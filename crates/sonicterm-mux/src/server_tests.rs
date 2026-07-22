@@ -2,6 +2,10 @@ use super::*;
 use crate::proto::{ClientMsg, ServerMsg};
 use crossbeam_channel::bounded;
 use std::io::{Cursor, Read, Write};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 
 struct BlockingWriteStream {
@@ -9,6 +13,15 @@ struct BlockingWriteStream {
     block_first_write: bool,
     write_started: crossbeam_channel::Sender<()>,
     release_write: crossbeam_channel::Receiver<()>,
+    dropped: Option<Arc<AtomicBool>>,
+}
+
+impl Drop for BlockingWriteStream {
+    fn drop(&mut self) {
+        if let Some(dropped) = &self.dropped {
+            dropped.store(true, Ordering::Release);
+        }
+    }
 }
 
 impl Read for BlockingWriteStream {
@@ -160,35 +173,40 @@ fn blocked_writer_does_not_block_connection_cleanup() {
         block_first_write: false,
         write_started: unused_started_tx,
         release_write: unused_release_rx,
+        dropped: None,
     };
     let (write_started_tx, write_started_rx) = bounded(1);
     let (release_write_tx, release_write_rx) = bounded(1);
+    let writer_dropped = Arc::new(AtomicBool::new(false));
     let write_half = BlockingWriteStream {
         read: Cursor::new(Vec::new()),
         block_first_write: true,
         write_started: write_started_tx,
         release_write: release_write_rx,
+        dropped: Some(writer_dropped.clone()),
     };
     let state = ServerState::new();
     let (done_tx, done_rx) = bounded(1);
+    let shutdown_release = release_write_tx.clone();
     let handler = std::thread::spawn(move || {
-        done_tx.send(handle_connection(state, read_half, write_half)).unwrap();
+        done_tx
+            .send(handle_connection(state, read_half, write_half, move || {
+                let _ = shutdown_release.try_send(());
+            }))
+            .unwrap();
     });
 
     write_started_rx.recv_timeout(Duration::from_secs(1)).expect("writer blocked");
-    let completed_while_blocked = done_rx.recv_timeout(Duration::from_secs(1));
-    let completed_before_release = completed_while_blocked.is_ok();
-    release_write_tx.send(()).expect("release writer for test cleanup");
-    let final_result = match completed_while_blocked {
-        Ok(result) => result,
-        Err(_) => done_rx.recv_timeout(Duration::from_secs(2)).expect("handler cleanup"),
-    };
+    let completed = done_rx.recv_timeout(Duration::from_secs(2));
+    if let Err(error) = &completed {
+        let _ = release_write_tx.try_send(());
+        handler.join().expect("handler cleanup");
+        panic!("server shutdown did not interrupt writer: {error}");
+    }
+    let final_result = completed.expect("checked above");
     handler.join().expect("handler thread");
 
-    assert!(
-        completed_before_release,
-        "bounded reply failure must not join a blocked writer indefinitely"
-    );
+    assert!(writer_dropped.load(Ordering::Acquire), "writer stream must be reclaimed");
     assert!(final_result.is_err(), "full control mailbox must end the connection");
 }
 
@@ -254,6 +272,26 @@ fn naturally_exited_pane_is_reaped_from_its_session() {
         state.attach(session_id, SubscriberSink::new(tx, rx)).is_err(),
         "empty reaped session must be unknown"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn exited_shell_with_background_descendant_is_reaped() {
+    let state = ServerState::new();
+    let (_session_id, pane_id) = state.spawn("/bin/sh", 80, 24).expect("spawn shell");
+    state
+        .input(
+            pane_id,
+            b"trap '' HUP\n(while :; do printf x; sleep 0.01; done) &\nexit\n".to_vec(),
+        )
+        .expect("launch background descendant");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while state.session_count() != 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(state.session_count(), 0, "exit probe must reap pane with inherited PTY child");
 }
 
 #[cfg(any(unix, windows))]

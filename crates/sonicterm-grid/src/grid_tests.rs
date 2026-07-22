@@ -388,6 +388,56 @@ fn narrow_exact_half_reshape_stays_within_visible_capacity_budget() {
 }
 
 #[test]
+fn history_reshape_stays_within_total_cell_capacity_budget() {
+    let mut grid = Grid::new(1024, 1);
+    grid.scrollback_requested_limit = 1023;
+    grid.scrollback_limit = 1023;
+    for index in 0..1023 {
+        let mut cells = vec![Cell::default(); 1024];
+        cells[0].ch = char::from(b'a' + (index % 26) as u8);
+        grid.scrollback.push_back(Line::from_flat(cells));
+    }
+
+    grid.resize(512, 1024);
+
+    let retained_bytes = grid
+        .rows_iter()
+        .chain(grid.scrollback_iter())
+        .map(Line::approx_capacity_byte_size)
+        .sum::<usize>();
+    let total_budget_bytes = MAX_GRID_CELLS as usize * std::mem::size_of::<Cell>();
+    assert!(
+        retained_bytes <= total_budget_bytes,
+        "visible + history retain {retained_bytes} bytes above {total_budget_bytes}"
+    );
+}
+
+#[test]
+fn entering_alt_screen_compacts_saved_primary_capacity() {
+    let mut grid = Grid::new(1024, 512);
+    grid.scrollback_requested_limit = 511;
+    grid.scrollback_limit = 511;
+    for index in 0..511 {
+        let mut cells = vec![Cell::default(); 1024];
+        cells[0].ch = char::from(b'a' + (index % 26) as u8);
+        grid.scrollback.push_back(Line::from_flat(cells));
+    }
+    grid.resize(512, 512);
+
+    grid.enter_alt_screen();
+
+    let active_bytes = grid.rows_iter().map(Line::approx_capacity_byte_size).sum::<usize>();
+    let saved = grid.alt_screen.as_ref().expect("saved primary");
+    let saved_bytes = saved
+        .rows_iter()
+        .chain(saved.scrollback_iter())
+        .map(Line::approx_capacity_byte_size)
+        .sum::<usize>();
+    let total_budget_bytes = MAX_GRID_CELLS as usize * std::mem::size_of::<Cell>();
+    assert!(active_bytes + saved_bytes <= total_budget_bytes);
+}
+
+#[test]
 fn adjacent_column_resize_preserves_populated_history_capacity() {
     let mut grid = Grid::new(100, 24);
     grid.scrollback_requested_limit = 256;

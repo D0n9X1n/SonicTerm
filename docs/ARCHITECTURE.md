@@ -68,9 +68,9 @@ of terminal correctness rather than a paint optimization:
 - Grid geometry budgets include retained row allocation, not only visible
   `cols × rows`; material column shrink compacts surviving rows while adjacent
   resize oscillation retains reusable capacity, and history-limit reductions
-  release excess `VecDeque` capacity. A grid-level aggregate check force-
-  compacts visible rows whenever retained capacity would exceed the visible
-  cell budget.
+  release excess `VecDeque` capacity. Grid-level aggregate checks include
+  visible, history, and saved-primary row capacity and force-compaction when
+  retained storage would exceed the corresponding cell budget.
 - Clipboard serialization preserves isolated or incomplete right-edge
   box-drawing text and removes only a coherent multi-row side ending in a
   lower-right frame corner. Frame detection reads physical row ends without
@@ -97,21 +97,22 @@ falls back to base OS/2/default weight and width rather than aborting the app.
 Embedded bitmap strikes are loaded metrics-only and checked against the glyph
 allocation budget before FreeType may decode their pixels.
 
-PTY handles own their native reader and writer threads. Exit observation is
-cached across probes and teardown so a reaped Unix pid is never signalled
-again, while the original Unix process group is retained and signalled once so
-background descendants cannot survive their leader. Windows teardown keeps a
+PTY handles own their native reader and writer threads. Unix natural exit is
+observed with `waitid(..., WNOWAIT)`; teardown repeatedly terminates every
+process in the unreaped leader's session before reaping, so session identity
+cannot be reused first. Windows teardown caches process exit and keeps a
 dedicated cloned output reader draining concurrently with ConPTY master close,
 including the pre-Windows 11 24H2 blocking contract. Both platforms use
 bounded thread, close, and child-exit deadlines.
 Terminal-input enqueue remains non-blocking and bounded; saturation,
 disconnection, and oversized messages return typed errors that retain the
 rejected bytes instead of reporting false success. App callers forward those
-bytes to the event loop for a visible retry notification. The mux observes
-natural child exit independently of PTY output EOF, removes exited panes,
-prunes empty sessions, rechunks subscriber output to 8 KiB frames, bounds all
-control replies and writer completion, and queues `Spawned` before enabling
-output, `Exit`, or reap.
+bytes to the event loop for a visible retry notification. The mux probes child
+exit on an independent timer, applies an absolute post-exit output-drain
+deadline, removes exited panes, prunes empty sessions, rechunks subscriber
+output to 8 KiB frames, bounds all control replies, actively interrupts blocked
+transport writes before joining, and queues `Spawned` before enabling output,
+`Exit`, or reap.
 
 Native GPU presentation, real PTYs/SSH, AppKit/Win32 handles, generated C ABI
 behavior, and installer signing are verified by build, integration, platform CI,

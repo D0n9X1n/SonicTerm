@@ -21,7 +21,7 @@ use std::{
         Arc, Weak,
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, Result};
@@ -385,7 +385,11 @@ fn drain_ready_pane_output<T: AsRef<[u8]>>(
     subscriber: &Mutex<Option<SubscriberSink>>,
     pane_id: PaneId,
 ) {
-    while let Ok(chunk) = out_rx.try_recv() {
+    let ready = out_rx.len();
+    for _ in 0..ready {
+        let Ok(chunk) = out_rx.try_recv() else {
+            break;
+        };
         forward_pane_output(chunk, replay, subscriber, pane_id);
     }
 }
@@ -422,7 +426,8 @@ fn build_pane(
             return;
         }
         let mut exit_probe_warned = false;
-        let mut child_exit_observed = false;
+        let mut next_exit_probe = Instant::now() + PANE_EXIT_POLL_INTERVAL;
+        let mut exit_drain_deadline = None;
         let child_has_exited = |exit_probe_warned: &mut bool| match child_exit.has_exited() {
             Ok(exited) => exited,
             Err(error) => {
@@ -434,26 +439,47 @@ fn build_pane(
             }
         };
         while r_alive.load(Ordering::Acquire) {
-            let wait =
-                if child_exit_observed { PANE_EXIT_DRAIN_GRACE } else { PANE_EXIT_POLL_INTERVAL };
-            let chunk = match out_rx.recv_timeout(wait) {
-                Ok(chunk) => chunk,
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                    if !r_alive.load(Ordering::Acquire) {
-                        break;
+            let now = Instant::now();
+            if exit_drain_deadline.is_some_and(|deadline| now >= deadline) {
+                break;
+            }
+            let chunk = {
+                let wait = if let Some(deadline) = exit_drain_deadline {
+                    deadline.saturating_duration_since(now)
+                } else {
+                    next_exit_probe.saturating_duration_since(now)
+                };
+                match out_rx.recv_timeout(wait) {
+                    Ok(chunk) => chunk,
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                        if !r_alive.load(Ordering::Acquire) {
+                            break;
+                        }
+                        let now = Instant::now();
+                        if exit_drain_deadline.is_some_and(|deadline| now >= deadline) {
+                            break;
+                        }
+                        if exit_drain_deadline.is_none()
+                            && child_has_exited(&mut exit_probe_warned)
+                        {
+                            drain_ready_pane_output(&out_rx, &r_replay, &r_sub, pane_id);
+                            exit_drain_deadline = Some(now + PANE_EXIT_DRAIN_GRACE);
+                        }
+                        next_exit_probe = now + PANE_EXIT_POLL_INTERVAL;
+                        continue;
                     }
-                    if child_exit_observed {
-                        break;
-                    }
-                    if child_has_exited(&mut exit_probe_warned) {
-                        drain_ready_pane_output(&out_rx, &r_replay, &r_sub, pane_id);
-                        child_exit_observed = true;
-                    }
-                    continue;
                 }
             };
             forward_pane_output(chunk, &r_replay, &r_sub, pane_id);
+            let now = Instant::now();
+            if exit_drain_deadline.is_none() && now >= next_exit_probe {
+                if child_has_exited(&mut exit_probe_warned) {
+                    drain_ready_pane_output(&out_rx, &r_replay, &r_sub, pane_id);
+                    exit_drain_deadline = Some(now + PANE_EXIT_DRAIN_GRACE);
+                }
+                next_exit_probe = now + PANE_EXIT_POLL_INTERVAL;
+            }
         }
         notify_subscriber_exit(&r_sub, pane_id);
         if let Some(server) = server.upgrade() {
@@ -480,9 +506,16 @@ fn build_pane(
 /// Handle one connected client: a request reader loop on the input stream,
 /// and a forwarder thread that drains server-side messages onto the output
 /// stream. Both halves share the same duplex stream via `try_clone`.
-pub fn handle_connection<S>(state: Arc<ServerState>, mut read_half: S, write_half: S) -> Result<()>
+pub fn handle_connection<R, W, F>(
+    state: Arc<ServerState>,
+    mut read_half: R,
+    write_half: W,
+    shutdown_writer: F,
+) -> Result<()>
 where
-    S: Read + Write + Send + 'static,
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+    F: FnOnce(),
 {
     let (tx, rx): (Sender<ServerMsg>, Receiver<ServerMsg>) =
         crossbeam_channel::bounded(CHANNEL_CAP);
@@ -582,6 +615,7 @@ where
     drop(read_half);
     drop(tx);
     drop(sink);
+    shutdown_writer();
     match writer_done_rx.recv_timeout(WRITER_SHUTDOWN_TIMEOUT) {
         Ok(()) | Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
             if writer_thread.join().is_err() {

@@ -305,6 +305,7 @@ impl Grid {
         self.alt_screen = Some(Box::new(saved));
         self.scrollback_limit = 0;
         self.enforce_alt_memory_budget();
+        self.enforce_retained_capacity_budget();
         self.mark_all();
         self.bump();
     }
@@ -347,7 +348,7 @@ impl Grid {
             self.cursor.row = self.cursor.row.min(rows.saturating_sub(1));
             self.cursor.col = self.cursor.col.min(cols.saturating_sub(1));
         }
-        self.enforce_visible_capacity_budget();
+        self.enforce_retained_capacity_budget();
         self.mark_all();
         self.bump();
     }
@@ -393,7 +394,6 @@ impl Grid {
                 self.visible.push_back(make_row(cols));
             }
         }
-        self.enforce_visible_capacity_budget();
         self.cols = cols;
         self.rows = rows;
         self.cursor.row = self.cursor.row.min(rows.saturating_sub(1));
@@ -406,6 +406,7 @@ impl Grid {
             alt.resize(cols, rows);
         }
         self.enforce_alt_memory_budget();
+        self.enforce_retained_capacity_budget();
         self.bump();
     }
 
@@ -1350,15 +1351,48 @@ impl Grid {
         compact_scrollback_capacity(&mut primary.scrollback);
     }
 
-    fn enforce_visible_capacity_budget(&mut self) {
-        let retained_bytes =
+    fn enforce_retained_capacity_budget(&mut self) {
+        let visible_bytes =
             self.visible.iter().map(Line::approx_capacity_byte_size).sum::<usize>();
-        let budget_bytes = MAX_VISIBLE_GRID_CELLS as usize * std::mem::size_of::<Cell>();
+        let visible_budget_bytes =
+            MAX_VISIBLE_GRID_CELLS as usize * std::mem::size_of::<Cell>();
+        if visible_bytes > visible_budget_bytes {
+            for row in &mut self.visible {
+                row.shrink_capacity_to_fit();
+            }
+        }
+        let primary_bytes = self
+            .visible
+            .iter()
+            .chain(self.scrollback.iter())
+            .map(Line::approx_capacity_byte_size)
+            .sum::<usize>();
+        let saved_primary_bytes = self.alt_screen.as_ref().map_or(0, |primary| {
+            primary
+                .visible
+                .iter()
+                .chain(primary.scrollback.iter())
+                .map(Line::approx_capacity_byte_size)
+                .sum::<usize>()
+        });
+        let retained_bytes = primary_bytes.saturating_add(saved_primary_bytes);
+        let budget_bytes = MAX_GRID_CELLS as usize * std::mem::size_of::<Cell>();
         if retained_bytes <= budget_bytes {
             return;
         }
         for row in &mut self.visible {
             row.shrink_capacity_to_fit();
+        }
+        for row in &mut self.scrollback {
+            row.shrink_capacity_to_fit();
+        }
+        if let Some(primary) = self.alt_screen.as_mut() {
+            for row in &mut primary.visible {
+                row.shrink_capacity_to_fit();
+            }
+            for row in &mut primary.scrollback {
+                row.shrink_capacity_to_fit();
+            }
         }
     }
 }

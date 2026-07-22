@@ -9,6 +9,10 @@
 //! pid-file, log-file, etc.
 
 use std::{env, process::ExitCode, sync::Arc, thread};
+#[cfg(windows)]
+use std::io::Write;
+#[cfg(windows)]
+use std::os::windows::io::{AsHandle, AsRawHandle};
 
 use anyhow::{anyhow, Context, Result};
 #[cfg(unix)]
@@ -24,6 +28,11 @@ use sonicterm_mux::{
     handle_connection,
     proto::{ClientMsg, ServerMsg},
     ServerState,
+};
+#[cfg(windows)]
+use windows::Win32::{
+    Foundation::HANDLE,
+    System::{IO::CancelIoEx, Pipes::DisconnectNamedPipe},
 };
 
 fn main() -> ExitCode {
@@ -120,8 +129,42 @@ fn cmd_daemon(socket: &str) -> Result<()> {
 fn serve_stream(state: Arc<ServerState>, stream: Stream) -> Result<()> {
     // interprocess 2.x streams are full-duplex; split with try_clone so
     // reader and writer can live on separate threads.
+    #[cfg(unix)]
+    {
     let writer = stream.try_clone()?;
-    handle_connection(state, stream, writer)
+    let shutdown = stream.try_clone()?;
+        return handle_connection(state, stream, writer, move || {
+            let Stream::UdSocket(stream) = shutdown;
+            let _ = stream.inner().shutdown(std::net::Shutdown::Both);
+        });
+    }
+    #[cfg(windows)]
+    {
+        let writer = Arc::new(stream.try_clone()?);
+        let shutdown = writer.clone();
+        handle_connection(state, stream, SharedWriter(writer), move || {
+            let Stream::NamedPipe(named_pipe) = shutdown.as_ref();
+            let writer_handle = HANDLE(named_pipe.as_handle().as_raw_handle());
+        unsafe {
+            let _ = CancelIoEx(writer_handle, None);
+            let _ = DisconnectNamedPipe(writer_handle);
+        }
+        })
+    }
+}
+
+#[cfg(windows)]
+struct SharedWriter(Arc<Stream>);
+
+#[cfg(windows)]
+impl Write for SharedWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        (&*self.0).write(buffer)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        (&*self.0).flush()
+    }
 }
 
 fn cmd_list(socket: &str) -> Result<()> {

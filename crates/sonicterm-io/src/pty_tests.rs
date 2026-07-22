@@ -14,6 +14,7 @@ fn lock_live_pty_test() -> std::sync::MutexGuard<'static, ()> {
 struct MockChild {
     try_wait_calls: Arc<AtomicUsize>,
     kill_calls: Arc<AtomicUsize>,
+    events: Arc<Mutex<Vec<&'static str>>>,
 }
 
 impl ChildKiller for MockChild {
@@ -30,6 +31,7 @@ impl ChildKiller for MockChild {
 impl Child for MockChild {
     fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
         self.try_wait_calls.fetch_add(1, Ordering::Relaxed);
+        self.events.lock().push("wait");
         Ok(Some(ExitStatus::with_exit_code(0)))
     }
 
@@ -348,11 +350,6 @@ fn observed_shell_exit_still_kills_background_process_group() {
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(probe.has_exited().expect("shell exited"));
-    // SAFETY: signal 0 only probes existence and does not modify the process.
-    assert_eq!(unsafe { libc::kill(background_pid, 0) }, 0, "background child must still be live");
-
-    drop(pty);
-
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     while unsafe { libc::kill(background_pid, 0) } == 0 && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
@@ -360,29 +357,39 @@ fn observed_shell_exit_still_kills_background_process_group() {
     // SAFETY: signal 0 only probes existence and does not modify the process.
     assert_eq!(unsafe { libc::kill(background_pid, 0) }, -1);
     assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+    drop(pty);
 }
 
 #[test]
-fn observed_child_exit_prevents_later_kill_or_pid_signal() {
+fn termination_signals_group_before_reaping_exited_leader() {
     let try_wait_calls = Arc::new(AtomicUsize::new(0));
     let kill_calls = Arc::new(AtomicUsize::new(0));
-    let child =
-        MockChild { try_wait_calls: try_wait_calls.clone(), kill_calls: kill_calls.clone() };
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let child = MockChild {
+        try_wait_calls: try_wait_calls.clone(),
+        kill_calls: kill_calls.clone(),
+        events: events.clone(),
+    };
     let child = Arc::new(Mutex::new(ChildState::new(Box::new(child), Some(4242))));
-    let probe = PtyChildExitProbe { child: child.clone() };
 
-    assert!(probe.has_exited().unwrap());
     let mut signalled_groups = Vec::new();
     let mut signalled_pids = Vec::new();
     terminate_child(
         &mut child.lock(),
-        |pgid| signalled_groups.push(pgid),
+        |pgid| {
+            events.lock().push("group");
+            signalled_groups.push(pgid);
+            Ok(())
+        },
         |pid| signalled_pids.push(pid),
     )
     .unwrap();
     terminate_child(
         &mut child.lock(),
-        |pgid| signalled_groups.push(pgid),
+        |pgid| {
+            signalled_groups.push(pgid);
+            Ok(())
+        },
         |pid| signalled_pids.push(pid),
     )
     .unwrap();
@@ -391,6 +398,26 @@ fn observed_child_exit_prevents_later_kill_or_pid_signal() {
     assert!(signalled_pids.is_empty());
     assert_eq!(kill_calls.load(Ordering::Relaxed), 0);
     assert_eq!(try_wait_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(*events.lock(), ["group", "wait"]);
+}
+
+#[test]
+fn failed_session_cleanup_remains_retryable() {
+    let child = MockChild {
+        try_wait_calls: Arc::new(AtomicUsize::new(0)),
+        kill_calls: Arc::new(AtomicUsize::new(0)),
+        events: Arc::new(Mutex::new(Vec::new())),
+    };
+    let mut child = ChildState::new(Box::new(child), Some(4242));
+
+    let first = signal_process_group(&mut child, |_| {
+        Err(std::io::Error::other("process table unavailable"))
+    });
+    assert!(first.is_err());
+    assert!(!child.process_group_signalled);
+
+    signal_process_group(&mut child, |_| Ok(())).unwrap();
+    assert!(child.process_group_signalled);
 }
 
 #[cfg(windows)]

@@ -14,7 +14,7 @@ use std::{
         Arc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::Result;
@@ -84,20 +84,56 @@ pub struct PtyChildExitProbe {
 impl PtyChildExitProbe {
     /// Return whether the child has exited without waiting for it.
     pub fn has_exited(&self) -> Result<bool> {
-        Ok(self.child.lock().has_exited()?)
+        let mut child = self.child.lock();
+        #[cfg(windows)]
+        return Ok(child.has_exited()?);
+        #[cfg(unix)]
+        {
+            if child.exited {
+                return Ok(true);
+            }
+            let Some(pid) = child.child.process_id() else {
+                return Ok(false);
+            };
+            if !unix_child_exit_pending(pid)? {
+                return Ok(false);
+            }
+            signal_process_group_for_platform(&mut child)?;
+            Ok(true)
+        }
     }
+}
+
+#[cfg(unix)]
+fn unix_child_exit_pending(pid: u32) -> std::io::Result<bool> {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: info points to writable siginfo storage. WNOWAIT observes the
+    // exited leader without reaping it, keeping its pid/pgid reserved until
+    // teardown has signalled the process group.
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if result == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { info.si_pid() } != 0)
 }
 
 struct ChildState {
     child: Box<dyn Child + Send + Sync>,
     exited: bool,
-    process_group_id: Option<u32>,
+    unix_session_id: Option<u32>,
     process_group_signalled: bool,
 }
 
 impl ChildState {
-    fn new(child: Box<dyn Child + Send + Sync>, process_group_id: Option<u32>) -> Self {
-        Self { child, exited: false, process_group_id, process_group_signalled: false }
+    fn new(child: Box<dyn Child + Send + Sync>, unix_session_id: Option<u32>) -> Self {
+        Self { child, exited: false, unix_session_id, process_group_signalled: false }
     }
 
     fn has_exited(&mut self) -> std::io::Result<bool> {
@@ -117,19 +153,14 @@ impl ChildState {
 
 fn terminate_child<G, P>(
     child: &mut ChildState,
-    mut signal_group: G,
+    signal_group: G,
     mut signal_pid: P,
 ) -> std::io::Result<()>
 where
-    G: FnMut(u32),
+    G: FnMut(u32) -> std::io::Result<()>,
     P: FnMut(u32),
 {
-    if !child.process_group_signalled {
-        if let Some(process_group_id) = child.process_group_id {
-            signal_group(process_group_id);
-        }
-        child.process_group_signalled = true;
-    }
+    signal_process_group(child, signal_group)?;
     if child.has_exited()? {
         return Ok(());
     }
@@ -139,21 +170,97 @@ where
     child.child.kill()
 }
 
+fn signal_process_group<G>(child: &mut ChildState, mut signal_group: G) -> std::io::Result<()>
+where
+    G: FnMut(u32) -> std::io::Result<()>,
+{
+    if child.process_group_signalled {
+        return Ok(());
+    }
+    if let Some(unix_session_id) = child.unix_session_id {
+        signal_group(unix_session_id)?;
+    }
+    child.process_group_signalled = true;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn signal_process_group_for_platform(child: &mut ChildState) -> std::io::Result<()> {
+    signal_process_group(child, terminate_unix_session)
+}
+
+#[cfg(target_os = "macos")]
+fn unix_session_pids(session_id: u32) -> std::io::Result<Vec<u32>> {
+    use libproc::processes::{pids_by_type, ProcFilter};
+
+    Ok(pids_by_type(ProcFilter::All)?
+        .into_iter()
+        .filter(|pid| {
+            *pid != 0
+                && unsafe { libc::getsid(*pid as libc::pid_t) }
+                    == session_id as libc::pid_t
+        })
+        .collect())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn unix_session_pids(session_id: u32) -> std::io::Result<Vec<u32>> {
+    let mut pids = Vec::new();
+    for entry in std::fs::read_dir("/proc")? {
+        let entry = entry?;
+        let Some(pid) = entry.file_name().to_string_lossy().parse::<u32>().ok() else {
+            continue;
+        };
+        if (unsafe { libc::getsid(pid as libc::pid_t) }) == session_id as libc::pid_t {
+            pids.push(pid);
+        }
+    }
+    Ok(pids)
+}
+
+#[cfg(unix)]
+fn terminate_unix_session(session_id: u32) -> std::io::Result<()> {
+    // Signal the shell's original process group even if process-table access
+    // is restricted.
+    unsafe {
+        libc::kill(-(session_id as libc::pid_t), libc::SIGKILL);
+    }
+    for _ in 0..8 {
+        let members = unix_session_pids(session_id)?
+            .into_iter()
+            .filter(|pid| *pid != session_id && *pid != std::process::id())
+            .collect::<Vec<_>>();
+        if members.is_empty() {
+            return Ok(());
+        }
+        for pid in members {
+            // Recheck membership immediately before signalling.
+            if unsafe { libc::getsid(pid as libc::pid_t) } != session_id as libc::pid_t {
+                continue;
+            }
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::WouldBlock,
+        "PTY session still has live descendants after termination attempts",
+    ))
+}
+
 fn terminate_child_for_platform(child: &mut ChildState) -> std::io::Result<()> {
     terminate_child(
         child,
-        |process_group_id| {
+        |unix_session_id| {
             #[cfg(unix)]
-            {
-                // SAFETY: process_group_id was captured from the live PTY
-                // master at spawn and identifies the group independently of
-                // the direct child's later pid reuse.
-                unsafe {
-                    libc::kill(-(process_group_id as libc::pid_t), libc::SIGKILL);
-                }
-            }
+            return terminate_unix_session(unix_session_id);
             #[cfg(not(unix))]
-            let _ = process_group_id;
+            {
+                let _ = unix_session_id;
+                Ok(())
+            }
         },
         |pid| {
             #[cfg(unix)]
@@ -366,7 +473,8 @@ impl PtyHandle {
 impl Drop for PtyHandle {
     fn drop(&mut self) {
         let resize = std::mem::replace(&mut self.resize, Box::new(|_, _| {}));
-        let mut teardown = PtyHandleTeardown { handle: self, resize: Some(resize) };
+        let mut teardown =
+            PtyHandleTeardown { handle: self, resize: Some(resize), termination_failed: false };
         run_pty_teardown(&mut teardown);
     }
 }
@@ -400,6 +508,7 @@ fn run_pty_teardown(teardown: &mut impl PtyTeardownOps) {
 struct PtyHandleTeardown<'a> {
     handle: &'a mut PtyHandle,
     resize: Option<Box<dyn Fn(u16, u16) + Send + Sync>>,
+    termination_failed: bool,
 }
 
 impl PtyTeardownOps for PtyHandleTeardown<'_> {
@@ -418,6 +527,9 @@ impl PtyTeardownOps for PtyHandleTeardown<'_> {
         let result = terminate_child_for_platform(&mut child);
         if let Err(error) = result {
             tracing::warn!(%error, "failed to terminate PTY child");
+            self.termination_failed = true;
+        } else {
+            self.termination_failed = false;
         }
     }
 
@@ -442,6 +554,25 @@ impl PtyTeardownOps for PtyHandleTeardown<'_> {
     }
 
     fn reap_child(&mut self) {
+        if self.termination_failed {
+            let deadline = Instant::now() + PTY_IO_SHUTDOWN_TIMEOUT;
+            loop {
+                match terminate_child_for_platform(&mut self.handle.child.lock()) {
+                    Ok(()) => {
+                        self.termination_failed = false;
+                        break;
+                    }
+                    Err(error) if Instant::now() >= deadline => {
+                        tracing::warn!(
+                            %error,
+                            "PTY session cleanup failed through the shutdown deadline; leader left unreaped"
+                        );
+                        return;
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                }
+            }
+        }
         let mut child = self.handle.child.lock();
         if child.exited {
             return;
@@ -587,10 +718,9 @@ impl PtyHandle {
 
         let master = pair.master;
         #[cfg(unix)]
-        let process_group_id =
-            master.process_group_leader().and_then(|pgid| u32::try_from(pgid).ok());
+        let unix_session_id = child.process_id();
         #[cfg(not(unix))]
-        let process_group_id = None;
+        let unix_session_id = None;
         let reader = master.try_clone_reader()?;
         #[cfg(windows)]
         let conpty_drain_reader = Some(master.try_clone_reader()?);
@@ -641,7 +771,7 @@ impl PtyHandle {
             writer_cancel,
             reader_thread,
             writer_thread,
-            child: Arc::new(Mutex::new(ChildState::new(child, process_group_id))),
+            child: Arc::new(Mutex::new(ChildState::new(child, unix_session_id))),
             #[cfg(windows)]
             conpty_drain_reader,
             shell_program_path: cmd.to_string(),
