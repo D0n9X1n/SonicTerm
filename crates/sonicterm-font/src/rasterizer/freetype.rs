@@ -10,7 +10,10 @@ use crate::rasterizer::colr::{
     ColorLine, ColorStop, PaintOp,
 };
 use crate::rasterizer::harfbuzz::{argb_to_rgba, HarfbuzzRasterizer};
-use crate::rasterizer::{FontRasterizer, FAKE_ITALIC_SKEW};
+use crate::rasterizer::{
+    checked_glyph_rgba_len, checked_raster_pixel_size, FontRasterizer,
+    MAX_RASTERIZED_GLYPH_BYTES, FAKE_ITALIC_SKEW,
+};
 use crate::units::*;
 use crate::{ftwrap, FontRasterizerSelection, RasterizedGlyph};
 use ::freetype::{
@@ -44,8 +47,13 @@ impl FontRasterizer for FreeTypeRasterizer {
         size: f64,
         dpi: u32,
     ) -> anyhow::Result<RasterizedGlyph> {
-        let SelectedFontSize { is_scaled, .. } =
+        checked_raster_pixel_size(size, self.scale, dpi)?;
+        let SelectedFontSize { width, height, is_scaled, .. } =
             self.face.borrow_mut().set_font_size(size * self.scale, dpi)?;
+        if !width.is_finite() || !height.is_finite() || width < 0.0 || height < 0.0 {
+            bail!("invalid selected FreeType strike dimensions {width}x{height}");
+        }
+        checked_glyph_rgba_len(width.ceil() as usize, height.ceil() as usize)?;
 
         let (load_flags, render_mode) = ftwrap::compute_load_flags_from_config(
             self.freetype_load_flags,
@@ -91,11 +99,26 @@ impl FontRasterizer for FreeTypeRasterizer {
 
         // pitch is the number of bytes per source row
         let pitch = ft_glyph.bitmap.pitch.unsigned_abs() as usize;
+        let raw_width =
+            usize::try_from(ft_glyph.bitmap.width).context("negative FreeType bitmap width")?;
+        let raw_rows =
+            usize::try_from(ft_glyph.bitmap.rows).context("negative FreeType bitmap height")?;
+        let (output_width, output_height) = match mode {
+            ftwrap::FT_Pixel_Mode::FT_PIXEL_MODE_LCD => (raw_width / 3, raw_rows),
+            ftwrap::FT_Pixel_Mode::FT_PIXEL_MODE_LCD_V => (raw_width, raw_rows / 3),
+            _ => (raw_width, raw_rows),
+        };
+        checked_glyph_rgba_len(output_width, output_height)?;
+        let source_len = raw_rows
+            .checked_mul(pitch)
+            .context("FreeType bitmap source length overflow")?;
+        if source_len > MAX_RASTERIZED_GLYPH_BYTES {
+            bail!(
+                "FreeType bitmap source requires {source_len} bytes, limit is {MAX_RASTERIZED_GLYPH_BYTES}"
+            );
+        }
         let data = unsafe {
-            crate::ftwrap::from_raw_parts(
-                ft_glyph.bitmap.buffer,
-                ft_glyph.bitmap.rows as usize * pitch,
-            )
+            crate::ftwrap::from_raw_parts(ft_glyph.bitmap.buffer, source_len)
         };
 
         let glyph = match mode {
@@ -131,7 +154,7 @@ impl FreeTypeRasterizer {
     ) -> RasterizedGlyph {
         let width = ft_glyph.bitmap.width as usize;
         let height = ft_glyph.bitmap.rows as usize;
-        let size = width * height * 4;
+        let size = checked_glyph_rgba_len(width, height).expect("glyph size prevalidated");
         let mut rgba = vec![0u8; size];
         for y in 0..height {
             let src_offset = y * pitch;
@@ -176,7 +199,7 @@ impl FreeTypeRasterizer {
     ) -> RasterizedGlyph {
         let width = ft_glyph.bitmap.width as usize;
         let height = ft_glyph.bitmap.rows as usize;
-        let size = width * height * 4;
+        let size = checked_glyph_rgba_len(width, height).expect("glyph size prevalidated");
         let mut rgba = vec![0u8; size];
         for y in 0..height {
             let src_offset = y * pitch;
@@ -216,7 +239,7 @@ impl FreeTypeRasterizer {
     ) -> RasterizedGlyph {
         let width = ft_glyph.bitmap.width as usize / 3;
         let height = ft_glyph.bitmap.rows as usize;
-        let size = width * height * 4;
+        let size = checked_glyph_rgba_len(width, height).expect("glyph size prevalidated");
         let mut rgba = vec![0u8; size];
         for y in 0..height {
             let src_offset = y * pitch;
@@ -269,7 +292,7 @@ impl FreeTypeRasterizer {
     ) -> RasterizedGlyph {
         let width = ft_glyph.bitmap.width as usize;
         let height = ft_glyph.bitmap.rows as usize / 3;
-        let size = width * height * 4;
+        let size = checked_glyph_rgba_len(width, height).expect("glyph size prevalidated");
         let mut rgba = vec![0u8; size];
         for y in 0..height {
             let src_offset = y * pitch * 3;
@@ -460,7 +483,12 @@ fn rasterize_from_ops(
     let (left, top, width, height) = surface.ink_extents();
     log::trace!("extents: left={left} top={top} width={width} height={height}");
 
-    if width as usize == 0 || height as usize == 0 {
+    if !width.is_finite() || !height.is_finite() || width < 0.0 || height < 0.0 {
+        bail!("invalid color glyph extents {width}x{height}");
+    }
+    let width_px = width as usize;
+    let height_px = height as usize;
+    if width_px == 0 || height_px == 0 {
         return Ok(RasterizedGlyph {
             data: vec![],
             height: 0,
@@ -471,12 +499,17 @@ fn rasterize_from_ops(
             is_scaled: true,
         });
     }
+    checked_glyph_rgba_len(width_px, height_px)?;
 
     let mut bounds_adjust = Matrix::identity();
     bounds_adjust.translate(-left, -top);
     log::trace!("dims: {width}x{height} {bounds_adjust:?}");
 
-    let target = ImageSurface::create(Format::ARgb32, width as i32, height as i32)?;
+    let target = ImageSurface::create(
+        Format::ARgb32,
+        i32::try_from(width_px).context("color glyph width exceeds i32")?,
+        i32::try_from(height_px).context("color glyph height exceeds i32")?,
+    )?;
     {
         let context = Context::new(&target)?;
         context.transform(bounds_adjust);
@@ -490,8 +523,8 @@ fn rasterize_from_ops(
 
     Ok(RasterizedGlyph {
         data,
-        height: height as usize,
-        width: width as usize,
+        height: height_px,
+        width: width_px,
         bearing_x: PixelLength::new(left.min(0.)),
         bearing_y: PixelLength::new(-top),
         has_color,

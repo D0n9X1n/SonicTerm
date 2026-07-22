@@ -55,6 +55,12 @@ software detection, `force` selects it, and `off` disables it. Dirty-rectangle
 messages in this path describe the area written into the software buffer; they
 do not opt the presenter into retained GPU rendering.
 
+At `debug` level, `target="memory"` records accepted surface dimensions, BGRA
+byte counts, software-frame capacity changes, and rejected unsafe resize
+requests. Capture these lines when a report involves a sudden memory jump;
+they distinguish window/frame allocations from PTY, font, or inline-media
+growth without requiring a diagnostic build.
+
 ## Redraw and window-lifecycle diagnostics
 
 PTY output is coalesced on VT workers, but native redraw requests are delivered

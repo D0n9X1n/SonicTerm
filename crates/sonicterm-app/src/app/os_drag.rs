@@ -188,6 +188,13 @@ pub trait OsTabDragBackend: Send {
     /// in tests can opt in / out trivially.
     fn register_window(&mut self, _handle: AppHandle, _window_id: WindowId, _window: &Arc<Window>) {
     }
+
+    /// Release any platform registration associated with a closing window.
+    ///
+    /// Windows uses this to pair `RegisterDragDrop` with `RevokeDragDrop`
+    /// before the HWND is destroyed. Backends without per-window state keep
+    /// the default no-op.
+    fn unregister_window(&mut self, _window_id: WindowId) {}
 }
 
 /// Snapshot of a single window's tab bar, in **screen** coordinates,

@@ -196,6 +196,16 @@ impl App {
             UserEvent::UpdateCheckFinished { level, message } => {
                 self.show_notification_for_kind(self.frontmost_kind(), level, message);
             }
+            UserEvent::PtyInputRejected { bytes, reason } => {
+                self.show_notification_for_kind(
+                    self.frontmost_kind(),
+                    sonicterm_ui::overlays::NotificationLevel::Error,
+                    format!(
+                        "Terminal input was not sent ({reason}; {} bytes). Retry after the terminal responds.",
+                        bytes.len()
+                    ),
+                );
+            }
         }
         // Any path above that ran an action may have requested a new
         // top-level window; create it now that we have an ActiveEventLoop.
@@ -237,8 +247,10 @@ impl App {
             hook();
         }
 
-        let cols = self.config.window.cols;
-        let rows = self.config.window.rows;
+        let (cols, rows) = sonicterm_grid::grid::bounded_grid_size(
+            u64::from(self.config.window.cols),
+            u64::from(self.config.window.rows),
+        );
 
         let attrs = super::with_app_icon(super::with_backdrop_transparency(
             with_integrated_titlebar(

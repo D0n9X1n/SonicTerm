@@ -9,8 +9,12 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::{
     io::{Read, Write},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     thread,
+    time::{Duration, Instant},
 };
 
 use anyhow::Result;
@@ -30,13 +34,349 @@ type Outgoing = Vec<u8>;
 /// ring drains below capacity it reuses the same allocation.
 type Incoming = Bytes;
 
+/// Maximum unread PTY output chunks retained per pane.
+///
+/// Each chunk is at most the 64 KiB reader-ring size, so this bounds queued
+/// output to roughly 4 MiB. Once full, the reader blocks and lets the OS PTY
+/// apply backpressure instead of growing process memory without limit.
+pub const PTY_OUTPUT_QUEUE_CAPACITY: usize = 64;
+/// Maximum pending terminal-input messages retained per pane.
+pub const PTY_INPUT_QUEUE_CAPACITY: usize = 4;
+/// Largest single terminal-input message accepted by first-party callers.
+pub const MAX_PTY_INPUT_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+const PTY_IO_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
+#[cfg(windows)]
+const CONPTY_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
+static ACTIVE_PTY_IO_THREADS: AtomicUsize = AtomicUsize::new(0);
+
+/// A terminal-input message that could not be queued without blocking.
+#[derive(Debug, thiserror::Error)]
+pub enum PtyInputError {
+    /// The message exceeds [`MAX_PTY_INPUT_MESSAGE_BYTES`].
+    #[error("PTY input message exceeds the per-message byte limit")]
+    MessageTooLarge(Vec<u8>),
+    /// The bounded writer queue has no available slot.
+    #[error("PTY input writer queue is full")]
+    QueueFull(Vec<u8>),
+    /// The PTY writer has already stopped.
+    #[error("PTY input writer is disconnected")]
+    WriterDisconnected(Vec<u8>),
+}
+
+impl PtyInputError {
+    /// Recover the rejected bytes so a caller can retry or report their size.
+    #[must_use]
+    pub fn into_bytes(self) -> Vec<u8> {
+        match self {
+            Self::MessageTooLarge(bytes)
+            | Self::QueueFull(bytes)
+            | Self::WriterDisconnected(bytes) => bytes,
+        }
+    }
+}
+
+/// Cloneable, non-blocking probe for a PTY child process's exit state.
+#[derive(Clone)]
+pub struct PtyChildExitProbe {
+    child: Arc<Mutex<ChildState>>,
+}
+
+impl PtyChildExitProbe {
+    /// Return whether the child has exited without waiting for it.
+    pub fn has_exited(&self) -> Result<bool> {
+        let mut child = self.child.lock();
+        #[cfg(windows)]
+        return Ok(child.has_exited()?);
+        #[cfg(unix)]
+        {
+            if child.exited {
+                return Ok(true);
+            }
+            let Some(pid) = child.child.process_id() else {
+                return Ok(false);
+            };
+            if !unix_child_exit_pending(pid)? {
+                return Ok(false);
+            }
+            signal_process_group_for_platform(&mut child)?;
+            Ok(true)
+        }
+    }
+}
+
+#[cfg(unix)]
+fn unix_child_exit_pending(pid: u32) -> std::io::Result<bool> {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: info points to writable siginfo storage. WNOWAIT observes the
+    // exited leader without reaping it, keeping its pid/pgid reserved until
+    // teardown has signalled the process group.
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if result == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { info.si_pid() } != 0)
+}
+
+struct ChildState {
+    child: Box<dyn Child + Send + Sync>,
+    exited: bool,
+    unix_session_id: Option<u32>,
+    process_group_signalled: bool,
+}
+
+impl ChildState {
+    fn new(child: Box<dyn Child + Send + Sync>, unix_session_id: Option<u32>) -> Self {
+        Self { child, exited: false, unix_session_id, process_group_signalled: false }
+    }
+
+    fn has_exited(&mut self) -> std::io::Result<bool> {
+        if self.exited {
+            return Ok(true);
+        }
+        if self.child.try_wait()?.is_some() {
+            self.exited = true;
+        }
+        Ok(self.exited)
+    }
+
+    fn process_id(&self) -> Option<u32> {
+        (!self.exited).then(|| self.child.process_id()).flatten()
+    }
+}
+
+fn terminate_child<G, P>(
+    child: &mut ChildState,
+    signal_group: G,
+    mut signal_pid: P,
+) -> std::io::Result<()>
+where
+    G: FnMut(u32) -> std::io::Result<()>,
+    P: FnMut(u32),
+{
+    signal_process_group(child, signal_group)?;
+    if child.has_exited()? {
+        return Ok(());
+    }
+    if let Some(pid) = child.process_id() {
+        signal_pid(pid);
+    }
+    child.child.kill()
+}
+
+fn signal_process_group<G>(child: &mut ChildState, mut signal_group: G) -> std::io::Result<()>
+where
+    G: FnMut(u32) -> std::io::Result<()>,
+{
+    if child.process_group_signalled {
+        return Ok(());
+    }
+    if let Some(unix_session_id) = child.unix_session_id {
+        signal_group(unix_session_id)?;
+    }
+    child.process_group_signalled = true;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn signal_process_group_for_platform(child: &mut ChildState) -> std::io::Result<()> {
+    signal_process_group(child, terminate_unix_session)
+}
+
+#[cfg(target_os = "macos")]
+fn unix_session_pids(session_id: u32) -> std::io::Result<Vec<u32>> {
+    use libproc::processes::{pids_by_type, ProcFilter};
+
+    Ok(pids_by_type(ProcFilter::All)?
+        .into_iter()
+        .filter(|pid| {
+            *pid != 0
+                && unsafe { libc::getsid(*pid as libc::pid_t) }
+                    == session_id as libc::pid_t
+        })
+        .collect())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn unix_session_pids(session_id: u32) -> std::io::Result<Vec<u32>> {
+    let mut pids = Vec::new();
+    for entry in std::fs::read_dir("/proc")? {
+        let entry = entry?;
+        let Some(pid) = entry.file_name().to_string_lossy().parse::<u32>().ok() else {
+            continue;
+        };
+        if (unsafe { libc::getsid(pid as libc::pid_t) }) == session_id as libc::pid_t {
+            pids.push(pid);
+        }
+    }
+    Ok(pids)
+}
+
+#[cfg(unix)]
+fn terminate_unix_session(session_id: u32) -> std::io::Result<()> {
+    // Signal the shell's original process group even if process-table access
+    // is restricted.
+    unsafe {
+        libc::kill(-(session_id as libc::pid_t), libc::SIGKILL);
+    }
+    for _ in 0..8 {
+        let members = unix_session_pids(session_id)?
+            .into_iter()
+            .filter(|pid| *pid != session_id && *pid != std::process::id())
+            .collect::<Vec<_>>();
+        if members.is_empty() {
+            return Ok(());
+        }
+        for pid in members {
+            // Recheck membership immediately before signalling.
+            if unsafe { libc::getsid(pid as libc::pid_t) } != session_id as libc::pid_t {
+                continue;
+            }
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::WouldBlock,
+        "PTY session still has live descendants after termination attempts",
+    ))
+}
+
+fn terminate_child_for_platform(child: &mut ChildState) -> std::io::Result<()> {
+    terminate_child(
+        child,
+        |unix_session_id| {
+            #[cfg(unix)]
+            return terminate_unix_session(unix_session_id);
+            #[cfg(not(unix))]
+            {
+                let _ = unix_session_id;
+                Ok(())
+            }
+        },
+        |pid| {
+            #[cfg(unix)]
+            {
+                // SAFETY: ChildState::has_exited just returned false while
+                // holding the child mutex, so the direct pid is not reaped.
+                unsafe {
+                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                }
+            }
+            #[cfg(not(unix))]
+            let _ = pid;
+        },
+    )
+}
+
+fn pty_output_channel() -> (Sender<Incoming>, Receiver<Incoming>) {
+    crossbeam_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY)
+}
+
+fn pty_input_channel() -> (Sender<Outgoing>, Receiver<Outgoing>) {
+    crossbeam_channel::bounded(PTY_INPUT_QUEUE_CAPACITY)
+}
+
+fn try_queue_pty_input(tx: &Sender<Outgoing>, bytes: Vec<u8>) -> Result<(), PtyInputError> {
+    if !pty_input_message_allowed(bytes.len()) {
+        return Err(PtyInputError::MessageTooLarge(bytes));
+    }
+    tx.try_send(bytes).map_err(|error| match error {
+        crossbeam_channel::TrySendError::Full(bytes) => PtyInputError::QueueFull(bytes),
+        crossbeam_channel::TrySendError::Disconnected(bytes) => {
+            PtyInputError::WriterDisconnected(bytes)
+        }
+    })
+}
+
+#[must_use]
+pub fn pty_input_message_allowed(bytes: usize) -> bool {
+    bytes <= MAX_PTY_INPUT_MESSAGE_BYTES
+}
+
+/// Maximum bytes that can wait in one pane's PTY input channel.
+#[must_use]
+pub fn max_pty_queued_input_bytes() -> usize {
+    PTY_INPUT_QUEUE_CAPACITY.saturating_mul(MAX_PTY_INPUT_MESSAGE_BYTES)
+}
+
+#[cfg(all(test, windows))]
+#[must_use]
+fn active_pty_io_threads() -> usize {
+    ACTIVE_PTY_IO_THREADS.load(Ordering::Acquire)
+}
+
+struct ActivePtyIoThread;
+
+impl ActivePtyIoThread {
+    fn enter() -> Self {
+        ACTIVE_PTY_IO_THREADS.fetch_add(1, Ordering::AcqRel);
+        Self
+    }
+}
+
+impl Drop for ActivePtyIoThread {
+    fn drop(&mut self) {
+        ACTIVE_PTY_IO_THREADS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+struct PtyIoThread {
+    handle: Option<thread::JoinHandle<()>>,
+    done: Receiver<()>,
+}
+
+impl PtyIoThread {
+    #[cfg(windows)]
+    fn cancel_synchronous_io(&self) {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::{Foundation::HANDLE, System::IO::CancelSynchronousIo};
+
+        let Some(handle) = self.handle.as_ref() else { return };
+        let thread_handle = HANDLE(handle.as_raw_handle());
+        // SAFETY: JoinHandle owns a live Windows thread handle. Cancellation
+        // only interrupts that thread's pending synchronous I/O.
+        unsafe {
+            if let Err(error) = CancelSynchronousIo(thread_handle) {
+                tracing::debug!(%error, "PTY I/O thread had no cancellable synchronous operation");
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn cancel_synchronous_io(&self) {}
+
+    fn finish(&mut self, name: &'static str) {
+        let finished = match self.done.recv_timeout(PTY_IO_SHUTDOWN_TIMEOUT) {
+            Ok(()) | Err(crossbeam_channel::RecvTimeoutError::Disconnected) => true,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => false,
+        };
+        if finished {
+            if let Some(handle) = self.handle.take() {
+                if handle.join().is_err() {
+                    tracing::warn!("{name} panicked during shutdown");
+                }
+            }
+        } else {
+            tracing::warn!("{name} did not exit within the PTY shutdown timeout");
+            self.handle.take();
+        }
+    }
+}
+
 /// Handle to a running pty process.
 ///
-/// On drop, the child process is explicitly killed and the master writer is
-/// dropped, which closes the pty fd and triggers EOF on the reader thread
-/// so it exits cleanly. Without the explicit kill, dropping a `PtyHandle`
-/// (e.g. on `Action::ClosePane`) would leave the shell as an orphan
-/// connected to a closed pty until the OS reaps it.
+/// On drop, the child process is explicitly killed, pending native I/O is
+/// cancelled, and the PTY reader/writer threads are given a bounded interval
+/// to exit.
 pub struct PtyHandle {
     /// Channel of byte chunks read from the child's stdout/stderr.
     pub out_rx: Receiver<Incoming>,
@@ -44,7 +384,13 @@ pub struct PtyHandle {
     pub in_tx: Sender<Outgoing>,
     /// Closure that resizes the pty to `(cols, rows)`.
     pub resize: Box<dyn Fn(u16, u16) + Send + Sync>,
-    child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
+    reader_cancel: Sender<()>,
+    writer_cancel: Sender<()>,
+    reader_thread: PtyIoThread,
+    writer_thread: PtyIoThread,
+    child: Arc<Mutex<ChildState>>,
+    #[cfg(windows)]
+    conpty_drain_reader: Option<Box<dyn Read + Send>>,
     /// Resolved shell program path (the command we actually spawned).
     shell_program_path: String,
 }
@@ -91,7 +437,8 @@ impl PtyHandle {
     /// Called automatically on Drop, but exposed for callers that want
     /// deterministic shutdown earlier.
     pub fn kill(&self) {
-        let _ = self.child.lock().kill();
+        let mut child = self.child.lock();
+        let _ = terminate_child_for_platform(&mut child);
     }
 
     /// Process id of the underlying shell, if the platform reports it. Used
@@ -107,68 +454,210 @@ impl PtyHandle {
     pub fn shell_program_path(&self) -> &str {
         &self.shell_program_path
     }
+
+    /// Build a cloneable probe for consumers that must observe natural exit
+    /// even when a platform PTY reader remains blocked until master teardown.
+    pub fn child_exit_probe(&self) -> PtyChildExitProbe {
+        PtyChildExitProbe { child: self.child.clone() }
+    }
+
+    /// Queue terminal input without blocking the event-loop thread.
+    ///
+    /// On failure, the error retains the rejected bytes so the caller can
+    /// retry or notify the user instead of silently losing terminal input.
+    pub fn send_input_nonblocking(&self, bytes: Vec<u8>) -> Result<(), PtyInputError> {
+        try_queue_pty_input(&self.in_tx, bytes)
+    }
 }
 
 impl Drop for PtyHandle {
     fn drop(&mut self) {
-        // LM-007: the previous `Arc::strong_count == 1` guard skipped
-        // the kill in any code path that still held a cloned child Arc,
-        // leaving an orphaned shell on tab close. It also relied on
-        // portable-pty's `Child::kill`, which on Unix sends SIGHUP and only
-        // escalates to SIGKILL after a timing window. Shells that trap
-        // SIGHUP (zsh by default, bash with `trap '' HUP`) survive that
-        // window and outlive the PTY as orphans.
-        //
-        // Fix: always kill — send SIGKILL directly via `libc::kill` first,
-        // then call portable-pty's `kill()` (covers any pid-namespace edge
-        // cases and the Windows `TerminateProcess` path), then reap with
-        // a bounded `try_wait` poll so a stuck child can never hang the
-        // app on tab close.
-        let mut child = self.child.lock();
-        #[cfg(unix)]
-        let pid_for_log = child.process_id();
-        #[cfg(unix)]
-        if let Some(pid) = child.process_id() {
-            // SAFETY: libc::kill is FFI; pid comes from portable-pty's
-            // tracked child handle. ESRCH (already dead) is fine.
-            unsafe {
-                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        let resize = std::mem::replace(&mut self.resize, Box::new(|_, _| {}));
+        let mut teardown =
+            PtyHandleTeardown { handle: self, resize: Some(resize), termination_failed: false };
+        run_pty_teardown(&mut teardown);
+    }
+}
+
+trait PtyTeardownOps {
+    fn signal_cancel(&mut self);
+    fn cancel_io(&mut self);
+    fn terminate_child(&mut self);
+    fn finish_io(&mut self);
+    fn close_master(&mut self);
+    fn reap_child(&mut self);
+}
+
+fn run_pty_teardown(teardown: &mut impl PtyTeardownOps) {
+    teardown.signal_cancel();
+    teardown.cancel_io();
+    teardown.terminate_child();
+    #[cfg(windows)]
+    {
+        teardown.finish_io();
+        teardown.close_master();
+    }
+    #[cfg(not(windows))]
+    {
+        teardown.close_master();
+        teardown.finish_io();
+    }
+    teardown.reap_child();
+}
+
+struct PtyHandleTeardown<'a> {
+    handle: &'a mut PtyHandle,
+    resize: Option<Box<dyn Fn(u16, u16) + Send + Sync>>,
+    termination_failed: bool,
+}
+
+impl PtyTeardownOps for PtyHandleTeardown<'_> {
+    fn signal_cancel(&mut self) {
+        let _ = self.handle.reader_cancel.try_send(());
+        let _ = self.handle.writer_cancel.try_send(());
+    }
+
+    fn cancel_io(&mut self) {
+        self.handle.reader_thread.cancel_synchronous_io();
+        self.handle.writer_thread.cancel_synchronous_io();
+    }
+
+    fn terminate_child(&mut self) {
+        let mut child = self.handle.child.lock();
+        let result = terminate_child_for_platform(&mut child);
+        if let Err(error) = result {
+            tracing::warn!(%error, "failed to terminate PTY child");
+            self.termination_failed = true;
+        } else {
+            self.termination_failed = false;
+        }
+    }
+
+    fn finish_io(&mut self) {
+        self.handle.reader_thread.finish("PTY reader thread");
+        self.handle.writer_thread.finish("PTY writer thread");
+    }
+
+    fn close_master(&mut self) {
+        #[cfg(windows)]
+        if let (Some(reader), Some(resize)) =
+            (self.handle.conpty_drain_reader.take(), self.resize.take())
+        {
+            let completed =
+                close_master_with_drain(reader, move || drop(resize), CONPTY_CLOSE_TIMEOUT);
+            if !completed {
+                tracing::warn!("ConPTY master close did not finish within the shutdown timeout");
+            }
+            return;
+        }
+        drop(self.resize.take());
+    }
+
+    fn reap_child(&mut self) {
+        if self.termination_failed {
+            let deadline = Instant::now() + PTY_IO_SHUTDOWN_TIMEOUT;
+            loop {
+                match terminate_child_for_platform(&mut self.handle.child.lock()) {
+                    Ok(()) => {
+                        self.termination_failed = false;
+                        break;
+                    }
+                    Err(error) if Instant::now() >= deadline => {
+                        tracing::warn!(
+                            %error,
+                            "PTY session cleanup failed through the shutdown deadline; leader left unreaped"
+                        );
+                        return;
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                }
             }
         }
-        // portable-pty escalation as defense in depth (Windows
-        // TerminateProcess, Unix pid-namespace edge cases).
-        let _ = child.kill();
-        // Bounded reap. After SIGKILL the kernel typically delivers the
-        // exit status in well under 10ms; the 500ms budget is huge
-        // headroom for pathological scheduling. We must never block the
-        // app indefinitely on tab close: if the child somehow doesn't
-        // reap (kernel bug, exotic process-group state) we log and move
-        // on rather than hang Drop.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        let mut child = self.handle.child.lock();
+        if child.exited {
+            return;
+        }
+        let pid_for_log = child.process_id();
+        let deadline = std::time::Instant::now() + PTY_IO_SHUTDOWN_TIMEOUT;
         loop {
-            match child.try_wait() {
-                Ok(Some(_status)) => break,
-                Ok(None) if std::time::Instant::now() >= deadline => {
-                    #[cfg(unix)]
-                    {
-                        tracing::warn!(
-                            pid = pid_for_log,
-                            "PtyHandle::Drop: child did not exit within 500ms after SIGKILL"
-                        );
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        tracing::warn!(
-                            "PtyHandle::Drop: child did not exit within 500ms after kill"
-                        );
-                    }
+            match child.has_exited() {
+                Ok(true) => break,
+                Ok(false) if std::time::Instant::now() >= deadline => {
+                    tracing::warn!(
+                        pid = pid_for_log,
+                        "PTY child did not exit within the shutdown timeout"
+                    );
                     break;
                 }
-                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
-                Err(_) => break,
+                Ok(false) => std::thread::sleep(Duration::from_millis(10)),
+                Err(error) => {
+                    tracing::warn!(%error, "failed to reap PTY child");
+                    break;
+                }
             }
         }
     }
+}
+
+#[cfg(windows)]
+fn close_master_with_drain(
+    mut reader: Box<dyn Read + Send>,
+    close_master: impl FnOnce() + Send + 'static,
+    timeout: Duration,
+) -> bool {
+    let (drain_done_tx, drain_done_rx) = crossbeam_channel::bounded(1);
+    let drain_thread =
+        match thread::Builder::new().name("sonic-conpty-drain".into()).spawn(move || {
+            let mut buffer = [0u8; 8192];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+            let _ = drain_done_tx.send(());
+        }) {
+            Ok(thread) => thread,
+            Err(error) => {
+                tracing::warn!(%error, "failed to spawn ConPTY drain thread");
+                std::mem::forget(close_master);
+                return false;
+            }
+        };
+    let (close_done_tx, close_done_rx) = crossbeam_channel::bounded(1);
+    let close_thread =
+        match thread::Builder::new().name("sonic-conpty-close".into()).spawn(move || {
+            close_master();
+            let _ = close_done_tx.send(());
+        }) {
+            Ok(thread) => thread,
+            Err(error) => {
+                tracing::warn!(%error, "failed to spawn ConPTY close thread");
+                std::mem::forget(drain_thread);
+                return false;
+            }
+        };
+
+    let close_finished = matches!(
+        close_done_rx.recv_timeout(timeout),
+        Ok(()) | Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+    );
+    if close_finished {
+        let _ = close_thread.join();
+        let drain_finished = matches!(
+            drain_done_rx.recv_timeout(timeout),
+            Ok(()) | Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+        );
+        if drain_finished {
+            let _ = drain_thread.join();
+        } else {
+            drop(drain_thread);
+        }
+    } else {
+        drop(close_thread);
+        drop(drain_thread);
+    }
+    close_finished
 }
 
 impl PtyHandle {
@@ -228,17 +717,25 @@ impl PtyHandle {
         drop(pair.slave);
 
         let master = pair.master;
+        #[cfg(unix)]
+        let unix_session_id = child.process_id();
+        #[cfg(not(unix))]
+        let unix_session_id = None;
         let reader = master.try_clone_reader()?;
+        #[cfg(windows)]
+        let conpty_drain_reader = Some(master.try_clone_reader()?);
         let writer = master.take_writer()?;
         let master = Arc::new(Mutex::new(master));
 
-        let (out_tx, out_rx) = crossbeam_channel::unbounded::<Incoming>();
-        let (in_tx, in_rx) = crossbeam_channel::unbounded::<Outgoing>();
+        let (out_tx, out_rx) = pty_output_channel();
+        let (in_tx, in_rx) = pty_input_channel();
+        let (reader_cancel, reader_cancel_rx) = crossbeam_channel::bounded(1);
+        let (writer_cancel, writer_cancel_rx) = crossbeam_channel::bounded(1);
 
         // Reader thread: pty -> out_rx.
-        spawn_reader_thread(reader, out_tx);
+        let reader_thread = spawn_reader_thread(reader, out_tx, reader_cancel_rx);
         // Writer thread: in_rx -> pty.
-        spawn_writer_thread(writer, in_rx);
+        let writer_thread = spawn_writer_thread(writer, in_rx, writer_cancel_rx);
 
         let resize_master = master.clone();
         // Dedup no-op resizes. Callers (e.g. tab switch via
@@ -270,16 +767,35 @@ impl PtyHandle {
             out_rx,
             in_tx,
             resize,
-            child: Arc::new(Mutex::new(child)),
+            reader_cancel,
+            writer_cancel,
+            reader_thread,
+            writer_thread,
+            child: Arc::new(Mutex::new(ChildState::new(child, unix_session_id))),
+            #[cfg(windows)]
+            conpty_drain_reader,
             shell_program_path: cmd.to_string(),
         })
     }
 }
 
-fn spawn_reader_thread(mut reader: Box<dyn Read + Send>, tx: Sender<Incoming>) {
-    thread::Builder::new()
+fn send_pty_output(tx: &Sender<Incoming>, cancel: &Receiver<()>, chunk: Incoming) -> bool {
+    crossbeam_channel::select! {
+        send(tx, chunk) -> result => result.is_ok(),
+        recv(cancel) -> _ => false,
+    }
+}
+
+fn spawn_reader_thread(
+    mut reader: Box<dyn Read + Send>,
+    tx: Sender<Incoming>,
+    cancel: Receiver<()>,
+) -> PtyIoThread {
+    let (done_tx, done) = crossbeam_channel::bounded(1);
+    let handle = thread::Builder::new()
         .name("sonic-pty-reader".into())
         .spawn(move || {
+            let _active = ActivePtyIoThread::enter();
             // 64 KiB ring. We `split` the filled prefix into a `Bytes`
             // (refcounted view into the same allocation) on each read and
             // send it downstream. Once consumers drop their `Bytes`, the
@@ -316,39 +832,60 @@ fn spawn_reader_thread(mut reader: Box<dyn Read + Send>, tx: Sender<Incoming>) {
                     Ok(n) => {
                         buf.truncate(initial_len + n);
                         let chunk = buf.split().freeze();
-                        if tx.send(chunk).is_err() {
+                        if !send_pty_output(&tx, &cancel, chunk) {
                             break;
                         }
                     }
                     Err(e) => {
-                        tracing::warn!("pty read error: {e}");
+                        if cancel.try_recv().is_err() {
+                            tracing::warn!("pty read error: {e}");
+                        }
                         break;
                     }
                 }
             }
+            let _ = done_tx.send(());
         })
         // PANIC: thread::Builder::spawn only fails on OS-level resource
         // exhaustion (out of memory / out of process handles). At terminal
         // startup we cannot meaningfully recover — propagating a Result up
         // through `spawn_pane` would land on the same `expect`. Documented.
         .expect("spawn pty reader");
+    PtyIoThread { handle: Some(handle), done }
 }
 
-fn spawn_writer_thread(mut writer: Box<dyn Write + Send>, rx: Receiver<Outgoing>) {
-    thread::Builder::new()
+fn spawn_writer_thread(
+    mut writer: Box<dyn Write + Send>,
+    rx: Receiver<Outgoing>,
+    cancel: Receiver<()>,
+) -> PtyIoThread {
+    let (done_tx, done) = crossbeam_channel::bounded(1);
+    let handle = thread::Builder::new()
         .name("sonic-pty-writer".into())
         .spawn(move || {
-            while let Ok(bytes) = rx.recv() {
+            let _active = ActivePtyIoThread::enter();
+            loop {
+                let bytes = crossbeam_channel::select! {
+                    recv(cancel) -> _ => break,
+                    recv(rx) -> result => match result {
+                        Ok(bytes) => bytes,
+                        Err(_) => break,
+                    },
+                };
                 if let Err(e) = writer.write_all(&bytes) {
-                    tracing::warn!("pty write error: {e}");
+                    if cancel.try_recv().is_err() {
+                        tracing::warn!("pty write error: {e}");
+                    }
                     break;
                 }
                 let _ = writer.flush();
             }
+            let _ = done_tx.send(());
         })
         // PANIC: see `spawn_reader_thread` rationale above — OS-level
         // thread-spawn failure at PTY init is unrecoverable.
         .expect("spawn pty writer");
+    PtyIoThread { handle: Some(handle), done }
 }
 
 fn default_shell() -> String {

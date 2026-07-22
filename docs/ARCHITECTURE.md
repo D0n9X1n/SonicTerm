@@ -65,6 +65,18 @@ of terminal correctness rather than a paint optimization:
   Primary-screen panes retain narrow dirty-row damage.
 - VT/grid mutations mark affected rows in the same frame, including scrolling,
   insert/delete line, reverse index, erase, resize, and wide-cell repair.
+- Grid geometry budgets include retained row allocation, not only visible
+  `cols × rows`; material column shrink compacts surviving rows while adjacent
+  resize oscillation retains reusable capacity, and history-limit reductions
+  release excess `VecDeque` capacity. Grid-level aggregate checks include
+  visible, history, and saved-primary row capacity and force-compaction when
+  retained storage would exceed the corresponding cell budget.
+- Clipboard serialization preserves isolated or incomplete right-edge
+  box-drawing text and removes only a coherent multi-row side ending in a
+  lower-right frame corner. Frame detection reads physical row ends without
+  widening the selected output span.
+- CAN/SUB cancellation resets VT escape accounting before cancelled DCS media
+  can reach `unhook` and emit an incomplete image.
 - Windows software rendering keeps the established full-surface presenter path;
   it is not coupled to retained GPU damage decisions.
 - Pane VT workers never call native window APIs. After output coalescing they
@@ -82,6 +94,25 @@ Generated FreeType/HarfBuzz/Fontconfig bindings stay in their wrapper crates;
 `sonicterm-font` owns safe allocation and fallback behavior. Variable-font
 metadata is optional: malformed, missing, or out-of-range variation metadata
 falls back to base OS/2/default weight and width rather than aborting the app.
+Embedded bitmap strikes are loaded metrics-only and checked against the glyph
+allocation budget before FreeType may decode their pixels.
+
+PTY handles own their native reader and writer threads. Unix natural exit is
+observed with `waitid(..., WNOWAIT)`; teardown repeatedly terminates every
+process in the unreaped leader's session before reaping, so session identity
+cannot be reused first. Windows teardown caches process exit and keeps a
+dedicated cloned output reader draining concurrently with ConPTY master close,
+including the pre-Windows 11 24H2 blocking contract. Both platforms use
+bounded thread, close, and child-exit deadlines.
+Terminal-input enqueue remains non-blocking and bounded; saturation,
+disconnection, and oversized messages return typed errors that retain the
+rejected bytes instead of reporting false success. App callers forward those
+bytes to the event loop for a visible retry notification. The mux probes child
+exit on an independent timer, applies an absolute post-exit output-drain
+deadline, removes exited panes, prunes empty sessions, rechunks subscriber
+output to 8 KiB frames, bounds all control replies, actively interrupts blocked
+transport writes before joining, and queues `Spawned` before enabling output,
+`Exit`, or reap.
 
 Native GPU presentation, real PTYs/SSH, AppKit/Win32 handles, generated C ABI
 behavior, and installer signing are verified by build, integration, platform CI,

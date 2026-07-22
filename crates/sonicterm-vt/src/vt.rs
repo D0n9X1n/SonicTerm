@@ -18,13 +18,16 @@ use crossbeam_channel::Sender;
 use vte::{Params, Perform};
 
 use sonicterm_grid::grid::{Cell, CellFlags, Color, Grid, Pos, UnderlineStyle};
-use sonicterm_grid::hyperlink::{HyperlinkId, HyperlinkRegistry};
+use sonicterm_grid::hyperlink::{
+    HyperlinkId, HyperlinkRegistry, MAX_HYPERLINK_CLIENT_ID_BYTES,
+};
 
 /// Version string reported in answer to CSI > q (XTVERSION).
 pub const SONIC_VERSION: &str = "SonicTerm 0.7";
 
 const MAX_MEDIA_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RAW_OSC4_BYTES: usize = 4096;
+const MAX_ESCAPE_SEQUENCE_BYTES: usize = 1024 * 1024;
 
 /// Event surfaced to the host so it can update window chrome, clipboard, etc.
 #[derive(Debug, Clone)]
@@ -169,6 +172,10 @@ pub struct Parser {
     apc_capture: Option<MediaCapture>,
     pending_esc: bool,
     raw_osc: Option<RawOsc>,
+    escape_bytes_in_flight: usize,
+    discarding_oversized_escape: bool,
+    discard_escape_pending_esc: bool,
+    escape_family: EscapeFamily,
 }
 
 /// SonicTerm-side OSC capture for sequences where vte's public callback loses
@@ -182,6 +189,15 @@ enum RawOsc {
     Palette { content: Vec<u8> },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EscapeFamily {
+    Ground,
+    Esc,
+    Csi,
+    Osc,
+    String,
+}
+
 impl Parser {
     /// Build a parser bound to `grid`, with no upstream reply channel — DSR /
     /// XTVERSION queries will be silently dropped.
@@ -192,6 +208,10 @@ impl Parser {
             apc_capture: None,
             pending_esc: false,
             raw_osc: None,
+            escape_bytes_in_flight: 0,
+            discarding_oversized_escape: false,
+            discard_escape_pending_esc: false,
+            escape_family: EscapeFamily::Ground,
         }
     }
 
@@ -204,6 +224,10 @@ impl Parser {
             apc_capture: None,
             pending_esc: false,
             raw_osc: None,
+            escape_bytes_in_flight: 0,
+            discarding_oversized_escape: false,
+            discard_escape_pending_esc: false,
+            escape_family: EscapeFamily::Ground,
         }
     }
 
@@ -260,8 +284,19 @@ impl Parser {
         let mut i = 0;
         let len = bytes.len();
         while i < len {
+            if self.discarding_oversized_escape {
+                self.consume_discarded_escape_byte(bytes[i]);
+                i += 1;
+                continue;
+            }
             if self.apc_capture.is_some() {
                 self.consume_apc_byte(bytes[i]);
+                i += 1;
+                continue;
+            }
+            if self.performer.dcs_capture.is_some() && matches!(bytes[i], 0x18 | 0x1a) {
+                self.inner = vte::Parser::new();
+                self.reset_cancelled_escape();
                 i += 1;
                 continue;
             }
@@ -299,8 +334,25 @@ impl Parser {
                 // start consuming an escape (ground flips false). The
                 // Performer callbacks below update `self.performer.ground`.
                 self.performer.ground = false;
+                self.escape_bytes_in_flight = 1;
+                self.escape_family = match bytes[i] {
+                    0x1b => EscapeFamily::Esc,
+                    0x9b => EscapeFamily::Csi,
+                    0x9d => EscapeFamily::Osc,
+                    0x90 | 0x98 | 0x9e | 0x9f => EscapeFamily::String,
+                    _ => EscapeFamily::Ground,
+                };
                 self.observe_osc4_byte(bytes[i]);
+                self.performer.sequence_dispatched = false;
+                let byte = bytes[i];
                 self.inner.advance(&mut self.performer, &bytes[i..i + 1]);
+                if matches!(byte, 0x18 | 0x1a) {
+                    self.reset_cancelled_escape();
+                }
+                if self.performer.ground || self.performer.sequence_dispatched {
+                    self.escape_bytes_in_flight = 0;
+                    self.escape_family = EscapeFamily::Ground;
+                }
                 // If vte stayed in Ground (execute() or print()), the
                 // callback has already set ground=true. If not, leave it
                 // false so the next iteration feeds bytes through vte until
@@ -314,9 +366,64 @@ impl Parser {
                 // stop the moment ground flips back to true.
                 let start = i;
                 while i < len && !self.performer.ground {
+                    if self.performer.dcs_capture.is_some() && matches!(bytes[i], 0x18 | 0x1a) {
+                        self.inner = vte::Parser::new();
+                        self.reset_cancelled_escape();
+                        i += 1;
+                        break;
+                    }
+                    let started_escape = if self.escape_family == EscapeFamily::Ground {
+                        self.escape_family = match bytes[i] {
+                            0x1b => EscapeFamily::Esc,
+                            0x9b => EscapeFamily::Csi,
+                            0x9d => EscapeFamily::Osc,
+                            0x90 | 0x98 | 0x9e | 0x9f => EscapeFamily::String,
+                            _ => EscapeFamily::Ground,
+                        };
+                        if self.escape_family != EscapeFamily::Ground {
+                            self.escape_bytes_in_flight = 1;
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if self.escape_family == EscapeFamily::Esc && !started_escape {
+                        self.escape_family = match bytes[i] {
+                            b'[' => EscapeFamily::Csi,
+                            b']' => EscapeFamily::Osc,
+                            b'P' | b'X' | b'^' | b'_' => EscapeFamily::String,
+                            _ => EscapeFamily::Esc,
+                        };
+                    }
+                    let media_capture_has_own_budget = self.performer.dcs_capture.is_some();
+                    if self.escape_family != EscapeFamily::Ground
+                        && !started_escape
+                        && !media_capture_has_own_budget
+                    {
+                        self.escape_bytes_in_flight =
+                            self.escape_bytes_in_flight.saturating_add(1);
+                        if self.escape_bytes_in_flight > MAX_ESCAPE_SEQUENCE_BYTES {
+                            let pending_esc = self.pending_esc;
+                            self.begin_discarding_oversized_escape(pending_esc);
+                            self.consume_discarded_escape_byte(bytes[i]);
+                            i += 1;
+                            break;
+                        }
+                    }
                     self.observe_osc4_byte(bytes[i]);
+                    self.performer.sequence_dispatched = false;
+                    let byte = bytes[i];
                     self.inner.advance(&mut self.performer, &bytes[i..i + 1]);
                     i += 1;
+                    if matches!(byte, 0x18 | 0x1a) {
+                        self.reset_cancelled_escape();
+                    }
+                    if self.performer.ground || self.performer.sequence_dispatched {
+                        self.escape_bytes_in_flight = 0;
+                        self.escape_family = EscapeFamily::Ground;
+                    }
                 }
                 debug_assert!(i > start, "vte must consume at least one byte per iteration");
             }
@@ -324,7 +431,67 @@ impl Parser {
         std::mem::take(&mut self.performer.events)
     }
 
+    fn reset_cancelled_escape(&mut self) {
+        self.raw_osc = None;
+        self.pending_esc = false;
+        self.apc_capture = None;
+        self.performer.dcs_capture = None;
+        self.escape_bytes_in_flight = 0;
+        self.discarding_oversized_escape = false;
+        self.discard_escape_pending_esc = false;
+        self.escape_family = EscapeFamily::Ground;
+        self.performer.ground = true;
+        self.performer.sequence_dispatched = true;
+    }
+
+    fn begin_discarding_oversized_escape(&mut self, pending_esc: bool) {
+        tracing::warn!(
+            limit = MAX_ESCAPE_SEQUENCE_BYTES,
+            "escape sequence exceeded memory limit; discarding through terminator"
+        );
+        self.inner = vte::Parser::new();
+        self.raw_osc = None;
+        self.performer.dcs_capture = None;
+        self.pending_esc = false;
+        self.discarding_oversized_escape = true;
+        self.discard_escape_pending_esc = pending_esc;
+        self.performer.ground = false;
+    }
+
+    fn consume_discarded_escape_byte(&mut self, byte: u8) {
+        let string_terminated = match self.escape_family {
+            EscapeFamily::Osc => {
+                byte == 0x07
+                    || byte == 0x9c
+                    || (self.discard_escape_pending_esc && byte == b'\\')
+            }
+            EscapeFamily::String => {
+                byte == 0x9c || (self.discard_escape_pending_esc && byte == b'\\')
+            }
+            EscapeFamily::Ground | EscapeFamily::Esc | EscapeFamily::Csi => false,
+        };
+        let final_byte = match self.escape_family {
+            EscapeFamily::Csi => (0x40..=0x7e).contains(&byte),
+            EscapeFamily::Esc => (0x30..=0x7e).contains(&byte),
+            EscapeFamily::Ground | EscapeFamily::Osc | EscapeFamily::String => false,
+        };
+        let terminated = string_terminated || final_byte || matches!(byte, 0x18 | 0x1a);
+        if terminated {
+            self.discarding_oversized_escape = false;
+            self.discard_escape_pending_esc = false;
+            self.escape_bytes_in_flight = 0;
+            self.performer.ground = true;
+            self.escape_family = EscapeFamily::Ground;
+            return;
+        }
+        self.discard_escape_pending_esc = byte == 0x1b;
+    }
+
     fn consume_apc_byte(&mut self, byte: u8) {
+        if matches!(byte, 0x18 | 0x1a) {
+            self.reset_cancelled_escape();
+            return;
+        }
         let Some(capture) = self.apc_capture.as_mut() else { return };
         if capture.pending_esc {
             capture.pending_esc = false;
@@ -488,6 +655,8 @@ struct Performer {
     /// one — modern zsh/bash/fish ship with cwd-reporting prompts.
     cwd: Option<String>,
     reply_tx: Option<Sender<Vec<u8>>>,
+    reply_queue_full_warned: std::sync::atomic::AtomicBool,
+    sequence_dispatched: bool,
     /// Theme default foreground (sRGB), used to answer OSC 10 `?` queries.
     /// `None` means the parser was never told a theme — query replies are
     /// suppressed in that case so we don't lie to the shell.
@@ -561,6 +730,8 @@ impl Performer {
             title: None,
             cwd: None,
             reply_tx,
+            reply_queue_full_warned: std::sync::atomic::AtomicBool::new(false),
+            sequence_dispatched: false,
             theme_fg: None,
             theme_bg: None,
             theme_cursor: None,
@@ -588,7 +759,21 @@ impl Performer {
 
     fn reply(&self, bytes: &[u8]) {
         if let Some(tx) = &self.reply_tx {
-            let _ = tx.send(bytes.to_vec());
+            match tx.try_send(bytes.to_vec()) {
+                Ok(()) => {
+                    self.reply_queue_full_warned
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
+                }
+                Err(crossbeam_channel::TrySendError::Full(_)) => {
+                    if !self
+                        .reply_queue_full_warned
+                        .swap(true, std::sync::atomic::Ordering::Relaxed)
+                    {
+                        tracing::warn!("terminal reply dropped because the reply queue is full");
+                    }
+                }
+                Err(crossbeam_channel::TrySendError::Disconnected(_)) => {}
+            }
         }
     }
 
@@ -1021,6 +1206,7 @@ impl Perform for Performer {
 
     fn csi_dispatch(&mut self, params: &Params, inter: &[u8], _ignore: bool, action: char) {
         self.ground = false;
+        self.sequence_dispatched = true;
         if action != 'b' {
             self.reset_last_printed_char();
         }
@@ -1326,6 +1512,7 @@ impl Perform for Performer {
 
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
         self.ground = false;
+        self.sequence_dispatched = true;
         let code = params
             .first()
             .and_then(|s| std::str::from_utf8(s).ok())
@@ -1359,14 +1546,28 @@ impl Perform for Performer {
                     let id_norm = id.filter(|s| !s.is_empty());
                     if uri.is_empty() {
                         self.current_hyperlink = None;
+                        self.events.push(VtEvent::Hyperlink {
+                            id: id_norm
+                                .filter(|value| value.len() <= MAX_HYPERLINK_CLIENT_ID_BYTES)
+                                .map(String::from),
+                            uri: String::new(),
+                        });
                     } else {
-                        let hid = self.hyperlinks.intern(id_norm, uri);
-                        self.current_hyperlink = Some(hid);
+                        self.current_hyperlink = self.hyperlinks.try_intern(id_norm, uri);
+                        if self.current_hyperlink.is_some() {
+                            self.events.push(VtEvent::Hyperlink {
+                                id: id_norm.map(String::from),
+                                uri: uri.to_string(),
+                            });
+                        } else {
+                            self.events.push(VtEvent::Hyperlink { id: None, uri: String::new() });
+                            tracing::warn!(
+                                uri_bytes = uri.len(),
+                                id_bytes = id_norm.map_or(0, str::len),
+                                "OSC 8 hyperlink rejected by memory limits"
+                            );
+                        }
                     }
-                    self.events.push(VtEvent::Hyperlink {
-                        id: id_norm.map(String::from),
-                        uri: uri.to_string(),
-                    });
                 }
             }
             Some(4) => {
@@ -1494,6 +1695,7 @@ impl Perform for Performer {
     }
     fn unhook(&mut self) {
         self.ground = false;
+        self.sequence_dispatched = true;
         if let Some(capture) = self.dcs_capture.take() {
             self.events.push(VtEvent::Media(
                 capture.into_event(self.grid.cursor.row, self.grid.cursor.col),
@@ -1502,6 +1704,7 @@ impl Perform for Performer {
     }
     fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, byte: u8) {
         self.ground = false;
+        self.sequence_dispatched = true;
         self.reset_last_printed_char();
         match byte {
             b'7' => {

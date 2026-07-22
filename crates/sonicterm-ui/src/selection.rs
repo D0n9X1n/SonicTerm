@@ -9,7 +9,7 @@
 //! (via `viewport_row_to_abs`) before building/extending a `Selection`, and
 //! the renderer maps the absolute row back to a viewport row for drawing.
 
-use sonicterm_grid::grid::{CellFlags, Grid};
+use sonicterm_grid::grid::{CellFlags, Grid, Row};
 
 /// The granularity a drag extends at, set on press by the click count.
 ///
@@ -174,35 +174,118 @@ impl Selection {
     /// available buffer (`None`) ends the walk.
     pub fn as_text(&self, grid: &Grid) -> String {
         let (a, b) = self.normalized();
-        let mut out = String::new();
-        // Emit the row separator BEFORE each row after the first, so a walk
-        // cut short by an unavailable absolute row (`row_at_abs` → None)
-        // never leaves a dangling trailing newline.
-        let mut first = true;
-        for r in a.0..=b.0 {
-            let Some(row) = grid.row_at_abs(r) else {
-                break;
-            };
-            if !first {
-                out.push('\n');
-            }
-            first = false;
-            let col_start = if r == a.0 { a.1 as usize } else { 0 };
-            let col_end = if r == b.0 { (b.1 as usize + 1).min(row.len()) } else { row.len() };
-            let mut line = String::new();
-            for cell in row.get_range(col_start, col_end) {
-                if cell.flags.contains(CellFlags::WIDE_CONT) {
-                    continue;
-                }
-                line.push(cell.ch);
-                if let Some(extras) = cell.extras() {
-                    line.push_str(extras);
-                }
-            }
-            out.push_str(line.trim_end());
-        }
-        out
+        plain_text_from_grid_range(grid, (usize::from(a.1), a.0), (usize::from(b.1), b.0))
     }
+}
+
+/// Serialize a cell range as clipboard-safe plain text.
+///
+/// Terminal UIs commonly draw a detached box frame in the pane's final column.
+/// A cross-row selection necessarily spans that column on every intermediate
+/// row. Strip only a coherent multi-row right frame: vertical sides on every
+/// preceding row followed by a lower-right corner. Isolated or incomplete
+/// patterns remain literal text.
+pub fn plain_text_from_grid_range(
+    grid: &Grid,
+    mut start: (usize, u64),
+    mut end: (usize, u64),
+) -> String {
+    if (start.1, start.0) > (end.1, end.0) {
+        std::mem::swap(&mut start, &mut end);
+    }
+    let ((start_col, start_row), (end_col, end_row)) = (start, end);
+    let strip_right_frame = has_coherent_right_frame(grid, start_col, start_row, end_row);
+    let mut out = String::new();
+    let mut first = true;
+    for row_idx in start_row..=end_row {
+        let Some(row) = grid.row_at_abs(row_idx) else {
+            break;
+        };
+        if !first {
+            out.push('\n');
+        }
+        first = false;
+        let col_start = if row_idx == start_row { start_col } else { 0 }.min(row.len());
+        let requested_end = if row_idx == end_row { end_col.saturating_add(1) } else { row.len() };
+        let requested_end = requested_end.min(row.len());
+        let col_end = if strip_right_frame {
+            detached_right_frame(row, col_start, requested_end)
+                .map_or(requested_end, |(content_end, _)| content_end)
+        } else {
+            requested_end
+        };
+        let mut line = String::new();
+        for cell in row.get_range(col_start, col_end) {
+            if cell.flags.contains(CellFlags::WIDE_CONT) {
+                continue;
+            }
+            line.push(cell.ch);
+            if let Some(extras) = cell.extras() {
+                line.push_str(extras);
+            }
+        }
+        out.push_str(line.trim_end());
+    }
+    out
+}
+
+fn has_coherent_right_frame(grid: &Grid, start_col: usize, start_row: u64, end_row: u64) -> bool {
+    if start_row >= end_row {
+        return false;
+    }
+    let mut saw_vertical_side = false;
+    for row_idx in start_row..=end_row {
+        let Some(row) = grid.row_at_abs(row_idx) else {
+            return false;
+        };
+        let col_start = if row_idx == start_row { start_col } else { 0 }.min(row.len());
+        let Some((_, frame)) = detached_right_frame(row, col_start, row.len()) else {
+            return false;
+        };
+        if row_idx == end_row {
+            return saw_vertical_side && is_lower_right_frame_corner(frame);
+        }
+        if !is_vertical_frame_side(frame) {
+            return false;
+        }
+        saw_vertical_side = true;
+    }
+    false
+}
+
+fn detached_right_frame(row: &Row, col_start: usize, col_end: usize) -> Option<(usize, char)> {
+    if col_end != row.len() || col_end <= col_start {
+        return None;
+    }
+    let mut last_non_space = col_end;
+    while last_non_space > col_start && row[last_non_space - 1].ch.is_whitespace() {
+        last_non_space -= 1;
+    }
+    if last_non_space == col_start {
+        return None;
+    }
+    let frame_col = last_non_space - 1;
+    let frame = row[frame_col].ch;
+    let at_right_edge = frame_col.saturating_add(2) >= row.len();
+    let detached = frame_col > col_start
+        && !row[frame_col - 1].flags.contains(CellFlags::WIDE_CONT)
+        && row[frame_col - 1].ch.is_whitespace();
+    if !at_right_edge || !detached {
+        return None;
+    }
+    let mut content_end = frame_col;
+    while content_end > col_start && row[content_end - 1].ch.is_whitespace() {
+        content_end -= 1;
+    }
+    Some((content_end, frame))
+}
+
+fn is_vertical_frame_side(ch: char) -> bool {
+    matches!(ch, '│' | '┃' | '┆' | '┇' | '┊' | '┋' | '╎' | '╏' | '║')
+}
+
+fn is_lower_right_frame_corner(ch: char) -> bool {
+    matches!(ch, '┘' | '┙' | '┚' | '┛' | '╛' | '╜' | '╝' | '╯')
 }
 
 /// Connector characters that count as part of a word in addition to

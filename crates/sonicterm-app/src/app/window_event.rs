@@ -16,7 +16,7 @@ use sonicterm_ui::overlays::{
     search_bar_label, search_query_caret_prefix, SearchBarLayout, SEARCH_BAR_ICON_GAP,
     SEARCH_BAR_PAD_LEFT, SEARCH_BAR_PAD_RIGHT,
 };
-use sonicterm_ui::selection::{SelectMode, Selection};
+use sonicterm_ui::selection::{plain_text_from_grid_range, SelectMode, Selection};
 use sonicterm_ui::tabbar_view::TabBarLayout;
 use winit::{
     event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
@@ -798,7 +798,11 @@ impl App {
                     if enabled {
                         if let Some(pty) = pane.pty.as_ref() {
                             let seq: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
-                            let _ = pty.in_tx.send(seq.to_vec());
+                            Self::queue_pty_input(
+                                self.event_loop_proxy.as_ref(),
+                                pty,
+                                seq.to_vec(),
+                            );
                         }
                     }
                 }
@@ -826,8 +830,16 @@ impl App {
             }
 
             WindowEvent::Resized(size) => {
-                if let Some(r) = self.main_renderer_mut() {
-                    r.resize(size.width, size.height);
+                if self
+                    .main_renderer_mut()
+                    .is_some_and(|renderer| !renderer.try_resize(size.width, size.height))
+                {
+                    tracing::warn!(
+                        width = size.width,
+                        height = size.height,
+                        "main window resize ignored after renderer safety rejection"
+                    );
+                    return;
                 }
                 // M6a-expand-2c-window: notify the reducer of the
                 // new logical grid dimensions. Derive cols/rows from
@@ -1247,7 +1259,11 @@ impl App {
                             let payload = wheel_report_bytes(sgr, up, col1, row1, count);
                             if let Some(pane) = self.main().and_then(|ws| ws.panes.get(&pane_id)) {
                                 if let Some(pty) = pane.pty.as_ref() {
-                                    let _ = pty.in_tx.send(payload);
+                                    Self::queue_pty_input(
+                                        self.event_loop_proxy.as_ref(),
+                                        pty,
+                                        payload,
+                                    );
                                 }
                             }
                         } else if is_alt {
@@ -1270,7 +1286,11 @@ impl App {
                             }
                             if let Some(pane) = self.main().and_then(|ws| ws.panes.get(&pane_id)) {
                                 if let Some(pty) = pane.pty.as_ref() {
-                                    let _ = pty.in_tx.send(payload);
+                                    Self::queue_pty_input(
+                                        self.event_loop_proxy.as_ref(),
+                                        pty,
+                                        payload,
+                                    );
                                 }
                             }
                         } else {
@@ -2092,37 +2112,9 @@ fn copy_mode_selected_text(state: &CopyModeState, grid: &Grid) -> Option<String>
     if start == end {
         return None;
     }
-    let mut out = String::new();
-    let last_row = end.1.min(grid.scrollback_len() + grid.rows.saturating_sub(1) as usize);
-    for row_idx in start.1..=last_row {
-        let Some(row) = copy_mode_row(grid, row_idx) else { break };
-        let col_start = if row_idx == start.1 { start.0 } else { 0 };
-        let col_end = if row_idx == end.1 { (end.0 + 1).min(row.len()) } else { row.len() };
-        let mut line = String::new();
-        for cell in row.get_range(col_start.min(row.len()), col_end) {
-            if cell.flags.contains(sonicterm_grid::grid::CellFlags::WIDE_CONT) {
-                continue;
-            }
-            line.push(cell.ch);
-        }
-        out.push_str(line.trim_end());
-        if row_idx < last_row {
-            out.push('\n');
-        }
-    }
+    let out = plain_text_from_grid_range(grid, (start.0, start.1 as u64), (end.0, end.1 as u64));
     (!out.is_empty()).then_some(out)
 }
-
-fn copy_mode_row(grid: &Grid, row_idx: usize) -> Option<&sonicterm_grid::grid::Row> {
-    let sb = grid.scrollback_len();
-    if row_idx < sb {
-        grid.scrollback_row(row_idx)
-    } else {
-        let live = row_idx - sb;
-        (live < grid.rows as usize).then(|| grid.row(live as u16))
-    }
-}
-
 
 #[cfg(test)]
 #[path = "window_event_tests.rs"]

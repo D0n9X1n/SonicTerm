@@ -34,6 +34,8 @@ use sonicterm_types::GlyphKey;
 /// (premultiplied BGRA from sbix/COLR strikes). The per-tile
 /// [`GlyphInfo::is_color`] flag tells the shader which branch to take.
 pub const ATLAS_DIM: u32 = 2048;
+/// Maximum resident glyph metadata entries, including blank/missing sentinels.
+pub const MAX_ATLAS_ENTRIES: usize = 16 * 1024;
 
 /// Information about a glyph the renderer needs each frame: where its
 /// tile lives in the atlas (in normalized 0..1 UVs) and how far the
@@ -413,6 +415,9 @@ impl GlyphAtlas {
             return Some(entry.info);
         }
         self.misses += 1;
+        if !self.make_entry_room(false) {
+            return None;
+        }
         if width == 0 || height == 0 || width > self.width || height > self.height {
             return None;
         }
@@ -437,6 +442,9 @@ impl GlyphAtlas {
             return Some(entry.info);
         }
         self.misses += 1;
+        if !self.make_entry_room(allow_eviction) {
+            return None;
+        }
         // Rasterizer miss: cache a sentinel "blank" GlyphInfo so we don't
         // retry the same failing key every frame. Renderer treats
         // zero-area UV as "draw the tofu fallback box" (see Renderer's
@@ -474,7 +482,17 @@ impl GlyphAtlas {
         // callers can skip or resize the oversized asset without invalidating
         // every cached UV in the process.
         if tile.width > self.width || tile.height > self.height {
-            return None;
+            let info = GlyphInfo {
+                uv: [0.0, 0.0, 0.0, 0.0],
+                px_size: [0, 0],
+                px_offset: [0, 0],
+                advance: 0.0,
+                is_color: false,
+                is_subpixel: false,
+            };
+            self.map
+                .insert(key, AtlasEntry { info, last_used_frame: self.current_frame, rect: None });
+            return Some(info);
         }
         // Allocate: try free-list first (slots reclaimed by prior
         // eviction), then the shelf packer, then evict-and-retry.
@@ -487,6 +505,17 @@ impl GlyphAtlas {
             None => return None,
         };
         Some(self.insert_tile(key, tile, x, y, slot_w, slot_h))
+    }
+
+    fn make_entry_room(&mut self, allow_eviction: bool) -> bool {
+        if self.map.len() < MAX_ATLAS_ENTRIES {
+            return true;
+        }
+        if !allow_eviction || !self.eviction_enabled {
+            return false;
+        }
+        self.evict_lru_quartile();
+        self.map.len() < MAX_ATLAS_ENTRIES
     }
 
     fn insert_tile(

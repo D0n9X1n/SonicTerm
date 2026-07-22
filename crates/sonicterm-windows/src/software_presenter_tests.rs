@@ -42,3 +42,29 @@ fn fill_rect_updates_pixels_and_dirty_set() {
     assert_eq!(&surface.pixels()[0..4], &[0, 0, 0, 0]);
 }
 
+#[test]
+fn software_surface_size_is_checked_and_bounded() {
+    assert_eq!(pixel_len(7680, 4320), Some(7680 * 4320 * 4));
+    assert_eq!(pixel_len(8192, 4320), Some(8192 * 4320 * 4));
+    assert_eq!(pixel_len(8192, 8192), None);
+    assert_eq!(pixel_len(u32::MAX, u32::MAX), None);
+}
+
+#[test]
+fn software_surface_shrink_releases_capacity() {
+    let mut surface = SoftwareSurface::try_new(1024, 1024).expect("valid surface");
+    let old_capacity = surface.pixels.capacity();
+
+    assert!(surface.try_resize(2, 2));
+
+    assert!(surface.pixels.capacity() < old_capacity / 2);
+}
+
+#[test]
+fn software_surface_growth_uses_exact_validated_capacity() {
+    let mut surface = SoftwareSurface::try_new(2, 2).expect("valid surface");
+
+    assert!(surface.try_resize(100, 100));
+
+    assert_eq!(surface.pixels.capacity(), 100 * 100 * 4);
+}

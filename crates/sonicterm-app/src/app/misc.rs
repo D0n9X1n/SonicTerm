@@ -562,6 +562,18 @@ impl App {
             .map(|p| p.parser.lock().bracketed_paste_enabled())
             .unwrap_or(false);
         let bytes = wrap_paste(&text, bracketed);
+        if !sonicterm_io::pty::pty_input_message_allowed(bytes.len()) {
+            self.show_notification_for_kind(
+                kind,
+                sonicterm_ui::overlays::NotificationLevel::Warning,
+                format!(
+                    "Paste is {:.1} MiB; maximum is {} MiB",
+                    bytes.len() as f64 / (1024.0 * 1024.0),
+                    sonicterm_io::pty::MAX_PTY_INPUT_MESSAGE_BYTES / (1024 * 1024)
+                ),
+            );
+            return;
+        }
         self.write_to_pane(pane_id, bytes.clone());
         self.broadcast_from(pane_id, bytes);
     }
@@ -584,6 +596,18 @@ impl App {
             .map(|p| p.parser.lock().bracketed_paste_enabled())
             .unwrap_or(false);
         let bytes = wrap_paste(&quoted, bracketed);
+        if !sonicterm_io::pty::pty_input_message_allowed(bytes.len()) {
+            self.show_notification_for_kind(
+                kind,
+                sonicterm_ui::overlays::NotificationLevel::Warning,
+                format!(
+                    "Dropped paths require {:.1} MiB; maximum is {} MiB",
+                    bytes.len() as f64 / (1024.0 * 1024.0),
+                    sonicterm_io::pty::MAX_PTY_INPUT_MESSAGE_BYTES / (1024 * 1024)
+                ),
+            );
+            return;
+        }
         self.write_to_pane(pane_id, bytes.clone());
         self.broadcast_from(pane_id, bytes);
     }
@@ -778,7 +802,14 @@ impl App {
         let real_sf = window_dpi(&window);
         renderer.force_rebuild_for_scale(real_sf);
         let real_inner = window.inner_size();
-        renderer.resize(real_inner.width.max(1), real_inner.height.max(1));
+        if !renderer.try_resize(real_inner.width.max(1), real_inner.height.max(1)) {
+            tracing::error!(
+                width = real_inner.width,
+                height = real_inner.height,
+                "Action::NewWindow rejected unsafe initial size"
+            );
+            return;
+        }
 
         let (cols, rows) = renderer.cells();
         let pane_state = self.spawn_pane_state_for_child(cols, rows, window.clone());

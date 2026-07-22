@@ -6,6 +6,11 @@ use sonicterm_render_model::InlineImage;
 use sonicterm_vt::vt::{MediaEvent, MediaProtocol};
 
 static NEXT_IMAGE_ID: AtomicU64 = AtomicU64::new(1);
+const MAX_INLINE_IMAGE_DECODE_SIDE: u32 = 2048;
+const MAX_INLINE_IMAGE_DECODE_PIXELS: u64 =
+    MAX_INLINE_IMAGE_DECODE_SIDE as u64 * MAX_INLINE_IMAGE_DECODE_SIDE as u64;
+const MAX_RETAINED_INLINE_IMAGES: usize = 128;
+pub(super) const MAX_RETAINED_INLINE_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 
 pub(super) fn decode_inline_image(event: &MediaEvent) -> Option<InlineImage> {
     let (width, height, bgra) = match event.protocol {
@@ -25,6 +30,18 @@ pub(super) fn decode_inline_image(event: &MediaEvent) -> Option<InlineImage> {
 
 fn decode_base64_image(encoded: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).ok()?;
+    let reader = image::ImageReader::new(std::io::Cursor::new(bytes.as_slice()))
+        .with_guessed_format()
+        .ok()?;
+    let (encoded_width, encoded_height) = reader.into_dimensions().ok()?;
+    if !inline_image_decode_dimensions_allowed(encoded_width, encoded_height) {
+        tracing::warn!(
+            encoded_width,
+            encoded_height,
+            "inline image rejected before decode: dimensions exceed memory limit"
+        );
+        return None;
+    }
     let mut image = image::load_from_memory(&bytes).ok()?;
     const MAX_INLINE_IMAGE_SIDE: u32 = 1024;
     if image.width() > MAX_INLINE_IMAGE_SIDE || image.height() > MAX_INLINE_IMAGE_SIDE {
@@ -52,6 +69,27 @@ fn decode_base64_image(encoded: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     }
 
     Some((width, height, bgra))
+}
+
+fn inline_image_decode_dimensions_allowed(width: u32, height: u32) -> bool {
+    width > 0
+        && height > 0
+        && width <= MAX_INLINE_IMAGE_DECODE_SIDE
+        && height <= MAX_INLINE_IMAGE_DECODE_SIDE
+        && u64::from(width)
+            .checked_mul(u64::from(height))
+            .is_some_and(|pixels| pixels <= MAX_INLINE_IMAGE_DECODE_PIXELS)
+}
+
+pub(super) fn trim_inline_images(images: &mut Vec<InlineImage>) {
+    let mut retained_bytes =
+        images.iter().fold(0usize, |total, image| total.saturating_add(image.bgra.len()));
+    while images.len() > MAX_RETAINED_INLINE_IMAGES
+        || retained_bytes > MAX_RETAINED_INLINE_IMAGE_BYTES
+    {
+        let removed = images.remove(0);
+        retained_bytes = retained_bytes.saturating_sub(removed.bgra.len());
+    }
 }
 
 fn decode_sixel(data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
@@ -186,3 +224,7 @@ fn parse_sixel_number(data: &[u8], i: &mut usize) -> Option<u32> {
 fn percent_to_u8(v: u32) -> u8 {
     ((v.min(100) * 255 + 50) / 100) as u8
 }
+
+#[cfg(test)]
+#[path = "media_tests.rs"]
+mod media_tests;

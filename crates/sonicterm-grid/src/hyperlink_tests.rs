@@ -72,6 +72,39 @@ fn lookup_unknown_returns_none() {
 }
 
 #[test]
+fn distinct_hyperlink_metadata_stays_bounded() {
+    const LIMIT: usize = 16 * 1024;
+    let mut registry = HyperlinkRegistry::new();
+    for index in 0..(LIMIT + 100) {
+        registry.intern(None, &format!("https://example.com/{index}"));
+    }
+
+    assert!(registry.len() <= LIMIT);
+}
+
+#[test]
+fn oversized_hyperlink_fields_are_rejected() {
+    let mut registry = HyperlinkRegistry::new();
+    assert!(registry.try_intern(None, &"u".repeat(MAX_HYPERLINK_URI_BYTES + 1)).is_none());
+    assert!(registry
+        .try_intern(Some(&"i".repeat(MAX_HYPERLINK_CLIENT_ID_BYTES + 1)), "https://example.com")
+        .is_none());
+    assert!(registry.is_empty());
+}
+
+#[test]
+fn hyperlink_string_bytes_stay_bounded() {
+    let mut registry = HyperlinkRegistry::new();
+    let uri_tail = "x".repeat(MAX_HYPERLINK_URI_BYTES - 32);
+    for index in 0..MAX_HYPERLINKS {
+        let _ = registry.intern(None, &format!("https://example.com/{index}/{uri_tail}"));
+    }
+
+    assert!(registry.retained_bytes <= MAX_HYPERLINK_METADATA_BYTES);
+    assert!(registry.len() < MAX_HYPERLINKS, "byte budget should bind before count budget");
+}
+
+#[test]
 fn empty_registry_reports_empty() {
     let r = HyperlinkRegistry::new();
     assert!(r.is_empty());

@@ -9,7 +9,10 @@ use winapi::um::dwrite::{DWRITE_GLYPH_OFFSET, DWRITE_GLYPH_RUN};
 
 use crate::locator::FontDataSource;
 use crate::parser::ParsedFont;
-use crate::rasterizer::{freetype::FreeTypeRasterizer, FontRasterizer, RasterizedGlyph};
+use crate::rasterizer::{
+    checked_glyph_rgba_len, checked_raster_pixel_size, freetype::FreeTypeRasterizer,
+    FontRasterizer, RasterizedGlyph,
+};
 use crate::units::PixelLength;
 
 const TEXT_COVERAGE_EXPONENT: f32 = 1.20;
@@ -44,10 +47,7 @@ impl DirectWriteRasterizer {
         dpi: u32,
     ) -> anyhow::Result<RasterizedGlyph> {
         let glyph_index = u16::try_from(glyph_pos).context("DirectWrite glyph id exceeds u16")?;
-        let em_size = (size * self.scale * dpi as f64 / 72.0) as f32;
-        if em_size <= 0.0 {
-            anyhow::bail!("invalid DirectWrite em size {em_size}");
-        }
+        let em_size = checked_raster_pixel_size(size, self.scale, dpi)? as f32;
 
         let glyph_indices = [glyph_index];
         let glyph_advances = [em_size];
@@ -90,8 +90,8 @@ impl DirectWriteRasterizer {
         let bounds = analysis
             .get_alpha_texture_bounds(DWRITE_TEXTURE_CLEARTYPE_3x1)
             .map_err(|hr| anyhow::anyhow!("GetAlphaTextureBounds failed: 0x{hr:08x}"))?;
-        let width = (bounds.right - bounds.left).max(0) as usize;
-        let height = (bounds.bottom - bounds.top).max(0) as usize;
+        let width = (i64::from(bounds.right) - i64::from(bounds.left)).max(0) as usize;
+        let height = (i64::from(bounds.bottom) - i64::from(bounds.top)).max(0) as usize;
         if width == 0 || height == 0 {
             return Ok(RasterizedGlyph {
                 data: Vec::new(),
@@ -103,10 +103,11 @@ impl DirectWriteRasterizer {
                 is_scaled: true,
             });
         }
+        let data_len = checked_glyph_rgba_len(width, height)?;
         let texture = analysis
             .create_alpha_texture(DWRITE_TEXTURE_CLEARTYPE_3x1, bounds)
             .map_err(|hr| anyhow::anyhow!("CreateAlphaTexture failed: 0x{hr:08x}"))?;
-        let mut data = vec![0u8; width * height * 4];
+        let mut data = vec![0u8; data_len];
         for (src, dst) in texture.chunks_exact(3).zip(data.chunks_exact_mut(4)) {
             let r = enhance_text_coverage(src[0]);
             let g = enhance_text_coverage(src[1]);

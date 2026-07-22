@@ -260,6 +260,77 @@ fn line_at_and_as_text_read_scrollback_absolute_row() {
 }
 
 #[test]
+fn multiline_copy_omits_whitespace_separated_right_edge_frame_glyphs() {
+    let mut grid = Grid::new(24, 3);
+    for (row, (text, frame)) in
+        [("[Environment]::Set(", '│'), ("    \"VALUE\",", '│'), (")", '╯')].into_iter().enumerate()
+    {
+        grid.goto(row as u16, 0);
+        for ch in text.chars() {
+            grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+        }
+        grid.goto(row as u16, grid.cols - 1);
+        grid.put_char(frame, Color::Default, Color::Default, CellFlags::empty());
+    }
+    let selection = Selection { start: (0, 0), end: (2, grid.cols - 1), anchored: true };
+
+    assert_eq!(selection.as_text(&grid), "[Environment]::Set(\n    \"VALUE\",\n)");
+}
+
+#[test]
+fn partial_final_row_selection_omits_coherent_right_edge_frame() {
+    let mut grid = Grid::new(11, 3);
+    for (row, (text, frame)) in
+        [("first", '│'), ("middle", '│'), ("last", '┘')].into_iter().enumerate()
+    {
+        grid.goto(row as u16, 0);
+        for ch in text.chars() {
+            grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+        }
+        grid.goto(row as u16, grid.cols - 1);
+        grid.put_char(frame, Color::Default, Color::Default, CellFlags::empty());
+    }
+    let selection = Selection { start: (0, 0), end: (2, 3), anchored: true };
+
+    assert_eq!(selection.as_text(&grid), "first\nmiddle\nlast");
+}
+
+#[test]
+fn copy_preserves_ambiguous_detached_box_glyph_at_right_edge() {
+    let grid = grid_with("foo     │");
+    let selection = Selection::line_at(&grid, 0);
+
+    assert_eq!(selection.as_text(&grid), "foo     │");
+}
+
+#[test]
+fn copy_preserves_incomplete_multiline_right_edge_frame_pattern() {
+    let grid = grid_rows(&["foo     │", "bar     │"]);
+    let selection = Selection::line_drag(&grid, 0, 1);
+
+    assert_eq!(selection.as_text(&grid), "foo     │\nbar     │");
+}
+
+#[test]
+fn copy_preserves_box_drawing_that_is_not_a_detached_right_edge_frame() {
+    let grid = grid_with("Write-Output '│'");
+    let selection = Selection::line_at(&grid, 0);
+
+    assert_eq!(selection.as_text(&grid), "Write-Output '│'");
+}
+
+#[test]
+fn copy_preserves_right_edge_border_attached_to_wide_glyph() {
+    let mut grid = Grid::new(3, 1);
+    grid.put_char('デ', Color::Default, Color::Default, CellFlags::empty());
+    grid.goto(0, 2);
+    grid.put_char('│', Color::Default, Color::Default, CellFlags::empty());
+    let selection = Selection::line_at(&grid, 0);
+
+    assert_eq!(selection.as_text(&grid), "デ│");
+}
+
+#[test]
 fn as_text_spans_scrollback_into_live_region() {
     // Scroll only 1 row: abs 0 = "alpha beta" (scrollback), abs 1 =
     // "gamma delta" (still live, the bottom visible row). A cross-row

@@ -79,6 +79,15 @@ fn unrelated_axes_are_ignored() {
 }
 
 #[test]
+fn bitmap_preflight_loads_metrics_without_rendering_pixels() {
+    let flags = bitmap_metrics_preflight_flags(FT_LOAD_RENDER as FT_Int32);
+
+    assert_ne!(flags & FT_LOAD_BITMAP_METRICS_ONLY as FT_Int32, 0);
+    assert_ne!(flags & FT_LOAD_NO_SVG as FT_Int32, 0);
+    assert_eq!(flags & FT_LOAD_RENDER as FT_Int32, 0);
+}
+
+#[test]
 fn unrelated_axis_does_not_leak_into_weight_or_width() {
     // A mix: only the wght axis applies; the optical-size axis is inert.
     let opsz = ft_make_tag(b'o', b'p', b's', b'z');

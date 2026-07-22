@@ -1,4 +1,4 @@
-use super::Parser;
+use super::{MediaProtocol, Parser, VtEvent, MAX_ESCAPE_SEQUENCE_BYTES};
 use sonicterm_grid::grid::{CellFlags, Grid};
 
 fn row_text(parser: &Parser, row: u16) -> String {
@@ -121,6 +121,178 @@ fn ris_resets_app_cursor_keys_and_mouse_tracking() {
 
     assert!(!parser.application_cursor_keys());
     assert!(!parser.mouse_tracking_enabled());
+}
+
+#[test]
+fn full_reply_queue_drops_excess_without_blocking_parser() {
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    let mut parser = Parser::new_with_reply(Grid::new(80, 24), tx);
+
+    parser.advance(b"\x1b[5n");
+    parser.advance(b"\x1b[5n");
+
+    assert_eq!(rx.len(), 1);
+    assert_eq!(rx.try_recv().expect("first reply retained"), b"\x1b[0n");
+}
+
+#[test]
+fn oversized_osc_is_discarded_without_unbounded_buffering() {
+    let mut parser = Parser::new(Grid::new(80, 24));
+    let mut payload = b"\x1b]8;;https://example.com/".to_vec();
+    payload.extend(std::iter::repeat_n(b'a', MAX_ESCAPE_SEQUENCE_BYTES + 1));
+
+    parser.advance(&payload);
+    assert!(parser.discarding_oversized_escape);
+
+    parser.advance(b"\x1b\\Z");
+    assert!(!parser.discarding_oversized_escape);
+    assert_eq!(parser.grid().row(0)[0].ch, 'Z');
+}
+
+#[test]
+fn oversized_csi_resynchronizes_on_final_byte() {
+    let mut parser = Parser::new(Grid::new(80, 24));
+    let mut payload = b"\x1b[".to_vec();
+    payload.extend(std::iter::repeat_n(b'1', MAX_ESCAPE_SEQUENCE_BYTES + 1));
+
+    parser.advance(&payload);
+    assert!(parser.discarding_oversized_escape);
+
+    parser.advance(b"mZ");
+    assert!(!parser.discarding_oversized_escape);
+    assert_eq!(parser.grid().row(0)[0].ch, 'Z');
+}
+
+#[test]
+fn can_and_sub_reset_escape_family_before_oversized_osc() {
+    for cancel in [0x18, 0x1a] {
+        let mut parser = Parser::new(Grid::new(80, 24));
+        parser.advance(&[0x1b, b'[', b'1', cancel]);
+
+        let mut payload = b"\x1b]0;".to_vec();
+        payload.extend(std::iter::repeat_n(b'1', MAX_ESCAPE_SEQUENCE_BYTES + 1));
+        payload.push(0x07);
+        payload.push(b'Z');
+        parser.advance(&payload);
+
+        assert!(!parser.discarding_oversized_escape, "cancel byte {cancel:#x}");
+        assert_eq!(parser.grid().row(0)[0].ch, 'Z', "cancel byte {cancel:#x}");
+    }
+}
+
+#[test]
+fn can_and_sub_cancel_sixel_without_emitting_media() {
+    for cancel in [0x18, 0x1a] {
+        let mut parser = Parser::new(Grid::new(80, 24));
+        let events = parser.advance(&[0x1b, b'P', b'q', b'a', b'b', b'c', cancel, b'Z']);
+
+        assert!(
+            events.iter().all(|event| !matches!(event, VtEvent::Media(_))),
+            "cancel byte {cancel:#x} emitted media"
+        );
+        assert_eq!(parser.grid().row(0)[0].ch, 'Z', "cancel byte {cancel:#x}");
+    }
+}
+
+#[test]
+fn overflow_triggering_osc_terminator_is_not_lost() {
+    let mut parser = Parser::new(Grid::new(80, 24));
+    let mut payload = b"\x1b]8;;".to_vec();
+    payload.extend(std::iter::repeat_n(
+        b'a',
+        MAX_ESCAPE_SEQUENCE_BYTES - payload.len(),
+    ));
+    payload.push(0x07);
+    payload.push(b'Z');
+
+    parser.advance(&payload);
+
+    assert!(!parser.discarding_oversized_escape);
+    assert_eq!(parser.grid().row(0)[0].ch, 'Z');
+}
+
+#[test]
+fn exact_limit_osc_resets_accounting_at_dispatch() {
+    let mut parser = Parser::new(Grid::new(80, 24));
+    let mut payload = b"\x1b]8;;".to_vec();
+    payload.extend(std::iter::repeat_n(
+        b'a',
+        MAX_ESCAPE_SEQUENCE_BYTES - payload.len() - 2,
+    ));
+    payload.extend_from_slice(b"\x1b\\");
+    assert_eq!(payload.len(), MAX_ESCAPE_SEQUENCE_BYTES);
+
+    parser.advance(&payload);
+    parser.advance(b"Z");
+
+    assert!(!parser.discarding_oversized_escape);
+    assert_eq!(parser.grid().row(0)[0].ch, 'Z');
+}
+
+#[test]
+fn consecutive_ground_controls_do_not_consume_escape_budget() {
+    let mut parser = Parser::new(Grid::new(80, 24));
+    parser.advance(&vec![b'\n'; MAX_ESCAPE_SEQUENCE_BYTES + 1]);
+    parser.advance(b"Z");
+
+    assert!(!parser.discarding_oversized_escape);
+    assert_eq!(parser.grid().row(parser.grid().rows - 1)[0].ch, 'Z');
+}
+
+#[test]
+fn st_split_across_escape_limit_is_recognized() {
+    let mut parser = Parser::new(Grid::new(80, 24));
+    let mut payload = b"\x1b]8;;".to_vec();
+    payload.extend(std::iter::repeat_n(
+        b'a',
+        MAX_ESCAPE_SEQUENCE_BYTES - payload.len() - 1,
+    ));
+    payload.push(0x1b);
+    assert_eq!(payload.len(), MAX_ESCAPE_SEQUENCE_BYTES);
+
+    parser.advance(&payload);
+    parser.advance(b"\\Z");
+
+    assert!(!parser.discarding_oversized_escape);
+    assert_eq!(parser.grid().row(0)[0].ch, 'Z');
+}
+
+#[test]
+fn large_sixel_uses_media_budget_not_generic_escape_limit() {
+    let mut parser = Parser::new(Grid::new(80, 24));
+    let mut payload = b"\x1bPq".to_vec();
+    payload.extend(std::iter::repeat_n(b'?', MAX_ESCAPE_SEQUENCE_BYTES + 1));
+    payload.extend_from_slice(b"\x1b\\");
+
+    let events = parser.advance(&payload);
+
+    let media = events
+        .into_iter()
+        .find_map(|event| match event {
+            VtEvent::Media(media) => Some(media),
+            _ => None,
+        })
+        .expect("large Sixel DCS should remain a media event");
+    assert_eq!(media.protocol, MediaProtocol::Sixel);
+    assert!(media.data.len() > MAX_ESCAPE_SEQUENCE_BYTES);
+}
+
+#[test]
+fn rejected_hyperlink_open_emits_close_event() {
+    let mut parser = Parser::new(Grid::new(80, 24));
+    parser.advance(b"\x1b]8;;https://example.com\x1b\\");
+    let mut rejected = b"\x1b]8;;https://example.com/".to_vec();
+    rejected.extend(std::iter::repeat_n(
+        b'x',
+        sonicterm_grid::hyperlink::MAX_HYPERLINK_URI_BYTES,
+    ));
+    rejected.extend_from_slice(b"\x1b\\");
+
+    let events = parser.advance(&rejected);
+
+    assert!(events.iter().any(
+        |event| matches!(event, VtEvent::Hyperlink { uri, .. } if uri.is_empty())
+    ));
 }
 
 #[test]

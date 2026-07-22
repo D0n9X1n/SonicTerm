@@ -835,6 +835,28 @@ fn damage_empty_is_noop() {
 }
 
 #[test]
+fn surface_size_budget_accepts_8k_and_minimized_windows() {
+    let eight_k =
+        validated_surface_size(7680, 4320, MAX_SURFACE_DIMENSION).expect("8K must fit the budget");
+    assert_eq!((eight_k.width, eight_k.height), (7680, 4320));
+    assert_eq!(eight_k.bytes, 7680 * 4320 * 4);
+    let dci_eight_k = validated_surface_size(8192, 4320, MAX_SURFACE_DIMENSION)
+        .expect("DCI 8K must fit the budget");
+    assert_eq!((dci_eight_k.width, dci_eight_k.height), (8192, 4320));
+
+    let minimized =
+        validated_surface_size(0, 0, MAX_SURFACE_DIMENSION).expect("zero clamps to one pixel");
+    assert_eq!((minimized.width, minimized.height, minimized.bytes), (1, 1, 4));
+}
+
+#[test]
+fn surface_size_budget_rejects_multi_gibabyte_frames() {
+    assert!(validated_surface_size(8192, 8192, MAX_SURFACE_DIMENSION).is_none());
+    assert!(validated_surface_size(u32::MAX, u32::MAX, MAX_SURFACE_DIMENSION).is_none());
+    assert!(validated_surface_size(MAX_SURFACE_DIMENSION + 1, 1, MAX_SURFACE_DIMENSION).is_none());
+}
+
+#[test]
 fn underline_key_ignores_blank_cells() {
     let mut blank = Cell::plain(' ', Color::Indexed(1), Color::Default, CellFlags::UNDERLINE);
     blank.set_underline_style(UnderlineStyle::Dashed);

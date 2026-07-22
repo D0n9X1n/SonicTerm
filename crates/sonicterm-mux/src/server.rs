@@ -18,13 +18,14 @@ use std::{
     io::{Read, Write},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
+        Arc, Weak,
     },
     thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, Result};
-use crossbeam_channel::{Receiver, Sender, TrySendError};
+use crossbeam_channel::{Receiver, SendTimeoutError, Sender, TrySendError};
 use parking_lot::Mutex;
 use sonicterm_io::pty::PtyHandle;
 
@@ -40,36 +41,70 @@ pub const REPLAY_CAP: usize = 256 * 1024;
 /// each is a soft ceiling of ~32 MiB per attached pane.
 pub const CHANNEL_CAP: usize = 4096;
 
-/// One subscriber's mailbox: a bounded sender plus a clone of its receiver
-/// so the producer can drop the oldest queued message itself when the
-/// mailbox is full. crossbeam-channel is MPMC, so the extra receiver
-/// shares the same queue.
+/// Maximum bytes stored in one queued subscriber output message.
+pub const SUBSCRIBER_OUTPUT_FRAME_BYTES: usize = 8 * 1024;
+const _: () = assert!((CHANNEL_CAP - 1) * SUBSCRIBER_OUTPUT_FRAME_BYTES <= 32 * 1024 * 1024);
+
+const SUBSCRIBER_CONTROL_SEND_TIMEOUT: Duration = Duration::from_millis(100);
+const WRITER_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(100);
+const PANE_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const PANE_EXIT_DRAIN_GRACE: Duration = Duration::from_millis(100);
+
+/// One subscriber's bounded mailbox sender.
 #[derive(Clone)]
 pub struct SubscriberSink {
     tx: Sender<ServerMsg>,
-    rx: Receiver<ServerMsg>,
 }
 
 impl SubscriberSink {
-    /// Wrap a paired `tx`/`rx` into a subscriber sink. Both halves reference
-    /// the same crossbeam MPMC channel so `send_drop_oldest` can pop from the
-    /// front before retrying a push.
-    pub fn new(tx: Sender<ServerMsg>, rx: Receiver<ServerMsg>) -> Self {
-        Self { tx, rx }
+    /// Wrap a paired `tx`/`rx` into a subscriber sink. The receiver argument
+    /// is retained for source compatibility; ownership remains with the client.
+    pub fn new(tx: Sender<ServerMsg>, _rx: Receiver<ServerMsg>) -> Self {
+        Self { tx }
     }
 
-    /// Try to enqueue `msg`. If the mailbox is full, drop the oldest
-    /// pending message and retry once. Returns `Err` only if the
-    /// receiver side has been dropped entirely.
+    /// Try to enqueue `msg`. If the mailbox is full, new PTY output is
+    /// dropped while control responses return an error. Existing queued
+    /// control messages are never evicted.
     pub fn send_drop_oldest(&self, msg: ServerMsg) -> Result<()> {
-        match self.tx.try_send(msg) {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Full(msg)) => {
-                let _ = self.rx.try_recv();
-                self.tx.try_send(msg).map_err(|e| anyhow!("subscriber closed: {e}"))
+        let ServerMsg::Output { pane_id, bytes } = msg else {
+            return match self.tx.try_send(msg) {
+                Ok(()) => Ok(()),
+                Err(TrySendError::Full(_)) => {
+                    Err(anyhow!("subscriber mailbox full; control message not queued"))
+                }
+                Err(TrySendError::Disconnected(_)) => Err(anyhow!("subscriber disconnected")),
+            };
+        };
+        for chunk in bytes.chunks(SUBSCRIBER_OUTPUT_FRAME_BYTES) {
+            if self
+                .tx
+                .capacity()
+                .is_some_and(|capacity| self.tx.len() >= capacity.saturating_sub(1))
+            {
+                return Ok(());
             }
-            Err(TrySendError::Disconnected(_)) => Err(anyhow!("subscriber disconnected")),
+            match self.tx.try_send(ServerMsg::Output { pane_id, bytes: chunk.to_vec() }) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => return Ok(()),
+                Err(TrySendError::Disconnected(_)) => {
+                    return Err(anyhow!("subscriber disconnected"));
+                }
+            }
         }
+        Ok(())
+    }
+
+    /// Deliver a control message without eviction, waiting only for the
+    /// bounded control-delivery deadline.
+    pub fn send_control(&self, msg: ServerMsg) -> Result<()> {
+        self.tx.send_timeout(msg, SUBSCRIBER_CONTROL_SEND_TIMEOUT).map_err(|error| match error {
+            SendTimeoutError::Timeout(_) => anyhow!(
+                "subscriber mailbox remained full for {} ms; control message not queued",
+                SUBSCRIBER_CONTROL_SEND_TIMEOUT.as_millis()
+            ),
+            SendTimeoutError::Disconnected(_) => anyhow!("subscriber disconnected"),
+        })
     }
 }
 
@@ -110,6 +145,18 @@ struct Session {
     panes: HashMap<PaneId, Pane>,
 }
 
+struct PendingPaneStart {
+    session_id: SessionId,
+    pane_id: PaneId,
+    start_tx: Sender<()>,
+}
+
+impl PendingPaneStart {
+    fn start(self) -> Result<()> {
+        self.start_tx.send(()).map_err(|_| anyhow!("pane reader stopped before startup"))
+    }
+}
+
 /// The server's mutable state. Held inside an `Arc<Mutex<_>>` so the
 /// connection-handler thread and the pane reader threads can both touch it.
 pub struct ServerState {
@@ -146,14 +193,21 @@ impl ServerState {
     }
 
     /// Spawn a new pane in a fresh session and return (session_id, pane_id).
-    pub fn spawn(&self, cmd: &str, cols: u16, rows: u16) -> Result<(SessionId, PaneId)> {
+    pub fn spawn(self: &Arc<Self>, cmd: &str, cols: u16, rows: u16) -> Result<(SessionId, PaneId)> {
+        let pending = self.spawn_paused(cmd, cols, rows)?;
+        let ids = (pending.session_id, pending.pane_id);
+        pending.start()?;
+        Ok(ids)
+    }
+
+    fn spawn_paused(self: &Arc<Self>, cmd: &str, cols: u16, rows: u16) -> Result<PendingPaneStart> {
         let session_id = self.next_session.fetch_add(1, Ordering::Relaxed);
         let pane_id = self.next_pane.fetch_add(1, Ordering::Relaxed);
-        let pane = build_pane(pane_id, cmd, cols, rows)?;
+        let (pane, start_tx) = build_pane(pane_id, cmd, cols, rows, Arc::downgrade(self))?;
         let mut sessions = self.sessions.lock();
         let session = Session { id: session_id, panes: HashMap::from([(pane_id, pane)]) };
         sessions.insert(session_id, session);
-        Ok((session_id, pane_id))
+        Ok(PendingPaneStart { session_id, pane_id, start_tx })
     }
 
     /// Subscribe `tx` as the new live consumer for every pane in
@@ -197,11 +251,12 @@ impl ServerState {
     /// convenience path so a freshly-spawned pane streams its output back
     /// to the spawner without requiring an explicit Attach.
     pub fn subscribe_if_unattached(&self, session_id: SessionId, sink: SubscriberSink) {
+        let sessions = self.sessions.lock();
         let mut attached = self.attached.lock();
         if attached.is_some() {
             return;
         }
-        if let Some(session) = self.sessions.lock().get(&session_id) {
+        if let Some(session) = sessions.get(&session_id) {
             for pane in session.panes.values() {
                 *pane.subscriber.lock() = Some(sink.clone());
             }
@@ -212,10 +267,25 @@ impl ServerState {
     /// Forward client-side keystrokes / paste bytes to the named pane's PTY
     /// writer thread. Errors if the pane is unknown or already torn down.
     pub fn input(&self, pane_id: PaneId, bytes: Vec<u8>) -> Result<()> {
-        let sessions = self.sessions.lock();
-        let pane = find_pane(&sessions, pane_id)?;
-        pane.pty.in_tx.send(bytes).map_err(|e| anyhow!("pane writer closed: {e}"))?;
-        Ok(())
+        if !sonicterm_io::pty::pty_input_message_allowed(bytes.len()) {
+            anyhow::bail!(
+                "pane input message is {} bytes; maximum is {}",
+                bytes.len(),
+                sonicterm_io::pty::MAX_PTY_INPUT_MESSAGE_BYTES
+            );
+        }
+        let sender = {
+            let sessions = self.sessions.lock();
+            find_pane(&sessions, pane_id)?.pty.in_tx.clone()
+        };
+        sender.try_send(bytes).map_err(|error| match error {
+            crossbeam_channel::TrySendError::Full(_) => {
+                anyhow!("pane writer queue is full")
+            }
+            crossbeam_channel::TrySendError::Disconnected(_) => {
+                anyhow!("pane writer is closed")
+            }
+        })
     }
 
     /// Propagate a client-side resize to the pane's PTY via `TIOCSWINSZ`
@@ -230,14 +300,36 @@ impl ServerState {
     /// Remove a pane from its session and SIGKILL its child. Errors if no
     /// session contains a pane with that id.
     pub fn kill_pane(&self, pane_id: PaneId) -> Result<()> {
-        let mut sessions = self.sessions.lock();
-        for session in sessions.values_mut() {
-            if let Some(pane) = session.panes.remove(&pane_id) {
-                pane.kill();
-                return Ok(());
+        let pane = self.take_pane(pane_id).ok_or_else(|| anyhow!("unknown pane {pane_id}"))?;
+        pane.kill();
+        Ok(())
+    }
+
+    fn reap_pane(&self, pane_id: PaneId) {
+        drop(self.take_pane(pane_id));
+    }
+
+    fn take_pane(&self, pane_id: PaneId) -> Option<Pane> {
+        let (pane, empty_session) = {
+            let mut sessions = self.sessions.lock();
+            let session_id = sessions.iter().find_map(|(session_id, session)| {
+                session.panes.contains_key(&pane_id).then_some(*session_id)
+            })?;
+            let session = sessions.get_mut(&session_id).expect("session found above");
+            let pane = session.panes.remove(&pane_id).expect("pane found above");
+            let empty_session = session.panes.is_empty().then_some(session_id);
+            if empty_session.is_some() {
+                sessions.remove(&session_id);
+            }
+            (pane, empty_session)
+        };
+        if let Some(session_id) = empty_session {
+            let mut attached = self.attached.lock();
+            if *attached == Some(session_id) {
+                *attached = None;
             }
         }
-        Err(anyhow!("unknown pane {pane_id}"))
+        Some(pane)
     }
 }
 
@@ -250,17 +342,77 @@ fn find_pane(sessions: &HashMap<SessionId, Session>, pane_id: PaneId) -> Result<
     Err(anyhow!("unknown pane {pane_id}"))
 }
 
-fn build_pane(pane_id: PaneId, cmd: &str, cols: u16, rows: u16) -> Result<Pane> {
+fn notify_subscriber_exit(subscriber: &Mutex<Option<SubscriberSink>>, pane_id: PaneId) {
+    let sink = subscriber.lock().take();
+    if let Some(sink) = sink {
+        if let Err(error) = sink.send_control(ServerMsg::Exit { pane_id }) {
+            tracing::debug!(
+                pane_id,
+                error = %error,
+                "pane exit notification was not delivered; subscriber detached"
+            );
+        }
+    }
+}
+
+fn send_reply(sink: &SubscriberSink, message: ServerMsg) -> Result<()> {
+    sink.send_control(message)
+}
+
+fn forward_pane_output<T: AsRef<[u8]>>(
+    chunk: T,
+    replay: &Mutex<VecDeque<u8>>,
+    subscriber: &Mutex<Option<SubscriberSink>>,
+    pane_id: PaneId,
+) {
+    let bytes = chunk.as_ref();
+    {
+        let mut replay = replay.lock();
+        replay.extend(bytes.iter().copied());
+        while replay.len() > REPLAY_CAP {
+            replay.pop_front();
+        }
+    }
+    let subscriber = subscriber.lock().clone();
+    if let Some(sink) = subscriber {
+        let _ = sink.send_drop_oldest(ServerMsg::Output { pane_id, bytes: bytes.to_vec() });
+    }
+}
+
+fn drain_ready_pane_output<T: AsRef<[u8]>>(
+    out_rx: &Receiver<T>,
+    replay: &Mutex<VecDeque<u8>>,
+    subscriber: &Mutex<Option<SubscriberSink>>,
+    pane_id: PaneId,
+) {
+    let ready = out_rx.len();
+    for _ in 0..ready {
+        let Ok(chunk) = out_rx.try_recv() else {
+            break;
+        };
+        forward_pane_output(chunk, replay, subscriber, pane_id);
+    }
+}
+
+fn build_pane(
+    pane_id: PaneId,
+    cmd: &str,
+    cols: u16,
+    rows: u16,
+    server: Weak<ServerState>,
+) -> Result<(Pane, Sender<()>)> {
     // Spawn through the shared sonicterm-io PTY seam. It owns the openpty,
     // the reader/writer threads, the deduped resize closure, and the robust
     // kill-on-Drop (SIGKILL + bounded reap) that the old hand-rolled path
     // lacked. It also applies the same TERM/COLORTERM/TERM_PROGRAM child
     // env as the GUI pane path via `apply_child_pty_env`.
     let pty = PtyHandle::spawn(cmd, cols, rows)?;
+    let child_exit = pty.child_exit_probe();
 
     let replay = Arc::new(Mutex::new(VecDeque::<u8>::with_capacity(REPLAY_CAP)));
     let subscriber: Arc<Mutex<Option<SubscriberSink>>> = Arc::new(Mutex::new(None));
     let alive = Arc::new(AtomicBool::new(true));
+    let (start_tx, start_rx) = crossbeam_channel::bounded(1);
 
     // Replay reader thread: drain the PTY's output channel into the replay
     // ring + (optional) subscriber. crossbeam is MPMC, so cloning `out_rx`
@@ -270,49 +422,112 @@ fn build_pane(pane_id: PaneId, cmd: &str, cols: u16, rows: u16) -> Result<Pane> 
     let r_sub = subscriber.clone();
     let r_alive = alive.clone();
     let reader_thread = thread::spawn(move || {
-        while r_alive.load(Ordering::Acquire) {
-            // Recv blocks until data or channel close. On pane kill the PTY
-            // child dies, its reader thread drops the sender, and this recv
-            // returns Err — unblocking the loop even without the alive flag.
-            let Ok(chunk) = out_rx.recv() else { break };
-            {
-                let mut rb = r_replay.lock();
-                rb.extend(chunk.iter().copied());
-                while rb.len() > REPLAY_CAP {
-                    rb.pop_front();
+        if start_rx.recv().is_err() {
+            return;
+        }
+        let mut exit_probe_warned = false;
+        let mut next_exit_probe = Instant::now() + PANE_EXIT_POLL_INTERVAL;
+        let mut exit_drain_deadline = None;
+        let child_has_exited = |exit_probe_warned: &mut bool| match child_exit.has_exited() {
+            Ok(exited) => exited,
+            Err(error) => {
+                if !*exit_probe_warned {
+                    tracing::warn!(pane_id, %error, "failed to probe mux pane child exit");
+                    *exit_probe_warned = true;
                 }
+                false
             }
-            let sub = r_sub.lock().clone();
-            if let Some(sink) = sub {
-                let _ =
-                    sink.send_drop_oldest(ServerMsg::Output { pane_id, bytes: chunk.to_vec() });
+        };
+        while r_alive.load(Ordering::Acquire) {
+            let now = Instant::now();
+            if exit_drain_deadline.is_some_and(|deadline| now >= deadline) {
+                break;
+            }
+            let chunk = {
+                let wait = if let Some(deadline) = exit_drain_deadline {
+                    deadline.saturating_duration_since(now)
+                } else {
+                    next_exit_probe.saturating_duration_since(now)
+                };
+                match out_rx.recv_timeout(wait) {
+                    Ok(chunk) => chunk,
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                        if !r_alive.load(Ordering::Acquire) {
+                            break;
+                        }
+                        let now = Instant::now();
+                        if exit_drain_deadline.is_some_and(|deadline| now >= deadline) {
+                            break;
+                        }
+                        if exit_drain_deadline.is_none()
+                            && child_has_exited(&mut exit_probe_warned)
+                        {
+                            drain_ready_pane_output(&out_rx, &r_replay, &r_sub, pane_id);
+                            exit_drain_deadline = Some(now + PANE_EXIT_DRAIN_GRACE);
+                        }
+                        next_exit_probe = now + PANE_EXIT_POLL_INTERVAL;
+                        continue;
+                    }
+                }
+            };
+            forward_pane_output(chunk, &r_replay, &r_sub, pane_id);
+            let now = Instant::now();
+            if exit_drain_deadline.is_none() && now >= next_exit_probe {
+                if child_has_exited(&mut exit_probe_warned) {
+                    drain_ready_pane_output(&out_rx, &r_replay, &r_sub, pane_id);
+                    exit_drain_deadline = Some(now + PANE_EXIT_DRAIN_GRACE);
+                }
+                next_exit_probe = now + PANE_EXIT_POLL_INTERVAL;
             }
         }
-        let sub = r_sub.lock().clone();
-        if let Some(sink) = sub {
-            let _ = sink.send_drop_oldest(ServerMsg::Exit { pane_id });
+        notify_subscriber_exit(&r_sub, pane_id);
+        if let Some(server) = server.upgrade() {
+            server.reap_pane(pane_id);
         }
     });
 
-    Ok(Pane {
-        id: pane_id,
-        cmd: cmd.to_string(),
-        cols,
-        rows,
-        pty,
-        replay,
-        subscriber,
-        alive,
-        _reader: reader_thread,
-    })
+    Ok((
+        Pane {
+            id: pane_id,
+            cmd: cmd.to_string(),
+            cols,
+            rows,
+            pty,
+            replay,
+            subscriber,
+            alive,
+            _reader: reader_thread,
+        },
+        start_tx,
+    ))
 }
 
-/// Handle one connected client: a request reader loop on the input stream,
-/// and a forwarder thread that drains server-side messages onto the output
-/// stream. Both halves share the same duplex stream via `try_clone`.
-pub fn handle_connection<S>(state: Arc<ServerState>, mut read_half: S, write_half: S) -> Result<()>
+/// Handle one connected client using the legacy three-argument API.
+///
+/// Transport-aware servers should prefer [`handle_connection_with_shutdown`]
+/// so blocked writes can be interrupted during teardown.
+pub fn handle_connection<S>(state: Arc<ServerState>, read_half: S, write_half: S) -> Result<()>
 where
     S: Read + Write + Send + 'static,
+{
+    handle_connection_with_shutdown(state, read_half, write_half, || {})
+}
+
+/// Handle one connected client with an explicit writer-shutdown hook.
+///
+/// The hook runs before the bounded writer join and should interrupt any
+/// transport write blocked on a disconnected or non-reading peer.
+pub fn handle_connection_with_shutdown<R, W, F>(
+    state: Arc<ServerState>,
+    mut read_half: R,
+    write_half: W,
+    shutdown_writer: F,
+) -> Result<()>
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+    F: FnOnce(),
 {
     let (tx, rx): (Sender<ServerMsg>, Receiver<ServerMsg>) =
         crossbeam_channel::bounded(CHANNEL_CAP);
@@ -321,59 +536,75 @@ where
     // Writer thread: drains rx -> stream.
     let mut write_half = write_half;
     let rx_writer = rx.clone();
+    let (writer_done_tx, writer_done_rx) = crossbeam_channel::bounded(1);
     let writer_thread = thread::spawn(move || {
         while let Ok(msg) = rx_writer.recv() {
             if crate::frame::write_frame(&mut write_half, &msg).is_err() {
                 break;
             }
         }
+        let _ = writer_done_tx.send(());
     });
 
     // Request loop on this thread.
+    let mut request_error = None;
     while let Ok(msg) = crate::frame::read_frame::<_, ClientMsg>(&mut read_half) {
-        match msg {
+        let result = match msg {
             ClientMsg::ListSessions => {
-                let _ = tx.send(ServerMsg::Sessions(state.list_sessions()));
+                send_reply(&sink, ServerMsg::Sessions(state.list_sessions()))
             }
             ClientMsg::Attach(sid) => match state.attach(sid, sink.clone()) {
-                Ok(panes) => {
-                    let _ = tx.send(ServerMsg::AttachOk { session_id: sid, panes });
-                }
-                Err(e) => {
-                    let _ = tx.send(ServerMsg::Error(e.to_string()));
-                }
+                Ok(panes) => send_reply(&sink, ServerMsg::AttachOk { session_id: sid, panes }),
+                Err(e) => send_reply(&sink, ServerMsg::Error(e.to_string())),
             },
             ClientMsg::Detach => {
                 state.detach();
+                Ok(())
             }
-            ClientMsg::Spawn { cmd, cols, rows } => match state.spawn(&cmd, cols, rows) {
-                Ok((sid, pid)) => {
+            ClientMsg::Spawn { cmd, cols, rows } => match state.spawn_paused(&cmd, cols, rows) {
+                Ok(pending) => {
+                    let sid = pending.session_id;
+                    let pid = pending.pane_id;
                     // Convenience: if the client isn't yet attached to any
                     // session, auto-subscribe them to the freshly spawned
                     // one. Matches the natural "I spawned it, I want its
                     // output" flow without forcing a separate Attach.
                     state.subscribe_if_unattached(sid, sink.clone());
-                    let _ = tx.send(ServerMsg::Spawned { session_id: sid, pane_id: pid });
+                    match send_reply(&sink, ServerMsg::Spawned { session_id: sid, pane_id: pid }) {
+                        Ok(()) => pending.start(),
+                        Err(error) => {
+                            let _ = state.kill_pane(pid);
+                            Err(error)
+                        }
+                    }
                 }
-                Err(e) => {
-                    let _ = tx.send(ServerMsg::Error(e.to_string()));
-                }
+                Err(e) => send_reply(&sink, ServerMsg::Error(e.to_string())),
             },
             ClientMsg::Input { pane_id, bytes } => {
                 if let Err(e) = state.input(pane_id, bytes) {
-                    let _ = tx.send(ServerMsg::Error(e.to_string()));
+                    send_reply(&sink, ServerMsg::Error(e.to_string()))
+                } else {
+                    Ok(())
                 }
             }
             ClientMsg::Resize { pane_id, cols, rows } => {
                 if let Err(e) = state.resize(pane_id, cols, rows) {
-                    let _ = tx.send(ServerMsg::Error(e.to_string()));
+                    send_reply(&sink, ServerMsg::Error(e.to_string()))
+                } else {
+                    Ok(())
                 }
             }
             ClientMsg::Kill { pane_id } => {
                 if let Err(e) = state.kill_pane(pane_id) {
-                    let _ = tx.send(ServerMsg::Error(e.to_string()));
+                    send_reply(&sink, ServerMsg::Error(e.to_string()))
+                } else {
+                    Ok(())
                 }
             }
+        };
+        if let Err(error) = result {
+            request_error = Some(error);
+            break;
         }
     }
 
@@ -393,10 +624,22 @@ where
     // `state.detach()` clears (3). We then explicitly drop (1) and (2)
     // before the `join` so the channel actually closes.
     state.detach();
+    drop(read_half);
     drop(tx);
     drop(sink);
-    let _ = writer_thread.join();
-    Ok(())
+    shutdown_writer();
+    match writer_done_rx.recv_timeout(WRITER_SHUTDOWN_TIMEOUT) {
+        Ok(()) | Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+            if writer_thread.join().is_err() {
+                tracing::warn!("mux client writer panicked during shutdown");
+            }
+        }
+        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+            tracing::warn!("mux client writer did not exit within the shutdown timeout");
+            drop(writer_thread);
+        }
+    }
+    request_error.map_or(Ok(()), Err)
 }
 
 #[cfg(test)]

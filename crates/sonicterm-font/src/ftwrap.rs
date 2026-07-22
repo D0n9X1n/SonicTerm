@@ -901,6 +901,22 @@ impl Face {
         synthesize_bold: bool,
     ) -> anyhow::Result<&FT_GlyphSlotRec_> {
         unsafe {
+            if (*self.face).num_fixed_sizes > 0 {
+                let preflight_flags = bitmap_metrics_preflight_flags(load_flags);
+                ft_result(FT_Load_Glyph(self.face, glyph_index, preflight_flags), ())
+                    .with_context(|| {
+                        format!(
+                            "load_and_render_glyph: bitmap metrics preflight glyph_index:{glyph_index}"
+                        )
+                    })?;
+                let preflight = &*(*self.face).glyph;
+                let width = usize::try_from(preflight.bitmap.width)
+                    .context("negative FreeType preflight bitmap width")?;
+                let rows = usize::try_from(preflight.bitmap.rows)
+                    .context("negative FreeType preflight bitmap height")?;
+                crate::rasterizer::checked_glyph_rgba_len(width, rows)
+                    .context("FreeType embedded bitmap rejected before decode")?;
+            }
             ft_result(
                 FT_Load_Glyph(self.face, glyph_index, load_flags | FT_LOAD_NO_SVG as i32),
                 (),
@@ -935,6 +951,17 @@ impl Face {
                     .is_ok()
             {
                 return Err(IsColr1OrLater.into());
+            }
+
+            if slot.format == FT_Glyph_Format_::FT_GLYPH_FORMAT_OUTLINE {
+                crate::rasterizer::checked_freetype_26_6_extent(
+                    slot.metrics.width.font_units() as i64,
+                )
+                .context("FreeType outline width rejected before rendering")?;
+                crate::rasterizer::checked_freetype_26_6_extent(
+                    slot.metrics.height.font_units() as i64,
+                )
+                .context("FreeType outline height rejected before rendering")?;
             }
 
             ft_result(FT_Render_Glyph(slot, render_mode), ())
@@ -1530,6 +1557,12 @@ fn weight_and_width_with_variation(
 /// variation axes, rounding to the nearest integer class. Axes other than
 /// `wght`/`wdth` are ignored, and an empty `scalings` slice returns the base
 /// metrics rounded. This is the pure core of `Face::weight_and_width`.
+fn bitmap_metrics_preflight_flags(load_flags: FT_Int32) -> FT_Int32 {
+    (load_flags & !(FT_LOAD_RENDER as FT_Int32))
+        | FT_LOAD_BITMAP_METRICS_ONLY as FT_Int32
+        | FT_LOAD_NO_SVG as FT_Int32
+}
+
 fn scaled_weight_and_width(
     base_weight: f64,
     base_width: f64,

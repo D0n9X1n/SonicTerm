@@ -23,7 +23,7 @@ use sonicterm_ui::overlays::{
     SEARCH_BAR_PAD_RIGHT,
 };
 use sonicterm_ui::pane::PaneTree;
-use sonicterm_ui::selection::{SelectMode, Selection};
+use sonicterm_ui::selection::{plain_text_from_grid_range, SelectMode, Selection};
 use sonicterm_ui::tabbar_view::{TabBarLayout, TabHit};
 use sonicterm_ui::tabs::{Tab, TabBar};
 use sonicterm_vt::vt::{Parser, VtEvent};
@@ -56,7 +56,9 @@ pub fn resize_renderer_and_panes_if_present(
     height: u32,
 ) -> bool {
     let Some(r) = renderer.as_mut() else { return false };
-    r.resize(width, height);
+    if !r.try_resize(width, height) {
+        return false;
+    }
     let (cols, rows) = r.cells();
     for pane in panes.values() {
         pane.parser.lock().grid_mut().resize(cols, rows);
@@ -85,7 +87,9 @@ pub(super) fn resize_renderer_and_split_panes(
     height: u32,
 ) -> bool {
     let Some(r) = child.renderer.as_mut() else { return false };
-    r.resize(width, height);
+    if !r.try_resize(width, height) {
+        return false;
+    }
     resize_visible_panes_in_child(child);
     true
 }
@@ -345,6 +349,7 @@ impl App {
         let broadcast_receivers = self.broadcast_receivers();
         let palette_for_render: Option<&mut CommandPalette> =
             if palette_here { Some(&mut self.command_palette) } else { None };
+        let pty_event_proxy = self.event_loop_proxy.clone();
         let Some(child) = self.windows.get_mut(&win_id) else { return };
         match event {
             WindowEvent::CloseRequested => {
@@ -357,10 +362,7 @@ impl App {
                     for pane in removed.panes.values() {
                         *pane.redraw_target.lock() = None;
                     }
-                    // Phase C2 — drop this window's tab bar
-                    // snapshot so later OS drops can't false-positive
-                    // hit-test against a stale rect.
-                    self.os_drag_bars.remove(Some(win_id));
+                    self.release_child_window_registries(win_id);
                     drop(removed);
                 }
                 // If this was the last child AND the main window had
@@ -1006,7 +1008,7 @@ impl App {
                                 super::window_event::wheel_report_bytes(sgr, up, col1, row1, count);
                             if let Some(pane) = child.panes.get(&pane_id) {
                                 if let Some(pty) = pane.pty.as_ref() {
-                                    let _ = pty.in_tx.send(payload);
+                                    Self::queue_pty_input(pty_event_proxy.as_ref(), pty, payload);
                                 }
                             }
                         } else if is_alt {
@@ -1024,7 +1026,7 @@ impl App {
                             }
                             if let Some(pane) = child.panes.get(&pane_id) {
                                 if let Some(pty) = pane.pty.as_ref() {
-                                    let _ = pty.in_tx.send(payload);
+                                    Self::queue_pty_input(pty_event_proxy.as_ref(), pty, payload);
                                 }
                             }
                         } else {
@@ -1591,6 +1593,7 @@ impl App {
                     for pane in removed.panes.values() {
                         *pane.redraw_target.lock() = None;
                     }
+                    self.release_child_window_registries(win_id);
                     drop(removed);
                     tracing::info!(
                         "child window reaped after drag-merge; remaining children={}",
@@ -1656,7 +1659,8 @@ impl App {
     ) -> PaneState {
         use sonicterm_grid::grid::Grid;
         use sonicterm_vt::vt::Parser;
-        let (reply_tx, reply_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
+        let (reply_tx, reply_rx) =
+            crossbeam_channel::bounded::<Vec<u8>>(crate::app::PTY_REPLY_QUEUE_CAPACITY);
         // Honour the user's configured scrollback depth; child
         // windows must match the main window, not the Grid's 10k default.
         let mut grid = Grid::new(cols, rows);
@@ -2496,33 +2500,6 @@ fn child_copy_mode_selected_text(
     if start == end {
         return None;
     }
-    let mut out = String::new();
-    let last_row = end.1.min(grid.scrollback_len() + grid.rows.saturating_sub(1) as usize);
-    for row_idx in start.1..=last_row {
-        let Some(row) = child_copy_mode_row(grid, row_idx) else { break };
-        let col_start = if row_idx == start.1 { start.0 } else { 0 };
-        let col_end = if row_idx == end.1 { (end.0 + 1).min(row.len()) } else { row.len() };
-        let mut line = String::new();
-        for cell in row.get_range(col_start.min(row.len()), col_end) {
-            if cell.flags.contains(sonicterm_grid::grid::CellFlags::WIDE_CONT) {
-                continue;
-            }
-            line.push(cell.ch);
-        }
-        out.push_str(line.trim_end());
-        if row_idx < last_row {
-            out.push('\n');
-        }
-    }
+    let out = plain_text_from_grid_range(grid, (start.0, start.1 as u64), (end.0, end.1 as u64));
     (!out.is_empty()).then_some(out)
-}
-
-fn child_copy_mode_row(grid: &Grid, row_idx: usize) -> Option<&sonicterm_grid::grid::Row> {
-    let sb = grid.scrollback_len();
-    if row_idx < sb {
-        grid.scrollback_row(row_idx)
-    } else {
-        let live = row_idx - sb;
-        (live < grid.rows as usize).then(|| grid.row(live as u16))
-    }
 }

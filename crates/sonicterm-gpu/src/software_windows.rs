@@ -11,7 +11,11 @@ use windows::Win32::{
 };
 use winit::window::Window;
 
-use crate::{quad::QuadInstance, wezterm_pipeline::ndc_rect_to_pixels};
+use crate::{
+    core::{validated_surface_size, MAX_SURFACE_DIMENSION},
+    quad::QuadInstance,
+    wezterm_pipeline::ndc_rect_to_pixels,
+};
 
 pub(crate) struct WindowsSoftwareFrame {
     width: u32,
@@ -20,26 +24,49 @@ pub(crate) struct WindowsSoftwareFrame {
 }
 
 impl WindowsSoftwareFrame {
-    pub(crate) fn new(width: u32, height: u32, clear: [f32; 4]) -> Self {
-        let width = width.max(1);
-        let height = height.max(1);
+    pub(crate) fn new(width: u32, height: u32, clear: [f32; 4]) -> anyhow::Result<Self> {
+        let size = validated_surface_size(width, height, MAX_SURFACE_DIMENSION)
+            .ok_or_else(|| anyhow::anyhow!("unsafe software frame size {width}x{height}"))?;
         let mut frame =
-            Self { width, height, pixels: vec![0; width as usize * height as usize * 4] };
+            Self { width: size.width, height: size.height, pixels: vec![0; size.bytes] };
         frame.clear(clear);
-        frame
+        Ok(frame)
     }
 
-    pub(crate) fn prepare(&mut self, width: u32, height: u32, clear: [f32; 4]) {
-        let width = width.max(1);
-        let height = height.max(1);
-        if self.width != width || self.height != height {
-            self.width = width;
-            self.height = height;
-            self.pixels.resize(width as usize * height as usize * 4, 0);
+    pub(crate) fn prepare(
+        &mut self,
+        width: u32,
+        height: u32,
+        clear: [f32; 4],
+    ) -> anyhow::Result<()> {
+        let size = validated_surface_size(width, height, MAX_SURFACE_DIMENSION)
+            .ok_or_else(|| anyhow::anyhow!("unsafe software frame size {width}x{height}"))?;
+        if self.width != size.width || self.height != size.height {
+            let old_capacity = self.pixels.capacity();
+            self.width = size.width;
+            self.height = size.height;
+            if size.bytes > self.pixels.capacity()
+                || size.bytes < self.pixels.capacity() / 2
+            {
+                self.pixels = vec![0; size.bytes];
+            } else {
+                self.pixels.resize(size.bytes, 0);
+            }
+            tracing::debug!(
+                target: "memory",
+                width = size.width,
+                height = size.height,
+                bytes = size.bytes,
+                old_capacity,
+                new_capacity = self.pixels.capacity(),
+                "Windows software frame resized"
+            );
         }
         self.clear(clear);
+        Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn draw_layers(
         &mut self,
         glyph_atlas: &GlyphAtlas,
