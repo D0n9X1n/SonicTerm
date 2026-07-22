@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(windows)]
 use crossbeam_channel::bounded;
 use portable_pty::{ChildKiller, ExitStatus};
 
@@ -49,6 +50,7 @@ impl Child for MockChild {
     }
 }
 
+#[cfg(windows)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TeardownStep {
     SignalCancel,
@@ -59,10 +61,12 @@ enum TeardownStep {
     ReapChild,
 }
 
+#[cfg(windows)]
 struct RecordingTeardown {
     steps: Vec<TeardownStep>,
 }
 
+#[cfg(windows)]
 impl PtyTeardownOps for RecordingTeardown {
     fn signal_cancel(&mut self) {
         self.steps.push(TeardownStep::SignalCancel);

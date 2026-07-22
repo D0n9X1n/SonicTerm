@@ -133,10 +133,10 @@ fn serve_stream(state: Arc<ServerState>, stream: Stream) -> Result<()> {
     {
     let writer = stream.try_clone()?;
     let shutdown = stream.try_clone()?;
-        return handle_connection_with_shutdown(state, stream, writer, move || {
+        handle_connection_with_shutdown(state, stream, writer, move || {
             let Stream::UdSocket(stream) = shutdown;
             let _ = stream.inner().shutdown(std::net::Shutdown::Both);
-        });
+        })
     }
     #[cfg(windows)]
     {

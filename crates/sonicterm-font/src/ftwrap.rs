@@ -14,7 +14,7 @@ use std::ffi::{c_int, c_void, CStr};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::mem::MaybeUninit;
-use std::os::raw::{c_uchar, c_ulong};
+use std::os::raw::{c_long, c_uchar, c_ulong};
 use std::path::Path;
 use std::ptr;
 use std::sync::Arc;
@@ -22,6 +22,16 @@ use std::sync::Arc;
 #[inline]
 pub fn succeeded(error: FT_Error) -> bool {
     error == freetype::FT_Err_Ok as FT_Error
+}
+
+#[cfg(any(windows, target_pointer_width = "32"))]
+fn freetype_pos_as_i64(pos: c_long) -> i64 {
+    i64::from(pos)
+}
+
+#[cfg(all(not(windows), target_pointer_width = "64"))]
+fn freetype_pos_as_i64(pos: c_long) -> i64 {
+    pos
 }
 
 /// Translate an error and value into a result
@@ -954,13 +964,13 @@ impl Face {
             }
 
             if slot.format == FT_Glyph_Format_::FT_GLYPH_FORMAT_OUTLINE {
-                crate::rasterizer::checked_freetype_26_6_extent(
-                    slot.metrics.width.font_units() as i64,
-                )
+                crate::rasterizer::checked_freetype_26_6_extent(freetype_pos_as_i64(
+                    slot.metrics.width.font_units(),
+                ))
                 .context("FreeType outline width rejected before rendering")?;
-                crate::rasterizer::checked_freetype_26_6_extent(
-                    slot.metrics.height.font_units() as i64,
-                )
+                crate::rasterizer::checked_freetype_26_6_extent(freetype_pos_as_i64(
+                    slot.metrics.height.font_units(),
+                ))
                 .context("FreeType outline height rejected before rendering")?;
             }
 
