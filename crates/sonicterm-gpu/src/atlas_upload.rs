@@ -49,12 +49,12 @@ pub fn atlas_sampler_descriptor() -> wgpu::SamplerDescriptor<'static> {
 }
 
 impl AtlasUpload {
-    /// Allocate a GPU texture sized to match `atlas` and seed it with
-    /// the atlas's current (probably empty) pixels. `bgl` must match
-    /// `crate::text_pipeline::TextPipeline::bind_group_layout`.
+    /// Allocate a GPU texture sized to match `atlas`. Tiles are initialized
+    /// lazily by [`Self::sync`] when the CPU atlas marks them dirty; avoiding
+    /// a full-atlas seed upload keeps startup/rebuild staging memory bounded.
+    /// `bgl` must match `crate::text_pipeline::TextPipeline::bind_group_layout`.
     pub fn new(
         device: &wgpu::Device,
-        queue: &wgpu::Queue,
         atlas: &GlyphAtlas,
         bgl: &wgpu::BindGroupLayout,
     ) -> Self {
@@ -72,29 +72,6 @@ impl AtlasUpload {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        // Seed-write the whole texture once. Cheap (16 MiB) and means
-        // the first frame can render against a black atlas if nothing
-        // has been requested yet, rather than tripping a "texture is
-        // in undefined state" validation error on some backends.
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            atlas.pixels(),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(atlas.width() * BYTES_PER_PIXEL),
-                rows_per_image: Some(atlas.height()),
-            },
-            wgpu::Extent3d {
-                width: atlas.width(),
-                height: atlas.height(),
-                depth_or_array_layers: 1,
-            },
-        );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let sampler = device.create_sampler(&atlas_sampler_descriptor());
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
