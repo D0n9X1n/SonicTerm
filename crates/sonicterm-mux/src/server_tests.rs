@@ -190,7 +190,7 @@ fn blocked_writer_does_not_block_connection_cleanup() {
     let shutdown_release = release_write_tx.clone();
     let handler = std::thread::spawn(move || {
         done_tx
-            .send(handle_connection(state, read_half, write_half, move || {
+            .send(handle_connection_with_shutdown(state, read_half, write_half, move || {
                 let _ = shutdown_release.try_send(());
             }))
             .unwrap();

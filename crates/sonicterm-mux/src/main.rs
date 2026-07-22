@@ -25,7 +25,7 @@ use interprocess::{
 };
 use sonicterm_mux::{
     frame::{read_frame, write_frame},
-    handle_connection,
+    handle_connection_with_shutdown,
     proto::{ClientMsg, ServerMsg},
     ServerState,
 };
@@ -133,7 +133,7 @@ fn serve_stream(state: Arc<ServerState>, stream: Stream) -> Result<()> {
     {
     let writer = stream.try_clone()?;
     let shutdown = stream.try_clone()?;
-        return handle_connection(state, stream, writer, move || {
+        return handle_connection_with_shutdown(state, stream, writer, move || {
             let Stream::UdSocket(stream) = shutdown;
             let _ = stream.inner().shutdown(std::net::Shutdown::Both);
         });
@@ -142,7 +142,7 @@ fn serve_stream(state: Arc<ServerState>, stream: Stream) -> Result<()> {
     {
         let writer = Arc::new(stream.try_clone()?);
         let shutdown = writer.clone();
-        handle_connection(state, stream, SharedWriter(writer), move || {
+        handle_connection_with_shutdown(state, stream, SharedWriter(writer), move || {
             let Stream::NamedPipe(named_pipe) = shutdown.as_ref();
             let writer_handle = HANDLE(named_pipe.as_handle().as_raw_handle());
         unsafe {

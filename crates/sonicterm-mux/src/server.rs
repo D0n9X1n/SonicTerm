@@ -503,10 +503,22 @@ fn build_pane(
     ))
 }
 
-/// Handle one connected client: a request reader loop on the input stream,
-/// and a forwarder thread that drains server-side messages onto the output
-/// stream. Both halves share the same duplex stream via `try_clone`.
-pub fn handle_connection<R, W, F>(
+/// Handle one connected client using the legacy three-argument API.
+///
+/// Transport-aware servers should prefer [`handle_connection_with_shutdown`]
+/// so blocked writes can be interrupted during teardown.
+pub fn handle_connection<S>(state: Arc<ServerState>, read_half: S, write_half: S) -> Result<()>
+where
+    S: Read + Write + Send + 'static,
+{
+    handle_connection_with_shutdown(state, read_half, write_half, || {})
+}
+
+/// Handle one connected client with an explicit writer-shutdown hook.
+///
+/// The hook runs before the bounded writer join and should interrupt any
+/// transport write blocked on a disconnected or non-reading peer.
+pub fn handle_connection_with_shutdown<R, W, F>(
     state: Arc<ServerState>,
     mut read_half: R,
     write_half: W,
