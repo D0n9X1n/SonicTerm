@@ -210,6 +210,58 @@ fn subpixel_text_coverage_blends_each_channel() {
 }
 
 #[test]
+fn software_presenter_samples_replacement_after_in_place_atlas_reset() {
+    let key = GlyphKey::new('a', false, false);
+    let mut atlas = GlyphAtlas::new(1, 1);
+    let first = atlas
+        .get_or_insert(
+            key,
+            &mut TileRasterizer(RasterTile {
+                width: 1,
+                height: 1,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 1.0,
+                coverage: vec![32],
+                is_color: false,
+                is_subpixel: false,
+            }),
+        )
+        .expect("first glyph inserts");
+    atlas.reset_in_place();
+    let second = atlas
+        .get_or_insert(
+            key,
+            &mut TileRasterizer(RasterTile {
+                width: 1,
+                height: 1,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 1.0,
+                coverage: vec![255],
+                is_color: false,
+                is_subpixel: false,
+            }),
+        )
+        .expect("replacement glyph inserts");
+    assert_eq!(first.uv, second.uv);
+
+    let mut frame =
+        WindowsSoftwareFrame::new(1, 1, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    frame.draw_glyphs(
+        &atlas,
+        &[GlyphInstance {
+            rect: px_to_ndc(0.0, 0.0, 1.0, 1.0, 1.0, 1.0),
+            uv: second.uv,
+            color: [1.0, 1.0, 1.0, 1.0],
+            flags: [0.0; 4],
+        }],
+    );
+
+    assert_eq!(frame.pixel_bgra(0, 0), [255, 255, 255, 255]);
+}
+
+#[test]
 fn subpixel_blend_lerps_each_channel_over_colored_background() {
     let mut dst = [32, 160, 240, 255];
 

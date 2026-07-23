@@ -38,7 +38,10 @@ use super::{
 use crate::app::window_geom;
 
 impl App {
-    fn tear_out_renderer_settings(&self) -> sonicterm_gpu::core::RendererSettings<'_> {
+    fn tear_out_renderer_settings(
+        &self,
+        role: &'static str,
+    ) -> sonicterm_gpu::core::RendererSettings<'_> {
         sonicterm_gpu::core::RendererSettings {
             font_family: &self.config.font.family,
             font_size: self.config.font.size,
@@ -56,6 +59,7 @@ impl App {
                 panel_padding: self.config.appearance.panel_padding,
                 software_render_mode: self.config.appearance.software_render_mode,
             },
+            role,
         }
     }
 
@@ -79,20 +83,36 @@ impl App {
     }
 
     pub(super) fn warm_window_pool_maintain(&mut self, el: &ActiveEventLoop) {
-        if self.main_renderer().is_none() {
+        let Some(software_rendering) = self
+            .main_renderer()
+            .map(|renderer| renderer.is_software_rendering() || renderer.is_software_render_degraded())
+        else {
             return;
+        };
+        let configured = self.config.window.warm_window_pool;
+        let target = super::warm_window_pool_target(configured, software_rendering);
+        let count_before = self.warm_window_pool.len();
+        if self.warm_window_pool.len() > target {
+            self.warm_window_pool.truncate(target);
         }
         if super::warm_window_pool_should_spawn(
             self.warm_window_pool.len(),
-            self.config.window.warm_window_pool,
+            configured,
+            software_rendering,
         ) {
             if let Some(warm) = self.create_warm_window(el) {
                 self.warm_window_pool.push(warm);
             }
         }
-        let max = super::WARM_WINDOW_POOL_MAX;
-        if self.warm_window_pool.len() > max {
-            self.warm_window_pool.truncate(max);
+        if self.warm_window_pool.len() != count_before {
+            tracing::debug!(
+                target: "memory",
+                configured,
+                target,
+                software_rendering,
+                warm_renderer_count = self.warm_window_pool.len(),
+                "warm renderer pool maintained"
+            );
         }
     }
 
@@ -117,7 +137,7 @@ impl App {
         };
         window.set_ime_allowed(true);
         super::install_native_window_background(&window, self.theme.colors.background.0.as_str());
-        let settings = self.tear_out_renderer_settings();
+        let settings = self.tear_out_renderer_settings("warm");
         let shared_gpu = self.main_renderer().map(GpuRenderer::shared_context);
         let mut renderer = match shared_gpu.map_or_else(
             || GpuRenderer::new(window.clone(), el, &self.theme, settings),
@@ -139,7 +159,10 @@ impl App {
     }
 
     fn take_warm_window(&mut self) -> Option<super::WarmWindow> {
-        self.warm_window_pool.pop()
+        self.warm_window_pool.pop().map(|mut warm| {
+            warm.renderer.set_render_timing_label("child");
+            warm
+        })
     }
 
     pub(super) fn is_warm_window_id(&self, win_id: WindowId) -> bool {
@@ -261,7 +284,7 @@ impl App {
                     self.theme.colors.background.0.as_str(),
                 );
                 let shared_gpu = self.main_renderer().map(GpuRenderer::shared_context);
-                let renderer_settings = self.tear_out_renderer_settings();
+                let renderer_settings = self.tear_out_renderer_settings("child");
                 let renderer_start = Instant::now();
                 let renderer = match shared_gpu.map_or_else(
                     || GpuRenderer::new(window.clone(), el, &self.theme, renderer_settings),

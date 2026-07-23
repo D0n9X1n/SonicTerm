@@ -124,8 +124,8 @@ pub struct WindowConfig {
     /// Legacy macOS blur value retained for config compatibility. Current
     /// platform setup uses [`AppearanceConfig::backdrop`] instead.
     pub blur: bool,
-    /// Requested hidden child-window pool for tab tear-out. The app clamps the
-    /// effective target to 2..=5, so values below 2 do not disable the pool.
+    /// Requested hidden child-window pool for tab tear-out. Zero disables it;
+    /// hardware honors 1..=5 and software adapters cap nonzero values at one.
     pub warm_window_pool: u8,
 }
 
@@ -432,7 +432,7 @@ impl Default for WindowConfig {
             decorations: true,
             opacity: 1.0,
             blur: false,
-            warm_window_pool: 2,
+            warm_window_pool: 1,
         }
     }
 }
@@ -693,8 +693,8 @@ opacity = 1.0
 blur = false
 
 # Hidden pre-created child windows kept warm for instant tab tear-out.
-# The effective target is clamped to 2..=5; 0 or 1 does not disable the pool.
-warm_window_pool = 2
+# 0 disables; hardware honors 1..=5; software adapters cap nonzero values at 1.
+warm_window_pool = 1
 
 [terminal]
 # Shell to spawn. Leave commented to auto-detect (Windows: PowerShell 7

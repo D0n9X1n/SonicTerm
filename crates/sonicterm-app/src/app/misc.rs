@@ -778,6 +778,7 @@ impl App {
                     panel_padding: self.config.appearance.panel_padding,
                     software_render_mode: self.config.appearance.software_render_mode,
                 },
+                role: "child",
             },
         ) {
             Ok(r) => r,

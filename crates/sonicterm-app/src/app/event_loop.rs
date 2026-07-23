@@ -323,6 +323,7 @@ impl App {
                     panel_padding: self.config.appearance.panel_padding,
                     software_render_mode: self.config.appearance.software_render_mode,
                 },
+                role: "main",
             },
         )
         // PANIC: renderer init failure means wgpu cannot initialize on the

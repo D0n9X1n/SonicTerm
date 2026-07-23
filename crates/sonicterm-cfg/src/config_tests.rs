@@ -7,6 +7,15 @@ fn default_terminal_term_program_is_sonicterm() {
 }
 
 #[test]
+fn default_warm_window_pool_keeps_one_spare() {
+    let cfg = Config::default();
+    assert_eq!(cfg.window.warm_window_pool, 1);
+    let template = default_config_template();
+    assert!(template.contains("warm_window_pool = 1"));
+    assert!(template.contains("0 disables"));
+}
+
+#[test]
 fn default_cursor_does_not_blink() {
     let cfg = Config::default();
     assert!(!cfg.terminal.cursor_blink);

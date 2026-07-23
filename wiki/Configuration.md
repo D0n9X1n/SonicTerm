@@ -45,7 +45,7 @@ decorations = true
 # Legacy compatibility keys; prefer [appearance] for new settings.
 opacity = 1.0
 blur = false
-warm_window_pool = 2
+warm_window_pool = 1
 
 [terminal]
 # Omit to auto-detect. Windows: pwsh -> Windows PowerShell -> cmd.
@@ -115,9 +115,10 @@ resizes each visible pane's grid and PTY using its own pane rectangle.
 
 `[window].cols` and `rows` define the initial grid for new windows. Padding is in
 logical pixels around terminal content. `warm_window_pool` controls hidden,
-pre-created child windows used to reduce tab tear-out latency. The effective
-target is clamped to `2..=5`, so values `0` or `1` still create two warm windows
-and cannot disable the pool.
+pre-created child windows used to reduce tab tear-out latency. `0` disables the
+pool, while the default `1` retains one instant tear-out spare. Hardware honors
+configured targets up to `5`; software rendering caps every nonzero value at
+one to bound the per-renderer memory baseline.
 
 Use `[appearance].opacity` and `backdrop` for active appearance configuration.
 The older `[window].opacity` and `blur` fields still deserialize, but current
@@ -247,7 +248,7 @@ decorations = true
 # 旧版兼容 key；新配置优先使用 [appearance]。
 opacity = 1.0
 blur = false
-warm_window_pool = 2
+warm_window_pool = 1
 
 [terminal]
 # 省略则自动探测。Windows：pwsh -> Windows PowerShell -> cmd；
@@ -312,8 +313,9 @@ Windows 默认 DirectWrite 并以 FreeType 回退；macOS/其它 Unix 使用 Fre
 ### 窗口与外观
 
 `[window].cols`、`rows` 定义新窗口初始 grid。padding 是终端内容周围的逻辑像素。
-`warm_window_pool` 控制用于降低 tab tear-out 延迟的隐藏预创建子窗口。实际目标会限制在
-`2..=5`，因此配置 `0` 或 `1` 仍会创建两个预热窗口，不能用它关闭该池。
+`warm_window_pool` 控制用于降低 tab tear-out 延迟的隐藏预创建子窗口。设为 `0` 会关闭
+该池；默认值 `1` 保留一个可立即 tear-out 的预热窗口。硬件渲染会遵循不超过 `5` 的
+配置目标；软件渲染会把任何非零值限制为 `1`，以约束每个 renderer 的内存基线。
 
 当前生效的外观配置是 `[appearance].opacity` 与 `backdrop`。旧的 `[window].opacity`、
 `blur` 仍可反序列化，但当前启动与热重载路径不会使用它们，不应依赖。Backdrop material

@@ -403,18 +403,26 @@ impl TearOutTiming {
     }
 }
 
-pub const WARM_WINDOW_POOL_MIN_SPARE: usize = 1;
 pub const WARM_WINDOW_POOL_MAX: usize = 5;
 
 #[must_use]
-pub fn warm_window_pool_target(configured: u8) -> usize {
-    let requested = configured as usize;
-    requested.clamp(WARM_WINDOW_POOL_MIN_SPARE + 1, WARM_WINDOW_POOL_MAX)
+pub fn warm_window_pool_target(configured: u8, software_rendering: bool) -> usize {
+    if configured == 0 {
+        return 0;
+    }
+    if software_rendering {
+        return 1;
+    }
+    usize::from(configured).min(WARM_WINDOW_POOL_MAX)
 }
 
 #[must_use]
-pub fn warm_window_pool_should_spawn(current_len: usize, configured: u8) -> bool {
-    current_len < warm_window_pool_target(configured)
+pub fn warm_window_pool_should_spawn(
+    current_len: usize,
+    configured: u8,
+    software_rendering: bool,
+) -> bool {
+    current_len < warm_window_pool_target(configured, software_rendering)
 }
 
 pub struct WarmWindow {

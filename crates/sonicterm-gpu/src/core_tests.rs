@@ -419,6 +419,36 @@ fn same_size_atlas_reset_reuses_gpu_texture() {
 }
 
 #[test]
+fn equal_scale_factor_does_not_rebuild_atlas() {
+    assert!(!scale_factor_rebuild_required(1.0, 1.0));
+    assert!(!scale_factor_rebuild_required(0.1, 0.0));
+    assert!(scale_factor_rebuild_required(1.0, 1.25));
+}
+
+#[test]
+fn inline_image_atlas_starts_placeholder_and_promotes_once() {
+    let placeholder = GlyphAtlas::new(PLACEHOLDER_ATLAS_DIM, PLACEHOLDER_ATLAS_DIM);
+    assert!(!image_atlas_promotion_required(&placeholder, false));
+    assert!(image_atlas_promotion_required(&placeholder, true));
+
+    let promoted = GlyphAtlas::default_size();
+    assert!(!image_atlas_promotion_required(&promoted, true));
+}
+
+#[test]
+fn windows_software_presenter_uses_placeholder_gpu_atlases() {
+    let atlas = GlyphAtlas::default_size();
+    assert_eq!(
+        desired_gpu_atlas_dimensions(true, &atlas),
+        (PLACEHOLDER_ATLAS_DIM, PLACEHOLDER_ATLAS_DIM)
+    );
+    assert_eq!(
+        desired_gpu_atlas_dimensions(false, &atlas),
+        (sonicterm_text::glyph_atlas::ATLAS_DIM, sonicterm_text::glyph_atlas::ATLAS_DIM)
+    );
+}
+
+#[test]
 fn inline_image_atlas_skips_older_images_without_eviction() {
     let older = sonicterm_render_model::InlineImage {
         id: 1,
