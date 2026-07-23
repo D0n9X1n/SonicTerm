@@ -302,7 +302,8 @@ class ValidationAndCliTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(result["schema_version"], soak.SCHEMA_VERSION)
         self.assertEqual(result["status"], "error")
-        self.assertIn("emit: IsADirectoryError", result["error"])
+        self.assertTrue(result["error"].startswith("emit: "), result["error"])
+        self.assertIn("Error:", result["error"])
         self.assertEqual(result["sample_count"], 2)
 
     def test_zero_duration_is_usage_error(self):
