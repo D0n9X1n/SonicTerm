@@ -88,6 +88,12 @@ fn software_frame_growth_uses_exact_validated_capacity() {
 }
 
 #[test]
+#[ignore = "v120-invariant-baseline:v120_native_decode_and_surface_share_bounds:WP-RENDER"]
+fn v120_native_decode_and_surface_share_bounds() {
+    panic!("baseline invariant requires WP-RENDER decode and surface governor");
+}
+
+#[test]
 fn adjacent_sharp_rects_do_not_overlap_edges() {
     let mut frame = WindowsSoftwareFrame::new(1, 3, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
     frame.fill_rect(0.0, 0.0, 1.0, 1.0, [1.0, 1.0, 1.0, 0.5]);

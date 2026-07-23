@@ -124,6 +124,12 @@ fn subscriber_output_rechunks_to_the_documented_byte_ceiling() {
 }
 
 #[test]
+#[ignore = "v120-invariant-baseline:v120_queue_accounting_covers_messages_and_payload_bytes:WP-MUX"]
+fn v120_queue_accounting_covers_messages_and_payload_bytes() {
+    panic!("baseline invariant requires WP-MUX byte and message accounting");
+}
+
+#[test]
 fn subscriber_control_returns_error_when_mailbox_stays_full() {
     let (tx, rx) = bounded(1);
     let sink = SubscriberSink::new(tx, rx.clone());
@@ -208,6 +214,13 @@ fn blocked_writer_does_not_block_connection_cleanup() {
 
     assert!(writer_dropped.load(Ordering::Acquire), "writer stream must be reclaimed");
     assert!(final_result.is_err(), "full control mailbox must end the connection");
+}
+
+#[test]
+#[ignore = "v120-invariant-baseline:v120_blocked_worker_owner_orders_cancel_join_and_drop:WP-MUX"]
+fn v120_blocked_worker_owner_orders_cancel_join_and_drop() {
+    blocked_writer_does_not_block_connection_cleanup();
+    panic!("baseline invariant requires WP-MUX connection owner");
 }
 
 #[test]

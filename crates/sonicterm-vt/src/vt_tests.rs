@@ -269,6 +269,12 @@ fn large_sixel_uses_media_budget_not_generic_escape_limit() {
 }
 
 #[test]
+#[ignore = "v120-invariant-baseline:v120_parser_media_capture_shares_one_budget:WP-VT"]
+fn v120_parser_media_capture_shares_one_budget() {
+    panic!("baseline invariant requires WP-VT compositional capture budget");
+}
+
+#[test]
 fn rejected_hyperlink_open_emits_close_event() {
     let mut parser = Parser::new(Grid::new(80, 24));
     parser.advance(b"\x1b]8;;https://example.com\x1b\\");

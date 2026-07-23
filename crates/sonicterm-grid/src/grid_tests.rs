@@ -592,3 +592,9 @@ fn zero_width_cluster_bytes_are_bounded_per_cell() {
         grid.row(0)[0].extras().expect("combining marks retained").len() <= MAX_CELL_EXTRAS_BYTES
     );
 }
+
+#[test]
+#[ignore = "v120-invariant-baseline:v120_grid_aggregate_retention_has_one_governor:WP-GRID"]
+fn v120_grid_aggregate_retention_has_one_governor() {
+    panic!("baseline invariant requires WP-GRID aggregate governor");
+}

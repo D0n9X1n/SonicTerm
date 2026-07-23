@@ -252,3 +252,9 @@ fn lazy_insert_metadata_stays_bounded() {
 
     assert!(atlas.len() <= MAX_ATLAS_ENTRIES);
 }
+
+#[test]
+#[ignore = "v120-invariant-baseline:v120_stale_atlas_identity_invalidates_all_dependents_888:WP-FONT"]
+fn v120_stale_atlas_identity_invalidates_all_dependents_888() {
+    panic!("baseline invariant requires WP-FONT identity authority");
+}
