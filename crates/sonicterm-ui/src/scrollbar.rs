@@ -153,7 +153,6 @@ pub fn thumb_to_view_top(
     ((frac * max_view_top as f32).round() as i64).clamp(0, max_view_top as i64) as u64
 }
 
-
 #[cfg(test)]
 #[path = "scrollbar_tests.rs"]
 mod scrollbar_tests;

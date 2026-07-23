@@ -49,11 +49,7 @@ pub fn bounded_grid_size(cols: u64, rows: u64) -> (u16, u16) {
 /// Clamp retained scrollback rows so visible cells plus history share one
 /// per-pane memory budget.
 #[must_use]
-pub fn bounded_scrollback_rows(
-    cols: u16,
-    visible_rows: u16,
-    requested_rows: usize,
-) -> usize {
+pub fn bounded_scrollback_rows(cols: u16, visible_rows: u16, requested_rows: usize) -> usize {
     let cols = u64::from(cols.max(1));
     let visible_cells = cols.saturating_mul(u64::from(visible_rows));
     let remaining_cells = u64::from(MAX_GRID_CELLS).saturating_sub(visible_cells);
@@ -129,8 +125,7 @@ impl Grid {
     pub fn new(cols: u16, rows: u16) -> Self {
         let (cols, rows) = bounded_grid_size(u64::from(cols), u64::from(rows));
         let scrollback_requested_limit = 1_000;
-        let scrollback_limit =
-            bounded_scrollback_rows(cols, rows, scrollback_requested_limit);
+        let scrollback_limit = bounded_scrollback_rows(cols, rows, scrollback_requested_limit);
         let visible = (0..rows).map(|_| make_row(cols)).collect();
         Self {
             cols,
@@ -1338,12 +1333,10 @@ impl Grid {
         let primary_visible_cells = u64::from(primary.cols) * u64::from(primary.rows);
         let remaining_cells = u64::from(MAX_GRID_CELLS)
             .saturating_sub(active_cells.saturating_add(primary_visible_cells));
-        let history_rows = usize::try_from(remaining_cells / u64::from(primary.cols.max(1)))
-            .unwrap_or(usize::MAX);
-        primary.scrollback_limit = primary
-            .scrollback_limit
-            .min(history_rows)
-            .min(primary.scrollback_requested_limit);
+        let history_rows =
+            usize::try_from(remaining_cells / u64::from(primary.cols.max(1))).unwrap_or(usize::MAX);
+        primary.scrollback_limit =
+            primary.scrollback_limit.min(history_rows).min(primary.scrollback_requested_limit);
         if primary.scrollback.len() > primary.scrollback_limit {
             let excess = primary.scrollback.len() - primary.scrollback_limit;
             primary.scrollback.drain(0..excess);
@@ -1352,10 +1345,8 @@ impl Grid {
     }
 
     fn enforce_retained_capacity_budget(&mut self) {
-        let visible_bytes =
-            self.visible.iter().map(Line::approx_capacity_byte_size).sum::<usize>();
-        let visible_budget_bytes =
-            MAX_VISIBLE_GRID_CELLS as usize * std::mem::size_of::<Cell>();
+        let visible_bytes = self.visible.iter().map(Line::approx_capacity_byte_size).sum::<usize>();
+        let visible_budget_bytes = MAX_VISIBLE_GRID_CELLS as usize * std::mem::size_of::<Cell>();
         if visible_bytes > visible_budget_bytes {
             for row in &mut self.visible {
                 row.shrink_capacity_to_fit();

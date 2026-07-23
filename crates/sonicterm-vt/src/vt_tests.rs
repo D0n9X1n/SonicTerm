@@ -198,10 +198,7 @@ fn can_and_sub_cancel_sixel_without_emitting_media() {
 fn overflow_triggering_osc_terminator_is_not_lost() {
     let mut parser = Parser::new(Grid::new(80, 24));
     let mut payload = b"\x1b]8;;".to_vec();
-    payload.extend(std::iter::repeat_n(
-        b'a',
-        MAX_ESCAPE_SEQUENCE_BYTES - payload.len(),
-    ));
+    payload.extend(std::iter::repeat_n(b'a', MAX_ESCAPE_SEQUENCE_BYTES - payload.len()));
     payload.push(0x07);
     payload.push(b'Z');
 
@@ -215,10 +212,7 @@ fn overflow_triggering_osc_terminator_is_not_lost() {
 fn exact_limit_osc_resets_accounting_at_dispatch() {
     let mut parser = Parser::new(Grid::new(80, 24));
     let mut payload = b"\x1b]8;;".to_vec();
-    payload.extend(std::iter::repeat_n(
-        b'a',
-        MAX_ESCAPE_SEQUENCE_BYTES - payload.len() - 2,
-    ));
+    payload.extend(std::iter::repeat_n(b'a', MAX_ESCAPE_SEQUENCE_BYTES - payload.len() - 2));
     payload.extend_from_slice(b"\x1b\\");
     assert_eq!(payload.len(), MAX_ESCAPE_SEQUENCE_BYTES);
 
@@ -243,10 +237,7 @@ fn consecutive_ground_controls_do_not_consume_escape_budget() {
 fn st_split_across_escape_limit_is_recognized() {
     let mut parser = Parser::new(Grid::new(80, 24));
     let mut payload = b"\x1b]8;;".to_vec();
-    payload.extend(std::iter::repeat_n(
-        b'a',
-        MAX_ESCAPE_SEQUENCE_BYTES - payload.len() - 1,
-    ));
+    payload.extend(std::iter::repeat_n(b'a', MAX_ESCAPE_SEQUENCE_BYTES - payload.len() - 1));
     payload.push(0x1b);
     assert_eq!(payload.len(), MAX_ESCAPE_SEQUENCE_BYTES);
 
@@ -282,17 +273,14 @@ fn rejected_hyperlink_open_emits_close_event() {
     let mut parser = Parser::new(Grid::new(80, 24));
     parser.advance(b"\x1b]8;;https://example.com\x1b\\");
     let mut rejected = b"\x1b]8;;https://example.com/".to_vec();
-    rejected.extend(std::iter::repeat_n(
-        b'x',
-        sonicterm_grid::hyperlink::MAX_HYPERLINK_URI_BYTES,
-    ));
+    rejected.extend(std::iter::repeat_n(b'x', sonicterm_grid::hyperlink::MAX_HYPERLINK_URI_BYTES));
     rejected.extend_from_slice(b"\x1b\\");
 
     let events = parser.advance(&rejected);
 
-    assert!(events.iter().any(
-        |event| matches!(event, VtEvent::Hyperlink { uri, .. } if uri.is_empty())
-    ));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, VtEvent::Hyperlink { uri, .. } if uri.is_empty())));
 }
 
 #[test]

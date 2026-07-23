@@ -45,9 +45,7 @@ impl QuitHold {
     /// Fresh, disarmed guard.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            confirm_until: None,
-        }
+        Self { confirm_until: None }
     }
 
     /// Whether the guard is currently armed (second press quits).

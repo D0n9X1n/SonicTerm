@@ -5,7 +5,7 @@ pub use harfbuzz::*;
 use crate::color::SrgbaPixel;
 use crate::locator::{FontDataHandle, FontDataSource};
 use crate::rasterizer::colr::{ColorLine, ColorStop, DrawOp};
-use anyhow::{Context, Error, ensure};
+use anyhow::{ensure, Context, Error};
 use cairo::Extend;
 use memmap2::{Mmap, MmapOptions};
 use std::ffi::CStr;
@@ -1101,5 +1101,9 @@ pub fn hb_tag_to_string(tag: hb_tag_t) -> TagString {
 /// empty arrays in that way, and rust 1.78 will panic if a null
 /// ptr is passed in.
 pub(crate) unsafe fn from_raw_parts<'a, T>(ptr: *const T, size: usize) -> &'a [T] {
-    if ptr.is_null() { &[] } else { unsafe { std::slice::from_raw_parts(ptr, size) } }
+    if ptr.is_null() {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(ptr, size) }
+    }
 }

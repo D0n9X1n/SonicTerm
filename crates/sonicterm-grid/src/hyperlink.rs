@@ -65,12 +65,8 @@ impl HyperlinkRegistry {
         if self.by_id.len() >= MAX_HYPERLINKS {
             return None;
         }
-        let entry_bytes = key
-            .0
-            .as_ref()
-            .map_or(0, String::len)
-            .saturating_add(key.1.len())
-            .saturating_mul(2);
+        let entry_bytes =
+            key.0.as_ref().map_or(0, String::len).saturating_add(key.1.len()).saturating_mul(2);
         if self.retained_bytes.saturating_add(entry_bytes) > MAX_HYPERLINK_METADATA_BYTES {
             return None;
         }

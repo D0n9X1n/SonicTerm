@@ -11,8 +11,8 @@ use crate::rasterizer::colr::{
 };
 use crate::rasterizer::harfbuzz::{argb_to_rgba, HarfbuzzRasterizer};
 use crate::rasterizer::{
-    checked_glyph_rgba_len, checked_raster_pixel_size, FontRasterizer,
-    MAX_RASTERIZED_GLYPH_BYTES, FAKE_ITALIC_SKEW,
+    checked_glyph_rgba_len, checked_raster_pixel_size, FontRasterizer, FAKE_ITALIC_SKEW,
+    MAX_RASTERIZED_GLYPH_BYTES,
 };
 use crate::units::*;
 use crate::{ftwrap, FontRasterizerSelection, RasterizedGlyph};
@@ -109,17 +109,14 @@ impl FontRasterizer for FreeTypeRasterizer {
             _ => (raw_width, raw_rows),
         };
         checked_glyph_rgba_len(output_width, output_height)?;
-        let source_len = raw_rows
-            .checked_mul(pitch)
-            .context("FreeType bitmap source length overflow")?;
+        let source_len =
+            raw_rows.checked_mul(pitch).context("FreeType bitmap source length overflow")?;
         if source_len > MAX_RASTERIZED_GLYPH_BYTES {
             bail!(
                 "FreeType bitmap source requires {source_len} bytes, limit is {MAX_RASTERIZED_GLYPH_BYTES}"
             );
         }
-        let data = unsafe {
-            crate::ftwrap::from_raw_parts(ft_glyph.bitmap.buffer, source_len)
-        };
+        let data = unsafe { crate::ftwrap::from_raw_parts(ft_glyph.bitmap.buffer, source_len) };
 
         let glyph = match mode {
             ftwrap::FT_Pixel_Mode::FT_PIXEL_MODE_LCD => {

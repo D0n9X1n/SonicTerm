@@ -113,4 +113,3 @@ pub fn __test_drain_tabs() -> Vec<TabPayload> {
 pub fn __test_drain_files() -> Vec<Vec<PathBuf>> {
     drain_file_drops()
 }
-

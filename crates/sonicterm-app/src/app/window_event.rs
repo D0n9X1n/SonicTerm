@@ -666,8 +666,7 @@ impl App {
                             let scale = r.scale_factor();
                             let font_size =
                                 sonicterm_ui::tab_spans::tab_title_font_size(r.font_size()) * scale;
-                            let icon_w =
-                                r.measure_overlay_text_width(SEARCH_BADGE_ICON, font_size);
+                            let icon_w = r.measure_overlay_text_width(SEARCH_BADGE_ICON, font_size);
                             let content_w = icon_w
                                 + SEARCH_BAR_ICON_GAP * scale
                                 + r.measure_overlay_text_width(search_label, font_size);
@@ -1863,7 +1862,8 @@ impl App {
                     .active_pane()
                     .map(|pane| pane.app_cursor_keys.load(std::sync::atomic::Ordering::Relaxed))
                     .unwrap_or(false);
-                if let Some(bytes) = encode_key(&event, self.main_modifiers(), kitty_flags, app_cursor)
+                if let Some(bytes) =
+                    encode_key(&event, self.main_modifiers(), kitty_flags, app_cursor)
                 {
                     self.write_to_pty(bytes);
                     // Scroll-to-bottom on Enter (#B12): pressing Enter while

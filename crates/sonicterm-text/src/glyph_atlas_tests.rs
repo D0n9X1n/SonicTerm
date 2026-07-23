@@ -70,9 +70,7 @@ fn subpixel_text_coverage_copies_bgra_channels() {
 fn reset_in_place_retains_pixels_and_restarts_atlas_state() {
     let mut atlas = GlyphAtlas::new(2, 1);
     let old = GlyphKey::new('a', false, false);
-    let old_info = atlas
-        .get_or_insert(old, &mut OnePixelRasterizer)
-        .expect("old tile inserts");
+    let old_info = atlas.get_or_insert(old, &mut OnePixelRasterizer).expect("old tile inserts");
     atlas.tick_frame();
     atlas.set_eviction_enabled(false);
     let pixels_ptr = atlas.pixels().as_ptr();
@@ -120,10 +118,8 @@ fn non_evicting_insert_preserves_resident_tiles_when_full() {
     atlas.get_or_insert(first, &mut rasterizer).expect("first tile fills atlas");
     let epoch = atlas.evictions();
 
-    let second = atlas.get_or_insert_without_eviction(
-        GlyphKey::new('b', false, false),
-        &mut rasterizer,
-    );
+    let second =
+        atlas.get_or_insert_without_eviction(GlyphKey::new('b', false, false), &mut rasterizer);
 
     assert!(second.is_none(), "a non-evicting insert must report a full atlas");
     assert_eq!(atlas.evictions(), epoch, "the resident tile must not be recycled");
@@ -139,11 +135,8 @@ fn lazy_non_evicting_insert_does_not_build_tile_when_full() {
         .expect("first tile fills atlas");
     let mut build_calls = 0;
 
-    let second = atlas.get_or_insert_lazy_without_eviction(
-        GlyphKey::new('b', false, false),
-        1,
-        1,
-        || {
+    let second =
+        atlas.get_or_insert_lazy_without_eviction(GlyphKey::new('b', false, false), 1, 1, || {
             build_calls += 1;
             RasterTile {
                 width: 1,
@@ -155,8 +148,7 @@ fn lazy_non_evicting_insert_does_not_build_tile_when_full() {
                 is_color: false,
                 is_subpixel: false,
             }
-        },
-    );
+        });
 
     assert!(second.is_none());
     assert_eq!(build_calls, 0, "a rejected insertion must not materialize pixel coverage");
@@ -180,38 +172,34 @@ fn failed_lazy_build_restores_full_reclaimed_slot() {
         .expect("first tile fills atlas");
     atlas.evict_lru_quartile();
 
-    let invalid = atlas.get_or_insert_lazy_without_eviction(
-        GlyphKey::new('b', false, false),
-        1,
-        1,
-        || RasterTile {
-            width: 2,
-            height: 1,
-            offset_x: 0,
-            offset_y: 0,
-            advance: 1.0,
-            coverage: vec![255; 2],
-            is_color: false,
-            is_subpixel: false,
-        },
-    );
+    let invalid =
+        atlas.get_or_insert_lazy_without_eviction(GlyphKey::new('b', false, false), 1, 1, || {
+            RasterTile {
+                width: 2,
+                height: 1,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 1.0,
+                coverage: vec![255; 2],
+                is_color: false,
+                is_subpixel: false,
+            }
+        });
     assert!(invalid.is_none(), "mismatched lazy tile must be rejected");
 
-    let replacement = atlas.get_or_insert_lazy_without_eviction(
-        GlyphKey::new('c', false, false),
-        2,
-        2,
-        || RasterTile {
-            width: 2,
-            height: 2,
-            offset_x: 0,
-            offset_y: 0,
-            advance: 2.0,
-            coverage: vec![255; 4],
-            is_color: false,
-            is_subpixel: false,
-        },
-    );
+    let replacement =
+        atlas.get_or_insert_lazy_without_eviction(GlyphKey::new('c', false, false), 2, 2, || {
+            RasterTile {
+                width: 2,
+                height: 2,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 2.0,
+                coverage: vec![255; 4],
+                is_color: false,
+                is_subpixel: false,
+            }
+        });
     assert!(replacement.is_some(), "rollback must restore the complete 2x2 reclaimed slot");
 }
 
@@ -248,11 +236,8 @@ fn lazy_insert_metadata_stays_bounded() {
     let mut atlas = GlyphAtlas::default_size();
     for codepoint in 0..(MAX_ATLAS_ENTRIES as u32 + 100) {
         let ch = char::from_u32(0xF0000 + codepoint).expect("private-use codepoint");
-        atlas.get_or_insert_lazy_without_eviction(
-            GlyphKey::new(ch, false, false),
-            1,
-            1,
-            || RasterTile {
+        atlas.get_or_insert_lazy_without_eviction(GlyphKey::new(ch, false, false), 1, 1, || {
+            RasterTile {
                 width: 1,
                 height: 1,
                 offset_x: 0,
@@ -261,8 +246,8 @@ fn lazy_insert_metadata_stays_bounded() {
                 coverage: vec![255],
                 is_color: false,
                 is_subpixel: false,
-            },
-        );
+            }
+        });
     }
 
     assert!(atlas.len() <= MAX_ATLAS_ENTRIES);

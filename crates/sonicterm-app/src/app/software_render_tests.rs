@@ -1,7 +1,6 @@
 //! no-GPU degrade decision + frame-period clamp.
 use super::{
-    should_degrade_for_software_render, software_render_frame_period,
-    SOFTWARE_RENDER_FRAME_PERIOD,
+    should_degrade_for_software_render, software_render_frame_period, SOFTWARE_RENDER_FRAME_PERIOD,
 };
 use sonicterm_cfg::config::SoftwareRenderMode;
 use std::time::Duration;
@@ -43,4 +42,3 @@ fn effective_frame_period_lowers_cap_while_composing() {
     // Software path, composing: lower cap — composing wins.
     assert_eq!(effective_frame_period(true, true, sixty), SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD);
 }
-

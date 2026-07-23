@@ -45,9 +45,7 @@ impl WindowsSoftwareFrame {
             let old_capacity = self.pixels.capacity();
             self.width = size.width;
             self.height = size.height;
-            if size.bytes > self.pixels.capacity()
-                || size.bytes < self.pixels.capacity() / 2
-            {
+            if size.bytes > self.pixels.capacity() || size.bytes < self.pixels.capacity() / 2 {
                 self.pixels = vec![0; size.bytes];
             } else {
                 self.pixels.resize(size.bytes, 0);
@@ -528,7 +526,6 @@ fn distance_to_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> 
     let cy = ay + t * vy;
     ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()
 }
-
 
 #[cfg(test)]
 #[path = "software_windows_tests.rs"]

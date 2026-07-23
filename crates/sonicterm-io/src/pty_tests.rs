@@ -276,10 +276,7 @@ fn pty_input_queue_has_fixed_capacity() {
         tx.try_send(vec![b'x']).expect("queue has bounded capacity");
     }
 
-    assert!(matches!(
-        tx.try_send(vec![b'y']),
-        Err(crossbeam_channel::TrySendError::Full(_))
-    ));
+    assert!(matches!(tx.try_send(vec![b'y']), Err(crossbeam_channel::TrySendError::Full(_))));
     assert_eq!(rx.len(), PTY_INPUT_QUEUE_CAPACITY);
     assert!(pty_input_message_allowed(MAX_PTY_INPUT_MESSAGE_BYTES));
     assert!(!pty_input_message_allowed(MAX_PTY_INPUT_MESSAGE_BYTES + 1));

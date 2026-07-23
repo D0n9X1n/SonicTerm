@@ -280,10 +280,7 @@ fn exited_shell_with_background_descendant_is_reaped() {
     let state = ServerState::new();
     let (_session_id, pane_id) = state.spawn("/bin/sh", 80, 24).expect("spawn shell");
     state
-        .input(
-            pane_id,
-            b"trap '' HUP\n(while :; do printf x; sleep 0.01; done) &\nexit\n".to_vec(),
-        )
+        .input(pane_id, b"trap '' HUP\n(while :; do printf x; sleep 0.01; done) &\nexit\n".to_vec())
         .expect("launch background descendant");
 
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -364,9 +361,7 @@ fn shell_output_flows_through_pty_seam_to_subscriber() {
     assert_eq!(panes[0].id, pane_id);
 
     // Drive the shell to emit the marker on its own line, then exit.
-    state
-        .input(pane_id, format!("printf '{MARKER}\\n'\n").into_bytes())
-        .expect("input write");
+    state.input(pane_id, format!("printf '{MARKER}\\n'\n").into_bytes()).expect("input write");
 
     // Poll the subscriber mailbox until the marker shows up (bounded wait so
     // the test can never hang CI). Output arrives as ServerMsg::Output chunks.
