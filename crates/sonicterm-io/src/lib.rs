@@ -9,6 +9,7 @@
 pub mod foreground_proc;
 pub mod proc_info;
 pub mod pty;
+pub mod pty_backend_feasibility;
 pub mod ssh;
 
 #[cfg(test)]
