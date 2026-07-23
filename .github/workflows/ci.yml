@@ -74,6 +74,10 @@ jobs:
         shell: bash
         run: bash scripts/test-release-notes.sh
 
+      - name: Verify frozen PTY feasibility evidence
+        shell: bash
+        run: bash scripts/pty-backend-feasibility.sh --check
+
       - name: Install cargo-llvm-cov
         if: runner.os == 'macOS'
         run: cargo install cargo-llvm-cov --locked
