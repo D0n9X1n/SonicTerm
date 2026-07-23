@@ -23,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, windows-latest]
+        os: [macos-14, windows-2022, windows-latest]
     steps:
       - uses: actions/checkout@v7
 
@@ -77,6 +77,14 @@ jobs:
       - name: Verify frozen PTY feasibility evidence
         shell: bash
         run: bash scripts/pty-backend-feasibility.sh --check
+
+      - name: Verify resource inventory
+        shell: bash
+        run: bash scripts/test-resource-inventory.sh
+
+      - name: Run deterministic soak control gate
+        shell: bash
+        run: bash scripts/test-soak-harness.sh
 
       - name: Install cargo-llvm-cov
         if: runner.os == 'macOS'

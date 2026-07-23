@@ -5,10 +5,19 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GENERATOR="$ROOT/scripts/resource-inventory.py"
 OUTPUT="$ROOT/target/v1.2.0-baseline"
 
-rm -rf "$OUTPUT"
-python3 "$GENERATOR"
+if command -v python3 >/dev/null 2>&1; then
+  PY=python3
+elif command -v python >/dev/null 2>&1; then
+  PY=python
+else
+  echo "python3 or python is required to generate the resource inventory" >&2
+  exit 1
+fi
 
-python3 - "$GENERATOR" <<'PY'
+rm -rf "$OUTPUT"
+"$PY" "$GENERATOR"
+
+"$PY" - "$GENERATOR" <<'PY'
 import runpy
 import sys
 
@@ -29,7 +38,7 @@ for column, value in ((3, "WP-INVENTED owner"), (11, "WP-INVENTED")):
         raise AssertionError(f"invented package was accepted in column {column}")
 PY
 
-first_hashes="$(python3 - "$OUTPUT" <<'PY'
+first_hashes="$("$PY" - "$OUTPUT" <<'PY'
 import hashlib
 import pathlib
 import sys
@@ -40,8 +49,8 @@ for path in sorted(output.iterdir()):
 PY
 )"
 
-python3 "$GENERATOR"
-second_hashes="$(python3 - "$OUTPUT" <<'PY'
+"$PY" "$GENERATOR"
+second_hashes="$("$PY" - "$OUTPUT" <<'PY'
 import hashlib
 import pathlib
 import sys
@@ -53,9 +62,9 @@ PY
 )"
 
 test "$first_hashes" = "$second_hashes"
-python3 "$GENERATOR" --check
+"$PY" "$GENERATOR" --check
 
-python3 - "$OUTPUT" <<'PY'
+"$PY" - "$OUTPUT" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -78,10 +87,10 @@ assert len(document["rows"]) == 7
 PY
 
 printf '\n' >> "$OUTPUT/resource-inventory.md"
-if python3 "$GENERATOR" --check >/dev/null 2>&1; then
+if "$PY" "$GENERATOR" --check >/dev/null 2>&1; then
     printf 'resource-inventory.py --check accepted stale output\n' >&2
     exit 1
 fi
 
-python3 "$GENERATOR"
-python3 "$GENERATOR" --check
+"$PY" "$GENERATOR"
+"$PY" "$GENERATOR" --check
