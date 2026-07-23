@@ -96,9 +96,21 @@ metadata is optional: malformed, missing, or out-of-range variation metadata
 falls back to base OS/2/default weight and width rather than aborting the app.
 Embedded bitmap strikes are loaded metrics-only and checked against the glyph
 allocation budget before FreeType may decode their pixels.
-Glyph/image atlas textures initialize lazily through dirty-tile uploads, and
-same-dimension CPU atlas resets retain the existing GPU texture and bind group
-instead of creating a transient second 2048×2048 allocation.
+Glyph/image atlas textures initialize lazily through dirty-tile uploads.
+Same-dimension atlas resets clear metadata and packing state in place without
+zeroing or replacing the retained CPU pixel allocation; cached UV generations
+are invalidated before newly inserted tiles overwrite any sampled rectangles.
+The inline-image atlas starts as a 1×1 CPU/GPU placeholder and promotes to its
+bounded full size only when a renderable image first appears. Atlas uploads
+coalesce compatible dirty rectangles and reuse staging storage across frames.
+On Windows, deterministic software presentation keeps the full CPU glyph atlas
+but replaces GPU atlas textures with 1×1 placeholders. Returning to GPU
+presentation recreates matching textures, resets atlas metadata and UV-bearing
+caches, and forces a full redraw before the new textures can be sampled.
+
+The hidden warm-renderer pool defaults to one on every adapter. A configured
+value of zero disables it; hardware honors values up to five, while software
+rendering caps every nonzero target at one.
 
 PTY handles own their native reader and writer threads. Unix natural exit is
 observed with `waitid(..., WNOWAIT)`; teardown repeatedly terminates every

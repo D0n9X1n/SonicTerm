@@ -199,6 +199,8 @@ pub struct RendererSettings<'a> {
     pub padding: [f32; 4],
     /// Surface/backdrop settings.
     pub appearance: SurfaceAppearance,
+    /// Stable renderer role used by memory and timing diagnostics.
+    pub role: &'static str,
 }
 
 fn cursor_color_from_theme(theme: &Theme) -> [f32; 4] {
@@ -449,7 +451,7 @@ fn splitter_rects_from_panes(pane_rects: &[(u64, PaneRect)], thickness: f32) -> 
 }
 
 use crate::{
-    atlas_upload::AtlasUpload,
+    atlas_upload::{AtlasUpload, AtlasUploadStats},
     quad::{premultiply, px_to_ndc, QuadInstance},
     wezterm_pipeline::WeztermPipeline,
 };
@@ -652,6 +654,32 @@ fn atlas_texture_rebuild_required(current: (u32, u32), next: (u32, u32)) -> bool
     current != next
 }
 
+fn scale_factor_rebuild_required(current: f32, next: f32) -> bool {
+    (current - next.max(0.1)).abs() >= f32::EPSILON
+}
+
+const PLACEHOLDER_ATLAS_DIM: u32 = 1;
+
+#[must_use]
+fn atlas_payload_bytes(width: u32, height: u32) -> u64 {
+    u64::from(width).saturating_mul(u64::from(height)).saturating_mul(4)
+}
+
+#[must_use]
+fn desired_gpu_atlas_dimensions(software_presenter: bool, atlas: &GlyphAtlas) -> (u32, u32) {
+    if software_presenter {
+        (PLACEHOLDER_ATLAS_DIM, PLACEHOLDER_ATLAS_DIM)
+    } else {
+        (atlas.width(), atlas.height())
+    }
+}
+
+#[must_use]
+fn image_atlas_promotion_required(atlas: &GlyphAtlas, has_inline_media: bool) -> bool {
+    has_inline_media
+        && (atlas.width(), atlas.height()) == (PLACEHOLDER_ATLAS_DIM, PLACEHOLDER_ATLAS_DIM)
+}
+
 fn full_surface_rect(width: u32, height: u32) -> PixelRect {
     PixelRect { x: 0, y: 0, w: width.max(1), h: height.max(1) }
 }
@@ -845,6 +873,7 @@ pub struct GpuRenderer {
     // referenced by the row cache.
     image_atlas: GlyphAtlas,
     image_upload: AtlasUpload,
+    retained_inline_media_bytes: usize,
     /// True after an eviction-triggered compaction. The rebuilt atlas has
     /// eviction disabled until one frame presents successfully, bounding
     /// retries when the visible glyph working set exceeds atlas capacity.
@@ -1418,8 +1447,14 @@ impl GpuRenderer {
         settings: RendererSettings<'_>,
         shared: Option<GpuSharedContext>,
     ) -> Result<Self> {
-        let RendererSettings { font_family, font_size, line_height_mult, padding, appearance } =
-            settings;
+        let RendererSettings {
+            font_family,
+            font_size,
+            line_height_mult,
+            padding,
+            appearance,
+            role,
+        } = settings;
         let [padding_left, padding_right, padding_top, padding_bottom] = padding;
         let size = window.inner_size();
         // G1a: read the OS DPI multiplier; stored verbatim into the
@@ -1556,18 +1591,45 @@ impl GpuRenderer {
         let (frame_texture, frame_view) =
             create_frame_texture(&device, config.width, config.height, format);
         let frame_blitter = wgpu::util::TextureBlitter::new(&device, format);
-        let mut glyph_atlas = GlyphAtlas::default_size();
-        let glyph_upload = AtlasUpload::new(
+        let glyph_atlas = GlyphAtlas::default_size();
+        let image_atlas = GlyphAtlas::new(PLACEHOLDER_ATLAS_DIM, PLACEHOLDER_ATLAS_DIM);
+        let software_presenter = cfg!(target_os = "windows") && software_render_degrade;
+        let glyph_gpu_dimensions = desired_gpu_atlas_dimensions(software_presenter, &glyph_atlas);
+        let image_gpu_dimensions = desired_gpu_atlas_dimensions(software_presenter, &image_atlas);
+        let glyph_upload = AtlasUpload::new_sized(
             &device,
-            &glyph_atlas,
+            glyph_gpu_dimensions.0,
+            glyph_gpu_dimensions.1,
             present_pipeline.texture_bind_group_layout(),
         );
-        let _ = (&mut glyph_atlas,); // touch so `mut` binding stays in scope for downstream warmup loops
-        let image_atlas = GlyphAtlas::default_size();
-        let image_upload = AtlasUpload::new(
+        let image_upload = AtlasUpload::new_sized(
             &device,
-            &image_atlas,
+            image_gpu_dimensions.0,
+            image_gpu_dimensions.1,
             present_pipeline.texture_bind_group_layout(),
+        );
+        tracing::debug!(
+            target: "memory",
+            renderer_role = role,
+            window_id = ?window.id(),
+            software_presenter,
+            glyph_cpu_width = glyph_atlas.width(),
+            glyph_cpu_height = glyph_atlas.height(),
+            glyph_cpu_payload_bytes = atlas_payload_bytes(glyph_atlas.width(), glyph_atlas.height()),
+            glyph_gpu_width = glyph_gpu_dimensions.0,
+            glyph_gpu_height = glyph_gpu_dimensions.1,
+            glyph_gpu_payload_bytes = atlas_payload_bytes(glyph_gpu_dimensions.0, glyph_gpu_dimensions.1),
+            image_cpu_width = image_atlas.width(),
+            image_cpu_height = image_atlas.height(),
+            image_cpu_payload_bytes = atlas_payload_bytes(image_atlas.width(), image_atlas.height()),
+            image_gpu_width = image_gpu_dimensions.0,
+            image_gpu_height = image_gpu_dimensions.1,
+            image_gpu_payload_bytes = atlas_payload_bytes(image_gpu_dimensions.0, image_gpu_dimensions.1),
+            glyph_resident = glyph_atlas.len(),
+            image_resident = image_atlas.len(),
+            retained_inline_media_bytes = 0,
+            payload_estimate = true,
+            "renderer atlas payload initialized"
         );
 
         // G1a (T2) + T13: cell metrics come from sonicterm-font in raster
@@ -1642,6 +1704,7 @@ impl GpuRenderer {
             glyph_atlas_generation: 0,
             image_atlas,
             image_upload,
+            retained_inline_media_bytes: 0,
             glyph_atlas_retry_without_eviction: false,
             font_family: font_family.to_string(),
             font_size,
@@ -1689,7 +1752,7 @@ impl GpuRenderer {
             skipped_frames: 0,
             #[cfg(target_os = "windows")]
             software_frame: None,
-            render_timing_label: "unknown",
+            render_timing_label: role,
             tab_bar_visible: true,
             titlebar_inset: 0.0,
             last_missing_chars: Vec::new(),
@@ -2368,6 +2431,7 @@ impl GpuRenderer {
         if self.software_render_degrade == degrade {
             return;
         }
+        let used_software_presenter = self.uses_windows_software_presenter();
         self.software_render_degrade = degrade;
         if degrade {
             self.config.present_mode = PresentMode::Fifo;
@@ -2383,7 +2447,40 @@ impl GpuRenderer {
             }
         }
         self.surface.configure(&self.device, &self.config);
+        let uses_software_presenter = self.uses_windows_software_presenter();
+        if used_software_presenter != uses_software_presenter {
+            if !uses_software_presenter {
+                self.reset_glyph_atlas_in_place("software_to_gpu");
+                self.reset_image_atlas();
+                self.glyph_atlas_retry_without_eviction = false;
+                self.row_glyph_cache.invalidate_all();
+                self.line_quad_cache.invalidate_all();
+            }
+            self.rebuild_glyph_upload_if_needed();
+            self.rebuild_image_upload_if_needed();
+            tracing::debug!(
+                target: "memory",
+                renderer_role = self.render_timing_label,
+                window_id = ?self.window.id(),
+                software_presenter = uses_software_presenter,
+                glyph_gpu_width = self.glyph_upload.width(),
+                glyph_gpu_height = self.glyph_upload.height(),
+                glyph_gpu_payload_bytes = atlas_payload_bytes(self.glyph_upload.width(), self.glyph_upload.height()),
+                image_gpu_width = self.image_upload.width(),
+                image_gpu_height = self.image_upload.height(),
+                image_gpu_payload_bytes = atlas_payload_bytes(self.image_upload.width(), self.image_upload.height()),
+                glyph_resident = self.glyph_atlas.len(),
+                image_resident = self.image_atlas.len(),
+                payload_estimate = true,
+                "renderer software/GPU atlas transition"
+            );
+        }
         self.last_frame_key = None;
+        self.window.request_redraw();
+    }
+
+    fn uses_windows_software_presenter(&self) -> bool {
+        cfg!(target_os = "windows") && self.software_render_degrade
     }
 
     /// Current OS display scale factor (physical px per logical px). Exposed so
@@ -2492,10 +2589,8 @@ impl GpuRenderer {
             "glyph atlas evicted during frame assembly; rebuilding before presentation"
         );
 
-        self.glyph_atlas = GlyphAtlas::new(width, height);
-        self.mark_glyph_atlas_replaced();
+        self.reset_glyph_atlas_in_place("eviction_compaction");
         self.glyph_atlas.set_eviction_enabled(false);
-        self.rebuild_glyph_upload_if_needed();
         self.row_glyph_cache.invalidate_all();
         self.glyph_atlas_retry_without_eviction = true;
         self.last_frame_key = None;
@@ -2514,11 +2609,86 @@ impl GpuRenderer {
         self.preedit_glyph_cache = None;
     }
 
+    fn reset_glyph_atlas_in_place(&mut self, reason: &'static str) {
+        let width = self.glyph_atlas.width();
+        let height = self.glyph_atlas.height();
+        self.glyph_atlas.reset_in_place();
+        self.mark_glyph_atlas_replaced();
+        tracing::debug!(
+            target: "memory",
+            renderer_role = self.render_timing_label,
+            window_id = ?self.window.id(),
+            software_presenter = self.uses_windows_software_presenter(),
+            atlas = "glyph",
+            reason,
+            width,
+            height,
+            cpu_payload_bytes = atlas_payload_bytes(width, height),
+            gpu_width = self.glyph_upload.width(),
+            gpu_height = self.glyph_upload.height(),
+            gpu_payload_bytes = atlas_payload_bytes(self.glyph_upload.width(), self.glyph_upload.height()),
+            resident = self.glyph_atlas.len(),
+            retained_inline_media_bytes = self.retained_inline_media_bytes,
+            retained_pixel_allocation = true,
+            payload_estimate = true,
+            "renderer atlas reset in place"
+        );
+    }
+
     fn reset_image_atlas(&mut self) {
         let width = self.image_atlas.width();
         let height = self.image_atlas.height();
-        self.image_atlas = GlyphAtlas::new(width, height);
-        self.rebuild_image_upload_if_needed();
+        self.image_atlas.reset_in_place();
+        tracing::debug!(
+            target: "memory",
+            renderer_role = self.render_timing_label,
+            window_id = ?self.window.id(),
+            software_presenter = self.uses_windows_software_presenter(),
+            atlas = "image",
+            width,
+            height,
+            cpu_payload_bytes = atlas_payload_bytes(width, height),
+            gpu_width = self.image_upload.width(),
+            gpu_height = self.image_upload.height(),
+            gpu_payload_bytes = atlas_payload_bytes(self.image_upload.width(), self.image_upload.height()),
+            resident = self.image_atlas.len(),
+            retained_inline_media_bytes = self.retained_inline_media_bytes,
+            retained_pixel_allocation = true,
+            payload_estimate = true,
+            "renderer atlas reset in place"
+        );
+    }
+
+    fn promote_image_atlas_if_needed(
+        &mut self,
+        has_inline_media: bool,
+        retained_inline_media_bytes: usize,
+    ) -> bool {
+        if !image_atlas_promotion_required(&self.image_atlas, has_inline_media) {
+            return false;
+        }
+        self.image_atlas = GlyphAtlas::default_size();
+        if !self.uses_windows_software_presenter() {
+            self.rebuild_image_upload_if_needed();
+        }
+        tracing::debug!(
+            target: "memory",
+            renderer_role = self.render_timing_label,
+            window_id = ?self.window.id(),
+            software_presenter = self.uses_windows_software_presenter(),
+            atlas = "image",
+            width = self.image_atlas.width(),
+            height = self.image_atlas.height(),
+            cpu_payload_bytes = atlas_payload_bytes(self.image_atlas.width(), self.image_atlas.height()),
+            gpu_width = self.image_upload.width(),
+            gpu_height = self.image_upload.height(),
+            gpu_payload_bytes = atlas_payload_bytes(self.image_upload.width(), self.image_upload.height()),
+            resident = self.image_atlas.len(),
+            retained_inline_media_bytes,
+            payload_estimate = true,
+            "inline image atlas promoted"
+        );
+        true
     }
 
     /// Deprecated close-button color override. The button is no longer
@@ -2561,10 +2731,7 @@ impl GpuRenderer {
         self.font_stack = new_stack;
         self.cell_w = new_cell_w;
         self.cell_h = new_line_h;
-        let w = self.glyph_atlas.width();
-        let h = self.glyph_atlas.height();
-        self.glyph_atlas = GlyphAtlas::new(w, h);
-        self.mark_glyph_atlas_replaced();
+        self.reset_glyph_atlas_in_place("font_change");
         self.glyph_atlas_retry_without_eviction = false;
         // T13/T14: SwashRasterizer prebake gone. Atlas is now lazily
         // filled by the wezterm rasterizer on the next render.
@@ -2589,11 +2756,9 @@ impl GpuRenderer {
     /// independent of DPI" because the renderer's coordinate system
     /// IS raster pixels.
     pub fn set_scale_factor(&mut self, scale_factor: f32) {
-        // G1a: always rebuild — the prior no-op-on-equal check used an
-        // extra field-read that conflicted with the ≤5 grep budget.
-        // `rebuild_for_sf` clamps internally. Atlas rebuild is cheap
-        // relative to the surrounding event, and the setter is only
-        // called on real DPI changes anyway (winit `ScaleFactorChanged`).
+        if !scale_factor_rebuild_required(self.scale_factor, scale_factor) {
+            return;
+        }
         self.rebuild_for_sf(scale_factor);
     }
 
@@ -2638,8 +2803,7 @@ impl GpuRenderer {
         // and grows on demand; no DPI-derived resize and no
         // SwashRasterizer prebake. The wezterm rasterizer fills the
         // atlas lazily on first encounter with each glyph.
-        self.glyph_atlas = GlyphAtlas::default_size();
-        self.mark_glyph_atlas_replaced();
+        self.reset_glyph_atlas_in_place("dpi_change");
         self.glyph_atlas_retry_without_eviction = false;
         // G1a: cell metrics are raster px end-to-end, so re-pull them
         // from sonicterm-font when the rasterizer target moves. Falls
@@ -2693,11 +2857,15 @@ impl GpuRenderer {
 
     fn rebuild_glyph_upload_if_needed(&mut self) {
         let current = (self.glyph_upload.width(), self.glyph_upload.height());
-        let next = (self.glyph_atlas.width(), self.glyph_atlas.height());
+        let next = desired_gpu_atlas_dimensions(
+            self.uses_windows_software_presenter(),
+            &self.glyph_atlas,
+        );
         if atlas_texture_rebuild_required(current, next) {
-            self.glyph_upload = AtlasUpload::new(
+            self.glyph_upload = AtlasUpload::new_sized(
                 &self.device,
-                &self.glyph_atlas,
+                next.0,
+                next.1,
                 self.present_pipeline.texture_bind_group_layout(),
             );
         }
@@ -2705,14 +2873,43 @@ impl GpuRenderer {
 
     fn rebuild_image_upload_if_needed(&mut self) {
         let current = (self.image_upload.width(), self.image_upload.height());
-        let next = (self.image_atlas.width(), self.image_atlas.height());
+        let next = desired_gpu_atlas_dimensions(
+            self.uses_windows_software_presenter(),
+            &self.image_atlas,
+        );
         if atlas_texture_rebuild_required(current, next) {
-            self.image_upload = AtlasUpload::new(
+            self.image_upload = AtlasUpload::new_sized(
                 &self.device,
-                &self.image_atlas,
+                next.0,
+                next.1,
                 self.present_pipeline.texture_bind_group_layout(),
             );
         }
+    }
+
+    fn log_atlas_upload_stats(
+        &self,
+        atlas: &'static str,
+        stats: AtlasUploadStats,
+        retained_inline_media_bytes: usize,
+    ) {
+        if stats.dirty_rects == 0 {
+            return;
+        }
+        tracing::debug!(
+            target: "memory",
+            renderer_role = self.render_timing_label,
+            window_id = ?self.window.id(),
+            software_presenter = self.uses_windows_software_presenter(),
+            atlas,
+            dirty_rects = stats.dirty_rects,
+            upload_calls = stats.upload_calls,
+            uploaded_bytes = stats.uploaded_bytes,
+            retained_inline_media_bytes,
+            glyph_resident = self.glyph_atlas.len(),
+            image_resident = self.image_atlas.len(),
+            "renderer atlas upload synchronized"
+        );
     }
 
     /// Apply a new color theme without reconstructing the renderer.
@@ -3068,6 +3265,11 @@ impl GpuRenderer {
             .iter()
             .map(|pv| (pv.pane_id, pv.grid.revision(), pv.viewport_top_abs))
             .collect();
+        let retained_inline_media_bytes = pane_views
+            .iter()
+            .flat_map(|view| view.inline_images)
+            .fold(0usize, |total, image| total.saturating_add(image.bgra.len()));
+        self.retained_inline_media_bytes = retained_inline_media_bytes;
         let inline_media_hash = {
             use std::collections::hash_map::DefaultHasher;
             use std::hash::{Hash, Hasher};
@@ -3414,9 +3616,6 @@ impl GpuRenderer {
         if matches!(render_mode, RenderMode::Noop) {
             self.last_frame_key = Some(key);
             return Ok(());
-        }
-        if inline_media_changed {
-            self.reset_image_atlas();
         }
         let emit_full_rows = matches!(render_mode, RenderMode::Full);
         gpu_lap!("frame_key");
@@ -3847,6 +4046,22 @@ impl GpuRenderer {
                 painter_order,
             })
             .collect();
+        let has_renderable_inline_media = inline_image_placements.iter().any(|placement| {
+            let image = placement.image;
+            if image.width == 0 || image.height == 0 || image.bgra.is_empty() {
+                return false;
+            }
+            let x = placement.origin_x + image.col as f32 * cell_w;
+            let y = placement.origin_y + image.row as f32 * cell_h;
+            x < sw && y < sh && x + image.width as f32 > 0.0 && y + image.height as f32 > 0.0
+        });
+        let image_atlas_promoted = self.promote_image_atlas_if_needed(
+            has_renderable_inline_media,
+            retained_inline_media_bytes,
+        );
+        if inline_media_changed && !image_atlas_promoted {
+            self.reset_image_atlas();
+        }
         let mut image_glyph_instances = Vec::new();
         let skipped_inline_images = emit_inline_image_instances(
             &mut self.image_atlas,
@@ -5728,8 +5943,8 @@ impl GpuRenderer {
                 &quads_overlay,
                 &overlay_glyph_instances,
             );
-            let _ = self.glyph_atlas.take_dirty_rects();
-            let _ = self.image_atlas.take_dirty_rects();
+            self.glyph_atlas.clear_dirty_rects();
+            self.image_atlas.clear_dirty_rects();
             frame.present(&self.window)?;
             gpu_lap!("software_present");
             self.finish_successful_frame(
@@ -5747,8 +5962,10 @@ impl GpuRenderer {
         // draw call samples it. Must come AFTER the grid walk above
         // (which is what populated the dirty rects) and BEFORE the
         // WezTerm presentation draw call in the render pass below.
-        self.image_upload.sync(&self.queue, &mut self.image_atlas);
-        self.glyph_upload.sync(&self.queue, &mut self.glyph_atlas);
+        let image_upload_stats = self.image_upload.sync(&self.queue, &mut self.image_atlas);
+        let glyph_upload_stats = self.glyph_upload.sync(&self.queue, &mut self.glyph_atlas);
+        self.log_atlas_upload_stats("image", image_upload_stats, retained_inline_media_bytes);
+        self.log_atlas_upload_stats("glyph", glyph_upload_stats, retained_inline_media_bytes);
         gpu_lap!("glyph_upload");
 
         let frame = match self.surface.get_current_texture() {

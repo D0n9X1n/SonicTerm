@@ -67,6 +67,52 @@ fn subpixel_text_coverage_copies_bgra_channels() {
 }
 
 #[test]
+fn reset_in_place_retains_pixels_and_restarts_atlas_state() {
+    let mut atlas = GlyphAtlas::new(2, 1);
+    let old = GlyphKey::new('a', false, false);
+    let old_info = atlas
+        .get_or_insert(old, &mut OnePixelRasterizer)
+        .expect("old tile inserts");
+    atlas.tick_frame();
+    atlas.set_eviction_enabled(false);
+    let pixels_ptr = atlas.pixels().as_ptr();
+    let pixels_capacity = atlas.pixels.capacity();
+    let old_sample = atlas.sample(0, 0);
+
+    atlas.reset_in_place();
+
+    assert_eq!(atlas.pixels().as_ptr(), pixels_ptr);
+    assert_eq!(atlas.pixels.capacity(), pixels_capacity);
+    assert_eq!(atlas.sample(0, 0), old_sample, "reset must not clear the retained pixel buffer");
+    assert!(atlas.get(old).is_none());
+    assert!(atlas.is_empty());
+    assert_eq!(atlas.hits(), 0);
+    assert_eq!(atlas.misses(), 0);
+    assert_eq!(atlas.evictions(), 0);
+    assert_eq!(atlas.current_frame(), 0);
+    assert!(atlas.take_dirty_rects().is_empty());
+
+    let new = GlyphKey::new('b', false, false);
+    let replacement = atlas
+        .get_or_insert(
+            new,
+            &mut TileRasterizer(RasterTile {
+                width: 1,
+                height: 1,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 1.0,
+                coverage: vec![23],
+                is_color: false,
+                is_subpixel: false,
+            }),
+        )
+        .expect("replacement tile inserts");
+    assert_eq!(replacement.uv, old_info.uv);
+    assert_eq!(atlas.sample(0, 0), 23, "replacement must overwrite retained bytes before sampling");
+}
+
+#[test]
 fn non_evicting_insert_preserves_resident_tiles_when_full() {
     let mut atlas = GlyphAtlas::new(1, 1);
     let mut rasterizer = OnePixelRasterizer;

@@ -341,6 +341,19 @@ impl GlyphAtlas {
         self.eviction_enabled = enabled;
     }
 
+    /// Reset atlas contents and packing state while retaining the pixel allocation.
+    pub fn reset_in_place(&mut self) {
+        self.map.clear();
+        self.packer = ShelfPacker::new(self.width, self.height);
+        self.free_rects.clear();
+        self.dirty.clear();
+        self.hits = 0;
+        self.misses = 0;
+        self.current_frame = 0;
+        self.evictions = 0;
+        self.eviction_enabled = true;
+    }
+
     /// Borrow the CPU-side alpha buffer. Used by `AtlasUpload` to push
     /// the initial empty texture; the upload path normally uses
     /// `take_dirty_rects` + subregion writes.
@@ -359,6 +372,17 @@ impl GlyphAtlas {
     /// these subregions to the GPU before the next frame.
     pub fn take_dirty_rects(&mut self) -> Vec<DirtyRect> {
         std::mem::take(&mut self.dirty)
+    }
+
+    /// Move pending dirty rectangles into reusable caller-owned storage.
+    pub fn drain_dirty_rects_into(&mut self, out: &mut Vec<DirtyRect>) {
+        out.clear();
+        out.append(&mut self.dirty);
+    }
+
+    /// Discard pending dirty rectangles while retaining their allocation.
+    pub fn clear_dirty_rects(&mut self) {
+        self.dirty.clear();
     }
 
     /// Look up the glyph for `key`, rasterizing + packing on miss.
@@ -727,7 +751,6 @@ impl Rasterizer for SyntheticRasterizer {
         })
     }
 }
-
 
 #[cfg(test)]
 #[path = "glyph_atlas_tests.rs"]

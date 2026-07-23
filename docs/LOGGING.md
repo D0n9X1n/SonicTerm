@@ -57,9 +57,15 @@ do not opt the presenter into retained GPU rendering.
 
 At `debug` level, `target="memory"` records accepted surface dimensions, BGRA
 byte counts, software-frame capacity changes, and rejected unsafe resize
-requests. Capture these lines when a report involves a sudden memory jump;
-they distinguish window/frame allocations from PTY, font, or inline-media
-growth without requiring a diagnostic build.
+requests. It also records renderer/window role and identity, software-presenter
+state, CPU/GPU atlas dimensions and owned-payload estimates, glyph/image
+resident counts, lazy image-atlas promotion, in-place resets, upload dirty-rect
+counts/calls/bytes, retained inline-media bytes, and warm-renderer counts.
+Payload fields estimate storage directly owned by these resources; they are not
+process RSS, commit, or shared-GPU accounting and do not identify the allocator
+behind a historical memory incident. Capture these lines when a report involves
+a sudden memory jump; they distinguish window/frame/atlas allocations from PTY,
+font, or inline-media growth without requiring a diagnostic build.
 
 ## Redraw and window-lifecycle diagnostics
 
