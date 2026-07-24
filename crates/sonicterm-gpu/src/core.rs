@@ -219,6 +219,19 @@ pub(crate) fn glyph_flags(is_color: bool, is_subpixel: bool) -> [f32; 4] {
     [if is_color { 1.0 } else { 0.0 }, if is_subpixel { 1.0 } else { 0.0 }, 0.0, 0.0]
 }
 
+fn software_block_glyph_target_rect(
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+) -> (f32, f32, f32, f32) {
+    let left = (left - 0.5).ceil();
+    let top = (top - 0.5).ceil();
+    let right = (right - 0.5).ceil().max(left + 1.0);
+    let bottom = (bottom - 0.5).ceil().max(top + 1.0);
+    (left, top, right - left, bottom - top)
+}
+
 /// Resolve the title text colour for a single tab, honouring hover.
 ///
 /// Two cases, unified so a custom-coloured tab highlights on hover exactly
@@ -2449,12 +2462,12 @@ impl GpuRenderer {
         self.surface.configure(&self.device, &self.config);
         let uses_software_presenter = self.uses_windows_software_presenter();
         if used_software_presenter != uses_software_presenter {
+            self.row_glyph_cache.invalidate_all();
+            self.line_quad_cache.invalidate_all();
             if !uses_software_presenter {
                 self.reset_glyph_atlas_in_place("software_to_gpu");
                 self.reset_image_atlas();
                 self.glyph_atlas_retry_without_eviction = false;
-                self.row_glyph_cache.invalidate_all();
-                self.line_quad_cache.invalidate_all();
             }
             self.rebuild_glyph_upload_if_needed();
             self.rebuild_image_upload_if_needed();
@@ -3683,6 +3696,7 @@ impl GpuRenderer {
         // line-height; finer baseline control would require querying
         // font metrics, which is a follow-up polish item.
         let baseline_y_in_cell = cell_h * 0.8;
+        let software_presenter = self.uses_windows_software_presenter();
 
         let raster_px = self.raster_px(self.font_size);
         {
@@ -3962,6 +3976,7 @@ impl GpuRenderer {
                                     wt_raster.as_mut(),
                                     pane_hovered_url,
                                     hovered_url_accent,
+                                    software_presenter,
                                 );
                                 run_cells.clear();
                                 run_style = Some(style);
@@ -3996,6 +4011,7 @@ impl GpuRenderer {
                             wt_raster.as_mut(),
                             pane_hovered_url,
                             hovered_url_accent,
+                            software_presenter,
                         );
                     }
                     // Capture this row's contributions and insert into
@@ -6266,6 +6282,7 @@ impl GpuRenderer {
         // recolor above. Same color space the per-glyph `color` field
         // already carries, so it is assigned with no conversion.
         hovered_url_accent: [f32; 4],
+        software_presenter: bool,
     ) {
         if cells.is_empty() {
             return;
@@ -6456,12 +6473,20 @@ impl GpuRenderer {
                 let cy = top_inset + f32::from(row) * cell_h;
                 let span = if is_wide { 2usize } else { cluster_cells };
                 let end_col = ((g.lead_col as usize) + span).min(snapped_cell_x.len() - 1);
-                let cell_pixel_width_snapped =
-                    snapped_cell_x[end_col] - snapped_cell_x[g.lead_col as usize];
-                // Cell box used both as the block_sprite metric and as
-                // the on-screen rect. raster-px throughout.
-                let cell_w_i = cell_w.round().max(1.0) as isize;
-                let cell_h_i = cell_h.round().max(1.0) as isize;
+                let cell_right = snapped_cell_x[end_col];
+                let (gx, gy, gw, gh) = if software_presenter {
+                    let cell_bottom = top_inset + (f32::from(row) + 1.0) * cell_h;
+                    software_block_glyph_target_rect(cx, cy, cell_right, cell_bottom)
+                } else {
+                    (cx, cy, cell_right - cx, cell_h)
+                };
+                // Hardware keeps the established font-cell geometry unchanged.
+                // The software presenter rasterizes to the exact integer
+                // destination so glyph-atlas sampling stays one-to-one.
+                let cell_w_i =
+                    if software_presenter { gw } else { cell_w }.round().max(1.0) as isize;
+                let cell_h_i =
+                    if software_presenter { gh } else { cell_h }.round().max(1.0) as isize;
                 // Bug 4 / wezterm-takeover: stroke width for the
                 // `PolyStyle::Outline` box-drawing path comes from the
                 // font's actual `underline_thickness`, mirroring
@@ -6581,17 +6606,9 @@ impl GpuRenderer {
                 if info.px_size[0] == 0 || info.px_size[1] == 0 {
                     continue;
                 }
-                // Block glyphs are cell-sized tiles aligned to the
-                // cell-box origin. No baseline offset, no symbol-fit,
-                // no per-glyph stretching — `block_sprite` already
-                // emits exactly the cell rect, so we draw it 1:1 at
-                // `(cx, cy)` with width = the snapped cell-box width.
-                let gx = cx;
-                let gy = cy;
-                let gw = cell_pixel_width_snapped;
-                let gh = cell_h;
-                let (gx, gy, gw, gh) =
-                    sonicterm_render_model::geometry::snap_to_device_pixels((gx, gy, gw, gh), 1.0);
+                // `block_sprite` was generated from this exact target size.
+                // Keeping the destination identical avoids software resampling;
+                // the hardware branch retains its established fractional rect.
                 let color = cell_fg(&lead_cell, theme, fg_default);
                 // Block glyphs are converted to monochrome masks so they
                 // honour the cell foreground and Cmd-hover URL recolor like text.
