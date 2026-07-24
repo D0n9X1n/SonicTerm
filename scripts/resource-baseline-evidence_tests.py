@@ -11,6 +11,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 _HERE = Path(__file__).resolve().parent
 _COLLECTOR_PATH = _HERE / "resource-baseline-evidence.py"
@@ -157,6 +158,32 @@ class SchemaContractTests(unittest.TestCase):
         self.assertEqual(
             evidence.RUNNER_LABELS,
             ("macos-14", "windows-2022", "windows-latest"),
+        )
+
+
+class EnvironmentProvenanceTests(unittest.TestCase):
+    def test_image_provenance_lookup_accepts_windows_uppercase_keys(self):
+        with mock.patch.object(evidence.platform, "system", return_value="Windows"), \
+             mock.patch.object(evidence.platform, "release", return_value="Server"), \
+             mock.patch.object(evidence.platform, "version", return_value="10.0.26100"), \
+             mock.patch.object(evidence.platform, "machine", return_value="AMD64"), \
+             mock.patch.object(evidence, "_windows_build", return_value=26100):
+            facts = evidence.platform_facts(
+                {"IMAGEOS": "win25", "IMAGEVERSION": "20260720.1"}
+            )
+
+        self.assertEqual(facts["image_os"], "win25")
+        self.assertEqual(facts["image_version"], "20260720.1")
+        self.assertEqual(facts["windows_build"], 26100)
+
+    def test_image_provenance_lookup_accepts_documented_mixed_case_keys(self):
+        self.assertEqual(
+            evidence._environment_value({"ImageOS": "macos14"}, "ImageOS"),
+            "macos14",
+        )
+        self.assertEqual(
+            evidence._environment_value({"ImageVersion": "20260720.1"}, "ImageVersion"),
+            "20260720.1",
         )
 
 

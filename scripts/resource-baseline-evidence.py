@@ -401,6 +401,15 @@ def _windows_build() -> int | None:
     return numbers[-1] if numbers else None
 
 
+def _environment_value(environ: dict, name: str):
+    """Read an environment value without assuming key casing."""
+    folded_name = name.casefold()
+    for key, value in environ.items():
+        if str(key).casefold() == folded_name:
+            return value
+    return None
+
+
 def platform_facts(environ: dict) -> dict:
     """Collect OS facts without trusting the configured runner label."""
     system = platform.system()
@@ -411,8 +420,8 @@ def platform_facts(environ: dict) -> dict:
         "machine": platform.machine(),
         "macos_version": platform.mac_ver()[0] or None if system == "Darwin" else None,
         "windows_build": _windows_build() if system == "Windows" else None,
-        "image_os": environ.get("ImageOS"),
-        "image_version": environ.get("ImageVersion"),
+        "image_os": _environment_value(environ, "ImageOS"),
+        "image_version": _environment_value(environ, "ImageVersion"),
     }
 
 
