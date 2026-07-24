@@ -266,6 +266,7 @@ impl WindowsSoftwareFrame {
         let fg_alpha = glyph.color[3].clamp(0.0, 1.0);
         let color_glyph = glyph.flags[0] >= 0.5;
         let subpixel_glyph = glyph.flags[1] >= 0.5;
+        let image = glyph.flags[2] >= 0.5;
         for yy in y0..y1 {
             let ty = ((yy as f32 + 0.5 - draw_y) / h).clamp(0.0, 0.999_999);
             let sy = ay0 as f32 + src_h * ty;
@@ -273,11 +274,13 @@ impl WindowsSoftwareFrame {
             for xx in x0..x1 {
                 let tx = ((xx as f32 + 0.5 - draw_x) / w).clamp(0.0, 0.999_999);
                 let sx = ax0 as f32 + src_w * tx;
+                // Match the GPU pipeline: glyphs use nearest sampling while
+                // inline images retain intentional bilinear scaling.
                 let sample = if one_to_one {
                     let sx = ax0 + (xx - x0) as u32;
                     let sy = ay0 + (yy - y0) as u32;
                     bgra_pixel_at(atlas_pixels, atlas_w, sx.min(atlas_w - 1), sy.min(atlas_h - 1))
-                } else {
+                } else if image {
                     sample_atlas_bilinear_in_rect(
                         atlas_pixels,
                         atlas_w,
@@ -286,6 +289,10 @@ impl WindowsSoftwareFrame {
                         sy,
                         (ax0, ay0, ax1, ay1),
                     )
+                } else {
+                    let sx = sx.floor().clamp(ax0 as f32, (ax1 - 1) as f32) as u32;
+                    let sy = sy.floor().clamp(ay0 as f32, (ay1 - 1) as f32) as u32;
+                    bgra_pixel_at(atlas_pixels, atlas_w, sx, sy)
                 };
                 let dst_off = row + xx as usize * 4;
                 if color_glyph {
