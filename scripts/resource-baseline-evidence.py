@@ -28,9 +28,15 @@ class EvidenceError(ValueError):
 class CommandSpec:
     """A named command whose complete output belongs in the evidence bundle."""
 
-    def __init__(self, name: str, argv: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        name: str,
+        argv: tuple[str, ...],
+        expected_test: str | None = None,
+    ) -> None:
         self.name = name
         self.argv = argv
+        self.expected_test = expected_test
 
 
 def classify_platform(runner_label: str, facts: dict) -> dict:
@@ -71,13 +77,30 @@ def classify_platform(runner_label: str, facts: dict) -> dict:
     return profile
 
 
+def _pty_test_command(name: str, test_name: str) -> CommandSpec:
+    full_name = "pty::pty_tests::{}".format(test_name)
+    return CommandSpec(
+        name,
+        (
+            "cargo",
+            "test",
+            "-p",
+            "sonicterm-io",
+            "--lib",
+            full_name,
+            "--",
+            "--exact",
+            "--nocapture",
+        ),
+        expected_test=full_name,
+    )
+
+
 def command_specs(profile: dict, python_bin: str) -> list[CommandSpec]:
     """Return the exact real-process commands for a validated platform profile."""
-    cargo_prefix = ("cargo", "test", "-p", "sonicterm-io", "--lib")
-    child_exit = CommandSpec(
+    child_exit = _pty_test_command(
         "pty-child-exit",
-        cargo_prefix
-        + ("child_exit_probe_observes_short_lived_process", "--", "--nocapture"),
+        "child_exit_probe_observes_short_lived_process",
     )
     soak_live = CommandSpec(
         "soak-live",
@@ -98,41 +121,52 @@ def command_specs(profile: dict, python_bin: str) -> list[CommandSpec]:
     if profile.get("family") == "macos":
         return [
             child_exit,
-            CommandSpec(
+            _pty_test_command(
                 "pty-descendant-cleanup",
-                cargo_prefix
-                + (
-                    "observed_shell_exit_still_kills_background_process_group",
-                    "--",
-                    "--nocapture",
-                ),
+                "observed_shell_exit_still_kills_background_process_group",
             ),
             soak_live,
         ]
     if profile.get("family") == "windows":
         return [
             child_exit,
-            CommandSpec(
+            _pty_test_command(
                 "pty-thread-cleanup",
-                cargo_prefix
-                + (
-                    "dropping_live_windows_pty_terminates_native_io_threads",
-                    "--",
-                    "--nocapture",
-                ),
+                "dropping_live_windows_pty_terminates_native_io_threads",
             ),
-            CommandSpec(
+            _pty_test_command(
                 "conpty-close-drain",
-                cargo_prefix
-                + (
-                    "conpty_close_runs_while_output_reader_is_draining",
-                    "--",
-                    "--nocapture",
-                ),
+                "conpty_close_runs_while_output_reader_is_draining",
             ),
             soak_live,
         ]
     raise EvidenceError("platform profile has no supported family")
+
+
+def validate_test_result(spec: CommandSpec, stdout: bytes) -> list[str]:
+    """Prove a focused libtest command ran exactly its expected test once."""
+    if spec.expected_test is None:
+        return []
+    text = stdout.decode("utf-8", errors="replace")
+    expected_line = "test {} ... ok".format(spec.expected_test)
+    summary = re.search(
+        r"test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;",
+        text,
+    )
+    errors = []
+    if text.count(expected_line) != 1:
+        errors.append("{} did not pass exactly once".format(spec.expected_test))
+    if summary is None:
+        errors.append("{} did not emit a parseable libtest summary".format(spec.name))
+    else:
+        passed, failed, ignored = (int(value) for value in summary.groups())
+        if (passed, failed, ignored) != (1, 0, 0):
+            errors.append(
+                "{} executed unexpected tests: {} passed, {} failed, {} ignored".format(
+                    spec.name, passed, failed, ignored
+                )
+            )
+    return errors
 
 
 def validate_live_result(profile: dict, result: dict) -> list[str]:
@@ -288,6 +322,8 @@ def collect_evidence(
         )
         if returncode != 0:
             errors.append("{} exited with {}".format(spec.name, returncode))
+        else:
+            errors.extend(validate_test_result(spec, stdout))
 
         if spec.name == "soak-live":
             (output_dir / "soak-live.json").write_bytes(stdout)

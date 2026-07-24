@@ -87,11 +87,20 @@ def _live_soak(capabilities: dict) -> dict:
     }
 
 
+def _cargo_success(spec) -> bytes:
+    return (
+        "\nrunning 1 test\n"
+        "test {} ... ok\n\n"
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; "
+        "43 filtered out; finished in 0.01s\n\n"
+    ).format(spec.expected_test).encode("utf-8")
+
+
 def _successful_executor(soak_result: dict):
     soak_bytes = (json.dumps(soak_result, sort_keys=True) + "\n").encode("utf-8")
 
     def execute(spec, _cwd):
-        stdout = soak_bytes if spec.name == "soak-live" else b"test result: ok\n"
+        stdout = soak_bytes if spec.name == "soak-live" else _cargo_success(spec)
         return subprocess.CompletedProcess(spec.argv, 0, stdout=stdout, stderr=b"")
 
     return execute
@@ -195,14 +204,16 @@ class CommandContractTests(unittest.TestCase):
                     "pty-child-exit",
                     (
                         "cargo", "test", "-p", "sonicterm-io", "--lib",
-                        "child_exit_probe_observes_short_lived_process", "--", "--nocapture",
+                        "pty::pty_tests::child_exit_probe_observes_short_lived_process",
+                        "--", "--exact", "--nocapture",
                     ),
                 ),
                 (
                     "pty-descendant-cleanup",
                     (
                         "cargo", "test", "-p", "sonicterm-io", "--lib",
-                        "observed_shell_exit_still_kills_background_process_group", "--", "--nocapture",
+                        "pty::pty_tests::observed_shell_exit_still_kills_background_process_group",
+                        "--", "--exact", "--nocapture",
                     ),
                 ),
                 (
@@ -221,21 +232,24 @@ class CommandContractTests(unittest.TestCase):
                 "pty-child-exit",
                 (
                     "cargo", "test", "-p", "sonicterm-io", "--lib",
-                    "child_exit_probe_observes_short_lived_process", "--", "--nocapture",
+                    "pty::pty_tests::child_exit_probe_observes_short_lived_process",
+                    "--", "--exact", "--nocapture",
                 ),
             ),
             (
                 "pty-thread-cleanup",
                 (
                     "cargo", "test", "-p", "sonicterm-io", "--lib",
-                    "dropping_live_windows_pty_terminates_native_io_threads", "--", "--nocapture",
+                    "pty::pty_tests::dropping_live_windows_pty_terminates_native_io_threads",
+                    "--", "--exact", "--nocapture",
                 ),
             ),
             (
                 "conpty-close-drain",
                 (
                     "cargo", "test", "-p", "sonicterm-io", "--lib",
-                    "conpty_close_runs_while_output_reader_is_draining", "--", "--nocapture",
+                    "pty::pty_tests::conpty_close_runs_while_output_reader_is_draining",
+                    "--", "--exact", "--nocapture",
                 ),
             ),
             (
@@ -251,6 +265,81 @@ class CommandContractTests(unittest.TestCase):
                 profile = evidence.classify_platform(runner_label, _windows_facts(build))
                 specs = evidence.command_specs(profile, "python")
                 self.assertEqual([(spec.name, spec.argv) for spec in specs], expected)
+
+
+class FocusedTestValidationTests(unittest.TestCase):
+    def setUp(self):
+        profile = evidence.classify_platform("macos-14", _macos_facts())
+        self.spec = evidence.command_specs(profile, "python3")[0]
+
+    def test_exact_expected_test_and_single_pass_summary_are_required(self):
+        self.assertEqual(evidence.validate_test_result(self.spec, _cargo_success(self.spec)), [])
+
+        cases = {
+            "zero matched": (
+                b"\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; "
+                b"0 ignored; 0 measured; 44 filtered out; finished in 0.00s\n",
+                "did not pass exactly once",
+            ),
+            "ignored": (
+                (
+                    "\nrunning 1 test\n"
+                    "test {} ... ignored\n\n"
+                    "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; "
+                    "43 filtered out; finished in 0.00s\n"
+                ).format(self.spec.expected_test).encode("utf-8"),
+                "0 passed, 0 failed, 1 ignored",
+            ),
+            "wrong name": (
+                b"\nrunning 1 test\ntest another::test ... ok\n\n"
+                b"test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; "
+                b"43 filtered out; finished in 0.00s\n",
+                "did not pass exactly once",
+            ),
+        }
+        for label, (stdout, expected_error) in cases.items():
+            with self.subTest(label=label):
+                errors = evidence.validate_test_result(self.spec, stdout)
+                self.assertTrue(
+                    any(expected_error in error for error in errors),
+                    errors,
+                )
+
+    def test_exit_zero_zero_test_bundle_fails_closed(self):
+        soak = _live_soak(
+            {
+                "rss_bytes": True,
+                "private_bytes": False,
+                "gpu_estimate_bytes": False,
+                "thread_count": True,
+                "handle_or_fd_count": True,
+                "process_count": False,
+                "ledger_value": False,
+            }
+        )
+        successful = _successful_executor(soak)
+
+        def execute(spec, cwd):
+            if spec.name == "pty-child-exit":
+                return subprocess.CompletedProcess(
+                    spec.argv,
+                    0,
+                    stdout=(
+                        b"\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; "
+                        b"0 ignored; 0 measured; 44 filtered out; finished in 0.00s\n"
+                    ),
+                    stderr=b"",
+                )
+            return successful(spec, cwd)
+
+        with tempfile.TemporaryDirectory() as directory:
+            document = _collect(Path(directory), executor=execute)
+
+        self.assertEqual(document["status"], "fail")
+        self.assertTrue(
+            any("did not pass exactly once" in error for error in document["errors"]),
+            document["errors"],
+        )
 
 
 class LiveResultValidationTests(unittest.TestCase):
@@ -368,9 +457,10 @@ class EvidenceBundleTests(unittest.TestCase):
             self.assertEqual(document["platform"]["machine"], "arm64")
             self.assertEqual(document["platform"]["macos_version"], "14.7.5")
             self.assertEqual(document["platform"]["lane"], "macos")
+            expected_specs = evidence.command_specs(document["platform"], "python3")
             expected_commands = [
                 {"name": spec.name, "argv": list(spec.argv)}
-                for spec in evidence.command_specs(document["platform"], "python3")
+                for spec in expected_specs
             ]
             self.assertEqual(document["commands"], expected_commands)
             self.assertEqual(
@@ -397,9 +487,15 @@ class EvidenceBundleTests(unittest.TestCase):
                     for command in expected_commands
                 ],
             )
-            self.assertEqual((output / "pty-child-exit.stdout.log").read_bytes(), b"test result: ok\n")
+            self.assertEqual(
+                (output / "pty-child-exit.stdout.log").read_bytes(),
+                _cargo_success(expected_specs[0]),
+            )
             self.assertEqual((output / "pty-child-exit.stderr.log").read_bytes(), b"")
-            self.assertEqual((output / "pty-descendant-cleanup.stdout.log").read_bytes(), b"test result: ok\n")
+            self.assertEqual(
+                (output / "pty-descendant-cleanup.stdout.log").read_bytes(),
+                _cargo_success(expected_specs[1]),
+            )
             self.assertEqual((output / "pty-descendant-cleanup.stderr.log").read_bytes(), b"")
             self.assertEqual((output / "soak-live.stdout.log").read_bytes(), soak_bytes)
             self.assertEqual((output / "soak-live.stderr.log").read_bytes(), b"")
@@ -435,7 +531,14 @@ class EvidenceBundleTests(unittest.TestCase):
             self.assertTrue(any("pty-child-exit exited with 1" in error for error in document["errors"]))
             self.assertEqual((output / "pty-child-exit.stdout.log").read_bytes(), b"partial\n")
             self.assertEqual((output / "pty-child-exit.stderr.log").read_bytes(), b"failed\n")
-            self.assertEqual((output / "pty-descendant-cleanup.stdout.log").read_bytes(), b"test result: ok\n")
+            macos_specs = evidence.command_specs(
+                evidence.classify_platform("macos-14", _macos_facts()),
+                "python3",
+            )
+            self.assertEqual(
+                (output / "pty-descendant-cleanup.stdout.log").read_bytes(),
+                _cargo_success(macos_specs[1]),
+            )
             self.assertEqual((output / "pty-descendant-cleanup.stderr.log").read_bytes(), b"")
             expected_soak = (json.dumps(soak, sort_keys=True) + "\n").encode("utf-8")
             self.assertEqual((output / "soak-live.stdout.log").read_bytes(), expected_soak)
@@ -446,7 +549,7 @@ class EvidenceBundleTests(unittest.TestCase):
 
     def test_malformed_soak_output_is_preserved_and_fails_closed(self):
         def execute(spec, _cwd):
-            stdout = b"not json\n" if spec.name == "soak-live" else b"test result: ok\n"
+            stdout = b"not json\n" if spec.name == "soak-live" else _cargo_success(spec)
             return subprocess.CompletedProcess(spec.argv, 0, stdout=stdout, stderr=b"")
 
         with tempfile.TemporaryDirectory() as directory:
