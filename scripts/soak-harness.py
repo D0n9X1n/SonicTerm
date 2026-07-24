@@ -200,51 +200,7 @@ def _live_rss_bytes():
     return int(usage) * 1024
 
 
-def _windows_working_set():
-    try:
-        import ctypes
-        from ctypes import wintypes
-    except (ImportError, ValueError):
-        return None
-
-    class _Counters(ctypes.Structure):
-        _fields_ = [
-            ("cb", wintypes.DWORD),
-            ("PageFaultCount", wintypes.DWORD),
-            ("PeakWorkingSetSize", ctypes.c_size_t),
-            ("WorkingSetSize", ctypes.c_size_t),
-            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
-            ("QuotaPagedPoolUsage", ctypes.c_size_t),
-            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
-            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
-            ("PagefileUsage", ctypes.c_size_t),
-            ("PeakPagefileUsage", ctypes.c_size_t),
-            ("PrivateUsage", ctypes.c_size_t),
-        ]
-
-    try:
-        counters = _Counters()
-        counters.cb = ctypes.sizeof(_Counters)
-        handle = ctypes.windll.kernel32.GetCurrentProcess()
-        ok = ctypes.windll.psapi.GetProcessMemoryInfo(
-            handle, ctypes.byref(counters), counters.cb
-        )
-        if not ok:
-            return None
-        return int(counters.WorkingSetSize)
-    except (OSError, AttributeError):
-        return None
-
-
-def _live_private_bytes():
-    # Private bytes have a cheap cross-API source only on Windows in this
-    # skeleton; POSIX private/anonymous accounting is deferred.
-    if sys.platform.startswith("win"):
-        return _windows_private_usage()
-    return None
-
-
-def _windows_private_usage():
+def _windows_process_memory():
     try:
         import ctypes
         from ctypes import wintypes
@@ -267,17 +223,50 @@ def _windows_private_usage():
         ]
 
     try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        current_process = kernel32.GetCurrentProcess
+        current_process.argtypes = []
+        current_process.restype = wintypes.HANDLE
+
+        query = getattr(kernel32, "K32GetProcessMemoryInfo", None)
+        if query is None:
+            psapi = ctypes.WinDLL("psapi", use_last_error=True)
+            query = psapi.GetProcessMemoryInfo
+        query.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(_CountersEx),
+            wintypes.DWORD,
+        ]
+        query.restype = wintypes.BOOL
+
         counters = _CountersEx()
         counters.cb = ctypes.sizeof(_CountersEx)
-        handle = ctypes.windll.kernel32.GetCurrentProcess()
-        ok = ctypes.windll.psapi.GetProcessMemoryInfo(
-            handle, ctypes.byref(counters), counters.cb
-        )
-        if not ok:
+        if not query(current_process(), ctypes.byref(counters), counters.cb):
             return None
-        return int(counters.PrivateUsage)
-    except (OSError, AttributeError):
+        return {
+            "rss_bytes": int(counters.WorkingSetSize),
+            "private_bytes": int(counters.PrivateUsage),
+        }
+    except (OSError, AttributeError, TypeError, ctypes.ArgumentError):
         return None
+
+
+def _windows_working_set():
+    memory = _windows_process_memory()
+    return memory["rss_bytes"] if memory is not None else None
+
+
+def _live_private_bytes():
+    # Private bytes have a cheap cross-API source only on Windows in this
+    # skeleton; POSIX private/anonymous accounting is deferred.
+    if sys.platform.startswith("win"):
+        return _windows_private_usage()
+    return None
+
+
+def _windows_private_usage():
+    memory = _windows_process_memory()
+    return memory["private_bytes"] if memory is not None else None
 
 
 def _live_handle_or_fd_count():
@@ -296,18 +285,23 @@ def _live_handle_or_fd_count():
 def _windows_handle_count():
     try:
         import ctypes
+        from ctypes import wintypes
     except (ImportError, ValueError):
         return None
     try:
-        count = ctypes.c_ulong(0)
-        handle = ctypes.windll.kernel32.GetCurrentProcess()
-        ok = ctypes.windll.kernel32.GetProcessHandleCount(
-            handle, ctypes.byref(count)
-        )
-        if not ok:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        current_process = kernel32.GetCurrentProcess
+        current_process.argtypes = []
+        current_process.restype = wintypes.HANDLE
+        query = kernel32.GetProcessHandleCount
+        query.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        query.restype = wintypes.BOOL
+
+        count = wintypes.DWORD(0)
+        if not query(current_process(), ctypes.byref(count)):
             return None
         return int(count.value)
-    except (OSError, AttributeError):
+    except (OSError, AttributeError, TypeError, ctypes.ArgumentError):
         return None
 
 
@@ -320,9 +314,16 @@ def _live_thread_count():
 
 
 def _live_metrics():
+    if sys.platform.startswith("win"):
+        memory = _windows_process_memory()
+        rss_bytes = memory["rss_bytes"] if memory is not None else None
+        private_bytes = memory["private_bytes"] if memory is not None else None
+    else:
+        rss_bytes = _live_rss_bytes()
+        private_bytes = _live_private_bytes()
     return {
-        "rss_bytes": _live_rss_bytes(),
-        "private_bytes": _live_private_bytes(),
+        "rss_bytes": rss_bytes,
+        "private_bytes": private_bytes,
         "gpu_estimate_bytes": None,  # Deferred to a later work package.
         "thread_count": _live_thread_count(),
         "handle_or_fd_count": _live_handle_or_fd_count(),

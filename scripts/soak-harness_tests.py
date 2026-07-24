@@ -10,6 +10,7 @@ Run directly:  python3 scripts/soak-harness_tests.py
 Or discovered:  python3 -m unittest soak-harness_tests   (from scripts/)
 """
 
+import ctypes
 import hashlib
 import importlib.util
 import io
@@ -17,6 +18,7 @@ import os
 import tempfile
 import unittest
 from fractions import Fraction
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _HARNESS_PATH = os.path.join(_HERE, "soak-harness.py")
@@ -259,6 +261,54 @@ class AlwaysEmitTests(unittest.TestCase):
         self.assertEqual(len(result["samples"]), 5)
 
 
+class _FakeFunction:
+    def __init__(self, callback):
+        self.callback = callback
+        self.argtypes = None
+        self.restype = None
+
+    def __call__(self, *args):
+        return self.callback(*args)
+
+
+class _FakeKernel32:
+    def __init__(self, *, memory_ok=True, handles_ok=True):
+        self.handle = ctypes.c_void_p(-1).value
+        self.seen_memory_handle = None
+        self.seen_handle_handle = None
+        self.GetCurrentProcess = _FakeFunction(lambda: self.handle)
+        self.K32GetProcessMemoryInfo = _FakeFunction(
+            lambda handle, counters, size: self._memory(
+                handle, counters, size, memory_ok
+            )
+        )
+        self.GetProcessHandleCount = _FakeFunction(
+            lambda handle, count: self._handles(handle, count, handles_ok)
+        )
+
+    def _memory(self, handle, counters, size, ok):
+        self.seen_memory_handle = handle
+        if not ok:
+            return 0
+        struct = counters._obj
+        self.assert_equal(size, ctypes.sizeof(type(struct)))
+        struct.WorkingSetSize = 123_456
+        struct.PrivateUsage = 98_765
+        return 1
+
+    def _handles(self, handle, count, ok):
+        self.seen_handle_handle = handle
+        if not ok:
+            return 0
+        count._obj.value = 42
+        return 1
+
+    @staticmethod
+    def assert_equal(actual, expected):
+        if actual != expected:
+            raise AssertionError("{} != {}".format(actual, expected))
+
+
 class LiveCaptureTests(unittest.TestCase):
     def test_rss_probe_error_degrades_to_unavailable(self):
         class _FailingResource:
@@ -277,6 +327,30 @@ class LiveCaptureTests(unittest.TestCase):
                 del soak.sys.modules["resource"]
             else:
                 soak.sys.modules["resource"] = original
+
+    def test_windows_typed_process_and_handle_probes(self):
+        kernel32 = _FakeKernel32()
+        with mock.patch.object(ctypes, "WinDLL", return_value=kernel32, create=True):
+            memory = soak._windows_process_memory()
+            handles = soak._windows_handle_count()
+
+        self.assertEqual(
+            memory,
+            {"rss_bytes": 123_456, "private_bytes": 98_765},
+        )
+        self.assertEqual(handles, 42)
+        self.assertEqual(kernel32.seen_memory_handle, kernel32.handle)
+        self.assertEqual(kernel32.seen_handle_handle, kernel32.handle)
+        self.assertEqual(kernel32.GetCurrentProcess.argtypes, [])
+        self.assertIsNotNone(kernel32.GetCurrentProcess.restype)
+        self.assertEqual(len(kernel32.K32GetProcessMemoryInfo.argtypes), 3)
+        self.assertEqual(len(kernel32.GetProcessHandleCount.argtypes), 2)
+
+    def test_windows_probe_failures_degrade_to_unavailable(self):
+        kernel32 = _FakeKernel32(memory_ok=False, handles_ok=False)
+        with mock.patch.object(ctypes, "WinDLL", return_value=kernel32, create=True):
+            self.assertIsNone(soak._windows_process_memory())
+            self.assertIsNone(soak._windows_handle_count())
 
 
 class ValidationAndCliTests(unittest.TestCase):
