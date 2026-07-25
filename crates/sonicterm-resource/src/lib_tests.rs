@@ -696,3 +696,68 @@ fn concurrent_swapped_transfers_settle_to_zero() {
     assert_eq!(governor.snapshot(left).unwrap().owner_amount, ResourceAmount::default());
     assert_eq!(governor.snapshot(right).unwrap().owner_amount, ResourceAmount::default());
 }
+
+#[test]
+fn refused_close_reports_the_true_outstanding_amount() {
+    // FM-10: the rejection carries the aggregate the owner actually holds, so a
+    // caller can tell whether teardown is progressing rather than only that it
+    // is blocked. A payload that reported the last reservation, or a
+    // placeholder, would look identical across very different situations.
+    let governor = governor(4096);
+    let root = governor.root_owner();
+    let window = governor.create_child(root, OwnerKind::Window, owner_limits(4096)).unwrap();
+    let pane = governor.create_child(window, OwnerKind::AppPane, owner_limits(4096)).unwrap();
+
+    let first = governor
+        .try_reserve(pane, ResourceClass::GridHistory, ResourceAmount { bytes: 128, items: 2 })
+        .unwrap();
+    let second = governor
+        .try_reserve(pane, ResourceClass::PtyOutput, ResourceAmount { bytes: 64, items: 1 })
+        .unwrap();
+    governor.begin_close(pane).unwrap();
+
+    // Aggregate across classes, not the most recent reservation.
+    let error = governor.finish_close(pane).unwrap_err();
+    assert!(
+        matches!(error, BudgetError::OwnerHasLiveCharges { owner, amount }
+            if owner == pane && amount == ResourceAmount { bytes: 192, items: 3 }),
+        "expected the aggregate of both classes, got {error:?}"
+    );
+
+    // Releasing part of it moves the reported figure rather than clearing it.
+    drop(second);
+    let error = governor.finish_close(pane).unwrap_err();
+    assert!(
+        matches!(error, BudgetError::OwnerHasLiveCharges { amount, .. }
+            if amount == ResourceAmount { bytes: 128, items: 2 }),
+        "expected the remaining charge after a partial release, got {error:?}"
+    );
+
+    drop(first);
+    governor.finish_close(pane).unwrap();
+    governor.begin_close(window).unwrap();
+    governor.finish_close(window).unwrap();
+}
+
+#[test]
+fn a_parent_close_reports_children_before_charges() {
+    // A parent holding both a live child and an inherited charge reports the
+    // child first: closing the child is the actionable next step, and the
+    // inherited charge disappears with it.
+    let governor = governor(4096);
+    let root = governor.root_owner();
+    let window = governor.create_child(root, OwnerKind::Window, owner_limits(4096)).unwrap();
+    let pane = governor.create_child(window, OwnerKind::AppPane, owner_limits(4096)).unwrap();
+    let held = governor
+        .try_reserve(pane, ResourceClass::GridVisible, ResourceAmount { bytes: 32, items: 1 })
+        .unwrap();
+    governor.begin_close(window).unwrap();
+    assert!(matches!(
+        governor.finish_close(window),
+        Err(BudgetError::OwnerHasLiveChildren { owner, children: 1 }) if owner == window
+    ));
+    drop(held);
+    governor.begin_close(pane).unwrap();
+    governor.finish_close(pane).unwrap();
+    governor.finish_close(window).unwrap();
+}

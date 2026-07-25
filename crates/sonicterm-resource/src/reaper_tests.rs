@@ -287,3 +287,186 @@ fn a_released_slot_wakes_a_waiting_reserver() {
     drop(first);
     assert!(waiter.join().unwrap(), "a released slot must wake a waiter");
 }
+
+/// Holds a committed charge until told to settle, so a test can keep an owner
+/// pinned in `Closing` the way a real uncancellable transport would.
+struct ChargeHoldingTask {
+    owner: ResourceOwnerId,
+    charge: Option<crate::CommittedReservation>,
+    settle_after: usize,
+    polls: usize,
+}
+
+impl ReapTask for ChargeHoldingTask {
+    fn owner(&self) -> ResourceOwnerId {
+        self.owner
+    }
+    fn next_action(&mut self, now: Instant) -> ReapAction {
+        self.polls += 1;
+        if self.polls >= self.settle_after {
+            // Releasing the charge is what actually lets the owner close.
+            self.charge = None;
+            ReapAction::Complete(ReapResult::Settled)
+        } else {
+            ReapAction::PollAfter(now + Duration::from_millis(1))
+        }
+    }
+    fn on_completion(&mut self, _result: ReapResult) {}
+    fn force_cancel(&mut self) -> CancelOutcome {
+        // Never settles on force: the charge outlives the deadline, which is
+        // the case that pins an owner.
+        CancelOutcome::TimedOut
+    }
+}
+
+#[test]
+fn an_owner_cannot_close_while_a_reap_task_holds_its_charge() {
+    // MM-05: begin_close succeeds because it only stops admission; finish_close
+    // must refuse while the reaper still holds a charge against the owner, and
+    // must succeed once the task settles and drops it.
+    use enum_map::enum_map;
+    use sonicterm_types::{
+        GovernorLimits, OwnerKind, OwnerLimits, ProcessKind, ResourceAmount, ResourceClass,
+    };
+
+    let governor = crate::ResourceGovernor::new(
+        ProcessKind::Gui,
+        GovernorLimits {
+            process_bytes: usize::MAX,
+            class_bytes: enum_map! { _ => usize::MAX },
+            class_items: enum_map! { _ => None },
+        },
+    )
+    .unwrap();
+    let owner_limits = || OwnerLimits {
+        owner_bytes: usize::MAX,
+        class_bytes: enum_map! { _ => usize::MAX },
+        class_items: enum_map! { _ => None },
+    };
+    let window =
+        governor.create_child(governor.root_owner(), OwnerKind::Window, owner_limits()).unwrap();
+    let pane = governor.create_child(window, OwnerKind::AppPane, owner_limits()).unwrap();
+    let committed = governor
+        .try_reserve(pane, ResourceClass::PtyOutput, ResourceAmount { bytes: 256, items: 1 })
+        .unwrap()
+        .commit(ResourceAmount { bytes: 256, items: 1 })
+        .unwrap_or_else(|error| panic!("commit failed: {:?}", error.error));
+
+    let clock = TestClock::new();
+    let supervisor =
+        ReaperSupervisor::new(ReaperLimits::new(4, 2, 4).unwrap(), Arc::new(clock.clone()));
+    supervisor.try_reserve_slot().unwrap().enqueue(Box::new(ChargeHoldingTask {
+        owner: pane,
+        charge: Some(committed),
+        settle_after: 3,
+        polls: 0,
+    }));
+
+    // Admission stops, but the charge is still outstanding.
+    governor.begin_close(pane).unwrap();
+    let refused = governor.finish_close(pane).unwrap_err();
+    assert!(
+        matches!(refused, sonicterm_types::BudgetError::OwnerHasLiveCharges { owner, amount }
+            if owner == pane && amount == ResourceAmount { bytes: 256, items: 1 }),
+        "expected the true outstanding amount, got {refused:?}"
+    );
+
+    // Drive the reaper until the task settles and drops the charge.
+    let cancel = CancelSource::new();
+    let progress =
+        supervisor.run_until(deadline_from(&clock, Duration::from_secs(1)), &cancel.token());
+    assert_eq!(progress.settled, 1);
+
+    // Now the owner can finish closing.
+    governor.finish_close(pane).unwrap();
+    assert_eq!(
+        governor.snapshot(pane).unwrap().owner_amount,
+        ResourceAmount::default(),
+        "a settled owner holds nothing"
+    );
+    governor.begin_close(window).unwrap();
+    governor.finish_close(window).unwrap();
+}
+
+#[test]
+fn shutdown_leaves_an_unsettled_owner_pinned_with_its_charge_visible() {
+    // MM-06: when the supervisor gives up, the charge stays attributed to its
+    // original owner and the owner stays in Closing. That is the defined
+    // outcome, not a leak to be swept: an owner that cannot settle must remain
+    // visible rather than being forced to Closed with work outstanding.
+    use enum_map::enum_map;
+    use sonicterm_types::{
+        GovernorLimits, OwnerKind, OwnerLimits, OwnerState, ProcessKind, ResourceAmount,
+        ResourceClass,
+    };
+
+    let governor = crate::ResourceGovernor::new(
+        ProcessKind::Gui,
+        GovernorLimits {
+            process_bytes: usize::MAX,
+            class_bytes: enum_map! { _ => usize::MAX },
+            class_items: enum_map! { _ => None },
+        },
+    )
+    .unwrap();
+    let owner_limits = || OwnerLimits {
+        owner_bytes: usize::MAX,
+        class_bytes: enum_map! { _ => usize::MAX },
+        class_items: enum_map! { _ => None },
+    };
+    let window =
+        governor.create_child(governor.root_owner(), OwnerKind::Window, owner_limits()).unwrap();
+    let pane = governor.create_child(window, OwnerKind::AppPane, owner_limits()).unwrap();
+    let committed = governor
+        .try_reserve(pane, ResourceClass::ReaperWork, ResourceAmount { bytes: 512, items: 2 })
+        .unwrap()
+        .commit(ResourceAmount { bytes: 512, items: 2 })
+        .unwrap_or_else(|error| panic!("commit failed: {:?}", error.error));
+
+    let clock = TestClock::new();
+    let supervisor =
+        ReaperSupervisor::new(ReaperLimits::new(4, 2, 4).unwrap(), Arc::new(clock.clone()));
+    supervisor.try_reserve_slot().unwrap().enqueue(Box::new(ChargeHoldingTask {
+        owner: pane,
+        charge: Some(committed),
+        settle_after: usize::MAX, // never settles
+        polls: 0,
+    }));
+    governor.begin_close(pane).unwrap();
+
+    let cancel = CancelSource::new();
+    let report =
+        supervisor.shutdown(deadline_from(&clock, Duration::from_millis(1)), &cancel.token());
+
+    assert!(!report.is_clean(), "an unsettled owner must not read as a clean exit");
+    assert_eq!(
+        report.unresolved_owners,
+        vec![pane],
+        "the report names the owner still holding work"
+    );
+    assert_eq!(report.live_tasks, 0, "the slot is returned even though the work did not settle");
+
+    // The charge is still attributed to its original owner, and the owner is
+    // still Closing rather than forced Closed.
+    let snapshot = governor.snapshot(pane).unwrap();
+    assert_eq!(snapshot.owner_amount, ResourceAmount { bytes: 512, items: 2 });
+    assert_eq!(snapshot.owner_state, OwnerState::Closing);
+    assert!(matches!(
+        governor.finish_close(pane),
+        Err(sonicterm_types::BudgetError::OwnerHasLiveCharges { .. })
+    ));
+    assert_eq!(snapshot.release_failures, 0, "a pinned charge is not a release failure");
+    assert_eq!(supervisor.retained_tasks(), 1, "the unsettled task is held, not dropped");
+
+    // Terminal cleanup: dropping the supervisor releases what it was holding,
+    // so retention defers the release rather than leaking it forever.
+    drop(supervisor);
+    assert_eq!(
+        governor.snapshot(pane).unwrap().owner_amount,
+        ResourceAmount::default(),
+        "terminal cleanup releases the retained charge"
+    );
+    governor.finish_close(pane).unwrap();
+    governor.begin_close(window).unwrap();
+    governor.finish_close(window).unwrap();
+}

@@ -83,6 +83,13 @@ struct SupervisorState {
     counters: Mutex<Counters>,
     slot_released: Condvar,
     queue: Mutex<VecDeque<Box<dyn ReapTask>>>,
+    /// Tasks that finished without settling.
+    ///
+    /// Their resources stay charged to the original owner until terminal
+    /// cleanup, so the supervisor keeps the task alive rather than dropping it.
+    /// Dropping would run the task's RAII release and quietly zero an owner the
+    /// shutdown report is simultaneously naming as unresolved.
+    retained: Mutex<Vec<Box<dyn ReapTask>>>,
     limits: ReaperLimits,
 }
 
@@ -141,6 +148,7 @@ impl ReaperSupervisor {
                 }),
                 slot_released: Condvar::new(),
                 queue: Mutex::new(VecDeque::new()),
+                retained: Mutex::new(Vec::new()),
                 limits,
             }),
             clock,
@@ -209,9 +217,44 @@ impl ReaperSupervisor {
     /// helper and the loop keeps servicing other tasks while it runs.
     pub fn run_until(&self, deadline: Instant, cancel: &CancelToken) -> ReaperProgress {
         let mut progress = ReaperProgress::default();
+        // Tasks that asked to be polled later wait here rather than cycling
+        // through the queue, so a deferred task cannot spin the loop.
+        let mut deferred: Vec<(Instant, Box<dyn ReapTask>)> = Vec::new();
         loop {
             let task = self.state.queue.lock().pop_front();
-            let Some(mut task) = task else { break };
+            let Some(mut task) = task else {
+                let Some(next_poll) = deferred.iter().map(|(at, _)| *at).min() else { break };
+                if cancel.is_cancelled() || next_poll > deadline {
+                    // Nothing will become ready in time: settle what is left.
+                    for (_, mut pending) in deferred.drain(..) {
+                        let outcome = pending.force_cancel();
+                        let result = if outcome.is_settled() {
+                            ReapResult::Settled
+                        } else {
+                            ReapResult::TimedOut
+                        };
+                        pending.on_completion(result);
+                        self.settle(pending, result, &mut progress);
+                    }
+                    break;
+                }
+                // Sleep to the earliest deadline instead of re-polling work
+                // that has already said it is not ready.
+                self.clock.wait_until(next_poll);
+                let now = self.clock.now();
+                let mut queue = self.state.queue.lock();
+                let mut still_deferred = Vec::with_capacity(deferred.len());
+                for (at, pending) in deferred.drain(..) {
+                    if at <= now {
+                        queue.push_back(pending);
+                    } else {
+                        still_deferred.push((at, pending));
+                    }
+                }
+                drop(queue);
+                deferred = still_deferred;
+                continue;
+            };
             let now = self.clock.now();
             if now >= deadline || cancel.is_cancelled() {
                 // Out of time: force cancellation, and keep the charge if the
@@ -220,19 +263,19 @@ impl ReaperSupervisor {
                 let result =
                     if outcome.is_settled() { ReapResult::Settled } else { ReapResult::TimedOut };
                 task.on_completion(result);
-                self.finish(task.owner(), result, &mut progress);
+                self.settle(task, result, &mut progress);
                 continue;
             }
             match task.next_action(now) {
                 ReapAction::Complete(result) => {
                     task.on_completion(result);
-                    self.finish(task.owner(), result, &mut progress);
+                    self.settle(task, result, &mut progress);
                 }
                 ReapAction::RunBlocking(work) => {
                     let result = self.run_on_helper(work);
                     task.on_completion(result);
                     if result == ReapResult::Settled || result == ReapResult::Escalated {
-                        self.finish(task.owner(), result, &mut progress);
+                        self.settle(task, result, &mut progress);
                     } else {
                         self.state.queue.lock().push_back(task);
                     }
@@ -246,10 +289,10 @@ impl ReaperSupervisor {
                             ReapResult::TimedOut
                         };
                         task.on_completion(result);
-                        self.finish(task.owner(), result, &mut progress);
+                        self.settle(task, result, &mut progress);
                     } else {
                         progress.polls += 1;
-                        self.state.queue.lock().push_back(task);
+                        deferred.push((at, task));
                     }
                 }
             }
@@ -271,14 +314,20 @@ impl ReaperSupervisor {
         result
     }
 
-    fn finish(&self, owner: ResourceOwnerId, result: ReapResult, progress: &mut ReaperProgress) {
+    fn settle(&self, task: Box<dyn ReapTask>, result: ReapResult, progress: &mut ReaperProgress) {
+        let owner = task.owner();
         let mut counters = self.state.counters.lock();
         counters.tasks -= 1;
         if result.releases_charge() {
             progress.settled += 1;
+            drop(task);
         } else {
             progress.unresolved += 1;
             counters.unresolved.push(owner);
+            // Keep the task alive so whatever it holds stays charged to this
+            // owner. Dropping it here would release the charge and leave the
+            // ledger disagreeing with the report that just named the owner.
+            self.state.retained.lock().push(task);
         }
         self.state.slot_released.notify_one();
     }
@@ -310,6 +359,16 @@ impl ReaperSupervisor {
     /// Live handle count.
     pub fn live_handles(&self) -> usize {
         self.state.counters.lock().handles
+    }
+
+    /// Tasks retained because they finished without settling.
+    ///
+    /// Their charges stay attributed to the original owner and are released
+    /// only when the supervisor itself is dropped, which is the terminal
+    /// cleanup the contract defers them to. A non-zero count in a healthy
+    /// process means something never gave its resources back.
+    pub fn retained_tasks(&self) -> usize {
+        self.state.retained.lock().len()
     }
 
     /// Return whether the supervisor still admits work.
