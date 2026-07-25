@@ -185,3 +185,13 @@ fn minimal_toml_defaults_optional_colors_flags_and_rare_attributes() {
     assert_eq!(cell, Cell::plain('q', Color::Default, Color::Default, CellFlags::empty()));
     assert!(!cell.has_fat());
 }
+
+#[test]
+fn cell_stays_within_its_documented_size_budget() {
+    // Grid capacity ceilings multiply this size to derive a per-pane byte
+    // budget, so growing `Cell` silently inflates every one of them. The
+    // assertion is compile-time: a regression fails the build rather than
+    // waiting for a test run.
+    const _: () = assert!(core::mem::size_of::<Cell>() <= 24);
+    assert_eq!(core::mem::size_of::<Cell>(), 24);
+}
