@@ -596,15 +596,17 @@ impl Ledger {
             .values()
             .try_fold(0usize, |total, items| total.checked_add(*items))
             .ok_or(BudgetError::Overflow)?;
+        // Both axes are summed from the class shards observed above, so a
+        // snapshot agrees with itself. Reading the process byte atomic here
+        // instead would mix two instants into one observation, and a reader
+        // could not tell a real imbalance from the sampling skew.
+        let process_bytes = process_class_bytes
+            .values()
+            .try_fold(0usize, |total, bytes| total.checked_add(*bytes))
+            .ok_or(BudgetError::Overflow)?;
+        let process_amount = ResourceAmount { bytes: process_bytes, items: process_items };
         let (owner_amount, owner_class_bytes, owner_class_items) = if owner == self.root {
-            (
-                ResourceAmount {
-                    bytes: self.process_bytes.load(Ordering::Acquire),
-                    items: process_items,
-                },
-                process_class_bytes,
-                process_class_items,
-            )
+            (process_amount, process_class_bytes, process_class_items)
         } else {
             (usage.amount, usage.class_bytes, usage.class_items)
         };
@@ -617,10 +619,7 @@ impl Ledger {
             owner_amount,
             owner_class_bytes,
             owner_class_items,
-            process_amount: ResourceAmount {
-                bytes: self.process_bytes.load(Ordering::Acquire),
-                items: process_items,
-            },
+            process_amount,
             process_class_bytes,
             process_class_items,
             owner_epoch: usage.epoch,
