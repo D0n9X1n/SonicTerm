@@ -69,6 +69,17 @@ pub trait ReapTask: Send + 'static {
 
     /// Force cancellation, returning whether the resource actually settled.
     fn force_cancel(&mut self) -> CancelOutcome;
+
+    /// Give up whatever charges this task still holds.
+    ///
+    /// A task that never settles keeps its charge, which keeps its owner from
+    /// closing and pins every ancestor with it. Without a way to surrender,
+    /// one wedged transport strands a whole window subtree for the life of the
+    /// process. Implementations drop or transfer their tokens here; the default
+    /// holds them, which is only correct for a task that owns nothing.
+    ///
+    /// Called during terminal cleanup, after cancellation has already failed.
+    fn surrender_charges(&mut self) {}
 }
 
 struct Counters {
@@ -220,9 +231,111 @@ impl ReaperSupervisor {
         // Tasks that asked to be polled later wait here rather than cycling
         // through the queue, so a deferred task cannot spin the loop.
         let mut deferred: Vec<(Instant, Box<dyn ReapTask>)> = Vec::new();
+        // Blocking calls running on helpers, with the task awaiting each.
+        let mut in_flight: Vec<(std::thread::JoinHandle<ReapResult>, Box<dyn ReapTask>)> =
+            Vec::new();
+        // Calls that found no free helper, held with their task so the same
+        // call is retried rather than re-requested.
+        #[allow(clippy::type_complexity)]
+        let mut pending_work: Vec<(
+            Box<dyn FnOnce() -> ReapResult + Send>,
+            Box<dyn ReapTask>,
+        )> = Vec::new();
         loop {
+            // Collect helpers that finished since the last pass. Only finished
+            // handles are joined, so collecting never blocks the loop.
+            let mut still_running = Vec::with_capacity(in_flight.len());
+            for (handle, mut task) in in_flight.drain(..) {
+                if !handle.is_finished() {
+                    still_running.push((handle, task));
+                    continue;
+                }
+                self.state.counters.lock().helpers -= 1;
+                let result = handle.join().unwrap_or(ReapResult::Failed);
+                task.on_completion(result);
+                if result.releases_charge() {
+                    self.settle(task, result, &mut progress);
+                } else {
+                    // Let the task choose its own backoff instead of
+                    // respawning the call immediately.
+                    deferred.push((self.clock.now(), task));
+                }
+            }
+            in_flight = still_running;
+
+            // Retry calls that found no helper earlier, now that one may be
+            // free. The original closure is reused, so no step is skipped.
+            if !pending_work.is_empty() {
+                let queued = std::mem::take(&mut pending_work);
+                for (work, task) in queued {
+                    if let Some(pair) = self.start_on_helper(work, task, &mut in_flight) {
+                        pending_work.push(pair);
+                    }
+                }
+            }
+
+            // Return any deferred task whose wait has elapsed. This runs every
+            // pass rather than only when nothing is in flight: a task deferred
+            // because helpers were saturated would otherwise sit until the
+            // running calls drained, and be lost entirely if the loop ended
+            // first.
+            if !deferred.is_empty() {
+                let now = self.clock.now();
+                let mut queue = self.state.queue.lock();
+                let mut still_deferred = Vec::with_capacity(deferred.len());
+                for (at, pending) in deferred.drain(..) {
+                    if at <= now {
+                        queue.push_back(pending);
+                    } else {
+                        still_deferred.push((at, pending));
+                    }
+                }
+                drop(queue);
+                deferred = still_deferred;
+            }
+
             let task = self.state.queue.lock().pop_front();
             let Some(mut task) = task else {
+                if !in_flight.is_empty() || !pending_work.is_empty() {
+                    if cancel.is_cancelled() || self.clock.now() >= deadline {
+                        // Out of time. Join what is running and report anything
+                        // that never got a helper as unsettled, so its owner
+                        // keeps the charge rather than losing the work silently.
+                        for (handle, mut task) in in_flight.drain(..) {
+                            self.state.counters.lock().helpers -= 1;
+                            let result = handle.join().unwrap_or(ReapResult::Failed);
+                            task.on_completion(result);
+                            self.settle(task, result, &mut progress);
+                        }
+                        for (_, mut task) in pending_work.drain(..) {
+                            let outcome = task.force_cancel();
+                            let result = if outcome.is_settled() {
+                                ReapResult::Settled
+                            } else {
+                                ReapResult::TimedOut
+                            };
+                            task.on_completion(result);
+                            self.settle(task, result, &mut progress);
+                        }
+                        continue;
+                    }
+                    if let Some((handle, mut task)) = in_flight.pop() {
+                        // Nothing else is ready, so block on real completion
+                        // rather than a clock: a helper finishes when its call
+                        // returns, which no amount of elapsed time guarantees.
+                        // This is not the serial path — every other task has
+                        // already been offered the loop.
+                        self.state.counters.lock().helpers -= 1;
+                        let result = handle.join().unwrap_or(ReapResult::Failed);
+                        task.on_completion(result);
+                        if result.releases_charge() {
+                            self.settle(task, result, &mut progress);
+                        } else {
+                            deferred.push((self.clock.now(), task));
+                        }
+                    }
+                    continue;
+                }
                 let Some(next_poll) = deferred.iter().map(|(at, _)| *at).min() else { break };
                 if cancel.is_cancelled() || next_poll > deadline {
                     // Nothing will become ready in time: settle what is left.
@@ -272,12 +385,14 @@ impl ReaperSupervisor {
                     self.settle(task, result, &mut progress);
                 }
                 ReapAction::RunBlocking(work) => {
-                    let result = self.run_on_helper(work);
-                    task.on_completion(result);
-                    if result == ReapResult::Settled || result == ReapResult::Escalated {
-                        self.settle(task, result, &mut progress);
-                    } else {
-                        self.state.queue.lock().push_back(task);
+                    // Hand the call to a helper and move on. The result is
+                    // collected below once the helper finishes, so a hung
+                    // native call cannot hold up unrelated teardowns.
+                    if let Some(pair) = self.start_on_helper(work, task, &mut in_flight) {
+                        // No helper free. Hold the original call and retry it
+                        // when one frees, rather than asking the task for a
+                        // closure it has already moved past producing.
+                        pending_work.push(pair);
                     }
                 }
                 ReapAction::PollAfter(at) => {
@@ -300,18 +415,46 @@ impl ReaperSupervisor {
         progress
     }
 
-    fn run_on_helper(&self, work: Box<dyn FnOnce() -> ReapResult + Send>) -> ReapResult {
+    /// Start blocking work on a helper without waiting for it.
+    ///
+    /// Returns the work and its task if no helper was free, so the caller can
+    /// retry the *same* call later. Asking the task for a fresh closure instead
+    /// would lose the work: `next_action` has already advanced the task's
+    /// state by the time it hands the closure over, so a second call reports
+    /// the step as done when it never ran.
+    ///
+    /// Joining here rather than deferring would hold the helper slot for the
+    /// call's whole duration, which makes more than one helper unreachable and
+    /// lets a single hung native call stall every other owner's teardown.
+    #[allow(clippy::type_complexity)]
+    fn start_on_helper(
+        &self,
+        work: Box<dyn FnOnce() -> ReapResult + Send>,
+        task: Box<dyn ReapTask>,
+        in_flight: &mut Vec<(std::thread::JoinHandle<ReapResult>, Box<dyn ReapTask>)>,
+    ) -> Option<(Box<dyn FnOnce() -> ReapResult + Send>, Box<dyn ReapTask>)> {
         {
             let mut counters = self.state.counters.lock();
             if counters.helpers >= self.state.limits.max_helpers {
-                return ReapResult::TimedOut;
+                return Some((work, task));
             }
             counters.helpers += 1;
         }
-        let handle = std::thread::spawn(work);
-        let result = handle.join().unwrap_or(ReapResult::Failed);
-        self.state.counters.lock().helpers -= 1;
-        result
+        // A thread the OS refuses is a resource failure, not a panic: this
+        // crate exists to stay standing under exhaustion.
+        match std::thread::Builder::new().name("sonic-reaper-helper".to_owned()).spawn(work) {
+            Ok(handle) => {
+                in_flight.push((handle, task));
+                None
+            }
+            Err(_) => {
+                self.state.counters.lock().helpers -= 1;
+                // The closure is gone with the failed spawn, so the task is
+                // returned alone and settles as failed rather than silently
+                // skipping its step.
+                Some((Box::new(|| ReapResult::Failed), task))
+            }
+        }
     }
 
     fn settle(&self, task: Box<dyn ReapTask>, result: ReapResult, progress: &mut ReaperProgress) {
@@ -369,6 +512,27 @@ impl ReaperSupervisor {
     /// process means something never gave its resources back.
     pub fn retained_tasks(&self) -> usize {
         self.state.retained.lock().len()
+    }
+
+    /// Make every retained task surrender what it holds, and report how many
+    /// were released.
+    ///
+    /// Retention keeps an unsettled charge visible, but it also keeps the
+    /// owner from closing, and a closed owner's parent from closing after it.
+    /// Without this, one wedged transport pins its whole window subtree until
+    /// the process exits. This is the terminal cleanup that unwinds it, so a
+    /// caller can reclaim a stuck subtree instead of restarting.
+    ///
+    /// Owners that were already reported unresolved stay reported: surrendering
+    /// releases the resources, it does not retract the diagnosis.
+    pub fn release_retained(&self) -> usize {
+        let mut retained = std::mem::take(&mut *self.state.retained.lock());
+        let count = retained.len();
+        for task in &mut retained {
+            task.surrender_charges();
+        }
+        drop(retained);
+        count
     }
 
     /// Return whether the supervisor still admits work.

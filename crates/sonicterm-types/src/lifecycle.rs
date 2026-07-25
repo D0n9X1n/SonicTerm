@@ -142,6 +142,7 @@ impl std::error::Error for IllegalTransition {}
 
 /// Why a resource was asked to stop.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
 pub enum CancelReason {
     /// Normal user- or app-initiated close.
     Requested,
@@ -157,6 +158,7 @@ pub enum CancelReason {
 
 /// Outcome of asking a resource to stop.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum CancelOutcome {
     /// Stopped before the deadline.
     Settled,
@@ -179,6 +181,7 @@ impl CancelOutcome {
 
 /// Terminal disposition of a reaped resource.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum ReapResult {
     /// The resource settled and released everything it owned.
     Settled,
@@ -204,6 +207,7 @@ impl ReapResult {
 
 /// Why a reaper refused to admit a task.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum ReapAdmission {
     /// A slot was reserved; ownership may transfer on enqueue.
     Reserved,

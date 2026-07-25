@@ -35,7 +35,13 @@ impl fmt::Display for ResourceOwnerId {
 }
 
 /// Resource classes governed by the shared accounting contract.
+///
+/// Adding a variant widens every `EnumMap` keyed by this type and breaks
+/// exhaustive matches in every consuming crate, so the set is deliberately
+/// complete rather than minimal: a class exists for each owner kind's
+/// documented payload even where no subsystem charges it yet.
 #[derive(Clone, Copy, Debug, Enum, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[non_exhaustive]
 pub enum ResourceClass {
     /// Cells and associated storage in the visible primary grid.
     GridVisible,
@@ -49,6 +55,12 @@ pub enum ResourceClass {
     SoftwareFrame,
     /// CPU/GPU upload staging storage.
     UploadStaging,
+    /// Parsed font faces, fallback tables, and shaping caches.
+    ///
+    /// Distinct from [`ResourceClass::GlyphRaster`]: this is the parsed input
+    /// a rasterizer reads, retained for the life of the font stack, while
+    /// raster output is transient and evictable.
+    FontFace,
     /// Rasterized glyph storage before atlas insertion.
     GlyphRaster,
     /// Glyph-atlas pixels and identity metadata.
@@ -144,6 +156,7 @@ pub struct OwnerLimits {
 
 /// Kind of process owning one independent resource governor.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
 pub enum ProcessKind {
     /// GUI application process.
     Gui,
@@ -153,6 +166,7 @@ pub enum ProcessKind {
 
 /// Kind of node in the resource-owner hierarchy.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
 pub enum OwnerKind {
     /// Process root owner.
     Process,
@@ -193,6 +207,7 @@ pub enum OwnerState {
 
 /// Dimension involved in a limit failure.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
 pub enum BudgetDimension {
     /// Byte accounting dimension.
     Bytes,
@@ -202,6 +217,7 @@ pub enum BudgetDimension {
 
 /// Scope whose limit rejected an operation.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
 pub enum BudgetScope {
     /// Aggregate process byte limit.
     Process,
@@ -220,6 +236,7 @@ pub enum BudgetScope {
 
 /// Reasons a resource-governor operation can fail.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum BudgetError {
     /// No further nonzero owner ID can be allocated.
     OwnerIdExhausted,
@@ -307,6 +324,7 @@ impl std::error::Error for BudgetError {}
 
 /// Direction required by an in-place committed resize.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
 pub enum ResizeOperation {
     /// New total must be component-wise no smaller.
     Grow,
@@ -372,6 +390,7 @@ impl DeliveryReceipt {
 
 /// Signal that should make a backpressured caller retry.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
 pub enum RetryWakeup {
     /// Retry when the token deadline is reached.
     AtDeadline,
@@ -410,6 +429,7 @@ impl RetryToken {
 
 /// Reasons a class-specific pressure policy may drop semantically lossy data.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
 pub enum DropReason {
     /// Frozen pressure policy explicitly permits dropping this class.
     Policy,
@@ -419,6 +439,7 @@ pub enum DropReason {
 
 /// Reasons delivery ownership may terminate at a connection boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
 pub enum DisconnectReason {
     /// Sustained pressure exceeded the bounded retry policy.
     SustainedPressure,
@@ -430,6 +451,7 @@ pub enum DisconnectReason {
 
 /// Typed result of an operation governed by resource pressure.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum PressureOutcome<T> {
     /// The receiver accepted ownership and produced a delivery receipt.
     Accepted {

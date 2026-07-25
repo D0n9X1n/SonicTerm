@@ -470,3 +470,225 @@ fn shutdown_leaves_an_unsettled_owner_pinned_with_its_charge_visible() {
     governor.begin_close(window).unwrap();
     governor.finish_close(window).unwrap();
 }
+
+/// Holds a charge and surrenders it only when asked, modelling a transport
+/// that never settles on its own.
+struct WedgedTask {
+    owner: ResourceOwnerId,
+    charge: Option<crate::CommittedReservation>,
+}
+
+impl ReapTask for WedgedTask {
+    fn owner(&self) -> ResourceOwnerId {
+        self.owner
+    }
+    fn next_action(&mut self, now: Instant) -> ReapAction {
+        ReapAction::PollAfter(now + Duration::from_secs(3600))
+    }
+    fn on_completion(&mut self, _result: ReapResult) {}
+    fn force_cancel(&mut self) -> CancelOutcome {
+        CancelOutcome::TimedOut
+    }
+    fn surrender_charges(&mut self) {
+        self.charge = None;
+    }
+}
+
+#[test]
+fn a_wedged_task_can_surrender_its_charge_and_unpin_the_subtree() {
+    // Retention keeps an unsettled charge visible, but without a way to give it
+    // up one wedged transport pins its owner, and every ancestor above it, for
+    // the life of the process. This is the escape hatch.
+    use enum_map::enum_map;
+    use sonicterm_types::{
+        BudgetError, GovernorLimits, OwnerKind, OwnerLimits, ProcessKind, ResourceAmount,
+        ResourceClass,
+    };
+
+    let governor = crate::ResourceGovernor::new(
+        ProcessKind::Gui,
+        GovernorLimits {
+            process_bytes: usize::MAX,
+            class_bytes: enum_map! { _ => usize::MAX },
+            class_items: enum_map! { _ => None },
+        },
+    )
+    .unwrap();
+    let owner_limits = || OwnerLimits {
+        owner_bytes: usize::MAX,
+        class_bytes: enum_map! { _ => usize::MAX },
+        class_items: enum_map! { _ => None },
+    };
+    let window =
+        governor.create_child(governor.root_owner(), OwnerKind::Window, owner_limits()).unwrap();
+    let pane = governor.create_child(window, OwnerKind::AppPane, owner_limits()).unwrap();
+    let committed = governor
+        .try_reserve(pane, ResourceClass::PtyOutput, ResourceAmount { bytes: 128, items: 1 })
+        .unwrap()
+        .commit(ResourceAmount { bytes: 128, items: 1 })
+        .unwrap_or_else(|error| panic!("commit failed: {:?}", error.error));
+
+    let clock = TestClock::new();
+    let supervisor =
+        ReaperSupervisor::new(ReaperLimits::new(4, 2, 4).unwrap(), Arc::new(clock.clone()));
+    supervisor
+        .try_reserve_slot()
+        .unwrap()
+        .enqueue(Box::new(WedgedTask { owner: pane, charge: Some(committed) }));
+
+    governor.begin_close(pane).unwrap();
+    let cancel = CancelSource::new();
+    let report =
+        supervisor.shutdown(deadline_from(&clock, Duration::from_millis(1)), &cancel.token());
+    assert!(!report.is_clean());
+    assert_eq!(supervisor.retained_tasks(), 1);
+
+    // Pinned: neither the pane nor the window above it can close.
+    assert!(matches!(governor.finish_close(pane), Err(BudgetError::OwnerHasLiveCharges { .. })));
+    governor.begin_close(window).unwrap();
+    assert!(matches!(governor.finish_close(window), Err(BudgetError::OwnerHasLiveChildren { .. })));
+
+    // Surrendering releases the charge and unpins the whole subtree.
+    assert_eq!(supervisor.release_retained(), 1);
+    assert_eq!(supervisor.retained_tasks(), 0);
+    assert_eq!(governor.snapshot(pane).unwrap().owner_amount, ResourceAmount::default());
+    governor.finish_close(pane).unwrap();
+    governor.finish_close(window).unwrap();
+
+    // The diagnosis is not retracted by the cleanup.
+    assert_eq!(report.unresolved_owners, vec![pane]);
+}
+
+#[test]
+fn releasing_retained_work_is_idempotent() {
+    let clock = TestClock::new();
+    let supervisor =
+        ReaperSupervisor::new(ReaperLimits::new(2, 1, 2).unwrap(), Arc::new(clock.clone()));
+    assert_eq!(supervisor.release_retained(), 0, "nothing retained yet");
+    assert_eq!(supervisor.release_retained(), 0, "still nothing");
+}
+
+/// Emits one blocking call that reports whether a sibling was running at the
+/// same moment.
+struct OverlapTask {
+    owner: ResourceOwnerId,
+    started: Arc<std::sync::Barrier>,
+    overlapped: Arc<std::sync::atomic::AtomicBool>,
+    issued: bool,
+}
+
+impl ReapTask for OverlapTask {
+    fn owner(&self) -> ResourceOwnerId {
+        self.owner
+    }
+    fn next_action(&mut self, _now: Instant) -> ReapAction {
+        if self.issued {
+            return ReapAction::Complete(ReapResult::Settled);
+        }
+        self.issued = true;
+        let started = self.started.clone();
+        let overlapped = self.overlapped.clone();
+        ReapAction::RunBlocking(Box::new(move || {
+            // Rendezvous with the sibling call. If helpers run serially this
+            // never completes, because the second call cannot start until the
+            // first returns.
+            let waited = started.wait();
+            if waited.is_leader() {
+                overlapped.store(true, Ordering::Relaxed);
+            }
+            ReapResult::Settled
+        }))
+    }
+    fn on_completion(&mut self, _result: ReapResult) {}
+    fn force_cancel(&mut self) -> CancelOutcome {
+        CancelOutcome::Settled
+    }
+}
+
+#[test]
+fn two_blocking_calls_run_at_the_same_time() {
+    // The property that matters: a hung native call must not hold up another
+    // owner's teardown. Both calls rendezvous on a barrier, so this test
+    // cannot pass if the supervisor joins each helper before starting the
+    // next — the earlier implementation would hang here rather than fail.
+    let clock = TestClock::new();
+    let supervisor =
+        ReaperSupervisor::new(ReaperLimits::new(4, 2, 4).unwrap(), Arc::new(clock.clone()));
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let overlapped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    for id in 1..=2u64 {
+        supervisor.try_reserve_slot().unwrap().enqueue(Box::new(OverlapTask {
+            owner: owner(id),
+            started: barrier.clone(),
+            overlapped: overlapped.clone(),
+            issued: false,
+        }));
+    }
+
+    let cancel = CancelSource::new();
+    let progress =
+        supervisor.run_until(deadline_from(&clock, Duration::from_secs(5)), &cancel.token());
+
+    assert!(overlapped.load(Ordering::Relaxed), "two blocking calls never overlapped");
+    assert_eq!(progress.settled, 2);
+    assert_eq!(supervisor.live_helpers(), 0, "helper slots return to zero");
+    assert_eq!(supervisor.live_tasks(), 0);
+}
+
+#[test]
+fn helper_saturation_defers_instead_of_reporting_a_timeout() {
+    // With one helper slot and two blocking tasks, the second must wait for a
+    // slot rather than being told its call timed out. Reporting a timeout for
+    // work that never ran would push a task toward escalation — killing a
+    // process that was never actually contacted.
+    let clock = TestClock::new();
+    let supervisor =
+        ReaperSupervisor::new(ReaperLimits::new(4, 1, 4).unwrap(), Arc::new(clock.clone()));
+    let ran = Arc::new(AtomicUsize::new(0));
+
+    for id in 10..=11u64 {
+        let ran = ran.clone();
+        supervisor.try_reserve_slot().unwrap().enqueue(Box::new(BlockingCountTask {
+            owner: owner(id),
+            ran,
+            issued: false,
+        }));
+    }
+
+    let cancel = CancelSource::new();
+    let progress =
+        supervisor.run_until(deadline_from(&clock, Duration::from_secs(5)), &cancel.token());
+
+    assert_eq!(ran.load(Ordering::Relaxed), 2, "both calls eventually ran");
+    assert_eq!(progress.settled, 2, "neither was reported as a timeout");
+    assert_eq!(supervisor.live_helpers(), 0);
+}
+
+/// Runs one blocking call and counts it.
+struct BlockingCountTask {
+    owner: ResourceOwnerId,
+    ran: Arc<AtomicUsize>,
+    issued: bool,
+}
+
+impl ReapTask for BlockingCountTask {
+    fn owner(&self) -> ResourceOwnerId {
+        self.owner
+    }
+    fn next_action(&mut self, _now: Instant) -> ReapAction {
+        if self.issued {
+            return ReapAction::Complete(ReapResult::Settled);
+        }
+        self.issued = true;
+        let ran = self.ran.clone();
+        ReapAction::RunBlocking(Box::new(move || {
+            ran.fetch_add(1, Ordering::Relaxed);
+            ReapResult::Settled
+        }))
+    }
+    fn on_completion(&mut self, _result: ReapResult) {}
+    fn force_cancel(&mut self) -> CancelOutcome {
+        CancelOutcome::Settled
+    }
+}
