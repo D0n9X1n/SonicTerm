@@ -1282,6 +1282,7 @@ impl App {
                         }
                     }
                     self.command_palette_handle_key(&event);
+                    self.drain_pending_window_creates(el);
                     if let Some(c) = self.windows.get(&win_id) {
                         c.request_redraw();
                     }

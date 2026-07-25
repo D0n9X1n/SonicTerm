@@ -164,6 +164,7 @@ Directions are `left`, `right`, `up`, `down`. Scroll values are `line_up`,
 | Quick select URL hints | `enter_quick_select` |
 | Font size | `increase_font_size`, `decrease_font_size`, `reset_font_size` |
 | New window | `new_window` |
+| Move active tab to new window | `move_tab_to_new_window` |
 | Quit app | `quit_app` |
 | Fullscreen | `toggle_fullscreen` |
 | Search | `open_search` |
@@ -408,6 +409,7 @@ action = { toggle_broadcast = { scope = "tab" } }
 | URL 快速选择 | `enter_quick_select` |
 | 字体大小 | `increase_font_size`, `decrease_font_size`, `reset_font_size` |
 | 新建窗口 | `new_window` |
+| 将当前 Tab 移至新窗口 | `move_tab_to_new_window` |
 | 退出应用 | `quit_app` |
 | 全屏 | `toggle_fullscreen` |
 | 搜索 | `open_search` |

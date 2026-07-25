@@ -310,6 +310,7 @@ impl App {
                 font_family: &self.config.font.family,
                 font_size: self.config.font.size,
                 line_height_mult: self.config.font.line_height,
+                font_weight_scale: self.config.font.effective_weight_scale(),
                 padding: [
                     self.config.window.padding_left,
                     self.config.window.padding_right,

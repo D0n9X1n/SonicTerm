@@ -8,10 +8,26 @@ fn palette_defaults_do_not_expose_placeholder_parameter_actions() {
     assert!(!actions.iter().any(|a| matches!(a, Action::OpenSshPane(_))));
     assert!(actions.iter().any(|a| matches!(a, Action::OpenCommandPalette)));
     assert!(actions.iter().any(|a| matches!(a, Action::UpdateTabColor)));
+    assert!(actions.iter().any(|a| matches!(a, Action::MoveTabToNewWindow)));
     assert!(actions
         .iter()
         .any(|a| { matches!(a, Action::ResizePane { dir: Direction::Left, amount: 5 }) }));
     assert!(covers_every_variant_kind());
+}
+
+#[test]
+fn move_tab_to_new_window_is_searchable_and_unbound_by_default() {
+    let mut palette = CommandPalette::new();
+    palette.set_keymap(&Keymap::default());
+    palette.set_query("detach");
+
+    let visible = palette.visible();
+    let index = visible
+        .iter()
+        .position(|action| matches!(action, Action::MoveTabToNewWindow))
+        .expect("detach should find Move Tab to New Window");
+    assert_eq!(crate::command_label::label(visible[index]), "Move Tab to New Window");
+    assert_eq!(palette.shortcut_hint_for_visible_index(index), None);
 }
 
 #[test]

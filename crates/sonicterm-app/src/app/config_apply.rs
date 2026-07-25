@@ -54,6 +54,12 @@ fn propagate_theme_to_pane_parsers(panes: &HashMap<u64, PaneState>, theme: &Them
 /// Extracted as a free function so the file-watcher path can be
 /// unit-tested without a live `GpuRenderer`.
 pub fn config_diff_needs_font_apply(old_cfg: &Config, new_cfg: &Config) -> bool {
+    config_diff_changes_font_metrics(old_cfg, new_cfg)
+        || (new_cfg.font.effective_weight_scale() - old_cfg.font.effective_weight_scale()).abs()
+            > f32::EPSILON
+}
+
+fn config_diff_changes_font_metrics(old_cfg: &Config, new_cfg: &Config) -> bool {
     new_cfg.font.family != old_cfg.font.family
         || (new_cfg.font.size - old_cfg.font.size).abs() > f32::EPSILON
         || (new_cfg.font.line_height - old_cfg.font.line_height).abs() > f32::EPSILON
@@ -158,8 +164,15 @@ impl App {
         // Font
         let font_changed = config_diff_needs_font_apply(&self.config, &new_cfg);
         if font_changed {
+            let metrics_changed = config_diff_changes_font_metrics(&self.config, &new_cfg);
+            let weight_scale = new_cfg.font.effective_weight_scale();
             if let Some(r) = self.main_renderer_mut() {
-                r.set_font(&new_cfg.font.family, new_cfg.font.size, new_cfg.font.line_height);
+                r.set_font(
+                    &new_cfg.font.family,
+                    new_cfg.font.size,
+                    new_cfg.font.line_height,
+                    weight_scale,
+                );
             }
             // Cell metrics changed → resize each pane to its own PaneRect,
             // never to the whole window's dimensions.
@@ -169,18 +182,25 @@ impl App {
             for child in self.windows.values_mut() {
                 {
                     let Some(r) = child.renderer.as_mut() else { continue };
-                    r.set_font(&new_cfg.font.family, new_cfg.font.size, new_cfg.font.line_height);
+                    r.set_font(
+                        &new_cfg.font.family,
+                        new_cfg.font.size,
+                        new_cfg.font.line_height,
+                        weight_scale,
+                    );
                 }
-                let Some(r) = child.renderer.as_ref() else { continue };
-                let rects = App::compute_pane_rects_for(child);
-                let (cw, ch) = r.cell_size();
-                let inset = [
-                    r.padding_left_px(),
-                    r.padding_right_px(),
-                    r.padding_top_px(),
-                    r.padding_bottom_px(),
-                ];
-                resize_panes_to_rects(&child.panes, &rects, cw, ch, inset);
+                if metrics_changed {
+                    let Some(r) = child.renderer.as_ref() else { continue };
+                    let rects = App::compute_pane_rects_for(child);
+                    let (cw, ch) = r.cell_size();
+                    let inset = [
+                        r.padding_left_px(),
+                        r.padding_right_px(),
+                        r.padding_top_px(),
+                        r.padding_bottom_px(),
+                    ];
+                    resize_panes_to_rects(&child.panes, &rects, cw, ch, inset);
+                }
             }
             tracing::info!(
                 "live-reload: font -> {} @ {}px x{}",
@@ -496,14 +516,15 @@ impl App {
         self.config.font.size = size;
         let family = self.config.font.family.clone();
         let line_h = self.config.font.line_height;
+        let weight_scale = self.config.font.effective_weight_scale();
         if let Some(r) = self.main_renderer_mut() {
-            r.set_font(&family, size, line_h);
+            r.set_font(&family, size, line_h, weight_scale);
         }
         // PR-B2c: the loop below covers main + every child.
         for child in self.windows.values_mut() {
             {
                 let Some(r) = child.renderer.as_mut() else { continue };
-                r.set_font(&family, size, line_h);
+                r.set_font(&family, size, line_h, weight_scale);
             }
             let Some(r) = child.renderer.as_ref() else { continue };
             let rects = App::compute_pane_rects_for(child);

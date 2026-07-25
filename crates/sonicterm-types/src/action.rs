@@ -137,6 +137,8 @@ pub enum Action {
     // Window
     /// Open a new top-level window.
     NewWindow,
+    /// Move the active tab into a new top-level window.
+    MoveTabToNewWindow,
     /// Toggle fullscreen on the active window.
     ToggleFullscreen,
     /// Quit the whole application. When triggered from the keyboard this is
