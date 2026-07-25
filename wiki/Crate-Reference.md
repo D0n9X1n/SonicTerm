@@ -240,7 +240,7 @@ overlays, tab transfer, and platform shell abstractions.
 **Feature:** `ssh` forwards to `sonicterm-io/ssh`; the live SSH session is not
 fully wired into the GUI today.
 
-**Read:** `src/app/mod.rs`, `src/app/{event_loop,window_event,spawn_pane,keymap_dispatch,key_encoding,tear_out}.rs`, `src/{shell,config_watch}.rs`.
+**Read:** `src/app/mod.rs`, `src/app/{event_loop,window_event,spawn_pane,keymap_dispatch,key_encoding,tear_out}.rs`, `src/shell.rs`.
 
 ## Platform and future binaries
 
@@ -508,7 +508,7 @@ COLR color glyph 与原生 handle wrapper。
 **Feature：** `ssh` 转发到 `sonicterm-io/ssh`；实时 SSH session 当前尚未完整接入 GUI。
 
 **阅读：** `src/app/mod.rs`、`src/app/{event_loop,window_event,spawn_pane,keymap_dispatch,key_encoding,tear_out}.rs`、
-`src/{shell,config_watch}.rs`。
+`src/shell.rs`。
 
 ## 平台与未来二进制
 

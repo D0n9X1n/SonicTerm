@@ -430,7 +430,7 @@ impl FontConfig {
     /// Return a safe regular-text weight scale. Invalid values preserve the
     /// native font coverage instead of reaching raster math.
     pub fn effective_weight_scale(&self) -> f32 {
-        if self.weight_scale.is_finite() && (0.5..=2.0).contains(&self.weight_scale) {
+        if self.weight_scale.is_finite() && (0.5..=5.0).contains(&self.weight_scale) {
             self.weight_scale
         } else {
             1.0
@@ -678,7 +678,11 @@ family = "{font_family}"
 size = {font_size}
 # Line-height multiplier. 1.1 is close to WezTerm's default terminal spacing.
 line_height = {line_height}
-# Regular-text coverage scale. 1.0 preserves native weight; 1.1 is slightly bolder.
+# Regular-text weight scale, range 0.5..=5.0. 1.0 preserves native weight.
+# Below 1.0 thins regular text; above 1.0 thickens it. Values far from 1.0 also
+# reshape the glyph outline (growing above, eroding below), which is what makes
+# the change visible on HiDPI screens where stem cores are already solid.
+# Cell metrics and SGR bold are unaffected. Invalid values fall back to 1.0.
 weight_scale = {weight_scale}
 
 [window]

@@ -20,7 +20,6 @@ main()
   -> create App and run ApplicationHandler
   -> resumed: create first native window and GpuRenderer
   -> create first tab and spawn its PTY pane
-  -> start config watcher
 ```
 
 Both platform binaries install panic/exit diagnostics before normal startup
@@ -53,8 +52,8 @@ small lifecycle methods:
 
 | Callback | Main responsibility |
 | --- | --- |
-| `resumed` | create the first window, renderer, first tab/pane, config watcher |
-| `user_event` | config, menu, OS-drag, update, and typed redraw events |
+| `resumed` | create the first window, renderer, and first tab/pane |
+| `user_event` | menu, OS-drag, update, and typed redraw events |
 | `window_event` | keyboard, mouse, IME, resize, focus, redraw, and close |
 | `new_events` | wake scheduled redraws when `WaitUntil` expires |
 | `about_to_wait` | combine frame pacing, cursor blink, notifications, quit deadlines |
@@ -151,13 +150,17 @@ During `RedrawRequested`, the app attempts to lock every visible pane parser
 without blocking. One failed lock defers the complete frame. Successful guards
 supply all `PaneRender` inputs to the renderer.
 
-## Config hot reload
+## Config reload
 
-`ConfigWatcher` watches the config directory, coalesces filesystem bursts, and
-sends `UserEvent::ConfigChanged`. The app drains the newest config/keymap update,
-then applies changes to all live windows and panes. Depending on the field,
-reload can update theme colors, key hints, padding, scrollback limits, cursor,
-renderer cache state, and the warm-window pool. Invalid hot-reload input is
+Configuration is read at startup and then only when the user runs **Reload
+Config** from the command palette (`Action::ReloadConfig`). There is no
+background watcher, so nothing re-reads the config on a timer, on a filesystem
+event, or during ordinary window events.
+
+A reload re-parses `sonicterm.toml` and re-reads the theme and keymap files it
+names, then applies changes to all live windows and panes. Depending on the
+field, reload can update theme colors, key hints, padding, scrollback limits,
+cursor, renderer cache state, and the warm-window pool. Invalid input is
 reported rather than silently replacing the active config.
 
 ## Tab drag and tear-out
@@ -225,7 +228,7 @@ child bytes -> PTY reader channel -> VT worker
 | Input actions/encoding | `crates/sonicterm-app/src/app/{keymap_dispatch,key_encoding}.rs` |
 | Pane spawning | `crates/sonicterm-app/src/app/spawn_pane.rs` |
 | Drag/transfer | `crates/sonicterm-app/src/app/{tear_out,tab_transfer,tab_state}.rs` |
-| Config reload | `crates/sonicterm-app/src/{config_watch.rs,app/config_apply.rs}` |
+| Config reload | `crates/sonicterm-app/src/app/config_apply.rs` |
 | Reducer boundary | `crates/sonicterm-app-core/src/` |
 
 ## 中文
@@ -247,7 +250,6 @@ main()
   -> 创建 App 并运行 ApplicationHandler
   -> resumed：创建首个原生窗口和 GpuRenderer
   -> 创建首个标签页并启动它的 PTY 窗格
-  -> 启动配置 watcher
 ```
 
 两个平台二进制都会先安装 panic/退出诊断，再执行普通启动工作；tracing subscriber 则等到
@@ -274,7 +276,7 @@ Windows 会在 winit 创建 HWND 前启用 per-monitor-v2 DPI awareness，并可
 
 | 回调 | 主要职责 |
 | --- | --- |
-| `resumed` | 创建首个窗口、renderer、首个标签页/窗格和配置 watcher |
+| `resumed` | 创建首个窗口、renderer 和首个标签页/窗格 |
 | `user_event` | 配置、菜单、OS 拖动、更新和类型化重绘事件 |
 | `window_event` | 键盘、鼠标、IME、resize、focus、redraw 和 close |
 | `new_events` | `WaitUntil` 到期时唤醒计划重绘 |
@@ -359,11 +361,15 @@ PTY worker 不会逐字节重绘，而是累积输出，在达到字节阈值或
 收到 `RedrawRequested` 时，app 非阻塞尝试锁住每个可见窗格 parser。任一个失败就推迟整帧；
 全部成功后才向 renderer 提供完整 `PaneRender`。
 
-## 配置热重载
+## 配置重载
 
-`ConfigWatcher` 监控配置目录、合并文件系统事件，然后发送 `UserEvent::ConfigChanged`。
-app 只取最新 config/keymap 更新，并应用到所有实时窗口和窗格。不同字段可更新主题颜色、快捷键提示、
-padding、scrollback 上限、光标、renderer 缓存和预热窗口池。无效热重载会报告错误，而不是默默替换活动配置。
+配置只在启动时读取，之后仅在用户从命令面板运行 **Reload Config**
+（`Action::ReloadConfig`）时重新读取。没有后台 watcher，因此不会有定时、文件系统事件
+或普通窗口事件触发的重复读取。
+
+重载会重新解析 `sonicterm.toml`，并重新读取它所指定的主题与 keymap 文件，然后应用到所有
+实时窗口和窗格。不同字段可更新主题颜色、快捷键提示、padding、scrollback 上限、光标、
+renderer 缓存和预热窗口池。无效输入会报告错误，而不是默默替换活动配置。
 
 ## 标签页拖动和撕离
 
@@ -421,5 +427,5 @@ keymap split_right
 | 输入 action/编码 | `crates/sonicterm-app/src/app/{keymap_dispatch,key_encoding}.rs` |
 | 窗格启动 | `crates/sonicterm-app/src/app/spawn_pane.rs` |
 | 拖动/转移 | `crates/sonicterm-app/src/app/{tear_out,tab_transfer,tab_state}.rs` |
-| 配置重载 | `crates/sonicterm-app/src/{config_watch.rs,app/config_apply.rs}` |
+| 配置重载 | `crates/sonicterm-app/src/app/config_apply.rs` |
 | Reducer 边界 | `crates/sonicterm-app-core/src/` |

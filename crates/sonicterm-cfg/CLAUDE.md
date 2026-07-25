@@ -19,8 +19,8 @@ cargo test -p sonicterm-cfg
 ```
 
 ## Guardrails
-- Startup may fall back to defaults, but hot reload should surface parse
-  errors clearly instead of silently accepting bad config.
+- Startup may fall back to defaults, but an explicit reload should surface
+  parse errors clearly instead of silently accepting bad config.
 - Preserve unknown/future TOML keys when possible.
 - Theme/keymap loading must check both bundled assets and user override
   directories under `~/.sonicterm/`.

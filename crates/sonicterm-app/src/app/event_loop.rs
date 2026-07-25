@@ -22,7 +22,6 @@ use winit::{
 };
 
 use super::{mark_all_panes_dirty, window_dpi, with_integrated_titlebar, App, UserEvent};
-use crate::config_watch::ConfigWatcher;
 use sonicterm_ui::selection::SelectMode;
 use winit::event_loop::ControlFlow;
 
@@ -173,12 +172,7 @@ impl App {
     }
 
     pub(super) fn do_user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
-        // Watcher-thread wake. Drain the channel and apply any new
-        // config immediately so the reload doesn't sit queued until
-        // the next OS event arrives. apply_new_config already
-        // request_redraw()s every live window.
         match event {
-            UserEvent::ConfigChanged => self.poll_config_reload(),
             UserEvent::MenuAction => self.drain_menubar_actions(el),
             UserEvent::OsDrag => self.drain_os_drag(),
             UserEvent::DragMoved => {
@@ -455,33 +449,5 @@ impl App {
             rr,
         );
         window.request_redraw();
-
-        // Spawn the sonicterm.toml live-reload watcher (best-effort; if the
-        // user has no config path or the parent dir is unreadable, the
-        // app still runs — just without live reload).
-        if self.config_watcher.is_none() {
-            if let Some(path) = sonicterm_cfg::config::Config::default_path() {
-                let proxy = self.event_loop_proxy.clone();
-                let spawn_result = if let Some(p) = proxy {
-                    ConfigWatcher::spawn_with_wake(path.clone(), move || {
-                        // Failure here means the event loop has shut
-                        // down — nothing to wake, safe to ignore.
-                        let _ = p.send_event(UserEvent::ConfigChanged);
-                    })
-                } else {
-                    // No proxy in this App instance — fall back to the
-                    // poll-only behavior; the watcher still delivers,
-                    // it just won't wake an idle loop.
-                    ConfigWatcher::spawn(path.clone())
-                };
-                match spawn_result {
-                    Ok(w) => {
-                        tracing::info!("config watcher: watching {path:?}");
-                        self.config_watcher = Some(w);
-                    }
-                    Err(e) => tracing::warn!("config watcher disabled: {e:#}"),
-                }
-            }
-        }
     }
 }
