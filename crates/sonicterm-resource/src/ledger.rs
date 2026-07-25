@@ -325,23 +325,28 @@ impl Ledger {
         if amount.is_zero() {
             return Ok(());
         }
-        let mut process = self.process_bytes.load(Ordering::Acquire);
-        loop {
-            let candidate = Self::validate_limit(
-                BudgetScope::Process,
-                BudgetDimension::Bytes,
-                process,
-                amount.bytes,
-                self.limits.process_bytes,
-            )?;
-            match self.process_bytes.compare_exchange_weak(
-                process,
-                candidate,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => break,
-                Err(observed) => process = observed,
+        // Only a byte charge moves the process total, so an items-only reservation
+        // skips the shared atomic entirely. The skipped check cannot reject: the
+        // process total is only ever written to an already validated value.
+        if amount.bytes > 0 {
+            let mut process = self.process_bytes.load(Ordering::Acquire);
+            loop {
+                let candidate = Self::validate_limit(
+                    BudgetScope::Process,
+                    BudgetDimension::Bytes,
+                    process,
+                    amount.bytes,
+                    self.limits.process_bytes,
+                )?;
+                match self.process_bytes.compare_exchange_weak(
+                    process,
+                    candidate,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => break,
+                    Err(observed) => process = observed,
+                }
             }
         }
         class_usage.bytes += amount.bytes;

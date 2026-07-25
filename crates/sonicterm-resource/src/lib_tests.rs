@@ -294,16 +294,29 @@ fn reserve_and_begin_close_linearize_without_post_close_admission() {
 }
 
 #[test]
-fn zero_token_commit_revalidates_closed_owner() {
-    let governor = governor(1);
-    let pane = app_pane(&governor, 1);
+fn zero_and_charged_tokens_commit_on_a_closing_owner() {
+    // Closing an owner rejects new reservations; it does not strand tokens that
+    // were already admitted, because the close protocol settles live workers
+    // before an owner can finish closing.
+    let governor = governor(64);
+    let pane = app_pane(&governor, 64);
     let zero = governor
         .try_reserve(pane, ResourceClass::ProtocolMetadata, ResourceAmount::default())
         .unwrap();
+    let charged = governor
+        .try_reserve(pane, ResourceClass::PtyOutput, ResourceAmount { bytes: 32, items: 2 })
+        .unwrap();
     governor.begin_close(pane).unwrap();
-    let error = zero.commit(ResourceAmount::default()).unwrap_err();
-    assert!(matches!(error.error, BudgetError::InvalidOwnerState { .. }));
-    drop(error.reservation);
+    let zero = zero.commit(ResourceAmount::default()).expect("zero commit on closing owner");
+    let charged = charged
+        .commit(ResourceAmount { bytes: 16, items: 1 })
+        .unwrap_or_else(|error| panic!("charged commit on closing owner: {:?}", error.error));
+    assert_eq!(
+        governor.snapshot(pane).unwrap().owner_amount,
+        ResourceAmount { bytes: 16, items: 1 }
+    );
+    drop(zero);
+    drop(charged);
     governor.finish_close(pane).unwrap();
 }
 

@@ -49,11 +49,10 @@ impl Reservation {
         }
         let difference = current.checked_sub(actual).expect("component-wise checked");
         let charge = self.charge();
-        let result = if current.is_zero() {
-            charge.ledger.validate_open(charge.owner)
-        } else {
-            charge.ledger.release(charge.owner, charge.class, difference)
-        };
+        // Committing settles a charge that was already admitted, so it does not
+        // re-check admission state: closing an owner rejects new reservations while
+        // still letting live tokens finalize during teardown.
+        let result = charge.ledger.release(charge.owner, charge.class, difference);
         if let Err(error) = result {
             return Err(CommitError { reservation: self, error });
         }
