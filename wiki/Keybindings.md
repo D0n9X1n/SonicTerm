@@ -48,7 +48,7 @@ aliases (`Ctrl+T`, `Ctrl+Shift+C`, `Ctrl+Shift+V`) are also bound.
 | Paste | `Cmd+V` | `Ctrl+Shift+V` |
 | Increase font size | `Cmd+=` / `Cmd++` | `Alt+=` / `Alt++` |
 | Decrease font size | `Cmd+-` | `Alt+-` |
-| Reset font size | `Cmd+0` | `Alt+0` |
+| Reset font size (to configured `size`) | `Cmd+0` | `Alt+0` |
 | New window | `Cmd+N` | `Alt+N` |
 | Quit app (confirm) | `Cmd+Q`, then `Cmd+Q` again within 5s | — |
 | Toggle fullscreen | `Cmd+Enter` / `Cmd+Shift+F` | `Alt+Enter` / `Alt+Shift+F` / `F11` |
@@ -78,10 +78,9 @@ These are the bundled defaults; every row is editable in the keymap TOML below.
 1. Open the command palette.
 2. Run **Edit keymap.toml**. This opens the platform-default user file.
 3. Edit that file, or manually open the custom path named by `keymap`.
-4. If `<name>` is the platform-default keymap, save and run **Reload Config**.
-   Arbitrary custom-named keymap files are not watched directly; if the same
-   custom selector is already active, change/reselect it in `sonicterm.toml` or
-   restart after editing.
+4. Save, then run **Reload Config**. This applies to any keymap the `keymap`
+   key names, including custom-named files — a reload re-reads the keymap file
+   whether or not the selector changed, so no rename or restart is needed.
 
 When a keymap reloads successfully, command-palette shortcut hints update with it.
 
@@ -300,7 +299,7 @@ macOS 上的应用修饰键是 `Cmd`；Windows 上是 `Alt`。在 Windows 上，
 | 粘贴 | `Cmd+V` | `Ctrl+Shift+V` |
 | 增大字号 | `Cmd+=` / `Cmd++` | `Alt+=` / `Alt++` |
 | 减小字号 | `Cmd+-` | `Alt+-` |
-| 重置字号 | `Cmd+0` | `Alt+0` |
+| 重置字号（回到配置的 `size`） | `Cmd+0` | `Alt+0` |
 | 新建窗口 | `Cmd+N` | `Alt+N` |
 | 退出应用（确认） | 先按 `Cmd+Q`，5 秒内再按一次 `Cmd+Q` | — |
 | 切换全屏 | `Cmd+Enter` / `Cmd+Shift+F` | `Alt+Enter` / `Alt+Shift+F` / `F11` |
@@ -328,9 +327,8 @@ action 模型还支持 prompt 导航（`scroll_to_prev_prompt`、`scroll_to_next
 1. 打开命令面板。
 2. 执行 **Edit keymap.toml**；它会打开平台默认用户文件。
 3. 编辑该文件，或手动打开 `keymap` 指向的自定义路径。
-4. 如果 `<name>` 是平台默认 keymap，保存后执行 **Reload Config**。任意自定义名称的 keymap
-   文件不会被直接监控；如果同一个自定义选择器已经生效，请在 `sonicterm.toml` 中改变/重新选择它，
-   或编辑后重启。
+4. 保存后执行 **Reload Config**。这对 `keymap` 指向的任何 keymap 都有效，包括自定义
+   名称的文件——重载会重新读取 keymap 文件，无论选择器是否变化，因此无需改名或重启。
 
 keymap 成功重载时，命令面板中的快捷键提示也会一起更新。
 
