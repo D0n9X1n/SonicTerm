@@ -472,6 +472,159 @@ impl core::marker::Unpin for sonicterm_types::hyperlink_id::HyperlinkId
 impl core::marker::UnsafeUnpin for sonicterm_types::hyperlink_id::HyperlinkId
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::hyperlink_id::HyperlinkId
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::hyperlink_id::HyperlinkId
+pub mod sonicterm_types::lifecycle
+pub enum sonicterm_types::lifecycle::CancelOutcome
+pub sonicterm_types::lifecycle::CancelOutcome::Pending
+pub sonicterm_types::lifecycle::CancelOutcome::Settled
+pub sonicterm_types::lifecycle::CancelOutcome::TimedOut
+impl sonicterm_types::lifecycle::CancelOutcome
+pub const fn sonicterm_types::lifecycle::CancelOutcome::is_settled(self) -> bool
+impl core::clone::Clone for sonicterm_types::lifecycle::CancelOutcome
+pub fn sonicterm_types::lifecycle::CancelOutcome::clone(&self) -> sonicterm_types::lifecycle::CancelOutcome
+impl core::cmp::Eq for sonicterm_types::lifecycle::CancelOutcome
+impl core::cmp::PartialEq for sonicterm_types::lifecycle::CancelOutcome
+pub fn sonicterm_types::lifecycle::CancelOutcome::eq(&self, &sonicterm_types::lifecycle::CancelOutcome) -> bool
+impl core::fmt::Debug for sonicterm_types::lifecycle::CancelOutcome
+pub fn sonicterm_types::lifecycle::CancelOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::lifecycle::CancelOutcome
+impl core::marker::StructuralPartialEq for sonicterm_types::lifecycle::CancelOutcome
+impl core::marker::Freeze for sonicterm_types::lifecycle::CancelOutcome
+impl core::marker::Send for sonicterm_types::lifecycle::CancelOutcome
+impl core::marker::Sync for sonicterm_types::lifecycle::CancelOutcome
+impl core::marker::Unpin for sonicterm_types::lifecycle::CancelOutcome
+impl core::marker::UnsafeUnpin for sonicterm_types::lifecycle::CancelOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::lifecycle::CancelOutcome
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::lifecycle::CancelOutcome
+pub enum sonicterm_types::lifecycle::CancelReason
+pub sonicterm_types::lifecycle::CancelReason::Faulted
+pub sonicterm_types::lifecycle::CancelReason::ParentClosing
+pub sonicterm_types::lifecycle::CancelReason::Requested
+pub sonicterm_types::lifecycle::CancelReason::Shutdown
+pub sonicterm_types::lifecycle::CancelReason::Timeout
+impl core::clone::Clone for sonicterm_types::lifecycle::CancelReason
+pub fn sonicterm_types::lifecycle::CancelReason::clone(&self) -> sonicterm_types::lifecycle::CancelReason
+impl core::cmp::Eq for sonicterm_types::lifecycle::CancelReason
+impl core::cmp::PartialEq for sonicterm_types::lifecycle::CancelReason
+pub fn sonicterm_types::lifecycle::CancelReason::eq(&self, &sonicterm_types::lifecycle::CancelReason) -> bool
+impl core::fmt::Debug for sonicterm_types::lifecycle::CancelReason
+pub fn sonicterm_types::lifecycle::CancelReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::lifecycle::CancelReason
+pub fn sonicterm_types::lifecycle::CancelReason::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::lifecycle::CancelReason
+impl core::marker::StructuralPartialEq for sonicterm_types::lifecycle::CancelReason
+impl core::marker::Freeze for sonicterm_types::lifecycle::CancelReason
+impl core::marker::Send for sonicterm_types::lifecycle::CancelReason
+impl core::marker::Sync for sonicterm_types::lifecycle::CancelReason
+impl core::marker::Unpin for sonicterm_types::lifecycle::CancelReason
+impl core::marker::UnsafeUnpin for sonicterm_types::lifecycle::CancelReason
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::lifecycle::CancelReason
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::lifecycle::CancelReason
+pub enum sonicterm_types::lifecycle::LifecycleState
+pub sonicterm_types::lifecycle::LifecycleState::Cancelling
+pub sonicterm_types::lifecycle::LifecycleState::Closed
+pub sonicterm_types::lifecycle::LifecycleState::ClosingTransport
+pub sonicterm_types::lifecycle::LifecycleState::Faulted
+pub sonicterm_types::lifecycle::LifecycleState::Joining
+pub sonicterm_types::lifecycle::LifecycleState::Reaped
+pub sonicterm_types::lifecycle::LifecycleState::Running
+pub sonicterm_types::lifecycle::LifecycleState::Starting
+impl sonicterm_types::lifecycle::LifecycleState
+pub const fn sonicterm_types::lifecycle::LifecycleState::admits_work(self) -> bool
+pub const fn sonicterm_types::lifecycle::LifecycleState::can_transition_to(self, Self) -> bool
+pub const fn sonicterm_types::lifecycle::LifecycleState::entry_requirement(self) -> &'static str
+pub const fn sonicterm_types::lifecycle::LifecycleState::is_terminal(self) -> bool
+impl core::clone::Clone for sonicterm_types::lifecycle::LifecycleState
+pub fn sonicterm_types::lifecycle::LifecycleState::clone(&self) -> sonicterm_types::lifecycle::LifecycleState
+impl core::cmp::Eq for sonicterm_types::lifecycle::LifecycleState
+impl core::cmp::Ord for sonicterm_types::lifecycle::LifecycleState
+pub fn sonicterm_types::lifecycle::LifecycleState::cmp(&self, &sonicterm_types::lifecycle::LifecycleState) -> core::cmp::Ordering
+impl core::cmp::PartialEq for sonicterm_types::lifecycle::LifecycleState
+pub fn sonicterm_types::lifecycle::LifecycleState::eq(&self, &sonicterm_types::lifecycle::LifecycleState) -> bool
+impl core::cmp::PartialOrd for sonicterm_types::lifecycle::LifecycleState
+pub fn sonicterm_types::lifecycle::LifecycleState::partial_cmp(&self, &sonicterm_types::lifecycle::LifecycleState) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for sonicterm_types::lifecycle::LifecycleState
+pub fn sonicterm_types::lifecycle::LifecycleState::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for sonicterm_types::lifecycle::LifecycleState
+pub fn sonicterm_types::lifecycle::LifecycleState::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::lifecycle::LifecycleState
+pub fn sonicterm_types::lifecycle::LifecycleState::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::lifecycle::LifecycleState
+impl core::marker::StructuralPartialEq for sonicterm_types::lifecycle::LifecycleState
+impl core::marker::Freeze for sonicterm_types::lifecycle::LifecycleState
+impl core::marker::Send for sonicterm_types::lifecycle::LifecycleState
+impl core::marker::Sync for sonicterm_types::lifecycle::LifecycleState
+impl core::marker::Unpin for sonicterm_types::lifecycle::LifecycleState
+impl core::marker::UnsafeUnpin for sonicterm_types::lifecycle::LifecycleState
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::lifecycle::LifecycleState
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::lifecycle::LifecycleState
+pub enum sonicterm_types::lifecycle::ReapAdmission
+pub sonicterm_types::lifecycle::ReapAdmission::QueueFull
+pub sonicterm_types::lifecycle::ReapAdmission::Reserved
+pub sonicterm_types::lifecycle::ReapAdmission::ShuttingDown
+impl sonicterm_types::lifecycle::ReapAdmission
+pub const fn sonicterm_types::lifecycle::ReapAdmission::admits(self) -> bool
+impl core::clone::Clone for sonicterm_types::lifecycle::ReapAdmission
+pub fn sonicterm_types::lifecycle::ReapAdmission::clone(&self) -> sonicterm_types::lifecycle::ReapAdmission
+impl core::cmp::Eq for sonicterm_types::lifecycle::ReapAdmission
+impl core::cmp::PartialEq for sonicterm_types::lifecycle::ReapAdmission
+pub fn sonicterm_types::lifecycle::ReapAdmission::eq(&self, &sonicterm_types::lifecycle::ReapAdmission) -> bool
+impl core::fmt::Debug for sonicterm_types::lifecycle::ReapAdmission
+pub fn sonicterm_types::lifecycle::ReapAdmission::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::lifecycle::ReapAdmission
+impl core::marker::StructuralPartialEq for sonicterm_types::lifecycle::ReapAdmission
+impl core::marker::Freeze for sonicterm_types::lifecycle::ReapAdmission
+impl core::marker::Send for sonicterm_types::lifecycle::ReapAdmission
+impl core::marker::Sync for sonicterm_types::lifecycle::ReapAdmission
+impl core::marker::Unpin for sonicterm_types::lifecycle::ReapAdmission
+impl core::marker::UnsafeUnpin for sonicterm_types::lifecycle::ReapAdmission
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::lifecycle::ReapAdmission
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::lifecycle::ReapAdmission
+pub enum sonicterm_types::lifecycle::ReapResult
+pub sonicterm_types::lifecycle::ReapResult::Escalated
+pub sonicterm_types::lifecycle::ReapResult::Failed
+pub sonicterm_types::lifecycle::ReapResult::Settled
+pub sonicterm_types::lifecycle::ReapResult::TimedOut
+impl sonicterm_types::lifecycle::ReapResult
+pub const fn sonicterm_types::lifecycle::ReapResult::releases_charge(self) -> bool
+impl core::clone::Clone for sonicterm_types::lifecycle::ReapResult
+pub fn sonicterm_types::lifecycle::ReapResult::clone(&self) -> sonicterm_types::lifecycle::ReapResult
+impl core::cmp::Eq for sonicterm_types::lifecycle::ReapResult
+impl core::cmp::PartialEq for sonicterm_types::lifecycle::ReapResult
+pub fn sonicterm_types::lifecycle::ReapResult::eq(&self, &sonicterm_types::lifecycle::ReapResult) -> bool
+impl core::fmt::Debug for sonicterm_types::lifecycle::ReapResult
+pub fn sonicterm_types::lifecycle::ReapResult::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::lifecycle::ReapResult
+impl core::marker::StructuralPartialEq for sonicterm_types::lifecycle::ReapResult
+impl core::marker::Freeze for sonicterm_types::lifecycle::ReapResult
+impl core::marker::Send for sonicterm_types::lifecycle::ReapResult
+impl core::marker::Sync for sonicterm_types::lifecycle::ReapResult
+impl core::marker::Unpin for sonicterm_types::lifecycle::ReapResult
+impl core::marker::UnsafeUnpin for sonicterm_types::lifecycle::ReapResult
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::lifecycle::ReapResult
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::lifecycle::ReapResult
+pub struct sonicterm_types::lifecycle::IllegalTransition
+pub sonicterm_types::lifecycle::IllegalTransition::from: sonicterm_types::lifecycle::LifecycleState
+pub sonicterm_types::lifecycle::IllegalTransition::owner: sonicterm_types::resource::ResourceOwnerId
+pub sonicterm_types::lifecycle::IllegalTransition::to: sonicterm_types::lifecycle::LifecycleState
+impl core::clone::Clone for sonicterm_types::lifecycle::IllegalTransition
+pub fn sonicterm_types::lifecycle::IllegalTransition::clone(&self) -> sonicterm_types::lifecycle::IllegalTransition
+impl core::cmp::Eq for sonicterm_types::lifecycle::IllegalTransition
+impl core::cmp::PartialEq for sonicterm_types::lifecycle::IllegalTransition
+pub fn sonicterm_types::lifecycle::IllegalTransition::eq(&self, &sonicterm_types::lifecycle::IllegalTransition) -> bool
+impl core::error::Error for sonicterm_types::lifecycle::IllegalTransition
+impl core::fmt::Debug for sonicterm_types::lifecycle::IllegalTransition
+pub fn sonicterm_types::lifecycle::IllegalTransition::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for sonicterm_types::lifecycle::IllegalTransition
+pub fn sonicterm_types::lifecycle::IllegalTransition::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::lifecycle::IllegalTransition
+impl core::marker::StructuralPartialEq for sonicterm_types::lifecycle::IllegalTransition
+impl core::marker::Freeze for sonicterm_types::lifecycle::IllegalTransition
+impl core::marker::Send for sonicterm_types::lifecycle::IllegalTransition
+impl core::marker::Sync for sonicterm_types::lifecycle::IllegalTransition
+impl core::marker::Unpin for sonicterm_types::lifecycle::IllegalTransition
+impl core::marker::UnsafeUnpin for sonicterm_types::lifecycle::IllegalTransition
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::lifecycle::IllegalTransition
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::lifecycle::IllegalTransition
 pub mod sonicterm_types::mod_key
 pub struct sonicterm_types::mod_key::ModKey(_)
 impl sonicterm_types::mod_key::ModKey
@@ -1364,6 +1517,52 @@ impl core::marker::Unpin for sonicterm_types::resource::BudgetScope
 impl core::marker::UnsafeUnpin for sonicterm_types::resource::BudgetScope
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::BudgetScope
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::BudgetScope
+pub enum sonicterm_types::CancelOutcome
+pub sonicterm_types::CancelOutcome::Pending
+pub sonicterm_types::CancelOutcome::Settled
+pub sonicterm_types::CancelOutcome::TimedOut
+impl sonicterm_types::lifecycle::CancelOutcome
+pub const fn sonicterm_types::lifecycle::CancelOutcome::is_settled(self) -> bool
+impl core::clone::Clone for sonicterm_types::lifecycle::CancelOutcome
+pub fn sonicterm_types::lifecycle::CancelOutcome::clone(&self) -> sonicterm_types::lifecycle::CancelOutcome
+impl core::cmp::Eq for sonicterm_types::lifecycle::CancelOutcome
+impl core::cmp::PartialEq for sonicterm_types::lifecycle::CancelOutcome
+pub fn sonicterm_types::lifecycle::CancelOutcome::eq(&self, &sonicterm_types::lifecycle::CancelOutcome) -> bool
+impl core::fmt::Debug for sonicterm_types::lifecycle::CancelOutcome
+pub fn sonicterm_types::lifecycle::CancelOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::lifecycle::CancelOutcome
+impl core::marker::StructuralPartialEq for sonicterm_types::lifecycle::CancelOutcome
+impl core::marker::Freeze for sonicterm_types::lifecycle::CancelOutcome
+impl core::marker::Send for sonicterm_types::lifecycle::CancelOutcome
+impl core::marker::Sync for sonicterm_types::lifecycle::CancelOutcome
+impl core::marker::Unpin for sonicterm_types::lifecycle::CancelOutcome
+impl core::marker::UnsafeUnpin for sonicterm_types::lifecycle::CancelOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::lifecycle::CancelOutcome
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::lifecycle::CancelOutcome
+pub enum sonicterm_types::CancelReason
+pub sonicterm_types::CancelReason::Faulted
+pub sonicterm_types::CancelReason::ParentClosing
+pub sonicterm_types::CancelReason::Requested
+pub sonicterm_types::CancelReason::Shutdown
+pub sonicterm_types::CancelReason::Timeout
+impl core::clone::Clone for sonicterm_types::lifecycle::CancelReason
+pub fn sonicterm_types::lifecycle::CancelReason::clone(&self) -> sonicterm_types::lifecycle::CancelReason
+impl core::cmp::Eq for sonicterm_types::lifecycle::CancelReason
+impl core::cmp::PartialEq for sonicterm_types::lifecycle::CancelReason
+pub fn sonicterm_types::lifecycle::CancelReason::eq(&self, &sonicterm_types::lifecycle::CancelReason) -> bool
+impl core::fmt::Debug for sonicterm_types::lifecycle::CancelReason
+pub fn sonicterm_types::lifecycle::CancelReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::lifecycle::CancelReason
+pub fn sonicterm_types::lifecycle::CancelReason::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::lifecycle::CancelReason
+impl core::marker::StructuralPartialEq for sonicterm_types::lifecycle::CancelReason
+impl core::marker::Freeze for sonicterm_types::lifecycle::CancelReason
+impl core::marker::Send for sonicterm_types::lifecycle::CancelReason
+impl core::marker::Sync for sonicterm_types::lifecycle::CancelReason
+impl core::marker::Unpin for sonicterm_types::lifecycle::CancelReason
+impl core::marker::UnsafeUnpin for sonicterm_types::lifecycle::CancelReason
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::lifecycle::CancelReason
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::lifecycle::CancelReason
 pub enum sonicterm_types::Color
 pub sonicterm_types::Color::Default
 pub sonicterm_types::Color::Indexed(u8)
@@ -1460,6 +1659,44 @@ impl core::marker::Unpin for sonicterm_types::resource::DropReason
 impl core::marker::UnsafeUnpin for sonicterm_types::resource::DropReason
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::DropReason
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::DropReason
+pub enum sonicterm_types::LifecycleState
+pub sonicterm_types::LifecycleState::Cancelling
+pub sonicterm_types::LifecycleState::Closed
+pub sonicterm_types::LifecycleState::ClosingTransport
+pub sonicterm_types::LifecycleState::Faulted
+pub sonicterm_types::LifecycleState::Joining
+pub sonicterm_types::LifecycleState::Reaped
+pub sonicterm_types::LifecycleState::Running
+pub sonicterm_types::LifecycleState::Starting
+impl sonicterm_types::lifecycle::LifecycleState
+pub const fn sonicterm_types::lifecycle::LifecycleState::admits_work(self) -> bool
+pub const fn sonicterm_types::lifecycle::LifecycleState::can_transition_to(self, Self) -> bool
+pub const fn sonicterm_types::lifecycle::LifecycleState::entry_requirement(self) -> &'static str
+pub const fn sonicterm_types::lifecycle::LifecycleState::is_terminal(self) -> bool
+impl core::clone::Clone for sonicterm_types::lifecycle::LifecycleState
+pub fn sonicterm_types::lifecycle::LifecycleState::clone(&self) -> sonicterm_types::lifecycle::LifecycleState
+impl core::cmp::Eq for sonicterm_types::lifecycle::LifecycleState
+impl core::cmp::Ord for sonicterm_types::lifecycle::LifecycleState
+pub fn sonicterm_types::lifecycle::LifecycleState::cmp(&self, &sonicterm_types::lifecycle::LifecycleState) -> core::cmp::Ordering
+impl core::cmp::PartialEq for sonicterm_types::lifecycle::LifecycleState
+pub fn sonicterm_types::lifecycle::LifecycleState::eq(&self, &sonicterm_types::lifecycle::LifecycleState) -> bool
+impl core::cmp::PartialOrd for sonicterm_types::lifecycle::LifecycleState
+pub fn sonicterm_types::lifecycle::LifecycleState::partial_cmp(&self, &sonicterm_types::lifecycle::LifecycleState) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for sonicterm_types::lifecycle::LifecycleState
+pub fn sonicterm_types::lifecycle::LifecycleState::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for sonicterm_types::lifecycle::LifecycleState
+pub fn sonicterm_types::lifecycle::LifecycleState::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::lifecycle::LifecycleState
+pub fn sonicterm_types::lifecycle::LifecycleState::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::lifecycle::LifecycleState
+impl core::marker::StructuralPartialEq for sonicterm_types::lifecycle::LifecycleState
+impl core::marker::Freeze for sonicterm_types::lifecycle::LifecycleState
+impl core::marker::Send for sonicterm_types::lifecycle::LifecycleState
+impl core::marker::Sync for sonicterm_types::lifecycle::LifecycleState
+impl core::marker::Unpin for sonicterm_types::lifecycle::LifecycleState
+impl core::marker::UnsafeUnpin for sonicterm_types::lifecycle::LifecycleState
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::lifecycle::LifecycleState
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::lifecycle::LifecycleState
 pub enum sonicterm_types::OwnerKind
 pub sonicterm_types::OwnerKind::AppPane
 pub sonicterm_types::OwnerKind::Attachment
@@ -1574,6 +1811,51 @@ impl core::marker::Unpin for sonicterm_types::resource::ProcessKind
 impl core::marker::UnsafeUnpin for sonicterm_types::resource::ProcessKind
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::ProcessKind
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::ProcessKind
+pub enum sonicterm_types::ReapAdmission
+pub sonicterm_types::ReapAdmission::QueueFull
+pub sonicterm_types::ReapAdmission::Reserved
+pub sonicterm_types::ReapAdmission::ShuttingDown
+impl sonicterm_types::lifecycle::ReapAdmission
+pub const fn sonicterm_types::lifecycle::ReapAdmission::admits(self) -> bool
+impl core::clone::Clone for sonicterm_types::lifecycle::ReapAdmission
+pub fn sonicterm_types::lifecycle::ReapAdmission::clone(&self) -> sonicterm_types::lifecycle::ReapAdmission
+impl core::cmp::Eq for sonicterm_types::lifecycle::ReapAdmission
+impl core::cmp::PartialEq for sonicterm_types::lifecycle::ReapAdmission
+pub fn sonicterm_types::lifecycle::ReapAdmission::eq(&self, &sonicterm_types::lifecycle::ReapAdmission) -> bool
+impl core::fmt::Debug for sonicterm_types::lifecycle::ReapAdmission
+pub fn sonicterm_types::lifecycle::ReapAdmission::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::lifecycle::ReapAdmission
+impl core::marker::StructuralPartialEq for sonicterm_types::lifecycle::ReapAdmission
+impl core::marker::Freeze for sonicterm_types::lifecycle::ReapAdmission
+impl core::marker::Send for sonicterm_types::lifecycle::ReapAdmission
+impl core::marker::Sync for sonicterm_types::lifecycle::ReapAdmission
+impl core::marker::Unpin for sonicterm_types::lifecycle::ReapAdmission
+impl core::marker::UnsafeUnpin for sonicterm_types::lifecycle::ReapAdmission
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::lifecycle::ReapAdmission
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::lifecycle::ReapAdmission
+pub enum sonicterm_types::ReapResult
+pub sonicterm_types::ReapResult::Escalated
+pub sonicterm_types::ReapResult::Failed
+pub sonicterm_types::ReapResult::Settled
+pub sonicterm_types::ReapResult::TimedOut
+impl sonicterm_types::lifecycle::ReapResult
+pub const fn sonicterm_types::lifecycle::ReapResult::releases_charge(self) -> bool
+impl core::clone::Clone for sonicterm_types::lifecycle::ReapResult
+pub fn sonicterm_types::lifecycle::ReapResult::clone(&self) -> sonicterm_types::lifecycle::ReapResult
+impl core::cmp::Eq for sonicterm_types::lifecycle::ReapResult
+impl core::cmp::PartialEq for sonicterm_types::lifecycle::ReapResult
+pub fn sonicterm_types::lifecycle::ReapResult::eq(&self, &sonicterm_types::lifecycle::ReapResult) -> bool
+impl core::fmt::Debug for sonicterm_types::lifecycle::ReapResult
+pub fn sonicterm_types::lifecycle::ReapResult::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::lifecycle::ReapResult
+impl core::marker::StructuralPartialEq for sonicterm_types::lifecycle::ReapResult
+impl core::marker::Freeze for sonicterm_types::lifecycle::ReapResult
+impl core::marker::Send for sonicterm_types::lifecycle::ReapResult
+impl core::marker::Sync for sonicterm_types::lifecycle::ReapResult
+impl core::marker::Unpin for sonicterm_types::lifecycle::ReapResult
+impl core::marker::UnsafeUnpin for sonicterm_types::lifecycle::ReapResult
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::lifecycle::ReapResult
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::lifecycle::ReapResult
 pub enum sonicterm_types::ResizeOperation
 pub sonicterm_types::ResizeOperation::Grow
 pub sonicterm_types::ResizeOperation::Shrink
@@ -2008,6 +2290,29 @@ impl core::marker::Unpin for sonicterm_types::hyperlink_id::HyperlinkId
 impl core::marker::UnsafeUnpin for sonicterm_types::hyperlink_id::HyperlinkId
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::hyperlink_id::HyperlinkId
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::hyperlink_id::HyperlinkId
+pub struct sonicterm_types::IllegalTransition
+pub sonicterm_types::IllegalTransition::from: sonicterm_types::lifecycle::LifecycleState
+pub sonicterm_types::IllegalTransition::owner: sonicterm_types::resource::ResourceOwnerId
+pub sonicterm_types::IllegalTransition::to: sonicterm_types::lifecycle::LifecycleState
+impl core::clone::Clone for sonicterm_types::lifecycle::IllegalTransition
+pub fn sonicterm_types::lifecycle::IllegalTransition::clone(&self) -> sonicterm_types::lifecycle::IllegalTransition
+impl core::cmp::Eq for sonicterm_types::lifecycle::IllegalTransition
+impl core::cmp::PartialEq for sonicterm_types::lifecycle::IllegalTransition
+pub fn sonicterm_types::lifecycle::IllegalTransition::eq(&self, &sonicterm_types::lifecycle::IllegalTransition) -> bool
+impl core::error::Error for sonicterm_types::lifecycle::IllegalTransition
+impl core::fmt::Debug for sonicterm_types::lifecycle::IllegalTransition
+pub fn sonicterm_types::lifecycle::IllegalTransition::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for sonicterm_types::lifecycle::IllegalTransition
+pub fn sonicterm_types::lifecycle::IllegalTransition::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::lifecycle::IllegalTransition
+impl core::marker::StructuralPartialEq for sonicterm_types::lifecycle::IllegalTransition
+impl core::marker::Freeze for sonicterm_types::lifecycle::IllegalTransition
+impl core::marker::Send for sonicterm_types::lifecycle::IllegalTransition
+impl core::marker::Sync for sonicterm_types::lifecycle::IllegalTransition
+impl core::marker::Unpin for sonicterm_types::lifecycle::IllegalTransition
+impl core::marker::UnsafeUnpin for sonicterm_types::lifecycle::IllegalTransition
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::lifecycle::IllegalTransition
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::lifecycle::IllegalTransition
 pub struct sonicterm_types::ModKey(_)
 impl sonicterm_types::mod_key::ModKey
 pub const sonicterm_types::mod_key::ModKey::ALT: Self
