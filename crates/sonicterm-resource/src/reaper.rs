@@ -14,6 +14,7 @@ use std::{
 /// Limits are immutable after construction so admission cannot be widened while
 /// work is in flight.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct ReaperLimits {
     /// Concurrently owned tasks.
     pub max_tasks: usize,
@@ -543,6 +544,7 @@ impl ReaperSupervisor {
 
 /// Counts from one supervisor run.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct ReaperProgress {
     /// Tasks that released their charge.
     pub settled: usize,
@@ -558,6 +560,7 @@ pub struct ReaperProgress {
 /// dropped, because a forgotten charge is the failure this contract exists to
 /// make visible.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct ShutdownReport {
     /// Tasks that released their charge.
     pub settled: usize,

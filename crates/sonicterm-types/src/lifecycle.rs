@@ -119,6 +119,7 @@ impl fmt::Display for LifecycleState {
 /// Carrying both states keeps the illegal edge in telemetry rather than
 /// collapsing every rejection into one opaque error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct IllegalTransition {
     /// Owner whose transition was rejected.
     pub owner: ResourceOwnerId,
