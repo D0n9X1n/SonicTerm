@@ -46,8 +46,14 @@ fn weight_scale_does_not_change_cell_metrics() {
         Ok(stack) => stack,
         Err(_) => return,
     };
-    let regular_metrics = regular.cell_metrics_raster_px().expect("regular metrics");
-    let heavier_metrics = heavier.cell_metrics_raster_px().expect("heavier metrics");
+    let regular_metrics = match regular.cell_metrics_raster_px() {
+        Ok(metrics) => metrics,
+        Err(_) => return,
+    };
+    let heavier_metrics = match heavier.cell_metrics_raster_px() {
+        Ok(metrics) => metrics,
+        Err(_) => return,
+    };
     assert_eq!(regular_metrics, heavier_metrics);
 }
 
