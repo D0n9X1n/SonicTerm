@@ -604,6 +604,10 @@ pub sonicterm_types::resource::BudgetError::AccountingInvariant::owner: sonicter
 pub sonicterm_types::resource::BudgetError::AmountExceedsCharge
 pub sonicterm_types::resource::BudgetError::AmountExceedsCharge::available: sonicterm_types::resource::ResourceAmount
 pub sonicterm_types::resource::BudgetError::AmountExceedsCharge::requested: sonicterm_types::resource::ResourceAmount
+pub sonicterm_types::resource::BudgetError::InvalidOwnerHierarchy
+pub sonicterm_types::resource::BudgetError::InvalidOwnerHierarchy::child: sonicterm_types::resource::OwnerKind
+pub sonicterm_types::resource::BudgetError::InvalidOwnerHierarchy::parent: sonicterm_types::resource::OwnerKind
+pub sonicterm_types::resource::BudgetError::InvalidOwnerHierarchy::process: sonicterm_types::resource::ProcessKind
 pub sonicterm_types::resource::BudgetError::InvalidOwnerState
 pub sonicterm_types::resource::BudgetError::InvalidOwnerState::actual: sonicterm_types::resource::OwnerState
 pub sonicterm_types::resource::BudgetError::InvalidOwnerState::expected: sonicterm_types::resource::OwnerState
@@ -1028,6 +1032,7 @@ pub sonicterm_types::resource::ResourceSnapshot::process_class_bytes: enum_map::
 pub sonicterm_types::resource::ResourceSnapshot::process_class_items: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
 pub sonicterm_types::resource::ResourceSnapshot::process_kind: sonicterm_types::resource::ProcessKind
 pub sonicterm_types::resource::ResourceSnapshot::registry_epoch: u64
+pub sonicterm_types::resource::ResourceSnapshot::release_failures: usize
 impl core::clone::Clone for sonicterm_types::resource::ResourceSnapshot
 pub fn sonicterm_types::resource::ResourceSnapshot::clone(&self) -> sonicterm_types::resource::ResourceSnapshot
 impl core::fmt::Debug for sonicterm_types::resource::ResourceSnapshot
@@ -1289,6 +1294,10 @@ pub sonicterm_types::BudgetError::AccountingInvariant::owner: sonicterm_types::r
 pub sonicterm_types::BudgetError::AmountExceedsCharge
 pub sonicterm_types::BudgetError::AmountExceedsCharge::available: sonicterm_types::resource::ResourceAmount
 pub sonicterm_types::BudgetError::AmountExceedsCharge::requested: sonicterm_types::resource::ResourceAmount
+pub sonicterm_types::BudgetError::InvalidOwnerHierarchy
+pub sonicterm_types::BudgetError::InvalidOwnerHierarchy::child: sonicterm_types::resource::OwnerKind
+pub sonicterm_types::BudgetError::InvalidOwnerHierarchy::parent: sonicterm_types::resource::OwnerKind
+pub sonicterm_types::BudgetError::InvalidOwnerHierarchy::process: sonicterm_types::resource::ProcessKind
 pub sonicterm_types::BudgetError::InvalidOwnerState
 pub sonicterm_types::BudgetError::InvalidOwnerState::actual: sonicterm_types::resource::OwnerState
 pub sonicterm_types::BudgetError::InvalidOwnerState::expected: sonicterm_types::resource::OwnerState
@@ -2208,6 +2217,7 @@ pub sonicterm_types::ResourceSnapshot::process_class_bytes: enum_map::EnumMap<so
 pub sonicterm_types::ResourceSnapshot::process_class_items: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
 pub sonicterm_types::ResourceSnapshot::process_kind: sonicterm_types::resource::ProcessKind
 pub sonicterm_types::ResourceSnapshot::registry_epoch: u64
+pub sonicterm_types::ResourceSnapshot::release_failures: usize
 impl core::clone::Clone for sonicterm_types::resource::ResourceSnapshot
 pub fn sonicterm_types::resource::ResourceSnapshot::clone(&self) -> sonicterm_types::resource::ResourceSnapshot
 impl core::fmt::Debug for sonicterm_types::resource::ResourceSnapshot

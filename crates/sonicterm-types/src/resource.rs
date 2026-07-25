@@ -345,6 +345,11 @@ pub struct ResourceSnapshot {
     pub class_epochs: EnumMap<ResourceClass, u64>,
     /// Registry epoch observed by the snapshot.
     pub registry_epoch: u64,
+    /// Accounting releases that could not be applied since governor creation.
+    ///
+    /// Any non-zero value means the process ceiling is permanently over-counted and
+    /// an owner cannot reach zero. Always zero in a consistent ledger.
+    pub release_failures: usize,
 }
 
 /// Opaque identifier for accepted asynchronous delivery work.

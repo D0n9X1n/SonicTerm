@@ -23,6 +23,7 @@ pub(crate) struct Ledger {
     next_owner: AtomicU64,
     registry_epoch: AtomicU64,
     process_bytes: AtomicUsize,
+    release_failures: AtomicUsize,
     pub(crate) registry: OwnerRegistry,
     classes: EnumMap<ResourceClass, Mutex<ClassUsage>>,
 }
@@ -60,6 +61,7 @@ impl Ledger {
             next_owner: AtomicU64::new(next_id),
             registry_epoch: AtomicU64::new(1),
             process_bytes: AtomicUsize::new(0),
+            release_failures: AtomicUsize::new(0),
             registry,
             classes: enum_map! { _ => Mutex::new(ClassUsage { bytes: 0, items: 0, epoch: 0 }) },
         }))
@@ -391,13 +393,22 @@ impl Ledger {
         class_usage.items -= amount.items;
         class_usage.epoch = class_usage.epoch.wrapping_add(1);
         for usage in &mut owner_usage {
-            usage.amount = usage.amount.checked_sub(amount)?;
+            usage.amount = usage.amount.checked_sub(amount).expect("prevalidated owner amount");
             usage.class_bytes[class] -= amount.bytes;
             usage.class_items[class] -= amount.items;
             usage.epoch = usage.epoch.wrapping_add(1);
         }
         self.process_bytes.fetch_sub(amount.bytes, Ordering::AcqRel);
         Ok(())
+    }
+
+    /// Record an accounting release that could not be applied.
+    ///
+    /// A failed release leaves the process ceiling permanently over-counted, so the
+    /// count is exposed through snapshots to keep the violation observable in builds
+    /// where debug assertions are compiled out.
+    pub(crate) fn record_release_failure(&self) {
+        self.release_failures.fetch_add(1, Ordering::AcqRel);
     }
 
     pub(crate) fn transfer(
@@ -411,11 +422,7 @@ impl Ledger {
         let source_path = self.path(source_owner)?;
         let target_path = self.path(target_owner)?;
         if amount.is_zero() {
-            let mut records: Vec<_> =
-                source_path.iter().chain(target_path.iter()).cloned().collect();
-            records.sort_by_key(|record| record.id);
-            records.dedup_by_key(|record| record.id);
-            let _states = Self::validate_state_path(&records)?;
+            let _states = Self::validate_state_path(&target_path)?;
             return Ok(());
         }
         if source_owner == target_owner && source_class == target_class {
@@ -543,14 +550,20 @@ impl Ledger {
                 usage.class_bytes[source_class] -= amount.bytes;
                 usage.class_items[source_class] -= amount.items;
                 if !in_target {
-                    usage.amount = usage.amount.checked_sub(amount)?;
+                    usage.amount = usage
+                        .amount
+                        .checked_sub(amount)
+                        .expect("prevalidated transfer source amount");
                 }
             }
             if in_target {
                 usage.class_bytes[target_class] += amount.bytes;
                 usage.class_items[target_class] += amount.items;
                 if !in_source {
-                    usage.amount = usage.amount.checked_add(amount)?;
+                    usage.amount = usage
+                        .amount
+                        .checked_add(amount)
+                        .expect("prevalidated transfer target amount");
                 }
             }
             if in_source || in_target {
@@ -608,6 +621,7 @@ impl Ledger {
             owner_epoch: usage.epoch,
             class_epochs,
             registry_epoch: self.registry_epoch.load(Ordering::Acquire),
+            release_failures: self.release_failures.load(Ordering::Acquire),
         })
     }
 }

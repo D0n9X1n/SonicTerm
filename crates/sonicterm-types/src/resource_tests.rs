@@ -168,12 +168,14 @@ fn snapshot_exposes_owner_process_class_and_epoch_views() {
         owner_epoch: 3,
         class_epochs: enum_map! { _ => 4 },
         registry_epoch: 5,
+        release_failures: 0,
     };
     assert_eq!(snapshot.owner, owner);
     assert_eq!(snapshot.parent.unwrap().get(), 8);
     assert_eq!(snapshot.owner_amount.bytes, 12);
     assert_eq!(snapshot.process_amount.items, 3);
     assert!(snapshot.class_epochs.values().all(|epoch| *epoch == 4));
+    assert_eq!(snapshot.release_failures, 0);
 }
 
 #[test]

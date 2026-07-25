@@ -381,7 +381,7 @@ fn shared_backing_aliases_carry_one_committed_charge() {
 }
 
 #[test]
-fn zero_transfer_validates_both_source_and_target_without_mutation() {
+fn zero_transfer_into_closing_target_is_rejected_without_mutation() {
     let governor = governor(10);
     let root = governor.root_owner();
     let window = governor.create_child(root, OwnerKind::Window, owner_limits(10)).unwrap();
@@ -395,6 +395,49 @@ fn zero_transfer_validates_both_source_and_target_without_mutation() {
     assert!(matches!(error.error, BudgetError::InvalidOwnerState { .. }));
     assert_eq!(governor.snapshot(root).unwrap().process_amount, ResourceAmount::default());
     drop(error.reservation);
+}
+
+#[test]
+fn zero_transfer_into_closing_target_ancestor_is_rejected() {
+    let governor = governor(10);
+    let root = governor.root_owner();
+    let source_window = governor.create_child(root, OwnerKind::Window, owner_limits(10)).unwrap();
+    let target_window = governor.create_child(root, OwnerKind::Window, owner_limits(10)).unwrap();
+    let source =
+        governor.create_child(source_window, OwnerKind::AppPane, owner_limits(10)).unwrap();
+    let target =
+        governor.create_child(target_window, OwnerKind::AppPane, owner_limits(10)).unwrap();
+    let zero = governor
+        .try_reserve(source, ResourceClass::ProtocolMetadata, ResourceAmount::default())
+        .unwrap();
+    governor.begin_close(target_window).unwrap();
+    let error = zero.transfer(target, ResourceClass::RegistryMetadata).unwrap_err();
+    assert!(matches!(error.error, BudgetError::InvalidOwnerState { .. }));
+    drop(error.reservation);
+}
+
+#[test]
+fn zero_and_nonzero_transfer_out_of_closing_source_agree() {
+    // The owner close protocol transfers workers out of a `Closing` owner. A
+    // borrowed view carries zero bytes and items, so a zero-amount transfer must
+    // be admitted on exactly the same terms as a charged one.
+    for amount in [ResourceAmount::default(), ResourceAmount { bytes: 8, items: 1 }] {
+        let governor = governor(100);
+        let root = governor.root_owner();
+        let window = governor.create_child(root, OwnerKind::Window, owner_limits(100)).unwrap();
+        let source = governor.create_child(window, OwnerKind::AppPane, owner_limits(100)).unwrap();
+        let target = governor.create_child(window, OwnerKind::AppPane, owner_limits(100)).unwrap();
+        let token = governor.try_reserve(source, ResourceClass::PtyOutput, amount).unwrap();
+        governor.begin_close(source).unwrap();
+        let moved = token
+            .transfer(target, ResourceClass::RemoteOutput)
+            .unwrap_or_else(|_| panic!("transfer out of closing source rejected for {amount:?}"));
+        assert_eq!(governor.snapshot(source).unwrap().owner_amount, ResourceAmount::default());
+        assert_eq!(governor.snapshot(target).unwrap().owner_amount, amount);
+        governor.finish_close(source).unwrap();
+        drop(moved);
+        assert_eq!(governor.snapshot(target).unwrap().owner_amount, ResourceAmount::default());
+    }
 }
 
 #[test]
@@ -505,4 +548,138 @@ fn token_keeps_ledger_alive_after_governor_drop() {
         .unwrap();
     drop(governor);
     drop(reservation);
+}
+
+#[test]
+fn consistent_ledger_reports_no_release_failures() {
+    let governor = governor(100);
+    let pane = app_pane(&governor, 100);
+    let reservation = governor
+        .try_reserve(pane, ResourceClass::GridHistory, ResourceAmount { bytes: 16, items: 2 })
+        .unwrap();
+    assert_eq!(governor.snapshot(pane).unwrap().release_failures, 0);
+    drop(reservation);
+    let settled = governor.snapshot(pane).unwrap();
+    assert_eq!(settled.owner_amount, ResourceAmount::default());
+    assert_eq!(settled.release_failures, 0);
+}
+
+#[test]
+fn failed_finish_close_never_leaks_or_double_counts_open_children() {
+    let governor = governor(100);
+    let root = governor.root_owner();
+    let window = governor.create_child(root, OwnerKind::Window, owner_limits(100)).unwrap();
+    let pane = governor.create_child(window, OwnerKind::AppPane, owner_limits(100)).unwrap();
+    let reservation = governor
+        .try_reserve(pane, ResourceClass::GridHistory, ResourceAmount { bytes: 32, items: 1 })
+        .unwrap();
+    governor.begin_close(pane).unwrap();
+    // Each rejection happens after the usage guards are taken but before the parent
+    // decrement, so a leak here would strand the parent's open-child count.
+    for _ in 0..16 {
+        assert!(matches!(
+            governor.finish_close(pane),
+            Err(BudgetError::OwnerHasLiveCharges { .. })
+        ));
+    }
+    drop(reservation);
+    governor.finish_close(pane).unwrap();
+    governor.begin_close(window).unwrap();
+    governor.finish_close(window).unwrap();
+}
+
+#[test]
+fn repeated_finish_close_does_not_double_decrement_parent() {
+    let governor = governor(100);
+    let root = governor.root_owner();
+    let window = governor.create_child(root, OwnerKind::Window, owner_limits(100)).unwrap();
+    let first = governor.create_child(window, OwnerKind::AppPane, owner_limits(100)).unwrap();
+    let second = governor.create_child(window, OwnerKind::AppPane, owner_limits(100)).unwrap();
+    governor.begin_close(first).unwrap();
+    governor.finish_close(first).unwrap();
+    assert!(matches!(governor.finish_close(first), Err(BudgetError::InvalidOwnerState { .. })));
+    governor.begin_close(window).unwrap();
+    // The second child is still open, so a double decrement would wrongly let the
+    // parent close here.
+    assert!(matches!(
+        governor.finish_close(window),
+        Err(BudgetError::OwnerHasLiveChildren { children: 1, .. })
+    ));
+    governor.begin_close(second).unwrap();
+    governor.finish_close(second).unwrap();
+    governor.finish_close(window).unwrap();
+}
+
+#[test]
+fn zero_reserve_succeeds_at_an_exactly_full_limit() {
+    let governor = governor(64);
+    let pane = app_pane(&governor, 64);
+    let full = governor
+        .try_reserve(pane, ResourceClass::PtyOutput, ResourceAmount { bytes: 64, items: 1 })
+        .unwrap();
+    // A zero request mutates nothing, so it must still be admitted while the owner
+    // sits exactly at its ceiling.
+    let zero =
+        governor.try_reserve(pane, ResourceClass::PtyOutput, ResourceAmount::default()).unwrap();
+    assert_eq!(governor.snapshot(pane).unwrap().owner_amount.bytes, 64);
+    drop(zero);
+    drop(full);
+    assert_eq!(governor.snapshot(pane).unwrap().owner_amount, ResourceAmount::default());
+}
+
+#[test]
+fn items_only_reservation_is_accounted_and_released() {
+    let governor = governor(64);
+    let pane = app_pane(&governor, 64);
+    let reservation = governor
+        .try_reserve(pane, ResourceClass::ReaperWork, ResourceAmount { bytes: 0, items: 5 })
+        .unwrap();
+    let held = governor.snapshot(pane).unwrap();
+    assert_eq!(held.owner_amount, ResourceAmount { bytes: 0, items: 5 });
+    assert_eq!(held.owner_class_items[ResourceClass::ReaperWork], 5);
+    drop(reservation);
+    assert_eq!(governor.snapshot(pane).unwrap().owner_amount, ResourceAmount::default());
+}
+
+#[test]
+fn concurrent_swapped_transfers_settle_to_zero() {
+    let governor = governor(4096);
+    let root = governor.root_owner();
+    let window = governor.create_child(root, OwnerKind::Window, owner_limits(4096)).unwrap();
+    let left = governor.create_child(window, OwnerKind::AppPane, owner_limits(4096)).unwrap();
+    let right = governor.create_child(window, OwnerKind::AppPane, owner_limits(4096)).unwrap();
+    let barrier = Arc::new(Barrier::new(2));
+    // Opposing transfer directions acquire the same owner and class guards in
+    // opposite logical order; sorted acquisition must keep them from cycling.
+    let handles: Vec<_> = [(left, right), (right, left)]
+        .into_iter()
+        .map(|(source, target)| {
+            let governor = governor.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..256 {
+                    let token = governor.try_reserve(
+                        source,
+                        ResourceClass::PtyOutput,
+                        ResourceAmount { bytes: 8, items: 1 },
+                    );
+                    if let Ok(token) = token {
+                        match token.transfer(target, ResourceClass::RemoteOutput) {
+                            Ok(moved) => drop(moved),
+                            Err(error) => drop(error.reservation),
+                        }
+                    }
+                }
+            })
+        })
+        .collect();
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    let settled = governor.snapshot(root).unwrap();
+    assert_eq!(settled.process_amount, ResourceAmount::default());
+    assert_eq!(settled.release_failures, 0);
+    assert_eq!(governor.snapshot(left).unwrap().owner_amount, ResourceAmount::default());
+    assert_eq!(governor.snapshot(right).unwrap().owner_amount, ResourceAmount::default());
 }

@@ -12,6 +12,9 @@ pub(crate) struct Charge {
 impl Charge {
     fn release(&self) {
         let result = self.ledger.release(self.owner, self.class, self.amount);
+        if result.is_err() {
+            self.ledger.record_release_failure();
+        }
         debug_assert!(result.is_ok(), "reservation accounting release failed: {result:?}");
     }
 }
