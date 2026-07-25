@@ -1,5 +1,6 @@
 //! Concrete resource governor and RAII reservation tokens.
 
+mod cancel;
 mod ledger;
 mod owner;
 mod reservation;
@@ -12,6 +13,7 @@ use sonicterm_types::{
 };
 use std::sync::Arc;
 
+pub use cancel::{CancelSource, CancelToken};
 pub use reservation::{
     CommitError, CommittedReservation, CommittedTransferError, Reservation, TransferError,
 };
