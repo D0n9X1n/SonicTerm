@@ -37,3 +37,54 @@ fn ownership_preserving_errors_are_send() {
     assert_send::<TransferError>();
     assert_send::<CommittedTransferError>();
 }
+
+#[test]
+fn an_unappliable_release_is_counted_rather_than_lost() {
+    // Injects the failure the counter exists for: a charge that claims more
+    // than the ledger holds. Dropping it must record the fault instead of
+    // panicking, so the same behavior is observable in test and shipped
+    // builds rather than only where debug assertions run.
+    use crate::{ledger::Ledger, reservation::Charge};
+    use enum_map::enum_map;
+    use sonicterm_types::{
+        GovernorLimits, OwnerKind, OwnerLimits, ProcessKind, ResourceAmount, ResourceClass,
+    };
+
+    let ledger = Ledger::new(
+        ProcessKind::Gui,
+        GovernorLimits {
+            process_bytes: usize::MAX,
+            class_bytes: enum_map! { _ => usize::MAX },
+            class_items: enum_map! { _ => None },
+        },
+    )
+    .unwrap();
+    let window = ledger
+        .create_child(
+            ledger.root,
+            OwnerKind::Window,
+            OwnerLimits {
+                owner_bytes: usize::MAX,
+                class_bytes: enum_map! { _ => usize::MAX },
+                class_items: enum_map! { _ => None },
+            },
+        )
+        .unwrap();
+
+    assert_eq!(ledger.snapshot(ledger.root).unwrap().release_failures, 0);
+    let overstated = Reservation::new(Charge {
+        ledger: ledger.clone(),
+        owner: window,
+        class: ResourceClass::PtyOutput,
+        amount: ResourceAmount { bytes: 4096, items: 1 },
+    });
+    drop(overstated);
+
+    let snapshot = ledger.snapshot(ledger.root).unwrap();
+    assert_eq!(snapshot.release_failures, 1, "an unappliable release must be counted");
+    assert_eq!(
+        snapshot.process_amount,
+        ResourceAmount::default(),
+        "a failed release must not push totals negative"
+    );
+}
