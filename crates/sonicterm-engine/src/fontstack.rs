@@ -14,6 +14,7 @@ use std::rc::Rc;
 use std::sync::Once;
 
 use anyhow::Result;
+use config::TextStyle;
 use sonicterm_font::{
     rasterizer::checked_glyph_rgba_len, Direction, FontConfiguration, Presentation,
 };
@@ -66,6 +67,7 @@ pub struct CellMetricsPx {
 #[derive(Clone)]
 pub struct FontStack {
     fc: Rc<FontConfiguration>,
+    regular_weight_scale: f32,
 }
 
 impl FontStack {
@@ -89,19 +91,30 @@ impl FontStack {
         Self::try_new_full(primary_family, 14.0, dpi)
     }
 
-    /// Construct a [`FontStack`] with explicit primary family + point
-    /// size + dpi. Use this when the caller knows the renderer's scale
-    /// factor: pass `dpi = 72 * scale_factor` so sonicterm-font's
-    /// `point_size * dpi / 72` yields raster-px-per-em equal to
-    /// `point_size * scale_factor`. Default font size is 14 pt to
-    /// match `sonicterm-cfg::FontConfig::default()`.
+    /// Construct a [`FontStack`] with explicit primary family, point size, and
+    /// DPI using native regular-text coverage.
     pub fn try_new_full(primary_family: &str, font_size_pt: f64, dpi: usize) -> Result<Self> {
+        Self::try_new_full_with_weight(primary_family, font_size_pt, dpi, 1.0)
+    }
+
+    /// Construct a [`FontStack`] with explicit primary family, point size, DPI,
+    /// and regular-text coverage scale. Pass `dpi = 72 * scale_factor` so
+    /// sonicterm-font's point-size conversion yields raster pixels.
+    pub fn try_new_full_with_weight(
+        primary_family: &str,
+        font_size_pt: f64,
+        dpi: usize,
+        regular_weight_scale: f32,
+    ) -> Result<Self> {
         install_default_config(primary_family, font_size_pt);
         let fc = FontConfiguration::new(
             Some(build_config(primary_family, font_size_pt, FALLBACK_FAMILIES)),
             dpi,
         )?;
-        Ok(Self { fc: Rc::new(fc) })
+        Ok(Self {
+            fc: Rc::new(fc),
+            regular_weight_scale: sanitize_weight_scale(regular_weight_scale),
+        })
     }
 
     pub fn change_scaling(&self, font_scale: f64, dpi: usize) -> (f64, usize) {
@@ -115,10 +128,31 @@ impl FontStack {
         self.fc.get_font_scale()
     }
 
-    /// Shape a text run using SonicTerm's current WezTerm font stack policy.
+    /// Shape a regular text run using SonicTerm's current font stack policy.
     pub fn shape_text(&self, text: &str) -> Result<Vec<sonicterm_font::shaper::GlyphInfo>> {
-        let font = self.fc.default_font()?;
+        self.shape_text_with_style(text, false, false)
+    }
+
+    /// Shape a text run using the face selected for its bold/italic style.
+    pub fn shape_text_with_style(
+        &self,
+        text: &str,
+        bold: bool,
+        italic: bool,
+    ) -> Result<Vec<sonicterm_font::shaper::GlyphInfo>> {
+        let font = self.font_for_style(bold, italic)?;
         font.blocking_shape(text, Some(Presentation::Text), Direction::LeftToRight, None, None)
+    }
+
+    fn font_for_style(&self, bold: bool, italic: bool) -> Result<Rc<sonicterm_font::LoadedFont>> {
+        let mut style: TextStyle = self.fc.config().font.clone();
+        if bold {
+            style = style.make_bold();
+        }
+        if italic {
+            style = style.make_italic();
+        }
+        self.fc.resolve_font(&style)
     }
 
     /// Measure a left-to-right text run in raster pixels using the same
@@ -151,7 +185,7 @@ impl FontStack {
 
 impl Rasterizer for FontStack {
     fn rasterize(&mut self, key: GlyphKey) -> Option<RasterTile> {
-        let font = self.fc.default_font().ok()?;
+        let font = self.font_for_style(key.weight_bold, key.italic).ok()?;
         let (font_idx, glyph_pos) = if key.glyph_id != 0 {
             (key.font_slot as usize, key.glyph_id)
         } else {
@@ -178,7 +212,7 @@ impl Rasterizer for FontStack {
             );
             return None;
         }
-        let (coverage, is_color, is_subpixel) = if rg.has_color {
+        let (mut coverage, is_color, is_subpixel) = if rg.has_color {
             let mut bgra = Vec::with_capacity(rg.data.len());
             for px in rg.data.chunks_exact(4) {
                 bgra.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
@@ -198,6 +232,9 @@ impl Rasterizer for FontStack {
                 (mask, false, false)
             }
         };
+        if !is_color && !key.weight_bold {
+            apply_regular_weight_scale(&mut coverage, self.regular_weight_scale, is_subpixel);
+        }
         Some(RasterTile {
             width: rg.width as u32,
             height: rg.height as u32,
@@ -208,6 +245,42 @@ impl Rasterizer for FontStack {
             is_color,
             is_subpixel,
         })
+    }
+}
+
+fn sanitize_weight_scale(scale: f32) -> f32 {
+    if scale.is_finite() && (0.5..=2.0).contains(&scale) {
+        scale
+    } else {
+        1.0
+    }
+}
+
+fn scale_coverage(coverage: u8, scale: f32) -> u8 {
+    if coverage == 0 || coverage == u8::MAX || (scale - 1.0).abs() < f32::EPSILON {
+        return coverage;
+    }
+    let normalized = f32::from(coverage) / 255.0;
+    let exponent = 1.0 / scale;
+    (normalized.powf(exponent) * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+fn apply_regular_weight_scale(coverage: &mut [u8], scale: f32, is_subpixel: bool) {
+    let scale = sanitize_weight_scale(scale);
+    if (scale - 1.0).abs() < f32::EPSILON {
+        return;
+    }
+    if is_subpixel {
+        for pixel in coverage.chunks_exact_mut(4) {
+            pixel[0] = scale_coverage(pixel[0], scale);
+            pixel[1] = scale_coverage(pixel[1], scale);
+            pixel[2] = scale_coverage(pixel[2], scale);
+            pixel[3] = pixel[0].max(pixel[1]).max(pixel[2]);
+        }
+    } else {
+        for value in coverage {
+            *value = scale_coverage(*value, scale);
+        }
     }
 }
 

@@ -1325,17 +1325,14 @@ impl TabState {
     }
 }
 
-/// Phase A: typed in-process tear-out request. Created by
-/// `handle_os_drag_ended` on the `DroppedOnEmpty` branch (Win32
-/// `GetCursorPos` provides the screen-position field); drained by
-/// `drain_pending_window_creates` which calls the in-process child-window
-/// builder factored out of `tear_out.rs` — so no `Command::new` is ever
-/// invoked for the tear-out path on Phase A.
+/// Deferred in-process tab tear-out request. Drag tear-out records a screen
+/// position; command-palette/keymap tear-out leaves it unset so the window
+/// manager chooses the destination position.
 #[derive(Debug, Clone)]
 pub struct PendingTearOut {
     pub source_window: WindowId,
     pub source_tab_idx: usize,
-    pub drop_screen_pos: (i32, i32),
+    pub drop_screen_pos: Option<(i32, i32)>,
 }
 
 #[doc(hidden)]
@@ -1399,13 +1396,9 @@ pub struct App {
     /// the windows-non-empty case (Cmd+N from a focused window) AND the
     /// windows-empty post-close-last-window dock-alive case on macOS.
     pub(super) pending_new_window: bool,
-    /// Phase A: typed in-process tear-out request. Set by
-    /// `handle_os_drag_ended` on the `DroppedOnEmpty` branch with the
-    /// recorded source tab handle + Win32 cursor screen position.
-    /// Drained by `drain_pending_window_creates` AFTER `pending_new_window`
-    /// in the SAME pass (NewShell then TearOut). Replaces the legacy
-    /// child-process spawn (`spawn_tearout_child`) — that code path
-    /// becomes dead in Phase A and is removed in Phase B.
+    /// Deferred in-process tab tear-out request from either drag/drop or the
+    /// Move Tab to New Window action. Drained only while an ActiveEventLoop is
+    /// available so every path uses the same native-window constructor.
     pub(super) pending_tear_out: Option<PendingTearOut>,
     /// (speculative defensive fix): deferred
     /// `cancel_drag_session` request. Set by `handle_os_drag_ended`
@@ -3822,13 +3815,9 @@ impl App {
         self.pending_new_window
     }
 
-    /// Phase A test seam: read whether a typed in-process
-    /// tear-out request has been queued (drained by
-    /// `drain_pending_window_creates`). The request carries the
-    /// source tab handle + Win32 cursor screen position from the
-    /// `DroppedOnEmpty` branch of `handle_os_drag_ended`.
+    /// Test seam for deferred in-process tear-out requests.
     #[doc(hidden)]
-    pub fn __test_pending_tear_out(&self) -> Option<(WindowId, usize, (i32, i32))> {
+    pub fn __test_pending_tear_out(&self) -> Option<(WindowId, usize, Option<(i32, i32)>)> {
         self.pending_tear_out
             .as_ref()
             .map(|t| (t.source_window, t.source_tab_idx, t.drop_screen_pos))
@@ -4456,7 +4445,7 @@ impl App {
                     self.pending_tear_out = Some(PendingTearOut {
                         source_window: src_win,
                         source_tab_idx: src_idx,
-                        drop_screen_pos,
+                        drop_screen_pos: Some(drop_screen_pos),
                     });
                 } else {
                     tracing::warn!(

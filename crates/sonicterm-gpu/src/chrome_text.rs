@@ -184,7 +184,7 @@ pub fn layout(
         }
     }
 
-    let shaped = match font_stack.shape_text(text) {
+    let shaped = match font_stack.shape_text_with_style(text, attrs.bold, attrs.italic) {
         Ok(v) => v,
         Err(_) => return out,
     };

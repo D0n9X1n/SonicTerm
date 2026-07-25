@@ -33,6 +33,7 @@ tab_max_width = 240
 family = "Rec Mono St.Helens"
 size = 13
 line_height = 1.3
+weight_scale = 1.0
 
 [window]
 cols = 100
@@ -103,13 +104,17 @@ effect and should not be added to new configurations.
 
 ### Font
 
-`family`, `size`, and `line_height` are the public SonicTerm font config. The
-platform rasterizer policy is internal: DirectWrite is the Windows default with
-FreeType fallback, while macOS/other Unix use FreeType. There is currently no
-`[font].font_rasterizer` key in `sonicterm.toml`.
+`family`, `size`, `line_height`, and `weight_scale` are the public SonicTerm
+font config. `weight_scale = 1.0` preserves native glyph coverage; values such as
+`1.1` make regular text slightly heavier without changing cell metrics or
+replacing SGR bold. Accepted values are `0.5..=2.0`; invalid values fall back to
+`1.0`. The platform rasterizer policy is internal: DirectWrite is the Windows
+default with FreeType fallback, while macOS/other Unix use FreeType. There is
+currently no `[font].font_rasterizer` key in `sonicterm.toml`.
 
-Changing font fields live updates every renderer, invalidates text caches, and
-resizes each visible pane's grid and PTY using its own pane rectangle.
+Changing font fields live updates every renderer and invalidates text caches.
+Family, size, and line-height changes also resize each visible pane's grid and
+PTY using its own pane rectangle; weight-only changes preserve metrics.
 
 ### Window and appearance
 
@@ -236,6 +241,7 @@ tab_max_width = 240
 family = "Rec Mono St.Helens"
 size = 13
 line_height = 1.3
+weight_scale = 1.0
 
 [window]
 cols = 100
@@ -304,11 +310,15 @@ threshold_secs = 10
 
 ### 字体
 
-`family`、`size`、`line_height` 是 SonicTerm 对外字体配置。平台 rasterizer policy 在内部决定：
-Windows 默认 DirectWrite 并以 FreeType 回退；macOS/其它 Unix 使用 FreeType。
-当前 `sonicterm.toml` 中不存在 `[font].font_rasterizer` key。
+`family`、`size`、`line_height`、`weight_scale` 是 SonicTerm 对外字体配置。
+`weight_scale = 1.0` 保持字体原始覆盖率；例如 `1.1` 可让常规文本稍微更粗，且不会改变
+cell metrics 或替代 SGR bold。允许范围为 `0.5..=2.0`；无效值回退为 `1.0`。
+平台 rasterizer policy 在内部决定：Windows 默认 DirectWrite 并以 FreeType 回退；
+macOS/其它 Unix 使用 FreeType。当前 `sonicterm.toml` 中不存在
+`[font].font_rasterizer` key。
 
-运行时改变字体会更新全部 renderer、使文本 cache 失效，并按各自 pane rect resize 每个可见窗格的 grid 与 PTY。
+运行时改变字体会更新全部 renderer 并使文本 cache 失效。family、size、line-height
+变更还会按各自 pane rect resize 每个可见窗格的 grid 与 PTY；仅修改 weight 不改变 metrics。
 
 ### 窗口与外观
 

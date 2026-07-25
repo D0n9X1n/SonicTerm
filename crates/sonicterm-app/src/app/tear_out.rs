@@ -46,6 +46,7 @@ impl App {
             font_family: &self.config.font.family,
             font_size: self.config.font.size,
             line_height_mult: self.config.font.line_height,
+            font_weight_scale: self.config.font.effective_weight_scale(),
             padding: [
                 self.config.window.padding_left,
                 self.config.window.padding_right,
@@ -167,6 +168,31 @@ impl App {
 
     pub(super) fn is_warm_window_id(&self, win_id: WindowId) -> bool {
         self.warm_window_pool.iter().any(|warm| warm.window.id() == win_id)
+    }
+
+    pub(super) fn queue_active_tab_tear_out(&mut self, source_window: WindowId) -> bool {
+        if self.pending_tear_out.is_some() {
+            return false;
+        }
+        let source_tab_idx = if Some(source_window) == self.main_window_id {
+            let tabs = match self.main_tabs() {
+                Some(tabs) if !tabs.is_empty() => tabs,
+                _ => return false,
+            };
+            tabs.active_index()
+        } else {
+            let child = match self.windows.get(&source_window) {
+                Some(child) if !child.tabs.is_empty() => child,
+                _ => return false,
+            };
+            child.tabs.active_index()
+        };
+        self.pending_tear_out = Some(super::PendingTearOut {
+            source_window,
+            source_tab_idx,
+            drop_screen_pos: None,
+        });
+        true
     }
 
     pub(super) fn tear_out_tab(&mut self, el: &ActiveEventLoop, index: usize) -> bool {

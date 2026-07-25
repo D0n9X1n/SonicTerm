@@ -437,6 +437,7 @@ pub fn action_display_name(a: &Action) -> String {
         Action::DecreaseFontSize => "DecreaseFontSize".into(),
         Action::ResetFontSize => "ResetFontSize".into(),
         Action::NewWindow => "NewWindow".into(),
+        Action::MoveTabToNewWindow => "MoveTabToNewWindow".into(),
         Action::ToggleFullscreen => "ToggleFullscreen".into(),
         Action::QuitApp => "QuitApp".into(),
         Action::OpenSearch => "OpenSearch".into(),
@@ -542,6 +543,7 @@ pub fn palette_actions() -> Vec<Action> {
         Action::UpdateTabColor,
         // Window
         Action::NewWindow,
+        Action::MoveTabToNewWindow,
         Action::ToggleFullscreen,
         Action::QuitApp,
         // Search / palette / editable config files

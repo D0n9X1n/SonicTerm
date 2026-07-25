@@ -7,6 +7,25 @@ fn default_terminal_term_program_is_sonicterm() {
 }
 
 #[test]
+fn font_weight_scale_defaults_to_identity_and_is_documented() {
+    let cfg = Config::default();
+    assert_eq!(cfg.font.weight_scale, 1.0);
+    assert!(default_config_template().contains("weight_scale = 1"));
+}
+
+#[test]
+fn font_weight_scale_rejects_non_finite_and_out_of_range_values() {
+    for value in [f32::NAN, f32::INFINITY, 0.0, 0.49, 2.01] {
+        let mut font = FontConfig::default();
+        font.weight_scale = value;
+        assert_eq!(font.effective_weight_scale(), 1.0);
+    }
+    let mut font = FontConfig::default();
+    font.weight_scale = 1.1;
+    assert_eq!(font.effective_weight_scale(), 1.1);
+}
+
+#[test]
 fn default_warm_window_pool_keeps_one_spare() {
     let cfg = Config::default();
     assert_eq!(cfg.window.warm_window_pool, 1);

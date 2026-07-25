@@ -604,6 +604,17 @@ impl App {
                     role: sonicterm_app_core::WindowRole::Primary,
                 });
             }
+            Action::MoveTabToNewWindow => {
+                let source_window = match self.frontmost_kind() {
+                    FrontmostKind::Child(id) => Some(id),
+                    FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {
+                        self.main_window_id
+                    }
+                };
+                if let Some(source_window) = source_window {
+                    self.queue_active_tab_tear_out(source_window);
+                }
+            }
             Action::Scroll(kind) => {
                 // replace the "not yet wired up" stub. Translate
                 // ScrollAction → signed line delta and route through the
@@ -928,6 +939,11 @@ impl App {
                     for _ in 0..*amount {
                         self.resize_active_split(*dir);
                     }
+                }
+            }
+            Action::MoveTabToNewWindow => {
+                if self.windows.contains_key(&source_window_id) {
+                    self.queue_active_tab_tear_out(source_window_id);
                 }
             }
             Action::ToggleFullscreen => self.toggle_fullscreen_for(source_kind),
