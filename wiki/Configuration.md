@@ -124,10 +124,12 @@ default with FreeType fallback, while macOS/other Unix use FreeType. There is
 currently no `[font].font_rasterizer` key in `sonicterm.toml`.
 
 `weight_scale` is also adjustable from the command palette without editing the
-file: **Bolder** and **Thinner** step it by `0.25`, and **Reset Font Weight**
-returns to the configured value. Those adjustments last for the session; the
-file stays the source of truth on the next reload. None of them have a default
-key binding, but all three can be bound — see [Keybindings](Keybindings).
+file: **Increase Font Weight (Bolder)** and **Decrease Font Weight (Thinner)**
+step it by `0.25`, and **Reset Font Weight to Config** returns to the configured
+value. Searching `bolder`, `thinner`, `heavier`, or `lighter` finds them. Those
+adjustments last for the session; the file stays the source of truth on the next
+reload. None of them have a default key binding, but all three can be bound —
+see [Keybindings](Keybindings).
 
 Changing font fields live updates every renderer and invalidates text caches.
 Family, size, and line-height changes also resize each visible pane's grid and
@@ -346,10 +348,11 @@ threshold_secs = 10
 macOS/其它 Unix 使用 FreeType。当前 `sonicterm.toml` 中不存在
 `[font].font_rasterizer` key。
 
-`weight_scale` 也可以直接在命令面板中调整，无需编辑文件：**Bolder** 和 **Thinner**
-每次调整 `0.25`，**Reset Font Weight** 回到配置值。这些调整只在当前会话生效；下次重载时
-仍以配置文件为准。三者默认都没有绑定快捷键，但都可以绑定——参见
-[Keybindings](Keybindings)。
+`weight_scale` 也可以直接在命令面板中调整，无需编辑文件：**Increase Font Weight
+(Bolder)** 和 **Decrease Font Weight (Thinner)** 每次调整 `0.25`，**Reset Font
+Weight to Config** 回到配置值。搜索 `bolder`、`thinner`、`heavier`、`lighter` 均可
+找到。这些调整只在当前会话生效；下次重载时仍以配置文件为准。三者默认都没有绑定快捷键，
+但都可以绑定——参见 [Keybindings](Keybindings)。
 
 运行时改变字体会更新全部 renderer 并使文本 cache 失效。family、size、line-height
 变更还会按各自 pane rect resize 每个可见窗格的 grid 与 PTY；仅修改 weight 不改变 metrics。

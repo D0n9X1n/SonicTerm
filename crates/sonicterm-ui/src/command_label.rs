@@ -167,9 +167,9 @@ pub fn label(a: &Action) -> String {
         Action::IncreaseFontSize => "Increase Font Size".into(),
         Action::DecreaseFontSize => "Decrease Font Size".into(),
         Action::ResetFontSize => "Reset Font Size".into(),
-        Action::IncreaseFontWeight => "Bolder".into(),
-        Action::DecreaseFontWeight => "Thinner".into(),
-        Action::ResetFontWeight => "Reset Font Weight".into(),
+        Action::IncreaseFontWeight => "Increase Font Weight (Bolder)".into(),
+        Action::DecreaseFontWeight => "Decrease Font Weight (Thinner)".into(),
+        Action::ResetFontWeight => "Reset Font Weight to Config".into(),
         Action::ApplyTheme(name) => format!("Apply Theme: {name}"),
         Action::ToggleTabBar => "Toggle Tab Bar".into(),
         Action::RenameTab => "Rename Active Tab".into(),
@@ -230,9 +230,13 @@ pub fn keywords(a: &Action) -> &'static [&'static str] {
         Action::IncreaseFontSize => &["bigger", "zoom in", "larger"],
         Action::DecreaseFontSize => &["smaller", "zoom out"],
         Action::ResetFontSize => &["default", "zoom reset"],
-        Action::IncreaseFontWeight => &["bolder", "heavier", "thicker", "bold", "weight"],
-        Action::DecreaseFontWeight => &["thinner", "lighter", "slimmer", "weight"],
-        Action::ResetFontWeight => &["weight", "default", "native"],
+        Action::IncreaseFontWeight => {
+            &["bolder", "bolder font", "bold font", "heavier", "thicker", "bold", "weight"]
+        }
+        Action::DecreaseFontWeight => {
+            &["thinner", "thinner font", "light font", "lighter", "slimmer", "weight"]
+        }
+        Action::ResetFontWeight => &["weight", "default", "native", "normal font"],
         Action::ApplyTheme(_) => &["color", "colors", "colour", "scheme", "appearance"],
         Action::ToggleTabBar => &["hide", "show"],
         Action::RenameTab => &["title", "name", "label", "edit"],

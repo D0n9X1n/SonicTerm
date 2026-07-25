@@ -167,8 +167,8 @@ fn tab_color_picker_exposes_selected_choice() {
 #[test]
 fn font_weight_commands_are_searchable_by_bolder_and_thinner() {
     for (query, expected, label) in [
-        ("bolder", Action::IncreaseFontWeight, "Bolder"),
-        ("thinner", Action::DecreaseFontWeight, "Thinner"),
+        ("bolder", Action::IncreaseFontWeight, "Increase Font Weight (Bolder)"),
+        ("thinner", Action::DecreaseFontWeight, "Decrease Font Weight (Thinner)"),
     ] {
         let mut palette = CommandPalette::new();
         palette.set_keymap(&Keymap::default());
@@ -190,8 +190,11 @@ fn font_weight_commands_are_searchable_by_synonyms() {
     for (query, expected) in [
         ("heavier", Action::IncreaseFontWeight),
         ("thicker", Action::IncreaseFontWeight),
+        ("bolder font", Action::IncreaseFontWeight),
+        ("bold font", Action::IncreaseFontWeight),
         ("lighter", Action::DecreaseFontWeight),
         ("slimmer", Action::DecreaseFontWeight),
+        ("thinner font", Action::DecreaseFontWeight),
     ] {
         let mut palette = CommandPalette::new();
         palette.set_keymap(&Keymap::default());
@@ -213,5 +216,5 @@ fn reset_font_weight_is_in_the_palette() {
         .iter()
         .position(|action| matches!(action, Action::ResetFontWeight))
         .expect("reset font weight should be searchable");
-    assert_eq!(crate::command_label::label(visible[index]), "Reset Font Weight");
+    assert_eq!(crate::command_label::label(visible[index]), "Reset Font Weight to Config");
 }
