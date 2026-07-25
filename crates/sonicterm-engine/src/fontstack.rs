@@ -249,8 +249,10 @@ impl Rasterizer for FontStack {
             apply_regular_weight_scale(&mut coverage, self.regular_weight_scale, is_subpixel);
             // The coverage remap alone cannot thicken a stem whose core is
             // already fully opaque, which is the common case at HiDPI. Growing
-            // the outline is what makes weight_scale visible there.
-            let radius = embolden_radius_px(self.regular_weight_scale, self.cell_h_px());
+            // the outline is what makes weight_scale visible there. The same
+            // ceiling applies to thinning, so below 1.0 the outline shrinks.
+            let cell_h = self.cell_h_px();
+            let radius = embolden_radius_px(self.regular_weight_scale, cell_h);
             if let Some((grown, w, h, pad)) =
                 embolden_coverage(&coverage, tile_w, tile_h, radius, is_subpixel)
             {
@@ -261,6 +263,11 @@ impl Rasterizer for FontStack {
                 // now sits that much further up and to the left of the pen.
                 offset_x -= pad as i32;
                 offset_y -= pad as i32;
+            }
+            let thin = thin_radius_px(self.regular_weight_scale, cell_h);
+            if let Some(eroded) = erode_coverage(&coverage, tile_w, tile_h, thin, is_subpixel) {
+                // Erosion only removes ink, so dimensions and offsets hold.
+                coverage = eroded;
             }
         }
         Some(RasterTile {
@@ -306,9 +313,8 @@ fn sanitize_weight_scale(scale: f32) -> f32 {
 /// point where adjacent stems merge into a blob.
 const EMBOLDEN_RADIUS_PER_CELL_H: f64 = 0.02;
 
-/// Radius, in raster px, that regular text should grow at `scale`. Zero for
-/// `scale <= 1.0` — thinning is handled by the coverage remap, which can
-/// lighten partial pixels but cannot erode a solid stem.
+/// Radius, in raster px, that regular text should grow at `scale`. Zero at or
+/// below `1.0`, where [`thin_radius_px`] takes over instead.
 fn embolden_radius_px(scale: f32, cell_h: f64) -> f64 {
     if scale <= 1.0 || !cell_h.is_finite() || cell_h <= 0.0 {
         return 0.0;
@@ -316,34 +322,141 @@ fn embolden_radius_px(scale: f32, cell_h: f64) -> f64 {
     f64::from(scale - 1.0) * cell_h * EMBOLDEN_RADIUS_PER_CELL_H
 }
 
-/// One separable max-filter pass with fractional radius. `radius` is split
+/// Outline shrink per unit of `weight_scale` below 1.0, as a fraction of cell
+/// height. Slightly larger per unit than [`EMBOLDEN_RADIUS_PER_CELL_H`]
+/// because thinning only has 0.5 of range to work with (0.5..1.0) against
+/// emboldening's 4.0. Kept low enough that a small thin such as `0.9` stays a
+/// nudge and leaves stem cores opaque rather than washing the glyph out.
+const THIN_RADIUS_PER_CELL_H: f64 = 0.012;
+
+/// Radius, in raster px, that regular text should shrink at `scale`. Zero at
+/// or above `1.0`. Like emboldening, this exists because the coverage remap
+/// cannot move a pixel that is already fully opaque — at HiDPI a stem core is
+/// solid, so gamma alone leaves the stem exactly as wide as it started.
+fn thin_radius_px(scale: f32, cell_h: f64) -> f64 {
+    if scale >= 1.0 || !cell_h.is_finite() || cell_h <= 0.0 {
+        return 0.0;
+    }
+    f64::from(1.0 - scale) * cell_h * THIN_RADIUS_PER_CELL_H
+}
+
+/// Shrink `coverage` inward by `radius` px in place. Unlike growth, erosion
+/// never needs padding — the glyph only loses ink — so tile dimensions and
+/// offsets are unchanged and the caller can swap the buffer straight in.
+///
+/// Returns `None` when there is nothing to do.
+fn erode_coverage(
+    coverage: &[u8],
+    width: usize,
+    height: usize,
+    radius: f64,
+    is_subpixel: bool,
+) -> Option<Vec<u8>> {
+    if radius <= 0.0 || width == 0 || height == 0 {
+        return None;
+    }
+    let channels = if is_subpixel { 4 } else { 1 };
+    if coverage.len() != width * height * channels {
+        return None;
+    }
+    let mut out = vec![0u8; width * height * channels];
+    for ch in 0..channels {
+        let mut plane = vec![0u8; width * height];
+        for i in 0..width * height {
+            plane[i] = coverage[i * channels + ch];
+        }
+        let mut tmp = vec![0u8; width * height];
+        morph_axis(&plane, &mut tmp, width, height, width, radius, true);
+        let mut transposed = vec![0u8; width * height];
+        for y in 0..height {
+            for x in 0..width {
+                transposed[x * height + y] = tmp[y * width + x];
+            }
+        }
+        let mut tcol = vec![0u8; width * height];
+        morph_axis(&transposed, &mut tcol, height, width, height, radius, true);
+        for y in 0..height {
+            for x in 0..width {
+                out[(y * width + x) * channels + ch] = tcol[x * height + y];
+            }
+        }
+    }
+    if is_subpixel {
+        for px in out.chunks_exact_mut(4) {
+            px[3] = px[0].max(px[1]).max(px[2]);
+        }
+    }
+    Some(out)
+}
+
+/// One separable morphology pass with fractional radius. `radius` is split
 /// into an integer core, taken at full strength, and a fractional outer ring
-/// that is blended in proportionally so growth is smooth rather than snapping
-/// a whole pixel at a time.
-fn dilate_axis(src: &[u8], dst: &mut [u8], len: usize, count: usize, stride: usize, radius: f64) {
+/// that is blended in proportionally so the change is smooth rather than
+/// snapping a whole pixel at a time.
+///
+/// `erode` selects the operator: max-filter (grow) when false, min-filter
+/// (shrink) when true. The two differ at the boundary — a max-filter ignores
+/// out-of-bounds samples, while a min-filter must treat them as empty so the
+/// glyph erodes inward from its own edge.
+fn morph_axis(
+    src: &[u8],
+    dst: &mut [u8],
+    len: usize,
+    count: usize,
+    stride: usize,
+    radius: f64,
+    erode: bool,
+) {
     let whole = radius.floor() as usize;
     let frac = radius - radius.floor();
     for line in 0..count {
         let base = line * stride;
         for i in 0..len {
-            let mut best = 0u8;
             let lo = i.saturating_sub(whole);
             let hi = (i + whole).min(len - 1);
-            for j in lo..=hi {
-                best = best.max(src[base + j]);
-            }
-            if frac > 0.0 {
-                let mut ring = 0u8;
-                if i > whole {
-                    ring = ring.max(src[base + i - whole - 1]);
+            if erode {
+                // A window that overhangs the tile edge sees empty space
+                // there, so the glyph erodes inward from its own rim. Only
+                // genuinely out-of-bounds samples count as empty — treating
+                // in-bounds neighbours as empty would erode the whole glyph
+                // rather than its edge.
+                let mut best = if i < whole || i + whole >= len { 0u8 } else { u8::MAX };
+                for j in lo..=hi {
+                    best = best.min(src[base + j]);
                 }
-                if i + whole + 1 < len {
-                    ring = ring.max(src[base + i + whole + 1]);
+                if frac > 0.0 && best > 0 {
+                    // Outer ring one step beyond the integer core, on both
+                    // sides. Out-of-bounds reads as empty.
+                    let left = if i > whole { src[base + i - whole - 1] } else { 0 };
+                    let right =
+                        if i + whole + 1 < len { src[base + i + whole + 1] } else { 0 };
+                    let ring = left.min(right);
+                    if ring < best {
+                        // Pull toward the ring minimum in proportion to frac.
+                        let blended =
+                            f64::from(best) - (f64::from(best) - f64::from(ring)) * frac;
+                        best = blended.round().clamp(0.0, 255.0) as u8;
+                    }
                 }
-                let blended = f64::from(ring) * frac;
-                best = best.max(blended.round().clamp(0.0, 255.0) as u8);
+                dst[base + i] = best;
+            } else {
+                let mut best = 0u8;
+                for j in lo..=hi {
+                    best = best.max(src[base + j]);
+                }
+                if frac > 0.0 {
+                    let mut ring = 0u8;
+                    if i > whole {
+                        ring = ring.max(src[base + i - whole - 1]);
+                    }
+                    if i + whole + 1 < len {
+                        ring = ring.max(src[base + i + whole + 1]);
+                    }
+                    let blended = f64::from(ring) * frac;
+                    best = best.max(blended.round().clamp(0.0, 255.0) as u8);
+                }
+                dst[base + i] = best;
             }
-            dst[base + i] = best;
         }
     }
 }
@@ -391,7 +504,7 @@ fn embolden_coverage(
         }
         let mut tmp = vec![0u8; new_w * new_h];
         // Horizontal: new_h lines of new_w samples, stride new_w.
-        dilate_axis(&plane, &mut tmp, new_w, new_h, new_w, radius);
+        morph_axis(&plane, &mut tmp, new_w, new_h, new_w, radius, false);
         // Vertical: transpose, reuse the same row-wise pass, transpose back.
         let mut transposed = vec![0u8; new_w * new_h];
         for y in 0..new_h {
@@ -400,7 +513,7 @@ fn embolden_coverage(
             }
         }
         let mut tcol = vec![0u8; new_w * new_h];
-        dilate_axis(&transposed, &mut tcol, new_h, new_w, new_h, radius);
+        morph_axis(&transposed, &mut tcol, new_h, new_w, new_h, radius, false);
         for y in 0..new_h {
             for x in 0..new_w {
                 out[(y * new_w + x) * channels + ch] = tcol[x * new_h + y];

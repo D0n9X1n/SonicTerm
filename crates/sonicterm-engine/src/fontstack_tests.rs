@@ -217,3 +217,82 @@ fn embolden_fractional_radius_blends_rather_than_snapping() {
     assert!(half_neighbor > 0, "fractional radius still spreads ink");
     assert!(half_neighbor < full_neighbor, "half radius must spread less than full");
 }
+
+/// The saturation ceiling cuts both ways: gamma cannot lighten a pixel that is
+/// already fully opaque, so below 1.0 the outline has to shrink for thinning to
+/// reach a solid stem core.
+#[test]
+fn erosion_removes_ink_the_coverage_remap_cannot() {
+    // 5x5 with a solid 3x3 core — a stem thick enough to have an interior.
+    let mut coverage = vec![0u8; 25];
+    for y in 1..4 {
+        for x in 1..4 {
+            coverage[y * 5 + x] = 255;
+        }
+    }
+
+    // The remap leaves every 255 exactly where it was, at any scale in range.
+    let mut remapped = coverage.clone();
+    apply_regular_weight_scale(&mut remapped, 0.5, false);
+    assert_eq!(remapped, coverage, "gamma remap cannot erode a solid core");
+
+    // Erosion eats the rim of that core.
+    let eroded = erode_coverage(&coverage, 5, 5, 1.0, false).expect("radius 1.0 must erode");
+    let before: u32 = coverage.iter().map(|&v| u32::from(v)).sum();
+    let after: u32 = eroded.iter().map(|&v| u32::from(v)).sum();
+    assert!(after < before, "erosion must remove ink: {before} -> {after}");
+    // The centre of a 3x3 core survives a radius-1 erosion; its rim does not.
+    assert_eq!(eroded[2 * 5 + 2], 255, "core centre must survive");
+    assert_eq!(eroded[1 * 5 + 1], 0, "core corner must erode");
+}
+
+/// A stem wide enough to have an interior must keep opaque pixels under a
+/// light thin. Guards against an over-eager erosion that washes glyphs out
+/// instead of slimming them.
+#[test]
+fn light_erosion_preserves_the_interior_of_a_thick_stem() {
+    // 9x9 fully solid: every interior pixel is far from an edge.
+    let coverage = vec![255u8; 81];
+    let eroded = erode_coverage(&coverage, 9, 9, 0.05, false).expect("sub-pixel erosion");
+    let centre = eroded[4 * 9 + 4];
+    assert_eq!(centre, 255, "a sub-pixel thin must not touch a deep interior pixel");
+    assert!(
+        eroded.iter().filter(|&&v| v == 255).count() > 20,
+        "most of a solid block must stay opaque under a light thin"
+    );
+}
+
+#[test]
+fn thin_radius_scales_with_weight_and_is_zero_at_or_above_identity() {
+    for scale in [1.0, 1.5, 5.0] {
+        assert_eq!(thin_radius_px(scale, 30.0), 0.0, "scale {scale} must not erode");
+    }
+    let at_09 = thin_radius_px(0.9, 30.0);
+    let at_05 = thin_radius_px(0.5, 30.0);
+    assert!(at_09 > 0.0);
+    assert!(at_05 > at_09, "lower weight must erode more");
+    assert_eq!(thin_radius_px(0.9, 0.0), 0.0);
+    assert_eq!(thin_radius_px(0.9, f64::NAN), 0.0);
+}
+
+#[test]
+fn erosion_declines_work_it_cannot_do_safely() {
+    let coverage = vec![255u8; 9];
+    assert!(erode_coverage(&coverage, 3, 3, 0.0, false).is_none(), "no radius, no work");
+    assert!(erode_coverage(&[], 0, 0, 1.0, false).is_none(), "empty glyph");
+    // Length that disagrees with the declared geometry is refused rather than
+    // indexed past the end.
+    assert!(erode_coverage(&[0u8; 5], 3, 3, 1.0, false).is_none(), "short buffer");
+}
+
+#[test]
+fn erosion_keeps_tile_geometry_and_subpixel_alpha_consistent() {
+    // Erosion only removes ink, so the buffer length must be preserved
+    // exactly — the caller relies on dimensions and offsets staying valid.
+    let coverage = vec![200u8; 4 * 4 * 4];
+    let eroded = erode_coverage(&coverage, 4, 4, 0.5, true).expect("subpixel erosion");
+    assert_eq!(eroded.len(), coverage.len(), "erosion must not resize the tile");
+    for px in eroded.chunks_exact(4) {
+        assert_eq!(px[3], px[0].max(px[1]).max(px[2]), "alpha must envelope RGB");
+    }
+}

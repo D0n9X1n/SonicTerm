@@ -110,13 +110,14 @@ values are `0.5..=5.0`; invalid values fall back to `1.0`. Below `1.0` thins
 regular text, above `1.0` thickens it, and neither changes cell metrics or
 replaces SGR bold.
 
-`weight_scale` works in two stages. Small adjustments near `1.0` (such as `1.1`)
-remap glyph coverage, which shifts the antialiased edge only. Because a stem
-pixel that is already fully opaque cannot be darkened further, coverage alone
-has little effect on HiDPI/Retina displays, where stem cores are solid. Larger
-values additionally grow the glyph outline, which adds real ink and stays
-visible at any display scale. Values around `2.0`-`3.0` suit most HiDPI screens;
-`5.0` is deliberately heavy.
+`weight_scale` works in two stages. Small adjustments near `1.0` (such as `1.1`
+or `0.9`) remap glyph coverage, which shifts the antialiased edge only. Because
+a stem pixel that is already fully opaque can be neither darkened nor lightened,
+coverage alone has little effect on HiDPI/Retina displays, where stem cores are
+solid. Further from `1.0`, the glyph outline itself changes — growing above
+`1.0` and eroding below it — which adds or removes real ink and stays visible at
+any display scale. Values around `2.0`-`3.0` suit most HiDPI screens; `5.0` is
+deliberately heavy, and `0.5` deliberately light.
 
 The platform rasterizer policy is internal: DirectWrite is the Windows
 default with FreeType fallback, while macOS/other Unix use FreeType. There is
@@ -325,11 +326,12 @@ threshold_secs = 10
 小于 `1.0` 会让常规文本更细，大于 `1.0` 会让其更粗；两者都不会改变 cell metrics
 或替代 SGR bold。
 
-`weight_scale` 分两个阶段生效。接近 `1.0` 的微调（例如 `1.1`）只重映射字形覆盖率，
-仅影响抗锯齿边缘。由于已经完全不透明的字干像素无法进一步加深，在 HiDPI/Retina
-屏幕上字干核心本身就是实心的，因此仅靠覆盖率几乎看不出变化。更大的取值会额外扩张
-字形轮廓，真正增加墨量，在任何缩放比例下都可见。HiDPI 屏幕通常适合 `2.0`-`3.0`；
-`5.0` 属于刻意加粗的极值。
+`weight_scale` 分两个阶段生效。接近 `1.0` 的微调（例如 `1.1` 或 `0.9`）只重映射字形
+覆盖率，仅影响抗锯齿边缘。由于已经完全不透明的字干像素既无法进一步加深也无法变浅，
+在 HiDPI/Retina 屏幕上字干核心本身就是实心的，因此仅靠覆盖率几乎看不出变化。离
+`1.0` 更远时会改变字形轮廓本身——大于 `1.0` 时扩张，小于 `1.0` 时收缩——真正增减
+墨量，在任何缩放比例下都可见。HiDPI 屏幕通常适合 `2.0`-`3.0`；`5.0` 属于刻意加粗的
+极值，`0.5` 则是刻意变细的极值。
 
 平台 rasterizer policy 在内部决定：Windows 默认 DirectWrite 并以 FreeType 回退；
 macOS/其它 Unix 使用 FreeType。当前 `sonicterm.toml` 中不存在
