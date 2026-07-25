@@ -1,5 +1,5 @@
 [package]
-name = "sonicterm-types"
+name = "sonicterm-resource"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,13 +9,14 @@ repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
 
-[dependencies]
-serde = { workspace = true, features = ["derive"] }
-bitflags = { workspace = true }
-enum-map = { workspace = true }
+[features]
+default = []
+test-util = []
 
-[dev-dependencies]
-toml.workspace = true
+[dependencies]
+sonicterm-types.workspace = true
+parking_lot.workspace = true
+enum-map.workspace = true
 
 [lints]
 workspace = true

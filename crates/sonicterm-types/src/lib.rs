@@ -16,6 +16,7 @@ pub mod geom;
 pub mod glyph_key;
 pub mod hyperlink_id;
 pub mod mod_key;
+pub mod resource;
 pub mod shell_quote;
 pub mod traits;
 pub mod window_key;
@@ -26,6 +27,12 @@ pub use geom::{GeometryQuad, Pos};
 pub use glyph_key::GlyphKey;
 pub use hyperlink_id::HyperlinkId;
 pub use mod_key::ModKey;
+pub use resource::{
+    BudgetDimension, BudgetError, BudgetScope, DeliveryReceipt, DisconnectReason, DropReason,
+    GovernorLimits, OwnerKind, OwnerLimits, OwnerState, PressureOutcome, ProcessKind,
+    ResizeOperation, ResourceAmount, ResourceClass, ResourceOwnerId, ResourceSnapshot, RetryToken,
+    RetryWakeup,
+};
 pub use shell_quote::shell_quote_posix;
 pub use traits::{ClipboardBackend, FrameLike, PaintError, Painter, PtyTransport, WindowBackend};
 pub use window_key::WindowKey;
