@@ -30,10 +30,11 @@ fn subpixel_weight_scale_recomputes_alpha_from_rgb_coverage() {
 
 #[test]
 fn invalid_weight_scales_fall_back_to_identity() {
-    for scale in [f32::NAN, f32::INFINITY, 0.0, 0.49, 2.01] {
+    for scale in [f32::NAN, f32::INFINITY, 0.0, 0.49, 5.01] {
         assert_eq!(sanitize_weight_scale(scale), 1.0);
     }
     assert_eq!(sanitize_weight_scale(1.1), 1.1);
+    assert_eq!(sanitize_weight_scale(5.0), 5.0);
 }
 
 #[test]
@@ -137,4 +138,82 @@ fn shaped_text_width_covers_mixed_ascii_cjk_and_status_text() {
 
     assert!(ascii.is_finite() && ascii > 0.0);
     assert!(mixed.is_finite() && mixed > ascii, "CJK glyphs must contribute to badge width");
+}
+
+/// The coverage remap saturates: a stem pixel already at 255 cannot get
+/// darker, which is why `weight_scale` was close to invisible at HiDPI where
+/// stem cores are solid. Outline growth is the part that adds real ink, so it
+/// must reach pixels the remap can never touch.
+#[test]
+fn embolden_puts_ink_where_the_coverage_remap_cannot() {
+    // Single solid pixel surrounded by empty space.
+    let coverage = vec![0, 0, 0, 0, 255, 0, 0, 0, 0];
+
+    // The remap leaves every zero pixel at zero, at any scale in range.
+    let mut remapped = coverage.clone();
+    apply_regular_weight_scale(&mut remapped, 5.0, false);
+    assert_eq!(remapped, coverage, "gamma remap cannot create ink");
+
+    // Dilation grows the glyph outward into those same pixels.
+    let (grown, w, h, pad) =
+        embolden_coverage(&coverage, 3, 3, 1.0, false).expect("radius 1.0 must dilate");
+    assert_eq!((w, h, pad), (5, 5, 1));
+    let center = (h / 2) * w + (w / 2);
+    assert_eq!(grown[center], 255);
+    assert!(grown[center - 1] > 0, "ink must spread horizontally");
+    assert!(grown[center + 1] > 0, "ink must spread horizontally");
+    assert!(grown[center - w] > 0, "ink must spread vertically");
+    assert!(grown[center + w] > 0, "ink must spread vertically");
+}
+
+#[test]
+fn embolden_radius_scales_with_weight_and_is_zero_at_or_below_identity() {
+    for scale in [0.5, 0.9, 1.0] {
+        assert_eq!(embolden_radius_px(scale, 30.0), 0.0, "scale {scale} must not grow outlines");
+    }
+    let at_two = embolden_radius_px(2.0, 30.0);
+    let at_five = embolden_radius_px(5.0, 30.0);
+    assert!(at_two > 0.0);
+    assert!(at_five > at_two, "higher weight must grow more");
+    // Radius tracks cell height so the effect holds its proportion across DPI.
+    assert!(embolden_radius_px(2.0, 60.0) > at_two);
+    // Degenerate metrics disable growth instead of guessing.
+    assert_eq!(embolden_radius_px(2.0, 0.0), 0.0);
+    assert_eq!(embolden_radius_px(2.0, f64::NAN), 0.0);
+}
+
+#[test]
+fn embolden_declines_work_it_cannot_do_safely() {
+    let coverage = vec![255; 9];
+    assert!(embolden_coverage(&coverage, 3, 3, 0.0, false).is_none(), "no radius, no work");
+    assert!(embolden_coverage(&[], 0, 0, 1.0, false).is_none(), "empty glyph");
+    // A tile that would exceed the atlas dimension limit is refused rather
+    // than producing a buffer the atlas must reject later.
+    let big = MAX_RASTERIZED_GLYPH_DIMENSION;
+    assert!(embolden_coverage(&vec![0u8; 4], big, 1, 2.0, false).is_none());
+}
+
+#[test]
+fn embolden_recomputes_subpixel_alpha_from_dilated_rgb() {
+    // 2x1 BGRA: one lit pixel, one empty.
+    let coverage = vec![200, 100, 50, 200, 0, 0, 0, 0];
+    let (grown, w, h, _) =
+        embolden_coverage(&coverage, 2, 1, 1.0, true).expect("subpixel dilation");
+    assert_eq!(grown.len(), w * h * 4);
+    for px in grown.chunks_exact(4) {
+        assert_eq!(px[3], px[0].max(px[1]).max(px[2]), "alpha must envelope RGB");
+    }
+}
+
+/// Fractional radii blend the outer ring proportionally, so growth ramps
+/// smoothly instead of snapping a whole pixel at a time as weight increases.
+#[test]
+fn embolden_fractional_radius_blends_rather_than_snapping() {
+    let coverage = vec![0, 0, 0, 0, 255, 0, 0, 0, 0];
+    let (half, w, _, _) = embolden_coverage(&coverage, 3, 3, 0.5, false).expect("half radius");
+    let (full, fw, _, _) = embolden_coverage(&coverage, 3, 3, 1.0, false).expect("full radius");
+    let half_neighbor = half[(half.len() / w / 2) * w + w / 2 + 1];
+    let full_neighbor = full[(full.len() / fw / 2) * fw + fw / 2 + 1];
+    assert!(half_neighbor > 0, "fractional radius still spreads ink");
+    assert!(half_neighbor < full_neighbor, "half radius must spread less than full");
 }

@@ -222,7 +222,7 @@ pub(crate) fn glyph_flags(is_color: bool, is_subpixel: bool) -> [f32; 4] {
 }
 
 fn effective_font_weight_scale(scale: f32) -> f32 {
-    if scale.is_finite() && (0.5..=2.0).contains(&scale) {
+    if scale.is_finite() && (0.5..=5.0).contains(&scale) {
         scale
     } else {
         1.0
