@@ -17,7 +17,7 @@ import time
 SCHEMA_VERSION = "resource-baseline-evidence/1"
 SUBJECT = "harness-process"
 CLAIM_SCOPE = "baseline-capture-capability"
-RUNNER_LABELS = ("macos-14", "windows-2022", "windows-latest")
+RUNNER_LABELS = ("macos-14", "windows-latest")
 _CURRENT_WINDOWS_BUILD = 26100
 
 
@@ -57,22 +57,13 @@ def classify_platform(runner_label: str, facts: dict) -> dict:
     build = facts.get("windows_build")
     if not isinstance(build, int) or build <= 0:
         raise EvidenceError("{} requires a positive Windows build number".format(runner_label))
-    if runner_label == "windows-2022":
-        if build >= _CURRENT_WINDOWS_BUILD:
-            raise EvidenceError(
-                "windows-2022 requires Windows build older than {}".format(
-                    _CURRENT_WINDOWS_BUILD
-                )
+    if build < _CURRENT_WINDOWS_BUILD:
+        raise EvidenceError(
+            "windows-latest requires Windows build {} or newer".format(
+                _CURRENT_WINDOWS_BUILD
             )
-        lane = "old-windows"
-    else:
-        if build < _CURRENT_WINDOWS_BUILD:
-            raise EvidenceError(
-                "windows-latest requires Windows build {} or newer".format(
-                    _CURRENT_WINDOWS_BUILD
-                )
-            )
-        lane = "current-windows"
+        )
+    lane = "current-windows"
     profile.update({"family": "windows", "lane": lane, "windows_build": build})
     return profile
 

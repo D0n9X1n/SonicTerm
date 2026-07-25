@@ -157,7 +157,7 @@ class SchemaContractTests(unittest.TestCase):
     def test_only_expected_runner_labels_are_supported(self):
         self.assertEqual(
             evidence.RUNNER_LABELS,
-            ("macos-14", "windows-2022", "windows-latest"),
+            ("macos-14", "windows-latest"),
         )
 
 
@@ -197,14 +197,9 @@ class PlatformClassificationTests(unittest.TestCase):
         with self.assertRaises(evidence.EvidenceError):
             evidence.classify_platform("macos-14", _windows_facts(20348))
 
-    def test_old_windows_lane_requires_a_pre_26100_runtime(self):
-        profile = evidence.classify_platform("windows-2022", _windows_facts(20348))
-        self.assertEqual(profile["family"], "windows")
-        self.assertEqual(profile["lane"], "old-windows")
-        self.assertEqual(profile["windows_build"], 20348)
-
+    def test_retired_runner_labels_are_rejected(self):
         with self.assertRaises(evidence.EvidenceError):
-            evidence.classify_platform("windows-2022", _windows_facts(26100))
+            evidence.classify_platform("windows-2022", _windows_facts(20348))
 
     def test_current_windows_lane_requires_build_26100_or_newer(self):
         profile = evidence.classify_platform("windows-latest", _windows_facts(26100))
@@ -287,7 +282,7 @@ class CommandContractTests(unittest.TestCase):
                 ),
             ),
         ]
-        for runner_label, build in (("windows-2022", 20348), ("windows-latest", 26100)):
+        for runner_label, build in (("windows-latest", 26100),):
             with self.subTest(runner_label=runner_label):
                 profile = evidence.classify_platform(runner_label, _windows_facts(build))
                 specs = evidence.command_specs(profile, "python")
