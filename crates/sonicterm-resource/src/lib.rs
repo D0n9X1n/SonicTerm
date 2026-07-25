@@ -1,8 +1,10 @@
 //! Concrete resource governor and RAII reservation tokens.
 
 mod cancel;
+mod clock;
 mod ledger;
 mod owner;
+mod reaper;
 mod reservation;
 
 use ledger::Ledger;
@@ -14,6 +16,11 @@ use sonicterm_types::{
 use std::sync::Arc;
 
 pub use cancel::{CancelSource, CancelToken};
+pub use clock::{Clock, SystemClock, TestClock};
+pub use reaper::{
+    deadline_from, ReapAction, ReapSlot, ReapTask, ReaperLimits, ReaperProgress, ReaperSupervisor,
+    ShutdownReport,
+};
 pub use reservation::{
     CommitError, CommittedReservation, CommittedTransferError, Reservation, TransferError,
 };
