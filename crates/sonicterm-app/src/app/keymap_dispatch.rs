@@ -12,6 +12,7 @@ use anyhow::Context;
 use parking_lot::Mutex;
 use sonicterm_cfg::config::Config;
 use sonicterm_cfg::keymap::{Action, Direction, Keymap, ScrollAction};
+use super::config_apply::{WEIGHT_SCALE_MAX, WEIGHT_SCALE_MIN};
 use sonicterm_cfg::theme::Theme;
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::Grid;
@@ -55,6 +56,17 @@ pub(super) fn terminal_input_passthrough_binding(key_str: &str, action: &Action)
         && key_str == "alt+v"
         && matches!(action, Action::PasteFromClipboard)
 }
+
+/// One palette/keymap step of regular-text weight. Four steps span
+/// 1.0 -> 2.0, so a useful weight is a few presses away while the full
+/// 0.5..=5.0 range stays reachable.
+const FONT_WEIGHT_STEP: f32 = 0.25;
+
+const _: () = {
+    // Keep the step meaningful relative to the range it moves through.
+    assert!(FONT_WEIGHT_STEP > 0.0);
+    assert!(FONT_WEIGHT_STEP < WEIGHT_SCALE_MAX - WEIGHT_SCALE_MIN);
+};
 
 impl App {
     /// Handle a Cmd+Q chord press from the keyboard path. First press arms the
@@ -579,6 +591,9 @@ impl App {
             Action::IncreaseFontSize => self.change_font_size(1.0),
             Action::DecreaseFontSize => self.change_font_size(-1.0),
             Action::ResetFontSize => self.reset_font_size(),
+            Action::IncreaseFontWeight => self.change_font_weight(FONT_WEIGHT_STEP),
+            Action::DecreaseFontWeight => self.change_font_weight(-FONT_WEIGHT_STEP),
+            Action::ResetFontWeight => self.reset_font_weight(),
             Action::ApplyTheme(name) => self.apply_theme_by_name(name),
             Action::ToggleTabBar => self.toggle_tab_bar(),
             Action::RenameTab => self.start_rename_active_tab(),

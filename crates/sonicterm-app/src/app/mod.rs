@@ -159,7 +159,6 @@ pub fn with_backdrop_transparency(
     }
 }
 
-use crate::config_watch::ConfigWatcher;
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_ui::broadcast::BroadcastState;
 use sonicterm_ui::command_palette::CommandPalette;
@@ -1093,16 +1092,11 @@ pub type KeymapLoader = Box<dyn Fn(&str) -> Result<Keymap> + Send + 'static>;
 
 /// Custom user events delivered through [`EventLoopProxy`].
 ///
-/// Currently the only variant is [`UserEvent::ConfigChanged`], sent by
-/// the [`ConfigWatcher`] thread whenever a fresh `sonicterm.toml` parse is
-/// available. The handler wakes the loop, drains the watcher channel,
-/// and applies the new config (theme/font/keymap). Without this the
-/// channel-based delivery would sit queued under `ControlFlow::Wait`
-/// until an unrelated event arrived.
+/// Config is read at startup and thereafter only when the user explicitly
+/// asks for it via `Action::ReloadConfig`, so there is no watcher thread and
+/// no event for "the config file changed on disk".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserEvent {
-    /// A new `sonicterm.toml` parse is ready on the watcher channel.
-    ConfigChanged,
     /// A pending action arrived from the macOS native menubar. The
     /// payload itself is queued in the static
     /// [`crate::menubar_bridge`] buffer; this variant is just the
@@ -1339,6 +1333,19 @@ pub struct PendingTearOut {
 pub struct App {
     pub(super) theme: Theme,
     pub(super) config: Config,
+    /// Font size the loaded config asked for, in logical px. `ResetFontSize`
+    /// returns here rather than to the compile-time default, so Cmd+0 restores
+    /// the user's configured size instead of a value they never chose.
+    ///
+    /// Tracks the config this session has *loaded*, not the file on disk.
+    /// Editing `sonicterm.toml` does not move it — the background watcher may
+    /// apply other settings from that edit, but the reset target stays where
+    /// the session started. Only an explicit `ReloadConfig` moves it.
+    pub(super) configured_font_size: f32,
+    /// Regular-text `weight_scale` the loaded config asked for. Follows the
+    /// same rule as [`Self::configured_font_size`]: `ResetFontWeight` returns
+    /// here, and only an explicit reload moves it.
+    pub(super) configured_weight_scale: f32,
     pub(super) keymap: Keymap,
     // PR-B1b: `App.renderer` field removed; the main window's
     // `GpuRenderer` is now owned by `self.windows[main_window_id].renderer`.
@@ -1516,13 +1523,8 @@ pub struct App {
     pub(crate) theme_loader: Option<ThemeLoader>,
     /// Optional keymap loader, set by `run_with`.
     pub(crate) keymap_loader: Option<KeymapLoader>,
-    /// Live-reload watcher for the user's `sonicterm.toml`. Spawned in
-    /// `resumed`; `None` if the config path could not be resolved or
-    /// the watcher failed to start (e.g. parent dir unwritable).
-    pub(super) config_watcher: Option<ConfigWatcher>,
-    /// Proxy used by the watcher thread to wake the idle event loop
-    /// on `sonicterm.toml` changes. `None` in tests that construct `App`
-    /// directly via [`App::new`] without a real event loop.
+    /// Proxy used to wake the idle event loop. `None` in tests that
+    /// construct `App` directly via [`App::new`] without a real event loop.
     pub(super) event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
     /// Minimum interval between two successive frames. Defaults to 1/60s
     /// and is updated in `resumed` from the current monitor's reported
@@ -1777,9 +1779,13 @@ impl App {
         });
         let mut command_palette = CommandPalette::new();
         command_palette.set_keymap(&keymap);
+        let configured_font_size = config.font.size;
+        let configured_weight_scale = config.font.effective_weight_scale();
         Self {
             theme,
             config,
+            configured_font_size,
+            configured_weight_scale,
             keymap,
             clipboard: Clipboard::new().ok(),
             test_clipboard_text: None,
@@ -1802,7 +1808,6 @@ impl App {
             pending_os_drag_payloads: Vec::new(),
             theme_loader: None,
             keymap_loader: None,
-            config_watcher: None,
             event_loop_proxy,
             // Default to 60 Hz until `resumed` probes the actual
             // monitor refresh rate. ~16.667 ms = 1/60 s.
@@ -4543,29 +4548,6 @@ impl App {
     #[doc(hidden)]
     pub fn __test_pane_pty_present(&self, id: u64) -> Option<bool> {
         self.main()?.panes.get(&id).map(|pane| pane.pty.is_some())
-    }
-
-    /// Drain the config-watcher channel and apply any incoming config/keymap.
-    /// Idempotent and cheap when nothing changed.
-    #[doc(hidden)]
-    pub fn poll_config_reload(&mut self) {
-        let Some(watcher) = self.config_watcher.as_ref() else {
-            return;
-        };
-        let (latest_config, latest_keymap) = watcher.try_latest_updates();
-        if let Some(km) = latest_keymap {
-            tracing::info!(
-                "live-reload: keymap.toml -> {} ({} bindings)",
-                km.meta.name,
-                km.bindings.len()
-            );
-            self.command_palette.set_keymap(&km);
-            self.keymap = km;
-            self.input_dirty = true;
-        }
-        if let Some(cfg) = latest_config {
-            self.apply_new_config(cfg);
-        }
     }
 
     /// Read-only accessor used by tests and (eventually) the

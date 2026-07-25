@@ -163,6 +163,7 @@ Directions are `left`, `right`, `up`, `down`. Scroll values are `line_up`,
 | Read-only navigation mode | `enter_copy_mode` |
 | Quick select URL hints | `enter_quick_select` |
 | Font size | `increase_font_size`, `decrease_font_size`, `reset_font_size` |
+| Font weight | `increase_font_weight`, `decrease_font_weight`, `reset_font_weight` |
 | New window | `new_window` |
 | Move active tab to new window | `move_tab_to_new_window` |
 | Quit app | `quit_app` |
@@ -209,7 +210,9 @@ action = { focus_pane = "right" }
 ```
 
 At startup, an invalid selected keymap is logged and falls back to the bundled
-platform default. A failed hot reload leaves the current in-memory keymap active.
+platform default. A failed reload leaves the current in-memory keymap active.
+Keymap edits apply when you run **Reload Config** from the command palette;
+there is no file watcher.
 
 ### Terminal-style editing in app text fields
 
@@ -408,6 +411,7 @@ action = { toggle_broadcast = { scope = "tab" } }
 | 只读导航模式 | `enter_copy_mode` |
 | URL 快速选择 | `enter_quick_select` |
 | 字体大小 | `increase_font_size`, `decrease_font_size`, `reset_font_size` |
+| 字体粗细 | `increase_font_weight`, `decrease_font_weight`, `reset_font_weight` |
 | 新建窗口 | `new_window` |
 | 将当前 Tab 移至新窗口 | `move_tab_to_new_window` |
 | 退出应用 | `quit_app` |
@@ -453,7 +457,7 @@ keys = "super+shift+l"
 action = { focus_pane = "right" }
 ```
 
-启动时，选中的 keymap 解析失败会记录日志并回退到平台内置默认值；热重载失败时则继续使用当前内存中的 keymap。
+启动时，选中的 keymap 解析失败会记录日志并回退到平台内置默认值；重载失败时则继续使用当前内存中的 keymap。
 
 ### 应用文本框中的终端风格编辑
 
