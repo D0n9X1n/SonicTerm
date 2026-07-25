@@ -4,7 +4,7 @@
 //! and the platform IO crates. This module owns only the state contract they
 //! share, so a transport cannot invent its own teardown ordering.
 
-use crate::ResourceOwnerId;
+use crate::{OwnerState, ResourceOwnerId};
 use std::fmt;
 
 /// Teardown state of a supervised transport or worker.
@@ -75,6 +75,25 @@ impl LifecycleState {
             Self::Reaped => "every worker joined or transferred to the reaper",
             Self::Closed => "process tree and ledger settled",
             Self::Faulted => "preserve owner and error evidence",
+        }
+    }
+
+    /// Return the owner admission state this lifecycle state implies.
+    ///
+    /// The two enums answer different questions — this one tracks teardown
+    /// progress, [`OwnerState`] tracks whether the ledger still admits work —
+    /// so a subsystem holding both must not let them drift. A faulted resource
+    /// maps to [`OwnerState::Closing`] rather than [`OwnerState::Closed`]
+    /// because a fault does not settle the charges the owner still holds.
+    pub const fn owner_state(self) -> OwnerState {
+        match self {
+            Self::Starting | Self::Running => OwnerState::Open,
+            Self::Cancelling
+            | Self::ClosingTransport
+            | Self::Joining
+            | Self::Reaped
+            | Self::Faulted => OwnerState::Closing,
+            Self::Closed => OwnerState::Closed,
         }
     }
 }

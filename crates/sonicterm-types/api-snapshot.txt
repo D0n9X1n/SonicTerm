@@ -533,6 +533,7 @@ pub const fn sonicterm_types::lifecycle::LifecycleState::admits_work(self) -> bo
 pub const fn sonicterm_types::lifecycle::LifecycleState::can_transition_to(self, Self) -> bool
 pub const fn sonicterm_types::lifecycle::LifecycleState::entry_requirement(self) -> &'static str
 pub const fn sonicterm_types::lifecycle::LifecycleState::is_terminal(self) -> bool
+pub const fn sonicterm_types::lifecycle::LifecycleState::owner_state(self) -> sonicterm_types::resource::OwnerState
 impl core::clone::Clone for sonicterm_types::lifecycle::LifecycleState
 pub fn sonicterm_types::lifecycle::LifecycleState::clone(&self) -> sonicterm_types::lifecycle::LifecycleState
 impl core::cmp::Eq for sonicterm_types::lifecycle::LifecycleState
@@ -1673,6 +1674,7 @@ pub const fn sonicterm_types::lifecycle::LifecycleState::admits_work(self) -> bo
 pub const fn sonicterm_types::lifecycle::LifecycleState::can_transition_to(self, Self) -> bool
 pub const fn sonicterm_types::lifecycle::LifecycleState::entry_requirement(self) -> &'static str
 pub const fn sonicterm_types::lifecycle::LifecycleState::is_terminal(self) -> bool
+pub const fn sonicterm_types::lifecycle::LifecycleState::owner_state(self) -> sonicterm_types::resource::OwnerState
 impl core::clone::Clone for sonicterm_types::lifecycle::LifecycleState
 pub fn sonicterm_types::lifecycle::LifecycleState::clone(&self) -> sonicterm_types::lifecycle::LifecycleState
 impl core::cmp::Eq for sonicterm_types::lifecycle::LifecycleState

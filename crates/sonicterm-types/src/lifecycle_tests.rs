@@ -147,3 +147,61 @@ fn only_a_reserved_slot_admits_a_handoff() {
     assert!(!ReapAdmission::QueueFull.admits());
     assert!(!ReapAdmission::ShuttingDown.admits());
 }
+
+#[test]
+fn every_lifecycle_state_maps_to_exactly_one_owner_state() {
+    // MM-16: the seam between the lifecycle contract and the ledger's
+    // admission contract. Enumerating the full 8x3 space keeps a future
+    // lifecycle state from silently defaulting to the wrong admission answer.
+    const EXPECTED: [(LifecycleState, OwnerState); 8] = [
+        (LifecycleState::Starting, OwnerState::Open),
+        (LifecycleState::Running, OwnerState::Open),
+        (LifecycleState::Cancelling, OwnerState::Closing),
+        (LifecycleState::ClosingTransport, OwnerState::Closing),
+        (LifecycleState::Joining, OwnerState::Closing),
+        (LifecycleState::Reaped, OwnerState::Closing),
+        (LifecycleState::Faulted, OwnerState::Closing),
+        (LifecycleState::Closed, OwnerState::Closed),
+    ];
+    const OWNER_STATES: [OwnerState; 3] =
+        [OwnerState::Open, OwnerState::Closing, OwnerState::Closed];
+
+    for state in ALL_STATES {
+        let expected = EXPECTED
+            .iter()
+            .find(|(candidate, _)| *candidate == state)
+            .map(|(_, owner)| *owner)
+            .expect("every lifecycle state is enumerated");
+        assert_eq!(state.owner_state(), expected, "{state}");
+        // Exactly one of the three owner states matches, so the mapping is a
+        // function rather than an accident of match ordering.
+        let matches = OWNER_STATES.iter().filter(|owner| **owner == state.owner_state()).count();
+        assert_eq!(matches, 1, "{state} must map to exactly one owner state");
+    }
+}
+
+#[test]
+fn only_running_and_starting_map_to_an_admitting_owner() {
+    // A state that stopped admitting work must never report an Open owner:
+    // that would let the ledger accept a reservation the transport has already
+    // refused.
+    for state in ALL_STATES {
+        let admits_owner = state.owner_state() == OwnerState::Open;
+        let expected = matches!(state, LifecycleState::Starting | LifecycleState::Running);
+        assert_eq!(admits_owner, expected, "{state}");
+    }
+}
+
+#[test]
+fn a_faulted_resource_does_not_report_a_settled_owner() {
+    // A fault preserves evidence; it does not settle the charges the owner
+    // still holds, so it must not present as Closed.
+    assert_eq!(LifecycleState::Faulted.owner_state(), OwnerState::Closing);
+    assert_ne!(LifecycleState::Faulted.owner_state(), OwnerState::Closed);
+    // Only the terminal lifecycle state may report a closed owner.
+    for state in ALL_STATES {
+        if state.owner_state() == OwnerState::Closed {
+            assert_eq!(state, LifecycleState::Closed, "only Closed may report a closed owner");
+        }
+    }
+}

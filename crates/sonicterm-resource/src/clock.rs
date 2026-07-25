@@ -10,6 +10,14 @@ use std::{
 pub trait Clock: Send + Sync + 'static {
     /// Return the current instant.
     fn now(&self) -> Instant;
+
+    /// Wait until `deadline`, or return immediately if it has passed.
+    ///
+    /// A deferred task must not be re-polled before its own deadline, so the
+    /// supervisor waits here rather than spinning the queue. A test clock jumps
+    /// straight to the deadline, which keeps deferred work deterministic
+    /// without sleeping.
+    fn wait_until(&self, deadline: Instant);
 }
 
 /// Real monotonic clock.
@@ -20,6 +28,13 @@ impl Clock for SystemClock {
     #[inline]
     fn now(&self) -> Instant {
         Instant::now()
+    }
+
+    fn wait_until(&self, deadline: Instant) {
+        let now = Instant::now();
+        if deadline > now {
+            std::thread::sleep(deadline - now);
+        }
     }
 }
 
@@ -54,6 +69,13 @@ impl Default for TestClock {
 impl Clock for TestClock {
     fn now(&self) -> Instant {
         *self.now.lock()
+    }
+
+    fn wait_until(&self, deadline: Instant) {
+        let mut now = self.now.lock();
+        if deadline > *now {
+            *now = deadline;
+        }
     }
 }
 
