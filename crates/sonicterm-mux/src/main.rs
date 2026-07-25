@@ -8,11 +8,11 @@
 //! v0.1 — minimal CLI; future versions may grow flags for foreground mode,
 //! pid-file, log-file, etc.
 
-use std::{env, process::ExitCode, sync::Arc, thread};
 #[cfg(windows)]
 use std::io::Write;
 #[cfg(windows)]
 use std::os::windows::io::{AsHandle, AsRawHandle};
+use std::{env, process::ExitCode, sync::Arc, thread};
 
 use anyhow::{anyhow, Context, Result};
 #[cfg(unix)]
@@ -32,7 +32,7 @@ use sonicterm_mux::{
 #[cfg(windows)]
 use windows::Win32::{
     Foundation::HANDLE,
-    System::{IO::CancelIoEx, Pipes::DisconnectNamedPipe},
+    System::{Pipes::DisconnectNamedPipe, IO::CancelIoEx},
 };
 
 fn main() -> ExitCode {
@@ -131,8 +131,8 @@ fn serve_stream(state: Arc<ServerState>, stream: Stream) -> Result<()> {
     // reader and writer can live on separate threads.
     #[cfg(unix)]
     {
-    let writer = stream.try_clone()?;
-    let shutdown = stream.try_clone()?;
+        let writer = stream.try_clone()?;
+        let shutdown = stream.try_clone()?;
         handle_connection_with_shutdown(state, stream, writer, move || {
             let Stream::UdSocket(stream) = shutdown;
             let _ = stream.inner().shutdown(std::net::Shutdown::Both);
@@ -145,10 +145,10 @@ fn serve_stream(state: Arc<ServerState>, stream: Stream) -> Result<()> {
         handle_connection_with_shutdown(state, stream, SharedWriter(writer), move || {
             let Stream::NamedPipe(named_pipe) = shutdown.as_ref();
             let writer_handle = HANDLE(named_pipe.as_handle().as_raw_handle());
-        unsafe {
-            let _ = CancelIoEx(writer_handle, None);
-            let _ = DisconnectNamedPipe(writer_handle);
-        }
+            unsafe {
+                let _ = CancelIoEx(writer_handle, None);
+                let _ = DisconnectNamedPipe(writer_handle);
+            }
         })
     }
 }

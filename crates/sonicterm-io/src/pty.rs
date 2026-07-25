@@ -196,9 +196,7 @@ fn unix_session_pids(session_id: u32) -> std::io::Result<Vec<u32>> {
     Ok(pids_by_type(ProcFilter::All)?
         .into_iter()
         .filter(|pid| {
-            *pid != 0
-                && unsafe { libc::getsid(*pid as libc::pid_t) }
-                    == session_id as libc::pid_t
+            *pid != 0 && unsafe { libc::getsid(*pid as libc::pid_t) } == session_id as libc::pid_t
         })
         .collect())
 }

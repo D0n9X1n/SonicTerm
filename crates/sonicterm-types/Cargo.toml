@@ -12,6 +12,7 @@ readme.workspace = true
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 bitflags = { workspace = true }
+enum-map = { workspace = true }
 
 [dev-dependencies]
 toml.workspace = true

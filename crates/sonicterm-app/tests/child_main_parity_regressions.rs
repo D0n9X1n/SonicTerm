@@ -152,10 +152,7 @@ fn named_search_edits_match_between_main_and_child_across_unicode() {
     }
     assert_eq!(app.__test_search_query_cursor(None), Some(("a你🙂", "a你🙂".len())));
 
-    for key in [
-        winit::keyboard::NamedKey::End,
-        winit::keyboard::NamedKey::ArrowLeft,
-    ] {
+    for key in [winit::keyboard::NamedKey::End, winit::keyboard::NamedKey::ArrowLeft] {
         let key = Key::Named(key);
         assert!(app.__test_search_text_edit(None, &key, ModifiersState::empty()));
         assert!(app.__test_search_text_edit(Some(child), &key, ModifiersState::empty()));

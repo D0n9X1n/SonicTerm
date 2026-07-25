@@ -460,8 +460,7 @@ fn build_pane(
                         if exit_drain_deadline.is_some_and(|deadline| now >= deadline) {
                             break;
                         }
-                        if exit_drain_deadline.is_none()
-                            && child_has_exited(&mut exit_probe_warned)
+                        if exit_drain_deadline.is_none() && child_has_exited(&mut exit_probe_warned)
                         {
                             drain_ready_pane_output(&out_rx, &r_replay, &r_sub, pane_id);
                             exit_drain_deadline = Some(now + PANE_EXIT_DRAIN_GRACE);

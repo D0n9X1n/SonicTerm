@@ -315,7 +315,6 @@ where
     h.finish()
 }
 
-
 #[cfg(test)]
 #[path = "row_glyph_cache_tests.rs"]
 mod row_glyph_cache_tests;

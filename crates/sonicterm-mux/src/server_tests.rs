@@ -124,6 +124,12 @@ fn subscriber_output_rechunks_to_the_documented_byte_ceiling() {
 }
 
 #[test]
+#[ignore = "v120-invariant-baseline:v120_queue_accounting_covers_messages_and_payload_bytes:WP-MUX"]
+fn v120_queue_accounting_covers_messages_and_payload_bytes() {
+    panic!("baseline invariant requires WP-MUX byte and message accounting");
+}
+
+#[test]
 fn subscriber_control_returns_error_when_mailbox_stays_full() {
     let (tx, rx) = bounded(1);
     let sink = SubscriberSink::new(tx, rx.clone());
@@ -211,6 +217,13 @@ fn blocked_writer_does_not_block_connection_cleanup() {
 }
 
 #[test]
+#[ignore = "v120-invariant-baseline:v120_blocked_worker_owner_orders_cancel_join_and_drop:WP-MUX"]
+fn v120_blocked_worker_owner_orders_cancel_join_and_drop() {
+    blocked_writer_does_not_block_connection_cleanup();
+    panic!("baseline invariant requires WP-MUX connection owner");
+}
+
+#[test]
 fn pane_exit_releases_subscriber_when_control_mailbox_stays_full() {
     let (tx, rx) = bounded(1);
     let sink = SubscriberSink::new(tx, rx.clone());
@@ -280,10 +293,7 @@ fn exited_shell_with_background_descendant_is_reaped() {
     let state = ServerState::new();
     let (_session_id, pane_id) = state.spawn("/bin/sh", 80, 24).expect("spawn shell");
     state
-        .input(
-            pane_id,
-            b"trap '' HUP\n(while :; do printf x; sleep 0.01; done) &\nexit\n".to_vec(),
-        )
+        .input(pane_id, b"trap '' HUP\n(while :; do printf x; sleep 0.01; done) &\nexit\n".to_vec())
         .expect("launch background descendant");
 
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -364,9 +374,7 @@ fn shell_output_flows_through_pty_seam_to_subscriber() {
     assert_eq!(panes[0].id, pane_id);
 
     // Drive the shell to emit the marker on its own line, then exit.
-    state
-        .input(pane_id, format!("printf '{MARKER}\\n'\n").into_bytes())
-        .expect("input write");
+    state.input(pane_id, format!("printf '{MARKER}\\n'\n").into_bytes()).expect("input write");
 
     // Poll the subscriber mailbox until the marker shows up (bounded wait so
     // the test can never hang CI). Output arrives as ServerMsg::Output chunks.

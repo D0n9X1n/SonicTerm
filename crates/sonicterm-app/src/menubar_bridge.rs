@@ -71,4 +71,3 @@ pub(crate) fn drain() -> Vec<Action> {
 pub fn __test_drain() -> Vec<Action> {
     drain()
 }
-

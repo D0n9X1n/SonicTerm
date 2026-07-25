@@ -27,4 +27,3 @@ fn timeout_resets_to_one() {
     assert_eq!(next_click_count(2, true, false), 1);
     assert_eq!(next_click_count(1, true, false), 1);
 }
-

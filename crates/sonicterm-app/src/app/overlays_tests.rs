@@ -19,4 +19,3 @@ fn tab_color_choices_include_reset_and_only_ansi_colors() {
         .filter_map(|choice| choice.hex.as_ref())
         .all(|hex| hex.to_ascii_lowercase() != bg));
 }
-

@@ -18,9 +18,7 @@ use crossbeam_channel::Sender;
 use vte::{Params, Perform};
 
 use sonicterm_grid::grid::{Cell, CellFlags, Color, Grid, Pos, UnderlineStyle};
-use sonicterm_grid::hyperlink::{
-    HyperlinkId, HyperlinkRegistry, MAX_HYPERLINK_CLIENT_ID_BYTES,
-};
+use sonicterm_grid::hyperlink::{HyperlinkId, HyperlinkRegistry, MAX_HYPERLINK_CLIENT_ID_BYTES};
 
 /// Version string reported in answer to CSI > q (XTVERSION).
 pub const SONIC_VERSION: &str = "SonicTerm 0.7";
@@ -402,8 +400,7 @@ impl Parser {
                         && !started_escape
                         && !media_capture_has_own_budget
                     {
-                        self.escape_bytes_in_flight =
-                            self.escape_bytes_in_flight.saturating_add(1);
+                        self.escape_bytes_in_flight = self.escape_bytes_in_flight.saturating_add(1);
                         if self.escape_bytes_in_flight > MAX_ESCAPE_SEQUENCE_BYTES {
                             let pending_esc = self.pending_esc;
                             self.begin_discarding_oversized_escape(pending_esc);
@@ -461,9 +458,7 @@ impl Parser {
     fn consume_discarded_escape_byte(&mut self, byte: u8) {
         let string_terminated = match self.escape_family {
             EscapeFamily::Osc => {
-                byte == 0x07
-                    || byte == 0x9c
-                    || (self.discard_escape_pending_esc && byte == b'\\')
+                byte == 0x07 || byte == 0x9c || (self.discard_escape_pending_esc && byte == b'\\')
             }
             EscapeFamily::String => {
                 byte == 0x9c || (self.discard_escape_pending_esc && byte == b'\\')
@@ -761,8 +756,7 @@ impl Performer {
         if let Some(tx) = &self.reply_tx {
             match tx.try_send(bytes.to_vec()) {
                 Ok(()) => {
-                    self.reply_queue_full_warned
-                        .store(false, std::sync::atomic::Ordering::Relaxed);
+                    self.reply_queue_full_warned.store(false, std::sync::atomic::Ordering::Relaxed);
                 }
                 Err(crossbeam_channel::TrySendError::Full(_)) => {
                     if !self

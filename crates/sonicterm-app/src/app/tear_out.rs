@@ -83,10 +83,9 @@ impl App {
     }
 
     pub(super) fn warm_window_pool_maintain(&mut self, el: &ActiveEventLoop) {
-        let Some(software_rendering) = self
-            .main_renderer()
-            .map(|renderer| renderer.is_software_rendering() || renderer.is_software_render_degraded())
-        else {
+        let Some(software_rendering) = self.main_renderer().map(|renderer| {
+            renderer.is_software_rendering() || renderer.is_software_render_degraded()
+        }) else {
             return;
         };
         let configured = self.config.window.warm_window_pool;

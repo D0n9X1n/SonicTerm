@@ -182,7 +182,13 @@ fn preedit_caret_advance(preedit: &str, caret_byte: usize, font_size: f32) -> f3
 /// * be exactly one line tall.
 ///
 /// Pure so the geometry is unit-testable without a GPU context.
-fn preedit_bg_rect(start_x: f32, top_y: f32, pre_w: f32, pad: f32, line_h: f32) -> (f32, f32, f32, f32) {
+fn preedit_bg_rect(
+    start_x: f32,
+    top_y: f32,
+    pre_w: f32,
+    pad: f32,
+    line_h: f32,
+) -> (f32, f32, f32, f32) {
     (start_x, top_y, pre_w + pad, line_h)
 }
 
@@ -364,8 +370,12 @@ pub fn emit_pane_scrollbar(
     // Bar width in raster px. Authored at 8 logical px; scale with DPI so the
     // bar keeps a constant physical size across displays, min 1px.
     let scrollbar_width_px: f32 = (8.0 * scale).max(1.0);
-    let geom_rect =
-        sonicterm_render_model::boundary::ui::scrollbar::Rect::new(pane_rect.x, pane_rect.y, pane_rect.w, pane_rect.h);
+    let geom_rect = sonicterm_render_model::boundary::ui::scrollbar::Rect::new(
+        pane_rect.x,
+        pane_rect.y,
+        pane_rect.w,
+        pane_rect.h,
+    );
     let Some(geom) = sonicterm_render_model::boundary::ui::scrollbar::compute(
         viewport_rows,
         total_rows,
@@ -456,24 +466,6 @@ use crate::{
     wezterm_pipeline::WeztermPipeline,
 };
 use sonicterm_render_model::boundary::cfg::config::CursorShape;
-use sonicterm_render_model::geometry::{DamageRect, PixelRect};
-use sonicterm_text::GlyphInstance;
-use sonicterm_text::{
-    glyph_atlas::GlyphAtlas,
-    // T9 (wezterm-takeover G2/C): `shape_run` + `ShapeCache` deleted in
-    // T8 (the cosmic-text adapter is gone). `flush_shape_run` now drives
-    // `shape_run_with_wezterm` directly; `ShapedGlyph::from_wezterm`
-    // narrows wezterm's `GlyphInfo` into the renderer-facing record.
-    // The legacy ASCII fast-path gate (`run_is_ascii_fast`) still
-    // applies — it's purely cell-shape based and not tied to shaper
-    // choice.
-    //
-    // T13/T14 (wezterm-takeover G3): `swash_rasterizer` is no longer
-    // imported here — every chrome site and the grid path both route
-    // through `sonicterm_engine::FontStack`. T10 deletes the
-    // file outright.
-    shape::{run_is_ascii_fast, RunStyle},
-};
 use sonicterm_render_model::boundary::ui::{
     command_palette::CommandPalette,
     copy_mode::{CopyModeState, QuickSelectState},
@@ -494,6 +486,24 @@ use sonicterm_render_model::boundary::ui::{
         TAB_GAP, TAB_VERT_INSET,
     },
     tabs::TabBar,
+};
+use sonicterm_render_model::geometry::{DamageRect, PixelRect};
+use sonicterm_text::GlyphInstance;
+use sonicterm_text::{
+    glyph_atlas::GlyphAtlas,
+    // T9 (wezterm-takeover G2/C): `shape_run` + `ShapeCache` deleted in
+    // T8 (the cosmic-text adapter is gone). `flush_shape_run` now drives
+    // `shape_run_with_wezterm` directly; `ShapedGlyph::from_wezterm`
+    // narrows wezterm's `GlyphInfo` into the renderer-facing record.
+    // The legacy ASCII fast-path gate (`run_is_ascii_fast`) still
+    // applies — it's purely cell-shape based and not tied to shaper
+    // choice.
+    //
+    // T13/T14 (wezterm-takeover G3): `swash_rasterizer` is no longer
+    // imported here — every chrome site and the grid path both route
+    // through `sonicterm_engine::FontStack`. T10 deletes the
+    // file outright.
+    shape::{run_is_ascii_fast, RunStyle},
 };
 
 #[must_use]
@@ -1927,7 +1937,10 @@ impl GpuRenderer {
     /// path, so config changes must invalidate the frame key explicitly;
     /// otherwise an idle window could keep the previous scrollbar quads
     /// until some unrelated grid/theme/input change forced a redraw.
-    pub fn set_scrollbar_mode(&mut self, mode: sonicterm_render_model::boundary::cfg::config::ScrollbarMode) -> bool {
+    pub fn set_scrollbar_mode(
+        &mut self,
+        mode: sonicterm_render_model::boundary::cfg::config::ScrollbarMode,
+    ) -> bool {
         if self.scrollbar_mode == mode {
             return false;
         }
@@ -2857,10 +2870,8 @@ impl GpuRenderer {
 
     fn rebuild_glyph_upload_if_needed(&mut self) {
         let current = (self.glyph_upload.width(), self.glyph_upload.height());
-        let next = desired_gpu_atlas_dimensions(
-            self.uses_windows_software_presenter(),
-            &self.glyph_atlas,
-        );
+        let next =
+            desired_gpu_atlas_dimensions(self.uses_windows_software_presenter(), &self.glyph_atlas);
         if atlas_texture_rebuild_required(current, next) {
             self.glyph_upload = AtlasUpload::new_sized(
                 &self.device,
@@ -2873,10 +2884,8 @@ impl GpuRenderer {
 
     fn rebuild_image_upload_if_needed(&mut self) {
         let current = (self.image_upload.width(), self.image_upload.height());
-        let next = desired_gpu_atlas_dimensions(
-            self.uses_windows_software_presenter(),
-            &self.image_atlas,
-        );
+        let next =
+            desired_gpu_atlas_dimensions(self.uses_windows_software_presenter(), &self.image_atlas);
         if atlas_texture_rebuild_required(current, next) {
             self.image_upload = AtlasUpload::new_sized(
                 &self.device,
@@ -3440,7 +3449,12 @@ impl GpuRenderer {
                     )
                     .with_top_offset(self.tab_bar_y_offset());
                     for t in layout.tabwidgets() {
-                        match t.hover_at(Some(sonicterm_render_model::boundary::ui::tabbar_view::Point { x: cx, y: cy })) {
+                        match t.hover_at(Some(
+                            sonicterm_render_model::boundary::ui::tabbar_view::Point {
+                                x: cx,
+                                y: cy,
+                            },
+                        )) {
                             sonicterm_render_model::boundary::ui::tabbar_view::TabHover::None => {}
                             sonicterm_render_model::boundary::ui::tabbar_view::TabHover::Body => {
                                 idx = t.idx as u32;
@@ -4034,9 +4048,7 @@ impl GpuRenderer {
         let inline_image_placements: Vec<InlineImagePlacement<'_>> = pane_views
             .iter()
             .flat_map(|pv| {
-                pv.inline_images
-                    .iter()
-                    .map(move |image| (image, pv.origin_x, pv.origin_y))
+                pv.inline_images.iter().map(move |image| (image, pv.origin_x, pv.origin_y))
             })
             .enumerate()
             .map(|(painter_order, (image, origin_x, origin_y))| InlineImagePlacement {
@@ -4527,7 +4539,8 @@ impl GpuRenderer {
                 // accent underline matching the recolored glyphs; plain hover
                 // → a yellow HINT underline only (no glyph recolor). #URL-hint
                 let hov_accent = if h.active {
-                    sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme).accent
+                    sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme)
+                        .accent
                 } else {
                     hex_to_rgba(theme.colors.ansi.yellow.0.as_str(), 0.9)
                 };
@@ -4676,7 +4689,8 @@ impl GpuRenderer {
             // tab bar. The theme.tab.* colors remain authoritative for
             // the title text (active vs inactive fg) so per-theme accents
             // still read through.
-            let ui_palette = sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme);
+            let ui_palette =
+                sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme);
             // `tok::BG_BASE` is a hardcoded near-black
             // (`#0B0E14`) that is indistinguishable from most dark
             // themes' `theme.background` — the tab bar drew correctly
@@ -5024,8 +5038,8 @@ impl GpuRenderer {
                 // theme-background block with the covered glyph recolored to
                 // badge yellow. The block overlays existing text and contributes
                 // no advance, matching terminal and command-palette cursors.
-                let caret_h = (search_font_size * 1.15)
-                    .min((layout.border.h - self.chrome_px(8.0)).max(4.0));
+                let caret_h =
+                    (search_font_size * 1.15).min((layout.border.h - self.chrome_px(8.0)).max(4.0));
                 let caret_y = layout.border.y + (layout.border.h - caret_h) * 0.5;
                 quads_overlay.push(QuadInstance {
                     rect: px_to_ndc(caret_x, caret_y, caret_w, caret_h, sw, sh),
@@ -5204,30 +5218,29 @@ impl GpuRenderer {
 
         // -------- Command palette overlay ----------------------------------
         let palette_preedit = ime.map(|i| i.preedit()).unwrap_or("");
-        let (palette_layout, palette_query_text, palette_caret_char) =
-            if let Some(p) = palette {
-                let query_text = if palette_preedit.is_empty() {
-                    None
-                } else {
-                    Some(command_palette_query_label(p, palette_preedit))
-                };
-                let layout =
-                    PaletteLayout::compute(p, sw, sh, self.panel_padding, self.scale_factor);
-                let caret_char = palette_cursor_char(
-                    p.query(),
-                    p.cursor(),
-                    layout.as_ref().and_then(|layout| layout.query_placeholder.as_deref()),
-                )
-                .map(str::to_string);
-                (layout, query_text, caret_char)
+        let (palette_layout, palette_query_text, palette_caret_char) = if let Some(p) = palette {
+            let query_text = if palette_preedit.is_empty() {
+                None
             } else {
-                (None, None, None)
+                Some(command_palette_query_label(p, palette_preedit))
             };
+            let layout = PaletteLayout::compute(p, sw, sh, self.panel_padding, self.scale_factor);
+            let caret_char = palette_cursor_char(
+                p.query(),
+                p.cursor(),
+                layout.as_ref().and_then(|layout| layout.query_placeholder.as_deref()),
+            )
+            .map(str::to_string);
+            (layout, query_text, caret_char)
+        } else {
+            (None, None, None)
+        };
         if let Some(layout) = &palette_layout {
             // Chrome colors are derived from the active theme so the palette
             // tracks the user's chosen palette instead of hardcoded
             // Tokyo Night literals (see UiPalette::from_theme).
-            let palette_chrome = sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme);
+            let palette_chrome =
+                sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme);
             let accent_rgba = palette_chrome.accent;
             // Full-window scrim — sits below the modal so the underlying
             // terminal recedes visually.
@@ -5328,8 +5341,10 @@ impl GpuRenderer {
                 let palette_native_em = self.raster_px(self.font_size);
                 let mut palette_rasterizer = stack.clone();
                 // Query: vertically centre inside the query_row chrome.
-                let query_origin_x =
-                    layout.query_row.x + self.chrome_px(sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_PAD_X);
+                let query_origin_x = layout.query_row.x
+                    + self.chrome_px(
+                        sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_PAD_X,
+                    );
                 let query_baseline_y =
                     layout.query_row.y + (layout.query_row.h + palette_font_size * 0.8) * 0.5;
                 emit_overlay_text_glyphs(
@@ -5413,8 +5428,10 @@ impl GpuRenderer {
                     let shortcut_font_size = palette_font_size;
                     let shortcut_w = shortcut
                         .map(|hint| hint.chars().count() as f32 * shortcut_font_size * 0.62);
-                    let mut origin_x =
-                        row.rect.x + self.chrome_px(sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_PAD_X);
+                    let mut origin_x = row.rect.x
+                        + self.chrome_px(
+                            sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_PAD_X,
+                        );
                     if let Some(hex) = swatch {
                         let color = hex_to_rgba(hex, 1.0);
                         let line_h = self.chrome_px(2.0).max(1.0);
@@ -5467,7 +5484,9 @@ impl GpuRenderer {
                     );
                     if let (Some(hint), Some(width)) = (shortcut, shortcut_w) {
                         let hint_origin_x = row.rect.x + row.rect.w
-                            - self.chrome_px(sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_PAD_X)
+                            - self.chrome_px(
+                                sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_PAD_X,
+                            )
                             - width;
                         let mut hint_color = self.search_fg;
                         hint_color.a = 180;
@@ -5494,13 +5513,17 @@ impl GpuRenderer {
                 if let Some(ph) = &layout.empty_label {
                     let empty_x = layout.bg.x
                         + self.chrome_px(self.panel_padding)
-                        + self.chrome_px(sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_PAD_X);
+                        + self.chrome_px(
+                            sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_PAD_X,
+                        );
                     let empty_y_top = layout.query_row.y
                         + layout.query_row.h
                         + self.chrome_px(self.panel_padding);
                     // No row rect here (empty state), so derive the scaled row
                     // height via chrome_px — same DPI basis as the row path. #palette
-                    let empty_row_h = self.chrome_px(sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_HEIGHT);
+                    let empty_row_h = self.chrome_px(
+                        sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_HEIGHT,
+                    );
                     let empty_baseline_y =
                         empty_y_top + (empty_row_h + palette_font_size * 0.8) * 0.5;
                     emit_overlay_text_glyphs(
@@ -5797,7 +5820,9 @@ impl GpuRenderer {
                 let (ly0, ly1) = chip.drop_line_y;
                 let lh = (ly1 - ly0).max(2.0 * dpi);
                 // Drop-line accent — theme-driven (was hardcoded ACCENT_BLUE).
-                let mut line_color = sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme).accent;
+                let mut line_color =
+                    sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme)
+                        .accent;
                 line_color[3] = 0.95;
                 // 3px line centered on lx; both the half-width offset and the
                 // width are logical px scaled by DPI.
@@ -6827,11 +6852,7 @@ fn emit_inline_image_instances(
         }
         let x = placement.origin_x + image.col as f32 * cell_w;
         let y = placement.origin_y + image.row as f32 * cell_h;
-        if x >= sw
-            || y >= sh
-            || x + image.width as f32 <= 0.0
-            || y + image.height as f32 <= 0.0
-        {
+        if x >= sw || y >= sh || x + image.width as f32 <= 0.0 || y + image.height as f32 <= 0.0 {
             continue;
         }
         let key = sonicterm_types::glyph_key::GlyphKey {
@@ -6841,11 +6862,8 @@ fn emit_inline_image_instances(
             italic: false,
             glyph_id: fold_u64_to_u32(image.id),
         };
-        let Some(info) = image_atlas.get_or_insert_lazy_without_eviction(
-            key,
-            image.width,
-            image.height,
-            || {
+        let Some(info) =
+            image_atlas.get_or_insert_lazy_without_eviction(key, image.width, image.height, || {
                 sonicterm_text::glyph_atlas::RasterTile {
                     width: image.width,
                     height: image.height,
@@ -6856,8 +6874,8 @@ fn emit_inline_image_instances(
                     is_color: true,
                     is_subpixel: false,
                 }
-            },
-        ) else {
+            })
+        else {
             skipped += 1;
             continue;
         };
@@ -7336,7 +7354,8 @@ pub fn collect_hyperlink_runs(grid: &Grid) -> Vec<(u16, u16, u16)> {
     for r in 0..grid.rows {
         let row = grid.row(r);
         let mut start: Option<u16> = None;
-        let mut current: Option<sonicterm_render_model::boundary::grid::hyperlink::HyperlinkId> = None;
+        let mut current: Option<sonicterm_render_model::boundary::grid::hyperlink::HyperlinkId> =
+            None;
         let mut last_col: u16 = 0;
         for (col, cell) in row.iter().enumerate() {
             if cell.flags.contains(CellFlags::WIDE_CONT) {
@@ -7382,7 +7401,10 @@ pub fn collect_hyperlink_runs(grid: &Grid) -> Vec<(u16, u16, u16)> {
 /// Stable fingerprint for command badges, including wall-clock buckets that
 /// change when badge visibility can transition without a tab model mutation.
 #[doc(hidden)]
-pub fn command_status_hash(status: &sonicterm_render_model::boundary::ui::tabs::CommandStatus, now: Instant) -> u64 {
+pub fn command_status_hash(
+    status: &sonicterm_render_model::boundary::ui::tabs::CommandStatus,
+    now: Instant,
+) -> u64 {
     match status {
         sonicterm_render_model::boundary::ui::tabs::CommandStatus::Idle => 0,
         sonicterm_render_model::boundary::ui::tabs::CommandStatus::Running(started_at) => {

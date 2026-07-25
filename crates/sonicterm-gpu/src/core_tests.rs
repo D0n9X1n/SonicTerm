@@ -173,7 +173,10 @@ fn custom_tab_color_does_not_emit_unfocused_panel_marker() {
     tabs.activate(0);
     tabs.set_active_custom_color("#83a598");
 
-    let layout = sonicterm_render_model::boundary::ui::tabbar_view::TabBarLayout::compute_with_height(&tabs, 400.0, 40.0);
+    let layout =
+        sonicterm_render_model::boundary::ui::tabbar_view::TabBarLayout::compute_with_height(
+            &tabs, 400.0, 40.0,
+        );
     let mut quads = Vec::new();
     emit_tab_bar_quads(
         &mut quads,
@@ -201,7 +204,10 @@ fn custom_tab_color_emits_focused_panel_marker_once() {
     tabs.activate(0);
     tabs.set_active_custom_color("#83a598");
 
-    let layout = sonicterm_render_model::boundary::ui::tabbar_view::TabBarLayout::compute_with_height(&tabs, 400.0, 40.0);
+    let layout =
+        sonicterm_render_model::boundary::ui::tabbar_view::TabBarLayout::compute_with_height(
+            &tabs, 400.0, 40.0,
+        );
     let mut quads = Vec::new();
     emit_tab_bar_quads(
         &mut quads,
@@ -258,10 +264,7 @@ fn preedit_caret_advance_zero_for_whitespace_only() {
 #[test]
 fn preedit_caret_advance_nonzero_for_real_composition() {
     // Real composition still advances the caret to the insertion point.
-    assert!(
-        preedit_caret_advance("ni", 2, 16.0) > 0.0,
-        "latin composing run advances the caret"
-    );
+    assert!(preedit_caret_advance("ni", 2, 16.0) > 0.0, "latin composing run advances the caret");
     assert!(
         preedit_caret_advance("\u{4f60}", 3, 16.0) > 0.0,
         "CJK composing run advances the caret"
@@ -473,15 +476,8 @@ fn inline_image_atlas_skips_older_images_without_eviction() {
         InlineImagePlacement { image: &newer, origin_x: 0.0, origin_y: 0.0, painter_order: 1 },
     ];
 
-    let skipped = emit_inline_image_instances(
-        &mut atlas,
-        &mut instances,
-        &placements,
-        1.0,
-        1.0,
-        10.0,
-        10.0,
-    );
+    let skipped =
+        emit_inline_image_instances(&mut atlas, &mut instances, &placements, 1.0, 1.0, 10.0, 10.0);
 
     let newer_key = sonicterm_types::GlyphKey {
         ch: '\u{fffc}',

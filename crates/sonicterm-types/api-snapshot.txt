@@ -4,6 +4,7 @@ pub enum sonicterm_types::action::Action
 pub sonicterm_types::action::Action::ActivateLastTab
 pub sonicterm_types::action::Action::ActivateTab(usize)
 pub sonicterm_types::action::Action::ApplyTheme(alloc::string::String)
+pub sonicterm_types::action::Action::CheckForUpdates
 pub sonicterm_types::action::Action::CloseActivePaneOrTab
 pub sonicterm_types::action::Action::ClosePane
 pub sonicterm_types::action::Action::CloseTab
@@ -23,7 +24,9 @@ pub sonicterm_types::action::Action::OpenSearch
 pub sonicterm_types::action::Action::OpenSshPane(alloc::string::String)
 pub sonicterm_types::action::Action::PasteFromClipboard
 pub sonicterm_types::action::Action::PrevTab
+pub sonicterm_types::action::Action::QuitApp
 pub sonicterm_types::action::Action::ReloadConfig
+pub sonicterm_types::action::Action::RenameTab
 pub sonicterm_types::action::Action::ResetFontSize
 pub sonicterm_types::action::Action::ResizePane
 pub sonicterm_types::action::Action::ResizePane::amount: u16
@@ -42,6 +45,7 @@ pub sonicterm_types::action::Action::ToggleBroadcast::scope: sonicterm_types::ac
 pub sonicterm_types::action::Action::ToggleFullscreen
 pub sonicterm_types::action::Action::TogglePaneZoom
 pub sonicterm_types::action::Action::ToggleTabBar
+pub sonicterm_types::action::Action::UpdateTabColor
 impl core::clone::Clone for sonicterm_types::action::Action
 pub fn sonicterm_types::action::Action::clone(&self) -> sonicterm_types::action::Action
 impl core::cmp::Eq for sonicterm_types::action::Action
@@ -165,6 +169,36 @@ impl core::marker::Unpin for sonicterm_types::cell::Color
 impl core::marker::UnsafeUnpin for sonicterm_types::cell::Color
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::cell::Color
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::cell::Color
+pub enum sonicterm_types::cell::UnderlineStyle
+pub sonicterm_types::cell::UnderlineStyle::Curly
+pub sonicterm_types::cell::UnderlineStyle::Dashed
+pub sonicterm_types::cell::UnderlineStyle::Dotted
+pub sonicterm_types::cell::UnderlineStyle::Double
+pub sonicterm_types::cell::UnderlineStyle::Single
+impl core::clone::Clone for sonicterm_types::cell::UnderlineStyle
+pub fn sonicterm_types::cell::UnderlineStyle::clone(&self) -> sonicterm_types::cell::UnderlineStyle
+impl core::cmp::Eq for sonicterm_types::cell::UnderlineStyle
+impl core::cmp::PartialEq for sonicterm_types::cell::UnderlineStyle
+pub fn sonicterm_types::cell::UnderlineStyle::eq(&self, &sonicterm_types::cell::UnderlineStyle) -> bool
+impl core::default::Default for sonicterm_types::cell::UnderlineStyle
+pub fn sonicterm_types::cell::UnderlineStyle::default() -> sonicterm_types::cell::UnderlineStyle
+impl core::fmt::Debug for sonicterm_types::cell::UnderlineStyle
+pub fn sonicterm_types::cell::UnderlineStyle::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::cell::UnderlineStyle
+pub fn sonicterm_types::cell::UnderlineStyle::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::cell::UnderlineStyle
+impl core::marker::StructuralPartialEq for sonicterm_types::cell::UnderlineStyle
+impl serde_core::ser::Serialize for sonicterm_types::cell::UnderlineStyle
+pub fn sonicterm_types::cell::UnderlineStyle::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for sonicterm_types::cell::UnderlineStyle
+pub fn sonicterm_types::cell::UnderlineStyle::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for sonicterm_types::cell::UnderlineStyle
+impl core::marker::Send for sonicterm_types::cell::UnderlineStyle
+impl core::marker::Sync for sonicterm_types::cell::UnderlineStyle
+impl core::marker::Unpin for sonicterm_types::cell::UnderlineStyle
+impl core::marker::UnsafeUnpin for sonicterm_types::cell::UnderlineStyle
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::cell::UnderlineStyle
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::cell::UnderlineStyle
 pub struct sonicterm_types::cell::Cell
 pub sonicterm_types::cell::Cell::bg: sonicterm_types::cell::Color
 pub sonicterm_types::cell::Cell::ch: char
@@ -176,7 +210,11 @@ pub fn sonicterm_types::cell::Cell::hyperlink(&self) -> core::option::Option<son
 pub fn sonicterm_types::cell::Cell::plain(char, sonicterm_types::cell::Color, sonicterm_types::cell::Color, sonicterm_types::cell::CellFlags) -> Self
 pub fn sonicterm_types::cell::Cell::set_extras(&mut self, core::option::Option<alloc::boxed::Box<str>>)
 pub fn sonicterm_types::cell::Cell::set_hyperlink(&mut self, core::option::Option<sonicterm_types::hyperlink_id::HyperlinkId>)
+pub fn sonicterm_types::cell::Cell::set_underline_color(&mut self, core::option::Option<sonicterm_types::cell::Color>)
+pub fn sonicterm_types::cell::Cell::set_underline_style(&mut self, sonicterm_types::cell::UnderlineStyle)
 pub fn sonicterm_types::cell::Cell::take_extras(&mut self) -> core::option::Option<alloc::boxed::Box<str>>
+pub fn sonicterm_types::cell::Cell::underline_color(&self) -> core::option::Option<sonicterm_types::cell::Color>
+pub fn sonicterm_types::cell::Cell::underline_style(&self) -> sonicterm_types::cell::UnderlineStyle
 impl core::clone::Clone for sonicterm_types::cell::Cell
 pub fn sonicterm_types::cell::Cell::clone(&self) -> sonicterm_types::cell::Cell
 impl core::cmp::Eq for sonicterm_types::cell::Cell
@@ -239,6 +277,7 @@ pub const fn sonicterm_types::cell::CellFlags::iter_names(&self) -> bitflags::it
 impl bitflags::traits::Flags for sonicterm_types::cell::CellFlags
 pub type sonicterm_types::cell::CellFlags::Bits = u16
 pub const sonicterm_types::cell::CellFlags::FLAGS: &'static [bitflags::traits::Flag<sonicterm_types::cell::CellFlags>]
+pub fn sonicterm_types::cell::CellFlags::all_named() -> sonicterm_types::cell::CellFlags
 pub fn sonicterm_types::cell::CellFlags::bits(&self) -> u16
 pub fn sonicterm_types::cell::CellFlags::from_bits_retain(u16) -> sonicterm_types::cell::CellFlags
 impl bitflags::traits::PublicFlags for sonicterm_types::cell::CellFlags
@@ -306,6 +345,8 @@ impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::cell::CellFlags
 pub struct sonicterm_types::cell::FatAttributes
 pub sonicterm_types::cell::FatAttributes::extras: core::option::Option<alloc::boxed::Box<str>>
 pub sonicterm_types::cell::FatAttributes::hyperlink: core::option::Option<sonicterm_types::hyperlink_id::HyperlinkId>
+pub sonicterm_types::cell::FatAttributes::underline_color: core::option::Option<sonicterm_types::cell::Color>
+pub sonicterm_types::cell::FatAttributes::underline_style: core::option::Option<sonicterm_types::cell::UnderlineStyle>
 impl sonicterm_types::cell::FatAttributes
 pub fn sonicterm_types::cell::FatAttributes::is_empty(&self) -> bool
 impl core::clone::Clone for sonicterm_types::cell::FatAttributes
@@ -328,6 +369,29 @@ impl core::marker::UnsafeUnpin for sonicterm_types::cell::FatAttributes
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::cell::FatAttributes
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::cell::FatAttributes
 pub mod sonicterm_types::geom
+#[repr(C)] pub struct sonicterm_types::geom::GeometryQuad
+pub sonicterm_types::geom::GeometryQuad::color: [f32; 4]
+pub sonicterm_types::geom::GeometryQuad::line_a: [f32; 2]
+pub sonicterm_types::geom::GeometryQuad::line_b: [f32; 2]
+pub sonicterm_types::geom::GeometryQuad::line_thickness_px: f32
+pub sonicterm_types::geom::GeometryQuad::radius_px: f32
+pub sonicterm_types::geom::GeometryQuad::rect: [f32; 4]
+pub sonicterm_types::geom::GeometryQuad::size_px: [f32; 2]
+impl core::clone::Clone for sonicterm_types::geom::GeometryQuad
+pub fn sonicterm_types::geom::GeometryQuad::clone(&self) -> sonicterm_types::geom::GeometryQuad
+impl core::cmp::PartialEq for sonicterm_types::geom::GeometryQuad
+pub fn sonicterm_types::geom::GeometryQuad::eq(&self, &sonicterm_types::geom::GeometryQuad) -> bool
+impl core::fmt::Debug for sonicterm_types::geom::GeometryQuad
+pub fn sonicterm_types::geom::GeometryQuad::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::geom::GeometryQuad
+impl core::marker::StructuralPartialEq for sonicterm_types::geom::GeometryQuad
+impl core::marker::Freeze for sonicterm_types::geom::GeometryQuad
+impl core::marker::Send for sonicterm_types::geom::GeometryQuad
+impl core::marker::Sync for sonicterm_types::geom::GeometryQuad
+impl core::marker::Unpin for sonicterm_types::geom::GeometryQuad
+impl core::marker::UnsafeUnpin for sonicterm_types::geom::GeometryQuad
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::geom::GeometryQuad
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::geom::GeometryQuad
 pub struct sonicterm_types::geom::Pos
 pub sonicterm_types::geom::Pos::col: u16
 pub sonicterm_types::geom::Pos::row: u16
@@ -351,40 +415,17 @@ impl core::marker::Unpin for sonicterm_types::geom::Pos
 impl core::marker::UnsafeUnpin for sonicterm_types::geom::Pos
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::geom::Pos
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::geom::Pos
-pub struct sonicterm_types::geom::GeometryQuad
-pub sonicterm_types::geom::GeometryQuad::color: [f32; 4]
-pub sonicterm_types::geom::GeometryQuad::line_a: [f32; 2]
-pub sonicterm_types::geom::GeometryQuad::line_b: [f32; 2]
-pub sonicterm_types::geom::GeometryQuad::line_thickness_px: f32
-pub sonicterm_types::geom::GeometryQuad::radius_px: f32
-pub sonicterm_types::geom::GeometryQuad::rect: [f32; 4]
-pub sonicterm_types::geom::GeometryQuad::size_px: [f32; 2]
-impl core::clone::Clone for sonicterm_types::geom::GeometryQuad
-pub fn sonicterm_types::geom::GeometryQuad::clone(&self) -> sonicterm_types::geom::GeometryQuad
-impl core::cmp::PartialEq for sonicterm_types::geom::GeometryQuad
-pub fn sonicterm_types::geom::GeometryQuad::eq(&self, &sonicterm_types::geom::GeometryQuad) -> bool
-impl core::fmt::Debug for sonicterm_types::geom::GeometryQuad
-pub fn sonicterm_types::geom::GeometryQuad::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for sonicterm_types::geom::GeometryQuad
-impl core::marker::StructuralPartialEq for sonicterm_types::geom::GeometryQuad
-impl core::marker::Freeze for sonicterm_types::geom::GeometryQuad
-impl core::marker::Send for sonicterm_types::geom::GeometryQuad
-impl core::marker::Sync for sonicterm_types::geom::GeometryQuad
-impl core::marker::Unpin for sonicterm_types::geom::GeometryQuad
-impl core::marker::UnsafeUnpin for sonicterm_types::geom::GeometryQuad
-impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::geom::GeometryQuad
-impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::geom::GeometryQuad
 pub mod sonicterm_types::glyph_key
 pub struct sonicterm_types::glyph_key::GlyphKey
 pub sonicterm_types::glyph_key::GlyphKey::ch: char
 pub sonicterm_types::glyph_key::GlyphKey::font_slot: u8
-pub sonicterm_types::glyph_key::GlyphKey::glyph_id: u16
+pub sonicterm_types::glyph_key::GlyphKey::glyph_id: u32
 pub sonicterm_types::glyph_key::GlyphKey::italic: bool
 pub sonicterm_types::glyph_key::GlyphKey::weight_bold: bool
 impl sonicterm_types::glyph_key::GlyphKey
 pub fn sonicterm_types::glyph_key::GlyphKey::from_cell(&sonicterm_types::cell::Cell) -> core::option::Option<Self>
 pub fn sonicterm_types::glyph_key::GlyphKey::new(char, bool, bool) -> Self
-pub fn sonicterm_types::glyph_key::GlyphKey::shaped(char, u8, u16, bool, bool) -> Self
+pub fn sonicterm_types::glyph_key::GlyphKey::shaped(char, u8, u32, bool, bool) -> Self
 pub fn sonicterm_types::glyph_key::GlyphKey::with_font_slot(self, u8) -> Self
 pub fn sonicterm_types::glyph_key::GlyphKey::with_slot(char, u8, bool, bool) -> Self
 impl core::clone::Clone for sonicterm_types::glyph_key::GlyphKey
@@ -465,6 +506,7 @@ pub const fn sonicterm_types::mod_key::ModKey::iter_names(&self) -> bitflags::it
 impl bitflags::traits::Flags for sonicterm_types::mod_key::ModKey
 pub type sonicterm_types::mod_key::ModKey::Bits = u32
 pub const sonicterm_types::mod_key::ModKey::FLAGS: &'static [bitflags::traits::Flag<sonicterm_types::mod_key::ModKey>]
+pub fn sonicterm_types::mod_key::ModKey::all_named() -> sonicterm_types::mod_key::ModKey
 pub fn sonicterm_types::mod_key::ModKey::bits(&self) -> u32
 pub fn sonicterm_types::mod_key::ModKey::from_bits_retain(u32) -> sonicterm_types::mod_key::ModKey
 impl bitflags::traits::PublicFlags for sonicterm_types::mod_key::ModKey
@@ -533,6 +575,498 @@ impl core::marker::Unpin for sonicterm_types::mod_key::ModKey
 impl core::marker::UnsafeUnpin for sonicterm_types::mod_key::ModKey
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::mod_key::ModKey
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::mod_key::ModKey
+pub mod sonicterm_types::resource
+pub enum sonicterm_types::resource::BudgetDimension
+pub sonicterm_types::resource::BudgetDimension::Bytes
+pub sonicterm_types::resource::BudgetDimension::Items
+impl core::clone::Clone for sonicterm_types::resource::BudgetDimension
+pub fn sonicterm_types::resource::BudgetDimension::clone(&self) -> sonicterm_types::resource::BudgetDimension
+impl core::cmp::Eq for sonicterm_types::resource::BudgetDimension
+impl core::cmp::PartialEq for sonicterm_types::resource::BudgetDimension
+pub fn sonicterm_types::resource::BudgetDimension::eq(&self, &sonicterm_types::resource::BudgetDimension) -> bool
+impl core::fmt::Debug for sonicterm_types::resource::BudgetDimension
+pub fn sonicterm_types::resource::BudgetDimension::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::resource::BudgetDimension
+pub fn sonicterm_types::resource::BudgetDimension::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::resource::BudgetDimension
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::BudgetDimension
+impl core::marker::Freeze for sonicterm_types::resource::BudgetDimension
+impl core::marker::Send for sonicterm_types::resource::BudgetDimension
+impl core::marker::Sync for sonicterm_types::resource::BudgetDimension
+impl core::marker::Unpin for sonicterm_types::resource::BudgetDimension
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::BudgetDimension
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::BudgetDimension
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::BudgetDimension
+pub enum sonicterm_types::resource::BudgetError
+pub sonicterm_types::resource::BudgetError::AccountingInvariant
+pub sonicterm_types::resource::BudgetError::AccountingInvariant::class: sonicterm_types::resource::ResourceClass
+pub sonicterm_types::resource::BudgetError::AccountingInvariant::owner: sonicterm_types::resource::ResourceOwnerId
+pub sonicterm_types::resource::BudgetError::AmountExceedsCharge
+pub sonicterm_types::resource::BudgetError::AmountExceedsCharge::available: sonicterm_types::resource::ResourceAmount
+pub sonicterm_types::resource::BudgetError::AmountExceedsCharge::requested: sonicterm_types::resource::ResourceAmount
+pub sonicterm_types::resource::BudgetError::InvalidOwnerHierarchy
+pub sonicterm_types::resource::BudgetError::InvalidOwnerHierarchy::child: sonicterm_types::resource::OwnerKind
+pub sonicterm_types::resource::BudgetError::InvalidOwnerHierarchy::parent: sonicterm_types::resource::OwnerKind
+pub sonicterm_types::resource::BudgetError::InvalidOwnerHierarchy::process: sonicterm_types::resource::ProcessKind
+pub sonicterm_types::resource::BudgetError::InvalidOwnerState
+pub sonicterm_types::resource::BudgetError::InvalidOwnerState::actual: sonicterm_types::resource::OwnerState
+pub sonicterm_types::resource::BudgetError::InvalidOwnerState::expected: sonicterm_types::resource::OwnerState
+pub sonicterm_types::resource::BudgetError::InvalidOwnerState::owner: sonicterm_types::resource::ResourceOwnerId
+pub sonicterm_types::resource::BudgetError::InvalidResize
+pub sonicterm_types::resource::BudgetError::InvalidResize::current: sonicterm_types::resource::ResourceAmount
+pub sonicterm_types::resource::BudgetError::InvalidResize::operation: sonicterm_types::resource::ResizeOperation
+pub sonicterm_types::resource::BudgetError::InvalidResize::requested: sonicterm_types::resource::ResourceAmount
+pub sonicterm_types::resource::BudgetError::LimitExceeded
+pub sonicterm_types::resource::BudgetError::LimitExceeded::current: usize
+pub sonicterm_types::resource::BudgetError::LimitExceeded::dimension: sonicterm_types::resource::BudgetDimension
+pub sonicterm_types::resource::BudgetError::LimitExceeded::limit: usize
+pub sonicterm_types::resource::BudgetError::LimitExceeded::requested: usize
+pub sonicterm_types::resource::BudgetError::LimitExceeded::scope: sonicterm_types::resource::BudgetScope
+pub sonicterm_types::resource::BudgetError::Overflow
+pub sonicterm_types::resource::BudgetError::OwnerHasLiveCharges
+pub sonicterm_types::resource::BudgetError::OwnerHasLiveCharges::amount: sonicterm_types::resource::ResourceAmount
+pub sonicterm_types::resource::BudgetError::OwnerHasLiveCharges::owner: sonicterm_types::resource::ResourceOwnerId
+pub sonicterm_types::resource::BudgetError::OwnerHasLiveChildren
+pub sonicterm_types::resource::BudgetError::OwnerHasLiveChildren::children: usize
+pub sonicterm_types::resource::BudgetError::OwnerHasLiveChildren::owner: sonicterm_types::resource::ResourceOwnerId
+pub sonicterm_types::resource::BudgetError::OwnerIdExhausted
+pub sonicterm_types::resource::BudgetError::OwnerNotFound(sonicterm_types::resource::ResourceOwnerId)
+impl core::clone::Clone for sonicterm_types::resource::BudgetError
+pub fn sonicterm_types::resource::BudgetError::clone(&self) -> sonicterm_types::resource::BudgetError
+impl core::cmp::Eq for sonicterm_types::resource::BudgetError
+impl core::cmp::PartialEq for sonicterm_types::resource::BudgetError
+pub fn sonicterm_types::resource::BudgetError::eq(&self, &sonicterm_types::resource::BudgetError) -> bool
+impl core::error::Error for sonicterm_types::resource::BudgetError
+impl core::fmt::Debug for sonicterm_types::resource::BudgetError
+pub fn sonicterm_types::resource::BudgetError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for sonicterm_types::resource::BudgetError
+pub fn sonicterm_types::resource::BudgetError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::BudgetError
+impl core::marker::Freeze for sonicterm_types::resource::BudgetError
+impl core::marker::Send for sonicterm_types::resource::BudgetError
+impl core::marker::Sync for sonicterm_types::resource::BudgetError
+impl core::marker::Unpin for sonicterm_types::resource::BudgetError
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::BudgetError
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::BudgetError
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::BudgetError
+pub enum sonicterm_types::resource::BudgetScope
+pub sonicterm_types::resource::BudgetScope::Owner(sonicterm_types::resource::ResourceOwnerId)
+pub sonicterm_types::resource::BudgetScope::OwnerClass
+pub sonicterm_types::resource::BudgetScope::OwnerClass::class: sonicterm_types::resource::ResourceClass
+pub sonicterm_types::resource::BudgetScope::OwnerClass::owner: sonicterm_types::resource::ResourceOwnerId
+pub sonicterm_types::resource::BudgetScope::Process
+pub sonicterm_types::resource::BudgetScope::ProcessClass(sonicterm_types::resource::ResourceClass)
+impl core::clone::Clone for sonicterm_types::resource::BudgetScope
+pub fn sonicterm_types::resource::BudgetScope::clone(&self) -> sonicterm_types::resource::BudgetScope
+impl core::cmp::Eq for sonicterm_types::resource::BudgetScope
+impl core::cmp::PartialEq for sonicterm_types::resource::BudgetScope
+pub fn sonicterm_types::resource::BudgetScope::eq(&self, &sonicterm_types::resource::BudgetScope) -> bool
+impl core::fmt::Debug for sonicterm_types::resource::BudgetScope
+pub fn sonicterm_types::resource::BudgetScope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::resource::BudgetScope
+pub fn sonicterm_types::resource::BudgetScope::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::resource::BudgetScope
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::BudgetScope
+impl core::marker::Freeze for sonicterm_types::resource::BudgetScope
+impl core::marker::Send for sonicterm_types::resource::BudgetScope
+impl core::marker::Sync for sonicterm_types::resource::BudgetScope
+impl core::marker::Unpin for sonicterm_types::resource::BudgetScope
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::BudgetScope
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::BudgetScope
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::BudgetScope
+pub enum sonicterm_types::resource::DisconnectReason
+pub sonicterm_types::resource::DisconnectReason::Cancelled
+pub sonicterm_types::resource::DisconnectReason::SustainedPressure
+pub sonicterm_types::resource::DisconnectReason::TransportClosed
+impl core::clone::Clone for sonicterm_types::resource::DisconnectReason
+pub fn sonicterm_types::resource::DisconnectReason::clone(&self) -> sonicterm_types::resource::DisconnectReason
+impl core::cmp::Eq for sonicterm_types::resource::DisconnectReason
+impl core::cmp::PartialEq for sonicterm_types::resource::DisconnectReason
+pub fn sonicterm_types::resource::DisconnectReason::eq(&self, &sonicterm_types::resource::DisconnectReason) -> bool
+impl core::fmt::Debug for sonicterm_types::resource::DisconnectReason
+pub fn sonicterm_types::resource::DisconnectReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::resource::DisconnectReason
+pub fn sonicterm_types::resource::DisconnectReason::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::resource::DisconnectReason
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::DisconnectReason
+impl core::marker::Freeze for sonicterm_types::resource::DisconnectReason
+impl core::marker::Send for sonicterm_types::resource::DisconnectReason
+impl core::marker::Sync for sonicterm_types::resource::DisconnectReason
+impl core::marker::Unpin for sonicterm_types::resource::DisconnectReason
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::DisconnectReason
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::DisconnectReason
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::DisconnectReason
+pub enum sonicterm_types::resource::DropReason
+pub sonicterm_types::resource::DropReason::Policy
+pub sonicterm_types::resource::DropReason::Superseded
+impl core::clone::Clone for sonicterm_types::resource::DropReason
+pub fn sonicterm_types::resource::DropReason::clone(&self) -> sonicterm_types::resource::DropReason
+impl core::cmp::Eq for sonicterm_types::resource::DropReason
+impl core::cmp::PartialEq for sonicterm_types::resource::DropReason
+pub fn sonicterm_types::resource::DropReason::eq(&self, &sonicterm_types::resource::DropReason) -> bool
+impl core::fmt::Debug for sonicterm_types::resource::DropReason
+pub fn sonicterm_types::resource::DropReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::resource::DropReason
+pub fn sonicterm_types::resource::DropReason::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::resource::DropReason
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::DropReason
+impl core::marker::Freeze for sonicterm_types::resource::DropReason
+impl core::marker::Send for sonicterm_types::resource::DropReason
+impl core::marker::Sync for sonicterm_types::resource::DropReason
+impl core::marker::Unpin for sonicterm_types::resource::DropReason
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::DropReason
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::DropReason
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::DropReason
+pub enum sonicterm_types::resource::OwnerKind
+pub sonicterm_types::resource::OwnerKind::AppPane
+pub sonicterm_types::resource::OwnerKind::Attachment
+pub sonicterm_types::resource::OwnerKind::LocalPty
+pub sonicterm_types::resource::OwnerKind::MuxConnection
+pub sonicterm_types::resource::OwnerKind::MuxPane
+pub sonicterm_types::resource::OwnerKind::MuxSession
+pub sonicterm_types::resource::OwnerKind::Process
+pub sonicterm_types::resource::OwnerKind::PtyTransport
+pub sonicterm_types::resource::OwnerKind::SharedAtlas
+pub sonicterm_types::resource::OwnerKind::SharedFont
+pub sonicterm_types::resource::OwnerKind::SharedRaster
+pub sonicterm_types::resource::OwnerKind::Window
+impl core::clone::Clone for sonicterm_types::resource::OwnerKind
+pub fn sonicterm_types::resource::OwnerKind::clone(&self) -> sonicterm_types::resource::OwnerKind
+impl core::cmp::Eq for sonicterm_types::resource::OwnerKind
+impl core::cmp::PartialEq for sonicterm_types::resource::OwnerKind
+pub fn sonicterm_types::resource::OwnerKind::eq(&self, &sonicterm_types::resource::OwnerKind) -> bool
+impl core::fmt::Debug for sonicterm_types::resource::OwnerKind
+pub fn sonicterm_types::resource::OwnerKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::resource::OwnerKind
+pub fn sonicterm_types::resource::OwnerKind::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::resource::OwnerKind
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::OwnerKind
+impl core::marker::Freeze for sonicterm_types::resource::OwnerKind
+impl core::marker::Send for sonicterm_types::resource::OwnerKind
+impl core::marker::Sync for sonicterm_types::resource::OwnerKind
+impl core::marker::Unpin for sonicterm_types::resource::OwnerKind
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::OwnerKind
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::OwnerKind
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::OwnerKind
+pub enum sonicterm_types::resource::OwnerState
+pub sonicterm_types::resource::OwnerState::Closed
+pub sonicterm_types::resource::OwnerState::Closing
+pub sonicterm_types::resource::OwnerState::Open
+impl core::clone::Clone for sonicterm_types::resource::OwnerState
+pub fn sonicterm_types::resource::OwnerState::clone(&self) -> sonicterm_types::resource::OwnerState
+impl core::cmp::Eq for sonicterm_types::resource::OwnerState
+impl core::cmp::PartialEq for sonicterm_types::resource::OwnerState
+pub fn sonicterm_types::resource::OwnerState::eq(&self, &sonicterm_types::resource::OwnerState) -> bool
+impl core::fmt::Debug for sonicterm_types::resource::OwnerState
+pub fn sonicterm_types::resource::OwnerState::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::resource::OwnerState
+pub fn sonicterm_types::resource::OwnerState::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::resource::OwnerState
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::OwnerState
+impl core::marker::Freeze for sonicterm_types::resource::OwnerState
+impl core::marker::Send for sonicterm_types::resource::OwnerState
+impl core::marker::Sync for sonicterm_types::resource::OwnerState
+impl core::marker::Unpin for sonicterm_types::resource::OwnerState
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::OwnerState
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::OwnerState
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::OwnerState
+pub enum sonicterm_types::resource::PressureOutcome<T>
+pub sonicterm_types::resource::PressureOutcome::Accepted
+pub sonicterm_types::resource::PressureOutcome::Accepted::receipt: sonicterm_types::resource::DeliveryReceipt
+pub sonicterm_types::resource::PressureOutcome::Backpressured
+pub sonicterm_types::resource::PressureOutcome::Backpressured::retry: sonicterm_types::resource::RetryToken
+pub sonicterm_types::resource::PressureOutcome::Backpressured::value: T
+pub sonicterm_types::resource::PressureOutcome::Disconnected
+pub sonicterm_types::resource::PressureOutcome::Disconnected::reason: sonicterm_types::resource::DisconnectReason
+pub sonicterm_types::resource::PressureOutcome::Disconnected::value: core::option::Option<T>
+pub sonicterm_types::resource::PressureOutcome::Dropped
+pub sonicterm_types::resource::PressureOutcome::Dropped::bytes: usize
+pub sonicterm_types::resource::PressureOutcome::Dropped::reason: sonicterm_types::resource::DropReason
+pub sonicterm_types::resource::PressureOutcome::Evicted
+pub sonicterm_types::resource::PressureOutcome::Evicted::receipt: sonicterm_types::resource::DeliveryReceipt
+pub sonicterm_types::resource::PressureOutcome::Evicted::released_bytes: usize
+pub sonicterm_types::resource::PressureOutcome::Rejected
+pub sonicterm_types::resource::PressureOutcome::Rejected::error: sonicterm_types::resource::BudgetError
+pub sonicterm_types::resource::PressureOutcome::Rejected::value: T
+impl<T: core::fmt::Debug> core::fmt::Debug for sonicterm_types::resource::PressureOutcome<T>
+pub fn sonicterm_types::resource::PressureOutcome<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<T> core::marker::Freeze for sonicterm_types::resource::PressureOutcome<T> where T: core::marker::Freeze
+impl<T> core::marker::Send for sonicterm_types::resource::PressureOutcome<T> where T: core::marker::Send
+impl<T> core::marker::Sync for sonicterm_types::resource::PressureOutcome<T> where T: core::marker::Sync
+impl<T> core::marker::Unpin for sonicterm_types::resource::PressureOutcome<T> where T: core::marker::Unpin
+impl<T> core::marker::UnsafeUnpin for sonicterm_types::resource::PressureOutcome<T> where T: core::marker::UnsafeUnpin
+impl<T> core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::PressureOutcome<T> where T: core::panic::unwind_safe::RefUnwindSafe
+impl<T> core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::PressureOutcome<T> where T: core::panic::unwind_safe::UnwindSafe
+pub enum sonicterm_types::resource::ProcessKind
+pub sonicterm_types::resource::ProcessKind::Gui
+pub sonicterm_types::resource::ProcessKind::Mux
+impl core::clone::Clone for sonicterm_types::resource::ProcessKind
+pub fn sonicterm_types::resource::ProcessKind::clone(&self) -> sonicterm_types::resource::ProcessKind
+impl core::cmp::Eq for sonicterm_types::resource::ProcessKind
+impl core::cmp::PartialEq for sonicterm_types::resource::ProcessKind
+pub fn sonicterm_types::resource::ProcessKind::eq(&self, &sonicterm_types::resource::ProcessKind) -> bool
+impl core::fmt::Debug for sonicterm_types::resource::ProcessKind
+pub fn sonicterm_types::resource::ProcessKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::resource::ProcessKind
+pub fn sonicterm_types::resource::ProcessKind::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::resource::ProcessKind
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::ProcessKind
+impl core::marker::Freeze for sonicterm_types::resource::ProcessKind
+impl core::marker::Send for sonicterm_types::resource::ProcessKind
+impl core::marker::Sync for sonicterm_types::resource::ProcessKind
+impl core::marker::Unpin for sonicterm_types::resource::ProcessKind
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::ProcessKind
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::ProcessKind
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::ProcessKind
+pub enum sonicterm_types::resource::ResizeOperation
+pub sonicterm_types::resource::ResizeOperation::Grow
+pub sonicterm_types::resource::ResizeOperation::Shrink
+impl core::clone::Clone for sonicterm_types::resource::ResizeOperation
+pub fn sonicterm_types::resource::ResizeOperation::clone(&self) -> sonicterm_types::resource::ResizeOperation
+impl core::cmp::Eq for sonicterm_types::resource::ResizeOperation
+impl core::cmp::PartialEq for sonicterm_types::resource::ResizeOperation
+pub fn sonicterm_types::resource::ResizeOperation::eq(&self, &sonicterm_types::resource::ResizeOperation) -> bool
+impl core::fmt::Debug for sonicterm_types::resource::ResizeOperation
+pub fn sonicterm_types::resource::ResizeOperation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::resource::ResizeOperation
+pub fn sonicterm_types::resource::ResizeOperation::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::resource::ResizeOperation
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::ResizeOperation
+impl core::marker::Freeze for sonicterm_types::resource::ResizeOperation
+impl core::marker::Send for sonicterm_types::resource::ResizeOperation
+impl core::marker::Sync for sonicterm_types::resource::ResizeOperation
+impl core::marker::Unpin for sonicterm_types::resource::ResizeOperation
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::ResizeOperation
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::ResizeOperation
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::ResizeOperation
+pub enum sonicterm_types::resource::ResourceClass
+pub sonicterm_types::resource::ResourceClass::CommandEvents
+pub sonicterm_types::resource::ResourceClass::GlyphAtlas
+pub sonicterm_types::resource::ResourceClass::GlyphRaster
+pub sonicterm_types::resource::ResourceClass::GridAlternate
+pub sonicterm_types::resource::ResourceClass::GridHistory
+pub sonicterm_types::resource::ResourceClass::GridVisible
+pub sonicterm_types::resource::ResourceClass::InlineMediaDecode
+pub sonicterm_types::resource::ResourceClass::InlineMediaRetained
+pub sonicterm_types::resource::ResourceClass::MuxSubscriber
+pub sonicterm_types::resource::ResourceClass::ParserCapture
+pub sonicterm_types::resource::ResourceClass::ParserReply
+pub sonicterm_types::resource::ResourceClass::ProtocolMetadata
+pub sonicterm_types::resource::ResourceClass::PtyInput
+pub sonicterm_types::resource::ResourceClass::PtyOutput
+pub sonicterm_types::resource::ResourceClass::ReaperWork
+pub sonicterm_types::resource::ResourceClass::RegistryMetadata
+pub sonicterm_types::resource::ResourceClass::RemoteInput
+pub sonicterm_types::resource::ResourceClass::RemoteOutput
+pub sonicterm_types::resource::ResourceClass::SoftwareFrame
+pub sonicterm_types::resource::ResourceClass::Surface
+pub sonicterm_types::resource::ResourceClass::UploadStaging
+impl core::clone::Clone for sonicterm_types::resource::ResourceClass
+pub fn sonicterm_types::resource::ResourceClass::clone(&self) -> sonicterm_types::resource::ResourceClass
+impl core::cmp::Eq for sonicterm_types::resource::ResourceClass
+impl core::cmp::Ord for sonicterm_types::resource::ResourceClass
+pub fn sonicterm_types::resource::ResourceClass::cmp(&self, &sonicterm_types::resource::ResourceClass) -> core::cmp::Ordering
+impl core::cmp::PartialEq for sonicterm_types::resource::ResourceClass
+pub fn sonicterm_types::resource::ResourceClass::eq(&self, &sonicterm_types::resource::ResourceClass) -> bool
+impl core::cmp::PartialOrd for sonicterm_types::resource::ResourceClass
+pub fn sonicterm_types::resource::ResourceClass::partial_cmp(&self, &sonicterm_types::resource::ResourceClass) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for sonicterm_types::resource::ResourceClass
+pub fn sonicterm_types::resource::ResourceClass::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::resource::ResourceClass
+pub fn sonicterm_types::resource::ResourceClass::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::resource::ResourceClass
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::ResourceClass
+impl enum_map::internal::Enum for sonicterm_types::resource::ResourceClass
+pub const sonicterm_types::resource::ResourceClass::LENGTH: usize
+pub fn sonicterm_types::resource::ResourceClass::from_usize(usize) -> Self
+pub fn sonicterm_types::resource::ResourceClass::into_usize(self) -> usize
+impl<V> enum_map::internal::EnumArray<V> for sonicterm_types::resource::ResourceClass
+pub type sonicterm_types::resource::ResourceClass::Array = [V; 21]
+impl core::marker::Freeze for sonicterm_types::resource::ResourceClass
+impl core::marker::Send for sonicterm_types::resource::ResourceClass
+impl core::marker::Sync for sonicterm_types::resource::ResourceClass
+impl core::marker::Unpin for sonicterm_types::resource::ResourceClass
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::ResourceClass
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::ResourceClass
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::ResourceClass
+pub enum sonicterm_types::resource::RetryWakeup
+pub sonicterm_types::resource::RetryWakeup::AtDeadline
+pub sonicterm_types::resource::RetryWakeup::CapacityAvailable
+pub sonicterm_types::resource::RetryWakeup::ConnectionStateChanged
+impl core::clone::Clone for sonicterm_types::resource::RetryWakeup
+pub fn sonicterm_types::resource::RetryWakeup::clone(&self) -> sonicterm_types::resource::RetryWakeup
+impl core::cmp::Eq for sonicterm_types::resource::RetryWakeup
+impl core::cmp::PartialEq for sonicterm_types::resource::RetryWakeup
+pub fn sonicterm_types::resource::RetryWakeup::eq(&self, &sonicterm_types::resource::RetryWakeup) -> bool
+impl core::fmt::Debug for sonicterm_types::resource::RetryWakeup
+pub fn sonicterm_types::resource::RetryWakeup::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::resource::RetryWakeup
+pub fn sonicterm_types::resource::RetryWakeup::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::resource::RetryWakeup
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::RetryWakeup
+impl core::marker::Freeze for sonicterm_types::resource::RetryWakeup
+impl core::marker::Send for sonicterm_types::resource::RetryWakeup
+impl core::marker::Sync for sonicterm_types::resource::RetryWakeup
+impl core::marker::Unpin for sonicterm_types::resource::RetryWakeup
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::RetryWakeup
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::RetryWakeup
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::RetryWakeup
+pub struct sonicterm_types::resource::DeliveryReceipt(_)
+impl sonicterm_types::resource::DeliveryReceipt
+pub const fn sonicterm_types::resource::DeliveryReceipt::get(self) -> u64
+pub const fn sonicterm_types::resource::DeliveryReceipt::new(u64) -> Self
+impl core::clone::Clone for sonicterm_types::resource::DeliveryReceipt
+pub fn sonicterm_types::resource::DeliveryReceipt::clone(&self) -> sonicterm_types::resource::DeliveryReceipt
+impl core::cmp::Eq for sonicterm_types::resource::DeliveryReceipt
+impl core::cmp::PartialEq for sonicterm_types::resource::DeliveryReceipt
+pub fn sonicterm_types::resource::DeliveryReceipt::eq(&self, &sonicterm_types::resource::DeliveryReceipt) -> bool
+impl core::fmt::Debug for sonicterm_types::resource::DeliveryReceipt
+pub fn sonicterm_types::resource::DeliveryReceipt::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::resource::DeliveryReceipt
+pub fn sonicterm_types::resource::DeliveryReceipt::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::resource::DeliveryReceipt
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::DeliveryReceipt
+impl core::marker::Freeze for sonicterm_types::resource::DeliveryReceipt
+impl core::marker::Send for sonicterm_types::resource::DeliveryReceipt
+impl core::marker::Sync for sonicterm_types::resource::DeliveryReceipt
+impl core::marker::Unpin for sonicterm_types::resource::DeliveryReceipt
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::DeliveryReceipt
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::DeliveryReceipt
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::DeliveryReceipt
+pub struct sonicterm_types::resource::GovernorLimits
+pub sonicterm_types::resource::GovernorLimits::class_bytes: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
+pub sonicterm_types::resource::GovernorLimits::class_items: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, core::option::Option<usize>>
+pub sonicterm_types::resource::GovernorLimits::process_bytes: usize
+impl core::clone::Clone for sonicterm_types::resource::GovernorLimits
+pub fn sonicterm_types::resource::GovernorLimits::clone(&self) -> sonicterm_types::resource::GovernorLimits
+impl core::fmt::Debug for sonicterm_types::resource::GovernorLimits
+pub fn sonicterm_types::resource::GovernorLimits::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for sonicterm_types::resource::GovernorLimits
+impl core::marker::Send for sonicterm_types::resource::GovernorLimits
+impl core::marker::Sync for sonicterm_types::resource::GovernorLimits
+impl core::marker::Unpin for sonicterm_types::resource::GovernorLimits
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::GovernorLimits
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::GovernorLimits
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::GovernorLimits
+pub struct sonicterm_types::resource::OwnerLimits
+pub sonicterm_types::resource::OwnerLimits::class_bytes: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
+pub sonicterm_types::resource::OwnerLimits::class_items: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, core::option::Option<usize>>
+pub sonicterm_types::resource::OwnerLimits::owner_bytes: usize
+impl core::clone::Clone for sonicterm_types::resource::OwnerLimits
+pub fn sonicterm_types::resource::OwnerLimits::clone(&self) -> sonicterm_types::resource::OwnerLimits
+impl core::fmt::Debug for sonicterm_types::resource::OwnerLimits
+pub fn sonicterm_types::resource::OwnerLimits::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for sonicterm_types::resource::OwnerLimits
+impl core::marker::Send for sonicterm_types::resource::OwnerLimits
+impl core::marker::Sync for sonicterm_types::resource::OwnerLimits
+impl core::marker::Unpin for sonicterm_types::resource::OwnerLimits
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::OwnerLimits
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::OwnerLimits
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::OwnerLimits
+pub struct sonicterm_types::resource::ResourceAmount
+pub sonicterm_types::resource::ResourceAmount::bytes: usize
+pub sonicterm_types::resource::ResourceAmount::items: usize
+impl sonicterm_types::resource::ResourceAmount
+pub fn sonicterm_types::resource::ResourceAmount::checked_add(self, Self) -> core::result::Result<Self, sonicterm_types::resource::BudgetError>
+pub fn sonicterm_types::resource::ResourceAmount::checked_sub(self, Self) -> core::result::Result<Self, sonicterm_types::resource::BudgetError>
+pub const fn sonicterm_types::resource::ResourceAmount::component_le(self, Self) -> bool
+pub const fn sonicterm_types::resource::ResourceAmount::is_zero(self) -> bool
+impl core::clone::Clone for sonicterm_types::resource::ResourceAmount
+pub fn sonicterm_types::resource::ResourceAmount::clone(&self) -> sonicterm_types::resource::ResourceAmount
+impl core::cmp::Eq for sonicterm_types::resource::ResourceAmount
+impl core::cmp::PartialEq for sonicterm_types::resource::ResourceAmount
+pub fn sonicterm_types::resource::ResourceAmount::eq(&self, &sonicterm_types::resource::ResourceAmount) -> bool
+impl core::default::Default for sonicterm_types::resource::ResourceAmount
+pub fn sonicterm_types::resource::ResourceAmount::default() -> sonicterm_types::resource::ResourceAmount
+impl core::fmt::Debug for sonicterm_types::resource::ResourceAmount
+pub fn sonicterm_types::resource::ResourceAmount::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::resource::ResourceAmount
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::ResourceAmount
+impl core::marker::Freeze for sonicterm_types::resource::ResourceAmount
+impl core::marker::Send for sonicterm_types::resource::ResourceAmount
+impl core::marker::Sync for sonicterm_types::resource::ResourceAmount
+impl core::marker::Unpin for sonicterm_types::resource::ResourceAmount
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::ResourceAmount
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::ResourceAmount
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::ResourceAmount
+pub struct sonicterm_types::resource::ResourceOwnerId(_)
+impl sonicterm_types::resource::ResourceOwnerId
+pub const fn sonicterm_types::resource::ResourceOwnerId::get(self) -> u64
+pub const fn sonicterm_types::resource::ResourceOwnerId::new(u64) -> core::option::Option<Self>
+impl core::clone::Clone for sonicterm_types::resource::ResourceOwnerId
+pub fn sonicterm_types::resource::ResourceOwnerId::clone(&self) -> sonicterm_types::resource::ResourceOwnerId
+impl core::cmp::Eq for sonicterm_types::resource::ResourceOwnerId
+impl core::cmp::Ord for sonicterm_types::resource::ResourceOwnerId
+pub fn sonicterm_types::resource::ResourceOwnerId::cmp(&self, &sonicterm_types::resource::ResourceOwnerId) -> core::cmp::Ordering
+impl core::cmp::PartialEq for sonicterm_types::resource::ResourceOwnerId
+pub fn sonicterm_types::resource::ResourceOwnerId::eq(&self, &sonicterm_types::resource::ResourceOwnerId) -> bool
+impl core::cmp::PartialOrd for sonicterm_types::resource::ResourceOwnerId
+pub fn sonicterm_types::resource::ResourceOwnerId::partial_cmp(&self, &sonicterm_types::resource::ResourceOwnerId) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for sonicterm_types::resource::ResourceOwnerId
+pub fn sonicterm_types::resource::ResourceOwnerId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for sonicterm_types::resource::ResourceOwnerId
+pub fn sonicterm_types::resource::ResourceOwnerId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::resource::ResourceOwnerId
+pub fn sonicterm_types::resource::ResourceOwnerId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::resource::ResourceOwnerId
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::ResourceOwnerId
+impl core::marker::Freeze for sonicterm_types::resource::ResourceOwnerId
+impl core::marker::Send for sonicterm_types::resource::ResourceOwnerId
+impl core::marker::Sync for sonicterm_types::resource::ResourceOwnerId
+impl core::marker::Unpin for sonicterm_types::resource::ResourceOwnerId
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::ResourceOwnerId
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::ResourceOwnerId
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::ResourceOwnerId
+pub struct sonicterm_types::resource::ResourceSnapshot
+pub sonicterm_types::resource::ResourceSnapshot::class_epochs: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, u64>
+pub sonicterm_types::resource::ResourceSnapshot::owner: sonicterm_types::resource::ResourceOwnerId
+pub sonicterm_types::resource::ResourceSnapshot::owner_amount: sonicterm_types::resource::ResourceAmount
+pub sonicterm_types::resource::ResourceSnapshot::owner_class_bytes: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
+pub sonicterm_types::resource::ResourceSnapshot::owner_class_items: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
+pub sonicterm_types::resource::ResourceSnapshot::owner_epoch: u64
+pub sonicterm_types::resource::ResourceSnapshot::owner_kind: sonicterm_types::resource::OwnerKind
+pub sonicterm_types::resource::ResourceSnapshot::owner_state: sonicterm_types::resource::OwnerState
+pub sonicterm_types::resource::ResourceSnapshot::parent: core::option::Option<sonicterm_types::resource::ResourceOwnerId>
+pub sonicterm_types::resource::ResourceSnapshot::process_amount: sonicterm_types::resource::ResourceAmount
+pub sonicterm_types::resource::ResourceSnapshot::process_class_bytes: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
+pub sonicterm_types::resource::ResourceSnapshot::process_class_items: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
+pub sonicterm_types::resource::ResourceSnapshot::process_kind: sonicterm_types::resource::ProcessKind
+pub sonicterm_types::resource::ResourceSnapshot::registry_epoch: u64
+pub sonicterm_types::resource::ResourceSnapshot::release_failures: usize
+impl core::clone::Clone for sonicterm_types::resource::ResourceSnapshot
+pub fn sonicterm_types::resource::ResourceSnapshot::clone(&self) -> sonicterm_types::resource::ResourceSnapshot
+impl core::fmt::Debug for sonicterm_types::resource::ResourceSnapshot
+pub fn sonicterm_types::resource::ResourceSnapshot::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for sonicterm_types::resource::ResourceSnapshot
+impl core::marker::Send for sonicterm_types::resource::ResourceSnapshot
+impl core::marker::Sync for sonicterm_types::resource::ResourceSnapshot
+impl core::marker::Unpin for sonicterm_types::resource::ResourceSnapshot
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::ResourceSnapshot
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::ResourceSnapshot
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::ResourceSnapshot
+pub struct sonicterm_types::resource::RetryToken
+impl sonicterm_types::resource::RetryToken
+pub const fn sonicterm_types::resource::RetryToken::deadline(self) -> std::time::Instant
+pub const fn sonicterm_types::resource::RetryToken::new(std::time::Instant, sonicterm_types::resource::RetryWakeup) -> Self
+pub const fn sonicterm_types::resource::RetryToken::wakeup(self) -> sonicterm_types::resource::RetryWakeup
+impl core::clone::Clone for sonicterm_types::resource::RetryToken
+pub fn sonicterm_types::resource::RetryToken::clone(&self) -> sonicterm_types::resource::RetryToken
+impl core::cmp::Eq for sonicterm_types::resource::RetryToken
+impl core::cmp::PartialEq for sonicterm_types::resource::RetryToken
+pub fn sonicterm_types::resource::RetryToken::eq(&self, &sonicterm_types::resource::RetryToken) -> bool
+impl core::fmt::Debug for sonicterm_types::resource::RetryToken
+pub fn sonicterm_types::resource::RetryToken::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::resource::RetryToken
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::RetryToken
+impl core::marker::Freeze for sonicterm_types::resource::RetryToken
+impl core::marker::Send for sonicterm_types::resource::RetryToken
+impl core::marker::Sync for sonicterm_types::resource::RetryToken
+impl core::marker::Unpin for sonicterm_types::resource::RetryToken
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::RetryToken
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::RetryToken
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::RetryToken
+pub mod sonicterm_types::shell_quote
+pub fn sonicterm_types::shell_quote::shell_quote_posix(&str) -> alloc::string::String
 pub mod sonicterm_types::traits
 pub mod sonicterm_types::traits::clipboard
 pub enum sonicterm_types::traits::clipboard::ClipboardError
@@ -648,6 +1182,7 @@ pub enum sonicterm_types::Action
 pub sonicterm_types::Action::ActivateLastTab
 pub sonicterm_types::Action::ActivateTab(usize)
 pub sonicterm_types::Action::ApplyTheme(alloc::string::String)
+pub sonicterm_types::Action::CheckForUpdates
 pub sonicterm_types::Action::CloseActivePaneOrTab
 pub sonicterm_types::Action::ClosePane
 pub sonicterm_types::Action::CloseTab
@@ -667,7 +1202,9 @@ pub sonicterm_types::Action::OpenSearch
 pub sonicterm_types::Action::OpenSshPane(alloc::string::String)
 pub sonicterm_types::Action::PasteFromClipboard
 pub sonicterm_types::Action::PrevTab
+pub sonicterm_types::Action::QuitApp
 pub sonicterm_types::Action::ReloadConfig
+pub sonicterm_types::Action::RenameTab
 pub sonicterm_types::Action::ResetFontSize
 pub sonicterm_types::Action::ResizePane
 pub sonicterm_types::Action::ResizePane::amount: u16
@@ -686,6 +1223,7 @@ pub sonicterm_types::Action::ToggleBroadcast::scope: sonicterm_types::action::Br
 pub sonicterm_types::Action::ToggleFullscreen
 pub sonicterm_types::Action::TogglePaneZoom
 pub sonicterm_types::Action::ToggleTabBar
+pub sonicterm_types::Action::UpdateTabColor
 impl core::clone::Clone for sonicterm_types::action::Action
 pub fn sonicterm_types::action::Action::clone(&self) -> sonicterm_types::action::Action
 impl core::cmp::Eq for sonicterm_types::action::Action
@@ -728,6 +1266,104 @@ impl core::marker::Unpin for sonicterm_types::action::BroadcastScope
 impl core::marker::UnsafeUnpin for sonicterm_types::action::BroadcastScope
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::action::BroadcastScope
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::action::BroadcastScope
+pub enum sonicterm_types::BudgetDimension
+pub sonicterm_types::BudgetDimension::Bytes
+pub sonicterm_types::BudgetDimension::Items
+impl core::clone::Clone for sonicterm_types::resource::BudgetDimension
+pub fn sonicterm_types::resource::BudgetDimension::clone(&self) -> sonicterm_types::resource::BudgetDimension
+impl core::cmp::Eq for sonicterm_types::resource::BudgetDimension
+impl core::cmp::PartialEq for sonicterm_types::resource::BudgetDimension
+pub fn sonicterm_types::resource::BudgetDimension::eq(&self, &sonicterm_types::resource::BudgetDimension) -> bool
+impl core::fmt::Debug for sonicterm_types::resource::BudgetDimension
+pub fn sonicterm_types::resource::BudgetDimension::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::resource::BudgetDimension
+pub fn sonicterm_types::resource::BudgetDimension::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::resource::BudgetDimension
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::BudgetDimension
+impl core::marker::Freeze for sonicterm_types::resource::BudgetDimension
+impl core::marker::Send for sonicterm_types::resource::BudgetDimension
+impl core::marker::Sync for sonicterm_types::resource::BudgetDimension
+impl core::marker::Unpin for sonicterm_types::resource::BudgetDimension
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::BudgetDimension
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::BudgetDimension
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::BudgetDimension
+pub enum sonicterm_types::BudgetError
+pub sonicterm_types::BudgetError::AccountingInvariant
+pub sonicterm_types::BudgetError::AccountingInvariant::class: sonicterm_types::resource::ResourceClass
+pub sonicterm_types::BudgetError::AccountingInvariant::owner: sonicterm_types::resource::ResourceOwnerId
+pub sonicterm_types::BudgetError::AmountExceedsCharge
+pub sonicterm_types::BudgetError::AmountExceedsCharge::available: sonicterm_types::resource::ResourceAmount
+pub sonicterm_types::BudgetError::AmountExceedsCharge::requested: sonicterm_types::resource::ResourceAmount
+pub sonicterm_types::BudgetError::InvalidOwnerHierarchy
+pub sonicterm_types::BudgetError::InvalidOwnerHierarchy::child: sonicterm_types::resource::OwnerKind
+pub sonicterm_types::BudgetError::InvalidOwnerHierarchy::parent: sonicterm_types::resource::OwnerKind
+pub sonicterm_types::BudgetError::InvalidOwnerHierarchy::process: sonicterm_types::resource::ProcessKind
+pub sonicterm_types::BudgetError::InvalidOwnerState
+pub sonicterm_types::BudgetError::InvalidOwnerState::actual: sonicterm_types::resource::OwnerState
+pub sonicterm_types::BudgetError::InvalidOwnerState::expected: sonicterm_types::resource::OwnerState
+pub sonicterm_types::BudgetError::InvalidOwnerState::owner: sonicterm_types::resource::ResourceOwnerId
+pub sonicterm_types::BudgetError::InvalidResize
+pub sonicterm_types::BudgetError::InvalidResize::current: sonicterm_types::resource::ResourceAmount
+pub sonicterm_types::BudgetError::InvalidResize::operation: sonicterm_types::resource::ResizeOperation
+pub sonicterm_types::BudgetError::InvalidResize::requested: sonicterm_types::resource::ResourceAmount
+pub sonicterm_types::BudgetError::LimitExceeded
+pub sonicterm_types::BudgetError::LimitExceeded::current: usize
+pub sonicterm_types::BudgetError::LimitExceeded::dimension: sonicterm_types::resource::BudgetDimension
+pub sonicterm_types::BudgetError::LimitExceeded::limit: usize
+pub sonicterm_types::BudgetError::LimitExceeded::requested: usize
+pub sonicterm_types::BudgetError::LimitExceeded::scope: sonicterm_types::resource::BudgetScope
+pub sonicterm_types::BudgetError::Overflow
+pub sonicterm_types::BudgetError::OwnerHasLiveCharges
+pub sonicterm_types::BudgetError::OwnerHasLiveCharges::amount: sonicterm_types::resource::ResourceAmount
+pub sonicterm_types::BudgetError::OwnerHasLiveCharges::owner: sonicterm_types::resource::ResourceOwnerId
+pub sonicterm_types::BudgetError::OwnerHasLiveChildren
+pub sonicterm_types::BudgetError::OwnerHasLiveChildren::children: usize
+pub sonicterm_types::BudgetError::OwnerHasLiveChildren::owner: sonicterm_types::resource::ResourceOwnerId
+pub sonicterm_types::BudgetError::OwnerIdExhausted
+pub sonicterm_types::BudgetError::OwnerNotFound(sonicterm_types::resource::ResourceOwnerId)
+impl core::clone::Clone for sonicterm_types::resource::BudgetError
+pub fn sonicterm_types::resource::BudgetError::clone(&self) -> sonicterm_types::resource::BudgetError
+impl core::cmp::Eq for sonicterm_types::resource::BudgetError
+impl core::cmp::PartialEq for sonicterm_types::resource::BudgetError
+pub fn sonicterm_types::resource::BudgetError::eq(&self, &sonicterm_types::resource::BudgetError) -> bool
+impl core::error::Error for sonicterm_types::resource::BudgetError
+impl core::fmt::Debug for sonicterm_types::resource::BudgetError
+pub fn sonicterm_types::resource::BudgetError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for sonicterm_types::resource::BudgetError
+pub fn sonicterm_types::resource::BudgetError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::BudgetError
+impl core::marker::Freeze for sonicterm_types::resource::BudgetError
+impl core::marker::Send for sonicterm_types::resource::BudgetError
+impl core::marker::Sync for sonicterm_types::resource::BudgetError
+impl core::marker::Unpin for sonicterm_types::resource::BudgetError
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::BudgetError
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::BudgetError
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::BudgetError
+pub enum sonicterm_types::BudgetScope
+pub sonicterm_types::BudgetScope::Owner(sonicterm_types::resource::ResourceOwnerId)
+pub sonicterm_types::BudgetScope::OwnerClass
+pub sonicterm_types::BudgetScope::OwnerClass::class: sonicterm_types::resource::ResourceClass
+pub sonicterm_types::BudgetScope::OwnerClass::owner: sonicterm_types::resource::ResourceOwnerId
+pub sonicterm_types::BudgetScope::Process
+pub sonicterm_types::BudgetScope::ProcessClass(sonicterm_types::resource::ResourceClass)
+impl core::clone::Clone for sonicterm_types::resource::BudgetScope
+pub fn sonicterm_types::resource::BudgetScope::clone(&self) -> sonicterm_types::resource::BudgetScope
+impl core::cmp::Eq for sonicterm_types::resource::BudgetScope
+impl core::cmp::PartialEq for sonicterm_types::resource::BudgetScope
+pub fn sonicterm_types::resource::BudgetScope::eq(&self, &sonicterm_types::resource::BudgetScope) -> bool
+impl core::fmt::Debug for sonicterm_types::resource::BudgetScope
+pub fn sonicterm_types::resource::BudgetScope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::resource::BudgetScope
+pub fn sonicterm_types::resource::BudgetScope::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::resource::BudgetScope
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::BudgetScope
+impl core::marker::Freeze for sonicterm_types::resource::BudgetScope
+impl core::marker::Send for sonicterm_types::resource::BudgetScope
+impl core::marker::Sync for sonicterm_types::resource::BudgetScope
+impl core::marker::Unpin for sonicterm_types::resource::BudgetScope
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::BudgetScope
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::BudgetScope
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::BudgetScope
 pub enum sonicterm_types::Color
 pub sonicterm_types::Color::Default
 pub sonicterm_types::Color::Indexed(u8)
@@ -781,6 +1417,102 @@ impl core::marker::Unpin for sonicterm_types::action::Direction
 impl core::marker::UnsafeUnpin for sonicterm_types::action::Direction
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::action::Direction
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::action::Direction
+pub enum sonicterm_types::DisconnectReason
+pub sonicterm_types::DisconnectReason::Cancelled
+pub sonicterm_types::DisconnectReason::SustainedPressure
+pub sonicterm_types::DisconnectReason::TransportClosed
+impl core::clone::Clone for sonicterm_types::resource::DisconnectReason
+pub fn sonicterm_types::resource::DisconnectReason::clone(&self) -> sonicterm_types::resource::DisconnectReason
+impl core::cmp::Eq for sonicterm_types::resource::DisconnectReason
+impl core::cmp::PartialEq for sonicterm_types::resource::DisconnectReason
+pub fn sonicterm_types::resource::DisconnectReason::eq(&self, &sonicterm_types::resource::DisconnectReason) -> bool
+impl core::fmt::Debug for sonicterm_types::resource::DisconnectReason
+pub fn sonicterm_types::resource::DisconnectReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::resource::DisconnectReason
+pub fn sonicterm_types::resource::DisconnectReason::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::resource::DisconnectReason
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::DisconnectReason
+impl core::marker::Freeze for sonicterm_types::resource::DisconnectReason
+impl core::marker::Send for sonicterm_types::resource::DisconnectReason
+impl core::marker::Sync for sonicterm_types::resource::DisconnectReason
+impl core::marker::Unpin for sonicterm_types::resource::DisconnectReason
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::DisconnectReason
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::DisconnectReason
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::DisconnectReason
+pub enum sonicterm_types::DropReason
+pub sonicterm_types::DropReason::Policy
+pub sonicterm_types::DropReason::Superseded
+impl core::clone::Clone for sonicterm_types::resource::DropReason
+pub fn sonicterm_types::resource::DropReason::clone(&self) -> sonicterm_types::resource::DropReason
+impl core::cmp::Eq for sonicterm_types::resource::DropReason
+impl core::cmp::PartialEq for sonicterm_types::resource::DropReason
+pub fn sonicterm_types::resource::DropReason::eq(&self, &sonicterm_types::resource::DropReason) -> bool
+impl core::fmt::Debug for sonicterm_types::resource::DropReason
+pub fn sonicterm_types::resource::DropReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::resource::DropReason
+pub fn sonicterm_types::resource::DropReason::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::resource::DropReason
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::DropReason
+impl core::marker::Freeze for sonicterm_types::resource::DropReason
+impl core::marker::Send for sonicterm_types::resource::DropReason
+impl core::marker::Sync for sonicterm_types::resource::DropReason
+impl core::marker::Unpin for sonicterm_types::resource::DropReason
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::DropReason
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::DropReason
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::DropReason
+pub enum sonicterm_types::OwnerKind
+pub sonicterm_types::OwnerKind::AppPane
+pub sonicterm_types::OwnerKind::Attachment
+pub sonicterm_types::OwnerKind::LocalPty
+pub sonicterm_types::OwnerKind::MuxConnection
+pub sonicterm_types::OwnerKind::MuxPane
+pub sonicterm_types::OwnerKind::MuxSession
+pub sonicterm_types::OwnerKind::Process
+pub sonicterm_types::OwnerKind::PtyTransport
+pub sonicterm_types::OwnerKind::SharedAtlas
+pub sonicterm_types::OwnerKind::SharedFont
+pub sonicterm_types::OwnerKind::SharedRaster
+pub sonicterm_types::OwnerKind::Window
+impl core::clone::Clone for sonicterm_types::resource::OwnerKind
+pub fn sonicterm_types::resource::OwnerKind::clone(&self) -> sonicterm_types::resource::OwnerKind
+impl core::cmp::Eq for sonicterm_types::resource::OwnerKind
+impl core::cmp::PartialEq for sonicterm_types::resource::OwnerKind
+pub fn sonicterm_types::resource::OwnerKind::eq(&self, &sonicterm_types::resource::OwnerKind) -> bool
+impl core::fmt::Debug for sonicterm_types::resource::OwnerKind
+pub fn sonicterm_types::resource::OwnerKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::resource::OwnerKind
+pub fn sonicterm_types::resource::OwnerKind::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::resource::OwnerKind
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::OwnerKind
+impl core::marker::Freeze for sonicterm_types::resource::OwnerKind
+impl core::marker::Send for sonicterm_types::resource::OwnerKind
+impl core::marker::Sync for sonicterm_types::resource::OwnerKind
+impl core::marker::Unpin for sonicterm_types::resource::OwnerKind
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::OwnerKind
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::OwnerKind
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::OwnerKind
+pub enum sonicterm_types::OwnerState
+pub sonicterm_types::OwnerState::Closed
+pub sonicterm_types::OwnerState::Closing
+pub sonicterm_types::OwnerState::Open
+impl core::clone::Clone for sonicterm_types::resource::OwnerState
+pub fn sonicterm_types::resource::OwnerState::clone(&self) -> sonicterm_types::resource::OwnerState
+impl core::cmp::Eq for sonicterm_types::resource::OwnerState
+impl core::cmp::PartialEq for sonicterm_types::resource::OwnerState
+pub fn sonicterm_types::resource::OwnerState::eq(&self, &sonicterm_types::resource::OwnerState) -> bool
+impl core::fmt::Debug for sonicterm_types::resource::OwnerState
+pub fn sonicterm_types::resource::OwnerState::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::resource::OwnerState
+pub fn sonicterm_types::resource::OwnerState::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::resource::OwnerState
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::OwnerState
+impl core::marker::Freeze for sonicterm_types::resource::OwnerState
+impl core::marker::Send for sonicterm_types::resource::OwnerState
+impl core::marker::Sync for sonicterm_types::resource::OwnerState
+impl core::marker::Unpin for sonicterm_types::resource::OwnerState
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::OwnerState
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::OwnerState
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::OwnerState
 pub enum sonicterm_types::PaintError
 pub sonicterm_types::PaintError::Other(alloc::string::String)
 pub sonicterm_types::PaintError::OutOfMemory
@@ -794,6 +1526,147 @@ impl core::marker::Unpin for sonicterm_types::traits::painter::PaintError
 impl core::marker::UnsafeUnpin for sonicterm_types::traits::painter::PaintError
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::traits::painter::PaintError
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::traits::painter::PaintError
+pub enum sonicterm_types::PressureOutcome<T>
+pub sonicterm_types::PressureOutcome::Accepted
+pub sonicterm_types::PressureOutcome::Accepted::receipt: sonicterm_types::resource::DeliveryReceipt
+pub sonicterm_types::PressureOutcome::Backpressured
+pub sonicterm_types::PressureOutcome::Backpressured::retry: sonicterm_types::resource::RetryToken
+pub sonicterm_types::PressureOutcome::Backpressured::value: T
+pub sonicterm_types::PressureOutcome::Disconnected
+pub sonicterm_types::PressureOutcome::Disconnected::reason: sonicterm_types::resource::DisconnectReason
+pub sonicterm_types::PressureOutcome::Disconnected::value: core::option::Option<T>
+pub sonicterm_types::PressureOutcome::Dropped
+pub sonicterm_types::PressureOutcome::Dropped::bytes: usize
+pub sonicterm_types::PressureOutcome::Dropped::reason: sonicterm_types::resource::DropReason
+pub sonicterm_types::PressureOutcome::Evicted
+pub sonicterm_types::PressureOutcome::Evicted::receipt: sonicterm_types::resource::DeliveryReceipt
+pub sonicterm_types::PressureOutcome::Evicted::released_bytes: usize
+pub sonicterm_types::PressureOutcome::Rejected
+pub sonicterm_types::PressureOutcome::Rejected::error: sonicterm_types::resource::BudgetError
+pub sonicterm_types::PressureOutcome::Rejected::value: T
+impl<T: core::fmt::Debug> core::fmt::Debug for sonicterm_types::resource::PressureOutcome<T>
+pub fn sonicterm_types::resource::PressureOutcome<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<T> core::marker::Freeze for sonicterm_types::resource::PressureOutcome<T> where T: core::marker::Freeze
+impl<T> core::marker::Send for sonicterm_types::resource::PressureOutcome<T> where T: core::marker::Send
+impl<T> core::marker::Sync for sonicterm_types::resource::PressureOutcome<T> where T: core::marker::Sync
+impl<T> core::marker::Unpin for sonicterm_types::resource::PressureOutcome<T> where T: core::marker::Unpin
+impl<T> core::marker::UnsafeUnpin for sonicterm_types::resource::PressureOutcome<T> where T: core::marker::UnsafeUnpin
+impl<T> core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::PressureOutcome<T> where T: core::panic::unwind_safe::RefUnwindSafe
+impl<T> core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::PressureOutcome<T> where T: core::panic::unwind_safe::UnwindSafe
+pub enum sonicterm_types::ProcessKind
+pub sonicterm_types::ProcessKind::Gui
+pub sonicterm_types::ProcessKind::Mux
+impl core::clone::Clone for sonicterm_types::resource::ProcessKind
+pub fn sonicterm_types::resource::ProcessKind::clone(&self) -> sonicterm_types::resource::ProcessKind
+impl core::cmp::Eq for sonicterm_types::resource::ProcessKind
+impl core::cmp::PartialEq for sonicterm_types::resource::ProcessKind
+pub fn sonicterm_types::resource::ProcessKind::eq(&self, &sonicterm_types::resource::ProcessKind) -> bool
+impl core::fmt::Debug for sonicterm_types::resource::ProcessKind
+pub fn sonicterm_types::resource::ProcessKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::resource::ProcessKind
+pub fn sonicterm_types::resource::ProcessKind::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::resource::ProcessKind
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::ProcessKind
+impl core::marker::Freeze for sonicterm_types::resource::ProcessKind
+impl core::marker::Send for sonicterm_types::resource::ProcessKind
+impl core::marker::Sync for sonicterm_types::resource::ProcessKind
+impl core::marker::Unpin for sonicterm_types::resource::ProcessKind
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::ProcessKind
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::ProcessKind
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::ProcessKind
+pub enum sonicterm_types::ResizeOperation
+pub sonicterm_types::ResizeOperation::Grow
+pub sonicterm_types::ResizeOperation::Shrink
+impl core::clone::Clone for sonicterm_types::resource::ResizeOperation
+pub fn sonicterm_types::resource::ResizeOperation::clone(&self) -> sonicterm_types::resource::ResizeOperation
+impl core::cmp::Eq for sonicterm_types::resource::ResizeOperation
+impl core::cmp::PartialEq for sonicterm_types::resource::ResizeOperation
+pub fn sonicterm_types::resource::ResizeOperation::eq(&self, &sonicterm_types::resource::ResizeOperation) -> bool
+impl core::fmt::Debug for sonicterm_types::resource::ResizeOperation
+pub fn sonicterm_types::resource::ResizeOperation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::resource::ResizeOperation
+pub fn sonicterm_types::resource::ResizeOperation::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::resource::ResizeOperation
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::ResizeOperation
+impl core::marker::Freeze for sonicterm_types::resource::ResizeOperation
+impl core::marker::Send for sonicterm_types::resource::ResizeOperation
+impl core::marker::Sync for sonicterm_types::resource::ResizeOperation
+impl core::marker::Unpin for sonicterm_types::resource::ResizeOperation
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::ResizeOperation
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::ResizeOperation
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::ResizeOperation
+pub enum sonicterm_types::ResourceClass
+pub sonicterm_types::ResourceClass::CommandEvents
+pub sonicterm_types::ResourceClass::GlyphAtlas
+pub sonicterm_types::ResourceClass::GlyphRaster
+pub sonicterm_types::ResourceClass::GridAlternate
+pub sonicterm_types::ResourceClass::GridHistory
+pub sonicterm_types::ResourceClass::GridVisible
+pub sonicterm_types::ResourceClass::InlineMediaDecode
+pub sonicterm_types::ResourceClass::InlineMediaRetained
+pub sonicterm_types::ResourceClass::MuxSubscriber
+pub sonicterm_types::ResourceClass::ParserCapture
+pub sonicterm_types::ResourceClass::ParserReply
+pub sonicterm_types::ResourceClass::ProtocolMetadata
+pub sonicterm_types::ResourceClass::PtyInput
+pub sonicterm_types::ResourceClass::PtyOutput
+pub sonicterm_types::ResourceClass::ReaperWork
+pub sonicterm_types::ResourceClass::RegistryMetadata
+pub sonicterm_types::ResourceClass::RemoteInput
+pub sonicterm_types::ResourceClass::RemoteOutput
+pub sonicterm_types::ResourceClass::SoftwareFrame
+pub sonicterm_types::ResourceClass::Surface
+pub sonicterm_types::ResourceClass::UploadStaging
+impl core::clone::Clone for sonicterm_types::resource::ResourceClass
+pub fn sonicterm_types::resource::ResourceClass::clone(&self) -> sonicterm_types::resource::ResourceClass
+impl core::cmp::Eq for sonicterm_types::resource::ResourceClass
+impl core::cmp::Ord for sonicterm_types::resource::ResourceClass
+pub fn sonicterm_types::resource::ResourceClass::cmp(&self, &sonicterm_types::resource::ResourceClass) -> core::cmp::Ordering
+impl core::cmp::PartialEq for sonicterm_types::resource::ResourceClass
+pub fn sonicterm_types::resource::ResourceClass::eq(&self, &sonicterm_types::resource::ResourceClass) -> bool
+impl core::cmp::PartialOrd for sonicterm_types::resource::ResourceClass
+pub fn sonicterm_types::resource::ResourceClass::partial_cmp(&self, &sonicterm_types::resource::ResourceClass) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for sonicterm_types::resource::ResourceClass
+pub fn sonicterm_types::resource::ResourceClass::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::resource::ResourceClass
+pub fn sonicterm_types::resource::ResourceClass::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::resource::ResourceClass
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::ResourceClass
+impl enum_map::internal::Enum for sonicterm_types::resource::ResourceClass
+pub const sonicterm_types::resource::ResourceClass::LENGTH: usize
+pub fn sonicterm_types::resource::ResourceClass::from_usize(usize) -> Self
+pub fn sonicterm_types::resource::ResourceClass::into_usize(self) -> usize
+impl<V> enum_map::internal::EnumArray<V> for sonicterm_types::resource::ResourceClass
+pub type sonicterm_types::resource::ResourceClass::Array = [V; 21]
+impl core::marker::Freeze for sonicterm_types::resource::ResourceClass
+impl core::marker::Send for sonicterm_types::resource::ResourceClass
+impl core::marker::Sync for sonicterm_types::resource::ResourceClass
+impl core::marker::Unpin for sonicterm_types::resource::ResourceClass
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::ResourceClass
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::ResourceClass
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::ResourceClass
+pub enum sonicterm_types::RetryWakeup
+pub sonicterm_types::RetryWakeup::AtDeadline
+pub sonicterm_types::RetryWakeup::CapacityAvailable
+pub sonicterm_types::RetryWakeup::ConnectionStateChanged
+impl core::clone::Clone for sonicterm_types::resource::RetryWakeup
+pub fn sonicterm_types::resource::RetryWakeup::clone(&self) -> sonicterm_types::resource::RetryWakeup
+impl core::cmp::Eq for sonicterm_types::resource::RetryWakeup
+impl core::cmp::PartialEq for sonicterm_types::resource::RetryWakeup
+pub fn sonicterm_types::resource::RetryWakeup::eq(&self, &sonicterm_types::resource::RetryWakeup) -> bool
+impl core::fmt::Debug for sonicterm_types::resource::RetryWakeup
+pub fn sonicterm_types::resource::RetryWakeup::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::resource::RetryWakeup
+pub fn sonicterm_types::resource::RetryWakeup::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::resource::RetryWakeup
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::RetryWakeup
+impl core::marker::Freeze for sonicterm_types::resource::RetryWakeup
+impl core::marker::Send for sonicterm_types::resource::RetryWakeup
+impl core::marker::Sync for sonicterm_types::resource::RetryWakeup
+impl core::marker::Unpin for sonicterm_types::resource::RetryWakeup
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::RetryWakeup
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::RetryWakeup
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::RetryWakeup
 pub enum sonicterm_types::ScrollAction
 pub sonicterm_types::ScrollAction::LineDown
 pub sonicterm_types::ScrollAction::LineUp
@@ -821,6 +1694,36 @@ impl core::marker::Unpin for sonicterm_types::action::ScrollAction
 impl core::marker::UnsafeUnpin for sonicterm_types::action::ScrollAction
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::action::ScrollAction
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::action::ScrollAction
+pub enum sonicterm_types::UnderlineStyle
+pub sonicterm_types::UnderlineStyle::Curly
+pub sonicterm_types::UnderlineStyle::Dashed
+pub sonicterm_types::UnderlineStyle::Dotted
+pub sonicterm_types::UnderlineStyle::Double
+pub sonicterm_types::UnderlineStyle::Single
+impl core::clone::Clone for sonicterm_types::cell::UnderlineStyle
+pub fn sonicterm_types::cell::UnderlineStyle::clone(&self) -> sonicterm_types::cell::UnderlineStyle
+impl core::cmp::Eq for sonicterm_types::cell::UnderlineStyle
+impl core::cmp::PartialEq for sonicterm_types::cell::UnderlineStyle
+pub fn sonicterm_types::cell::UnderlineStyle::eq(&self, &sonicterm_types::cell::UnderlineStyle) -> bool
+impl core::default::Default for sonicterm_types::cell::UnderlineStyle
+pub fn sonicterm_types::cell::UnderlineStyle::default() -> sonicterm_types::cell::UnderlineStyle
+impl core::fmt::Debug for sonicterm_types::cell::UnderlineStyle
+pub fn sonicterm_types::cell::UnderlineStyle::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::cell::UnderlineStyle
+pub fn sonicterm_types::cell::UnderlineStyle::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::cell::UnderlineStyle
+impl core::marker::StructuralPartialEq for sonicterm_types::cell::UnderlineStyle
+impl serde_core::ser::Serialize for sonicterm_types::cell::UnderlineStyle
+pub fn sonicterm_types::cell::UnderlineStyle::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for sonicterm_types::cell::UnderlineStyle
+pub fn sonicterm_types::cell::UnderlineStyle::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for sonicterm_types::cell::UnderlineStyle
+impl core::marker::Send for sonicterm_types::cell::UnderlineStyle
+impl core::marker::Sync for sonicterm_types::cell::UnderlineStyle
+impl core::marker::Unpin for sonicterm_types::cell::UnderlineStyle
+impl core::marker::UnsafeUnpin for sonicterm_types::cell::UnderlineStyle
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::cell::UnderlineStyle
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::cell::UnderlineStyle
 pub struct sonicterm_types::Cell
 pub sonicterm_types::Cell::bg: sonicterm_types::cell::Color
 pub sonicterm_types::Cell::ch: char
@@ -832,7 +1735,11 @@ pub fn sonicterm_types::cell::Cell::hyperlink(&self) -> core::option::Option<son
 pub fn sonicterm_types::cell::Cell::plain(char, sonicterm_types::cell::Color, sonicterm_types::cell::Color, sonicterm_types::cell::CellFlags) -> Self
 pub fn sonicterm_types::cell::Cell::set_extras(&mut self, core::option::Option<alloc::boxed::Box<str>>)
 pub fn sonicterm_types::cell::Cell::set_hyperlink(&mut self, core::option::Option<sonicterm_types::hyperlink_id::HyperlinkId>)
+pub fn sonicterm_types::cell::Cell::set_underline_color(&mut self, core::option::Option<sonicterm_types::cell::Color>)
+pub fn sonicterm_types::cell::Cell::set_underline_style(&mut self, sonicterm_types::cell::UnderlineStyle)
 pub fn sonicterm_types::cell::Cell::take_extras(&mut self) -> core::option::Option<alloc::boxed::Box<str>>
+pub fn sonicterm_types::cell::Cell::underline_color(&self) -> core::option::Option<sonicterm_types::cell::Color>
+pub fn sonicterm_types::cell::Cell::underline_style(&self) -> sonicterm_types::cell::UnderlineStyle
 impl core::clone::Clone for sonicterm_types::cell::Cell
 pub fn sonicterm_types::cell::Cell::clone(&self) -> sonicterm_types::cell::Cell
 impl core::cmp::Eq for sonicterm_types::cell::Cell
@@ -895,6 +1802,7 @@ pub const fn sonicterm_types::cell::CellFlags::iter_names(&self) -> bitflags::it
 impl bitflags::traits::Flags for sonicterm_types::cell::CellFlags
 pub type sonicterm_types::cell::CellFlags::Bits = u16
 pub const sonicterm_types::cell::CellFlags::FLAGS: &'static [bitflags::traits::Flag<sonicterm_types::cell::CellFlags>]
+pub fn sonicterm_types::cell::CellFlags::all_named() -> sonicterm_types::cell::CellFlags
 pub fn sonicterm_types::cell::CellFlags::bits(&self) -> u16
 pub fn sonicterm_types::cell::CellFlags::from_bits_retain(u16) -> sonicterm_types::cell::CellFlags
 impl bitflags::traits::PublicFlags for sonicterm_types::cell::CellFlags
@@ -959,9 +1867,33 @@ impl core::marker::Unpin for sonicterm_types::cell::CellFlags
 impl core::marker::UnsafeUnpin for sonicterm_types::cell::CellFlags
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::cell::CellFlags
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::cell::CellFlags
+pub struct sonicterm_types::DeliveryReceipt(_)
+impl sonicterm_types::resource::DeliveryReceipt
+pub const fn sonicterm_types::resource::DeliveryReceipt::get(self) -> u64
+pub const fn sonicterm_types::resource::DeliveryReceipt::new(u64) -> Self
+impl core::clone::Clone for sonicterm_types::resource::DeliveryReceipt
+pub fn sonicterm_types::resource::DeliveryReceipt::clone(&self) -> sonicterm_types::resource::DeliveryReceipt
+impl core::cmp::Eq for sonicterm_types::resource::DeliveryReceipt
+impl core::cmp::PartialEq for sonicterm_types::resource::DeliveryReceipt
+pub fn sonicterm_types::resource::DeliveryReceipt::eq(&self, &sonicterm_types::resource::DeliveryReceipt) -> bool
+impl core::fmt::Debug for sonicterm_types::resource::DeliveryReceipt
+pub fn sonicterm_types::resource::DeliveryReceipt::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::resource::DeliveryReceipt
+pub fn sonicterm_types::resource::DeliveryReceipt::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::resource::DeliveryReceipt
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::DeliveryReceipt
+impl core::marker::Freeze for sonicterm_types::resource::DeliveryReceipt
+impl core::marker::Send for sonicterm_types::resource::DeliveryReceipt
+impl core::marker::Sync for sonicterm_types::resource::DeliveryReceipt
+impl core::marker::Unpin for sonicterm_types::resource::DeliveryReceipt
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::DeliveryReceipt
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::DeliveryReceipt
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::DeliveryReceipt
 pub struct sonicterm_types::FatAttributes
 pub sonicterm_types::FatAttributes::extras: core::option::Option<alloc::boxed::Box<str>>
 pub sonicterm_types::FatAttributes::hyperlink: core::option::Option<sonicterm_types::hyperlink_id::HyperlinkId>
+pub sonicterm_types::FatAttributes::underline_color: core::option::Option<sonicterm_types::cell::Color>
+pub sonicterm_types::FatAttributes::underline_style: core::option::Option<sonicterm_types::cell::UnderlineStyle>
 impl sonicterm_types::cell::FatAttributes
 pub fn sonicterm_types::cell::FatAttributes::is_empty(&self) -> bool
 impl core::clone::Clone for sonicterm_types::cell::FatAttributes
@@ -983,16 +1915,39 @@ impl core::marker::Unpin for sonicterm_types::cell::FatAttributes
 impl core::marker::UnsafeUnpin for sonicterm_types::cell::FatAttributes
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::cell::FatAttributes
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::cell::FatAttributes
+#[repr(C)] pub struct sonicterm_types::GeometryQuad
+pub sonicterm_types::GeometryQuad::color: [f32; 4]
+pub sonicterm_types::GeometryQuad::line_a: [f32; 2]
+pub sonicterm_types::GeometryQuad::line_b: [f32; 2]
+pub sonicterm_types::GeometryQuad::line_thickness_px: f32
+pub sonicterm_types::GeometryQuad::radius_px: f32
+pub sonicterm_types::GeometryQuad::rect: [f32; 4]
+pub sonicterm_types::GeometryQuad::size_px: [f32; 2]
+impl core::clone::Clone for sonicterm_types::geom::GeometryQuad
+pub fn sonicterm_types::geom::GeometryQuad::clone(&self) -> sonicterm_types::geom::GeometryQuad
+impl core::cmp::PartialEq for sonicterm_types::geom::GeometryQuad
+pub fn sonicterm_types::geom::GeometryQuad::eq(&self, &sonicterm_types::geom::GeometryQuad) -> bool
+impl core::fmt::Debug for sonicterm_types::geom::GeometryQuad
+pub fn sonicterm_types::geom::GeometryQuad::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::geom::GeometryQuad
+impl core::marker::StructuralPartialEq for sonicterm_types::geom::GeometryQuad
+impl core::marker::Freeze for sonicterm_types::geom::GeometryQuad
+impl core::marker::Send for sonicterm_types::geom::GeometryQuad
+impl core::marker::Sync for sonicterm_types::geom::GeometryQuad
+impl core::marker::Unpin for sonicterm_types::geom::GeometryQuad
+impl core::marker::UnsafeUnpin for sonicterm_types::geom::GeometryQuad
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::geom::GeometryQuad
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::geom::GeometryQuad
 pub struct sonicterm_types::GlyphKey
 pub sonicterm_types::GlyphKey::ch: char
 pub sonicterm_types::GlyphKey::font_slot: u8
-pub sonicterm_types::GlyphKey::glyph_id: u16
+pub sonicterm_types::GlyphKey::glyph_id: u32
 pub sonicterm_types::GlyphKey::italic: bool
 pub sonicterm_types::GlyphKey::weight_bold: bool
 impl sonicterm_types::glyph_key::GlyphKey
 pub fn sonicterm_types::glyph_key::GlyphKey::from_cell(&sonicterm_types::cell::Cell) -> core::option::Option<Self>
 pub fn sonicterm_types::glyph_key::GlyphKey::new(char, bool, bool) -> Self
-pub fn sonicterm_types::glyph_key::GlyphKey::shaped(char, u8, u16, bool, bool) -> Self
+pub fn sonicterm_types::glyph_key::GlyphKey::shaped(char, u8, u32, bool, bool) -> Self
 pub fn sonicterm_types::glyph_key::GlyphKey::with_font_slot(self, u8) -> Self
 pub fn sonicterm_types::glyph_key::GlyphKey::with_slot(char, u8, bool, bool) -> Self
 impl core::clone::Clone for sonicterm_types::glyph_key::GlyphKey
@@ -1013,6 +1968,21 @@ impl core::marker::Unpin for sonicterm_types::glyph_key::GlyphKey
 impl core::marker::UnsafeUnpin for sonicterm_types::glyph_key::GlyphKey
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::glyph_key::GlyphKey
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::glyph_key::GlyphKey
+pub struct sonicterm_types::GovernorLimits
+pub sonicterm_types::GovernorLimits::class_bytes: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
+pub sonicterm_types::GovernorLimits::class_items: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, core::option::Option<usize>>
+pub sonicterm_types::GovernorLimits::process_bytes: usize
+impl core::clone::Clone for sonicterm_types::resource::GovernorLimits
+pub fn sonicterm_types::resource::GovernorLimits::clone(&self) -> sonicterm_types::resource::GovernorLimits
+impl core::fmt::Debug for sonicterm_types::resource::GovernorLimits
+pub fn sonicterm_types::resource::GovernorLimits::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for sonicterm_types::resource::GovernorLimits
+impl core::marker::Send for sonicterm_types::resource::GovernorLimits
+impl core::marker::Sync for sonicterm_types::resource::GovernorLimits
+impl core::marker::Unpin for sonicterm_types::resource::GovernorLimits
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::GovernorLimits
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::GovernorLimits
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::GovernorLimits
 pub struct sonicterm_types::HyperlinkId(pub u64)
 impl sonicterm_types::hyperlink_id::HyperlinkId
 pub fn sonicterm_types::hyperlink_id::HyperlinkId::next() -> Self
@@ -1071,6 +2041,7 @@ pub const fn sonicterm_types::mod_key::ModKey::iter_names(&self) -> bitflags::it
 impl bitflags::traits::Flags for sonicterm_types::mod_key::ModKey
 pub type sonicterm_types::mod_key::ModKey::Bits = u32
 pub const sonicterm_types::mod_key::ModKey::FLAGS: &'static [bitflags::traits::Flag<sonicterm_types::mod_key::ModKey>]
+pub fn sonicterm_types::mod_key::ModKey::all_named() -> sonicterm_types::mod_key::ModKey
 pub fn sonicterm_types::mod_key::ModKey::bits(&self) -> u32
 pub fn sonicterm_types::mod_key::ModKey::from_bits_retain(u32) -> sonicterm_types::mod_key::ModKey
 impl bitflags::traits::PublicFlags for sonicterm_types::mod_key::ModKey
@@ -1139,6 +2110,21 @@ impl core::marker::Unpin for sonicterm_types::mod_key::ModKey
 impl core::marker::UnsafeUnpin for sonicterm_types::mod_key::ModKey
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::mod_key::ModKey
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::mod_key::ModKey
+pub struct sonicterm_types::OwnerLimits
+pub sonicterm_types::OwnerLimits::class_bytes: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
+pub sonicterm_types::OwnerLimits::class_items: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, core::option::Option<usize>>
+pub sonicterm_types::OwnerLimits::owner_bytes: usize
+impl core::clone::Clone for sonicterm_types::resource::OwnerLimits
+pub fn sonicterm_types::resource::OwnerLimits::clone(&self) -> sonicterm_types::resource::OwnerLimits
+impl core::fmt::Debug for sonicterm_types::resource::OwnerLimits
+pub fn sonicterm_types::resource::OwnerLimits::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for sonicterm_types::resource::OwnerLimits
+impl core::marker::Send for sonicterm_types::resource::OwnerLimits
+impl core::marker::Sync for sonicterm_types::resource::OwnerLimits
+impl core::marker::Unpin for sonicterm_types::resource::OwnerLimits
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::OwnerLimits
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::OwnerLimits
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::OwnerLimits
 pub struct sonicterm_types::Pos
 pub sonicterm_types::Pos::col: u16
 pub sonicterm_types::Pos::row: u16
@@ -1162,29 +2148,108 @@ impl core::marker::Unpin for sonicterm_types::geom::Pos
 impl core::marker::UnsafeUnpin for sonicterm_types::geom::Pos
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::geom::Pos
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::geom::Pos
-pub struct sonicterm_types::GeometryQuad
-pub sonicterm_types::GeometryQuad::color: [f32; 4]
-pub sonicterm_types::GeometryQuad::line_a: [f32; 2]
-pub sonicterm_types::GeometryQuad::line_b: [f32; 2]
-pub sonicterm_types::GeometryQuad::line_thickness_px: f32
-pub sonicterm_types::GeometryQuad::radius_px: f32
-pub sonicterm_types::GeometryQuad::rect: [f32; 4]
-pub sonicterm_types::GeometryQuad::size_px: [f32; 2]
-impl core::clone::Clone for sonicterm_types::geom::GeometryQuad
-pub fn sonicterm_types::geom::GeometryQuad::clone(&self) -> sonicterm_types::geom::GeometryQuad
-impl core::cmp::PartialEq for sonicterm_types::geom::GeometryQuad
-pub fn sonicterm_types::geom::GeometryQuad::eq(&self, &sonicterm_types::geom::GeometryQuad) -> bool
-impl core::fmt::Debug for sonicterm_types::geom::GeometryQuad
-pub fn sonicterm_types::geom::GeometryQuad::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for sonicterm_types::geom::GeometryQuad
-impl core::marker::StructuralPartialEq for sonicterm_types::geom::GeometryQuad
-impl core::marker::Freeze for sonicterm_types::geom::GeometryQuad
-impl core::marker::Send for sonicterm_types::geom::GeometryQuad
-impl core::marker::Sync for sonicterm_types::geom::GeometryQuad
-impl core::marker::Unpin for sonicterm_types::geom::GeometryQuad
-impl core::marker::UnsafeUnpin for sonicterm_types::geom::GeometryQuad
-impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::geom::GeometryQuad
-impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::geom::GeometryQuad
+pub struct sonicterm_types::ResourceAmount
+pub sonicterm_types::ResourceAmount::bytes: usize
+pub sonicterm_types::ResourceAmount::items: usize
+impl sonicterm_types::resource::ResourceAmount
+pub fn sonicterm_types::resource::ResourceAmount::checked_add(self, Self) -> core::result::Result<Self, sonicterm_types::resource::BudgetError>
+pub fn sonicterm_types::resource::ResourceAmount::checked_sub(self, Self) -> core::result::Result<Self, sonicterm_types::resource::BudgetError>
+pub const fn sonicterm_types::resource::ResourceAmount::component_le(self, Self) -> bool
+pub const fn sonicterm_types::resource::ResourceAmount::is_zero(self) -> bool
+impl core::clone::Clone for sonicterm_types::resource::ResourceAmount
+pub fn sonicterm_types::resource::ResourceAmount::clone(&self) -> sonicterm_types::resource::ResourceAmount
+impl core::cmp::Eq for sonicterm_types::resource::ResourceAmount
+impl core::cmp::PartialEq for sonicterm_types::resource::ResourceAmount
+pub fn sonicterm_types::resource::ResourceAmount::eq(&self, &sonicterm_types::resource::ResourceAmount) -> bool
+impl core::default::Default for sonicterm_types::resource::ResourceAmount
+pub fn sonicterm_types::resource::ResourceAmount::default() -> sonicterm_types::resource::ResourceAmount
+impl core::fmt::Debug for sonicterm_types::resource::ResourceAmount
+pub fn sonicterm_types::resource::ResourceAmount::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::resource::ResourceAmount
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::ResourceAmount
+impl core::marker::Freeze for sonicterm_types::resource::ResourceAmount
+impl core::marker::Send for sonicterm_types::resource::ResourceAmount
+impl core::marker::Sync for sonicterm_types::resource::ResourceAmount
+impl core::marker::Unpin for sonicterm_types::resource::ResourceAmount
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::ResourceAmount
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::ResourceAmount
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::ResourceAmount
+pub struct sonicterm_types::ResourceOwnerId(_)
+impl sonicterm_types::resource::ResourceOwnerId
+pub const fn sonicterm_types::resource::ResourceOwnerId::get(self) -> u64
+pub const fn sonicterm_types::resource::ResourceOwnerId::new(u64) -> core::option::Option<Self>
+impl core::clone::Clone for sonicterm_types::resource::ResourceOwnerId
+pub fn sonicterm_types::resource::ResourceOwnerId::clone(&self) -> sonicterm_types::resource::ResourceOwnerId
+impl core::cmp::Eq for sonicterm_types::resource::ResourceOwnerId
+impl core::cmp::Ord for sonicterm_types::resource::ResourceOwnerId
+pub fn sonicterm_types::resource::ResourceOwnerId::cmp(&self, &sonicterm_types::resource::ResourceOwnerId) -> core::cmp::Ordering
+impl core::cmp::PartialEq for sonicterm_types::resource::ResourceOwnerId
+pub fn sonicterm_types::resource::ResourceOwnerId::eq(&self, &sonicterm_types::resource::ResourceOwnerId) -> bool
+impl core::cmp::PartialOrd for sonicterm_types::resource::ResourceOwnerId
+pub fn sonicterm_types::resource::ResourceOwnerId::partial_cmp(&self, &sonicterm_types::resource::ResourceOwnerId) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for sonicterm_types::resource::ResourceOwnerId
+pub fn sonicterm_types::resource::ResourceOwnerId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for sonicterm_types::resource::ResourceOwnerId
+pub fn sonicterm_types::resource::ResourceOwnerId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::resource::ResourceOwnerId
+pub fn sonicterm_types::resource::ResourceOwnerId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::resource::ResourceOwnerId
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::ResourceOwnerId
+impl core::marker::Freeze for sonicterm_types::resource::ResourceOwnerId
+impl core::marker::Send for sonicterm_types::resource::ResourceOwnerId
+impl core::marker::Sync for sonicterm_types::resource::ResourceOwnerId
+impl core::marker::Unpin for sonicterm_types::resource::ResourceOwnerId
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::ResourceOwnerId
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::ResourceOwnerId
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::ResourceOwnerId
+pub struct sonicterm_types::ResourceSnapshot
+pub sonicterm_types::ResourceSnapshot::class_epochs: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, u64>
+pub sonicterm_types::ResourceSnapshot::owner: sonicterm_types::resource::ResourceOwnerId
+pub sonicterm_types::ResourceSnapshot::owner_amount: sonicterm_types::resource::ResourceAmount
+pub sonicterm_types::ResourceSnapshot::owner_class_bytes: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
+pub sonicterm_types::ResourceSnapshot::owner_class_items: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
+pub sonicterm_types::ResourceSnapshot::owner_epoch: u64
+pub sonicterm_types::ResourceSnapshot::owner_kind: sonicterm_types::resource::OwnerKind
+pub sonicterm_types::ResourceSnapshot::owner_state: sonicterm_types::resource::OwnerState
+pub sonicterm_types::ResourceSnapshot::parent: core::option::Option<sonicterm_types::resource::ResourceOwnerId>
+pub sonicterm_types::ResourceSnapshot::process_amount: sonicterm_types::resource::ResourceAmount
+pub sonicterm_types::ResourceSnapshot::process_class_bytes: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
+pub sonicterm_types::ResourceSnapshot::process_class_items: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
+pub sonicterm_types::ResourceSnapshot::process_kind: sonicterm_types::resource::ProcessKind
+pub sonicterm_types::ResourceSnapshot::registry_epoch: u64
+pub sonicterm_types::ResourceSnapshot::release_failures: usize
+impl core::clone::Clone for sonicterm_types::resource::ResourceSnapshot
+pub fn sonicterm_types::resource::ResourceSnapshot::clone(&self) -> sonicterm_types::resource::ResourceSnapshot
+impl core::fmt::Debug for sonicterm_types::resource::ResourceSnapshot
+pub fn sonicterm_types::resource::ResourceSnapshot::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for sonicterm_types::resource::ResourceSnapshot
+impl core::marker::Send for sonicterm_types::resource::ResourceSnapshot
+impl core::marker::Sync for sonicterm_types::resource::ResourceSnapshot
+impl core::marker::Unpin for sonicterm_types::resource::ResourceSnapshot
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::ResourceSnapshot
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::ResourceSnapshot
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::ResourceSnapshot
+pub struct sonicterm_types::RetryToken
+impl sonicterm_types::resource::RetryToken
+pub const fn sonicterm_types::resource::RetryToken::deadline(self) -> std::time::Instant
+pub const fn sonicterm_types::resource::RetryToken::new(std::time::Instant, sonicterm_types::resource::RetryWakeup) -> Self
+pub const fn sonicterm_types::resource::RetryToken::wakeup(self) -> sonicterm_types::resource::RetryWakeup
+impl core::clone::Clone for sonicterm_types::resource::RetryToken
+pub fn sonicterm_types::resource::RetryToken::clone(&self) -> sonicterm_types::resource::RetryToken
+impl core::cmp::Eq for sonicterm_types::resource::RetryToken
+impl core::cmp::PartialEq for sonicterm_types::resource::RetryToken
+pub fn sonicterm_types::resource::RetryToken::eq(&self, &sonicterm_types::resource::RetryToken) -> bool
+impl core::fmt::Debug for sonicterm_types::resource::RetryToken
+pub fn sonicterm_types::resource::RetryToken::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::resource::RetryToken
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::RetryToken
+impl core::marker::Freeze for sonicterm_types::resource::RetryToken
+impl core::marker::Send for sonicterm_types::resource::RetryToken
+impl core::marker::Sync for sonicterm_types::resource::RetryToken
+impl core::marker::Unpin for sonicterm_types::resource::RetryToken
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::RetryToken
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::RetryToken
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::RetryToken
 pub struct sonicterm_types::WindowKey(pub u64)
 impl sonicterm_types::window_key::WindowKey
 pub const fn sonicterm_types::window_key::WindowKey::new(u64) -> Self
@@ -1234,3 +2299,4 @@ pub fn sonicterm_types::WindowBackend::inner_size_px(&self) -> (u32, u32)
 pub fn sonicterm_types::WindowBackend::request_redraw(&self)
 pub fn sonicterm_types::WindowBackend::scale_factor(&self) -> f64
 pub fn sonicterm_types::WindowBackend::set_title(&self, &str)
+pub fn sonicterm_types::shell_quote_posix(&str) -> alloc::string::String

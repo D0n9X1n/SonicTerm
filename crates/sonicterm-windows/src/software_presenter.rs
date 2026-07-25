@@ -326,7 +326,6 @@ unsafe extern "system" {
     ) -> i32;
 }
 
-
 #[cfg(test)]
 #[path = "software_presenter_tests.rs"]
 mod software_presenter_tests;

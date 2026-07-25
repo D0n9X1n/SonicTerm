@@ -171,4 +171,3 @@ fn negotiate(requested: &str) -> String {
         negotiate_languages(&[req], &available, Some(&default), NegotiationStrategy::Filtering);
     supported.first().map(|id| id.to_string()).unwrap_or_else(|| "en".to_string())
 }
-

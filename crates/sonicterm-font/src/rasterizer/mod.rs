@@ -60,10 +60,7 @@ pub fn checked_freetype_26_6_extent(extent: i64) -> anyhow::Result<usize> {
 /// Validate the requested point-size/DPI conversion before native font calls.
 pub fn checked_raster_pixel_size(point_size: f64, scale: f64, dpi: u32) -> anyhow::Result<f64> {
     let pixels = point_size * scale * f64::from(dpi) / 72.0;
-    if !pixels.is_finite()
-        || pixels <= 0.0
-        || pixels > MAX_RASTERIZED_GLYPH_DIMENSION as f64
-    {
+    if !pixels.is_finite() || pixels <= 0.0 || pixels > MAX_RASTERIZED_GLYPH_DIMENSION as f64 {
         anyhow::bail!("invalid raster pixel size {pixels}");
     }
     Ok(pixels)

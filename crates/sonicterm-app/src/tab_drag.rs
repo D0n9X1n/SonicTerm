@@ -272,4 +272,3 @@ pub fn find_drop_target_skipping_unrendered<W: Copy>(
             .filter_map(|(id, geom, layout)| layout.map(|layout| (id, geom, layout))),
     )
 }
-

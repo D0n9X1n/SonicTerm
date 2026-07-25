@@ -521,8 +521,7 @@ fn scrollback_limit_shares_the_total_grid_cell_budget() {
     let mut grid = Grid::new(100, 24);
     grid.set_scrollback_limit(usize::MAX);
     assert!(
-        u64::from(grid.cols)
-            * (u64::from(grid.rows) + grid.scrollback_limit as u64)
+        u64::from(grid.cols) * (u64::from(grid.rows) + grid.scrollback_limit as u64)
             <= u64::from(MAX_GRID_CELLS)
     );
 }
@@ -589,6 +588,13 @@ fn zero_width_cluster_bytes_are_bounded_per_cell() {
         grid.put_char('\u{0301}', Color::Default, Color::Default, CellFlags::empty());
     }
 
-    assert!(grid.row(0)[0].extras().expect("combining marks retained").len()
-        <= MAX_CELL_EXTRAS_BYTES);
+    assert!(
+        grid.row(0)[0].extras().expect("combining marks retained").len() <= MAX_CELL_EXTRAS_BYTES
+    );
+}
+
+#[test]
+#[ignore = "v120-invariant-baseline:v120_grid_aggregate_retention_has_one_governor:WP-GRID"]
+fn v120_grid_aggregate_retention_has_one_governor() {
+    panic!("baseline invariant requires WP-GRID aggregate governor");
 }

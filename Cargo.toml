@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/sonicterm-types", "crates/sonicterm-vt", "crates/sonicterm-grid", "crates/sonicterm-cfg", "crates/sonicterm-io", "crates/sonicterm-text", "crates/sonicterm-ui", "crates/sonicterm-render-model", "crates/sonicterm-gpu", "crates/sonicterm-app-core", "crates/sonicterm-app", "crates/sonicterm-mac", "crates/sonicterm-windows", "crates/sonicterm-mux", "crates/sonicterm-logging", "crates/sonicterm-engine", "crates/sonicterm-block-glyph", "crates/sonicterm-font", "crates/sonicterm-font-config", "crates/sonicterm-freetype", "crates/sonicterm-harfbuzz", "crates/sonicterm-fontconfig"]
+members = ["crates/sonicterm-types", "crates/sonicterm-resource", "crates/sonicterm-vt", "crates/sonicterm-grid", "crates/sonicterm-cfg", "crates/sonicterm-io", "crates/sonicterm-text", "crates/sonicterm-ui", "crates/sonicterm-render-model", "crates/sonicterm-gpu", "crates/sonicterm-app-core", "crates/sonicterm-app", "crates/sonicterm-mac", "crates/sonicterm-windows", "crates/sonicterm-mux", "crates/sonicterm-logging", "crates/sonicterm-engine", "crates/sonicterm-block-glyph", "crates/sonicterm-font", "crates/sonicterm-font-config", "crates/sonicterm-freetype", "crates/sonicterm-harfbuzz", "crates/sonicterm-fontconfig"]
 default-members = ["crates/sonicterm-app"]
 
 [workspace.package]
@@ -16,6 +16,7 @@ readme = "README.md"
 [workspace.dependencies]
 # Internal
 sonicterm-types = { path = "crates/sonicterm-types", version = "1.1.5" }
+sonicterm-resource = { path = "crates/sonicterm-resource", version = "1.1.5" }
 sonicterm-vt = { path = "crates/sonicterm-vt", version = "1.1.5" }
 sonicterm-grid = { path = "crates/sonicterm-grid", version = "1.1.5" }
 sonicterm-cfg = { path = "crates/sonicterm-cfg", version = "1.1.5" }
@@ -53,6 +54,7 @@ crossbeam-channel = "0.5"
 # SSH client (optional; enabled via sonicterm-io/ssh feature)
 russh = "0.61"
 parking_lot = "0.12"
+enum-map = "2.7"
 
 # Rendering
 # T13/T14 (wezterm-takeover G3): glyphon + cosmic-text deleted. The

@@ -65,10 +65,7 @@ impl WinOsTabDragBackend {
     }
 
     fn take_registered_hwnd(&self, window_id: WindowId) -> Option<u64> {
-        self.registered_windows
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(&window_id)
+        self.registered_windows.lock().unwrap_or_else(|p| p.into_inner()).remove(&window_id)
     }
 }
 

@@ -9,4 +9,3 @@ fn tear_out_first_render_total_is_measured_from_start() {
 
     assert!((41.0..=43.0).contains(&total));
 }
-
