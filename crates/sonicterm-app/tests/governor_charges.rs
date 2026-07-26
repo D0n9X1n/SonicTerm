@@ -414,3 +414,97 @@ fn reclaiming_a_stalled_capture_leaves_the_pane_usable() {
         "and no capture may be left in flight"
     );
 }
+
+/// Closing everything must return the process root to zero.
+///
+/// The last of #880's four clauses, and the one that catches the defect shape
+/// this epic exists for: a charge taken and not returned reads as memory in
+/// use forever. Nothing before this asserted it — every existing test measures
+/// a *live* session, where a non-zero figure is correct.
+///
+/// Asserted on the process root rather than per owner, because that is where a
+/// leak accumulates: an owner that never returns its charge leaves the root
+/// non-zero even after the owner record is gone.
+#[test]
+fn the_process_root_returns_to_zero_after_every_pane_closes() {
+    let mut app = app();
+
+    let baseline = app.__test_governor_snapshot_root().process_amount;
+    assert_eq!(baseline.bytes, 0, "precondition: a fresh app holds nothing");
+
+    // Three windows, each with panes carrying real content.
+    let mut windows = Vec::new();
+    for _ in 0..3 {
+        let child = app.__test_seed_child_window(&["one", "two"]);
+        let pane_ids = app.__test_child_pane_ids(child).expect("child window");
+        for pane_id in &pane_ids {
+            for round in 0..200 {
+                app.__test_advance_child_pane_parser(
+                    child,
+                    *pane_id,
+                    format!("line {round} with \x1b]8;;https://example.com/{round}\x07a link\x1b]8;;\x07\r\n")
+                        .as_bytes(),
+                );
+            }
+        }
+        windows.push(child);
+    }
+
+    app.__test_reconcile_pane_owners();
+    app.__test_force_retention_sample();
+
+    let charged = app.__test_governor_snapshot_root().process_amount;
+    assert!(
+        charged.bytes > 0,
+        "precondition: a populated session must charge something, or the teardown \
+         assertion below passes for the wrong reason"
+    );
+
+    // Close every pane in every window, then the windows themselves.
+    for window in &windows {
+        while app.__test_child_pane_ids(*window).is_some_and(|ids| !ids.is_empty()) {
+            app.__test_invoke_close_active_pane_in_child(*window);
+        }
+    }
+    app.__test_drain_pending_os_teardown();
+    app.__test_reconcile_pane_owners();
+
+    let after = app.__test_governor_snapshot_root().process_amount;
+    assert_eq!(
+        after.bytes, 0,
+        "the process root holds {} bytes after every pane closed; a charge taken and \
+         not returned reads as memory in use for the life of the process",
+        after.bytes
+    );
+    assert_eq!(after.items, 0, "and no items may remain");
+}
+
+/// A ledger that cannot release is worse than one that over-charges.
+///
+/// `release_failures` counts releases the ledger could not apply. Any non-zero
+/// value means the process total is permanently over-counted and no owner can
+/// reach zero — the figure would look like a leak while the memory was
+/// actually freed, sending an operator hunting for something that is not
+/// there.
+#[test]
+fn teardown_leaves_no_unapplied_releases() {
+    let mut app = app();
+    let child = app.__test_seed_child_window(&["one"]);
+    let pane_ids = app.__test_child_pane_ids(child).expect("child window");
+    for pane_id in &pane_ids {
+        app.__test_advance_child_pane_parser(child, *pane_id, b"content\r\n");
+    }
+    app.__test_reconcile_pane_owners();
+    app.__test_force_retention_sample();
+
+    while app.__test_child_pane_ids(child).is_some_and(|ids| !ids.is_empty()) {
+        app.__test_invoke_close_active_pane_in_child(child);
+    }
+    app.__test_drain_pending_os_teardown();
+
+    assert_eq!(
+        app.__test_governor_snapshot_root().release_failures,
+        0,
+        "a release the ledger could not apply permanently over-counts the process total"
+    );
+}
