@@ -19,6 +19,8 @@ use sonicterm_cfg::keymap::{Action, BroadcastScope, Keymap};
 use sonicterm_cfg::theme::Theme;
 use sonicterm_grid::grid::Grid;
 use sonicterm_io::pty::PtyHandle;
+use sonicterm_resource::ResourceGovernor;
+use sonicterm_types::{GovernorLimits, OwnerKind, OwnerLimits, ProcessKind, ResourceOwnerId};
 use sonicterm_vt::vt::{CommandEvent, Parser};
 use winit::{
     application::ApplicationHandler,
@@ -291,6 +293,21 @@ pub const PTY_REDRAW_FLUSH_BYTES: usize = 128 * 1024;
 pub const PTY_REPLY_QUEUE_CAPACITY: usize = 64;
 pub const MAX_PANE_COMMAND_EVENTS: usize = 1024;
 
+/// Owner limits that track without constraining.
+///
+/// Enforcement stays with the per-seam caps that are already tested and
+/// falsified. A governor limit here would be a second enforcement point, and
+/// two limits that must agree and are maintained separately will drift — the
+/// defect shape behind the charge-lifetime bug, where a cap silently stopped
+/// capping while still reporting itself as enforced.
+fn tracking_only_owner_limits() -> OwnerLimits {
+    OwnerLimits {
+        owner_bytes: usize::MAX,
+        class_bytes: enum_map::enum_map! { _ => usize::MAX },
+        class_items: enum_map::enum_map! { _ => None },
+    }
+}
+
 fn append_bounded_command_events(
     queue: &mut Vec<PaneCommandEvent>,
     events: impl IntoIterator<Item = PaneCommandEvent>,
@@ -432,6 +449,12 @@ pub struct WarmWindow {
 }
 
 pub struct WindowState {
+    /// This window's owner in the governor hierarchy.
+    ///
+    /// `None` for synthetic windows built by tests that never registered one.
+    /// Production windows always have it; the option exists so a test seam
+    /// cannot silently register a phantom owner that never closes.
+    pub(crate) owner: Option<ResourceOwnerId>,
     /// Phase B classification — see [`WindowRole`].
     pub role: WindowRole,
     /// Phase B2 PR-B2-0: promoted from `Arc<Window>` to
@@ -1240,6 +1263,13 @@ pub fn init_tracing_public() {
 /// read the current id after coalescing and send a typed redraw event. Native
 /// window APIs remain confined to the winit event-loop thread.
 pub struct PaneState {
+    /// This pane's owner in the governor hierarchy, below its window's.
+    ///
+    /// Assigned when the pane is inserted into a window rather than at
+    /// construction: `PaneState::new` is called from a dozen sites that have
+    /// no governor in scope, and threading one through all of them would be a
+    /// larger change than the ownership it establishes.
+    pub(crate) owner: Option<ResourceOwnerId>,
     pub parser: Arc<Mutex<Parser>>,
     pub pty: Option<PtyHandle>,
     pub redraw_target: Arc<Mutex<Option<WindowId>>>,
@@ -1304,6 +1334,8 @@ impl PaneState {
     #[doc(hidden)]
     pub fn new(parser: Arc<Mutex<Parser>>, pty: Option<PtyHandle>) -> Self {
         Self {
+            // Assigned when the pane is inserted into a window.
+            owner: None,
             parser,
             pty,
             redraw_target: Arc::new(Mutex::new(None)),
@@ -1489,6 +1521,18 @@ pub struct App {
     pub(super) os_drag_handoff_started: bool,
     /// Windows spawned by tearing tabs out of the parent bar. Keyed by
     /// winit WindowId so events route back to the right child.
+    /// Process-wide resource governor and its owner hierarchy.
+    ///
+    /// Holds the `Process` root; every window registers a `Window` owner below
+    /// it and every pane an `AppPane` owner below its window. That hierarchy
+    /// is what makes a window's total derivable from its panes — the question
+    /// per-pane accounting cannot answer and the one a user asks when they
+    /// close a window to reclaim memory.
+    ///
+    /// Registered here rather than accounted here: this change establishes
+    /// ownership only. Charging producers through it is the larger job that
+    /// changes when allocation happens, not merely where the number lives.
+    pub(super) governor: ResourceGovernor,
     pub(super) windows: HashMap<WindowId, WindowState>,
     /// Phase B2 PR-A: id of the main window. Set in `do_resumed` once
     /// the main `Window` is created and `WindowState` shadow entry is
@@ -1820,6 +1864,20 @@ impl App {
             command_palette,
             palette_attached_window: None,
             os_drag_handoff_started: false,
+            governor: ResourceGovernor::new(
+                ProcessKind::Gui,
+                GovernorLimits {
+                    // Deliberately unlimited. Enforcement stays with the
+                    // per-seam caps that are already tested; a second
+                    // enforcement point would create two figures that must
+                    // agree and will eventually drift — the defect shape of
+                    // the charge-lifetime bug in #923.
+                    process_bytes: usize::MAX,
+                    class_bytes: enum_map::enum_map! { _ => usize::MAX },
+                    class_items: enum_map::enum_map! { _ => None },
+                },
+            )
+            .expect("an unlimited governor cannot fail to construct"),
             windows: HashMap::new(),
             main_window_id: None,
             frontmost_window: None,
@@ -3009,6 +3067,8 @@ impl App {
             tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
         }
         let child = WindowState {
+            // Registered when the window is inserted.
+            owner: None,
             role: WindowRole::Terminal,
             window: None,
             renderer: None,
@@ -3046,6 +3106,7 @@ impl App {
             test_pane_viewport: None,
         };
         self.windows.insert(id, child);
+        self.register_window_owner(id);
         id
     }
 
@@ -3608,6 +3669,187 @@ impl App {
     /// was deleted in PR-B2c). Returns `None` before `do_resumed` /
     /// `__test_synthetic_main` has populated the shadow entry.
     #[doc(hidden)]
+    /// Register a window in the governor hierarchy and record its owner.
+    ///
+    /// Idempotent by construction: a window that already has an owner keeps
+    /// it, so a re-insert during tab transfer cannot create a second owner
+    /// that never closes. That is the ratchet shape — an owner registered
+    /// twice and released once leaves the hierarchy permanently over-counted.
+    pub(super) fn register_window_owner(&mut self, id: WindowId) {
+        let root = self.governor.root_owner();
+        let Some(window) = self.windows.get(&id) else { return };
+        if window.owner.is_some() {
+            return;
+        }
+        let owner =
+            self.governor.create_child(root, OwnerKind::Window, tracking_only_owner_limits());
+        match owner {
+            Ok(owner) => {
+                if let Some(window) = self.windows.get_mut(&id) {
+                    window.owner = Some(owner);
+                }
+            }
+            Err(error) => {
+                // A window that cannot register still works; it is invisible
+                // to hierarchy accounting until the next insert. Failing the
+                // window would trade a diagnostic gap for a lost window.
+                tracing::warn!(
+                    target: "memory",
+                    ?error,
+                    "window owner registration failed; hierarchy accounting will omit it"
+                );
+            }
+        }
+    }
+
+    /// Test-only: snapshot the governor's process root.
+    #[doc(hidden)]
+    pub fn __test_governor_snapshot_root(&self) -> sonicterm_types::ResourceSnapshot {
+        self.governor
+            .snapshot(self.governor.root_owner())
+            .expect("the process root always snapshots")
+    }
+
+    /// Test-only: whether `owner` is still open in the governor.
+    ///
+    /// Asks the ledger for the owner's *state*, not its existence.
+    /// `finish_close` transitions an owner to `Closed` and decrements its
+    /// parent's child count; it does not remove the record, so a closed owner
+    /// still snapshots successfully. A check on existence would therefore pass
+    /// whether or not the owner was ever closed — which is exactly the
+    /// non-discriminating assertion that let a leaking release path through
+    /// here on the first attempt.
+    #[doc(hidden)]
+    pub fn __test_owner_is_open(&self, owner: ResourceOwnerId) -> bool {
+        self.governor
+            .snapshot(owner)
+            .map(|snapshot| snapshot.owner_state != sonicterm_types::OwnerState::Closed)
+            .unwrap_or(false)
+    }
+
+    /// Test-only: a window's owner id, if it registered one.
+    #[doc(hidden)]
+    pub fn __test_window_owner(&self, id: WindowId) -> Option<ResourceOwnerId> {
+        self.windows.get(&id).and_then(|window| window.owner)
+    }
+
+    /// Test-only: how many panes in a window have owners.
+    #[doc(hidden)]
+    pub fn __test_child_pane_owner_count(&self, id: WindowId) -> Option<usize> {
+        self.windows
+            .get(&id)
+            .map(|window| window.panes.values().filter(|pane| pane.owner.is_some()).count())
+    }
+
+    /// Test-only: the pane owner ids in a window, sorted for comparison.
+    #[doc(hidden)]
+    pub fn __test_child_pane_owners(&self, id: WindowId) -> Vec<u64> {
+        let mut owners: Vec<u64> = self
+            .windows
+            .get(&id)
+            .map(|window| {
+                window
+                    .panes
+                    .values()
+                    .filter_map(|pane| pane.owner)
+                    .map(|owner| owner.get())
+                    .collect()
+            })
+            .unwrap_or_default();
+        owners.sort_unstable();
+        owners
+    }
+
+    /// Test-only invoker for [`Self::reconcile_pane_owners`].
+    #[doc(hidden)]
+    pub fn __test_reconcile_pane_owners(&mut self) {
+        self.reconcile_pane_owners();
+    }
+
+    /// Reconcile pane owners against every window's actual pane set.
+    ///
+    /// Panes are inserted at a dozen sites, several inside borrows where the
+    /// governor is not reachable, and threading registration through all of
+    /// them is the "every call site must remember" pattern that produces the
+    /// one forgotten site. Reconciling instead means there is no site to
+    /// forget: a pane without an owner gets one, and an owner whose pane is
+    /// gone is closed.
+    ///
+    /// Runs from the periodic retention sampler rather than per frame, so its
+    /// cost is bounded by that interval regardless of how often panes move.
+    pub(super) fn reconcile_pane_owners(&mut self) {
+        let window_ids: Vec<WindowId> = self.windows.keys().copied().collect();
+        for window_id in window_ids {
+            let Some(window) = self.windows.get(&window_id) else { continue };
+            let Some(window_owner) = window.owner else { continue };
+
+            let unowned: Vec<u64> = window
+                .panes
+                .iter()
+                .filter(|(_, pane)| pane.owner.is_none())
+                .map(|(id, _)| *id)
+                .collect();
+
+            for pane_id in unowned {
+                match self.governor.create_child(
+                    window_owner,
+                    OwnerKind::AppPane,
+                    tracking_only_owner_limits(),
+                ) {
+                    Ok(owner) => {
+                        if let Some(pane) =
+                            self.windows.get_mut(&window_id).and_then(|w| w.panes.get_mut(&pane_id))
+                        {
+                            pane.owner = Some(owner);
+                        } else {
+                            // The pane vanished between listing and assigning.
+                            // Close the owner rather than leak it.
+                            let _ = self.governor.begin_close(owner);
+                            let _ = self.governor.finish_close(owner);
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "memory",
+                            ?error,
+                            "pane owner registration failed; hierarchy accounting omits this pane"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Close a window's owner and every pane owner below it.
+    ///
+    /// Called from window teardown. Owners are closed leaf-first because the
+    /// governor refuses to finish closing a parent with open children — which
+    /// is the invariant that makes a leaked pane owner visible rather than
+    /// silent.
+    pub(super) fn release_window_owner(&mut self, id: WindowId) {
+        let Some(window) = self.windows.get_mut(&id) else { return };
+        let pane_owners: Vec<ResourceOwnerId> =
+            window.panes.values_mut().filter_map(|pane| pane.owner.take()).collect();
+        let window_owner = window.owner.take();
+
+        for owner in pane_owners {
+            let _ = self.governor.begin_close(owner);
+            let _ = self.governor.finish_close(owner);
+        }
+        if let Some(owner) = window_owner {
+            let _ = self.governor.begin_close(owner);
+            if let Err(error) = self.governor.finish_close(owner) {
+                // A window owner that will not close means a pane owner below
+                // it is still open — a leak this reports rather than hides.
+                tracing::warn!(
+                    target: "memory",
+                    ?error,
+                    "window owner did not close; a pane owner below it is still open"
+                );
+            }
+        }
+    }
+
     pub fn main_panes(&self) -> Option<&HashMap<u64, PaneState>> {
         Some(&self.windows.get(&self.main_window_id?)?.panes)
     }
@@ -3924,6 +4166,7 @@ impl App {
     /// the window existed and was removed, `false` otherwise.
     #[doc(hidden)]
     pub fn __test_remove_window(&mut self, id: WindowId) -> bool {
+        self.release_window_owner(id);
         self.windows.remove(&id).is_some()
     }
 
@@ -4020,6 +4263,8 @@ impl App {
         }
         let id = synthetic_main_window_id();
         let ws = WindowState {
+            // Registered when the window is inserted.
+            owner: None,
             role: WindowRole::Terminal,
             window: None,
             renderer: None,
@@ -4057,6 +4302,7 @@ impl App {
             test_pane_viewport: None,
         };
         self.windows.insert(id, ws);
+        self.register_window_owner(id);
         self.main_window_id = Some(id);
     }
 

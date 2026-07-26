@@ -823,6 +823,9 @@ impl App {
 
         let win_id = window.id();
         let child = WindowState {
+            // Registered when the window is inserted; construction has no
+            // governor in scope.
+            owner: None,
             role: crate::app::WindowRole::Terminal,
             window: Some(window.clone()),
             renderer: Some(renderer),

@@ -403,6 +403,9 @@ impl App {
         }
         self.main_window_id = Some(main_id);
         let shadow = super::WindowState {
+            // Registered when the window is inserted; construction has no
+            // governor in scope.
+            owner: None,
             role: super::WindowRole::Terminal,
             window: Some(window.clone()),
             renderer: Some(renderer),
@@ -440,6 +443,7 @@ impl App {
             test_pane_viewport: None,
         };
         self.windows.insert(main_id, shadow);
+        self.register_window_owner(main_id);
 
         // Seed the first tab + pane now that the window + renderer exist.
         self.new_tab("shell");

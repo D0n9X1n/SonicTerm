@@ -334,6 +334,9 @@ impl App {
         let active_pane = state.active_pane;
         child_tabs.push(tab);
         let child = WindowState {
+            // Registered when the window is inserted; construction has no
+            // governor in scope.
+            owner: None,
             role: crate::app::WindowRole::Terminal,
             window: Some(window.clone()),
             renderer: Some(renderer),
@@ -382,6 +385,7 @@ impl App {
             test_pane_viewport: None,
         };
         self.windows.insert(win_id, child);
+        self.register_window_owner(win_id);
         // #pane-geom: now that the child WindowState exists, size each migrated
         // pane to its OWN split sub-rect (via compute_pane_rects_for) instead of
         // the full child grid. Sizing every pane to the whole `(cols, rows)` is
