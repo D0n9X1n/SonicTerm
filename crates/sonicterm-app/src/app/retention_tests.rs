@@ -300,3 +300,48 @@ fn all_three_grid_classes_appear_among_the_charged_seams() {
         assert!(charged.contains(&class), "{class:?} must have a production charge site");
     }
 }
+
+/// The wiki's field table must name the fields the log line emits.
+///
+/// `wiki/Logging.md` documented `grid_bytes` after that field was split into
+/// three, so a user following the documentation would look for a field that no
+/// longer exists. Nothing catches that: the log line compiles, the wiki
+/// renders, and the mismatch surfaces only when someone tries to use it.
+///
+/// Both language sections are checked, because a bilingual page drifts one
+/// half at a time.
+#[test]
+fn the_wiki_documents_the_fields_the_memory_log_actually_emits() {
+    const WIKI: &str = include_str!("../../../../wiki/Logging.md");
+    const SOURCE: &str = include_str!("retention.rs");
+
+    // Fields the log line emits, scraped from the emitting source.
+    let emitted: Vec<&str> = SOURCE
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let name = line.split(" = ").next()?;
+            (name.ends_with("_bytes") && line.contains(" = retention.")).then_some(name)
+        })
+        .collect();
+
+    assert!(!emitted.is_empty(), "the scan must find emitted fields, or it asserts nothing");
+
+    for field in &emitted {
+        let count = WIKI.matches(field).count();
+        assert!(
+            count >= 2,
+            "`{field}` is emitted by the memory log but appears {count} time(s) in \
+             wiki/Logging.md; both the English and 中文 tables must name it"
+        );
+    }
+
+    // And the reverse: the table must not document a field that no longer
+    // exists. `grid_bytes` was split into three by the class-attribution work,
+    // and the wiki kept naming it — a user would look for a field the log line
+    // stopped emitting.
+    assert!(
+        !WIKI.contains("`grid_bytes`"),
+        "wiki/Logging.md still documents `grid_bytes`, which the log line no longer emits"
+    );
+}

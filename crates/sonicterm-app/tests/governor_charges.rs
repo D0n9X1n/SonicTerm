@@ -166,3 +166,63 @@ fn closing_a_window_returns_the_process_total_to_zero() {
     );
     assert_eq!(root.release_failures, 0, "and the ledger must stay consistent through teardown");
 }
+
+/// The gated production path charges; the test seam alone never proved it.
+///
+/// Every test in this file reaches charging through
+/// `__test_force_retention_sample`, which calls `charge_pane_owners` directly.
+/// Production reaches it only through `sample_pane_retention`, which returns
+/// immediately unless `enabled!(target: "memory", DEBUG)` holds.
+///
+/// No configured log level named the `memory` target, so that gate was closed
+/// in every shipped session and **nothing was ever charged**. These tests all
+/// passed throughout, because they enter below the gate — they verified the
+/// charge logic, which was never the part that was broken.
+///
+/// This one enters above it.
+#[test]
+fn the_production_sampling_path_charges_when_the_memory_target_is_admitted() {
+    use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
+
+    let mut app = app();
+    let child = app.__test_seed_child_window(&["one"]);
+    let pane_id = *app.__test_child_pane_ids(child).expect("child window").first().expect("pane");
+
+    // The filter a `level = "debug"` session actually gets, not a directive
+    // written here. Writing one would prove the gate opens when the target is
+    // admitted and say nothing about whether any configured level admits it —
+    // which was the whole defect.
+    let debug_filter = sonicterm_logging::filter_for_level(sonicterm_logging::LogLevel::Debug);
+    let subscriber =
+        Registry::default().with(EnvFilter::try_new(debug_filter).expect("valid filter"));
+
+    let sampled =
+        tracing::subscriber::with_default(subscriber, || app.__test_sample_pane_retention_now());
+
+    assert!(sampled, "with the memory target admitted, a due sample must run");
+    let charged = app.__test_pane_charge_total(child, pane_id).expect("pane present");
+    assert!(charged > 0, "the production path must charge, not only measure");
+}
+
+/// And stays inert at the default level.
+///
+/// The gate is load-bearing in both directions: it keeps a walk over every
+/// pane out of an ordinary session. A fix that charged unconditionally would
+/// trade one defect for a permanent cost.
+#[test]
+fn the_production_sampling_path_stays_inert_at_the_default_level() {
+    use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
+
+    let mut app = app();
+    let child = app.__test_seed_child_window(&["one"]);
+    let pane_id = *app.__test_child_pane_ids(child).expect("child window").first().expect("pane");
+
+    let subscriber = Registry::default()
+        .with(EnvFilter::try_new(sonicterm_logging::DEFAULT_FILTER).expect("valid filter"));
+
+    let sampled =
+        tracing::subscriber::with_default(subscriber, || app.__test_sample_pane_retention_now());
+
+    assert!(!sampled, "the default level must not run the sampling walk");
+    assert_eq!(app.__test_pane_charge_total(child, pane_id), Some(0), "and must not charge");
+}

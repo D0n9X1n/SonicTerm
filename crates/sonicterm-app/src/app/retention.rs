@@ -400,6 +400,22 @@ impl super::App {
         self.charge_pane_owners();
     }
 
+    /// Test-only: enter the **gated** production sampling path.
+    ///
+    /// Distinct from [`Self::__test_charge_pane_owners`], which calls the
+    /// charging step directly. Production reaches charging only through
+    /// `sample_pane_retention`, whose `enabled!(target: "memory", …)` gate is
+    /// the part that was closed in every shipped session. A test that enters
+    /// below the gate cannot observe that, which is why one that enters above
+    /// it exists.
+    ///
+    /// Clears the rate limiter so the sample is due.
+    #[doc(hidden)]
+    pub fn __test_sample_pane_retention_now(&mut self) -> bool {
+        self.last_retention_sample = None;
+        self.sample_pane_retention(Instant::now())
+    }
+
     fn charge_pane_owners(&mut self) {
         let window_ids: Vec<super::WindowId> = self.windows.keys().copied().collect();
         for window_id in window_ids {
