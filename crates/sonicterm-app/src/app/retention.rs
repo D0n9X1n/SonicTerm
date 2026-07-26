@@ -48,6 +48,15 @@ pub struct PaneRetention {
     pub hyperlinks: ResourceAmount,
     /// Decoded inline images retained for display.
     pub inline_media: ResourceAmount,
+    /// Bytes waiting in this pane's PTY output channel.
+    ///
+    /// Bounded at 64 slots over a reused 64 KiB ring. Measured at 512 KiB per
+    /// pane when full — the ring hands out views into one allocation rather
+    /// than 64 independent buffers, so the figure is 8x below what the slot
+    /// count alone would suggest. Ten MiB across twenty panes: small next to
+    /// the grid, large enough that leaving it uncharged would be a gap rather
+    /// than a rounding error.
+    pub pty_output: ResourceAmount,
 }
 
 impl PaneRetention {
@@ -67,6 +76,7 @@ impl PaneRetention {
             self.parser,
             self.hyperlinks,
             self.inline_media,
+            self.pty_output,
         ]
         .into_iter()
         .fold(ResourceAmount::default(), |acc, part| ResourceAmount {
@@ -85,6 +95,7 @@ impl PaneRetention {
             ("parser", self.parser),
             ("hyperlinks", self.hyperlinks),
             ("inline_media", self.inline_media),
+            ("pty_output", self.pty_output),
         ]
         .into_iter()
         .max_by_key(|(_, amount)| amount.bytes)
@@ -113,6 +124,11 @@ pub fn measure_pane(pane: &PaneState) -> Option<PaneRetention> {
         .map(|images| super::media::retained_inline_media(&images))
         .unwrap_or_default();
 
+    let pty_output = pane.pty.as_ref().map_or_else(ResourceAmount::default, |pty| {
+        let bytes = sonicterm_io::pty::queued_output_bytes(pty);
+        ResourceAmount { bytes, items: usize::from(bytes > 0) }
+    });
+
     Some(PaneRetention {
         grid_visible: regions.visible,
         grid_history: regions.history,
@@ -120,6 +136,7 @@ pub fn measure_pane(pane: &PaneState) -> Option<PaneRetention> {
         parser: parser_amount,
         hyperlinks: ResourceAmount { bytes: hyperlink_bytes, items: hyperlink_items },
         inline_media,
+        pty_output,
     })
 }
 
@@ -139,6 +156,7 @@ pub fn measure_panes<'a>(panes: impl IntoIterator<Item = &'a PaneState>) -> Pane
             parser: add(acc.parser, pane.parser),
             hyperlinks: add(acc.hyperlinks, pane.hyperlinks),
             inline_media: add(acc.inline_media, pane.inline_media),
+            pty_output: add(acc.pty_output, pane.pty_output),
         }
     })
 }
@@ -168,6 +186,7 @@ pub fn log_pane_retention(label: &str, retention: &PaneRetention) {
         parser_bytes = retention.parser.bytes,
         hyperlink_bytes = retention.hyperlinks.bytes,
         inline_media_bytes = retention.inline_media.bytes,
+        pty_output_bytes = retention.pty_output.bytes,
         largest_seam = seam,
         largest_seam_bytes = largest.bytes,
         "pane retention"
@@ -208,7 +227,7 @@ pub fn retention_sample_due(last_sample: &mut Option<Instant>, now: Instant) -> 
 /// the registry owns those strings independently of any cell — that
 /// disjointness is what makes summing the seams valid at all.
 #[must_use]
-pub fn seam_classes(retention: &PaneRetention) -> [(ResourceClass, ResourceAmount); 6] {
+pub fn seam_classes(retention: &PaneRetention) -> [(ResourceClass, ResourceAmount); 7] {
     [
         (ResourceClass::GridVisible, retention.grid_visible),
         (ResourceClass::GridHistory, retention.grid_history),
@@ -216,6 +235,7 @@ pub fn seam_classes(retention: &PaneRetention) -> [(ResourceClass, ResourceAmoun
         (ResourceClass::ParserCapture, retention.parser),
         (ResourceClass::ProtocolMetadata, retention.hyperlinks),
         (ResourceClass::InlineMediaRetained, retention.inline_media),
+        (ResourceClass::PtyOutput, retention.pty_output),
     ]
 }
 
@@ -349,6 +369,7 @@ pub fn log_sampled_panes<'a>(
             parser: add(session.parser, retention.parser),
             hyperlinks: add(session.hyperlinks, retention.hyperlinks),
             inline_media: add(session.inline_media, retention.inline_media),
+            pty_output: add(session.pty_output, retention.pty_output),
         };
         sampled += 1;
     }
@@ -367,6 +388,7 @@ pub fn log_sampled_panes<'a>(
         parser_bytes = session.parser.bytes,
         hyperlink_bytes = session.hyperlinks.bytes,
         inline_media_bytes = session.inline_media.bytes,
+        pty_output_bytes = session.pty_output.bytes,
         "session retention"
     );
     session

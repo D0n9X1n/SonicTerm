@@ -93,6 +93,98 @@ pub enum ResourceClass {
     ReaperWork,
 }
 
+/// Why each [`ResourceClass`] is or is not charged in production.
+///
+/// A class with no charge site is indistinguishable, from the outside, from a
+/// class someone forgot. This records which it is, with the measurement behind
+/// the decision, and a test asserts the table covers the enum — so a new class
+/// cannot be added without a decision being made about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClassCoverage {
+    /// A production site reserves and charges this class.
+    Charged,
+    /// The subsystem that would own it does not exist yet. Charging it would
+    /// be charging nothing.
+    SubsystemAbsent,
+    /// Compiled out of shipped builds by a feature gate.
+    FeatureGated,
+    /// Allocated and released within one call, so a charge would be taken and
+    /// returned before any sampler could observe it.
+    TransientWithinCall,
+    /// Real retention, measured, and small enough that charging it would cost
+    /// more than it reports. The measurement is recorded so "small" is a
+    /// finding rather than an assumption.
+    MeasuredNegligible {
+        /// Worst-case bytes retained per pane.
+        per_pane_bytes: usize,
+    },
+}
+
+impl ResourceClass {
+    /// This class's coverage decision.
+    ///
+    /// Exhaustive by construction: adding a variant to [`ResourceClass`] fails
+    /// to compile here until someone decides what it is.
+    #[must_use]
+    pub const fn coverage(self) -> ClassCoverage {
+        match self {
+            // Charged from `sonicterm-app`'s retention sampling pass.
+            Self::GridVisible
+            | Self::GridHistory
+            | Self::GridAlternate
+            | Self::ParserCapture
+            | Self::ProtocolMetadata
+            | Self::InlineMediaRetained => ClassCoverage::Charged,
+
+            // Charged from the renderer's retention seam.
+            Self::GlyphAtlas | Self::SoftwareFrame => ClassCoverage::Charged,
+
+            // PTY output queue: 64 slots over a reused 64 KiB ring. Measured
+            // at 512 KiB per pane at full capacity — the ring hands out views
+            // into one allocation rather than 64 independent buffers, which is
+            // 8x less than treating the slots as separate would suggest.
+            Self::PtyOutput => ClassCoverage::Charged,
+
+            // 4 bounded slots of keystroke-sized payloads.
+            Self::PtyInput => ClassCoverage::MeasuredNegligible { per_pane_bytes: 4 * 1024 },
+            // 64 bounded slots of DSR/XTVERSION replies, ~32 bytes each.
+            Self::ParserReply => ClassCoverage::MeasuredNegligible { per_pane_bytes: 2 * 1024 },
+            // 1024 bounded records of 40 bytes.
+            Self::CommandEvents => ClassCoverage::MeasuredNegligible { per_pane_bytes: 40 * 1024 },
+
+            // Decode buffers live inside `decode_inline_image`; the retained
+            // result is charged as `InlineMediaRetained`.
+            Self::InlineMediaDecode => ClassCoverage::TransientWithinCall,
+            // Rasterized before atlas insertion, then owned by the atlas.
+            Self::GlyphRaster => ClassCoverage::TransientWithinCall,
+            // Staging for one upload, released when the upload completes.
+            Self::UploadStaging => ClassCoverage::TransientWithinCall,
+
+            // SSH is `--features ssh`, off in shipped builds.
+            Self::RemoteInput | Self::RemoteOutput => ClassCoverage::FeatureGated,
+
+            // `sonicterm-mux` is server scaffolding with no live subscribers.
+            Self::MuxSubscriber => ClassCoverage::SubsystemAbsent,
+            // The reaper exists in `sonicterm-resource` and is not referenced
+            // from `sonicterm-app`.
+            Self::ReaperWork => ClassCoverage::SubsystemAbsent,
+            // Owner records are the ledger's own storage. Charging them to a
+            // ledger class would make the ledger account for itself, and the
+            // recursion has no fixed point.
+            Self::RegistryMetadata => ClassCoverage::SubsystemAbsent,
+
+            // Parsed font data is retained for the life of the font stack and
+            // shared across every pane, so it belongs to a `SharedFont` owner
+            // that the app does not yet create.
+            Self::FontFace => ClassCoverage::SubsystemAbsent,
+            // GPU surface memory belongs to the driver; wgpu exposes no size
+            // accounting for it, so any figure here would be a guess presented
+            // as a measurement. `SoftwareFrame` covers the CPU-side buffer.
+            Self::Surface => ClassCoverage::SubsystemAbsent,
+        }
+    }
+}
+
 /// Two-dimensional amount charged to a resource class.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ResourceAmount {

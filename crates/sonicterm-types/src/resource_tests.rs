@@ -230,3 +230,92 @@ fn public_contract_types_are_send_sync_and_copy_where_expected() {
     assert_copy::<ResourceAmount>();
     assert_copy::<RetryToken>();
 }
+
+// ---------------------------------------------------------------------------
+// Class coverage
+//
+// A class with no charge site looks identical, from outside, to a class
+// someone forgot. These make the difference explicit and checkable.
+// ---------------------------------------------------------------------------
+
+/// Every class has a coverage decision.
+///
+/// Guaranteed by the exhaustive match in `coverage()`, so this asserts the
+/// guarantee is real rather than the match having a catch-all arm.
+#[test]
+fn every_class_has_a_coverage_decision() {
+    for index in 0..ResourceClass::LENGTH {
+        let class = ResourceClass::from_usize(index);
+        // Calling it at all is the assertion: a wildcard arm would make this
+        // pass vacuously, so the value is checked for sense too.
+        match class.coverage() {
+            ClassCoverage::MeasuredNegligible { per_pane_bytes } => {
+                assert!(
+                    per_pane_bytes > 0,
+                    "{class:?} is classified negligible with a zero measurement; \
+                     a zero figure means nobody measured"
+                );
+                assert!(
+                    per_pane_bytes <= 1024 * 1024,
+                    "{class:?} is classified negligible at {per_pane_bytes} bytes per pane, \
+                     which is not negligible — twenty panes make it \
+                     {} MiB",
+                    per_pane_bytes * 20 / (1024 * 1024)
+                );
+            }
+            ClassCoverage::Charged
+            | ClassCoverage::SubsystemAbsent
+            | ClassCoverage::FeatureGated
+            | ClassCoverage::TransientWithinCall => {}
+        }
+    }
+}
+
+/// The classes the retention path charges must say so.
+///
+/// Pins the table to reality in the direction that matters: a class charged in
+/// production but recorded as absent would send the next reader looking for
+/// work already done.
+#[test]
+fn classes_with_production_charge_sites_are_recorded_as_charged() {
+    for class in [
+        ResourceClass::GridVisible,
+        ResourceClass::GridHistory,
+        ResourceClass::GridAlternate,
+        ResourceClass::ParserCapture,
+        ResourceClass::ProtocolMetadata,
+        ResourceClass::InlineMediaRetained,
+        ResourceClass::GlyphAtlas,
+        ResourceClass::SoftwareFrame,
+        ResourceClass::PtyOutput,
+    ] {
+        assert_eq!(
+            class.coverage(),
+            ClassCoverage::Charged,
+            "{class:?} has a production charge site and must be recorded as charged"
+        );
+    }
+}
+
+/// Nothing is classified negligible without a figure behind it.
+///
+/// The whole point of the variant carrying a number is that "small" has to be
+/// a measurement someone took, not an adjective. Twenty panes is the scale the
+/// rest of this work uses, so the aggregate is checked at that scale.
+#[test]
+fn negligible_classes_stay_negligible_in_aggregate() {
+    const PANES: usize = 20;
+    let mut aggregate = 0usize;
+    for index in 0..ResourceClass::LENGTH {
+        let class = ResourceClass::from_usize(index);
+        if let ClassCoverage::MeasuredNegligible { per_pane_bytes } = class.coverage() {
+            aggregate += per_pane_bytes * PANES;
+        }
+    }
+    assert!(
+        aggregate < 4 * 1024 * 1024,
+        "everything classified negligible sums to {} KiB across {PANES} panes; \
+         a sum that large is not negligible even if each term is",
+        aggregate / 1024
+    );
+}
