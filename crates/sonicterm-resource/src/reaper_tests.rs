@@ -136,8 +136,11 @@ fn a_reserved_slot_transfers_ownership_only_on_enqueue() {
 
 #[test]
 fn blocking_work_never_runs_on_the_poll_loop() {
-    let clock = TestClock::new();
-    let supervisor = supervisor(&clock);
+    // A real clock: the assertion observes a real OS thread, and virtual time
+    // jumps to the deadline on the first poll, abandoning the call before it
+    // records anything. Virtual time is for deferral, not for watching threads.
+    let clock = SystemClock;
+    let supervisor = ReaperSupervisor::new(ReaperLimits::new(2, 1, 2).unwrap(), Arc::new(clock));
     let ran_on = Arc::new(Mutex::new(None));
     supervisor
         .try_reserve_slot()
@@ -614,9 +617,12 @@ fn two_blocking_calls_run_at_the_same_time() {
     // owner's teardown. Both calls rendezvous on a barrier, so this test
     // cannot pass if the supervisor joins each helper before starting the
     // next — the earlier implementation would hang here rather than fail.
-    let clock = TestClock::new();
-    let supervisor =
-        ReaperSupervisor::new(ReaperLimits::new(4, 2, 4).unwrap(), Arc::new(clock.clone()));
+    //
+    // A real clock, for the same reason the poll-loop test needs one: these are
+    // real OS threads, and virtual time jumps to the deadline on the first
+    // poll, abandoning both calls before either reaches the barrier.
+    let clock = SystemClock;
+    let supervisor = ReaperSupervisor::new(ReaperLimits::new(4, 2, 4).unwrap(), Arc::new(clock));
     let barrier = Arc::new(std::sync::Barrier::new(2));
     let overlapped = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
