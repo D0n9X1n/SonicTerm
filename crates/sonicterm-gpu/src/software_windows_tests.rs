@@ -87,10 +87,120 @@ fn software_frame_growth_uses_exact_validated_capacity() {
     assert_eq!(frame.pixels.capacity(), 100 * 100 * 4);
 }
 
+/// Decoded pixels and the destination surface are bounded against the same
+/// ceiling, so a decode cannot be admitted that the surface then cannot hold.
+///
+/// RI-NATIVE-SURFACE recorded these as "separate surface-size checks". They
+/// are separate, but they are not independent: `validated_surface_size`
+/// rejects any frame whose byte total crosses `MAX_SURFACE_BYTES`, and the
+/// same helper gates both `new` and `prepare`, so the destination can never
+/// be admitted above the bound whatever the decode asks for.
 #[test]
-#[ignore = "v120-invariant-baseline:v120_native_decode_and_surface_share_bounds:WP-RENDER"]
 fn v120_native_decode_and_surface_share_bounds() {
-    panic!("baseline invariant requires WP-RENDER decode and surface governor");
+    // A dimension inside MAX_SURFACE_DIMENSION whose byte total still crosses
+    // the surface byte ceiling: the two checks are not the same check. The
+    // ceiling itself is private to `core`, so this asserts the behaviour it
+    // produces rather than the constant.
+    let side = MAX_SURFACE_DIMENSION - 1;
+    assert!(
+        validated_surface_size(side, 1, MAX_SURFACE_DIMENSION).is_some(),
+        "the chosen side must pass the axis check on its own"
+    );
+    assert!(
+        validated_surface_size(side, side, MAX_SURFACE_DIMENSION).is_none(),
+        "a frame within the dimension limit must still be rejected on total bytes"
+    );
+    assert!(
+        WindowsSoftwareFrame::new(side, side, [0.0, 0.0, 0.0, 1.0]).is_err(),
+        "constructing an over-budget frame must fail rather than allocate"
+    );
+
+    // The same ceiling governs a resize, so a frame cannot grow past it after
+    // construction succeeded at a smaller size.
+    let mut frame = WindowsSoftwareFrame::new(64, 64, [0.0, 0.0, 0.0, 1.0]).expect("small frame");
+    let before = frame.retained_bytes();
+    assert!(
+        frame.prepare(side, side, [0.0, 0.0, 0.0, 1.0]).is_err(),
+        "resizing past the byte ceiling must fail"
+    );
+    assert_eq!(frame.retained_bytes(), before, "a rejected resize must not have allocated");
+}
+
+/// A glyph drawn at a fractional scale must not sample its neighbours.
+///
+/// `blit_glyph` takes a nearest sample only when source and destination match
+/// within 0.01px (`one_to_one`). Any other scale falls to bilinear, which
+/// reads a 2x2 texel neighbourhood — so a glyph whose atlas neighbour holds
+/// unrelated pixels blends them in at its edges.
+///
+/// This is the mechanism #888 reports: Powerline separators showing faint
+/// marks in their own colours, only after long use. Bleeding is invisible on
+/// a fresh atlas because the neighbours are empty; once eviction repacks real
+/// glyphs beside a separator, it becomes marks. A fractional cell height —
+/// the reporter runs line height 1.15 — puts every glyph on this path.
+#[test]
+fn a_scaled_glyph_does_not_sample_its_atlas_neighbour() {
+    let mut atlas = GlyphAtlas::new(4, 4);
+    // Two tiles side by side: the subject is fully transparent, the
+    // neighbour fully opaque. Any non-zero output is the neighbour bleeding.
+    let subject = atlas
+        .get_or_insert(
+            GlyphKey::new('a', false, false),
+            &mut TileRasterizer(RasterTile {
+                width: 1,
+                height: 1,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 1.0,
+                coverage: vec![0],
+                is_color: false,
+                is_subpixel: false,
+            }),
+        )
+        .expect("subject inserts");
+    let _neighbour = atlas
+        .get_or_insert(
+            GlyphKey::new('b', false, false),
+            &mut TileRasterizer(RasterTile {
+                width: 1,
+                height: 1,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 1.0,
+                coverage: vec![255],
+                is_color: false,
+                is_subpixel: false,
+            }),
+        )
+        .expect("neighbour inserts");
+
+    // Draw the transparent subject into a 3x3 destination: a 1px source into
+    // 3px is emphatically not one_to_one, so this is the bilinear path.
+    let mut frame =
+        WindowsSoftwareFrame::new(3, 3, [0.0, 0.0, 0.0, 255.0 / 255.0]).expect("valid frame");
+    frame.draw_glyphs(
+        &atlas,
+        &[GlyphInstance {
+            rect: px_to_ndc(0.0, 0.0, 3.0, 3.0, 3.0, 3.0),
+            uv: subject.uv,
+            color: [1.0, 1.0, 1.0, 1.0],
+            flags: [0.0; 4],
+        }],
+    );
+
+    // The subject has zero coverage, so every destination pixel must remain
+    // the cleared background. Anything brighter came from the neighbour.
+    for y in 0..3 {
+        for x in 0..3 {
+            let px = frame.pixel_bgra(x, y);
+            assert_eq!(
+                px,
+                [0, 0, 0, 255],
+                "pixel ({x},{y}) = {px:?}: a fully transparent glyph scaled 1px -> 3px \
+                 picked up its atlas neighbour"
+            );
+        }
+    }
 }
 
 #[test]
