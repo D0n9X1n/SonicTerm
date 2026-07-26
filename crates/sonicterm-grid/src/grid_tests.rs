@@ -1016,3 +1016,63 @@ fn entering_an_alternate_screen_attributes_the_saved_primary_separately() {
     let after = grid.retained_amount_by_region();
     assert_eq!(after.alternate, ResourceAmount::default(), "leaving must clear the region");
 }
+
+/// Row containers are counted, not only the cells they point at.
+///
+/// A `VecDeque<Line>` reserves `Line` headers independently of the cell
+/// storage each points at, and nothing else in the process counts them. The
+/// figure is small — 0.68% on a full 200×50 grid — and is counted for the same
+/// reason the rare-attribute boxes are: "small" was the answer there too,
+/// before measurement made it 1.67× the reported total.
+#[test]
+fn row_containers_are_counted_in_the_retained_figure() {
+    let mut grid = Grid::new(80, 24);
+    let empty = grid.retained_amount().bytes;
+
+    // Grow the scrollback so the deque reserves materially more slots.
+    for _ in 0..2_000 {
+        for _ in 0..70 {
+            grid.put_char('x', Color::Default, Color::Default, CellFlags::empty());
+        }
+        grid.put_char('\n', Color::Default, Color::Default, CellFlags::empty());
+    }
+    let full = grid.retained_amount().bytes;
+
+    let line = std::mem::size_of::<Line>();
+    let container = (grid.visible.capacity() + grid.scrollback.capacity()) * line
+        + grid.dirty_rows.capacity() * std::mem::size_of::<bool>();
+    assert!(container > 0, "precondition: the deques reserved slots");
+
+    let cells: usize =
+        grid.rows_iter().chain(grid.scrollback_iter()).map(Line::approx_capacity_byte_size).sum();
+
+    assert!(
+        full > cells,
+        "the reported figure must exceed cell storage alone; containers and boxes are \
+         grid-owned and counted by nothing else"
+    );
+    assert!(full > empty, "filling the grid must move the figure");
+}
+
+/// Adding the container term must not break the region split.
+///
+/// The three regions sum to the total, and that property is what lets them be
+/// charged to separate classes. A term added to the total and not to a region
+/// would silently change how much is charged.
+#[test]
+fn container_bytes_keep_the_region_split_exact() {
+    let mut grid = Grid::new(80, 24);
+    for _ in 0..300 {
+        for _ in 0..70 {
+            grid.put_char('y', Color::Default, Color::Default, CellFlags::empty());
+        }
+        grid.put_char('\n', Color::Default, Color::Default, CellFlags::empty());
+    }
+    grid.enter_alt_screen();
+
+    assert_eq!(
+        grid.retained_amount_by_region().total(),
+        grid.retained_amount(),
+        "regions must still sum to the total with containers counted"
+    );
+}

@@ -438,6 +438,64 @@ impl super::App {
         self.sample_pane_retention(Instant::now())
     }
 
+    /// Cancel media captures that have stopped receiving.
+    ///
+    /// A capture holds its staging buffer between an APC/DCS introducer and
+    /// its terminator, and the terminator is not guaranteed to arrive: a
+    /// transfer killed mid-flight, a dropped link, `imgcat` over a stalled SSH
+    /// session. Until it does, the buffer is pinned for the life of the pane
+    /// and no eviction pass can reclaim it — the parser cannot distinguish a
+    /// stalled transfer from a slow one, having no clock.
+    ///
+    /// This is that clock. `Parser::capture_progress` advances only while
+    /// bytes arrive, so a figure unchanged across two consecutive samples
+    /// means nothing has arrived in at least one full interval.
+    ///
+    /// Two samples rather than one, deliberately. A single unchanged reading
+    /// can happen to a live transfer that is merely slower than the sampling
+    /// interval, and cancelling that would take a picture the user is waiting
+    /// for. Requiring the figure to hold still twice costs one extra interval
+    /// before reclaiming and removes that case.
+    ///
+    /// Skips a pane whose parser lock is contended: a pane actively parsing is
+    /// by definition not stalled.
+    fn reclaim_stalled_captures(&mut self) {
+        for window in self.windows.values_mut() {
+            for (pane_id, pane) in window.panes.iter_mut() {
+                let Some(mut parser) = pane.parser.try_lock() else {
+                    // Contended means it is parsing, which means it is moving.
+                    pane.last_capture_progress = None;
+                    continue;
+                };
+                if parser.live_capture_count() == 0 {
+                    pane.last_capture_progress = None;
+                    continue;
+                }
+
+                let progress = parser.capture_progress();
+                let stalled = pane.last_capture_progress == Some(progress);
+                pane.last_capture_progress = Some(progress);
+                if !stalled {
+                    continue;
+                }
+
+                let released = parser.cancel_capture();
+                drop(parser);
+                pane.last_capture_progress = None;
+                if released > 0 {
+                    tracing::warn!(
+                        target: "memory",
+                        pane = pane_id,
+                        released_bytes = released,
+                        stalled_for = ?RETENTION_SAMPLE_INTERVAL.saturating_mul(2),
+                        "cancelled a media capture that stopped receiving; the transfer was \
+                         abandoned and its staging is reclaimed"
+                    );
+                }
+            }
+        }
+    }
+
     fn charge_pane_owners(&mut self) {
         let window_ids: Vec<super::WindowId> = self.windows.keys().copied().collect();
         for window_id in window_ids {
@@ -463,6 +521,19 @@ impl super::App {
     }
 
     pub(super) fn sample_pane_retention(&mut self, now: Instant) -> bool {
+        // Reclamation runs before the diagnostic gate, and must.
+        //
+        // A stalled capture pins its staging until the pane dies. Freeing it
+        // is not a diagnostic — a user at the default log level has the same
+        // memory to get back as one running with `memory=debug`, and gating
+        // the release on whether anyone is watching would mean the fix only
+        // worked for people already investigating.
+        //
+        // The first draft of this had it inside the gate. Its own test caught
+        // that: the capture was never reclaimed because no subscriber was
+        // installed, which is exactly the shipped default.
+        self.reclaim_stalled_captures();
+
         if !tracing::enabled!(target: "memory", tracing::Level::DEBUG) {
             return false;
         }
