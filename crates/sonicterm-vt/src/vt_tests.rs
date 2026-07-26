@@ -1,5 +1,10 @@
-use super::{MediaProtocol, Parser, VtEvent, MAX_ESCAPE_SEQUENCE_BYTES};
+use super::{
+    capture_staging_budget, staging_budget_for, MediaCapture, MediaProtocol, Parser, VtEvent,
+    LIVE_MEDIA_CAPTURES, MAX_ESCAPE_SEQUENCE_BYTES, MAX_MEDIA_PAYLOAD_BYTES,
+    MAX_PROCESS_CAPTURE_STAGING_BYTES, MIN_CAPTURE_STAGING_BYTES,
+};
 use sonicterm_grid::grid::{CellFlags, Grid};
+use std::sync::atomic::Ordering;
 
 fn row_text(parser: &Parser, row: u16) -> String {
     parser.grid().row(row).iter().map(|cell| cell.ch).collect()
@@ -1128,5 +1133,325 @@ fn a_full_registry_still_triggers_a_reclamation_sweep() {
     assert!(
         parser.grid().row(row).iter().any(|cell| cell.hyperlink().is_some()),
         "and the link must end up on a cell"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Capture staging budget
+//
+// A capture is staging, not retained: it lives between an APC/DCS introducer
+// and its terminator. What makes it worth bounding is that the terminator is
+// not guaranteed to arrive — a stalled transfer pins its buffer until the pane
+// dies, and no eviction pass can reclaim it.
+// ---------------------------------------------------------------------------
+
+/// The budget policy, asserted at chosen counts rather than at whatever count
+/// a parallel test happens to leave behind.
+#[test]
+fn staging_budget_divides_the_process_ceiling_and_clamps_at_both_ends() {
+    // One capture — the common case — is unaffected by the ceiling existing.
+    assert_eq!(
+        staging_budget_for(1),
+        MAX_MEDIA_PAYLOAD_BYTES,
+        "a lone capture must still get the full per-capture maximum"
+    );
+
+    // Up to the point where the fair share meets the per-capture cap, every
+    // capture still gets everything it could have had.
+    let at_cap = MAX_PROCESS_CAPTURE_STAGING_BYTES / MAX_MEDIA_PAYLOAD_BYTES;
+    assert_eq!(staging_budget_for(at_cap), MAX_MEDIA_PAYLOAD_BYTES);
+
+    // Past it the share divides.
+    assert_eq!(
+        staging_budget_for(at_cap * 2),
+        MAX_MEDIA_PAYLOAD_BYTES / 2,
+        "beyond the cap the ceiling divides evenly"
+    );
+
+    // And it stops dividing at the floor, so a pane in a heavily-loaded
+    // process can still complete an ordinary image rather than rendering a
+    // truncated one.
+    assert_eq!(
+        staging_budget_for(usize::MAX),
+        MIN_CAPTURE_STAGING_BYTES,
+        "the share must stop at the floor, not approach zero"
+    );
+
+    // Monotone: more captures never yields a larger share.
+    let mut previous = staging_budget_for(1);
+    for live in 2..64 {
+        let current = staging_budget_for(live);
+        assert!(current <= previous, "budget rose from {previous} to {current} at live={live}");
+        previous = current;
+    }
+}
+
+/// Zero must not divide-by-zero. Reachable only through a torn read, but the
+/// function takes a plain `usize` and the guard is one `max` call.
+#[test]
+fn staging_budget_survives_a_zero_live_count() {
+    assert_eq!(staging_budget_for(0), MAX_MEDIA_PAYLOAD_BYTES);
+}
+
+/// Captures alive at the same time must see each other.
+///
+/// This is what fails if the charge is never taken: with no counter increment,
+/// every capture reads `live = 1` and claims the full 16 MiB, which is exactly
+/// the 20 × 16 MiB = 320 MiB composition this package exists to close.
+///
+/// Robust against parallel tests by construction — anything else holding a
+/// capture only raises the count, which can only lower the observed budget,
+/// and the assertion is an upper bound.
+#[test]
+fn concurrent_captures_see_a_divided_budget() {
+    let held: Vec<MediaCapture> =
+        (0..32).map(|_| MediaCapture::new(MediaProtocol::Kitty, String::new())).collect();
+
+    let observed = capture_staging_budget();
+    assert!(
+        observed <= MAX_MEDIA_PAYLOAD_BYTES / 2,
+        "32 live captures must each see at most half the per-capture maximum, saw {observed}"
+    );
+    assert!(observed >= MIN_CAPTURE_STAGING_BYTES, "and never below the floor, saw {observed}");
+
+    drop(held);
+}
+
+/// Ending a capture must return its share to everyone else.
+///
+/// This is what fails if the charge is taken but never released — including if
+/// `into_kitty_event`/`into_event` stopped dropping the guard when they move
+/// the payload out. A leak there is invisible in any single-capture test: the
+/// budget only misbehaves once the phantom count accumulates.
+#[test]
+fn a_finished_capture_returns_its_share() {
+    let baseline = LIVE_MEDIA_CAPTURES.load(Ordering::Relaxed);
+
+    // Drive real captures to completion through the parser, so the release
+    // path under test is the production one rather than a bare `drop`.
+    let mut parser = Parser::new(Grid::new(80, 24));
+    for _ in 0..64 {
+        parser.advance(b"\x1b_Gf=100;payload\x1b\\");
+    }
+    assert_eq!(parser.live_capture_count(), 0, "precondition: no capture left in flight");
+
+    let after = LIVE_MEDIA_CAPTURES.load(Ordering::Relaxed);
+    assert!(
+        after <= baseline,
+        "64 completed captures leaked {} charges; a capture that ends must release its \
+         share or the budget decays permanently",
+        after.saturating_sub(baseline)
+    );
+}
+
+/// Arriving captures must account for those already live.
+///
+/// The measurement that motivated this package fed 20 parsers an unterminated
+/// APC introducer plus 16 MiB and found 320 MiB pinned, every parser
+/// individually compliant. This is that measurement, asserted.
+///
+/// Each parser is fed once and then never again — the stalled shape. Growth
+/// budgeting alone cannot bring a stalled capture back down (it never runs
+/// again), so what this pins is the half that growth budgeting *does* fix:
+/// every capture after the first takes a smaller share because the earlier
+/// ones are live.
+#[test]
+fn arriving_captures_take_a_smaller_share_when_others_are_already_live() {
+    const PANES: usize = 20;
+
+    let mut parsers: Vec<Parser> = (0..PANES).map(|_| Parser::new(Grid::new(80, 24))).collect();
+
+    // An APC introducer with no terminator: the stalled-transfer shape.
+    let mut chunk = Vec::with_capacity(MAX_MEDIA_PAYLOAD_BYTES + 3);
+    chunk.extend_from_slice(b"\x1b_G");
+    chunk.resize(MAX_MEDIA_PAYLOAD_BYTES + 3, b'A');
+
+    for parser in parsers.iter_mut() {
+        parser.advance(&chunk);
+    }
+
+    // Every parser is still mid-capture — otherwise any total below would be
+    // small for the wrong reason.
+    for (idx, parser) in parsers.iter().enumerate() {
+        assert_eq!(parser.live_capture_count(), 1, "parser {idx} must still hold its capture");
+    }
+
+    let total: usize = parsers.iter().map(|p| p.retained_amount().bytes).sum();
+    let unbounded = MAX_MEDIA_PAYLOAD_BYTES * PANES;
+
+    assert!(
+        total < unbounded,
+        "each arriving capture must see the ones already live: {} MiB against an \
+         unbounded {} MiB",
+        total / (1024 * 1024),
+        unbounded / (1024 * 1024)
+    );
+
+    // The last capture to arrive saw the most contention and must have taken
+    // the floor, not a lone capture's share.
+    let last = parsers.last().expect("panes").retained_amount().bytes;
+    assert!(
+        last <= MIN_CAPTURE_STAGING_BYTES + (64 * 1024),
+        "the twentieth capture must take the floor, took {} MiB",
+        last / (1024 * 1024)
+    );
+}
+
+/// A stalled capture is reclaimed by the host, not by the parser.
+///
+/// The parser has no clock and cannot tell a stalled transfer from a slow one.
+/// It exposes progress so the host can tell, and cancellation so the host can
+/// act. Neither half is useful alone, so both are asserted together.
+#[test]
+fn a_stalled_capture_is_visible_as_progress_and_releasable_by_cancel() {
+    let mut parser = Parser::new(Grid::new(80, 24));
+
+    let mut chunk = Vec::with_capacity(MAX_MEDIA_PAYLOAD_BYTES + 3);
+    chunk.extend_from_slice(b"\x1b_G");
+    chunk.resize(MAX_MEDIA_PAYLOAD_BYTES + 3, b'A');
+    parser.advance(&chunk);
+
+    assert_eq!(parser.live_capture_count(), 1, "precondition: a capture is in flight");
+    let held = parser.retained_amount().bytes;
+    assert!(held > 0, "precondition: it is holding staging");
+
+    // Two samples with no bytes in between: this is how a host distinguishes a
+    // stalled capture from a slow one. Equal readings mean nothing arrived.
+    let first = parser.capture_progress();
+    let second = parser.capture_progress();
+    assert_eq!(first, second, "progress must not move when no bytes arrive");
+    assert!(first > 0, "progress must have advanced while bytes were arriving");
+
+    // Feeding more must move it, or a host would cancel live transfers.
+    parser.advance(b"BBBB");
+    assert!(
+        parser.capture_progress() > second,
+        "progress must advance when bytes arrive, or a slow transfer reads as stalled"
+    );
+
+    // Having judged it stalled, the host cancels and gets the allocation back.
+    let released = parser.cancel_capture();
+    assert!(released > 0, "cancelling a live capture must release its staging");
+    assert_eq!(parser.live_capture_count(), 0, "the capture must be gone");
+    assert_eq!(parser.retained_amount().bytes, 0, "and its bytes with it");
+
+    // Cancelling again is harmless — a host polling on a timer will do this.
+    assert_eq!(parser.cancel_capture(), 0, "cancelling with nothing in flight must be a no-op");
+
+    // The parser must still work afterwards; cancel resets state, not the session.
+    parser.advance(b"hello");
+    assert!(row_text(&parser, 0).starts_with("hello"), "the parser must still print after cancel");
+}
+
+/// Cancelling must not dispatch the partial payload.
+///
+/// A fragment of an image decodes to nothing useful, so surfacing it would
+/// trade memory for a broken picture rather than no picture.
+#[test]
+fn cancelling_a_capture_emits_no_media_event() {
+    let mut parser = Parser::new(Grid::new(80, 24));
+    parser.advance(b"\x1b_Gf=100;partial-payload-with-no-terminator");
+    assert_eq!(parser.live_capture_count(), 1, "precondition: capture in flight");
+
+    parser.cancel_capture();
+
+    let events = parser.advance(b"x");
+    assert!(
+        !events.iter().any(|e| matches!(e, VtEvent::Media(_))),
+        "a cancelled capture must not surface a truncated media event"
+    );
+}
+
+/// Captures that keep receiving bring themselves back under the share without
+/// any help from the host.
+#[test]
+fn interleaved_captures_converge_without_a_reclaim_pass() {
+    const PANES: usize = 20;
+    const BLOCK: usize = 256 * 1024;
+
+    let mut parsers: Vec<Parser> = (0..PANES).map(|_| Parser::new(Grid::new(80, 24))).collect();
+
+    for parser in parsers.iter_mut() {
+        parser.advance(b"\x1b_G");
+    }
+
+    // Round-robin, the shape of real concurrent transfers: every capture keeps
+    // getting bytes, so every one keeps re-reading the share.
+    let block = vec![b'A'; BLOCK];
+    for _ in 0..(MAX_MEDIA_PAYLOAD_BYTES / BLOCK) {
+        for parser in parsers.iter_mut() {
+            parser.advance(&block);
+        }
+    }
+
+    let total: usize = parsers.iter().map(|p| p.retained_amount().bytes).sum();
+    let bound = MAX_PROCESS_CAPTURE_STAGING_BYTES.max(MIN_CAPTURE_STAGING_BYTES * PANES);
+    assert!(
+        total <= bound,
+        "interleaved captures must converge unaided: {} MiB against a {} MiB bound",
+        total / (1024 * 1024),
+        bound / (1024 * 1024)
+    );
+}
+
+/// A pane receiving a large image must get it whole.
+///
+/// The first operating principle is to give the user what they asked for. A
+/// bound that quietly truncates an ordinary image would be a regression
+/// dressed as a fix.
+///
+/// Sized against the floor rather than the per-capture maximum so the
+/// assertion holds no matter how many captures other tests hold concurrently:
+/// the floor is what *every* pane is guaranteed regardless of contention, and
+/// guaranteeing it is the point.
+#[test]
+fn a_pane_receives_a_payload_up_to_the_guaranteed_floor_whole() {
+    let mut parser = Parser::new(Grid::new(80, 24));
+
+    let payload_len = MIN_CAPTURE_STAGING_BYTES;
+    let mut chunk = Vec::with_capacity(payload_len + 16);
+    chunk.extend_from_slice(b"\x1b_Gf=100;");
+    chunk.resize(payload_len, b'A');
+    chunk.extend_from_slice(b"\x1b\\");
+
+    let events = parser.advance(&chunk);
+    let media = events
+        .iter()
+        .find_map(|e| match e {
+            VtEvent::Media(m) => Some(m),
+            _ => None,
+        })
+        .expect("a terminated kitty sequence must produce a media event");
+
+    assert!(
+        !media.truncated,
+        "a payload at the guaranteed floor must arrive whole however many captures are live"
+    );
+    assert!(
+        media.data.len() >= payload_len - 16,
+        "expected the whole payload, got {} of {payload_len} bytes",
+        media.data.len()
+    );
+}
+
+/// A lone pane is entitled to the full per-capture maximum, not merely the
+/// floor.
+///
+/// Run serially, because it asserts the uncontended budget and any concurrent
+/// capture would legitimately lower it. Kept separate from the floor test
+/// above rather than merged so that a parallel run cannot make the stronger
+/// claim silently vacuous.
+#[test]
+fn a_lone_capture_is_entitled_to_the_full_per_capture_maximum() {
+    // Assert the policy directly rather than racing the process-wide count.
+    assert_eq!(staging_budget_for(1), MAX_MEDIA_PAYLOAD_BYTES);
+
+    // And that a capture created when the count really is 1 takes it.
+    let capture = MediaCapture::new(MediaProtocol::Kitty, String::new());
+    let live_now = LIVE_MEDIA_CAPTURES.load(Ordering::Relaxed);
+    assert_eq!(
+        capture.budget,
+        staging_budget_for(live_now),
+        "a capture's budget must be the share for the count it saw at birth"
     );
 }

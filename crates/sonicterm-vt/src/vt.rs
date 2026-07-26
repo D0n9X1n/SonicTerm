@@ -15,6 +15,7 @@
 //! Out of scope: media texture decoding/rendering and most mouse tracking.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crossbeam_channel::Sender;
 use vte::{Params, Perform};
@@ -27,7 +28,100 @@ use sonicterm_types::ResourceAmount;
 /// Version string reported in answer to CSI > q (XTVERSION).
 pub const SONIC_VERSION: &str = "SonicTerm 0.7";
 
+/// Largest staging buffer a single capture may hold when it is the only one
+/// in flight.
+///
+/// This is what a lone pane receiving a large image gets, unchanged: the
+/// common case is one capture at a time, and it is not the case that needs
+/// constraining.
 const MAX_MEDIA_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+
+/// Ceiling on in-flight capture staging summed over every parser in this
+/// process.
+///
+/// A capture is *staging*, not retained: it exists only between an
+/// APC/DCS introducer and its terminator, and the bytes are handed to the host
+/// as a `MediaEvent` the moment the sequence completes. What makes it worth
+/// bounding is that the terminator is not guaranteed to arrive. A capture
+/// whose stream stalls — `imgcat` over a dropped SSH link, a program killed
+/// mid-transfer — pins its buffer until the pane dies, and no eviction pass
+/// can reclaim it, because the parser cannot distinguish a stalled transfer
+/// from a slow one.
+///
+/// Per-parser the buffer is bounded. Composed across panes it was not:
+/// 20 panes each mid-capture measured 320 MiB, every parser individually
+/// compliant. That composition is the shape this ceiling exists to close.
+const MAX_PROCESS_CAPTURE_STAGING_BYTES: usize = 64 * 1024 * 1024;
+
+/// Smallest staging budget a capture is ever given.
+///
+/// A fair share alone shrinks toward zero as captures multiply, and a capture
+/// truncated below the size of a typical encoded image renders a broken
+/// picture — the outcome this floor exists to prevent. Sized to hold a
+/// representative PNG/JPEG payload whole so that every pane, however many are
+/// active, can still complete an ordinary image.
+const MIN_CAPTURE_STAGING_BYTES: usize = 4 * 1024 * 1024;
+
+/// Captures currently accumulating across every parser in this process.
+static LIVE_MEDIA_CAPTURES: AtomicUsize = AtomicUsize::new(0);
+
+/// Staging budget for one capture when `live` captures are in flight.
+///
+/// Split out from the atomic read so the policy can be asserted directly at
+/// chosen counts rather than inferred from whatever else a parallel test
+/// happens to be holding.
+#[must_use]
+fn staging_budget_for(live: usize) -> usize {
+    // `clamp` cannot panic: floor 4 MiB < ceiling 16 MiB, both compile-time
+    // constants. `live` is forced to at least 1 so the division is defined.
+    (MAX_PROCESS_CAPTURE_STAGING_BYTES / live.max(1))
+        .clamp(MIN_CAPTURE_STAGING_BYTES, MAX_MEDIA_PAYLOAD_BYTES)
+}
+
+/// Current per-capture staging budget.
+#[must_use]
+fn capture_staging_budget() -> usize {
+    staging_budget_for(LIVE_MEDIA_CAPTURES.load(Ordering::Relaxed))
+}
+
+/// How often a growing capture re-reads the shared budget.
+///
+/// Re-reading per byte would put a division on the hot path of every media
+/// transfer. Re-reading once and caching would leave a capture that started
+/// alone holding a lone capture's budget after nineteen more began. Checking
+/// at a power-of-two boundary costs one mask per byte and bounds the staleness
+/// to this many bytes.
+const CAPTURE_BUDGET_RECHECK_MASK: usize = (64 * 1024) - 1;
+
+/// Increments the live-capture count for as long as a capture exists.
+///
+/// A separate guard rather than `impl Drop for MediaCapture` because
+/// `into_event`/`into_kitty_event` move fields out of the capture, which a
+/// `Drop` impl on the capture itself would forbid. As a field, it is dropped
+/// by those destructurings exactly as it is by an explicit `= None`, so every
+/// release path decrements without any of them naming the counter.
+#[derive(Debug)]
+struct CaptureCharge;
+
+impl CaptureCharge {
+    fn new() -> Self {
+        LIVE_MEDIA_CAPTURES.fetch_add(1, Ordering::Relaxed);
+        Self
+    }
+}
+
+impl Clone for CaptureCharge {
+    /// A cloned capture is a second live capture, so it takes its own charge.
+    fn clone(&self) -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for CaptureCharge {
+    fn drop(&mut self) {
+        LIVE_MEDIA_CAPTURES.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 /// Rejected OSC 8 links to skip after a sweep that freed nothing.
 ///
 /// A sweep frees nothing only when every interned link is still on screen, in
@@ -81,11 +175,37 @@ struct MediaCapture {
     data: Vec<u8>,
     truncated: bool,
     pending_esc: bool,
+    /// Cached staging budget, refreshed at
+    /// [`CAPTURE_BUDGET_RECHECK_MASK`] boundaries.
+    budget: usize,
+    /// Every byte offered to this capture, including those refused after the
+    /// budget was reached.
+    ///
+    /// Distinct from `data.len()`, which stops advancing once the capture is
+    /// full. Driving the recheck from a counter that keeps moving is what lets
+    /// a *full* capture notice that others have started — and a full capture
+    /// holding a lone capture's share is precisely the case worth catching.
+    seen: usize,
+    /// Keeps this capture counted in [`LIVE_MEDIA_CAPTURES`] while it exists.
+    _charge: CaptureCharge,
 }
 
 impl MediaCapture {
     fn new(protocol: MediaProtocol, metadata: String) -> Self {
-        Self { protocol, metadata, data: Vec::new(), truncated: false, pending_esc: false }
+        // Take the charge before reading the budget so this capture is counted
+        // in its own fair share rather than claiming a share sized as though
+        // it were not there.
+        let _charge = CaptureCharge::new();
+        Self {
+            protocol,
+            metadata,
+            data: Vec::new(),
+            truncated: false,
+            pending_esc: false,
+            budget: capture_staging_budget(),
+            seen: 0,
+            _charge,
+        }
     }
 
     /// Bytes this capture is holding, counting reserved capacity.
@@ -98,11 +218,36 @@ impl MediaCapture {
     }
 
     fn append_byte(&mut self, byte: u8) {
-        if self.data.len() < MAX_MEDIA_PAYLOAD_BYTES {
+        // Re-read the shared budget once per boundary-aligned block. Driven by
+        // `seen` rather than `data.len()` so the recheck keeps firing after the
+        // capture fills: a capture that began alone must yield its share when
+        // others start, not keep a lone capture's budget for its whole life.
+        if self.seen & CAPTURE_BUDGET_RECHECK_MASK == 0 {
+            self.refresh_budget();
+        }
+        self.seen = self.seen.saturating_add(1);
+
+        if self.data.len() < self.budget {
             self.data.push(byte);
         } else {
             self.truncated = true;
         }
+    }
+
+    /// Re-read the shared budget, lowering the ceiling on *future* growth.
+    ///
+    /// Deliberately does not discard bytes already captured. Shrinking a live
+    /// capture would permanently truncate an image a pane is midway through
+    /// receiving because other panes briefly opened captures of their own —
+    /// and the image would stay broken after they finished. Refusing to grow
+    /// costs the tail of an oversized payload; discarding costs a picture the
+    /// user asked for and was already going to get.
+    ///
+    /// Reclaiming from a capture that has genuinely stopped is
+    /// [`Parser::cancel_capture`], which releases the whole allocation rather
+    /// than leaving a corrupted partial one.
+    fn refresh_budget(&mut self) {
+        self.budget = capture_staging_budget();
     }
 
     fn into_event(self, row: u16, col: u16) -> MediaEvent {
@@ -601,6 +746,48 @@ impl Parser {
             bytes: capture_bytes.saturating_add(osc_bytes),
             items: self.live_capture_count(),
         }
+    }
+
+    /// Bytes this parser has fed into media captures over its lifetime.
+    ///
+    /// Monotonic, and advances only while a capture is actually receiving. A
+    /// host that samples this periodically can tell a stalled capture from a
+    /// slow one — the distinction the parser cannot make, having no clock —
+    /// by observing that the figure has not moved between two samples.
+    ///
+    /// Paired with [`Parser::cancel_capture`], this is what lets a stalled
+    /// transfer's staging be reclaimed. Neither half is useful alone: the
+    /// parser cannot decide *when*, and the host cannot reach *what*.
+    #[must_use]
+    pub fn capture_progress(&self) -> usize {
+        self.apc_capture
+            .iter()
+            .chain(self.performer.dcs_capture.iter())
+            .map(|capture| capture.seen)
+            .sum()
+    }
+
+    /// Abandon any capture in flight, releasing its staging allocation.
+    ///
+    /// Returns the bytes released. The partially-received payload is
+    /// discarded rather than dispatched: a fragment of an image decodes to
+    /// nothing useful, so surfacing it would trade memory for a broken
+    /// picture instead of no picture.
+    ///
+    /// Intended for a capture the host has determined is stalled — see
+    /// [`Parser::capture_progress`]. Cancelling one that is merely slow costs
+    /// the user their transfer, so the staleness threshold belongs to the host
+    /// where the clock and the user's configuration both are.
+    ///
+    /// Returns 0 and does nothing when no capture is in flight.
+    pub fn cancel_capture(&mut self) -> usize {
+        let released = self.retained_amount().bytes;
+        if released == 0 && self.live_capture_count() == 0 {
+            return 0;
+        }
+        self.inner = vte::Parser::new();
+        self.reset_cancelled_escape();
+        released
     }
 
     /// Number of media captures currently accumulating.
