@@ -158,3 +158,92 @@ fn registering_owners_charges_nothing() {
     assert_eq!(snapshot.process_amount.items, 0);
     let _ = child;
 }
+
+/// Closing a window through the production path must close its owners.
+///
+/// `release_window_owner` had exactly one caller: `__test_remove_window`, a
+/// `#[doc(hidden)]` test seam. The production close paths call
+/// `release_child_window_registries`, which touches three maps and the drag
+/// backend and never mentions the governor.
+///
+/// Measured before this: 100 create/destroy cycles left **200 owners created
+/// and 200 still `Open`** — not `Closing`, `Open`. Close was never attempted.
+#[test]
+fn the_production_close_path_closes_the_owners_it_created() {
+    let mut app = app();
+
+    let child = app.__test_seed_child_window(&["one", "two"]);
+    app.__test_reconcile_pane_owners();
+
+    let window_owner = app.__test_window_owner(child).expect("window owner registered");
+    let pane_owners: Vec<sonicterm_types::ResourceOwnerId> = app
+        .__test_child_pane_owners(child)
+        .into_iter()
+        .filter_map(sonicterm_types::ResourceOwnerId::new)
+        .collect();
+    assert!(!pane_owners.is_empty(), "precondition: panes have owners");
+    assert!(app.__test_owner_is_open(window_owner), "precondition: the window owner is open");
+
+    // The production close path, not the test seam.
+    while app.__test_child_pane_ids(child).is_some_and(|ids| !ids.is_empty()) {
+        app.__test_invoke_close_active_pane_in_child(child);
+    }
+    app.__test_drain_pending_os_teardown();
+
+    for owner in &pane_owners {
+        assert!(
+            !app.__test_owner_is_open(*owner),
+            "pane owner {owner:?} is still open after its window closed"
+        );
+    }
+    assert!(
+        !app.__test_owner_is_open(window_owner),
+        "the window owner is still open after the window closed"
+    );
+}
+
+/// Repeated create/destroy must not ratchet the root's child count.
+///
+/// `OwnerRegistry` exposes `get` and `insert` and **no `remove`**, so every
+/// `OwnerRecord` — with its `RwLock`, `Mutex`, and two `EnumMap`s over all
+/// resource classes — is retained for the life of the process. An owner that
+/// never closes is therefore a genuine leak, not merely a stale counter.
+#[test]
+fn repeated_window_cycles_do_not_ratchet_open_owners() {
+    let mut app = app();
+    const CYCLES: usize = 40;
+
+    let mut still_open = 0usize;
+    let mut created = 0usize;
+
+    for _ in 0..CYCLES {
+        let child = app.__test_seed_child_window(&["one"]);
+        app.__test_reconcile_pane_owners();
+
+        let window_owner = app.__test_window_owner(child).expect("window owner");
+        let pane_owners: Vec<sonicterm_types::ResourceOwnerId> = app
+            .__test_child_pane_owners(child)
+            .into_iter()
+            .filter_map(sonicterm_types::ResourceOwnerId::new)
+            .collect();
+        created += 1 + pane_owners.len();
+
+        while app.__test_child_pane_ids(child).is_some_and(|ids| !ids.is_empty()) {
+            app.__test_invoke_close_active_pane_in_child(child);
+        }
+        app.__test_drain_pending_os_teardown();
+
+        if app.__test_owner_is_open(window_owner) {
+            still_open += 1;
+        }
+        still_open += pane_owners.iter().filter(|o| app.__test_owner_is_open(**o)).count();
+    }
+
+    assert!(created > 0, "precondition: the cycles created owners");
+    assert_eq!(
+        still_open, 0,
+        "{still_open} of {created} owners are still open after {CYCLES} create/destroy \
+         cycles; the registry has no remove, so each one is retained for the life of \
+         the process"
+    );
+}
