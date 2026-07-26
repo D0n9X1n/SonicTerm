@@ -155,6 +155,41 @@ fn resolve_spawn_shell_prefers_nonempty_override() {
 
 #[cfg(target_os = "windows")]
 #[test]
+fn windows_default_shell_prefers_registered_pwsh_before_store_and_legacy() {
+    let chosen = resolve_windows_default_shell_with(
+        || None,
+        || Some("registered-pwsh.exe".into()),
+        || Some("store-pwsh.exe".into()),
+        || Some("powershell.exe".into()),
+    );
+    assert_eq!(chosen, "registered-pwsh.exe");
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_default_shell_priority_and_fallback_are_stable() {
+    assert_eq!(
+        resolve_windows_default_shell_with(
+            || Some("path-pwsh.exe".into()),
+            || Some("registered-pwsh.exe".into()),
+            || Some("store-pwsh.exe".into()),
+            || Some("powershell.exe".into()),
+        ),
+        "path-pwsh.exe"
+    );
+    assert_eq!(resolve_windows_default_shell_with(|| None, || None, || None, || None), "cmd.exe");
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn registered_pwsh_resolves_to_a_real_powershell_7_when_present() {
+    let Some(path) = registered_pwsh() else { return };
+    assert!(std::path::Path::new(&path).is_file());
+    assert_eq!(shell_file_name(&path), "pwsh.exe");
+}
+
+#[cfg(target_os = "windows")]
+#[test]
 fn store_pkg_version_parses_dir_name() {
     use std::path::PathBuf;
     let p = PathBuf::from(

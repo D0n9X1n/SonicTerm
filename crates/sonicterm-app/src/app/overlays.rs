@@ -362,6 +362,7 @@ impl App {
                 }
                 Key::Named(NamedKey::Enter) => {
                     let action = self.command_palette.current().cloned();
+                    let source_window = self.palette_attached_window.or(self.main_window_id);
                     if matches!(action, Some(sonicterm_cfg::keymap::Action::RenameTab)) {
                         let body = self.active_tab_title_body().unwrap_or_default();
                         self.command_palette.start_rename_tab(body);
@@ -376,7 +377,11 @@ impl App {
                     self.command_palette.close();
                     self.palette_attached_window = None;
                     if let Some(a) = action {
-                        self.run_action(&a);
+                        if let Some(source_window) = source_window {
+                            self.run_action_for_window(&a, source_window);
+                        } else {
+                            self.run_action(&a);
+                        }
                     }
                     true
                 }

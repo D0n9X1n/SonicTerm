@@ -654,54 +654,43 @@ impl App {
         }
     }
 
-    /// Phase A: resolve a queued `PendingTearOut` request
-    /// into a real torn-out window. Locates the source tab via the
-    /// recorded `(WindowId, tab_idx)` handle, detaches the tab state
-    /// (which MOVES the live `PtyHandle` — see `tear_out.rs` for the
-    /// `detach_tab_state` contract), and hands it to the reusable
-    /// `install_torn_out_window` builder positioned at the drop screen
-    /// position from Win32 `GetCursorPos`.
+    /// Resolve a queued tear-out into a native window while the event loop can
+    /// create one. The live tab, pane graph, and PTY move without restarting.
     fn drain_pending_tear_out(&mut self, el: &ActiveEventLoop, req: crate::app::PendingTearOut) {
-        // Only main-window tear-out is wired in Phase A; child-window
-        // tear-out continues to flow through `tear_out_tab` directly.
-        // The source check guards against a stale request after the
-        // source window has gone away.
-        let main_id = match self.main_window().map(|w| w.id()) {
-            Some(id) => id,
-            None => {
-                tracing::warn!(
-                    src = ?req.source_window,
-                    "drain_pending_tear_out: no main window — dropping request"
-                );
-                return;
-            }
+        let source_is_main = Some(req.source_window) == self.main_window_id;
+        let detached = if source_is_main {
+            self.detach_tab_state(req.source_tab_idx)
+        } else {
+            self.detach_from_child(req.source_window, req.source_tab_idx)
         };
-        if req.source_window != main_id {
+        let Some((tab, state, panes)) = detached else {
             tracing::warn!(
-                src = ?req.source_window, main = ?main_id,
-                "drain_pending_tear_out: source is not main — falling back to noop \
-                 (child-window tear-out drained via tear_out_tab inline)"
-            );
-            return;
-        }
-        let Some((tab, state, panes)) = self.detach_tab_state(req.source_tab_idx) else {
-            tracing::warn!(
+                source = ?req.source_window,
                 idx = req.source_tab_idx,
-                "drain_pending_tear_out: detach_tab_state returned None — dropping request"
+                "drain_pending_tear_out: source tab no longer exists"
             );
             return;
         };
+        let source = if source_is_main { "main" } else { "child" };
         if self
-            .install_torn_out_window(el, tab, state, panes, Some(req.drop_screen_pos), "main")
+            .install_torn_out_window(el, tab, state, panes, req.drop_screen_pos, source)
             .is_none()
         {
-            tracing::warn!("drain_pending_tear_out: install_torn_out_window failed");
+            tracing::warn!(source = ?req.source_window, "drain_pending_tear_out: install failed");
+            if !source_is_main {
+                self.tear_out_apply_child_source_side(req.source_window, req.source_tab_idx);
+            }
             return;
         }
-        self.tear_out_apply_source_side(req.source_tab_idx);
+        if source_is_main {
+            self.tear_out_apply_source_side(req.source_tab_idx);
+        } else {
+            self.tear_out_apply_child_source_side(req.source_window, req.source_tab_idx);
+        }
         tracing::info!(
+            source = ?req.source_window,
             at = ?req.drop_screen_pos,
-            "in-process tear-out completed (Phase A — no child process spawned)"
+            "in-process tear-out completed"
         );
     }
 
@@ -765,6 +754,7 @@ impl App {
                 font_family: &self.config.font.family,
                 font_size: self.config.font.size,
                 line_height_mult: self.config.font.line_height,
+                font_weight_scale: self.config.font.effective_weight_scale(),
                 padding: [
                     self.config.window.padding_left,
                     self.config.window.padding_right,

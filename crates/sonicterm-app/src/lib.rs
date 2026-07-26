@@ -10,7 +10,6 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 pub mod app;
-pub mod config_watch;
 pub mod menu;
 pub mod menubar_bridge;
 pub mod os_drag;

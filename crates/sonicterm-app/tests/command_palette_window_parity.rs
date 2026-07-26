@@ -5,8 +5,12 @@
 //! tests pin that the same compact palette can attach to either the main window
 //! or a torn-out child window, so main/child cannot drift.
 
-use sonicterm_app::app::App;
-use sonicterm_cfg::{config::Config, keymap::Action, keymap::Keymap, theme::Theme};
+use sonicterm_app::app::{config_diff_needs_font_apply, os_drag::DragOutcome, App};
+use sonicterm_cfg::{
+    config::Config,
+    keymap::{Action, Keymap},
+    theme::Theme,
+};
 use winit::{
     event::Ime,
     keyboard::{Key, ModifiersState},
@@ -135,6 +139,56 @@ fn active_palette_ime_preedit_suppresses_core_editing() {
     );
 
     assert_eq!(app.__test_palette_query(), "alpha beta");
+}
+
+#[test]
+fn weight_scale_only_change_reapplies_font_rendering() {
+    let old = Config::default();
+    let mut new = old.clone();
+    new.font.weight_scale = 1.1;
+    assert!(config_diff_needs_font_apply(&old, &new));
+}
+
+#[test]
+fn move_tab_to_new_window_queues_active_main_tab_without_detaching() {
+    let mut app = app();
+    app.__test_seed_tab("first");
+    app.__test_seed_tab("second");
+    let main = app.__test_main_window_id().expect("synthetic main");
+
+    assert!(app.run_action_for_window(&Action::MoveTabToNewWindow, main));
+
+    assert_eq!(app.__test_pending_tear_out(), Some((main, 1, None)));
+    assert_eq!(app.__test_main_tab_count(), 2, "detach waits for native-window creation");
+}
+
+#[test]
+fn move_tab_to_new_window_queues_active_child_tab_without_detaching() {
+    let mut app = app();
+    app.__test_seed_tab("main");
+    let child = app.__test_seed_child_window(&["first", "second"]);
+    assert!(app.__test_invoke_activate_tab_in_child(child, 0));
+
+    assert!(app.run_action_for_window(&Action::MoveTabToNewWindow, child));
+
+    assert_eq!(app.__test_pending_tear_out(), Some((child, 0, None)));
+    assert_eq!(app.__test_child_tab_count(child), Some(2));
+}
+
+#[test]
+fn drag_tear_out_keeps_its_screen_position() {
+    let mut app = app();
+    app.__test_seed_tab("main");
+    let main = app.__test_main_window_id().expect("synthetic main");
+    app.__test_set_os_drag_source(Some((main, 0)));
+    app.__test_os_drag_pending()
+        .set_ended(DragOutcome::DroppedOnEmpty { drop_screen_pos: (640, 360) });
+
+    assert_eq!(
+        app.handle_os_drag_ended(),
+        Some(DragOutcome::DroppedOnEmpty { drop_screen_pos: (640, 360) })
+    );
+    assert_eq!(app.__test_pending_tear_out(), Some((main, 0, Some((640, 360)))));
 }
 
 #[test]

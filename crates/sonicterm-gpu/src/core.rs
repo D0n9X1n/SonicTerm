@@ -201,6 +201,8 @@ pub struct RendererSettings<'a> {
     pub font_size: f32,
     /// Line-height multiplier.
     pub line_height_mult: f32,
+    /// Regular-text coverage scale.
+    pub font_weight_scale: f32,
     /// Window padding in logical pixels: left, right, top, bottom.
     pub padding: [f32; 4],
     /// Surface/backdrop settings.
@@ -223,6 +225,27 @@ fn active_cursor_color(base: [f32; 4], _shape: CursorShape, _blink_alpha: f32) -
 
 pub(crate) fn glyph_flags(is_color: bool, is_subpixel: bool) -> [f32; 4] {
     [if is_color { 1.0 } else { 0.0 }, if is_subpixel { 1.0 } else { 0.0 }, 0.0, 0.0]
+}
+
+fn effective_font_weight_scale(scale: f32) -> f32 {
+    if scale.is_finite() && (0.5..=5.0).contains(&scale) {
+        scale
+    } else {
+        1.0
+    }
+}
+
+fn software_block_glyph_target_rect(
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+) -> (f32, f32, f32, f32) {
+    let left = (left - 0.5).ceil();
+    let top = (top - 0.5).ceil();
+    let right = (right - 0.5).ceil().max(left + 1.0);
+    let bottom = (bottom - 0.5).ceil().max(top + 1.0);
+    (left, top, right - left, bottom - top)
 }
 
 /// Resolve the title text colour for a single tab, honouring hover.
@@ -926,6 +949,7 @@ pub struct GpuRenderer {
     font_family: String,
     font_size: f32,
     line_height: f32,
+    font_weight_scale: f32,
     /// Multiplier applied to the font's natural cell height to derive the
     /// rendered line height (`cell_h = natural_cell_h * line_height_mult`).
     /// Stored so a DPI/scale-factor change can recompute `cell_h` from the
@@ -1495,10 +1519,12 @@ impl GpuRenderer {
             font_family,
             font_size,
             line_height_mult,
+            font_weight_scale,
             padding,
             appearance,
             role,
         } = settings;
+        let font_weight_scale = effective_font_weight_scale(font_weight_scale);
         let [padding_left, padding_right, padding_top, padding_bottom] = padding;
         let size = window.inner_size();
         // G1a: read the OS DPI multiplier; stored verbatim into the
@@ -1687,8 +1713,13 @@ impl GpuRenderer {
         // metrics match the renderer's raster-px coordinate system.
         // Font size in points equals sonicterm's logical font_size.
         let fs_dpi = (72.0 * sf).round() as usize;
-        let font_stack =
-            sonicterm_engine::FontStack::try_new_full(font_family, font_size as f64, fs_dpi).ok();
+        let font_stack = sonicterm_engine::FontStack::try_new_full_with_weight(
+            font_family,
+            font_size as f64,
+            fs_dpi,
+            font_weight_scale,
+        )
+        .ok();
         let (cell_w, natural_cell_h) =
             match font_stack.as_ref().and_then(|s| s.cell_metrics_raster_px().ok()) {
                 Some(m) => (m.cell_w as f32, m.cell_h as f32),
@@ -1754,6 +1785,7 @@ impl GpuRenderer {
             font_family: font_family.to_string(),
             font_size,
             line_height,
+            font_weight_scale,
             line_height_mult: line_height_mult.max(0.0).max(0.01),
             scale_factor: sf,
             cell_w,
@@ -2497,12 +2529,12 @@ impl GpuRenderer {
         self.surface.configure(&self.device, &self.config);
         let uses_software_presenter = self.uses_windows_software_presenter();
         if used_software_presenter != uses_software_presenter {
+            self.row_glyph_cache.invalidate_all();
+            self.line_quad_cache.invalidate_all();
             if !uses_software_presenter {
                 self.reset_glyph_atlas_in_place("software_to_gpu");
                 self.reset_image_atlas();
                 self.glyph_atlas_retry_without_eviction = false;
-                self.row_glyph_cache.invalidate_all();
-                self.line_quad_cache.invalidate_all();
             }
             self.rebuild_glyph_upload_if_needed();
             self.rebuild_image_upload_if_needed();
@@ -2803,10 +2835,16 @@ impl GpuRenderer {
 
     /// the next `render()` call cannot short-circuit through the
     /// fast-path against a now-stale frame.
-    pub fn set_font(&mut self, family: &str, size: f32, line_height_mult: f32) {
+    pub fn set_font(&mut self, family: &str, size: f32, line_height_mult: f32, weight_scale: f32) {
+        let weight_scale = effective_font_weight_scale(weight_scale);
         let dpi = (72.0 * self.scale_factor).round().max(1.0) as usize;
-        let new_stack =
-            sonicterm_engine::FontStack::try_new_full(family, f64::from(size), dpi).ok();
+        let new_stack = sonicterm_engine::FontStack::try_new_full_with_weight(
+            family,
+            f64::from(size),
+            dpi,
+            weight_scale,
+        )
+        .ok();
         let (new_cell_w, natural_cell_h) =
             match new_stack.as_ref().and_then(|s| s.cell_metrics_raster_px().ok()) {
                 Some(m) => (m.cell_w as f32, m.cell_h as f32),
@@ -2816,6 +2854,7 @@ impl GpuRenderer {
         let no_change = self.font_family == family
             && (self.font_size - size).abs() < f32::EPSILON
             && (self.line_height - new_line_h).abs() < f32::EPSILON
+            && (self.font_weight_scale - weight_scale).abs() < f32::EPSILON
             && (self.cell_w - new_cell_w).abs() < f32::EPSILON
             && (self.cell_h - new_line_h).abs() < f32::EPSILON;
         if no_change {
@@ -2824,6 +2863,7 @@ impl GpuRenderer {
         self.font_family = family.to_string();
         self.font_size = size;
         self.line_height = new_line_h;
+        self.font_weight_scale = weight_scale;
         self.line_height_mult = line_height_mult.max(0.0).max(0.01);
         self.font_stack = new_stack;
         self.cell_w = new_cell_w;
@@ -3781,6 +3821,7 @@ impl GpuRenderer {
         // line-height; finer baseline control would require querying
         // font metrics, which is a follow-up polish item.
         let baseline_y_in_cell = cell_h * 0.8;
+        let software_presenter = self.uses_windows_software_presenter();
 
         let raster_px = self.raster_px(self.font_size);
         {
@@ -4060,6 +4101,7 @@ impl GpuRenderer {
                                     wt_raster.as_mut(),
                                     pane_hovered_url,
                                     hovered_url_accent,
+                                    software_presenter,
                                 );
                                 run_cells.clear();
                                 run_style = Some(style);
@@ -4094,6 +4136,7 @@ impl GpuRenderer {
                             wt_raster.as_mut(),
                             pane_hovered_url,
                             hovered_url_accent,
+                            software_presenter,
                         );
                     }
                     // Capture this row's contributions and insert into
@@ -6376,6 +6419,7 @@ impl GpuRenderer {
         // recolor above. Same color space the per-glyph `color` field
         // already carries, so it is assigned with no conversion.
         hovered_url_accent: [f32; 4],
+        software_presenter: bool,
     ) {
         if cells.is_empty() {
             return;
@@ -6492,7 +6536,7 @@ impl GpuRenderer {
             return;
         }
 
-        let infos = match stack.shape_text(&text) {
+        let infos = match stack.shape_text_with_style(&text, style.bold, style.italic) {
             Ok(v) => v,
             Err(_) => return,
         };
@@ -6566,12 +6610,20 @@ impl GpuRenderer {
                 let cy = top_inset + f32::from(row) * cell_h;
                 let span = if is_wide { 2usize } else { cluster_cells };
                 let end_col = ((g.lead_col as usize) + span).min(snapped_cell_x.len() - 1);
-                let cell_pixel_width_snapped =
-                    snapped_cell_x[end_col] - snapped_cell_x[g.lead_col as usize];
-                // Cell box used both as the block_sprite metric and as
-                // the on-screen rect. raster-px throughout.
-                let cell_w_i = cell_w.round().max(1.0) as isize;
-                let cell_h_i = cell_h.round().max(1.0) as isize;
+                let cell_right = snapped_cell_x[end_col];
+                let (gx, gy, gw, gh) = if software_presenter {
+                    let cell_bottom = top_inset + (f32::from(row) + 1.0) * cell_h;
+                    software_block_glyph_target_rect(cx, cy, cell_right, cell_bottom)
+                } else {
+                    (cx, cy, cell_right - cx, cell_h)
+                };
+                // Hardware keeps the established font-cell geometry unchanged.
+                // The software presenter rasterizes to the exact integer
+                // destination so glyph-atlas sampling stays one-to-one.
+                let cell_w_i =
+                    if software_presenter { gw } else { cell_w }.round().max(1.0) as isize;
+                let cell_h_i =
+                    if software_presenter { gh } else { cell_h }.round().max(1.0) as isize;
                 // Bug 4 / wezterm-takeover: stroke width for the
                 // `PolyStyle::Outline` box-drawing path comes from the
                 // font's actual `underline_thickness`, mirroring
@@ -6691,17 +6743,9 @@ impl GpuRenderer {
                 if info.px_size[0] == 0 || info.px_size[1] == 0 {
                     continue;
                 }
-                // Block glyphs are cell-sized tiles aligned to the
-                // cell-box origin. No baseline offset, no symbol-fit,
-                // no per-glyph stretching — `block_sprite` already
-                // emits exactly the cell rect, so we draw it 1:1 at
-                // `(cx, cy)` with width = the snapped cell-box width.
-                let gx = cx;
-                let gy = cy;
-                let gw = cell_pixel_width_snapped;
-                let gh = cell_h;
-                let (gx, gy, gw, gh) =
-                    sonicterm_render_model::geometry::snap_to_device_pixels((gx, gy, gw, gh), 1.0);
+                // `block_sprite` was generated from this exact target size.
+                // Keeping the destination identical avoids software resampling;
+                // the hardware branch retains its established fractional rect.
                 let color = cell_fg(&lead_cell, theme, fg_default);
                 // Block glyphs are converted to monochrome masks so they
                 // honour the cell foreground and Cmd-hover URL recolor like text.

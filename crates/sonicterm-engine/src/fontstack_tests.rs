@@ -1,6 +1,85 @@
 use super::*;
 
 #[test]
+fn regular_weight_scale_preserves_identity_and_extremes() {
+    let original = vec![0, 1, 64, 128, 254, 255];
+    let mut coverage = original.clone();
+    apply_regular_weight_scale(&mut coverage, 1.0, false);
+    assert_eq!(coverage, original);
+
+    let mut stronger = original.clone();
+    apply_regular_weight_scale(&mut stronger, 1.1, false);
+    assert_eq!(stronger[0], 0);
+    assert_eq!(*stronger.last().unwrap(), 255);
+    assert!(stronger[2] > original[2]);
+    assert!(stronger[3] > original[3]);
+
+    let mut lighter = original.clone();
+    apply_regular_weight_scale(&mut lighter, 0.9, false);
+    assert!(lighter[2] < original[2]);
+    assert!(lighter[3] < original[3]);
+}
+
+#[test]
+fn subpixel_weight_scale_recomputes_alpha_from_rgb_coverage() {
+    let mut coverage = vec![32, 64, 96, 96, 0, 0, 0, 0];
+    apply_regular_weight_scale(&mut coverage, 1.1, true);
+    assert_eq!(coverage[3], coverage[0].max(coverage[1]).max(coverage[2]));
+    assert_eq!(&coverage[4..], &[0, 0, 0, 0]);
+}
+
+#[test]
+fn invalid_weight_scales_fall_back_to_identity() {
+    for scale in [f32::NAN, f32::INFINITY, 0.0, 0.49, 5.01] {
+        assert_eq!(sanitize_weight_scale(scale), 1.0);
+    }
+    assert_eq!(sanitize_weight_scale(1.1), 1.1);
+    assert_eq!(sanitize_weight_scale(5.0), 5.0);
+}
+
+#[test]
+fn weight_scale_does_not_change_cell_metrics() {
+    let regular = match FontStack::try_new_full_with_weight(DEFAULT_FONT_FAMILY, 14.0, 72, 1.0) {
+        Ok(stack) => stack,
+        Err(_) => return,
+    };
+    let heavier = match FontStack::try_new_full_with_weight(DEFAULT_FONT_FAMILY, 14.0, 72, 1.1) {
+        Ok(stack) => stack,
+        Err(_) => return,
+    };
+    let regular_metrics = match regular.cell_metrics_raster_px() {
+        Ok(metrics) => metrics,
+        Err(_) => return,
+    };
+    let heavier_metrics = match heavier.cell_metrics_raster_px() {
+        Ok(metrics) => metrics,
+        Err(_) => return,
+    };
+    assert_eq!(regular_metrics, heavier_metrics);
+}
+
+#[test]
+fn bold_style_resolves_separately_from_regular_style() {
+    let stack = match FontStack::try_new(72) {
+        Ok(stack) => stack,
+        Err(_) => return,
+    };
+    let regular = match stack.font_for_style(false, false) {
+        Ok(font) => font,
+        Err(_) => return,
+    };
+    let bold = match stack.font_for_style(true, false) {
+        Ok(font) => font,
+        Err(_) => return,
+    };
+    assert_ne!(regular.style(), bold.style());
+    assert!(
+        bold.style().font[0].weight.to_opentype_weight()
+            > regular.style().font[0].weight.to_opentype_weight()
+    );
+}
+
+#[test]
 fn explicit_config_records_requested_font_size() {
     let cfg = build_config("Rec Mono St.Helens", 17.0, &["Symbols Nerd Font Mono"]);
     assert_eq!(cfg.font_size, 17.0);
@@ -59,4 +138,161 @@ fn shaped_text_width_covers_mixed_ascii_cjk_and_status_text() {
 
     assert!(ascii.is_finite() && ascii > 0.0);
     assert!(mixed.is_finite() && mixed > ascii, "CJK glyphs must contribute to badge width");
+}
+
+/// The coverage remap saturates: a stem pixel already at 255 cannot get
+/// darker, which is why `weight_scale` was close to invisible at HiDPI where
+/// stem cores are solid. Outline growth is the part that adds real ink, so it
+/// must reach pixels the remap can never touch.
+#[test]
+fn embolden_puts_ink_where_the_coverage_remap_cannot() {
+    // Single solid pixel surrounded by empty space.
+    let coverage = vec![0, 0, 0, 0, 255, 0, 0, 0, 0];
+
+    // The remap leaves every zero pixel at zero, at any scale in range.
+    let mut remapped = coverage.clone();
+    apply_regular_weight_scale(&mut remapped, 5.0, false);
+    assert_eq!(remapped, coverage, "gamma remap cannot create ink");
+
+    // Dilation grows the glyph outward into those same pixels.
+    let (grown, w, h, pad) =
+        embolden_coverage(&coverage, 3, 3, 1.0, false).expect("radius 1.0 must dilate");
+    assert_eq!((w, h, pad), (5, 5, 1));
+    let center = (h / 2) * w + (w / 2);
+    assert_eq!(grown[center], 255);
+    assert!(grown[center - 1] > 0, "ink must spread horizontally");
+    assert!(grown[center + 1] > 0, "ink must spread horizontally");
+    assert!(grown[center - w] > 0, "ink must spread vertically");
+    assert!(grown[center + w] > 0, "ink must spread vertically");
+}
+
+#[test]
+fn embolden_radius_scales_with_weight_and_is_zero_at_or_below_identity() {
+    for scale in [0.5, 0.9, 1.0] {
+        assert_eq!(embolden_radius_px(scale, 30.0), 0.0, "scale {scale} must not grow outlines");
+    }
+    let at_two = embolden_radius_px(2.0, 30.0);
+    let at_five = embolden_radius_px(5.0, 30.0);
+    assert!(at_two > 0.0);
+    assert!(at_five > at_two, "higher weight must grow more");
+    // Radius tracks cell height so the effect holds its proportion across DPI.
+    assert!(embolden_radius_px(2.0, 60.0) > at_two);
+    // Degenerate metrics disable growth instead of guessing.
+    assert_eq!(embolden_radius_px(2.0, 0.0), 0.0);
+    assert_eq!(embolden_radius_px(2.0, f64::NAN), 0.0);
+}
+
+#[test]
+fn embolden_declines_work_it_cannot_do_safely() {
+    let coverage = vec![255; 9];
+    assert!(embolden_coverage(&coverage, 3, 3, 0.0, false).is_none(), "no radius, no work");
+    assert!(embolden_coverage(&[], 0, 0, 1.0, false).is_none(), "empty glyph");
+    // A tile that would exceed the atlas dimension limit is refused rather
+    // than producing a buffer the atlas must reject later.
+    let big = MAX_RASTERIZED_GLYPH_DIMENSION;
+    assert!(embolden_coverage(&[0u8; 4], big, 1, 2.0, false).is_none());
+}
+
+#[test]
+fn embolden_recomputes_subpixel_alpha_from_dilated_rgb() {
+    // 2x1 BGRA: one lit pixel, one empty.
+    let coverage = vec![200, 100, 50, 200, 0, 0, 0, 0];
+    let (grown, w, h, _) =
+        embolden_coverage(&coverage, 2, 1, 1.0, true).expect("subpixel dilation");
+    assert_eq!(grown.len(), w * h * 4);
+    for px in grown.chunks_exact(4) {
+        assert_eq!(px[3], px[0].max(px[1]).max(px[2]), "alpha must envelope RGB");
+    }
+}
+
+/// Fractional radii blend the outer ring proportionally, so growth ramps
+/// smoothly instead of snapping a whole pixel at a time as weight increases.
+#[test]
+fn embolden_fractional_radius_blends_rather_than_snapping() {
+    let coverage = vec![0, 0, 0, 0, 255, 0, 0, 0, 0];
+    let (half, w, _, _) = embolden_coverage(&coverage, 3, 3, 0.5, false).expect("half radius");
+    let (full, fw, _, _) = embolden_coverage(&coverage, 3, 3, 1.0, false).expect("full radius");
+    let half_neighbor = half[(half.len() / w / 2) * w + w / 2 + 1];
+    let full_neighbor = full[(full.len() / fw / 2) * fw + fw / 2 + 1];
+    assert!(half_neighbor > 0, "fractional radius still spreads ink");
+    assert!(half_neighbor < full_neighbor, "half radius must spread less than full");
+}
+
+/// The saturation ceiling cuts both ways: gamma cannot lighten a pixel that is
+/// already fully opaque, so below 1.0 the outline has to shrink for thinning to
+/// reach a solid stem core.
+#[test]
+fn erosion_removes_ink_the_coverage_remap_cannot() {
+    // 5x5 with a solid 3x3 core — a stem thick enough to have an interior.
+    let mut coverage = vec![0u8; 25];
+    for y in 1..4 {
+        for x in 1..4 {
+            coverage[y * 5 + x] = 255;
+        }
+    }
+
+    // The remap leaves every 255 exactly where it was, at any scale in range.
+    let mut remapped = coverage.clone();
+    apply_regular_weight_scale(&mut remapped, 0.5, false);
+    assert_eq!(remapped, coverage, "gamma remap cannot erode a solid core");
+
+    // Erosion eats the rim of that core.
+    let eroded = erode_coverage(&coverage, 5, 5, 1.0, false).expect("radius 1.0 must erode");
+    let before: u32 = coverage.iter().map(|&v| u32::from(v)).sum();
+    let after: u32 = eroded.iter().map(|&v| u32::from(v)).sum();
+    assert!(after < before, "erosion must remove ink: {before} -> {after}");
+    // The centre of a 3x3 core survives a radius-1 erosion; its rim does not.
+    assert_eq!(eroded[2 * 5 + 2], 255, "core centre must survive");
+    assert_eq!(eroded[5 + 1], 0, "core corner must erode");
+}
+
+/// A stem wide enough to have an interior must keep opaque pixels under a
+/// light thin. Guards against an over-eager erosion that washes glyphs out
+/// instead of slimming them.
+#[test]
+fn light_erosion_preserves_the_interior_of_a_thick_stem() {
+    // 9x9 fully solid: every interior pixel is far from an edge.
+    let coverage = vec![255u8; 81];
+    let eroded = erode_coverage(&coverage, 9, 9, 0.05, false).expect("sub-pixel erosion");
+    let centre = eroded[4 * 9 + 4];
+    assert_eq!(centre, 255, "a sub-pixel thin must not touch a deep interior pixel");
+    assert!(
+        eroded.iter().filter(|&&v| v == 255).count() > 20,
+        "most of a solid block must stay opaque under a light thin"
+    );
+}
+
+#[test]
+fn thin_radius_scales_with_weight_and_is_zero_at_or_above_identity() {
+    for scale in [1.0, 1.5, 5.0] {
+        assert_eq!(thin_radius_px(scale, 30.0), 0.0, "scale {scale} must not erode");
+    }
+    let at_09 = thin_radius_px(0.9, 30.0);
+    let at_05 = thin_radius_px(0.5, 30.0);
+    assert!(at_09 > 0.0);
+    assert!(at_05 > at_09, "lower weight must erode more");
+    assert_eq!(thin_radius_px(0.9, 0.0), 0.0);
+    assert_eq!(thin_radius_px(0.9, f64::NAN), 0.0);
+}
+
+#[test]
+fn erosion_declines_work_it_cannot_do_safely() {
+    let coverage = vec![255u8; 9];
+    assert!(erode_coverage(&coverage, 3, 3, 0.0, false).is_none(), "no radius, no work");
+    assert!(erode_coverage(&[], 0, 0, 1.0, false).is_none(), "empty glyph");
+    // Length that disagrees with the declared geometry is refused rather than
+    // indexed past the end.
+    assert!(erode_coverage(&[0u8; 5], 3, 3, 1.0, false).is_none(), "short buffer");
+}
+
+#[test]
+fn erosion_keeps_tile_geometry_and_subpixel_alpha_consistent() {
+    // Erosion only removes ink, so the buffer length must be preserved
+    // exactly — the caller relies on dimensions and offsets staying valid.
+    let coverage = vec![200u8; 4 * 4 * 4];
+    let eroded = erode_coverage(&coverage, 4, 4, 0.5, true).expect("subpixel erosion");
+    assert_eq!(eroded.len(), coverage.len(), "erosion must not resize the tile");
+    for px in eroded.chunks_exact(4) {
+        assert_eq!(px[3], px[0].max(px[1]).max(px[2]), "alpha must envelope RGB");
+    }
 }

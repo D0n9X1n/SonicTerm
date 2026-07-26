@@ -47,6 +47,12 @@ fn propagate_theme_to_pane_parsers(panes: &HashMap<u64, PaneState>, theme: &Them
     }
 }
 
+/// Accepted `weight_scale` range, matching the clamp in `sonicterm-cfg`,
+/// `sonicterm-gpu`, and `sonicterm-engine`. Stepping past either end is a
+/// no-op rather than an error.
+pub(super) const WEIGHT_SCALE_MIN: f32 = 0.5;
+pub(super) const WEIGHT_SCALE_MAX: f32 = 5.0;
+
 /// True iff any field in `new_cfg.font` differs from `old_cfg.font`
 /// (family, size, or line_height) in a way that should drive a live
 /// renderer re-apply.
@@ -54,6 +60,12 @@ fn propagate_theme_to_pane_parsers(panes: &HashMap<u64, PaneState>, theme: &Them
 /// Extracted as a free function so the file-watcher path can be
 /// unit-tested without a live `GpuRenderer`.
 pub fn config_diff_needs_font_apply(old_cfg: &Config, new_cfg: &Config) -> bool {
+    config_diff_changes_font_metrics(old_cfg, new_cfg)
+        || (new_cfg.font.effective_weight_scale() - old_cfg.font.effective_weight_scale()).abs()
+            > f32::EPSILON
+}
+
+fn config_diff_changes_font_metrics(old_cfg: &Config, new_cfg: &Config) -> bool {
     new_cfg.font.family != old_cfg.font.family
         || (new_cfg.font.size - old_cfg.font.size).abs() > f32::EPSILON
         || (new_cfg.font.line_height - old_cfg.font.line_height).abs() > f32::EPSILON
@@ -78,19 +90,22 @@ pub fn renderer_panel_padding_differs(old_cfg: &Config, new_cfg: &Config) -> boo
 
 impl App {
     pub(super) fn apply_new_config(&mut self, new_cfg: Config) {
-        // any live-reload (theme/font/keymap) is user-driven
-        // and must render immediately, not at the next vsync deadline.
+        // Config is only applied on an explicit user reload, so it must
+        // render immediately rather than at the next vsync deadline.
         self.input_dirty = true;
         self.warm_window_pool.clear();
         let assets = sonicterm_cfg::assets::asset_dir();
 
-        // Theme
-        if new_cfg.theme != self.config.theme {
+        // Theme. Re-read unconditionally: the theme lives in its own file, so
+        // its contents can change while `[theme]` in sonicterm.toml still
+        // names the same theme. Comparing names would make an explicit reload
+        // silently skip an edited theme file.
+        {
             let theme_path = Theme::resolve_path(&new_cfg.theme, &assets);
             match Theme::load_strict(&theme_path) {
                 Ok(mut t) => {
                     t.apply_accessibility(&new_cfg.accessibility);
-                    tracing::info!("live-reload: theme -> {}", t.name);
+                    tracing::info!("reload: theme -> {}", t.name);
                     if let Some(r) = self.main_renderer_mut() {
                         r.set_theme(&t);
                     }
@@ -114,52 +129,22 @@ impl App {
                         mark_all_panes_dirty(&child.panes);
                     }
                 }
-                Err(e) => tracing::warn!("live-reload: theme {:?} failed: {e:#}", theme_path),
+                Err(e) => tracing::warn!("reload: theme {:?} failed: {e:#}", theme_path),
             }
-        }
-
-        if new_cfg.theme == self.config.theme
-            && new_cfg.accessibility.high_contrast != self.config.accessibility.high_contrast
-        {
-            let theme_path = Theme::resolve_path(&new_cfg.theme, &assets);
-            let mut t = match Theme::load_strict(&theme_path) {
-                Ok(t) => t,
-                Err(e) => {
-                    tracing::warn!("live-reload: theme {:?} failed: {e:#}", theme_path);
-                    self.theme.clone()
-                }
-            };
-            t.apply_accessibility(&new_cfg.accessibility);
-            if let Some(r) = self.main_renderer_mut() {
-                r.set_theme(&t);
-            }
-            for child in self.windows.values_mut() {
-                if let Some(r) = child.renderer.as_mut() {
-                    r.set_theme(&t);
-                }
-            }
-            self.theme = t;
-            for child in self.windows.values() {
-                propagate_theme_to_pane_parsers(&child.panes, &self.theme);
-            }
-            for child in self.windows.values() {
-                // Phase B2 PR-A: skip shadow main entry (renderer=None).
-                if child.renderer.is_none() {
-                    continue;
-                }
-                mark_all_panes_dirty(&child.panes);
-            }
-            tracing::info!(
-                "live-reload: accessibility.high_contrast -> {}",
-                new_cfg.accessibility.high_contrast
-            );
         }
 
         // Font
         let font_changed = config_diff_needs_font_apply(&self.config, &new_cfg);
         if font_changed {
+            let metrics_changed = config_diff_changes_font_metrics(&self.config, &new_cfg);
+            let weight_scale = new_cfg.font.effective_weight_scale();
             if let Some(r) = self.main_renderer_mut() {
-                r.set_font(&new_cfg.font.family, new_cfg.font.size, new_cfg.font.line_height);
+                r.set_font(
+                    &new_cfg.font.family,
+                    new_cfg.font.size,
+                    new_cfg.font.line_height,
+                    weight_scale,
+                );
             }
             // Cell metrics changed → resize each pane to its own PaneRect,
             // never to the whole window's dimensions.
@@ -169,18 +154,25 @@ impl App {
             for child in self.windows.values_mut() {
                 {
                     let Some(r) = child.renderer.as_mut() else { continue };
-                    r.set_font(&new_cfg.font.family, new_cfg.font.size, new_cfg.font.line_height);
+                    r.set_font(
+                        &new_cfg.font.family,
+                        new_cfg.font.size,
+                        new_cfg.font.line_height,
+                        weight_scale,
+                    );
                 }
-                let Some(r) = child.renderer.as_ref() else { continue };
-                let rects = App::compute_pane_rects_for(child);
-                let (cw, ch) = r.cell_size();
-                let inset = [
-                    r.padding_left_px(),
-                    r.padding_right_px(),
-                    r.padding_top_px(),
-                    r.padding_bottom_px(),
-                ];
-                resize_panes_to_rects(&child.panes, &rects, cw, ch, inset);
+                if metrics_changed {
+                    let Some(r) = child.renderer.as_ref() else { continue };
+                    let rects = App::compute_pane_rects_for(child);
+                    let (cw, ch) = r.cell_size();
+                    let inset = [
+                        r.padding_left_px(),
+                        r.padding_right_px(),
+                        r.padding_top_px(),
+                        r.padding_bottom_px(),
+                    ];
+                    resize_panes_to_rects(&child.panes, &rects, cw, ch, inset);
+                }
             }
             tracing::info!(
                 "live-reload: font -> {} @ {}px x{}",
@@ -376,8 +368,10 @@ impl App {
             );
         }
 
-        // Keymap
-        if new_cfg.keymap != self.config.keymap {
+        // Keymap. Unconditional for the same reason as the theme: keymap.toml
+        // is a separate file whose bindings can change while `[keymap]` still
+        // names it.
+        {
             let km_path = Keymap::resolve_path(&new_cfg.keymap, &assets);
             match self
                 .keymap_loader
@@ -386,14 +380,14 @@ impl App {
             {
                 Ok(km) => {
                     tracing::info!(
-                        "live-reload: keymap -> {} ({} bindings)",
+                        "reload: keymap -> {} ({} bindings)",
                         km.meta.name,
                         km.bindings.len()
                     );
                     self.command_palette.set_keymap(&km);
                     self.keymap = km;
                 }
-                Err(e) => tracing::warn!("live-reload: keymap {:?} failed: {e:#}", km_path),
+                Err(e) => tracing::warn!("reload: keymap {:?} failed: {e:#}", km_path),
             }
         }
 
@@ -486,24 +480,74 @@ impl App {
         self.set_font_size(next);
     }
     pub(super) fn reset_font_size(&mut self) {
-        let default = sonicterm_cfg::config::FontConfig::default().size;
-        if (self.config.font.size - default).abs() < f32::EPSILON {
+        // Return to the configured size, not `FontConfig::default()` — the
+        // compile-time default is a size the user never asked for.
+        let target = self.configured_font_size;
+        if (self.config.font.size - target).abs() < f32::EPSILON {
             return;
         }
-        self.set_font_size(default);
+        self.set_font_size(target);
+    }
+
+    /// Step regular-text weight by `delta`, clamped to the accepted
+    /// `weight_scale` range. Weight does not affect cell metrics, so unlike a
+    /// size change this never resizes a grid or PTY.
+    pub(super) fn change_font_weight(&mut self, delta: f32) {
+        let cur = self.config.font.effective_weight_scale();
+        let next = (cur + delta).clamp(WEIGHT_SCALE_MIN, WEIGHT_SCALE_MAX);
+        if (next - cur).abs() < f32::EPSILON {
+            return;
+        }
+        self.set_font_weight(next);
+    }
+
+    /// Return regular-text weight to the configured `weight_scale`, discarding
+    /// transient palette adjustments.
+    pub(super) fn reset_font_weight(&mut self) {
+        let target = self.configured_weight_scale;
+        if (self.config.font.effective_weight_scale() - target).abs() < f32::EPSILON {
+            return;
+        }
+        self.set_font_weight(target);
+    }
+
+    pub(super) fn set_font_weight(&mut self, weight_scale: f32) {
+        self.config.font.weight_scale = weight_scale;
+        let family = self.config.font.family.clone();
+        let size = self.config.font.size;
+        let line_h = self.config.font.line_height;
+        let weight_scale = self.config.font.effective_weight_scale();
+        if let Some(r) = self.main_renderer_mut() {
+            r.set_font(&family, size, line_h, weight_scale);
+        }
+        for child in self.windows.values_mut() {
+            if let Some(r) = child.renderer.as_mut() {
+                r.set_font(&family, size, line_h, weight_scale);
+            }
+        }
+        self.input_dirty = true;
+        for child in self.windows.values() {
+            if child.renderer.is_none() {
+                continue;
+            }
+            mark_all_panes_dirty(&child.panes);
+            child.request_redraw();
+        }
+        tracing::info!("font weight_scale -> {weight_scale}");
     }
     pub(super) fn set_font_size(&mut self, size: f32) {
         self.config.font.size = size;
         let family = self.config.font.family.clone();
         let line_h = self.config.font.line_height;
+        let weight_scale = self.config.font.effective_weight_scale();
         if let Some(r) = self.main_renderer_mut() {
-            r.set_font(&family, size, line_h);
+            r.set_font(&family, size, line_h, weight_scale);
         }
         // PR-B2c: the loop below covers main + every child.
         for child in self.windows.values_mut() {
             {
                 let Some(r) = child.renderer.as_mut() else { continue };
-                r.set_font(&family, size, line_h);
+                r.set_font(&family, size, line_h, weight_scale);
             }
             let Some(r) = child.renderer.as_ref() else { continue };
             let rects = App::compute_pane_rects_for(child);
@@ -562,11 +606,20 @@ impl App {
             child.request_redraw();
         }
     }
+    /// Re-read `sonicterm.toml` from disk and apply it, along with the theme
+    /// and keymap files it names. This is the only path that reads config
+    /// after startup — there is no background watcher, so an edit takes effect
+    /// when the user asks for it and not before.
     pub(super) fn force_reload_config(&mut self) {
         let Some(path) = sonicterm_cfg::config::Config::default_path() else { return };
         match Config::load_strict(&path) {
-            Ok(cfg) => self.apply_new_config(cfg),
-            Err(e) => tracing::warn!("force_reload_config: parse failed: {e:#}"),
+            Ok(cfg) => {
+                // The reset targets follow the config the session has loaded.
+                self.configured_font_size = cfg.font.size;
+                self.configured_weight_scale = cfg.font.effective_weight_scale();
+                self.apply_new_config(cfg);
+            }
+            Err(e) => tracing::warn!("reload: config parse failed: {e:#}"),
         }
     }
 
@@ -584,3 +637,7 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "config_apply_tests.rs"]
+mod config_apply_tests;

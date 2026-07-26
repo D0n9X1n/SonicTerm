@@ -88,6 +88,8 @@ pub struct FontConfig {
     pub size: f32,
     /// Line height multiplier applied to the metric ascent+descent.
     pub line_height: f32,
+    /// Coverage multiplier for regular text. `1.0` preserves native weight.
+    pub weight_scale: f32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -415,7 +417,28 @@ pub const DEFAULT_FONT_FAMILY: &str = "Rec Mono St.Helens";
 
 impl Default for FontConfig {
     fn default() -> Self {
-        Self { family: DEFAULT_FONT_FAMILY.to_string(), size: 13.0, line_height: 1.3 }
+        Self {
+            family: DEFAULT_FONT_FAMILY.to_string(),
+            size: 13.0,
+            line_height: 1.3,
+            weight_scale: 1.0,
+        }
+    }
+}
+
+impl FontConfig {
+    /// Return a safe regular-text weight scale. Invalid values preserve the
+    /// native font coverage instead of reaching raster math.
+    pub fn effective_weight_scale(&self) -> f32 {
+        if self.weight_scale.is_finite() && (0.5..=5.0).contains(&self.weight_scale) {
+            self.weight_scale
+        } else {
+            1.0
+        }
+    }
+
+    fn normalize(&mut self) {
+        self.weight_scale = self.effective_weight_scale();
     }
 }
 
@@ -497,6 +520,7 @@ impl Config {
         let text = std::fs::read_to_string(path).with_context(|| format!("read {path:?}"))?;
         let mut cfg: Self = toml::from_str(&text).with_context(|| format!("parse {path:?}"))?;
         cfg.window.normalize_padding();
+        cfg.font.normalize();
         Ok(cfg)
     }
 
@@ -654,6 +678,12 @@ family = "{font_family}"
 size = {font_size}
 # Line-height multiplier. 1.1 is close to WezTerm's default terminal spacing.
 line_height = {line_height}
+# Regular-text weight scale, range 0.5..=5.0. 1.0 preserves native weight.
+# Below 1.0 thins regular text; above 1.0 thickens it. Values far from 1.0 also
+# reshape the glyph outline (growing above, eroding below), which is what makes
+# the change visible on HiDPI screens where stem cores are already solid.
+# Cell metrics and SGR bold are unaffected. Invalid values fall back to 1.0.
+weight_scale = {weight_scale}
 
 [window]
 # Default terminal grid size for NEW windows. These are character cells, not px.
@@ -774,6 +804,7 @@ threshold_secs = 10
         font_family = cfg.font.family,
         font_size = cfg.font.size,
         line_height = cfg.font.line_height,
+        weight_scale = cfg.font.weight_scale,
         cols = cfg.window.cols,
         rows = cfg.window.rows,
         padding_left = cfg.window.padding_left,

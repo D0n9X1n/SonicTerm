@@ -121,6 +121,12 @@ pub enum Action {
     DecreaseFontSize,
     /// Reset the font size to the configured default.
     ResetFontSize,
+    /// Make regular text heavier by one `weight_scale` step.
+    IncreaseFontWeight,
+    /// Make regular text lighter by one `weight_scale` step.
+    DecreaseFontWeight,
+    /// Reset regular-text weight to the configured `weight_scale`.
+    ResetFontWeight,
 
     /// Apply a theme by name (live-applied; persists to config on next save).
     /// Bound from the View → Theme submenu in the macOS menubar.
@@ -137,6 +143,8 @@ pub enum Action {
     // Window
     /// Open a new top-level window.
     NewWindow,
+    /// Move the active tab into a new top-level window.
+    MoveTabToNewWindow,
     /// Toggle fullscreen on the active window.
     ToggleFullscreen,
     /// Quit the whole application. When triggered from the keyboard this is

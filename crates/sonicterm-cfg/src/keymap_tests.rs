@@ -40,7 +40,26 @@ fn every_bundled_keymap_parses_with_no_dead_actions() {
         let km: Keymap = toml::from_str(text)
             .unwrap_or_else(|e| panic!("bundled {os} keymap must parse (dead action?): {e}"));
         assert!(!km.bindings.is_empty(), "bundled {os} keymap should have bindings");
+        assert!(
+            km.bindings.iter().all(|binding| binding.action.0 != Action::MoveTabToNewWindow),
+            "bundled {os} keymap must leave Move Tab to New Window unbound"
+        );
     }
+}
+
+#[test]
+fn move_tab_to_new_window_action_parses_for_user_bindings() {
+    let source = r#"
+[meta]
+name = "test"
+version = "1"
+
+[[binding]]
+keys = "alt+shift+n"
+action = "move_tab_to_new_window"
+"#;
+    let keymap: Keymap = toml::from_str(source).expect("action should deserialize");
+    assert_eq!(keymap.lookup("alt+shift+n"), Some(&Action::MoveTabToNewWindow));
 }
 
 /// `bundled_default()` (the runtime fallback) parses for the host platform.
