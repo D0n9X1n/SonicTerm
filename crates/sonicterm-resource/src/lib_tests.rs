@@ -761,3 +761,70 @@ fn a_parent_close_reports_children_before_charges() {
     governor.finish_close(pane).unwrap();
     governor.finish_close(window).unwrap();
 }
+
+/// The call sequence integration has to write, driven end to end.
+///
+/// Nothing depends on this crate yet — `cargo tree -i -p sonicterm-resource`
+/// reports no dependents — so every other test here exercises the governor
+/// against values this crate invented. That leaves one thing unverified: that
+/// the contract actually fits a caller.
+///
+/// The subsystems that will call it report a `ResourceAmount` and nothing else
+/// (`Grid::retained_amount`, `Parser::retained_amount`,
+/// `GlyphAtlas::retained_amount`). This drives exactly that value through the
+/// full cycle — reserve, observe, release, re-reserve, grow — so a mismatch
+/// between what subsystems report and what the governor accepts fails here
+/// rather than during integration.
+#[test]
+fn a_reported_amount_survives_the_full_reserve_release_cycle() {
+    let governor = governor(1_000_000);
+    let pane = app_pane(&governor, 1_000_000);
+
+    // Shaped exactly like what a subsystem reports today.
+    let reported = ResourceAmount { bytes: 4096, items: 24 };
+
+    let token = governor
+        .try_reserve(pane, ResourceClass::GridVisible, reported)
+        .expect("a reported amount must be reservable as-is, with no adaptation");
+    assert_eq!(
+        governor.snapshot(pane).unwrap().owner_amount,
+        reported,
+        "the charge must equal what the subsystem reported, not a rounded or derived value"
+    );
+
+    // Releasing must return the budget exactly. A subsystem that grows and
+    // shrinks repeatedly would otherwise leak its ceiling away over a session,
+    // which is the failure mode this architecture exists to prevent.
+    drop(token);
+    assert_eq!(
+        governor.snapshot(pane).unwrap().owner_amount,
+        ResourceAmount { bytes: 0, items: 0 },
+        "dropping the token must release the whole charge"
+    );
+
+    let reacquired = governor
+        .try_reserve(pane, ResourceClass::GridVisible, reported)
+        .expect("the same amount must be reservable again after release");
+
+    // Growth is reserved as a delta on top of the live charge, not as a new
+    // total — the caller holds both tokens and the ledger sums them.
+    let grown = ResourceAmount { bytes: 8192, items: 48 };
+    let delta =
+        ResourceAmount { bytes: grown.bytes - reported.bytes, items: grown.items - reported.items };
+    let growth = governor
+        .try_reserve(pane, ResourceClass::GridVisible, delta)
+        .expect("a growth delta must be reservable while the original is held");
+    assert_eq!(
+        governor.snapshot(pane).unwrap().owner_amount,
+        grown,
+        "concurrent reservations must sum to the subsystem's new reported total"
+    );
+
+    drop(growth);
+    drop(reacquired);
+    assert_eq!(
+        governor.snapshot(pane).unwrap().owner_amount,
+        ResourceAmount { bytes: 0, items: 0 },
+        "releasing every token must return the owner to zero"
+    );
+}
