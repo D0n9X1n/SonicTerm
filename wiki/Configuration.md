@@ -33,6 +33,7 @@ tab_max_width = 240
 family = "Rec Mono St.Helens"
 size = 13
 line_height = 1.3
+weight_scale = 1.0
 
 [window]
 cols = 100
@@ -103,13 +104,36 @@ effect and should not be added to new configurations.
 
 ### Font
 
-`family`, `size`, and `line_height` are the public SonicTerm font config. The
-platform rasterizer policy is internal: DirectWrite is the Windows default with
-FreeType fallback, while macOS/other Unix use FreeType. There is currently no
-`[font].font_rasterizer` key in `sonicterm.toml`.
+`family`, `size`, `line_height`, and `weight_scale` are the public SonicTerm
+font config. `weight_scale = 1.0` preserves native glyph coverage. Accepted
+values are `0.5..=5.0`; invalid values fall back to `1.0`. Below `1.0` thins
+regular text, above `1.0` thickens it, and neither changes cell metrics or
+replaces SGR bold.
 
-Changing font fields live updates every renderer, invalidates text caches, and
-resizes each visible pane's grid and PTY using its own pane rectangle.
+`weight_scale` works in two stages. Small adjustments near `1.0` (such as `1.1`
+or `0.9`) remap glyph coverage, which shifts the antialiased edge only. Because
+a stem pixel that is already fully opaque can be neither darkened nor lightened,
+coverage alone has little effect on HiDPI/Retina displays, where stem cores are
+solid. Further from `1.0`, the glyph outline itself changes — growing above
+`1.0` and eroding below it — which adds or removes real ink and stays visible at
+any display scale. Values around `2.0`-`3.0` suit most HiDPI screens; `5.0` is
+deliberately heavy, and `0.5` deliberately light.
+
+The platform rasterizer policy is internal: DirectWrite is the Windows
+default with FreeType fallback, while macOS/other Unix use FreeType. There is
+currently no `[font].font_rasterizer` key in `sonicterm.toml`.
+
+`weight_scale` is also adjustable from the command palette without editing the
+file: **Increase Font Weight (Bolder)** and **Decrease Font Weight (Thinner)**
+step it by `0.25`, and **Reset Font Weight to Config** returns to the configured
+value. Searching `bolder`, `thinner`, `heavier`, or `lighter` finds them. Those
+adjustments last for the session; the file stays the source of truth on the next
+reload. None of them have a default key binding, but all three can be bound —
+see [Keybindings](Keybindings).
+
+Changing font fields live updates every renderer and invalidates text caches.
+Family, size, and line-height changes also resize each visible pane's grid and
+PTY using its own pane rectangle; weight-only changes preserve metrics.
 
 ### Window and appearance
 
@@ -170,24 +194,27 @@ SonicTerm preserves and reloads them, but they do not yet change presentation.
 `long_command` enables completion notifications for commands exceeding
 `threshold_secs`.
 
-## Editing and hot reload
+## Editing and reloading
 
 Use the command palette entries **Edit sonicterm.toml**, **Edit keymap.toml**,
-and **Reload Config**. SonicTerm also watches the config directory. Editors
-commonly save by remove-and-rename, so the watcher observes the parent directory,
-coalesces 80 ms event bursts, and wakes the winit loop immediately.
+and **Reload Config**.
 
-A malformed hot-reload file is logged and the previous active config remains in
-use. Startup is more forgiving: an invalid existing config produces a warning
-and starts with defaults so the app remains launchable.
+SonicTerm reads configuration at startup and then only when you run **Reload
+Config**. There is no background file watcher, so saving a file does not apply
+it — this keeps a watcher thread and its filesystem handles out of the running
+process. Edit freely, then reload when you want the changes to take effect.
 
-Font, locale, cursor, padding, scrollbar policy, scrollback, and selector
-changes for `theme`/`keymap` are live. Editing the contents of the currently
-selected custom theme or custom-named keymap without changing its selector does
-not reliably reload that asset today. The file watcher observes
-`sonicterm.toml` and the platform-default keymap basename, not arbitrary active
-theme/keymap files. To apply a custom asset edit, change/reselect its name or
-restart after saving. Native decorations and certain platform setup may also
+A reload re-reads `sonicterm.toml` together with the theme and keymap files it
+names, even when the `theme` and `keymap` selectors are unchanged. Editing the
+contents of a custom theme or custom-named keymap therefore applies on reload;
+no rename or restart is needed.
+
+A malformed file is logged and the previous active config remains in use.
+Startup is more forgiving: an invalid existing config produces a warning and
+starts with defaults so the app remains launchable.
+
+Font, locale, cursor, padding, scrollbar policy, scrollback, theme, and keymap
+all apply on reload. Native decorations and certain platform setup may still
 require a new window or restart.
 
 ## Layout diagrams
@@ -236,6 +263,7 @@ tab_max_width = 240
 family = "Rec Mono St.Helens"
 size = 13
 line_height = 1.3
+weight_scale = 1.0
 
 [window]
 cols = 100
@@ -304,11 +332,30 @@ threshold_secs = 10
 
 ### 字体
 
-`family`、`size`、`line_height` 是 SonicTerm 对外字体配置。平台 rasterizer policy 在内部决定：
-Windows 默认 DirectWrite 并以 FreeType 回退；macOS/其它 Unix 使用 FreeType。
-当前 `sonicterm.toml` 中不存在 `[font].font_rasterizer` key。
+`family`、`size`、`line_height`、`weight_scale` 是 SonicTerm 对外字体配置。
+`weight_scale = 1.0` 保持字体原始覆盖率。允许范围为 `0.5..=5.0`；无效值回退为 `1.0`。
+小于 `1.0` 会让常规文本更细，大于 `1.0` 会让其更粗；两者都不会改变 cell metrics
+或替代 SGR bold。
 
-运行时改变字体会更新全部 renderer、使文本 cache 失效，并按各自 pane rect resize 每个可见窗格的 grid 与 PTY。
+`weight_scale` 分两个阶段生效。接近 `1.0` 的微调（例如 `1.1` 或 `0.9`）只重映射字形
+覆盖率，仅影响抗锯齿边缘。由于已经完全不透明的字干像素既无法进一步加深也无法变浅，
+在 HiDPI/Retina 屏幕上字干核心本身就是实心的，因此仅靠覆盖率几乎看不出变化。离
+`1.0` 更远时会改变字形轮廓本身——大于 `1.0` 时扩张，小于 `1.0` 时收缩——真正增减
+墨量，在任何缩放比例下都可见。HiDPI 屏幕通常适合 `2.0`-`3.0`；`5.0` 属于刻意加粗的
+极值，`0.5` 则是刻意变细的极值。
+
+平台 rasterizer policy 在内部决定：Windows 默认 DirectWrite 并以 FreeType 回退；
+macOS/其它 Unix 使用 FreeType。当前 `sonicterm.toml` 中不存在
+`[font].font_rasterizer` key。
+
+`weight_scale` 也可以直接在命令面板中调整，无需编辑文件：**Increase Font Weight
+(Bolder)** 和 **Decrease Font Weight (Thinner)** 每次调整 `0.25`，**Reset Font
+Weight to Config** 回到配置值。搜索 `bolder`、`thinner`、`heavier`、`lighter` 均可
+找到。这些调整只在当前会话生效；下次重载时仍以配置文件为准。三者默认都没有绑定快捷键，
+但都可以绑定——参见 [Keybindings](Keybindings)。
+
+运行时改变字体会更新全部 renderer 并使文本 cache 失效。family、size、line-height
+变更还会按各自 pane rect resize 每个可见窗格的 grid 与 PTY；仅修改 weight 不改变 metrics。
 
 ### 窗口与外观
 
@@ -318,7 +365,7 @@ Windows 默认 DirectWrite 并以 FreeType 回退；macOS/其它 Unix 使用 Fre
 配置目标；软件渲染会把任何非零值限制为 `1`，以约束每个 renderer 的内存基线。
 
 当前生效的外观配置是 `[appearance].opacity` 与 `backdrop`。旧的 `[window].opacity`、
-`blur` 仍可反序列化，但当前启动与热重载路径不会使用它们，不应依赖。Backdrop material
+`blur` 仍可反序列化，但当前启动与重载路径不会使用它们，不应依赖。Backdrop material
 依赖平台；不支持的选项会回退，不改变终端语义。
 
 滚动条支持交互：拖动 thumb 可浏览历史，点击 thumb 上方或下方的 track 会按一整个视口翻页。
@@ -338,7 +385,7 @@ Windows 默认 DirectWrite 并以 FreeType 回退；macOS/其它 Unix 使用 Fre
 macOS/其它 Unix 使用 `$SHELL`。`term_program` 写入子进程的 `TERM_PROGRAM`。
 某些暂不识别 SonicTerm 的程序可尝试 `term_program = "WezTerm"`。
 
-`scrollback` 按窗格保存；热重载调小会立即删除最老历史，`0` 关闭历史。光标形状与 blink 可热更新。
+`scrollback` 按窗格保存；重载调小会立即删除最老历史，`0` 关闭历史。光标形状与 blink 会在重载时生效。
 
 ### 日志
 
@@ -352,22 +399,26 @@ macOS/其它 Unix 使用 `$SHELL`。`term_program` 写入子进程的 `TERM_PROG
 ### 无障碍与通知
 
 `high_contrast` 已生效，会把主题重新应用为白字黑底。`reduced_motion` 和 `strong_focus`
-目前是仅配置层保留字段：SonicTerm 会保存并热重载它们，但尚不会改变呈现。
+目前是仅配置层保留字段：SonicTerm 会保存并在重载时应用它们，但尚不会改变呈现。
 `long_command` 为运行超过 `threshold_secs` 的命令启用完成通知。
 
-## 编辑与热重载
+## 编辑与重载
 
 使用命令面板中的 **Edit sonicterm.toml**、**Edit keymap.toml**、**Reload Config**。
-SonicTerm 也会监控配置目录。由于编辑器常用 remove-and-rename 保存，watcher 监控父目录、合并 80 ms 事件 burst，
-并立即唤醒 winit loop。
 
-热重载文件损坏时会记录错误并继续使用旧配置。启动更宽容：已有配置损坏时发 warning 并以默认值启动，保证 app 可打开。
+SonicTerm 只在启动时读取配置，之后仅在运行 **Reload Config** 时重新读取。没有后台
+文件 watcher，因此保存文件不会自动生效——这样运行进程中就不存在 watcher 线程及其文件
+系统句柄。可以自由编辑，需要生效时再重载。
 
-字体、locale、光标、padding、scrollbar policy、scrollback，以及 `theme`/`keymap`
-选择器变化可以热更新。但如果不改变选择器，只修改当前自定义主题或自定义命名 keymap 的文件内容，
-目前不能可靠重载。watcher 只监控 `sonicterm.toml` 和平台默认 keymap 的 basename，不监控任意活动
-主题/keymap 文件。应用自定义资产修改时，请改变/重新选择名称，或保存后重启。原生 decorations
-和部分平台初始化也可能需要新窗口或重启。
+重载会连同 `sonicterm.toml` 一起重新读取它所指定的主题与 keymap 文件，即使 `theme`
+和 `keymap` 选择器没有变化。因此修改自定义主题或自定义命名 keymap 的文件内容也会在
+重载时生效，无需改名或重启。
+
+文件损坏时会记录错误并继续使用旧配置。启动更宽容：已有配置损坏时发 warning 并以默认值
+启动，保证 app 可打开。
+
+字体、locale、光标、padding、scrollbar policy、scrollback、主题和 keymap 都会在重载时
+生效。原生 decorations 和部分平台初始化仍可能需要新窗口或重启。
 
 ## 布局示意
 

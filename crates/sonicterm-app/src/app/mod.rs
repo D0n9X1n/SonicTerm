@@ -163,7 +163,6 @@ pub fn with_backdrop_transparency(
     }
 }
 
-use crate::config_watch::ConfigWatcher;
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_ui::broadcast::BroadcastState;
 use sonicterm_ui::command_palette::CommandPalette;
@@ -1118,16 +1117,11 @@ pub type KeymapLoader = Box<dyn Fn(&str) -> Result<Keymap> + Send + 'static>;
 
 /// Custom user events delivered through [`EventLoopProxy`].
 ///
-/// Currently the only variant is [`UserEvent::ConfigChanged`], sent by
-/// the [`ConfigWatcher`] thread whenever a fresh `sonicterm.toml` parse is
-/// available. The handler wakes the loop, drains the watcher channel,
-/// and applies the new config (theme/font/keymap). Without this the
-/// channel-based delivery would sit queued under `ControlFlow::Wait`
-/// until an unrelated event arrived.
+/// Config is read at startup and thereafter only when the user explicitly
+/// asks for it via `Action::ReloadConfig`, so there is no watcher thread and
+/// no event for "the config file changed on disk".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserEvent {
-    /// A new `sonicterm.toml` parse is ready on the watcher channel.
-    ConfigChanged,
     /// A pending action arrived from the macOS native menubar. The
     /// payload itself is queued in the static
     /// [`crate::menubar_bridge`] buffer; this variant is just the
@@ -1382,23 +1376,33 @@ impl TabState {
     }
 }
 
-/// Phase A: typed in-process tear-out request. Created by
-/// `handle_os_drag_ended` on the `DroppedOnEmpty` branch (Win32
-/// `GetCursorPos` provides the screen-position field); drained by
-/// `drain_pending_window_creates` which calls the in-process child-window
-/// builder factored out of `tear_out.rs` — so no `Command::new` is ever
-/// invoked for the tear-out path on Phase A.
+/// Deferred in-process tab tear-out request. Drag tear-out records a screen
+/// position; command-palette/keymap tear-out leaves it unset so the window
+/// manager chooses the destination position.
 #[derive(Debug, Clone)]
 pub struct PendingTearOut {
     pub source_window: WindowId,
     pub source_tab_idx: usize,
-    pub drop_screen_pos: (i32, i32),
+    pub drop_screen_pos: Option<(i32, i32)>,
 }
 
 #[doc(hidden)]
 pub struct App {
     pub(super) theme: Theme,
     pub(super) config: Config,
+    /// Font size the loaded config asked for, in logical px. `ResetFontSize`
+    /// returns here rather than to the compile-time default, so Cmd+0 restores
+    /// the user's configured size instead of a value they never chose.
+    ///
+    /// Tracks the config this session has *loaded*, not the file on disk.
+    /// Editing `sonicterm.toml` does not move it — the background watcher may
+    /// apply other settings from that edit, but the reset target stays where
+    /// the session started. Only an explicit `ReloadConfig` moves it.
+    pub(super) configured_font_size: f32,
+    /// Regular-text `weight_scale` the loaded config asked for. Follows the
+    /// same rule as [`Self::configured_font_size`]: `ResetFontWeight` returns
+    /// here, and only an explicit reload moves it.
+    pub(super) configured_weight_scale: f32,
     pub(super) keymap: Keymap,
     // PR-B1b: `App.renderer` field removed; the main window's
     // `GpuRenderer` is now owned by `self.windows[main_window_id].renderer`.
@@ -1456,13 +1460,9 @@ pub struct App {
     /// the windows-non-empty case (Cmd+N from a focused window) AND the
     /// windows-empty post-close-last-window dock-alive case on macOS.
     pub(super) pending_new_window: bool,
-    /// Phase A: typed in-process tear-out request. Set by
-    /// `handle_os_drag_ended` on the `DroppedOnEmpty` branch with the
-    /// recorded source tab handle + Win32 cursor screen position.
-    /// Drained by `drain_pending_window_creates` AFTER `pending_new_window`
-    /// in the SAME pass (NewShell then TearOut). Replaces the legacy
-    /// child-process spawn (`spawn_tearout_child`) — that code path
-    /// becomes dead in Phase A and is removed in Phase B.
+    /// Deferred in-process tab tear-out request from either drag/drop or the
+    /// Move Tab to New Window action. Drained only while an ActiveEventLoop is
+    /// available so every path uses the same native-window constructor.
     pub(super) pending_tear_out: Option<PendingTearOut>,
     /// (speculative defensive fix): deferred
     /// `cancel_drag_session` request. Set by `handle_os_drag_ended`
@@ -1598,13 +1598,8 @@ pub struct App {
     pub(crate) theme_loader: Option<ThemeLoader>,
     /// Optional keymap loader, set by `run_with`.
     pub(crate) keymap_loader: Option<KeymapLoader>,
-    /// Live-reload watcher for the user's `sonicterm.toml`. Spawned in
-    /// `resumed`; `None` if the config path could not be resolved or
-    /// the watcher failed to start (e.g. parent dir unwritable).
-    pub(super) config_watcher: Option<ConfigWatcher>,
-    /// Proxy used by the watcher thread to wake the idle event loop
-    /// on `sonicterm.toml` changes. `None` in tests that construct `App`
-    /// directly via [`App::new`] without a real event loop.
+    /// Proxy used to wake the idle event loop. `None` in tests that
+    /// construct `App` directly via [`App::new`] without a real event loop.
     pub(super) event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
     /// Minimum interval between two successive frames. Defaults to 1/60s
     /// and is updated in `resumed` from the current monitor's reported
@@ -1859,9 +1854,13 @@ impl App {
         });
         let mut command_palette = CommandPalette::new();
         command_palette.set_keymap(&keymap);
+        let configured_font_size = config.font.size;
+        let configured_weight_scale = config.font.effective_weight_scale();
         Self {
             theme,
             config,
+            configured_font_size,
+            configured_weight_scale,
             keymap,
             clipboard: Clipboard::new().ok(),
             test_clipboard_text: None,
@@ -1899,7 +1898,6 @@ impl App {
             pending_os_drag_payloads: Vec::new(),
             theme_loader: None,
             keymap_loader: None,
-            config_watcher: None,
             event_loop_proxy,
             // Default to 60 Hz until `resumed` probes the actual
             // monitor refresh rate. ~16.667 ms = 1/60 s.
@@ -4256,13 +4254,9 @@ impl App {
         self.pending_new_window
     }
 
-    /// Phase A test seam: read whether a typed in-process
-    /// tear-out request has been queued (drained by
-    /// `drain_pending_window_creates`). The request carries the
-    /// source tab handle + Win32 cursor screen position from the
-    /// `DroppedOnEmpty` branch of `handle_os_drag_ended`.
+    /// Test seam for deferred in-process tear-out requests.
     #[doc(hidden)]
-    pub fn __test_pending_tear_out(&self) -> Option<(WindowId, usize, (i32, i32))> {
+    pub fn __test_pending_tear_out(&self) -> Option<(WindowId, usize, Option<(i32, i32)>)> {
         self.pending_tear_out
             .as_ref()
             .map(|t| (t.source_window, t.source_tab_idx, t.drop_screen_pos))
@@ -4894,7 +4888,7 @@ impl App {
                     self.pending_tear_out = Some(PendingTearOut {
                         source_window: src_win,
                         source_tab_idx: src_idx,
-                        drop_screen_pos,
+                        drop_screen_pos: Some(drop_screen_pos),
                     });
                 } else {
                     tracing::warn!(
@@ -4992,29 +4986,6 @@ impl App {
     #[doc(hidden)]
     pub fn __test_pane_pty_present(&self, id: u64) -> Option<bool> {
         self.main()?.panes.get(&id).map(|pane| pane.pty.is_some())
-    }
-
-    /// Drain the config-watcher channel and apply any incoming config/keymap.
-    /// Idempotent and cheap when nothing changed.
-    #[doc(hidden)]
-    pub fn poll_config_reload(&mut self) {
-        let Some(watcher) = self.config_watcher.as_ref() else {
-            return;
-        };
-        let (latest_config, latest_keymap) = watcher.try_latest_updates();
-        if let Some(km) = latest_keymap {
-            tracing::info!(
-                "live-reload: keymap.toml -> {} ({} bindings)",
-                km.meta.name,
-                km.bindings.len()
-            );
-            self.command_palette.set_keymap(&km);
-            self.keymap = km;
-            self.input_dirty = true;
-        }
-        if let Some(cfg) = latest_config {
-            self.apply_new_config(cfg);
-        }
     }
 
     /// Read-only accessor used by tests and (eventually) the

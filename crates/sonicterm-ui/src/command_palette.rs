@@ -436,7 +436,11 @@ pub fn action_display_name(a: &Action) -> String {
         Action::IncreaseFontSize => "IncreaseFontSize".into(),
         Action::DecreaseFontSize => "DecreaseFontSize".into(),
         Action::ResetFontSize => "ResetFontSize".into(),
+        Action::IncreaseFontWeight => "IncreaseFontWeight".into(),
+        Action::DecreaseFontWeight => "DecreaseFontWeight".into(),
+        Action::ResetFontWeight => "ResetFontWeight".into(),
         Action::NewWindow => "NewWindow".into(),
+        Action::MoveTabToNewWindow => "MoveTabToNewWindow".into(),
         Action::ToggleFullscreen => "ToggleFullscreen".into(),
         Action::QuitApp => "QuitApp".into(),
         Action::OpenSearch => "OpenSearch".into(),
@@ -536,12 +540,16 @@ pub fn palette_actions() -> Vec<Action> {
         Action::IncreaseFontSize,
         Action::DecreaseFontSize,
         Action::ResetFontSize,
+        Action::IncreaseFontWeight,
+        Action::DecreaseFontWeight,
+        Action::ResetFontWeight,
         // UI chrome
         Action::ToggleTabBar,
         Action::RenameTab,
         Action::UpdateTabColor,
         // Window
         Action::NewWindow,
+        Action::MoveTabToNewWindow,
         Action::ToggleFullscreen,
         Action::QuitApp,
         // Search / palette / editable config files

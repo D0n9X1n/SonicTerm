@@ -52,7 +52,8 @@ Cargo graph, `sonicterm-gpu` depends on `sonicterm-render-model`, while
 - Platform crates stay thin; cross-platform behavior belongs in `sonicterm-app`
   or lower crates.
 - Public contracts live in `sonicterm-types`; changes there affect every crate.
-- User-facing settings live in `sonicterm-cfg` and hot-reload where possible.
+- User-facing settings live in `sonicterm-cfg` and are applied on explicit
+  reload; there is no config file watcher.
 - WezTerm-proven terminal/font behavior is absorbed into Sonic-owned crates; do
   not add new dependencies on a `vendor/` tree.
 

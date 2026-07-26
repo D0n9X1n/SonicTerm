@@ -284,6 +284,8 @@ impl WindowsSoftwareFrame {
             for xx in x0..x1 {
                 let tx = ((xx as f32 + 0.5 - draw_x) / w).clamp(0.0, 0.999_999);
                 let sx = ax0 as f32 + src_w * tx;
+                // Match the GPU pipeline: glyphs use nearest sampling while
+                // inline images retain intentional bilinear scaling.
                 let sample = if one_to_one {
                     let sx = ax0 + (xx - x0) as u32;
                     let sy = ay0 + (yy - y0) as u32;

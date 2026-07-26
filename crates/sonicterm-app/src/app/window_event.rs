@@ -101,10 +101,6 @@ impl App {
         if self.is_warm_window_id(win_id) {
             return;
         }
-        // Drain any pending sonicterm.toml live-reload deliveries before
-        // dispatching the event — guarantees font/theme/keymap swaps
-        // land on the same redraw tick they were detected on.
-        self.poll_config_reload();
         // Tear-out child windows: route to the dedicated handler so
         // each child renders/handles input on its own surface.
         // Phase B2 PR-A: the main window also lives in `self.windows`

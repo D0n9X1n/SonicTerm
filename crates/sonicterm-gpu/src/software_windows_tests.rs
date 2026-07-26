@@ -383,6 +383,112 @@ fn one_to_one_sampling_is_size_based_not_fractional_position_based() {
 }
 
 #[test]
+fn scaled_glyph_uses_nearest_without_bottom_fringe() {
+    let mut atlas = GlyphAtlas::new(1, 2);
+    let info = atlas
+        .get_or_insert(
+            GlyphKey::new('', false, false),
+            &mut TileRasterizer(RasterTile {
+                width: 1,
+                height: 2,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 1.0,
+                coverage: vec![255, 0],
+                is_color: false,
+                is_subpixel: false,
+            }),
+        )
+        .expect("block glyph inserts");
+    let mut frame = WindowsSoftwareFrame::new(1, 3, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+
+    frame.draw_glyphs(
+        &atlas,
+        &[GlyphInstance {
+            rect: px_to_ndc(0.0, 0.0, 1.0, 3.0, 1.0, 3.0),
+            uv: info.uv,
+            color: [1.0, 1.0, 1.0, 1.0],
+            flags: [0.0; 4],
+        }],
+    );
+
+    assert_eq!(frame.pixel_bgra(0, 0), [255, 255, 255, 255]);
+    assert_eq!(frame.pixel_bgra(0, 1), [0, 0, 0, 255]);
+    assert_eq!(frame.pixel_bgra(0, 2), [0, 0, 0, 255]);
+}
+
+#[test]
+fn scaled_color_glyph_uses_nearest_sampling() {
+    let mut atlas = GlyphAtlas::new(1, 2);
+    let info = atlas
+        .get_or_insert(
+            GlyphKey::new('😀', false, false),
+            &mut TileRasterizer(RasterTile {
+                width: 1,
+                height: 2,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 1.0,
+                coverage: vec![0, 0, 255, 255, 0, 0, 0, 0],
+                is_color: true,
+                is_subpixel: false,
+            }),
+        )
+        .expect("color glyph inserts");
+    let mut frame = WindowsSoftwareFrame::new(1, 3, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+
+    frame.draw_glyphs(
+        &atlas,
+        &[GlyphInstance {
+            rect: px_to_ndc(0.0, 0.0, 1.0, 3.0, 1.0, 3.0),
+            uv: info.uv,
+            color: [1.0; 4],
+            flags: [1.0, 0.0, 0.0, 0.0],
+        }],
+    );
+
+    assert_eq!(frame.pixel_bgra(0, 0), [0, 0, 255, 255]);
+    assert_eq!(frame.pixel_bgra(0, 1), [0, 0, 0, 255]);
+    assert_eq!(frame.pixel_bgra(0, 2), [0, 0, 0, 255]);
+}
+
+#[test]
+fn scaled_image_keeps_bilinear_sampling() {
+    let mut atlas = GlyphAtlas::new(1, 2);
+    let info = atlas
+        .get_or_insert(
+            GlyphKey::new('\u{fffc}', false, false),
+            &mut TileRasterizer(RasterTile {
+                width: 1,
+                height: 2,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 1.0,
+                coverage: vec![255, 255, 255, 255, 0, 0, 0, 0],
+                is_color: true,
+                is_subpixel: false,
+            }),
+        )
+        .expect("image tile inserts");
+    let mut frame = WindowsSoftwareFrame::new(1, 3, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+
+    frame.draw_glyphs(
+        &atlas,
+        &[GlyphInstance {
+            rect: px_to_ndc(0.0, 0.0, 1.0, 3.0, 1.0, 3.0),
+            uv: info.uv,
+            color: [1.0; 4],
+            flags: [1.0, 0.0, 1.0, 0.0],
+        }],
+    );
+
+    let middle = frame.pixel_bgra(0, 1);
+    assert!((120..=135).contains(&middle[0]), "image scaling should interpolate: {middle:?}");
+    assert_eq!(middle[0], middle[1]);
+    assert_eq!(middle[1], middle[2]);
+}
+
+#[test]
 fn scaled_glyph_sampling_does_not_bleed_from_adjacent_atlas_tile() {
     let mut atlas = GlyphAtlas::new(4, 8);
     let line = atlas

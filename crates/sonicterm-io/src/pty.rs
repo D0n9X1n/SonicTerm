@@ -997,17 +997,83 @@ fn interactive_shell_args(_shell_path: &str) -> Vec<String> {
 
 #[cfg(target_os = "windows")]
 fn default_shell_program() -> String {
-    // Prefer PowerShell 7 (`pwsh.exe`): first via PATH, then by probing the
-    // Microsoft Store package dir directly.: when SonicTerm is launched
-    // from Explorer (installed under `C:\Program Files\SonicTerm`), its
-    // inherited PATH often contains ONLY the per-user App Execution Alias stub
-    // (which we correctly skip) and NOT the real Store package dir, so PATH
-    // lookup alone misses a Store-installed PS7 and falls back to PS5. Fall
-    // back to Windows PowerShell, then `cmd.exe`.
-    path_lookup("pwsh.exe")
-        .or_else(windowsapps_store_pwsh)
-        .or_else(|| path_lookup("powershell.exe"))
+    resolve_windows_default_shell_with(
+        || path_lookup("pwsh.exe"),
+        registered_pwsh,
+        windowsapps_store_pwsh,
+        || path_lookup("powershell.exe"),
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_windows_default_shell_with<PathPwsh, RegisteredPwsh, StorePwsh, LegacyPwsh>(
+    path_pwsh: PathPwsh,
+    registered_pwsh: RegisteredPwsh,
+    store_pwsh: StorePwsh,
+    legacy_pwsh: LegacyPwsh,
+) -> String
+where
+    PathPwsh: FnOnce() -> Option<String>,
+    RegisteredPwsh: FnOnce() -> Option<String>,
+    StorePwsh: FnOnce() -> Option<String>,
+    LegacyPwsh: FnOnce() -> Option<String>,
+{
+    path_pwsh()
+        .or_else(registered_pwsh)
+        .or_else(store_pwsh)
+        .or_else(legacy_pwsh)
         .unwrap_or_else(|| "cmd.exe".to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn registered_pwsh() -> Option<String> {
+    use std::{ffi::c_void, os::windows::ffi::OsStringExt};
+
+    use windows::{
+        core::{w, PCWSTR},
+        Win32::{
+            Foundation::ERROR_SUCCESS,
+            System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_SZ},
+        },
+    };
+
+    const MAX_PATH_BYTES: u32 = 64 * 1024 + 2;
+    let mut bytes = 0u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!("Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\pwsh.exe"),
+            PCWSTR::null(),
+            RRF_RT_REG_SZ,
+            None,
+            None,
+            Some(&mut bytes),
+        )
+    };
+    if status != ERROR_SUCCESS || bytes < 2 || bytes > MAX_PATH_BYTES {
+        return None;
+    }
+
+    let mut value = vec![0u16; (bytes as usize).div_ceil(2)];
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!("Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\pwsh.exe"),
+            PCWSTR::null(),
+            RRF_RT_REG_SZ,
+            None,
+            Some(value.as_mut_ptr().cast::<c_void>()),
+            Some(&mut bytes),
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return None;
+    }
+
+    let units = (bytes as usize / 2).min(value.len());
+    let end = value[..units].iter().position(|&unit| unit == 0).unwrap_or(units);
+    let path = PathBuf::from(std::ffi::OsString::from_wide(&value[..end]));
+    path.is_file().then(|| path.to_string_lossy().into_owned())
 }
 
 /// Probe the Microsoft Store package directory for a real, executable

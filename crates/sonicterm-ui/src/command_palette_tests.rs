@@ -8,10 +8,26 @@ fn palette_defaults_do_not_expose_placeholder_parameter_actions() {
     assert!(!actions.iter().any(|a| matches!(a, Action::OpenSshPane(_))));
     assert!(actions.iter().any(|a| matches!(a, Action::OpenCommandPalette)));
     assert!(actions.iter().any(|a| matches!(a, Action::UpdateTabColor)));
+    assert!(actions.iter().any(|a| matches!(a, Action::MoveTabToNewWindow)));
     assert!(actions
         .iter()
         .any(|a| { matches!(a, Action::ResizePane { dir: Direction::Left, amount: 5 }) }));
     assert!(covers_every_variant_kind());
+}
+
+#[test]
+fn move_tab_to_new_window_is_searchable_and_unbound_by_default() {
+    let mut palette = CommandPalette::new();
+    palette.set_keymap(&Keymap::default());
+    palette.set_query("detach");
+
+    let visible = palette.visible();
+    let index = visible
+        .iter()
+        .position(|action| matches!(action, Action::MoveTabToNewWindow))
+        .expect("detach should find Move Tab to New Window");
+    assert_eq!(crate::command_label::label(visible[index]), "Move Tab to New Window");
+    assert_eq!(palette.shortcut_hint_for_visible_index(index), None);
 }
 
 #[test]
@@ -143,4 +159,62 @@ fn tab_color_picker_exposes_selected_choice() {
     assert_eq!(palette.selected_tab_color().and_then(|c| c.hex.as_deref()), Some("#fb4934"));
     palette.move_selection_down();
     assert_eq!(palette.selected_tab_color().map(|c| c.name.as_str()), Some("ANSI Blue"));
+}
+
+/// The weight commands exist so `weight_scale` is reachable without editing
+/// `sonicterm.toml`. Searching the words a user would actually type has to
+/// surface them, or the feature is invisible.
+#[test]
+fn font_weight_commands_are_searchable_by_bolder_and_thinner() {
+    for (query, expected, label) in [
+        ("bolder", Action::IncreaseFontWeight, "Increase Font Weight (Bolder)"),
+        ("thinner", Action::DecreaseFontWeight, "Decrease Font Weight (Thinner)"),
+    ] {
+        let mut palette = CommandPalette::new();
+        palette.set_keymap(&Keymap::default());
+        palette.set_query(query);
+
+        let visible = palette.visible();
+        let index = visible
+            .iter()
+            .position(|action| **action == expected)
+            .unwrap_or_else(|| panic!("{query:?} should find {label}"));
+        assert_eq!(crate::command_label::label(visible[index]), label);
+    }
+}
+
+/// Alternate wordings people reach for, so the commands are not findable only
+/// by their exact label.
+#[test]
+fn font_weight_commands_are_searchable_by_synonyms() {
+    for (query, expected) in [
+        ("heavier", Action::IncreaseFontWeight),
+        ("thicker", Action::IncreaseFontWeight),
+        ("bolder font", Action::IncreaseFontWeight),
+        ("bold font", Action::IncreaseFontWeight),
+        ("lighter", Action::DecreaseFontWeight),
+        ("slimmer", Action::DecreaseFontWeight),
+        ("thinner font", Action::DecreaseFontWeight),
+    ] {
+        let mut palette = CommandPalette::new();
+        palette.set_keymap(&Keymap::default());
+        palette.set_query(query);
+        assert!(
+            palette.visible().iter().any(|action| **action == expected),
+            "{query:?} should surface {expected:?}"
+        );
+    }
+}
+
+#[test]
+fn reset_font_weight_is_in_the_palette() {
+    let mut palette = CommandPalette::new();
+    palette.set_keymap(&Keymap::default());
+    palette.set_query("reset font weight");
+    let visible = palette.visible();
+    let index = visible
+        .iter()
+        .position(|action| matches!(action, Action::ResetFontWeight))
+        .expect("reset font weight should be searchable");
+    assert_eq!(crate::command_label::label(visible[index]), "Reset Font Weight to Config");
 }

@@ -429,6 +429,43 @@ fn equal_scale_factor_does_not_rebuild_atlas() {
 }
 
 #[test]
+fn software_block_glyph_rect_matches_integer_raster_size() {
+    let rect = software_block_glyph_target_rect(21.0, 49.017345, 36.0, 84.03469);
+
+    assert_eq!(rect, (21.0, 49.0, 15.0, 35.0));
+}
+
+#[test]
+fn software_block_glyph_rows_share_integer_edges() {
+    let first = software_block_glyph_target_rect(21.0, 49.017345, 36.0, 84.03469);
+    let second = software_block_glyph_target_rect(21.0, 84.03469, 36.0, 119.05203);
+
+    assert_eq!(first.1 + first.3, second.1);
+    assert_eq!(first.3, 35.0);
+    assert_eq!(second.3, 35.0);
+}
+
+#[test]
+fn software_block_glyph_rows_distribute_fractional_height_without_seams() {
+    let first = software_block_glyph_target_rect(0.0, 0.0, 15.0, 35.6);
+    let second = software_block_glyph_target_rect(0.0, 35.6, 15.0, 71.2);
+
+    assert_eq!(first.1 + first.3, second.1);
+    assert_eq!((first.3, second.3), (36.0, 35.0));
+}
+
+#[test]
+fn hardware_block_glyph_geometry_stays_fractional() {
+    let cx = 21.0_f32;
+    let cy = 49.017345_f32;
+    let cell_right = 36.0_f32;
+    let cell_h = 35.017345_f32;
+    let rect = (cx, cy, cell_right - cx, cell_h);
+
+    assert_eq!(rect, (21.0, 49.017345, 15.0, 35.017345));
+}
+
+#[test]
 fn inline_image_atlas_starts_placeholder_and_promotes_once() {
     let placeholder = GlyphAtlas::new(PLACEHOLDER_ATLAS_DIM, PLACEHOLDER_ATLAS_DIM);
     assert!(!image_atlas_promotion_required(&placeholder, false));

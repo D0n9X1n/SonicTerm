@@ -3,7 +3,7 @@
 ## Purpose
 Cross-platform application glue around `sonicterm-app-core`. This crate
 owns the winit `ApplicationHandler`, window lifecycle, keymap dispatch,
-PTY thread wiring, redraw scheduling, config hot reload, overlays, tab
+PTY thread wiring, redraw scheduling, explicit config reload, overlays, tab
 drag/tear-out, and the platform shell abstractions.
 
 ## Key files
@@ -13,7 +13,7 @@ drag/tear-out, and the platform shell abstractions.
 - `src/app/event_loop.rs` - window creation and window-ready hooks.
 - `src/app/spawn_pane.rs` - PTY thread pump and redraw coalescing.
 - `src/app/tab_transfer.rs`, `tear_out.rs`, `child_window.rs` - tab movement.
-- `src/config_watch.rs` - hot reload of `~/.sonicterm/sonicterm.toml`.
+- `src/app/config_apply.rs` - explicit reload of `~/.sonicterm/sonicterm.toml`.
 - `src/shell.rs` - `MacShell` and `WindowsShell` builders.
 
 ## Local gate

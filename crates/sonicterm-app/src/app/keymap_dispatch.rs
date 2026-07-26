@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::{atomic::Ordering, Arc};
 use std::time::{Duration, Instant};
 
+use super::config_apply::{WEIGHT_SCALE_MAX, WEIGHT_SCALE_MIN};
 use anyhow::Context;
 use parking_lot::Mutex;
 use sonicterm_cfg::config::Config;
@@ -55,6 +56,17 @@ pub(super) fn terminal_input_passthrough_binding(key_str: &str, action: &Action)
         && key_str == "alt+v"
         && matches!(action, Action::PasteFromClipboard)
 }
+
+/// One palette/keymap step of regular-text weight. Four steps span
+/// 1.0 -> 2.0, so a useful weight is a few presses away while the full
+/// 0.5..=5.0 range stays reachable.
+const FONT_WEIGHT_STEP: f32 = 0.25;
+
+const _: () = {
+    // Keep the step meaningful relative to the range it moves through.
+    assert!(FONT_WEIGHT_STEP > 0.0);
+    assert!(FONT_WEIGHT_STEP < WEIGHT_SCALE_MAX - WEIGHT_SCALE_MIN);
+};
 
 impl App {
     /// Handle a Cmd+Q chord press from the keyboard path. First press arms the
@@ -579,6 +591,9 @@ impl App {
             Action::IncreaseFontSize => self.change_font_size(1.0),
             Action::DecreaseFontSize => self.change_font_size(-1.0),
             Action::ResetFontSize => self.reset_font_size(),
+            Action::IncreaseFontWeight => self.change_font_weight(FONT_WEIGHT_STEP),
+            Action::DecreaseFontWeight => self.change_font_weight(-FONT_WEIGHT_STEP),
+            Action::ResetFontWeight => self.reset_font_weight(),
             Action::ApplyTheme(name) => self.apply_theme_by_name(name),
             Action::ToggleTabBar => self.toggle_tab_bar(),
             Action::RenameTab => self.start_rename_active_tab(),
@@ -603,6 +618,17 @@ impl App {
                 self.dispatch_intent(sonicterm_app_core::AppIntent::NewWindow {
                     role: sonicterm_app_core::WindowRole::Primary,
                 });
+            }
+            Action::MoveTabToNewWindow => {
+                let source_window = match self.frontmost_kind() {
+                    FrontmostKind::Child(id) => Some(id),
+                    FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {
+                        self.main_window_id
+                    }
+                };
+                if let Some(source_window) = source_window {
+                    self.queue_active_tab_tear_out(source_window);
+                }
             }
             Action::Scroll(kind) => {
                 // replace the "not yet wired up" stub. Translate
@@ -928,6 +954,11 @@ impl App {
                     for _ in 0..*amount {
                         self.resize_active_split(*dir);
                     }
+                }
+            }
+            Action::MoveTabToNewWindow => {
+                if self.windows.contains_key(&source_window_id) {
+                    self.queue_active_tab_tear_out(source_window_id);
                 }
             }
             Action::ToggleFullscreen => self.toggle_fullscreen_for(source_kind),
