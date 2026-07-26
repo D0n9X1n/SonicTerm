@@ -256,6 +256,11 @@ impl super::App {
         if !tracing::enabled!(target: "memory", tracing::Level::DEBUG) {
             return false;
         }
+        // Owners are reconciled on the same interval: both walk every pane,
+        // and doing them together means the hierarchy cannot drift from the
+        // figures reported beside it.
+        self.reconcile_pane_owners();
+
         let labelled: Vec<(String, &PaneState)> = self
             .windows
             .iter()

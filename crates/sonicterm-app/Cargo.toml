@@ -18,6 +18,11 @@ default = []
 ssh = ["sonicterm-io/ssh"]
 
 [dependencies]
+# The governor's owner registry. This is the edge that takes
+# `sonicterm-resource` from zero dependents to one: without it the crate is
+# fully built and unreachable from the shipping binary.
+sonicterm-resource.workspace = true
+enum-map = { workspace = true }
 sonicterm-app-core.workspace = true
 sonicterm-types.workspace = true
 bytes = "1"
