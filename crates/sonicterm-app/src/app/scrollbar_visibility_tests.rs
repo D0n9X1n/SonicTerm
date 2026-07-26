@@ -136,3 +136,112 @@ fn near_edge_band_is_tight_to_the_right_gutter() {
         "above the pane is not near edge"
     );
 }
+
+// ── Registry cleanup (v1.2.0 resource baseline, WP-WINDOW) ──────────
+
+/// The per-window `scrollbar_vis` map is the only pane-keyed registry
+/// that is grown implicitly: entries appear via `entry().or_insert_with`
+/// on whatever pane list the render path supplies, and no call site ever
+/// calls `remove` on it. What bounds it is the `retain` at the top of
+/// this helper, which keeps only the panes in the list it was handed.
+///
+/// The render path hands it the *visible* pane rects — the active tab of
+/// one window — so the map is bounded by visible pane count, not by
+/// panes ever created. This pins that bound across pane churn far larger
+/// than any real session, and pins the cost that buys it: an entry for a
+/// live-but-hidden pane is dropped and rebuilt, so its fade state does
+/// not survive a tab switch.
+#[test]
+fn v120_registry_cleanup_removes_all_owned_entries() {
+    let now = Instant::now();
+    let mut vis = std::collections::HashMap::new();
+    let cursor = (795.0, 300.0); // parked in the right-edge band
+
+    // Churn far past any real session. Pane ids come from a monotonic
+    // `AtomicU64` and are never reused, so an unpruned map would grow by
+    // one entry per generation and never shrink.
+    const GENERATIONS: u64 = 5_000;
+    let mut high_water = 0usize;
+    for generation in 0..GENERATIONS {
+        let id = generation + 1;
+        let visible = [(id, 0.0f32, 30.0f32, 800.0f32, 570.0f32)];
+        update_and_collect(&mut vis, &visible, cursor, id, None, ScrollbarMode::Auto, now);
+        high_water = high_water.max(vis.len());
+    }
+    assert_eq!(
+        high_water, 1,
+        "one visible pane must never leave more than one entry behind; \
+         {GENERATIONS} generations reached {high_water}"
+    );
+    assert!(
+        vis.contains_key(&GENERATIONS),
+        "the surviving entry must be the visible pane, not an arbitrary leftover"
+    );
+
+    // The same rule applies to the hover-only path, which the cursor-move
+    // handler drives far more often than a full render.
+    let mut hover_vis = std::collections::HashMap::new();
+    for generation in 0..GENERATIONS {
+        let id = generation + 1;
+        let visible = [(id, 0.0f32, 30.0f32, 800.0f32, 570.0f32)];
+        update_hover_states(&mut hover_vis, &visible, cursor, now);
+    }
+    assert_eq!(
+        hover_vis.len(),
+        1,
+        "the hover path must prune closed panes too, not only the render path"
+    );
+
+    // Two live panes in different tabs. Only one is ever visible, so the
+    // hidden one's entry is dropped even though its pane is alive.
+    let mut tabbed = std::collections::HashMap::new();
+    let front = (1u64, 0.0f32, 30.0f32, 800.0f32, 570.0f32);
+    let back = (2u64, 0.0f32, 30.0f32, 800.0f32, 570.0f32);
+
+    update_and_collect(&mut tabbed, &[front], cursor, front.0, None, ScrollbarMode::Auto, now);
+    let faded_in = now.checked_add(Duration::from_millis(200)).unwrap();
+    let alphas = update_and_collect(
+        &mut tabbed,
+        &[front],
+        cursor,
+        front.0,
+        None,
+        ScrollbarMode::Auto,
+        faded_in,
+    );
+    assert_eq!(
+        alphas.get(&front.0).copied(),
+        Some(1.0),
+        "hovering the right edge must fade the bar fully in"
+    );
+
+    // Switch to the other tab: pane 1 is alive but not visible.
+    update_and_collect(&mut tabbed, &[back], cursor, back.0, None, ScrollbarMode::Auto, faded_in);
+    assert_eq!(
+        tabbed.keys().copied().collect::<Vec<_>>(),
+        vec![back.0],
+        "only the visible pane may hold an entry while another tab is shown"
+    );
+
+    // Switch back. The entry is rebuilt from scratch, so the bar restarts
+    // its fade rather than resuming at full alpha. This is the accepted
+    // cost of bounding the map by visibility: fade state is ephemeral
+    // polish, and trading it for a hard bound is the right trade — but it
+    // is a real behavior change on tab switch, so it is pinned here
+    // rather than left to be rediscovered as a bug.
+    let returned = faded_in.checked_add(Duration::from_millis(10)).unwrap();
+    let back_alphas = update_and_collect(
+        &mut tabbed,
+        &[front],
+        cursor,
+        front.0,
+        None,
+        ScrollbarMode::Auto,
+        returned,
+    );
+    let resumed = back_alphas.get(&front.0).copied().expect("returning pane gets an alpha");
+    assert!(
+        resumed < 1.0,
+        "returning to a tab must restart the fade, not resume it: got {resumed}"
+    );
+}
