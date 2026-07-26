@@ -624,6 +624,7 @@ impl Ledger {
                 state: owner_state,
                 parent: record.parent.as_ref().map(|parent| parent.id),
                 amount: owner_amount,
+                bytes_limit: record.limits.owner_bytes,
                 class_bytes: owner_class_bytes,
                 class_items: owner_class_items,
                 epoch: usage.epoch,

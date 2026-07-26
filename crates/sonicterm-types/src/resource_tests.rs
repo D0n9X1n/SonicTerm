@@ -161,6 +161,7 @@ fn snapshot_exposes_owner_process_class_and_epoch_views() {
         owner_state: OwnerState::Open,
         parent: ResourceOwnerId::new(8),
         owner_amount: ResourceAmount { bytes: 12, items: 2 },
+        owner_bytes_limit: 64,
         owner_class_bytes: enum_map! { _ => 0 },
         owner_class_items: enum_map! { _ => 0 },
         process_amount: ResourceAmount { bytes: 20, items: 3 },
@@ -172,6 +173,11 @@ fn snapshot_exposes_owner_process_class_and_epoch_views() {
         release_failures: 0,
     };
     assert_eq!(snapshot.owner, owner);
+    assert_eq!(
+        snapshot.owner_bytes_limit, 64,
+        "a snapshot must carry the limit its usage is measured against; usage without \
+         a limit says how much is held and not whether that is near a problem"
+    );
     assert_eq!(snapshot.parent.unwrap().get(), 8);
     assert_eq!(snapshot.owner_amount.bytes, 12);
     assert_eq!(snapshot.process_amount.items, 3);

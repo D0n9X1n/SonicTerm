@@ -226,3 +226,101 @@ fn the_production_sampling_path_stays_inert_at_the_default_level() {
     assert!(!sampled, "the default level must not run the sampling walk");
     assert_eq!(app.__test_pane_charge_total(child, pane_id), Some(0), "and must not charge");
 }
+
+/// The committed budget is derived from the seam caps, not chosen.
+///
+/// This is what makes it safe to have at all. The objection to a governor
+/// limit was that two limits which must agree and are maintained separately
+/// drift, and the one that stops agreeing keeps reporting itself as enforced.
+/// A limit *computed from* the caps cannot disagree with them: change a cap and
+/// this moves with it.
+#[test]
+fn the_committed_budget_is_derived_from_the_seam_caps() {
+    use sonicterm_app::app::{PANE_COMMITTED_BUDGET_BYTES, PANE_SEAM_CAP_SUM_BYTES};
+
+    // Recomputed here from the caps themselves. If someone replaces the derived
+    // constant with a literal, these stop agreeing.
+    let expected = (sonicterm_grid::grid::MAX_GRID_CELLS as usize
+        * std::mem::size_of::<sonicterm_types::Cell>())
+        + 64 * 1024 * 1024
+        + sonicterm_grid::hyperlink::MAX_HYPERLINK_METADATA_BYTES
+        + sonicterm_vt::vt::MAX_MEDIA_PAYLOAD_BYTES
+        + sonicterm_vt::vt::MAX_ESCAPE_SEQUENCE_BYTES
+        + (sonicterm_app::app::MAX_PANE_COMMAND_EVENTS * 40);
+
+    assert_eq!(
+        PANE_SEAM_CAP_SUM_BYTES, expected,
+        "the seam-cap sum must be the sum of the caps, not a restatement of one"
+    );
+    // Both are compile-time constants, so these are decided before the test
+    // runs. Stated as const assertions rather than runtime ones so the build
+    // fails rather than the suite — a backstop below the caps it backstops is
+    // not a test failure, it is a design that cannot ship.
+    const _: () = assert!(
+        PANE_COMMITTED_BUDGET_BYTES > PANE_SEAM_CAP_SUM_BYTES,
+        "the backstop must sit above the caps it backstops, or it becomes the enforcer"
+    );
+    const _: () = assert!(
+        PANE_COMMITTED_BUDGET_BYTES <= PANE_SEAM_CAP_SUM_BYTES * 4,
+        "and stay a small multiple, or it bounds nothing in practice"
+    );
+}
+
+/// A pane behaving correctly must never approach the backstop.
+///
+/// The property that makes this a tripwire rather than a second enforcement
+/// point. If ordinary operation came near it, it would start refusing what the
+/// user asked for — which is the failure mode the whole design avoids.
+#[test]
+fn a_correctly_behaving_pane_stays_far_below_the_committed_budget() {
+    use sonicterm_app::app::PANE_COMMITTED_BUDGET_BYTES;
+
+    let mut app = app();
+    let child = app.__test_seed_child_window(&["one"]);
+    let pane_id = *app.__test_child_pane_ids(child).expect("child window").first().expect("pane");
+
+    // Fill the pane the way a long session does: scrollback, links, styling.
+    for round in 0..4_000 {
+        app.__test_advance_child_pane_parser(
+            child,
+            pane_id,
+            format!(
+                "\x1b[3{}mline {round} with styling and \
+                 \x1b]8;;https://example.com/{round}\x07a link\x1b]8;;\x07\r\n",
+                round % 8
+            )
+            .as_bytes(),
+        );
+    }
+
+    app.__test_reconcile_pane_owners();
+    app.__test_force_retention_sample();
+
+    let charged = app.__test_pane_charge_total(child, pane_id).expect("pane present");
+    assert!(charged > 0, "precondition: the pane charged something");
+    assert!(
+        charged < PANE_COMMITTED_BUDGET_BYTES / 2,
+        "a correctly behaving pane charged {charged} against a {PANE_COMMITTED_BUDGET_BYTES}-byte \
+         backstop; the backstop must never be near ordinary operation or it enforces"
+    );
+}
+
+/// The budget is a real limit the ledger holds, not a number in a doc comment.
+///
+/// Reads it back from the governor rather than from the constant, so a limit
+/// that is computed correctly and never installed fails here.
+#[test]
+fn the_governor_actually_holds_pane_owners_to_the_budget() {
+    use sonicterm_app::app::PANE_COMMITTED_BUDGET_BYTES;
+
+    let mut app = app();
+    let child = app.__test_seed_child_window(&["one"]);
+    app.__test_reconcile_pane_owners();
+
+    let limit = app.__test_pane_owner_limit(child).expect("a pane owner exists");
+    assert_eq!(
+        limit, PANE_COMMITTED_BUDGET_BYTES,
+        "the governor must hold pane owners to the derived budget; a limit that is \
+         computed and never installed is a comment"
+    );
+}

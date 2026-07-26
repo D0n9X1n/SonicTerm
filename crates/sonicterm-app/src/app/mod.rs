@@ -294,13 +294,83 @@ pub const PTY_REDRAW_FLUSH_BYTES: usize = 128 * 1024;
 pub const PTY_REPLY_QUEUE_CAPACITY: usize = 64;
 pub const MAX_PANE_COMMAND_EVENTS: usize = 1024;
 
-/// Owner limits that track without constraining.
+/// Sum of every per-pane seam cap, computed from the caps themselves.
+///
+/// Not a chosen figure. Each term is the constant the owning seam already
+/// enforces and tests, so this cannot drift from what the seams do — changing
+/// a cap changes this automatically, and a test asserts the arithmetic.
+///
+/// | Seam | Cap |
+/// | --- | --- |
+/// | grid (visible + history + saved primary) | `MAX_GRID_CELLS × size_of::<Cell>()` |
+/// | inline media retained | `MAX_RETAINED_INLINE_IMAGE_BYTES` |
+/// | hyperlink metadata | `MAX_HYPERLINK_METADATA_BYTES` |
+/// | parser capture staging | `MAX_MEDIA_PAYLOAD_BYTES` |
+/// | escape sequence in flight | `MAX_ESCAPE_SEQUENCE_BYTES` |
+/// | command events | `MAX_PANE_COMMAND_EVENTS × size_of::<PaneCommandEvent>()` |
+pub const PANE_SEAM_CAP_SUM_BYTES: usize = (sonicterm_grid::grid::MAX_GRID_CELLS as usize
+    * std::mem::size_of::<sonicterm_types::Cell>())
+    + media::MAX_RETAINED_INLINE_IMAGE_BYTES
+    + sonicterm_grid::hyperlink::MAX_HYPERLINK_METADATA_BYTES
+    + sonicterm_vt::vt::MAX_MEDIA_PAYLOAD_BYTES
+    + sonicterm_vt::vt::MAX_ESCAPE_SEQUENCE_BYTES
+    + (MAX_PANE_COMMAND_EVENTS * std::mem::size_of::<PaneCommandEvent>());
+
+/// Headroom multiplier between the seam caps and the governor's backstop.
+///
+/// The backstop exists to catch a seam that has *stopped* bounding, so it must
+/// sit far enough above correct operation that it never fires there. Two times
+/// the sum leaves room for allocator slack, capacity overshoot, and the
+/// deliberate residual where a pane keeps one oversized image rather than
+/// rendering nothing — while still being a small multiple rather than an
+/// unbounded curve.
+const BACKSTOP_HEADROOM: usize = 2;
+
+/// The committed budget an `AppPane` owner is held to.
+///
+/// **A tripwire, not a second enforcement point.** That distinction is what
+/// makes it safe, and it is the whole design:
+///
+/// The objection to a governor limit was that two limits which must agree and
+/// are maintained separately will drift, and the one that stops agreeing keeps
+/// reporting itself as enforced. That objection holds for a limit that shares
+/// the enforcement job. It does not hold for one derived from the other limits
+/// and set above all of them: this cannot disagree with the seam caps, because
+/// it is computed from them, and it cannot silently stop enforcing, because it
+/// was never the thing enforcing.
+///
+/// What it catches is the failure the seam caps cannot: a seam that has stopped
+/// bounding while still reporting itself as bounded. Today produced two of
+/// those — a retained figure under-reporting by 1.67×, and a charging path that
+/// never ran — and neither would have tripped any per-seam assertion, because
+/// each seam was behaving correctly on its own terms.
+pub const PANE_COMMITTED_BUDGET_BYTES: usize = PANE_SEAM_CAP_SUM_BYTES * BACKSTOP_HEADROOM;
+
+/// Owner limits: seam caps enforce, the governor backstops.
 ///
 /// Enforcement stays with the per-seam caps that are already tested and
-/// falsified. A governor limit here would be a second enforcement point, and
-/// two limits that must agree and are maintained separately will drift — the
-/// defect shape behind the charge-lifetime bug, where a cap silently stopped
-/// capping while still reporting itself as enforced.
+/// falsified. The governor's limit is [`PANE_COMMITTED_BUDGET_BYTES`], derived
+/// from those caps and set above them, so it is a tripwire for a seam that has
+/// stopped bounding rather than a second bound that must agree with the first.
+///
+/// Window and process owners stay untracked: their content is the sum of their
+/// panes, each already held to its own budget, and a second aggregate limit
+/// would be the drift surface this design avoids.
+fn pane_owner_limits() -> OwnerLimits {
+    OwnerLimits {
+        owner_bytes: PANE_COMMITTED_BUDGET_BYTES,
+        class_bytes: enum_map::enum_map! { _ => usize::MAX },
+        class_items: enum_map::enum_map! { _ => None },
+    }
+}
+
+/// Owner limits that track without constraining.
+///
+/// Used for window and process owners, whose retention is the sum of the panes
+/// beneath them. Each pane is already held to
+/// [`PANE_COMMITTED_BUDGET_BYTES`], so an aggregate limit here would add a
+/// second figure to keep in agreement without catching anything the per-pane
+/// backstop misses.
 fn tracking_only_owner_limits() -> OwnerLimits {
     OwnerLimits {
         owner_bytes: usize::MAX,
@@ -3791,6 +3861,18 @@ impl App {
         Some(pane.charges.values().map(|held| held.committed_amount().bytes).sum())
     }
 
+    /// Test-only: the byte ceiling the governor holds a pane owner to.
+    ///
+    /// Read back from the ledger rather than from the constant, so a limit that
+    /// is computed correctly and never installed fails the assertion that uses
+    /// this.
+    #[doc(hidden)]
+    pub fn __test_pane_owner_limit(&self, window: WindowId) -> Option<usize> {
+        let pane = self.windows.get(&window)?.panes.values().next()?;
+        let owner = pane.owner?;
+        self.governor.snapshot(owner).ok().map(|snapshot| snapshot.owner_bytes_limit)
+    }
+
     /// Test-only: set a child pane's scrollback limit.
     #[doc(hidden)]
     pub fn __test_set_child_pane_scrollback(
@@ -3902,7 +3984,7 @@ impl App {
                 match self.governor.create_child(
                     window_owner,
                     OwnerKind::AppPane,
-                    tracking_only_owner_limits(),
+                    pane_owner_limits(),
                 ) {
                     Ok(owner) => {
                         if let Some(pane) =
