@@ -307,3 +307,126 @@ fn reason_codes_are_stable_and_distinct() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Table overhead
+//
+// `retained_bytes` counted the interned strings and not the two `HashMap`s
+// holding them. That is not only a reporting defect: `try_intern` admits
+// against this same figure, so an undercount admits past the cap rather than
+// merely misreporting it.
+// ---------------------------------------------------------------------------
+
+/// The reported figure must track real heap, not just the strings.
+///
+/// Measured against a counting allocator at three sizes before this landed:
+/// reported 983,040 against 4,718,624 actual — **4.80x** — because the two
+/// `hashbrown` tables cost roughly 3.7 MB against 1.0 MB of strings.
+#[test]
+fn reported_bytes_include_the_tables_that_hold_the_strings() {
+    let mut registry = HyperlinkRegistry::default();
+    for index in 0..2_000u32 {
+        registry.intern(None, &format!("https://example.com/a-path/{index}"));
+    }
+
+    let strings: usize = (0..2_000u32)
+        .map(|index| format!("https://example.com/a-path/{index}").len())
+        .sum::<usize>()
+        * 2;
+
+    let reported = registry.retained_bytes();
+    assert!(
+        reported > strings,
+        "reported {reported} does not exceed the {strings} bytes of strings alone; \
+         the tables holding them are uncounted"
+    );
+
+    // The tables are the dominant term at this size, not a rounding correction.
+    assert!(
+        reported > strings * 2,
+        "the table term must be material: reported {reported} against {strings} of strings"
+    );
+}
+
+/// Admission must stop before the cap, judged on the figure it uses.
+///
+/// Necessary but **not sufficient**: with tables uncounted this also passed,
+/// because the registry stopped at 8,388,244 against a cap of 8,388,608 —
+/// compliant on the number it reports while holding ~4.7 MB more. The
+/// heap-truth check that catches that lives in
+/// `tests/hyperlink_heap_truth.rs`, which needs a crate-wide allocator.
+#[test]
+fn the_registry_stops_admitting_at_its_cap() {
+    let mut registry = HyperlinkRegistry::default();
+    let uri = "u".repeat(256);
+
+    for index in 0..MAX_HYPERLINKS {
+        if registry.try_intern(None, &format!("{uri}{index}")).is_none() {
+            break;
+        }
+        assert!(
+            registry.retained_bytes() <= MAX_HYPERLINK_METADATA_BYTES,
+            "the registry passed its own cap at entry {index}: {} > {MAX_HYPERLINK_METADATA_BYTES}",
+            registry.retained_bytes()
+        );
+    }
+
+    assert!(!registry.is_empty(), "precondition: the registry admitted something");
+    assert!(
+        registry.retained_bytes() > MAX_HYPERLINK_METADATA_BYTES / 2,
+        "the run must approach the cap, or this asserts nothing: {}",
+        registry.retained_bytes()
+    );
+}
+
+/// Freeing entries must return the table bytes, not only the string bytes.
+///
+/// `HashMap` does not shrink on removal, so a figure that decremented only the
+/// strings would report a registry as empty while it still held ~934 KB of
+/// table — a reported zero over real memory, which is the case a diagnostic
+/// exists to prevent.
+#[test]
+fn clearing_returns_the_table_bytes_it_charged() {
+    let mut registry = HyperlinkRegistry::default();
+    for index in 0..4_000u32 {
+        registry.intern(None, &format!("https://example.com/{index}"));
+    }
+    assert!(registry.retained_bytes() > 0, "precondition: the registry holds bytes");
+
+    registry.clear();
+
+    assert_eq!(registry.len(), 0, "clear must empty the registry");
+    assert_eq!(
+        registry.retained_bytes(),
+        0,
+        "a registry reporting zero must hold zero — including its tables"
+    );
+
+    // And it must still work afterwards.
+    let id = registry.try_intern(None, "https://example.com/after-clear");
+    assert!(id.is_some(), "the registry must still admit after a clear");
+}
+
+/// A sweep must return table bytes proportionally.
+#[test]
+fn retaining_a_subset_returns_the_freed_entries_table_bytes() {
+    let mut registry = HyperlinkRegistry::default();
+    let mut ids = Vec::new();
+    for index in 0..4_000u32 {
+        if let Some(id) = registry.try_intern(None, &format!("https://example.com/{index}")) {
+            ids.push(id);
+        }
+    }
+    let full = registry.retained_bytes();
+
+    // Keep a tenth.
+    let live: std::collections::HashSet<_> = ids.iter().take(400).copied().collect();
+    registry.retain_live(&live);
+
+    let after = registry.retained_bytes();
+    assert!(
+        after < full / 2,
+        "keeping a tenth of the entries must return most of the bytes: {after} against {full}"
+    );
+    assert_eq!(registry.len(), live.len(), "the surviving entries must be exactly the live set");
+}
