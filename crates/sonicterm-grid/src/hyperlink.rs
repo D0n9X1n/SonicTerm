@@ -9,6 +9,9 @@ use std::collections::{HashMap, HashSet};
 // `HyperlinkId` lives in `sonicterm-types` so value types like `Cell` can carry
 // it without depending on this crate. Re-exported for source compatibility.
 pub use sonicterm_types::HyperlinkId;
+// Rejection vocabulary is shared, not redefined here: a caller that matches on
+// it must be able to use the same variants across every admission point.
+pub use sonicterm_types::AdmissionRejection;
 
 /// Maximum distinct OSC 8 links retained by one parser/grid.
 pub const MAX_HYPERLINKS: usize = 16 * 1024;
@@ -53,29 +56,48 @@ impl HyperlinkRegistry {
 
     /// Fallible bounded variant of [`Self::intern`].
     pub fn try_intern(&mut self, id: Option<&str>, uri: &str) -> Option<HyperlinkId> {
+        self.intern_or_reject(id, uri).ok()
+    }
+
+    /// Intern `(id, uri)`, reporting **why** on refusal.
+    ///
+    /// The three rejection paths are not interchangeable, and treating them as
+    /// one costs real work. An oversized URI is refused by a size check that
+    /// no amount of reclamation can change, so sweeping the grid and retrying
+    /// — which the parser does when the registry is full — is a wasted
+    /// `O(visible + scrollback)` scan on the VT hot path, repeated per link
+    /// for as long as the shell keeps emitting them.
+    ///
+    /// [`AdmissionRejection::is_retryable_after_reclaim`] is the distinction
+    /// callers need: it separates "no room right now" from "never".
+    pub fn intern_or_reject(
+        &mut self,
+        id: Option<&str>,
+        uri: &str,
+    ) -> Result<HyperlinkId, AdmissionRejection> {
         if uri.len() > MAX_HYPERLINK_URI_BYTES
             || id.is_some_and(|value| value.len() > MAX_HYPERLINK_CLIENT_ID_BYTES)
         {
-            return None;
+            return Err(AdmissionRejection::ItemTooLarge);
         }
         let key = (id.map(String::from), uri.to_string());
         if let Some(hid) = self.by_key.get(&key) {
-            return Some(*hid);
+            return Ok(*hid);
         }
         if self.by_id.len() >= MAX_HYPERLINKS {
-            return None;
+            return Err(AdmissionRejection::ItemCountLimit);
         }
         let entry_bytes =
             key.0.as_ref().map_or(0, String::len).saturating_add(key.1.len()).saturating_mul(2);
         if self.retained_bytes.saturating_add(entry_bytes) > MAX_HYPERLINK_METADATA_BYTES {
-            return None;
+            return Err(AdmissionRejection::PerOwnerBudget);
         }
         let hid = HyperlinkId::next();
         let link = Hyperlink { id: key.0.clone(), uri: key.1.clone() };
         self.by_key.insert(key, hid);
         self.by_id.insert(hid, link);
         self.retained_bytes += entry_bytes;
-        Some(hid)
+        Ok(hid)
     }
 
     /// Resolve `hid` back to the interned `Hyperlink`.

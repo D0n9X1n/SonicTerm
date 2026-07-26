@@ -323,17 +323,36 @@ impl App {
                 // produce torn output. Order is pane_rects order;
                 // active position is recorded separately.
                 let main_panes_for_arcs = self.main_panes();
-                let inline_images_by_pane: std::collections::HashMap<
+                // `try_lock`, never a blocking `lock`: the VT worker holds
+                // this while merging a decoded batch, and blocking here would
+                // stall the event loop behind it. On contention this defers
+                // the redraw exactly as the parser locks below do — the
+                // renderer needs a coherent view of every pane, so reusing a
+                // stale image list for one pane while the rest advance would
+                // tear the frame rather than merely delay it.
+                let mut inline_images_by_pane: std::collections::HashMap<
                     u64,
                     Vec<sonicterm_render_model::InlineImage>,
-                > = main_panes_for_arcs
-                    .map(|panes| {
-                        panes
-                            .iter()
-                            .map(|(id, pane)| (*id, pane.inline_images.lock().clone()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                > = std::collections::HashMap::new();
+                let mut inline_images_locked = true;
+                if let Some(panes) = main_panes_for_arcs {
+                    for (id, pane) in panes.iter() {
+                        match pane.inline_images.try_lock() {
+                            Some(images) => {
+                                inline_images_by_pane.insert(*id, images.clone());
+                            }
+                            None => {
+                                inline_images_locked = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if !inline_images_locked {
+                    drop(inline_images_by_pane);
+                    self.defer_redraw_on_lock_contention(was_dirty);
+                    return;
+                }
                 let parser_arcs: Vec<(
                     u64,
                     std::sync::Arc<parking_lot::Mutex<sonicterm_vt::vt::Parser>>,

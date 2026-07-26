@@ -1647,8 +1647,18 @@ impl Perform for Performer {
                             uri: String::new(),
                         });
                     } else {
-                        let mut interned = self.hyperlinks.try_intern(id_norm, uri);
-                        if interned.is_none() {
+                        let mut admission = self.hyperlinks.intern_or_reject(id_norm, uri);
+                        // Only a rejection that reclamation could plausibly
+                        // relieve is worth a grid scan. An oversized URI is
+                        // refused by a size check no sweep can change, so
+                        // retrying it burns an O(visible + scrollback) walk to
+                        // reach the same answer — once per link, for as long
+                        // as the shell keeps emitting them.
+                        if admission
+                            .as_ref()
+                            .err()
+                            .is_some_and(|reason| reason.is_retryable_after_reclaim())
+                        {
                             // The registry is full. Almost all of it is links
                             // whose cells scrolled away, so reclaim and retry
                             // rather than leaving this and every later link
@@ -1687,13 +1697,13 @@ impl Perform for Performer {
                                         retained_bytes = self.hyperlinks.retained_bytes(),
                                         "reclaimed unreferenced hyperlinks"
                                     );
-                                    interned = self.hyperlinks.try_intern(id_norm, uri);
+                                    admission = self.hyperlinks.intern_or_reject(id_norm, uri);
                                 }
                             } else {
                                 self.hyperlink_reclaim_backoff -= 1;
                             }
                         }
-                        self.current_hyperlink = interned;
+                        self.current_hyperlink = admission.as_ref().ok().copied();
                         if self.current_hyperlink.is_some() {
                             self.events.push(VtEvent::Hyperlink {
                                 id: id_norm.map(String::from),
@@ -1706,6 +1716,10 @@ impl Perform for Performer {
                                 uri_bytes = uri.len(),
                                 id_bytes = id_norm.map_or(0, str::len),
                                 retained = self.hyperlinks.len(),
+                                reason = admission
+                                    .as_ref()
+                                    .err()
+                                    .map_or("unknown", |reason| reason.code()),
                                 "OSC 8 hyperlink rejected by memory limits"
                             );
                         }
