@@ -31,8 +31,17 @@ use super::PaneState;
 /// remedy differs.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PaneRetention {
-    /// Cells, scrollback, saved alternate screen, and prompt regions.
-    pub grid: ResourceAmount,
+    /// On-screen cells, their prompt regions, and their rare-attribute boxes.
+    pub grid_visible: ResourceAmount,
+    /// Scrollback history.
+    pub grid_history: ResourceAmount,
+    /// The saved primary screen held while an alternate screen is showing.
+    ///
+    /// Separated from history because the remedy differs: history is memory
+    /// the user asked for and can shrink by lowering `scrollback`, while a
+    /// saved primary is memory held for a screen they are not looking at and
+    /// which disappears when the alternate-screen program exits.
+    pub grid_alternate: ResourceAmount,
     /// In-flight escape/media capture buffers held by the parser.
     pub parser: ResourceAmount,
     /// Interned OSC 8 hyperlink strings.
@@ -51,27 +60,35 @@ impl PaneRetention {
     /// unreachable in practice.
     #[must_use]
     pub fn total(&self) -> ResourceAmount {
-        [self.grid, self.parser, self.hyperlinks, self.inline_media].into_iter().fold(
-            ResourceAmount::default(),
-            |acc, part| ResourceAmount {
-                bytes: acc.bytes.saturating_add(part.bytes),
-                items: acc.items.saturating_add(part.items),
-            },
-        )
+        [
+            self.grid_visible,
+            self.grid_history,
+            self.grid_alternate,
+            self.parser,
+            self.hyperlinks,
+            self.inline_media,
+        ]
+        .into_iter()
+        .fold(ResourceAmount::default(), |acc, part| ResourceAmount {
+            bytes: acc.bytes.saturating_add(part.bytes),
+            items: acc.items.saturating_add(part.items),
+        })
     }
 
     /// The seam holding the most bytes, for reporting the dominant term first.
     #[must_use]
     pub fn largest_seam(&self) -> (&'static str, ResourceAmount) {
         [
-            ("grid", self.grid),
+            ("grid_visible", self.grid_visible),
+            ("grid_history", self.grid_history),
+            ("grid_alternate", self.grid_alternate),
             ("parser", self.parser),
             ("hyperlinks", self.hyperlinks),
             ("inline_media", self.inline_media),
         ]
         .into_iter()
         .max_by_key(|(_, amount)| amount.bytes)
-        .unwrap_or(("grid", ResourceAmount::default()))
+        .unwrap_or(("grid_visible", ResourceAmount::default()))
     }
 }
 
@@ -84,7 +101,7 @@ impl PaneRetention {
 #[must_use]
 pub fn measure_pane(pane: &PaneState) -> Option<PaneRetention> {
     let parser = pane.parser.try_lock()?;
-    let grid = parser.grid().retained_amount();
+    let regions = parser.grid().retained_amount_by_region();
     let hyperlink_bytes = parser.hyperlinks().retained_bytes();
     let hyperlink_items = parser.hyperlinks().len();
     let parser_amount = parser.retained_amount();
@@ -97,7 +114,9 @@ pub fn measure_pane(pane: &PaneState) -> Option<PaneRetention> {
         .unwrap_or_default();
 
     Some(PaneRetention {
-        grid,
+        grid_visible: regions.visible,
+        grid_history: regions.history,
+        grid_alternate: regions.alternate,
         parser: parser_amount,
         hyperlinks: ResourceAmount { bytes: hyperlink_bytes, items: hyperlink_items },
         inline_media,
@@ -114,7 +133,9 @@ pub fn measure_pane(pane: &PaneState) -> Option<PaneRetention> {
 pub fn measure_panes<'a>(panes: impl IntoIterator<Item = &'a PaneState>) -> PaneRetention {
     panes.into_iter().filter_map(measure_pane).fold(PaneRetention::default(), |acc, pane| {
         PaneRetention {
-            grid: add(acc.grid, pane.grid),
+            grid_visible: add(acc.grid_visible, pane.grid_visible),
+            grid_history: add(acc.grid_history, pane.grid_history),
+            grid_alternate: add(acc.grid_alternate, pane.grid_alternate),
             parser: add(acc.parser, pane.parser),
             hyperlinks: add(acc.hyperlinks, pane.hyperlinks),
             inline_media: add(acc.inline_media, pane.inline_media),
@@ -141,7 +162,9 @@ pub fn log_pane_retention(label: &str, retention: &PaneRetention) {
         target: "memory",
         pane = label,
         total_bytes = total.bytes,
-        grid_bytes = retention.grid.bytes,
+        grid_visible_bytes = retention.grid_visible.bytes,
+        grid_history_bytes = retention.grid_history.bytes,
+        grid_alternate_bytes = retention.grid_alternate.bytes,
         parser_bytes = retention.parser.bytes,
         hyperlink_bytes = retention.hyperlinks.bytes,
         inline_media_bytes = retention.inline_media.bytes,
@@ -185,9 +208,11 @@ pub fn retention_sample_due(last_sample: &mut Option<Instant>, now: Instant) -> 
 /// the registry owns those strings independently of any cell — that
 /// disjointness is what makes summing the seams valid at all.
 #[must_use]
-pub fn seam_classes(retention: &PaneRetention) -> [(ResourceClass, ResourceAmount); 4] {
+pub fn seam_classes(retention: &PaneRetention) -> [(ResourceClass, ResourceAmount); 6] {
     [
-        (ResourceClass::GridHistory, retention.grid),
+        (ResourceClass::GridVisible, retention.grid_visible),
+        (ResourceClass::GridHistory, retention.grid_history),
+        (ResourceClass::GridAlternate, retention.grid_alternate),
         (ResourceClass::ParserCapture, retention.parser),
         (ResourceClass::ProtocolMetadata, retention.hyperlinks),
         (ResourceClass::InlineMediaRetained, retention.inline_media),
@@ -299,7 +324,9 @@ pub fn log_sampled_panes<'a>(
         let Some(retention) = measure_pane(pane) else { continue };
         log_pane_retention(label, &retention);
         session = PaneRetention {
-            grid: add(session.grid, retention.grid),
+            grid_visible: add(session.grid_visible, retention.grid_visible),
+            grid_history: add(session.grid_history, retention.grid_history),
+            grid_alternate: add(session.grid_alternate, retention.grid_alternate),
             parser: add(session.parser, retention.parser),
             hyperlinks: add(session.hyperlinks, retention.hyperlinks),
             inline_media: add(session.inline_media, retention.inline_media),
@@ -315,7 +342,9 @@ pub fn log_sampled_panes<'a>(
         target: "memory",
         panes = sampled,
         total_bytes = total.bytes,
-        grid_bytes = session.grid.bytes,
+        grid_visible_bytes = session.grid_visible.bytes,
+        grid_history_bytes = session.grid_history.bytes,
+        grid_alternate_bytes = session.grid_alternate.bytes,
         parser_bytes = session.parser.bytes,
         hyperlink_bytes = session.hyperlinks.bytes,
         inline_media_bytes = session.inline_media.bytes,

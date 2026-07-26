@@ -34,6 +34,40 @@ pub const MAX_VISIBLE_GRID_CELLS: u32 = MAX_GRID_CELLS / 2;
 /// Maximum UTF-8 bytes of zero-width cluster data retained by one cell.
 pub const MAX_CELL_EXTRAS_BYTES: usize = 64;
 
+/// A grid's retained storage split by the region holding it.
+///
+/// The three parts are disjoint and sum to [`Grid::retained_amount`], so a
+/// caller may charge them to separate `ResourceClass` rows without changing
+/// the total charged.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GridRegionAmounts {
+    /// The on-screen rows, their prompt regions, and their rare-attribute
+    /// boxes.
+    pub visible: ResourceAmount,
+    /// Scrollback history.
+    pub history: ResourceAmount,
+    /// The saved primary screen held while an alternate screen is active.
+    ///
+    /// Named for the `ResourceClass` it maps to. What is stored is the
+    /// *primary* screen the alternate displaced — the alternate screen itself
+    /// is the live `visible`/`history` pair while it is showing.
+    pub alternate: ResourceAmount,
+}
+
+impl GridRegionAmounts {
+    /// Sum of the three regions, equal to [`Grid::retained_amount`].
+    #[must_use]
+    pub fn total(&self) -> ResourceAmount {
+        [self.visible, self.history, self.alternate].into_iter().fold(
+            ResourceAmount::default(),
+            |acc, part| ResourceAmount {
+                bytes: acc.bytes.saturating_add(part.bytes),
+                items: acc.items.saturating_add(part.items),
+            },
+        )
+    }
+}
+
 /// Smallest aggregate capacity excess worth a reallocation pass.
 ///
 /// Below this, walking every row to reclaim it costs more than the memory is
@@ -1527,6 +1561,50 @@ impl Grid {
                 .saturating_add(self.fat_attribute_bytes()),
             items: self.retained_rows(),
         }
+    }
+
+    /// Storage split by the region that holds it.
+    ///
+    /// [`Self::retained_amount`] returns one figure for the whole grid, which
+    /// is what a governor charges but not what an operator can act on: a pane
+    /// holding 14 MiB of scrollback and one holding 14 MiB in a saved primary
+    /// behind an alternate screen call for different responses, and the total
+    /// cannot tell them apart.
+    ///
+    /// The three parts sum to [`Self::retained_amount`] exactly, so charging
+    /// them to separate classes and charging the total are the same charge —
+    /// which is the property that lets attribution improve without the
+    /// aggregate moving.
+    ///
+    /// Prompt regions and rare-attribute boxes belong to the screen that holds
+    /// their cells, so they are folded into the corresponding part rather than
+    /// reported separately.
+    #[must_use]
+    pub fn retained_amount_by_region(&self) -> GridRegionAmounts {
+        let visible = ResourceAmount {
+            bytes: self.visible.iter().map(Line::approx_capacity_byte_size).sum::<usize>()
+                + self.visible.iter().map(Line::fat_attribute_bytes).sum::<usize>()
+                + self.prompts.capacity() * std::mem::size_of::<PromptRegion>(),
+            items: self.visible.len(),
+        };
+        let history = ResourceAmount {
+            bytes: self.scrollback.iter().map(Line::approx_capacity_byte_size).sum::<usize>()
+                + self.scrollback.iter().map(Line::fat_attribute_bytes).sum::<usize>(),
+            items: self.scrollback.len(),
+        };
+        let alternate = self.alt_screen.as_ref().map_or_else(ResourceAmount::default, |saved| {
+            let rows = saved.visible.iter().chain(saved.scrollback.iter());
+            ResourceAmount {
+                bytes: rows
+                    .clone()
+                    .map(Line::approx_capacity_byte_size)
+                    .sum::<usize>()
+                    .saturating_add(rows.map(Line::fat_attribute_bytes).sum::<usize>()),
+                items: saved.visible.len().saturating_add(saved.scrollback.len()),
+            }
+        });
+
+        GridRegionAmounts { visible, history, alternate }
     }
 
     fn enforce_retained_capacity_budget(&mut self) {
