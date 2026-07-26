@@ -17,6 +17,8 @@
 //! which is the shape behind reported multi-gigabyte growth and the thing no
 //! individual seam can reveal.
 
+use std::time::{Duration, Instant};
+
 use sonicterm_types::ResourceAmount;
 
 use super::PaneState;
@@ -147,6 +149,124 @@ pub fn log_pane_retention(label: &str, retention: &PaneRetention) {
         largest_seam_bytes = largest.bytes,
         "pane retention"
     );
+}
+
+/// How often pane retention is sampled for the memory log.
+///
+/// A sample walks every pane's seams and briefly takes each parser lock, so it
+/// is far too costly to run per frame. Thirty seconds is frequent enough to
+/// show a growth curve across a session — the thing a memory report needs —
+/// and rare enough that its cost is not measurable against idle CPU.
+pub const RETENTION_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Whether a sample is due, advancing the timestamp when it is.
+///
+/// Split out from [`sample_retention_if_due`] so the cadence is testable
+/// without a tracing subscriber. Folding it into the caller made both its
+/// tests pass vacuously: with no subscriber installed the level guard is
+/// false, so every assertion sat behind an early return and the tests stayed
+/// green against any interval bug.
+#[must_use]
+pub fn retention_sample_due(last_sample: &mut Option<Instant>, now: Instant) -> bool {
+    if last_sample.is_some_and(|last| now.duration_since(last) < RETENTION_SAMPLE_INTERVAL) {
+        return false;
+    }
+    *last_sample = Some(now);
+    true
+}
+
+/// Sample and log retention if the interval has elapsed.
+///
+/// Returns `true` when a sample was taken, so callers can pin the cadence in
+/// tests without waiting on a wall clock.
+///
+/// Two guards keep this off the hot path. It runs only when the `memory`
+/// target is actually recording at debug level, so a default session pays one
+/// level check and nothing else; and it samples on an interval rather than
+/// every call, because the caller is the idle-wake path that governs idle CPU.
+///
+/// Panes whose parser lock is contended are skipped rather than waited on: a
+/// diagnostic must never stall the thread it is reporting from.
+pub fn sample_retention_if_due<'a>(
+    last_sample: &mut Option<Instant>,
+    now: Instant,
+    panes: impl IntoIterator<Item = (&'a str, &'a PaneState)>,
+) -> bool {
+    if !tracing::enabled!(target: "memory", tracing::Level::DEBUG) {
+        return false;
+    }
+    if !retention_sample_due(last_sample, now) {
+        return false;
+    }
+    log_sampled_panes(panes);
+    true
+}
+
+/// Measure and log each pane, then the session total.
+///
+/// Separate from the gating so it can be exercised directly: contended panes
+/// must be skipped rather than waited on, which is a property of this walk
+/// rather than of the interval.
+pub fn log_sampled_panes<'a>(
+    panes: impl IntoIterator<Item = (&'a str, &'a PaneState)>,
+) -> PaneRetention {
+    let mut session = PaneRetention::default();
+    let mut sampled = 0usize;
+    for (label, pane) in panes {
+        let Some(retention) = measure_pane(pane) else { continue };
+        log_pane_retention(label, &retention);
+        session = PaneRetention {
+            grid: add(session.grid, retention.grid),
+            parser: add(session.parser, retention.parser),
+            hyperlinks: add(session.hyperlinks, retention.hyperlinks),
+            inline_media: add(session.inline_media, retention.inline_media),
+        };
+        sampled += 1;
+    }
+
+    // The session line is the one that matters for the growth this milestone
+    // exists to explain: every pane can be inside its own ceiling while the
+    // sum is not, and only this figure shows that.
+    let total = session.total();
+    tracing::debug!(
+        target: "memory",
+        panes = sampled,
+        total_bytes = total.bytes,
+        grid_bytes = session.grid.bytes,
+        parser_bytes = session.parser.bytes,
+        hyperlink_bytes = session.hyperlinks.bytes,
+        inline_media_bytes = session.inline_media.bytes,
+        "session retention"
+    );
+    session
+}
+
+impl super::App {
+    /// Sample every window's panes into the memory log, at most once per
+    /// [`RETENTION_SAMPLE_INTERVAL`].
+    ///
+    /// Called from the idle-wake path, which is also what governs idle CPU, so
+    /// both guards in [`sample_retention_if_due`] matter here: a default
+    /// session pays a single level check per wake and nothing more.
+    ///
+    /// Labels carry the window and pane id so a line identifies which pane it
+    /// describes — a total with no owner tells an operator a number without
+    /// telling them where to look.
+    pub(super) fn sample_pane_retention(&mut self, now: Instant) -> bool {
+        if !tracing::enabled!(target: "memory", tracing::Level::DEBUG) {
+            return false;
+        }
+        let labelled: Vec<(String, &PaneState)> = self
+            .windows
+            .iter()
+            .flat_map(|(win_id, ws)| {
+                ws.panes.iter().map(move |(pane_id, pane)| (format!("{win_id:?}/{pane_id}"), pane))
+            })
+            .collect();
+        let borrowed: Vec<(&str, &PaneState)> =
+            labelled.iter().map(|(label, pane)| (label.as_str(), *pane)).collect();
+        sample_retention_if_due(&mut self.last_retention_sample, now, borrowed)
+    }
 }
 
 #[cfg(test)]

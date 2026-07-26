@@ -58,6 +58,7 @@ impl App {
         }
         self.expire_quit_confirmation();
         self.warm_window_pool_maintain(el);
+        self.sample_pane_retention(Instant::now());
         let notification_wake = self.expire_notifications(Instant::now());
         // Schedule the next blink-only redraw via `WaitUntil(..)`
         // rather than `request_redraw()` from inside the render path

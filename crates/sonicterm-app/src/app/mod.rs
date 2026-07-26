@@ -1455,6 +1455,12 @@ pub struct App {
     /// needed because `run_action` does not have an `ActiveEventLoop`
     /// handle.
     pub(super) pending_exit: bool,
+    /// When pane retention was last sampled for the memory log.
+    ///
+    /// `None` until the first sample. Gating on elapsed time rather than
+    /// sampling every idle turn keeps a measurement that walks every pane off
+    /// the path that governs idle CPU.
+    pub(super) last_retention_sample: Option<std::time::Instant>,
     // PR-B3d: `App.ime` and `App.ime_cursor_throttle` fields
     // removed; now owned by `self.windows[main_window_id]`. Access via
     // `self.main()?.ime` / `self.main_mut()?.ime_cursor_throttle`.
@@ -1810,6 +1816,7 @@ impl App {
             pending_os_teardown: false,
             test_post_snapshot_hook: None,
             pending_exit: false,
+            last_retention_sample: None,
             command_palette,
             palette_attached_window: None,
             os_drag_handoff_started: false,
