@@ -690,6 +690,32 @@ fn image_atlas_promotion_required(atlas: &GlyphAtlas, has_inline_media: bool) ->
         && (atlas.width(), atlas.height()) == (PLACEHOLDER_ATLAS_DIM, PLACEHOLDER_ATLAS_DIM)
 }
 
+/// Frames a window must draw with no renderable inline media before its image
+/// atlas is released.
+///
+/// At 60fps this is about four seconds. Long enough that scrolling an image
+/// out of view and back does not free and reallocate 16 MiB — which would also
+/// force every visible image to re-decode — and short enough that a window
+/// that has genuinely finished with images does not hold the allocation for
+/// the rest of its life.
+const IMAGE_ATLAS_IDLE_FRAMES: u32 = 240;
+
+/// Whether an idle window should release its full-size image atlas.
+///
+/// Promotion is otherwise one-way: `reset_in_place` clears the map and
+/// repacker but never touches the pixel buffer or the dimensions, so a window
+/// that displays one inline image keeps the allocation until it closes.
+#[must_use]
+fn image_atlas_demotion_ready(
+    atlas: &GlyphAtlas,
+    has_inline_media: bool,
+    frames_without_inline_media: u32,
+) -> bool {
+    !has_inline_media
+        && (atlas.width(), atlas.height()) != (PLACEHOLDER_ATLAS_DIM, PLACEHOLDER_ATLAS_DIM)
+        && frames_without_inline_media >= IMAGE_ATLAS_IDLE_FRAMES
+}
+
 fn full_surface_rect(width: u32, height: u32) -> PixelRect {
     PixelRect { x: 0, y: 0, w: width.max(1), h: height.max(1) }
 }
@@ -884,6 +910,14 @@ pub struct GpuRenderer {
     image_atlas: GlyphAtlas,
     image_upload: AtlasUpload,
     retained_inline_media_bytes: usize,
+    /// Consecutive frames this window has drawn with no renderable inline
+    /// media. Promotion of the image atlas is one-way without this: a window
+    /// that shows a single image holds the full-size allocation for its whole
+    /// life, even after the image scrolls into history. Demoting on the first
+    /// idle frame would instead free and reallocate 16 MiB every time an image
+    /// scrolled off and back, and re-decode it each time, so the count gates
+    /// demotion behind a sustained absence.
+    frames_without_inline_media: u32,
     /// True after an eviction-triggered compaction. The rebuilt atlas has
     /// eviction disabled until one frame presents successfully, bounding
     /// retries when the visible glyph working set exceeds atlas capacity.
@@ -1715,6 +1749,7 @@ impl GpuRenderer {
             image_atlas,
             image_upload,
             retained_inline_media_bytes: 0,
+            frames_without_inline_media: 0,
             glyph_atlas_retry_without_eviction: false,
             font_family: font_family.to_string(),
             font_size,
@@ -2669,6 +2704,55 @@ impl GpuRenderer {
             retained_pixel_allocation = true,
             payload_estimate = true,
             "renderer atlas reset in place"
+        );
+    }
+
+    /// Release a full-size image atlas once the window has drawn without any
+    /// renderable inline media for [`IMAGE_ATLAS_IDLE_FRAMES`].
+    ///
+    /// Without this, promotion is permanent: a window that displays a single
+    /// image keeps 16 MiB of CPU pixels — and, on the GPU path, a matching
+    /// texture — until it closes, however long ago the image scrolled away.
+    /// Across several windows that is the largest retained term in the
+    /// process.
+    ///
+    /// Nothing the user can see changes. The atlas is rebuilt on demand the
+    /// next time an image becomes visible, which is the same work the first
+    /// promotion does.
+    fn demote_image_atlas_if_idle(&mut self, has_inline_media: bool) {
+        if has_inline_media {
+            self.frames_without_inline_media = 0;
+            return;
+        }
+        self.frames_without_inline_media = self.frames_without_inline_media.saturating_add(1);
+        if !image_atlas_demotion_ready(
+            &self.image_atlas,
+            has_inline_media,
+            self.frames_without_inline_media,
+        ) {
+            return;
+        }
+
+        let released_width = self.image_atlas.width();
+        let released_height = self.image_atlas.height();
+        self.image_atlas = GlyphAtlas::new(PLACEHOLDER_ATLAS_DIM, PLACEHOLDER_ATLAS_DIM);
+        if !self.uses_windows_software_presenter() {
+            self.rebuild_image_upload_if_needed();
+        }
+        self.frames_without_inline_media = 0;
+        tracing::debug!(
+            target: "memory",
+            renderer_role = self.render_timing_label,
+            window_id = ?self.window.id(),
+            software_presenter = self.uses_windows_software_presenter(),
+            atlas = "image",
+            released_width,
+            released_height,
+            released_cpu_bytes = atlas_payload_bytes(released_width, released_height),
+            gpu_width = self.image_upload.width(),
+            gpu_height = self.image_upload.height(),
+            idle_frames = IMAGE_ATLAS_IDLE_FRAMES,
+            "image atlas released after sustained absence of inline media"
         );
     }
 
@@ -4067,6 +4151,7 @@ impl GpuRenderer {
             let y = placement.origin_y + image.row as f32 * cell_h;
             x < sw && y < sh && x + image.width as f32 > 0.0 && y + image.height as f32 > 0.0
         });
+        self.demote_image_atlas_if_idle(has_renderable_inline_media);
         let image_atlas_promoted = self.promote_image_atlas_if_needed(
             has_renderable_inline_media,
             retained_inline_media_bytes,

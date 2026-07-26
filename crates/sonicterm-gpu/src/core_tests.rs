@@ -1125,3 +1125,71 @@ fn every_glyph_atlas_reset_invalidates_the_row_cache() {
         );
     }
 }
+
+// --- Image atlas promotion / demotion ------------------------------
+
+/// A promoted image atlas is released once the window stops showing media,
+/// but not on the first idle frame.
+///
+/// `reset_in_place` clears the map and repacker and never touches the pixel
+/// buffer, so promotion is otherwise permanent: a window that displays one
+/// inline image holds 16 MiB of CPU pixels — plus a matching GPU texture off
+/// the software path — until it closes. Across windows that is the largest
+/// retained term in the process.
+///
+/// The delay is the load-bearing part. Demoting on the first frame without
+/// visible media would free and reallocate the atlas every time an image
+/// scrolled out of view and back, re-decoding every visible image each time.
+#[test]
+fn an_idle_image_atlas_is_released_but_not_on_the_first_idle_frame() {
+    let promoted = GlyphAtlas::default_size();
+    let placeholder = GlyphAtlas::new(PLACEHOLDER_ATLAS_DIM, PLACEHOLDER_ATLAS_DIM);
+
+    // Media visible: never demote, however long the window has been idle
+    // before — the counter resets at the call site.
+    assert!(
+        !image_atlas_demotion_ready(&promoted, true, IMAGE_ATLAS_IDLE_FRAMES * 10),
+        "an atlas must never be released while media is on screen"
+    );
+
+    // Idle, but not yet long enough.
+    assert!(
+        !image_atlas_demotion_ready(&promoted, false, 0),
+        "the first idle frame must not release the atlas"
+    );
+    assert!(
+        !image_atlas_demotion_ready(&promoted, false, IMAGE_ATLAS_IDLE_FRAMES - 1),
+        "one frame short of the threshold must not release the atlas"
+    );
+
+    // Idle long enough.
+    assert!(
+        image_atlas_demotion_ready(&promoted, false, IMAGE_ATLAS_IDLE_FRAMES),
+        "a sustained absence of media must release the atlas"
+    );
+
+    // Already at placeholder size: nothing to release, so no repeated work.
+    assert!(
+        !image_atlas_demotion_ready(&placeholder, false, IMAGE_ATLAS_IDLE_FRAMES * 10),
+        "a placeholder atlas must not be re-released every frame"
+    );
+
+    // Promotion and demotion must not both fire for the same state, or a
+    // window with no media would allocate and free every frame.
+    for frames in [0, IMAGE_ATLAS_IDLE_FRAMES, IMAGE_ATLAS_IDLE_FRAMES * 2] {
+        for has_media in [false, true] {
+            let promote = image_atlas_promotion_required(&placeholder, has_media);
+            let demote = image_atlas_demotion_ready(&placeholder, has_media, frames);
+            assert!(
+                !(promote && demote),
+                "placeholder atlas: promote and demote both fired (media={has_media}, frames={frames})"
+            );
+            let promote_full = image_atlas_promotion_required(&promoted, has_media);
+            let demote_full = image_atlas_demotion_ready(&promoted, has_media, frames);
+            assert!(
+                !(promote_full && demote_full),
+                "promoted atlas: promote and demote both fired (media={has_media}, frames={frames})"
+            );
+        }
+    }
+}
