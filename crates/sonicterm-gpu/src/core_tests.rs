@@ -1035,9 +1035,15 @@ fn shaped_glyph_column_check_rejects_backtracking_columns() {
 /// pixels on screen.
 ///
 /// Nothing structural enforces either pairing. What holds today is that all
-/// four `reset_glyph_atlas_in_place` call sites happen to do both afterwards.
-/// A fifth reset path missing either call reintroduces a stale-pixel class
-/// with no compile error and no failing test.
+/// four `reset_glyph_atlas_in_place` call sites happen to do both in the same
+/// function. A fifth reset path missing either call reintroduces a
+/// stale-pixel class with no compile error and no failing test.
+///
+/// Order is deliberately not asserted. Flushing before the reset is at least
+/// as safe as flushing after — one arrangement hoists the invalidation above
+/// the reset so it covers both transition directions — so the requirement is
+/// that both calls appear in the same function, not that they appear in a
+/// particular sequence.
 ///
 /// `GpuRenderer` needs a live wgpu device and a window, so the pairing cannot
 /// be driven at runtime in a unit test. Reading the source is the available
@@ -1064,29 +1070,37 @@ fn every_glyph_atlas_reset_invalidates_the_row_cache() {
     );
 
     for &site in &reset_sites {
-        // Scan to the end of the enclosing function: the next line that starts
-        // a new item at method indentation.
-        let mut invalidated = false;
-        let mut frame_key_cleared = false;
-        for line in lines.iter().skip(site + 1) {
-            let starts_new_item = line.starts_with("    fn ")
-                || line.starts_with("    pub fn ")
-                || line.starts_with("    pub(crate) fn ")
-                || line.starts_with("impl ")
-                || line.starts_with("}");
-            if starts_new_item {
-                break;
-            }
-            if line.contains(INVALIDATE) {
-                invalidated = true;
-            }
-            if line.contains(CLEAR_FRAME_KEY) {
-                frame_key_cleared = true;
-            }
-            if invalidated && frame_key_cleared {
-                break;
-            }
-        }
+        // Search the whole enclosing function, not just forward from the
+        // reset. Flushing the cache *before* replacing the atlas is at least
+        // as safe as flushing it after, and one call site does exactly that —
+        // hoisting the invalidation above the reset so it runs on both
+        // transition directions. A forward-only scan would read that safer
+        // arrangement as a violation, so the invariant is "somewhere in the
+        // same function", not "after".
+        let start = lines[..site]
+            .iter()
+            .rposition(|line| {
+                line.starts_with("    fn ")
+                    || line.starts_with("    pub fn ")
+                    || line.starts_with("    pub(crate) fn ")
+            })
+            .map_or(0, |index| index + 1);
+        let end = lines
+            .iter()
+            .enumerate()
+            .skip(site + 1)
+            .find(|(_, line)| {
+                line.starts_with("    fn ")
+                    || line.starts_with("    pub fn ")
+                    || line.starts_with("    pub(crate) fn ")
+                    || line.starts_with("impl ")
+                    || line.starts_with("}")
+            })
+            .map_or(lines.len(), |(index, _)| index);
+
+        let body = &lines[start..end];
+        let invalidated = body.iter().any(|line| line.contains(INVALIDATE));
+        let frame_key_cleared = body.iter().any(|line| line.contains(CLEAR_FRAME_KEY));
         assert!(
             invalidated,
             "core.rs:{} resets the glyph atlas without calling \
