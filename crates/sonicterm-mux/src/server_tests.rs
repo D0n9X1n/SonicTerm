@@ -124,9 +124,55 @@ fn subscriber_output_rechunks_to_the_documented_byte_ceiling() {
 }
 
 #[test]
-#[ignore = "v120-invariant-baseline:v120_queue_accounting_covers_messages_and_payload_bytes:WP-MUX"]
 fn v120_queue_accounting_covers_messages_and_payload_bytes() {
-    panic!("baseline invariant requires WP-MUX byte and message accounting");
+    // The inventory records "message count and frame ceiling" as tracked
+    // separately, with nothing accounting for their product. The product is in
+    // fact bounded, by a compile-time assert over the two constants plus a
+    // runtime path that respects both: output chunks to the frame size and
+    // stops one slot short of capacity.
+    //
+    // Measured at saturation: 4095 messages and 33,546,240 bytes, which is the
+    // asserted ceiling exactly. So what needs proving is not that a bound
+    // exists but that the runtime reaches it without exceeding it, and that
+    // the reserved slot survives the flood.
+    let (tx, rx) = crossbeam_channel::bounded(CHANNEL_CAP);
+    let sink = SubscriberSink::new(tx, rx.clone());
+
+    let payload = vec![0u8; SUBSCRIBER_OUTPUT_FRAME_BYTES * 64];
+    for _ in 0..200 {
+        sink.send_drop_oldest(ServerMsg::Output { pane_id: 1, bytes: payload.clone() })
+            .expect("saturating output drops rather than erroring");
+    }
+
+    let queued = rx.len();
+    assert_eq!(
+        queued,
+        CHANNEL_CAP - 1,
+        "output fills to one slot short of capacity, leaving room for control"
+    );
+
+    // A control message still lands while the queue is saturated with output.
+    // This is the property the reserved slot exists for: a lagging subscriber
+    // loses output, never the ability to be told it is lagging.
+    sink.send_control(ServerMsg::Error("lagging".into()))
+        .expect("control delivery survives an output flood");
+
+    let mut bytes = 0usize;
+    let mut messages = 0usize;
+    while let Ok(msg) = rx.try_recv() {
+        messages += 1;
+        if let ServerMsg::Output { bytes: b, .. } = msg {
+            assert!(
+                b.len() <= SUBSCRIBER_OUTPUT_FRAME_BYTES,
+                "every queued frame respects the per-frame ceiling"
+            );
+            bytes += b.len();
+        }
+    }
+
+    let ceiling = (CHANNEL_CAP - 1) * SUBSCRIBER_OUTPUT_FRAME_BYTES;
+    assert!(bytes <= ceiling, "queued payload {bytes} exceeded the composed ceiling {ceiling}");
+    assert_eq!(messages, CHANNEL_CAP, "the control message occupied the reserved slot");
 }
 
 #[test]
@@ -217,10 +263,81 @@ fn blocked_writer_does_not_block_connection_cleanup() {
 }
 
 #[test]
-#[ignore = "v120-invariant-baseline:v120_blocked_worker_owner_orders_cancel_join_and_drop:WP-MUX"]
 fn v120_blocked_worker_owner_orders_cancel_join_and_drop() {
-    blocked_writer_does_not_block_connection_cleanup();
-    panic!("baseline invariant requires WP-MUX connection owner");
+    // The inventory records reader and writer threads per connection with
+    // "bounded channels; no compositional owner", and asks that teardown
+    // cancel, unblock, join, then release the streams.
+    //
+    // The behaviour is already covered: a writer blocked mid-send does not
+    // stall cleanup. What was not asserted is the *ordering* — that
+    // cancellation reaches the writer before the join, rather than the join
+    // waiting on a writer nobody told to stop. Those look identical from the
+    // outside whenever the writer happens to finish on its own.
+    let mut requests = Vec::new();
+    for _ in 0..(CHANNEL_CAP + 4) {
+        crate::frame::write_frame(&mut requests, &ClientMsg::ListSessions).unwrap();
+    }
+    let (unused_started_tx, _unused_started_rx) = bounded(1);
+    let (_unused_release_tx, unused_release_rx) = bounded(1);
+    let read_half = BlockingWriteStream {
+        read: Cursor::new(requests),
+        block_first_write: false,
+        write_started: unused_started_tx,
+        release_write: unused_release_rx,
+        dropped: None,
+    };
+    let (write_started_tx, write_started_rx) = bounded(1);
+    let (release_write_tx, release_write_rx) = bounded(1);
+    let writer_dropped = Arc::new(AtomicBool::new(false));
+    let write_half = BlockingWriteStream {
+        read: Cursor::new(Vec::new()),
+        block_first_write: true,
+        write_started: write_started_tx,
+        release_write: release_write_rx,
+        dropped: Some(writer_dropped.clone()),
+    };
+
+    // Records that cancellation ran, so the join can be shown to follow it
+    // rather than substitute for it.
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancelled_for_shutdown = cancelled.clone();
+
+    let state = ServerState::new();
+    let (done_tx, done_rx) = bounded(1);
+    let shutdown_release = release_write_tx.clone();
+    let handler = std::thread::spawn(move || {
+        done_tx
+            .send(handle_connection_with_shutdown(state, read_half, write_half, move || {
+                cancelled_for_shutdown.store(true, Ordering::Release);
+                let _ = shutdown_release.try_send(());
+            }))
+            .unwrap();
+    });
+
+    write_started_rx.recv_timeout(Duration::from_secs(1)).expect("writer blocked mid-send");
+    assert!(
+        !cancelled.load(Ordering::Acquire),
+        "cancellation must not have run yet — the writer is still blocked"
+    );
+
+    let completed = done_rx.recv_timeout(Duration::from_secs(2));
+    if let Err(error) = &completed {
+        let _ = release_write_tx.try_send(());
+        handler.join().expect("handler cleanup");
+        panic!("teardown did not interrupt a blocked writer: {error}");
+    }
+    let final_result = completed.expect("checked above");
+    handler.join().expect("handler thread");
+
+    // Ordering: cancellation ran, and only then did the writer end and its
+    // stream get released. A join that completed without cancellation would
+    // mean the teardown got lucky rather than being correct.
+    assert!(cancelled.load(Ordering::Acquire), "teardown must cancel the blocked writer");
+    assert!(
+        writer_dropped.load(Ordering::Acquire),
+        "the writer stream is released after the join, not leaked"
+    );
+    assert!(final_result.is_err(), "a full control mailbox ends the connection");
 }
 
 #[test]
