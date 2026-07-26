@@ -115,8 +115,8 @@ struct Pane {
     rows: u16,
     /// PTY spawned through the shared `sonicterm-io` seam. Owns the child,
     /// the reader/writer threads, the deduped resize closure, and the
-    /// robust kill-on-Drop. mux writes via `pty.in_tx` and resizes via
-    /// `pty.resize`; its own reader thread consumes `pty.out_rx`.
+    /// robust kill-on-Drop. mux writes via `pty.input_sender()` and resizes
+    /// via `pty.resize`; its own reader thread consumes `pty.out_rx`.
     pty: PtyHandle,
     /// Most-recent bytes, cap = REPLAY_CAP. Bounded ring (FIFO trim from
     /// front when over capacity).
@@ -267,22 +267,24 @@ impl ServerState {
     /// Forward client-side keystrokes / paste bytes to the named pane's PTY
     /// writer thread. Errors if the pane is unknown or already torn down.
     pub fn input(&self, pane_id: PaneId, bytes: Vec<u8>) -> Result<()> {
-        if !sonicterm_io::pty::pty_input_message_allowed(bytes.len()) {
-            anyhow::bail!(
+        // The size cap and the non-blocking send are one operation, not two
+        // steps a caller assembles. This previously checked the cap by hand and
+        // then reached for the raw sender — correct, but a copy of the rule
+        // that had to stay in agreement with the original.
+        let sender = {
+            let sessions = self.sessions.lock();
+            find_pane(&sessions, pane_id)?.pty.input_sender()
+        };
+        sender.send(bytes).map_err(|error| match error {
+            sonicterm_io::pty::PtyInputError::MessageTooLarge(bytes) => anyhow!(
                 "pane input message is {} bytes; maximum is {}",
                 bytes.len(),
                 sonicterm_io::pty::MAX_PTY_INPUT_MESSAGE_BYTES
-            );
-        }
-        let sender = {
-            let sessions = self.sessions.lock();
-            find_pane(&sessions, pane_id)?.pty.in_tx.clone()
-        };
-        sender.try_send(bytes).map_err(|error| match error {
-            crossbeam_channel::TrySendError::Full(_) => {
+            ),
+            sonicterm_io::pty::PtyInputError::QueueFull(_) => {
                 anyhow!("pane writer queue is full")
             }
-            crossbeam_channel::TrySendError::Disconnected(_) => {
+            sonicterm_io::pty::PtyInputError::WriterDisconnected(_) => {
                 anyhow!("pane writer is closed")
             }
         })
