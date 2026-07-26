@@ -700,3 +700,82 @@ fn a_wedged_call_does_not_hold_the_deadline() {
     assert!(!report.is_clean(), "an unreturned call is not a clean shutdown");
     assert_eq!(report.unresolved_owners, vec![owner(20)], "the stuck owner is named");
 }
+
+#[test]
+fn an_abandoned_helper_returns_its_slot_when_the_call_finishes() {
+    // Abandoning a call at the deadline is what keeps the deadline real, but
+    // the slot has to come back when the call eventually returns. Releasing on
+    // the join path alone did not: an abandoned call is never joined, so the
+    // pool shrank by one on every abandonment until no blocking work could
+    // start again — a hang traded for a silent, permanent stall.
+    let clock = SystemClock;
+    let supervisor = ReaperSupervisor::new(ReaperLimits::new(8, 2, 8).unwrap(), Arc::new(clock));
+    let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancel = CancelSource::new();
+    let budget = Duration::from_millis(30);
+
+    // Abandon enough wedged calls to fill the pool.
+    for id in 30..=31u64 {
+        supervisor.try_reserve_slot().unwrap().enqueue(Box::new(WedgedCallTask {
+            owner: owner(id),
+            issued: false,
+            release: release.clone(),
+        }));
+        let started = Instant::now();
+        supervisor.run_until(deadline_from(&clock, budget), &cancel.token());
+        assert!(started.elapsed() < budget * 10, "a wedged call must not hold the deadline");
+    }
+    assert_eq!(supervisor.live_helpers(), 2, "both helpers are genuinely still running");
+
+    // Let the abandoned calls finish; each releases its own slot.
+    release.store(true, Ordering::SeqCst);
+    let waited = Instant::now();
+    while supervisor.live_helpers() > 0 && waited.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        supervisor.live_helpers(),
+        0,
+        "an abandoned call must return its slot when it finishes"
+    );
+
+    // The pool is usable again: a fresh call runs to completion.
+    let ran = Arc::new(AtomicUsize::new(0));
+    supervisor.try_reserve_slot().unwrap().enqueue(Box::new(CountingCallTask {
+        owner: owner(32),
+        ran: ran.clone(),
+        issued: false,
+    }));
+    let progress =
+        supervisor.run_until(deadline_from(&clock, Duration::from_secs(5)), &cancel.token());
+    assert_eq!(ran.load(Ordering::SeqCst), 1, "the reclaimed pool still runs work");
+    assert_eq!(progress.settled, 1);
+}
+
+/// Runs one blocking call and counts it.
+struct CountingCallTask {
+    owner: ResourceOwnerId,
+    ran: Arc<AtomicUsize>,
+    issued: bool,
+}
+
+impl ReapTask for CountingCallTask {
+    fn owner(&self) -> ResourceOwnerId {
+        self.owner
+    }
+    fn next_action(&mut self, _now: Instant) -> ReapAction {
+        if self.issued {
+            return ReapAction::Complete(ReapResult::Settled);
+        }
+        self.issued = true;
+        let ran = self.ran.clone();
+        ReapAction::RunBlocking(Box::new(move || {
+            ran.fetch_add(1, Ordering::SeqCst);
+            ReapResult::Settled
+        }))
+    }
+    fn on_completion(&mut self, _result: ReapResult) {}
+    fn force_cancel(&mut self) -> CancelOutcome {
+        CancelOutcome::Settled
+    }
+}

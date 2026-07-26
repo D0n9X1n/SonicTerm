@@ -263,7 +263,6 @@ impl ReaperSupervisor {
                     still_running.push((handle, task));
                     continue;
                 }
-                self.state.counters.lock().helpers -= 1;
                 let result = handle.join().unwrap_or(ReapResult::Failed);
                 task.on_completion(result);
                 if result.releases_charge() {
@@ -321,7 +320,6 @@ impl ReaperSupervisor {
                         // silently blocking teardown.
                         for (handle, mut task) in in_flight.drain(..) {
                             if handle.is_finished() {
-                                self.state.counters.lock().helpers -= 1;
                                 let result = handle.join().unwrap_or(ReapResult::Failed);
                                 task.on_completion(result);
                                 self.settle(task, result, &mut progress);
@@ -358,7 +356,6 @@ impl ReaperSupervisor {
                         }
                         in_flight = running;
                         for (handle, mut task) in ready {
-                            self.state.counters.lock().helpers -= 1;
                             let result = handle.join().unwrap_or(ReapResult::Failed);
                             task.on_completion(result);
                             if result.releases_charge() {
@@ -478,9 +475,22 @@ impl ReaperSupervisor {
             }
             counters.helpers += 1;
         }
+        // The helper releases its own slot when the call returns, rather than
+        // the loop releasing it on join. A call abandoned at the deadline is
+        // never joined, so a loop-side release would keep its slot forever and
+        // the pool would shrink by one on every abandonment until no blocking
+        // work could start again — trading a hang for a silent, permanent
+        // stall. Releasing here means the slot is held exactly as long as the
+        // call actually runs.
+        let state = self.state.clone();
+        let scoped: Box<dyn FnOnce() -> ReapResult + Send> = Box::new(move || {
+            let result = work();
+            state.counters.lock().helpers -= 1;
+            result
+        });
         // A thread the OS refuses is a resource failure, not a panic: this
         // crate exists to stay standing under exhaustion.
-        match std::thread::Builder::new().name("sonic-reaper-helper".to_owned()).spawn(work) {
+        match std::thread::Builder::new().name("sonic-reaper-helper".to_owned()).spawn(scoped) {
             Ok(handle) => {
                 in_flight.push((handle, task));
                 None
