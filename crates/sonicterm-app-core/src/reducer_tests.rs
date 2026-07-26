@@ -724,12 +724,6 @@ fn clear_selection_only_acts_when_active() {
     assert_render(only(&cleared), wk(1), RedrawReason::Selection);
 }
 
-#[test]
-#[ignore = "v120-invariant-baseline:v120_registry_cleanup_removes_all_owned_entries:WP-WINDOW"]
-fn v120_registry_cleanup_removes_all_owned_entries() {
-    panic!("baseline invariant requires WP-WINDOW lifecycle owner");
-}
-
 // ── Search overlay ──────────────────────────────────────────────────
 
 #[test]

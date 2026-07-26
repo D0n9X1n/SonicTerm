@@ -134,13 +134,13 @@ ROWS: Final[tuple[tuple[str, ...], ...]] = (
     ),
     (
         "RI-REGISTRY-CLEANUP",
-        "sonicterm-app-core:src/reducer.rs/reduce_leaf",
-        "individual lifecycle reducers",
+        "sonicterm-app:src/app/scrollbar_visibility.rs/update_and_collect",
+        "per-window scrollbar_vis map",
         "WP-WINDOW lifecycle owner",
         "window tab and pane registries",
         "retained",
         "live registry entries after close and child exit",
-        "saturating counters only",
+        "pruned to the visible pane set on every render/hover pass",
         "remove every keyed entry before owner teardown completes",
         "window and pane lifecycle handles",
         "v120_registry_cleanup_removes_all_owned_entries",
@@ -191,7 +191,11 @@ def validate_rows(root: Path) -> None:
     source_test_ids: dict[str, str] = {}
     implemented_test_ids: set[str] = set()
     crates = root / "crates"
-    for path in sorted(crates.glob("*/src/*_tests.rs")):
+    # Recursive: crates that group modules into subdirectories keep their
+    # sibling test files there too (`sonicterm-app/src/app/*_tests.rs`). A
+    # one-level glob cannot see those, so a sentinel implemented in one would
+    # read as missing.
+    for path in sorted(crates.glob("*/src/**/*_tests.rs")):
         text = path.read_text(encoding="utf-8")
         for test_id, package in TEST_ATTRIBUTE.findall(text):
             if test_id in source_test_ids:
