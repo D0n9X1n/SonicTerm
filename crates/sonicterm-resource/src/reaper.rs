@@ -117,6 +117,21 @@ struct SupervisorState {
     limits: ReaperLimits,
 }
 
+/// Returns a helper slot when its call ends, however it ends.
+///
+/// A slot released by a statement after the call is lost when the call panics,
+/// which pins the pool one slot smaller for the life of the process. Dropping
+/// runs on both paths.
+struct HelperSlot {
+    state: Arc<SupervisorState>,
+}
+
+impl Drop for HelperSlot {
+    fn drop(&mut self) {
+        self.state.counters.lock().helpers -= 1;
+    }
+}
+
 /// Proof that a reaper slot was reserved before work began.
 ///
 /// The slot is acquired *before* starting an operation that may need handoff, so
@@ -482,11 +497,15 @@ impl ReaperSupervisor {
         // work could start again — trading a hang for a silent, permanent
         // stall. Releasing here means the slot is held exactly as long as the
         // call actually runs.
+        //
+        // The release is a drop guard rather than a statement after the call,
+        // because a panicking call unwinds straight past a statement. Cleanup
+        // work panicking is far more reachable than a native call wedging, and
+        // it would leak the slot just as permanently.
         let state = self.state.clone();
         let scoped: Box<dyn FnOnce() -> ReapResult + Send> = Box::new(move || {
-            let result = work();
-            state.counters.lock().helpers -= 1;
-            result
+            let _slot = HelperSlot { state };
+            work()
         });
         // A thread the OS refuses is a resource failure, not a panic: this
         // crate exists to stay standing under exhaustion.

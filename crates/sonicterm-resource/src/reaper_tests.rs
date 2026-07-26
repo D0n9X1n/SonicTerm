@@ -785,3 +785,72 @@ impl ReapTask for CountingCallTask {
         CancelOutcome::Settled
     }
 }
+
+/// A blocking call that panics.
+struct PanickingCallTask {
+    owner: ResourceOwnerId,
+    issued: bool,
+}
+
+impl ReapTask for PanickingCallTask {
+    fn owner(&self) -> ResourceOwnerId {
+        self.owner
+    }
+    fn next_action(&mut self, _now: Instant) -> ReapAction {
+        if self.issued {
+            return ReapAction::Complete(ReapResult::Settled);
+        }
+        self.issued = true;
+        ReapAction::RunBlocking(Box::new(|| panic!("native call panicked")))
+    }
+    fn on_completion(&mut self, _result: ReapResult) {}
+    fn force_cancel(&mut self) -> CancelOutcome {
+        CancelOutcome::TimedOut
+    }
+}
+
+#[test]
+fn a_panicking_call_returns_its_helper_slot() {
+    // The slot release has to survive an unwind. Releasing after the call
+    // instead of on drop lost the slot whenever a call panicked, and cleanup
+    // work panicking is far more reachable than a native call wedging: two
+    // panics were enough to pin the pool at its ceiling for the life of the
+    // process, after which no blocking work could start at all.
+    //
+    // The previous test covered only the clean-return path, which is how this
+    // reached a green suite.
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+
+    let clock = SystemClock;
+    let supervisor = ReaperSupervisor::new(ReaperLimits::new(8, 2, 8).unwrap(), Arc::new(clock));
+    let cancel = CancelSource::new();
+
+    for id in 40..=41u64 {
+        supervisor
+            .try_reserve_slot()
+            .unwrap()
+            .enqueue(Box::new(PanickingCallTask { owner: owner(id), issued: false }));
+        supervisor.run_until(deadline_from(&clock, Duration::from_millis(200)), &cancel.token());
+    }
+
+    std::panic::set_hook(previous);
+
+    assert_eq!(
+        supervisor.live_helpers(),
+        0,
+        "a panicking call must return its slot, not pin it for the process lifetime"
+    );
+
+    // The pool is still usable, which is the consequence that matters.
+    let ran = Arc::new(AtomicUsize::new(0));
+    supervisor.try_reserve_slot().unwrap().enqueue(Box::new(CountingCallTask {
+        owner: owner(42),
+        ran: ran.clone(),
+        issued: false,
+    }));
+    let progress =
+        supervisor.run_until(deadline_from(&clock, Duration::from_secs(5)), &cancel.token());
+    assert_eq!(ran.load(Ordering::SeqCst), 1, "blocking work still runs after a panic");
+    assert_eq!(progress.settled, 1);
+}
