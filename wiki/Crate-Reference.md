@@ -55,6 +55,21 @@ keys, geometry, glyph/window/hyperlink ids, shell quoting, and backend traits.
 
 **Read:** `src/{cell,action,glyph_key,geom}.rs`, `src/traits/`.
 
+### `sonicterm-resource`
+
+**Role:** process-local resource governor. Owns a sharded ledger over one
+immutable process root, an owner hierarchy, RAII reservation tokens that
+release their charge when dropped, level-triggered cancellation, and a bounded
+reaper supervisor that admits work only when a slot is free.
+
+**Important API:** `ResourceGovernor`, `Reservation`, `CommittedReservation`,
+`CancelSource`, `CancelToken`, `ReaperSupervisor`, `ReaperLimits`, `ReapTask`,
+`ReapSlot`, `ShutdownReport`, `Clock`/`TestClock`.
+
+**Consumes:** `sonicterm-types`.
+
+**Read:** `src/{ledger,owner,reservation,reaper,cancel}.rs`.
+
 ### `sonicterm-grid`
 
 **Role:** primary/alternate screens, visible rows, bounded scrollback, cursor,
@@ -301,7 +316,7 @@ Every crate contains a local `CLAUDE.md` with its guardrails and local gate.
 
 > 简短规范映射位于
 > [`docs/MODULES.md`](https://github.com/D0n9X1n/SonicTerm/blob/main/docs/MODULES.md)。
-> 本页为全部 22 个 workspace crate 增加依赖与代码导航细节。
+> 本页为全部 23 个 workspace crate 增加依赖与代码导航细节。
 
 根 `Cargo.toml` 中的 workspace 版本适用于所有第一方 crate。`sonicterm-app` 是默认 member，
 实际发布二进制是 `sonicterm-mac` 与 `sonicterm-windows`。
@@ -348,6 +363,20 @@ shell quoting 和后端 trait。
 `GlyphKey`、`WindowKey`、`PtyTransport`、`Painter`、`ClipboardBackend`、`WindowBackend`。
 
 **阅读：** `src/{cell,action,glyph_key,geom}.rs`、`src/traits/`。
+
+### `sonicterm-resource`
+
+**职责：** 进程内资源治理器。基于唯一不可变进程根的分片 ledger、owner 层级、
+drop 时自动归还额度的 RAII reservation token、电平触发的取消机制，以及只在有空闲
+slot 时才接收任务的有界 reaper supervisor。
+
+**重要 API：** `ResourceGovernor`、`Reservation`、`CommittedReservation`、
+`CancelSource`、`CancelToken`、`ReaperSupervisor`、`ReaperLimits`、`ReapTask`、
+`ReapSlot`、`ShutdownReport`、`Clock`/`TestClock`。
+
+**依赖：** types。
+
+**阅读：** `src/{ledger,owner,reservation,reaper,cancel}.rs`。
 
 ### `sonicterm-grid`
 

@@ -56,7 +56,7 @@ SonicTerm 是一个面向 macOS 和 Windows 的原生 GPU 加速终端。本 Wik
 - [终端 IO 与 VT / Terminal IO and VT](Terminal-IO-and-VT) — PTY、可选 SSH、VT 解析、网格、回滚缓冲与 mux 状态
 - [渲染与字体 / Rendering and Fonts](Rendering-and-Fonts) — 损坏区域、字形塑形、图集、wgpu 与软件渲染
 - [平台集成 / Platform Integration](Platform-Integration) — AppKit/macOS 与 Win32/Windows 边界
-- [Crate 参考 / Crate Reference](Crate-Reference) — 工作区全部 22 个 crate 及其关系
+- [Crate 参考 / Crate Reference](Crate-Reference) — 工作区全部 23 个 crate 及其关系
 - [开发与发布 / Development and Release](Development-and-Release) — 测试、CI、打包与 `v*` 发布流水线
 
 ### 项目演进
