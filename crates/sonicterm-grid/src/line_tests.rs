@@ -582,3 +582,39 @@ fn plain_cells_charge_nothing() {
         .collect();
     assert_eq!(LineStorage::Flat(flat).fat_attribute_bytes(), 0);
 }
+
+/// The mechanism behind adjacent-resize capacity retention, pinned where it
+/// happens.
+///
+/// `Vec::resize` growing past capacity does not allocate the amount asked for
+/// — it doubles. Growing an 80-cell row to 81 allocates 160, and shrinking
+/// back to 80 truncates the length while keeping all 160.
+///
+/// Pinned at this level because the aggregate effect is easy to mis-attribute.
+/// While investigating it I offered three wrong explanations — resize
+/// direction, working-set size, and construction path — each of which fitted
+/// the grid-level numbers and none of which was the cause. Reading it here
+/// takes one assertion.
+#[test]
+fn growing_a_row_by_one_cell_doubles_its_capacity_and_shrinking_keeps_it() {
+    let mut line = Line::from_flat(vec![Cell::default(); 80]);
+    let cells = |line: &Line| line.approx_capacity_byte_size() / std::mem::size_of::<Cell>();
+
+    assert_eq!(cells(&line), 80, "a row built at an exact size reserves exactly that");
+
+    line.resize(81, Cell::default());
+    assert!(
+        cells(&line) > 81,
+        "growing past capacity doubles rather than allocating what was asked for; \
+         this is the allocation the aggregate pass exists to reclaim"
+    );
+
+    let grown = cells(&line);
+    line.resize(80, Cell::default());
+    assert_eq!(
+        cells(&line),
+        grown,
+        "shrinking truncates the length and keeps the capacity — 80 wasted cells per \
+         row, which across a full scrollback is 1.875 MiB"
+    );
+}

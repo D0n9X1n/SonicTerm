@@ -34,6 +34,20 @@ pub const MAX_VISIBLE_GRID_CELLS: u32 = MAX_GRID_CELLS / 2;
 /// Maximum UTF-8 bytes of zero-width cluster data retained by one cell.
 pub const MAX_CELL_EXTRAS_BYTES: usize = 64;
 
+/// Smallest aggregate capacity excess worth a reallocation pass.
+///
+/// Below this, walking every row to reclaim it costs more than the memory is
+/// worth. Sized so an ordinary screen-sized overshoot is ignored and a
+/// scrollback-sized one is not.
+const CAPACITY_EXCESS_FLOOR_BYTES: usize = 512 * 1024;
+
+/// Excess must exceed live bytes divided by this before rows are compacted.
+///
+/// Four gives a 25% band. The hysteresis is the point: a user dragging a
+/// window edge emits a continuous stream of ±1 resizes, and a threshold
+/// tight enough to fire on each one would reallocate every row per frame.
+const CAPACITY_EXCESS_DIVISOR: usize = 4;
+
 /// Clamp requested grid dimensions to a non-zero, memory-bounded shape.
 ///
 /// Columns are bounded first, then rows are reduced to keep the total cell
@@ -1525,7 +1539,7 @@ impl Grid {
         }
         let retained_bytes = self.retained_cell_bytes();
         let budget_bytes = MAX_GRID_CELLS as usize * std::mem::size_of::<Cell>();
-        if retained_bytes <= budget_bytes {
+        if retained_bytes <= budget_bytes && !self.capacity_excess_is_material() {
             return;
         }
         for row in &mut self.visible {
@@ -1542,6 +1556,45 @@ impl Grid {
                 row.shrink_capacity_to_fit();
             }
         }
+    }
+
+    /// `true` when rows are holding materially more capacity than they use.
+    ///
+    /// The absolute ceiling above is not reached by ordinary sessions — a grid
+    /// at 80×24 with full scrollback sits at roughly 0.4% of it — so on its own
+    /// it never releases anything. What it misses is a *relative* excess.
+    ///
+    /// The mechanism, measured at the primitive: `Line::resize(81)` on an
+    /// 80-cell row allocates capacity **160**, `Vec`'s amortized doubling, and
+    /// `Line::resize(80)` leaves it at 160. Eighty wasted cells per row. Across
+    /// a 1024-row scrollback that is **1.875 MiB retained by a ±1 column window
+    /// drag** — about 8% of a pane's entire grid ceiling, from a gesture the
+    /// user would not describe as doing anything. Twenty panes make it 37.5 MiB.
+    ///
+    /// Per row the excess is invisible: eighty spare cells is far below any
+    /// sensible per-row threshold, which is why `shrink_vec_if_excessive` does
+    /// not catch it. It is material only in aggregate — the same composition
+    /// shape as the rest of this work, locally correct decisions summing to a
+    /// wrong one.
+    ///
+    /// Deliberately hysteretic. The criterion is that *adjacent* resizing must
+    /// avoid allocation churn, and a user dragging a window edge produces a
+    /// continuous stream of ±1 resizes. Shrinking on every one would compact
+    /// every row per frame of the drag. Requiring the excess to clear both a
+    /// proportion of live bytes and an absolute floor lets a drag settle into
+    /// steady state — measured at one change across eight adjacent steps —
+    /// while a drag that ends materially smaller still returns its memory.
+    fn capacity_excess_is_material(&self) -> bool {
+        let live = self
+            .visible
+            .iter()
+            .chain(self.scrollback.iter())
+            .map(Line::approx_byte_size)
+            .sum::<usize>();
+        let reserved = self.retained_cell_bytes();
+        let excess = reserved.saturating_sub(live);
+
+        excess >= CAPACITY_EXCESS_FLOOR_BYTES && excess > live / CAPACITY_EXCESS_DIVISOR
     }
 }
 
