@@ -798,3 +798,134 @@ fn clearing_linked_cells_returns_their_bytes() {
          {cleared} vs {linked}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Adjacent-resize capacity reclamation
+//
+// Growing a row by one column doubles its `Vec`; shrinking back truncates the
+// length and keeps the capacity. Per row that excess is trivial. In aggregate
+// over a populated scrollback it is not.
+// ---------------------------------------------------------------------------
+
+fn grid_with_scrollback(rows: usize) -> Grid {
+    let mut grid = Grid::new(80, 24);
+    for _ in 0..rows {
+        for _ in 0..70 {
+            grid.put_char('x', Color::Default, Color::Default, CellFlags::empty());
+        }
+        grid.put_char('\n', Color::Default, Color::Default, CellFlags::empty());
+    }
+    grid
+}
+
+/// A window drag that returns to its starting width must return its memory.
+///
+/// Measured before this was handled: one ±1 column drag on a populated
+/// scrollback permanently retained **1.875 MiB** — about 8% of a pane's entire
+/// grid ceiling, from a gesture the user would not describe as doing anything.
+#[test]
+fn an_adjacent_resize_round_trip_returns_its_capacity() {
+    let mut grid = grid_with_scrollback(12_000);
+    let before = grid.retained_amount().bytes;
+
+    grid.resize(81, 24);
+    grid.resize(80, 24);
+
+    let after = grid.retained_amount().bytes;
+    let leaked = after.saturating_sub(before);
+
+    // A small residual is acceptable — the threshold is hysteretic by design.
+    // What is not acceptable is the doubling.
+    assert!(
+        leaked < before / 8,
+        "a ±1 column round trip retained {:.3} MiB against a starting {:.3} MiB",
+        leaked as f64 / 1048576.0,
+        before as f64 / 1048576.0
+    );
+}
+
+/// Dragging must not reallocate every row on every frame.
+///
+/// This is the other half of the criterion, and it pulls against the test
+/// above: a threshold tight enough to reclaim on every step would compact
+/// thousands of rows per frame of a drag. The band exists to make a drag
+/// settle rather than thrash.
+#[test]
+fn dragging_a_window_edge_does_not_thrash_allocations() {
+    let mut grid = grid_with_scrollback(12_000);
+    grid.resize(81, 24);
+    grid.resize(80, 24);
+
+    let mut changes = 0usize;
+    let mut previous = grid.retained_amount().bytes;
+    // The shape of a drag: adjacent widths, back and forth, ending where it
+    // started.
+    for width in [81u16, 82, 81, 80, 79, 80, 81, 80] {
+        grid.resize(width, 24);
+        let now = grid.retained_amount().bytes;
+        if now != previous {
+            changes += 1;
+        }
+        previous = now;
+    }
+
+    assert!(
+        changes <= 3,
+        "the retained figure moved on {changes} of 8 adjacent resize steps; a drag \
+         must settle into steady state rather than compacting every frame"
+    );
+}
+
+/// A resize that genuinely shrinks the grid must still release, immediately.
+///
+/// The hysteresis must not become an excuse to keep memory after the user has
+/// made the window materially smaller — that is the case where they can see
+/// the space they gave back.
+#[test]
+fn a_large_shrink_releases_without_waiting_for_a_threshold() {
+    let mut grid = grid_with_scrollback(12_000);
+    grid.resize(200, 24);
+    let wide = grid.retained_amount().bytes;
+
+    grid.resize(40, 24);
+    let narrow = grid.retained_amount().bytes;
+
+    assert!(
+        narrow < wide / 2,
+        "shrinking 200 → 40 columns must release: {} MiB → {} MiB",
+        wide / 1048576,
+        narrow / 1048576
+    );
+}
+
+/// Content must survive the compaction.
+///
+/// Reclaiming capacity is only correct if it reclaims *capacity*. A pass that
+/// dropped cells would be trading the user's scrollback for memory.
+#[test]
+fn compaction_preserves_the_content_it_compacts() {
+    let mut grid = Grid::new(80, 24);
+    for row in 0..40 {
+        for _ in 0..70 {
+            grid.put_char(
+                char::from(b'a' + (row % 26) as u8),
+                Color::Default,
+                Color::Default,
+                CellFlags::empty(),
+            );
+        }
+        grid.put_char('\n', Color::Default, Color::Default, CellFlags::empty());
+    }
+    let rows_before = grid.retained_amount().items;
+    let sample: String = grid.row(0).iter().map(|cell| cell.ch).collect();
+
+    grid.resize(81, 24);
+    grid.resize(80, 24);
+
+    assert_eq!(grid.retained_amount().items, rows_before, "no row may be dropped");
+    assert_eq!(
+        grid.row(0).iter().map(|cell| cell.ch).collect::<String>(),
+        sample,
+        "cell content must survive a capacity compaction"
+    );
+}
