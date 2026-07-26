@@ -1680,6 +1680,7 @@ impl Perform for Performer {
                         } else {
                             self.events.push(VtEvent::Hyperlink { id: None, uri: String::new() });
                             tracing::warn!(
+                                target: "memory",
                                 uri_bytes = uri.len(),
                                 id_bytes = id_norm.map_or(0, str::len),
                                 retained = self.hyperlinks.len(),

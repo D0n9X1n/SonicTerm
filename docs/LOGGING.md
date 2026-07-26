@@ -67,6 +67,78 @@ behind a historical memory incident. Capture these lines when a report involves
 a sudden memory jump; they distinguish window/frame/atlas allocations from PTY,
 font, or inline-media growth without requiring a diagnostic build.
 
+### Pane and session retention
+
+Also at `debug` level, `target="memory"` samples what each pane retains, at
+most once every 30 seconds, and emits one `pane retention` line per pane
+followed by one `session retention` line:
+
+```
+pane retention    pane=WindowId(1)/7 total_bytes=15204320 grid_bytes=14515200
+                  parser_bytes=0 hyperlink_bytes=254240 inline_media_bytes=434880
+                  largest_seam=grid largest_seam_bytes=14515200
+session retention panes=12 total_bytes=182451840 grid_bytes=174182400 ...
+```
+
+Four subsystems meter their own memory and the figures are **disjoint** —
+each counts only what it owns, so no allocation is charged twice:
+
+| Field | Covers |
+| --- | --- |
+| `grid_bytes` | cells, scrollback, saved alternate screen, prompt regions |
+| `parser_bytes` | in-flight escape and media capture buffers |
+| `hyperlink_bytes` | interned OSC 8 URI and id strings |
+| `inline_media_bytes` | decoded inline images retained for display |
+
+`largest_seam` names the dominant subsystem. Read it first: a total alone says
+a pane is large without saying where to look, and the remedy differs per seam —
+a pane holding 60 MB of inline media is behaving as designed, while a pane
+holding 60 MB of grid is not.
+
+The `session retention` line is the one to check against a growth report.
+Per-pane figures are each individually bounded, so a session can grow well past
+any single ceiling while every pane remains compliant; only the session total
+shows that. When investigating growth, compare successive `session retention`
+lines rather than any single sample — the shape of the curve is what
+distinguishes a working set that plateaus from retention that keeps climbing.
+
+Two caveats when reading these:
+
+- Panes whose parser lock is held by their VT thread are **skipped**, not
+  waited on, so a sample taken while output is streaming may report fewer
+  panes than the window has. `panes=` reports how many were actually measured.
+- Not every seam plateaus, and that is intended. Grid reaches a true steady
+  state once scrollback fills. Interned hyperlinks grow until their cap,
+  because a link in retained scrollback is still reachable by scrolling back to
+  it — freeing it early would break a link that is still on screen.
+
+### Reclamation and eviction events
+
+Five `target="memory"` events record memory being reclaimed or refused:
+
+- **`inline media evicted to hold the process-wide ceiling`** (`warn`) — a pane
+  dropped its oldest decoded image because the process-wide inline-media total
+  would otherwise exceed its ceiling. Fields report the evicted size, the
+  pane's remaining retention, the process total, and the ceiling. A pane only
+  ever evicts its own images; one busy pane never blanks another.
+- **`reclaimed unreferenced hyperlinks`** (`debug`) — the OSC 8 registry was
+  full and entries whose cells had scrolled out of scrollback were freed so new
+  links keep working. `freed` counts the entries dropped.
+- **`OSC 8 hyperlink rejected by memory limits`** (`warn`) — a link was refused
+  even after reclamation, meaning the retained links really are still on
+  screen. The link renders as unlinked text.
+- **`inline image atlas promoted`** (`debug`) — a window displayed inline media
+  and allocated an image-capable atlas.
+- **`image atlas released after sustained absence of inline media`** (`debug`)
+  — that atlas was released after roughly four seconds without inline media.
+  Promotion used to be one-way, so a window that displayed a single image held
+  the atlas until it closed; this line is the reclamation that replaced it.
+
+A burst of the first event means inline media is the dominant term. A steady
+trickle of the second is normal on a link-heavy session and shows reclamation
+working. Promotion without a matching release, across a window's whole
+lifetime, is worth reporting.
+
 ## Redraw and window-lifecycle diagnostics
 
 PTY output is coalesced on VT workers, but native redraw requests are delivered
