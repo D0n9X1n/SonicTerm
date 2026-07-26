@@ -19,6 +19,8 @@ use vte::{Params, Perform};
 
 use sonicterm_grid::grid::{Cell, CellFlags, Color, Grid, Pos, UnderlineStyle};
 use sonicterm_grid::hyperlink::{HyperlinkId, HyperlinkRegistry, MAX_HYPERLINK_CLIENT_ID_BYTES};
+// Governor accounting type, consumed rather than republished.
+use sonicterm_types::ResourceAmount;
 
 /// Version string reported in answer to CSI > q (XTVERSION).
 pub const SONIC_VERSION: &str = "SonicTerm 0.7";
@@ -75,6 +77,15 @@ struct MediaCapture {
 impl MediaCapture {
     fn new(protocol: MediaProtocol, metadata: String) -> Self {
         Self { protocol, metadata, data: Vec::new(), truncated: false, pending_esc: false }
+    }
+
+    /// Bytes this capture is holding, counting reserved capacity.
+    ///
+    /// Capacity rather than length because that is what the allocator is
+    /// actually holding: a capture that grew and was truncated still owns the
+    /// larger buffer.
+    fn retained_bytes(&self) -> usize {
+        self.data.capacity().saturating_add(self.metadata.capacity())
     }
 
     fn append_byte(&mut self, byte: u8) {
@@ -554,6 +565,45 @@ impl Parser {
     /// Borrow the underlying [`Grid`] — used by the renderer to read cells.
     pub fn grid(&self) -> &Grid {
         &self.performer.grid
+    }
+
+    /// Bytes and buffers this parser is holding mid-sequence.
+    ///
+    /// Covers the in-flight media capture, the raw OSC palette accumulator, and
+    /// reserved capacity in both. Excludes the grid and the hyperlink registry,
+    /// which report their own retention: a pane composes these figures rather
+    /// than any one of them restating another.
+    ///
+    /// Items count live capture buffers, which is at most one — see
+    /// [`Self::live_capture_count`].
+    #[must_use]
+    pub fn retained_amount(&self) -> ResourceAmount {
+        let capture_bytes = self
+            .apc_capture
+            .iter()
+            .chain(self.performer.dcs_capture.iter())
+            .map(MediaCapture::retained_bytes)
+            .sum::<usize>();
+        let osc_bytes = match &self.raw_osc {
+            Some(RawOsc::Palette { content }) => content.capacity(),
+            Some(RawOsc::Probe { .. }) | None => 0,
+        };
+        ResourceAmount {
+            bytes: capture_bytes.saturating_add(osc_bytes),
+            items: self.live_capture_count(),
+        }
+    }
+
+    /// Number of media captures currently accumulating.
+    ///
+    /// Beginning any escape family cancels a capture already in flight, so this
+    /// is at most one. The two capture slots are therefore alternatives rather
+    /// than addends, and a budget covering their sum would guard a state the
+    /// parser cannot reach. That exclusivity is what needs holding, so it is
+    /// exposed for assertion rather than left as an emergent property.
+    #[must_use]
+    pub fn live_capture_count(&self) -> usize {
+        usize::from(self.apc_capture.is_some()) + usize::from(self.performer.dcs_capture.is_some())
     }
 
     /// Mutably borrow the [`Grid`] — used by the host on resize, scrollback

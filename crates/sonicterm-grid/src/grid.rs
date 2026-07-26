@@ -7,6 +7,9 @@ use std::collections::VecDeque;
 // every existing `use sonicterm_grid::grid::{Cell, CellFlags, Color, Pos}` keeps
 // compiling unchanged.
 pub use sonicterm_types::{Cell, CellFlags, Color, Pos, UnderlineStyle};
+// Governor accounting type, consumed rather than republished: the grid reports
+// what it retains, it does not own the resource contract.
+use sonicterm_types::ResourceAmount;
 
 use crate::hyperlink::HyperlinkId;
 use crate::line::Line;
@@ -1344,14 +1347,13 @@ impl Grid {
         compact_scrollback_capacity(&mut primary.scrollback);
     }
 
-    fn enforce_retained_capacity_budget(&mut self) {
-        let visible_bytes = self.visible.iter().map(Line::approx_capacity_byte_size).sum::<usize>();
-        let visible_budget_bytes = MAX_VISIBLE_GRID_CELLS as usize * std::mem::size_of::<Cell>();
-        if visible_bytes > visible_budget_bytes {
-            for row in &mut self.visible {
-                row.shrink_capacity_to_fit();
-            }
-        }
+    /// Bytes retained by cell storage across primary and alternate screens.
+    ///
+    /// Counts reserved capacity rather than live length, because capacity is
+    /// what the allocator is holding. The same figure drives
+    /// [`Self::enforce_retained_capacity_budget`], so what a governor is asked
+    /// to charge and what the grid enforces cannot drift apart.
+    fn retained_cell_bytes(&self) -> usize {
         let primary_bytes = self
             .visible
             .iter()
@@ -1366,7 +1368,50 @@ impl Grid {
                 .map(Line::approx_capacity_byte_size)
                 .sum::<usize>()
         });
-        let retained_bytes = primary_bytes.saturating_add(saved_primary_bytes);
+        primary_bytes.saturating_add(saved_primary_bytes)
+    }
+
+    /// Rows retained across primary and alternate screens.
+    ///
+    /// One row container is the item unit for grid accounting: a cell is far
+    /// too fine to reserve against, and the row is what actually gets
+    /// allocated, trimmed, and compacted.
+    fn retained_rows(&self) -> usize {
+        let primary = self.visible.len().saturating_add(self.scrollback.len());
+        let saved = self
+            .alt_screen
+            .as_ref()
+            .map_or(0, |screen| screen.visible.len().saturating_add(screen.scrollback.len()));
+        primary.saturating_add(saved)
+    }
+
+    /// Storage this grid is holding, for governor accounting and telemetry.
+    ///
+    /// Bytes cover visible, history, saved-primary and alternate cell storage
+    /// including reserved row capacity and per-cell extras, plus retained
+    /// prompt regions. Items count retained row containers.
+    ///
+    /// Hyperlink metadata is deliberately excluded: the registry that owns it
+    /// meters and bounds it separately, so counting it here would charge it
+    /// twice.
+    #[must_use]
+    pub fn retained_amount(&self) -> ResourceAmount {
+        let prompt_bytes = self.prompts.capacity() * std::mem::size_of::<PromptRegion>();
+        ResourceAmount {
+            bytes: self.retained_cell_bytes().saturating_add(prompt_bytes),
+            items: self.retained_rows(),
+        }
+    }
+
+    fn enforce_retained_capacity_budget(&mut self) {
+        let visible_bytes = self.visible.iter().map(Line::approx_capacity_byte_size).sum::<usize>();
+        let visible_budget_bytes = MAX_VISIBLE_GRID_CELLS as usize * std::mem::size_of::<Cell>();
+        if visible_bytes > visible_budget_bytes {
+            for row in &mut self.visible {
+                row.shrink_capacity_to_fit();
+            }
+        }
+        let retained_bytes = self.retained_cell_bytes();
         let budget_bytes = MAX_GRID_CELLS as usize * std::mem::size_of::<Cell>();
         if retained_bytes <= budget_bytes {
             return;
