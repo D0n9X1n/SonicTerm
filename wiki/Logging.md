@@ -55,6 +55,55 @@ whether it appears to be a software adapter. Under RDP, a VM, or VDI, look for a
 `software-render degrade engaged` line and review
 `[appearance].software_render_mode` on the [Configuration](Configuration) page.
 
+### Memory diagnostics
+
+Set the level to `debug` and let the session run for a minute or two:
+
+```toml
+[logging]
+level = "debug"
+```
+
+The `memory` target samples what each pane holds every 30 seconds and writes
+one `pane retention` line per pane followed by one `session retention` line
+for the whole process. Four figures are reported separately because the
+remedy differs:
+
+| Field | What it covers |
+| --- | --- |
+| `grid_bytes` | cells, scrollback, saved alternate screen |
+| `parser_bytes` | escape sequences being parsed right now |
+| `hyperlink_bytes` | OSC 8 link targets |
+| `inline_media_bytes` | decoded inline images |
+
+Read `largest_seam` first. A total tells you a pane is large; that field tells
+you which subsystem to look at. A pane holding 60 MB of inline images is
+working as designed — a pane holding 60 MB of grid is not.
+
+Compare successive `session retention` lines rather than one sample. The shape
+of the curve is what separates a working set that levels off from memory that
+keeps climbing.
+
+Not every figure levels off, and that is intended. Cells reach a steady state
+once scrollback fills. Interned hyperlinks keep growing until their limit is
+reached, because a link that has scrolled off screen is still reachable by
+scrolling back to it.
+
+### When inline images disappear
+
+SonicTerm bounds decoded inline images per pane and across the whole process.
+A pane that keeps displaying new images will eventually drop its oldest ones,
+and with many panes open each gets a share of the process budget rather than
+the full per-pane amount. Every pane always keeps at least its newest image.
+
+This is deliberate, and it is logged: look for `inline media evicted to hold
+the process-wide ceiling` at `warn` level. If images vanish and that line is
+absent, it is a bug worth reporting.
+
+Hyperlinks behave differently. When the link table fills, SonicTerm reclaims
+entries whose text has scrolled out of history so that new links keep working.
+Links that are still on screen are never reclaimed.
+
 ### Crash and hang diagnostics
 
 The panic hook writes the panic payload, source location, backtrace, and a
@@ -135,6 +184,48 @@ render-timing 配置项。
 启动时，渲染器会记录选中的 wgpu adapter、设备类型和是否检测为软件 adapter。在 RDP、
 虚拟机或 VDI 中，请先查找 `software-render degrade engaged`，并结合
 [配置 / Configuration](Configuration) 中的 `[appearance].software_render_mode` 排查。
+
+### 内存诊断
+
+将级别设为 `debug`，让会话运行一两分钟：
+
+```toml
+[logging]
+level = "debug"
+```
+
+`memory` 目标每 30 秒采样一次每个面板占用的内存，为每个面板写入一行
+`pane retention`，随后为整个进程写入一行 `session retention`。四个数值分别
+报告，因为对应的处理方式不同：
+
+| 字段 | 含义 |
+| --- | --- |
+| `grid_bytes` | 单元格、回滚缓冲、保存的备用屏幕 |
+| `parser_bytes` | 当前正在解析的转义序列 |
+| `hyperlink_bytes` | OSC 8 链接目标 |
+| `inline_media_bytes` | 已解码的内联图像 |
+
+先看 `largest_seam`。总量只能说明面板占用大，而该字段指出应当检查哪个子系统。
+占用 60 MB 内联图像的面板属于正常设计；占用 60 MB 网格的面板则不正常。
+
+请比较连续多行 `session retention`，而不是只看单次采样。曲线的形状才能区分
+「工作集趋于平稳」与「内存持续增长」。
+
+并非每个数值都会趋于平稳，这是有意为之。回滚缓冲填满后，单元格占用达到稳态；
+而暂存的超链接会持续增长直至上限，因为已滚出屏幕的链接仍可通过向上滚动访问。
+
+### 内联图像消失时
+
+SonicTerm 对已解码的内联图像按面板和整个进程分别设限。持续显示新图像的面板
+最终会丢弃最旧的图像；打开多个面板时，每个面板获得进程预算的一份份额，而非
+完整的单面板额度。每个面板始终至少保留最新的一张图像。
+
+这是有意行为，并且会记录日志：查找 `warn` 级别的
+`inline media evicted to hold the process-wide ceiling`。若图像消失而该行缺失，
+则属于值得上报的缺陷。
+
+超链接的行为不同。链接表填满时，SonicTerm 会回收其文本已滚出历史记录的条目，
+使新链接继续可用。仍显示在屏幕上的链接永远不会被回收。
 
 ### 崩溃与卡死诊断
 
