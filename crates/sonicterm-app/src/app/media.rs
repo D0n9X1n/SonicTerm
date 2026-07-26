@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use base64::Engine;
+use parking_lot::Mutex;
 use sonicterm_render_model::InlineImage;
 use sonicterm_types::ResourceAmount;
 use sonicterm_vt::vt::{MediaEvent, MediaProtocol};
@@ -109,9 +110,23 @@ pub(super) fn process_inline_media_bytes() -> usize {
 /// counter would ratchet upward until inline media stopped rendering
 /// process-wide. Tying it to the allocation's own lifetime means there is no
 /// site to forget.
+///
+/// Co-owned by the VT worker and the pane, because their lifetimes differ. A
+/// shell exiting ends the worker while the pane stays on screen with its
+/// scrollback and images intact, so a charge held only by the worker would be
+/// returned while every pixel it accounted for is still retained — an
+/// undercount that lets other panes past the true ceiling.
 #[derive(Debug, Default)]
-pub(super) struct InlineMediaCharge {
+pub(crate) struct InlineMediaCharge {
     bytes: usize,
+}
+
+/// Shared handle to a pane's charge, held by both the VT worker and the pane.
+pub(crate) type SharedInlineMediaCharge = Arc<Mutex<InlineMediaCharge>>;
+
+/// Create a charge handle for a new pane.
+pub(crate) fn new_inline_media_charge() -> SharedInlineMediaCharge {
+    Arc::new(Mutex::new(InlineMediaCharge::default()))
 }
 
 impl InlineMediaCharge {
@@ -141,17 +156,17 @@ impl Drop for InlineMediaCharge {
 /// under pressure would evict each other every frame.
 pub(super) fn trim_inline_images_charged(
     images: &mut Vec<InlineImage>,
-    charge: &mut InlineMediaCharge,
+    charge: &SharedInlineMediaCharge,
 ) {
     trim_inline_images(images);
 
     // Charge exactly what the reporting seam reports, so the figure the
     // governor would see and the figure enforced here cannot drift apart.
-    charge.set(retained_inline_media(images).bytes);
+    charge.lock().set(retained_inline_media(images).bytes);
 
     while !images.is_empty() && process_inline_media_bytes() > MAX_PROCESS_INLINE_MEDIA_BYTES {
         let removed = images.remove(0);
-        charge.set(retained_inline_media(images).bytes);
+        charge.lock().set(retained_inline_media(images).bytes);
         tracing::warn!(
             target: "memory",
             evicted_bytes = removed.bgra.len(),

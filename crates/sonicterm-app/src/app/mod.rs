@@ -1282,6 +1282,14 @@ pub struct PaneState {
     pub app_cursor_keys: Arc<std::sync::atomic::AtomicBool>,
     /// Decoded inline media images captured from terminal protocols.
     pub inline_images: Arc<Mutex<Vec<sonicterm_render_model::InlineImage>>>,
+    /// This pane's share of the process-wide inline-media total.
+    ///
+    /// Co-owned with the pane's VT worker. The worker ends when its shell
+    /// exits, but the pane stays on screen with its images, so a charge held
+    /// only by the worker would be released while the pixels are still
+    /// retained. Held here so the charge is returned when the pane — and with
+    /// it the image store — is actually dropped.
+    pub(crate) inline_media_charge: media::SharedInlineMediaCharge,
 }
 
 #[derive(Debug, Clone)]
@@ -1305,6 +1313,7 @@ impl PaneState {
             kitty_flags: Arc::new(std::sync::atomic::AtomicU8::new(0)),
             app_cursor_keys: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             inline_images: Arc::new(Mutex::new(Vec::new())),
+            inline_media_charge: media::new_inline_media_charge(),
         }
     }
 }
