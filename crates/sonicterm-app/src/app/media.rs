@@ -201,7 +201,24 @@ pub(super) fn trim_inline_images_charged(
     images: &mut Vec<InlineImage>,
     charge: &SharedInlineMediaCharge,
 ) {
-    let budget = pane_inline_media_budget();
+    let budget = if process_inline_media_bytes() > MAX_PROCESS_INLINE_MEDIA_BYTES {
+        // Over the ceiling: trim to the floor, not to a fair share.
+        //
+        // A fair share alone does not converge, because only a pane that is
+        // *decoding* re-trims. Panes created earlier keep the larger budget
+        // they were admitted under and never revisit it while idle, so the
+        // total grows as ceiling x (1 + ln(N/4)) — measured at 616 MiB for 20
+        // panes against a 256 MiB ceiling. Trimming to the floor under
+        // pressure means every decode while over the ceiling returns memory
+        // instead of merely capping the newcomer.
+        //
+        // The residual is irreducible: principle 1 requires every pane to
+        // render at least its newest image, so N panes cost at least N x the
+        // floor. That is a bound that can be stated, rather than a curve.
+        MIN_PANE_INLINE_MEDIA_BYTES
+    } else {
+        pane_inline_media_budget()
+    };
     let before = retained_inline_media(images);
     trim_inline_images_to(images, budget);
     let after = retained_inline_media(images);

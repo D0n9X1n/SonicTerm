@@ -273,3 +273,76 @@ fn many_panes_each_keep_a_share_of_the_media_budget() {
         );
     }
 }
+
+/// The process total stays within a stateable bound when panes are created
+/// one at a time and then left idle.
+///
+/// This is the sequence a real session follows, and it is not what the uniform
+/// tests above exercise — they drive every pane on every round, so every pane
+/// re-trims against the current budget. In reality a pane fills up, the user
+/// moves on, and it never decodes again.
+///
+/// A fair share alone does not converge under that sequence: only a decoding
+/// pane re-trims, so panes admitted earlier keep the larger budget they were
+/// admitted under. Measured at **616 MiB for 20 panes** against a 256 MiB
+/// ceiling — growth of `ceiling x (1 + ln(N/4))`, which is not a bound.
+///
+/// Trimming to the floor while over the ceiling makes every decode return
+/// memory rather than merely capping the newcomer. The residual is
+/// irreducible: principle 1 requires every pane to render at least its newest
+/// image, so N panes cost at least N x the floor. That is a bound that can be
+/// stated, and this test states it.
+#[test]
+fn the_process_total_stays_within_a_stateable_bound_as_panes_accumulate() {
+    let _serialised = MEDIA_COUNTER_LOCK.lock();
+    const IMAGE_BYTES: usize = 4 * 1024 * 1024;
+    const PANES: usize = 20;
+
+    let baseline = process_inline_media_bytes();
+    let mut panes: Vec<(Vec<InlineImage>, SharedInlineMediaCharge)> = Vec::new();
+    let mut id = 0u64;
+    let mut peak = 0usize;
+
+    for _ in 0..PANES {
+        let mut images = Vec::new();
+        let charge = new_inline_media_charge();
+        // Fill to budget, then never decode again — the idle case.
+        for _ in 0..20 {
+            id += 1;
+            images.push(image(id, IMAGE_BYTES));
+            trim_inline_images_charged(&mut images, &charge);
+            assert!(
+                !images.is_empty(),
+                "no pane may be starved to nothing, even under process pressure"
+            );
+        }
+        panes.push((images, charge));
+        peak = peak.max(process_inline_media_bytes() - baseline);
+    }
+
+    // Ceiling, plus one floor-sized allocation for each pane past the point
+    // where pressure begins. Nothing weaker than this is honest, and nothing
+    // stronger is achievable while every pane still renders.
+    let bound = MAX_PROCESS_INLINE_MEDIA_BYTES + PANES * MIN_PANE_INLINE_MEDIA_BYTES;
+    assert!(
+        peak <= bound,
+        "peak {peak} ({} MiB) exceeded the stateable bound {bound} ({} MiB) \
+         for {PANES} panes",
+        peak / 1024 / 1024,
+        bound / 1024 / 1024
+    );
+
+    // Guard against the assertion being trivially true: the bound must be a
+    // small multiple of the ceiling, not an unbounded curve.
+    assert!(
+        bound < MAX_PROCESS_INLINE_MEDIA_BYTES * 2,
+        "the bound itself must stay close to the ceiling: {bound}"
+    );
+
+    drop(panes);
+    assert_eq!(
+        process_inline_media_bytes(),
+        baseline,
+        "dropping every pane must return the process total to its baseline"
+    );
+}
