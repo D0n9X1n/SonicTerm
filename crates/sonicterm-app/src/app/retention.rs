@@ -19,7 +19,7 @@
 
 use std::time::{Duration, Instant};
 
-use sonicterm_types::ResourceAmount;
+use sonicterm_types::{ResourceAmount, ResourceClass};
 
 use super::PaneState;
 
@@ -175,6 +175,89 @@ pub fn retention_sample_due(last_sample: &mut Option<Instant>, now: Instant) -> 
     true
 }
 
+/// The governor class each retention seam is charged to.
+///
+/// Explicit rather than inferred so the mapping is reviewable in one place: a
+/// seam charged to the wrong class makes the dominant-class line point at the
+/// wrong subsystem, which is worse than not reporting it.
+///
+/// `hyperlinks` maps to `ProtocolMetadata` rather than a grid class because
+/// the registry owns those strings independently of any cell — that
+/// disjointness is what makes summing the seams valid at all.
+#[must_use]
+pub fn seam_classes(retention: &PaneRetention) -> [(ResourceClass, ResourceAmount); 4] {
+    [
+        (ResourceClass::GridHistory, retention.grid),
+        (ResourceClass::ParserCapture, retention.parser),
+        (ResourceClass::ProtocolMetadata, retention.hyperlinks),
+        (ResourceClass::InlineMediaRetained, retention.inline_media),
+    ]
+}
+
+/// Move a pane's governor charges to match what it currently retains.
+///
+/// Resizes live charges rather than releasing and re-reserving. A pane's
+/// retention moves continuously, and a release/re-reserve pair on every sample
+/// leaves the ledger briefly disagreeing with reality — the same window that
+/// made the inline-media charge undercount when it was released before the
+/// pixels were freed.
+///
+/// A charge that cannot grow is left at its current size rather than dropped.
+/// Under an unlimited governor that cannot happen; if limits are ever
+/// introduced, reporting a stale-but-live figure beats reporting nothing while
+/// the pane still holds the memory.
+pub fn charge_pane_retention(
+    governor: &sonicterm_resource::ResourceGovernor,
+    owner: sonicterm_types::ResourceOwnerId,
+    charges: &mut std::collections::HashMap<
+        ResourceClass,
+        sonicterm_resource::CommittedReservation,
+    >,
+    retention: &PaneRetention,
+) {
+    for (class, amount) in seam_classes(retention) {
+        match charges.entry(class) {
+            std::collections::hash_map::Entry::Occupied(mut held) => {
+                let current = held.get().committed_amount();
+                let outcome = if amount.component_le(current) {
+                    held.get_mut().shrink(amount)
+                } else {
+                    held.get_mut().try_grow(amount)
+                };
+                if let Err(error) = outcome {
+                    tracing::debug!(
+                        target: "memory",
+                        ?error,
+                        ?class,
+                        "pane charge could not be resized; the reported figure lags reality"
+                    );
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                if amount.bytes == 0 && amount.items == 0 {
+                    continue;
+                }
+                match governor
+                    .try_reserve(owner, class, amount)
+                    .and_then(|reservation| reservation.commit(amount).map_err(|error| error.error))
+                {
+                    Ok(committed) => {
+                        slot.insert(committed);
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            target: "memory",
+                            ?error,
+                            ?class,
+                            "pane charge could not be opened; this class is omitted from the ledger"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Sample and log retention if the interval has elapsed.
 ///
 /// Returns `true` when a sample was taken, so callers can pin the cadence in
@@ -252,6 +335,47 @@ impl super::App {
     /// Labels carry the window and pane id so a line identifies which pane it
     /// describes — a total with no owner tells an operator a number without
     /// telling them where to look.
+    /// Charge every owned pane's retention into the governor.
+    ///
+    /// Measure and charge are the same figure by construction: the amount
+    /// charged comes from `measure_pane`, which is what the log lines report.
+    /// Computing them separately would produce two numbers that are supposed
+    /// to be equal and are maintained apart — the drift that let a media cap
+    /// silently stop capping.
+    ///
+    /// Panes whose parser lock is held are skipped, exactly as measurement
+    /// skips them. Their charge stays at its last value rather than dropping
+    /// to zero, because a busy pane holds *more* memory than an idle one and
+    /// zeroing it would understate the process at the worst moment.
+    #[doc(hidden)]
+    pub fn __test_charge_pane_owners(&mut self) {
+        self.charge_pane_owners();
+    }
+
+    fn charge_pane_owners(&mut self) {
+        let window_ids: Vec<super::WindowId> = self.windows.keys().copied().collect();
+        for window_id in window_ids {
+            let Some(window) = self.windows.get(&window_id) else { continue };
+            let pane_ids: Vec<u64> = window.panes.keys().copied().collect();
+
+            for pane_id in pane_ids {
+                let Some(pane) = self.windows.get(&window_id).and_then(|w| w.panes.get(&pane_id))
+                else {
+                    continue;
+                };
+                let Some(owner) = pane.owner else { continue };
+                let Some(retention) = measure_pane(pane) else { continue };
+
+                let Some(pane) =
+                    self.windows.get_mut(&window_id).and_then(|w| w.panes.get_mut(&pane_id))
+                else {
+                    continue;
+                };
+                charge_pane_retention(&self.governor, owner, &mut pane.charges, &retention);
+            }
+        }
+    }
+
     pub(super) fn sample_pane_retention(&mut self, now: Instant) -> bool {
         if !tracing::enabled!(target: "memory", tracing::Level::DEBUG) {
             return false;
@@ -260,6 +384,12 @@ impl super::App {
         // and doing them together means the hierarchy cannot drift from the
         // figures reported beside it.
         self.reconcile_pane_owners();
+
+        // Charge what each pane retains into its governor owner, so the
+        // hierarchy reports real memory rather than only structure. Done in
+        // the same pass as the log lines: two passes computing the same
+        // figures would be two figures that must agree.
+        self.charge_pane_owners();
 
         let labelled: Vec<(String, &PaneState)> = self
             .windows

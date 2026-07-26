@@ -20,7 +20,9 @@ use sonicterm_cfg::theme::Theme;
 use sonicterm_grid::grid::Grid;
 use sonicterm_io::pty::PtyHandle;
 use sonicterm_resource::ResourceGovernor;
-use sonicterm_types::{GovernorLimits, OwnerKind, OwnerLimits, ProcessKind, ResourceOwnerId};
+use sonicterm_types::{
+    GovernorLimits, OwnerKind, OwnerLimits, ProcessKind, ResourceClass, ResourceOwnerId,
+};
 use sonicterm_vt::vt::{CommandEvent, Parser};
 use winit::{
     application::ApplicationHandler,
@@ -1263,6 +1265,18 @@ pub fn init_tracing_public() {
 /// read the current id after coalescing and send a typed redraw event. Native
 /// window APIs remain confined to the winit event-loop thread.
 pub struct PaneState {
+    /// Governor charges this pane holds, one per resource class.
+    ///
+    /// Committed reservations rather than repeated reserve/release: a pane's
+    /// retention rises and falls continuously, and a release/re-reserve pair
+    /// on every sample opens a window where the ledger disagrees with reality.
+    /// `try_grow` and `shrink` move a live charge in place, so the figure is
+    /// never briefly wrong.
+    ///
+    /// Released by `Drop` when the pane is dropped, which is the same property
+    /// that made the inline-media charge correct: there is no teardown site to
+    /// forget.
+    pub(crate) charges: HashMap<ResourceClass, sonicterm_resource::CommittedReservation>,
     /// This pane's owner in the governor hierarchy, below its window's.
     ///
     /// Assigned when the pane is inserted into a window rather than at
@@ -1336,6 +1350,7 @@ impl PaneState {
         Self {
             // Assigned when the pane is inserted into a window.
             owner: None,
+            charges: HashMap::new(),
             parser,
             pty,
             redraw_target: Arc::new(Mutex::new(None)),
@@ -3708,6 +3723,71 @@ impl App {
         self.governor
             .snapshot(self.governor.root_owner())
             .expect("the process root always snapshots")
+    }
+
+    /// Test-only: snapshot any owner.
+    #[doc(hidden)]
+    pub fn __test_owner_snapshot(
+        &self,
+        owner: ResourceOwnerId,
+    ) -> Option<sonicterm_types::ResourceSnapshot> {
+        self.governor.snapshot(owner).ok()
+    }
+
+    /// Test-only: measure one pane's retention through the reporting seam.
+    #[doc(hidden)]
+    pub fn __test_pane_retention(
+        &self,
+        window: WindowId,
+        pane_id: u64,
+    ) -> Option<retention::PaneRetention> {
+        let pane = self.windows.get(&window)?.panes.get(&pane_id)?;
+        retention::measure_pane(pane)
+    }
+
+    /// Test-only: the governor amounts a pane currently holds, by class.
+    #[doc(hidden)]
+    pub fn __test_pane_charges(
+        &self,
+        window: WindowId,
+        pane_id: u64,
+    ) -> Option<HashMap<ResourceClass, sonicterm_types::ResourceAmount>> {
+        let pane = self.windows.get(&window)?.panes.get(&pane_id)?;
+        Some(pane.charges.iter().map(|(class, held)| (*class, held.committed_amount())).collect())
+    }
+
+    /// Test-only: a pane's total charged bytes across every class.
+    #[doc(hidden)]
+    pub fn __test_pane_charge_total(&self, window: WindowId, pane_id: u64) -> Option<usize> {
+        let pane = self.windows.get(&window)?.panes.get(&pane_id)?;
+        Some(pane.charges.values().map(|held| held.committed_amount().bytes).sum())
+    }
+
+    /// Test-only: set a child pane's scrollback limit.
+    #[doc(hidden)]
+    pub fn __test_set_child_pane_scrollback(
+        &mut self,
+        window: WindowId,
+        pane_id: u64,
+        limit: usize,
+    ) -> bool {
+        let Some(pane) = self.windows.get_mut(&window).and_then(|w| w.panes.get_mut(&pane_id))
+        else {
+            return false;
+        };
+        pane.parser.lock().grid_mut().set_scrollback_limit(limit);
+        true
+    }
+
+    /// Test-only: run a retention sample regardless of the interval.
+    ///
+    /// The production sampler is interval-gated and level-gated, neither of
+    /// which a test should wait on or install a subscriber for. This drives
+    /// the same charging pass the sampler runs.
+    #[doc(hidden)]
+    pub fn __test_force_retention_sample(&mut self) {
+        self.reconcile_pane_owners();
+        self.__test_charge_pane_owners();
     }
 
     /// Test-only: whether `owner` is still open in the governor.
