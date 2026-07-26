@@ -346,3 +346,51 @@ fn the_process_total_stays_within_a_stateable_bound_as_panes_accumulate() {
         "dropping every pane must return the process total to its baseline"
     );
 }
+
+/// The worker's staging vector is bounded by the pane's budget, not by the
+/// fixed per-pane constant.
+///
+/// The VT worker decodes into a local vector and merges it into the pane's
+/// charged store only at the end of the batch, so that vector is **uncharged**
+/// while it fills. Trimming it against the fixed constant let a pane stage far
+/// more than it could ever retain: with many panes live the fair share is a
+/// fraction of the constant, so every pane decoding at once could hold
+/// hundreds of megabytes that no ceiling saw.
+///
+/// The staging vector must therefore never hold more than the merge is going
+/// to let the pane keep.
+#[test]
+fn the_staging_vector_is_bounded_by_the_pane_budget() {
+    let _serialised = MEDIA_COUNTER_LOCK.lock();
+    const IMAGE_BYTES: usize = 4 * 1024 * 1024;
+    const PANES: usize = 20;
+
+    // Enough live charges that the fair share is well below the fixed
+    // per-pane constant — otherwise the two are indistinguishable and the
+    // test would pass against the defect.
+    let charges: Vec<SharedInlineMediaCharge> =
+        (0..PANES).map(|_| new_inline_media_charge()).collect();
+    let budget = pane_inline_media_budget();
+    assert!(
+        budget < MAX_RETAINED_INLINE_IMAGE_BYTES,
+        "precondition: the fair share ({budget}) must be below the fixed constant \
+         ({MAX_RETAINED_INLINE_IMAGE_BYTES}), or this test cannot discriminate"
+    );
+
+    // One worker stages a burst, as it would from a single PTY chunk.
+    let mut staged: Vec<InlineImage> = Vec::new();
+    for id in 1..=32u64 {
+        staged.push(image(id, IMAGE_BYTES));
+        trim_staged_inline_images(&mut staged);
+
+        let held = retained_inline_media(&staged).bytes;
+        assert!(
+            held <= budget.max(IMAGE_BYTES),
+            "staging held {held} bytes against a {budget}-byte pane budget; \
+             uncharged staging must not exceed what the merge will keep"
+        );
+    }
+
+    assert!(!staged.is_empty(), "staging must still retain the newest image");
+    drop(charges);
+}
