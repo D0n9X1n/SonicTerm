@@ -680,3 +680,121 @@ fn retained_amount_tracks_trimming_back_down() {
         trimmed.items
     );
 }
+
+// ---------------------------------------------------------------------------
+// Rare-attribute box accounting
+//
+// `Cell` keeps hyperlink ids, grapheme extras, and non-default underline
+// metadata behind `Option<Box<FatAttributes>>`. Row capacity accounting
+// multiplies by `size_of::<Cell>()`, which counts the pointer slot and not the
+// allocation behind it.
+// ---------------------------------------------------------------------------
+
+/// Linked cells must move the reported figure.
+///
+/// Before this was counted, filling a screen with OSC 8 links moved
+/// `retained_amount().bytes` by **exactly zero** while allocating 76,800 bytes.
+#[test]
+fn linking_cells_moves_the_retained_figure() {
+    let mut grid = Grid::new(80, 24);
+    let plain = grid.retained_amount().bytes;
+
+    let mut linked = 0usize;
+    for _ in 0..24 {
+        for _ in 0..80 {
+            grid.put_char_linked(
+                'x',
+                Color::Default,
+                Color::Default,
+                CellFlags::empty(),
+                Some(HyperlinkId(1)),
+            );
+            linked += 1;
+        }
+    }
+
+    let after = grid.retained_amount().bytes;
+    let delta = after.saturating_sub(plain);
+    let fat = std::mem::size_of::<sonicterm_types::FatAttributes>();
+
+    assert!(
+        delta > 0,
+        "linking {linked} cells allocated {} bytes and moved the reported figure by 0",
+        linked * fat
+    );
+    // Cluster storage may collapse identical runs, so the figure is bounded
+    // above by one box per cell rather than equal to it. Assert the shape,
+    // not an exact count that storage form would make brittle.
+    assert!(
+        delta <= linked * fat,
+        "reported {delta} bytes for at most {} of boxes — over-counting suggests \
+         logical columns are being counted instead of stored cells",
+        linked * fat
+    );
+}
+
+/// Grapheme extras allocate the same box with no hyperlink involved.
+///
+/// Worth pinning separately: the excuse for excluding this figure was that the
+/// hyperlink registry meters it. The registry meters URI *strings*. A cell
+/// carrying only combining marks has no registry entry at all, so nothing else
+/// in the process accounts for its box.
+#[test]
+fn grapheme_extras_are_counted_though_no_hyperlink_exists() {
+    let mut grid = Grid::new(80, 24);
+    let plain = grid.retained_amount().bytes;
+
+    // A base character followed by combining marks lands in `extras`.
+    for _ in 0..24 {
+        for _ in 0..80 {
+            grid.put_char('e', Color::Default, Color::Default, CellFlags::empty());
+            grid.put_char('\u{0301}', Color::Default, Color::Default, CellFlags::empty());
+        }
+    }
+
+    let after = grid.retained_amount().bytes;
+    assert!(
+        after > plain,
+        "combining marks allocate a rare-attribute box with no hyperlink and no \
+         registry entry; nothing else in the process meters it"
+    );
+}
+
+/// Clearing a linked cell must return the bytes.
+///
+/// A figure that only rises is a figure that will eventually read as a leak
+/// whether or not one exists.
+#[test]
+fn clearing_linked_cells_returns_their_bytes() {
+    let mut grid = Grid::new(80, 24);
+    let plain = grid.retained_amount().bytes;
+
+    for _ in 0..24 {
+        for _ in 0..80 {
+            grid.put_char_linked(
+                'x',
+                Color::Default,
+                Color::Default,
+                CellFlags::empty(),
+                Some(HyperlinkId(1)),
+            );
+        }
+    }
+    let linked = grid.retained_amount().bytes;
+    assert!(linked > plain, "precondition: linking raised the figure");
+
+    // Overwrite every cell with plain content.
+    grid.cursor = Pos { row: 0, col: 0 };
+    for _ in 0..24 {
+        for _ in 0..80 {
+            grid.put_char('y', Color::Default, Color::Default, CellFlags::empty());
+        }
+    }
+
+    let cleared = grid.retained_amount().bytes;
+    assert!(
+        cleared < linked,
+        "overwriting linked cells with plain ones must return their boxes: \
+         {cleared} vs {linked}"
+    );
+}

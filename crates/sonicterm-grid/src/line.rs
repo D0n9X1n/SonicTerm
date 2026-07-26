@@ -27,7 +27,7 @@
 //! structure + invariants + tests first lets the integration PR focus purely
 //! on the call-site refactor.
 
-use sonicterm_types::cell::Cell;
+use sonicterm_types::cell::{Cell, FatAttributes};
 
 const MIN_EXACT_HALF_COMPACTION_ITEMS: usize = 1024;
 
@@ -106,6 +106,32 @@ impl LineStorage {
             LineStorage::Flat(v) => v.capacity() * std::mem::size_of::<Cell>(),
             LineStorage::Cluster(cs) => cs.capacity() * std::mem::size_of::<Cluster>(),
         }
+    }
+
+    /// Heap bytes held by cells' rare-attribute boxes.
+    ///
+    /// [`Cell`] keeps hyperlink ids, grapheme extras, and non-default
+    /// underline metadata behind an `Option<Box<FatAttributes>>`, so a linked
+    /// cell costs its inline 24 bytes *plus* a 40-byte heap allocation.
+    /// [`Self::approx_capacity_byte_size`] multiplies capacity by the inline
+    /// size and therefore counts only the pointer, never what it points at —
+    /// a row of linked cells under-reports by 40 bytes per cell, which is
+    /// larger than the figure it does report.
+    ///
+    /// Counted per *stored* cell rather than per logical column: in cluster
+    /// form a run of N identical linked cells holds one `Cell`, hence one box.
+    /// Multiplying by the logical length would over-report a long link span by
+    /// the run length.
+    ///
+    /// Walks the row, so it is O(stored cells). Callers on a per-frame path
+    /// should not use it; it exists for the retention sampling pass, which
+    /// runs on a timer.
+    pub fn fat_attribute_bytes(&self) -> usize {
+        let stored = match self {
+            LineStorage::Flat(v) => v.iter().filter(|cell| cell.has_fat()).count(),
+            LineStorage::Cluster(cs) => cs.iter().filter(|c| c.cell.has_fat()).count(),
+        };
+        stored * std::mem::size_of::<FatAttributes>()
     }
 
     // --- PR-A: API completeness. Pure additive on the primitive.
@@ -470,6 +496,15 @@ impl Line {
     /// Approximate reserved heap payload bytes for this line's storage.
     pub fn approx_capacity_byte_size(&self) -> usize {
         self.storage.approx_capacity_byte_size()
+    }
+
+    /// Heap bytes held by this row's rare-attribute boxes.
+    ///
+    /// See [`LineStorage::fat_attribute_bytes`]. Separate from
+    /// [`Self::approx_capacity_byte_size`] rather than folded into it because
+    /// that function is `capacity`-based and O(1); this one walks the row.
+    pub fn fat_attribute_bytes(&self) -> usize {
+        self.storage.fat_attribute_bytes()
     }
 
     /// Release all unused inner storage capacity.

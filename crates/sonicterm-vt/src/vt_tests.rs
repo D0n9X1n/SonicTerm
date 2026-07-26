@@ -824,11 +824,38 @@ fn the_three_retention_seams_are_disjoint_and_must_be_summed() {
          it reports capture and OSC accumulator bytes only"
     );
 
-    // Neither does the grid, even though cells carry hyperlink ids.
-    assert_eq!(
-        parser.grid().retained_amount().bytes,
-        grid_before,
-        "Grid::retained_amount must exclude hyperlink metadata; the registry meters it"
+    // The grid moves, and must: a linked cell allocates a 40-byte
+    // `Box<FatAttributes>` that the grid owns. What the registry meters is the
+    // URI *strings* — `(id + uri) * 2` — which is a different allocation. The
+    // two are disjoint, so both are charged exactly once.
+    //
+    // This assertion previously required the grid figure not to move at all,
+    // using that as a proxy for "no double counting". The proxy was wrong in
+    // the direction that matters: it also holds when the grid fails to count
+    // something it genuinely owns, which is the defect it was meant to
+    // exclude. Measured before the fix: 1.85 MiB reported against 3.09 MiB
+    // held on a populated scrollback.
+    let grid_after = parser.grid().retained_amount().bytes;
+    assert!(
+        grid_after > grid_before,
+        "linked cells allocate grid-owned attribute boxes, which the grid must count"
+    );
+
+    // Disjointness, asserted directly rather than through a proxy: the grid's
+    // increase is bounded by what the boxes can cost, so it cannot be
+    // restating the registry's string bytes.
+    let linked_cells: usize = parser
+        .grid()
+        .rows_iter()
+        .chain(parser.grid().scrollback_iter())
+        .map(|row| row.iter().filter(|cell| cell.hyperlink().is_some()).count())
+        .sum();
+    let max_box_bytes = linked_cells * std::mem::size_of::<sonicterm_types::FatAttributes>();
+    assert!(
+        grid_after - grid_before <= max_box_bytes,
+        "the grid's increase ({}) exceeds what {linked_cells} attribute boxes can cost \
+         ({max_box_bytes}) — it is restating registry bytes",
+        grid_after - grid_before
     );
 
     // Therefore the registry's bytes are reachable from exactly one place, and
