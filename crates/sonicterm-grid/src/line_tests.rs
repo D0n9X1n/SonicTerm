@@ -487,3 +487,98 @@ fn index_ops_and_len_reflect_storage() {
     assert!(!filled.is_empty());
     assert!(Line::from_flat(Vec::new()).is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Rare-attribute box accounting
+// ---------------------------------------------------------------------------
+
+fn linked_cell(id: u64) -> Cell {
+    let mut cell = Cell::plain('x', Color::Default, Color::Default, CellFlags::empty());
+    cell.set_hyperlink(Some(sonicterm_types::HyperlinkId(id)));
+    cell
+}
+
+/// Cluster form must charge one box per *stored* cell, not per logical column.
+///
+/// A run of N identical linked cells collapses to one `Cluster` holding one
+/// `Cell`, hence one `Box<FatAttributes>`. Charging the run length would
+/// inflate a long link span — a whole line inside one OSC 8 span — by up to
+/// its column count.
+///
+/// Tested against `LineStorage` directly because cluster form is rare when
+/// driving a `Grid` through `put_char`: measured at 3 of 203 rows, which is
+/// too few for a grid-level assertion to discriminate. This is the level the
+/// distinction exists at.
+#[test]
+fn cluster_storage_charges_one_box_per_stored_cell() {
+    let fat = std::mem::size_of::<sonicterm_types::FatAttributes>();
+
+    // One run of 80 identical linked cells.
+    let flat: Vec<Cell> = (0..80).map(|_| linked_cell(1)).collect();
+    let clustered = LineStorage::cluster_from_flat(&flat);
+
+    assert!(clustered.is_cluster(), "precondition: identical cells must collapse to one run");
+    assert_eq!(clustered.len(), 80, "precondition: the logical length is unchanged");
+
+    assert_eq!(
+        clustered.fat_attribute_bytes(),
+        fat,
+        "one collapsed run holds one boxed attribute set, so it must be charged once — \
+         charging its 80-column length would over-report by 80x"
+    );
+}
+
+/// Flat form charges every linked cell, because every one has its own box.
+#[test]
+fn flat_storage_charges_every_linked_cell() {
+    let fat = std::mem::size_of::<sonicterm_types::FatAttributes>();
+
+    // Distinct link ids defeat run collapsing, so each cell keeps its own box.
+    let flat: Vec<Cell> = (0..80).map(|i| linked_cell(i + 1)).collect();
+    let storage = LineStorage::Flat(flat);
+
+    assert_eq!(
+        storage.fat_attribute_bytes(),
+        80 * fat,
+        "each distinct linked cell holds its own box and must be charged"
+    );
+}
+
+/// The two forms must agree on identical content.
+///
+/// Converting between them frees no memory and allocates none, so a figure
+/// that moved across the conversion would make compaction look like a leak or
+/// a saving that never happened.
+#[test]
+fn converting_between_storage_forms_does_not_move_the_figure() {
+    // Distinct ids: nothing collapses, so both forms hold the same boxes.
+    let flat: Vec<Cell> = (0..40).map(|i| linked_cell(i + 1)).collect();
+
+    let as_flat = LineStorage::Flat(flat.clone());
+    let mut as_cluster = LineStorage::cluster_from_flat(&flat);
+
+    assert_eq!(
+        as_flat.fat_attribute_bytes(),
+        as_cluster.fat_attribute_bytes(),
+        "identical content must report identically whichever form holds it"
+    );
+
+    as_cluster.to_flat();
+    assert_eq!(
+        as_cluster.fat_attribute_bytes(),
+        as_flat.fat_attribute_bytes(),
+        "converting back must not move the figure either"
+    );
+}
+
+/// Plain cells cost nothing.
+///
+/// The whole point of the box is that the overwhelming majority of cells leave
+/// it `None`. If plain content charged for it, every grid would over-report.
+#[test]
+fn plain_cells_charge_nothing() {
+    let flat: Vec<Cell> = (0..80)
+        .map(|_| Cell::plain(' ', Color::Default, Color::Default, CellFlags::empty()))
+        .collect();
+    assert_eq!(LineStorage::Flat(flat).fat_attribute_bytes(), 0);
+}
