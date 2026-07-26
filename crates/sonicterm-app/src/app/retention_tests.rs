@@ -22,18 +22,22 @@ fn a_pane_total_is_exactly_the_sum_of_its_seams() {
     let pane = pane_with(80, 24);
     let retention = measure_pane(&pane).expect("a fresh pane's locks are uncontended");
 
-    let expected_bytes = retention.grid.bytes
+    let expected_bytes = retention.grid_visible.bytes
+        + retention.grid_history.bytes
+        + retention.grid_alternate.bytes
         + retention.parser.bytes
         + retention.hyperlinks.bytes
         + retention.inline_media.bytes;
-    let expected_items = retention.grid.items
+    let expected_items = retention.grid_visible.items
+        + retention.grid_history.items
+        + retention.grid_alternate.items
         + retention.parser.items
         + retention.hyperlinks.items
         + retention.inline_media.items;
 
     assert_eq!(retention.total().bytes, expected_bytes);
     assert_eq!(retention.total().items, expected_items);
-    assert!(retention.grid.bytes > 0, "a live pane must report grid cells");
+    assert!(retention.grid_visible.bytes > 0, "a live pane must report grid cells");
 }
 
 /// Content written to a pane moves its reported total.
@@ -124,7 +128,9 @@ fn the_session_total_is_the_sum_over_panes() {
 #[test]
 fn the_largest_seam_is_identified_by_name() {
     let retention = PaneRetention {
-        grid: ResourceAmount { bytes: 1_000, items: 10 },
+        grid_visible: ResourceAmount { bytes: 1_000, items: 10 },
+        grid_history: ResourceAmount { bytes: 500, items: 5 },
+        grid_alternate: ResourceAmount::default(),
         parser: ResourceAmount { bytes: 200, items: 1 },
         hyperlinks: ResourceAmount { bytes: 50, items: 2 },
         inline_media: ResourceAmount { bytes: 64 * 1024 * 1024, items: 3 },
@@ -232,4 +238,65 @@ fn sampling_skips_a_contended_pane_rather_than_blocking() {
     assert!(session.total().bytes > 0, "the uncontended pane must still be measured");
 
     drop(held);
+}
+
+/// A saved primary screen is charged to `GridAlternate`, not folded into
+/// history.
+///
+/// Before this split every grid byte — visible, history and saved primary
+/// alike — was charged to `GridHistory`. The total was right and the
+/// attribution was wrong, which matters because the remedy differs: history
+/// shrinks by lowering `scrollback`, while a saved primary is memory held for
+/// a screen the user is not looking at and which frees itself when the
+/// full-screen program exits.
+#[test]
+fn a_saved_primary_screen_is_charged_to_its_own_class() {
+    let pane = pane_with(80, 24);
+    {
+        let mut parser = pane.parser.lock();
+        for _ in 0..300 {
+            parser.advance(b"scrollback content for the primary screen\r\n");
+        }
+    }
+
+    let before = measure_pane(&pane).expect("uncontended");
+    assert_eq!(
+        before.grid_alternate,
+        ResourceAmount::default(),
+        "precondition: no alternate screen is active"
+    );
+    assert!(before.grid_history.bytes > 0, "precondition: the primary has history");
+
+    // Enter the alternate screen the way a full-screen program does.
+    pane.parser.lock().advance(b"\x1b[?1049h");
+    let during = measure_pane(&pane).expect("uncontended");
+
+    assert!(during.grid_alternate.bytes > 0, "the saved primary must be charged to GridAlternate");
+
+    // The classes charged must reflect it.
+    let classes = seam_classes(&during);
+    let alternate = classes
+        .iter()
+        .find(|(class, _)| *class == ResourceClass::GridAlternate)
+        .expect("GridAlternate must be among the charged classes");
+    assert_eq!(alternate.1, during.grid_alternate);
+
+    // And the total must not have moved by the re-attribution alone — the
+    // whole point is that this changes where bytes are charged, not how many.
+    let sum: usize = classes.iter().map(|(_, amount)| amount.bytes).sum();
+    assert_eq!(sum, during.total().bytes, "re-attribution must not change the total charged");
+}
+
+/// Every grid class the inventory names must be charged, not just history.
+#[test]
+fn all_three_grid_classes_appear_among_the_charged_seams() {
+    let retention = PaneRetention::default();
+    let charged: Vec<ResourceClass> =
+        seam_classes(&retention).iter().map(|(class, _)| *class).collect();
+
+    for class in
+        [ResourceClass::GridVisible, ResourceClass::GridHistory, ResourceClass::GridAlternate]
+    {
+        assert!(charged.contains(&class), "{class:?} must have a production charge site");
+    }
 }

@@ -929,3 +929,90 @@ fn compaction_preserves_the_content_it_compacts() {
         "cell content must survive a capacity compaction"
     );
 }
+
+/// The regions must sum to the total, in every state the grid can be in.
+///
+/// This is what makes splitting the charge safe: if the parts did not sum to
+/// the whole, attributing them to separate classes would silently change how
+/// much is charged, not just where. A governor would then be reading a
+/// different number than the one every existing test pins.
+#[test]
+fn region_amounts_sum_to_the_retained_total() {
+    let mut grid = Grid::new(80, 24);
+
+    let states: [(&str, fn(&mut Grid)); 5] = [
+        ("empty", |_| {}),
+        ("visible content", |g| {
+            for _ in 0..20 {
+                for _ in 0..70 {
+                    g.put_char('x', Color::Default, Color::Default, CellFlags::empty());
+                }
+                g.put_char('\n', Color::Default, Color::Default, CellFlags::empty());
+            }
+        }),
+        ("populated scrollback", |g| {
+            for _ in 0..500 {
+                for _ in 0..70 {
+                    g.put_char('y', Color::Default, Color::Default, CellFlags::empty());
+                }
+                g.put_char('\n', Color::Default, Color::Default, CellFlags::empty());
+            }
+        }),
+        ("alternate screen active", |g| g.enter_alt_screen()),
+        ("back to primary", |g| g.leave_alt_screen()),
+    ];
+
+    for (name, step) in states {
+        step(&mut grid);
+        let regions = grid.retained_amount_by_region();
+        let total = grid.retained_amount();
+        assert_eq!(
+            regions.total(),
+            total,
+            "regions must sum to the total in state '{name}': \
+             visible={:?} history={:?} alternate={:?}",
+            regions.visible,
+            regions.history,
+            regions.alternate
+        );
+    }
+}
+
+/// Entering an alternate screen must move bytes into the alternate region,
+/// not merely leave them in history.
+///
+/// This is the attribution the split exists for: the saved primary is what an
+/// operator would want to see separated, because it is memory held for a
+/// screen the user is not currently looking at.
+#[test]
+fn entering_an_alternate_screen_attributes_the_saved_primary_separately() {
+    let mut grid = Grid::new(80, 24);
+    for _ in 0..500 {
+        for _ in 0..70 {
+            grid.put_char('x', Color::Default, Color::Default, CellFlags::empty());
+        }
+        grid.put_char('\n', Color::Default, Color::Default, CellFlags::empty());
+    }
+
+    let before = grid.retained_amount_by_region();
+    assert_eq!(before.alternate, ResourceAmount::default(), "no alternate screen yet");
+    assert!(before.history.bytes > 0, "precondition: history holds the scrollback");
+
+    grid.enter_alt_screen();
+    let during = grid.retained_amount_by_region();
+
+    assert!(
+        during.alternate.bytes > 0,
+        "the saved primary must be attributed to the alternate region, not left in history"
+    );
+    assert!(
+        during.history.bytes < before.history.bytes,
+        "and history must no longer be carrying it: {} vs {}",
+        during.history.bytes,
+        before.history.bytes
+    );
+
+    grid.leave_alt_screen();
+    let after = grid.retained_amount_by_region();
+    assert_eq!(after.alternate, ResourceAmount::default(), "leaving must clear the region");
+}

@@ -78,13 +78,20 @@ fn the_grid_seam_plateaus_once_scrollback_is_full() {
     for round in 0..PLATEAU_ROUND {
         write_session_burst(&mut pane.parser.lock(), round);
     }
-    let at_plateau = measure(&pane).grid.bytes;
+    // Sum the three grid regions: the property under test is that grid
+    // storage as a whole plateaus, and splitting it by region for attribution
+    // must not change that.
+    let grid_bytes = |pane: &_| {
+        let r = measure(pane);
+        r.grid_visible.bytes + r.grid_history.bytes + r.grid_alternate.bytes
+    };
+    let at_plateau = grid_bytes(&pane);
 
     // Three times as much work again after the plateau.
     for round in PLATEAU_ROUND..PLATEAU_ROUND * 4 {
         write_session_burst(&mut pane.parser.lock(), round);
     }
-    let after = measure(&pane).grid.bytes;
+    let after = grid_bytes(&pane);
 
     assert_eq!(
         after, at_plateau,
@@ -122,8 +129,11 @@ fn a_long_session_stays_within_a_one_pane_envelope() {
     assert!(
         total < ONE_PANE_ENVELOPE,
         "one pane retained {total} bytes after {ROUNDS} rounds, above the \
-         {ONE_PANE_ENVELOPE}-byte envelope (grid {}, parser {}, links {}, media {})",
-        retention.grid.bytes,
+         {ONE_PANE_ENVELOPE}-byte envelope (visible {}, history {}, alternate {}, \
+         parser {}, links {}, media {})",
+        retention.grid_visible.bytes,
+        retention.grid_history.bytes,
+        retention.grid_alternate.bytes,
         retention.parser.bytes,
         retention.hyperlinks.bytes,
         retention.inline_media.bytes
@@ -132,8 +142,12 @@ fn a_long_session_stays_within_a_one_pane_envelope() {
     // The grid must be the dominant term. If something else overtakes it, the
     // shape of the session has changed and this test's envelope no longer
     // describes what it claims to.
+    // History specifically, not grid storage in aggregate: a scrolling session
+    // accumulates scrollback, and if the visible screen or a saved primary
+    // overtook it the shape of the session would have changed and this test's
+    // envelope would no longer describe what it claims to.
     let (seam, _) = retention.largest_seam();
-    assert_eq!(seam, "grid", "cells must dominate a scrolling session's retention");
+    assert_eq!(seam, "grid_history", "scrollback must dominate a scrolling session's retention");
 }
 
 /// In-flight parser buffers do not survive the sequences that created them.
