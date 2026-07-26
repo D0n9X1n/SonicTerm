@@ -498,14 +498,32 @@ impl App {
                     self.defer_child_redraw(win_id, was_dirty);
                     return;
                 }
-                let inline_images_by_pane: std::collections::HashMap<
+                // `try_lock`, never a blocking `lock`: the VT worker holds
+                // this while merging a decoded batch, and blocking here would
+                // stall the event loop behind it. On contention this defers
+                // the redraw exactly as the parser locks do — a coherent view
+                // of every pane matters more than one frame's latency.
+                let mut inline_images_by_pane: std::collections::HashMap<
                     u64,
                     Vec<sonicterm_render_model::InlineImage>,
-                > = child
-                    .panes
-                    .iter()
-                    .map(|(id, pane)| (*id, pane.inline_images.lock().clone()))
-                    .collect();
+                > = std::collections::HashMap::new();
+                let mut inline_images_locked = true;
+                for (id, pane) in child.panes.iter() {
+                    match pane.inline_images.try_lock() {
+                        Some(images) => {
+                            inline_images_by_pane.insert(*id, images.clone());
+                        }
+                        None => {
+                            inline_images_locked = false;
+                            break;
+                        }
+                    }
+                }
+                if !inline_images_locked {
+                    drop(inline_images_by_pane);
+                    drop(guards);
+                    return;
+                }
                 let viewport_tops: std::collections::HashMap<u64, Option<u64>> =
                     child.panes.iter().map(|(id, pane)| (*id, pane.viewport_top_abs)).collect();
                 if let Some(t) = timing.as_mut() {
