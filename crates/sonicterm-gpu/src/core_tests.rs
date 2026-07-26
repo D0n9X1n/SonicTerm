@@ -1020,7 +1020,8 @@ fn shaped_glyph_column_check_rejects_backtracking_columns() {
 
 // --- Atlas reset / row-cache invalidation pairing ------------------
 
-/// Every atlas reset must flush the row glyph cache in the same function.
+/// Every atlas reset must flush the row glyph cache and defeat the frame-skip
+/// guard, in the same function.
 ///
 /// The row cache tags entries with `glyph_atlas.evictions()` alone — the
 /// atlas-local counter, with no allocation-generation component. That filter
@@ -1028,11 +1029,15 @@ fn shaped_glyph_column_check_rejects_backtracking_columns() {
 /// entry that outlived a reset could match against tiles it was never built
 /// for and sample whatever now occupies those rectangles.
 ///
-/// Nothing structural prevents that. What prevents it is that all four
-/// `reset_glyph_atlas_in_place` call sites happen to call
-/// `row_glyph_cache.invalidate_all()` afterwards. A fifth reset path added
-/// without that call would reintroduce the stale-UV class with no compile
-/// error and no failing test.
+/// `last_frame_key` is the second half: it skips presentation when a frame is
+/// byte-identical to the last one. A reset changes what that same frame
+/// *renders to*, so a surviving key can skip the redraw and leave pre-reset
+/// pixels on screen.
+///
+/// Nothing structural enforces either pairing. What holds today is that all
+/// four `reset_glyph_atlas_in_place` call sites happen to do both afterwards.
+/// A fifth reset path missing either call reintroduces a stale-pixel class
+/// with no compile error and no failing test.
 ///
 /// `GpuRenderer` needs a live wgpu device and a window, so the pairing cannot
 /// be driven at runtime in a unit test. Reading the source is the available
@@ -1043,6 +1048,7 @@ fn every_glyph_atlas_reset_invalidates_the_row_cache() {
     const CORE_SRC: &str = include_str!("core.rs");
     const RESET: &str = "self.reset_glyph_atlas_in_place(";
     const INVALIDATE: &str = "self.row_glyph_cache.invalidate_all()";
+    const CLEAR_FRAME_KEY: &str = "self.last_frame_key = None";
 
     let lines: Vec<&str> = CORE_SRC.lines().collect();
     let reset_sites: Vec<usize> =
@@ -1061,6 +1067,7 @@ fn every_glyph_atlas_reset_invalidates_the_row_cache() {
         // Scan to the end of the enclosing function: the next line that starts
         // a new item at method indentation.
         let mut invalidated = false;
+        let mut frame_key_cleared = false;
         for line in lines.iter().skip(site + 1) {
             let starts_new_item = line.starts_with("    fn ")
                 || line.starts_with("    pub fn ")
@@ -1072,6 +1079,11 @@ fn every_glyph_atlas_reset_invalidates_the_row_cache() {
             }
             if line.contains(INVALIDATE) {
                 invalidated = true;
+            }
+            if line.contains(CLEAR_FRAME_KEY) {
+                frame_key_cleared = true;
+            }
+            if invalidated && frame_key_cleared {
                 break;
             }
         }
@@ -1082,6 +1094,17 @@ fn every_glyph_atlas_reset_invalidates_the_row_cache() {
              The row cache keys on the atlas eviction count alone, which resets \
              with the atlas, so surviving entries can match a fresh atlas and \
              sample tiles they were not built against.\n\
+             Offending line: {}",
+            site + 1,
+            lines[site].trim()
+        );
+        assert!(
+            frame_key_cleared,
+            "core.rs:{} resets the glyph atlas without clearing \
+             `last_frame_key` in the same function.\n\
+             The frame key skips presentation when a frame is unchanged. A reset \
+             changes what the same frame renders to, so a stale key can skip the \
+             redraw and leave pre-reset pixels on screen.\n\
              Offending line: {}",
             site + 1,
             lines[site].trim()
