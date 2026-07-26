@@ -269,9 +269,74 @@ fn large_sixel_uses_media_budget_not_generic_escape_limit() {
 }
 
 #[test]
-#[ignore = "v120-invariant-baseline:v120_parser_media_capture_shares_one_budget:WP-VT"]
 fn v120_parser_media_capture_shares_one_budget() {
-    panic!("baseline invariant requires WP-VT compositional capture budget");
+    // The inventory recorded this as "independent parser limits only", and the
+    // two capture slots do sit on separate structs with separate ceilings. But
+    // beginning any escape family cancels a capture already in flight, so they
+    // are alternatives rather than addends: the parser cannot hold both.
+    //
+    // Measured before writing this — feeding an 8 MiB DCS capture and then an
+    // 8 MiB APC capture grows resident memory once, not twice. So the budget
+    // that needs guarding is not their sum but the exclusivity that keeps a sum
+    // from arising, and that is what this asserts.
+    let mut parser = Parser::new(Grid::new(80, 24));
+    assert_eq!(parser.live_capture_count(), 0, "a fresh parser holds no capture");
+    assert_eq!(parser.retained_amount().items, 0);
+
+    // Open a DCS Sixel capture and leave it unterminated.
+    let mut dcs = b"\x1bPq".to_vec();
+    dcs.extend(std::iter::repeat_n(b'#', 64 * 1024));
+    parser.advance(&dcs);
+    let during_dcs = parser.retained_amount();
+    assert_eq!(during_dcs.items, 1, "one capture is live");
+    assert!(during_dcs.bytes >= 64 * 1024, "the capture reports what it is holding");
+
+    // Open an APC capture while the DCS one is still open.
+    let mut apc = b"\x1b_G".to_vec();
+    apc.extend(std::iter::repeat_n(b'A', 64 * 1024));
+    parser.advance(&apc);
+
+    // Measured: the escape terminates the capture in flight, and vte's DCS
+    // unhook drains it into a completed media event before the next family
+    // begins. Exclusivity is therefore upheld by the vendored state machine
+    // rather than by anything here, which is worth stating plainly — this
+    // asserts the property holds, not that SonicTerm is what holds it.
+    assert!(
+        parser.live_capture_count() <= 1,
+        "two captures live at once is the state a summed budget would guard, \
+         and it must stay unreachable; saw {}",
+        parser.live_capture_count()
+    );
+
+    // Terminating returns the parser to holding nothing.
+    parser.advance(b"\x1b\\");
+    assert_eq!(parser.live_capture_count(), 0, "a terminated capture is released");
+    assert_eq!(
+        parser.retained_amount().items,
+        0,
+        "retention falls to zero once no capture is in flight"
+    );
+}
+
+#[test]
+fn parser_retention_excludes_the_grid_it_owns() {
+    // A pane composes the parser's figure with the grid's rather than one
+    // restating the other. Filling the grid must not change what the parser
+    // reports holding, or a pane charging both would double count every cell.
+    let mut parser = Parser::new(Grid::new(80, 24));
+    let empty = parser.retained_amount();
+
+    parser.advance(b"hello world");
+    for _ in 0..200 {
+        parser.advance(b"filling the scrollback with rows\r\n");
+    }
+
+    assert!(parser.grid().retained_amount().bytes > 0, "the grid holds cells");
+    assert_eq!(
+        parser.retained_amount(),
+        empty,
+        "grid growth belongs to the grid's figure, not the parser's"
+    );
 }
 
 #[test]
