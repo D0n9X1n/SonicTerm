@@ -61,6 +61,7 @@ impl App {
             Arc::new(Mutex::new(Vec::new()));
         let inline_images: Arc<Mutex<Vec<sonicterm_render_model::InlineImage>>> =
             Arc::new(Mutex::new(Vec::new()));
+        let inline_media_charge = super::media::new_inline_media_charge();
         // fix: per-pane cursor_visible Arc lives outside the
         // pty-spawn match so we can store it on PaneState even if pty
         // spawn failed (and so a no-pty pane still has a valid Arc).
@@ -101,11 +102,11 @@ impl App {
                 let pty_burst_gen = self.pty_burst_gen.clone();
                 let command_events_thread = command_events.clone();
                 let inline_images_thread = inline_images.clone();
-                // Holds this pane's share of the process-wide inline-media
-                // total. Owned by the VT thread, which is the only writer to
-                // the shared store, so the charge is released when the pane's
-                // thread ends rather than at any of the pane-removal sites.
-                let mut inline_media_charge = super::media::InlineMediaCharge::default();
+                // This pane's share of the process-wide inline-media total.
+                // Co-owned with the pane: a shell exiting ends this thread
+                // while the pane stays on screen holding every image, so a
+                // charge released here would undercount live pixels.
+                let inline_media_charge_thread = inline_media_charge.clone();
                 // Forward parser replies (DSR/DA/XTVERSION/focus) to the pty
                 // master. Kept on its own thread so the VT loop never blocks
                 // pushing replies, and so a slow pty doesn't stall parsing.
@@ -257,7 +258,7 @@ impl App {
                                         images.extend(inline_images);
                                         super::media::trim_inline_images_charged(
                                             &mut images,
-                                            &mut inline_media_charge,
+                                            &inline_media_charge_thread,
                                         );
                                     }
                                     if !command_side_effects.is_empty() {
@@ -348,6 +349,7 @@ impl App {
         state.kitty_flags = kitty_flags_pane;
         state.app_cursor_keys = app_cursor_keys_pane;
         state.inline_images = inline_images;
+        state.inline_media_charge = inline_media_charge;
         state
     }
 }

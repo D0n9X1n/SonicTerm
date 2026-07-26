@@ -1,5 +1,14 @@
 use super::*;
 
+/// Serialises the tests that assert on `PROCESS_INLINE_MEDIA_BYTES`.
+///
+/// The counter is process-global by design — that is the property under test —
+/// so two tests charging it concurrently make each other's absolute
+/// assertions meaningless. Measured at roughly one failure in twelve runs
+/// before this guard: the ceiling test would see a sibling's 8 MiB and report
+/// the ceiling breached when its own panes were within it.
+static MEDIA_COUNTER_LOCK: Mutex<()> = Mutex::new(());
+
 fn image(id: u64, bytes: usize) -> InlineImage {
     InlineImage { id, row: 0, col: 0, width: 1, height: 1, bgra: Arc::from(vec![0; bytes]) }
 }
@@ -40,6 +49,7 @@ fn retained_inline_images_respect_count_and_byte_budgets() {
 /// change the second number without breaking the first.
 #[test]
 fn per_pane_media_is_capped_but_the_aggregate_is_not() {
+    let _serialised = MEDIA_COUNTER_LOCK.lock();
     let mut pane: Vec<InlineImage> = Vec::new();
     let mut id = 0u64;
     while retained_inline_media(&pane).bytes < MAX_RETAINED_INLINE_IMAGE_BYTES && id <= 200 {
@@ -86,13 +96,14 @@ fn per_pane_media_is_capped_but_the_aggregate_is_not() {
 /// since a peak that is trimmed afterwards has already been allocated.
 #[test]
 fn the_process_wide_media_ceiling_holds_across_panes() {
+    let _serialised = MEDIA_COUNTER_LOCK.lock();
     const PANES: usize = 10;
     const IMAGE_BYTES: usize = 4 * 1024 * 1024;
     const PUSHES_PER_PANE: usize = 24; // 96 MiB offered per pane, above its own cap
 
     let baseline = process_inline_media_bytes();
-    let mut panes: Vec<(Vec<InlineImage>, InlineMediaCharge)> =
-        (0..PANES).map(|_| (Vec::new(), InlineMediaCharge::default())).collect();
+    let mut panes: Vec<(Vec<InlineImage>, SharedInlineMediaCharge)> =
+        (0..PANES).map(|_| (Vec::new(), new_inline_media_charge())).collect();
 
     let mut id = 0u64;
     let mut peak = baseline;
@@ -130,5 +141,52 @@ fn the_process_wide_media_ceiling_holds_across_panes() {
         process_inline_media_bytes(),
         baseline,
         "dropping every pane's images must return the process total to its baseline"
+    );
+}
+
+/// A pane's charge survives its VT worker and is released with the pane.
+///
+/// The worker ends when its shell exits — an ordinary event, not teardown —
+/// while the pane stays on screen with its scrollback and images. A charge
+/// owned only by the worker would be returned at that moment, undercounting
+/// pixels that are still retained and letting other panes past the true
+/// ceiling. Co-ownership means the last holder returns it.
+#[test]
+fn a_charge_outlives_its_worker_and_is_released_with_the_pane() {
+    let _serialised = MEDIA_COUNTER_LOCK.lock();
+    let baseline = process_inline_media_bytes();
+
+    // The pane and its worker both hold the charge.
+    let pane_charge = new_inline_media_charge();
+    let worker_charge = pane_charge.clone();
+
+    let mut images = vec![image(1, 8 * 1024 * 1024)];
+    trim_inline_images_charged(&mut images, &worker_charge);
+    let this_pane = retained_inline_media(&images).bytes;
+    assert!(
+        process_inline_media_bytes() >= baseline + this_pane,
+        "retaining an image must charge the process total"
+    );
+
+    // Compare deltas, not absolutes: PROCESS_INLINE_MEDIA_BYTES is global and
+    // sibling tests charge it concurrently, so a snapshot taken earlier is
+    // already stale. What must hold is that *this* pane's contribution does
+    // not move when its worker ends.
+    let before_worker_exit = process_inline_media_bytes();
+    drop(worker_charge);
+    assert_eq!(
+        process_inline_media_bytes(),
+        before_worker_exit,
+        "a worker ending must not release a charge for pixels the pane still holds"
+    );
+
+    // The pane is finally closed: exactly this pane's bytes come back.
+    let before_pane_close = process_inline_media_bytes();
+    drop(images);
+    drop(pane_charge);
+    assert_eq!(
+        process_inline_media_bytes(),
+        before_pane_close - this_pane,
+        "closing the pane must return exactly what it retained"
     );
 }
