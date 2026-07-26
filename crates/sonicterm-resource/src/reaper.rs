@@ -9,6 +9,18 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// How long the loop waits between checks when every helper is still running.
+///
+/// Short enough that a finished call is collected promptly, long enough that
+/// waiting costs nothing measurable.
+const HELPER_POLL_INTERVAL: Duration = Duration::from_millis(1);
+
+/// Delay before a blocking call that did not settle is attempted again.
+///
+/// Without it a failing call is respawned on the next pass, which turns a
+/// persistent failure into a thread-spawn storm rather than a retry.
+const FAILED_CALL_BACKOFF: Duration = Duration::from_millis(10);
+
 /// Fixed ceilings for one supervisor.
 ///
 /// Limits are immutable after construction so admission cannot be widened while
@@ -73,13 +85,13 @@ pub trait ReapTask: Send + 'static {
 
     /// Give up whatever charges this task still holds.
     ///
-    /// A task that never settles keeps its charge, which keeps its owner from
-    /// closing and pins every ancestor with it. Without a way to surrender,
-    /// one wedged transport strands a whole window subtree for the life of the
-    /// process. Implementations drop or transfer their tokens here; the default
-    /// holds them, which is only correct for a task that owns nothing.
-    ///
     /// Called during terminal cleanup, after cancellation has already failed.
+    ///
+    /// The default does nothing, which is sufficient for a task whose charges
+    /// are released by its own drop — dropping the task runs the RAII release
+    /// on any reservation it owns. Override this when a charge would outlive
+    /// the drop: one transferred to another owner, or one behind a handle
+    /// shared with a thread that is still running.
     fn surrender_charges(&mut self) {}
 }
 
@@ -257,9 +269,10 @@ impl ReaperSupervisor {
                 if result.releases_charge() {
                     self.settle(task, result, &mut progress);
                 } else {
-                    // Let the task choose its own backoff instead of
-                    // respawning the call immediately.
-                    deferred.push((self.clock.now(), task));
+                    // Back off before retrying. Re-deferring at the current
+                    // instant would be collected by the requeue pass on this
+                    // same iteration, respawning the call immediately.
+                    deferred.push((self.retry_at(), task));
                 }
             }
             in_flight = still_running;
@@ -299,14 +312,23 @@ impl ReaperSupervisor {
             let Some(mut task) = task else {
                 if !in_flight.is_empty() || !pending_work.is_empty() {
                     if cancel.is_cancelled() || self.clock.now() >= deadline {
-                        // Out of time. Join what is running and report anything
-                        // that never got a helper as unsettled, so its owner
-                        // keeps the charge rather than losing the work silently.
+                        // Out of time. A call still running is abandoned rather
+                        // than joined: joining here is what made the deadline
+                        // advisory, and a wedged native call would hold the
+                        // loop for as long as it hangs. The thread keeps its
+                        // helper slot and is reported through `live_helpers`,
+                        // so an unreturned call stays visible instead of
+                        // silently blocking teardown.
                         for (handle, mut task) in in_flight.drain(..) {
-                            self.state.counters.lock().helpers -= 1;
-                            let result = handle.join().unwrap_or(ReapResult::Failed);
-                            task.on_completion(result);
-                            self.settle(task, result, &mut progress);
+                            if handle.is_finished() {
+                                self.state.counters.lock().helpers -= 1;
+                                let result = handle.join().unwrap_or(ReapResult::Failed);
+                                task.on_completion(result);
+                                self.settle(task, result, &mut progress);
+                            } else {
+                                task.on_completion(ReapResult::TimedOut);
+                                self.settle(task, ReapResult::TimedOut, &mut progress);
+                            }
                         }
                         for (_, mut task) in pending_work.drain(..) {
                             let outcome = task.force_cancel();
@@ -320,21 +342,36 @@ impl ReaperSupervisor {
                         }
                         continue;
                     }
-                    if let Some((handle, mut task)) = in_flight.pop() {
-                        // Nothing else is ready, so block on real completion
-                        // rather than a clock: a helper finishes when its call
-                        // returns, which no amount of elapsed time guarantees.
-                        // This is not the serial path — every other task has
-                        // already been offered the loop.
-                        self.state.counters.lock().helpers -= 1;
-                        let result = handle.join().unwrap_or(ReapResult::Failed);
-                        task.on_completion(result);
-                        if result.releases_charge() {
-                            self.settle(task, result, &mut progress);
-                        } else {
-                            deferred.push((self.clock.now(), task));
+                    // Nothing else is ready. Wait for a helper to finish, but
+                    // only up to the deadline: polling completion keeps the
+                    // deadline real, where joining would surrender it to
+                    // whatever the call decides to do.
+                    if in_flight.iter().any(|(handle, _)| handle.is_finished()) {
+                        let mut ready = Vec::with_capacity(in_flight.len());
+                        let mut running = Vec::with_capacity(in_flight.len());
+                        for entry in in_flight.drain(..) {
+                            if entry.0.is_finished() {
+                                ready.push(entry);
+                            } else {
+                                running.push(entry);
+                            }
                         }
+                        in_flight = running;
+                        for (handle, mut task) in ready {
+                            self.state.counters.lock().helpers -= 1;
+                            let result = handle.join().unwrap_or(ReapResult::Failed);
+                            task.on_completion(result);
+                            if result.releases_charge() {
+                                self.settle(task, result, &mut progress);
+                            } else {
+                                deferred.push((self.retry_at(), task));
+                            }
+                        }
+                        continue;
                     }
+                    self.clock.wait_until(
+                        self.clock.now().checked_add(HELPER_POLL_INTERVAL).unwrap_or(deadline),
+                    );
                     continue;
                 }
                 let Some(next_poll) = deferred.iter().map(|(at, _)| *at).min() else { break };
@@ -456,6 +493,11 @@ impl ReaperSupervisor {
                 Some((Box::new(|| ReapResult::Failed), task))
             }
         }
+    }
+
+    /// When a call that did not settle may be attempted again.
+    fn retry_at(&self) -> Instant {
+        self.clock.now().checked_add(FAILED_CALL_BACKOFF).unwrap_or_else(|| self.clock.now())
     }
 
     fn settle(&self, task: Box<dyn ReapTask>, result: ReapResult, progress: &mut ReaperProgress) {

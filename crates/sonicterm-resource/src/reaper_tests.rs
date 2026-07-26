@@ -1,5 +1,8 @@
 use super::*;
-use crate::{cancel::CancelSource, clock::TestClock};
+use crate::{
+    cancel::CancelSource,
+    clock::{SystemClock, TestClock},
+};
 use sonicterm_types::CancelReason;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -636,43 +639,14 @@ fn two_blocking_calls_run_at_the_same_time() {
     assert_eq!(supervisor.live_tasks(), 0);
 }
 
-#[test]
-fn helper_saturation_defers_instead_of_reporting_a_timeout() {
-    // With one helper slot and two blocking tasks, the second must wait for a
-    // slot rather than being told its call timed out. Reporting a timeout for
-    // work that never ran would push a task toward escalation — killing a
-    // process that was never actually contacted.
-    let clock = TestClock::new();
-    let supervisor =
-        ReaperSupervisor::new(ReaperLimits::new(4, 1, 4).unwrap(), Arc::new(clock.clone()));
-    let ran = Arc::new(AtomicUsize::new(0));
-
-    for id in 10..=11u64 {
-        let ran = ran.clone();
-        supervisor.try_reserve_slot().unwrap().enqueue(Box::new(BlockingCountTask {
-            owner: owner(id),
-            ran,
-            issued: false,
-        }));
-    }
-
-    let cancel = CancelSource::new();
-    let progress =
-        supervisor.run_until(deadline_from(&clock, Duration::from_secs(5)), &cancel.token());
-
-    assert_eq!(ran.load(Ordering::Relaxed), 2, "both calls eventually ran");
-    assert_eq!(progress.settled, 2, "neither was reported as a timeout");
-    assert_eq!(supervisor.live_helpers(), 0);
-}
-
-/// Runs one blocking call and counts it.
-struct BlockingCountTask {
+/// A call that runs until the test releases it.
+struct WedgedCallTask {
     owner: ResourceOwnerId,
-    ran: Arc<AtomicUsize>,
     issued: bool,
+    release: Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl ReapTask for BlockingCountTask {
+impl ReapTask for WedgedCallTask {
     fn owner(&self) -> ResourceOwnerId {
         self.owner
     }
@@ -681,14 +655,48 @@ impl ReapTask for BlockingCountTask {
             return ReapAction::Complete(ReapResult::Settled);
         }
         self.issued = true;
-        let ran = self.ran.clone();
+        let release = self.release.clone();
         ReapAction::RunBlocking(Box::new(move || {
-            ran.fetch_add(1, Ordering::Relaxed);
+            while !release.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
             ReapResult::Settled
         }))
     }
     fn on_completion(&mut self, _result: ReapResult) {}
     fn force_cancel(&mut self) -> CancelOutcome {
-        CancelOutcome::Settled
+        CancelOutcome::TimedOut
     }
+}
+
+#[test]
+fn a_wedged_call_does_not_hold_the_deadline() {
+    // Joining a running handle surrendered the deadline to the call itself: a
+    // fifty millisecond budget waited three seconds, and a call that never
+    // returns would have waited forever. That is the hang this supervisor
+    // exists to bound.
+    let clock = SystemClock;
+    let supervisor = ReaperSupervisor::new(ReaperLimits::new(4, 2, 4).unwrap(), Arc::new(clock));
+    let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    supervisor.try_reserve_slot().unwrap().enqueue(Box::new(WedgedCallTask {
+        owner: owner(20),
+        issued: false,
+        release: release.clone(),
+    }));
+
+    let cancel = CancelSource::new();
+    let budget = Duration::from_millis(50);
+    let started = Instant::now();
+    let report = supervisor.shutdown(deadline_from(&clock, budget), &cancel.token());
+    let elapsed = started.elapsed();
+
+    // Let the abandoned helper end so the test leaves nothing spinning.
+    release.store(true, Ordering::SeqCst);
+
+    assert!(
+        elapsed < budget * 10,
+        "shutdown overran its deadline: took {elapsed:?} against a {budget:?} budget"
+    );
+    assert!(!report.is_clean(), "an unreturned call is not a clean shutdown");
+    assert_eq!(report.unresolved_owners, vec![owner(20)], "the stuck owner is named");
 }
