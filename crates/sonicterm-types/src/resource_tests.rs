@@ -2,13 +2,14 @@ use super::*;
 use enum_map::enum_map;
 use std::time::{Duration, Instant};
 
-const ALL_CLASSES: [ResourceClass; 21] = [
+const ALL_CLASSES: [ResourceClass; 22] = [
     ResourceClass::GridVisible,
     ResourceClass::GridHistory,
     ResourceClass::GridAlternate,
     ResourceClass::Surface,
     ResourceClass::SoftwareFrame,
     ResourceClass::UploadStaging,
+    ResourceClass::FontFace,
     ResourceClass::GlyphRaster,
     ResourceClass::GlyphAtlas,
     ResourceClass::ParserCapture,

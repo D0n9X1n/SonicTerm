@@ -473,7 +473,7 @@ impl core::marker::UnsafeUnpin for sonicterm_types::hyperlink_id::HyperlinkId
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::hyperlink_id::HyperlinkId
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::hyperlink_id::HyperlinkId
 pub mod sonicterm_types::lifecycle
-pub enum sonicterm_types::lifecycle::CancelOutcome
+#[non_exhaustive] pub enum sonicterm_types::lifecycle::CancelOutcome
 pub sonicterm_types::lifecycle::CancelOutcome::Pending
 pub sonicterm_types::lifecycle::CancelOutcome::Settled
 pub sonicterm_types::lifecycle::CancelOutcome::TimedOut
@@ -495,7 +495,7 @@ impl core::marker::Unpin for sonicterm_types::lifecycle::CancelOutcome
 impl core::marker::UnsafeUnpin for sonicterm_types::lifecycle::CancelOutcome
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::lifecycle::CancelOutcome
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::lifecycle::CancelOutcome
-pub enum sonicterm_types::lifecycle::CancelReason
+#[non_exhaustive] pub enum sonicterm_types::lifecycle::CancelReason
 pub sonicterm_types::lifecycle::CancelReason::Faulted
 pub sonicterm_types::lifecycle::CancelReason::ParentClosing
 pub sonicterm_types::lifecycle::CancelReason::Requested
@@ -558,7 +558,7 @@ impl core::marker::Unpin for sonicterm_types::lifecycle::LifecycleState
 impl core::marker::UnsafeUnpin for sonicterm_types::lifecycle::LifecycleState
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::lifecycle::LifecycleState
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::lifecycle::LifecycleState
-pub enum sonicterm_types::lifecycle::ReapAdmission
+#[non_exhaustive] pub enum sonicterm_types::lifecycle::ReapAdmission
 pub sonicterm_types::lifecycle::ReapAdmission::QueueFull
 pub sonicterm_types::lifecycle::ReapAdmission::Reserved
 pub sonicterm_types::lifecycle::ReapAdmission::ShuttingDown
@@ -580,7 +580,7 @@ impl core::marker::Unpin for sonicterm_types::lifecycle::ReapAdmission
 impl core::marker::UnsafeUnpin for sonicterm_types::lifecycle::ReapAdmission
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::lifecycle::ReapAdmission
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::lifecycle::ReapAdmission
-pub enum sonicterm_types::lifecycle::ReapResult
+#[non_exhaustive] pub enum sonicterm_types::lifecycle::ReapResult
 pub sonicterm_types::lifecycle::ReapResult::Escalated
 pub sonicterm_types::lifecycle::ReapResult::Failed
 pub sonicterm_types::lifecycle::ReapResult::Settled
@@ -603,7 +603,7 @@ impl core::marker::Unpin for sonicterm_types::lifecycle::ReapResult
 impl core::marker::UnsafeUnpin for sonicterm_types::lifecycle::ReapResult
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::lifecycle::ReapResult
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::lifecycle::ReapResult
-pub struct sonicterm_types::lifecycle::IllegalTransition
+#[non_exhaustive] pub struct sonicterm_types::lifecycle::IllegalTransition
 pub sonicterm_types::lifecycle::IllegalTransition::from: sonicterm_types::lifecycle::LifecycleState
 pub sonicterm_types::lifecycle::IllegalTransition::owner: sonicterm_types::resource::ResourceOwnerId
 pub sonicterm_types::lifecycle::IllegalTransition::to: sonicterm_types::lifecycle::LifecycleState
@@ -730,7 +730,7 @@ impl core::marker::UnsafeUnpin for sonicterm_types::mod_key::ModKey
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::mod_key::ModKey
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::mod_key::ModKey
 pub mod sonicterm_types::resource
-pub enum sonicterm_types::resource::BudgetDimension
+#[non_exhaustive] pub enum sonicterm_types::resource::BudgetDimension
 pub sonicterm_types::resource::BudgetDimension::Bytes
 pub sonicterm_types::resource::BudgetDimension::Items
 impl core::clone::Clone for sonicterm_types::resource::BudgetDimension
@@ -751,7 +751,7 @@ impl core::marker::Unpin for sonicterm_types::resource::BudgetDimension
 impl core::marker::UnsafeUnpin for sonicterm_types::resource::BudgetDimension
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::BudgetDimension
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::BudgetDimension
-pub enum sonicterm_types::resource::BudgetError
+#[non_exhaustive] pub enum sonicterm_types::resource::BudgetError
 pub sonicterm_types::resource::BudgetError::AccountingInvariant
 pub sonicterm_types::resource::BudgetError::AccountingInvariant::class: sonicterm_types::resource::ResourceClass
 pub sonicterm_types::resource::BudgetError::AccountingInvariant::owner: sonicterm_types::resource::ResourceOwnerId
@@ -803,7 +803,7 @@ impl core::marker::Unpin for sonicterm_types::resource::BudgetError
 impl core::marker::UnsafeUnpin for sonicterm_types::resource::BudgetError
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::BudgetError
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::BudgetError
-pub enum sonicterm_types::resource::BudgetScope
+#[non_exhaustive] pub enum sonicterm_types::resource::BudgetScope
 pub sonicterm_types::resource::BudgetScope::Owner(sonicterm_types::resource::ResourceOwnerId)
 pub sonicterm_types::resource::BudgetScope::OwnerClass
 pub sonicterm_types::resource::BudgetScope::OwnerClass::class: sonicterm_types::resource::ResourceClass
@@ -828,7 +828,7 @@ impl core::marker::Unpin for sonicterm_types::resource::BudgetScope
 impl core::marker::UnsafeUnpin for sonicterm_types::resource::BudgetScope
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::BudgetScope
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::BudgetScope
-pub enum sonicterm_types::resource::DisconnectReason
+#[non_exhaustive] pub enum sonicterm_types::resource::DisconnectReason
 pub sonicterm_types::resource::DisconnectReason::Cancelled
 pub sonicterm_types::resource::DisconnectReason::SustainedPressure
 pub sonicterm_types::resource::DisconnectReason::TransportClosed
@@ -850,7 +850,7 @@ impl core::marker::Unpin for sonicterm_types::resource::DisconnectReason
 impl core::marker::UnsafeUnpin for sonicterm_types::resource::DisconnectReason
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::DisconnectReason
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::DisconnectReason
-pub enum sonicterm_types::resource::DropReason
+#[non_exhaustive] pub enum sonicterm_types::resource::DropReason
 pub sonicterm_types::resource::DropReason::Policy
 pub sonicterm_types::resource::DropReason::Superseded
 impl core::clone::Clone for sonicterm_types::resource::DropReason
@@ -871,7 +871,7 @@ impl core::marker::Unpin for sonicterm_types::resource::DropReason
 impl core::marker::UnsafeUnpin for sonicterm_types::resource::DropReason
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::DropReason
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::DropReason
-pub enum sonicterm_types::resource::OwnerKind
+#[non_exhaustive] pub enum sonicterm_types::resource::OwnerKind
 pub sonicterm_types::resource::OwnerKind::AppPane
 pub sonicterm_types::resource::OwnerKind::Attachment
 pub sonicterm_types::resource::OwnerKind::LocalPty
@@ -924,7 +924,7 @@ impl core::marker::Unpin for sonicterm_types::resource::OwnerState
 impl core::marker::UnsafeUnpin for sonicterm_types::resource::OwnerState
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::OwnerState
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::OwnerState
-pub enum sonicterm_types::resource::PressureOutcome<T>
+#[non_exhaustive] pub enum sonicterm_types::resource::PressureOutcome<T>
 pub sonicterm_types::resource::PressureOutcome::Accepted
 pub sonicterm_types::resource::PressureOutcome::Accepted::receipt: sonicterm_types::resource::DeliveryReceipt
 pub sonicterm_types::resource::PressureOutcome::Backpressured
@@ -951,7 +951,7 @@ impl<T> core::marker::Unpin for sonicterm_types::resource::PressureOutcome<T> wh
 impl<T> core::marker::UnsafeUnpin for sonicterm_types::resource::PressureOutcome<T> where T: core::marker::UnsafeUnpin
 impl<T> core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::PressureOutcome<T> where T: core::panic::unwind_safe::RefUnwindSafe
 impl<T> core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::PressureOutcome<T> where T: core::panic::unwind_safe::UnwindSafe
-pub enum sonicterm_types::resource::ProcessKind
+#[non_exhaustive] pub enum sonicterm_types::resource::ProcessKind
 pub sonicterm_types::resource::ProcessKind::Gui
 pub sonicterm_types::resource::ProcessKind::Mux
 impl core::clone::Clone for sonicterm_types::resource::ProcessKind
@@ -972,7 +972,7 @@ impl core::marker::Unpin for sonicterm_types::resource::ProcessKind
 impl core::marker::UnsafeUnpin for sonicterm_types::resource::ProcessKind
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::ProcessKind
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::ProcessKind
-pub enum sonicterm_types::resource::ResizeOperation
+#[non_exhaustive] pub enum sonicterm_types::resource::ResizeOperation
 pub sonicterm_types::resource::ResizeOperation::Grow
 pub sonicterm_types::resource::ResizeOperation::Shrink
 impl core::clone::Clone for sonicterm_types::resource::ResizeOperation
@@ -993,8 +993,9 @@ impl core::marker::Unpin for sonicterm_types::resource::ResizeOperation
 impl core::marker::UnsafeUnpin for sonicterm_types::resource::ResizeOperation
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::ResizeOperation
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::ResizeOperation
-pub enum sonicterm_types::resource::ResourceClass
+#[non_exhaustive] pub enum sonicterm_types::resource::ResourceClass
 pub sonicterm_types::resource::ResourceClass::CommandEvents
+pub sonicterm_types::resource::ResourceClass::FontFace
 pub sonicterm_types::resource::ResourceClass::GlyphAtlas
 pub sonicterm_types::resource::ResourceClass::GlyphRaster
 pub sonicterm_types::resource::ResourceClass::GridAlternate
@@ -1035,7 +1036,7 @@ pub const sonicterm_types::resource::ResourceClass::LENGTH: usize
 pub fn sonicterm_types::resource::ResourceClass::from_usize(usize) -> Self
 pub fn sonicterm_types::resource::ResourceClass::into_usize(self) -> usize
 impl<V> enum_map::internal::EnumArray<V> for sonicterm_types::resource::ResourceClass
-pub type sonicterm_types::resource::ResourceClass::Array = [V; 21]
+pub type sonicterm_types::resource::ResourceClass::Array = [V; 22]
 impl core::marker::Freeze for sonicterm_types::resource::ResourceClass
 impl core::marker::Send for sonicterm_types::resource::ResourceClass
 impl core::marker::Sync for sonicterm_types::resource::ResourceClass
@@ -1043,7 +1044,7 @@ impl core::marker::Unpin for sonicterm_types::resource::ResourceClass
 impl core::marker::UnsafeUnpin for sonicterm_types::resource::ResourceClass
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::ResourceClass
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::ResourceClass
-pub enum sonicterm_types::resource::RetryWakeup
+#[non_exhaustive] pub enum sonicterm_types::resource::RetryWakeup
 pub sonicterm_types::resource::RetryWakeup::AtDeadline
 pub sonicterm_types::resource::RetryWakeup::CapacityAvailable
 pub sonicterm_types::resource::RetryWakeup::ConnectionStateChanged
@@ -1117,6 +1118,44 @@ impl core::marker::Unpin for sonicterm_types::resource::OwnerLimits
 impl core::marker::UnsafeUnpin for sonicterm_types::resource::OwnerLimits
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::OwnerLimits
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::OwnerLimits
+pub struct sonicterm_types::resource::OwnerView
+pub sonicterm_types::resource::OwnerView::amount: sonicterm_types::resource::ResourceAmount
+pub sonicterm_types::resource::OwnerView::class_bytes: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
+pub sonicterm_types::resource::OwnerView::class_items: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
+pub sonicterm_types::resource::OwnerView::epoch: u64
+pub sonicterm_types::resource::OwnerView::kind: sonicterm_types::resource::OwnerKind
+pub sonicterm_types::resource::OwnerView::owner: sonicterm_types::resource::ResourceOwnerId
+pub sonicterm_types::resource::OwnerView::parent: core::option::Option<sonicterm_types::resource::ResourceOwnerId>
+pub sonicterm_types::resource::OwnerView::state: sonicterm_types::resource::OwnerState
+impl core::clone::Clone for sonicterm_types::resource::OwnerView
+pub fn sonicterm_types::resource::OwnerView::clone(&self) -> sonicterm_types::resource::OwnerView
+impl core::fmt::Debug for sonicterm_types::resource::OwnerView
+pub fn sonicterm_types::resource::OwnerView::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for sonicterm_types::resource::OwnerView
+impl core::marker::Send for sonicterm_types::resource::OwnerView
+impl core::marker::Sync for sonicterm_types::resource::OwnerView
+impl core::marker::Unpin for sonicterm_types::resource::OwnerView
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::OwnerView
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::OwnerView
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::OwnerView
+pub struct sonicterm_types::resource::ProcessView
+pub sonicterm_types::resource::ProcessView::amount: sonicterm_types::resource::ResourceAmount
+pub sonicterm_types::resource::ProcessView::class_bytes: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
+pub sonicterm_types::resource::ProcessView::class_epochs: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, u64>
+pub sonicterm_types::resource::ProcessView::class_items: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
+pub sonicterm_types::resource::ProcessView::registry_epoch: u64
+pub sonicterm_types::resource::ProcessView::release_failures: usize
+impl core::clone::Clone for sonicterm_types::resource::ProcessView
+pub fn sonicterm_types::resource::ProcessView::clone(&self) -> sonicterm_types::resource::ProcessView
+impl core::fmt::Debug for sonicterm_types::resource::ProcessView
+pub fn sonicterm_types::resource::ProcessView::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for sonicterm_types::resource::ProcessView
+impl core::marker::Send for sonicterm_types::resource::ProcessView
+impl core::marker::Sync for sonicterm_types::resource::ProcessView
+impl core::marker::Unpin for sonicterm_types::resource::ProcessView
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::ProcessView
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::ProcessView
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::ProcessView
 pub struct sonicterm_types::resource::ResourceAmount
 pub sonicterm_types::resource::ResourceAmount::bytes: usize
 pub sonicterm_types::resource::ResourceAmount::items: usize
@@ -1171,7 +1210,7 @@ impl core::marker::Unpin for sonicterm_types::resource::ResourceOwnerId
 impl core::marker::UnsafeUnpin for sonicterm_types::resource::ResourceOwnerId
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::ResourceOwnerId
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::ResourceOwnerId
-pub struct sonicterm_types::resource::ResourceSnapshot
+#[non_exhaustive] pub struct sonicterm_types::resource::ResourceSnapshot
 pub sonicterm_types::resource::ResourceSnapshot::class_epochs: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, u64>
 pub sonicterm_types::resource::ResourceSnapshot::owner: sonicterm_types::resource::ResourceOwnerId
 pub sonicterm_types::resource::ResourceSnapshot::owner_amount: sonicterm_types::resource::ResourceAmount
@@ -1187,6 +1226,8 @@ pub sonicterm_types::resource::ResourceSnapshot::process_class_items: enum_map::
 pub sonicterm_types::resource::ResourceSnapshot::process_kind: sonicterm_types::resource::ProcessKind
 pub sonicterm_types::resource::ResourceSnapshot::registry_epoch: u64
 pub sonicterm_types::resource::ResourceSnapshot::release_failures: usize
+impl sonicterm_types::resource::ResourceSnapshot
+pub fn sonicterm_types::resource::ResourceSnapshot::new(sonicterm_types::resource::ProcessKind, sonicterm_types::resource::OwnerView, sonicterm_types::resource::ProcessView) -> Self
 impl core::clone::Clone for sonicterm_types::resource::ResourceSnapshot
 pub fn sonicterm_types::resource::ResourceSnapshot::clone(&self) -> sonicterm_types::resource::ResourceSnapshot
 impl core::fmt::Debug for sonicterm_types::resource::ResourceSnapshot
@@ -1198,7 +1239,7 @@ impl core::marker::Unpin for sonicterm_types::resource::ResourceSnapshot
 impl core::marker::UnsafeUnpin for sonicterm_types::resource::ResourceSnapshot
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::ResourceSnapshot
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::ResourceSnapshot
-pub struct sonicterm_types::resource::RetryToken
+#[non_exhaustive] pub struct sonicterm_types::resource::RetryToken
 impl sonicterm_types::resource::RetryToken
 pub const fn sonicterm_types::resource::RetryToken::deadline(self) -> std::time::Instant
 pub const fn sonicterm_types::resource::RetryToken::new(std::time::Instant, sonicterm_types::resource::RetryWakeup) -> Self
@@ -1420,7 +1461,7 @@ impl core::marker::Unpin for sonicterm_types::action::BroadcastScope
 impl core::marker::UnsafeUnpin for sonicterm_types::action::BroadcastScope
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::action::BroadcastScope
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::action::BroadcastScope
-pub enum sonicterm_types::BudgetDimension
+#[non_exhaustive] pub enum sonicterm_types::BudgetDimension
 pub sonicterm_types::BudgetDimension::Bytes
 pub sonicterm_types::BudgetDimension::Items
 impl core::clone::Clone for sonicterm_types::resource::BudgetDimension
@@ -1441,7 +1482,7 @@ impl core::marker::Unpin for sonicterm_types::resource::BudgetDimension
 impl core::marker::UnsafeUnpin for sonicterm_types::resource::BudgetDimension
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::BudgetDimension
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::BudgetDimension
-pub enum sonicterm_types::BudgetError
+#[non_exhaustive] pub enum sonicterm_types::BudgetError
 pub sonicterm_types::BudgetError::AccountingInvariant
 pub sonicterm_types::BudgetError::AccountingInvariant::class: sonicterm_types::resource::ResourceClass
 pub sonicterm_types::BudgetError::AccountingInvariant::owner: sonicterm_types::resource::ResourceOwnerId
@@ -1493,7 +1534,7 @@ impl core::marker::Unpin for sonicterm_types::resource::BudgetError
 impl core::marker::UnsafeUnpin for sonicterm_types::resource::BudgetError
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::BudgetError
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::BudgetError
-pub enum sonicterm_types::BudgetScope
+#[non_exhaustive] pub enum sonicterm_types::BudgetScope
 pub sonicterm_types::BudgetScope::Owner(sonicterm_types::resource::ResourceOwnerId)
 pub sonicterm_types::BudgetScope::OwnerClass
 pub sonicterm_types::BudgetScope::OwnerClass::class: sonicterm_types::resource::ResourceClass
@@ -1518,7 +1559,7 @@ impl core::marker::Unpin for sonicterm_types::resource::BudgetScope
 impl core::marker::UnsafeUnpin for sonicterm_types::resource::BudgetScope
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::BudgetScope
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::BudgetScope
-pub enum sonicterm_types::CancelOutcome
+#[non_exhaustive] pub enum sonicterm_types::CancelOutcome
 pub sonicterm_types::CancelOutcome::Pending
 pub sonicterm_types::CancelOutcome::Settled
 pub sonicterm_types::CancelOutcome::TimedOut
@@ -1540,7 +1581,7 @@ impl core::marker::Unpin for sonicterm_types::lifecycle::CancelOutcome
 impl core::marker::UnsafeUnpin for sonicterm_types::lifecycle::CancelOutcome
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::lifecycle::CancelOutcome
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::lifecycle::CancelOutcome
-pub enum sonicterm_types::CancelReason
+#[non_exhaustive] pub enum sonicterm_types::CancelReason
 pub sonicterm_types::CancelReason::Faulted
 pub sonicterm_types::CancelReason::ParentClosing
 pub sonicterm_types::CancelReason::Requested
@@ -1617,7 +1658,7 @@ impl core::marker::Unpin for sonicterm_types::action::Direction
 impl core::marker::UnsafeUnpin for sonicterm_types::action::Direction
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::action::Direction
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::action::Direction
-pub enum sonicterm_types::DisconnectReason
+#[non_exhaustive] pub enum sonicterm_types::DisconnectReason
 pub sonicterm_types::DisconnectReason::Cancelled
 pub sonicterm_types::DisconnectReason::SustainedPressure
 pub sonicterm_types::DisconnectReason::TransportClosed
@@ -1639,7 +1680,7 @@ impl core::marker::Unpin for sonicterm_types::resource::DisconnectReason
 impl core::marker::UnsafeUnpin for sonicterm_types::resource::DisconnectReason
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::DisconnectReason
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::DisconnectReason
-pub enum sonicterm_types::DropReason
+#[non_exhaustive] pub enum sonicterm_types::DropReason
 pub sonicterm_types::DropReason::Policy
 pub sonicterm_types::DropReason::Superseded
 impl core::clone::Clone for sonicterm_types::resource::DropReason
@@ -1699,7 +1740,7 @@ impl core::marker::Unpin for sonicterm_types::lifecycle::LifecycleState
 impl core::marker::UnsafeUnpin for sonicterm_types::lifecycle::LifecycleState
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::lifecycle::LifecycleState
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::lifecycle::LifecycleState
-pub enum sonicterm_types::OwnerKind
+#[non_exhaustive] pub enum sonicterm_types::OwnerKind
 pub sonicterm_types::OwnerKind::AppPane
 pub sonicterm_types::OwnerKind::Attachment
 pub sonicterm_types::OwnerKind::LocalPty
@@ -1765,7 +1806,7 @@ impl core::marker::Unpin for sonicterm_types::traits::painter::PaintError
 impl core::marker::UnsafeUnpin for sonicterm_types::traits::painter::PaintError
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::traits::painter::PaintError
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::traits::painter::PaintError
-pub enum sonicterm_types::PressureOutcome<T>
+#[non_exhaustive] pub enum sonicterm_types::PressureOutcome<T>
 pub sonicterm_types::PressureOutcome::Accepted
 pub sonicterm_types::PressureOutcome::Accepted::receipt: sonicterm_types::resource::DeliveryReceipt
 pub sonicterm_types::PressureOutcome::Backpressured
@@ -1792,7 +1833,7 @@ impl<T> core::marker::Unpin for sonicterm_types::resource::PressureOutcome<T> wh
 impl<T> core::marker::UnsafeUnpin for sonicterm_types::resource::PressureOutcome<T> where T: core::marker::UnsafeUnpin
 impl<T> core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::PressureOutcome<T> where T: core::panic::unwind_safe::RefUnwindSafe
 impl<T> core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::PressureOutcome<T> where T: core::panic::unwind_safe::UnwindSafe
-pub enum sonicterm_types::ProcessKind
+#[non_exhaustive] pub enum sonicterm_types::ProcessKind
 pub sonicterm_types::ProcessKind::Gui
 pub sonicterm_types::ProcessKind::Mux
 impl core::clone::Clone for sonicterm_types::resource::ProcessKind
@@ -1813,7 +1854,7 @@ impl core::marker::Unpin for sonicterm_types::resource::ProcessKind
 impl core::marker::UnsafeUnpin for sonicterm_types::resource::ProcessKind
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::ProcessKind
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::ProcessKind
-pub enum sonicterm_types::ReapAdmission
+#[non_exhaustive] pub enum sonicterm_types::ReapAdmission
 pub sonicterm_types::ReapAdmission::QueueFull
 pub sonicterm_types::ReapAdmission::Reserved
 pub sonicterm_types::ReapAdmission::ShuttingDown
@@ -1835,7 +1876,7 @@ impl core::marker::Unpin for sonicterm_types::lifecycle::ReapAdmission
 impl core::marker::UnsafeUnpin for sonicterm_types::lifecycle::ReapAdmission
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::lifecycle::ReapAdmission
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::lifecycle::ReapAdmission
-pub enum sonicterm_types::ReapResult
+#[non_exhaustive] pub enum sonicterm_types::ReapResult
 pub sonicterm_types::ReapResult::Escalated
 pub sonicterm_types::ReapResult::Failed
 pub sonicterm_types::ReapResult::Settled
@@ -1858,7 +1899,7 @@ impl core::marker::Unpin for sonicterm_types::lifecycle::ReapResult
 impl core::marker::UnsafeUnpin for sonicterm_types::lifecycle::ReapResult
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::lifecycle::ReapResult
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::lifecycle::ReapResult
-pub enum sonicterm_types::ResizeOperation
+#[non_exhaustive] pub enum sonicterm_types::ResizeOperation
 pub sonicterm_types::ResizeOperation::Grow
 pub sonicterm_types::ResizeOperation::Shrink
 impl core::clone::Clone for sonicterm_types::resource::ResizeOperation
@@ -1879,8 +1920,9 @@ impl core::marker::Unpin for sonicterm_types::resource::ResizeOperation
 impl core::marker::UnsafeUnpin for sonicterm_types::resource::ResizeOperation
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::ResizeOperation
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::ResizeOperation
-pub enum sonicterm_types::ResourceClass
+#[non_exhaustive] pub enum sonicterm_types::ResourceClass
 pub sonicterm_types::ResourceClass::CommandEvents
+pub sonicterm_types::ResourceClass::FontFace
 pub sonicterm_types::ResourceClass::GlyphAtlas
 pub sonicterm_types::ResourceClass::GlyphRaster
 pub sonicterm_types::ResourceClass::GridAlternate
@@ -1921,7 +1963,7 @@ pub const sonicterm_types::resource::ResourceClass::LENGTH: usize
 pub fn sonicterm_types::resource::ResourceClass::from_usize(usize) -> Self
 pub fn sonicterm_types::resource::ResourceClass::into_usize(self) -> usize
 impl<V> enum_map::internal::EnumArray<V> for sonicterm_types::resource::ResourceClass
-pub type sonicterm_types::resource::ResourceClass::Array = [V; 21]
+pub type sonicterm_types::resource::ResourceClass::Array = [V; 22]
 impl core::marker::Freeze for sonicterm_types::resource::ResourceClass
 impl core::marker::Send for sonicterm_types::resource::ResourceClass
 impl core::marker::Sync for sonicterm_types::resource::ResourceClass
@@ -1929,7 +1971,7 @@ impl core::marker::Unpin for sonicterm_types::resource::ResourceClass
 impl core::marker::UnsafeUnpin for sonicterm_types::resource::ResourceClass
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::ResourceClass
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::ResourceClass
-pub enum sonicterm_types::RetryWakeup
+#[non_exhaustive] pub enum sonicterm_types::RetryWakeup
 pub sonicterm_types::RetryWakeup::AtDeadline
 pub sonicterm_types::RetryWakeup::CapacityAvailable
 pub sonicterm_types::RetryWakeup::ConnectionStateChanged
@@ -2292,7 +2334,7 @@ impl core::marker::Unpin for sonicterm_types::hyperlink_id::HyperlinkId
 impl core::marker::UnsafeUnpin for sonicterm_types::hyperlink_id::HyperlinkId
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::hyperlink_id::HyperlinkId
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::hyperlink_id::HyperlinkId
-pub struct sonicterm_types::IllegalTransition
+#[non_exhaustive] pub struct sonicterm_types::IllegalTransition
 pub sonicterm_types::IllegalTransition::from: sonicterm_types::lifecycle::LifecycleState
 pub sonicterm_types::IllegalTransition::owner: sonicterm_types::resource::ResourceOwnerId
 pub sonicterm_types::IllegalTransition::to: sonicterm_types::lifecycle::LifecycleState
@@ -2432,6 +2474,26 @@ impl core::marker::Unpin for sonicterm_types::resource::OwnerLimits
 impl core::marker::UnsafeUnpin for sonicterm_types::resource::OwnerLimits
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::OwnerLimits
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::OwnerLimits
+pub struct sonicterm_types::OwnerView
+pub sonicterm_types::OwnerView::amount: sonicterm_types::resource::ResourceAmount
+pub sonicterm_types::OwnerView::class_bytes: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
+pub sonicterm_types::OwnerView::class_items: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
+pub sonicterm_types::OwnerView::epoch: u64
+pub sonicterm_types::OwnerView::kind: sonicterm_types::resource::OwnerKind
+pub sonicterm_types::OwnerView::owner: sonicterm_types::resource::ResourceOwnerId
+pub sonicterm_types::OwnerView::parent: core::option::Option<sonicterm_types::resource::ResourceOwnerId>
+pub sonicterm_types::OwnerView::state: sonicterm_types::resource::OwnerState
+impl core::clone::Clone for sonicterm_types::resource::OwnerView
+pub fn sonicterm_types::resource::OwnerView::clone(&self) -> sonicterm_types::resource::OwnerView
+impl core::fmt::Debug for sonicterm_types::resource::OwnerView
+pub fn sonicterm_types::resource::OwnerView::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for sonicterm_types::resource::OwnerView
+impl core::marker::Send for sonicterm_types::resource::OwnerView
+impl core::marker::Sync for sonicterm_types::resource::OwnerView
+impl core::marker::Unpin for sonicterm_types::resource::OwnerView
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::OwnerView
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::OwnerView
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::OwnerView
 pub struct sonicterm_types::Pos
 pub sonicterm_types::Pos::col: u16
 pub sonicterm_types::Pos::row: u16
@@ -2455,6 +2517,24 @@ impl core::marker::Unpin for sonicterm_types::geom::Pos
 impl core::marker::UnsafeUnpin for sonicterm_types::geom::Pos
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::geom::Pos
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::geom::Pos
+pub struct sonicterm_types::ProcessView
+pub sonicterm_types::ProcessView::amount: sonicterm_types::resource::ResourceAmount
+pub sonicterm_types::ProcessView::class_bytes: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
+pub sonicterm_types::ProcessView::class_epochs: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, u64>
+pub sonicterm_types::ProcessView::class_items: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
+pub sonicterm_types::ProcessView::registry_epoch: u64
+pub sonicterm_types::ProcessView::release_failures: usize
+impl core::clone::Clone for sonicterm_types::resource::ProcessView
+pub fn sonicterm_types::resource::ProcessView::clone(&self) -> sonicterm_types::resource::ProcessView
+impl core::fmt::Debug for sonicterm_types::resource::ProcessView
+pub fn sonicterm_types::resource::ProcessView::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for sonicterm_types::resource::ProcessView
+impl core::marker::Send for sonicterm_types::resource::ProcessView
+impl core::marker::Sync for sonicterm_types::resource::ProcessView
+impl core::marker::Unpin for sonicterm_types::resource::ProcessView
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::ProcessView
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::ProcessView
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::ProcessView
 pub struct sonicterm_types::ResourceAmount
 pub sonicterm_types::ResourceAmount::bytes: usize
 pub sonicterm_types::ResourceAmount::items: usize
@@ -2509,7 +2589,7 @@ impl core::marker::Unpin for sonicterm_types::resource::ResourceOwnerId
 impl core::marker::UnsafeUnpin for sonicterm_types::resource::ResourceOwnerId
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::ResourceOwnerId
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::ResourceOwnerId
-pub struct sonicterm_types::ResourceSnapshot
+#[non_exhaustive] pub struct sonicterm_types::ResourceSnapshot
 pub sonicterm_types::ResourceSnapshot::class_epochs: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, u64>
 pub sonicterm_types::ResourceSnapshot::owner: sonicterm_types::resource::ResourceOwnerId
 pub sonicterm_types::ResourceSnapshot::owner_amount: sonicterm_types::resource::ResourceAmount
@@ -2525,6 +2605,8 @@ pub sonicterm_types::ResourceSnapshot::process_class_items: enum_map::EnumMap<so
 pub sonicterm_types::ResourceSnapshot::process_kind: sonicterm_types::resource::ProcessKind
 pub sonicterm_types::ResourceSnapshot::registry_epoch: u64
 pub sonicterm_types::ResourceSnapshot::release_failures: usize
+impl sonicterm_types::resource::ResourceSnapshot
+pub fn sonicterm_types::resource::ResourceSnapshot::new(sonicterm_types::resource::ProcessKind, sonicterm_types::resource::OwnerView, sonicterm_types::resource::ProcessView) -> Self
 impl core::clone::Clone for sonicterm_types::resource::ResourceSnapshot
 pub fn sonicterm_types::resource::ResourceSnapshot::clone(&self) -> sonicterm_types::resource::ResourceSnapshot
 impl core::fmt::Debug for sonicterm_types::resource::ResourceSnapshot
@@ -2536,7 +2618,7 @@ impl core::marker::Unpin for sonicterm_types::resource::ResourceSnapshot
 impl core::marker::UnsafeUnpin for sonicterm_types::resource::ResourceSnapshot
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::ResourceSnapshot
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::ResourceSnapshot
-pub struct sonicterm_types::RetryToken
+#[non_exhaustive] pub struct sonicterm_types::RetryToken
 impl sonicterm_types::resource::RetryToken
 pub const fn sonicterm_types::resource::RetryToken::deadline(self) -> std::time::Instant
 pub const fn sonicterm_types::resource::RetryToken::new(std::time::Instant, sonicterm_types::resource::RetryWakeup) -> Self

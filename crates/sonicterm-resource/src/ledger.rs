@@ -95,8 +95,14 @@ impl Ledger {
                     | OwnerKind::SharedRaster
                     | OwnerKind::SharedAtlas
                     | OwnerKind::Window
+                    // The GUI is the client side of a mux link, so it owns the
+                    // connection it opened. Without this the remote input and
+                    // output it retains has no owner to close with, and a
+                    // dropped link would leak its queues into the process root.
+                    | OwnerKind::MuxConnection
             ) | (ProcessKind::Gui, OwnerKind::Window, OwnerKind::AppPane)
                 | (ProcessKind::Gui, OwnerKind::AppPane, OwnerKind::LocalPty)
+                | (ProcessKind::Gui, OwnerKind::MuxConnection, OwnerKind::Attachment)
                 | (
                     ProcessKind::Mux,
                     OwnerKind::Process,
@@ -610,23 +616,27 @@ impl Ledger {
         } else {
             (usage.amount, usage.class_bytes, usage.class_items)
         };
-        Ok(ResourceSnapshot {
-            process_kind: self.process_kind,
-            owner,
-            owner_kind: record.kind,
-            owner_state,
-            parent: record.parent.as_ref().map(|parent| parent.id),
-            owner_amount,
-            owner_class_bytes,
-            owner_class_items,
-            process_amount,
-            process_class_bytes,
-            process_class_items,
-            owner_epoch: usage.epoch,
-            class_epochs,
-            registry_epoch: self.registry_epoch.load(Ordering::Acquire),
-            release_failures: self.release_failures.load(Ordering::Acquire),
-        })
+        Ok(ResourceSnapshot::new(
+            self.process_kind,
+            sonicterm_types::OwnerView {
+                owner,
+                kind: record.kind,
+                state: owner_state,
+                parent: record.parent.as_ref().map(|parent| parent.id),
+                amount: owner_amount,
+                class_bytes: owner_class_bytes,
+                class_items: owner_class_items,
+                epoch: usage.epoch,
+            },
+            sonicterm_types::ProcessView {
+                amount: process_amount,
+                class_bytes: process_class_bytes,
+                class_items: process_class_items,
+                class_epochs,
+                registry_epoch: self.registry_epoch.load(Ordering::Acquire),
+                release_failures: self.release_failures.load(Ordering::Acquire),
+            },
+        ))
     }
 }
 

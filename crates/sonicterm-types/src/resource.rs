@@ -35,7 +35,13 @@ impl fmt::Display for ResourceOwnerId {
 }
 
 /// Resource classes governed by the shared accounting contract.
+///
+/// Adding a variant widens every `EnumMap` keyed by this type and breaks
+/// exhaustive matches in every consuming crate, so the set is deliberately
+/// complete rather than minimal: a class exists for each owner kind's
+/// documented payload even where no subsystem charges it yet.
 #[derive(Clone, Copy, Debug, Enum, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[non_exhaustive]
 pub enum ResourceClass {
     /// Cells and associated storage in the visible primary grid.
     GridVisible,
@@ -49,6 +55,12 @@ pub enum ResourceClass {
     SoftwareFrame,
     /// CPU/GPU upload staging storage.
     UploadStaging,
+    /// Parsed font faces, fallback tables, and shaping caches.
+    ///
+    /// Distinct from [`ResourceClass::GlyphRaster`]: this is the parsed input
+    /// a rasterizer reads, retained for the life of the font stack, while
+    /// raster output is transient and evictable.
+    FontFace,
     /// Rasterized glyph storage before atlas insertion.
     GlyphRaster,
     /// Glyph-atlas pixels and identity metadata.
@@ -144,6 +156,7 @@ pub struct OwnerLimits {
 
 /// Kind of process owning one independent resource governor.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
 pub enum ProcessKind {
     /// GUI application process.
     Gui,
@@ -153,6 +166,7 @@ pub enum ProcessKind {
 
 /// Kind of node in the resource-owner hierarchy.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
 pub enum OwnerKind {
     /// Process root owner.
     Process,
@@ -193,6 +207,7 @@ pub enum OwnerState {
 
 /// Dimension involved in a limit failure.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
 pub enum BudgetDimension {
     /// Byte accounting dimension.
     Bytes,
@@ -202,6 +217,7 @@ pub enum BudgetDimension {
 
 /// Scope whose limit rejected an operation.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
 pub enum BudgetScope {
     /// Aggregate process byte limit.
     Process,
@@ -220,6 +236,7 @@ pub enum BudgetScope {
 
 /// Reasons a resource-governor operation can fail.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum BudgetError {
     /// No further nonzero owner ID can be allocated.
     OwnerIdExhausted,
@@ -307,6 +324,7 @@ impl std::error::Error for BudgetError {}
 
 /// Direction required by an in-place committed resize.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
 pub enum ResizeOperation {
     /// New total must be component-wise no smaller.
     Grow,
@@ -316,6 +334,7 @@ pub enum ResizeOperation {
 
 /// Observational owner and process accounting snapshot.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct ResourceSnapshot {
     /// Process kind for this ledger.
     pub process_kind: ProcessKind,
@@ -352,6 +371,72 @@ pub struct ResourceSnapshot {
     pub release_failures: usize,
 }
 
+/// One owner's view within a [`ResourceSnapshot`].
+#[derive(Clone, Debug)]
+pub struct OwnerView {
+    /// Requested owner.
+    pub owner: ResourceOwnerId,
+    /// Requested owner's hierarchy kind.
+    pub kind: OwnerKind,
+    /// Requested owner's admission state.
+    pub state: OwnerState,
+    /// Parent owner, absent only for the process root.
+    pub parent: Option<ResourceOwnerId>,
+    /// Aggregate charge attributed to the owner.
+    pub amount: ResourceAmount,
+    /// Owner-local bytes by class.
+    pub class_bytes: EnumMap<ResourceClass, usize>,
+    /// Owner-local items by class.
+    pub class_items: EnumMap<ResourceClass, usize>,
+    /// Epoch observed with the owner fields.
+    pub epoch: u64,
+}
+
+/// Process-wide totals within a [`ResourceSnapshot`].
+#[derive(Clone, Debug)]
+pub struct ProcessView {
+    /// Aggregate process charge.
+    pub amount: ResourceAmount,
+    /// Process-wide bytes by class.
+    pub class_bytes: EnumMap<ResourceClass, usize>,
+    /// Process-wide items by class.
+    pub class_items: EnumMap<ResourceClass, usize>,
+    /// Independently observed epoch for each class shard.
+    pub class_epochs: EnumMap<ResourceClass, u64>,
+    /// Registry epoch observed by the snapshot.
+    pub registry_epoch: u64,
+    /// Accounting releases that could not be applied.
+    pub release_failures: usize,
+}
+
+impl ResourceSnapshot {
+    /// Assemble a snapshot from an owner view and the process totals.
+    ///
+    /// Grouping the fields keeps the call readable and lets the snapshot gain
+    /// observations later without changing this signature, which is what the
+    /// non-exhaustive marker is protecting: consumers read snapshots, only a
+    /// governor produces them.
+    pub fn new(process_kind: ProcessKind, owner: OwnerView, process: ProcessView) -> Self {
+        Self {
+            process_kind,
+            owner: owner.owner,
+            owner_kind: owner.kind,
+            owner_state: owner.state,
+            parent: owner.parent,
+            owner_amount: owner.amount,
+            owner_class_bytes: owner.class_bytes,
+            owner_class_items: owner.class_items,
+            process_amount: process.amount,
+            process_class_bytes: process.class_bytes,
+            process_class_items: process.class_items,
+            owner_epoch: owner.epoch,
+            class_epochs: process.class_epochs,
+            registry_epoch: process.registry_epoch,
+            release_failures: process.release_failures,
+        }
+    }
+}
+
 /// Opaque identifier for accepted asynchronous delivery work.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct DeliveryReceipt(u64);
@@ -372,6 +457,7 @@ impl DeliveryReceipt {
 
 /// Signal that should make a backpressured caller retry.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
 pub enum RetryWakeup {
     /// Retry when the token deadline is reached.
     AtDeadline,
@@ -383,6 +469,7 @@ pub enum RetryWakeup {
 
 /// Provider-neutral retry scheduling information.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct RetryToken {
     deadline: Instant,
     wakeup: RetryWakeup,
@@ -410,6 +497,7 @@ impl RetryToken {
 
 /// Reasons a class-specific pressure policy may drop semantically lossy data.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
 pub enum DropReason {
     /// Frozen pressure policy explicitly permits dropping this class.
     Policy,
@@ -419,6 +507,7 @@ pub enum DropReason {
 
 /// Reasons delivery ownership may terminate at a connection boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
 pub enum DisconnectReason {
     /// Sustained pressure exceeded the bounded retry policy.
     SustainedPressure,
@@ -430,6 +519,7 @@ pub enum DisconnectReason {
 
 /// Typed result of an operation governed by resource pressure.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum PressureOutcome<T> {
     /// The receiver accepted ownership and produced a delivery receipt.
     Accepted {
