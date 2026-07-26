@@ -4,7 +4,7 @@
 
 > The short canonical map is
 > [`docs/MODULES.md`](https://github.com/D0n9X1n/SonicTerm/blob/main/docs/MODULES.md).
-> This page adds dependency and code-navigation detail for all 22 workspace crates.
+> This page adds dependency and code-navigation detail for all 23 workspace crates.
 
 The workspace version in the root `Cargo.toml` applies to every first-party
 crate. `sonicterm-app` is the default workspace member, while the shipping

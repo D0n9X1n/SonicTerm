@@ -21,7 +21,7 @@ project works internally.
 - [Terminal IO and VT](Terminal-IO-and-VT) — PTYs, optional SSH, VT parsing, grids, scrollback, and mux status
 - [Rendering and Fonts](Rendering-and-Fonts) — damage, glyph shaping, atlases, wgpu, and software rendering
 - [Platform Integration](Platform-Integration) — AppKit/macOS and Win32/Windows boundaries
-- [Crate Reference](Crate-Reference) — all 22 workspace crates and their relationships
+- [Crate Reference](Crate-Reference) — all 23 workspace crates and their relationships
 - [Development and Release](Development-and-Release) — tests, CI, packaging, and the `v*` release pipeline
 
 ### Project evolution
