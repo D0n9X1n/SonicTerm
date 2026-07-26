@@ -254,9 +254,71 @@ fn lazy_insert_metadata_stays_bounded() {
 }
 
 #[test]
-#[ignore = "v120-invariant-baseline:v120_stale_atlas_identity_invalidates_all_dependents_888:WP-FONT"]
 fn v120_stale_atlas_identity_invalidates_all_dependents_888() {
-    panic!("baseline invariant requires WP-FONT identity authority");
+    // A dependent cache stores atlas coordinates and must discard them
+    // whenever those coordinates could have stopped meaning what they meant.
+    // Two things do that: eviction, which recycles a rect to a different
+    // glyph, and reset, which replaces the contents wholesale.
+    //
+    // The eviction counter cannot serve as that identity. `reset_in_place`
+    // returns it to zero, so a cache holding a pre-reset value is invalidated
+    // correctly at first and then matches again once the counter climbs back
+    // past it — pointing into an atlas that was entirely replaced. Measured
+    // before this fix: 8 -> 0 -> 11, and an entry holding 8 revived.
+    let mut atlas = GlyphAtlas::new(32, 32);
+    let mut raster = TileRasterizer(RasterTile {
+        width: 16,
+        height: 16,
+        offset_x: 0,
+        offset_y: 0,
+        advance: 16.0,
+        coverage: vec![255; 16 * 16],
+        is_color: false,
+        is_subpixel: false,
+    });
+    let key = |n: u32| GlyphKey {
+        ch: char::from_u32(n).unwrap_or('a'),
+        font_slot: 0,
+        weight_bold: false,
+        italic: false,
+        glyph_id: n,
+    };
+
+    let fresh = atlas.identity();
+
+    // Eviction changes identity, because a freed rect is handed to a new glyph.
+    for n in 33..45u32 {
+        atlas.get_or_insert(key(n), &mut raster);
+    }
+    assert!(atlas.evictions() > 0, "the run must evict for this to assert anything");
+    let after_eviction = atlas.identity();
+    assert_ne!(after_eviction, fresh, "eviction must change the atlas identity");
+
+    // Reset changes it again rather than returning to a prior value.
+    atlas.reset_in_place();
+    let after_reset = atlas.identity();
+    assert_ne!(after_reset, after_eviction, "reset must change the identity");
+    assert_ne!(after_reset, fresh, "reset must not return to the identity of a fresh atlas");
+
+    // Refilling past the earlier eviction count must never reproduce an
+    // identity a dependent could still be holding.
+    for n in 60..80u32 {
+        atlas.get_or_insert(key(n), &mut raster);
+    }
+    let after_refill = atlas.identity();
+    assert_ne!(after_refill, fresh);
+    assert_ne!(after_refill, after_eviction, "a stale entry must not revive");
+    assert!(
+        after_refill > after_eviction,
+        "identity advances monotonically: {after_eviction} -> {after_refill}"
+    );
+
+    // The eviction counter alone does revisit values, which is why it is not
+    // the identity. Asserting this keeps the two from being conflated again.
+    assert!(
+        atlas.evictions() < after_refill,
+        "the eviction counter resets and so cannot serve as a cache generation"
+    );
 }
 
 #[test]
