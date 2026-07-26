@@ -88,7 +88,7 @@ impl App {
             Ok(pty) => {
                 let parser_clone = parser.clone();
                 let out_rx = pty.out_rx.clone();
-                let in_tx_reply = pty.in_tx.clone();
+                let in_tx_reply = pty.input_sender();
                 let redraw_target_thread = redraw_target.clone();
                 let redraw_proxy = self.event_loop_proxy.clone();
                 // fix: VT thread captures the same Arc that
@@ -114,8 +114,29 @@ impl App {
                     .name("sonicterm-vt-reply".into())
                     .spawn(move || {
                         while let Ok(bytes) = reply_rx.recv() {
-                            if in_tx_reply.send(bytes).is_err() {
-                                break;
+                            // Typed send: refuses rather than blocking, and
+                            // applies the same size cap as terminal input. The
+                            // raw sender this used to hold did neither, in a
+                            // thread whose reason for existing is that nothing
+                            // should block here.
+                            if let Err(error) = in_tx_reply.send(bytes) {
+                                match error {
+                                    sonicterm_io::pty::PtyInputError::WriterDisconnected(_) => {
+                                        break;
+                                    }
+                                    // A full queue means the child is not
+                                    // draining. Dropping one reply is correct:
+                                    // DSR/DA answers are idempotent status
+                                    // reports, and blocking here would stall
+                                    // the forwarder behind a stalled child.
+                                    dropped => {
+                                        tracing::debug!(
+                                            target: "memory",
+                                            ?dropped,
+                                            "parser reply dropped; the child is not draining input"
+                                        );
+                                    }
+                                }
                             }
                         }
                     })

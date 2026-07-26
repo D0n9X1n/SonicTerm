@@ -49,6 +49,30 @@ const PTY_IO_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
 const CONPTY_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 static ACTIVE_PTY_IO_THREADS: AtomicUsize = AtomicUsize::new(0);
 
+/// Owned, cloneable sender for a child process's input channel.
+///
+/// Wraps the bounded channel so a caller holding one cannot reach the raw
+/// `Sender`. Every path through this type applies the same size cap and
+/// non-blocking discipline as [`PtyHandle::send_input_nonblocking`], which is
+/// the property that makes the raw field private.
+#[derive(Clone, Debug)]
+pub struct PtyInputSender {
+    tx: Sender<Outgoing>,
+}
+
+impl PtyInputSender {
+    /// Queue input, refusing rather than blocking.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PtyInputError`] when the message exceeds the cap, the queue
+    /// is full, or the writer has gone. The error retains the bytes so the
+    /// caller can retry or report rather than losing them silently.
+    pub fn send(&self, bytes: Vec<u8>) -> Result<(), PtyInputError> {
+        try_queue_pty_input(&self.tx, bytes)
+    }
+}
+
 /// A terminal-input message that could not be queued without blocking.
 #[derive(Debug, thiserror::Error)]
 pub enum PtyInputError {
@@ -403,7 +427,15 @@ pub struct PtyHandle {
     /// Channel of byte chunks read from the child's stdout/stderr.
     pub out_rx: Receiver<Incoming>,
     /// Channel for bytes / control messages to send to the child.
-    pub in_tx: Sender<Outgoing>,
+    ///
+    /// **Private deliberately.** This is the raw bounded seam: sending on it
+    /// directly skips the message-size cap and blocks the calling thread when
+    /// the queue is full. Measured — typed refuses an oversized message, raw
+    /// accepts it; typed refuses a full queue, raw blocks on it.
+    ///
+    /// Use [`PtyHandle::send_input_nonblocking`] for terminal input, or
+    /// [`PtyHandle::reply_sender`] for a thread that forwards parser replies.
+    in_tx: Sender<Outgoing>,
     /// Closure that resizes the pty to `(cols, rows)`.
     pub resize: Box<dyn Fn(u16, u16) + Send + Sync>,
     reader_cancel: Sender<()>,
@@ -489,6 +521,21 @@ impl PtyHandle {
     /// retry or notify the user instead of silently losing terminal input.
     pub fn send_input_nonblocking(&self, bytes: Vec<u8>) -> Result<(), PtyInputError> {
         try_queue_pty_input(&self.in_tx, bytes)
+    }
+
+    /// An owned input sender for a caller that cannot borrow the handle.
+    ///
+    /// Two callers need this: the thread forwarding parser replies (DSR, DA,
+    /// XTVERSION, focus) generated on the VT thread, and the mux server, which
+    /// resolves a pane under a lock and must send after releasing it.
+    ///
+    /// Returns [`PtyInputSender`] rather than the raw channel. The reply
+    /// forwarder previously cloned the `Sender` and called `send`, which
+    /// skipped the size cap and blocked when the queue filled — in a thread
+    /// whose reason for existing is that nothing should block there.
+    #[must_use]
+    pub fn input_sender(&self) -> PtyInputSender {
+        PtyInputSender { tx: self.in_tx.clone() }
     }
 }
 

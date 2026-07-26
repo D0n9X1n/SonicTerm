@@ -564,3 +564,119 @@ fn dropping_live_windows_pty_terminates_native_io_threads() {
     }
     assert_eq!(active_pty_io_threads(), baseline);
 }
+
+// ---------------------------------------------------------------------------
+// Raw seam privacy
+//
+// §7 of the v1.2.0 contract: "Make raw bounded seams private where bypass
+// would invalidate invariants (for example raw PTY senders). Expose typed
+// operations that enforce reservation, ordering, and error ownership."
+//
+// This is that seam, and these are the invariants bypass invalidated.
+// ---------------------------------------------------------------------------
+
+/// The typed send refuses a full queue; the raw one blocks.
+///
+/// Blocking is the consequence that matters. The reply forwarder holds this
+/// sender in a thread whose stated reason for existing is that the VT loop
+/// must never block pushing replies — and it held the raw channel, so a child
+/// that stopped draining stalled the forwarder indefinitely.
+#[test]
+fn the_typed_send_refuses_a_full_queue_where_the_raw_channel_blocks() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (tx, _rx) = crossbeam_channel::bounded::<Vec<u8>>(PTY_INPUT_QUEUE_CAPACITY);
+    for _ in 0..PTY_INPUT_QUEUE_CAPACITY {
+        tx.try_send(vec![0u8; 8]).expect("precondition: the queue fills");
+    }
+
+    assert!(
+        matches!(try_queue_pty_input(&tx, vec![0u8; 8]), Err(PtyInputError::QueueFull(_))),
+        "the typed path must refuse a full queue and hand the bytes back"
+    );
+
+    // The raw channel, for contrast: a send that never returns.
+    let (done_tx, done_rx) = mpsc::channel();
+    let raw = tx.clone();
+    let blocked_thread = std::thread::spawn(move || {
+        let _ = raw.send(vec![0u8; 8]);
+        let _ = done_tx.send(());
+    });
+    assert!(
+        done_rx.recv_timeout(Duration::from_millis(250)).is_err(),
+        "precondition for the whole fix: a raw send on a full queue blocks"
+    );
+
+    // Let the blocked thread finish so the test does not leak it.
+    drop(_rx);
+    let _ = blocked_thread.join();
+}
+
+/// The typed send refuses an oversized message; the raw one accepts it.
+#[test]
+fn the_typed_send_enforces_the_message_cap_the_raw_channel_ignores() {
+    let (tx, _rx) = crossbeam_channel::bounded::<Vec<u8>>(PTY_INPUT_QUEUE_CAPACITY);
+    let oversized = vec![0u8; MAX_PTY_INPUT_MESSAGE_BYTES + 1];
+
+    assert!(
+        matches!(
+            try_queue_pty_input(&tx, oversized.clone()),
+            Err(PtyInputError::MessageTooLarge(_))
+        ),
+        "the typed path must refuse a message above the cap"
+    );
+    assert!(
+        tx.try_send(oversized).is_ok(),
+        "precondition: the raw channel accepts it, which is why the field is private"
+    );
+}
+
+/// No first-party caller may hold the raw sender.
+///
+/// Asserted by scanning the sources rather than by types, because the property
+/// is *absence* — a compiler check would only catch a caller that exists. Three
+/// sites held the raw channel before this: two reply forwarders and the mux
+/// input path, and only one of the three applied the cap.
+#[test]
+fn no_first_party_caller_reaches_the_raw_input_channel() {
+    const SOURCES: &[(&str, &str)] = &[
+        ("spawn_pane.rs", include_str!("../../sonicterm-app/src/app/spawn_pane.rs")),
+        ("child_window.rs", include_str!("../../sonicterm-app/src/app/child_window.rs")),
+        ("mux server.rs", include_str!("../../sonicterm-mux/src/server.rs")),
+        ("app misc.rs", include_str!("../../sonicterm-app/src/app/misc.rs")),
+    ];
+
+    for (name, source) in SOURCES {
+        // Code, not prose: a doc comment naming the old field is stale rather
+        // than a bypass. Scanning raw text caught exactly that on first run,
+        // which is worth keeping — a comment describing a seam that no longer
+        // exists misleads the next reader — but it is a different defect.
+        let code: String = source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !code.contains(".in_tx"),
+            "{name} reaches the raw PTY input channel; use `input_sender()` or \
+             `send_input_nonblocking`, which apply the cap and refuse rather than block"
+        );
+    }
+}
+
+/// The cap lives in one place.
+///
+/// The mux path previously checked the size by hand and then sent on the raw
+/// channel — correct, but a copy of the rule that had to stay in agreement
+/// with the original. Two copies of a limit is the drift shape this milestone
+/// exists to remove.
+#[test]
+fn the_message_cap_is_not_reimplemented_by_callers() {
+    const MUX: &str = include_str!("../../sonicterm-mux/src/server.rs");
+    assert!(
+        !MUX.contains("pty_input_message_allowed"),
+        "the mux input path must not restate the size check; `PtyInputSender::send` \
+         applies it, and a second copy is a second thing to keep in agreement"
+    );
+}
