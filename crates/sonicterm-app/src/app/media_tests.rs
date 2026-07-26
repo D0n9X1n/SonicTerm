@@ -290,12 +290,21 @@ fn many_panes_each_keep_a_share_of_the_media_budget() {
 /// Trimming to the floor while over the ceiling makes every decode return
 /// memory rather than merely capping the newcomer. The residual is
 /// irreducible: principle 1 requires every pane to render at least its newest
-/// image, so N panes cost at least N x the floor. That is a bound that can be
-/// stated, and this test states it.
+/// image, so N panes cost at least N × that image.
+///
+/// Driven at the **largest size decode accepts**, not at the floor. An earlier
+/// version of this test used 4 MiB images, which happens to equal the floor
+/// exactly — so the residual it measured was the floor, and it certified a
+/// bound of `ceiling + panes × floor` that does not hold. Re-run at 2048²×4,
+/// the real peak was 512 MiB against that 336 MiB bound. The test was passing
+/// because of the size it chose, not because the bound was true.
 #[test]
 fn the_process_total_stays_within_a_stateable_bound_as_panes_accumulate() {
     let _serialised = MEDIA_COUNTER_LOCK.lock();
-    const IMAGE_BYTES: usize = 4 * 1024 * 1024;
+    // The largest image `inline_image_decode_dimensions_allowed` admits. Using
+    // anything smaller lets the floor stand in for the residual and hides the
+    // case where one image exceeds it.
+    const IMAGE_BYTES: usize = MAX_DECODED_INLINE_IMAGE_BYTES;
     const PANES: usize = 20;
 
     let baseline = process_inline_media_bytes();
@@ -320,10 +329,11 @@ fn the_process_total_stays_within_a_stateable_bound_as_panes_accumulate() {
         peak = peak.max(process_inline_media_bytes() - baseline);
     }
 
-    // Ceiling, plus one floor-sized allocation for each pane past the point
-    // where pressure begins. Nothing weaker than this is honest, and nothing
-    // stronger is achievable while every pane still renders.
-    let bound = MAX_PROCESS_INLINE_MEDIA_BYTES + PANES * MIN_PANE_INLINE_MEDIA_BYTES;
+    // Ceiling, plus the largest single image each pane may still be holding.
+    // Stated against `max_pane_residual_bytes()` rather than the floor because
+    // trimming stops at a pane's most recent image whatever its size, and that
+    // image can be four times the floor.
+    let bound = MAX_PROCESS_INLINE_MEDIA_BYTES + PANES * max_pane_residual_bytes();
     assert!(
         peak <= bound,
         "peak {peak} ({} MiB) exceeded the stateable bound {bound} ({} MiB) \
@@ -332,11 +342,16 @@ fn the_process_total_stays_within_a_stateable_bound_as_panes_accumulate() {
         bound / 1024 / 1024
     );
 
-    // Guard against the assertion being trivially true: the bound must be a
-    // small multiple of the ceiling, not an unbounded curve.
+    // Guard against the assertion being trivially true. Each pane decoded 20
+    // images; if the bound held only because it scaled with decode count it
+    // would be meaningless. The peak must stay under what those decodes would
+    // cost unbounded, which is what makes trimming observable at all.
+    let unbounded = PANES * 20 * IMAGE_BYTES;
     assert!(
-        bound < MAX_PROCESS_INLINE_MEDIA_BYTES * 2,
-        "the bound itself must stay close to the ceiling: {bound}"
+        peak < unbounded / 4,
+        "trimming must be doing real work: peak {} MiB against an untrimmed {} MiB",
+        peak / 1024 / 1024,
+        unbounded / 1024 / 1024
     );
 
     drop(panes);
