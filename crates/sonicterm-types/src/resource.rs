@@ -348,6 +348,14 @@ pub struct ResourceSnapshot {
     pub parent: Option<ResourceOwnerId>,
     /// Aggregate charge attributed to the owner.
     pub owner_amount: ResourceAmount,
+    /// Byte ceiling this owner is held to.
+    ///
+    /// Reported alongside the usage it bounds, because a usage figure without
+    /// its limit is half a diagnostic: it says how much is held and not whether
+    /// that is close to a problem. It is also the only way a caller can verify
+    /// a limit was actually installed rather than merely computed — a limit
+    /// nothing can read back is indistinguishable from a doc comment.
+    pub owner_bytes_limit: usize,
     /// Owner-local bytes by class.
     pub owner_class_bytes: EnumMap<ResourceClass, usize>,
     /// Owner-local items by class.
@@ -384,6 +392,8 @@ pub struct OwnerView {
     pub parent: Option<ResourceOwnerId>,
     /// Aggregate charge attributed to the owner.
     pub amount: ResourceAmount,
+    /// Byte ceiling this owner is held to.
+    pub bytes_limit: usize,
     /// Owner-local bytes by class.
     pub class_bytes: EnumMap<ResourceClass, usize>,
     /// Owner-local items by class.
@@ -424,6 +434,7 @@ impl ResourceSnapshot {
             owner_state: owner.state,
             parent: owner.parent,
             owner_amount: owner.amount,
+            owner_bytes_limit: owner.bytes_limit,
             owner_class_bytes: owner.class_bytes,
             owner_class_items: owner.class_items,
             process_amount: process.amount,

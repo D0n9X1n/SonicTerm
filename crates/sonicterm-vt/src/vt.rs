@@ -34,7 +34,10 @@ pub const SONIC_VERSION: &str = "SonicTerm 0.7";
 /// This is what a lone pane receiving a large image gets, unchanged: the
 /// common case is one capture at a time, and it is not the case that needs
 /// constraining.
-const MAX_MEDIA_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+/// Public so the app can derive the governor's per-pane backstop from the caps
+/// the seams actually enforce, rather than restating a number that would then
+/// need to be kept in agreement with this one.
+pub const MAX_MEDIA_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 
 /// Ceiling on in-flight capture staging summed over every parser in this
 /// process.
@@ -130,7 +133,9 @@ impl Drop for CaptureCharge {
 /// of one per link, while still recovering as soon as content scrolls away.
 const HYPERLINK_RECLAIM_BACKOFF_LINKS: u32 = 256;
 const MAX_RAW_OSC4_BYTES: usize = 4096;
-const MAX_ESCAPE_SEQUENCE_BYTES: usize = 1024 * 1024;
+/// Public for the same reason as [`MAX_MEDIA_PAYLOAD_BYTES`]: the backstop is
+/// derived from the caps, not parallel to them.
+pub const MAX_ESCAPE_SEQUENCE_BYTES: usize = 1024 * 1024;
 
 /// Event surfaced to the host so it can update window chrome, clipboard, etc.
 #[derive(Debug, Clone)]
