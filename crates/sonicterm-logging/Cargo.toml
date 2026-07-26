@@ -14,6 +14,9 @@ description = "SonicTerm Terminal — tracing init, rolling file sinks, retentio
 workspace = true
 
 [dependencies]
+# Snapshot formatting reads the governor's own `ResourceSnapshot` rather than
+# a parallel shape, so a field added there cannot silently go unreported here.
+sonicterm-types.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
 tracing-appender = "0.2"
@@ -23,3 +26,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+# Real snapshots from the real ledger: a hand-built `ResourceSnapshot` would
+# drift from what the governor actually produces, and the formatter's whole
+# job is to render that faithfully.
+sonicterm-resource = { workspace = true, features = ["test-util"] }
+enum-map = { workspace = true }

@@ -73,6 +73,17 @@ impl ResourceGovernor {
         Ok(Reservation::new(Charge { ledger: self.ledger.clone(), owner, class, amount }))
     }
 
+    /// Hand the shared ledger to `test_support` so it can construct a charge
+    /// the ledger never issued.
+    ///
+    /// Feature-gated: this exists only to reach the permanently-inconsistent
+    /// accounting state, which a correct ledger cannot produce and which
+    /// downstream crates otherwise cannot test their reporting against.
+    #[cfg(feature = "test-util")]
+    pub(crate) fn ledger_for_test_support(&self) -> Arc<Ledger> {
+        self.ledger.clone()
+    }
+
     /// Return an observational owner/process snapshot.
     pub fn snapshot(&self, owner: ResourceOwnerId) -> Result<ResourceSnapshot, BudgetError> {
         self.ledger.snapshot(owner)

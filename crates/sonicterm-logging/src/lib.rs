@@ -130,6 +130,8 @@ pub fn init(cfg: &LoggingConfig) -> io::Result<LoggingGuard> {
 #[path = "lib_tests.rs"]
 mod lib_tests;
 
+pub mod snapshot_format;
+
 #[cfg(test)]
 #[path = "redaction_tests.rs"]
 mod redaction_tests;
