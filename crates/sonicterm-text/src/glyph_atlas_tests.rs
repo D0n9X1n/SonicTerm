@@ -258,3 +258,64 @@ fn lazy_insert_metadata_stays_bounded() {
 fn v120_stale_atlas_identity_invalidates_all_dependents_888() {
     panic!("baseline invariant requires WP-FONT identity authority");
 }
+
+#[test]
+fn retained_amount_reports_pixels_and_resident_entries() {
+    // A governor charges the atlas for what it actually holds. Bytes are the
+    // pixel buffer, which is allocated up front at full size rather than
+    // growing with use; items are resident entries, which is what eviction
+    // acts on.
+    let mut atlas = GlyphAtlas::new(64, 64);
+    let empty = atlas.retained_amount();
+    assert_eq!(empty.bytes, 64 * 64 * 4, "the pixel buffer is allocated up front");
+    assert_eq!(empty.items, 0, "a fresh atlas holds no entries");
+
+    let mut raster = OnePixelRasterizer;
+    let key = |n: u32| GlyphKey {
+        ch: char::from_u32(n).unwrap_or('a'),
+        font_slot: 0,
+        weight_bold: false,
+        italic: false,
+        glyph_id: n,
+    };
+    for n in 33..43u32 {
+        atlas.get_or_insert(key(n), &mut raster);
+    }
+
+    let filled = atlas.retained_amount();
+    assert_eq!(filled.bytes, empty.bytes, "inserting glyphs does not grow the buffer");
+    assert_eq!(filled.items, 10, "resident entries are counted");
+    assert_eq!(filled.items, atlas.len(), "the item count matches the entry count");
+}
+
+#[test]
+fn retained_amount_falls_when_eviction_reclaims_entries() {
+    // Eviction has to be visible in the reported figure, or a governor would
+    // hold a charge for entries the atlas has already dropped.
+    let mut atlas = GlyphAtlas::new(32, 32);
+    let mut raster = TileRasterizer(RasterTile {
+        width: 16,
+        height: 16,
+        offset_x: 0,
+        offset_y: 0,
+        advance: 16.0,
+        coverage: vec![255; 16 * 16],
+        is_color: false,
+        is_subpixel: false,
+    });
+    let key = |n: u32| GlyphKey {
+        ch: char::from_u32(n).unwrap_or('a'),
+        font_slot: 0,
+        weight_bold: false,
+        italic: false,
+        glyph_id: n,
+    };
+
+    for n in 33..40u32 {
+        atlas.get_or_insert(key(n), &mut raster);
+    }
+    let peak = atlas.retained_amount();
+    assert!(atlas.evictions() > 0, "the run must actually evict for this to mean anything");
+    assert!(peak.items <= 4, "a 32x32 atlas holds at most four 16x16 tiles");
+    assert_eq!(peak.items, atlas.len());
+}

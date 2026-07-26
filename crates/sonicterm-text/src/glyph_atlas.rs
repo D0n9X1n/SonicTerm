@@ -26,7 +26,7 @@
 
 use std::collections::HashMap;
 
-use sonicterm_types::GlyphKey;
+use sonicterm_types::{GlyphKey, ResourceAmount};
 
 /// Default atlas dimensions. BGRA8Unorm, so 16 MiB on the GPU. The
 /// BGRA channel layout lets one texture serve both monochrome glyphs
@@ -359,6 +359,21 @@ impl GlyphAtlas {
     /// `take_dirty_rects` + subregion writes.
     pub fn pixels(&self) -> &[u8] {
         &self.pixels
+    }
+
+    /// Storage this atlas is holding, for governor accounting and telemetry.
+    ///
+    /// Bytes are the pixel buffer's reserved capacity. Items count resident
+    /// glyph entries rather than pages: a page is a fixed 16 MiB allocation
+    /// that says nothing about occupancy, while the entry count is what
+    /// eviction actually acts on.
+    ///
+    /// Note this reports live storage, not live *glyphs* — a recycled slot
+    /// over-reserves when a shorter tile replaces a taller one, so the pixel
+    /// buffer can hold bytes no entry references.
+    #[must_use]
+    pub fn retained_amount(&self) -> ResourceAmount {
+        ResourceAmount { bytes: self.pixels.capacity(), items: self.map.len() }
     }
 
     /// Borrow the CPU-side atlas pixels without draining dirty rects.
