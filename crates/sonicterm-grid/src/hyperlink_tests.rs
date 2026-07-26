@@ -210,3 +210,100 @@ fn clear_returns_the_registry_to_empty() {
     assert_eq!(registry.retained_bytes(), 0, "clearing must zero the enforced byte figure");
     assert!(registry.try_intern(None, "https://example.com/after").is_some());
 }
+
+/// Rejections say which limit refused them, because the remedies differ.
+///
+/// All three paths returned a bare `None` before, so a caller could not tell
+/// "no room right now" from "never". The parser sweeps the whole grid and
+/// retries on a full registry; doing that for an oversized URI is an
+/// `O(visible + scrollback)` walk that cannot change the answer, repeated per
+/// link for as long as the shell keeps emitting them.
+#[test]
+fn rejections_report_which_limit_refused_them() {
+    let mut registry = HyperlinkRegistry::new();
+
+    // Oversized URI: no reclamation can ever admit it.
+    let huge = "x".repeat(MAX_HYPERLINK_URI_BYTES + 1);
+    assert_eq!(
+        registry.intern_or_reject(None, &huge),
+        Err(AdmissionRejection::ItemTooLarge),
+        "an oversized URI must report a permanent rejection"
+    );
+    assert!(
+        !AdmissionRejection::ItemTooLarge.is_retryable_after_reclaim(),
+        "a permanently-rejected item must not invite a sweep"
+    );
+
+    // Oversized client id, same class.
+    let huge_id = "i".repeat(MAX_HYPERLINK_CLIENT_ID_BYTES + 1);
+    assert_eq!(
+        registry.intern_or_reject(Some(&huge_id), "https://example.com/"),
+        Err(AdmissionRejection::ItemTooLarge)
+    );
+
+    // Count limit: reclamation can relieve this one.
+    for index in 0..MAX_HYPERLINKS {
+        let _ = registry.intern(None, &format!("https://example.com/{index}"));
+    }
+    let full = registry.intern_or_reject(None, "https://example.com/one-more");
+    assert_eq!(
+        full,
+        Err(AdmissionRejection::ItemCountLimit),
+        "a full registry must report the count limit, not a size limit"
+    );
+    assert!(
+        AdmissionRejection::ItemCountLimit.is_retryable_after_reclaim(),
+        "a count limit is exactly what reclamation relieves"
+    );
+}
+
+/// The byte budget is distinguishable from the count budget.
+///
+/// Both mean "full", but one is relieved by releasing a large entry and the
+/// other by releasing any entry. Reporting them identically loses that.
+#[test]
+fn the_byte_budget_reports_itself_distinctly() {
+    let mut registry = HyperlinkRegistry::new();
+    let base = "https://example.com/".to_string() + &"x".repeat(MAX_HYPERLINK_URI_BYTES - 40);
+
+    let mut rejection = None;
+    for index in 0..30_000u32 {
+        if let Err(reason) = registry.intern_or_reject(None, &format!("{base}{index:08}")) {
+            rejection = Some(reason);
+            break;
+        }
+    }
+
+    assert_eq!(
+        rejection,
+        Some(AdmissionRejection::PerOwnerBudget),
+        "maximum-length URIs must exhaust the byte budget before the count cap, \
+         and must say so"
+    );
+    assert!(AdmissionRejection::PerOwnerBudget.is_retryable_after_reclaim());
+}
+
+/// Reason codes are stable strings, so an operator can grep across versions.
+#[test]
+fn reason_codes_are_stable_and_distinct() {
+    use std::collections::HashSet;
+
+    let all = [
+        AdmissionRejection::ItemTooLarge,
+        AdmissionRejection::PerOwnerBudget,
+        AdmissionRejection::ProcessBudget,
+        AdmissionRejection::ItemCountLimit,
+        AdmissionRejection::Cancelled,
+    ];
+    let codes: HashSet<&str> = all.iter().map(|reason| reason.code()).collect();
+
+    assert_eq!(codes.len(), all.len(), "every rejection must have a distinct code");
+    assert_eq!(AdmissionRejection::ItemTooLarge.code(), "item_too_large");
+    assert_eq!(AdmissionRejection::ProcessBudget.code(), "process_budget");
+    for code in codes {
+        assert!(
+            code.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+            "codes are grepped from logs, so they must stay snake_case: {code}"
+        );
+    }
+}

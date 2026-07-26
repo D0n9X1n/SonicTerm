@@ -505,6 +505,78 @@ pub enum DropReason {
     Superseded,
 }
 
+/// Why a specific admission was refused or an allocation reclaimed.
+///
+/// [`BudgetError`] says why a *governor operation* failed and [`DropReason`]
+/// says why a pressure policy discarded data. Neither answers the question a
+/// diagnostic leaves open: this pane asked to keep something and did not get
+/// to — why?
+///
+/// Distinct variants exist wherever the *remedy* differs. `PerOwnerBudget` and
+/// `ProcessBudget` both mean "no room", but the first is relieved by that
+/// owner releasing something and the second only by the process as a whole
+/// coming down; an operator who cannot tell them apart cannot act.
+/// `ItemTooLarge` is neither — no amount of reclamation admits it, so retrying
+/// after a sweep is wasted work.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
+pub enum AdmissionRejection {
+    /// The item exceeds a per-item limit and can never be admitted.
+    ///
+    /// Reclamation cannot help: the item is larger than the policy allows
+    /// regardless of what else is retained. Callers must not sweep and retry.
+    ItemTooLarge,
+    /// The owner's own byte budget is exhausted.
+    ///
+    /// Relieved when this owner releases something, so reclaiming within the
+    /// owner is the correct response.
+    PerOwnerBudget,
+    /// The process-wide ceiling is reached across all owners.
+    ///
+    /// This owner may be well within its own budget. Reclaiming here helps
+    /// only in proportion to what this owner holds.
+    ProcessBudget,
+    /// A per-owner count limit is reached, independent of bytes.
+    ///
+    /// Distinct from a byte budget because the remedy differs: releasing one
+    /// large item relieves bytes but not a count.
+    ItemCountLimit,
+    /// Admission is closed because the owner is shutting down.
+    Cancelled,
+}
+
+impl AdmissionRejection {
+    /// Whether reclaiming and retrying could plausibly admit the item.
+    ///
+    /// [`Self::ItemTooLarge`] and [`Self::Cancelled`] are permanent for this
+    /// item, so a caller that sweeps and retries on them burns a scan to reach
+    /// the same answer. The hyperlink registry did exactly that before this
+    /// distinction existed: an oversized URI triggered a full grid scan that
+    /// could never change the outcome.
+    #[must_use]
+    pub fn is_retryable_after_reclaim(self) -> bool {
+        match self {
+            Self::PerOwnerBudget | Self::ProcessBudget | Self::ItemCountLimit => true,
+            Self::ItemTooLarge | Self::Cancelled => false,
+        }
+    }
+
+    /// Stable snake_case code for logs and tests.
+    ///
+    /// Stable so an operator can grep for it across versions, and so a
+    /// diagnostic's meaning does not shift when a variant is renamed.
+    #[must_use]
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::ItemTooLarge => "item_too_large",
+            Self::PerOwnerBudget => "per_owner_budget",
+            Self::ProcessBudget => "process_budget",
+            Self::ItemCountLimit => "item_count_limit",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
 /// Reasons delivery ownership may terminate at a connection boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[non_exhaustive]

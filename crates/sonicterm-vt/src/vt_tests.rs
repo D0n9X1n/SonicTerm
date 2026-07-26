@@ -1051,3 +1051,82 @@ fn links_recover_as_soon_as_scrollback_frees_the_registry() {
          the backoff counter happens to drain"
     );
 }
+
+/// An oversized URI does not trigger a reclamation sweep.
+///
+/// The parser sweeps the grid and retries when the registry refuses a link.
+/// That is right for a full registry and wrong for an oversized URI, which is
+/// refused by a size check no sweep can change — an `O(visible + scrollback)`
+/// walk on the VT hot path to reach the same answer, once per link.
+///
+/// Observed through the registry's contents rather than by counting sweeps:
+/// a sweep that ran would free the unreferenced links this test parks in the
+/// registry, so their survival is the evidence it did not run.
+#[test]
+fn an_oversized_uri_does_not_trigger_a_reclamation_sweep() {
+    let mut grid = Grid::new(20, 4);
+    grid.set_scrollback_limit(2);
+    let mut parser = Parser::new(grid);
+
+    // Park links in the registry, then scroll them out so a sweep would free
+    // them. They are unreferenced garbage from here on.
+    for index in 0..40 {
+        parser.advance(
+            format!("\x1b]8;;https://example.com/{index}\x07link\x1b]8;;\x07\r\n").as_bytes(),
+        );
+    }
+    for _ in 0..20 {
+        parser.advance(b"scroll\r\n");
+    }
+    let retained_before = parser.hyperlinks().len();
+    assert!(retained_before > 0, "precondition: the registry holds reclaimable links");
+
+    // An oversized URI: rejected on size, and no sweep can change that.
+    let huge = "x".repeat(sonicterm_grid::hyperlink::MAX_HYPERLINK_URI_BYTES + 1);
+    parser.advance(format!("\x1b]8;;{huge}\x07text\x1b]8;;\x07").as_bytes());
+
+    assert_eq!(
+        parser.hyperlinks().len(),
+        retained_before,
+        "an oversized URI must not trigger a sweep: the registry's contents changed, \
+         so the parser scanned the whole grid to reach a rejection the size check had \
+         already decided"
+    );
+}
+
+/// A full registry still triggers a sweep, so the skip is targeted.
+///
+/// Without this the test above could pass by disabling reclamation entirely,
+/// which would reintroduce the permanent hyperlink wedge.
+#[test]
+fn a_full_registry_still_triggers_a_reclamation_sweep() {
+    use sonicterm_grid::hyperlink::MAX_HYPERLINKS;
+
+    let mut grid = Grid::new(20, 4);
+    grid.set_scrollback_limit(2);
+    let mut parser = Parser::new(grid);
+
+    for index in 0..MAX_HYPERLINKS {
+        parser.advance(
+            format!("\x1b]8;;https://example.com/{index}\x07l\x1b]8;;\x07\r\n").as_bytes(),
+        );
+    }
+    let full = parser.hyperlinks().len();
+    assert_eq!(full, MAX_HYPERLINKS, "precondition: the registry is at its count cap");
+
+    // A normal link against a full registry must sweep, free the scrolled-away
+    // entries, and succeed.
+    parser.advance(b"\x1b]8;;https://example.com/after\x07visible\x1b]8;;\x07");
+
+    assert!(
+        parser.hyperlinks().len() < full,
+        "a retryable rejection must still sweep: {} entries retained, expected fewer \
+         than {full}",
+        parser.hyperlinks().len()
+    );
+    let row = parser.grid().cursor.row;
+    assert!(
+        parser.grid().row(row).iter().any(|cell| cell.hyperlink().is_some()),
+        "and the link must end up on a cell"
+    );
+}
