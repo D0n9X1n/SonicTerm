@@ -101,6 +101,11 @@ impl App {
                 let pty_burst_gen = self.pty_burst_gen.clone();
                 let command_events_thread = command_events.clone();
                 let inline_images_thread = inline_images.clone();
+                // Holds this pane's share of the process-wide inline-media
+                // total. Owned by the VT thread, which is the only writer to
+                // the shared store, so the charge is released when the pane's
+                // thread ends rather than at any of the pane-removal sites.
+                let mut inline_media_charge = super::media::InlineMediaCharge::default();
                 // Forward parser replies (DSR/DA/XTVERSION/focus) to the pty
                 // master. Kept on its own thread so the VT loop never blocks
                 // pushing replies, and so a slow pty doesn't stall parsing.
@@ -250,7 +255,10 @@ impl App {
                                     if !inline_images.is_empty() {
                                         let mut images = inline_images_thread.lock();
                                         images.extend(inline_images);
-                                        super::media::trim_inline_images(&mut images);
+                                        super::media::trim_inline_images_charged(
+                                            &mut images,
+                                            &mut inline_media_charge,
+                                        );
                                     }
                                     if !command_side_effects.is_empty() {
                                         super::append_bounded_command_events(
