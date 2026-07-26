@@ -85,11 +85,16 @@ fn inline_image_decode_dimensions_allowed(width: u32, height: u32) -> bool {
 
 /// Process-wide ceiling on decoded inline media across every pane.
 ///
-/// [`MAX_RETAINED_INLINE_IMAGE_BYTES`] bounds one pane. Panes own their image
-/// vectors independently, so N panes retain N × 64 MiB with every pane
-/// individually compliant — twenty panes is 1.2 GiB, and nothing above the
-/// pane says no. That composition, not any single unbounded buffer, is the
-/// shape behind the reported multi-gigabyte growth.
+/// Panes own their image vectors independently, so a fixed per-pane cap
+/// composes without a bound above it: at the original 64 MiB per pane, twenty
+/// panes retained 1.2 GiB with every pane individually compliant. That
+/// composition, not any single unbounded buffer, is the shape behind the
+/// reported multi-gigabyte growth.
+///
+/// A pane's actual budget is now [`pane_inline_media_budget`] — this ceiling
+/// divided by the live pane count — so the per-pane and process bounds are one
+/// bound rather than two independent constants that happened to multiply out
+/// to exactly this figure.
 pub(super) const MAX_PROCESS_INLINE_MEDIA_BYTES: usize = 256 * 1024 * 1024;
 
 /// Live decoded inline-media bytes summed over every pane in this process.
@@ -242,8 +247,22 @@ pub(super) fn trim_inline_images_charged(
     }
 }
 
-pub(super) fn trim_inline_images(images: &mut Vec<InlineImage>) {
-    trim_inline_images_to(images, MAX_RETAINED_INLINE_IMAGE_BYTES);
+/// Trim a VT worker's staging vector to what its pane could actually keep.
+///
+/// The worker decodes into a local vector and merges it into the pane's
+/// charged store only at the end of the batch, so that vector is **uncharged**
+/// while it fills. Trimming it against the fixed per-pane constant let a pane
+/// stage far more than it would be allowed to retain: at twenty panes the fair
+/// share is ~12 MiB while staging still admitted 64 MiB, so panes decoding
+/// concurrently could hold roughly 1.2 GiB that no ceiling ever saw — the
+/// multi-gigabyte shape this work exists to remove, reintroduced behind the
+/// merge.
+///
+/// Trimming to the budget the merge will apply means the staging vector never
+/// holds bytes the pane is about to discard, so the transient peak stays
+/// inside the same bound as the steady state.
+pub(super) fn trim_staged_inline_images(images: &mut Vec<InlineImage>) {
+    trim_inline_images_to(images, pane_inline_media_budget());
 }
 
 /// Drop oldest images until the vector fits `byte_budget` and the count cap.
@@ -265,7 +284,7 @@ fn trim_inline_images_to(images: &mut Vec<InlineImage>, byte_budget: usize) {
 
 /// Bytes and images this pane retains as decoded inline media.
 ///
-/// This is the same figure [`trim_inline_images`] enforces against
+/// This is the same figure [`trim_inline_images_to`] enforces against
 /// [`MAX_RETAINED_INLINE_IMAGE_BYTES`], exposed so a governor charges what the
 /// pane actually admits rather than a second estimate of it.
 ///

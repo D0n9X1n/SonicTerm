@@ -26,7 +26,7 @@ fn retained_inline_images_respect_count_and_byte_budgets() {
     let chunk = MAX_RETAINED_INLINE_IMAGE_BYTES / 2;
     let mut images = vec![image(1, chunk), image(2, chunk), image(3, chunk)];
 
-    trim_inline_images(&mut images);
+    trim_inline_images_to(&mut images, MAX_RETAINED_INLINE_IMAGE_BYTES);
 
     assert_eq!(images.iter().map(|image| image.id).collect::<Vec<_>>(), vec![2, 3]);
     assert!(
@@ -37,7 +37,7 @@ fn retained_inline_images_respect_count_and_byte_budgets() {
 
 /// One pane's inline-media retention is bounded; the sum across panes is not.
 ///
-/// `trim_inline_images` enforces [`MAX_RETAINED_INLINE_IMAGE_BYTES`] against a
+/// `trim_inline_images_to` enforces [`MAX_RETAINED_INLINE_IMAGE_BYTES`] against a
 /// single pane's vector, and each pane owns its own. Nothing composes them, so
 /// a session's total is `panes × 64 MiB` with every pane individually
 /// compliant. That is the shape behind the reported multi-gigabyte growth:
@@ -55,7 +55,7 @@ fn per_pane_media_is_capped_but_the_aggregate_is_not() {
     while retained_inline_media(&pane).bytes < MAX_RETAINED_INLINE_IMAGE_BYTES && id <= 200 {
         id += 1;
         pane.push(image(id, 1024 * 1024));
-        trim_inline_images(&mut pane);
+        trim_inline_images_to(&mut pane, MAX_RETAINED_INLINE_IMAGE_BYTES);
     }
 
     let per_pane = retained_inline_media(&pane);

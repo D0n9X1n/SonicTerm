@@ -229,7 +229,7 @@ impl App {
                                                         super::media::decode_inline_image(&media)
                                                     {
                                                         inline_images.push(image);
-                                                        super::media::trim_inline_images(
+                                                        super::media::trim_staged_inline_images(
                                                             &mut inline_images,
                                                         );
                                                     }
