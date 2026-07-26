@@ -14,6 +14,8 @@
 //!
 //! Out of scope: media texture decoding/rendering and most mouse tracking.
 
+use std::collections::HashSet;
+
 use crossbeam_channel::Sender;
 use vte::{Params, Perform};
 
@@ -26,6 +28,13 @@ use sonicterm_types::ResourceAmount;
 pub const SONIC_VERSION: &str = "SonicTerm 0.7";
 
 const MAX_MEDIA_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+/// Rejected OSC 8 links to skip after a sweep that freed nothing.
+///
+/// A sweep frees nothing only when every interned link is still on screen, in
+/// which case the next link is no more likely to find garbage. Waiting this
+/// many rejections bounds the scan to roughly one per that many links instead
+/// of one per link, while still recovering as soon as content scrolls away.
+const HYPERLINK_RECLAIM_BACKOFF_LINKS: u32 = 256;
 const MAX_RAW_OSC4_BYTES: usize = 4096;
 const MAX_ESCAPE_SEQUENCE_BYTES: usize = 1024 * 1024;
 
@@ -680,6 +689,13 @@ struct Performer {
     events: Vec<VtEvent>,
     hyperlinks: HyperlinkRegistry,
     current_hyperlink: Option<HyperlinkId>,
+    /// Rejected OSC 8 links since the last reclaim sweep.
+    ///
+    /// Bounds how often a full-grid scan may run. When every interned link is
+    /// genuinely still on screen a sweep frees nothing, and without this an
+    /// output stream of distinct links would scan the whole grid once per
+    /// link — turning a dead feature into a stall.
+    hyperlink_reclaim_backoff: u32,
     /// Cursor saved by DECSET ?1049 when entering the alt screen.
     saved_cursor: Option<Pos>,
     bracketed_paste: bool,
@@ -766,6 +782,7 @@ impl Performer {
             events: Vec::new(),
             hyperlinks: HyperlinkRegistry::new(),
             current_hyperlink: None,
+            hyperlink_reclaim_backoff: 0,
             saved_cursor: None,
             bracketed_paste: false,
             mouse_sgr: false,
@@ -932,6 +949,30 @@ impl Performer {
         }
         self.grid.erase_screen_with(Cell::default());
         self.grid.goto(0, 0);
+        // RIS erases every screen and drops the alt buffer above, so no cell
+        // can still reference an interned link. Clearing outright is cheaper
+        // and no less correct than scanning to prove the set is empty.
+        self.hyperlinks.clear();
+        self.hyperlink_reclaim_backoff = 0;
+    }
+
+    /// Free interned hyperlinks no cell references, returning the count.
+    ///
+    /// Runs only when admission has already failed, so a pane below the cap
+    /// never pays for it. The scan is `O(visible + scrollback)` over every
+    /// screen the grid owns.
+    ///
+    /// The root set is every cell plus [`Self::current_hyperlink`], which is
+    /// live but not yet written to any cell: between OSC 8 open and the first
+    /// printed character there is no cell holding it, and freeing it there
+    /// would unlink the text about to be written.
+    fn reclaim_hyperlinks(&mut self) -> usize {
+        let mut live: HashSet<HyperlinkId> = HashSet::new();
+        if let Some(open) = self.current_hyperlink {
+            live.insert(open);
+        }
+        self.grid.collect_live_hyperlinks(&mut live);
+        self.hyperlinks.retain_live(&live)
     }
 
     fn apply_sgr(&mut self, params: &Params) {
@@ -1597,7 +1638,40 @@ impl Perform for Performer {
                             uri: String::new(),
                         });
                     } else {
-                        self.current_hyperlink = self.hyperlinks.try_intern(id_norm, uri);
+                        let mut interned = self.hyperlinks.try_intern(id_norm, uri);
+                        if interned.is_none() {
+                            // The registry is full. Almost all of it is links
+                            // whose cells scrolled away, so reclaim and retry
+                            // rather than leaving this and every later link
+                            // dead for the rest of the session.
+                            //
+                            // Swept before `current_hyperlink` is reassigned,
+                            // so the span the parser still considers open is a
+                            // live root even though no cell holds it yet.
+                            //
+                            // Backoff bounds the scan: when the links really
+                            // are all still on screen the sweep frees nothing,
+                            // and retrying per link would scan the whole grid
+                            // per link.
+                            if self.hyperlink_reclaim_backoff == 0 {
+                                let freed = self.reclaim_hyperlinks();
+                                self.hyperlink_reclaim_backoff =
+                                    if freed > 0 { 0 } else { HYPERLINK_RECLAIM_BACKOFF_LINKS };
+                                if freed > 0 {
+                                    tracing::debug!(
+                                        target: "memory",
+                                        freed,
+                                        retained = self.hyperlinks.len(),
+                                        retained_bytes = self.hyperlinks.retained_bytes(),
+                                        "reclaimed unreferenced hyperlinks"
+                                    );
+                                    interned = self.hyperlinks.try_intern(id_norm, uri);
+                                }
+                            } else {
+                                self.hyperlink_reclaim_backoff -= 1;
+                            }
+                        }
+                        self.current_hyperlink = interned;
                         if self.current_hyperlink.is_some() {
                             self.events.push(VtEvent::Hyperlink {
                                 id: id_norm.map(String::from),
@@ -1608,6 +1682,7 @@ impl Perform for Performer {
                             tracing::warn!(
                                 uri_bytes = uri.len(),
                                 id_bytes = id_norm.map_or(0, str::len),
+                                retained = self.hyperlinks.len(),
                                 "OSC 8 hyperlink rejected by memory limits"
                             );
                         }

@@ -1,6 +1,6 @@
 //! Terminal screen grid: cells, attributes, scrollback.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 // Value types live in `sonicterm-types` so non-engine crates can use them
 // without depending on this crate. Re-exported here for source compatibility:
@@ -435,6 +435,39 @@ impl Grid {
     /// Iterate scrollback rows from oldest to newest.
     pub fn scrollback_iter(&self) -> impl Iterator<Item = &Row> {
         self.scrollback.iter()
+    }
+
+    /// Insert every hyperlink id any cell this grid owns still references.
+    ///
+    /// Cells carry a plain `Copy` [`HyperlinkId`] with no refcount and no
+    /// back-pointer to the registry, so the only way to know whether an
+    /// interned link is still reachable is to look at every cell. Scrolling a
+    /// row out of scrollback drops its ids with no notification, which is why
+    /// the registry cannot tell on its own what has become garbage.
+    ///
+    /// Reaches the saved primary screen as well as the live one: while the alt
+    /// screen is active, `alt_screen` holds the *primary* the user will return
+    /// to. Collecting only the visible grid and its scrollback would omit
+    /// every link on the screen behind the alt buffer, and a sweep using that
+    /// set would break links that reappear the moment a full-screen program
+    /// exits.
+    ///
+    /// This is the caller's to schedule, not a per-frame cost: it is
+    /// `O(visible + scrollback)` and runs under the pane lock. It does not
+    /// force compressed scrollback rows back to their flat form.
+    pub fn collect_live_hyperlinks(&self, live: &mut HashSet<HyperlinkId>) {
+        let mut collect = |row: &Row| {
+            for cell in row.iter() {
+                if let Some(hid) = cell.hyperlink() {
+                    live.insert(hid);
+                }
+            }
+        };
+        self.visible.iter().for_each(&mut collect);
+        self.scrollback.iter().for_each(&mut collect);
+        if let Some(primary) = self.alt_screen.as_deref() {
+            primary.collect_live_hyperlinks(live);
+        }
     }
 
     /// Borrow the row at scrollback-absolute index `abs`. Returns `None`
