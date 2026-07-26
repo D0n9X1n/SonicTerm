@@ -772,3 +772,64 @@ fn wide_char_edit_dirties_only_its_row_same_frame() {
     assert!(row[0].flags.contains(CellFlags::WIDE), "lead cell is WIDE");
     assert!(row[1].flags.contains(CellFlags::WIDE_CONT), "trailing cell is WIDE_CONT");
 }
+
+/// The three retention seams a pane must add up, and the fact that none of
+/// them restates another.
+///
+/// `Parser::retained_amount`, `Grid::retained_amount`, and
+/// `HyperlinkRegistry::retained_bytes` each report only what they own. That
+/// is deliberate — the registry's own docs say it is "exposed so a governor
+/// charges what the registry actually admits rather than a second estimate of
+/// it" — and it means the pane owner charges the sum of all three.
+///
+/// The failure mode this guards is silent under-charging: an integrator who
+/// composes grid + parser and stops there misses up to
+/// `MAX_HYPERLINK_METADATA_BYTES` (8 MiB) per parser, because hyperlink
+/// metadata hangs off the parser rather than being reported by it. Measured
+/// here: 200 interned links retain ~18 KB that neither of the other two
+/// figures moves by a single byte.
+#[test]
+fn the_three_retention_seams_are_disjoint_and_must_be_summed() {
+    let mut parser = Parser::new(Grid::new(80, 24));
+
+    let parser_before = parser.retained_amount().bytes;
+    let grid_before = parser.grid().retained_amount().bytes;
+    let links_before = parser.hyperlinks().retained_bytes();
+    assert_eq!(links_before, 0, "a fresh parser interns no hyperlinks");
+
+    // OSC 8 hyperlinks: ESC ] 8 ; id=N ; URI ESC \ ... ESC ] 8 ; ; ESC \
+    for index in 0..200u32 {
+        let sequence = format!(
+            "\x1b]8;id={index};https://example.com/a-fairly-long-path/{index}\x1b\\link\x1b]8;;\x1b\\"
+        );
+        parser.advance(sequence.as_bytes());
+    }
+
+    let parser_after = parser.retained_amount().bytes;
+    let links_after = parser.hyperlinks().retained_bytes();
+
+    assert_eq!(parser.hyperlinks().len(), 200, "every link interned");
+    assert!(links_after > 0, "interning links must retain bytes");
+
+    // The parser does not restate hyperlink bytes. If it did, a pane summing
+    // all three would charge them twice.
+    assert_eq!(
+        parser_after, parser_before,
+        "Parser::retained_amount must not move when only hyperlinks are interned; \
+         it reports capture and OSC accumulator bytes only"
+    );
+
+    // Neither does the grid, even though cells carry hyperlink ids.
+    assert_eq!(
+        parser.grid().retained_amount().bytes,
+        grid_before,
+        "Grid::retained_amount must exclude hyperlink metadata; the registry meters it"
+    );
+
+    // Therefore the registry's bytes are reachable from exactly one place, and
+    // a pane that omits this term under-charges by that much.
+    assert!(
+        links_after >= 10_000,
+        "200 links with long URIs should retain a meaningful amount, got {links_after}"
+    );
+}
