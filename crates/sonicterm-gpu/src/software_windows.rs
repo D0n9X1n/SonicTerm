@@ -64,6 +64,15 @@ impl WindowsSoftwareFrame {
         Ok(())
     }
 
+    /// Bytes this frame is holding, counting reserved capacity.
+    ///
+    /// Capacity rather than length: `prepare` keeps the allocation across
+    /// resizes that shrink by less than half, so a frame that was once large
+    /// still owns the larger buffer.
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.pixels.capacity()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn draw_layers(
         &mut self,
