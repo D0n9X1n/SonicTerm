@@ -1017,3 +1017,74 @@ fn shaped_glyph_column_check_rejects_backtracking_columns() {
 
     assert!(!shaped_glyph_columns_are_monotonic(&glyphs));
 }
+
+// --- Atlas reset / row-cache invalidation pairing ------------------
+
+/// Every atlas reset must flush the row glyph cache in the same function.
+///
+/// The row cache tags entries with `glyph_atlas.evictions()` alone — the
+/// atlas-local counter, with no allocation-generation component. That filter
+/// cannot tell an old atlas's epoch-0 from a fresh atlas's epoch-0, so a row
+/// entry that outlived a reset could match against tiles it was never built
+/// for and sample whatever now occupies those rectangles.
+///
+/// Nothing structural prevents that. What prevents it is that all four
+/// `reset_glyph_atlas_in_place` call sites happen to call
+/// `row_glyph_cache.invalidate_all()` afterwards. A fifth reset path added
+/// without that call would reintroduce the stale-UV class with no compile
+/// error and no failing test.
+///
+/// `GpuRenderer` needs a live wgpu device and a window, so the pairing cannot
+/// be driven at runtime in a unit test. Reading the source is the available
+/// check, and it is the one that would actually catch the regression: the
+/// mistake being guarded is an omitted call, which is visible in the text.
+#[test]
+fn every_glyph_atlas_reset_invalidates_the_row_cache() {
+    const CORE_SRC: &str = include_str!("core.rs");
+    const RESET: &str = "self.reset_glyph_atlas_in_place(";
+    const INVALIDATE: &str = "self.row_glyph_cache.invalidate_all()";
+
+    let lines: Vec<&str> = CORE_SRC.lines().collect();
+    let reset_sites: Vec<usize> =
+        lines.iter().enumerate().filter(|(_, l)| l.contains(RESET)).map(|(i, _)| i).collect();
+
+    // Guard against the check silently passing because the call was renamed
+    // and no site matches any more.
+    assert!(
+        reset_sites.len() >= 4,
+        "expected at least the four known atlas reset sites, found {}; \
+         if `reset_glyph_atlas_in_place` was renamed, update this test",
+        reset_sites.len()
+    );
+
+    for &site in &reset_sites {
+        // Scan to the end of the enclosing function: the next line that starts
+        // a new item at method indentation.
+        let mut invalidated = false;
+        for line in lines.iter().skip(site + 1) {
+            let starts_new_item = line.starts_with("    fn ")
+                || line.starts_with("    pub fn ")
+                || line.starts_with("    pub(crate) fn ")
+                || line.starts_with("impl ")
+                || line.starts_with("}");
+            if starts_new_item {
+                break;
+            }
+            if line.contains(INVALIDATE) {
+                invalidated = true;
+                break;
+            }
+        }
+        assert!(
+            invalidated,
+            "core.rs:{} resets the glyph atlas without calling \
+             `row_glyph_cache.invalidate_all()` in the same function.\n\
+             The row cache keys on the atlas eviction count alone, which resets \
+             with the atlas, so surviving entries can match a fresh atlas and \
+             sample tiles they were not built against.\n\
+             Offending line: {}",
+            site + 1,
+            lines[site].trim()
+        );
+    }
+}
