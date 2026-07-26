@@ -103,14 +103,44 @@ static PROCESS_INLINE_MEDIA_BYTES: AtomicUsize = AtomicUsize::new(0);
 /// Number of live pane charges, used to divide the process ceiling fairly.
 static LIVE_INLINE_MEDIA_CHARGES: AtomicUsize = AtomicUsize::new(0);
 
+/// Largest decoded image the retention path can be asked to hold.
+///
+/// Not a policy choice — a consequence of what
+/// [`inline_image_decode_dimensions_allowed`] admits. Stated here because the
+/// residual bound depends on it: a pane is never trimmed below its most recent
+/// image, so the worst case per pane is this, not the floor below.
+pub(super) const MAX_DECODED_INLINE_IMAGE_BYTES: usize =
+    MAX_INLINE_IMAGE_DECODE_SIDE as usize * MAX_INLINE_IMAGE_DECODE_SIDE as usize * 4;
+
 /// Smallest budget a pane is guaranteed regardless of how many panes exist.
 ///
 /// A fair share alone would shrink toward zero as panes multiply, and a pane
 /// with a budget below one image renders nothing — the failure this floor
-/// exists to prevent. Sized to hold one image at the decode limit
-/// (1024×1024×4 bytes), so every pane can always show at least the most recent
-/// one.
+/// exists to prevent.
+///
+/// Holds a 1024×1024 image whole. Note that this is *below* what decode
+/// accepts: [`MAX_DECODED_INLINE_IMAGE_BYTES`] is four times larger. A pane
+/// receiving an image at the decode limit therefore retains more than this
+/// floor, because trimming never evicts a pane's only image — doing so would
+/// leave it rendering nothing, which is the outcome the floor exists to
+/// prevent. The floor bounds a pane holding *many* images; the decode limit
+/// bounds one holding a single large one, and the residual bound has to be
+/// stated in terms of the larger of the two.
 pub(super) const MIN_PANE_INLINE_MEDIA_BYTES: usize = 4 * 1024 * 1024;
+
+/// Worst-case bytes one pane retains under process pressure.
+///
+/// Trimming reduces a pane to its most recent image and no further. That image
+/// may be anything decode accepted, so the per-pane residual is the larger of
+/// the guaranteed floor and the largest image that could be sitting in it.
+#[must_use]
+pub(super) const fn max_pane_residual_bytes() -> usize {
+    if MAX_DECODED_INLINE_IMAGE_BYTES > MIN_PANE_INLINE_MEDIA_BYTES {
+        MAX_DECODED_INLINE_IMAGE_BYTES
+    } else {
+        MIN_PANE_INLINE_MEDIA_BYTES
+    }
+}
 
 /// Read the live process-wide inline-media total.
 #[must_use]
@@ -236,6 +266,17 @@ pub(super) fn trim_inline_images_charged(
     let before = retained_inline_media(images);
     let evicted = take_trimmed_inline_images(images, budget);
     let after = retained_inline_media(images);
+
+    // A pane is never trimmed below its most recent image, so a pane holding
+    // one image at the decode limit legitimately sits above `budget`. Anything
+    // beyond that is not the residual — it is a trim that failed to run.
+    debug_assert!(
+        after.bytes <= budget.max(max_pane_residual_bytes()),
+        "a trimmed pane retained {} bytes, above both its {budget}-byte budget and the \
+         {}-byte single-image residual",
+        after.bytes,
+        max_pane_residual_bytes()
+    );
 
     // Charge exactly what the reporting seam reports, so the figure the
     // governor would see and the figure enforced here cannot drift apart.
