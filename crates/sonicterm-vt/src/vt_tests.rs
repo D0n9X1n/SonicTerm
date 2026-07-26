@@ -833,3 +833,165 @@ fn the_three_retention_seams_are_disjoint_and_must_be_summed() {
         "200 links with long URIs should retain a meaningful amount, got {links_after}"
     );
 }
+
+/// A link written into the pane keeps working after the registry fills.
+///
+/// The registry is append-only in normal operation, so a pane that has seen
+/// `MAX_HYPERLINKS` distinct links used to stop interning for the rest of the
+/// session: every later OSC 8 rendered as plain text with no way to recover.
+/// The links holding those slots are overwhelmingly ones whose cells scrolled
+/// out of scrollback long ago.
+///
+/// This drives well past the cap through a small grid — so the early links
+/// really are gone — and asserts the newest link is still resolvable, which
+/// is what the user sees as a working hyperlink.
+#[test]
+fn a_pane_past_the_link_cap_still_renders_new_links() {
+    use sonicterm_grid::hyperlink::MAX_HYPERLINKS;
+
+    let mut grid = Grid::new(20, 4);
+    grid.set_scrollback_limit(8);
+    let mut parser = Parser::new(grid);
+
+    for index in 0..MAX_HYPERLINKS + 64 {
+        parser.advance(
+            format!("\x1b]8;;https://example.com/{index}\x07link\x1b]8;;\x07\r\n").as_bytes(),
+        );
+    }
+
+    parser.advance(b"\x1b]8;;https://example.com/final\x07final\x1b]8;;\x07");
+
+    // Assert on the cell the final link was written to, not the parser's
+    // open-span state: the close sequence above correctly clears the latter,
+    // while the cell is what the renderer draws and the user clicks. Search
+    // that row specifically — earlier rows still hold earlier links.
+    let final_row = parser.grid().cursor.row;
+    let hid = parser.grid().row(final_row).iter().find_map(|cell| cell.hyperlink()).unwrap_or_else(
+        || {
+            panic!(
+                "a link after {MAX_HYPERLINKS} others must still reach a cell; registry holds {}",
+                parser.hyperlinks().len()
+            )
+        },
+    );
+    assert_eq!(
+        parser.hyperlinks().lookup(hid).map(|link| link.uri.as_str()),
+        Some("https://example.com/final"),
+        "the interned id must resolve to the URI the application sent"
+    );
+    assert!(
+        parser.hyperlinks().len() <= MAX_HYPERLINKS,
+        "reclamation must not push the registry past its own cap"
+    );
+}
+
+/// Reclamation never frees a link the user can still see.
+///
+/// Both the visible screen and retained scrollback are live: a link scrolled
+/// off screen but still within history is one the user reaches by scrolling
+/// back, so freeing it would break a link that is still on display.
+#[test]
+fn reclamation_keeps_visible_scrollback_and_open_links() {
+    use sonicterm_grid::hyperlink::MAX_HYPERLINKS;
+
+    let mut grid = Grid::new(20, 4);
+    grid.set_scrollback_limit(64);
+    let mut parser = Parser::new(grid);
+
+    parser.advance(b"\x1b]8;;https://example.com/scrolled\x07history\x1b]8;;\x07\r\n");
+    let scrollback_link = parser
+        .grid()
+        .row(0)
+        .iter()
+        .find_map(|cell| cell.hyperlink())
+        .expect("the first row must carry the link just written");
+
+    // Push it into scrollback but keep it within the retained history.
+    for _ in 0..6 {
+        parser.advance(b"filler\r\n");
+    }
+    parser.advance(b"\x1b]8;;https://example.com/visible\x07visible\x1b]8;;\x07\r\n");
+    let visible_link = parser
+        .grid()
+        .rows_iter()
+        .flat_map(sonicterm_grid::grid::Row::iter)
+        .find_map(|cell| cell.hyperlink())
+        .expect("a visible row must carry the second link");
+
+    // Force the registry to its cap so the next intern triggers a sweep.
+    for index in 0..MAX_HYPERLINKS + 8 {
+        parser.advance(format!("\x1b]8;id=f{index};https://example.com/f{index}\x07").as_bytes());
+    }
+
+    for (label, hid) in [("scrollback", scrollback_link), ("visible", visible_link)] {
+        assert!(
+            parser.hyperlinks().lookup(hid).is_some(),
+            "reclamation freed the {label} link, which is still referenced"
+        );
+    }
+}
+
+/// A full-screen program's links do not survive as garbage, but the primary
+/// screen behind it does.
+///
+/// While the alt screen is active the grid holds the *primary* the user will
+/// return to. A sweep that walked only the live screen would free every link
+/// on the screen behind it, and they would come back dead the moment the
+/// program exits.
+#[test]
+fn reclamation_reaches_the_screen_behind_the_alt_buffer() {
+    use sonicterm_grid::hyperlink::MAX_HYPERLINKS;
+
+    let mut parser = Parser::new(Grid::new(20, 4));
+    parser.advance(b"\x1b]8;;https://example.com/primary\x07primary\x1b]8;;\x07");
+    let primary_link = parser
+        .grid()
+        .row(0)
+        .iter()
+        .find_map(|cell| cell.hyperlink())
+        .expect("the primary screen must carry the link");
+
+    parser.advance(b"\x1b[?1049h");
+    assert!(parser.grid().is_alt(), "precondition: the alt screen is active");
+
+    for index in 0..MAX_HYPERLINKS + 8 {
+        parser.advance(format!("\x1b]8;id=a{index};https://example.com/a{index}\x07").as_bytes());
+    }
+
+    assert!(
+        parser.hyperlinks().lookup(primary_link).is_some(),
+        "a sweep during alt-screen use freed a link the primary screen still shows"
+    );
+
+    parser.advance(b"\x1b[?1049l");
+    assert!(!parser.grid().is_alt());
+    assert_eq!(
+        parser.grid().row(0).iter().find_map(|cell| cell.hyperlink()),
+        Some(primary_link),
+        "the restored primary screen must still reference its link"
+    );
+    assert!(
+        parser.hyperlinks().lookup(primary_link).is_some(),
+        "the restored link must still resolve after leaving the alt screen"
+    );
+}
+
+/// RIS drops every interned link.
+///
+/// A full reset erases every screen and the alt buffer, so no cell can still
+/// reference an interned link. Retaining them would leave a fresh terminal
+/// carrying the previous session's entire link set against its cap.
+#[test]
+fn ris_clears_the_hyperlink_registry() {
+    let mut parser = Parser::new(Grid::new(20, 4));
+    for index in 0..64 {
+        parser
+            .advance(format!("\x1b]8;;https://example.com/{index}\x07link\x1b]8;;\x07").as_bytes());
+    }
+    assert!(!parser.hyperlinks().is_empty(), "precondition: links are interned");
+
+    parser.advance(b"\x1bc");
+
+    assert!(parser.hyperlinks().is_empty(), "RIS must drop every interned link");
+    assert_eq!(parser.hyperlinks().retained_bytes(), 0);
+}

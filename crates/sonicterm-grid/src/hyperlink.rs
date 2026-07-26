@@ -4,7 +4,7 @@
 //! duplicate URI strings across thousands of cells. The [`HyperlinkRegistry`]
 //! interns `(id, uri)` pairs and hands out stable ids.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // `HyperlinkId` lives in `sonicterm-types` so value types like `Cell` can carry
 // it without depending on this crate. Re-exported for source compatibility.
@@ -100,6 +100,57 @@ impl HyperlinkRegistry {
     /// registry actually admits rather than a second estimate of it.
     pub fn retained_bytes(&self) -> usize {
         self.retained_bytes
+    }
+
+    /// Drop every entry whose id is not in `live`, returning the number freed.
+    ///
+    /// Admission is append-only in normal operation, so without this a pane
+    /// that has seen [`MAX_HYPERLINKS`] distinct links stops interning
+    /// permanently: [`Self::try_intern`] returns `None`, [`Self::intern`]
+    /// hands back the reserved invalid id `0`, and every subsequent OSC 8
+    /// renders as unlinked text for the rest of the session. The slots are
+    /// held overwhelmingly by links whose cells scrolled out of scrollback
+    /// long ago, so reclaiming them restores a feature the user is still
+    /// asking for.
+    ///
+    /// `live` must be the *complete* set of referencing ids. Freeing an id a
+    /// cell still holds silently breaks a link the user can see, which is a
+    /// worse defect than the exhaustion this repairs.
+    ///
+    /// Both maps are freed together and `retained_bytes` is decremented by the
+    /// same `(id + uri) * 2` charge admission applied, so freeing genuinely
+    /// reopens headroom rather than only releasing memory.
+    pub fn retain_live(&mut self, live: &HashSet<HyperlinkId>) -> usize {
+        let before = self.by_id.len();
+        self.by_id.retain(|hid, _| live.contains(hid));
+        if self.by_id.len() == before {
+            return 0;
+        }
+
+        self.by_key.retain(|_, hid| live.contains(hid));
+
+        // Recompute rather than subtract per entry: the charge is a pure
+        // function of the retained keys, so recomputing cannot drift from the
+        // figure admission enforces the way accumulated subtractions can.
+        self.retained_bytes = self
+            .by_key
+            .keys()
+            .map(|(id, uri)| {
+                id.as_ref().map_or(0, String::len).saturating_add(uri.len()).saturating_mul(2)
+            })
+            .fold(0usize, usize::saturating_add);
+
+        before - self.by_id.len()
+    }
+
+    /// Drop every entry unconditionally.
+    ///
+    /// For transitions that invalidate every referencing cell at once, where
+    /// scanning to prove what is live would be wasted work.
+    pub fn clear(&mut self) {
+        self.by_key.clear();
+        self.by_id.clear();
+        self.retained_bytes = 0;
     }
 }
 
