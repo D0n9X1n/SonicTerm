@@ -594,7 +594,89 @@ fn zero_width_cluster_bytes_are_bounded_per_cell() {
 }
 
 #[test]
-#[ignore = "v120-invariant-baseline:v120_grid_aggregate_retention_has_one_governor:WP-GRID"]
 fn v120_grid_aggregate_retention_has_one_governor() {
-    panic!("baseline invariant requires WP-GRID aggregate governor");
+    // The baseline invariant this sentinel was placed for: one figure covers
+    // everything a grid retains, and it is the same figure the grid enforces
+    // its own budget against. Two accounting paths that can disagree is the
+    // failure this exists to prevent.
+    let mut grid = Grid::new(80, 24);
+    let empty = grid.retained_amount();
+    assert_eq!(empty.items, 24, "a fresh grid retains its visible rows");
+
+    grid.set_scrollback_limit(500);
+    for row in 0..600 {
+        for column in 0..40 {
+            grid.put_char(
+                char::from(b'a' + (column % 26) as u8),
+                Color::Default,
+                Color::Default,
+                CellFlags::empty(),
+            );
+            let _ = row;
+        }
+        grid.linefeed();
+    }
+
+    let filled = grid.retained_amount();
+    assert!(filled.bytes > empty.bytes, "scrollback growth is reflected in retained bytes");
+    assert!(filled.items > empty.items, "scrollback growth is reflected in retained rows");
+
+    // The reported figure is the enforced figure: it never exceeds the budget
+    // the grid clamps itself to.
+    let budget_bytes = MAX_GRID_CELLS as usize * std::mem::size_of::<Cell>();
+    assert!(
+        filled.bytes <= budget_bytes,
+        "retained {} bytes exceeds the {} byte budget the grid enforces",
+        filled.bytes,
+        budget_bytes
+    );
+
+    // Alternate-screen storage is counted in the same aggregate rather than
+    // escaping it.
+    grid.enter_alt_screen();
+    for _ in 0..24 {
+        for _ in 0..40 {
+            grid.put_char('z', Color::Default, Color::Default, CellFlags::empty());
+        }
+        grid.linefeed();
+    }
+    let with_alt = grid.retained_amount();
+    assert!(
+        with_alt.items > filled.items,
+        "alternate-screen rows join the aggregate rather than escaping it"
+    );
+    assert!(
+        with_alt.bytes <= budget_bytes,
+        "the aggregate still respects the enforced budget with an alternate screen"
+    );
+
+    // Leaving the alternate screen returns to the primary aggregate.
+    grid.leave_alt_screen();
+    let restored = grid.retained_amount();
+    assert!(restored.items <= with_alt.items, "leaving the alternate screen releases its rows");
+}
+
+#[test]
+fn retained_amount_tracks_trimming_back_down() {
+    // Retention has to fall when history is trimmed, or a governor would hold
+    // a charge for storage that was already given back.
+    let mut grid = Grid::new(40, 10);
+    grid.set_scrollback_limit(200);
+    for _ in 0..250 {
+        for _ in 0..20 {
+            grid.put_char('x', Color::Default, Color::Default, CellFlags::empty());
+        }
+        grid.linefeed();
+    }
+    let grown = grid.retained_amount();
+
+    grid.set_scrollback_limit(10);
+    let trimmed = grid.retained_amount();
+
+    assert!(
+        trimmed.items < grown.items,
+        "trimming history must reduce retained rows: {} -> {}",
+        grown.items,
+        trimmed.items
+    );
 }

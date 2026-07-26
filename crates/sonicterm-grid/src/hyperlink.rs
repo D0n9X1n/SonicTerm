@@ -92,6 +92,15 @@ impl HyperlinkRegistry {
     pub fn is_empty(&self) -> bool {
         self.by_id.is_empty()
     }
+
+    /// Bytes retained by interned hyperlink ids and URIs.
+    ///
+    /// This is the same figure the registry already enforces against
+    /// [`MAX_HYPERLINK_METADATA_BYTES`], exposed so a governor charges what the
+    /// registry actually admits rather than a second estimate of it.
+    pub fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
 }
 
 #[cfg(test)]
