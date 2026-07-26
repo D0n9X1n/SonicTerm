@@ -254,12 +254,21 @@ impl App {
                                         );
                                     }
                                     if !inline_images.is_empty() {
-                                        let mut images = inline_images_thread.lock();
-                                        images.extend(inline_images);
-                                        super::media::trim_inline_images_charged(
-                                            &mut images,
-                                            &inline_media_charge_thread,
-                                        );
+                                        // Evicted images are carried out of
+                                        // the critical section and freed after
+                                        // the guard drops: releasing their
+                                        // pixel buffers takes milliseconds,
+                                        // and the render path waits on this
+                                        // same lock.
+                                        let evicted = {
+                                            let mut images = inline_images_thread.lock();
+                                            images.extend(inline_images);
+                                            super::media::trim_inline_images_charged(
+                                                &mut images,
+                                                &inline_media_charge_thread,
+                                            )
+                                        };
+                                        drop(evicted);
                                     }
                                     if !command_side_effects.is_empty() {
                                         super::append_bounded_command_events(
