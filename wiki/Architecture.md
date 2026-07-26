@@ -49,6 +49,7 @@ those three implementation crates.
 | Layer | Owns | Must not own |
 | --- | --- | --- |
 | `sonicterm-types` | small values and backend-free trait contracts | winit, wgpu, PTY processes |
+| `sonicterm-resource` | owner tree, retained-memory ledger, reservation tokens | the memory itself, or per-seam enforcement policy |
 | `sonicterm-app-core` | pure intents, effects, reducer state, effect ordering | native handles or blocking IO |
 | `sonicterm-io` | local PTY/process boundary and optional SSH transport | terminal interpretation or UI |
 | `sonicterm-vt` / `sonicterm-grid` | ANSI/VT behavior, cells, history, dirty rows | native windows or GPU resources |
@@ -123,6 +124,7 @@ FFI handles.
 
 ```text
 contracts:  sonicterm-types
+accounting: sonicterm-resource (charged by app and GPU; owns no frame data)
 terminal:   sonicterm-io -> sonicterm-vt -> sonicterm-grid
 UI/model:   sonicterm-cfg -> sonicterm-ui -> sonicterm-render-model
 fonts:      font-config/fontconfig/freetype/harfbuzz -> font -> engine/text
@@ -141,6 +143,8 @@ This is a conceptual grouping; the exact edge list is in [Crate Reference](Crate
 | Canonical invariants | `docs/ARCHITECTURE.md`, `docs/MODULES.md` |
 | Intent/effect contracts | `crates/sonicterm-app-core/src/{intent,effect,reducer,state_machine}.rs` |
 | Authoritative app state | `crates/sonicterm-app/src/app/mod.rs` |
+| Resource governor | `crates/sonicterm-resource/src/{ledger,owner,reservation}.rs` |
+| Retention sampling and charging | `crates/sonicterm-app/src/app/retention.rs` |
 | PTY worker and redraw handoff | `crates/sonicterm-app/src/app/spawn_pane.rs` |
 | Render boundary | `crates/sonicterm-render-model/src/{pane_render,inputs,lib}.rs` |
 | Renderer | `crates/sonicterm-gpu/src/core.rs` |
@@ -194,6 +198,7 @@ sonicterm-io ---> sonicterm-vt ---> sonicterm-grid ---+   文本/字体栈
 | 层 | 负责 | 不应负责 |
 | --- | --- | --- |
 | `sonicterm-types` | 小型值类型和后端无关 trait 契约 | winit、wgpu、PTY 进程 |
+| `sonicterm-resource` | owner 树、常驻内存账本、reservation token | 内存本身，或各接缝的限额策略 |
 | `sonicterm-app-core` | 纯数据 intent、effect、reducer state、effect 排序 | 原生句柄或阻塞 IO |
 | `sonicterm-io` | 本地 PTY/进程边界和可选 SSH transport | 终端语义或 UI |
 | `sonicterm-vt` / `sonicterm-grid` | ANSI/VT 行为、单元格、历史、脏行 | 原生窗口或 GPU 资源 |
@@ -251,6 +256,7 @@ Windows 也用 FreeType 作回退。渲染器只接触光栅 tile、字形度量
 
 ```text
 契约：      sonicterm-types
+记账：      sonicterm-resource（由 app 与 GPU 计费；不持有帧数据）
 终端：      sonicterm-io -> sonicterm-vt -> sonicterm-grid
 UI/模型：   sonicterm-cfg -> sonicterm-ui -> sonicterm-render-model
 字体：      font-config/fontconfig/freetype/harfbuzz -> font -> engine/text
@@ -269,6 +275,8 @@ UI/模型：   sonicterm-cfg -> sonicterm-ui -> sonicterm-render-model
 | 规范不变量 | `docs/ARCHITECTURE.md`, `docs/MODULES.md` |
 | Intent/effect 契约 | `crates/sonicterm-app-core/src/{intent,effect,reducer,state_machine}.rs` |
 | 权威应用状态 | `crates/sonicterm-app/src/app/mod.rs` |
+| 资源 governor | `crates/sonicterm-resource/src/{ledger,owner,reservation}.rs` |
+| 常驻内存采样与计费 | `crates/sonicterm-app/src/app/retention.rs` |
 | PTY worker 与重绘交接 | `crates/sonicterm-app/src/app/spawn_pane.rs` |
 | 渲染边界 | `crates/sonicterm-render-model/src/{pane_render,inputs,lib}.rs` |
 | 渲染器 | `crates/sonicterm-gpu/src/core.rs` |
