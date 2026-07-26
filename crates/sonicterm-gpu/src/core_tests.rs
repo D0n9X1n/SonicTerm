@@ -1230,3 +1230,66 @@ fn an_idle_image_atlas_is_released_but_not_on_the_first_idle_frame() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Renderer retention reporting
+//
+// `GpuRenderer` needs a real adapter, so it cannot be built here. The
+// aggregation and class mapping are pure and are tested directly; what a live
+// renderer puts into them is covered by the atlas and software-frame suites
+// that already exist.
+// ---------------------------------------------------------------------------
+
+fn amount(bytes: usize, items: usize) -> ResourceAmount {
+    ResourceAmount { bytes, items }
+}
+
+/// Every part must reach a class, and no part may be charged twice.
+///
+/// The failure this guards is silent under-charging: a part added to
+/// `RendererRetention` without a matching row in `seam_classes` would be
+/// reported by `total()` and never charged, so the governor and the diagnostic
+/// would disagree about the same renderer.
+#[test]
+fn every_reported_part_is_charged_to_exactly_one_class() {
+    let retention = RendererRetention {
+        glyph_atlas: amount(16 * 1024 * 1024, 512),
+        image_atlas: amount(8 * 1024 * 1024, 12),
+        software_frame: amount(4 * 1024 * 1024, 1),
+    };
+
+    let classes = retention.seam_classes();
+    let charged: usize = classes.iter().map(|(_, part)| part.bytes).sum();
+
+    assert_eq!(
+        charged,
+        retention.total().bytes,
+        "the charged classes must account for every reported byte"
+    );
+
+    let distinct: std::collections::HashSet<_> = classes.iter().map(|(class, _)| *class).collect();
+    assert_eq!(distinct.len(), classes.len(), "no class may appear twice, or bytes double-count");
+}
+
+/// The software frame is reported on every platform, zero where absent.
+///
+/// A caller charging renderer classes should not need a `#[cfg(windows)]`
+/// branch to do it — an absent part and an empty part are the same charge.
+#[test]
+fn the_software_frame_part_is_present_on_every_platform() {
+    let retention = RendererRetention::default();
+    let classes = retention.seam_classes();
+
+    assert!(
+        classes.iter().any(|(class, _)| *class == ResourceClass::SoftwareFrame),
+        "SoftwareFrame must be charged on every platform, zero where there is no software path"
+    );
+    assert_eq!(retention.total(), ResourceAmount::default(), "a default renderer holds nothing");
+}
+
+/// An empty renderer charges nothing.
+#[test]
+fn an_empty_renderer_charges_nothing() {
+    let classes = RendererRetention::default().seam_classes();
+    assert!(classes.iter().all(|(_, part)| part.bytes == 0 && part.items == 0));
+}

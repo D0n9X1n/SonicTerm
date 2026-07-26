@@ -240,7 +240,26 @@ pub fn charge_pane_retention(
     >,
     retention: &PaneRetention,
 ) {
-    for (class, amount) in seam_classes(retention) {
+    charge_classes(governor, owner, charges, seam_classes(retention));
+}
+
+/// Move an owner's charges to match a set of class-tagged amounts.
+///
+/// Shared by every owner that charges the governor rather than written once
+/// per owner kind. The resize-in-place behaviour below is the part worth not
+/// duplicating: a release/re-reserve pair on every sample would pass through
+/// zero, and a concurrent reservation could take the budget in that window and
+/// leave this owner unable to re-open its own charge.
+pub fn charge_classes(
+    governor: &sonicterm_resource::ResourceGovernor,
+    owner: sonicterm_types::ResourceOwnerId,
+    charges: &mut std::collections::HashMap<
+        ResourceClass,
+        sonicterm_resource::CommittedReservation,
+    >,
+    classes: impl IntoIterator<Item = (ResourceClass, ResourceAmount)>,
+) {
+    for (class, amount) in classes {
         match charges.entry(class) {
             std::collections::hash_map::Entry::Occupied(mut held) => {
                 let current = held.get().committed_amount();
@@ -254,7 +273,7 @@ pub fn charge_pane_retention(
                         target: "memory",
                         ?error,
                         ?class,
-                        "pane charge could not be resized; the reported figure lags reality"
+                        "charge could not be resized; the reported figure lags reality"
                     );
                 }
             }
@@ -274,7 +293,7 @@ pub fn charge_pane_retention(
                             target: "memory",
                             ?error,
                             ?class,
-                            "pane charge could not be opened; this class is omitted from the ledger"
+                            "charge could not be opened; this class is omitted from the ledger"
                         );
                     }
                 }
