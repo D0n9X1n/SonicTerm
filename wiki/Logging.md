@@ -69,12 +69,14 @@ one `pane retention` line per pane followed by one `session retention` line
 for the whole process. Four figures are reported separately because the
 remedy differs:
 
-| Field | What it covers |
-| --- | --- |
-| `grid_bytes` | cells, scrollback, saved alternate screen |
-| `parser_bytes` | escape sequences being parsed right now |
-| `hyperlink_bytes` | OSC 8 link targets |
-| `inline_media_bytes` | decoded inline images |
+| Field | What it covers | What you can do |
+| --- | --- | --- |
+| `grid_visible_bytes` | the cells currently on screen | nothing — it is the screen |
+| `grid_history_bytes` | scrollback | lower `scrollback` |
+| `grid_alternate_bytes` | the screen saved behind a full-screen program | nothing — it frees itself on exit |
+| `parser_bytes` | escape sequences being parsed right now | nothing — transient |
+| `hyperlink_bytes` | OSC 8 link targets | nothing — reclaimed as links scroll away |
+| `inline_media_bytes` | decoded inline images | lower image usage, or open fewer panes |
 
 Read `largest_seam` first. A total tells you a pane is large; that field tells
 you which subsystem to look at. A pane holding 60 MB of inline images is
@@ -195,15 +197,17 @@ level = "debug"
 ```
 
 `memory` 目标每 30 秒采样一次每个面板占用的内存，为每个面板写入一行
-`pane retention`，随后为整个进程写入一行 `session retention`。四个数值分别
+`pane retention`，随后为整个进程写入一行 `session retention`。各数值分别
 报告，因为对应的处理方式不同：
 
-| 字段 | 含义 |
-| --- | --- |
-| `grid_bytes` | 单元格、回滚缓冲、保存的备用屏幕 |
-| `parser_bytes` | 当前正在解析的转义序列 |
-| `hyperlink_bytes` | OSC 8 链接目标 |
-| `inline_media_bytes` | 已解码的内联图像 |
+| 字段 | 含义 | 可采取的措施 |
+| --- | --- | --- |
+| `grid_visible_bytes` | 当前显示在屏幕上的单元格 | 无 — 这就是屏幕本身 |
+| `grid_history_bytes` | 回滚缓冲 | 调低 `scrollback` |
+| `grid_alternate_bytes` | 全屏程序背后保存的主屏幕 | 无 — 程序退出时自动释放 |
+| `parser_bytes` | 当前正在解析的转义序列 | 无 — 瞬时占用 |
+| `hyperlink_bytes` | OSC 8 链接目标 | 无 — 链接滚出后自动回收 |
+| `inline_media_bytes` | 已解码的内联图像 | 减少图像使用，或减少面板数量 |
 
 先看 `largest_seam`。总量只能说明面板占用大，而该字段指出应当检查哪个子系统。
 占用 60 MB 内联图像的面板属于正常设计；占用 60 MB 网格的面板则不正常。
