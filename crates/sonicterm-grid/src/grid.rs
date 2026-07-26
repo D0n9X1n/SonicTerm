@@ -111,6 +111,15 @@ pub struct Grid {
     /// can compare the current revision with their last-observed value to
     /// skip work when nothing has changed.
     revision: u64,
+    /// Monotonically increasing count of rows dropped from scrollback.
+    ///
+    /// Evicting a row destroys the only references its cells held, so this is
+    /// the signal that per-cell garbage may now exist. Consumers that scan the
+    /// grid to reclaim something — the hyperlink registry does — compare it
+    /// against the value at their last scan to tell "nothing has changed since
+    /// I last looked" from "the grid has moved on". Never decremented, so a
+    /// missed bump costs eagerness, never correctness.
+    scrollback_evicted: u64,
     /// Per-row dirty bitset. `true` means the row has been mutated since
     /// the last `clear_dirty()` and the renderer must re-shape it; `false`
     /// means the renderer may reuse its cached span data for that row.
@@ -141,6 +150,7 @@ impl Grid {
             default: Cell::default(),
             alt_screen: None,
             revision: 0,
+            scrollback_evicted: 0,
             // A freshly created grid is fully dirty: the renderer has
             // never seen it. Once it does its first walk and calls
             // clear_dirty(), the flags drop to all-false.
@@ -295,6 +305,7 @@ impl Grid {
             default: self.default.clone(),
             alt_screen: None,
             revision: 0,
+            scrollback_evicted: 0,
             dirty_rows: vec![true; rows as usize],
             prompts: VecDeque::new(),
             autowrap: self.autowrap,
@@ -324,6 +335,7 @@ impl Grid {
         if self.scrollback.len() > self.scrollback_limit {
             let excess = self.scrollback.len() - self.scrollback_limit;
             self.scrollback.drain(0..excess);
+            self.scrollback_evicted = self.scrollback_evicted.saturating_add(excess as u64);
         }
         compact_scrollback_capacity(&mut self.scrollback);
         self.cursor = saved.cursor;
@@ -367,6 +379,7 @@ impl Grid {
         if self.scrollback.len() > self.scrollback_limit {
             let excess = self.scrollback.len() - self.scrollback_limit;
             self.scrollback.drain(0..excess);
+            self.scrollback_evicted = self.scrollback_evicted.saturating_add(excess as u64);
         }
         compact_scrollback_capacity(&mut self.scrollback);
         // Drop rows that will not survive before widening columns. Otherwise
@@ -435,6 +448,16 @@ impl Grid {
     /// Iterate scrollback rows from oldest to newest.
     pub fn scrollback_iter(&self) -> impl Iterator<Item = &Row> {
         self.scrollback.iter()
+    }
+
+    /// Rows dropped from scrollback over this grid's lifetime.
+    ///
+    /// Monotone. Evicting a row destroys the only references its cells held,
+    /// so a change in this value is the signal that per-cell garbage may now
+    /// exist — which is what lets a reclaimer distinguish "I already scanned
+    /// and found nothing" from "the grid has moved on since I looked".
+    pub fn scrollback_evicted(&self) -> u64 {
+        self.scrollback_evicted
     }
 
     /// Insert every hyperlink id any cell this grid owns still references.
@@ -819,6 +842,7 @@ impl Grid {
                 // PANIC: safe — `len >= limit >= 1` here (limit == 0 handled
                 // above), and a non-empty VecDeque always yields `Some`.
                 let mut recycled = self.scrollback.pop_front().unwrap();
+                self.scrollback_evicted = self.scrollback_evicted.saturating_add(1);
                 // Recycled may itself have been compressed when it was
                 // ejected — force back to Flat before we mutate cells.
                 recycled.ensure_flat();
@@ -1355,6 +1379,7 @@ impl Grid {
         if self.scrollback.len() > self.scrollback_limit {
             let excess = self.scrollback.len() - self.scrollback_limit;
             self.scrollback.drain(0..excess);
+            self.scrollback_evicted = self.scrollback_evicted.saturating_add(excess as u64);
         }
         compact_scrollback_capacity(&mut self.scrollback);
         if let Some(primary) = self.alt_screen.as_mut() {
@@ -1376,6 +1401,7 @@ impl Grid {
         if primary.scrollback.len() > primary.scrollback_limit {
             let excess = primary.scrollback.len() - primary.scrollback_limit;
             primary.scrollback.drain(0..excess);
+            primary.scrollback_evicted = primary.scrollback_evicted.saturating_add(excess as u64);
         }
         compact_scrollback_capacity(&mut primary.scrollback);
     }

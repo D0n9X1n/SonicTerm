@@ -689,6 +689,14 @@ struct Performer {
     events: Vec<VtEvent>,
     hyperlinks: HyperlinkRegistry,
     current_hyperlink: Option<HyperlinkId>,
+    /// Scrollback-eviction count at the last reclaim sweep.
+    ///
+    /// The backoff below is only valid while the grid still looks the way it
+    /// did when the sweep found nothing. Evicting a row turns live links into
+    /// garbage, so a change here releases the backoff immediately rather than
+    /// making the next 256 links wait out a counter set against a grid that no
+    /// longer exists.
+    hyperlink_reclaim_scanned_at: u64,
     /// Rejected OSC 8 links since the last reclaim sweep.
     ///
     /// Bounds how often a full-grid scan may run. When every interned link is
@@ -782,6 +790,7 @@ impl Performer {
             events: Vec::new(),
             hyperlinks: HyperlinkRegistry::new(),
             current_hyperlink: None,
+            hyperlink_reclaim_scanned_at: 0,
             hyperlink_reclaim_backoff: 0,
             saved_cursor: None,
             bracketed_paste: false,
@@ -1653,8 +1662,21 @@ impl Perform for Performer {
                             // are all still on screen the sweep frees nothing,
                             // and retrying per link would scan the whole grid
                             // per link.
+                            //
+                            // It is released as soon as scrollback evicts a
+                            // row, because that is the event that turns live
+                            // links into garbage. A blind countdown outlived
+                            // the state it was set on: scrolling every link
+                            // out of history made the whole registry
+                            // reclaimable while the next links still took the
+                            // skip branch and rendered as plain text.
+                            let evicted = self.grid.scrollback_evicted();
+                            if evicted != self.hyperlink_reclaim_scanned_at {
+                                self.hyperlink_reclaim_backoff = 0;
+                            }
                             if self.hyperlink_reclaim_backoff == 0 {
                                 let freed = self.reclaim_hyperlinks();
+                                self.hyperlink_reclaim_scanned_at = evicted;
                                 self.hyperlink_reclaim_backoff =
                                     if freed > 0 { 0 } else { HYPERLINK_RECLAIM_BACKOFF_LINKS };
                                 if freed > 0 {

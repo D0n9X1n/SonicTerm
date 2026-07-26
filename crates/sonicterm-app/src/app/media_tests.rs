@@ -26,7 +26,7 @@ fn retained_inline_images_respect_count_and_byte_budgets() {
     let chunk = MAX_RETAINED_INLINE_IMAGE_BYTES / 2;
     let mut images = vec![image(1, chunk), image(2, chunk), image(3, chunk)];
 
-    trim_inline_images(&mut images);
+    trim_inline_images_to(&mut images, MAX_RETAINED_INLINE_IMAGE_BYTES);
 
     assert_eq!(images.iter().map(|image| image.id).collect::<Vec<_>>(), vec![2, 3]);
     assert!(
@@ -37,7 +37,7 @@ fn retained_inline_images_respect_count_and_byte_budgets() {
 
 /// One pane's inline-media retention is bounded; the sum across panes is not.
 ///
-/// `trim_inline_images` enforces [`MAX_RETAINED_INLINE_IMAGE_BYTES`] against a
+/// `trim_inline_images_to` enforces [`MAX_RETAINED_INLINE_IMAGE_BYTES`] against a
 /// single pane's vector, and each pane owns its own. Nothing composes them, so
 /// a session's total is `panes × 64 MiB` with every pane individually
 /// compliant. That is the shape behind the reported multi-gigabyte growth:
@@ -55,7 +55,7 @@ fn per_pane_media_is_capped_but_the_aggregate_is_not() {
     while retained_inline_media(&pane).bytes < MAX_RETAINED_INLINE_IMAGE_BYTES && id <= 200 {
         id += 1;
         pane.push(image(id, 1024 * 1024));
-        trim_inline_images(&mut pane);
+        trim_inline_images_to(&mut pane, MAX_RETAINED_INLINE_IMAGE_BYTES);
     }
 
     let per_pane = retained_inline_media(&pane);
@@ -189,4 +189,208 @@ fn a_charge_outlives_its_worker_and_is_released_with_the_pane() {
         before_pane_close - this_pane,
         "closing the pane must return exactly what it retained"
     );
+}
+
+/// A new pane still renders images when other panes hold the ceiling.
+///
+/// The eviction loop's exit condition is a *process-wide* total, but its body
+/// can only shrink the *calling* pane. Four panes at the 64 MiB per-pane cap
+/// reach the 256 MiB process ceiling exactly, so a fifth pane evicts every
+/// image it decodes — down to empty — and still cannot satisfy the condition.
+///
+/// The consequence is the worst kind: the pane the user is actively looking at
+/// renders nothing, permanently, while idle panes they cannot see keep the
+/// whole budget. Principle 1 says the active pane must get its share.
+#[test]
+fn a_new_pane_renders_images_even_when_others_hold_the_ceiling() {
+    let _serialised = MEDIA_COUNTER_LOCK.lock();
+    const IMAGE_BYTES: usize = 4 * 1024 * 1024;
+
+    // Four panes fill the process ceiling exactly: 4 x 64 MiB = 256 MiB.
+    let mut holders: Vec<(Vec<InlineImage>, SharedInlineMediaCharge)> = Vec::new();
+    let mut id = 0u64;
+    for _ in 0..4 {
+        let mut images = Vec::new();
+        let charge = new_inline_media_charge();
+        for _ in 0..20 {
+            id += 1;
+            images.push(image(id, IMAGE_BYTES));
+            trim_inline_images_charged(&mut images, &charge);
+        }
+        holders.push((images, charge));
+    }
+
+    // A fifth pane decodes one image. It must be able to show it.
+    let mut newcomer = Vec::new();
+    let newcomer_charge = new_inline_media_charge();
+    id += 1;
+    newcomer.push(image(id, IMAGE_BYTES));
+    trim_inline_images_charged(&mut newcomer, &newcomer_charge);
+
+    assert!(
+        !newcomer.is_empty(),
+        "a new pane must retain at least one image; it evicted everything while \
+         {} idle panes held {} bytes",
+        holders.len(),
+        process_inline_media_bytes()
+    );
+
+    // And it must keep working, not blank on every subsequent image.
+    for _ in 0..5 {
+        id += 1;
+        newcomer.push(image(id, IMAGE_BYTES));
+        trim_inline_images_charged(&mut newcomer, &newcomer_charge);
+        assert!(
+            !newcomer.is_empty(),
+            "the new pane must keep rendering images, not blank on every decode"
+        );
+    }
+}
+
+/// Every pane gets a share; none is starved to nothing.
+#[test]
+fn many_panes_each_keep_a_share_of_the_media_budget() {
+    let _serialised = MEDIA_COUNTER_LOCK.lock();
+    const PANES: usize = 12;
+    const IMAGE_BYTES: usize = 4 * 1024 * 1024;
+
+    let mut panes: Vec<(Vec<InlineImage>, SharedInlineMediaCharge)> =
+        (0..PANES).map(|_| (Vec::new(), new_inline_media_charge())).collect();
+
+    let mut id = 0u64;
+    for _ in 0..24 {
+        for (images, charge) in &mut panes {
+            id += 1;
+            images.push(image(id, IMAGE_BYTES));
+            trim_inline_images_charged(images, charge);
+        }
+    }
+
+    for (index, (images, _)) in panes.iter().enumerate() {
+        assert!(
+            !images.is_empty(),
+            "pane {index} of {PANES} was starved to nothing; every pane must keep a share"
+        );
+    }
+}
+
+/// The process total stays within a stateable bound when panes are created
+/// one at a time and then left idle.
+///
+/// This is the sequence a real session follows, and it is not what the uniform
+/// tests above exercise — they drive every pane on every round, so every pane
+/// re-trims against the current budget. In reality a pane fills up, the user
+/// moves on, and it never decodes again.
+///
+/// A fair share alone does not converge under that sequence: only a decoding
+/// pane re-trims, so panes admitted earlier keep the larger budget they were
+/// admitted under. Measured at **616 MiB for 20 panes** against a 256 MiB
+/// ceiling — growth of `ceiling x (1 + ln(N/4))`, which is not a bound.
+///
+/// Trimming to the floor while over the ceiling makes every decode return
+/// memory rather than merely capping the newcomer. The residual is
+/// irreducible: principle 1 requires every pane to render at least its newest
+/// image, so N panes cost at least N x the floor. That is a bound that can be
+/// stated, and this test states it.
+#[test]
+fn the_process_total_stays_within_a_stateable_bound_as_panes_accumulate() {
+    let _serialised = MEDIA_COUNTER_LOCK.lock();
+    const IMAGE_BYTES: usize = 4 * 1024 * 1024;
+    const PANES: usize = 20;
+
+    let baseline = process_inline_media_bytes();
+    let mut panes: Vec<(Vec<InlineImage>, SharedInlineMediaCharge)> = Vec::new();
+    let mut id = 0u64;
+    let mut peak = 0usize;
+
+    for _ in 0..PANES {
+        let mut images = Vec::new();
+        let charge = new_inline_media_charge();
+        // Fill to budget, then never decode again — the idle case.
+        for _ in 0..20 {
+            id += 1;
+            images.push(image(id, IMAGE_BYTES));
+            trim_inline_images_charged(&mut images, &charge);
+            assert!(
+                !images.is_empty(),
+                "no pane may be starved to nothing, even under process pressure"
+            );
+        }
+        panes.push((images, charge));
+        peak = peak.max(process_inline_media_bytes() - baseline);
+    }
+
+    // Ceiling, plus one floor-sized allocation for each pane past the point
+    // where pressure begins. Nothing weaker than this is honest, and nothing
+    // stronger is achievable while every pane still renders.
+    let bound = MAX_PROCESS_INLINE_MEDIA_BYTES + PANES * MIN_PANE_INLINE_MEDIA_BYTES;
+    assert!(
+        peak <= bound,
+        "peak {peak} ({} MiB) exceeded the stateable bound {bound} ({} MiB) \
+         for {PANES} panes",
+        peak / 1024 / 1024,
+        bound / 1024 / 1024
+    );
+
+    // Guard against the assertion being trivially true: the bound must be a
+    // small multiple of the ceiling, not an unbounded curve.
+    assert!(
+        bound < MAX_PROCESS_INLINE_MEDIA_BYTES * 2,
+        "the bound itself must stay close to the ceiling: {bound}"
+    );
+
+    drop(panes);
+    assert_eq!(
+        process_inline_media_bytes(),
+        baseline,
+        "dropping every pane must return the process total to its baseline"
+    );
+}
+
+/// The worker's staging vector is bounded by the pane's budget, not by the
+/// fixed per-pane constant.
+///
+/// The VT worker decodes into a local vector and merges it into the pane's
+/// charged store only at the end of the batch, so that vector is **uncharged**
+/// while it fills. Trimming it against the fixed constant let a pane stage far
+/// more than it could ever retain: with many panes live the fair share is a
+/// fraction of the constant, so every pane decoding at once could hold
+/// hundreds of megabytes that no ceiling saw.
+///
+/// The staging vector must therefore never hold more than the merge is going
+/// to let the pane keep.
+#[test]
+fn the_staging_vector_is_bounded_by_the_pane_budget() {
+    let _serialised = MEDIA_COUNTER_LOCK.lock();
+    const IMAGE_BYTES: usize = 4 * 1024 * 1024;
+    const PANES: usize = 20;
+
+    // Enough live charges that the fair share is well below the fixed
+    // per-pane constant — otherwise the two are indistinguishable and the
+    // test would pass against the defect.
+    let charges: Vec<SharedInlineMediaCharge> =
+        (0..PANES).map(|_| new_inline_media_charge()).collect();
+    let budget = pane_inline_media_budget();
+    assert!(
+        budget < MAX_RETAINED_INLINE_IMAGE_BYTES,
+        "precondition: the fair share ({budget}) must be below the fixed constant \
+         ({MAX_RETAINED_INLINE_IMAGE_BYTES}), or this test cannot discriminate"
+    );
+
+    // One worker stages a burst, as it would from a single PTY chunk.
+    let mut staged: Vec<InlineImage> = Vec::new();
+    for id in 1..=32u64 {
+        staged.push(image(id, IMAGE_BYTES));
+        trim_staged_inline_images(&mut staged);
+
+        let held = retained_inline_media(&staged).bytes;
+        assert!(
+            held <= budget.max(IMAGE_BYTES),
+            "staging held {held} bytes against a {budget}-byte pane budget; \
+             uncharged staging must not exceed what the merge will keep"
+        );
+    }
+
+    assert!(!staged.is_empty(), "staging must still retain the newest image");
+    drop(charges);
 }
