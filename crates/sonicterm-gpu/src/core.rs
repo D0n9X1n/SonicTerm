@@ -18,6 +18,7 @@ use sonicterm_render_model::boundary::cfg::theme::{Color as ThemeColor, Theme};
 use sonicterm_render_model::boundary::grid::grid::{
     bounded_grid_size, Cell, CellFlags, Color, Grid, UnderlineStyle,
 };
+use sonicterm_types::{ResourceAmount, ResourceClass};
 use wgpu::{
     CommandEncoderDescriptor, CompositeAlphaMode, DeviceDescriptor, Instance, InstanceDescriptor,
     LoadOp, Operations, PresentMode, RenderPassColorAttachment, RenderPassDescriptor,
@@ -1475,6 +1476,45 @@ pub fn emit_overlay_text_glyphs(
         }
     }
 }
+/// CPU-side storage a renderer holds, split by owning class.
+///
+/// Deliberately not a single total. The three parts have different lifetimes
+/// and different remedies: atlases grow with the glyph and image set and are
+/// evictable, while a software frame is sized by the window and is not.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RendererRetention {
+    /// Rasterized glyph pixels mirrored on the CPU, and resident entries.
+    pub glyph_atlas: ResourceAmount,
+    /// Decoded inline-image pixels mirrored on the CPU, and resident entries.
+    pub image_atlas: ResourceAmount,
+    /// Windows software presentation buffer. Zero elsewhere.
+    pub software_frame: ResourceAmount,
+}
+
+impl RendererRetention {
+    /// Class-tagged parts, ready to charge.
+    #[must_use]
+    pub fn seam_classes(&self) -> [(ResourceClass, ResourceAmount); 3] {
+        [
+            (ResourceClass::GlyphAtlas, self.glyph_atlas),
+            (ResourceClass::InlineMediaRetained, self.image_atlas),
+            (ResourceClass::SoftwareFrame, self.software_frame),
+        ]
+    }
+
+    /// Sum of every part.
+    #[must_use]
+    pub fn total(&self) -> ResourceAmount {
+        [self.glyph_atlas, self.image_atlas, self.software_frame].into_iter().fold(
+            ResourceAmount::default(),
+            |acc, part| ResourceAmount {
+                bytes: acc.bytes.saturating_add(part.bytes),
+                items: acc.items.saturating_add(part.items),
+            },
+        )
+    }
+}
+
 impl GpuRenderer {
     /// Build a renderer bound to `window`. Creates the wgpu surface +
     /// device + pipelines, the cosmic-text font system, the glyph atlas,
@@ -2102,6 +2142,44 @@ impl GpuRenderer {
     /// text cursor when `false`. Bumps the FrameKey via
     /// [`Self::last_frame_key`] so the next render is not skipped by
     /// the cache.
+    /// Host-side storage this renderer holds, split by the class that owns it.
+    ///
+    /// Every figure here already existed and was unreachable from outside the
+    /// crate: `GlyphAtlas::retained_amount` and
+    /// `WindowsSoftwareFrame::retained_bytes` were both written, tested, and
+    /// called by nothing. What was missing was a way for the owner of the
+    /// governor to read them, which is what this provides.
+    ///
+    /// **CPU-side only.** GPU textures and buffers are not included: their
+    /// memory belongs to the driver, `wgpu` exposes no size accounting for
+    /// them, and a figure invented here would be a guess presented as a
+    /// measurement. The atlases are the CPU mirrors that back those textures,
+    /// so they track the same content without claiming to measure VRAM.
+    #[must_use]
+    pub fn retained_amounts(&self) -> RendererRetention {
+        RendererRetention {
+            glyph_atlas: self.glyph_atlas.retained_amount(),
+            image_atlas: self.image_atlas.retained_amount(),
+            software_frame: self.software_frame_retained_amount(),
+        }
+    }
+
+    #[cfg(windows)]
+    fn software_frame_retained_amount(&self) -> ResourceAmount {
+        self.software_frame.as_ref().map_or_else(ResourceAmount::default, |frame| ResourceAmount {
+            bytes: frame.retained_bytes(),
+            items: usize::from(frame.retained_bytes() > 0),
+        })
+    }
+
+    /// Non-Windows builds have no software presentation path, so this is
+    /// always zero rather than absent — a caller charging it should not need
+    /// a platform branch to do so.
+    #[cfg(not(windows))]
+    fn software_frame_retained_amount(&self) -> ResourceAmount {
+        ResourceAmount::default()
+    }
+
     pub fn set_window_focused(&mut self, focused: bool) {
         if self.window_focused == focused {
             return;
