@@ -34,6 +34,7 @@ When touching a crate, also read that crate's local `CLAUDE.md`.
 | Crate | Role |
 | --- | --- |
 | `sonicterm-types` | Shared contract types and trait seams. |
+| `sonicterm-resource` | Resource governor: ledger, owner hierarchy, reservations, reaper. |
 | `sonicterm-vt` | VT/ANSI parsing. |
 | `sonicterm-grid` | Cells, scrollback, dirty rows. |
 | `sonicterm-cfg` | Config, themes, keymaps, URL safety. |

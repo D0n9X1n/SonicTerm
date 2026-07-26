@@ -5,6 +5,7 @@ Developer documentation: [Architecture](ARCHITECTURE.md) · **Modules** · [Logg
 | Crate | Role |
 | --- | --- |
 | `sonicterm-types` | Contract crate: shared value types and trait seams. |
+| `sonicterm-resource` | Resource governor: sharded ledger, owner hierarchy, reservation tokens, bounded reaper supervisor. |
 | `sonicterm-vt` | VT/ANSI parser and terminal protocol handling. |
 | `sonicterm-grid` | Cells, scrollback, wide characters, dirty rows. |
 | `sonicterm-cfg` | TOML config, themes, keymaps, URL safety. |

@@ -11,7 +11,7 @@
 
 ```text
 Cargo.toml                 workspace members, shared version/dependencies/lints
-crates/                    22 first-party Rust crates
+crates/                    23 first-party Rust crates
 assets/                    fonts, themes, keymaps, icons, i18n, screenshots
 docs/                      canonical architecture/logging/modules/packaging docs
 wiki/                      canonical bilingual user documentation
@@ -242,7 +242,7 @@ separate wiki repository.
 
 ```text
 Cargo.toml                 workspace member、共享版本/依赖/lint
-crates/                    22 个第一方 Rust crate
+crates/                    23 个第一方 Rust crate
 assets/                    字体、主题、keymap、icon、i18n、截图
 docs/                      规范架构/日志/module/打包文档
 wiki/                      规范双语用户文档
