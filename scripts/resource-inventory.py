@@ -151,6 +151,9 @@ ROWS: Final[tuple[tuple[str, ...], ...]] = (
 TEST_ATTRIBUTE = re.compile(
     r'#\[ignore\s*=\s*"v120-invariant-baseline:([^:"]+):([^:"]+)"\]'
 )
+# A sentinel a Wave 2 package has satisfied: the gate is gone and the test runs.
+# Matched by name so the row stays accounted for after its package implements it.
+IMPLEMENTED_TEST = re.compile(r"\bfn\s+(v120_[a-z0-9_]+)\s*\(")
 PACKAGE_TOKEN = re.compile(r"\bWP-[A-Z0-9-]+\b")
 
 
@@ -186,17 +189,30 @@ def validate_rows(root: Path) -> None:
             )
 
     source_test_ids: dict[str, str] = {}
+    implemented_test_ids: set[str] = set()
     crates = root / "crates"
     for path in sorted(crates.glob("*/src/*_tests.rs")):
-        for test_id, package in TEST_ATTRIBUTE.findall(path.read_text(encoding="utf-8")):
+        text = path.read_text(encoding="utf-8")
+        for test_id, package in TEST_ATTRIBUTE.findall(text):
             if test_id in source_test_ids:
                 raise ValueError(f"duplicate gated test ID in source: {test_id}")
             source_test_ids[test_id] = package
+        implemented_test_ids.update(IMPLEMENTED_TEST.findall(text))
 
     for row in ROWS:
         test_id, package = row[10], row[11]
         if test_id not in source_test_ids:
-            raise ValueError(f"gated test ID does not exist in source: {test_id}")
+            # A Wave 2 package satisfies its baseline invariant by implementing
+            # the sentinel and removing the gate. That is the completion
+            # condition, so an implemented sentinel is success rather than a
+            # missing row — but it still has to exist, because deleting one
+            # would quietly drop an accepted acceptance criterion.
+            if test_id in implemented_test_ids:
+                continue
+            raise ValueError(
+                f"gated test ID does not exist in source, "
+                f"neither gated nor implemented: {test_id}"
+            )
         if source_test_ids[test_id] != package:
             raise ValueError(
                 f"gated test package mismatch for {test_id}: "
