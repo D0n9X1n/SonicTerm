@@ -519,13 +519,78 @@ pub struct WarmWindow {
     pub created_at: Instant,
 }
 
+/// Closes a governor owner when the thing that owned it drops.
+///
+/// The charge on a pane is released by `CommittedReservation::Drop`, and its
+/// doc comment states why that is correct: *there is no teardown site to
+/// forget*. The owner beside it had no such guarantee — it was a plain
+/// `Option<ResourceOwnerId>` that vanished when the pane dropped, leaving the
+/// governor holding a record that never closed.
+///
+/// Measured before this: 80 of 80 owners still `Open` after 40 create/destroy
+/// cycles, and `OwnerRegistry` has `get` and `insert` and **no `remove`**, so
+/// each one is retained for the life of the process along with its `RwLock`,
+/// `Mutex`, and two `EnumMap`s over every resource class.
+///
+/// Six pane-removal sites across four files reach `panes.remove`. Patching
+/// each is how the original defect happened; this makes the close a property
+/// of ownership instead.
+pub(crate) struct OwnerGuard {
+    governor: ResourceGovernor,
+    owner: ResourceOwnerId,
+}
+
+impl OwnerGuard {
+    /// Take responsibility for closing `owner` when this drops.
+    pub(crate) fn new(governor: ResourceGovernor, owner: ResourceOwnerId) -> Self {
+        Self { governor, owner }
+    }
+
+    /// The owner this guard will close.
+    pub(crate) fn id(&self) -> ResourceOwnerId {
+        self.owner
+    }
+}
+
+impl std::fmt::Debug for OwnerGuard {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("OwnerGuard").field("owner", &self.owner).finish()
+    }
+}
+
+impl Drop for OwnerGuard {
+    fn drop(&mut self) {
+        // Charges must already be gone: `finish_close` refuses an owner still
+        // holding them. `PaneState` declares `charges` before `owner`, and
+        // Rust drops fields in declaration order, so the reservations release
+        // before this runs.
+        if let Err(error) = self
+            .governor
+            .begin_close(self.owner)
+            .and_then(|()| self.governor.finish_close(self.owner))
+        {
+            tracing::warn!(
+                target: "memory",
+                ?error,
+                owner = ?self.owner,
+                "owner did not close on drop; its record is retained for the process lifetime"
+            );
+        }
+    }
+}
+
 pub struct WindowState {
     /// This window's owner in the governor hierarchy.
     ///
     /// `None` for synthetic windows built by tests that never registered one.
     /// Production windows always have it; the option exists so a test seam
     /// cannot silently register a phantom owner that never closes.
-    pub(crate) owner: Option<ResourceOwnerId>,
+    ///
+    /// An [`OwnerGuard`] for the same reason the pane's is: the window is
+    /// removed from `self.windows` at three sites across two files, and the
+    /// close has to be a property of ownership rather than something each of
+    /// them remembers.
+    pub(crate) owner: Option<OwnerGuard>,
     /// Phase B classification — see [`WindowRole`].
     pub role: WindowRole,
     /// Phase B2 PR-B2-0: promoted from `Arc<Window>` to
@@ -1347,7 +1412,12 @@ pub struct PaneState {
     /// construction: `PaneState::new` is called from a dozen sites that have
     /// no governor in scope, and threading one through all of them would be a
     /// larger change than the ownership it establishes.
-    pub(crate) owner: Option<ResourceOwnerId>,
+    ///
+    /// Held as an [`OwnerGuard`] so the owner closes when the pane drops.
+    /// Declared *after* `charges` deliberately: Rust drops fields in
+    /// declaration order, and `finish_close` refuses an owner that still holds
+    /// charges, so the reservations must release first.
+    pub(crate) owner: Option<OwnerGuard>,
     pub parser: Arc<Mutex<Parser>>,
     /// Capture progress seen at the previous retention sample.
     ///
@@ -3778,6 +3848,9 @@ impl App {
 
     fn register_window_owner_inner(&mut self, id: WindowId) {
         let root = self.governor.root_owner();
+        // Cloned before the window borrow: `ResourceGovernor` is a handle over
+        // an `Arc<Ledger>`, so this shares the ledger rather than copying it.
+        let governor_handle = self.governor.clone();
         let Some(window) = self.windows.get(&id) else { return };
         if window.owner.is_some() {
             return;
@@ -3787,7 +3860,7 @@ impl App {
         match owner {
             Ok(owner) => {
                 if let Some(window) = self.windows.get_mut(&id) {
-                    window.owner = Some(owner);
+                    window.owner = Some(OwnerGuard::new(governor_handle, owner));
                 }
             }
             Err(error) => {
@@ -3890,7 +3963,7 @@ impl App {
     #[doc(hidden)]
     pub fn __test_pane_owner_limit(&self, window: WindowId) -> Option<usize> {
         let pane = self.windows.get(&window)?.panes.values().next()?;
-        let owner = pane.owner?;
+        let owner = pane.owner.as_ref()?.id();
         self.governor.snapshot(owner).ok().map(|snapshot| snapshot.owner_bytes_limit)
     }
 
@@ -3941,7 +4014,7 @@ impl App {
     /// Test-only: a window's owner id, if it registered one.
     #[doc(hidden)]
     pub fn __test_window_owner(&self, id: WindowId) -> Option<ResourceOwnerId> {
-        self.windows.get(&id).and_then(|window| window.owner)
+        self.windows.get(&id).and_then(|window| window.owner.as_ref()).map(OwnerGuard::id)
     }
 
     /// Test-only: how many panes in a window have owners.
@@ -3962,8 +4035,8 @@ impl App {
                 window
                     .panes
                     .values()
-                    .filter_map(|pane| pane.owner)
-                    .map(|owner| owner.get())
+                    .filter_map(|pane| pane.owner.as_ref())
+                    .map(|owner| owner.id().get())
                     .collect()
             })
             .unwrap_or_default();
@@ -3992,7 +4065,9 @@ impl App {
         let window_ids: Vec<WindowId> = self.windows.keys().copied().collect();
         for window_id in window_ids {
             let Some(window) = self.windows.get(&window_id) else { continue };
-            let Some(window_owner) = window.owner else { continue };
+            let Some(window_owner) = window.owner.as_ref().map(OwnerGuard::id) else {
+                continue;
+            };
 
             let unowned: Vec<u64> = window
                 .panes
@@ -4011,7 +4086,7 @@ impl App {
                         if let Some(pane) =
                             self.windows.get_mut(&window_id).and_then(|w| w.panes.get_mut(&pane_id))
                         {
-                            pane.owner = Some(owner);
+                            pane.owner = Some(OwnerGuard::new(self.governor.clone(), owner));
                         } else {
                             // The pane vanished between listing and assigning.
                             // Close the owner rather than leak it.
@@ -4054,13 +4129,15 @@ impl App {
         let window_ids: Vec<WindowId> = self.windows.keys().copied().collect();
         for window_id in window_ids {
             let Some(window) = self.windows.get(&window_id) else { continue };
-            let Some(window_owner) = window.owner else { continue };
+            let Some(window_owner) = window.owner.as_ref().map(OwnerGuard::id) else {
+                continue;
+            };
 
             let misattributed: Vec<u64> = window
                 .panes
                 .iter()
                 .filter_map(|(pane_id, pane)| {
-                    let owner = pane.owner?;
+                    let owner = pane.owner.as_ref()?.id();
                     let parent = self.governor.snapshot(owner).ok()?.parent?;
                     (parent != window_owner).then_some(*pane_id)
                 })
@@ -4078,17 +4155,10 @@ impl App {
                     pane.charges.clear();
                     pane.owner.take()
                 };
-                if let Some(stale) = stale {
-                    let _ = self.governor.begin_close(stale);
-                    if let Err(error) = self.governor.finish_close(stale) {
-                        tracing::warn!(
-                            target: "memory",
-                            ?error,
-                            "a moved pane's old owner did not close; its window will \
-                             keep reporting memory the pane no longer contributes"
-                        );
-                    }
-                }
+                // Dropping the guard closes the old owner and reports a
+                // failure to close. Charges were cleared above, in the same
+                // statement that took it, so `finish_close` can succeed.
+                drop(stale);
             }
         }
         // Panes left without an owner above are re-registered under the window
@@ -4102,28 +4172,45 @@ impl App {
     /// governor refuses to finish closing a parent with open children — which
     /// is the invariant that makes a leaked pane owner visible rather than
     /// silent.
+    /// Close the governor owners held by a window already removed from the map.
+    ///
+    /// Takes the `WindowState` rather than looking it up, because the
+    /// production close paths remove the window *before* releasing its
+    /// registries — so a lookup-based release returns early and closes
+    /// nothing. That is exactly what happened: the release ran, found no
+    /// window, and returned, leaving every owner `Open` for the life of the
+    /// process.
+    pub(super) fn release_owners_of(&mut self, window: &mut WindowState) {
+        // Charges first. `finish_close` refuses an owner that still holds
+        // them, and the previous order took `pane.owner` while leaving
+        // `pane.charges` populated — so every close returned
+        // `OwnerHasLiveCharges` and stopped at `Closing`.
+        // Charges first, then drop the guards: each closes its owner on drop,
+        // and `finish_close` refuses an owner still holding charges.
+        for pane in window.panes.values_mut() {
+            pane.charges.clear();
+            drop(pane.owner.take());
+        }
+        drop(window.owner.take());
+    }
+
     pub(super) fn release_window_owner(&mut self, id: WindowId) {
         let Some(window) = self.windows.get_mut(&id) else { return };
-        let pane_owners: Vec<ResourceOwnerId> =
-            window.panes.values_mut().filter_map(|pane| pane.owner.take()).collect();
-        let window_owner = window.owner.take();
-
-        for owner in pane_owners {
-            let _ = self.governor.begin_close(owner);
-            let _ = self.governor.finish_close(owner);
+        // Charges must be released before the owner closes.
+        //
+        // `finish_close` refuses an owner that still holds charges, and this
+        // took `pane.owner` while leaving `pane.charges` populated — so every
+        // close returned `OwnerHasLiveCharges`, the `let _` discarded it, and
+        // the owner stopped at `Closing` forever. Measured: 80 of 80 owners
+        // still open after 40 create/destroy cycles.
+        //
+        // `reattribute_pane_owners` already does this in the right order,
+        // twelve lines away.
+        for pane in window.panes.values_mut() {
+            pane.charges.clear();
+            drop(pane.owner.take());
         }
-        if let Some(owner) = window_owner {
-            let _ = self.governor.begin_close(owner);
-            if let Err(error) = self.governor.finish_close(owner) {
-                // A window owner that will not close means a pane owner below
-                // it is still open — a leak this reports rather than hides.
-                tracing::warn!(
-                    target: "memory",
-                    ?error,
-                    "window owner did not close; a pane owner below it is still open"
-                );
-            }
-        }
+        drop(window.owner.take());
     }
 
     pub fn main_panes(&self) -> Option<&HashMap<u64, PaneState>> {

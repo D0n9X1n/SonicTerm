@@ -507,7 +507,9 @@ impl super::App {
                 else {
                     continue;
                 };
-                let Some(owner) = pane.owner else { continue };
+                let Some(owner) = pane.owner.as_ref().map(super::OwnerGuard::id) else {
+                    continue;
+                };
                 let Some(retention) = measure_pane(pane) else { continue };
 
                 let Some(pane) =

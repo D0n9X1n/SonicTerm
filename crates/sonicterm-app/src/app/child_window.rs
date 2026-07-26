@@ -358,10 +358,14 @@ impl App {
                 // pty channel close on Drop and exit). Dropping the
                 // WindowState drops PaneState → PtyHandle → kills the
                 // child shells.
-                if let Some(removed) = self.windows.remove(&win_id) {
+                if let Some(mut removed) = self.windows.remove(&win_id) {
                     for pane in removed.panes.values() {
                         *pane.redraw_target.lock() = None;
                     }
+                    // Close the governor owners before the state drops. Taken
+                    // from the removed window rather than looked up, because
+                    // it is already out of the map by this point.
+                    self.release_owners_of(&mut removed);
                     self.release_child_window_registries(win_id);
                     drop(removed);
                 }
@@ -1606,12 +1610,14 @@ impl App {
         self.reap_call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(child) = self.windows.get(&win_id) {
             if child.tabs.is_empty() {
-                if let Some(removed) = self.windows.remove(&win_id) {
+                if let Some(mut removed) = self.windows.remove(&win_id) {
                     // panes map should already be empty; defensively
                     // null out any stragglers' redraw targets.
                     for pane in removed.panes.values() {
                         *pane.redraw_target.lock() = None;
                     }
+                    // Close the governor owners before the state drops.
+                    self.release_owners_of(&mut removed);
                     self.release_child_window_registries(win_id);
                     drop(removed);
                     tracing::info!(
