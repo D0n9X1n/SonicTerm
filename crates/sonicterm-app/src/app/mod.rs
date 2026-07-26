@@ -3691,6 +3691,14 @@ impl App {
     /// that never closes. That is the ratchet shape — an owner registered
     /// twice and released once leaves the hierarchy permanently over-counted.
     pub(super) fn register_window_owner(&mut self, id: WindowId) {
+        self.register_window_owner_inner(id);
+        // A window arrives with its panes already populated, so registering
+        // the window without them would leave every pane unowned until the
+        // next 30-second sample.
+        self.reconcile_pane_owners();
+    }
+
+    fn register_window_owner_inner(&mut self, id: WindowId) {
         let root = self.governor.root_owner();
         let Some(window) = self.windows.get(&id) else { return };
         if window.owner.is_some() {
@@ -3723,6 +3731,28 @@ impl App {
         self.governor
             .snapshot(self.governor.root_owner())
             .expect("the process root always snapshots")
+    }
+
+    /// Test-only: move a pane from one window to another.
+    ///
+    /// Mirrors what tab tear-out does — remove from the source map, insert
+    /// into the destination — so the test exercises the real ownership
+    /// consequence rather than a simulation of it.
+    #[doc(hidden)]
+    pub fn __test_move_pane_between_windows(
+        &mut self,
+        source: WindowId,
+        destination: WindowId,
+        pane_id: u64,
+    ) -> bool {
+        let Some(pane) = self.windows.get_mut(&source).and_then(|w| w.panes.remove(&pane_id))
+        else {
+            return false;
+        };
+        let Some(window) = self.windows.get_mut(&destination) else { return false };
+        window.panes.insert(pane_id, pane);
+        self.reattribute_pane_owners();
+        true
     }
 
     /// Test-only: snapshot any owner.
@@ -3898,6 +3928,71 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Re-parent pane owners whose window has changed, and close their old ones.
+    ///
+    /// A `PaneState` carries its `owner` field when tab tear-out moves it
+    /// between windows, but the owner itself was created *below the source
+    /// window's* owner and the governor has no move operation. Left alone, the
+    /// source window keeps reporting a pane it no longer has and the
+    /// destination reports none for a pane it does — which makes "what does
+    /// this window hold" wrong in both directions, and that question is the
+    /// entire reason the hierarchy exists.
+    ///
+    /// Detected by comparing each pane owner's recorded parent against the
+    /// window it now lives in, so this needs no hook at the move sites: a pane
+    /// that never moved has a matching parent and costs one snapshot read.
+    ///
+    /// The old owner is closed rather than abandoned. Its charges are dropped
+    /// with it and re-opened against the new owner on the next charging pass,
+    /// which is correct precisely because charges are derived from a
+    /// measurement rather than accumulated — a transferred balance could
+    /// drift, a re-measured one cannot.
+    pub(super) fn reattribute_pane_owners(&mut self) {
+        let window_ids: Vec<WindowId> = self.windows.keys().copied().collect();
+        for window_id in window_ids {
+            let Some(window) = self.windows.get(&window_id) else { continue };
+            let Some(window_owner) = window.owner else { continue };
+
+            let misattributed: Vec<u64> = window
+                .panes
+                .iter()
+                .filter_map(|(pane_id, pane)| {
+                    let owner = pane.owner?;
+                    let parent = self.governor.snapshot(owner).ok()?.parent?;
+                    (parent != window_owner).then_some(*pane_id)
+                })
+                .collect();
+
+            for pane_id in misattributed {
+                // Drop the charges before closing: the governor refuses to
+                // finish closing an owner that still holds any.
+                let stale = {
+                    let Some(pane) =
+                        self.windows.get_mut(&window_id).and_then(|w| w.panes.get_mut(&pane_id))
+                    else {
+                        continue;
+                    };
+                    pane.charges.clear();
+                    pane.owner.take()
+                };
+                if let Some(stale) = stale {
+                    let _ = self.governor.begin_close(stale);
+                    if let Err(error) = self.governor.finish_close(stale) {
+                        tracing::warn!(
+                            target: "memory",
+                            ?error,
+                            "a moved pane's old owner did not close; its window will \
+                             keep reporting memory the pane no longer contributes"
+                        );
+                    }
+                }
+            }
+        }
+        // Panes left without an owner above are re-registered under the window
+        // they now live in.
+        self.reconcile_pane_owners();
     }
 
     /// Close a window's owner and every pane owner below it.
