@@ -508,34 +508,3 @@ fn teardown_leaves_no_unapplied_releases() {
         "a release the ledger could not apply permanently over-counts the process total"
     );
 }
-
-#[test]
-fn diag_is_the_zero_assertion_reachable() {
-    let mut app = app();
-    let child = app.__test_seed_child_window(&["one"]);
-    let pane_ids = app.__test_child_pane_ids(child).expect("child");
-    for pane_id in &pane_ids {
-        for r in 0..200 {
-            app.__test_advance_child_pane_parser(child, *pane_id,
-                format!("line {r}\r\n").as_bytes());
-        }
-    }
-    app.__test_reconcile_pane_owners();
-    app.__test_force_retention_sample();
-    let charged = app.__test_governor_snapshot_root().process_amount;
-
-    while app.__test_child_pane_ids(child).is_some_and(|ids| !ids.is_empty()) {
-        app.__test_invoke_close_active_pane_in_child(child);
-    }
-    app.__test_drain_pending_os_teardown();
-    app.__test_reconcile_pane_owners();
-    let after = app.__test_governor_snapshot_root().process_amount;
-
-    panic!(
-        "MEASURED: charged after fill = {} bytes / {} items\n  \
-         after teardown = {} bytes / {} items\n  \
-         => precondition 'charged > 0' was {}",
-        charged.bytes, charged.items, after.bytes, after.items,
-        if charged.bytes > 0 { "TRUE" } else { "FALSE — the test proves nothing" }
-    );
-}
