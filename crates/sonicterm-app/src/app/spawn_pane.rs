@@ -386,6 +386,10 @@ impl App {
             split_ok
         };
         if did_split {
+            // Own the new pane now rather than on the next 30-second sample:
+            // until it has an owner its memory is attributed to nothing, and
+            // anything reserving against it has no owner to reserve against.
+            self.reconcile_pane_owners();
             self.resize_visible_panes();
             if let Some(r) = self.main_renderer_mut() {
                 r.flash_pane_focus(new_id);

@@ -948,6 +948,9 @@ impl App {
             ws.tabs.push(Tab::new(title));
             ws.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
         }
+        // Own the new pane now: until it has one, its memory is attributed to
+        // nothing and the next 30-second sample is a long time to be blind.
+        self.reconcile_pane_owners();
     }
     pub(super) fn close_tab_at(&mut self, index: usize) {
         let Some(ws) = self.main_mut() else { return };

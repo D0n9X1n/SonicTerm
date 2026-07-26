@@ -383,7 +383,9 @@ impl super::App {
         // Owners are reconciled on the same interval: both walk every pane,
         // and doing them together means the hierarchy cannot drift from the
         // figures reported beside it.
-        self.reconcile_pane_owners();
+        // Reattribution subsumes reconciliation: it re-parents moved panes and
+        // then registers anything still unowned.
+        self.reattribute_pane_owners();
 
         // Charge what each pane retains into its governor owner, so the
         // hierarchy reports real memory rather than only structure. Done in
