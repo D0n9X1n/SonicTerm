@@ -190,3 +190,86 @@ fn a_charge_outlives_its_worker_and_is_released_with_the_pane() {
         "closing the pane must return exactly what it retained"
     );
 }
+
+/// A new pane still renders images when other panes hold the ceiling.
+///
+/// The eviction loop's exit condition is a *process-wide* total, but its body
+/// can only shrink the *calling* pane. Four panes at the 64 MiB per-pane cap
+/// reach the 256 MiB process ceiling exactly, so a fifth pane evicts every
+/// image it decodes — down to empty — and still cannot satisfy the condition.
+///
+/// The consequence is the worst kind: the pane the user is actively looking at
+/// renders nothing, permanently, while idle panes they cannot see keep the
+/// whole budget. Principle 1 says the active pane must get its share.
+#[test]
+fn a_new_pane_renders_images_even_when_others_hold_the_ceiling() {
+    let _serialised = MEDIA_COUNTER_LOCK.lock();
+    const IMAGE_BYTES: usize = 4 * 1024 * 1024;
+
+    // Four panes fill the process ceiling exactly: 4 x 64 MiB = 256 MiB.
+    let mut holders: Vec<(Vec<InlineImage>, SharedInlineMediaCharge)> = Vec::new();
+    let mut id = 0u64;
+    for _ in 0..4 {
+        let mut images = Vec::new();
+        let charge = new_inline_media_charge();
+        for _ in 0..20 {
+            id += 1;
+            images.push(image(id, IMAGE_BYTES));
+            trim_inline_images_charged(&mut images, &charge);
+        }
+        holders.push((images, charge));
+    }
+
+    // A fifth pane decodes one image. It must be able to show it.
+    let mut newcomer = Vec::new();
+    let newcomer_charge = new_inline_media_charge();
+    id += 1;
+    newcomer.push(image(id, IMAGE_BYTES));
+    trim_inline_images_charged(&mut newcomer, &newcomer_charge);
+
+    assert!(
+        !newcomer.is_empty(),
+        "a new pane must retain at least one image; it evicted everything while \
+         {} idle panes held {} bytes",
+        holders.len(),
+        process_inline_media_bytes()
+    );
+
+    // And it must keep working, not blank on every subsequent image.
+    for _ in 0..5 {
+        id += 1;
+        newcomer.push(image(id, IMAGE_BYTES));
+        trim_inline_images_charged(&mut newcomer, &newcomer_charge);
+        assert!(
+            !newcomer.is_empty(),
+            "the new pane must keep rendering images, not blank on every decode"
+        );
+    }
+}
+
+/// Every pane gets a share; none is starved to nothing.
+#[test]
+fn many_panes_each_keep_a_share_of_the_media_budget() {
+    let _serialised = MEDIA_COUNTER_LOCK.lock();
+    const PANES: usize = 12;
+    const IMAGE_BYTES: usize = 4 * 1024 * 1024;
+
+    let mut panes: Vec<(Vec<InlineImage>, SharedInlineMediaCharge)> =
+        (0..PANES).map(|_| (Vec::new(), new_inline_media_charge())).collect();
+
+    let mut id = 0u64;
+    for _ in 0..24 {
+        for (images, charge) in &mut panes {
+            id += 1;
+            images.push(image(id, IMAGE_BYTES));
+            trim_inline_images_charged(images, charge);
+        }
+    }
+
+    for (index, (images, _)) in panes.iter().enumerate() {
+        assert!(
+            !images.is_empty(),
+            "pane {index} of {PANES} was starved to nothing; every pane must keep a share"
+        );
+    }
+}

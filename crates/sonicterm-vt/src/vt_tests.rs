@@ -995,3 +995,59 @@ fn ris_clears_the_hyperlink_registry() {
     assert!(parser.hyperlinks().is_empty(), "RIS must drop every interned link");
     assert_eq!(parser.hyperlinks().retained_bytes(), 0);
 }
+
+/// Links work again as soon as scrollback frees the registry.
+///
+/// After a sweep that frees nothing — every interned link genuinely still on
+/// screen — the parser backs off before scanning again. That guard is right in
+/// principle: rescanning per link when nothing is reclaimable turns a dead
+/// feature into a stall.
+///
+/// But the backoff was set on a snapshot of grid state and never invalidated
+/// when that state changed. Scrolling every link out of scrollback makes the
+/// whole registry garbage, and the next links would still take the skip branch
+/// — rendering as plain text despite megabytes being reclaimable. It
+/// self-heals after the counter drains, which is exactly what makes it get
+/// reported as "hyperlinks stop working sometimes" and resist reproduction.
+#[test]
+fn links_recover_as_soon_as_scrollback_frees_the_registry() {
+    use sonicterm_grid::hyperlink::MAX_HYPERLINKS;
+
+    let mut grid = Grid::new(20, 4);
+    // Deep enough to hold every link on screen, so the first sweep frees zero.
+    grid.set_scrollback_limit(MAX_HYPERLINKS + 64);
+    let mut parser = Parser::new(grid);
+
+    for index in 0..MAX_HYPERLINKS {
+        parser.advance(
+            format!("\x1b]8;;https://example.com/{index}\x07link\x1b]8;;\x07\r\n").as_bytes(),
+        );
+    }
+
+    // The registry is full and everything in it is still reachable, so the
+    // next link fails and the parser backs off.
+    parser.advance(b"\x1b]8;;https://example.com/wedged\x07x\x1b]8;;\x07");
+
+    // Now shrink scrollback so every one of those links falls out of history.
+    // Their cells are gone; the entire registry is garbage.
+    parser.grid_mut().set_scrollback_limit(4);
+    parser.advance(b"\r\n");
+
+    // The very next link must work. It does not have to wait out a counter
+    // that was set when the grid looked completely different.
+    parser.advance(b"\x1b]8;;https://example.com/after-scrollback\x07visible\x1b]8;;\x07");
+
+    let row = parser.grid().cursor.row;
+    let hid = parser
+        .grid()
+        .row(row)
+        .iter()
+        .find_map(|cell| cell.hyperlink())
+        .expect("the link written after scrollback shrank must reach a cell");
+    assert_eq!(
+        parser.hyperlinks().lookup(hid).map(|link| link.uri.as_str()),
+        Some("https://example.com/after-scrollback"),
+        "a link must work as soon as scrollback frees the registry, not after \
+         the backoff counter happens to drain"
+    );
+}

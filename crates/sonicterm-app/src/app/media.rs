@@ -95,10 +95,44 @@ pub(super) const MAX_PROCESS_INLINE_MEDIA_BYTES: usize = 256 * 1024 * 1024;
 /// Live decoded inline-media bytes summed over every pane in this process.
 static PROCESS_INLINE_MEDIA_BYTES: AtomicUsize = AtomicUsize::new(0);
 
+/// Number of live pane charges, used to divide the process ceiling fairly.
+static LIVE_INLINE_MEDIA_CHARGES: AtomicUsize = AtomicUsize::new(0);
+
+/// Smallest budget a pane is guaranteed regardless of how many panes exist.
+///
+/// A fair share alone would shrink toward zero as panes multiply, and a pane
+/// with a budget below one image renders nothing — the failure this floor
+/// exists to prevent. Sized to hold one image at the decode limit
+/// (1024×1024×4 bytes), so every pane can always show at least the most recent
+/// one.
+pub(super) const MIN_PANE_INLINE_MEDIA_BYTES: usize = 4 * 1024 * 1024;
+
 /// Read the live process-wide inline-media total.
 #[must_use]
 pub(super) fn process_inline_media_bytes() -> usize {
     PROCESS_INLINE_MEDIA_BYTES.load(Ordering::Acquire)
+}
+
+/// This pane's share of the process-wide media ceiling.
+///
+/// The per-pane and process ceilings were originally independent constants,
+/// and 256 MiB ÷ 64 MiB is exactly 4 — so four panes at their own cap
+/// saturated the process ceiling precisely, and a fifth pane could evict every
+/// image it decoded, down to empty, without ever satisfying a condition that
+/// depends on bytes it does not own. The pane the user was actively looking at
+/// rendered nothing while idle panes they could not see held the entire
+/// budget.
+///
+/// Dividing the ceiling by the live pane count makes the two bounds one bound.
+/// N panes at `ceiling / N` sum to the ceiling by construction, so no pane has
+/// to evict on another's behalf and the pathological loop cannot arise.
+#[must_use]
+pub(super) fn pane_inline_media_budget() -> usize {
+    let live = LIVE_INLINE_MEDIA_CHARGES.load(Ordering::Acquire).max(1);
+    // `clamp` cannot panic: the floor is 4 MiB and the ceiling 64 MiB, both
+    // compile-time constants with floor < ceiling.
+    (MAX_PROCESS_INLINE_MEDIA_BYTES / live)
+        .clamp(MIN_PANE_INLINE_MEDIA_BYTES, MAX_RETAINED_INLINE_IMAGE_BYTES)
 }
 
 /// Releases a pane's inline-media charge when the pane's image store drops.
@@ -126,6 +160,7 @@ pub(crate) type SharedInlineMediaCharge = Arc<Mutex<InlineMediaCharge>>;
 
 /// Create a charge handle for a new pane.
 pub(crate) fn new_inline_media_charge() -> SharedInlineMediaCharge {
+    LIVE_INLINE_MEDIA_CHARGES.fetch_add(1, Ordering::AcqRel);
     Arc::new(Mutex::new(InlineMediaCharge::default()))
 }
 
@@ -145,32 +180,44 @@ impl InlineMediaCharge {
 impl Drop for InlineMediaCharge {
     fn drop(&mut self) {
         PROCESS_INLINE_MEDIA_BYTES.fetch_sub(self.bytes, Ordering::AcqRel);
+        LIVE_INLINE_MEDIA_CHARGES.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
-/// Trim one pane's retained inline media to its own ceiling, then to the
-/// process-wide ceiling.
+/// Trim one pane's retained inline media to its share of the process ceiling.
 ///
 /// Eviction is always from the calling pane. Evicting another pane's images to
 /// make room would make one busy pane blank out its neighbours, and two panes
 /// under pressure would evict each other every frame.
+///
+/// The budget is [`pane_inline_media_budget`] — the process ceiling divided by
+/// the live pane count — rather than a fixed per-pane constant. A single pass
+/// against that budget replaces the loop that used to spin against the
+/// *process* total: because the loop body could only shrink the calling pane,
+/// a pane could evict itself to empty and still not satisfy a condition owned
+/// by other panes' bytes. Dividing the ceiling means a pane's own budget is
+/// always achievable by trimming itself.
 pub(super) fn trim_inline_images_charged(
     images: &mut Vec<InlineImage>,
     charge: &SharedInlineMediaCharge,
 ) {
-    trim_inline_images(images);
+    let budget = pane_inline_media_budget();
+    let before = retained_inline_media(images);
+    trim_inline_images_to(images, budget);
+    let after = retained_inline_media(images);
 
     // Charge exactly what the reporting seam reports, so the figure the
     // governor would see and the figure enforced here cannot drift apart.
-    charge.lock().set(retained_inline_media(images).bytes);
+    charge.lock().set(after.bytes);
 
-    while !images.is_empty() && process_inline_media_bytes() > MAX_PROCESS_INLINE_MEDIA_BYTES {
-        let removed = images.remove(0);
-        charge.lock().set(retained_inline_media(images).bytes);
+    if after.items < before.items {
         tracing::warn!(
             target: "memory",
-            evicted_bytes = removed.bgra.len(),
-            pane_retained_bytes = retained_inline_media(images).bytes,
+            evicted_images = before.items - after.items,
+            evicted_bytes = before.bytes.saturating_sub(after.bytes),
+            pane_retained_bytes = after.bytes,
+            pane_budget_bytes = budget,
+            live_panes = LIVE_INLINE_MEDIA_CHARGES.load(Ordering::Acquire),
             process_retained_bytes = process_inline_media_bytes(),
             ceiling = MAX_PROCESS_INLINE_MEDIA_BYTES,
             "inline media evicted to hold the process-wide ceiling"
@@ -179,10 +226,20 @@ pub(super) fn trim_inline_images_charged(
 }
 
 pub(super) fn trim_inline_images(images: &mut Vec<InlineImage>) {
+    trim_inline_images_to(images, MAX_RETAINED_INLINE_IMAGE_BYTES);
+}
+
+/// Drop oldest images until the vector fits `byte_budget` and the count cap.
+///
+/// Always retains the newest image even when it alone exceeds the budget: a
+/// pane that renders nothing is a worse outcome than one that briefly holds a
+/// single oversized image, and the decode-side dimension check already bounds
+/// how large that one image can be.
+fn trim_inline_images_to(images: &mut Vec<InlineImage>, byte_budget: usize) {
     let mut retained_bytes =
         images.iter().fold(0usize, |total, image| total.saturating_add(image.bgra.len()));
     while images.len() > MAX_RETAINED_INLINE_IMAGES
-        || retained_bytes > MAX_RETAINED_INLINE_IMAGE_BYTES
+        || (retained_bytes > byte_budget && images.len() > 1)
     {
         let removed = images.remove(0);
         retained_bytes = retained_bytes.saturating_sub(removed.bgra.len());
