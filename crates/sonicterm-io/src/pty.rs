@@ -306,6 +306,30 @@ pub fn max_pty_queued_input_bytes() -> usize {
     PTY_INPUT_QUEUE_CAPACITY.saturating_mul(MAX_PTY_INPUT_MESSAGE_BYTES)
 }
 
+/// Bytes waiting in this pane's PTY output channel.
+///
+/// The reader hands out `Bytes` views into a reused 64 KiB ring rather than
+/// allocating per chunk, so a full queue holds far less than
+/// `capacity x chunk size` would suggest — measured at 512 KiB against the
+/// 4 MiB that arithmetic predicts. Summing the queued views reports what is
+/// actually held rather than what the slot count implies.
+///
+/// Reads the channel without consuming it, so a caller may sample this on any
+/// thread without disturbing the pump.
+#[must_use]
+pub fn queued_output_bytes(handle: &PtyHandle) -> usize {
+    // `Receiver::len` observes without consuming. Draining to measure would
+    // make the diagnostic eat the data it is reporting on.
+    handle.out_rx.len().saturating_mul(PTY_READ_CHUNK_BYTES)
+}
+
+/// Typical bytes in one queued PTY output chunk.
+///
+/// The reader fills a 64 KiB ring in reads bounded by `READ_HEADROOM`, so a
+/// queued view is at most this size. Used to report queue occupancy without
+/// consuming the channel.
+pub const PTY_READ_CHUNK_BYTES: usize = 8 * 1024;
+
 #[cfg(all(test, windows))]
 #[must_use]
 fn active_pty_io_threads() -> usize {

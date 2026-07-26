@@ -27,13 +27,15 @@ fn a_pane_total_is_exactly_the_sum_of_its_seams() {
         + retention.grid_alternate.bytes
         + retention.parser.bytes
         + retention.hyperlinks.bytes
-        + retention.inline_media.bytes;
+        + retention.inline_media.bytes
+        + retention.pty_output.bytes;
     let expected_items = retention.grid_visible.items
         + retention.grid_history.items
         + retention.grid_alternate.items
         + retention.parser.items
         + retention.hyperlinks.items
-        + retention.inline_media.items;
+        + retention.inline_media.items
+        + retention.pty_output.items;
 
     assert_eq!(retention.total().bytes, expected_bytes);
     assert_eq!(retention.total().items, expected_items);
@@ -134,6 +136,7 @@ fn the_largest_seam_is_identified_by_name() {
         parser: ResourceAmount { bytes: 200, items: 1 },
         hyperlinks: ResourceAmount { bytes: 50, items: 2 },
         inline_media: ResourceAmount { bytes: 64 * 1024 * 1024, items: 3 },
+        pty_output: ResourceAmount { bytes: 8 * 1024, items: 1 },
     };
 
     let (seam, amount) = retention.largest_seam();
@@ -344,4 +347,45 @@ fn the_wiki_documents_the_fields_the_memory_log_actually_emits() {
         !WIKI.contains("`grid_bytes`"),
         "wiki/Logging.md still documents `grid_bytes`, which the log line no longer emits"
     );
+}
+
+/// The coverage table must match the charge sites that exist.
+///
+/// The table is a claim about the code. Without this it is a claim nobody
+/// checks — which is how `PtyOutput` came to be recorded as charged before its
+/// charge site was written, in this same change.
+///
+/// Scans the seam-class list rather than trusting the table: a class the
+/// retention pass charges must be recorded `Charged`, and a class recorded
+/// `Charged` must be one the pass actually charges.
+#[test]
+fn the_coverage_table_agrees_with_the_charge_sites() {
+    use enum_map::Enum;
+    use sonicterm_types::{ClassCoverage, ResourceClass};
+
+    let charged_here: Vec<ResourceClass> =
+        seam_classes(&PaneRetention::default()).iter().map(|(class, _)| *class).collect();
+
+    for class in &charged_here {
+        assert_eq!(
+            class.coverage(),
+            ClassCoverage::Charged,
+            "{class:?} is charged by the retention pass but the coverage table does not \
+             record it as charged"
+        );
+    }
+
+    // The renderer charges two more; everything else recorded `Charged` must
+    // be one of these two sets, or the table is claiming a site that is not
+    // there.
+    let renderer_charged = [ResourceClass::GlyphAtlas, ResourceClass::SoftwareFrame];
+    for index in 0..ResourceClass::LENGTH {
+        let class = ResourceClass::from_usize(index);
+        if class.coverage() == ClassCoverage::Charged {
+            assert!(
+                charged_here.contains(&class) || renderer_charged.contains(&class),
+                "{class:?} is recorded as charged but no production pass charges it"
+            );
+        }
+    }
 }
