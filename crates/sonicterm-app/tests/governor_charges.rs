@@ -324,3 +324,93 @@ fn the_governor_actually_holds_pane_owners_to_the_budget() {
          computed and never installed is a comment"
     );
 }
+
+/// A stalled capture is reclaimed after two quiet samples.
+///
+/// The seam for this landed in #940 and nothing called it, so a transfer
+/// killed mid-flight pinned its staging until the pane died. This is the pass
+/// that was missing.
+#[test]
+fn a_stalled_capture_is_reclaimed_by_the_sampling_pass() {
+    let mut app = app();
+    let child = app.__test_seed_child_window(&["one"]);
+    let pane_id = *app.__test_child_pane_ids(child).expect("child").first().expect("pane");
+
+    // An APC introducer plus payload, with no terminator: the shape a killed
+    // `imgcat` leaves behind.
+    let mut chunk = Vec::with_capacity(2 * 1024 * 1024 + 3);
+    chunk.extend_from_slice(b"\x1b_G");
+    chunk.resize(2 * 1024 * 1024, b'A');
+    app.__test_advance_child_pane_parser(child, pane_id, &chunk);
+
+    let held = app.__test_pane_retention(child, pane_id).expect("measures").parser.bytes;
+    assert!(held > 0, "precondition: the capture is holding staging");
+
+    // First sample: records the progress figure, cancels nothing. A capture
+    // seen once might simply be slow.
+    app.__test_sample_pane_retention_now();
+    let after_first = app.__test_pane_retention(child, pane_id).expect("measures").parser.bytes;
+    assert_eq!(
+        after_first, held,
+        "one quiet sample must not cancel; a slow transfer looks identical at this point"
+    );
+
+    // Second sample with no bytes in between: now it is stalled.
+    app.__test_sample_pane_retention_now();
+    let after_second = app.__test_pane_retention(child, pane_id).expect("measures").parser.bytes;
+    assert_eq!(after_second, 0, "a capture quiet across two samples must be reclaimed");
+}
+
+/// A slow transfer must survive.
+///
+/// This is the way the reclamation could hurt a user: cancelling a capture
+/// that was still arriving, just slowly, destroys an image they are waiting
+/// for. Bytes arriving between samples must keep it alive indefinitely.
+#[test]
+fn a_slow_but_live_transfer_is_never_cancelled() {
+    let mut app = app();
+    let child = app.__test_seed_child_window(&["one"]);
+    let pane_id = *app.__test_child_pane_ids(child).expect("child").first().expect("pane");
+
+    app.__test_advance_child_pane_parser(child, pane_id, b"\x1b_G");
+
+    // Ten sampling rounds, each with a trickle of bytes in between — far more
+    // than the two that would condemn a stalled one.
+    for _ in 0..10 {
+        app.__test_advance_child_pane_parser(child, pane_id, b"more payload bytes");
+        app.__test_sample_pane_retention_now();
+
+        let live = app.__test_pane_capture_count(child, pane_id).expect("pane present");
+        assert_eq!(live, 1, "a capture still receiving bytes must never be cancelled");
+    }
+}
+
+/// Cancelling must not disturb the pane.
+///
+/// Reclamation frees a buffer; it must not cost the user their scrollback or
+/// leave the parser unable to render what comes next.
+#[test]
+fn reclaiming_a_stalled_capture_leaves_the_pane_usable() {
+    let mut app = app();
+    let child = app.__test_seed_child_window(&["one"]);
+    let pane_id = *app.__test_child_pane_ids(child).expect("child").first().expect("pane");
+
+    app.__test_advance_child_pane_parser(child, pane_id, b"before the transfer\r\n");
+    let mut chunk = Vec::with_capacity(1024 * 1024 + 3);
+    chunk.extend_from_slice(b"\x1b_G");
+    chunk.resize(1024 * 1024, b'A');
+    app.__test_advance_child_pane_parser(child, pane_id, &chunk);
+
+    app.__test_sample_pane_retention_now();
+    app.__test_sample_pane_retention_now();
+
+    // The pane must still print.
+    app.__test_advance_child_pane_parser(child, pane_id, b"after the cancel\r\n");
+    let grid = app.__test_pane_retention(child, pane_id).expect("measures");
+    assert!(grid.grid_visible.bytes > 0, "the pane must still hold its cells");
+    assert_eq!(
+        app.__test_pane_capture_count(child, pane_id),
+        Some(0),
+        "and no capture may be left in flight"
+    );
+}

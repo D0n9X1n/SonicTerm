@@ -1349,6 +1349,15 @@ pub struct PaneState {
     /// larger change than the ownership it establishes.
     pub(crate) owner: Option<ResourceOwnerId>,
     pub parser: Arc<Mutex<Parser>>,
+    /// Capture progress seen at the previous retention sample.
+    ///
+    /// A media capture holds its staging buffer until its terminator arrives,
+    /// and the terminator is not guaranteed to — a killed transfer or dropped
+    /// link leaves it pinned until the pane dies. The parser cannot tell that
+    /// from a slow transfer, having no clock. The sampler has one, so it
+    /// remembers what the capture had received last time and cancels only a
+    /// capture that has not moved across consecutive samples.
+    pub(crate) last_capture_progress: Option<usize>,
     pub pty: Option<PtyHandle>,
     pub redraw_target: Arc<Mutex<Option<WindowId>>>,
     /// Absolute row (scrollback-relative) that should appear at the top of
@@ -1416,6 +1425,7 @@ impl PaneState {
             owner: None,
             charges: HashMap::new(),
             parser,
+            last_capture_progress: None,
             pty,
             redraw_target: Arc::new(Mutex::new(None)),
             viewport_top_abs: None,
@@ -3859,6 +3869,17 @@ impl App {
     pub fn __test_pane_charge_total(&self, window: WindowId, pane_id: u64) -> Option<usize> {
         let pane = self.windows.get(&window)?.panes.get(&pane_id)?;
         Some(pane.charges.values().map(|held| held.committed_amount().bytes).sum())
+    }
+
+    /// Test-only: media captures currently in flight on a pane.
+    ///
+    /// Distinct from the retained-bytes figure: a cancelled capture and a
+    /// completed one both report zero bytes, and the slow-transfer test turns
+    /// on which of those happened.
+    #[doc(hidden)]
+    pub fn __test_pane_capture_count(&self, window: WindowId, pane_id: u64) -> Option<usize> {
+        let pane = self.windows.get(&window)?.panes.get(&pane_id)?;
+        pane.parser.try_lock().map(|parser| parser.live_capture_count())
     }
 
     /// Test-only: the byte ceiling the governor holds a pane owner to.
