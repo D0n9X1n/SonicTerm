@@ -394,3 +394,52 @@ fn the_staging_vector_is_bounded_by_the_pane_budget() {
     assert!(!staged.is_empty(), "staging must still retain the newest image");
     drop(charges);
 }
+
+/// The live-charge count does not ratchet, so budgets do not shrink over time.
+///
+/// The fair share *divides* the process ceiling by this count, which makes an
+/// over-count silently harmful in a way an over-count of bytes would not be:
+/// every pane's budget shrinks toward the floor and images start being evicted
+/// on a machine with plenty of memory free. Nothing reports it, because each
+/// pane is dutifully honouring the budget it was given.
+///
+/// Two creation sites feed the count — `PaneState::new` makes one and
+/// `spawn_pane` replaces it with its own — so the field assignment that
+/// performs the replacement has to drop the first. This drives that cycle far
+/// more often than a session would and asserts the budget comes back.
+#[test]
+fn the_live_charge_count_does_not_ratchet_across_pane_churn() {
+    let _serialised = MEDIA_COUNTER_LOCK.lock();
+    let baseline = pane_inline_media_budget();
+
+    for cycle in 0..500 {
+        // The spawn_pane shape: `PaneState::new` makes one charge, spawn
+        // makes a second, and the field assignment replaces the first. What
+        // matters is that the replaced charge is *dropped*, not that anything
+        // reads it — so the first is deliberately only ever overwritten.
+        let from_pane_state = new_inline_media_charge();
+        let from_spawn = new_inline_media_charge();
+        let _worker_clone = from_spawn.clone();
+        let held = from_spawn;
+        drop(from_pane_state);
+
+        // Retain and release some media through it, as a real pane would.
+        let mut images = vec![image(cycle as u64, 1024 * 1024)];
+        trim_inline_images_charged(&mut images, &held);
+        drop(images);
+        drop(held);
+    }
+
+    assert_eq!(
+        pane_inline_media_budget(),
+        baseline,
+        "the per-pane budget must return to its baseline after pane churn; a \
+         ratcheting charge count silently shrinks every pane's budget toward \
+         the floor with no error anywhere"
+    );
+    assert_eq!(
+        process_inline_media_bytes(),
+        0,
+        "no bytes may remain charged after every pane is dropped"
+    );
+}
