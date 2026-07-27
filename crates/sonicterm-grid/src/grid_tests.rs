@@ -1076,3 +1076,85 @@ fn container_bytes_keep_the_region_split_exact() {
         "regions must still sum to the total with containers counted"
     );
 }
+
+/// The saved primary's own containers are counted, not just its rows.
+///
+/// Entering an alternate screen boxes the whole primary `Grid`: its two deque
+/// spines, its dirty bitset, its prompt ring, and the struct itself. Counting
+/// only the rows leaves the rest held but unreported.
+///
+/// Pinned here rather than in the counting-allocator suite because the term is
+/// fixed-size — measured at 232 bytes — and the allocations the test harness
+/// makes inside a measurement window are larger than that. At this level no
+/// allocator is involved and the figure is exact.
+#[test]
+fn entering_an_alternate_screen_counts_the_saved_primarys_containers() {
+    let mut grid = Grid::new(80, 24);
+    for _ in 0..300 {
+        for _ in 0..70 {
+            grid.put_char('y', Color::Default, Color::Default, CellFlags::empty());
+        }
+        grid.put_char('\n', Color::Default, Color::Default, CellFlags::empty());
+    }
+    grid.enter_alt_screen();
+
+    let saved = grid.alt_screen.as_ref().expect("the alternate screen holds the saved primary");
+    let saved_rows = saved.visible.capacity().saturating_add(saved.scrollback.capacity())
+        * std::mem::size_of::<Line>();
+    let saved_dirty = saved.dirty_rows.capacity() * std::mem::size_of::<bool>();
+    let saved_prompts = saved.prompts.capacity() * std::mem::size_of::<PromptRegion>();
+    let expected_saved = saved_rows + saved_dirty + saved_prompts + std::mem::size_of::<Grid>();
+
+    let live_rows = grid.visible.capacity().saturating_add(grid.scrollback.capacity())
+        * std::mem::size_of::<Line>();
+    let live_dirty = grid.dirty_rows.capacity() * std::mem::size_of::<bool>();
+
+    assert!(
+        expected_saved > saved_rows,
+        "precondition: the non-row terms must be non-zero or this asserts nothing"
+    );
+    assert_eq!(
+        grid.container_bytes(),
+        live_rows + live_dirty + expected_saved,
+        "the saved primary's spines, dirty bitset, prompt ring and struct are all memory \
+         held while the alternate screen shows, and all must be counted"
+    );
+}
+
+/// Grapheme extras move the reported figure.
+///
+/// A cell's trailing zero-width codepoints live in a `Box<str>` behind the
+/// rare-attribute box. A figure built from `size_of::<FatAttributes>()` alone
+/// reports a screen of accented text identically to a screen of plain text,
+/// while the accented one holds a separate allocation per cell.
+#[test]
+fn grapheme_extras_move_the_reported_figure() {
+    fn screen_with_marks(marks: usize) -> usize {
+        let mut grid = Grid::new(80, 24);
+        for _ in 0..24 {
+            for _ in 0..80 {
+                grid.put_char('a', Color::Default, Color::Default, CellFlags::empty());
+                for _ in 0..marks {
+                    // U+0301 COMBINING ACUTE ACCENT: zero width, 2 bytes UTF-8.
+                    grid.put_char('\u{0301}', Color::Default, Color::Default, CellFlags::empty());
+                }
+            }
+        }
+        grid.retained_amount().bytes
+    }
+
+    let plain = screen_with_marks(0);
+    let light = screen_with_marks(8);
+    let heavy = screen_with_marks(24);
+
+    assert!(
+        light > plain,
+        "a screen of accented text holds an allocation per cell that plain text does not, \
+         so it must report above it (plain {plain}, accented {light})"
+    );
+    assert!(
+        heavy > light,
+        "the figure must scale with the payload rather than being a per-cell constant \
+         ({light} at 8 marks, {heavy} at 24)"
+    );
+}

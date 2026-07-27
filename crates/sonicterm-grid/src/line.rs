@@ -118,6 +118,15 @@ impl LineStorage {
     /// a row of linked cells under-reports by 40 bytes per cell, which is
     /// larger than the figure it does report.
     ///
+    /// The box is not the whole cost. `FatAttributes::extras` is itself an
+    /// `Option<Box<str>>` holding a cell's trailing zero-width codepoints, up
+    /// to [`MAX_CELL_EXTRAS_BYTES`](crate::grid::MAX_CELL_EXTRAS_BYTES) of
+    /// them, in a second allocation the box's own size does not describe.
+    /// Ordinary output reaches it: any combining mark or ZWJ emoji appends
+    /// there. Counting only `size_of::<FatAttributes>()` under-reports a grid
+    /// of accented or emoji text by up to **1.99x**, so the payload is
+    /// measured per cell rather than assumed small.
+    ///
     /// Counted per *stored* cell rather than per logical column: in cluster
     /// form a run of N identical linked cells holds one `Cell`, hence one box.
     /// Multiplying by the logical length would over-report a long link span by
@@ -127,11 +136,19 @@ impl LineStorage {
     /// should not use it; it exists for the retention sampling pass, which
     /// runs on a timer.
     pub fn fat_attribute_bytes(&self) -> usize {
-        let stored = match self {
-            LineStorage::Flat(v) => v.iter().filter(|cell| cell.has_fat()).count(),
-            LineStorage::Cluster(cs) => cs.iter().filter(|c| c.cell.has_fat()).count(),
+        let cell_bytes = |cell: &Cell| {
+            if !cell.has_fat() {
+                return 0;
+            }
+            // The box itself, plus the separate allocation behind its
+            // `extras` pointer. `size_of::<FatAttributes>()` counts the
+            // `Box<str>` fat pointer, never the bytes it points at.
+            std::mem::size_of::<FatAttributes>() + cell.extras().map_or(0, str::len)
         };
-        stored * std::mem::size_of::<FatAttributes>()
+        match self {
+            LineStorage::Flat(v) => v.iter().map(cell_bytes).sum(),
+            LineStorage::Cluster(cs) => cs.iter().map(|c| cell_bytes(&c.cell)).sum(),
+        }
     }
 
     // --- PR-A: API completeness. Pure additive on the primitive.
