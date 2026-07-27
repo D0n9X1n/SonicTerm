@@ -301,7 +301,8 @@ impl App {
                 if mhz > 0 {
                     // period_us = 1_000_000_000 / mhz
                     let period_us = 1_000_000_000u64 / u64::from(mhz);
-                    self.frame_period = Duration::from_micros(period_us);
+                    self.monitor_frame_period = Duration::from_micros(period_us);
+                    self.frame_period = self.monitor_frame_period;
                     tracing::debug!(
                         "vsync pacing: monitor reports {}.{:03} Hz, frame period {:?}",
                         mhz / 1000,
@@ -369,7 +370,11 @@ impl App {
         renderer.set_software_render_degrade(self.software_render_degrade);
         if self.software_render_degrade {
             let before = self.frame_period;
-            self.frame_period = crate::app::software_render_frame_period(true, self.frame_period);
+            // Resolved from the monitor's own period, not from `frame_period`:
+            // that field is the resolved value and would already hold the cap
+            // on a re-resolution, making the decision one-way.
+            self.frame_period =
+                crate::app::software_render_frame_period(true, self.monitor_frame_period);
             tracing::info!(
                 detected = renderer.is_software_rendering(),
                 mode = ?self.config.appearance.software_render_mode,
