@@ -1,4 +1,5 @@
 use super::*;
+use sonicterm_text::glyph_atlas::ATLAS_DIM;
 
 #[test]
 fn coalesces_touching_rows_and_columns() {
@@ -48,20 +49,14 @@ fn copies_tightly_packed_subrect_and_reuses_capacity() {
 ///
 /// The test above establishes that capacity survives the call — deliberately,
 /// because reallocating per frame on this path would cost more than the memory
-/// does. What it does not say is how much memory that is, and the coverage
-/// table records this class as `TransientWithinCall`: allocated and released
-/// within one call, so a charge would be taken and returned before a sampler
-/// could see it. The buffer is a field, it is cleared and never shrunk, and it
-/// holds the largest rect it has ever copied for as long as the renderer
-/// lives — so the figure is worth having on the record.
+/// does. What it does not say is how much memory that is, and the class is
+/// recorded `UnchargedRetention` on exactly that figure, so it is worth having
+/// under a test rather than only in a comment.
 ///
 /// Derived from the atlas constants rather than typed, because a dirty rect
-/// cannot exceed the atlas it comes from. A renderer holds two `AtlasUpload`s,
-/// one for glyphs and one for images.
+/// cannot exceed the atlas it comes from.
 #[test]
 fn retained_staging_is_bounded_by_one_whole_atlas() {
-    use sonicterm_text::glyph_atlas::ATLAS_DIM;
-
     let whole_atlas = ATLAS_DIM as usize * ATLAS_DIM as usize * BYTES_PER_PIXEL as usize;
 
     assert_eq!(
@@ -89,5 +84,42 @@ fn retained_staging_is_bounded_by_one_whole_atlas() {
         "a {copied}-byte copy left {} bytes of capacity; the retained figure scales with \
          the rect, up to {whole_atlas} for a whole atlas",
         scratch.capacity()
+    );
+}
+
+/// The recorded figure must be the atlas arithmetic, not a number beside it.
+///
+/// `sonicterm-types` is a contract crate and cannot depend on
+/// `sonicterm-text`, so the figure in the coverage table is typed rather than
+/// derived — the same constraint that makes the pane-charge list a hand-kept
+/// mirror. A typed figure drifts silently when `ATLAS_DIM` changes, and every
+/// accounting defect this milestone found had that shape.
+///
+/// This crate sees both, so the check belongs here: it recomputes the figure
+/// from the constants and compares it to what the table records. Change the
+/// atlas and this fails until the row is updated.
+#[test]
+fn the_recorded_class_figure_matches_the_atlas_constants() {
+    use sonicterm_types::{ClassCoverage, ResourceClass};
+
+    let per_upload = ATLAS_DIM as usize * ATLAS_DIM as usize * BYTES_PER_PIXEL as usize;
+    // One for glyphs, one for images; `GpuRenderer` holds both for its life.
+    let uploads_per_renderer = 2;
+    let derived = per_upload * uploads_per_renderer;
+
+    let ClassCoverage::UnchargedRetention { per_owner_bytes } =
+        ResourceClass::UploadStaging.coverage()
+    else {
+        panic!(
+            "`UploadStaging` retains its staging buffer between copies and nothing charges \
+             it, so it must record `UnchargedRetention` with what it holds"
+        );
+    };
+
+    assert_eq!(
+        per_owner_bytes, derived,
+        "the coverage table records {per_owner_bytes} bytes for `UploadStaging` but the \
+         atlas constants give {derived} ({uploads_per_renderer} x {per_upload}); the typed \
+         figure has drifted from the atlas it describes"
     );
 }

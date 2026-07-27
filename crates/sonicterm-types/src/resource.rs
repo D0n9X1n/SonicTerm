@@ -196,8 +196,25 @@ impl ResourceClass {
             Self::InlineMediaDecode => ClassCoverage::TransientWithinCall,
             // Rasterized before atlas insertion, then owned by the atlas.
             Self::GlyphRaster => ClassCoverage::TransientWithinCall,
-            // Staging for one upload, released when the upload completes.
-            Self::UploadStaging => ClassCoverage::TransientWithinCall,
+
+            // Upload staging is a field on `AtlasUpload`, cleared between
+            // copies and never shrunk, so it holds the largest dirty rect it
+            // has ever staged for as long as the renderer lives.
+            //
+            // **The reuse is deliberate and is not a defect to fix.** Copying
+            // a rect per frame into a fresh allocation would trade this memory
+            // for a per-frame allocation on the upload path;
+            // `copies_tightly_packed_subrect_and_reuses_capacity` asserts the
+            // capacity survives the call, and that assertion is the intended
+            // behaviour rather than an accident this row is reporting.
+            //
+            // What is recorded here is only what the reuse costs. A dirty rect
+            // cannot exceed the atlas it is copied from, so the ceiling is one
+            // whole atlas — `ATLAS_DIM x ATLAS_DIM x BYTES_PER_PIXEL`, 16 MiB —
+            // and a renderer holds two, one for glyphs and one for images.
+            Self::UploadStaging => {
+                ClassCoverage::UnchargedRetention { per_owner_bytes: 2 * 2048 * 2048 * 4 }
+            }
 
             // SSH is `--features ssh`, off in shipped builds.
             Self::RemoteInput | Self::RemoteOutput => ClassCoverage::FeatureGated,
@@ -305,9 +322,13 @@ impl ResourceClass {
 
             // Released before the call that allocated them returns, so no
             // sampler sees them in a pane's total.
-            Self::InlineMediaDecode | Self::GlyphRaster | Self::UploadStaging => {
-                PaneSeamTerm::NotChargedInProduction
-            }
+            Self::InlineMediaDecode | Self::GlyphRaster => PaneSeamTerm::NotChargedInProduction,
+
+            // Retained rather than released, but retained by a renderer and
+            // charged to nobody. A pane's ledger cannot carry it either way,
+            // so the sum gains no term — for the same reason as the classes
+            // above, though not for the same reason as their comment gives.
+            Self::UploadStaging => PaneSeamTerm::NotChargedInProduction,
 
             // Compiled out of shipped builds.
             Self::RemoteInput | Self::RemoteOutput => PaneSeamTerm::NotChargedInProduction,

@@ -251,26 +251,35 @@ match that fails to compile until a new variant is given a decision:
 | `TransientWithinCall` | Allocated and released within one call, so a charge would be taken and returned before any sampler could observe it. |
 | `FeatureGated` | Compiled out of shipped builds by a feature gate. |
 | `SubsystemAbsent` | The subsystem that would own it does not exist yet; charging it would be charging nothing. |
+| `UnchargedRetention { per_owner_bytes }` | Real retention that nothing charges, recorded with what it holds. Distinct from `SubsystemAbsent` (charging would charge nothing) and `TransientWithinCall` (gone before a sampler could see it): the memory is present, significant, and outside the ledger. |
 
 The classes with live charge sites are the grid trio, parser capture, protocol
-metadata, retained inline media, and local PTY output, all charged from the pane
-retention pass. `RegistryMetadata` is `SubsystemAbsent` by construction rather
-than by schedule: owner records are the ledger's own storage, and charging them
-to a ledger class would make the ledger account for itself, a recursion with no
-fixed point.
+metadata, retained inline media, and the local PTY output and input queues, all
+charged from the pane retention pass. `RegistryMetadata` is `SubsystemAbsent` by
+construction rather than by schedule: owner records are the ledger's own storage,
+and charging them to a ledger class would make the ledger account for itself, a
+recursion with no fixed point.
 
 #### Renderer retention is measured, not charged
 
-`GlyphAtlas` and `SoftwareFrame` are marked `Charged` in the coverage table, but
-**no charge site exists for either.** This is a known gap, and it is structural
-rather than pending: `sonicterm-gpu` declares no dependency on
-`sonicterm-resource`, so `GpuRenderer::retained_amounts()` reports its figures
-but has no governor to reserve against. Closing the gap requires a new
+`GlyphAtlas` and `SoftwareFrame` record `UnchargedRetention`, carrying what they
+hold rather than a charge site they do not have. The gap is structural rather
+than pending: `sonicterm-gpu` declares no dependency on `sonicterm-resource`, so
+`GpuRenderer::retained_amounts()` reports its figures but has no governor to
+reserve against — and nothing calls it. Closing the gap requires a new
 dependency edge, not merely a call site.
 
-The consequence for anyone reading a snapshot: atlas and software-frame memory
-is real, is measured, and is absent from the ledger. A process total taken from
-the governor is a total of what the app charges, not of what the process holds.
+`UploadStaging` is recorded the same way, for a different reason. Its staging
+buffer is a renderer field that is cleared between copies and never shrunk, so
+it holds the largest dirty rect it has ever staged. That reuse is deliberate —
+reallocating per frame on the upload path would cost more than the memory does,
+and a test asserts the capacity survives the call — so the row records what the
+reuse costs rather than proposing to remove it.
+
+The consequence for anyone reading a snapshot: atlas, software-frame, and
+staging memory is real, is measured, and is absent from the ledger. A process
+total taken from the governor is a total of what the app charges, not of what
+the process holds.
 
 ### Memory invariants this release guarantees
 
