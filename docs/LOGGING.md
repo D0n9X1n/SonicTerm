@@ -77,12 +77,15 @@ followed by one `session retention` line:
 pane retention    pane=WindowId(1)/7 total_bytes=15204320 grid_visible_bytes=8110080
                   grid_history_bytes=6405120 grid_alternate_bytes=0 parser_bytes=0
                   hyperlink_bytes=254240 inline_media_bytes=434880 pty_output_bytes=0
+                  pty_input_bytes=0
                   largest_seam=grid_visible largest_seam_bytes=8110080
 session retention panes=12 total_bytes=182451840 grid_visible_bytes=97320960 ...
 ```
 
-Seven seams meter their own memory and the figures are **disjoint** —
-each counts only what it owns, so no allocation is charged twice:
+Eight seams meter their own memory and the figures are **disjoint** —
+each counts only what it owns, so no allocation is charged twice. They are
+also exhaustive: `total_bytes` is their sum, so the rows below account for
+every byte in the total.
 
 | Field | Covers |
 | --- | --- |
@@ -93,6 +96,7 @@ each counts only what it owns, so no allocation is charged twice:
 | `hyperlink_bytes` | interned OSC 8 URI and id strings |
 | `inline_media_bytes` | decoded inline images retained for display |
 | `pty_output_bytes` | local PTY output queued or in flight |
+| `pty_input_bytes` | input queued toward the shell, typically a large paste |
 
 `largest_seam` names the dominant subsystem. Read it first: a total alone says
 a pane is large without saying where to look, and the remedy differs per seam —

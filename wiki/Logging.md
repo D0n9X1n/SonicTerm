@@ -64,10 +64,12 @@ Set the level to `debug` and let the session run for a minute or two:
 level = "debug"
 ```
 
-The `memory` target samples what each pane holds every 30 seconds and writes
+The `memory` target samples what each pane holds at most once every 30
+seconds — sampling happens on the idle-wake path, so a window that never
+wakes produces no samples at all — and writes
 one `pane retention` line per pane followed by one `session retention` line
-for the whole process. Seven figures are reported separately because the
-remedy differs:
+for the whole process. Eight figures are reported separately because the
+remedy differs, and together they sum to `total_bytes`:
 
 | Field | What it covers | What you can do |
 | --- | --- | --- |
@@ -363,9 +365,10 @@ render-timing 配置项。
 level = "debug"
 ```
 
-`memory` 目标每 30 秒采样一次每个面板占用的内存，为每个面板写入一行
-`pane retention`，随后为整个进程写入一行 `session retention`。各数值分别
-报告，因为对应的处理方式不同：
+`memory` 目标最多每 30 秒采样一次每个面板占用的内存——采样发生在空闲唤醒
+路径上，因此完全不唤醒的窗口不会产生任何采样——为每个面板写入一行
+`pane retention`，随后为整个进程写入一行 `session retention`。以下八项数值
+分别报告，因为对应的处理方式不同；它们相加即为 `total_bytes`：
 
 | 字段 | 含义 | 可采取的措施 |
 | --- | --- | --- |
