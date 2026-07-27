@@ -48,14 +48,14 @@ pub struct PaneRetention {
     pub hyperlinks: ResourceAmount,
     /// Decoded inline images retained for display.
     pub inline_media: ResourceAmount,
-    /// Bytes waiting in this pane's PTY output channel.
+    /// Ring memory held by this pane's queued PTY output.
     ///
-    /// Bounded at 64 slots over a reused 64 KiB ring. Measured at 512 KiB per
-    /// pane when full — the ring hands out views into one allocation rather
-    /// than 64 independent buffers, so the figure is 8x below what the slot
-    /// count alone would suggest. Ten MiB across twenty panes: small next to
-    /// the grid, large enough that leaving it uncharged would be a gap rather
-    /// than a rounding error.
+    /// Bounded at 64 slots of views into the reader's reused 64 KiB ring. The
+    /// charge is the ring those views pin, not their payload: 64 keystroke
+    /// echoes are 64 bytes of data in 64 KiB of memory, and charging the
+    /// payload would report a pane as holding almost nothing while a ring is
+    /// held down. Measured at one ring for every real shell workload and two
+    /// under a sustained flood, against a 4 MiB structural ceiling.
     pub pty_output: ResourceAmount,
 }
 
@@ -124,9 +124,13 @@ pub fn measure_pane(pane: &PaneState) -> Option<PaneRetention> {
         .map(|images| super::media::retained_inline_media(&images))
         .unwrap_or_default();
 
-    let pty_output = pane.pty.as_ref().map_or_else(ResourceAmount::default, |pty| {
-        let bytes = sonicterm_io::pty::queued_output_bytes(pty);
-        ResourceAmount { bytes, items: usize::from(bytes > 0) }
+    // Ring memory, not payload: the queued views are windows into the reader's
+    // reused 64 KiB ring, so a pane holding 64 bytes of keystroke echo is
+    // holding 64 KiB. `items` is the queued chunk count, which is what the
+    // slot bound is expressed in.
+    let pty_output = pane.pty.as_ref().map_or_else(ResourceAmount::default, |pty| ResourceAmount {
+        bytes: sonicterm_io::pty::queued_output_bytes(pty),
+        items: pty.out_rx.len(),
     });
 
     Some(PaneRetention {
