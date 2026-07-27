@@ -11,11 +11,26 @@
 //! parts are disjoint. That property is load-bearing rather than incidental,
 //! so it is pinned by tests in both the parser and this module.
 //!
-//! This is measurement, not enforcement. Nothing here rejects, evicts, or
-//! caps: the per-seam limits already do that. What it adds is the ability to
-//! see the composition — bounded parts summing without a bound above them —
-//! which is the shape behind reported multi-gigabyte growth and the thing no
-//! individual seam can reveal.
+//! This is measurement first. The per-seam limits do the rejecting and
+//! capping, and what measurement adds is the ability to see the composition —
+//! bounded parts summing without a bound above them — which is the shape
+//! behind reported multi-gigabyte growth and the thing no individual seam can
+//! reveal.
+//!
+//! Two passes here do reclaim, and they are here for the same reason: both
+//! recover memory that the seam owning it cannot recover for itself, because
+//! the seam has no clock and no view above the pane.
+//! [`App::reclaim_stalled_captures`] cancels captures that stopped receiving,
+//! and [`trim_panes_over_media_ceiling`] revisits panes still holding an
+//! inline-media budget sized for an earlier, smaller session. A pane only
+//! re-evaluates that budget while it is *decoding*, so an idle pane never
+//! revisits it — this walk is what does.
+//!
+//! Both run *above* the log-level gate in [`App::sample_pane_retention`].
+//! Freeing memory is not a diagnostic: a user at the default log level has the
+//! same memory to get back as one running with `memory=debug`, and a
+//! reclamation gated on whether anyone is watching is a reclamation that never
+//! runs in a shipped build.
 
 use std::time::{Duration, Instant};
 
@@ -188,6 +203,69 @@ fn add(left: ResourceAmount, right: ResourceAmount) -> ResourceAmount {
         bytes: left.bytes.saturating_add(right.bytes),
         items: left.items.saturating_add(right.items),
     }
+}
+
+/// Bring every pane's inline media back inside the process ceiling.
+///
+/// Returns the bytes reclaimed, so a caller can log the figure and a test can
+/// assert the pass did work rather than merely ran.
+///
+/// # The gap this closes
+///
+/// A pane's inline-media budget is the process ceiling divided by the live
+/// pane count, so it *shrinks* as panes are created. But a pane only
+/// recomputes it while decoding: the trim runs on the pane's own PTY thread,
+/// driven by images arriving. A pane admitted when four panes existed takes a
+/// quarter of the ceiling, goes idle, and holds that quarter forever — no
+/// matter how many panes arrive afterwards, because nothing on an idle pane's
+/// behalf ever looks again.
+///
+/// Measured against a 256 MiB ceiling: four panes filled early hold 64 MiB
+/// each, and every pane created afterwards adds its own floor on top — 260 MiB
+/// at five panes, 320 MiB at twenty, 496 MiB at sixty-four. The early four
+/// keep 256 MiB between them throughout, where 16 MiB renders every image they
+/// can actually show.
+///
+/// This walk is the missing revisit. It runs over *every* pane rather than
+/// only the one decoding, which is the whole difference: the pane holding the
+/// stale budget is by definition the one that is not decoding.
+///
+/// # What it will not do
+///
+/// Only runs when the process is actually over its ceiling, and trims toward
+/// each pane's most recent image — never below the floor that renders one
+/// image whole, and never to nothing. Reclaiming unused memory is always
+/// correct; reclaiming memory in use is refusing what the user asked to see.
+/// A pane trimmed here still renders.
+///
+/// Panes whose image lock is contended are skipped rather than waited on. A
+/// contended pane is one actively merging a decode batch, which re-trims
+/// itself on that same thread; blocking here would put the reclamation pass in
+/// front of the render path, which takes the same lock.
+pub fn trim_panes_over_media_ceiling<'a>(panes: impl IntoIterator<Item = &'a PaneState>) -> usize {
+    if super::media::process_inline_media_bytes() <= super::media::MAX_PROCESS_INLINE_MEDIA_BYTES {
+        return 0;
+    }
+
+    let mut reclaimed = 0usize;
+    for pane in panes {
+        // Re-checked per pane, not hoisted. Each trim lowers the process
+        // total, and once the walk brings it back under the ceiling the
+        // remaining panes are entitled to a fair share rather than the floor.
+        // Stopping there is the point: the pass reclaims what is over the
+        // line and no more.
+        let Some(mut images) = pane.inline_images.try_lock() else { continue };
+        let before = super::media::retained_inline_media(&images).bytes;
+        let evicted =
+            super::media::trim_inline_images_charged(&mut images, &pane.inline_media_charge);
+        let after = super::media::retained_inline_media(&images).bytes;
+        drop(images);
+        // Freed outside the lock: releasing these pixel buffers takes
+        // milliseconds, and the render path waits on the lock just released.
+        drop(evicted);
+        reclaimed = reclaimed.saturating_add(before.saturating_sub(after));
+    }
+    reclaimed
 }
 
 /// Emit one pane's retention to the memory log.
@@ -548,6 +626,28 @@ impl super::App {
         }
     }
 
+    /// Revisit every pane's inline-media budget when the process is over its
+    /// ceiling.
+    ///
+    /// The per-pane trim runs on a pane's own PTY thread and therefore only
+    /// ever reaches a pane that is decoding. This is the walk that reaches the
+    /// rest — a pane that filled up early, went idle, and is still holding the
+    /// generous budget it was admitted under.
+    fn trim_over_ceiling_inline_media(&mut self) {
+        let reclaimed = trim_panes_over_media_ceiling(
+            self.windows.values().flat_map(|window| window.panes.values()),
+        );
+        if reclaimed > 0 {
+            tracing::warn!(
+                target: "memory",
+                reclaimed_bytes = reclaimed,
+                process_retained_bytes = super::media::process_inline_media_bytes(),
+                ceiling = super::media::MAX_PROCESS_INLINE_MEDIA_BYTES,
+                "revisited idle panes holding an inline-media budget sized for a smaller session"
+            );
+        }
+    }
+
     pub(super) fn sample_pane_retention(&mut self, now: Instant) -> bool {
         // Reclamation runs before the diagnostic gate, and must.
         //
@@ -561,6 +661,12 @@ impl super::App {
         // that: the capture was never reclaimed because no subscriber was
         // installed, which is exactly the shipped default.
         self.reclaim_stalled_captures();
+
+        // Above the gate for the same reason, and it is the only place the
+        // stale-budget case can be reached at all: a pane recomputes its
+        // inline-media budget only while decoding, so the pane still holding
+        // an early, generous share is precisely the one no other path visits.
+        self.trim_over_ceiling_inline_media();
 
         // Owner reattribution and charging also run before the gate, for the
         // same reason.

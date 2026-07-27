@@ -7,6 +7,8 @@ use parking_lot::Mutex;
 use sonicterm_grid::grid::Grid;
 use sonicterm_vt::vt::Parser;
 
+use crate::app::{App, WindowId};
+
 fn pane_with(cols: u16, rows: u16) -> PaneState {
     PaneState::new(Arc::new(Mutex::new(Parser::new(Grid::new(cols, rows)))), None)
 }
@@ -389,4 +391,218 @@ fn the_coverage_table_agrees_with_the_charge_sites() {
             );
         }
     }
+}
+
+/// Fill a pane the way its PTY thread does: merge, then trim under charge.
+///
+/// Pushing into `inline_images` directly would move no counter — the charge is
+/// applied by the trim, so a test that skipped it would drive a process total
+/// that stays at zero and a ceiling that is never crossed.
+fn decode_into(pane: &PaneState, id: &mut u64, count: usize, image_bytes: usize) {
+    for _ in 0..count {
+        *id += 1;
+        let evicted = {
+            let mut images = pane.inline_images.lock();
+            images.push(sonicterm_render_model::InlineImage {
+                id: *id,
+                row: 0,
+                col: 0,
+                width: 1,
+                height: 1,
+                bgra: Arc::from(vec![0u8; image_bytes]),
+            });
+            crate::app::media::trim_inline_images_charged(&mut images, &pane.inline_media_charge)
+        };
+        drop(evicted);
+    }
+}
+
+fn retained_bytes(pane: &PaneState) -> usize {
+    crate::app::media::retained_inline_media(&pane.inline_images.lock()).bytes
+}
+
+/// Reach a seeded pane through the private field rather than a new test seam.
+///
+/// These tests are in-crate, so nothing has to be made public to drive them.
+fn seeded_pane(app: &App, window: WindowId, pane_id: u64) -> &PaneState {
+    app.windows
+        .get(&window)
+        .and_then(|state| state.panes.get(&pane_id))
+        .expect("the seeded pane exists")
+}
+
+/// A pane that filled early must not keep that budget once panes multiply.
+///
+/// The budget is the process ceiling divided by the live pane count, so it
+/// shrinks as panes arrive — but a pane only recomputes it *while decoding*,
+/// on its own PTY thread. A pane that filled up and went idle is never
+/// revisited, and keeps a share sized for a session that no longer exists.
+///
+/// # Why this asserts per pane
+///
+/// The aggregate bound `ceiling + panes × floor` cannot fail this case: at 64
+/// panes it permits 512 MiB against a measured 496 MiB, and stated against the
+/// single-image residual it permits 1280 MiB. Both scale with the pane count
+/// they are meant to bound, so both stay green on the unfixed code. Two
+/// earlier attempts at this test were written that way and passed without
+/// reproducing anything.
+///
+/// The quantity the defect actually moves is **one pane's retained bytes**:
+/// 64 MiB held where 4 MiB renders everything it can show. That is asserted
+/// here per pane, and the aggregate is kept only as a secondary check.
+#[test]
+fn an_idle_pane_gives_back_a_budget_sized_for_a_smaller_session() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    const EARLY: usize = 4;
+    const LATE: usize = 60;
+    // One MiB, so a pane at the 4 MiB floor still holds four whole images and
+    // the per-pane bound below is the floor itself rather than one large
+    // image standing in for it.
+    const IMAGE_BYTES: usize = 1024 * 1024;
+
+    let floor = crate::app::media::MIN_PANE_INLINE_MEDIA_BYTES;
+    let mut id = 0u64;
+
+    // Four panes fill at the early, generous budget — then go idle. Nothing
+    // decodes into them again for the rest of this test.
+    let early: Vec<PaneState> = (0..EARLY).map(|_| pane_with(80, 24)).collect();
+    for pane in &early {
+        decode_into(pane, &mut id, 128, IMAGE_BYTES);
+    }
+
+    let before: Vec<usize> = early.iter().map(retained_bytes).collect();
+    for (index, &bytes) in before.iter().enumerate() {
+        assert!(
+            bytes > floor,
+            "precondition failed: early pane {index} filled to {bytes} bytes, at or below the \
+             {floor}-byte floor, so this run cannot show a pane coming down from a larger \
+             budget — the fill above did not reach the generous share"
+        );
+    }
+
+    // Many more panes arrive. Each trims itself as it decodes; the early four
+    // never decode again, which is exactly the case under test.
+    let late: Vec<PaneState> = (0..LATE).map(|_| pane_with(80, 24)).collect();
+    for pane in &late {
+        decode_into(pane, &mut id, 8, IMAGE_BYTES);
+    }
+
+    assert!(
+        crate::app::media::process_inline_media_bytes()
+            > crate::app::media::MAX_PROCESS_INLINE_MEDIA_BYTES,
+        "precondition failed: the process is not over its ceiling, so there is no pressure \
+         for the pass to relieve"
+    );
+
+    let reclaimed = trim_panes_over_media_ceiling(early.iter().chain(late.iter()));
+
+    // The assertion that discriminates. Per pane, not aggregate.
+    for (index, pane) in early.iter().enumerate() {
+        let after = retained_bytes(pane);
+        assert!(
+            after <= floor.max(IMAGE_BYTES),
+            "early pane {index} still holds {after} bytes ({} MiB) after the pass, against a \
+             {floor}-byte floor. It was admitted when {EARLY} panes existed and there are now \
+             {}; a pane that filled early and went idle is keeping a share the ceiling can no \
+             longer honour, because only a decoding pane re-trims",
+            after / 1048576,
+            EARLY + LATE
+        );
+        assert!(
+            after > 0,
+            "early pane {index} was trimmed to nothing; every pane must keep its most recent \
+             image, or the pass refuses the user the thing they asked to see"
+        );
+        assert!(
+            after < before[index],
+            "early pane {index} did not come down at all: {} bytes before, {after} after",
+            before[index]
+        );
+    }
+
+    assert!(reclaimed > 0, "the pass reported reclaiming nothing while panes were over budget");
+
+    // Secondary, and only that: every pane is entitled to render one image, so
+    // this term has to scale with the pane count. It is a real bound but it
+    // does not discriminate — it holds on the unfixed code too.
+    let total = crate::app::media::process_inline_media_bytes();
+    let bound = crate::app::media::MAX_PROCESS_INLINE_MEDIA_BYTES + (EARLY + LATE) * floor;
+    assert!(
+        total <= bound,
+        "the process holds {} MiB against a stateable bound of {} MiB",
+        total / 1048576,
+        bound / 1048576
+    );
+}
+
+/// The pass runs in a shipped build, where nothing is watching the log.
+///
+/// Reclamation sits above the `enabled!(target: "memory", DEBUG)` gate in
+/// `sample_pane_retention`. Below it, the pass would do nothing in every
+/// default session and everything in a session with `memory=debug` — the
+/// memory would come back only for users already investigating why it had not.
+///
+/// No subscriber is installed here, so the gate is closed: this enters the
+/// real production path with the level check failing, and asserts the trim
+/// happened anyway. Moving the call below the gate fails this test.
+#[test]
+fn media_is_reclaimed_with_the_memory_log_switched_off() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    const IMAGE_BYTES: usize = 1024 * 1024;
+
+    assert!(
+        !tracing::enabled!(target: "memory", tracing::Level::DEBUG),
+        "precondition failed: a subscriber is recording `memory` at debug, so this test \
+         cannot show behaviour that differs below the gate"
+    );
+
+    let floor = crate::app::media::MIN_PANE_INLINE_MEDIA_BYTES;
+    let mut app = App::new(
+        sonicterm_cfg::theme::Theme::default(),
+        sonicterm_cfg::config::Config::default(),
+        sonicterm_cfg::keymap::Keymap::default(),
+    );
+    let window = app.__test_seed_child_window(&["early"]);
+    let pane_ids = app.__test_child_pane_ids(window).expect("the seeded window exists");
+    let early_id = *pane_ids.first().expect("the window has a pane");
+
+    let mut id = 0u64;
+    decode_into(seeded_pane(&app, window, early_id), &mut id, 128, IMAGE_BYTES);
+
+    let before = retained_bytes(seeded_pane(&app, window, early_id));
+    assert!(
+        before > floor,
+        "precondition failed: the pane filled to {before} bytes, at or below the {floor}-byte \
+         floor, so there is no stale budget for the pass to reclaim"
+    );
+
+    // Panes keep arriving until the process is over its ceiling. The pane
+    // above never decodes again.
+    let mut crowd: Vec<PaneState> = Vec::new();
+    while crate::app::media::process_inline_media_bytes()
+        <= crate::app::media::MAX_PROCESS_INLINE_MEDIA_BYTES
+        && crowd.len() < 256
+    {
+        let pane = pane_with(80, 24);
+        decode_into(&pane, &mut id, 8, IMAGE_BYTES);
+        crowd.push(pane);
+    }
+    assert!(
+        crate::app::media::process_inline_media_bytes()
+            > crate::app::media::MAX_PROCESS_INLINE_MEDIA_BYTES,
+        "precondition failed: the process never went over its ceiling"
+    );
+
+    // The production entry point, with the gate closed.
+    let sampled = app.__test_sample_pane_retention_now();
+    assert!(!sampled, "no subscriber is installed, so the gated sampling must report not-taken");
+
+    let after = retained_bytes(seeded_pane(&app, window, early_id));
+    assert!(
+        after <= floor.max(IMAGE_BYTES),
+        "the pane still holds {after} bytes with the memory log switched off, down from \
+         {before}. Reclamation that only runs when someone is watching the log does not run \
+         in a shipped build"
+    );
+    assert!(after > 0, "the pane was trimmed to nothing; it must keep its most recent image");
 }
