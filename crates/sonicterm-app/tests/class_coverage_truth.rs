@@ -18,10 +18,11 @@
 //! full message size and broadcast to every pane.
 
 use enum_map::Enum;
+use sonicterm_app::app::retention::{seam_classes, PaneRetention};
 use sonicterm_io::pty::{
     max_pty_queued_input_bytes, MAX_PTY_INPUT_MESSAGE_BYTES, PTY_INPUT_QUEUE_CAPACITY,
 };
-use sonicterm_types::resource::{ClassCoverage, ResourceClass};
+use sonicterm_types::resource::{ClassCoverage, PaneSeamTerm, ResourceClass};
 
 /// A class whose worst case is large must be charged, not called negligible.
 ///
@@ -98,6 +99,78 @@ fn the_backstop_covers_the_seams_plus_the_charged_input_queue() {
          derived from. A backstop below the worst case refuses panes that are behaving \
          correctly."
     );
+}
+
+/// A class recorded as uncharged must not appear in the charge path.
+///
+/// `UnchargedRetention` is the one coverage variant that describes work not
+/// done: the memory is present and significant, and no owner's ledger carries
+/// it. That claim is only worth reading if something checks it, because the
+/// failure mode is silent in both directions. A class wired up to charge while
+/// the table still says otherwise leaves the table lying about the thing it
+/// exists to record; a class the table promotes to `Charged` without a charge
+/// site reproduces exactly the defect the variant was introduced to make
+/// visible — a row reading `Charged` with nothing behind it.
+///
+/// `seam_classes` is the whole production charge path. It is the sole argument
+/// to the only `charge_classes` call an app makes, so a class absent from it is
+/// charged nowhere, whatever any table says.
+#[test]
+fn no_uncharged_class_appears_in_the_production_charge_path() {
+    let charged: Vec<ResourceClass> =
+        seam_classes(&PaneRetention::default()).into_iter().map(|(class, _)| class).collect();
+
+    for index in 0..ResourceClass::LENGTH {
+        let class = ResourceClass::from_usize(index);
+        let ClassCoverage::UnchargedRetention { per_owner_bytes } = class.coverage() else {
+            continue;
+        };
+
+        assert!(
+            !charged.contains(&class),
+            "{class:?} is recorded UnchargedRetention at {per_owner_bytes} bytes per owner, \
+             but it is in the production charge path. Either the charge is real and the \
+             table must say so, or the class does not belong in the path."
+        );
+    }
+}
+
+/// The renderer's host-side classes reach no ledger, and the report shows it.
+///
+/// Stated for these two by name rather than left to the sweep above, because
+/// the reason they are absent is structural and not obvious from the table:
+/// `sonicterm-gpu` declares no dependency on `sonicterm-resource`, so the crate
+/// that computes both figures cannot reserve against a governor at all. The
+/// figures exist, are tested, and stop at the crate boundary.
+///
+/// The consequence is a diagnosis gap rather than an unbounded allocation —
+/// the per-seam caps bound this memory whether or not anything is charged. What
+/// is missing is the ability to see it: on the Windows software path the frame
+/// buffer is the largest single host-side buffer in the process, and a user
+/// reading a retention report cannot find it there.
+#[test]
+fn the_renderer_host_side_classes_are_absent_from_the_charge_path() {
+    let charged: Vec<ResourceClass> =
+        seam_classes(&PaneRetention::default()).into_iter().map(|(class, _)| class).collect();
+
+    for class in [ResourceClass::GlyphAtlas, ResourceClass::SoftwareFrame] {
+        assert!(
+            matches!(class.coverage(), ClassCoverage::UnchargedRetention { .. }),
+            "{class:?} is computed by the renderer and charged by nothing, so it must be \
+             recorded UnchargedRetention rather than as a decision that means there is \
+             nothing to do"
+        );
+        assert!(
+            !charged.contains(&class),
+            "{class:?} is in the charge path, so its coverage row is stale"
+        );
+        assert_eq!(
+            class.pane_seam_term(),
+            PaneSeamTerm::NotChargedInProduction,
+            "{class:?} reaches no owner's ledger, so a pane's seam-cap sum must carry no \
+             term for it"
+        );
+    }
 }
 
 /// Every class still recorded negligible must be small at its real bound.
