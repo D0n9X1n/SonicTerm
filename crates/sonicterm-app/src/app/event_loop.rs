@@ -337,9 +337,9 @@ impl App {
             renderer.set_async_loader(());
         }
         // Seed cursor visuals from config so the very first frame draws
-        // the user-selected shape rather than the default. Subsequent
-        // edits to sonicterm.toml take effect through the config-watch hook
-        // (see apply_config below).
+        // the user-selected shape rather than the default. Later edits to
+        // sonicterm.toml reach the renderer only when the user asks for a
+        // reload; nothing watches the file.
         renderer.set_cursor_shape(self.config.terminal.cursor_shape);
         renderer.set_cursor_blink(self.config.terminal.cursor_blink);
 
