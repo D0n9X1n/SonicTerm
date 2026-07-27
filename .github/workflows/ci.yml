@@ -85,6 +85,13 @@ jobs:
       - name: Report host window capability
         run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture
 
+      # `--nocapture` for the same reason as the probe above: this test's
+      # verdict is its stdout. Without it, a run that compared eight cycles
+      # and a run that returned early having measured nothing both report
+      # `ok`, and the distinction is the whole point.
+      - name: Report renderer churn baseline
+        run: cargo test -p sonicterm-gpu --test renderer_churn_baseline -- --nocapture
+
       - name: Run release-note unit test
         shell: bash
         run: bash scripts/test-release-notes.sh
