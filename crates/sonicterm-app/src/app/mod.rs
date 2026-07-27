@@ -402,6 +402,18 @@ fn tracking_only_owner_limits() -> OwnerLimits {
     }
 }
 
+/// Append parsed command events, bounding both the entries kept and the
+/// memory the queue holds.
+///
+/// Trimming the length is not enough on its own. `Vec::drain` lowers the
+/// length and keeps the allocation, so one oversized batch — a 64 KiB parse
+/// chunk of `OSC 133` prompt markers is roughly eight thousand events — leaves
+/// the queue trimmed to the cap while still holding the peak buffer for as
+/// long as the pane lives. Releasing the overshoot keeps the memory the class
+/// records and the memory the pane holds the same figure.
+///
+/// The release runs only when a batch actually overshot, so the steady state,
+/// where the queue sits at or below the cap, does not reallocate.
 fn append_bounded_command_events(
     queue: &mut Vec<PaneCommandEvent>,
     events: impl IntoIterator<Item = PaneCommandEvent>,
@@ -410,6 +422,7 @@ fn append_bounded_command_events(
     if queue.len() > MAX_PANE_COMMAND_EVENTS {
         let excess = queue.len() - MAX_PANE_COMMAND_EVENTS;
         queue.drain(0..excess);
+        queue.shrink_to(MAX_PANE_COMMAND_EVENTS);
     }
 }
 
@@ -603,17 +616,6 @@ impl Drop for OwnerGuard {
 }
 
 pub struct WindowState {
-    /// This window's owner in the governor hierarchy.
-    ///
-    /// `None` for synthetic windows built by tests that never registered one.
-    /// Production windows always have it; the option exists so a test seam
-    /// cannot silently register a phantom owner that never closes.
-    ///
-    /// An [`OwnerGuard`] for the same reason the pane's is: the window is
-    /// removed from `self.windows` at three sites across two files, and the
-    /// close has to be a property of ownership rather than something each of
-    /// them remembers.
-    pub(crate) owner: Option<OwnerGuard>,
     /// Phase B classification — see [`WindowRole`].
     pub role: WindowRole,
     /// Phase B2 PR-B2-0: promoted from `Arc<Window>` to
@@ -634,6 +636,24 @@ pub struct WindowState {
     pub tabs: TabBar,
     pub tab_states: Vec<TabState>,
     pub panes: HashMap<u64, PaneState>,
+    /// This window's owner in the governor hierarchy.
+    ///
+    /// `None` for synthetic windows built by tests that never registered one.
+    /// Production windows always have it; the option exists so a test seam
+    /// cannot silently register a phantom owner that never closes.
+    ///
+    /// An [`OwnerGuard`] for the same reason the pane's is: the window is
+    /// removed from `self.windows` at three sites across two files, and the
+    /// close has to be a property of ownership rather than something each of
+    /// them remembers.
+    ///
+    /// **Declared after `panes`, and the order is load-bearing.** Rust drops
+    /// fields in declaration order, and a pane's owner is a child of this one.
+    /// `finish_close` refuses an owner that still has live children, so a
+    /// window dropped with this field first would strand its own owner part
+    /// closed while the panes beneath it were still open. Panes first means
+    /// each child guard has already closed by the time this one runs.
+    pub(crate) owner: Option<OwnerGuard>,
     pub cursor_pos: (f64, f64),
     pub mouse_down: bool,
     pub selection: Option<Selection>,
@@ -4546,6 +4566,19 @@ impl App {
     #[doc(hidden)]
     pub fn __test_remove_window(&mut self, id: WindowId) -> bool {
         self.release_window_owner(id);
+        self.windows.remove(&id).is_some()
+    }
+
+    /// Test-only: drop a window without the explicit owner release first.
+    ///
+    /// [`Self::__test_remove_window`] calls `release_window_owner`, which takes
+    /// each pane's owner in the right order before the window is removed. That
+    /// hides what the struct does on its own, and the struct has to be right:
+    /// a window removed from the map without that call, or held in the map
+    /// until the process tears down, closes its owners purely by field drop
+    /// order. This models that path.
+    #[doc(hidden)]
+    pub fn __test_drop_window_without_release(&mut self, id: WindowId) -> bool {
         self.windows.remove(&id).is_some()
     }
 

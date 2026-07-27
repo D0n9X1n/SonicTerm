@@ -247,3 +247,45 @@ fn repeated_window_cycles_do_not_ratchet_open_owners() {
          the process"
     );
 }
+
+/// A window dropped without an explicit release still closes its owners.
+///
+/// The teardown most paths take calls `release_window_owner`, which takes each
+/// pane's owner in the right order before the window goes. Two paths do not:
+/// a raw removal from the window map, and the process tearing down with
+/// windows still in it. Those close purely by field drop order, so the struct
+/// has to be correct on its own.
+///
+/// Rust drops fields in declaration order and a pane owner is a child of the
+/// window owner. `finish_close` refuses a parent with live children, so a
+/// window whose guard ran before its panes would strand its own owner part
+/// closed — the same terminal state as an owner nobody closed at all, which is
+/// the defect this hierarchy exists to make impossible.
+///
+/// Every other test in this file reaches teardown through
+/// `release_window_owner`, which orders it by hand. None of them can observe
+/// the field order, and all of them stayed green while it was wrong.
+#[test]
+fn a_window_dropped_without_an_explicit_release_still_closes_its_owners() {
+    let mut app = app();
+    let child = app.__test_seed_child_window(&["one", "two"]);
+    app.__test_reconcile_pane_owners();
+
+    let window_owner = app.__test_window_owner(child).expect("the window registered an owner");
+    let pane_owners = app.__test_child_pane_owners(child);
+    assert_eq!(pane_owners.len(), 2, "precondition: both panes hold owners");
+    assert!(app.__test_owner_is_open(window_owner), "precondition: the window owner is open");
+
+    assert!(app.__test_drop_window_without_release(child), "the window is dropped");
+
+    assert!(
+        !app.__test_owner_is_open(window_owner),
+        "the window owner is still open after the window was dropped — its guard ran \
+         while the pane owners beneath it were live, so the close was refused"
+    );
+    let snapshot = app.__test_governor_snapshot_root();
+    assert_eq!(
+        snapshot.release_failures, 0,
+        "and dropping a window must leave the ledger consistent"
+    );
+}
