@@ -63,6 +63,10 @@ jobs:
         shell: bash
         run: bash scripts/check-no-raw-process-exit.sh
 
+      - name: Check window owner registration
+        shell: bash
+        run: bash scripts/check-window-owner-registration.sh
+
       - name: Run unit tests
         run: cargo test --workspace --lib --bins
 

@@ -64,6 +64,7 @@ Normal PR/main CI runs workspace unit tests plus a per-crate unit/build gate:
 ```bash
 cargo test --workspace --lib --bins
 bash scripts/check-no-raw-process-exit.sh
+bash scripts/check-window-owner-registration.sh
 bash scripts/check-workspace-crates.sh
 scripts/rust-logic-coverage.sh
 ```

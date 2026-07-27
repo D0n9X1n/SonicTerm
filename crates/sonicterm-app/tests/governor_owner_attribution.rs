@@ -39,6 +39,47 @@ fn a_new_pane_is_owned_without_waiting_for_the_sampler() {
     );
 }
 
+/// A window arrives in the hierarchy owned, with its panes parented below it.
+///
+/// A window is inserted with its panes already populated, so the owner has to
+/// be registered at the insertion itself. Skip it and nothing later recovers:
+/// both reconciliation and re-attribution pass over a window whose owner is
+/// `None`, so its panes never get owners either and the entire subtree stays
+/// invisible to the hierarchy for as long as the window is open — not
+/// uncharged, absent. That is the state a user meets when they open a new
+/// window, enable `memory=debug`, and find its panes missing from the report.
+///
+/// Asserts the parent edge, not just that owners exist. A pane owner that
+/// exists but hangs off the wrong parent answers "what does this window hold"
+/// incorrectly, which is the question the hierarchy is for.
+#[test]
+fn a_window_is_owned_and_parents_its_panes_when_it_is_inserted() {
+    let mut app = app();
+
+    // Insertion is the whole exercise: no reconcile, no forced sample. This is
+    // the state a window is in the instant it becomes live.
+    let window = app.__test_seed_child_window(&["one", "two"]);
+
+    let window_owner =
+        app.__test_window_owner(window).expect("a window must own a record the moment it exists");
+
+    let panes = app.__test_child_pane_ids(window).expect("the window exists");
+    assert_eq!(panes.len(), 2, "precondition: the window was seeded with two panes");
+
+    for pane in panes {
+        let pane_owner = app
+            .__test_pane_owner(window, pane)
+            .expect("a pane in an owned window must have an owner, not wait for a sample");
+        let parent = app.__test_owner_snapshot(pane_owner).expect("the owner has a record").parent;
+        assert_eq!(
+            parent,
+            Some(window_owner),
+            "pane {pane} must be parented to the window that holds it; the hierarchy \
+             reports it under {parent:?} instead"
+        );
+    }
+}
+
 /// A pane moved between windows is charged to the window it lands in.
 #[test]
 fn a_moved_pane_is_charged_to_its_new_window() {

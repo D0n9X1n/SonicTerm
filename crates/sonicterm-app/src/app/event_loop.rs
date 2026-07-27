@@ -452,8 +452,7 @@ impl App {
             test_renderer_focus_marker: None,
             test_pane_viewport: None,
         };
-        self.windows.insert(main_id, shadow);
-        self.register_window_owner(main_id);
+        self.insert_window_registered(main_id, shadow);
 
         // Seed the first tab + pane now that the window + renderer exist.
         self.new_tab("shell");

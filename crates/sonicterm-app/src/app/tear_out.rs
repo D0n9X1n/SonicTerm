@@ -407,8 +407,7 @@ impl App {
             test_renderer_focus_marker: None,
             test_pane_viewport: None,
         };
-        self.windows.insert(win_id, child);
-        self.register_window_owner(win_id);
+        self.insert_window_registered(win_id, child);
         // #pane-geom: now that the child WindowState exists, size each migrated
         // pane to its OWN split sub-rect (via compute_pane_rects_for) instead of
         // the full child grid. Sizing every pane to the whole `(cols, rows)` is

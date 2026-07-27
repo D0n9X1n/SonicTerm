@@ -852,7 +852,7 @@ impl App {
             test_renderer_focus_marker: None,
             test_pane_viewport: None,
         };
-        self.windows.insert(win_id, child);
+        self.insert_window_registered(win_id, child);
         self.register_window_with_os_drag_backend(win_id, &window);
         window.request_redraw();
         // Eagerly mark frontmost so the next Cmd+T / Cmd+W routes
