@@ -283,19 +283,28 @@ fn many_panes_each_keep_a_share_of_the_media_budget() {
 /// irreducible: principle 1 requires every pane to render at least its newest
 /// image, so N panes cost at least N × that image.
 ///
-/// Driven at the **largest size decode accepts**, not at the floor. An earlier
-/// version of this test used 4 MiB images, which happens to equal the floor
-/// exactly — so the residual it measured was the floor, and it certified a
-/// bound of `ceiling + panes × floor` that does not hold. Re-run at 2048²×4,
-/// the real peak was 512 MiB against that 336 MiB bound. The test was passing
-/// because of the size it chose, not because the bound was true.
+/// Driven at [`MAX_SINGLE_INLINE_IMAGE_BYTES`] — the largest image any decoder
+/// can emit — which is also the floor, because the floor is sized to hold one
+/// such image whole. Nothing larger can reach a pane, so nothing larger tells
+/// this test anything: an image above the floor is a shape the decoders cannot
+/// produce, and a bound widened to admit it is a bound stated against an
+/// impossible input.
+///
+/// # What this bound is worth
+///
+/// `ceiling + panes × residual` scales with the pane count it is meant to
+/// bound, so it admits more memory the more panes exist and grows weaker as N
+/// rises. It is kept because the pre-reclamation peak is a real quantity and
+/// this is the sequence that produces it, but the assertion that discriminates
+/// per pane belongs with the pass that revisits idle panes — this test
+/// deliberately never runs that pass, so the panes it leaves behind are still
+/// holding budgets from when the session was smaller.
 #[test]
 fn the_process_total_stays_within_a_stateable_bound_as_panes_accumulate() {
     let _serialised = MEDIA_COUNTER_LOCK.lock();
-    // The largest image `inline_image_decode_dimensions_allowed` admits. Using
-    // anything smaller lets the floor stand in for the residual and hides the
-    // case where one image exceeds it.
-    const IMAGE_BYTES: usize = MAX_DECODED_INLINE_IMAGE_BYTES;
+    // The largest image any decoder can emit. Anything larger is not a
+    // stronger test — it is an input no protocol can deliver.
+    const IMAGE_BYTES: usize = MAX_SINGLE_INLINE_IMAGE_BYTES;
     const PANES: usize = 20;
 
     let baseline = process_inline_media_bytes();
@@ -320,10 +329,42 @@ fn the_process_total_stays_within_a_stateable_bound_as_panes_accumulate() {
         peak = peak.max(process_inline_media_bytes() - baseline);
     }
 
+    // What this sequence does *not* establish, stated so the bound below is
+    // not read as more than it is.
+    //
+    // A pane only re-trims when it decodes. Panes admitted before the ceiling
+    // was reached keep the generous budget they were admitted under, and this
+    // test never runs the pass that revisits them — so measured here, the
+    // earliest panes sit far above the per-pane residual: 64 MiB against 4 MiB.
+    // That is the stale-budget case `trim_panes_over_media_ceiling` exists to
+    // relieve, and it is asserted where that pass is driven, not here.
+    //
+    // The consequence for this test is that the aggregate below is the only
+    // claim it can make. It is a real bound on the pre-reclamation peak, and it
+    // is weak: the `PANES ×` term grows with the pane count it is meant to
+    // bound, so it admits more memory the more panes exist. The assertion that
+    // discriminates on a per-pane basis lives with the reclamation pass.
+    let worst_pane = panes
+        .iter()
+        .map(|(images, _)| retained_inline_media(images).bytes)
+        .max()
+        .expect("at least one pane exists");
+    assert!(
+        worst_pane > max_pane_residual_bytes(),
+        "precondition failed: no pane exceeded the {}-byte residual, so this run did not \
+         reproduce the idle-pane case and the aggregate below is being measured against a \
+         sequence that never built up a stale budget",
+        max_pane_residual_bytes()
+    );
+    for (index, (images, _)) in panes.iter().enumerate() {
+        assert!(
+            retained_inline_media(images).bytes > 0,
+            "pane {index} of {PANES} was trimmed to nothing; every pane must keep its newest \
+             image even under process pressure"
+        );
+    }
+
     // Ceiling, plus the largest single image each pane may still be holding.
-    // Stated against `max_pane_residual_bytes()` rather than the floor because
-    // trimming stops at a pane's most recent image whatever its size, and that
-    // image can be four times the floor.
     let bound = MAX_PROCESS_INLINE_MEDIA_BYTES + PANES * max_pane_residual_bytes();
     assert!(
         peak <= bound,
@@ -512,4 +553,128 @@ fn eviction_returns_the_images_so_they_can_be_freed_outside_the_lock() {
     drop(images);
     drop(charge);
     assert_eq!(process_inline_media_bytes(), 0);
+}
+
+/// A `side`x`side` PNG with incompressible pixels, so the encoded payload is a
+/// realistic size rather than a solid-colour degenerate case.
+fn png_of_side(side: u32) -> Vec<u8> {
+    let mut buffer = image::RgbaImage::new(side, side);
+    for (x, y, px) in buffer.enumerate_pixels_mut() {
+        *px = image::Rgba([(x % 251) as u8, (y % 241) as u8, ((x ^ y) % 239) as u8, 255]);
+    }
+    let mut encoded = Vec::new();
+    image::DynamicImage::ImageRgba8(buffer)
+        .write_to(&mut std::io::Cursor::new(&mut encoded), image::ImageFormat::Png)
+        .expect("encoding a PNG in memory cannot fail");
+    encoded
+}
+
+fn base64_media_event(protocol: MediaProtocol, png: &[u8]) -> MediaEvent {
+    MediaEvent {
+        protocol,
+        row: 0,
+        col: 0,
+        metadata: String::new(),
+        data: base64::engine::general_purpose::STANDARD.encode(png).into_bytes(),
+    }
+}
+
+/// A Sixel payload that paints every pixel of a `width`x`height` region.
+fn sixel_covering(width: usize, height: usize) -> MediaEvent {
+    let mut data = Vec::new();
+    for _ in 0..height.div_ceil(6) {
+        data.extend_from_slice(b"#1!");
+        data.extend_from_slice(width.to_string().as_bytes());
+        // `~` is 0x7E: all six rows of the band set.
+        data.extend_from_slice(b"~-");
+    }
+    MediaEvent { protocol: MediaProtocol::Sixel, row: 0, col: 0, metadata: String::new(), data }
+}
+
+/// The single-image bound must equal what the decoders actually produce.
+///
+/// This is the assertion the constant lacked. Stated as an **equality** rather
+/// than a bound, because a bound is what let the figure drift: derived from the
+/// preflight side of 2048 it read 16 MiB, four times the largest image any
+/// decoder can emit, and every `<=` check still passed. Only pinning it to the
+/// measured maximum fails when the two disagree.
+///
+/// Driven through real payloads on every protocol rather than through
+/// synthetic `Vec`s, because the question is what the *decoders* emit. A
+/// synthetic image can be any size the test chooses and would pin nothing.
+///
+/// The three shapes are the ones that could each bound retention differently:
+/// a source above the rendered cap (resized down), a source at it exactly (no
+/// resize runs), and a Sixel addressing far beyond its buffer (clipped). The
+/// figure asserted is `bgra.len()`, which is what `retained_inline_media`
+/// sums and what the charge is set from, so this pins the number the budget is
+/// actually enforced against.
+#[test]
+fn no_decoder_can_emit_an_image_larger_than_the_single_image_bound() {
+    let largest = |label: &str, event: &MediaEvent| -> usize {
+        let decoded =
+            decode_inline_image(event).unwrap_or_else(|| panic!("{label} must decode to an image"));
+        assert!(
+            decoded.width <= MAX_INLINE_IMAGE_RENDER_SIDE
+                && decoded.height <= MAX_INLINE_IMAGE_RENDER_SIDE,
+            "{label} decoded to {}x{}, beyond the {MAX_INLINE_IMAGE_RENDER_SIDE}px rendered cap",
+            decoded.width,
+            decoded.height
+        );
+        decoded.bgra.len()
+    };
+
+    // A source at the largest side the preflight gate admits: resized down.
+    let at_preflight_cap = png_of_side(MAX_INLINE_IMAGE_DECODE_SIDE);
+    let kitty = largest(
+        "Kitty at the preflight cap",
+        &base64_media_event(MediaProtocol::Kitty, &at_preflight_cap),
+    );
+    let iterm = largest(
+        "iTerm2 at the preflight cap",
+        &base64_media_event(MediaProtocol::Iterm2File, &at_preflight_cap),
+    );
+
+    // A source exactly at the rendered cap: no resize runs, so this is the
+    // path that reaches retention untouched.
+    let at_render_cap = png_of_side(MAX_INLINE_IMAGE_RENDER_SIDE);
+    let unresized = largest(
+        "Kitty at the rendered cap",
+        &base64_media_event(MediaProtocol::Kitty, &at_render_cap),
+    );
+
+    // Sixel rasterises into its own buffer and clips, so drive it well past
+    // the edge rather than at it.
+    let sixel = largest(
+        "Sixel addressing beyond its buffer",
+        &sixel_covering(
+            MAX_INLINE_IMAGE_RENDER_SIDE as usize * 4,
+            MAX_INLINE_IMAGE_RENDER_SIDE as usize * 4,
+        ),
+    );
+
+    let measured = [kitty, iterm, unresized, sixel].into_iter().max().expect("array is non-empty");
+    assert_eq!(
+        measured,
+        MAX_SINGLE_INLINE_IMAGE_BYTES,
+        "the largest image any decoder emits is {measured} bytes ({} MiB), but \
+         MAX_SINGLE_INLINE_IMAGE_BYTES claims {MAX_SINGLE_INLINE_IMAGE_BYTES} ({} MiB). \
+         Every bound derived from that constant is wrong by the difference — it is the \
+         residual `max_pane_residual_bytes` reports and the term the aggregate bound is \
+         stated in",
+        measured / 1048576,
+        MAX_SINGLE_INLINE_IMAGE_BYTES / 1048576
+    );
+
+    // A source beyond the preflight gate is refused outright rather than
+    // clamped, which is what keeps the gate a separate limit from the cap
+    // above: it decides whether decoding starts, not what survives it.
+    assert!(
+        decode_inline_image(&base64_media_event(
+            MediaProtocol::Kitty,
+            &png_of_side(MAX_INLINE_IMAGE_DECODE_SIDE + 1)
+        ))
+        .is_none(),
+        "a source past the preflight cap must be rejected before any pixels are decoded"
+    );
 }
