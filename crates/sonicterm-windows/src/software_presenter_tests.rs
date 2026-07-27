@@ -548,10 +548,10 @@ fn resized_surface_still_clips_fills_to_the_new_bounds() {
 }
 
 #[test]
-fn shrinking_retains_dirty_rects_recorded_at_the_previous_size() {
-    // Characterization of current behavior: `try_resize` appends a full-surface
-    // rect but does not discard rects recorded before the resize, so after a
-    // shrink the dirty list can still hold a rect larger than the surface.
+fn shrinking_discards_dirty_rects_recorded_at_the_previous_size() {
+    // A rect recorded before the resize was clipped against the old, larger
+    // dimensions. Presenting it against the reallocated buffer asks GDI to
+    // read a region the buffer no longer covers, so the resize must drop it.
     let mut surface = SoftwareSurface::try_new(ODD_W, ODD_H).expect("valid surface");
     surface.mark_dirty(DirtyRect { x: 0, y: 0, w: ODD_W, h: ODD_H });
 
@@ -559,9 +559,56 @@ fn shrinking_retains_dirty_rects_recorded_at_the_previous_size() {
 
     assert_eq!(
         surface.dirty_rects(),
-        &[
-            DirtyRect { x: 0, y: 0, w: ODD_W, h: ODD_H },
-            DirtyRect { x: 0, y: 0, w: 101, h: 97 },
-        ]
+        &[DirtyRect { x: 0, y: 0, w: 101, h: 97 }],
+        "only the full-area rect for the new size may remain"
+    );
+}
+
+/// Every retained rect fits the surface it will be presented against.
+///
+/// Stated as the invariant rather than as one expected list, so it holds for
+/// resize sequences the explicit cases above do not enumerate. The shrink,
+/// grow, and shrink-again ordering matters: a fix that cleared only on shrink
+/// would pass a shrink-only test.
+#[test]
+fn no_dirty_rect_outlives_the_surface_it_was_recorded_against() {
+    let mut surface = SoftwareSurface::try_new(ODD_W, ODD_H).expect("valid surface");
+
+    for (w, h) in [(101u32, 97u32), (809, 601), (17, 13), (1, 1), (640, 480)] {
+        surface.mark_dirty(DirtyRect {
+            x: 0,
+            y: 0,
+            w: surface.width(),
+            h: surface.height(),
+        });
+        assert!(surface.try_resize(w, h));
+
+        for rect in surface.dirty_rects() {
+            assert!(
+                rect.x + rect.w <= surface.width() && rect.y + rect.h <= surface.height(),
+                "dirty rect {rect:?} exceeds the {}x{} surface it will be presented against",
+                surface.width(),
+                surface.height(),
+            );
+        }
+    }
+}
+
+/// A no-op resize keeps pending rects.
+///
+/// The clear belongs to a real reallocation. Dropping rects on a resize to the
+/// same size would discard a pending partial update and lose the frame — the
+/// opposite defect, and one a same-size caller would hit on every frame.
+#[test]
+fn resize_to_the_same_size_keeps_pending_dirty_rects() {
+    let mut surface = SoftwareSurface::try_new(200, 100).expect("valid surface");
+    surface.mark_dirty(DirtyRect { x: 10, y: 20, w: 30, h: 40 });
+
+    assert!(surface.try_resize(200, 100));
+
+    assert_eq!(
+        surface.dirty_rects(),
+        &[DirtyRect { x: 10, y: 20, w: 30, h: 40 }],
+        "a resize that changes nothing must not discard a pending update"
     );
 }
