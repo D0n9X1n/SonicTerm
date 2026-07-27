@@ -32,18 +32,14 @@ fn app() -> App {
 /// enough that instrumenting the assertion makes it stop reproducing, so the
 /// obvious next step measures nothing.
 ///
-/// What is established: `enabled!` consults process-global state — the static
-/// max level, and the callsite's cached `Interest` — before it reaches the
-/// thread-local dispatcher, and `tracing::subscriber::with_default` scopes the
-/// subscriber but not that state. Both tests already install theirs through
-/// `with_default` and flake anyway, so scoping is not the remedy and this lock
-/// must not be dropped in favour of it.
+/// Scoping the subscriber is not the remedy: both tests already install theirs
+/// through `tracing::subscriber::with_default` and flake anyway. Do not drop
+/// this lock in favour of scoping — that is the configuration the failure was
+/// measured in.
 ///
-/// What is ruled out, recorded so it is not investigated twice: the max level
-/// never fell below DEBUG under a live scoped subscriber; the cached
-/// `Interest` never went stale under the same conditions; and opposing
-/// subscribers resolve to `sometimes`, which does consult the thread-local
-/// dispatcher. Each was tested directly and refuted.
+/// Several candidate mechanisms have been tested directly and refuted. The
+/// pull request that introduced this lock records which ones, so they are not
+/// investigated a second time.
 ///
 /// The rule is therefore unconditional — **hold this across any call that
 /// enters the production sampling path**, whether or not the test installs a
