@@ -319,3 +319,116 @@ fn negligible_classes_stay_negligible_in_aggregate() {
         aggregate / 1024
     );
 }
+
+// ---------------------------------------------------------------------------
+// Pane seam terms
+//
+// The pane seam-cap sum is only a derivation while every class has been
+// decided about. These hold that decision to the coverage table so the two
+// cannot describe different worlds.
+// ---------------------------------------------------------------------------
+
+/// Every class has a pane-seam decision.
+///
+/// Guaranteed by the exhaustive match in `pane_seam_term()`, so this asserts
+/// the guarantee is real rather than the match having a catch-all arm.
+#[test]
+fn every_class_has_a_pane_seam_term_decision() {
+    for index in 0..ResourceClass::LENGTH {
+        let class = ResourceClass::from_usize(index);
+        match class.pane_seam_term() {
+            PaneSeamTerm::Contributes
+            | PaneSeamTerm::ChargedToAnotherOwnerKind
+            | PaneSeamTerm::NotChargedInProduction => {}
+        }
+    }
+}
+
+/// A class cannot contribute a term unless something charges it.
+///
+/// The sum is compared against a pane owner's ledger total. A term for a class
+/// with no charge site raises the backstop by memory that can never appear in
+/// the figure it guards, which is the way a tripwire stops being one.
+#[test]
+fn contributing_classes_are_charged_classes() {
+    for index in 0..ResourceClass::LENGTH {
+        let class = ResourceClass::from_usize(index);
+        if class.pane_seam_term() == PaneSeamTerm::Contributes {
+            assert_eq!(
+                class.coverage(),
+                ClassCoverage::Charged,
+                "{class:?} contributes a term to the pane seam-cap sum but nothing charges it; \
+                 an uncharged term inflates the backstop with memory that cannot reach it"
+            );
+        }
+    }
+}
+
+/// A charged class is either a term or an explicit exclusion.
+///
+/// The direction that catches the omission this exists for: a class that
+/// starts charging a pane and is not added to the sum leaves the backstop
+/// below memory the seams permit, where it fires on a healthy pane.
+#[test]
+fn charged_classes_are_either_terms_or_excluded_for_a_stated_reason() {
+    for index in 0..ResourceClass::LENGTH {
+        let class = ResourceClass::from_usize(index);
+        if class.coverage() != ClassCoverage::Charged {
+            assert_ne!(
+                class.pane_seam_term(),
+                PaneSeamTerm::ChargedToAnotherOwnerKind,
+                "{class:?} is excluded as charged elsewhere but is not charged at all; \
+                 the exclusion reason must be the true one"
+            );
+            continue;
+        }
+        match class.pane_seam_term() {
+            // Contributing is the expected outcome for a charged class.
+            PaneSeamTerm::Contributes => {}
+            // Excluded because a pane owner's ledger never carries it.
+            PaneSeamTerm::ChargedToAnotherOwnerKind => {}
+            PaneSeamTerm::NotChargedInProduction => panic!(
+                "{class:?} is charged in production but recorded as never charged; \
+                 a charged class must contribute a term or say which owner carries it"
+            ),
+        }
+    }
+}
+
+/// The classes the pane retention pass charges are exactly the terms.
+///
+/// Pins the table to the production charge site rather than to itself. The
+/// pane sampling pass charges this list, so a class it charges that is not a
+/// term here is the omission that puts the backstop below correct operation.
+#[test]
+fn the_pane_charge_sites_are_exactly_the_contributing_classes() {
+    // The classes `sonicterm-app`'s pane retention pass reserves against a
+    // pane owner. Mirrored rather than imported because a contract crate
+    // cannot depend on the app that consumes it.
+    let charged_to_panes = [
+        ResourceClass::GridVisible,
+        ResourceClass::GridHistory,
+        ResourceClass::GridAlternate,
+        ResourceClass::ParserCapture,
+        ResourceClass::ProtocolMetadata,
+        ResourceClass::InlineMediaRetained,
+        ResourceClass::PtyOutput,
+    ];
+    for class in charged_to_panes {
+        assert_eq!(
+            class.pane_seam_term(),
+            PaneSeamTerm::Contributes,
+            "{class:?} is charged to a pane owner and must carry a term in the seam-cap sum"
+        );
+    }
+    for index in 0..ResourceClass::LENGTH {
+        let class = ResourceClass::from_usize(index);
+        if class.pane_seam_term() == PaneSeamTerm::Contributes {
+            assert!(
+                charged_to_panes.contains(&class),
+                "{class:?} carries a term in the pane seam-cap sum but the pane retention \
+                 pass does not charge it"
+            );
+        }
+    }
+}

@@ -300,21 +300,40 @@ pub const MAX_PANE_COMMAND_EVENTS: usize = 1024;
 /// enforces and tests, so this cannot drift from what the seams do — changing
 /// a cap changes this automatically, and a test asserts the arithmetic.
 ///
-/// | Seam | Cap |
+/// **The rule for what belongs.** A term for exactly the classes a pane owner
+/// can be charged for, because this is compared against that owner's ledger
+/// total. Both directions matter: a missing term puts the backstop below memory
+/// the seams legitimately permit, where it fires during correct operation, and
+/// a term for a class that never charges a pane inflates the backstop with
+/// memory that cannot appear in the figure it guards. Which classes those are
+/// is [`ResourceClass::pane_seam_term`], decided by an exhaustive match that
+/// fails to compile until a new class is classified.
+///
+/// | Class | Cap |
 /// | --- | --- |
-/// | grid (visible + history + saved primary) | `MAX_GRID_CELLS × size_of::<Cell>()` |
-/// | inline media retained | `MAX_RETAINED_INLINE_IMAGE_BYTES` |
-/// | hyperlink metadata | `MAX_HYPERLINK_METADATA_BYTES` |
-/// | parser capture staging | `MAX_MEDIA_PAYLOAD_BYTES` |
-/// | escape sequence in flight | `MAX_ESCAPE_SEQUENCE_BYTES` |
-/// | command events | `MAX_PANE_COMMAND_EVENTS × size_of::<PaneCommandEvent>()` |
+/// | `GridVisible` + `GridHistory` + `GridAlternate` | `MAX_GRID_CELLS × size_of::<Cell>()` |
+/// | `InlineMediaRetained` | `MAX_RETAINED_INLINE_IMAGE_BYTES` |
+/// | `ProtocolMetadata` | `MAX_HYPERLINK_METADATA_BYTES` |
+/// | `ParserCapture` | `MAX_MEDIA_PAYLOAD_BYTES` + `MAX_ESCAPE_SEQUENCE_BYTES` |
+/// | `PtyOutput` | `max_queued_output_ring_bytes()` |
+///
+/// The three grid classes share one term because `MAX_GRID_CELLS` bounds them
+/// together rather than each separately. `PtyOutput` carries the structural
+/// ceiling of one reader ring per queue slot, not the single ring a real shell
+/// pins: a backstop has to sit above what the seam permits, not above what it
+/// usually uses.
+///
+/// `CommandEvents` is deliberately absent. Its queue is bounded and its
+/// retention is real, but no production site charges it, so it cannot appear in
+/// the ledger total this is compared against — a term for it would raise the
+/// tripwire without raising what the tripwire can see.
 pub const PANE_SEAM_CAP_SUM_BYTES: usize = (sonicterm_grid::grid::MAX_GRID_CELLS as usize
     * std::mem::size_of::<sonicterm_types::Cell>())
     + media::MAX_RETAINED_INLINE_IMAGE_BYTES
     + sonicterm_grid::hyperlink::MAX_HYPERLINK_METADATA_BYTES
     + sonicterm_vt::vt::MAX_MEDIA_PAYLOAD_BYTES
     + sonicterm_vt::vt::MAX_ESCAPE_SEQUENCE_BYTES
-    + (MAX_PANE_COMMAND_EVENTS * std::mem::size_of::<PaneCommandEvent>());
+    + sonicterm_io::pty::max_queued_output_ring_bytes();
 
 /// Headroom multiplier between the seam caps and the governor's backstop.
 ///

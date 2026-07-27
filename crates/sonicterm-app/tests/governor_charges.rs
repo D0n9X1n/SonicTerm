@@ -247,23 +247,85 @@ fn the_production_sampling_path_charges_at_the_default_level() {
 /// drift, and the one that stops agreeing keeps reporting itself as enforced.
 /// A limit *computed from* the caps cannot disagree with them: change a cap and
 /// this moves with it.
+///
+/// The sum is only a derivation while every class has been decided about, so
+/// this walks the whole enum rather than restating the terms it expects. A
+/// class that starts charging a pane and is not given a term fails here, and a
+/// class that has not been classified at all fails to compile in
+/// `sonicterm-types` before it can reach this test.
 #[test]
 fn the_committed_budget_is_derived_from_the_seam_caps() {
     use sonicterm_app::app::{PANE_COMMITTED_BUDGET_BYTES, PANE_SEAM_CAP_SUM_BYTES};
+    use sonicterm_types::{PaneSeamTerm, ResourceClass};
 
-    // Recomputed here from the caps themselves. If someone replaces the derived
-    // constant with a literal, these stop agreeing.
-    let expected = (sonicterm_grid::grid::MAX_GRID_CELLS as usize
-        * std::mem::size_of::<sonicterm_types::Cell>())
-        + 64 * 1024 * 1024
-        + sonicterm_grid::hyperlink::MAX_HYPERLINK_METADATA_BYTES
-        + sonicterm_vt::vt::MAX_MEDIA_PAYLOAD_BYTES
-        + sonicterm_vt::vt::MAX_ESCAPE_SEQUENCE_BYTES
-        + (sonicterm_app::app::MAX_PANE_COMMAND_EVENTS * 40);
+    // The cap behind each contributing class, recomputed from the seams
+    // themselves. If someone replaces a derived constant with a literal, these
+    // stop agreeing. `None` means the class is expected to carry no term.
+    //
+    // A wildcard arm is unavoidable here: `ResourceClass` is `#[non_exhaustive]`,
+    // so a match outside `sonicterm-types` cannot omit one. The exhaustiveness
+    // that forces a decision therefore lives on `pane_seam_term()`, at the
+    // enum's definition site; this asserts the decision made there is honoured
+    // by the arithmetic, and the wildcard returns `None` so a newly
+    // contributing class arrives here with no term and fails rather than
+    // passing silently.
+    fn expected_term_bytes(class: ResourceClass) -> Option<usize> {
+        match class {
+            // One term for the three grid classes: `MAX_GRID_CELLS` bounds
+            // visible, history, and saved primary together.
+            ResourceClass::GridVisible => Some(
+                sonicterm_grid::grid::MAX_GRID_CELLS as usize
+                    * std::mem::size_of::<sonicterm_types::Cell>(),
+            ),
+            ResourceClass::GridHistory | ResourceClass::GridAlternate => Some(0),
+            ResourceClass::InlineMediaRetained => Some(64 * 1024 * 1024),
+            ResourceClass::ProtocolMetadata => {
+                Some(sonicterm_grid::hyperlink::MAX_HYPERLINK_METADATA_BYTES)
+            }
+            ResourceClass::ParserCapture => Some(
+                sonicterm_vt::vt::MAX_MEDIA_PAYLOAD_BYTES
+                    + sonicterm_vt::vt::MAX_ESCAPE_SEQUENCE_BYTES,
+            ),
+            ResourceClass::PtyOutput => Some(sonicterm_io::pty::max_queued_output_ring_bytes()),
+            _ => None,
+        }
+    }
+
+    let mut expected = 0usize;
+    for index in 0..<ResourceClass as enum_map::Enum>::LENGTH {
+        let class = <ResourceClass as enum_map::Enum>::from_usize(index);
+        match class.pane_seam_term() {
+            PaneSeamTerm::Contributes => {
+                let term = expected_term_bytes(class).unwrap_or_else(|| {
+                    panic!(
+                        "{class:?} contributes to the pane seam-cap sum but this test has no \
+                         term for it; the sum is a derivation only while every contributing \
+                         class carries the cap its seam enforces"
+                    )
+                });
+                expected += term;
+            }
+            PaneSeamTerm::ChargedToAnotherOwnerKind | PaneSeamTerm::NotChargedInProduction => {
+                assert!(
+                    expected_term_bytes(class).is_none(),
+                    "{class:?} is excluded from the pane seam-cap sum but this test gives it a \
+                     term; the exclusion and the arithmetic must agree"
+                );
+            }
+        }
+    }
 
     assert_eq!(
         PANE_SEAM_CAP_SUM_BYTES, expected,
         "the seam-cap sum must be the sum of the caps, not a restatement of one"
+    );
+    // The omission this guards against, stated directly: the PTY reader ring is
+    // charged to a pane and must be inside the backstop that reads a pane's
+    // total. Asserted on the structural ceiling rather than the ring a real
+    // shell pins, because the backstop sits above what the seam permits.
+    assert!(
+        PANE_SEAM_CAP_SUM_BYTES >= sonicterm_io::pty::max_queued_output_ring_bytes(),
+        "the sum must cover the PTY output ring it is charged for"
     );
     // Both are compile-time constants, so these are decided before the test
     // runs. Stated as const assertions rather than runtime ones so the build
