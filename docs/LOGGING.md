@@ -121,6 +121,73 @@ Two caveats when reading these:
   in retained scrollback — freeing it early would break a link the user can
   still scroll back to.
 
+### Renderer retention
+
+On the same cadence and behind the same gate, `target="memory"` emits one
+`renderer retention` line per renderer — for every visible window **and** every
+renderer held in the warm pool:
+
+```
+renderer retention window=WindowId(1) role=visible total_bytes=17301504
+                   glyph_atlas_bytes=16777216 glyph_atlas_items=412
+                   image_atlas_bytes=524288 image_atlas_items=3
+                   software_frame_bytes=0
+renderer retention window=warm[0] role=warm total_bytes=16777216
+                   glyph_atlas_bytes=16777216 glyph_atlas_items=0 ...
+```
+
+| Field | Covers |
+| --- | --- |
+| `glyph_atlas_bytes` | rasterized glyph pixels mirrored on the CPU |
+| `image_atlas_bytes` | decoded inline-image pixels mirrored on the CPU |
+| `software_frame_bytes` | Windows software presentation buffer; zero elsewhere |
+
+`role` is `visible` or `warm`. A warm renderer is fully constructed and holds a
+full-size glyph atlas — the pool exists so a new window opens without paying to
+build one — so it retains the same order of memory as a visible window while
+belonging to no window the user can see. **Reporting only visible windows would
+understate process retention by one full atlas per pooled entry, and would imply
+a remedy that cannot work:** closing a window does not release a warm renderer.
+The warm-pool size is the lever for those.
+
+**These are not part of `session retention`, and the two answer different
+questions.** A renderer belongs to a window while the session line sums panes.
+`image_atlas_bytes` is the CPU mirror backing a GPU texture; `inline_media_bytes`
+is the decoded source. They hold the same picture and are **two distinct
+allocations, both resident** — the pane owns an `Arc<[u8]>`, and the atlas copies
+into its own `Vec<u8>` on a miss. So adding them is correct for a host-memory
+total and wrong for "how many images are open": the duplication is of content,
+not of bytes.
+
+`software_frame_bytes` is the largest buffer a renderer holds on the Windows
+software path, and unlike the atlases it scales with the window: ~32 MB at 4K,
+~59 MB at 5K, up to the 160 MiB clamp in `pixel_len`. It is zero on every other
+configuration. `glyph_atlas_bytes` is non-zero on every platform.
+
+It is **not** the largest buffer in the process. Three 64 MiB bounds each
+exceed a 4K frame: `MAX_RETAINED_INLINE_IMAGE_BYTES`,
+`MAX_PROCESS_CAPTURE_STAGING_BYTES`, and `foreground_proc::MAX_BUFFER_BYTES`.
+
+`retained_amounts` reports the two atlases and the software frame. It does
+**not** include `UploadStaging` — the renderer's two upload scratch buffers,
+recorded at 32 MiB per renderer in the coverage table — so these lines are not
+the whole of a renderer's host memory.
+
+Both atlas figures carry an `_items` count of resident entries alongside their
+bytes: bytes alone do not distinguish a large glyph set from a small one inside
+an oversized allocation, and the remedy differs.
+
+CPU-side only. GPU textures and buffers are excluded — that memory belongs to
+the driver, which exposes no size accounting for it, so a figure here would be
+a guess presented as a measurement. The atlases are the CPU mirrors backing
+those textures.
+
+These figures are **reported, not charged**. The renderer computes them but
+cannot reserve against the governor: `sonicterm-gpu` declares no
+`sonicterm-resource` dependency, and adding one would invert the direction of
+that crate boundary. Both classes are recorded
+`ClassCoverage::UnchargedRetention` accordingly.
+
 ### Reclamation and eviction events
 
 Five `target="memory"` events record memory being reclaimed or refused:

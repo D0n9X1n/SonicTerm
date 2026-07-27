@@ -145,9 +145,11 @@ fn no_uncharged_class_appears_in_the_production_charge_path() {
 ///
 /// The consequence is a diagnosis gap rather than an unbounded allocation —
 /// the per-seam caps bound this memory whether or not anything is charged. What
-/// is missing is the ability to see it: on the Windows software path the frame
-/// buffer is the largest single host-side buffer in the process, and a user
-/// reading a retention report cannot find it there.
+/// is missing is the ability to see it in the *charge* path: on the Windows
+/// software path the frame buffer is the largest buffer a renderer holds, and
+/// scales with the window rather than sitting at a fixed size. It is not the
+/// largest buffer in the process — three 64 MiB bounds exceed a 4K frame — but
+/// it is the one a user cannot find in a per-owner ledger.
 #[test]
 fn the_renderer_host_side_classes_are_absent_from_the_charge_path() {
     let charged: Vec<ResourceClass> =

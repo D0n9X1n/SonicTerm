@@ -1408,6 +1408,7 @@ mod overlays;
 mod quit_hold;
 mod redraw_target;
 mod render_timing;
+pub mod renderer_retention;
 pub mod retention;
 mod scroll;
 pub mod scrollbar_input;

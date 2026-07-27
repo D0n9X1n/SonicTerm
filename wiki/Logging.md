@@ -248,7 +248,71 @@ If `panes` rises alongside the total, the session is growing because it holds
 more panes, which is expected. If the total climbs while `panes` holds steady,
 go back to step 2 and find which pane is responsible.
 
-**6. Two warnings that are not bugs.** These appear at the default `warn`
+**6. Account for what the renderer holds.** Pane figures cover what panes own,
+and the renderer's own buffers belong to no pane — so a session can hold tens
+of megabytes that the `session retention` total does not include. Those are
+reported separately, one `renderer retention` line per renderer, on the same 30
+second cadence:
+
+```
+renderer retention window=WindowId(1) role=visible total_bytes=17301504
+                   glyph_atlas_bytes=16777216 glyph_atlas_items=412
+                   image_atlas_bytes=524288 image_atlas_items=3
+                   software_frame_bytes=0
+renderer retention window=warm[0] role=warm total_bytes=16777216
+                   glyph_atlas_bytes=16777216 glyph_atlas_items=0 ...
+```
+
+| Field | What it covers | What you can do |
+| --- | --- | --- |
+| `glyph_atlas_bytes` | rasterized glyph pixels held on the CPU for this renderer | nothing for a visible window — it is bounded, and shared by every pane in the window |
+| `image_atlas_bytes` | inline-image pixels uploaded for display | lower image usage, or open fewer panes |
+| `software_frame_bytes` | the full-window software presentation buffer | Windows software rendering only; zero everywhere else |
+
+```sh
+grep 'renderer retention' "$LOG" | awk '{
+  for (i = 1; i <= NF; i++) {
+    if ($i ~ /^window=/)      w = substr($i, 8)
+    if ($i ~ /^role=/)        r = substr($i, 6)
+    if ($i ~ /^total_bytes=/) t = substr($i, 13)
+  }
+  printf "%s  %-14s %-8s %8.2f MB\n", substr($1, 12, 8), w, r, t / 1048576
+}'
+```
+
+```powershell
+Select-String 'renderer retention' $log | ForEach-Object {
+  if ($_.Line -match 'window=(\S+) role=(\S+).*?total_bytes=(\d+)') {
+    '{0}  {1,-14} {2,-8} {3,8:N2} MB' -f $_.Line.Substring(11, 8), $Matches[1], $Matches[2], ([long]$Matches[3] / 1MB)
+  }
+}
+```
+
+**Read `role` before deciding what to do.** `visible` is a window you have open.
+`warm` is a renderer SonicTerm built ahead of time so the next window opens
+instantly — it belongs to no window on screen, and **closing windows will not
+release it.** A warm renderer holds a full-size glyph atlas, typically ~16 MB
+each, so on a default session roughly half the renderer memory reported may be
+warm. Lower `warm_window_pool` in the Configuration page to reclaim it, at the
+cost of slower window opening.
+
+Add the lines up yourself — one appears per renderer, so a session with two
+windows and one warm entry reports three. Which renderer holds the memory is the
+part that tells you what to change.
+
+`software_frame_bytes` is the one to check first on Windows if you are using
+software rendering. It is the largest buffer a renderer holds, and unlike the
+atlases it scales with the window: about 32 MB for a 4K window, roughly 59 MB
+at 5K, and it can reach 160 MB before the size is refused. Making the window
+smaller is what lowers it. It is zero on macOS and on any Windows session using
+GPU rendering. `[appearance].software_render_mode` in the Configuration page
+controls which path is in use.
+
+These figures are host memory. Textures on the GPU are not included — the
+graphics driver owns those and does not report their size — so these lines
+account for the CPU-side copies, not video memory.
+
+**7. Two warnings that are not bugs.** These appear at the default `warn`
 level, and both mean SonicTerm corrected something rather than that something
 broke. Finding one is not by itself worth reporting:
 
@@ -534,7 +598,65 @@ Select-String 'session retention' $log | ForEach-Object {
 如果 `panes` 与总量一起上升，说明会话增长是因为打开了更多面板，属于预期行为。
 如果 `panes` 保持不变而总量持续上涨，请回到第 2 步，找出是哪个面板导致的。
 
-**6. 两条不代表缺陷的警告。** 这两行在默认的 `warn` 级别下也会出现，且都表示
+**6. 计入渲染器持有的内存。** 面板数值只涵盖面板自身拥有的内存，而渲染器的
+缓冲区不属于任何面板 —— 因此会话可能持有数十 MB 内存，却不计入
+`session retention` 的总量。这部分内存单独报告，每个渲染器一行
+`renderer retention`，采样周期同样是 30 秒：
+
+```
+renderer retention window=WindowId(1) role=visible total_bytes=17301504
+                   glyph_atlas_bytes=16777216 glyph_atlas_items=412
+                   image_atlas_bytes=524288 image_atlas_items=3
+                   software_frame_bytes=0
+renderer retention window=warm[0] role=warm total_bytes=16777216
+                   glyph_atlas_bytes=16777216 glyph_atlas_items=0 ...
+```
+
+| 字段 | 含义 | 可采取的措施 |
+| --- | --- | --- |
+| `glyph_atlas_bytes` | 该渲染器在 CPU 侧保存的字形位图像素 | 对可见窗口无需处理 —— 该值有上限，且由窗口内所有面板共用 |
+| `image_atlas_bytes` | 为显示而上传的内联图像像素 | 减少图像使用，或减少面板数量 |
+| `software_frame_bytes` | 整窗软件呈现缓冲区 | 仅出现于 Windows 软件渲染；其他情况均为 0 |
+
+```sh
+grep 'renderer retention' "$LOG" | awk '{
+  for (i = 1; i <= NF; i++) {
+    if ($i ~ /^window=/)      w = substr($i, 8)
+    if ($i ~ /^role=/)        r = substr($i, 6)
+    if ($i ~ /^total_bytes=/) t = substr($i, 13)
+  }
+  printf "%s  %-14s %-8s %8.2f MB\n", substr($1, 12, 8), w, r, t / 1048576
+}'
+```
+
+```powershell
+Select-String 'renderer retention' $log | ForEach-Object {
+  if ($_.Line -match 'window=(\S+) role=(\S+).*?total_bytes=(\d+)') {
+    '{0}  {1,-14} {2,-8} {3,8:N2} MB' -f $_.Line.Substring(11, 8), $Matches[1], $Matches[2], ([long]$Matches[3] / 1MB)
+  }
+}
+```
+
+**在决定如何处理之前，请先看 `role`。** `visible` 表示当前打开的窗口；
+`warm` 则是 SonicTerm 预先创建、用于让下一个窗口瞬间打开的渲染器 —— 它不属于
+屏幕上任何窗口，**关闭窗口并不会释放它。** 每个预热渲染器都持有一份完整尺寸的
+字形图集，通常约 16 MB，因此在默认会话中，报告出的渲染器内存可能有近一半来自
+预热渲染器。如需回收，请在配置页面调低 `warm_window_pool`，代价是新窗口打开
+变慢。
+
+请自行将各行相加 —— 每个渲染器对应一行，因此「两个窗口 + 一个预热渲染器」的
+会话会输出三行。究竟是哪个渲染器占用了内存，才是决定如何调整的依据。
+
+在 Windows 上使用软件渲染时，请优先查看 `software_frame_bytes`。它是单个渲染器
+持有的最大缓冲区，且与图集不同，它随窗口尺寸变化：4K 窗口约 32 MB，5K 约 59 MB，
+最高可达 160 MB，超过则拒绝分配。缩小窗口才能降低该值。在 macOS 上，以及在使用
+GPU 渲染的 Windows 会话中，该值均为 0。具体使用哪条路径由配置页面的
+`[appearance].software_render_mode` 控制。
+
+这些数值均为主机内存。GPU 上的纹理不计入其中 —— 这部分由显卡驱动持有，且不报告
+大小 —— 因此这几行统计的是 CPU 侧的副本，而非显存。
+
+**7. 两条不代表缺陷的警告。** 这两行在默认的 `warn` 级别下也会出现，且都表示
 SonicTerm 已经纠正了某个状况，而不是出了故障。仅仅看到其中一条并不值得上报：
 
 - `cancelled a media capture that stopped receiving; the transfer was abandoned and its staging is reclaimed` —— 图像传输中途停止，其缓冲已被释放，而不是一直占用到该面板关闭为止。
