@@ -2097,7 +2097,8 @@ impl App {
                     // per-seam caps that are already tested; a second
                     // enforcement point would create two figures that must
                     // agree and will eventually drift — the defect shape of
-                    // the charge-lifetime bug in #923.
+                    // the charge-lifetime bug, where a reservation outlived
+                    // the thing it was taken for.
                     process_bytes: usize::MAX,
                     class_bytes: enum_map::enum_map! { _ => usize::MAX },
                     class_items: enum_map::enum_map! { _ => None },

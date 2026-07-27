@@ -23,7 +23,7 @@ fn damage_rect_clips_and_unions_damage() {
 }
 
 /// The `boundary` module is the single seam `sonicterm-gpu` reaches grid/cfg/ui
-/// through (#809). These asserts prove the re-exports resolve to the *same*
+/// through. These asserts prove the re-exports resolve to the *same*
 /// types as the origin crates — a function typed against the origin path
 /// accepts a value built through the boundary path only if they are identical.
 /// If the seam ever breaks (wrong re-export, renamed module), this fails to

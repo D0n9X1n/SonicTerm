@@ -133,11 +133,11 @@ fn v120_native_decode_and_surface_share_bounds() {
 /// reads a 2x2 texel neighbourhood — so a glyph whose atlas neighbour holds
 /// unrelated pixels blends them in at its edges.
 ///
-/// This is the mechanism #888 reports: Powerline separators showing faint
+/// This is the mechanism behind reported Powerline separators showing faint
 /// marks in their own colours, only after long use. Bleeding is invisible on
 /// a fresh atlas because the neighbours are empty; once eviction repacks real
 /// glyphs beside a separator, it becomes marks. A fractional cell height —
-/// the reporter runs line height 1.15 — puts every glyph on this path.
+/// line height 1.15 in the report — puts every glyph on this path.
 #[test]
 fn a_scaled_glyph_does_not_sample_its_atlas_neighbour() {
     let mut atlas = GlyphAtlas::new(4, 4);
