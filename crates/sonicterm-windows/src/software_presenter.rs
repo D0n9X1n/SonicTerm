@@ -136,6 +136,16 @@ impl SoftwareSurface {
         } else {
             self.pixels.resize(len, 0);
         }
+        // Rects recorded before this call were clipped against the previous
+        // dimensions, so after a shrink the list can hold a rect larger than
+        // the surface it will be presented against — `present_dirty` passes
+        // each rect to GDI as both source and destination geometry, against a
+        // buffer that has just been reallocated to the new, smaller size.
+        //
+        // Discarding them loses nothing: the full-surface rect appended below
+        // covers every pixel of the new surface, so any retained rect is a
+        // subset of it once clipped.
+        self.dirty.clear();
         self.mark_dirty(DirtyRect { x: 0, y: 0, w: width, h: height });
         true
     }
