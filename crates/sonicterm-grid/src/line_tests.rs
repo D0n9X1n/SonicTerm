@@ -583,6 +583,57 @@ fn plain_cells_charge_nothing() {
     assert_eq!(LineStorage::Flat(flat).fat_attribute_bytes(), 0);
 }
 
+/// Grapheme extras are a second allocation and must be charged as one.
+///
+/// `FatAttributes::extras` is an `Option<Box<str>>`. `size_of::<FatAttributes>()`
+/// describes the fat pointer, never the string behind it, so a figure built
+/// only from the box size reports a cell of combining marks identically to a
+/// cell with none. Ordinary output reaches this: accented text and ZWJ emoji
+/// both land here.
+#[test]
+fn extras_payload_is_charged_beyond_the_box() {
+    let fat = std::mem::size_of::<sonicterm_types::FatAttributes>();
+
+    let mut with_extras = ch('a');
+    // Four combining acute accents: 2 bytes UTF-8 each.
+    with_extras.set_extras(Some(String::from("\u{0301}\u{0301}\u{0301}\u{0301}").into_boxed_str()));
+    let extras_len = with_extras.extras().map_or(0, str::len);
+    assert_eq!(extras_len, 8, "precondition: the payload is the bytes behind the pointer");
+
+    let storage = LineStorage::Flat(vec![with_extras]);
+    assert_eq!(
+        storage.fat_attribute_bytes(),
+        fat + extras_len,
+        "the box and the string it points at are two allocations and must both be charged"
+    );
+}
+
+/// A longer payload must cost more than a shorter one.
+///
+/// The assertion the box-only figure cannot make: it reports both at exactly
+/// `size_of::<FatAttributes>()`, so a grid of emoji and a grid of plain linked
+/// cells become indistinguishable.
+#[test]
+fn a_longer_extras_payload_costs_more() {
+    let mut short = ch('a');
+    short.set_extras(Some(String::from("\u{0301}").into_boxed_str()));
+    let mut long = ch('a');
+    long.set_extras(Some("\u{0301}".repeat(16).into_boxed_str()));
+
+    let short_bytes = LineStorage::Flat(vec![short]).fat_attribute_bytes();
+    let long_bytes = LineStorage::Flat(vec![long]).fat_attribute_bytes();
+
+    assert!(
+        long_bytes > short_bytes,
+        "a 32-byte payload must report above a 2-byte one (short {short_bytes}, long {long_bytes})"
+    );
+    assert_eq!(
+        long_bytes - short_bytes,
+        30,
+        "the difference must be the payload difference, not a constant"
+    );
+}
+
 /// The mechanism behind adjacent-resize capacity retention, pinned where it
 /// happens.
 ///

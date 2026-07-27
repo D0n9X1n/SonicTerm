@@ -1556,6 +1556,13 @@ impl Grid {
     /// flag per visible row. Neither is counted by cell accounting, and nothing
     /// else in the process counts them.
     ///
+    /// The saved primary behind an alternate screen is a whole `Box<Grid>`: its
+    /// deque spines, its own dirty bitset, its prompt ring, and the `Grid`
+    /// struct itself. Counting only its rows leaves the rest uncounted, which
+    /// measured as a 232-byte shortfall while an alternate screen was active —
+    /// fixed rather than proportional, and counted for the same reason the rest
+    /// is.
+    ///
     /// Measured at 33 KiB against 4.9 MiB of cells on a 200x50 grid with full
     /// scrollback — 0.68%. Counted anyway: "small" was also the answer for the
     /// rare-attribute boxes before they were measured at 1.67x the figure that
@@ -1563,9 +1570,17 @@ impl Grid {
     /// unknown one.
     fn container_bytes(&self) -> usize {
         let line = std::mem::size_of::<Line>();
+        let prompt = std::mem::size_of::<PromptRegion>();
         let primary = self.visible.capacity().saturating_add(self.scrollback.capacity()) * line;
         let saved = self.alt_screen.as_ref().map_or(0, |screen| {
-            screen.visible.capacity().saturating_add(screen.scrollback.capacity()) * line
+            let rows =
+                screen.visible.capacity().saturating_add(screen.scrollback.capacity()) * line;
+            let dirty = screen.dirty_rows.capacity() * std::mem::size_of::<bool>();
+            let prompts = screen.prompts.capacity() * prompt;
+            // The `Box<Grid>` holding it all.
+            rows.saturating_add(dirty)
+                .saturating_add(prompts)
+                .saturating_add(std::mem::size_of::<Grid>())
         });
         let dirty = self.dirty_rows.capacity() * std::mem::size_of::<bool>();
         primary.saturating_add(saved).saturating_add(dirty)
