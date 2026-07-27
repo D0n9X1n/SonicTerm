@@ -7,12 +7,34 @@ use super::{
 use sonicterm_grid::grid::{CellFlags, Grid};
 use std::sync::atomic::Ordering;
 
-/// Serialises tests that depend on how much of the staging pools is free.
+/// Serialises every test that brings a media capture into existence.
 ///
-/// The pools are process-wide, so a test holding captures changes what a
-/// concurrently-running test is admitted for. Tests that merely open a capture
-/// do not need this; tests that assert *whether* a capture was admitted do.
+/// The staging pools and the live-capture count are process-wide, so a capture
+/// held anywhere changes what a concurrently-running test observes: how much
+/// pool is free, whether the next capture is admitted, and what the live count
+/// reads between two samples.
+///
+/// The rule is the broad one — **hold this for the whole life of any capture
+/// the test creates**, not merely while asserting about one. A test that opens
+/// a capture without holding it is invisible to review and to its own
+/// assertions, yet it perturbs every sibling that is measuring; the sibling
+/// fails, reporting a defect that is not there. Coverage that is partial is
+/// worth little, because one unlocked capture is enough to break every
+/// measurement taken while it is live.
+///
+/// A capture is created both by [`MediaCapture::new`] and by feeding a parser
+/// bytes that open one — `ESC P ... q` for Sixel and `ESC _` for Kitty, in
+/// string or byte-array form.
 static POOLS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Take the capture-serialising lock for the rest of the current test.
+///
+/// Recovers a poisoned lock rather than propagating it: poisoning means some
+/// other test panicked while holding it, and failing every later test would
+/// bury the one real failure under a pile of noise.
+fn serialised_captures() -> std::sync::MutexGuard<'static, ()> {
+    POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn row_text(parser: &Parser, row: u16) -> String {
     parser.grid().row(row).iter().map(|cell| cell.ch).collect()
@@ -195,6 +217,10 @@ fn can_and_sub_reset_escape_family_before_oversized_osc() {
 
 #[test]
 fn can_and_sub_cancel_sixel_without_emitting_media() {
+    // `ESC P ... q` opens a real Sixel capture, so this holds the lock for as
+    // long as that capture is live even though it asserts nothing about pools.
+    let _serialised = serialised_captures();
+
     for cancel in [0x18, 0x1a] {
         let mut parser = Parser::new(Grid::new(80, 24));
         let events = parser.advance(&[0x1b, b'P', b'q', b'a', b'b', b'c', cancel, b'Z']);
@@ -263,7 +289,7 @@ fn st_split_across_escape_limit_is_recognized() {
 
 #[test]
 fn large_sixel_uses_media_budget_not_generic_escape_limit() {
-    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _serialised = serialised_captures();
     let mut parser = Parser::new(Grid::new(80, 24));
     let mut payload = b"\x1bPq".to_vec();
     payload.extend(std::iter::repeat_n(b'?', MAX_ESCAPE_SEQUENCE_BYTES + 1));
@@ -284,7 +310,7 @@ fn large_sixel_uses_media_budget_not_generic_escape_limit() {
 
 #[test]
 fn v120_parser_media_capture_shares_one_budget() {
-    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _serialised = serialised_captures();
     // The inventory recorded this as "independent parser limits only", and the
     // two capture slots do sit on separate structs with separate ceilings. But
     // beginning any escape family cancels a capture already in flight, so they
@@ -1246,7 +1272,7 @@ const _: () = assert!(
 /// limit. What replaced it must actually stop.
 #[test]
 fn captures_are_admitted_up_to_the_guarantee_and_refused_past_it() {
-    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _serialised = serialised_captures();
 
     let admitted: Vec<MediaCapture> = (0..GUARANTEED_CONCURRENT_CAPTURES)
         .map(|_| MediaCapture::new(MediaProtocol::Kitty, String::new()))
@@ -1276,7 +1302,7 @@ fn captures_are_admitted_up_to_the_guarantee_and_refused_past_it() {
 /// accumulated would make the bound decorative.
 #[test]
 fn a_refused_capture_stages_nothing() {
-    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _serialised = serialised_captures();
 
     let held: Vec<MediaCapture> = (0..GUARANTEED_CONCURRENT_CAPTURES)
         .map(|_| MediaCapture::new(MediaProtocol::Kitty, String::new()))
@@ -1303,7 +1329,7 @@ fn a_refused_capture_stages_nothing() {
 /// burst of captures, which is a permanent degradation rather than a bound.
 #[test]
 fn releasing_a_capture_returns_its_pool_bytes() {
-    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _serialised = serialised_captures();
 
     let held: Vec<MediaCapture> = (0..GUARANTEED_CONCURRENT_CAPTURES)
         .map(|_| MediaCapture::new(MediaProtocol::Kitty, String::new()))
@@ -1326,7 +1352,7 @@ fn releasing_a_capture_returns_its_pool_bytes() {
 /// would pass every ceiling test and quietly cap every image at the floor.
 #[test]
 fn an_admitted_capture_grows_to_the_per_capture_maximum() {
-    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _serialised = serialised_captures();
 
     let mut capture = MediaCapture::new(MediaProtocol::Kitty, String::new());
     assert!(capture.admitted(), "precondition: admitted into a free pool");
@@ -1350,7 +1376,7 @@ fn an_admitted_capture_grows_to_the_per_capture_maximum() {
 /// against.
 #[test]
 fn growth_stops_at_the_per_capture_maximum() {
-    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _serialised = serialised_captures();
 
     let mut capture = MediaCapture::new(MediaProtocol::Kitty, String::new());
     for _ in 0..(MAX_MEDIA_PAYLOAD_BYTES + 4096) {
@@ -1374,7 +1400,7 @@ fn growth_stops_at_the_per_capture_maximum() {
 /// close.
 #[test]
 fn concurrent_captures_contend_for_the_same_pools() {
-    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _serialised = serialised_captures();
 
     let held: Vec<MediaCapture> =
         (0..32).map(|_| MediaCapture::new(MediaProtocol::Kitty, String::new())).collect();
@@ -1401,10 +1427,25 @@ fn concurrent_captures_contend_for_the_same_pools() {
 /// `into_kitty_event`/`into_event` stopped dropping the guard when they move
 /// the payload out. A leak there is invisible in any single-capture test: the
 /// budget only misbehaves once the phantom count accumulates.
+///
+/// The count is process-wide, so this reads it only while holding the capture
+/// lock, where no sibling can be part-way through a capture of its own and the
+/// count is therefore attributable to this parser alone. It opens by asserting
+/// the count starts at zero: under the lock that is guaranteed, so a non-zero
+/// reading is itself the bug — either a charge an earlier test leaked, or a
+/// capture-creating test that skipped the lock and is running right now.
+/// Naming that failure here is what stops it from resurfacing later as an
+/// unexplained flake somewhere else.
 #[test]
 fn a_finished_capture_returns_its_share() {
-    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _serialised = serialised_captures();
     let baseline = LIVE_MEDIA_CAPTURES.load(Ordering::Relaxed);
+    assert_eq!(
+        baseline, 0,
+        "the live-capture count must be zero under the capture lock; {baseline} charges are \
+         held, so either an earlier test leaked them or a test that creates captures is \
+         running without taking the lock"
+    );
 
     // Drive real captures to completion through the parser, so the release
     // path under test is the production one rather than a bare `drop`.
@@ -1415,11 +1456,10 @@ fn a_finished_capture_returns_its_share() {
     assert_eq!(parser.live_capture_count(), 0, "precondition: no capture left in flight");
 
     let after = LIVE_MEDIA_CAPTURES.load(Ordering::Relaxed);
-    assert!(
-        after <= baseline,
-        "64 completed captures leaked {} charges; a capture that ends must release its \
-         share or the budget decays permanently",
-        after.saturating_sub(baseline)
+    assert_eq!(
+        after, baseline,
+        "64 completed captures left the live count at {after} instead of {baseline}; a capture \
+         that ends must release its share or the budget decays permanently"
     );
 }
 
@@ -1436,7 +1476,7 @@ fn a_finished_capture_returns_its_share() {
 /// would put the total over.
 #[test]
 fn arriving_captures_are_bounded_by_what_the_pools_have_left() {
-    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _serialised = serialised_captures();
     const PANES: usize = 20;
 
     let mut parsers: Vec<Parser> = (0..PANES).map(|_| Parser::new(Grid::new(80, 24))).collect();
@@ -1485,7 +1525,7 @@ fn arriving_captures_are_bounded_by_what_the_pools_have_left() {
 /// act. Neither half is useful alone, so both are asserted together.
 #[test]
 fn a_stalled_capture_is_visible_as_progress_and_releasable_by_cancel() {
-    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _serialised = serialised_captures();
     let mut parser = Parser::new(Grid::new(80, 24));
 
     let mut chunk = Vec::with_capacity(MAX_MEDIA_PAYLOAD_BYTES + 3);
@@ -1531,7 +1571,7 @@ fn a_stalled_capture_is_visible_as_progress_and_releasable_by_cancel() {
 /// trade memory for a broken picture rather than no picture.
 #[test]
 fn cancelling_a_capture_emits_no_media_event() {
-    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _serialised = serialised_captures();
     let mut parser = Parser::new(Grid::new(80, 24));
     parser.advance(b"\x1b_Gf=100;partial-payload-with-no-terminator");
     assert_eq!(parser.live_capture_count(), 1, "precondition: capture in flight");
@@ -1555,7 +1595,7 @@ fn cancelling_a_capture_emits_no_media_event() {
 /// the measurement is not a bound.
 #[test]
 fn interleaved_captures_hold_the_ceiling_without_a_reclaim_pass() {
-    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _serialised = serialised_captures();
     const PANES: usize = 20;
     const BLOCK: usize = 256 * 1024;
 
@@ -1592,7 +1632,7 @@ fn interleaved_captures_hold_the_ceiling_without_a_reclaim_pass() {
 /// guaranteeing it is the point.
 #[test]
 fn a_pane_receives_a_payload_up_to_the_guaranteed_floor_whole() {
-    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _serialised = serialised_captures();
     let mut parser = Parser::new(Grid::new(80, 24));
 
     let payload_len = MIN_CAPTURE_STAGING_BYTES;
@@ -1625,7 +1665,7 @@ fn a_pane_receives_a_payload_up_to_the_guaranteed_floor_whole() {
 /// picture. Neither is the image the user asked for, so neither is surfaced.
 #[test]
 fn a_payload_past_the_per_capture_maximum_is_not_dispatched() {
-    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _serialised = serialised_captures();
     let mut parser = Parser::new(Grid::new(80, 24));
 
     let mut chunk = Vec::with_capacity(MAX_MEDIA_PAYLOAD_BYTES + 64);
@@ -1650,7 +1690,7 @@ fn a_payload_past_the_per_capture_maximum_is_not_dispatched() {
 /// make the stronger claim silently vacuous.
 #[test]
 fn a_lone_capture_is_entitled_to_the_full_per_capture_maximum() {
-    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _serialised = serialised_captures();
 
     let mut capture = MediaCapture::new(MediaProtocol::Kitty, String::new());
     assert!(capture.admitted(), "a lone capture must be admitted");
