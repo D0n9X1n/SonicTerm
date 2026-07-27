@@ -206,9 +206,14 @@ Charging sits above the gate because it is not a diagnostic: it is what puts a
 pane's retention into the ledger that `PANE_COMMITTED_BUDGET_BYTES` is enforced
 against. Below the gate, a shipped session — which installs no `memory`
 subscriber — charged nothing, so the per-pane backstop had no figure to apply
-itself to and the tripwire could not fire in any shipped build. Reclamation of
-stalled captures sits above the gate for the same reason: freeing memory a user
-is owed does not depend on whether anyone is watching.
+itself to and the tripwire could not fire in any shipped build. Two reclamation
+passes sit above the gate for the same reason — freeing memory a user is owed
+does not depend on whether anyone is watching: stalled captures are cancelled,
+and panes still holding an inline-media budget sized for an earlier, smaller
+session are revisited. Both recover memory the owning seam cannot recover for
+itself, because a seam has no clock and no view above the pane — an idle pane
+re-evaluates its own budget only while decoding, so nothing on its behalf would
+otherwise look again.
 
 An integration test installs **no** subscriber — the shipped default — enters
 through the real gated path, and asserts both that a pane's retention reaches
