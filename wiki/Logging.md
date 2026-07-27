@@ -213,12 +213,13 @@ A steady climb across every sample is what to report:
 05:21:02     32.00 MB  grid_history
 ```
 
-**Do not compare only the endpoints.** Samples are rate-limited to about one
-set every 30 seconds, but they are written from the idle-wake path, so a busy
-session logs more often than a quiet one. A gap in the log does not mean memory
-was flat across it — it means nothing woke to measure. Two lines ten minutes
-apart may span a burst you cannot see. Read several consecutive samples and
-judge the shape.
+**Do not compare only the endpoints.** Samples are rate-limited to at most one
+set every 30 seconds, and they are written from the idle-wake path, so a
+session that parks with nothing to do can go longer than that between sets. A
+gap in the log does not mean memory was flat across it — it means nothing woke
+to measure, or the interval had not yet elapsed when something did. Two lines
+ten minutes apart may span a burst you cannot see. Read several consecutive
+samples and judge the shape.
 
 **5. Check the process view.** Every pane can sit inside its own ceiling while
 the total does not. The `session retention` line is the sum across panes, and
@@ -502,10 +503,11 @@ Select-String 'pane retention' $log | ForEach-Object {
 05:21:02     32.00 MB  grid_history
 ```
 
-**不要只比较首尾两行。** 采样被限制为大约每 30 秒一组，但它们是在空闲唤醒路径上
-写出的，因此繁忙的会话记录得比空闲的会话更频繁。日志中的空档并不表示这段时间内存
-是平稳的 —— 只表示期间没有唤醒去测量。相隔十分钟的两行之间，可能夹着你看不到的
-一次突发增长。请读连续多次采样，据此判断曲线形状。
+**不要只比较首尾两行。** 采样被限制为最多每 30 秒一组，且它们是在空闲唤醒路径上
+写出的，因此完全空闲、无事可做的会话，两组之间可能间隔更久。日志中的空档并不表示
+这段时间内存是平稳的 —— 只表示期间没有唤醒去测量，或唤醒时采样间隔尚未到期。相隔
+十分钟的两行之间，可能夹着你看不到的一次突发增长。请读连续多次采样，据此判断曲线
+形状。
 
 **5. 查看进程整体。** 可能每个面板都在各自的上限之内，而总量却不是。
 `session retention` 行是各面板的求和，它带有 `panes=N` 而没有 `largest_seam`

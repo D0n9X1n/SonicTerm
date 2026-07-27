@@ -31,6 +31,12 @@
 //! same memory to get back as one running with `memory=debug`, and a
 //! reclamation gated on whether anyone is watching is a reclamation that never
 //! runs in a shipped build.
+//!
+//! They do run *under* that function's cadence check, which is a different
+//! thing from the log-level gate and bounds how often the whole pass repeats.
+//! The pass walks every pane's grid cell by cell, and its caller is the idle
+//! wake path rather than a timer, so without a cadence it ran at whatever rate
+//! the event loop happened to spin.
 
 use std::time::{Duration, Instant};
 
@@ -430,9 +436,15 @@ pub fn charge_classes(
 /// tests without waiting on a wall clock.
 ///
 /// Two guards keep this off the hot path. It runs only when the `memory`
-/// target is actually recording at debug level, so a default session pays one
-/// level check and nothing else; and it samples on an interval rather than
-/// every call, because the caller is the idle-wake path that governs idle CPU.
+/// target is actually recording at debug level, so a caller pays one level
+/// check and nothing else; and it samples on an interval rather than every
+/// call.
+///
+/// [`App::sample_pane_retention`] does not route through this. That path
+/// applies the same interval to a wider pass — one that reclaims memory and
+/// charges the governor as well as logging — so it takes the cadence itself
+/// and keeps the level check around the log lines alone. This entry point
+/// remains for callers that want logging only, with both guards attached.
 ///
 /// Panes whose parser lock is contended are skipped rather than waited on: a
 /// diagnostic must never stall the thread it is reporting from.
@@ -555,6 +567,12 @@ impl super::App {
     /// bytes arrive, so a figure unchanged across two consecutive samples
     /// means nothing has arrived in at least one full interval.
     ///
+    /// "One full interval" holds only because the caller rate-limits the pass.
+    /// This function reads a cadence it does not enforce: called once per
+    /// event-loop wake, consecutive samples are milliseconds apart, and then a
+    /// transfer that is merely slow looks stalled and the duration reported
+    /// below is wrong by the ratio between a wake and an interval.
+    ///
     /// Two samples rather than one, deliberately. A single unchanged reading
     /// can happen to a live transfer that is merely slower than the sampling
     /// interval, and cancelling that would take a picture the user is waiting
@@ -649,6 +667,35 @@ impl super::App {
     }
 
     pub(super) fn sample_pane_retention(&mut self, now: Instant) -> bool {
+        // Cadence first, and it governs the whole pass.
+        //
+        // The caller is `do_about_to_wait`, which runs on every idle wake —
+        // not on a timer. Measured under sustained pane output that is
+        // hundreds of wakes per second, and every one of them used to walk
+        // every pane: `measure_pane` calls `Grid::retained_amount_by_region`,
+        // which makes a separate pass over the visible rows, the scrollback
+        // and any saved primary screen for both capacity and rare-attribute
+        // bytes, and the rare-attribute figure visits every stored cell.
+        // Nothing caches it, so the walk repeats in full each time.
+        //
+        // This is a cadence check, deliberately not a log-level check. Gating
+        // the pass on whether anyone is watching the memory log is what left a
+        // shipped session charging nothing at all — panes retained bytes, the
+        // ledger stayed empty, and the committed-budget limit had no figure to
+        // apply itself to. The level check below still guards the log lines
+        // alone, which is all it should ever have guarded.
+        //
+        // Consequence, stated rather than left to be discovered: every figure
+        // this pass maintains is now up to one interval stale. The governor's
+        // ledger can lag reality by that much, and so can the memory log.
+        // That is acceptable because neither is a real-time control loop —
+        // the ledger backs a tripwire and the log lines back a growth curve
+        // across a session, and both answer questions on a scale of minutes.
+        // A control loop that had to act within a frame could not read this.
+        if !retention_sample_due(&mut self.last_retention_sample, now) {
+            return false;
+        }
+
         // Reclamation runs before the diagnostic gate, and must.
         //
         // A stalled capture pins its staging until the pane dies. Freeing it
@@ -660,6 +707,12 @@ impl super::App {
         // The first draft of this had it inside the gate. Its own test caught
         // that: the capture was never reclaimed because no subscriber was
         // installed, which is exactly the shipped default.
+        //
+        // The cadence above is also what makes "two consecutive samples"
+        // mean two intervals here. Called once per wake, consecutive samples
+        // were milliseconds apart, so a transfer that was merely slow could
+        // be cancelled and the reported stall duration was wrong by the ratio
+        // between a wake and an interval.
         self.reclaim_stalled_captures();
 
         // Above the gate for the same reason, and it is the only place the
@@ -680,7 +733,9 @@ impl super::App {
         // governor exists to apply had no figure to apply it to.
         //
         // Reattribution subsumes reconciliation: it re-parents moved panes and
-        // then registers anything still unowned.
+        // then registers anything still unowned. Both the tear-out and
+        // insertion paths register owners eagerly, so this pass corrects
+        // rather than establishes attribution.
         self.reattribute_pane_owners();
 
         // Charge what each pane retains into its governor owner, so the
@@ -700,7 +755,8 @@ impl super::App {
             .collect();
         let borrowed: Vec<(&str, &PaneState)> =
             labelled.iter().map(|(label, pane)| (label.as_str(), *pane)).collect();
-        sample_retention_if_due(&mut self.last_retention_sample, now, borrowed)
+        log_sampled_panes(borrowed);
+        true
     }
 }
 

@@ -156,8 +156,12 @@ Lifecycle:
 The retention log lines are the diagnostic half of this pass: setting the
 `memory` target to debug adds a `pane retention` line per pane and a
 `session retention` line per session, at most once every 30 seconds. Charging
-and re-attribution above run regardless. Neither half blocks the loop — a pane
-whose parser lock is contended is skipped rather than waited on.
+and re-attribution above run on that same 30-second cadence, whether or not the
+log lines are switched on — so a default session maintains the ledger without
+writing anything. Figures are therefore up to 30 seconds old; they back a
+tripwire and a growth curve, neither of which needs a fresher number. Neither
+half blocks the loop — a pane whose parser lock is contended is skipped rather
+than waited on.
 
 ## Input routing order
 
@@ -418,8 +422,8 @@ governor：`sonicterm-gpu` 并不依赖 resource crate。因此 governor 的总�
   的会话中不会施加任何限制。parser 锁被占用的窗格会被跳过，并保留上一次的
   charge，直到下一轮采样。
 - **迁移。** 在窗口之间移动窗格会把其 charge 重新归属到目标窗口的 owner，因此
-  撕离的标签页不会把内存继续记在原窗口名下。重新归属与计费在同一轮中执行，且在
-  任何日志级别下都会发生。
+  撕离的标签页不会把内存继续记在原窗口名下。重新归属与计费在同一轮中执行，在任何
+  日志级别下都会发生，但都受同一个 30 秒采样间隔约束。
 - **释放。** charge 是归属于窗格的 RAII token，拆除分为有序的两步：先释放该窗格的
   charge token，再由 owner guard 关闭窗格与窗口记录。这个顺序是关键——owner 仍持有
   charge 时会拒绝关闭，因此 `PaneState` 把 `charges` 声明在 `owner` 之前，依赖 Rust
@@ -428,7 +432,9 @@ governor：`sonicterm-gpu` 并不依赖 resource crate。因此 governor 的总�
 
 这一轮中属于诊断的部分是占用日志：把 `memory` target 设为 debug 后，会为每个窗格
 输出一行 `pane retention`，并为整个会话输出一行 `session retention`，且最多每 30
-秒一次。上面的计费与重新归属则不受此影响，始终执行。两者都不会阻塞事件循环——
+秒一次。上面的计费与重新归属按同样的 30 秒节奏执行，无论日志是否开启——因此默认
+会话同样会维护账本，只是不写日志。由此，这些数字最多可能滞后 30 秒；它们支撑的是
+一条警戒线和一条增长曲线，两者都不需要更新的数字。两者都不会阻塞事件循环——
 parser 锁被占用的窗格会被跳过而非等待。
 
 ## 输入路由顺序
