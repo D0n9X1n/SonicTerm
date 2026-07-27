@@ -76,7 +76,6 @@ tiny-skia = "0.12"
 # Config / serialization
 serde = { version = "1", features = ["derive"] }
 toml = "1"
-notify = "8"
 
 # Logging / errors
 anyhow = "1"
