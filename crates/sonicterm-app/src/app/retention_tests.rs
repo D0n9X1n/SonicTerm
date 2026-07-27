@@ -378,15 +378,17 @@ fn the_coverage_table_agrees_with_the_charge_sites() {
         );
     }
 
-    // The renderer charges two more; everything else recorded `Charged` must
-    // be one of these two sets, or the table is claiming a site that is not
-    // there.
-    let renderer_charged = [ResourceClass::GlyphAtlas, ResourceClass::SoftwareFrame];
+    // And the converse: a class recorded `Charged` must be one this pass
+    // charges. The set is read from `seam_classes` rather than listed here,
+    // because a list written by hand records what someone believed and keeps
+    // reporting it after it stops being true — which is what let two classes
+    // stay recorded as charged while nothing read the seam that would have
+    // charged them, and then let a later derivation inherit the same claim.
     for index in 0..ResourceClass::LENGTH {
         let class = ResourceClass::from_usize(index);
         if class.coverage() == ClassCoverage::Charged {
             assert!(
-                charged_here.contains(&class) || renderer_charged.contains(&class),
+                charged_here.contains(&class),
                 "{class:?} is recorded as charged but no production pass charges it"
             );
         }

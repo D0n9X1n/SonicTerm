@@ -118,6 +118,24 @@ pub enum ClassCoverage {
         /// Worst-case bytes retained per pane.
         per_pane_bytes: usize,
     },
+    /// Real retention that nothing charges, recorded with what it holds.
+    ///
+    /// Distinct from every other variant, and the distinction is the point.
+    /// [`Self::SubsystemAbsent`] says charging would charge nothing;
+    /// [`Self::TransientWithinCall`] says the memory is gone before a sampler
+    /// could see it; [`Self::MeasuredNegligible`] says it is too small to be
+    /// worth reporting. This says the memory is present, significant, and
+    /// outside the ledger — a gap with a number on it rather than a decision.
+    ///
+    /// A class recorded this way is work that has not been done. It exists so
+    /// that fact is visible in the table instead of being spelled as one of
+    /// the variants that mean "nothing to do here" — which is how a class with
+    /// no charge site came to read `Charged`, and how a later derivation built
+    /// on that row inherited the same claim.
+    UnchargedRetention {
+        /// Worst-case bytes retained by one owner of this class.
+        per_owner_bytes: usize,
+    },
 }
 
 impl ResourceClass {
@@ -136,8 +154,18 @@ impl ResourceClass {
             | Self::ProtocolMetadata
             | Self::InlineMediaRetained => ClassCoverage::Charged,
 
-            // Charged from the renderer's retention seam.
-            Self::GlyphAtlas | Self::SoftwareFrame => ClassCoverage::Charged,
+            // The renderer reports both figures and nothing reads them:
+            // `retained_amounts` has no caller, and `sonicterm-gpu` declares no
+            // dependency on `sonicterm-resource`, so the crate cannot reserve
+            // against a governor at all. Sized at the glyph atlas's own
+            // 2048 x 2048 x 4 pixel buffer, and at one 4K frame for the
+            // Windows-only software presentation buffer.
+            Self::GlyphAtlas => {
+                ClassCoverage::UnchargedRetention { per_owner_bytes: 2048 * 2048 * 4 }
+            }
+            Self::SoftwareFrame => {
+                ClassCoverage::UnchargedRetention { per_owner_bytes: 3840 * 2160 * 4 }
+            }
 
             // PTY output queue: 64 slots of views into the reader's reused
             // 64 KiB ring. The charge is the ring memory those views pin, not
@@ -208,6 +236,13 @@ pub enum PaneSeamTerm {
     Contributes,
     /// Charged, but to an owner other than a pane, so it never appears in a
     /// pane owner's total.
+    ///
+    /// **No class uses this today, and one wrongly did.** The renderer classes
+    /// were recorded here on the reasoning that atlas memory belongs to the
+    /// renderer's owner — sound, had anything charged it. Nothing does. Before
+    /// putting a class here, name the owner kind whose ledger carries it and
+    /// the site that charges it; if neither exists, the class belongs in
+    /// [`Self::NotChargedInProduction`], which claims less and is checkable.
     ChargedToAnotherOwnerKind,
     /// No production site charges this class to any owner, so it cannot appear
     /// in a pane owner's total whatever it retains.
@@ -246,11 +281,14 @@ impl ResourceClass {
             // seam permits, not above what it usually uses.
             Self::PtyOutput => PaneSeamTerm::Contributes,
 
-            // Atlas pixels and the software frame belong to the renderer and
-            // are charged to its owner. A pane's ledger never carries them, so
-            // a term here would raise the pane backstop for memory that cannot
-            // appear beneath it.
-            Self::GlyphAtlas | Self::SoftwareFrame => PaneSeamTerm::ChargedToAnotherOwnerKind,
+            // Atlas pixels and the software frame are charged to nobody. The
+            // renderer computes both figures, but `retained_amounts` has no
+            // caller and `sonicterm-gpu` cannot reserve, so they reach no
+            // owner's ledger — a pane's least of all. The sum carries no term
+            // for them for the same reason it carries none for the classes
+            // below: not because the charge lands elsewhere, but because there
+            // is no charge.
+            Self::GlyphAtlas | Self::SoftwareFrame => PaneSeamTerm::NotChargedInProduction,
 
             // Charged to the pane that owns the queue, so it appears in that
             // pane's total and the backstop above it must carry its cap.
