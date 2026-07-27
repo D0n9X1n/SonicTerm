@@ -155,8 +155,11 @@ impl ResourceClass {
             // count the queue maintains, not from a per-slot estimate.
             Self::PtyInput => ClassCoverage::Charged,
 
-            // 64 bounded slots of DSR/XTVERSION replies, ~32 bytes each.
-            Self::ParserReply => ClassCoverage::MeasuredNegligible { per_pane_bytes: 2 * 1024 },
+            // 64 bounded slots of DSR/XTVERSION replies. The replies are ~28
+            // bytes, but the figure has to cover the channel's slot array and
+            // each reply's `Vec` header too: measured at 4,480 bytes for a
+            // full queue, against the 2,048 the payloads alone predict.
+            Self::ParserReply => ClassCoverage::MeasuredNegligible { per_pane_bytes: 8 * 1024 },
             // 1024 bounded records of 40 bytes.
             Self::CommandEvents => ClassCoverage::MeasuredNegligible { per_pane_bytes: 40 * 1024 },
 
