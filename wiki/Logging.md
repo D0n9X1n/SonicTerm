@@ -390,8 +390,8 @@ level = "debug"
 
 ### 排查内存偏高的会话
 
-上一节说明每个数值的含义。本节给出的是当 SonicTerm 占用超出预期时，应当按什么
-顺序去读这些数值，最终定位到可以写进报告里的具体面板和子系统。
+上一节说明每个数值的含义。本节给出的是当 SonicTerm 内存占用超出预期时，应当按
+什么顺序去读这些数值，最终定位到可以写进报告里的具体面板和子系统。
 
 **1. 先打开这些日志行。** 内存日志只在 `debug` 级别写入。在默认的 `warn`
 以及 `info` 级别下完全不会出现，因此 grep 不到内容说明级别不对，而不是会话
@@ -444,14 +444,14 @@ Select-String 'pane retention' $log | ForEach-Object {
 | `grid_visible` | `grid_visible_bytes` | 无 — 窗口大，占用自然大 |
 | `grid_history` | `grid_history_bytes` | 调低 `scrollback` |
 | `grid_alternate` | `grid_alternate_bytes` | 退出该面板中的全屏程序 |
-| `parser` | `parser_bytes` | 在下次采样时复查 —— 见下方说明 |
+| `parser` | `parser_bytes` | 在下次采样时复查 — 见下方说明 |
 | `hyperlinks` | `hyperlink_bytes` | 无 — 有上限，链接滚出后自动回收 |
 | `inline_media` | `inline_media_bytes` | 减少显示图像，或关闭图像较多的面板 |
 | `pty_output` | `pty_output_bytes` | 等待该面板输出完毕 |
 | `pty_input` | `pty_input_bytes` | 等待 shell 读完大段粘贴 |
 
-注意 seam 取值是 `hyperlinks`，而字段名是 `hyperlink_bytes`；请按实际需要的
-那个去 grep。
+注意 `largest_seam` 的取值是 `hyperlinks`，而字段名是 `hyperlink_bytes`；
+请按实际需要的那个去 grep。
 
 `parser` 是唯一通常只是瞬时占用的接缝 —— 它保存的是当前正在解析的序列，因此
 下次采样时就应当回落。如果它在连续多次采样中都保持很大，多半是某次图像传输
@@ -501,12 +501,12 @@ Select-String 'pane retention' $log | ForEach-Object {
 
 **不要只比较首尾两行。** 采样被限制为大约每 30 秒一组，但它们是在空闲唤醒路径上
 写出的，因此繁忙的会话记录得比空闲的会话更频繁。日志中的空档并不表示这段时间内存
-是平的 —— 只表示期间没有唤醒去测量。相隔十分钟的两行之间，可能跨过了你看不到的
-一次突发。请读连续多次采样，据此判断曲线形状。
+是平稳的 —— 只表示期间没有唤醒去测量。相隔十分钟的两行之间，可能夹着你看不到的
+一次突发增长。请读连续多次采样，据此判断曲线形状。
 
-**5. 查看进程整体。** 每个面板都可能在各自的上限之内，而总量并非如此。
+**5. 查看进程整体。** 可能每个面板都在各自的上限之内，而总量却不是。
 `session retention` 行是各面板的求和，它带有 `panes=N` 而没有 `largest_seam`
-—— 按 seam 的拆分只存在于单个面板。
+—— 按接缝的拆分只存在于单个面板。
 
 ```sh
 grep 'session retention' "$LOG" | awk '{
@@ -530,9 +530,9 @@ Select-String 'session retention' $log | ForEach-Object {
 如果 `panes` 保持不变而总量持续上涨，请回到第 2 步，找出是哪个面板导致的。
 
 **6. 两条不代表缺陷的警告。** 这两行在默认的 `warn` 级别下也会出现，且都表示
-SonicTerm 已经纠正了某个状况，而不是出了故障。仅仅看到它们并不值得上报：
+SonicTerm 已经纠正了某个状况，而不是出了故障。仅仅看到其中一条并不值得上报：
 
-- `cancelled a media capture that stopped receiving; the transfer was abandoned and its staging is reclaimed` —— 图像传输中途停止，其缓冲已被释放，而不是被占用到面板结束为止。
+- `cancelled a media capture that stopped receiving; the transfer was abandoned and its staging is reclaimed` —— 图像传输中途停止，其缓冲已被释放，而不是一直占用到该面板关闭为止。
 - `revisited idle panes holding an inline-media budget sized for a smaller session` —— 早期填满的面板仍持有面板数较少时分得的图像预算份额，现已归还。
 
 ### 内联图像消失时
