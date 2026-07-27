@@ -135,13 +135,21 @@ fn no_uncharged_class_appears_in_the_production_charge_path() {
     }
 }
 
-/// The renderer's host-side classes reach no ledger, and the report shows it.
+/// The renderer's host-side classes reach no ledger, though they do reach a
+/// report.
 ///
 /// Stated for these two by name rather than left to the sweep above, because
 /// the reason they are absent is structural and not obvious from the table:
 /// `sonicterm-gpu` declares no dependency on `sonicterm-resource`, so the crate
-/// that computes both figures cannot reserve against a governor at all. The
-/// figures exist, are tested, and stop at the crate boundary.
+/// that computes both figures cannot reserve against a governor at all.
+///
+/// They are no longer invisible. The app reads `retained_amounts` and emits a
+/// `renderer retention` line per renderer, live and warm, on the memory
+/// target's sampling interval. Reporting is not charging, and this test pins
+/// the second: a future change that wired these into the charge path would
+/// have to resolve the `InlineMediaRetained` collision first, since the
+/// renderer's image atlas and a pane's decoded media are different allocations
+/// under the same class.
 ///
 /// The consequence is a diagnosis gap rather than an unbounded allocation —
 /// the per-seam caps bound this memory whether or not anything is charged. What
