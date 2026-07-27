@@ -1337,12 +1337,14 @@ fn amount(bytes: usize, items: usize) -> ResourceAmount {
 
 /// Every part must reach a class, and no part may be charged twice.
 ///
-/// The failure this guards is silent under-charging: a part added to
-/// `RendererRetention` without a matching row in `seam_classes` would be
-/// reported by `total()` and never charged, so the governor and the diagnostic
-/// would disagree about the same renderer.
+/// The failure this guards is a part added to `RendererRetention` without a
+/// matching row in `seam_classes` — it would be counted by `total()` and
+/// classified as nothing, so the struct would report a byte it could not name.
+///
+/// A structural check on the struct, not on a charge path. Nothing charges
+/// these classes; see `RendererRetention::seam_classes`.
 #[test]
-fn every_reported_part_is_charged_to_exactly_one_class() {
+fn every_reported_part_is_classified_exactly_once() {
     let retention = RendererRetention {
         glyph_atlas: amount(16 * 1024 * 1024, 512),
         image_atlas: amount(8 * 1024 * 1024, 12),
@@ -1350,22 +1352,26 @@ fn every_reported_part_is_charged_to_exactly_one_class() {
     };
 
     let classes = retention.seam_classes();
-    let charged: usize = classes.iter().map(|(_, part)| part.bytes).sum();
+    let classified: usize = classes.iter().map(|(_, part)| part.bytes).sum();
 
     assert_eq!(
-        charged,
+        classified,
         retention.total().bytes,
-        "the charged classes must account for every reported byte"
+        "the classified parts must account for every byte the struct reports"
     );
 
     let distinct: std::collections::HashSet<_> = classes.iter().map(|(class, _)| *class).collect();
-    assert_eq!(distinct.len(), classes.len(), "no class may appear twice, or bytes double-count");
+    assert_eq!(
+        distinct.len(),
+        classes.len(),
+        "no class may appear twice, or bytes are counted twice"
+    );
 }
 
 /// The software frame is reported on every platform, zero where absent.
 ///
-/// A caller charging renderer classes should not need a `#[cfg(windows)]`
-/// branch to do it — an absent part and an empty part are the same charge.
+/// A caller reading renderer classes should not need a `#[cfg(windows)]`
+/// branch — an absent part and an empty part read the same.
 #[test]
 fn the_software_frame_part_is_present_on_every_platform() {
     let retention = RendererRetention::default();
@@ -1373,14 +1379,14 @@ fn the_software_frame_part_is_present_on_every_platform() {
 
     assert!(
         classes.iter().any(|(class, _)| *class == ResourceClass::SoftwareFrame),
-        "SoftwareFrame must be charged on every platform, zero where there is no software path"
+        "SoftwareFrame must be classified on every platform, zero where there is no software path"
     );
     assert_eq!(retention.total(), ResourceAmount::default(), "a default renderer holds nothing");
 }
 
-/// An empty renderer charges nothing.
+/// An empty renderer reports nothing.
 #[test]
-fn an_empty_renderer_charges_nothing() {
+fn an_empty_renderer_reports_nothing() {
     let classes = RendererRetention::default().seam_classes();
     assert!(classes.iter().all(|(_, part)| part.bytes == 0 && part.items == 0));
 }
