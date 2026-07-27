@@ -77,6 +77,14 @@ jobs:
         shell: bash
         run: bash scripts/check-workspace-crates.sh
 
+      # `--nocapture` deliberately: this probe reports through stdout, and a
+      # passing test's stdout is swallowed. Its whole purpose is the printed
+      # verdict — whether this runner can create a window, and therefore
+      # whether the Windows software-path verification can be automated rather
+      # than needing a person at a keyboard.
+      - name: Report host window capability
+        run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture
+
       - name: Run release-note unit test
         shell: bash
         run: bash scripts/test-release-notes.sh
