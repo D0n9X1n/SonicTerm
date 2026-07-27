@@ -94,6 +94,157 @@ reached, because a link stays reachable for as long as the cells referencing it
 remain in retained scrollback — freeing it earlier would break a link the user
 can still scroll back to.
 
+### Triaging a session that feels heavy
+
+The section above says what each figure means. This one is the order to read
+them in when SonicTerm is using more memory than you expect, and it ends at a
+pane and a subsystem you can name in a report.
+
+**1. Turn the lines on.** Memory lines are written only at `debug`. At the
+default `warn` — and at `info` — they are absent entirely, so an empty grep
+means the level is wrong, not that the session is clean. Set the level in
+`~/.sonicterm/sonicterm.toml` (on Windows, under your user profile), restart
+SonicTerm, and use it normally for a few minutes:
+
+```toml
+[logging]
+level = "debug"
+```
+
+**2. Find the heaviest pane.** Logs rotate into `sonicterm.log.<date>`, and a
+busy day can add a second file, so pick the newest by modification time rather
+than by name. This prints every pane's most recent total, largest first:
+
+```sh
+LOG=$(ls -1t ~/.sonicterm/logs/sonicterm.log* | head -1)
+grep 'pane retention' "$LOG" | awk '{
+  for (i = 1; i <= NF; i++) {
+    if ($i ~ /^pane=/)        { p = substr($i, 6); gsub(/"/, "", p) }
+    if ($i ~ /^total_bytes=/)   t = substr($i, 13)
+  }
+  last[p] = t
+} END { for (p in last) printf "%10.2f MB  %s\n", last[p] / 1048576, p }' \
+  | sort -rn
+```
+
+```powershell
+$log = Get-ChildItem ~/.sonicterm/logs/sonicterm.log* |
+  Sort-Object LastWriteTime -Descending | Select-Object -First 1
+Select-String 'pane retention' $log | ForEach-Object {
+  if ($_.Line -match 'pane="([^"]+)".*?total_bytes=(\d+)') {
+    [pscustomobject]@{ Pane = $Matches[1]; Bytes = [long]$Matches[2] }
+  }
+} | Group-Object Pane | ForEach-Object {
+  $newest = $_.Group[-1]
+  [pscustomobject]@{ MB = [math]::Round($newest.Bytes / 1MB, 2); Pane = $_.Name }
+} | Sort-Object MB -Descending
+```
+
+The pane label is the window and pane id, so it identifies the pane even after
+tabs move between windows.
+
+**3. Ask which subsystem.** On the heaviest pane, read `largest_seam`. A total
+says a pane is big; this field says where to look. Each value names one row of
+the field table above:
+
+| `largest_seam` | Field it points at | First thing to try |
+| --- | --- | --- |
+| `grid_visible` | `grid_visible_bytes` | nothing — a large window is large |
+| `grid_history` | `grid_history_bytes` | lower `scrollback` |
+| `grid_alternate` | `grid_alternate_bytes` | quit the full-screen program in that pane |
+| `parser` | `parser_bytes` | nothing yet — recheck on the next sample |
+| `hyperlinks` | `hyperlink_bytes` | nothing — bounded, reclaimed as links scroll away |
+| `inline_media` | `inline_media_bytes` | display fewer images, or close image-heavy panes |
+| `pty_output` | `pty_output_bytes` | let the pane finish printing |
+| `pty_input` | `pty_input_bytes` | let the shell drain a large paste |
+
+The seam value is `hyperlinks` but the field is `hyperlink_bytes`; grep for the
+one you actually want.
+
+**4. Separate large from growing.** This is the step that decides whether you
+have a bug. One sample cannot tell them apart — a pane holding 60 MB of images
+steadily is working as designed, and a pane climbing every sample is not. Track
+one pane across samples, substituting its label from step 2:
+
+```sh
+PANE='pane="WindowId(50820809344)/3"'
+grep 'pane retention' "$LOG" | grep -F "$PANE" | awk '{
+  for (i = 1; i <= NF; i++) {
+    if ($i ~ /^total_bytes=/)    t = substr($i, 13)
+    if ($i ~ /^largest_seam=/) { s = substr($i, 14); gsub(/"/, "", s) }
+  }
+  printf "%s  %8.2f MB  %s\n", substr($1, 12, 8), t / 1048576, s
+}'
+```
+
+```powershell
+$pane = 'WindowId(50820809344)/3'
+$re = 'pane="' + [regex]::Escape($pane) + '".*?total_bytes=(\d+).*?largest_seam="([^"]+)"'
+Select-String 'pane retention' $log | ForEach-Object {
+  if ($_.Line -match $re) {
+    '{0}  {1,8:N2} MB  {2}' -f $_.Line.Substring(11, 8), ([long]$Matches[1] / 1MB), $Matches[2]
+  }
+}
+```
+
+Flat is fine, even at 60 MB:
+
+```text
+05:19:28     60.00 MB  inline_media
+05:19:59     60.00 MB  inline_media
+05:20:30     60.00 MB  inline_media
+```
+
+A steady climb across every sample is what to report:
+
+```text
+05:19:28      8.00 MB  grid_history
+05:19:59     16.00 MB  grid_history
+05:20:30     24.00 MB  grid_history
+05:21:02     32.00 MB  grid_history
+```
+
+**Do not compare only the endpoints.** Samples are rate-limited to about one
+set every 30 seconds, but they are written from the idle-wake path, so a busy
+session logs more often than a quiet one. A gap in the log does not mean memory
+was flat across it — it means nothing woke to measure. Two lines ten minutes
+apart may span a burst you cannot see. Read several consecutive samples and
+judge the shape.
+
+**5. Check the process view.** Every pane can sit inside its own ceiling while
+the total does not. The `session retention` line is the sum across panes, and
+it carries `panes=N` instead of `largest_seam` — the seam breakdown is per pane
+only.
+
+```sh
+grep 'session retention' "$LOG" | awk '{
+  for (i = 1; i <= NF; i++) {
+    if ($i ~ /^panes=/)        n = substr($i, 7)
+    if ($i ~ /^total_bytes=/)  t = substr($i, 13)
+  }
+  printf "%s  panes=%-3s %8.2f MB\n", substr($1, 12, 8), n, t / 1048576
+}'
+```
+
+```powershell
+Select-String 'session retention' $log | ForEach-Object {
+  if ($_.Line -match 'panes=(\d+) total_bytes=(\d+)') {
+    '{0}  panes={1,-3} {2,8:N2} MB' -f $_.Line.Substring(11, 8), $Matches[1], ([long]$Matches[2] / 1MB)
+  }
+}
+```
+
+If `panes` rises alongside the total, the session is growing because it holds
+more panes, which is expected. If the total climbs while `panes` holds steady,
+go back to step 2 and find which pane is responsible.
+
+**6. Two warnings that are not bugs.** These appear at the default `warn`
+level, and both mean SonicTerm corrected something rather than that something
+broke. Finding one is not by itself worth reporting:
+
+- `cancelled a media capture that stopped receiving; the transfer was abandoned and its staging is reclaimed` — an image transfer stopped mid-flight and its buffer was released instead of being pinned for the life of the pane.
+- `revisited idle panes holding an inline-media budget sized for a smaller session` — panes that filled up early were still holding a share of the image budget from when fewer panes existed, and it was handed back.
+
 ### When inline images disappear
 
 SonicTerm bounds decoded inline images per pane and across the whole process.
@@ -137,6 +288,12 @@ Include:
 3. The relevant crash dump or process sample, if any.
 4. A screenshot or short recording for rendering, font, VT, input, or pane-layout issues.
 5. Exact reproduction steps and whether the problem occurs on a hardware or software GPU.
+6. For a memory report, the `pane retention` lines for the pane identified in
+   [Triaging a session that feels heavy](#triaging-a-session-that-feels-heavy)
+   and every `session retention` line over the same window — at least five
+   consecutive samples, roughly three minutes of a session in use, not two
+   lines far apart. Say what the session was doing, how many panes were open,
+   and quote the pane's `largest_seam`.
 
 Avoid posting secrets, tokens, environment dumps, or sensitive command output.
 
@@ -224,6 +381,148 @@ level = "debug"
 而暂存的超链接会持续增长直至上限，因为只要引用它们的单元格仍留在回滚历史中，
 这些链接就仍可通过向上滚动访问。
 
+### 排查内存偏高的会话
+
+上一节说明每个数值的含义。本节给出的是当 SonicTerm 占用超出预期时，应当按什么
+顺序去读这些数值，最终定位到可以写进报告里的具体面板和子系统。
+
+**1. 先打开这些日志行。** 内存日志只在 `debug` 级别写入。在默认的 `warn`
+以及 `info` 级别下完全不会出现，因此 grep 不到内容说明级别不对，而不是会话
+没有问题。请在 `~/.sonicterm/sonicterm.toml`（Windows 上位于用户配置文件目录）
+中设置级别，重启 SonicTerm，并正常使用几分钟：
+
+```toml
+[logging]
+level = "debug"
+```
+
+**2. 找出占用最高的面板。** 日志会轮转为 `sonicterm.log.<date>`，繁忙的一天还
+可能产生第二个文件，因此请按修改时间而不是文件名挑选最新的一个。下面的命令按
+从大到小列出每个面板最近一次的总量：
+
+```sh
+LOG=$(ls -1t ~/.sonicterm/logs/sonicterm.log* | head -1)
+grep 'pane retention' "$LOG" | awk '{
+  for (i = 1; i <= NF; i++) {
+    if ($i ~ /^pane=/)        { p = substr($i, 6); gsub(/"/, "", p) }
+    if ($i ~ /^total_bytes=/)   t = substr($i, 13)
+  }
+  last[p] = t
+} END { for (p in last) printf "%10.2f MB  %s\n", last[p] / 1048576, p }' \
+  | sort -rn
+```
+
+```powershell
+$log = Get-ChildItem ~/.sonicterm/logs/sonicterm.log* |
+  Sort-Object LastWriteTime -Descending | Select-Object -First 1
+Select-String 'pane retention' $log | ForEach-Object {
+  if ($_.Line -match 'pane="([^"]+)".*?total_bytes=(\d+)') {
+    [pscustomobject]@{ Pane = $Matches[1]; Bytes = [long]$Matches[2] }
+  }
+} | Group-Object Pane | ForEach-Object {
+  $newest = $_.Group[-1]
+  [pscustomobject]@{ MB = [math]::Round($newest.Bytes / 1MB, 2); Pane = $_.Name }
+} | Sort-Object MB -Descending
+```
+
+面板标签由窗口 id 和面板 id 组成，因此即使标签页在窗口之间移动，也仍能识别到
+同一个面板。
+
+**3. 判断是哪个子系统。** 在占用最高的面板上读 `largest_seam`。总量只能说明
+面板占用大，该字段指出应当检查哪里。每个取值都对应上一节字段表中的一行：
+
+| `largest_seam` | 对应字段 | 首先可以尝试 |
+| --- | --- | --- |
+| `grid_visible` | `grid_visible_bytes` | 无 — 窗口大，占用自然大 |
+| `grid_history` | `grid_history_bytes` | 调低 `scrollback` |
+| `grid_alternate` | `grid_alternate_bytes` | 退出该面板中的全屏程序 |
+| `parser` | `parser_bytes` | 暂时无需处理 — 在下次采样时复查 |
+| `hyperlinks` | `hyperlink_bytes` | 无 — 有上限，链接滚出后自动回收 |
+| `inline_media` | `inline_media_bytes` | 减少显示图像，或关闭图像较多的面板 |
+| `pty_output` | `pty_output_bytes` | 等待该面板输出完毕 |
+| `pty_input` | `pty_input_bytes` | 等待 shell 读完大段粘贴 |
+
+注意 seam 取值是 `hyperlinks`，而字段名是 `hyperlink_bytes`；请按实际需要的
+那个去 grep。
+
+**4. 区分「占用大」与「持续增长」。** 这一步决定是否真的存在缺陷。单次采样无法
+区分两者 —— 稳定占用 60 MB 图像的面板属于正常设计，而每次采样都在上涨的面板则
+不是。把第 2 步得到的标签代入下面的命令，跟踪同一个面板：
+
+```sh
+PANE='pane="WindowId(50820809344)/3"'
+grep 'pane retention' "$LOG" | grep -F "$PANE" | awk '{
+  for (i = 1; i <= NF; i++) {
+    if ($i ~ /^total_bytes=/)    t = substr($i, 13)
+    if ($i ~ /^largest_seam=/) { s = substr($i, 14); gsub(/"/, "", s) }
+  }
+  printf "%s  %8.2f MB  %s\n", substr($1, 12, 8), t / 1048576, s
+}'
+```
+
+```powershell
+$pane = 'WindowId(50820809344)/3'
+$re = 'pane="' + [regex]::Escape($pane) + '".*?total_bytes=(\d+).*?largest_seam="([^"]+)"'
+Select-String 'pane retention' $log | ForEach-Object {
+  if ($_.Line -match $re) {
+    '{0}  {1,8:N2} MB  {2}' -f $_.Line.Substring(11, 8), ([long]$Matches[1] / 1MB), $Matches[2]
+  }
+}
+```
+
+保持平稳就没有问题，即使是 60 MB：
+
+```text
+05:19:28     60.00 MB  inline_media
+05:19:59     60.00 MB  inline_media
+05:20:30     60.00 MB  inline_media
+```
+
+每次采样都稳定上涨才是值得上报的情况：
+
+```text
+05:19:28      8.00 MB  grid_history
+05:19:59     16.00 MB  grid_history
+05:20:30     24.00 MB  grid_history
+05:21:02     32.00 MB  grid_history
+```
+
+**不要只比较首尾两行。** 采样被限制为大约每 30 秒一组，但它们是在空闲唤醒路径上
+写出的，因此繁忙的会话记录得比空闲的会话更频繁。日志中的空档并不表示这段时间内存
+是平的 —— 只表示期间没有唤醒去测量。相隔十分钟的两行之间，可能跨过了你看不到的
+一次突发。请读连续多次采样，据此判断曲线形状。
+
+**5. 查看进程整体。** 每个面板都可能在各自的上限之内，而总量并非如此。
+`session retention` 行是各面板的求和，它带有 `panes=N` 而没有 `largest_seam`
+—— 按 seam 的拆分只存在于单个面板。
+
+```sh
+grep 'session retention' "$LOG" | awk '{
+  for (i = 1; i <= NF; i++) {
+    if ($i ~ /^panes=/)        n = substr($i, 7)
+    if ($i ~ /^total_bytes=/)  t = substr($i, 13)
+  }
+  printf "%s  panes=%-3s %8.2f MB\n", substr($1, 12, 8), n, t / 1048576
+}'
+```
+
+```powershell
+Select-String 'session retention' $log | ForEach-Object {
+  if ($_.Line -match 'panes=(\d+) total_bytes=(\d+)') {
+    '{0}  panes={1,-3} {2,8:N2} MB' -f $_.Line.Substring(11, 8), $Matches[1], ([long]$Matches[2] / 1MB)
+  }
+}
+```
+
+如果 `panes` 与总量一起上升，说明会话增长是因为打开了更多面板，属于预期行为。
+如果 `panes` 保持不变而总量持续上涨，请回到第 2 步，找出是哪个面板导致的。
+
+**6. 两条不代表缺陷的警告。** 这两行在默认的 `warn` 级别下也会出现，且都表示
+SonicTerm 已经纠正了某个状况，而不是出了故障。仅仅看到它们并不值得上报：
+
+- `cancelled a media capture that stopped receiving; the transfer was abandoned and its staging is reclaimed` —— 图像传输中途停止，其缓冲已被释放，而不是被占用到面板结束为止。
+- `revisited idle panes holding an inline-media budget sized for a smaller session` —— 早期填满的面板仍持有面板数较少时分得的图像预算份额，现已归还。
+
 ### 内联图像消失时
 
 SonicTerm 对已解码的内联图像按面板和整个进程分别设限。持续显示新图像的面板
@@ -262,5 +561,10 @@ grep -nE 'dispatch_sync_f_slow|redraw_target|__psynch_cvwait' \
 3. 相关崩溃转储或进程 sample（如果存在）。
 4. 渲染、字体、VT、输入或窗格布局问题的截图或短录屏。
 5. 精确复现步骤，以及问题发生在硬件 GPU 还是软件 GPU 上。
+6. 内存问题请附上：在
+   [排查内存偏高的会话](#排查内存偏高的会话) 中定位到的那个面板的
+   `pane retention` 行，以及同一时间段内所有 `session retention` 行 ——
+   至少五次连续采样，约相当于三分钟的实际使用，而不是相隔很远的两行。
+   同时说明当时会话在做什么、打开了多少个面板，并附上该面板的 `largest_seam`。
 
 不要公开密钥、token、完整环境变量或敏感命令输出。
