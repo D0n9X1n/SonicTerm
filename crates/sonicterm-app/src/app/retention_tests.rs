@@ -378,11 +378,19 @@ fn the_maintainer_docs_document_the_fields_the_memory_log_actually_emits() {
 
     assert!(!emitted.is_empty(), "the scan must find emitted fields, or it asserts nothing");
 
+    // Asserted against table rows, not against the file. A whole-file
+    // `contains` is satisfied by the sample block below, so it would pass with
+    // the table row deleted — the exact omission this test exists to catch.
+    // Verified by deleting the row and watching this go RED.
+    let table_rows: Vec<&str> =
+        DOCS.lines().map(str::trim_start).filter(|line| line.starts_with('|')).collect();
+    assert!(!table_rows.is_empty(), "the scan must find table rows, or it asserts nothing");
+
     for field in &emitted {
         assert!(
-            DOCS.contains(field),
-            "`{field}` is emitted by the memory log but is absent from docs/LOGGING.md; \
-             the seam table must account for every term in total_bytes"
+            table_rows.iter().any(|row| row.contains(field)),
+            "`{field}` is emitted by the memory log but no table row in docs/LOGGING.md \
+             names it; the seam table must account for every term in total_bytes"
         );
     }
 
