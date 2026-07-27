@@ -517,6 +517,26 @@ fn percent_to_u8(v: u32) -> u8 {
     ((v.min(100) * 255 + 50) / 100) as u8
 }
 
+/// Serialises every test that asserts on the process-wide media counters.
+///
+/// [`PROCESS_INLINE_MEDIA_BYTES`] and [`LIVE_INLINE_MEDIA_CHARGES`] are
+/// process-global by design — that is the property under test — so two tests
+/// charging them concurrently make each other's absolute assertions
+/// meaningless. Measured at roughly one failure in twelve runs before this
+/// guard: the ceiling test would see a sibling's 8 MiB and report the ceiling
+/// breached when its own panes were within it.
+///
+/// Lives beside the counters rather than in one test file because the panes
+/// that charge them are driven from two: the media tests exercise the trim
+/// directly, and the retention tests exercise the pass that walks every pane.
+/// A second, independent lock would serialise each file against itself and
+/// neither against the other.
+///
+/// A lock rather than `--test-threads=1`, because a suite that only works
+/// under a flag is a suite that will eventually run without it.
+#[cfg(test)]
+pub(super) static MEDIA_COUNTER_LOCK: Mutex<()> = Mutex::new(());
+
 #[cfg(test)]
 #[path = "media_tests.rs"]
 mod media_tests;

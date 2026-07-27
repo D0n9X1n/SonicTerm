@@ -1,14 +1,5 @@
 use super::*;
 
-/// Serialises the tests that assert on `PROCESS_INLINE_MEDIA_BYTES`.
-///
-/// The counter is process-global by design — that is the property under test —
-/// so two tests charging it concurrently make each other's absolute
-/// assertions meaningless. Measured at roughly one failure in twelve runs
-/// before this guard: the ceiling test would see a sibling's 8 MiB and report
-/// the ceiling breached when its own panes were within it.
-static MEDIA_COUNTER_LOCK: Mutex<()> = Mutex::new(());
-
 fn image(id: u64, bytes: usize) -> InlineImage {
     InlineImage { id, row: 0, col: 0, width: 1, height: 1, bgra: Arc::from(vec![0; bytes]) }
 }
