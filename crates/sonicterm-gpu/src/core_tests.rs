@@ -1165,6 +1165,42 @@ fn every_glyph_atlas_reset_invalidates_the_row_cache() {
 
 // --- Image atlas promotion / demotion ------------------------------
 
+/// A window with no inline media must not clear its image atlas on every
+/// frame it draws.
+///
+/// The frame-assembly guard asks whether inline media *changed*, and that
+/// question is answered `true` whenever the previous frame key is absent —
+/// which is every frame following any of the many state changes that clear
+/// it. The media hash itself is deterministic, so on a window that has never
+/// shown an image the hash arm can never fire and the absent-key arm accounts
+/// for every reset. The result is one reset per rendered frame on a window
+/// with nothing to reset.
+///
+/// Resetting an atlas that holds nothing is not free: it rebuilds the packer
+/// and bumps the atlas identity, which invalidates every dependent cache
+/// keyed to it. Gating on whether the atlas actually holds anything is
+/// therefore correct regardless of why the frame key was cleared.
+#[test]
+fn an_empty_placeholder_image_atlas_is_not_reset_every_frame() {
+    let placeholder = GlyphAtlas::new(PLACEHOLDER_ATLAS_DIM, PLACEHOLDER_ATLAS_DIM);
+
+    // The reported defect: a window with no media, drawing frames, whose
+    // atlas is still the untouched 1x1 placeholder. Nothing to clear.
+    assert!(
+        !image_atlas_reset_warranted(&placeholder),
+        "an empty placeholder atlas must not be reset; there is nothing in it to clear"
+    );
+
+    // A promoted atlas carries packer and eviction state even when its entry
+    // map is momentarily empty, so it must still reset. Guarding on emptiness
+    // alone would strand that state and let the packer refuse new inserts.
+    let promoted = GlyphAtlas::default_size();
+    assert!(
+        image_atlas_reset_warranted(&promoted),
+        "a promoted atlas must still be reset even while its entry map is empty"
+    );
+}
+
 /// A promoted image atlas is released once the window stops showing media,
 /// but not on the first idle frame.
 ///
