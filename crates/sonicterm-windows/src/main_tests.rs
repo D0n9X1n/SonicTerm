@@ -8,7 +8,6 @@
 //! here, behind `#[cfg(test)]`.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::software_presenter::{DirtyRect, SoftwareSurface};
 
@@ -17,7 +16,31 @@ fn integration_test_target_is_present() {
     assert_eq!(env!("CARGO_PKG_NAME"), "sonicterm-windows");
 }
 
-static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    /// Bytes live on *this* thread.
+    ///
+    /// Per-thread, not process-global. The counting allocator sees every
+    /// thread's traffic, and this binary runs 46 other tests concurrently — a
+    /// process-wide counter reports their allocations as this test's. Measured
+    /// on CI: a 4K surface whose arithmetic is 33,177,600 read as 34,407,040,
+    /// 1.17 MiB of someone else's memory.
+    ///
+    /// A sibling thread now increments its own counter and is invisible here.
+    /// Correct because every surface in this file is created and dropped on the
+    /// thread that measures it; a buffer freed on another thread would leave
+    /// this counter high and that one saturated at zero.
+    static LIVE_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn add_live(n: usize) {
+    // `try_with`: during thread teardown the TLS slot is gone, and a panic
+    // inside the allocator would abort rather than fail a test.
+    let _ = LIVE_BYTES.try_with(|c| c.set(c.get().saturating_add(n)));
+}
+
+fn sub_live(n: usize) {
+    let _ = LIVE_BYTES.try_with(|c| c.set(c.get().saturating_sub(n)));
+}
 
 /// Serialises every measuring test in this file.
 ///
@@ -34,20 +57,20 @@ struct Counting;
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        LIVE_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+        add_live(layout.size());
         unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        LIVE_BYTES.fetch_sub(layout.size(), Ordering::Relaxed);
+        sub_live(layout.size());
         unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        LIVE_BYTES.fetch_add(new_size.saturating_sub(layout.size()), Ordering::Relaxed);
-        LIVE_BYTES.fetch_sub(layout.size().saturating_sub(new_size), Ordering::Relaxed);
+        add_live(new_size.saturating_sub(layout.size()));
+        sub_live(layout.size().saturating_sub(new_size));
         unsafe { System.realloc(ptr, layout, new_size) }
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        LIVE_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+        add_live(layout.size());
         unsafe { System.alloc_zeroed(layout) }
     }
 }
@@ -56,34 +79,23 @@ unsafe impl GlobalAlloc for Counting {
 static ALLOCATOR: Counting = Counting;
 
 fn live() -> usize {
-    LIVE_BYTES.load(Ordering::Relaxed)
+    LIVE_BYTES.try_with(std::cell::Cell::get).unwrap_or(0)
 }
 
 /// Heap actually held by a surface of the given size.
 ///
-/// Measured as a delta across construction, so the baseline the harness itself
-/// holds cancels out.
-///
-/// Sampled several times and taking the median, because `MEASURE` serialises
-/// the tests that take it and not the whole binary — the other tests in this
-/// crate allocate on their own threads while this one reads. Concurrent
-/// allocation pushes a sample up and concurrent deallocation pushes it down,
-/// so the median converges on the figure while a single sample does not.
-/// Measured: an unsampled read came back 432 bytes under a 59 MB surface.
+/// One reading, because the counter is per-thread: nothing else allocates on
+/// this thread between the two reads, so there is no noise to sample around.
+/// The earlier median-of-five existed only to fight a process-global counter
+/// and could not subtract an allocation present in every sample.
 fn measured_bytes(width: u32, height: u32) -> usize {
-    let mut samples: Vec<usize> = (0..5)
-        .map(|_| {
-            let before = live();
-            let surface = SoftwareSurface::try_new(width, height).expect("valid surface");
-            let held = live().saturating_sub(before);
-            // Read before the drop, or the release races the measurement.
-            assert_eq!(surface.width(), width.max(1));
-            drop(surface);
-            held
-        })
-        .collect();
-    samples.sort_unstable();
-    samples[samples.len() / 2]
+    let before = live();
+    let surface = SoftwareSurface::try_new(width, height).expect("valid surface");
+    let held = live().saturating_sub(before);
+    // Read before the drop, or the release races the measurement.
+    assert_eq!(surface.width(), width.max(1));
+    drop(surface);
+    held
 }
 
 /// The tabled `ClassCoverage::UnchargedRetention` figure for `SoftwareFrame`.
@@ -260,4 +272,43 @@ fn resize_retention_follows_the_hysteresis_band() {
 
     surface.mark_dirty(DirtyRect { x: 0, y: 0, w: 640, h: 480 });
     drop(surface);
+}
+
+/// A sibling thread's allocations must not reach this thread's reading.
+///
+/// The defect this replaced: the counter was process-global, so any concurrent
+/// test inflated the figure. A 4K surface read 34,407,040 on CI against its
+/// arithmetic of 33,177,600.
+///
+/// Asserted as an *exact* match rather than a tolerance. With a per-thread
+/// counter there is no noise to admit, so any slack would only hide the return
+/// of the defect.
+#[test]
+fn a_sibling_threads_allocations_do_not_reach_this_reading() {
+    let _guard = MEASURE.lock().unwrap_or_else(|e| e.into_inner());
+
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = stop.clone();
+    let noisy = std::thread::spawn(move || {
+        let mut held: Vec<Vec<u8>> = Vec::new();
+        while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+            held.push(vec![0u8; 1_229_440]);
+            if held.len() > 8 {
+                held.remove(0);
+            }
+        }
+    });
+
+    // Measured while the sibling is allocating megabytes in a tight loop.
+    let measured = measured_bytes(3840, 2160);
+
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    noisy.join().expect("noise thread");
+
+    assert_eq!(
+        measured,
+        3840 * 2160 * 4,
+        "a sibling thread allocating during the measurement changed this thread's \
+         reading; the counter is not per-thread"
+    );
 }
