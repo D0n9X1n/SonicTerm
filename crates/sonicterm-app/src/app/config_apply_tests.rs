@@ -212,3 +212,80 @@ fn applying_a_config_moves_the_weight_reset_target() {
     app.reset_font_weight();
     assert_eq!(app.config.font.weight_scale, 3.0);
 }
+
+/// Clearing the software-render mode restores the monitor's frame period.
+///
+/// The defect this pins was not in `software_render_frame_period` — that
+/// function is a correct pure map. It was in the call sites, which resolved
+/// the new period from `frame_period`, the field the degrade write had already
+/// replaced with the cap. `Force` → `Off` therefore left a 144 Hz window paced
+/// at 40 fps until restart.
+///
+/// Driven through `apply_new_config` rather than the resolver, because a test
+/// of the resolver alone passes whether or not the fields are wired correctly.
+#[test]
+fn clearing_software_render_mode_restores_the_monitor_frame_period() {
+    use sonicterm_cfg::config::SoftwareRenderMode;
+    use std::time::Duration;
+
+    let monitor = Duration::from_micros(6_944); // 144 Hz
+
+    let mut cfg = Config::default();
+    cfg.appearance.software_render_mode = SoftwareRenderMode::Force;
+    let mut app = App::new(Theme::default(), cfg, Keymap::default());
+
+    // The state the window-ready path leaves behind once degrade engages:
+    // the monitor's period recorded, the resolved period capped.
+    app.monitor_frame_period = monitor;
+    app.frame_period = crate::app::SOFTWARE_RENDER_FRAME_PERIOD;
+    app.software_render_degrade = true;
+
+    let mut reloaded = Config::default();
+    reloaded.appearance.software_render_mode = SoftwareRenderMode::Off;
+    app.apply_new_config(reloaded);
+
+    assert!(!app.software_render_degrade, "Off must clear the degrade decision");
+    assert_eq!(
+        app.frame_period, monitor,
+        "clearing degrade must restore the monitor's period, not leave the software cap",
+    );
+    assert_eq!(
+        app.monitor_frame_period, monitor,
+        "the monitor's own period must survive the transition untouched",
+    );
+}
+
+/// Re-engaging degrade caps again, and the monitor period still survives.
+///
+/// A fix that restored the monitor period by overwriting `monitor_frame_period`
+/// with the resolved value would pass the test above once and fail on the
+/// second cycle. This runs the transition twice.
+#[test]
+fn software_render_mode_can_be_toggled_repeatedly() {
+    use sonicterm_cfg::config::SoftwareRenderMode;
+    use std::time::Duration;
+
+    let monitor = Duration::from_micros(8_333); // 120 Hz
+
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.monitor_frame_period = monitor;
+    app.frame_period = monitor;
+
+    for cycle in 0..3 {
+        let mut on = Config::default();
+        on.appearance.software_render_mode = SoftwareRenderMode::Force;
+        app.apply_new_config(on);
+        assert_eq!(
+            app.monitor_frame_period, monitor,
+            "cycle {cycle}: the monitor period must survive engaging degrade",
+        );
+
+        let mut off = Config::default();
+        off.appearance.software_render_mode = SoftwareRenderMode::Off;
+        app.apply_new_config(off);
+        assert_eq!(
+            app.frame_period, monitor,
+            "cycle {cycle}: clearing degrade must restore the monitor's period",
+        );
+    }
+}

@@ -148,25 +148,51 @@ fn the_two_resolvers_agree_on_the_non_composing_software_path() {
 }
 
 #[test]
-fn degrade_write_is_not_reversible_from_the_stored_period() {
-    // The window-ready path writes the monitor period into the frame-period
-    // field, then overwrites that same field with the software cap when
-    // degrading. The original monitor period is retained nowhere, so a later
-    // transition back to the hardware path resolves against the already-capped
-    // value and the monitor's true period cannot be recovered.
+fn resolving_from_a_previously_resolved_period_cannot_recover_the_monitor_rate() {
+    // Why `App` keeps `monitor_frame_period` separately from `frame_period`.
+    //
+    // This function is a pure map with no memory: given the cap as its second
+    // argument it returns the cap, because that is what a non-degrading
+    // resolution does. So feeding a *resolved* period back in makes the
+    // degrade decision one-way — which is exactly what the window-ready and
+    // config-reload paths used to do, leaving a 144 Hz window at 40 fps until
+    // restart once degrade had ever engaged.
+    //
+    // The fix is at the call sites, not here: they now pass the monitor's own
+    // period. This pins the property that forced that design, so a future
+    // caller that reaches for the resolved field has a test explaining why it
+    // must not.
     let monitor = period_from_millihertz(144_000);
     let stored = software_render_frame_period(true, monitor);
     assert_eq!(stored, SOFTWARE_RENDER_FRAME_PERIOD);
-    // Degrade cleared, resolving against what the field now holds.
-    let after_degrade_cleared = software_render_frame_period(false, stored);
-    assert_eq!(after_degrade_cleared, SOFTWARE_RENDER_FRAME_PERIOD);
+
+    let resolved_from_stored = software_render_frame_period(false, stored);
     assert_ne!(
-        after_degrade_cleared, monitor,
-        "the monitor period is not restored by clearing degrade",
+        resolved_from_stored, monitor,
+        "resolving from an already-resolved period cannot recover the monitor rate",
     );
-    assert_eq!(
-        effective_frame_period(false, false, stored),
-        SOFTWARE_RENDER_FRAME_PERIOD,
-        "the hardware branch returns the stored value, which is the cap",
-    );
+}
+
+#[test]
+fn resolving_from_the_monitor_period_is_reversible() {
+    // The property the call sites now rely on: with the monitor's own period
+    // as the second argument, degrade is a decision that can be taken and
+    // untaken. Engaging returns the cap; clearing returns the monitor rate,
+    // whatever the previous resolution was.
+    for mhz in [30_000u32, 60_000, 120_000, 144_000, 240_000] {
+        let monitor = period_from_millihertz(mhz);
+
+        let degraded = software_render_frame_period(true, monitor);
+        assert_eq!(degraded, SOFTWARE_RENDER_FRAME_PERIOD, "{mhz} mHz: degrade must cap");
+
+        let cleared = software_render_frame_period(false, monitor);
+        assert_eq!(cleared, monitor, "{mhz} mHz: clearing degrade must restore the monitor rate");
+
+        // And it survives repetition — the resolution holds no state, so a
+        // user toggling software_render_mode never accumulates drift.
+        for _ in 0..3 {
+            assert_eq!(software_render_frame_period(true, monitor), SOFTWARE_RENDER_FRAME_PERIOD);
+            assert_eq!(software_render_frame_period(false, monitor), monitor);
+        }
+    }
 }

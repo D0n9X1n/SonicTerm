@@ -321,9 +321,14 @@ impl App {
                     r.set_software_render_degrade(degrade);
                 }
             }
+            // Resolved from the monitor's own period, never from
+            // `frame_period`: that field already holds the software cap when
+            // degrade was previously engaged, so resolving from it would make
+            // the decision one-way and leave the window capped after the user
+            // turns software rendering off.
             self.frame_period = super::software_render_frame_period(
                 self.software_render_degrade,
-                self.frame_period,
+                self.monitor_frame_period,
             );
             tracing::info!(
                 ?new_cfg.appearance.software_render_mode,

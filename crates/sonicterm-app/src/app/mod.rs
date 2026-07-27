@@ -467,12 +467,20 @@ pub fn effective_frame_period(
 
 /// Resolve the effective frame period for the no-GPU case.
 ///
-/// When `degrade` is true (software rasterizer detected, or forced by config),
-/// the frame period is clamped to at least [`SOFTWARE_RENDER_FRAME_PERIOD`] so
-/// the CPU isn't asked to rasterize at the monitor's full refresh rate. A
-/// faster monitor period is slowed to the software cap.
+/// When `degrade` is true the result is [`SOFTWARE_RENDER_FRAME_PERIOD`],
+/// whatever the monitor reports. This is an override, not a `max()`: a monitor
+/// slower than the cap — a 30 Hz panel in a VM or over RDP, which is where
+/// software rendering usually runs — is resolved to the cap too, asking for
+/// more frames than the panel presents. That is long-standing and deliberate;
+/// the wording is written this way because "clamped to at least" describes a
+/// `max()` this function does not perform.
+///
 /// With `degrade` false the monitor period passes through unchanged, so the
 /// hardware-GPU path is untouched.
+///
+/// `monitor_period` must be the monitor's own period, never a previously
+/// resolved value — passing the resolved period back in makes the decision
+/// one-way, because a resolution taken while degrading returns the cap.
 #[must_use]
 pub fn software_render_frame_period(degrade: bool, monitor_period: Duration) -> Duration {
     if degrade {
@@ -1800,11 +1808,22 @@ pub struct App {
     /// over-render and by `about_to_wait` to schedule the next vsync
     /// boundary via `ControlFlow::WaitUntil`. See perf audit #9.
     pub(super) frame_period: Duration,
+    /// The monitor's own reported period, kept separately so the degrade
+    /// decision stays reversible.
+    ///
+    /// `frame_period` is the *resolved* period and is overwritten with the
+    /// software cap while degrading. Resolving a later decision from it would
+    /// read the cap back as if it were the monitor's rate, so clearing degrade
+    /// could not restore the monitor's cadence and the window stayed at 40 fps
+    /// until restart. Every resolution reads this field instead; only the
+    /// monitor probe writes it.
+    pub(super) monitor_frame_period: Duration,
     /// True when the no-GPU degrade path is engaged (software rasterizer
     /// detected or forced via `[appearance].software_render_mode`). When set,
-    /// `frame_period` is clamped to the software cap and per-frame scrollbar
+    /// `frame_period` is replaced by the software cap and per-frame scrollbar
     /// fade animation is suppressed so the CPU isn't asked to rasterize at full
-    /// refresh. Resolved once after the renderer is created.
+    /// refresh. Resolved after the renderer is created and re-resolved on an
+    /// explicit config reload.
     pub(super) software_render_degrade: bool,
     /// Set when a RedrawRequested arrives sooner than `frame_period`
     /// after the previous render. `about_to_wait` schedules a
@@ -2095,6 +2114,7 @@ impl App {
             // Default to 60 Hz until `resumed` probes the actual
             // monitor refresh rate. ~16.667 ms = 1/60 s.
             frame_period: Duration::from_micros(16_667),
+            monitor_frame_period: Duration::from_micros(16_667),
             // Resolved after the renderer is created in `do_resumed`.
             software_render_degrade: false,
             pending_redraw: false,
