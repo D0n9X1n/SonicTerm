@@ -74,21 +74,25 @@ most once every 30 seconds, and emits one `pane retention` line per pane
 followed by one `session retention` line:
 
 ```
-pane retention    pane=WindowId(1)/7 total_bytes=15204320 grid_bytes=14515200
-                  parser_bytes=0 hyperlink_bytes=254240 inline_media_bytes=434880
-                  largest_seam=grid largest_seam_bytes=14515200
-session retention panes=12 total_bytes=182451840 grid_bytes=174182400 ...
+pane retention    pane=WindowId(1)/7 total_bytes=15204320 grid_visible_bytes=8110080
+                  grid_history_bytes=6405120 grid_alternate_bytes=0 parser_bytes=0
+                  hyperlink_bytes=254240 inline_media_bytes=434880 pty_output_bytes=0
+                  largest_seam=grid_visible largest_seam_bytes=8110080
+session retention panes=12 total_bytes=182451840 grid_visible_bytes=97320960 ...
 ```
 
-Four subsystems meter their own memory and the figures are **disjoint** —
+Seven seams meter their own memory and the figures are **disjoint** —
 each counts only what it owns, so no allocation is charged twice:
 
 | Field | Covers |
 | --- | --- |
-| `grid_bytes` | cells, scrollback, saved alternate screen, prompt regions |
+| `grid_visible_bytes` | cells and row storage in the visible primary grid |
+| `grid_history_bytes` | retained scrollback history |
+| `grid_alternate_bytes` | saved alternate-screen storage |
 | `parser_bytes` | in-flight escape and media capture buffers |
 | `hyperlink_bytes` | interned OSC 8 URI and id strings |
 | `inline_media_bytes` | decoded inline images retained for display |
+| `pty_output_bytes` | local PTY output queued or in flight |
 
 `largest_seam` names the dominant subsystem. Read it first: a total alone says
 a pane is large without saying where to look, and the remedy differs per seam —
@@ -109,8 +113,9 @@ Two caveats when reading these:
   panes than the window has. `panes=` reports how many were actually measured.
 - Not every seam plateaus, and that is intended. Grid reaches a true steady
   state once scrollback fills. Interned hyperlinks grow until their cap,
-  because a link in retained scrollback is still reachable by scrolling back to
-  it — freeing it early would break a link that is still on screen.
+  because a link stays reachable for as long as the cells referencing it remain
+  in retained scrollback — freeing it early would break a link the user can
+  still scroll back to.
 
 ### Reclamation and eviction events
 

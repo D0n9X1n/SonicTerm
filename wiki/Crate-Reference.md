@@ -37,6 +37,8 @@ font-config + fontconfig + freetype + harfbuzz
                            sonicterm-gpu
 
 sonicterm-io -> sonicterm-mux (standalone, not used by app)
+
+sonicterm-types -> sonicterm-resource -> sonicterm-app (retained-memory ledger)
 ```
 
 The diagram omits some utility edges; each crate entry below lists its important
@@ -249,7 +251,7 @@ window/tab/pane topology remains authoritative in `sonicterm-app`.
 tabs, pane trees, PTYs/parsers, input routing, config reload, redraw scheduling,
 overlays, tab transfer, and platform shell abstractions.
 
-**Consumes:** app-core, terminal stack, cfg/UI/render-model, GPU, logging.
+**Consumes:** app-core, terminal stack, cfg/UI/render-model, GPU, resource, logging.
 **Consumed by:** macOS and Windows binaries.
 
 **Feature:** `ssh` forwards to `sonicterm-io/ssh`; the live SSH session is not
@@ -348,6 +350,8 @@ font-config + fontconfig + freetype + harfbuzz
                            sonicterm-gpu
 
 sonicterm-io -> sonicterm-mux（独立，app 未使用）
+
+sonicterm-types -> sonicterm-resource -> sonicterm-app（常驻内存账本）
 ```
 
 图中省略部分工具依赖；下方每个 crate 会列出重要关系。
@@ -532,7 +536,7 @@ COLR color glyph 与原生 handle wrapper。
 **职责：** 跨平台 winit 编排；拥有实时窗口、renderer、标签页、pane tree、PTY/parser、输入路由、配置重载、
 重绘调度、overlay、tab transfer 和平台 shell abstraction。
 
-**依赖：** app-core、终端栈、cfg/UI/render-model、GPU、logging。**被依赖：** macOS 与 Windows 二进制。
+**依赖：** app-core、终端栈、cfg/UI/render-model、GPU、resource、logging。**被依赖：** macOS 与 Windows 二进制。
 
 **Feature：** `ssh` 转发到 `sonicterm-io/ssh`；实时 SSH session 当前尚未完整接入 GUI。
 

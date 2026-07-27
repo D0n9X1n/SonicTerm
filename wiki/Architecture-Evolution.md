@@ -1,6 +1,6 @@
 # Architecture Evolution / 架构演进
 
-_Last reviewed against workspace version 1.1.1 on 2026-07-13._
+_Last reviewed against workspace version 1.2.0 on 2026-07-26._
 
 ## English
 
@@ -118,9 +118,9 @@ bilingual explanatory roadmap.
 | Area | Primary evidence |
 | --- | --- |
 | Actual dependency graph | root `Cargo.toml`, all crate `Cargo.toml`, `cargo metadata` |
-| State ownership | `sonicterm-app-core/src/`, `sonicterm-app/src/app/` |
-| Renderer concentration | `sonicterm-gpu/src/core.rs`, recent file churn |
-| Concurrency invariants | `app/spawn_pane.rs`, `app/invariants.rs`, `docs/ARCHITECTURE.md` |
+| State ownership | `crates/sonicterm-app-core/src/`, `crates/sonicterm-app/src/app/` |
+| Renderer concentration | `crates/sonicterm-gpu/src/core.rs`, recent file churn |
+| Concurrency invariants | `crates/sonicterm-app/src/app/spawn_pane.rs`, `crates/sonicterm-app/src/app/invariants.rs`, `docs/ARCHITECTURE.md` |
 | Test/CI boundary | `.github/workflows/ci.yml`, `scripts/*.sh`, PR template |
 | Supply-chain policy | `deny.toml`, Cargo.lock |
 | Native/FFI boundary | font wrappers/build.rs, mac/windows crates |
@@ -128,7 +128,7 @@ bilingual explanatory roadmap.
 
 ## 中文
 
-_最后一次按 workspace 1.1.1 审查：2026-07-13。_
+_最后一次按 workspace 1.2.0 审查：2026-07-26。_
 
 这是持续维护的改进路线图，并不承诺所有建议都会实施。每项都按证据分类，避免把观察误写成 bug：
 
@@ -231,9 +231,9 @@ session ownership 和 release support 的设计与测试。
 | 区域 | 主要证据 |
 | --- | --- |
 | 实际依赖图 | 根 `Cargo.toml`、各 crate `Cargo.toml`、`cargo metadata` |
-| 状态所有权 | `sonicterm-app-core/src/`、`sonicterm-app/src/app/` |
-| Renderer 职责集中 | `sonicterm-gpu/src/core.rs`、近期文件 churn |
-| 并发不变量 | `app/spawn_pane.rs`、`app/invariants.rs`、`docs/ARCHITECTURE.md` |
+| 状态所有权 | `crates/sonicterm-app-core/src/`、`crates/sonicterm-app/src/app/` |
+| Renderer 职责集中 | `crates/sonicterm-gpu/src/core.rs`、近期文件 churn |
+| 并发不变量 | `crates/sonicterm-app/src/app/spawn_pane.rs`、`crates/sonicterm-app/src/app/invariants.rs`、`docs/ARCHITECTURE.md` |
 | Test/CI 边界 | `.github/workflows/ci.yml`、`scripts/*.sh`、PR template |
 | Supply-chain policy | `deny.toml`、Cargo.lock |
 | Native/FFI 边界 | font wrapper/build.rs、mac/windows crate |

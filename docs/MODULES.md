@@ -25,8 +25,8 @@ Developer documentation: [Architecture](ARCHITECTURE.md) · **Modules** · [Logg
 | `sonicterm-engine` | WezTerm-compatible font engine adapter surface. |
 | `sonicterm-font-config` | Font configuration value helpers. |
 | `sonicterm-fontconfig` | fontconfig build/link shim. |
-| `sonicterm-freetype` | Freetype/libpng/zlib bindings. |
-| `sonicterm-harfbuzz` | Harfbuzz bindings. |
+| `sonicterm-freetype` | FreeType/libpng/zlib bindings. |
+| `sonicterm-harfbuzz` | HarfBuzz bindings. |
 
 Every crate has a local `CLAUDE.md` with purpose, public surface, test gate, and
 pitfalls.

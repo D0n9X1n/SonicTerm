@@ -239,10 +239,13 @@ bitmap/metric types; attribution is preserved in
 ## Inline images
 
 iTerm2 file images, kitty graphics, and Sixel media events are decoded by the
-app, capped at 1024 pixels per side, converted to premultiplied BGRA8, and stored
-on their pane. The renderer inserts them into the same atlas using a reserved
-image font slot and emits color-glyph instances anchored to grid row/column.
-Each pane retains at most 128 decoded images.
+app. Decoding applies two different dimension limits: images larger than 2048
+pixels per side are rejected before decoding, and an accepted image is then
+resized so its rendered form is at most 1024 pixels per side. Sixel data is
+decoded into a 1024-per-side buffer directly. The result is converted to
+premultiplied BGRA8 and stored on its pane. The renderer inserts them into the
+same atlas using a reserved image font slot and emits color-glyph instances
+anchored to grid row/column. Each pane retains at most 128 decoded images.
 
 ## GPU drawing
 
@@ -493,7 +496,9 @@ box drawing、block element、Powerline、Braille、sextant、octant、progress 
 
 ## 内联图像
 
-iTerm2 file image、kitty graphics 与 Sixel media event 在 app 中解码，单边上限 1024 像素，转换为预乘 BGRA8，
+iTerm2 file image、kitty graphics 与 Sixel media event 在 app 中解码。解码应用两个不同的
+尺寸限制：单边超过 2048 像素的图像在解码前即被拒绝；被接受的图像随后会被缩放，使其渲染
+尺寸单边不超过 1024 像素。Sixel 数据直接解码进单边 1024 的缓冲区。结果转换为预乘 BGRA8，
 保存在所属窗格。renderer 使用保留 image font slot 插入同一 atlas，并按 grid 行列发出 color-glyph instance。
 每个窗格最多保留 128 个已解码图像。
 

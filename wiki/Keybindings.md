@@ -176,6 +176,10 @@ Directions are `left`, `right`, `up`, `down`. Scroll values are `line_up`,
 
 ### Example: make pane resize larger
 
+The default keymaps bind the four `resize_pane_*` actions listed above, which
+use the built-in step size. Use the parameterized `resize_pane` form when you
+want a different step:
+
 These examples use macOS `super`; on Windows/Linux use `alt` for the same app-level chord.
 
 ```toml
@@ -404,7 +408,7 @@ action = { toggle_broadcast = { scope = "tab" } }
 | 关闭 Pane | `close_pane` |
 | 放大 Pane | `toggle_pane_zoom` |
 | 切换 Pane 焦点 | `{ focus_pane = "left" }` |
-| 调整 Pane 大小 | `{ resize_pane = { dir = "left", amount = 5 } }` |
+| 调整 Pane 大小 | `resize_pane_left`, `resize_pane_right`, `resize_pane_up`, `resize_pane_down` |
 | 复制 / 粘贴 | `copy_to_clipboard`, `paste_from_clipboard` |
 | 只读导航模式 | `enter_copy_mode` |
 | URL 快速选择 | `enter_quick_select` |
@@ -422,6 +426,9 @@ action = { toggle_broadcast = { scope = "tab" } }
 | 重新加载配置 | `reload_config` |
 
 ### 示例：把 pane resize 改大
+
+默认 keymap 绑定的是上表列出的四个 `resize_pane_*` action，使用内置步长。若需要
+不同的步长，请使用带参数的 `resize_pane` 形式：
 
 下面示例使用 macOS 的 `super`；Windows/Linux 上同样的应用级快捷键请把 `super` 换成 `alt`。
 
@@ -455,7 +462,7 @@ keys = "super+shift+l"
 action = { focus_pane = "right" }
 ```
 
-启动时，选中的 keymap 解析失败会记录日志并回退到平台内置默认值；重载失败时则继续使用当前内存中的 keymap。
+启动时，选中的 keymap 解析失败会记录日志并回退到平台内置默认值；重载失败时则继续使用当前内存中的 keymap。keymap 的修改在你从命令面板执行 **Reload Config** 时生效；系统中没有文件 watcher。
 
 ### 应用文本框中的终端风格编辑
 

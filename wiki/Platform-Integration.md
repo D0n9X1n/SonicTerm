@@ -108,7 +108,7 @@ including ConPTY as selected by `portable-pty`, is implemented behind
 
 On software adapters, the renderer can compose a CPU BGRA frame and present it
 through GDI. The active CPU frame implementation is in
-`sonicterm-gpu/src/software_windows.rs`; the Windows crate also contains a
+`crates/sonicterm-gpu/src/software_windows.rs`; the Windows crate also contains a
 retained dirty-rectangle presenter primitive and configuration preference model.
 
 ### MSI packaging
@@ -251,7 +251,7 @@ Windows 二进制不负责终端解析。本地进程 hosting（包括 `portable
 `sonicterm-io::PtyHandle` 后；二进制只负责 Win32 GUI 胶水。
 
 软件 adapter 下，renderer 可在 CPU 中合成 BGRA frame，并通过 GDI 呈现。当前 CPU frame 实现在
-`sonicterm-gpu/src/software_windows.rs`；Windows crate 还包含 retained dirty-rectangle presenter primitive
+`crates/sonicterm-gpu/src/software_windows.rs`；Windows crate 还包含 retained dirty-rectangle presenter primitive
 与配置 preference model。
 
 ### MSI 打包

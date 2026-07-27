@@ -66,7 +66,7 @@ level = "debug"
 
 The `memory` target samples what each pane holds every 30 seconds and writes
 one `pane retention` line per pane followed by one `session retention` line
-for the whole process. Four figures are reported separately because the
+for the whole process. Seven figures are reported separately because the
 remedy differs:
 
 | Field | What it covers | What you can do |
@@ -74,7 +74,7 @@ remedy differs:
 | `grid_visible_bytes` | the cells currently on screen | nothing — it is the screen |
 | `grid_history_bytes` | scrollback | lower `scrollback` |
 | `grid_alternate_bytes` | the screen saved behind a full-screen program | nothing — it frees itself on exit |
-| `parser_bytes` | escape sequences being parsed right now | nothing — transient |
+| `parser_bytes` | escape sequences and inline-media capture buffers being parsed right now | nothing — transient |
 | `hyperlink_bytes` | OSC 8 link targets | nothing — reclaimed as links scroll away |
 | `inline_media_bytes` | decoded inline images | lower image usage, or open fewer panes |
 | `pty_output_bytes` | the read buffer held by shell output waiting to be parsed | nothing — it drains as the terminal catches up |
@@ -89,8 +89,9 @@ keeps climbing.
 
 Not every figure levels off, and that is intended. Cells reach a steady state
 once scrollback fills. Interned hyperlinks keep growing until their limit is
-reached, because a link that has scrolled off screen is still reachable by
-scrolling back to it.
+reached, because a link stays reachable for as long as the cells referencing it
+remain in retained scrollback — freeing it earlier would break a link the user
+can still scroll back to.
 
 ### When inline images disappear
 
@@ -206,7 +207,7 @@ level = "debug"
 | `grid_visible_bytes` | 当前显示在屏幕上的单元格 | 无 — 这就是屏幕本身 |
 | `grid_history_bytes` | 回滚缓冲 | 调低 `scrollback` |
 | `grid_alternate_bytes` | 全屏程序背后保存的主屏幕 | 无 — 程序退出时自动释放 |
-| `parser_bytes` | 当前正在解析的转义序列 | 无 — 瞬时占用 |
+| `parser_bytes` | 当前正在解析的转义序列与内联媒体暂存缓冲 | 无 — 瞬时占用 |
 | `hyperlink_bytes` | OSC 8 链接目标 | 无 — 链接滚出后自动回收 |
 | `inline_media_bytes` | 已解码的内联图像 | 减少图像使用，或减少面板数量 |
 | `pty_output_bytes` | 等待解析的 shell 输出所占用的读取缓冲区 | 无 — 终端处理完毕后自动释放 |
@@ -218,7 +219,8 @@ level = "debug"
 「工作集趋于平稳」与「内存持续增长」。
 
 并非每个数值都会趋于平稳，这是有意为之。回滚缓冲填满后，单元格占用达到稳态；
-而暂存的超链接会持续增长直至上限，因为已滚出屏幕的链接仍可通过向上滚动访问。
+而暂存的超链接会持续增长直至上限，因为只要引用它们的单元格仍留在回滚历史中，
+这些链接就仍可通过向上滚动访问。
 
 ### 内联图像消失时
 
