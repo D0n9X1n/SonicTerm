@@ -154,12 +154,21 @@ impl ResourceClass {
             | Self::ProtocolMetadata
             | Self::InlineMediaRetained => ClassCoverage::Charged,
 
-            // The renderer reports both figures and nothing reads them:
-            // `retained_amounts` has no caller, and `sonicterm-gpu` declares no
-            // dependency on `sonicterm-resource`, so the crate cannot reserve
-            // against a governor at all. Sized at the glyph atlas's own
-            // 2048 x 2048 x 4 pixel buffer, and at one 4K frame for the
-            // Windows-only software presentation buffer.
+            // Reported but not charged, which is the distinction this variant
+            // exists to carry. The app reads `retained_amounts` and emits a
+            // `renderer retention` line per renderer, so these figures are
+            // visible; what they do not reach is a ledger. `sonicterm-gpu`
+            // declares no dependency on `sonicterm-resource`, so the crate that
+            // computes them cannot reserve against a governor at all.
+            //
+            // `GlyphAtlas` is the atlas's own 2048 x 2048 x 4 pixel buffer.
+            //
+            // `SoftwareFrame` is one 4K frame, and that is a *lower bound on a
+            // variable*, not a constant: the buffer is `width x height x 4`, so
+            // a 5K window holds 178% of this figure and the module's own clamp
+            // admits 160 MiB — 5.06x. Measured against a counting allocator
+            // rather than derived. `per_owner_bytes` cannot express a figure
+            // that scales with the window, which is the open question here.
             Self::GlyphAtlas => {
                 ClassCoverage::UnchargedRetention { per_owner_bytes: 2048 * 2048 * 4 }
             }
