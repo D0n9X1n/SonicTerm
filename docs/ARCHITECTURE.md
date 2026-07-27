@@ -192,7 +192,12 @@ things, and the distinction matters when reading a snapshot:
 - **Owners always exist.** A `Window` owner is registered when the window is
   created, and an `AppPane` owner when the pane is created — new tab, split, or
   window registration all reconcile unconditionally. This happens at every log
-  level.
+  level. Window registration is structural rather than conventional: inserting a
+  window and registering its owner are one operation, and the insertion is not
+  reachable without it. A window that registered no owner would not merely be
+  uncharged — reconciliation and re-attribution both skip a window whose owner
+  is absent, so its panes would never be adopted and the whole subtree would
+  stay missing from the hierarchy for as long as the window lived.
 - **Charging always runs.** The pass that samples what a pane retains and moves
   its charges to match runs on the idle-wake path at every log level. At the
   default level the owner hierarchy is fully populated and its figures report

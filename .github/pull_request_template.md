@@ -23,6 +23,7 @@
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`
 - [ ] `cargo test --workspace --lib --bins`
 - [ ] `bash scripts/check-no-raw-process-exit.sh`
+- [ ] `bash scripts/check-window-owner-registration.sh`
 - [ ] `bash scripts/check-workspace-crates.sh`
 - [ ] `scripts/rust-logic-coverage.sh`
 - [ ] `bash scripts/test-release-notes.sh`

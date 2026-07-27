@@ -3311,8 +3311,7 @@ impl App {
             test_renderer_focus_marker: None,
             test_pane_viewport: None,
         };
-        self.windows.insert(id, child);
-        self.register_window_owner(id);
+        self.insert_window_registered(id, child);
         id
     }
 
@@ -3870,18 +3869,38 @@ impl App {
         Some(&mut self.windows.get_mut(&id)?.tab_states)
     }
 
-    /// Phase B2 PR-B2c — borrow the main window's pane map from
-    /// its [`WindowState`]. Sole source of truth (legacy `App.panes`
-    /// was deleted in PR-B2c). Returns `None` before `do_resumed` /
-    /// `__test_synthetic_main` has populated the shadow entry.
-    #[doc(hidden)]
+    /// Insert a window and register its owner as one operation.
+    ///
+    /// The two steps are inseparable, so they are not offered separately. A
+    /// window inserted without an owner is not merely uncharged, it is absent
+    /// from hierarchy accounting entirely, and nothing later recovers it:
+    /// [`Self::reconcile_pane_owners`] and [`Self::reattribute_pane_owners`]
+    /// both skip a window whose owner is `None`, so its panes never get owners
+    /// either and the periodic sampler passes over the whole subtree forever.
+    ///
+    /// Registering here rather than at each call site is the same reasoning
+    /// [`Self::reconcile_pane_owners`] applies to panes: a rule every call site
+    /// must remember is a rule one call site will forget, and the forgotten one
+    /// is silent — the window works, and only the memory report is missing it.
+    ///
+    /// Panes already in `window` are adopted by this call. A window populated
+    /// after insertion instead reconciles when those panes arrive.
+    pub(super) fn insert_window_registered(&mut self, id: WindowId, window: WindowState) {
+        self.windows.insert(id, window);
+        self.register_window_owner(id);
+    }
+
     /// Register a window in the governor hierarchy and record its owner.
+    ///
+    /// Private, and deliberately: reaching it goes through
+    /// [`Self::insert_window_registered`], so registration cannot drift away
+    /// from the insertion it belongs to.
     ///
     /// Idempotent by construction: a window that already has an owner keeps
     /// it, so a re-insert during tab transfer cannot create a second owner
     /// that never closes. That is the ratchet shape — an owner registered
     /// twice and released once leaves the hierarchy permanently over-counted.
-    pub(super) fn register_window_owner(&mut self, id: WindowId) {
+    fn register_window_owner(&mut self, id: WindowId) {
         self.register_window_owner_inner(id);
         // A window arrives with its panes already populated, so registering
         // the window without them would leave every pane unowned until the
@@ -4730,8 +4749,7 @@ impl App {
             test_renderer_focus_marker: None,
             test_pane_viewport: None,
         };
-        self.windows.insert(id, ws);
-        self.register_window_owner(id);
+        self.insert_window_registered(id, ws);
         self.main_window_id = Some(id);
     }
 
