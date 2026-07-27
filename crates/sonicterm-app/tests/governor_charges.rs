@@ -287,6 +287,7 @@ fn the_committed_budget_is_derived_from_the_seam_caps() {
                     + sonicterm_vt::vt::MAX_ESCAPE_SEQUENCE_BYTES,
             ),
             ResourceClass::PtyOutput => Some(sonicterm_io::pty::max_queued_output_ring_bytes()),
+            ResourceClass::PtyInput => Some(sonicterm_io::pty::max_pty_queued_input_bytes()),
             _ => None,
         }
     }

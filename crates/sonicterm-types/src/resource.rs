@@ -252,13 +252,15 @@ impl ResourceClass {
             // appear beneath it.
             Self::GlyphAtlas | Self::SoftwareFrame => PaneSeamTerm::ChargedToAnotherOwnerKind,
 
+            // Charged to the pane that owns the queue, so it appears in that
+            // pane's total and the backstop above it must carry its cap.
+            Self::PtyInput => PaneSeamTerm::Contributes,
+
             // Real retention, bounded by its own seam, and small enough that
             // no charge site exists. Without a charge these cannot appear in a
             // pane's total, so the backstop that reads that total gains
             // nothing from carrying them.
-            Self::PtyInput | Self::ParserReply | Self::CommandEvents => {
-                PaneSeamTerm::NotChargedInProduction
-            }
+            Self::ParserReply | Self::CommandEvents => PaneSeamTerm::NotChargedInProduction,
 
             // Released before the call that allocated them returns, so no
             // sampler sees them in a pane's total.
