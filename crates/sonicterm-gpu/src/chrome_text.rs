@@ -3,7 +3,7 @@
 //! Replaces the 11 `legacy-chrome TextRenderer` chrome sites in `core.rs`
 //! (tab titles, search input, palette query/rows/footer, IME preedit,
 //! broadcast banner, drag-chip title)
-//! plus the `tab_spans.rs` the legacy chrome layer path. Every chrome string now flows
+//! plus the `tab_spans.rs` glyphon path. Every chrome string now flows
 //! through the same `FontStack` raster path + `GlyphAtlas` + `TextPipeline`
 //! path the terminal grid uses — no second font system, no second
 //! atlas, no second render pass.

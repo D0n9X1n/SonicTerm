@@ -1,6 +1,6 @@
 //! GPU renderer for the terminal grid using wgpu 29.
 //!
-//! T13+T14 (wezterm-takeover G3): the legacy `the legacy chrome layer` chrome path is
+//! T13+T14 (wezterm-takeover G3): the legacy `glyphon` chrome path is
 //! gone. Every chrome string (tab titles, palette, search, IME,
 //! broadcast, drag chip, quick-select hints) flows through
 //! [`crate::chrome_text::layout`] → the shared `GlyphAtlas` →
@@ -91,7 +91,7 @@ pub struct SurfaceAppearance {
     /// Scrollbar visibility policy. `Auto` and `Always` both
     /// draw the bar when the pane has scrollback beyond the viewport;
     /// `Never` suppresses it. Hover-driven auto-hide for `Auto` is
-    /// deferred to PR-D — until then `Auto` behaves like Always-when-
+    /// not implemented — `Auto` behaves like Always-when-
     /// scrollable.
     pub scrollbar: sonicterm_render_model::boundary::cfg::config::ScrollbarMode,
     /// Padding between overlay panel chrome and inner content.
@@ -363,8 +363,8 @@ fn software_render_degrade_from(mode: SoftwareRenderMode, detected: bool) -> boo
 }
 
 /// Emit a pane's scrollbar (track + thumb) into `quads_overlay` using the
-/// PR-A geometry model. No-op when the pane has nothing to scroll, the
-/// mode is `Never`, or `alpha` is at or below the emit floor (PR-D).
+/// shared geometry model. No-op when the pane has nothing to scroll, the
+/// mode is `Never`, or `alpha` is at or below the emit floor.
 /// Returns the number of quads emitted (for tests).
 ///
 /// `alpha` in `[0.0, 1.0]` scales both track + thumb tint alphas; the
@@ -385,7 +385,7 @@ pub fn emit_pane_scrollbar(
     alpha: f32,
     scale: f32,
 ) -> usize {
-    // PR-D: hidden / nearly-hidden early-out. Mirrors
+    // hidden / nearly-hidden early-out. Mirrors
     // `scrollbar_visibility::ALPHA_EMIT_FLOOR`.
     if alpha <= 0.01 {
         return 0;
@@ -996,7 +996,7 @@ pub struct GpuRenderer {
     padding_bottom: f32,
     bg: wgpu::Color,
     bg_opacity: f32,
-    /// Scrollbar visibility policy from config (PR-B). Read on
+    /// Scrollbar visibility policy from config. Read on
     /// every frame in the per-pane scrollbar emit loop.
     scrollbar_mode: sonicterm_render_model::boundary::cfg::config::ScrollbarMode,
     /// Padding between overlay panel chrome and inner content.
@@ -1068,7 +1068,7 @@ pub struct GpuRenderer {
     // glyph instances feed either `glyph_instances` (pre-overlay
     // chrome — tab titles, search status bar) or
     // `overlay_glyph_instances` (modal chrome — palette,
-    // IME preedit, drag-chip title). No per-renderer the legacy chrome layer buffer
+    // IME preedit, drag-chip title). No per-renderer glyphon buffer
     // state survives.
     /// Cached drag-chip rect from the last `render()` call (in logical
     /// pixels). `None` when no chip was drawn. Test-only diagnostic
@@ -1129,7 +1129,7 @@ pub struct GpuRenderer {
     /// skips the entire `flush_shape_run` walk.
     row_glyph_cache: sonicterm_text::row_glyph_cache::RowGlyphCache,
     /// Per-row cache for background/underline/hyperlink-tint quads
-    /// (Phase P2). Mirrors `row_glyph_cache` but for the
+    /// Mirrors `row_glyph_cache` but for the
     /// `QuadInstance`s emitted by `emit_cell_bg_quads_clipped` — on a
     /// hit we splice the cached `Vec<QuadInstance>` straight into the
     /// frame's quad vector and skip the per-cell run-length-encode.
@@ -1963,12 +1963,12 @@ impl GpuRenderer {
         // wrong NDC coordinates.
         self.row_glyph_cache.invalidate_all();
         self.line_quad_cache.invalidate_all();
-        // T13/T14: post-the legacy chrome layer there is no persistent text buffer to
+        // T13/T14: post-glyphon there is no persistent text buffer to
         // resize — chrome strings are re-shaped through
         // `chrome_text::layout` on every frame, picking up the new
         // surface dims via the per-call `(sw, sh)` parameter. The
         // legacy `*_buffer.set_size(...)` block that lived here is
-        // gone with the the legacy chrome layer plumbing.
+        // gone with the glyphon plumbing.
         true
     }
 
@@ -3034,7 +3034,7 @@ impl GpuRenderer {
     fn rebuild_for_sf(&mut self, sf: f32) {
         let sf = sf.max(0.1);
         self.scale_factor = sf;
-        // T13/T14: post-the legacy chrome layer the atlas is sized once at default
+        // T13/T14: post-glyphon the atlas is sized once at default
         // and grows on demand; no DPI-derived resize and no
         // SwashRasterizer prebake. The wezterm rasterizer fills the
         // atlas lazily on first encounter with each glyph.
@@ -3144,7 +3144,7 @@ impl GpuRenderer {
     }
 
     /// Apply a new color theme without reconstructing the renderer.
-    /// Recomputes every cached wgpu / the legacy chrome layer color derived from the
+    /// Recomputes every cached wgpu / glyphon color derived from the
     /// theme so the next frame reflects the swap.
     pub fn set_theme(&mut self, theme: &Theme) {
         self.set_theme_with_opacity(theme, self.bg_opacity);
@@ -3863,7 +3863,7 @@ impl GpuRenderer {
         // -------- B3 cutover: walk the grid once, emit one glyph
         // instance per visible cell, route every miss through the
         // swash rasterizer + atlas. No per-row cache, no rich-text
-        // buffer, no the legacy chrome layer shape pass for the terminal grid.
+        // buffer, no glyphon shape pass for the terminal grid.
         let fg_default = self.fg_default;
         // Underline runs collected per pane. We record
         // (origin_x, origin_y, pane_cols, row, col_a, col_b) where
@@ -3892,7 +3892,7 @@ impl GpuRenderer {
         // Kept separate so they can be drawn AFTER `quad_overlay` paints
         // the modal backdrop, otherwise they'd be hidden by their own
         // background. (— palette text was previously routed through
-        // the legacy chrome layer's TextRenderer which bypassed the device-scale atlas
+        // glyphon's TextRenderer which bypassed the device-scale atlas
         // path used by `emit_tab_title_glyphs`, hence the HiDPI blur.)
         let mut overlay_glyph_instances: Vec<GlyphInstance> = Vec::new();
         // Missing-glyph "tofu" outlines collected during the cell walk.
@@ -3923,7 +3923,7 @@ impl GpuRenderer {
 
         let raster_px = self.raster_px(self.font_size);
         {
-            // T13/T14: post-the legacy chrome layer the grid path is wezterm-only.
+            // T13/T14: post-glyphon the grid path is wezterm-only.
             // FontStack is the sole rasterizer; on test fixtures
             // without bundled fonts (FontStack returns None) the grid
             // walk skips per-glyph emission and only paints quads.
@@ -4454,12 +4454,12 @@ impl GpuRenderer {
             }
         }
 
-        // PR-B: per-pane scrollbar emit. Runs once per pane, AFTER
+        // per-pane scrollbar emit. Runs once per pane, AFTER
         // the per-row bg quads so the bar paints above any colored cell
         // background but below selection / cursor / modal overlays
         // (those land in `quads_overlay` later in the function). Auto
         // mode behaves like Always-when-scrollable here — hover-driven
-        // auto-hide is PR-D.
+        // auto-hide is not implemented.
         for pv in &pane_views {
             let pane_rect = PaneRect { x: pv.origin_x, y: pv.origin_y, w: pv.rect_w, h: pv.rect_h };
             let pv_grid: &Grid = pv.grid;
@@ -4900,7 +4900,7 @@ impl GpuRenderer {
         }
         // -------- Tab bar ---------------------------------------------------
         if self.tab_bar_visible {
-            // Phase D: open an 8 px insertion gap at the
+            // open an 8 px insertion gap at the
             // current drop slot when a drag is active over this bar.
             let insertion_slot = self.drag_chip.as_ref().and_then(|c| c.insertion_slot);
             let source_tab_idx = self.drag_chip.as_ref().and_then(|c| c.source_tab_idx);
@@ -4947,7 +4947,7 @@ impl GpuRenderer {
                 },
             );
             for t in &layout.tabs {
-                // Phase D D3: if this tab is the source of
+                // If this tab is the source of
                 // a live drag, overlay a translucent bar-bg quad to
                 // dim it to roughly `source_alpha` perceived opacity.
                 // The quad is painted AFTER the tab body + close icon
@@ -5551,7 +5551,7 @@ impl GpuRenderer {
             //
             // emit through the SonicTerm glyph atlas at device pixel
             // scale (mirrors `emit_tab_title_glyphs`) so the palette text
-            // is crisp on HiDPI. The previous the legacy chrome layer TextRenderer path
+            // is crisp on HiDPI. The previous glyphon TextRenderer path
             // bypassed the DPI multiplier and rendered blurry on Windows.
             let query_text = if let Some(text) = &palette_query_text {
                 text.replace('▏', "")
@@ -6062,9 +6062,9 @@ impl GpuRenderer {
                 });
             }
 
-            // Ghost body — Phase D D1: alpha controlled by
+            // Ghost body: alpha controlled by
             // `chip.ghost_alpha` (spec 0.5). The historical chip
-            // rendered at 0.7; the Phase D spec ghost is more
+            // rendered at 0.7; the spec ghost is more
             // translucent so the bar underneath stays legible.
             let mut chip_color = self.tab_active_bg;
             chip_color[3] = chip.ghost_alpha.clamp(0.0, 1.0);
@@ -6076,7 +6076,7 @@ impl GpuRenderer {
 
             // T14: drag-chip title text → chrome_text.
             //
-            // Phase D D1 (Haiku follow-up): scale the
+            // Scale the
             // text color alpha by `chip.ghost_alpha` (spec 0.5) so
             // the GHOST TITLE matches the ghost body translucency.
             if !chip.title.is_empty() {
@@ -6118,7 +6118,7 @@ impl GpuRenderer {
             self.drag_chip_visual = None;
         }
 
-        // T13/T14: the legacy chrome layer `Resolution` / `TextArea` / `TextBounds` /
+        // T13/T14: glyphon `Resolution` / `TextArea` / `TextBounds` /
         // `text_renderer.prepare` are gone. Every chrome string already
         // landed in `glyph_instances` (pre-overlay: search status bar,
         // tab titles) or `overlay_glyph_instances` (modal chrome:
@@ -6877,7 +6877,7 @@ impl GpuRenderer {
 
             // ── Normal wezterm-shape path (non-block cluster) ──
             //
-            // T13/T14: post-the legacy chrome layer the char-fallback path is wezterm-
+            // T13/T14: post-glyphon the char-fallback path is wezterm-
             // only. FontStack is the sole rasterizer; missing chars
             // emit tofu via `Rasterizer::rasterize` returning
             // None (when sonicterm-font's fallback chain has nothing).
@@ -7554,12 +7554,12 @@ fn indexed(i: u8, theme: &Theme) -> Option<ChromeColor> {
 #[cfg(test)]
 #[path = "core_tests.rs"]
 mod core_tests;
-// T13/T14 (wezterm-takeover G3): `hex_to_the legacy chrome layer` and
-// `scale_the legacy chrome layer_alpha` have moved into `crate::color` under the
+// T13/T14 (wezterm-takeover G3): `hex_to_glyphon` and
+// `scale_glyphon_alpha` have moved into `crate::color` under the
 // renamed `hex_to_chrome_color` / `scale_chrome_text_alpha` names and
 // now consume `ChromeColor` instead of `legacy chrome color`.
 // Re-export them at the legacy path so callers that imported
-// `sonicterm_gpu::core::scale_the legacy chrome layer_alpha` can switch to the new
+// `sonicterm_gpu::core::scale_glyphon_alpha` can switch to the new
 // identifier (see `crates/sonicterm-app/tests/drag_visual_feedback.rs`
 // for the port). The legacy names are gone from this file entirely;
 // any caller that lingers on them will fail to compile (intentional —

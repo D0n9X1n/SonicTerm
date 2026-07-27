@@ -159,10 +159,7 @@ fn the_tabled_figure_holds_only_at_4k() {
 
     // Stated as a ratio so the assertion says how wrong, not merely that it is.
     let over = (at_5k * 100) / TABLED_PER_OWNER_BYTES;
-    assert!(
-        over >= 175,
-        "a 5K surface should be ~178% of the tabled figure, measured {over}%"
-    );
+    assert!(over >= 175, "a 5K surface should be ~178% of the tabled figure, measured {over}%");
 }
 
 /// The real ceiling is the module's own clamp, not the tabled figure.

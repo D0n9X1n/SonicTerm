@@ -1,5 +1,5 @@
 //! `App::do_window_event` — the full `WindowEvent` dispatch body,
-//! extracted from `ApplicationHandler::window_event` in refactor PR 8b.
+//! extracted from `ApplicationHandler::window_event` from the monolithic app module.
 //!
 //! This is mechanically the original body wrapped in a separate `impl App`
 //! block; field access works because all referenced `App` fields are
@@ -103,10 +103,10 @@ impl App {
         }
         // Tear-out child windows: route to the dedicated handler so
         // each child renders/handles input on its own surface.
-        // Phase B2 PR-A: the main window also lives in `self.windows`
+        // the main window also lives in `self.windows`
         // now (shadow entry, `Some(main_window_id)`), but its events
         // must continue to flow through the legacy `App.*` paths
-        // below until PR-B swaps readers. Skip the shadow id explicitly.
+        // below. Skip the main window's id explicitly.
         if self.windows.contains_key(&win_id) && Some(win_id) != self.main_window_id {
             self.handle_child_window_event(el, win_id, event);
             return;
@@ -243,7 +243,7 @@ impl App {
                     t.lap("layout");
                 }
 
-                // PR-D: per-pane scrollbar visibility/fade tick.
+                // per-pane scrollbar visibility/fade tick.
                 // Built BEFORE the try_lock pass since it only needs
                 // logical-px rects (already in `pane_rects`) and the
                 // already-captured cursor pos / scrollbar_drag — no
@@ -403,7 +403,7 @@ impl App {
                     r.set_inactive_pane_cursors(Vec::new());
                 }
 
-                // PR-B1a: lift the main window Arc clone before the
+                // lift the main window Arc clone before the
                 // mut borrow on `self.renderer` below, so the IME
                 // cursor-area branch can still touch
                 // `ws.ime_cursor_throttle` (mut) without re-borrowing
@@ -439,13 +439,13 @@ impl App {
                         })
                     })
                     .unzip();
-                // PR-B1b borrow-split: pull the renderer out via direct
+                // Borrow-split: pull the renderer out via direct
                 // map-lookup on `self.windows` (NOT through `main_renderer_mut`,
                 // which would borrow all of `self`). That keeps
                 // `self.command_palette`, `self.ime` available for the
                 // disjoint mut borrows the render call needs in the same
                 // expression scope.
-                // PR-B2c: panes now live in `ws` too, so they're
+                // panes now live in `ws` too, so they're
                 // pulled from the same field-disjoint split borrow.
                 let main_id_opt = self.main_window_id;
                 let ws_opt = main_id_opt.and_then(|id| self.windows.get_mut(&id));
@@ -489,10 +489,10 @@ impl App {
                             .get(&active_id)
                             .map(|p| p.cursor_visible.load(std::sync::atomic::Ordering::Relaxed))
                             .unwrap_or(true);
-                        // PR-B3c: selection + copy_mode now live on
+                        // selection + copy_mode now live on
                         // `ws`. Pull immutable refs disjoint from the mut
                         // borrows of `ws.{renderer,tabs,tab_states,panes,last_render}`.
-                        // PR-B3d: ime + ime_cursor_throttle also live
+                        // ime + ime_cursor_throttle also live
                         // on `ws`; split-borrow disjointly too.
                         let sel_ref = ws.selection.as_ref();
                         let cm_ref = ws.copy_mode.as_ref();
@@ -657,7 +657,7 @@ impl App {
                         let g = guards[active_pos].1.grid_mut();
                         (g.cursor.row, g.cursor.col)
                     };
-                    // Phase C2 — refresh the OS-drag tab bar
+                    // refresh the OS-drag tab bar
                     // snapshot so cross-window drop hit-tests see the
                     // current layout. Drops between PRs read this; an
                     // empty registry means every drop resolves to
@@ -735,7 +735,7 @@ impl App {
                         }
                     }
                 }
-                // Phase C2 — refresh OS-drag tab bar snapshot
+                // refresh OS-drag tab bar snapshot
                 // for the main window. Outside the renderer borrow scope
                 // so the immutable self borrow doesn't conflict with `r`.
                 self.publish_main_window_tab_bar();
@@ -762,10 +762,10 @@ impl App {
                 };
                 self.dispatch_intent(intent);
                 if focused {
-                    // Phase A — record the main window as
+                    // record the main window as
                     // OS-frontmost so keymap_dispatch / menubar drain
                     // route subsequent Cmd+T / Cmd+W / Cmd+\\ to the
-                    // main window's tabs vec. PR-B4 removed the
+                    // main window's tabs vec. `frontmost_window` subsumed the
                     // sibling `focused_child` clear — `frontmost_window`
                     // discriminates main vs child via `frontmost_kind()`.
                     self.frontmost_window = Some(win_id);
@@ -1043,7 +1043,7 @@ impl App {
                     if let Some(ws) = self.main_mut() {
                         ws.drag_target = target;
                     }
-                    // Phase C2 (review fix): start the OS-level
+                    // start the OS-level
                     // drag session AS SOON AS the cursor crosses the
                     // drag-start threshold from its press point, not on
                     // mouse-release. Windows `DoDragDrop` needs the live
@@ -1072,7 +1072,7 @@ impl App {
                     return;
                 }
                 if self.main().map(|ws| ws.mouse_down).unwrap_or(false) {
-                    // PR-C: scrollbar drag takes priority over
+                    // scrollbar drag takes priority over
                     // selection extension while a thumb is held. Match
                     // CLAUDE.md §4 — keep this branch fast; no parser
                     // lock is needed (geometry was snapshotted at press).
@@ -1103,7 +1103,7 @@ impl App {
                                 }
                             }
                         }
-                        // PR-D: drag also counts as scrollbar activity.
+                        // drag also counts as scrollbar activity.
                         self.mark_scrollbar_active(pane_id);
                         return;
                     }
@@ -1154,7 +1154,7 @@ impl App {
                             } else {
                                 None
                             };
-                            // PR-B3c: selection lives on WindowState.
+                            // selection lives on WindowState.
                             // Split-borrow `ws.selection` and `ws.panes`
                             // disjointly.
                             if let Some(ws) = self.main_mut() {
@@ -1340,7 +1340,7 @@ impl App {
                     if let Some(ws) = self.main_mut() {
                         ws.mouse_down = true;
                     }
-                    // Phase C2 (review fix): re-arm the OS-drag
+                    // re-arm the OS-drag
                     // handoff gate so the CursorMoved threshold check
                     // can fire once for the new gesture.
                     self.os_drag_handoff_started = false;
@@ -1434,7 +1434,7 @@ impl App {
                         let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
                         self.main_renderer().and_then(|r| r.pixel_to_cell(cp.0 as f32, cp.1 as f32))
                     };
-                    // PR-C: scrollbar input has priority over
+                    // scrollbar input has priority over
                     // selection start. Done BEFORE the pane-focus switch
                     // and selection-anchor path so a thumb-drag never
                     // doubles as a text drag. `scrollbar_hit_at` returns
@@ -1605,7 +1605,7 @@ impl App {
                             pos: sonicterm_app_core::LogicalPos { x: lx as f64, y: ly as f64 },
                         });
                     }
-                    // PR-C: end any active scrollbar drag — do this
+                    // end any active scrollbar drag — do this
                     // unconditionally on release so a drag that ended
                     // outside the bar still clears state.
                     if let Some(ws) = self.main_mut() {

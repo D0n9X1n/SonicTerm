@@ -189,19 +189,18 @@ use sonicterm_ui::tabs::{CommandStatus, Tab, TabBar};
 /// to point at this child's window so output from the shell triggers
 /// redraws on the correct surface (otherwise typing in the child
 /// would render onto the parent's window, which was the v1 bug).
-/// Phase B — kind of window stored in the unified
+/// kind of window stored in the unified
 /// [`App::windows`] map. Today every torn-out terminal child window is
 /// `Terminal`.
 ///
 /// Note: the main terminal window's authoritative state still lives
 /// directly on `App` (split across `App::tabs`, `App::panes`,
-/// `App::renderer`, etc.) pending the Phase C struct-level absorption.
-/// Phase B's deliverable is removing the `child_windows` field name
+/// `App::renderer`, etc.). Removing the `child_windows` field name
 /// and folding torn-out windows under one role-tagged map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowRole {
     /// A terminal window (torn-out child today; main + child after
-    /// Phase C lands).
+    /// is absorbed).
     Terminal,
 }
 
@@ -624,9 +623,9 @@ impl Drop for OwnerGuard {
 }
 
 pub struct WindowState {
-    /// Phase B classification — see [`WindowRole`].
+    /// Window classification — see [`WindowRole`].
     pub role: WindowRole,
-    /// Phase B2 PR-B2-0: promoted from `Arc<Window>` to
+    /// promoted from `Arc<Window>` to
     /// `Option<Arc<Window>>` so test seeders can build a `WindowState`
     /// without running `do_resumed`. In production this is `Some(_)`
     /// the moment `do_resumed` (main) or `create_child_window`
@@ -636,7 +635,7 @@ pub struct WindowState {
     pub window: Option<Arc<Window>>,
     /// Per-window wgpu renderer. `Some(_)` once `do_resumed` (main
     /// window) or `create_child_window` (torn-out) populates it.
-    /// PR-B1b: the main window's renderer now lives here too —
+    /// the main window's renderer now lives here too —
     /// the legacy `App.renderer` field was deleted. Read through
     /// [`Self::renderer`] / [`Self::renderer_mut`] which unwrap (always
     /// safe after `do_resumed`).
@@ -692,7 +691,7 @@ pub struct WindowState {
     // Arc travels with tear-out). Read from
     // `ws.panes.get(&active_pane).map(|p| p.cursor_visible.load(...))`.
     pub last_render: Instant,
-    /// Phase B2 PR-B3b: pointer-cursor-is-link latch. Mirrors
+    /// pointer-cursor-is-link latch. Mirrors
     /// `App.hover_link` (now deleted). Per-window so a torn-out child can
     /// flip its own cursor independently of the main window.
     pub hover_link: bool,
@@ -709,25 +708,18 @@ pub struct WindowState {
     /// rebuilds when winit reports monitor changes. Cursor/layout math is
     /// raster-px and must not read this field.
     pub dpi_scale: f64,
-    /// Per-window IME composition state. Phase B2 PR-A — promoted from
-    /// `App.ime` (main-only) so torn-out windows can compose CJK input
-    /// independently. The legacy `App.ime` continues to exist and is
-    /// kept in sync on the main window until PR-B.
+    /// Per-window IME composition state, so torn-out windows compose CJK
+    /// input independently of the main window.
     pub ime: ImeState,
-    /// Phase B2 PR-B3d — per-window throttle for
-    /// `Window::set_ime_cursor_area`. Promoted from `App.ime_cursor_throttle`
-    /// so each torn-out window can throttle its own IMK runloop traffic
-    /// independently. The legacy field stayed in lock-step on the main
-    /// window via the shadow snapshot prior to PR-B3d; with the field
-    /// deleted from `App`, every read path now goes through
+    /// Per-window throttle for
+    /// `Window::set_ime_cursor_area`, so each torn-out window throttles its
+    /// own IMK runloop traffic independently. Every read path goes through
     /// `self.main()?.ime_cursor_throttle`.
     pub ime_cursor_throttle: sonicterm_ui::ime::ImeCursorThrottle,
     /// Per-window hovered URL (Cmd-held underline + pointer cursor).
-    /// Phase B2 PR-A — promoted from `App.hovered_url`. Legacy field
-    /// stays in lock-step on the main window until PR-B.
     pub hovered_url: Option<hovered_url::HoveredUrl>,
     pub notification: Option<NotificationBubble>,
-    /// Phase B2 PR-B4: "this window is hidden / drained" latch.
+    /// "this window is hidden / drained" latch.
     /// Promoted from the App-level `main_hidden` bool so the visibility
     /// state lives next to the `Window` Arc it gates. Today only the main
     /// window flips this to `true` (when its last tab is torn out and
@@ -804,7 +796,7 @@ impl WindowState {
             .expect("WindowState::renderer_mut() called before do_resumed populated it")
     }
 
-    /// Phase B2 PR-B2-0: convenience that short-circuits when
+    /// convenience that short-circuits when
     /// `window` is `None`. Most call sites previously did
     /// `ws.window.request_redraw()` unconditionally; after the
     /// `Option` promotion they want a no-op when the window is gone.
@@ -1018,7 +1010,7 @@ fn next_synthetic_child_window_id() -> WindowId {
     unsafe { std::mem::transmute::<u64, WindowId>(u64::MAX - tag) }
 }
 
-/// Phase B2 PR-B2a: stable synthetic `WindowId` used by the
+/// stable synthetic `WindowId` used by the
 /// test-only [`App::__test_synthetic_main`] seam so the main entry in
 /// `App.windows` can be addressed without a live winit window. winit's
 /// `WindowId` is `#[repr(transparent)] struct WindowId(u64)` so a
@@ -1038,8 +1030,8 @@ pub fn synthetic_main_window_id() -> WindowId {
     unsafe { std::mem::transmute::<u64, WindowId>(u64::MAX) }
 }
 
-/// Phase B2 PR-A — snapshot of the cheap scalar fields mirrored from
-/// Phase A — classification of which terminal window currently
+/// snapshot of the cheap scalar fields mirrored from
+/// classification of which terminal window currently
 /// owns the OS-frontmost focus. Returned by [`App::frontmost_kind`] and
 /// consumed by keymap_dispatch arms + menubar drain to decide where a
 /// chord like Cmd+T / Cmd+W / Cmd+\\ should land.
@@ -1606,29 +1598,16 @@ pub struct App {
     /// here, and only an explicit reload moves it.
     pub(super) configured_weight_scale: f32,
     pub(super) keymap: Keymap,
-    // PR-B1b: `App.renderer` field removed; the main window's
-    // `GpuRenderer` is now owned by `self.windows[main_window_id].renderer`.
-    // Access via `Self::main_renderer()` / `Self::main_renderer_mut()`.
-    // PR-B2b: `App.tabs` + `App.tab_states` fields removed; the
-    // main window's TabBar + TabState vec are now owned by
-    // `self.windows[main_window_id]`. Access via `Self::main_tabs()` /
-    // `Self::main_tabs_mut()` / `Self::main_tab_states()` /
-    // `Self::main_tab_states_mut()`. Callers needing both at once should
-    // go through `self.main_mut()` directly to avoid double-borrow.
-    // PR-B2c: `App.panes` field removed; the main window's pane
-    // map is now owned by `self.windows[main_window_id]`. Access via
-    // `Self::main_panes()` / `Self::main_panes_mut()`. Callers needing
-    // panes + tabs/tab_states/renderer together should go through
-    // `self.main_mut()` and split-borrow the fields disjointly.
-    // PR-B3b: `App.last_render`, `App.cursor_visible`, and
-    // `App.hover_link` fields removed; now owned by
-    // `self.windows[main_window_id]`. Access via
-    // `self.main()?.last_render` / `self.main()?.cursor_visible` /
-    // `self.main()?.hover_link`.
-    // PR-B3c: `App.selection`, `App.copy_mode`, and `App.modifiers`
-    // fields removed; now owned by `self.windows[main_window_id]`.
-    // Access via [`Self::main_selection`] / [`Self::main_modifiers`] /
-    // direct field access through `self.main()?.copy_mode` etc.
+    // The main window holds no state of its own here. Its renderer, tabs,
+    // tab states, panes, selection, modifiers, copy mode, last render, cursor
+    // visibility, and hover link all live in `self.windows[main_window_id]`,
+    // the same place a torn-out child's do — so one set of code paths serves
+    // both. Reach them through `main_renderer()`, `main_tabs()`,
+    // `main_panes()`, `main_selection()`, and their `_mut` counterparts.
+    //
+    // Callers needing several at once should go through `main_mut()` and
+    // split-borrow the fields disjointly; taking two `main_*_mut()` accessors
+    // together is a double borrow of the same map entry.
     pub(super) clipboard: Option<Clipboard>,
     /// Test-only in-memory clipboard override for integration tests that need
     /// to observe copy/paste routing without depending on a desktop clipboard
@@ -1653,8 +1632,8 @@ pub struct App {
     // now live exclusively on `WindowState`. Readers go through
     // `self.main()?.dpi_scale` / `self.main()?.hovered_url`
     // (with safe-default fallbacks at call sites). The shadow-sync
-    // path was deleted as the final Phase B2 leftover.
-    /// Phase E (Haiku follow-up): Action::NewWindow sets this
+    // path was deleted as the last of the per-window migration.
+    /// Action::NewWindow sets this
     /// flag, then `drain_pending_window_creates` consumes it by calling
     /// `create_new_terminal_window(el)`. Window creation requires an
     /// `ActiveEventLoop` reference
@@ -1710,23 +1689,15 @@ pub struct App {
     /// sampling every idle turn keeps a measurement that walks every pane off
     /// the path that governs idle CPU.
     pub(super) last_retention_sample: Option<std::time::Instant>,
-    // PR-B3d: `App.ime` and `App.ime_cursor_throttle` fields
-    // removed; now owned by `self.windows[main_window_id]`. Access via
-    // `self.main()?.ime` / `self.main_mut()?.ime_cursor_throttle`.
     pub(super) command_palette: CommandPalette,
-    /// Phase A follow-up — which window the (single, modal)
-    /// command palette is currently attached to. `None` means it's
-    /// closed OR attached to the main window; `Some(id)` means it's
-    /// attached to that child window. The render paths for the main
-    /// window and each child window consult this so the palette only
-    /// paints on the frontmost window at the moment it was opened,
-    /// fixing the bug where Cmd+Shift+P typed in a torn-out child
-    /// silently opened the palette on the original main window.
+    /// Which window the (single, modal) command palette is attached to.
+    /// `None` means it is closed OR attached to the main window; `Some(id)`
+    /// means that child window. Both the main and child render paths consult
+    /// it so the palette paints only on the window it was opened from —
+    /// without it, Cmd+Shift+P typed in a torn-out child opened the palette
+    /// on the original main window.
     pub(super) palette_attached_window: Option<WindowId>,
-    // PR-B3d: `App.drag_session` field removed; per-window
-    // drag sessions live on `WindowState`. Access via
-    // `self.main_mut()?.drag_session` / per-window iteration.
-    /// Phase C2 (review fix): set the moment a held-tab drag
+    /// Set the moment a held-tab drag
     /// crosses [`os_drag::OS_DRAG_THRESHOLD_PX`] from its press point,
     /// before the user releases the button. Guards
     /// [`Self::try_os_drag_handoff`] in the `CursorMoved` path so the
@@ -1751,50 +1722,41 @@ pub struct App {
     /// changes when allocation happens, not merely where the number lives.
     pub(super) governor: ResourceGovernor,
     pub(super) windows: HashMap<WindowId, WindowState>,
-    /// Phase B2 PR-A: id of the main window. Set in `do_resumed` once
-    /// the main `Window` is created and `WindowState` shadow entry is
-    /// inserted into [`Self::windows`]. Readers MUST still use the
-    /// legacy `App.window`/`renderer`/`tabs`/... fields — PR-B will
-    /// switch them to read off `self.windows[main_window_id]`.
+    /// Id of the main window. Set in `do_resumed` once the main `Window` is
+    /// created and its [`WindowState`] is inserted into [`Self::windows`].
+    ///
+    /// `None` before that point, which is why every `main_*()` accessor
+    /// returns an `Option` rather than assuming a main window exists.
     pub(super) main_window_id: Option<WindowId>,
-    // PR-B4: `App.focused_child` removed; its job
-    // ("which torn-out child currently owns focus, or None for main")
-    // is now strictly a subset of `frontmost_window` (which discriminates
-    // main vs child via `frontmost_kind()`). All readers route through
-    // `frontmost_window` / `frontmost_kind()`.
-    /// Phase A — most-recently-OS-frontmost window id, INCLUDING
-    /// the main window. The frontmost field tracks *every* sonic-owned
-    /// terminal window with a single non-`Option` discriminant once the
-    /// first focus arrives:
-    /// single non-`Option` discriminant once the first focus arrives:
+    /// Most-recently-OS-frontmost window id, INCLUDING the main window.
+    /// Tracks *every* sonic-owned terminal window with a single
+    /// non-`Option` discriminant once the first focus arrives:
     ///
     ///   * `Some(main_window_id)`  → main window is OS-frontmost
     ///   * `Some(child_window_id)` → that child window is OS-frontmost
     ///   * `None`                  → no sonic window has been focused yet,
     ///     OR focus has moved out of every sonic window to another app.
     ///
+    /// Subsumes a separate "which child has focus" field: main-vs-child is
+    /// discriminated by `frontmost_kind()`, so one id answers both questions
+    /// and the two cannot disagree.
+    ///
     /// Keyboard / menubar / accelerator actions (Cmd+T, Cmd+W, Cmd+\\, …)
     /// route through this id so a chord typed in window B never mutates
     /// window A's tab vec. Set in both the main and child `Focused(true)`
     /// arms; on `Focused(false)` we only clear when the dropped window was
-    /// the current frontmost (focus moving to a *different* sonic window
+    /// the current frontmost — focus moving to a *different* sonic window
     /// arrives as that other window's `Focused(true)` and overwrites
-    /// frontmost in the right order). Bug reports addressed by this field:
-    ///   * #2: Cmd+T after tear-out opens tab in WRONG window
-    ///   * #3: Cmd+W in new window closes OLD window's tab
+    /// frontmost in the right order.
+    ///
+    /// Without it, Cmd+T after a tear-out opened a tab in the wrong window,
+    /// and Cmd+W in a new window closed the old window's tab.
     pub(super) frontmost_window: Option<WindowId>,
-    // PR-B3d: `App.drag_target` field removed; per-window
-    // pending drop target lives on `WindowState`. Access via
-    // `self.main_mut()?.drag_target`.
     /// OS-drag tab payloads received before the main [`WindowState`] exists.
     /// Startup pasteboard / OLE deliveries can arrive before `do_resumed`
     /// inserts `main_window_id`; queue them so the destination tab is created
     /// after main is available instead of silently dropping the payload.
     pub(super) pending_os_drag_payloads: Vec<crate::os_drag::TabPayload>,
-    // PR-B4: `App.main_hidden` removed; the "main window is
-    // drained / hidden" latch lives on `WindowState.hidden`. Access via
-    // `self.main_is_hidden()` (true when the field is set OR the main
-    // entry is gone — both shapes mean "no visible main").
     /// Optional theme loader, set by `run_with`. Used to reload a theme
     /// by name live.
     pub(crate) theme_loader: Option<ThemeLoader>,
@@ -1897,7 +1859,7 @@ pub struct App {
     /// to resolve the raw screen-coordinate drop into a real
     /// `(WindowId, slot)` pair before posting a `DroppedOnBar` outcome.
     pub(super) os_drag_bars: Arc<os_drag::TabBarRegistry>,
-    /// Phase C2: tracks the source-side bookkeeping while an OS drag
+    /// tracks the source-side bookkeeping while an OS drag
     /// is in flight. `Some((source_window, source_tab_idx))` from
     /// `begin_session` until `UserEvent::DragEnded` is drained; back
     /// to `None` once the dispatcher routes the outcome.
@@ -2421,7 +2383,7 @@ impl App {
         }
     }
 
-    /// PR-B4: is the main window currently hidden / drained?
+    /// is the main window currently hidden / drained?
     /// `true` when the main `WindowState` is gone OR its `hidden` latch
     /// is set. The two shapes mean the same thing operationally — no
     /// visible main — so callers don't need to discriminate.
@@ -3427,7 +3389,7 @@ impl App {
 
     /// Test-only: install a frontmost child id without going through a
     /// real `WindowEvent::Focused(true)` (which requires a winit window).
-    /// PR-B4 replaced `focused_child` with `frontmost_window`;
+    /// `frontmost_window` subsumes a separate focused-child field;
     /// this kept the old name so the existing regression tests don't
     /// need touching, but it now drives the unified tracker.
     #[doc(hidden)]
@@ -3437,7 +3399,7 @@ impl App {
     }
 
     /// Test-only: read back the current frontmost-child id.
-    /// PR-B4 — returns `Some(id)` when `frontmost_window` points
+    /// returns `Some(id)` when `frontmost_window` points
     /// at a non-main entry, mirroring the old `focused_child` semantics.
     #[doc(hidden)]
     pub fn __test_focused_child(&self) -> Option<WindowId> {
@@ -3455,7 +3417,7 @@ impl App {
 
     /// Test-only: install a `frontmost_window` id without going through a
     /// real `WindowEvent::Focused(true)` (which requires a winit window).
-    /// Used Phase A regression tests to assert that
+    /// Used by regression tests to assert that
     /// keymap-dispatched actions route to the right window's tab vec.
     #[doc(hidden)]
     pub fn __test_set_frontmost_window(&mut self, id: Option<WindowId>) {
@@ -3802,7 +3764,7 @@ impl App {
         self.handle_child_focus_changed(id, focused);
     }
 
-    /// Phase A — classify [`Self::frontmost_window`] without
+    /// classify [`Self::frontmost_window`] without
     /// borrowing anything mutably. Returns:
     ///   * `FrontmostKind::None` if no sonic window has been focused yet,
     ///     focus is currently outside every sonic window, or the recorded
@@ -3817,12 +3779,12 @@ impl App {
     ///
     /// Pure read; no mutation, no logging. The keymap_dispatch arms call
     /// this first, then route to the matching mutator + redraw target.
-    /// Phase B2 PR-A — borrow the main window's [`WindowState`] shadow
-    /// entry from `self.windows`, keyed by [`Self::main_window_id`].
-    /// Returns `None` before `do_resumed` has run (no main window yet)
-    /// OR if the shadow entry is missing for any reason. PR-B will
-    /// migrate readers (`self.tabs`, `self.renderer`, …) to go through
-    /// this helper.
+    /// Borrow the main window's [`WindowState`] from `self.windows`, keyed by
+    /// [`Self::main_window_id`]. Returns `None` before `do_resumed` has run
+    /// (no main window yet) or if the entry is missing for any reason.
+    ///
+    /// Every reader of the main window's renderer, tabs, and panes goes
+    /// through this helper or its `_mut` counterpart.
     #[doc(hidden)]
     pub fn main(&self) -> Option<&WindowState> {
         let id = self.main_window_id?;
@@ -3836,18 +3798,17 @@ impl App {
         self.windows.get_mut(&id)
     }
 
-    /// Phase B2 PR-B1a — borrow the main window's `Arc<Window>` from
-    /// the shadow [`WindowState`]. Sole source of truth for the main
-    /// window handle (the legacy `App.window` field was deleted in
-    /// PR-B1a). Returns `None` before `do_resumed` has run.
+    /// Borrow the main window's `Arc<Window>` from its [`WindowState`].
+    /// Sole source of truth for the main window handle. Returns `None`
+    /// before `do_resumed` has run.
     #[doc(hidden)]
     pub fn main_window(&self) -> Option<&Arc<Window>> {
         self.windows.get(&self.main_window_id?)?.window.as_ref()
     }
 
-    /// Phase B2 PR-B1b — borrow the main window's `GpuRenderer`
+    /// borrow the main window's `GpuRenderer`
     /// from its `WindowState`. Sole source of truth for the main
-    /// renderer (legacy `App.renderer` field was deleted in PR-B1b).
+    /// renderer.
     /// Returns `None` before `do_resumed` has run.
     #[doc(hidden)]
     pub fn main_renderer(&self) -> Option<&GpuRenderer> {
@@ -3861,9 +3822,9 @@ impl App {
         self.windows.get_mut(&id)?.renderer.as_mut()
     }
 
-    /// Phase B2 PR-B2b — borrow the main window's [`TabBar`] from
+    /// borrow the main window's [`TabBar`] from
     /// its [`WindowState`]. Sole source of truth (legacy `App.tabs` was
-    /// deleted in PR-B2b). Returns `None` before `do_resumed` /
+    /// Returns `None` before `do_resumed` /
     /// `__test_synthetic_main` has populated the shadow entry.
     #[doc(hidden)]
     pub fn main_tabs(&self) -> Option<&TabBar> {
@@ -3877,7 +3838,7 @@ impl App {
         Some(&mut self.windows.get_mut(&id)?.tabs)
     }
 
-    /// Phase B2 PR-B2b — borrow the main window's `Vec<TabState>`
+    /// borrow the main window's `Vec<TabState>`
     /// from its [`WindowState`]. Sole source of truth.
     #[doc(hidden)]
     pub fn main_tab_states(&self) -> Option<&[TabState]> {
@@ -4326,9 +4287,9 @@ impl App {
         Some(&mut self.windows.get_mut(&id)?.panes)
     }
 
-    /// Phase B2 PR-B3c — borrow the main window's selection
+    /// borrow the main window's selection
     /// `Option<Selection>` from its [`WindowState`]. Sole source of
-    /// truth (legacy `App.selection` field was deleted in PR-B3c).
+    /// truth.
     /// Returns `None` (no main window) — `Some(None)` (no selection)
     /// — `Some(Some(_))` (active selection).
     #[doc(hidden)]
@@ -4343,7 +4304,7 @@ impl App {
         Some(&mut self.windows.get_mut(&id)?.selection)
     }
 
-    /// Phase B2 PR-B3c — borrow the main window's
+    /// borrow the main window's
     /// `ModifiersState` from its [`WindowState`]. Returns
     /// `ModifiersState::empty()` if the main window does not yet
     /// exist (safe default — no modifiers held).
@@ -4355,7 +4316,7 @@ impl App {
             .unwrap_or_else(ModifiersState::empty)
     }
 
-    /// PR-B3c — replace the main window's selection.
+    /// replace the main window's selection.
     /// No-op when the main window does not yet exist.
     #[doc(hidden)]
     pub fn selection_set(&mut self, sel: Option<Selection>) {
@@ -4364,7 +4325,7 @@ impl App {
         }
     }
 
-    /// PR-B3c — replace the main window's copy-mode state.
+    /// replace the main window's copy-mode state.
     /// No-op when the main window does not yet exist.
     #[doc(hidden)]
     pub fn copy_mode_set(&mut self, st: Option<CopyModeState>) {
@@ -4373,7 +4334,7 @@ impl App {
         }
     }
 
-    /// Phase B2 PR-A — borrow the [`WindowState`] of whichever terminal
+    /// borrow the [`WindowState`] of whichever terminal
     /// window is OS-frontmost. Falls back to the main window when no
     /// frontmost has been recorded yet (matches the safe default in
     /// [`Self::frontmost_kind`]).
@@ -4407,7 +4368,7 @@ impl App {
         FrontmostKind::None
     }
 
-    /// Phase A — if [`Self::frontmost_window`] is `Some(_)`
+    /// if [`Self::frontmost_window`] is `Some(_)`
     /// but classifies as `None` (recorded id no longer matches any
     /// live window), clear it. Called by keymap_dispatch arms BEFORE
     /// falling back to main, so the next dispatch doesn't retry the
@@ -4536,7 +4497,7 @@ impl App {
     /// `Action::NewWindow` dispatcher arm; consumed by
     /// `drain_pending_window_creates` (which needs a live
     /// `ActiveEventLoop` and so can't run in a unit test). The flag
-    /// is the testable seam — see Phase E Haiku follow-up.
+    /// is the testable seam.
     #[doc(hidden)]
     pub fn __test_pending_new_window(&self) -> bool {
         self.pending_new_window
@@ -4579,10 +4540,10 @@ impl App {
     /// would change the windows-map cardinality (the post-drain
     /// state itself requires an `ActiveEventLoop`).
     ///
-    /// Phase B2 PR-A: the shadow main entry inserted by
+    /// the shadow main entry inserted by
     /// [`Self::do_resumed`] is excluded so existing call sites that
     /// expected this to be "number of torn-out child terminal windows"
-    /// keep their pre-PR-A semantics.
+    /// keep meaning "number of torn-out child terminal windows".
     #[doc(hidden)]
     pub fn __test_windows_len(&self) -> usize {
         self.windows.len().saturating_sub(self.shadow_main_count())
@@ -4659,9 +4620,9 @@ impl App {
         self.windows.len().saturating_sub(self.shadow_main_count())
     }
 
-    /// Phase B2 PR-A — `1` if the shadow main entry is present in
+    /// `1` if the shadow main entry is present in
     /// [`Self::windows`], else `0`. Used by every "count torn-out
-    /// child windows" path that pre-existed PR-A so they keep the
+    /// child windows" path so they keep the
     /// same number.
     #[inline]
     #[doc(hidden)]
@@ -4672,7 +4633,7 @@ impl App {
         }
     }
 
-    /// Phase B — number of windows in the unified
+    /// number of windows in the unified
     /// [`Self::windows`] map.
     /// Used by the regression suite to pin the rename + role tagging.
     #[doc(hidden)]
@@ -4680,7 +4641,7 @@ impl App {
         self.windows.len().saturating_sub(self.shadow_main_count())
     }
 
-    /// Phase B — count entries in [`Self::windows`] whose
+    /// count entries in [`Self::windows`] whose
     /// role matches the argument. Today every entry is `Terminal`;
     #[doc(hidden)]
     pub fn windows_with_role(&self, role: crate::app::WindowRole) -> usize {
@@ -4704,7 +4665,7 @@ impl App {
     /// tests exercise tab/pane bookkeeping without spawning shells.
     #[doc(hidden)]
     pub fn __test_seed_tab(&mut self, title: &str) -> u64 {
-        // Phase B2 PR-B2a: ensure the synthetic main WindowState
+        // ensure the synthetic main WindowState
         // entry exists before seeding. Future PRs B2b/c/d delete the
         // App.tabs/tab_states/panes fields outright, so seed writes
         // MUST land in `self.main_mut()` to survive that migration.
@@ -4719,7 +4680,7 @@ impl App {
         pane_id
     }
 
-    /// Phase B2 PR-B2a: for tests that build an `App` without
+    /// for tests that build an `App` without
     /// `do_resumed` running, insert a synthetic main `WindowState`
     /// entry (window=None, renderer=None) under a stable synthetic
     /// `WindowId` so test seeders can route writes through
@@ -4941,13 +4902,13 @@ impl App {
         self.os_drag_backend = Some(backend);
     }
 
-    /// Phase C2 test-only: install a mock [`os_drag::OsTabDragBackend`].
+    /// Test-only: install a mock [`os_drag::OsTabDragBackend`].
     #[doc(hidden)]
     pub fn __test_set_os_drag_backend(&mut self, backend: Box<dyn os_drag::OsTabDragBackend>) {
         self.os_drag_backend = Some(backend);
     }
 
-    /// Phase C2 test-only: hand out the shared pending-outcome mailbox
+    /// Test-only: hand out the shared pending-outcome mailbox
     /// so tests can drive [`Self::handle_os_drag_ended`] without
     /// constructing a real [`winit::event_loop::EventLoopProxy`].
     #[doc(hidden)]
@@ -4955,7 +4916,7 @@ impl App {
         self.os_drag_pending.clone()
     }
 
-    /// Phase C2 test-only: seed the in-flight source bookkeeping that
+    /// Test-only: seed the in-flight source bookkeeping that
     /// [`Self::begin_os_tab_drag`] normally sets. Used by tests that
     /// drive the dispatcher directly without first calling
     /// `begin_os_tab_drag`.
@@ -4964,7 +4925,7 @@ impl App {
         self.os_drag_source = source;
     }
 
-    /// Phase C2: build an [`os_drag::AppHandle`] tied to the App's
+    /// build an [`os_drag::AppHandle`] tied to the App's
     /// event-loop proxy and the shared pending-outcome mailbox. The
     /// returned handle is what gets passed to
     /// [`os_drag::OsTabDragBackend::begin_session`] so the backend can
@@ -5057,7 +5018,7 @@ impl App {
         self.publish_os_drag_bar_snapshot(snap);
     }
 
-    /// Phase C2: begin an OS-level tab drag session via the installed
+    /// begin an OS-level tab drag session via the installed
     /// backend. Returns `true` when the backend was invoked, `false`
     /// when no backend is installed or no event-loop proxy exists (in
     /// which case the caller falls back to the existing tear_out path).
@@ -5079,7 +5040,7 @@ impl App {
         true
     }
 
-    /// Phase C2: does the installed backend own the gesture end-to-end?
+    /// does the installed backend own the gesture end-to-end?
     /// `try_os_drag_handoff` consults this to decide whether to skip
     /// the legacy `OsDragSink` after `begin_os_tab_drag` returns —
     /// running both on Windows would invoke `DoDragDrop` twice.
@@ -5087,7 +5048,7 @@ impl App {
         self.os_drag_backend.as_ref().map(|b| b.handles_full_gesture()).unwrap_or(false)
     }
 
-    /// Phase C2: register a winit window with the installed OS-drag
+    /// register a winit window with the installed OS-drag
     /// backend so OS-level drops landing on that window's HWND /
     /// NSWindow are routed back into the App. Called once per window
     /// at creation time — main window from `App::resumed`, torn-out
@@ -5118,7 +5079,7 @@ impl App {
         }
     }
 
-    /// Phase C2: dispatcher entry point for `UserEvent::DragMoved`.
+    /// dispatcher entry point for `UserEvent::DragMoved`.
     /// Drains the mailbox; currently a no-op beyond logging — the
     /// drag-chip overlay is rendered from `tab_drag` state, not from
     /// the OS cursor stream. Reserved for future "highlight drop
@@ -5131,7 +5092,7 @@ impl App {
         pos
     }
 
-    /// Phase C2: dispatcher entry point for `UserEvent::DragEnded`.
+    /// dispatcher entry point for `UserEvent::DragEnded`.
     /// Drains the mailbox outcome and routes it: `DroppedOnBar` →
     /// [`Self::transfer_tab`]; `Cancelled` → [`Self::cancel_drag_session`];
     /// `DroppedOnEmpty` is left for the existing tear_out path (this
@@ -5150,7 +5111,7 @@ impl App {
                     return Some(outcome);
                 };
                 // `source` / `target` are `Option<WindowId>`, where
-                // `None` means "the App's main window". In Phase C2 the
+                // `None` means "the App's main window". The
                 // backend always reports a concrete WindowId on the
                 // source side, but the *target* may legitimately be the
                 // main window. Detect that by comparing against the
@@ -5172,9 +5133,9 @@ impl App {
             os_drag::DragOutcome::DroppedOnEmpty { drop_screen_pos } => {
                 tracing::debug!(
                     ?drop_screen_pos,
-                    "os_drag_session: DroppedOnEmpty — in-process tear-out (Phase A)"
+                    "os_drag_session: DroppedOnEmpty — in-process tear-out"
                 );
-                // Phase A: replace the legacy
+                // replace the legacy
                 // out-of-process tear-out (child-window via
                 // `spawn_tearout_child` → `Command::new`) with an
                 // in-process create. Enqueue a typed `PendingTearOut`
@@ -5295,7 +5256,7 @@ impl App {
         self.tab_bar_visible
     }
 
-    /// Phase C — cancel an in-flight drag session. Wired
+    /// cancel an in-flight drag session. Wired
     /// to the ESC key handler in `window_event.rs` (any window's
     /// `WindowEvent::KeyboardInput` with `NamedKey::Escape` clears
     /// the App's drag_session AND every per-window drag_session) so
@@ -5375,7 +5336,7 @@ impl App {
         had
     }
 
-    /// Phase C — pure cross-window transfer API. Operates
+    /// pure cross-window transfer API. Operates
     /// on the App's MAIN window only (`source` / `target` are both
     /// `None` ⇒ main↔main reorder). Tests exercise the pure-container
     /// form in `crate::app::tab_transfer` directly; the App wrapper
@@ -5482,7 +5443,7 @@ impl App {
                 self.reap_empty_child(id);
             } else {
                 // main window — leave the App to its existing
-                // last-tab-closed handling (Phase B already covers
+                // last-tab-closed handling (already covered
                 // hiding the main window when its tabs vec empties).
             }
         }

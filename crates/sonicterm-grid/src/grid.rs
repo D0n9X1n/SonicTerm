@@ -16,7 +16,7 @@ use crate::line::Line;
 
 /// A row of cells.
 ///
-/// **PR-B2:** the public type alias is now `Line`. Public accessors
+/// The public type alias is `Line`. Public accessors
 /// (`row`, `row_mut`, `rows_iter`, `scrollback_row`, `scrollback_iter`,
 /// `row_at_abs`) return `&Line` / `&mut Line` directly. Callers index cells
 /// via `Line::Index<usize>` / `Index<Range<usize>>`, iterate via
@@ -456,7 +456,7 @@ impl Grid {
         for row in &mut self.visible {
             row.resize(cols as usize, Cell::default());
         }
-        // PR-E: keep scrollback consistent with the new column count.
+        // keep scrollback consistent with the new column count.
         // `Line::resize` is now Cluster-preserving, so uniform blank
         // scrollback rows (the bulk of typical scrollback) stay compressed.
         if cols != self.cols {
@@ -890,10 +890,10 @@ impl Grid {
                 self.visible.push_back(row);
                 continue;
             }
-            // PR-C: try to compress the ejected line into a
+            // try to compress the ejected line into a
             // single Cluster (whole-line uniform attrs). No-op when the
             // line is non-uniform — it stays Flat. Multi-Cluster
-            // segmentation of partially-uniform lines is PR-D scope.
+            // segmentation of partially-uniform lines is not implemented.
             row.try_compress();
             if self.scrollback.len() >= self.scrollback_limit {
                 // At (or over) capacity: reuse the oldest scrollback row as
@@ -1337,7 +1337,7 @@ impl Grid {
         self.scrollback.len()
     }
 
-    /// PR-F: debug introspection — count (Cluster, Flat) lines in
+    /// debug introspection — count (Cluster, Flat) lines in
     /// scrollback.
     #[doc(hidden)]
     pub fn scrollback_storage_breakdown(&self) -> (usize, usize) {
@@ -1353,7 +1353,7 @@ impl Grid {
         (cluster, flat)
     }
 
-    /// PR-F: sum of per-row `approx_byte_size` across scrollback. This
+    /// sum of per-row `approx_byte_size` across scrollback. This
     /// is a payload-only metric used by internal compression policy tests.
     /// User-visible heap reporting should use [`Self::scrollback_heap_bytes`]
     /// so it counts reserved `Vec::capacity()` bytes and container overhead.

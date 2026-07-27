@@ -95,7 +95,7 @@ pub fn is_mouse_near_right_edge(
 /// Step the alpha animation one frame. Returns the new alpha.
 ///
 /// `drag_active` should be `true` while a scrollbar-thumb drag is in
-/// progress on this pane (per PR-C `ScrollbarDragState`).
+/// progress on this pane (per `ScrollbarDragState`).
 ///
 /// For `Always` the returned alpha is always 1.0; for `Never` always 0.0
 /// (state struct is bypassed but kept in lock-step so a live mode swap
@@ -341,7 +341,7 @@ impl App {
 
     /// Mark a pane's scrollbar as "actively in use" so its alpha
     /// resets to fully-visible and the idle hide timer restarts.
-    /// Called from PR-D update points (scroll, drag, view_top jump).
+    /// Called from the update points (scroll, drag, view_top jump).
     pub(crate) fn mark_scrollbar_active(&mut self, pane_id: u64) {
         let now = Instant::now();
         let marked = self

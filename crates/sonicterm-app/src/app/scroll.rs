@@ -67,7 +67,7 @@ impl App {
         if let Some(w) = ws.window.as_ref() {
             w.request_redraw();
         }
-        // PR-D parity: any view_top jump from wheel/keymap is
+        // Parity: any view_top jump from wheel/keymap is
         // scrollbar activity for auto-hide bookkeeping.
         self.mark_scrollbar_active(pane_id);
     }
