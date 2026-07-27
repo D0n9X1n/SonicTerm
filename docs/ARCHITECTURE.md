@@ -51,9 +51,9 @@ depend on it and does not charge — see
    and as the Windows fallback.
 6. `sonicterm-resource` holds the process-local owner tree and retained-memory
    ledger. `sonicterm-app` creates a `Window` owner per live window and an
-   `AppPane` owner per pane. Charging what each pane retains happens only when
-   memory-target debug diagnostics are enabled; at the default log level the
-   owner tree exists and its figures stay zero.
+   `AppPane` owner per pane. Charging what each pane retains runs on the
+   idle-wake path at every log level; memory-target debug diagnostics govern
+   only the retention log lines.
 
 ## Design rules
 
@@ -159,7 +159,7 @@ Registration failure is not retried uniformly, and the difference matters:
 - A **pane** that fails to register keeps working and is picked up by the next
   reconcile pass, which registers any unowned pane under an already-registered
   window. Reconcile runs whenever a pane is created — new tab or split — and
-  again under memory-target debug sampling.
+  again on every retention pass, at every log level.
 - A **window** that fails to register is never retried. Reconcile skips a window
   that has no owner, so neither it nor any of its panes appears in hierarchy
   accounting for the rest of that window's life.
@@ -184,30 +184,44 @@ re-reserving on every sample would pass the charge through zero, leaving the
 ledger briefly disagreeing with reality and letting a concurrent reservation
 take the budget in that window.
 
-#### Charging runs only under memory-target debug diagnostics
+#### Charging runs at every log level; the gate governs only the log lines
 
-Owner registration and charging are gated differently, and the distinction
-matters when reading a snapshot:
+Owner registration, charging, and the retention log lines are three separate
+things, and the distinction matters when reading a snapshot:
 
 - **Owners always exist.** A `Window` owner is registered when the window is
   created, and an `AppPane` owner when the pane is created — new tab, split, or
   window registration all reconcile unconditionally. This happens at every log
   level.
-- **Charging is debug-gated.** The pass that samples what a pane retains and
-  moves its charges to match runs only when the `memory` target is enabled at
-  debug level. At the default level the owner hierarchy is fully populated and
-  every figure in it reads zero.
+- **Charging always runs.** The pass that samples what a pane retains and moves
+  its charges to match runs on the idle-wake path at every log level. At the
+  default level the owner hierarchy is fully populated and its figures report
+  what each pane actually holds.
+- **Only the log lines are gated.** The `enabled!(target: "memory", DEBUG)`
+  check in `sample_pane_retention` guards the `pane retention` and `session
+  retention` lines, which are additionally rate-limited to one sample every 30
+  seconds. Charging is not rate-limited by that interval.
 
-This is deliberate, not a limitation. A walk over every pane briefly takes each
-parser lock, and paying that in an ordinary session would be a permanent cost
-for a diagnostic almost nobody is reading. A paired test pins both directions —
-one asserts charges appear under a debug subscriber, the other asserts the path
-stays inert at the default level — so a change that charged unconditionally
-would fail rather than quietly trade the defect for that cost.
+Charging sits above the gate because it is not a diagnostic: it is what puts a
+pane's retention into the ledger that `PANE_COMMITTED_BUDGET_BYTES` is enforced
+against. Below the gate, a shipped session — which installs no `memory`
+subscriber — charged nothing, so the per-pane backstop had no figure to apply
+itself to and the tripwire could not fire in any shipped build. Reclamation of
+stalled captures sits above the gate for the same reason: freeing memory a user
+is owed does not depend on whether anyone is watching.
 
-The consequence for anyone reading a snapshot: at the default log level, zero is
-what a correctly-working governor reports. It does not mean nothing is retained.
-The seam caps bound memory at every log level regardless.
+An integration test installs **no** subscriber — the shipped default — enters
+through the real gated path, and asserts both that a pane's retention reaches
+the ledger and that the charged figure agrees with what the pane measures, in
+`crates/sonicterm-app/tests/governor_charges_without_subscriber.rs`.
+
+The walk skips rather than blocks: a pane whose parser lock is contended is
+passed over and keeps its previous charge until the next pass, so charging never
+stalls the event loop behind a parsing VT thread.
+
+The seam caps bound memory at every log level, as they always did; what changed
+is that the governor's own figures are now populated in shipped sessions rather
+than reading zero.
 
 Every failure preserves the original ownership and accounting — `CommitError`,
 `TransferError`, and `CommittedTransferError` each hand the untouched original
@@ -272,10 +286,10 @@ These hold for the classes with live charge sites, listed above:
 - Classes that are not charged are not merely uncharged — each carries a
   recorded reason.
 
-Two scope limits are deliberate and are *not* defects. Charging runs only under
-memory-target debug diagnostics, so at the default level these figures are zero
-while the seam caps continue to bound memory. And renderer retention is outside
-the ledger entirely, as described above.
+One scope limit is deliberate and is *not* a defect: renderer retention is
+outside the ledger entirely, as described above. Charging itself is not scoped —
+it runs at every log level, so these figures report live retention rather than
+zero in a shipped session.
 
 ## Accounting verification
 

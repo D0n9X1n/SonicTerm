@@ -132,19 +132,18 @@ Lifecycle:
   new tab and a split each reconcile immediately rather than waiting for the
   next sample — and panes migrated during tear-out are registered as part of
   that migration. This happens at every log level.
-- **Charging.** Only when the `memory` target is enabled at debug level, and
-  then at most once every 30 seconds, the idle-wake path samples what each pane
-  retains and moves that pane's charges to match. Charges are resized in place
-  rather than released and re-taken, so the ledger never briefly reads zero for
-  memory that is still held. **At the default log level the owner tree is fully
-  populated and every figure in it reads zero** — that is designed behavior, not
-  a fault, because walking every pane in an ordinary session would be a
-  permanent cost for a diagnostic almost nobody is reading. A paired test pins
-  both directions.
+- **Charging.** The idle-wake path samples what each pane retains and moves that
+  pane's charges to match. Charges are resized in place rather than released and
+  re-taken, so the ledger never briefly reads zero for memory that is still
+  held. **This runs at every log level**, because charging is not a diagnostic:
+  it is what fills the ledger the per-pane budget is enforced against, and a
+  governor that only charged while someone was watching would apply no limit in
+  the sessions that ship. A pane whose parser lock is busy is skipped and keeps
+  its previous charge until the next pass.
 - **Migration.** Moving a pane between windows re-attributes its charges to the
   destination window's owner, so a torn-out tab does not leave its memory
-  accounted to the window it left. Re-attribution runs under the same debug
-  gate as charging.
+  accounted to the window it left. Re-attribution runs in the same pass as
+  charging, at every log level.
 - **Release.** Charges are pane-owned RAII tokens, and teardown is two ordered
   steps: the pane's charge tokens release first, then the owner guards close the
   pane and window records. The order is load-bearing — closing an owner is
@@ -154,19 +153,11 @@ Lifecycle:
   and a leaked charge surfaces as a refused close rather than a silent
   undercount.
 
-Sampling is diagnostic and never blocks the loop: a pane whose parser lock is
-contended is skipped rather than waited on.
-- **Release.** Charges are pane-owned RAII tokens, and teardown is two ordered
-  steps: the pane's charge tokens release first, then the owner guards close the
-  pane and window records. The order is load-bearing — closing an owner is
-  refused while it still holds charges, so `PaneState` declares `charges` before
-  `owner` and relies on Rust dropping fields in declaration order. A window
-  dropping does not itself free pane memory; its panes' charges release first,
-  and a leaked charge surfaces as a refused close rather than a silent
-  undercount.
-
-Sampling is diagnostic and never blocks the loop: a pane whose parser lock is
-contended is skipped rather than waited on.
+The retention log lines are the diagnostic half of this pass: setting the
+`memory` target to debug adds a `pane retention` line per pane and a
+`session retention` line per session, at most once every 30 seconds. Charging
+and re-attribution above run regardless. Neither half blocks the loop — a pane
+whose parser lock is contended is skipped rather than waited on.
 
 ## Input routing order
 
@@ -420,21 +411,25 @@ governor：`sonicterm-gpu` 并不依赖 resource crate。因此 governor 的总�
 - **窗格注册。** 窗格在创建时即获得 `AppPane` owner——新建标签页与分屏都会立即
   协调，而不等待下一次采样；撕离迁移的窗格则在迁移过程中完成注册。这在任何日志
   级别下都会发生。
-- **计费。** 仅当 `memory` target 以 debug 级别启用时，空闲唤醒路径才会采样每个
-  窗格的常驻内存（且最多每 30 秒一次），并把该窗格的 charge 调整到相应数值。
-  charge 采用原地缩放而非先释放再重新申请，因此账本不会在内存仍被持有时短暂读到
-  零。**在默认日志级别下，owner 树是完整的，而其中每个数值都为零**——这是设计行为
-  而非故障：在普通会话中遍历每个窗格属于长期开销，而这项诊断几乎无人查看。一对
-  测试同时固定了这两个方向。
+- **计费。** 空闲唤醒路径会采样每个窗格的常驻内存，并把该窗格的 charge 调整到
+  相应数值。charge 采用原地缩放而非先释放再重新申请，因此账本不会在内存仍被持有
+  时短暂读到零。**这在任何日志级别下都会发生**，因为计费并非诊断：它负责填充
+  「窗格预算据以生效」的账本，而一个只在有人观察时才计费的 governor，在实际发布
+  的会话中不会施加任何限制。parser 锁被占用的窗格会被跳过，并保留上一次的
+  charge，直到下一轮采样。
 - **迁移。** 在窗口之间移动窗格会把其 charge 重新归属到目标窗口的 owner，因此
-  撕离的标签页不会把内存继续记在原窗口名下。重新归属与计费受同一个 debug 门控。
+  撕离的标签页不会把内存继续记在原窗口名下。重新归属与计费在同一轮中执行，且在
+  任何日志级别下都会发生。
 - **释放。** charge 是归属于窗格的 RAII token，拆除分为有序的两步：先释放该窗格的
   charge token，再由 owner guard 关闭窗格与窗口记录。这个顺序是关键——owner 仍持有
   charge 时会拒绝关闭，因此 `PaneState` 把 `charges` 声明在 `owner` 之前，依赖 Rust
   按声明顺序 drop 字段。窗口被 drop 本身并不直接释放窗格内存：先释放其窗格的
   charge，而泄漏的 charge 会表现为关闭被拒绝，而不是无声的少计。
 
-采样属于诊断行为，绝不阻塞事件循环：parser 锁被占用的窗格会被跳过而非等待。
+这一轮中属于诊断的部分是占用日志：把 `memory` target 设为 debug 后，会为每个窗格
+输出一行 `pane retention`，并为整个会话输出一行 `session retention`，且最多每 30
+秒一次。上面的计费与重新归属则不受此影响，始终执行。两者都不会阻塞事件循环——
+parser 锁被占用的窗格会被跳过而非等待。
 
 ## 输入路由顺序
 
