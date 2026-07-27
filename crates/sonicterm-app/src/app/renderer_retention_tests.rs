@@ -267,6 +267,26 @@ fn the_role_distinguishes_a_warm_renderer_from_a_visible_one() {
     );
 }
 
+/// The window label is emitted, and it is what the shipped recipes parse.
+///
+/// Both the `sh` and PowerShell recipes in `wiki/Logging.md` key on `window=`
+/// to attribute a line to a renderer. Deleting or renaming the field would
+/// leave every other assertion here green while breaking both recipes for
+/// every reader who copies them.
+#[test]
+fn the_window_label_identifies_which_renderer_the_line_is_about() {
+    let events = capture(|| {
+        emit_renderer_retention("WindowId(1)", "visible", &retention(16_777_216, 524_288, 0));
+    });
+    let line = events.iter().find(|event| event.message == "renderer retention").expect("emitted");
+
+    assert!(
+        line.strings.iter().any(|(key, value)| key == "window" && value == "WindowId(1)"),
+        "the line must name the renderer it describes; the wiki recipes parse `window=` \
+         and a line without it cannot be attributed to anything"
+    );
+}
+
 /// Every field this line emits must be documented in both language halves.
 ///
 /// A user following the memory-triage procedure reads the fields by name. A

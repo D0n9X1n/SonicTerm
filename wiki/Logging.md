@@ -301,10 +301,12 @@ windows and one warm entry reports three. Which renderer holds the memory is the
 part that tells you what to change.
 
 `software_frame_bytes` is the one to check first on Windows if you are using
-software rendering, because it is the largest single buffer in the process: a
-4K window is about 32 MB on its own. It is zero on macOS and on any Windows
-session using GPU rendering. `[appearance].software_render_mode` in the
-Configuration page controls which path is in use.
+software rendering. It is the largest buffer a renderer holds, and unlike the
+atlases it scales with the window: about 32 MB for a 4K window, roughly 59 MB
+at 5K, and it can reach 160 MB before the size is refused. Making the window
+smaller is what lowers it. It is zero on macOS and on any Windows session using
+GPU rendering. `[appearance].software_render_mode` in the Configuration page
+controls which path is in use.
 
 These figures are host memory. Textures on the GPU are not included — the
 graphics driver owns those and does not report their size — so these lines
@@ -645,9 +647,10 @@ Select-String 'renderer retention' $log | ForEach-Object {
 请自行将各行相加 —— 每个渲染器对应一行，因此「两个窗口 + 一个预热渲染器」的
 会话会输出三行。究竟是哪个渲染器占用了内存，才是决定如何调整的依据。
 
-在 Windows 上使用软件渲染时，请优先查看 `software_frame_bytes`，因为它是进程中
-最大的单个缓冲区：仅一个 4K 窗口就约占 32 MB。在 macOS 上，以及在使用 GPU 渲染的
-Windows 会话中，该值均为 0。具体使用哪条路径由配置页面的
+在 Windows 上使用软件渲染时，请优先查看 `software_frame_bytes`。它是单个渲染器
+持有的最大缓冲区，且与图集不同，它随窗口尺寸变化：4K 窗口约 32 MB，5K 约 59 MB，
+最高可达 160 MB，超过则拒绝分配。缩小窗口才能降低该值。在 macOS 上，以及在使用
+GPU 渲染的 Windows 会话中，该值均为 0。具体使用哪条路径由配置页面的
 `[appearance].software_render_mode` 控制。
 
 这些数值均为主机内存。GPU 上的纹理不计入其中 —— 这部分由显卡驱动持有，且不报告
