@@ -24,8 +24,10 @@ Cargo graph, `sonicterm-gpu` depends on `sonicterm-render-model`, while
 `render-model` depends on and re-exports grid/config/UI types through its
 `boundary` module; arrows do not imply the reverse Cargo dependency.
 `sonicterm-resource` is drawn apart because it carries no frame data: it is the
-accounting seam that the app and renderer charge retained memory to, described
-under [Resource governance](#resource-governance).
+accounting seam that `sonicterm-app` charges retained memory to, described
+under [Resource governance](#resource-governance). `sonicterm-gpu` does not
+depend on it and does not charge — see
+[Renderer retention is measured, not charged](#renderer-retention-is-measured-not-charged).
 
 ## Core flow
 
@@ -49,8 +51,9 @@ under [Resource governance](#resource-governance).
    and as the Windows fallback.
 6. `sonicterm-resource` holds the process-local owner tree and retained-memory
    ledger. `sonicterm-app` creates a `Window` owner per live window and an
-   `AppPane` owner per pane, and a periodic retention pass charges what each
-   pane and the renderer actually retain.
+   `AppPane` owner per pane. Charging what each pane retains happens only when
+   memory-target debug diagnostics are enabled; at the default log level the
+   owner tree exists and its figures stay zero.
 
 ## Design rules
 
@@ -124,8 +127,9 @@ cannot mistake sampling skew for a real imbalance.
 
 Owners form a tree with one immutable process root, and IDs are allocated
 monotonically and never reused. Which parent may hold which child is fixed per
-process kind and rejected at creation time rather than left to convention. The
-GUI path is:
+process kind and rejected at creation time rather than left to convention.
+
+The contract permits, for a GUI process:
 
 ```text
 Process -> Window -> AppPane -> LocalPty
@@ -133,13 +137,34 @@ Process -> Window -> AppPane -> LocalPty
 
 A GUI process root also admits `SharedFont`, `SharedRaster`, `SharedAtlas`, and
 the `MuxConnection` it opened as a client; a mux process root instead admits
-`MuxSession -> MuxPane -> PtyTransport`. Each owner is `Open`, then `Closing`,
-then `Closed`. `Closing` stops admitting new reservations and new children while
-still letting live tokens finalize during teardown, and closing is refused while
-an owner still has live children or nonzero charges.
+`MuxSession -> MuxPane -> PtyTransport`.
 
-A window or pane that fails to register an owner keeps working and is omitted
-from hierarchy accounting until the next sample — a diagnostic gap is preferred
+What production actually instantiates today is the first two levels:
+
+```text
+Process -> Window -> AppPane
+```
+
+`LocalPty`, the `Shared*` owners, and every `Mux*` owner are permitted by the
+ledger but never registered — no code path creates them. They are reserved
+capacity in the contract, not live topology.
+
+Each owner is `Open`, then `Closing`, then `Closed`. `Closing` stops admitting
+new reservations and new children while still letting live tokens finalize
+during teardown, and closing is refused while an owner still has live children
+or nonzero charges.
+
+Registration failure is not retried uniformly, and the difference matters:
+
+- A **pane** that fails to register keeps working and is picked up by the next
+  reconcile pass, which registers any unowned pane under an already-registered
+  window. Reconcile runs whenever a pane is created — new tab or split — and
+  again under memory-target debug sampling.
+- A **window** that fails to register is never retried. Reconcile skips a window
+  that has no owner, so neither it nor any of its panes appears in hierarchy
+  accounting for the rest of that window's life.
+
+In both cases the window or pane keeps working; a diagnostic gap is preferred
 over a lost window.
 
 ### Reservation tokens
@@ -158,6 +183,31 @@ Resizing in place is what the pane retention pass uses: releasing and
 re-reserving on every sample would pass the charge through zero, leaving the
 ledger briefly disagreeing with reality and letting a concurrent reservation
 take the budget in that window.
+
+#### Charging runs only under memory-target debug diagnostics
+
+Owner registration and charging are gated differently, and the distinction
+matters when reading a snapshot:
+
+- **Owners always exist.** A `Window` owner is registered when the window is
+  created, and an `AppPane` owner when the pane is created — new tab, split, or
+  window registration all reconcile unconditionally. This happens at every log
+  level.
+- **Charging is debug-gated.** The pass that samples what a pane retains and
+  moves its charges to match runs only when the `memory` target is enabled at
+  debug level. At the default level the owner hierarchy is fully populated and
+  every figure in it reads zero.
+
+This is deliberate, not a limitation. A walk over every pane briefly takes each
+parser lock, and paying that in an ordinary session would be a permanent cost
+for a diagnostic almost nobody is reading. A paired test pins both directions —
+one asserts charges appear under a debug subscriber, the other asserts the path
+stays inert at the default level — so a change that charged unconditionally
+would fail rather than quietly trade the defect for that cost.
+
+The consequence for anyone reading a snapshot: at the default log level, zero is
+what a correctly-working governor reports. It does not mean nothing is retained.
+The seam caps bound memory at every log level regardless.
 
 Every failure preserves the original ownership and accounting — `CommitError`,
 `TransferError`, and `CommittedTransferError` each hand the untouched original
@@ -183,20 +233,36 @@ match that fails to compile until a new variant is given a decision:
 | `FeatureGated` | Compiled out of shipped builds by a feature gate. |
 | `SubsystemAbsent` | The subsystem that would own it does not exist yet; charging it would be charging nothing. |
 
-Charged classes are the grid trio, parser capture, protocol metadata, retained
-inline media, and local PTY output, charged from the pane retention pass, plus
-glyph atlas and software frame from the renderer's retention seam.
-`RegistryMetadata` is `SubsystemAbsent` by construction rather than by schedule:
-owner records are the ledger's own storage, and charging them to a ledger class
-would make the ledger account for itself, a recursion with no fixed point.
+The classes with live charge sites are the grid trio, parser capture, protocol
+metadata, retained inline media, and local PTY output, all charged from the pane
+retention pass. `RegistryMetadata` is `SubsystemAbsent` by construction rather
+than by schedule: owner records are the ledger's own storage, and charging them
+to a ledger class would make the ledger account for itself, a recursion with no
+fixed point.
+
+#### Renderer retention is measured, not charged
+
+`GlyphAtlas` and `SoftwareFrame` are marked `Charged` in the coverage table, but
+**no charge site exists for either.** This is a known gap, and it is structural
+rather than pending: `sonicterm-gpu` declares no dependency on
+`sonicterm-resource`, so `GpuRenderer::retained_amounts()` reports its figures
+but has no governor to reserve against. Closing the gap requires a new
+dependency edge, not merely a call site.
+
+The consequence for anyone reading a snapshot: atlas and software-frame memory
+is real, is measured, and is absent from the ledger. A process total taken from
+the governor is a total of what the app charges, not of what the process holds.
 
 ### Memory invariants this release guarantees
 
+These hold for the classes with live charge sites, listed above:
+
 - Every seam that retains memory is bounded by its own tested cap, and the
-  reported figure for that seam tracks real heap.
-- Retained memory is attributable to an owner and a class, and the owner tree
-  reflects live window/pane topology — an owner closes when its window or pane
-  drops.
+  reported figure for that seam tracks real heap. This is the invariant that
+  bounds memory, and it holds at every log level.
+- Retained memory that is charged is attributable to an owner and a class, and
+  the owner tree reflects live window/pane topology — an owner closes when its
+  window or pane drops.
 - Charges follow their resource across pane migration: a pane torn out into a
   new window transfers attribution rather than leaking it to the process root.
 - Accounting cannot silently go negative or double-count; a release that would
@@ -205,6 +271,11 @@ would make the ledger account for itself, a recursion with no fixed point.
   derived from them.
 - Classes that are not charged are not merely uncharged — each carries a
   recorded reason.
+
+Two scope limits are deliberate and are *not* defects. Charging runs only under
+memory-target debug diagnostics, so at the default level these figures are zero
+while the seam caps continue to bound memory. And renderer retention is outside
+the ledger entirely, as described above.
 
 ## Accounting verification
 
@@ -337,6 +408,10 @@ bash scripts/check-no-raw-process-exit.sh
 bash scripts/check-workspace-crates.sh
 scripts/rust-logic-coverage.sh
 bash scripts/test-release-notes.sh
+bash scripts/pty-backend-feasibility.sh --check
+bash scripts/test-resource-inventory.sh
+bash scripts/test-soak-harness.sh
+bash scripts/test-resource-baseline-evidence.sh
 cargo build --release -p sonicterm-mac
 ```
 

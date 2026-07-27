@@ -124,7 +124,7 @@ FFI handles.
 
 ```text
 contracts:  sonicterm-types
-accounting: sonicterm-resource (charged by app and GPU; owns no frame data)
+accounting: sonicterm-resource (charged by app; owns no frame data)
 terminal:   sonicterm-io -> sonicterm-vt -> sonicterm-grid
 UI/model:   sonicterm-cfg -> sonicterm-ui -> sonicterm-render-model
 fonts:      font-config/fontconfig/freetype/harfbuzz -> font -> engine/text
@@ -256,7 +256,7 @@ Windows 也用 FreeType 作回退。渲染器只接触光栅 tile、字形度量
 
 ```text
 契约：      sonicterm-types
-记账：      sonicterm-resource（由 app 与 GPU 计费；不持有帧数据）
+记账：      sonicterm-resource（由 app 计费；不持有帧数据）
 终端：      sonicterm-io -> sonicterm-vt -> sonicterm-grid
 UI/模型：   sonicterm-cfg -> sonicterm-ui -> sonicterm-render-model
 字体：      font-config/fontconfig/freetype/harfbuzz -> font -> engine/text
