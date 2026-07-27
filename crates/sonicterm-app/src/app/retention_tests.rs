@@ -30,18 +30,55 @@ fn a_pane_total_is_exactly_the_sum_of_its_seams() {
         + retention.parser.bytes
         + retention.hyperlinks.bytes
         + retention.inline_media.bytes
-        + retention.pty_output.bytes;
+        + retention.pty_output.bytes
+        + retention.pty_input.bytes;
     let expected_items = retention.grid_visible.items
         + retention.grid_history.items
         + retention.grid_alternate.items
         + retention.parser.items
         + retention.hyperlinks.items
         + retention.inline_media.items
-        + retention.pty_output.items;
+        + retention.pty_output.items
+        + retention.pty_input.items;
 
     assert_eq!(retention.total().bytes, expected_bytes);
     assert_eq!(retention.total().items, expected_items);
     assert!(retention.grid_visible.bytes > 0, "a live pane must report grid cells");
+}
+
+/// Every seam carries weight in the total, including the ones a fresh pane
+/// leaves empty.
+///
+/// The test above measures a live pane, where `pty_input` is zero — nothing is
+/// queued toward the shell. A zero term is invisible on both sides of the
+/// assertion, so that test omitted `pty_input` entirely and still passed, and
+/// would have kept passing if `total()` stopped folding it.
+///
+/// Constructed rather than measured, with a distinct non-zero value per seam,
+/// so dropping any one term from `total()` changes the sum by an amount no
+/// other term can account for.
+#[test]
+fn every_seam_contributes_to_the_total() {
+    // Distinct powers of two: any subset sums to a unique value, so a missing
+    // term cannot be masked by the others.
+    let retention = PaneRetention {
+        grid_visible: ResourceAmount { bytes: 1, items: 1 },
+        grid_history: ResourceAmount { bytes: 2, items: 2 },
+        grid_alternate: ResourceAmount { bytes: 4, items: 4 },
+        parser: ResourceAmount { bytes: 8, items: 8 },
+        hyperlinks: ResourceAmount { bytes: 16, items: 16 },
+        inline_media: ResourceAmount { bytes: 32, items: 32 },
+        pty_output: ResourceAmount { bytes: 64, items: 64 },
+        pty_input: ResourceAmount { bytes: 128, items: 128 },
+    };
+
+    let total = retention.total();
+    assert_eq!(
+        total.bytes, 255,
+        "the total must fold all eight seams; a missing term leaves a gap the \
+         other seven cannot produce"
+    );
+    assert_eq!(total.items, 255, "items must fold the same eight seams as bytes");
 }
 
 /// Content written to a pane moves its reported total.
