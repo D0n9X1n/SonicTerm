@@ -139,10 +139,13 @@ impl ResourceClass {
             // Charged from the renderer's retention seam.
             Self::GlyphAtlas | Self::SoftwareFrame => ClassCoverage::Charged,
 
-            // PTY output queue: 64 slots over a reused 64 KiB ring. Measured
-            // at 512 KiB per pane at full capacity — the ring hands out views
-            // into one allocation rather than 64 independent buffers, which is
-            // 8x less than treating the slots as separate would suggest.
+            // PTY output queue: 64 slots of views into the reader's reused
+            // 64 KiB ring. The charge is the ring memory those views pin, not
+            // the slot count and not the payload — measured on a full queue
+            // from `/bin/sh`, 64 bytes of keystroke echo pin 64 KiB, and a
+            // sustained flood spans two rings at 128 KiB. The structural
+            // ceiling is one ring per slot, 4 MiB, which needs reads large
+            // enough to exhaust a ring apiece and no real shell reaches it.
             Self::PtyOutput => ClassCoverage::Charged,
 
             // 4 bounded slots of keystroke-sized payloads.
