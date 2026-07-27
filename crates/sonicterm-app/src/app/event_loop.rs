@@ -59,27 +59,39 @@ impl App {
         self.warm_window_pool_maintain(el);
         self.sample_pane_retention(Instant::now());
         let notification_wake = self.expire_notifications(Instant::now());
-        // Schedule the next blink-only redraw via `WaitUntil(..)`
-        // rather than `request_redraw()` from inside the render path
-        // (which produced the tight redraw loop flagged).
-        // The renderer hands us the exact instant of the next phase
-        // bucket boundary; fall back to `Wait` when blinking is off,
-        // the window is unfocused, or no renderer exists. Explicitly
-        // resetting to `Wait` (rather than leaving the previous
-        // `WaitUntil` in place) is what keeps idle CPU near zero —
-        // otherwise an unfocused window would keep waking at 26Hz.
-        let mut next: Option<std::time::Instant> = notification_wake;
+        // Reset the control flow on every pass rather than leaving the previous
+        // `WaitUntil` in place: that is what keeps idle CPU near zero. A
+        // deadline that has already elapsed re-fires `ResumeTimeReached` on
+        // every iteration, so a stale one spins the loop instead of letting it
+        // idle. With no contributor armed, idle parks in `Wait` and the app
+        // drives no wakes at all.
+        match self.wake_deadline(notification_wake) {
+            Some(at) => el.set_control_flow(ControlFlow::WaitUntil(at)),
+            None => el.set_control_flow(ControlFlow::Wait),
+        }
+    }
+
+    /// Earliest instant the event loop must wake, given the notification
+    /// expiry already computed by the caller.
+    ///
+    /// Folds every contributor: notification expiry, the Cmd+Q confirmation
+    /// window, the main window's deferred-redraw frame boundary, each pending
+    /// child window's frame boundary, and the cursor-blink phase boundary.
+    /// `None` means nothing is armed and the loop may park indefinitely.
+    ///
+    /// Every contributor min-folds. A deadline is a "wake no later than" bound,
+    /// so the earliest one wins; a contributor that overwrote instead of
+    /// folding would push an earlier deadline out past its due instant.
+    fn wake_deadline(&self, notification_wake: Option<Instant>) -> Option<Instant> {
+        let mut next: Option<Instant> = notification_wake;
         // Wake when the Cmd+Q confirmation window expires so a stale first press
         // does not make a much later Cmd+Q quit unexpectedly.
         if let Some(at) = self.quit_hold.deadline() {
             next = Some(next.map_or(at, |cur| cur.min(at)));
         }
-        // Perf audit #9: if a redraw was deferred for vsync pacing,
-        // schedule the next wake at the upcoming frame boundary. This
-        // takes priority over (and is bounded by) the blink deadline:
-        // typing latency must still feel instant, and a deferred
-        // redraw at frame_period in the future is the tightest budget
-        // that still preserves vsync alignment.
+        // A redraw deferred for vsync pacing wakes at its upcoming frame
+        // boundary: typing latency must still feel instant, and the frame
+        // boundary is the tightest budget that preserves vsync alignment.
         if self.pending_redraw {
             if let Some(last_render) = self.main().map(|ws| ws.last_render) {
                 let composing = self.main().map(|ws| ws.ime.is_composing()).unwrap_or(false);
@@ -88,7 +100,8 @@ impl App {
                     composing,
                     self.frame_period,
                 );
-                next = Some(last_render + period);
+                let at = last_render + period;
+                next = Some(next.map_or(at, |cur| cur.min(at)));
             }
         }
         // same vsync-pacing schedule for any CHILD window that
@@ -108,6 +121,11 @@ impl App {
                 next = Some(next.map_or(at, |cur| cur.min(at)));
             }
         }
+        // The next cursor-blink phase boundary is scheduled through this wake
+        // deadline rather than by calling `request_redraw()` from inside the
+        // render path, which would spin a tight redraw loop. The renderer
+        // returns the exact instant of the next phase bucket, or `None` when
+        // blinking is off, the window is unfocused, or no renderer exists.
         if let Some(r) = self.main_renderer() {
             // cursor_visible is per-pane — read from the
             // active pane of the active tab so the DECTCEM flag
@@ -130,10 +148,7 @@ impl App {
                 };
             }
         }
-        match next {
-            Some(at) => el.set_control_flow(ControlFlow::WaitUntil(at)),
-            None => el.set_control_flow(ControlFlow::Wait),
-        }
+        next
     }
 
     pub(super) fn do_new_events(&mut self, _el: &ActiveEventLoop, cause: winit::event::StartCause) {
@@ -456,3 +471,7 @@ impl App {
         window.request_redraw();
     }
 }
+
+#[cfg(test)]
+#[path = "event_loop_tests.rs"]
+mod event_loop_tests;
