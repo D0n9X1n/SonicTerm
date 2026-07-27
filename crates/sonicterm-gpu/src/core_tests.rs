@@ -1390,3 +1390,48 @@ fn an_empty_renderer_reports_nothing() {
     let classes = RendererRetention::default().seam_classes();
     assert!(classes.iter().all(|(_, part)| part.bytes == 0 && part.items == 0));
 }
+
+/// The resource table's `SoftwareFrame` bound is this crate's surface clamp.
+///
+/// `ClassCoverage::UnchargedRetention { per_owner_bytes }` asks how much can
+/// hide in a class nothing charges. The software frame is
+/// `width * height * 4`, so no single figure describes it and the honest
+/// answer is the most one surface may hold — [`MAX_SURFACE_BYTES`], which
+/// `validated_surface_size` enforces on every construction and resize.
+///
+/// The table previously carried one 4K frame, 33,177,600 bytes. That is one
+/// common window, not a bound: a 5K window holds 178% of it and the clamp
+/// admits 5.06x. Nothing noticed it drifting, because the figure was a literal
+/// checked against nothing.
+///
+/// Asserted against the constant, not a copy of its value, so moving the clamp
+/// without moving the table fails here.
+#[test]
+fn the_tabled_software_frame_bound_is_the_surface_clamp() {
+    use sonicterm_types::{ClassCoverage, ResourceClass};
+
+    let ClassCoverage::UnchargedRetention { per_owner_bytes } =
+        ResourceClass::SoftwareFrame.coverage()
+    else {
+        panic!(
+            "SoftwareFrame must be UnchargedRetention: this crate computes it and no \
+             governor charges it"
+        );
+    };
+
+    assert_eq!(
+        u64::try_from(per_owner_bytes).expect("the bound fits u64"),
+        MAX_SURFACE_BYTES,
+        "the resource table's SoftwareFrame bound and this crate's surface clamp \
+         disagree; the table would misstate what one frame can hold"
+    );
+
+    // And the clamp is reachable in principle, or the bound is fiction. The
+    // per-axis cap is the binding constraint, not the byte cap.
+    let max_pixels = u64::from(MAX_SURFACE_DIMENSION) * u64::from(MAX_SURFACE_DIMENSION);
+    assert!(
+        max_pixels * 4 >= MAX_SURFACE_BYTES,
+        "the dimension cap makes the byte clamp unreachable, so the bound describes \
+         a surface that cannot exist"
+    );
+}

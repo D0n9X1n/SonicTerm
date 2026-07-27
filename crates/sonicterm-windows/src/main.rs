@@ -35,6 +35,9 @@ mod cli;
 mod menubar;
 #[cfg(target_os = "windows")]
 mod os_drag_win;
+// Windows-only: it resolves `software_render_mode` for the Win32 backdrop
+// decision, and nothing off-Windows consumes it.
+#[cfg(target_os = "windows")]
 mod software_presenter;
 #[cfg(target_os = "windows")]
 mod tab_drag_os;
