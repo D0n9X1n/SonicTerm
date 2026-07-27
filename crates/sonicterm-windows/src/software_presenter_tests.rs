@@ -600,3 +600,37 @@ fn resize_to_the_same_size_keeps_pending_dirty_rects() {
         "a resize that changes nothing must not discard a pending update"
     );
 }
+
+/// No caller may answer the detection question with a literal.
+///
+/// `should_use(false)` in `main.rs` made the branch unreachable under `Auto`,
+/// the default mode — the answer was fixed before the adapter was consulted.
+/// The argument must come from runtime detection or the call is decorative.
+///
+/// A source scan, because this is a property of the *call site* rather than of
+/// any value: a behavioural test cannot tell `should_use(false)` from
+/// `should_use(detected)` on a host where detection is false.
+///
+/// Scoped to literals only. It will not catch a caller that passes a variable
+/// which is always false, and it is not meant to — that is a different defect
+/// with a different remedy.
+#[test]
+fn no_caller_hardcodes_the_detection_argument() {
+    const MAIN: &str = include_str!("main.rs");
+
+    for (index, line) in MAIN.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        assert!(
+            !trimmed.contains("should_use(false)") && !trimmed.contains("should_use(true)"),
+            "main.rs:{} answers the software-detection question with a literal: {}\n\
+             The argument must come from runtime adapter detection. A literal makes the \
+             call decorative — `Auto` follows detection, so a hardcoded value fixes the \
+             answer before the adapter is consulted.",
+            index + 1,
+            trimmed
+        );
+    }
+}
