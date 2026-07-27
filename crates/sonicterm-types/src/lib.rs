@@ -34,8 +34,8 @@ pub use mod_key::ModKey;
 pub use resource::{
     AdmissionRejection, BudgetDimension, BudgetError, BudgetScope, ClassCoverage, DeliveryReceipt,
     DisconnectReason, DropReason, GovernorLimits, OwnerKind, OwnerLimits, OwnerState, OwnerView,
-    PressureOutcome, ProcessKind, ProcessView, ResizeOperation, ResourceAmount, ResourceClass,
-    ResourceOwnerId, ResourceSnapshot, RetryToken, RetryWakeup,
+    PaneSeamTerm, PressureOutcome, ProcessKind, ProcessView, ResizeOperation, ResourceAmount,
+    ResourceClass, ResourceOwnerId, ResourceSnapshot, RetryToken, RetryWakeup,
 };
 pub use shell_quote::shell_quote_posix;
 pub use traits::{ClipboardBackend, FrameLike, PaintError, Painter, PtyTransport, WindowBackend};

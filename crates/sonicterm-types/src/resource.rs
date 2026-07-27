@@ -188,6 +188,95 @@ impl ResourceClass {
     }
 }
 
+/// Whether a class contributes a term to a pane owner's seam-cap sum.
+///
+/// The sum exists to derive a backstop above everything a pane owner can be
+/// charged for. It is compared against that owner's ledger total, so it must
+/// have a term for exactly the classes that can appear in that total — no more
+/// and no fewer. A missing term puts the backstop below memory the seams
+/// legitimately permit, where it fires during correct operation; a term for a
+/// class that never charges a pane inflates it with memory that cannot appear
+/// in the figure it guards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneSeamTerm {
+    /// A pane owner is charged for this class, so the sum carries its cap.
+    Contributes,
+    /// Charged, but to an owner other than a pane, so it never appears in a
+    /// pane owner's total.
+    ChargedToAnotherOwnerKind,
+    /// No production site charges this class to any owner, so it cannot appear
+    /// in a pane owner's total whatever it retains.
+    NotChargedInProduction,
+}
+
+impl ResourceClass {
+    /// This class's place in a pane owner's seam-cap sum.
+    ///
+    /// Exhaustive by construction, like [`ResourceClass::coverage`]: adding a
+    /// variant fails to compile here until someone decides whether a pane owner
+    /// can be charged for it. That is what keeps the sum a derivation rather
+    /// than a figure that was once correct — a new charged class cannot reach
+    /// production without either contributing a term or recording why it does
+    /// not.
+    #[must_use]
+    pub const fn pane_seam_term(self) -> PaneSeamTerm {
+        match self {
+            // The three grid classes share one cap: `MAX_GRID_CELLS` bounds
+            // visible, history, and saved-primary cells together rather than
+            // each separately, so the sum carries that single term.
+            Self::GridVisible | Self::GridHistory | Self::GridAlternate => {
+                PaneSeamTerm::Contributes
+            }
+
+            // Capture staging and the escape sequence in flight, both bounded
+            // by the parser's own caps.
+            Self::ParserCapture => PaneSeamTerm::Contributes,
+            // The hyperlink registry's retained strings.
+            Self::ProtocolMetadata => PaneSeamTerm::Contributes,
+            // Decoded pixels the pane keeps after rendering.
+            Self::InlineMediaRetained => PaneSeamTerm::Contributes,
+            // The reader ring the output queue pins. The sum carries the
+            // structural ceiling of one ring per slot rather than the figure a
+            // real shell reaches, because a backstop has to sit above what the
+            // seam permits, not above what it usually uses.
+            Self::PtyOutput => PaneSeamTerm::Contributes,
+
+            // Atlas pixels and the software frame belong to the renderer and
+            // are charged to its owner. A pane's ledger never carries them, so
+            // a term here would raise the pane backstop for memory that cannot
+            // appear beneath it.
+            Self::GlyphAtlas | Self::SoftwareFrame => PaneSeamTerm::ChargedToAnotherOwnerKind,
+
+            // Real retention, bounded by its own seam, and small enough that
+            // no charge site exists. Without a charge these cannot appear in a
+            // pane's total, so the backstop that reads that total gains
+            // nothing from carrying them.
+            Self::PtyInput | Self::ParserReply | Self::CommandEvents => {
+                PaneSeamTerm::NotChargedInProduction
+            }
+
+            // Released before the call that allocated them returns, so no
+            // sampler sees them in a pane's total.
+            Self::InlineMediaDecode | Self::GlyphRaster | Self::UploadStaging => {
+                PaneSeamTerm::NotChargedInProduction
+            }
+
+            // Compiled out of shipped builds.
+            Self::RemoteInput | Self::RemoteOutput => PaneSeamTerm::NotChargedInProduction,
+
+            // No subsystem charges these: mux has no live subscribers, the
+            // reaper is unreferenced from the app, owner records are the
+            // ledger's own storage, font faces await a shared owner, and GPU
+            // surface memory has no size the driver exposes.
+            Self::MuxSubscriber
+            | Self::ReaperWork
+            | Self::RegistryMetadata
+            | Self::FontFace
+            | Self::Surface => PaneSeamTerm::NotChargedInProduction,
+        }
+    }
+}
+
 /// Two-dimensional amount charged to a resource class.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ResourceAmount {
