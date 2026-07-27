@@ -245,7 +245,20 @@ resized so its rendered form is at most 1024 pixels per side. Sixel data is
 decoded into a 1024-per-side buffer directly. The result is converted to
 premultiplied BGRA8 and stored on its pane. The renderer inserts them into the
 same atlas using a reserved image font slot and emits color-glyph instances
-anchored to grid row/column. Each pane retains at most 128 decoded images.
+anchored to grid row/column.
+
+Retention is bounded per pane and across the process together, so how much a
+pane keeps depends on how many panes are open. Every pane draws on one process
+budget of 256 MiB; opening more panes lowers what each one retains rather than
+pushing the process past that ceiling. No pane is reduced below 4 MiB, which
+holds one full-size image, and no pane keeps more than 128 images regardless of
+their size.
+
+A pane releases its oldest images first and never releases its most recent one,
+so a trimmed pane still renders. When the process is over its budget, SonicTerm
+revisits every pane rather than only the one currently decoding, so a pane that
+filled up early and then went idle gives back the larger share it was admitted
+under instead of holding it for the rest of the session.
 
 ## GPU drawing
 
@@ -500,7 +513,16 @@ iTerm2 file image、kitty graphics 与 Sixel media event 在 app 中解码。解
 尺寸限制：单边超过 2048 像素的图像在解码前即被拒绝；被接受的图像随后会被缩放，使其渲染
 尺寸单边不超过 1024 像素。Sixel 数据直接解码进单边 1024 的缓冲区。结果转换为预乘 BGRA8，
 保存在所属窗格。renderer 使用保留 image font slot 插入同一 atlas，并按 grid 行列发出 color-glyph instance。
-每个窗格最多保留 128 个已解码图像。
+
+保留量由窗格与整个进程共同限制，因此单个窗格能保留多少，取决于当前打开了多少窗格。
+所有窗格共用 256 MiB 的进程预算；打开更多窗格会降低每个窗格的保留量，而不会让进程
+超出该上限。任何窗格都不会被压到 4 MiB 以下（足以完整保留一张全尺寸图像），也都不会
+保留超过 128 张图像，无论其尺寸大小。
+
+窗格优先释放最旧的图像，并且永远不会释放最新的一张，因此被裁剪的窗格仍能正常渲染。
+当进程超出预算时，SonicTerm 会遍历每一个窗格，而不只是当前正在解码的那个；因此，
+早期填满后转入空闲的窗格会交还其被准入时获得的较大份额，而不会在此后的整个会话中
+一直占用。
 
 ## GPU 绘制
 
