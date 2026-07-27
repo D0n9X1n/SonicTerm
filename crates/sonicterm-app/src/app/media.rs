@@ -8,9 +8,29 @@ use sonicterm_types::ResourceAmount;
 use sonicterm_vt::vt::{MediaEvent, MediaProtocol};
 
 static NEXT_IMAGE_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Largest side a *source* image may declare before any pixels are decoded.
+///
+/// A preflight rejection bound, not a retention bound. It is read from the
+/// encoded header and bounds the work the decoder is willing to start; what
+/// survives decode is bounded by [`MAX_INLINE_IMAGE_RENDER_SIDE`] below, which
+/// is smaller. The two are separate limits and the distance between them is
+/// deliberate: a source larger than the rendered cap is downscaled rather than
+/// refused, so an oversized image still renders.
 const MAX_INLINE_IMAGE_DECODE_SIDE: u32 = 2048;
 const MAX_INLINE_IMAGE_DECODE_PIXELS: u64 =
     MAX_INLINE_IMAGE_DECODE_SIDE as u64 * MAX_INLINE_IMAGE_DECODE_SIDE as u64;
+
+/// Largest side an image can occupy *after* decode, and so the side that
+/// bounds every retained buffer.
+///
+/// Both decoders reduce to this: the base64 path resizes anything larger, and
+/// the Sixel path rasterises into a buffer of exactly this side and clips
+/// beyond it. Named once and shared by both because it was previously written
+/// as two independent literals — one per decoder — which is a bound that can
+/// drift on one path while the constant derived from it keeps describing the
+/// other.
+const MAX_INLINE_IMAGE_RENDER_SIDE: u32 = 1024;
 const MAX_RETAINED_INLINE_IMAGES: usize = 128;
 pub(super) const MAX_RETAINED_INLINE_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 
@@ -45,11 +65,11 @@ fn decode_base64_image(encoded: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
         return None;
     }
     let mut image = image::load_from_memory(&bytes).ok()?;
-    const MAX_INLINE_IMAGE_SIDE: u32 = 1024;
-    if image.width() > MAX_INLINE_IMAGE_SIDE || image.height() > MAX_INLINE_IMAGE_SIDE {
+    if image.width() > MAX_INLINE_IMAGE_RENDER_SIDE || image.height() > MAX_INLINE_IMAGE_RENDER_SIDE
+    {
         image = image.resize(
-            MAX_INLINE_IMAGE_SIDE,
-            MAX_INLINE_IMAGE_SIDE,
+            MAX_INLINE_IMAGE_RENDER_SIDE,
+            MAX_INLINE_IMAGE_RENDER_SIDE,
             image::imageops::FilterType::Lanczos3,
         );
     }
@@ -105,12 +125,19 @@ static LIVE_INLINE_MEDIA_CHARGES: AtomicUsize = AtomicUsize::new(0);
 
 /// Largest decoded image the retention path can be asked to hold.
 ///
-/// Not a policy choice — a consequence of what
-/// [`inline_image_decode_dimensions_allowed`] admits. Stated here because the
-/// residual bound depends on it: a pane is never trimmed below its most recent
-/// image, so the worst case per pane is this, not the floor below.
-pub(super) const MAX_DECODED_INLINE_IMAGE_BYTES: usize =
-    MAX_INLINE_IMAGE_DECODE_SIDE as usize * MAX_INLINE_IMAGE_DECODE_SIDE as usize * 4;
+/// Derived from [`MAX_INLINE_IMAGE_RENDER_SIDE`] — the cap on what survives
+/// decode — and not from the preflight cap, which is larger and bounds
+/// something else. The preflight gate gets to decide whether decoding starts;
+/// it does not decide what is retained, because both decoders reduce to the
+/// rendered side below it. Deriving this from the preflight side described a
+/// resize that runs before anything reaches retention, and overstated the
+/// figure by the square of the ratio between the two sides.
+///
+/// Measured rather than asserted: driving a 2048x2048 PNG through the Kitty
+/// and iTerm2 paths, and a Sixel payload addressing 4096x4096, each retains
+/// exactly this many bytes.
+pub(super) const MAX_SINGLE_INLINE_IMAGE_BYTES: usize =
+    MAX_INLINE_IMAGE_RENDER_SIDE as usize * MAX_INLINE_IMAGE_RENDER_SIDE as usize * 4;
 
 /// Smallest budget a pane is guaranteed regardless of how many panes exist.
 ///
@@ -118,28 +145,34 @@ pub(super) const MAX_DECODED_INLINE_IMAGE_BYTES: usize =
 /// with a budget below one image renders nothing — the failure this floor
 /// exists to prevent.
 ///
-/// Holds a 1024×1024 image whole. Note that this is *below* what decode
-/// accepts: [`MAX_DECODED_INLINE_IMAGE_BYTES`] is four times larger. A pane
-/// receiving an image at the decode limit therefore retains more than this
-/// floor, because trimming never evicts a pane's only image — doing so would
-/// leave it rendering nothing, which is the outcome the floor exists to
-/// prevent. The floor bounds a pane holding *many* images; the decode limit
-/// bounds one holding a single large one, and the residual bound has to be
-/// stated in terms of the larger of the two.
+/// Sized to hold one whole image at [`MAX_SINGLE_INLINE_IMAGE_BYTES`], which
+/// is the largest any decoder produces. The two figures are therefore equal,
+/// and the assertion below keeps them that way: a pane's guaranteed budget
+/// must cover the largest single image, or the guarantee does not hold for the
+/// case it exists to cover.
 pub(super) const MIN_PANE_INLINE_MEDIA_BYTES: usize = 4 * 1024 * 1024;
+
+/// The floor must hold the largest decodable image whole.
+///
+/// If the rendered side grows without this floor growing with it, a pane's
+/// guaranteed budget would no longer fit one image, and the residual bound
+/// below — which is stated as the floor — would understate what a pane can
+/// legitimately retain. Failing at compile time is the point: the two are
+/// derived from different places and nothing else ties them together.
+const _: () = assert!(
+    MIN_PANE_INLINE_MEDIA_BYTES >= MAX_SINGLE_INLINE_IMAGE_BYTES,
+    "the per-pane floor must hold one whole image at the rendered cap"
+);
 
 /// Worst-case bytes one pane retains under process pressure.
 ///
-/// Trimming reduces a pane to its most recent image and no further. That image
-/// may be anything decode accepted, so the per-pane residual is the larger of
-/// the guaranteed floor and the largest image that could be sitting in it.
+/// Trimming reduces a pane to its most recent image and no further, so a pane
+/// can sit above its budget by at most one image. Since the floor is sized to
+/// hold the largest such image whole, the floor *is* that worst case — there
+/// is no second, larger term to take a maximum against.
 #[must_use]
 pub(super) const fn max_pane_residual_bytes() -> usize {
-    if MAX_DECODED_INLINE_IMAGE_BYTES > MIN_PANE_INLINE_MEDIA_BYTES {
-        MAX_DECODED_INLINE_IMAGE_BYTES
-    } else {
-        MIN_PANE_INLINE_MEDIA_BYTES
-    }
+    MIN_PANE_INLINE_MEDIA_BYTES
 }
 
 /// Read the live process-wide inline-media total.
@@ -268,7 +301,7 @@ pub(super) fn trim_inline_images_charged(
     let after = retained_inline_media(images);
 
     // A pane is never trimmed below its most recent image, so a pane holding
-    // one image at the decode limit legitimately sits above `budget`. Anything
+    // one image at the rendered cap legitimately sits above `budget`. Anything
     // beyond that is not the residual — it is a trim that failed to run.
     debug_assert!(
         after.bytes <= budget.max(max_pane_residual_bytes()),
@@ -316,12 +349,6 @@ pub(super) fn trim_staged_inline_images(images: &mut Vec<InlineImage>) {
     trim_inline_images_to(images, pane_inline_media_budget());
 }
 
-/// Drop oldest images until the vector fits `byte_budget` and the count cap.
-///
-/// Always retains the newest image even when it alone exceeds the budget: a
-/// pane that renders nothing is a worse outcome than one that briefly holds a
-/// single oversized image, and the decode-side dimension check already bounds
-/// how large that one image can be.
 /// Drop oldest images until the vector fits `byte_budget` and the count cap,
 /// **returning** the evicted images rather than freeing them.
 ///
@@ -339,7 +366,7 @@ pub(super) fn trim_staged_inline_images(images: &mut Vec<InlineImage>) {
 ///
 /// Always retains the newest image even when it alone exceeds the budget: a
 /// pane that renders nothing is a worse outcome than one that briefly holds a
-/// single oversized image, and the decode-side dimension check already bounds
+/// single oversized image, and [`MAX_SINGLE_INLINE_IMAGE_BYTES`] already bounds
 /// how large that one image can be.
 #[must_use = "the evicted images must be dropped outside the lock, or the \
               allocator pause this exists to avoid happens anyway"]
@@ -385,7 +412,10 @@ pub(super) fn retained_inline_media(images: &[InlineImage]) -> ResourceAmount {
 }
 
 fn decode_sixel(data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
-    const MAX_SIDE: usize = 1024;
+    // The same rendered-side cap the base64 path resizes to: this buffer is
+    // what a Sixel payload rasterises into, and anything addressing beyond it
+    // is clipped below.
+    const MAX_SIDE: usize = MAX_INLINE_IMAGE_RENDER_SIDE as usize;
     let mut palette = [[0u8, 0, 0, 255]; 256];
     palette[0] = [0, 0, 0, 255];
     palette[1] = [255, 255, 255, 255];
