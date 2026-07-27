@@ -59,6 +59,24 @@ impl WindowsSoftwarePresenterPreference {
         }
     }
 
+    /// Whether the software presenter applies, given runtime adapter detection.
+    ///
+    /// **No production caller.** The only one passed a hardcoded `false`, so
+    /// under `Auto` — the default — it always answered "no" whatever the host
+    /// had; it gated a log line and was removed rather than corrected, because
+    /// `app/event_loop.rs` already logs `software-render degrade engaged` with
+    /// both `detected` and `mode` at the moment those are real.
+    ///
+    /// A real caller cannot exist here yet for a structural reason:
+    /// `detected_software_adapter` comes from the renderer, and the renderer is
+    /// built inside `WindowsShell` — after this crate's startup code runs. The
+    /// caller will arrive with [`SoftwareSurface`], which is also not yet
+    /// constructed outside tests.
+    ///
+    /// Kept because the decision it encodes is verified against the app's copy
+    /// (`should_degrade_for_software_render`) across the whole `(mode,
+    /// detected)` domain, and that agreement is what stops a half-degraded
+    /// renderer when the presenter is wired up.
     #[must_use]
     pub fn should_use(self, detected_software_adapter: bool) -> bool {
         match self {

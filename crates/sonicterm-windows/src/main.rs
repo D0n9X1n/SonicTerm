@@ -94,12 +94,17 @@ fn main() -> Result<()> {
             software_presenter::WindowsSoftwarePresenterPreference::from_config(
                 config.appearance.software_render_mode,
             );
-        if software_presenter_pref.should_use(false) {
-            tracing::info!(
-                mode = ?config.appearance.software_render_mode,
-                "Windows software presenter preferred by config; disabling compositor backdrop"
-            );
-        }
+        // No log line here. Whether the software path applies depends on
+        // adapter detection, which comes from the renderer — built inside
+        // `WindowsShell` below, after this point. Asking the question here
+        // meant passing a hardcoded `false`, so under `Auto` (the default) the
+        // answer was always "no" regardless of the host's adapter.
+        //
+        // `app/event_loop.rs` already logs `software-render degrade engaged`
+        // with both `detected` and `mode`, at the moment those are real.
+        //
+        // `forces_opaque_window` below needs no detection: only `Force`
+        // overrides the backdrop, and that is a pure config question.
         let backdrop_kind = if software_presenter_pref.forces_opaque_window() {
             sonicterm_cfg::config::BackdropKind::Opaque
         } else {
