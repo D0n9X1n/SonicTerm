@@ -64,6 +64,7 @@ static ACTIVE_PTY_IO_THREADS: AtomicUsize = AtomicUsize::new(0);
 #[derive(Clone, Debug)]
 pub struct PtyInputSender {
     tx: Sender<Outgoing>,
+    queued_bytes: Arc<AtomicUsize>,
 }
 
 impl PtyInputSender {
@@ -75,7 +76,7 @@ impl PtyInputSender {
     /// is full, or the writer has gone. The error retains the bytes so the
     /// caller can retry or report rather than losing them silently.
     pub fn send(&self, bytes: Vec<u8>) -> Result<(), PtyInputError> {
-        try_queue_pty_input(&self.tx, bytes)
+        try_queue_pty_input(&self.tx, &self.queued_bytes, bytes)
     }
 }
 
@@ -410,14 +411,27 @@ fn pty_input_channel() -> (Sender<Outgoing>, Receiver<Outgoing>) {
     crossbeam_channel::bounded(PTY_INPUT_QUEUE_CAPACITY)
 }
 
-fn try_queue_pty_input(tx: &Sender<Outgoing>, bytes: Vec<u8>) -> Result<(), PtyInputError> {
+fn try_queue_pty_input(
+    tx: &Sender<Outgoing>,
+    queued_bytes: &AtomicUsize,
+    bytes: Vec<u8>,
+) -> Result<(), PtyInputError> {
     if !pty_input_message_allowed(bytes.len()) {
         return Err(PtyInputError::MessageTooLarge(bytes));
     }
-    tx.try_send(bytes).map_err(|error| match error {
-        crossbeam_channel::TrySendError::Full(bytes) => PtyInputError::QueueFull(bytes),
-        crossbeam_channel::TrySendError::Disconnected(bytes) => {
-            PtyInputError::WriterDisconnected(bytes)
+    // Counted before the send, because once the message is in the channel the
+    // writer thread may drain it before this line would otherwise run — which
+    // would decrement a counter that had never been incremented.
+    let len = bytes.len();
+    queued_bytes.fetch_add(len, Ordering::Relaxed);
+    tx.try_send(bytes).map_err(|error| {
+        // The message never entered the queue, so it is not queued memory.
+        queued_bytes.fetch_sub(len, Ordering::Relaxed);
+        match error {
+            crossbeam_channel::TrySendError::Full(bytes) => PtyInputError::QueueFull(bytes),
+            crossbeam_channel::TrySendError::Disconnected(bytes) => {
+                PtyInputError::WriterDisconnected(bytes)
+            }
         }
     })
 }
@@ -427,7 +441,11 @@ pub fn pty_input_message_allowed(bytes: usize) -> bool {
     bytes <= MAX_PTY_INPUT_MESSAGE_BYTES
 }
 
-/// Maximum bytes that can wait in one pane's PTY input channel.
+/// Worst-case bytes that can wait in one pane's PTY input channel.
+///
+/// The product of the slot count and the per-message cap. This is the bound,
+/// not the occupancy: [`PtyHandle::queued_input_bytes`] reports what is
+/// actually held.
 #[must_use]
 pub fn max_pty_queued_input_bytes() -> usize {
     PTY_INPUT_QUEUE_CAPACITY.saturating_mul(MAX_PTY_INPUT_MESSAGE_BYTES)
@@ -564,6 +582,14 @@ pub struct PtyHandle {
     /// Use [`PtyHandle::send_input_nonblocking`] for terminal input, or
     /// [`PtyHandle::reply_sender`] for a thread that forwards parser replies.
     in_tx: Sender<Outgoing>,
+    /// Bytes currently waiting in `in_tx`, maintained exactly.
+    ///
+    /// The queue holds `Vec<u8>` messages of any size up to the per-message
+    /// cap, so a slot count says nothing about bytes held. Incremented when a
+    /// message enters the queue and decremented when the writer thread takes
+    /// it out, both inside this crate — there is no consumer that could forget
+    /// to account for one.
+    queued_input_bytes: Arc<AtomicUsize>,
     /// Closure that resizes the pty to `(cols, rows)`.
     pub resize: Box<dyn Fn(u16, u16) + Send + Sync>,
     reader_cancel: Sender<()>,
@@ -650,7 +676,20 @@ impl PtyHandle {
     /// On failure, the error retains the rejected bytes so the caller can
     /// retry or notify the user instead of silently losing terminal input.
     pub fn send_input_nonblocking(&self, bytes: Vec<u8>) -> Result<(), PtyInputError> {
-        try_queue_pty_input(&self.in_tx, bytes)
+        try_queue_pty_input(&self.in_tx, &self.queued_input_bytes, bytes)
+    }
+
+    /// Bytes waiting in this pane's PTY input channel.
+    ///
+    /// The exact figure, not a slot count times an assumed message size. A
+    /// single paste is accepted up to the per-message cap and broadcast to
+    /// every pane, so the difference between "four slots" and the bytes in
+    /// them is the difference between kilobytes and tens of megabytes.
+    ///
+    /// Observes without consuming, so any thread may sample it.
+    #[must_use]
+    pub fn queued_input_bytes(&self) -> usize {
+        self.queued_input_bytes.load(Ordering::Relaxed)
     }
 
     /// An owned input sender for a caller that cannot borrow the handle.
@@ -665,7 +704,7 @@ impl PtyHandle {
     /// whose reason for existing is that nothing should block there.
     #[must_use]
     pub fn input_sender(&self) -> PtyInputSender {
-        PtyInputSender { tx: self.in_tx.clone() }
+        PtyInputSender { tx: self.in_tx.clone(), queued_bytes: self.queued_input_bytes.clone() }
     }
 }
 
@@ -936,7 +975,9 @@ impl PtyHandle {
         let reader_thread =
             spawn_reader_thread(reader, out_tx, reader_cancel_rx, output_meter.clone());
         // Writer thread: in_rx -> pty.
-        let writer_thread = spawn_writer_thread(writer, in_rx, writer_cancel_rx);
+        let queued_input_bytes = Arc::new(AtomicUsize::new(0));
+        let writer_thread =
+            spawn_writer_thread(writer, in_rx, writer_cancel_rx, queued_input_bytes.clone());
 
         let resize_master = master.clone();
         // Dedup no-op resizes. Callers (e.g. tab switch via
@@ -967,6 +1008,7 @@ impl PtyHandle {
         Ok(Self {
             out_rx,
             in_tx,
+            queued_input_bytes,
             resize,
             reader_cancel,
             writer_cancel,
@@ -1089,6 +1131,7 @@ fn spawn_writer_thread(
     mut writer: Box<dyn Write + Send>,
     rx: Receiver<Outgoing>,
     cancel: Receiver<()>,
+    queued_bytes: Arc<AtomicUsize>,
 ) -> PtyIoThread {
     let (done_tx, done) = crossbeam_channel::bounded(1);
     let handle = thread::Builder::new()
@@ -1103,6 +1146,12 @@ fn spawn_writer_thread(
                         Err(_) => break,
                     },
                 };
+                // Out of the queue and owned by this thread, so it is no
+                // longer queued memory whether or not the write succeeds.
+                // Exactly paired with the increment in `try_queue_pty_input`:
+                // a message is counted once when it enters the channel and
+                // uncounted once when it leaves, so this cannot underflow.
+                queued_bytes.fetch_sub(bytes.len(), Ordering::Relaxed);
                 if let Err(e) = writer.write_all(&bytes) {
                     if cancel.try_recv().is_err() {
                         tracing::warn!("pty write error: {e}");
@@ -1111,6 +1160,10 @@ fn spawn_writer_thread(
                 }
                 let _ = writer.flush();
             }
+            // Nothing will drain the queue again. Anything still in it is
+            // released when the channel drops, so the figure must not keep
+            // reporting it as held.
+            queued_bytes.store(0, Ordering::Relaxed);
             let _ = done_tx.send(());
         })
         // PANIC: see `spawn_reader_thread` rationale above — OS-level

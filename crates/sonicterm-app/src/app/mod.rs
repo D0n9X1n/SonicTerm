@@ -3996,13 +3996,10 @@ impl App {
 
     /// Test-only: whether `owner` is still open in the governor.
     ///
-    /// Asks the ledger for the owner's *state*, not its existence.
-    /// `finish_close` transitions an owner to `Closed` and decrements its
-    /// parent's child count; it does not remove the record, so a closed owner
-    /// still snapshots successfully. A check on existence would therefore pass
-    /// whether or not the owner was ever closed — which is exactly the
-    /// non-discriminating assertion that let a leaking release path through
-    /// here on the first attempt.
+    /// A closed owner's record is dropped, so this reports `false` for both a
+    /// closed owner and an owner that never existed. That is the answer the
+    /// callers want — "is this still holding resources" — and it stays correct
+    /// whichever way the ledger represents a finished owner.
     #[doc(hidden)]
     pub fn __test_owner_is_open(&self, owner: ResourceOwnerId) -> bool {
         self.governor

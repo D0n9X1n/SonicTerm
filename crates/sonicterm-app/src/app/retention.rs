@@ -57,6 +57,15 @@ pub struct PaneRetention {
     /// held down. Measured at one ring for every real shell workload and two
     /// under a sustained flood, against a 4 MiB structural ceiling.
     pub pty_output: ResourceAmount,
+    /// Bytes waiting in this pane's PTY input channel.
+    ///
+    /// Four slots, but each holds a `Vec<u8>` accepted up to the per-message
+    /// cap, so the slot count says nothing about the bytes held. A paste is
+    /// admitted at the full message size and broadcast to every pane, which is
+    /// how this reaches tens of megabytes per pane from one user action. The
+    /// figure is maintained exactly by the queue rather than derived from the
+    /// slot count.
+    pub pty_input: ResourceAmount,
 }
 
 impl PaneRetention {
@@ -77,6 +86,7 @@ impl PaneRetention {
             self.hyperlinks,
             self.inline_media,
             self.pty_output,
+            self.pty_input,
         ]
         .into_iter()
         .fold(ResourceAmount::default(), |acc, part| ResourceAmount {
@@ -96,6 +106,7 @@ impl PaneRetention {
             ("hyperlinks", self.hyperlinks),
             ("inline_media", self.inline_media),
             ("pty_output", self.pty_output),
+            ("pty_input", self.pty_input),
         ]
         .into_iter()
         .max_by_key(|(_, amount)| amount.bytes)
@@ -133,6 +144,11 @@ pub fn measure_pane(pane: &PaneState) -> Option<PaneRetention> {
         items: pty.out_rx.len(),
     });
 
+    let pty_input = pane.pty.as_ref().map_or_else(ResourceAmount::default, |pty| {
+        let bytes = pty.queued_input_bytes();
+        ResourceAmount { bytes, items: usize::from(bytes > 0) }
+    });
+
     Some(PaneRetention {
         grid_visible: regions.visible,
         grid_history: regions.history,
@@ -141,6 +157,7 @@ pub fn measure_pane(pane: &PaneState) -> Option<PaneRetention> {
         hyperlinks: ResourceAmount { bytes: hyperlink_bytes, items: hyperlink_items },
         inline_media,
         pty_output,
+        pty_input,
     })
 }
 
@@ -161,6 +178,7 @@ pub fn measure_panes<'a>(panes: impl IntoIterator<Item = &'a PaneState>) -> Pane
             hyperlinks: add(acc.hyperlinks, pane.hyperlinks),
             inline_media: add(acc.inline_media, pane.inline_media),
             pty_output: add(acc.pty_output, pane.pty_output),
+            pty_input: add(acc.pty_input, pane.pty_input),
         }
     })
 }
@@ -191,6 +209,7 @@ pub fn log_pane_retention(label: &str, retention: &PaneRetention) {
         hyperlink_bytes = retention.hyperlinks.bytes,
         inline_media_bytes = retention.inline_media.bytes,
         pty_output_bytes = retention.pty_output.bytes,
+        pty_input_bytes = retention.pty_input.bytes,
         largest_seam = seam,
         largest_seam_bytes = largest.bytes,
         "pane retention"
@@ -231,7 +250,7 @@ pub fn retention_sample_due(last_sample: &mut Option<Instant>, now: Instant) -> 
 /// the registry owns those strings independently of any cell — that
 /// disjointness is what makes summing the seams valid at all.
 #[must_use]
-pub fn seam_classes(retention: &PaneRetention) -> [(ResourceClass, ResourceAmount); 7] {
+pub fn seam_classes(retention: &PaneRetention) -> [(ResourceClass, ResourceAmount); 8] {
     [
         (ResourceClass::GridVisible, retention.grid_visible),
         (ResourceClass::GridHistory, retention.grid_history),
@@ -240,6 +259,7 @@ pub fn seam_classes(retention: &PaneRetention) -> [(ResourceClass, ResourceAmoun
         (ResourceClass::ProtocolMetadata, retention.hyperlinks),
         (ResourceClass::InlineMediaRetained, retention.inline_media),
         (ResourceClass::PtyOutput, retention.pty_output),
+        (ResourceClass::PtyInput, retention.pty_input),
     ]
 }
 
@@ -374,6 +394,7 @@ pub fn log_sampled_panes<'a>(
             hyperlinks: add(session.hyperlinks, retention.hyperlinks),
             inline_media: add(session.inline_media, retention.inline_media),
             pty_output: add(session.pty_output, retention.pty_output),
+            pty_input: add(session.pty_input, retention.pty_input),
         };
         sampled += 1;
     }
@@ -393,6 +414,7 @@ pub fn log_sampled_panes<'a>(
         hyperlink_bytes = session.hyperlinks.bytes,
         inline_media_bytes = session.inline_media.bytes,
         pty_output_bytes = session.pty_output.bytes,
+        pty_input_bytes = session.pty_input.bytes,
         "session retention"
     );
     session
@@ -540,21 +562,28 @@ impl super::App {
         // installed, which is exactly the shipped default.
         self.reclaim_stalled_captures();
 
-        if !tracing::enabled!(target: "memory", tracing::Level::DEBUG) {
-            return false;
-        }
-        // Owners are reconciled on the same interval: both walk every pane,
-        // and doing them together means the hierarchy cannot drift from the
-        // figures reported beside it.
+        // Owner reattribution and charging also run before the gate, for the
+        // same reason.
+        //
+        // These are not diagnostics either. Reattribution re-parents a pane
+        // that moved between windows, and charging is what puts a pane's
+        // retention into the ledger the governor enforces against. Below the
+        // gate, a shipped session — which installs no `memory` subscriber —
+        // charged nothing at all: a pane holding 46,872 bytes was charged
+        // zero, every owner's usage stayed empty, and every limit the
+        // governor exists to apply had no figure to apply it to.
+        //
         // Reattribution subsumes reconciliation: it re-parents moved panes and
         // then registers anything still unowned.
         self.reattribute_pane_owners();
 
         // Charge what each pane retains into its governor owner, so the
-        // hierarchy reports real memory rather than only structure. Done in
-        // the same pass as the log lines: two passes computing the same
-        // figures would be two figures that must agree.
+        // hierarchy reports real memory rather than only structure.
         self.charge_pane_owners();
+
+        if !tracing::enabled!(target: "memory", tracing::Level::DEBUG) {
+            return false;
+        }
 
         let labelled: Vec<(String, &PaneState)> = self
             .windows

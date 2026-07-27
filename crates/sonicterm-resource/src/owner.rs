@@ -71,6 +71,23 @@ impl OwnerRegistry {
         let previous = self.shards[Self::shard(record.id)].write().insert(record.id, record);
         debug_assert!(previous.is_none());
     }
+
+    /// Drop a closed owner's record.
+    ///
+    /// Marking an owner `Closed` satisfies the lifecycle contract but returns
+    /// no memory: an `OwnerRecord` carries two `EnumMap`s over every resource
+    /// class, an `RwLock`, a `Mutex`, and an `Arc` to its parent, and a record
+    /// left in its shard holds all of it for the life of the process. Measured
+    /// at roughly 1 KiB per owner, growing linearly with every tab or pane
+    /// opened and closed, while the governor reported zero bytes in use.
+    ///
+    /// A child holds an `Arc` to its parent, so a parent's record is freed
+    /// only once its children are gone. Close order already guarantees that:
+    /// `finish_close` refuses an owner with live children, so children are
+    /// removed first and the last child's removal releases the parent.
+    pub(crate) fn remove(&self, id: ResourceOwnerId) -> Option<Arc<OwnerRecord>> {
+        self.shards[Self::shard(id)].write().remove(&id)
+    }
 }
 
 #[cfg(test)]
