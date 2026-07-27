@@ -573,11 +573,14 @@ impl super::App {
     /// transfer that is merely slow looks stalled and the duration reported
     /// below is wrong by the ratio between a wake and an interval.
     ///
-    /// Two samples rather than one, deliberately. A single unchanged reading
-    /// can happen to a live transfer that is merely slower than the sampling
-    /// interval, and cancelling that would take a picture the user is waiting
-    /// for. Requiring the figure to hold still twice costs one extra interval
-    /// before reclaiming and removes that case.
+    /// Two samples rather than one, deliberately. A single reading proves
+    /// nothing on its own — there is no earlier figure to compare it against.
+    /// Two consecutive equal readings bound the silence at one full interval:
+    /// the transfer may have gone quiet at any point between them, so what is
+    /// proven is "nothing arrived for up to [`RETENTION_SAMPLE_INTERVAL`]",
+    /// which is what the log below reports. A transfer slower than that reads
+    /// as stalled and loses its picture; widening the window costs staging
+    /// held longer against a transfer that is genuinely dead.
     ///
     /// Skips a pane whose parser lock is contended: a pane actively parsing is
     /// by definition not stalled.
@@ -609,7 +612,7 @@ impl super::App {
                         target: "memory",
                         pane = pane_id,
                         released_bytes = released,
-                        stalled_for = ?RETENTION_SAMPLE_INTERVAL.saturating_mul(2),
+                        stalled_for = ?RETENTION_SAMPLE_INTERVAL,
                         "cancelled a media capture that stopped receiving; the transfer was \
                          abandoned and its staging is reclaimed"
                     );
