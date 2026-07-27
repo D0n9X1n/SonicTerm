@@ -610,7 +610,13 @@ fn repeated_finish_close_does_not_double_decrement_parent() {
     let second = governor.create_child(window, OwnerKind::AppPane, owner_limits(100)).unwrap();
     governor.begin_close(first).unwrap();
     governor.finish_close(first).unwrap();
-    assert!(matches!(governor.finish_close(first), Err(BudgetError::InvalidOwnerState { .. })));
+    // A closed owner's record is dropped, so closing it again finds nothing
+    // rather than finding it in the wrong state. Either way the second call
+    // must refuse, which is what stops the parent's child count being
+    // decremented twice.
+    assert!(
+        matches!(governor.finish_close(first), Err(BudgetError::OwnerNotFound(id)) if id == first)
+    );
     governor.begin_close(window).unwrap();
     // The second child is still open, so a double decrement would wrongly let the
     // parent close here.

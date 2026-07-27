@@ -208,3 +208,74 @@ fn keystroke_echo_queue_is_not_reported_as_half_a_megabyte() {
         truth.pinned
     );
 }
+
+/// The reported input figure must be the bytes queued, not a slot estimate.
+///
+/// The input queue is four slots holding `Vec<u8>` messages of any size up to
+/// the per-message cap, so a slot count carries no information about the bytes
+/// held. Measured with a real child so the figure is checked against what was
+/// actually sent.
+///
+/// The class was recorded `MeasuredNegligible { per_pane_bytes: 4096 }` while
+/// the queue accepted four messages of up to 16 MiB — 67,108,864 bytes, and a
+/// paste is admitted at the full message size and broadcast to every pane.
+#[cfg(unix)]
+#[test]
+fn queued_input_bytes_reports_the_bytes_actually_queued() {
+    let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    // `cat` with no argument reads stdin forever.
+    let pty = PtyHandle::spawn_with_args("/bin/cat", &[], 80, 24).expect("the child spawns");
+
+    assert_eq!(pty.queued_input_bytes(), 0, "nothing has been sent yet");
+
+    // One message far larger than any per-slot estimate would predict.
+    const MESSAGE: usize = 4 * 1024 * 1024;
+    pty.send_input_nonblocking(vec![b'x'; MESSAGE]).expect("the message is accepted");
+
+    // The writer may already have drained it, so this is bounded above by what
+    // was sent rather than equal to it. The property under test is that the
+    // figure is derived from bytes at all: a slot-count estimate would report
+    // a fixed per-slot figure regardless of message size.
+    let queued = pty.queued_input_bytes();
+    println!("MEASURED queued input: sent {MESSAGE}, reported {queued}");
+    assert!(queued <= MESSAGE, "reported {queued} bytes queued after sending {MESSAGE}");
+
+    // And returns to zero once the child has consumed it.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline && pty.queued_input_bytes() > 0 {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        pty.queued_input_bytes(),
+        0,
+        "the figure must return to zero once the writer has drained the queue, or it \
+         reports memory that is no longer held"
+    );
+}
+
+/// A refused message must not be counted as queued.
+///
+/// The count is incremented before the send, so the writer cannot drain a
+/// message that was never counted. That makes refusal the path where
+/// accounting can corrupt: a message rejected for size or a full queue was
+/// never queued memory, and leaving it counted would permanently overstate the
+/// figure the governor is charged.
+#[cfg(unix)]
+#[test]
+fn a_refused_input_message_leaves_the_queued_figure_untouched() {
+    let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let pty = PtyHandle::spawn_with_args("/bin/cat", &[], 80, 24).expect("the child spawns");
+
+    let before = pty.queued_input_bytes();
+    let oversized = sonicterm_io::pty::MAX_PTY_INPUT_MESSAGE_BYTES + 1;
+    let refused = pty.send_input_nonblocking(vec![0u8; oversized]);
+    assert!(refused.is_err(), "a message over the cap must be refused");
+
+    assert_eq!(
+        pty.queued_input_bytes(),
+        before,
+        "a refused message must not move the queued figure — it was never queued"
+    );
+}

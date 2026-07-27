@@ -148,8 +148,13 @@ impl ResourceClass {
             // enough to exhaust a ring apiece and no real shell reaches it.
             Self::PtyOutput => ClassCoverage::Charged,
 
-            // 4 bounded slots of keystroke-sized payloads.
-            Self::PtyInput => ClassCoverage::MeasuredNegligible { per_pane_bytes: 4 * 1024 },
+            // PTY input queue: four slots, each a `Vec<u8>` accepted up to the
+            // per-message cap. The slot count says nothing about the bytes
+            // held — a paste is admitted at the full message size and
+            // broadcast to every pane — so this is charged from an exact
+            // count the queue maintains, not from a per-slot estimate.
+            Self::PtyInput => ClassCoverage::Charged,
+
             // 64 bounded slots of DSR/XTVERSION replies, ~32 bytes each.
             Self::ParserReply => ClassCoverage::MeasuredNegligible { per_pane_bytes: 2 * 1024 },
             // 1024 bounded records of 40 bytes.

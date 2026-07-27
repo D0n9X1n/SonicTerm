@@ -137,6 +137,7 @@ fn the_largest_seam_is_identified_by_name() {
         hyperlinks: ResourceAmount { bytes: 50, items: 2 },
         inline_media: ResourceAmount { bytes: 64 * 1024 * 1024, items: 3 },
         pty_output: ResourceAmount { bytes: 8 * 1024, items: 1 },
+        pty_input: ResourceAmount { bytes: 128, items: 1 },
     };
 
     let (seam, amount) = retention.largest_seam();

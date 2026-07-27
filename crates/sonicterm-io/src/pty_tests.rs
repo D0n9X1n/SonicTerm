@@ -412,15 +412,21 @@ fn pty_input_queue_has_fixed_capacity() {
 #[test]
 fn saturated_pty_input_queue_returns_the_rejected_bytes() {
     let (tx, _rx) = pty_input_channel();
+    let queued = AtomicUsize::new(0);
     for _ in 0..PTY_INPUT_QUEUE_CAPACITY {
         tx.try_send(vec![b'x']).expect("fill bounded input queue");
     }
     let rejected = vec![b'y'];
 
     assert!(matches!(
-        try_queue_pty_input(&tx, rejected.clone()),
+        try_queue_pty_input(&tx, &queued, rejected.clone()),
         Err(PtyInputError::QueueFull(bytes)) if bytes == rejected
     ));
+    assert_eq!(
+        queued.load(Ordering::Relaxed),
+        0,
+        "a message the queue refused was never queued memory, so it must not be counted"
+    );
 }
 
 #[cfg(any(unix, windows))]
@@ -684,7 +690,10 @@ fn the_typed_send_refuses_a_full_queue_where_the_raw_channel_blocks() {
     }
 
     assert!(
-        matches!(try_queue_pty_input(&tx, vec![0u8; 8]), Err(PtyInputError::QueueFull(_))),
+        matches!(
+            try_queue_pty_input(&tx, &AtomicUsize::new(0), vec![0u8; 8]),
+            Err(PtyInputError::QueueFull(_))
+        ),
         "the typed path must refuse a full queue and hand the bytes back"
     );
 
@@ -710,13 +719,19 @@ fn the_typed_send_refuses_a_full_queue_where_the_raw_channel_blocks() {
 fn the_typed_send_enforces_the_message_cap_the_raw_channel_ignores() {
     let (tx, _rx) = crossbeam_channel::bounded::<Vec<u8>>(PTY_INPUT_QUEUE_CAPACITY);
     let oversized = vec![0u8; MAX_PTY_INPUT_MESSAGE_BYTES + 1];
+    let queued = AtomicUsize::new(0);
 
     assert!(
         matches!(
-            try_queue_pty_input(&tx, oversized.clone()),
+            try_queue_pty_input(&tx, &queued, oversized.clone()),
             Err(PtyInputError::MessageTooLarge(_))
         ),
         "the typed path must refuse a message above the cap"
+    );
+    assert_eq!(
+        queued.load(Ordering::Relaxed),
+        0,
+        "a message refused for size never entered the queue, so it must not be counted"
     );
     assert!(
         tx.try_send(oversized).is_ok(),

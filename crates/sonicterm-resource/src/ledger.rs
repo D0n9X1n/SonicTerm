@@ -220,6 +220,19 @@ impl Ledger {
             guards[parent_index].epoch = guards[parent_index].epoch.wrapping_add(1);
         }
         self.registry_epoch.fetch_add(1, Ordering::Release);
+        drop(guards);
+        drop(state);
+        // The record is now unreferenced by the hierarchy, so drop it rather
+        // than leaving a closed owner occupying its shard. Marking an owner
+        // `Closed` returns no memory on its own: the record carries two
+        // `EnumMap`s over every resource class plus two locks, measured at
+        // roughly 1 KiB, and every tab or pane opened and closed adds one.
+        //
+        // The root is kept. It is the process owner, `root_owner` hands it out
+        // for the life of the governor, and nothing closes it.
+        if owner != self.root {
+            self.registry.remove(owner);
+        }
         Ok(())
     }
 

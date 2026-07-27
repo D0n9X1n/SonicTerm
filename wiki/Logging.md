@@ -78,6 +78,7 @@ remedy differs:
 | `hyperlink_bytes` | OSC 8 link targets | nothing — reclaimed as links scroll away |
 | `inline_media_bytes` | decoded inline images | lower image usage, or open fewer panes |
 | `pty_output_bytes` | the read buffer held by shell output waiting to be parsed | nothing — it drains as the terminal catches up |
+| `pty_input_bytes` | input waiting to reach the shell, usually a large paste | nothing — it drains as the shell reads it |
 
 Read `largest_seam` first. A total tells you a pane is large; that field tells
 you which subsystem to look at. A pane holding 60 MB of inline images is
@@ -211,6 +212,7 @@ level = "debug"
 | `hyperlink_bytes` | OSC 8 链接目标 | 无 — 链接滚出后自动回收 |
 | `inline_media_bytes` | 已解码的内联图像 | 减少图像使用，或减少面板数量 |
 | `pty_output_bytes` | 等待解析的 shell 输出所占用的读取缓冲区 | 无 — 终端处理完毕后自动释放 |
+| `pty_input_bytes` | 等待送往 shell 的输入，通常来自大段粘贴 | 无 — shell 读取后自动释放 |
 
 先看 `largest_seam`。总量只能说明面板占用大，而该字段指出应当检查哪个子系统。
 占用 60 MB 内联图像的面板属于正常设计；占用 60 MB 网格的面板则不正常。

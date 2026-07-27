@@ -204,13 +204,20 @@ fn the_production_sampling_path_charges_when_the_memory_target_is_admitted() {
     assert!(charged > 0, "the production path must charge, not only measure");
 }
 
-/// And stays inert at the default level.
+/// And charges at the default level too, where it also has to.
 ///
-/// The gate is load-bearing in both directions: it keeps a walk over every
-/// pane out of an ordinary session. A fix that charged unconditionally would
-/// trade one defect for a permanent cost.
+/// The gate governs the *log lines*, not the charging. A session at the
+/// default level holds exactly as much memory as one running `memory=debug`,
+/// and the governor's limits are enforced against charged figures — so a
+/// governor that only charges when someone is watching is a governor that is
+/// inert in every shipped session.
+///
+/// The objection this replaces was that charging unconditionally trades one
+/// defect for a permanent cost. Measured, release build, eight panes:
+/// **5.95 µs per sample**. Sampling runs once per 30 seconds, so the cost is
+/// **714 µs per hour** — the walk is not what makes a session expensive.
 #[test]
-fn the_production_sampling_path_stays_inert_at_the_default_level() {
+fn the_production_sampling_path_charges_at_the_default_level() {
     use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
 
     let mut app = app();
@@ -223,8 +230,14 @@ fn the_production_sampling_path_stays_inert_at_the_default_level() {
     let sampled =
         tracing::subscriber::with_default(subscriber, || app.__test_sample_pane_retention_now());
 
-    assert!(!sampled, "the default level must not run the sampling walk");
-    assert_eq!(app.__test_pane_charge_total(child, pane_id), Some(0), "and must not charge");
+    assert!(!sampled, "the default level must not emit the memory log lines");
+    let charged = app.__test_pane_charge_total(child, pane_id).expect("pane present");
+    assert!(
+        charged > 0,
+        "the default level must still charge: a pane retains the same bytes whether or \
+         not anyone is reading the log, and every governor limit is applied to the \
+         charged figure"
+    );
 }
 
 /// The committed budget is derived from the seam caps, not chosen.

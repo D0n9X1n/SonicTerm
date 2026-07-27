@@ -385,10 +385,11 @@ fn an_owner_cannot_close_while_a_reap_task_holds_its_charge() {
 
     // Now the owner can finish closing.
     governor.finish_close(pane).unwrap();
-    assert_eq!(
-        governor.snapshot(pane).unwrap().owner_amount,
-        ResourceAmount::default(),
-        "a settled owner holds nothing"
+    // Its record is dropped once closed, so there is nothing left to snapshot
+    // — which is the strongest form of "a settled owner holds nothing".
+    assert!(
+        matches!(governor.snapshot(pane), Err(sonicterm_types::BudgetError::OwnerNotFound(id)) if id == pane),
+        "a closed owner's record must not outlive it"
     );
     governor.begin_close(window).unwrap();
     governor.finish_close(window).unwrap();
@@ -853,4 +854,80 @@ fn a_panicking_call_returns_its_helper_slot() {
         supervisor.run_until(deadline_from(&clock, Duration::from_secs(5)), &cancel.token());
     assert_eq!(ran.load(Ordering::SeqCst), 1, "blocking work still runs after a panic");
     assert_eq!(progress.settled, 1);
+}
+
+/// The unresolved report names owners, so it is bounded by owner count.
+///
+/// One entry per unsettled *task* would grow with work rather than with the
+/// number of owners in trouble, and the vector is cloned into every shutdown
+/// report. Measured before this was deduplicated: 4,000 unsettled tasks from a
+/// single owner produced 4,000 entries naming that one owner.
+#[test]
+fn the_unresolved_report_names_each_owner_once() {
+    let clock = TestClock::new();
+    // Enough task slots to enqueue several unsettled tasks from one owner.
+    let supervisor =
+        ReaperSupervisor::new(ReaperLimits::new(8, 1, 2).unwrap(), Arc::new(clock.clone()));
+    let cancel = CancelSource::new();
+    let forced = Arc::new(AtomicUsize::new(0));
+
+    const TASKS: usize = 6;
+    for _ in 0..TASKS {
+        supervisor.try_reserve_slot().unwrap().enqueue(Box::new(StuckTask {
+            owner: owner(11),
+            forced: forced.clone(),
+            settles_on_force: false,
+        }));
+    }
+
+    let report =
+        supervisor.shutdown(deadline_from(&clock, Duration::from_secs(1)), &cancel.token());
+
+    assert_eq!(
+        report.unresolved_owners,
+        vec![owner(11)],
+        "{TASKS} unsettled tasks from one owner must name that owner once, not {TASKS} times"
+    );
+}
+
+/// Releasing a handle that was never reserved is a bug, not a no-op.
+///
+/// The count exists to bound handles outstanding. Flooring an unpaired release
+/// at zero keeps the count looking healthy while it no longer describes
+/// reality, and admission then says yes past the ceiling: measured with a
+/// ceiling of four, two reserved and five released left six outstanding.
+#[test]
+#[should_panic(expected = "released a native handle that was never reserved")]
+fn releasing_an_unreserved_handle_is_caught() {
+    let clock = TestClock::new();
+    let supervisor = supervisor(&clock);
+
+    supervisor.try_reserve_handle().expect("the first handle is admitted");
+    supervisor.release_handle();
+    // Nothing is outstanding now, so this release is unpaired.
+    supervisor.release_handle();
+}
+
+/// Handle admission stays bounded across balanced reserve/release cycles.
+///
+/// The property the count exists for: however many times handles are taken and
+/// given back, the ceiling still refuses the one that would exceed it.
+#[test]
+fn handle_admission_respects_the_ceiling_after_balanced_cycles() {
+    let clock = TestClock::new();
+    let supervisor = supervisor(&clock);
+    let ceiling = 2;
+
+    for _ in 0..10 {
+        supervisor.try_reserve_handle().expect("a handle is admitted");
+        supervisor.release_handle();
+    }
+
+    let mut admitted = 0;
+    while supervisor.try_reserve_handle().is_ok() {
+        admitted += 1;
+        assert!(admitted <= ceiling, "admitted {admitted} handles against a ceiling of {ceiling}");
+    }
+    assert_eq!(admitted, ceiling, "the ceiling must still admit exactly its limit");
+    assert_eq!(supervisor.live_handles(), ceiling);
 }

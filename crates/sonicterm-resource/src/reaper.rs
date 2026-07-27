@@ -244,8 +244,25 @@ impl ReaperSupervisor {
     }
 
     /// Release a previously reserved native handle.
+    ///
+    /// Each release must pair with a `try_reserve_handle` that succeeded. An
+    /// unpaired release would drive the count below zero, and flooring it at
+    /// zero silently converts that into permanent extra headroom: the counter
+    /// no longer describes the handles outstanding, so admission keeps saying
+    /// yes past the ceiling. Measured with a ceiling of four handles, two
+    /// reserved and five released left six outstanding against a limit the
+    /// supervisor still reported itself as meeting.
+    ///
+    /// The debug assertion turns that into a test failure where tests run,
+    /// while release builds still floor rather than wrap — an over-count is
+    /// wrong, but a wrapped count would admit `usize::MAX` handles.
     pub fn release_handle(&self) {
         let mut counters = self.state.counters.lock();
+        debug_assert!(
+            counters.handles > 0,
+            "released a native handle that was never reserved; the handle count no longer \
+             describes what is outstanding"
+        );
         counters.handles = counters.handles.saturating_sub(1);
     }
 
@@ -538,7 +555,14 @@ impl ReaperSupervisor {
             drop(task);
         } else {
             progress.unresolved += 1;
-            counters.unresolved.push(owner);
+            // One entry per owner, not per task. The field names which owners
+            // are unresolved, so a second unsettled task from an owner already
+            // named adds nothing to the report and would let the vector grow
+            // with the task count instead of the owner count — measured at
+            // 4,000 entries naming a single distinct owner.
+            if !counters.unresolved.contains(&owner) {
+                counters.unresolved.push(owner);
+            }
             // Keep the task alive so whatever it holds stays charged to this
             // owner. Dropping it here would release the charge and leave the
             // ledger disagreeing with the report that just named the owner.
