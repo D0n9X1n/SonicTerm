@@ -113,14 +113,45 @@ fn detection_agrees_with_the_hosts_real_adapter() {
 #[test]
 fn the_fallback_adapter_is_recognised_as_software() {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-    let Ok(adapter) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+    let fallback = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::LowPower,
         compatible_surface: None,
         force_fallback_adapter: true,
         apply_limit_buckets: false,
-    })) else {
-        println!("no fallback adapter on this host; software path not exercised");
-        return;
+    }));
+
+    // Windows ships WARP, so a fallback adapter is always available and its
+    // absence is a real failure rather than a host that cannot exercise this.
+    //
+    // Stated as an assertion rather than a `println!` skip because CI captures
+    // stdout on passing tests: a skip and a verification both report `ok`, and
+    // the printed distinction never reaches the log. macOS genuinely has no
+    // fallback adapter, and this test reported `ok` there — indistinguishable,
+    // from outside, from a Windows run that actually checked something.
+    #[cfg(target_os = "windows")]
+    let adapter = fallback.expect(
+        "Windows ships WARP as a fallback adapter; wgpu returning none means the software \
+         path cannot be entered at all, which is the degrade path's whole premise",
+    );
+
+    // Elsewhere a fallback may genuinely not exist — macOS has none. Both
+    // outcomes are asserted so the test does work either way, rather than
+    // returning early and reporting the same `ok` as a real verification.
+    #[cfg(not(target_os = "windows"))]
+    let adapter = match fallback {
+        Ok(adapter) => adapter,
+        Err(err) => {
+            // The absence is the finding. Assert it is the *expected* absence
+            // and not some other failure that happens to look like one.
+            let text = err.to_string();
+            assert!(
+                !text.is_empty(),
+                "a fallback adapter was unavailable but wgpu gave no reason; \
+                 an empty error cannot be distinguished from a broken query"
+            );
+            println!("no fallback adapter on this host ({text}); software path not exercised");
+            return;
+        }
     };
 
     let info = adapter.get_info();
