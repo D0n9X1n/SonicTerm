@@ -447,7 +447,7 @@ pub fn pty_input_message_allowed(bytes: usize) -> bool {
 /// not the occupancy: [`PtyHandle::queued_input_bytes`] reports what is
 /// actually held.
 #[must_use]
-pub fn max_pty_queued_input_bytes() -> usize {
+pub const fn max_pty_queued_input_bytes() -> usize {
     PTY_INPUT_QUEUE_CAPACITY.saturating_mul(MAX_PTY_INPUT_MESSAGE_BYTES)
 }
 

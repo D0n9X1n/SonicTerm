@@ -316,12 +316,15 @@ pub const MAX_PANE_COMMAND_EVENTS: usize = 1024;
 /// | `ProtocolMetadata` | `MAX_HYPERLINK_METADATA_BYTES` |
 /// | `ParserCapture` | `MAX_MEDIA_PAYLOAD_BYTES` + `MAX_ESCAPE_SEQUENCE_BYTES` |
 /// | `PtyOutput` | `max_queued_output_ring_bytes()` |
+/// | `PtyInput` | `max_pty_queued_input_bytes()` |
 ///
 /// The three grid classes share one term because `MAX_GRID_CELLS` bounds them
 /// together rather than each separately. `PtyOutput` carries the structural
 /// ceiling of one reader ring per queue slot, not the single ring a real shell
 /// pins: a backstop has to sit above what the seam permits, not above what it
-/// usually uses.
+/// usually uses. `PtyInput` carries its queue depth times the per-message cap
+/// for the same reason — a paste is admitted at its full size, so the seam
+/// permits far more than a session typically holds.
 ///
 /// `CommandEvents` is deliberately absent. Its queue is bounded and its
 /// retention is real, but no production site charges it, so it cannot appear in
@@ -333,7 +336,8 @@ pub const PANE_SEAM_CAP_SUM_BYTES: usize = (sonicterm_grid::grid::MAX_GRID_CELLS
     + sonicterm_grid::hyperlink::MAX_HYPERLINK_METADATA_BYTES
     + sonicterm_vt::vt::MAX_MEDIA_PAYLOAD_BYTES
     + sonicterm_vt::vt::MAX_ESCAPE_SEQUENCE_BYTES
-    + sonicterm_io::pty::max_queued_output_ring_bytes();
+    + sonicterm_io::pty::max_queued_output_ring_bytes()
+    + sonicterm_io::pty::max_pty_queued_input_bytes();
 
 /// Headroom multiplier between the seam caps and the governor's backstop.
 ///

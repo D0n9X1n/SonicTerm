@@ -413,6 +413,7 @@ fn the_pane_charge_sites_are_exactly_the_contributing_classes() {
         ResourceClass::ProtocolMetadata,
         ResourceClass::InlineMediaRetained,
         ResourceClass::PtyOutput,
+        ResourceClass::PtyInput,
     ];
     for class in charged_to_panes {
         assert_eq!(
