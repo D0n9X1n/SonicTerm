@@ -150,16 +150,28 @@ understate process retention by one full atlas per pooled entry, and would imply
 a remedy that cannot work:** closing a window does not release a warm renderer.
 The warm-pool size is the lever for those.
 
-**These are not part of `session retention`, and the two must not be summed
-into one figure without care.** A renderer belongs to a window while the
-session line sums panes, and `image_atlas_bytes` is the CPU mirror backing a
-GPU texture rather than the decoded source counted by `inline_media_bytes` —
-they are different allocations of the same picture, so adding them reports one
-image twice.
+**These are not part of `session retention`, and the two answer different
+questions.** A renderer belongs to a window while the session line sums panes.
+`image_atlas_bytes` is the CPU mirror backing a GPU texture; `inline_media_bytes`
+is the decoded source. They hold the same picture and are **two distinct
+allocations, both resident** — the pane owns an `Arc<[u8]>`, and the atlas copies
+into its own `Vec<u8>` on a miss. So adding them is correct for a host-memory
+total and wrong for "how many images are open": the duplication is of content,
+not of bytes.
 
-`software_frame_bytes` is the largest single host-side buffer in the process on
-the Windows software path — a 4K window is ~32 MB — and is zero on every other
+`software_frame_bytes` is the largest buffer a renderer holds on the Windows
+software path, and unlike the atlases it scales with the window: ~32 MB at 4K,
+~59 MB at 5K, up to the 160 MiB clamp in `pixel_len`. It is zero on every other
 configuration. `glyph_atlas_bytes` is non-zero on every platform.
+
+It is **not** the largest buffer in the process. Three 64 MiB bounds each
+exceed a 4K frame: `MAX_RETAINED_INLINE_IMAGE_BYTES`,
+`MAX_PROCESS_CAPTURE_STAGING_BYTES`, and `foreground_proc::MAX_BUFFER_BYTES`.
+
+`retained_amounts` reports the two atlases and the software frame. It does
+**not** include `UploadStaging` — the renderer's two upload scratch buffers,
+recorded at 32 MiB per renderer in the coverage table — so these lines are not
+the whole of a renderer's host memory.
 
 Both atlas figures carry an `_items` count of resident entries alongside their
 bytes: bytes alone do not distinguish a large glyph set from a small one inside
