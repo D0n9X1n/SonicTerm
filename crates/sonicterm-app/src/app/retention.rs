@@ -692,6 +692,7 @@ impl super::App {
         // the ledger backs a tripwire and the log lines back a growth curve
         // across a session, and both answer questions on a scale of minutes.
         // A control loop that had to act within a frame could not read this.
+        self.log_renderer_retention();
         if !retention_sample_due(&mut self.last_retention_sample, now) {
             return false;
         }
@@ -756,6 +757,17 @@ impl super::App {
         let borrowed: Vec<(&str, &PaneState)> =
             labelled.iter().map(|(label, pane)| (label.as_str(), *pane)).collect();
         log_sampled_panes(borrowed);
+
+        // The renderer's own CPU storage, on the same cadence as the pane
+        // lines. Unconditional here because the cadence gate at the top of
+        // this function has already returned if a sample was not due —
+        // reaching this line is what "a sample was taken" means.
+        //
+        // Reported here rather than charged: the renderer computes these
+        // figures but cannot reserve against the governor, and giving it
+        // that ability would invert the direction of the crate boundary.
+        // What was missing was never the measurement — it was a reader.
+        self.log_renderer_retention();
         true
     }
 }
