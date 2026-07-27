@@ -397,14 +397,18 @@ fn charged_classes_are_either_terms_or_excluded_for_a_stated_reason() {
 
 /// The classes the pane retention pass charges are exactly the terms.
 ///
-/// Pins the table to the production charge site rather than to itself. The
-/// pane sampling pass charges this list, so a class it charges that is not a
-/// term here is the omission that puts the backstop below correct operation.
+/// Checks the term rows against a copy of the charge list, kept here because a
+/// contract crate cannot import the app that consumes it.
+///
+/// The copy is the weakness: it can only drift toward the pass it mirrors, and
+/// it has. What actually pins the table to production is
+/// `the_coverage_table_agrees_with_the_charge_sites` in `sonicterm-app`, which
+/// reads `seam_classes()` itself, one crate up where the dependency runs the
+/// right way. This one catches a term row that disagrees with the copy; treat
+/// the app-side check as the authority when the two ever differ.
 #[test]
 fn the_pane_charge_sites_are_exactly_the_contributing_classes() {
-    // The classes `sonicterm-app`'s pane retention pass reserves against a
-    // pane owner. Mirrored rather than imported because a contract crate
-    // cannot depend on the app that consumes it.
+    // Mirrors `sonicterm-app`'s pane retention pass. Update both together.
     let charged_to_panes = [
         ResourceClass::GridVisible,
         ResourceClass::GridHistory,
@@ -427,8 +431,9 @@ fn the_pane_charge_sites_are_exactly_the_contributing_classes() {
         if class.pane_seam_term() == PaneSeamTerm::Contributes {
             assert!(
                 charged_to_panes.contains(&class),
-                "{class:?} carries a term in the pane seam-cap sum but the pane retention \
-                 pass does not charge it"
+                "{class:?} carries a term in the pane seam-cap sum but is absent from the \
+                 copy of the charge list above; if the retention pass does charge it, this \
+                 copy is stale"
             );
         }
     }
