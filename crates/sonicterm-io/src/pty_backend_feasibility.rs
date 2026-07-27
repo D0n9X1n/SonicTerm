@@ -1,11 +1,19 @@
 //! Frozen PTY/native backend feasibility decision (`pty-backend-v1`).
 //!
 //! This module is the WP-PTY-FEAS decision artifact: it compares the current
-//! `portable-pty` seam against the ownership and cancellation surface the
-//! v1.2.0 resource/lifecycle architecture requires (`PtyTransportOwner`,
-//! level-triggered cancellation, bounded reaper handoff, exact process-tree
-//! ownership), records the chosen approach, and enumerates the exact Windows,
-//! Unix, and SSH requirements that flow into the production WP-PTY package.
+//! `portable-pty` seam against the ownership and cancellation surface a
+//! Sonic-owned local-PTY transport would have to provide (own the pseudoconsole
+//! and pipe ends, level-triggered cancellation, bounded reaper handoff, exact
+//! process-tree ownership), records the chosen approach, and enumerates the
+//! exact Windows, Unix, and SSH requirements that flow into the production
+//! WP-PTY package.
+//!
+//! That transport-owner surface is a *requirement this document specifies*, not
+//! a type that exists today. No trait by that name is defined or implemented
+//! anywhere in the workspace, and none is expected to be until the production
+//! WP-PTY package builds the native backend. Reading the capability rows below
+//! as a contract that current code must already satisfy inverts the artifact:
+//! they describe what the chosen backend must provide when it is written.
 //!
 //! It is a research/decision artifact only — no production backend is spawned
 //! here. The frozen bytes are rendered deterministically by
@@ -58,7 +66,7 @@ pub const DECISION: BackendApproach = BackendApproach::SonicOwnedNative;
 pub const DECISION_RATIONALE: &str = concat!(
     "portable-pty 0.9 MasterPty exposes no HPCON/handle accessor and no job-object seam; ",
     "WinChild::kill terminates only the direct child, and HPCON closes solely by private ",
-    "drop order. The required PtyTransportOwner surface (own HPCON, close input/output/",
+    "drop order. The required transport-owner surface (own HPCON, close input/output/",
     "terminal independently, cancel synchronous IO before join, process-tree ownership) ",
     "cannot be met through the released seam. Upstream extension is out of Sonic's control ",
     "and WezTerm itself does not route ConPTY ownership through portable-pty; a fork ",
@@ -66,8 +74,9 @@ pub const DECISION_RATIONALE: &str = concat!(
     "are the only approach that satisfies every ownership/cancellation invariant.",
 );
 
-/// A capability the v1.2.0 `PtyTransportOwner`/lifecycle contract requires from
-/// the local-PTY transport seam.
+/// A capability the local-PTY transport seam must provide for the Sonic-owned
+/// backend this document selects. These are requirements on the backend still
+/// to be written, not properties current code is expected to have.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Capability {
     /// Own the ConPTY `HPCON` and sequence `ClosePseudoConsole` explicitly.
@@ -291,7 +300,7 @@ pub const UNIX_REQUIREMENTS: &[&str] = &[
     "capture session/process-group identity at spawn; treat cached pid/pgid as metadata only",
     "signal the process group (negative pgid) before the leader pid/pgid can be reused",
     "reap the direct child (waitpid) without blocking descendant cleanup; re-scan the session",
-    "prefer a live OS identity (pidfd on Linux) over a cached numeric leader where available",
+    "prefer a live OS identity over a cached numeric leader wherever the platform offers one",
 ];
 
 /// SSH inclusion/exclusion disposition for `RemoteInput`/`RemoteOutput`.
@@ -307,8 +316,8 @@ pub const SSH_DISPOSITION: &str = concat!(
 pub const CARGO_CI_REQUIREMENTS: &[&str] = &[
     "sonicterm-io: add windows features Win32_System_Pipes, Win32_System_JobObjects, Win32_Security (integrator-applied)",
     "sonicterm-io: drop portable-pty from the local-PTY teardown path once the native backend lands (WP-PTY, not WP-PTY-FEAS)",
-    "CI: add a real pre-24H2 Windows job (windows-2022 / Server 2019 image) alongside the current windows-latest runner",
-    "CI: keep the injectable pre-24H2 close test in the default cross-platform gate so 24H2-only CI still exercises it",
+    "CI: no pre-24H2 Windows job; supported Windows is 24H2+, covered by the windows-latest runner",
+    "CI: keep the injectable pre-24H2 close test in the default cross-platform gate so the drain-before-close ordering stays exercised on every host",
     "no separate helper binary required for v1; the bounded reaper lives in-process per WP-LIFECYCLE",
 ];
 
@@ -321,12 +330,15 @@ pub struct EvidenceRow {
     /// What must be observed.
     pub observation: &'static str,
     /// `true` when a sibling probe test captures it on that host class in this
-    /// package; `false` when a real runner is still required (WP-PLATFORM).
+    /// package. Every row in the supported matrix is capturable on its own
+    /// host class; a row that is not is an outstanding real-platform run.
     pub capturable_here: bool,
 }
 
-/// The real-OS evidence matrix. `capturable_here == false` rows are the
-/// outstanding real-platform runs the owner still needs before accepting.
+/// The real-OS evidence matrix, scoped to the platforms SonicTerm supports:
+/// macOS (Intel and Apple Silicon) and current Windows. Every row is captured
+/// by a CI job — the macOS row by the live `openpty` probe on `macos-14`, the
+/// Windows row by the ConPTY symbol probe that compiles on `windows-latest`.
 pub const EVIDENCE_MATRIX: &[EvidenceRow] = &[
     EvidenceRow {
         host_class: "macos",
@@ -334,19 +346,9 @@ pub const EVIDENCE_MATRIX: &[EvidenceRow] = &[
         capturable_here: cfg!(target_os = "macos"),
     },
     EvidenceRow {
-        host_class: "linux",
-        observation: "same Unix probe plus pidfd_open availability for live-identity supervision.",
-        capturable_here: cfg!(target_os = "linux"),
-    },
-    EvidenceRow {
         host_class: "windows-24h2-plus",
         observation: "ConPTY/CancelSynchronousIo symbols compile against the workspace windows features; native drain/close runs green.",
-        capturable_here: false,
-    },
-    EvidenceRow {
-        host_class: "windows-pre-24h2",
-        observation: "real ClosePseudoConsole blocks until output drains; Sonic drain-before-close ordering settles the child.",
-        capturable_here: false,
+        capturable_here: cfg!(windows),
     },
 ];
 
@@ -487,7 +489,7 @@ pub fn render_canonical_evidence() -> String {
 /// constant is a well-formed, non-placeholder digest so the crate stays
 /// crypto-dependency-free.
 pub const FROZEN_EVIDENCE_SHA256: &str =
-    "7e367c3f573c5d0eaff41eb732059c67b26b5a1e379ab18d5fde0013b2cf699b";
+    "b9c74662de233eb39a7d3563d45243d7ecdb16dce779defb17d94496b5aa9b76";
 
 #[cfg(windows)]
 #[path = "pty_backend_feasibility_win_probe.rs"]
