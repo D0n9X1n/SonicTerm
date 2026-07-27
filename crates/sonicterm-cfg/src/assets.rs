@@ -1,6 +1,6 @@
 //! Bundled-asset directory probe.
 //!
-//! Moved from the deprecated `sonicterm-shared` façade `asset_dir` in PR-C so the
+//! Moved from the deprecated `sonicterm-shared` façade `asset_dir` so the
 //! app crate no longer needs to depend on the deprecated `sonicterm-shared`
 //! façade just to locate `assets/`.
 

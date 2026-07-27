@@ -1,10 +1,10 @@
-//! Phase C — cross-window tab drag & drop.
+//! cross-window tab drag & drop.
 //!
 //! Implements the *pure* tab-transfer primitive that moves a `Tab`
 //! (with its `TabState` and the full `PaneState` graph it owns)
 //! between two `TabContainer`s. The OS-level NSDraggingSession / OLE
 //! integration that *invokes* this primitive ships in a follow-up
-//! commit on this PR (see PR body: "Phase C ships the simulated
+//! commit at the time (the simulated
 //! primitive + tests; OS-drag hookup deferred to a follow-up").
 //!
 //! Why a separate "container" struct rather than just operating on

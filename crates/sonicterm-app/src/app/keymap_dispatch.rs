@@ -1,4 +1,4 @@
-//! Extracted from `app/mod.rs` in refactor PR 8b (expose-then-extract).
+//! Extracted from `app/mod.rs` from the monolithic app module.
 //! `App`'s referenced fields are `pub(super)`; this submodule lives in
 //! the same `app` module tree, so direct field access works.
 
@@ -277,7 +277,7 @@ impl App {
     }
 
     pub fn run_action(&mut self, action: &Action) -> bool {
-        // Phase A — if `frontmost_window` was set to a stale id
+        // if `frontmost_window` was set to a stale id
         // (window closed between focus event + this dispatch), clear it
         // now so the routing arms below see `None` (safe main fallback)
         // AND the next action doesn't retry the dead window. This single
@@ -304,10 +304,10 @@ impl App {
                     window: sonicterm_types::WindowKey::new(0),
                     cwd: None,
                 });
-                // Phase A — route through the unified
+                // route through the unified
                 // `frontmost_window` discriminator so a Cmd+T typed in a
                 // torn-out child opens a tab in THAT child, not in the
-                // main window. PR-B4 removed the `focused_child`
+                // main window. `frontmost_window` subsumed the `focused_child`
                 // fallback — `frontmost_window` is set by the same focus
                 // event so the back-compat path was redundant.
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
@@ -329,7 +329,7 @@ impl App {
                     window: sonicterm_types::WindowKey::new(0),
                     idx: active_idx,
                 });
-                // Phase A — route to frontmost window.
+                // route to frontmost window.
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
                     if self.close_active_tab_in_child(id) {
                         return true;
@@ -387,7 +387,7 @@ impl App {
                 self.activate_last_main_tab();
             }
             Action::SplitRight => {
-                // Phase A — route to frontmost window so Cmd+D
+                // route to frontmost window so Cmd+D
                 // typed in a torn-out child splits THAT window's active
                 // pane, not the main window's.
                 // M6a-expand-2c-pane: notify the reducer first so
@@ -432,7 +432,7 @@ impl App {
                 self.close_active_pane();
             }
             Action::CloseActivePaneOrTab => {
-                // Phase A — Cmd+W routes to frontmost window.
+                // Cmd+W routes to frontmost window.
                 // Without this, a Cmd+W typed in a torn-out child window
                 // closed a tab in the original main window (bug #3).
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
@@ -599,7 +599,7 @@ impl App {
             Action::RenameTab => self.start_rename_active_tab(),
             Action::UpdateTabColor => self.start_update_tab_color(),
             Action::NewWindow => {
-                // Phase E (Haiku follow-up): set the pending
+                // set the pending
                 // flag; `drain_pending_window_creates` consumes it with
                 // the live `ActiveEventLoop` and builds a fresh
                 // top-level terminal window. Works whether or not

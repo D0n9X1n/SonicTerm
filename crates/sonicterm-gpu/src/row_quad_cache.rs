@@ -1,5 +1,5 @@
 //! Per-row quad cache for background / underline / hyperlink tint
-//! quads — Phase P2.
+//! quads.
 //!
 //! Mirrors the shape of `sonicterm_text::row_glyph_cache::RowGlyphCache`
 //! but caches the `QuadInstance` slice each row emits for

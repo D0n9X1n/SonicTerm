@@ -1,15 +1,15 @@
 //! Scrollbar mouse-input wiring.
 //!
-//! PR-A landed the pure-function model (`sonicterm_ui::scrollbar`); PR-B
+//! The pure-function model lives in `sonicterm_ui::scrollbar`; the render
 //! wired the renderer to emit the bar quads. This module is the input
 //! glue: it converts a logical-pixel pointer event on the active pane
 //! into either a `view_top` jump (track click) or the start of a drag
-//! gesture (thumb press). Auto-hide-on-hover proximity is PR-D scope.
+//! gesture (thumb press). Auto-hide-on-hover proximity is not implemented.
 //!
 //! All coordinates here are **logical pixels** to match the pane-rect
 //! layout the renderer also uses. The width constant mirrors the one
 //! held inside `sonicterm_gpu::core::emit_pane_scrollbar` — if
-//! you change one, change the other (PR-D will lift this into config).
+//! you change one, change the other; neither is configurable.
 //!
 //! NOT exported above the `app` module: tests reach in via
 //! `pub(crate)` helpers exposed on `App`.
@@ -248,7 +248,7 @@ impl App {
         if let Some(w) = ws.window.as_ref() {
             w.request_redraw();
         }
-        // PR-D: any view_top jump (track click, prompt-nav, copy
+        // any view_top jump (track click, prompt-nav, copy
         // mode scroll, mouse-wheel) counts as scrollbar activity.
         self.mark_scrollbar_active(active_id);
     }

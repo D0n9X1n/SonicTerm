@@ -11,7 +11,7 @@
 //!     that owns the texture/view/sampler/bind-group and syncs dirty tiles.
 //!   * [`chrome_text`] — wezterm-driven helper that batches chrome strings
 //!     (tab titles, palette, search bar, IME, drag chip) into the shared
-//!     atlas + text pipeline. Replaced the the legacy chrome layer `TextRenderer` path in
+//!     atlas + text pipeline. Replaced the glyphon `TextRenderer` path in
 //!     T13/T14 of the wezterm-takeover.
 //!
 //! The composite renderer (`sonicterm-shared::render`) still lives in
@@ -29,7 +29,7 @@
 /// view, sampler, and bind group; syncs dirty tiles to the GPU.
 pub mod atlas_upload;
 /// T13 (wezterm-takeover G3): wezterm-driven chrome text helper. Replaces
-/// the 11 the legacy chrome layer `TextRenderer` chrome sites and feeds the existing
+/// the 11 glyphon `TextRenderer` chrome sites and feeds the existing
 /// [`text_pipeline`] buffer — no second atlas, no second pass.
 pub mod chrome_text;
 /// Color / sRGB conversion helpers — produce `wgpu::Color` / linear RGBA arrays

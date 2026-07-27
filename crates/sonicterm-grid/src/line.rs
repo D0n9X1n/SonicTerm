@@ -153,9 +153,9 @@ impl LineStorage {
         }
     }
 
-    // --- PR-A: API completeness. Pure additive on the primitive.
-    // These methods cover every operation `Line` callers will need in PR-B
-    // (the Line::cells alias swap). Line itself is intentionally unchanged.
+    // Cluster-aware accessors. These cover every operation a `Line` caller
+    // needs without forcing the storage back to Flat, which is what makes
+    // compressed scrollback worth keeping compressed.
 
     /// `true` if storage is currently in cluster (RLE) form.
     pub fn is_cluster(&self) -> bool {
@@ -357,9 +357,10 @@ impl LineStorage {
         }
     }
 
-    /// Try to re-compress into Cluster form. PR-A exposes only the
-    /// unconditional rebuild for callers that already know they want it
-    /// (e.g. scrollback eject in PR-C). The size-win threshold lives on
+    /// Try to re-compress into Cluster form.
+    ///
+    /// Unconditional: for callers that already know they want it, such as
+    /// scrollback eject. The size-win threshold lives on
     /// `Line::compact_if_beneficial`. Returns `true` if storage changed.
     pub fn try_compress(&mut self) -> bool {
         let flat = match self {
@@ -558,7 +559,7 @@ impl Line {
 
     /// Set the cell at logical column `idx`.
     ///
-    /// PR-D smart-degrade: when the storage is a single uniform
+    /// Smart-degrade: when the storage is a single uniform
     /// Cluster and the new cell is byte-identical to the cluster's
     /// representative, this is a no-op and storage stays in Cluster form.
     /// Otherwise the storage is degraded to Flat before the write. This
@@ -604,7 +605,7 @@ impl Line {
     /// Fill cells in `[start, end)` with `cell`. `end` is clamped to
     /// `len()`; empty/reversed ranges are no-ops.
     ///
-    /// PR-D smart-degrade: matches [`Self::set`]'s policy. If the line
+    /// Smart-degrade: matches [`Self::set`]'s policy. If the line
     /// is a single uniform Cluster whose representative equals `cell`,
     /// the write is a no-op and storage stays Cluster. Otherwise
     /// degrade to Flat then bulk-fill the range.
@@ -671,11 +672,10 @@ impl Line {
     /// `&Cell` regardless of storage form without materializing the flat
     /// representation.
     ///
-    /// **PR-B2 follow-up:** previously routed
-    /// through `as_flat_slice()` which panicked on Cluster lines via
-    /// `as_vec()`. That made PR-C's premise — actually produce Cluster
-    /// lines from scrollback eject — impossible without rewriting every
-    /// downstream call site. The iterator now lazily walks either form
+    /// This used to route through `as_flat_slice()`, which panicked on
+    /// Cluster lines via `as_vec()` — so producing Cluster lines from
+    /// scrollback eject was impossible without rewriting every downstream
+    /// call site. The iterator now lazily walks either form
     /// and implements `DoubleEndedIterator` + `ExactSizeIterator` so the
     /// existing `iter().rev()` / `iter().len()` call sites (copy_mode,
     /// search, etc.) keep working unchanged.
@@ -684,7 +684,7 @@ impl Line {
     }
 
     /// Transparent cluster-or-flat iterator. Same as [`Self::iter`] —
-    /// kept as an explicit name for the post-PR-C hot paths that want
+    /// kept as an explicit name for the hot paths that want
     /// to call it for clarity.
     pub fn iter_storage(&self) -> LineIter<'_> {
         match &self.storage {
@@ -735,11 +735,15 @@ impl Line {
         &self.storage
     }
 
-    // ----- PR-B1: shim accessors used by Grid's internal/public API
-    // while downstream callers still pass &Vec<Cell> / &[Cell] around. These
-    // force the storage to Flat (cheap in B1 because the Grid never produces
-    // Cluster yet) and expose the inner Vec directly so the lifetime chain
+    // ----- Shim accessors for callers that still pass &Vec<Cell> / &[Cell]
+    // around. These force the storage to Flat and expose the inner Vec
+    // directly, so the lifetime chain
     // `&Grid → &VecDeque<Line> → &Line → &Vec<Cell>` works without copies.
+    //
+    // Forcing is not free: `Grid` compresses lines on scrollback eject
+    // (`grid.rs`, `row.try_compress()`), so any line in history may be
+    // Cluster and calling one of these decompresses it in place. Prefer the
+    // cluster-aware accessors above on any path that walks scrollback.
 
     /// Borrow the underlying flat `Vec<Cell>`. **PANICS** on Cluster storage:
     /// there is no `Vec<Cell>` to lend without first materialising into
@@ -748,10 +752,9 @@ impl Line {
     /// or call [`Self::as_vec_mut`] / [`Self::degrade_to_flat`] first if a
     /// borrowed `Vec` reference is truly needed.
     ///
-    /// **PR-B2:** all of `iter` / `Hash` /
-    /// range-index used to silently go through this method and panic on
-    /// Cluster lines. They now use cluster-transparent paths; this method
-    /// remains for the few legitimately-flat-only callers (e.g.
+    /// `iter` / `Hash` / range-index used to route through this method and
+    /// panic on Cluster lines. They now use cluster-transparent paths; this
+    /// method remains for the few legitimately-flat-only callers (e.g.
     /// `as_flat_slice_mut` for mutation), but reading it on a Cluster line
     /// is a programming error.
     pub fn as_vec(&self) -> &Vec<Cell> {
@@ -788,7 +791,7 @@ impl Line {
 
     /// Resize to `new_len`, padding with `fill` when growing.
     ///
-    /// PR-E: Cluster-preserving resize. When the line is in Cluster
+    /// Cluster-preserving resize. When the line is in Cluster
     /// form, this avoids degrading to Flat in the common cases:
     ///
     /// * **Shrink** — truncate the cluster's run-len; if the resulting
@@ -866,11 +869,11 @@ impl Line {
         self.as_flat_slice_mut().iter_mut()
     }
 
-    /// PR-C: try to compress this line into a single Cluster when
+    /// try to compress this line into a single Cluster when
     /// the entire row is uniform (every cell byte-identical). Called by
     /// `Grid::scroll_up` as a Line is ejected from visible into
     /// scrollback. Multi-Cluster compression of partially-uniform lines
-    /// is intentionally deferred to PR-D.
+    /// is intentionally not implemented.
     ///
     /// Returns `true` if storage changed.
     ///
@@ -896,9 +899,9 @@ impl Line {
         true
     }
 
-    /// PR-C: force the storage to Flat. Use at any mutation site
+    /// force the storage to Flat. Use at any mutation site
     /// that may operate on a scrollback Line that could now be in
-    /// Cluster form (since PR-C produces Cluster lines on eject). All
+    /// Cluster form (the Grid produces Cluster lines on eject). All
     /// existing `as_vec_mut` / `set` / `iter_mut` paths already degrade,
     /// but call sites that hold a `&mut Line` and intend to do bulk
     /// in-place edits can call this once up front for clarity.

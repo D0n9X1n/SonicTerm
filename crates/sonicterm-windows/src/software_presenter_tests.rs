@@ -142,11 +142,7 @@ fn software_surface_growth_uses_exact_validated_capacity() {
 /// Independent half-open intersection of `[x, x + w) x [y, y + h)` with
 /// `[0, width) x [0, height)`, computed in `u64` so no clamping or wrapping can
 /// hide an error in the `u32` implementation under test.
-fn reference_clip(
-    rect: DirtyRect,
-    width: u32,
-    height: u32,
-) -> Option<DirtyRect> {
+fn reference_clip(rect: DirtyRect, width: u32, height: u32) -> Option<DirtyRect> {
     let x1 = u64::from(rect.x);
     let y1 = u64::from(rect.y);
     let x2 = (x1 + u64::from(rect.w)).min(u64::from(width));
@@ -154,12 +150,7 @@ fn reference_clip(
     if x1 >= x2 || y1 >= y2 {
         return None;
     }
-    Some(DirtyRect {
-        x: rect.x,
-        y: rect.y,
-        w: (x2 - x1) as u32,
-        h: (y2 - y1) as u32,
-    })
+    Some(DirtyRect { x: rect.x, y: rect.y, w: (x2 - x1) as u32, h: (y2 - y1) as u32 })
 }
 
 // Odd, non-round surface dimensions used throughout the edge tests. Round
@@ -309,7 +300,8 @@ fn dirty_rect_clipped_matches_reference_intersection_exhaustively() {
 fn dirty_rect_clipped_matches_reference_along_odd_surface_edges() {
     // Same equivalence check at the odd dimensions the surface actually uses,
     // sampled along each edge and past both extremes rather than exhaustively.
-    let coords = [0, 1, 2, ODD_W / 2, ODD_W - 2, ODD_W - 1, ODD_W, ODD_W + 1, u32::MAX - 1, u32::MAX];
+    let coords =
+        [0, 1, 2, ODD_W / 2, ODD_W - 2, ODD_W - 1, ODD_W, ODD_W + 1, u32::MAX - 1, u32::MAX];
     let extents = [0, 1, 2, 3, ODD_H - 1, ODD_H, ODD_H + 1, ODD_W, u32::MAX - 1, u32::MAX];
     for &x in &coords {
         for &y in &coords {
@@ -343,10 +335,7 @@ fn mark_dirty_records_only_clipped_rects() {
 
     // Overhanging is trimmed to the surface before being recorded.
     surface.mark_dirty(DirtyRect { x: ODD_W - 2, y: ODD_H - 3, w: 999, h: 999 });
-    assert_eq!(
-        surface.dirty_rects(),
-        &[DirtyRect { x: ODD_W - 2, y: ODD_H - 3, w: 2, h: 3 }]
-    );
+    assert_eq!(surface.dirty_rects(), &[DirtyRect { x: ODD_W - 2, y: ODD_H - 3, w: 2, h: 3 }]);
 }
 
 #[test]
@@ -529,7 +518,11 @@ fn try_resize_growth_within_capacity_reuses_allocation() {
     assert!(surface.try_resize(100, 80));
 
     assert_eq!(surface.pixels().len(), 100 * 80 * 4);
-    assert_eq!(surface.pixels.capacity(), capacity, "growth under capacity should reuse the buffer");
+    assert_eq!(
+        surface.pixels.capacity(),
+        capacity,
+        "growth under capacity should reuse the buffer"
+    );
 }
 
 #[test]
@@ -575,12 +568,7 @@ fn no_dirty_rect_outlives_the_surface_it_was_recorded_against() {
     let mut surface = SoftwareSurface::try_new(ODD_W, ODD_H).expect("valid surface");
 
     for (w, h) in [(101u32, 97u32), (809, 601), (17, 13), (1, 1), (640, 480)] {
-        surface.mark_dirty(DirtyRect {
-            x: 0,
-            y: 0,
-            w: surface.width(),
-            h: surface.height(),
-        });
+        surface.mark_dirty(DirtyRect { x: 0, y: 0, w: surface.width(), h: surface.height() });
         assert!(surface.try_resize(w, h));
 
         for rect in surface.dirty_rects() {

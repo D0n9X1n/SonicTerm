@@ -28,11 +28,11 @@ pub struct RenderInputs<'a> {
     /// lifetime/gating as [`Self::hovered_url_underline`]; this is the
     /// glyph-recolor companion to that underline overlay.
     pub hovered_url_cells: Option<HoveredUrlCells>,
-    /// Phase D — drag visual feedback.
+    /// drag visual feedback.
     ///
     /// `Some(ghost)` while a tab drag session is live and the cursor
     /// has moved at least the drag-start threshold from the press
-    /// point. Drives the three Phase D affordances:
+    /// point. Drives the three drag affordances:
     ///   * D1 ghost copy of the dragged tab at the cursor position,
     ///     painted at `alpha = 0.5`
     ///   * D2 insertion gap — when `insertion_slot` is `Some`, the
@@ -44,7 +44,7 @@ pub struct RenderInputs<'a> {
     pub drag_ghost: Option<DragGhost>,
 }
 
-/// Phase D drag-feedback descriptor — pure data passed from the App
+/// Drag-feedback descriptor — pure data passed from the App
 /// layer to the renderer. The renderer reads this to paint a 50 %
 /// alpha ghost copy of the dragged tab at the cursor, draw the 8 px
 /// insertion gap in the destination bar, and gray out the source tab.

@@ -56,12 +56,9 @@ fn software_cap_applies_across_high_refresh_monitors() {
     // The rates a software-render user is most likely to be sitting in front
     // of. Every one is FASTER than the 40 fps software cap, so the cap must
     // fire and the monitor period must not pass through.
-    for (mhz, label) in [
-        (120_000u32, "120 Hz"),
-        (144_000, "144 Hz"),
-        (240_000, "240 Hz"),
-        (165_000, "165 Hz"),
-    ] {
+    for (mhz, label) in
+        [(120_000u32, "120 Hz"), (144_000, "144 Hz"), (240_000, "240 Hz"), (165_000, "165 Hz")]
+    {
         let monitor = period_from_millihertz(mhz);
         assert!(
             monitor < SOFTWARE_RENDER_FRAME_PERIOD,
@@ -109,7 +106,11 @@ fn effective_frame_period_covers_the_full_state_matrix() {
         (true, true, SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD, "software, composing: ~12 fps cap"),
     ];
     for (software_render, composing, expected, label) in cases {
-        assert_eq!(effective_frame_period(software_render, composing, monitor), expected, "{label}");
+        assert_eq!(
+            effective_frame_period(software_render, composing, monitor),
+            expected,
+            "{label}"
+        );
     }
 }
 

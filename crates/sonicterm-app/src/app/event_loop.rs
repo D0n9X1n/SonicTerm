@@ -1,6 +1,6 @@
 //! `App::do_resumed` / `do_user_event` / `do_new_events` /
 //! `do_about_to_wait` — extracted from the `ApplicationHandler` trait impl
-//! in refactor PR 8b.
+//! from the monolithic app module.
 //!
 //! The trait methods in `mod.rs` are 1-line delegators that call into
 //! these `impl App` methods. Splitting the bodies out of the trait impl
@@ -236,7 +236,7 @@ impl App {
     /// re-walks the fallback chain and the user's tofu cells flip to
     /// real glyphs.
     pub(super) fn handle_clear_shape_cache(&mut self) {
-        // PR-B1b: main window lives in `self.windows` with `renderer=Some`,
+        // main window lives in `self.windows` with `renderer=Some`,
         // so a single iteration covers main + all torn-out children.
         for child in self.windows.values_mut() {
             if let Some(r) = child.renderer.as_mut() {
@@ -385,7 +385,7 @@ impl App {
             );
         }
 
-        // Phase C2 / register the main window's HWND with
+        // Register the main window's HWND with
         // the OS-drag backend through the unified entry point so the
         // main and torn-out windows share code paths. No-op on mac.
         let main_id = window.id();
@@ -407,10 +407,10 @@ impl App {
         // up on the very first paint, not after a config edit.
         renderer.set_tab_close_override(self.config.tab_close_button_color.as_deref());
 
-        // PR-B1b: renderer is now owned by `WindowState.renderer`.
+        // renderer is now owned by `WindowState.renderer`.
         // Insert the main entry BEFORE `new_tab` so `spawn_pane` (which
         // reads cell size through `self.main_renderer()`) sees it.
-        // PR-B2a: drop any synthetic main entry seeded by tests
+        // drop any synthetic main entry seeded by tests
         // (`App::__test_synthetic_main`); production `do_resumed` is
         // the authoritative source for `main_window_id`.
         if let Some(prev) = self.main_window_id.take() {

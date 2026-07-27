@@ -121,7 +121,7 @@ pub fn build_drag_chip_overlay(
         drop_line_x,
         drop_line_y: source_bar.bar_y_range(),
         scale,
-        // Phase D — drag visual feedback:
+        // drag visual feedback:
         //   D1: ghost_alpha 0.5 on the chip body
         //   D2: insertion_slot opens an 8 px gap in the destination
         //       bar at the drop slot when the cursor is over a bar
@@ -257,7 +257,7 @@ pub fn find_drop_target<W: Copy>(
 }
 
 /// Variant of [`find_drop_target`] for app-level candidate lists where a
-/// window entry may not own a renderer yet. Phase B2 PR-A inserts a shadow
+/// window entry may not own a renderer yet: the main window's entry is
 /// main-window entry into `App::windows` with `renderer: None`; drag-target
 /// hit-testing must skip that placeholder rather than unwrapping it.
 #[doc(hidden)]

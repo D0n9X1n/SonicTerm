@@ -9,7 +9,7 @@
 //! palette, search bar, IME, drag chip) also flow through this
 //! pipeline via [`crate::chrome_text::layout`] — the same instance
 //! shape, the same atlas, the same draw call. No second pipeline, no
-//! second pass, no the legacy chrome layer.
+//! second pass, no glyphon.
 
 use wgpu::{
     BindGroup, BindGroupLayout, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer,

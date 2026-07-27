@@ -1,6 +1,6 @@
 //! Tab title span builders extracted from `render.rs`.
 //!
-//! T14 (wezterm-takeover G3): the legacy the legacy chrome layer `Attrs` / `Color`
+//! T14 (wezterm-takeover G3): the legacy glyphon `Attrs` / `Color`
 //! types are gone. Spans are now built around two local types:
 //!
 //! - [`TabSpanColor`] — sRGB-encoded `(r, g, b, a)` u8s, byte-identical

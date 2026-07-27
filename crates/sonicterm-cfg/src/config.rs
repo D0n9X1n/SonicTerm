@@ -163,10 +163,10 @@ pub enum BackdropKind {
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-/// Scrollbar visibility policy (PR-A).
+/// Scrollbar visibility policy.
 pub enum ScrollbarMode {
     /// Show only on hover / active scroll (default). Auto-hide logic
-    /// lives in the render layer (PR-B/D); the model treats Auto the
+    /// lives in the render layer; the model treats Auto the
     /// same as Always — the caller decides whether to draw the
     /// returned geometry.
     #[default]

@@ -1,4 +1,4 @@
-//! Extracted from `app/mod.rs` in refactor PR 8b (expose-then-extract).
+//! Extracted from `app/mod.rs` from the monolithic app module.
 //! `App`'s referenced fields are `pub(super)`; this submodule lives in
 //! the same `app` module tree, so direct field access works.
 
@@ -796,7 +796,7 @@ impl App {
                             }
                         }
                     }
-                    // Phase C2 — publish this child's tab bar
+                    // publish this child's tab bar
                     // snapshot for cross-window OS drag hit-tests. See
                     // `App::publish_child_window_tab_bar` for the
                     // rationale on the main-window mirror.
@@ -1234,7 +1234,7 @@ impl App {
                                 self.merge_child_into_target(win_id, src_idx, target);
                             }
                             crate::tab_drag::DragAction::TearOutToNewWindow { .. } => {
-                                // Phase B: tear out from a
+                                // tear out from a
                                 // child window into a NEW top-level
                                 // window. The Tab + PaneState (incl.
                                 // PtyHandle) MOVE — no clone, no
@@ -1526,9 +1526,9 @@ impl App {
         let mut focus_report: Option<(u64, Vec<u8>)> = None;
         if let Some(child) = self.windows.get_mut(&win_id) {
             if focused {
-                // Phase A — unified frontmost tracker;
+                // unified frontmost tracker;
                 // discriminates main vs child via `frontmost_kind()`.
-                // PR-B4: `focused_child` removed — the child-only
+                // `focused_child` removed — the child-only
                 // subset is now derivable from `frontmost_window`.
                 self.frontmost_window = Some(win_id);
                 child.ime_cursor_throttle.reset();
@@ -1916,7 +1916,7 @@ impl App {
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // Phase A — per-child action helpers
+    // per-child action helpers
     //
     // These mirror the equivalent main-window mutators in
     // `app/misc.rs` and `app/spawn_pane.rs` but operate on a child
@@ -2057,7 +2057,7 @@ impl App {
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // Phase A — per-child PANE mutators
+    // per-child PANE mutators
     //
     // Mirror of the per-child tab helpers above, but for pane-level
     // actions (`Action::SplitRight`, `SplitDown`, `ClosePane`,
