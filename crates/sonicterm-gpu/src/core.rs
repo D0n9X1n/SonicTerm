@@ -1512,7 +1512,21 @@ pub struct RendererRetention {
 }
 
 impl RendererRetention {
-    /// Class-tagged parts, ready to charge.
+    /// Class-tagged parts, for checking that every part is accounted for.
+    ///
+    /// **Nothing charges these.** `sonicterm-gpu` declares no dependency on
+    /// `sonicterm-resource`, so this crate cannot reserve against a governor
+    /// at all, and the renderer's memory reaches the app as a report rather
+    /// than a ledger entry. The `ResourceClass` tags exist so a part cannot be
+    /// added to this struct without deciding what it is.
+    ///
+    /// Wiring this to charging is not a small change, and the reason is here
+    /// rather than in the caller that would attempt it: `image_atlas` maps to
+    /// `InlineMediaRetained`, which a pane's decoded media already uses. They
+    /// are different resident allocations — `capacity()` of one contiguous
+    /// atlas buffer versus summed `len()` across separately-owned per-image
+    /// `Vec`s — so charging both under one class would make the class mean two
+    /// things and leave a reader unable to tell which allocation to act on.
     #[must_use]
     pub fn seam_classes(&self) -> [(ResourceClass, ResourceAmount); 3] {
         [
