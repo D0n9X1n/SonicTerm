@@ -740,6 +740,26 @@ fn image_atlas_demotion_ready(
         && frames_without_inline_media >= IMAGE_ATLAS_IDLE_FRAMES
 }
 
+/// Whether clearing the image atlas would actually do anything.
+///
+/// The frame-assembly caller resets whenever inline media "changed", but that
+/// signal is `true` on any frame whose predecessor's key was absent — which is
+/// every frame following the many state changes that clear it. On a window
+/// that has never shown an image the media hash cannot change, so the absent
+/// key accounts for every reset, once per rendered frame.
+///
+/// An untouched placeholder atlas holds no entries and no packing state, so
+/// resetting it changes nothing while still rebuilding the packer and bumping
+/// the atlas identity — which invalidates every cache keyed to it. A promoted
+/// atlas carries that state even while its entry map is momentarily empty and
+/// must still be reset, or the packer would keep handing out coordinates from
+/// a layout the caller believes it discarded.
+#[must_use]
+fn image_atlas_reset_warranted(atlas: &GlyphAtlas) -> bool {
+    !atlas.is_empty()
+        || (atlas.width(), atlas.height()) != (PLACEHOLDER_ATLAS_DIM, PLACEHOLDER_ATLAS_DIM)
+}
+
 fn full_surface_rect(width: u32, height: u32) -> PixelRect {
     PixelRect { x: 0, y: 0, w: width.max(1), h: height.max(1) }
 }
@@ -4277,7 +4297,10 @@ impl GpuRenderer {
             has_renderable_inline_media,
             retained_inline_media_bytes,
         );
-        if inline_media_changed && !image_atlas_promoted {
+        if inline_media_changed
+            && !image_atlas_promoted
+            && image_atlas_reset_warranted(&self.image_atlas)
+        {
             self.reset_image_atlas();
         }
         let mut image_glyph_instances = Vec::new();
