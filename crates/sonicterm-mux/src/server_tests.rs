@@ -472,8 +472,9 @@ fn paused_spawn_queues_spawned_before_exit_and_reap() {
 /// Real PTY integration (unix): spawn a shell through the sonicterm-io seam,
 /// attach a subscriber, feed a command on stdin, and assert the marker bytes
 /// travel PTY -> reader thread -> replay/subscriber. This is the end-to-end
-/// guard for the #810 refactor (build_pane via PtyHandle, out_rx drain,
-/// in_tx write path). Unix-only: it depends on `/bin/sh` and printf.
+/// guard for the PTY-seam refactor: `build_pane` via `PtyHandle`, the `out_rx`
+/// drain, and the `in_tx` write path. Unix-only: it depends on `/bin/sh` and
+/// printf.
 #[cfg(unix)]
 #[test]
 fn shell_output_flows_through_pty_seam_to_subscriber() {

@@ -1,6 +1,6 @@
 //! The governor's figures match what the retention seams report.
 //!
-//! The hierarchy in #934 established ownership without charging anything. This
+//! The owner hierarchy established ownership without charging anything. This
 //! is the next increment: each pane's retention is charged to its owner, so a
 //! window's memory total is derivable from the ledger rather than only from a
 //! log line.
@@ -445,7 +445,7 @@ fn the_governor_actually_holds_pane_owners_to_the_budget() {
 
 /// A stalled capture is reclaimed after two quiet samples.
 ///
-/// The seam for this landed in #940 and nothing called it, so a transfer
+/// The reclamation seam was built and nothing called it, so a transfer
 /// killed mid-flight pinned its staging until the pane died. This is the pass
 /// that was missing.
 #[test]
@@ -538,10 +538,10 @@ fn reclaiming_a_stalled_capture_leaves_the_pane_usable() {
 
 /// Closing everything must return the process root to zero.
 ///
-/// The last of #880's four clauses, and the one that catches the defect shape
-/// this epic exists for: a charge taken and not returned reads as memory in
-/// use forever. Nothing before this asserted it — every existing test measures
-/// a *live* session, where a non-zero figure is correct.
+/// The last of the four release clauses, and the one that catches the defect
+/// shape this work exists for: a charge taken and not returned reads as memory
+/// in use forever. Nothing before this asserted it — every existing test
+/// measures a *live* session, where a non-zero figure is correct.
 ///
 /// Asserted on the process root rather than per owner, because that is where a
 /// leak accumulates: an owner that never returns its charge leaves the root
