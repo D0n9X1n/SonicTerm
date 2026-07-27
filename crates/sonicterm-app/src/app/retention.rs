@@ -692,7 +692,6 @@ impl super::App {
         // the ledger backs a tripwire and the log lines back a growth curve
         // across a session, and both answer questions on a scale of minutes.
         // A control loop that had to act within a frame could not read this.
-        self.log_renderer_retention();
         if !retention_sample_due(&mut self.last_retention_sample, now) {
             return false;
         }
