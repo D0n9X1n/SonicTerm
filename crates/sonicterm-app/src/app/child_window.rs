@@ -526,6 +526,7 @@ impl App {
                 if !inline_images_locked {
                     drop(inline_images_by_pane);
                     drop(guards);
+                    self.defer_child_redraw(win_id, was_dirty);
                     return;
                 }
                 let viewport_tops: std::collections::HashMap<u64, Option<u64>> =
