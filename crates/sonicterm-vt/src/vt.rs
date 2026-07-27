@@ -54,75 +54,175 @@ pub const MAX_MEDIA_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 /// Per-parser the buffer is bounded. Composed across panes it was not:
 /// 20 panes each mid-capture measured 320 MiB, every parser individually
 /// compliant. That composition is the shape this ceiling exists to close.
-const MAX_PROCESS_CAPTURE_STAGING_BYTES: usize = 64 * 1024 * 1024;
+///
+/// This is a real ceiling, not a target: staging is handed out from two fixed
+/// pools that sum to exactly this figure, so the total cannot exceed it at any
+/// number of panes. A per-capture share with a floor cannot make that promise
+/// — past the point where the floor wins the clamp, the sum is the floor times
+/// the number of panes, and nothing bounds the number of panes.
+///
+/// Public so the bound can be measured against real heap from outside the
+/// crate. A ceiling checked only against the arithmetic it was derived from is
+/// how the composition above passed review in the first place.
+pub const MAX_PROCESS_CAPTURE_STAGING_BYTES: usize = 64 * 1024 * 1024;
 
-/// Smallest staging budget a capture is ever given.
+/// Smallest staging budget an admitted capture is ever given.
 ///
 /// A fair share alone shrinks toward zero as captures multiply, and a capture
 /// truncated below the size of a typical encoded image renders a broken
 /// picture — the outcome this floor exists to prevent. Sized to hold a
-/// representative PNG/JPEG payload whole so that every pane, however many are
-/// active, can still complete an ordinary image.
-const MIN_CAPTURE_STAGING_BYTES: usize = 4 * 1024 * 1024;
+/// representative PNG/JPEG payload whole so that an admitted pane can always
+/// complete an ordinary image.
+///
+/// Public so the guarantee can be asserted from outside the crate: the floor
+/// is the promise made to an admitted pane, and a bound that held by quietly
+/// withdrawing it would be a regression dressed as a fix.
+pub const MIN_CAPTURE_STAGING_BYTES: usize = 4 * 1024 * 1024;
+
+/// Staging reserved for growth beyond the floor.
+///
+/// Exactly what one capture needs to climb from the floor to the per-capture
+/// maximum, so a lone pane receiving a large image still gets all 16 MiB of it
+/// — the common case, and not the one that needs constraining. Held apart from
+/// the floor pool so that a capture growing large cannot consume the floors
+/// other panes are guaranteed.
+const CAPTURE_GROWTH_POOL_BYTES: usize = MAX_MEDIA_PAYLOAD_BYTES - MIN_CAPTURE_STAGING_BYTES;
+
+/// Staging reserved for the floors of concurrent captures.
+const CAPTURE_FLOOR_POOL_BYTES: usize =
+    MAX_PROCESS_CAPTURE_STAGING_BYTES - CAPTURE_GROWTH_POOL_BYTES;
+
+/// How many panes can hold an ordinary image whole at the same time.
+///
+/// The honest form of the promise the floor makes. The old formulation —
+/// every pane, however many are active, gets at least the floor — is not
+/// something a fixed ceiling can promise, because panes are not bounded:
+/// nothing in the workspace caps tab or split count, so "every pane" is
+/// unbounded and `N × floor` has no maximum.
+///
+/// Derived rather than chosen, so it cannot drift from the pools it describes.
+/// Raising it means raising the ceiling; the arithmetic is the trade, stated.
+pub const GUARANTEED_CONCURRENT_CAPTURES: usize =
+    CAPTURE_FLOOR_POOL_BYTES / MIN_CAPTURE_STAGING_BYTES;
+
+/// Floor bytes currently reserved by live captures.
+static CAPTURE_FLOOR_RESERVED: AtomicUsize = AtomicUsize::new(0);
+
+/// Growth bytes currently reserved by live captures.
+static CAPTURE_GROWTH_RESERVED: AtomicUsize = AtomicUsize::new(0);
 
 /// Captures currently accumulating across every parser in this process.
 static LIVE_MEDIA_CAPTURES: AtomicUsize = AtomicUsize::new(0);
 
-/// Staging budget for one capture when `live` captures are in flight.
+/// Take `want` bytes from `pool` if `capacity` has them, all or nothing.
 ///
-/// Split out from the atomic read so the policy can be asserted directly at
-/// chosen counts rather than inferred from whatever else a parallel test
-/// happens to be holding.
-#[must_use]
-fn staging_budget_for(live: usize) -> usize {
-    // `clamp` cannot panic: floor 4 MiB < ceiling 16 MiB, both compile-time
-    // constants. `live` is forced to at least 1 so the division is defined.
-    (MAX_PROCESS_CAPTURE_STAGING_BYTES / live.max(1))
-        .clamp(MIN_CAPTURE_STAGING_BYTES, MAX_MEDIA_PAYLOAD_BYTES)
+/// All-or-nothing because a partial grant would put a capture's buffer at a
+/// size that is not a power of two, and `Vec` growth rounds up: a 6 MiB budget
+/// is held in an 8 MiB allocation, so the pool would be handing out bytes the
+/// allocator does not honour and the ceiling would fail by the rounding.
+fn reserve_from(pool: &AtomicUsize, capacity: usize, want: usize) -> bool {
+    let mut reserved = pool.load(Ordering::Relaxed);
+    loop {
+        if want > capacity.saturating_sub(reserved) {
+            return false;
+        }
+        match pool.compare_exchange_weak(
+            reserved,
+            reserved + want,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return true,
+            Err(current) => reserved = current,
+        }
+    }
 }
 
-/// Current per-capture staging budget.
-#[must_use]
-fn capture_staging_budget() -> usize {
-    staging_budget_for(LIVE_MEDIA_CAPTURES.load(Ordering::Relaxed))
-}
-
-/// How often a growing capture re-reads the shared budget.
-///
-/// Re-reading per byte would put a division on the hot path of every media
-/// transfer. Re-reading once and caching would leave a capture that started
-/// alone holding a lone capture's budget after nineteen more began. Checking
-/// at a power-of-two boundary costs one mask per byte and bounds the staleness
-/// to this many bytes.
-const CAPTURE_BUDGET_RECHECK_MASK: usize = (64 * 1024) - 1;
-
-/// Increments the live-capture count for as long as a capture exists.
+/// One capture's claim on the process staging pools.
 ///
 /// A separate guard rather than `impl Drop for MediaCapture` because
 /// `into_event`/`into_kitty_event` move fields out of the capture, which a
 /// `Drop` impl on the capture itself would forbid. As a field, it is dropped
 /// by those destructurings exactly as it is by an explicit `= None`, so every
-/// release path decrements without any of them naming the counter.
+/// release path returns its bytes without any of them naming the pools.
 #[derive(Debug)]
-struct CaptureCharge;
+struct StagingReservation {
+    floor: usize,
+    growth: usize,
+}
 
-impl CaptureCharge {
-    fn new() -> Self {
+impl StagingReservation {
+    /// Admit a capture if the floor pool can still guarantee it an ordinary
+    /// image, otherwise refuse it.
+    ///
+    /// Refusing rather than admitting at a reduced size is what makes the
+    /// ceiling hold. It is also the better rendering outcome: a capture
+    /// truncated below a whole image decodes to nothing for Kitty and iTerm2,
+    /// and for Sixel to a silently cut-off picture, which is the broken
+    /// picture the floor exists to prevent rather than an approximation of the
+    /// image the user asked for.
+    fn admit() -> Self {
         LIVE_MEDIA_CAPTURES.fetch_add(1, Ordering::Relaxed);
-        Self
+        let floor = if reserve_from(
+            &CAPTURE_FLOOR_RESERVED,
+            CAPTURE_FLOOR_POOL_BYTES,
+            MIN_CAPTURE_STAGING_BYTES,
+        ) {
+            MIN_CAPTURE_STAGING_BYTES
+        } else {
+            tracing::warn!(
+                guaranteed = GUARANTEED_CONCURRENT_CAPTURES,
+                "media capture refused: staging pool is fully committed to captures \
+                     already in flight"
+            );
+            0
+        };
+        Self { floor, growth: 0 }
+    }
+
+    /// Whether this capture was given staging at all.
+    fn admitted(&self) -> bool {
+        self.floor > 0
+    }
+
+    /// Bytes this capture may hold.
+    fn budget(&self) -> usize {
+        self.floor + self.growth
+    }
+
+    /// Double the budget out of the growth pool.
+    ///
+    /// Doubling rather than a fixed block so every budget stays a power of
+    /// two. `Vec` grows by doubling, so a power-of-two budget is held in an
+    /// allocation of exactly that size and the reservation matches the heap;
+    /// any other budget would be rounded up by the allocator into bytes the
+    /// pool never granted.
+    fn try_double(&mut self) -> bool {
+        let current = self.budget();
+        if current == 0 || current >= MAX_MEDIA_PAYLOAD_BYTES {
+            return false;
+        }
+        if !reserve_from(&CAPTURE_GROWTH_RESERVED, CAPTURE_GROWTH_POOL_BYTES, current) {
+            return false;
+        }
+        self.growth += current;
+        true
     }
 }
 
-impl Clone for CaptureCharge {
-    /// A cloned capture is a second live capture, so it takes its own charge.
+impl Clone for StagingReservation {
+    /// A cloned capture is a second live capture, so it makes its own claim
+    /// rather than duplicating one the pools only granted once.
     fn clone(&self) -> Self {
-        Self::new()
+        Self::admit()
     }
 }
 
-impl Drop for CaptureCharge {
+impl Drop for StagingReservation {
     fn drop(&mut self) {
         LIVE_MEDIA_CAPTURES.fetch_sub(1, Ordering::Relaxed);
+        CAPTURE_FLOOR_RESERVED.fetch_sub(self.floor, Ordering::Relaxed);
+        CAPTURE_GROWTH_RESERVED.fetch_sub(self.growth, Ordering::Relaxed);
     }
 }
 /// Rejected OSC 8 links to skip after a sweep that freed nothing.
@@ -180,36 +280,32 @@ struct MediaCapture {
     data: Vec<u8>,
     truncated: bool,
     pending_esc: bool,
-    /// Cached staging budget, refreshed at
-    /// [`CAPTURE_BUDGET_RECHECK_MASK`] boundaries.
-    budget: usize,
     /// Every byte offered to this capture, including those refused after the
     /// budget was reached.
     ///
     /// Distinct from `data.len()`, which stops advancing once the capture is
-    /// full. Driving the recheck from a counter that keeps moving is what lets
-    /// a *full* capture notice that others have started — and a full capture
-    /// holding a lone capture's share is precisely the case worth catching.
+    /// full. A host watching for a stalled transfer needs to see that bytes
+    /// are still arriving even when none of them are being kept.
     seen: usize,
-    /// Keeps this capture counted in [`LIVE_MEDIA_CAPTURES`] while it exists.
-    _charge: CaptureCharge,
+    /// Set once the growth pool has refused this capture, so a full capture
+    /// stops asking on every subsequent byte.
+    growth_exhausted: bool,
+    /// This capture's claim on the process staging pools, released when the
+    /// capture is dropped or destructured into an event.
+    reservation: StagingReservation,
 }
 
 impl MediaCapture {
     fn new(protocol: MediaProtocol, metadata: String) -> Self {
-        // Take the charge before reading the budget so this capture is counted
-        // in its own fair share rather than claiming a share sized as though
-        // it were not there.
-        let _charge = CaptureCharge::new();
         Self {
             protocol,
             metadata,
             data: Vec::new(),
             truncated: false,
             pending_esc: false,
-            budget: capture_staging_budget(),
             seen: 0,
-            _charge,
+            growth_exhausted: false,
+            reservation: StagingReservation::admit(),
         }
     }
 
@@ -223,53 +319,76 @@ impl MediaCapture {
     }
 
     fn append_byte(&mut self, byte: u8) {
-        // Re-read the shared budget once per boundary-aligned block. Driven by
-        // `seen` rather than `data.len()` so the recheck keeps firing after the
-        // capture fills: a capture that began alone must yield its share when
-        // others start, not keep a lone capture's budget for its whole life.
-        if self.seen & CAPTURE_BUDGET_RECHECK_MASK == 0 {
-            self.refresh_budget();
-        }
         self.seen = self.seen.saturating_add(1);
 
-        if self.data.len() < self.budget {
+        if self.data.len() < self.reservation.budget() {
             self.data.push(byte);
-        } else {
-            self.truncated = true;
+            return;
         }
+
+        // Full. Ask the growth pool for a larger budget, once: a capture that
+        // has been refused keeps receiving bytes, and retrying per byte would
+        // put a contended atomic on the hot path of a transfer that is already
+        // known to be capped.
+        if !self.growth_exhausted && self.reservation.try_double() {
+            self.data.push(byte);
+            return;
+        }
+
+        self.growth_exhausted = true;
+        self.truncated = true;
     }
 
-    /// Re-read the shared budget, lowering the ceiling on *future* growth.
+    /// Whether this capture was admitted to the staging pools.
     ///
-    /// Deliberately does not discard bytes already captured. Shrinking a live
-    /// capture would permanently truncate an image a pane is midway through
-    /// receiving because other panes briefly opened captures of their own —
-    /// and the image would stay broken after they finished. Refusing to grow
-    /// costs the tail of an oversized payload; discarding costs a picture the
-    /// user asked for and was already going to get.
-    ///
-    /// Reclaiming from a capture that has genuinely stopped is
-    /// [`Parser::cancel_capture`], which releases the whole allocation rather
-    /// than leaving a corrupted partial one.
-    fn refresh_budget(&mut self) {
-        self.budget = capture_staging_budget();
+    /// A refused capture holds no staging and has kept no bytes, so it has
+    /// nothing to dispatch.
+    fn admitted(&self) -> bool {
+        self.reservation.admitted()
     }
 
-    fn into_event(self, row: u16, col: u16) -> MediaEvent {
-        MediaEvent {
+    /// Whether this capture holds the whole payload it was offered.
+    fn whole(&self) -> bool {
+        self.admitted() && !self.truncated
+    }
+
+    /// Dispatch the payload, unless it is not the whole picture.
+    ///
+    /// A capture that was refused, or admitted and then cut, is dropped rather
+    /// than surfaced, for the reason [`Parser::cancel_capture`] gives for
+    /// discarding a partial one: a fragment of an image decodes to nothing
+    /// useful, so surfacing it would trade memory for a broken picture instead
+    /// of no picture.
+    ///
+    /// For Sixel the distinction is load-bearing rather than theoretical. Its
+    /// decoder paints whatever bytes it is given and reports the bounding box
+    /// of what it painted, so a cut payload decodes to a real image containing
+    /// the top fraction of the picture — byte-identical to the whole one for
+    /// as far as it goes, with nothing in it marking it incomplete. A user
+    /// cannot tell that image from a complete one that happens to be shorter.
+    fn into_event(self, row: u16, col: u16) -> Option<MediaEvent> {
+        if !self.whole() {
+            return None;
+        }
+        Some(MediaEvent {
             protocol: self.protocol,
             row,
             col,
             metadata: self.metadata,
             data: self.data,
-            truncated: self.truncated,
-        }
+        })
     }
 
     fn into_kitty_event(mut self, row: u16, col: u16) -> Option<MediaEvent> {
+        if !self.admitted() {
+            return None;
+        }
         if self.pending_esc {
             self.append_byte(0x1b);
             self.pending_esc = false;
+        }
+        if !self.whole() {
+            return None;
         }
         if self.data.first().copied() != Some(b'G') {
             return None;
@@ -278,14 +397,7 @@ impl MediaCapture {
         let (metadata, data) = split_once_byte(payload, b';')
             .map(|(m, d)| (String::from_utf8_lossy(m).into_owned(), d.to_vec()))
             .unwrap_or_else(|| (String::new(), payload.to_vec()));
-        Some(MediaEvent {
-            protocol: MediaProtocol::Kitty,
-            row,
-            col,
-            metadata,
-            data,
-            truncated: self.truncated,
-        })
+        Some(MediaEvent { protocol: MediaProtocol::Kitty, row, col, metadata, data })
     }
 }
 
@@ -315,10 +427,12 @@ pub struct MediaEvent {
     pub metadata: String,
     /// Raw protocol payload bytes, capped at 16 MiB to keep untrusted PTY output
     /// from growing memory without bound.
+    ///
+    /// Always the whole payload the sequence carried. A payload that could not
+    /// be staged whole is not dispatched at all — see
+    /// [`Parser::cancel_capture`] for why a fragment is worse than nothing —
+    /// so a consumer never has to ask whether what it received is complete.
     pub data: Vec<u8>,
-    /// True when `data` was capped by SonicTerm. The event is still surfaced so
-    /// callers can show a failed/truncated media placeholder.
-    pub truncated: bool,
 }
 
 /// Command lifecycle events surfaced from OSC 133 shell-integration markers.
@@ -1424,28 +1538,31 @@ fn join_osc_params(params: &[&[u8]]) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Parse an iTerm2 `File=...` inline media payload.
+///
+/// Returns `None` for a payload larger than a capture may hold, rather than a
+/// capped one: the bytes past the cap are the rest of the image, and an image
+/// missing its tail decodes to nothing for a base64 protocol. Dispatching the
+/// prefix would cost a decode that is guaranteed to fail.
 fn parse_iterm2_file_event(payload: &[u8], row: u16, col: u16) -> Option<MediaEvent> {
     if !payload.starts_with(b"File=") {
         return None;
     }
     let (metadata, data) = split_once_byte(payload, b':')?;
-    let mut data_vec = Vec::with_capacity(data.len().min(MAX_MEDIA_PAYLOAD_BYTES));
-    let mut truncated = false;
-    for byte in data.iter().copied() {
-        if data_vec.len() < MAX_MEDIA_PAYLOAD_BYTES {
-            data_vec.push(byte);
-        } else {
-            truncated = true;
-            break;
-        }
+    if data.len() > MAX_MEDIA_PAYLOAD_BYTES {
+        tracing::warn!(
+            payload_bytes = data.len(),
+            cap = MAX_MEDIA_PAYLOAD_BYTES,
+            "inline media payload refused: larger than a capture may hold"
+        );
+        return None;
     }
     Some(MediaEvent {
         protocol: MediaProtocol::Iterm2File,
         row,
         col,
         metadata: String::from_utf8_lossy(metadata).into_owned(),
-        data: data_vec,
-        truncated,
+        data: data.to_vec(),
     })
 }
 
@@ -2045,9 +2162,9 @@ impl Perform for Performer {
         self.ground = false;
         self.sequence_dispatched = true;
         if let Some(capture) = self.dcs_capture.take() {
-            self.events.push(VtEvent::Media(
-                capture.into_event(self.grid.cursor.row, self.grid.cursor.col),
-            ));
+            if let Some(event) = capture.into_event(self.grid.cursor.row, self.grid.cursor.col) {
+                self.events.push(VtEvent::Media(event));
+            }
         }
     }
     fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, byte: u8) {

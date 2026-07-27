@@ -1,10 +1,18 @@
 use super::{
-    capture_staging_budget, staging_budget_for, MediaCapture, MediaProtocol, Parser, VtEvent,
-    LIVE_MEDIA_CAPTURES, MAX_ESCAPE_SEQUENCE_BYTES, MAX_MEDIA_PAYLOAD_BYTES,
-    MAX_PROCESS_CAPTURE_STAGING_BYTES, MIN_CAPTURE_STAGING_BYTES,
+    MediaCapture, MediaProtocol, Parser, VtEvent, CAPTURE_FLOOR_POOL_BYTES,
+    CAPTURE_GROWTH_POOL_BYTES, GUARANTEED_CONCURRENT_CAPTURES, LIVE_MEDIA_CAPTURES,
+    MAX_ESCAPE_SEQUENCE_BYTES, MAX_MEDIA_PAYLOAD_BYTES, MAX_PROCESS_CAPTURE_STAGING_BYTES,
+    MIN_CAPTURE_STAGING_BYTES,
 };
 use sonicterm_grid::grid::{CellFlags, Grid};
 use std::sync::atomic::Ordering;
+
+/// Serialises tests that depend on how much of the staging pools is free.
+///
+/// The pools are process-wide, so a test holding captures changes what a
+/// concurrently-running test is admitted for. Tests that merely open a capture
+/// do not need this; tests that assert *whether* a capture was admitted do.
+static POOLS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn row_text(parser: &Parser, row: u16) -> String {
     parser.grid().row(row).iter().map(|cell| cell.ch).collect()
@@ -255,6 +263,7 @@ fn st_split_across_escape_limit_is_recognized() {
 
 #[test]
 fn large_sixel_uses_media_budget_not_generic_escape_limit() {
+    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut parser = Parser::new(Grid::new(80, 24));
     let mut payload = b"\x1bPq".to_vec();
     payload.extend(std::iter::repeat_n(b'?', MAX_ESCAPE_SEQUENCE_BYTES + 1));
@@ -275,6 +284,7 @@ fn large_sixel_uses_media_budget_not_generic_escape_limit() {
 
 #[test]
 fn v120_parser_media_capture_shares_one_budget() {
+    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     // The inventory recorded this as "independent parser limits only", and the
     // two capture slots do sit on separate structs with separate ceilings. But
     // beginning any escape family cancels a capture already in flight, so they
@@ -1172,74 +1182,215 @@ fn a_full_registry_still_triggers_a_reclamation_sweep() {
 // dies, and no eviction pass can reclaim it.
 // ---------------------------------------------------------------------------
 
-/// The budget policy, asserted at chosen counts rather than at whatever count
-/// a parallel test happens to leave behind.
+/// The pools must sum to the ceiling exactly.
+///
+/// The ceiling is only a ceiling if nothing can be handed out that is not
+/// drawn from one of the two pools. Asserted as arithmetic over the
+/// constants — the heap-truth integration tests are what check that the code
+/// actually obeys them.
 #[test]
-fn staging_budget_divides_the_process_ceiling_and_clamps_at_both_ends() {
-    // One capture — the common case — is unaffected by the ceiling existing.
+fn the_pools_sum_to_the_process_ceiling() {
     assert_eq!(
-        staging_budget_for(1),
-        MAX_MEDIA_PAYLOAD_BYTES,
-        "a lone capture must still get the full per-capture maximum"
+        CAPTURE_FLOOR_POOL_BYTES + CAPTURE_GROWTH_POOL_BYTES,
+        MAX_PROCESS_CAPTURE_STAGING_BYTES,
+        "staging handed out from pools that do not sum to the ceiling is not bounded by it"
     );
+}
 
-    // Up to the point where the fair share meets the per-capture cap, every
-    // capture still gets everything it could have had.
-    let at_cap = MAX_PROCESS_CAPTURE_STAGING_BYTES / MAX_MEDIA_PAYLOAD_BYTES;
-    assert_eq!(staging_budget_for(at_cap), MAX_MEDIA_PAYLOAD_BYTES);
-
-    // Past it the share divides.
+/// The growth pool must let one capture reach the per-capture maximum.
+///
+/// A lone pane receiving a large image is the common case and the one the
+/// ceiling must not touch. If growth were smaller than the climb from the
+/// floor to the maximum, no capture could ever reach the maximum and
+/// `MAX_MEDIA_PAYLOAD_BYTES` would be a number no code path can produce.
+#[test]
+fn the_growth_pool_covers_one_capture_climbing_to_the_maximum() {
     assert_eq!(
-        staging_budget_for(at_cap * 2),
-        MAX_MEDIA_PAYLOAD_BYTES / 2,
-        "beyond the cap the ceiling divides evenly"
+        CAPTURE_GROWTH_POOL_BYTES,
+        MAX_MEDIA_PAYLOAD_BYTES - MIN_CAPTURE_STAGING_BYTES,
+        "the growth pool must be exactly one capture's climb from the floor to the maximum"
     );
+}
 
-    // And it stops dividing at the floor, so a pane in a heavily-loaded
-    // process can still complete an ordinary image rather than rendering a
-    // truncated one.
+/// The guarantee must be the floor pool divided by the floor.
+///
+/// Derived rather than chosen, so the promise cannot drift from the pool that
+/// backs it. A guarantee larger than the pool would be a promise the pools
+/// cannot keep; smaller would be leaving panes unrendered for no reason.
+#[test]
+fn the_guarantee_is_derived_from_the_floor_pool() {
     assert_eq!(
-        staging_budget_for(usize::MAX),
-        MIN_CAPTURE_STAGING_BYTES,
-        "the share must stop at the floor, not approach zero"
+        GUARANTEED_CONCURRENT_CAPTURES * MIN_CAPTURE_STAGING_BYTES,
+        CAPTURE_FLOOR_POOL_BYTES,
+        "the guaranteed count must be exactly what the floor pool can floor"
     );
+}
 
-    // Monotone: more captures never yields a larger share.
-    let mut previous = staging_budget_for(1);
-    for live in 2..64 {
-        let current = staging_budget_for(live);
-        assert!(current <= previous, "budget rose from {previous} to {current} at live={live}");
-        previous = current;
+/// The guarantee must cover a plausible session.
+///
+/// A change that held the ceiling by guaranteeing one or two panes would
+/// satisfy every bound assertion in the suite while making the terminal
+/// useless for the case the floor exists to serve. Compile-time because both
+/// sides are constants.
+const _: () = assert!(
+    GUARANTEED_CONCURRENT_CAPTURES >= 8,
+    "the staging pools guarantee too few concurrent captures to cover a plausible \
+     working session"
+);
+
+/// Every capture inside the guarantee is admitted; the next one is refused.
+///
+/// This is the admission boundary itself. The old policy had no boundary — it
+/// divided a share and clamped it at a floor, so the `N + 1`th capture was
+/// admitted at the floor exactly like the first, and the sum grew without
+/// limit. What replaced it must actually stop.
+#[test]
+fn captures_are_admitted_up_to_the_guarantee_and_refused_past_it() {
+    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let admitted: Vec<MediaCapture> = (0..GUARANTEED_CONCURRENT_CAPTURES)
+        .map(|_| MediaCapture::new(MediaProtocol::Kitty, String::new()))
+        .collect();
+
+    for (index, capture) in admitted.iter().enumerate() {
+        assert!(
+            capture.admitted(),
+            "capture {index} is inside the guarantee of {GUARANTEED_CONCURRENT_CAPTURES} and \
+             must be admitted"
+        );
     }
+
+    let refused = MediaCapture::new(MediaProtocol::Kitty, String::new());
+    assert!(
+        !refused.admitted(),
+        "the capture past the guarantee must be refused, or the ceiling is not a ceiling"
+    );
+
+    drop(refused);
+    drop(admitted);
 }
 
-/// Zero must not divide-by-zero. Reachable only through a torn read, but the
-/// function takes a plain `usize` and the guard is one `max` call.
+/// A refused capture must keep no bytes at all.
+///
+/// Admission is what bounds the total, so a refused capture that still
+/// accumulated would make the bound decorative.
 #[test]
-fn staging_budget_survives_a_zero_live_count() {
-    assert_eq!(staging_budget_for(0), MAX_MEDIA_PAYLOAD_BYTES);
+fn a_refused_capture_stages_nothing() {
+    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let held: Vec<MediaCapture> = (0..GUARANTEED_CONCURRENT_CAPTURES)
+        .map(|_| MediaCapture::new(MediaProtocol::Kitty, String::new()))
+        .collect();
+
+    let mut refused = MediaCapture::new(MediaProtocol::Kitty, String::new());
+    assert!(!refused.admitted(), "precondition: the pool is committed");
+
+    for byte in b"a-payload-that-must-not-be-staged" {
+        refused.append_byte(*byte);
+    }
+
+    assert_eq!(refused.data.len(), 0, "a refused capture must keep no bytes");
+    assert_eq!(refused.retained_bytes(), 0, "and hold no allocation");
+    assert!(refused.truncated, "and know that it dropped what it was given");
+
+    drop(refused);
+    drop(held);
 }
 
-/// Captures alive at the same time must see each other.
+/// Releasing a capture must return its bytes to the pools.
 ///
-/// This is what fails if the charge is never taken: with no counter increment,
-/// every capture reads `live = 1` and claims the full 16 MiB, which is exactly
-/// the 20 × 16 MiB = 320 MiB composition this package exists to close.
-///
-/// Robust against parallel tests by construction — anything else holding a
-/// capture only raises the count, which can only lower the observed budget,
-/// and the assertion is an upper bound.
+/// A pool that is never returned to would refuse everything after the first
+/// burst of captures, which is a permanent degradation rather than a bound.
 #[test]
-fn concurrent_captures_see_a_divided_budget() {
+fn releasing_a_capture_returns_its_pool_bytes() {
+    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let held: Vec<MediaCapture> = (0..GUARANTEED_CONCURRENT_CAPTURES)
+        .map(|_| MediaCapture::new(MediaProtocol::Kitty, String::new()))
+        .collect();
+    assert!(
+        !MediaCapture::new(MediaProtocol::Kitty, String::new()).admitted(),
+        "precondition: the pool is committed"
+    );
+
+    drop(held);
+
+    let after = MediaCapture::new(MediaProtocol::Kitty, String::new());
+    assert!(after.admitted(), "a capture must be admitted once the pool is released");
+}
+
+/// A capture must grow to the per-capture maximum when the pool allows.
+///
+/// The growth path is what keeps the common case whole, and it runs only when
+/// a capture fills its floor. A fix that bounded the total by never growing
+/// would pass every ceiling test and quietly cap every image at the floor.
+#[test]
+fn an_admitted_capture_grows_to_the_per_capture_maximum() {
+    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let mut capture = MediaCapture::new(MediaProtocol::Kitty, String::new());
+    assert!(capture.admitted(), "precondition: admitted into a free pool");
+
+    for _ in 0..MAX_MEDIA_PAYLOAD_BYTES {
+        capture.append_byte(b'A');
+    }
+
+    assert_eq!(
+        capture.data.len(),
+        MAX_MEDIA_PAYLOAD_BYTES,
+        "a capture growing alone must reach the per-capture maximum"
+    );
+    assert!(!capture.truncated, "and must not report truncation at the maximum");
+}
+
+/// Growth must stop at the per-capture maximum.
+///
+/// The floor keeps small images whole; this keeps one capture from taking the
+/// whole growth pool and then continuing past the cap the app charges panes
+/// against.
+#[test]
+fn growth_stops_at_the_per_capture_maximum() {
+    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let mut capture = MediaCapture::new(MediaProtocol::Kitty, String::new());
+    for _ in 0..(MAX_MEDIA_PAYLOAD_BYTES + 4096) {
+        capture.append_byte(b'A');
+    }
+
+    assert_eq!(capture.data.len(), MAX_MEDIA_PAYLOAD_BYTES, "growth must stop at the maximum");
+    assert!(capture.truncated, "and past it the capture must know it was cut");
+    assert!(
+        capture.retained_bytes() <= MAX_MEDIA_PAYLOAD_BYTES + capture.metadata.capacity(),
+        "the allocation must not exceed the budget the pools granted: held {}",
+        capture.retained_bytes()
+    );
+}
+
+/// Captures alive at the same time must contend for the same pools.
+///
+/// This is what fails if the reservation is never taken: with nothing charged
+/// to the pools, every capture is admitted and claims the full 16 MiB, which
+/// is exactly the 20 × 16 MiB = 320 MiB composition this package exists to
+/// close.
+#[test]
+fn concurrent_captures_contend_for_the_same_pools() {
+    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
     let held: Vec<MediaCapture> =
         (0..32).map(|_| MediaCapture::new(MediaProtocol::Kitty, String::new())).collect();
 
-    let observed = capture_staging_budget();
-    assert!(
-        observed <= MAX_MEDIA_PAYLOAD_BYTES / 2,
-        "32 live captures must each see at most half the per-capture maximum, saw {observed}"
+    let admitted = held.iter().filter(|capture| capture.admitted()).count();
+    assert_eq!(
+        admitted, GUARANTEED_CONCURRENT_CAPTURES,
+        "32 concurrent captures must be admitted up to the guarantee and no further"
     );
-    assert!(observed >= MIN_CAPTURE_STAGING_BYTES, "and never below the floor, saw {observed}");
+
+    let staged: usize = held.iter().map(MediaCapture::retained_bytes).sum();
+    assert!(
+        staged <= MAX_PROCESS_CAPTURE_STAGING_BYTES,
+        "32 concurrent captures hold {staged} bytes against a ceiling of \
+         {MAX_PROCESS_CAPTURE_STAGING_BYTES}"
+    );
 
     drop(held);
 }
@@ -1252,6 +1403,7 @@ fn concurrent_captures_see_a_divided_budget() {
 /// budget only misbehaves once the phantom count accumulates.
 #[test]
 fn a_finished_capture_returns_its_share() {
+    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let baseline = LIVE_MEDIA_CAPTURES.load(Ordering::Relaxed);
 
     // Drive real captures to completion through the parser, so the release
@@ -1271,19 +1423,20 @@ fn a_finished_capture_returns_its_share() {
     );
 }
 
-/// Arriving captures must account for those already live.
+/// Arriving captures must be bounded by what the pools have left.
 ///
 /// The measurement that motivated this package fed 20 parsers an unterminated
 /// APC introducer plus 16 MiB and found 320 MiB pinned, every parser
 /// individually compliant. This is that measurement, asserted.
 ///
-/// Each parser is fed once and then never again — the stalled shape. Growth
-/// budgeting alone cannot bring a stalled capture back down (it never runs
-/// again), so what this pins is the half that growth budgeting *does* fix:
-/// every capture after the first takes a smaller share because the earlier
-/// ones are live.
+/// Each parser is fed once and then never again — the stalled shape, which is
+/// the one no growth policy can fix, because a stalled capture never runs
+/// again to be re-budgeted. Admission is what bounds it: a capture that the
+/// pools cannot floor is refused at birth rather than admitted at a size that
+/// would put the total over.
 #[test]
-fn arriving_captures_take_a_smaller_share_when_others_are_already_live() {
+fn arriving_captures_are_bounded_by_what_the_pools_have_left() {
+    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     const PANES: usize = 20;
 
     let mut parsers: Vec<Parser> = (0..PANES).map(|_| Parser::new(Grid::new(80, 24))).collect();
@@ -1303,24 +1456,25 @@ fn arriving_captures_take_a_smaller_share_when_others_are_already_live() {
         assert_eq!(parser.live_capture_count(), 1, "parser {idx} must still hold its capture");
     }
 
+    // Against the ceiling itself, not against the naive product. `total <
+    // MAX_MEDIA_PAYLOAD_BYTES * PANES` is satisfied by any policy that divides
+    // at all, including one whose sum grows without limit — it was what this
+    // assertion said while the process held 80 MiB against a stated 64 MiB.
     let total: usize = parsers.iter().map(|p| p.retained_amount().bytes).sum();
-    let unbounded = MAX_MEDIA_PAYLOAD_BYTES * PANES;
-
     assert!(
-        total < unbounded,
-        "each arriving capture must see the ones already live: {} MiB against an \
-         unbounded {} MiB",
+        total <= MAX_PROCESS_CAPTURE_STAGING_BYTES,
+        "{PANES} stalled captures hold {} MiB against a ceiling of {} MiB",
         total / (1024 * 1024),
-        unbounded / (1024 * 1024)
+        MAX_PROCESS_CAPTURE_STAGING_BYTES / (1024 * 1024)
     );
 
-    // The last capture to arrive saw the most contention and must have taken
-    // the floor, not a lone capture's share.
-    let last = parsers.last().expect("panes").retained_amount().bytes;
+    // And the ones past the guarantee took nothing at all, rather than a floor
+    // the ceiling could not back.
+    let staged = parsers.iter().filter(|p| p.retained_amount().bytes > 0).count();
     assert!(
-        last <= MIN_CAPTURE_STAGING_BYTES + (64 * 1024),
-        "the twentieth capture must take the floor, took {} MiB",
-        last / (1024 * 1024)
+        staged <= GUARANTEED_CONCURRENT_CAPTURES,
+        "{staged} captures were staged, but the pools can only guarantee \
+         {GUARANTEED_CONCURRENT_CAPTURES}"
     );
 }
 
@@ -1331,6 +1485,7 @@ fn arriving_captures_take_a_smaller_share_when_others_are_already_live() {
 /// act. Neither half is useful alone, so both are asserted together.
 #[test]
 fn a_stalled_capture_is_visible_as_progress_and_releasable_by_cancel() {
+    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut parser = Parser::new(Grid::new(80, 24));
 
     let mut chunk = Vec::with_capacity(MAX_MEDIA_PAYLOAD_BYTES + 3);
@@ -1376,6 +1531,7 @@ fn a_stalled_capture_is_visible_as_progress_and_releasable_by_cancel() {
 /// trade memory for a broken picture rather than no picture.
 #[test]
 fn cancelling_a_capture_emits_no_media_event() {
+    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut parser = Parser::new(Grid::new(80, 24));
     parser.advance(b"\x1b_Gf=100;partial-payload-with-no-terminator");
     assert_eq!(parser.live_capture_count(), 1, "precondition: capture in flight");
@@ -1389,10 +1545,17 @@ fn cancelling_a_capture_emits_no_media_event() {
     );
 }
 
-/// Captures that keep receiving bring themselves back under the share without
-/// any help from the host.
+/// Interleaved captures must hold the ceiling without help from the host.
+///
+/// Round-robin is the shape of real concurrent transfers. The bound asserted
+/// here is the ceiling itself; it used to be
+/// `MAX_PROCESS_CAPTURE_STAGING_BYTES.max(MIN_CAPTURE_STAGING_BYTES * PANES)`,
+/// which grows with the pane count and so accommodated exactly the
+/// unboundedness it looked like it was checking. A bound that widens to fit
+/// the measurement is not a bound.
 #[test]
-fn interleaved_captures_converge_without_a_reclaim_pass() {
+fn interleaved_captures_hold_the_ceiling_without_a_reclaim_pass() {
+    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     const PANES: usize = 20;
     const BLOCK: usize = 256 * 1024;
 
@@ -1402,8 +1565,6 @@ fn interleaved_captures_converge_without_a_reclaim_pass() {
         parser.advance(b"\x1b_G");
     }
 
-    // Round-robin, the shape of real concurrent transfers: every capture keeps
-    // getting bytes, so every one keeps re-reading the share.
     let block = vec![b'A'; BLOCK];
     for _ in 0..(MAX_MEDIA_PAYLOAD_BYTES / BLOCK) {
         for parser in parsers.iter_mut() {
@@ -1412,12 +1573,11 @@ fn interleaved_captures_converge_without_a_reclaim_pass() {
     }
 
     let total: usize = parsers.iter().map(|p| p.retained_amount().bytes).sum();
-    let bound = MAX_PROCESS_CAPTURE_STAGING_BYTES.max(MIN_CAPTURE_STAGING_BYTES * PANES);
     assert!(
-        total <= bound,
-        "interleaved captures must converge unaided: {} MiB against a {} MiB bound",
+        total <= MAX_PROCESS_CAPTURE_STAGING_BYTES,
+        "interleaved captures hold {} MiB against a ceiling of {} MiB",
         total / (1024 * 1024),
-        bound / (1024 * 1024)
+        MAX_PROCESS_CAPTURE_STAGING_BYTES / (1024 * 1024)
     );
 }
 
@@ -1427,12 +1587,12 @@ fn interleaved_captures_converge_without_a_reclaim_pass() {
 /// bound that quietly truncates an ordinary image would be a regression
 /// dressed as a fix.
 ///
-/// Sized against the floor rather than the per-capture maximum so the
-/// assertion holds no matter how many captures other tests hold concurrently:
-/// the floor is what *every* pane is guaranteed regardless of contention, and
+/// Sized against the floor rather than the per-capture maximum, because the
+/// floor is what an admitted pane is guaranteed regardless of contention, and
 /// guaranteeing it is the point.
 #[test]
 fn a_pane_receives_a_payload_up_to_the_guaranteed_floor_whole() {
+    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut parser = Parser::new(Grid::new(80, 24));
 
     let payload_len = MIN_CAPTURE_STAGING_BYTES;
@@ -1451,34 +1611,63 @@ fn a_pane_receives_a_payload_up_to_the_guaranteed_floor_whole() {
         .expect("a terminated kitty sequence must produce a media event");
 
     assert!(
-        !media.truncated,
-        "a payload at the guaranteed floor must arrive whole however many captures are live"
-    );
-    assert!(
         media.data.len() >= payload_len - 16,
-        "expected the whole payload, got {} of {payload_len} bytes",
+        "a payload at the guaranteed floor must arrive whole: got {} of {payload_len} bytes",
         media.data.len()
+    );
+}
+
+/// A capture cut by the per-capture maximum must not be dispatched.
+///
+/// A payload larger than a capture may hold arrives missing its tail, and the
+/// tail is the rest of the image. Base64 protocols fail to decode it outright;
+/// Sixel paints the fraction that arrived and reports it as a whole, shorter
+/// picture. Neither is the image the user asked for, so neither is surfaced.
+#[test]
+fn a_payload_past_the_per_capture_maximum_is_not_dispatched() {
+    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut parser = Parser::new(Grid::new(80, 24));
+
+    let mut chunk = Vec::with_capacity(MAX_MEDIA_PAYLOAD_BYTES + 64);
+    chunk.extend_from_slice(b"\x1b_Gf=100;");
+    chunk.resize(MAX_MEDIA_PAYLOAD_BYTES + 32, b'A');
+    chunk.extend_from_slice(b"\x1b\\");
+
+    let events = parser.advance(&chunk);
+
+    assert!(
+        !events.iter().any(|e| matches!(e, VtEvent::Media(_))),
+        "a payload past the per-capture maximum must not surface a cut-off picture"
     );
 }
 
 /// A lone pane is entitled to the full per-capture maximum, not merely the
 /// floor.
 ///
-/// Run serially, because it asserts the uncontended budget and any concurrent
-/// capture would legitimately lower it. Kept separate from the floor test
-/// above rather than merged so that a parallel run cannot make the stronger
-/// claim silently vacuous.
+/// Serialised, because it asserts the uncontended outcome and a concurrent
+/// capture holding the growth pool would legitimately lower it. Kept separate
+/// from the floor test above rather than merged so that a parallel run cannot
+/// make the stronger claim silently vacuous.
 #[test]
 fn a_lone_capture_is_entitled_to_the_full_per_capture_maximum() {
-    // Assert the policy directly rather than racing the process-wide count.
-    assert_eq!(staging_budget_for(1), MAX_MEDIA_PAYLOAD_BYTES);
+    let _serialised = POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    // And that a capture created when the count really is 1 takes it.
-    let capture = MediaCapture::new(MediaProtocol::Kitty, String::new());
-    let live_now = LIVE_MEDIA_CAPTURES.load(Ordering::Relaxed);
+    let mut capture = MediaCapture::new(MediaProtocol::Kitty, String::new());
+    assert!(capture.admitted(), "a lone capture must be admitted");
     assert_eq!(
-        capture.budget,
-        staging_budget_for(live_now),
-        "a capture's budget must be the share for the count it saw at birth"
+        LIVE_MEDIA_CAPTURES.load(Ordering::Relaxed),
+        1,
+        "precondition: this is the only capture in the process"
     );
+
+    for _ in 0..MAX_MEDIA_PAYLOAD_BYTES {
+        capture.append_byte(b'A');
+    }
+
+    assert_eq!(
+        capture.data.len(),
+        MAX_MEDIA_PAYLOAD_BYTES,
+        "a lone capture must be able to grow to the full per-capture maximum"
+    );
+    assert!(!capture.truncated, "and must not be truncated on the way there");
 }
