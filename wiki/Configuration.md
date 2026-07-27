@@ -163,6 +163,21 @@ scroll/drag activity or pointer proximity to the pane's right edge.
 The degraded path lowers frame frequency and animation cost. Windows can compose
 and present a deterministic CPU BGRA frame through GDI.
 
+**`force` overrides `backdrop` on Windows.** The software presenter cannot
+composite transparency, so a window under `force` is opaque whatever `backdrop`
+says — `mica`, `acrylic`, and `tabbed` all resolve to `opaque`. Nothing on
+screen distinguishes "the backdrop was applied" from "the backdrop was
+overridden", so SonicTerm says so at `warn` level:
+
+```
+software_render_mode = force overrides the configured backdrop;
+the software presenter cannot composite transparency
+  configured=Mica applied=Opaque
+```
+
+`auto` does not do this: it degrades rendering when detection finds a software
+adapter, and leaves a configured backdrop alone. Only `force` overrides it.
+
 ### Terminal
 
 If `shell` is absent, Windows searches for PowerShell 7 (including Store
@@ -378,6 +393,20 @@ Weight to Config** 回到配置值。搜索 `bolder`、`thinner`、`heavier`、`
 - `off` 从不启用降级。
 
 降级会降低帧率与动画成本。Windows 可通过 GDI 合成并呈现确定性的 CPU BGRA frame。
+
+**在 Windows 上，`force` 会覆盖 `backdrop`。** 软件呈现器无法合成透明效果，因此
+`force` 下的窗口一律不透明，无论 `backdrop` 配置为何 —— `mica`、`acrylic`、
+`tabbed` 都会被解析为 `opaque`。屏幕上无法区分「背景效果已生效」与「背景效果被
+覆盖」，因此 SonicTerm 会在 `warn` 级别写出说明：
+
+```
+software_render_mode = force overrides the configured backdrop;
+the software presenter cannot composite transparency
+  configured=Mica applied=Opaque
+```
+
+`auto` 不会这样做：它在检测到软件 adapter 时降级渲染，但保留已配置的背景效果。
+只有 `force` 会覆盖它。
 
 ### 终端
 

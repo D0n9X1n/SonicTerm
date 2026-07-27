@@ -221,9 +221,18 @@ impl SoftwareSurface {
     }
 }
 
+/// Largest dimension a software surface may have, per axis.
+pub const MAX_DIMENSION: u32 = 16_384;
+
+/// Most bytes one software surface may hold.
+///
+/// This is the real ceiling on `ClassCoverage::UnchargedRetention` for
+/// `ResourceClass::SoftwareFrame`: the buffer is `width * height * 4`, so no
+/// single figure describes it, and the honest bound is what the clamp admits.
+/// `the_tabled_software_frame_bound_is_this_clamp` ties the two together.
+pub const MAX_BYTES: u64 = 160 * 1024 * 1024;
+
 fn pixel_len(width: u32, height: u32) -> Option<usize> {
-    const MAX_DIMENSION: u32 = 16_384;
-    const MAX_BYTES: u64 = 160 * 1024 * 1024;
     if width > MAX_DIMENSION || height > MAX_DIMENSION {
         return None;
     }

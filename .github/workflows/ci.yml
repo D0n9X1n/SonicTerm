@@ -59,6 +59,9 @@ jobs:
         with:
           shared-key: unit-${{ matrix.os }}
 
+      - name: Check formatting
+        run: cargo fmt --all --check
+
       - name: Check process exit paths
         shell: bash
         run: bash scripts/check-no-raw-process-exit.sh
