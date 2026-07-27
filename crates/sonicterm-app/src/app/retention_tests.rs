@@ -395,6 +395,204 @@ fn the_coverage_table_agrees_with_the_charge_sites() {
     }
 }
 
+/// The charging pass runs on the sampling interval, not on every wake.
+///
+/// Its caller is `do_about_to_wait`, which fires on every idle wake — hundreds
+/// of times a second under sustained pane output. Each pass walks every pane's
+/// grid cell by cell through `retained_amount_by_region`, which is uncached, so
+/// an ungated pass repeats that walk at the event loop's spin rate.
+///
+/// Enters `sample_pane_retention` directly rather than through
+/// `__test_sample_pane_retention_now`, which clears the limiter by design and
+/// therefore cannot observe a cadence. `now` is supplied explicitly so the
+/// interval is crossed without sleeping.
+///
+/// Removing the cadence check fails this: the second call charges the grown
+/// scrollback immediately and the mid-interval figure moves.
+#[test]
+fn charging_runs_on_the_sampling_interval_rather_than_every_wake() {
+    let mut app = App::new(
+        sonicterm_cfg::theme::Theme::default(),
+        sonicterm_cfg::config::Config::default(),
+        sonicterm_cfg::keymap::Keymap::default(),
+    );
+    let window = app.__test_seed_child_window(&["one"]);
+    let pane_id = *app
+        .__test_child_pane_ids(window)
+        .expect("the seeded window exists")
+        .first()
+        .expect("the window has a pane");
+
+    let start = Instant::now();
+
+    // First wake: nothing has been sampled yet, so this one charges.
+    app.sample_pane_retention(start);
+    let charged_at_start: usize = app
+        .__test_pane_charges(window, pane_id)
+        .expect("the pane holds charges")
+        .values()
+        .map(|amount| amount.bytes)
+        .sum();
+    assert!(
+        charged_at_start > 0,
+        "the first wake must charge: a pane holding cells and charged nothing leaves every \
+         governor limit with no figure to apply itself to"
+    );
+
+    // Grow the pane by enough that a fresh charge could not report the old
+    // figure by coincidence.
+    {
+        let pane = seeded_pane(&app, window, pane_id);
+        let mut parser = pane.parser.lock();
+        parser.grid_mut().set_scrollback_limit(2_000);
+        for line in 0..1_500 {
+            parser.advance(format!("line {line} with enough text to occupy cells\r\n").as_bytes());
+        }
+    }
+    let held_now =
+        measure_pane(seeded_pane(&app, window, pane_id)).expect("uncontended").total().bytes;
+    assert!(
+        held_now > charged_at_start,
+        "precondition failed: the pane did not grow, so a charge that followed it \
+         immediately would be indistinguishable from one that did not"
+    );
+
+    // Wakes inside the interval, at the rate the event loop actually delivers
+    // them. None may re-walk the panes.
+    for offset_ms in [1, 2, 5, 100, 1_000, 29_999] {
+        app.sample_pane_retention(start + Duration::from_millis(offset_ms));
+        let charged: usize = app
+            .__test_pane_charges(window, pane_id)
+            .expect("the pane holds charges")
+            .values()
+            .map(|amount| amount.bytes)
+            .sum();
+        assert_eq!(
+            charged, charged_at_start,
+            "a wake {offset_ms} ms into the interval re-charged the pane. The pass walks every \
+             pane's grid cell by cell and its caller fires hundreds of times a second, so it \
+             must run on the interval rather than on the wake"
+        );
+    }
+
+    // At the interval, the pass runs and the figure catches up.
+    app.sample_pane_retention(start + RETENTION_SAMPLE_INTERVAL);
+    let charged_after_interval: usize = app
+        .__test_pane_charges(window, pane_id)
+        .expect("the pane holds charges")
+        .values()
+        .map(|amount| amount.bytes)
+        .sum();
+    assert!(
+        charged_after_interval > charged_at_start,
+        "the pass must run once the interval elapses: rate-limiting it must delay the figure, \
+         never stop maintaining it. {charged_after_interval} !> {charged_at_start}"
+    );
+}
+
+/// A slow transfer survives the wakes that arrive inside one interval.
+///
+/// `reclaim_stalled_captures` treats a capture whose progress figure is
+/// unchanged across two consecutive samples as abandoned. That inference is
+/// only sound if consecutive samples are an interval apart. Called once per
+/// wake they are milliseconds apart, and a transfer that is merely slow — an
+/// image arriving over a loaded link — looks identical to one that died.
+///
+/// Drives the wake rate this was measured at: hundreds of wakes inside a single
+/// interval, with no bytes arriving between them.
+#[test]
+fn a_slow_capture_survives_the_wakes_inside_one_interval() {
+    let mut app = App::new(
+        sonicterm_cfg::theme::Theme::default(),
+        sonicterm_cfg::config::Config::default(),
+        sonicterm_cfg::keymap::Keymap::default(),
+    );
+    let window = app.__test_seed_child_window(&["one"]);
+    let pane_id = *app
+        .__test_child_pane_ids(window)
+        .expect("the seeded window exists")
+        .first()
+        .expect("the window has a pane");
+
+    // An APC introducer with payload and no terminator: a transfer still in
+    // flight. Nothing here says whether it is slow or dead.
+    let mut chunk = Vec::with_capacity(512 * 1024 + 3);
+    chunk.extend_from_slice(b"\x1b_G");
+    chunk.resize(512 * 1024, b'A');
+    {
+        let pane = seeded_pane(&app, window, pane_id);
+        pane.parser.lock().advance(&chunk);
+    }
+    assert_eq!(
+        app.__test_pane_capture_count(window, pane_id),
+        Some(1),
+        "precondition: the capture is in flight"
+    );
+
+    // One interval's worth of wakes at the measured sustained-output rate.
+    // No bytes arrive: the transfer is slow, not dead.
+    let start = Instant::now();
+    for wake in 0..600u64 {
+        app.sample_pane_retention(start + Duration::from_millis(wake * 2));
+    }
+
+    assert_eq!(
+        app.__test_pane_capture_count(window, pane_id),
+        Some(1),
+        "600 wakes inside one interval cancelled a live transfer. Two consecutive samples mean \
+         two intervals only if the pass is rate-limited; on the wake path they are milliseconds \
+         apart, so a slow transfer is destroyed and the reported stall duration is wrong by the \
+         ratio between a wake and an interval"
+    );
+}
+
+/// A genuinely stalled capture is still reclaimed, across two intervals.
+///
+/// The guard above must not be satisfied by never reclaiming at all. This is
+/// the same shape — a capture with no bytes arriving — sampled across two full
+/// intervals rather than inside one, and it must be cancelled.
+#[test]
+fn a_stalled_capture_is_still_reclaimed_across_two_intervals() {
+    let mut app = App::new(
+        sonicterm_cfg::theme::Theme::default(),
+        sonicterm_cfg::config::Config::default(),
+        sonicterm_cfg::keymap::Keymap::default(),
+    );
+    let window = app.__test_seed_child_window(&["one"]);
+    let pane_id = *app
+        .__test_child_pane_ids(window)
+        .expect("the seeded window exists")
+        .first()
+        .expect("the window has a pane");
+
+    let mut chunk = Vec::with_capacity(512 * 1024 + 3);
+    chunk.extend_from_slice(b"\x1b_G");
+    chunk.resize(512 * 1024, b'A');
+    {
+        let pane = seeded_pane(&app, window, pane_id);
+        pane.parser.lock().advance(&chunk);
+    }
+
+    let start = Instant::now();
+    // First sample records the progress figure; one quiet reading is not
+    // enough, because a slow transfer looks the same at this point.
+    app.sample_pane_retention(start);
+    assert_eq!(
+        app.__test_pane_capture_count(window, pane_id),
+        Some(1),
+        "one quiet sample must not cancel"
+    );
+
+    // Second sample, one interval later, with nothing having arrived.
+    app.sample_pane_retention(start + RETENTION_SAMPLE_INTERVAL);
+    assert_eq!(
+        app.__test_pane_capture_count(window, pane_id),
+        Some(0),
+        "a capture quiet across two intervals must still be reclaimed; rate-limiting the pass \
+         must delay reclamation, never remove it"
+    );
+}
+
 /// Fill a pane the way its PTY thread does: merge, then trim under charge.
 ///
 /// Pushing into `inline_images` directly would move no counter — the charge is

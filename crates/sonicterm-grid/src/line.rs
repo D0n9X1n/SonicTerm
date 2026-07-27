@@ -134,7 +134,9 @@ impl LineStorage {
     ///
     /// Walks the row, so it is O(stored cells). Callers on a per-frame path
     /// should not use it; it exists for the retention sampling pass, which
-    /// runs on a timer.
+    /// runs on an interval rather than per wake or per frame. That cadence is
+    /// enforced by the caller — this figure is uncached, so each call pays the
+    /// full walk.
     pub fn fat_attribute_bytes(&self) -> usize {
         let cell_bytes = |cell: &Cell| {
             if !cell.has_fat() {
