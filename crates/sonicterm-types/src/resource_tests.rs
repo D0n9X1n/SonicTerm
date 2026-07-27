@@ -263,6 +263,13 @@ fn every_class_has_a_coverage_decision() {
                     per_pane_bytes * 20 / (1024 * 1024)
                 );
             }
+            ClassCoverage::UnchargedRetention { per_owner_bytes } => {
+                assert!(
+                    per_owner_bytes > 0,
+                    "{class:?} records uncharged retention with a zero figure; the \
+                     variant exists to carry what the gap holds, and zero carries nothing"
+                );
+            }
             ClassCoverage::Charged
             | ClassCoverage::SubsystemAbsent
             | ClassCoverage::FeatureGated
@@ -276,6 +283,13 @@ fn every_class_has_a_coverage_decision() {
 /// Pins the table to reality in the direction that matters: a class charged in
 /// production but recorded as absent would send the next reader looking for
 /// work already done.
+///
+/// The list is the classes a production pass actually charges. `GlyphAtlas`
+/// and `SoftwareFrame` were once here and are not now: the renderer computes
+/// both figures, but `retained_amounts` has no caller and `sonicterm-gpu`
+/// declares no dependency on `sonicterm-resource`, so the crate cannot reserve
+/// at all. Naming them here asserted the table against itself and passed while
+/// nothing was charged.
 #[test]
 fn classes_with_production_charge_sites_are_recorded_as_charged() {
     for class in [
@@ -285,8 +299,6 @@ fn classes_with_production_charge_sites_are_recorded_as_charged() {
         ResourceClass::ParserCapture,
         ResourceClass::ProtocolMetadata,
         ResourceClass::InlineMediaRetained,
-        ResourceClass::GlyphAtlas,
-        ResourceClass::SoftwareFrame,
         ResourceClass::PtyOutput,
     ] {
         assert_eq!(
