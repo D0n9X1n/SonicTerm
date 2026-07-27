@@ -19,6 +19,50 @@ fn app() -> App {
     App::new(Theme::default(), Config::default(), Keymap::default())
 }
 
+/// Serialises every test that enters the production sampling path.
+///
+/// An empirically effective guard whose exact cause is open. Run in parallel,
+/// these tests flake at roughly one failed run in two hundred; serialised, the
+/// failure has not been observed. Because the rate is that low, a short green
+/// streak establishes nothing — twenty clean runs are the expected outcome
+/// whether or not the fault is present.
+///
+/// It surfaces as the admitted-level test seeing its gate closed, so it fails
+/// naming the charging path, which is not where the fault is. It is also rare
+/// enough that instrumenting the assertion makes it stop reproducing, so the
+/// obvious next step measures nothing.
+///
+/// What is established: `enabled!` consults process-global state — the static
+/// max level, and the callsite's cached `Interest` — before it reaches the
+/// thread-local dispatcher, and `tracing::subscriber::with_default` scopes the
+/// subscriber but not that state. Both tests already install theirs through
+/// `with_default` and flake anyway, so scoping is not the remedy and this lock
+/// must not be dropped in favour of it.
+///
+/// What is ruled out, recorded so it is not investigated twice: the max level
+/// never fell below DEBUG under a live scoped subscriber; the cached
+/// `Interest` never went stale under the same conditions; and opposing
+/// subscribers resolve to `sometimes`, which does consult the thread-local
+/// dispatcher. Each was tested directly and refuted.
+///
+/// The rule is therefore unconditional — **hold this across any call that
+/// enters the production sampling path**, whether or not the test installs a
+/// subscriber and whether or not it asserts on the gate. A test cannot judge
+/// from its own body whether it is affected, and an unidentified cause is
+/// itself reason not to carve out exceptions.
+///
+/// [`App::__test_sample_pane_retention_now`] is that path.
+static SAMPLING_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Take the sampling-gate lock for the rest of the current test.
+///
+/// Recovers a poisoned lock rather than propagating it: poisoning means some
+/// other test panicked while holding it, and failing every later test would
+/// bury the one real failure under a pile of noise.
+fn serialised_sampling() -> std::sync::MutexGuard<'static, ()> {
+    SAMPLING_GATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// A pane's charges equal what its seams report.
 ///
 /// Asserted per class rather than on the total: a total can agree while two
@@ -184,6 +228,7 @@ fn closing_a_window_returns_the_process_total_to_zero() {
 fn the_production_sampling_path_charges_when_the_memory_target_is_admitted() {
     use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
 
+    let _serialised = serialised_sampling();
     let mut app = app();
     let child = app.__test_seed_child_window(&["one"]);
     let pane_id = *app.__test_child_pane_ids(child).expect("child window").first().expect("pane");
@@ -220,6 +265,7 @@ fn the_production_sampling_path_charges_when_the_memory_target_is_admitted() {
 fn the_production_sampling_path_charges_at_the_default_level() {
     use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
 
+    let _serialised = serialised_sampling();
     let mut app = app();
     let child = app.__test_seed_child_window(&["one"]);
     let pane_id = *app.__test_child_pane_ids(child).expect("child window").first().expect("pane");
@@ -408,6 +454,7 @@ fn the_governor_actually_holds_pane_owners_to_the_budget() {
 /// that was missing.
 #[test]
 fn a_stalled_capture_is_reclaimed_by_the_sampling_pass() {
+    let _serialised = serialised_sampling();
     let mut app = app();
     let child = app.__test_seed_child_window(&["one"]);
     let pane_id = *app.__test_child_pane_ids(child).expect("child").first().expect("pane");
@@ -444,6 +491,7 @@ fn a_stalled_capture_is_reclaimed_by_the_sampling_pass() {
 /// for. Bytes arriving between samples must keep it alive indefinitely.
 #[test]
 fn a_slow_but_live_transfer_is_never_cancelled() {
+    let _serialised = serialised_sampling();
     let mut app = app();
     let child = app.__test_seed_child_window(&["one"]);
     let pane_id = *app.__test_child_pane_ids(child).expect("child").first().expect("pane");
@@ -467,6 +515,7 @@ fn a_slow_but_live_transfer_is_never_cancelled() {
 /// leave the parser unable to render what comes next.
 #[test]
 fn reclaiming_a_stalled_capture_leaves_the_pane_usable() {
+    let _serialised = serialised_sampling();
     let mut app = app();
     let child = app.__test_seed_child_window(&["one"]);
     let pane_id = *app.__test_child_pane_ids(child).expect("child").first().expect("pane");
