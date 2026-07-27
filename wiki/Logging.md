@@ -154,7 +154,7 @@ the field table above:
 | `grid_visible` | `grid_visible_bytes` | nothing — a large window is large |
 | `grid_history` | `grid_history_bytes` | lower `scrollback` |
 | `grid_alternate` | `grid_alternate_bytes` | quit the full-screen program in that pane |
-| `parser` | `parser_bytes` | nothing yet — recheck on the next sample |
+| `parser` | `parser_bytes` | recheck next sample — see the note below |
 | `hyperlinks` | `hyperlink_bytes` | nothing — bounded, reclaimed as links scroll away |
 | `inline_media` | `inline_media_bytes` | display fewer images, or close image-heavy panes |
 | `pty_output` | `pty_output_bytes` | let the pane finish printing |
@@ -162,6 +162,11 @@ the field table above:
 
 The seam value is `hyperlinks` but the field is `hyperlink_bytes`; grep for the
 one you actually want.
+
+`parser` is the one seam that is normally transient — it holds a sequence being
+parsed right now, so it should fall on the next sample. If it stays large
+across several, an image transfer probably stopped mid-flight; SonicTerm
+cancels that itself and says so at `warn` level (step 6).
 
 **4. Separate large from growing.** This is the step that decides whether you
 have a bug. One sample cannot tell them apart — a pane holding 60 MB of images
@@ -439,7 +444,7 @@ Select-String 'pane retention' $log | ForEach-Object {
 | `grid_visible` | `grid_visible_bytes` | 无 — 窗口大，占用自然大 |
 | `grid_history` | `grid_history_bytes` | 调低 `scrollback` |
 | `grid_alternate` | `grid_alternate_bytes` | 退出该面板中的全屏程序 |
-| `parser` | `parser_bytes` | 暂时无需处理 — 在下次采样时复查 |
+| `parser` | `parser_bytes` | 在下次采样时复查 —— 见下方说明 |
 | `hyperlinks` | `hyperlink_bytes` | 无 — 有上限，链接滚出后自动回收 |
 | `inline_media` | `inline_media_bytes` | 减少显示图像，或关闭图像较多的面板 |
 | `pty_output` | `pty_output_bytes` | 等待该面板输出完毕 |
@@ -447,6 +452,10 @@ Select-String 'pane retention' $log | ForEach-Object {
 
 注意 seam 取值是 `hyperlinks`，而字段名是 `hyperlink_bytes`；请按实际需要的
 那个去 grep。
+
+`parser` 是唯一通常只是瞬时占用的接缝 —— 它保存的是当前正在解析的序列，因此
+下次采样时就应当回落。如果它在连续多次采样中都保持很大，多半是某次图像传输
+中途停止了；SonicTerm 会自行取消，并在 `warn` 级别记录（见第 6 步）。
 
 **4. 区分「占用大」与「持续增长」。** 这一步决定是否真的存在缺陷。单次采样无法
 区分两者 —— 稳定占用 60 MB 图像的面板属于正常设计，而每次采样都在上涨的面板则
