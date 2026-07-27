@@ -1201,6 +1201,61 @@ fn an_empty_placeholder_image_atlas_is_not_reset_every_frame() {
     );
 }
 
+/// The frame-assembly call site actually consults the reset guard.
+///
+/// The predicate test above pins the decision, but nothing structural forces
+/// frame assembly to ask. Dropping the call from the condition restores one
+/// reset per rendered frame on a window with no media, and it does so with no
+/// compile error and no other failing test — the predicate would simply go
+/// unused at that site while every assertion about it still held.
+///
+/// `GpuRenderer` needs a live wgpu device and a window, so the composed guard
+/// cannot be driven at runtime in a unit test. Reading the source is the
+/// available check, and it is the one that catches this regression: the
+/// mistake being guarded is an omitted call, which is visible in the text.
+#[test]
+fn image_atlas_reset_is_gated_on_the_atlas_holding_something() {
+    const CORE_SRC: &str = include_str!("core.rs");
+    const RESET_CALL: &str = "self.reset_image_atlas()";
+    const GUARD: &str = "image_atlas_reset_warranted(";
+
+    let lines: Vec<&str> = CORE_SRC.lines().collect();
+    let reset_sites: Vec<usize> =
+        lines.iter().enumerate().filter(|(_, l)| l.contains(RESET_CALL)).map(|(i, _)| i).collect();
+
+    // Guard against the check silently passing because the call was renamed
+    // and no site matches any more.
+    assert!(
+        reset_sites.len() >= 2,
+        "expected at least the two known image-atlas reset sites, found {}; \
+         if `reset_image_atlas` was renamed, update this test",
+        reset_sites.len()
+    );
+
+    // The frame-assembly site is the per-frame one. Find it by the condition
+    // that precedes it: the surface-transition site resets unconditionally
+    // once, which is correct there and must not be required to carry a guard.
+    let frame_site = reset_sites
+        .iter()
+        .copied()
+        .find(|&site| {
+            lines[site.saturating_sub(6)..site].iter().any(|l| l.contains("inline_media_changed"))
+        })
+        .expect(
+            "no image-atlas reset site is preceded by an `inline_media_changed` condition; \
+             if frame assembly was restructured, update this test",
+        );
+
+    let guard_window = &lines[frame_site.saturating_sub(6)..frame_site];
+    assert!(
+        guard_window.iter().any(|l| l.contains(GUARD)),
+        "the per-frame image-atlas reset at line {} is not gated on \
+         `image_atlas_reset_warranted`; without it a window with no inline media \
+         resets an empty atlas on every frame it draws",
+        frame_site + 1
+    );
+}
+
 /// A promoted image atlas is released once the window stops showing media,
 /// but not on the first idle frame.
 ///
