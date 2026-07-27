@@ -163,17 +163,34 @@ impl ResourceClass {
             //
             // `GlyphAtlas` is the atlas's own 2048 x 2048 x 4 pixel buffer.
             //
-            // `SoftwareFrame` is one 4K frame, and that is a *lower bound on a
-            // variable*, not a constant: the buffer is `width x height x 4`, so
-            // a 5K window holds 178% of this figure and the module's own clamp
-            // admits 160 MiB — 5.06x. Measured against a counting allocator
-            // rather than derived. `per_owner_bytes` cannot express a figure
-            // that scales with the window, which is the open question here.
+            // `SoftwareFrame` is the clamp, not a typical window.
+            //
+            // The buffer is `width x height x 4`, so no single figure describes
+            // it, and `per_owner_bytes` asks how much can hide here rather than
+            // what a session usually holds. The honest answer is the most one
+            // surface may hold, which is `software_presenter::MAX_BYTES`.
+            //
+            // Measured against a counting allocator, per window:
+            //
+            //     1080p    8,294,400
+            //     1440p   14,745,600
+            //     4K      33,177,600
+            //     5K      58,982,400
+            //     8K     132,710,400
+            //     clamp  167,772,160   <- this figure
+            //
+            // The clamp is structural rather than observed: `pixel_len` also
+            // caps each axis at 16,384, so reaching it needs roughly
+            // 6.5K x 6.5K — beyond one panel, reachable across a span. A 4K
+            // window, the previous figure, understates the ceiling by 5.06x.
+            //
+            // `the_tabled_software_frame_bound_is_this_clamp` in
+            // `sonicterm-windows` fails if the clamp moves without this.
             Self::GlyphAtlas => {
                 ClassCoverage::UnchargedRetention { per_owner_bytes: 2048 * 2048 * 4 }
             }
             Self::SoftwareFrame => {
-                ClassCoverage::UnchargedRetention { per_owner_bytes: 3840 * 2160 * 4 }
+                ClassCoverage::UnchargedRetention { per_owner_bytes: 160 * 1024 * 1024 }
             }
 
             // PTY output queue: 64 slots of views into the reader's reused

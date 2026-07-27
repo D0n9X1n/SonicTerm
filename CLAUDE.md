@@ -62,6 +62,7 @@ When touching a crate, also read that crate's local `CLAUDE.md`.
 Normal PR/main CI runs workspace unit tests plus a per-crate unit/build gate:
 
 ```bash
+cargo fmt --all --check
 cargo test --workspace --lib --bins
 bash scripts/check-no-raw-process-exit.sh
 bash scripts/check-window-owner-registration.sh

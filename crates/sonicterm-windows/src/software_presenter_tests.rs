@@ -634,3 +634,47 @@ fn no_caller_hardcodes_the_detection_argument() {
         );
     }
 }
+
+/// The resource table's `SoftwareFrame` bound is this module's clamp.
+///
+/// `ClassCoverage::UnchargedRetention { per_owner_bytes }` asks how much can
+/// hide in a class nothing charges. For this class the buffer is
+/// `width * height * 4`, so no single figure describes it and the honest
+/// answer is the most one surface may hold — which is [`MAX_BYTES`].
+///
+/// The table previously carried one 4K frame, 33,177,600 bytes. That is the
+/// cost of one common window, not a bound: a 5K window holds 178% of it, and
+/// the clamp admits 5.06x. Nothing would have noticed it drifting, because the
+/// figure was a literal checked against nothing.
+///
+/// Asserted against the constant rather than a copy of its value, so moving
+/// the clamp without moving the table fails here.
+#[test]
+fn the_tabled_software_frame_bound_is_this_clamp() {
+    use sonicterm_types::{ClassCoverage, ResourceClass};
+
+    let ClassCoverage::UnchargedRetention { per_owner_bytes } =
+        ResourceClass::SoftwareFrame.coverage()
+    else {
+        panic!(
+            "SoftwareFrame must be UnchargedRetention: the renderer computes it and no \
+             governor charges it"
+        );
+    };
+
+    assert_eq!(
+        u64::try_from(per_owner_bytes).expect("the bound fits u64"),
+        MAX_BYTES,
+        "the resource table's SoftwareFrame bound and this module's clamp disagree; \
+         the table would understate what one surface can hold"
+    );
+
+    // And the clamp is reachable in principle, or the bound is fiction. The
+    // per-axis cap is the binding constraint, not the byte cap.
+    let max_pixels = u64::from(MAX_DIMENSION) * u64::from(MAX_DIMENSION);
+    assert!(
+        max_pixels * 4 >= MAX_BYTES,
+        "the dimension cap makes the byte clamp unreachable, so the bound describes \
+         a surface that cannot exist"
+    );
+}

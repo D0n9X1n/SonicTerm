@@ -106,6 +106,20 @@ fn main() -> Result<()> {
         // `forces_opaque_window` below needs no detection: only `Force`
         // overrides the backdrop, and that is a pure config question.
         let backdrop_kind = if software_presenter_pref.forces_opaque_window() {
+            // Say so. `software_render_mode = "force"` discards whatever
+            // backdrop the user configured, and silently ignoring a setting
+            // leaves them reading a config that is not in effect — there is
+            // nothing on screen to distinguish "mica was applied" from "mica
+            // was overridden". Warn rather than info: the app is declining to
+            // honour an explicit choice.
+            if config.appearance.backdrop != sonicterm_cfg::config::BackdropKind::Opaque {
+                tracing::warn!(
+                    configured = ?config.appearance.backdrop,
+                    applied = ?sonicterm_cfg::config::BackdropKind::Opaque,
+                    "software_render_mode = force overrides the configured backdrop; \
+                     the software presenter cannot composite transparency"
+                );
+            }
             sonicterm_cfg::config::BackdropKind::Opaque
         } else {
             config.appearance.backdrop
