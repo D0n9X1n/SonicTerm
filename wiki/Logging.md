@@ -140,8 +140,10 @@ Select-String 'pane retention' $log | ForEach-Object {
 } | Sort-Object MB -Descending
 ```
 
-The pane label is the window and pane id, so it identifies the pane even after
-tabs move between windows.
+The label is the window id and the pane id. The pane id stays with the pane
+when a tab moves to another window, but the window id in front of it changes —
+so if a pane seems to vanish between samples, look for the same pane id behind
+a different window id.
 
 **3. Ask which subsystem.** On the heaviest pane, read `largest_seam`. A total
 says a pane is big; this field says where to look. Each value names one row of
@@ -425,8 +427,9 @@ Select-String 'pane retention' $log | ForEach-Object {
 } | Sort-Object MB -Descending
 ```
 
-面板标签由窗口 id 和面板 id 组成，因此即使标签页在窗口之间移动，也仍能识别到
-同一个面板。
+标签由窗口 id 和面板 id 组成。标签页移动到另一个窗口时，面板 id 会跟随面板保持
+不变，但前面的窗口 id 会改变 —— 因此如果某个面板在两次采样之间「消失」了，
+请在不同的窗口 id 下查找相同的面板 id。
 
 **3. 判断是哪个子系统。** 在占用最高的面板上读 `largest_seam`。总量只能说明
 面板占用大，该字段指出应当检查哪里。每个取值都对应上一节字段表中的一行：
