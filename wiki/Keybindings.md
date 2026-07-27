@@ -455,7 +455,7 @@ keys = "super+shift+l"
 action = { focus_pane = "right" }
 ```
 
-启动时，选中的 keymap 解析失败会记录日志并回退到平台内置默认值；重载失败时则继续使用当前内存中的 keymap。
+启动时，选中的 keymap 解析失败会记录日志并回退到平台内置默认值；重载失败时则继续使用当前内存中的 keymap。keymap 的修改在你从命令面板执行 **Reload Config** 时生效；系统中没有文件 watcher。
 
 ### 应用文本框中的终端风格编辑
 

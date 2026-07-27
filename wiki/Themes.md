@@ -32,10 +32,11 @@ You can also point `theme` at any TOML file path.
    theme = "my-theme"
    ```
 
-4. Run **Reload Config** after changing the `theme` selector. If `my-theme` is
-   already selected and you only edit its TOML contents, current reload logic
-   does not reliably re-read that file; temporarily select another theme and
-   select `my-theme` again, or restart SonicTerm.
+4. Run **Reload Config**. The selected theme file is re-read every time, so
+   editing `my-theme.toml` while it is already selected takes effect on the
+   next reload — you do not need to switch themes or restart. If the edited
+   file fails to parse, the previous theme stays active and the reason is
+   logged.
 
 ### Theme file shape
 
@@ -149,9 +150,9 @@ theme = "wezterm"
    theme = "my-theme"
    ```
 
-4. 修改 `theme` 选择器后，在命令面板执行 **Reload Config**。如果已经选中 `my-theme`，
-   只是修改它的 TOML 内容，当前 reload 逻辑不会可靠地重新读取该文件；可先临时选择其它主题，
-   再重新选择 `my-theme`，或重启 SonicTerm。
+4. 在命令面板执行 **Reload Config**。每次重载都会重新读取所选主题文件，因此在
+   `my-theme` 已被选中的情况下修改它的 TOML 内容，也会在下次重载时生效——无需切换
+   主题或重启。如果修改后的文件解析失败，将保留原主题并记录原因。
 
 ### 主题文件结构
 
