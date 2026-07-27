@@ -171,12 +171,31 @@ fn ssh_is_included_and_decoupled_from_the_local_backend() {
 }
 
 #[test]
-fn both_windows_rows_still_need_real_runners() {
-    let win_pending = EVIDENCE_MATRIX
-        .iter()
-        .filter(|row| row.host_class.starts_with("windows") && !row.capturable_here)
-        .count();
-    assert_eq!(win_pending, 2, "pre-24H2 and 24H2+ Windows rows are still pending");
+fn evidence_matrix_is_scoped_to_supported_platforms() {
+    // SonicTerm supports macOS (Intel and Apple Silicon) and current Windows.
+    // Linux is out of scope, and pre-24H2 Windows is not a supported target,
+    // so neither may reappear as an evidence row.
+    let classes: Vec<&str> = EVIDENCE_MATRIX.iter().map(|row| row.host_class).collect();
+    assert_eq!(classes, ["macos", "windows-24h2-plus"]);
+}
+
+#[test]
+fn every_evidence_row_is_captured_by_a_ci_host() {
+    // Each row must be capturable on exactly one host class, and the CI matrix
+    // (macos-14 + windows-latest) must contain a job that captures it. A row no
+    // runner can reach would leave the decision resting on an uncaptured claim.
+    for row in EVIDENCE_MATRIX {
+        let captured_on_this_host = match row.host_class {
+            "macos" => cfg!(target_os = "macos"),
+            "windows-24h2-plus" => cfg!(windows),
+            other => panic!("unknown host class {other} has no CI job"),
+        };
+        assert_eq!(
+            row.capturable_here, captured_on_this_host,
+            "{} must be capturable exactly on its own host class",
+            row.host_class
+        );
+    }
 }
 
 #[test]
@@ -235,6 +254,24 @@ fn frozen_hash_is_a_wellformed_nonplaceholder_digest() {
     );
 }
 
+#[test]
+fn evidence_names_no_transport_owner_type_that_does_not_exist() {
+    // This artifact specifies the surface a future native backend must provide.
+    // Naming it as though it were an existing trait invites readers to check
+    // the code against a contract, find nothing, and treat the decision as
+    // blocked on a missing implementor. The requirement is described by what it
+    // must do, so no reader can mistake it for a type to look up.
+    let rendered = render_canonical_evidence();
+    assert!(
+        !rendered.contains("PtyTransportOwner"),
+        "evidence must not name a transport-owner type; no such type is defined in the workspace"
+    );
+    // The capability requirements it stands for must still be stated.
+    assert!(rendered.contains("own HPCON"));
+    assert!(rendered.contains("win.own_hpcon"));
+    assert!(rendered.contains("win.job_object_tree"));
+}
+
 // ---- Real-OS probe (host-gated) -----------------------------------------
 
 #[cfg(unix)]
@@ -272,13 +309,9 @@ fn unix_real_pty_probe_confirms_partial_fd_ownership() {
 
     // The host row for this OS is marked capturable in the evidence matrix.
     #[cfg(target_os = "macos")]
-    let host_class = "macos";
-    #[cfg(target_os = "linux")]
-    let host_class = "linux";
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         let row =
-            EVIDENCE_MATRIX.iter().find(|r| r.host_class == host_class).expect("host row present");
+            EVIDENCE_MATRIX.iter().find(|r| r.host_class == "macos").expect("host row present");
         assert!(row.capturable_here, "this host class must be capturable here");
     }
 
