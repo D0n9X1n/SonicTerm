@@ -3885,8 +3885,14 @@ impl App {
         self.register_window_owner_inner(id);
         // A window arrives with its panes already populated, so registering
         // the window without them would leave every pane unowned until the
-        // next 30-second sample.
-        self.reconcile_pane_owners();
+        // next sampling pass.
+        //
+        // Re-attribution rather than plain reconciliation: a window built by
+        // tear-out receives panes that already carry an owner, parented below
+        // the window they left. Reconciliation only adopts *ownerless* panes,
+        // so it skips exactly those and leaves the source window counting a
+        // pane it no longer holds — which refuses that window's close.
+        self.reattribute_pane_owners();
     }
 
     fn register_window_owner_inner(&mut self, id: WindowId) {
@@ -4055,6 +4061,17 @@ impl App {
     #[doc(hidden)]
     pub fn __test_window_owner(&self, id: WindowId) -> Option<ResourceOwnerId> {
         self.windows.get(&id).and_then(|window| window.owner.as_ref()).map(OwnerGuard::id)
+    }
+
+    /// Test-only: one pane's owner id, if it has one.
+    #[doc(hidden)]
+    pub fn __test_pane_owner(&self, window: WindowId, pane_id: u64) -> Option<ResourceOwnerId> {
+        self.windows
+            .get(&window)?
+            .panes
+            .get(&pane_id)
+            .and_then(|pane| pane.owner.as_ref())
+            .map(OwnerGuard::id)
     }
 
     /// Test-only: how many panes in a window have owners.

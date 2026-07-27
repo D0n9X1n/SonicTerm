@@ -77,6 +77,14 @@ impl App {
             ws.tabs.insert(idx, tab);
             ws.tab_states.insert(idx, state);
         }
+        // Re-parent the arriving panes now rather than on the next sampling
+        // pass. A pane's owner was created below the window it left, and the
+        // source window is reaped in this same call when the move drained it —
+        // while still counting the moved pane among its open children, which
+        // refuses its close and strands its owner for the life of the process.
+        // Reaping also removes it from the window map, so the periodic pass,
+        // which walks live windows, can never reach it afterwards.
+        self.reattribute_pane_owners();
     }
     pub fn detach_from_child(
         &mut self,
@@ -121,6 +129,11 @@ impl App {
         child.tabs.insert(idx, tab);
         child.tab_states.insert(idx, state);
         child.request_redraw();
+        // Re-parent the arriving panes now, for the reason given in
+        // [`Self::attach_tab_state`]: the source window is reaped in this same
+        // call when the move drained it, and a pane owner still parented there
+        // refuses that close permanently.
+        self.reattribute_pane_owners();
         true
     }
 }
