@@ -41,10 +41,11 @@ under [Resource governance](#resource-governance).
    the declared boundary through which the GPU sees grid/config/UI types.
 5. `sonicterm-gpu` builds quads and glyph instances for wgpu presentation. When
    no usable GPU is present it falls back to a CPU rasterizer; on Windows the
-   software path (`sonicterm-gpu/src/software_windows.rs` +
-   `sonicterm-windows/src/software_presenter.rs`) repaints the whole surface
-   deterministically each frame. Glyphs rasterize via DirectWrite by default on
-   Windows (`sonicterm-font/src/rasterizer/directwrite.rs`), FreeType elsewhere
+   software path (`crates/sonicterm-gpu/src/software_windows.rs` +
+   `crates/sonicterm-windows/src/software_presenter.rs`) repaints the whole
+   surface deterministically each frame. Glyphs rasterize via DirectWrite by
+   default on Windows
+   (`crates/sonicterm-font/src/rasterizer/directwrite.rs`), FreeType elsewhere
    and as the Windows fallback.
 6. `sonicterm-resource` holds the process-local owner tree and retained-memory
    ledger. `sonicterm-app` creates a `Window` owner per live window and an

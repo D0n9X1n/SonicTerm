@@ -118,8 +118,8 @@ bilingual explanatory roadmap.
 | Area | Primary evidence |
 | --- | --- |
 | Actual dependency graph | root `Cargo.toml`, all crate `Cargo.toml`, `cargo metadata` |
-| State ownership | `sonicterm-app-core/src/`, `sonicterm-app/src/app/` |
-| Renderer concentration | `sonicterm-gpu/src/core.rs`, recent file churn |
+| State ownership | `crates/sonicterm-app-core/src/`, `crates/sonicterm-app/src/app/` |
+| Renderer concentration | `crates/sonicterm-gpu/src/core.rs`, recent file churn |
 | Concurrency invariants | `crates/sonicterm-app/src/app/spawn_pane.rs`, `crates/sonicterm-app/src/app/invariants.rs`, `docs/ARCHITECTURE.md` |
 | Test/CI boundary | `.github/workflows/ci.yml`, `scripts/*.sh`, PR template |
 | Supply-chain policy | `deny.toml`, Cargo.lock |
@@ -231,8 +231,8 @@ session ownership 和 release support 的设计与测试。
 | 区域 | 主要证据 |
 | --- | --- |
 | 实际依赖图 | 根 `Cargo.toml`、各 crate `Cargo.toml`、`cargo metadata` |
-| 状态所有权 | `sonicterm-app-core/src/`、`sonicterm-app/src/app/` |
-| Renderer 职责集中 | `sonicterm-gpu/src/core.rs`、近期文件 churn |
+| 状态所有权 | `crates/sonicterm-app-core/src/`、`crates/sonicterm-app/src/app/` |
+| Renderer 职责集中 | `crates/sonicterm-gpu/src/core.rs`、近期文件 churn |
 | 并发不变量 | `crates/sonicterm-app/src/app/spawn_pane.rs`、`crates/sonicterm-app/src/app/invariants.rs`、`docs/ARCHITECTURE.md` |
 | Test/CI 边界 | `.github/workflows/ci.yml`、`scripts/*.sh`、PR template |
 | Supply-chain policy | `deny.toml`、Cargo.lock |
