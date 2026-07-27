@@ -272,9 +272,9 @@ renderer retention window=warm[0] role=warm total_bytes=16777216
 ```sh
 grep 'renderer retention' "$LOG" | awk '{
   for (i = 1; i <= NF; i++) {
-    if ($i ~ /^window=/)      w = substr($i, 8)
-    if ($i ~ /^role=/)        r = substr($i, 6)
-    if ($i ~ /^total_bytes=/) t = substr($i, 13)
+    if ($i ~ /^window=/)      { w = substr($i, 8); gsub(/"/, "", w) }
+    if ($i ~ /^role=/)        { r = substr($i, 6); gsub(/"/, "", r) }
+    if ($i ~ /^total_bytes=/)   t = substr($i, 13)
   }
   printf "%s  %-14s %-8s %8.2f MB\n", substr($1, 12, 8), w, r, t / 1048576
 }'
@@ -282,7 +282,7 @@ grep 'renderer retention' "$LOG" | awk '{
 
 ```powershell
 Select-String 'renderer retention' $log | ForEach-Object {
-  if ($_.Line -match 'window=(\S+) role=(\S+).*?total_bytes=(\d+)') {
+  if ($_.Line -match 'window="?([^"\s]+)"? role="?([^"\s]+)"?.*?total_bytes=(\d+)') {
     '{0}  {1,-14} {2,-8} {3,8:N2} MB' -f $_.Line.Substring(11, 8), $Matches[1], $Matches[2], ([long]$Matches[3] / 1MB)
   }
 }
@@ -621,9 +621,9 @@ renderer retention window=warm[0] role=warm total_bytes=16777216
 ```sh
 grep 'renderer retention' "$LOG" | awk '{
   for (i = 1; i <= NF; i++) {
-    if ($i ~ /^window=/)      w = substr($i, 8)
-    if ($i ~ /^role=/)        r = substr($i, 6)
-    if ($i ~ /^total_bytes=/) t = substr($i, 13)
+    if ($i ~ /^window=/)      { w = substr($i, 8); gsub(/"/, "", w) }
+    if ($i ~ /^role=/)        { r = substr($i, 6); gsub(/"/, "", r) }
+    if ($i ~ /^total_bytes=/)   t = substr($i, 13)
   }
   printf "%s  %-14s %-8s %8.2f MB\n", substr($1, 12, 8), w, r, t / 1048576
 }'
@@ -631,7 +631,7 @@ grep 'renderer retention' "$LOG" | awk '{
 
 ```powershell
 Select-String 'renderer retention' $log | ForEach-Object {
-  if ($_.Line -match 'window=(\S+) role=(\S+).*?total_bytes=(\d+)') {
+  if ($_.Line -match 'window="?([^"\s]+)"? role="?([^"\s]+)"?.*?total_bytes=(\d+)') {
     '{0}  {1,-14} {2,-8} {3,8:N2} MB' -f $_.Line.Substring(11, 8), $Matches[1], $Matches[2], ([long]$Matches[3] / 1MB)
   }
 }
