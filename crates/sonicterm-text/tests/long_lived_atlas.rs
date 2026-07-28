@@ -1,10 +1,11 @@
 //! Does one long-lived glyph atlas stay bounded across many frames?
 //!
-//! #888 named **"atlas/cache churn in a long-lived window"** as its strongest
-//! lead, on a process that reached 51.1 GB before a fatal `wgpu` OOM. Two
-//! existing checks bracket that without covering it: the renderer churn
-//! baseline (#1034) opens and closes windows, and the long-session pane soak
-//! (#1042) drives `App` state. Neither drives one atlas for a long time.
+//! Reported runaway growth pointed at atlas and cache churn inside a window
+//! that had been open a long time, on a process that reached tens of
+//! gigabytes before a fatal `wgpu` OOM. Two sibling checks bracket that shape
+//! without covering it: the renderer churn baseline opens and closes windows,
+//! and the long-session pane soak drives `App` state. Neither drives one
+//! atlas for a long time.
 //!
 //! This does. The atlas is a CPU-side structure — `tick_frame`, `evictions`,
 //! `retained_amount` — so a long life is a matter of frames driven, not hours
@@ -119,9 +120,9 @@ fn a_long_lived_atlas_stays_bounded_and_its_eviction_runs() {
     assert!(
         peak <= INDEX_CEILING,
         "the atlas index peaked at {peak} entries against a {INDEX_CEILING}-entry ceiling, \
-         with {inserted} glyphs inserted across {FRAMES} frames. #888 named atlas churn in a \
-         long-lived window as its strongest lead, so an index that keeps everything it has \
-         seen is the shape that incident had."
+         with {inserted} glyphs inserted across {FRAMES} frames. Atlas churn inside a \
+         long-lived window is where runaway growth was traced to, so an index that keeps \
+         everything it has seen is that shape."
     );
 
     // A leak that grows and then plateaus at the cap would satisfy both
