@@ -257,7 +257,7 @@ mod live_impl {
     use crossbeam_channel::{Receiver, Sender, TryRecvError};
     use parking_lot::Mutex;
     use russh::client::{self, Handle, Handler};
-    use russh::keys::{key, load_secret_key};
+    use russh::keys::{load_secret_key, PrivateKeyWithHashAlg, PublicKey};
     use russh::{ChannelMsg, CryptoVec, Disconnect};
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -265,12 +265,15 @@ mod live_impl {
 
     struct Client;
 
-    #[async_trait::async_trait]
+    // `Handler`'s methods return `impl Future + Send` directly rather than
+    // being `#[async_trait]` methods, so the implementation is a plain
+    // `async fn`. Wrapping this impl in `#[async_trait::async_trait]` rewrites
+    // the signature into a boxed future and no longer matches the trait.
     impl Handler for Client {
         type Error = russh::Error;
         async fn check_server_key(
             &mut self,
-            _server_public_key: &key::PublicKey,
+            _server_public_key: &PublicKey,
         ) -> Result<bool, Self::Error> {
             // Host keys are currently accepted unconditionally. No key is
             // persisted or compared on later connections, so this does not
@@ -374,8 +377,8 @@ mod live_impl {
         if let Some(path) = explicit_key {
             return try_key_file(sess, user, &path).await;
         }
-        // ssh-agent fallback is not wired up in v1 — russh 0.46's agent
-        // auth requires implementing a custom Signer; tracked as follow-up.
+        // ssh-agent fallback is not wired up: agent auth requires implementing
+        // a custom `Signer`, so only on-disk keys are tried here.
         if let Some(home) = std::env::var_os("HOME") {
             let home = PathBuf::from(home);
             for name in ["id_ed25519", "id_rsa"] {
@@ -393,13 +396,18 @@ mod live_impl {
         user: &str,
         path: &std::path::Path,
     ) -> Result<(), SshError> {
-        let keypair: key::KeyPair = load_secret_key(path, None)
+        let key = load_secret_key(path, None)
             .map_err(|e| SshError::Connect(format!("load key {}: {e}", path.display())))?;
-        let ok = sess
-            .authenticate_publickey(user, Arc::new(keypair))
+        // `None` selects the legacy SHA-1 `ssh-rsa` signature for RSA keys and
+        // is ignored for every other algorithm. Modern servers reject SHA-1
+        // signatures, so RSA keys need an explicit stronger hash before RSA is
+        // advertised as supported.
+        let key = PrivateKeyWithHashAlg::new(Arc::new(key), None);
+        let result = sess
+            .authenticate_publickey(user, key)
             .await
             .map_err(|e| SshError::Connect(format!("publickey auth: {e}")))?;
-        if ok {
+        if result.success() {
             Ok(())
         } else {
             Err(SshError::AuthExhausted)

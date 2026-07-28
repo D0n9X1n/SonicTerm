@@ -69,12 +69,25 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # `ssh` is off by default, so no other step in this workflow compiles it:
+      # `--all-targets` does not imply `--all-features`. Without this the
+      # backend can stop building against a dependency's newer API and every
+      # gate still reports green.
+      - name: Clippy optional ssh backend
+        run: cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings
+
       # `shell: bash` because the matrix includes Windows, where the default
       # shell is PowerShell and `> /dev/null` would create a file named `null`
       # rather than discarding the output.
       - name: Validate workspace manifests
         shell: bash
         run: cargo metadata --no-deps --format-version 1 > /dev/null
+
+      # CI installs floating `stable`, so nothing here would otherwise notice
+      # the declared minimum falling behind what the lockfile needs.
+      - name: Check declared rust-version against the lock
+        shell: bash
+        run: bash scripts/check-rust-version.sh
 
       - name: Check process exit paths
         shell: bash

@@ -6,10 +6,14 @@
 //!
 //! **What this covers, and what it does not.**
 //!
-//! It creates and drops real `GpuRenderer`s against a real window, reading
-//! `retained_amounts()` each cycle. That catches accumulation in anything a
-//! renderer holds or shares — the glyph atlas is 16 MiB per renderer, so a
-//! leak compounds fast and visibly.
+//! It creates and drops real `GpuRenderer`s against a real window, and checks
+//! that the process-wide live-renderer count returns to where it started. That
+//! is the reading a leak moves: a renderer's own `retained_amounts()` reports
+//! the instance being asked, and every instance reports the same atlas
+//! capacity, so comparing those across cycles compares a constant to itself
+//! and holds whether or not anything leaked. The per-cycle retention readings
+//! are still taken and printed, because a change in them would mean the atlas
+//! sizing itself moved — but the count is what fails on a leak.
 //!
 //! It does **not** exercise the software frame. `WindowsSoftwareFrame` is
 //! allocated lazily inside `render()`, which takes thirteen arguments
@@ -27,7 +31,7 @@
 
 use std::sync::Arc;
 
-use sonicterm_gpu::core::{GpuRenderer, RendererSettings, SurfaceAppearance};
+use sonicterm_gpu::core::{live_renderer_count, GpuRenderer, RendererSettings, SurfaceAppearance};
 use winit::application::ApplicationHandler;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::platform::windows::EventLoopBuilderExtWindows;
@@ -39,12 +43,19 @@ const CYCLES: usize = 8;
 
 struct Churn {
     readings: Vec<(usize, usize, usize)>,
+    /// Live renderers observed after each cycle's renderer was dropped.
+    live_after_drop: Vec<usize>,
+    /// Live renderers before the first cycle, so the comparison does not
+    /// assume the process started at zero.
+    live_baseline: usize,
     failure: Option<String>,
 }
 
 impl ApplicationHandler for Churn {
     fn resumed(&mut self, active: &ActiveEventLoop) {
         let theme = sonicterm_render_model::boundary::cfg::theme::Theme::default();
+
+        self.live_baseline = live_renderer_count();
 
         for cycle in 0..CYCLES {
             let attrs = winit::window::Window::default_attributes()
@@ -86,6 +97,10 @@ impl ApplicationHandler for Churn {
                         held.software_frame.bytes,
                     ));
                     // Renderer and window both drop here.
+                    drop(renderer);
+                    // Read after the drop, not before: this is the reading a
+                    // leaked renderer moves.
+                    self.live_after_drop.push(live_renderer_count());
                 }
                 Err(err) => {
                     self.failure = Some(format!("cycle {cycle}: renderer: {err}"));
@@ -106,11 +121,12 @@ impl ApplicationHandler for Churn {
     }
 }
 
-/// Renderer memory does not accumulate across open/close cycles.
+/// Renderers do not accumulate across open/close cycles.
 ///
-/// Asserted as *first equals last* rather than against an absolute figure: the
-/// question is whether churn leaves residue, and a renderer's own footprint is
-/// not the subject. A staircase shows as the last reading exceeding the first.
+/// The load-bearing assertion is on the live-renderer count, which returns to
+/// its starting value only if every renderer built was also dropped. The
+/// retention readings are reported alongside it: they are per-instance
+/// constants, so they detect a change in atlas sizing, not a leak.
 #[test]
 fn renderer_memory_returns_to_baseline_across_window_churn() {
     let event_loop = match EventLoop::builder().with_any_thread(true).build() {
@@ -124,7 +140,12 @@ fn renderer_memory_returns_to_baseline_across_window_churn() {
         }
     };
 
-    let mut churn = Churn { readings: Vec::new(), failure: None };
+    let mut churn = Churn {
+        readings: Vec::new(),
+        live_after_drop: Vec::new(),
+        live_baseline: 0,
+        failure: None,
+    };
     event_loop.run_app(&mut churn).expect("event loop runs");
 
     if let Some(failure) = churn.failure {
@@ -148,12 +169,36 @@ fn renderer_memory_returns_to_baseline_across_window_churn() {
          last=(glyph {last_glyph}, image {last_image}, frame {last_frame})",
         churn.readings.len()
     );
+    println!(
+        "live renderers: baseline {} after-each-drop {:?}",
+        churn.live_baseline, churn.live_after_drop
+    );
+
+    // The one that fails on a leak. Every cycle must return the count to the
+    // baseline, not merely end there: a run that leaked one renderer and freed
+    // an unrelated one would balance out in a first-vs-last comparison.
+    for (cycle, live) in churn.live_after_drop.iter().enumerate() {
+        assert_eq!(
+            *live, churn.live_baseline,
+            "after cycle {cycle} the process held {live} live renderers against a \
+             baseline of {}; a renderer built in this loop was not dropped, which is \
+             the staircase this exists to catch",
+            churn.live_baseline
+        );
+    }
+
+    assert_eq!(
+        churn.live_after_drop.len(),
+        churn.readings.len(),
+        "every cycle that produced a retention reading must also have produced a \
+         live-renderer reading; unequal counts mean the leak check skipped a cycle"
+    );
 
     assert_eq!(
         (last_glyph, last_image, last_frame),
         (first_glyph, first_image, first_frame),
-        "renderer retention grew across {} open/close cycles; a per-window buffer is \
-         not being released, which is the staircase this exists to catch",
+        "per-renderer retention changed across {} cycles; this is a constant by \
+         construction, so a change means atlas sizing moved between instances",
         churn.readings.len()
     );
 }

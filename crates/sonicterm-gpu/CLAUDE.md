@@ -29,6 +29,12 @@ cargo build -p sonicterm-gpu
   staircase across window open/close, which is what the churn baseline
   measures; keep new renderer-owned allocations reported through
   `retained_amounts` so they stay visible there.
+- `retained_amounts()` answers about the instance you ask, and every instance
+  reports the same atlas capacity. It cannot tell you whether the *previous*
+  renderer was released — comparing it across open/close cycles compares a
+  constant to itself. `live_renderer_count()` is the reading a leak moves; it
+  is what the churn baseline asserts on, and its increment in `new` must stay
+  paired with the decrement in `Drop`.
 - Upgrade `wgpu` and the `sonicterm-font`/`sonicterm-text` glyph stack as a
   tested set, not one at a time. (`glyphon`/`cosmic-text` were removed; text
   now flows through the Sonic-owned atlas + rasterizer.)

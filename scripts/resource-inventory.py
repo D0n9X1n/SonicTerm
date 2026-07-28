@@ -152,9 +152,44 @@ TEST_ATTRIBUTE = re.compile(
     r'#\[ignore\s*=\s*"v120-invariant-baseline:([^:"]+):([^:"]+)"\]'
 )
 # A sentinel a Wave 2 package has satisfied: the gate is gone and the test runs.
-# Matched by name so the row stays accounted for after its package implements it.
-IMPLEMENTED_TEST = re.compile(r"\bfn\s+(v120_[a-z0-9_]+)\s*\(")
+#
+# "Runs" is the whole claim, so matching the name alone is not enough. A bare
+# name match accepts `// fn v120_x() {}`, a plain helper that Cargo never
+# registers, and `#[ignore] fn v120_x()`, which Cargo registers and then skips.
+# Each of those reports an acceptance criterion as covered while nothing
+# executes, which is the one failure this gate exists to prevent.
+#
+# So the match starts at an unambiguous `#[test]` line and walks the
+# attributes between it and the function, rejecting the pair if `#[ignore]`
+# appears among them. Comment lines are stripped before any of this, because
+# a commented-out block otherwise satisfies every pattern in it.
+IMPLEMENTED_TEST = re.compile(
+    r"^[ \t]*#\[test\][ \t]*\n"  # a real #[test], not inside a comment
+    r"(?P<attrs>(?:[ \t]*#\[[^\n]*\][ \t]*\n)*)"  # attributes before the fn
+    r"[ \t]*(?:pub[ \t]+)?(?:async[ \t]+)?fn[ \t]+(?P<name>v120_[a-z0-9_]+)[ \t]*\(",
+    re.MULTILINE,
+)
+IGNORE_ATTRIBUTE = re.compile(r"#\[\s*ignore\b")
+LINE_COMMENT = re.compile(r"^[ \t]*//.*$", re.MULTILINE)
 PACKAGE_TOKEN = re.compile(r"\bWP-[A-Z0-9-]+\b")
+
+
+def implemented_sentinels(text: str) -> set[str]:
+    """Names of sentinels in `text` that Cargo will actually run.
+
+    Requires an immediately preceding `#[test]` and rejects `#[ignore]`
+    anywhere between that attribute and the function signature.
+    """
+    # Blank the line comments rather than deleting them, so the remaining
+    # text keeps its line structure and a commented-out `#[test]` cannot
+    # pair with the next real function below it.
+    uncommented = LINE_COMMENT.sub("", text)
+    names: set[str] = set()
+    for match in IMPLEMENTED_TEST.finditer(uncommented):
+        if IGNORE_ATTRIBUTE.search(match.group("attrs")):
+            continue
+        names.add(match.group("name"))
+    return names
 
 
 def repository_root() -> Path:
@@ -201,7 +236,7 @@ def validate_rows(root: Path) -> None:
             if test_id in source_test_ids:
                 raise ValueError(f"duplicate gated test ID in source: {test_id}")
             source_test_ids[test_id] = package
-        implemented_test_ids.update(IMPLEMENTED_TEST.findall(text))
+        implemented_test_ids.update(implemented_sentinels(text))
 
     for row in ROWS:
         test_id, package = row[10], row[11]

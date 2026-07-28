@@ -49,6 +49,12 @@ impl WindowsSoftwarePresenterPreference {
     /// (`should_degrade_for_software_render`) across the whole `(mode,
     /// detected)` domain, and that agreement is what stops a half-degraded
     /// renderer when the presenter is wired up.
+    ///
+    /// `dead_code` is allowed rather than silenced by deletion: removing the
+    /// method would take the cross-layer agreement check with it, and that
+    /// check is the only thing holding the two copies of this decision
+    /// together until a production caller exists.
+    #[allow(dead_code)]
     #[must_use]
     pub fn should_use(self, detected_software_adapter: bool) -> bool {
         match self {

@@ -87,8 +87,10 @@ Normal PR/main CI runs workspace unit tests plus a per-crate unit/build gate:
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings
 cargo test --workspace --lib --bins
 bash scripts/check-no-raw-process-exit.sh
+bash scripts/check-rust-version.sh
 bash scripts/check-window-owner-registration.sh
 bash scripts/check-workspace-crates.sh
 bash scripts/pty-backend-feasibility.sh --check
@@ -104,6 +106,10 @@ excludes every `tests/` binary, so it can pass while an integration test is
 broken; `check-workspace-crates.sh` is the step that runs `--tests` per crate
 and catches that. A green `cargo test --workspace --lib --bins` on its own
 means the unit tests pass, not that CI will.
+
+The second clippy line is not a duplicate. `--workspace --all-targets` does
+not imply `--all-features`, and `ssh` is off by default, so the SSH backend is
+compiled by no other command in this list.
 
 Two more limits worth knowing before trusting a green run:
 
