@@ -27,9 +27,38 @@ CHOKEPOINT="insert_window_registered"
 # `crates/`, which would break the path comparisons below.
 hits=$(grep -rn --include='*.rs' 'self\.windows\.insert(' crates || true)
 
+# No insertion at all means the chokepoint has moved or been deleted, not that
+# the invariant holds. Reporting OK there is how a guard survives the removal of
+# the thing it guards.
 if [[ -z "$hits" ]]; then
-    echo "check-window-owner-registration: no window insertions found. OK."
-    exit 0
+    echo "FAILED: no window insertion found anywhere in crates/." >&2
+    echo "The chokepoint has moved or been removed; this check can no longer" >&2
+    echo "see the operation it exists to constrain." >&2
+    exit 1
+fi
+
+# Locating the insertion inside the chokepoint proves only where it lives. The
+# invariant is that the same operation registers an owner, so assert the
+# chokepoint's body actually does it — otherwise deleting that one line leaves
+# every insertion correctly placed and entirely unregistered.
+chokepoint_body=$(awk -v fname="$CHOKEPOINT" '
+    $0 ~ "^    (pub(\\([^)]*\\))? )?(async )?fn " fname "\\(" { inside = 1 }
+    inside { print }
+    inside && /^    \}$/ { exit }
+' crates/sonicterm-app/src/app/mod.rs)
+
+if [[ -z "$chokepoint_body" ]]; then
+    echo "FAILED: could not find fn $CHOKEPOINT to inspect." >&2
+    exit 1
+fi
+
+# Comment lines stripped first: `// self.register_window_owner(id);` contains
+# the string and would satisfy a plain text match, which is the same defect
+# this check exists to catch elsewhere.
+if ! grep -v '^\s*//' <<<"$chokepoint_body" | grep -q 'register_window_owner'; then
+    echo "FAILED: $CHOKEPOINT does not call register_window_owner." >&2
+    echo "The insertion and the registration must remain one operation." >&2
+    exit 1
 fi
 
 fail=0

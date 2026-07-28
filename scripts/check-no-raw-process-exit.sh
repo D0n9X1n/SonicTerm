@@ -15,7 +15,13 @@ ALLOWLIST="scripts/process-exit-allowlist.txt"
 # Note: macOS BSD grep emits `crates//foo/...` (double slash) when given
 # `crates/` as the path arg; pass `crates` (no trailing /) so paths come
 # out as `crates/foo/...` consistently with the allowlist prefixes.
-hits=$(grep -rn --include='*.rs' 'std::process::exit\|process::exit(' crates || true)
+# `::exit(` rather than only the `std::process::exit` spelling: an import
+# alias — `use std::process as p; p::exit(1)` — is a raw exit by another name
+# and the narrow pattern missed it entirely. This is text matching, not
+# parsing, so it cannot catch every possible aliasing; it catches every path
+# form, which is what the aliases produce. Broadening costs nothing today:
+# the only file it newly reaches is the allowlisted logging wrapper.
+hits=$(grep -rn --include='*.rs' '::exit(' crates || true)
 
 if [[ -z "$hits" ]]; then
     echo "check-no-raw-process-exit: 0 occurrences. OK."
