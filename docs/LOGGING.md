@@ -28,6 +28,30 @@ Logging is initialized after `sonicterm.toml` is loaded so the configured level
 is honored from startup onward. Log files and crash dumps older than 2 days are
 cleaned asynchronously by default.
 
+## Reclamation that destroys user-visible data
+
+One target is deliberately exempt from the level gate. `memory::reclaimed`
+carries the two events where SonicTerm discards something the user can see to
+stay within a budget: a media capture abandoned after it stopped receiving, and
+inline images trimmed from idle panes over the process ceiling. It is admitted
+at **every** level including the default `warn`, and it is in `DEFAULT_FILTER`,
+which is also the parse-failure fallback — a malformed `RUST_LOG` cannot
+silence it.
+
+The reasoning is the same one that put `sonic::glyph_atlas` in the default
+filter: a user who lost data is owed a reason in the log they already have, not
+in the one they would have had if they had enabled `debug` before it happened.
+Diagnostics — the 34 `memory` call sites describing what a session holds —
+remain off at default and need `debug`.
+
+Two tests pin this and are written as a pair, so the target cannot fall silent
+unnoticed: `reclamation_warnings_reach_a_default_session` asserts admission at
+WARN across every filter level, and `custom_targets_stay_off_at_the_default_level`
+carries this target as a documented exception rather than a quiet exemption. A
+third, `the_documented_grep_recipe_matches_a_real_reclamation_line`, captures a
+real formatted event and asserts the target string is present, because the
+`grep` recipe in `wiki/Logging.md` is only true while the formatter writes it.
+
 ## Render timing diagnostics
 
 SonicTerm supports four user-facing levels: `error`, `warn`, `info`, and
