@@ -457,6 +457,17 @@ pub struct Parser {
     escape_bytes_in_flight: usize,
     discarding_oversized_escape: bool,
     discard_escape_pending_esc: bool,
+    /// Let a newline end the discard, used only when the discard was started
+    /// by [`Parser::cancel_capture`].
+    ///
+    /// A cancelled transfer's sender is never told, so its tail keeps
+    /// arriving and has to be swallowed. But a sender that *died* rather than
+    /// stalled sends no terminator at all, and an unbounded discard would eat
+    /// the shell's next prompt forever. Media payloads carry no newline —
+    /// base64 has none, and Sixel breaks lines with `-` — while shell output
+    /// is full of them, so a newline is the signal that the bytes now arriving
+    /// belong to the user rather than to the abandoned transfer.
+    discard_exits_on_newline: bool,
     escape_family: EscapeFamily,
 }
 
@@ -493,6 +504,7 @@ impl Parser {
             escape_bytes_in_flight: 0,
             discarding_oversized_escape: false,
             discard_escape_pending_esc: false,
+            discard_exits_on_newline: false,
             escape_family: EscapeFamily::Ground,
         }
     }
@@ -509,6 +521,7 @@ impl Parser {
             escape_bytes_in_flight: 0,
             discarding_oversized_escape: false,
             discard_escape_pending_esc: false,
+            discard_exits_on_newline: false,
             escape_family: EscapeFamily::Ground,
         }
     }
@@ -720,6 +733,7 @@ impl Parser {
         self.escape_bytes_in_flight = 0;
         self.discarding_oversized_escape = false;
         self.discard_escape_pending_esc = false;
+        self.discard_exits_on_newline = false;
         self.escape_family = EscapeFamily::Ground;
         self.performer.ground = true;
         self.performer.sequence_dispatched = true;
@@ -754,13 +768,21 @@ impl Parser {
             EscapeFamily::Esc => (0x30..=0x7e).contains(&byte),
             EscapeFamily::Ground | EscapeFamily::Osc | EscapeFamily::String => false,
         };
-        let terminated = string_terminated || final_byte || matches!(byte, 0x18 | 0x1a);
+        let abandoned_by_newline = self.discard_exits_on_newline && byte == b'\n';
+        let terminated =
+            string_terminated || final_byte || abandoned_by_newline || matches!(byte, 0x18 | 0x1a);
         if terminated {
             self.discarding_oversized_escape = false;
             self.discard_escape_pending_esc = false;
+            self.discard_exits_on_newline = false;
             self.escape_bytes_in_flight = 0;
             self.performer.ground = true;
             self.escape_family = EscapeFamily::Ground;
+            // A newline is the user's output, not the transfer's terminator,
+            // so it has to reach the grid rather than be eaten as one.
+            if abandoned_by_newline {
+                self.performer.execute(b'\n');
+            }
             return;
         }
         self.discard_escape_pending_esc = byte == 0x1b;
@@ -893,6 +915,13 @@ impl Parser {
     /// nothing useful, so surfacing it would trade memory for a broken
     /// picture instead of no picture.
     ///
+    /// The sender is not told, so the rest of the transfer keeps arriving.
+    /// Those bytes are swallowed rather than returned to ground: a payload is
+    /// printable ASCII end to end, so a parser back in ground would print
+    /// megabytes of base64 into the grid — the user would lose the image
+    /// *and* the screen. The discard ends at the transfer's terminator, or at
+    /// the first newline if the sender died and no terminator is ever coming.
+    ///
     /// Intended for a capture the host has determined is stalled — see
     /// [`Parser::capture_progress`]. Cancelling one that is merely slow costs
     /// the user their transfer, so the staleness threshold belongs to the host
@@ -906,6 +935,12 @@ impl Parser {
         }
         self.inner = vte::Parser::new();
         self.reset_cancelled_escape();
+        // Both capture families terminate with ST, so the discard reads as a
+        // string sequence. Set after the reset, which clears these.
+        self.escape_family = EscapeFamily::String;
+        self.discarding_oversized_escape = true;
+        self.discard_exits_on_newline = true;
+        self.performer.ground = false;
         released
     }
 

@@ -1560,9 +1560,16 @@ fn a_stalled_capture_is_visible_as_progress_and_releasable_by_cancel() {
     // Cancelling again is harmless — a host polling on a timer will do this.
     assert_eq!(parser.cancel_capture(), 0, "cancelling with nothing in flight must be a no-op");
 
-    // The parser must still work afterwards; cancel resets state, not the session.
-    parser.advance(b"hello");
-    assert!(row_text(&parser, 0).starts_with("hello"), "the parser must still print after cancel");
+    // The parser must still work afterwards; cancel resets state, not the
+    // session. The abandoned transfer's tail is swallowed first — printing it
+    // would put megabytes of base64 on the user's screen — so the parser
+    // resumes at the newline that marks the end of that tail.
+    parser.advance(b"tail-of-the-abandoned-payload\nhello");
+    assert!(row_text(&parser, 1).starts_with("hello"), "the parser must still print after cancel");
+    assert!(
+        !row_text(&parser, 0).contains("tail-of-the-abandoned-payload"),
+        "but the abandoned tail must not reach the screen"
+    );
 }
 
 /// Cancelling must not dispatch the partial payload.
@@ -1710,4 +1717,55 @@ fn a_lone_capture_is_entitled_to_the_full_per_capture_maximum() {
         "a lone capture must be able to grow to the full per-capture maximum"
     );
     assert!(!capture.truncated, "and must not be truncated on the way there");
+}
+
+/// Cancelling a stalled capture must not turn the rest of the transfer into
+/// text on the user's screen.
+///
+/// The host cancels a capture whose byte count stopped moving, but the sender
+/// is not told, so the remaining payload keeps arriving. Base64 is entirely
+/// within the printable-ASCII fast path, so a parser returned to ground with
+/// nothing set to swallow the tail prints megabytes of it into the grid: the
+/// user gets no image *and* a destroyed screen.
+#[test]
+fn cancelled_capture_does_not_print_its_remaining_payload() {
+    let mut parser = Parser::new(Grid::new(16, 2));
+
+    // A Kitty transfer that has begun but not terminated.
+    parser.advance(b"\x1b_Gf=100,a=T;AAAABBBBCCCC");
+    assert_eq!(parser.live_capture_count(), 1, "capture must be in flight");
+
+    // The host observes no progress and reclaims the staging.
+    parser.cancel_capture();
+
+    // The sender knows nothing about the cancellation and keeps streaming.
+    parser.advance(b"DDDDEEEEFFFF\x1b\\");
+
+    assert_eq!(
+        row_text(&parser, 0),
+        "                ",
+        "the abandoned payload must not be printed as text"
+    );
+}
+
+/// A sender that *died* mid-transfer sends no terminator, so the discard armed
+/// by cancellation has to end on its own or the pane is wedged: the shell's
+/// next prompt would be swallowed forever. A newline is the discriminator —
+/// media payloads carry none, shell output is full of them.
+#[test]
+fn cancelled_capture_stops_discarding_at_the_first_newline() {
+    let mut parser = Parser::new(Grid::new(16, 3));
+
+    parser.advance(b"\x1b_Gf=100,a=T;AAAABBBB");
+    parser.cancel_capture();
+
+    // No terminator ever comes. The shell prints a prompt instead.
+    parser.advance(b"CCCC\nuser@host$ ");
+
+    assert_eq!(row_text(&parser, 0), "                ", "the tail is still swallowed");
+    assert_eq!(
+        row_text(&parser, 1),
+        "user@host$      ",
+        "but output after the newline must reach the user"
+    );
 }
