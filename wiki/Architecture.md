@@ -23,19 +23,29 @@ SonicTerm is organized around five goals:
 
 ## Runtime data flow
 
-```text
-macOS/Windows binary
-        |
-        v
-sonicterm-app (winit orchestration and authoritative live topology)
-   |          |                    |
-   |          | intents/effects    | frame inputs
-   |          v                    v
-   |   sonicterm-app-core   sonicterm-render-model ---> sonicterm-gpu ---> screen
-   |                                                 |       |
-   v                                                 |       v
-sonicterm-io ---> sonicterm-vt ---> sonicterm-grid ---+   text/font stack
-   PTY bytes        ANSI/VT          cells/history         shaping/raster/atlas
+```mermaid
+flowchart TD
+    bin["macOS/Windows binary"]
+    app["sonicterm-app<br/>winit orchestration, authoritative live topology"]
+    core["sonicterm-app-core"]
+    rm["sonicterm-render-model"]
+    gpu["sonicterm-gpu"]
+    screen(["screen"])
+    io["sonicterm-io<br/>PTY bytes"]
+    vt["sonicterm-vt<br/>ANSI/VT"]
+    grid["sonicterm-grid<br/>cells/history"]
+    text["text/font stack<br/>shaping/raster/atlas"]
+
+    bin --> app
+    app -- "intents/effects" --> core
+    app -- "frame inputs" --> rm
+    app --> io
+    io --> vt
+    vt --> grid
+    grid --> rm
+    rm --> gpu
+    gpu --> screen
+    gpu --> text
 ```
 
 The arrows above describe runtime data flow, not every Cargo dependency. In the
@@ -174,19 +184,29 @@ SonicTerm 的组织方式围绕五个目标：
 
 ## 运行时数据流
 
-```text
-macOS/Windows 二进制
-        |
-        v
-sonicterm-app（winit 编排与权威实时拓扑）
-   |          |                    |
-   |          | intent/effect      | 帧输入
-   |          v                    v
-   |   sonicterm-app-core   sonicterm-render-model ---> sonicterm-gpu ---> 屏幕
-   |                                                 |       |
-   v                                                 |       v
-sonicterm-io ---> sonicterm-vt ---> sonicterm-grid ---+   文本/字体栈
-   PTY 字节          ANSI/VT          单元格/历史          塑形/光栅/图集
+```mermaid
+flowchart TD
+    bin["macOS/Windows 二进制"]
+    app["sonicterm-app<br/>winit 编排与权威实时拓扑"]
+    core["sonicterm-app-core"]
+    rm["sonicterm-render-model"]
+    gpu["sonicterm-gpu"]
+    screen(["屏幕"])
+    io["sonicterm-io<br/>PTY 字节"]
+    vt["sonicterm-vt<br/>ANSI/VT"]
+    grid["sonicterm-grid<br/>单元格/历史"]
+    text["文本/字体栈<br/>塑形/光栅/图集"]
+
+    bin --> app
+    app -- "intent/effect" --> core
+    app -- "帧输入" --> rm
+    app --> io
+    io --> vt
+    vt --> grid
+    grid --> rm
+    rm --> gpu
+    gpu --> screen
+    gpu --> text
 ```
 
 上图表示运行时数据流，不等同于全部 Cargo 依赖。真实依赖中，`sonicterm-gpu`

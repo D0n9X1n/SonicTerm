@@ -5,18 +5,34 @@ Developer documentation: **Architecture** · [Modules](MODULES.md) · [Logging](
 SonicTerm is a native macOS + Windows terminal built around small Rust crates
 with a strict data-flow boundary:
 
-```text
-platform shell -> sonicterm-app -> sonicterm-render-model -> sonicterm-gpu
-                        |                    ^                    ^
-                        v                    |                    |
-                  sonicterm-io -> sonicterm-vt -> sonicterm-grid |
-                                             \-> sonicterm-ui ----/
+```mermaid
+flowchart TD
+    shell["platform shell"]
+    app["sonicterm-app"]
+    rm["sonicterm-render-model"]
+    gpu["sonicterm-gpu"]
+    io["sonicterm-io"]
+    vt["sonicterm-vt"]
+    grid["sonicterm-grid"]
+    ui["sonicterm-ui"]
+    fontsrc["font-config/fontconfig/freetype/harfbuzz"]
+    font["sonicterm-font"]
+    engine["sonicterm-engine/text"]
+    res["sonicterm-resource<br/>cross-cutting: owner tree and retained-memory ledger"]
 
-font-config/fontconfig/freetype/harfbuzz -> sonicterm-font
-                                          -> sonicterm-engine/text
-                                          -> sonicterm-gpu
+    shell --> app
+    app --> rm
+    app --> io
+    io --> vt
+    vt --> grid
+    vt --> ui
+    grid --> rm
+    ui --> rm
+    rm --> gpu
 
-sonicterm-resource ..... cross-cutting: owner tree and retained-memory ledger
+    fontsrc --> font
+    font --> engine
+    engine --> gpu
 ```
 
 This diagram shows runtime data flow and the primary dependency seams. In the

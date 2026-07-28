@@ -9,15 +9,14 @@ and packaging metadata.
 
 ## Shared versus platform-specific
 
-```text
-sonicterm-app
-  winit lifecycle, windows/tabs/panes, PTYs, input, redraw, config reload
-       |
-       +--> sonicterm-mac
-       |      AppKit menu, NSPasteboard drag, NSWindow setup, .app/.dmg
-       |
-       +--> sonicterm-windows
-              DPI/Win32, muda menu, OLE drag, DWM backdrop, GDI, WiX/.msi
+```mermaid
+flowchart TD
+    app["sonicterm-app<br/>winit lifecycle, windows/tabs/panes, PTYs, input, redraw, config reload"]
+    mac["sonicterm-mac<br/>AppKit menu, NSPasteboard drag, NSWindow setup, .app/.dmg"]
+    win["sonicterm-windows<br/>DPI/Win32, muda menu, OLE drag, DWM backdrop, GDI, WiX/.msi"]
+
+    app --> mac
+    app --> win
 ```
 
 A behavior belongs in `sonicterm-app` or a lower crate when it can be expressed
@@ -168,15 +167,14 @@ precedence over bundled files; an explicit path can also be configured.
 
 ## 共享与平台专属边界
 
-```text
-sonicterm-app
-  winit 生命周期、窗口/标签页/窗格、PTY、输入、重绘、配置重载
-       |
-       +--> sonicterm-mac
-       |      AppKit 菜单、NSPasteboard 拖动、NSWindow 设置、.app/.dmg
-       |
-       +--> sonicterm-windows
-              DPI/Win32、muda 菜单、OLE 拖动、DWM backdrop、GDI、WiX/.msi
+```mermaid
+flowchart TD
+    app["sonicterm-app<br/>winit 生命周期、窗口/标签页/窗格、PTY、输入、重绘、配置重载"]
+    mac["sonicterm-mac<br/>AppKit 菜单、NSPasteboard 拖动、NSWindow 设置、.app/.dmg"]
+    win["sonicterm-windows<br/>DPI/Win32、muda 菜单、OLE 拖动、DWM backdrop、GDI、WiX/.msi"]
+
+    app --> mac
+    app --> win
 ```
 
 不需要 AppKit/Win32 handle 的行为应放在 `sonicterm-app` 或更低层。平台 crate 只保留必须依赖

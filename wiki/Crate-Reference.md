@@ -12,33 +12,50 @@ binaries are `sonicterm-mac` and `sonicterm-windows`.
 
 ## Dependency overview
 
-```text
-                           sonicterm-types
-                      /          |          \
-                  grid          cfg          app-core
-                    ^            ^              |
-                    |            |              |
-                   vt            ui             |
-                    ^             \             |
-                    |              render-model |
-                    |                    \       |
-                   io                     gpu    |
-                    \                     /      |
-                     +------ sonicterm-app ------+
-                              /         \
-                            mac        windows
+```mermaid
+flowchart BT
+    types["sonicterm-types"]
+    grid["grid"]
+    cfg["cfg"]
+    appcore["app-core"]
+    vt["vt"]
+    ui["ui"]
+    rm["render-model"]
+    io["io"]
+    gpu["gpu"]
+    app["sonicterm-app"]
+    mac["mac"]
+    win["windows"]
+    fontsrc["font-config + fontconfig + freetype + harfbuzz"]
+    font["sonicterm-font"]
+    engine["engine"]
+    text["text"]
+    mux["sonicterm-mux<br/>standalone, not used by app"]
+    res["sonicterm-resource<br/>retained-memory ledger"]
 
-font-config + fontconfig + freetype + harfbuzz
-                       \       |       /
-                         sonicterm-font
-                           /          \
-                       engine        text
-                          \          /
-                           sonicterm-gpu
+    grid --> types
+    cfg --> types
+    appcore --> types
+    vt --> grid
+    ui --> cfg
+    rm --> ui
+    io --> vt
+    gpu --> rm
+    app --> io
+    app --> gpu
+    app --> appcore
+    mac --> app
+    win --> app
 
-sonicterm-io -> sonicterm-mux (standalone, not used by app)
+    font --> fontsrc
+    engine --> font
+    text --> font
+    gpu --> engine
+    gpu --> text
 
-sonicterm-types -> sonicterm-resource -> sonicterm-app (retained-memory ledger)
+    mux --> io
+    res --> types
+    app --> res
 ```
 
 The diagram omits some utility edges; each crate entry below lists its important
@@ -325,33 +342,50 @@ Every crate contains a local `CLAUDE.md` with its guardrails and local gate.
 
 ## 依赖概览
 
-```text
-                           sonicterm-types
-                      /          |          \
-                  grid          cfg          app-core
-                    ^            ^              |
-                    |            |              |
-                   vt            ui             |
-                    ^             \             |
-                    |              render-model |
-                    |                    \       |
-                   io                     gpu    |
-                    \                     /      |
-                     +------ sonicterm-app ------+
-                              /         \
-                            mac        windows
+```mermaid
+flowchart BT
+    types["sonicterm-types"]
+    grid["grid"]
+    cfg["cfg"]
+    appcore["app-core"]
+    vt["vt"]
+    ui["ui"]
+    rm["render-model"]
+    io["io"]
+    gpu["gpu"]
+    app["sonicterm-app"]
+    mac["mac"]
+    win["windows"]
+    fontsrc["font-config + fontconfig + freetype + harfbuzz"]
+    font["sonicterm-font"]
+    engine["engine"]
+    text["text"]
+    mux["sonicterm-mux<br/>独立，app 未使用"]
+    res["sonicterm-resource<br/>常驻内存账本"]
 
-font-config + fontconfig + freetype + harfbuzz
-                       \       |       /
-                         sonicterm-font
-                           /          \
-                       engine        text
-                          \          /
-                           sonicterm-gpu
+    grid --> types
+    cfg --> types
+    appcore --> types
+    vt --> grid
+    ui --> cfg
+    rm --> ui
+    io --> vt
+    gpu --> rm
+    app --> io
+    app --> gpu
+    app --> appcore
+    mac --> app
+    win --> app
 
-sonicterm-io -> sonicterm-mux（独立，app 未使用）
+    font --> fontsrc
+    engine --> font
+    text --> font
+    gpu --> engine
+    gpu --> text
 
-sonicterm-types -> sonicterm-resource -> sonicterm-app（常驻内存账本）
+    mux --> io
+    res --> types
+    app --> res
 ```
 
 图中省略部分工具依赖；下方每个 crate 会列出重要关系。

@@ -68,11 +68,16 @@ reduce shared mutable state or make an invariant mechanically testable.
 Move only pure, serializable topology and transition logic into `app-core`.
 Recommended order:
 
-```text
-window identity registry
-  -> tab identity/order/active tab
-  -> pane-tree topology/focus/resize
-  -> selection/search/palette summaries where useful
+```mermaid
+flowchart TD
+    win["window identity registry"]
+    tab["tab identity/order/active tab"]
+    pane["pane-tree topology/focus/resize"]
+    sel(["selection/search/palette summaries where useful"])
+
+    win --> tab
+    tab --> pane
+    pane --> sel
 ```
 
 Native windows, renderers, PTY handles, parser mutexes, clipboard objects,
@@ -186,11 +191,16 @@ _最后一次按 workspace 1.2.0 审查：2026-07-26。_
 
 只把纯、可序列化 topology 与 transition logic 移入 `app-core`。推荐顺序：
 
-```text
-window identity registry
-  -> tab identity/order/active tab
-  -> pane-tree topology/focus/resize
-  -> 有价值的 selection/search/palette summary
+```mermaid
+flowchart TD
+    win["window identity registry"]
+    tab["tab identity/order/active tab"]
+    pane["pane-tree topology/focus/resize"]
+    sel(["有价值的 selection/search/palette summary"])
+
+    win --> tab
+    tab --> pane
+    pane --> sel
 ```
 
 原生 window、renderer、PTY handle、parser mutex、clipboard object、thread、OS drag session 应留作 boundary resource，

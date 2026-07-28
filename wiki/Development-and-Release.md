@@ -125,18 +125,30 @@ Rust logic.
 its `on.push.branches` list names — currently `main` and the active release
 branch — with a macOS 14 / Windows latest matrix:
 
-```text
-checkout + stable Rust
-  -> Windows: cache/install Cairo with vcpkg
-  -> process-exit policy
-  -> cargo test --workspace --lib --bins
-  -> per-crate unit/build gate
-  -> release-note unit test
-  -> frozen PTY feasibility evidence check
-  -> resource inventory verification
-  -> deterministic soak control gate
-  -> resource baseline evidence collector test + capture
-  -> macOS only: install cargo-llvm-cov and enforce coverage
+```mermaid
+flowchart TD
+    checkout["checkout + stable Rust"]
+    cairo["Windows: cache/install Cairo with vcpkg"]
+    exitpolicy["process-exit policy"]
+    wstest["cargo test --workspace --lib --bins"]
+    percrate["per-crate unit/build gate"]
+    notes["release-note unit test"]
+    pty["frozen PTY feasibility evidence check"]
+    inventory["resource inventory verification"]
+    soak["deterministic soak control gate"]
+    baseline["resource baseline evidence collector test + capture"]
+    coverage(["macOS only: install cargo-llvm-cov and enforce coverage"])
+
+    checkout --> cairo
+    cairo --> exitpolicy
+    exitpolicy --> wstest
+    wstest --> percrate
+    percrate --> notes
+    notes --> pty
+    pty --> inventory
+    inventory --> soak
+    soak --> baseline
+    baseline --> coverage
 ```
 
 At the current repository revision, CI does **not** execute the documented
@@ -160,18 +172,30 @@ threshold.
 
 Pushing a matching `v*` tag starts `.github/workflows/release.yml`:
 
-```text
-vX.Y.Z tag
-  -> macOS workspace/per-crate/release-note tests
-  -> Windows workspace/per-crate/release-note tests
-  -> build macOS x86_64 binary
-  -> build macOS aarch64 binary
-  -> verify architectures and package two DMGs
-  -> build Windows x64 binary and WiX MSI
-  -> download all artifacts on Ubuntu
-  -> require at least one DMG and MSI
-  -> generate SHA256SUMS.txt and release notes
-  -> publish GitHub Release
+```mermaid
+flowchart TD
+    tag["vX.Y.Z tag"]
+    mactest["macOS workspace/per-crate/release-note tests"]
+    wintest["Windows workspace/per-crate/release-note tests"]
+    macx86["build macOS x86_64 binary"]
+    macarm["build macOS aarch64 binary"]
+    dmg["verify architectures and package two DMGs"]
+    msi["build Windows x64 binary and WiX MSI"]
+    download["download all artifacts on Ubuntu"]
+    require["require at least one DMG and MSI"]
+    sums["generate SHA256SUMS.txt and release notes"]
+    publish(["publish GitHub Release"])
+
+    tag --> mactest
+    mactest --> wintest
+    wintest --> macx86
+    macx86 --> macarm
+    macarm --> dmg
+    dmg --> msi
+    msi --> download
+    download --> require
+    require --> sums
+    sums --> publish
 ```
 
 Pre-release tags containing `-` are marked prerelease automatically.
@@ -359,18 +383,30 @@ cargo build --release -p sonicterm-mac
 `.github/workflows/ci.yml` 在 PR 以及推送到其 `on.push.branches` 所列分支（当前为
 `main` 与当前发布分支）时运行 macOS 14 / Windows latest matrix：
 
-```text
-checkout + stable Rust
-  -> Windows：缓存/安装 vcpkg Cairo
-  -> process-exit policy
-  -> cargo test --workspace --lib --bins
-  -> per-crate unit/build gate
-  -> release-note unit test
-  -> 冻结的 PTY feasibility evidence 校验
-  -> resource inventory 校验
-  -> 确定性 soak control gate
-  -> resource baseline evidence 收集器测试与采集
-  -> 仅 macOS：安装 cargo-llvm-cov 并执行 coverage gate
+```mermaid
+flowchart TD
+    checkout["checkout + stable Rust"]
+    cairo["Windows：缓存/安装 vcpkg Cairo"]
+    exitpolicy["process-exit policy"]
+    wstest["cargo test --workspace --lib --bins"]
+    percrate["per-crate unit/build gate"]
+    notes["release-note unit test"]
+    pty["冻结的 PTY feasibility evidence 校验"]
+    inventory["resource inventory 校验"]
+    soak["确定性 soak control gate"]
+    baseline["resource baseline evidence 收集器测试与采集"]
+    coverage(["仅 macOS：安装 cargo-llvm-cov 并执行 coverage gate"])
+
+    checkout --> cairo
+    cairo --> exitpolicy
+    exitpolicy --> wstest
+    wstest --> percrate
+    percrate --> notes
+    notes --> pty
+    pty --> inventory
+    inventory --> soak
+    soak --> baseline
+    baseline --> coverage
 ```
 
 当前仓库 revision 的 CI **不执行**文档要求的 `cargo fmt` 或 `cargo clippy`，`deny.toml` 也没有由
@@ -387,18 +423,30 @@ coverage job 当前只在 macOS 运行。Windows-only 确定性 logic 会在 Win
 
 push 匹配的 `v*` tag 会启动 `.github/workflows/release.yml`：
 
-```text
-vX.Y.Z tag
-  -> macOS workspace/per-crate/release-note 测试
-  -> Windows workspace/per-crate/release-note 测试
-  -> 构建 macOS x86_64 binary
-  -> 构建 macOS aarch64 binary
-  -> 校验架构并打包两个 DMG
-  -> 构建 Windows x64 binary 和 WiX MSI
-  -> Ubuntu 下载所有 artifact
-  -> 要求至少存在 DMG 和 MSI
-  -> 生成 SHA256SUMS.txt 与 release notes
-  -> 发布 GitHub Release
+```mermaid
+flowchart TD
+    tag["vX.Y.Z tag"]
+    mactest["macOS workspace/per-crate/release-note 测试"]
+    wintest["Windows workspace/per-crate/release-note 测试"]
+    macx86["构建 macOS x86_64 binary"]
+    macarm["构建 macOS aarch64 binary"]
+    dmg["校验架构并打包两个 DMG"]
+    msi["构建 Windows x64 binary 和 WiX MSI"]
+    download["Ubuntu 下载所有 artifact"]
+    require["要求至少存在 DMG 和 MSI"]
+    sums["生成 SHA256SUMS.txt 与 release notes"]
+    publish(["发布 GitHub Release"])
+
+    tag --> mactest
+    mactest --> wintest
+    wintest --> macx86
+    macx86 --> macarm
+    macarm --> dmg
+    dmg --> msi
+    msi --> download
+    download --> require
+    require --> sums
+    sums --> publish
 ```
 
 包含 `-` 的 prerelease tag 会自动标记为 prerelease。
