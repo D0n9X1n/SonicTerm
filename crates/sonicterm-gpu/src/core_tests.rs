@@ -165,13 +165,105 @@ fn does_not_flag_real_gpus() {
 }
 
 #[test]
-fn custom_tab_color_does_not_emit_unfocused_panel_marker() {
+fn unfocused_window_dims_the_active_panel_marker_rather_than_hiding_it() {
+    // The accent answers "which tab is active", which is true of the window
+    // whether or not it holds keyboard focus. Suppressing it on blur made an
+    // unfocused window say nothing about its own state. It now dims instead,
+    // so both facts stay readable at once.
     let mut tabs = sonicterm_render_model::boundary::ui::tabs::TabBar::new();
     tabs.push(sonicterm_render_model::boundary::ui::tabs::Tab::new("one"));
     tabs.push(sonicterm_render_model::boundary::ui::tabs::Tab::new("two"));
     tabs.set_active_custom_color("#fabd2f");
     tabs.activate(0);
     tabs.set_active_custom_color("#83a598");
+
+    let layout =
+        sonicterm_render_model::boundary::ui::tabbar_view::TabBarLayout::compute_with_height(
+            &tabs, 400.0, 40.0,
+        );
+
+    let emit = |alpha: f32| {
+        let mut quads = Vec::new();
+        emit_tab_bar_quads(
+            &mut quads,
+            &layout,
+            &TabBarQuadParams {
+                tab_count: tabs.tabs().len(),
+                accent: [1.0, 0.0, 0.0, 1.0],
+                separator: [0.5, 0.5, 0.5, 1.0],
+                border: [0.0, 0.0, 0.0, 1.0],
+                hover_tab_idx: u32::MAX,
+                surface: (400.0, 80.0),
+                active_panel_marker_alpha: alpha,
+            },
+        );
+        quads
+    };
+
+    let focused = emit(ACTIVE_PANEL_MARKER_ALPHA_FOCUSED);
+    let unfocused = emit(ACTIVE_PANEL_MARKER_ALPHA_UNFOCUSED);
+
+    // Asserting only that a quad exists would pass if the dimming were
+    // dropped, and asserting only the count would pass if the color were
+    // wrong. Both the presence and the difference have to hold.
+    assert_eq!(
+        unfocused.len(),
+        focused.len(),
+        "the unfocused bar must still be drawn, not omitted"
+    );
+
+    // Located by geometry, not by position in the list: the separator quad is
+    // pushed after the accent, so `.last()` returns the separator and would
+    // compare two identical greys that never change with focus — passing
+    // whatever the accent did.
+    let accent_rect = {
+        let t = layout.tabs.iter().find(|t| layout.active == Some(t.idx)).expect("an active tab");
+        let scale = (t.bg_rect.h
+            / (sonicterm_render_model::boundary::ui::tabbar_view::TAB_BAR_HEIGHT
+                - 2.0 * sonicterm_render_model::boundary::ui::tabbar_view::TAB_VERT_INSET))
+            .max(0.1);
+        let inset =
+            sonicterm_render_model::boundary::ui::tabbar_view::ACTIVE_TOP_ACCENT_INSET * scale;
+        px_to_ndc(
+            t.bg_rect.x + inset,
+            t.bg_rect.y + 1.0 * scale,
+            (t.bg_rect.w - inset * 2.0).max(0.0),
+            sonicterm_render_model::boundary::ui::tabbar_view::ACTIVE_TOP_ACCENT_H * scale,
+            400.0,
+            80.0,
+        )
+    };
+    let find_accent = |quads: &[QuadInstance]| {
+        *quads.iter().find(|q| q.rect == accent_rect).expect("an accent quad at the accent rect")
+    };
+
+    let focused_accent = find_accent(&focused);
+    let unfocused_accent = find_accent(&unfocused);
+    assert_ne!(
+        focused_accent.color, unfocused_accent.color,
+        "the unfocused bar must be visibly dimmer, not identical"
+    );
+
+    // Premultiplied blending: every channel scales together. Alpha alone
+    // would leave the bar brighter than its alpha claims.
+    for channel in 0..4 {
+        assert!(
+            unfocused_accent.color[channel] < focused_accent.color[channel],
+            "channel {channel} must dim: {} vs {}",
+            unfocused_accent.color[channel],
+            focused_accent.color[channel]
+        );
+    }
+}
+
+#[test]
+fn a_fully_transparent_marker_alpha_emits_no_accent_quad() {
+    // The alpha is not a visibility flag, but zero still has to mean absent
+    // rather than an invisible quad occupying a draw slot.
+    let mut tabs = sonicterm_render_model::boundary::ui::tabs::TabBar::new();
+    tabs.push(sonicterm_render_model::boundary::ui::tabs::Tab::new("one"));
+    tabs.push(sonicterm_render_model::boundary::ui::tabs::Tab::new("two"));
+    tabs.activate(0);
 
     let layout =
         sonicterm_render_model::boundary::ui::tabbar_view::TabBarLayout::compute_with_height(
@@ -188,7 +280,7 @@ fn custom_tab_color_does_not_emit_unfocused_panel_marker() {
             border: [0.0, 0.0, 0.0, 1.0],
             hover_tab_idx: u32::MAX,
             surface: (400.0, 80.0),
-            show_active_panel_marker: false,
+            active_panel_marker_alpha: 0.0,
         },
     );
 
@@ -219,7 +311,7 @@ fn custom_tab_color_emits_focused_panel_marker_once() {
             border: [0.0, 0.0, 0.0, 1.0],
             hover_tab_idx: u32::MAX,
             surface: (400.0, 80.0),
-            show_active_panel_marker: true,
+            active_panel_marker_alpha: ACTIVE_PANEL_MARKER_ALPHA_FOCUSED,
         },
     );
 
@@ -672,6 +764,65 @@ fn dirty_rows_damage_rect_closes_fractional_cell_seam() {
         "row 2 strip must reach row 3 top: {} vs {}",
         r2.y + r2.h as i32,
         r3.y
+    );
+}
+
+#[test]
+fn dirty_rows_damage_rect_closes_fractional_origin_seam_horizontally() {
+    // The horizontal twin of the vertical seam above. A pane whose left edge
+    // is not on a whole pixel — a split boundary, or padding at fractional
+    // DPI — has its damage rect floored leftward. If the width is derived
+    // from the cell count alone it does not get that fraction back, so the
+    // strip ends short of the true right edge and the last column is never
+    // repainted. A glyph that painted there survives after its cell is
+    // cleared, appearing as a stray mark on an otherwise empty row.
+    //
+    // origin_x = 24.6, cell_w = 10.4, cols = 80:
+    //   left        = floor(24.6)               = 24
+    //   true right  = 24.6 + 80*10.4 = 856.6
+    //   ceiled      = 857
+    //   width       = 857 - 24                  = 833
+    // Deriving width as ceil(80*10.4) = 832 gives right = 856, one pixel
+    // short of the 856.6 the pane actually covers.
+    let damage = dirty_rows_damage_rect(
+        [0usize],
+        sonicterm_render_model::geometry::PixelRect { x: 0, y: 0, w: 1200, h: 800 },
+        24.6,
+        0.0,
+        80,
+        10.4,
+        20.0,
+        1200,
+        800,
+    )
+    .expect("one dirty row yields damage");
+
+    assert_eq!(damage.x, 24, "left edge floored");
+    assert_eq!(
+        damage.x + damage.w as i32,
+        857,
+        "strip must reach the ceiled true right edge, not floor(origin) + ceil(cols * cell_w)"
+    );
+
+    // A whole-pixel origin must be unaffected, or the fix has moved the
+    // common case to buy the fractional one.
+    let aligned = dirty_rows_damage_rect(
+        [0usize],
+        sonicterm_render_model::geometry::PixelRect { x: 0, y: 0, w: 1200, h: 800 },
+        24.0,
+        0.0,
+        80,
+        10.4,
+        20.0,
+        1200,
+        800,
+    )
+    .expect("one dirty row yields damage");
+    assert_eq!(aligned.x, 24, "aligned left edge unchanged");
+    assert_eq!(
+        aligned.x + aligned.w as i32,
+        856,
+        "aligned origin still covers exactly ceil(24 + 80 * 10.4)"
     );
 }
 

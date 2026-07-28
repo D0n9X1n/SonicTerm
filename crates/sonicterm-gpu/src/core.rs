@@ -553,9 +553,19 @@ where
     let bounds = PixelRect { x: 0, y: 0, w: surface_w, h: surface_h };
     let pane_bounds = pane_rect.intersect(bounds)?;
     let mut damage = DamageRect::empty();
-    let row_w = (cols as f32 * cell_w).ceil().max(1.0) as u32;
+    // Span from the floored left edge to the CEILED right edge, for the same
+    // reason the row height below spans to the ceiled top of the next row.
+    // `x` floors, which moves the strip left by the fractional part of
+    // `origin_x`; a width taken from the cell count alone never gets that
+    // fraction back, so the strip ends short of where the pane actually
+    // reaches. A glyph that painted into that last column is then never
+    // repainted when its cell is cleared, and survives as a stray mark on an
+    // otherwise empty row.
+    let left = origin_x.floor() as i32;
+    let right = (origin_x + cols as f32 * cell_w).ceil() as i32;
+    let row_w = (right - left).max(1) as u32;
     for row in dirty_rows {
-        let x = origin_x.floor() as i32;
+        let x = left;
         // Span each dirty row from its floored top edge to the CEILED top edge
         // of the NEXT row. With a fractional `cell_h` (common at fractional
         // DPI), a fixed `ceil(cell_h)` height starting at `floor(top)` can fall
@@ -822,6 +832,17 @@ fn create_frame_texture(
     (texture, view)
 }
 
+/// Opacity of the active tab's accent bar while the window holds keyboard
+/// focus.
+pub const ACTIVE_PANEL_MARKER_ALPHA_FOCUSED: f32 = 1.0;
+
+/// Opacity of the active tab's accent bar while the window is unfocused.
+///
+/// Low enough to read as "not the focused window" at a glance, high enough
+/// that the active tab is still identifiable without focusing the window to
+/// ask.
+pub const ACTIVE_PANEL_MARKER_ALPHA_UNFOCUSED: f32 = 0.4;
+
 /// Style and sizing inputs for tab-bar quad emission.
 pub struct TabBarQuadParams {
     /// Number of tabs in the bar.
@@ -836,7 +857,14 @@ pub struct TabBarQuadParams {
     pub hover_tab_idx: u32,
     /// Surface dimensions in the same units as the layout rects.
     pub surface: (f32, f32),
-    pub show_active_panel_marker: bool,
+    /// Opacity of the active tab's accent bar, `0.0`–`1.0`.
+    ///
+    /// Not a visibility flag. The accent answers *which tab is active*, which
+    /// is true of the window whether or not it holds keyboard focus, so an
+    /// unfocused window dims it rather than dropping it — otherwise the
+    /// window stops saying anything about its own state and has to be
+    /// focused to find out.
+    pub active_panel_marker_alpha: f32,
 }
 
 /// Paint the tab-bar background and tab chrome quads into `quads`.
@@ -858,7 +886,8 @@ pub fn emit_tab_bar_quads(
     });
     for t in &layout.tabs {
         let is_active = layout.active == Some(t.idx);
-        if is_active && params.show_active_panel_marker {
+        let marker_alpha = params.active_panel_marker_alpha.clamp(0.0, 1.0);
+        if is_active && marker_alpha > 0.0 {
             let scale = (t.bg_rect.h / (TAB_BAR_HEIGHT - 2.0 * TAB_VERT_INSET)).max(0.1);
             let inset = ACTIVE_TOP_ACCENT_INSET * scale;
             let acc = sonicterm_render_model::boundary::ui::tabbar_view::Rect {
@@ -867,8 +896,18 @@ pub fn emit_tab_bar_quads(
                 w: (t.bg_rect.w - inset * 2.0).max(0.0),
                 h: ACTIVE_TOP_ACCENT_H * scale,
             };
-            let color =
+            let base =
                 t.custom_color.as_deref().map(|hex| hex_to_rgba(hex, 1.0)).unwrap_or(params.accent);
+            // Every channel scales, not just alpha: the pipeline blends
+            // premultiplied sources, so a color whose RGB is left at full
+            // strength while alpha drops is brighter than its alpha claims
+            // and the bar would not visibly dim.
+            let color = [
+                base[0] * marker_alpha,
+                base[1] * marker_alpha,
+                base[2] * marker_alpha,
+                base[3] * marker_alpha,
+            ];
             quads.push(QuadInstance {
                 rect: px_to_ndc(acc.x, acc.y, acc.w, acc.h, sw, sh),
                 color,
@@ -4982,7 +5021,11 @@ impl GpuRenderer {
                     border: bar_bg,
                     hover_tab_idx,
                     surface: (sw, sh),
-                    show_active_panel_marker: self.window_focused,
+                    active_panel_marker_alpha: if self.window_focused {
+                        ACTIVE_PANEL_MARKER_ALPHA_FOCUSED
+                    } else {
+                        ACTIVE_PANEL_MARKER_ALPHA_UNFOCUSED
+                    },
                 },
             );
             for t in &layout.tabs {
