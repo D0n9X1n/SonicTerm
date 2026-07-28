@@ -199,9 +199,41 @@ SonicTerm releases are created by pushing a `v*` tag. The tag workflow builds:
 ## Wiki
 
 The repository-tracked `wiki/` directory is the **only source of truth** for
-SonicTerm's bilingual user documentation. Edit and review wiki pages in the
-same branch and pull request as the behavior they describe. Do not clone,
-refresh from, publish to, or otherwise maintain a separate wiki repository.
+SonicTerm's documentation. Edit and review wiki pages in the same branch and
+pull request as the behavior they describe.
+
+The GitHub wiki is a **published mirror** of that directory. It is refreshed by
+hand, not by CI: publishing needs a credential that can push to the wiki remote,
+and storing one as an Actions secret would put a token with account-wide reach
+in reach of every workflow run. A manual publish keeps that credential out of
+the repository entirely.
+
+**Publish after a `wiki/` change merges to `main`, not before.** Publishing from
+a branch puts unreviewed documentation on the public wiki. Sequence:
+
+```bash
+git checkout main && git pull origin main
+tmp="$(mktemp -d)"
+git clone "https://github.com/D0n9X1n/SonicTerm.wiki.git" "$tmp/wiki"
+rm -f "$tmp/wiki"/*.md          # carry deletions; the wiki is flat
+cp wiki/*.md "$tmp/wiki"/
+git -C "$tmp/wiki" add --all
+git -C "$tmp/wiki" diff --cached --quiet || \
+  git -C "$tmp/wiki" commit -m "docs: publish wiki from $(git rev-parse --short HEAD)"
+git -C "$tmp/wiki" push origin HEAD:master
+```
+
+Three details that matter:
+
+- The wiki's default branch is **`master`**, not `main`. Pushing to `main`
+  creates a branch that renders nowhere.
+- Deleting the `.md` files before copying is what carries deletions. Copying
+  alone leaves a page live after it is removed from `wiki/`.
+- Verify the push landed by reading the wiki, not by trusting the exit code.
+
+Never edit the GitHub wiki directly. Edits made in its web UI are not tracked,
+are not reviewed, and are overwritten by the next publish. Do not maintain any
+other wiki repository, and do not add a CI workflow that publishes this one.
 
 ## WezTerm
 
