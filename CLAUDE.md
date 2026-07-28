@@ -140,6 +140,26 @@ publishes the expected macOS DMG(s), Windows MSI, and checksum assets.
 
 ## Conventions
 
+- **A change that alters documented behavior updates the wiki in the same PR.**
+  Config keys and defaults, log fields and levels, keybindings, CI gates,
+  rendering and pacing behavior, packaging steps, and crate roles are all
+  described on wiki pages, and a page that describes the old behavior is worse
+  than no page — a reader trusts it and is wrong. Update `CLAUDE.md` too when
+  the change touches something it states: the crate table, the local gate, or a
+  convention. Both language halves, in the same commit as the behavior.
+
+  This is not hypothetical drift. `Development-and-Release` asserted that CI ran
+  neither `cargo fmt` nor `cargo clippy` long after both had become jobs, so a
+  contributor reading it would have believed formatting was unchecked.
+
+- **The wiki describes what the project is and does, not what it might become.**
+  No roadmaps, phase plans, proposal lists, or sequencing documents. Those decay
+  into fiction the moment priorities move, and a reader cannot tell a stale plan
+  from a current one. Design intent belongs next to the mechanism it explains —
+  why the governor accounts rather than enforces, why the software path is
+  paced differently — not in a document about future work. Track intended work
+  in issues, where it has a state.
+
 - **Every issue and pull request carries labels and a milestone.** Set them
   when you open the item, not afterwards: an unlabelled issue with no
   milestone does not appear in the filtered views the work is tracked
