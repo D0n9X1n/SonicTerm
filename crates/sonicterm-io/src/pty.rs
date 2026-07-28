@@ -1336,7 +1336,7 @@ fn registered_pwsh() -> Option<String> {
             Some(&mut bytes),
         )
     };
-    if status != ERROR_SUCCESS || bytes < 2 || bytes > MAX_PATH_BYTES {
+    if status != ERROR_SUCCESS || !(2..=MAX_PATH_BYTES).contains(&bytes) {
         return None;
     }
 
