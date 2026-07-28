@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, v1.2.0]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -59,9 +59,16 @@ jobs:
         with:
           shared-key: unit-${{ matrix.os }}
 
+      - name: Check formatting
+        run: cargo fmt --all --check
+
       - name: Check process exit paths
         shell: bash
         run: bash scripts/check-no-raw-process-exit.sh
+
+      - name: Check window owner registration
+        shell: bash
+        run: bash scripts/check-window-owner-registration.sh
 
       - name: Run unit tests
         run: cargo test --workspace --lib --bins
@@ -70,9 +77,67 @@ jobs:
         shell: bash
         run: bash scripts/check-workspace-crates.sh
 
+      # `--nocapture` deliberately: this probe reports through stdout, and a
+      # passing test's stdout is swallowed. Its whole purpose is the printed
+      # verdict — whether this runner can create a window, and therefore
+      # whether the Windows software-path verification can be automated rather
+      # than needing a person at a keyboard.
+      - name: Report host window capability
+        run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture
+
+      # `--nocapture` again: this probe exists to report which adapters the
+      # runner offers and how the production predicate classifies them.
+      # Exercising `Auto` is usually assumed to need a real software
+      # rasterizer; this is what establishes whether the runner is one.
+      - name: Report host adapter classification
+        run: cargo test -p sonicterm-gpu --test ci_adapter_classification_probe -- --nocapture
+
+      # `--nocapture` for the same reason as the probe above: this test's
+      # verdict is its stdout. Without it, a run that compared eight cycles
+      # and a run that returned early having measured nothing both report
+      # `ok`, and the distinction is the whole point.
+      - name: Report renderer churn baseline
+        run: cargo test -p sonicterm-gpu --test renderer_churn_baseline -- --nocapture
+
       - name: Run release-note unit test
         shell: bash
         run: bash scripts/test-release-notes.sh
+
+      - name: Verify frozen PTY feasibility evidence
+        shell: bash
+        run: bash scripts/pty-backend-feasibility.sh --check
+
+      - name: Verify resource inventory
+        shell: bash
+        run: bash scripts/test-resource-inventory.sh
+
+      - name: Run deterministic soak control gate
+        shell: bash
+        run: bash scripts/test-soak-harness.sh
+
+      - name: Test resource baseline evidence collector
+        shell: bash
+        run: bash scripts/test-resource-baseline-evidence.sh
+
+      - name: Capture real resource baseline evidence
+        id: capture_resource_baseline
+        shell: bash
+        run: |
+          python_cmd=python3
+          if ! command -v "$python_cmd" >/dev/null 2>&1; then
+            python_cmd=python
+          fi
+          "$python_cmd" scripts/resource-baseline-evidence.py \
+            --runner-label "${{ matrix.os }}" \
+            --output-dir "target/v1.2.0-baseline/evidence-${{ matrix.os }}"
+
+      - name: Upload resource baseline evidence
+        if: ${{ !cancelled() && steps.capture_resource_baseline.conclusion != 'skipped' }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: resource-baseline-evidence-${{ matrix.os }}
+          path: target/v1.2.0-baseline/evidence-${{ matrix.os }}
+          if-no-files-found: error
 
       - name: Install cargo-llvm-cov
         if: runner.os == 'macOS'

@@ -30,24 +30,21 @@ impl Rasterizer for TileRasterizer {
 
 #[test]
 fn clear_uses_straight_alpha_background() {
-    let frame =
-        WindowsSoftwareFrame::new(2, 2, [1.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let frame = WindowsSoftwareFrame::new(2, 2, [1.0, 0.0, 0.0, 1.0]).expect("valid frame");
     assert_eq!(frame.pixel_bgra(0, 0), [0, 0, 255, 255]);
     assert_eq!(frame.pixel_bgra(1, 1), [0, 0, 255, 255]);
 }
 
 #[test]
 fn prepare_resizes_buffer_and_repaints_background() {
-    let mut frame =
-        WindowsSoftwareFrame::new(2, 2, [1.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = WindowsSoftwareFrame::new(2, 2, [1.0, 0.0, 0.0, 1.0]).expect("valid frame");
     frame.prepare(3, 1, [0.0, 1.0, 0.0, 1.0]).expect("valid resize");
     assert_eq!(frame.pixel_bgra(2, 0), [0, 255, 0, 255]);
 }
 
 #[test]
 fn prepare_repaints_existing_buffer() {
-    let mut frame =
-        WindowsSoftwareFrame::new(2, 1, [1.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = WindowsSoftwareFrame::new(2, 1, [1.0, 0.0, 0.0, 1.0]).expect("valid frame");
     frame.prepare(2, 1, [0.0, 1.0, 0.0, 1.0]).expect("valid resize");
     assert_eq!(frame.pixel_bgra(0, 0), [0, 255, 0, 255]);
     assert_eq!(frame.pixel_bgra(1, 0), [0, 255, 0, 255]);
@@ -74,8 +71,7 @@ fn software_frame_rejects_unsafe_size_without_mutating_existing_buffer() {
         "a 256 MiB BGRA frame exceeds the renderer budget"
     );
 
-    let mut frame =
-        WindowsSoftwareFrame::new(2, 2, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = WindowsSoftwareFrame::new(2, 2, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
     let before = frame.pixels.clone();
     assert!(frame.prepare(u32::MAX, u32::MAX, [1.0, 0.0, 0.0, 1.0]).is_err());
     assert_eq!((frame.width, frame.height), (2, 2));
@@ -84,18 +80,132 @@ fn software_frame_rejects_unsafe_size_without_mutating_existing_buffer() {
 
 #[test]
 fn software_frame_growth_uses_exact_validated_capacity() {
-    let mut frame =
-        WindowsSoftwareFrame::new(2, 2, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = WindowsSoftwareFrame::new(2, 2, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
 
     frame.prepare(100, 100, [0.0, 0.0, 0.0, 1.0]).expect("valid growth");
 
     assert_eq!(frame.pixels.capacity(), 100 * 100 * 4);
 }
 
+/// Decoded pixels and the destination surface are bounded against the same
+/// ceiling, so a decode cannot be admitted that the surface then cannot hold.
+///
+/// RI-NATIVE-SURFACE recorded these as "separate surface-size checks". They
+/// are separate, but they are not independent: `validated_surface_size`
+/// rejects any frame whose byte total crosses `MAX_SURFACE_BYTES`, and the
+/// same helper gates both `new` and `prepare`, so the destination can never
+/// be admitted above the bound whatever the decode asks for.
+#[test]
+fn v120_native_decode_and_surface_share_bounds() {
+    // A dimension inside MAX_SURFACE_DIMENSION whose byte total still crosses
+    // the surface byte ceiling: the two checks are not the same check. The
+    // ceiling itself is private to `core`, so this asserts the behaviour it
+    // produces rather than the constant.
+    let side = MAX_SURFACE_DIMENSION - 1;
+    assert!(
+        validated_surface_size(side, 1, MAX_SURFACE_DIMENSION).is_some(),
+        "the chosen side must pass the axis check on its own"
+    );
+    assert!(
+        validated_surface_size(side, side, MAX_SURFACE_DIMENSION).is_none(),
+        "a frame within the dimension limit must still be rejected on total bytes"
+    );
+    assert!(
+        WindowsSoftwareFrame::new(side, side, [0.0, 0.0, 0.0, 1.0]).is_err(),
+        "constructing an over-budget frame must fail rather than allocate"
+    );
+
+    // The same ceiling governs a resize, so a frame cannot grow past it after
+    // construction succeeded at a smaller size.
+    let mut frame = WindowsSoftwareFrame::new(64, 64, [0.0, 0.0, 0.0, 1.0]).expect("small frame");
+    let before = frame.retained_bytes();
+    assert!(
+        frame.prepare(side, side, [0.0, 0.0, 0.0, 1.0]).is_err(),
+        "resizing past the byte ceiling must fail"
+    );
+    assert_eq!(frame.retained_bytes(), before, "a rejected resize must not have allocated");
+}
+
+/// A glyph drawn at a fractional scale must not sample its neighbours.
+///
+/// `blit_glyph` takes a nearest sample only when source and destination match
+/// within 0.01px (`one_to_one`). Any other scale falls to bilinear, which
+/// reads a 2x2 texel neighbourhood — so a glyph whose atlas neighbour holds
+/// unrelated pixels blends them in at its edges.
+///
+/// This is the mechanism behind reported Powerline separators showing faint
+/// marks in their own colours, only after long use. Bleeding is invisible on
+/// a fresh atlas because the neighbours are empty; once eviction repacks real
+/// glyphs beside a separator, it becomes marks. A fractional cell height —
+/// line height 1.15 in the report — puts every glyph on this path.
+#[test]
+fn a_scaled_glyph_does_not_sample_its_atlas_neighbour() {
+    let mut atlas = GlyphAtlas::new(4, 4);
+    // Two tiles side by side: the subject is fully transparent, the
+    // neighbour fully opaque. Any non-zero output is the neighbour bleeding.
+    let subject = atlas
+        .get_or_insert(
+            GlyphKey::new('a', false, false),
+            &mut TileRasterizer(RasterTile {
+                width: 1,
+                height: 1,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 1.0,
+                coverage: vec![0],
+                is_color: false,
+                is_subpixel: false,
+            }),
+        )
+        .expect("subject inserts");
+    let _neighbour = atlas
+        .get_or_insert(
+            GlyphKey::new('b', false, false),
+            &mut TileRasterizer(RasterTile {
+                width: 1,
+                height: 1,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 1.0,
+                coverage: vec![255],
+                is_color: false,
+                is_subpixel: false,
+            }),
+        )
+        .expect("neighbour inserts");
+
+    // Draw the transparent subject into a 3x3 destination: a 1px source into
+    // 3px is emphatically not one_to_one, so this is the bilinear path.
+    let mut frame =
+        WindowsSoftwareFrame::new(3, 3, [0.0, 0.0, 0.0, 255.0 / 255.0]).expect("valid frame");
+    frame.draw_glyphs(
+        &atlas,
+        &[GlyphInstance {
+            rect: px_to_ndc(0.0, 0.0, 3.0, 3.0, 3.0, 3.0),
+            uv: subject.uv,
+            color: [1.0, 1.0, 1.0, 1.0],
+            flags: [0.0; 4],
+        }],
+    );
+
+    // The subject has zero coverage, so every destination pixel must remain
+    // the cleared background. Anything brighter came from the neighbour.
+    for y in 0..3 {
+        for x in 0..3 {
+            let px = frame.pixel_bgra(x, y);
+            assert_eq!(
+                px,
+                [0, 0, 0, 255],
+                "pixel ({x},{y}) = {px:?}: a fully transparent glyph scaled 1px -> 3px \
+                 picked up its atlas neighbour"
+            );
+        }
+    }
+}
+
 #[test]
 fn adjacent_sharp_rects_do_not_overlap_edges() {
-    let mut frame =
-        WindowsSoftwareFrame::new(1, 3, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = WindowsSoftwareFrame::new(1, 3, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
     frame.fill_rect(0.0, 0.0, 1.0, 1.0, [1.0, 1.0, 1.0, 0.5]);
     frame.fill_rect(0.0, 1.0, 1.0, 1.0, [1.0, 1.0, 1.0, 0.5]);
     assert_eq!(frame.pixel_bgra(0, 0), frame.pixel_bgra(0, 1));
@@ -104,14 +214,10 @@ fn adjacent_sharp_rects_do_not_overlap_edges() {
 
 #[test]
 fn premultiplied_quad_blends_over_background() {
-    let mut frame =
-        WindowsSoftwareFrame::new(1, 1, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = WindowsSoftwareFrame::new(1, 1, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
     frame.fill_rect(0.0, 0.0, 1.0, 1.0, [0.5, 0.0, 0.0, 0.5]);
     let px = frame.pixel_bgra(0, 0);
-    assert!(
-        (120..=135).contains(&px[2]),
-        "premultiplied red should stay half intensity: {px:?}"
-    );
+    assert!((120..=135).contains(&px[2]), "premultiplied red should stay half intensity: {px:?}");
     assert_eq!(px[0], 0);
     assert_eq!(px[1], 0);
     assert_eq!(px[3], 255);
@@ -119,21 +225,16 @@ fn premultiplied_quad_blends_over_background() {
 
 #[test]
 fn rounded_rect_antialiases_corner_pixels() {
-    let mut frame =
-        WindowsSoftwareFrame::new(8, 8, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = WindowsSoftwareFrame::new(8, 8, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
     frame.fill_rounded_rect(1.0, 1.0, 6.0, 6.0, [1.0, 1.0, 1.0, 1.0], 3.0);
     assert_eq!(frame.pixel_bgra(4, 4), [255, 255, 255, 255]);
     let corner = frame.pixel_bgra(1, 1);
-    assert!(
-        corner[0] < 255,
-        "corner should be partially or fully clipped by radius: {corner:?}"
-    );
+    assert!(corner[0] < 255, "corner should be partially or fully clipped by radius: {corner:?}");
 }
 
 #[test]
 fn line_quad_antialiases_near_segment() {
-    let mut frame =
-        WindowsSoftwareFrame::new(8, 8, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = WindowsSoftwareFrame::new(8, 8, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
     let q = QuadInstance::line(
         px_to_ndc(1.0, 1.0, 6.0, 6.0, 8.0, 8.0),
         [0.0, 1.0, 0.0, 1.0],
@@ -170,10 +271,7 @@ fn atlas_bilinear_sampling_smooths_between_coverage_pixels() {
 fn atlas_pixel_centers_sample_exact_texels() {
     let pixels = [0, 0, 0, 0, 0, 0, 0, 128, 0, 0, 0, 192, 0, 0, 0, 255];
     let sample = sample_atlas_bilinear(&pixels, 2, 2, 1.5, 1.5);
-    assert!(
-        (sample[3] - 1.0).abs() < 0.001,
-        "centered sample should hit exact texel: {sample:?}"
-    );
+    assert!((sample[3] - 1.0).abs() < 0.001, "centered sample should hit exact texel: {sample:?}");
 }
 
 #[test]
@@ -190,8 +288,7 @@ fn subpixel_text_coverage_blends_each_channel() {
         .expect("subpixel glyph inserts");
     assert!(info.is_subpixel);
 
-    let mut frame =
-        WindowsSoftwareFrame::new(1, 1, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = WindowsSoftwareFrame::new(1, 1, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
     frame.draw_glyphs(
         &atlas,
         &[GlyphInstance {
@@ -246,8 +343,7 @@ fn software_presenter_samples_replacement_after_in_place_atlas_reset() {
         .expect("replacement glyph inserts");
     assert_eq!(first.uv, second.uv);
 
-    let mut frame =
-        WindowsSoftwareFrame::new(1, 1, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = WindowsSoftwareFrame::new(1, 1, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
     frame.draw_glyphs(
         &atlas,
         &[GlyphInstance {
@@ -304,8 +400,7 @@ fn scaled_glyph_uses_nearest_without_bottom_fringe() {
             }),
         )
         .expect("block glyph inserts");
-    let mut frame =
-        WindowsSoftwareFrame::new(1, 3, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = WindowsSoftwareFrame::new(1, 3, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
 
     frame.draw_glyphs(
         &atlas,
@@ -340,8 +435,7 @@ fn scaled_color_glyph_uses_nearest_sampling() {
             }),
         )
         .expect("color glyph inserts");
-    let mut frame =
-        WindowsSoftwareFrame::new(1, 3, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = WindowsSoftwareFrame::new(1, 3, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
 
     frame.draw_glyphs(
         &atlas,
@@ -376,8 +470,7 @@ fn scaled_image_keeps_bilinear_sampling() {
             }),
         )
         .expect("image tile inserts");
-    let mut frame =
-        WindowsSoftwareFrame::new(1, 3, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = WindowsSoftwareFrame::new(1, 3, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
 
     frame.draw_glyphs(
         &atlas,
@@ -434,8 +527,7 @@ fn scaled_glyph_sampling_does_not_bleed_from_adjacent_atlas_tile() {
         )
         .expect("neighbor glyph inserts below the line tile");
 
-    let mut frame =
-        WindowsSoftwareFrame::new(4, 5, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+    let mut frame = WindowsSoftwareFrame::new(4, 5, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
     frame.draw_glyphs(
         &atlas,
         &[GlyphInstance {

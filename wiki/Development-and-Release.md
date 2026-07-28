@@ -11,7 +11,7 @@
 
 ```text
 Cargo.toml                 workspace members, shared version/dependencies/lints
-crates/                    22 first-party Rust crates
+crates/                    23 first-party Rust crates
 assets/                    fonts, themes, keymaps, icons, i18n, screenshots
 docs/                      canonical architecture/logging/modules/packaging docs
 wiki/                      canonical bilingual user documentation
@@ -93,7 +93,17 @@ bash scripts/check-no-raw-process-exit.sh
 bash scripts/check-workspace-crates.sh
 scripts/rust-logic-coverage.sh
 bash scripts/test-release-notes.sh
+bash scripts/pty-backend-feasibility.sh --check
+bash scripts/test-resource-inventory.sh
+bash scripts/test-soak-harness.sh
+bash scripts/test-resource-baseline-evidence.sh
 ```
+
+The first eight are the gate documented in the root `CLAUDE.md` and the
+architecture document; the last four are the resource-evidence and soak checks
+CI also runs. Note that `cargo test --workspace --lib --bins` excludes
+integration tests — the cross-crate suites, including the counting-allocator
+heap-truth tests, run under `scripts/rust-logic-coverage.sh`.
 
 Release preparation additionally builds the shipping platform binary, for
 example:
@@ -111,8 +121,9 @@ Rust logic.
 
 ## Pull-request CI
 
-`.github/workflows/ci.yml` runs on pull requests and pushes to `main` with a
-macOS 14 / Windows latest matrix:
+`.github/workflows/ci.yml` runs on pull requests and on pushes to the branches
+its `on.push.branches` list names — currently `main` and the active release
+branch — with a macOS 14 / Windows latest matrix:
 
 ```text
 checkout + stable Rust
@@ -121,6 +132,10 @@ checkout + stable Rust
   -> cargo test --workspace --lib --bins
   -> per-crate unit/build gate
   -> release-note unit test
+  -> frozen PTY feasibility evidence check
+  -> resource inventory verification
+  -> deterministic soak control gate
+  -> resource baseline evidence collector test + capture
   -> macOS only: install cargo-llvm-cov and enforce coverage
 ```
 
@@ -242,7 +257,7 @@ separate wiki repository.
 
 ```text
 Cargo.toml                 workspace member、共享版本/依赖/lint
-crates/                    22 个第一方 Rust crate
+crates/                    23 个第一方 Rust crate
 assets/                    字体、主题、keymap、icon、i18n、截图
 docs/                      规范架构/日志/module/打包文档
 wiki/                      规范双语用户文档
@@ -318,7 +333,15 @@ bash scripts/check-no-raw-process-exit.sh
 bash scripts/check-workspace-crates.sh
 scripts/rust-logic-coverage.sh
 bash scripts/test-release-notes.sh
+bash scripts/pty-backend-feasibility.sh --check
+bash scripts/test-resource-inventory.sh
+bash scripts/test-soak-harness.sh
+bash scripts/test-resource-baseline-evidence.sh
 ```
+
+前八条是根 `CLAUDE.md` 与架构文档记录的 gate；后四条是 CI 同样执行的资源证据与
+soak 检查。注意 `cargo test --workspace --lib --bins` 不包含集成测试——跨 crate
+套件（含计数分配器 heap-truth 测试）由 `scripts/rust-logic-coverage.sh` 执行。
 
 release prep 还要构建发布平台二进制，例如：
 
@@ -333,7 +356,8 @@ cargo build --release -p sonicterm-mac
 
 ## Pull-request CI
 
-`.github/workflows/ci.yml` 在 PR 和 `main` push 上运行 macOS 14 / Windows latest matrix：
+`.github/workflows/ci.yml` 在 PR 以及推送到其 `on.push.branches` 所列分支（当前为
+`main` 与当前发布分支）时运行 macOS 14 / Windows latest matrix：
 
 ```text
 checkout + stable Rust
@@ -342,6 +366,10 @@ checkout + stable Rust
   -> cargo test --workspace --lib --bins
   -> per-crate unit/build gate
   -> release-note unit test
+  -> 冻结的 PTY feasibility evidence 校验
+  -> resource inventory 校验
+  -> 确定性 soak control gate
+  -> resource baseline evidence 收集器测试与采集
   -> 仅 macOS：安装 cargo-llvm-cov 并执行 coverage gate
 ```
 

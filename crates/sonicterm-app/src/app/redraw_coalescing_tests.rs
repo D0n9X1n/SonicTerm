@@ -27,13 +27,7 @@ fn streaming_redraw_within_frame_defers() {
 fn input_driven_redraw_never_defers() {
     // Keystroke / resize / theme / IME must render immediately even
     // inside the vsync window — gating them adds perceptible latency.
-    assert!(!should_defer_streaming_redraw(
-        true,
-        false,
-        false,
-        Duration::from_millis(1),
-        FRAME
-    ));
+    assert!(!should_defer_streaming_redraw(true, false, false, Duration::from_millis(1), FRAME));
 }
 
 #[test]
@@ -47,13 +41,7 @@ fn pty_burst_within_frame_defers_like_other_streaming_redraws() {
 #[test]
 fn past_frame_boundary_never_defers() {
     // We're past this vsync window — render now, don't defer forever.
-    assert!(!should_defer_streaming_redraw(
-        false,
-        false,
-        false,
-        Duration::from_millis(20),
-        FRAME
-    ));
+    assert!(!should_defer_streaming_redraw(false, false, false, Duration::from_millis(20), FRAME));
     // Exactly at the boundary also renders (`<` is strict).
     assert!(!should_defer_streaming_redraw(false, false, false, FRAME, FRAME));
 }
@@ -67,13 +55,7 @@ fn input_with_concurrent_burst_coalesces() {
     // storm the renderer.
     assert!(should_defer_streaming_redraw(true, true, false, Duration::ZERO, FRAME));
     // ...but only within the frame window; past the boundary it renders.
-    assert!(!should_defer_streaming_redraw(
-        true,
-        true,
-        false,
-        Duration::from_millis(20),
-        FRAME
-    ));
+    assert!(!should_defer_streaming_redraw(true, true, false, Duration::from_millis(20), FRAME));
 }
 
 #[test]
@@ -85,13 +67,7 @@ fn software_render_defers_even_pure_input() {
     assert!(should_defer_streaming_redraw(true, false, true, Duration::from_millis(1), FRAME));
     // ...but still renders once past the boundary (bounded latency, not
     // dropped).
-    assert!(!should_defer_streaming_redraw(
-        true,
-        false,
-        true,
-        Duration::from_millis(40),
-        FRAME
-    ));
+    assert!(!should_defer_streaming_redraw(true, false, true, Duration::from_millis(40), FRAME));
 }
 
 #[test]
@@ -104,4 +80,3 @@ fn pty_redraw_flush_waits_for_burst_window() {
 fn pty_redraw_flushes_large_bursts_without_waiting() {
     assert!(should_flush_pending_pty_redraw(super::PTY_REDRAW_FLUSH_BYTES, Duration::ZERO,));
 }
-

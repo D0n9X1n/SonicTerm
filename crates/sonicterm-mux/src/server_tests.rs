@@ -124,6 +124,58 @@ fn subscriber_output_rechunks_to_the_documented_byte_ceiling() {
 }
 
 #[test]
+fn v120_queue_accounting_covers_messages_and_payload_bytes() {
+    // The inventory records "message count and frame ceiling" as tracked
+    // separately, with nothing accounting for their product. The product is in
+    // fact bounded, by a compile-time assert over the two constants plus a
+    // runtime path that respects both: output chunks to the frame size and
+    // stops one slot short of capacity.
+    //
+    // Measured at saturation: 4095 messages and 33,546,240 bytes, which is the
+    // asserted ceiling exactly. So what needs proving is not that a bound
+    // exists but that the runtime reaches it without exceeding it, and that
+    // the reserved slot survives the flood.
+    let (tx, rx) = crossbeam_channel::bounded(CHANNEL_CAP);
+    let sink = SubscriberSink::new(tx, rx.clone());
+
+    let payload = vec![0u8; SUBSCRIBER_OUTPUT_FRAME_BYTES * 64];
+    for _ in 0..200 {
+        sink.send_drop_oldest(ServerMsg::Output { pane_id: 1, bytes: payload.clone() })
+            .expect("saturating output drops rather than erroring");
+    }
+
+    let queued = rx.len();
+    assert_eq!(
+        queued,
+        CHANNEL_CAP - 1,
+        "output fills to one slot short of capacity, leaving room for control"
+    );
+
+    // A control message still lands while the queue is saturated with output.
+    // This is the property the reserved slot exists for: a lagging subscriber
+    // loses output, never the ability to be told it is lagging.
+    sink.send_control(ServerMsg::Error("lagging".into()))
+        .expect("control delivery survives an output flood");
+
+    let mut bytes = 0usize;
+    let mut messages = 0usize;
+    while let Ok(msg) = rx.try_recv() {
+        messages += 1;
+        if let ServerMsg::Output { bytes: b, .. } = msg {
+            assert!(
+                b.len() <= SUBSCRIBER_OUTPUT_FRAME_BYTES,
+                "every queued frame respects the per-frame ceiling"
+            );
+            bytes += b.len();
+        }
+    }
+
+    let ceiling = (CHANNEL_CAP - 1) * SUBSCRIBER_OUTPUT_FRAME_BYTES;
+    assert!(bytes <= ceiling, "queued payload {bytes} exceeded the composed ceiling {ceiling}");
+    assert_eq!(messages, CHANNEL_CAP, "the control message occupied the reserved slot");
+}
+
+#[test]
 fn subscriber_control_returns_error_when_mailbox_stays_full() {
     let (tx, rx) = bounded(1);
     let sink = SubscriberSink::new(tx, rx.clone());
@@ -211,6 +263,84 @@ fn blocked_writer_does_not_block_connection_cleanup() {
 }
 
 #[test]
+fn v120_blocked_worker_owner_orders_cancel_join_and_drop() {
+    // The inventory records reader and writer threads per connection with
+    // "bounded channels; no compositional owner", and asks that teardown
+    // cancel, unblock, join, then release the streams.
+    //
+    // The behaviour is already covered: a writer blocked mid-send does not
+    // stall cleanup. What was not asserted is the *ordering* — that
+    // cancellation reaches the writer before the join, rather than the join
+    // waiting on a writer nobody told to stop. Those look identical from the
+    // outside whenever the writer happens to finish on its own.
+    let mut requests = Vec::new();
+    for _ in 0..(CHANNEL_CAP + 4) {
+        crate::frame::write_frame(&mut requests, &ClientMsg::ListSessions).unwrap();
+    }
+    let (unused_started_tx, _unused_started_rx) = bounded(1);
+    let (_unused_release_tx, unused_release_rx) = bounded(1);
+    let read_half = BlockingWriteStream {
+        read: Cursor::new(requests),
+        block_first_write: false,
+        write_started: unused_started_tx,
+        release_write: unused_release_rx,
+        dropped: None,
+    };
+    let (write_started_tx, write_started_rx) = bounded(1);
+    let (release_write_tx, release_write_rx) = bounded(1);
+    let writer_dropped = Arc::new(AtomicBool::new(false));
+    let write_half = BlockingWriteStream {
+        read: Cursor::new(Vec::new()),
+        block_first_write: true,
+        write_started: write_started_tx,
+        release_write: release_write_rx,
+        dropped: Some(writer_dropped.clone()),
+    };
+
+    // Records that cancellation ran, so the join can be shown to follow it
+    // rather than substitute for it.
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancelled_for_shutdown = cancelled.clone();
+
+    let state = ServerState::new();
+    let (done_tx, done_rx) = bounded(1);
+    let shutdown_release = release_write_tx.clone();
+    let handler = std::thread::spawn(move || {
+        done_tx
+            .send(handle_connection_with_shutdown(state, read_half, write_half, move || {
+                cancelled_for_shutdown.store(true, Ordering::Release);
+                let _ = shutdown_release.try_send(());
+            }))
+            .unwrap();
+    });
+
+    write_started_rx.recv_timeout(Duration::from_secs(1)).expect("writer blocked mid-send");
+    assert!(
+        !cancelled.load(Ordering::Acquire),
+        "cancellation must not have run yet — the writer is still blocked"
+    );
+
+    let completed = done_rx.recv_timeout(Duration::from_secs(2));
+    if let Err(error) = &completed {
+        let _ = release_write_tx.try_send(());
+        handler.join().expect("handler cleanup");
+        panic!("teardown did not interrupt a blocked writer: {error}");
+    }
+    let final_result = completed.expect("checked above");
+    handler.join().expect("handler thread");
+
+    // Ordering: cancellation ran, and only then did the writer end and its
+    // stream get released. A join that completed without cancellation would
+    // mean the teardown got lucky rather than being correct.
+    assert!(cancelled.load(Ordering::Acquire), "teardown must cancel the blocked writer");
+    assert!(
+        writer_dropped.load(Ordering::Acquire),
+        "the writer stream is released after the join, not leaked"
+    );
+    assert!(final_result.is_err(), "a full control mailbox ends the connection");
+}
+
+#[test]
 fn pane_exit_releases_subscriber_when_control_mailbox_stays_full() {
     let (tx, rx) = bounded(1);
     let sink = SubscriberSink::new(tx, rx.clone());
@@ -280,10 +410,7 @@ fn exited_shell_with_background_descendant_is_reaped() {
     let state = ServerState::new();
     let (_session_id, pane_id) = state.spawn("/bin/sh", 80, 24).expect("spawn shell");
     state
-        .input(
-            pane_id,
-            b"trap '' HUP\n(while :; do printf x; sleep 0.01; done) &\nexit\n".to_vec(),
-        )
+        .input(pane_id, b"trap '' HUP\n(while :; do printf x; sleep 0.01; done) &\nexit\n".to_vec())
         .expect("launch background descendant");
 
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -345,8 +472,9 @@ fn paused_spawn_queues_spawned_before_exit_and_reap() {
 /// Real PTY integration (unix): spawn a shell through the sonicterm-io seam,
 /// attach a subscriber, feed a command on stdin, and assert the marker bytes
 /// travel PTY -> reader thread -> replay/subscriber. This is the end-to-end
-/// guard for the #810 refactor (build_pane via PtyHandle, out_rx drain,
-/// in_tx write path). Unix-only: it depends on `/bin/sh` and printf.
+/// guard for the PTY-seam refactor: `build_pane` via `PtyHandle`, the `out_rx`
+/// drain, and the `in_tx` write path. Unix-only: it depends on `/bin/sh` and
+/// printf.
 #[cfg(unix)]
 #[test]
 fn shell_output_flows_through_pty_seam_to_subscriber() {
@@ -364,9 +492,7 @@ fn shell_output_flows_through_pty_seam_to_subscriber() {
     assert_eq!(panes[0].id, pane_id);
 
     // Drive the shell to emit the marker on its own line, then exit.
-    state
-        .input(pane_id, format!("printf '{MARKER}\\n'\n").into_bytes())
-        .expect("input write");
+    state.input(pane_id, format!("printf '{MARKER}\\n'\n").into_bytes()).expect("input write");
 
     // Poll the subscriber mailbox until the marker shows up (bounded wait so
     // the test can never hang CI). Output arrives as ServerMsg::Output chunks.

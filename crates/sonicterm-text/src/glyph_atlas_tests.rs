@@ -70,9 +70,7 @@ fn subpixel_text_coverage_copies_bgra_channels() {
 fn reset_in_place_retains_pixels_and_restarts_atlas_state() {
     let mut atlas = GlyphAtlas::new(2, 1);
     let old = GlyphKey::new('a', false, false);
-    let old_info = atlas
-        .get_or_insert(old, &mut OnePixelRasterizer)
-        .expect("old tile inserts");
+    let old_info = atlas.get_or_insert(old, &mut OnePixelRasterizer).expect("old tile inserts");
     atlas.tick_frame();
     atlas.set_eviction_enabled(false);
     let pixels_ptr = atlas.pixels().as_ptr();
@@ -120,10 +118,8 @@ fn non_evicting_insert_preserves_resident_tiles_when_full() {
     atlas.get_or_insert(first, &mut rasterizer).expect("first tile fills atlas");
     let epoch = atlas.evictions();
 
-    let second = atlas.get_or_insert_without_eviction(
-        GlyphKey::new('b', false, false),
-        &mut rasterizer,
-    );
+    let second =
+        atlas.get_or_insert_without_eviction(GlyphKey::new('b', false, false), &mut rasterizer);
 
     assert!(second.is_none(), "a non-evicting insert must report a full atlas");
     assert_eq!(atlas.evictions(), epoch, "the resident tile must not be recycled");
@@ -139,11 +135,8 @@ fn lazy_non_evicting_insert_does_not_build_tile_when_full() {
         .expect("first tile fills atlas");
     let mut build_calls = 0;
 
-    let second = atlas.get_or_insert_lazy_without_eviction(
-        GlyphKey::new('b', false, false),
-        1,
-        1,
-        || {
+    let second =
+        atlas.get_or_insert_lazy_without_eviction(GlyphKey::new('b', false, false), 1, 1, || {
             build_calls += 1;
             RasterTile {
                 width: 1,
@@ -155,8 +148,7 @@ fn lazy_non_evicting_insert_does_not_build_tile_when_full() {
                 is_color: false,
                 is_subpixel: false,
             }
-        },
-    );
+        });
 
     assert!(second.is_none());
     assert_eq!(build_calls, 0, "a rejected insertion must not materialize pixel coverage");
@@ -180,38 +172,34 @@ fn failed_lazy_build_restores_full_reclaimed_slot() {
         .expect("first tile fills atlas");
     atlas.evict_lru_quartile();
 
-    let invalid = atlas.get_or_insert_lazy_without_eviction(
-        GlyphKey::new('b', false, false),
-        1,
-        1,
-        || RasterTile {
-            width: 2,
-            height: 1,
-            offset_x: 0,
-            offset_y: 0,
-            advance: 1.0,
-            coverage: vec![255; 2],
-            is_color: false,
-            is_subpixel: false,
-        },
-    );
+    let invalid =
+        atlas.get_or_insert_lazy_without_eviction(GlyphKey::new('b', false, false), 1, 1, || {
+            RasterTile {
+                width: 2,
+                height: 1,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 1.0,
+                coverage: vec![255; 2],
+                is_color: false,
+                is_subpixel: false,
+            }
+        });
     assert!(invalid.is_none(), "mismatched lazy tile must be rejected");
 
-    let replacement = atlas.get_or_insert_lazy_without_eviction(
-        GlyphKey::new('c', false, false),
-        2,
-        2,
-        || RasterTile {
-            width: 2,
-            height: 2,
-            offset_x: 0,
-            offset_y: 0,
-            advance: 2.0,
-            coverage: vec![255; 4],
-            is_color: false,
-            is_subpixel: false,
-        },
-    );
+    let replacement =
+        atlas.get_or_insert_lazy_without_eviction(GlyphKey::new('c', false, false), 2, 2, || {
+            RasterTile {
+                width: 2,
+                height: 2,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 2.0,
+                coverage: vec![255; 4],
+                is_color: false,
+                is_subpixel: false,
+            }
+        });
     assert!(replacement.is_some(), "rollback must restore the complete 2x2 reclaimed slot");
 }
 
@@ -248,11 +236,8 @@ fn lazy_insert_metadata_stays_bounded() {
     let mut atlas = GlyphAtlas::default_size();
     for codepoint in 0..(MAX_ATLAS_ENTRIES as u32 + 100) {
         let ch = char::from_u32(0xF0000 + codepoint).expect("private-use codepoint");
-        atlas.get_or_insert_lazy_without_eviction(
-            GlyphKey::new(ch, false, false),
-            1,
-            1,
-            || RasterTile {
+        atlas.get_or_insert_lazy_without_eviction(GlyphKey::new(ch, false, false), 1, 1, || {
+            RasterTile {
                 width: 1,
                 height: 1,
                 offset_x: 0,
@@ -261,9 +246,138 @@ fn lazy_insert_metadata_stays_bounded() {
                 coverage: vec![255],
                 is_color: false,
                 is_subpixel: false,
-            },
-        );
+            }
+        });
     }
 
     assert!(atlas.len() <= MAX_ATLAS_ENTRIES);
+}
+
+#[test]
+fn v120_stale_atlas_identity_invalidates_all_dependents_888() {
+    // A dependent cache stores atlas coordinates and must discard them
+    // whenever those coordinates could have stopped meaning what they meant.
+    // Two things do that: eviction, which recycles a rect to a different
+    // glyph, and reset, which replaces the contents wholesale.
+    //
+    // The eviction counter cannot serve as that identity. `reset_in_place`
+    // returns it to zero, so a cache holding a pre-reset value is invalidated
+    // correctly at first and then matches again once the counter climbs back
+    // past it — pointing into an atlas that was entirely replaced. Measured
+    // before this fix: 8 -> 0 -> 11, and an entry holding 8 revived.
+    let mut atlas = GlyphAtlas::new(32, 32);
+    let mut raster = TileRasterizer(RasterTile {
+        width: 16,
+        height: 16,
+        offset_x: 0,
+        offset_y: 0,
+        advance: 16.0,
+        coverage: vec![255; 16 * 16],
+        is_color: false,
+        is_subpixel: false,
+    });
+    let key = |n: u32| GlyphKey {
+        ch: char::from_u32(n).unwrap_or('a'),
+        font_slot: 0,
+        weight_bold: false,
+        italic: false,
+        glyph_id: n,
+    };
+
+    let fresh = atlas.identity();
+
+    // Eviction changes identity, because a freed rect is handed to a new glyph.
+    for n in 33..45u32 {
+        atlas.get_or_insert(key(n), &mut raster);
+    }
+    assert!(atlas.evictions() > 0, "the run must evict for this to assert anything");
+    let after_eviction = atlas.identity();
+    assert_ne!(after_eviction, fresh, "eviction must change the atlas identity");
+
+    // Reset changes it again rather than returning to a prior value.
+    atlas.reset_in_place();
+    let after_reset = atlas.identity();
+    assert_ne!(after_reset, after_eviction, "reset must change the identity");
+    assert_ne!(after_reset, fresh, "reset must not return to the identity of a fresh atlas");
+
+    // Refilling past the earlier eviction count must never reproduce an
+    // identity a dependent could still be holding.
+    for n in 60..80u32 {
+        atlas.get_or_insert(key(n), &mut raster);
+    }
+    let after_refill = atlas.identity();
+    assert_ne!(after_refill, fresh);
+    assert_ne!(after_refill, after_eviction, "a stale entry must not revive");
+    assert!(
+        after_refill > after_eviction,
+        "identity advances monotonically: {after_eviction} -> {after_refill}"
+    );
+
+    // The eviction counter alone does revisit values, which is why it is not
+    // the identity. Asserting this keeps the two from being conflated again.
+    assert!(
+        atlas.evictions() < after_refill,
+        "the eviction counter resets and so cannot serve as a cache generation"
+    );
+}
+
+#[test]
+fn retained_amount_reports_pixels_and_resident_entries() {
+    // A governor charges the atlas for what it actually holds. Bytes are the
+    // pixel buffer, which is allocated up front at full size rather than
+    // growing with use; items are resident entries, which is what eviction
+    // acts on.
+    let mut atlas = GlyphAtlas::new(64, 64);
+    let empty = atlas.retained_amount();
+    assert_eq!(empty.bytes, 64 * 64 * 4, "the pixel buffer is allocated up front");
+    assert_eq!(empty.items, 0, "a fresh atlas holds no entries");
+
+    let mut raster = OnePixelRasterizer;
+    let key = |n: u32| GlyphKey {
+        ch: char::from_u32(n).unwrap_or('a'),
+        font_slot: 0,
+        weight_bold: false,
+        italic: false,
+        glyph_id: n,
+    };
+    for n in 33..43u32 {
+        atlas.get_or_insert(key(n), &mut raster);
+    }
+
+    let filled = atlas.retained_amount();
+    assert_eq!(filled.bytes, empty.bytes, "inserting glyphs does not grow the buffer");
+    assert_eq!(filled.items, 10, "resident entries are counted");
+    assert_eq!(filled.items, atlas.len(), "the item count matches the entry count");
+}
+
+#[test]
+fn retained_amount_falls_when_eviction_reclaims_entries() {
+    // Eviction has to be visible in the reported figure, or a governor would
+    // hold a charge for entries the atlas has already dropped.
+    let mut atlas = GlyphAtlas::new(32, 32);
+    let mut raster = TileRasterizer(RasterTile {
+        width: 16,
+        height: 16,
+        offset_x: 0,
+        offset_y: 0,
+        advance: 16.0,
+        coverage: vec![255; 16 * 16],
+        is_color: false,
+        is_subpixel: false,
+    });
+    let key = |n: u32| GlyphKey {
+        ch: char::from_u32(n).unwrap_or('a'),
+        font_slot: 0,
+        weight_bold: false,
+        italic: false,
+        glyph_id: n,
+    };
+
+    for n in 33..40u32 {
+        atlas.get_or_insert(key(n), &mut raster);
+    }
+    let peak = atlas.retained_amount();
+    assert!(atlas.evictions() > 0, "the run must actually evict for this to mean anything");
+    assert!(peak.items <= 4, "a 32x32 atlas holds at most four 16x16 tiles");
+    assert_eq!(peak.items, atlas.len());
 }

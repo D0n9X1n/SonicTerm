@@ -1,6 +1,6 @@
 //! GPU renderer for the terminal grid using wgpu 29.
 //!
-//! T13+T14 (wezterm-takeover G3): the legacy `the legacy chrome layer` chrome path is
+//! The legacy `glyphon` chrome path is
 //! gone. Every chrome string (tab titles, palette, search, IME,
 //! broadcast, drag chip, quick-select hints) flows through
 //! [`crate::chrome_text::layout`] → the shared `GlyphAtlas` →
@@ -18,6 +18,7 @@ use sonicterm_render_model::boundary::cfg::theme::{Color as ThemeColor, Theme};
 use sonicterm_render_model::boundary::grid::grid::{
     bounded_grid_size, Cell, CellFlags, Color, Grid, UnderlineStyle,
 };
+use sonicterm_types::{ResourceAmount, ResourceClass};
 use wgpu::{
     CommandEncoderDescriptor, CompositeAlphaMode, DeviceDescriptor, Instance, InstanceDescriptor,
     LoadOp, Operations, PresentMode, RenderPassColorAttachment, RenderPassDescriptor,
@@ -90,7 +91,7 @@ pub struct SurfaceAppearance {
     /// Scrollbar visibility policy. `Auto` and `Always` both
     /// draw the bar when the pane has scrollback beyond the viewport;
     /// `Never` suppresses it. Hover-driven auto-hide for `Auto` is
-    /// deferred to PR-D — until then `Auto` behaves like Always-when-
+    /// not implemented — `Auto` behaves like Always-when-
     /// scrollable.
     pub scrollbar: sonicterm_render_model::boundary::cfg::config::ScrollbarMode,
     /// Padding between overlay panel chrome and inner content.
@@ -182,7 +183,13 @@ fn preedit_caret_advance(preedit: &str, caret_byte: usize, font_size: f32) -> f3
 /// * be exactly one line tall.
 ///
 /// Pure so the geometry is unit-testable without a GPU context.
-fn preedit_bg_rect(start_x: f32, top_y: f32, pre_w: f32, pad: f32, line_h: f32) -> (f32, f32, f32, f32) {
+fn preedit_bg_rect(
+    start_x: f32,
+    top_y: f32,
+    pre_w: f32,
+    pad: f32,
+    line_h: f32,
+) -> (f32, f32, f32, f32) {
     (start_x, top_y, pre_w + pad, line_h)
 }
 
@@ -297,9 +304,9 @@ fn splitter_color_from_theme(theme: &Theme) -> [f32; 4] {
 }
 
 /// Resolve a scrollbar tint from the theme foreground at `derived_alpha`.
-/// Theme-customizable explicit scrollbar colors are intentionally deferred
-/// to a later PR (would require updating ~50 `Palette { .. }` literals in
-/// tests for no shipped benefit yet). Returns straight-alpha linear RGBA;
+/// Theme-customizable explicit scrollbar colors are intentionally not
+/// supported: they would require updating ~50 `Palette { .. }` literals in
+/// tests for no shipped benefit. Returns straight-alpha linear RGBA;
 /// the caller premultiplies before stuffing into a [`QuadInstance`].
 fn scrollbar_tint(fg: &str, derived_alpha: f32) -> [f32; 4] {
     hex_to_rgba(fg, derived_alpha)
@@ -356,8 +363,8 @@ fn software_render_degrade_from(mode: SoftwareRenderMode, detected: bool) -> boo
 }
 
 /// Emit a pane's scrollbar (track + thumb) into `quads_overlay` using the
-/// PR-A geometry model. No-op when the pane has nothing to scroll, the
-/// mode is `Never`, or `alpha` is at or below the emit floor (PR-D).
+/// shared geometry model. No-op when the pane has nothing to scroll, the
+/// mode is `Never`, or `alpha` is at or below the emit floor.
 /// Returns the number of quads emitted (for tests).
 ///
 /// `alpha` in `[0.0, 1.0]` scales both track + thumb tint alphas; the
@@ -378,7 +385,7 @@ pub fn emit_pane_scrollbar(
     alpha: f32,
     scale: f32,
 ) -> usize {
-    // PR-D: hidden / nearly-hidden early-out. Mirrors
+    // hidden / nearly-hidden early-out. Mirrors
     // `scrollbar_visibility::ALPHA_EMIT_FLOOR`.
     if alpha <= 0.01 {
         return 0;
@@ -387,8 +394,12 @@ pub fn emit_pane_scrollbar(
     // Bar width in raster px. Authored at 8 logical px; scale with DPI so the
     // bar keeps a constant physical size across displays, min 1px.
     let scrollbar_width_px: f32 = (8.0 * scale).max(1.0);
-    let geom_rect =
-        sonicterm_render_model::boundary::ui::scrollbar::Rect::new(pane_rect.x, pane_rect.y, pane_rect.w, pane_rect.h);
+    let geom_rect = sonicterm_render_model::boundary::ui::scrollbar::Rect::new(
+        pane_rect.x,
+        pane_rect.y,
+        pane_rect.w,
+        pane_rect.h,
+    );
     let Some(geom) = sonicterm_render_model::boundary::ui::scrollbar::compute(
         viewport_rows,
         total_rows,
@@ -479,24 +490,6 @@ use crate::{
     wezterm_pipeline::WeztermPipeline,
 };
 use sonicterm_render_model::boundary::cfg::config::CursorShape;
-use sonicterm_render_model::geometry::{DamageRect, PixelRect};
-use sonicterm_text::GlyphInstance;
-use sonicterm_text::{
-    glyph_atlas::GlyphAtlas,
-    // T9 (wezterm-takeover G2/C): `shape_run` + `ShapeCache` deleted in
-    // T8 (the cosmic-text adapter is gone). `flush_shape_run` now drives
-    // `shape_run_with_wezterm` directly; `ShapedGlyph::from_wezterm`
-    // narrows wezterm's `GlyphInfo` into the renderer-facing record.
-    // The legacy ASCII fast-path gate (`run_is_ascii_fast`) still
-    // applies — it's purely cell-shape based and not tied to shaper
-    // choice.
-    //
-    // T13/T14 (wezterm-takeover G3): `swash_rasterizer` is no longer
-    // imported here — every chrome site and the grid path both route
-    // through `sonicterm_engine::FontStack`. T10 deletes the
-    // file outright.
-    shape::{run_is_ascii_fast, RunStyle},
-};
 use sonicterm_render_model::boundary::ui::{
     command_palette::CommandPalette,
     copy_mode::{CopyModeState, QuickSelectState},
@@ -517,6 +510,24 @@ use sonicterm_render_model::boundary::ui::{
         TAB_GAP, TAB_VERT_INSET,
     },
     tabs::TabBar,
+};
+use sonicterm_render_model::geometry::{DamageRect, PixelRect};
+use sonicterm_text::GlyphInstance;
+use sonicterm_text::{
+    glyph_atlas::GlyphAtlas,
+    // `shape_run` + `ShapeCache` deleted in
+    // T8 (the cosmic-text adapter is gone). `flush_shape_run` now drives
+    // `shape_run_with_wezterm` directly; `ShapedGlyph::from_wezterm`
+    // narrows wezterm's `GlyphInfo` into the renderer-facing record.
+    // The legacy ASCII fast-path gate (`run_is_ascii_fast`) still
+    // applies — it's purely cell-shape based and not tied to shaper
+    // choice.
+    //
+    // `swash_rasterizer` is no longer
+    // imported here — every chrome site and the grid path both route
+    // through `sonicterm_engine::FontStack`. T10 deletes the
+    // file outright.
+    shape::{run_is_ascii_fast, RunStyle},
 };
 
 #[must_use]
@@ -701,6 +712,52 @@ fn desired_gpu_atlas_dimensions(software_presenter: bool, atlas: &GlyphAtlas) ->
 fn image_atlas_promotion_required(atlas: &GlyphAtlas, has_inline_media: bool) -> bool {
     has_inline_media
         && (atlas.width(), atlas.height()) == (PLACEHOLDER_ATLAS_DIM, PLACEHOLDER_ATLAS_DIM)
+}
+
+/// Frames a window must draw with no renderable inline media before its image
+/// atlas is released.
+///
+/// At 60fps this is about four seconds. Long enough that scrolling an image
+/// out of view and back does not free and reallocate 16 MiB — which would also
+/// force every visible image to re-decode — and short enough that a window
+/// that has genuinely finished with images does not hold the allocation for
+/// the rest of its life.
+const IMAGE_ATLAS_IDLE_FRAMES: u32 = 240;
+
+/// Whether an idle window should release its full-size image atlas.
+///
+/// Promotion is otherwise one-way: `reset_in_place` clears the map and
+/// repacker but never touches the pixel buffer or the dimensions, so a window
+/// that displays one inline image keeps the allocation until it closes.
+#[must_use]
+fn image_atlas_demotion_ready(
+    atlas: &GlyphAtlas,
+    has_inline_media: bool,
+    frames_without_inline_media: u32,
+) -> bool {
+    !has_inline_media
+        && (atlas.width(), atlas.height()) != (PLACEHOLDER_ATLAS_DIM, PLACEHOLDER_ATLAS_DIM)
+        && frames_without_inline_media >= IMAGE_ATLAS_IDLE_FRAMES
+}
+
+/// Whether clearing the image atlas would actually do anything.
+///
+/// The frame-assembly caller resets whenever inline media "changed", but that
+/// signal is `true` on any frame whose predecessor's key was absent — which is
+/// every frame following the many state changes that clear it. On a window
+/// that has never shown an image the media hash cannot change, so the absent
+/// key accounts for every reset, once per rendered frame.
+///
+/// An untouched placeholder atlas holds no entries and no packing state, so
+/// resetting it changes nothing while still rebuilding the packer and bumping
+/// the atlas identity — which invalidates every cache keyed to it. A promoted
+/// atlas carries that state even while its entry map is momentarily empty and
+/// must still be reset, or the packer would keep handing out coordinates from
+/// a layout the caller believes it discarded.
+#[must_use]
+fn image_atlas_reset_warranted(atlas: &GlyphAtlas) -> bool {
+    !atlas.is_empty()
+        || (atlas.width(), atlas.height()) != (PLACEHOLDER_ATLAS_DIM, PLACEHOLDER_ATLAS_DIM)
 }
 
 fn full_surface_rect(width: u32, height: u32) -> PixelRect {
@@ -897,6 +954,14 @@ pub struct GpuRenderer {
     image_atlas: GlyphAtlas,
     image_upload: AtlasUpload,
     retained_inline_media_bytes: usize,
+    /// Consecutive frames this window has drawn with no renderable inline
+    /// media. Promotion of the image atlas is one-way without this: a window
+    /// that shows a single image holds the full-size allocation for its whole
+    /// life, even after the image scrolls into history. Demoting on the first
+    /// idle frame would instead free and reallocate 16 MiB every time an image
+    /// scrolled off and back, and re-decode it each time, so the count gates
+    /// demotion behind a sustained absence.
+    frames_without_inline_media: u32,
     /// True after an eviction-triggered compaction. The rebuilt atlas has
     /// eviction disabled until one frame presents successfully, bounding
     /// retries when the visible glyph working set exceeds atlas capacity.
@@ -931,7 +996,7 @@ pub struct GpuRenderer {
     padding_bottom: f32,
     bg: wgpu::Color,
     bg_opacity: f32,
-    /// Scrollbar visibility policy from config (PR-B). Read on
+    /// Scrollbar visibility policy from config. Read on
     /// every frame in the per-pane scrollbar emit loop.
     scrollbar_mode: sonicterm_render_model::boundary::cfg::config::ScrollbarMode,
     /// Padding between overlay panel chrome and inner content.
@@ -995,7 +1060,7 @@ pub struct GpuRenderer {
     search_highlight: [f32; 4],
     search_fg: ChromeColor,
     search_bg: [f32; 4],
-    // T13/T14 (wezterm-takeover G3): the 11 `*_buffer: legacy chrome buffer`
+    // The 11 `*_buffer: legacy chrome buffer`
     // fields that lived here (search, quick_select, palette_{query,rows,
     // footer}, ime, broadcast,
     // drag_chip) are gone. Every chrome string is now shaped on demand
@@ -1003,7 +1068,7 @@ pub struct GpuRenderer {
     // glyph instances feed either `glyph_instances` (pre-overlay
     // chrome — tab titles, search status bar) or
     // `overlay_glyph_instances` (modal chrome — palette,
-    // IME preedit, drag-chip title). No per-renderer the legacy chrome layer buffer
+    // IME preedit, drag-chip title). No per-renderer glyphon buffer
     // state survives.
     /// Cached drag-chip rect from the last `render()` call (in logical
     /// pixels). `None` when no chip was drawn. Test-only diagnostic
@@ -1040,7 +1105,7 @@ pub struct GpuRenderer {
     /// surfaced through [`Self::last_missing_tofu`]; production code
     /// must not depend on it.
     last_missing_chars: Vec<char>,
-    // T9 (wezterm-takeover G2/C): the per-style-run `ShapeCache` was
+    // The per-style-run `ShapeCache` was
     // deleted with the cosmic-text path in T8 (`shape.rs` is now a
     // thin sonicterm-font adapter). Per-row caching survives at the
     // higher-level `row_glyph_cache` layer below — that's the cache
@@ -1048,7 +1113,7 @@ pub struct GpuRenderer {
     // shell. Re-shaping a style run via sonicterm-font on a row-cache
     // miss is cheap relative to the bitmap rasterize + atlas insert
     // it precedes.
-    /// T9 (wezterm-takeover G2/C): sonicterm-font driven shaper. Owns
+    /// Sonicterm-font driven shaper. Owns
     /// the cell metrics (`cell_metrics_raster_px()`), the resolved
     /// font fallback chain, and the `blocking_shape` entry point that
     /// `flush_shape_run` calls through `shape_run_with_wezterm`. The
@@ -1064,7 +1129,7 @@ pub struct GpuRenderer {
     /// skips the entire `flush_shape_run` walk.
     row_glyph_cache: sonicterm_text::row_glyph_cache::RowGlyphCache,
     /// Per-row cache for background/underline/hyperlink-tint quads
-    /// (Phase P2). Mirrors `row_glyph_cache` but for the
+    /// Mirrors `row_glyph_cache` but for the
     /// `QuadInstance`s emitted by `emit_cell_bg_quads_clipped` — on a
     /// hit we splice the cached `Vec<QuadInstance>` straight into the
     /// frame's quad vector and skip the per-cell run-length-encode.
@@ -1101,7 +1166,7 @@ pub struct GpuRenderer {
     /// `EventLoopProxy` plumbed in by `sonicterm-app`. Stays `None` in
     /// tests / examples that construct `GpuRenderer` without an event
     /// loop proxy (the existing tofu fallback path keeps working).
-    // T13/T14: `async_fallback::AsyncFallbackLoader` is deleted with
+    // `async_fallback::AsyncFallbackLoader` is deleted with
     // the rest of the swash/cosmic-text family. sonicterm-font handles
     // CJK/emoji/Nerd-font fallback synchronously through its own
     // resolved fallback chain (vendor-* features), so no async hook
@@ -1277,7 +1342,7 @@ pub fn emit_tab_title_glyphs(
     glyph_instances: &mut Vec<GlyphInstance>,
     mut debug: Option<&mut Vec<TabTitleGlyphDebug>>,
 ) {
-    // T14: chrome_text-driven port of the tab-title emit loop. Each
+    // Chrome_text-driven port of the tab-title emit loop. Each
     // span is shaped through sonicterm-font and rasterized through the
     // same FontStack raster path the grid uses, so chrome and grid
     // share atlas tiles freely. The legacy SwashRasterizer +
@@ -1431,6 +1496,59 @@ pub fn emit_overlay_text_glyphs(
         }
     }
 }
+/// CPU-side storage a renderer holds, split by owning class.
+///
+/// Deliberately not a single total. The three parts have different lifetimes
+/// and different remedies: atlases grow with the glyph and image set and are
+/// evictable, while a software frame is sized by the window and is not.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RendererRetention {
+    /// Rasterized glyph pixels mirrored on the CPU, and resident entries.
+    pub glyph_atlas: ResourceAmount,
+    /// Decoded inline-image pixels mirrored on the CPU, and resident entries.
+    pub image_atlas: ResourceAmount,
+    /// Windows software presentation buffer. Zero elsewhere.
+    pub software_frame: ResourceAmount,
+}
+
+impl RendererRetention {
+    /// Class-tagged parts, for checking that every part is accounted for.
+    ///
+    /// **Nothing charges these.** `sonicterm-gpu` declares no dependency on
+    /// `sonicterm-resource`, so this crate cannot reserve against a governor
+    /// at all, and the renderer's memory reaches the app as a report rather
+    /// than a ledger entry. The `ResourceClass` tags exist so a part cannot be
+    /// added to this struct without deciding what it is.
+    ///
+    /// Wiring this to charging is not a small change, and the reason is here
+    /// rather than in the caller that would attempt it: `image_atlas` maps to
+    /// `InlineMediaRetained`, which a pane's decoded media already uses. They
+    /// are different resident allocations — `capacity()` of one contiguous
+    /// atlas buffer versus summed `len()` across separately-owned per-image
+    /// `Vec`s — so charging both under one class would make the class mean two
+    /// things and leave a reader unable to tell which allocation to act on.
+    #[must_use]
+    pub fn seam_classes(&self) -> [(ResourceClass, ResourceAmount); 3] {
+        [
+            (ResourceClass::GlyphAtlas, self.glyph_atlas),
+            (ResourceClass::InlineMediaRetained, self.image_atlas),
+            (ResourceClass::SoftwareFrame, self.software_frame),
+        ]
+    }
+
+    /// Sum of every part.
+    #[must_use]
+    pub fn total(&self) -> ResourceAmount {
+        [self.glyph_atlas, self.image_atlas, self.software_frame].into_iter().fold(
+            ResourceAmount::default(),
+            |acc, part| ResourceAmount {
+                bytes: acc.bytes.saturating_add(part.bytes),
+                items: acc.items.saturating_add(part.items),
+            },
+        )
+    }
+}
+
 impl GpuRenderer {
     /// Build a renderer bound to `window`. Creates the wgpu surface +
     /// device + pipelines, the cosmic-text font system, the glyph atlas,
@@ -1610,7 +1728,7 @@ impl GpuRenderer {
 
         // B3 GPU text path. Allocate independent glyph and inline-image
         // atlases up front so media pressure cannot recycle text UVs.
-        // T13/T14 (wezterm-takeover G3): no more SwashRasterizer
+        // No more SwashRasterizer
         // prebake — chrome and grid share the glyph atlas, populated
         // on demand by the wezterm rasterizer on every miss.
         let present_pipeline = WeztermPipeline::new(&device, format, 4096);
@@ -1709,7 +1827,7 @@ impl GpuRenderer {
         let search_highlight = hex_to_rgba(theme.colors.bright.yellow.0.as_str(), 0.35);
         let search_fg = hex_to_chrome_color(theme.colors.foreground.0.as_str());
         let search_bg = hex_to_rgba(theme.colors.tab.bar_bg.0.as_str(), 0.95);
-        // T13/T14: cosmic-text Buffer / Metrics allocations deleted.
+        // Cosmic-text Buffer / Metrics allocations deleted.
         // Chrome strings are shape+raster'd on demand inside `render()`
         // through `chrome_text::layout(...)`; there is no persistent
         // per-overlay text buffer to size at construction.
@@ -1736,6 +1854,7 @@ impl GpuRenderer {
             image_atlas,
             image_upload,
             retained_inline_media_bytes: 0,
+            frames_without_inline_media: 0,
             glyph_atlas_retry_without_eviction: false,
             font_family: font_family.to_string(),
             font_size,
@@ -1788,7 +1907,7 @@ impl GpuRenderer {
             tab_bar_visible: true,
             titlebar_inset: 0.0,
             last_missing_chars: Vec::new(),
-            // T9: `shape_cache` field deleted with the cosmic-text path.
+            // `shape_cache` field deleted with the cosmic-text path.
             font_stack,
             row_glyph_cache: sonicterm_text::row_glyph_cache::RowGlyphCache::new(),
             line_quad_cache: crate::row_quad_cache::LineQuadCache::new(),
@@ -1858,12 +1977,12 @@ impl GpuRenderer {
         // wrong NDC coordinates.
         self.row_glyph_cache.invalidate_all();
         self.line_quad_cache.invalidate_all();
-        // T13/T14: post-the legacy chrome layer there is no persistent text buffer to
+        // Post-glyphon there is no persistent text buffer to
         // resize — chrome strings are re-shaped through
         // `chrome_text::layout` on every frame, picking up the new
         // surface dims via the per-call `(sw, sh)` parameter. The
         // legacy `*_buffer.set_size(...)` block that lived here is
-        // gone with the the legacy chrome layer plumbing.
+        // gone with the glyphon plumbing.
         true
     }
 
@@ -1959,7 +2078,10 @@ impl GpuRenderer {
     /// path, so config changes must invalidate the frame key explicitly;
     /// otherwise an idle window could keep the previous scrollbar quads
     /// until some unrelated grid/theme/input change forced a redraw.
-    pub fn set_scrollbar_mode(&mut self, mode: sonicterm_render_model::boundary::cfg::config::ScrollbarMode) -> bool {
+    pub fn set_scrollbar_mode(
+        &mut self,
+        mode: sonicterm_render_model::boundary::cfg::config::ScrollbarMode,
+    ) -> bool {
         if self.scrollbar_mode == mode {
             return false;
         }
@@ -2054,6 +2176,44 @@ impl GpuRenderer {
     /// text cursor when `false`. Bumps the FrameKey via
     /// [`Self::last_frame_key`] so the next render is not skipped by
     /// the cache.
+    /// Host-side storage this renderer holds, split by the class that owns it.
+    ///
+    /// Every figure here already existed and was unreachable from outside the
+    /// crate: `GlyphAtlas::retained_amount` and
+    /// `WindowsSoftwareFrame::retained_bytes` were both written, tested, and
+    /// called by nothing. What was missing was a way for the owner of the
+    /// governor to read them, which is what this provides.
+    ///
+    /// **CPU-side only.** GPU textures and buffers are not included: their
+    /// memory belongs to the driver, `wgpu` exposes no size accounting for
+    /// them, and a figure invented here would be a guess presented as a
+    /// measurement. The atlases are the CPU mirrors that back those textures,
+    /// so they track the same content without claiming to measure VRAM.
+    #[must_use]
+    pub fn retained_amounts(&self) -> RendererRetention {
+        RendererRetention {
+            glyph_atlas: self.glyph_atlas.retained_amount(),
+            image_atlas: self.image_atlas.retained_amount(),
+            software_frame: self.software_frame_retained_amount(),
+        }
+    }
+
+    #[cfg(windows)]
+    fn software_frame_retained_amount(&self) -> ResourceAmount {
+        self.software_frame.as_ref().map_or_else(ResourceAmount::default, |frame| ResourceAmount {
+            bytes: frame.retained_bytes(),
+            items: usize::from(frame.retained_bytes() > 0),
+        })
+    }
+
+    /// Non-Windows builds have no software presentation path, so this is
+    /// always zero rather than absent — a caller charging it should not need
+    /// a platform branch to do so.
+    #[cfg(not(windows))]
+    fn software_frame_retained_amount(&self) -> ResourceAmount {
+        ResourceAmount::default()
+    }
+
     pub fn set_window_focused(&mut self, focused: bool) {
         if self.window_focused == focused {
             return;
@@ -2691,6 +2851,55 @@ impl GpuRenderer {
         );
     }
 
+    /// Release a full-size image atlas once the window has drawn without any
+    /// renderable inline media for [`IMAGE_ATLAS_IDLE_FRAMES`].
+    ///
+    /// Without this, promotion is permanent: a window that displays a single
+    /// image keeps 16 MiB of CPU pixels — and, on the GPU path, a matching
+    /// texture — until it closes, however long ago the image scrolled away.
+    /// Across several windows that is the largest retained term in the
+    /// process.
+    ///
+    /// Nothing the user can see changes. The atlas is rebuilt on demand the
+    /// next time an image becomes visible, which is the same work the first
+    /// promotion does.
+    fn demote_image_atlas_if_idle(&mut self, has_inline_media: bool) {
+        if has_inline_media {
+            self.frames_without_inline_media = 0;
+            return;
+        }
+        self.frames_without_inline_media = self.frames_without_inline_media.saturating_add(1);
+        if !image_atlas_demotion_ready(
+            &self.image_atlas,
+            has_inline_media,
+            self.frames_without_inline_media,
+        ) {
+            return;
+        }
+
+        let released_width = self.image_atlas.width();
+        let released_height = self.image_atlas.height();
+        self.image_atlas = GlyphAtlas::new(PLACEHOLDER_ATLAS_DIM, PLACEHOLDER_ATLAS_DIM);
+        if !self.uses_windows_software_presenter() {
+            self.rebuild_image_upload_if_needed();
+        }
+        self.frames_without_inline_media = 0;
+        tracing::debug!(
+            target: "memory",
+            renderer_role = self.render_timing_label,
+            window_id = ?self.window.id(),
+            software_presenter = self.uses_windows_software_presenter(),
+            atlas = "image",
+            released_width,
+            released_height,
+            released_cpu_bytes = atlas_payload_bytes(released_width, released_height),
+            gpu_width = self.image_upload.width(),
+            gpu_height = self.image_upload.height(),
+            idle_frames = IMAGE_ATLAS_IDLE_FRAMES,
+            "image atlas released after sustained absence of inline media"
+        );
+    }
+
     fn promote_image_atlas_if_needed(
         &mut self,
         has_inline_media: bool,
@@ -2738,13 +2947,7 @@ impl GpuRenderer {
 
     /// the next `render()` call cannot short-circuit through the
     /// fast-path against a now-stale frame.
-    pub fn set_font(
-        &mut self,
-        family: &str,
-        size: f32,
-        line_height_mult: f32,
-        weight_scale: f32,
-    ) {
+    pub fn set_font(&mut self, family: &str, size: f32, line_height_mult: f32, weight_scale: f32) {
         let weight_scale = effective_font_weight_scale(weight_scale);
         let dpi = (72.0 * self.scale_factor).round().max(1.0) as usize;
         let new_stack = sonicterm_engine::FontStack::try_new_full_with_weight(
@@ -2779,7 +2982,7 @@ impl GpuRenderer {
         self.cell_h = new_line_h;
         self.reset_glyph_atlas_in_place("font_change");
         self.glyph_atlas_retry_without_eviction = false;
-        // T13/T14: SwashRasterizer prebake gone. Atlas is now lazily
+        // SwashRasterizer prebake gone. Atlas is now lazily
         // filled by the wezterm rasterizer on the next render.
         self.row_glyph_cache.invalidate_all();
         self.line_quad_cache.invalidate_all();
@@ -2845,7 +3048,7 @@ impl GpuRenderer {
     fn rebuild_for_sf(&mut self, sf: f32) {
         let sf = sf.max(0.1);
         self.scale_factor = sf;
-        // T13/T14: post-the legacy chrome layer the atlas is sized once at default
+        // Post-glyphon the atlas is sized once at default
         // and grows on demand; no DPI-derived resize and no
         // SwashRasterizer prebake. The wezterm rasterizer fills the
         // atlas lazily on first encounter with each glyph.
@@ -2903,10 +3106,8 @@ impl GpuRenderer {
 
     fn rebuild_glyph_upload_if_needed(&mut self) {
         let current = (self.glyph_upload.width(), self.glyph_upload.height());
-        let next = desired_gpu_atlas_dimensions(
-            self.uses_windows_software_presenter(),
-            &self.glyph_atlas,
-        );
+        let next =
+            desired_gpu_atlas_dimensions(self.uses_windows_software_presenter(), &self.glyph_atlas);
         if atlas_texture_rebuild_required(current, next) {
             self.glyph_upload = AtlasUpload::new_sized(
                 &self.device,
@@ -2919,10 +3120,8 @@ impl GpuRenderer {
 
     fn rebuild_image_upload_if_needed(&mut self) {
         let current = (self.image_upload.width(), self.image_upload.height());
-        let next = desired_gpu_atlas_dimensions(
-            self.uses_windows_software_presenter(),
-            &self.image_atlas,
-        );
+        let next =
+            desired_gpu_atlas_dimensions(self.uses_windows_software_presenter(), &self.image_atlas);
         if atlas_texture_rebuild_required(current, next) {
             self.image_upload = AtlasUpload::new_sized(
                 &self.device,
@@ -2959,7 +3158,7 @@ impl GpuRenderer {
     }
 
     /// Apply a new color theme without reconstructing the renderer.
-    /// Recomputes every cached wgpu / the legacy chrome layer color derived from the
+    /// Recomputes every cached wgpu / glyphon color derived from the
     /// theme so the next frame reflects the swap.
     pub fn set_theme(&mut self, theme: &Theme) {
         self.set_theme_with_opacity(theme, self.bg_opacity);
@@ -3010,7 +3209,7 @@ impl GpuRenderer {
     /// seeing tofu boxes for an arbitrary amount of time after the
     /// font finished loading.
     ///
-    /// T9 (wezterm-takeover G2/C): the per-style-run `ShapeCache`
+    /// The per-style-run `ShapeCache`
     /// was deleted in T8; the only surviving caches the async loader
     /// notifier needs to invalidate are the per-row + per-line
     /// quad caches plus the style_rev bump.
@@ -3034,7 +3233,7 @@ impl GpuRenderer {
         self.style_rev
     }
 
-    /// T13/T14: attach point for the legacy async font fallback loader.
+    /// Attach point for the legacy async font fallback loader.
     /// Stub today — sonicterm-font handles fallback synchronously via its
     /// built-in vendor chain, so the loader is a no-op `()`. Kept as
     /// `Option<()>` so the cross-crate API (`sonicterm-app` calls
@@ -3486,7 +3685,12 @@ impl GpuRenderer {
                     )
                     .with_top_offset(self.tab_bar_y_offset());
                     for t in layout.tabwidgets() {
-                        match t.hover_at(Some(sonicterm_render_model::boundary::ui::tabbar_view::Point { x: cx, y: cy })) {
+                        match t.hover_at(Some(
+                            sonicterm_render_model::boundary::ui::tabbar_view::Point {
+                                x: cx,
+                                y: cy,
+                            },
+                        )) {
                             sonicterm_render_model::boundary::ui::tabbar_view::TabHover::None => {}
                             sonicterm_render_model::boundary::ui::tabbar_view::TabHover::Body => {
                                 idx = t.idx as u32;
@@ -3673,7 +3877,7 @@ impl GpuRenderer {
         // -------- B3 cutover: walk the grid once, emit one glyph
         // instance per visible cell, route every miss through the
         // swash rasterizer + atlas. No per-row cache, no rich-text
-        // buffer, no the legacy chrome layer shape pass for the terminal grid.
+        // buffer, no glyphon shape pass for the terminal grid.
         let fg_default = self.fg_default;
         // Underline runs collected per pane. We record
         // (origin_x, origin_y, pane_cols, row, col_a, col_b) where
@@ -3702,7 +3906,7 @@ impl GpuRenderer {
         // Kept separate so they can be drawn AFTER `quad_overlay` paints
         // the modal backdrop, otherwise they'd be hidden by their own
         // background. (— palette text was previously routed through
-        // the legacy chrome layer's TextRenderer which bypassed the device-scale atlas
+        // glyphon's TextRenderer which bypassed the device-scale atlas
         // path used by `emit_tab_title_glyphs`, hence the HiDPI blur.)
         let mut overlay_glyph_instances: Vec<GlyphInstance> = Vec::new();
         // Missing-glyph "tofu" outlines collected during the cell walk.
@@ -3733,12 +3937,12 @@ impl GpuRenderer {
 
         let raster_px = self.raster_px(self.font_size);
         {
-            // T13/T14: post-the legacy chrome layer the grid path is wezterm-only.
+            // Post-glyphon the grid path is wezterm-only.
             // FontStack is the sole rasterizer; on test fixtures
             // without bundled fonts (FontStack returns None) the grid
             // walk skips per-glyph emission and only paints quads.
             let mut wt_raster = self.font_stack.clone();
-            // T13/T14: the async fallback loader was wired into the
+            // The async fallback loader was wired into the
             // legacy SwashRasterizer. The wezterm path doesn't expose
             // an equivalent hook; missing glyphs are handled by
             // sonicterm-font's built-in fallback chain (NotoColorEmoji,
@@ -4083,9 +4287,7 @@ impl GpuRenderer {
         let inline_image_placements: Vec<InlineImagePlacement<'_>> = pane_views
             .iter()
             .flat_map(|pv| {
-                pv.inline_images
-                    .iter()
-                    .map(move |image| (image, pv.origin_x, pv.origin_y))
+                pv.inline_images.iter().map(move |image| (image, pv.origin_x, pv.origin_y))
             })
             .enumerate()
             .map(|(painter_order, (image, origin_x, origin_y))| InlineImagePlacement {
@@ -4104,11 +4306,15 @@ impl GpuRenderer {
             let y = placement.origin_y + image.row as f32 * cell_h;
             x < sw && y < sh && x + image.width as f32 > 0.0 && y + image.height as f32 > 0.0
         });
+        self.demote_image_atlas_if_idle(has_renderable_inline_media);
         let image_atlas_promoted = self.promote_image_atlas_if_needed(
             has_renderable_inline_media,
             retained_inline_media_bytes,
         );
-        if inline_media_changed && !image_atlas_promoted {
+        if inline_media_changed
+            && !image_atlas_promoted
+            && image_atlas_reset_warranted(&self.image_atlas)
+        {
             self.reset_image_atlas();
         }
         let mut image_glyph_instances = Vec::new();
@@ -4262,12 +4468,12 @@ impl GpuRenderer {
             }
         }
 
-        // PR-B: per-pane scrollbar emit. Runs once per pane, AFTER
+        // per-pane scrollbar emit. Runs once per pane, AFTER
         // the per-row bg quads so the bar paints above any colored cell
         // background but below selection / cursor / modal overlays
         // (those land in `quads_overlay` later in the function). Auto
         // mode behaves like Always-when-scrollable here — hover-driven
-        // auto-hide is PR-D.
+        // auto-hide is not implemented.
         for pv in &pane_views {
             let pane_rect = PaneRect { x: pv.origin_x, y: pv.origin_y, w: pv.rect_w, h: pv.rect_h };
             let pv_grid: &Grid = pv.grid;
@@ -4576,7 +4782,8 @@ impl GpuRenderer {
                 // accent underline matching the recolored glyphs; plain hover
                 // → a yellow HINT underline only (no glyph recolor). #URL-hint
                 let hov_accent = if h.active {
-                    sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme).accent
+                    sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme)
+                        .accent
                 } else {
                     hex_to_rgba(theme.colors.ansi.yellow.0.as_str(), 0.9)
                 };
@@ -4707,7 +4914,7 @@ impl GpuRenderer {
         }
         // -------- Tab bar ---------------------------------------------------
         if self.tab_bar_visible {
-            // Phase D: open an 8 px insertion gap at the
+            // open an 8 px insertion gap at the
             // current drop slot when a drag is active over this bar.
             let insertion_slot = self.drag_chip.as_ref().and_then(|c| c.insertion_slot);
             let source_tab_idx = self.drag_chip.as_ref().and_then(|c| c.source_tab_idx);
@@ -4725,7 +4932,8 @@ impl GpuRenderer {
             // tab bar. The theme.tab.* colors remain authoritative for
             // the title text (active vs inactive fg) so per-theme accents
             // still read through.
-            let ui_palette = sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme);
+            let ui_palette =
+                sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme);
             // `tok::BG_BASE` is a hardcoded near-black
             // (`#0B0E14`) that is indistinguishable from most dark
             // themes' `theme.background` — the tab bar drew correctly
@@ -4753,7 +4961,7 @@ impl GpuRenderer {
                 },
             );
             for t in &layout.tabs {
-                // Phase D D3: if this tab is the source of
+                // If this tab is the source of
                 // a live drag, overlay a translucent bar-bg quad to
                 // dim it to roughly `source_alpha` perceived opacity.
                 // The quad is painted AFTER the tab body + close icon
@@ -4984,7 +5192,7 @@ impl GpuRenderer {
                 [layout.border.w, layout.border.h],
                 self.chrome_px(READ_ONLY_BADGE_RADIUS),
             ));
-            // T14: search-badge overlay text → chrome_text into the
+            // Search-badge overlay text → chrome_text into the
             // overlay glyph instance vec (sits above quad_overlay).
             if let (Some(stack), Some(search_state)) = (self.font_stack.as_ref(), search) {
                 let mut wt = stack.clone();
@@ -5073,8 +5281,8 @@ impl GpuRenderer {
                 // theme-background block with the covered glyph recolored to
                 // badge yellow. The block overlays existing text and contributes
                 // no advance, matching terminal and command-palette cursors.
-                let caret_h = (search_font_size * 1.15)
-                    .min((layout.border.h - self.chrome_px(8.0)).max(4.0));
+                let caret_h =
+                    (search_font_size * 1.15).min((layout.border.h - self.chrome_px(8.0)).max(4.0));
                 let caret_y = layout.border.y + (layout.border.h - caret_h) * 0.5;
                 quads_overlay.push(QuadInstance {
                     rect: px_to_ndc(caret_x, caret_y, caret_w, caret_h, sw, sh),
@@ -5253,30 +5461,29 @@ impl GpuRenderer {
 
         // -------- Command palette overlay ----------------------------------
         let palette_preedit = ime.map(|i| i.preedit()).unwrap_or("");
-        let (palette_layout, palette_query_text, palette_caret_char) =
-            if let Some(p) = palette {
-                let query_text = if palette_preedit.is_empty() {
-                    None
-                } else {
-                    Some(command_palette_query_label(p, palette_preedit))
-                };
-                let layout =
-                    PaletteLayout::compute(p, sw, sh, self.panel_padding, self.scale_factor);
-                let caret_char = palette_cursor_char(
-                    p.query(),
-                    p.cursor(),
-                    layout.as_ref().and_then(|layout| layout.query_placeholder.as_deref()),
-                )
-                .map(str::to_string);
-                (layout, query_text, caret_char)
+        let (palette_layout, palette_query_text, palette_caret_char) = if let Some(p) = palette {
+            let query_text = if palette_preedit.is_empty() {
+                None
             } else {
-                (None, None, None)
+                Some(command_palette_query_label(p, palette_preedit))
             };
+            let layout = PaletteLayout::compute(p, sw, sh, self.panel_padding, self.scale_factor);
+            let caret_char = palette_cursor_char(
+                p.query(),
+                p.cursor(),
+                layout.as_ref().and_then(|layout| layout.query_placeholder.as_deref()),
+            )
+            .map(str::to_string);
+            (layout, query_text, caret_char)
+        } else {
+            (None, None, None)
+        };
         if let Some(layout) = &palette_layout {
             // Chrome colors are derived from the active theme so the palette
             // tracks the user's chosen palette instead of hardcoded
             // Tokyo Night literals (see UiPalette::from_theme).
-            let palette_chrome = sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme);
+            let palette_chrome =
+                sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme);
             let accent_rgba = palette_chrome.accent;
             // Full-window scrim — sits below the modal so the underlying
             // terminal recedes visually.
@@ -5358,7 +5565,7 @@ impl GpuRenderer {
             //
             // emit through the SonicTerm glyph atlas at device pixel
             // scale (mirrors `emit_tab_title_glyphs`) so the palette text
-            // is crisp on HiDPI. The previous the legacy chrome layer TextRenderer path
+            // is crisp on HiDPI. The previous glyphon TextRenderer path
             // bypassed the DPI multiplier and rendered blurry on Windows.
             let query_text = if let Some(text) = &palette_query_text {
                 text.replace('▏', "")
@@ -5368,7 +5575,7 @@ impl GpuRenderer {
                 layout.query_label.replace('▏', "")
             };
             let palette_font_size = self.raster_px(self.font_size);
-            // T14: chrome text needs a wezterm FontStack; when one
+            // Chrome text needs a wezterm FontStack; when one
             // isn't available (test fixtures), the palette quads still
             // render but no text is emitted. Wrap the entire chrome
             // emission in an `if let Some(...)` so the palette path
@@ -5377,8 +5584,10 @@ impl GpuRenderer {
                 let palette_native_em = self.raster_px(self.font_size);
                 let mut palette_rasterizer = stack.clone();
                 // Query: vertically centre inside the query_row chrome.
-                let query_origin_x =
-                    layout.query_row.x + self.chrome_px(sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_PAD_X);
+                let query_origin_x = layout.query_row.x
+                    + self.chrome_px(
+                        sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_PAD_X,
+                    );
                 let query_baseline_y =
                     layout.query_row.y + (layout.query_row.h + palette_font_size * 0.8) * 0.5;
                 emit_overlay_text_glyphs(
@@ -5462,8 +5671,10 @@ impl GpuRenderer {
                     let shortcut_font_size = palette_font_size;
                     let shortcut_w = shortcut
                         .map(|hint| hint.chars().count() as f32 * shortcut_font_size * 0.62);
-                    let mut origin_x =
-                        row.rect.x + self.chrome_px(sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_PAD_X);
+                    let mut origin_x = row.rect.x
+                        + self.chrome_px(
+                            sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_PAD_X,
+                        );
                     if let Some(hex) = swatch {
                         let color = hex_to_rgba(hex, 1.0);
                         let line_h = self.chrome_px(2.0).max(1.0);
@@ -5516,7 +5727,9 @@ impl GpuRenderer {
                     );
                     if let (Some(hint), Some(width)) = (shortcut, shortcut_w) {
                         let hint_origin_x = row.rect.x + row.rect.w
-                            - self.chrome_px(sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_PAD_X)
+                            - self.chrome_px(
+                                sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_PAD_X,
+                            )
                             - width;
                         let mut hint_color = self.search_fg;
                         hint_color.a = 180;
@@ -5543,13 +5756,17 @@ impl GpuRenderer {
                 if let Some(ph) = &layout.empty_label {
                     let empty_x = layout.bg.x
                         + self.chrome_px(self.panel_padding)
-                        + self.chrome_px(sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_PAD_X);
+                        + self.chrome_px(
+                            sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_PAD_X,
+                        );
                     let empty_y_top = layout.query_row.y
                         + layout.query_row.h
                         + self.chrome_px(self.panel_padding);
                     // No row rect here (empty state), so derive the scaled row
                     // height via chrome_px — same DPI basis as the row path. #palette
-                    let empty_row_h = self.chrome_px(sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_HEIGHT);
+                    let empty_row_h = self.chrome_px(
+                        sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_HEIGHT,
+                    );
                     let empty_baseline_y =
                         empty_y_top + (empty_row_h + palette_font_size * 0.8) * 0.5;
                     emit_overlay_text_glyphs(
@@ -5774,7 +5991,7 @@ impl GpuRenderer {
             .map(|(_, r)| *r)
             .collect();
         if !broadcast_label_rects.is_empty() {
-            // T14: broadcast warning label → chrome_text, one call per
+            // Broadcast warning label → chrome_text, one call per
             // pane rect (each rect gets its own ⚠ BROADCAST string).
             if let Some(stack) = self.font_stack.as_ref() {
                 let native_em = stack
@@ -5846,7 +6063,9 @@ impl GpuRenderer {
                 let (ly0, ly1) = chip.drop_line_y;
                 let lh = (ly1 - ly0).max(2.0 * dpi);
                 // Drop-line accent — theme-driven (was hardcoded ACCENT_BLUE).
-                let mut line_color = sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme).accent;
+                let mut line_color =
+                    sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme)
+                        .accent;
                 line_color[3] = 0.95;
                 // 3px line centered on lx; both the half-width offset and the
                 // width are logical px scaled by DPI.
@@ -5857,9 +6076,9 @@ impl GpuRenderer {
                 });
             }
 
-            // Ghost body — Phase D D1: alpha controlled by
+            // Ghost body: alpha controlled by
             // `chip.ghost_alpha` (spec 0.5). The historical chip
-            // rendered at 0.7; the Phase D spec ghost is more
+            // rendered at 0.7; the spec ghost is more
             // translucent so the bar underneath stays legible.
             let mut chip_color = self.tab_active_bg;
             chip_color[3] = chip.ghost_alpha.clamp(0.0, 1.0);
@@ -5869,9 +6088,9 @@ impl GpuRenderer {
                 ..Default::default()
             });
 
-            // T14: drag-chip title text → chrome_text.
+            // Drag-chip title text → chrome_text.
             //
-            // Phase D D1 (Haiku follow-up): scale the
+            // Scale the
             // text color alpha by `chip.ghost_alpha` (spec 0.5) so
             // the GHOST TITLE matches the ghost body translucency.
             if !chip.title.is_empty() {
@@ -5913,7 +6132,7 @@ impl GpuRenderer {
             self.drag_chip_visual = None;
         }
 
-        // T13/T14: the legacy chrome layer `Resolution` / `TextArea` / `TextBounds` /
+        // Glyphon `Resolution` / `TextArea` / `TextBounds` /
         // `text_renderer.prepare` are gone. Every chrome string already
         // landed in `glyph_instances` (pre-overlay: search status bar,
         // tab titles) or `overlay_glyph_instances` (modal chrome:
@@ -6196,7 +6415,7 @@ impl GpuRenderer {
         }
     }
 
-    /// T14: this function only emits the quick-select hint background
+    /// This function only emits the quick-select hint background
     /// quads now. The legacy `quick_select_buffer` text path is gone;
     /// the per-hint text is laid out via `chrome_text::layout` later
     /// in `render()` so it shares the wezterm atlas with the rest of
@@ -6248,7 +6467,7 @@ impl GpuRenderer {
     /// fallback handling four times (run start, mid-row flush, end of
     /// row, etc.).
     ///
-    /// T9 (wezterm-takeover G2/C): non-ASCII clusters drive through
+    /// Non-ASCII clusters drive through
     /// `shape_run_with_wezterm` only — the cosmic-text path plus the
     /// legacy wezterm-cluster-width overlay are gone. Each cluster
     /// lead cell dispatches on
@@ -6290,7 +6509,7 @@ impl GpuRenderer {
         sh: f32,
         baseline_y_in_cell: f32,
         snapped_cell_x: &[f32],
-        // T9 (wezterm-takeover G2/C): `font_stack` is now the sole
+        // `font_stack` is now the sole
         // shape entry point — when None, the non-ASCII branch can
         // emit nothing (test fixtures without bundled fonts hit
         // this; the ASCII branch still drives through `wt_raster`
@@ -6298,7 +6517,7 @@ impl GpuRenderer {
         // `GpuRenderer::new` can continue to construct a partly-
         // degraded renderer in tests.
         font_stack: Option<&sonicterm_engine::FontStack>,
-        // T13/T14 (wezterm-takeover G3): sonicterm-font is now the sole
+        // Sonicterm-font is now the sole
         // atlas insertion path. The legacy `rasterizer: &mut
         // SwashRasterizer` parameter is gone (T10 deletes the type
         // entirely). When `wt_raster` is None (test fixtures without
@@ -6343,7 +6562,7 @@ impl GpuRenderer {
         // would emit a 1:1 mapping anyway. Skip the shape call entirely
         // and drive the glyph atlas straight from each cell's GlyphKey.
         //
-        // T9: ASCII codepoints (0x20..=0x7E) never overlap the
+        // ASCII codepoints (0x20..=0x7E) never overlap the
         // `BlockKey::from_char` ranges (≥ U+2500) and never carry a
         // Powerline / NF PUA codepoint, so the BlockKey dispatch is
         // safely skipped here.
@@ -6356,7 +6575,7 @@ impl GpuRenderer {
                     italic: style.italic,
                     glyph_id: 0,
                 };
-                // T13/T14: sonicterm-font owns the atlas. No swash
+                // Sonicterm-font owns the atlas. No swash
                 // fallback — when `wt_raster` is None (test fixture
                 // without a FontStack) the glyph is silently skipped
                 // so the renderer still paints quads.
@@ -6382,7 +6601,7 @@ impl GpuRenderer {
                 let gy = cy + baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
                 let gw = info.px_size[0] as f32 * inv_s;
                 let gh = info.px_size[1] as f32 * inv_s;
-                // T13/T14: the legacy `apply_symbol_fit_v2` +
+                // The legacy `apply_symbol_fit_v2` +
                 // `block_element_rect` overlay tracks the SwashRasterizer
                 // path; sonicterm-font handles cell fit natively. ASCII
                 // glyphs are always `Natural` (identity) so dropping
@@ -6672,7 +6891,7 @@ impl GpuRenderer {
 
             // ── Normal wezterm-shape path (non-block cluster) ──
             //
-            // T13/T14: post-the legacy chrome layer the char-fallback path is wezterm-
+            // Post-glyphon the char-fallback path is wezterm-
             // only. FontStack is the sole rasterizer; missing chars
             // emit tofu via `Rasterizer::rasterize` returning
             // None (when sonicterm-font's fallback chain has nothing).
@@ -6681,7 +6900,7 @@ impl GpuRenderer {
                 if ch == '\0' || ch.is_whitespace() {
                     continue;
                 }
-                // T13/T14: drop the `resolve_slot` swash walk. wezterm
+                // Drop the `resolve_slot` swash walk. wezterm
                 // handles fallback internally — pass `font_slot = 0`
                 // and let `FontStack::rasterize` find a face
                 // (it shapes the single char against the loaded font
@@ -6753,7 +6972,7 @@ impl GpuRenderer {
                 style.bold,
                 style.italic,
             );
-            // T13/T14: sonicterm-font is the sole rasterizer; the
+            // Sonicterm-font is the sole rasterizer; the
             // legacy `swash_rasterizer::classify_symbol` / SymbolFit
             // family routes through the SwashRasterizer which is gone.
             // sonicterm-font sizes glyphs natively, so the IconCellFit
@@ -6877,11 +7096,7 @@ fn emit_inline_image_instances(
         }
         let x = placement.origin_x + image.col as f32 * cell_w;
         let y = placement.origin_y + image.row as f32 * cell_h;
-        if x >= sw
-            || y >= sh
-            || x + image.width as f32 <= 0.0
-            || y + image.height as f32 <= 0.0
-        {
+        if x >= sw || y >= sh || x + image.width as f32 <= 0.0 || y + image.height as f32 <= 0.0 {
             continue;
         }
         let key = sonicterm_types::glyph_key::GlyphKey {
@@ -6891,11 +7106,8 @@ fn emit_inline_image_instances(
             italic: false,
             glyph_id: fold_u64_to_u32(image.id),
         };
-        let Some(info) = image_atlas.get_or_insert_lazy_without_eviction(
-            key,
-            image.width,
-            image.height,
-            || {
+        let Some(info) =
+            image_atlas.get_or_insert_lazy_without_eviction(key, image.width, image.height, || {
                 sonicterm_text::glyph_atlas::RasterTile {
                     width: image.width,
                     height: image.height,
@@ -6906,8 +7118,8 @@ fn emit_inline_image_instances(
                     is_color: true,
                     is_subpixel: false,
                 }
-            },
-        ) else {
+            })
+        else {
             skipped += 1;
             continue;
         };
@@ -7356,19 +7568,19 @@ fn indexed(i: u8, theme: &Theme) -> Option<ChromeColor> {
 #[cfg(test)]
 #[path = "core_tests.rs"]
 mod core_tests;
-// T13/T14 (wezterm-takeover G3): `hex_to_the legacy chrome layer` and
-// `scale_the legacy chrome layer_alpha` have moved into `crate::color` under the
+// `hex_to_glyphon` and
+// `scale_glyphon_alpha` have moved into `crate::color` under the
 // renamed `hex_to_chrome_color` / `scale_chrome_text_alpha` names and
 // now consume `ChromeColor` instead of `legacy chrome color`.
 // Re-export them at the legacy path so callers that imported
-// `sonicterm_gpu::core::scale_the legacy chrome layer_alpha` can switch to the new
+// `sonicterm_gpu::core::scale_glyphon_alpha` can switch to the new
 // identifier (see `crates/sonicterm-app/tests/drag_visual_feedback.rs`
 // for the port). The legacy names are gone from this file entirely;
 // any caller that lingers on them will fail to compile (intentional —
 // it's the must-pass #4 grep gate's job to catch survivors).
 pub use crate::color::scale_chrome_text_alpha;
 
-// T13/T14: `terminal_font_attrs` re-export removed. It returned
+// `terminal_font_attrs` re-export removed. It returned
 // `legacy chrome attrs` which carried per-span family/weight; the
 // chrome-text path replaces it with `ChromeAttrs { bold, italic }`
 // constructed per-span at the call site. Downstream callers
@@ -7386,7 +7598,8 @@ pub fn collect_hyperlink_runs(grid: &Grid) -> Vec<(u16, u16, u16)> {
     for r in 0..grid.rows {
         let row = grid.row(r);
         let mut start: Option<u16> = None;
-        let mut current: Option<sonicterm_render_model::boundary::grid::hyperlink::HyperlinkId> = None;
+        let mut current: Option<sonicterm_render_model::boundary::grid::hyperlink::HyperlinkId> =
+            None;
         let mut last_col: u16 = 0;
         for (col, cell) in row.iter().enumerate() {
             if cell.flags.contains(CellFlags::WIDE_CONT) {
@@ -7423,7 +7636,7 @@ pub fn collect_hyperlink_runs(grid: &Grid) -> Vec<(u16, u16, u16)> {
     runs
 }
 
-// T13/T14: `load_bundled_fonts` (cosmic-text bundle loader) is gone.
+// `load_bundled_fonts` (cosmic-text bundle loader) is gone.
 // Bundled fonts ship via sonicterm-font's `vendor-jetbrains`,
 // `vendor-noto-emoji`, `vendor-nerd-font-symbols` features (see
 // `sonicterm-text/Cargo.toml`), so the FontStack discovers them
@@ -7432,7 +7645,10 @@ pub fn collect_hyperlink_runs(grid: &Grid) -> Vec<(u16, u16, u16)> {
 /// Stable fingerprint for command badges, including wall-clock buckets that
 /// change when badge visibility can transition without a tab model mutation.
 #[doc(hidden)]
-pub fn command_status_hash(status: &sonicterm_render_model::boundary::ui::tabs::CommandStatus, now: Instant) -> u64 {
+pub fn command_status_hash(
+    status: &sonicterm_render_model::boundary::ui::tabs::CommandStatus,
+    now: Instant,
+) -> u64 {
     match status {
         sonicterm_render_model::boundary::ui::tabs::CommandStatus::Idle => 0,
         sonicterm_render_model::boundary::ui::tabs::CommandStatus::Running(started_at) => {

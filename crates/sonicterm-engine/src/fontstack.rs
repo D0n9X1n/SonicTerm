@@ -47,7 +47,7 @@ static INSTALL_ONCE: Once = Once::new();
 
 /// Cell metrics in raster pixels, sourced from the active font stack.
 ///
-/// G1a (wezterm-takeover): the renderer's coordinate system is raster
+/// The renderer's coordinate system is raster
 /// pixels end-to-end. [`FontStack::cell_metrics_raster_px`] emits this
 /// renderer-friendly view without any `* scale_factor` math.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -91,7 +91,7 @@ impl FontStack {
     /// [`Self::try_new`]) installs a wezterm `Config` globally; later
     /// calls re-use that install regardless of their `primary_family`
     /// argument (live family swaps are out-of-scope for this phase —
-    /// see the wezterm-takeover spec § "Default font config").
+    /// see the default font config).
     pub fn try_new_with_family(primary_family: &str, dpi: usize) -> Result<Self> {
         Self::try_new_full(primary_family, 14.0, dpi)
     }
@@ -172,7 +172,7 @@ impl FontStack {
     }
 
     /// Return cell metrics for the default font, projected into the
-    /// renderer-facing [`CellMetricsPx`] (raster px). G1a: wezterm's
+    /// renderer-facing [`CellMetricsPx`] (raster px). Wezterm's
     /// `FontMetrics` already lives in raster px, so this is a plain
     /// field extraction — no `* scale_factor` multiplier here, and
     /// none at the call site.
@@ -428,13 +428,11 @@ fn morph_axis(
                     // Outer ring one step beyond the integer core, on both
                     // sides. Out-of-bounds reads as empty.
                     let left = if i > whole { src[base + i - whole - 1] } else { 0 };
-                    let right =
-                        if i + whole + 1 < len { src[base + i + whole + 1] } else { 0 };
+                    let right = if i + whole + 1 < len { src[base + i + whole + 1] } else { 0 };
                     let ring = left.min(right);
                     if ring < best {
                         // Pull toward the ring minimum in proportion to frac.
-                        let blended =
-                            f64::from(best) - (f64::from(best) - f64::from(ring)) * frac;
+                        let blended = f64::from(best) - (f64::from(best) - f64::from(ring)) * frac;
                         best = blended.round().clamp(0.0, 255.0) as u8;
                     }
                 }
@@ -488,8 +486,7 @@ fn embolden_coverage(
     for y in 0..height {
         let src = y * width * channels;
         let dst = ((y + pad) * new_w + pad) * channels;
-        padded[dst..dst + width * channels]
-            .copy_from_slice(&coverage[src..src + width * channels]);
+        padded[dst..dst + width * channels].copy_from_slice(&coverage[src..src + width * channels]);
     }
 
     // Dilate each channel independently. Interleaved BGRA is handled by

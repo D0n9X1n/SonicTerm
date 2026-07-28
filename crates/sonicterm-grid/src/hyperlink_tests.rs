@@ -111,3 +111,322 @@ fn empty_registry_reports_empty() {
     assert_eq!(r.len(), 0);
     assert!(r.lookup(HyperlinkId(1)).is_none());
 }
+
+/// Reclaiming unreferenced entries reopens admission, not just memory.
+///
+/// `retained_bytes` is both the figure reported to a governor and the figure
+/// [`HyperlinkRegistry::try_intern`] enforces against. A sweep that freed the
+/// maps without decrementing it would release memory while leaving the
+/// registry wedged — links would stay dead with the bytes already returned,
+/// which is the most confusing possible outcome to diagnose.
+#[test]
+fn reclaiming_entries_restores_admission_headroom() {
+    let mut registry = HyperlinkRegistry::new();
+    let mut live = HashSet::new();
+
+    // Fill to the count cap, keeping only every hundredth id live.
+    for index in 0..MAX_HYPERLINKS {
+        let hid = registry.intern(None, &format!("https://example.com/{index}"));
+        if index % 100 == 0 {
+            live.insert(hid);
+        }
+    }
+    assert_eq!(registry.len(), MAX_HYPERLINKS, "precondition: the registry is full");
+    assert!(
+        registry.try_intern(None, "https://example.com/wedged").is_none(),
+        "precondition: a full registry refuses new links"
+    );
+    let full_bytes = registry.retained_bytes();
+
+    let freed = registry.retain_live(&live);
+
+    assert_eq!(freed, MAX_HYPERLINKS - live.len(), "every unreferenced entry must be freed");
+    assert_eq!(registry.len(), live.len());
+    assert!(
+        registry.retained_bytes() < full_bytes,
+        "the enforced byte figure must fall: {} !< {full_bytes}",
+        registry.retained_bytes()
+    );
+    assert!(
+        registry.try_intern(None, "https://example.com/after-reclaim").is_some(),
+        "reclaiming must reopen admission, not merely release memory"
+    );
+    for hid in &live {
+        assert!(registry.lookup(*hid).is_some(), "a referenced link must survive the sweep");
+    }
+}
+
+/// A swept registry re-interns a freed URI as a *new* id.
+///
+/// Both maps must be freed together. Dropping only `by_id` would leave the
+/// `by_key` entry to hand back an id that no longer resolves, so `lookup`
+/// would return `None` for a link the registry reported as interned.
+#[test]
+fn a_freed_uri_re_interns_to_a_working_id() {
+    let mut registry = HyperlinkRegistry::new();
+    let stale = registry.intern(None, "https://example.com/stale");
+    let kept = registry.intern(None, "https://example.com/kept");
+
+    let live: HashSet<HyperlinkId> = [kept].into_iter().collect();
+    assert_eq!(registry.retain_live(&live), 1);
+    assert!(registry.lookup(stale).is_none(), "the freed id must stop resolving");
+
+    let reborn = registry.intern(None, "https://example.com/stale");
+    assert_ne!(reborn, stale, "a re-interned URI must get a fresh id");
+    assert_ne!(reborn, HyperlinkId(0), "re-interning must not return the invalid sentinel");
+    assert_eq!(
+        registry.lookup(reborn).map(|link| link.uri.as_str()),
+        Some("https://example.com/stale"),
+        "the re-interned id must resolve to its URI"
+    );
+}
+
+/// A sweep that frees nothing leaves the registry byte-for-byte unchanged.
+#[test]
+fn a_sweep_with_everything_live_changes_nothing() {
+    let mut registry = HyperlinkRegistry::new();
+    let live: HashSet<HyperlinkId> =
+        (0..64).map(|i| registry.intern(None, &format!("https://example.com/{i}"))).collect();
+    let before_len = registry.len();
+    let before_bytes = registry.retained_bytes();
+
+    assert_eq!(registry.retain_live(&live), 0);
+    assert_eq!(registry.len(), before_len);
+    assert_eq!(registry.retained_bytes(), before_bytes);
+}
+
+/// `clear` returns the registry to exactly its constructed state.
+#[test]
+fn clear_returns_the_registry_to_empty() {
+    let mut registry = HyperlinkRegistry::new();
+    for i in 0..128 {
+        registry.intern(None, &format!("https://example.com/{i}"));
+    }
+
+    registry.clear();
+
+    assert!(registry.is_empty());
+    assert_eq!(registry.len(), 0);
+    assert_eq!(registry.retained_bytes(), 0, "clearing must zero the enforced byte figure");
+    assert!(registry.try_intern(None, "https://example.com/after").is_some());
+}
+
+/// Rejections say which limit refused them, because the remedies differ.
+///
+/// All three paths returned a bare `None` before, so a caller could not tell
+/// "no room right now" from "never". The parser sweeps the whole grid and
+/// retries on a full registry; doing that for an oversized URI is an
+/// `O(visible + scrollback)` walk that cannot change the answer, repeated per
+/// link for as long as the shell keeps emitting them.
+#[test]
+fn rejections_report_which_limit_refused_them() {
+    let mut registry = HyperlinkRegistry::new();
+
+    // Oversized URI: no reclamation can ever admit it.
+    let huge = "x".repeat(MAX_HYPERLINK_URI_BYTES + 1);
+    assert_eq!(
+        registry.intern_or_reject(None, &huge),
+        Err(AdmissionRejection::ItemTooLarge),
+        "an oversized URI must report a permanent rejection"
+    );
+    assert!(
+        !AdmissionRejection::ItemTooLarge.is_retryable_after_reclaim(),
+        "a permanently-rejected item must not invite a sweep"
+    );
+
+    // Oversized client id, same class.
+    let huge_id = "i".repeat(MAX_HYPERLINK_CLIENT_ID_BYTES + 1);
+    assert_eq!(
+        registry.intern_or_reject(Some(&huge_id), "https://example.com/"),
+        Err(AdmissionRejection::ItemTooLarge)
+    );
+
+    // Count limit: reclamation can relieve this one.
+    for index in 0..MAX_HYPERLINKS {
+        let _ = registry.intern(None, &format!("https://example.com/{index}"));
+    }
+    let full = registry.intern_or_reject(None, "https://example.com/one-more");
+    assert_eq!(
+        full,
+        Err(AdmissionRejection::ItemCountLimit),
+        "a full registry must report the count limit, not a size limit"
+    );
+    assert!(
+        AdmissionRejection::ItemCountLimit.is_retryable_after_reclaim(),
+        "a count limit is exactly what reclamation relieves"
+    );
+}
+
+/// The byte budget is distinguishable from the count budget.
+///
+/// Both mean "full", but one is relieved by releasing a large entry and the
+/// other by releasing any entry. Reporting them identically loses that.
+#[test]
+fn the_byte_budget_reports_itself_distinctly() {
+    let mut registry = HyperlinkRegistry::new();
+    let base = "https://example.com/".to_string() + &"x".repeat(MAX_HYPERLINK_URI_BYTES - 40);
+
+    let mut rejection = None;
+    for index in 0..30_000u32 {
+        if let Err(reason) = registry.intern_or_reject(None, &format!("{base}{index:08}")) {
+            rejection = Some(reason);
+            break;
+        }
+    }
+
+    assert_eq!(
+        rejection,
+        Some(AdmissionRejection::PerOwnerBudget),
+        "maximum-length URIs must exhaust the byte budget before the count cap, \
+         and must say so"
+    );
+    assert!(AdmissionRejection::PerOwnerBudget.is_retryable_after_reclaim());
+}
+
+/// Reason codes are stable strings, so an operator can grep across versions.
+#[test]
+fn reason_codes_are_stable_and_distinct() {
+    use std::collections::HashSet;
+
+    let all = [
+        AdmissionRejection::ItemTooLarge,
+        AdmissionRejection::PerOwnerBudget,
+        AdmissionRejection::ProcessBudget,
+        AdmissionRejection::ItemCountLimit,
+        AdmissionRejection::Cancelled,
+    ];
+    let codes: HashSet<&str> = all.iter().map(|reason| reason.code()).collect();
+
+    assert_eq!(codes.len(), all.len(), "every rejection must have a distinct code");
+    assert_eq!(AdmissionRejection::ItemTooLarge.code(), "item_too_large");
+    assert_eq!(AdmissionRejection::ProcessBudget.code(), "process_budget");
+    for code in codes {
+        assert!(
+            code.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+            "codes are grepped from logs, so they must stay snake_case: {code}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Table overhead
+//
+// `retained_bytes` counted the interned strings and not the two `HashMap`s
+// holding them. That is not only a reporting defect: `try_intern` admits
+// against this same figure, so an undercount admits past the cap rather than
+// merely misreporting it.
+// ---------------------------------------------------------------------------
+
+/// The reported figure must track real heap, not just the strings.
+///
+/// Measured against a counting allocator at three sizes before this landed:
+/// reported 983,040 against 4,718,624 actual — **4.80x** — because the two
+/// `hashbrown` tables cost roughly 3.7 MB against 1.0 MB of strings.
+#[test]
+fn reported_bytes_include_the_tables_that_hold_the_strings() {
+    let mut registry = HyperlinkRegistry::default();
+    for index in 0..2_000u32 {
+        registry.intern(None, &format!("https://example.com/a-path/{index}"));
+    }
+
+    let strings: usize = (0..2_000u32)
+        .map(|index| format!("https://example.com/a-path/{index}").len())
+        .sum::<usize>()
+        * 2;
+
+    let reported = registry.retained_bytes();
+    assert!(
+        reported > strings,
+        "reported {reported} does not exceed the {strings} bytes of strings alone; \
+         the tables holding them are uncounted"
+    );
+
+    // The tables are the dominant term at this size, not a rounding correction.
+    assert!(
+        reported > strings * 2,
+        "the table term must be material: reported {reported} against {strings} of strings"
+    );
+}
+
+/// Admission must stop before the cap, judged on the figure it uses.
+///
+/// Necessary but **not sufficient**: with tables uncounted this also passed,
+/// because the registry stopped at 8,388,244 against a cap of 8,388,608 —
+/// compliant on the number it reports while holding ~4.7 MB more. The
+/// heap-truth check that catches that lives in
+/// `tests/hyperlink_heap_truth.rs`, which needs a crate-wide allocator.
+#[test]
+fn the_registry_stops_admitting_at_its_cap() {
+    let mut registry = HyperlinkRegistry::default();
+    let uri = "u".repeat(256);
+
+    for index in 0..MAX_HYPERLINKS {
+        if registry.try_intern(None, &format!("{uri}{index}")).is_none() {
+            break;
+        }
+        assert!(
+            registry.retained_bytes() <= MAX_HYPERLINK_METADATA_BYTES,
+            "the registry passed its own cap at entry {index}: {} > {MAX_HYPERLINK_METADATA_BYTES}",
+            registry.retained_bytes()
+        );
+    }
+
+    assert!(!registry.is_empty(), "precondition: the registry admitted something");
+    assert!(
+        registry.retained_bytes() > MAX_HYPERLINK_METADATA_BYTES / 2,
+        "the run must approach the cap, or this asserts nothing: {}",
+        registry.retained_bytes()
+    );
+}
+
+/// Freeing entries must return the table bytes, not only the string bytes.
+///
+/// `HashMap` does not shrink on removal, so a figure that decremented only the
+/// strings would report a registry as empty while it still held ~934 KB of
+/// table — a reported zero over real memory, which is the case a diagnostic
+/// exists to prevent.
+#[test]
+fn clearing_returns_the_table_bytes_it_charged() {
+    let mut registry = HyperlinkRegistry::default();
+    for index in 0..4_000u32 {
+        registry.intern(None, &format!("https://example.com/{index}"));
+    }
+    assert!(registry.retained_bytes() > 0, "precondition: the registry holds bytes");
+
+    registry.clear();
+
+    assert_eq!(registry.len(), 0, "clear must empty the registry");
+    assert_eq!(
+        registry.retained_bytes(),
+        0,
+        "a registry reporting zero must hold zero — including its tables"
+    );
+
+    // And it must still work afterwards.
+    let id = registry.try_intern(None, "https://example.com/after-clear");
+    assert!(id.is_some(), "the registry must still admit after a clear");
+}
+
+/// A sweep must return table bytes proportionally.
+#[test]
+fn retaining_a_subset_returns_the_freed_entries_table_bytes() {
+    let mut registry = HyperlinkRegistry::default();
+    let mut ids = Vec::new();
+    for index in 0..4_000u32 {
+        if let Some(id) = registry.try_intern(None, &format!("https://example.com/{index}")) {
+            ids.push(id);
+        }
+    }
+    let full = registry.retained_bytes();
+
+    // Keep a tenth.
+    let live: std::collections::HashSet<_> = ids.iter().take(400).copied().collect();
+    registry.retain_live(&live);
+
+    let after = registry.retained_bytes();
+    assert!(
+        after < full / 2,
+        "keeping a tenth of the entries must return most of the bytes: {after} against {full}"
+    );
+    assert_eq!(registry.len(), live.len(), "the surviving entries must be exactly the live set");
+}

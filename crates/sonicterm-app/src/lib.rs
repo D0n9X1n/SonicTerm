@@ -5,7 +5,7 @@
 //! overlays, tab transfer, OS-drag bridges, menubar abstractions, and the
 //! platform-shell builders consumed by the macOS and Windows binaries.
 
-// TODO: add per-item docs and switch to #![deny(missing_docs)] in a follow-up PR.
+// TODO: add per-item docs and switch to #![deny(missing_docs)].
 #![allow(missing_docs)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 

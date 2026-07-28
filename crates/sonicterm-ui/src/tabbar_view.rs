@@ -245,12 +245,12 @@ impl TabBarLayout {
         Self::compute_with_height(bar, window_width, TAB_BAR_HEIGHT)
     }
 
-    /// Width of the Phase D insertion gap in logical px.
+    /// Width of the insertion gap in logical px.
     /// Tabs at or after the insertion slot shift right by this amount
     /// while a drag is in progress, previewing the drop position.
     pub const INSERTION_GAP_PX: f32 = 8.0;
 
-    /// Like [`Self::compute_with_height`] but also opens a Phase D
+    /// Like [`Self::compute_with_height`] but also opens an
     /// insertion gap of [`Self::INSERTION_GAP_PX`] pixels at
     /// `insertion_slot` so the user can see where a dragged tab will
     /// land. `insertion_slot` is in `[0, n]` (insertion-slot
@@ -295,7 +295,7 @@ impl TabBarLayout {
     /// indicator, and title hit zones all share bottom coordinates.
     ///
     /// All sizes (`bar_height`, `bar_y`, `window_width`) live in the
-    /// **same coordinate system** the renderer uses (raster px post-G1a).
+    /// **same coordinate system** the renderer uses (raster px).
     /// The logical-px constants (`TAB_GAP`,
     /// `BAR_LEFT_PAD`, `TAB_INNER_PAD`) are auto-scaled to that system
     /// by treating `bar_height` as the reference: the default unscaled

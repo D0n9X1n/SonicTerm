@@ -16,19 +16,16 @@ fn font_weight_scale_defaults_to_identity_and_is_documented() {
 #[test]
 fn font_weight_scale_rejects_non_finite_and_out_of_range_values() {
     for value in [f32::NAN, f32::INFINITY, 0.0, 0.49, 5.01] {
-        let mut font = FontConfig::default();
-        font.weight_scale = value;
+        let font = FontConfig { weight_scale: value, ..FontConfig::default() };
         assert_eq!(font.effective_weight_scale(), 1.0);
     }
-    let mut font = FontConfig::default();
-    font.weight_scale = 1.1;
+    let font = FontConfig { weight_scale: 1.1, ..FontConfig::default() };
     assert_eq!(font.effective_weight_scale(), 1.1);
     // Guards the range extension: the renderer and font-stack clamps must
     // accept the same span, otherwise a value valid here is silently reset
     // to 1.0 further down the pipeline.
     for value in [2.5, 5.0] {
-        let mut font = FontConfig::default();
-        font.weight_scale = value;
+        let font = FontConfig { weight_scale: value, ..FontConfig::default() };
         assert_eq!(font.effective_weight_scale(), value);
     }
 }

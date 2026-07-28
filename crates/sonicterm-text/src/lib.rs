@@ -13,18 +13,16 @@
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-// T13/T14 (chrome migration) co-landed the T10 hard-delete of the
-// cosmic-text + swash modules — the only consumer (sonicterm-gpu)
-// stopped referencing every symbol in those files once chrome moved
-// to `chrome_text::layout`, so leaving the modules on disk would
-// break the workspace gate (the legacy files import deleted
-// helpers that already broke during T8/T9). The deleted module
-// list mirrors the v5 spec §"What dies":
+// The chrome migration removed the cosmic-text + swash modules. The
+// only consumer (sonicterm-gpu) stopped referencing every symbol in
+// those files once chrome moved to `chrome_text::layout`, and leaving
+// the modules on disk would break the workspace gate, since they import
+// helpers that no longer exist. What was deleted:
 //
 // - `async_fallback.rs`        — cosmic-text-driven fallback loader
 // - `block_element_geometry.rs`— SonicTerm-specific Block Element
 //                                geometry overlay (wezterm vendored
-//                                customglyph in T7 covers the same set)
+//                                customglyph covers the same set)
 // - `box_drawing_geometry.rs`  — likewise box-drawing overlay
 // - `metrics.rs`               — cosmic-text `measure_cell` etc.
 // - `prewarm.rs`               — pre-bake walker (swash-driven)

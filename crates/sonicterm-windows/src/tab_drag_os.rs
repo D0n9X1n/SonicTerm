@@ -1,4 +1,4 @@
-//! Phase C2 — Windows `OsTabDragBackend` implementation.
+//! Windows `OsTabDragBackend` implementation.
 //!
 //! Wires `begin_session` straight into the existing OLE `DoDragDrop`
 //! loop in [`crate::os_drag_win`]. Same-process drag uses the in-memory
@@ -65,10 +65,7 @@ impl WinOsTabDragBackend {
     }
 
     fn take_registered_hwnd(&self, window_id: WindowId) -> Option<u64> {
-        self.registered_windows
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(&window_id)
+        self.registered_windows.lock().unwrap_or_else(|p| p.into_inner()).remove(&window_id)
     }
 }
 
@@ -174,7 +171,7 @@ impl OsTabDragBackend for WinOsTabDragBackend {
                 DragOutcome::DroppedOnBar { target_window: None, target_slot: source_tab_idx }
             }
             _ => {
-                // Phase A: DROPEFFECT_NONE means the user
+                // DROPEFFECT_NONE means the user
                 // released over bare desktop / a non-SonicTerm window.
                 // Capture the cursor position via Win32 GetCursorPos
                 // (screen coordinates) so the App can spawn a torn-out

@@ -161,7 +161,6 @@ impl FontLocator for CoreTextFontLocator {
                     // Only use normal attributed text for fallbacks,
                     // otherwise we'll end up picking something with
                     // undefined and undesirable attributes
-                    // <https://github.com/wezterm/wezterm/issues/4808>
                     continue;
                 }
 
@@ -203,7 +202,11 @@ impl FontLocator for CoreTextFontLocator {
 
         matches.sort_by(|(a_len, a), (b_len, b)| {
             let primary = a_len.cmp(b_len).reverse();
-            if primary == Ordering::Equal { a.cmp(b) } else { primary }
+            if primary == Ordering::Equal {
+                a.cmp(b)
+            } else {
+                primary
+            }
         });
         matches.dedup();
 
@@ -263,7 +266,6 @@ fn build_fallback_list_impl() -> anyhow::Result<Vec<ParsedFont>> {
     let mut fonts = vec![];
     // Explicitly include Menlo itself, as it appears to be the only
     // font on macOS that contains U+2718.
-    // <https://github.com/wezterm/wezterm/issues/849>
     fonts.append(&mut handles_from_descriptor(&menlo.copy_descriptor()));
     for descriptor in &cascade {
         fonts.append(&mut handles_from_descriptor(&descriptor));

@@ -173,7 +173,10 @@ fn custom_tab_color_does_not_emit_unfocused_panel_marker() {
     tabs.activate(0);
     tabs.set_active_custom_color("#83a598");
 
-    let layout = sonicterm_render_model::boundary::ui::tabbar_view::TabBarLayout::compute_with_height(&tabs, 400.0, 40.0);
+    let layout =
+        sonicterm_render_model::boundary::ui::tabbar_view::TabBarLayout::compute_with_height(
+            &tabs, 400.0, 40.0,
+        );
     let mut quads = Vec::new();
     emit_tab_bar_quads(
         &mut quads,
@@ -201,7 +204,10 @@ fn custom_tab_color_emits_focused_panel_marker_once() {
     tabs.activate(0);
     tabs.set_active_custom_color("#83a598");
 
-    let layout = sonicterm_render_model::boundary::ui::tabbar_view::TabBarLayout::compute_with_height(&tabs, 400.0, 40.0);
+    let layout =
+        sonicterm_render_model::boundary::ui::tabbar_view::TabBarLayout::compute_with_height(
+            &tabs, 400.0, 40.0,
+        );
     let mut quads = Vec::new();
     emit_tab_bar_quads(
         &mut quads,
@@ -258,10 +264,7 @@ fn preedit_caret_advance_zero_for_whitespace_only() {
 #[test]
 fn preedit_caret_advance_nonzero_for_real_composition() {
     // Real composition still advances the caret to the insertion point.
-    assert!(
-        preedit_caret_advance("ni", 2, 16.0) > 0.0,
-        "latin composing run advances the caret"
-    );
+    assert!(preedit_caret_advance("ni", 2, 16.0) > 0.0, "latin composing run advances the caret");
     assert!(
         preedit_caret_advance("\u{4f60}", 3, 16.0) > 0.0,
         "CJK composing run advances the caret"
@@ -510,15 +513,8 @@ fn inline_image_atlas_skips_older_images_without_eviction() {
         InlineImagePlacement { image: &newer, origin_x: 0.0, origin_y: 0.0, painter_order: 1 },
     ];
 
-    let skipped = emit_inline_image_instances(
-        &mut atlas,
-        &mut instances,
-        &placements,
-        1.0,
-        1.0,
-        10.0,
-        10.0,
-    );
+    let skipped =
+        emit_inline_image_instances(&mut atlas, &mut instances, &placements, 1.0, 1.0, 10.0, 10.0);
 
     let newer_key = sonicterm_types::GlyphKey {
         ch: '\u{fffc}',
@@ -1057,4 +1053,385 @@ fn shaped_glyph_column_check_rejects_backtracking_columns() {
     ];
 
     assert!(!shaped_glyph_columns_are_monotonic(&glyphs));
+}
+
+// --- Atlas reset / row-cache invalidation pairing ------------------
+
+/// Every atlas reset must flush the row glyph cache and defeat the frame-skip
+/// guard, in the same function.
+///
+/// The row cache tags entries with `glyph_atlas.evictions()` alone — the
+/// atlas-local counter, with no allocation-generation component. That filter
+/// cannot tell an old atlas's epoch-0 from a fresh atlas's epoch-0, so a row
+/// entry that outlived a reset could match against tiles it was never built
+/// for and sample whatever now occupies those rectangles.
+///
+/// `last_frame_key` is the second half: it skips presentation when a frame is
+/// byte-identical to the last one. A reset changes what that same frame
+/// *renders to*, so a surviving key can skip the redraw and leave pre-reset
+/// pixels on screen.
+///
+/// Nothing structural enforces either pairing. What holds today is that all
+/// four `reset_glyph_atlas_in_place` call sites happen to do both in the same
+/// function. A fifth reset path missing either call reintroduces a
+/// stale-pixel class with no compile error and no failing test.
+///
+/// Order is deliberately not asserted. Flushing before the reset is at least
+/// as safe as flushing after — one arrangement hoists the invalidation above
+/// the reset so it covers both transition directions — so the requirement is
+/// that both calls appear in the same function, not that they appear in a
+/// particular sequence.
+///
+/// `GpuRenderer` needs a live wgpu device and a window, so the pairing cannot
+/// be driven at runtime in a unit test. Reading the source is the available
+/// check, and it is the one that would actually catch the regression: the
+/// mistake being guarded is an omitted call, which is visible in the text.
+#[test]
+fn every_glyph_atlas_reset_invalidates_the_row_cache() {
+    const CORE_SRC: &str = include_str!("core.rs");
+    const RESET: &str = "self.reset_glyph_atlas_in_place(";
+    const INVALIDATE: &str = "self.row_glyph_cache.invalidate_all()";
+    const CLEAR_FRAME_KEY: &str = "self.last_frame_key = None";
+
+    let lines: Vec<&str> = CORE_SRC.lines().collect();
+    let reset_sites: Vec<usize> =
+        lines.iter().enumerate().filter(|(_, l)| l.contains(RESET)).map(|(i, _)| i).collect();
+
+    // Guard against the check silently passing because the call was renamed
+    // and no site matches any more.
+    assert!(
+        reset_sites.len() >= 4,
+        "expected at least the four known atlas reset sites, found {}; \
+         if `reset_glyph_atlas_in_place` was renamed, update this test",
+        reset_sites.len()
+    );
+
+    for &site in &reset_sites {
+        // Search the whole enclosing function, not just forward from the
+        // reset. Flushing the cache *before* replacing the atlas is at least
+        // as safe as flushing it after, and one call site does exactly that —
+        // hoisting the invalidation above the reset so it runs on both
+        // transition directions. A forward-only scan would read that safer
+        // arrangement as a violation, so the invariant is "somewhere in the
+        // same function", not "after".
+        let start = lines[..site]
+            .iter()
+            .rposition(|line| {
+                line.starts_with("    fn ")
+                    || line.starts_with("    pub fn ")
+                    || line.starts_with("    pub(crate) fn ")
+            })
+            .map_or(0, |index| index + 1);
+        let end = lines
+            .iter()
+            .enumerate()
+            .skip(site + 1)
+            .find(|(_, line)| {
+                line.starts_with("    fn ")
+                    || line.starts_with("    pub fn ")
+                    || line.starts_with("    pub(crate) fn ")
+                    || line.starts_with("impl ")
+                    || line.starts_with("}")
+            })
+            .map_or(lines.len(), |(index, _)| index);
+
+        let body = &lines[start..end];
+        let invalidated = body.iter().any(|line| line.contains(INVALIDATE));
+        let frame_key_cleared = body.iter().any(|line| line.contains(CLEAR_FRAME_KEY));
+        assert!(
+            invalidated,
+            "core.rs:{} resets the glyph atlas without calling \
+             `row_glyph_cache.invalidate_all()` in the same function.\n\
+             The row cache keys on the atlas eviction count alone, which resets \
+             with the atlas, so surviving entries can match a fresh atlas and \
+             sample tiles they were not built against.\n\
+             Offending line: {}",
+            site + 1,
+            lines[site].trim()
+        );
+        assert!(
+            frame_key_cleared,
+            "core.rs:{} resets the glyph atlas without clearing \
+             `last_frame_key` in the same function.\n\
+             The frame key skips presentation when a frame is unchanged. A reset \
+             changes what the same frame renders to, so a stale key can skip the \
+             redraw and leave pre-reset pixels on screen.\n\
+             Offending line: {}",
+            site + 1,
+            lines[site].trim()
+        );
+    }
+}
+
+// --- Image atlas promotion / demotion ------------------------------
+
+/// A window with no inline media must not clear its image atlas on every
+/// frame it draws.
+///
+/// The frame-assembly guard asks whether inline media *changed*, and that
+/// question is answered `true` whenever the previous frame key is absent —
+/// which is every frame following any of the many state changes that clear
+/// it. The media hash itself is deterministic, so on a window that has never
+/// shown an image the hash arm can never fire and the absent-key arm accounts
+/// for every reset. The result is one reset per rendered frame on a window
+/// with nothing to reset.
+///
+/// Resetting an atlas that holds nothing is not free: it rebuilds the packer
+/// and bumps the atlas identity, which invalidates every dependent cache
+/// keyed to it. Gating on whether the atlas actually holds anything is
+/// therefore correct regardless of why the frame key was cleared.
+#[test]
+fn an_empty_placeholder_image_atlas_is_not_reset_every_frame() {
+    let placeholder = GlyphAtlas::new(PLACEHOLDER_ATLAS_DIM, PLACEHOLDER_ATLAS_DIM);
+
+    // The reported defect: a window with no media, drawing frames, whose
+    // atlas is still the untouched 1x1 placeholder. Nothing to clear.
+    assert!(
+        !image_atlas_reset_warranted(&placeholder),
+        "an empty placeholder atlas must not be reset; there is nothing in it to clear"
+    );
+
+    // A promoted atlas carries packer and eviction state even when its entry
+    // map is momentarily empty, so it must still reset. Guarding on emptiness
+    // alone would strand that state and let the packer refuse new inserts.
+    let promoted = GlyphAtlas::default_size();
+    assert!(
+        image_atlas_reset_warranted(&promoted),
+        "a promoted atlas must still be reset even while its entry map is empty"
+    );
+}
+
+/// The frame-assembly call site actually consults the reset guard.
+///
+/// The predicate test above pins the decision, but nothing structural forces
+/// frame assembly to ask. Dropping the call from the condition restores one
+/// reset per rendered frame on a window with no media, and it does so with no
+/// compile error and no other failing test — the predicate would simply go
+/// unused at that site while every assertion about it still held.
+///
+/// `GpuRenderer` needs a live wgpu device and a window, so the composed guard
+/// cannot be driven at runtime in a unit test. Reading the source is the
+/// available check, and it is the one that catches this regression: the
+/// mistake being guarded is an omitted call, which is visible in the text.
+#[test]
+fn image_atlas_reset_is_gated_on_the_atlas_holding_something() {
+    const CORE_SRC: &str = include_str!("core.rs");
+    const RESET_CALL: &str = "self.reset_image_atlas()";
+    const GUARD: &str = "image_atlas_reset_warranted(";
+
+    let lines: Vec<&str> = CORE_SRC.lines().collect();
+    let reset_sites: Vec<usize> =
+        lines.iter().enumerate().filter(|(_, l)| l.contains(RESET_CALL)).map(|(i, _)| i).collect();
+
+    // Guard against the check silently passing because the call was renamed
+    // and no site matches any more.
+    assert!(
+        reset_sites.len() >= 2,
+        "expected at least the two known image-atlas reset sites, found {}; \
+         if `reset_image_atlas` was renamed, update this test",
+        reset_sites.len()
+    );
+
+    // The frame-assembly site is the per-frame one. Find it by the condition
+    // that precedes it: the surface-transition site resets unconditionally
+    // once, which is correct there and must not be required to carry a guard.
+    let frame_site = reset_sites
+        .iter()
+        .copied()
+        .find(|&site| {
+            lines[site.saturating_sub(6)..site].iter().any(|l| l.contains("inline_media_changed"))
+        })
+        .expect(
+            "no image-atlas reset site is preceded by an `inline_media_changed` condition; \
+             if frame assembly was restructured, update this test",
+        );
+
+    let guard_window = &lines[frame_site.saturating_sub(6)..frame_site];
+    assert!(
+        guard_window.iter().any(|l| l.contains(GUARD)),
+        "the per-frame image-atlas reset at line {} is not gated on \
+         `image_atlas_reset_warranted`; without it a window with no inline media \
+         resets an empty atlas on every frame it draws",
+        frame_site + 1
+    );
+}
+
+/// A promoted image atlas is released once the window stops showing media,
+/// but not on the first idle frame.
+///
+/// `reset_in_place` clears the map and repacker and never touches the pixel
+/// buffer, so promotion is otherwise permanent: a window that displays one
+/// inline image holds 16 MiB of CPU pixels — plus a matching GPU texture off
+/// the software path — until it closes. Across windows that is the largest
+/// retained term in the process.
+///
+/// The delay is the load-bearing part. Demoting on the first frame without
+/// visible media would free and reallocate the atlas every time an image
+/// scrolled out of view and back, re-decoding every visible image each time.
+#[test]
+fn an_idle_image_atlas_is_released_but_not_on_the_first_idle_frame() {
+    let promoted = GlyphAtlas::default_size();
+    let placeholder = GlyphAtlas::new(PLACEHOLDER_ATLAS_DIM, PLACEHOLDER_ATLAS_DIM);
+
+    // Media visible: never demote, however long the window has been idle
+    // before — the counter resets at the call site.
+    assert!(
+        !image_atlas_demotion_ready(&promoted, true, IMAGE_ATLAS_IDLE_FRAMES * 10),
+        "an atlas must never be released while media is on screen"
+    );
+
+    // Idle, but not yet long enough.
+    assert!(
+        !image_atlas_demotion_ready(&promoted, false, 0),
+        "the first idle frame must not release the atlas"
+    );
+    assert!(
+        !image_atlas_demotion_ready(&promoted, false, IMAGE_ATLAS_IDLE_FRAMES - 1),
+        "one frame short of the threshold must not release the atlas"
+    );
+
+    // Idle long enough.
+    assert!(
+        image_atlas_demotion_ready(&promoted, false, IMAGE_ATLAS_IDLE_FRAMES),
+        "a sustained absence of media must release the atlas"
+    );
+
+    // Already at placeholder size: nothing to release, so no repeated work.
+    assert!(
+        !image_atlas_demotion_ready(&placeholder, false, IMAGE_ATLAS_IDLE_FRAMES * 10),
+        "a placeholder atlas must not be re-released every frame"
+    );
+
+    // Promotion and demotion must not both fire for the same state, or a
+    // window with no media would allocate and free every frame.
+    for frames in [0, IMAGE_ATLAS_IDLE_FRAMES, IMAGE_ATLAS_IDLE_FRAMES * 2] {
+        for has_media in [false, true] {
+            let promote = image_atlas_promotion_required(&placeholder, has_media);
+            let demote = image_atlas_demotion_ready(&placeholder, has_media, frames);
+            assert!(
+                !(promote && demote),
+                "placeholder atlas: promote and demote both fired (media={has_media}, frames={frames})"
+            );
+            let promote_full = image_atlas_promotion_required(&promoted, has_media);
+            let demote_full = image_atlas_demotion_ready(&promoted, has_media, frames);
+            assert!(
+                !(promote_full && demote_full),
+                "promoted atlas: promote and demote both fired (media={has_media}, frames={frames})"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Renderer retention reporting
+//
+// `GpuRenderer` needs a real adapter, so it cannot be built here. The
+// aggregation and class mapping are pure and are tested directly; what a live
+// renderer puts into them is covered by the atlas and software-frame suites
+// that already exist.
+// ---------------------------------------------------------------------------
+
+fn amount(bytes: usize, items: usize) -> ResourceAmount {
+    ResourceAmount { bytes, items }
+}
+
+/// Every part must reach a class, and no part may be charged twice.
+///
+/// The failure this guards is a part added to `RendererRetention` without a
+/// matching row in `seam_classes` — it would be counted by `total()` and
+/// classified as nothing, so the struct would report a byte it could not name.
+///
+/// A structural check on the struct, not on a charge path. Nothing charges
+/// these classes; see `RendererRetention::seam_classes`.
+#[test]
+fn every_reported_part_is_classified_exactly_once() {
+    let retention = RendererRetention {
+        glyph_atlas: amount(16 * 1024 * 1024, 512),
+        image_atlas: amount(8 * 1024 * 1024, 12),
+        software_frame: amount(4 * 1024 * 1024, 1),
+    };
+
+    let classes = retention.seam_classes();
+    let classified: usize = classes.iter().map(|(_, part)| part.bytes).sum();
+
+    assert_eq!(
+        classified,
+        retention.total().bytes,
+        "the classified parts must account for every byte the struct reports"
+    );
+
+    let distinct: std::collections::HashSet<_> = classes.iter().map(|(class, _)| *class).collect();
+    assert_eq!(
+        distinct.len(),
+        classes.len(),
+        "no class may appear twice, or bytes are counted twice"
+    );
+}
+
+/// The software frame is reported on every platform, zero where absent.
+///
+/// A caller reading renderer classes should not need a `#[cfg(windows)]`
+/// branch — an absent part and an empty part read the same.
+#[test]
+fn the_software_frame_part_is_present_on_every_platform() {
+    let retention = RendererRetention::default();
+    let classes = retention.seam_classes();
+
+    assert!(
+        classes.iter().any(|(class, _)| *class == ResourceClass::SoftwareFrame),
+        "SoftwareFrame must be classified on every platform, zero where there is no software path"
+    );
+    assert_eq!(retention.total(), ResourceAmount::default(), "a default renderer holds nothing");
+}
+
+/// An empty renderer reports nothing.
+#[test]
+fn an_empty_renderer_reports_nothing() {
+    let classes = RendererRetention::default().seam_classes();
+    assert!(classes.iter().all(|(_, part)| part.bytes == 0 && part.items == 0));
+}
+
+/// The resource table's `SoftwareFrame` bound is this crate's surface clamp.
+///
+/// `ClassCoverage::UnchargedRetention { per_owner_bytes }` asks how much can
+/// hide in a class nothing charges. The software frame is
+/// `width * height * 4`, so no single figure describes it and the honest
+/// answer is the most one surface may hold — [`MAX_SURFACE_BYTES`], which
+/// `validated_surface_size` enforces on every construction and resize.
+///
+/// The table previously carried one 4K frame, 33,177,600 bytes. That is one
+/// common window, not a bound: a 5K window holds 178% of it and the clamp
+/// admits 5.06x. Nothing noticed it drifting, because the figure was a literal
+/// checked against nothing.
+///
+/// Asserted against the constant, not a copy of its value, so moving the clamp
+/// without moving the table fails here.
+#[test]
+fn the_tabled_software_frame_bound_is_the_surface_clamp() {
+    use sonicterm_types::{ClassCoverage, ResourceClass};
+
+    let ClassCoverage::UnchargedRetention { per_owner_bytes } =
+        ResourceClass::SoftwareFrame.coverage()
+    else {
+        panic!(
+            "SoftwareFrame must be UnchargedRetention: this crate computes it and no \
+             governor charges it"
+        );
+    };
+
+    assert_eq!(
+        u64::try_from(per_owner_bytes).expect("the bound fits u64"),
+        MAX_SURFACE_BYTES,
+        "the resource table's SoftwareFrame bound and this crate's surface clamp \
+         disagree; the table would misstate what one frame can hold"
+    );
+
+    // And the clamp is reachable in principle, or the bound is fiction. The
+    // per-axis cap is the binding constraint, not the byte cap.
+    let max_pixels = u64::from(MAX_SURFACE_DIMENSION) * u64::from(MAX_SURFACE_DIMENSION);
+    assert!(
+        max_pixels * 4 >= MAX_SURFACE_BYTES,
+        "the dimension cap makes the byte clamp unreachable, so the bound describes \
+         a surface that cannot exist"
+    );
 }

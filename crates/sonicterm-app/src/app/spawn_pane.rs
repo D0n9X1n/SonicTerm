@@ -1,4 +1,4 @@
-//! Extracted from `app/mod.rs` in refactor PR 8b (expose-then-extract).
+//! Extracted from `app/mod.rs` from the monolithic app module.
 //! `App`'s referenced fields are `pub(super)`; this submodule lives in
 //! the same `app` module tree, so direct field access works.
 
@@ -61,6 +61,7 @@ impl App {
             Arc::new(Mutex::new(Vec::new()));
         let inline_images: Arc<Mutex<Vec<sonicterm_render_model::InlineImage>>> =
             Arc::new(Mutex::new(Vec::new()));
+        let inline_media_charge = super::media::new_inline_media_charge();
         // fix: per-pane cursor_visible Arc lives outside the
         // pty-spawn match so we can store it on PaneState even if pty
         // spawn failed (and so a no-pty pane still has a valid Arc).
@@ -87,7 +88,7 @@ impl App {
             Ok(pty) => {
                 let parser_clone = parser.clone();
                 let out_rx = pty.out_rx.clone();
-                let in_tx_reply = pty.in_tx.clone();
+                let in_tx_reply = pty.input_sender();
                 let redraw_target_thread = redraw_target.clone();
                 let redraw_proxy = self.event_loop_proxy.clone();
                 // fix: VT thread captures the same Arc that
@@ -101,6 +102,11 @@ impl App {
                 let pty_burst_gen = self.pty_burst_gen.clone();
                 let command_events_thread = command_events.clone();
                 let inline_images_thread = inline_images.clone();
+                // This pane's share of the process-wide inline-media total.
+                // Co-owned with the pane: a shell exiting ends this thread
+                // while the pane stays on screen holding every image, so a
+                // charge released here would undercount live pixels.
+                let inline_media_charge_thread = inline_media_charge.clone();
                 // Forward parser replies (DSR/DA/XTVERSION/focus) to the pty
                 // master. Kept on its own thread so the VT loop never blocks
                 // pushing replies, and so a slow pty doesn't stall parsing.
@@ -108,8 +114,29 @@ impl App {
                     .name("sonicterm-vt-reply".into())
                     .spawn(move || {
                         while let Ok(bytes) = reply_rx.recv() {
-                            if in_tx_reply.send(bytes).is_err() {
-                                break;
+                            // Typed send: refuses rather than blocking, and
+                            // applies the same size cap as terminal input. The
+                            // raw sender this used to hold did neither, in a
+                            // thread whose reason for existing is that nothing
+                            // should block here.
+                            if let Err(error) = in_tx_reply.send(bytes) {
+                                match error {
+                                    sonicterm_io::pty::PtyInputError::WriterDisconnected(_) => {
+                                        break;
+                                    }
+                                    // A full queue means the child is not
+                                    // draining. Dropping one reply is correct:
+                                    // DSR/DA answers are idempotent status
+                                    // reports, and blocking here would stall
+                                    // the forwarder behind a stalled child.
+                                    dropped => {
+                                        tracing::debug!(
+                                            target: "memory",
+                                            ?dropped,
+                                            "parser reply dropped; the child is not draining input"
+                                        );
+                                    }
+                                }
                             }
                         }
                     })
@@ -223,7 +250,7 @@ impl App {
                                                         super::media::decode_inline_image(&media)
                                                     {
                                                         inline_images.push(image);
-                                                        super::media::trim_inline_images(
+                                                        super::media::trim_staged_inline_images(
                                                             &mut inline_images,
                                                         );
                                                     }
@@ -248,9 +275,21 @@ impl App {
                                         );
                                     }
                                     if !inline_images.is_empty() {
-                                        let mut images = inline_images_thread.lock();
-                                        images.extend(inline_images);
-                                        super::media::trim_inline_images(&mut images);
+                                        // Evicted images are carried out of
+                                        // the critical section and freed after
+                                        // the guard drops: releasing their
+                                        // pixel buffers takes milliseconds,
+                                        // and the render path waits on this
+                                        // same lock.
+                                        let evicted = {
+                                            let mut images = inline_images_thread.lock();
+                                            images.extend(inline_images);
+                                            super::media::trim_inline_images_charged(
+                                                &mut images,
+                                                &inline_media_charge_thread,
+                                            )
+                                        };
+                                        drop(evicted);
                                     }
                                     if !command_side_effects.is_empty() {
                                         super::append_bounded_command_events(
@@ -340,6 +379,7 @@ impl App {
         state.kitty_flags = kitty_flags_pane;
         state.app_cursor_keys = app_cursor_keys_pane;
         state.inline_images = inline_images;
+        state.inline_media_charge = inline_media_charge;
         state
     }
 }
@@ -367,6 +407,10 @@ impl App {
             split_ok
         };
         if did_split {
+            // Own the new pane now rather than on the next 30-second sample:
+            // until it has an owner its memory is attributed to nothing, and
+            // anything reserving against it has no owner to reserve against.
+            self.reconcile_pane_owners();
             self.resize_visible_panes();
             if let Some(r) = self.main_renderer_mut() {
                 r.flash_pane_focus(new_id);

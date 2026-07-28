@@ -122,9 +122,11 @@ impl FatAttributes {
 /// A single grid cell.
 ///
 /// Size goal (P1): **`size_of::<Cell> <= 24`** on 64-bit
-/// targets. Asserted in `tests/cell_size.rs`. The four inline fields
-/// account for 12 bytes (4 + 4 + 4 + 2) with 2 bytes of trailing pad
-/// before the 8-byte [`Option<Box<FatAttributes>>`]; total 24.
+/// targets, asserted at compile time in `cell_tests.rs`. The four
+/// inline fields account for 12 bytes (4 + 4 + 4 + 2) with 2 bytes
+/// of trailing pad before the 8-byte [`Option<Box<FatAttributes>>`];
+/// total 24. Grid capacity ceilings multiply this size, so growing
+/// it inflates every per-pane memory budget.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Cell {
     /// The lead character rendered in this cell.

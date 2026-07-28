@@ -34,6 +34,7 @@ When touching a crate, also read that crate's local `CLAUDE.md`.
 | Crate | Role |
 | --- | --- |
 | `sonicterm-types` | Shared contract types and trait seams. |
+| `sonicterm-resource` | Resource governor: ledger, owner hierarchy, reservations, reaper. |
 | `sonicterm-vt` | VT/ANSI parsing. |
 | `sonicterm-grid` | Cells, scrollback, dirty rows. |
 | `sonicterm-cfg` | Config, themes, keymaps, URL safety. |
@@ -61,8 +62,10 @@ When touching a crate, also read that crate's local `CLAUDE.md`.
 Normal PR/main CI runs workspace unit tests plus a per-crate unit/build gate:
 
 ```bash
+cargo fmt --all --check
 cargo test --workspace --lib --bins
 bash scripts/check-no-raw-process-exit.sh
+bash scripts/check-window-owner-registration.sh
 bash scripts/check-workspace-crates.sh
 scripts/rust-logic-coverage.sh
 ```

@@ -1,7 +1,7 @@
 //! Keyboard event → byte encoding for the PTY side, plus
 //! `KeyName` mapping used by the keymap parser.
 //!
-//! Extracted from `app/mod.rs` in refactor PR 8b.
+//! Extracted from `app/mod.rs` from the monolithic app module.
 
 use sonicterm_cfg::keymap::ScrollAction;
 use winit::{

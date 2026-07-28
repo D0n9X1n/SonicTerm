@@ -5,6 +5,7 @@ Developer documentation: [Architecture](ARCHITECTURE.md) · **Modules** · [Logg
 | Crate | Role |
 | --- | --- |
 | `sonicterm-types` | Contract crate: shared value types and trait seams. |
+| `sonicterm-resource` | Resource governor: sharded ledger, owner hierarchy, reservation tokens, bounded reaper supervisor. |
 | `sonicterm-vt` | VT/ANSI parser and terminal protocol handling. |
 | `sonicterm-grid` | Cells, scrollback, wide characters, dirty rows. |
 | `sonicterm-cfg` | TOML config, themes, keymaps, URL safety. |
@@ -24,8 +25,8 @@ Developer documentation: [Architecture](ARCHITECTURE.md) · **Modules** · [Logg
 | `sonicterm-engine` | WezTerm-compatible font engine adapter surface. |
 | `sonicterm-font-config` | Font configuration value helpers. |
 | `sonicterm-fontconfig` | fontconfig build/link shim. |
-| `sonicterm-freetype` | Freetype/libpng/zlib bindings. |
-| `sonicterm-harfbuzz` | Harfbuzz bindings. |
+| `sonicterm-freetype` | FreeType/libpng/zlib bindings. |
+| `sonicterm-harfbuzz` | HarfBuzz bindings. |
 
 Every crate has a local `CLAUDE.md` with purpose, public surface, test gate, and
 pitfalls.

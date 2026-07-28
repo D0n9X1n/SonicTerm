@@ -1,6 +1,6 @@
 //! `App::do_resumed` / `do_user_event` / `do_new_events` /
 //! `do_about_to_wait` — extracted from the `ApplicationHandler` trait impl
-//! in refactor PR 8b.
+//! from the monolithic app module.
 //!
 //! The trait methods in `mod.rs` are 1-line delegators that call into
 //! these `impl App` methods. Splitting the bodies out of the trait impl
@@ -57,28 +57,41 @@ impl App {
         }
         self.expire_quit_confirmation();
         self.warm_window_pool_maintain(el);
+        self.sample_pane_retention(Instant::now());
         let notification_wake = self.expire_notifications(Instant::now());
-        // Schedule the next blink-only redraw via `WaitUntil(..)`
-        // rather than `request_redraw()` from inside the render path
-        // (which produced the tight redraw loop flagged).
-        // The renderer hands us the exact instant of the next phase
-        // bucket boundary; fall back to `Wait` when blinking is off,
-        // the window is unfocused, or no renderer exists. Explicitly
-        // resetting to `Wait` (rather than leaving the previous
-        // `WaitUntil` in place) is what keeps idle CPU near zero —
-        // otherwise an unfocused window would keep waking at 26Hz.
-        let mut next: Option<std::time::Instant> = notification_wake;
+        // Reset the control flow on every pass rather than leaving the previous
+        // `WaitUntil` in place: that is what keeps idle CPU near zero. A
+        // deadline that has already elapsed re-fires `ResumeTimeReached` on
+        // every iteration, so a stale one spins the loop instead of letting it
+        // idle. With no contributor armed, idle parks in `Wait` and the app
+        // drives no wakes at all.
+        match self.wake_deadline(notification_wake) {
+            Some(at) => el.set_control_flow(ControlFlow::WaitUntil(at)),
+            None => el.set_control_flow(ControlFlow::Wait),
+        }
+    }
+
+    /// Earliest instant the event loop must wake, given the notification
+    /// expiry already computed by the caller.
+    ///
+    /// Folds every contributor: notification expiry, the Cmd+Q confirmation
+    /// window, the main window's deferred-redraw frame boundary, each pending
+    /// child window's frame boundary, and the cursor-blink phase boundary.
+    /// `None` means nothing is armed and the loop may park indefinitely.
+    ///
+    /// Every contributor min-folds. A deadline is a "wake no later than" bound,
+    /// so the earliest one wins; a contributor that overwrote instead of
+    /// folding would push an earlier deadline out past its due instant.
+    fn wake_deadline(&self, notification_wake: Option<Instant>) -> Option<Instant> {
+        let mut next: Option<Instant> = notification_wake;
         // Wake when the Cmd+Q confirmation window expires so a stale first press
         // does not make a much later Cmd+Q quit unexpectedly.
         if let Some(at) = self.quit_hold.deadline() {
             next = Some(next.map_or(at, |cur| cur.min(at)));
         }
-        // Perf audit #9: if a redraw was deferred for vsync pacing,
-        // schedule the next wake at the upcoming frame boundary. This
-        // takes priority over (and is bounded by) the blink deadline:
-        // typing latency must still feel instant, and a deferred
-        // redraw at frame_period in the future is the tightest budget
-        // that still preserves vsync alignment.
+        // A redraw deferred for vsync pacing wakes at its upcoming frame
+        // boundary: typing latency must still feel instant, and the frame
+        // boundary is the tightest budget that preserves vsync alignment.
         if self.pending_redraw {
             if let Some(last_render) = self.main().map(|ws| ws.last_render) {
                 let composing = self.main().map(|ws| ws.ime.is_composing()).unwrap_or(false);
@@ -87,7 +100,8 @@ impl App {
                     composing,
                     self.frame_period,
                 );
-                next = Some(last_render + period);
+                let at = last_render + period;
+                next = Some(next.map_or(at, |cur| cur.min(at)));
             }
         }
         // same vsync-pacing schedule for any CHILD window that
@@ -107,6 +121,11 @@ impl App {
                 next = Some(next.map_or(at, |cur| cur.min(at)));
             }
         }
+        // The next cursor-blink phase boundary is scheduled through this wake
+        // deadline rather than by calling `request_redraw()` from inside the
+        // render path, which would spin a tight redraw loop. The renderer
+        // returns the exact instant of the next phase bucket, or `None` when
+        // blinking is off, the window is unfocused, or no renderer exists.
         if let Some(r) = self.main_renderer() {
             // cursor_visible is per-pane — read from the
             // active pane of the active tab so the DECTCEM flag
@@ -129,10 +148,7 @@ impl App {
                 };
             }
         }
-        match next {
-            Some(at) => el.set_control_flow(ControlFlow::WaitUntil(at)),
-            None => el.set_control_flow(ControlFlow::Wait),
-        }
+        next
     }
 
     pub(super) fn do_new_events(&mut self, _el: &ActiveEventLoop, cause: winit::event::StartCause) {
@@ -220,7 +236,7 @@ impl App {
     /// re-walks the fallback chain and the user's tofu cells flip to
     /// real glyphs.
     pub(super) fn handle_clear_shape_cache(&mut self) {
-        // PR-B1b: main window lives in `self.windows` with `renderer=Some`,
+        // main window lives in `self.windows` with `renderer=Some`,
         // so a single iteration covers main + all torn-out children.
         for child in self.windows.values_mut() {
             if let Some(r) = child.renderer.as_mut() {
@@ -285,7 +301,8 @@ impl App {
                 if mhz > 0 {
                     // period_us = 1_000_000_000 / mhz
                     let period_us = 1_000_000_000u64 / u64::from(mhz);
-                    self.frame_period = Duration::from_micros(period_us);
+                    self.monitor_frame_period = Duration::from_micros(period_us);
+                    self.frame_period = self.monitor_frame_period;
                     tracing::debug!(
                         "vsync pacing: monitor reports {}.{:03} Hz, frame period {:?}",
                         mhz / 1000,
@@ -336,9 +353,9 @@ impl App {
             renderer.set_async_loader(());
         }
         // Seed cursor visuals from config so the very first frame draws
-        // the user-selected shape rather than the default. Subsequent
-        // edits to sonicterm.toml take effect through the config-watch hook
-        // (see apply_config below).
+        // the user-selected shape rather than the default. Later edits to
+        // sonicterm.toml reach the renderer only when the user asks for a
+        // reload; nothing watches the file.
         renderer.set_cursor_shape(self.config.terminal.cursor_shape);
         renderer.set_cursor_blink(self.config.terminal.cursor_blink);
 
@@ -353,7 +370,11 @@ impl App {
         renderer.set_software_render_degrade(self.software_render_degrade);
         if self.software_render_degrade {
             let before = self.frame_period;
-            self.frame_period = crate::app::software_render_frame_period(true, self.frame_period);
+            // Resolved from the monitor's own period, not from `frame_period`:
+            // that field is the resolved value and would already hold the cap
+            // on a re-resolution, making the decision one-way.
+            self.frame_period =
+                crate::app::software_render_frame_period(true, self.monitor_frame_period);
             tracing::info!(
                 detected = renderer.is_software_rendering(),
                 mode = ?self.config.appearance.software_render_mode,
@@ -364,7 +385,7 @@ impl App {
             );
         }
 
-        // Phase C2 / register the main window's HWND with
+        // Register the main window's HWND with
         // the OS-drag backend through the unified entry point so the
         // main and torn-out windows share code paths. No-op on mac.
         let main_id = window.id();
@@ -386,10 +407,10 @@ impl App {
         // up on the very first paint, not after a config edit.
         renderer.set_tab_close_override(self.config.tab_close_button_color.as_deref());
 
-        // PR-B1b: renderer is now owned by `WindowState.renderer`.
+        // renderer is now owned by `WindowState.renderer`.
         // Insert the main entry BEFORE `new_tab` so `spawn_pane` (which
         // reads cell size through `self.main_renderer()`) sees it.
-        // PR-B2a: drop any synthetic main entry seeded by tests
+        // drop any synthetic main entry seeded by tests
         // (`App::__test_synthetic_main`); production `do_resumed` is
         // the authoritative source for `main_window_id`.
         if let Some(prev) = self.main_window_id.take() {
@@ -397,6 +418,9 @@ impl App {
         }
         self.main_window_id = Some(main_id);
         let shadow = super::WindowState {
+            // Registered when the window is inserted; construction has no
+            // governor in scope.
+            owner: None,
             role: super::WindowRole::Terminal,
             window: Some(window.clone()),
             renderer: Some(renderer),
@@ -433,7 +457,7 @@ impl App {
             test_renderer_focus_marker: None,
             test_pane_viewport: None,
         };
-        self.windows.insert(main_id, shadow);
+        self.insert_window_registered(main_id, shadow);
 
         // Seed the first tab + pane now that the window + renderer exist.
         self.new_tab("shell");
@@ -451,3 +475,7 @@ impl App {
         window.request_redraw();
     }
 }
+
+#[cfg(test)]
+#[path = "event_loop_tests.rs"]
+mod event_loop_tests;

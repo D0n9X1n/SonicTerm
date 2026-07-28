@@ -5,9 +5,7 @@ use crate::hbwrap::{
 use crate::rasterizer::colr::{
     apply_draw_ops_to_context, paint_linear_gradient, paint_radial_gradient, paint_sweep_gradient,
 };
-use crate::rasterizer::{
-    checked_glyph_rgba_len, checked_raster_pixel_size, FAKE_ITALIC_SKEW,
-};
+use crate::rasterizer::{checked_glyph_rgba_len, checked_raster_pixel_size, FAKE_ITALIC_SKEW};
 use crate::units::PixelLength;
 use crate::{FontRasterizer, ParsedFont, RasterizedGlyph};
 use cairo::{Content, Context, Format, ImageSurface, Matrix, Operator, RecordingSurface};
@@ -210,8 +208,7 @@ fn record_to_cairo_surface(paint_ops: Vec<PaintOp>) -> anyhow::Result<(Recording
             PaintOp::PaintImage { image, width: _, height: _, format, slant, extents } => {
                 let image_surface = if format == IS_PNG {
                     let reader = image::ImageReader::new(std::io::Cursor::new(image.as_slice()))
-                        .with_guessed_format()?
-                        ;
+                        .with_guessed_format()?;
                     let (encoded_width, encoded_height) = reader.into_dimensions()?;
                     checked_glyph_rgba_len(encoded_width as usize, encoded_height as usize)?;
                     let decoded = image::ImageReader::new(std::io::Cursor::new(image.as_slice()))

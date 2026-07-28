@@ -57,20 +57,80 @@ pub struct LoggingGuard {
     _file_guard: tracing_appender::non_blocking::WorkerGuard,
 }
 
+/// Custom `tracing` targets the app emits that are not crate names.
+///
+/// `EnvFilter` admits a target only when a directive names it. A target that
+/// appears in no directive is silently never enabled — `tracing::enabled!`
+/// returns false and the call site compiles to nothing observable, with no
+/// warning at build or run time.
+///
+/// That bit the `memory` target: it had 25 call sites, a documented wiki
+/// procedure telling users to set `level = "debug"`, and no directive. Setting
+/// the documented level produced no output, and because the retention sampling
+/// path is itself gated on `enabled!(target: "memory", …)`, the governor was
+/// charged nothing in any shipped session.
+///
+/// Listing them in one place, and asserting that list against the source, is
+/// what stops the next target from being added the same way.
+pub const CUSTOM_DEBUG_TARGETS: &[&str] = &[
+    "memory",
+    "memory::reclaimed",
+    "state_machine",
+    "state_machine.log",
+    "render_timing",
+    "tear_out_timing",
+    "sonic::glyph_atlas",
+    "sonic::render::glyph",
+];
+
+/// The target for reclamation that **destroys something the user can see**.
+///
+/// Separate from `memory` because the two answer different questions. `memory`
+/// is diagnostics — 34 call sites describing what a session holds — and is
+/// rightly off unless someone is investigating. This target carries the events
+/// where SonicTerm discarded a user's data to stay within a budget: an
+/// abandoned image transfer, a trimmed pane's images. Those are not
+/// diagnostics. A user whose image vanished is owed a reason whether or not
+/// they had the foresight to enable debug logging first.
+///
+/// Admitted at every level, including the default `warn`, for the same reason
+/// `sonic::glyph_atlas` is: an exhaustion the user experiences must reach the
+/// log the user actually has.
+pub const MEMORY_RECLAIMED_TARGET: &str = "memory::reclaimed";
+
 /// Default user-facing `warn` filter. `sonic_exit` stays WARN-on so exit
 /// markers survive; noisy renderer/backend crates stay pinned to WARN.
-pub const DEFAULT_FILTER: &str =
-    "sonic_exit=warn,sonicterm=warn,sonicterm_vt=warn,sonicterm_grid=warn,wgpu=warn,naga=warn";
+///
+/// `memory::reclaimed=warn` is here rather than only at `debug` because it
+/// reports data the user has already lost. This constant is also the
+/// parse-failure fallback, so a malformed `RUST_LOG` cannot silence it either.
+pub const DEFAULT_FILTER: &str = "sonic_exit=warn,sonic=warn,sonicterm=warn,sonicterm_vt=warn,\
+     sonicterm_grid=warn,memory::reclaimed=warn,wgpu=warn,naga=warn";
 
-fn filter_for_level(level: LogLevel) -> &'static str {
+/// The `EnvFilter` directive string a configured log level produces.
+///
+/// Public so callers can assert against the filter a shipped session actually
+/// uses. A test that writes its own directive string proves the gate behind it
+/// works and says nothing about whether any configured level opens that gate —
+/// which is exactly the defect this function's contents once carried.
+#[must_use]
+pub fn filter_for_level(level: LogLevel) -> &'static str {
     match level {
         LogLevel::Error => "error",
         LogLevel::Warn => DEFAULT_FILTER,
         LogLevel::Info => {
-            "sonic_exit=warn,sonicterm=info,sonicterm_vt=warn,sonicterm_grid=warn,wgpu=warn,naga=warn"
+            "sonic_exit=warn,sonic=warn,sonicterm=info,sonicterm_vt=warn,sonicterm_grid=warn,\
+             memory::reclaimed=warn,wgpu=warn,naga=warn"
         }
+        // Every custom target is admitted here, not just the two that happened
+        // to be added when they were introduced. `debug` is the level the
+        // documentation tells a user to set when investigating, so it has to
+        // turn on the diagnostics that documentation describes.
         LogLevel::Debug => {
-            "sonic_exit=warn,sonicterm=debug,sonicterm_vt=warn,sonicterm_grid=warn,render_timing=debug,tear_out_timing=debug,wgpu=warn,naga=warn"
+            "sonic_exit=warn,sonic=debug,sonicterm=debug,sonicterm_vt=warn,sonicterm_grid=warn,\
+             memory=debug,memory::reclaimed=debug,state_machine=debug,state_machine.log=debug,\
+             render_timing=debug,tear_out_timing=debug,\
+             wgpu=warn,naga=warn"
         }
     }
 }
@@ -129,3 +189,9 @@ pub fn init(cfg: &LoggingConfig) -> io::Result<LoggingGuard> {
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod lib_tests;
+
+pub mod snapshot_format;
+
+#[cfg(test)]
+#[path = "redaction_tests.rs"]
+mod redaction_tests;

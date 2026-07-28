@@ -1,4 +1,4 @@
-//! Extracted from `app/mod.rs` in refactor PR 8b (expose-then-extract).
+//! Extracted from `app/mod.rs` from the monolithic app module.
 //! `App`'s referenced fields are `pub(super)`; this submodule lives in
 //! the same `app` module tree, so direct field access works.
 
@@ -122,7 +122,7 @@ impl App {
                     // mutating cell contents — mark every pane dirty so
                     // the renderer re-shapes with the new palette.
                     for child in self.windows.values() {
-                        // Phase B2 PR-A: skip shadow main entry (renderer=None).
+                        // skip shadow main entry (renderer=None).
                         if child.renderer.is_none() {
                             continue;
                         }
@@ -148,7 +148,7 @@ impl App {
             }
             // Cell metrics changed → resize each pane to its own PaneRect,
             // never to the whole window's dimensions.
-            // PR-B2c: main is in self.windows so the loop below
+            // main is in self.windows so the loop below
             // covers main + every torn-out child. Each owns its own
             // GpuRenderer + pane rects.
             for child in self.windows.values_mut() {
@@ -230,7 +230,7 @@ impl App {
             if let Some(r) = self.main_renderer_mut() {
                 r.set_padding(pad);
             }
-            // PR-B2c: the loop below covers main + every child.
+            // the loop below covers main + every child.
             for child in self.windows.values_mut() {
                 {
                     let Some(r) = child.renderer.as_mut() else { continue };
@@ -321,9 +321,14 @@ impl App {
                     r.set_software_render_degrade(degrade);
                 }
             }
+            // Resolved from the monitor's own period, never from
+            // `frame_period`: that field already holds the software cap when
+            // degrade was previously engaged, so resolving from it would make
+            // the decision one-way and leave the window capped after the user
+            // turns software rendering off.
             self.frame_period = super::software_render_frame_period(
                 self.software_render_degrade,
-                self.frame_period,
+                self.monitor_frame_period,
             );
             tracing::info!(
                 ?new_cfg.appearance.software_render_mode,
@@ -379,7 +384,11 @@ impl App {
                 .map_or_else(|| Keymap::load_strict(&km_path), |loader| loader(&new_cfg.keymap))
             {
                 Ok(km) => {
-                    tracing::info!("reload: keymap -> {} ({} bindings)", km.meta.name, km.bindings.len());
+                    tracing::info!(
+                        "reload: keymap -> {} ({} bindings)",
+                        km.meta.name,
+                        km.bindings.len()
+                    );
                     self.command_palette.set_keymap(&km);
                     self.keymap = km;
                 }
@@ -406,7 +415,7 @@ impl App {
             w.request_redraw();
         }
         for child in self.windows.values() {
-            // Phase B2 PR-A: skip shadow main entry (renderer=None).
+            // skip shadow main entry (renderer=None).
             if child.renderer.is_none() {
                 continue;
             }
@@ -449,7 +458,7 @@ impl App {
         // cell contents — mark every pane dirty so the renderer
         // re-shapes with the new palette.
         for child in self.windows.values() {
-            // Phase B2 PR-A: skip shadow main entry (renderer=None).
+            // skip shadow main entry (renderer=None).
             if child.renderer.is_none() {
                 continue;
             }
@@ -459,7 +468,7 @@ impl App {
             w.request_redraw();
         }
         for child in self.windows.values() {
-            // Phase B2 PR-A: skip shadow main entry (renderer=None).
+            // skip shadow main entry (renderer=None).
             if child.renderer.is_none() {
                 continue;
             }
@@ -539,7 +548,7 @@ impl App {
         if let Some(r) = self.main_renderer_mut() {
             r.set_font(&family, size, line_h, weight_scale);
         }
-        // PR-B2c: the loop below covers main + every child.
+        // the loop below covers main + every child.
         for child in self.windows.values_mut() {
             {
                 let Some(r) = child.renderer.as_mut() else { continue };
@@ -560,7 +569,7 @@ impl App {
             w.request_redraw();
         }
         for child in self.windows.values() {
-            // Phase B2 PR-A: skip shadow main entry (renderer=None).
+            // skip shadow main entry (renderer=None).
             if child.renderer.is_none() {
                 continue;
             }
@@ -572,7 +581,7 @@ impl App {
         self.tab_bar_visible = !self.tab_bar_visible;
         let visible = self.tab_bar_visible;
         tracing::info!("tab bar visible -> {visible}");
-        // PR-B2c: the loop below covers main + every child.
+        // the loop below covers main + every child.
         for child in self.windows.values_mut() {
             let changed = {
                 let Some(r) = child.renderer.as_mut() else { continue };
@@ -595,7 +604,7 @@ impl App {
             w.request_redraw();
         }
         for child in self.windows.values() {
-            // Phase B2 PR-A: skip shadow main entry (renderer=None).
+            // skip shadow main entry (renderer=None).
             if child.renderer.is_none() {
                 continue;
             }

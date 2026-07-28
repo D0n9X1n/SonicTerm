@@ -12,7 +12,7 @@
 //!
 //! No GPU types here — these helpers compute coordinates from a viewport
 //! size + the state and return rectangles + label strings. The renderer
-//! turns them into `QuadInstance`s and the legacy chrome layer `TextArea`s. Pure logic
+//! turns them into `QuadInstance`s and glyphon `TextArea`s. Pure logic
 //! keeps the path covered by unit tests without a wgpu device.
 //!
 //! Coordinate system: physical pixels, origin top-left (the same system
@@ -183,9 +183,9 @@ impl PaletteLayout {
     /// Takes the palette by `&mut` so it can publish the current
     /// `visible_rows` count back into the state — subsequent arrow-key
     /// navigation uses that to keep the highlighted row inside the
-    /// rendered viewport (the bug this PR fixes was that the selection
-    /// could move past the visible window and the highlight quad would
-    /// then be drawn offscreen below the modal).
+    /// rendered viewport. Without it the selection can move past the
+    /// visible window and the highlight quad is drawn offscreen below the
+    /// modal.
     #[must_use]
     pub fn compute(
         palette: &mut CommandPalette,

@@ -190,7 +190,7 @@ fn embolden_declines_work_it_cannot_do_safely() {
     // A tile that would exceed the atlas dimension limit is refused rather
     // than producing a buffer the atlas must reject later.
     let big = MAX_RASTERIZED_GLYPH_DIMENSION;
-    assert!(embolden_coverage(&vec![0u8; 4], big, 1, 2.0, false).is_none());
+    assert!(embolden_coverage(&[0u8; 4], big, 1, 2.0, false).is_none());
 }
 
 #[test]
@@ -243,7 +243,7 @@ fn erosion_removes_ink_the_coverage_remap_cannot() {
     assert!(after < before, "erosion must remove ink: {before} -> {after}");
     // The centre of a 3x3 core survives a radius-1 erosion; its rim does not.
     assert_eq!(eroded[2 * 5 + 2], 255, "core centre must survive");
-    assert_eq!(eroded[1 * 5 + 1], 0, "core corner must erode");
+    assert_eq!(eroded[5 + 1], 0, "core corner must erode");
 }
 
 /// A stem wide enough to have an interior must keep opaque pixels under a

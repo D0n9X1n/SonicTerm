@@ -45,9 +45,7 @@ impl WindowsSoftwareFrame {
             let old_capacity = self.pixels.capacity();
             self.width = size.width;
             self.height = size.height;
-            if size.bytes > self.pixels.capacity()
-                || size.bytes < self.pixels.capacity() / 2
-            {
+            if size.bytes > self.pixels.capacity() || size.bytes < self.pixels.capacity() / 2 {
                 self.pixels = vec![0; size.bytes];
             } else {
                 self.pixels.resize(size.bytes, 0);
@@ -64,6 +62,15 @@ impl WindowsSoftwareFrame {
         }
         self.clear(clear);
         Ok(())
+    }
+
+    /// Bytes this frame is holding, counting reserved capacity.
+    ///
+    /// Capacity rather than length: `prepare` keeps the allocation across
+    /// resizes that shrink by less than half, so a frame that was once large
+    /// still owns the larger buffer.
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.pixels.capacity()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -266,6 +273,9 @@ impl WindowsSoftwareFrame {
         let fg_alpha = glyph.color[3].clamp(0.0, 1.0);
         let color_glyph = glyph.flags[0] >= 0.5;
         let subpixel_glyph = glyph.flags[1] >= 0.5;
+        // Inline images set flags[2]; glyphs leave it clear. Only images want
+        // bilinear scaling — a glyph sampled bilinearly reads its atlas
+        // neighbours and blends them into its own edges.
         let image = glyph.flags[2] >= 0.5;
         for yy in y0..y1 {
             let ty = ((yy as f32 + 0.5 - draw_y) / h).clamp(0.0, 0.999_999);
@@ -290,6 +300,9 @@ impl WindowsSoftwareFrame {
                         (ax0, ay0, ax1, ay1),
                     )
                 } else {
+                    // Nearest, clamped to this glyph's own tile. The clamp is
+                    // what makes neighbour bleed impossible rather than
+                    // merely unlikely.
                     let sx = sx.floor().clamp(ax0 as f32, (ax1 - 1) as f32) as u32;
                     let sy = sy.floor().clamp(ay0 as f32, (ay1 - 1) as f32) as u32;
                     bgra_pixel_at(atlas_pixels, atlas_w, sx, sy)
@@ -535,7 +548,6 @@ fn distance_to_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> 
     let cy = ay + t * vy;
     ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()
 }
-
 
 #[cfg(test)]
 #[path = "software_windows_tests.rs"]

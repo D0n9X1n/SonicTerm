@@ -26,7 +26,7 @@
 
 use std::collections::HashMap;
 
-use sonicterm_types::GlyphKey;
+use sonicterm_types::{GlyphKey, ResourceAmount};
 
 /// Default atlas dimensions. BGRA8Unorm, so 16 MiB on the GPU. The
 /// BGRA channel layout lets one texture serve both monochrome glyphs
@@ -225,6 +225,10 @@ pub struct GlyphAtlas {
     /// rather than re-uploading the whole texture every frame. Drained
     /// by `take_dirty_rects`.
     dirty: Vec<DirtyRect>,
+    /// Monotonic identity of the atlas's contents. Bumped wherever a cached
+    /// coordinate could stop meaning what it meant, and never reset, so a
+    /// stale value can never come back around and match again.
+    identity: u64,
     /// Counters for diagnostics + bench validation.
     hits: u64,
     misses: u64,
@@ -268,6 +272,7 @@ impl GlyphAtlas {
             map: HashMap::new(),
             packer: ShelfPacker::new(width, height),
             free_rects: Vec::new(),
+            identity: 0,
             dirty: Vec::new(),
             hits: 0,
             misses: 0,
@@ -316,6 +321,28 @@ impl GlyphAtlas {
     /// construction. Diagnostic only — useful for verifying that long
     /// sessions with diverse glyph sets are actually cycling memory
     /// rather than monotonically growing.
+    /// Identity of the atlas's current contents.
+    ///
+    /// Changes whenever a cached coordinate could have stopped meaning what it
+    /// meant: on eviction, which recycles a rect to a different glyph, and on
+    /// reset, which replaces everything at once. A dependent cache stores this
+    /// alongside its entries and discards those whose identity no longer
+    /// matches.
+    ///
+    /// Never repeats a value. The eviction counter alone cannot serve here
+    /// because `reset_in_place` returns it to zero, so a cache holding a
+    /// pre-reset value would be invalidated correctly at first and then match
+    /// again once the counter climbed back past it — pointing into an atlas
+    /// whose contents had been entirely replaced.
+    #[must_use]
+    pub fn identity(&self) -> u64 {
+        self.identity
+    }
+
+    /// Number of LRU evictions performed, for diagnostics and bench validation.
+    ///
+    /// Not an identity: this resets with the atlas. Use [`Self::identity`] for
+    /// cache invalidation.
     pub fn evictions(&self) -> u64 {
         self.evictions
     }
@@ -351,6 +378,8 @@ impl GlyphAtlas {
         self.misses = 0;
         self.current_frame = 0;
         self.evictions = 0;
+        // Every coordinate handed out before now is meaningless.
+        self.identity = self.identity.wrapping_add(1);
         self.eviction_enabled = true;
     }
 
@@ -359,6 +388,21 @@ impl GlyphAtlas {
     /// `take_dirty_rects` + subregion writes.
     pub fn pixels(&self) -> &[u8] {
         &self.pixels
+    }
+
+    /// Storage this atlas is holding, for governor accounting and telemetry.
+    ///
+    /// Bytes are the pixel buffer's reserved capacity. Items count resident
+    /// glyph entries rather than pages: a page is a fixed 16 MiB allocation
+    /// that says nothing about occupancy, while the entry count is what
+    /// eviction actually acts on.
+    ///
+    /// Note this reports live storage, not live *glyphs* — a recycled slot
+    /// over-reserves when a shorter tile replaces a taller one, so the pixel
+    /// buffer can hold bytes no entry references.
+    #[must_use]
+    pub fn retained_amount(&self) -> ResourceAmount {
+        ResourceAmount { bytes: self.pixels.capacity(), items: self.map.len() }
     }
 
     /// Borrow the CPU-side atlas pixels without draining dirty rects.
@@ -656,6 +700,7 @@ impl GlyphAtlas {
                     self.free_rects.push(rect);
                 }
                 self.evictions += 1;
+                self.identity = self.identity.wrapping_add(1);
             }
         }
         tracing::debug!(

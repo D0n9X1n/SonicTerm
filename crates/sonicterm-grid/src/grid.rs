@@ -1,19 +1,22 @@
 //! Terminal screen grid: cells, attributes, scrollback.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 // Value types live in `sonicterm-types` so non-engine crates can use them
 // without depending on this crate. Re-exported here for source compatibility:
 // every existing `use sonicterm_grid::grid::{Cell, CellFlags, Color, Pos}` keeps
 // compiling unchanged.
 pub use sonicterm_types::{Cell, CellFlags, Color, Pos, UnderlineStyle};
+// Governor accounting type, consumed rather than republished: the grid reports
+// what it retains, it does not own the resource contract.
+use sonicterm_types::ResourceAmount;
 
 use crate::hyperlink::HyperlinkId;
 use crate::line::Line;
 
 /// A row of cells.
 ///
-/// **PR-B2:** the public type alias is now `Line`. Public accessors
+/// The public type alias is `Line`. Public accessors
 /// (`row`, `row_mut`, `rows_iter`, `scrollback_row`, `scrollback_iter`,
 /// `row_at_abs`) return `&Line` / `&mut Line` directly. Callers index cells
 /// via `Line::Index<usize>` / `Index<Range<usize>>`, iterate via
@@ -30,6 +33,62 @@ pub const MAX_GRID_CELLS: u32 = 1024 * 1024;
 pub const MAX_VISIBLE_GRID_CELLS: u32 = MAX_GRID_CELLS / 2;
 /// Maximum UTF-8 bytes of zero-width cluster data retained by one cell.
 pub const MAX_CELL_EXTRAS_BYTES: usize = 64;
+
+/// A grid's retained storage split by the region holding it.
+///
+/// The three parts are disjoint and sum to [`Grid::retained_amount`], so a
+/// caller may charge them to separate `ResourceClass` rows without changing
+/// the total charged.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GridRegionAmounts {
+    /// The on-screen rows, their prompt regions, and their rare-attribute
+    /// boxes.
+    pub visible: ResourceAmount,
+    /// Scrollback history.
+    pub history: ResourceAmount,
+    /// The saved primary screen held while an alternate screen is active.
+    ///
+    /// Named for the `ResourceClass` it maps to. What is stored is the
+    /// *primary* screen the alternate displaced — the alternate screen itself
+    /// is the live `visible`/`history` pair while it is showing.
+    pub alternate: ResourceAmount,
+}
+
+impl GridRegionAmounts {
+    /// Sum of the three regions, equal to [`Grid::retained_amount`].
+    #[must_use]
+    pub fn total(&self) -> ResourceAmount {
+        [self.visible, self.history, self.alternate].into_iter().fold(
+            ResourceAmount::default(),
+            |acc, part| ResourceAmount {
+                bytes: acc.bytes.saturating_add(part.bytes),
+                items: acc.items.saturating_add(part.items),
+            },
+        )
+    }
+}
+
+/// Scrolls between retained-budget checks on the scroll path.
+///
+/// The check walks every row, so running it per scroll would make a long
+/// `cat` quadratic in history depth. This bounds the overshoot to roughly this
+/// many rows of content — kilobytes at ordinary widths — while keeping
+/// scrolling linear.
+const ROWS_BETWEEN_BUDGET_CHECKS: usize = 512;
+
+/// Smallest aggregate capacity excess worth a reallocation pass.
+///
+/// Below this, walking every row to reclaim it costs more than the memory is
+/// worth. Sized so an ordinary screen-sized overshoot is ignored and a
+/// scrollback-sized one is not.
+const CAPACITY_EXCESS_FLOOR_BYTES: usize = 512 * 1024;
+
+/// Excess must exceed live bytes divided by this before rows are compacted.
+///
+/// Four gives a 25% band. The hysteresis is the point: a user dragging a
+/// window edge emits a continuous stream of ±1 resizes, and a threshold
+/// tight enough to fire on each one would reallocate every row per frame.
+const CAPACITY_EXCESS_DIVISOR: usize = 4;
 
 /// Clamp requested grid dimensions to a non-zero, memory-bounded shape.
 ///
@@ -49,11 +108,7 @@ pub fn bounded_grid_size(cols: u64, rows: u64) -> (u16, u16) {
 /// Clamp retained scrollback rows so visible cells plus history share one
 /// per-pane memory budget.
 #[must_use]
-pub fn bounded_scrollback_rows(
-    cols: u16,
-    visible_rows: u16,
-    requested_rows: usize,
-) -> usize {
+pub fn bounded_scrollback_rows(cols: u16, visible_rows: u16, requested_rows: usize) -> usize {
     let cols = u64::from(cols.max(1));
     let visible_cells = cols.saturating_mul(u64::from(visible_rows));
     let remaining_cells = u64::from(MAX_GRID_CELLS).saturating_sub(visible_cells);
@@ -112,6 +167,21 @@ pub struct Grid {
     /// can compare the current revision with their last-observed value to
     /// skip work when nothing has changed.
     revision: u64,
+    /// Rows pushed into scrollback since the budget was last checked.
+    ///
+    /// The budget check walks every row, so running it per scroll would make
+    /// `cat largefile` quadratic in history depth. Counting rows and checking
+    /// at a boundary makes it amortized: one walk per this many scrolls.
+    rows_since_budget_check: usize,
+    /// Monotonically increasing count of rows dropped from scrollback.
+    ///
+    /// Evicting a row destroys the only references its cells held, so this is
+    /// the signal that per-cell garbage may now exist. Consumers that scan the
+    /// grid to reclaim something — the hyperlink registry does — compare it
+    /// against the value at their last scan to tell "nothing has changed since
+    /// I last looked" from "the grid has moved on". Never decremented, so a
+    /// missed bump costs eagerness, never correctness.
+    scrollback_evicted: u64,
     /// Per-row dirty bitset. `true` means the row has been mutated since
     /// the last `clear_dirty()` and the renderer must re-shape it; `false`
     /// means the renderer may reuse its cached span data for that row.
@@ -129,8 +199,7 @@ impl Grid {
     pub fn new(cols: u16, rows: u16) -> Self {
         let (cols, rows) = bounded_grid_size(u64::from(cols), u64::from(rows));
         let scrollback_requested_limit = 1_000;
-        let scrollback_limit =
-            bounded_scrollback_rows(cols, rows, scrollback_requested_limit);
+        let scrollback_limit = bounded_scrollback_rows(cols, rows, scrollback_requested_limit);
         let visible = (0..rows).map(|_| make_row(cols)).collect();
         Self {
             cols,
@@ -143,6 +212,8 @@ impl Grid {
             default: Cell::default(),
             alt_screen: None,
             revision: 0,
+            scrollback_evicted: 0,
+            rows_since_budget_check: 0,
             // A freshly created grid is fully dirty: the renderer has
             // never seen it. Once it does its first walk and calls
             // clear_dirty(), the flags drop to all-false.
@@ -297,6 +368,8 @@ impl Grid {
             default: self.default.clone(),
             alt_screen: None,
             revision: 0,
+            scrollback_evicted: 0,
+            rows_since_budget_check: 0,
             dirty_rows: vec![true; rows as usize],
             prompts: VecDeque::new(),
             autowrap: self.autowrap,
@@ -326,6 +399,7 @@ impl Grid {
         if self.scrollback.len() > self.scrollback_limit {
             let excess = self.scrollback.len() - self.scrollback_limit;
             self.scrollback.drain(0..excess);
+            self.scrollback_evicted = self.scrollback_evicted.saturating_add(excess as u64);
         }
         compact_scrollback_capacity(&mut self.scrollback);
         self.cursor = saved.cursor;
@@ -369,6 +443,7 @@ impl Grid {
         if self.scrollback.len() > self.scrollback_limit {
             let excess = self.scrollback.len() - self.scrollback_limit;
             self.scrollback.drain(0..excess);
+            self.scrollback_evicted = self.scrollback_evicted.saturating_add(excess as u64);
         }
         compact_scrollback_capacity(&mut self.scrollback);
         // Drop rows that will not survive before widening columns. Otherwise
@@ -381,7 +456,7 @@ impl Grid {
         for row in &mut self.visible {
             row.resize(cols as usize, Cell::default());
         }
-        // PR-E: keep scrollback consistent with the new column count.
+        // keep scrollback consistent with the new column count.
         // `Line::resize` is now Cluster-preserving, so uniform blank
         // scrollback rows (the bulk of typical scrollback) stay compressed.
         if cols != self.cols {
@@ -437,6 +512,49 @@ impl Grid {
     /// Iterate scrollback rows from oldest to newest.
     pub fn scrollback_iter(&self) -> impl Iterator<Item = &Row> {
         self.scrollback.iter()
+    }
+
+    /// Rows dropped from scrollback over this grid's lifetime.
+    ///
+    /// Monotone. Evicting a row destroys the only references its cells held,
+    /// so a change in this value is the signal that per-cell garbage may now
+    /// exist — which is what lets a reclaimer distinguish "I already scanned
+    /// and found nothing" from "the grid has moved on since I looked".
+    pub fn scrollback_evicted(&self) -> u64 {
+        self.scrollback_evicted
+    }
+
+    /// Insert every hyperlink id any cell this grid owns still references.
+    ///
+    /// Cells carry a plain `Copy` [`HyperlinkId`] with no refcount and no
+    /// back-pointer to the registry, so the only way to know whether an
+    /// interned link is still reachable is to look at every cell. Scrolling a
+    /// row out of scrollback drops its ids with no notification, which is why
+    /// the registry cannot tell on its own what has become garbage.
+    ///
+    /// Reaches the saved primary screen as well as the live one: while the alt
+    /// screen is active, `alt_screen` holds the *primary* the user will return
+    /// to. Collecting only the visible grid and its scrollback would omit
+    /// every link on the screen behind the alt buffer, and a sweep using that
+    /// set would break links that reappear the moment a full-screen program
+    /// exits.
+    ///
+    /// This is the caller's to schedule, not a per-frame cost: it is
+    /// `O(visible + scrollback)` and runs under the pane lock. It does not
+    /// force compressed scrollback rows back to their flat form.
+    pub fn collect_live_hyperlinks(&self, live: &mut HashSet<HyperlinkId>) {
+        let mut collect = |row: &Row| {
+            for cell in row.iter() {
+                if let Some(hid) = cell.hyperlink() {
+                    live.insert(hid);
+                }
+            }
+        };
+        self.visible.iter().for_each(&mut collect);
+        self.scrollback.iter().for_each(&mut collect);
+        if let Some(primary) = self.alt_screen.as_deref() {
+            primary.collect_live_hyperlinks(live);
+        }
     }
 
     /// Borrow the row at scrollback-absolute index `abs`. Returns `None`
@@ -772,10 +890,10 @@ impl Grid {
                 self.visible.push_back(row);
                 continue;
             }
-            // PR-C: try to compress the ejected line into a
+            // try to compress the ejected line into a
             // single Cluster (whole-line uniform attrs). No-op when the
             // line is non-uniform — it stays Flat. Multi-Cluster
-            // segmentation of partially-uniform lines is PR-D scope.
+            // segmentation of partially-uniform lines is not implemented.
             row.try_compress();
             if self.scrollback.len() >= self.scrollback_limit {
                 // At (or over) capacity: reuse the oldest scrollback row as
@@ -788,6 +906,7 @@ impl Grid {
                 // PANIC: safe — `len >= limit >= 1` here (limit == 0 handled
                 // above), and a non-empty VecDeque always yields `Some`.
                 let mut recycled = self.scrollback.pop_front().unwrap();
+                self.scrollback_evicted = self.scrollback_evicted.saturating_add(1);
                 // Recycled may itself have been compressed when it was
                 // ejected — force back to Flat before we mutate cells.
                 recycled.ensure_flat();
@@ -802,6 +921,24 @@ impl Grid {
                 self.visible.push_back(Line::flat_filled(cols, fill.clone()));
             }
         }
+        // Enforce the retained budget on the scroll path, amortized.
+        //
+        // Enforcement previously ran only on alt-screen transitions and
+        // resize, so a grid growing through ordinary output was never checked
+        // at all. Measured: 63 MiB retained against a 24 MiB budget at 80
+        // columns with linked cells, reached by `cat` alone with no resize.
+        //
+        // Amortized because the check walks every row: per-scroll it would
+        // make a long `cat` quadratic in history depth. One walk per
+        // `ROWS_BETWEEN_BUDGET_CHECKS` scrolls bounds the overshoot to that
+        // many rows while keeping the scroll path linear.
+        self.rows_since_budget_check = self.rows_since_budget_check.saturating_add(n as usize);
+        if self.rows_since_budget_check >= ROWS_BETWEEN_BUDGET_CHECKS {
+            self.rows_since_budget_check = 0;
+            let budget_bytes = MAX_GRID_CELLS as usize * std::mem::size_of::<Cell>();
+            self.trim_scrollback_to_reported_budget(budget_bytes);
+        }
+
         // Every row's content shifted up — the entire visible region
         // changed identity, so every cached span set is stale. The dirty
         // bitset is keyed on visible-row index (0..rows), not by row
@@ -1200,7 +1337,7 @@ impl Grid {
         self.scrollback.len()
     }
 
-    /// PR-F: debug introspection — count (Cluster, Flat) lines in
+    /// debug introspection — count (Cluster, Flat) lines in
     /// scrollback.
     #[doc(hidden)]
     pub fn scrollback_storage_breakdown(&self) -> (usize, usize) {
@@ -1216,7 +1353,7 @@ impl Grid {
         (cluster, flat)
     }
 
-    /// PR-F: sum of per-row `approx_byte_size` across scrollback. This
+    /// sum of per-row `approx_byte_size` across scrollback. This
     /// is a payload-only metric used by internal compression policy tests.
     /// User-visible heap reporting should use [`Self::scrollback_heap_bytes`]
     /// so it counts reserved `Vec::capacity()` bytes and container overhead.
@@ -1324,6 +1461,7 @@ impl Grid {
         if self.scrollback.len() > self.scrollback_limit {
             let excess = self.scrollback.len() - self.scrollback_limit;
             self.scrollback.drain(0..excess);
+            self.scrollback_evicted = self.scrollback_evicted.saturating_add(excess as u64);
         }
         compact_scrollback_capacity(&mut self.scrollback);
         if let Some(primary) = self.alt_screen.as_mut() {
@@ -1338,29 +1476,29 @@ impl Grid {
         let primary_visible_cells = u64::from(primary.cols) * u64::from(primary.rows);
         let remaining_cells = u64::from(MAX_GRID_CELLS)
             .saturating_sub(active_cells.saturating_add(primary_visible_cells));
-        let history_rows = usize::try_from(remaining_cells / u64::from(primary.cols.max(1)))
-            .unwrap_or(usize::MAX);
-        primary.scrollback_limit = primary
-            .scrollback_limit
-            .min(history_rows)
-            .min(primary.scrollback_requested_limit);
+        let history_rows =
+            usize::try_from(remaining_cells / u64::from(primary.cols.max(1))).unwrap_or(usize::MAX);
+        primary.scrollback_limit =
+            primary.scrollback_limit.min(history_rows).min(primary.scrollback_requested_limit);
         if primary.scrollback.len() > primary.scrollback_limit {
             let excess = primary.scrollback.len() - primary.scrollback_limit;
             primary.scrollback.drain(0..excess);
+            primary.scrollback_evicted = primary.scrollback_evicted.saturating_add(excess as u64);
         }
         compact_scrollback_capacity(&mut primary.scrollback);
     }
 
-    fn enforce_retained_capacity_budget(&mut self) {
-        let visible_bytes =
-            self.visible.iter().map(Line::approx_capacity_byte_size).sum::<usize>();
-        let visible_budget_bytes =
-            MAX_VISIBLE_GRID_CELLS as usize * std::mem::size_of::<Cell>();
-        if visible_bytes > visible_budget_bytes {
-            for row in &mut self.visible {
-                row.shrink_capacity_to_fit();
-            }
-        }
+    /// Bytes retained by cell storage across primary and alternate screens.
+    ///
+    /// Counts reserved capacity rather than live length, because capacity is
+    /// what the allocator is holding. The same figure drives
+    /// [`Self::enforce_retained_capacity_budget`], so what the grid enforces
+    /// and what it can shrink cannot drift apart.
+    ///
+    /// This is *not* the whole of what the grid retains — see
+    /// [`Self::fat_attribute_bytes`] for the per-cell boxes it excludes, and
+    /// [`Self::retained_amount`] for the total a governor is charged.
+    fn retained_cell_bytes(&self) -> usize {
         let primary_bytes = self
             .visible
             .iter()
@@ -1375,9 +1513,199 @@ impl Grid {
                 .map(Line::approx_capacity_byte_size)
                 .sum::<usize>()
         });
-        let retained_bytes = primary_bytes.saturating_add(saved_primary_bytes);
+        primary_bytes.saturating_add(saved_primary_bytes)
+    }
+
+    /// Heap bytes held by cells' rare-attribute boxes across every screen.
+    ///
+    /// [`Self::retained_cell_bytes`] multiplies row capacity by
+    /// `size_of::<Cell>()`, which counts the 8-byte `Option<Box<…>>` slot but
+    /// not the 40-byte allocation behind it. A row of linked cells therefore
+    /// under-reports by more than it reports: measured at **1.67×** on a
+    /// populated scrollback of OSC 8 output — 1.85 MiB reported against 3.09
+    /// MiB actually held.
+    ///
+    /// Kept separate from `retained_cell_bytes` because the two have different
+    /// costs and different callers. That function is O(1) per row and runs on
+    /// alt-screen and resize transitions; this one walks every stored cell,
+    /// measured at 48 µs against 22 ns on a 1050-row grid — 2098×. Acceptable
+    /// on the retention sampling timer, not on a transition the user drives by
+    /// launching `vim`.
+    fn fat_attribute_bytes(&self) -> usize {
+        let primary = self
+            .visible
+            .iter()
+            .chain(self.scrollback.iter())
+            .map(Line::fat_attribute_bytes)
+            .sum::<usize>();
+        let saved = self.alt_screen.as_ref().map_or(0, |screen| {
+            screen
+                .visible
+                .iter()
+                .chain(screen.scrollback.iter())
+                .map(Line::fat_attribute_bytes)
+                .sum::<usize>()
+        });
+        primary.saturating_add(saved)
+    }
+
+    /// Bytes held by the row containers themselves, rather than by cells.
+    ///
+    /// A `VecDeque<Line>` reserves slots for its `Line` headers independently
+    /// of the cell storage each header points at, and `dirty_rows` reserves one
+    /// flag per visible row. Neither is counted by cell accounting, and nothing
+    /// else in the process counts them.
+    ///
+    /// The saved primary behind an alternate screen is a whole `Box<Grid>`: its
+    /// deque spines, its own dirty bitset, its prompt ring, and the `Grid`
+    /// struct itself. Counting only its rows leaves the rest uncounted, which
+    /// measured as a 232-byte shortfall while an alternate screen was active —
+    /// fixed rather than proportional, and counted for the same reason the rest
+    /// is.
+    ///
+    /// Measured at 33 KiB against 4.9 MiB of cells on a 200x50 grid with full
+    /// scrollback — 0.68%. Counted anyway: "small" was also the answer for the
+    /// rare-attribute boxes before they were measured at 1.67x the figure that
+    /// was being reported. An unmeasured term is not a small term, it is an
+    /// unknown one.
+    fn container_bytes(&self) -> usize {
+        let line = std::mem::size_of::<Line>();
+        let prompt = std::mem::size_of::<PromptRegion>();
+        let primary = self.visible.capacity().saturating_add(self.scrollback.capacity()) * line;
+        let saved = self.alt_screen.as_ref().map_or(0, |screen| {
+            let rows =
+                screen.visible.capacity().saturating_add(screen.scrollback.capacity()) * line;
+            let dirty = screen.dirty_rows.capacity() * std::mem::size_of::<bool>();
+            let prompts = screen.prompts.capacity() * prompt;
+            // The `Box<Grid>` holding it all.
+            rows.saturating_add(dirty)
+                .saturating_add(prompts)
+                .saturating_add(std::mem::size_of::<Grid>())
+        });
+        let dirty = self.dirty_rows.capacity() * std::mem::size_of::<bool>();
+        primary.saturating_add(saved).saturating_add(dirty)
+    }
+
+    /// Rows retained across primary and alternate screens.
+    ///
+    /// One row container is the item unit for grid accounting: a cell is far
+    /// too fine to reserve against, and the row is what actually gets
+    /// allocated, trimmed, and compacted.
+    fn retained_rows(&self) -> usize {
+        let primary = self.visible.len().saturating_add(self.scrollback.len());
+        let saved = self
+            .alt_screen
+            .as_ref()
+            .map_or(0, |screen| screen.visible.len().saturating_add(screen.scrollback.len()));
+        primary.saturating_add(saved)
+    }
+
+    /// Storage this grid is holding, for governor accounting and telemetry.
+    ///
+    /// Bytes cover visible, history, saved-primary and alternate cell storage
+    /// including reserved row capacity, the heap allocations behind cells'
+    /// rare-attribute boxes, and retained prompt regions. Items count retained
+    /// row containers.
+    ///
+    /// Hyperlink *targets* are deliberately excluded: the registry that owns
+    /// the URI strings meters and bounds them separately, so counting them
+    /// here would charge them twice. The per-cell `Box<FatAttributes>` is not
+    /// registry-owned and is counted — it is grid storage that happens to hold
+    /// a link id, and it is also what grapheme extras and non-default
+    /// underline metadata allocate, neither of which the registry knows about.
+    ///
+    /// **Deliberately larger than the figure
+    /// [`Self::enforce_retained_capacity_budget`] acts on.** Enforcement can
+    /// only shrink what `shrink_capacity_to_fit` reaches, which is row
+    /// capacity; a rare-attribute box is freed by clearing the cell, not by
+    /// compacting the row. Reporting the enforceable figure instead would make
+    /// the governor's charge smaller than the memory actually held, which is
+    /// the direction that lets a process past its ceiling. The two numbers
+    /// answer different questions and are allowed to differ.
+    #[must_use]
+    pub fn retained_amount(&self) -> ResourceAmount {
+        let prompt_bytes = self.prompts.capacity() * std::mem::size_of::<PromptRegion>();
+        ResourceAmount {
+            bytes: self
+                .retained_cell_bytes()
+                .saturating_add(prompt_bytes)
+                .saturating_add(self.fat_attribute_bytes())
+                .saturating_add(self.container_bytes()),
+            items: self.retained_rows(),
+        }
+    }
+
+    /// Storage split by the region that holds it.
+    ///
+    /// [`Self::retained_amount`] returns one figure for the whole grid, which
+    /// is what a governor charges but not what an operator can act on: a pane
+    /// holding 14 MiB of scrollback and one holding 14 MiB in a saved primary
+    /// behind an alternate screen call for different responses, and the total
+    /// cannot tell them apart.
+    ///
+    /// The three parts sum to [`Self::retained_amount`] exactly, so charging
+    /// them to separate classes and charging the total are the same charge —
+    /// which is the property that lets attribution improve without the
+    /// aggregate moving.
+    ///
+    /// Prompt regions and rare-attribute boxes belong to the screen that holds
+    /// their cells, so they are folded into the corresponding part rather than
+    /// reported separately.
+    #[must_use]
+    pub fn retained_amount_by_region(&self) -> GridRegionAmounts {
+        // Container bytes ride with the visible region rather than being split
+        // across the three: the deques are one allocation each, not divisible
+        // by which rows they hold, and attributing a shared allocation to the
+        // parts that share it would be inventing a split the allocator does
+        // not have.
+        let visible = ResourceAmount {
+            bytes: self.visible.iter().map(Line::approx_capacity_byte_size).sum::<usize>()
+                + self.visible.iter().map(Line::fat_attribute_bytes).sum::<usize>()
+                + self.prompts.capacity() * std::mem::size_of::<PromptRegion>()
+                + self.container_bytes(),
+            items: self.visible.len(),
+        };
+        let history = ResourceAmount {
+            bytes: self.scrollback.iter().map(Line::approx_capacity_byte_size).sum::<usize>()
+                + self.scrollback.iter().map(Line::fat_attribute_bytes).sum::<usize>(),
+            items: self.scrollback.len(),
+        };
+        let alternate = self.alt_screen.as_ref().map_or_else(ResourceAmount::default, |saved| {
+            let rows = saved.visible.iter().chain(saved.scrollback.iter());
+            ResourceAmount {
+                bytes: rows
+                    .clone()
+                    .map(Line::approx_capacity_byte_size)
+                    .sum::<usize>()
+                    .saturating_add(rows.map(Line::fat_attribute_bytes).sum::<usize>()),
+                items: saved.visible.len().saturating_add(saved.scrollback.len()),
+            }
+        });
+
+        GridRegionAmounts { visible, history, alternate }
+    }
+
+    fn enforce_retained_capacity_budget(&mut self) {
+        let visible_bytes = self.visible.iter().map(Line::approx_capacity_byte_size).sum::<usize>();
+        let visible_budget_bytes = MAX_VISIBLE_GRID_CELLS as usize * std::mem::size_of::<Cell>();
+        if visible_bytes > visible_budget_bytes {
+            for row in &mut self.visible {
+                row.shrink_capacity_to_fit();
+            }
+        }
+        // Compare the figure this grid *reports*, not a subset of it.
+        //
+        // Enforcement used `retained_cell_bytes()`, which excludes the
+        // rare-attribute boxes and row containers that `retained_amount()` —
+        // the figure the governor is charged — includes. Two numbers for one
+        // grid, and the smaller one held the budget.
+        //
+        // Measured against a counting allocator with `scrollback` raised, which
+        // a user config reaches directly: 35 MiB held against a 24 MiB budget
+        // at one column with hyperlinks, 63 MiB at eighty. Reported tracked
+        // held exactly, so the reporting was honest and the comparison was not.
         let budget_bytes = MAX_GRID_CELLS as usize * std::mem::size_of::<Cell>();
-        if retained_bytes <= budget_bytes {
+        if self.retained_amount().bytes <= budget_bytes && !self.capacity_excess_is_material() {
             return;
         }
         for row in &mut self.visible {
@@ -1386,6 +1714,21 @@ impl Grid {
         for row in &mut self.scrollback {
             row.shrink_capacity_to_fit();
         }
+        // Compaction reclaims capacity slack. When the overage is not slack it
+        // reclaims nothing, and the check above would fire on every mutation
+        // while the grid stayed over budget.
+        //
+        // Measured at 80 columns with every cell linked: 63 MiB retained, of
+        // which cell capacity is 23 MiB — inside the budget — with **0 KiB of
+        // reclaimable slack**. The other 40 MiB is rare-attribute boxes and
+        // deque spine, neither of which `shrink_capacity_to_fit` can touch.
+        //
+        // So the budget has to be enforced against the term that can actually
+        // shrink: scrollback rows. `bounded_scrollback_rows` bounds them by
+        // cell count alone, which understates a linked row by up to 2.7x, so
+        // rows are dropped here until what the grid *reports* fits.
+        self.trim_scrollback_to_reported_budget(budget_bytes);
+
         if let Some(primary) = self.alt_screen.as_mut() {
             for row in &mut primary.visible {
                 row.shrink_capacity_to_fit();
@@ -1394,6 +1737,75 @@ impl Grid {
                 row.shrink_capacity_to_fit();
             }
         }
+    }
+
+    /// Drop the oldest scrollback until the reported figure fits the budget.
+    ///
+    /// The last resort in [`Self::enforce_retained_capacity_budget`], and the
+    /// only remedy that works when the overage is not capacity slack.
+    ///
+    /// Scrollback is the right term to cut: the visible screen is what the user
+    /// is looking at, the saved primary belongs to a program that will exit,
+    /// and history is the one part that is both large and already understood to
+    /// be finite. `bounded_scrollback_rows` already bounds it — by cell count,
+    /// which understates a row carrying rare-attribute boxes by up to 2.7x.
+    ///
+    /// Drops in blocks rather than one row at a time: each check walks every
+    /// row to recompute the figure, so per-row trimming would be quadratic in a
+    /// large scrollback.
+    fn trim_scrollback_to_reported_budget(&mut self, budget_bytes: usize) {
+        // A grid with no history cannot trim, and one already inside the budget
+        // has nothing to do.
+        if self.scrollback.is_empty() || self.retained_amount().bytes <= budget_bytes {
+            return;
+        }
+
+        const TRIM_BLOCK_ROWS: usize = 64;
+        while !self.scrollback.is_empty() && self.retained_amount().bytes > budget_bytes {
+            let drop = TRIM_BLOCK_ROWS.min(self.scrollback.len());
+            self.scrollback.drain(0..drop);
+            self.scrollback_evicted = self.scrollback_evicted.saturating_add(drop as u64);
+        }
+        compact_scrollback_capacity(&mut self.scrollback);
+    }
+
+    /// `true` when rows are holding materially more capacity than they use.
+    ///
+    /// The absolute ceiling above is not reached by ordinary sessions — a grid
+    /// at 80×24 with full scrollback sits at roughly 0.4% of it — so on its own
+    /// it never releases anything. What it misses is a *relative* excess.
+    ///
+    /// The mechanism, measured at the primitive: `Line::resize(81)` on an
+    /// 80-cell row allocates capacity **160**, `Vec`'s amortized doubling, and
+    /// `Line::resize(80)` leaves it at 160. Eighty wasted cells per row. Across
+    /// a 1024-row scrollback that is **1.875 MiB retained by a ±1 column window
+    /// drag** — about 8% of a pane's entire grid ceiling, from a gesture the
+    /// user would not describe as doing anything. Twenty panes make it 37.5 MiB.
+    ///
+    /// Per row the excess is invisible: eighty spare cells is far below any
+    /// sensible per-row threshold, which is why `shrink_vec_if_excessive` does
+    /// not catch it. It is material only in aggregate — the same composition
+    /// shape as the rest of this work, locally correct decisions summing to a
+    /// wrong one.
+    ///
+    /// Deliberately hysteretic. The criterion is that *adjacent* resizing must
+    /// avoid allocation churn, and a user dragging a window edge produces a
+    /// continuous stream of ±1 resizes. Shrinking on every one would compact
+    /// every row per frame of the drag. Requiring the excess to clear both a
+    /// proportion of live bytes and an absolute floor lets a drag settle into
+    /// steady state — measured at one change across eight adjacent steps —
+    /// while a drag that ends materially smaller still returns its memory.
+    fn capacity_excess_is_material(&self) -> bool {
+        let live = self
+            .visible
+            .iter()
+            .chain(self.scrollback.iter())
+            .map(Line::approx_byte_size)
+            .sum::<usize>();
+        let reserved = self.retained_cell_bytes();
+        let excess = reserved.saturating_sub(live);
+
+        excess >= CAPACITY_EXCESS_FLOOR_BYTES && excess > live / CAPACITY_EXCESS_DIVISOR
     }
 }
 

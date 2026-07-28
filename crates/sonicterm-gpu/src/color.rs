@@ -1,15 +1,13 @@
 //! Color / sRGB conversion helpers extracted from `render.rs`.
 //!
-//! T13 (wezterm-takeover G3): `ChromeColor` replaces `legacy chrome color` as
-//! the chrome-text fg type. It carries the same 8-bit sRGB-encoded
-//! channels the legacy chrome layer used (so the LUT-based linearization path is byte-
-//! identical) but does not pull the legacy chrome layer into the dep graph. Every
-//! `_the legacy chrome layer_` identifier in this file is renamed to `_chrome_color_` /
-//! `_chrome_text_` so the must-pass #4 grep gate (`grep -rE 'the legacy chrome layer'`)
-//! returns zero.
+//! `ChromeColor` is the chrome-text foreground type. It carries the same
+//! 8-bit sRGB-encoded channels the removed `glyphon` stack used, so the
+//! LUT-based linearization path is byte-identical, without pulling that
+//! dependency into the graph. Identifiers here are named `_chrome_color_` /
+//! `_chrome_text_` for the same reason.
 
 /// SonicTerm's chrome-text foreground color. 8-bit sRGB-encoded
-/// channels in the same byte layout the legacy chrome layer's `Color` used, so the
+/// channels in the same byte layout `glyphon::Color` used, so the
 /// existing LUT-based linearization (`chrome_color_to_linear_rgba`) is
 /// byte-identical to the legacy path.
 ///
@@ -47,7 +45,7 @@ impl ChromeColor {
         Self { r, g, b, a }
     }
 
-    /// Red channel accessor — same name as the the legacy chrome layer `Color::r()` helper
+    /// Red channel accessor — same name as the glyphon `Color::r()` helper
     /// every caller used to invoke. Keeps the migration mechanical.
     #[inline]
     #[must_use]
@@ -94,7 +92,7 @@ impl From<ChromeColor> for [u8; 4] {
 /// Convert a [`ChromeColor`] (sRGB-encoded u8 channels) to a `[r, g, b, a]`
 /// array in linear-light space, suitable for the quad pipeline.
 ///
-/// Bit-exact with the legacy `the legacy chrome layer_color_to_linear_rgba` path (same
+/// Bit-exact with the legacy `glyphon_color_to_linear_rgba` path (same
 /// LUT, same channel ordering, alpha always `1.0`).
 pub fn chrome_color_to_linear_rgba(c: ChromeColor) -> [f32; 4] {
     // Use the 256-entry u8 LUT — every input here is already an 8-bit
@@ -178,7 +176,7 @@ pub fn hex_to_wgpu_with_alpha(h: &str, alpha: f32) -> wgpu::Color {
 ///
 /// Note: the chrome-text path uses a separate [`hex_to_chrome_color`]
 /// helper that returns sRGB-encoded bytes, because the chrome atlas
-/// stores tiles in the same sRGB-encoded coverage layout the legacy chrome layer /
+/// stores tiles in the same sRGB-encoded coverage layout glyphon /
 /// cosmic-text used — the wgpu surface format performs the sRGB→linear
 /// decode on sample, so glyph foreground colors must NOT be
 /// pre-linearized.
@@ -198,7 +196,7 @@ pub fn hex_to_rgba(h: &str, alpha: f32) -> [f32; 4] {
 /// u8 channels). Alpha is set to `0xFF` (fully opaque). On malformed
 /// input falls back to opaque black.
 ///
-/// Replaces the legacy `hex_to_the legacy chrome layer` helper that lived in `core.rs`
+/// Replaces the legacy `hex_to_glyphon` helper that lived in `core.rs`
 /// and returned a `legacy chrome color`. The byte layout is preserved
 /// (sRGB-encoded `r,g,b,a` u8s) so chrome theming values round-trip
 /// identically through the new path.
@@ -217,8 +215,8 @@ pub fn hex_to_chrome_color(h: &str) -> ChromeColor {
 /// (clamped to `0.0..=1.0`) and return a fresh color with the same
 /// RGB triplet.
 ///
-/// Replaces the legacy `scale_the legacy chrome layer_alpha` helper (Phase D
-/// drag-feedback path,) — same math, new type. Used to dim
+/// Replaces the removed `glyphon`-based alpha helper on the drag-feedback
+/// path — same math, new type. Used to dim
 /// the source-tab title text and the ghost-chip title text so they
 /// match their corresponding dimmed body quads.
 #[doc(hidden)]

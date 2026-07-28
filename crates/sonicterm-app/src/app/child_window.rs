@@ -1,4 +1,4 @@
-//! Extracted from `app/mod.rs` in refactor PR 8b (expose-then-extract).
+//! Extracted from `app/mod.rs` from the monolithic app module.
 //! `App`'s referenced fields are `pub(super)`; this submodule lives in
 //! the same `app` module tree, so direct field access works.
 
@@ -358,10 +358,14 @@ impl App {
                 // pty channel close on Drop and exit). Dropping the
                 // WindowState drops PaneState → PtyHandle → kills the
                 // child shells.
-                if let Some(removed) = self.windows.remove(&win_id) {
+                if let Some(mut removed) = self.windows.remove(&win_id) {
                     for pane in removed.panes.values() {
                         *pane.redraw_target.lock() = None;
                     }
+                    // Close the governor owners before the state drops. Taken
+                    // from the removed window rather than looked up, because
+                    // it is already out of the map by this point.
+                    self.release_owners_of(&mut removed);
                     self.release_child_window_registries(win_id);
                     drop(removed);
                 }
@@ -498,14 +502,33 @@ impl App {
                     self.defer_child_redraw(win_id, was_dirty);
                     return;
                 }
-                let inline_images_by_pane: std::collections::HashMap<
+                // `try_lock`, never a blocking `lock`: the VT worker holds
+                // this while merging a decoded batch, and blocking here would
+                // stall the event loop behind it. On contention this defers
+                // the redraw exactly as the parser locks do — a coherent view
+                // of every pane matters more than one frame's latency.
+                let mut inline_images_by_pane: std::collections::HashMap<
                     u64,
                     Vec<sonicterm_render_model::InlineImage>,
-                > = child
-                    .panes
-                    .iter()
-                    .map(|(id, pane)| (*id, pane.inline_images.lock().clone()))
-                    .collect();
+                > = std::collections::HashMap::new();
+                let mut inline_images_locked = true;
+                for (id, pane) in child.panes.iter() {
+                    match pane.inline_images.try_lock() {
+                        Some(images) => {
+                            inline_images_by_pane.insert(*id, images.clone());
+                        }
+                        None => {
+                            inline_images_locked = false;
+                            break;
+                        }
+                    }
+                }
+                if !inline_images_locked {
+                    drop(inline_images_by_pane);
+                    drop(guards);
+                    self.defer_child_redraw(win_id, was_dirty);
+                    return;
+                }
                 let viewport_tops: std::collections::HashMap<u64, Option<u64>> =
                     child.panes.iter().map(|(id, pane)| (*id, pane.viewport_top_abs)).collect();
                 if let Some(t) = timing.as_mut() {
@@ -774,7 +797,7 @@ impl App {
                             }
                         }
                     }
-                    // Phase C2 — publish this child's tab bar
+                    // publish this child's tab bar
                     // snapshot for cross-window OS drag hit-tests. See
                     // `App::publish_child_window_tab_bar` for the
                     // rationale on the main-window mirror.
@@ -1212,7 +1235,7 @@ impl App {
                                 self.merge_child_into_target(win_id, src_idx, target);
                             }
                             crate::tab_drag::DragAction::TearOutToNewWindow { .. } => {
-                                // Phase B: tear out from a
+                                // tear out from a
                                 // child window into a NEW top-level
                                 // window. The Tab + PaneState (incl.
                                 // PtyHandle) MOVE — no clone, no
@@ -1504,9 +1527,9 @@ impl App {
         let mut focus_report: Option<(u64, Vec<u8>)> = None;
         if let Some(child) = self.windows.get_mut(&win_id) {
             if focused {
-                // Phase A — unified frontmost tracker;
+                // unified frontmost tracker;
                 // discriminates main vs child via `frontmost_kind()`.
-                // PR-B4: `focused_child` removed — the child-only
+                // `focused_child` removed — the child-only
                 // subset is now derivable from `frontmost_window`.
                 self.frontmost_window = Some(win_id);
                 child.ime_cursor_throttle.reset();
@@ -1588,12 +1611,14 @@ impl App {
         self.reap_call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(child) = self.windows.get(&win_id) {
             if child.tabs.is_empty() {
-                if let Some(removed) = self.windows.remove(&win_id) {
+                if let Some(mut removed) = self.windows.remove(&win_id) {
                     // panes map should already be empty; defensively
                     // null out any stragglers' redraw targets.
                     for pane in removed.panes.values() {
                         *pane.redraw_target.lock() = None;
                     }
+                    // Close the governor owners before the state drops.
+                    self.release_owners_of(&mut removed);
                     self.release_child_window_registries(win_id);
                     drop(removed);
                     tracing::info!(
@@ -1697,7 +1722,7 @@ impl App {
             Ok(pty) => {
                 let parser_clone = parser.clone();
                 let out_rx = pty.out_rx.clone();
-                let in_tx_reply = pty.in_tx.clone();
+                let in_tx_reply = pty.input_sender();
                 let redraw_target_thread = redraw_target.clone();
                 let redraw_proxy = self.event_loop_proxy.clone();
                 let cursor_visible = cursor_visible_pane.clone();
@@ -1708,8 +1733,29 @@ impl App {
                     .name("sonicterm-vt-reply-child".into())
                     .spawn(move || {
                         while let Ok(bytes) = reply_rx.recv() {
-                            if in_tx_reply.send(bytes).is_err() {
-                                break;
+                            // Typed send: refuses rather than blocking, and
+                            // applies the same size cap as terminal input. The
+                            // raw sender this used to hold did neither, in a
+                            // thread whose reason for existing is that nothing
+                            // should block here.
+                            if let Err(error) = in_tx_reply.send(bytes) {
+                                match error {
+                                    sonicterm_io::pty::PtyInputError::WriterDisconnected(_) => {
+                                        break;
+                                    }
+                                    // A full queue means the child is not
+                                    // draining. Dropping one reply is correct:
+                                    // DSR/DA answers are idempotent status
+                                    // reports, and blocking here would stall
+                                    // the forwarder behind a stalled child.
+                                    dropped => {
+                                        tracing::debug!(
+                                            target: "memory",
+                                            ?dropped,
+                                            "parser reply dropped; the child is not draining input"
+                                        );
+                                    }
+                                }
                             }
                         }
                     })
@@ -1871,7 +1917,7 @@ impl App {
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // Phase A — per-child action helpers
+    // per-child action helpers
     //
     // These mirror the equivalent main-window mutators in
     // `app/misc.rs` and `app/spawn_pane.rs` but operate on a child
@@ -2012,7 +2058,7 @@ impl App {
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // Phase A — per-child PANE mutators
+    // per-child PANE mutators
     //
     // Mirror of the per-child tab helpers above, but for pane-level
     // actions (`Action::SplitRight`, `SplitDown`, `ClosePane`,

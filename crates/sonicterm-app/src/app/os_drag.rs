@@ -1,4 +1,4 @@
-//! Phase C2 — OS-level drag *session* hookup.
+//! OS-level drag *session* hookup.
 //!
 //! This module is distinct from the *cross-process* drag wire format
 //! at [`crate::os_drag`]:
@@ -6,7 +6,7 @@
 //! * [`crate::os_drag`] (top-level) defines the **wire payload**
 //!   ([`crate::os_drag::TabPayload`], [`crate::os_drag::PASTEBOARD_TYPE`])
 //!   carried between two SonicTerm *processes* via NSPasteboard / OLE
-//!   clipboard. That's the Phase C1 work that already shipped.
+//!   clipboard. That part already shipped.
 //!
 //! * **This module** ([`crate::app::os_drag`]) defines the
 //!   [`OsTabDragBackend`] trait for platform handoff. Windows uses it for a
@@ -14,7 +14,7 @@
 //!   implementation publishes to NSPasteboard and immediately cancels the
 //!   backend gesture; same-process merging stays in the in-process path.
 //!
-//! Phase C ([`crate::app::tab_transfer`]) added the pure
+//! [`crate::app::tab_transfer`] added the pure
 //! [`crate::app::App::transfer_tab`] primitive — given a `(src_window,
 //! src_tab_idx, dst_window, dst_tab_idx)` 4-tuple, move a tab. Phase
 //! C1 added the cross-process wire format. This file provides the shared
@@ -108,7 +108,7 @@ pub enum DragOutcome {
     /// a placeholder zero.
     DroppedOnBar { target_window: Option<WindowId>, target_slot: usize },
     /// User let go over empty space (no SonicTerm tab bar under the
-    /// cursor) — Phase C semantics: tear out to a new floating child
+    /// cursor) — tear out to a new floating child
     /// window. The backend includes the screen-global drop position so
     /// the App can place the new window's origin sensibly.
     DroppedOnEmpty { drop_screen_pos: (i32, i32) },

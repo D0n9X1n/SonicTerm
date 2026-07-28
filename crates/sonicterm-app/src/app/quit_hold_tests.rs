@@ -13,9 +13,7 @@ fn first_press_arms_and_requests_prompt() {
     let mut hold = QuitHold::new();
     let now = t0();
     let action = hold.on_press(now, false);
-    assert_eq!(action, QuitHoldAction::ShowPrompt {
-        deadline: now + QUIT_CONFIRM_DURATION
-    });
+    assert_eq!(action, QuitHoldAction::ShowPrompt { deadline: now + QUIT_CONFIRM_DURATION });
     assert!(hold.is_armed());
     assert_eq!(hold.deadline(), Some(now + QUIT_CONFIRM_DURATION));
 }
@@ -63,9 +61,7 @@ fn press_after_expiry_starts_a_fresh_confirmation() {
     let later = now + QUIT_CONFIRM_DURATION + Duration::from_secs(1);
     assert_eq!(
         hold.on_press(later, false),
-        QuitHoldAction::ShowPrompt {
-            deadline: later + QUIT_CONFIRM_DURATION
-        }
+        QuitHoldAction::ShowPrompt { deadline: later + QUIT_CONFIRM_DURATION }
     );
     assert!(hold.is_armed());
 }

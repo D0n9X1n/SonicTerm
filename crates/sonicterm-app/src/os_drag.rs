@@ -321,4 +321,3 @@ pub trait OsDragSink: Send + Sync {
     /// tab alive.
     fn begin_drag(&self, payload: &TabPayload) -> DragAck;
 }
-

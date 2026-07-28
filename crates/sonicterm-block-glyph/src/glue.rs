@@ -1,8 +1,7 @@
-//! T6/G2A glue — the substitution boundary between the
-//! verbatim-vendored `customglyph.rs` (lands in T7) and sonicterm's
-//! own types. Customglyph imports `window::{BitmapImage, Image, Point,
-//! Rect, Size}` and `window::color::SrgbaPixel`; this module provides
-//! the substitutions named in the spec's import table:
+//! Glue — the substitution boundary between the verbatim-vendored
+//! `customglyph.rs` and sonicterm's own types. Customglyph imports
+//! `window::{BitmapImage, Image, Point, Rect, Size}` and
+//! `window::color::SrgbaPixel`; this module provides the substitutions:
 //!
 //! - `Image`         → [`Bitmap`]      (BGRA-premul `Vec<u8>` buffer)
 //! - `BitmapImage`   → [`BitmapImage`] trait (clear_rect + draw_line)
@@ -248,19 +247,12 @@ impl BitmapImage for Bitmap {
 
 /// `block_sprite`'s return payload. Structurally identical to
 /// `sonicterm_text::glyph_atlas::RasterTile` (same fields, same
-/// `is_empty()` helper) — kept LOCAL to this crate because, at the
-/// time T7 lands, `sonicterm-text` does not compile (cosmic-text /
-/// `load_font_data_with_sonic_overrides` / `terminal_font_attrs`
-/// references the T6 commit message flags as "still mid-flight,
-/// scheduled for T10/G2D"). T9's `flush_shape_run` rewire is the
-/// natural place to land the trivial field-for-field copy when the
-/// consumer wants a `sonicterm_text::glyph_atlas::RasterTile`.
+/// `is_empty()` helper) but kept local to this crate, so that block-glyph
+/// geometry does not depend on the text stack. `flush_shape_run` does the
+/// field-for-field copy where a consumer wants the `RasterTile` form.
 ///
-/// Once T10 lands the cosmic-text deletes and `sonicterm-text` builds
-/// again, this type can be deleted and `block_sprite` can return
-/// `sonicterm_text::glyph_atlas::RasterTile` directly — the field
-/// shape is identical so the swap is one line in `Cargo.toml` plus
-/// one line in `customglyph.rs`.
+/// Collapsing the two is a one-line change in `Cargo.toml` plus one in
+/// `customglyph.rs`, should the dependency ever become welcome.
 #[derive(Debug, Clone)]
 pub struct BlockRasterTile {
     /// Glyph tile width in pixels.

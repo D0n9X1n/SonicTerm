@@ -42,10 +42,7 @@ fn search_named_keys_map_only_without_modifiers() {
             search_text_edit_for_key(&Key::Named(key), ModifiersState::empty()),
             Some(expected),
         );
-        assert_eq!(
-            search_text_edit_for_key(&Key::Named(key), ModifiersState::SUPER),
-            None,
-        );
+        assert_eq!(search_text_edit_for_key(&Key::Named(key), ModifiersState::SUPER), None,);
     }
 }
 

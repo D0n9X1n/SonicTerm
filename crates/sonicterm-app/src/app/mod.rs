@@ -19,6 +19,10 @@ use sonicterm_cfg::keymap::{Action, BroadcastScope, Keymap};
 use sonicterm_cfg::theme::Theme;
 use sonicterm_grid::grid::Grid;
 use sonicterm_io::pty::PtyHandle;
+use sonicterm_resource::ResourceGovernor;
+use sonicterm_types::{
+    GovernorLimits, OwnerKind, OwnerLimits, ProcessKind, ResourceClass, ResourceOwnerId,
+};
 use sonicterm_vt::vt::{CommandEvent, Parser};
 use winit::{
     application::ApplicationHandler,
@@ -185,19 +189,18 @@ use sonicterm_ui::tabs::{CommandStatus, Tab, TabBar};
 /// to point at this child's window so output from the shell triggers
 /// redraws on the correct surface (otherwise typing in the child
 /// would render onto the parent's window, which was the v1 bug).
-/// Phase B — kind of window stored in the unified
+/// kind of window stored in the unified
 /// [`App::windows`] map. Today every torn-out terminal child window is
 /// `Terminal`.
 ///
 /// Note: the main terminal window's authoritative state still lives
 /// directly on `App` (split across `App::tabs`, `App::panes`,
-/// `App::renderer`, etc.) pending the Phase C struct-level absorption.
-/// Phase B's deliverable is removing the `child_windows` field name
+/// `App::renderer`, etc.). Removing the `child_windows` field name
 /// and folding torn-out windows under one role-tagged map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowRole {
     /// A terminal window (torn-out child today; main + child after
-    /// Phase C lands).
+    /// is absorbed).
     Terminal,
 }
 
@@ -290,6 +293,126 @@ pub const PTY_REDRAW_FLUSH_BYTES: usize = 128 * 1024;
 pub const PTY_REPLY_QUEUE_CAPACITY: usize = 64;
 pub const MAX_PANE_COMMAND_EVENTS: usize = 1024;
 
+/// Sum of every per-pane seam cap, computed from the caps themselves.
+///
+/// Not a chosen figure. Each term is the constant the owning seam already
+/// enforces and tests, so this cannot drift from what the seams do — changing
+/// a cap changes this automatically, and a test asserts the arithmetic.
+///
+/// **The rule for what belongs.** A term for exactly the classes a pane owner
+/// can be charged for, because this is compared against that owner's ledger
+/// total. Both directions matter: a missing term puts the backstop below memory
+/// the seams legitimately permit, where it fires during correct operation, and
+/// a term for a class that never charges a pane inflates the backstop with
+/// memory that cannot appear in the figure it guards. Which classes those are
+/// is [`ResourceClass::pane_seam_term`], decided by an exhaustive match that
+/// fails to compile until a new class is classified.
+///
+/// | Class | Cap |
+/// | --- | --- |
+/// | `GridVisible` + `GridHistory` + `GridAlternate` | `MAX_GRID_CELLS × size_of::<Cell>()` |
+/// | `InlineMediaRetained` | `MAX_RETAINED_INLINE_IMAGE_BYTES` |
+/// | `ProtocolMetadata` | `MAX_HYPERLINK_METADATA_BYTES` |
+/// | `ParserCapture` | `MAX_MEDIA_PAYLOAD_BYTES` + `MAX_ESCAPE_SEQUENCE_BYTES` |
+/// | `PtyOutput` | `max_queued_output_ring_bytes()` |
+/// | `PtyInput` | `max_pty_queued_input_bytes()` |
+///
+/// The three grid classes share one term because `MAX_GRID_CELLS` bounds them
+/// together rather than each separately. `PtyOutput` carries the structural
+/// ceiling of one reader ring per queue slot, not the single ring a real shell
+/// pins: a backstop has to sit above what the seam permits, not above what it
+/// usually uses. `PtyInput` carries its queue depth times the per-message cap
+/// for the same reason — a paste is admitted at its full size, so the seam
+/// permits far more than a session typically holds.
+///
+/// `CommandEvents` is deliberately absent. Its queue is bounded and its
+/// retention is real, but no production site charges it, so it cannot appear in
+/// the ledger total this is compared against — a term for it would raise the
+/// tripwire without raising what the tripwire can see.
+pub const PANE_SEAM_CAP_SUM_BYTES: usize = (sonicterm_grid::grid::MAX_GRID_CELLS as usize
+    * std::mem::size_of::<sonicterm_types::Cell>())
+    + media::MAX_RETAINED_INLINE_IMAGE_BYTES
+    + sonicterm_grid::hyperlink::MAX_HYPERLINK_METADATA_BYTES
+    + sonicterm_vt::vt::MAX_MEDIA_PAYLOAD_BYTES
+    + sonicterm_vt::vt::MAX_ESCAPE_SEQUENCE_BYTES
+    + sonicterm_io::pty::max_queued_output_ring_bytes()
+    + sonicterm_io::pty::max_pty_queued_input_bytes();
+
+/// Headroom multiplier between the seam caps and the governor's backstop.
+///
+/// The backstop exists to catch a seam that has *stopped* bounding, so it must
+/// sit far enough above correct operation that it never fires there. Two times
+/// the sum leaves room for allocator slack, capacity overshoot, and the
+/// deliberate residual where a pane keeps one oversized image rather than
+/// rendering nothing — while still being a small multiple rather than an
+/// unbounded curve.
+const BACKSTOP_HEADROOM: usize = 2;
+
+/// The committed budget an `AppPane` owner is held to.
+///
+/// **A tripwire, not a second enforcement point.** That distinction is what
+/// makes it safe, and it is the whole design:
+///
+/// The objection to a governor limit was that two limits which must agree and
+/// are maintained separately will drift, and the one that stops agreeing keeps
+/// reporting itself as enforced. That objection holds for a limit that shares
+/// the enforcement job. It does not hold for one derived from the other limits
+/// and set above all of them: this cannot disagree with the seam caps, because
+/// it is computed from them, and it cannot silently stop enforcing, because it
+/// was never the thing enforcing.
+///
+/// What it catches is the failure the seam caps cannot: a seam that has stopped
+/// bounding while still reporting itself as bounded. Today produced two of
+/// those — a retained figure under-reporting by 1.67×, and a charging path that
+/// never ran — and neither would have tripped any per-seam assertion, because
+/// each seam was behaving correctly on its own terms.
+pub const PANE_COMMITTED_BUDGET_BYTES: usize = PANE_SEAM_CAP_SUM_BYTES * BACKSTOP_HEADROOM;
+
+/// Owner limits: seam caps enforce, the governor backstops.
+///
+/// Enforcement stays with the per-seam caps that are already tested and
+/// falsified. The governor's limit is [`PANE_COMMITTED_BUDGET_BYTES`], derived
+/// from those caps and set above them, so it is a tripwire for a seam that has
+/// stopped bounding rather than a second bound that must agree with the first.
+///
+/// Window and process owners stay untracked: their content is the sum of their
+/// panes, each already held to its own budget, and a second aggregate limit
+/// would be the drift surface this design avoids.
+fn pane_owner_limits() -> OwnerLimits {
+    OwnerLimits {
+        owner_bytes: PANE_COMMITTED_BUDGET_BYTES,
+        class_bytes: enum_map::enum_map! { _ => usize::MAX },
+        class_items: enum_map::enum_map! { _ => None },
+    }
+}
+
+/// Owner limits that track without constraining.
+///
+/// Used for window and process owners, whose retention is the sum of the panes
+/// beneath them. Each pane is already held to
+/// [`PANE_COMMITTED_BUDGET_BYTES`], so an aggregate limit here would add a
+/// second figure to keep in agreement without catching anything the per-pane
+/// backstop misses.
+fn tracking_only_owner_limits() -> OwnerLimits {
+    OwnerLimits {
+        owner_bytes: usize::MAX,
+        class_bytes: enum_map::enum_map! { _ => usize::MAX },
+        class_items: enum_map::enum_map! { _ => None },
+    }
+}
+
+/// Append parsed command events, bounding both the entries kept and the
+/// memory the queue holds.
+///
+/// Trimming the length is not enough on its own. `Vec::drain` lowers the
+/// length and keeps the allocation, so one oversized batch — a 64 KiB parse
+/// chunk of `OSC 133` prompt markers is roughly eight thousand events — leaves
+/// the queue trimmed to the cap while still holding the peak buffer for as
+/// long as the pane lives. Releasing the overshoot keeps the memory the class
+/// records and the memory the pane holds the same figure.
+///
+/// The release runs only when a batch actually overshot, so the steady state,
+/// where the queue sits at or below the cap, does not reallocate.
 fn append_bounded_command_events(
     queue: &mut Vec<PaneCommandEvent>,
     events: impl IntoIterator<Item = PaneCommandEvent>,
@@ -298,6 +421,7 @@ fn append_bounded_command_events(
     if queue.len() > MAX_PANE_COMMAND_EVENTS {
         let excess = queue.len() - MAX_PANE_COMMAND_EVENTS;
         queue.drain(0..excess);
+        queue.shrink_to(MAX_PANE_COMMAND_EVENTS);
     }
 }
 
@@ -342,12 +466,20 @@ pub fn effective_frame_period(
 
 /// Resolve the effective frame period for the no-GPU case.
 ///
-/// When `degrade` is true (software rasterizer detected, or forced by config),
-/// the frame period is clamped to at least [`SOFTWARE_RENDER_FRAME_PERIOD`] so
-/// the CPU isn't asked to rasterize at the monitor's full refresh rate. A
-/// faster monitor period is slowed to the software cap.
+/// When `degrade` is true the result is [`SOFTWARE_RENDER_FRAME_PERIOD`],
+/// whatever the monitor reports. This is an override, not a `max()`: a monitor
+/// slower than the cap — a 30 Hz panel in a VM or over RDP, which is where
+/// software rendering usually runs — is resolved to the cap too, asking for
+/// more frames than the panel presents. That is long-standing and deliberate;
+/// the wording is written this way because "clamped to at least" describes a
+/// `max()` this function does not perform.
+///
 /// With `degrade` false the monitor period passes through unchanged, so the
 /// hardware-GPU path is untouched.
+///
+/// `monitor_period` must be the monitor's own period, never a previously
+/// resolved value — passing the resolved period back in makes the decision
+/// one-way, because a resolution taken while degrading returns the cap.
 #[must_use]
 pub fn software_render_frame_period(degrade: bool, monitor_period: Duration) -> Duration {
     if degrade {
@@ -430,10 +562,70 @@ pub struct WarmWindow {
     pub created_at: Instant,
 }
 
+/// Closes a governor owner when the thing that owned it drops.
+///
+/// The charge on a pane is released by `CommittedReservation::Drop`, and its
+/// doc comment states why that is correct: *there is no teardown site to
+/// forget*. The owner beside it had no such guarantee — it was a plain
+/// `Option<ResourceOwnerId>` that vanished when the pane dropped, leaving the
+/// governor holding a record that never closed.
+///
+/// Measured before this: 80 of 80 owners still `Open` after 40 create/destroy
+/// cycles, and `OwnerRegistry` has `get` and `insert` and **no `remove`**, so
+/// each one is retained for the life of the process along with its `RwLock`,
+/// `Mutex`, and two `EnumMap`s over every resource class.
+///
+/// Six pane-removal sites across four files reach `panes.remove`. Patching
+/// each is how the original defect happened; this makes the close a property
+/// of ownership instead.
+pub(crate) struct OwnerGuard {
+    governor: ResourceGovernor,
+    owner: ResourceOwnerId,
+}
+
+impl OwnerGuard {
+    /// Take responsibility for closing `owner` when this drops.
+    pub(crate) fn new(governor: ResourceGovernor, owner: ResourceOwnerId) -> Self {
+        Self { governor, owner }
+    }
+
+    /// The owner this guard will close.
+    pub(crate) fn id(&self) -> ResourceOwnerId {
+        self.owner
+    }
+}
+
+impl std::fmt::Debug for OwnerGuard {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("OwnerGuard").field("owner", &self.owner).finish()
+    }
+}
+
+impl Drop for OwnerGuard {
+    fn drop(&mut self) {
+        // Charges must already be gone: `finish_close` refuses an owner still
+        // holding them. `PaneState` declares `charges` before `owner`, and
+        // Rust drops fields in declaration order, so the reservations release
+        // before this runs.
+        if let Err(error) = self
+            .governor
+            .begin_close(self.owner)
+            .and_then(|()| self.governor.finish_close(self.owner))
+        {
+            tracing::warn!(
+                target: "memory",
+                ?error,
+                owner = ?self.owner,
+                "owner did not close on drop; its record is retained for the process lifetime"
+            );
+        }
+    }
+}
+
 pub struct WindowState {
-    /// Phase B classification — see [`WindowRole`].
+    /// Window classification — see [`WindowRole`].
     pub role: WindowRole,
-    /// Phase B2 PR-B2-0: promoted from `Arc<Window>` to
+    /// promoted from `Arc<Window>` to
     /// `Option<Arc<Window>>` so test seeders can build a `WindowState`
     /// without running `do_resumed`. In production this is `Some(_)`
     /// the moment `do_resumed` (main) or `create_child_window`
@@ -443,7 +635,7 @@ pub struct WindowState {
     pub window: Option<Arc<Window>>,
     /// Per-window wgpu renderer. `Some(_)` once `do_resumed` (main
     /// window) or `create_child_window` (torn-out) populates it.
-    /// PR-B1b: the main window's renderer now lives here too —
+    /// the main window's renderer now lives here too —
     /// the legacy `App.renderer` field was deleted. Read through
     /// [`Self::renderer`] / [`Self::renderer_mut`] which unwrap (always
     /// safe after `do_resumed`).
@@ -451,6 +643,24 @@ pub struct WindowState {
     pub tabs: TabBar,
     pub tab_states: Vec<TabState>,
     pub panes: HashMap<u64, PaneState>,
+    /// This window's owner in the governor hierarchy.
+    ///
+    /// `None` for synthetic windows built by tests that never registered one.
+    /// Production windows always have it; the option exists so a test seam
+    /// cannot silently register a phantom owner that never closes.
+    ///
+    /// An [`OwnerGuard`] for the same reason the pane's is: the window is
+    /// removed from `self.windows` at three sites across two files, and the
+    /// close has to be a property of ownership rather than something each of
+    /// them remembers.
+    ///
+    /// **Declared after `panes`, and the order is load-bearing.** Rust drops
+    /// fields in declaration order, and a pane's owner is a child of this one.
+    /// `finish_close` refuses an owner that still has live children, so a
+    /// window dropped with this field first would strand its own owner part
+    /// closed while the panes beneath it were still open. Panes first means
+    /// each child guard has already closed by the time this one runs.
+    pub(crate) owner: Option<OwnerGuard>,
     pub cursor_pos: (f64, f64),
     pub mouse_down: bool,
     pub selection: Option<Selection>,
@@ -481,7 +691,7 @@ pub struct WindowState {
     // Arc travels with tear-out). Read from
     // `ws.panes.get(&active_pane).map(|p| p.cursor_visible.load(...))`.
     pub last_render: Instant,
-    /// Phase B2 PR-B3b: pointer-cursor-is-link latch. Mirrors
+    /// pointer-cursor-is-link latch. Mirrors
     /// `App.hover_link` (now deleted). Per-window so a torn-out child can
     /// flip its own cursor independently of the main window.
     pub hover_link: bool,
@@ -498,25 +708,18 @@ pub struct WindowState {
     /// rebuilds when winit reports monitor changes. Cursor/layout math is
     /// raster-px and must not read this field.
     pub dpi_scale: f64,
-    /// Per-window IME composition state. Phase B2 PR-A — promoted from
-    /// `App.ime` (main-only) so torn-out windows can compose CJK input
-    /// independently. The legacy `App.ime` continues to exist and is
-    /// kept in sync on the main window until PR-B.
+    /// Per-window IME composition state, so torn-out windows compose CJK
+    /// input independently of the main window.
     pub ime: ImeState,
-    /// Phase B2 PR-B3d — per-window throttle for
-    /// `Window::set_ime_cursor_area`. Promoted from `App.ime_cursor_throttle`
-    /// so each torn-out window can throttle its own IMK runloop traffic
-    /// independently. The legacy field stayed in lock-step on the main
-    /// window via the shadow snapshot prior to PR-B3d; with the field
-    /// deleted from `App`, every read path now goes through
+    /// Per-window throttle for
+    /// `Window::set_ime_cursor_area`, so each torn-out window throttles its
+    /// own IMK runloop traffic independently. Every read path goes through
     /// `self.main()?.ime_cursor_throttle`.
     pub ime_cursor_throttle: sonicterm_ui::ime::ImeCursorThrottle,
     /// Per-window hovered URL (Cmd-held underline + pointer cursor).
-    /// Phase B2 PR-A — promoted from `App.hovered_url`. Legacy field
-    /// stays in lock-step on the main window until PR-B.
     pub hovered_url: Option<hovered_url::HoveredUrl>,
     pub notification: Option<NotificationBubble>,
-    /// Phase B2 PR-B4: "this window is hidden / drained" latch.
+    /// "this window is hidden / drained" latch.
     /// Promoted from the App-level `main_hidden` bool so the visibility
     /// state lives next to the `Window` Arc it gates. Today only the main
     /// window flips this to `true` (when its last tab is torn out and
@@ -593,7 +796,7 @@ impl WindowState {
             .expect("WindowState::renderer_mut() called before do_resumed populated it")
     }
 
-    /// Phase B2 PR-B2-0: convenience that short-circuits when
+    /// convenience that short-circuits when
     /// `window` is `None`. Most call sites previously did
     /// `ws.window.request_redraw()` unconditionally; after the
     /// `Option` promotion they want a no-op when the window is gone.
@@ -807,7 +1010,7 @@ fn next_synthetic_child_window_id() -> WindowId {
     unsafe { std::mem::transmute::<u64, WindowId>(u64::MAX - tag) }
 }
 
-/// Phase B2 PR-B2a: stable synthetic `WindowId` used by the
+/// stable synthetic `WindowId` used by the
 /// test-only [`App::__test_synthetic_main`] seam so the main entry in
 /// `App.windows` can be addressed without a live winit window. winit's
 /// `WindowId` is `#[repr(transparent)] struct WindowId(u64)` so a
@@ -827,8 +1030,8 @@ pub fn synthetic_main_window_id() -> WindowId {
     unsafe { std::mem::transmute::<u64, WindowId>(u64::MAX) }
 }
 
-/// Phase B2 PR-A — snapshot of the cheap scalar fields mirrored from
-/// Phase A — classification of which terminal window currently
+/// snapshot of the cheap scalar fields mirrored from
+/// classification of which terminal window currently
 /// owns the OS-frontmost focus. Returned by [`App::frontmost_kind`] and
 /// consumed by keymap_dispatch arms + menubar drain to decide where a
 /// chord like Cmd+T / Cmd+W / Cmd+\\ should land.
@@ -1168,7 +1371,7 @@ fn pty_input_rejected_event(error: sonicterm_io::pty::PtyInputError) -> UserEven
 /// background font load completion bumps `style_rev` on every live
 /// window and triggers a redraw — the tofu cells flip to real
 /// glyphs without the user having to type anything.
-/// T13/T14: the legacy `AsyncFallbackLoader` (cosmic-text/swash
+/// The legacy `AsyncFallbackLoader` (cosmic-text/swash
 /// driven background-load helper) is gone with the rest of the
 /// glyphon plumbing. sonicterm-font handles CJK/emoji/Nerd-font
 /// fallback synchronously via its built-in vendor chain
@@ -1197,6 +1400,8 @@ mod overlays;
 mod quit_hold;
 mod redraw_target;
 mod render_timing;
+pub mod renderer_retention;
+pub mod retention;
 mod scroll;
 pub mod scrollbar_input;
 pub mod scrollbar_visibility;
@@ -1233,7 +1438,50 @@ pub fn init_tracing_public() {
 /// read the current id after coalescing and send a typed redraw event. Native
 /// window APIs remain confined to the winit event-loop thread.
 pub struct PaneState {
+    /// Governor charges this pane holds, one per resource class.
+    ///
+    /// Committed reservations rather than repeated reserve/release: a pane's
+    /// retention rises and falls continuously, and a release/re-reserve pair
+    /// on every sample opens a window where the ledger disagrees with reality.
+    /// `try_grow` and `shrink` move a live charge in place, so the figure is
+    /// never briefly wrong.
+    ///
+    /// Released by `Drop` when the pane is dropped, which is the same property
+    /// that made the inline-media charge correct: there is no teardown site to
+    /// forget.
+    pub(crate) charges: HashMap<ResourceClass, sonicterm_resource::CommittedReservation>,
+    /// This pane's owner in the governor hierarchy, below its window's.
+    ///
+    /// Assigned when the pane is inserted into a window rather than at
+    /// construction: `PaneState::new` is called from a dozen sites that have
+    /// no governor in scope, and threading one through all of them would be a
+    /// larger change than the ownership it establishes.
+    ///
+    /// Held as an [`OwnerGuard`] so the owner closes when the pane drops.
+    /// Declared *after* `charges` deliberately: Rust drops fields in
+    /// declaration order, and `finish_close` refuses an owner that still holds
+    /// charges, so the reservations must release first.
+    pub(crate) owner: Option<OwnerGuard>,
     pub parser: Arc<Mutex<Parser>>,
+    /// Capture progress seen at the previous retention sample.
+    ///
+    /// A media capture holds its staging buffer until its terminator arrives,
+    /// and the terminator is not guaranteed to — a killed transfer or dropped
+    /// link leaves it pinned until the pane dies. The parser cannot tell that
+    /// from a slow transfer, having no clock. The sampler has one, so it
+    /// remembers what the capture had received last time and cancels only a
+    /// capture that has not moved across consecutive samples.
+    pub(crate) last_capture_progress: Option<usize>,
+    /// How many consecutive samples have seen `last_capture_progress`
+    /// unchanged.
+    ///
+    /// A count rather than a flag because one unchanged reading proves only
+    /// one sample interval of silence, and a transfer merely slower than that
+    /// interval reads as stalled — cancelling it costs the user a picture they
+    /// were waiting for. Requiring the figure to hold still twice buys a
+    /// second interval of evidence, so the threshold is the full
+    /// `2 × RETENTION_SAMPLE_INTERVAL` the cancellation reports.
+    pub(crate) capture_stall_samples: u8,
     pub pty: Option<PtyHandle>,
     pub redraw_target: Arc<Mutex<Option<WindowId>>>,
     /// Absolute row (scrollback-relative) that should appear at the top of
@@ -1276,6 +1524,14 @@ pub struct PaneState {
     pub app_cursor_keys: Arc<std::sync::atomic::AtomicBool>,
     /// Decoded inline media images captured from terminal protocols.
     pub inline_images: Arc<Mutex<Vec<sonicterm_render_model::InlineImage>>>,
+    /// This pane's share of the process-wide inline-media total.
+    ///
+    /// Co-owned with the pane's VT worker. The worker ends when its shell
+    /// exits, but the pane stays on screen with its images, so a charge held
+    /// only by the worker would be released while the pixels are still
+    /// retained. Held here so the charge is returned when the pane — and with
+    /// it the image store — is actually dropped.
+    pub(crate) inline_media_charge: media::SharedInlineMediaCharge,
 }
 
 #[derive(Debug, Clone)]
@@ -1289,7 +1545,12 @@ impl PaneState {
     #[doc(hidden)]
     pub fn new(parser: Arc<Mutex<Parser>>, pty: Option<PtyHandle>) -> Self {
         Self {
+            // Assigned when the pane is inserted into a window.
+            owner: None,
+            charges: HashMap::new(),
             parser,
+            last_capture_progress: None,
+            capture_stall_samples: 0,
             pty,
             redraw_target: Arc::new(Mutex::new(None)),
             viewport_top_abs: None,
@@ -1299,6 +1560,7 @@ impl PaneState {
             kitty_flags: Arc::new(std::sync::atomic::AtomicU8::new(0)),
             app_cursor_keys: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             inline_images: Arc::new(Mutex::new(Vec::new())),
+            inline_media_charge: media::new_inline_media_charge(),
         }
     }
 }
@@ -1347,29 +1609,16 @@ pub struct App {
     /// here, and only an explicit reload moves it.
     pub(super) configured_weight_scale: f32,
     pub(super) keymap: Keymap,
-    // PR-B1b: `App.renderer` field removed; the main window's
-    // `GpuRenderer` is now owned by `self.windows[main_window_id].renderer`.
-    // Access via `Self::main_renderer()` / `Self::main_renderer_mut()`.
-    // PR-B2b: `App.tabs` + `App.tab_states` fields removed; the
-    // main window's TabBar + TabState vec are now owned by
-    // `self.windows[main_window_id]`. Access via `Self::main_tabs()` /
-    // `Self::main_tabs_mut()` / `Self::main_tab_states()` /
-    // `Self::main_tab_states_mut()`. Callers needing both at once should
-    // go through `self.main_mut()` directly to avoid double-borrow.
-    // PR-B2c: `App.panes` field removed; the main window's pane
-    // map is now owned by `self.windows[main_window_id]`. Access via
-    // `Self::main_panes()` / `Self::main_panes_mut()`. Callers needing
-    // panes + tabs/tab_states/renderer together should go through
-    // `self.main_mut()` and split-borrow the fields disjointly.
-    // PR-B3b: `App.last_render`, `App.cursor_visible`, and
-    // `App.hover_link` fields removed; now owned by
-    // `self.windows[main_window_id]`. Access via
-    // `self.main()?.last_render` / `self.main()?.cursor_visible` /
-    // `self.main()?.hover_link`.
-    // PR-B3c: `App.selection`, `App.copy_mode`, and `App.modifiers`
-    // fields removed; now owned by `self.windows[main_window_id]`.
-    // Access via [`Self::main_selection`] / [`Self::main_modifiers`] /
-    // direct field access through `self.main()?.copy_mode` etc.
+    // The main window holds no state of its own here. Its renderer, tabs,
+    // tab states, panes, selection, modifiers, copy mode, last render, cursor
+    // visibility, and hover link all live in `self.windows[main_window_id]`,
+    // the same place a torn-out child's do — so one set of code paths serves
+    // both. Reach them through `main_renderer()`, `main_tabs()`,
+    // `main_panes()`, `main_selection()`, and their `_mut` counterparts.
+    //
+    // Callers needing several at once should go through `main_mut()` and
+    // split-borrow the fields disjointly; taking two `main_*_mut()` accessors
+    // together is a double borrow of the same map entry.
     pub(super) clipboard: Option<Clipboard>,
     /// Test-only in-memory clipboard override for integration tests that need
     /// to observe copy/paste routing without depending on a desktop clipboard
@@ -1394,8 +1643,8 @@ pub struct App {
     // now live exclusively on `WindowState`. Readers go through
     // `self.main()?.dpi_scale` / `self.main()?.hovered_url`
     // (with safe-default fallbacks at call sites). The shadow-sync
-    // path was deleted as the final Phase B2 leftover.
-    /// Phase E (Haiku follow-up): Action::NewWindow sets this
+    // path was deleted as the last of the per-window migration.
+    /// Action::NewWindow sets this
     /// flag, then `drain_pending_window_creates` consumes it by calling
     /// `create_new_terminal_window(el)`. Window creation requires an
     /// `ActiveEventLoop` reference
@@ -1445,23 +1694,21 @@ pub struct App {
     /// needed because `run_action` does not have an `ActiveEventLoop`
     /// handle.
     pub(super) pending_exit: bool,
-    // PR-B3d: `App.ime` and `App.ime_cursor_throttle` fields
-    // removed; now owned by `self.windows[main_window_id]`. Access via
-    // `self.main()?.ime` / `self.main_mut()?.ime_cursor_throttle`.
+    /// When pane retention was last sampled for the memory log.
+    ///
+    /// `None` until the first sample. Gating on elapsed time rather than
+    /// sampling every idle turn keeps a measurement that walks every pane off
+    /// the path that governs idle CPU.
+    pub(super) last_retention_sample: Option<std::time::Instant>,
     pub(super) command_palette: CommandPalette,
-    /// Phase A follow-up — which window the (single, modal)
-    /// command palette is currently attached to. `None` means it's
-    /// closed OR attached to the main window; `Some(id)` means it's
-    /// attached to that child window. The render paths for the main
-    /// window and each child window consult this so the palette only
-    /// paints on the frontmost window at the moment it was opened,
-    /// fixing the bug where Cmd+Shift+P typed in a torn-out child
-    /// silently opened the palette on the original main window.
+    /// Which window the (single, modal) command palette is attached to.
+    /// `None` means it is closed OR attached to the main window; `Some(id)`
+    /// means that child window. Both the main and child render paths consult
+    /// it so the palette paints only on the window it was opened from —
+    /// without it, Cmd+Shift+P typed in a torn-out child opened the palette
+    /// on the original main window.
     pub(super) palette_attached_window: Option<WindowId>,
-    // PR-B3d: `App.drag_session` field removed; per-window
-    // drag sessions live on `WindowState`. Access via
-    // `self.main_mut()?.drag_session` / per-window iteration.
-    /// Phase C2 (review fix): set the moment a held-tab drag
+    /// Set the moment a held-tab drag
     /// crosses [`os_drag::OS_DRAG_THRESHOLD_PX`] from its press point,
     /// before the user releases the button. Guards
     /// [`Self::try_os_drag_handoff`] in the `CursorMoved` path so the
@@ -1473,51 +1720,54 @@ pub struct App {
     pub(super) os_drag_handoff_started: bool,
     /// Windows spawned by tearing tabs out of the parent bar. Keyed by
     /// winit WindowId so events route back to the right child.
+    /// Process-wide resource governor and its owner hierarchy.
+    ///
+    /// Holds the `Process` root; every window registers a `Window` owner below
+    /// it and every pane an `AppPane` owner below its window. That hierarchy
+    /// is what makes a window's total derivable from its panes — the question
+    /// per-pane accounting cannot answer and the one a user asks when they
+    /// close a window to reclaim memory.
+    ///
+    /// Registered here rather than accounted here: this change establishes
+    /// ownership only. Charging producers through it is the larger job that
+    /// changes when allocation happens, not merely where the number lives.
+    pub(super) governor: ResourceGovernor,
     pub(super) windows: HashMap<WindowId, WindowState>,
-    /// Phase B2 PR-A: id of the main window. Set in `do_resumed` once
-    /// the main `Window` is created and `WindowState` shadow entry is
-    /// inserted into [`Self::windows`]. Readers MUST still use the
-    /// legacy `App.window`/`renderer`/`tabs`/... fields — PR-B will
-    /// switch them to read off `self.windows[main_window_id]`.
+    /// Id of the main window. Set in `do_resumed` once the main `Window` is
+    /// created and its [`WindowState`] is inserted into [`Self::windows`].
+    ///
+    /// `None` before that point, which is why every `main_*()` accessor
+    /// returns an `Option` rather than assuming a main window exists.
     pub(super) main_window_id: Option<WindowId>,
-    // PR-B4: `App.focused_child` removed; its job
-    // ("which torn-out child currently owns focus, or None for main")
-    // is now strictly a subset of `frontmost_window` (which discriminates
-    // main vs child via `frontmost_kind()`). All readers route through
-    // `frontmost_window` / `frontmost_kind()`.
-    /// Phase A — most-recently-OS-frontmost window id, INCLUDING
-    /// the main window. The frontmost field tracks *every* sonic-owned
-    /// terminal window with a single non-`Option` discriminant once the
-    /// first focus arrives:
-    /// single non-`Option` discriminant once the first focus arrives:
+    /// Most-recently-OS-frontmost window id, INCLUDING the main window.
+    /// Tracks *every* sonic-owned terminal window with a single
+    /// non-`Option` discriminant once the first focus arrives:
     ///
     ///   * `Some(main_window_id)`  → main window is OS-frontmost
     ///   * `Some(child_window_id)` → that child window is OS-frontmost
     ///   * `None`                  → no sonic window has been focused yet,
     ///     OR focus has moved out of every sonic window to another app.
     ///
+    /// Subsumes a separate "which child has focus" field: main-vs-child is
+    /// discriminated by `frontmost_kind()`, so one id answers both questions
+    /// and the two cannot disagree.
+    ///
     /// Keyboard / menubar / accelerator actions (Cmd+T, Cmd+W, Cmd+\\, …)
     /// route through this id so a chord typed in window B never mutates
     /// window A's tab vec. Set in both the main and child `Focused(true)`
     /// arms; on `Focused(false)` we only clear when the dropped window was
-    /// the current frontmost (focus moving to a *different* sonic window
+    /// the current frontmost — focus moving to a *different* sonic window
     /// arrives as that other window's `Focused(true)` and overwrites
-    /// frontmost in the right order). Bug reports addressed by this field:
-    ///   * #2: Cmd+T after tear-out opens tab in WRONG window
-    ///   * #3: Cmd+W in new window closes OLD window's tab
+    /// frontmost in the right order.
+    ///
+    /// Without it, Cmd+T after a tear-out opened a tab in the wrong window,
+    /// and Cmd+W in a new window closed the old window's tab.
     pub(super) frontmost_window: Option<WindowId>,
-    // PR-B3d: `App.drag_target` field removed; per-window
-    // pending drop target lives on `WindowState`. Access via
-    // `self.main_mut()?.drag_target`.
     /// OS-drag tab payloads received before the main [`WindowState`] exists.
     /// Startup pasteboard / OLE deliveries can arrive before `do_resumed`
     /// inserts `main_window_id`; queue them so the destination tab is created
     /// after main is available instead of silently dropping the payload.
     pub(super) pending_os_drag_payloads: Vec<crate::os_drag::TabPayload>,
-    // PR-B4: `App.main_hidden` removed; the "main window is
-    // drained / hidden" latch lives on `WindowState.hidden`. Access via
-    // `self.main_is_hidden()` (true when the field is set OR the main
-    // entry is gone — both shapes mean "no visible main").
     /// Optional theme loader, set by `run_with`. Used to reload a theme
     /// by name live.
     pub(crate) theme_loader: Option<ThemeLoader>,
@@ -1532,11 +1782,22 @@ pub struct App {
     /// over-render and by `about_to_wait` to schedule the next vsync
     /// boundary via `ControlFlow::WaitUntil`. See perf audit #9.
     pub(super) frame_period: Duration,
+    /// The monitor's own reported period, kept separately so the degrade
+    /// decision stays reversible.
+    ///
+    /// `frame_period` is the *resolved* period and is overwritten with the
+    /// software cap while degrading. Resolving a later decision from it would
+    /// read the cap back as if it were the monitor's rate, so clearing degrade
+    /// could not restore the monitor's cadence and the window stayed at 40 fps
+    /// until restart. Every resolution reads this field instead; only the
+    /// monitor probe writes it.
+    pub(super) monitor_frame_period: Duration,
     /// True when the no-GPU degrade path is engaged (software rasterizer
     /// detected or forced via `[appearance].software_render_mode`). When set,
-    /// `frame_period` is clamped to the software cap and per-frame scrollbar
+    /// `frame_period` is replaced by the software cap and per-frame scrollbar
     /// fade animation is suppressed so the CPU isn't asked to rasterize at full
-    /// refresh. Resolved once after the renderer is created.
+    /// refresh. Resolved after the renderer is created and re-resolved on an
+    /// explicit config reload.
     pub(super) software_render_degrade: bool,
     /// Set when a RedrawRequested arrives sooner than `frame_period`
     /// after the previous render. `about_to_wait` schedules a
@@ -1609,7 +1870,7 @@ pub struct App {
     /// to resolve the raw screen-coordinate drop into a real
     /// `(WindowId, slot)` pair before posting a `DroppedOnBar` outcome.
     pub(super) os_drag_bars: Arc<os_drag::TabBarRegistry>,
-    /// Phase C2: tracks the source-side bookkeeping while an OS drag
+    /// tracks the source-side bookkeeping while an OS drag
     /// is in flight. `Some((source_window, source_tab_idx))` from
     /// `begin_session` until `UserEvent::DragEnded` is drained; back
     /// to `None` once the dispatcher routes the outcome.
@@ -1799,9 +2060,25 @@ impl App {
             pending_os_teardown: false,
             test_post_snapshot_hook: None,
             pending_exit: false,
+            last_retention_sample: None,
             command_palette,
             palette_attached_window: None,
             os_drag_handoff_started: false,
+            governor: ResourceGovernor::new(
+                ProcessKind::Gui,
+                GovernorLimits {
+                    // Deliberately unlimited. Enforcement stays with the
+                    // per-seam caps that are already tested; a second
+                    // enforcement point would create two figures that must
+                    // agree and will eventually drift — the defect shape of
+                    // the charge-lifetime bug, where a reservation outlived
+                    // the thing it was taken for.
+                    process_bytes: usize::MAX,
+                    class_bytes: enum_map::enum_map! { _ => usize::MAX },
+                    class_items: enum_map::enum_map! { _ => None },
+                },
+            )
+            .expect("an unlimited governor cannot fail to construct"),
             windows: HashMap::new(),
             main_window_id: None,
             frontmost_window: None,
@@ -1812,6 +2089,7 @@ impl App {
             // Default to 60 Hz until `resumed` probes the actual
             // monitor refresh rate. ~16.667 ms = 1/60 s.
             frame_period: Duration::from_micros(16_667),
+            monitor_frame_period: Duration::from_micros(16_667),
             // Resolved after the renderer is created in `do_resumed`.
             software_render_degrade: false,
             pending_redraw: false,
@@ -2116,7 +2394,7 @@ impl App {
         }
     }
 
-    /// PR-B4: is the main window currently hidden / drained?
+    /// is the main window currently hidden / drained?
     /// `true` when the main `WindowState` is gone OR its `hidden` latch
     /// is set. The two shapes mean the same thing operationally — no
     /// visible main — so callers don't need to discriminate.
@@ -2990,6 +3268,8 @@ impl App {
             tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
         }
         let child = WindowState {
+            // Registered when the window is inserted.
+            owner: None,
             role: WindowRole::Terminal,
             window: None,
             renderer: None,
@@ -3026,7 +3306,7 @@ impl App {
             test_renderer_focus_marker: None,
             test_pane_viewport: None,
         };
-        self.windows.insert(id, child);
+        self.insert_window_registered(id, child);
         id
     }
 
@@ -3120,7 +3400,7 @@ impl App {
 
     /// Test-only: install a frontmost child id without going through a
     /// real `WindowEvent::Focused(true)` (which requires a winit window).
-    /// PR-B4 replaced `focused_child` with `frontmost_window`;
+    /// `frontmost_window` subsumes a separate focused-child field;
     /// this kept the old name so the existing regression tests don't
     /// need touching, but it now drives the unified tracker.
     #[doc(hidden)]
@@ -3130,7 +3410,7 @@ impl App {
     }
 
     /// Test-only: read back the current frontmost-child id.
-    /// PR-B4 — returns `Some(id)` when `frontmost_window` points
+    /// returns `Some(id)` when `frontmost_window` points
     /// at a non-main entry, mirroring the old `focused_child` semantics.
     #[doc(hidden)]
     pub fn __test_focused_child(&self) -> Option<WindowId> {
@@ -3148,7 +3428,7 @@ impl App {
 
     /// Test-only: install a `frontmost_window` id without going through a
     /// real `WindowEvent::Focused(true)` (which requires a winit window).
-    /// Used Phase A regression tests to assert that
+    /// Used by regression tests to assert that
     /// keymap-dispatched actions route to the right window's tab vec.
     #[doc(hidden)]
     pub fn __test_set_frontmost_window(&mut self, id: Option<WindowId>) {
@@ -3495,7 +3775,7 @@ impl App {
         self.handle_child_focus_changed(id, focused);
     }
 
-    /// Phase A — classify [`Self::frontmost_window`] without
+    /// classify [`Self::frontmost_window`] without
     /// borrowing anything mutably. Returns:
     ///   * `FrontmostKind::None` if no sonic window has been focused yet,
     ///     focus is currently outside every sonic window, or the recorded
@@ -3510,12 +3790,12 @@ impl App {
     ///
     /// Pure read; no mutation, no logging. The keymap_dispatch arms call
     /// this first, then route to the matching mutator + redraw target.
-    /// Phase B2 PR-A — borrow the main window's [`WindowState`] shadow
-    /// entry from `self.windows`, keyed by [`Self::main_window_id`].
-    /// Returns `None` before `do_resumed` has run (no main window yet)
-    /// OR if the shadow entry is missing for any reason. PR-B will
-    /// migrate readers (`self.tabs`, `self.renderer`, …) to go through
-    /// this helper.
+    /// Borrow the main window's [`WindowState`] from `self.windows`, keyed by
+    /// [`Self::main_window_id`]. Returns `None` before `do_resumed` has run
+    /// (no main window yet) or if the entry is missing for any reason.
+    ///
+    /// Every reader of the main window's renderer, tabs, and panes goes
+    /// through this helper or its `_mut` counterpart.
     #[doc(hidden)]
     pub fn main(&self) -> Option<&WindowState> {
         let id = self.main_window_id?;
@@ -3529,18 +3809,17 @@ impl App {
         self.windows.get_mut(&id)
     }
 
-    /// Phase B2 PR-B1a — borrow the main window's `Arc<Window>` from
-    /// the shadow [`WindowState`]. Sole source of truth for the main
-    /// window handle (the legacy `App.window` field was deleted in
-    /// PR-B1a). Returns `None` before `do_resumed` has run.
+    /// Borrow the main window's `Arc<Window>` from its [`WindowState`].
+    /// Sole source of truth for the main window handle. Returns `None`
+    /// before `do_resumed` has run.
     #[doc(hidden)]
     pub fn main_window(&self) -> Option<&Arc<Window>> {
         self.windows.get(&self.main_window_id?)?.window.as_ref()
     }
 
-    /// Phase B2 PR-B1b — borrow the main window's `GpuRenderer`
+    /// borrow the main window's `GpuRenderer`
     /// from its `WindowState`. Sole source of truth for the main
-    /// renderer (legacy `App.renderer` field was deleted in PR-B1b).
+    /// renderer.
     /// Returns `None` before `do_resumed` has run.
     #[doc(hidden)]
     pub fn main_renderer(&self) -> Option<&GpuRenderer> {
@@ -3554,9 +3833,9 @@ impl App {
         self.windows.get_mut(&id)?.renderer.as_mut()
     }
 
-    /// Phase B2 PR-B2b — borrow the main window's [`TabBar`] from
+    /// borrow the main window's [`TabBar`] from
     /// its [`WindowState`]. Sole source of truth (legacy `App.tabs` was
-    /// deleted in PR-B2b). Returns `None` before `do_resumed` /
+    /// Returns `None` before `do_resumed` /
     /// `__test_synthetic_main` has populated the shadow entry.
     #[doc(hidden)]
     pub fn main_tabs(&self) -> Option<&TabBar> {
@@ -3570,7 +3849,7 @@ impl App {
         Some(&mut self.windows.get_mut(&id)?.tabs)
     }
 
-    /// Phase B2 PR-B2b — borrow the main window's `Vec<TabState>`
+    /// borrow the main window's `Vec<TabState>`
     /// from its [`WindowState`]. Sole source of truth.
     #[doc(hidden)]
     pub fn main_tab_states(&self) -> Option<&[TabState]> {
@@ -3584,11 +3863,426 @@ impl App {
         Some(&mut self.windows.get_mut(&id)?.tab_states)
     }
 
-    /// Phase B2 PR-B2c — borrow the main window's pane map from
-    /// its [`WindowState`]. Sole source of truth (legacy `App.panes`
-    /// was deleted in PR-B2c). Returns `None` before `do_resumed` /
-    /// `__test_synthetic_main` has populated the shadow entry.
+    /// Insert a window and register its owner as one operation.
+    ///
+    /// The two steps are inseparable, so they are not offered separately. A
+    /// window inserted without an owner is not merely uncharged, it is absent
+    /// from hierarchy accounting entirely, and nothing later recovers it:
+    /// [`Self::reconcile_pane_owners`] and [`Self::reattribute_pane_owners`]
+    /// both skip a window whose owner is `None`, so its panes never get owners
+    /// either and the periodic sampler passes over the whole subtree forever.
+    ///
+    /// Registering here rather than at each call site is the same reasoning
+    /// [`Self::reconcile_pane_owners`] applies to panes: a rule every call site
+    /// must remember is a rule one call site will forget, and the forgotten one
+    /// is silent — the window works, and only the memory report is missing it.
+    ///
+    /// Panes already in `window` are adopted by this call. A window populated
+    /// after insertion instead reconciles when those panes arrive.
+    pub(super) fn insert_window_registered(&mut self, id: WindowId, window: WindowState) {
+        self.windows.insert(id, window);
+        self.register_window_owner(id);
+    }
+
+    /// Register a window in the governor hierarchy and record its owner.
+    ///
+    /// Private, and deliberately: reaching it goes through
+    /// [`Self::insert_window_registered`], so registration cannot drift away
+    /// from the insertion it belongs to.
+    ///
+    /// Idempotent by construction: a window that already has an owner keeps
+    /// it, so a re-insert during tab transfer cannot create a second owner
+    /// that never closes. That is the ratchet shape — an owner registered
+    /// twice and released once leaves the hierarchy permanently over-counted.
+    fn register_window_owner(&mut self, id: WindowId) {
+        self.register_window_owner_inner(id);
+        // A window arrives with its panes already populated, so registering
+        // the window without them would leave every pane unowned until the
+        // next sampling pass.
+        //
+        // Re-attribution rather than plain reconciliation: a window built by
+        // tear-out receives panes that already carry an owner, parented below
+        // the window they left. Reconciliation only adopts *ownerless* panes,
+        // so it skips exactly those and leaves the source window counting a
+        // pane it no longer holds — which refuses that window's close.
+        self.reattribute_pane_owners();
+    }
+
+    fn register_window_owner_inner(&mut self, id: WindowId) {
+        let root = self.governor.root_owner();
+        // Cloned before the window borrow: `ResourceGovernor` is a handle over
+        // an `Arc<Ledger>`, so this shares the ledger rather than copying it.
+        let governor_handle = self.governor.clone();
+        let Some(window) = self.windows.get(&id) else { return };
+        if window.owner.is_some() {
+            return;
+        }
+        let owner =
+            self.governor.create_child(root, OwnerKind::Window, tracking_only_owner_limits());
+        match owner {
+            Ok(owner) => {
+                if let Some(window) = self.windows.get_mut(&id) {
+                    window.owner = Some(OwnerGuard::new(governor_handle, owner));
+                }
+            }
+            Err(error) => {
+                // A window that cannot register still works; it is invisible
+                // to hierarchy accounting until the next insert. Failing the
+                // window would trade a diagnostic gap for a lost window.
+                tracing::warn!(
+                    target: "memory",
+                    ?error,
+                    "window owner registration failed; hierarchy accounting will omit it"
+                );
+            }
+        }
+    }
+
+    /// Test-only: snapshot the governor's process root.
     #[doc(hidden)]
+    pub fn __test_governor_snapshot_root(&self) -> sonicterm_types::ResourceSnapshot {
+        self.governor
+            .snapshot(self.governor.root_owner())
+            .expect("the process root always snapshots")
+    }
+
+    /// Test-only: move a pane from one window to another.
+    ///
+    /// Mirrors what tab tear-out does — remove from the source map, insert
+    /// into the destination — so the test exercises the real ownership
+    /// consequence rather than a simulation of it.
+    #[doc(hidden)]
+    pub fn __test_move_pane_between_windows(
+        &mut self,
+        source: WindowId,
+        destination: WindowId,
+        pane_id: u64,
+    ) -> bool {
+        let Some(pane) = self.windows.get_mut(&source).and_then(|w| w.panes.remove(&pane_id))
+        else {
+            return false;
+        };
+        let Some(window) = self.windows.get_mut(&destination) else { return false };
+        window.panes.insert(pane_id, pane);
+        self.reattribute_pane_owners();
+        true
+    }
+
+    /// Test-only: snapshot any owner.
+    #[doc(hidden)]
+    pub fn __test_owner_snapshot(
+        &self,
+        owner: ResourceOwnerId,
+    ) -> Option<sonicterm_types::ResourceSnapshot> {
+        self.governor.snapshot(owner).ok()
+    }
+
+    /// Test-only: measure one pane's retention through the reporting seam.
+    #[doc(hidden)]
+    pub fn __test_pane_retention(
+        &self,
+        window: WindowId,
+        pane_id: u64,
+    ) -> Option<retention::PaneRetention> {
+        let pane = self.windows.get(&window)?.panes.get(&pane_id)?;
+        retention::measure_pane(pane)
+    }
+
+    /// Test-only: the governor amounts a pane currently holds, by class.
+    #[doc(hidden)]
+    pub fn __test_pane_charges(
+        &self,
+        window: WindowId,
+        pane_id: u64,
+    ) -> Option<HashMap<ResourceClass, sonicterm_types::ResourceAmount>> {
+        let pane = self.windows.get(&window)?.panes.get(&pane_id)?;
+        Some(pane.charges.iter().map(|(class, held)| (*class, held.committed_amount())).collect())
+    }
+
+    /// Test-only: a pane's total charged bytes across every class.
+    #[doc(hidden)]
+    pub fn __test_pane_charge_total(&self, window: WindowId, pane_id: u64) -> Option<usize> {
+        let pane = self.windows.get(&window)?.panes.get(&pane_id)?;
+        Some(pane.charges.values().map(|held| held.committed_amount().bytes).sum())
+    }
+
+    /// Test-only: media captures currently in flight on a pane.
+    ///
+    /// Distinct from the retained-bytes figure: a cancelled capture and a
+    /// completed one both report zero bytes, and the slow-transfer test turns
+    /// on which of those happened.
+    #[doc(hidden)]
+    pub fn __test_pane_capture_count(&self, window: WindowId, pane_id: u64) -> Option<usize> {
+        let pane = self.windows.get(&window)?.panes.get(&pane_id)?;
+        pane.parser.try_lock().map(|parser| parser.live_capture_count())
+    }
+
+    /// Test-only: the byte ceiling the governor holds a pane owner to.
+    ///
+    /// Read back from the ledger rather than from the constant, so a limit that
+    /// is computed correctly and never installed fails the assertion that uses
+    /// this.
+    #[doc(hidden)]
+    pub fn __test_pane_owner_limit(&self, window: WindowId) -> Option<usize> {
+        let pane = self.windows.get(&window)?.panes.values().next()?;
+        let owner = pane.owner.as_ref()?.id();
+        self.governor.snapshot(owner).ok().map(|snapshot| snapshot.owner_bytes_limit)
+    }
+
+    /// Test-only: set a child pane's scrollback limit.
+    #[doc(hidden)]
+    pub fn __test_set_child_pane_scrollback(
+        &mut self,
+        window: WindowId,
+        pane_id: u64,
+        limit: usize,
+    ) -> bool {
+        let Some(pane) = self.windows.get_mut(&window).and_then(|w| w.panes.get_mut(&pane_id))
+        else {
+            return false;
+        };
+        pane.parser.lock().grid_mut().set_scrollback_limit(limit);
+        true
+    }
+
+    /// Test-only: run a retention sample regardless of the interval.
+    ///
+    /// The production sampler is interval-gated and level-gated, neither of
+    /// which a test should wait on or install a subscriber for. This drives
+    /// the same charging pass the sampler runs.
+    #[doc(hidden)]
+    pub fn __test_force_retention_sample(&mut self) {
+        self.reconcile_pane_owners();
+        self.__test_charge_pane_owners();
+    }
+
+    /// Test-only: whether `owner` is still open in the governor.
+    ///
+    /// A closed owner's record is dropped, so this reports `false` for both a
+    /// closed owner and an owner that never existed. That is the answer the
+    /// callers want — "is this still holding resources" — and it stays correct
+    /// whichever way the ledger represents a finished owner.
+    #[doc(hidden)]
+    pub fn __test_owner_is_open(&self, owner: ResourceOwnerId) -> bool {
+        self.governor
+            .snapshot(owner)
+            .map(|snapshot| snapshot.owner_state != sonicterm_types::OwnerState::Closed)
+            .unwrap_or(false)
+    }
+
+    /// Test-only: a window's owner id, if it registered one.
+    #[doc(hidden)]
+    pub fn __test_window_owner(&self, id: WindowId) -> Option<ResourceOwnerId> {
+        self.windows.get(&id).and_then(|window| window.owner.as_ref()).map(OwnerGuard::id)
+    }
+
+    /// Test-only: one pane's owner id, if it has one.
+    #[doc(hidden)]
+    pub fn __test_pane_owner(&self, window: WindowId, pane_id: u64) -> Option<ResourceOwnerId> {
+        self.windows
+            .get(&window)?
+            .panes
+            .get(&pane_id)
+            .and_then(|pane| pane.owner.as_ref())
+            .map(OwnerGuard::id)
+    }
+
+    /// Test-only: how many panes in a window have owners.
+    #[doc(hidden)]
+    pub fn __test_child_pane_owner_count(&self, id: WindowId) -> Option<usize> {
+        self.windows
+            .get(&id)
+            .map(|window| window.panes.values().filter(|pane| pane.owner.is_some()).count())
+    }
+
+    /// Test-only: the pane owner ids in a window, sorted for comparison.
+    #[doc(hidden)]
+    pub fn __test_child_pane_owners(&self, id: WindowId) -> Vec<u64> {
+        let mut owners: Vec<u64> = self
+            .windows
+            .get(&id)
+            .map(|window| {
+                window
+                    .panes
+                    .values()
+                    .filter_map(|pane| pane.owner.as_ref())
+                    .map(|owner| owner.id().get())
+                    .collect()
+            })
+            .unwrap_or_default();
+        owners.sort_unstable();
+        owners
+    }
+
+    /// Test-only invoker for [`Self::reconcile_pane_owners`].
+    #[doc(hidden)]
+    pub fn __test_reconcile_pane_owners(&mut self) {
+        self.reconcile_pane_owners();
+    }
+
+    /// Reconcile pane owners against every window's actual pane set.
+    ///
+    /// Panes are inserted at a dozen sites, several inside borrows where the
+    /// governor is not reachable, and threading registration through all of
+    /// them is the "every call site must remember" pattern that produces the
+    /// one forgotten site. Reconciling instead means there is no site to
+    /// forget: a pane without an owner gets one, and an owner whose pane is
+    /// gone is closed.
+    ///
+    /// Runs from the periodic retention sampler rather than per frame, so its
+    /// cost is bounded by that interval regardless of how often panes move.
+    pub(super) fn reconcile_pane_owners(&mut self) {
+        let window_ids: Vec<WindowId> = self.windows.keys().copied().collect();
+        for window_id in window_ids {
+            let Some(window) = self.windows.get(&window_id) else { continue };
+            let Some(window_owner) = window.owner.as_ref().map(OwnerGuard::id) else {
+                continue;
+            };
+
+            let unowned: Vec<u64> = window
+                .panes
+                .iter()
+                .filter(|(_, pane)| pane.owner.is_none())
+                .map(|(id, _)| *id)
+                .collect();
+
+            for pane_id in unowned {
+                match self.governor.create_child(
+                    window_owner,
+                    OwnerKind::AppPane,
+                    pane_owner_limits(),
+                ) {
+                    Ok(owner) => {
+                        if let Some(pane) =
+                            self.windows.get_mut(&window_id).and_then(|w| w.panes.get_mut(&pane_id))
+                        {
+                            pane.owner = Some(OwnerGuard::new(self.governor.clone(), owner));
+                        } else {
+                            // The pane vanished between listing and assigning.
+                            // Close the owner rather than leak it.
+                            let _ = self.governor.begin_close(owner);
+                            let _ = self.governor.finish_close(owner);
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "memory",
+                            ?error,
+                            "pane owner registration failed; hierarchy accounting omits this pane"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Re-parent pane owners whose window has changed, and close their old ones.
+    ///
+    /// A `PaneState` carries its `owner` field when tab tear-out moves it
+    /// between windows, but the owner itself was created *below the source
+    /// window's* owner and the governor has no move operation. Left alone, the
+    /// source window keeps reporting a pane it no longer has and the
+    /// destination reports none for a pane it does — which makes "what does
+    /// this window hold" wrong in both directions, and that question is the
+    /// entire reason the hierarchy exists.
+    ///
+    /// Detected by comparing each pane owner's recorded parent against the
+    /// window it now lives in, so this needs no hook at the move sites: a pane
+    /// that never moved has a matching parent and costs one snapshot read.
+    ///
+    /// The old owner is closed rather than abandoned. Its charges are dropped
+    /// with it and re-opened against the new owner on the next charging pass,
+    /// which is correct precisely because charges are derived from a
+    /// measurement rather than accumulated — a transferred balance could
+    /// drift, a re-measured one cannot.
+    pub(super) fn reattribute_pane_owners(&mut self) {
+        let window_ids: Vec<WindowId> = self.windows.keys().copied().collect();
+        for window_id in window_ids {
+            let Some(window) = self.windows.get(&window_id) else { continue };
+            let Some(window_owner) = window.owner.as_ref().map(OwnerGuard::id) else {
+                continue;
+            };
+
+            let misattributed: Vec<u64> = window
+                .panes
+                .iter()
+                .filter_map(|(pane_id, pane)| {
+                    let owner = pane.owner.as_ref()?.id();
+                    let parent = self.governor.snapshot(owner).ok()?.parent?;
+                    (parent != window_owner).then_some(*pane_id)
+                })
+                .collect();
+
+            for pane_id in misattributed {
+                // Drop the charges before closing: the governor refuses to
+                // finish closing an owner that still holds any.
+                let stale = {
+                    let Some(pane) =
+                        self.windows.get_mut(&window_id).and_then(|w| w.panes.get_mut(&pane_id))
+                    else {
+                        continue;
+                    };
+                    pane.charges.clear();
+                    pane.owner.take()
+                };
+                // Dropping the guard closes the old owner and reports a
+                // failure to close. Charges were cleared above, in the same
+                // statement that took it, so `finish_close` can succeed.
+                drop(stale);
+            }
+        }
+        // Panes left without an owner above are re-registered under the window
+        // they now live in.
+        self.reconcile_pane_owners();
+    }
+
+    /// Close a window's owner and every pane owner below it.
+    ///
+    /// Called from window teardown. Owners are closed leaf-first because the
+    /// governor refuses to finish closing a parent with open children — which
+    /// is the invariant that makes a leaked pane owner visible rather than
+    /// silent.
+    /// Close the governor owners held by a window already removed from the map.
+    ///
+    /// Takes the `WindowState` rather than looking it up, because the
+    /// production close paths remove the window *before* releasing its
+    /// registries — so a lookup-based release returns early and closes
+    /// nothing. That is exactly what happened: the release ran, found no
+    /// window, and returned, leaving every owner `Open` for the life of the
+    /// process.
+    pub(super) fn release_owners_of(&mut self, window: &mut WindowState) {
+        // Charges first. `finish_close` refuses an owner that still holds
+        // them, and the previous order took `pane.owner` while leaving
+        // `pane.charges` populated — so every close returned
+        // `OwnerHasLiveCharges` and stopped at `Closing`.
+        // Charges first, then drop the guards: each closes its owner on drop,
+        // and `finish_close` refuses an owner still holding charges.
+        for pane in window.panes.values_mut() {
+            pane.charges.clear();
+            drop(pane.owner.take());
+        }
+        drop(window.owner.take());
+    }
+
+    pub(super) fn release_window_owner(&mut self, id: WindowId) {
+        let Some(window) = self.windows.get_mut(&id) else { return };
+        // Charges must be released before the owner closes.
+        //
+        // `finish_close` refuses an owner that still holds charges, and this
+        // took `pane.owner` while leaving `pane.charges` populated — so every
+        // close returned `OwnerHasLiveCharges`, the `let _` discarded it, and
+        // the owner stopped at `Closing` forever. Measured: 80 of 80 owners
+        // still open after 40 create/destroy cycles.
+        //
+        // `reattribute_pane_owners` already does this in the right order,
+        // twelve lines away.
+        for pane in window.panes.values_mut() {
+            pane.charges.clear();
+            drop(pane.owner.take());
+        }
+        drop(window.owner.take());
+    }
+
     pub fn main_panes(&self) -> Option<&HashMap<u64, PaneState>> {
         Some(&self.windows.get(&self.main_window_id?)?.panes)
     }
@@ -3604,9 +4298,9 @@ impl App {
         Some(&mut self.windows.get_mut(&id)?.panes)
     }
 
-    /// Phase B2 PR-B3c — borrow the main window's selection
+    /// borrow the main window's selection
     /// `Option<Selection>` from its [`WindowState`]. Sole source of
-    /// truth (legacy `App.selection` field was deleted in PR-B3c).
+    /// truth.
     /// Returns `None` (no main window) — `Some(None)` (no selection)
     /// — `Some(Some(_))` (active selection).
     #[doc(hidden)]
@@ -3621,7 +4315,7 @@ impl App {
         Some(&mut self.windows.get_mut(&id)?.selection)
     }
 
-    /// Phase B2 PR-B3c — borrow the main window's
+    /// borrow the main window's
     /// `ModifiersState` from its [`WindowState`]. Returns
     /// `ModifiersState::empty()` if the main window does not yet
     /// exist (safe default — no modifiers held).
@@ -3633,7 +4327,7 @@ impl App {
             .unwrap_or_else(ModifiersState::empty)
     }
 
-    /// PR-B3c — replace the main window's selection.
+    /// replace the main window's selection.
     /// No-op when the main window does not yet exist.
     #[doc(hidden)]
     pub fn selection_set(&mut self, sel: Option<Selection>) {
@@ -3642,7 +4336,7 @@ impl App {
         }
     }
 
-    /// PR-B3c — replace the main window's copy-mode state.
+    /// replace the main window's copy-mode state.
     /// No-op when the main window does not yet exist.
     #[doc(hidden)]
     pub fn copy_mode_set(&mut self, st: Option<CopyModeState>) {
@@ -3651,7 +4345,7 @@ impl App {
         }
     }
 
-    /// Phase B2 PR-A — borrow the [`WindowState`] of whichever terminal
+    /// borrow the [`WindowState`] of whichever terminal
     /// window is OS-frontmost. Falls back to the main window when no
     /// frontmost has been recorded yet (matches the safe default in
     /// [`Self::frontmost_kind`]).
@@ -3685,7 +4379,7 @@ impl App {
         FrontmostKind::None
     }
 
-    /// Phase A — if [`Self::frontmost_window`] is `Some(_)`
+    /// if [`Self::frontmost_window`] is `Some(_)`
     /// but classifies as `None` (recorded id no longer matches any
     /// live window), clear it. Called by keymap_dispatch arms BEFORE
     /// falling back to main, so the next dispatch doesn't retry the
@@ -3814,7 +4508,7 @@ impl App {
     /// `Action::NewWindow` dispatcher arm; consumed by
     /// `drain_pending_window_creates` (which needs a live
     /// `ActiveEventLoop` and so can't run in a unit test). The flag
-    /// is the testable seam — see Phase E Haiku follow-up.
+    /// is the testable seam.
     #[doc(hidden)]
     pub fn __test_pending_new_window(&self) -> bool {
         self.pending_new_window
@@ -3857,10 +4551,10 @@ impl App {
     /// would change the windows-map cardinality (the post-drain
     /// state itself requires an `ActiveEventLoop`).
     ///
-    /// Phase B2 PR-A: the shadow main entry inserted by
+    /// the shadow main entry inserted by
     /// [`Self::do_resumed`] is excluded so existing call sites that
     /// expected this to be "number of torn-out child terminal windows"
-    /// keep their pre-PR-A semantics.
+    /// keep meaning "number of torn-out child terminal windows".
     #[doc(hidden)]
     pub fn __test_windows_len(&self) -> usize {
         self.windows.len().saturating_sub(self.shadow_main_count())
@@ -3901,6 +4595,20 @@ impl App {
     /// the window existed and was removed, `false` otherwise.
     #[doc(hidden)]
     pub fn __test_remove_window(&mut self, id: WindowId) -> bool {
+        self.release_window_owner(id);
+        self.windows.remove(&id).is_some()
+    }
+
+    /// Test-only: drop a window without the explicit owner release first.
+    ///
+    /// [`Self::__test_remove_window`] calls `release_window_owner`, which takes
+    /// each pane's owner in the right order before the window is removed. That
+    /// hides what the struct does on its own, and the struct has to be right:
+    /// a window removed from the map without that call, or held in the map
+    /// until the process tears down, closes its owners purely by field drop
+    /// order. This models that path.
+    #[doc(hidden)]
+    pub fn __test_drop_window_without_release(&mut self, id: WindowId) -> bool {
         self.windows.remove(&id).is_some()
     }
 
@@ -3923,9 +4631,9 @@ impl App {
         self.windows.len().saturating_sub(self.shadow_main_count())
     }
 
-    /// Phase B2 PR-A — `1` if the shadow main entry is present in
+    /// `1` if the shadow main entry is present in
     /// [`Self::windows`], else `0`. Used by every "count torn-out
-    /// child windows" path that pre-existed PR-A so they keep the
+    /// child windows" path so they keep the
     /// same number.
     #[inline]
     #[doc(hidden)]
@@ -3936,7 +4644,7 @@ impl App {
         }
     }
 
-    /// Phase B — number of windows in the unified
+    /// number of windows in the unified
     /// [`Self::windows`] map.
     /// Used by the regression suite to pin the rename + role tagging.
     #[doc(hidden)]
@@ -3944,7 +4652,7 @@ impl App {
         self.windows.len().saturating_sub(self.shadow_main_count())
     }
 
-    /// Phase B — count entries in [`Self::windows`] whose
+    /// count entries in [`Self::windows`] whose
     /// role matches the argument. Today every entry is `Terminal`;
     #[doc(hidden)]
     pub fn windows_with_role(&self, role: crate::app::WindowRole) -> usize {
@@ -3968,7 +4676,7 @@ impl App {
     /// tests exercise tab/pane bookkeeping without spawning shells.
     #[doc(hidden)]
     pub fn __test_seed_tab(&mut self, title: &str) -> u64 {
-        // Phase B2 PR-B2a: ensure the synthetic main WindowState
+        // ensure the synthetic main WindowState
         // entry exists before seeding. Future PRs B2b/c/d delete the
         // App.tabs/tab_states/panes fields outright, so seed writes
         // MUST land in `self.main_mut()` to survive that migration.
@@ -3983,7 +4691,7 @@ impl App {
         pane_id
     }
 
-    /// Phase B2 PR-B2a: for tests that build an `App` without
+    /// for tests that build an `App` without
     /// `do_resumed` running, insert a synthetic main `WindowState`
     /// entry (window=None, renderer=None) under a stable synthetic
     /// `WindowId` so test seeders can route writes through
@@ -3997,6 +4705,8 @@ impl App {
         }
         let id = synthetic_main_window_id();
         let ws = WindowState {
+            // Registered when the window is inserted.
+            owner: None,
             role: WindowRole::Terminal,
             window: None,
             renderer: None,
@@ -4033,7 +4743,7 @@ impl App {
             test_renderer_focus_marker: None,
             test_pane_viewport: None,
         };
-        self.windows.insert(id, ws);
+        self.insert_window_registered(id, ws);
         self.main_window_id = Some(id);
     }
 
@@ -4203,13 +4913,13 @@ impl App {
         self.os_drag_backend = Some(backend);
     }
 
-    /// Phase C2 test-only: install a mock [`os_drag::OsTabDragBackend`].
+    /// Test-only: install a mock [`os_drag::OsTabDragBackend`].
     #[doc(hidden)]
     pub fn __test_set_os_drag_backend(&mut self, backend: Box<dyn os_drag::OsTabDragBackend>) {
         self.os_drag_backend = Some(backend);
     }
 
-    /// Phase C2 test-only: hand out the shared pending-outcome mailbox
+    /// Test-only: hand out the shared pending-outcome mailbox
     /// so tests can drive [`Self::handle_os_drag_ended`] without
     /// constructing a real [`winit::event_loop::EventLoopProxy`].
     #[doc(hidden)]
@@ -4217,7 +4927,7 @@ impl App {
         self.os_drag_pending.clone()
     }
 
-    /// Phase C2 test-only: seed the in-flight source bookkeeping that
+    /// Test-only: seed the in-flight source bookkeeping that
     /// [`Self::begin_os_tab_drag`] normally sets. Used by tests that
     /// drive the dispatcher directly without first calling
     /// `begin_os_tab_drag`.
@@ -4226,7 +4936,7 @@ impl App {
         self.os_drag_source = source;
     }
 
-    /// Phase C2: build an [`os_drag::AppHandle`] tied to the App's
+    /// build an [`os_drag::AppHandle`] tied to the App's
     /// event-loop proxy and the shared pending-outcome mailbox. The
     /// returned handle is what gets passed to
     /// [`os_drag::OsTabDragBackend::begin_session`] so the backend can
@@ -4319,7 +5029,7 @@ impl App {
         self.publish_os_drag_bar_snapshot(snap);
     }
 
-    /// Phase C2: begin an OS-level tab drag session via the installed
+    /// begin an OS-level tab drag session via the installed
     /// backend. Returns `true` when the backend was invoked, `false`
     /// when no backend is installed or no event-loop proxy exists (in
     /// which case the caller falls back to the existing tear_out path).
@@ -4341,7 +5051,7 @@ impl App {
         true
     }
 
-    /// Phase C2: does the installed backend own the gesture end-to-end?
+    /// does the installed backend own the gesture end-to-end?
     /// `try_os_drag_handoff` consults this to decide whether to skip
     /// the legacy `OsDragSink` after `begin_os_tab_drag` returns —
     /// running both on Windows would invoke `DoDragDrop` twice.
@@ -4349,7 +5059,7 @@ impl App {
         self.os_drag_backend.as_ref().map(|b| b.handles_full_gesture()).unwrap_or(false)
     }
 
-    /// Phase C2: register a winit window with the installed OS-drag
+    /// register a winit window with the installed OS-drag
     /// backend so OS-level drops landing on that window's HWND /
     /// NSWindow are routed back into the App. Called once per window
     /// at creation time — main window from `App::resumed`, torn-out
@@ -4380,7 +5090,7 @@ impl App {
         }
     }
 
-    /// Phase C2: dispatcher entry point for `UserEvent::DragMoved`.
+    /// dispatcher entry point for `UserEvent::DragMoved`.
     /// Drains the mailbox; currently a no-op beyond logging — the
     /// drag-chip overlay is rendered from `tab_drag` state, not from
     /// the OS cursor stream. Reserved for future "highlight drop
@@ -4393,7 +5103,7 @@ impl App {
         pos
     }
 
-    /// Phase C2: dispatcher entry point for `UserEvent::DragEnded`.
+    /// dispatcher entry point for `UserEvent::DragEnded`.
     /// Drains the mailbox outcome and routes it: `DroppedOnBar` →
     /// [`Self::transfer_tab`]; `Cancelled` → [`Self::cancel_drag_session`];
     /// `DroppedOnEmpty` is left for the existing tear_out path (this
@@ -4412,7 +5122,7 @@ impl App {
                     return Some(outcome);
                 };
                 // `source` / `target` are `Option<WindowId>`, where
-                // `None` means "the App's main window". In Phase C2 the
+                // `None` means "the App's main window". The
                 // backend always reports a concrete WindowId on the
                 // source side, but the *target* may legitimately be the
                 // main window. Detect that by comparing against the
@@ -4434,9 +5144,9 @@ impl App {
             os_drag::DragOutcome::DroppedOnEmpty { drop_screen_pos } => {
                 tracing::debug!(
                     ?drop_screen_pos,
-                    "os_drag_session: DroppedOnEmpty — in-process tear-out (Phase A)"
+                    "os_drag_session: DroppedOnEmpty — in-process tear-out"
                 );
-                // Phase A: replace the legacy
+                // replace the legacy
                 // out-of-process tear-out (child-window via
                 // `spawn_tearout_child` → `Command::new`) with an
                 // in-process create. Enqueue a typed `PendingTearOut`
@@ -4557,7 +5267,7 @@ impl App {
         self.tab_bar_visible
     }
 
-    /// Phase C — cancel an in-flight drag session. Wired
+    /// cancel an in-flight drag session. Wired
     /// to the ESC key handler in `window_event.rs` (any window's
     /// `WindowEvent::KeyboardInput` with `NamedKey::Escape` clears
     /// the App's drag_session AND every per-window drag_session) so
@@ -4571,7 +5281,7 @@ impl App {
         // mutation loop. The loop body calls `clear_drag_chip` /
         // `request_redraw`, neither of which mutate `self.windows`
         // today, but a future per-window handler (or a winit reentrant
-        // callback on Windows under HOT-FILE PR pressure) could
+        // callback on Windows under heavy load) could
         // insert/remove a window mid-iteration. Iterating a snapshot of
         // `Vec<WindowId>` is panic-free and matches intent: cancel
         // residue on the set of windows that exist RIGHT NOW. The
@@ -4637,7 +5347,7 @@ impl App {
         had
     }
 
-    /// Phase C — pure cross-window transfer API. Operates
+    /// pure cross-window transfer API. Operates
     /// on the App's MAIN window only (`source` / `target` are both
     /// `None` ⇒ main↔main reorder). Tests exercise the pure-container
     /// form in `crate::app::tab_transfer` directly; the App wrapper
@@ -4744,7 +5454,7 @@ impl App {
                 self.reap_empty_child(id);
             } else {
                 // main window — leave the App to its existing
-                // last-tab-closed handling (Phase B already covers
+                // last-tab-closed handling (already covered
                 // hiding the main window when its tabs vec empties).
             }
         }

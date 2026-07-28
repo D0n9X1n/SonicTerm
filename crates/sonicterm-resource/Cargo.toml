@@ -1,0 +1,22 @@
+[package]
+name = "sonicterm-resource"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[features]
+default = []
+test-util = []
+
+[dependencies]
+sonicterm-types.workspace = true
+parking_lot.workspace = true
+enum-map.workspace = true
+
+[lints]
+workspace = true

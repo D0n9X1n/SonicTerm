@@ -18,6 +18,11 @@ default = []
 ssh = ["sonicterm-io/ssh"]
 
 [dependencies]
+# The governor's owner registry. This is the edge that takes
+# `sonicterm-resource` from zero dependents to one: without it the crate is
+# fully built and unreachable from the shipping binary.
+sonicterm-resource.workspace = true
+enum-map = { workspace = true }
 sonicterm-app-core.workspace = true
 sonicterm-types.workspace = true
 bytes = "1"
@@ -55,3 +60,9 @@ windows = { workspace = true, features = [
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[dev-dependencies]
+# For the software-adapter detection test, which enumerates the host's real
+# adapters. A dev-dependency rather than a dependency: the app reaches wgpu
+# through `sonicterm-gpu` and must not gain a direct one.
+wgpu.workspace = true

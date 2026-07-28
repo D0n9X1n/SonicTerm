@@ -1,7 +1,7 @@
 //! Pure-function scrollbar geometry model.
 //!
-//! PR-A: data layer only. No render emit, no input wiring.
-//! Consumers (PR-B render, PR-C input) call [`compute`], [`hit_test`],
+//! data layer only. No render emit, no input wiring.
+//! Consumers in the render and input layers call [`compute`], [`hit_test`],
 //! and [`thumb_to_view_top`] without any global state.
 //!
 //! All coordinates are in physical pixels; the caller is responsible
@@ -131,7 +131,7 @@ pub fn hit_test(geometry: &ScrollbarGeometry, point: Point) -> HitTarget {
 
 /// Translate a thumb-top y coordinate (physical px) back to a `view_top` row.
 ///
-/// Used by PR-C's drag handler: as the cursor moves, the new thumb-y is fed
+/// Used by the drag handler: as the cursor moves, the new thumb-y is fed
 /// through here to compute the new top-of-view row.
 pub fn thumb_to_view_top(
     geometry: &ScrollbarGeometry,
@@ -152,7 +152,6 @@ pub fn thumb_to_view_top(
     let frac = dy / travel;
     ((frac * max_view_top as f32).round() as i64).clamp(0, max_view_top as i64) as u64
 }
-
 
 #[cfg(test)]
 #[path = "scrollbar_tests.rs"]

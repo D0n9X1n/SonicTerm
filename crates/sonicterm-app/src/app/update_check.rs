@@ -20,9 +20,7 @@ struct GithubRelease {
 }
 
 pub fn check_latest_release(current: &str) -> UpdateCheckResult {
-    let config = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(6)))
-        .build();
+    let config = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(6))).build();
     let agent: ureq::Agent = config.into();
     let response = agent
         .get("https://api.github.com/repos/D0n9X1n/SonicTerm/releases")

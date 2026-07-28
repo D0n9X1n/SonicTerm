@@ -1,7 +1,7 @@
-//! Phase C2 — macOS `OsTabDragBackend` implementation.
+//! macOS `OsTabDragBackend` implementation.
 //!
 //! Wires `begin_session` to the real AppKit pasteboard write that the
-//! cross-process Phase C1 path already proved out, and posts a
+//! cross-process path already proved out, and posts a
 //! synchronous terminal [`DragOutcome`] back through the
 //! [`AppHandle`] so the App's `UserEvent::DragEnded` dispatcher
 //! releases its in-flight bookkeeping cleanly.
@@ -32,7 +32,7 @@
 //! `NSView` atop `CAMetalLayer` that owns mouse-down handling
 //! directly, or (b) a winit hook that exposes the live `NSEvent` to
 //! user code. Both are large pieces of work — tracked as a follow-up
-//! to the Phase C2 PR rather than blocking it.
+//! to a follow-up rather than blocking it.
 //!
 //! Until that lifts, this backend is a pasteboard publisher plus a synchronous
 //! cancellation callback. It does not implement native cursor capture or a

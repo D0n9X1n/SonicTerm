@@ -17,8 +17,9 @@ fn never_mode_and_no_scrollback_suppress_the_bar() {
 fn degenerate_inputs_suppress_the_bar() {
     assert!(compute(0, 20, 0, pane(), ScrollbarMode::Always, 8.0).is_none());
     assert!(compute(10, 20, 0, pane(), ScrollbarMode::Always, 0.0).is_none());
-    assert!(compute(10, 20, 0, Rect::new(0.0, 0.0, 0.0, 100.0), ScrollbarMode::Always, 8.0)
-        .is_none());
+    assert!(
+        compute(10, 20, 0, Rect::new(0.0, 0.0, 0.0, 100.0), ScrollbarMode::Always, 8.0).is_none()
+    );
 }
 
 #[test]
@@ -122,4 +123,3 @@ fn track_must_be_computed_from_the_padded_content_rect() {
     // ...but the old raw-rect geometry misses it entirely.
     assert_eq!(hit_test(&from_full, press), HitTarget::None);
 }
-

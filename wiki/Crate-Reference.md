@@ -4,7 +4,7 @@
 
 > The short canonical map is
 > [`docs/MODULES.md`](https://github.com/D0n9X1n/SonicTerm/blob/main/docs/MODULES.md).
-> This page adds dependency and code-navigation detail for all 22 workspace crates.
+> This page adds dependency and code-navigation detail for all 23 workspace crates.
 
 The workspace version in the root `Cargo.toml` applies to every first-party
 crate. `sonicterm-app` is the default workspace member, while the shipping
@@ -37,6 +37,8 @@ font-config + fontconfig + freetype + harfbuzz
                            sonicterm-gpu
 
 sonicterm-io -> sonicterm-mux (standalone, not used by app)
+
+sonicterm-types -> sonicterm-resource -> sonicterm-app (retained-memory ledger)
 ```
 
 The diagram omits some utility edges; each crate entry below lists its important
@@ -54,6 +56,21 @@ keys, geometry, glyph/window/hyperlink ids, shell quoting, and backend traits.
 `ClipboardBackend`, `WindowBackend`.
 
 **Read:** `src/{cell,action,glyph_key,geom}.rs`, `src/traits/`.
+
+### `sonicterm-resource`
+
+**Role:** process-local resource governor. Owns a sharded ledger over one
+immutable process root, an owner hierarchy, RAII reservation tokens that
+release their charge when dropped, level-triggered cancellation, and a bounded
+reaper supervisor that admits work only when a slot is free.
+
+**Important API:** `ResourceGovernor`, `Reservation`, `CommittedReservation`,
+`CancelSource`, `CancelToken`, `ReaperSupervisor`, `ReaperLimits`, `ReapTask`,
+`ReapSlot`, `ShutdownReport`, `Clock`/`TestClock`.
+
+**Consumes:** `sonicterm-types`.
+
+**Read:** `src/{ledger,owner,reservation,reaper,cancel}.rs`.
 
 ### `sonicterm-grid`
 
@@ -234,7 +251,7 @@ window/tab/pane topology remains authoritative in `sonicterm-app`.
 tabs, pane trees, PTYs/parsers, input routing, config reload, redraw scheduling,
 overlays, tab transfer, and platform shell abstractions.
 
-**Consumes:** app-core, terminal stack, cfg/UI/render-model, GPU, logging.
+**Consumes:** app-core, terminal stack, cfg/UI/render-model, GPU, resource, logging.
 **Consumed by:** macOS and Windows binaries.
 
 **Feature:** `ssh` forwards to `sonicterm-io/ssh`; the live SSH session is not
@@ -301,7 +318,7 @@ Every crate contains a local `CLAUDE.md` with its guardrails and local gate.
 
 > 简短规范映射位于
 > [`docs/MODULES.md`](https://github.com/D0n9X1n/SonicTerm/blob/main/docs/MODULES.md)。
-> 本页为全部 22 个 workspace crate 增加依赖与代码导航细节。
+> 本页为全部 23 个 workspace crate 增加依赖与代码导航细节。
 
 根 `Cargo.toml` 中的 workspace 版本适用于所有第一方 crate。`sonicterm-app` 是默认 member，
 实际发布二进制是 `sonicterm-mac` 与 `sonicterm-windows`。
@@ -333,6 +350,8 @@ font-config + fontconfig + freetype + harfbuzz
                            sonicterm-gpu
 
 sonicterm-io -> sonicterm-mux（独立，app 未使用）
+
+sonicterm-types -> sonicterm-resource -> sonicterm-app（常驻内存账本）
 ```
 
 图中省略部分工具依赖；下方每个 crate 会列出重要关系。
@@ -348,6 +367,20 @@ shell quoting 和后端 trait。
 `GlyphKey`、`WindowKey`、`PtyTransport`、`Painter`、`ClipboardBackend`、`WindowBackend`。
 
 **阅读：** `src/{cell,action,glyph_key,geom}.rs`、`src/traits/`。
+
+### `sonicterm-resource`
+
+**职责：** 进程内资源治理器。基于唯一不可变进程根的分片 ledger、owner 层级、
+drop 时自动归还额度的 RAII reservation token、电平触发的取消机制，以及只在有空闲
+slot 时才接收任务的有界 reaper supervisor。
+
+**重要 API：** `ResourceGovernor`、`Reservation`、`CommittedReservation`、
+`CancelSource`、`CancelToken`、`ReaperSupervisor`、`ReaperLimits`、`ReapTask`、
+`ReapSlot`、`ShutdownReport`、`Clock`/`TestClock`。
+
+**依赖：** types。
+
+**阅读：** `src/{ledger,owner,reservation,reaper,cancel}.rs`。
 
 ### `sonicterm-grid`
 
@@ -503,7 +536,7 @@ COLR color glyph 与原生 handle wrapper。
 **职责：** 跨平台 winit 编排；拥有实时窗口、renderer、标签页、pane tree、PTY/parser、输入路由、配置重载、
 重绘调度、overlay、tab transfer 和平台 shell abstraction。
 
-**依赖：** app-core、终端栈、cfg/UI/render-model、GPU、logging。**被依赖：** macOS 与 Windows 二进制。
+**依赖：** app-core、终端栈、cfg/UI/render-model、GPU、resource、logging。**被依赖：** macOS 与 Windows 二进制。
 
 **Feature：** `ssh` 转发到 `sonicterm-io/ssh`；实时 SSH session 当前尚未完整接入 GUI。
 

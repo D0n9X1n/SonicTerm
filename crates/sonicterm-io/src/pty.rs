@@ -27,18 +27,24 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, PtySize};
 type Outgoing = Vec<u8>;
 /// Incoming message: bytes read from the pty master (program output).
 ///
-/// Uses [`bytes::Bytes`] — a refcounted slice — so the reader thread can
+/// Wraps a [`bytes::Bytes`] — a refcounted slice — so the reader thread can
 /// hand the buffer off to the VT thread without per-read `Vec::to_vec`
 /// allocations. The reader keeps a single [`BytesMut`] ring of 64 KiB and
-/// `split_to`s the filled prefix into a `Bytes` each iteration; once the
+/// `split`s the filled prefix into a `Bytes` each iteration; once the
 /// ring drains below capacity it reuses the same allocation.
-type Incoming = Bytes;
+///
+/// The wrapper exists to carry that ring's charge: many views share one
+/// allocation, and only the type holding them can tell when the last one goes.
+type Incoming = PtyOutputChunk;
 
 /// Maximum unread PTY output chunks retained per pane.
 ///
-/// Each chunk is at most the 64 KiB reader-ring size, so this bounds queued
-/// output to roughly 4 MiB. Once full, the reader blocks and lets the OS PTY
-/// apply backpressure instead of growing process memory without limit.
+/// A slot holds a view into the reader's 64 KiB ring, not a buffer of its own,
+/// and one ring backs many views. The bound that matters is therefore the
+/// number of distinct rings the queued views pin: at most one per slot, so
+/// 4 MiB worst case, and one ring — 64 KiB — for every real shell workload
+/// measured. Once full, the reader blocks and lets the OS PTY apply
+/// backpressure instead of growing process memory without limit.
 pub const PTY_OUTPUT_QUEUE_CAPACITY: usize = 64;
 /// Maximum pending terminal-input messages retained per pane.
 pub const PTY_INPUT_QUEUE_CAPACITY: usize = 4;
@@ -48,6 +54,31 @@ const PTY_IO_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
 #[cfg(windows)]
 const CONPTY_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 static ACTIVE_PTY_IO_THREADS: AtomicUsize = AtomicUsize::new(0);
+
+/// Owned, cloneable sender for a child process's input channel.
+///
+/// Wraps the bounded channel so a caller holding one cannot reach the raw
+/// `Sender`. Every path through this type applies the same size cap and
+/// non-blocking discipline as [`PtyHandle::send_input_nonblocking`], which is
+/// the property that makes the raw field private.
+#[derive(Clone, Debug)]
+pub struct PtyInputSender {
+    tx: Sender<Outgoing>,
+    queued_bytes: Arc<AtomicUsize>,
+}
+
+impl PtyInputSender {
+    /// Queue input, refusing rather than blocking.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PtyInputError`] when the message exceeds the cap, the queue
+    /// is full, or the writer has gone. The error retains the bytes so the
+    /// caller can retry or report rather than losing them silently.
+    pub fn send(&self, bytes: Vec<u8>) -> Result<(), PtyInputError> {
+        try_queue_pty_input(&self.tx, &self.queued_bytes, bytes)
+    }
+}
 
 /// A terminal-input message that could not be queued without blocking.
 #[derive(Debug, thiserror::Error)]
@@ -61,6 +92,103 @@ pub enum PtyInputError {
     /// The PTY writer has already stopped.
     #[error("PTY input writer is disconnected")]
     WriterDisconnected(Vec<u8>),
+}
+
+/// Live totals for one pane's queued PTY output.
+///
+/// Two quantities, because they answer different questions and differ by three
+/// orders of magnitude on a keystroke-echo queue: `ring_bytes` is the memory
+/// the process cannot reclaim, `payload_bytes` is the data waiting to be
+/// parsed. Both are maintained by the chunks themselves, so a sampler reads
+/// them without touching the channel.
+#[derive(Debug, Default)]
+struct QueuedOutputMeter {
+    ring_bytes: AtomicUsize,
+    payload_bytes: AtomicUsize,
+}
+
+/// One ring allocation, charged while any chunk still views into it.
+///
+/// The reader splits many views out of a single 64 KiB ring, so charging per
+/// chunk would multiply one allocation by the number of views taken from it.
+/// This is held by `Arc` from every chunk sharing the ring: the first view
+/// charges, and the last one to drop releases. `Drop` is what makes the figure
+/// exact without anyone polling — the charge cannot outlive the memory.
+#[derive(Debug)]
+struct RingCharge {
+    bytes: usize,
+    meter: Arc<QueuedOutputMeter>,
+}
+
+impl RingCharge {
+    fn new(bytes: usize, meter: &Arc<QueuedOutputMeter>) -> Arc<Self> {
+        meter.ring_bytes.fetch_add(bytes, Ordering::AcqRel);
+        Arc::new(Self { bytes, meter: meter.clone() })
+    }
+}
+
+impl Drop for RingCharge {
+    fn drop(&mut self) {
+        self.meter.ring_bytes.fetch_sub(self.bytes, Ordering::AcqRel);
+    }
+}
+
+/// A chunk of child output, and the ring memory it keeps alive.
+///
+/// Derefs to `[u8]`, so callers read it exactly like the `Bytes` it wraps. The
+/// reason it is not a bare `Bytes` is the charge: a view into a shared ring
+/// holds down the whole allocation, and nothing outside this type can observe
+/// when the last view of a ring goes away.
+#[derive(Debug)]
+pub struct PtyOutputChunk {
+    bytes: Bytes,
+    /// Kept for its `Drop`. The ring stays charged while this clone lives.
+    _ring: Arc<RingCharge>,
+    meter: Arc<QueuedOutputMeter>,
+}
+
+impl PtyOutputChunk {
+    fn new(bytes: Bytes, ring: Arc<RingCharge>, meter: &Arc<QueuedOutputMeter>) -> Self {
+        meter.payload_bytes.fetch_add(bytes.len(), Ordering::AcqRel);
+        Self { bytes, _ring: ring, meter: meter.clone() }
+    }
+
+    /// The output bytes, as a refcounted slice.
+    ///
+    /// Cloning the returned `Bytes` outlives this chunk's charge, so a caller
+    /// that retains one holds ring memory the queue figure no longer reports.
+    /// Parse from it and drop it; do not park it in a cache.
+    #[must_use]
+    pub fn bytes(&self) -> &Bytes {
+        &self.bytes
+    }
+
+    /// Build a chunk charged against `meter` as if split from a `ring_bytes`
+    /// ring, for tests that drive the queue without a child process.
+    #[cfg(test)]
+    fn for_test(bytes: &'static [u8], ring_bytes: usize, meter: &Arc<QueuedOutputMeter>) -> Self {
+        Self::new(Bytes::from_static(bytes), RingCharge::new(ring_bytes, meter), meter)
+    }
+}
+
+impl Drop for PtyOutputChunk {
+    fn drop(&mut self) {
+        self.meter.payload_bytes.fetch_sub(self.bytes.len(), Ordering::AcqRel);
+    }
+}
+
+impl std::ops::Deref for PtyOutputChunk {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.bytes
+    }
+}
+
+impl AsRef<[u8]> for PtyOutputChunk {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 impl PtyInputError {
@@ -196,9 +324,7 @@ fn unix_session_pids(session_id: u32) -> std::io::Result<Vec<u32>> {
     Ok(pids_by_type(ProcFilter::All)?
         .into_iter()
         .filter(|pid| {
-            *pid != 0
-                && unsafe { libc::getsid(*pid as libc::pid_t) }
-                    == session_id as libc::pid_t
+            *pid != 0 && unsafe { libc::getsid(*pid as libc::pid_t) } == session_id as libc::pid_t
         })
         .collect())
 }
@@ -285,14 +411,27 @@ fn pty_input_channel() -> (Sender<Outgoing>, Receiver<Outgoing>) {
     crossbeam_channel::bounded(PTY_INPUT_QUEUE_CAPACITY)
 }
 
-fn try_queue_pty_input(tx: &Sender<Outgoing>, bytes: Vec<u8>) -> Result<(), PtyInputError> {
+fn try_queue_pty_input(
+    tx: &Sender<Outgoing>,
+    queued_bytes: &AtomicUsize,
+    bytes: Vec<u8>,
+) -> Result<(), PtyInputError> {
     if !pty_input_message_allowed(bytes.len()) {
         return Err(PtyInputError::MessageTooLarge(bytes));
     }
-    tx.try_send(bytes).map_err(|error| match error {
-        crossbeam_channel::TrySendError::Full(bytes) => PtyInputError::QueueFull(bytes),
-        crossbeam_channel::TrySendError::Disconnected(bytes) => {
-            PtyInputError::WriterDisconnected(bytes)
+    // Counted before the send, because once the message is in the channel the
+    // writer thread may drain it before this line would otherwise run — which
+    // would decrement a counter that had never been incremented.
+    let len = bytes.len();
+    queued_bytes.fetch_add(len, Ordering::Relaxed);
+    tx.try_send(bytes).map_err(|error| {
+        // The message never entered the queue, so it is not queued memory.
+        queued_bytes.fetch_sub(len, Ordering::Relaxed);
+        match error {
+            crossbeam_channel::TrySendError::Full(bytes) => PtyInputError::QueueFull(bytes),
+            crossbeam_channel::TrySendError::Disconnected(bytes) => {
+                PtyInputError::WriterDisconnected(bytes)
+            }
         }
     })
 }
@@ -302,10 +441,63 @@ pub fn pty_input_message_allowed(bytes: usize) -> bool {
     bytes <= MAX_PTY_INPUT_MESSAGE_BYTES
 }
 
-/// Maximum bytes that can wait in one pane's PTY input channel.
+/// Worst-case bytes that can wait in one pane's PTY input channel.
+///
+/// The product of the slot count and the per-message cap. This is the bound,
+/// not the occupancy: [`PtyHandle::queued_input_bytes`] reports what is
+/// actually held.
 #[must_use]
-pub fn max_pty_queued_input_bytes() -> usize {
+pub const fn max_pty_queued_input_bytes() -> usize {
     PTY_INPUT_QUEUE_CAPACITY.saturating_mul(MAX_PTY_INPUT_MESSAGE_BYTES)
+}
+
+/// Ring memory this pane's queued PTY output holds down.
+///
+/// The reader hands out `Bytes` views into a reused 64 KiB ring, so neither
+/// obvious arithmetic describes the queue. The slot count times a chunk size
+/// counts buffers that were never allocated; the sum of the view lengths
+/// counts payload while ignoring the ring those views pin. Measured on a full
+/// 64-slot queue from `/bin/sh`: 64 bytes of keystroke echo, 65,536 bytes of
+/// ring — the payload figure would have understated the memory 1024x.
+///
+/// This reports the ring: the bytes that stay allocated until the queue
+/// drains, which is what the governor is deciding about. Use
+/// [`queued_output_payload_bytes`] for the data waiting to be parsed.
+///
+/// Maintained by the chunks as they are created and dropped, so this observes
+/// without consuming and may be sampled from any thread without disturbing the
+/// pump.
+#[must_use]
+pub fn queued_output_bytes(handle: &PtyHandle) -> usize {
+    handle.output_meter.ring_bytes.load(Ordering::Acquire)
+}
+
+/// Payload bytes waiting in this pane's PTY output channel.
+///
+/// The sum of the queued view lengths — what the VT thread still has to parse.
+/// This is not the memory cost: 64 keystroke echoes are 64 bytes here and
+/// 65,536 bytes of pinned ring. [`queued_output_bytes`] reports the latter.
+#[must_use]
+pub fn queued_output_payload_bytes(handle: &PtyHandle) -> usize {
+    handle.output_meter.payload_bytes.load(Ordering::Acquire)
+}
+
+/// Reader ring size, and the granularity of [`queued_output_bytes`].
+///
+/// The reader fills one allocation of this size and splits views out of it
+/// until the remaining headroom is too small for another read, so a queue's
+/// pinned total is always a multiple of this.
+pub const PTY_READ_RING_BYTES: usize = 64 * 1024;
+
+/// Worst-case ring memory one pane's output queue can pin.
+///
+/// Reached only if every queued view came from a different ring, which needs
+/// reads large enough to exhaust an allocation each. Real shells do not do
+/// this: every `/bin/sh` workload measured pinned exactly one ring, because
+/// PTY reads arrive far smaller than the ring.
+#[must_use]
+pub const fn max_queued_output_ring_bytes() -> usize {
+    PTY_OUTPUT_QUEUE_CAPACITY.saturating_mul(PTY_READ_RING_BYTES)
 }
 
 #[cfg(all(test, windows))]
@@ -381,7 +573,23 @@ pub struct PtyHandle {
     /// Channel of byte chunks read from the child's stdout/stderr.
     pub out_rx: Receiver<Incoming>,
     /// Channel for bytes / control messages to send to the child.
-    pub in_tx: Sender<Outgoing>,
+    ///
+    /// **Private deliberately.** This is the raw bounded seam: sending on it
+    /// directly skips the message-size cap and blocks the calling thread when
+    /// the queue is full. Measured — typed refuses an oversized message, raw
+    /// accepts it; typed refuses a full queue, raw blocks on it.
+    ///
+    /// Use [`PtyHandle::send_input_nonblocking`] for terminal input, or
+    /// [`PtyHandle::reply_sender`] for a thread that forwards parser replies.
+    in_tx: Sender<Outgoing>,
+    /// Bytes currently waiting in `in_tx`, maintained exactly.
+    ///
+    /// The queue holds `Vec<u8>` messages of any size up to the per-message
+    /// cap, so a slot count says nothing about bytes held. Incremented when a
+    /// message enters the queue and decremented when the writer thread takes
+    /// it out, both inside this crate — there is no consumer that could forget
+    /// to account for one.
+    queued_input_bytes: Arc<AtomicUsize>,
     /// Closure that resizes the pty to `(cols, rows)`.
     pub resize: Box<dyn Fn(u16, u16) + Send + Sync>,
     reader_cancel: Sender<()>,
@@ -393,6 +601,8 @@ pub struct PtyHandle {
     conpty_drain_reader: Option<Box<dyn Read + Send>>,
     /// Resolved shell program path (the command we actually spawned).
     shell_program_path: String,
+    /// Live ring/payload totals for `out_rx`, maintained by the chunks in it.
+    output_meter: Arc<QueuedOutputMeter>,
 }
 
 /// Options controlling how `spawn_default_shell` constructs the shell
@@ -466,7 +676,35 @@ impl PtyHandle {
     /// On failure, the error retains the rejected bytes so the caller can
     /// retry or notify the user instead of silently losing terminal input.
     pub fn send_input_nonblocking(&self, bytes: Vec<u8>) -> Result<(), PtyInputError> {
-        try_queue_pty_input(&self.in_tx, bytes)
+        try_queue_pty_input(&self.in_tx, &self.queued_input_bytes, bytes)
+    }
+
+    /// Bytes waiting in this pane's PTY input channel.
+    ///
+    /// The exact figure, not a slot count times an assumed message size. A
+    /// single paste is accepted up to the per-message cap and broadcast to
+    /// every pane, so the difference between "four slots" and the bytes in
+    /// them is the difference between kilobytes and tens of megabytes.
+    ///
+    /// Observes without consuming, so any thread may sample it.
+    #[must_use]
+    pub fn queued_input_bytes(&self) -> usize {
+        self.queued_input_bytes.load(Ordering::Relaxed)
+    }
+
+    /// An owned input sender for a caller that cannot borrow the handle.
+    ///
+    /// Two callers need this: the thread forwarding parser replies (DSR, DA,
+    /// XTVERSION, focus) generated on the VT thread, and the mux server, which
+    /// resolves a pane under a lock and must send after releasing it.
+    ///
+    /// Returns [`PtyInputSender`] rather than the raw channel. The reply
+    /// forwarder previously cloned the `Sender` and called `send`, which
+    /// skipped the size cap and blocked when the queue filled — in a thread
+    /// whose reason for existing is that nothing should block there.
+    #[must_use]
+    pub fn input_sender(&self) -> PtyInputSender {
+        PtyInputSender { tx: self.in_tx.clone(), queued_bytes: self.queued_input_bytes.clone() }
     }
 }
 
@@ -733,9 +971,13 @@ impl PtyHandle {
         let (writer_cancel, writer_cancel_rx) = crossbeam_channel::bounded(1);
 
         // Reader thread: pty -> out_rx.
-        let reader_thread = spawn_reader_thread(reader, out_tx, reader_cancel_rx);
+        let output_meter = Arc::new(QueuedOutputMeter::default());
+        let reader_thread =
+            spawn_reader_thread(reader, out_tx, reader_cancel_rx, output_meter.clone());
         // Writer thread: in_rx -> pty.
-        let writer_thread = spawn_writer_thread(writer, in_rx, writer_cancel_rx);
+        let queued_input_bytes = Arc::new(AtomicUsize::new(0));
+        let writer_thread =
+            spawn_writer_thread(writer, in_rx, writer_cancel_rx, queued_input_bytes.clone());
 
         let resize_master = master.clone();
         // Dedup no-op resizes. Callers (e.g. tab switch via
@@ -766,6 +1008,7 @@ impl PtyHandle {
         Ok(Self {
             out_rx,
             in_tx,
+            queued_input_bytes,
             resize,
             reader_cancel,
             writer_cancel,
@@ -775,6 +1018,7 @@ impl PtyHandle {
             #[cfg(windows)]
             conpty_drain_reader,
             shell_program_path: cmd.to_string(),
+            output_meter,
         })
     }
 }
@@ -790,6 +1034,7 @@ fn spawn_reader_thread(
     mut reader: Box<dyn Read + Send>,
     tx: Sender<Incoming>,
     cancel: Receiver<()>,
+    meter: Arc<QueuedOutputMeter>,
 ) -> PtyIoThread {
     let (done_tx, done) = crossbeam_channel::bounded(1);
     let handle = thread::Builder::new()
@@ -804,18 +1049,34 @@ fn spawn_reader_thread(
             // `[u8; 8192]` stack buffer + `buf[..n].to_vec()` pattern that
             // allocated once per read (and the reader can fire thousands of
             // reads per second under `cat largefile`).
-            const RING_CAP: usize = 64 * 1024;
+            const RING_CAP: usize = PTY_READ_RING_BYTES;
             // Keep at least one full PTY chunk (typical kernel pipe buffer
             // is 4–16 KiB) of headroom before each read to avoid forcing a
             // realloc mid-read.
             const READ_HEADROOM: usize = 8 * 1024;
             let mut buf = BytesMut::with_capacity(RING_CAP);
+            // The whole allocation, not the unsplit remainder. `split` hands
+            // out views into one buffer and shrinks `buf`'s window; the memory
+            // behind an earlier view is not reclaimable while any view lives,
+            // so a charge computed from the shrunken window would undercount
+            // the ring by everything already handed out. Sampled straight
+            // after each `reserve`, when the window is the allocation.
+            let mut ring_bytes = buf.capacity();
+            // Weak, so the charge for the ring we are filling lives exactly as
+            // long as some chunk still views into it. Holding an `Arc` here
+            // would keep an emptied queue charged for a ring nobody is waiting
+            // on; upgrading tells us whether this ring is already charged.
+            let mut ring_charge: std::sync::Weak<RingCharge> = std::sync::Weak::new();
             loop {
                 if buf.capacity() - buf.len() < READ_HEADROOM {
                     // If downstream has dropped its `Bytes` views, this
                     // reclaims the original buffer; otherwise it allocates
                     // a fresh one and drops our half of the previous ring.
                     buf.reserve(RING_CAP);
+                    // Either way the bytes we hand out from here belong to a
+                    // different ring than the charge above describes.
+                    ring_bytes = buf.capacity();
+                    ring_charge = std::sync::Weak::new();
                 }
                 // Zero-initialise the spare region before handing it to
                 // `Read::read`. `Read` requires an initialised destination
@@ -832,6 +1093,18 @@ fn spawn_reader_thread(
                     Ok(n) => {
                         buf.truncate(initial_len + n);
                         let chunk = buf.split().freeze();
+                        // Reuse this ring's charge if any queued view still
+                        // holds it, so one allocation is counted once however
+                        // many views come out of it.
+                        let charge = match ring_charge.upgrade() {
+                            Some(existing) => existing,
+                            None => {
+                                let fresh = RingCharge::new(ring_bytes, &meter);
+                                ring_charge = Arc::downgrade(&fresh);
+                                fresh
+                            }
+                        };
+                        let chunk = PtyOutputChunk::new(chunk, charge, &meter);
                         if !send_pty_output(&tx, &cancel, chunk) {
                             break;
                         }
@@ -858,6 +1131,7 @@ fn spawn_writer_thread(
     mut writer: Box<dyn Write + Send>,
     rx: Receiver<Outgoing>,
     cancel: Receiver<()>,
+    queued_bytes: Arc<AtomicUsize>,
 ) -> PtyIoThread {
     let (done_tx, done) = crossbeam_channel::bounded(1);
     let handle = thread::Builder::new()
@@ -872,6 +1146,12 @@ fn spawn_writer_thread(
                         Err(_) => break,
                     },
                 };
+                // Out of the queue and owned by this thread, so it is no
+                // longer queued memory whether or not the write succeeds.
+                // Exactly paired with the increment in `try_queue_pty_input`:
+                // a message is counted once when it enters the channel and
+                // uncounted once when it leaves, so this cannot underflow.
+                queued_bytes.fetch_sub(bytes.len(), Ordering::Relaxed);
                 if let Err(e) = writer.write_all(&bytes) {
                     if cancel.try_recv().is_err() {
                         tracing::warn!("pty write error: {e}");
@@ -880,6 +1160,10 @@ fn spawn_writer_thread(
                 }
                 let _ = writer.flush();
             }
+            // Nothing will drain the queue again. Anything still in it is
+            // released when the channel drops, so the figure must not keep
+            // reporting it as held.
+            queued_bytes.store(0, Ordering::Relaxed);
             let _ = done_tx.send(());
         })
         // PANIC: see `spawn_reader_thread` rationale above — OS-level

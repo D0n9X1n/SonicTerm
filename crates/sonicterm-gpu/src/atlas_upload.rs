@@ -1,10 +1,11 @@
 //! GPU-side wrapper around [`sonicterm_text::glyph_atlas::GlyphAtlas`].
 //!
 //! Owns a wgpu texture/view/sampler plus the bind group that
-//! [`crate::text_pipeline::TextPipeline`] samples from. This used to live
-//! inside `glyph_atlas.rs` itself, but in PR 4 the atlas was moved into
-//! the headless `sonicterm-text` crate, which does not depend on wgpu. The
-//! GPU wrapper stays here in `sonicterm-shared` (later: `sonicterm-gpu`).
+//! [`crate::text_pipeline::TextPipeline`] samples from.
+//!
+//! The atlas itself lives in the headless `sonicterm-text` crate, which does
+//! not depend on wgpu; only this GPU-side wrapper does. That split is what
+//! lets the atlas be exercised without a device.
 
 use sonicterm_text::glyph_atlas::{DirtyRect, GlyphAtlas, BYTES_PER_PIXEL};
 

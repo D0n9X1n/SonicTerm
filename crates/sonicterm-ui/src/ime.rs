@@ -5,9 +5,9 @@
 //! text shown by the OS IME panel) followed by zero or one `Commit` events
 //! (the finalized text the user picked).
 //!
-//! This module is intentionally render-agnostic: a future PR can pull
-//! [`ImeState::preedit`] / [`ImeState::cursor`] to paint a composition
-//! overlay. Today the consumer is just `app::App`, which feeds the
+//! This module is intentionally render-agnostic: [`ImeState::preedit`] and
+//! [`ImeState::cursor`] are exposed so a renderer can paint a composition
+//! overlay from them. The only consumer today is `app::App`, which feeds the
 //! drained commits straight into the active pane's PTY.
 
 /// Throttle for `Window::set_ime_cursor_area` calls.

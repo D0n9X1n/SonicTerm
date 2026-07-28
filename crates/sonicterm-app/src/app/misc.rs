@@ -1,4 +1,4 @@
-//! Extracted from `app/mod.rs` in refactor PR 8b (expose-then-extract).
+//! Extracted from `app/mod.rs` from the monolithic app module.
 //! `App`'s referenced fields are `pub(super)`; this submodule lives in
 //! the same `app` module tree, so direct field access works.
 
@@ -643,9 +643,9 @@ impl App {
             self.pending_new_window = false;
             self.create_new_terminal_window(el);
         }
-        // Phase A: in-process tear-out drain. Replaces the
-        // legacy `Command::new`-based spawn — Phase B will delete the
-        // dead `spawn_tearout_child` + `--tear-out-payload` CLI flag.
+        // In-process tear-out drain. The `Command::new`-based spawn
+        // (`spawn_tearout_child` + `--tear-out-payload`) is still reached from
+        // the Windows OLE drop path, so both routes exist.
         // Ordering MUST stay before `drain_pending_os_teardown` (the
         // invariant — `cancel_drag_session` must see the new
         // child window already inserted).
@@ -711,7 +711,7 @@ impl App {
         }
     }
 
-    /// Phase E (Haiku follow-up): create a fresh
+    /// create a fresh
     /// top-level terminal window, install its renderer, spawn one
     /// tab + PTY-backed pane, register it with the OS-drag backend,
     /// and mark it as the new frontmost window.
@@ -813,6 +813,9 @@ impl App {
 
         let win_id = window.id();
         let child = WindowState {
+            // Registered when the window is inserted; construction has no
+            // governor in scope.
+            owner: None,
             role: crate::app::WindowRole::Terminal,
             window: Some(window.clone()),
             renderer: Some(renderer),
@@ -849,12 +852,12 @@ impl App {
             test_renderer_focus_marker: None,
             test_pane_viewport: None,
         };
-        self.windows.insert(win_id, child);
+        self.insert_window_registered(win_id, child);
         self.register_window_with_os_drag_backend(win_id, &window);
         window.request_redraw();
         // Eagerly mark frontmost so the next Cmd+T / Cmd+W routes
         // here before the OS Focus event arrives — mirrors the
-        // tear_out_tab Phase B pattern.
+        // tear_out_tab pattern.
         self.frontmost_window = Some(win_id);
         tracing::info!(
             "Action::NewWindow: spawned terminal window; windows={}",
@@ -935,6 +938,9 @@ impl App {
             ws.tabs.push(Tab::new(title));
             ws.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
         }
+        // Own the new pane now: until it has one, its memory is attributed to
+        // nothing and the next 30-second sample is a long time to be blind.
+        self.reconcile_pane_owners();
     }
     pub(super) fn close_tab_at(&mut self, index: usize) {
         let Some(ws) = self.main_mut() else { return };

@@ -1,7 +1,7 @@
 //! A font-database to keep track of fonts that we've located
 
 use crate::locator::{FontDataSource, FontOrigin};
-use crate::parser::{ParsedFont, load_built_in_fonts, parse_and_collect_font_info};
+use crate::parser::{load_built_in_fonts, parse_and_collect_font_info, ParsedFont};
 use crate::rangeset::RangeSet;
 use anyhow::Context;
 use config::{Config, FontAttributes};

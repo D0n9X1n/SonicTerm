@@ -1,4 +1,4 @@
-//! Extracted from `app/mod.rs` in refactor PR 8b (expose-then-extract).
+//! Extracted from `app/mod.rs` from the monolithic app module.
 //! `App`'s referenced fields are `pub(super)`; this submodule lives in
 //! the same `app` module tree, so direct field access works.
 
@@ -84,10 +84,9 @@ impl App {
     }
 
     pub(super) fn warm_window_pool_maintain(&mut self, el: &ActiveEventLoop) {
-        let Some(software_rendering) = self
-            .main_renderer()
-            .map(|renderer| renderer.is_software_rendering() || renderer.is_software_render_degraded())
-        else {
+        let Some(software_rendering) = self.main_renderer().map(|renderer| {
+            renderer.is_software_rendering() || renderer.is_software_render_degraded()
+        }) else {
             return;
         };
         let configured = self.config.window.warm_window_pool;
@@ -187,11 +186,8 @@ impl App {
             };
             child.tabs.active_index()
         };
-        self.pending_tear_out = Some(super::PendingTearOut {
-            source_window,
-            source_tab_idx,
-            drop_screen_pos: None,
-        });
+        self.pending_tear_out =
+            Some(super::PendingTearOut { source_window, source_tab_idx, drop_screen_pos: None });
         true
     }
 
@@ -230,7 +226,7 @@ impl App {
         if self.try_os_drag_handoff(index) {
             return true;
         }
-        // Phase B: the single-tab guard is GONE. Tearing
+        // the single-tab guard is GONE. Tearing
         // out the only tab in main hides main (existing drained-main
         // path) and the tab becomes its own new top-level window. The
         // PtyHandle MOVES via `detach_tab_state` — no respawn, no
@@ -241,14 +237,14 @@ impl App {
         if self.install_torn_out_window(el, tab, state, panes, None, "main").is_none() {
             return true;
         }
-        // Phase B source-side cleanup: hide main if drained, else
+        // Source-side cleanup: hide main if drained, else
         // activate the LEFT neighbor of the removed slot (spec §B4).
         self.tear_out_apply_source_side(index);
         tracing::info!("tab torn out as new window; windows={}", self.windows.len());
         true
     }
 
-    /// Phase A: factored-out child-window construction so
+    /// factored-out child-window construction so
     /// both [`Self::tear_out_tab`] (cursor-leaves-windows path) and the
     /// in-process tear-out drain (`drain_pending_window_creates` →
     /// `pending_tear_out` enqueued from `DroppedOnEmpty`) build the
@@ -361,6 +357,9 @@ impl App {
         let active_pane = state.active_pane;
         child_tabs.push(tab);
         let child = WindowState {
+            // Registered when the window is inserted; construction has no
+            // governor in scope.
+            owner: None,
             role: crate::app::WindowRole::Terminal,
             window: Some(window.clone()),
             renderer: Some(renderer),
@@ -408,7 +407,7 @@ impl App {
             test_renderer_focus_marker: None,
             test_pane_viewport: None,
         };
-        self.windows.insert(win_id, child);
+        self.insert_window_registered(win_id, child);
         // #pane-geom: now that the child WindowState exists, size each migrated
         // pane to its OWN split sub-rect (via compute_pane_rects_for) instead of
         // the full child grid. Sizing every pane to the whole `(cols, rows)` is
@@ -418,7 +417,7 @@ impl App {
         if let Some(child) = self.windows.get_mut(&win_id) {
             super::child_window::resize_visible_panes_in_child(child);
         }
-        // Phase C2 / register the new window's HWND with
+        // Register the new window's HWND with
         // the OS-drag backend so drops on this child window reach
         // IDropTarget::Drop. No-op on mac (pasteboard model).
         self.register_window_with_os_drag_backend(win_id, &window);
@@ -439,14 +438,14 @@ impl App {
         window.request_redraw();
         // The pool target is at least two, so consuming one still leaves one
         // hidden spare. Refill on the next idle tick, not on the drop path.
-        // Phase B: the new window becomes OS-frontmost after
+        // the new window becomes OS-frontmost after
         // the hidden first frame is rendered and the child RedrawRequested
         // handler shows it.
         self.frontmost_window = Some(win_id);
         Some(win_id)
     }
 
-    /// Phase B — source-side post-tear-out cleanup, factored
+    /// source-side post-tear-out cleanup, factored
     /// out so unit tests can drive it without an `ActiveEventLoop`.
     ///
     /// * If main is now empty, hide it (existing drained-main path).
@@ -455,7 +454,7 @@ impl App {
     /// `detach_tab_state` already adjusts the active index via
     /// `TabBar::close`, but its rule ("stay at the same numeric
     /// index, clamp on overflow") shifts focus RIGHT when the active
-    /// tab was removed. Phase B overrides to consistently pick the
+    /// tab was removed. Overridden to consistently pick the
     /// LEFT neighbor, matching common terminal-emulator UX.
     pub fn tear_out_apply_source_side(&mut self, removed_idx: usize) {
         let is_empty = self.main_tabs().map(|t| t.is_empty()).unwrap_or(true);
@@ -557,7 +556,7 @@ impl App {
         }
         let Some(payload) = self.build_payload_for_tab(index) else { return false };
 
-        // Phase C2: hand the gesture to the installed OsTabDragBackend
+        // hand the gesture to the installed OsTabDragBackend
         // first. The backend is responsible for OS cursor capture +
         // pasteboard / OLE handoff. If `handles_full_gesture()` returns
         // true (Windows: DoDragDrop ran end-to-end inside the backend)
@@ -591,7 +590,7 @@ impl App {
                 if started && self.os_drag_backend_handles_full_gesture() {
                     tracing::info!(
                         tab = %payload.tab_title,
-                        "Phase C2: backend owns gesture end-to-end; legacy sink skipped"
+                        "backend owns gesture end-to-end; legacy sink skipped"
                     );
                     return true;
                 }
@@ -669,7 +668,7 @@ impl App {
         true
     }
     pub fn tear_out_would_be_noop(&self) -> bool {
-        // Phase B: tear-out is now ALWAYS productive — a
+        // tear-out is now ALWAYS productive — a
         // single-tab tear creates a new window with that tab and
         // hides the now-empty main. The CursorMoved handler no
         // longer needs to preserve gesture state for a "no-op" case;
@@ -679,7 +678,7 @@ impl App {
         false
     }
 
-    /// Phase B — tear a tab out of an existing child window
+    /// tear a tab out of an existing child window
     /// into a brand-new top-level window. Mirrors
     /// [`Self::tear_out_tab`] (main → new) but with detach_from_child
     /// as the source. The torn Tab + its PaneState (incl. PtyHandle)
@@ -710,7 +709,7 @@ impl App {
         true
     }
 
-    /// Phase B — child-side post-tear-out cleanup. Mirrors
+    /// child-side post-tear-out cleanup. Mirrors
     /// [`Self::tear_out_apply_source_side`] for a torn-from-child
     /// origin. Removes the source child window from
     /// `self.windows` if it became empty; else activates the

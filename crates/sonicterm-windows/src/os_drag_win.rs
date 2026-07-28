@@ -110,7 +110,7 @@ pub fn take_pending_payload() -> Option<TabPayload> {
     PENDING_PAYLOAD.take()
 }
 
-// ---- Phase C2 AppHandle slot -------------------------------------------------
+// ---- AppHandle slot -------------------------------------------------
 
 /// Slot for the [`sonicterm_app::app::os_drag::AppHandle`] the WinOsTabDragBackend
 /// installs for the duration of a single `DoDragDrop` call. The
@@ -494,7 +494,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
         if let Some(json) = read_hglobal_utf8(data, cf_sonic_tab()) {
             match TabPayload::from_json(&json) {
                 Ok(_p) => {
-                    // Phase C2 (review fix): resolve the real
+                    // resolve the real
                     // destination via the shared TabBarRegistry the App
                     // publishes into every frame. Falls back to
                     // DroppedOnEmpty (tear out at drop point) when the

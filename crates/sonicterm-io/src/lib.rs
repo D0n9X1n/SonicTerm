@@ -1,6 +1,5 @@
 //! sonicterm-io — PTY + process probes for SonicTerm Terminal.
 //!
-//! Split out of `sonicterm-core` in the PR-3 refactor.
 //! `sonicterm-core` re-exports this crate's contents for back-compat.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -9,6 +8,7 @@
 pub mod foreground_proc;
 pub mod proc_info;
 pub mod pty;
+pub mod pty_backend_feasibility;
 pub mod ssh;
 
 #[cfg(test)]
