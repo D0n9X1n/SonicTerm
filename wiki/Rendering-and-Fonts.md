@@ -25,22 +25,34 @@ policy.
 
 ## Per-frame pipeline
 
-```text
-RedrawRequested
-  -> app try_locks every visible Parser/Grid
-  -> build PaneRender[] + RenderInputs
-  -> GpuRenderer::render
-       1. compute pane/content geometry
-       2. build a frame fingerprint and skip identical frames
-       3. walk dirty/uncached rows
-       4. shape text and resolve custom block glyphs
-       5. emit background, cursor, selection, underline and UI quads
-       6. insert inline images and newly rasterized glyphs into atlas
-       7. compute damage
-       8. upload dirty atlas rectangles
-       9. acquire surface texture
-      10. draw retained offscreen frame within damage scissor
-      11. blit to swapchain and present
+```mermaid
+flowchart TD
+    req["RedrawRequested"]
+    lock["app try_locks every visible Parser/Grid"]
+    build["build PaneRender[] + RenderInputs"]
+    render["GpuRenderer::render"]
+
+    req --> lock
+    lock --> build
+    build --> render
+
+    subgraph steps["GpuRenderer::render steps"]
+        direction TB
+        s1["1. compute pane/content geometry"]
+        s2["2. build a frame fingerprint and skip identical frames"]
+        s3["3. walk dirty/uncached rows"]
+        s4["4. shape text and resolve custom block glyphs"]
+        s5["5. emit background, cursor, selection, underline and UI quads"]
+        s6["6. insert inline images and newly rasterized glyphs into atlas"]
+        s7["7. compute damage"]
+        s8["8. upload dirty atlas rectangles"]
+        s9["9. acquire surface texture"]
+        s10["10. draw retained offscreen frame within damage scissor"]
+        s11["11. blit to swapchain and present"]
+        s1 --> s2 --> s3 --> s4 --> s5 --> s6 --> s7 --> s8 --> s9 --> s10 --> s11
+    end
+
+    render --> s1
 ```
 
 A frame fingerprint fast path skips GPU work when visible state is unchanged.
@@ -78,15 +90,24 @@ scale, atlas, or pane changes invalidate the appropriate entries.
 
 ## Text shaping
 
-```text
-cell style run
-  -> ASCII fast-path check
-  -> otherwise FontStack::shape_text
-  -> sonicterm-font LoadedFont
-  -> HarfBuzz buffer and hb_shape
-  -> clusters, glyph ids, advances and offsets
-  -> recursively retry missing clusters with fallback faces
-  -> ShapedGlyph records
+```mermaid
+flowchart TD
+    run["cell style run"]
+    ascii["ASCII fast-path check"]
+    shape["otherwise FontStack::shape_text"]
+    loaded["sonicterm-font LoadedFont"]
+    hb["HarfBuzz buffer and hb_shape"]
+    clusters["clusters, glyph ids, advances and offsets"]
+    fallback["recursively retry missing clusters with fallback faces"]
+    shaped(["ShapedGlyph records"])
+
+    run --> ascii
+    ascii --> shape
+    shape --> loaded
+    loaded --> hb
+    hb --> clusters
+    clusters --> fallback
+    fallback --> shaped
 ```
 
 The ASCII fast path is deliberately conservative. Printable ASCII can bypass
@@ -326,22 +347,34 @@ app 为每个可见窗格构建一个 `PaneRender`，其中包含：
 
 ## 每帧流水线
 
-```text
-RedrawRequested
-  -> app try_lock 每个可见 Parser/Grid
-  -> 构建 PaneRender[] + RenderInputs
-  -> GpuRenderer::render
-       1. 计算窗格/内容几何
-       2. 构建帧指纹并跳过完全相同的帧
-       3. 遍历脏行或未缓存行
-       4. 文本塑形并解析自定义块字形
-       5. 生成背景、光标、选区、下划线和 UI quad
-       6. 把内联图像与新光栅字形插入 atlas
-       7. 计算 damage
-       8. 上传 atlas 脏矩形
-       9. 获取 surface texture
-      10. 在 damage scissor 内绘制保留式 offscreen frame
-      11. blit 到 swapchain 并 present
+```mermaid
+flowchart TD
+    req["RedrawRequested"]
+    lock["app try_lock 每个可见 Parser/Grid"]
+    build["构建 PaneRender[] + RenderInputs"]
+    render["GpuRenderer::render"]
+
+    req --> lock
+    lock --> build
+    build --> render
+
+    subgraph steps["GpuRenderer::render 步骤"]
+        direction TB
+        s1["1. 计算窗格/内容几何"]
+        s2["2. 构建帧指纹并跳过完全相同的帧"]
+        s3["3. 遍历脏行或未缓存行"]
+        s4["4. 文本塑形并解析自定义块字形"]
+        s5["5. 生成背景、光标、选区、下划线和 UI quad"]
+        s6["6. 把内联图像与新光栅字形插入 atlas"]
+        s7["7. 计算 damage"]
+        s8["8. 上传 atlas 脏矩形"]
+        s9["9. 获取 surface texture"]
+        s10["10. 在 damage scissor 内绘制保留式 offscreen frame"]
+        s11["11. blit 到 swapchain 并 present"]
+        s1 --> s2 --> s3 --> s4 --> s5 --> s6 --> s7 --> s8 --> s9 --> s10 --> s11
+    end
+
+    render --> s1
 ```
 
 帧指纹 fast path 在可见状态不变时跳过 GPU 工作。任何未成功 present 的 surface 获取路径都会清除
@@ -370,15 +403,24 @@ hash 包含 cell 内容、style revision、cell metric、scale，以及仅在选
 
 ## 文本塑形
 
-```text
-cell style run
-  -> ASCII fast-path 检查
-  -> 否则 FontStack::shape_text
-  -> sonicterm-font LoadedFont
-  -> HarfBuzz buffer 和 hb_shape
-  -> cluster、glyph id、advance、offset
-  -> 对缺失 cluster 递归尝试 fallback face
-  -> ShapedGlyph 记录
+```mermaid
+flowchart TD
+    run["cell style run"]
+    ascii["ASCII fast-path 检查"]
+    shape["否则 FontStack::shape_text"]
+    loaded["sonicterm-font LoadedFont"]
+    hb["HarfBuzz buffer 和 hb_shape"]
+    clusters["cluster、glyph id、advance、offset"]
+    fallback["对缺失 cluster 递归尝试 fallback face"]
+    shaped(["ShapedGlyph 记录"])
+
+    run --> ascii
+    ascii --> shape
+    shape --> loaded
+    loaded --> hb
+    hb --> clusters
+    clusters --> fallback
+    fallback --> shaped
 ```
 
 ASCII fast path 很保守：只有可打印 ASCII，且没有组合 extras、宽 cell 标记，以及 `=`、`!`、`<`、`>`、

@@ -8,20 +8,33 @@ present in the workspace but have narrower status described below.
 
 ## End-to-end byte flow
 
-```text
-child process
-  -> PTY master reader thread
-  -> crossbeam Receiver<Bytes>
-  -> per-pane VT worker
-  -> vte::Parser + SonicTerm Performer
-  -> Grid cells / scrollback / dirty rows / VtEvent
-  -> typed redraw event
-  -> app + renderer
+```mermaid
+flowchart TD
+    child["child process"]
+    reader["PTY master reader thread"]
+    recv["crossbeam Receiver&lt;Bytes&gt;"]
+    worker["per-pane VT worker"]
+    parser["vte::Parser + SonicTerm Performer"]
+    grid["Grid cells / scrollback / dirty rows / VtEvent"]
+    redraw["typed redraw event"]
+    app(["app + renderer"])
 
-keyboard / paste / terminal reply
-  -> Sender<Vec<u8>>
-  -> PTY writer thread
-  -> child process
+    child --> reader
+    reader --> recv
+    recv --> worker
+    worker --> parser
+    parser --> grid
+    grid --> redraw
+    redraw --> app
+
+    input["keyboard / paste / terminal reply"]
+    sender["Sender&lt;Vec&lt;u8&gt;&gt;"]
+    writer["PTY writer thread"]
+    child2(["child process"])
+
+    input --> sender
+    sender --> writer
+    writer --> child2
 ```
 
 The reader uses `bytes::Bytes` so parsed output can move through the channel
@@ -41,13 +54,20 @@ released before those writes occur.
 
 Spawn sequence:
 
-```text
-resolve configured/default shell
-  -> open native PTY pair through portable-pty
-  -> set TERM, COLORTERM, TERM_PROGRAM, TERM_PROGRAM_VERSION
-  -> spawn child and close the slave in the parent
-  -> start sonic-pty-reader
-  -> start sonic-pty-writer
+```mermaid
+flowchart TD
+    shell["resolve configured/default shell"]
+    pair["open native PTY pair through portable-pty"]
+    env["set TERM, COLORTERM, TERM_PROGRAM, TERM_PROGRAM_VERSION"]
+    spawn["spawn child and close the slave in the parent"]
+    reader(["start sonic-pty-reader"])
+    writer(["start sonic-pty-writer"])
+
+    shell --> pair
+    pair --> env
+    env --> spawn
+    spawn --> reader
+    spawn --> writer
 ```
 
 On Windows, automatic shell selection prefers PowerShell 7 (`pwsh.exe`),
@@ -204,24 +224,38 @@ parsing or expose grid-aware scrollback.
 
 ### Terminal reply
 
-```text
-application sends CSI 6 n
-  -> vte dispatches DSR query
-  -> Performer computes cursor row/column
-  -> reply Sender<Vec<u8>>
-  -> VT-reply/PTY writer path
-  -> child receives CSI <row>;<col> R
+```mermaid
+flowchart TD
+    csi["application sends CSI 6 n"]
+    dsr["vte dispatches DSR query"]
+    perf["Performer computes cursor row/column"]
+    reply["reply Sender&lt;Vec&lt;u8&gt;&gt;"]
+    path["VT-reply/PTY writer path"]
+    child(["child receives CSI &lt;row&gt;;&lt;col&gt; R"])
+
+    csi --> dsr
+    dsr --> perf
+    perf --> reply
+    reply --> path
+    path --> child
 ```
 
 ### Alternate-screen scroll
 
-```text
-TUI enters DECSET 1049
-  -> save cursor + enter blank alternate grid
-  -> mark full pane dirty
-  -> linefeed/scroll inside alternate grid
-  -> any dirty alt-screen row causes full clipped-pane repaint
-  -> DECRST 1049 restores primary grid and marks it dirty
+```mermaid
+flowchart TD
+    enter["TUI enters DECSET 1049"]
+    save["save cursor + enter blank alternate grid"]
+    dirty["mark full pane dirty"]
+    scroll["linefeed/scroll inside alternate grid"]
+    repaint["any dirty alt-screen row causes full clipped-pane repaint"]
+    restore(["DECRST 1049 restores primary grid and marks it dirty"])
+
+    enter --> save
+    save --> dirty
+    dirty --> scroll
+    scroll --> repaint
+    repaint --> restore
 ```
 
 ## Where to read the code
@@ -244,20 +278,33 @@ SSH 和 mux daemon 虽在工作区中，但状态更受限，见下文。
 
 ## 端到端字节流
 
-```text
-子进程
-  -> PTY master reader 线程
-  -> crossbeam Receiver<Bytes>
-  -> 每窗格 VT worker
-  -> vte::Parser + SonicTerm Performer
-  -> Grid 单元格 / scrollback / 脏行 / VtEvent
-  -> 类型化重绘事件
-  -> app + renderer
+```mermaid
+flowchart TD
+    child["子进程"]
+    reader["PTY master reader 线程"]
+    recv["crossbeam Receiver&lt;Bytes&gt;"]
+    worker["每窗格 VT worker"]
+    parser["vte::Parser + SonicTerm Performer"]
+    grid["Grid 单元格 / scrollback / 脏行 / VtEvent"]
+    redraw["类型化重绘事件"]
+    app(["app + renderer"])
 
-键盘 / 粘贴 / 终端回复
-  -> Sender<Vec<u8>>
-  -> PTY writer 线程
-  -> 子进程
+    child --> reader
+    reader --> recv
+    recv --> worker
+    worker --> parser
+    parser --> grid
+    grid --> redraw
+    redraw --> app
+
+    input["键盘 / 粘贴 / 终端回复"]
+    sender["Sender&lt;Vec&lt;u8&gt;&gt;"]
+    writer["PTY writer 线程"]
+    child2(["子进程"])
+
+    input --> sender
+    sender --> writer
+    writer --> child2
 ```
 
 reader 使用 `bytes::Bytes`，使大批输出通过 channel 时避免反复复制；输入使用拥有所有权的
@@ -275,13 +322,20 @@ writer channel，但执行写入前会释放 parser/grid 锁。
 
 启动流程：
 
-```text
-解析配置/default shell
-  -> 通过 portable-pty 打开原生 PTY pair
-  -> 设置 TERM、COLORTERM、TERM_PROGRAM、TERM_PROGRAM_VERSION
-  -> 启动子进程，父进程关闭 slave
-  -> 启动 sonic-pty-reader
-  -> 启动 sonic-pty-writer
+```mermaid
+flowchart TD
+    shell["解析配置/default shell"]
+    pair["通过 portable-pty 打开原生 PTY pair"]
+    env["设置 TERM、COLORTERM、TERM_PROGRAM、TERM_PROGRAM_VERSION"]
+    spawn["启动子进程，父进程关闭 slave"]
+    reader(["启动 sonic-pty-reader"])
+    writer(["启动 sonic-pty-writer"])
+
+    shell --> pair
+    pair --> env
+    env --> spawn
+    spawn --> reader
+    spawn --> writer
 ```
 
 Windows 自动选择顺序是 PowerShell 7（含 Microsoft Store 安装）、Windows PowerShell、
@@ -411,24 +465,38 @@ OSC 133 prompt 边界以绝对历史坐标保存，因此滚动后仍可跳转�
 
 ### 终端回复
 
-```text
-应用发送 CSI 6 n
-  -> vte 派发 DSR 查询
-  -> Performer 计算光标行列
-  -> reply Sender<Vec<u8>>
-  -> VT-reply/PTY writer 路径
-  -> 子进程收到 CSI <row>;<col> R
+```mermaid
+flowchart TD
+    csi["应用发送 CSI 6 n"]
+    dsr["vte 派发 DSR 查询"]
+    perf["Performer 计算光标行列"]
+    reply["reply Sender&lt;Vec&lt;u8&gt;&gt;"]
+    path["VT-reply/PTY writer 路径"]
+    child(["子进程收到 CSI &lt;row&gt;;&lt;col&gt; R"])
+
+    csi --> dsr
+    dsr --> perf
+    perf --> reply
+    reply --> path
+    path --> child
 ```
 
 ### 备用屏幕滚动
 
-```text
-TUI 进入 DECSET 1049
-  -> 保存光标并进入空白 alternate grid
-  -> 标记完整窗格为脏
-  -> alternate grid 内 linefeed/scroll
-  -> 任一 alt-screen 脏行导致完整裁剪窗格重绘
-  -> DECRST 1049 恢复 primary grid 并标脏
+```mermaid
+flowchart TD
+    enter["TUI 进入 DECSET 1049"]
+    save["保存光标并进入空白 alternate grid"]
+    dirty["标记完整窗格为脏"]
+    scroll["alternate grid 内 linefeed/scroll"]
+    repaint["任一 alt-screen 脏行导致完整裁剪窗格重绘"]
+    restore(["DECRST 1049 恢复 primary grid 并标脏"])
+
+    enter --> save
+    save --> dirty
+    dirty --> scroll
+    scroll --> repaint
+    repaint --> restore
 ```
 
 ## 从哪里阅读源码

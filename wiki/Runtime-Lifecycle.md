@@ -8,18 +8,30 @@ and [Rendering and Fonts](Rendering-and-Fonts).
 
 ## Startup sequence
 
-```text
-main()
-  -> install panic and exit tracing
-  -> load sonicterm.toml (collect warnings)
-  -> initialize logging with [logging]
-  -> load theme and keymap
-  -> create AppStateMachine
-  -> build MacShell or WindowsShell
-  -> create winit EventLoop<UserEvent>
-  -> create App and run ApplicationHandler
-  -> resumed: create first native window and GpuRenderer
-  -> create first tab and spawn its PTY pane
+```mermaid
+flowchart TD
+    main["main()"]
+    trace["install panic and exit tracing"]
+    cfg["load sonicterm.toml (collect warnings)"]
+    log["initialize logging with [logging]"]
+    theme["load theme and keymap"]
+    asm["create AppStateMachine"]
+    shell["build MacShell or WindowsShell"]
+    loop["create winit EventLoop&lt;UserEvent&gt;"]
+    app["create App and run ApplicationHandler"]
+    resumed["resumed: create first native window and GpuRenderer"]
+    pane(["create first tab and spawn its PTY pane"])
+
+    main --> trace
+    trace --> cfg
+    cfg --> log
+    log --> theme
+    theme --> asm
+    asm --> shell
+    shell --> loop
+    loop --> app
+    app --> resumed
+    resumed --> pane
 ```
 
 Both platform binaries install panic/exit diagnostics before normal startup
@@ -189,14 +201,22 @@ calculated receiver panes after the source write.
 
 ## Intent and effect dispatch
 
-```text
-input/lifecycle code
-  -> App::dispatch_intent(AppIntent)
-  -> AppStateMachine::handle
-  -> reducer updates mirror AppState
-  -> stable effect-class sort
-  -> App::dispatch_effects
-  -> PTY / redraw / clipboard / URL / window / native boundary
+```mermaid
+flowchart TD
+    input["input/lifecycle code"]
+    intent["App::dispatch_intent(AppIntent)"]
+    handle["AppStateMachine::handle"]
+    reducer["reducer updates mirror AppState"]
+    sort["stable effect-class sort"]
+    effects["App::dispatch_effects"]
+    boundary(["PTY / redraw / clipboard / URL / window / native boundary"])
+
+    input --> intent
+    intent --> handle
+    handle --> reducer
+    reducer --> sort
+    sort --> effects
+    effects --> boundary
 ```
 
 Current implementation note: `sonicterm-app-core` mirrors many transitions, but
@@ -267,25 +287,50 @@ native menu's explicit Quit command can exit immediately.
 
 ### New split
 
-```text
-keymap split_right
-  -> run action for frontmost window
-  -> spawn new PTY + Parser/Grid + worker threads
-  -> PaneTree::split(active, Right, new_id)
-  -> resize every visible pane/grid/PTY
-  -> focus new leaf
-  -> request redraw
+```mermaid
+flowchart TD
+    keymap["keymap split_right"]
+    action["run action for frontmost window"]
+    spawn["spawn new PTY + Parser/Grid + worker threads"]
+    split["PaneTree::split(active, Right, new_id)"]
+    resize["resize every visible pane/grid/PTY"]
+    focus["focus new leaf"]
+    redraw(["request redraw"])
+
+    keymap --> action
+    action --> spawn
+    spawn --> split
+    split --> resize
+    resize --> focus
+    focus --> redraw
 ```
 
 ### PTY output
 
-```text
-child bytes -> PTY reader channel -> VT worker
-  -> parser/grid mutation under lock
-  -> update mode/title/media side effects
-  -> release lock
-  -> coalesced RequestRedraw(WindowId)
-  -> winit thread -> RedrawRequested -> try_lock all panes -> render
+```mermaid
+flowchart TD
+    bytes["child bytes"]
+    chan["PTY reader channel"]
+    worker["VT worker"]
+    mutate["parser/grid mutation under lock"]
+    side["update mode/title/media side effects"]
+    release["release lock"]
+    coalesce["coalesced RequestRedraw(WindowId)"]
+    winit["winit thread"]
+    req["RedrawRequested"]
+    trylock["try_lock all panes"]
+    render(["render"])
+
+    bytes --> chan
+    chan --> worker
+    worker --> mutate
+    mutate --> side
+    side --> release
+    release --> coalesce
+    coalesce --> winit
+    winit --> req
+    req --> trylock
+    trylock --> render
 ```
 
 ## Where to read the code
@@ -309,18 +354,30 @@ child bytes -> PTY reader channel -> VT worker
 
 ## 启动顺序
 
-```text
-main()
-  -> 安装 panic 与退出追踪
-  -> 读取 sonicterm.toml（收集 warning）
-  -> 根据 [logging] 初始化日志
-  -> 读取主题和 keymap
-  -> 创建 AppStateMachine
-  -> 构建 MacShell 或 WindowsShell
-  -> 创建 winit EventLoop<UserEvent>
-  -> 创建 App 并运行 ApplicationHandler
-  -> resumed：创建首个原生窗口和 GpuRenderer
-  -> 创建首个标签页并启动它的 PTY 窗格
+```mermaid
+flowchart TD
+    main["main()"]
+    trace["安装 panic 与退出追踪"]
+    cfg["读取 sonicterm.toml（收集 warning）"]
+    log["根据 [logging] 初始化日志"]
+    theme["读取主题和 keymap"]
+    asm["创建 AppStateMachine"]
+    shell["构建 MacShell 或 WindowsShell"]
+    loop["创建 winit EventLoop&lt;UserEvent&gt;"]
+    app["创建 App 并运行 ApplicationHandler"]
+    resumed["resumed：创建首个原生窗口和 GpuRenderer"]
+    pane(["创建首个标签页并启动它的 PTY 窗格"])
+
+    main --> trace
+    trace --> cfg
+    cfg --> log
+    log --> theme
+    theme --> asm
+    asm --> shell
+    shell --> loop
+    loop --> app
+    app --> resumed
+    resumed --> pane
 ```
 
 两个平台二进制都会先安装 panic/退出诊断，再执行普通启动工作；tracing subscriber 则等到
@@ -461,14 +518,22 @@ parser 锁被占用的窗格会被跳过而非等待。
 
 ## Intent 与 effect 派发
 
-```text
-输入/生命周期代码
-  -> App::dispatch_intent(AppIntent)
-  -> AppStateMachine::handle
-  -> reducer 更新镜像 AppState
-  -> 稳定 effect 分类排序
-  -> App::dispatch_effects
-  -> PTY / 重绘 / 剪贴板 / URL / 窗口 / 原生边界
+```mermaid
+flowchart TD
+    input["输入/生命周期代码"]
+    intent["App::dispatch_intent(AppIntent)"]
+    handle["AppStateMachine::handle"]
+    reducer["reducer 更新镜像 AppState"]
+    sort["稳定 effect 分类排序"]
+    effects["App::dispatch_effects"]
+    boundary(["PTY / 重绘 / 剪贴板 / URL / 窗口 / 原生边界"])
+
+    input --> intent
+    intent --> handle
+    handle --> reducer
+    reducer --> sort
+    sort --> effects
+    effects --> boundary
 ```
 
 当前 `sonicterm-app-core` 已镜像许多转换，但实时拓扑仍以 `WindowState` 和 `PaneTree` 为准。
@@ -520,25 +585,50 @@ macOS 的 `Cmd+Q` 使用两次按键确认：第一次非重复按键显示“Pr
 
 ### 新分屏
 
-```text
-keymap split_right
-  -> 对最前窗口执行 action
-  -> 启动新 PTY + Parser/Grid + worker thread
-  -> PaneTree::split(active, Right, new_id)
-  -> resize 所有可见窗格/grid/PTY
-  -> 聚焦新叶节点
-  -> 请求重绘
+```mermaid
+flowchart TD
+    keymap["keymap split_right"]
+    action["对最前窗口执行 action"]
+    spawn["启动新 PTY + Parser/Grid + worker thread"]
+    split["PaneTree::split(active, Right, new_id)"]
+    resize["resize 所有可见窗格/grid/PTY"]
+    focus["聚焦新叶节点"]
+    redraw(["请求重绘"])
+
+    keymap --> action
+    action --> spawn
+    spawn --> split
+    split --> resize
+    resize --> focus
+    focus --> redraw
 ```
 
 ### PTY 输出
 
-```text
-子进程字节 -> PTY reader channel -> VT worker
-  -> 锁内修改 parser/grid
-  -> 更新模式/标题/媒体 side effect
-  -> 释放锁
-  -> 合并的 RequestRedraw(WindowId)
-  -> winit 线程 -> RedrawRequested -> try_lock 全部窗格 -> render
+```mermaid
+flowchart TD
+    bytes["子进程字节"]
+    chan["PTY reader channel"]
+    worker["VT worker"]
+    mutate["锁内修改 parser/grid"]
+    side["更新模式/标题/媒体 side effect"]
+    release["释放锁"]
+    coalesce["合并的 RequestRedraw(WindowId)"]
+    winit["winit 线程"]
+    req["RedrawRequested"]
+    trylock["try_lock 全部窗格"]
+    render(["render"])
+
+    bytes --> chan
+    chan --> worker
+    worker --> mutate
+    mutate --> side
+    side --> release
+    release --> coalesce
+    coalesce --> winit
+    winit --> req
+    req --> trylock
+    trylock --> render
 ```
 
 ## 从哪里阅读源码

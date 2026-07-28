@@ -136,6 +136,12 @@ publishes the expected macOS DMG(s), Windows MSI, and checksum assets.
 
 ## Conventions
 
+- **Flowcharts and data-flow diagrams in markdown are `mermaid` fenced blocks.**
+  Hand-drawn ASCII loses alignment across fonts and cannot be edited without
+  redrawing the whole picture. Directory trees and layout wireframes stay as
+  plain text — their meaning lives in the character positions, which Mermaid
+  discards. Because `wiki/` pages are bilingual, a converted diagram must be
+  converted in both halves with localized labels and identical structure.
 - **Keep first-party shell automation flat in `scripts/`.** Every SonicTerm-owned
   `.sh` and `.ps1` file must be a direct child of `scripts/`; do not create
   nested script folders or top-level `tools/` or `packaging/` directories.
