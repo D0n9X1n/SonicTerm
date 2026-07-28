@@ -381,3 +381,92 @@ fn retained_amount_falls_when_eviction_reclaims_entries() {
     assert!(peak.items <= 4, "a 32x32 atlas holds at most four 16x16 tiles");
     assert_eq!(peak.items, atlas.len());
 }
+
+/// A rasterizer whose tile size and coverage are chosen per character, so a
+/// test can evict a large glyph and insert a smaller one into its slot.
+struct SizedRasterizer {
+    big: RasterTile,
+    small: RasterTile,
+}
+
+impl Rasterizer for SizedRasterizer {
+    fn rasterize(&mut self, key: GlyphKey) -> Option<RasterTile> {
+        Some(if key.ch == 'B' { self.big.clone() } else { self.small.clone() })
+    }
+}
+
+#[test]
+fn reusing_a_freed_slot_leaves_the_evicted_glyphs_pixels_in_the_margin() {
+    // Eviction returns a rect to the free list without clearing the pixels
+    // under it, and `alloc_rect` reuses the whole slot rather than splitting
+    // it. A smaller glyph landing in a larger freed slot therefore writes
+    // only its own extent, and the evicted glyph's ink survives in the
+    // margin between the new tile's edge and the slot's.
+    //
+    // The atlas is sized to hold exactly one 4x4 tile so the second insert
+    // is forced to evict and reuse.
+    let mut atlas = GlyphAtlas::new(4, 4);
+    let mut rasterizer = SizedRasterizer {
+        big: RasterTile {
+            width: 4,
+            height: 4,
+            offset_x: 0,
+            offset_y: 0,
+            advance: 4.0,
+            coverage: vec![255; 16],
+            is_color: false,
+            is_subpixel: false,
+        },
+        small: RasterTile {
+            width: 2,
+            height: 2,
+            offset_x: 0,
+            offset_y: 0,
+            advance: 2.0,
+            coverage: vec![64; 4],
+            is_color: false,
+            is_subpixel: false,
+        },
+    };
+
+    let big_key =
+        GlyphKey { ch: 'B', font_slot: 0, weight_bold: false, italic: false, glyph_id: 1 };
+    atlas.get_or_insert(big_key, &mut rasterizer).expect("the big glyph fits an empty atlas");
+    assert_eq!(atlas.sample(3, 3), 255, "the big glyph paints the far corner of the slot");
+
+    // Force the big glyph out and put the small one in its place.
+    let small_key =
+        GlyphKey { ch: 'S', font_slot: 0, weight_bold: false, italic: false, glyph_id: 2 };
+    atlas.tick_frame();
+    let small = atlas
+        .get_or_insert(small_key, &mut rasterizer)
+        .expect("the small glyph fits once the big one is evicted");
+    assert!(atlas.evictions() > 0, "the run must actually evict, or it proves nothing");
+
+    // The small glyph's own pixels are correct.
+    assert_eq!(atlas.sample(0, 0), 64, "the new tile is written");
+
+    // The margin still holds the evicted glyph. This is the defect: those
+    // pixels are live texture content that nothing will overwrite until
+    // another tile happens to cover them.
+    assert_eq!(
+        atlas.sample(3, 3),
+        255,
+        "the evicted glyph's ink survives in the reused slot's margin"
+    );
+
+    // The saving grace today is that the UV rect is derived from the tile,
+    // not the slot, so a correct sample never reaches the margin. That is
+    // what keeps this latent rather than visible, and it is worth pinning:
+    // if UVs ever widen to the slot, the stale ink becomes visible ink.
+    let u1 = small.uv[2];
+    let v1 = small.uv[3];
+    assert!(
+        u1 <= 2.0 / 4.0 + f32::EPSILON,
+        "UV right edge must stay within the tile, not the slot: {u1}"
+    );
+    assert!(
+        v1 <= 2.0 / 4.0 + f32::EPSILON,
+        "UV bottom edge must stay within the tile, not the slot: {v1}"
+    );
+}
