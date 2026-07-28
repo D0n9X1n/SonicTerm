@@ -30,17 +30,11 @@ level. [Memory](Memory) covers what is bounded and how to read it.
 - [Crate Reference](Crate-Reference) — all 23 workspace crates and their relationships
 - [Development and Release](Development-and-Release) — tests, CI, packaging, and the `v*` release pipeline
 
-### Project evolution
-
-- [Architecture Evolution](Architecture-Evolution) — evidence-classified proposals for making the architecture easier to maintain
-
-The tracked canonical developer documents remain
-[Architecture Internals](Architecture-Internals),
-[Crate Reference](Crate-Reference),
-[Logging](Logging),
-and [Packaging](Packaging).
-The architecture pages in this wiki explain those boundaries in more detail;
-they do not replace the canonical invariants.
+This wiki is the canonical documentation surface: architecture and invariants
+in [Architecture](Architecture) and
+[Architecture Internals](Architecture-Internals), the crate map in
+[Crate Reference](Crate-Reference), diagnostics in [Logging](Logging), and
+build procedures in [Packaging](Packaging).
 
 ## 中文
 
@@ -70,13 +64,7 @@ SonicTerm 是一个面向 macOS 和 Windows 的原生 GPU 加速终端。本 Wik
 - [Crate 参考 / Crate Reference](Crate-Reference) — 工作区全部 23 个 crate 及其关系
 - [开发与发布 / Development and Release](Development-and-Release) — 测试、CI、打包与 `v*` 发布流水线
 
-### 项目演进
-
-- [架构演进 / Architecture Evolution](Architecture-Evolution) — 按证据类型分类的架构与可维护性改进建议
-
-受版本控制的规范开发文档仍然是
-[Architecture Internals](Architecture-Internals)、
-[Crate Reference](Crate-Reference)、
-[Logging](Logging)
-和 [Packaging](Packaging)。
-本 Wiki 的架构页面用于更详细地解释这些边界，不取代其中的规范不变量。
+本 Wiki 即规范文档面：架构与不变量见 [Architecture](Architecture) 与
+[Architecture Internals](Architecture-Internals)，crate 映射见
+[Crate Reference](Crate-Reference)，诊断见 [Logging](Logging)，
+构建步骤见 [Packaging](Packaging)。

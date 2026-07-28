@@ -150,10 +150,10 @@ flowchart TD
     baseline --> coverage
 ```
 
-At the current repository revision, CI does **not** execute the documented
-`cargo fmt` or `cargo clippy` commands, and `deny.toml` is not enforced by a
-`cargo deny check` job. These are tracked as improvement proposals in
-[Architecture Evolution](Architecture-Evolution), not described as current gates.
+CI runs `cargo fmt --all --check` and `cargo clippy --workspace --all-targets`
+with warnings denied, plus the same clippy pass over `sonicterm-io` with the
+`ssh` feature. `deny.toml` is present but no `cargo deny check` job enforces it,
+so dependency policy is checked by hand rather than by a gate.
 
 ## Coverage boundary
 
@@ -407,8 +407,10 @@ flowchart TD
     baseline --> coverage
 ```
 
-当前仓库 revision 的 CI **不执行**文档要求的 `cargo fmt` 或 `cargo clippy`，`deny.toml` 也没有由
-`cargo deny check` job 强制。它们在 [架构演进](Architecture-Evolution) 中作为建议跟踪，不能描述为现有 gate。
+CI 会运行 `cargo fmt --all --check` 与 `cargo clippy --workspace --all-targets`
+（warning 视为错误），并对启用 `ssh` feature 的 `sonicterm-io` 执行同样的 clippy 检查。
+`deny.toml` 存在，但没有 `cargo deny check` job 强制执行它，
+因此依赖策略靠人工检查，而不是由 gate 保证。
 
 ## Coverage 边界
 

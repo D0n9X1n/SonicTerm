@@ -161,7 +161,8 @@ This is a conceptual grouping; the exact edge list is in [Crate Reference](Crate
 | Font adapter | `crates/sonicterm-engine/src/fontstack.rs` |
 | Platform entry points | `crates/sonicterm-{mac,windows}/src/main.rs` |
 
-For proposed changes to these boundaries, see [Architecture Evolution](Architecture-Evolution).
+For the invariants these boundaries hold to, see
+[Architecture Internals](Architecture-Internals).
 
 ## 中文
 
@@ -303,4 +304,4 @@ UI/模型：   sonicterm-cfg -> sonicterm-ui -> sonicterm-render-model
 | 字体适配 | `crates/sonicterm-engine/src/fontstack.rs` |
 | 平台入口 | `crates/sonicterm-{mac,windows}/src/main.rs` |
 
-这些边界的改进建议见 [架构演进 / Architecture Evolution](Architecture-Evolution)。
+这些边界所遵守的不变量见 [Architecture Internals](Architecture-Internals)。
