@@ -677,9 +677,13 @@ fn dirty_rows_damage_rect_unions_and_clips_rows() {
         80,
     );
 
+    // Rows 1 and 3 union vertically into [22, 58); horizontally the strip
+    // spans the pane's clipped bounds [8, 80) rather than the 60px the cell
+    // grid occupies. The extra 20px is padding band, which carries glyph ink
+    // from negative left side bearings and so is repainted with the row.
     assert_eq!(
         damage,
-        Some(sonicterm_render_model::geometry::PixelRect { x: 8, y: 22, w: 60, h: 36 })
+        Some(sonicterm_render_model::geometry::PixelRect { x: 8, y: 22, w: 72, h: 36 })
     );
 }
 
@@ -784,9 +788,13 @@ fn dirty_rows_damage_rect_closes_fractional_origin_seam_horizontally() {
     //   width       = 857 - 24                  = 833
     // Deriving width as ceil(80*10.4) = 832 gives right = 856, one pixel
     // short of the 856.6 the pane actually covers.
+    //
+    // The pane rect here starts AT the content origin and ends at its right
+    // edge, so the strip is not also being widened to a padding band — this
+    // test is about the rounding alone.
     let damage = dirty_rows_damage_rect(
         [0usize],
-        sonicterm_render_model::geometry::PixelRect { x: 0, y: 0, w: 1200, h: 800 },
+        sonicterm_render_model::geometry::PixelRect { x: 24, y: 0, w: 833, h: 800 },
         24.6,
         0.0,
         80,
@@ -808,7 +816,7 @@ fn dirty_rows_damage_rect_closes_fractional_origin_seam_horizontally() {
     // common case to buy the fractional one.
     let aligned = dirty_rows_damage_rect(
         [0usize],
-        sonicterm_render_model::geometry::PixelRect { x: 0, y: 0, w: 1200, h: 800 },
+        sonicterm_render_model::geometry::PixelRect { x: 24, y: 0, w: 832, h: 800 },
         24.0,
         0.0,
         80,
@@ -855,6 +863,47 @@ fn pane_damage_rect_alt_dirty_pane_repaints_whole_clipped_rect() {
     let pane = sonicterm_render_model::geometry::PixelRect { x: 0, y: 0, w: 200, h: 480 };
     let d = pane_damage_rect(true, [5usize], pane, 0.0, 0.0, 80, 10.0, 12.0, 800, 600);
     assert_eq!(d, Some(pane), "one dirty alt row must repaint the full pane");
+}
+
+#[test]
+fn pane_damage_rect_covers_the_padding_band_around_the_content() {
+    // The cell grid starts at the CONTENT origin, inset from the pane by the
+    // configured padding, but glyph ink is not confined to it: a negative
+    // left side bearing at column 0 paints left of its cell, into the
+    // padding band. A damage rect that stops at the content edge never
+    // repaints those columns, so such a pixel survives every later frame —
+    // including a full alt-screen pane repaint — until something forces a
+    // whole-surface redraw.
+    //
+    // Both paths must therefore span the pane's own bounds, with the cell
+    // geometry still measured from the content origin.
+    //
+    // pane at x=0 w=848, content origin x=24 (padding_left 12 logical at 2x),
+    // 80 cols of 10.0 => content spans [24, 824), pane spans [0, 848).
+    let pane = sonicterm_render_model::geometry::PixelRect { x: 0, y: 0, w: 848, h: 640 };
+
+    let normal = pane_damage_rect(false, [0usize], pane, 24.0, 16.0, 80, 10.0, 20.0, 1200, 800)
+        .expect("a dirty normal pane damages its row");
+    assert_eq!(normal.x, 0, "the row strip must reach the pane's left edge, not the content edge");
+    assert_eq!(
+        normal.x + normal.w as i32,
+        848,
+        "and its right edge, so ink in either padding band is repainted"
+    );
+
+    let alt = pane_damage_rect(true, [0usize], pane, 24.0, 16.0, 80, 10.0, 20.0, 1200, 800)
+        .expect("a dirty alt pane damages its rect");
+    assert_eq!(alt, pane, "an alt repaint covers the whole pane including padding");
+
+    // Widening must not lose the row's vertical precision: a normal-screen
+    // repaint still covers one row, not the whole pane. Otherwise this would
+    // trade a stale-pixel bug for repainting everything on every keystroke.
+    assert!(
+        normal.h < pane.h,
+        "the normal path must stay row-limited vertically: got h={} against a {}-tall pane",
+        normal.h,
+        pane.h
+    );
 }
 
 #[test]
@@ -927,9 +976,13 @@ fn pane_damage_rect_normal_matches_narrow_helper() {
         pane_damage_rect(false, [1usize, 3usize], pane, 8.0, 10.0, 10, 6.0, 12.0, 80, 80);
     let direct = dirty_rows_damage_rect([1usize, 3usize], pane, 8.0, 10.0, 10, 6.0, 12.0, 80, 80);
     assert_eq!(via_wrapper, direct);
+    // Width spans the pane's clipped bounds — [8, 80) after the 80px surface
+    // clips the 100px pane — rather than the 60px the cell grid occupies.
+    // The 20px difference is padding band, which holds glyph ink from
+    // negative left side bearings and so has to be repainted with the row.
     assert_eq!(
         via_wrapper,
-        Some(sonicterm_render_model::geometry::PixelRect { x: 8, y: 22, w: 60, h: 36 })
+        Some(sonicterm_render_model::geometry::PixelRect { x: 8, y: 22, w: 72, h: 36 })
     );
 }
 

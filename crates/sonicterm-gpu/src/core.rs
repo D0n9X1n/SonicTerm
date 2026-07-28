@@ -563,6 +563,13 @@ where
     // otherwise empty row.
     let left = origin_x.floor() as i32;
     let right = (origin_x + cols as f32 * cell_w).ceil() as i32;
+    // Widen each row strip to the pane's own edges where the pane reaches
+    // further than the cell grid. The difference is the padding band, and
+    // glyph ink can land in it: a negative left side bearing at column 0
+    // paints left of its cell. A strip that stops at the content edge never
+    // repaints those columns, so such a pixel survives every later frame.
+    let left = left.min(pane_bounds.x);
+    let right = right.max(pane_bounds.x + pane_bounds.w as i32);
     let row_w = (right - left).max(1) as u32;
     for row in dirty_rows {
         let x = left;
@@ -3549,6 +3556,16 @@ impl GpuRenderer {
             // out to fix. See a review.
             rect_w: f32,
             rect_h: f32,
+            /// The pane's FULL rect, padding included, in pixels.
+            ///
+            /// Distinct from `origin_*`/`rect_*` above, which are the content
+            /// rect and drive cell layout. Damage must use this one: a glyph
+            /// with a negative left side bearing at column 0 paints left of
+            /// its cell and into the padding band, and a damage rect built
+            /// from the content rect never covers those columns again. The
+            /// pixel then survives every later frame, including a full
+            /// alt-screen pane repaint.
+            full_rect: PixelRect,
             is_active: bool,
             viewport_top_abs: Option<u64>,
             scrollbar_alpha: f32,
@@ -3563,6 +3580,7 @@ impl GpuRenderer {
                 origin_y: content_rect(p).1,
                 rect_w: content_rect(p).2,
                 rect_h: content_rect(p).3,
+                full_rect: p.rect_px,
                 is_active: p.is_active,
                 viewport_top_abs: p.viewport_top_abs,
                 scrollbar_alpha: p.scrollbar_alpha,
@@ -3810,12 +3828,16 @@ impl GpuRenderer {
             damage.add_clipped(surface_rect, surface_rect);
         } else {
             for pv in &pane_views {
-                let pane_rect = PixelRect {
-                    x: pv.origin_x.floor() as i32,
-                    y: pv.origin_y.floor() as i32,
-                    w: pv.rect_w.ceil().max(1.0) as u32,
-                    h: pv.rect_h.ceil().max(1.0) as u32,
-                };
+                // The pane's full rect, not the content rect. Glyph ink can
+                // land in the padding band — a negative left side bearing at
+                // column 0 reaches left of its cell — and a damage rect that
+                // stops at the content edge never repaints those columns
+                // again, so such a pixel survives every later frame.
+                //
+                // The dirty-row geometry below still uses the content origin,
+                // because that is where the cell grid actually starts. Only
+                // the bounding rectangle widens.
+                let pane_rect = pv.full_rect;
                 if let Some(rect) = pane_damage_rect(
                     pv.grid.is_alt(),
                     pv.grid.dirty_rows(),
