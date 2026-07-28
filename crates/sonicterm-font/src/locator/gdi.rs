@@ -125,7 +125,12 @@ fn load_font(font_attr: &FontAttributes, pixel_size: u16) -> anyhow::Result<Pars
     }
 }
 
-pub fn parse_log_font(log_font: &LOGFONTW, hdc: HDC) -> anyhow::Result<(ParsedFont, f64)> {
+/// # Safety
+///
+/// `hdc` must be a valid device context for the lifetime of the call. It is
+/// passed to `GetDeviceCaps`, which dereferences it; an invalid or already
+/// released handle is undefined behaviour rather than an error return.
+pub unsafe fn parse_log_font(log_font: &LOGFONTW, hdc: HDC) -> anyhow::Result<(ParsedFont, f64)> {
     let name = String::from_utf16(&log_font.lfFaceName)?;
     unsafe {
         let font = CreateFontIndirectW(log_font);
@@ -134,7 +139,10 @@ pub fn parse_log_font(log_font: &LOGFONTW, hdc: HDC) -> anyhow::Result<(ParsedFo
         let source = source?;
 
         let point_size = MulDiv(-log_font.lfHeight, 72, GetDeviceCaps(hdc, LOGPIXELSY)) as f64;
-        let pixel_size = log_font.lfHeight.abs() as u16;
+        // Saturating rather than `as`: `lfHeight` is i32, and a cast wraps a
+        // large value to a small one, turning an absurd height into a
+        // plausible-looking wrong one.
+        let pixel_size = u16::try_from(log_font.lfHeight.abs()).unwrap_or(u16::MAX);
 
         let mut attr = FontAttributes::new(&name);
         attr.weight = config::FontWeight::from_opentype_weight(log_font.lfWeight as u16);
@@ -172,10 +180,15 @@ fn handle_from_descriptor(
     descriptor: &FontDescriptor,
     pixel_size: u16,
 ) -> Option<ParsedFont> {
-    let font = collection.get_font_from_descriptor(&descriptor)?;
+    // The `font_from_descriptor` / `files` / `font_file_path` spellings
+    // return `Result` where the deprecated `get_*` ones returned `Option` or
+    // a bare `Vec`. A DirectWrite failure here means this candidate cannot be
+    // read, which is the same outcome as not matching, so each is folded back
+    // into the existing "skip it and keep scanning" behaviour.
+    let font = collection.font_from_descriptor(descriptor).ok().flatten()?;
     let face = font.create_font_face();
-    for file in face.get_files() {
-        if let Some(path) = file.get_font_file_path() {
+    for file in face.files().ok()? {
+        if let Ok(path) = file.font_file_path() {
             let family_name = font.family_name();
 
             log::debug!("{} -> {}", family_name, path.display());
@@ -351,10 +364,11 @@ impl FontLocator for GdiFontLocator {
         for family in collection.families_iter() {
             let count = family.get_font_count();
             for idx in 0..count {
-                let font = family.get_font(idx);
+                let Ok(font) = family.font(idx) else { continue };
                 let face = font.create_font_face();
-                for file in face.get_files() {
-                    if let Some(path) = file.get_font_file_path() {
+                let Ok(font_files) = face.files() else { continue };
+                for file in font_files {
+                    if let Ok(path) = file.font_file_path() {
                         if files.contains(&path) {
                             continue;
                         }

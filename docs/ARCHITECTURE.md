@@ -435,9 +435,12 @@ The local release gate is:
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings
 cargo metadata --no-deps --format-version 1
 cargo test --workspace --lib --bins
 bash scripts/check-no-raw-process-exit.sh
+bash scripts/check-rust-version.sh
+bash scripts/check-window-owner-registration.sh
 bash scripts/check-workspace-crates.sh
 scripts/rust-logic-coverage.sh
 bash scripts/test-release-notes.sh
@@ -447,6 +450,15 @@ bash scripts/test-soak-harness.sh
 bash scripts/test-resource-baseline-evidence.sh
 cargo build --release -p sonicterm-mac
 ```
+
+`ssh` is an optional feature and the default feature set is empty, so
+`--workspace --all-targets` never compiles it — `--all-targets` is not
+`--all-features`. Its own clippy line is what keeps the backend building
+against its dependencies.
+
+`check-rust-version.sh` recomputes the effective minimum from every locked
+dependency and fails when the declared `rust-version` falls below it. CI
+installs floating `stable` and so cannot notice that drift on its own.
 
 The deterministic Rust coverage threshold is 80%. Note that
 `cargo test --workspace --lib --bins` deliberately excludes integration tests;

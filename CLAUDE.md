@@ -29,6 +29,29 @@ when user-facing behavior changes.
 
 When touching a crate, also read that crate's local `CLAUDE.md`.
 
+## Searching
+
+**Search is filtered by default, and the filter is silent.** A root `.ignore`
+excludes the four vendored upstream trees — FreeType, libpng, zlib, HarfBuzz —
+from `rg` and from most editors and agents that read it. That is 2,021 of the
+2,529 tracked files, so a default search covers 504.
+
+This matters for reading a result, not just for speed: **an empty result may
+mean the match is in a filtered tree, not that it does not exist.** When a
+symbol is expected and search finds nothing, re-run with `--no-ignore` before
+concluding it is absent.
+
+```bash
+rg 'FT_Load_Glyph'                                   # first-party only
+rg --no-ignore 'FT_Load_Glyph'                       # including vendored
+git grep 'FT_Load_Glyph'                             # git ignores .ignore entirely
+```
+
+`git grep` and `git ls-files` are unaffected, which makes them the right tool
+when the question is "what does the repository contain" rather than "where is
+our code". `.github/` is explicitly un-hidden, since `rg` skips dot-directories
+by default and the CI workflows are first-party files worth finding.
+
 ## Crates
 
 | Crate | Role |
@@ -63,18 +86,47 @@ Normal PR/main CI runs workspace unit tests plus a per-crate unit/build gate:
 
 ```bash
 cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings
 cargo test --workspace --lib --bins
 bash scripts/check-no-raw-process-exit.sh
+bash scripts/check-rust-version.sh
 bash scripts/check-window-owner-registration.sh
 bash scripts/check-workspace-crates.sh
+bash scripts/pty-backend-feasibility.sh --check
+bash scripts/test-resource-inventory.sh
+bash scripts/test-resource-baseline-evidence.sh
+bash scripts/test-soak-harness.sh
+bash scripts/test-release-notes.sh
 scripts/rust-logic-coverage.sh
 ```
+
+**Run the list to the end before concluding anything.** `--lib --bins`
+excludes every `tests/` binary, so it can pass while an integration test is
+broken; `check-workspace-crates.sh` is the step that runs `--tests` per crate
+and catches that. A green `cargo test --workspace --lib --bins` on its own
+means the unit tests pass, not that CI will.
+
+The second clippy line is not a duplicate. `--workspace --all-targets` does
+not imply `--all-features`, and `ssh` is off by default, so the SSH backend is
+compiled by no other command in this list.
+
+Two more limits worth knowing before trusting a green run:
+
+- `rust-logic-coverage.sh` measures a deterministic-logic subset and skips 11
+  of the 23 crates outright, including `sonicterm-app` and `sonicterm-gpu`. A
+  passing coverage figure says nothing about code in those crates. It is also
+  macOS-only in CI.
+- Tests behind `#![cfg(target_os = "windows")]` compile to nothing on macOS,
+  so a Windows-gated test file that would fail to *compile* still reports
+  `ok` locally. Cross-compiling to check is not available — the vendored
+  Cairo dependency is host-architecture-only. Windows CI is the only place
+  those are exercised.
 
 For release prep also run:
 
 ```bash
 cargo build --release -p sonicterm-mac
-bash scripts/test-release-notes.sh
 ```
 
 Before opening a release PR, verify user-facing docs in README, `docs/`, and
@@ -103,6 +155,14 @@ publishes the expected macOS DMG(s), Windows MSI, and checksum assets.
   `tests/` directory for genuine integration tests that exercise the crate
   through its public API or across crate boundaries. Do not put trivial
   "does this symbol export" checks there — fold those into `lib_tests.rs`.
+- **Some test state is process-global; take the lock.** The media staging
+  pools, the live-capture count, and the inline-media charge counters are
+  process-wide, so a test that creates a capture or a charge perturbs any
+  sibling measuring one — the sibling fails, reporting a defect that is not
+  there. `MEDIA_COUNTER_LOCK` (`app/media.rs`) and `serialised_captures()`
+  (`vt_tests.rs`) exist for this and carry the measured failure rate in their
+  docs. Hold one for the whole life of any capture or charge the test creates,
+  not merely while asserting about it.
 - **Comments describe behavior, not history.** Explain what the code does and
   the problem it solves; do not cite issue/PR/Epic numbers or reviewer names
   in comments, log strings, or panic messages.

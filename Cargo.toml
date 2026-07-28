@@ -6,7 +6,11 @@ default-members = ["crates/sonicterm-app"]
 [workspace.package]
 version = "1.2.0"
 edition = "2021"
-rust-version = "1.85"
+# Raised to what the lockfile actually requires rather than an aspirational
+# floor: `fixed` needs 1.93 and reaches the shipping app through
+# sonicterm-freetype. `scripts/check-rust-version.sh` recomputes this from
+# every locked dependency and fails when the two drift apart.
+rust-version = "1.93"
 authors = ["SonicTerm Terminal contributors"]
 license = "MIT"
 repository = "https://github.com/D0n9X1n/SonicTerm"

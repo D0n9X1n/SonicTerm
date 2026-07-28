@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main, v1.2.0]
+    branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -29,6 +29,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
 
       - name: Resolve vcpkg commit (for cache key)
         id: vcpkg
@@ -61,6 +63,31 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt --all --check
+
+      # Documented as a gate step but previously enforced only by whoever
+      # remembered to run it, so a `-D warnings` violation could merge.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # `ssh` is off by default, so no other step in this workflow compiles it:
+      # `--all-targets` does not imply `--all-features`. Without this the
+      # backend can stop building against a dependency's newer API and every
+      # gate still reports green.
+      - name: Clippy optional ssh backend
+        run: cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings
+
+      # `shell: bash` because the matrix includes Windows, where the default
+      # shell is PowerShell and `> /dev/null` would create a file named `null`
+      # rather than discarding the output.
+      - name: Validate workspace manifests
+        shell: bash
+        run: cargo metadata --no-deps --format-version 1 > /dev/null
+
+      # CI installs floating `stable`, so nothing here would otherwise notice
+      # the declared minimum falling behind what the lockfile needs.
+      - name: Check declared rust-version against the lock
+        shell: bash
+        run: bash scripts/check-rust-version.sh
 
       - name: Check process exit paths
         shell: bash

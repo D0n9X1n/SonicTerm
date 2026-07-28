@@ -666,7 +666,7 @@ fn dropping_live_windows_pty_terminates_native_io_threads() {
 // ---------------------------------------------------------------------------
 // Raw seam privacy
 //
-// §7 of the v1.2.0 contract: "Make raw bounded seams private where bypass
+// The rule: "Make raw bounded seams private where bypass
 // would invalidate invariants (for example raw PTY senders). Expose typed
 // operations that enforce reservation, ordering, and error ownership."
 //

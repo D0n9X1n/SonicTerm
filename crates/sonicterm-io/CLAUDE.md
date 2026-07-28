@@ -14,7 +14,13 @@ process information, and SSH-related seams.
 ## Local gate
 ```bash
 cargo build -p sonicterm-io
+cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings
 ```
+
+The second command is not redundant. `ssh` is an optional feature and the
+workspace default feature set is empty, so `--workspace --all-targets` never
+compiles `ssh.rs`. Without an explicit `--features ssh` the backend can stop
+building against a dependency's newer API while every other gate stays green.
 
 ## Guardrails
 - `PtyHandle::Drop` must clean up child PTYs/conhosts; orphan processes are

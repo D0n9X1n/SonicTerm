@@ -18,7 +18,8 @@ default = []
 # Optional SSH client backend. Pulls in russh + a tokio runtime, so it's
 # off by default to keep the cold build slim. Enable with
 # `cargo build -p sonicterm-io --features ssh` (or via the bin crate).
-ssh = ["dep:russh", "dep:tokio", "dep:async-trait"]
+ssh = ["dep:russh", "dep:tokio"]
+
 [dependencies]
 sonicterm-types.workspace = true
 portable-pty.workspace = true
@@ -30,7 +31,6 @@ tracing.workspace = true
 bytes = "1"
 russh = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
-async-trait = { version = "0.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libproc = "0.14"
@@ -40,5 +40,5 @@ windows = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 # Needed by `PtyHandle::Drop` to send an explicit SIGKILL to the child
-# shell pid before invoking portable-pty's `Child::kill`. See #598 (LM-007).
+# shell pid before invoking portable-pty's `Child::kill`.
 libc = "0.2"

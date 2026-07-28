@@ -28,6 +28,16 @@ cargo build -p sonicterm-app
 - Search input has priority over READONLY. In READONLY, only the explicit
   safe action whitelist may execute or reach the PTY.
 - Do not add unconditional heartbeat redraws at the tail of event handling.
+- Per-pane budgets do not bound a session. The inline-media ceiling is
+  process-wide and each pane's share scales with live pane count; two
+  independent mechanisms hold the total — the over-ceiling floor for panes
+  that are decoding, and the idle-pane walk for the rest. Removing either
+  alone still leaves the total bounded, so a test must assert the mechanism
+  it means to cover, not just the bound.
+- Reclamation that destroys something the user can see logs on
+  `memory::reclaimed`, which is admitted at every level including the
+  default. Diagnostics belong on `memory`, which is off unless someone is
+  investigating.
 - Window-ready hooks fire once, immediately after winit creates the window.
 
 ## Cross-references

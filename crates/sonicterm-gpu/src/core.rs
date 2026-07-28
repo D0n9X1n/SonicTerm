@@ -8,6 +8,7 @@
 //! no second atlas, no second render pass.
 
 use std::{
+    sync::atomic::{AtomicUsize, Ordering},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -1496,6 +1497,25 @@ pub fn emit_overlay_text_glyphs(
         }
     }
 }
+/// Renderers constructed but not yet dropped, across the whole process.
+///
+/// A renderer's own `retained_amounts()` cannot answer "did the last one go
+/// away": it reports the instance being asked, and every instance reports the
+/// same atlas capacity. Reading it in a loop compares a constant to itself and
+/// holds whether or not anything leaked. This counter is the quantity a leak
+/// actually moves — it rises on construction, falls in `Drop`, and returns to
+/// its starting value only if every renderer built was also released.
+static LIVE_RENDERERS: AtomicUsize = AtomicUsize::new(0);
+
+/// How many `GpuRenderer`s are alive right now.
+///
+/// Intended for churn and lifecycle checks: take a reading, create and drop
+/// renderers, and compare. A surviving renderer leaves this above where it
+/// started.
+pub fn live_renderer_count() -> usize {
+    LIVE_RENDERERS.load(Ordering::Acquire)
+}
+
 /// CPU-side storage a renderer holds, split by owning class.
 ///
 /// Deliberately not a single total. The three parts have different lifetimes
@@ -1831,6 +1851,11 @@ impl GpuRenderer {
         // Chrome strings are shape+raster'd on demand inside `render()`
         // through `chrome_text::layout(...)`; there is no persistent
         // per-overlay text buffer to size at construction.
+
+        // Counted here rather than earlier in `new`: every `?` above this
+        // point returns without producing a renderer, so incrementing sooner
+        // would charge for instances that never existed and never drop.
+        LIVE_RENDERERS.fetch_add(1, Ordering::AcqRel);
 
         Ok(Self {
             instance,
@@ -7019,6 +7044,15 @@ impl GpuRenderer {
                 flags: glyph_flags(info.is_color, info.is_subpixel),
             });
         }
+    }
+}
+
+impl Drop for GpuRenderer {
+    fn drop(&mut self) {
+        // Paired with the increment in `new`. Together they make the live
+        // count return to its starting value across balanced open/close
+        // churn, and stay above it when a renderer survives.
+        LIVE_RENDERERS.fetch_sub(1, Ordering::AcqRel);
     }
 }
 

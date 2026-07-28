@@ -5310,7 +5310,6 @@ name = "sonicterm-io"
 version = "1.2.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "bytes",
  "crossbeam-channel",
  "libc",
