@@ -55,26 +55,40 @@ def main() -> int:
 
     metadata = json.loads(completed.stdout.decode("utf-8"))
     workspace = set(metadata["workspace_members"])
-
-    declared: str | None = None
+    # Keyed by declared version so a disagreement among first-party crates is
+    # visible rather than resolved by iteration order. Today all 23 inherit
+    # `rust-version.workspace = true`, so this holds one entry; if a crate ever
+    # sets its own, picking whichever package the metadata happened to list
+    # last would check an arbitrary one of them and pass while another crate
+    # declares something the lock cannot build.
+    declared_by_crate: dict[str, list[str]] = {}
     highest: tuple[tuple[int, ...], str, str, str] | None = None
     for package in metadata["packages"]:
         version = package.get("rust_version")
         if version is None:
             continue
         if package["id"] in workspace:
-            # First-party crates inherit the workspace value, so any one of
-            # them reports the declaration. They are not part of the floor
-            # they are being checked against.
-            declared = version
+            declared_by_crate.setdefault(version, []).append(package["name"])
             continue
         candidate = (parse(version), version, package["name"], package["version"])
         if highest is None or candidate[0] > highest[0]:
             highest = candidate
 
-    if declared is None:
+    if not declared_by_crate:
         print("check-rust-version: no workspace rust-version found.", file=sys.stderr)
         return 1
+
+    if len(declared_by_crate) > 1:
+        print(
+            "FAILED: first-party crates declare more than one rust-version, so "
+            "there is no single declaration to check:",
+            file=sys.stderr,
+        )
+        for version, names in sorted(declared_by_crate.items()):
+            print(f"  {version}: {', '.join(sorted(names))}", file=sys.stderr)
+        return 1
+
+    declared = next(iter(declared_by_crate))
 
     if highest is None:
         print(
