@@ -1,0 +1,73 @@
+name: Publish wiki
+
+# The tracked wiki/ directory is canonical; the GitHub wiki is a rendered
+# mirror of it. This publishes that mirror whenever wiki/ changes on main.
+on:
+  push:
+    branches: [main]
+    paths: ['wiki/**']
+  workflow_dispatch:
+
+# Two pushes in quick succession would otherwise race to push the same wiki
+# ref, and the loser fails on a non-fast-forward. Queue them instead, and do
+# not cancel: every wiki state should be published in order.
+concurrency:
+  group: publish-wiki
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Mirror wiki/ to the GitHub wiki
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      # GITHUB_TOKEN cannot authenticate against a .wiki.git remote whatever
+      # its permissions block says, so publishing needs a classic PAT with
+      # repo scope. Fail with that sentence rather than a bare 403 later.
+      - name: Require the publish token
+        env:
+          WIKI_PUBLISH_TOKEN: ${{ secrets.WIKI_PUBLISH_TOKEN }}
+        run: |
+          if [ -z "${WIKI_PUBLISH_TOKEN}" ]; then
+            echo "::error::WIKI_PUBLISH_TOKEN is not set. The wiki remote"\
+              "rejects GITHUB_TOKEN, so publishing needs a classic PAT with"\
+              "repo scope stored as that repository secret."
+            exit 1
+          fi
+
+      # The wiki's default branch is master, not main. Cloning without
+      # naming it would leave the push targeting a branch that renders
+      # nowhere.
+      - name: Clone the wiki repository
+        env:
+          WIKI_PUBLISH_TOKEN: ${{ secrets.WIKI_PUBLISH_TOKEN }}
+        run: |
+          git clone --depth 1 \
+            "https://x-access-token:${WIKI_PUBLISH_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git" \
+            wiki-publish
+
+      # --delete makes this a mirror rather than an accumulation, so a page
+      # deleted from wiki/ stops being served. Excluding .git keeps rsync
+      # from removing the clone's own metadata, which would strand the
+      # working tree with nothing to commit into.
+      - name: Sync the tracked directory into the clone
+        run: |
+          rsync --archive --delete --exclude '.git' wiki/ wiki-publish/
+
+      - name: Publish when the content changed
+        working-directory: wiki-publish
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add --all
+          if git diff --cached --quiet; then
+            echo "Wiki already matches the tracked directory; nothing to publish."
+            exit 0
+          fi
+          git commit -m "docs: publish wiki from ${GITHUB_SHA}"
+          git push origin HEAD:master

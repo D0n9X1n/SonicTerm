@@ -185,8 +185,18 @@ SonicTerm releases are created by pushing a `v*` tag. The tag workflow builds:
 
 The repository-tracked `wiki/` directory is the **only source of truth** for
 SonicTerm's bilingual user documentation. Edit and review wiki pages in the
-same branch and pull request as the behavior they describe. Do not clone,
-refresh from, publish to, or otherwise maintain a separate wiki repository.
+same branch and pull request as the behavior they describe.
+
+The GitHub wiki is a **published mirror** of that directory, refreshed
+automatically by `.github/workflows/publish-wiki.yml` whenever a push to `main`
+touches `wiki/**`. The mirror is one-way and carries deletions: it replaces the
+wiki's contents with the tracked directory, so a page removed here disappears
+there.
+
+Never edit the GitHub wiki directly. Edits made in its web UI are not tracked,
+are not reviewed, and are overwritten by the next publish. Do not treat the
+published wiki as an editable second copy, and do not maintain any other wiki
+repository.
 
 ## WezTerm
 
