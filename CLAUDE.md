@@ -86,10 +86,16 @@ Normal PR/main CI runs workspace unit tests plus a per-crate unit/build gate:
 
 ```bash
 cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --lib --bins
 bash scripts/check-no-raw-process-exit.sh
 bash scripts/check-window-owner-registration.sh
 bash scripts/check-workspace-crates.sh
+bash scripts/pty-backend-feasibility.sh --check
+bash scripts/test-resource-inventory.sh
+bash scripts/test-resource-baseline-evidence.sh
+bash scripts/test-soak-harness.sh
+bash scripts/test-release-notes.sh
 scripts/rust-logic-coverage.sh
 ```
 
@@ -115,7 +121,6 @@ For release prep also run:
 
 ```bash
 cargo build --release -p sonicterm-mac
-bash scripts/test-release-notes.sh
 ```
 
 Before opening a release PR, verify user-facing docs in README, `docs/`, and

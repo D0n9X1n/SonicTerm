@@ -29,6 +29,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
 
       - name: Resolve vcpkg commit (for cache key)
         id: vcpkg
@@ -61,6 +63,18 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt --all --check
+
+      # Documented as a gate step but previously enforced only by whoever
+      # remembered to run it, so a `-D warnings` violation could merge.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # `shell: bash` because the matrix includes Windows, where the default
+      # shell is PowerShell and `> /dev/null` would create a file named `null`
+      # rather than discarding the output.
+      - name: Validate workspace manifests
+        shell: bash
+        run: cargo metadata --no-deps --format-version 1 > /dev/null
 
       - name: Check process exit paths
         shell: bash

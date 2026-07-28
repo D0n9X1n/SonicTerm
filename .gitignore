@@ -32,3 +32,8 @@ crash-reports/
 docs/specs/
 docs/plans/
 docs/reviews/
+
+# Python bytecode. Two .pyc files were tracked, so they churned on every run
+# of the scripts and produced diffs that carry no information.
+__pycache__/
+*.pyc
