@@ -1,12 +1,13 @@
 //! What can the CI host actually do?
 //!
-//! #991, #992, and #993 are open on "needs a human at a keyboard on a Windows
-//! software-rendering host". That may be more pessimistic than the truth:
-//! GitHub's `windows-latest` image runs an interactive desktop session, and if
-//! a window can be created there, frame cadence and dirty-rect presentation
-//! become measurable without a person watching.
+//! Verifying the Windows software-rendering path — frame cadence, dirty-rect
+//! presentation, renderer memory across window churn — is usually assumed to
+//! need a person at a keyboard on a real desktop. That may be more pessimistic
+//! than the truth: GitHub's `windows-latest` image runs an interactive desktop
+//! session, and if a window can be created there, those become measurable
+//! without anyone watching.
 //!
-//! Nobody has checked. This checks, and prints what it finds.
+//! Nobody had checked. This checks, and prints what it finds.
 //!
 //! **It asserts that it reached a conclusion, not what the conclusion is.** A
 //! host that cannot create a window is a fact about the host, not a defect —
@@ -56,9 +57,9 @@ fn report_whether_this_host_can_create_a_window() {
         Ok(event_loop) => {
             println!("event loop: available");
 
-            // A window is the thing #991/#992 need. Create one, report, exit.
-            // `resumed` fires immediately on Windows; the handler leaves the
-            // loop on its first call so this cannot spin.
+            // A window is what the software-path checks need. Create one,
+            // report, exit. `resumed` fires immediately on Windows; the
+            // handler leaves the loop on its first call so this cannot spin.
             struct Probe {
                 outcome: Option<Result<(), String>>,
             }
@@ -99,7 +100,7 @@ fn report_whether_this_host_can_create_a_window() {
                     Some(Ok(())) => {
                         println!("verdict: a window CAN be created on this host");
                         println!(
-                            "  => frame cadence (#991) and dirty-rect presentation (#992) \
+                            "  => frame cadence and dirty-rect presentation \
                              are automatable here"
                         );
                     }

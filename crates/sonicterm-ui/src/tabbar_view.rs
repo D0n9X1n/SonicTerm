@@ -295,7 +295,7 @@ impl TabBarLayout {
     /// indicator, and title hit zones all share bottom coordinates.
     ///
     /// All sizes (`bar_height`, `bar_y`, `window_width`) live in the
-    /// **same coordinate system** the renderer uses (raster px post-G1a).
+    /// **same coordinate system** the renderer uses (raster px).
     /// The logical-px constants (`TAB_GAP`,
     /// `BAR_LEFT_PAD`, `TAB_INNER_PAD`) are auto-scaled to that system
     /// by treating `bar_height` as the reference: the default unscaled

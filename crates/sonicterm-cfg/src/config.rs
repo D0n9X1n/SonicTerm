@@ -402,7 +402,7 @@ impl Default for Config {
 }
 
 /// Default font family. "Rec Mono St.Helens" is the brand default the project
-/// ships with. As of the Windows-build-unblock PR, all four variants
+/// ships with. All four variants
 /// (Regular, Italic, Bold, BoldItalic) are bundled in `assets/fonts/` as
 /// `RecMonoSt.Helens-*.ttf`, built from MOSconfig/recursive-code-config
 /// v1.2.2 and distributed under the SIL Open Font License 1.1. The

@@ -24,7 +24,7 @@
 // - `async_fallback.rs`        — cosmic-text-driven fallback loader
 // - `block_element_geometry.rs`— SonicTerm-specific Block Element
 //                                geometry overlay (wezterm vendored
-//                                customglyph in T7 covers the same set)
+//                                customglyph covers the same set)
 // - `box_drawing_geometry.rs`  — likewise box-drawing overlay
 // - `metrics.rs`               — cosmic-text `measure_cell` etc.
 // - `prewarm.rs`               — pre-bake walker (swash-driven)

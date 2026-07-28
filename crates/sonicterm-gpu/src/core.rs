@@ -1,6 +1,6 @@
 //! GPU renderer for the terminal grid using wgpu 29.
 //!
-//! T13+T14 (wezterm-takeover G3): the legacy `glyphon` chrome path is
+//! The legacy `glyphon` chrome path is
 //! gone. Every chrome string (tab titles, palette, search, IME,
 //! broadcast, drag chip, quick-select hints) flows through
 //! [`crate::chrome_text::layout`] → the shared `GlyphAtlas` →
@@ -304,9 +304,9 @@ fn splitter_color_from_theme(theme: &Theme) -> [f32; 4] {
 }
 
 /// Resolve a scrollbar tint from the theme foreground at `derived_alpha`.
-/// Theme-customizable explicit scrollbar colors are intentionally deferred
-/// to a later PR (would require updating ~50 `Palette { .. }` literals in
-/// tests for no shipped benefit yet). Returns straight-alpha linear RGBA;
+/// Theme-customizable explicit scrollbar colors are intentionally not
+/// supported: they would require updating ~50 `Palette { .. }` literals in
+/// tests for no shipped benefit. Returns straight-alpha linear RGBA;
 /// the caller premultiplies before stuffing into a [`QuadInstance`].
 fn scrollbar_tint(fg: &str, derived_alpha: f32) -> [f32; 4] {
     hex_to_rgba(fg, derived_alpha)
@@ -515,7 +515,7 @@ use sonicterm_render_model::geometry::{DamageRect, PixelRect};
 use sonicterm_text::GlyphInstance;
 use sonicterm_text::{
     glyph_atlas::GlyphAtlas,
-    // T9 (wezterm-takeover G2/C): `shape_run` + `ShapeCache` deleted in
+    // `shape_run` + `ShapeCache` deleted in
     // T8 (the cosmic-text adapter is gone). `flush_shape_run` now drives
     // `shape_run_with_wezterm` directly; `ShapedGlyph::from_wezterm`
     // narrows wezterm's `GlyphInfo` into the renderer-facing record.
@@ -523,7 +523,7 @@ use sonicterm_text::{
     // applies — it's purely cell-shape based and not tied to shaper
     // choice.
     //
-    // T13/T14 (wezterm-takeover G3): `swash_rasterizer` is no longer
+    // `swash_rasterizer` is no longer
     // imported here — every chrome site and the grid path both route
     // through `sonicterm_engine::FontStack`. T10 deletes the
     // file outright.
@@ -1060,7 +1060,7 @@ pub struct GpuRenderer {
     search_highlight: [f32; 4],
     search_fg: ChromeColor,
     search_bg: [f32; 4],
-    // T13/T14 (wezterm-takeover G3): the 11 `*_buffer: legacy chrome buffer`
+    // The 11 `*_buffer: legacy chrome buffer`
     // fields that lived here (search, quick_select, palette_{query,rows,
     // footer}, ime, broadcast,
     // drag_chip) are gone. Every chrome string is now shaped on demand
@@ -1105,7 +1105,7 @@ pub struct GpuRenderer {
     /// surfaced through [`Self::last_missing_tofu`]; production code
     /// must not depend on it.
     last_missing_chars: Vec<char>,
-    // T9 (wezterm-takeover G2/C): the per-style-run `ShapeCache` was
+    // The per-style-run `ShapeCache` was
     // deleted with the cosmic-text path in T8 (`shape.rs` is now a
     // thin sonicterm-font adapter). Per-row caching survives at the
     // higher-level `row_glyph_cache` layer below — that's the cache
@@ -1113,7 +1113,7 @@ pub struct GpuRenderer {
     // shell. Re-shaping a style run via sonicterm-font on a row-cache
     // miss is cheap relative to the bitmap rasterize + atlas insert
     // it precedes.
-    /// T9 (wezterm-takeover G2/C): sonicterm-font driven shaper. Owns
+    /// Sonicterm-font driven shaper. Owns
     /// the cell metrics (`cell_metrics_raster_px()`), the resolved
     /// font fallback chain, and the `blocking_shape` entry point that
     /// `flush_shape_run` calls through `shape_run_with_wezterm`. The
@@ -1166,7 +1166,7 @@ pub struct GpuRenderer {
     /// `EventLoopProxy` plumbed in by `sonicterm-app`. Stays `None` in
     /// tests / examples that construct `GpuRenderer` without an event
     /// loop proxy (the existing tofu fallback path keeps working).
-    // T13/T14: `async_fallback::AsyncFallbackLoader` is deleted with
+    // `async_fallback::AsyncFallbackLoader` is deleted with
     // the rest of the swash/cosmic-text family. sonicterm-font handles
     // CJK/emoji/Nerd-font fallback synchronously through its own
     // resolved fallback chain (vendor-* features), so no async hook
@@ -1342,7 +1342,7 @@ pub fn emit_tab_title_glyphs(
     glyph_instances: &mut Vec<GlyphInstance>,
     mut debug: Option<&mut Vec<TabTitleGlyphDebug>>,
 ) {
-    // T14: chrome_text-driven port of the tab-title emit loop. Each
+    // Chrome_text-driven port of the tab-title emit loop. Each
     // span is shaped through sonicterm-font and rasterized through the
     // same FontStack raster path the grid uses, so chrome and grid
     // share atlas tiles freely. The legacy SwashRasterizer +
@@ -1728,7 +1728,7 @@ impl GpuRenderer {
 
         // B3 GPU text path. Allocate independent glyph and inline-image
         // atlases up front so media pressure cannot recycle text UVs.
-        // T13/T14 (wezterm-takeover G3): no more SwashRasterizer
+        // No more SwashRasterizer
         // prebake — chrome and grid share the glyph atlas, populated
         // on demand by the wezterm rasterizer on every miss.
         let present_pipeline = WeztermPipeline::new(&device, format, 4096);
@@ -1827,7 +1827,7 @@ impl GpuRenderer {
         let search_highlight = hex_to_rgba(theme.colors.bright.yellow.0.as_str(), 0.35);
         let search_fg = hex_to_chrome_color(theme.colors.foreground.0.as_str());
         let search_bg = hex_to_rgba(theme.colors.tab.bar_bg.0.as_str(), 0.95);
-        // T13/T14: cosmic-text Buffer / Metrics allocations deleted.
+        // Cosmic-text Buffer / Metrics allocations deleted.
         // Chrome strings are shape+raster'd on demand inside `render()`
         // through `chrome_text::layout(...)`; there is no persistent
         // per-overlay text buffer to size at construction.
@@ -1907,7 +1907,7 @@ impl GpuRenderer {
             tab_bar_visible: true,
             titlebar_inset: 0.0,
             last_missing_chars: Vec::new(),
-            // T9: `shape_cache` field deleted with the cosmic-text path.
+            // `shape_cache` field deleted with the cosmic-text path.
             font_stack,
             row_glyph_cache: sonicterm_text::row_glyph_cache::RowGlyphCache::new(),
             line_quad_cache: crate::row_quad_cache::LineQuadCache::new(),
@@ -1977,7 +1977,7 @@ impl GpuRenderer {
         // wrong NDC coordinates.
         self.row_glyph_cache.invalidate_all();
         self.line_quad_cache.invalidate_all();
-        // T13/T14: post-glyphon there is no persistent text buffer to
+        // Post-glyphon there is no persistent text buffer to
         // resize — chrome strings are re-shaped through
         // `chrome_text::layout` on every frame, picking up the new
         // surface dims via the per-call `(sw, sh)` parameter. The
@@ -2982,7 +2982,7 @@ impl GpuRenderer {
         self.cell_h = new_line_h;
         self.reset_glyph_atlas_in_place("font_change");
         self.glyph_atlas_retry_without_eviction = false;
-        // T13/T14: SwashRasterizer prebake gone. Atlas is now lazily
+        // SwashRasterizer prebake gone. Atlas is now lazily
         // filled by the wezterm rasterizer on the next render.
         self.row_glyph_cache.invalidate_all();
         self.line_quad_cache.invalidate_all();
@@ -3048,7 +3048,7 @@ impl GpuRenderer {
     fn rebuild_for_sf(&mut self, sf: f32) {
         let sf = sf.max(0.1);
         self.scale_factor = sf;
-        // T13/T14: post-glyphon the atlas is sized once at default
+        // Post-glyphon the atlas is sized once at default
         // and grows on demand; no DPI-derived resize and no
         // SwashRasterizer prebake. The wezterm rasterizer fills the
         // atlas lazily on first encounter with each glyph.
@@ -3209,7 +3209,7 @@ impl GpuRenderer {
     /// seeing tofu boxes for an arbitrary amount of time after the
     /// font finished loading.
     ///
-    /// T9 (wezterm-takeover G2/C): the per-style-run `ShapeCache`
+    /// The per-style-run `ShapeCache`
     /// was deleted in T8; the only surviving caches the async loader
     /// notifier needs to invalidate are the per-row + per-line
     /// quad caches plus the style_rev bump.
@@ -3233,7 +3233,7 @@ impl GpuRenderer {
         self.style_rev
     }
 
-    /// T13/T14: attach point for the legacy async font fallback loader.
+    /// Attach point for the legacy async font fallback loader.
     /// Stub today — sonicterm-font handles fallback synchronously via its
     /// built-in vendor chain, so the loader is a no-op `()`. Kept as
     /// `Option<()>` so the cross-crate API (`sonicterm-app` calls
@@ -3937,12 +3937,12 @@ impl GpuRenderer {
 
         let raster_px = self.raster_px(self.font_size);
         {
-            // T13/T14: post-glyphon the grid path is wezterm-only.
+            // Post-glyphon the grid path is wezterm-only.
             // FontStack is the sole rasterizer; on test fixtures
             // without bundled fonts (FontStack returns None) the grid
             // walk skips per-glyph emission and only paints quads.
             let mut wt_raster = self.font_stack.clone();
-            // T13/T14: the async fallback loader was wired into the
+            // The async fallback loader was wired into the
             // legacy SwashRasterizer. The wezterm path doesn't expose
             // an equivalent hook; missing glyphs are handled by
             // sonicterm-font's built-in fallback chain (NotoColorEmoji,
@@ -5192,7 +5192,7 @@ impl GpuRenderer {
                 [layout.border.w, layout.border.h],
                 self.chrome_px(READ_ONLY_BADGE_RADIUS),
             ));
-            // T14: search-badge overlay text → chrome_text into the
+            // Search-badge overlay text → chrome_text into the
             // overlay glyph instance vec (sits above quad_overlay).
             if let (Some(stack), Some(search_state)) = (self.font_stack.as_ref(), search) {
                 let mut wt = stack.clone();
@@ -5575,7 +5575,7 @@ impl GpuRenderer {
                 layout.query_label.replace('▏', "")
             };
             let palette_font_size = self.raster_px(self.font_size);
-            // T14: chrome text needs a wezterm FontStack; when one
+            // Chrome text needs a wezterm FontStack; when one
             // isn't available (test fixtures), the palette quads still
             // render but no text is emitted. Wrap the entire chrome
             // emission in an `if let Some(...)` so the palette path
@@ -5991,7 +5991,7 @@ impl GpuRenderer {
             .map(|(_, r)| *r)
             .collect();
         if !broadcast_label_rects.is_empty() {
-            // T14: broadcast warning label → chrome_text, one call per
+            // Broadcast warning label → chrome_text, one call per
             // pane rect (each rect gets its own ⚠ BROADCAST string).
             if let Some(stack) = self.font_stack.as_ref() {
                 let native_em = stack
@@ -6088,7 +6088,7 @@ impl GpuRenderer {
                 ..Default::default()
             });
 
-            // T14: drag-chip title text → chrome_text.
+            // Drag-chip title text → chrome_text.
             //
             // Scale the
             // text color alpha by `chip.ghost_alpha` (spec 0.5) so
@@ -6132,7 +6132,7 @@ impl GpuRenderer {
             self.drag_chip_visual = None;
         }
 
-        // T13/T14: glyphon `Resolution` / `TextArea` / `TextBounds` /
+        // Glyphon `Resolution` / `TextArea` / `TextBounds` /
         // `text_renderer.prepare` are gone. Every chrome string already
         // landed in `glyph_instances` (pre-overlay: search status bar,
         // tab titles) or `overlay_glyph_instances` (modal chrome:
@@ -6415,7 +6415,7 @@ impl GpuRenderer {
         }
     }
 
-    /// T14: this function only emits the quick-select hint background
+    /// This function only emits the quick-select hint background
     /// quads now. The legacy `quick_select_buffer` text path is gone;
     /// the per-hint text is laid out via `chrome_text::layout` later
     /// in `render()` so it shares the wezterm atlas with the rest of
@@ -6467,7 +6467,7 @@ impl GpuRenderer {
     /// fallback handling four times (run start, mid-row flush, end of
     /// row, etc.).
     ///
-    /// T9 (wezterm-takeover G2/C): non-ASCII clusters drive through
+    /// Non-ASCII clusters drive through
     /// `shape_run_with_wezterm` only — the cosmic-text path plus the
     /// legacy wezterm-cluster-width overlay are gone. Each cluster
     /// lead cell dispatches on
@@ -6509,7 +6509,7 @@ impl GpuRenderer {
         sh: f32,
         baseline_y_in_cell: f32,
         snapped_cell_x: &[f32],
-        // T9 (wezterm-takeover G2/C): `font_stack` is now the sole
+        // `font_stack` is now the sole
         // shape entry point — when None, the non-ASCII branch can
         // emit nothing (test fixtures without bundled fonts hit
         // this; the ASCII branch still drives through `wt_raster`
@@ -6517,7 +6517,7 @@ impl GpuRenderer {
         // `GpuRenderer::new` can continue to construct a partly-
         // degraded renderer in tests.
         font_stack: Option<&sonicterm_engine::FontStack>,
-        // T13/T14 (wezterm-takeover G3): sonicterm-font is now the sole
+        // Sonicterm-font is now the sole
         // atlas insertion path. The legacy `rasterizer: &mut
         // SwashRasterizer` parameter is gone (T10 deletes the type
         // entirely). When `wt_raster` is None (test fixtures without
@@ -6562,7 +6562,7 @@ impl GpuRenderer {
         // would emit a 1:1 mapping anyway. Skip the shape call entirely
         // and drive the glyph atlas straight from each cell's GlyphKey.
         //
-        // T9: ASCII codepoints (0x20..=0x7E) never overlap the
+        // ASCII codepoints (0x20..=0x7E) never overlap the
         // `BlockKey::from_char` ranges (≥ U+2500) and never carry a
         // Powerline / NF PUA codepoint, so the BlockKey dispatch is
         // safely skipped here.
@@ -6575,7 +6575,7 @@ impl GpuRenderer {
                     italic: style.italic,
                     glyph_id: 0,
                 };
-                // T13/T14: sonicterm-font owns the atlas. No swash
+                // Sonicterm-font owns the atlas. No swash
                 // fallback — when `wt_raster` is None (test fixture
                 // without a FontStack) the glyph is silently skipped
                 // so the renderer still paints quads.
@@ -6601,7 +6601,7 @@ impl GpuRenderer {
                 let gy = cy + baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
                 let gw = info.px_size[0] as f32 * inv_s;
                 let gh = info.px_size[1] as f32 * inv_s;
-                // T13/T14: the legacy `apply_symbol_fit_v2` +
+                // The legacy `apply_symbol_fit_v2` +
                 // `block_element_rect` overlay tracks the SwashRasterizer
                 // path; sonicterm-font handles cell fit natively. ASCII
                 // glyphs are always `Natural` (identity) so dropping
@@ -6891,7 +6891,7 @@ impl GpuRenderer {
 
             // ── Normal wezterm-shape path (non-block cluster) ──
             //
-            // T13/T14: post-glyphon the char-fallback path is wezterm-
+            // Post-glyphon the char-fallback path is wezterm-
             // only. FontStack is the sole rasterizer; missing chars
             // emit tofu via `Rasterizer::rasterize` returning
             // None (when sonicterm-font's fallback chain has nothing).
@@ -6900,7 +6900,7 @@ impl GpuRenderer {
                 if ch == '\0' || ch.is_whitespace() {
                     continue;
                 }
-                // T13/T14: drop the `resolve_slot` swash walk. wezterm
+                // Drop the `resolve_slot` swash walk. wezterm
                 // handles fallback internally — pass `font_slot = 0`
                 // and let `FontStack::rasterize` find a face
                 // (it shapes the single char against the loaded font
@@ -6972,7 +6972,7 @@ impl GpuRenderer {
                 style.bold,
                 style.italic,
             );
-            // T13/T14: sonicterm-font is the sole rasterizer; the
+            // Sonicterm-font is the sole rasterizer; the
             // legacy `swash_rasterizer::classify_symbol` / SymbolFit
             // family routes through the SwashRasterizer which is gone.
             // sonicterm-font sizes glyphs natively, so the IconCellFit
@@ -7568,7 +7568,7 @@ fn indexed(i: u8, theme: &Theme) -> Option<ChromeColor> {
 #[cfg(test)]
 #[path = "core_tests.rs"]
 mod core_tests;
-// T13/T14 (wezterm-takeover G3): `hex_to_glyphon` and
+// `hex_to_glyphon` and
 // `scale_glyphon_alpha` have moved into `crate::color` under the
 // renamed `hex_to_chrome_color` / `scale_chrome_text_alpha` names and
 // now consume `ChromeColor` instead of `legacy chrome color`.
@@ -7580,7 +7580,7 @@ mod core_tests;
 // it's the must-pass #4 grep gate's job to catch survivors).
 pub use crate::color::scale_chrome_text_alpha;
 
-// T13/T14: `terminal_font_attrs` re-export removed. It returned
+// `terminal_font_attrs` re-export removed. It returned
 // `legacy chrome attrs` which carried per-span family/weight; the
 // chrome-text path replaces it with `ChromeAttrs { bold, italic }`
 // constructed per-span at the call site. Downstream callers
@@ -7636,7 +7636,7 @@ pub fn collect_hyperlink_runs(grid: &Grid) -> Vec<(u16, u16, u16)> {
     runs
 }
 
-// T13/T14: `load_bundled_fonts` (cosmic-text bundle loader) is gone.
+// `load_bundled_fonts` (cosmic-text bundle loader) is gone.
 // Bundled fonts ship via sonicterm-font's `vendor-jetbrains`,
 // `vendor-noto-emoji`, `vendor-nerd-font-symbols` features (see
 // `sonicterm-text/Cargo.toml`), so the FontStack discovers them

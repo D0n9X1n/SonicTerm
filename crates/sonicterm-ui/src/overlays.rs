@@ -183,9 +183,9 @@ impl PaletteLayout {
     /// Takes the palette by `&mut` so it can publish the current
     /// `visible_rows` count back into the state — subsequent arrow-key
     /// navigation uses that to keep the highlighted row inside the
-    /// rendered viewport (the bug this PR fixes was that the selection
-    /// could move past the visible window and the highlight quad would
-    /// then be drawn offscreen below the modal).
+    /// rendered viewport. Without it the selection can move past the
+    /// visible window and the highlight quad is drawn offscreen below the
+    /// modal.
     #[must_use]
     pub fn compute(
         palette: &mut CommandPalette,

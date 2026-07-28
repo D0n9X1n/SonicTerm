@@ -14,8 +14,8 @@
 //!     atlas + text pipeline. Replaced the glyphon `TextRenderer` path in
 //!     T13/T14 of the wezterm-takeover.
 //!
-//! The composite renderer (`sonicterm-shared::render`) still lives in
-//! `sonicterm-shared`; PR 7b split `render.rs` into sub-files.
+//! The composite renderer (`sonicterm-shared::render`) lives in
+//! `sonicterm-shared`, split across sub-files.
 //!
 //! Dependency rule: `sonicterm-gpu` may depend on `sonicterm-types`, `sonicterm-text`, and
 //! `sonicterm-render-model` only. It must NOT depend on `sonicterm-ui` or `sonicterm-shared`
@@ -28,7 +28,7 @@
 /// wgpu-side wrapper around `sonicterm_text::glyph_atlas` — owns the texture,
 /// view, sampler, and bind group; syncs dirty tiles to the GPU.
 pub mod atlas_upload;
-/// T13 (wezterm-takeover G3): wezterm-driven chrome text helper. Replaces
+/// Wezterm-driven chrome text helper. Replaces
 /// the 11 glyphon `TextRenderer` chrome sites and feeds the existing
 /// [`text_pipeline`] buffer — no second atlas, no second pass.
 pub mod chrome_text;

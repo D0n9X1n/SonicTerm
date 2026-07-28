@@ -1,14 +1,13 @@
 //! sonicterm-ui — pure-data UI state and layout for SonicTerm Terminal.
 //!
-//! Extracted from `sonicterm-shared` in PR-5 of the workspace refactor
-//! . This crate carries only *state* and *layout* — no
+//! This crate carries only *state* and *layout* — no
 //! winit, no wgpu, no glyphon. The render layer in `sonicterm-shared` /
 //! `sonicterm-gpu` consumes these types to produce draw commands.
 //!
 //! `sonicterm-shared` re-exports every module here, so existing imports
 //! of the form `use sonicterm_ui::tabs::TabBar;` continue to work.
 //!
-//! ## Deviations from the PR-5 plan
+//! ## Deviations from the pure-UI-state rule
 //!
 //! - `menu.rs` stays in `sonicterm-shared` (transitively depends on
 //!   `winit` via `menubar_bridge`).
@@ -20,7 +19,7 @@
 //! - `ime.rs` is moved here too (the plan didn't list it explicitly,
 //!   but it has zero external deps and `overlays.rs` requires it).
 
-// TODO: add per-item docs and switch to #![deny(missing_docs)] in a follow-up PR.
+// TODO: add per-item docs and switch to #![deny(missing_docs)].
 #![allow(missing_docs)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 

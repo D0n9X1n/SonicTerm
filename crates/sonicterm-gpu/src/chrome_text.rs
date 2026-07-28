@@ -1,4 +1,4 @@
-//! T13 (wezterm-takeover G3): wezterm-driven chrome text helper.
+//! Wezterm-driven chrome text helper.
 //!
 //! Replaces the 11 `legacy-chrome TextRenderer` chrome sites in `core.rs`
 //! (tab titles, search input, palette query/rows/footer, IME preedit,

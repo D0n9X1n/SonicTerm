@@ -216,9 +216,8 @@ impl Names {
         // We don't simply use the freetype functions to retrieve names,
         // as freetype has a limited set of encodings that it supports.
         // We process the name table for ourselves to increase our chances
-        // of returning a good version of the name.
-        // See <https://github.com/wezterm/wezterm/issues/1761#issuecomment-1079150560>
-        // for a case where freetype returns `?????` for a name.
+        // of returning a good version of the name: freetype returns
+        // `?????` for some names.
         let names = face.get_sfnt_names();
 
         let family = name_from_table(

@@ -1371,7 +1371,7 @@ fn pty_input_rejected_event(error: sonicterm_io::pty::PtyInputError) -> UserEven
 /// background font load completion bumps `style_rev` on every live
 /// window and triggers a redraw — the tofu cells flip to real
 /// glyphs without the user having to type anything.
-/// T13/T14: the legacy `AsyncFallbackLoader` (cosmic-text/swash
+/// The legacy `AsyncFallbackLoader` (cosmic-text/swash
 /// driven background-load helper) is gone with the rest of the
 /// glyphon plumbing. sonicterm-font handles CJK/emoji/Nerd-font
 /// fallback synchronously via its built-in vendor chain
@@ -5281,7 +5281,7 @@ impl App {
         // mutation loop. The loop body calls `clear_drag_chip` /
         // `request_redraw`, neither of which mutate `self.windows`
         // today, but a future per-window handler (or a winit reentrant
-        // callback on Windows under HOT-FILE PR pressure) could
+        // callback on Windows under heavy load) could
         // insert/remove a window mid-iteration. Iterating a snapshot of
         // `Vec<WindowId>` is panic-free and matches intent: cancel
         // residue on the set of windows that exist RIGHT NOW. The

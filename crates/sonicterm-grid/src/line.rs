@@ -21,11 +21,10 @@
 //! (`compact_if_beneficial`) only switches Flat → Cluster when the saving is
 //! ≥ 2× — otherwise the bookkeeping costs more than it saves.
 //!
-//! NOTE: this module currently lives as an additive primitive. Wiring it into
-//! `Grid::scrollback` is a follow-up because every Row consumer in
-//! the codebase indexes through `Vec<Cell>` directly. Landing the data
-//! structure + invariants + tests first lets the integration PR focus purely
-//! on the call-site refactor.
+//! NOTE: this module is an additive primitive, not yet wired into
+//! `Grid::scrollback`, because every Row consumer indexes through
+//! `Vec<Cell>` directly. The data structure, its invariants, and its tests
+//! stand on their own so the call-site refactor can be done separately.
 
 use sonicterm_types::cell::{Cell, FatAttributes};
 

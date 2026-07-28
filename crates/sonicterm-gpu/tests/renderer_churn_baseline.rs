@@ -1,8 +1,8 @@
 //! Does renderer memory return to baseline across window churn?
 //!
-//! #993 asks whether the process total returns to baseline when windows are
-//! opened and closed on the software path. A per-window buffer that is never
-//! released shows as a staircase.
+//! Opening and closing windows on the software path must leave the process
+//! total where it started. A per-window buffer that is never released shows as
+//! a staircase.
 //!
 //! **What this covers, and what it does not.**
 //!
@@ -76,8 +76,8 @@ impl ApplicationHandler for Churn {
 
             match GpuRenderer::new(window.clone(), active, &theme, settings) {
                 Ok(mut renderer) => {
-                    // Engage the degrade path, which is the configuration
-                    // #993 is about.
+                    // Engage the degrade path: the software configuration is
+                    // the one this measures.
                     renderer.set_software_render_degrade(true);
                     let held = renderer.retained_amounts();
                     self.readings.push((

@@ -37,9 +37,8 @@ fn app() -> App {
 /// this lock in favour of scoping — that is the configuration the failure was
 /// measured in.
 ///
-/// Several candidate mechanisms have been tested directly and refuted. The
-/// pull request that introduced this lock records which ones, so they are not
-/// investigated a second time.
+/// Several candidate mechanisms have been tested directly and refuted, so the
+/// cause remains unidentified.
 ///
 /// The rule is therefore unconditional — **hold this across any call that
 /// enters the production sampling path**, whether or not the test installs a

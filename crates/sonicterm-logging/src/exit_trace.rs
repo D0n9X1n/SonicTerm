@@ -153,8 +153,8 @@ fn open_log_fd(_path: &Path) {
 }
 
 fn install_alloc_error_logging() {
-    // `std::alloc::set_alloc_error_hook` is unstable on stable Rust
-    // (rust-lang/rust#51245). We therefore can't intercept allocator
+    // `std::alloc::set_alloc_error_hook` is unstable on stable Rust. We
+    // therefore can't intercept allocator
     // failures directly; instead, the global allocator's default
     // behaviour is to call `__rust_alloc_error_handler`, which prints
     // to stderr and aborts via SIGABRT — and our SIGABRT handler
