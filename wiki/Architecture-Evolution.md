@@ -114,8 +114,8 @@ Before a P1/P2 architecture change, write an issue or PR design with:
 6. docs and release impact;
 7. completion metric.
 
-Do not place standalone plans or audits under tracked `docs/`; durable accepted
-invariants belong in `docs/ARCHITECTURE.md`, while this wiki remains the
+Do not track standalone plans or audits; durable accepted invariants belong in
+[Architecture Internals](Architecture-Internals), while this page remains the
 bilingual explanatory roadmap.
 
 ## Evidence sources
@@ -125,7 +125,7 @@ bilingual explanatory roadmap.
 | Actual dependency graph | root `Cargo.toml`, all crate `Cargo.toml`, `cargo metadata` |
 | State ownership | `crates/sonicterm-app-core/src/`, `crates/sonicterm-app/src/app/` |
 | Renderer concentration | `crates/sonicterm-gpu/src/core.rs`, recent file churn |
-| Concurrency invariants | `crates/sonicterm-app/src/app/spawn_pane.rs`, `crates/sonicterm-app/src/app/invariants.rs`, `docs/ARCHITECTURE.md` |
+| Concurrency invariants | `crates/sonicterm-app/src/app/spawn_pane.rs`, `crates/sonicterm-app/src/app/invariants.rs`, `Architecture-Internals` |
 | Test/CI boundary | `.github/workflows/ci.yml`, `scripts/*.sh`, PR template |
 | Supply-chain policy | `deny.toml`, Cargo.lock |
 | Native/FFI boundary | font wrappers/build.rs, mac/windows crates |
@@ -233,8 +233,8 @@ session ownership 和 release support 的设计与测试。
 6. docs 与 release 影响；
 7. 完成指标。
 
-不要把 standalone plan/audit 跟踪在 `docs/`；已接受的 durable invariant 写入 `docs/ARCHITECTURE.md`，
-本 Wiki 保留双语解释性路线图。
+不要跟踪 standalone plan/audit；已接受的 durable invariant 写入
+[Architecture Internals](Architecture-Internals)，本页保留双语解释性路线图。
 
 ## 证据来源
 
@@ -243,7 +243,7 @@ session ownership 和 release support 的设计与测试。
 | 实际依赖图 | 根 `Cargo.toml`、各 crate `Cargo.toml`、`cargo metadata` |
 | 状态所有权 | `crates/sonicterm-app-core/src/`、`crates/sonicterm-app/src/app/` |
 | Renderer 职责集中 | `crates/sonicterm-gpu/src/core.rs`、近期文件 churn |
-| 并发不变量 | `crates/sonicterm-app/src/app/spawn_pane.rs`、`crates/sonicterm-app/src/app/invariants.rs`、`docs/ARCHITECTURE.md` |
+| 并发不变量 | `crates/sonicterm-app/src/app/spawn_pane.rs`、`crates/sonicterm-app/src/app/invariants.rs`、`Architecture-Internals` |
 | Test/CI 边界 | `.github/workflows/ci.yml`、`scripts/*.sh`、PR template |
 | Supply-chain policy | `deny.toml`、Cargo.lock |
 | Native/FFI 边界 | font wrapper/build.rs、mac/windows crate |

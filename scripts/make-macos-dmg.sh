@@ -71,7 +71,7 @@ done
 # cannot override. Re-signing the bundle ad-hoc AFTER all resources are in place
 # makes it internally consistent, downgrading that to the normal, overridable
 # "unidentified developer" prompt (right-click → Open, or strip quarantine).
-# See docs/packaging/macos.md for packaging and trust details.
+# See the Packaging wiki page for packaging and trust details.
 echo "==> Ad-hoc signing $APP (no Developer ID; not notarized)"
 codesign --force --deep --sign - "$APP"
 codesign --verify --strict --verbose=2 "$APP"

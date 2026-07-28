@@ -2,9 +2,8 @@
 
 ## English
 
-> The short canonical map is
-> [`docs/MODULES.md`](https://github.com/D0n9X1n/SonicTerm/blob/main/docs/MODULES.md).
-> This page adds dependency and code-navigation detail for all 23 workspace crates.
+> This page is the crate map, with dependency and code-navigation detail for
+> all 23 workspace crates.
 
 The workspace version in the root `Cargo.toml` applies to every first-party
 crate. `sonicterm-app` is the default workspace member, while the shipping
@@ -333,9 +332,7 @@ Every crate contains a local `CLAUDE.md` with its guardrails and local gate.
 
 ## 中文
 
-> 简短规范映射位于
-> [`docs/MODULES.md`](https://github.com/D0n9X1n/SonicTerm/blob/main/docs/MODULES.md)。
-> 本页为全部 23 个 workspace crate 增加依赖与代码导航细节。
+> 本页即 crate 映射，并为全部 23 个 workspace crate 提供依赖与代码导航细节。
 
 根 `Cargo.toml` 中的 workspace 版本适用于所有第一方 crate。`sonicterm-app` 是默认 member，
 实际发布二进制是 `sonicterm-mac` 与 `sonicterm-windows`。

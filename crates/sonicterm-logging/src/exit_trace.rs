@@ -3,7 +3,7 @@
 //! Ensures that **every** process termination path leaves a marker in
 //! `sonicterm.log` and, for crashes, a file under `crashes/`.
 //!
-//! Coverage matrix (see also `docs/LOGGING.md`):
+//! Coverage matrix (see also `wiki/Logging.md`):
 //!
 //! | path                                  | mechanism                              |
 //! |---------------------------------------|----------------------------------------|
@@ -161,7 +161,7 @@ fn install_alloc_error_logging() {
     // (installed below on Unix) catches the abort and writes a
     // "FATAL: SIGABRT" marker to sonicterm.log. So alloc failures DO
     // produce a log line on Unix, just routed via the signal path.
-    // Documented in docs/LOGGING.md.
+    // Documented in wiki/Logging.md.
 }
 
 #[cfg(unix)]

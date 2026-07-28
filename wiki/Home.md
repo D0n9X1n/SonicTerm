@@ -35,10 +35,10 @@ level. [Memory](Memory) covers what is bounded and how to read it.
 - [Architecture Evolution](Architecture-Evolution) — evidence-classified proposals for making the architecture easier to maintain
 
 The tracked canonical developer documents remain
-[`docs/ARCHITECTURE.md`](https://github.com/D0n9X1n/SonicTerm/blob/main/docs/ARCHITECTURE.md),
-[`docs/MODULES.md`](https://github.com/D0n9X1n/SonicTerm/blob/main/docs/MODULES.md),
-[`docs/LOGGING.md`](https://github.com/D0n9X1n/SonicTerm/blob/main/docs/LOGGING.md),
-and [`docs/packaging/`](https://github.com/D0n9X1n/SonicTerm/tree/main/docs/packaging).
+[Architecture Internals](Architecture-Internals),
+[Crate Reference](Crate-Reference),
+[Logging](Logging),
+and [Packaging](Packaging).
 The architecture pages in this wiki explain those boundaries in more detail;
 they do not replace the canonical invariants.
 
@@ -75,8 +75,8 @@ SonicTerm 是一个面向 macOS 和 Windows 的原生 GPU 加速终端。本 Wik
 - [架构演进 / Architecture Evolution](Architecture-Evolution) — 按证据类型分类的架构与可维护性改进建议
 
 受版本控制的规范开发文档仍然是
-[`docs/ARCHITECTURE.md`](https://github.com/D0n9X1n/SonicTerm/blob/main/docs/ARCHITECTURE.md)、
-[`docs/MODULES.md`](https://github.com/D0n9X1n/SonicTerm/blob/main/docs/MODULES.md)、
-[`docs/LOGGING.md`](https://github.com/D0n9X1n/SonicTerm/blob/main/docs/LOGGING.md)
-和 [`docs/packaging/`](https://github.com/D0n9X1n/SonicTerm/tree/main/docs/packaging)。
+[Architecture Internals](Architecture-Internals)、
+[Crate Reference](Crate-Reference)、
+[Logging](Logging)
+和 [Packaging](Packaging)。
 本 Wiki 的架构页面用于更详细地解释这些边界，不取代其中的规范不变量。

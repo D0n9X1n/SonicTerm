@@ -2,9 +2,6 @@
 
 ## English
 
-> Canonical developer diagnostics:
-> [`docs/LOGGING.md`](https://github.com/D0n9X1n/SonicTerm/blob/main/docs/LOGGING.md).
-
 ### Paths
 
 - Active log: `~/.sonicterm/logs/sonicterm.log`
@@ -63,6 +60,60 @@ Set the level to `debug` and let the session run for a minute or two:
 [logging]
 level = "debug"
 ```
+
+#### Pane and session retention
+
+At `debug` level, `target="memory"` samples what each pane retains, at most
+once every 30 seconds. It emits one `pane retention` line per pane, followed by
+one `session retention` line:
+
+```
+pane retention    pane=WindowId(1)/7 total_bytes=15204320 grid_visible_bytes=8110080
+                  grid_history_bytes=6405120 grid_alternate_bytes=0 parser_bytes=0
+                  hyperlink_bytes=254240 inline_media_bytes=434880 pty_output_bytes=0
+                  pty_input_bytes=0
+                  largest_seam=grid_visible largest_seam_bytes=8110080
+session retention panes=12 total_bytes=182451840 grid_visible_bytes=97320960 ...
+```
+
+Eight seams meter their own memory, and the figures are **disjoint** — each
+counts only what it owns, so no allocation is charged twice. They are also
+exhaustive: `total_bytes` is their sum, so the rows below account for every
+byte in the total.
+
+| Field | Covers |
+| --- | --- |
+| `grid_visible_bytes` | cells and row storage in the visible primary grid |
+| `grid_history_bytes` | retained scrollback history |
+| `grid_alternate_bytes` | saved alternate-screen storage |
+| `parser_bytes` | in-flight escape and media capture buffers |
+| `hyperlink_bytes` | interned OSC 8 URI and id strings |
+| `inline_media_bytes` | decoded inline images retained for display |
+| `pty_output_bytes` | local PTY output queued or in flight |
+| `pty_input_bytes` | input queued toward the shell, typically a large paste |
+
+`largest_seam` names the dominant subsystem. Read it first: a total alone says
+a pane is large without saying where to look, and the remedy differs per seam —
+a pane holding 60 MB of inline media is behaving as designed, while a pane
+holding 60 MB of grid is not.
+
+The `session retention` line is the one to check against a growth report.
+Per-pane figures are each individually bounded, so a session can grow well past
+any single ceiling while every pane remains compliant; only the session total
+shows that. When investigating growth, compare successive `session retention`
+lines rather than any single sample — the shape of the curve is what
+distinguishes a working set that plateaus from retention that keeps climbing.
+
+Two caveats when reading these:
+
+- Panes whose parser lock is held by their VT thread are **skipped**, not
+  waited on, so a sample taken while output is streaming may report fewer panes
+  than the window has. `panes=` reports how many were actually measured.
+- Not every seam plateaus, and that is intended. Grid reaches a true steady
+  state once scrollback fills. Interned hyperlinks grow until their cap,
+  because a link stays reachable for as long as the cells referencing it remain
+  in retained scrollback — freeing it early would break a link the user can
+  still scroll back to.
 
 ### If an image disappeared, you do not need `debug`
 
@@ -394,9 +445,6 @@ Avoid posting secrets, tokens, environment dumps, or sensitive command output.
 
 ## 中文
 
-> 规范开发诊断文档：
-> [`docs/LOGGING.md`](https://github.com/D0n9X1n/SonicTerm/blob/main/docs/LOGGING.md)。
-
 ### 路径
 
 - 当前日志：`~/.sonicterm/logs/sonicterm.log`
@@ -450,6 +498,53 @@ render-timing 配置项。
 [logging]
 level = "debug"
 ```
+
+#### 窗格与会话保留量
+
+在 `debug` 级别下，`target="memory"` 会采样每个窗格保留的内存，最多每 30 秒一次。
+每个窗格输出一行 `pane retention`，随后输出一行 `session retention`：
+
+```
+pane retention    pane=WindowId(1)/7 total_bytes=15204320 grid_visible_bytes=8110080
+                  grid_history_bytes=6405120 grid_alternate_bytes=0 parser_bytes=0
+                  hyperlink_bytes=254240 inline_media_bytes=434880 pty_output_bytes=0
+                  pty_input_bytes=0
+                  largest_seam=grid_visible largest_seam_bytes=8110080
+session retention panes=12 total_bytes=182451840 grid_visible_bytes=97320960 ...
+```
+
+八个接缝各自统计自身的内存，且这些数字**互不重叠**——每个只统计自己拥有的部分，
+因此不会有任何一次分配被重复计入。它们同时也是完备的：`total_bytes` 是它们的总和，
+所以下表的各行覆盖了总量中的每一个字节。
+
+| 字段 | 含义 |
+| --- | --- |
+| `grid_visible_bytes` | 可见主网格中的单元格与行存储 |
+| `grid_history_bytes` | 保留的回滚历史 |
+| `grid_alternate_bytes` | 保存的备用屏幕存储 |
+| `parser_bytes` | 处理中的转义序列与媒体捕获缓冲区 |
+| `hyperlink_bytes` | 驻留的 OSC 8 URI 与 id 字符串 |
+| `inline_media_bytes` | 为显示而保留的已解码内联图像 |
+| `pty_output_bytes` | 已排队或传输中的本地 PTY 输出 |
+| `pty_input_bytes` | 排队送往 shell 的输入，通常是大段粘贴 |
+
+`largest_seam` 指出占比最大的子系统。请先读它：仅有总量只能说明窗格很大，
+却没有指出该往哪里查，而每个接缝的处理方式并不相同——
+一个持有 60 MB 内联图像的窗格属于设计预期，而持有 60 MB 网格的窗格则不是。
+
+`session retention` 这一行才是用来对照内存增长报告的。每个窗格的数字都各自受限，
+因此在所有窗格都合规的情况下，会话总量仍可能远超任何单个上限；只有会话总量能反映这一点。
+排查增长时，请比较连续多行 `session retention`，而不是任何单次采样——
+曲线的形状才能区分「工作集趋于平稳」与「保留量持续攀升」。
+
+阅读这些数据时有两点需要注意：
+
+- 若某个窗格的解析器锁正被其 VT 线程持有，该窗格会被**跳过**而不是等待，
+  因此在输出流式刷屏时采样，报告的窗格数可能少于窗口实际拥有的数量。
+  `panes=` 给出的是实际测量到的数量。
+- 并非每个接缝都会趋于平稳，这是预期行为。网格在回滚缓冲填满后会进入真正的稳态。
+  驻留的超链接会一直增长到其上限，因为只要引用它的单元格仍留在保留的回滚历史中，
+  该链接就仍可被访问——提前释放会破坏用户回滚后仍能点击的链接。
 
 ### 如果图像消失了，无需开启 `debug`
 

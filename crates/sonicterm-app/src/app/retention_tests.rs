@@ -389,19 +389,19 @@ fn the_wiki_documents_the_fields_the_memory_log_actually_emits() {
     );
 }
 
-/// `docs/LOGGING.md` must name the same fields, and its sample must be real.
+/// The seam table must name the same fields, and its sample must be real.
 ///
-/// The wiki was guarded and this file was not, so the two drifted: the seam
-/// table here omitted `pty_input_bytes` entirely and the prose counted seven
-/// seams while the log line emitted eight. Because `total_bytes` is the sum of
-/// all of them, the documented rows did not add up to the documented total —
-/// and reconciling seams against the total is exactly the procedure the triage
-/// guide teaches.
+/// This guards the table and sample rather than the prose: the seam table once
+/// omitted `pty_input_bytes` entirely while the prose counted seven seams and
+/// the log line emitted eight. Because `total_bytes` is the sum of all of them,
+/// the documented rows did not add up to the documented total — and reconciling
+/// seams against the total is exactly the procedure the triage guide teaches.
 ///
-/// One occurrence is enough here; unlike the wiki this file is English-only.
+/// Both language halves carry the sample, so the check requires a fenced block
+/// that names every field rather than merely finding one somewhere in the page.
 #[test]
-fn the_maintainer_docs_document_the_fields_the_memory_log_actually_emits() {
-    const DOCS: &str = include_str!("../../../../docs/LOGGING.md");
+fn the_seam_table_documents_the_fields_the_memory_log_actually_emits() {
+    const WIKI: &str = include_str!("../../../../wiki/Logging.md");
     const SOURCE: &str = include_str!("retention.rs");
 
     let emitted: Vec<&str> = SOURCE
@@ -420,13 +420,13 @@ fn the_maintainer_docs_document_the_fields_the_memory_log_actually_emits() {
     // the table row deleted — the exact omission this test exists to catch.
     // Verified by deleting the row and watching this go RED.
     let table_rows: Vec<&str> =
-        DOCS.lines().map(str::trim_start).filter(|line| line.starts_with('|')).collect();
+        WIKI.lines().map(str::trim_start).filter(|line| line.starts_with('|')).collect();
     assert!(!table_rows.is_empty(), "the scan must find table rows, or it asserts nothing");
 
     for field in &emitted {
         assert!(
             table_rows.iter().any(|row| row.contains(field)),
-            "`{field}` is emitted by the memory log but no table row in docs/LOGGING.md \
+            "`{field}` is emitted by the memory log but no table row in wiki/Logging.md \
              names it; the seam table must account for every term in total_bytes"
         );
     }
@@ -435,17 +435,20 @@ fn the_maintainer_docs_document_the_fields_the_memory_log_actually_emits() {
     // missing a field the log line always emits sends a reader looking for a
     // discrepancy that is in the docs, not in their terminal.
     //
-    // Anchored on the fenced block that contains the sample, not on the first
-    // occurrence of the phrase — "pane retention" appears in the prose above
-    // it, and splitting on the phrase selects that instead.
-    let sample = DOCS
+    // The block must name every emitted field, not merely mention the phrase.
+    // The page also carries shell recipes that grep for `pane retention`, and
+    // those blocks contain the phrase without being samples — selecting one of
+    // them would assert nothing.
+    let sample = WIKI
         .split("```")
-        .find(|block| block.contains("pane retention") && block.contains("total_bytes="))
-        .expect("docs/LOGGING.md must contain a fenced sample `pane retention` block");
+        .find(|block| {
+            block.contains("total_bytes=") && emitted.iter().all(|field| block.contains(field))
+        })
+        .expect("wiki/Logging.md must contain a fenced sample `pane retention` block");
     for field in &emitted {
         assert!(
             sample.contains(field),
-            "the sample `pane retention` block in docs/LOGGING.md omits `{field}`, \
+            "the sample `pane retention` block in wiki/Logging.md omits `{field}`, \
              which the log line always emits"
         );
     }
