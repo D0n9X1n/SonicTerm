@@ -29,6 +29,29 @@ when user-facing behavior changes.
 
 When touching a crate, also read that crate's local `CLAUDE.md`.
 
+## Searching
+
+**Search is filtered by default, and the filter is silent.** A root `.ignore`
+excludes the four vendored upstream trees — FreeType, libpng, zlib, HarfBuzz —
+from `rg` and from most editors and agents that read it. That is 2,021 of the
+2,529 tracked files, so a default search covers 504.
+
+This matters for reading a result, not just for speed: **an empty result may
+mean the match is in a filtered tree, not that it does not exist.** When a
+symbol is expected and search finds nothing, re-run with `--no-ignore` before
+concluding it is absent.
+
+```bash
+rg 'FT_Load_Glyph'                                   # first-party only
+rg --no-ignore 'FT_Load_Glyph'                       # including vendored
+git grep 'FT_Load_Glyph'                             # git ignores .ignore entirely
+```
+
+`git grep` and `git ls-files` are unaffected, which makes them the right tool
+when the question is "what does the repository contain" rather than "where is
+our code". `.github/` is explicitly un-hidden, since `rg` skips dot-directories
+by default and the CI workflows are first-party files worth finding.
+
 ## Crates
 
 | Crate | Role |

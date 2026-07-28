@@ -22,3 +22,9 @@ crates/sonicterm-harfbuzz/harfbuzz/
 # Build output and packaging artifacts.
 target/
 dist/
+
+# Ripgrep skips dot-directories by default, which hides `.github/` — the CI
+# workflows, issue templates, and dependabot config. Those are first-party
+# files someone editing CI needs to find by searching for them, so un-hide
+# that one tree. Everything else dot-prefixed stays hidden.
+!.github/
