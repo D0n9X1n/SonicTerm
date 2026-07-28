@@ -5153,6 +5153,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ureq",
+ "wgpu",
  "windows 0.62.2",
  "winit",
 ]

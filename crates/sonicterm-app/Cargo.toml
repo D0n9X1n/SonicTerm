@@ -60,3 +60,9 @@ windows = { workspace = true, features = [
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[dev-dependencies]
+# For the software-adapter detection test, which enumerates the host's real
+# adapters. A dev-dependency rather than a dependency: the app reaches wgpu
+# through `sonicterm-gpu` and must not gain a direct one.
+wgpu.workspace = true
