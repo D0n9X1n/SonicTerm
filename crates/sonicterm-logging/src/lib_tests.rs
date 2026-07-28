@@ -28,6 +28,9 @@ fn enabled_at(filter: &str, target: &str) -> bool {
     let subscriber = Registry::default().with(EnvFilter::try_new(filter).expect("valid filter"));
     tracing::subscriber::with_default(subscriber, || match target {
         "memory" => tracing::enabled!(target: "memory", tracing::Level::DEBUG),
+        "memory::reclaimed" => {
+            tracing::enabled!(target: "memory::reclaimed", tracing::Level::DEBUG)
+        }
         "state_machine" => tracing::enabled!(target: "state_machine", tracing::Level::DEBUG),
         "state_machine.log" => {
             tracing::enabled!(target: "state_machine.log", tracing::Level::DEBUG)
@@ -163,15 +166,58 @@ fn every_listed_custom_target_is_admitted_by_the_debug_filter() {
 /// The fix must not turn 25 memory call sites and a 30-second sampling walk
 /// into something an ordinary session pays for. `warn` is what a user runs by
 /// default, and it must remain silent.
+///
+/// [`crate::MEMORY_RECLAIMED_TARGET`] is the deliberate exception and is
+/// asserted the other way in
+/// `reclamation_warnings_reach_a_default_session`: it reports data the user
+/// has already lost, which is not a diagnostic. Exempting it here without
+/// asserting the opposite elsewhere would let it fall silent unnoticed, so the
+/// two tests are written as a pair.
 #[test]
 fn custom_targets_stay_off_at_the_default_level() {
     for target in CUSTOM_DEBUG_TARGETS {
+        if *target == crate::MEMORY_RECLAIMED_TARGET {
+            continue;
+        }
         assert!(
             !enabled_at(DEFAULT_FILTER, target),
             "{target:?} must stay off at the default warn level"
         );
     }
     assert!(!enabled_at(filter_for_level(LogLevel::Info), "memory"), "and off at info");
+}
+
+/// Reclamation that destroys user-visible data reaches a default session.
+///
+/// A user whose image vanished is owed a reason in the log they actually have,
+/// not one they would have had if they had enabled debug logging before the
+/// thing happened. Checked at WARN because that is the level these sites emit
+/// at and the level a default session admits — a target admitted only at DEBUG
+/// would pass a DEBUG-level probe and still be silent in every shipped
+/// session.
+#[test]
+fn reclamation_warnings_reach_a_default_session() {
+    use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
+
+    for filter in [
+        DEFAULT_FILTER,
+        filter_for_level(LogLevel::Warn),
+        filter_for_level(LogLevel::Info),
+        filter_for_level(LogLevel::Debug),
+    ] {
+        let subscriber =
+            Registry::default().with(EnvFilter::try_new(filter).expect("valid filter"));
+        let admitted = tracing::subscriber::with_default(
+            subscriber,
+            || tracing::enabled!(target: "memory::reclaimed", tracing::Level::WARN),
+        );
+        assert!(
+            admitted,
+            "a WARN on {:?} must reach a session running {filter:?}; a user cannot be told \
+             their image was discarded by a log line that never renders",
+            crate::MEMORY_RECLAIMED_TARGET
+        );
+    }
 }
 
 /// Atlas-exhaustion warnings must reach a default session.
@@ -221,4 +267,70 @@ fn atlas_debug_detail_stays_off_below_debug_level() {
         );
         assert!(!reached, "atlas DEBUG detail must stay off at {name}");
     }
+}
+
+/// The grep recipe the wiki gives for reclamation must match a real line.
+///
+/// `wiki/Logging.md` tells a user whose image vanished to run
+/// `grep 'memory::reclaimed'`. That instruction is only true if the formatter
+/// actually writes the target into the line — a default that is on today and
+/// could be turned off by a `.with_target(false)` added for unrelated reasons,
+/// silently breaking a documented recovery step.
+///
+/// Captures a real formatted event rather than asserting on the default.
+#[test]
+fn the_documented_grep_recipe_matches_a_real_reclamation_line() {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Layer, Registry};
+
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+    impl Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("not poisoned").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+        type Writer = Self;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    let sink = Captured::default();
+    // The shipped default filter and a fmt layer configured as `init` builds
+    // one: no `.with_target(false)`, so whatever the default is, is what the
+    // user's log gets.
+    let subscriber = Registry::default().with(
+        tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(sink.clone())
+            .with_filter(EnvFilter::try_new(DEFAULT_FILTER).expect("valid filter")),
+    );
+
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::warn!(
+            target: "memory::reclaimed",
+            released_bytes = 1234,
+            "cancelled a media capture that stopped receiving"
+        );
+    });
+
+    let written = String::from_utf8(sink.0.lock().expect("not poisoned").clone())
+        .expect("formatted output is utf-8");
+
+    assert!(
+        !written.is_empty(),
+        "a WARN on the reclamation target produced no output under the default filter"
+    );
+    assert!(
+        written.contains("memory::reclaimed"),
+        "the wiki tells users to `grep 'memory::reclaimed'`, but the formatted line does not \
+         contain that string. The line was: {written:?}"
+    );
 }

@@ -308,6 +308,17 @@ pub fn log_pane_retention(label: &str, retention: &PaneRetention) {
 /// and rare enough that its cost is not measurable against idle CPU.
 pub const RETENTION_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Consecutive unchanged progress samples before a capture is abandoned.
+///
+/// Two, so the silence proven is `2 × RETENTION_SAMPLE_INTERVAL`. One
+/// unchanged reading proves only a single interval, and a transfer merely
+/// slower than that interval — a large image over a congested link, a laptop
+/// that slept briefly — reads identically to a dead one. Cancelling it costs
+/// the user a picture they were waiting for, which is the failure this
+/// threshold exists to avoid; holding staging one interval longer against a
+/// transfer that really is dead is the cheaper mistake.
+pub const STALL_SAMPLES_BEFORE_CANCEL: u8 = 2;
+
 /// Whether a sample is due, advancing the timestamp when it is.
 ///
 /// Split out from [`sample_retention_if_due`] so the cadence is testable
@@ -564,23 +575,22 @@ impl super::App {
     /// stalled transfer from a slow one, having no clock.
     ///
     /// This is that clock. `Parser::capture_progress` advances only while
-    /// bytes arrive, so a figure unchanged across two consecutive samples
-    /// means nothing has arrived in at least one full interval.
+    /// bytes arrive, so a figure that does not move between samples means
+    /// nothing arrived in between.
     ///
-    /// "One full interval" holds only because the caller rate-limits the pass.
-    /// This function reads a cadence it does not enforce: called once per
-    /// event-loop wake, consecutive samples are milliseconds apart, and then a
-    /// transfer that is merely slow looks stalled and the duration reported
-    /// below is wrong by the ratio between a wake and an interval.
+    /// The interval each sample represents holds only because the caller
+    /// rate-limits the pass. This function reads a cadence it does not
+    /// enforce: called once per event-loop wake, consecutive samples would be
+    /// milliseconds apart, a merely-slow transfer would look stalled, and the
+    /// duration reported below would be wrong by the ratio between a wake and
+    /// an interval.
     ///
-    /// Two samples rather than one, deliberately. A single reading proves
-    /// nothing on its own — there is no earlier figure to compare it against.
-    /// Two consecutive equal readings bound the silence at one full interval:
-    /// the transfer may have gone quiet at any point between them, so what is
-    /// proven is "nothing arrived for up to [`RETENTION_SAMPLE_INTERVAL`]",
-    /// which is what the log below reports. A transfer slower than that reads
-    /// as stalled and loses its picture; widening the window costs staging
-    /// held longer against a transfer that is genuinely dead.
+    /// [`STALL_SAMPLES_BEFORE_CANCEL`] unchanged readings are required, not
+    /// one. A single reading proves nothing on its own — there is no earlier
+    /// figure to compare it against — and two consecutive equal readings bound
+    /// the silence at only one interval, which a large image over a congested
+    /// link can exceed while perfectly alive. Any movement resets the count,
+    /// so the threshold is consecutive silence rather than cumulative.
     ///
     /// Skips a pane whose parser lock is contended: a pane actively parsing is
     /// by definition not stalled.
@@ -590,31 +600,42 @@ impl super::App {
                 let Some(mut parser) = pane.parser.try_lock() else {
                     // Contended means it is parsing, which means it is moving.
                     pane.last_capture_progress = None;
+                    pane.capture_stall_samples = 0;
                     continue;
                 };
                 if parser.live_capture_count() == 0 {
                     pane.last_capture_progress = None;
+                    pane.capture_stall_samples = 0;
                     continue;
                 }
 
                 let progress = parser.capture_progress();
-                let stalled = pane.last_capture_progress == Some(progress);
+                let unchanged = pane.last_capture_progress == Some(progress);
                 pane.last_capture_progress = Some(progress);
-                if !stalled {
+                if !unchanged {
+                    // Any movement clears the evidence: the threshold is
+                    // consecutive silence, not cumulative.
+                    pane.capture_stall_samples = 0;
+                    continue;
+                }
+                pane.capture_stall_samples = pane.capture_stall_samples.saturating_add(1);
+                if pane.capture_stall_samples < STALL_SAMPLES_BEFORE_CANCEL {
                     continue;
                 }
 
                 let released = parser.cancel_capture();
                 drop(parser);
                 pane.last_capture_progress = None;
+                pane.capture_stall_samples = 0;
                 if released > 0 {
                     tracing::warn!(
-                        target: "memory",
+                        target: "memory::reclaimed",
                         pane = pane_id,
                         released_bytes = released,
-                        stalled_for = ?RETENTION_SAMPLE_INTERVAL,
-                        "cancelled a media capture that stopped receiving; the transfer was \
-                         abandoned and its staging is reclaimed"
+                        stalled_for = ?RETENTION_SAMPLE_INTERVAL
+                            .saturating_mul(u32::from(STALL_SAMPLES_BEFORE_CANCEL)),
+                        "cancelled a media capture that stopped receiving; the image will not \
+                         appear and its staging is reclaimed"
                     );
                 }
             }
@@ -660,11 +681,12 @@ impl super::App {
         );
         if reclaimed > 0 {
             tracing::warn!(
-                target: "memory",
+                target: "memory::reclaimed",
                 reclaimed_bytes = reclaimed,
                 process_retained_bytes = super::media::process_inline_media_bytes(),
                 ceiling = super::media::MAX_PROCESS_INLINE_MEDIA_BYTES,
-                "revisited idle panes holding an inline-media budget sized for a smaller session"
+                "discarded inline images from idle panes to stay within the process ceiling; \
+                 those images are gone and cannot be redrawn without re-sending them"
             );
         }
     }

@@ -645,13 +645,18 @@ fn a_slow_capture_survives_the_wakes_inside_one_interval() {
     );
 }
 
-/// A genuinely stalled capture is still reclaimed, across two intervals.
+/// A genuinely stalled capture is still reclaimed, once the threshold is met.
 ///
 /// The guard above must not be satisfied by never reclaiming at all. This is
-/// the same shape — a capture with no bytes arriving — sampled across two full
-/// intervals rather than inside one, and it must be cancelled.
+/// the same shape — a capture with no bytes arriving — sampled across enough
+/// intervals to meet [`STALL_SAMPLES_BEFORE_CANCEL`], and it must be
+/// cancelled.
+///
+/// The loop counts derive from the constant rather than hardcoding an interval
+/// count, so raising the threshold cannot leave this test asserting the old
+/// one while still passing.
 #[test]
-fn a_stalled_capture_is_still_reclaimed_across_two_intervals() {
+fn a_stalled_capture_is_still_reclaimed_across_the_stall_threshold() {
     let mut app = App::new(
         sonicterm_cfg::theme::Theme::default(),
         sonicterm_cfg::config::Config::default(),
@@ -673,23 +678,80 @@ fn a_stalled_capture_is_still_reclaimed_across_two_intervals() {
     }
 
     let start = Instant::now();
-    // First sample records the progress figure; one quiet reading is not
-    // enough, because a slow transfer looks the same at this point.
-    app.sample_pane_retention(start);
-    assert_eq!(
-        app.__test_pane_capture_count(window, pane_id),
-        Some(1),
-        "one quiet sample must not cancel"
-    );
+    // The first sample only records a figure — there is nothing to compare it
+    // against — so reaching the threshold takes one more sample than the
+    // threshold itself.
+    let samples_to_cancel = u32::from(STALL_SAMPLES_BEFORE_CANCEL) + 1;
+    for sample in 0..samples_to_cancel - 1 {
+        app.sample_pane_retention(start + RETENTION_SAMPLE_INTERVAL * sample);
+        assert_eq!(
+            app.__test_pane_capture_count(window, pane_id),
+            Some(1),
+            "sample {sample} of {samples_to_cancel} must not cancel: below the threshold a \
+             merely-slow transfer is indistinguishable from a dead one"
+        );
+    }
 
-    // Second sample, one interval later, with nothing having arrived.
-    app.sample_pane_retention(start + RETENTION_SAMPLE_INTERVAL);
+    app.sample_pane_retention(start + RETENTION_SAMPLE_INTERVAL * (samples_to_cancel - 1));
     assert_eq!(
         app.__test_pane_capture_count(window, pane_id),
         Some(0),
-        "a capture quiet across two intervals must still be reclaimed; rate-limiting the pass \
-         must delay reclamation, never remove it"
+        "a capture quiet across the full threshold must still be reclaimed; widening the \
+         window must delay reclamation, never remove it"
     );
+}
+
+/// Bytes arriving reset the stall count, so silence must be consecutive.
+///
+/// Without this, a transfer that goes quiet for one interval, delivers a chunk,
+/// then goes quiet again would accumulate its way to cancellation despite never
+/// being silent for the threshold — the count would measure total quiet samples
+/// rather than consecutive ones. That is exactly the trickling-but-alive
+/// transfer the threshold exists to protect.
+#[test]
+fn bytes_arriving_reset_the_stall_count() {
+    let mut app = App::new(
+        sonicterm_cfg::theme::Theme::default(),
+        sonicterm_cfg::config::Config::default(),
+        sonicterm_cfg::keymap::Keymap::default(),
+    );
+    let window = app.__test_seed_child_window(&["one"]);
+    let pane_id = *app
+        .__test_child_pane_ids(window)
+        .expect("the seeded window exists")
+        .first()
+        .expect("the window has a pane");
+
+    let mut chunk = Vec::with_capacity(512 * 1024 + 3);
+    chunk.extend_from_slice(b"\x1b_G");
+    chunk.resize(512 * 1024, b'A');
+    {
+        let pane = seeded_pane(&app, window, pane_id);
+        pane.parser.lock().advance(&chunk);
+    }
+
+    let start = Instant::now();
+    let mut elapsed = 0u32;
+
+    // Enough alternating quiet-then-a-byte rounds that a cumulative counter
+    // would have cancelled several times over.
+    for _round in 0..4 {
+        for _ in 0..u32::from(STALL_SAMPLES_BEFORE_CANCEL) {
+            app.sample_pane_retention(start + RETENTION_SAMPLE_INTERVAL * elapsed);
+            elapsed += 1;
+        }
+        // One byte: the transfer is slow, not dead.
+        {
+            let pane = seeded_pane(&app, window, pane_id);
+            pane.parser.lock().advance(b"A");
+        }
+        assert_eq!(
+            app.__test_pane_capture_count(window, pane_id),
+            Some(1),
+            "a transfer still delivering bytes must never be cancelled, however slowly it \
+             delivers them"
+        );
+    }
 }
 
 /// Fill a pane the way its PTY thread does: merge, then trim under charge.
