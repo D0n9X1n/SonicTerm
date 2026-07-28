@@ -6701,6 +6701,7 @@ impl GpuRenderer {
                 let color = cell_fg(cell, theme, fg_default);
                 let rgba =
                     if info.is_color { [1.0, 1.0, 1.0, 1.0] } else { resolve_fg(*col, color) };
+                trace_white_glyph(cell.ch, rgba, (gx, gy, gw, gh), "ascii");
                 if glyph_draw_is_degenerate(&info) {
                     tracing::debug!(
                         target: "sonic::render::glyph",
@@ -7058,6 +7059,7 @@ impl GpuRenderer {
                 };
                 let (gx, gy, gw, gh) =
                     sonicterm_render_model::geometry::snap_to_device_pixels((gx, gy, gw, gh), 1.0);
+                trace_white_glyph(lead_cell.ch, rgba, (gx, gy, gw, gh), "shaped_run");
                 if glyph_draw_is_degenerate(&info) {
                     tracing::warn!(
                         target: "sonic::render::glyph",
@@ -7127,6 +7129,7 @@ impl GpuRenderer {
                 if info.is_color { [1.0, 1.0, 1.0, 1.0] } else { resolve_fg(g.lead_col, color) };
             let (gx, gy, gw, gh) =
                 sonicterm_render_model::geometry::snap_to_device_pixels((gx, gy, gw, gh), 1.0);
+            trace_white_glyph(lead_cell.ch, rgba, (gx, gy, gw, gh), "ligature");
             if glyph_draw_is_degenerate(&info) {
                 tracing::warn!(
                     target: "sonic::render::glyph",
@@ -7157,6 +7160,31 @@ impl Drop for GpuRenderer {
         // churn, and stay above it when a renderer survives.
         LIVE_RENDERERS.fetch_sub(1, Ordering::AcqRel);
     }
+}
+
+/// Report a glyph about to be drawn in pure white.
+///
+/// `[1.0, 1.0, 1.0, 1.0]` is emitted on exactly one branch — the colour-glyph
+/// path, which deliberately skips the per-cell foreground. Stray pure-white
+/// pixels have been reported against a theme whose text is `(190, 183, 150)`,
+/// so a glyph carrying this colour is the only draw that could produce them.
+///
+/// Logging every one makes the question answerable from a capture: if the
+/// pixels appear and this fired, the codepoint and rect name the glyph; if
+/// they appear and this never fired, no glyph draw is responsible and the
+/// whole glyph path is excluded.
+fn trace_white_glyph(ch: char, rgba: [f32; 4], rect: (f32, f32, f32, f32), site: &'static str) {
+    if rgba != [1.0, 1.0, 1.0, 1.0] {
+        return;
+    }
+    tracing::warn!(
+        target: "sonic::render::glyph",
+        ch = ?ch,
+        codepoint = format!("U+{:04X}", ch as u32),
+        rect = ?rect,
+        site,
+        "emitting a glyph in pure white"
+    );
 }
 
 /// Would drawing this glyph sample the atlas outside its own tile?
