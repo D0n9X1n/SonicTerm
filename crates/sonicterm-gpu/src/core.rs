@@ -6701,6 +6701,19 @@ impl GpuRenderer {
                 let color = cell_fg(cell, theme, fg_default);
                 let rgba =
                     if info.is_color { [1.0, 1.0, 1.0, 1.0] } else { resolve_fg(*col, color) };
+                trace_white_glyph(cell.ch, rgba, (gx, gy, gw, gh), "ascii");
+                if glyph_draw_is_degenerate(&info) {
+                    tracing::debug!(
+                        target: "sonic::render::glyph",
+                        ch = ?cell.ch,
+                        is_color = info.is_color,
+                        px_size = ?info.px_size,
+                        uv = ?info.uv,
+                        site = "ascii",
+                        "skipped a degenerate glyph draw that would sample the atlas origin"
+                    );
+                    continue;
+                }
                 glyph_instances.push(GlyphInstance {
                     rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
                     uv: info.uv,
@@ -7046,6 +7059,20 @@ impl GpuRenderer {
                 };
                 let (gx, gy, gw, gh) =
                     sonicterm_render_model::geometry::snap_to_device_pixels((gx, gy, gw, gh), 1.0);
+                trace_white_glyph(lead_cell.ch, rgba, (gx, gy, gw, gh), "shaped_run");
+                if glyph_draw_is_degenerate(&info) {
+                    tracing::warn!(
+                        target: "sonic::render::glyph",
+                        ch = ?lead_cell.ch,
+                        codepoint = format!("U+{:04X}", lead_cell.ch as u32),
+                        is_color = info.is_color,
+                        px_size = ?info.px_size,
+                        uv = ?info.uv,
+                        site = "shaped_run",
+                        "skipped a degenerate glyph draw that would sample the atlas origin"
+                    );
+                    continue;
+                }
                 glyph_instances.push(GlyphInstance {
                     rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
                     uv: info.uv,
@@ -7102,6 +7129,20 @@ impl GpuRenderer {
                 if info.is_color { [1.0, 1.0, 1.0, 1.0] } else { resolve_fg(g.lead_col, color) };
             let (gx, gy, gw, gh) =
                 sonicterm_render_model::geometry::snap_to_device_pixels((gx, gy, gw, gh), 1.0);
+            trace_white_glyph(lead_cell.ch, rgba, (gx, gy, gw, gh), "ligature");
+            if glyph_draw_is_degenerate(&info) {
+                tracing::warn!(
+                    target: "sonic::render::glyph",
+                    ch = ?lead_cell.ch,
+                    codepoint = format!("U+{:04X}", lead_cell.ch as u32),
+                    is_color = info.is_color,
+                    px_size = ?info.px_size,
+                    uv = ?info.uv,
+                    site = "ligature",
+                    "skipped a degenerate glyph draw that would sample the atlas origin"
+                );
+                continue;
+            }
             glyph_instances.push(GlyphInstance {
                 rect: px_to_ndc(gx, gy, gw, gh, sw, sh),
                 uv: info.uv,
@@ -7119,6 +7160,53 @@ impl Drop for GpuRenderer {
         // churn, and stay above it when a renderer survives.
         LIVE_RENDERERS.fetch_sub(1, Ordering::AcqRel);
     }
+}
+
+/// Report a glyph about to be drawn in pure white.
+///
+/// `[1.0, 1.0, 1.0, 1.0]` is emitted on exactly one branch — the colour-glyph
+/// path, which deliberately skips the per-cell foreground. Stray pure-white
+/// pixels have been reported against a theme whose text is `(190, 183, 150)`,
+/// so a glyph carrying this colour is the only draw that could produce them.
+///
+/// Logging every one makes the question answerable from a capture: if the
+/// pixels appear and this fired, the codepoint and rect name the glyph; if
+/// they appear and this never fired, no glyph draw is responsible and the
+/// whole glyph path is excluded.
+fn trace_white_glyph(ch: char, rgba: [f32; 4], rect: (f32, f32, f32, f32), site: &'static str) {
+    if rgba != [1.0, 1.0, 1.0, 1.0] {
+        return;
+    }
+    tracing::warn!(
+        target: "sonic::render::glyph",
+        ch = ?ch,
+        codepoint = format!("U+{:04X}", ch as u32),
+        rect = ?rect,
+        site,
+        "emitting a glyph in pure white"
+    );
+}
+
+/// Would drawing this glyph sample the atlas outside its own tile?
+///
+/// The atlas caches an empty or failed rasterization as a sentinel with a
+/// zero-area UV, `[0.0, 0.0, 0.0, 0.0]`, and its comment states the renderer
+/// skips such a draw. Nothing did. `(0, 0)` is not "nowhere": it is the
+/// atlas's top-left texel, which the shelf packer hands to the first glyph of
+/// the session, so a zero-area sample reads that glyph's corner ink.
+///
+/// A monochrome sentinel would at least take the cell's foreground. A block
+/// glyph's does not — block tiles carry `is_color: true`, which makes the
+/// renderer paint the texture's own colour, so an opaque corner texel arrives
+/// as pure white whatever the theme says.
+///
+/// Returns true when the instance must not be emitted.
+#[must_use]
+fn glyph_draw_is_degenerate(info: &sonicterm_text::glyph_atlas::GlyphInfo) -> bool {
+    info.px_size[0] == 0
+        || info.px_size[1] == 0
+        || info.uv[2] <= info.uv[0]
+        || info.uv[3] <= info.uv[1]
 }
 
 /// Fraction a dim/faint (`SGR 2`) cell's foreground is blended toward its

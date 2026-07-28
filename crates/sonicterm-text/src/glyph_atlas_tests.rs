@@ -470,3 +470,71 @@ fn reusing_a_freed_slot_leaves_the_evicted_glyphs_pixels_in_the_margin() {
         "UV bottom edge must stay within the tile, not the slot: {v1}"
     );
 }
+
+/// An empty tile is cached with a zero-area UV whose corners are all
+/// `(0.0, 0.0)`. The atlas comment says the renderer skips such a draw, and
+/// this pins the property that makes that skip load-bearing: `(0,0)` is not
+/// "nowhere", it is the atlas's top-left texel, which the shelf packer hands
+/// to the first glyph of the session. Sampling it draws that glyph's corner.
+///
+/// For a block glyph the consequence is worse than a wrong shade. Block tiles
+/// carry `is_color: true`, so the renderer skips the per-cell foreground and
+/// paints the texture's own colour — a fully-opaque corner texel arrives as
+/// pure white regardless of theme.
+#[test]
+fn a_zero_area_uv_points_at_the_first_packed_glyph_not_at_nothing() {
+    let mut atlas = GlyphAtlas::new(64, 64);
+
+    // The first glyph packed lands at the atlas origin.
+    let mut opaque = TileRasterizer(RasterTile {
+        width: 4,
+        height: 4,
+        offset_x: 0,
+        offset_y: 0,
+        advance: 4.0,
+        coverage: vec![255; 16],
+        is_color: false,
+        is_subpixel: false,
+    });
+    let first = GlyphKey { ch: 'A', font_slot: 0, weight_bold: false, italic: false, glyph_id: 1 };
+    let info = atlas.get_or_insert(first, &mut opaque).expect("first glyph packs");
+    assert_eq!(info.uv[0], 0.0, "the first glyph is packed at the atlas origin");
+    assert_eq!(info.uv[1], 0.0, "the first glyph is packed at the atlas origin");
+    assert_eq!(
+        atlas.sample(0, 0),
+        255,
+        "so texel (0,0) now holds fully-opaque ink, not transparency"
+    );
+
+    // An empty tile caches the zero-area sentinel.
+    let mut empty = TileRasterizer(RasterTile {
+        width: 0,
+        height: 0,
+        offset_x: 0,
+        offset_y: 0,
+        advance: 0.0,
+        coverage: Vec::new(),
+        is_color: true,
+        is_subpixel: false,
+    });
+    let blank = GlyphKey { ch: ' ', font_slot: 0, weight_bold: false, italic: false, glyph_id: 2 };
+    let sentinel = atlas.get_or_insert(blank, &mut empty).expect("empty tile caches a sentinel");
+
+    assert_eq!(sentinel.uv, [0.0, 0.0, 0.0, 0.0], "empty tiles cache a zero-area UV");
+    assert_eq!(sentinel.px_size, [0, 0], "and zero pixel size");
+    assert!(
+        sentinel.is_color,
+        "a block glyph's empty tile keeps is_color, which makes the renderer paint the \
+         texture's own colour rather than the cell foreground"
+    );
+
+    // The sentinel's UV corner is exactly the texel the first glyph occupies.
+    // A renderer that draws this instance samples opaque ink, and for a
+    // colour tile paints it as-is. The skip is what prevents that, so it has
+    // to exist rather than be assumed.
+    assert_eq!(
+        atlas.sample((sentinel.uv[0] * 64.0) as u32, (sentinel.uv[1] * 64.0) as u32),
+        255,
+        "the zero-area UV addresses opaque ink, so emitting the draw is not harmless"
+    );
+}
