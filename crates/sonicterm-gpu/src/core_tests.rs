@@ -1639,3 +1639,33 @@ fn the_tabled_software_frame_bound_is_the_surface_clamp() {
          a surface that cannot exist"
     );
 }
+
+#[test]
+fn a_zero_area_glyph_is_recognised_as_degenerate() {
+    use sonicterm_text::glyph_atlas::GlyphInfo;
+    let base = GlyphInfo {
+        uv: [0.1, 0.1, 0.2, 0.2],
+        px_size: [8, 12],
+        px_offset: [0, 0],
+        advance: 8.0,
+        is_color: false,
+        is_subpixel: false,
+    };
+
+    assert!(!glyph_draw_is_degenerate(&base), "an ordinary glyph must still draw");
+
+    // The atlas's empty/failed-rasterization sentinel. `(0,0)` is the atlas
+    // origin, which the shelf packer gives to the first glyph of the session,
+    // so drawing this samples that glyph's corner ink.
+    let sentinel = GlyphInfo { uv: [0.0, 0.0, 0.0, 0.0], px_size: [0, 0], ..base };
+    assert!(glyph_draw_is_degenerate(&sentinel), "the zero-area sentinel must be skipped");
+
+    // Zero on either axis alone is still nothing to draw.
+    assert!(glyph_draw_is_degenerate(&GlyphInfo { px_size: [0, 12], ..base }));
+    assert!(glyph_draw_is_degenerate(&GlyphInfo { px_size: [8, 0], ..base }));
+
+    // An inverted or empty UV rect addresses no texels of its own.
+    assert!(glyph_draw_is_degenerate(&GlyphInfo { uv: [0.2, 0.1, 0.2, 0.2], ..base }));
+    assert!(glyph_draw_is_degenerate(&GlyphInfo { uv: [0.1, 0.2, 0.2, 0.2], ..base }));
+    assert!(glyph_draw_is_degenerate(&GlyphInfo { uv: [0.3, 0.1, 0.2, 0.2], ..base }));
+}
