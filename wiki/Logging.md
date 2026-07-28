@@ -64,6 +64,27 @@ Set the level to `debug` and let the session run for a minute or two:
 level = "debug"
 ```
 
+### If an image disappeared, you do not need `debug`
+
+To stay within its memory budget SonicTerm sometimes discards something you
+can see: an image transfer that stopped arriving, or older images in panes you
+have left idle. Those two events are **not** diagnostics, so they are written
+at the default level — you do not have to have enabled `debug` beforehand:
+
+```
+grep 'memory::reclaimed' ~/.sonicterm/logs/sonicterm.log
+```
+
+Two lines can appear there:
+
+| Line | What happened | What you can do |
+| --- | --- | --- |
+| `cancelled a media capture that stopped receiving` | an image transfer delivered nothing for a full minute and was abandoned; the image will not appear | re-send it. Common after a laptop sleeps mid-transfer or an SSH link drops |
+| `discarded inline images from idle panes` | the total decoded image memory crossed the process ceiling, so older images were dropped from panes you were not using | re-send the images you still need, or keep fewer panes holding images |
+
+Both lines carry the byte figures involved. Everything else about memory is
+diagnostics and needs `debug`, described next.
+
 The `memory` target samples what each pane holds at most once every 30
 seconds — sampling happens on the idle-wake path, so a window that never
 wakes produces no samples at all — and writes
@@ -429,6 +450,26 @@ render-timing 配置项。
 [logging]
 level = "debug"
 ```
+
+### 如果图像消失了，无需开启 `debug`
+
+为了控制内存占用，SonicTerm 有时会丢弃你能看到的内容：停止传输的图像，或
+闲置面板中较早的图像。这两类事件**不是**诊断信息，因此在默认级别下即会写
+入日志——无需事先开启 `debug`：
+
+```
+grep 'memory::reclaimed' ~/.sonicterm/logs/sonicterm.log
+```
+
+其中可能出现两种日志行：
+
+| 日志行 | 发生了什么 | 可采取的措施 |
+| --- | --- | --- |
+| `cancelled a media capture that stopped receiving` | 图像传输整整一分钟没有新数据，已被放弃；该图像不会显示 | 重新发送。笔记本在传输中途休眠或 SSH 连接中断后常见 |
+| `discarded inline images from idle panes` | 已解码图像的总内存超出进程上限，因此丢弃了未使用面板中较早的图像 | 重新发送仍需要的图像，或减少持有图像的面板数量 |
+
+两种日志行都会附带相关的字节数。其余内存信息均属诊断范畴，需要 `debug`
+级别，见下文。
 
 `memory` 目标最多每 30 秒采样一次每个面板占用的内存——采样发生在空闲唤醒
 路径上，因此完全不唤醒的窗口不会产生任何采样——为每个面板写入一行

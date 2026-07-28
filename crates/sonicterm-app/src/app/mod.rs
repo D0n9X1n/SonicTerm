@@ -1472,6 +1472,16 @@ pub struct PaneState {
     /// remembers what the capture had received last time and cancels only a
     /// capture that has not moved across consecutive samples.
     pub(crate) last_capture_progress: Option<usize>,
+    /// How many consecutive samples have seen `last_capture_progress`
+    /// unchanged.
+    ///
+    /// A count rather than a flag because one unchanged reading proves only
+    /// one sample interval of silence, and a transfer merely slower than that
+    /// interval reads as stalled — cancelling it costs the user a picture they
+    /// were waiting for. Requiring the figure to hold still twice buys a
+    /// second interval of evidence, so the threshold is the full
+    /// `2 × RETENTION_SAMPLE_INTERVAL` the cancellation reports.
+    pub(crate) capture_stall_samples: u8,
     pub pty: Option<PtyHandle>,
     pub redraw_target: Arc<Mutex<Option<WindowId>>>,
     /// Absolute row (scrollback-relative) that should appear at the top of
@@ -1540,6 +1550,7 @@ impl PaneState {
             charges: HashMap::new(),
             parser,
             last_capture_progress: None,
+            capture_stall_samples: 0,
             pty,
             redraw_target: Arc::new(Mutex::new(None)),
             viewport_top_abs: None,

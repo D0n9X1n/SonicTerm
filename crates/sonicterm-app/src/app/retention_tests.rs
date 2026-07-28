@@ -645,13 +645,18 @@ fn a_slow_capture_survives_the_wakes_inside_one_interval() {
     );
 }
 
-/// A genuinely stalled capture is still reclaimed, across two intervals.
+/// A genuinely stalled capture is still reclaimed, once the threshold is met.
 ///
 /// The guard above must not be satisfied by never reclaiming at all. This is
-/// the same shape — a capture with no bytes arriving — sampled across two full
-/// intervals rather than inside one, and it must be cancelled.
+/// the same shape — a capture with no bytes arriving — sampled across enough
+/// intervals to meet [`STALL_SAMPLES_BEFORE_CANCEL`], and it must be
+/// cancelled.
+///
+/// The loop counts derive from the constant rather than hardcoding an interval
+/// count, so raising the threshold cannot leave this test asserting the old
+/// one while still passing.
 #[test]
-fn a_stalled_capture_is_still_reclaimed_across_two_intervals() {
+fn a_stalled_capture_is_still_reclaimed_across_the_stall_threshold() {
     let mut app = App::new(
         sonicterm_cfg::theme::Theme::default(),
         sonicterm_cfg::config::Config::default(),
@@ -673,23 +678,80 @@ fn a_stalled_capture_is_still_reclaimed_across_two_intervals() {
     }
 
     let start = Instant::now();
-    // First sample records the progress figure; one quiet reading is not
-    // enough, because a slow transfer looks the same at this point.
-    app.sample_pane_retention(start);
-    assert_eq!(
-        app.__test_pane_capture_count(window, pane_id),
-        Some(1),
-        "one quiet sample must not cancel"
-    );
+    // The first sample only records a figure — there is nothing to compare it
+    // against — so reaching the threshold takes one more sample than the
+    // threshold itself.
+    let samples_to_cancel = u32::from(STALL_SAMPLES_BEFORE_CANCEL) + 1;
+    for sample in 0..samples_to_cancel - 1 {
+        app.sample_pane_retention(start + RETENTION_SAMPLE_INTERVAL * sample);
+        assert_eq!(
+            app.__test_pane_capture_count(window, pane_id),
+            Some(1),
+            "sample {sample} of {samples_to_cancel} must not cancel: below the threshold a \
+             merely-slow transfer is indistinguishable from a dead one"
+        );
+    }
 
-    // Second sample, one interval later, with nothing having arrived.
-    app.sample_pane_retention(start + RETENTION_SAMPLE_INTERVAL);
+    app.sample_pane_retention(start + RETENTION_SAMPLE_INTERVAL * (samples_to_cancel - 1));
     assert_eq!(
         app.__test_pane_capture_count(window, pane_id),
         Some(0),
-        "a capture quiet across two intervals must still be reclaimed; rate-limiting the pass \
-         must delay reclamation, never remove it"
+        "a capture quiet across the full threshold must still be reclaimed; widening the \
+         window must delay reclamation, never remove it"
     );
+}
+
+/// Bytes arriving reset the stall count, so silence must be consecutive.
+///
+/// Without this, a transfer that goes quiet for one interval, delivers a chunk,
+/// then goes quiet again would accumulate its way to cancellation despite never
+/// being silent for the threshold — the count would measure total quiet samples
+/// rather than consecutive ones. That is exactly the trickling-but-alive
+/// transfer the threshold exists to protect.
+#[test]
+fn bytes_arriving_reset_the_stall_count() {
+    let mut app = App::new(
+        sonicterm_cfg::theme::Theme::default(),
+        sonicterm_cfg::config::Config::default(),
+        sonicterm_cfg::keymap::Keymap::default(),
+    );
+    let window = app.__test_seed_child_window(&["one"]);
+    let pane_id = *app
+        .__test_child_pane_ids(window)
+        .expect("the seeded window exists")
+        .first()
+        .expect("the window has a pane");
+
+    let mut chunk = Vec::with_capacity(512 * 1024 + 3);
+    chunk.extend_from_slice(b"\x1b_G");
+    chunk.resize(512 * 1024, b'A');
+    {
+        let pane = seeded_pane(&app, window, pane_id);
+        pane.parser.lock().advance(&chunk);
+    }
+
+    let start = Instant::now();
+    let mut elapsed = 0u32;
+
+    // Enough alternating quiet-then-a-byte rounds that a cumulative counter
+    // would have cancelled several times over.
+    for _round in 0..4 {
+        for _ in 0..u32::from(STALL_SAMPLES_BEFORE_CANCEL) {
+            app.sample_pane_retention(start + RETENTION_SAMPLE_INTERVAL * elapsed);
+            elapsed += 1;
+        }
+        // One byte: the transfer is slow, not dead.
+        {
+            let pane = seeded_pane(&app, window, pane_id);
+            pane.parser.lock().advance(b"A");
+        }
+        assert_eq!(
+            app.__test_pane_capture_count(window, pane_id),
+            Some(1),
+            "a transfer still delivering bytes must never be cancelled, however slowly it \
+             delivers them"
+        );
+    }
 }
 
 /// Fill a pane the way its PTY thread does: merge, then trim under charge.
@@ -904,4 +966,88 @@ fn media_is_reclaimed_with_the_memory_log_switched_off() {
          in a shipped build"
     );
     assert!(after > 0, "the pane was trimmed to nothing; it must keep its most recent image");
+}
+
+/// The session total returns under the process ceiling as panes accumulate.
+///
+/// This is the shape behind the incidents this milestone exists to close:
+/// growth to 80 GB on macOS and 51 GB on Windows with every individual seam
+/// inside its own ceiling. Per-seam bounds do not compose, and the session
+/// figure was *reported* and never *asserted* — reporting a leak and
+/// preventing one are different claims.
+///
+/// **Panes are created one at a time, each decoding before the next exists.**
+/// That is what produces the divergence: a pane only re-evaluates its budget
+/// while *decoding*, so pane 0 is admitted under a nearly-whole-ceiling budget
+/// and then goes idle holding it while the pane count climbs underneath. Two
+/// earlier versions filled a pre-seeded set of panes instead; each pane then
+/// got the same small share, the total never crossed the ceiling at all, and
+/// both passed with the convergence deliberately removed. They proved nothing.
+///
+/// The figure before the pass is asserted to be *over* the ceiling, so the
+/// test cannot be satisfied by a session that was never in trouble — that
+/// precondition is what the earlier versions silently lacked.
+///
+/// **Two independent mechanisms hold this bound**, which falsification
+/// established and is worth stating: the over-ceiling floor in
+/// `trim_inline_images_charged`, which caps every pane that is *decoding*
+/// while the process is over budget, and `trim_panes_over_media_ceiling`,
+/// which revisits panes that are *idle*. Removing either alone leaves the
+/// total bounded — this test fails only when the idle-pane walk goes, because
+/// that is the one this fixture's post-decode state depends on. A single test
+/// cannot pin both; the decoding-pane cap is pinned separately by the media
+/// tests.
+#[test]
+fn the_session_total_returns_under_the_ceiling_as_panes_accumulate() {
+    // The charge counters are process-global and this test holds 24 panes'
+    // worth of them. Sibling tests measure the per-pane budget derived from
+    // that count, so without this they see a budget shrunk by panes they
+    // never created and report a defect that is not there.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = App::new(
+        sonicterm_cfg::theme::Theme::default(),
+        sonicterm_cfg::config::Config::default(),
+        sonicterm_cfg::keymap::Keymap::default(),
+    );
+
+    const PANES: usize = 24;
+    const IMAGE_BYTES: usize = 4 * 1024 * 1024;
+    const IMAGES_PER_PANE: usize = 20;
+
+    let ceiling = crate::app::media::MAX_PROCESS_INLINE_MEDIA_BYTES;
+    let mut next_id = 0u64;
+
+    // One window per pane, seeded and filled before the next is created, so
+    // each decodes against the live count as it was at that moment.
+    for index in 0..PANES {
+        let title = format!("pane{index}");
+        let window = app.__test_seed_child_window(&[title.as_str()]);
+        let pane_id = *app
+            .__test_child_pane_ids(window)
+            .expect("the seeded window exists")
+            .first()
+            .expect("the window has a pane");
+        let pane = seeded_pane(&app, window, pane_id);
+        decode_into(pane, &mut next_id, IMAGES_PER_PANE, IMAGE_BYTES);
+    }
+
+    let after_decode = crate::app::media::process_inline_media_bytes();
+    assert!(
+        after_decode > ceiling,
+        "the session must actually get over the ceiling or the reclaim assertion below is \
+         satisfied by a session that was never in trouble: {after_decode} !> {ceiling}"
+    );
+
+    // The pass the idle-wake path runs. This is what revisits panes that are
+    // idle and still holding a budget sized for a smaller session.
+    app.sample_pane_retention(Instant::now());
+    let after_reclaim = crate::app::media::process_inline_media_bytes();
+
+    assert!(
+        after_reclaim <= ceiling,
+        "decoded inline media stayed at {after_reclaim} bytes against a {ceiling}-byte \
+         process ceiling after the reclaim pass (before it: {after_decode}). Per-pane \
+         budgets bounding each pane while the sum runs away is exactly the composition \
+         failure behind the multi-gigabyte growth reports"
+    );
 }

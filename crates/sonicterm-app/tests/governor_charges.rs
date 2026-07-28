@@ -11,7 +11,7 @@
 //! wrong. That is the shape of the charge-lifetime defect, where a cap kept
 //! reporting itself as enforced after it had stopped enforcing.
 
-use sonicterm_app::app::retention::seam_classes;
+use sonicterm_app::app::retention::{seam_classes, STALL_SAMPLES_BEFORE_CANCEL};
 use sonicterm_app::app::App;
 use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
 
@@ -465,19 +465,25 @@ fn a_stalled_capture_is_reclaimed_by_the_sampling_pass() {
     let held = app.__test_pane_retention(child, pane_id).expect("measures").parser.bytes;
     assert!(held > 0, "precondition: the capture is holding staging");
 
-    // First sample: records the progress figure, cancels nothing. A capture
-    // seen once might simply be slow.
-    app.__test_sample_pane_retention_now();
-    let after_first = app.__test_pane_retention(child, pane_id).expect("measures").parser.bytes;
-    assert_eq!(
-        after_first, held,
-        "one quiet sample must not cancel; a slow transfer looks identical at this point"
-    );
+    // The first sample only records a figure — there is nothing to compare it
+    // against — so reaching the threshold takes one sample more than the
+    // threshold itself. Derived from the constant rather than hardcoded, so
+    // moving the threshold cannot leave this asserting the old one.
+    let samples_to_cancel = u32::from(STALL_SAMPLES_BEFORE_CANCEL) + 1;
+    for sample in 0..samples_to_cancel - 1 {
+        app.__test_sample_pane_retention_now();
+        let still_held = app.__test_pane_retention(child, pane_id).expect("measures").parser.bytes;
+        assert_eq!(
+            still_held, held,
+            "sample {sample} of {samples_to_cancel} must not cancel; below the threshold a \
+             slow transfer looks identical to a dead one"
+        );
+    }
 
-    // Second sample with no bytes in between: now it is stalled.
+    // The sample that meets the threshold.
     app.__test_sample_pane_retention_now();
-    let after_second = app.__test_pane_retention(child, pane_id).expect("measures").parser.bytes;
-    assert_eq!(after_second, 0, "a capture quiet across two samples must be reclaimed");
+    let after = app.__test_pane_retention(child, pane_id).expect("measures").parser.bytes;
+    assert_eq!(after, 0, "a capture quiet across the full threshold must be reclaimed");
 }
 
 /// A slow transfer must survive.

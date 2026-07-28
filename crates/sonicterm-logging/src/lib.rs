@@ -74,6 +74,7 @@ pub struct LoggingGuard {
 /// what stops the next target from being added the same way.
 pub const CUSTOM_DEBUG_TARGETS: &[&str] = &[
     "memory",
+    "memory::reclaimed",
     "state_machine",
     "state_machine.log",
     "render_timing",
@@ -82,10 +83,29 @@ pub const CUSTOM_DEBUG_TARGETS: &[&str] = &[
     "sonic::render::glyph",
 ];
 
+/// The target for reclamation that **destroys something the user can see**.
+///
+/// Separate from `memory` because the two answer different questions. `memory`
+/// is diagnostics — 34 call sites describing what a session holds — and is
+/// rightly off unless someone is investigating. This target carries the events
+/// where SonicTerm discarded a user's data to stay within a budget: an
+/// abandoned image transfer, a trimmed pane's images. Those are not
+/// diagnostics. A user whose image vanished is owed a reason whether or not
+/// they had the foresight to enable debug logging first.
+///
+/// Admitted at every level, including the default `warn`, for the same reason
+/// `sonic::glyph_atlas` is: an exhaustion the user experiences must reach the
+/// log the user actually has.
+pub const MEMORY_RECLAIMED_TARGET: &str = "memory::reclaimed";
+
 /// Default user-facing `warn` filter. `sonic_exit` stays WARN-on so exit
 /// markers survive; noisy renderer/backend crates stay pinned to WARN.
+///
+/// `memory::reclaimed=warn` is here rather than only at `debug` because it
+/// reports data the user has already lost. This constant is also the
+/// parse-failure fallback, so a malformed `RUST_LOG` cannot silence it either.
 pub const DEFAULT_FILTER: &str = "sonic_exit=warn,sonic=warn,sonicterm=warn,sonicterm_vt=warn,\
-     sonicterm_grid=warn,wgpu=warn,naga=warn";
+     sonicterm_grid=warn,memory::reclaimed=warn,wgpu=warn,naga=warn";
 
 /// The `EnvFilter` directive string a configured log level produces.
 ///
@@ -100,7 +120,7 @@ pub fn filter_for_level(level: LogLevel) -> &'static str {
         LogLevel::Warn => DEFAULT_FILTER,
         LogLevel::Info => {
             "sonic_exit=warn,sonic=warn,sonicterm=info,sonicterm_vt=warn,sonicterm_grid=warn,\
-             wgpu=warn,naga=warn"
+             memory::reclaimed=warn,wgpu=warn,naga=warn"
         }
         // Every custom target is admitted here, not just the two that happened
         // to be added when they were introduced. `debug` is the level the
@@ -108,7 +128,7 @@ pub fn filter_for_level(level: LogLevel) -> &'static str {
         // turn on the diagnostics that documentation describes.
         LogLevel::Debug => {
             "sonic_exit=warn,sonic=debug,sonicterm=debug,sonicterm_vt=warn,sonicterm_grid=warn,\
-             memory=debug,state_machine=debug,state_machine.log=debug,\
+             memory=debug,memory::reclaimed=debug,state_machine=debug,state_machine.log=debug,\
              render_timing=debug,tear_out_timing=debug,\
              wgpu=warn,naga=warn"
         }
