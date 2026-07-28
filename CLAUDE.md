@@ -6,26 +6,30 @@ The workspace version is the source of truth (`Cargo.toml` `[workspace.package]`
 
 ## Read first
 
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — architecture, invariants, verification, and release boundary.
-- [`docs/MODULES.md`](docs/MODULES.md) — crate map.
-- [`docs/LOGGING.md`](docs/LOGGING.md) — logs, diagnostics, and hang investigation.
-- [`docs/packaging/README.md`](docs/packaging/README.md) — maintained macOS and Windows packaging guidance.
-- `wiki/` — bilingual user-facing usage/config/keybinding/log/theme docs.
+- [`wiki/Architecture.md`](wiki/Architecture.md) — system shape, data flow, seams.
+- [`wiki/Architecture-Internals.md`](wiki/Architecture-Internals.md) — accounting verification, rendering invariants, native boundaries, release gate.
+- [`wiki/Crate-Reference.md`](wiki/Crate-Reference.md) — crate map and per-crate detail.
+- [`wiki/Logging.md`](wiki/Logging.md) — logs, diagnostics, retention, hang investigation.
+- [`wiki/Memory.md`](wiki/Memory.md) — what each subsystem holds, and the resource governor.
+- [`wiki/Rendering-Modes.md`](wiki/Rendering-Modes.md) — software vs GPU rendering and frame pacing.
+- [`wiki/Packaging.md`](wiki/Packaging.md) — local macOS and Windows packaging.
 
-When auditing docs for release blockers, typos, renamed paths, or user-facing
-terminology, include `wiki/` alongside README and `docs/`; `wiki/` is the
-canonical, repository-tracked user documentation surface.
+**Canonical documentation rule:** `wiki/` is the single documentation surface,
+for agents and humans alike. It carries the technical detail — architecture,
+invariants, verification, governance, packaging, release boundary — alongside
+user-facing usage, configuration, keybindings, themes, and the feature
+requirements. There is no separate maintainer-only documentation tree; a fact
+worth writing down belongs on a wiki page, in both language halves.
 
-**Canonical documentation rule:** the core tracked `docs/` surface is
-`ARCHITECTURE.md`, `LOGGING.md`, and `MODULES.md`; maintained packaging guidance
-lives under `docs/packaging/`. Keep durable architecture, invariants,
-verification, and release-boundary information in `docs/ARCHITECTURE.md`; keep
-operational logging, diagnostics, and hang-investigation guidance in
-`docs/LOGGING.md`; keep `docs/MODULES.md` limited to the crate map. Do not track
-standalone implementation specs, plans, review audits, version-audit documents,
-or a separate release document in `docs/`. `docs/specs/`, `docs/plans/`, and
-`docs/reviews/` are ignored local working folders. Update README/`wiki/` only
-when user-facing behavior changes.
+Every page is bilingual: an `## English` half and a `## 中文` half with the same
+structure. A page edited in one language only is half-wrong for the next reader,
+so update both halves in the same change. Pages link to each other by bare page
+name — `[Logging](Logging)`, not `[Logging](Logging.md)` — because that is what
+resolves on the published wiki.
+
+Do not track standalone implementation specs, plans, review audits, or
+version-audit documents. `docs/specs/`, `docs/plans/`, and `docs/reviews/`
+remain ignored local working folders.
 
 When touching a crate, also read that crate's local `CLAUDE.md`.
 
@@ -129,14 +133,25 @@ For release prep also run:
 cargo build --release -p sonicterm-mac
 ```
 
-Before opening a release PR, verify user-facing docs in README, `docs/`, and
-`wiki/` match any changed config, logging, window, palette, or input behavior.
+Before opening a release PR, verify that README and `wiki/` match any changed
+config, logging, window, palette, or input behavior.
 After pushing a release tag, verify the GitHub release workflow finishes and
 publishes the expected macOS DMG(s), Windows MSI, and checksum assets.
 
 ## Conventions
 
+- **Every issue and pull request carries labels and a milestone.** Set them
+  when you open the item, not afterwards: an unlabelled issue with no
+  milestone does not appear in the filtered views the work is tracked
+  through, so it is invisible to everyone who is not reading the raw list.
+  Pick labels that describe the change — `bug`, `enhancement`,
+  `documentation`, `chore`, `refactor`, `perf`, `regression` — plus a
+  `platform:` label when the change is not cross-platform. Use the milestone
+  the work ships in. `gh issue create` and `gh pr create` take `--label` and
+  `--milestone` directly; `gh issue edit` and `gh pr edit` fix an item that
+  was opened without them.
 - **Flowcharts and data-flow diagrams in markdown are `mermaid` fenced blocks.**
+
   Hand-drawn ASCII loses alignment across fonts and cannot be edited without
   redrawing the whole picture. Directory trees and layout wireframes stay as
   plain text — their meaning lives in the character positions, which Mermaid
@@ -147,7 +162,7 @@ publishes the expected macOS DMG(s), Windows MSI, and checksum assets.
   nested script folders or top-level `tools/` or `packaging/` directories.
   Embedded upstream FreeType, libpng, zlib, and HarfBuzz scripts retain their
   vendored layouts and are exempt. Packaging executables belong in `scripts/`,
-  while maintained packaging instructions belong in `docs/packaging/`.
+  while maintained packaging instructions belong on the `Packaging` wiki page.
 - **Unit tests use the exact flat `file_tests.rs` sibling pattern, never inline.**
   For every source file `foo.rs`, put its unit tests beside it in
   `foo_tests.rs` and declare them from `foo.rs` with

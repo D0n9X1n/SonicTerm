@@ -19,7 +19,7 @@ cargo test -p sonicterm-types
 ## Guardrails
 - Keep this crate dependency-light and backend-free.
 - Public API changes require reviewing the cross-crate boundary in
-  `docs/ARCHITECTURE.md` and updating affected crate/user documentation.
+  `Architecture-Internals` and updating affected crate/user documentation.
 - Prefer small value types and explicit trait seams over leaking app,
   renderer, or platform types.
 

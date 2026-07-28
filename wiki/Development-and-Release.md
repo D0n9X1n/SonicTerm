@@ -3,9 +3,9 @@
 ## English
 
 > Canonical packaging instructions:
-> [`docs/packaging/`](https://github.com/D0n9X1n/SonicTerm/tree/main/docs/packaging).
+> [Packaging](Packaging).
 > Canonical release boundary:
-> [`docs/ARCHITECTURE.md`](https://github.com/D0n9X1n/SonicTerm/blob/main/docs/ARCHITECTURE.md).
+> [Architecture Internals](Architecture-Internals).
 
 ## Repository layout
 
@@ -13,8 +13,7 @@
 Cargo.toml                 workspace members, shared version/dependencies/lints
 crates/                    23 first-party Rust crates
 assets/                    fonts, themes, keymaps, icons, i18n, screenshots
-docs/                      canonical architecture/logging/modules/packaging docs
-wiki/                      canonical bilingual user documentation
+wiki/                      canonical bilingual documentation, all of it
 scripts/                   flat first-party shell/PowerShell automation
 .github/                   CI, release, issue, PR, and dependency automation
 ```
@@ -44,7 +43,7 @@ guardrails, and cross-references. Read the root instructions and the relevant
 crate instructions before changing a boundary.
 
 The short crate map is [Crate Reference](Crate-Reference) and
-[`docs/MODULES.md`](https://github.com/D0n9X1n/SonicTerm/blob/main/docs/MODULES.md).
+[Crate Reference](Crate-Reference).
 
 ## Test organization
 
@@ -266,16 +265,16 @@ separate wiki repository.
 | Coverage | `scripts/rust-logic-coverage.sh` |
 | Per-crate gate | `scripts/check-workspace-crates.sh` |
 | Exit policy | `scripts/check-no-raw-process-exit.sh` |
-| macOS package | `scripts/make-macos-dmg.sh`, `docs/packaging/macos.md` |
-| Windows package | `crates/sonicterm-windows/wix/main.wxs`, `docs/packaging/windows.md` |
+| macOS package | `scripts/make-macos-dmg.sh`, `Packaging` |
+| Windows package | `crates/sonicterm-windows/wix/main.wxs`, `Packaging` |
 | Wiki publication rule | root `CLAUDE.md` under “Wiki” |
 
 ## 中文
 
 > 规范打包说明：
-> [`docs/packaging/`](https://github.com/D0n9X1n/SonicTerm/tree/main/docs/packaging)。
+> [Packaging](Packaging)。
 > 规范发布边界：
-> [`docs/ARCHITECTURE.md`](https://github.com/D0n9X1n/SonicTerm/blob/main/docs/ARCHITECTURE.md)。
+> [Architecture Internals](Architecture-Internals)。
 
 ## 仓库布局
 
@@ -283,8 +282,7 @@ separate wiki repository.
 Cargo.toml                 workspace member、共享版本/依赖/lint
 crates/                    23 个第一方 Rust crate
 assets/                    字体、主题、keymap、icon、i18n、截图
-docs/                      规范架构/日志/module/打包文档
-wiki/                      规范双语用户文档
+wiki/                      规范双语文档，全部文档均在此
 scripts/                   扁平第一方 shell/PowerShell 自动化
 .github/                   CI、发布、issue、PR 和依赖自动化
 ```
@@ -311,7 +309,7 @@ Fontconfig、FreeType、HarfBuzz、AppKit、Win32 和 installer 行为需要相�
 修改边界前先阅读根说明和相关 crate 说明。
 
 简短 crate 映射见 [Crate 参考](Crate-Reference) 与
-[`docs/MODULES.md`](https://github.com/D0n9X1n/SonicTerm/blob/main/docs/MODULES.md)。
+[Crate Reference](Crate-Reference)。
 
 ## 测试组织
 
@@ -509,6 +507,6 @@ release 前，对照配置、输入、日志、palette、rendering 和 window �
 | Coverage | `scripts/rust-logic-coverage.sh` |
 | Per-crate gate | `scripts/check-workspace-crates.sh` |
 | Exit policy | `scripts/check-no-raw-process-exit.sh` |
-| macOS package | `scripts/make-macos-dmg.sh`, `docs/packaging/macos.md` |
-| Windows package | `crates/sonicterm-windows/wix/main.wxs`, `docs/packaging/windows.md` |
+| macOS package | `scripts/make-macos-dmg.sh`, `Packaging` |
+| Windows package | `crates/sonicterm-windows/wix/main.wxs`, `Packaging` |
 | Wiki 发布规则 | 根 `CLAUDE.md` 的“Wiki”章节 |

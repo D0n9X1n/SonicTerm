@@ -19,8 +19,10 @@ PRs are all welcome.
    ```
 
 Crates live under `crates/`. Before changing boundaries or diagnostics, read
-[Architecture](docs/ARCHITECTURE.md), [Modules](docs/MODULES.md),
-[Logging](docs/LOGGING.md), and [Packaging](docs/packaging/README.md).
+[Architecture](wiki/Architecture.md),
+[Architecture Internals](wiki/Architecture-Internals.md),
+[Crate Reference](wiki/Crate-Reference.md), [Logging](wiki/Logging.md), and
+[Packaging](wiki/Packaging.md).
 
 ## Before opening a PR
 

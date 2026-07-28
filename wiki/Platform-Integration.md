@@ -156,8 +156,8 @@ precedence over bundled files; an explicit path can also be configured.
 | Windows entry/menu/drag | `crates/sonicterm-windows/src/{main,menubar,os_drag_win,tab_drag_os}.rs` |
 | DWM and chrome | `crates/sonicterm-windows/src/{backdrop,chrome}.rs` |
 | Windows software present | `crates/sonicterm-gpu/src/software_windows.rs`, `crates/sonicterm-windows/src/software_presenter.rs` |
-| macOS package | `scripts/make-macos-dmg.sh`, `docs/packaging/macos.md` |
-| Windows package | `crates/sonicterm-windows/wix/main.wxs`, `docs/packaging/windows.md` |
+| macOS package | `scripts/make-macos-dmg.sh`, `Packaging` |
+| Windows package | `crates/sonicterm-windows/wix/main.wxs`, `Packaging` |
 | Assets/config paths | `crates/sonicterm-cfg/src/{assets,config,theme,keymap}.rs` |
 
 ## 中文
@@ -295,6 +295,6 @@ keymap、内置字体和 icon，创建开始菜单快捷方式，并可选桌面
 | Windows 入口/菜单/拖动 | `crates/sonicterm-windows/src/{main,menubar,os_drag_win,tab_drag_os}.rs` |
 | DWM 与 chrome | `crates/sonicterm-windows/src/{backdrop,chrome}.rs` |
 | Windows 软件呈现 | `crates/sonicterm-gpu/src/software_windows.rs`, `crates/sonicterm-windows/src/software_presenter.rs` |
-| macOS package | `scripts/make-macos-dmg.sh`, `docs/packaging/macos.md` |
-| Windows package | `crates/sonicterm-windows/wix/main.wxs`, `docs/packaging/windows.md` |
+| macOS package | `scripts/make-macos-dmg.sh`, `Packaging` |
+| Windows package | `crates/sonicterm-windows/wix/main.wxs`, `Packaging` |
 | Asset/config 路径 | `crates/sonicterm-cfg/src/{assets,config,theme,keymap}.rs` |

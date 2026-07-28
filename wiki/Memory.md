@@ -103,6 +103,95 @@ Then look at which seam moved. `inline_media_bytes` climbing means images;
 `grid_history_bytes` climbing means scrollback; `parser_bytes` staying high
 means a transfer is stuck rather than transient.
 
+### How the accounting works
+
+`sonicterm-resource` owns a process-local **resource governor**: the accounting
+and attribution layer behind the figures above. It answers "how much is held, by
+which owner, in which class". It is not the layer that bounds allocation.
+
+#### Enforcement belongs to the seams
+
+Per-seam caps enforce. The governor accounts, attributes, and backstops. The GUI
+process deliberately constructs its governor with an unlimited process byte
+ceiling and tracking-only window limits.
+
+That is a design decision, not an omission. Two limits that must agree and are
+maintained separately will drift, and the one that stops agreeing keeps
+reporting itself as enforced. Each seam — grid cells, retained inline media,
+interned hyperlink metadata, parser capture staging, escape sequences in flight,
+command events — already bounds itself and is tested at its own boundary.
+
+The one governor limit that does bind is the pane owner's committed budget. It
+is **a tripwire, not a second enforcement point**: it is computed as the sum of
+the per-seam caps times a headroom multiplier, so it cannot disagree with the
+seam caps — it is derived from them — and sits far enough above correct
+operation that it never fires there. What it catches is the failure the
+per-seam caps structurally cannot: a seam that has stopped bounding while still
+reporting itself as bounded.
+
+#### Owner hierarchy
+
+Owners form a tree with one immutable process root. IDs are allocated
+monotonically and never reused, and which parent may hold which child is fixed
+per process kind and rejected at creation time rather than left to convention.
+
+```mermaid
+flowchart TD
+    P[Process root] --> W[Window]
+    W --> A[AppPane]
+    A -.-> L[LocalPty]
+    P -.-> SF[SharedFont]
+    P -.-> SR[SharedRaster]
+    P -.-> SA[SharedAtlas]
+    P -.-> MC[MuxConnection]
+
+    classDef live fill:#1b5e20,stroke:#66bb6a,stroke-width:2px,color:#ffffff
+    classDef reserved fill:#37474f,stroke:#90a4ae,stroke-width:1px,color:#eceff1,stroke-dasharray: 4 3
+
+    class P,W,A live
+    class L,SF,SR,SA,MC reserved
+```
+
+Solid nodes are what production instantiates today: `Process → Window →
+AppPane`. Dashed nodes are permitted by the ledger but never registered — no
+code path creates them. They are reserved capacity in the contract, not live
+topology.
+
+Each owner is `Open`, then `Closing`, then `Closed`. `Closing` stops admitting
+new reservations and new children while still letting live tokens finalize
+during teardown. Closing is refused while an owner still has live children or
+nonzero charges.
+
+Registration failure is not retried uniformly, and the difference matters:
+
+- A **pane** that fails to register keeps working and is picked up by the next
+  reconcile pass, which registers any unowned pane under an already-registered
+  window. Reconcile runs whenever a pane is created — new tab or split — and
+  again on every retention pass, at every log level.
+- A **window** that fails to register is never retried. Reconcile skips a window
+  that has no owner, so neither it nor any of its panes appears in hierarchy
+  accounting for the rest of that window's life.
+
+In both cases the window or pane keeps working: a diagnostic gap is preferred
+over a lost window.
+
+#### Charging runs at every log level
+
+Owner registration, charging, and the retention log lines are three separate
+things, and the distinction matters when reading a snapshot:
+
+- **Owners always exist.** A window owner is registered when the window is
+  created, a pane owner when the pane is created. This happens at every log
+  level, and it is structural rather than conventional: inserting a window and
+  registering its owner are one operation.
+- **Charging always runs.** The pass that samples what a pane retains and moves
+  its charges to match runs on the idle-wake path at every log level.
+- **Only the log lines are gated.** `debug` on `target="memory"` controls
+  whether the figures are written out, not whether they are collected.
+
+So a session running at the default level is still fully accounted; you simply
+cannot see the numbers until you raise the level.
+
 ---
 
 ## 中文
@@ -201,3 +290,80 @@ level = "debug"
 随后查看是哪一项发生了变化。`inline_media_bytes` 上升说明是图像；
 `grid_history_bytes` 上升说明是回滚缓冲；`parser_bytes` 持续偏高则说明某个
 传输卡住了，而非瞬时占用。
+
+### 记账机制是如何工作的
+
+`sonicterm-resource` 拥有一个进程内的**资源治理器**（resource governor）：
+它是上述数字背后的记账与归属层。它回答的是「持有了多少、由哪个所有者持有、
+属于哪个类别」，而不是限制分配的那一层。
+
+#### 约束属于各个接缝
+
+真正实施限制的是各接缝自身的上限。治理器负责记账、归属与兜底。GUI 进程刻意
+将其治理器构造为进程字节上限无限、窗口限制仅用于跟踪。
+
+这是设计决定，而非疏漏。两个必须保持一致却分别维护的限制终将漂移，而那个已经
+不再一致的限制仍会把自己报告为「已生效」。每个接缝——网格单元、保留的内联媒体、
+驻留的超链接元数据、解析器捕获暂存、传输中的转义序列、命令事件——都已各自设限，
+并在各自的边界处受测试覆盖。
+
+治理器中唯一真正生效的限制是窗格所有者的已提交预算。它是**一根绊线，而不是
+第二道强制点**：它由各接缝上限之和乘以余量系数算得，因此不可能与接缝上限相互
+矛盾——它本就派生自后者——并且高到在正常运行时永不触发。它捕捉的是各接缝上限
+在结构上无法捕捉的故障：某个接缝已经停止设限，却仍把自己报告为受限。
+
+#### 所有者层级
+
+所有者构成一棵树，根节点是唯一且不可变的进程根。ID 单调分配且永不复用，
+哪个父节点可以持有哪种子节点，按进程类型固定，并在创建时直接拒绝非法组合，
+而不是依赖约定。
+
+```mermaid
+flowchart TD
+    P[进程根] --> W[窗口 Window]
+    W --> A[窗格 AppPane]
+    A -.-> L[LocalPty]
+    P -.-> SF[SharedFont]
+    P -.-> SR[SharedRaster]
+    P -.-> SA[SharedAtlas]
+    P -.-> MC[MuxConnection]
+
+    classDef live fill:#1b5e20,stroke:#66bb6a,stroke-width:2px,color:#ffffff
+    classDef reserved fill:#37474f,stroke:#90a4ae,stroke-width:1px,color:#eceff1,stroke-dasharray: 4 3
+
+    class P,W,A live
+    class L,SF,SR,SA,MC reserved
+```
+
+实线节点是当前生产环境真正实例化的部分：`进程 → 窗口 → 窗格`。虚线节点虽然被
+账本允许，却从未被注册——没有任何代码路径会创建它们。它们是契约中预留的容量，
+而不是活跃的拓扑结构。
+
+每个所有者依次处于 `Open`、`Closing`、`Closed` 三种状态。`Closing` 会停止接纳
+新的预留与新的子节点，同时仍允许存活的令牌在拆除过程中完成结算。若某个所有者
+仍有存活的子节点或非零的记账额，关闭会被拒绝。
+
+注册失败并非一律重试，其中的差异很重要：
+
+- **窗格**注册失败后仍可正常工作，并会被下一次协调（reconcile）扫描接管——
+  该扫描会把任何无主窗格挂到已注册的窗口之下。协调在每次创建窗格时运行
+  （新标签页或分屏），也在每一次保留量采样时运行，且在所有日志级别下都会执行。
+- **窗口**注册失败则永不重试。协调会跳过没有所有者的窗口，因此在该窗口的整个
+  生命周期内，它及其所有窗格都不会出现在层级记账中。
+
+两种情况下窗口或窗格都能继续工作：宁可留下诊断盲区，也不要丢失一个窗口。
+
+#### 记账在所有日志级别下都会运行
+
+所有者注册、记账、保留量日志行是三件相互独立的事情，阅读快照时必须区分：
+
+- **所有者始终存在。** 窗口所有者在窗口创建时注册，窗格所有者在窗格创建时注册。
+  这在所有日志级别下都会发生，而且是结构性的而非约定性的：插入窗口与注册其
+  所有者是同一个操作。
+- **记账始终运行。** 采样窗格保留量并相应调整其记账额的那一趟处理，运行在空闲
+  唤醒路径上，在所有日志级别下都会执行。
+- **只有日志行受开关控制。** `target="memory"` 上的 `debug` 控制的是这些数字
+  是否被写出，而不是它们是否被收集。
+
+因此，运行在默认级别下的会话依然被完整记账；只是在提高日志级别之前，你看不到
+这些数字而已。

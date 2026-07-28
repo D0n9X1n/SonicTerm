@@ -26,7 +26,7 @@ Release MSI builds require the Windows Cairo setup script and WiX.
   Win32 integration.
 - Mica/backdrop changes must run after the HWND exists and is shown.
 - OLE drag/drop initialization must stay on the window thread.
-- Keep packaging paths in sync with `wix/main.wxs`, `docs/packaging/`, and the
+- Keep packaging paths in sync with `wix/main.wxs`, `Packaging`, and the
   release workflow.
 
 ## Cross-references

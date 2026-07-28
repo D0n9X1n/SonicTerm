@@ -3,9 +3,9 @@
 ## English
 
 > Canonical invariants:
-> [`docs/ARCHITECTURE.md`](https://github.com/D0n9X1n/SonicTerm/blob/main/docs/ARCHITECTURE.md).
+> [Architecture Internals](Architecture-Internals).
 > Canonical crate map:
-> [`docs/MODULES.md`](https://github.com/D0n9X1n/SonicTerm/blob/main/docs/MODULES.md).
+> [Crate Reference](Crate-Reference).
 
 This page explains the implementation behind those documents. It describes the
 current repository, including transitional boundaries that are not yet the
@@ -150,7 +150,7 @@ This is a conceptual grouping; the exact edge list is in [Crate Reference](Crate
 
 | Topic | Primary paths |
 | --- | --- |
-| Canonical invariants | `docs/ARCHITECTURE.md`, `docs/MODULES.md` |
+| Canonical invariants | `Architecture-Internals`, `Crate-Reference` |
 | Intent/effect contracts | `crates/sonicterm-app-core/src/{intent,effect,reducer,state_machine}.rs` |
 | Authoritative app state | `crates/sonicterm-app/src/app/mod.rs` |
 | Resource governor | `crates/sonicterm-resource/src/{ledger,owner,reservation}.rs` |
@@ -166,9 +166,9 @@ For proposed changes to these boundaries, see [Architecture Evolution](Architect
 ## 中文
 
 > 规范架构不变量：
-> [`docs/ARCHITECTURE.md`](https://github.com/D0n9X1n/SonicTerm/blob/main/docs/ARCHITECTURE.md)。
+> [Architecture Internals](Architecture-Internals)。
 > 规范 crate 映射：
-> [`docs/MODULES.md`](https://github.com/D0n9X1n/SonicTerm/blob/main/docs/MODULES.md)。
+> [Crate Reference](Crate-Reference)。
 
 本页解释这些文档背后的实现，并如实描述当前仓库，包括仍处于迁移阶段的边界。
 
@@ -292,7 +292,7 @@ UI/模型：   sonicterm-cfg -> sonicterm-ui -> sonicterm-render-model
 
 | 主题 | 主要路径 |
 | --- | --- |
-| 规范不变量 | `docs/ARCHITECTURE.md`, `docs/MODULES.md` |
+| 规范不变量 | `Architecture-Internals`, `Crate-Reference` |
 | Intent/effect 契约 | `crates/sonicterm-app-core/src/{intent,effect,reducer,state_machine}.rs` |
 | 权威应用状态 | `crates/sonicterm-app/src/app/mod.rs` |
 | 资源 governor | `crates/sonicterm-resource/src/{ledger,owner,reservation}.rs` |
