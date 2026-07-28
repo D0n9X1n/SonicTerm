@@ -1,1 +1,13 @@
 scripts/soak-harness.golden.json text eol=lf
+
+# Mark vendored upstream sources so GitHub treats them as what they are.
+#
+# `linguist-vendored` keeps them out of the repository's language statistics
+# and collapses them by default in pull-request diffs. Without it the language
+# bar reads mostly C — roughly 376,000 lines of FreeType, libpng, zlib, and
+# HarfBuzz against SonicTerm's own 117,000 lines of Rust — which describes
+# what the project builds rather than what it is.
+crates/sonicterm-freetype/freetype2/** linguist-vendored
+crates/sonicterm-freetype/libpng/**    linguist-vendored
+crates/sonicterm-freetype/zlib/**      linguist-vendored
+crates/sonicterm-harfbuzz/harfbuzz/**  linguist-vendored

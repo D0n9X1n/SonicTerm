@@ -137,7 +137,7 @@ fn near_edge_band_is_tight_to_the_right_gutter() {
     );
 }
 
-// ── Registry cleanup (v1.2.0 resource baseline, WP-WINDOW) ──────────
+// ── Registry cleanup ────────────────────────────────────────────────
 
 /// The per-window `scrollbar_vis` map is the only pane-keyed registry
 /// that is grown implicitly: entries appear via `entry().or_insert_with`

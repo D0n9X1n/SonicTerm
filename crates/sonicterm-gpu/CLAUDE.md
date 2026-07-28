@@ -24,6 +24,11 @@ cargo build -p sonicterm-gpu
   semantics when moving data through the renderer.
 - Drop `wgpu::SurfaceTexture` before reconfiguring the surface after a
   suboptimal frame.
+- The renderer's retained figures are reported per window and summed across
+  the process. A per-window buffer that is never released shows as a
+  staircase across window open/close, which is what the churn baseline
+  measures; keep new renderer-owned allocations reported through
+  `retained_amounts` so they stay visible there.
 - Upgrade `wgpu` and the `sonicterm-font`/`sonicterm-text` glyph stack as a
   tested set, not one at a time. (`glyphon`/`cosmic-text` were removed; text
   now flows through the Sonic-owned atlas + rasterizer.)

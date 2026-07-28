@@ -70,6 +70,24 @@ bash scripts/check-workspace-crates.sh
 scripts/rust-logic-coverage.sh
 ```
 
+**Run the list to the end before concluding anything.** `--lib --bins`
+excludes every `tests/` binary, so it can pass while an integration test is
+broken; `check-workspace-crates.sh` is the step that runs `--tests` per crate
+and catches that. A green `cargo test --workspace --lib --bins` on its own
+means the unit tests pass, not that CI will.
+
+Two more limits worth knowing before trusting a green run:
+
+- `rust-logic-coverage.sh` measures a deterministic-logic subset and skips 11
+  of the 23 crates outright, including `sonicterm-app` and `sonicterm-gpu`. A
+  passing coverage figure says nothing about code in those crates. It is also
+  macOS-only in CI.
+- Tests behind `#![cfg(target_os = "windows")]` compile to nothing on macOS,
+  so a Windows-gated test file that would fail to *compile* still reports
+  `ok` locally. Cross-compiling to check is not available — the vendored
+  Cairo dependency is host-architecture-only. Windows CI is the only place
+  those are exercised.
+
 For release prep also run:
 
 ```bash
@@ -103,6 +121,14 @@ publishes the expected macOS DMG(s), Windows MSI, and checksum assets.
   `tests/` directory for genuine integration tests that exercise the crate
   through its public API or across crate boundaries. Do not put trivial
   "does this symbol export" checks there — fold those into `lib_tests.rs`.
+- **Some test state is process-global; take the lock.** The media staging
+  pools, the live-capture count, and the inline-media charge counters are
+  process-wide, so a test that creates a capture or a charge perturbs any
+  sibling measuring one — the sibling fails, reporting a defect that is not
+  there. `MEDIA_COUNTER_LOCK` (`app/media.rs`) and `serialised_captures()`
+  (`vt_tests.rs`) exist for this and carry the measured failure rate in their
+  docs. Hold one for the whole life of any capture or charge the test creates,
+  not merely while asserting about it.
 - **Comments describe behavior, not history.** Explain what the code does and
   the problem it solves; do not cite issue/PR/Epic numbers or reviewer names
   in comments, log strings, or panic messages.

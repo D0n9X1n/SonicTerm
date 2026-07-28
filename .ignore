@@ -1,0 +1,24 @@
+# Paths excluded from `rg`, and therefore from most editor and agent search.
+#
+# Four upstream C libraries are vendored under crates/ so the FFI wrappers can
+# build them: 2,021 tracked files, roughly three times the size of SonicTerm's
+# own source. An unfiltered search for anything generic — `buffer`, `size`,
+# `error` — returns mostly FreeType and HarfBuzz, which buries the first-party
+# hit that was being looked for.
+#
+# These are still tracked, still built, and still greppable when needed:
+# `rg --no-ignore <pattern> crates/sonicterm-freetype/freetype2` searches them
+# explicitly. This file only changes the default.
+#
+# Note: git itself ignores this file. `git grep` and `git ls-files` continue to
+# see everything, which is what makes them the right tool when the question is
+# "what does the repository contain" rather than "where is our code".
+
+crates/sonicterm-freetype/freetype2/
+crates/sonicterm-freetype/libpng/
+crates/sonicterm-freetype/zlib/
+crates/sonicterm-harfbuzz/harfbuzz/
+
+# Build output and packaging artifacts.
+target/
+dist/

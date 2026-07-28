@@ -136,7 +136,7 @@ fn measure_frame_gaps(app: &mut App, frames: usize, start: Instant) -> Vec<Durat
 /// 120 Hz monitor period and measures every gap, so a monitor period passed
 /// through unclamped — the actual failure — shows up as an 8.3 ms gap.
 ///
-/// The whole distribution is checked rather than an average. A related v1.2.0
+/// The whole distribution is checked rather than an average. A related
 /// finding reported "~11 resets/sec sustained" which turned out to be bursts
 /// at the frame period with nothing in the final 21 seconds; an average hides
 /// exactly the shape that matters.
