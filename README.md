@@ -81,6 +81,13 @@ back when the context belongs with the original session again.
   rasterize with DirectWrite on Windows (FreeType elsewhere and as fallback).
   Detects the no-GPU case (RDP / VM software rasterizer) and degrades gracefully
   to stay responsive, with a deterministic full-screen software path on Windows.
+- **Bounded memory, and it tells you** — every subsystem that can grow has a
+  ceiling, and the ones that matter are process-wide rather than per-pane, so
+  a session with many panes cannot sum its way past them. When SonicTerm does
+  discard something you can see — an image transfer that stopped arriving, or
+  older images in idle panes — it says so in the log at the default level,
+  without needing diagnostics turned on beforehand. `session retention` lines
+  break a session's usage down by subsystem when you want the detail.
 - **Real pane workflow** — split panes, close/resize behavior, per-pane PTYs,
   pane focus, READ ONLY mode for safe scrollback navigation, quick-select URL
   hints, and search.
