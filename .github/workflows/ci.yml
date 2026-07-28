@@ -85,6 +85,13 @@ jobs:
       - name: Report host window capability
         run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture
 
+      # `--nocapture` again: this probe exists to report which adapters the
+      # runner offers and how the production predicate classifies them. #990
+      # assumes CI cannot exercise `Auto` because no software rasterizer is
+      # present; nobody had checked, and this is the check.
+      - name: Report host adapter classification
+        run: cargo test -p sonicterm-gpu --test ci_adapter_classification_probe -- --nocapture
+
       # `--nocapture` for the same reason as the probe above: this test's
       # verdict is its stdout. Without it, a run that compared eight cycles
       # and a run that returned early having measured nothing both report
