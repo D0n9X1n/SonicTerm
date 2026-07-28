@@ -36,19 +36,24 @@ def repository_root() -> Path:
 
 
 def main() -> int:
+    # Bytes, decoded explicitly as UTF-8 rather than `text=True`. `text=True`
+    # decodes with the *locale* encoding, which is cp1252 on the Windows
+    # runner, and `cargo metadata` is UTF-8: dependency authors and
+    # descriptions carry non-Latin-1 characters. The mismatch raises inside
+    # subprocess's reader thread, leaving `stdout` as None for a confusing
+    # `TypeError` at the json.loads below rather than a decode error here.
     completed = subprocess.run(
         ["cargo", "metadata", "--format-version", "1"],
         capture_output=True,
-        text=True,
         check=False,
         cwd=repository_root(),
     )
     if completed.returncode != 0:
         print("check-rust-version: cargo metadata failed:", file=sys.stderr)
-        print(completed.stderr.strip(), file=sys.stderr)
+        print(completed.stderr.decode("utf-8", errors="replace").strip(), file=sys.stderr)
         return 1
 
-    metadata = json.loads(completed.stdout)
+    metadata = json.loads(completed.stdout.decode("utf-8"))
     workspace = set(metadata["workspace_members"])
 
     declared: str | None = None
