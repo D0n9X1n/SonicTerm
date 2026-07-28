@@ -98,6 +98,15 @@ Supported behavior includes:
 - OSC 133 shell-integration prompt markers;
 - iTerm2, kitty, and Sixel media events with a 16 MiB payload cap.
 
+Media transfers draw staging from a 64 MiB process-wide pool, which
+guarantees 13 simultaneous transfers at the 4 MiB floor. A transfer that
+cannot be staged is refused and renders nothing rather than rendering
+partially, and an oversized or truncated Sixel is likewise dropped: a cut
+Sixel is byte-identical to a complete short one, so a partial render would
+be indistinguishable from correct output. A transfer that stops receiving
+for a full minute is abandoned and its staging reclaimed. See
+[Memory](Memory) for the bounds and how to read them from the log.
+
 The parser returns `VtEvent`s such as title changes, bell, hyperlink, clipboard,
 media, command state, and cursor visibility. The app consumes these outside the
 parser hot path.
@@ -312,6 +321,13 @@ worker 只在读取和修改终端状态时持有 parser mutex；之后释放 gu
 - OSC 标题、工作目录、超链接、剪贴板事件、调色板/颜色查询；
 - OSC 133 shell integration prompt marker；
 - iTerm2、kitty 和 Sixel 媒体事件，payload 上限 16 MiB。
+
+媒体传输从进程级 64 MiB 暂存池中申请空间，可保证 13 个并发传输获得 4 MiB
+的下限配额。无法获得暂存空间的传输会被拒绝并且不显示任何内容，而不是显示
+残缺图像；超长或被截断的 Sixel 同样会被丢弃：被截断的 Sixel 与完整的短
+Sixel 在字节层面无法区分，因此部分渲染的结果与正确输出无从辨别。整整一分钟
+没有收到新数据的传输会被放弃，其暂存空间随之回收。限制范围及如何从日志中
+查看，参见 [内存 / Memory](Memory)。
 
 parser 返回标题变化、bell、超链接、剪贴板、媒体、命令状态和光标可见性等 `VtEvent`，
 app 在 parser 热路径之外消费。

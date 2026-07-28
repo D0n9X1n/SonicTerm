@@ -6,6 +6,11 @@ SonicTerm is a native, GPU-accelerated terminal for macOS and Windows. This
 wiki contains both the user guide and a source-backed explanation of how the
 project works internally.
 
+Memory is a first-class concern: every subsystem that can grow has a ceiling,
+the ones that matter are process-wide rather than per-pane, and anything
+SonicTerm discards that you could see is reported in the log at the default
+level. [Memory](Memory) covers what is bounded and how to read it.
+
 ### User guide
 
 - [Usage](Usage) — installation, panes, tabs, READONLY mode, and common actions
@@ -13,6 +18,7 @@ project works internally.
 - [Keybindings](Keybindings) — bundled keymaps, binding syntax, and actions
 - [Themes](Themes) — bundled palettes and custom theme authoring
 - [Logging](Logging) — logs, crash dumps, performance diagnostics, and bug reports
+- [Memory](Memory) — what SonicTerm bounds, what it discards, and how to read it from the log
 
 ### How SonicTerm works
 
@@ -41,6 +47,10 @@ they do not replace the canonical invariants.
 SonicTerm 是一个面向 macOS 和 Windows 的原生 GPU 加速终端。本 Wiki 同时包含
 用户手册，以及基于源码整理的项目内部工作原理说明。
 
+内存是首要关注点：每个可能增长的子系统都有上限，其中最关键的是进程级而非按
+面板计的限制，并且 SonicTerm 丢弃的任何可见内容都会在默认日志级别下记录。
+[内存 / Memory](Memory) 说明了限制范围以及如何查看。
+
 ### 用户手册
 
 - [用法 / Usage](Usage) — 安装、窗格、标签页、READONLY 模式和常用操作
@@ -48,6 +58,7 @@ SonicTerm 是一个面向 macOS 和 Windows 的原生 GPU 加速终端。本 Wik
 - [快捷键 / Keybindings](Keybindings) — 内置键位映射、绑定语法和 action
 - [主题 / Themes](Themes) — 内置配色和自定义主题
 - [日志 / Logging](Logging) — 日志、崩溃转储、性能诊断和问题报告
+- [内存 / Memory](Memory) — SonicTerm 限制什么、丢弃什么，以及如何从日志中查看
 
 ### SonicTerm 如何工作
 
