@@ -15,10 +15,10 @@ updates:
     groups:
       patch-updates:
         update-types: ["patch"]
-    # #550: fluent-rs stack is locked together. fluent-bundle 0.16 pins
-    # fluent-langneg ^0.13 and unic-langid ^0.9. Re-open #550 to remove
-    # this ignore when fluent-bundle ships a fluent-langneg 0.14 (icu-locid)
-    # compatible release.
+    # The fluent-rs stack is locked together. fluent-bundle 0.16 pins
+    # fluent-langneg ^0.13 and unic-langid ^0.9. Remove this ignore when
+    # fluent-bundle ships a fluent-langneg 0.14 (icu-locid) compatible
+    # release.
     ignore:
       - dependency-name: "fluent-langneg"
         versions: [">=0.14"]

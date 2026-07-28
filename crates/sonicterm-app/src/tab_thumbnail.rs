@@ -39,10 +39,10 @@
 //!    pure-CPU PNG generator returns bytes in microseconds and works
 //!    identically on both.
 //!
-//! When/if a future PR lifts the threading constraint (e.g. by
-//! pre-rendering the thumbnail at every tab activation and caching
-//! the PNG on the tab itself), it can swap the body of
-//! [`render_tab_thumbnail_png`] without touching any caller.
+//! Lifting the threading constraint later — for instance by pre-rendering
+//! the thumbnail at every tab activation and caching the PNG on the tab
+//! itself — only requires swapping the body of
+//! [`render_tab_thumbnail_png`], without touching any caller.
 
 use image::{codecs::png::PngEncoder, ColorType, ImageEncoder};
 
@@ -86,8 +86,8 @@ impl Default for TabThumbnailInputs {
 }
 
 /// Convenience: produce a [`TabThumbnailInputs`] from just a payload
-/// title using the default palette. Used by `tear_out.rs` until a
-/// future PR plumbs theme colors through.
+/// title using the default palette. Used by `tear_out.rs`, which does not
+/// plumb theme colors through.
 pub fn tab_thumbnail_inputs_from_payload(title: &str) -> TabThumbnailInputs {
     TabThumbnailInputs { title: title.to_string(), ..TabThumbnailInputs::default() }
 }

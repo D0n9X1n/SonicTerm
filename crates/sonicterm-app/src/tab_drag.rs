@@ -223,7 +223,7 @@ pub fn local_to_global(source_inner_origin: (i32, i32), local: (f64, f64)) -> (i
 /// `None` if the cursor is not inside the window's inner area at all.
 ///
 /// Winit cursor and window geometry are already raster px, which is also
-/// the unit `TabBarLayout` uses after G1a, so no DPI normalization occurs.
+/// the unit `TabBarLayout` uses, so no DPI normalization occurs.
 pub fn global_to_local(dest: WindowGeom, global: (i32, i32)) -> Option<(f32, f32)> {
     let (gx, gy) = global;
     let (ox, oy) = dest.inner_origin;

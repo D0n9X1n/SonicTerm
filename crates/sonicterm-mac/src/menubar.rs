@@ -188,7 +188,7 @@ fn ns_selector_from_str(name: &str) -> Sel {
         // PANIC: safe — the input strings come from the const menu blueprint
         // (see `Blueprint::system` callers), which is authored alongside this
         // match. Any new selector added to the blueprint must be added here
-        // in the same PR; mismatch is a dev-time bug, not a runtime risk.
+        // as well; mismatch is a dev-time bug, not a runtime risk.
         other => panic!("unknown system selector in menu blueprint: {other}"),
     }
 }

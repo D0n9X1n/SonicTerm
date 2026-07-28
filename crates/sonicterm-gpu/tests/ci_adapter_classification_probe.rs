@@ -1,12 +1,10 @@
 //! What does the production software-adapter predicate say about this host?
 //!
-//! #990 asks whether `Auto` detects a software rasterizer and degrades. Its
-//! premise is that `Auto` is "the branch CI cannot exercise", because it
-//! depends on `detected`, which needs a real software rasterizer present.
-//!
-//! That premise was assumed, never checked. GitHub's `windows-latest` image
-//! has no discrete GPU, so the adapter it presents is plausibly WARP — in
-//! which case `detected` is true there and `Auto` is exercisable after all.
+//! `SoftwareRenderMode::Auto` follows runtime detection, so exercising it is
+//! usually assumed to need a real software rasterizer and therefore a special
+//! host. That assumption is worth testing rather than inheriting: a runner
+//! with no discrete GPU plausibly presents WARP, in which case detection
+//! returns true there and `Auto` is exercisable in CI after all.
 //!
 //! This enumerates the host's real adapters and runs the real production
 //! predicate over each, printing what it finds. It does not reimplement the

@@ -9,24 +9,22 @@
 //
 //   1. The import block is replaced by these crate-local substitutions:
 //        `(upstream) crate :: glyphcache :: {GlyphCache, SizedBlockKey}`
-//          — deleted (split spelling so the T7 self-verify grep gate
-//          on the literal upstream module path returns 0; see plan
-//          T7's self-verify section);
+//          — deleted (spelling split so a grep for the literal
+//          upstream module path returns 0);
 //          `SizedBlockKey` is defined inline below; `GlyphCache` does
 //          not exist in this crate (we are not vendoring the cache).
 //        `crate::utilsprites::RenderMetrics`
 //          → `crate::glue::BlockCellMetrics as RenderMetrics`
 //          (structurally identical to `sonicterm_engine::CellMetrics`
-//          — sonicterm-engine itself can't be a dep here because of
-//          the T10 sonicterm-text breakage, see Cargo.toml note).
+//          — sonicterm-engine itself is not a dep here; see the
+//          Cargo.toml note).
 //        `config::DimensionContext` — was imported in upstream because
 //          `cursor_sprite` read `self.fonts.config().cursor_thickness`
-//          and resolved it via `Dimension::evaluate_as_pixels`. T7
-//          drops `cursor_sprite` (out of G2/A scope) and `block_sprite`
-//          itself never reaches `DimensionContext`, so this import is
-//          dropped too. The `sonicterm_cfg::dimension::DimensionContext`
-//          substitution noted in the spec stays available for T9 /
-//          a future `cursor_sprite` port to import on demand.
+//          and resolved it via `Dimension::evaluate_as_pixels`.
+//          `cursor_sprite` is not vendored and `block_sprite` itself
+//          never reaches `DimensionContext`, so this import is dropped
+//          too. `sonicterm_cfg::dimension::DimensionContext` remains
+//          available for a future `cursor_sprite` port to import.
 //        `::window::bitmaps::atlas::Sprite` — deleted; `block_sprite`
 //          returns `crate::glue::BlockRasterTile` (structurally
 //          identical to `sonicterm_text::glyph_atlas::RasterTile`,
@@ -48,7 +46,7 @@
 //        - `draw_polys` becomes a free `fn draw_polys(metrics, polys,
 //          buffer, aa, blend_mode)` — body verbatim, only `&mut self`
 //          dropped from the signature. Called by `block_sprite`.
-//        - `cursor_sprite` is OUT OF SCOPE for T7 (G2/A is block /
+//        - `cursor_sprite` is OUT OF SCOPE here (this crate is block /
 //          box-drawing / Powerline / Sextant glyphs only — cursor
 //          rendering lives in a sibling task). It is removed here;
 //          the geometry it encoded is reproduced verbatim wherever
@@ -66,7 +64,7 @@
 //              `RasterTile { width, height, coverage: buffer.into_bgra_vec(),
 //              offset_x: 0, offset_y: 0, advance: width as f32,
 //              is_color: true }`. The atlas + cache wrapping is the
-//              consumer's job in T9, not customglyph's.
+//              consumer's job, not customglyph's.
 //
 //   3. `BlockKey::filter_out_synthetic(glyphs)` becomes
 //      `filter_out_synthetic(glyphs, custom_block_glyphs)` — the
@@ -77,7 +75,7 @@
 // construction, the 5000+ lines of glyph definitions — is the
 // upstream bytes, unmodified.
 
-// T7 clippy allows: these lints fire on the verbatim upstream
+// Clippy allows: these lints fire on the verbatim upstream
 // wezterm-gui code. The "no shortcuts" rule forbids per-call-site
 // rewrites of geometry / polygon construction, so we accept the lint
 // at the module level instead. Each `allow` documents WHAT upstream
@@ -791,7 +789,7 @@ impl PolyStyle {
 
 impl BlockKey {
     pub fn filter_out_synthetic(glyphs: &mut Vec<char>, custom_block_glyphs: bool) {
-        // T7 vendor change: original `let config = config::configuration();
+        // Vendor change: original `let config = config::configuration();
         // if config.custom_block_glyphs { ... }` reached the wezterm
         // config global. Lift the bool to a parameter the consumer
         // passes in (same pattern as the `anti_alias` parameter on
@@ -5100,13 +5098,13 @@ impl BlockKey {
     }
 }
 
-// T7 vendor change: the upstream `impl GlyphCache { fn draw_polys, fn
+// Vendor change: the upstream `impl GlyphCache { fn draw_polys, fn
 // cursor_sprite, fn block_sprite }` block is rewritten to free
 // functions. See the header comment at the top of this file for the
 // full rationale. The opening `impl GlyphCache {` brace is gone; the
 // closing `}` at the original line 6007 is also gone (the standalone
 // `fill_rect` helper that follows it stays as-is). `cursor_sprite` is
-// dropped entirely — it is out of G2/A scope (see header §2).
+// dropped entirely — it is out of scope here (see header §2).
 
 fn draw_polys(
     metrics: &RenderMetrics,
@@ -5942,11 +5940,11 @@ pub fn block_sprite(
     buffer.log_bits();
     */
 
-    // T7 vendor change: the wezterm-side `self.atlas.allocate` +
+    // Vendor change: the wezterm-side `self.atlas.allocate` +
     // `self.block_glyphs.insert(...)` + `Ok(sprite)` 3-line tail
     // was removed from the body above and replaced with the
     // RasterTile pack below. The atlas / cache wrapping is the
-    // consumer's job in T9 (see this file's header §2).
+    // consumer's job (see this file's header §2).
     let (w, h) = buffer.image_dimensions();
     Ok(RasterTile {
         width: w as u32,

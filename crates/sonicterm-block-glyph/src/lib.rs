@@ -1,13 +1,11 @@
-// `customglyph` carries its own vendor-attribution header (moved from
-// the head of T5's lib.rs stub when T7 landed the 6036-LOC paste).
-// The license text lives at
-// crates/sonicterm-block-glyph/LICENSE-WEZTERM.
+// `customglyph` carries its own vendor-attribution header. The license
+// text lives at crates/sonicterm-block-glyph/LICENSE-WEZTERM.
 //
-// T6 landed the substitution-boundary glue types (Bitmap, BgraPixel,
-// Point/Rect/Size, and the `BitmapImage` trait) in `glue`. T7 lands
-// the verbatim paste of wezterm-gui/src/customglyph.rs in
-// `customglyph`, with `use crate::glue::{BitmapImage, Bitmap as Image,
-// Point, Rect, Size, BgraPixel as SrgbaPixel}` for the substitution.
+// `glue` holds the substitution-boundary types (Bitmap, BgraPixel,
+// Point/Rect/Size, and the `BitmapImage` trait). `customglyph` is a
+// verbatim paste of wezterm-gui/src/customglyph.rs, with
+// `use crate::glue::{BitmapImage, Bitmap as Image, Point, Rect, Size,
+// BgraPixel as SrgbaPixel}` for the substitution.
 //
 // `CellMetrics` is re-exported from `sonicterm-engine`; `DimensionContext`
 // is re-exported from `sonicterm-cfg::dimension`. Those live outside this
@@ -19,7 +17,7 @@
 pub mod customglyph;
 pub mod glue;
 
-// Re-export the public surface T9 (flush_shape_run) consumes.
+// Re-export the public surface `flush_shape_run` consumes.
 pub use customglyph::{block_sprite, BlockKey, SizedBlockKey};
 
 /// Rasterize a WezTerm custom block glyph using SonicTerm's cell metrics.

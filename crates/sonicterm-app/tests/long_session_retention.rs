@@ -1,10 +1,10 @@
 //! Does a long-lived pane return to baseline, or ratchet?
 //!
-//! #888 recorded its artifact as **"stateful and long-session-only"**: absent
-//! from a fresh window, appearing only after extended use, and on a process
-//! that reached 51.1 GB before a fatal `wgpu` OOM. The renderer churn baseline
-//! covers the other shape — windows opened and closed — and says nothing about
-//! one window used for a long time.
+//! Reported runaway growth has a shape worth naming: **stateful and
+//! long-session-only** — absent from a fresh window, appearing only after
+//! extended use, on a process that reached tens of gigabytes before a fatal
+//! `wgpu` OOM. The renderer churn baseline covers the other shape — windows
+//! opened and closed — and says nothing about one window used for a long time.
 //!
 //! "Long session" in wall-clock terms is a proxy for **many state
 //! transitions**, and those are drivable. This drives them: scrollback
@@ -149,7 +149,7 @@ fn a_long_lived_pane_stays_bounded_and_its_reclamation_runs() {
     assert!(
         peak <= RETENTION_CEILING,
         "a long-lived pane peaked at {peak} bytes against a {RETENTION_CEILING}-byte ceiling \
-         across {CYCLES} cycles. #888's artifact was stateful and long-session-only, so \
-         unbounded growth here is the shape that incident had. Samples: {samples:?}"
+         across {CYCLES} cycles. Reported runaway growth was stateful and long-session-only, \
+         so unbounded growth here is that shape. Samples: {samples:?}"
     );
 }

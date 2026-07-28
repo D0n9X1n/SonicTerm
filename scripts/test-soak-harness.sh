@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Local gate for scripts/soak-harness.py: unit tests plus an end-to-end control
-# run. This is the documented cross-platform control gate for #867 (WP-SOAK) on
-# Unix-like hosts; on Windows run the same checks via the unit module directly:
+# run. This is the documented cross-platform control gate on Unix-like hosts;
+# on Windows run the same checks via the unit module directly:
 #   python -m unittest -v soak-harness_tests   (from the scripts/ directory)
 # The unit suite embeds the cross-platform determinism assertions (pinned golden
 # SHA-256 and byte-for-byte golden-file match), so both paths verify the same

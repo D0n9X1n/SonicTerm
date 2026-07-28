@@ -1,5 +1,4 @@
-//! Per-row glyph cache layered on top of the dirty-bitset foundation
-//! landed.
+//! Per-row glyph cache layered on top of the dirty-bitset foundation.
 //!
 //! The terminal renderer (see `render.rs::render`) walks every visible
 //! row, groups cells into style runs, and feeds each run through
@@ -19,15 +18,15 @@
 //! key, we splice the cached `Vec` straight into the frame buffer and
 //! skip the shaping pass.
 //!
-//! **Per-pane keying (PR prerequisite):** the cache is keyed
-//! by `(pane_id, abs_row, hash)`. Before this change the key was just
-//! `(abs_row, hash)`, which assumed a single grid. Once introduces
-//! the per-pane render loop, every pane would otherwise read/write the
-//! same slot for any matching `(abs_row, hash)` pair and corrupt each
-//! other's glyphs. Folding the pane identifier into the key makes the
-//! cache safe for the multi-pane traversal without changing today's
+//! **Per-pane keying:** the cache is keyed by `(pane_id, abs_row, hash)`.
+//! The pane identifier is load-bearing rather than decorative — keyed on
+//! `(abs_row, hash)` alone the cache assumes a single grid, and under the
+//! per-pane render loop every pane would read and write the same slot for any
+//! matching `(abs_row, hash)` pair and corrupt each other's glyphs. Folding
+//! the pane identifier into the key makes the cache safe for multi-pane
+//! traversal without changing today's
 //! single-pane behaviour (callers pass `0` as the placeholder pane id
-//! until wires real pane identifiers through).
+//! until real pane identifiers are wired through).
 //!
 //! Cursor movement does NOT need to be folded into the hash: the cursor
 //! is drawn as a quad (`render::render` builds it from the cursor
@@ -52,7 +51,7 @@
 
 use crate::GlyphInstance;
 use std::borrow::Borrow;
-// T13/T14: the tofu colour was previously `cosmic_text::Color` (an
+// The tofu colour was previously `cosmic_text::Color` (an
 // opaque 4-byte struct). The renderer just feeds it into
 // `chrome_color_to_linear_rgba` at replay time; storing the same
 // four sRGB-encoded bytes here keeps the cache decoupled from any
