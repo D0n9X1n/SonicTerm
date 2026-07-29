@@ -553,6 +553,61 @@ fn the_exit_probe_distinguishes_a_clean_exit_from_a_failing_one() {
     );
 }
 
+/// A child that exits must close its output channel while its handle is held.
+///
+/// This is the trigger the pane close policy is built on: the VT worker learns
+/// its shell is gone by seeing `out_rx` disconnect, and only then classifies
+/// the exit. If the channel stays open while the pane still owns its
+/// `PtyHandle`, that notification is unreachable rather than late — the pane
+/// closes only on the event, and the event arrives only if the pane closes.
+///
+/// The handle is deliberately held for the whole drain. Dropping it early
+/// would tear down the pty itself and prove nothing about the natural path,
+/// which is exactly the case that matters: on Windows the ConPTY `HPCON` is
+/// released only by `PsuedoCon::drop`, so a reader that waits for the master
+/// to close would wait for the very teardown this event is meant to cause.
+///
+/// Runs on both platforms because the answer is platform-specific and the
+/// pty layers differ; a unix-only assertion would leave the ConPTY path
+/// untested, which is the half in doubt.
+#[test]
+fn a_clean_child_exit_closes_the_output_channel_while_the_handle_lives() {
+    #[cfg(windows)]
+    let _live_pty_guard = lock_live_pty_test();
+    #[cfg(unix)]
+    let (command, args) = ("/bin/sh", vec!["-c".to_string(), "exit 0".to_string()]);
+    #[cfg(windows)]
+    let (command, args) = ("cmd.exe", vec!["/c".to_string(), "exit".to_string(), "0".to_string()]);
+
+    let pty = PtyHandle::spawn_with_args(command, &args, 80, 24).expect("spawn short-lived shell");
+    #[cfg(windows)]
+    pty.send_input_nonblocking(b"\x1b[1;1R".to_vec()).expect("answer ConPTY cursor query");
+
+    // Drain exactly as the VT worker does, and keep the handle alive
+    // throughout — `pty` is not dropped until this test returns.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut disconnected = false;
+    let mut bytes = 0usize;
+    while std::time::Instant::now() < deadline {
+        match pty.out_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(chunk) => bytes += chunk.len(),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                disconnected = true;
+                break;
+            }
+        }
+    }
+
+    assert!(
+        disconnected,
+        "the output channel stayed open 10s after a clean child exit ({bytes} bytes read) while \
+         the handle was still held — a pane waiting on this disconnect would never learn its \
+         shell had gone"
+    );
+    drop(pty);
+}
+
 #[cfg(unix)]
 #[test]
 fn observed_shell_exit_still_kills_background_process_group() {
