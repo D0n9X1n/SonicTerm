@@ -107,17 +107,28 @@ effect and should not be added to new configurations.
 `family`, `size`, `line_height`, and `weight_scale` are the public SonicTerm
 font config. `weight_scale = 1.0` preserves native glyph coverage. Accepted
 values are `0.5..=5.0`; invalid values fall back to `1.0`. Below `1.0` thins
-regular text, above `1.0` thickens it, and neither changes cell metrics or
-replaces SGR bold.
+text, above `1.0` thickens it, and neither changes cell metrics or replaces
+SGR bold.
 
-`weight_scale` works in two stages. Small adjustments near `1.0` (such as `1.1`
-or `0.9`) remap glyph coverage, which shifts the antialiased edge only. Because
-a stem pixel that is already fully opaque can be neither darkened nor lightened,
-coverage alone has little effect on HiDPI/Retina displays, where stem cores are
-solid. Further from `1.0`, the glyph outline itself changes — growing above
-`1.0` and eroding below it — which adds or removes real ink and stays visible at
-any display scale. Values around `2.0`-`3.0` suit most HiDPI screens; `5.0` is
-deliberately heavy, and `0.5` deliberately light.
+**`weight_scale` acts on the configured `family` alone.** A character that
+family does not contain is drawn from a fallback font, at the weight that
+font's own designer chose, and stays there whatever this setting says. That
+boundary is deliberate: the setting names one family, and reweighting a
+different one applies your intent for your font to a font you never chose. The
+mismatch shows wherever the two sit side by side — a fallback glyph growing or
+thinning while its neighbour from your family does not move with it.
+
+`weight_scale` works in two stages, and both run at every value other than
+`1.0`. The first remaps glyph coverage, which shifts the antialiased edge only.
+Because a stem pixel that is already fully opaque can be neither darkened nor
+lightened, coverage alone has little effect on HiDPI/Retina displays, where
+stem cores are solid. The second changes the glyph outline — growing above
+`1.0`, eroding below it — which adds or removes real ink and stays visible at
+any display scale. Outline growth also enlarges the glyph's bitmap, so a change
+in weight is partly visible as a change in apparent size; cell metrics and
+advances are unaffected, so the grid does not move. Values around `2.0`-`3.0`
+suit most HiDPI screens; `5.0` is deliberately heavy, and `0.5` deliberately
+light.
 
 The platform rasterizer policy is internal: DirectWrite is the Windows
 default with FreeType fallback, while macOS/other Unix use FreeType. There is
@@ -349,15 +360,22 @@ threshold_secs = 10
 
 `family`、`size`、`line_height`、`weight_scale` 是 SonicTerm 对外字体配置。
 `weight_scale = 1.0` 保持字体原始覆盖率。允许范围为 `0.5..=5.0`；无效值回退为 `1.0`。
-小于 `1.0` 会让常规文本更细，大于 `1.0` 会让其更粗；两者都不会改变 cell metrics
+小于 `1.0` 会让文本更细，大于 `1.0` 会让其更粗；两者都不会改变 cell metrics
 或替代 SGR bold。
 
-`weight_scale` 分两个阶段生效。接近 `1.0` 的微调（例如 `1.1` 或 `0.9`）只重映射字形
-覆盖率，仅影响抗锯齿边缘。由于已经完全不透明的字干像素既无法进一步加深也无法变浅，
-在 HiDPI/Retina 屏幕上字干核心本身就是实心的，因此仅靠覆盖率几乎看不出变化。离
-`1.0` 更远时会改变字形轮廓本身——大于 `1.0` 时扩张，小于 `1.0` 时收缩——真正增减
-墨量，在任何缩放比例下都可见。HiDPI 屏幕通常适合 `2.0`-`3.0`；`5.0` 属于刻意加粗的
-极值，`0.5` 则是刻意变细的极值。
+**`weight_scale` 只作用于所配置的 `family`。** 该字体不包含的字符会由回退字体绘制，
+其粗细由那个字体自己的设计者决定，无论本设置取何值都保持不变。这条边界是刻意的：
+该设置指名的是一个字体族，而去改变另一个字体族，等于把你对自己字体的意图施加到
+一个你从未选择的字体上。两者相邻时这种不一致最为明显——回退字形变粗或变细，而
+来自你所配置字体的邻居纹丝不动。
+
+`weight_scale` 分两个阶段生效，且在 `1.0` 以外的任何取值下两个阶段都会执行。第一阶段
+重映射字形覆盖率，仅影响抗锯齿边缘。由于已经完全不透明的字干像素既无法进一步加深也
+无法变浅，在 HiDPI/Retina 屏幕上字干核心本身就是实心的，因此仅靠覆盖率几乎看不出变化。
+第二阶段改变字形轮廓本身——大于 `1.0` 时扩张，小于 `1.0` 时收缩——真正增减墨量，在任何
+缩放比例下都可见。轮廓扩张同时会放大字形位图，因此粗细变化有一部分会表现为视觉尺寸的
+变化；cell metrics 与 advance 不受影响，网格不会移动。HiDPI 屏幕通常适合 `2.0`-`3.0`；
+`5.0` 属于刻意加粗的极值，`0.5` 则是刻意变细的极值。
 
 平台 rasterizer policy 在内部决定：Windows 默认 DirectWrite 并以 FreeType 回退；
 macOS/其它 Unix 使用 FreeType。当前 `sonicterm.toml` 中不存在
