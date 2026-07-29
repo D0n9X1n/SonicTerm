@@ -332,6 +332,30 @@ impl LoadedFont {
     pub fn clone_handles(&self) -> Vec<ParsedFont> {
         self.handles.borrow().clone()
     }
+
+    /// Whether the handle at `font_idx` is a font the user configured, as
+    /// opposed to one resolved to cover a glyph the configured font lacked.
+    ///
+    /// Index alone cannot answer this. Resolution pushes a handle only when a
+    /// family actually matches, so a configured family that fails to load is
+    /// simply absent and the first fallback inherits index 0. A predicate
+    /// written as `font_idx == 0` therefore reports "configured" for a font
+    /// the user never named, in exactly the case where the distinction matters
+    /// most.
+    ///
+    /// Answered by asking the handle whether it matches any non-fallback entry
+    /// of the style this font was resolved from, which is what "the user
+    /// configured this" means.
+    pub fn is_configured_family(&self, font_idx: usize) -> bool {
+        let handles = self.handles.borrow();
+        let Some(handle) = handles.get(font_idx) else {
+            return false;
+        };
+        self.text_style
+            .font_with_fallback()
+            .iter()
+            .any(|attr| !attr.is_fallback && handle.matches_name(attr))
+    }
 }
 
 struct FallbackResolveInfo {

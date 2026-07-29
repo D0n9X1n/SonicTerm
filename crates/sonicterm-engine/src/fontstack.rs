@@ -245,7 +245,7 @@ impl Rasterizer for FontStack {
         let mut tile_h = rg.height;
         let mut offset_x = rg.bearing_x.get() as i32;
         let mut offset_y = -rg.bearing_y.get() as i32;
-        if !is_color && !key.weight_bold {
+        if weight_scale_applies(is_color, key.weight_bold, font.is_configured_family(font_idx)) {
             apply_regular_weight_scale(&mut coverage, self.regular_weight_scale, is_subpixel);
             // The coverage remap alone cannot thicken a stem whose core is
             // already fully opaque, which is the common case at HiDPI. Growing
@@ -534,6 +534,37 @@ fn scale_coverage(coverage: u8, scale: f32) -> u8 {
     let normalized = f32::from(coverage) / 255.0;
     let exponent = 1.0 / scale;
     (normalized.powf(exponent) * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+/// Whether `weight_scale` may act on this glyph.
+///
+/// The setting scales the native weight of *the configured font*, so it must
+/// reach that font's glyphs and no others. Three exclusions, each for its own
+/// reason:
+///
+/// * **colour glyphs** — emoji carry their own artwork; remapping coverage on
+///   them alters the picture rather than its weight.
+/// * **SGR bold** — the terminal already resolved a bold face for those, and
+///   scaling on top of it would compound two weight changes.
+/// * **fallback glyphs** — these come from a font the user did not configure,
+///   drawn at a weight its own designer chose. Reweighting them applies the
+///   user's intent for one family to a different one, and the mismatch shows
+///   whenever the two sit adjacent: a fallback glyph grows or thins while its
+///   neighbour from the configured family does not move with it.
+///
+/// `is_configured_family` is asked of the loaded font rather than inferred
+/// from the handle index. Resolution pushes a handle only when a family
+/// actually matches, so a configured family that fails to load is absent
+/// entirely and the first fallback inherits index 0 — an index test would then
+/// reweight a font the user never named, in the one case where the difference
+/// matters most.
+///
+/// Split out of `rasterize` so it can be tested. The gate governs both the
+/// coverage remap and the outline growth that follows it, and a test that
+/// reached only the helpers underneath would pass against a build whose gate
+/// was gone.
+fn weight_scale_applies(is_color: bool, weight_bold: bool, is_configured_family: bool) -> bool {
+    !is_color && !weight_bold && is_configured_family
 }
 
 fn apply_regular_weight_scale(coverage: &mut [u8], scale: f32, is_subpixel: bool) {
