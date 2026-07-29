@@ -53,7 +53,7 @@ const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// `None` means unknown — the child outlived the wait, or the probe failed.
 /// Callers must not read that as a crash: it decides only that the pane stays
 /// open, never that it closes.
-fn observe_child_exit_cleanliness(probe: &PtyChildExitProbe) -> Option<bool> {
+pub(super) fn observe_child_exit_cleanliness(probe: &PtyChildExitProbe) -> Option<bool> {
     let deadline = Instant::now() + CHILD_EXIT_OBSERVE_TIMEOUT;
     loop {
         match probe.has_exited() {

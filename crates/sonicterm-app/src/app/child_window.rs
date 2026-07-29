@@ -1679,6 +1679,7 @@ impl App {
     /// `PaneState`, no longer threaded in from the WindowState.
     pub(super) fn spawn_pane_state_for_child(
         &self,
+        pane_id: u64,
         cols: u16,
         rows: u16,
         child_window: Arc<Window>,
@@ -1722,6 +1723,10 @@ impl App {
             Ok(pty) => {
                 let parser_clone = parser.clone();
                 let out_rx = pty.out_rx.clone();
+                // Same reason as the main-window worker: the probe is what
+                // lets the exit be classified after the output channel is
+                // already gone.
+                let exit_probe = pty.child_exit_probe();
                 let in_tx_reply = pty.input_sender();
                 let redraw_target_thread = redraw_target.clone();
                 let redraw_proxy = self.event_loop_proxy.clone();
@@ -1859,7 +1864,35 @@ impl App {
                                         pending_bytes = 0;
                                     }
                                 }
-                                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                                    // A pane born in a child window reaches
+                                    // its shell's exit through this loop, not
+                                    // the main-window one. Both must report
+                                    // it, or the close policy applies to
+                                    // whichever window the pane happened to
+                                    // start in.
+                                    if let Some(proxy) = redraw_proxy.as_ref() {
+                                        if pending {
+                                            super::redraw_target::dispatch(
+                                                &redraw_target_thread,
+                                                |window_id| {
+                                                    let _ = proxy.send_event(
+                                                        UserEvent::RequestRedraw(window_id),
+                                                    );
+                                                },
+                                            );
+                                        }
+                                        let was_clean =
+                                            super::spawn_pane::observe_child_exit_cleanliness(
+                                                &exit_probe,
+                                            );
+                                        let _ = proxy.send_event(UserEvent::PaneProcessExited {
+                                            pane_id,
+                                            was_clean,
+                                        });
+                                    }
+                                    break;
+                                }
                             }
                         }
                     })
@@ -1901,8 +1934,8 @@ impl App {
             let (c, r) = renderer.cells();
             (c, r, win.clone())
         };
-        let pane_state = self.spawn_pane_state_for_child(cols, rows, child_window.clone());
         let pane_id = next_pane_id();
+        let pane_state = self.spawn_pane_state_for_child(pane_id, cols, rows, child_window.clone());
         let Some(child) = self.windows.get_mut(&win_id) else {
             return false;
         };
@@ -2089,7 +2122,7 @@ impl App {
         let pane_state =
             if let (Some(renderer), Some(win)) = (child.renderer.as_ref(), child.window.as_ref()) {
                 let (cols, rows) = renderer.cells();
-                self.spawn_pane_state_for_child(cols, rows, win.clone())
+                self.spawn_pane_state_for_child(new_id, cols, rows, win.clone())
             } else if child.renderer.is_none() && child.window.is_none() {
                 // Test-only synthetic child windows intentionally have no
                 // renderer/window, but they still need to exercise pane

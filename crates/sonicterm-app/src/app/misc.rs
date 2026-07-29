@@ -803,8 +803,8 @@ impl App {
         }
 
         let (cols, rows) = renderer.cells();
-        let pane_state = self.spawn_pane_state_for_child(cols, rows, window.clone());
         let pane_id = super::next_pane_id();
+        let pane_state = self.spawn_pane_state_for_child(pane_id, cols, rows, window.clone());
         let mut panes = HashMap::new();
         panes.insert(pane_id, pane_state);
 
