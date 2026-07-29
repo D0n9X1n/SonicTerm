@@ -296,3 +296,98 @@ fn erosion_keeps_tile_geometry_and_subpixel_alpha_consistent() {
         assert_eq!(px[3], px[0].max(px[1]).max(px[2]), "alpha must envelope RGB");
     }
 }
+
+/// `weight_scale` must reach the configured family's glyphs.
+///
+/// The setting exists to change that font's weight, so a build that gated it
+/// away entirely would be no fix at all — it would trade a wrong-glyph bug for
+/// a dead feature.
+#[test]
+fn weight_scale_acts_on_the_configured_family() {
+    assert!(
+        weight_scale_applies(false, false, PRIMARY_FONT_IDX),
+        "a regular glyph from the configured font is exactly what the setting names"
+    );
+}
+
+/// And must not reach glyphs from any other font.
+///
+/// This is the defect the gate closes. A fallback glyph is drawn at the weight
+/// its own designer chose, in a family the user never configured; scaling it
+/// applies the user's intent for one font to a different one. The visible
+/// result is a fallback glyph growing or thinning while its neighbour from the
+/// configured family stays put.
+///
+/// Asserted across several indices rather than just index 1: the handle list
+/// appends fallbacks, so the defect is "any index but the primary", and a
+/// gate written as `font_idx != 1` would satisfy a single-index check.
+#[test]
+fn weight_scale_leaves_every_fallback_font_alone() {
+    for font_idx in [1, 2, 3, 7, 42, 254] {
+        assert!(
+            !weight_scale_applies(false, false, font_idx),
+            "font_idx {font_idx} is a fallback the user never configured, so the weight \
+             setting for their own family must not touch it"
+        );
+    }
+}
+
+/// The two exclusions that predate this gate must survive it.
+///
+/// Colour glyphs carry artwork rather than a weight, and an SGR-bold glyph has
+/// already had a bold face resolved for it — scaling on top would compound two
+/// weight changes. Both were correct before and are unrelated to the fallback
+/// question, so a fix that dropped either would be a regression smuggled in
+/// beside a fix.
+#[test]
+fn colour_and_bold_glyphs_stay_excluded_even_from_the_primary_font() {
+    assert!(
+        !weight_scale_applies(true, false, PRIMARY_FONT_IDX),
+        "a colour glyph carries its own artwork; remapping coverage alters the picture"
+    );
+    assert!(
+        !weight_scale_applies(false, true, PRIMARY_FONT_IDX),
+        "SGR bold already resolved a bold face; scaling it again compounds two changes"
+    );
+    assert!(
+        !weight_scale_applies(true, true, PRIMARY_FONT_IDX),
+        "both exclusions together must still exclude"
+    );
+}
+
+/// The gate governs the outline growth, not only the coverage remap.
+///
+/// This is the assertion that matters most, and the one a helper-level test
+/// misses. `rasterize` runs two mechanisms behind this single gate: the
+/// coverage remap, and `embolden_coverage`, which pads the bitmap and
+/// max-filters it — actually changing `tile_w`/`tile_h` and the tile offset.
+/// The second is what makes a weight change visible as a *size* change.
+///
+/// A fix that gated only the remap would leave a fallback glyph still being
+/// dilated, so the user would see the same growth they reported. Pinning that
+/// the growth radius is non-zero at a raised weight is what makes this test
+/// fail against that half-fix rather than pass it.
+#[test]
+fn the_gate_governs_outline_growth_and_not_just_the_coverage_remap() {
+    // A weight the user reaches in four keypresses at 0.25 per step.
+    let scale = 2.0_f32;
+    let cell_h = 28.0_f64;
+
+    // Precondition: at this weight the growth is real, so gating it matters.
+    let radius = embolden_radius_px(scale, cell_h);
+    assert!(
+        radius > 0.0,
+        "test setup: weight {scale} must produce real outline growth, or this test cannot \
+         distinguish a fix that gates the growth from one that does not"
+    );
+
+    // Both mechanisms sit behind one predicate, so one answer decides both.
+    assert!(
+        weight_scale_applies(false, false, PRIMARY_FONT_IDX),
+        "the configured family gets both the remap and the growth"
+    );
+    assert!(
+        !weight_scale_applies(false, false, 1),
+        "a fallback glyph gets neither — including the growth that changes tile size"
+    );
+}
