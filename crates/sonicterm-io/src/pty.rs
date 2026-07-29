@@ -1507,6 +1507,38 @@ pub(crate) fn clean_e2e_args(shell_path: &str) -> Vec<String> {
 }
 
 #[doc(hidden)]
+/// The `TERM_PROGRAM_VERSION` to advertise for a given `TERM_PROGRAM`.
+///
+/// Running as ourselves, this is SonicTerm's own version. But `term_program`
+/// is configurable precisely so a user can present as a terminal that tools
+/// already recognise, and a name/version pair has to be internally consistent
+/// to be useful: programs gate features on the version *of the terminal the
+/// name claims*.
+///
+/// WezTerm versions its releases by datestamp, and consumers compare those
+/// lexically. A semver string sorts below any datestamp, so sending
+/// SonicTerm's `1.2.0` under WezTerm's name fails every such gate — the tool
+/// takes its WezTerm branch on the name, then disables the features it just
+/// decided the terminal was too old for. That is worse than either identity
+/// alone.
+///
+/// The advertised datestamp is the release that introduced the capabilities
+/// SonicTerm actually implements, not a moving "now": claiming to be newer
+/// than we are would invite gates for features we do not have.
+fn term_program_version(term_program: &str) -> &'static str {
+    match term_program {
+        "WezTerm" => WEZTERM_ADVERTISED_VERSION,
+        _ => env!("CARGO_PKG_VERSION"),
+    }
+}
+
+/// Datestamp advertised when presenting as WezTerm.
+///
+/// Above the thresholds consumers test for modern capabilities — notably
+/// styled underlines, which is the gate that otherwise makes editors probe
+/// with a DCS query instead of enabling the feature outright.
+const WEZTERM_ADVERTISED_VERSION: &str = "20230712-072601";
+
 pub fn apply_child_pty_env(builder: &mut CommandBuilder, term_program: &str) {
     builder.env("TERM", "xterm-256color");
     builder.env("COLORTERM", "truecolor");
@@ -1514,7 +1546,7 @@ pub fn apply_child_pty_env(builder: &mut CommandBuilder, term_program: &str) {
     // (e.g. Copilot CLI, shells, prompt frameworks). Mirrors iTerm2 /
     // WezTerm, which set TERM_PROGRAM + TERM_PROGRAM_VERSION.
     builder.env("TERM_PROGRAM", term_program);
-    builder.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+    builder.env("TERM_PROGRAM_VERSION", term_program_version(term_program));
     apply_terminal_locale_env(builder);
 }
 

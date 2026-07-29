@@ -111,7 +111,50 @@ fn child_pty_env_uses_configured_term_program() {
     assert_eq!(env_str(&builder, "TERM"), "xterm-256color");
     assert_eq!(env_str(&builder, "COLORTERM"), "truecolor");
     assert_eq!(env_str(&builder, "TERM_PROGRAM"), "WezTerm");
+    // Not SonicTerm's own version. See
+    // `an_advertised_name_carries_a_version_that_names_gates_accept`.
+    assert_eq!(env_str(&builder, "TERM_PROGRAM_VERSION"), "20230712-072601");
+}
+
+#[test]
+fn running_as_ourselves_advertises_our_own_version() {
+    let mut builder = CommandBuilder::new("sh");
+    apply_child_pty_env(&mut builder, ShellSpawnOpts::DEFAULT_TERM_PROGRAM);
+
+    assert_eq!(env_str(&builder, "TERM_PROGRAM"), "SonicTerm");
     assert_eq!(env_str(&builder, "TERM_PROGRAM_VERSION"), env!("CARGO_PKG_VERSION"));
+}
+
+#[test]
+fn an_advertised_name_carries_a_version_that_names_gates_accept() {
+    // A name/version pair has to be internally consistent to be useful:
+    // programs gate features on the version *of the terminal the name
+    // claims*. WezTerm versions by datestamp and consumers compare those
+    // lexically, so a semver string sorts below every datestamp — the tool
+    // takes its WezTerm branch on the name, then disables the features it
+    // just decided the terminal was too old for.
+    //
+    // Asserting the pair rather than either field: checking only that the
+    // version is non-empty, or only that the name is passed through, would
+    // both pass against the mismatch this exists to prevent.
+    let mut builder = CommandBuilder::new("sh");
+    apply_child_pty_env(&mut builder, "WezTerm");
+    let advertised = env_str(&builder, "TERM_PROGRAM_VERSION");
+
+    // The threshold editors test for styled-underline support.
+    const CONSUMER_GATE: &str = "20210203-095643";
+    assert!(
+        advertised > CONSUMER_GATE,
+        "advertised WezTerm version {advertised:?} sorts below the gate \
+         {CONSUMER_GATE:?}, so capability checks against the claimed identity fail"
+    );
+
+    // And SonicTerm's own version would NOT have cleared it, which is the
+    // defect this replaced.
+    assert!(
+        env!("CARGO_PKG_VERSION") < CONSUMER_GATE,
+        "this test is vacuous if our own version already cleared the gate"
+    );
 }
 
 #[cfg(target_os = "windows")]
