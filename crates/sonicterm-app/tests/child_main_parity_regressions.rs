@@ -23,7 +23,15 @@ fn main_and_child() -> (App, u64, winit::window::WindowId, u64) {
 }
 
 fn selected_row(cols_inclusive: u16) -> Selection {
-    Selection { start: (0, 0), end: (0, cols_inclusive), anchored: true }
+    Selection {
+        start: (0, 0),
+        end: (0, cols_inclusive),
+        anchored: true,
+        pane_id: None,
+        content_seq: 0,
+        on_alt_screen: false,
+        scrollback_evicted: 0,
+    }
 }
 
 #[test]

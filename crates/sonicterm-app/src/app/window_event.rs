@@ -26,7 +26,7 @@ use winit::{
 };
 
 use super::key_encoding::{encode_key, key_event_to_string, key_to_strings};
-use super::{mark_all_panes_dirty, App, FrontmostKind, TabState};
+use super::{invalidate_selection_for_content, mark_all_panes_dirty, App, FrontmostKind, TabState};
 
 const SPLITTER_HIT_THICKNESS: f32 = 8.0;
 const SEARCH_BADGE_ICON: &str = "";
@@ -448,7 +448,17 @@ impl App {
                 // panes now live in `ws` too, so they're
                 // pulled from the same field-disjoint split borrow.
                 let main_id_opt = self.main_window_id;
-                let ws_opt = main_id_opt.and_then(|id| self.windows.get_mut(&id));
+                let mut ws_opt = main_id_opt.and_then(|id| self.windows.get_mut(&id));
+                if let Some(ws) = ws_opt.as_deref_mut() {
+                    if let Some(active_pos) = guards.iter().position(|(id, _, _)| *id == active_id)
+                    {
+                        invalidate_selection_for_content(
+                            &mut ws.selection,
+                            active_id,
+                            guards[active_pos].1.grid(),
+                        );
+                    }
+                }
                 #[allow(clippy::type_complexity)]
                 let (
                     renderer_opt,
@@ -1149,8 +1159,8 @@ impl App {
                             // to a small on-screen row and balloon the selection.
                             // Only Cell mode consumes it, so skip the extra
                             // try_lock for word/line drags. (#B10 review)
-                            let cursor_abs_row = if matches!(mode, SelectMode::Cell) {
-                                self.viewport_row_to_abs(row)
+                            let cursor_selection_state = if matches!(mode, SelectMode::Cell) {
+                                self.viewport_row_selection_state(row)
                             } else {
                                 None
                             };
@@ -1168,8 +1178,12 @@ impl App {
                                             // point-drag extends. Skip if
                                             // the absolute row was unavailable.
                                             if !sel.anchored {
-                                                if let Some(abs) = cursor_abs_row {
-                                                    sel.extend(abs, col);
+                                                if let Some((abs, pane_id, seq, is_alt, evicted)) =
+                                                    cursor_selection_state
+                                                {
+                                                    sel.extend_with_content_state(
+                                                        abs, col, pane_id, seq, is_alt, evicted,
+                                                    );
                                                     mark_all_panes_dirty(&ws.panes);
                                                     if let Some(w) = ws.window.as_ref() {
                                                         w.request_redraw();
@@ -1555,17 +1569,21 @@ impl App {
                             // (CLAUDE.md §4).
                             let click_count =
                                 self.main_mut().map(|ws| ws.register_click(row, col)).unwrap_or(1);
-                            // Selection rows are scrollback-ABSOLUTE so the
-                            // highlight tracks the same TEXT as the viewport
-                            // scrolls. Convert the viewport row from
-                            // `pixel_to_cell` once; fall back to treating it
-                            // as absolute (correct while unscrolled) if the
-                            // parser is momentarily busy.
-                            let abs_row = self.viewport_row_to_abs(row).unwrap_or(row as u64);
+                            // Resolve the absolute row and content baseline
+                            // under one parser lock. A selection must not be
+                            // born with dirty/content state older than itself.
+                            let selection_state = self.viewport_row_selection_state(row);
+                            let abs_row = selection_state.map_or(row as u64, |state| state.0);
                             let sel = match click_count {
                                 2 => self.word_selection_at(abs_row, col),
                                 3 => self.line_selection_at(abs_row),
-                                _ => Selection::new(abs_row, col),
+                                _ => selection_state.map_or_else(
+                                    || Selection::new(abs_row, col),
+                                    |(_, pane_id, seq, is_alt, evicted)| {
+                                        Selection::new(abs_row, col)
+                                            .with_content_state(pane_id, seq, is_alt, evicted)
+                                    },
+                                ),
                             };
                             // Record the WezTerm-style drag granularity +
                             // anchor cell so a subsequent CursorMoved (button

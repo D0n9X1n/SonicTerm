@@ -1,16 +1,12 @@
-//! Wezterm-font powered font stack.
+//! Renderer-facing adapter over SonicTerm's font discovery, shaping, and
+//! rasterization stack.
 //!
-//! Phase 3 entry point. Wraps `wezterm_font::FontConfiguration` so
-//! `sonicterm-text` can query wezterm's font selection / fallback /
-//! shaping algorithms instead of cosmic-text. The first concrete
-//! consumer is the per-row shape cache; over time more sonicterm-text
-//! helpers will route through this stack.
-//!
-//! The stack is intentionally minimal in this phase: we expose only
-//! the methods the sonicterm-text shape cache needs to call. Adding
-//! more sonicterm-font surface area as needed is a one-liner here.
+//! The adapter owns the configured-family provenance check and converts native
+//! raster output into fixed-geometry atlas tiles. Weight scaling changes ink
+//! coverage only; fallback, color, and explicitly bold glyphs remain untouched.
 
 use std::cell::Cell;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Once;
 
@@ -88,10 +84,9 @@ impl FontStack {
 
     /// Construct a [`FontStack`] with `primary_family` as the baseline
     /// `[font] family` setting. The first call to this function (or
-    /// [`Self::try_new`]) installs a wezterm `Config` globally; later
-    /// calls re-use that install regardless of their `primary_family`
-    /// argument (live family swaps are out-of-scope for this phase —
-    /// see the default font config).
+    /// [`Self::try_new`]) installs a process-wide font configuration; later
+    /// calls still pass an explicit per-stack configuration so live family
+    /// changes build a stack for the requested family.
     pub fn try_new_with_family(primary_family: &str, dpi: usize) -> Result<Self> {
         Self::try_new_full(primary_family, 14.0, dpi)
     }
@@ -116,6 +111,40 @@ impl FontStack {
             Some(build_config(primary_family, font_size_pt, FALLBACK_FAMILIES)),
             dpi,
         )?;
+        Ok(Self {
+            fc: Rc::new(fc),
+            regular_weight_scale: sanitize_weight_scale(regular_weight_scale),
+            cell_h_px: Cell::new(0.0),
+        })
+    }
+
+    /// Construct from exact font directories and an explicit style.
+    ///
+    /// Hidden because this is a deterministic test seam, not user-facing font
+    /// discovery. The caller supplies tracked font files/directories and can
+    /// mark each family configured or fallback without consulting OS fonts.
+    #[doc(hidden)]
+    pub fn try_new_with_font_dirs_for_test(
+        families: &[(&str, bool)],
+        font_dirs: Vec<PathBuf>,
+        font_size_pt: f64,
+        dpi: usize,
+        regular_weight_scale: f32,
+    ) -> Result<Self> {
+        let mut cfg = config::Config::default_config();
+        cfg.font.font = families
+            .iter()
+            .map(|(family, is_fallback)| config::FontAttributes {
+                family: (*family).to_string(),
+                is_fallback: *is_fallback,
+                ..config::FontAttributes::default()
+            })
+            .collect();
+        cfg.font_size = font_size_pt;
+        cfg.font_dirs = font_dirs;
+        cfg.font_locator = config::FontLocatorSelection::ConfigDirsOnly;
+        cfg.search_font_dirs_for_fallback = true;
+        let fc = FontConfiguration::new(Some(config::ConfigHandle::new(cfg)), dpi)?;
         Ok(Self {
             fc: Rc::new(fc),
             regular_weight_scale: sanitize_weight_scale(regular_weight_scale),
@@ -169,6 +198,39 @@ impl FontStack {
     pub fn measure_text_width(&self, text: &str) -> Result<f32> {
         let glyphs = self.shape_text(text)?;
         Ok(glyphs.iter().map(|glyph| glyph.x_advance.get() as f32).sum())
+    }
+
+    /// Resolve a family to its exact handle index in this stack.
+    ///
+    /// Hidden test seam for provenance regression tests that must address a
+    /// fallback handle directly even when the primary also covers the glyph.
+    #[doc(hidden)]
+    pub fn font_index_for_test(&self, family: &str) -> Result<usize> {
+        let font = self.font_for_style(false, false)?;
+        let attr = config::FontAttributes::new(family);
+        font.clone_handles()
+            .iter()
+            .position(|handle| handle.matches_name(&attr))
+            .ok_or_else(|| anyhow::anyhow!("tracked font fixture {family:?} did not resolve"))
+    }
+
+    /// Shape a glyph directly with a tracked family and return its glyph id.
+    #[doc(hidden)]
+    pub fn glyph_id_for_family_for_test(&self, family: &str, ch: char) -> Result<u32> {
+        let style = TextStyle { font: vec![config::FontAttributes::new(family)], foreground: None };
+        self.fc
+            .resolve_font(&style)?
+            .blocking_shape(
+                &ch.to_string(),
+                Some(Presentation::Text),
+                Direction::LeftToRight,
+                None,
+                None,
+            )?
+            .into_iter()
+            .find(|glyph| glyph.glyph_pos != 0)
+            .map(|glyph| glyph.glyph_pos)
+            .ok_or_else(|| anyhow::anyhow!("tracked font fixture {family:?} lacks {ch:?}"))
     }
 
     /// Return cell metrics for the default font, projected into the
@@ -259,8 +321,9 @@ impl Rasterizer for FontStack {
                 coverage = grown;
                 tile_w = w;
                 tile_h = h;
-                // The tile grew by `pad` on every side, so its top-left corner
-                // now sits that much further up and to the left of the pen.
+                // Fixed-tile emboldening reports pad zero. Keep the adjustment
+                // explicit so a future implementation that returns padding also
+                // keeps its top-left corner aligned with the pen.
                 offset_x -= pad as i32;
                 offset_y -= pad as i32;
             }
@@ -309,9 +372,16 @@ fn sanitize_weight_scale(scale: f32) -> f32 {
 
 /// Glyph outline growth per unit of `weight_scale` above 1.0, expressed as a
 /// fraction of the cell height. Tuned so `weight_scale = 2.0` adds roughly
-/// half a pixel of radius at a 13pt Retina cell and `5.0` stays under the
-/// point where adjacent stems merge into a blob.
+/// half a pixel of radius at a 13pt Retina cell.
 const EMBOLDEN_RADIUS_PER_CELL_H: f64 = 0.02;
+
+/// Raster-space growth ceiling while the output stays inside the original tile.
+///
+/// Larger bitmap dilations flatten counters and saturate the tile edge after
+/// crop-back. The ceiling is deliberately independent of the glyph's existing
+/// margins: flat-sided glyphs often touch one bitmap edge, and consulting spare
+/// margin would disable growth for those while still growing curved glyphs.
+const MAX_EMBOLDEN_RADIUS_PX: f64 = 1.0;
 
 /// Radius, in raster px, that regular text should grow at `scale`. Zero at or
 /// below `1.0`, where [`thin_radius_px`] takes over instead.
@@ -340,6 +410,17 @@ fn thin_radius_px(scale: f32, cell_h: f64) -> f64 {
     f64::from(1.0 - scale) * cell_h * THIN_RADIUS_PER_CELL_H
 }
 
+fn checked_coverage_len(width: usize, height: usize, channels: usize) -> Option<usize> {
+    if width == 0
+        || height == 0
+        || width > MAX_RASTERIZED_GLYPH_DIMENSION
+        || height > MAX_RASTERIZED_GLYPH_DIMENSION
+    {
+        return None;
+    }
+    width.checked_mul(height)?.checked_mul(channels)
+}
+
 /// Shrink `coverage` inward by `radius` px in place. Unlike growth, erosion
 /// never needs padding — the glyph only loses ink — so tile dimensions and
 /// offsets are unchanged and the caller can swap the buffer straight in.
@@ -356,24 +437,26 @@ fn erode_coverage(
         return None;
     }
     let channels = if is_subpixel { 4 } else { 1 };
-    if coverage.len() != width * height * channels {
+    let byte_len = checked_coverage_len(width, height, channels)?;
+    if coverage.len() != byte_len {
         return None;
     }
-    let mut out = vec![0u8; width * height * channels];
+    let pixel_len = width.checked_mul(height)?;
+    let mut out = vec![0u8; byte_len];
     for ch in 0..channels {
-        let mut plane = vec![0u8; width * height];
-        for i in 0..width * height {
+        let mut plane = vec![0u8; pixel_len];
+        for i in 0..pixel_len {
             plane[i] = coverage[i * channels + ch];
         }
-        let mut tmp = vec![0u8; width * height];
+        let mut tmp = vec![0u8; pixel_len];
         morph_axis(&plane, &mut tmp, width, height, width, radius, true);
-        let mut transposed = vec![0u8; width * height];
+        let mut transposed = vec![0u8; pixel_len];
         for y in 0..height {
             for x in 0..width {
                 transposed[x * height + y] = tmp[y * width + x];
             }
         }
-        let mut tcol = vec![0u8; width * height];
+        let mut tcol = vec![0u8; pixel_len];
         morph_axis(&transposed, &mut tcol, height, width, height, radius, true);
         for y in 0..height {
             for x in 0..width {
@@ -459,48 +542,19 @@ fn morph_axis(
     }
 }
 
-/// Grow `coverage` outward by `radius` px, returning the padded buffer and its
-/// new dimensions. The glyph is padded on every side first so the added ink has
-/// somewhere to land instead of being clipped at the old bitmap edge.
+/// Grow `coverage` outward by `radius` raster pixels without changing the
+/// returned tile dimensions or origin.
 ///
-/// Returns `None` when there is nothing to do or the padded tile would exceed
-/// the atlas dimension limit.
-/// How far the ink in `coverage` sits from the tile's edges, in pixels.
+/// The operation pads scratch space so max-filter samples can cross the old
+/// bitmap edge, then crops back to the original bounds. Radius is capped by
+/// [`MAX_EMBOLDEN_RADIUS_PX`] rather than by spare bitmap margin: a flat-sided
+/// glyph commonly touches an edge, and margin-dependent growth would make
+/// weight behavior vary by glyph shape.
 ///
-/// The smallest of the four margins bounds how far the outline can grow before
-/// it would be cropped. Computed from the alpha channel, which is the envelope
-/// of the subpixel channels and identical to coverage in the grayscale case.
-fn ink_margin_px(coverage: &[u8], width: usize, height: usize, is_subpixel: bool) -> usize {
-    let channels = if is_subpixel { 4 } else { 1 };
-    let alpha_at = |x: usize, y: usize| -> u8 {
-        let i = (y * width + x) * channels;
-        if is_subpixel {
-            coverage[i + 3]
-        } else {
-            coverage[i]
-        }
-    };
-    // Anything above zero is ink: dilation spreads from any non-empty pixel,
-    // so a faint antialiased edge bounds the growth exactly as a solid one
-    // does.
-    let (mut min_x, mut max_x, mut min_y, mut max_y) = (width, 0usize, height, 0usize);
-    for y in 0..height {
-        for x in 0..width {
-            if alpha_at(x, y) > 0 {
-                min_x = min_x.min(x);
-                max_x = max_x.max(x);
-                min_y = min_y.min(y);
-                max_y = max_y.max(y);
-            }
-        }
-    }
-    if min_x > max_x {
-        // No ink at all; nothing can be cropped.
-        return usize::MAX;
-    }
-    min_x.min(min_y).min(width.saturating_sub(max_x + 1)).min(height.saturating_sub(max_y + 1))
-}
-
+/// Returns `None` when there is nothing to do, the declared final dimensions
+/// exceed the atlas limit, the input buffer does not match them exactly, or
+/// checked scratch arithmetic overflows. The bounded scratch padding may exceed
+/// the final atlas dimensions because it is cropped before return.
 fn embolden_coverage(
     coverage: &[u8],
     width: usize,
@@ -511,38 +565,22 @@ fn embolden_coverage(
     if radius <= 0.0 || width == 0 || height == 0 {
         return None;
     }
-    // Before reading a single pixel: the buffer has to actually hold the
-    // dimensions it claims. A caller passing a short slice with a large
-    // declared width would otherwise index past its end during the margin
-    // scan below — the old code reached its size guard first and never
-    // touched the buffer, so inserting a scan above that guard introduced the
-    // out-of-bounds this restores.
     let channels = if is_subpixel { 4 } else { 1 };
-    if coverage.len() < width * height * channels {
+    let byte_len = checked_coverage_len(width, height, channels)?;
+    if coverage.len() != byte_len {
         return None;
     }
-    // Grow no further than the glyph's own margin. The tile keeps its
-    // dimensions, so ink pushed past the edge is discarded rather than
-    // enlarging the glyph — and a bullet dilated past its margin stops being a
-    // bullet and becomes a filled square. Measured across four glyphs, cropping
-    // is invisible through weight 2.0 and disfiguring by 3.0.
-    //
-    // The consequence is that weight saturates for a glyph that already fills
-    // its tile: past its margin, asking for more weight gets no more ink. That
-    // is the better failure. A glyph that stops getting heavier still reads as
-    // itself; one dilated into a rectangle does not.
-    let margin = ink_margin_px(coverage, width, height, is_subpixel);
-    let radius = radius.min(margin as f64);
-    if radius <= 0.0 {
-        return None;
-    }
+    // A shape-independent ceiling prevents high-weight crop saturation without
+    // making flat glyphs (which commonly touch one bitmap edge) grow less than
+    // curved glyphs. Fractional values below the ceiling still blend smoothly.
+    let radius = radius.min(MAX_EMBOLDEN_RADIUS_PX);
     let pad = radius.ceil() as usize;
-    let new_w = width + pad * 2;
-    let new_h = height + pad * 2;
-    if new_w > MAX_RASTERIZED_GLYPH_DIMENSION || new_h > MAX_RASTERIZED_GLYPH_DIMENSION {
-        return None;
-    }
-    let mut padded = vec![0u8; new_w * new_h * channels];
+    let doubled_pad = pad.checked_mul(2)?;
+    let new_w = width.checked_add(doubled_pad)?;
+    let new_h = height.checked_add(doubled_pad)?;
+    let scratch_pixels = new_w.checked_mul(new_h)?;
+    let scratch_bytes = scratch_pixels.checked_mul(channels)?;
+    let mut padded = vec![0u8; scratch_bytes];
     for y in 0..height {
         let src = y * width * channels;
         let dst = ((y + pad) * new_w + pad) * channels;
@@ -553,23 +591,23 @@ fn embolden_coverage(
     // deinterleaving into a scratch plane, since the separable passes need a
     // contiguous stride per axis. Every byte is written below, so the buffer
     // starts zeroed rather than copied.
-    let mut out = vec![0u8; new_w * new_h * channels];
+    let mut out = vec![0u8; scratch_bytes];
     for ch in 0..channels {
-        let mut plane = vec![0u8; new_w * new_h];
-        for i in 0..new_w * new_h {
+        let mut plane = vec![0u8; scratch_pixels];
+        for i in 0..scratch_pixels {
             plane[i] = padded[i * channels + ch];
         }
-        let mut tmp = vec![0u8; new_w * new_h];
+        let mut tmp = vec![0u8; scratch_pixels];
         // Horizontal: new_h lines of new_w samples, stride new_w.
         morph_axis(&plane, &mut tmp, new_w, new_h, new_w, radius, false);
         // Vertical: transpose, reuse the same row-wise pass, transpose back.
-        let mut transposed = vec![0u8; new_w * new_h];
+        let mut transposed = vec![0u8; scratch_pixels];
         for y in 0..new_h {
             for x in 0..new_w {
                 transposed[x * new_h + y] = tmp[y * new_w + x];
             }
         }
-        let mut tcol = vec![0u8; new_w * new_h];
+        let mut tcol = vec![0u8; scratch_pixels];
         morph_axis(&transposed, &mut tcol, new_h, new_w, new_h, radius, false);
         for y in 0..new_h {
             for x in 0..new_w {
@@ -596,7 +634,7 @@ fn embolden_coverage(
     // right trade: a rasterized glyph carries margin around its outline, so
     // there is room to thicken into, and where there is not, losing a fraction
     // of a pixel at the edge is less visible than every glyph resizing.
-    let mut cropped = vec![0u8; width * height * channels];
+    let mut cropped = vec![0u8; byte_len];
     for y in 0..height {
         let src = ((y + pad) * new_w + pad) * channels;
         let dst = y * width * channels;

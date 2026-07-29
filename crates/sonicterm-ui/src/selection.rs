@@ -40,11 +40,70 @@ pub struct Selection {
     /// as empty, even when it covers a single cell, so a one-character word
     /// or an empty line stays visible, copyable, and survives release.
     pub anchored: bool,
+    /// Pane whose content sequence `content_seq` belongs to.
+    ///
+    /// SonicTerm stores selection state per window while row sequences are
+    /// per pane. Keeping the identity beside the sequence prevents a pane-focus
+    /// change from comparing unrelated counters and invalidating arbitrarily.
+    pub pane_id: Option<u64>,
+    /// Grid cell-content sequence observed when this selection was last created
+    /// or extended. Mirrors WezTerm's selection seqno: rows changed after this
+    /// value may invalidate the selected range; older dirty state cannot.
+    pub content_seq: u64,
+    /// Screen buffer the selected content came from. Switching between primary
+    /// and alternate screens replaces every row's identity, so a selection from
+    /// the previous buffer cannot remain copyable on the next one.
+    pub on_alt_screen: bool,
+    /// Number of oldest scrollback rows already removed when the endpoints were
+    /// recorded. A later eviction rebases surviving absolute rows by the delta.
+    pub scrollback_evicted: u64,
 }
 
 impl Selection {
     pub fn new(row: u64, col: u16) -> Self {
-        Self { start: (row, col), end: (row, col), anchored: false }
+        Self {
+            start: (row, col),
+            end: (row, col),
+            anchored: false,
+            pane_id: None,
+            content_seq: 0,
+            on_alt_screen: false,
+            scrollback_evicted: 0,
+        }
+    }
+
+    /// Bind this selection to the pane and grid state it was created from.
+    #[must_use]
+    pub fn with_content_state(
+        mut self,
+        pane_id: u64,
+        content_seq: u64,
+        on_alt_screen: bool,
+        scrollback_evicted: u64,
+    ) -> Self {
+        self.pane_id = Some(pane_id);
+        self.content_seq = content_seq;
+        self.on_alt_screen = on_alt_screen;
+        self.scrollback_evicted = scrollback_evicted;
+        self
+    }
+
+    /// Extend the range and advance its content baseline, matching WezTerm's
+    /// `extend_selection_at_mouse_cursor` behavior.
+    pub fn extend_with_content_state(
+        &mut self,
+        row: u64,
+        col: u16,
+        pane_id: u64,
+        content_seq: u64,
+        on_alt_screen: bool,
+        scrollback_evicted: u64,
+    ) {
+        self.end = (row, col);
+        self.pane_id = Some(pane_id);
+        self.content_seq = content_seq;
+        self.on_alt_screen = on_alt_screen;
+        self.scrollback_evicted = scrollback_evicted;
     }
 
     pub fn extend(&mut self, row: u64, col: u16) {
@@ -113,7 +172,15 @@ impl Selection {
         }
         let c = (col as usize).min(len - 1);
         let (left, right) = word_bounds(&chars, c);
-        Selection { start: (row, left as u16), end: (row, right as u16), anchored: true }
+        Selection {
+            start: (row, left as u16),
+            end: (row, right as u16),
+            anchored: true,
+            pane_id: None,
+            content_seq: grid.content_seq(),
+            on_alt_screen: grid.is_alt(),
+            scrollback_evicted: grid.scrollback_evicted(),
+        }
     }
 
     /// Select the whole row under `abs_row` — the triple-click behavior.
@@ -125,7 +192,15 @@ impl Selection {
             Some(line) => line.len().saturating_sub(1) as u16,
             None => grid.cols.saturating_sub(1),
         };
-        Selection { start: (row, 0), end: (row, last_col), anchored: true }
+        Selection {
+            start: (row, 0),
+            end: (row, last_col),
+            anchored: true,
+            pane_id: None,
+            content_seq: grid.content_seq(),
+            on_alt_screen: grid.is_alt(),
+            scrollback_evicted: grid.scrollback_evicted(),
+        }
     }
 
     /// Word-mode drag (WezTerm `SelectionMode::Word`): the selection spans
@@ -149,7 +224,15 @@ impl Selection {
         // the two ends.
         let start = a.start.min(c.start);
         let end = a.end.max(c.end);
-        Selection { start, end, anchored: true }
+        Selection {
+            start,
+            end,
+            anchored: true,
+            pane_id: None,
+            content_seq: grid.content_seq(),
+            on_alt_screen: grid.is_alt(),
+            scrollback_evicted: grid.scrollback_evicted(),
+        }
     }
 
     /// Line-mode drag (WezTerm `SelectionMode::Line`): the selection spans
@@ -166,7 +249,15 @@ impl Selection {
             Some(line) => line.len().saturating_sub(1) as u16,
             None => grid.cols.saturating_sub(1),
         };
-        Selection { start: (top, 0), end: (bottom, last_col), anchored: true }
+        Selection {
+            start: (top, 0),
+            end: (bottom, last_col),
+            anchored: true,
+            pane_id: None,
+            content_seq: grid.content_seq(),
+            on_alt_screen: grid.is_alt(),
+            scrollback_evicted: grid.scrollback_evicted(),
+        }
     }
 
     /// Serialize the covered cells from `grid`. Rows are scrollback-ABSOLUTE
@@ -328,6 +419,46 @@ pub fn word_bounds(chars: &[char], col: usize) -> (usize, usize) {
         right += 1;
     }
     (left, right)
+}
+
+/// Whether a selection must be dropped because content changed underneath it.
+///
+/// Mirrors WezTerm's changed-since-selection rule: compare only rows whose
+/// cell-content sequence is newer than the selection's baseline, then clear
+/// only when those rows intersect the selected absolute-row range. Cursor
+/// motion and presentation-only dirtiness do not advance the content sequence.
+///
+/// Live visible row `r` maps to `scrollback_len + r`, not to the user's current
+/// viewport. On the primary screen that lets a selected row move into history
+/// without invalidation; on the alternate screen `scrollback_len` is zero, so a
+/// TUI repaint of a fixed row invalidates exactly that row.
+#[must_use]
+pub fn revalidate_selection(selection: &mut Selection, pane_id: u64, grid: &Grid) -> bool {
+    if selection.is_empty() {
+        return false;
+    }
+    if selection.pane_id != Some(pane_id) || selection.on_alt_screen != grid.is_alt() {
+        return true;
+    }
+
+    let evicted = grid.scrollback_evicted().saturating_sub(selection.scrollback_evicted);
+    if !selection.on_alt_screen && evicted > 0 {
+        let ((first_row, _), _) = selection.normalized();
+        if first_row < evicted {
+            return true;
+        }
+        selection.start.0 -= evicted;
+        selection.end.0 -= evicted;
+        selection.scrollback_evicted = grid.scrollback_evicted();
+    }
+
+    let ((first_row, _), (last_row, _)) = selection.normalized();
+    let live_top = grid.scrollback_len() as u64;
+    grid.scrollback_rows_changed_since(selection.content_seq)
+        .chain(
+            grid.visible_rows_changed_since(selection.content_seq).map(|row| live_top + row as u64),
+        )
+        .any(|row| row >= first_row && row <= last_row)
 }
 
 #[cfg(test)]

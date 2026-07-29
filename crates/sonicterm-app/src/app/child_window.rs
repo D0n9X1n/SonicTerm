@@ -36,6 +36,7 @@ use winit::{
 
 use super::scrollbar_input::HitOutcome;
 use super::{
+    invalidate_selection_for_content,
     key_encoding::{encode_key, encode_logical, key_event_to_string, key_name, key_to_strings},
     mark_all_panes_dirty, next_pane_id, pick_prompt_target, poll_command_events_for_child_window,
     resize_all_panes, shell_quote_posix, with_integrated_titlebar, wrap_paste, App, FrontmostKind,
@@ -543,6 +544,11 @@ impl App {
                         // map keyed by `active_id`, so a guard with this id
                         // must exist. Render hot path: no Result conversion.
                         .expect("active pane guard collected above");
+                    invalidate_selection_for_content(
+                        &mut child.selection,
+                        active_id,
+                        guards[active_pos].1.grid(),
+                    );
                     // Bug fix: child windows (Cmd+N, tear-out) were rendering
                     // their tab bar with the literal fallback title
                     // ("shell N") because the wezterm-style title formatter
@@ -948,11 +954,12 @@ impl App {
                         // Only Cell mode consumes it. None = parser busy → SKIP
                         // (don't fall back to viewport-as-absolute, which would
                         // balloon a scrolled selection). (#B10 review)
-                        let cursor_abs_row = if matches!(child.select_mode, SelectMode::Cell) {
-                            child.viewport_row_to_abs(row)
-                        } else {
-                            None
-                        };
+                        let cursor_selection_state =
+                            if matches!(child.select_mode, SelectMode::Cell) {
+                                child.viewport_row_selection_state(row)
+                            } else {
+                                None
+                            };
                         if let Some(sel) = child.selection.as_mut() {
                             match child.select_mode {
                                 SelectMode::Cell => {
@@ -960,8 +967,12 @@ impl App {
                                     // anchored (word/line) selection on a plain
                                     // cell move. Skip if abs row missing.
                                     if !sel.anchored {
-                                        if let Some(abs) = cursor_abs_row {
-                                            sel.extend(abs, col);
+                                        if let Some((abs, pane_id, seq, is_alt, evicted)) =
+                                            cursor_selection_state
+                                        {
+                                            sel.extend_with_content_state(
+                                                abs, col, pane_id, seq, is_alt, evicted,
+                                            );
                                             mark_all_panes_dirty(&child.panes);
                                             child.request_redraw();
                                         }
@@ -1143,14 +1154,22 @@ impl App {
                         // unchanged. (`r`'s last use was pixel_to_cell
                         // above, so the &mut child borrows below are fine.)
                         let count = child.register_click(row, col);
-                        // Selection rows are scrollback-ABSOLUTE so the
-                        // highlight tracks the same TEXT as the viewport
-                        // scrolls. Convert the viewport row from
-                        // `pixel_to_cell` once; fall back to treating it as
-                        // absolute (correct while unscrolled) if the parser
-                        // is momentarily busy.
-                        let abs_row = child.viewport_row_to_abs(row).unwrap_or(row as u64);
-                        let sel = child.multi_click_selection(count, abs_row, col);
+                        // Resolve absolute row and content baseline under one
+                        // parser lock so a fresh selection cannot inherit older
+                        // changed-row state.
+                        let selection_state = child.viewport_row_selection_state(row);
+                        let abs_row = selection_state.map_or(row as u64, |state| state.0);
+                        let sel = if count < 2 {
+                            selection_state.map_or_else(
+                                || Selection::new(abs_row, col),
+                                |(_, pane_id, seq, is_alt, evicted)| {
+                                    Selection::new(abs_row, col)
+                                        .with_content_state(pane_id, seq, is_alt, evicted)
+                                },
+                            )
+                        } else {
+                            child.multi_click_selection(count, abs_row, col)
+                        };
                         // Record WezTerm-style drag granularity + anchor cell
                         // (mirrors the main-window path) so a held-button
                         // CursorMoved extends by cell / word / line. The

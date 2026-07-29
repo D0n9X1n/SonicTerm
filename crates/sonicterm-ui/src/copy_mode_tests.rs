@@ -303,3 +303,102 @@ fn quick_select_lifecycle_set_query_clear() {
     s.quick_select = None;
     assert!(s.quick_select.is_none());
 }
+
+// --- production shapes: read-only entry and quick-select snapshot ----------
+
+/// A read-only state must not expose a selection, however it was driven.
+fn assert_no_selection(s: &CopyModeState, label: &str) {
+    assert_eq!(s.anchor, None, "anchor set {label}");
+    assert_eq!(s.mode, CopyMode::Cursor, "mode left Cursor {label}");
+    assert_eq!(s.selected_range(), None, "range produced {label}");
+}
+
+#[test]
+fn read_only_entry_yields_no_selection_through_full_key_sequence() {
+    let mut grid = Grid::new(20, 2);
+    write(&mut grid, "alpha beta");
+    grid.goto(1, 0);
+    write(&mut grid, "gamma delta");
+
+    // The shape entering copy mode builds: read-only, unanchored, no hints.
+    let mut s = CopyModeState::read_only_at((0, 0));
+    assert!(s.is_read_only());
+    assert!(s.quick_select.is_none());
+
+    // Every motion the key handler can reach, with `start_select` interleaved
+    // the way pressing `v` between motions would drive it.
+    s.start_select();
+    assert_no_selection(&s, "after start_select at origin");
+
+    s.move_right(&grid);
+    s.move_down(&grid);
+    assert_eq!(s.cursor, (1, 1), "read-only suppresses selection, not motion");
+    s.start_select();
+    assert_no_selection(&s, "after start_select mid-grid");
+
+    s.move_word_fwd(&grid);
+    s.move_line_end(&grid);
+    s.move_bottom(&grid);
+    s.start_select();
+    assert_no_selection(&s, "after start_select at bottom");
+
+    s.move_word_back(&grid);
+    s.move_line_start(&grid);
+    s.move_top(&grid);
+    s.move_left(&grid);
+    s.move_up(&grid);
+    s.start_select();
+    assert_no_selection(&s, "after full traversal");
+}
+
+#[test]
+fn quick_select_shape_has_no_anchor_or_range() {
+    let grid = grid_with_line("http://a.co", 20);
+    // The shape entering quick select builds: not read-only, hints attached.
+    let mut s = CopyModeState::new_at((0, grid.scrollback_len()));
+    s.quick_select = Some(QuickSelectState::from_grid(&grid));
+
+    assert!(!s.is_read_only());
+    assert_eq!(s.quick_select.as_ref().unwrap().hints.len(), 1);
+    // Not read-only, yet still no range: the hint path never anchors.
+    assert_eq!(s.anchor, None);
+    assert_eq!(s.mode, CopyMode::Cursor);
+    assert_eq!(s.selected_range(), None);
+
+    // A hint keypress copies hint text, and copying leaves the range absent.
+    assert_eq!(s.quick_select.as_ref().unwrap().text_for_hint('a'), Some("http://a.co"));
+    assert_eq!(s.selected_range(), None);
+}
+
+#[test]
+fn quick_select_text_is_a_snapshot_immune_to_later_grid_writes() {
+    let mut grid = grid_with_line("http://a.co", 20);
+    let captured = QuickSelectState::from_grid(&grid);
+    assert_eq!(captured.text_for_hint('a'), Some("http://a.co"));
+
+    // The pane keeps producing output: overwrite the scanned row in place.
+    grid.goto(0, 0);
+    write(&mut grid, "http://b.co");
+
+    // A fresh scan sees the new text, so the grid really did change...
+    assert_eq!(QuickSelectState::from_grid(&grid).text_for_hint('a'), Some("http://b.co"));
+    // ...while the captured snapshot still yields what it scanned.
+    assert_eq!(captured.text_for_hint('a'), Some("http://a.co"));
+    assert_eq!(captured.hints[0].text, "http://a.co");
+}
+
+#[test]
+fn quick_select_text_survives_scrollback_shift() {
+    let mut grid = Grid::new(20, 2);
+    write(&mut grid, "http://a.co");
+    let captured = QuickSelectState::from_grid(&grid);
+    assert_eq!(captured.hints[0].row, 0);
+
+    // Output scrolls the scanned row out of the visible window.
+    grid.scroll_up(1);
+    assert_eq!(grid.scrollback_len(), 1);
+
+    // The hint's row is stale now, but the text it copies is intact.
+    assert!(QuickSelectState::from_grid(&grid).hints.is_empty());
+    assert_eq!(captured.text_for_hint('a'), Some("http://a.co"));
+}

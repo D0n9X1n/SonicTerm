@@ -26,12 +26,10 @@
 //! What is NOT cached:
 //! * Cursor quads — frame-specific position; drawn after the per-row
 //!   pass anyway.
-//! * Rows that overlap an active text selection — selection painting
-//!   adds quads outside this module's per-row scope. The cache key
-//!   includes the selection bbox overlap so cache entries are
-//!   automatically distinct between "selected" and "not selected"
-//!   states for a row; a selection-state change drops the previous
-//!   entry naturally without `invalidate_all`.
+//! * Selection highlight quads — they are emitted later into the overlay
+//!   buffer. Background rows remain cacheable while selected. The key still
+//!   includes selection overlap conservatively, so changing selection state
+//!   cannot reuse an entry across that transition.
 //! * Search-match / quick-select overlays — same story; emitted into
 //!   a separate `quads_overlay` buffer and not part of this cache.
 
@@ -152,11 +150,10 @@ impl LineQuadCache {
 ///   moving on screen invalidates its rows).
 /// * `pane_w`, `pane_h` — pane rect dimensions (clipping affects the
 ///   last quad on the row when the pane is narrower than the grid).
-/// * `selection_overlap` — when the active selection touches row `r`,
-///   the renderer must NOT serve a cached entry whose quads predate
-///   the selection (selection paint sits on top, but the per-row pass
-///   skips its own bg work for those rows to avoid double-paint). A
-///   non-overlapping selection has no effect.
+/// * `selection_overlap` — conservatively partitions entries when the active
+///   selection starts, moves, or ends on row `r`. Selection is painted in a
+///   separate overlay pass, so the cached background payload itself remains
+///   independent of the highlight.
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn row_quad_hash(

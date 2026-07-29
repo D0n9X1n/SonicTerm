@@ -122,11 +122,13 @@ thinning while its neighbour from your family does not move with it.
 `1.0`. The first remaps glyph coverage, which shifts the antialiased edge only.
 Because a stem pixel that is already fully opaque can be neither darkened nor
 lightened, coverage alone has little effect on HiDPI/Retina displays, where
-stem cores are solid. The second changes the glyph outline — growing above
+stem cores are solid. The second changes the rasterized outline — growing above
 `1.0`, eroding below it — which adds or removes real ink and stays visible at
-any display scale. Outline growth also enlarges the glyph's bitmap, so a change
-in weight is partly visible as a change in apparent size; cell metrics and
-advances are unaffected, so the grid does not move. Values around `2.0`-`3.0`
+any display scale. Growth is cropped back into the original glyph tile and
+capped at one raster pixel independently of the glyph's spare bitmap margin.
+Tile dimensions, origin, cell metrics, and advances therefore stay fixed, so a
+weight change does not double as a size change and flat-sided glyphs are not
+suppressed merely because they touch a tile edge. Values around `2.0`-`3.0`
 suit most HiDPI screens; `5.0` is deliberately heavy, and `0.5` deliberately
 light.
 
@@ -153,7 +155,10 @@ logical pixels around terminal content. `warm_window_pool` controls hidden,
 pre-created child windows used to reduce tab tear-out latency. `0` disables the
 pool, while the default `1` retains one instant tear-out spare. Hardware honors
 configured targets up to `5`; software rendering caps every nonzero value at
-one to bound the per-renderer memory baseline.
+one to bound the per-renderer memory baseline. When a pooled window is adopted,
+SonicTerm reapplies the current font (including session weight), theme, tab-bar
+visibility, native background, display scale, and size before revealing it, so
+its first visible frame cannot expose the stale state captured while it waited.
 
 Use `[appearance].opacity` and `backdrop` for active appearance configuration.
 The older `[window].opacity` and `blur` fields still deserialize, but current
@@ -372,10 +377,11 @@ threshold_secs = 10
 `weight_scale` 分两个阶段生效，且在 `1.0` 以外的任何取值下两个阶段都会执行。第一阶段
 重映射字形覆盖率，仅影响抗锯齿边缘。由于已经完全不透明的字干像素既无法进一步加深也
 无法变浅，在 HiDPI/Retina 屏幕上字干核心本身就是实心的，因此仅靠覆盖率几乎看不出变化。
-第二阶段改变字形轮廓本身——大于 `1.0` 时扩张，小于 `1.0` 时收缩——真正增减墨量，在任何
-缩放比例下都可见。轮廓扩张同时会放大字形位图，因此粗细变化有一部分会表现为视觉尺寸的
-变化；cell metrics 与 advance 不受影响，网格不会移动。HiDPI 屏幕通常适合 `2.0`-`3.0`；
-`5.0` 属于刻意加粗的极值，`0.5` 则是刻意变细的极值。
+第二阶段改变光栅化轮廓——大于 `1.0` 时扩张，小于 `1.0` 时收缩——真正增减墨量，在任何
+缩放比例下都可见。扩张结果会裁回原始字形 tile，并使用与字形空白边距无关的一个光栅像素
+上限。因此 tile 尺寸、原点、cell metrics 与 advance 均保持不变：调整粗细不会同时改变
+视觉尺寸，平直边缘的字形也不会仅因接触 tile 边缘而失去加粗效果。HiDPI 屏幕通常适合
+`2.0`-`3.0`；`5.0` 属于刻意加粗的极值，`0.5` 则是刻意变细的极值。
 
 平台 rasterizer policy 在内部决定：Windows 默认 DirectWrite 并以 FreeType 回退；
 macOS/其它 Unix 使用 FreeType。当前 `sonicterm.toml` 中不存在
@@ -395,7 +401,9 @@ Weight to Config** 回到配置值。搜索 `bolder`、`thinner`、`heavier`、`
 `[window].cols`、`rows` 定义新窗口初始 grid。padding 是终端内容周围的逻辑像素。
 `warm_window_pool` 控制用于降低 tab tear-out 延迟的隐藏预创建子窗口。设为 `0` 会关闭
 该池；默认值 `1` 保留一个可立即 tear-out 的预热窗口。硬件渲染会遵循不超过 `5` 的
-配置目标；软件渲染会把任何非零值限制为 `1`，以约束每个 renderer 的内存基线。
+配置目标；软件渲染会把任何非零值限制为 `1`，以约束每个 renderer 的内存基线。预热窗口
+被采用时，SonicTerm 会先重新应用当前字体（包括会话内字重）、主题、标签栏可见性、原生
+背景、显示缩放与尺寸，再将窗口显示出来，因此首个可见帧不会暴露等待期间缓存的旧状态。
 
 当前生效的外观配置是 `[appearance].opacity` 与 `backdrop`。旧的 `[window].opacity`、
 `blur` 仍可反序列化，但当前启动与重载路径不会使用它们，不应依赖。Backdrop material

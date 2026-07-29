@@ -546,6 +546,12 @@ impl ParsedFont {
     }
 
     pub fn matches_name(&self, attr: &FontAttributes) -> bool {
+        if matches!(
+            &self.handle.origin,
+            FontOrigin::FontConfigMatch(requested) if requested == &attr.family
+        ) {
+            return true;
+        }
         if attr.family == self.names.family {
             return true;
         }

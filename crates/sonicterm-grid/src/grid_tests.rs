@@ -307,6 +307,148 @@ fn dirty_rows_vec(grid: &Grid) -> Vec<usize> {
     grid.dirty_rows().collect()
 }
 
+fn content_rows_since(grid: &Grid, seq: u64) -> Vec<usize> {
+    grid.visible_rows_changed_since(seq).collect()
+}
+
+#[test]
+fn content_sequence_excludes_cursor_and_presentation_only_dirtiness() {
+    let mut grid = Grid::new(8, 3);
+    let before = grid.content_seq();
+
+    grid.goto(1, 2);
+    grid.carriage_return();
+    grid.tab();
+    grid.backspace();
+    grid.mark_all_dirty();
+
+    assert_eq!(grid.content_seq(), before);
+    assert!(content_rows_since(&grid, before).is_empty());
+}
+
+#[test]
+fn content_sequence_marks_only_the_row_whose_cells_changed() {
+    let mut grid = Grid::new(8, 3);
+    grid.goto(1, 0);
+    let before = grid.content_seq();
+
+    grid.put_char('x', Color::Default, Color::Default, CellFlags::empty());
+
+    assert!(grid.content_seq() > before);
+    assert_eq!(content_rows_since(&grid, before), vec![1]);
+}
+
+#[test]
+fn primary_scroll_keeps_existing_rows_at_their_absolute_content_identity() {
+    let mut grid = Grid::new(4, 3);
+    grid.goto(0, 0);
+    grid.put_char('a', Color::Default, Color::Default, CellFlags::empty());
+    grid.goto(1, 0);
+    grid.put_char('b', Color::Default, Color::Default, CellFlags::empty());
+    grid.goto(2, 0);
+    grid.put_char('c', Color::Default, Color::Default, CellFlags::empty());
+    let before = grid.content_seq();
+
+    grid.scroll_up(1);
+
+    assert_eq!(grid.scrollback_len(), 1);
+    assert_eq!(text(&grid, 0).chars().next(), Some('b'));
+    assert_eq!(content_rows_since(&grid, before), vec![2]);
+}
+
+#[test]
+fn alternate_screen_scroll_marks_every_fixed_screen_position_changed() {
+    let mut grid = Grid::new(4, 3);
+    grid.enter_alt_screen();
+    let before = grid.content_seq();
+
+    grid.scroll_up(1);
+
+    assert_eq!(grid.scrollback_len(), 0);
+    assert_eq!(content_rows_since(&grid, before), vec![0, 1, 2]);
+}
+
+#[test]
+fn region_scroll_marks_only_the_region_content_changed() {
+    let mut grid = Grid::new(4, 5);
+    let before = grid.content_seq();
+
+    grid.scroll_region_up(1, 3, 1);
+
+    assert_eq!(content_rows_since(&grid, before), vec![1, 2, 3]);
+}
+
+#[test]
+fn saved_primary_history_evictions_fold_into_the_active_counter() {
+    let mut grid = Grid::new(4, 2);
+    grid.set_scrollback_limit(40);
+    for _ in 0..20 {
+        grid.scroll_up(1);
+    }
+    assert_eq!(grid.scrollback_len(), 20);
+    let before = grid.scrollback_evicted();
+
+    grid.enter_alt_screen();
+    grid.set_scrollback_limit(4);
+
+    assert_eq!(
+        grid.scrollback_evicted() - before,
+        16,
+        "rows removed from the saved primary are removals from this pane's history"
+    );
+    grid.leave_alt_screen();
+    assert_eq!(
+        grid.scrollback_evicted() - before,
+        16,
+        "leaving the alternate screen must not lose or double-count folded evictions"
+    );
+}
+
+#[test]
+fn row_content_stamp_storage_stays_bounded_by_visible_rows() {
+    let mut grid = Grid::new(8, 3);
+    grid.set_scrollback_limit(5_000);
+    for _ in 0..5_000 {
+        grid.scroll_up(1);
+    }
+
+    assert_eq!(grid.row_content_seq.len(), grid.visible.len());
+    assert!(
+        grid.row_content_seq.capacity() <= grid.visible.capacity().max(grid.visible.len() * 2),
+        "content identity storage follows the visible grid, not scrollback depth"
+    );
+}
+
+#[test]
+fn region_scroll_down_marks_only_the_region_content_changed() {
+    let mut grid = Grid::new(4, 5);
+    let before = grid.content_seq();
+
+    grid.scroll_region_down(1, 3, 1);
+
+    assert_eq!(content_rows_since(&grid, before), vec![1, 2, 3]);
+}
+
+#[test]
+fn full_region_primary_scroll_preserves_survivor_identity() {
+    let mut grid = Grid::new(4, 3);
+    for row in 0..3 {
+        grid.goto(row, 0);
+        grid.put_char(
+            char::from(b'a' + row as u8),
+            Color::Default,
+            Color::Default,
+            CellFlags::empty(),
+        );
+    }
+    let before = grid.content_seq();
+
+    grid.scroll_region_up(0, 2, 1);
+
+    assert_eq!(grid.scrollback_len(), 1);
+    assert_eq!(content_rows_since(&grid, before), vec![2]);
+}
+
 #[test]
 fn resize_grow_dirties_every_row_including_new_ones() {
     let mut grid = Grid::new(8, 3);
@@ -1040,7 +1182,8 @@ fn row_containers_are_counted_in_the_retained_figure() {
 
     let line = std::mem::size_of::<Line>();
     let container = (grid.visible.capacity() + grid.scrollback.capacity()) * line
-        + grid.dirty_rows.capacity() * std::mem::size_of::<bool>();
+        + grid.dirty_rows.capacity() * std::mem::size_of::<bool>()
+        + grid.row_content_seq.capacity() * std::mem::size_of::<u64>();
     assert!(container > 0, "precondition: the deques reserved slots");
 
     let cells: usize =
@@ -1080,8 +1223,8 @@ fn container_bytes_keep_the_region_split_exact() {
 /// The saved primary's own containers are counted, not just its rows.
 ///
 /// Entering an alternate screen boxes the whole primary `Grid`: its two deque
-/// spines, its dirty bitset, its prompt ring, and the struct itself. Counting
-/// only the rows leaves the rest held but unreported.
+/// spines, dirty bitset, row-content stamps, prompt ring, and the struct itself.
+/// Counting only the rows leaves the rest held but unreported.
 ///
 /// Pinned here rather than in the counting-allocator suite because the term is
 /// fixed-size — measured at 232 bytes — and the allocations the test harness
@@ -1102,12 +1245,18 @@ fn entering_an_alternate_screen_counts_the_saved_primarys_containers() {
     let saved_rows = saved.visible.capacity().saturating_add(saved.scrollback.capacity())
         * std::mem::size_of::<Line>();
     let saved_dirty = saved.dirty_rows.capacity() * std::mem::size_of::<bool>();
+    let saved_content_stamps = saved.row_content_seq.capacity() * std::mem::size_of::<u64>();
     let saved_prompts = saved.prompts.capacity() * std::mem::size_of::<PromptRegion>();
-    let expected_saved = saved_rows + saved_dirty + saved_prompts + std::mem::size_of::<Grid>();
+    let expected_saved = saved_rows
+        + saved_dirty
+        + saved_content_stamps
+        + saved_prompts
+        + std::mem::size_of::<Grid>();
 
     let live_rows = grid.visible.capacity().saturating_add(grid.scrollback.capacity())
         * std::mem::size_of::<Line>();
     let live_dirty = grid.dirty_rows.capacity() * std::mem::size_of::<bool>();
+    let live_content_stamps = grid.row_content_seq.capacity() * std::mem::size_of::<u64>();
 
     assert!(
         expected_saved > saved_rows,
@@ -1115,9 +1264,9 @@ fn entering_an_alternate_screen_counts_the_saved_primarys_containers() {
     );
     assert_eq!(
         grid.container_bytes(),
-        live_rows + live_dirty + expected_saved,
-        "the saved primary's spines, dirty bitset, prompt ring and struct are all memory \
-         held while the alternate screen shows, and all must be counted"
+        live_rows + live_dirty + live_content_stamps + expected_saved,
+        "the saved primary's spines, dirty bitset, content stamps, prompt ring and struct are \
+         all memory held while the alternate screen shows, and all must be counted"
     );
 }
 

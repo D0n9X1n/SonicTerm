@@ -161,7 +161,12 @@ cell's `extras` field, walking backward over a continuation cell if necessary.
 Full-screen upward scrolling moves ejected rows into the scrollback deque and
 reuses old storage where possible. Region scrolling changes only the configured
 margin area; a full-height region deliberately uses the history-producing path.
-Changing the scrollback limit trims the oldest rows immediately.
+Changing the scrollback limit trims the oldest rows immediately. Cell-content
+changes advance a monotonic sequence and stamp only affected visible rows;
+cursor movement and presentation-only dirtiness do not. Ordinary primary-screen
+scrolling carries stamps with the text moving into history. Alternate-screen,
+zero-history, and partial-region scrolling instead restamp the fixed screen
+positions whose content changed. Visible stamps stay bounded by visible rows, while each bounded history row carries one stamp so a changed row keeps its identity when it enters scrollback.
 
 ### Line storage
 
@@ -181,6 +186,18 @@ OSC 133 prompt boundaries are stored in absolute history coordinates, enabling
 “previous/next prompt” navigation after scrolling. Selection state lives in
 `sonicterm-ui`; the grid exposes visible, scrollback, and absolute-row accessors
 so selection and search can operate across history.
+
+Selections record their pane, screen buffer, content sequence, and scrollback-
+eviction baseline. Ordinary primary-screen scrolling therefore carries selected
+text into history. If bounded history later removes older rows, fully surviving
+endpoints are rebased; a selection that lost any selected row is cleared. On
+either screen, changing panes or buffers clears the selection, and a post-baseline
+content change clears it only when the changed row intersects the selected range.
+The alternate screen has no scrollback, so a full-screen application scrolls by
+repainting fixed rows. Repainting an unrelated status line, spinner, or other row
+preserves the selection. The same check runs before main/child rendering and
+again immediately before copy, preventing replacement text from reaching the
+clipboard while a redraw is still queued.
 
 ## Optional SSH status
 
@@ -411,6 +428,9 @@ app 在 parser 热路径之外消费。
 
 全屏向上滚动会把离开屏幕的行放入 scrollback，并尽量复用旧存储。region scroll 只修改 margin；
 如果 region 覆盖完整高度，则故意走会产生历史的路径。调小 scrollback 上限会立即丢弃最老行。
+cell 内容修改会递增单调序列，并只为受影响的可见行记录时间戳；光标移动和仅呈现层面的脏标记
+不会递增该序列。主屏幕普通滚动会让时间戳随文本进入历史；备用屏幕、零历史和局部 region
+滚动则为内容改变的固定屏幕位置重新记录时间戳。可见区时间戳受可见行数约束；每个有界历史行另带一个时间戳，使发生变化的行进入 scrollback 后仍保留内容身份。
 
 ### Line 存储
 
@@ -426,6 +446,13 @@ app 在 parser 热路径之外消费。
 
 OSC 133 prompt 边界以绝对历史坐标保存，因此滚动后仍可跳转上一个/下一个 prompt。选区状态位于
 `sonicterm-ui`；grid 暴露可见行、scrollback 和绝对行访问器，供选区与搜索跨历史工作。
+
+选区会记录所属窗格、屏幕 buffer、内容序列与 scrollback 淘汰基线。主屏幕普通滚动因此会让所选
+文本随同行进入历史；有界历史随后淘汰更老行时，完全存活的端点会重新基准化，而任何已失去所选行的
+选区都会清除。在任一屏幕上，切换窗格或 buffer 都会清除选区；基线之后的内容变化仅在修改行与选区
+范围相交时才清除它。备用屏幕没有 scrollback，全屏应用通过重绘固定行实现滚动，因此仅重绘无关的
+状态行、spinner 或其他行仍会保留选区。主窗口与子窗口都会在渲染前执行同一检查，并在复制前立即
+再次检查，避免重绘尚在队列中时把替换后的文本写入剪贴板。
 
 ## 可选 SSH 状态
 

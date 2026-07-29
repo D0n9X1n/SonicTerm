@@ -471,20 +471,32 @@ impl<'a> Iterator for StorageRangeIter<'a> {
 }
 
 /// A line of cells with transparent cluster-or-flat storage.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Line {
     storage: LineStorage,
+    /// Last content sequence for this row. Keeping the stamp with the row lets
+    /// changed-since-selection identity survive moves between visible storage
+    /// and scrollback.
+    content_seq: u64,
 }
+
+impl PartialEq for Line {
+    fn eq(&self, other: &Self) -> bool {
+        self.storage == other.storage
+    }
+}
+
+impl Eq for Line {}
 
 impl Line {
     /// Build a flat line of `len` clones of `fill`.
     pub fn flat_filled(len: usize, fill: Cell) -> Self {
-        Self { storage: LineStorage::Flat(vec![fill; len]) }
+        Self { storage: LineStorage::Flat(vec![fill; len]), content_seq: 0 }
     }
 
     /// Build directly from a `Vec<Cell>` in flat form.
     pub fn from_flat(cells: Vec<Cell>) -> Self {
-        Self { storage: LineStorage::Flat(cells) }
+        Self { storage: LineStorage::Flat(cells), content_seq: 0 }
     }
 
     /// Build directly from clusters. The caller is responsible for the
@@ -495,7 +507,15 @@ impl Line {
             "adjacent clusters must differ"
         );
         debug_assert!(clusters.iter().all(|c| c.count > 0));
-        Self { storage: LineStorage::Cluster(clusters) }
+        Self { storage: LineStorage::Cluster(clusters), content_seq: 0 }
+    }
+
+    pub(crate) fn content_seq(&self) -> u64 {
+        self.content_seq
+    }
+
+    pub(crate) fn set_content_seq(&mut self, seq: u64) {
+        self.content_seq = seq;
     }
 
     /// Logical cell count.

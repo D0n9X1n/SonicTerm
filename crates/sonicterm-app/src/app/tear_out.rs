@@ -37,6 +37,70 @@ use super::{
 };
 use crate::app::window_geom;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ChildRendererOrigin {
+    Fresh,
+    WarmPool,
+}
+
+/// Whether a child window is already on screen by the time its renderer is
+/// adopted, or is still hidden and waiting to be shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChildWindowReveal {
+    /// Created visible, so there is nothing to reveal.
+    AlreadyVisible,
+    /// Created hidden, and shown only once adoption and installation succeed.
+    AfterInstall,
+}
+
+/// A pooled window is created hidden and holds the font, theme, tab-bar, and
+/// scale state it captured while it waited, so it stays hidden until adoption
+/// has replaced that state and its window is installed. A fresh window is
+/// created visible and its renderer was built from the current settings, so it
+/// has nothing stale to hide.
+fn child_window_reveal(origin: ChildRendererOrigin) -> ChildWindowReveal {
+    match origin {
+        ChildRendererOrigin::WarmPool => ChildWindowReveal::AfterInstall,
+        ChildRendererOrigin::Fresh => ChildWindowReveal::AlreadyVisible,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LiveFontSettings<'a> {
+    family: &'a str,
+    size: f32,
+    line_height: f32,
+    weight_scale: f32,
+}
+
+#[derive(Clone, Copy)]
+struct LiveRendererSettings<'a> {
+    font: Option<LiveFontSettings<'a>>,
+    theme: Option<&'a Theme>,
+    background: &'a str,
+    tab_bar_visible: bool,
+}
+
+fn live_renderer_settings<'a>(
+    config: &'a Config,
+    theme: &'a Theme,
+    tab_bar_visible: bool,
+    origin: ChildRendererOrigin,
+) -> LiveRendererSettings<'a> {
+    let refresh_cached_state = origin == ChildRendererOrigin::WarmPool;
+    LiveRendererSettings {
+        font: refresh_cached_state.then_some(LiveFontSettings {
+            family: &config.font.family,
+            size: config.font.size,
+            line_height: config.font.line_height,
+            weight_scale: config.font.effective_weight_scale(),
+        }),
+        theme: refresh_cached_state.then_some(theme),
+        background: theme.colors.background.0.as_str(),
+        tab_bar_visible,
+    }
+}
+
 impl App {
     fn tear_out_renderer_settings(
         &self,
@@ -64,7 +128,12 @@ impl App {
         }
     }
 
-    fn configure_child_renderer(&self, renderer: &mut GpuRenderer, window: &Window) -> bool {
+    pub(super) fn configure_child_renderer(
+        &self,
+        renderer: &mut GpuRenderer,
+        window: &Window,
+        origin: ChildRendererOrigin,
+    ) -> bool {
         if let Some(proxy) = self.event_loop_proxy.clone() {
             super::build_async_fallback_loader_for_proxy(proxy);
             renderer.set_async_loader(());
@@ -77,22 +146,22 @@ impl App {
         ));
         renderer.set_titlebar_inset(0.0);
         renderer.set_tab_close_override(self.config.tab_close_button_color.as_deref());
-        // Apply the live font settings. A warm renderer captured them when it
-        // was built, and a weight change since then reached only the windows in
-        // `self.windows` — the pool is not among them. Without this, a tab torn
-        // out after a bolder/thinner press adopts a renderer still at the old
-        // weight and renders beside windows at the new one.
-        //
-        // Done at adoption rather than by having the weight change walk the
-        // pool: adoption is the single point every warm renderer passes
-        // through, so any future setting that reaches renderers is covered
-        // here too.
-        renderer.set_font(
-            &self.config.font.family,
-            self.config.font.size,
-            self.config.font.line_height,
-            self.config.font.effective_weight_scale(),
-        );
+        let live = live_renderer_settings(&self.config, &self.theme, self.tab_bar_visible, origin);
+        // RendererSettings does not carry tab-bar visibility, so every fresh or
+        // pooled child receives the current app value here.
+        renderer.set_tab_bar_visible(live.tab_bar_visible);
+        super::install_native_window_background(window, live.background);
+        if let Some(font) = live.font {
+            // Runtime font-weight and theme actions walk visible windows only.
+            // A pooled renderer captured both values when it was hidden, so
+            // adoption must resynchronize it before its first visible frame.
+            // Fresh renderers already received them from their constructors and
+            // `live.font` is None, skipping the expensive atlas/font rebuild.
+            renderer.set_font(font.family, font.size, font.line_height, font.weight_scale);
+        }
+        if let Some(theme) = live.theme {
+            renderer.set_theme(theme);
+        }
         let real_sf = window_dpi(window);
         renderer.force_rebuild_for_scale(real_sf);
         let real_inner = window.inner_size();
@@ -152,7 +221,6 @@ impl App {
             }
         };
         window.set_ime_allowed(true);
-        super::install_native_window_background(&window, self.theme.colors.background.0.as_str());
         let settings = self.tear_out_renderer_settings("warm");
         let shared_gpu = self.main_renderer().map(GpuRenderer::shared_context);
         let mut renderer = match shared_gpu.map_or_else(
@@ -167,7 +235,7 @@ impl App {
                 return None;
             }
         };
-        if !self.configure_child_renderer(&mut renderer, &window) {
+        if !self.configure_child_renderer(&mut renderer, &window, ChildRendererOrigin::Fresh) {
             tracing::error!("warm-window-pool: renderer rejected unsafe initial size");
             return None;
         }
@@ -313,7 +381,7 @@ impl App {
         source: &'static str,
     ) -> Option<WindowId> {
         let tear_start = Instant::now();
-        let (window, mut renderer, create_window_ms, renderer_init_ms) = match self
+        let (window, mut renderer, create_window_ms, renderer_init_ms, renderer_origin) = match self
             .take_warm_window()
         {
             Some(warm) => {
@@ -321,8 +389,12 @@ impl App {
                 if let Some((sx, sy)) = screen_pos {
                     window.set_outer_position(winit::dpi::PhysicalPosition::new(sx, sy));
                 }
-                window.set_visible(true);
-                (window, warm.renderer, 0.0, 0.0)
+                // Positioned while still hidden. This renderer is the one the
+                // window was pooled with, carrying the font, theme, tab-bar,
+                // and scale state captured at that time, so showing it now
+                // would put a frame of that stale state on screen. The reveal
+                // waits until adoption and installation have both succeeded.
+                (window, warm.renderer, 0.0, 0.0, ChildRendererOrigin::WarmPool)
             }
             None => {
                 let mut attrs = super::with_app_icon(super::with_backdrop_transparency(
@@ -348,10 +420,6 @@ impl App {
                 };
                 let create_window_ms = create_start.elapsed().as_secs_f32() * 1000.0;
                 window.set_ime_allowed(true);
-                super::install_native_window_background(
-                    &window,
-                    self.theme.colors.background.0.as_str(),
-                );
                 let shared_gpu = self.main_renderer().map(GpuRenderer::shared_context);
                 let renderer_settings = self.tear_out_renderer_settings("child");
                 let renderer_start = Instant::now();
@@ -374,12 +442,12 @@ impl App {
                     }
                 };
                 let renderer_init_ms = renderer_start.elapsed().as_secs_f32() * 1000.0;
-                (window, renderer, create_window_ms, renderer_init_ms)
+                (window, renderer, create_window_ms, renderer_init_ms, ChildRendererOrigin::Fresh)
             }
         };
 
         let resize_start = Instant::now();
-        if !self.configure_child_renderer(&mut renderer, &window) {
+        if !self.configure_child_renderer(&mut renderer, &window, renderer_origin) {
             tracing::error!("tear-out: renderer rejected unsafe child size");
             return None;
         }
@@ -482,12 +550,17 @@ impl App {
                 );
             }
         }
+        if child_window_reveal(renderer_origin) == ChildWindowReveal::AfterInstall {
+            // The only reveal on this path. Adoption has replaced the pooled
+            // renderer state, the child window is installed, and its panes are
+            // sized to their own sub-rects, so the first frame the user sees is
+            // the current one. A tear-out that failed adoption returned before
+            // reaching here and left the window hidden, so it never appears.
+            window.set_visible(true);
+        }
         window.request_redraw();
-        // The pool target is at least two, so consuming one still leaves one
-        // hidden spare. Refill on the next idle tick, not on the drop path.
-        // the new window becomes OS-frontmost after
-        // the hidden first frame is rendered and the child RedrawRequested
-        // handler shows it.
+        // A consumed pooled window is not replaced here; the pool refills on
+        // the next idle tick rather than on this path.
         self.frontmost_window = Some(win_id);
         Some(win_id)
     }
