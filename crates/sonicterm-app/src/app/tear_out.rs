@@ -169,6 +169,32 @@ impl App {
         self.warm_window_pool.iter().any(|warm| warm.window.id() == win_id)
     }
 
+    /// The id of the tab currently at `idx` in `window`.
+    ///
+    /// Recorded when a tear-out is queued so the request names a tab rather
+    /// than a slot.
+    pub(super) fn tab_id_at(
+        &self,
+        window: WindowId,
+        idx: usize,
+    ) -> Option<sonicterm_ui::tabs::TabId> {
+        self.windows.get(&window)?.tabs.tabs().get(idx).map(|tab| tab.id)
+    }
+
+    /// Where the tab `id` currently sits in `window`, or `None` if it is gone.
+    ///
+    /// The counterpart to [`Self::tab_id_at`]: a queued request re-resolves
+    /// through this at the moment it is applied, so a tab that moved is still
+    /// found and a tab that closed fails the operation instead of silently
+    /// promoting whichever tab inherited its index.
+    pub(super) fn tab_index_of_id(
+        &self,
+        window: WindowId,
+        id: sonicterm_ui::tabs::TabId,
+    ) -> Option<usize> {
+        self.windows.get(&window)?.tabs.tabs().iter().position(|tab| tab.id == id)
+    }
+
     pub(super) fn queue_active_tab_tear_out(&mut self, source_window: WindowId) -> bool {
         if self.pending_tear_out.is_some() {
             return false;
@@ -186,8 +212,13 @@ impl App {
             };
             child.tabs.active_index()
         };
-        self.pending_tear_out =
-            Some(super::PendingTearOut { source_window, source_tab_idx, drop_screen_pos: None });
+        let source_tab_id = self.tab_id_at(source_window, source_tab_idx);
+        self.pending_tear_out = Some(super::PendingTearOut {
+            source_window,
+            source_tab_idx,
+            source_tab_id,
+            drop_screen_pos: None,
+        });
         true
     }
 
@@ -727,3 +758,7 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tear_out_tests.rs"]
+mod tear_out_tests;

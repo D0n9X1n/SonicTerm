@@ -656,17 +656,53 @@ impl App {
 
     /// Resolve a queued tear-out into a native window while the event loop can
     /// create one. The live tab, pane graph, and PTY move without restarting.
+    /// Where the tab a queued tear-out names currently sits.
+    ///
+    /// The index in the request was recorded when the gesture began, and a tab
+    /// closing at a lower index since then leaves it *in range* while naming a
+    /// different tab — a bounds check cannot tell the two apart, so trusting it
+    /// tears out whichever tab inherited the slot. Resolving through the
+    /// recorded id instead follows the tab, and returns `None` when it is gone
+    /// so the operation fails rather than promoting a neighbour.
+    ///
+    /// Split out of the drain so it can be tested: the drain itself needs an
+    /// `ActiveEventLoop`, which exists only inside a running winit loop, and a
+    /// build that ignored the id entirely passed a suite that only exercised
+    /// the lookup helpers.
+    pub(super) fn resolve_tear_out_source_index(
+        &self,
+        req: &crate::app::PendingTearOut,
+    ) -> Option<usize> {
+        match req.source_tab_id {
+            Some(id) => self.tab_index_of_id(req.source_window, id),
+            // Requests built before an id was available keep the old
+            // behaviour rather than refusing outright.
+            None => Some(req.source_tab_idx),
+        }
+    }
+
     fn drain_pending_tear_out(&mut self, el: &ActiveEventLoop, req: crate::app::PendingTearOut) {
         let source_is_main = Some(req.source_window) == self.main_window_id;
+        let source_tab_idx = match self.resolve_tear_out_source_index(&req) {
+            Some(idx) => idx,
+            None => {
+                tracing::warn!(
+                    source = ?req.source_window,
+                    recorded_idx = req.source_tab_idx,
+                    "drain_pending_tear_out: the dragged tab closed before the drop"
+                );
+                return;
+            }
+        };
         let detached = if source_is_main {
-            self.detach_tab_state(req.source_tab_idx)
+            self.detach_tab_state(source_tab_idx)
         } else {
-            self.detach_from_child(req.source_window, req.source_tab_idx)
+            self.detach_from_child(req.source_window, source_tab_idx)
         };
         let Some((tab, state, panes)) = detached else {
             tracing::warn!(
                 source = ?req.source_window,
-                idx = req.source_tab_idx,
+                idx = source_tab_idx,
                 "drain_pending_tear_out: source tab no longer exists"
             );
             return;
@@ -678,14 +714,14 @@ impl App {
         {
             tracing::warn!(source = ?req.source_window, "drain_pending_tear_out: install failed");
             if !source_is_main {
-                self.tear_out_apply_child_source_side(req.source_window, req.source_tab_idx);
+                self.tear_out_apply_child_source_side(req.source_window, source_tab_idx);
             }
             return;
         }
         if source_is_main {
-            self.tear_out_apply_source_side(req.source_tab_idx);
+            self.tear_out_apply_source_side(source_tab_idx);
         } else {
-            self.tear_out_apply_child_source_side(req.source_window, req.source_tab_idx);
+            self.tear_out_apply_child_source_side(req.source_window, source_tab_idx);
         }
         tracing::info!(
             source = ?req.source_window,
