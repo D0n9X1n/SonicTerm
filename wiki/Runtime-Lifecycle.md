@@ -104,6 +104,31 @@ spawns another pane and replaces the focused leaf with a horizontal or vertical
 split. The tree computes pane rectangles; every visible grid and PTY is resized
 to its allocated cell area.
 
+## When a pane's shell exits
+
+A pane whose child process ends closes **only if that child exited cleanly** —
+status zero, not killed by a signal. The pane's VT worker notices its output
+channel close, classifies the exit, and posts `PaneProcessExited` to the event
+loop:
+
+| Child's exit | Pane and tab |
+| --- | --- |
+| Clean (status 0) | Pane closes. If it was the tab's only pane, the tab closes; if that was the window's last tab, the window goes with it. |
+| Non-zero status, or killed by a signal | Both stay open, with the shell's last output still on screen. |
+| Status could not be read | Both stay open. |
+
+Holding the pane open on an unclean exit is the point of the policy rather than
+a limitation of it: closing discards the scrollback, and the output of a shell
+that died badly is the part the user most needs to read. The third row follows
+the same reasoning — an unreadable status is uncertainty, and discarding a
+user's scrollback on our own uncertainty is the worse failure.
+
+Classification happens on the VT worker, not the event loop. EOF on the pty
+master and the child becoming reapable are unordered, so a single probe at EOF
+can read "still running" for a shell that has already gone; the worker waits
+briefly for the answer, which is work the event-loop thread must never do. Past
+that bound the exit is reported as unknown, and the pane stays open.
+
 ## Resource ownership and retention charging
 
 Alongside the window/tab/pane tree, `App` holds a process-local **resource
@@ -439,6 +464,27 @@ App
 
 新标签页会启动一个窗格、添加 `Tab`，并创建单叶 `PaneTree`。分屏会启动另一个窗格，
 把当前叶节点替换为横向或纵向 split。树计算窗格矩形，每个可见 grid 和 PTY 随其单元格区域 resize。
+
+## 窗格 shell 退出时
+
+子进程结束的窗格**只在该子进程干净退出时**关闭——退出码为 0，且不是被信号杀死。
+窗格的 VT worker 发现输出通道关闭后对退出做出判定，并向事件循环投递
+`PaneProcessExited`：
+
+| 子进程退出方式 | 窗格与标签页 |
+| --- | --- |
+| 干净退出（退出码 0） | 关闭窗格。若它是该标签页唯一的窗格，标签页一并关闭；若那是窗口最后一个标签页，窗口也随之关闭。 |
+| 非零退出码，或被信号杀死 | 两者都保留，shell 最后的输出仍留在屏幕上。 |
+| 无法读到退出状态 | 两者都保留。 |
+
+非干净退出时保留窗格是该策略的目的，而不是它的局限：关闭会丢弃 scrollback，
+而异常终止的 shell 的输出恰恰是用户最需要阅读的部分。第三行出于同样的理由——
+读不到状态属于不确定，而因我们自己的不确定去丢弃用户的 scrollback 是更严重的失败。
+
+判定发生在 VT worker 上，而不是事件循环。pty master 的 EOF 与子进程变为可回收
+之间没有先后关系，因此仅在 EOF 处探测一次，可能把已经结束的 shell 读成"仍在运行"；
+worker 会为此短暂等待，而这类等待绝不能放在事件循环线程上。超过该时限后退出被
+报告为未知，窗格保持打开。
 
 ## 资源所有权与占用计费
 

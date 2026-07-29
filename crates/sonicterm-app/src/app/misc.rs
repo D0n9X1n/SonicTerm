@@ -932,7 +932,7 @@ impl App {
     }
     pub(super) fn new_tab(&mut self, title: impl Into<String>) {
         let pane_id = next_pane_id();
-        let pane = self.spawn_pane();
+        let pane = self.spawn_pane(pane_id);
         if let Some(ws) = self.main_mut() {
             ws.panes.insert(pane_id, pane);
             ws.tabs.push(Tab::new(title));

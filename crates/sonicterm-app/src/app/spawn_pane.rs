@@ -15,7 +15,7 @@ use sonicterm_cfg::keymap::{Action, Direction, Keymap, ScrollAction};
 use sonicterm_cfg::theme::Theme;
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::Grid;
-use sonicterm_io::pty::PtyHandle;
+use sonicterm_io::pty::{PtyChildExitProbe, PtyHandle};
 use sonicterm_ui::pane::PaneTree;
 use sonicterm_ui::selection::Selection;
 use sonicterm_ui::tabbar_view::{TabBarLayout, TabHit};
@@ -35,8 +35,44 @@ use super::{
     WindowState,
 };
 
+/// How long the VT loop waits for an exited child to become observable.
+///
+/// EOF on the pty master and the child becoming reapable are two events with
+/// no ordering between them, so a single probe at EOF can read "still
+/// running" for a shell that has already gone. The wait is bounded because
+/// the answer is only worth having promptly: past this, the pane stays open,
+/// which is the same outcome as an unclean exit and costs the user nothing
+/// but a stale tab they can close.
+const CHILD_EXIT_OBSERVE_TIMEOUT: Duration = Duration::from_millis(250);
+/// Gap between exit observations while waiting.
+const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// Whether the pane's child exited cleanly, waiting briefly for it to become
+/// observable.
+///
+/// `None` means unknown — the child outlived the wait, or the probe failed.
+/// Callers must not read that as a crash: it decides only that the pane stays
+/// open, never that it closes.
+fn observe_child_exit_cleanliness(probe: &PtyChildExitProbe) -> Option<bool> {
+    let deadline = Instant::now() + CHILD_EXIT_OBSERVE_TIMEOUT;
+    loop {
+        match probe.has_exited() {
+            Ok(true) => return probe.exit_was_clean(),
+            Ok(false) => {}
+            Err(error) => {
+                tracing::debug!(%error, "failed to observe pane child exit");
+                return None;
+            }
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(CHILD_EXIT_POLL_INTERVAL);
+    }
+}
+
 impl App {
-    pub(super) fn spawn_pane(&self) -> PaneState {
+    pub(super) fn spawn_pane(&self, pane_id: u64) -> PaneState {
         let (cols, rows) = self.main_renderer().map(|r| r.cells()).unwrap_or((80, 24));
         let (reply_tx, reply_rx) =
             crossbeam_channel::bounded::<Vec<u8>>(super::PTY_REPLY_QUEUE_CAPACITY);
@@ -88,6 +124,11 @@ impl App {
             Ok(pty) => {
                 let parser_clone = parser.clone();
                 let out_rx = pty.out_rx.clone();
+                // Cloned before the loop takes ownership: the probe is what
+                // lets the exit be classified after the output channel has
+                // already gone, which is the only moment the classification
+                // is needed.
+                let exit_probe = pty.child_exit_probe();
                 let in_tx_reply = pty.input_sender();
                 let redraw_target_thread = redraw_target.clone();
                 let redraw_proxy = self.event_loop_proxy.clone();
@@ -358,7 +399,42 @@ impl App {
                                         pending_bytes = 0;
                                     }
                                 }
-                                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                                    // The reader thread reached EOF on the pty
+                                    // master and dropped its sender: every fd
+                                    // on the slave side is closed, so the
+                                    // child and anything it left holding the
+                                    // terminal are gone.
+                                    //
+                                    // Flush any coalesced output first. The
+                                    // shell's last bytes — a farewell line, or
+                                    // the error that killed it — are still
+                                    // pending here, and on the hold-open path
+                                    // nothing else will ask for that frame.
+                                    if let Some(proxy) = redraw_proxy.as_ref() {
+                                        if pending {
+                                            super::redraw_target::dispatch(
+                                                &redraw_target_thread,
+                                                |window_id| {
+                                                    let _ = proxy.send_event(
+                                                        UserEvent::RequestRedraw(window_id),
+                                                    );
+                                                },
+                                            );
+                                        }
+                                        // Classified on this thread rather than
+                                        // by the handler: the wait for the
+                                        // child to become reapable belongs
+                                        // anywhere but the event loop, and this
+                                        // thread is about to exit regardless.
+                                        let was_clean = observe_child_exit_cleanliness(&exit_probe);
+                                        let _ = proxy.send_event(UserEvent::PaneProcessExited {
+                                            pane_id,
+                                            was_clean,
+                                        });
+                                    }
+                                    break;
+                                }
                             }
                         }
                     })
@@ -387,7 +463,7 @@ impl App {
 impl App {
     pub(super) fn split_active(&mut self, dir: Direction) {
         let new_id = next_pane_id();
-        let new_pane = self.spawn_pane();
+        let new_pane = self.spawn_pane(new_id);
         let did_split = {
             let Some(ws) = self.main_mut() else { return };
             let i = ws.tabs.active_index();

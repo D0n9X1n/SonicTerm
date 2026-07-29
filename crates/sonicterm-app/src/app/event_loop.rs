@@ -206,6 +206,9 @@ impl App {
             UserEvent::UpdateCheckFinished { level, message } => {
                 self.show_notification_for_kind(self.frontmost_kind(), level, message);
             }
+            UserEvent::PaneProcessExited { pane_id, was_clean } => {
+                self.handle_pane_process_exited(pane_id, was_clean);
+            }
             UserEvent::PtyInputRejected { bytes, reason } => {
                 self.show_notification_for_kind(
                     self.frontmost_kind(),

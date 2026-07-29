@@ -1339,6 +1339,20 @@ pub enum UserEvent {
     ClearShapeCache,
     /// Background update check finished; show a reusable notification bubble.
     UpdateCheckFinished { level: NotificationLevel, message: String },
+    /// A pane's child process ended, and its output channel closed with it.
+    ///
+    /// Raised once by that pane's VT worker, which classifies the exit before
+    /// posting: the child becoming reapable and its pty reaching EOF are
+    /// unordered, so the answer needs a bounded wait that must not happen on
+    /// the event-loop thread.
+    PaneProcessExited {
+        /// The pane whose child ended.
+        pane_id: u64,
+        /// Whether that child exited cleanly, or `None` if it could not be
+        /// determined. `None` is not a crash — it holds the pane open, the
+        /// same as an unclean exit.
+        was_clean: Option<bool>,
+    },
     /// A bounded PTY input enqueue failed. Retains the rejected bytes until
     /// the event-loop thread can show a user-actionable notification.
     PtyInputRejected {
@@ -1397,6 +1411,7 @@ mod media;
 mod misc;
 pub mod os_drag;
 mod overlays;
+mod pane_exit;
 mod quit_hold;
 mod redraw_target;
 mod render_timing;
