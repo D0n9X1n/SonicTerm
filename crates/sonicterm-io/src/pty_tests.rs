@@ -501,6 +501,44 @@ fn child_exit_probe_observes_short_lived_process() {
     );
 }
 
+/// A clean exit and a failing one must be distinguishable.
+///
+/// The probe reporting only liveness is what left a pane unable to decide
+/// whether to close: `exit` and a crash look identical through a bool, and a
+/// close policy built on that would discard a crashed shell's output before
+/// the user could read it.
+///
+/// Asserted as a pair. Checking only the clean case would pass against an
+/// accessor hardcoded to `Some(true)`, which is exactly the failure that
+/// would destroy scrollback.
+#[test]
+fn the_exit_probe_distinguishes_a_clean_exit_from_a_failing_one() {
+    #[cfg(windows)]
+    let _live_pty_guard = lock_live_pty_test();
+
+    fn observe(command: &str) -> Option<bool> {
+        let pty = PtyHandle::spawn(command, 80, 24).expect("spawn short-lived process");
+        let probe = pty.child_exit_probe();
+        #[cfg(windows)]
+        pty.send_input_nonblocking(b"\x1b[1;1R".to_vec()).expect("answer ConPTY cursor query");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !probe.has_exited().expect("probe child") && std::time::Instant::now() < deadline {
+            while pty.out_rx.try_recv().is_ok() {}
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(probe.has_exited().expect("final probe"), "{command} did not exit in time");
+        probe.exit_was_clean()
+    }
+
+    #[cfg(unix)]
+    let (clean, failing) = ("/usr/bin/true", "/usr/bin/false");
+    #[cfg(windows)]
+    let (clean, failing) = ("cmd.exe /c exit 0", "cmd.exe /c exit 1");
+
+    assert_eq!(observe(clean), Some(true), "a zero exit must read as clean");
+    assert_eq!(observe(failing), Some(false), "a nonzero exit must read as not clean");
+}
+
 #[cfg(unix)]
 #[test]
 fn observed_shell_exit_still_kills_background_process_group() {
