@@ -516,8 +516,12 @@ fn the_exit_probe_distinguishes_a_clean_exit_from_a_failing_one() {
     #[cfg(windows)]
     let _live_pty_guard = lock_live_pty_test();
 
-    fn observe(command: &str) -> Option<bool> {
-        let pty = PtyHandle::spawn(command, 80, 24).expect("spawn short-lived process");
+    // `spawn` takes a program path, not a command line — passing
+    // "cmd.exe /c exit 0" makes Windows look for a binary with that literal
+    // name. Arguments go through `spawn_with_args`.
+    fn observe(command: &str, args: &[String]) -> Option<bool> {
+        let pty =
+            PtyHandle::spawn_with_args(command, args, 80, 24).expect("spawn short-lived process");
         let probe = pty.child_exit_probe();
         #[cfg(windows)]
         pty.send_input_nonblocking(b"\x1b[1;1R".to_vec()).expect("answer ConPTY cursor query");
@@ -531,12 +535,22 @@ fn the_exit_probe_distinguishes_a_clean_exit_from_a_failing_one() {
     }
 
     #[cfg(unix)]
-    let (clean, failing) = ("/usr/bin/true", "/usr/bin/false");
+    let (clean, clean_args, failing, failing_args) =
+        ("/usr/bin/true", Vec::<String>::new(), "/usr/bin/false", Vec::<String>::new());
     #[cfg(windows)]
-    let (clean, failing) = ("cmd.exe /c exit 0", "cmd.exe /c exit 1");
+    let (clean, clean_args, failing, failing_args) = (
+        "cmd.exe",
+        vec!["/c".to_string(), "exit".to_string(), "0".to_string()],
+        "cmd.exe",
+        vec!["/c".to_string(), "exit".to_string(), "1".to_string()],
+    );
 
-    assert_eq!(observe(clean), Some(true), "a zero exit must read as clean");
-    assert_eq!(observe(failing), Some(false), "a nonzero exit must read as not clean");
+    assert_eq!(observe(clean, &clean_args), Some(true), "a zero exit must read as clean");
+    assert_eq!(
+        observe(failing, &failing_args),
+        Some(false),
+        "a nonzero exit must read as not clean"
+    );
 }
 
 #[cfg(unix)]
