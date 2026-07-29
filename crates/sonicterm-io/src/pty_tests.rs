@@ -553,6 +553,93 @@ fn the_exit_probe_distinguishes_a_clean_exit_from_a_failing_one() {
     );
 }
 
+/// A clean child exit must become observable while the pane holds its handle.
+///
+/// This is the contract the pane close policy rests on. It is deliberately
+/// stated as "observable", not "the channel disconnects", because the two
+/// platforms satisfy it by different signals and an earlier version of this
+/// test asserted the unix one as though it were universal:
+///
+/// * **unix** — the reader reaches EOF once the child's last slave fd closes,
+///   so `out_rx` disconnects on its own and the loop needs no timer.
+/// * **Windows** — the ConPTY master is held open by our `PtyHandle`, whose
+///   `HPCON` is released only when that handle drops, which happens when the
+///   pane closes. The channel therefore never disconnects while the pane
+///   lives, and the loop must poll the exit probe instead.
+///
+/// Asserting the disconnect alone made this test fail on Windows for a true
+/// reason and would have kept failing after the fix, because the fix does not
+/// make the channel disconnect — it gives the loop a second way to notice.
+///
+/// The handle is held for the whole drain on purpose. Dropping it early tears
+/// the pty down and proves nothing about the natural path, which is the only
+/// case that matters here.
+#[test]
+fn a_clean_child_exit_becomes_observable_while_the_handle_lives() {
+    #[cfg(windows)]
+    let _live_pty_guard = lock_live_pty_test();
+    #[cfg(unix)]
+    let (command, args) = ("/bin/sh", vec!["-c".to_string(), "exit 0".to_string()]);
+    #[cfg(windows)]
+    let (command, args) = ("cmd.exe", vec!["/c".to_string(), "exit".to_string(), "0".to_string()]);
+
+    let pty = PtyHandle::spawn_with_args(command, &args, 80, 24).expect("spawn short-lived shell");
+    #[cfg(windows)]
+    pty.send_input_nonblocking(b"\x1b[1;1R".to_vec()).expect("answer ConPTY cursor query");
+    let probe = pty.child_exit_probe();
+
+    // Drain as the VT worker does, checking both signals it can act on, and
+    // keep the handle alive throughout — `pty` outlives this loop.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut signal: Option<&'static str> = None;
+    let mut bytes = 0usize;
+    while std::time::Instant::now() < deadline {
+        match pty.out_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(chunk) => bytes += chunk.len(),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                signal = Some("channel disconnect");
+                break;
+            }
+        }
+        if probe.has_exited().expect("probe the child") {
+            signal = Some("exit probe");
+            break;
+        }
+    }
+
+    let signal = signal.unwrap_or_else(|| {
+        panic!(
+            "a clean child exit was still unobservable 10s later ({bytes} bytes read) with the \
+             handle held: neither the output channel nor the exit probe reported it, so a pane \
+             waiting on either would never learn its shell had gone"
+        )
+    });
+
+    // Record the status the way production does. `exit_was_clean` reports
+    // what a prior `has_exited` observed — it is an accessor, not a probe — so
+    // reading it straight after a channel disconnect returns `None` for a
+    // shell that exited perfectly well. The VT worker runs this same bounded
+    // poll before classifying, because EOF and the child becoming reapable are
+    // unordered.
+    let status_deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !probe.has_exited().expect("probe the child")
+        && std::time::Instant::now() < status_deadline
+    {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // The status must survive the observation, whichever signal produced it —
+    // the close policy reads it to decide whether the pane may close at all.
+    assert_eq!(
+        probe.exit_was_clean(),
+        Some(true),
+        "the exit was observed via {signal} but its status did not survive; a pane cannot \
+         distinguish `exit` from a crash without it"
+    );
+    drop(pty);
+}
+
 #[cfg(unix)]
 #[test]
 fn observed_shell_exit_still_kills_background_process_group() {

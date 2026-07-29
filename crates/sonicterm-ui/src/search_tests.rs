@@ -129,3 +129,67 @@ fn visible_match_range_includes_all_matches_on_a_boundary_row() {
     // Viewport [5, 6) captures all three row-5 matches, not the row-99 one.
     assert_eq!(s.visible_match_range(5, 1), (0, 3));
 }
+
+/// A search must not carry its matches onto a different grid.
+///
+/// The refresh gate compares `grid.revision()`, a per-grid counter, so two
+/// unrelated grids can sit at the same number — and they routinely do, since a
+/// fresh grid starts at zero and counts writes. When a searched pane closes
+/// and focus lands on a survivor, that collision skips the rescan and the dead
+/// pane's highlights are drawn over text they were never computed against.
+///
+/// The collision is constructed rather than raced: both grids take the same
+/// number of writes, so their revisions are equal by construction.
+#[test]
+fn a_search_pointed_at_a_new_grid_rescans_despite_an_equal_revision() {
+    fn grid_with(text: &str) -> Grid {
+        let mut grid = Grid::new(20, 1);
+        for ch in text.chars() {
+            grid.put_char(
+                ch,
+                sonicterm_grid::grid::Color::Default,
+                sonicterm_grid::grid::Color::Default,
+                CellFlags::empty(),
+            );
+        }
+        grid
+    }
+
+    // The pane being searched, and the survivor that focus lands on. Same
+    // width, same write count, so the counters match.
+    let searched = grid_with("alpha");
+    let survivor = grid_with("bravo");
+    assert_eq!(
+        searched.revision(),
+        survivor.revision(),
+        "test setup: the two grids must collide on revision, or this proves nothing"
+    );
+
+    let mut s = SearchState::new();
+    s.set_query("alpha", &searched);
+    assert_eq!(s.matches.len(), 1, "precondition: the query matches in the searched pane");
+
+    // Without being told the grid changed, the equal revision reads as
+    // "nothing has changed" and the rescan is skipped.
+    assert!(
+        !s.maybe_refresh_for_revision(&survivor),
+        "test setup: the revision collision must actually suppress the rescan"
+    );
+    assert_eq!(
+        s.matches.len(),
+        1,
+        "and the stale match survives — this is the defect, shown before the fix acts"
+    );
+
+    // What the pane-close path now does.
+    s.invalidate_for_new_grid();
+
+    assert!(
+        s.maybe_refresh_for_revision(&survivor),
+        "invalidation must force the rescan the revision check cannot ask for"
+    );
+    assert!(
+        s.matches.is_empty(),
+        "the survivor does not contain the query, so no match may remain highlighted"
+    );
+}

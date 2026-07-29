@@ -1339,6 +1339,20 @@ pub enum UserEvent {
     ClearShapeCache,
     /// Background update check finished; show a reusable notification bubble.
     UpdateCheckFinished { level: NotificationLevel, message: String },
+    /// A pane's child process ended, and its output channel closed with it.
+    ///
+    /// Raised once by that pane's VT worker, which classifies the exit before
+    /// posting: the child becoming reapable and its pty reaching EOF are
+    /// unordered, so the answer needs a bounded wait that must not happen on
+    /// the event-loop thread.
+    PaneProcessExited {
+        /// The pane whose child ended.
+        pane_id: u64,
+        /// Whether that child exited cleanly, or `None` if it could not be
+        /// determined. `None` is not a crash — it holds the pane open, the
+        /// same as an unclean exit.
+        was_clean: Option<bool>,
+    },
     /// A bounded PTY input enqueue failed. Retains the rejected bytes until
     /// the event-loop thread can show a user-actionable notification.
     PtyInputRejected {
@@ -1397,6 +1411,7 @@ mod media;
 mod misc;
 pub mod os_drag;
 mod overlays;
+mod pane_exit;
 mod quit_hold;
 mod redraw_target;
 mod render_timing;
@@ -1588,6 +1603,17 @@ impl TabState {
 pub struct PendingTearOut {
     pub source_window: WindowId,
     pub source_tab_idx: usize,
+    /// The tab this request names, independent of where it currently sits.
+    ///
+    /// An index is a position, and positions move: a tab closing at a lower
+    /// index leaves the recorded one in range but naming a different tab, so a
+    /// bounds check passes and the wrong tab is torn out. That became reachable
+    /// once a shell exiting could close a tab on its own, with no user action
+    /// to serialise against the drag.
+    ///
+    /// `None` only for requests built before an id was available, which fall
+    /// back to the index.
+    pub source_tab_id: Option<sonicterm_ui::tabs::TabId>,
     pub drop_screen_pos: Option<(i32, i32)>,
 }
 
@@ -2933,6 +2959,12 @@ impl App {
                     if st.active_pane == pane_id {
                         st.active_pane =
                             leaves.into_iter().find(|id| *id != pane_id).unwrap_or(st.active_pane);
+                        // The search was scanning the grid that just went
+                        // away. Its matches, their coordinates, and the
+                        // revision it recorded all describe that grid.
+                        if let Some(search) = st.search.as_mut() {
+                            search.invalidate_for_new_grid();
+                        }
                     }
                     if tab_idx == active_tab {
                         resize_main = true;
@@ -2969,6 +3001,12 @@ impl App {
                     if st.active_pane == pane_id {
                         st.active_pane =
                             leaves.into_iter().find(|id| *id != pane_id).unwrap_or(st.active_pane);
+                        // The search was scanning the grid that just went
+                        // away. Its matches, their coordinates, and the
+                        // revision it recorded all describe that grid.
+                        if let Some(search) = st.search.as_mut() {
+                            search.invalidate_for_new_grid();
+                        }
                     }
                     if tab_idx == active_tab {
                         resize_child = true;
@@ -5157,9 +5195,11 @@ impl App {
                 // builds the child window directly from the reusable
                 // helper extracted from `tear_out.rs`.
                 if let Some((src_win, src_idx)) = source {
+                    let source_tab_id = self.tab_id_at(src_win, src_idx);
                     self.pending_tear_out = Some(PendingTearOut {
                         source_window: src_win,
                         source_tab_idx: src_idx,
+                        source_tab_id,
                         drop_screen_pos: Some(drop_screen_pos),
                     });
                 } else {

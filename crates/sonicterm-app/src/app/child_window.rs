@@ -1679,6 +1679,7 @@ impl App {
     /// `PaneState`, no longer threaded in from the WindowState.
     pub(super) fn spawn_pane_state_for_child(
         &self,
+        pane_id: u64,
         cols: u16,
         rows: u16,
         child_window: Arc<Window>,
@@ -1722,6 +1723,10 @@ impl App {
             Ok(pty) => {
                 let parser_clone = parser.clone();
                 let out_rx = pty.out_rx.clone();
+                // Same reason as the main-window worker: the probe is what
+                // lets the exit be classified after the output channel is
+                // already gone.
+                let exit_probe = pty.child_exit_probe();
                 let in_tx_reply = pty.input_sender();
                 let redraw_target_thread = redraw_target.clone();
                 let redraw_proxy = self.event_loop_proxy.clone();
@@ -1771,7 +1776,7 @@ impl App {
                             match out_rx.recv_timeout(if pending {
                                 crate::app::PTY_REDRAW_QUIESCENT
                             } else {
-                                Duration::from_secs(3600)
+                                super::spawn_pane::PANE_IDLE_WAIT
                             }) {
                                 Ok(bytes) => {
                                     if !bytes.is_empty() {
@@ -1858,8 +1863,48 @@ impl App {
                                         pending_since = None;
                                         pending_bytes = 0;
                                     }
+                                    // Windows only: the output channel does
+                                    // not disconnect while the pane holds its
+                                    // handle, so this periodic wake is the one
+                                    // place a natural exit can be noticed. On
+                                    // unix the disconnect arm below does it,
+                                    // and this loop never wakes on its own.
+                                    #[cfg(windows)]
+                                    if exit_probe.has_exited().unwrap_or(false) {
+                                        super::spawn_pane::report_pane_exit(
+                                            redraw_proxy.as_ref(),
+                                            &exit_probe,
+                                            pane_id,
+                                        );
+                                        break;
+                                    }
                                 }
-                                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                                    // A pane born in a child window reaches
+                                    // its shell's exit through this loop, not
+                                    // the main-window one. Both must report
+                                    // it, or the close policy applies to
+                                    // whichever window the pane happened to
+                                    // start in.
+                                    if let Some(proxy) = redraw_proxy.as_ref() {
+                                        if pending {
+                                            super::redraw_target::dispatch(
+                                                &redraw_target_thread,
+                                                |window_id| {
+                                                    let _ = proxy.send_event(
+                                                        UserEvent::RequestRedraw(window_id),
+                                                    );
+                                                },
+                                            );
+                                        }
+                                    }
+                                    super::spawn_pane::report_pane_exit(
+                                        redraw_proxy.as_ref(),
+                                        &exit_probe,
+                                        pane_id,
+                                    );
+                                    break;
+                                }
                             }
                         }
                     })
@@ -1901,8 +1946,8 @@ impl App {
             let (c, r) = renderer.cells();
             (c, r, win.clone())
         };
-        let pane_state = self.spawn_pane_state_for_child(cols, rows, child_window.clone());
         let pane_id = next_pane_id();
+        let pane_state = self.spawn_pane_state_for_child(pane_id, cols, rows, child_window.clone());
         let Some(child) = self.windows.get_mut(&win_id) else {
             return false;
         };
@@ -2003,6 +2048,11 @@ impl App {
         let new_focus = st.tree.leaves().into_iter().find(|id| *id != focus).unwrap_or(focus);
         if st.tree.close(focus) {
             st.active_pane = new_focus;
+            // Same reason as the main-window path: the search was scanning the
+            // grid that just went away.
+            if let Some(search) = st.search.as_mut() {
+                search.invalidate_for_new_grid();
+            }
             child.panes.remove(&focus);
             // #pane-geom: the surviving sibling's PaneRect just grew to cover
             // the closed pane's area. Push the new layout into its Grid +
@@ -2089,7 +2139,7 @@ impl App {
         let pane_state =
             if let (Some(renderer), Some(win)) = (child.renderer.as_ref(), child.window.as_ref()) {
                 let (cols, rows) = renderer.cells();
-                self.spawn_pane_state_for_child(cols, rows, win.clone())
+                self.spawn_pane_state_for_child(new_id, cols, rows, win.clone())
             } else if child.renderer.is_none() && child.window.is_none() {
                 // Test-only synthetic child windows intentionally have no
                 // renderer/window, but they still need to exercise pane
@@ -2136,6 +2186,11 @@ impl App {
         let new_focus = st.tree.leaves().into_iter().find(|id| *id != focus).unwrap_or(focus);
         if st.tree.close(focus) {
             st.active_pane = new_focus;
+            // Same reason as the main-window path: the search was scanning the
+            // grid that just went away.
+            if let Some(search) = st.search.as_mut() {
+                search.invalidate_for_new_grid();
+            }
             child.panes.remove(&focus);
             resize_visible_panes_in_child(child);
             if let Some(r) = child.renderer.as_mut() {

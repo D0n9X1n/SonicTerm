@@ -104,6 +104,42 @@ spawns another pane and replaces the focused leaf with a horizontal or vertical
 split. The tree computes pane rectangles; every visible grid and PTY is resized
 to its allocated cell area.
 
+## When a pane's shell exits
+
+A pane whose child process ends closes **only if that child exited cleanly** —
+status zero, not killed by a signal. The pane's VT worker notices the exit,
+classifies it, and posts `PaneProcessExited` to the event loop:
+
+| Child's exit | Pane and tab |
+| --- | --- |
+| Clean (status 0) | Pane closes. If it was the tab's only pane, the tab closes; if that was the window's last tab, the window goes with it. |
+| Non-zero status, or killed by a signal | Both stay open, with the shell's last output still on screen. |
+| Status could not be read | Both stay open. |
+
+Holding the pane open on an unclean exit is the point of the policy rather than
+a limitation of it: closing discards the scrollback, and the output of a shell
+that died badly is the part the user most needs to read. The third row follows
+the same reasoning — an unreadable status is uncertainty, and discarding a
+user's scrollback on our own uncertainty is the worse failure.
+
+Classification happens on the VT worker, not the event loop. EOF on the pty
+master and the child becoming reapable are unordered, so a single probe at EOF
+can read "still running" for a shell that has already gone; the worker waits
+briefly for the answer, which is work the event-loop thread must never do. Past
+that bound the exit is reported as unknown, and the pane stays open.
+
+**How the worker learns of the exit differs by platform**, because only one of
+the two gets a signal for free:
+
+| Platform | Signal | Idle cost |
+| --- | --- | --- |
+| macOS, Linux | The pty reader reaches EOF once the child's last slave fd closes, so the worker's output channel disconnects on its own. | None — an idle pane never wakes. |
+| Windows | The ConPTY master is held open by the pane's own PTY handle, whose `HPCON` is released only when that handle drops — which happens when the pane closes. The channel therefore never disconnects while the pane lives, so the worker polls the exit probe instead. | Two wakeups per second per idle pane. |
+
+The Windows column is not a missing optimization. Waiting for that channel
+would mean waiting for the pane to close in order to learn that it should
+close, so the poll is what makes the policy reachable there at all.
+
 ## Resource ownership and retention charging
 
 Alongside the window/tab/pane tree, `App` holds a process-local **resource
@@ -439,6 +475,37 @@ App
 
 新标签页会启动一个窗格、添加 `Tab`，并创建单叶 `PaneTree`。分屏会启动另一个窗格，
 把当前叶节点替换为横向或纵向 split。树计算窗格矩形，每个可见 grid 和 PTY 随其单元格区域 resize。
+
+## 窗格 shell 退出时
+
+子进程结束的窗格**只在该子进程干净退出时**关闭——退出码为 0，且不是被信号杀死。
+窗格的 VT worker 发现该退出后对其做出判定，并向事件循环投递
+`PaneProcessExited`：
+
+| 子进程退出方式 | 窗格与标签页 |
+| --- | --- |
+| 干净退出（退出码 0） | 关闭窗格。若它是该标签页唯一的窗格，标签页一并关闭；若那是窗口最后一个标签页，窗口也随之关闭。 |
+| 非零退出码，或被信号杀死 | 两者都保留，shell 最后的输出仍留在屏幕上。 |
+| 无法读到退出状态 | 两者都保留。 |
+
+非干净退出时保留窗格是该策略的目的，而不是它的局限：关闭会丢弃 scrollback，
+而异常终止的 shell 的输出恰恰是用户最需要阅读的部分。第三行出于同样的理由——
+读不到状态属于不确定，而因我们自己的不确定去丢弃用户的 scrollback 是更严重的失败。
+
+判定发生在 VT worker 上，而不是事件循环。pty master 的 EOF 与子进程变为可回收
+之间没有先后关系，因此仅在 EOF 处探测一次，可能把已经结束的 shell 读成"仍在运行"；
+worker 会为此短暂等待，而这类等待绝不能放在事件循环线程上。超过该时限后退出被
+报告为未知，窗格保持打开。
+
+**worker 得知该退出的方式因平台而异**，因为只有一个平台能免费拿到这个信号：
+
+| 平台 | 信号 | 空闲开销 |
+| --- | --- | --- |
+| macOS、Linux | 子进程最后一个 slave fd 关闭后，pty reader 读到 EOF，worker 的输出通道随之自行断开。 | 无——空闲窗格从不唤醒。 |
+| Windows | ConPTY master 由窗格自己的 PTY handle 持有，其 `HPCON` 只在该 handle 析构时释放，而这发生在窗格关闭时。因此窗格存活期间通道永不断开，worker 改为轮询退出探针。 | 每个空闲窗格每秒两次唤醒。 |
+
+Windows 一列不是尚未完成的优化。等待那个通道，等于为了得知窗格应当关闭而先等待
+窗格关闭；轮询才是让该策略在该平台上可达的前提。
 
 ## 资源所有权与占用计费
 
