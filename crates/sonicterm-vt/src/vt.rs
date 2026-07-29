@@ -2181,11 +2181,29 @@ impl Perform for Performer {
         }
     }
 
-    fn hook(&mut self, _params: &Params, _intermediates: &[u8], _ignore: bool, action: char) {
+    fn hook(&mut self, _params: &Params, intermediates: &[u8], ignore: bool, action: char) {
         // Entering DCS passthrough — stay out of the fast-path until unhook.
         self.ground = false;
-        self.dcs_capture =
-            (action == 'q').then(|| MediaCapture::new(MediaProtocol::Sixel, String::new()));
+        // `q` ends three unrelated DCS sequences, told apart only by their
+        // intermediate byte:
+        //
+        //   Sixel      DCS <params> q   no intermediate
+        //   DECRQSS    DCS $ q          intermediate 0x24
+        //   XTGETTCAP  DCS + q          intermediate 0x2B
+        //
+        // Only the first is image data. Matching on the final byte alone
+        // captures a terminal *query* and hands its reply to the Sixel
+        // decoder, which renders the bytes as pixels: a DECRQSS reply of `m`
+        // decodes to a 1x6 column in the decoder's default palette entry,
+        // which is pure white. That reaches the screen as a stray white mark
+        // at the pane content origin, redrawn every frame from retained
+        // media and surviving every repaint path.
+        // `ignore` is set when the sequence exceeded the parser's parameter or
+        // intermediate limits, so what arrives is a truncated view of
+        // something longer. Capturing that as an image would decode bytes the
+        // sender never meant as pixel data.
+        self.dcs_capture = (action == 'q' && intermediates.is_empty() && !ignore)
+            .then(|| MediaCapture::new(MediaProtocol::Sixel, String::new()));
     }
     fn put(&mut self, byte: u8) {
         self.ground = false;

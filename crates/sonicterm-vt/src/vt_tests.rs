@@ -1769,3 +1769,107 @@ fn cancelled_capture_stops_discarding_at_the_first_newline() {
         "but output after the newline must reach the user"
     );
 }
+
+#[test]
+fn a_decrqss_query_is_not_captured_as_a_sixel_image() {
+    let _serialised = serialised_captures();
+    // `q` is the final byte of three unrelated DCS sequences, told apart only
+    // by their intermediate:
+    //
+    //   Sixel      DCS <params> q      no intermediate
+    //   DECRQSS    DCS $ q             intermediate 0x24
+    //   XTGETTCAP  DCS + q             intermediate 0x2B
+    //
+    // Classifying on the final byte alone captures a terminal *query* as
+    // image data. nvim sends DECRQSS on startup to read the current SGR, and
+    // its payload byte `m` lands in the Sixel data range `?`..=`~`, so the
+    // decoder renders it: `bits = 0x6D - 63 = 0x2E`, setting rows 1, 2, 3 and
+    // 5 of one six-row column. That is a 1x6 image, and with no colour
+    // introducer it takes the decoder's default palette entry — pure white.
+    //
+    // The result is a stray white pixel at the pane content origin, redrawn
+    // every frame from retained media, surviving every repaint path.
+    let mut parser = Parser::new(Grid::new(80, 24));
+    let events = parser.advance(b"\x1bP$qm\x1b\\");
+
+    let media: Vec<_> = events
+        .into_iter()
+        .filter_map(|event| match event {
+            VtEvent::Media(media) => Some(media),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        media.is_empty(),
+        "DECRQSS (DCS $ q) is a status query, not an image; capturing it as \
+         Sixel renders the reply payload as pixels: {media:?}"
+    );
+}
+
+#[test]
+fn an_xtgetcap_query_is_not_captured_as_a_sixel_image() {
+    let _serialised = serialised_captures();
+    // The other `q`-terminated query nvim sends. Its hex-digit payload mostly
+    // falls outside the Sixel data range, so it decodes to nothing visible
+    // more often than DECRQSS does — but it is still a query being read as an
+    // image, and `b`..`f` in a hex string are inside the range.
+    let mut parser = Parser::new(Grid::new(80, 24));
+    let events = parser.advance(b"\x1bP+q626365\x1b\\");
+
+    let media: Vec<_> = events
+        .into_iter()
+        .filter_map(|event| match event {
+            VtEvent::Media(media) => Some(media),
+            _ => None,
+        })
+        .collect();
+
+    assert!(media.is_empty(), "XTGETTCAP (DCS + q) is a capability query, not an image: {media:?}");
+}
+
+#[test]
+fn a_real_sixel_without_intermediates_is_still_captured() {
+    let _serialised = serialised_captures();
+    // The other half of the fix: rejecting intermediates must not reject
+    // actual Sixel, which carries parameters but no intermediate byte.
+    let mut parser = Parser::new(Grid::new(80, 24));
+    let events = parser.advance(b"\x1bP0;0;0q#0;2;0;0;0#0~~@@vv@@~~@@~~$\x1b\\");
+
+    let media = events
+        .into_iter()
+        .find_map(|event| match event {
+            VtEvent::Media(media) => Some(media),
+            _ => None,
+        })
+        .expect("a genuine Sixel payload must still be captured");
+    assert_eq!(media.protocol, MediaProtocol::Sixel);
+}
+
+#[test]
+fn a_decscusr_query_reply_is_not_captured_as_a_sixel_image() {
+    let _serialised = serialised_captures();
+    // The defect is not specific to one query. DECSCUSR — `DCS $ q SP q ST`,
+    // the cursor-shape request — carries the same `$` intermediate, and its
+    // reply byte `q` (0x71) is itself inside the Sixel data range: `bits =
+    // 0x71 - 63 = 0b110010` would paint rows 1, 4 and 5 of a six-row column.
+    //
+    // Any `$`-intermediate query whose reply lands in `?`..=`~` produces a
+    // mark, so the fix has to gate on the intermediate rather than enumerate
+    // the queries that happen to be known.
+    let mut parser = Parser::new(Grid::new(80, 24));
+    let events = parser.advance(b"\x1bP$q q\x1b\\");
+
+    let media: Vec<_> = events
+        .into_iter()
+        .filter_map(|event| match event {
+            VtEvent::Media(media) => Some(media),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        media.is_empty(),
+        "DECSCUSR (DCS $ q SP q) is a cursor-shape query, not an image: {media:?}"
+    );
+}
