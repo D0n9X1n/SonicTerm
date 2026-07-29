@@ -44,11 +44,67 @@ fn enabled_at(filter: &str, target: &str) -> bool {
             tracing::enabled!(target: "sonic::render::glyph", tracing::Level::DEBUG)
         }
         "sonic_exit" => tracing::enabled!(target: "sonic_exit", tracing::Level::DEBUG),
+        "sonicterm_font::shaper::harfbuzz" => {
+            tracing::enabled!(target: "sonicterm_font::shaper::harfbuzz", tracing::Level::DEBUG)
+        }
         other => panic!(
             "no probe arm for target {other:?}; add one so the reachability tests \
              cover every target the source emits"
         ),
     })
+}
+
+/// Is a TRACE event on the shaper's module target admitted by `filter`?
+///
+/// Separate from [`enabled_at`], which probes DEBUG. The shaper's per-glyph
+/// and per-shape-call dumps sit at TRACE precisely so no configured level
+/// reaches them, and asserting that needs a probe at that level.
+fn shaper_trace_enabled_at(filter: &str) -> bool {
+    use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
+    let subscriber = Registry::default().with(EnvFilter::try_new(filter).expect("valid filter"));
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::enabled!(
+            target: "sonicterm_font::shaper::harfbuzz",
+            tracing::Level::TRACE
+        )
+    })
+}
+
+/// No configured level turns on the shaper's hot-path diagnostics.
+///
+/// Those sites fire once per shaped glyph and once per shape call, and two of
+/// them pretty-print whole collections. At DEBUG they produced 82 million
+/// lines and 2.3 GB from a session that sat idle — while `wiki/Logging.md`
+/// tells a user investigating *memory* to set `level = "debug"`. The
+/// documented procedure for diagnosing a memory problem could therefore fill
+/// the disk, and the cost landed on the shaping hot path where it also
+/// distorted what was being measured.
+///
+/// They live at TRACE now, which no `LogLevel` admits, so they stay available
+/// through `RUST_LOG` for shaping work without reaching a user who followed
+/// the documentation.
+///
+/// The DEBUG assertion is the pair to this one: it pins that the crate is
+/// still reachable at all, so a future change cannot satisfy this test by
+/// silencing the whole target.
+#[test]
+fn no_configured_level_admits_the_shaper_hot_path_dumps() {
+    for level in [LogLevel::Error, LogLevel::Warn, LogLevel::Info, LogLevel::Debug] {
+        let filter = filter_for_level(level);
+        assert!(
+            !shaper_trace_enabled_at(filter),
+            "{level:?} admits TRACE on the shaper target; its per-glyph dumps would \
+             flood the log a user was told to enable while investigating memory"
+        );
+    }
+
+    // And the crate is still reachable at debug, so this cannot be satisfied
+    // by turning the target off entirely.
+    let debug = filter_for_level(LogLevel::Debug);
+    assert!(
+        enabled_at(debug, "sonicterm_font::shaper::harfbuzz"),
+        "the shaper's ordinary DEBUG diagnostics must still be reachable"
+    );
 }
 
 /// The instruction the wiki gives a user must actually produce output.

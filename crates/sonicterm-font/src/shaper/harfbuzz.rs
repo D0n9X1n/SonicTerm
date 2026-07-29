@@ -361,7 +361,10 @@ impl HarfbuzzShaper {
         let mut cluster_resolver = ClusterResolver { presentation_width, ..Default::default() };
 
         cluster_resolver.build(hb_infos, s, &range);
-        log::debug!("cluster_resolver: {cluster_resolver:#?}");
+        // `trace`, not `debug`: this pretty-prints the whole resolver once per
+        // shape call. No configured log level admits trace, so a user
+        // following the memory-investigation procedure does not pay for it.
+        log::trace!("cluster_resolver: {cluster_resolver:#?}");
 
         let info_iter = hb_infos.iter().zip(positions.iter()).peekable();
         for (info, pos) in info_iter {
@@ -387,7 +390,9 @@ impl HarfbuzzShaper {
                 x_offset: pos.x_offset,
                 y_offset: pos.y_offset,
             };
-            log::debug!("hb info.cluster {} -> {info:?}", info.cluster);
+            // `trace`, not `debug`: this fires once per shaped glyph. At debug
+            // it produced 82 million lines and 2.3 GB from an idle session.
+            log::trace!("hb info.cluster {} -> {info:?}", info.cluster);
 
             if info.codepoint == 0 && !no_more_fallbacks {
                 cluster_info.incomplete = true;
@@ -434,7 +439,8 @@ impl HarfbuzzShaper {
             info_clusters.push(vec![info]);
         }
         //  log::error!("do_shape: font_idx={} {:?} {:#?}", font_idx, &s[range.clone()], info_clusters);
-        log::debug!("font_idx={font_idx} info_clusters: {:#?}", info_clusters);
+        // `trace`, not `debug`: pretty-prints a `Vec<Vec<Info>>` per shape call.
+        log::trace!("font_idx={font_idx} info_clusters: {:#?}", info_clusters);
 
         let mut direct_clusters = 0;
 
