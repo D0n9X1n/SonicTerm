@@ -55,11 +55,18 @@ fn a_fallback_at_index_zero_is_not_reweighted() {
     // first declared fallback takes index 0, and a PUA symbol is what it
     // covers.
     const PUA_SYMBOL: char = '\u{e0b0}';
-    let Some(base) = tile_for(MISSING_FAMILY, 1.0, PUA_SYMBOL) else {
-        // No font stack available in this environment; nothing to assert.
-        return;
-    };
-    let Some(heavy) = tile_for(MISSING_FAMILY, HEAVY, PUA_SYMBOL) else {
+    let (Some(base), Some(heavy)) =
+        (tile_for(MISSING_FAMILY, 1.0, PUA_SYMBOL), tile_for(MISSING_FAMILY, HEAVY, PUA_SYMBOL))
+    else {
+        // The symbol did not resolve, so no glyph reached index 0 and there is
+        // nothing here to discriminate. Announced rather than returned
+        // silently: a skipped run and a passing run are otherwise identical in
+        // the log, and this test's whole value is that it fails against a
+        // build gating on the handle index.
+        eprintln!(
+            "SKIPPED a_fallback_at_index_zero_is_not_reweighted: U+E0B0 did not resolve, \
+             so this environment cannot place a glyph at handle index 0"
+        );
         return;
     };
 
@@ -84,10 +91,9 @@ fn the_configured_family_is_still_reweighted() {
     // wrong trade; if the default ever changes, this resolves to nothing
     // and the test skips rather than asserting something false.
     let family = "Rec Mono St.Helens";
-    let Some(base) = tile_for(family, 1.0, 'm') else {
-        return;
-    };
-    let Some(heavy) = tile_for(family, HEAVY, 'm') else {
+    let (Some(base), Some(heavy)) = (tile_for(family, 1.0, 'm'), tile_for(family, HEAVY, 'm'))
+    else {
+        eprintln!("SKIPPED the_configured_family_is_still_reweighted: {family} did not resolve");
         return;
     };
 
