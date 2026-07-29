@@ -62,11 +62,31 @@ pub struct SearchState {
     pub requested_scroll_row: Option<u32>,
     /// Last regex compile error, if any (so the UI can show it).
     pub regex_error: Option<String>,
+    /// Forces the next revision check to rescan, whatever the revision says.
+    ///
+    /// Revisions are per-grid counters, so equality means "this grid has not
+    /// changed" only while the grid stays the same one. When the search is
+    /// pointed at a different grid — the surviving pane after the searched
+    /// pane closed — the two counters are unrelated, and an accidental match
+    /// skips the rescan and leaves the dead pane's matches on screen.
+    needs_rescan: bool,
 }
 
 impl SearchState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Point this search at a different grid than the one it last scanned.
+    ///
+    /// Called when the pane a search was running against goes away and focus
+    /// lands on a survivor. The matches, their coordinates, and the recorded
+    /// revision all describe a grid that no longer exists, and the revision
+    /// check cannot detect that on its own: two unrelated grids can sit at the
+    /// same counter, and when they do the rescan is skipped and the dead
+    /// pane's highlights are drawn over the survivor's text.
+    pub fn invalidate_for_new_grid(&mut self) {
+        self.needs_rescan = true;
     }
 
     /// Index window `[start, end)` into [`Self::matches`] whose rows intersect
@@ -154,9 +174,10 @@ impl SearchState {
     /// nearest preceding match (or the first one when nothing precedes).
     /// Returns `true` if a rescan happened.
     pub fn maybe_refresh_for_revision(&mut self, grid: &Grid) -> bool {
-        if grid.revision() == self.last_revision {
+        if !self.needs_rescan && grid.revision() == self.last_revision {
             return false;
         }
+        self.needs_rescan = false;
         let anchor = self.current_match();
         self.scrollback_len = grid.scrollback_len() as u32;
         self.visible_rows = grid.rows;

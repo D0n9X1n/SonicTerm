@@ -71,6 +71,40 @@ pub(super) fn observe_child_exit_cleanliness(probe: &PtyChildExitProbe) -> Optio
     }
 }
 
+/// How long a quiescent VT loop parks before looking around.
+///
+/// On unix the pty reader reaches EOF once the child's last slave fd closes,
+/// so a loop learns of an exit by its channel disconnecting and never needs to
+/// wake on its own. An hour is "effectively forever": idle panes cost no
+/// wakeups at all.
+///
+/// Windows cannot use that signal. The ConPTY master is held open by our own
+/// `PtyHandle`, whose `HPCON` is released only when that handle drops — which
+/// happens when the pane closes. The reader therefore never reaches EOF while
+/// the pane lives, so the disconnect that would report the exit sits
+/// *downstream of the close it is supposed to cause*. Measured: the channel
+/// stayed open for a full 10s after a clean exit with the handle held. Polling
+/// the exit probe is the only way out of that circle, so the loop wakes
+/// periodically and pays two wakeups per second per idle pane to get it.
+#[cfg(not(windows))]
+pub(super) const PANE_IDLE_WAIT: Duration = Duration::from_secs(3600);
+#[cfg(windows)]
+pub(super) const PANE_IDLE_WAIT: Duration = Duration::from_millis(500);
+
+/// Classify a pane's child exit and report it to the event loop.
+///
+/// Shared by both VT loops and by both ways a loop can notice an exit: the
+/// output channel disconnecting, and — where that never happens — the probe.
+pub(super) fn report_pane_exit(
+    proxy: Option<&EventLoopProxy<UserEvent>>,
+    probe: &PtyChildExitProbe,
+    pane_id: u64,
+) {
+    let Some(proxy) = proxy else { return };
+    let was_clean = observe_child_exit_cleanliness(probe);
+    let _ = proxy.send_event(UserEvent::PaneProcessExited { pane_id, was_clean });
+}
+
 impl App {
     pub(super) fn spawn_pane(&self, pane_id: u64) -> PaneState {
         let (cols, rows) = self.main_renderer().map(|r| r.cells()).unwrap_or((80, 24));
@@ -199,7 +233,7 @@ impl App {
                             match out_rx.recv_timeout(if pending {
                                 crate::app::PTY_REDRAW_QUIESCENT
                             } else {
-                                Duration::from_secs(3600)
+                                PANE_IDLE_WAIT
                             }) {
                                 Ok(bytes) => {
                                     // /: bump generation so the
@@ -398,6 +432,21 @@ impl App {
                                         pending_since = None;
                                         pending_bytes = 0;
                                     }
+                                    // Windows only: the output channel does
+                                    // not disconnect while the pane holds its
+                                    // handle, so this periodic wake is the one
+                                    // place a natural exit can be noticed. On
+                                    // unix the disconnect arm below does it,
+                                    // and this loop never wakes on its own.
+                                    #[cfg(windows)]
+                                    if exit_probe.has_exited().unwrap_or(false) {
+                                        report_pane_exit(
+                                            redraw_proxy.as_ref(),
+                                            &exit_probe,
+                                            pane_id,
+                                        );
+                                        break;
+                                    }
                                 }
                                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                                     // The reader thread reached EOF on the pty
@@ -422,17 +471,13 @@ impl App {
                                                 },
                                             );
                                         }
-                                        // Classified on this thread rather than
-                                        // by the handler: the wait for the
-                                        // child to become reapable belongs
-                                        // anywhere but the event loop, and this
-                                        // thread is about to exit regardless.
-                                        let was_clean = observe_child_exit_cleanliness(&exit_probe);
-                                        let _ = proxy.send_event(UserEvent::PaneProcessExited {
-                                            pane_id,
-                                            was_clean,
-                                        });
                                     }
+                                    // Classified on this thread rather than by
+                                    // the handler: the wait for a child to
+                                    // become reapable belongs anywhere but the
+                                    // event loop, and this thread is about to
+                                    // exit regardless.
+                                    report_pane_exit(redraw_proxy.as_ref(), &exit_probe, pane_id);
                                     break;
                                 }
                             }
@@ -510,6 +555,11 @@ impl App {
                         st.tree.leaves().into_iter().find(|id| *id != focus).unwrap_or(focus);
                     if st.tree.close(focus) {
                         st.active_pane = new_focus;
+                        // Same reason as the exit-driven path: the search was
+                        // scanning the grid that just went away.
+                        if let Some(search) = st.search.as_mut() {
+                            search.invalidate_for_new_grid();
+                        }
                         (None, Some(focus))
                     } else {
                         (None, None)

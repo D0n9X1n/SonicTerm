@@ -1776,7 +1776,7 @@ impl App {
                             match out_rx.recv_timeout(if pending {
                                 crate::app::PTY_REDRAW_QUIESCENT
                             } else {
-                                Duration::from_secs(3600)
+                                super::spawn_pane::PANE_IDLE_WAIT
                             }) {
                                 Ok(bytes) => {
                                     if !bytes.is_empty() {
@@ -1863,6 +1863,21 @@ impl App {
                                         pending_since = None;
                                         pending_bytes = 0;
                                     }
+                                    // Windows only: the output channel does
+                                    // not disconnect while the pane holds its
+                                    // handle, so this periodic wake is the one
+                                    // place a natural exit can be noticed. On
+                                    // unix the disconnect arm below does it,
+                                    // and this loop never wakes on its own.
+                                    #[cfg(windows)]
+                                    if exit_probe.has_exited().unwrap_or(false) {
+                                        super::spawn_pane::report_pane_exit(
+                                            redraw_proxy.as_ref(),
+                                            &exit_probe,
+                                            pane_id,
+                                        );
+                                        break;
+                                    }
                                 }
                                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                                     // A pane born in a child window reaches
@@ -1882,15 +1897,12 @@ impl App {
                                                 },
                                             );
                                         }
-                                        let was_clean =
-                                            super::spawn_pane::observe_child_exit_cleanliness(
-                                                &exit_probe,
-                                            );
-                                        let _ = proxy.send_event(UserEvent::PaneProcessExited {
-                                            pane_id,
-                                            was_clean,
-                                        });
                                     }
+                                    super::spawn_pane::report_pane_exit(
+                                        redraw_proxy.as_ref(),
+                                        &exit_probe,
+                                        pane_id,
+                                    );
                                     break;
                                 }
                             }
@@ -2036,6 +2048,11 @@ impl App {
         let new_focus = st.tree.leaves().into_iter().find(|id| *id != focus).unwrap_or(focus);
         if st.tree.close(focus) {
             st.active_pane = new_focus;
+            // Same reason as the main-window path: the search was scanning the
+            // grid that just went away.
+            if let Some(search) = st.search.as_mut() {
+                search.invalidate_for_new_grid();
+            }
             child.panes.remove(&focus);
             // #pane-geom: the surviving sibling's PaneRect just grew to cover
             // the closed pane's area. Push the new layout into its Grid +
@@ -2169,6 +2186,11 @@ impl App {
         let new_focus = st.tree.leaves().into_iter().find(|id| *id != focus).unwrap_or(focus);
         if st.tree.close(focus) {
             st.active_pane = new_focus;
+            // Same reason as the main-window path: the search was scanning the
+            // grid that just went away.
+            if let Some(search) = st.search.as_mut() {
+                search.invalidate_for_new_grid();
+            }
             child.panes.remove(&focus);
             resize_visible_panes_in_child(child);
             if let Some(r) = child.renderer.as_mut() {

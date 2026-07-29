@@ -2948,6 +2948,12 @@ impl App {
                     if st.active_pane == pane_id {
                         st.active_pane =
                             leaves.into_iter().find(|id| *id != pane_id).unwrap_or(st.active_pane);
+                        // The search was scanning the grid that just went
+                        // away. Its matches, their coordinates, and the
+                        // revision it recorded all describe that grid.
+                        if let Some(search) = st.search.as_mut() {
+                            search.invalidate_for_new_grid();
+                        }
                     }
                     if tab_idx == active_tab {
                         resize_main = true;
@@ -2984,6 +2990,12 @@ impl App {
                     if st.active_pane == pane_id {
                         st.active_pane =
                             leaves.into_iter().find(|id| *id != pane_id).unwrap_or(st.active_pane);
+                        // The search was scanning the grid that just went
+                        // away. Its matches, their coordinates, and the
+                        // revision it recorded all describe that grid.
+                        if let Some(search) = st.search.as_mut() {
+                            search.invalidate_for_new_grid();
+                        }
                     }
                     if tab_idx == active_tab {
                         resize_child = true;

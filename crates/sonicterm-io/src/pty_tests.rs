@@ -553,25 +553,29 @@ fn the_exit_probe_distinguishes_a_clean_exit_from_a_failing_one() {
     );
 }
 
-/// A child that exits must close its output channel while its handle is held.
+/// A clean child exit must become observable while the pane holds its handle.
 ///
-/// This is the trigger the pane close policy is built on: the VT worker learns
-/// its shell is gone by seeing `out_rx` disconnect, and only then classifies
-/// the exit. If the channel stays open while the pane still owns its
-/// `PtyHandle`, that notification is unreachable rather than late — the pane
-/// closes only on the event, and the event arrives only if the pane closes.
+/// This is the contract the pane close policy rests on. It is deliberately
+/// stated as "observable", not "the channel disconnects", because the two
+/// platforms satisfy it by different signals and an earlier version of this
+/// test asserted the unix one as though it were universal:
 ///
-/// The handle is deliberately held for the whole drain. Dropping it early
-/// would tear down the pty itself and prove nothing about the natural path,
-/// which is exactly the case that matters: on Windows the ConPTY `HPCON` is
-/// released only by `PsuedoCon::drop`, so a reader that waits for the master
-/// to close would wait for the very teardown this event is meant to cause.
+/// * **unix** — the reader reaches EOF once the child's last slave fd closes,
+///   so `out_rx` disconnects on its own and the loop needs no timer.
+/// * **Windows** — the ConPTY master is held open by our `PtyHandle`, whose
+///   `HPCON` is released only when that handle drops, which happens when the
+///   pane closes. The channel therefore never disconnects while the pane
+///   lives, and the loop must poll the exit probe instead.
 ///
-/// Runs on both platforms because the answer is platform-specific and the
-/// pty layers differ; a unix-only assertion would leave the ConPTY path
-/// untested, which is the half in doubt.
+/// Asserting the disconnect alone made this test fail on Windows for a true
+/// reason and would have kept failing after the fix, because the fix does not
+/// make the channel disconnect — it gives the loop a second way to notice.
+///
+/// The handle is held for the whole drain on purpose. Dropping it early tears
+/// the pty down and proves nothing about the natural path, which is the only
+/// case that matters here.
 #[test]
-fn a_clean_child_exit_closes_the_output_channel_while_the_handle_lives() {
+fn a_clean_child_exit_becomes_observable_while_the_handle_lives() {
     #[cfg(windows)]
     let _live_pty_guard = lock_live_pty_test();
     #[cfg(unix)]
@@ -582,28 +586,56 @@ fn a_clean_child_exit_closes_the_output_channel_while_the_handle_lives() {
     let pty = PtyHandle::spawn_with_args(command, &args, 80, 24).expect("spawn short-lived shell");
     #[cfg(windows)]
     pty.send_input_nonblocking(b"\x1b[1;1R".to_vec()).expect("answer ConPTY cursor query");
+    let probe = pty.child_exit_probe();
 
-    // Drain exactly as the VT worker does, and keep the handle alive
-    // throughout — `pty` is not dropped until this test returns.
+    // Drain as the VT worker does, checking both signals it can act on, and
+    // keep the handle alive throughout — `pty` outlives this loop.
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    let mut disconnected = false;
+    let mut signal: Option<&'static str> = None;
     let mut bytes = 0usize;
     while std::time::Instant::now() < deadline {
         match pty.out_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(chunk) => bytes += chunk.len(),
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                disconnected = true;
+                signal = Some("channel disconnect");
                 break;
             }
         }
+        if probe.has_exited().expect("probe the child") {
+            signal = Some("exit probe");
+            break;
+        }
     }
 
-    assert!(
-        disconnected,
-        "the output channel stayed open 10s after a clean child exit ({bytes} bytes read) while \
-         the handle was still held — a pane waiting on this disconnect would never learn its \
-         shell had gone"
+    let signal = signal.unwrap_or_else(|| {
+        panic!(
+            "a clean child exit was still unobservable 10s later ({bytes} bytes read) with the \
+             handle held: neither the output channel nor the exit probe reported it, so a pane \
+             waiting on either would never learn its shell had gone"
+        )
+    });
+
+    // Record the status the way production does. `exit_was_clean` reports
+    // what a prior `has_exited` observed — it is an accessor, not a probe — so
+    // reading it straight after a channel disconnect returns `None` for a
+    // shell that exited perfectly well. The VT worker runs this same bounded
+    // poll before classifying, because EOF and the child becoming reapable are
+    // unordered.
+    let status_deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !probe.has_exited().expect("probe the child")
+        && std::time::Instant::now() < status_deadline
+    {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // The status must survive the observation, whichever signal produced it —
+    // the close policy reads it to decide whether the pane may close at all.
+    assert_eq!(
+        probe.exit_was_clean(),
+        Some(true),
+        "the exit was observed via {signal} but its status did not survive; a pane cannot \
+         distinguish `exit` from a crash without it"
     );
     drop(pty);
 }
