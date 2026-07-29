@@ -154,16 +154,53 @@ fn embolden_puts_ink_where_the_coverage_remap_cannot() {
     apply_regular_weight_scale(&mut remapped, 5.0, false);
     assert_eq!(remapped, coverage, "gamma remap cannot create ink");
 
-    // Dilation grows the glyph outward into those same pixels.
+    // Dilation spreads into those same pixels, inside the tile it was given.
+    // The dimensions must not move: a weight control that resizes glyphs makes
+    // every character change size when the user asks for more ink, and glyphs
+    // from different fonts change by different amounts.
     let (grown, w, h, pad) =
         embolden_coverage(&coverage, 3, 3, 1.0, false).expect("radius 1.0 must dilate");
-    assert_eq!((w, h, pad), (5, 5, 1));
+    assert_eq!(
+        (w, h, pad),
+        (3, 3, 0),
+        "the tile keeps its dimensions and its origin, so the glyph gains weight without \
+         gaining size"
+    );
     let center = (h / 2) * w + (w / 2);
     assert_eq!(grown[center], 255);
     assert!(grown[center - 1] > 0, "ink must spread horizontally");
     assert!(grown[center + 1] > 0, "ink must spread horizontally");
     assert!(grown[center - w] > 0, "ink must spread vertically");
     assert!(grown[center + w] > 0, "ink must spread vertically");
+}
+
+/// Growth stops at the ink's own margin rather than being cropped by the tile.
+///
+/// Holding the tile size means ink pushed past the edge is discarded, so an
+/// unbounded radius would flatten a glyph into a filled rectangle — measured at
+/// 96% border saturation on a bullet at weight 3.0. Bounding the radius by the
+/// margin trades peak weight for keeping the glyph's shape.
+#[test]
+fn embolden_declines_when_the_ink_has_no_margin_to_grow_into() {
+    // Every pixel lit: the ink touches all four edges, so there is no room.
+    let full = vec![255u8; 9];
+    assert!(
+        embolden_coverage(&full, 3, 3, 1.0, false).is_none(),
+        "ink already at the tile edge has no margin, and dilating it would only crop"
+    );
+
+    // One pixel of margin all round: growth is allowed, and bounded to it.
+    let inset = vec![0, 0, 0, 0, 255, 0, 0, 0, 0];
+    let (at_margin, w, h, pad) =
+        embolden_coverage(&inset, 3, 3, 1.0, false).expect("a 1px margin permits growth");
+    assert_eq!((w, h, pad), (3, 3, 0), "still no resize, whatever the radius asked for");
+    let (beyond_margin, ..) =
+        embolden_coverage(&inset, 3, 3, 5.0, false).expect("an over-large radius is clamped");
+    assert_eq!(
+        at_margin, beyond_margin,
+        "a radius past the margin must be clamped to it, so asking for 5.0 and asking for \
+         the 1.0 available produce the same glyph"
+    );
 }
 
 #[test]
@@ -195,10 +232,16 @@ fn embolden_declines_work_it_cannot_do_safely() {
 
 #[test]
 fn embolden_recomputes_subpixel_alpha_from_dilated_rgb() {
-    // 2x1 BGRA: one lit pixel, one empty.
-    let coverage = vec![200, 100, 50, 200, 0, 0, 0, 0];
+    // 4x3 BGRA with a single lit pixel at the centre, so the ink has a 1px
+    // margin on every side. A tile whose ink touches an edge has no margin and
+    // is declined outright — covered by
+    // `embolden_declines_when_the_ink_has_no_margin_to_grow_into`.
+    let mut coverage = vec![0u8; 4 * 3 * 4];
+    let (row, col, tile_w, bytes_per_px) = (1usize, 1usize, 4usize, 4usize);
+    let centre = (row * tile_w + col) * bytes_per_px;
+    coverage[centre..centre + 4].copy_from_slice(&[200, 100, 50, 200]);
     let (grown, w, h, _) =
-        embolden_coverage(&coverage, 2, 1, 1.0, true).expect("subpixel dilation");
+        embolden_coverage(&coverage, 4, 3, 1.0, true).expect("subpixel dilation");
     assert_eq!(grown.len(), w * h * 4);
     for px in grown.chunks_exact(4) {
         assert_eq!(px[3], px[0].max(px[1]).max(px[2]), "alpha must envelope RGB");

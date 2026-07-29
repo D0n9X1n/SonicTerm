@@ -24,7 +24,13 @@ const MISSING_FAMILY: &str = "SonicTermNoSuchFamily-A7F3E1";
 /// Well past 1.0, so outline growth is unambiguous if it happens at all.
 const HEAVY: f32 = 3.0;
 
-fn tile_for(family: &str, weight: f32, ch: char) -> Option<(u32, u32)> {
+/// Tile dimensions and total ink for `ch` rendered at `weight`.
+///
+/// Both are needed because the two halves of the contract pull apart: raising
+/// the weight must add ink while leaving the dimensions alone. Checking size
+/// alone cannot tell a working weight control from an inert one, and checking
+/// ink alone cannot tell it from one that resizes the glyph.
+fn tile_for(family: &str, weight: f32, ch: char) -> Option<(u32, u32, u64)> {
     let mut stack = FontStack::try_new_full_with_weight(family, 14.0, 72, weight).ok()?;
     let tile = stack.rasterize(GlyphKey {
         ch,
@@ -35,7 +41,20 @@ fn tile_for(family: &str, weight: f32, ch: char) -> Option<(u32, u32)> {
         // index instead of trusting the slot we passed in.
         glyph_id: 0,
     })?;
-    Some((tile.width, tile.height))
+    let (w, h) = (tile.width as usize, tile.height as usize);
+    let stride = tile.coverage.len() / h.max(1);
+    let bytes_per_px = stride / w.max(1);
+    let mut ink = 0u64;
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * stride + x * bytes_per_px;
+            // Alpha is the last byte of a subpixel pixel and the only byte of
+            // a grayscale one.
+            let a = if bytes_per_px == 4 { tile.coverage[i + 3] } else { tile.coverage[i] };
+            ink += u64::from(a);
+        }
+    }
+    Some((tile.width, tile.height, ink))
 }
 
 /// A glyph drawn from a fallback must not grow when the weight is raised,
@@ -71,7 +90,8 @@ fn a_fallback_at_index_zero_is_not_reweighted() {
     };
 
     assert_eq!(
-        heavy, base,
+        (heavy.0, heavy.1),
+        (base.0, base.1),
         "the configured family could not resolve, so every glyph here comes from a \
          fallback and none may be reweighted — but raising the weight to {HEAVY} grew the \
          tile from {base:?} to {heavy:?}, which is what an index-based gate does when a \
@@ -97,10 +117,21 @@ fn the_configured_family_is_still_reweighted() {
         return;
     };
 
+    // Ink, not size. Emboldening dilates within the tile it was given, so a
+    // heavier glyph occupies the same box — that is the point of the change,
+    // and asserting growth here would assert the defect.
+    assert_eq!(
+        (heavy.0, heavy.1),
+        (base.0, base.1),
+        "the configured family must keep its tile dimensions across a weight change, or a \
+         weight control doubles as a size control"
+    );
     assert!(
-        heavy.0 >= base.0 && heavy.1 >= base.1 && heavy != base,
-        "raising the weight to {HEAVY} on the configured family must grow the glyph \
-         outline, but the tile went from {base:?} to {heavy:?} — a gate that excluded \
-         everything would satisfy the fallback test while leaving the setting inert"
+        heavy.2 > base.2,
+        "raising the weight to {HEAVY} on the configured family must add ink, but the \
+         glyph carried {} at 1.0 and {} at {HEAVY} — a gate that excluded everything \
+         would satisfy the fallback test while leaving the setting inert",
+        base.2,
+        heavy.2
     );
 }

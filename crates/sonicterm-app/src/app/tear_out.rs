@@ -77,6 +77,22 @@ impl App {
         ));
         renderer.set_titlebar_inset(0.0);
         renderer.set_tab_close_override(self.config.tab_close_button_color.as_deref());
+        // Apply the live font settings. A warm renderer captured them when it
+        // was built, and a weight change since then reached only the windows in
+        // `self.windows` — the pool is not among them. Without this, a tab torn
+        // out after a bolder/thinner press adopts a renderer still at the old
+        // weight and renders beside windows at the new one.
+        //
+        // Done at adoption rather than by having the weight change walk the
+        // pool: adoption is the single point every warm renderer passes
+        // through, so any future setting that reaches renderers is covered
+        // here too.
+        renderer.set_font(
+            &self.config.font.family,
+            self.config.font.size,
+            self.config.font.line_height,
+            self.config.font.effective_weight_scale(),
+        );
         let real_sf = window_dpi(window);
         renderer.force_rebuild_for_scale(real_sf);
         let real_inner = window.inner_size();

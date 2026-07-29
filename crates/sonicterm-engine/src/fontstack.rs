@@ -465,6 +465,42 @@ fn morph_axis(
 ///
 /// Returns `None` when there is nothing to do or the padded tile would exceed
 /// the atlas dimension limit.
+/// How far the ink in `coverage` sits from the tile's edges, in pixels.
+///
+/// The smallest of the four margins bounds how far the outline can grow before
+/// it would be cropped. Computed from the alpha channel, which is the envelope
+/// of the subpixel channels and identical to coverage in the grayscale case.
+fn ink_margin_px(coverage: &[u8], width: usize, height: usize, is_subpixel: bool) -> usize {
+    let channels = if is_subpixel { 4 } else { 1 };
+    let alpha_at = |x: usize, y: usize| -> u8 {
+        let i = (y * width + x) * channels;
+        if is_subpixel {
+            coverage[i + 3]
+        } else {
+            coverage[i]
+        }
+    };
+    // Anything above zero is ink: dilation spreads from any non-empty pixel,
+    // so a faint antialiased edge bounds the growth exactly as a solid one
+    // does.
+    let (mut min_x, mut max_x, mut min_y, mut max_y) = (width, 0usize, height, 0usize);
+    for y in 0..height {
+        for x in 0..width {
+            if alpha_at(x, y) > 0 {
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+    if min_x > max_x {
+        // No ink at all; nothing can be cropped.
+        return usize::MAX;
+    }
+    min_x.min(min_y).min(width.saturating_sub(max_x + 1)).min(height.saturating_sub(max_y + 1))
+}
+
 fn embolden_coverage(
     coverage: &[u8],
     width: usize,
@@ -475,13 +511,37 @@ fn embolden_coverage(
     if radius <= 0.0 || width == 0 || height == 0 {
         return None;
     }
+    // Before reading a single pixel: the buffer has to actually hold the
+    // dimensions it claims. A caller passing a short slice with a large
+    // declared width would otherwise index past its end during the margin
+    // scan below — the old code reached its size guard first and never
+    // touched the buffer, so inserting a scan above that guard introduced the
+    // out-of-bounds this restores.
+    let channels = if is_subpixel { 4 } else { 1 };
+    if coverage.len() < width * height * channels {
+        return None;
+    }
+    // Grow no further than the glyph's own margin. The tile keeps its
+    // dimensions, so ink pushed past the edge is discarded rather than
+    // enlarging the glyph — and a bullet dilated past its margin stops being a
+    // bullet and becomes a filled square. Measured across four glyphs, cropping
+    // is invisible through weight 2.0 and disfiguring by 3.0.
+    //
+    // The consequence is that weight saturates for a glyph that already fills
+    // its tile: past its margin, asking for more weight gets no more ink. That
+    // is the better failure. A glyph that stops getting heavier still reads as
+    // itself; one dilated into a rectangle does not.
+    let margin = ink_margin_px(coverage, width, height, is_subpixel);
+    let radius = radius.min(margin as f64);
+    if radius <= 0.0 {
+        return None;
+    }
     let pad = radius.ceil() as usize;
     let new_w = width + pad * 2;
     let new_h = height + pad * 2;
     if new_w > MAX_RASTERIZED_GLYPH_DIMENSION || new_h > MAX_RASTERIZED_GLYPH_DIMENSION {
         return None;
     }
-    let channels = if is_subpixel { 4 } else { 1 };
     let mut padded = vec![0u8; new_w * new_h * channels];
     for y in 0..height {
         let src = y * width * channels;
@@ -524,7 +584,27 @@ fn embolden_coverage(
             px[3] = px[0].max(px[1]).max(px[2]);
         }
     }
-    Some((out, new_w, new_h, pad))
+
+    // Crop back to the original bounds. The padding exists so the dilation has
+    // somewhere to expand into; keeping it would grow the tile, and a tile that
+    // grows makes a *weight* control read as a *size* control. Every glyph then
+    // changes size when the user asks for more ink, and glyphs from different
+    // fonts change by different amounts — which is what makes two adjacent
+    // markers drift apart.
+    //
+    // Ink that lands outside the original bounds is discarded. That is the
+    // right trade: a rasterized glyph carries margin around its outline, so
+    // there is room to thicken into, and where there is not, losing a fraction
+    // of a pixel at the edge is less visible than every glyph resizing.
+    let mut cropped = vec![0u8; width * height * channels];
+    for y in 0..height {
+        let src = ((y + pad) * new_w + pad) * channels;
+        let dst = y * width * channels;
+        cropped[dst..dst + width * channels].copy_from_slice(&out[src..src + width * channels]);
+    }
+    // `pad` is reported as zero: the caller shifts the tile offset by it, and
+    // the tile no longer moved.
+    Some((cropped, width, height, 0))
 }
 
 fn scale_coverage(coverage: u8, scale: f32) -> u8 {
