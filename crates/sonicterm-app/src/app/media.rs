@@ -461,7 +461,15 @@ fn decode_sixel(data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
             }
             b'!' => {
                 i += 1;
-                repeat = parse_sixel_number(data, &mut i).unwrap_or(1).max(1) as usize;
+                // Clamped to the raster width. Every iteration past `MAX_SIDE`
+                // is discarded by the `px >= MAX_SIDE` test below, and once `x`
+                // has advanced that far no later byte writes anything either —
+                // so the clamp changes how long the decode takes, not what it
+                // produces. Without it a twelve-byte payload (`!4294967295m`)
+                // buys about 4.29 billion no-op iterations, which any process
+                // that can write to the terminal could trigger.
+                repeat =
+                    (parse_sixel_number(data, &mut i).unwrap_or(1).max(1) as usize).min(MAX_SIDE);
             }
             b'$' => {
                 x = 0;
