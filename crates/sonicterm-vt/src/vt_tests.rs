@@ -1845,3 +1845,31 @@ fn a_real_sixel_without_intermediates_is_still_captured() {
         .expect("a genuine Sixel payload must still be captured");
     assert_eq!(media.protocol, MediaProtocol::Sixel);
 }
+
+#[test]
+fn a_decscusr_query_reply_is_not_captured_as_a_sixel_image() {
+    let _serialised = serialised_captures();
+    // The defect is not specific to one query. DECSCUSR — `DCS $ q SP q ST`,
+    // the cursor-shape request — carries the same `$` intermediate, and its
+    // reply byte `q` (0x71) is itself inside the Sixel data range: `bits =
+    // 0x71 - 63 = 0b110010` would paint rows 1, 4 and 5 of a six-row column.
+    //
+    // Any `$`-intermediate query whose reply lands in `?`..=`~` produces a
+    // mark, so the fix has to gate on the intermediate rather than enumerate
+    // the queries that happen to be known.
+    let mut parser = Parser::new(Grid::new(80, 24));
+    let events = parser.advance(b"\x1bP$q q\x1b\\");
+
+    let media: Vec<_> = events
+        .into_iter()
+        .filter_map(|event| match event {
+            VtEvent::Media(media) => Some(media),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        media.is_empty(),
+        "DECSCUSR (DCS $ q SP q) is a cursor-shape query, not an image: {media:?}"
+    );
+}

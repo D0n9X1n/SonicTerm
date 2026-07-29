@@ -2181,7 +2181,7 @@ impl Perform for Performer {
         }
     }
 
-    fn hook(&mut self, _params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
+    fn hook(&mut self, _params: &Params, intermediates: &[u8], ignore: bool, action: char) {
         // Entering DCS passthrough — stay out of the fast-path until unhook.
         self.ground = false;
         // `q` ends three unrelated DCS sequences, told apart only by their
@@ -2198,7 +2198,11 @@ impl Perform for Performer {
         // which is pure white. That reaches the screen as a stray white mark
         // at the pane content origin, redrawn every frame from retained
         // media and surviving every repaint path.
-        self.dcs_capture = (action == 'q' && intermediates.is_empty())
+        // `ignore` is set when the sequence exceeded the parser's parameter or
+        // intermediate limits, so what arrives is a truncated view of
+        // something longer. Capturing that as an image would decode bytes the
+        // sender never meant as pixel data.
+        self.dcs_capture = (action == 'q' && intermediates.is_empty() && !ignore)
             .then(|| MediaCapture::new(MediaProtocol::Sixel, String::new()));
     }
     fn put(&mut self, byte: u8) {
