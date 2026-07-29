@@ -16,6 +16,13 @@
 //!   leaving its leaf would satisfy while destroying exactly what the policy
 //!   exists to protect.
 //!
+//! Every test here takes `MEDIA_COUNTER_LOCK` as its first statement. Each
+//! seeded pane creates an inline-media charge, and the per-pane budget is a
+//! process-wide ceiling divided by the live charge count — so a pane alive in
+//! this file shrinks the budget a sibling test is measuring, and that sibling
+//! fails reporting a defect that is not there. Declaring the guard first makes
+//! it drop last, after the `App` and the charges it owns.
+//!
 //! What these tests do *not* cover: they call the handler directly, so the VT
 //! worker's disconnect arm, its bounded classification, and the `UserEvent`
 //! dispatch are outside them. Those are covered by the io-layer probe and by
@@ -47,6 +54,7 @@ fn pane_state_lives(app: &App, pane_id: u64) -> bool {
 
 #[test]
 fn a_clean_exit_closes_the_tab_it_emptied() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (mut app, panes) = app_with_tabs(&["first", "second"]);
     let before = tab_ids(&app);
     assert_eq!(before.len(), 2, "precondition: two tabs seeded");
@@ -73,6 +81,7 @@ fn a_clean_exit_closes_the_tab_it_emptied() {
 /// the user cannot undo.
 #[test]
 fn an_unclean_exit_holds_its_tab_open() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (mut app, panes) = app_with_tabs(&["first", "second"]);
     let before = tab_ids(&app);
 
@@ -97,6 +106,7 @@ fn an_unclean_exit_holds_its_tab_open() {
 /// test above, but for the right reason.
 #[test]
 fn an_unknown_exit_status_holds_its_tab_open() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (mut app, panes) = app_with_tabs(&["first", "second"]);
     let before = tab_ids(&app);
 
@@ -114,6 +124,7 @@ fn an_unknown_exit_status_holds_its_tab_open() {
 /// The tab still has something to show, so it stays; only the dead pane goes.
 #[test]
 fn a_clean_exit_in_a_split_closes_the_pane_and_keeps_the_tab() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (mut app, panes) = app_with_tabs(&["only"]);
     let survivor = panes[0];
 
@@ -148,6 +159,7 @@ fn a_clean_exit_in_a_split_closes_the_pane_and_keeps_the_tab() {
 /// inverse of the policy — would pass every other test in this file.
 #[test]
 fn an_unclean_exit_in_a_split_holds_the_pane_open() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (mut app, panes) = app_with_tabs(&["only"]);
     let survivor = panes[0];
 
@@ -171,6 +183,7 @@ fn an_unclean_exit_in_a_split_holds_the_pane_open() {
 /// A window with no tabs is not a state the app should be able to reach.
 #[test]
 fn the_last_tab_closing_on_a_clean_exit_takes_its_window_with_it() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (mut app, panes) = app_with_tabs(&["only"]);
     assert!(!app.__test_main_hidden(), "precondition: the window starts visible");
     assert!(!app.__test_pending_exit(), "precondition: no exit is pending");
@@ -199,6 +212,7 @@ fn the_last_tab_closing_on_a_clean_exit_takes_its_window_with_it() {
 /// tell.
 #[test]
 fn a_clean_exit_closes_a_child_windows_tab_too() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let child = app.__test_seed_child_window(&["first", "second"]);
     let child_panes = app.__test_child_pane_ids(child).expect("seeded child window");
@@ -230,6 +244,7 @@ fn a_clean_exit_closes_a_child_windows_tab_too() {
 /// The hold-open half of the policy in a child window.
 #[test]
 fn an_unclean_exit_holds_a_child_windows_tab_open() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     let child = app.__test_seed_child_window(&["first", "second"]);
     let child_panes = app.__test_child_pane_ids(child).expect("seeded child window");
@@ -253,6 +268,7 @@ fn an_unclean_exit_holds_a_child_windows_tab_open() {
 /// inside it. The event then names a pane that no longer exists.
 #[test]
 fn an_exit_for_an_already_closed_pane_changes_nothing() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (mut app, panes) = app_with_tabs(&["first", "second"]);
     let before = tab_ids(&app);
     app.close_tab_at(0);
