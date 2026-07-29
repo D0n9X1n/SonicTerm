@@ -167,6 +167,18 @@ pub struct Grid {
     /// can compare the current revision with their last-observed value to
     /// skip work when nothing has changed.
     revision: u64,
+    /// Monotonic sequence for cell-content changes only.
+    ///
+    /// Unlike `revision` and `dirty_rows`, cursor motion and presentation-only
+    /// invalidation do not advance this. Selections record the current value and
+    /// ask which rows changed afterward, matching WezTerm's selection seqno
+    /// policy without clearing on a blinking cursor or theme redraw.
+    content_seq: u64,
+    /// Last content sequence for each visible row. This follows row identity
+    /// during primary-screen scrolling, where `scrollback_len()` advances with
+    /// the text, but screen-position scrolls (alternate screen and DECSTBM
+    /// regions) restamp the affected positions.
+    row_content_seq: VecDeque<u64>,
     /// Rows pushed into scrollback since the budget was last checked.
     ///
     /// The budget check walks every row, so running it per scroll would make
@@ -212,6 +224,8 @@ impl Grid {
             default: Cell::default(),
             alt_screen: None,
             revision: 0,
+            content_seq: 0,
+            row_content_seq: vec![0; rows as usize].into(),
             scrollback_evicted: 0,
             rows_since_budget_check: 0,
             // A freshly created grid is fully dirty: the renderer has
@@ -322,6 +336,90 @@ impl Grid {
         }
     }
 
+    /// Current cell-content sequence. Cursor movement and presentation-only
+    /// invalidation do not advance it.
+    #[inline]
+    pub fn content_seq(&self) -> u64 {
+        self.content_seq
+    }
+
+    /// Visible row indices whose cell content changed after `seq`.
+    ///
+    /// The caller maps these live row indices to absolute rows with
+    /// `scrollback_len() + row`. Row stamps follow text during primary-screen
+    /// scrolling, so an absolute selection continues to follow that text. An
+    /// alternate-screen scroll restamps the changed screen positions instead.
+    pub fn visible_rows_changed_since(&self, seq: u64) -> impl Iterator<Item = usize> + '_ {
+        self.row_content_seq
+            .iter()
+            .enumerate()
+            .filter_map(move |(row, changed_at)| (*changed_at > seq).then_some(row))
+    }
+
+    /// Scrollback-absolute rows in history whose content changed after `seq`.
+    pub fn scrollback_rows_changed_since(&self, seq: u64) -> impl Iterator<Item = u64> + '_ {
+        self.scrollback
+            .iter()
+            .enumerate()
+            .filter_map(move |(row, line)| (line.content_seq() > seq).then_some(row as u64))
+    }
+
+    #[inline]
+    fn next_content_seq(&mut self) -> u64 {
+        self.content_seq = self.content_seq.saturating_add(1);
+        self.content_seq
+    }
+
+    #[inline]
+    fn content_changed_row(&mut self, row: u16) {
+        let seq = self.next_content_seq();
+        if let Some(changed_at) = self.row_content_seq.get_mut(row as usize) {
+            *changed_at = seq;
+        }
+        if let Some(line) = self.visible.get_mut(row as usize) {
+            line.set_content_seq(seq);
+        }
+    }
+
+    #[inline]
+    fn content_changed_range(&mut self, lo: u16, hi_inclusive: u16) {
+        if self.row_content_seq.is_empty() {
+            return;
+        }
+        let lo = lo as usize;
+        let hi = (hi_inclusive as usize).min(self.row_content_seq.len() - 1);
+        if lo > hi {
+            return;
+        }
+        let seq = self.next_content_seq();
+        for row in lo..=hi {
+            self.row_content_seq[row] = seq;
+            self.visible[row].set_content_seq(seq);
+        }
+    }
+
+    #[inline]
+    fn content_changed_all(&mut self) {
+        if self.row_content_seq.is_empty() {
+            return;
+        }
+        let seq = self.next_content_seq();
+        for (changed_at, row) in self.row_content_seq.iter_mut().zip(self.visible.iter_mut()) {
+            *changed_at = seq;
+            row.set_content_seq(seq);
+        }
+    }
+
+    fn content_changed_scrollback_all(&mut self) {
+        if self.scrollback.is_empty() {
+            return;
+        }
+        let seq = self.next_content_seq();
+        for row in &mut self.scrollback {
+            row.set_content_seq(seq);
+        }
+    }
+
     /// Monotonic revision counter, bumped by every mutator. A fresh grid
     /// is at revision 0; the first content change yields a value > 0.
     /// Renderers can compare this against their last-observed revision to
@@ -368,6 +466,11 @@ impl Grid {
             default: self.default.clone(),
             alt_screen: None,
             revision: 0,
+            content_seq: self.content_seq,
+            row_content_seq: std::mem::replace(
+                &mut self.row_content_seq,
+                vec![self.content_seq; rows as usize].into(),
+            ),
             scrollback_evicted: 0,
             rows_since_budget_check: 0,
             dirty_rows: vec![true; rows as usize],
@@ -380,6 +483,7 @@ impl Grid {
         self.enforce_alt_memory_budget();
         self.enforce_retained_capacity_budget();
         self.mark_all();
+        self.content_changed_all();
         self.bump();
     }
 
@@ -391,8 +495,12 @@ impl Grid {
             return;
         };
         let saved = *saved;
+        self.scrollback_evicted = self.scrollback_evicted.saturating_add(saved.scrollback_evicted);
+        let content_seq = self.content_seq.max(saved.content_seq);
         self.visible = saved.visible;
         self.scrollback = saved.scrollback;
+        self.row_content_seq = saved.row_content_seq;
+        self.content_seq = content_seq;
         self.scrollback_requested_limit = saved.scrollback_requested_limit;
         self.scrollback_limit =
             bounded_scrollback_rows(self.cols, self.rows, self.scrollback_requested_limit);
@@ -412,18 +520,24 @@ impl Grid {
             for row in &mut self.scrollback {
                 row.resize(cols as usize, Cell::default());
             }
+            if saved.cols != self.cols {
+                self.content_changed_scrollback_all();
+            }
             if (rows as usize) > self.visible.len() {
                 while self.visible.len() < rows as usize {
                     self.visible.push_back(make_row(cols));
+                    self.row_content_seq.push_back(self.content_seq);
                 }
             } else {
                 self.visible.truncate(rows as usize);
+                self.row_content_seq.truncate(rows as usize);
             }
             self.cursor.row = self.cursor.row.min(rows.saturating_sub(1));
             self.cursor.col = self.cursor.col.min(cols.saturating_sub(1));
         }
         self.enforce_retained_capacity_budget();
         self.mark_all();
+        self.content_changed_all();
         self.bump();
     }
 
@@ -463,6 +577,7 @@ impl Grid {
             for row in &mut self.scrollback {
                 row.resize(cols as usize, Cell::default());
             }
+            self.content_changed_scrollback_all();
         }
         if rows > self.rows {
             for _ in self.rows..rows {
@@ -473,10 +588,12 @@ impl Grid {
         self.rows = rows;
         self.cursor.row = self.cursor.row.min(rows.saturating_sub(1));
         self.cursor.col = self.cursor.col.min(cols.saturating_sub(1));
-        // Re-size the dirty bitset to the new row count, then mark
-        // everything — any geometry change forces a full re-render.
+        // Re-size the row metadata to the new row count, then mark everything:
+        // geometry and cell content both changed for the visible screen.
         self.dirty_rows.resize(rows as usize, true);
+        self.row_content_seq.resize(rows as usize, self.content_seq);
         self.mark_all();
+        self.content_changed_all();
         if let Some(alt) = self.alt_screen.as_mut() {
             alt.resize(cols, rows);
         }
@@ -492,8 +609,14 @@ impl Grid {
     }
 
     /// Mutably borrow a visible row.
+    ///
+    /// Returning `&mut Row` permits arbitrary cell changes, so conservatively
+    /// record a content change before handing the borrow out.
     #[inline]
     pub fn row_mut(&mut self, r: u16) -> &mut Row {
+        self.mark_row(r);
+        self.content_changed_row(r);
+        self.bump();
         &mut self.visible[r as usize]
     }
 
@@ -682,6 +805,7 @@ impl Grid {
             s.push(ch);
             lead.set_extras(Some(s.into_boxed_str()));
             self.mark_row(self.cursor.row);
+            self.content_changed_row(self.cursor.row);
             self.bump();
             return;
         }
@@ -732,6 +856,7 @@ impl Grid {
             }
         }
         self.mark_row(r as u16);
+        self.content_changed_row(r as u16);
         self.bump();
     }
 
@@ -876,18 +1001,27 @@ impl Grid {
     pub fn scroll_up_with(&mut self, n: u16, fill: Cell) {
         self.clear_pending_wrap();
         let cols = self.cols as usize;
+        let n = usize::from(n).min(self.visible.len());
+        if n == 0 {
+            return;
+        }
+        let changed_at = self.next_content_seq();
         for _ in 0..n {
             let Some(mut row) = self.visible.pop_front() else {
                 break;
             };
+            let _old_stamp = self.row_content_seq.pop_front();
             if self.scrollback_limit == 0 {
                 // Scrollback disabled — recycle the row straight back as
-                // the new blank line.
+                // the new blank line. Absolute row numbers stay fixed, so all
+                // visible positions are restamped after the rotation below.
                 for cell in row.iter_mut() {
                     *cell = fill.clone();
                 }
                 row.resize(cols, fill.clone());
+                row.set_content_seq(changed_at);
                 self.visible.push_back(row);
+                self.row_content_seq.push_back(changed_at);
                 continue;
             }
             // try to compress the ejected line into a
@@ -915,10 +1049,24 @@ impl Grid {
                 }
                 recycled.resize(cols, fill.clone());
                 self.scrollback.push_back(row);
+                recycled.set_content_seq(changed_at);
                 self.visible.push_back(recycled);
+                self.row_content_seq.push_back(changed_at);
             } else {
                 self.scrollback.push_back(row);
-                self.visible.push_back(Line::flat_filled(cols, fill.clone()));
+                let mut blank = Line::flat_filled(cols, fill.clone());
+                blank.set_content_seq(changed_at);
+                self.visible.push_back(blank);
+                self.row_content_seq.push_back(changed_at);
+            }
+        }
+        if self.scrollback_limit == 0 {
+            // With no history, absolute rows are fixed screen positions. Every
+            // one received different content after the rotation, not just the
+            // newly blank row at the bottom.
+            for (row_seq, row) in self.row_content_seq.iter_mut().zip(self.visible.iter_mut()) {
+                *row_seq = changed_at;
+                row.set_content_seq(changed_at);
             }
         }
         // Enforce the retained budget on the scroll path, amortized.
@@ -932,7 +1080,7 @@ impl Grid {
         // make a long `cat` quadratic in history depth. One walk per
         // `ROWS_BETWEEN_BUDGET_CHECKS` scrolls bounds the overshoot to that
         // many rows while keeping the scroll path linear.
-        self.rows_since_budget_check = self.rows_since_budget_check.saturating_add(n as usize);
+        self.rows_since_budget_check = self.rows_since_budget_check.saturating_add(n);
         if self.rows_since_budget_check >= ROWS_BETWEEN_BUDGET_CHECKS {
             self.rows_since_budget_check = 0;
             let budget_bytes = MAX_GRID_CELLS as usize * std::mem::size_of::<Cell>();
@@ -969,6 +1117,9 @@ impl Grid {
             return;
         }
         let n = (n as usize).min(rows);
+        if n == 0 {
+            return;
+        }
         for _ in 0..n {
             // Drop bottom row, recycle it as the new blank top row.
             let Some(mut row) = self.visible.pop_back() else {
@@ -980,10 +1131,9 @@ impl Grid {
             row.resize(cols, fill.clone());
             self.visible.push_front(row);
         }
-        // Every row's identity shifted — dirty bitset is keyed on
-        // visible-row index, so mark all (same justification as
-        // `scroll_up`).
+        // Every row's identity shifted at fixed absolute screen positions.
         self.mark_all();
+        self.content_changed_all();
         self.bump();
     }
 
@@ -1060,7 +1210,9 @@ impl Grid {
                 *cell = fill.clone();
             }
         }
-        self.mark_range(top, bottom.min(self.rows.saturating_sub(1)));
+        let bottom = bottom.min(self.rows.saturating_sub(1));
+        self.mark_range(top, bottom);
+        self.content_changed_range(top, bottom);
         self.bump();
     }
 
@@ -1108,7 +1260,9 @@ impl Grid {
                 *cell = fill.clone();
             }
         }
-        self.mark_range(top, bottom.min(self.rows.saturating_sub(1)));
+        let bottom = bottom.min(self.rows.saturating_sub(1));
+        self.mark_range(top, bottom);
+        self.content_changed_range(top, bottom);
         self.bump();
     }
 
@@ -1128,6 +1282,7 @@ impl Grid {
             self.visible[r][c] = fill.clone();
         }
         self.mark_row(r as u16);
+        self.content_changed_row(r as u16);
         self.bump();
     }
 
@@ -1146,6 +1301,7 @@ impl Grid {
             self.visible[r][c] = fill.clone();
         }
         self.mark_row(r as u16);
+        self.content_changed_row(r as u16);
         self.bump();
     }
 
@@ -1162,6 +1318,7 @@ impl Grid {
             *cell = fill.clone();
         }
         self.mark_row(r as u16);
+        self.content_changed_row(r as u16);
         self.bump();
     }
 
@@ -1185,6 +1342,7 @@ impl Grid {
         let lo = self.cursor.row;
         let hi = self.rows.saturating_sub(1);
         self.mark_range(lo, hi);
+        self.content_changed_range(lo, hi);
         self.bump();
     }
 
@@ -1205,6 +1363,7 @@ impl Grid {
         // erase_line_to_start already marked cursor.row; mark 0..cursor.row too.
         let hi = self.cursor.row;
         self.mark_range(0, hi);
+        self.content_changed_range(0, hi);
         self.bump();
     }
 
@@ -1222,6 +1381,7 @@ impl Grid {
             }
         }
         self.mark_all();
+        self.content_changed_all();
         self.bump();
     }
 
@@ -1248,6 +1408,7 @@ impl Grid {
             self.visible[r][c] = fill.clone();
         }
         self.mark_row(row);
+        self.content_changed_row(row);
         self.bump();
     }
 
@@ -1287,6 +1448,7 @@ impl Grid {
         }
         self.repair_wide_row(r, fill);
         self.mark_row(row);
+        self.content_changed_row(row);
         self.bump();
     }
 
@@ -1316,6 +1478,7 @@ impl Grid {
         }
         self.repair_wide_row(r, fill);
         self.mark_row(row);
+        self.content_changed_row(row);
         self.bump();
     }
 
@@ -1471,21 +1634,29 @@ impl Grid {
     }
 
     fn enforce_alt_memory_budget(&mut self) {
-        let Some(primary) = self.alt_screen.as_mut() else { return };
-        let active_cells = u64::from(self.cols) * u64::from(self.rows);
-        let primary_visible_cells = u64::from(primary.cols) * u64::from(primary.rows);
-        let remaining_cells = u64::from(MAX_GRID_CELLS)
-            .saturating_sub(active_cells.saturating_add(primary_visible_cells));
-        let history_rows =
-            usize::try_from(remaining_cells / u64::from(primary.cols.max(1))).unwrap_or(usize::MAX);
-        primary.scrollback_limit =
-            primary.scrollback_limit.min(history_rows).min(primary.scrollback_requested_limit);
-        if primary.scrollback.len() > primary.scrollback_limit {
-            let excess = primary.scrollback.len() - primary.scrollback_limit;
-            primary.scrollback.drain(0..excess);
-            primary.scrollback_evicted = primary.scrollback_evicted.saturating_add(excess as u64);
-        }
-        compact_scrollback_capacity(&mut primary.scrollback);
+        let dropped = {
+            let Some(primary) = self.alt_screen.as_mut() else { return };
+            let active_cells = u64::from(self.cols) * u64::from(self.rows);
+            let primary_visible_cells = u64::from(primary.cols) * u64::from(primary.rows);
+            let remaining_cells = u64::from(MAX_GRID_CELLS)
+                .saturating_sub(active_cells.saturating_add(primary_visible_cells));
+            let history_rows = usize::try_from(remaining_cells / u64::from(primary.cols.max(1)))
+                .unwrap_or(usize::MAX);
+            primary.scrollback_limit =
+                primary.scrollback_limit.min(history_rows).min(primary.scrollback_requested_limit);
+            if primary.scrollback.len() > primary.scrollback_limit {
+                let excess = primary.scrollback.len() - primary.scrollback_limit;
+                primary.scrollback.drain(0..excess);
+                primary.scrollback_evicted =
+                    primary.scrollback_evicted.saturating_add(excess as u64);
+            }
+            compact_scrollback_capacity(&mut primary.scrollback);
+            std::mem::take(&mut primary.scrollback_evicted)
+        };
+        // The saved primary is still part of this grid. Fold its dropped-row
+        // count into the active counter so consumers see one monotonic history
+        // identity for the pane, regardless of which screen is visible.
+        self.scrollback_evicted = self.scrollback_evicted.saturating_add(dropped);
     }
 
     /// Bytes retained by cell storage across primary and alternate screens.
@@ -1552,9 +1723,9 @@ impl Grid {
     /// Bytes held by the row containers themselves, rather than by cells.
     ///
     /// A `VecDeque<Line>` reserves slots for its `Line` headers independently
-    /// of the cell storage each header points at, and `dirty_rows` reserves one
-    /// flag per visible row. Neither is counted by cell accounting, and nothing
-    /// else in the process counts them.
+    /// of the cell storage each header points at. `dirty_rows` reserves one flag
+    /// per visible row, and `row_content_seq` one `u64` change stamp. None is
+    /// counted by cell accounting, and nothing else in the process counts them.
     ///
     /// The saved primary behind an alternate screen is a whole `Box<Grid>`: its
     /// deque spines, its own dirty bitset, its prompt ring, and the `Grid`
@@ -1576,14 +1747,17 @@ impl Grid {
             let rows =
                 screen.visible.capacity().saturating_add(screen.scrollback.capacity()) * line;
             let dirty = screen.dirty_rows.capacity() * std::mem::size_of::<bool>();
+            let content_stamps = screen.row_content_seq.capacity() * std::mem::size_of::<u64>();
             let prompts = screen.prompts.capacity() * prompt;
             // The `Box<Grid>` holding it all.
             rows.saturating_add(dirty)
+                .saturating_add(content_stamps)
                 .saturating_add(prompts)
                 .saturating_add(std::mem::size_of::<Grid>())
         });
         let dirty = self.dirty_rows.capacity() * std::mem::size_of::<bool>();
-        primary.saturating_add(saved).saturating_add(dirty)
+        let content_stamps = self.row_content_seq.capacity() * std::mem::size_of::<u64>();
+        primary.saturating_add(saved).saturating_add(dirty).saturating_add(content_stamps)
     }
 
     /// Rows retained across primary and alternate screens.

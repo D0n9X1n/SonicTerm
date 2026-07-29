@@ -3,6 +3,16 @@
 //! Coordinates are `(col, row)` pairs in visible-grid cell space. The live
 //! terminal cursor keeps moving independently; copy mode owns this separate
 //! cursor plus an optional selection anchor.
+//!
+//! The application stores two shapes of this state, and neither produces a
+//! selected range. Entering copy mode builds a read-only state via
+//! [`CopyModeState::read_only_at`]: the cursor roams for reading,
+//! [`CopyModeState::start_select`] is inert, and
+//! [`CopyModeState::selected_range`] is `None`. Quick select builds a state
+//! that is not read-only but carries a [`QuickSelectState`] and never sets an
+//! anchor, so it has no range either; what a hint keypress copies is the
+//! owned text captured by [`QuickSelectState::from_grid`], which is a
+//! snapshot and does not follow later writes to the grid it was scanned from.
 
 use sonicterm_cfg::url_scan::find_urls;
 use sonicterm_grid::grid::{Cell, CellFlags, Grid, Row};

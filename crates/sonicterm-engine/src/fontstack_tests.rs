@@ -154,16 +154,67 @@ fn embolden_puts_ink_where_the_coverage_remap_cannot() {
     apply_regular_weight_scale(&mut remapped, 5.0, false);
     assert_eq!(remapped, coverage, "gamma remap cannot create ink");
 
-    // Dilation grows the glyph outward into those same pixels.
+    // Dilation spreads into those same pixels, inside the tile it was given.
+    // The dimensions must not move: a weight control that resizes glyphs makes
+    // every character change size when the user asks for more ink, and glyphs
+    // from different fonts change by different amounts.
     let (grown, w, h, pad) =
         embolden_coverage(&coverage, 3, 3, 1.0, false).expect("radius 1.0 must dilate");
-    assert_eq!((w, h, pad), (5, 5, 1));
+    assert_eq!(
+        (w, h, pad),
+        (3, 3, 0),
+        "the tile keeps its dimensions and its origin, so the glyph gains weight without \
+         gaining size"
+    );
     let center = (h / 2) * w + (w / 2);
     assert_eq!(grown[center], 255);
     assert!(grown[center - 1] > 0, "ink must spread horizontally");
     assert!(grown[center + 1] > 0, "ink must spread horizontally");
     assert!(grown[center - w] > 0, "ink must spread vertically");
     assert!(grown[center + w] > 0, "ink must spread vertically");
+}
+
+/// Growth is independent of how much spare bitmap margin a glyph carries.
+///
+/// FreeType returns a tight control box. Flat-sided glyphs commonly touch one
+/// edge while curved glyphs retain antialiasing margin, so using the nearest
+/// spare margin as a bound makes the same weight scale act differently by glyph
+/// shape. Crop-back is allowed at the touched side; in-bounds neighbours still
+/// receive ink and tile geometry stays fixed.
+#[test]
+fn embolden_grows_an_asymmetric_glyph_that_touches_one_edge() {
+    // 5x5 with a vertical stem on the left edge and room to its right.
+    let mut coverage = vec![0u8; 25];
+    for row in 1..4 {
+        coverage[row * 5] = 255;
+    }
+
+    let (grown, w, h, pad) =
+        embolden_coverage(&coverage, 5, 5, 1.0, false).expect("edge-touching stem must grow");
+    assert_eq!((w, h, pad), (5, 5, 0), "weight must not resize or reposition the tile");
+    assert!(
+        grown[2 * 5 + 1] > 0,
+        "the left-edge stem must spread into its in-bounds neighbour even though outward ink is cropped"
+    );
+}
+
+#[test]
+fn embolden_uses_a_literal_one_pixel_shape_independent_ceiling() {
+    const EXPECTED_CEILING_PX: f64 = 1.0;
+    assert_eq!(
+        MAX_EMBOLDEN_RADIUS_PX, EXPECTED_CEILING_PX,
+        "the documented crop-back ceiling is one raster pixel"
+    );
+    let inset = vec![0, 0, 0, 0, 255, 0, 0, 0, 0];
+    let (at_ceiling, w, h, pad) = embolden_coverage(&inset, 3, 3, EXPECTED_CEILING_PX, false)
+        .expect("the one-pixel ceiling permits growth");
+    assert_eq!((w, h, pad), (3, 3, 0));
+    let (above_ceiling, ..) =
+        embolden_coverage(&inset, 3, 3, 5.0, false).expect("large radius is capped");
+    assert_eq!(
+        at_ceiling, above_ceiling,
+        "radii above one pixel must produce the same bounded crop-back result"
+    );
 }
 
 #[test]
@@ -187,18 +238,38 @@ fn embolden_declines_work_it_cannot_do_safely() {
     let coverage = vec![255; 9];
     assert!(embolden_coverage(&coverage, 3, 3, 0.0, false).is_none(), "no radius, no work");
     assert!(embolden_coverage(&[], 0, 0, 1.0, false).is_none(), "empty glyph");
-    // A tile that would exceed the atlas dimension limit is refused rather
-    // than producing a buffer the atlas must reject later.
-    let big = MAX_RASTERIZED_GLYPH_DIMENSION;
-    assert!(embolden_coverage(&[0u8; 4], big, 1, 2.0, false).is_none());
+    assert!(embolden_coverage(&[0u8; 8], 3, 3, 1.0, false).is_none(), "short buffer");
+    assert!(embolden_coverage(&[0u8; 10], 3, 3, 1.0, false).is_none(), "long buffer");
+    assert!(embolden_coverage(&[0u8; 2], usize::MAX, 2, 1.0, false).is_none());
+
+    let over = MAX_RASTERIZED_GLYPH_DIMENSION + 1;
+    assert!(embolden_coverage(&vec![0u8; over], over, 1, 1.0, false).is_none());
+}
+
+#[test]
+fn embolden_accepts_a_legal_final_tile_at_the_dimension_limit() {
+    let width = MAX_RASTERIZED_GLYPH_DIMENSION;
+    let mut coverage = vec![0u8; width];
+    coverage[width / 2] = 255;
+
+    let (grown, w, h, pad) = embolden_coverage(&coverage, width, 1, 1.0, false)
+        .expect("bounded scratch padding must not reject a legal cropped result");
+
+    assert_eq!((w, h, pad), (width, 1, 0));
+    assert_eq!(grown.len(), coverage.len());
+    assert!(grown[width / 2 - 1] > 0);
 }
 
 #[test]
 fn embolden_recomputes_subpixel_alpha_from_dilated_rgb() {
-    // 2x1 BGRA: one lit pixel, one empty.
-    let coverage = vec![200, 100, 50, 200, 0, 0, 0, 0];
+    // 4x3 BGRA with a single lit pixel near the centre. Subpixel channels are
+    // dilated independently and alpha is rebuilt from their envelope.
+    let mut coverage = vec![0u8; 4 * 3 * 4];
+    let (row, col, tile_w, bytes_per_px) = (1usize, 1usize, 4usize, 4usize);
+    let centre = (row * tile_w + col) * bytes_per_px;
+    coverage[centre..centre + 4].copy_from_slice(&[200, 100, 50, 200]);
     let (grown, w, h, _) =
-        embolden_coverage(&coverage, 2, 1, 1.0, true).expect("subpixel dilation");
+        embolden_coverage(&coverage, 4, 3, 1.0, true).expect("subpixel dilation");
     assert_eq!(grown.len(), w * h * 4);
     for px in grown.chunks_exact(4) {
         assert_eq!(px[3], px[0].max(px[1]).max(px[2]), "alpha must envelope RGB");
@@ -281,8 +352,10 @@ fn erosion_declines_work_it_cannot_do_safely() {
     assert!(erode_coverage(&coverage, 3, 3, 0.0, false).is_none(), "no radius, no work");
     assert!(erode_coverage(&[], 0, 0, 1.0, false).is_none(), "empty glyph");
     // Length that disagrees with the declared geometry is refused rather than
-    // indexed past the end.
+    // indexed past the end, in either direction.
     assert!(erode_coverage(&[0u8; 5], 3, 3, 1.0, false).is_none(), "short buffer");
+    assert!(erode_coverage(&[0u8; 10], 3, 3, 1.0, false).is_none(), "long buffer");
+    assert!(erode_coverage(&[0u8; 2], usize::MAX, 2, 1.0, false).is_none());
 }
 
 #[test]
@@ -368,18 +441,17 @@ fn colour_and_bold_glyphs_stay_excluded_even_from_the_configured_family() {
     assert!(!weight_scale_applies(true, true, true), "both exclusions together must still exclude");
 }
 
-/// The gate governs the outline growth, not only the coverage remap.
+/// The gate governs fixed-tile outline growth, not only the coverage remap.
 ///
 /// This is the assertion a helper-level test misses. `rasterize` runs two
-/// mechanisms behind this single gate: the coverage remap, and
-/// `embolden_coverage`, which pads the bitmap and max-filters it — actually
-/// changing `tile_w`/`tile_h` and the tile offset. The second is what makes a
-/// weight change visible as a *size* change.
+/// mechanisms behind this single gate: the coverage remap and
+/// `embolden_coverage`, which max-filters the outline inside padded scratch
+/// space before cropping back to the original tile. The second adds real ink
+/// while width, height, origin, and advance remain fixed.
 ///
 /// A fix that gated only the remap would leave a fallback glyph still being
-/// dilated, so the user would see the same growth they reported. Pinning that
-/// the growth radius is non-zero at a raised weight is what makes this test
-/// fail against that half-fix rather than pass it.
+/// dilated. Pinning that the growth radius is non-zero at a raised weight makes
+/// this test fail against that half-fix rather than pass it.
 #[test]
 fn the_gate_governs_outline_growth_and_not_just_the_coverage_remap() {
     // A weight the user reaches in four keypresses at 0.25 per step.
@@ -401,6 +473,6 @@ fn the_gate_governs_outline_growth_and_not_just_the_coverage_remap() {
     );
     assert!(
         !weight_scale_applies(false, false, false),
-        "a fallback glyph gets neither — including the growth that changes tile size"
+        "a fallback glyph gets neither — including fixed-tile outline growth"
     );
 }

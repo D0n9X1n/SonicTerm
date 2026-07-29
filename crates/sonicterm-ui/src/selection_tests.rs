@@ -272,7 +272,15 @@ fn multiline_copy_omits_whitespace_separated_right_edge_frame_glyphs() {
         grid.goto(row as u16, grid.cols - 1);
         grid.put_char(frame, Color::Default, Color::Default, CellFlags::empty());
     }
-    let selection = Selection { start: (0, 0), end: (2, grid.cols - 1), anchored: true };
+    let selection = Selection {
+        start: (0, 0),
+        end: (2, grid.cols - 1),
+        anchored: true,
+        pane_id: None,
+        content_seq: 0,
+        on_alt_screen: false,
+        scrollback_evicted: 0,
+    };
 
     assert_eq!(selection.as_text(&grid), "[Environment]::Set(\n    \"VALUE\",\n)");
 }
@@ -290,7 +298,15 @@ fn partial_final_row_selection_omits_coherent_right_edge_frame() {
         grid.goto(row as u16, grid.cols - 1);
         grid.put_char(frame, Color::Default, Color::Default, CellFlags::empty());
     }
-    let selection = Selection { start: (0, 0), end: (2, 3), anchored: true };
+    let selection = Selection {
+        start: (0, 0),
+        end: (2, 3),
+        anchored: true,
+        pane_id: None,
+        content_seq: 0,
+        on_alt_screen: false,
+        scrollback_evicted: 0,
+    };
 
     assert_eq!(selection.as_text(&grid), "first\nmiddle\nlast");
 }
@@ -337,7 +353,15 @@ fn as_text_spans_scrollback_into_live_region() {
     // selection must read both the scrollback and the live row.
     let grid = grid_scrolled(&["alpha beta", "gamma delta"], 1);
     assert_eq!(grid.scrollback_len(), 1);
-    let sel = Selection { start: (0, 0), end: (1, 10), anchored: true };
+    let sel = Selection {
+        start: (0, 0),
+        end: (1, 10),
+        anchored: true,
+        pane_id: None,
+        content_seq: 0,
+        on_alt_screen: false,
+        scrollback_evicted: 0,
+    };
     assert_eq!(sel.as_text(&grid), "alpha beta\ngamma delta");
 }
 
@@ -346,6 +370,296 @@ fn as_text_stops_at_unavailable_absolute_row() {
     // end.row past the bottom of the buffer: the walk stops cleanly
     // (no panic) and yields only the rows that exist.
     let grid = grid_rows(&["only line"]);
-    let sel = Selection { start: (0, 0), end: (50, 5), anchored: true };
+    let sel = Selection {
+        start: (0, 0),
+        end: (50, 5),
+        anchored: true,
+        pane_id: None,
+        content_seq: 0,
+        on_alt_screen: false,
+        scrollback_evicted: 0,
+    };
     assert_eq!(sel.as_text(&grid), "only line");
+}
+
+// ---- selection invalidation after alternate-screen content changes ----
+
+const PANE_ID: u64 = 7;
+
+fn alt_grid() -> Grid {
+    let mut grid = Grid::new(12, 12);
+    grid.enter_alt_screen();
+    grid
+}
+
+fn anchored_selection(grid: &Grid, start_row: u64, end_row: u64) -> Selection {
+    Selection {
+        start: (start_row, 2),
+        end: (end_row, 7),
+        anchored: true,
+        pane_id: Some(PANE_ID),
+        content_seq: grid.content_seq(),
+        on_alt_screen: grid.is_alt(),
+        scrollback_evicted: grid.scrollback_evicted(),
+    }
+}
+
+fn write_row(grid: &mut Grid, row: u16, ch: char) {
+    grid.goto(row, 0);
+    grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+}
+
+#[test]
+fn content_change_on_a_selected_alt_row_invalidates_the_selection() {
+    let mut grid = alt_grid();
+    let mut selection = anchored_selection(&grid, 4, 6);
+
+    write_row(&mut grid, 6, 'x');
+
+    assert!(
+        revalidate_selection(&mut selection, PANE_ID, &grid),
+        "selected row 6 changed after selection, so it no longer necessarily contains the chosen text"
+    );
+}
+
+#[test]
+fn unrelated_alt_rows_preserve_the_selection() {
+    let mut grid = alt_grid();
+    let mut selection = anchored_selection(&grid, 4, 6);
+
+    for (row, ch) in [(0, 'a'), (3, 'b'), (7, 'c'), (11, 'd')] {
+        write_row(&mut grid, row, ch);
+    }
+
+    assert!(
+        !revalidate_selection(&mut selection, PANE_ID, &grid),
+        "an unrelated status line or spinner update must not make selection impossible in a live TUI"
+    );
+}
+
+#[test]
+fn content_intersection_normalizes_a_backwards_selection() {
+    let mut grid = alt_grid();
+    let mut selection = anchored_selection(&grid, 9, 3);
+
+    write_row(&mut grid, 5, 'x');
+    assert!(revalidate_selection(&mut selection, PANE_ID, &grid));
+
+    let mut selection = anchored_selection(&grid, 9, 3);
+    write_row(&mut grid, 2, 'y');
+    write_row(&mut grid, 10, 'z');
+    assert!(!revalidate_selection(&mut selection, PANE_ID, &grid));
+}
+
+#[test]
+fn content_changed_before_selection_does_not_invalidate_it() {
+    let mut grid = alt_grid();
+    write_row(&mut grid, 4, 'x');
+    let mut selection = anchored_selection(&grid, 4, 6);
+
+    grid.mark_all_dirty();
+
+    assert!(
+        !revalidate_selection(&mut selection, PANE_ID, &grid),
+        "dirty state older than the selection baseline must not clear a fresh selection"
+    );
+}
+
+#[test]
+fn extending_a_selection_advances_its_content_baseline() {
+    let mut grid = alt_grid();
+    let mut selection = anchored_selection(&grid, 4, 6);
+    write_row(&mut grid, 5, 'x');
+
+    selection.extend_with_content_state(
+        6,
+        8,
+        PANE_ID,
+        grid.content_seq(),
+        grid.is_alt(),
+        grid.scrollback_evicted(),
+    );
+    assert!(!revalidate_selection(&mut selection, PANE_ID, &grid));
+
+    write_row(&mut grid, 5, 'y');
+    assert!(revalidate_selection(&mut selection, PANE_ID, &grid));
+}
+
+#[test]
+fn a_bare_point_anchor_is_not_invalidated_as_a_selection() {
+    let mut grid = alt_grid();
+    let mut selection = Selection::new(4, 2).with_content_state(
+        PANE_ID,
+        grid.content_seq(),
+        grid.is_alt(),
+        grid.scrollback_evicted(),
+    );
+    write_row(&mut grid, 4, 'x');
+
+    assert!(
+        !revalidate_selection(&mut selection, PANE_ID, &grid),
+        "a click point that release handling treats as empty must not become a content selection"
+    );
+}
+
+#[test]
+fn an_anchored_single_cell_is_invalidated_when_its_alt_row_changes() {
+    let mut grid = alt_grid();
+    let mut selection = Selection {
+        start: (4, 2),
+        end: (4, 2),
+        anchored: true,
+        pane_id: Some(PANE_ID),
+        content_seq: grid.content_seq(),
+        on_alt_screen: true,
+        scrollback_evicted: 0,
+    };
+    write_row(&mut grid, 4, 'x');
+
+    assert!(
+        revalidate_selection(&mut selection, PANE_ID, &grid),
+        "a double-clicked one-character word is real even when its endpoints are equal"
+    );
+}
+
+#[test]
+fn changing_the_active_pane_invalidates_the_window_selection() {
+    let grid = alt_grid();
+    let mut selection = anchored_selection(&grid, 4, 6);
+
+    assert!(
+        revalidate_selection(&mut selection, PANE_ID + 1, &grid),
+        "a window selection belongs to the pane it was made in; rendering or copying it against a different active pane would target unrelated content"
+    );
+}
+
+#[test]
+fn changing_panes_invalidates_a_primary_selection_too() {
+    let grid = Grid::new(12, 3);
+    let mut selection = anchored_selection(&grid, 1, 1);
+
+    assert!(
+        revalidate_selection(&mut selection, PANE_ID + 1, &grid),
+        "a window-level selection must never be interpreted against another pane"
+    );
+}
+
+#[test]
+fn a_fully_out_of_view_selection_survives_visible_alt_changes() {
+    let mut grid = alt_grid();
+    let mut selection = anchored_selection(&grid, 40, 50);
+    write_row(&mut grid, 5, 'x');
+
+    assert!(!revalidate_selection(&mut selection, PANE_ID, &grid));
+}
+
+#[test]
+fn primary_scroll_preserves_unchanged_selected_text() {
+    let mut grid = Grid::new(12, 3);
+    write_row(&mut grid, 1, 'x');
+    let mut selection = anchored_selection(&grid, 1, 1);
+
+    grid.scroll_up(1);
+
+    assert!(
+        !revalidate_selection(&mut selection, PANE_ID, &grid),
+        "ordinary scrolling moves the same selected text into history without replacing it"
+    );
+}
+
+#[test]
+fn rewriting_a_selected_primary_row_invalidates_it() {
+    let mut grid = Grid::new(12, 3);
+    let mut selection = anchored_selection(&grid, 1, 1);
+
+    write_row(&mut grid, 1, 'x');
+
+    assert!(revalidate_selection(&mut selection, PANE_ID, &grid));
+}
+
+#[test]
+fn scrollback_eviction_rebases_a_surviving_primary_selection() {
+    let mut grid = Grid::new(4, 2);
+    grid.set_scrollback_limit(1);
+    write_row(&mut grid, 0, 'A');
+    write_row(&mut grid, 1, 'B');
+    grid.scroll_up(1);
+    let mut selection = Selection {
+        start: (1, 0),
+        end: (1, 0),
+        anchored: true,
+        pane_id: Some(PANE_ID),
+        content_seq: grid.content_seq(),
+        on_alt_screen: false,
+        scrollback_evicted: grid.scrollback_evicted(),
+    };
+    write_row(&mut grid, 1, 'C');
+
+    grid.scroll_up(1);
+
+    assert!(!revalidate_selection(&mut selection, PANE_ID, &grid));
+    assert_eq!((selection.start.0, selection.end.0), (0, 0));
+    assert_eq!(selection.as_text(&grid), "B");
+}
+
+#[test]
+fn primary_write_then_scroll_still_invalidates_the_selected_history_row() {
+    let mut grid = Grid::new(4, 2);
+    grid.set_scrollback_limit(4);
+    write_row(&mut grid, 0, 'A');
+    let mut selection = Selection {
+        start: (0, 0),
+        end: (0, 0),
+        anchored: true,
+        pane_id: Some(PANE_ID),
+        content_seq: grid.content_seq(),
+        on_alt_screen: false,
+        scrollback_evicted: grid.scrollback_evicted(),
+    };
+
+    write_row(&mut grid, 0, 'X');
+    grid.scroll_up(1);
+
+    assert!(revalidate_selection(&mut selection, PANE_ID, &grid));
+}
+
+#[test]
+fn scrollback_eviction_clears_a_range_that_lost_selected_rows() {
+    let mut grid = Grid::new(4, 2);
+    grid.set_scrollback_limit(1);
+    write_row(&mut grid, 0, 'A');
+    grid.scroll_up(1);
+    let mut selection = Selection {
+        start: (0, 0),
+        end: (1, 0),
+        anchored: true,
+        pane_id: Some(PANE_ID),
+        content_seq: grid.content_seq(),
+        on_alt_screen: false,
+        scrollback_evicted: grid.scrollback_evicted(),
+    };
+
+    grid.scroll_up(1);
+
+    assert!(revalidate_selection(&mut selection, PANE_ID, &grid));
+}
+
+#[test]
+fn entering_alt_screen_invalidates_a_primary_selection() {
+    let mut grid = Grid::new(12, 3);
+    let mut selection = anchored_selection(&grid, 1, 1);
+
+    grid.enter_alt_screen();
+
+    assert!(revalidate_selection(&mut selection, PANE_ID, &grid));
+}
+
+#[test]
+fn leaving_alt_screen_invalidates_an_alt_selection() {
+    let mut grid = alt_grid();
+    let mut selection = anchored_selection(&grid, 1, 1);
+
+    grid.leave_alt_screen();
+
+    assert!(revalidate_selection(&mut selection, PANE_ID, &grid));
 }

@@ -94,31 +94,37 @@ pub fn with_app_icon(attrs: WindowAttributes) -> WindowAttributes {
 }
 
 #[cfg(target_os = "windows")]
-use std::sync::atomic::AtomicIsize;
+static WINDOW_BG_BRUSHES: std::sync::OnceLock<std::sync::Mutex<HashMap<u32, isize>>> =
+    std::sync::OnceLock::new();
+
 #[cfg(target_os = "windows")]
-static WINDOW_BG_BRUSH: AtomicIsize = AtomicIsize::new(0);
+fn native_background_brush(rgb: (u8, u8, u8)) -> Option<isize> {
+    use windows::Win32::Foundation::COLORREF;
+    use windows::Win32::Graphics::Gdi::CreateSolidBrush;
+
+    // COLORREF is 0x00BBGGRR. Brushes stay alive for the process lifetime:
+    // window classes can retain their handles after this call returns, so
+    // deleting a superseded theme brush would leave those classes dangling.
+    let (r, g, b) = rgb;
+    let color = u32::from(r) | (u32::from(g) << 8) | (u32::from(b) << 16);
+    let brushes = WINDOW_BG_BRUSHES.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut brushes = brushes.lock().ok()?;
+    if let Some(brush) = brushes.get(&color) {
+        return Some(*brush);
+    }
+    let brush = unsafe { CreateSolidBrush(COLORREF(color)) }.0 as isize;
+    if brush == 0 {
+        return None;
+    }
+    brushes.insert(color, brush);
+    Some(brush)
+}
 
 #[cfg(target_os = "windows")]
 #[doc(hidden)]
 pub fn install_native_window_background(window: &Window, bg_hex: &str) {
-    let Some((r, g, b)) = parse_hex_rgb(bg_hex) else { return };
-    let brush = WINDOW_BG_BRUSH.load(Ordering::Relaxed);
-    let brush = if brush != 0 {
-        brush
-    } else {
-        use windows::Win32::Foundation::COLORREF;
-        use windows::Win32::Graphics::Gdi::CreateSolidBrush;
-        // COLORREF is 0x00BBGGRR.
-        let color = COLORREF(u32::from(r) | (u32::from(g) << 8) | (u32::from(b) << 16));
-        let created = unsafe { CreateSolidBrush(color) }.0 as isize;
-        if created == 0 {
-            return;
-        }
-        match WINDOW_BG_BRUSH.compare_exchange(0, created, Ordering::Relaxed, Ordering::Relaxed) {
-            Ok(_) => created,
-            Err(existing) => existing,
-        }
-    };
+    let Some(rgb) = parse_hex_rgb(bg_hex) else { return };
+    let Some(brush) = native_background_brush(rgb) else { return };
     let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else { return };
     let raw_window_handle::RawWindowHandle::Win32(h) = handle.as_raw() else { return };
     let hwnd = windows::Win32::Foundation::HWND(h.hwnd.get() as *mut _);
@@ -846,38 +852,53 @@ impl WindowState {
     /// (CLAUDE.md §4). Returns `None` when the pane is missing or the parser
     /// is busy; the child-window mouse path then treats the viewport row as
     /// absolute (correct while unscrolled).
-    pub fn viewport_row_to_abs(&self, viewport_row: u16) -> Option<u64> {
-        let pane = self
-            .tab_states
-            .get(self.tabs.active_index())
-            .map(|st| st.active_pane)
-            .and_then(|id| self.panes.get(&id))?;
+    pub fn viewport_row_selection_state(
+        &self,
+        viewport_row: u16,
+    ) -> Option<(u64, u64, u64, bool, u64)> {
+        let pane_id = self.tab_states.get(self.tabs.active_index()).map(|st| st.active_pane)?;
+        let pane = self.panes.get(&pane_id)?;
         let guard = pane.parser.try_lock()?;
-        let view_top =
-            GpuRenderer::resolved_view_top_abs_legacy(guard.grid(), pane.viewport_top_abs);
+        let grid = guard.grid();
+        let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
+        let state = (
+            view_top + viewport_row as u64,
+            pane_id,
+            grid.content_seq(),
+            grid.is_alt(),
+            grid.scrollback_evicted(),
+        );
         drop(guard);
-        Some(view_top + viewport_row as u64)
+        Some(state)
+    }
+
+    pub fn viewport_row_to_abs(&self, viewport_row: u16) -> Option<u64> {
+        self.viewport_row_selection_state(viewport_row).map(|state| state.0)
     }
 
     pub fn multi_click_selection(&self, count: u8, abs_row: u64, col: u16) -> Selection {
-        if count < 2 {
+        let Some(pane_id) = self.tab_states.get(self.tabs.active_index()).map(|st| st.active_pane)
+        else {
             return Selection::new(abs_row, col);
-        }
-        let pane = self
-            .tab_states
-            .get(self.tabs.active_index())
-            .map(|st| st.active_pane)
-            .and_then(|id| self.panes.get(&id));
-        let Some(pane) = pane else {
+        };
+        let Some(pane) = self.panes.get(&pane_id) else {
             return Selection::new(abs_row, col);
         };
         let Some(guard) = pane.parser.try_lock() else {
             return Selection::new(abs_row, col);
         };
+        let grid = guard.grid();
         let sel = match count {
-            2 => Selection::word_at(guard.grid(), abs_row, col),
-            _ => Selection::line_at(guard.grid(), abs_row),
-        };
+            2 => Selection::word_at(grid, abs_row, col),
+            3 => Selection::line_at(grid, abs_row),
+            _ => Selection::new(abs_row, col),
+        }
+        .with_content_state(
+            pane_id,
+            grid.content_seq(),
+            grid.is_alt(),
+            grid.scrollback_evicted(),
+        );
         drop(guard);
         sel
     }
@@ -895,16 +916,18 @@ impl WindowState {
         cursor_viewport_row: u16,
         col: u16,
     ) -> Option<Selection> {
-        let pane = self
-            .tab_states
-            .get(self.tabs.active_index())
-            .map(|st| st.active_pane)
-            .and_then(|id| self.panes.get(&id))?;
+        let pane_id = self.tab_states.get(self.tabs.active_index()).map(|st| st.active_pane)?;
+        let pane = self.panes.get(&pane_id)?;
         let guard = pane.parser.try_lock()?;
-        let view_top =
-            GpuRenderer::resolved_view_top_abs_legacy(guard.grid(), pane.viewport_top_abs);
+        let grid = guard.grid();
+        let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
         let cursor_abs = view_top + cursor_viewport_row as u64;
-        let sel = Selection::word_drag(guard.grid(), anchor, (cursor_abs, col));
+        let sel = Selection::word_drag(grid, anchor, (cursor_abs, col)).with_content_state(
+            pane_id,
+            grid.content_seq(),
+            grid.is_alt(),
+            grid.scrollback_evicted(),
+        );
         drop(guard);
         Some(sel)
     }
@@ -919,16 +942,18 @@ impl WindowState {
         anchor_row: u64,
         cursor_viewport_row: u16,
     ) -> Option<Selection> {
-        let pane = self
-            .tab_states
-            .get(self.tabs.active_index())
-            .map(|st| st.active_pane)
-            .and_then(|id| self.panes.get(&id))?;
+        let pane_id = self.tab_states.get(self.tabs.active_index()).map(|st| st.active_pane)?;
+        let pane = self.panes.get(&pane_id)?;
         let guard = pane.parser.try_lock()?;
-        let view_top =
-            GpuRenderer::resolved_view_top_abs_legacy(guard.grid(), pane.viewport_top_abs);
+        let grid = guard.grid();
+        let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
         let cursor_abs = view_top + cursor_viewport_row as u64;
-        let sel = Selection::line_drag(guard.grid(), anchor_row, cursor_abs);
+        let sel = Selection::line_drag(grid, anchor_row, cursor_abs).with_content_state(
+            pane_id,
+            grid.content_seq(),
+            grid.is_alt(),
+            grid.scrollback_evicted(),
+        );
         drop(guard);
         Some(sel)
     }
@@ -1234,6 +1259,28 @@ pub fn mark_all_panes_dirty(panes: &HashMap<u64, PaneState>) {
     for pane in panes.values() {
         pane.parser.lock().grid_mut().mark_all_dirty();
     }
+}
+
+/// Clear the authoritative window selection when its alternate-screen content
+/// is no longer the content the user selected.
+///
+/// Callers already hold the active pane's parser guard during frame assembly;
+/// accepting `&Grid` avoids re-locking that parser and the AB-BA deadlock such a
+/// re-lock would cause. Search and copy-mode overlays own separate state and are
+/// deliberately untouched.
+#[doc(hidden)]
+pub fn invalidate_selection_for_content(
+    selection: &mut Option<Selection>,
+    pane_id: u64,
+    grid: &Grid,
+) -> bool {
+    let should_clear = selection.as_mut().is_some_and(|selection| {
+        sonicterm_ui::selection::revalidate_selection(selection, pane_id, grid)
+    });
+    if should_clear {
+        *selection = None;
+    }
+    should_clear
 }
 
 /// Compute the wezterm-style pretty tab title for the active pane and
@@ -3712,11 +3759,37 @@ impl App {
         self.paste_file_paths_for_kind(kind, paths);
     }
 
+    /// Bind an unbound headless selection to a synthetic window's active pane,
+    /// matching production mouse selection creation.
+    fn bind_test_selection(
+        window: &WindowState,
+        selection: Option<Selection>,
+    ) -> Option<Selection> {
+        let mut selection = selection?;
+        if selection.pane_id.is_some() {
+            return Some(selection);
+        }
+        let pane_id = window.tab_states.get(window.tabs.active_index())?.active_pane;
+        let pane = window.panes.get(&pane_id)?;
+        let parser = pane.parser.lock();
+        let grid = parser.grid();
+        selection = selection.with_content_state(
+            pane_id,
+            grid.content_seq(),
+            grid.is_alt(),
+            grid.scrollback_evicted(),
+        );
+        Some(selection)
+    }
+
     /// Test-only: set the synthetic main window's selection.
     #[doc(hidden)]
     pub fn __test_set_main_selection(&mut self, selection: Option<Selection>) -> bool {
-        let Some(ws) = self.main_mut() else { return false };
-        ws.selection = selection;
+        let Some(id) = self.main_window_id else { return false };
+        let Some(window) = self.windows.get(&id) else { return false };
+        let selection = Self::bind_test_selection(window, selection);
+        let Some(window) = self.windows.get_mut(&id) else { return false };
+        window.selection = selection;
         true
     }
 
@@ -3727,8 +3800,10 @@ impl App {
         id: WindowId,
         selection: Option<Selection>,
     ) -> bool {
-        let Some(child) = self.windows.get_mut(&id) else { return false };
-        child.selection = selection;
+        let Some(window) = self.windows.get(&id) else { return false };
+        let selection = Self::bind_test_selection(window, selection);
+        let Some(window) = self.windows.get_mut(&id) else { return false };
+        window.selection = selection;
         true
     }
 
@@ -5574,6 +5649,10 @@ mod tear_out_timing_tests;
 #[cfg(test)]
 #[path = "software_render_tests.rs"]
 mod software_render_tests;
+
+#[cfg(test)]
+#[path = "selection_invalidation_tests.rs"]
+mod selection_invalidation_tests;
 
 #[cfg(test)]
 #[path = "pty_input_tests.rs"]

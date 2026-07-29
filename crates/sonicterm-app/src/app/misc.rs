@@ -30,6 +30,7 @@ use winit::{
 };
 
 use super::{
+    invalidate_selection_for_content,
     key_encoding::{encode_key, encode_logical, key_event_to_string, key_name},
     mark_all_panes_dirty, next_pane_id, pick_prompt_target, resize_all_panes, shell_quote_posix,
     window_dpi, with_integrated_titlebar, wrap_paste, App, FrontmostKind, PaneState, TabState,
@@ -104,13 +105,24 @@ impl App {
     /// before returning. Returns `None` when there is no active pane or the
     /// parser is busy; callers fall back to treating the viewport row as
     /// absolute (correct while unscrolled).
-    pub(super) fn viewport_row_to_abs(&self, viewport_row: u16) -> Option<u64> {
+    pub(super) fn viewport_row_selection_state(
+        &self,
+        viewport_row: u16,
+    ) -> Option<(u64, u64, u64, bool, u64)> {
+        let pane_id = self.active_pane_id()?;
         let pane = self.active_pane()?;
         let guard = pane.parser.try_lock()?;
-        let view_top =
-            GpuRenderer::resolved_view_top_abs_legacy(guard.grid(), pane.viewport_top_abs);
+        let grid = guard.grid();
+        let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
+        let state = (
+            view_top + viewport_row as u64,
+            pane_id,
+            grid.content_seq(),
+            grid.is_alt(),
+            grid.scrollback_evicted(),
+        );
         drop(guard);
-        Some(view_top + viewport_row as u64)
+        Some(state)
     }
 
     /// Compute a word selection (double-click) at scrollback-ABSOLUTE
@@ -120,13 +132,22 @@ impl App {
     /// across `selection_set`/redraw (CLAUDE.md §4). Falls back to a point
     /// selection when the parser is busy.
     pub(super) fn word_selection_at(&self, abs_row: u64, col: u16) -> Selection {
-        let Some(pane) = self.active_pane() else {
+        let Some(pane_id) = self.active_pane_id() else {
+            return Selection::new(abs_row, col);
+        };
+        let Some(pane) = self.pane_by_id(pane_id) else {
             return Selection::new(abs_row, col);
         };
         let Some(guard) = pane.parser.try_lock() else {
             return Selection::new(abs_row, col);
         };
-        let sel = Selection::word_at(guard.grid(), abs_row, col);
+        let grid = guard.grid();
+        let sel = Selection::word_at(grid, abs_row, col).with_content_state(
+            pane_id,
+            grid.content_seq(),
+            grid.is_alt(),
+            grid.scrollback_evicted(),
+        );
         drop(guard);
         sel
     }
@@ -135,13 +156,22 @@ impl App {
     /// `abs_row` from the focused pane's grid. Same lock discipline as
     /// [`Self::word_selection_at`].
     pub(super) fn line_selection_at(&self, abs_row: u64) -> Selection {
-        let Some(pane) = self.active_pane() else {
+        let Some(pane_id) = self.active_pane_id() else {
+            return Selection::new(abs_row, 0);
+        };
+        let Some(pane) = self.pane_by_id(pane_id) else {
             return Selection::new(abs_row, 0);
         };
         let Some(guard) = pane.parser.try_lock() else {
             return Selection::new(abs_row, 0);
         };
-        let sel = Selection::line_at(guard.grid(), abs_row);
+        let grid = guard.grid();
+        let sel = Selection::line_at(grid, abs_row).with_content_state(
+            pane_id,
+            grid.content_seq(),
+            grid.is_alt(),
+            grid.scrollback_evicted(),
+        );
         drop(guard);
         sel
     }
@@ -162,12 +192,18 @@ impl App {
         cursor_viewport_row: u16,
         col: u16,
     ) -> Option<Selection> {
-        let pane = self.active_pane()?;
+        let pane_id = self.active_pane_id()?;
+        let pane = self.pane_by_id(pane_id)?;
         let guard = pane.parser.try_lock()?;
-        let view_top =
-            GpuRenderer::resolved_view_top_abs_legacy(guard.grid(), pane.viewport_top_abs);
+        let grid = guard.grid();
+        let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
         let cursor_abs = view_top + cursor_viewport_row as u64;
-        let sel = Selection::word_drag(guard.grid(), anchor, (cursor_abs, col));
+        let sel = Selection::word_drag(grid, anchor, (cursor_abs, col)).with_content_state(
+            pane_id,
+            grid.content_seq(),
+            grid.is_alt(),
+            grid.scrollback_evicted(),
+        );
         drop(guard);
         Some(sel)
     }
@@ -182,12 +218,18 @@ impl App {
         anchor_row: u64,
         cursor_viewport_row: u16,
     ) -> Option<Selection> {
-        let pane = self.active_pane()?;
+        let pane_id = self.active_pane_id()?;
+        let pane = self.pane_by_id(pane_id)?;
         let guard = pane.parser.try_lock()?;
-        let view_top =
-            GpuRenderer::resolved_view_top_abs_legacy(guard.grid(), pane.viewport_top_abs);
+        let grid = guard.grid();
+        let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
         let cursor_abs = view_top + cursor_viewport_row as u64;
-        let sel = Selection::line_drag(guard.grid(), anchor_row, cursor_abs);
+        let sel = Selection::line_drag(grid, anchor_row, cursor_abs).with_content_state(
+            pane_id,
+            grid.content_seq(),
+            grid.is_alt(),
+            grid.scrollback_evicted(),
+        );
         drop(guard);
         Some(sel)
     }
@@ -508,28 +550,38 @@ impl App {
     }
 
     pub(super) fn copy_selection_for_kind(&mut self, kind: FrontmostKind) {
-        let (sel, pane_id) = match kind {
-            FrontmostKind::Child(id) => {
-                let Some(child) = self.windows.get(&id) else { return };
-                let Some(sel) = child.selection else { return };
-                let Some(pane_id) =
-                    child.tab_states.get(child.tabs.active_index()).map(|state| state.active_pane)
-                else {
-                    return;
-                };
-                (sel, pane_id)
-            }
+        let window_id = match kind {
+            FrontmostKind::Child(id) => id,
             FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {
-                let Some(sel) = self.main().and_then(|ws| ws.selection) else { return };
-                let Some(pane_id) = self.main_active_pane_id() else { return };
-                (sel, pane_id)
+                let Some(id) = self.main_window_id else { return };
+                id
             }
         };
-        if sel.is_empty() {
-            return;
-        }
-        let Some(pane) = self.pane_by_id(pane_id) else { return };
-        let text = sel.as_text(pane.parser.lock().grid());
+        let text = {
+            let Some(window) = self.windows.get_mut(&window_id) else { return };
+            let Some(pane_id) =
+                window.tab_states.get(window.tabs.active_index()).map(|state| state.active_pane)
+            else {
+                return;
+            };
+            let Some(pane) = window.panes.get(&pane_id) else { return };
+            let parser = pane.parser.lock();
+            let grid = parser.grid();
+
+            // PTY output can arrive after the user selects text but before the
+            // queued redraw gets a turn. Validate here too so Cmd+C cannot copy
+            // replacement content during that window. This mutates only the
+            // normal window selection; copy-mode and search overlays are
+            // independent state.
+            if invalidate_selection_for_content(&mut window.selection, pane_id, grid) {
+                return;
+            }
+            let Some(selection) = window.selection else { return };
+            if selection.is_empty() {
+                return;
+            }
+            selection.as_text(grid)
+        };
         self.set_clipboard_text(text);
     }
 
@@ -780,7 +832,6 @@ impl App {
             }
         };
         window.set_ime_allowed(true);
-        super::install_native_window_background(&window, self.theme.colors.background.0.as_str());
 
         let mut renderer = match GpuRenderer::new(
             window.clone(),
@@ -813,23 +864,12 @@ impl App {
                 return;
             }
         };
-        // P4 follow-up wire (NewWindow path).
-        if let Some(proxy) = self.event_loop_proxy.clone() {
-            super::build_async_fallback_loader_for_proxy(proxy);
-            renderer.set_async_loader(());
-        }
-        renderer.set_cursor_shape(self.config.terminal.cursor_shape);
-        renderer.set_cursor_blink(self.config.terminal.cursor_blink);
-        renderer.set_software_render_degrade(crate::app::should_degrade_for_software_render(
-            self.config.appearance.software_render_mode,
-            renderer.is_software_rendering(),
-        ));
-        renderer.set_titlebar_inset(0.0);
-        renderer.set_tab_close_override(self.config.tab_close_button_color.as_deref());
-        let real_sf = window_dpi(&window);
-        renderer.force_rebuild_for_scale(real_sf);
-        let real_inner = window.inner_size();
-        if !renderer.try_resize(real_inner.width.max(1), real_inner.height.max(1)) {
+        if !self.configure_child_renderer(
+            &mut renderer,
+            &window,
+            super::tear_out::ChildRendererOrigin::Fresh,
+        ) {
+            let real_inner = window.inner_size();
             tracing::error!(
                 width = real_inner.width,
                 height = real_inner.height,

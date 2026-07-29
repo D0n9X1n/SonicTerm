@@ -130,6 +130,16 @@ fn name_matching_accepts_family_path_full_postscript_and_alias_but_is_case_sensi
 }
 
 #[test]
+fn fontconfig_match_origin_preserves_the_requested_alias() {
+    let mut parsed =
+        font("Resolved Family", FontWeight::REGULAR, FontStretch::Normal, FontStyle::Normal);
+    parsed.handle.origin = FontOrigin::FontConfigMatch("monospace".to_string());
+
+    assert!(parsed.matches_name(&FontAttributes::new("monospace")));
+    assert!(!parsed.matches_name(&FontAttributes::new("sans-serif")));
+}
+
+#[test]
 fn matching_prefers_exact_stretch_then_css_directional_nearest_stretch() {
     let fonts = [
         font("Condensed", FontWeight::REGULAR, FontStretch::Condensed, FontStyle::Normal),
