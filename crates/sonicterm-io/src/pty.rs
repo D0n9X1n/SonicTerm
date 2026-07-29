@@ -223,17 +223,47 @@ impl PtyChildExitProbe {
             let Some(pid) = child.child.process_id() else {
                 return Ok(false);
             };
-            if !unix_child_exit_pending(pid)? {
+            let observed = unix_child_exit_pending(pid)?;
+            if !observed.pending {
                 return Ok(false);
             }
+            // Recorded before signalling the group: teardown reaps the child,
+            // after which the status is unrecoverable.
+            child.exit_was_clean = observed.was_clean;
             signal_process_group_for_platform(&mut child)?;
             Ok(true)
         }
     }
+
+    /// Whether the child's own exit was clean, once it has exited.
+    ///
+    /// `None` means unknown rather than bad: the child is still running, or
+    /// it was reaped by a path that never saw a status. A caller deciding
+    /// whether to tear down a pane must not read `None` as a crash —
+    /// discarding a user's scrollback on our own uncertainty is a worse
+    /// failure than leaving the pane open.
+    ///
+    /// Only meaningful after [`Self::has_exited`] returns `true`; that call
+    /// is what records the status.
+    pub fn exit_was_clean(&self) -> Option<bool> {
+        self.child.lock().exit_was_clean
+    }
 }
 
 #[cfg(unix)]
-fn unix_child_exit_pending(pid: u32) -> std::io::Result<bool> {
+/// Whether the child has exited, and if so whether it exited cleanly.
+///
+/// `waitid` already fills `siginfo_t` with the reason and status, so the
+/// cleanliness comes free with the liveness check — reading only `si_pid`
+/// would throw away the answer the kernel just handed us.
+#[cfg(unix)]
+struct UnixExitObservation {
+    pending: bool,
+    was_clean: Option<bool>,
+}
+
+#[cfg(unix)]
+fn unix_child_exit_pending(pid: u32) -> std::io::Result<UnixExitObservation> {
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
     // SAFETY: info points to writable siginfo storage. WNOWAIT observes the
     // exited leader without reaping it, keeping its pid/pgid reserved until
@@ -249,27 +279,59 @@ fn unix_child_exit_pending(pid: u32) -> std::io::Result<bool> {
     if result == -1 {
         return Err(std::io::Error::last_os_error());
     }
-    Ok(unsafe { info.si_pid() } != 0)
+    let pending = unsafe { info.si_pid() } != 0;
+    if !pending {
+        return Ok(UnixExitObservation { pending: false, was_clean: None });
+    }
+    // `si_code` distinguishes a normal exit from a signal death; `si_status`
+    // carries the exit code only in the former case. A child killed by a
+    // signal is not a clean exit, and neither is a nonzero code.
+    let (code, status) = (info.si_code, unsafe { info.si_status() });
+    let was_clean = match code {
+        libc::CLD_EXITED => Some(status == 0),
+        // Killed, dumped, trapped, stopped: not a clean exit, and we know it.
+        _ => Some(false),
+    };
+    Ok(UnixExitObservation { pending: true, was_clean })
 }
 
 struct ChildState {
     child: Box<dyn Child + Send + Sync>,
     exited: bool,
+    /// Whether the child's own exit was clean, once it has exited.
+    ///
+    /// `None` while it is still running, and also when the exit was observed
+    /// by a path that never saw a status — a kill we issued, or a platform
+    /// probe that only reports liveness. A caller deciding whether to close a
+    /// pane must treat `None` as "unknown", not as "crashed": tearing down a
+    /// window because we could not read a status would lose the user's
+    /// scrollback on our own uncertainty.
+    exit_was_clean: Option<bool>,
     unix_session_id: Option<u32>,
     process_group_signalled: bool,
 }
 
 impl ChildState {
     fn new(child: Box<dyn Child + Send + Sync>, unix_session_id: Option<u32>) -> Self {
-        Self { child, exited: false, unix_session_id, process_group_signalled: false }
+        Self {
+            child,
+            exited: false,
+            exit_was_clean: None,
+            unix_session_id,
+            process_group_signalled: false,
+        }
     }
 
     fn has_exited(&mut self) -> std::io::Result<bool> {
         if self.exited {
             return Ok(true);
         }
-        if self.child.try_wait()?.is_some() {
+        if let Some(status) = self.child.try_wait()? {
             self.exited = true;
+            // Recorded here because this is the only place the status is
+            // available: `try_wait` reaps the child, so a later call returns
+            // `None` and the status is gone for good.
+            self.exit_was_clean = Some(status.success());
         }
         Ok(self.exited)
     }

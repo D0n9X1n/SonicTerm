@@ -501,6 +501,58 @@ fn child_exit_probe_observes_short_lived_process() {
     );
 }
 
+/// A clean exit and a failing one must be distinguishable.
+///
+/// The probe reporting only liveness is what left a pane unable to decide
+/// whether to close: `exit` and a crash look identical through a bool, and a
+/// close policy built on that would discard a crashed shell's output before
+/// the user could read it.
+///
+/// Asserted as a pair. Checking only the clean case would pass against an
+/// accessor hardcoded to `Some(true)`, which is exactly the failure that
+/// would destroy scrollback.
+#[test]
+fn the_exit_probe_distinguishes_a_clean_exit_from_a_failing_one() {
+    #[cfg(windows)]
+    let _live_pty_guard = lock_live_pty_test();
+
+    // `spawn` takes a program path, not a command line — passing
+    // "cmd.exe /c exit 0" makes Windows look for a binary with that literal
+    // name. Arguments go through `spawn_with_args`.
+    fn observe(command: &str, args: &[String]) -> Option<bool> {
+        let pty =
+            PtyHandle::spawn_with_args(command, args, 80, 24).expect("spawn short-lived process");
+        let probe = pty.child_exit_probe();
+        #[cfg(windows)]
+        pty.send_input_nonblocking(b"\x1b[1;1R".to_vec()).expect("answer ConPTY cursor query");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !probe.has_exited().expect("probe child") && std::time::Instant::now() < deadline {
+            while pty.out_rx.try_recv().is_ok() {}
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(probe.has_exited().expect("final probe"), "{command} did not exit in time");
+        probe.exit_was_clean()
+    }
+
+    #[cfg(unix)]
+    let (clean, clean_args, failing, failing_args) =
+        ("/usr/bin/true", Vec::<String>::new(), "/usr/bin/false", Vec::<String>::new());
+    #[cfg(windows)]
+    let (clean, clean_args, failing, failing_args) = (
+        "cmd.exe",
+        vec!["/c".to_string(), "exit".to_string(), "0".to_string()],
+        "cmd.exe",
+        vec!["/c".to_string(), "exit".to_string(), "1".to_string()],
+    );
+
+    assert_eq!(observe(clean, &clean_args), Some(true), "a zero exit must read as clean");
+    assert_eq!(
+        observe(failing, &failing_args),
+        Some(false),
+        "a nonzero exit must read as not clean"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn observed_shell_exit_still_kills_background_process_group() {
