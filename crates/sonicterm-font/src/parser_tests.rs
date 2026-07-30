@@ -48,6 +48,7 @@ fn font(family: &str, weight: FontWeight, stretch: FontStretch, style: FontStyle
         synthesize_bold: false,
         synthesize_dim: false,
         assume_emoji_presentation: false,
+        is_math_font: false,
         pixel_sizes: vec![],
         is_built_in_fallback: false,
         palettes: vec![],
@@ -380,4 +381,92 @@ fn lua_fallback_reports_bitmap_synthesis_palette_alias_and_non_default_options()
     ] {
         assert!(output.contains(expected), "missing {expected:?} in {output}");
     }
+}
+
+fn tracked_font_path(file: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts").join(file)
+}
+
+fn parse_from_disk(path: &std::path::Path) -> ParsedFont {
+    let handle = FontDataHandle {
+        source: FontDataSource::OnDisk(path.to_path_buf()),
+        index: 0,
+        variation: 0,
+        origin: FontOrigin::FontDirs,
+        coverage: None,
+    };
+    ParsedFont::from_locator(&handle)
+        .unwrap_or_else(|err| panic!("fixture {path:?} must parse: {err:#}"))
+}
+
+/// The configured family must not be mistaken for a math font.
+///
+/// This is the direction that would break the terminal outright: automatic
+/// fallback resolution drops math fonts, so a predicate that caught an
+/// ordinary monospace face would strip legitimate fonts out of the chain.
+/// Asserting it separately is what stops a predicate that answers `true` for
+/// everything from "fixing" the defect by emptying the chain.
+#[test]
+fn tracked_text_fixtures_are_not_math_fonts() {
+    for file in [
+        "RecMonoSt.Helens-Regular.ttf",
+        "RecMonoSt.Helens-Bold.ttf",
+        "RecMonoSt.Helens-Italic.ttf",
+        "RecMonoSt.Helens-BoldItalic.ttf",
+    ] {
+        let font = parse_from_disk(&tracked_font_path(file));
+        assert!(
+            !font.is_math_font,
+            "{file} carries no MATH table and must not be treated as a math font"
+        );
+    }
+}
+
+/// A face carrying `MATH` is detected, and the text faces it competes with
+/// are not.
+///
+/// STIX Two Math and STIX Two Text share a design and a name prefix, so a
+/// predicate keyed on the family name passes one and fails the other; they are
+/// asserted together for that reason. Menlo is included because it is the font
+/// that *should* win these codepoints — it served every correctly sized
+/// fallback tile measured while diagnosing the defect, against STIX Two Math's
+/// oversized ones.
+///
+/// No font with a `MATH` table is tracked in this repository, so the positive
+/// case reads macOS's bundled STIX Two Math and is gated to that platform.
+#[cfg(target_os = "macos")]
+#[test]
+fn math_table_detection_separates_math_from_text_faces() {
+    // The positive case is the point of the test, so its absence is a failure
+    // rather than a skip: a loop over missing files reports a pass while
+    // asserting nothing.
+    let math = std::path::Path::new("/System/Library/Fonts/Supplemental/STIXTwoMath.otf");
+    assert!(math.exists(), "{math:?} is expected on macOS but is missing");
+    assert!(
+        parse_from_disk(math).is_math_font,
+        "STIXTwoMath.otf carries a MATH table and must be detected as a math font"
+    );
+
+    // Negative cases. These paths move between macOS releases, and the
+    // convention against silent skips is about a test quietly asserting
+    // nothing — so the counter is explicit: whichever of these exist must all
+    // report false, and at least one must have existed.
+    let text_faces = [
+        "/System/Library/Fonts/Supplemental/STIXTwoText.ttf",
+        "/System/Library/Fonts/Apple Symbols.ttf",
+        "/System/Library/Fonts/Menlo.ttc",
+    ];
+    let mut checked = 0;
+    for path in text_faces {
+        let path = std::path::Path::new(path);
+        if !path.exists() {
+            continue;
+        }
+        checked += 1;
+        assert!(
+            !parse_from_disk(path).is_math_font,
+            "{path:?} carries no MATH table and must not be detected as a math font"
+        );
+    }
+    assert!(checked > 0, "no macOS text face was found, so the negative direction went untested");
 }
