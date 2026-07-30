@@ -3807,6 +3807,59 @@ impl App {
         true
     }
 
+    #[doc(hidden)]
+    pub fn __test_attach_window_renderer(
+        &mut self,
+        id: WindowId,
+        window: Arc<Window>,
+        renderer: GpuRenderer,
+    ) -> bool {
+        let Some(state) = self.windows.get_mut(&id) else { return false };
+        state.window = Some(window);
+        state.renderer = Some(renderer);
+        true
+    }
+
+    #[doc(hidden)]
+    pub fn __test_window_selection(&self, id: WindowId) -> Option<Option<Selection>> {
+        self.windows.get(&id).map(|state| state.selection)
+    }
+
+    #[cfg(target_os = "windows")]
+    #[doc(hidden)]
+    pub fn __test_window_software_frame_pixel_bgra(
+        &self,
+        id: WindowId,
+        x: u32,
+        y: u32,
+    ) -> Option<[u8; 4]> {
+        self.windows.get(&id)?.renderer.as_ref()?.__test_software_frame_pixel_bgra(x, y)
+    }
+
+    #[doc(hidden)]
+    pub fn __test_set_software_render_degrade(&mut self, degrade: bool) {
+        self.software_render_degrade = degrade;
+    }
+
+    #[doc(hidden)]
+    pub fn __test_main_redraw_deferred(&self) -> bool {
+        self.pending_redraw
+    }
+
+    #[doc(hidden)]
+    pub fn __test_set_window_last_render(&mut self, id: WindowId, last_render: Instant) -> bool {
+        let Some(state) = self.windows.get_mut(&id) else { return false };
+        state.last_render = last_render;
+        true
+    }
+
+    #[doc(hidden)]
+    pub fn __test_window_cell_geometry(&self, id: WindowId) -> Option<(f32, f32, f32)> {
+        let renderer = self.windows.get(&id)?.renderer.as_ref()?;
+        let (cell_w, cell_h) = renderer.cell_size();
+        Some((cell_w, cell_h, renderer.top_inset()))
+    }
+
     /// Test-only: feed bytes into a child pane's parser.
     #[doc(hidden)]
     pub fn __test_advance_child_pane_parser(

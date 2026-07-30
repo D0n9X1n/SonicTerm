@@ -64,6 +64,22 @@ fn main_and_child_clear_when_selected_alt_content_changes() {
 }
 
 #[test]
+fn main_and_child_preserve_selection_when_alt_wheel_changes_no_rows() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
+    let main = app.__test_main_window_id().expect("synthetic main window");
+
+    for (window, pane) in [(main, main_pane), (child, child_pane)] {
+        install_alt_selection(&mut app, window, pane, 4);
+
+        // Models a wheel event ignored at a TUI scroll boundary: no grid row
+        // changed after the selection baseline, so the selection must survive.
+        assert!(!run_invalidation(&mut app, window, pane));
+        assert!(app.windows.get(&window).unwrap().selection.is_some());
+    }
+}
+
+#[test]
 fn main_and_child_preserve_selection_for_unrelated_alt_updates() {
     let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
