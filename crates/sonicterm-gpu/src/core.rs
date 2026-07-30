@@ -2687,6 +2687,20 @@ impl GpuRenderer {
         self.software_render_degrade
     }
 
+    /// Force the next Windows software-presented frame to be rebuilt instead of
+    /// re-presenting retained pixels. Hardware rendering already submits a fresh
+    /// full frame, so it needs no equivalent invalidation.
+    pub fn invalidate_windows_software_frame(&mut self) {
+        if !self.uses_windows_software_presenter() {
+            return;
+        }
+        self.last_frame_key = None;
+        #[cfg(target_os = "windows")]
+        {
+            self.software_frame = None;
+        }
+    }
+
     /// Update the resolved no-GPU degrade state after a config reload.
     /// A transition invalidates the retained frame and reconfigures the
     /// surface with the software-render present tweaks.

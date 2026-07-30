@@ -30,41 +30,6 @@ fn install_alt_selection(app: &mut App, window: WindowId, pane_id: u64, row: u64
     });
 }
 
-#[cfg(target_os = "windows")]
-fn selection_for_wheel(pane_id: u64, on_alt_screen: bool, anchored: bool) -> Option<Selection> {
-    Some(Selection {
-        start: (4, 0),
-        end: if anchored { (5, 3) } else { (4, 0) },
-        anchored,
-        pane_id: Some(pane_id),
-        content_seq: 0,
-        on_alt_screen,
-        scrollback_evicted: 0,
-    })
-}
-
-#[cfg(target_os = "windows")]
-#[test]
-fn windows_software_alt_wheel_clears_only_the_owned_nonempty_selection() {
-    let mut selection = selection_for_wheel(7, true, true);
-    assert!(clear_alt_selection_before_wheel(&mut selection, 7, true, true));
-    assert!(selection.is_none());
-
-    for (pane_id, is_alt, degraded, anchored) in [
-        (8, true, true, true),
-        (7, false, true, true),
-        (7, true, false, true),
-        (7, true, true, false),
-    ] {
-        let mut selection = selection_for_wheel(7, is_alt, anchored);
-        assert!(
-            !clear_alt_selection_before_wheel(&mut selection, pane_id, is_alt, degraded),
-            "the cleanup must stay limited to Windows software alt-screen wheel scrolling"
-        );
-        assert!(selection.is_some());
-    }
-}
-
 fn write_row(app: &App, window: WindowId, pane_id: u64, row: u16, ch: char) {
     let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
     let mut parser = pane.parser.lock();
@@ -95,6 +60,22 @@ fn main_and_child_clear_when_selected_alt_content_changes() {
             app.windows.get(&window).unwrap().selection.is_none(),
             "{window:?} must not leave stale selected text copyable"
         );
+    }
+}
+
+#[test]
+fn main_and_child_preserve_selection_when_alt_wheel_changes_no_rows() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
+    let main = app.__test_main_window_id().expect("synthetic main window");
+
+    for (window, pane) in [(main, main_pane), (child, child_pane)] {
+        install_alt_selection(&mut app, window, pane, 4);
+
+        // Models a wheel event ignored at a TUI scroll boundary: no grid row
+        // changed after the selection baseline, so the selection must survive.
+        assert!(!run_invalidation(&mut app, window, pane));
+        assert!(app.windows.get(&window).unwrap().selection.is_some());
     }
 }
 
@@ -308,7 +289,12 @@ fn both_redraw_paths_invalidate_before_rendering() {
             .find(".render(")
             .map(|offset| call + offset)
             .unwrap_or_else(|| panic!("{name} redraw must render after invalidation"));
-        assert!(source[call..render].contains(selection_arg));
+        let before_render = &source[call..render];
+        assert!(before_render.contains(selection_arg));
+        assert!(
+            before_render.contains("renderer.invalidate_windows_software_frame()"),
+            "{name} must discard Windows software pixels after a real selection clear"
+        );
         assert!(call < render, "{name} must clear stale selection before the renderer borrows it");
     }
 }

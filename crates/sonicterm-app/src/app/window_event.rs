@@ -452,11 +452,19 @@ impl App {
                 if let Some(ws) = ws_opt.as_deref_mut() {
                     if let Some(active_pos) = guards.iter().position(|(id, _, _)| *id == active_id)
                     {
-                        invalidate_selection_for_content(
-                            &mut ws.selection,
-                            active_id,
-                            guards[active_pos].1.grid(),
-                        );
+                        let grid = guards[active_pos].1.grid();
+                        let selected_active_alt = ws.selection.as_ref().is_some_and(|selection| {
+                            selection.pane_id == Some(active_id)
+                                && selection.on_alt_screen
+                                && grid.is_alt()
+                        });
+                        let selection_cleared =
+                            invalidate_selection_for_content(&mut ws.selection, active_id, grid);
+                        if selected_active_alt && selection_cleared {
+                            if let Some(renderer) = ws.renderer.as_mut() {
+                                renderer.invalidate_windows_software_frame();
+                            }
+                        }
                     }
                 }
                 #[allow(clippy::type_complexity)]
@@ -1277,25 +1285,6 @@ impl App {
                                 (is_alt, tracking_on, sgr, app_cursor)
                             })
                             .unwrap_or((false, false, false, false));
-                        #[cfg(target_os = "windows")]
-                        {
-                            let software_render_degraded = self
-                                .main_renderer()
-                                .is_some_and(GpuRenderer::is_software_render_degraded);
-                            let cleared = self.main_mut().is_some_and(|ws| {
-                                super::clear_alt_selection_before_wheel(
-                                    &mut ws.selection,
-                                    pane_id,
-                                    is_alt,
-                                    software_render_degraded,
-                                )
-                            });
-                            if cleared {
-                                if let Some(window) = self.main_window() {
-                                    window.request_redraw();
-                                }
-                            }
-                        }
                         if is_alt && tracking_on {
                             // App wants mouse events: emit one wheel report per
                             // line of motion at the cell under the cursor.
