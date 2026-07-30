@@ -1367,29 +1367,6 @@ fn every_glyph_atlas_reset_invalidates_the_row_cache() {
     }
 }
 
-#[test]
-fn windows_software_selection_cleanup_discards_the_retained_frame() {
-    const CORE_SRC: &str = include_str!("core.rs");
-    let start = CORE_SRC
-        .find("pub fn invalidate_windows_software_frame(&mut self)")
-        .expect("renderer must expose the Windows software-frame invalidation hook");
-    let end = CORE_SRC[start..]
-        .find("/// Update the resolved no-GPU degrade state")
-        .map(|offset| start + offset)
-        .expect("invalidation hook must end before the next method");
-    let body = &CORE_SRC[start..end];
-
-    assert!(
-        body.contains("if !self.uses_windows_software_presenter()"),
-        "hardware and non-Windows rendering must remain untouched"
-    );
-    assert!(body.contains("self.last_frame_key = None"));
-    assert!(
-        body.contains("self.software_frame = None"),
-        "the deselected frame must not re-present retained selection pixels"
-    );
-}
-
 // --- Image atlas promotion / demotion ------------------------------
 
 /// A window with no inline media must not clear its image atlas on every

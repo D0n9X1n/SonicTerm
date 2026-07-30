@@ -75,6 +75,9 @@ jobs:
         shell: bash
         run: bash scripts/check-workspace-crates.sh
 
+      - name: Verify Windows software presentation capability
+        run: cargo test -p sonicterm-gpu --test windows_software_present_capability -- --nocapture
+
       - name: Run release-note unit test
         shell: bash
         run: bash scripts/test-release-notes.sh

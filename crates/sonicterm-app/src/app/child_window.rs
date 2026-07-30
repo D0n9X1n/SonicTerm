@@ -544,19 +544,11 @@ impl App {
                         // map keyed by `active_id`, so a guard with this id
                         // must exist. Render hot path: no Result conversion.
                         .expect("active pane guard collected above");
-                    let grid = guards[active_pos].1.grid();
-                    let selected_active_alt = child.selection.as_ref().is_some_and(|selection| {
-                        selection.pane_id == Some(active_id)
-                            && selection.on_alt_screen
-                            && grid.is_alt()
-                    });
-                    let selection_cleared =
-                        invalidate_selection_for_content(&mut child.selection, active_id, grid);
-                    if selected_active_alt && selection_cleared {
-                        if let Some(renderer) = child.renderer.as_mut() {
-                            renderer.invalidate_windows_software_frame();
-                        }
-                    }
+                    invalidate_selection_for_content(
+                        &mut child.selection,
+                        active_id,
+                        guards[active_pos].1.grid(),
+                    );
                     // Bug fix: child windows (Cmd+N, tear-out) were rendering
                     // their tab bar with the literal fallback title
                     // ("shell N") because the wezterm-style title formatter

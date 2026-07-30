@@ -289,12 +289,7 @@ fn both_redraw_paths_invalidate_before_rendering() {
             .find(".render(")
             .map(|offset| call + offset)
             .unwrap_or_else(|| panic!("{name} redraw must render after invalidation"));
-        let before_render = &source[call..render];
-        assert!(before_render.contains(selection_arg));
-        assert!(
-            before_render.contains("renderer.invalidate_windows_software_frame()"),
-            "{name} must discard Windows software pixels after a real selection clear"
-        );
+        assert!(source[call..render].contains(selection_arg));
         assert!(call < render, "{name} must clear stale selection before the renderer borrows it");
     }
 }

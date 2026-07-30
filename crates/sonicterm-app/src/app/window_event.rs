@@ -452,19 +452,11 @@ impl App {
                 if let Some(ws) = ws_opt.as_deref_mut() {
                     if let Some(active_pos) = guards.iter().position(|(id, _, _)| *id == active_id)
                     {
-                        let grid = guards[active_pos].1.grid();
-                        let selected_active_alt = ws.selection.as_ref().is_some_and(|selection| {
-                            selection.pane_id == Some(active_id)
-                                && selection.on_alt_screen
-                                && grid.is_alt()
-                        });
-                        let selection_cleared =
-                            invalidate_selection_for_content(&mut ws.selection, active_id, grid);
-                        if selected_active_alt && selection_cleared {
-                            if let Some(renderer) = ws.renderer.as_mut() {
-                                renderer.invalidate_windows_software_frame();
-                            }
-                        }
+                        invalidate_selection_for_content(
+                            &mut ws.selection,
+                            active_id,
+                            guards[active_pos].1.grid(),
+                        );
                     }
                 }
                 #[allow(clippy::type_complexity)]
