@@ -1283,6 +1283,29 @@ pub fn invalidate_selection_for_content(
     should_clear
 }
 
+/// The Windows software presenter can re-present its retained frame between a
+/// wheel event and the alternate-screen application's reply. Clear only that
+/// pane's normal selection before forwarding the wheel so the old rectangle is
+/// not shown over newly scrolled content.
+#[cfg(target_os = "windows")]
+fn clear_alt_selection_before_wheel(
+    selection: &mut Option<Selection>,
+    pane_id: u64,
+    is_alt: bool,
+    software_render_degraded: bool,
+) -> bool {
+    if !software_render_degraded
+        || !is_alt
+        || !selection.as_ref().is_some_and(|selection| {
+            selection.pane_id == Some(pane_id) && selection.on_alt_screen && !selection.is_empty()
+        })
+    {
+        return false;
+    }
+    *selection = None;
+    true
+}
+
 /// Compute the wezterm-style pretty tab title for the active pane and
 /// (if it differs from the current `TabBar` active title) apply it via
 /// `set_active_title`. Returns the title actually applied, or `None` if

@@ -195,9 +195,12 @@ either screen, changing panes or buffers clears the selection, and a post-baseli
 content change clears it only when the changed row intersects the selected range.
 The alternate screen has no scrollback, so a full-screen application scrolls by
 repainting fixed rows. Repainting an unrelated status line, spinner, or other row
-preserves the selection. The same check runs before main/child rendering and
-again immediately before copy, preventing replacement text from reaching the
-clipboard while a redraw is still queued.
+preserves the selection. On the Windows software-rendering path, an alternate-
+screen wheel event clears that pane's normal selection before forwarding the
+wheel input, so the old rectangle cannot be re-presented while the application
+scrolls. The same check runs before main/child rendering and again immediately
+before copy, preventing replacement text from reaching the clipboard while a
+redraw is still queued.
 
 ## Optional SSH status
 
@@ -451,8 +454,9 @@ OSC 133 prompt 边界以绝对历史坐标保存，因此滚动后仍可跳转�
 文本随同行进入历史；有界历史随后淘汰更老行时，完全存活的端点会重新基准化，而任何已失去所选行的
 选区都会清除。在任一屏幕上，切换窗格或 buffer 都会清除选区；基线之后的内容变化仅在修改行与选区
 范围相交时才清除它。备用屏幕没有 scrollback，全屏应用通过重绘固定行实现滚动，因此仅重绘无关的
-状态行、spinner 或其他行仍会保留选区。主窗口与子窗口都会在渲染前执行同一检查，并在复制前立即
-再次检查，避免重绘尚在队列中时把替换后的文本写入剪贴板。
+状态行、spinner 或其他行仍会保留选区。在 Windows 软件渲染路径中，备用屏幕的滚轮事件会在转发
+滚轮输入前清除该窗格的普通选区，因此应用滚动时不会再次显示旧的选区矩形。主窗口与子窗口都会在
+渲染前执行同一检查，并在复制前立即再次检查，避免重绘尚在队列中时把替换后的文本写入剪贴板。
 
 ## 可选 SSH 状态
 

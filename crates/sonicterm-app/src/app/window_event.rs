@@ -1277,6 +1277,25 @@ impl App {
                                 (is_alt, tracking_on, sgr, app_cursor)
                             })
                             .unwrap_or((false, false, false, false));
+                        #[cfg(target_os = "windows")]
+                        {
+                            let software_render_degraded = self
+                                .main_renderer()
+                                .is_some_and(GpuRenderer::is_software_render_degraded);
+                            let cleared = self.main_mut().is_some_and(|ws| {
+                                super::clear_alt_selection_before_wheel(
+                                    &mut ws.selection,
+                                    pane_id,
+                                    is_alt,
+                                    software_render_degraded,
+                                )
+                            });
+                            if cleared {
+                                if let Some(window) = self.main_window() {
+                                    window.request_redraw();
+                                }
+                            }
+                        }
                         if is_alt && tracking_on {
                             // App wants mouse events: emit one wheel report per
                             // line of motion at the cell under the cursor.

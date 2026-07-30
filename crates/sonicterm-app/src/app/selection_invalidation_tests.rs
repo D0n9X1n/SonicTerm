@@ -30,6 +30,41 @@ fn install_alt_selection(app: &mut App, window: WindowId, pane_id: u64, row: u64
     });
 }
 
+#[cfg(target_os = "windows")]
+fn selection_for_wheel(pane_id: u64, on_alt_screen: bool, anchored: bool) -> Option<Selection> {
+    Some(Selection {
+        start: (4, 0),
+        end: if anchored { (5, 3) } else { (4, 0) },
+        anchored,
+        pane_id: Some(pane_id),
+        content_seq: 0,
+        on_alt_screen,
+        scrollback_evicted: 0,
+    })
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_software_alt_wheel_clears_only_the_owned_nonempty_selection() {
+    let mut selection = selection_for_wheel(7, true, true);
+    assert!(clear_alt_selection_before_wheel(&mut selection, 7, true, true));
+    assert!(selection.is_none());
+
+    for (pane_id, is_alt, degraded, anchored) in [
+        (8, true, true, true),
+        (7, false, true, true),
+        (7, true, false, true),
+        (7, true, true, false),
+    ] {
+        let mut selection = selection_for_wheel(7, is_alt, anchored);
+        assert!(
+            !clear_alt_selection_before_wheel(&mut selection, pane_id, is_alt, degraded),
+            "the cleanup must stay limited to Windows software alt-screen wheel scrolling"
+        );
+        assert!(selection.is_some());
+    }
+}
+
 fn write_row(app: &App, window: WindowId, pane_id: u64, row: u16, ch: char) {
     let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
     let mut parser = pane.parser.lock();

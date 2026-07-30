@@ -1033,6 +1033,21 @@ impl App {
                                 )
                             })
                             .unwrap_or((false, false, false, false));
+                        #[cfg(target_os = "windows")]
+                        {
+                            let software_render_degraded = child
+                                .renderer
+                                .as_ref()
+                                .is_some_and(GpuRenderer::is_software_render_degraded);
+                            if super::clear_alt_selection_before_wheel(
+                                &mut child.selection,
+                                pane_id,
+                                is_alt,
+                                software_render_degraded,
+                            ) {
+                                child.request_redraw();
+                            }
+                        }
                         if is_alt && tracking_on {
                             let up = delta_lines < 0;
                             let (col1, row1) =
