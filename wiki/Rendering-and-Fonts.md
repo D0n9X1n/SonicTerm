@@ -133,6 +133,31 @@ for family, style, weight, stretch, face index, variation, and codepoint coverag
 Variable-font metadata is optional; malformed or missing axes fall back to base
 weight/width values.
 
+A codepoint no font in the chain covers is resolved on a background thread, and
+the font it finds is appended to that chain. **Automatic resolution ranks fonts
+carrying an OpenType `MATH` table last.** A math font draws to the em square
+rather than to a text advance, so its glyphs are sized for display equations:
+one measured 43x35 in a 15x21 cell, overlapping its neighbour while the advance
+stayed put. Detection is the table's presence, not the family name — nothing in
+`OS/2` separates STIX Two Math from STIX Two Text, and both report
+`sFamilyClass` 0/0.
+
+Ranking, not exclusion, is the rule. Candidates are ordered by how much of the
+batch being resolved they cover, and a math font covers a great many symbol
+codepoints, so it outranks a text font that covers each of them perfectly well.
+Sorting math fonts last lets a text font win wherever one exists, while leaving
+a math font available for a codepoint nothing else carries — dropping them
+outright turns such a codepoint into tofu.
+
+The rule applies only to this automatic path. A family named explicitly in
+`[font]` is still honored, math table or not.
+
+Because the chain grows per stack and candidates are ranked by coverage of the
+batch being resolved, the same codepoint could otherwise resolve to different
+fonts in different windows — the batch depends on which codepoints reached the
+screen together. Demoting math fonts removes the case where that difference
+was visible as a change in glyph size.
+
 ## Tab title process icons
 
 When the OS reports a foreground executable, SonicTerm normalizes its basename
@@ -439,6 +464,23 @@ HarfBuzz cluster 会映射回 cell 列。缺失 cluster 依次尝试 fallback fa
 内置主字体族是 `Rec Mono St.Helens`；回退链包含常见等宽字体、Nerd Font symbols 和彩色 emoji。
 匹配考虑 family、style、weight、stretch、face index、variation 和码点 coverage。可变字体 metadata 是可选项；
 损坏或缺失轴会回退到基础 weight/width。
+
+当链中没有任何字体覆盖某个码点时，解析会在后台线程进行，找到的字体随后被追加到该链上。
+**自动解析会把带有 OpenType `MATH` 表的字体排在最后。** 数学字体按 em 方块而非文本 advance 绘制，
+其字形是为独立展示的公式排版设计的：实测有一个字形在 15x21 的单元格中占据 43x35，
+advance 不变却压住了相邻字符。判定依据是该表是否存在，而不是字体族名 ——
+`OS/2` 无法区分 STIX Two Math 与 STIX Two Text，两者的 `sFamilyClass` 都是 0/0。
+
+规则是排序而非排除。候选字体按其对当前批次的覆盖率排序，而数学字体覆盖了大量符号码点，
+因此会压过那些本可以完美呈现这些码点的文本字体。把数学字体排在最后，
+可以让文本字体在存在时优先胜出，同时仍为没有其它字体覆盖的码点保留数学字体 ——
+若直接丢弃它们，这类码点就会变成 tofu。
+
+该规则只作用于这条自动路径。在 `[font]` 中显式指定的字体族仍然生效，无论其是否带有 MATH 表。
+
+由于每个 stack 各自增长回退链，且候选字体按当前批次的覆盖率排序，
+而批次取决于哪些码点恰好同时出现在屏幕上，否则同一码点可能在不同窗口解析到不同字体。
+把数学字体降级消除了这种差异表现为字形尺寸变化的情形。
 
 ## 标签页进程图标
 

@@ -33,6 +33,14 @@ pub struct ParsedFont {
     pub synthesize_bold: bool,
     pub synthesize_dim: bool,
     pub assume_emoji_presentation: bool,
+    /// Whether the face carries an OpenType `MATH` table.
+    ///
+    /// Math fonts draw to the em square rather than to a text advance, so
+    /// their glyphs overflow a terminal cell — a warning sign resolved from
+    /// one measured 43x35 against a 15x21 cell. Auto-fallback resolution
+    /// excludes them for that reason; a family the user names explicitly is
+    /// still honored.
+    pub is_math_font: bool,
     pub pixel_sizes: Vec<u16>,
     pub is_built_in_fallback: bool,
     pub palettes: Vec<FontPaletteInfo>,
@@ -78,6 +86,7 @@ impl Clone for ParsedFont {
             synthesize_bold: self.synthesize_bold,
             synthesize_dim: self.synthesize_dim,
             assume_emoji_presentation: self.assume_emoji_presentation,
+            is_math_font: self.is_math_font,
             handle: self.handle.clone(),
             cap_height: self.cap_height,
             coverage: Mutex::new(self.coverage.lock().unwrap().clone()),
@@ -404,6 +413,7 @@ impl ParsedFont {
         let has_color =
             unsafe { (((*face.face).face_flags as u32) & crate::ftwrap::FT_FACE_FLAG_COLOR) != 0 };
         let assume_emoji_presentation = has_color;
+        let is_math_font = face.has_math_table();
 
         let names = Names::from_ft_face(face);
         // Objectively gross, but freetype's italic property is very coarse grained.
@@ -498,6 +508,7 @@ impl ParsedFont {
             synthesize_dim: false,
             is_built_in_fallback: false,
             assume_emoji_presentation,
+            is_math_font,
             handle,
             coverage: Mutex::new(RangeSet::new()),
             cap_height,

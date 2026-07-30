@@ -428,6 +428,24 @@ impl FallbackResolveInfo {
             );
         }
 
+        // Math fonts are drawn to the em square rather than to a text advance,
+        // so a glyph taken from one overflows the cell it lands in: a warning
+        // sign resolved from STIX Two Math measured 43x35 against a 15x21 cell,
+        // overlapping its neighbour while the advance stayed put.
+        //
+        // They are demoted rather than dropped. Ranking is by coverage of the
+        // batch being resolved, and a math font covers a great many symbol
+        // codepoints, so it outranks a text font that covers each of them
+        // perfectly well — that is how one came to serve glyphs Menlo already
+        // had. Sorting them last lets the reduction below take a text font
+        // wherever one exists, while still leaving a math font available for a
+        // codepoint nothing else carries. Excluding them outright would have
+        // turned such a codepoint into tofu.
+        //
+        // A stable sort, so the coverage order above survives within each
+        // group. This runs after that sort for the same reason.
+        extra_handles.sort_by_key(|p| p.is_math_font);
+
         // iteratively reduce to just the fonts that we need
         extra_handles.retain(|p| match p.coverage_intersection(&wanted) {
             Ok(cov) if cov.is_empty() => false,
