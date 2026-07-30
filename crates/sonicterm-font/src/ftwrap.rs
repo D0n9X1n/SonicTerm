@@ -309,6 +309,27 @@ impl Face {
         }
     }
 
+    /// Whether the face carries an OpenType `MATH` table.
+    ///
+    /// The table's presence is what distinguishes a math font from a text
+    /// font that happens to cover mathematical codepoints: STIX Two Math has
+    /// it, while STIX Two Text, Apple Symbols, and Menlo do not. Nothing in
+    /// `OS/2` separates them — every one of those faces reports
+    /// `sFamilyClass` 0/0 — so this table is the only structural signal
+    /// available.
+    ///
+    /// It matters because a math font draws to the em square rather than to a
+    /// text advance: its glyphs are sized for display equations, and dropping
+    /// one into a terminal cell produces ink several times the cell's width.
+    ///
+    /// Queried with a zero-length read, which asks FreeType whether the table
+    /// exists without loading any of it.
+    pub fn has_math_table(&self) -> bool {
+        let tag = ft_make_tag(b'M', b'A', b'T', b'H');
+        let mut len: FT_ULong = 0;
+        unsafe { succeeded(FT_Load_Sfnt_Table(self.face, tag, 0, ptr::null_mut(), &mut len)) }
+    }
+
     /// Returns the cap_height/units_per_EM ratio if known
     pub fn cap_height(&self) -> Option<f64> {
         unsafe {

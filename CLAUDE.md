@@ -138,6 +138,46 @@ config, logging, window, palette, or input behavior.
 After pushing a release tag, verify the GitHub release workflow finishes and
 publishes the expected macOS DMG(s), Windows MSI, and checksum assets.
 
+## Debugging
+
+Work a defect in this order. **Baseline → Theory → Probe → Log → Confirm →
+Fix → Pin.** Skipping a step does not save time; it produces a confident wrong
+answer that costs more to retract than it did to reach.
+
+- **Baseline** — measure the working case first, on the same subject you will
+  measure after. A delta against a different subject is an invalid inference,
+  not a weak one.
+- **Theory** — name the mechanism and the reading that would refute it, before
+  instrumenting. A theory no measurement can refute will survive every one.
+- **Probe** — instrument the exact transform, logging its input and output on
+  one line. A probe placed upstream records what arrived, not what the block
+  did, and every conclusion drawn from it describes the wrong code.
+- **Log** — record identity, not only magnitude. Sizes say something changed;
+  names, ids, and indices say what.
+- **Confirm** — vary exactly one thing, and check that the numbers fit the
+  mechanism's shape. Arithmetic refutes a wrong mechanism before any code is
+  read.
+- **Fix** — at the seam the evidence implicates. One symptom can have two
+  independent mechanisms; do not collapse them into the first plausible cause.
+- **Pin** — a regression test that fails before the change and passes after.
+  Without it there is a claim, not a fix.
+
+Three rules carry the same weight as the steps:
+
+- **Isolate the diagnostic run.** Point config and logs at scratch directories.
+  Override those specific directories, not `HOME` — the shell inside the
+  terminal inherits it, so a scratch `HOME` changes the repro itself.
+- **Say what did not reproduce.** A run that reproduces the baseline but not
+  the defect has bounded the problem. Silence about the gap is how a wrong root
+  cause survives.
+- **Retract explicitly when superseded.** Name the dead claim and the
+  measurement that killed it. A thread that only accumulates is unreadable to
+  whoever arrives next.
+
+Instrumentation is not free of effect: a probe can hide a race by perturbing
+its timing, so a non-reproduction under instrumentation is weaker evidence than
+a reproduction.
+
 ## Conventions
 
 - **A change that alters documented behavior updates the wiki in the same PR.**
