@@ -11,7 +11,7 @@ use sonicterm_render_model::{
             theme::{Hex, Theme},
         },
         grid::grid::Grid,
-        ui::tabs::TabBar,
+        ui::{selection::Selection, tabs::TabBar},
     },
     CursorStyle, PaneRender, PixelRect,
 };
@@ -29,6 +29,7 @@ use winit::{
 };
 
 const BACKGROUND_HEX: &str = "#123456";
+const SELECTION_HEX: &str = "#e04020";
 const EXPECTED_COLORREF: u32 = 0x0056_3412;
 
 #[derive(Debug)]
@@ -65,6 +66,7 @@ fn run_probe(active: &ActiveEventLoop) -> Result<Capability, String> {
 
     let mut theme = Theme::default();
     theme.colors.background = Hex(BACKGROUND_HEX.to_string());
+    theme.colors.selection_bg = Hex(SELECTION_HEX.to_string());
     let settings = RendererSettings {
         font_family: "monospace",
         font_size: 14.0,
@@ -94,6 +96,7 @@ fn run_probe(active: &ActiveEventLoop) -> Result<Capability, String> {
 
     let size = window.inner_size();
     let mut grid = Grid::new(8, 4);
+    grid.enter_alt_screen();
     let mut panes = [PaneRender {
         id: 1,
         rect_px: PixelRect { x: 0, y: 0, w: size.width, h: size.height },
@@ -105,22 +108,8 @@ fn run_probe(active: &ActiveEventLoop) -> Result<Capability, String> {
         scrollbar_alpha: 0.0,
         inline_images: Vec::new(),
     }];
-    renderer
-        .render(
-            &mut panes,
-            &theme,
-            false,
-            None,
-            None,
-            &TabBar::new(),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .map_err(|error| format!("software render failed: {error}"))?;
+    let tabs = TabBar::new();
+    render_frame(&mut renderer, &mut panes, &theme, None, &tabs)?;
 
     let handle =
         window.window_handle().map_err(|error| format!("window handle failed: {error}"))?;
@@ -144,10 +133,68 @@ fn run_probe(active: &ActiveEventLoop) -> Result<Capability, String> {
         ));
     }
 
+    let (cell_w, cell_h) = renderer.cell_size();
+    let sample_x = (cell_w * 1.5).round() as i32;
+    let sample_y = (cell_h * 1.5).round() as i32;
+    let mut selection = Selection::new(1, 1);
+    selection.extend(1, 2);
+    selection.anchored = true;
+    selection = selection.with_content_state(1, panes[0].grid.content_seq(), true, 0);
+    render_frame(&mut renderer, &mut panes, &theme, Some(&selection), &tabs)?;
+    let selected = read_hwnd_pixel(hwnd, sample_x, sample_y)?;
+    if selected == observed {
+        return Err(String::from("selection fixture did not change the sampled HWND pixel"));
+    }
+
+    selection = selection.with_content_state(1, panes[0].grid.content_seq(), true, 0);
+    panes[0].grid.scroll_up(1);
+    if !sonicterm_render_model::boundary::ui::selection::revalidate_selection(
+        &mut selection,
+        1,
+        panes[0].grid,
+    ) {
+        return Err(String::from(
+            "intersecting alternate-screen scroll did not invalidate selection",
+        ));
+    }
+    render_frame(&mut renderer, &mut panes, &theme, None, &tabs)?;
+    let deselected = read_hwnd_pixel(hwnd, sample_x, sample_y)?;
+    if deselected != observed {
+        return Err(format!(
+            "first deselected HWND frame retained selection pixels: reference \
+             {observed:#010x}, selected {selected:#010x}, deselected {deselected:#010x}"
+        ));
+    }
+
     Ok(Capability::Exercised {
         detected_software_adapter: renderer.is_software_rendering(),
         observed,
     })
+}
+
+fn render_frame(
+    renderer: &mut GpuRenderer,
+    panes: &mut [PaneRender<'_>],
+    theme: &Theme,
+    selection: Option<&Selection>,
+    tabs: &TabBar,
+) -> Result<(), String> {
+    renderer
+        .render(panes, theme, false, selection, None, tabs, None, None, None, None, None, None)
+        .map_err(|error| format!("software render failed: {error}"))
+}
+
+fn read_hwnd_pixel(hwnd: HWND, x: i32, y: i32) -> Result<u32, String> {
+    let hdc = unsafe { GetDC(Some(hwnd)) };
+    if hdc.0.is_null() {
+        return Err(String::from("GetDC returned null"));
+    }
+    let observed = unsafe { GetPixel(hdc, x, y) }.0;
+    let _ = unsafe { ReleaseDC(Some(hwnd), hdc) };
+    if observed == CLR_INVALID {
+        return Err(String::from("GetPixel returned CLR_INVALID"));
+    }
+    Ok(observed)
 }
 
 #[test]

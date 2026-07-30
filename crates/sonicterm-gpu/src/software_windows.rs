@@ -96,10 +96,17 @@ impl WindowsSoftwareFrame {
         unsafe { blit_bgra_to_hwnd(hwnd, self.width, self.height, &self.pixels) }
     }
 
+    pub(crate) fn pixel_bgra_at(&self, x: u32, y: u32) -> Option<[u8; 4]> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let off = ((y * self.width + x) * 4) as usize;
+        Some([self.pixels[off], self.pixels[off + 1], self.pixels[off + 2], self.pixels[off + 3]])
+    }
+
     #[cfg(test)]
     fn pixel_bgra(&self, x: u32, y: u32) -> [u8; 4] {
-        let off = ((y * self.width + x) * 4) as usize;
-        [self.pixels[off], self.pixels[off + 1], self.pixels[off + 2], self.pixels[off + 3]]
+        self.pixel_bgra_at(x, y).expect("test pixel in bounds")
     }
 
     fn clear(&mut self, color: [f32; 4]) {

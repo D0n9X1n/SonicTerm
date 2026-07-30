@@ -2687,6 +2687,12 @@ impl GpuRenderer {
         self.software_render_degrade
     }
 
+    #[cfg(target_os = "windows")]
+    #[doc(hidden)]
+    pub fn __test_software_frame_pixel_bgra(&self, x: u32, y: u32) -> Option<[u8; 4]> {
+        self.software_frame.as_ref()?.pixel_bgra_at(x, y)
+    }
+
     /// Update the resolved no-GPU degrade state after a config reload.
     /// A transition invalidates the retained frame and reconfigures the
     /// surface with the software-render present tweaks.

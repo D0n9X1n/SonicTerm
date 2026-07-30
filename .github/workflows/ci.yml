@@ -130,6 +130,10 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo test -p sonicterm-gpu --test windows_software_present_capability -- --nocapture
 
+      - name: Verify Windows selection presentation
+        if: runner.os == 'Windows'
+        run: cargo test -p sonicterm-app --test windows_software_selection_present -- --nocapture
+
       - name: Run release-note unit test
         shell: bash
         run: bash scripts/test-release-notes.sh
