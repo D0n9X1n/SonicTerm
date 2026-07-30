@@ -132,7 +132,7 @@ fn run_probe(active: &ActiveEventLoop) -> Result<Capability, String> {
     if hdc.0.is_null() {
         return Ok(Capability::HostIncapable(String::from("GetDC returned null")));
     }
-    let observed = unsafe { GetPixel(hdc, 8, 8) };
+    let observed = unsafe { GetPixel(hdc, 8, 8) }.0;
     let _ = unsafe { ReleaseDC(Some(hwnd), hdc) };
     if observed == CLR_INVALID {
         return Ok(Capability::HostIncapable(String::from("GetPixel returned CLR_INVALID")));
