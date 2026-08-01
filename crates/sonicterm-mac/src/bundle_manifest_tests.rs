@@ -1,12 +1,17 @@
 use super::*;
 use roxmltree::{Document, Node};
 
-fn info_plist_xml() -> String {
+fn info_plist_xml_from(script: &str) -> String {
+    let normalized = script.replace("\r\n", "\n");
     let marker = "cat > \"$APP/Contents/Info.plist\" <<PLIST\n";
-    let start = MACOS_DMG_SCRIPT.find(marker).expect("Info.plist heredoc") + marker.len();
-    let remainder = &MACOS_DMG_SCRIPT[start..];
+    let start = normalized.find(marker).expect("Info.plist heredoc") + marker.len();
+    let remainder = &normalized[start..];
     let end = remainder.find("\nPLIST\n").expect("Info.plist heredoc terminator");
     remainder[..end].replace("${VERSION}", "1.2.1")
+}
+
+fn info_plist_xml() -> String {
+    info_plist_xml_from(MACOS_DMG_SCRIPT)
 }
 
 fn element_children<'a, 'input>(node: Node<'a, 'input>) -> Vec<Node<'a, 'input>> {
@@ -20,6 +25,12 @@ fn dict_value<'a, 'input>(dict: Node<'a, 'input>, key: &str) -> Node<'a, 'input>
         .position(|child| child.tag_name().name() == "key" && child.text() == Some(key))
         .unwrap_or_else(|| panic!("missing key {key}"));
     children[index + 1]
+}
+
+#[test]
+fn info_plist_extraction_accepts_windows_line_endings() {
+    let crlf = MACOS_DMG_SCRIPT.replace('\n', "\r\n");
+    assert_eq!(info_plist_xml_from(&crlf), info_plist_xml());
 }
 
 #[test]
