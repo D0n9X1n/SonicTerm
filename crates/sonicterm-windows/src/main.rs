@@ -29,12 +29,24 @@ fn set_process_dpi_awareness() {
 fn set_process_dpi_awareness() {}
 
 #[cfg(target_os = "windows")]
+fn refresh_shell_associations() {
+    use windows::Win32::UI::Shell::{SHChangeNotify, SHCNE_ASSOCCHANGED, SHCNF_IDLIST};
+
+    unsafe {
+        SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None);
+    }
+}
+
+#[cfg(target_os = "windows")]
 mod backdrop;
 mod cli;
 #[cfg(target_os = "windows")]
 mod menubar;
 #[cfg(target_os = "windows")]
 mod os_drag_win;
+#[cfg(test)]
+mod packaging_manifest;
+mod startup;
 // Windows-only: it resolves `software_render_mode` for the Win32 backdrop
 // decision, and nothing off-Windows consumes it.
 #[cfg(target_os = "windows")]
@@ -44,6 +56,15 @@ mod tab_drag_os;
 
 fn main() -> Result<()> {
     set_process_dpi_awareness();
+    #[cfg(target_os = "windows")]
+    let parsed_cli = cli::parse_cli_from_env()?;
+    #[cfg(target_os = "windows")]
+    if parsed_cli.refresh_shell_associations {
+        refresh_shell_associations();
+        return Ok(());
+    }
+    #[cfg(target_os = "windows")]
+    startup::queue_startup_open_script(&parsed_cli, || std::env::current_dir().ok())?;
     // Install panic hook BEFORE config load so a panic during load
     // still produces a crash dump. Logger init is deferred until
     // after the user's `[logging]` section has been read so its
@@ -70,8 +91,6 @@ fn main() -> Result<()> {
         tracing::warn!(target: "sonicterm-cfg", "{w}");
     }
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "sonic started");
-    #[cfg(target_os = "windows")]
-    let parsed_cli = cli::parse_cli_from_env()?;
     #[cfg(target_os = "windows")]
     let tearout_payload = parsed_cli.tearout;
     let theme = load_theme(&config.theme);

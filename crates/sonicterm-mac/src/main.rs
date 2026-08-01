@@ -10,6 +10,8 @@ use sonicterm_cfg::theme::Theme;
 #[cfg(target_os = "macos")]
 use sonicterm_mac::menubar;
 #[cfg(target_os = "macos")]
+mod open_documents;
+#[cfg(target_os = "macos")]
 mod os_drag_mac;
 #[cfg(target_os = "macos")]
 mod tab_drag_os;
@@ -105,6 +107,7 @@ fn main() -> Result<()> {
         // to the platform shell. State mutation routes through the
         // reducer the shell owns — the bin no longer reaches into
         // the monolithic `App` directly via `run_with_*`.
+        open_documents::install();
         let machine =
             sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default());
         let mut shell = sonicterm_app::shell::MacShell::new(machine, theme, config, keymap)

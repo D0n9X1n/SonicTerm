@@ -17,7 +17,9 @@ pub mod glyph_key;
 pub mod hyperlink_id;
 pub mod lifecycle;
 pub mod mod_key;
+pub mod open_script;
 pub mod resource;
+pub mod script_draft;
 pub mod shell_quote;
 pub mod traits;
 pub mod window_key;
@@ -31,11 +33,15 @@ pub use lifecycle::{
     CancelOutcome, CancelReason, IllegalTransition, LifecycleState, ReapAdmission, ReapResult,
 };
 pub use mod_key::ModKey;
+pub use open_script::{OpenScriptRequest, OpenScriptResolveError};
 pub use resource::{
     AdmissionRejection, BudgetDimension, BudgetError, BudgetScope, ClassCoverage, DeliveryReceipt,
     DisconnectReason, DropReason, GovernorLimits, OwnerKind, OwnerLimits, OwnerState, OwnerView,
     PaneSeamTerm, PressureOutcome, ProcessKind, ProcessView, ResizeOperation, ResourceAmount,
     ResourceClass, ResourceOwnerId, ResourceSnapshot, RetryToken, RetryWakeup,
+};
+pub use script_draft::{
+    classify_shell, format_script_draft, shell_quote_powershell, DraftRejection, ShellDialect,
 };
 pub use shell_quote::shell_quote_posix;
 pub use traits::{ClipboardBackend, FrameLike, PaintError, Painter, PtyTransport, WindowBackend};

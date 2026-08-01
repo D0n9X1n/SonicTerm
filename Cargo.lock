@@ -3479,6 +3479,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-core-services"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "583300ad934cba24ff5292aee751ecc070f7ca6b39a574cc21b7b5e588e06a0b"
+dependencies = [
+ "bitflags 2.13.1",
+ "block2 0.6.2",
+ "dispatch2",
+ "libc",
+ "objc2 0.6.4",
+ "objc2-core-foundation",
+ "objc2-security",
+]
+
+[[package]]
 name = "objc2-core-text"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3533,6 +3548,7 @@ dependencies = [
  "libc",
  "objc2 0.6.4",
  "objc2-core-foundation",
+ "objc2-core-services",
 ]
 
 [[package]]
@@ -3607,6 +3623,17 @@ dependencies = [
  "objc2-core-graphics",
  "objc2-foundation 0.3.2",
  "objc2-metal 0.3.2",
+]
+
+[[package]]
+name = "objc2-security"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "709fe137109bd1e8b5a99390f77a7d8b2961dafc1a1c5db8f2e60329ad6d895a"
+dependencies = [
+ "bitflags 2.13.1",
+ "objc2 0.6.4",
+ "objc2-core-foundation",
 ]
 
 [[package]]
@@ -5126,7 +5153,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-app"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -5166,7 +5193,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-app-core"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "bytes",
  "smallvec",
@@ -5176,7 +5203,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-block-glyph"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "anyhow",
  "bitflags 2.13.1",
@@ -5187,7 +5214,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-cfg"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "anyhow",
  "serde",
@@ -5200,7 +5227,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-engine"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "anyhow",
  "log",
@@ -5213,7 +5240,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-font"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "anyhow",
  "cairo-rs 0.22.0",
@@ -5245,7 +5272,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-font-config"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "bitflags 2.13.1",
  "lazy_static",
@@ -5255,7 +5282,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-fontconfig"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "libc",
  "pkg-config",
@@ -5263,7 +5290,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-freetype"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "cc",
  "fixed",
@@ -5271,7 +5298,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-gpu"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -5291,7 +5318,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-grid"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "sonicterm-types",
  "unicode-width",
@@ -5299,7 +5326,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-harfbuzz"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "cc",
  "sonicterm-freetype",
@@ -5307,7 +5334,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-io"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -5326,7 +5353,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-logging"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "chrono",
  "enum-map",
@@ -5342,13 +5369,15 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-mac"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "anyhow",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
+ "objc2-core-services",
  "objc2-foundation 0.3.2",
  "raw-window-handle",
+ "roxmltree",
  "sonicterm-app",
  "sonicterm-app-core",
  "sonicterm-cfg",
@@ -5358,7 +5387,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-mux"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "anyhow",
  "bincode",
@@ -5375,7 +5404,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-render-model"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "sonicterm-cfg",
  "sonicterm-grid",
@@ -5385,7 +5414,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-resource"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "enum-map",
  "parking_lot",
@@ -5394,7 +5423,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-text"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "bytemuck",
  "fontdb",
@@ -5406,7 +5435,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-types"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "bitflags 2.13.1",
  "enum-map",
@@ -5416,7 +5445,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-ui"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "anyhow",
  "fluent-bundle",
@@ -5436,7 +5465,7 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-vt"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "crossbeam-channel",
  "memchr",
@@ -5448,11 +5477,12 @@ dependencies = [
 
 [[package]]
 name = "sonicterm-windows"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "anyhow",
  "muda",
  "raw-window-handle",
+ "roxmltree",
  "serde_json",
  "sonicterm-app",
  "sonicterm-app-core",

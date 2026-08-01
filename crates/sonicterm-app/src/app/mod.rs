@@ -1352,6 +1352,8 @@ pub enum UserEvent {
     /// [`crate::menubar_bridge`] buffer; this variant is just the
     /// wake-up signal so the loop drains it.
     MenuAction,
+    /// Script-file open requests were queued by a platform boundary.
+    OpenScripts,
     /// A platform OS-drag drop landed and stashed payloads in
     /// [`crate::os_drag_bridge`]. The variant is just the wake-up
     /// signal so the loop drains the queues — separate from
@@ -1399,6 +1401,11 @@ pub enum UserEvent {
         /// determined. `None` is not a crash — it holds the pane open, the
         /// same as an unclean exit.
         was_clean: Option<bool>,
+    },
+    /// A script path could not be represented safely for the active shell.
+    ScriptDraftRejected {
+        /// User-facing explanation of why no draft was inserted.
+        message: String,
     },
     /// A bounded PTY input enqueue failed. Retains the rejected bytes until
     /// the event-loop thread can show a user-actionable notification.
@@ -1459,6 +1466,7 @@ mod misc;
 pub mod os_drag;
 mod overlays;
 mod pane_exit;
+mod pane_launch;
 mod quit_hold;
 mod redraw_target;
 mod render_timing;

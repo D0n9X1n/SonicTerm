@@ -49,6 +49,19 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key>       <string>sonicterm-mac</string>
     <key>CFBundleIconFile</key>         <string>sonic</string>
     <key>CFBundlePackageType</key>      <string>APPL</string>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key> <string>Shell Script</string>
+            <key>CFBundleTypeRole</key> <string>Shell</string>
+            <key>LSHandlerRank</key>    <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.shell-script</string>
+                <string>com.apple.terminal.shell-script</string>
+            </array>
+        </dict>
+    </array>
     <key>LSMinimumSystemVersion</key>   <string>14.0</string>
     <key>ATSApplicationFontsPath</key>  <string>Fonts</string>
     <key>NSHighResolutionCapable</key>  <true/>

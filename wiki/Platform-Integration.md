@@ -50,6 +50,18 @@ The native menu is built after the AppKit event loop is active. An Objective-C
 target receives selectors, maps menu tags to cross-platform `Action`s, and posts
 them through the event-loop proxy. AppKit calls stay on the main thread.
 
+### Script-file open events
+
+The packaged app advertises `public.shell-script` and
+`com.apple.terminal.shell-script` with `LSHandlerRank=Alternate`. A
+process-lifetime observer installs the `kAEOpenDocuments` handler during
+`NSApplicationWillFinishLaunchingNotification`, after AppKit installs its
+default handlers but before cold-launch documents arrive. The callback copies
+file paths into the shared FIFO and wakes winit when a proxy exists; window and
+PTY work stays on the event-loop thread. Cold multi-file opens create ordered
+tabs without an extra blank tab, and later events append tabs. macOS has no
+global default-terminal selector.
+
 ### Tab drag
 
 The macOS OS-handoff backend uses the general NSPasteboard with the private type
@@ -84,6 +96,18 @@ opened. A private command-line payload supports cross-process tab tear-out.
 The window-ready callback runs after the HWND is valid. This is where native
 menu, backdrop, taskbar icon, and drag/drop hooks that require a window handle
 must be installed.
+
+### Script-file command line
+
+The installed executable accepts one lossless `--open-script <PATH>` argument.
+The path is resolved against the process's initial cwd before pane creation and
+queued before `WindowsShell::run`, so cold startup creates the script tab rather
+than an unrelated HOME tab. A separate no-window
+`--refresh-shell-associations` mode broadcasts `SHCNE_ASSOCCHANGED` for the MSI.
+The MSI registers ProgIDs, Default Apps capabilities, and `OpenWithProgids` for
+`.ps1`, `.cmd`, `.bat`, and `.sh`; it never writes an extension default or
+`UserChoice`. This is file-handler integration, not Windows' global **Default
+terminal application** protocol.
 
 ### Menu and window appearance
 
@@ -204,6 +228,15 @@ flowchart TD
 原生菜单在 AppKit 事件循环可用后构建。Objective-C target 接收 selector，把菜单 tag 映射为
 跨平台 `Action`，再经 event-loop proxy 发送。AppKit 调用保持在主线程。
 
+### 脚本文件打开事件
+
+打包后的应用以 `LSHandlerRank=Alternate` 声明 `public.shell-script` 与
+`com.apple.terminal.shell-script`。进程级 observer 在
+`NSApplicationWillFinishLaunchingNotification` 阶段安装 `kAEOpenDocuments` handler：
+此时 AppKit 已安装默认 handler，而冷启动文档事件尚未到达。callback 只把路径复制到共享
+FIFO，并在 proxy 可用时唤醒 winit；窗口和 PTY 工作仍由事件循环线程执行。冷启动多文件会按顺序
+创建标签页且不额外创建空白标签页，后续事件则追加标签页。macOS 不存在全局默认终端选择器。
+
 ### 标签页拖动
 
 macOS 的 OS handoff backend 使用 general NSPasteboard 私有类型
@@ -231,6 +264,15 @@ Windows 在 winit 创建 HWND 前设置 per-monitor-v2 DPI awareness。release b
 
 window-ready callback 在 HWND 有效后执行；需要 window handle 的原生菜单、backdrop、taskbar icon 和拖放 hook
 必须在这里安装。
+
+### 脚本文件命令行
+
+安装后的 executable 接受一个无损的 `--open-script <PATH>` 参数。路径会在创建窗格前，
+相对进程初始 cwd 解析，并在 `WindowsShell::run` 前进入队列，因此冷启动会创建脚本标签页，
+而不是无关的 HOME 标签页。另有不创建窗口的 `--refresh-shell-associations` 模式，供 MSI
+广播 `SHCNE_ASSOCCHANGED`。MSI 为 `.ps1`、`.cmd`、`.bat`、`.sh` 注册 ProgID、
+Default Apps capabilities 与 `OpenWithProgids`；它不会写扩展名默认值或 `UserChoice`。
+这是文件处理程序集成，不是 Windows 全局**默认终端应用**协议。
 
 ### 菜单与窗口外观
 

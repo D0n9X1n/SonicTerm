@@ -181,8 +181,47 @@ fn powershell_interactive_args_force_utf8_codepage() {
 }
 
 #[test]
-fn shell_spawn_opts_default_has_no_shell_override() {
-    assert_eq!(ShellSpawnOpts::default().shell, None);
+fn shell_spawn_opts_default_has_no_shell_or_cwd_override() {
+    let opts = ShellSpawnOpts::default();
+    assert_eq!(opts.shell, None);
+    assert_eq!(opts.cwd, None);
+}
+
+#[test]
+fn explicit_child_cwd_overrides_home() {
+    let explicit = std::env::temp_dir();
+    let mut builder = CommandBuilder::new("sh");
+    apply_child_cwd(&mut builder, Some(&explicit), Some("/home/fallback"));
+    assert_eq!(builder.get_cwd().map(Path::new), Some(explicit.as_path()));
+}
+
+#[test]
+fn child_cwd_uses_home_only_without_an_override() {
+    let mut builder = CommandBuilder::new("sh");
+    apply_child_cwd(&mut builder, None, Some("/home/fallback"));
+    assert_eq!(builder.get_cwd().map(Path::new), Some(Path::new("/home/fallback")));
+}
+
+#[test]
+fn child_cwd_remains_unset_without_override_or_home() {
+    let mut builder = CommandBuilder::new("sh");
+    apply_child_cwd(&mut builder, None, None);
+    assert_eq!(builder.get_cwd(), None);
+}
+
+#[test]
+fn unusable_explicit_child_cwd_falls_back_to_home() {
+    let missing = std::env::temp_dir().join(format!(
+        "sonicterm-missing-cwd-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&missing);
+    let mut builder = CommandBuilder::new("sh");
+
+    apply_child_cwd(&mut builder, Some(&missing), Some("/home/fallback"));
+
+    assert_eq!(builder.get_cwd().map(Path::new), Some(Path::new("/home/fallback")));
 }
 
 #[test]
