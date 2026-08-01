@@ -70,3 +70,6 @@ path-guid    = "8F8A7D4E-4F6A-4F2E-AE3C-7A9D7D6E3F22"
 license      = false
 eula         = false
 product-icon = "../../assets/icons/exports/sonic.ico"
+
+[dev-dependencies]
+roxmltree = "0.20"

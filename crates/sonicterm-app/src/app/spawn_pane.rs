@@ -106,7 +106,11 @@ pub(super) fn report_pane_exit(
 }
 
 impl App {
-    pub(super) fn spawn_pane(&self, pane_id: u64) -> PaneState {
+    pub(super) fn spawn_pane(
+        &self,
+        pane_id: u64,
+        launch: &super::pane_launch::PaneLaunch,
+    ) -> PaneState {
         let (cols, rows) = self.main_renderer().map(|r| r.cells()).unwrap_or((80, 24));
         let (reply_tx, reply_rx) =
             crossbeam_channel::bounded::<Vec<u8>>(super::PTY_REPLY_QUEUE_CAPACITY);
@@ -149,13 +153,29 @@ impl App {
         let pty = match PtyHandle::spawn_default_shell(
             cols,
             rows,
-            sonicterm_io::pty::ShellSpawnOpts {
-                term_program: self.config.terminal.term_program.clone(),
-                shell: self.config.terminal.shell.clone(),
-                ..sonicterm_io::pty::ShellSpawnOpts::default()
-            },
+            launch.shell_spawn_opts(
+                self.config.terminal.term_program.clone(),
+                self.config.terminal.shell.clone(),
+            ),
         ) {
             Ok(pty) => {
+                match launch.draft_for_shell(pty.shell_program_path()) {
+                    Ok(Some(draft)) => {
+                        Self::queue_pty_input(
+                            self.event_loop_proxy.as_ref(),
+                            &pty,
+                            draft.into_bytes(),
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(rejection) => {
+                        let message = launch.draft_rejection_message(rejection);
+                        tracing::warn!(%message);
+                        if let Some(proxy) = self.event_loop_proxy.as_ref() {
+                            let _ = proxy.send_event(UserEvent::ScriptDraftRejected { message });
+                        }
+                    }
+                }
                 let parser_clone = parser.clone();
                 let out_rx = pty.out_rx.clone();
                 // Cloned before the loop takes ownership: the probe is what
@@ -508,7 +528,7 @@ impl App {
 impl App {
     pub(super) fn split_active(&mut self, dir: Direction) {
         let new_id = next_pane_id();
-        let new_pane = self.spawn_pane(new_id);
+        let new_pane = self.spawn_pane(new_id, &super::pane_launch::PaneLaunch::default());
         let did_split = {
             let Some(ws) = self.main_mut() else { return };
             let i = ws.tabs.active_index();

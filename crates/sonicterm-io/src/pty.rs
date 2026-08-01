@@ -4,9 +4,7 @@
 //! directly. `PtyHandle` owns the slave-side child and the master read/write
 //! pair, all decoupled by channels for use from the render thread.
 
-use std::path::Path;
-#[cfg(target_os = "windows")]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::{
     io::{Read, Write},
     sync::{
@@ -690,6 +688,8 @@ pub struct ShellSpawnOpts {
     /// `Some(non-empty)`, this is spawned verbatim instead of the
     /// platform default. `None` / empty → auto-detect.
     pub shell: Option<String>,
+    /// Working-directory override. `None` preserves the existing `$HOME` fallback.
+    pub cwd: Option<PathBuf>,
 }
 
 impl ShellSpawnOpts {
@@ -699,7 +699,12 @@ impl ShellSpawnOpts {
 
 impl Default for ShellSpawnOpts {
     fn default() -> Self {
-        Self { clean_e2e: false, term_program: Self::DEFAULT_TERM_PROGRAM.to_string(), shell: None }
+        Self {
+            clean_e2e: false,
+            term_program: Self::DEFAULT_TERM_PROGRAM.to_string(),
+            shell: None,
+            cwd: None,
+        }
     }
 }
 
@@ -960,6 +965,14 @@ fn close_master_with_drain(
     close_finished
 }
 
+fn apply_child_cwd(builder: &mut CommandBuilder, explicit: Option<&Path>, home: Option<&str>) {
+    if let Some(cwd) = explicit.filter(|cwd| cwd.is_dir()) {
+        builder.cwd(cwd);
+    } else if let Some(home) = home {
+        builder.cwd(home);
+    }
+}
+
 impl PtyHandle {
     /// Spawn the user's default shell.
     ///
@@ -1008,9 +1021,8 @@ impl PtyHandle {
         for a in args {
             builder.arg(a);
         }
-        if let Ok(home) = std::env::var("HOME") {
-            builder.cwd(home);
-        }
+        let home = std::env::var("HOME").ok();
+        apply_child_cwd(&mut builder, opts.cwd.as_deref(), home.as_deref());
         apply_child_pty_env(&mut builder, &opts.term_program);
 
         let child = pair.slave.spawn_command(builder)?;

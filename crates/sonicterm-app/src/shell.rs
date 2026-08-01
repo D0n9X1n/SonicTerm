@@ -169,6 +169,7 @@ impl MacShell {
         let proxy = event_loop.create_proxy();
         crate::menubar_bridge::install_proxy(proxy.clone());
         crate::os_drag_bridge::install_proxy(proxy.clone());
+        crate::open_script_bridge::install_proxy(proxy.clone());
 
         let mut app = App::new_with_proxy_and_machine(theme, config, keymap, Some(proxy), machine);
         app.theme_loader = theme_loader;
@@ -312,6 +313,7 @@ impl WindowsShell {
         // required so OLE drop callbacks can wake the loop.
         crate::menubar_bridge::install_proxy(proxy.clone());
         crate::os_drag_bridge::install_proxy(proxy.clone());
+        crate::open_script_bridge::install_proxy(proxy.clone());
 
         let mut app = App::new_with_proxy_and_machine(theme, config, keymap, Some(proxy), machine);
         app.theme_loader = theme_loader;

@@ -190,6 +190,9 @@ impl App {
     pub(super) fn do_user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::MenuAction => self.drain_menubar_actions(el),
+            UserEvent::OpenScripts => {
+                self.drain_open_script_requests();
+            }
             UserEvent::OsDrag => self.drain_os_drag(),
             UserEvent::DragMoved => {
                 let _ = self.handle_os_drag_moved();
@@ -208,6 +211,9 @@ impl App {
             }
             UserEvent::PaneProcessExited { pane_id, was_clean } => {
                 self.handle_pane_process_exited(pane_id, was_clean);
+            }
+            UserEvent::ScriptDraftRejected { message } => {
+                self.handle_script_draft_rejected(message);
             }
             UserEvent::PtyInputRejected { bytes, reason } => {
                 self.show_notification_for_kind(
@@ -231,6 +237,14 @@ impl App {
         self.drain_pending_os_teardown();
     }
 
+    pub(super) fn handle_script_draft_rejected(&mut self, message: String) {
+        self.show_notification_for_kind(
+            self.frontmost_kind(),
+            sonicterm_ui::overlays::NotificationLevel::Warning,
+            message,
+        );
+    }
+
     /// Drain a `UserEvent::ClearShapeCache` (P4 follow-up):
     /// an async font fallback family just landed in
     /// [`sonicterm_text::async_fallback::AsyncFallbackLoader`]. Clear every
@@ -246,6 +260,33 @@ impl App {
                 r.clear_shape_cache();
                 child.request_redraw();
             }
+        }
+    }
+
+    pub(super) fn drain_open_script_requests(&mut self) -> usize {
+        if self.main().is_none() {
+            return 0;
+        }
+        let requests = crate::open_script_bridge::drain();
+        let count = requests.len();
+        for request in requests {
+            let title = request
+                .launch_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("script")
+                .to_string();
+            self.new_tab_with_launch(title, super::pane_launch::PaneLaunch::for_script(request));
+        }
+        if count > 0 && self.main_is_hidden() {
+            self.show_main_window();
+        }
+        count
+    }
+
+    pub(super) fn seed_initial_tabs(&mut self) {
+        if self.drain_open_script_requests() == 0 {
+            self.new_tab("shell");
         }
     }
 
@@ -462,8 +503,9 @@ impl App {
         };
         self.insert_window_registered(main_id, shadow);
 
-        // Seed the first tab + pane now that the window + renderer exist.
-        self.new_tab("shell");
+        // Seed script-file tabs when launch events arrived before the window;
+        // otherwise preserve the normal one-shell startup.
+        self.seed_initial_tabs();
         self.drain_pending_os_drag_payloads();
 
         let (rc, rr) = self.main_renderer().map(|r| r.cells()).unwrap_or((0, 0));

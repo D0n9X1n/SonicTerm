@@ -4,6 +4,9 @@
 // TODO: add per-item docs and switch to #![deny(missing_docs)].
 #![allow(missing_docs)]
 
+#[cfg(test)]
+mod bundle_manifest;
+
 #[cfg(target_os = "macos")]
 pub mod menubar;
 

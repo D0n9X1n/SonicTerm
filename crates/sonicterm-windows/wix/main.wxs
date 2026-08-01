@@ -51,6 +51,49 @@
                             KeyPath='yes'/>
                     </Component>
 
+
+                    <Component Id='script_progids' Guid='C1A21A01-0000-0000-0000-000000000105' Win64='yes'>
+                        <RegistryValue Root='HKLM' Key='Software\Classes\SonicTerm.ps1' Type='string' Value='PowerShell Script' KeyPath='yes'/>
+                        <RegistryValue Root='HKLM' Key='Software\Classes\SonicTerm.ps1' Name='FriendlyTypeName' Type='string' Value='PowerShell Script'/>
+                        <RegistryValue Root='HKLM' Key='Software\Classes\SonicTerm.ps1\DefaultIcon' Type='string' Value='&quot;[APPLICATIONFOLDER]sonicterm-windows.exe&quot;,0'/>
+                        <RegistryValue Root='HKLM' Key='Software\Classes\SonicTerm.ps1\shell\open\command' Type='string' Value='&quot;[APPLICATIONFOLDER]sonicterm-windows.exe&quot; --open-script &quot;%1&quot;'/>
+                        <RemoveRegistryKey Id='RemoveSonicTermPs1ProgId' Root='HKLM' Key='Software\Classes\SonicTerm.ps1' Action='removeOnUninstall'/>
+                        <RegistryValue Root='HKLM' Key='Software\Classes\SonicTerm.cmd' Type='string' Value='Windows Command Script'/>
+                        <RegistryValue Root='HKLM' Key='Software\Classes\SonicTerm.cmd' Name='FriendlyTypeName' Type='string' Value='Windows Command Script'/>
+                        <RegistryValue Root='HKLM' Key='Software\Classes\SonicTerm.cmd\DefaultIcon' Type='string' Value='&quot;[APPLICATIONFOLDER]sonicterm-windows.exe&quot;,0'/>
+                        <RegistryValue Root='HKLM' Key='Software\Classes\SonicTerm.cmd\shell\open\command' Type='string' Value='&quot;[APPLICATIONFOLDER]sonicterm-windows.exe&quot; --open-script &quot;%1&quot;'/>
+                        <RemoveRegistryKey Id='RemoveSonicTermCmdProgId' Root='HKLM' Key='Software\Classes\SonicTerm.cmd' Action='removeOnUninstall'/>
+                        <RegistryValue Root='HKLM' Key='Software\Classes\SonicTerm.bat' Type='string' Value='Windows Batch File'/>
+                        <RegistryValue Root='HKLM' Key='Software\Classes\SonicTerm.bat' Name='FriendlyTypeName' Type='string' Value='Windows Batch File'/>
+                        <RegistryValue Root='HKLM' Key='Software\Classes\SonicTerm.bat\DefaultIcon' Type='string' Value='&quot;[APPLICATIONFOLDER]sonicterm-windows.exe&quot;,0'/>
+                        <RegistryValue Root='HKLM' Key='Software\Classes\SonicTerm.bat\shell\open\command' Type='string' Value='&quot;[APPLICATIONFOLDER]sonicterm-windows.exe&quot; --open-script &quot;%1&quot;'/>
+                        <RemoveRegistryKey Id='RemoveSonicTermBatProgId' Root='HKLM' Key='Software\Classes\SonicTerm.bat' Action='removeOnUninstall'/>
+                        <RegistryValue Root='HKLM' Key='Software\Classes\SonicTerm.sh' Type='string' Value='Shell Script'/>
+                        <RegistryValue Root='HKLM' Key='Software\Classes\SonicTerm.sh' Name='FriendlyTypeName' Type='string' Value='Shell Script'/>
+                        <RegistryValue Root='HKLM' Key='Software\Classes\SonicTerm.sh\DefaultIcon' Type='string' Value='&quot;[APPLICATIONFOLDER]sonicterm-windows.exe&quot;,0'/>
+                        <RegistryValue Root='HKLM' Key='Software\Classes\SonicTerm.sh\shell\open\command' Type='string' Value='&quot;[APPLICATIONFOLDER]sonicterm-windows.exe&quot; --open-script &quot;%1&quot;'/>
+                        <RemoveRegistryKey Id='RemoveSonicTermShProgId' Root='HKLM' Key='Software\Classes\SonicTerm.sh' Action='removeOnUninstall'/>
+                    </Component>
+
+                    <Component Id='script_capabilities' Guid='C1A21A01-0000-0000-0000-000000000106' Win64='yes'>
+                        <RegistryValue Root='HKLM' Key='Software\SonicTerm\SonicTerm\Capabilities' Name='ApplicationDescription' Type='string' Value='GPU-accelerated terminal for safely opening shell scripts' KeyPath='yes'/>
+                        <RegistryValue Root='HKLM' Key='Software\SonicTerm\SonicTerm\Capabilities' Name='ApplicationName' Type='string' Value='SonicTerm'/>
+                        <RegistryValue Root='HKLM' Key='Software\SonicTerm\SonicTerm\Capabilities' Name='ApplicationIcon' Type='string' Value='&quot;[APPLICATIONFOLDER]sonicterm-windows.exe&quot;,0'/>
+                        <RegistryValue Root='HKLM' Key='Software\SonicTerm\SonicTerm\Capabilities\FileAssociations' Name='.ps1' Type='string' Value='SonicTerm.ps1'/>
+                        <RegistryValue Root='HKLM' Key='Software\SonicTerm\SonicTerm\Capabilities\FileAssociations' Name='.cmd' Type='string' Value='SonicTerm.cmd'/>
+                        <RegistryValue Root='HKLM' Key='Software\SonicTerm\SonicTerm\Capabilities\FileAssociations' Name='.bat' Type='string' Value='SonicTerm.bat'/>
+                        <RegistryValue Root='HKLM' Key='Software\SonicTerm\SonicTerm\Capabilities\FileAssociations' Name='.sh' Type='string' Value='SonicTerm.sh'/>
+                        <RegistryValue Root='HKLM' Key='Software\RegisteredApplications' Name='SonicTerm' Type='string' Value='Software\SonicTerm\SonicTerm\Capabilities'/>
+                        <RemoveRegistryKey Id='RemoveSonicTermCapabilities' Root='HKLM' Key='Software\SonicTerm\SonicTerm\Capabilities' Action='removeOnUninstall'/>
+                    </Component>
+
+                    <Component Id='script_open_with' Guid='C1A21A01-0000-0000-0000-000000000107' Win64='yes'>
+                        <RegistryValue Root='HKLM' Key='Software\Classes\.ps1\OpenWithProgids' Name='SonicTerm.ps1' Type='string' Value='' KeyPath='yes'/>
+                        <RegistryValue Root='HKLM' Key='Software\Classes\.cmd\OpenWithProgids' Name='SonicTerm.cmd' Type='string' Value=''/>
+                        <RegistryValue Root='HKLM' Key='Software\Classes\.bat\OpenWithProgids' Name='SonicTerm.bat' Type='string' Value=''/>
+                        <RegistryValue Root='HKLM' Key='Software\Classes\.sh\OpenWithProgids' Name='SonicTerm.sh' Type='string' Value=''/>
+                    </Component>
+
                     <Directory Id='AssetsDir' Name='assets'>
                         <Directory Id='AssetsThemesDir' Name='themes'>
                             <Component Id='asset_themes' Guid='C1A21A01-0000-0000-0000-000000000101' Win64='yes'>
@@ -136,6 +179,9 @@
             Display='expand'
             Absent='disallow'>
             <ComponentRef Id='binary0'/>
+            <ComponentRef Id='script_progids'/>
+            <ComponentRef Id='script_capabilities'/>
+            <ComponentRef Id='script_open_with'/>
             <ComponentRef Id='asset_themes'/>
             <ComponentRef Id='asset_keymaps'/>
             <ComponentRef Id='asset_fonts'/>
@@ -143,6 +189,39 @@
             <ComponentRef Id='start_menu_shortcut'/>
             <ComponentRef Id='desktop_shortcut'/>
         </Feature>
+
+
+        <CustomAction Id='RollbackRefreshShellAssociationsInstall'
+            FileKey='exe0'
+            ExeCommand='--refresh-shell-associations'
+            Execute='rollback'
+            Impersonate='yes'
+            Return='ignore'/>
+        <CustomAction Id='RefreshShellAssociationsInstall'
+            FileKey='exe0'
+            ExeCommand='--refresh-shell-associations'
+            Execute='deferred'
+            Impersonate='yes'
+            Return='ignore'/>
+        <CustomAction Id='RollbackRefreshShellAssociationsUninstall'
+            FileKey='exe0'
+            ExeCommand='--refresh-shell-associations'
+            Execute='rollback'
+            Impersonate='yes'
+            Return='ignore'/>
+        <CustomAction Id='RefreshShellAssociationsUninstall'
+            FileKey='exe0'
+            ExeCommand='--refresh-shell-associations'
+            Execute='deferred'
+            Impersonate='yes'
+            Return='ignore'/>
+
+        <InstallExecuteSequence>
+            <Custom Action='RollbackRefreshShellAssociationsInstall' After='WriteRegistryValues'>NOT Installed</Custom>
+            <Custom Action='RefreshShellAssociationsInstall' After='RollbackRefreshShellAssociationsInstall'>NOT Installed</Custom>
+            <Custom Action='RollbackRefreshShellAssociationsUninstall' After='RemoveRegistryValues'>REMOVE=&quot;ALL&quot;</Custom>
+            <Custom Action='RefreshShellAssociationsUninstall' After='RollbackRefreshShellAssociationsUninstall'>REMOVE=&quot;ALL&quot;</Custom>
+        </InstallExecuteSequence>
 
         <Property Id='INSTALLDESKTOPSHORTCUT' Value='1'/>
         <SetProperty Id='ARPINSTALLLOCATION' Value='[APPLICATIONFOLDER]' After='CostFinalize'/>

@@ -49,3 +49,55 @@ fn repeated_payload_uses_the_last_value() {
     ];
     assert_eq!(parse_cli_from(args).unwrap().tearout, Some(last));
 }
+
+#[test]
+fn open_script_preserves_spaces_and_unicode_as_an_os_path() {
+    let parsed = parse_cli_from(["sonicterm", "--open-script", "C:/work folder/脚本.ps1"]).unwrap();
+    assert_eq!(parsed.open_script, Some(std::path::PathBuf::from("C:/work folder/脚本.ps1")));
+}
+
+#[test]
+fn open_script_rejects_missing_repeated_and_tearout_conflicts() {
+    let err = parse_cli_from(["sonicterm", "--open-script"]).unwrap_err();
+    assert!(err.to_string().contains("requires a path argument"));
+
+    let err = parse_cli_from(["sonicterm", "--open-script", "one.ps1", "--open-script", "two.ps1"])
+        .unwrap_err();
+    assert!(err.to_string().contains("may be provided only once"));
+
+    let json = payload("one").to_json().unwrap();
+    let err = parse_cli_from([
+        std::ffi::OsString::from("sonicterm"),
+        std::ffi::OsString::from("--open-script"),
+        std::ffi::OsString::from("one.ps1"),
+        std::ffi::OsString::from("--tear-out-payload"),
+        std::ffi::OsString::from(json),
+    ])
+    .unwrap_err();
+    assert!(err.to_string().contains("cannot be combined"));
+}
+
+#[test]
+fn refresh_flag_is_parsed_without_changing_unknown_argument_tolerance() {
+    let parsed =
+        parse_cli_from(["sonicterm", "--unknown", "value", "--refresh-shell-associations"])
+            .unwrap();
+    assert!(parsed.refresh_shell_associations);
+    assert!(parsed.open_script.is_none());
+    assert!(parsed.tearout.is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn open_script_preserves_non_utf8_os_strings() {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    let raw = b"/tmp/script-\xff.sh".to_vec();
+    let parsed = parse_cli_from([
+        std::ffi::OsString::from("sonicterm"),
+        std::ffi::OsString::from("--open-script"),
+        std::ffi::OsString::from_vec(raw.clone()),
+    ])
+    .unwrap();
+    assert_eq!(parsed.open_script.unwrap().as_os_str().as_bytes(), raw);
+}

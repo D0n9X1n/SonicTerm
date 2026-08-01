@@ -38,6 +38,28 @@ Windows deliberately uses `Alt` as the application modifier so common
 applications. A few familiar compatibility aliases such as `Ctrl+T`,
 `Ctrl+Shift+C`, and `Ctrl+Shift+V` are also bundled.
 
+### Opening script files
+
+Installed builds can be selected as a handler for runnable script files. On
+macOS, choose SonicTerm from Finder's **Open With** menu for `.sh`, `.command`,
+or `.tool`. On Windows, choose SonicTerm in **Open with** or **Default apps**
+for `.ps1`, `.cmd`, `.bat`, or `.sh`. Installation only makes SonicTerm a
+candidate; it does not replace the current default.
+
+Opening a supported file creates a tab in the script's parent directory and
+places a safely quoted command at the prompt **without pressing Enter**. Review,
+edit, or clear it before submitting. Unsupported shell/script combinations and
+unsafe paths still open the tab but show a warning instead of inserting a
+command. Windows opens one new SonicTerm process per association invocation;
+macOS sends later files to the running app and appends tabs.
+
+This is a draft-input feature, not a sandbox. Shell startup files run before the
+prompt and can read or evaluate PTY input themselves. A profile that performs a
+fixed-length read followed by `eval` can execute or swallow the draft without
+Enter; users with such startup code should not select SonicTerm as a script
+handler. SonicTerm itself never invokes the script or an interpreter for the
+open action and appends no submit/control byte.
+
 ### Tabs, panes, and windows
 
 Each pane owns a separate child PTY. A tab can contain a split-pane tree, and
@@ -110,6 +132,23 @@ set to avoid duplicate input.
 Windows 特意使用 `Alt` 作为应用级修饰键，使常见的 `Ctrl+<字母>` 仍可传给
 PowerShell、cmd、readline 和终端程序。同时保留 `Ctrl+T`、`Ctrl+Shift+C`、
 `Ctrl+Shift+V` 等常见兼容别名。
+
+### 打开脚本文件
+
+安装后的 SonicTerm 可被用户选作可执行脚本的处理程序。macOS 可在 Finder 的
+**打开方式**中为 `.sh`、`.command` 或 `.tool` 选择 SonicTerm；Windows 可在
+**打开方式**或**默认应用**中为 `.ps1`、`.cmd`、`.bat`、`.sh` 选择 SonicTerm。安装只声明候选资格，
+不会替换当前默认程序。
+
+打开受支持文件时，会在脚本父目录创建标签页，并把安全引用后的命令放到提示符中，
+**不会自动按下 Enter**。提交前可以检查、修改或清空。shell 与脚本类型不兼容、或路径
+无法安全表示时，标签页仍会打开，但只显示 warning，不会填入命令。Windows 每次文件
+关联调用会启动一个新的 SonicTerm 进程；macOS 会把后续文件发送给运行中的实例并追加标签页。
+
+该功能提供的是输入草稿，不是沙箱。shell 启动文件先于提示符运行，也可以自行读取或执行
+PTY 输入；例如定长 `read` 后接 `eval` 的配置，即使没有 Enter，也可能执行或吞掉草稿。
+有这类启动配置的用户不应把 SonicTerm 设为脚本处理程序。对于“打开”动作，SonicTerm
+自身不会调用脚本或解释器，也不会追加提交/控制字节。
 
 ### 标签页、窗格和窗口
 

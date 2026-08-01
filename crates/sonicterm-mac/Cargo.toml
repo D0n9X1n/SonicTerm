@@ -23,7 +23,16 @@ tracing.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSURL"] }
+objc2-foundation = { version = "0.3", features = [
+    "NSString",
+    "NSArray",
+    "NSURL",
+    "NSNotification",
+    "NSAppleEventDescriptor",
+    "NSAppleEventManager",
+    "objc2-core-services",
+] }
+objc2-core-services = "0.3"
 objc2-app-kit = { version = "0.3", features = [
     "NSPasteboard",
     "NSApplication",
@@ -37,3 +46,6 @@ raw-window-handle = { workspace = true }
 [[bin]]
 name = "sonicterm-mac"
 path = "src/main.rs"
+
+[dev-dependencies]
+roxmltree = "0.20"

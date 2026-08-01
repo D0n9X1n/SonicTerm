@@ -271,3 +271,163 @@ fn a_deferred_keystroke_waits_at_most_one_frame_period() {
         crate::app::SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn cold_script_requests_replace_the_blank_tab_and_late_requests_append() {
+    use sonicterm_types::OpenScriptRequest;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    let _guard = crate::open_script_bridge::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _ = crate::open_script_bridge::drain();
+
+    let dir = std::env::temp_dir().join(format!(
+        "sonicterm-cold-open-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let shell = dir.join("sh");
+    std::fs::write(&shell, "#!/bin/sh\nexec cat\n").unwrap();
+    let mut permissions = std::fs::metadata(&shell).unwrap().permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&shell, permissions).unwrap();
+
+    let request =
+        |name: &str| OpenScriptRequest::resolve(PathBuf::from(name), Path::new(&dir)).unwrap();
+    let first = request("first.sh");
+    let second = request("second.sh");
+    assert!(!crate::open_script_bridge::push_requests(vec![first, second]));
+
+    let mut config = Config::default();
+    config.terminal.shell = Some(shell.to_string_lossy().into_owned());
+    let mut app = App::new(Theme::default(), config, Keymap::default());
+    app.__test_synthetic_main();
+    app.seed_initial_tabs();
+    assert_eq!(app.__test_tab_count(), 2, "cold requests must not leave a blank tab");
+
+    let late = request("late.sh");
+    assert!(!crate::open_script_bridge::push_requests(vec![late]));
+    assert_eq!(app.drain_open_script_requests(), 1);
+    assert_eq!(app.__test_tab_count(), 3, "late opens append one tab");
+    assert_eq!(app.drain_open_script_requests(), 0, "requests drain exactly once");
+
+    drop(app);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn startup_without_script_requests_keeps_the_normal_blank_tab() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _guard = crate::open_script_bridge::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _ = crate::open_script_bridge::drain();
+    let dir = std::env::temp_dir().join(format!(
+        "sonicterm-normal-startup-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let shell = dir.join("sh");
+    std::fs::write(&shell, "#!/bin/sh\nexec cat\n").unwrap();
+    let mut permissions = std::fs::metadata(&shell).unwrap().permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&shell, permissions).unwrap();
+
+    let mut config = Config::default();
+    config.terminal.shell = Some(shell.to_string_lossy().into_owned());
+    let mut app = App::new(Theme::default(), config, Keymap::default());
+    app.__test_synthetic_main();
+    app.seed_initial_tabs();
+
+    assert_eq!(app.__test_tab_count(), 1);
+    drop(app);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn open_script_wake_before_window_readiness_keeps_requests_for_initial_tabs() {
+    use sonicterm_types::OpenScriptRequest;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    let _guard = crate::open_script_bridge::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _ = crate::open_script_bridge::drain();
+    let dir = std::env::temp_dir().join(format!(
+        "sonicterm-early-open-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let shell = dir.join("sh");
+    std::fs::write(&shell, "#!/bin/sh\nexec cat\n").unwrap();
+    let mut permissions = std::fs::metadata(&shell).unwrap().permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&shell, permissions).unwrap();
+
+    let request = OpenScriptRequest::resolve(PathBuf::from("early.sh"), Path::new(&dir)).unwrap();
+    assert!(!crate::open_script_bridge::push_requests(vec![request]));
+
+    let mut config = Config::default();
+    config.terminal.shell = Some(shell.to_string_lossy().into_owned());
+    let mut app = App::new(Theme::default(), config, Keymap::default());
+    assert_eq!(app.drain_open_script_requests(), 0, "pre-window wake must not drain the FIFO");
+
+    app.__test_synthetic_main();
+    app.seed_initial_tabs();
+    assert_eq!(app.__test_tab_count(), 1, "readiness must consume the retained request");
+    assert_eq!(app.drain_open_script_requests(), 0, "the retained request drains exactly once");
+
+    drop(app);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn late_script_open_reveals_a_drained_main_window() {
+    use sonicterm_types::OpenScriptRequest;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    let _guard = crate::open_script_bridge::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _ = crate::open_script_bridge::drain();
+    let dir = std::env::temp_dir().join(format!(
+        "sonicterm-hidden-main-open-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let shell = dir.join("sh");
+    std::fs::write(&shell, "#!/bin/sh\nexec cat\n").unwrap();
+    let mut permissions = std::fs::metadata(&shell).unwrap().permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&shell, permissions).unwrap();
+
+    let mut config = Config::default();
+    config.terminal.shell = Some(shell.to_string_lossy().into_owned());
+    let mut app = App::new(Theme::default(), config, Keymap::default());
+    app.__test_synthetic_main();
+    app.__test_set_main_hidden(true);
+    assert!(app.__test_main_hidden());
+
+    let request = OpenScriptRequest::resolve(PathBuf::from("visible.sh"), Path::new(&dir)).unwrap();
+    assert!(!crate::open_script_bridge::push_requests(vec![request]));
+    assert_eq!(app.drain_open_script_requests(), 1);
+
+    assert!(!app.__test_main_hidden(), "a late open must reveal the main window");
+    assert_eq!(app.__test_tab_count(), 1);
+
+    drop(app);
+    std::fs::remove_dir_all(dir).unwrap();
+}

@@ -43,6 +43,11 @@ bash scripts/make-macos-dmg.sh \
   "$artifact_suffix"
 ```
 
+The generated `Info.plist` also declares `.sh`, `.command`, and `.tool`
+shell-document types at `Alternate` handler rank. This makes the installed app
+eligible for Finder's **Open With** without changing the user's current
+association.
+
 The app bundle is ad-hoc signed for internal consistency, but it is **not**
 signed with an Apple Developer ID and **not** notarized. A downloaded build can
 therefore show the normal unidentified-developer warning; use Finder's **Open**
@@ -80,6 +85,14 @@ Pop-Location
 **current process**, so it must be sourced in the same shell that runs the
 build. A separate shell will fail in `cairo-sys-rs` with "The pkg-config command
 could not be found."
+
+The MSI registers application-specific ProgIDs, Default Apps capabilities, and
+per-extension `OpenWithProgids` entries for `.ps1`, `.cmd`, `.bat`, and `.sh`.
+It does not set extension defaults or `UserChoice`. Install and uninstall each
+run the installed executable with `--refresh-shell-associations` after their
+registry mutation; that mode only broadcasts `SHCNE_ASSOCCHANGED` and opens no
+window. Uninstall removes SonicTerm's own values while leaving other handlers
+and user choices intact.
 
 `light.exe` may warn `LGHT1105: Validation could not run due to system policy`
 when the shell is not elevated. ICE validation is skipped; the MSI contents and
@@ -123,6 +136,9 @@ bash scripts/make-macos-dmg.sh \
   "$artifact_suffix"
 ```
 
+生成的 `Info.plist` 还以 `Alternate` handler rank 声明 `.sh`、`.command` 和
+`.tool` shell document type，使安装后的应用出现在 Finder **打开方式**中，但不会修改用户当前关联。
+
 该 app bundle 会施加 ad-hoc 签名以保证内部一致性，但**没有**使用
 Apple Developer ID 签名，也**没有**经过公证（notarize）。因此下载得到的构建
 可能会出现常见的「来自身份不明的开发者」提示；若 macOS 阻止首次启动，
@@ -158,6 +174,12 @@ Pop-Location
 **当前进程**，因此它必须在运行构建的同一个 shell 中被 source。
 换一个 shell 会导致 `cairo-sys-rs` 报错：
 「The pkg-config command could not be found.」
+
+MSI 为 `.ps1`、`.cmd`、`.bat`、`.sh` 注册应用专属 ProgID、Default Apps
+capabilities 和各扩展名的 `OpenWithProgids`，不会设置扩展名默认值或 `UserChoice`。
+安装与卸载会在 registry 修改完成后，以 `--refresh-shell-associations` 调用已安装 executable；
+该模式只广播 `SHCNE_ASSOCCHANGED`，不会打开窗口。卸载仅移除 SonicTerm 自己的值，
+保留其它 handler 和用户选择。
 
 当 shell 未以管理员权限运行时，`light.exe` 可能会警告
 `LGHT1105: Validation could not run due to system policy`。

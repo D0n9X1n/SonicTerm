@@ -1007,8 +1007,16 @@ impl App {
         }
     }
     pub(super) fn new_tab(&mut self, title: impl Into<String>) {
+        self.new_tab_with_launch(title, super::pane_launch::PaneLaunch::default());
+    }
+
+    pub(super) fn new_tab_with_launch(
+        &mut self,
+        title: impl Into<String>,
+        launch: super::pane_launch::PaneLaunch,
+    ) {
         let pane_id = next_pane_id();
-        let pane = self.spawn_pane(pane_id);
+        let pane = self.spawn_pane(pane_id, &launch);
         if let Some(ws) = self.main_mut() {
             ws.panes.insert(pane_id, pane);
             ws.tabs.push(Tab::new(title));
