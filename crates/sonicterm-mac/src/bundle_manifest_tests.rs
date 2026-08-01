@@ -29,7 +29,7 @@ fn dict_value<'a, 'input>(dict: Node<'a, 'input>, key: &str) -> Node<'a, 'input>
 
 #[test]
 fn info_plist_extraction_accepts_windows_line_endings() {
-    let crlf = MACOS_DMG_SCRIPT.replace('\n', "\r\n");
+    let crlf = MACOS_DMG_SCRIPT.replace("\r\n", "\n").replace('\n', "\r\n");
     assert_eq!(info_plist_xml_from(&crlf), info_plist_xml());
 }
 
