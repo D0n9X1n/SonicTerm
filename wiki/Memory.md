@@ -62,15 +62,46 @@ Both lines carry the byte figures involved.
 
 ### Reading what a session is holding
 
-Everything else is diagnostics and needs `debug`:
+The aggregate answer needs only `info`:
+
+```toml
+[logging]
+level = "info"
+```
+
+**`memory snapshot`** — one line at most every 30 seconds, carrying process,
+session, and renderer figures together. This is the record to reach for first,
+and the only one that survives a session nobody expected to have to explain:
+
+| Field group | What it covers | What you can do |
+| --- | --- | --- |
+| `process_*_bytes` | What the OS says the whole process holds | Compare against the session total — a large gap is allocator or driver memory, not retention |
+| `session_total_bytes` + seam fields | Everything the panes hold, summed | See the per-seam table below |
+| `renderer_total_bytes`, `renderers=` | Glyph and image atlases, software frame, per renderer | Close windows for `visible`; lower the warm-pool size for `warm` |
+| `*_delta` | Movement since the previous snapshot | Read the direction, not the magnitude |
+
+Three readings mean "no number" and they are not interchangeable.
+`unsupported` means this platform exposes no such figure — on macOS,
+private/committed is unsupported, because the meaningful figure there is
+`phys_footprint` and SonicTerm cannot reach it without guessing.
+`unavailable` on a delta means there was no previous sample to compare
+against. `panes_contended=N` means N panes were skipped because they were
+busy, so the session total is **partial**.
+
+**`process_virtual_bytes` is not consumption.** It is reserved address space,
+routinely in the hundreds of gigabytes for a GPU process, and routinely
+harmless. Compare `process_resident_bytes` and `session_total_bytes` when
+asking whether a session is actually large.
+
+The remaining detail is diagnostics and needs `debug`:
 
 ```toml
 [logging]
 level = "debug"
 ```
 
-Two lines are written at most once every 30 seconds, on the idle-wake path —
-a window that never wakes produces no samples.
+The detail pass runs at most once every 30 seconds. An idle session arms that
+sampling deadline itself, and a sampling-only wake does not request a redraw.
 
 **`pane retention`** — one per pane:
 
@@ -186,11 +217,12 @@ things, and the distinction matters when reading a snapshot:
   registering its owner are one operation.
 - **Charging always runs.** The pass that samples what a pane retains and moves
   its charges to match runs on the idle-wake path at every log level.
-- **Only the log lines are gated.** `debug` on `target="memory"` controls
-  whether the figures are written out, not whether they are collected.
+- **Only emission is gated.** `info` on `target="memory"` admits the aggregate
+  snapshot; `debug` additionally admits per-pane and allocation/release detail.
+  Neither level controls whether the figures are collected.
 
-So a session running at the default level is still fully accounted; you simply
-cannot see the numbers until you raise the level.
+So a session running at the default level is still fully accounted. Raise the
+level to `info` for the aggregate or `debug` for the diagnostic detail.
 
 ---
 
@@ -251,15 +283,42 @@ grep 'memory::reclaimed' ~/.sonicterm/logs/sonicterm.log
 
 ### 查看会话的实际占用
 
-其余内容均属诊断信息，需要 `debug` 级别：
+聚合结论只需要 `info` 级别：
+
+```toml
+[logging]
+level = "info"
+```
+
+**`memory snapshot`**——最多每 30 秒一行，同时承载进程、会话与渲染器数据。这是
+应当首先查看的记录，也是唯一能在“没人预料到需要解释”的会话中留存下来的记录：
+
+| 字段组 | 含义 | 可采取的措施 |
+| --- | --- | --- |
+| `process_*_bytes` | 操作系统所报告的整个进程占用 | 与会话总量对比——差距很大说明是分配器或驱动内存，而非保留量 |
+| `session_total_bytes` 及各接缝字段 | 所有窗格保留量的总和 | 参见下方按接缝划分的表格 |
+| `renderer_total_bytes`、`renderers=` | 每个渲染器的字形图集、图像图集与软件帧 | `visible` 可关闭窗口；`warm` 可调低预热池大小 |
+| `*_delta` | 相对上一次快照的变化 | 关注方向，而非绝对值 |
+
+有三种读数表示“没有数值”，且彼此不可互换。`unsupported` 表示该平台不提供此数据
+——在 macOS 上 private/committed 即为不支持，因为该平台上有意义的数据是
+`phys_footprint`，而 SonicTerm 无法在不猜测的前提下获取它。增量为
+`unavailable` 表示没有可供比较的上一次采样。`panes_contended=N` 表示有 N 个窗格
+因繁忙而被跳过，因此会话总量是**不完整的**。
+
+**`process_virtual_bytes` 不是实际占用。** 它是已保留的地址空间，对 GPU 进程而言
+常达数百 GB，且通常无害。判断会话是否真的很大时，应比较
+`process_resident_bytes` 与 `session_total_bytes`。
+
+其余明细属于诊断信息，需要 `debug` 级别：
 
 ```toml
 [logging]
 level = "debug"
 ```
 
-以下两行最多每 30 秒写入一次，且发生在空闲唤醒路径上——完全不唤醒的窗口不会
-产生任何采样。
+明细采样最多每 30 秒运行一次。空闲会话会自行安排采样截止时间，而仅用于采样的
+唤醒不会请求重绘。
 
 **`pane retention`**——每个面板一行：
 
@@ -362,8 +421,8 @@ flowchart TD
   所有者是同一个操作。
 - **记账始终运行。** 采样窗格保留量并相应调整其记账额的那一趟处理，运行在空闲
   唤醒路径上，在所有日志级别下都会执行。
-- **只有日志行受开关控制。** `target="memory"` 上的 `debug` 控制的是这些数字
-  是否被写出，而不是它们是否被收集。
+- **只有日志输出受开关控制。** `target="memory"` 上的 `info` 会接纳聚合快照；
+  `debug` 还会接纳按窗格与分配/释放明细。两者都不控制这些数字是否被收集。
 
-因此，运行在默认级别下的会话依然被完整记账；只是在提高日志级别之前，你看不到
-这些数字而已。
+因此，运行在默认级别下的会话依然被完整记账。把级别调到 `info` 可查看聚合快照，
+调到 `debug` 可查看诊断明细。

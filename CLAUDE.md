@@ -102,6 +102,7 @@ bash scripts/test-resource-inventory.sh
 bash scripts/test-resource-baseline-evidence.sh
 bash scripts/test-soak-harness.sh
 bash scripts/test-release-notes.sh
+bash scripts/test-wiki-publish.sh
 scripts/rust-logic-coverage.sh
 ```
 
@@ -262,38 +263,38 @@ The repository-tracked `wiki/` directory is the **only source of truth** for
 SonicTerm's documentation. Edit and review wiki pages in the same branch and
 pull request as the behavior they describe.
 
-The GitHub wiki is a **published mirror** of that directory. It is refreshed by
-hand, not by CI: publishing needs a credential that can push to the wiki remote,
-and storing one as an Actions secret would put a token with account-wide reach
-in reach of every workflow run. A manual publish keeps that credential out of
-the repository entirely.
+The GitHub wiki is a **published mirror** of that directory. The
+`publish-wiki.yml` workflow runs after every push to `main` — including every
+merged pull request — and on manual dispatch. It uses `scripts/publish-wiki.sh`
+to replace the flat Markdown page set, so renames and deletions are mirrored and
+an unchanged run is a successful no-op. The wiki's rendered branch is **`master`**,
+not `main`.
 
-**Publish after a `wiki/` change merges to `main`, not before.** Publishing from
-a branch puts unreviewed documentation on the public wiki. Sequence:
-
-```bash
-git checkout main && git pull origin main
-tmp="$(mktemp -d)"
-git clone "https://github.com/D0n9X1n/SonicTerm.wiki.git" "$tmp/wiki"
-rm -f "$tmp/wiki"/*.md          # carry deletions; the wiki is flat
-cp wiki/*.md "$tmp/wiki"/
-git -C "$tmp/wiki" add --all
-git -C "$tmp/wiki" diff --cached --quiet || \
-  git -C "$tmp/wiki" commit -m "docs: publish wiki from $(git rev-parse --short HEAD)"
-git -C "$tmp/wiki" push origin HEAD:master
-```
-
-Three details that matter:
-
-- The wiki's default branch is **`master`**, not `main`. Pushing to `main`
-  creates a branch that renders nowhere.
-- Deleting the `.md` files before copying is what carries deletions. Copying
-  alone leaves a page live after it is removed from `wiki/`.
-- Verify the push landed by reading the wiki, not by trusting the exit code.
+Publication uses the workflow's short-lived, repository-scoped
+`GITHUB_TOKEN` with `contents: write`; no PAT, GitHub App key, or long-lived
+secret is stored. Do not replace it with an account-wide classic PAT.
 
 Never edit the GitHub wiki directly. Edits made in its web UI are not tracked,
-are not reviewed, and are overwritten by the next publish. Do not maintain any
-other wiki repository, and do not add a CI workflow that publishes this one.
+are not reviewed, and are overwritten on the next publish. Do not maintain any
+other wiki repository or pull wiki content back into `wiki/`.
+
+A merged pull request is not complete until its wiki publication run is verified:
+
+```bash
+gh run list --workflow=publish-wiki.yml --limit 3
+gh run view <run-id>
+tmp="$(mktemp -d)"
+git clone "https://github.com/D0n9X1n/SonicTerm.wiki.git" "$tmp/wiki"
+git -C "$tmp/wiki" log -1 --oneline
+ls "$tmp/wiki"
+```
+
+The newest successful run must correspond to the merge SHA. When the source
+wiki changed, the newest wiki commit must correspond to that SHA; an unrelated
+merge is expected to complete as a successful no-op without a wiki commit.
+Inspect the live Wiki and click representative English and Chinese navigation
+links; a successful workflow exit alone does not prove that the published pages
+render or link correctly.
 
 ## WezTerm
 

@@ -1,0 +1,36 @@
+name: Publish wiki
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-wiki
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Clone wiki repository
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git clone \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git" \
+            wiki-repo
+
+      - name: Build wiki mirror
+        id: mirror
+        run: scripts/publish-wiki.sh wiki wiki-repo "$GITHUB_SHA"
+
+      - name: Push wiki mirror
+        if: steps.mirror.outputs.changed == 'true'
+        run: git -C wiki-repo push origin HEAD:master

@@ -57,6 +57,7 @@ pub struct MacShell {
     os_drag_sink: Option<Arc<dyn OsDragSink>>,
     os_drag_backend: Option<Box<dyn OsTabDragBackend>>,
     pending: Option<TabPayload>,
+    breadcrumb_recorder: Option<sonicterm_logging::breadcrumbs::BreadcrumbRecorder>,
     on_resumed: Option<Box<dyn FnOnce() + Send>>,
     /// one-shot hook fired the instant `create_window` returns
     /// with the raw AppKit window handle. The mac bin uses this slot
@@ -82,6 +83,7 @@ impl MacShell {
             os_drag_sink: None,
             os_drag_backend: None,
             pending: None,
+            breadcrumb_recorder: None,
             on_resumed: None,
             on_window_ready: None,
         }
@@ -122,6 +124,16 @@ impl MacShell {
         self
     }
 
+    /// Install the nonblocking postmortem breadcrumb recorder.
+    #[must_use]
+    pub fn with_breadcrumb_recorder(
+        mut self,
+        recorder: sonicterm_logging::breadcrumbs::BreadcrumbRecorder,
+    ) -> Self {
+        self.breadcrumb_recorder = Some(recorder);
+        self
+    }
+
     /// One-shot hook fired at the top of the first `resumed` tick —
     /// the mac bin uses it to install the native NSMenu once winit
     /// has built the AppKit event loop.
@@ -158,6 +170,7 @@ impl MacShell {
             os_drag_sink,
             os_drag_backend,
             pending,
+            breadcrumb_recorder,
             on_resumed,
             on_window_ready,
         } = self;
@@ -172,6 +185,9 @@ impl MacShell {
         crate::open_script_bridge::install_proxy(proxy.clone());
 
         let mut app = App::new_with_proxy_and_machine(theme, config, keymap, Some(proxy), machine);
+        if let Some(recorder) = breadcrumb_recorder {
+            app.set_breadcrumb_recorder(recorder);
+        }
         app.theme_loader = theme_loader;
         app.keymap_loader = keymap_loader;
         if let Some(sink) = os_drag_sink {
@@ -215,6 +231,7 @@ pub struct WindowsShell {
     os_drag_sink: Option<Arc<dyn OsDragSink>>,
     os_drag_backend: Option<Box<dyn OsTabDragBackend>>,
     pending: Option<TabPayload>,
+    breadcrumb_recorder: Option<sonicterm_logging::breadcrumbs::BreadcrumbRecorder>,
     on_window_ready: Option<Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send>>,
 }
 
@@ -235,6 +252,7 @@ impl WindowsShell {
             os_drag_sink: None,
             os_drag_backend: None,
             pending: None,
+            breadcrumb_recorder: None,
             on_window_ready: None,
         }
     }
@@ -273,6 +291,16 @@ impl WindowsShell {
         self
     }
 
+    /// Install the nonblocking postmortem breadcrumb recorder.
+    #[must_use]
+    pub fn with_breadcrumb_recorder(
+        mut self,
+        recorder: sonicterm_logging::breadcrumbs::BreadcrumbRecorder,
+    ) -> Self {
+        self.breadcrumb_recorder = Some(recorder);
+        self
+    }
+
     /// One-shot hook fired the instant `create_window` returns, with
     /// the raw `HWND` handle. The Windows bin uses this slot to
     /// install the muda menubar + apply DWM backdrop — both require
@@ -299,6 +327,7 @@ impl WindowsShell {
             os_drag_sink,
             os_drag_backend,
             pending,
+            breadcrumb_recorder,
             on_window_ready,
         } = self;
 
@@ -316,6 +345,9 @@ impl WindowsShell {
         crate::open_script_bridge::install_proxy(proxy.clone());
 
         let mut app = App::new_with_proxy_and_machine(theme, config, keymap, Some(proxy), machine);
+        if let Some(recorder) = breadcrumb_recorder {
+            app.set_breadcrumb_recorder(recorder);
+        }
         app.theme_loader = theme_loader;
         app.keymap_loader = keymap_loader;
         if let Some(sink) = os_drag_sink {

@@ -1462,6 +1462,7 @@ pub mod invariants;
 mod key_encoding;
 mod keymap_dispatch;
 mod media;
+pub mod memory_snapshot;
 mod misc;
 pub mod os_drag;
 mod overlays;
@@ -1781,6 +1782,30 @@ pub struct App {
     /// sampling every idle turn keeps a measurement that walks every pane off
     /// the path that governs idle CPU.
     pub(super) last_retention_sample: Option<std::time::Instant>,
+    /// The preceding cycle's totals, so a snapshot can report movement.
+    ///
+    /// `None` until the first sample has been taken, which is what makes the
+    /// first snapshot's deltas report `unavailable` rather than `+0` — the
+    /// latter claims the process did not move, which is a measurement nobody
+    /// made.
+    ///
+    /// Only the totals are retained rather than the whole snapshot: the
+    /// per-renderer breakdown is a string per renderer, and holding it between
+    /// samples would keep it alive for the life of the session to serve a
+    /// report that never reads it.
+    pub(super) last_memory_totals: Option<memory_snapshot::MemoryTotals>,
+    /// Nonblocking recorder for bounded postmortem breadcrumbs.
+    ///
+    /// The platform binary owns the writer thread; the app only holds this cheap
+    /// sender and never performs filesystem IO on the event-loop path.
+    pub(super) breadcrumb_recorder: Option<sonicterm_logging::breadcrumbs::BreadcrumbRecorder>,
+    /// Whether the currently-armed timed wake exists only to sample memory.
+    ///
+    /// Set when the wake deadline is armed and cleared when it fires. A wake
+    /// armed by a diagnostic must not repaint: an idle session would otherwise
+    /// draw a frame every thirty seconds forever purely to record that it was
+    /// idle, which is a heartbeat redraw under another name.
+    pub(super) wake_is_memory_only: bool,
     pub(super) command_palette: CommandPalette,
     /// Which window the (single, modal) command palette is attached to.
     /// `None` means it is closed OR attached to the main window; `Some(id)`
@@ -2142,6 +2167,9 @@ impl App {
             test_post_snapshot_hook: None,
             pending_exit: false,
             last_retention_sample: None,
+            last_memory_totals: None,
+            breadcrumb_recorder: None,
+            wake_is_memory_only: false,
             command_palette,
             palette_attached_window: None,
             os_drag_handoff_started: false,
@@ -2195,6 +2223,13 @@ impl App {
             test_viewport_override: None,
             machine,
         }
+    }
+
+    pub(crate) fn set_breadcrumb_recorder(
+        &mut self,
+        recorder: sonicterm_logging::breadcrumbs::BreadcrumbRecorder,
+    ) {
+        self.breadcrumb_recorder = Some(recorder);
     }
 
     #[doc(hidden)]

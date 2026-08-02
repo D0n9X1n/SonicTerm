@@ -12,6 +12,7 @@ use windows::Win32::{
 use winit::window::Window;
 
 use crate::{
+    color::{blend_premul_linear_over_srgb_bgra, grayscale_coverage},
     core::{validated_surface_size, MAX_SURFACE_DIMENSION},
     quad::QuadInstance,
     wezterm_pipeline::ndc_rect_to_pixels,
@@ -275,7 +276,6 @@ impl WindowsSoftwareFrame {
             return;
         }
         let atlas_pixels = atlas.pixels_bgra();
-        let fg = straight_linear_rgba_to_premul_bgra_f32(glyph.color);
         let fg_srgb = premul_linear_rgba_to_straight_srgb(glyph.color);
         let fg_alpha = glyph.color[3].clamp(0.0, 1.0);
         let color_glyph = glyph.flags[0] >= 0.5;
@@ -331,12 +331,17 @@ impl WindowsSoftwareFrame {
                         fg_alpha,
                     );
                 } else {
-                    let cov = coverage_luma(sample);
-                    if cov < 0.08 {
+                    let cov = grayscale_coverage(sample);
+                    if cov <= 0.0 {
                         continue;
                     }
-                    let src = [fg[0] * cov, fg[1] * cov, fg[2] * cov, fg[3] * cov];
-                    blend_premul_bgra(&mut self.pixels[dst_off..dst_off + 4], src);
+                    let src = [
+                        glyph.color[0] * cov,
+                        glyph.color[1] * cov,
+                        glyph.color[2] * cov,
+                        glyph.color[3] * cov,
+                    ];
+                    blend_premul_linear_over_srgb_bgra(&mut self.pixels[dst_off..dst_off + 4], src);
                 }
             }
         }
@@ -420,16 +425,6 @@ fn premul_linear_rgba_to_premul_bgra_f32(color: [f32; 4]) -> [f32; 4] {
     let g = (color[1] / a).clamp(0.0, 1.0);
     let b = (color[2] / a).clamp(0.0, 1.0);
     [linear_to_srgb(b) * a, linear_to_srgb(g) * a, linear_to_srgb(r) * a, a]
-}
-
-fn straight_linear_rgba_to_premul_bgra_f32(color: [f32; 4]) -> [f32; 4] {
-    let a = color[3].clamp(0.0, 1.0);
-    [
-        linear_to_srgb(color[2].clamp(0.0, 1.0)) * a,
-        linear_to_srgb(color[1].clamp(0.0, 1.0)) * a,
-        linear_to_srgb(color[0].clamp(0.0, 1.0)) * a,
-        a,
-    ]
 }
 
 fn premul_linear_rgba_to_straight_srgb(color: [f32; 4]) -> [f32; 3] {
@@ -526,10 +521,6 @@ fn blend_subpixel_bgra(dst: &mut [u8], coverage_bgra: [f32; 4], fg_srgb: [f32; 3
     dst[1] = to_u8(dg + (fg_srgb[1] - dg) * wg);
     dst[2] = to_u8(dr + (fg_srgb[0] - dr) * wr);
     dst[3] = 255;
-}
-
-fn coverage_luma(coverage: [f32; 4]) -> f32 {
-    coverage[2] * 0.2126 + coverage[1] * 0.7152 + coverage[0] * 0.0722
 }
 
 fn linear_to_srgb(v: f32) -> f32 {

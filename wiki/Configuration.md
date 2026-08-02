@@ -64,6 +64,10 @@ max_rotated_files = 3
 max_age_days = 2
 max_crash_dumps = 10
 max_crash_age_days = 2
+max_crash_bytes = 10485760        # 10 MiB
+max_breadcrumb_files = 10
+max_breadcrumb_age_days = 2
+max_breadcrumb_bytes = 1048576    # 1 MiB
 
 [appearance]
 backdrop = "opaque"           # opaque | mica | acrylic | tabbed
@@ -325,6 +329,10 @@ max_rotated_files = 3
 max_age_days = 2
 max_crash_dumps = 10
 max_crash_age_days = 2
+max_crash_bytes = 10485760        # 10 MiB
+max_breadcrumb_files = 10
+max_breadcrumb_age_days = 2
+max_breadcrumb_bytes = 1048576    # 1 MiB
 
 [appearance]
 backdrop = "opaque"           # opaque | mica | acrylic | tabbed

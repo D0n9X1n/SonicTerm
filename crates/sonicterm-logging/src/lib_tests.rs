@@ -145,6 +145,7 @@ fn every_custom_target_in_the_source_is_reachable_at_debug_level() {
     const SOURCES: &[&str] = &[
         include_str!("../../sonicterm-app/src/app/mod.rs"),
         include_str!("../../sonicterm-app/src/app/media.rs"),
+        include_str!("../../sonicterm-app/src/app/memory_snapshot.rs"),
         include_str!("../../sonicterm-app/src/app/retention.rs"),
         include_str!("../../sonicterm-app/src/app/tear_out.rs"),
         include_str!("../../sonicterm-app/src/app/child_window.rs"),
@@ -389,4 +390,79 @@ fn the_documented_grep_recipe_matches_a_real_reclamation_line() {
         "the wiki tells users to `grep 'memory::reclaimed'`, but the formatted line does not \
          contain that string. The line was: {written:?}"
     );
+}
+
+/// Is an INFO event on the memory target admitted by `filter`?
+///
+/// Separate from [`enabled_at`], which probes DEBUG. The aggregate memory
+/// snapshot sits at INFO precisely so a user investigating growth can capture
+/// it without turning on the per-pane and per-renderer DEBUG detail, and
+/// asserting that needs a probe at the level the snapshot actually emits at.
+fn memory_info_enabled_at(filter: &str) -> bool {
+    use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
+    let subscriber = Registry::default().with(EnvFilter::try_new(filter).expect("valid filter"));
+    tracing::subscriber::with_default(
+        subscriber,
+        || tracing::enabled!(target: "memory", tracing::Level::INFO),
+    )
+}
+
+/// `level = "info"` admits the aggregate memory snapshot.
+///
+/// The snapshot is the one line that answers "what is this session holding"
+/// after an unexpected termination, and a user who has to know to set `debug`
+/// first has already lost the session they wanted to explain.
+///
+/// Pinned against the real [`filter_for_level`] output rather than a
+/// hand-written directive: a test that writes its own filter proves the gate
+/// behind it works and says nothing about whether any configured level opens
+/// that gate.
+#[test]
+fn the_memory_snapshot_is_admitted_at_info() {
+    assert!(
+        memory_info_enabled_at(filter_for_level(LogLevel::Info)),
+        "an INFO event on `memory` must reach a session running `level = \"info\"`; \
+         the aggregate snapshot is the report a growth investigation reads"
+    );
+    assert!(
+        memory_info_enabled_at(filter_for_level(LogLevel::Debug)),
+        "debug is strictly more verbose than info; the snapshot must survive there too"
+    );
+}
+
+/// Admitting the snapshot at info must not drag the DEBUG detail in with it.
+///
+/// The per-pane and per-renderer lines fire once per pane and once per
+/// renderer every thirty seconds. They are the right level of detail for
+/// someone already investigating and the wrong one for a session that merely
+/// turned on informational logging, so `info` must admit the aggregate and
+/// nothing below it.
+///
+/// The pair to [`the_memory_snapshot_is_admitted_at_info`]: satisfying one by
+/// opening the target wholesale would fail the other.
+#[test]
+fn info_does_not_admit_the_memory_debug_detail() {
+    assert!(
+        !enabled_at(filter_for_level(LogLevel::Info), "memory"),
+        "`level = \"info\"` must not admit DEBUG on `memory`; the per-pane and \
+         per-renderer detail belongs to an investigating session"
+    );
+}
+
+#[test]
+fn platform_startup_reports_postmortem_evidence_before_artifact_cleanup() {
+    for (platform, source) in [
+        ("macOS", include_str!("../../sonicterm-mac/src/main.rs")),
+        ("Windows", include_str!("../../sonicterm-windows/src/main.rs")),
+    ] {
+        let report = source
+            .find("postmortem::report_prior_sessions")
+            .expect("platform startup reports prior sessions");
+        let cleanup =
+            source.find("cleanup_artifacts").expect("platform startup retains old artifacts");
+        assert!(
+            report < cleanup,
+            "{platform} cleanup can delete crash or breadcrumb evidence before it is reported"
+        );
+    }
 }

@@ -1,4 +1,4 @@
-//! Retention enforcement for log files and crash dumps.
+//! Retention enforcement for logs, crash dumps, and breadcrumbs.
 //!
 //! Cleanup is **fail-soft**: every filesystem error is logged at WARN
 //! and swallowed so a hostile log directory cannot crash the app at
@@ -11,29 +11,33 @@ use crate::config::LoggingConfig;
 use crate::path::{crash_dir, log_file_name};
 use crate::sinks::ROTATED_PREFIX;
 
-/// Run a cleanup pass over `log_dir` and its `crashes/` subdirectory.
+/// Run a cleanup pass over `log_dir` and its artifact subdirectories.
 ///
-/// - Rotates the active log file when it exceeds
-///   `cfg.max_file_size_mb` MiB (renamed to
-///   `sonicterm.log.<unix-seconds>` so daily rotation doesn't collide).
-/// - Caps rotated log files at `cfg.max_rotated_files` (oldest mtime
-///   evicted first).
-/// - Deletes rotated log files older than `cfg.max_age_days`
-///   (`0` disables age eviction).
-/// - Caps crash dumps at `cfg.max_crash_dumps`.
-/// - Deletes crash dumps older than `cfg.max_crash_age_days`
-///   (`0` disables age eviction).
+/// Rotated logs remain bounded by file size, count, and age. Crash dumps and
+/// per-session breadcrumb files are each bounded independently by count, age,
+/// and aggregate bytes, evicting the oldest artifacts first. A zero age or
+/// aggregate-byte value disables that axis; count remains authoritative.
 ///
-/// The active `sonicterm.log` is never *deleted*, only renamed when it
-/// exceeds the size cap.
+/// The active `sonicterm.log` is never *deleted*, only renamed when it exceeds
+/// the size cap.
 pub fn cleanup_old_files(log_dir: &Path, cfg: &LoggingConfig) {
-    enforce_size_rotation(log_dir, cfg);
-    enforce_rotated_logs(log_dir, cfg);
-    enforce_crash_dumps(log_dir, cfg);
+    cleanup_log_files(log_dir, cfg);
+    cleanup_artifacts(log_dir, cfg);
 }
 
-/// Spawn `cleanup_old_files` on a background thread. Used by the
-/// platform entry points so a slow filesystem cannot stall startup.
+/// Rotate and retain log files before the appender opens its active file.
+pub fn cleanup_log_files(log_dir: &Path, cfg: &LoggingConfig) {
+    enforce_size_rotation(log_dir, cfg);
+    enforce_rotated_logs(log_dir, cfg);
+}
+
+/// Retain crash and breadcrumb artifacts after prior-session reporting.
+pub fn cleanup_artifacts(log_dir: &Path, cfg: &LoggingConfig) {
+    enforce_crash_dumps(log_dir, cfg);
+    enforce_breadcrumbs(log_dir, cfg);
+}
+
+/// Spawn `cleanup_old_files` on a background thread.
 pub fn cleanup_old_files_async(log_dir: PathBuf, cfg: &LoggingConfig) {
     let cfg = cfg.clone();
     std::thread::Builder::new()
@@ -222,40 +226,89 @@ fn enforce_rotated_logs(log_dir: &Path, cfg: &LoggingConfig) {
 }
 
 fn enforce_crash_dumps(log_dir: &Path, cfg: &LoggingConfig) {
-    let crashes = crash_dir_from(log_dir);
-    let mut dumps: Vec<(PathBuf, SystemTime)> = match std::fs::read_dir(&crashes) {
+    enforce_artifact_bounds(
+        &crash_dir_from(log_dir),
+        |_| true,
+        cfg.max_crash_dumps,
+        cfg.max_crash_age_days,
+        cfg.max_crash_bytes,
+    );
+}
+
+fn enforce_breadcrumbs(log_dir: &Path, cfg: &LoggingConfig) {
+    enforce_artifact_bounds(
+        &log_dir.join("breadcrumbs"),
+        |name| {
+            name.starts_with("breadcrumbs-") && (name.ends_with(".log") || name.ends_with(".tmp"))
+        },
+        cfg.max_breadcrumb_files,
+        cfg.max_breadcrumb_age_days,
+        cfg.max_breadcrumb_bytes,
+    );
+}
+
+#[derive(Debug)]
+struct Artifact {
+    path: PathBuf,
+    modified: SystemTime,
+    bytes: u64,
+}
+
+fn enforce_artifact_bounds(
+    dir: &Path,
+    accepts: impl Fn(&str) -> bool,
+    max_count: usize,
+    max_age_days: u32,
+    max_bytes: u64,
+) {
+    let mut artifacts: Vec<Artifact> = match std::fs::read_dir(dir) {
         Ok(read) => read
             .flatten()
-            .filter_map(|e| {
-                let mtime = e.metadata().ok().and_then(|m| m.modified().ok())?;
-                Some((e.path(), mtime))
+            .filter_map(|entry| {
+                let name = entry.file_name();
+                let name = name.to_str()?;
+                if !accepts(name) {
+                    return None;
+                }
+                let metadata = entry.metadata().ok()?;
+                if !metadata.is_file() {
+                    return None;
+                }
+                Some(Artifact {
+                    path: entry.path(),
+                    modified: metadata.modified().ok()?,
+                    bytes: metadata.len(),
+                })
             })
             .collect(),
-        Err(_) => return, // crashes/ may simply not exist yet
+        Err(_) => return,
     };
-    dumps.sort_by_key(|(_, m)| *m);
+    artifacts.sort_by_key(|artifact| artifact.modified);
 
-    let now = SystemTime::now();
-    if cfg.max_crash_age_days > 0 {
-        let cutoff = Duration::from_secs(u64::from(cfg.max_crash_age_days) * 86_400);
-        dumps.retain(|(p, mtime)| {
-            let age = now.duration_since(*mtime).unwrap_or_default();
-            if age > cutoff {
-                if let Err(e) = std::fs::remove_file(p) {
-                    tracing::warn!("cleanup: remove {p:?} failed: {e}");
-                }
-                false
-            } else {
-                true
+    if max_age_days > 0 {
+        let now = SystemTime::now();
+        let cutoff = Duration::from_secs(u64::from(max_age_days).saturating_mul(86_400));
+        artifacts.retain(|artifact| {
+            if now.duration_since(artifact.modified).unwrap_or_default() <= cutoff {
+                return true;
             }
+            remove_artifact(&artifact.path);
+            false
         });
     }
 
-    while dumps.len() > cfg.max_crash_dumps {
-        let (path, _) = dumps.remove(0);
-        if let Err(e) = std::fs::remove_file(&path) {
-            tracing::warn!("cleanup: remove {path:?} failed: {e}");
-        }
+    let mut aggregate_bytes =
+        artifacts.iter().fold(0u64, |total, artifact| total.saturating_add(artifact.bytes));
+    while artifacts.len() > max_count || (max_bytes > 0 && aggregate_bytes > max_bytes) {
+        let artifact = artifacts.remove(0);
+        aggregate_bytes = aggregate_bytes.saturating_sub(artifact.bytes);
+        remove_artifact(&artifact.path);
+    }
+}
+
+fn remove_artifact(path: &Path) {
+    if let Err(error) = std::fs::remove_file(path) {
+        tracing::warn!("cleanup: remove {path:?} failed: {error}");
     }
 }
 

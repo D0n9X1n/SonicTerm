@@ -27,6 +27,7 @@
 - [ ] `bash scripts/check-workspace-crates.sh`
 - [ ] `scripts/rust-logic-coverage.sh`
 - [ ] `bash scripts/test-release-notes.sh`
+- [ ] `bash scripts/test-wiki-publish.sh`
 - [ ] Relevant release/platform build or manual launch completed
 - [ ] Screenshots / recordings attached (UI changes)
 

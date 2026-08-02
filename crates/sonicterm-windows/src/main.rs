@@ -74,23 +74,70 @@ fn main() -> Result<()> {
     // silently dropped the user-configured level (Haiku review of
     // ).
     sonicterm_logging::install_panic_hook(sonicterm_logging::log_dir());
-    let bootstrap_cfg = sonicterm_logging::LoggingConfig::default();
-    sonicterm_logging::cleanup_old_files_async(sonicterm_logging::log_dir(), &bootstrap_cfg);
     // Exit-path tracing — drop guard + (Unix only) signal handlers.
     // See `crates/sonicterm-logging/src/exit_trace.rs`.
     let _exit_guard = sonicterm_logging::install_exit_logging(&sonicterm_logging::log_dir());
+    // Arm the session marker before any work that could fail. A kill after
+    // this point leaves the marker behind, which is what lets the next launch
+    // tell that this session never reached its shutdown path. Armed before the
+    // logger exists on purpose: a session killed during config load is exactly
+    // the one with no other evidence.
+    let session = sonicterm_logging::session_state::arm(
+        &sonicterm_logging::log_dir(),
+        env!("CARGO_PKG_VERSION"),
+    )
+    .ok();
+    // Tag any dump this process writes with the session that wrote it, so the
+    // next launch can attach the artifact to the right session rather than
+    // guessing.
+    if let Some(session) = session.as_ref() {
+        sonicterm_logging::crash::set_session_id(session.id());
+    }
+    let breadcrumb_writer = session.as_ref().and_then(|session| {
+        sonicterm_logging::breadcrumbs::BreadcrumbWriter::start(
+            &sonicterm_logging::log_dir(),
+            session.id(),
+            sonicterm_logging::breadcrumbs::BreadcrumbLimits::default(),
+        )
+        .ok()
+    });
+    let breadcrumb_recorder = breadcrumb_writer.as_ref().map(|writer| writer.recorder());
+    if let Some(recorder) = &breadcrumb_recorder {
+        use sonicterm_logging::breadcrumbs::{
+            AppVersion, BreadcrumbEvent, LifecycleEvent, Platform,
+        };
+        if let Ok(version) = env!("CARGO_PKG_VERSION").parse::<AppVersion>() {
+            let _ = recorder.record(BreadcrumbEvent::Version(version));
+        }
+        let _ = recorder.record(BreadcrumbEvent::Platform(Platform::current()));
+        let _ = recorder.record(BreadcrumbEvent::Lifecycle(LifecycleEvent::Started));
+    }
 
     let mut cfg_warnings: Vec<String> = Vec::new();
     let config = load_config(&mut cfg_warnings);
     let log_cfg = config.logging.clone();
+    sonicterm_logging::cleanup_log_files(&sonicterm_logging::log_dir(), &log_cfg);
     let _log_guard = sonicterm_logging::init(&log_cfg).ok();
-    sonicterm_logging::cleanup_old_files_async(sonicterm_logging::log_dir(), &log_cfg);
     // Drain any warnings collected during pre-logging Config load so the
     // parse-failure WARN actually reaches sonicterm.log + stderr.
     for w in cfg_warnings.drain(..) {
         tracing::warn!(target: "sonicterm-cfg", "{w}");
     }
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "sonic started");
+    // Report what the previous session left behind, now that the logger is up.
+    sonicterm_logging::postmortem::report_prior_sessions(
+        &sonicterm_logging::log_dir(),
+        session.as_ref().map(sonicterm_logging::session_state::ArmedSession::id),
+    );
+    let artifact_log_dir = sonicterm_logging::log_dir();
+    let artifact_log_cfg = log_cfg.clone();
+    std::thread::Builder::new()
+        .name("sonicterm-artifact-cleanup".to_string())
+        .spawn(move || {
+            sonicterm_logging::cleanup_artifacts(&artifact_log_dir, &artifact_log_cfg);
+        })
+        .map(|_| ())
+        .unwrap_or_else(|error| tracing::warn!("failed to spawn artifact cleanup: {error}"));
     #[cfg(target_os = "windows")]
     let tearout_payload = parsed_cli.tearout;
     let theme = load_theme(&config.theme);
@@ -175,12 +222,33 @@ fn main() -> Result<()> {
                 .with_os_drag_sink(os_drag_win::WinOsDragSink::arc())
                 .with_os_drag_backend(tab_drag_os::WinOsTabDragBackend::boxed())
                 .with_on_window_ready(on_window_ready);
+            if let Some(recorder) = breadcrumb_recorder.clone() {
+                shell = shell.with_breadcrumb_recorder(recorder);
+            }
             if let Some(p) = tearout_payload.or_else(os_drag_win::take_pending_payload) {
                 shell = shell.with_pending_payload(p);
             }
             shell.run()
         };
         os_drag_win::shutdown_ole();
+        if result.is_ok() {
+            if let Some(recorder) = &breadcrumb_recorder {
+                let _ =
+                    recorder.record(sonicterm_logging::breadcrumbs::BreadcrumbEvent::Lifecycle(
+                        sonicterm_logging::breadcrumbs::LifecycleEvent::CleanShutdown,
+                    ));
+            }
+        }
+        if let Some(writer) = breadcrumb_writer {
+            let _ = writer.shutdown();
+        }
+        // Mark clean only after a successful event-loop return and after the
+        // breadcrumb worker flushed the clean-shutdown event.
+        if result.is_ok() {
+            if let Some(session) = session {
+                let _ = session.mark_clean();
+            }
+        }
         result
     }
     #[cfg(not(target_os = "windows"))]
@@ -189,7 +257,7 @@ fn main() -> Result<()> {
         // (ConPTY, muda, OLE drag, Mica). Keep this branch only so
         // `cargo check --workspace` on non-Win hosts type-checks the
         // bin. Unused bindings:
-        let _ = (theme, config, keymap, theme_loader, keymap_loader);
+        let _ = (theme, config, keymap, theme_loader, keymap_loader, session);
         unreachable!("sonicterm-windows binary built for non-Windows target")
     }
 }

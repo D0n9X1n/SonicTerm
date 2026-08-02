@@ -138,6 +138,10 @@ jobs:
         shell: bash
         run: bash scripts/test-release-notes.sh
 
+      - name: Test wiki publisher
+        shell: bash
+        run: bash scripts/test-wiki-publish.sh
+
       - name: Verify frozen PTY feasibility evidence
         shell: bash
         run: bash scripts/pty-backend-feasibility.sh --check

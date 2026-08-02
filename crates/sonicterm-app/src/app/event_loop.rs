@@ -25,6 +25,43 @@ use super::{mark_all_panes_dirty, window_dpi, with_integrated_titlebar, App, Use
 use sonicterm_ui::selection::SelectMode;
 use winit::event_loop::ControlFlow;
 
+/// The earlier of two optional deadlines.
+///
+/// A deadline is a "wake no later than" bound, so the earliest wins. Folding
+/// rather than overwriting is what keeps an earlier contributor from being
+/// pushed out past its due instant by a later one.
+fn earliest(left: Option<Instant>, right: Option<Instant>) -> Option<Instant> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (left, right) => left.or(right),
+    }
+}
+
+/// Whether the wake about to be armed exists only to sample memory.
+///
+/// The distinction decides whether the resulting `ResumeTimeReached` requests
+/// a redraw. Before the memory deadline existed, every timed wake was armed by
+/// something with a frame to draw — a blink phase, a deferred redraw, a
+/// notification expiring — so redrawing unconditionally on that wake was
+/// correct. It stops being correct the moment a deadline is armed by a
+/// diagnostic: an idle session would then repaint every thirty seconds forever
+/// purely to record that it was idle, which is a heartbeat redraw in all but
+/// name and defeats the crate's own guardrail against one.
+///
+/// A memory wake is "only" a memory wake when no render contributor is armed,
+/// or when the memory deadline lands strictly first. Ties go to the render
+/// side: if a frame is due at the same instant, the frame still needs drawing.
+///
+/// Pure and free-standing so the decision is testable without a winit event
+/// loop, a window, or a GPU.
+fn wake_is_memory_only(render_wake: Option<Instant>, memory_wake: Option<Instant>) -> bool {
+    match (render_wake, memory_wake) {
+        (_, None) => false,
+        (None, Some(_)) => true,
+        (Some(render), Some(memory)) => memory < render,
+    }
+}
+
 impl App {
     pub(super) fn expire_notifications(&mut self, now: Instant) -> Option<Instant> {
         let mut next: Option<Instant> = None;
@@ -65,10 +102,39 @@ impl App {
         // every iteration, so a stale one spins the loop instead of letting it
         // idle. With no contributor armed, idle parks in `Wait` and the app
         // drives no wakes at all.
-        match self.wake_deadline(notification_wake) {
+        //
+        // The memory deadline is folded in separately from the render
+        // contributors, and the two are kept apart deliberately. An idle
+        // session has no render contributor at all — nothing blinking, nothing
+        // deferred — so before the snapshot existed it parked in `Wait`
+        // indefinitely and sampled only when something else happened to wake
+        // it. A session left alone overnight produced one sample. Arming the
+        // memory deadline is what makes the cadence real when nothing else is
+        // running; recording *which* deadline was armed is what stops that
+        // wake from turning into a heartbeat redraw.
+        let render_wake = self.wake_deadline(notification_wake);
+        let memory_wake = self.memory_sample_deadline();
+        self.wake_is_memory_only = wake_is_memory_only(render_wake, memory_wake);
+        match earliest(render_wake, memory_wake) {
             Some(at) => el.set_control_flow(ControlFlow::WaitUntil(at)),
             None => el.set_control_flow(ControlFlow::Wait),
         }
+    }
+
+    /// When the next memory snapshot is due.
+    ///
+    /// `None` only before the first sample has been taken, which cannot
+    /// persist: the first `do_about_to_wait` samples unconditionally and
+    /// records the instant, so the deadline is armed from then on.
+    ///
+    /// Armed regardless of log level. The level check belongs at the emission
+    /// site, not here — a deadline that existed only for sessions already
+    /// logging would make the reclamation passes that share this cadence run
+    /// at a different rate depending on whether anyone was watching, and those
+    /// passes free memory a user gets back either way.
+    fn memory_sample_deadline(&self) -> Option<Instant> {
+        self.last_retention_sample
+            .map(|last| last + crate::app::retention::RETENTION_SAMPLE_INTERVAL)
     }
 
     /// Earliest instant the event loop must wake, given the notification
@@ -161,6 +227,20 @@ impl App {
         // `pending_redraw` here so the next render call services it
         // and stale flags can't keep the loop hot.
         if matches!(cause, winit::event::StartCause::ResumeTimeReached { .. }) {
+            // A wake armed solely to sample memory draws nothing.
+            //
+            // `do_about_to_wait` takes the sample later in this event-loop turn;
+            // this branch only suppresses the repaint that a diagnostic wake
+            // does not need. An idle session would otherwise
+            // repaint every thirty seconds forever purely to record that it
+            // was idle: a heartbeat redraw in all but name, and the exact
+            // thing this crate's guardrails forbid.
+            //
+            // Cleared on read. The flag describes the wake that just fired,
+            // and leaving it set would suppress the next genuine render wake.
+            if std::mem::take(&mut self.wake_is_memory_only) {
+                return;
+            }
             if let Some(w) = self.main_window() {
                 w.request_redraw();
             }
@@ -412,6 +492,22 @@ impl App {
             renderer.is_software_rendering(),
         );
         renderer.set_software_render_degrade(self.software_render_degrade);
+        if let Some(recorder) = &self.breadcrumb_recorder {
+            use sonicterm_logging::breadcrumbs::{
+                AdapterClass, BreadcrumbEvent, RendererIdentity, RendererMode,
+            };
+            let software_adapter = renderer.is_software_rendering();
+            let mode = if software_adapter { RendererMode::Software } else { RendererMode::Gpu };
+            let adapter =
+                if software_adapter { AdapterClass::Software } else { AdapterClass::Hardware };
+            let identity = if cfg!(target_os = "windows") && renderer.is_software_render_degraded()
+            {
+                RendererIdentity::Software
+            } else {
+                RendererIdentity::Wgpu
+            };
+            let _ = recorder.record(BreadcrumbEvent::Renderer { identity, mode, adapter });
+        }
         if self.software_render_degrade {
             let before = self.frame_period;
             // Resolved from the monitor's own period, not from `frame_period`:
@@ -507,6 +603,19 @@ impl App {
         // otherwise preserve the normal one-shell startup.
         self.seed_initial_tabs();
         self.drain_pending_os_drag_payloads();
+
+        if let Some(recorder) = &self.breadcrumb_recorder {
+            use sonicterm_logging::breadcrumbs::{BreadcrumbEvent, LifecycleEvent};
+            let windows = u32::try_from(self.windows.len()).unwrap_or(u32::MAX);
+            let panes = u32::try_from(
+                self.windows
+                    .values()
+                    .fold(0usize, |total, window| total.saturating_add(window.panes.len())),
+            )
+            .unwrap_or(u32::MAX);
+            let _ = recorder.record(BreadcrumbEvent::Counts { windows, panes });
+            let _ = recorder.record(BreadcrumbEvent::Lifecycle(LifecycleEvent::Ready));
+        }
 
         let (rc, rr) = self.main_renderer().map(|r| r.cells()).unwrap_or((0, 0));
         tracing::info!(
