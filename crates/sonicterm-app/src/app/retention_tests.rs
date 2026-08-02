@@ -202,6 +202,20 @@ fn measurement_yields_rather_than_waiting_for_the_parser_lock() {
     assert!(measure_pane(&pane).is_some(), "measurement resumes once the lock is free");
 }
 
+#[test]
+fn measurement_does_not_report_contended_inline_media_as_zero() {
+    let pane = pane_with(80, 24);
+    let held = pane.inline_images.lock();
+
+    assert!(
+        measure_pane(&pane).is_none(),
+        "inline-media contention must make the pane partial, not look like zero retained media"
+    );
+
+    drop(held);
+    assert!(measure_pane(&pane).is_some(), "measurement resumes once the lock is free");
+}
+
 /// An empty session reports zero rather than failing.
 #[test]
 fn an_empty_session_reports_zero() {
@@ -909,6 +923,56 @@ fn an_idle_pane_gives_back_a_budget_sized_for_a_smaller_session() {
 /// No subscriber is installed here, so the gate is closed: this enters the
 /// real production path with the level check failing, and asserts the trim
 /// happened anyway. Moving the call below the gate fails this test.
+#[test]
+fn production_sampling_persists_breadcrumbs_with_the_memory_log_switched_off() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "sonicterm-app-breadcrumb-sampling-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let writer = sonicterm_logging::breadcrumbs::BreadcrumbWriter::start(
+        &dir,
+        "production-sampling",
+        sonicterm_logging::breadcrumbs::BreadcrumbLimits::default(),
+    )
+    .expect("start breadcrumb writer");
+
+    let mut app = App::new(
+        sonicterm_cfg::theme::Theme::default(),
+        sonicterm_cfg::config::Config::default(),
+        sonicterm_cfg::keymap::Keymap::default(),
+    );
+    app.__test_seed_child_window(&["one"]);
+    app.set_breadcrumb_recorder(writer.recorder());
+
+    assert!(
+        !tracing::enabled!(target: "memory", tracing::Level::INFO),
+        "precondition: the breadcrumb path must not rely on INFO logging"
+    );
+    assert!(
+        !app.__test_sample_pane_retention_now(),
+        "without DEBUG logging the production sampler still reports no detail log sample"
+    );
+    writer.shutdown().expect("flush breadcrumb writer");
+
+    let written = std::fs::read_to_string(
+        sonicterm_logging::breadcrumbs::breadcrumb_path(&dir, "production-sampling")
+            .expect("breadcrumb path"),
+    )
+    .expect("read persisted breadcrumbs");
+    for expected in ["event=counts", "event=resource", "event=retention"] {
+        assert!(written.contains(expected), "missing {expected:?} in {written:?}");
+    }
+    assert!(written.contains("windows=2 panes=1"), "wrong app counts: {written}");
+    assert!(written.contains("live_renderers="), "missing renderer count: {written}");
+
+    std::fs::remove_dir_all(dir).expect("remove breadcrumb scratch directory");
+}
+
 #[test]
 fn media_is_reclaimed_with_the_memory_log_switched_off() {
     let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();

@@ -21,10 +21,9 @@ pub enum LogLevel {
 
 /// Retention + level configuration. See field docs for defaults.
 ///
-/// Total disk usage is bounded by
-/// `max_file_size_mb * (max_rotated_files + 1)` for log files plus
-/// `~max_crash_dumps * <avg crash dump size>` for crash dumps. The
-/// shipped defaults yield ≈ 40 MB of logs + ≈ 10 small crash dumps.
+/// Total disk usage is bounded independently for rotated logs, crash dumps,
+/// and breadcrumb artifacts. Crash and breadcrumb cleanup each enforce count,
+/// age, and aggregate-byte limits; the first limit reached wins.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct LoggingConfig {
@@ -45,6 +44,18 @@ pub struct LoggingConfig {
     /// Delete crash dumps older than this many days. Set to `0` to
     /// disable age-based eviction. Default: 2.
     pub max_crash_age_days: u32,
+    /// Maximum aggregate bytes retained under `crashes/`. Set to `0` to
+    /// disable aggregate-byte eviction. Default: 10 MiB.
+    pub max_crash_bytes: u64,
+    /// Maximum number of per-session breadcrumb files retained under
+    /// `breadcrumbs/`. Default: 10.
+    pub max_breadcrumb_files: usize,
+    /// Delete breadcrumb files older than this many days. Set to `0` to
+    /// disable age-based eviction. Default: 2.
+    pub max_breadcrumb_age_days: u32,
+    /// Maximum aggregate bytes retained under `breadcrumbs/`. Set to `0` to
+    /// disable aggregate-byte eviction. Default: 1 MiB.
+    pub max_breadcrumb_bytes: u64,
     /// User-facing log level. `debug` includes performance/render timing.
     /// Default: `warn`.
     pub level: LogLevel,
@@ -58,6 +69,10 @@ impl Default for LoggingConfig {
             max_age_days: 2,
             max_crash_dumps: 10,
             max_crash_age_days: 2,
+            max_crash_bytes: 10 * 1024 * 1024,
+            max_breadcrumb_files: 10,
+            max_breadcrumb_age_days: 2,
+            max_breadcrumb_bytes: 1024 * 1024,
             level: LogLevel::default(),
         }
     }

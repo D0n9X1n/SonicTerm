@@ -431,3 +431,138 @@ fn late_script_open_reveals_a_drained_main_window() {
     drop(app);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Memory-sampling wake
+//
+// The snapshot has to keep arriving in a session nobody is touching, which
+// means the loop must wake on its own. It must not repaint when it does: an
+// idle session that drew a frame every thirty seconds to record that it was
+// idle is a heartbeat redraw under another name, and this crate forbids one.
+//
+// `do_about_to_wait` needs an `ActiveEventLoop`, so these drive the winit-free
+// halves — the pure decision function and the deadline accessor.
+// ---------------------------------------------------------------------------
+
+/// An idle session with nothing to draw still arms a wake.
+///
+/// This is the gap the sampling cadence had. With no render contributor —
+/// nothing blinking, nothing deferred, no notification — the loop parked in
+/// `Wait` indefinitely and sampled only when something else happened to wake
+/// it. A session left alone overnight produced one sample, and the growth
+/// curve the snapshot exists to draw needs more than one point.
+#[test]
+fn an_idle_session_arms_a_memory_wake_and_draws_nothing() {
+    assert!(
+        wake_is_memory_only(None, Some(Instant::now() + Duration::from_secs(30))),
+        "with no render contributor armed, a memory deadline is the only reason to wake, and \
+         that wake must not repaint"
+    );
+}
+
+/// A render contributor due first keeps its redraw.
+///
+/// The suppression is scoped to wakes the diagnostic armed. A blink phase or a
+/// deferred frame landing before the next sample still has a frame to draw,
+/// and suppressing it would drop real rendering.
+#[test]
+fn a_render_wake_due_first_still_redraws() {
+    let now = Instant::now();
+    assert!(
+        !wake_is_memory_only(
+            Some(now + Duration::from_millis(16)),
+            Some(now + Duration::from_secs(30))
+        ),
+        "a frame boundary before the next sample must still repaint"
+    );
+}
+
+/// A tie goes to the render side.
+///
+/// If a frame is due at the same instant as a sample, the frame still needs
+/// drawing. Ordering the comparison the other way would drop a real frame
+/// whenever the two coincided.
+#[test]
+fn a_simultaneous_render_and_memory_wake_redraws() {
+    let at = Instant::now() + Duration::from_secs(30);
+    assert!(
+        !wake_is_memory_only(Some(at), Some(at)),
+        "a frame due at the sampling instant must still be drawn"
+    );
+}
+
+/// With no memory deadline armed, behaviour is exactly as before.
+///
+/// Pins that the change cannot suppress a redraw on any path that predates it.
+#[test]
+fn a_wake_with_no_memory_deadline_is_never_memory_only() {
+    let now = Instant::now();
+    assert!(!wake_is_memory_only(None, None));
+    assert!(!wake_is_memory_only(Some(now + Duration::from_millis(16)), None));
+}
+
+/// The memory deadline sits one interval after the last sample.
+///
+/// Read through the real `App` field rather than recomputed, so a change to
+/// either the interval or the field this reads cannot leave the two disagreeing
+/// while both look correct in isolation.
+#[test]
+fn the_memory_deadline_is_one_interval_after_the_last_sample() {
+    let mut app = app_with_main_window();
+    let sampled_at = Instant::now();
+
+    app.last_retention_sample = Some(sampled_at);
+
+    assert_eq!(
+        app.memory_sample_deadline(),
+        Some(sampled_at + crate::app::retention::RETENTION_SAMPLE_INTERVAL),
+        "the next snapshot is due one interval after the last one, so an idle loop wakes \
+         exactly when the cadence says it should"
+    );
+}
+
+#[test]
+fn idle_memory_sampling_rearms_after_each_sample_without_redrawing() {
+    let mut app = app_with_main_window();
+    let interval = crate::app::retention::RETENTION_SAMPLE_INTERVAL;
+    let first_sample = Instant::now();
+
+    app.last_retention_sample = Some(first_sample);
+    let first_wake = app.memory_sample_deadline();
+    assert_eq!(first_wake, Some(first_sample + interval));
+    assert!(wake_is_memory_only(None, first_wake));
+
+    let second_sample = first_wake.expect("the first sample arms a wake");
+    app.last_retention_sample = Some(second_sample);
+    let second_wake = app.memory_sample_deadline();
+    assert_eq!(second_wake, Some(first_sample + interval + interval));
+    assert!(wake_is_memory_only(None, second_wake));
+}
+
+/// Before the first sample there is no deadline, and that cannot persist.
+///
+/// `do_about_to_wait` samples unconditionally on its first pass and records
+/// the instant, so the unarmed state lasts exactly until the loop turns once.
+#[test]
+fn no_memory_deadline_is_armed_before_the_first_sample() {
+    let app = app_with_main_window();
+    assert_eq!(app.last_retention_sample, None, "test setup: a fresh app has not sampled");
+    assert_eq!(app.memory_sample_deadline(), None);
+}
+
+/// The flag is cleared when the wake it describes fires.
+///
+/// It describes one wake, not a mode. Left set, it would suppress the next
+/// genuine render wake — a dropped frame that would look like a rendering bug
+/// rather than a diagnostic one.
+#[test]
+fn the_memory_only_marker_does_not_survive_the_wake_it_describes() {
+    let mut app = app_with_main_window();
+    app.wake_is_memory_only = true;
+
+    assert!(std::mem::take(&mut app.wake_is_memory_only), "the armed wake reads as memory-only");
+    assert!(
+        !app.wake_is_memory_only,
+        "reading the marker must clear it; a stale one suppresses the next real frame"
+    );
+}

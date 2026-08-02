@@ -42,6 +42,7 @@ use std::time::{Duration, Instant};
 
 use sonicterm_types::{ResourceAmount, ResourceClass};
 
+use super::memory_snapshot;
 use super::PaneState;
 
 /// One pane's retention, split by the seam that owns each part.
@@ -137,10 +138,10 @@ impl PaneRetention {
 
 /// Measure what `pane` retains right now.
 ///
-/// Takes the parser lock briefly. Callers on the render path must not block on
-/// it — this is for diagnostics and periodic reporting, not per-frame use.
-/// Returns `None` when the lock is held, so a busy VT thread delays a
-/// measurement rather than stalling the caller.
+/// Takes the parser and inline-media locks briefly. Callers on the render path
+/// must not block on either — this is for diagnostics and periodic reporting,
+/// not per-frame use. Returns `None` when either lock is held, so a busy pane
+/// delays a complete measurement rather than reporting a partial one as exact.
 #[must_use]
 pub fn measure_pane(pane: &PaneState) -> Option<PaneRetention> {
     let parser = pane.parser.try_lock()?;
@@ -150,11 +151,9 @@ pub fn measure_pane(pane: &PaneState) -> Option<PaneRetention> {
     let parser_amount = parser.retained_amount();
     drop(parser);
 
-    let inline_media = pane
-        .inline_images
-        .try_lock()
-        .map(|images| super::media::retained_inline_media(&images))
-        .unwrap_or_default();
+    let inline_images = pane.inline_images.try_lock()?;
+    let inline_media = super::media::retained_inline_media(&inline_images);
+    drop(inline_images);
 
     // Ring memory, not payload: the queued views are windows into the reader's
     // reused 64 KiB ring, so a pane holding 64 bytes of keystroke echo is
@@ -766,6 +765,44 @@ impl super::App {
         // Charge what each pane retains into its governor owner, so the
         // hierarchy reports real memory rather than only structure.
         self.charge_pane_owners();
+
+        // The aggregate snapshot, above the DEBUG gate and deliberately so.
+        //
+        // Everything below this line is detail for someone already
+        // investigating. This one line is the report that has to survive a
+        // session nobody predicted would need explaining: it emits at INFO, so
+        // a user who set `level = "info"` — or who is handed a log by someone
+        // who did — still gets process, session and renderer totals with
+        // movement against the previous cycle.
+        //
+        // Build once when either the INFO log or persistent breadcrumbs need the
+        // cycle. The breadcrumb recorder is nonblocking; filesystem IO remains on
+        // its worker thread.
+        let info_enabled = tracing::enabled!(target: "memory", tracing::Level::INFO);
+        if info_enabled || self.breadcrumb_recorder.is_some() {
+            let snapshot = self.build_memory_snapshot();
+            if info_enabled {
+                memory_snapshot::emit_memory_snapshot(&snapshot, self.last_memory_totals);
+                self.last_memory_totals = Some(snapshot.totals());
+            }
+            if let Some(recorder) = &self.breadcrumb_recorder {
+                use sonicterm_logging::breadcrumbs::BreadcrumbEvent;
+                let windows = u32::try_from(self.windows.len()).unwrap_or(u32::MAX);
+                let panes = u32::try_from(
+                    self.windows
+                        .values()
+                        .fold(0usize, |total, window| total.saturating_add(window.panes.len())),
+                )
+                .unwrap_or(u32::MAX);
+                let _ = recorder.record(BreadcrumbEvent::Counts { windows, panes });
+                let _ = recorder.record(BreadcrumbEvent::ResourceSnapshot(snapshot.process));
+                let _ = recorder.record(BreadcrumbEvent::RetentionSnapshot {
+                    session_bytes: u64::try_from(snapshot.session_bytes()).unwrap_or(u64::MAX),
+                    renderer_bytes: u64::try_from(snapshot.renderer_bytes()).unwrap_or(u64::MAX),
+                    live_renderers: u32::try_from(snapshot.live_renderers).unwrap_or(u32::MAX),
+                });
+            }
+        }
 
         if !tracing::enabled!(target: "memory", tracing::Level::DEBUG) {
             return false;

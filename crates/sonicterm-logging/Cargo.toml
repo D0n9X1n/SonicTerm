@@ -27,6 +27,17 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Process-memory sampling. `ProcessStatus` carries the commit/working-set
+# counters, `Threading` the current-process handle, and `Memory` the
+# address-space walk that produces the reserved figure those counters omit.
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Storage_FileSystem",
+    "Win32_System_Memory",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 # Real snapshots from the real ledger: a hand-built `ResourceSnapshot` would
 # drift from what the governor actually produces, and the formatter's whole

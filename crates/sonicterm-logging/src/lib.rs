@@ -31,18 +31,26 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
+pub mod breadcrumbs;
 pub mod cleanup;
 pub mod config;
 pub mod crash;
 pub mod exit_trace;
 pub mod path;
+pub mod postmortem;
+pub mod process_memory;
+pub mod session_state;
 pub mod sinks;
 
-pub use cleanup::{cleanup_old_files, cleanup_old_files_async, clear_all_rotated};
+pub use cleanup::{
+    cleanup_artifacts, cleanup_log_files, cleanup_old_files, cleanup_old_files_async,
+    clear_all_rotated,
+};
 pub use config::{LogLevel, LoggingConfig};
 pub use crash::install_panic_hook;
 pub use exit_trace::{exit_with, install_exit_logging, record_loop_exiting, ExitGuard, ExitReason};
 pub use path::{crash_dir, log_dir, log_file_name};
+pub use process_memory::{MemoryDelta, MemoryMetric, ProcessMemory};
 
 use std::io;
 
@@ -118,9 +126,15 @@ pub fn filter_for_level(level: LogLevel) -> &'static str {
     match level {
         LogLevel::Error => "error",
         LogLevel::Warn => DEFAULT_FILTER,
+        // `memory=info` admits the aggregate snapshot and nothing below it.
+        // The per-pane and per-renderer lines emit at DEBUG, so this directive
+        // opens exactly one line per sample: the one that answers "what is
+        // this session holding" without the detail an investigating session
+        // wants. A user who has to know to set `debug` first has already lost
+        // the session they wanted to explain.
         LogLevel::Info => {
             "sonic_exit=warn,sonic=warn,sonicterm=info,sonicterm_vt=warn,sonicterm_grid=warn,\
-             memory::reclaimed=warn,wgpu=warn,naga=warn"
+             memory=info,memory::reclaimed=warn,wgpu=warn,naga=warn"
         }
         // Every custom target is admitted here, not just the two that happened
         // to be added when they were introduced. `debug` is the level the

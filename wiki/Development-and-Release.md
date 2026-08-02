@@ -92,17 +92,18 @@ bash scripts/check-no-raw-process-exit.sh
 bash scripts/check-workspace-crates.sh
 scripts/rust-logic-coverage.sh
 bash scripts/test-release-notes.sh
+bash scripts/test-wiki-publish.sh
 bash scripts/pty-backend-feasibility.sh --check
 bash scripts/test-resource-inventory.sh
 bash scripts/test-soak-harness.sh
 bash scripts/test-resource-baseline-evidence.sh
 ```
 
-The first eight are the gate documented in the root `CLAUDE.md` and the
-architecture document; the last four are the resource-evidence and soak checks
-CI also runs. Note that `cargo test --workspace --lib --bins` excludes
-integration tests — the cross-crate suites, including the counting-allocator
-heap-truth tests, run under `scripts/rust-logic-coverage.sh`.
+The root `CLAUDE.md` is authoritative for this gate; CI also runs the
+resource-evidence, soak, and wiki-publisher checks listed here. Note that
+`cargo test --workspace --lib --bins` excludes integration tests — the
+cross-crate suites, including the counting-allocator heap-truth tests, run under
+`scripts/rust-logic-coverage.sh`.
 
 Release preparation additionally builds the shipping platform binary, for
 example:
@@ -239,8 +240,26 @@ window behavior. Recommended smoke checks include:
 The repository-tracked `wiki/` directory is the only source of truth for
 SonicTerm's bilingual user documentation. Edit the relevant Markdown pages in
 the same branch and pull request as the behavior they describe so code and user
-guidance are reviewed and versioned together. Do not maintain or publish a
-separate wiki repository.
+guidance are reviewed and versioned together.
+
+`.github/workflows/publish-wiki.yml` runs after every push to `main` — including
+every merged pull request — and can also be run with `workflow_dispatch`. It
+publishes the directory as a one-way GitHub Wiki mirror. `scripts/publish-wiki.sh`
+replaces the flat Markdown page set on the wiki's `master` branch, which carries
+page additions, changes, renames, and deletions; an unchanged mirror succeeds
+without creating a commit. Browser edits are not source and are overwritten by
+the next publication.
+
+The workflow authenticates with its short-lived, repository-scoped
+`GITHUB_TOKEN` and grants only `contents: write`; no PAT, GitHub App key, or
+long-lived secret is stored. Do not replace it with an account-wide classic PAT.
+
+After every pull request merges, verify the newest `publish-wiki.yml` run
+corresponds to the merge SHA. When `wiki/` changed, the newest wiki commit must
+also correspond to that SHA; otherwise the run should report a successful no-op
+without creating a wiki commit. Then inspect the live Wiki and click representative
+English and Chinese navigation links. A successful workflow exit alone does not
+prove the published pages render and link correctly.
 
 ## Other automation
 
@@ -248,6 +267,9 @@ separate wiki repository.
 | --- | --- |
 | `scripts/release-notes.sh` | commit-derived release notes and asset list |
 | `scripts/test-release-notes.sh` | throwaway-repository unit test for notes |
+| `scripts/publish-wiki.sh` | deletion-aware flat wiki mirror builder |
+| `scripts/test-wiki-publish.sh` | throwaway-repository wiki publication test |
+| `.github/workflows/publish-wiki.yml` | publish `wiki/` to the GitHub Wiki after merge |
 | `scripts/bake-icons.sh` | regenerate platform icon exports |
 | `scripts/regenerate-freetype.sh` | regenerate FreeType bindings |
 | `scripts/regenerate-harfbuzz.sh` | regenerate HarfBuzz bindings |
@@ -261,6 +283,7 @@ separate wiki repository.
 | --- | --- |
 | Contributor workflow | `CONTRIBUTING.md`, `.github/pull_request_template.md` |
 | CI | `.github/workflows/ci.yml` |
+| Wiki publication | `.github/workflows/publish-wiki.yml`, `scripts/publish-wiki.sh` |
 | Release | `.github/workflows/release.yml` |
 | Coverage | `scripts/rust-logic-coverage.sh` |
 | Per-crate gate | `scripts/check-workspace-crates.sh` |
@@ -355,14 +378,15 @@ bash scripts/check-no-raw-process-exit.sh
 bash scripts/check-workspace-crates.sh
 scripts/rust-logic-coverage.sh
 bash scripts/test-release-notes.sh
+bash scripts/test-wiki-publish.sh
 bash scripts/pty-backend-feasibility.sh --check
 bash scripts/test-resource-inventory.sh
 bash scripts/test-soak-harness.sh
 bash scripts/test-resource-baseline-evidence.sh
 ```
 
-前八条是根 `CLAUDE.md` 与架构文档记录的 gate；后四条是 CI 同样执行的资源证据与
-soak 检查。注意 `cargo test --workspace --lib --bins` 不包含集成测试——跨 crate
+根 `CLAUDE.md` 是这组 gate 的权威来源；CI 也会运行这里列出的资源证据、soak 和
+Wiki publisher 检查。注意 `cargo test --workspace --lib --bins` 不包含集成测试——跨 crate
 套件（含计数分配器 heap-truth 测试）由 `scripts/rust-logic-coverage.sh` 执行。
 
 release prep 还要构建发布平台二进制，例如：
@@ -484,7 +508,13 @@ release 前，对照配置、输入、日志、palette、rendering 和 window �
 
 ## 文档与 Wiki 工作流
 
-仓库内受版本控制的 `wiki/` 目录是 SonicTerm 双语用户文档的唯一事实来源。请在描述相关行为的同一分支和 pull request 中编辑对应 Markdown 页面，让代码和用户指南一起接受审查并保持版本一致。不要维护或发布独立的 wiki 仓库。
+仓库内受版本控制的 `wiki/` 目录是 SonicTerm 双语用户文档的唯一事实来源。请在描述相关行为的同一分支和 pull request 中编辑对应 Markdown 页面，让代码和用户指南一起接受审查并保持版本一致。
+
+`.github/workflows/publish-wiki.yml` 会在每次推送到 `main` 后运行——包括每个合并的 pull request——也支持 `workflow_dispatch` 手动运行，并把该目录单向发布为 GitHub Wiki 镜像。`scripts/publish-wiki.sh` 会替换 Wiki `master` 分支上的全部扁平 Markdown 页面，因此新增、修改、重命名和删除都会同步；内容未变化时会成功结束且不创建空 commit。网页端编辑不是事实来源，并会在下次发布时被覆盖。
+
+workflow 使用生命周期短、只限本仓库的 `GITHUB_TOKEN`，并仅授予 `contents: write`；不保存 PAT、GitHub App key 或其它长期 secret。不要改用覆盖整个账号的 classic PAT。
+
+每个 pull request 合并后，都要确认最新的 `publish-wiki.yml` run 对应 merge SHA。若 `wiki/` 有变更，最新 Wiki commit 也必须对应该 SHA；若无变更，该 run 应成功 no-op 且不创建 Wiki commit。随后打开在线 Wiki，并点击具有代表性的英文和中文导航链接。workflow 成功退出本身不能证明发布页面可以正确渲染和跳转。
 
 ## 其它自动化
 
@@ -492,6 +522,9 @@ release 前，对照配置、输入、日志、palette、rendering 和 window �
 | --- | --- |
 | `scripts/release-notes.sh` | 根据 commit 生成 release note 与资产列表 |
 | `scripts/test-release-notes.sh` | 在临时仓库中测试 note 脚本 |
+| `scripts/publish-wiki.sh` | 构建可同步删除的扁平 Wiki 镜像 |
+| `scripts/test-wiki-publish.sh` | 在临时仓库中测试 Wiki 发布 |
+| `.github/workflows/publish-wiki.yml` | 合并后把 `wiki/` 发布到 GitHub Wiki |
 | `scripts/bake-icons.sh` | 重新生成平台 icon export |
 | `scripts/regenerate-freetype.sh` | 重新生成 FreeType binding |
 | `scripts/regenerate-harfbuzz.sh` | 重新生成 HarfBuzz binding |
@@ -505,6 +538,7 @@ release 前，对照配置、输入、日志、palette、rendering 和 window �
 | --- | --- |
 | Contributor workflow | `CONTRIBUTING.md`, `.github/pull_request_template.md` |
 | CI | `.github/workflows/ci.yml` |
+| Wiki 发布 | `.github/workflows/publish-wiki.yml`, `scripts/publish-wiki.sh` |
 | Release | `.github/workflows/release.yml` |
 | Coverage | `scripts/rust-logic-coverage.sh` |
 | Per-crate gate | `scripts/check-workspace-crates.sh` |

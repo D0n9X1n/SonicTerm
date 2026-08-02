@@ -249,3 +249,33 @@ pub fn dim_toward(fg: ChromeColor, bg: ChromeColor, t: f32) -> ChromeColor {
     };
     ChromeColor::rgba(mix(fg.r(), bg.r()), mix(fg.g(), bg.g()), mix(fg.b(), bg.b()), fg.a())
 }
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn grayscale_coverage(coverage: [f32; 4]) -> f32 {
+    coverage[2] * 0.2126 + coverage[1] * 0.7152 + coverage[0] * 0.0722
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn blend_premul_linear_over_srgb_bgra(dst: &mut [u8], src: [f32; 4]) {
+    let src_alpha = src[3].clamp(0.0, 1.0);
+    let inverse_alpha = 1.0 - src_alpha;
+    let decode = srgb_u8_to_linear_lut();
+
+    dst[0] = linear_channel_to_srgb_u8(src[2] + decode[dst[0] as usize] * inverse_alpha);
+    dst[1] = linear_channel_to_srgb_u8(src[1] + decode[dst[1] as usize] * inverse_alpha);
+    dst[2] = linear_channel_to_srgb_u8(src[0] + decode[dst[2] as usize] * inverse_alpha);
+    let dst_alpha = dst[3] as f32 / 255.0;
+    dst[3] = ((src_alpha + dst_alpha * inverse_alpha) * 255.0).round() as u8;
+}
+
+pub(crate) fn linear_channel_to_srgb_u8(channel: f32) -> u8 {
+    static THRESHOLDS: std::sync::OnceLock<[f32; 255]> = std::sync::OnceLock::new();
+    let thresholds = THRESHOLDS.get_or_init(|| {
+        std::array::from_fn(|index| srgb_channel_to_linear((index as f64 + 0.5) / 255.0) as f32)
+    });
+    thresholds.partition_point(|threshold| channel.clamp(0.0, 1.0) >= *threshold) as u8
+}
+
+#[cfg(test)]
+#[path = "color_tests.rs"]
+mod color_tests;

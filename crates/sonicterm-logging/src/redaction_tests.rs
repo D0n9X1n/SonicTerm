@@ -26,13 +26,15 @@
 /// author already knew about.
 const MEDIA_SRC: &str = include_str!("../../sonicterm-app/src/app/media.rs");
 const RETENTION_SRC: &str = include_str!("../../sonicterm-app/src/app/retention.rs");
+const SNAPSHOT_SRC: &str = include_str!("../../sonicterm-app/src/app/memory_snapshot.rs");
 const VT_SRC: &str = include_str!("../../sonicterm-vt/src/vt.rs");
 const HYPERLINK_SRC: &str = include_str!("../../sonicterm-grid/src/hyperlink.rs");
 
-fn sources() -> [(&'static str, &'static str); 4] {
+fn sources() -> [(&'static str, &'static str); 5] {
     [
         ("sonicterm-app/src/app/media.rs", MEDIA_SRC),
         ("sonicterm-app/src/app/retention.rs", RETENTION_SRC),
+        ("sonicterm-app/src/app/memory_snapshot.rs", SNAPSHOT_SRC),
         ("sonicterm-vt/src/vt.rs", VT_SRC),
         ("sonicterm-grid/src/hyperlink.rs", HYPERLINK_SRC),
     ]

@@ -249,15 +249,6 @@ fn line_quad_antialiases_near_segment() {
 }
 
 #[test]
-fn straight_glyph_color_conversion_premultiplies_alpha() {
-    let c = straight_linear_rgba_to_premul_bgra_f32([0.0, 0.0, 1.0, 0.5]);
-    assert!((c[0] - 0.5).abs() < 0.001);
-    assert_eq!(c[1], 0.0);
-    assert_eq!(c[2], 0.0);
-    assert_eq!(c[3], 0.5);
-}
-
-#[test]
 fn atlas_bilinear_sampling_smooths_between_coverage_pixels() {
     let pixels = [0, 0, 0, 0, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 0];
     let sample = sample_atlas_bilinear(&pixels, 2, 2, 1.0, 1.0);
@@ -275,8 +266,8 @@ fn atlas_pixel_centers_sample_exact_texels() {
 }
 
 #[test]
-fn coverage_luma_is_not_max_channel() {
-    let cov = coverage_luma([0.25, 0.5, 0.75, 0.75]);
+fn grayscale_coverage_is_not_max_channel() {
+    let cov = grayscale_coverage([0.25, 0.5, 0.75, 0.75]);
     assert!(cov > 0.5 && cov < 0.75, "colored fallback should smooth edges: {cov}");
 }
 
@@ -367,8 +358,85 @@ fn subpixel_blend_lerps_each_channel_over_colored_background() {
 }
 
 #[test]
-fn very_low_text_coverage_is_treated_as_empty() {
-    assert!(coverage_luma([0.02, 0.04, 0.06, 0.06]) < 0.08);
+fn grayscale_ramp_matches_hardware_blending_at_supported_scales() {
+    const HARDWARE_REFERENCE: [[u8; 4]; 21] = [
+        [32, 96, 160, 255],
+        [34, 96, 160, 255],
+        [36, 96, 160, 255],
+        [38, 96, 160, 255],
+        [40, 96, 160, 255],
+        [42, 97, 160, 255],
+        [44, 97, 160, 255],
+        [45, 97, 161, 255],
+        [47, 97, 161, 255],
+        [48, 97, 161, 255],
+        [50, 97, 161, 255],
+        [51, 97, 161, 255],
+        [53, 97, 161, 255],
+        [54, 98, 161, 255],
+        [55, 98, 161, 255],
+        [57, 98, 161, 255],
+        [58, 98, 161, 255],
+        [59, 98, 161, 255],
+        [60, 98, 161, 255],
+        [61, 98, 161, 255],
+        [63, 98, 161, 255],
+    ];
+
+    for scale in [1.0_f32, 1.25, 1.5, 1.75] {
+        let width = (8.0 * scale).round() as usize;
+        let height = (15.0 * scale).round() as usize;
+        let ramp: Vec<u8> =
+            (0..width).map(|x| ((x * 20) as f32 / (width - 1) as f32).round() as u8).collect();
+        let mut coverage = Vec::with_capacity(width * height);
+        for _ in 0..height {
+            coverage.extend_from_slice(&ramp);
+        }
+
+        let mut atlas = GlyphAtlas::new(32, 32);
+        let info = atlas
+            .get_or_insert(
+                GlyphKey::new('M', false, false),
+                &mut TileRasterizer(RasterTile {
+                    width: width as u32,
+                    height: height as u32,
+                    offset_x: 0,
+                    offset_y: 0,
+                    advance: width as f32,
+                    coverage,
+                    is_color: false,
+                    is_subpixel: false,
+                }),
+            )
+            .expect("command-palette-sized glyph inserts");
+        let mut frame = WindowsSoftwareFrame::new(
+            width as u32,
+            height as u32,
+            [0.351_532_6, 0.116_970_666, 0.014_443_844, 1.0],
+        )
+        .expect("valid frame");
+
+        frame.draw_glyphs(
+            &atlas,
+            &[GlyphInstance {
+                rect: px_to_ndc(0.0, 0.0, width as f32, height as f32, width as f32, height as f32),
+                uv: info.uv,
+                color: [0.3, 0.15, 0.45, 0.6],
+                flags: [0.0; 4],
+            }],
+        );
+
+        for y in 0..height as u32 {
+            for x in 0..width as u32 {
+                let coverage = ramp[x as usize] as usize;
+                assert_eq!(
+                    frame.pixel_bgra(x, y),
+                    HARDWARE_REFERENCE[coverage],
+                    "scale {scale} diverged from the hardware linear blend at ({x}, {y})"
+                );
+            }
+        }
+    }
 }
 
 #[test]

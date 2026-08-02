@@ -99,6 +99,39 @@ impl Visit for MessageVisitor {
 
 static PANIC_DIR: OnceLock<PathBuf> = OnceLock::new();
 
+/// The session a dump written from this process belongs to.
+///
+/// Set once at startup, alongside the session marker. A dump carrying no
+/// session cannot be attributed to a particular launch, and attributing it to
+/// the wrong one would send a reader to the wrong window of the log — so an
+/// untagged dump reports its session as absent rather than guessed.
+static SESSION_ID: OnceLock<String> = OnceLock::new();
+
+/// Record which session subsequent dumps belong to.
+///
+/// Call once at startup, after arming the session marker. Later calls are
+/// ignored: the first launch identity is the correct one for the life of the
+/// process, and a second call could only overwrite it with a later, wrong one.
+pub fn set_session_id(id: &str) {
+    if valid_session_id(id) {
+        let _ = SESSION_ID.set(id.to_string());
+    }
+}
+
+pub(crate) fn valid_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+/// The session id dumps are tagged with, or `<none>` when untagged.
+///
+/// Written into the dump header verbatim, so the sentinel is spelled out
+/// rather than left blank — an empty field reads as a truncated file.
+fn session_id() -> &'static str {
+    SESSION_ID.get().map_or("<none>", String::as_str)
+}
+
 /// Install a panic hook that writes
 /// `<log_dir>/crashes/crash-<utc-iso8601>.log` and then chains to the
 /// previously-installed (default) panic hook. Calling this more than
@@ -132,6 +165,7 @@ pub fn install_panic_hook(log_dir: PathBuf) {
         .or_else(|| std::env::var_os("SONIC_PANIC_ABORT"))
         .is_some_and(|v| v == "1");
     std::panic::set_hook(Box::new(move |info| {
+        crate::exit_trace::record_exit_reason(crate::exit_trace::ExitReason::Panic);
         let summary = summarize(info);
         // Rolling-log breadcrumb first; file dump is the heavyweight
         // artifact. Use a dedicated target so operators can filter.
@@ -197,6 +231,8 @@ fn write_dump(info: &std::panic::PanicInfo<'_>) -> std::io::Result<()> {
     writeln!(f, "== sonic crash dump ==")?;
     writeln!(f, "timestamp: {}", chrono::Utc::now().to_rfc3339())?;
     writeln!(f, "version:   {}", env!("CARGO_PKG_VERSION"))?;
+    writeln!(f, "session:   {}", session_id())?;
+    writeln!(f, "classification: panic")?;
     writeln!(f, "thread:    {thread_name} ({:?})", thread.id())?;
     writeln!(f, "location:  {location}")?;
     writeln!(f, "message:   {payload}")?;
@@ -247,6 +283,8 @@ pub fn __test_write_dump(dir: &Path, message: &str) -> std::io::Result<PathBuf> 
     writeln!(f, "== sonic crash dump ==")?;
     writeln!(f, "timestamp: {}", chrono::Utc::now().to_rfc3339())?;
     writeln!(f, "version:   {}", env!("CARGO_PKG_VERSION"))?;
+    writeln!(f, "session:   {}", session_id())?;
+    writeln!(f, "classification: panic")?;
     writeln!(f, "location:  <test>")?;
     writeln!(f, "message:   {message}")?;
     writeln!(f)?;
