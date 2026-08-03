@@ -72,4 +72,4 @@ eula         = false
 product-icon = "../../assets/icons/exports/sonic.ico"
 
 [dev-dependencies]
-roxmltree = "0.20"
+roxmltree = "0.21"

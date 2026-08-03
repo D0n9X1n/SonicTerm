@@ -48,4 +48,4 @@ name = "sonicterm-mac"
 path = "src/main.rs"
 
 [dev-dependencies]
-roxmltree = "0.20"
+roxmltree = "0.21"
