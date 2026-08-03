@@ -334,7 +334,7 @@ fn the_committed_budget_is_derived_from_the_seam_caps() {
     }
 
     let mut expected = 0usize;
-    for index in 0..<ResourceClass as enum_map::Enum>::LENGTH {
+    for index in 0..ResourceClass::COUNT {
         let class = <ResourceClass as enum_map::Enum>::from_usize(index);
         match class.pane_seam_term() {
             PaneSeamTerm::Contributes => {

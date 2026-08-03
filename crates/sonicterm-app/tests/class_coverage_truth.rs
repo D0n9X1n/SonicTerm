@@ -120,7 +120,7 @@ fn no_uncharged_class_appears_in_the_production_charge_path() {
     let charged: Vec<ResourceClass> =
         seam_classes(&PaneRetention::default()).into_iter().map(|(class, _)| class).collect();
 
-    for index in 0..ResourceClass::LENGTH {
+    for index in 0..ResourceClass::COUNT {
         let class = ResourceClass::from_usize(index);
         let ClassCoverage::UnchargedRetention { per_owner_bytes } = class.coverage() else {
             continue;
@@ -196,7 +196,7 @@ fn the_remaining_negligible_classes_stay_small_in_aggregate() {
 
     let mut aggregate = 0usize;
     let mut recorded = Vec::new();
-    for index in 0..ResourceClass::LENGTH {
+    for index in 0..ResourceClass::COUNT {
         let class = ResourceClass::from_usize(index);
         if let ClassCoverage::MeasuredNegligible { per_pane_bytes } = class.coverage() {
             aggregate += per_pane_bytes * PANES;

@@ -244,7 +244,7 @@ fn public_contract_types_are_send_sync_and_copy_where_expected() {
 /// guarantee is real rather than the match having a catch-all arm.
 #[test]
 fn every_class_has_a_coverage_decision() {
-    for index in 0..ResourceClass::LENGTH {
+    for index in 0..ResourceClass::COUNT {
         let class = ResourceClass::from_usize(index);
         // Calling it at all is the assertion: a wildcard arm would make this
         // pass vacuously, so the value is checked for sense too.
@@ -318,7 +318,7 @@ fn classes_with_production_charge_sites_are_recorded_as_charged() {
 fn negligible_classes_stay_negligible_in_aggregate() {
     const PANES: usize = 20;
     let mut aggregate = 0usize;
-    for index in 0..ResourceClass::LENGTH {
+    for index in 0..ResourceClass::COUNT {
         let class = ResourceClass::from_usize(index);
         if let ClassCoverage::MeasuredNegligible { per_pane_bytes } = class.coverage() {
             aggregate += per_pane_bytes * PANES;
@@ -346,7 +346,7 @@ fn negligible_classes_stay_negligible_in_aggregate() {
 /// the guarantee is real rather than the match having a catch-all arm.
 #[test]
 fn every_class_has_a_pane_seam_term_decision() {
-    for index in 0..ResourceClass::LENGTH {
+    for index in 0..ResourceClass::COUNT {
         let class = ResourceClass::from_usize(index);
         match class.pane_seam_term() {
             PaneSeamTerm::Contributes
@@ -363,7 +363,7 @@ fn every_class_has_a_pane_seam_term_decision() {
 /// the figure it guards, which is the way a tripwire stops being one.
 #[test]
 fn contributing_classes_are_charged_classes() {
-    for index in 0..ResourceClass::LENGTH {
+    for index in 0..ResourceClass::COUNT {
         let class = ResourceClass::from_usize(index);
         if class.pane_seam_term() == PaneSeamTerm::Contributes {
             assert_eq!(
@@ -383,7 +383,7 @@ fn contributing_classes_are_charged_classes() {
 /// below memory the seams permit, where it fires on a healthy pane.
 #[test]
 fn charged_classes_are_either_terms_or_excluded_for_a_stated_reason() {
-    for index in 0..ResourceClass::LENGTH {
+    for index in 0..ResourceClass::COUNT {
         let class = ResourceClass::from_usize(index);
         if class.coverage() != ClassCoverage::Charged {
             assert_ne!(
@@ -438,7 +438,7 @@ fn the_pane_charge_sites_are_exactly_the_contributing_classes() {
             "{class:?} is charged to a pane owner and must carry a term in the seam-cap sum"
         );
     }
-    for index in 0..ResourceClass::LENGTH {
+    for index in 0..ResourceClass::COUNT {
         let class = ResourceClass::from_usize(index);
         if class.pane_seam_term() == PaneSeamTerm::Contributes {
             assert!(
