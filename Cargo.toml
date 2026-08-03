@@ -58,7 +58,7 @@ crossbeam-channel = "0.5"
 # SSH client (optional; enabled via sonicterm-io/ssh feature)
 russh = "0.61"
 parking_lot = "0.12"
-enum-map = "2.7"
+enum-map = "3.1"
 
 # Rendering
 # T13/T14 (wezterm-takeover G3): glyphon + cosmic-text deleted. The
