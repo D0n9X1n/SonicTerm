@@ -68,7 +68,7 @@ enum-map = "2.7"
 # is the sole shaper + rasterizer.
 wgpu = "30"
 swash = "0.2"
-fontdb = "0.23"
+fontdb = "0.24"
 bytemuck = { version = "1.25", features = ["derive"] }
 # T5 (wezterm-takeover G2A): vendored customglyph.rs uses tiny-skia for
 # Powerline/triangle/Poly path rasterization. Version matches wezterm-gui
