@@ -76,14 +76,16 @@ def rule_names(report) -> list[str]:
     return [diagnostic.rule for diagnostic in report.diagnostics]
 
 
-def cli(cwd: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
-    """Run the checker CLI exactly as a gate caller would."""
+def cli(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run the checker CLI with platform newlines normalized for comparison."""
     return subprocess.run(
         [sys.executable, str(_CHECKER_PATH), *args],
         cwd=cwd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
+        text=True,
+        encoding="utf-8",
     )
 
 
@@ -1759,7 +1761,7 @@ class PathCliAndInventoryTests(unittest.TestCase):
             "scripts/.keep": "",
         }
         with repository(files) as root:
-            expected = b"src/lib.rs:1:1 [public-doc] effectively public function needs purpose rustdoc\n"
+            expected = "src/lib.rs:1:1 [public-doc] effectively public function needs purpose rustdoc\n"
             invocations = [
                 (root, str(root / "src/lib.rs")),
                 (root / "src", "lib.rs"),
@@ -1769,7 +1771,7 @@ class PathCliAndInventoryTests(unittest.TestCase):
             outputs = []
             for cwd, path in invocations:
                 completed = cli(cwd, "--check", "--paths", path)
-                self.assertEqual(completed.returncode, 1, completed.stderr.decode())
+                self.assertEqual(completed.returncode, 1, completed.stderr)
                 outputs.append(completed.stdout)
             self.assertEqual(outputs, [expected] * len(outputs))
 
@@ -1807,7 +1809,7 @@ class PathCliAndInventoryTests(unittest.TestCase):
             outputs = []
             for cwd in (root, root / "scripts", root / "crates"):
                 completed = cli(cwd, "--inventory")
-                self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+                self.assertEqual(completed.returncode, 0, completed.stderr)
                 outputs.append(completed.stdout)
             self.assertEqual(outputs[0], outputs[1])
             self.assertEqual(outputs[1], outputs[2])
@@ -1826,17 +1828,17 @@ class PathCliAndInventoryTests(unittest.TestCase):
     def test_semantic_candidates_mode_is_stable_and_non_failing(self):
         with repository({"src/lib.rs": "fn f(ready: bool) { if ready { work(); } }\n"}) as root:
             completed = cli(root, "--semantic-candidates")
-        self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+        self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(
             completed.stdout,
-            b"src/lib.rs:1:21 [when-advisory] ordinary branch has no mandatory // When: requirement\n",
+            "src/lib.rs:1:21 [when-advisory] ordinary branch has no mandatory // When: requirement\n",
         )
 
     def test_no_in_scope_rust_fails_closed(self):
         with repository({"README": "fixture\n"}) as root:
             completed = cli(root, "--check")
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn(b"no tracked Rust files", completed.stderr)
+        self.assertIn("no tracked Rust files", completed.stderr)
 
 
 if __name__ == "__main__":
