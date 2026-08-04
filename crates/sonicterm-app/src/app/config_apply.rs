@@ -1,6 +1,7 @@
-//! Extracted from `app/mod.rs` from the monolithic app module.
-//! `App`'s referenced fields are `pub(super)`; this submodule lives in
-//! the same `app` module tree, so direct field access works.
+//! Explicit config reload: re-reads `~/.sonicterm/sonicterm.toml` plus the
+//! theme and keymap files it names, and applies live font, theme, and tab-bar
+//! changes to every window. `App`'s referenced fields are `pub(super)`; this
+//! submodule lives in the same `app` module tree, so direct field access works.
 
 #![allow(unused_imports)]
 
@@ -54,11 +55,11 @@ pub(super) const WEIGHT_SCALE_MIN: f32 = 0.5;
 pub(super) const WEIGHT_SCALE_MAX: f32 = 5.0;
 
 /// True iff any field in `new_cfg.font` differs from `old_cfg.font`
-/// (family, size, or line_height) in a way that should drive a live
-/// renderer re-apply.
+/// (family, size, line_height, or the effective weight_scale) in a way
+/// that should drive a live renderer re-apply.
 ///
-/// Extracted as a free function so the file-watcher path can be
-/// unit-tested without a live `GpuRenderer`.
+/// A free function so the reload decision can be unit-tested without a
+/// live `GpuRenderer`.
 pub fn config_diff_needs_font_apply(old_cfg: &Config, new_cfg: &Config) -> bool {
     config_diff_changes_font_metrics(old_cfg, new_cfg)
         || (new_cfg.font.effective_weight_scale() - old_cfg.font.effective_weight_scale()).abs()
@@ -104,6 +105,8 @@ impl App {
             let theme_path = Theme::resolve_path(&new_cfg.theme, &assets);
             match Theme::load_strict(&theme_path) {
                 Ok(mut t) => {
+                    // When: load_strict parsed theme_path, so adopt t and re-seed every
+                    // renderer and pane parser before OSC replies quote stale colors.
                     t.apply_accessibility(&new_cfg.accessibility);
                     tracing::info!("reload: theme -> {}", t.name);
                     if let Some(r) = self.main_renderer_mut() {
@@ -122,7 +125,8 @@ impl App {
                     // mutating cell contents — mark every pane dirty so
                     // the renderer re-shapes with the new palette.
                     for child in self.windows.values() {
-                        // skip shadow main entry (renderer=None).
+                        // When: child.renderer is None for test-seeded entries, which
+                        // never present a frame, so the palette dirty rows go unread.
                         if child.renderer.is_none() {
                             continue;
                         }
@@ -136,6 +140,8 @@ impl App {
         // Font
         let font_changed = config_diff_needs_font_apply(&self.config, &new_cfg);
         if font_changed {
+            // When: font_changed means family, size, line_height, or weight_scale
+            // differs; push the new font so the reload applies without a restart.
             let metrics_changed = config_diff_changes_font_metrics(&self.config, &new_cfg);
             let weight_scale = new_cfg.font.effective_weight_scale();
             if let Some(r) = self.main_renderer_mut() {
@@ -153,7 +159,11 @@ impl App {
             // GpuRenderer + pane rects.
             for child in self.windows.values_mut() {
                 {
-                    let Some(r) = child.renderer.as_mut() else { continue };
+                    let Some(r) = child.renderer.as_mut() else {
+                        // When: child.renderer is None for test-seeded entries; skip so
+                        // set_font only runs where a live renderer can apply it.
+                        continue;
+                    };
                     r.set_font(
                         &new_cfg.font.family,
                         new_cfg.font.size,
@@ -162,7 +172,13 @@ impl App {
                     );
                 }
                 if metrics_changed {
-                    let Some(r) = child.renderer.as_ref() else { continue };
+                    // When: metrics_changed means cell size moved because family, size,
+                    // or line_height changed; refit each pane to its own rect.
+                    let Some(r) = child.renderer.as_ref() else {
+                        // When: child.renderer is None for test-seeded entries, so the
+                        // cell_size and inset needed to compute pane rects are absent.
+                        continue;
+                    };
                     let rects = App::compute_pane_rects_for(child);
                     let (cw, ch) = r.cell_size();
                     let inset = [
@@ -187,6 +203,8 @@ impl App {
         // restart.
         if new_cfg.locale != self.config.locale {
             let requested =
+                // When: locale is non-empty, so the configured tag reaches
+                // reload_locale; None would defer to the OS locale instead.
                 if new_cfg.locale.is_empty() { None } else { Some(new_cfg.locale.as_str()) };
             self.i18n.reload_locale(requested);
             tracing::info!(locale = %self.i18n.locale(), "live-reload: locale");
@@ -221,6 +239,8 @@ impl App {
             || (new_cfg.window.padding_bottom - self.config.window.padding_bottom).abs()
                 > f32::EPSILON;
         if padding_changed {
+            // When: padding_changed means one of the four window.padding values moved;
+            // resize every pane grid and PTY or the shell keeps a stale stty size.
             let pad = [
                 new_cfg.window.padding_left,
                 new_cfg.window.padding_right,
@@ -233,10 +253,18 @@ impl App {
             // the loop below covers main + every child.
             for child in self.windows.values_mut() {
                 {
-                    let Some(r) = child.renderer.as_mut() else { continue };
+                    let Some(r) = child.renderer.as_mut() else {
+                        // When: child.renderer is None for test-seeded entries; skip so
+                        // the new padding reaches only windows that own a surface.
+                        continue;
+                    };
                     r.set_padding(pad);
                 }
-                let Some(r) = child.renderer.as_ref() else { continue };
+                let Some(r) = child.renderer.as_ref() else {
+                    // When: child.renderer is None for test-seeded entries, so cell_size
+                    // and the padding inset needed to resize panes are unavailable.
+                    continue;
+                };
                 let rects = App::compute_pane_rects_for(child);
                 let (cw, ch) = r.cell_size();
                 let inset = [
@@ -257,8 +285,8 @@ impl App {
         }
 
         if (new_cfg.appearance.opacity - self.config.appearance.opacity).abs() > f32::EPSILON {
-            // B1b borrow-split: clone theme before borrowing renderer
-            // (theme + renderer used to be disjoint App fields).
+            // Clone the theme before borrowing the renderer: `main_renderer_mut`
+            // takes `&mut self`, so a live borrow of `self.theme` would conflict.
             let theme_snapshot = self.theme.clone();
             if let Some(r) = self.main_renderer_mut() {
                 r.set_theme_with_opacity(&theme_snapshot, new_cfg.appearance.opacity);
@@ -398,8 +426,8 @@ impl App {
 
         // Scrollback depth: re-apply to every live pane across all windows
         // (and all tabs — every pane lives in `ws.panes`, inactive tabs
-        // included). Lowering the cap drains excess history immediately
-        // . App-thread, not render hot path, so lock is fine.
+        // included). Lowering the cap drains excess history immediately.
+        // App-thread, not render hot path, so lock is fine.
         if new_cfg.terminal.scrollback != self.config.terminal.scrollback {
             let limit = new_cfg.terminal.scrollback;
             tracing::info!("live-reload: scrollback -> {limit} rows");
@@ -415,7 +443,8 @@ impl App {
             w.request_redraw();
         }
         for child in self.windows.values() {
-            // skip shadow main entry (renderer=None).
+            // When: child.renderer is None for test-seeded entries, which carry no
+            // window either, so child.request_redraw would already do nothing.
             if child.renderer.is_none() {
                 continue;
             }
@@ -427,15 +456,21 @@ impl App {
 impl App {
     pub(super) fn apply_theme_by_name(&mut self, name: &str) {
         if self.config.theme == name {
+            // When: the requested name is already the active config.theme; returning
+            // avoids re-seeding every pane parser and re-pushing an identical palette.
             return;
         }
         let Some(loader) = self.theme_loader.as_ref() else {
+            // When: no theme_loader is installed, so name cannot be resolved to a
+            // theme; warn and drop the request, leaving the active theme in place.
             tracing::warn!("ApplyTheme({name}): no theme_loader installed; ignoring");
             return;
         };
         let mut theme = match loader(name) {
             Ok(t) => t,
             Err(e) => {
+                // When: loader returned Err for name, so no theme was produced; warn
+                // and return, leaving the active theme and renderer palettes untouched.
                 tracing::warn!("ApplyTheme({name}): load failed: {e:#}");
                 return;
             }
@@ -458,7 +493,8 @@ impl App {
         // cell contents — mark every pane dirty so the renderer
         // re-shapes with the new palette.
         for child in self.windows.values() {
-            // skip shadow main entry (renderer=None).
+            // When: child.renderer is None for test-seeded entries, where nothing
+            // will ever consume the dirty rows mark_all_panes_dirty would set.
             if child.renderer.is_none() {
                 continue;
             }
@@ -468,7 +504,8 @@ impl App {
             w.request_redraw();
         }
         for child in self.windows.values() {
-            // skip shadow main entry (renderer=None).
+            // When: child.renderer is None for test-seeded entries, whose window is
+            // None too, so skipping keeps this sweep to windows that present frames.
             if child.renderer.is_none() {
                 continue;
             }
@@ -480,6 +517,8 @@ impl App {
         let cur = self.config.font.size;
         let next = (cur + delta).clamp(8.0, 48.0);
         if (next - cur).abs() < f32::EPSILON {
+            // When: next equals cur because the clamp pinned the step at an end of
+            // the 8..48 range; skip the font-stack rebuild and pane resize entirely.
             return;
         }
         self.set_font_size(next);
@@ -489,6 +528,8 @@ impl App {
         // compile-time default is a size the user never asked for.
         let target = self.configured_font_size;
         if (self.config.font.size - target).abs() < f32::EPSILON {
+            // When: the live font size already equals target, so a reset has nothing
+            // to undo; returning avoids rebuilding every renderer's font stack.
             return;
         }
         self.set_font_size(target);
@@ -501,6 +542,8 @@ impl App {
         let cur = self.config.font.effective_weight_scale();
         let next = (cur + delta).clamp(WEIGHT_SCALE_MIN, WEIGHT_SCALE_MAX);
         if (next - cur).abs() < f32::EPSILON {
+            // When: next equals cur because the clamp pinned the step at an end of the
+            // accepted weight_scale range; stepping past either end stays a no-op.
             return;
         }
         self.set_font_weight(next);
@@ -511,6 +554,8 @@ impl App {
     pub(super) fn reset_font_weight(&mut self) {
         let target = self.configured_weight_scale;
         if (self.config.font.effective_weight_scale() - target).abs() < f32::EPSILON {
+            // When: the live weight already equals target, so there is no transient
+            // adjustment left to discard and no renderer needs a new font stack.
             return;
         }
         self.set_font_weight(target);
@@ -532,6 +577,8 @@ impl App {
         }
         self.input_dirty = true;
         for child in self.windows.values() {
+            // When: child.renderer is None only for test-seeded entries, where no
+            // renderer will consume the dirty rows and request_redraw is a no-op.
             if child.renderer.is_none() {
                 continue;
             }
@@ -551,10 +598,18 @@ impl App {
         // the loop below covers main + every child.
         for child in self.windows.values_mut() {
             {
-                let Some(r) = child.renderer.as_mut() else { continue };
+                let Some(r) = child.renderer.as_mut() else {
+                    // When: child.renderer is None for test-seeded entries; skip so the
+                    // new size reaches only windows that can actually rasterize it.
+                    continue;
+                };
                 r.set_font(&family, size, line_h, weight_scale);
             }
-            let Some(r) = child.renderer.as_ref() else { continue };
+            let Some(r) = child.renderer.as_ref() else {
+                // When: child.renderer is None for test-seeded entries, so there is no
+                // cell_size or padding inset to fit new pane rects against.
+                continue;
+            };
             let rects = App::compute_pane_rects_for(child);
             let (cw, ch) = r.cell_size();
             let inset = [
@@ -569,7 +624,8 @@ impl App {
             w.request_redraw();
         }
         for child in self.windows.values() {
-            // skip shadow main entry (renderer=None).
+            // When: child.renderer is None only for test-seeded entries, which carry
+            // no window either, so child.request_redraw would already do nothing.
             if child.renderer.is_none() {
                 continue;
             }
@@ -584,11 +640,21 @@ impl App {
         // the loop below covers main + every child.
         for child in self.windows.values_mut() {
             let changed = {
-                let Some(r) = child.renderer.as_mut() else { continue };
+                let Some(r) = child.renderer.as_mut() else {
+                    // When: renderer is None for test-seeded entries, which hold no
+                    // tab-bar visibility state; skip so the toggle only hits live windows.
+                    continue;
+                };
                 r.set_tab_bar_visible(visible)
             };
             if changed {
-                let Some(r) = child.renderer.as_ref() else { continue };
+                // When: changed means set_tab_bar_visible actually flipped the flag, so
+                // the usable cell area moved and every pane must be refitted to it.
+                let Some(r) = child.renderer.as_ref() else {
+                    // When: renderer is None for test-seeded entries, so there is no
+                    // cell_size or padding inset to compute new pane rects against.
+                    continue;
+                };
                 let rects = App::compute_pane_rects_for(child);
                 let (cw, ch) = r.cell_size();
                 let inset = [
@@ -604,7 +670,8 @@ impl App {
             w.request_redraw();
         }
         for child in self.windows.values() {
-            // skip shadow main entry (renderer=None).
+            // When: renderer is None only for test-seeded entries, which also carry
+            // no window, so child.request_redraw would already be a no-op.
             if child.renderer.is_none() {
                 continue;
             }
@@ -616,9 +683,16 @@ impl App {
     /// after startup — there is no background watcher, so an edit takes effect
     /// when the user asks for it and not before.
     pub(super) fn force_reload_config(&mut self) {
-        let Some(path) = sonicterm_cfg::config::Config::default_path() else { return };
+        let Some(path) = sonicterm_cfg::config::Config::default_path() else {
+            // When: default_path found no home directory, so no sonicterm.toml
+            // exists to re-read; keep the running config rather than clearing it.
+            return;
+        };
         match Config::load_strict(&path) {
             Ok(cfg) => {
+                // When: load_strict parsed the file at path with no error; adopt cfg
+                // as the session baseline before pushing it into live windows.
+
                 // The reset targets follow the config the session has loaded.
                 self.configured_font_size = cfg.font.size;
                 self.configured_weight_scale = cfg.font.effective_weight_scale();

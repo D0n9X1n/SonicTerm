@@ -108,8 +108,8 @@ pub const TAB_TITLE_PADDING_PX: f32 = 6.0;
 /// reads as soft/blurry tab titles on HiDPI. Matching the body size makes
 /// the projection scale exactly 1.0, so tab glyphs reuse the grid atlas
 /// tiles 1:1 and render as crisply as terminal text. Restoring the larger
-/// size *without* the blur needs a size-keyed atlas (rasterize chrome
-/// glyphs natively at the tab px size) — tracked as the follow-up.
+/// size *without* the blur requires a size-keyed atlas that rasterizes
+/// chrome glyphs natively at the tab pixel size.
 #[must_use]
 pub fn tab_title_font_size(body_font_size: f32) -> f32 {
     body_font_size
@@ -127,6 +127,7 @@ pub struct TabTitleRichTextSpans<'a> {
     pub default_attrs: TabSpanAttrs,
 }
 
+/// Build renderer-ready text/color/style spans from tab-title byte ranges.
 #[doc(hidden)]
 #[must_use]
 pub fn build_tab_title_rich_text_spans<'a>(
@@ -155,6 +156,7 @@ pub fn build_tab_title_rich_text_spans<'a>(
     }
 }
 
+/// Build centered, truncated tab-title text and its active/inactive color ranges.
 #[doc(hidden)]
 pub fn build_tab_title_spans(
     tabs: &[TabSpanInput<'_>],
@@ -177,6 +179,7 @@ pub fn build_tab_title_spans(
             display_title = format!("{badge} {}", t.title);
             display_title.as_str()
         } else {
+            // When: `badge` is absent, use the tab title without allocating a prefixed display string.
             t.title
         };
         let title_chars: Vec<char> = title.chars().collect();
@@ -186,6 +189,7 @@ pub fn build_tab_title_spans(
             s.push('…');
             s
         } else {
+            // When: `title_chars` fits within `max_chars`, preserve the complete title without an ellipsis.
             title_chars.iter().collect()
         };
         let body_chars = body.chars().count();
@@ -209,6 +213,7 @@ pub fn build_tab_title_spans(
             s.extend(std::iter::repeat_n(' ', trailing_pad));
             (rect_left_col, s)
         } else {
+            // When: `is_active` is false, omit tinted padding and anchor only the centered title body.
             (center_col, body)
         };
 

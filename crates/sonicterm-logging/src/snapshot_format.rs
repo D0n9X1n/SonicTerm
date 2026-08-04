@@ -32,9 +32,7 @@ pub fn format_snapshot(snapshot: &ResourceSnapshot) -> String {
     let mut out = String::with_capacity(512);
 
     if snapshot.release_failures != 0 {
-        // Deliberately first and deliberately loud: while this is non-zero
-        // every other figure below is measured against a ceiling that is
-        // already wrong, so reading them as normal accounting is misleading.
+        // When: `release_failures` is nonzero, lead with the inconsistency because later totals use the wrong ceiling.
         let _ = writeln!(
             out,
             "LEDGER INCONSISTENT: {} release(s) could not be applied. The process \
@@ -64,9 +62,11 @@ pub fn format_snapshot(snapshot: &ResourceSnapshot) -> String {
     );
 
     if let Some((class, bytes)) = dominant_class(snapshot) {
+        // When: `dominant_class` returns a value, include the subsystem holding the most process bytes.
         let share = if snapshot.process_amount.bytes == 0 {
             0.0
         } else {
+            // When: `process_amount.bytes` is nonzero, compute the dominant class's process share.
             (bytes as f64 / snapshot.process_amount.bytes as f64) * 100.0
         };
         let _ =
@@ -76,9 +76,11 @@ pub fn format_snapshot(snapshot: &ResourceSnapshot) -> String {
     let mut any_class = false;
     for (class, bytes) in snapshot.process_class_bytes.iter() {
         if *bytes == 0 && snapshot.process_class_items[class] == 0 {
+            // When: this `class` holds neither bytes nor items, omit it from the operator-focused report.
             continue;
         }
         if !any_class {
+            // When: `any_class` is false for the first nonempty class, emit the section header exactly once.
             let _ = writeln!(out, "  classes holding anything:");
             any_class = true;
         }
@@ -90,6 +92,7 @@ pub fn format_snapshot(snapshot: &ResourceSnapshot) -> String {
         );
     }
     if !any_class {
+        // When: `any_class` remains false, state explicitly that no class held bytes or items.
         let _ = writeln!(out, "  classes holding anything: none");
     }
 

@@ -117,12 +117,18 @@ fn run_probe(active: &ActiveEventLoop) -> Result<Capability, String> {
         return Err(String::from("created window did not expose a Win32 handle"));
     };
     let hwnd = HWND(handle.hwnd.get() as *mut _);
-    let hdc = unsafe { GetDC(Some(hwnd)) };
+    let hdc =
+        // SAFETY: `hwnd` belongs to the live `window`; this DC is released once below with the same `hwnd`.
+        unsafe { GetDC(Some(hwnd)) };
     if hdc.0.is_null() {
         return Ok(Capability::HostIncapable(String::from("GetDC returned null")));
     }
-    let observed = unsafe { GetPixel(hdc, 8, 8) }.0;
-    let _ = unsafe { ReleaseDC(Some(hwnd), hdc) };
+    let observed =
+        // SAFETY: `hdc` is the live non-null DC for `hwnd`; `GetPixel` borrows it and retains no pointer.
+        unsafe { GetPixel(hdc, 8, 8) }.0;
+    let _ =
+        // SAFETY: pairs once with the successful `GetDC` above, using the exact same live `hwnd` and `hdc`.
+        unsafe { ReleaseDC(Some(hwnd), hdc) };
     if observed == CLR_INVALID {
         return Ok(Capability::HostIncapable(String::from("GetPixel returned CLR_INVALID")));
     }
@@ -185,12 +191,18 @@ fn render_frame(
 }
 
 fn read_hwnd_pixel(hwnd: HWND, x: i32, y: i32) -> Result<u32, String> {
-    let hdc = unsafe { GetDC(Some(hwnd)) };
+    let hdc =
+        // SAFETY: the caller supplies the live window's `hwnd`; this DC is released once below with the same handle.
+        unsafe { GetDC(Some(hwnd)) };
     if hdc.0.is_null() {
         return Err(String::from("GetDC returned null"));
     }
-    let observed = unsafe { GetPixel(hdc, x, y) }.0;
-    let _ = unsafe { ReleaseDC(Some(hwnd), hdc) };
+    let observed =
+        // SAFETY: `hdc` is the live non-null DC for `hwnd`; `GetPixel` borrows it and retains no pointer.
+        unsafe { GetPixel(hdc, x, y) }.0;
+    let _ =
+        // SAFETY: pairs once with the successful `GetDC` above, using the exact same live `hwnd` and `hdc`.
+        unsafe { ReleaseDC(Some(hwnd), hdc) };
     if observed == CLR_INVALID {
         return Err(String::from("GetPixel returned CLR_INVALID"));
     }

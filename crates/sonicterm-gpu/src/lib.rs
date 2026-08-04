@@ -9,10 +9,9 @@
 //!     `sonicterm_text::GlyphInstance` and samples the GPU glyph atlas.
 //!   * [`atlas_upload`] — wgpu-side wrapper around `sonicterm_text::glyph_atlas`
 //!     that owns the texture/view/sampler/bind-group and syncs dirty tiles.
-//!   * [`chrome_text`] — wezterm-driven helper that batches chrome strings
+//!   * [`chrome_text`] — WezTerm-driven helper that batches chrome strings
 //!     (tab titles, palette, search bar, IME, drag chip) into the shared
-//!     atlas + text pipeline. Replaced the glyphon `TextRenderer` path in
-//!     T13/T14 of the wezterm-takeover.
+//!     atlas and text pipeline.
 //!
 //! The composite renderer (`sonicterm-shared::render`) lives in
 //! `sonicterm-shared`, split across sub-files.
@@ -23,7 +22,7 @@
 
 #![deny(missing_docs)]
 #![forbid(unsafe_op_in_unsafe_fn)]
-#![allow(missing_docs)] // core.rs (moved in M7f) carries its own doc coverage; relax until follow-up.
+#![allow(missing_docs)] // Public contracts are checked separately from private renderer implementation seams.
 
 /// wgpu-side wrapper around `sonicterm_text::glyph_atlas` — owns the texture,
 /// view, sampler, and bind group; syncs dirty tiles to the GPU.
@@ -32,24 +31,20 @@ pub mod atlas_upload;
 /// the 11 glyphon `TextRenderer` chrome sites and feeds the existing
 /// [`text_pipeline`] buffer — no second atlas, no second pass.
 pub mod chrome_text;
-/// Color / sRGB conversion helpers — produce `wgpu::Color` / linear RGBA arrays
-/// from chrome-text colors and `#rrggbb` hex strings. Moved here from
-/// `sonicterm-shared::render::color` in M7b of the workspace refactor; the
-/// helpers consume [`color::ChromeColor`] (post-T13) and produce
-/// `wgpu::Color`, so they belong on the GPU side of the layer split.
+/// Color / sRGB conversion helpers that produce `wgpu::Color` and linear RGBA
+/// arrays from chrome-text colors and `#rrggbb` strings. They consume
+/// [`color::ChromeColor`] and keep GPU color conversion behind this crate's
+/// renderer-model boundary.
 pub mod color;
-/// Cursor-related rendering helpers (hollow rects, glyph recolouring,
-/// inactive-pane cursor record). Moved from
-/// `sonicterm-shared::render::cursor` in M7e of the workspace refactor —
-/// all helpers emit `QuadInstance` / `GlyphInstance` and belong on the
-/// GPU side of the layer split.
+/// Cursor-related rendering helpers for hollow rectangles, glyph recolouring,
+/// and inactive-pane cursor records. All helpers emit `QuadInstance` or
+/// `GlyphInstance` data on the GPU side of the renderer-model boundary.
 pub mod cursor;
 /// Quad pipeline (`QuadInstance` + WGSL): cursor blocks, selection tint,
 /// rounded chrome, underlines, focus borders.
 pub mod quad;
-/// Per-row quad cache for background / underline / hyperlink tint quads.
-/// Moved from `sonicterm-shared::render::row_quad_cache` in M7e — caches
-/// `QuadInstance`, so it belongs on the GPU side of the layer split.
+/// Per-row cache for background, underline, and hyperlink-tint
+/// `QuadInstance`s on the GPU side of the renderer-model boundary.
 pub mod row_quad_cache;
 #[cfg(target_os = "windows")]
 pub(crate) mod software_windows;
@@ -60,12 +55,8 @@ pub mod text_pipeline;
 /// path for atlas glyphs and colored geometry.
 pub mod wezterm_pipeline;
 
-/// Composite terminal renderer (`GpuRenderer`). Moved here from
-/// `sonicterm-shared::render::core` in M7f of the workspace refactor —
-/// the renderer composes `quad` geometry, atlas glyphs, and cursor state
-/// into the WezTerm-style final presentation pipeline, so it belongs on
-/// the GPU side. `sonicterm-shared::render` is now a thin deprecated
-/// re-export shim around this module.
+/// Composite terminal renderer (`GpuRenderer`) that combines quad geometry,
+/// atlas glyphs, and cursor state in the WezTerm-style presentation pipeline.
 pub mod core;
 
 #[cfg(test)]

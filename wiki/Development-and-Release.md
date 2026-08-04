@@ -78,25 +78,51 @@ The test surface includes:
 - app cross-window, redraw, broadcast, resize, and update flows;
 - platform-specific CLI and software-present primitives.
 
+## Authored Rust comment contract
+
+First-party Rust comments are part of the checked source contract. Effectively
+public authored functions and public trait functions require concise purpose
+Rustdoc; public unsafe functions also require a `# Safety` section. Objective
+control-flow boundaries require substantive `// When:` rationale, while
+mechanical value selectors remain advisories. Unsafe boundaries require
+`// SAFETY:`, functions that order distinct locks require `// Lock order:`,
+non-`SeqCst` atomic protocols require `// Ordering:`, and `Drop`
+implementations require `// Lifecycle:`.
+
+Each marker stays at the exact checker-required anchor, names the relevant
+identifiers, and is limited to two comment lines and 160 characters. Comments
+describe current behavior and why the boundary exists, never issue, pull-request,
+or authoring history. Vendored, generated, preserved-upstream, build, and
+ordinary test contexts are excluded from non-safety rules; unsafe constructs in
+test code still require `// SAFETY:`. Run
+`scripts/check-authored-rust-comments.sh` to execute the checker's contract tests
+before scanning the repository.
+
 ## Local gates
 
 The complete local verification set documented by the architecture and PR
 template is:
 
 ```sh
-cargo fmt --all -- --check
+cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-io --no-deps --features ssh
 cargo metadata --no-deps --format-version 1
 cargo test --workspace --lib --bins
+bash scripts/check-authored-rust-comments.sh
 bash scripts/check-no-raw-process-exit.sh
+bash scripts/check-rust-version.sh
+bash scripts/check-window-owner-registration.sh
 bash scripts/check-workspace-crates.sh
-scripts/rust-logic-coverage.sh
-bash scripts/test-release-notes.sh
-bash scripts/test-wiki-publish.sh
 bash scripts/pty-backend-feasibility.sh --check
 bash scripts/test-resource-inventory.sh
-bash scripts/test-soak-harness.sh
 bash scripts/test-resource-baseline-evidence.sh
+bash scripts/test-soak-harness.sh
+bash scripts/test-release-notes.sh
+bash scripts/test-wiki-publish.sh
+scripts/rust-logic-coverage.sh
 ```
 
 The root `CLAUDE.md` is authoritative for this gate; CI also runs the
@@ -121,14 +147,15 @@ Rust logic.
 
 ## Pull-request CI
 
-`.github/workflows/ci.yml` runs on pull requests and on pushes to the branches
-its `on.push.branches` list names — currently `main` and the active release
-branch — with a macOS 14 / Windows latest matrix:
+`.github/workflows/ci.yml` runs on pull requests and on pushes to `main`, with a
+macOS 14 / Windows latest matrix:
 
 ```mermaid
 flowchart TD
     checkout["checkout + stable Rust"]
     cairo["Windows: cache/install Cairo with vcpkg"]
+    comments["authored Rust comment contract"]
+    rustdoc["strict workspace + SSH Rustdoc"]
     exitpolicy["process-exit policy"]
     wstest["cargo test --workspace --lib --bins"]
     percrate["per-crate unit/build gate"]
@@ -140,7 +167,9 @@ flowchart TD
     coverage(["macOS only: install cargo-llvm-cov and enforce coverage"])
 
     checkout --> cairo
-    cairo --> exitpolicy
+    cairo --> comments
+    comments --> rustdoc
+    rustdoc --> exitpolicy
     exitpolicy --> wstest
     wstest --> percrate
     percrate --> notes
@@ -151,10 +180,12 @@ flowchart TD
     baseline --> coverage
 ```
 
-CI runs `cargo fmt --all --check` and `cargo clippy --workspace --all-targets`
-with warnings denied, plus the same clippy pass over `sonicterm-io` with the
-`ssh` feature. `deny.toml` is present but no `cargo deny check` job enforces it,
-so dependency policy is checked by hand rather than by a gate.
+CI runs `cargo fmt --all --check`, the authored Rust comment checker, strict
+workspace Rustdoc, and `cargo clippy --workspace --all-targets` with warnings
+denied. The `sonicterm-io` SSH feature receives separate clippy and strict
+Rustdoc passes because `--all-targets` does not enable optional features.
+`deny.toml` is present but no `cargo deny check` job enforces it, so dependency
+policy is checked by hand rather than by a gate.
 
 ## Coverage boundary
 
@@ -265,6 +296,7 @@ prove the published pages render and link correctly.
 
 | File | Purpose |
 | --- | --- |
+| `scripts/check-authored-rust-comments.sh` | test and enforce first-party Rust comment contracts |
 | `scripts/release-notes.sh` | commit-derived release notes and asset list |
 | `scripts/test-release-notes.sh` | throwaway-repository unit test for notes |
 | `scripts/publish-wiki.sh` | deletion-aware flat wiki mirror builder |
@@ -365,24 +397,46 @@ crate root 使用 `lib_tests.rs` 或 `main_tests.rs`。不要创建 inline `mod 
 - app 跨窗口、redraw、broadcast、resize 与 update flow；
 - 平台专属 CLI 与 software-present primitive。
 
+## 第一方 Rust 注释契约
+
+第一方 Rust 注释属于受检查的源码契约。有效公开的第一方函数和公开 trait
+函数必须有简洁的用途 Rustdoc；公开 unsafe 函数还必须有 `# Safety` 章节。
+客观控制流边界必须有实质性的 `// When:` 理由，而机械式值选择器只作为
+advisory。unsafe 边界必须有 `// SAFETY:`；对不同锁规定获取顺序的函数必须有
+`// Lock order:`；使用非 `SeqCst` 原子顺序的协议必须有 `// Ordering:`；
+`Drop` 实现必须有 `// Lifecycle:`。
+
+每个 marker 必须位于 checker 要求的准确锚点，点名相关 identifier，并限制在
+两行注释、160 个字符以内。注释只描述当前行为以及边界存在的原因，不记录 issue、
+pull request 或编写历史。vendored、generated、保留的 upstream、build 和普通 test
+上下文不执行非 safety 规则；test 代码中的 unsafe construct 仍需 `// SAFETY:`。
+运行 `scripts/check-authored-rust-comments.sh` 时，会先执行 checker 契约测试，再扫描
+整个仓库。
+
 ## 本地 gate
 
 架构文档与 PR template 记录的完整本地验证集合：
 
 ```sh
-cargo fmt --all -- --check
+cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-io --no-deps --features ssh
 cargo metadata --no-deps --format-version 1
 cargo test --workspace --lib --bins
+bash scripts/check-authored-rust-comments.sh
 bash scripts/check-no-raw-process-exit.sh
+bash scripts/check-rust-version.sh
+bash scripts/check-window-owner-registration.sh
 bash scripts/check-workspace-crates.sh
-scripts/rust-logic-coverage.sh
-bash scripts/test-release-notes.sh
-bash scripts/test-wiki-publish.sh
 bash scripts/pty-backend-feasibility.sh --check
 bash scripts/test-resource-inventory.sh
-bash scripts/test-soak-harness.sh
 bash scripts/test-resource-baseline-evidence.sh
+bash scripts/test-soak-harness.sh
+bash scripts/test-release-notes.sh
+bash scripts/test-wiki-publish.sh
+scripts/rust-logic-coverage.sh
 ```
 
 根 `CLAUDE.md` 是这组 gate 的权威来源；CI 也会运行这里列出的资源证据、soak 和
@@ -402,13 +456,15 @@ cargo build --release -p sonicterm-mac
 
 ## Pull-request CI
 
-`.github/workflows/ci.yml` 在 PR 以及推送到其 `on.push.branches` 所列分支（当前为
-`main` 与当前发布分支）时运行 macOS 14 / Windows latest matrix：
+`.github/workflows/ci.yml` 在 PR 以及推送到 `main` 时运行 macOS 14 /
+Windows latest matrix：
 
 ```mermaid
 flowchart TD
     checkout["checkout + stable Rust"]
     cairo["Windows：缓存/安装 vcpkg Cairo"]
+    comments["第一方 Rust 注释契约"]
+    rustdoc["严格 workspace + SSH Rustdoc"]
     exitpolicy["process-exit policy"]
     wstest["cargo test --workspace --lib --bins"]
     percrate["per-crate unit/build gate"]
@@ -420,7 +476,9 @@ flowchart TD
     coverage(["仅 macOS：安装 cargo-llvm-cov 并执行 coverage gate"])
 
     checkout --> cairo
-    cairo --> exitpolicy
+    cairo --> comments
+    comments --> rustdoc
+    rustdoc --> exitpolicy
     exitpolicy --> wstest
     wstest --> percrate
     percrate --> notes
@@ -431,10 +489,11 @@ flowchart TD
     baseline --> coverage
 ```
 
-CI 会运行 `cargo fmt --all --check` 与 `cargo clippy --workspace --all-targets`
-（warning 视为错误），并对启用 `ssh` feature 的 `sonicterm-io` 执行同样的 clippy 检查。
-`deny.toml` 存在，但没有 `cargo deny check` job 强制执行它，
-因此依赖策略靠人工检查，而不是由 gate 保证。
+CI 会运行 `cargo fmt --all --check`、第一方 Rust 注释 checker、严格 workspace
+Rustdoc，以及 warning 视为错误的 `cargo clippy --workspace --all-targets`。由于
+`--all-targets` 不会启用 optional feature，`sonicterm-io` 的 `ssh` feature 另有
+clippy 和严格 Rustdoc gate。`deny.toml` 存在，但没有 `cargo deny check` job
+强制执行它，因此依赖策略靠人工检查，而不是由 gate 保证。
 
 ## Coverage 边界
 
@@ -520,6 +579,7 @@ workflow 使用生命周期短、只限本仓库的 `GITHUB_TOKEN`，并仅授�
 
 | 文件 | 用途 |
 | --- | --- |
+| `scripts/check-authored-rust-comments.sh` | 测试并执行第一方 Rust 注释契约 |
 | `scripts/release-notes.sh` | 根据 commit 生成 release note 与资产列表 |
 | `scripts/test-release-notes.sh` | 在临时仓库中测试 note 脚本 |
 | `scripts/publish-wiki.sh` | 构建可同步删除的扁平 Wiki 镜像 |

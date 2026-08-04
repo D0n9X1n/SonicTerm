@@ -89,9 +89,11 @@ impl I18n {
             a
         });
         if let Some(s) = format_in(&self.active_bundle, key, fluent_args.as_ref()) {
+            // When: the active bundle contains `key`, return its localized rendering without fallback.
             return s;
         }
         if let Some(s) = format_in(&self.fallback, key, fluent_args.as_ref()) {
+            // When: active lookup missed but English `fallback` contains `key`, return the fallback translation.
             return s;
         }
         key.to_string()
@@ -143,14 +145,18 @@ fn build_bundle(tag: &str) -> Bundle {
 /// `SONIC_LOCALE` env var > caller-supplied `requested` > OS locale > `"en"`.
 fn pick_locale(requested: Option<&str>) -> String {
     if let Ok(env) = std::env::var("SONIC_LOCALE") {
+        // When: `std::env::var("SONIC_LOCALE")` yields `env`, give the process override first priority.
         if !env.is_empty() {
+            // When: `env` is nonempty, negotiate it against the shipped locale set.
             return negotiate(&env);
         }
     }
     if let Some(r) = requested.filter(|s| !s.is_empty()) {
+        // When: caller `requested` is nonempty and no env override won, negotiate the configured locale.
         return negotiate(r);
     }
     if let Some(sys) = sys_locale::get_locale() {
+        // When: the OS reports `sys` and no explicit choice exists, negotiate the system locale.
         return negotiate(&sys);
     }
     "en".to_string()
@@ -159,7 +165,10 @@ fn pick_locale(requested: Option<&str>) -> String {
 fn negotiate(requested: &str) -> String {
     let req: LanguageIdentifier = match requested.parse() {
         Ok(id) => id,
-        Err(_) => return "en".to_string(),
+        Err(_) => {
+            // When: `requested` is not a valid language identifier, fall back to English.
+            return "en".to_string();
+        }
     };
     let available: Vec<LanguageIdentifier> =
         // PANIC: safe — `SHIPPED_LOCALES` is a const &[&str] of canonical BCP-47

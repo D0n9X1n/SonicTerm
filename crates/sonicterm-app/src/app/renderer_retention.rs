@@ -1,7 +1,7 @@
 //! What a renderer retains on the CPU, reported per window.
 //!
 //! The renderer computes three real, measured host-side figures —
-//! [`GpuRenderer::retained_amounts`] reads the capacity of the glyph atlas, the
+//! `GpuRenderer::retained_amounts` reads the capacity of the glyph atlas, the
 //! image atlas, and (on Windows) the software presentation frame. Those figures
 //! were computed and read by nothing: the crate that owns them cannot depend on
 //! the governor, so the numbers stopped at the crate boundary and no report
@@ -101,7 +101,10 @@ impl super::App {
     /// entries own their renderer outright, so none is ever absent.
     pub(super) fn log_renderer_retention(&self) {
         for (window_id, window) in &self.windows {
-            let Some(renderer) = window.renderer.as_ref() else { continue };
+            let Some(renderer) = window.renderer.as_ref() else {
+                // When: this window has no renderer yet, omit a misleading zero-retention record.
+                continue;
+            };
             emit_renderer_retention(
                 &format!("{window_id:?}"),
                 "visible",

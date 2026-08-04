@@ -29,6 +29,7 @@ pub fn tab_display_label(index: usize, title: &str) -> String {
     if index == 0 {
         title.to_string()
     } else {
+        // When: `index` is nonzero, the tab is not first, so it carries the separator prefix.
         format!("{TAB_SEPARATOR_PREFIX}{title}")
     }
 }
@@ -51,8 +52,10 @@ pub fn format_tab_title(
     let body = if let Some(c) = cwd {
         cwd_two_components(c)
     } else if let Some(t) = raw_title.map(str::trim).filter(|s| !s.is_empty()) {
+        // When: `cwd` is absent but `raw_title` has text, the OSC title names the session.
         t.to_string()
     } else {
+        // When: neither `cwd` nor `raw_title` is set, the body falls back to a bare shell label.
         "shell".to_string()
     };
 
@@ -64,6 +67,10 @@ pub fn format_tab_title(
 /// terminal icon when neither is known.
 fn icon_for_process(process: Option<&str>, has_cwd: bool) -> char {
     if let Some(p) = process {
+        // When: `process` reports a name, try its command-specific glyph before cwd and shell fallbacks.
+
+        // When: `p` is lowercased, each known command maps to its own Nerd Font glyph; unlisted
+        // names fall through to the cwd and terminal glyphs below.
         match p.to_ascii_lowercase().as_str() {
             "claude" | "claude-code" => return '\u{F0674}', // md-creation
             "copilot" | "github-copilot" | "github-copilot-cli" => {
@@ -140,6 +147,7 @@ fn icon_for_process(process: Option<&str>, has_cwd: bool) -> char {
     if has_cwd {
         '\u{F07B}' // fa-folder
     } else {
+        // When: `has_cwd` is false, no process or directory is known, so the generic glyph shows.
         '\u{F489}' // oct-terminal — generic shell fallback
     }
 }
@@ -150,6 +158,7 @@ fn icon_for_process(process: Option<&str>, has_cwd: bool) -> char {
 fn cwd_two_components(cwd: &str) -> String {
     let trimmed = cwd.trim_end_matches('/');
     if trimmed.is_empty() {
+        // When: `trimmed` is empty, the path was only slashes, so the root marker stands in.
         return "/".to_string();
     }
     let comps: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();

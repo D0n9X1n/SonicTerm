@@ -19,6 +19,7 @@ pub struct DimensionContext {
 }
 
 impl Dimension {
+    /// Evaluate this dimension in pixels from the supplied DPI, cell size, or maximum extent, rounding down.
     pub fn evaluate_as_pixels(&self, context: DimensionContext) -> f32 {
         match self {
             Self::Pixels(n) => n.floor(),

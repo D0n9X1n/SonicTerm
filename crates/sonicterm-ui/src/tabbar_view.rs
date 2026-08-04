@@ -49,6 +49,8 @@ static MAX_TAB_WIDTH_BITS: AtomicU32 = AtomicU32::new(TAB_MAX_WIDTH.to_bits());
 /// Override the active maximum tab width. Called from config apply on startup
 /// and hot-reload. Non-finite or non-positive values are ignored so a bad
 /// config never collapses the tab bar.
+// Ordering: MAX_TAB_WIDTH_BITS stores with Relaxed; the width stands alone and
+// publishes no companion state, so no reader needs an acquire pairing.
 pub fn set_max_tab_width(width: f32) {
     if width.is_finite() && width > 0.0 {
         MAX_TAB_WIDTH_BITS.store(width.to_bits(), Ordering::Relaxed);
@@ -56,6 +58,8 @@ pub fn set_max_tab_width(width: f32) {
 }
 
 /// Read the active maximum tab width, in logical pixels.
+// Ordering: MAX_TAB_WIDTH_BITS loads with Relaxed; a layout pass only needs the
+// latest width, with no dependent state to acquire alongside it.
 #[must_use]
 pub fn max_tab_width() -> f32 {
     f32::from_bits(MAX_TAB_WIDTH_BITS.load(Ordering::Relaxed))
@@ -108,6 +112,8 @@ pub struct Rect {
 }
 
 impl Rect {
+    /// Whether `(px, py)` lies inside this rect, counting the left and top
+    /// edges as inside and the right and bottom edges as outside.
     pub fn contains(&self, px: f32, py: f32) -> bool {
         px >= self.x && px < self.x + self.w && py >= self.y && py < self.y + self.h
     }
@@ -156,14 +162,22 @@ impl TabWidget {
     /// activates the tab; close buttons are no longer part of the tab chrome.
     pub fn hit(&self, p: Point) -> Option<TabAction> {
         if !self.bg_rect.contains(p.x, p.y) {
+            // When: the point misses bg_rect, so this tab claims no action and
+            // the caller keeps testing the remaining tabs.
             return None;
         }
         Some(TabAction::Activate(self.idx))
     }
 
+    /// Hover state for this tab under the given cursor position, reporting
+    /// `TabHover::None` when the cursor is absent or outside the tab.
     #[must_use]
     pub fn hover_at(&self, p: Option<Point>) -> TabHover {
-        let Some(p) = p else { return TabHover::None };
+        let Some(p) = p else {
+            // When: p is absent because the cursor left the window entirely,
+            // so no part of this tab is hovered.
+            return TabHover::None;
+        };
         match self.hit(p) {
             Some(TabAction::Close(_)) => TabHover::Close,
             Some(TabAction::Activate(_)) => TabHover::Body,
@@ -222,6 +236,8 @@ pub fn detect_tear_out(press_tab_index: usize, current_pos: (f32, f32)) -> Optio
     if cy >= TAB_BAR_HEIGHT + TEAR_OUT_THRESHOLD_PX {
         Some(TearOut { tab_index: press_tab_index, drop_position: (cx, cy) })
     } else {
+        // When: cy stays within the bar plus its threshold, so the gesture is
+        // still an ordinary press rather than a tear-out.
         None
     }
 }
@@ -268,6 +284,8 @@ impl TabBarLayout {
     ) -> Self {
         let mut layout = Self::compute_with_height(bar, window_width, bar_height);
         let Some(slot) = insertion_slot else {
+            // When: insertion_slot is absent because no drag is in progress, so
+            // the layout is returned with no preview gap opened.
             return layout;
         };
         let dx = Self::INSERTION_GAP_PX;
@@ -309,6 +327,8 @@ impl TabBarLayout {
         let n = bar.len();
         let mut tabs: Vec<TabWidget> = Vec::with_capacity(n);
         if n == 0 {
+            // When: n is zero, the bar holds no tabs, so only the background
+            // rect is reported and there is no active index.
             return Self { bar: bar_rect, tabs, active: None, visible: true };
         }
 
@@ -374,8 +394,7 @@ impl TabBarLayout {
     /// `None` when there is no active tab in the layout (empty bar) or
     /// when the active index points past the laid-out tabs (defensive —
     /// stale state must never paint an accent floating in the empty
-    /// right-edge area of the bar, which was the user-reported bug in
-    /// ).
+    /// right-edge area of the bar).
     ///
     /// The rect is anchored to the active tab's own `bg.x`/`bg.y` — it
     /// MUST NOT be derived from `active_idx * tab_w`, because the bar
@@ -384,10 +403,10 @@ impl TabBarLayout {
     #[must_use]
     pub fn active_accent_rect(&self) -> Option<Rect> {
         let t = self.active_widget()?;
-        // the active indicator must be clipped to the active
-        // tab's post-layout width. Do not derive it from the whole strip or
-        // shrink/grow it independently; wide two-tab Windows layouts exposed
-        // that drift as an orange line overshooting into empty chrome.
+        // The active indicator must be clipped to the active tab's post-layout
+        // width. Do not derive it from the whole strip or shrink/grow it
+        // independently; wide two-tab Windows layouts exposed that drift as an
+        // orange line overshooting into empty chrome.
         let scale = (t.bg_rect.h / (TAB_BAR_HEIGHT - 2.0 * TAB_VERT_INSET)).max(0.1);
         let inset = ACTIVE_TOP_ACCENT_INSET * scale;
         Some(Rect {
@@ -434,6 +453,8 @@ impl TabBarLayout {
     pub fn with_top_offset(mut self, dy: f32) -> Self {
         let dy = dy.max(0.0);
         if dy == 0.0 {
+            // When: dy clamps to zero on non-macOS or non-integrated titlebar
+            // styles, so every rect already sits at its final position.
             return self;
         }
         self.bar.y += dy;
@@ -460,9 +481,13 @@ impl TabBarLayout {
     /// default, making the user feel they had to aim at the title text.
     pub fn hit(&self, px: f32, py: f32) -> Option<TabHit> {
         if !self.visible {
+            // When: visible is false, the bar is toggled off and must not
+            // capture a click that belongs to the terminal area.
             return None;
         }
         if !self.bar.contains(px, py) {
+            // When: the point falls outside bar, so the click belongs to the
+            // terminal area rather than to any tab.
             return None;
         }
         self.tabwidgets()
@@ -497,11 +522,15 @@ impl TabBarLayout {
     /// horizontal slot.
     pub fn drop_slot(&self, px: f32, _py: f32) -> usize {
         if self.tabs.is_empty() {
+            // When: tabs is empty, the only slot a drop can name is the first
+            // position in an otherwise bare bar.
             return 0;
         }
         for t in &self.tabs {
             let midx = t.bg_rect.x + t.bg_rect.w * 0.5;
             if px < midx {
+                // When: px lands left of this tab's midpoint midx, so the drop
+                // belongs in the slot ahead of it.
                 return t.idx;
             }
         }
@@ -519,16 +548,20 @@ impl TabBarLayout {
     /// meaningful insertion gap to render.
     pub fn insertion_x(&self, slot: usize) -> Option<f32> {
         if !self.visible || self.tabs.is_empty() {
+            // When: visible is false or tabs is empty, no rendered gap exists
+            // for a drop line to mark.
             return None;
         }
         let n = self.tabs.len();
         let slot = slot.min(n);
         if slot == 0 {
-            // Just inside the bar's left padding.
+            // When: slot names the head of the bar, so the line sits just
+            // inside the bar's left padding.
             return Some(self.tabs[0].bg_rect.x - TAB_GAP * 0.5);
         }
         if slot == n {
-            // After the last tab — just past its right edge.
+            // When: slot equals n, the drop appends past the last tab, so the
+            // line sits just beyond its right edge.
             let last = &self.tabs[n - 1];
             return Some(last.bg_rect.x + last.bg_rect.w + TAB_GAP * 0.5);
         }
@@ -566,7 +599,13 @@ pub fn tab_bar_top_inset(visible: bool, padding: f32) -> f32 {
 /// `with_fullsize_content_view(true)`). Pass 0 when the OS already keeps
 /// our content below its chrome.
 pub fn tab_bar_top_inset_with_titlebar(visible: bool, padding: f32, titlebar_inset: f32) -> f32 {
-    let bar = if visible { TAB_BAR_HEIGHT + padding } else { padding };
+    let bar = if visible {
+        TAB_BAR_HEIGHT + padding
+    } else {
+        // When: visible is false, the bar reserves nothing, so the grid
+        // recovers the row it used to occupy and only padding remains.
+        padding
+    };
     titlebar_inset + bar
 }
 

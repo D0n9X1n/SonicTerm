@@ -1,21 +1,18 @@
 //! Command palette (Cmd+Shift+P). Pure-data state holder.
 //!
 //! The palette is a fuzzy-searchable list of runnable
-//! [`sonicterm_cfg::keymap::Action`] values. The keyboard-event handler in
-//! [`crate::app`] routes printable characters, arrow keys, Enter and Esc
+//! [`sonicterm_cfg::keymap::Action`] values. The app's keyboard-event handler
+//! routes printable characters, arrow keys, Enter and Esc
 //! into this state instead of forwarding them to the active pty when
 //! [`CommandPalette::is_open`] returns `true`. On Enter the dispatcher
-//! reads [`CommandPalette::current`] and runs that action through
-//! `App::run_action`.
+//! reads [`CommandPalette::current`] and runs that action.
 //!
-//! Filtering is now a VSCode-style fuzzy match using
+//! Filtering is a VSCode-style fuzzy match using
 //! [`nucleo_matcher`]: each candidate label gets a score, results are
 //! sorted descending by score, and ties fall back to the canonical
 //! order returned by [`all_actions`]. Empty query matches everything
-//! in canonical order. The legacy subsequence behavior is preserved
-//! as the underlying ranker (substring runs score above scattered
-//! matches), so historical tests that depend on subsequence semantics
-//! still pass.
+//! in canonical order. Subsequence matching is the underlying ranker,
+//! so substring runs score above scattered matches.
 
 use nucleo_matcher::{
     pattern::{CaseMatching, Normalization, Pattern},
@@ -76,6 +73,7 @@ impl Default for CommandPalette {
 }
 
 impl CommandPalette {
+    /// Build a closed palette holding the canonical action list.
     pub fn new() -> Self {
         let all = palette_actions();
         let shortcut_hints = vec![None; all.len()];
@@ -97,22 +95,27 @@ impl CommandPalette {
         }
     }
 
+    /// Report whether the overlay is showing and should absorb key events.
     pub fn is_open(&self) -> bool {
         self.open
     }
 
+    /// Current query text, as typed.
     pub fn query(&self) -> &str {
         &self.query
     }
 
+    /// Byte offset of the text cursor within [`Self::query`].
     pub fn cursor(&self) -> usize {
         self.cursor
     }
 
+    /// Which input the overlay is collecting: commands, a tab name, or a colour.
     pub fn mode(&self) -> CommandPaletteMode {
         self.mode
     }
 
+    /// Index of the highlighted row within the filtered view.
     pub fn selected(&self) -> usize {
         self.selected
     }
@@ -121,20 +124,24 @@ impl CommandPalette {
     /// should show.
     pub fn visible(&self) -> Vec<&Action> {
         if self.mode != CommandPaletteMode::Commands {
+            // When: `mode` is not `Commands`, the overlay lists tab names or colours, not actions.
             return Vec::new();
         }
         self.items.iter().filter_map(|&i| self.all.get(i)).collect()
     }
 
+    /// Keybinding hint for a row of [`Self::visible`], in the same display order.
     pub fn shortcut_hint_for_visible_index(&self, visible_index: usize) -> Option<&str> {
         let all_index = *self.items.get(visible_index)?;
         self.shortcut_hints.get(all_index)?.as_deref()
     }
 
+    /// Number of rows in the filtered view.
     pub fn len(&self) -> usize {
         self.items.len()
     }
 
+    /// Report whether the query matched nothing.
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
@@ -150,6 +157,7 @@ impl CommandPalette {
         self.refilter();
     }
 
+    /// Close the palette and clear the query so the next open starts clean.
     pub fn close(&mut self) {
         self.open = false;
         self.mode = CommandPaletteMode::Commands;
@@ -165,11 +173,13 @@ impl CommandPalette {
         if self.open {
             self.close();
         } else {
+            // When: `open` is false, the same shortcut reopens the overlay from a clean query.
             self.open();
         }
         self.open
     }
 
+    /// Replace the query wholesale and re-filter, putting the cursor at the end.
     pub fn set_query(&mut self, q: impl Into<String>) {
         self.query = q.into();
         self.cursor = self.query.len();
@@ -180,6 +190,10 @@ impl CommandPalette {
         }
     }
 
+    /// Rebuild the action list and shortcut hints from the user's keymap.
+    ///
+    /// Bound actions the canonical list omits are appended, so a user-defined
+    /// binding becomes reachable from the palette.
     pub fn set_keymap(&mut self, keymap: &Keymap) {
         self.all = palette_actions();
         for binding in &keymap.bindings {
@@ -195,9 +209,11 @@ impl CommandPalette {
         self.refilter();
     }
 
+    /// Record how many tabs exist so `ActivateTab` rows past the end stay hidden.
     pub fn set_tab_count(&mut self, tab_count: usize) {
         let tab_count = tab_count.max(1);
         if self.tab_count == tab_count {
+            // When: `tab_count` is unchanged, re-filtering would discard the selection for nothing.
             return;
         }
         self.tab_count = tab_count;
@@ -208,6 +224,7 @@ impl CommandPalette {
         }
     }
 
+    /// Insert a typed character at the cursor and re-filter.
     pub fn input_char(&mut self, ch: char) {
         self.query.insert(self.cursor, ch);
         self.cursor += ch.len_utf8();
@@ -218,6 +235,7 @@ impl CommandPalette {
         }
     }
 
+    /// Apply a cursor move or deletion, re-filtering only when the text changed.
     pub fn apply_text_edit(&mut self, edit: TextEdit) {
         let outcome = apply_edit(&mut self.query, self.cursor, edit);
         self.cursor = outcome.cursor;
@@ -230,10 +248,12 @@ impl CommandPalette {
         }
     }
 
+    /// Delete the character before the cursor.
     pub fn backspace(&mut self) {
         self.apply_text_edit(TextEdit::DeleteBackward);
     }
 
+    /// Switch to tab-rename mode, seeding the field with the current title.
     pub fn start_rename_tab(&mut self, title_body: impl Into<String>) {
         self.open = true;
         self.mode = CommandPaletteMode::RenameTab;
@@ -244,6 +264,7 @@ impl CommandPalette {
         self.scroll_offset = 0;
     }
 
+    /// Switch to tab-colour mode, listing `choices` for the named tab.
     pub fn start_tab_color_picker(
         &mut self,
         tab_title: impl Into<String>,
@@ -260,40 +281,50 @@ impl CommandPalette {
         self.tab_color_choices = choices;
     }
 
+    /// Title of the tab the colour picker is editing.
     pub fn tab_color_title(&self) -> &str {
         &self.tab_color_title
     }
 
+    /// Colour choices offered in tab-colour mode, in display order.
     pub fn tab_color_choices(&self) -> &[TabColorChoice] {
         &self.tab_color_choices
     }
 
+    /// Highlighted colour choice, if the selection still indexes the list.
     pub fn selected_tab_color(&self) -> Option<&TabColorChoice> {
         self.tab_color_choices.get(self.selected)
     }
 
+    /// Move the text cursor one character left.
     pub fn move_cursor_left(&mut self) {
         self.apply_text_edit(TextEdit::MoveBackward);
     }
 
+    /// Move the text cursor one character right.
     pub fn move_cursor_right(&mut self) {
         self.apply_text_edit(TextEdit::MoveForward);
     }
 
+    /// Move the text cursor to the start of the query.
     pub fn move_cursor_home(&mut self) {
         self.apply_text_edit(TextEdit::MoveStart);
     }
 
+    /// Move the text cursor to the end of the query.
     pub fn move_cursor_end(&mut self) {
         self.apply_text_edit(TextEdit::MoveEnd);
     }
 
+    /// Delete the character after the cursor.
     pub fn delete_forward(&mut self) {
         self.apply_text_edit(TextEdit::DeleteForward);
     }
 
+    /// Highlight the next row, wrapping to the top past the last one.
     pub fn move_selection_down(&mut self) {
         if self.items.is_empty() {
+            // When: `items` is empty, there is no row to highlight, so the view resets to the top.
             self.selected = 0;
             self.scroll_offset = 0;
             return;
@@ -302,13 +333,20 @@ impl CommandPalette {
         self.ensure_selected_in_view();
     }
 
+    /// Highlight the previous row, wrapping to the bottom past the first one.
     pub fn move_selection_up(&mut self) {
         if self.items.is_empty() {
+            // When: `items` is empty, there is no row to highlight, so the view resets to the top.
             self.selected = 0;
             self.scroll_offset = 0;
             return;
         }
-        self.selected = if self.selected == 0 { self.items.len() - 1 } else { self.selected - 1 };
+        self.selected = if self.selected == 0 {
+            self.items.len() - 1
+        } else {
+            // When: `selected` is nonzero, stepping back stays inside the list without wrapping.
+            self.selected - 1
+        };
         self.ensure_selected_in_view();
     }
 
@@ -328,6 +366,7 @@ impl CommandPalette {
         self.ensure_selected_in_view();
     }
 
+    /// Number of rows the renderer last reported it can display.
     pub fn visible_rows(&self) -> usize {
         self.visible_rows
     }
@@ -337,11 +376,13 @@ impl CommandPalette {
     /// When `visible_rows == 0` this is a no-op (no constraint known).
     fn ensure_selected_in_view(&mut self) {
         if self.visible_rows == 0 || self.items.is_empty() {
+            // When: `visible_rows` is zero or `items` is empty, no window constrains the selection.
             return;
         }
         if self.selected < self.scroll_offset {
             self.scroll_offset = self.selected;
         } else if self.selected >= self.scroll_offset + self.visible_rows {
+            // When: `selected` sits past the window, scroll down so it becomes the last row.
             self.scroll_offset = self.selected + 1 - self.visible_rows;
         }
         // Don't leave a trailing gap of empty rows at the bottom when the
@@ -355,6 +396,7 @@ impl CommandPalette {
     /// The currently highlighted action, if any.
     pub fn current(&self) -> Option<&Action> {
         if self.mode == CommandPaletteMode::RenameTab {
+            // When: `mode` is `RenameTab`, the field holds a tab title, so no action is selected.
             return None;
         }
         self.items.get(self.selected).and_then(|&i| self.all.get(i))
@@ -368,6 +410,7 @@ impl CommandPalette {
             self.items =
                 (0..self.all.len()).filter(|&i| self.action_available(&self.all[i])).collect();
         } else {
+            // When: `query` is non-empty, every candidate is scored and ranked instead of listed.
             let mut matcher = Matcher::new(Config::DEFAULT);
             let pattern = Pattern::parse(&self.query, CaseMatching::Ignore, Normalization::Smart);
             let mut scratch: Vec<char> = Vec::new();

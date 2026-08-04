@@ -52,6 +52,7 @@ pub fn apply_edit(text: &mut String, caret: usize, edit: TextEdit) -> EditOutcom
                 text.drain(start..cursor);
                 outcome(start, true)
             } else {
+                // When: `start` equals `cursor`, there is no previous character to delete.
                 outcome(cursor, false)
             }
         }
@@ -61,6 +62,7 @@ pub fn apply_edit(text: &mut String, caret: usize, edit: TextEdit) -> EditOutcom
                 text.drain(cursor..end);
                 outcome(cursor, true)
             } else {
+                // When: `cursor` equals `end`, there is no following character to delete.
                 outcome(cursor, false)
             }
         }
@@ -76,6 +78,7 @@ pub fn apply_edit(text: &mut String, caret: usize, edit: TextEdit) -> EditOutcom
                 text.drain(word_start..cursor);
                 outcome(word_start, true)
             } else {
+                // When: `word_start` equals `cursor`, no preceding word or whitespace remains to remove.
                 outcome(cursor, false)
             }
         }
@@ -84,6 +87,7 @@ pub fn apply_edit(text: &mut String, caret: usize, edit: TextEdit) -> EditOutcom
                 text.drain(..cursor);
                 outcome(0, true)
             } else {
+                // When: `cursor` is already zero, deleting to start leaves text and caret unchanged.
                 outcome(0, false)
             }
         }
@@ -92,6 +96,7 @@ pub fn apply_edit(text: &mut String, caret: usize, edit: TextEdit) -> EditOutcom
                 text.truncate(cursor);
                 outcome(cursor, true)
             } else {
+                // When: `cursor` equals `text.len()`, deleting to end leaves the buffer unchanged.
                 outcome(cursor, false)
             }
         }

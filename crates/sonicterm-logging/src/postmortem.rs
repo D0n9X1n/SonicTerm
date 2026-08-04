@@ -61,6 +61,8 @@ impl ArtifactKind {
         if let Some(classification) =
             contents.lines().find_map(|line| line.strip_prefix("classification:").map(str::trim))
         {
+            // When: the dump carries an explicit classification header, which
+            // states the failure kind rather than leaving it inferred.
             return match classification {
                 "panic" => Self::Panic,
                 "fatal_signal" => Self::FatalSignal,
@@ -71,10 +73,16 @@ impl ArtifactKind {
         if contents.contains("FATAL: SIG") || contents.contains("after fatal signal") {
             Self::FatalSignal
         } else if contents.contains("allocator failure") {
+            // When: contents names an allocator failure, which reaches the log
+            // through SIGABRT rather than through the panic hook.
             Self::AllocFailure
         } else if contents.contains("panic") || contents.contains("== sonic crash dump ==") {
+            // When: contents carries panic text or the crash-dump banner, so
+            // the process still had control when it wrote this.
             Self::Panic
         } else {
+            // When: contents matches no marker any writer emits, so the failure
+            // stays unrecognised rather than guessed at.
             Self::Unknown
         }
     }
@@ -218,10 +226,12 @@ impl fmt::Display for PostmortemReport {
                 )?;
             }
         } else if self.is_unclean() {
-            // The statement the acceptance criteria turn on. A hard kill
-            // destroys the process before any handler runs, so there is no
-            // dump to find — and a reader who is not told that will keep
-            // looking for one, or worse, conclude the dump was lost.
+            // When: is_unclean holds with no artifact written, so the report
+            // must say the dump does not exist rather than leave it unsaid.
+
+            // A hard kill destroys the process before any handler runs, so
+            // there is no dump to find — and a reader who is not told that
+            // will keep looking for one, or worse, conclude the dump was lost.
             write!(
                 f,
                 "; no process-written memory dump exists for this session. SonicTerm cannot \
@@ -247,6 +257,8 @@ impl fmt::Display for PostmortemReport {
         if self.os_evidence.is_empty() {
             write!(f, "; no operating-system postmortem records found")?;
         } else {
+            // When: os_evidence holds candidates, each is named with the
+            // qualifier that it matched by convention, not by provenance.
             for evidence in &self.os_evidence {
                 write!(
                     f,
@@ -324,16 +336,22 @@ pub fn report_prior_sessions(log_dir: &Path, current: Option<&str>) {
                 "{report}"
             );
         } else {
+            // When: report.is_unclean is false, the prior session recorded its
+            // own shutdown, so the finding goes to debug rather than warn.
             tracing::debug!(target: "sonic_exit", "{report}");
         }
 
         match &report.session {
             PriorSession::CleanExit(marker) | PriorSession::Unclean(marker) => {
+                // When: the marker identifies its session, so its file is
+                // removed and the finding is reported once, not every launch.
                 let path = session_state::session_dir(log_dir)
                     .join(format!("session-{}.marker", marker.id));
                 let _ = session_state::clear(&path);
             }
             PriorSession::Corrupt { path } => {
+                // When: the marker is Corrupt, the unreadable file at path is
+                // cleared too, so it is not re-reported forever.
                 let _ = session_state::clear(path);
             }
         }
@@ -344,6 +362,8 @@ pub fn report_prior_sessions(log_dir: &Path, current: Option<&str>) {
 #[must_use]
 fn discover_artifacts(crash_dir: &Path) -> Vec<CrashArtifact> {
     let Ok(entries) = std::fs::read_dir(crash_dir) else {
+        // When: read_dir cannot open crash_dir, SonicTerm wrote no artifacts
+        // there and there is nothing to classify.
         return Vec::new();
     };
 
@@ -351,9 +371,15 @@ fn discover_artifacts(crash_dir: &Path) -> Vec<CrashArtifact> {
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_file() {
+            // When: path is not a file — a subdirectory or special entry — so
+            // it holds no dump text to read.
             continue;
         }
-        let Ok(contents) = std::fs::read_to_string(&path) else { continue };
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            // When: read_to_string fails, the artifact cannot be classified by
+            // content, and its kind is not guessed from the name.
+            continue;
+        };
         found.push(CrashArtifact {
             kind: ArtifactKind::classify(&contents),
             session_id: session_id_from(&contents),
@@ -397,13 +423,23 @@ fn discover_macos_evidence_at(user_dir: &Path, system_dir: &Path) -> Vec<OsEvide
         (user_dir, OsEvidenceSource::MacUserDiagnosticReports),
         (system_dir, OsEvidenceSource::MacSystemDiagnosticReports),
     ] {
-        let Ok(entries) = std::fs::read_dir(root) else { continue };
+        let Ok(entries) = std::fs::read_dir(root) else {
+            // When: read_dir cannot open root, that DiagnosticReports location
+            // holds nothing here, so the other root is still tried.
+            continue;
+        };
         let mut from_root = Vec::new();
         for entry in entries.flatten() {
             let name = entry.file_name();
-            let Some(name) = name.to_str() else { continue };
+            let Some(name) = name.to_str() else {
+                // When: name is not UTF-8, so to_str yields nothing to match
+                // against the CrashReporter naming convention.
+                continue;
+            };
             let lower = name.to_ascii_lowercase();
             if !lower.ends_with(".ips") || !is_conservative_sonicterm_name(&lower) {
+                // When: lower is not an .ips record, or the conservative name
+                // test rejects it, so it is another application's report.
                 continue;
             }
             from_root.push(OsEvidence {
@@ -421,7 +457,11 @@ fn discover_macos_evidence_at(user_dir: &Path, system_dir: &Path) -> Vec<OsEvide
 #[cfg(any(test, target_os = "macos"))]
 fn is_conservative_sonicterm_name(lower_name: &str) -> bool {
     let stem = lower_name.strip_suffix(".ips").unwrap_or(lower_name);
-    let Some(rest) = stem.strip_prefix("sonicterm") else { return false };
+    let Some(rest) = stem.strip_prefix("sonicterm") else {
+        // When: strip_prefix finds no sonicterm prefix on stem, so the record
+        // names another application entirely.
+        return false;
+    };
     rest.is_empty()
         || rest.starts_with('-')
         || rest.starts_with('_')
@@ -454,11 +494,21 @@ fn discover_windows_evidence_at(local_app_data: &Path) -> PlatformEvidence {
 
     let mut evidence = Vec::new();
     for (root, source) in roots {
-        let Ok(entries) = std::fs::read_dir(&root) else { continue };
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            // When: read_dir cannot open root, that WER or LocalDumps store
+            // does not exist here, so the remaining roots are still tried.
+            continue;
+        };
         for entry in entries.flatten() {
             let name = entry.file_name();
-            let Some(name) = name.to_str() else { continue };
+            let Some(name) = name.to_str() else {
+                // When: name is not UTF-8, so to_str yields nothing to match
+                // against the WER naming convention.
+                continue;
+            };
             if !is_windows_sonicterm_record(name, source) {
+                // When: is_windows_sonicterm_record rejects name for this
+                // source, so it belongs to another application in that store.
                 continue;
             }
             evidence.push(OsEvidence {

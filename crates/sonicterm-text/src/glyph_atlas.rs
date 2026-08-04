@@ -138,6 +138,11 @@ pub struct ShelfPacker {
 }
 
 impl ShelfPacker {
+    /// New packer for a `width × height` atlas, starting with an empty shelf.
+    ///
+    /// The packer owns placement only: `cursor_x`, `shelf_y` and `shelf_h`
+    /// describe the open shelf, and `shelf_h` is fixed by the first tile
+    /// placed on each one.
     #[doc(hidden)]
     pub fn new(width: u32, height: u32) -> Self {
         Self { width, height, cursor_x: 0, shelf_y: 0, shelf_h: 0 }
@@ -150,6 +155,8 @@ impl ShelfPacker {
     #[doc(hidden)]
     pub fn alloc(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
         if w > self.width || h > self.height {
+            // When: w or h exceeds the atlas no placement exists, so alloc returns before
+            // mutating cursor_x or shelf_h and a later smaller tile still fits this shelf.
             return None; // tile bigger than entire atlas
         }
         // Compute a candidate (cursor_x, shelf_y, shelf_h) without
@@ -175,6 +182,8 @@ impl ShelfPacker {
         // Bounds check BEFORE committing — if vertical capacity is
         // exhausted, return None and leave packer untouched.
         if cand_shelf_y + cand_shelf_h > self.height {
+            // When: cand_shelf_y plus cand_shelf_h passes the atlas height no shelf room
+            // is left, and returning before the commit keeps the packer state reusable.
             return None;
         }
         // Commit.
@@ -317,10 +326,6 @@ impl GlyphAtlas {
         self.misses
     }
 
-    /// Cumulative number of glyph entries evicted by LRU since
-    /// construction. Diagnostic only — useful for verifying that long
-    /// sessions with diverse glyph sets are actually cycling memory
-    /// rather than monotonically growing.
     /// Identity of the atlas's current contents.
     ///
     /// Changes whenever a cached coordinate could have stopped meaning what it
@@ -434,11 +439,10 @@ impl GlyphAtlas {
     /// On a hit, bumps the entry's `last_used_frame` to the current
     /// frame so LRU eviction will spare it.
     ///
-    /// On a miss where the new tile won't fit, attempts LRU eviction
-    /// (drops the coldest 25% of entries, returning their atlas rects
-    /// to a free-list) and retries once. Returns `None` only when even
-    /// after eviction the tile still won't fit — in v0.7 the renderer
-    /// treats that as "draw a blank" rather than crash.
+    /// On a miss, admission may evict the coldest 25% of entries when eviction
+    /// is enabled. Returns `None` when the entry ceiling or pixel allocator
+    /// cannot admit the tile under the current eviction policy; the renderer
+    /// treats that as "draw a blank" rather than crashing.
     pub fn get_or_insert<R: Rasterizer>(
         &mut self,
         key: GlyphKey,
@@ -478,20 +482,28 @@ impl GlyphAtlas {
         F: FnOnce() -> RasterTile,
     {
         if let Some(entry) = self.map.get_mut(&key) {
+            // When: key is already in map the tile is resident, so cached info is returned
+            // and last_used_frame is refreshed to keep it out of the eviction quartile.
             entry.last_used_frame = self.current_frame;
             self.hits += 1;
             return Some(entry.info);
         }
         self.misses += 1;
         if !self.make_entry_room(false) {
+            // When: make_entry_room reports no capacity the entry count is at its ceiling
+            // and eviction is barred here, so admission is refused before any pixel work.
             return None;
         }
         if width == 0 || height == 0 || width > self.width || height > self.height {
+            // When: width or height is zero or larger than the atlas the request can never
+            // be placed, so it is refused before build_tile materializes any pixels.
             return None;
         }
         let (x, y, slot_w, slot_h) = self.alloc_rect(width, height)?;
         let tile = build_tile();
         if tile.is_empty() || tile.width != width || tile.height != height {
+            // When: tile does not match the reserved width and height the slot would be
+            // written at the wrong extent, so the reservation returns to free_rects.
             self.free_rects.push((x, y, slot_w, slot_h));
             return None;
         }
@@ -505,12 +517,16 @@ impl GlyphAtlas {
         allow_eviction: bool,
     ) -> Option<GlyphInfo> {
         if let Some(entry) = self.map.get_mut(&key) {
+            // When: key is already in map the cached info is returned without rasterizing,
+            // and last_used_frame is refreshed so a hot glyph survives the LRU sweep.
             entry.last_used_frame = self.current_frame;
             self.hits += 1;
             return Some(entry.info);
         }
         self.misses += 1;
         if !self.make_entry_room(allow_eviction) {
+            // When: make_entry_room cannot free a slot the index is full, so the glyph is
+            // refused and goes missing rather than displacing a resident tile.
             return None;
         }
         // Rasterizer miss: cache a sentinel "blank" GlyphInfo so we don't
@@ -518,6 +534,8 @@ impl GlyphAtlas {
         // zero-area UV as "draw the tofu fallback box" (see Renderer's
         // missing-glyph path).
         let Some(tile) = rasterizer.rasterize(key) else {
+            // When: rasterize fails for key a zero-area sentinel is cached, so the same
+            // failing glyph is not retried every frame and draws as the tofu box.
             let info = GlyphInfo {
                 uv: [0.0, 0.0, 0.0, 0.0],
                 px_size: [0, 0],
@@ -533,6 +551,8 @@ impl GlyphAtlas {
         // Empty tile (space, etc.) — stash a zero-area UV; no upload
         // needed. The renderer will skip the draw instance anyway.
         if tile.is_empty() {
+            // When: tile is_empty the glyph has no pixels, so a zero-area UV is cached
+            // with the real advance and offsets and the draw instance is skipped.
             let info = GlyphInfo {
                 uv: [0.0, 0.0, 0.0, 0.0],
                 px_size: [0, 0],
@@ -550,6 +570,8 @@ impl GlyphAtlas {
         // callers can skip or resize the oversized asset without invalidating
         // every cached UV in the process.
         if tile.width > self.width || tile.height > self.height {
+            // When: tile exceeds the atlas width or height it can never be placed, so a
+            // sentinel is cached instead of evicting live tiles for an impossible retry.
             let info = GlyphInfo {
                 uv: [0.0, 0.0, 0.0, 0.0],
                 px_size: [0, 0],
@@ -570,16 +592,24 @@ impl GlyphAtlas {
                 self.evict_lru_quartile();
                 self.alloc_rect(tile.width, tile.height)?
             }
-            None => return None,
+            None => {
+                // When: alloc_rect fails with eviction barred the tile is refused, so the
+                // glyph goes missing this frame rather than displacing a resident tile.
+                return None;
+            }
         };
         Some(self.insert_tile(key, tile, x, y, slot_w, slot_h))
     }
 
     fn make_entry_room(&mut self, allow_eviction: bool) -> bool {
         if self.map.len() < MAX_ATLAS_ENTRIES {
+            // When: map is below MAX_ATLAS_ENTRIES a slot is already free, so admission
+            // proceeds without disturbing any resident entry.
             return true;
         }
         if !allow_eviction || !self.eviction_enabled {
+            // When: allow_eviction or eviction_enabled is false the index stops admitting
+            // instead of growing, so memory looks flat while later glyphs go missing.
             return false;
         }
         self.evict_lru_quartile();
@@ -610,6 +640,8 @@ impl GlyphAtlas {
                 self.pixels[dst_off..dst_off + len]
                     .copy_from_slice(&tile.coverage[src_off..src_off + len]);
             } else {
+                // When: tile is neither is_color nor is_subpixel it arrives as one alpha
+                // byte per pixel, which is replicated so one sampler serves both formats.
                 let src_off = (row * tile.width) as usize;
                 for col in 0..tile.width as usize {
                     let a = tile.coverage[src_off + col];
@@ -664,6 +696,8 @@ impl GlyphAtlas {
         for i in 0..self.free_rects.len() {
             let (_, _, fw, fh) = self.free_rects[i];
             if fw >= w && fh >= h {
+                // When: fw and fh cover the request the reclaimed slot is reused whole, so
+                // an atlas that has cycled through eviction never grows again.
                 return Some(self.free_rects.swap_remove(i));
             }
         }
@@ -678,6 +712,8 @@ impl GlyphAtlas {
     fn evict_lru_quartile(&mut self) {
         let total = self.map.len();
         if total == 0 {
+            // When: total is zero there is nothing resident to reclaim, and the quartile
+            // below rounds up to one entry, which would underflow an empty map.
             return;
         }
         // Evict at least 1 entry even when 25% rounds to 0 — otherwise
@@ -728,12 +764,14 @@ impl GlyphAtlas {
     pub fn hit_rate_pct(&self) -> f64 {
         let total = self.hits + self.misses;
         if total == 0 {
+            // When: total is zero no lookup has happened yet, so the ratio below would
+            // divide by zero and report a rate no measurement supports.
             return 0.0;
         }
         (self.hits as f64 / total as f64) * 100.0
     }
 
-    /// Sample the alpha (BGRA[3]) channel of a single atlas pixel.
+    /// Sample the alpha (`BGRA[3]`) channel of a single atlas pixel.
     /// Used in tests to assert that rasterized pixels actually landed
     /// where the GlyphInfo's UV says they should. We return the alpha
     /// channel specifically because (a) for monochrome glyphs all four
@@ -762,6 +800,9 @@ impl Rasterizer for SyntheticRasterizer {
     fn rasterize(&mut self, key: GlyphKey) -> Option<RasterTile> {
         self.calls += 1;
         if key.ch == ' ' {
+            // When: key.ch is a space the glyph has no coverage, so an empty tile carries
+            // only the advance and the atlas caches it without reserving pixels.
+
             // Space → empty tile.
             return Some(RasterTile {
                 width: 0,

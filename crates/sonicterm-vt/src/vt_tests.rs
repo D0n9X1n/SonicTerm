@@ -16,7 +16,7 @@ use std::sync::atomic::Ordering;
 ///
 /// The rule is the broad one — **hold this for the whole life of any capture
 /// the test creates**, not merely while asserting about one. A test that opens
-/// a capture without holding it is invisible to review and to its own
+/// a capture without holding it escapes the locking discipline and its own
 /// assertions, yet it perturbs every sibling that is measuring; the sibling
 /// fails, reporting a defect that is not there. Coverage that is partial is
 /// worth little, because one unlocked capture is enough to break every

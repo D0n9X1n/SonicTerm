@@ -24,6 +24,7 @@ pub struct DirectWriteRasterizer {
 }
 
 impl DirectWriteRasterizer {
+    /// Build a DirectWrite rasterizer from an on-disk font, retaining FreeType as the glyph fallback.
     pub fn from_locator(
         parsed: &ParsedFont,
         pixel_geometry: DisplayPixelGeometry,
@@ -53,7 +54,9 @@ impl DirectWriteRasterizer {
         let glyph_advances = [em_size];
         let glyph_offsets = [DWRITE_GLYPH_OFFSET { advanceOffset: 0.0, ascenderOffset: 0.0 }];
         let glyph_run = DWRITE_GLYPH_RUN {
-            fontFace: unsafe { self.face.as_ptr() },
+            fontFace:
+                // SAFETY: `self.face` owns a live font face through the synchronous analysis call below.
+                unsafe { self.face.as_ptr() },
             fontEmSize: em_size,
             glyphCount: 1,
             glyphIndices: glyph_indices.as_ptr(),
@@ -68,6 +71,8 @@ impl DirectWriteRasterizer {
             1.0,
             DWRITE_MEASURING_MODE_NATURAL,
         );
+        // Sentinel, outline, and aliased recommendations do not provide the
+        // ClearType coverage this texture path consumes; concrete modes do.
         let render_mode = if render_mode == dwrote::DWRITE_RENDERING_MODE_ALIASED
             || render_mode == dwrote::DWRITE_RENDERING_MODE_OUTLINE
             || render_mode == dwrote::DWRITE_RENDERING_MODE_DEFAULT
@@ -93,6 +98,7 @@ impl DirectWriteRasterizer {
         let width = (i64::from(bounds.right) - i64::from(bounds.left)).max(0) as usize;
         let height = (i64::from(bounds.bottom) - i64::from(bounds.top)).max(0) as usize;
         if width == 0 || height == 0 {
+            // When: `width` or `height` is zero, return an empty glyph without requesting an alpha texture.
             return Ok(RasterizedGlyph {
                 data: Vec::new(),
                 width,
@@ -144,6 +150,7 @@ impl FontRasterizer for DirectWriteRasterizer {
 
 fn enhance_text_coverage(coverage: u8) -> u8 {
     if coverage == 0 || coverage == u8::MAX {
+        // When: `coverage` is an endpoint, the contrast curve cannot change the byte.
         return coverage;
     }
     let c = coverage as f32 / 255.0;

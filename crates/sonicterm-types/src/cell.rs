@@ -84,7 +84,7 @@ bitflags::bitflags! {
 /// Only allocated the first time a cell needs to carry a hyperlink
 /// or trailing zero-width codepoints (combining marks, ZWJ sequences,
 /// variation selectors). The default cell — plain ASCII space, no
-/// link, no extras — leaves [`Cell::fat`] as `None` and pays nothing
+/// link, no extras — leaves `Cell::fat` as `None` and pays nothing
 /// beyond the inline pointer slot.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct FatAttributes {
@@ -107,9 +107,9 @@ pub struct FatAttributes {
 }
 
 impl FatAttributes {
-    /// Return `true` when neither hyperlink nor extras carry data,
-    /// i.e. dropping the box would lose nothing. Used by setters to
-    /// re-collapse to `None` when the last rare attribute clears.
+    /// Return `true` when no hyperlink, extra codepoints, underline style, or
+    /// underline colour is stored. Used by setters to re-collapse to `None`
+    /// when the last rare attribute clears.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.hyperlink.is_none()
@@ -201,7 +201,9 @@ impl Cell {
                     underline_color: None,
                 }));
             }
-            (None, None) => {}
+            (None, None) => {
+                // When: both `fat` and `id` are absent, clearing a hyperlink needs no allocation or state change.
+            }
         }
     }
 
@@ -224,7 +226,9 @@ impl Cell {
                     underline_color: None,
                 }));
             }
-            (None, None) => {}
+            (None, None) => {
+                // When: both `fat` and `extras` are absent, clearing extras needs no allocation or state change.
+            }
         }
     }
 
@@ -248,7 +252,9 @@ impl Cell {
                     underline_color: None,
                 }));
             }
-            (None, None) => {}
+            (None, None) => {
+                // When: `fat` is absent and `style` is the implicit single default, no stored attribute is needed.
+            }
         }
     }
 
@@ -271,7 +277,9 @@ impl Cell {
                     underline_color: Some(color),
                 }));
             }
-            (None, None) => {}
+            (None, None) => {
+                // When: both `fat` and `color` are absent, clearing underline colour is already satisfied.
+            }
         }
     }
 

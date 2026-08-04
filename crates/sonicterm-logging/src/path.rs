@@ -44,6 +44,7 @@ pub fn crash_dir_in(log_dir: &std::path::Path) -> PathBuf {
 
 fn resolve_log_dir() -> PathBuf {
     if let Some(home) = home_dir() {
+        // When: `home` resolves from the environment, keep logs under that user's SonicTerm directory.
         return home.join(".sonicterm").join("logs");
     }
     PathBuf::from(".sonicterm/logs")
@@ -77,6 +78,7 @@ pub(crate) fn replace_file(
 
         let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
         let destination: Vec<u16> = destination.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: both UTF-16 paths are NUL-terminated and live through the call; flags request same-volume replacement.
         unsafe {
             MoveFileExW(
                 PCWSTR(source.as_ptr()),

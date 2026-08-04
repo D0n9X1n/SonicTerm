@@ -23,9 +23,17 @@ use winapi::um::wingdi::{
 pub struct GdiFontLocator {}
 
 fn extract_raw_font_data(font: HFONT, name: &str) -> anyhow::Result<FontDataSource> {
+    anyhow::ensure!(!font.is_null(), "font handle is null");
+    // SAFETY: `font` is checked live before use; the checked compatible HDC is owned here,
+    // its previous object is restored, buffers match queried sizes, and `DeleteDC` releases it.
     unsafe {
         let hdc = CreateCompatibleDC(std::ptr::null_mut());
-        SelectObject(hdc, font as *mut _);
+        anyhow::ensure!(!hdc.is_null(), "CreateCompatibleDC failed");
+        let previous = SelectObject(hdc, font as *mut _);
+        if previous.is_null() {
+            DeleteDC(hdc);
+            anyhow::bail!("SelectObject failed");
+        }
 
         // GetFontData can retrieve different parts of the font data.
         // We want to fetch the entire font file, but things are made
@@ -46,6 +54,7 @@ fn extract_raw_font_data(font: HFONT, name: &str) -> anyhow::Result<FontDataSour
 
             Ok(data)
         } else {
+            // When: `ttc_size > 0 && ttc_size != GDI_ERROR` is false, query regular font data.
             // Otherwise: presumably a regular ttf
 
             let size = GetFontData(hdc, 0, 0, std::ptr::null_mut(), 0);
@@ -58,6 +67,7 @@ fn extract_raw_font_data(font: HFONT, name: &str) -> anyhow::Result<FontDataSour
                 _ => Err(anyhow::anyhow!("Failed to get font data")),
             }
         };
+        SelectObject(hdc, previous);
         DeleteDC(hdc);
         let data = data?;
 
@@ -117,8 +127,11 @@ fn load_font(font_attr: &FontAttributes, pixel_size: u16) -> anyhow::Result<Pars
         log_font.lfFaceName[i] = c;
     }
 
+    // SAFETY: `log_font` is fully initialized; the created `HFONT` is checked before use and
+    // `DeleteObject` releases it after all synchronous data extraction completes.
     unsafe {
         let font = CreateFontIndirectW(&log_font);
+        anyhow::ensure!(!font.is_null(), "CreateFontIndirectW failed");
         let result = extract_font_data(font, font_attr, pixel_size);
         DeleteObject(font as *mut _);
         result
@@ -130,10 +143,15 @@ fn load_font(font_attr: &FontAttributes, pixel_size: u16) -> anyhow::Result<Pars
 /// `hdc` must be a valid device context for the lifetime of the call. It is
 /// passed to `GetDeviceCaps`, which dereferences it; an invalid or already
 /// released handle is undefined behaviour rather than an error return.
+// SAFETY: callers provide a live `HDC` and initialized `LOGFONTW`; every created `HFONT`
+// is deleted exactly once after synchronous extraction, while the caller retains HDC ownership.
 pub unsafe fn parse_log_font(log_font: &LOGFONTW, hdc: HDC) -> anyhow::Result<(ParsedFont, f64)> {
     let name = String::from_utf16(&log_font.lfFaceName)?;
+    // SAFETY: the contract guarantees `hdc` and `log_font` are live; the created `HFONT` is
+    // checked and deleted after extraction, and `GetDeviceCaps` only borrows `hdc`.
     unsafe {
         let font = CreateFontIndirectW(log_font);
+        anyhow::ensure!(!font.is_null(), "CreateFontIndirectW failed");
         let source = extract_raw_font_data(font, &name);
         DeleteObject(font as *mut _);
         let source = source?;
@@ -189,15 +207,19 @@ fn handle_from_descriptor(
     let face = font.create_font_face();
     for file in face.files().ok()? {
         if let Ok(path) = file.font_file_path() {
+            // When: `font_file_path()` returns `Ok`, parse this readable DirectWrite font file.
             let family_name = font.family_name();
 
             log::debug!("{} -> {}", family_name, path.display());
             let source = FontDataSource::OnDisk(path);
             match best_matching_font(&source, attr, FontOrigin::DirectWrite, pixel_size) {
                 Ok(Some(parsed)) => {
+                    // When: parsing returns `Ok(Some(parsed))`, stop at this matching face.
                     return Some(parsed);
                 }
-                Ok(None) => {}
+                Ok(None) => {
+                    // When: `best_matching_font(...)` returns `Ok(None)`, continue scanning files.
+                }
                 Err(err) => log::warn!("While parsing: {:?}: {:#}", source, err),
             }
         }
@@ -229,6 +251,7 @@ impl FontLocator for GdiFontLocator {
                     loaded.insert(font_attr.clone());
                     true
                 } else {
+                    // When: `parsed.matches_name(font_attr)` is false, reject the candidate.
                     log::debug!("parsed {:?} doesn't match {:?}", parsed, font_attr);
                     false
                 }
@@ -236,8 +259,10 @@ impl FontLocator for GdiFontLocator {
 
             match handle_from_descriptor(font_attr, &collection, &descriptor, pixel_size) {
                 Some(handle) => {
+                    // When: DirectWrite resolves a handle, validate its parsed name before GDI.
                     log::debug!("Got {:?} from dwrote", handle);
                     if try_handle(font_attr, handle, &mut fonts, loaded) {
+                        // When: `try_handle(...)` is true, this request is resolved; skip GDI.
                         continue;
                     }
                 }
@@ -290,6 +315,7 @@ impl FontLocator for GdiFontLocator {
         let mut resolved = HashSet::new();
 
         if let Some(fallback) = dwrote::FontFallback::get_system_fallback() {
+            // When: the system fallback object is available, map successive text segments.
             let mut start = 0usize;
             let mut len = codepoints.len();
             loop {
@@ -343,14 +369,17 @@ impl FontLocator for GdiFontLocator {
                 if result.mapped_length > 0 {
                     start += result.mapped_length
                 } else {
+                    // When: `result.mapped_length > 0` is false, mapping made no progress.
                     break;
                 }
                 if start == codepoints.len() {
+                    // When: `start == codepoints.len()`, every requested codepoint was mapped.
                     break;
                 }
                 len = codepoints.len() - start;
             }
         } else {
+            // When: `get_system_fallback()` is `None`, DirectWrite fallback is unavailable.
             log::error!("Unable to get system fallback from dwrote");
         }
 
@@ -364,12 +393,20 @@ impl FontLocator for GdiFontLocator {
         for family in collection.families_iter() {
             let count = family.get_font_count();
             for idx in 0..count {
-                let Ok(font) = family.font(idx) else { continue };
+                let Ok(font) = family.font(idx) else {
+                    // When: `family.font(idx)` returns `Err`, skip the unreadable family entry.
+                    continue;
+                };
                 let face = font.create_font_face();
-                let Ok(font_files) = face.files() else { continue };
+                let Ok(font_files) = face.files() else {
+                    // When: `face.files()` returns `Err`, skip a face with no readable file list.
+                    continue;
+                };
                 for file in font_files {
                     if let Ok(path) = file.font_file_path() {
+                        // When: `font_file_path()` returns `Ok`, consider this on-disk font file.
                         if files.contains(&path) {
+                            // When: `files.contains(&path)` is true, avoid parsing the file twice.
                             continue;
                         }
                         files.insert(path.clone());

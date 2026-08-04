@@ -61,6 +61,9 @@ pub struct DragSession {
 }
 
 impl DragSession {
+    /// Open a drag session anchored at the pressed tab. `current_pos` starts
+    /// equal to `press_pos`, so the session begins below
+    /// [`DRAG_START_THRESHOLD_PX`] and publishes no chip until the cursor moves.
     pub fn new(press_tab_index: usize, press_pos: (f32, f32)) -> Self {
         Self { press_tab_index, press_pos, current_pos: press_pos }
     }
@@ -99,6 +102,8 @@ pub fn build_drag_chip_overlay(
     title: String,
 ) -> Option<sonicterm_ui::drag_chip::DragChipOverlay> {
     if !drag_moved_enough(session) {
+        // When: drag_moved_enough is still false the press reads as a click, so
+        // no chip is published and a stray wiggle cannot flash a ghost frame.
         return None;
     }
     let (cx, cy) = session.current_pos;
@@ -107,6 +112,8 @@ pub fn build_drag_chip_overlay(
         let slot = source_bar.drop_slot(cx, cy);
         source_bar.insertion_x(slot)
     } else {
+        // When: over_bar is false the cursor has left the bar and tear-out is
+        // armed, so no insertion line is drawn.
         None
     };
     // Subtle scale ease — the renderer interpolates from the previous
@@ -121,15 +128,19 @@ pub fn build_drag_chip_overlay(
         drop_line_x,
         drop_line_y: source_bar.bar_y_range(),
         scale,
-        // drag visual feedback:
-        //   D1: ghost_alpha 0.5 on the chip body
-        //   D2: insertion_slot opens an 8 px gap in the destination
-        //       bar at the drop slot when the cursor is over a bar
-        //   D3: source_tab_idx flags the source tab for alpha-0.3
-        //       painting so the dragged tab visibly "lifts off"
+        // Drag visual feedback: ghost_alpha fades the chip body, source_tab_idx
+        // flags the source tab for alpha-0.3 painting so the dragged tab visibly
+        // lifts off, and insertion_slot opens an 8 px gap in the destination bar
+        // at the drop slot while the cursor is over one.
         source_tab_idx: Some(session.press_tab_index),
         source_alpha: 0.3,
-        insertion_slot: if over_bar { Some(source_bar.drop_slot(cx, cy)) } else { None },
+        insertion_slot: if over_bar {
+            Some(source_bar.drop_slot(cx, cy))
+        } else {
+            // When: over_bar is false there is no destination bar to open a gap
+            // in, so insertion_slot stays cleared.
+            None
+        },
         ghost_alpha: 0.5,
     })
 }
@@ -145,39 +156,45 @@ pub fn compute_action<W: Copy>(
     source_bar: &TabBarLayout,
 ) -> DragAction<W> {
     if let Some(t) = foreign_target {
+        // When: foreign_target resolved, a drop over another window's bar wins
+        // over every source-local outcome.
         return DragAction::MergeIntoWindow(t);
     }
     let (cx, cy) = session.current_pos;
     if source_bar.point_over_bar(cx, cy) {
-        // Within-bar reorder: compute the destination slot from the
-        // cursor X and compare to the press tab index. `drop_slot`
-        // returns a value in `[0, n]` (insertion-slot semantics). We
-        // convert that to a tab-vec index in `[0, n-1]` and gate the
-        // ReorderTab variant on it actually differing from the source
-        // — otherwise this is the regular "drop on yourself" no-op
-        // that browsers also treat as a cancel.
+        // When: point_over_bar holds the release landed on the source bar, so the
+        // outcome is a within-bar reorder or a cancel, never a tear-out.
+
+        // `drop_slot` returns a value in `[0, n]` (insertion-slot semantics),
+        // converted below to a tab-vec index in `[0, n-1]`. ReorderTab is gated
+        // on that index differing from the source — dropping a tab onto itself
+        // is the "drop on yourself" no-op that browsers also treat as a cancel.
         //
-        // A press-then-release with sub-threshold cursor movement is
-        // a CLICK, not a drag — it must never reorder. Pre-fix, the
-        // right half of any tab (which includes the title-to-`×` gap
-        // on tab 0) had `drop_slot` returning the next tab's index,
-        // so a stationary click silently swapped the two tabs and the
-        // user perceived "nothing happened" because the active tab
-        // simply migrated to the same on-screen position the other
-        // tab vacated. See tests/click_without_drag_does_not_reorder.rs.
+        // A press-then-release with sub-threshold cursor movement is a CLICK,
+        // not a drag, and must never reorder. The right half of any tab — which
+        // includes the title-to-`×` gap on tab 0 — resolves to the next tab's
+        // slot, so without the movement gate a stationary click would swap two
+        // tabs while appearing to do nothing: the active tab simply takes the
+        // on-screen position the other one vacated.
         let n = source_bar.tabwidgets().len();
         if n > 0 && drag_moved_enough(session) {
+            // When: n is non-zero and drag_moved_enough passes, the release is a
+            // real drag over a populated bar, so a destination slot is resolved.
             let raw_slot = source_bar.drop_slot(cx, cy);
             // Clamp insertion-slot semantics: `raw_slot == n` means
             // "after the last tab", which is the last index.
             let to = raw_slot.min(n - 1);
             if to != session.press_tab_index {
+                // When: to differs from press_tab_index the tab genuinely moves,
+                // so a reorder is emitted rather than a cancel.
                 return DragAction::ReorderTab { from: session.press_tab_index, to };
             }
         }
         return DragAction::ReturnToOriginalBar;
     }
     if cy >= TAB_BAR_HEIGHT + TEAR_OUT_THRESHOLD_PX {
+        // When: cy has cleared TAB_BAR_HEIGHT plus TEAR_OUT_THRESHOLD_PX the
+        // pointer is far enough below the bar to commit to a new window.
         return DragAction::TearOutToNewWindow { drop_local: (cx, cy) };
     }
     DragAction::ReturnToOriginalBar
@@ -231,6 +248,8 @@ pub fn global_to_local(dest: WindowGeom, global: (i32, i32)) -> Option<(f32, f32
     let lx = gx - ox;
     let ly = gy - oy;
     if lx < 0 || ly < 0 || lx as u32 >= w || ly as u32 >= h {
+        // When: lx or ly falls outside the w by h inner area the cursor is not
+        // over this window at all, so it cannot be a drop candidate.
         return None;
     }
     Some((lx as f32, ly as f32))
@@ -247,8 +266,14 @@ pub fn find_drop_target<W: Copy>(
     candidates: impl IntoIterator<Item = (W, WindowGeom, TabBarLayout)>,
 ) -> Option<DropTarget<W>> {
     for (id, geom, layout) in candidates {
-        let Some((lx, ly)) = global_to_local(geom, global_cursor) else { continue };
+        let Some((lx, ly)) = global_to_local(geom, global_cursor) else {
+            // When: global_to_local yields None the cursor is outside geom, so
+            // this candidate is skipped and the search moves to the next window.
+            continue;
+        };
         if layout.point_over_bar(lx, ly) {
+            // When: point_over_bar holds for this layout the first matching
+            // window wins and the remaining candidates are not tested.
             let slot = layout.drop_slot(lx, ly);
             return Some(DropTarget { window: id, slot });
         }

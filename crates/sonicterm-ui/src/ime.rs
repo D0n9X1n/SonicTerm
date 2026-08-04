@@ -44,6 +44,7 @@ impl ImeCursorThrottle {
     /// returns `true`.
     pub fn should_update(&mut self, row: u16, col: u16) -> bool {
         if self.last == Some((row, col)) {
+            // When: `last` already matches this cell, suppress a duplicate native IME cursor update.
             return false;
         }
         self.last = Some((row, col));

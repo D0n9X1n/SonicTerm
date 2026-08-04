@@ -2,7 +2,7 @@
 //!
 //! Kept GPU-free so unit tests can exercise the math without standing up
 //! a wgpu surface. The render path calls [`blink_alpha`] once per frame
-//! and uses [`phase_bucket`] to keep the [`crate::render::FrameKey`]
+//! and uses [`phase_bucket`] to keep the renderer's `FrameKey`
 //! fast-path coherent — two frames with the same bucket render the same
 //! cursor opacity, so a no-typing/no-output idle session still pegs the
 //! cache and skips work between visible phase transitions.
@@ -45,13 +45,18 @@ pub const BLINK_MAX_ALPHA: f32 = 1.0;
 /// reason about when debugging "did my cursor blink this frame?".
 pub fn blink_alpha(elapsed: Duration, enabled: bool) -> f32 {
     if !enabled {
+        // When: `enabled` is false, keep the cursor fully opaque and independent of wall-clock phase.
         return BLINK_MAX_ALPHA;
     }
     let half = BLINK_PERIOD_MS / 2;
     let t = (elapsed.as_millis() as u64) % BLINK_PERIOD_MS;
     // Ramp 0..half goes max→min, half..period goes min→max.
-    let frac =
-        if t < half { t as f32 / half as f32 } else { 1.0 - ((t - half) as f32 / half as f32) };
+    let frac = if t < half {
+        t as f32 / half as f32
+    } else {
+        // When: `t` is in the second half-cycle, mirror elapsed phase so opacity ramps back toward maximum.
+        1.0 - ((t - half) as f32 / half as f32)
+    };
     // frac is in [0,1] going up then down → invert so it starts at max.
     let down = 1.0 - frac;
     BLINK_MIN_ALPHA + (BLINK_MAX_ALPHA - BLINK_MIN_ALPHA) * down
@@ -67,6 +72,7 @@ pub fn blink_alpha(elapsed: Duration, enabled: bool) -> f32 {
 /// participates in the cache key on a non-blinking cursor.
 pub fn phase_bucket(elapsed: Duration, enabled: bool) -> u8 {
     if !enabled {
+        // When: `enabled` is false, use one stable bucket so time cannot invalidate the frame cache.
         return 0;
     }
     let t = (elapsed.as_millis() as u64) % BLINK_PERIOD_MS;

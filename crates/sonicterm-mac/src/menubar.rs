@@ -79,6 +79,8 @@ pub fn __test_register(entry: MenuEntry) -> isize {
 /// we can simulate an AppKit click without spinning AppKit.
 pub fn dispatch_tag(tag: isize) -> bool {
     let Some(entry) = lookup(tag) else {
+        // When: lookup holds no entry for tag, so the click names an item this
+        // registry never assigned.
         tracing::warn!("SonicTermMenuTarget: tag {tag} has no registered entry");
         return false;
     };
@@ -99,6 +101,8 @@ pub fn dispatch_tag(tag: isize) -> bool {
             true
         }
         MenuEntry::ClearOldLogs => {
+            // When: entry is ClearOldLogs, so removal runs here and the freed
+            // count reaches the user through a spawned notification.
             let dir = sonicterm_logging::log_dir();
             let (n, bytes) = sonicterm_logging::clear_all_rotated(&dir);
             let mb = (bytes as f64) / (1024.0 * 1024.0);
@@ -120,6 +124,8 @@ fn open_url(url: &str) {
     // Best-effort: invalid URLs are silently ignored (logged at WARN).
     let nsurl = NSURL::URLWithString(&NSString::from_str(url));
     if let Some(nsurl) = nsurl {
+        // When: nsurl parsed, so the string named a real URL and it can be
+        // handed to NSWorkspace from the main thread.
         let _ = MainThreadMarker::new()
             // PANIC: safe — every caller of `open_url` is dispatched from
             // AppKit menu actions, which AppKit guarantees fire on the main
@@ -129,6 +135,8 @@ fn open_url(url: &str) {
         let workspace = NSWorkspace::sharedWorkspace();
         workspace.openURL(&nsurl);
     } else {
+        // When: nsurl is absent, so URLWithString rejected the string and the
+        // click is dropped rather than opening something unintended.
         tracing::warn!("menubar: ignoring malformed URL {url:?}");
     }
 }
@@ -157,6 +165,9 @@ define_class!(
 impl MenuTarget {
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(());
+        // SAFETY: `this` is a freshly allocated `MenuTarget` whose ivars are
+        // set, and `init` is `NSObject`'s designated initializer, so it runs
+        // exactly once on an object that has not been initialised yet.
         unsafe { msg_send![super(this), init] }
     }
 }
@@ -195,6 +206,8 @@ fn ns_selector_from_str(name: &str) -> Sel {
 
 fn build_item(mtm: MainThreadMarker, item: &Item, target: &MenuTarget) -> Retained<NSMenuItem> {
     if matches!(item.binding, Binding::Separator) {
+        // When: matches reports a separator, which carries no title, key, or
+        // action and is built by AppKit's own constructor.
         return NSMenuItem::separatorItem(mtm);
     }
     let nsi = NSMenuItem::new(mtm);
@@ -203,7 +216,12 @@ fn build_item(mtm: MainThreadMarker, item: &Item, target: &MenuTarget) -> Retain
     nsi.setKeyEquivalentModifierMask(flags(item.mods));
     match &item.binding {
         Binding::Action(a) => {
+            // When: the binding is an Action, so the item carries a registry
+            // tag and routes through the shared dispatch selector.
             let tag = register(MenuEntry::Act(a.clone()));
+            // SAFETY: `nsi` is a live `NSMenuItem` this function just created,
+            // and `target` outlives it — the `MenuTarget` is leaked for the
+            // process lifetime in `MacMenu::install`.
             unsafe {
                 nsi.setTag(tag);
                 nsi.setTarget(Some(target));
@@ -211,16 +229,29 @@ fn build_item(mtm: MainThreadMarker, item: &Item, target: &MenuTarget) -> Retain
             }
         }
         Binding::Url(url) => {
+            // When: the binding is a Url, so the item carries a registry tag
+            // whose entry opens that address on click.
             let tag = register(MenuEntry::Url((*url).to_string()));
+            // SAFETY: `nsi` is a live `NSMenuItem` this function just created,
+            // and `target` outlives it — the `MenuTarget` is leaked for the
+            // process lifetime in `MacMenu::install`.
             unsafe {
                 nsi.setTag(tag);
                 nsi.setTarget(Some(target));
                 nsi.setAction(Some(sel!(dispatch:)));
             }
         }
-        Binding::System(name) => unsafe {
-            nsi.setAction(Some(ns_selector_from_str(name)));
-        },
+        Binding::System(name) => {
+            // When: the binding is a System selector, so AppKit routes the
+            // click through the responder chain with no target and no tag.
+
+            // SAFETY: `ns_selector_from_str` returns a selector compiled into
+            // this binary, and `nsi` is a live `NSMenuItem` this function just
+            // created.
+            unsafe {
+                nsi.setAction(Some(ns_selector_from_str(name)));
+            }
+        }
         // PANIC: safe — `Binding::Separator` is intercepted by the caller
         // (see `MenuItem::separator()` branch in build_menu before this fn
         // is invoked); reaching it here would indicate a refactor missed
@@ -257,6 +288,9 @@ fn build_responder_item(
     nsi.setTitle(&ns(title));
     nsi.setKeyEquivalent(&ns(key));
     nsi.setKeyEquivalentModifierMask(flags(mods));
+    // SAFETY: `selector` is a compile-time selector constant and `nsi` is a
+    // live `NSMenuItem` this function just created. No target is set, which is
+    // what routes the click through the key window's responder chain.
     unsafe { nsi.setAction(Some(selector)) };
     nsi
 }
@@ -301,6 +335,7 @@ pub struct MacMenu {
 }
 
 impl MacMenu {
+    /// Build the macOS menu from the shared blueprint.
     pub fn new() -> Self {
         Self { blueprint: menu::blueprint() }
     }
@@ -317,7 +352,7 @@ impl PlatformMenu for MacMenu {
         for sm in &self.blueprint {
             // The standard macOS Window menu conventionally sits just
             // before Help. Insert it here so AppKit owns the live window
-            // list (all torn-out windows) + ⌘` cycling. See #window-menu.
+            // list (all torn-out windows) + ⌘` cycling.
             if sm.title == "Help" {
                 install_window_menu(mtm, &app, &main);
             }
@@ -362,6 +397,9 @@ fn build_custom_item(
     let nsi = NSMenuItem::new(mtm);
     nsi.setTitle(&ns(title));
     let tag = register(entry);
+    // SAFETY: `nsi` is a live `NSMenuItem` this function just created, and
+    // `target` outlives it — the `MenuTarget` is leaked for the process
+    // lifetime in `MacMenu::install`.
     unsafe {
         nsi.setTag(tag);
         nsi.setTarget(Some(target));
@@ -384,8 +422,14 @@ pub fn install(_theme_names: &[String]) {
 // Theme list helper (kept for callers that still scan).
 // ---------------------------------------------------------------------
 
+/// List the `.toml` theme stems under `themes_dir`, sorted.
+///
+/// An unreadable directory yields an empty list rather than an error: a missing
+/// themes directory is a normal state, not a startup failure.
 pub fn scan_themes(themes_dir: &Path) -> Vec<String> {
     let Ok(read) = std::fs::read_dir(themes_dir) else {
+        // When: read_dir cannot open themes_dir, so no theme file is visible
+        // and the caller receives an empty list.
         tracing::warn!("menubar: cannot read theme dir {themes_dir:?}");
         return Vec::new();
     };
@@ -396,6 +440,8 @@ pub fn scan_themes(themes_dir: &Path) -> Vec<String> {
             if p.extension().and_then(|s| s.to_str()) == Some("toml") {
                 p.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string())
             } else {
+                // When: the extension is not toml, so the entry is not a theme
+                // file and contributes no name to the scan.
                 None
             }
         })

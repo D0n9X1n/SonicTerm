@@ -71,6 +71,7 @@ pub type MenuBlueprint = Vec<Submenu>;
 pub struct Sender;
 
 impl Sender {
+    /// Construct a sender for the process-wide menubar action bridge.
     pub fn new() -> Self {
         Self
     }
@@ -88,6 +89,7 @@ impl Sender {
 /// and is expected to run on whatever thread the platform requires —
 /// callers always invoke from the windowing thread.
 pub trait PlatformMenu {
+    /// Materialize the native menu and route item activation through `sender`.
     fn install(&self, sender: Sender) -> anyhow::Result<()>;
 }
 

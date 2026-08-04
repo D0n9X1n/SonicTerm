@@ -97,6 +97,18 @@ jobs:
         shell: bash
         run: bash scripts/check-window-owner-registration.sh
 
+      - name: Check authored Rust comments
+        shell: bash
+        run: bash scripts/check-authored-rust-comments.sh
+
+      - name: Check public Rustdoc
+        shell: bash
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+
+      - name: Check optional ssh Rustdoc
+        shell: bash
+        run: RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-io --no-deps --features ssh
+
       - name: Run unit tests
         run: cargo test --workspace --lib --bins
 

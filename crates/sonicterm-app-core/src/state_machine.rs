@@ -64,6 +64,7 @@ impl AppStateMachine {
         while let Some(effect) = self.pending.pop() {
             depth = depth.saturating_add(1);
             if depth > MAX_CASCADE_DEPTH {
+                // When: `depth` exceeds `MAX_CASCADE_DEPTH`, stop the broken cascade instead of draining an unbounded queue.
                 #[cfg(debug_assertions)]
                 {
                     panic!("MAX_CASCADE_DEPTH ({}) exceeded in drain_pending", MAX_CASCADE_DEPTH);
@@ -77,7 +78,7 @@ impl AppStateMachine {
                         self.pending.len() + 1
                     );
                     self.pending.clear();
-                    return out;
+                    break;
                 }
             }
             out.push(effect);

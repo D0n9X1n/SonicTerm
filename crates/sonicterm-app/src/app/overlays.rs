@@ -1,4 +1,3 @@
-//! Extracted from `app/mod.rs` from the monolithic app module.
 //! `App`'s referenced fields are `pub(super)`; this submodule lives in
 //! the same `app` module tree, so direct field access works.
 
@@ -89,6 +88,8 @@ impl App {
             Some(id) => self.windows.get_mut(&id),
             None => self.main_mut(),
         }) else {
+            // When: target names a window already removed, or target is None and
+            // there is no main window, drop the IME update — nothing records it.
             return;
         };
         match ime_event {
@@ -96,6 +97,8 @@ impl App {
             winit::event::Ime::Disabled => ws.ime.handle_disabled(),
             winit::event::Ime::Preedit(text, cursor) => ws.ime.handle_preedit(text, *cursor),
             winit::event::Ime::Commit(text) => {
+                // When: a Commit arrives the palette consumes text itself, so
+                // take_commits drains the buffer and no bytes reach the PTY later.
                 ws.ime.handle_commit(text);
                 let _ = ws.ime.take_commits();
             }
@@ -119,6 +122,8 @@ impl App {
         cell_w: f32,
     ) -> Option<(winit::dpi::PhysicalPosition<i32>, winit::dpi::PhysicalSize<u32>)> {
         if !self.command_palette.is_open() {
+            // When: command_palette is closed there is no query row to anchor
+            // the IME candidate box to; None leaves the cursor area unchanged.
             return None;
         }
         let mut palette = self.command_palette.clone();
@@ -136,13 +141,23 @@ impl App {
 
     pub(super) fn update_command_palette_ime_cursor_area(&self) {
         if !self.command_palette.is_open() {
+            // When: command_palette is closed there is no palette caret to
+            // follow; the IME cursor area stays where the terminal set it.
             return;
         }
         let target = self.palette_attached_window;
         let (window, width, height, scale, font_size, cell_w) = if let Some(id) = target {
-            let Some(child) = self.windows.get(&id) else { return };
+            // When: target names a child window the palette is attached to it,
+            // so measure that child's surface for the IME box.
+            let Some(child) = self.windows.get(&id) else {
+                // When: id is no longer in windows the child closed since the
+                // palette attached; abandon the reposition instead of a dead window.
+                return;
+            };
             let (Some(window), Some(renderer)) = (child.window.as_ref(), child.renderer.as_ref())
             else {
+                // When: the child has no window or renderer yet there is no
+                // surface to measure scale and cell width from; skip until ready.
                 return;
             };
             let size = window.inner_size();
@@ -156,7 +171,11 @@ impl App {
                 renderer.cell_w,
             )
         } else {
+            // When: target is None the palette is attached to no child window,
+            // so measure the main window's surface instead.
             let (Some(window), Some(renderer)) = (self.main_window(), self.main_renderer()) else {
+                // When: main_window or main_renderer is absent before the first
+                // frame there is no surface to place the IME box on; skip.
                 return;
             };
             let size = window.inner_size();
@@ -211,6 +230,8 @@ impl App {
 
     pub(super) fn command_palette_handle_ime(&mut self, ime_event: &winit::event::Ime) -> bool {
         if !self.command_palette.is_open() {
+            // When: command_palette is closed the IME event belongs to the
+            // terminal; returning false lets window_event run its commit path.
             return false;
         }
         self.update_palette_ime_state(ime_event);
@@ -235,10 +256,14 @@ impl App {
     pub(super) fn command_palette_handle_key(&mut self, event: &KeyEvent) -> bool {
         use winit::keyboard::{Key, NamedKey};
         if !self.command_palette.is_open() {
+            // When: command_palette is closed no palette state may change here;
+            // both callers gate on their own checks and discard this false.
             return false;
         }
         self.refresh_command_palette_context();
         if self.palette_ime_is_composing() {
+            // When: palette_ime_is_composing is true the IME owns the keystroke;
+            // swallow every key so a half-formed CJK sequence cannot also navigate.
             if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
                 if let Some(ws) = match self.palette_attached_window {
                     Some(id) => self.windows.get_mut(&id),
@@ -279,6 +304,8 @@ impl App {
                 _ => true,
             }
         } else if let Some(edit) = self.command_palette_text_edit(event) {
+            // When: command_palette_text_edit maps the chord to an emacs ctrl edit
+            // (ctrl+a, ctrl+k, ctrl+w); it rewrites the query in rename and list modes.
             self.command_palette.apply_text_edit(edit);
             self.update_command_palette_ime_cursor_area();
             self.request_redraw_for_overlay(self.palette_attached_window);
@@ -286,6 +313,8 @@ impl App {
         } else if self.command_palette.mode()
             == sonicterm_ui::command_palette::CommandPaletteMode::RenameTab
         {
+            // When: mode is RenameTab the query holds the tab title, so Enter
+            // commits it via rename_active_tab_body instead of running an action.
             match &event.logical_key {
                 Key::Named(NamedKey::Escape) => {
                     self.command_palette.close();
@@ -354,6 +383,8 @@ impl App {
                 _ => true,
             }
         } else {
+            // When: mode is neither TabColor nor RenameTab the palette shows
+            // the command list, where Enter runs the selected action.
             match &event.logical_key {
                 Key::Named(NamedKey::Escape) => {
                     self.command_palette.close();
@@ -361,9 +392,13 @@ impl App {
                     true
                 }
                 Key::Named(NamedKey::Enter) => {
+                    // When: Enter arrives in list mode it runs the highlighted
+                    // entry; RenameTab and UpdateTabColor re-enter sub-modes.
                     let action = self.command_palette.current().cloned();
                     let source_window = self.palette_attached_window.or(self.main_window_id);
                     if matches!(action, Some(sonicterm_cfg::keymap::Action::RenameTab)) {
+                        // When: matches finds RenameTab the palette stays open as
+                        // a rename editor seeded with the active tab title.
                         let body = self.active_tab_title_body().unwrap_or_default();
                         self.command_palette.start_rename_tab(body);
                         self.update_command_palette_ime_cursor_area();
@@ -371,6 +406,8 @@ impl App {
                         return true;
                     }
                     if matches!(action, Some(sonicterm_cfg::keymap::Action::UpdateTabColor)) {
+                        // When: matches finds UpdateTabColor the palette switches
+                        // to the tab color picker instead of closing.
                         self.start_update_tab_color();
                         return true;
                     }
@@ -380,6 +417,8 @@ impl App {
                         if let Some(source_window) = source_window {
                             self.run_action_for_window(&a, source_window);
                         } else {
+                            // When: source_window is None no originating window
+                            // was recorded; run_action picks the frontmost itself.
                             self.run_action(&a);
                         }
                     }
@@ -452,24 +491,23 @@ impl App {
     pub(super) fn toggle_command_palette(&mut self) {
         self.refresh_command_palette_context();
         let now_open = self.command_palette.toggle();
-        // M6a-expand-2c-misc: notify reducer of the toggle. The
-        // reducer flips `palette_open` and emits Render(Overlay) on
-        // every transition.
+        // Notify the reducer of the toggle. The reducer flips `palette_open`
+        // and emits Render(Overlay) on every transition.
         self.dispatch_intent(sonicterm_app_core::AppIntent::ToggleCommandPalette {
             window: sonicterm_types::WindowKey::new(0),
         });
         if now_open {
-            // follow-up: tag with the frontmost window so the
-            // palette appears on whatever window the user is looking at.
-            // Pre-fix this was hardcoded to the main window's render
-            // pass — typing Cmd+Shift+P in a torn-out child popped the
-            // palette on the original main window instead.
+            // Tag with the frontmost window so the palette appears on
+            // whatever window the user is looking at, rather than on the
+            // main window's render pass.
             self.palette_attached_window = match self.frontmost_kind() {
                 FrontmostKind::Child(id) => Some(id),
                 _ => None,
             };
             self.update_command_palette_ime_cursor_area();
         } else {
+            // When: now_open is false the toggle just closed the palette; drop
+            // the attachment so later redraws do not target a stale window.
             self.palette_attached_window = None;
         }
         tracing::info!(
@@ -540,13 +578,19 @@ impl App {
     }
 
     pub(super) fn apply_selected_tab_color(&mut self) {
-        let Some(choice) = self.command_palette.selected_tab_color().cloned() else { return };
+        let Some(choice) = self.command_palette.selected_tab_color().cloned() else {
+            // When: selected_tab_color has no entry at the current index the
+            // picker is empty or the selection is stale; leave the color as is.
+            return;
+        };
         match self.frontmost_kind() {
             FrontmostKind::Child(id) => {
                 if let Some(ws) = self.windows.get_mut(&id) {
                     if let Some(hex) = choice.hex {
                         ws.tabs.set_active_custom_color(hex);
                     } else {
+                        // When: choice carries no hex the picked entry is Reset
+                        // to Default; clear the child tab's color override.
                         ws.tabs.clear_active_custom_color();
                     }
                     ws.request_redraw();
@@ -557,6 +601,8 @@ impl App {
                     if let Some(hex) = choice.hex {
                         tabs.set_active_custom_color(hex);
                     } else {
+                        // When: choice carries no hex the picked entry is Reset
+                        // to Default; clear the override so the theme color wins.
                         tabs.clear_active_custom_color();
                     }
                 }
@@ -568,6 +614,8 @@ impl App {
     }
     pub(crate) fn draw_command_palette_overlay(&self) {
         if !self.command_palette.is_open() {
+            // When: command_palette is closed there is no query or selection
+            // state to report; this helper only emits a trace line.
             return;
         }
         tracing::info!(
@@ -578,26 +626,37 @@ impl App {
         );
     }
     pub(super) fn open_search(&mut self) {
-        // M6a-expand-2c-misc: notify reducer of the open transition
-        // (Render(Overlay) — transition-guarded so a re-open against
-        // an already-open overlay is a no-op).
+        // Notify the reducer of the open transition (Render(Overlay) —
+        // transition-guarded so a re-open against an already-open overlay
+        // is a no-op).
         self.dispatch_intent(sonicterm_app_core::AppIntent::OpenSearch {
             window: sonicterm_types::WindowKey::new(0),
         });
-        // follow-up: route to the OS-frontmost window so
-        // Cmd+F typed in a torn-out child opens a search bar on
-        // THAT child's active tab, not the main window's.
+        // Cmd+F typed in a torn-out child opens a search bar on THAT child's
+        // active tab, not the main window's.
         if let FrontmostKind::Child(id) = self.frontmost_kind() {
+            // When: frontmost_kind reports Child the frontmost window is a
+            // torn-out child, so route the search bar to its active tab.
             if self.open_search_in_child(id) {
+                // When: open_search_in_child succeeded the child window owns
+                // the new search bar; return so main does not open a second.
                 return;
             }
             // Child id was stale — fall through to main, clear stale.
             self.frontmost_window = None;
         }
         let (i, pane_id) = {
-            let Some(ws) = self.main() else { return };
+            let Some(ws) = self.main() else {
+                // When: main is absent before the window exists there is no tab
+                // to hold the new SearchState; leave search unopened.
+                return;
+            };
             let i = ws.tabs.active_index();
-            let Some(t) = ws.tab_states.get(i) else { return };
+            let Some(t) = ws.tab_states.get(i) else {
+                // When: tab_states has no entry at active index i, tabs and
+                // tab_states have diverged; open no search bar rather than guess.
+                return;
+            };
             (i, t.active_pane)
         };
         let mut s = SearchState::new();
@@ -614,13 +673,19 @@ impl App {
         }
     }
 
-    /// follow-up — child-window mirror of `open_search`. Opens
-    /// a search bar on the active tab of the given child window. Returns
-    /// `true` on success, `false` if the recorded id is stale so the
-    /// caller can fall back to the main App default.
+    /// Child-window mirror of `open_search`. Opens a search bar on the
+    /// active tab of the given child window. Returns `true` on success,
+    /// `false` if the recorded id is stale so the caller can fall back to
+    /// the main App default.
     pub(super) fn open_search_in_child(&mut self, win_id: WindowId) -> bool {
-        let Some(child) = self.windows.get_mut(&win_id) else { return false };
+        let Some(child) = self.windows.get_mut(&win_id) else {
+            // When: win_id is no longer in windows the child closed since it
+            // was recorded; return false so open_search falls back to main.
+            return false;
+        };
         let i = child.tabs.active_index();
+        // When: tab_states has no entry at the child's active index i, tabs
+        // and tab_states have diverged; report failure instead of guessing.
         let pane_id = match child.tab_states.get(i) {
             Some(t) => t.active_pane,
             None => return false,
@@ -636,10 +701,10 @@ impl App {
         true
     }
 
-    /// follow-up — redraw helper for app-level overlays
-    /// (palette) that need to wake whichever window is
-    /// currently hosting them. `None` ⇒ main window; `Some(id)` ⇒ that
-    /// child window. Silently no-ops if the recorded id is stale.
+    /// Redraw helper for app-level overlays (palette) that need to wake
+    /// whichever window is currently hosting them. `None` ⇒ main window;
+    /// `Some(id)` ⇒ that child window. Silently no-ops if the recorded id
+    /// is stale.
     pub(super) fn request_redraw_for_overlay(&mut self, attached: Option<WindowId>) {
         self.input_dirty = true;
         match attached {
@@ -657,7 +722,11 @@ impl App {
     }
 
     pub(super) fn search_active(&self) -> bool {
-        let Some(ws) = self.main() else { return false };
+        let Some(ws) = self.main() else {
+            // When: main has not been created yet no tab can hold a SearchState,
+            // so report search inactive rather than claiming it owns the keys.
+            return false;
+        };
         let i = ws.tabs.active_index();
         ws.tab_states.get(i).map(|t| t.search.is_some()).unwrap_or(false)
     }

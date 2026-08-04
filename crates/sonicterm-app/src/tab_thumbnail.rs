@@ -116,6 +116,7 @@ pub fn render_tab_thumbnail_png(input: &TabThumbnailInputs) -> Vec<u8> {
                 || x >= width.saturating_sub(border_w)
                 || y < border_w
                 || y >= height.saturating_sub(border_w);
+            // When: `is_top_stripe` selects accent, `is_border` selects outline, and the interior uses `bg`.
             let (r, g, b, a) = if is_top_stripe {
                 input.accent
             } else if is_border {
@@ -135,6 +136,7 @@ pub fn render_tab_thumbnail_png(input: &TabThumbnailInputs) -> Vec<u8> {
     match encoder.write_image(&buf, width, height, ColorType::Rgba8.into()) {
         Ok(()) => out,
         Err(e) => {
+            // Encoding failure degrades to no preview so drag handoff can continue.
             tracing::warn!(?e, "tab_thumbnail: PNG encode failed; returning empty preview");
             Vec::new()
         }

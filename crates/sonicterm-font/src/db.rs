@@ -18,6 +18,7 @@ impl Default for FontDatabase {
 }
 
 impl FontDatabase {
+    /// Creates an empty font database.
     pub fn new() -> Self {
         Self { by_full_name: HashMap::new() }
     }
@@ -31,15 +32,18 @@ impl FontDatabase {
         }
     }
 
-    /// Build up the database from the fonts found in the configured font dirs
-    /// and from the built-in selection of fonts
+    /// Build a database from fonts found in the configured font directories.
+    /// Built-in fallback bundles are loaded separately by [`Self::with_built_in`].
     pub fn with_font_dirs(config: &Config) -> anyhow::Result<Self> {
         let mut font_info = vec![];
         for path in &config.font_dirs {
             for entry in walkdir::WalkDir::new(path).into_iter() {
                 let entry = match entry {
                     Ok(entry) => entry,
-                    Err(_) => continue,
+                    Err(_) => {
+                        // When: walking a configured font-directory entry fails, skip that entry.
+                        continue;
+                    }
                 };
 
                 let source = FontDataSource::OnDisk(entry.path().to_path_buf());
@@ -57,6 +61,7 @@ impl FontDatabase {
         Ok(db)
     }
 
+    /// Returns clones of all parsed fonts currently indexed by the database.
     pub fn list_available(&self) -> Vec<ParsedFont> {
         let mut fonts = vec![];
         for parsed_list in self.by_full_name.values() {
@@ -67,6 +72,7 @@ impl FontDatabase {
         fonts
     }
 
+    /// Builds a database from the optional compiled-in fallback font bundles.
     pub fn with_built_in() -> anyhow::Result<Self> {
         let mut font_info = vec![];
         load_built_in_fonts(&mut font_info)?;
@@ -75,6 +81,7 @@ impl FontDatabase {
         Ok(db)
     }
 
+    /// Resolves multiple requested attributes and records each successful match.
     pub fn resolve_multiple(
         &self,
         fonts: &[FontAttributes],
@@ -105,6 +112,7 @@ impl FontDatabase {
         for parsed_list in self.by_full_name.values() {
             for parsed in parsed_list {
                 if parsed.names().family == "Last Resort High-Efficiency" {
+                    // When: the family is Fontconfig's last-resort face, exclude it from fallback.
                     continue;
                 }
                 let covered = parsed
@@ -119,6 +127,7 @@ impl FontDatabase {
         Ok(matches)
     }
 
+    /// Returns every parsed font whose names or origin match the requested attributes.
     pub fn candidates(&self, font_attr: &FontAttributes) -> Vec<&ParsedFont> {
         let mut fonts = vec![];
         for parsed_list in self.by_full_name.values() {
@@ -131,6 +140,7 @@ impl FontDatabase {
         fonts
     }
 
+    /// Returns the best matching parsed font for requested attributes and pixel size.
     pub fn resolve(&self, font_attr: &FontAttributes, pixel_size: u16) -> Option<&ParsedFont> {
         let mut candidates = vec![];
         for parsed_list in self.by_full_name.values() {
@@ -142,6 +152,7 @@ impl FontDatabase {
         }
 
         if let Some(idx) = ParsedFont::best_matching_index(font_attr, &candidates, pixel_size) {
+            // When: `best_matching_index(...)` is `Some`, return that candidate when present.
             return candidates.get(idx).copied();
         }
 

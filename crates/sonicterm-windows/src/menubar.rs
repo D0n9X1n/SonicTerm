@@ -54,7 +54,13 @@ pub struct WinMenu {
 }
 
 impl WinMenu {
-    pub fn new(hwnd: HWND) -> Self {
+    /// Bind a native menu to an existing Windows top-level window.
+    ///
+    /// # Safety
+    ///
+    /// `hwnd` must remain a live window through [`PlatformMenu::install`].
+    // SAFETY: callers must provide the live HWND later passed to muda.
+    pub unsafe fn new(hwnd: HWND) -> Self {
         Self { hwnd }
     }
 }
@@ -112,7 +118,10 @@ fn key_code(key: &str) -> Option<Code> {
         '8' => Code::Digit8,
         '9' => Code::Digit9,
         ',' => Code::Comma,
-        _ => return None,
+        _ => {
+            // When: `c` has no supported muda key code, keep the menu item but omit its accelerator.
+            return None;
+        }
     })
 }
 
@@ -181,8 +190,8 @@ impl PlatformMenu for WinMenu {
             menu.append(&sub).with_context(|| format!("attach submenu {}", sm.title))?;
         }
 
-        // SAFETY: HWND is provided by winit and lives for the program;
-        // muda's `init_for_hwnd` is the documented entry point.
+        // SAFETY: the unsafe constructor requires `self.hwnd` to remain live
+        // through installation; muda's `init_for_hwnd` is the native entry point.
         unsafe {
             menu.init_for_hwnd(self.hwnd.0 as isize).context("muda::Menu::init_for_hwnd")?;
         }
@@ -205,6 +214,7 @@ fn muda_pump(sender: Sender) {
     let rx = MenuEvent::receiver();
     while let Ok(ev) = rx.recv() {
         let Some(entry) = registry_lookup(&ev.id) else {
+            // When: `ev.id` is absent from the registry, ignore the stale or foreign native menu event.
             tracing::warn!("muda: unknown menu id {:?}", ev.id);
             continue;
         };

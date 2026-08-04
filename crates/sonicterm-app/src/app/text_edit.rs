@@ -10,9 +10,11 @@ pub(super) fn core_text_edit_for_key(key: &Key, mods: ModifiersState) -> Option<
 
 pub(super) fn search_text_edit_for_key(key: &Key, mods: ModifiersState) -> Option<TextEdit> {
     if let Some(edit) = core_text_edit_for_key(key, mods) {
+        // When: `core_text_edit_for_key` recognized a control chord, preserve that command before considering unmodified navigation keys.
         return Some(edit);
     }
     if !mods.is_empty() {
+        // When: `mods` remains nonempty after core-chord lookup, do not reinterpret a modified key as plain search-field navigation.
         return None;
     }
     Some(match key {
@@ -21,7 +23,10 @@ pub(super) fn search_text_edit_for_key(key: &Key, mods: ModifiersState) -> Optio
         Key::Named(winit::keyboard::NamedKey::Home) => TextEdit::MoveStart,
         Key::Named(winit::keyboard::NamedKey::End) => TextEdit::MoveEnd,
         Key::Named(winit::keyboard::NamedKey::Delete) => TextEdit::DeleteForward,
-        _ => return None,
+        _ => {
+            // When: `key` is not a supported unmodified editing key, leave it available to other input handling.
+            return None;
+        }
     })
 }
 
@@ -36,7 +41,10 @@ pub(super) fn core_text_edit_for_chord(chord: &str) -> Option<TextEdit> {
         "ctrl+w" => TextEdit::DeletePreviousWord,
         "ctrl+u" => TextEdit::DeleteToStart,
         "ctrl+k" => TextEdit::DeleteToEnd,
-        _ => return None,
+        _ => {
+            // When: `chord` is outside the shared editing set, report no command rather than consuming it.
+            return None;
+        }
     })
 }
 

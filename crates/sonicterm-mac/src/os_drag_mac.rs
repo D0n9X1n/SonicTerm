@@ -58,6 +58,7 @@ impl OsDragSink for MacOsDragSink {
         let json = match payload.to_json() {
             Ok(s) => s,
             Err(e) => {
+                // When: payload serialization fails, keep the source tab because no receiver can adopt malformed data.
                 tracing::error!(?e, "os_drag_mac: payload serialization failed");
                 return DragAck::NotAcknowledged;
             }
@@ -69,7 +70,9 @@ impl OsDragSink for MacOsDragSink {
         let type_str: Retained<NSString> = NSString::from_str(PASTEBOARD_TYPE);
         let types: Retained<NSArray<NSString>> =
             NSArray::from_retained_slice(std::slice::from_ref(&type_str));
-        let _ = unsafe { pasteboard.declareTypes_owner(&types, None) };
+        let _ =
+            // SAFETY: retained pasteboard/type objects outlive this synchronous declaration; owner is intentionally nil.
+            unsafe { pasteboard.declareTypes_owner(&types, None) };
         let value: Retained<NSString> = NSString::from_str(&json);
         let ok = pasteboard.setString_forType(&value, &type_str);
         if ok {
@@ -79,12 +82,11 @@ impl OsDragSink for MacOsDragSink {
                 "os_drag_mac: payload written to NSPasteboard"
             );
         } else {
+            // When: `ok` is false, publication failed and the source remains authoritative.
             tracing::warn!("os_drag_mac: NSPasteboard.setString_forType returned NO");
         }
-        // DATA-LOSS FIX (review): even a successful
-        // pasteboard write is NOT a consumption ack — no receiver
-        // may ever pick it up. Until v2 adds a reply-key heartbeat
-        // we always tell the caller to keep the source tab alive.
+        // A pasteboard write is publication, not receiver acknowledgement;
+        // keep the source tab alive until a receiver explicitly adopts it.
         DragAck::NotAcknowledged
     }
 }
@@ -95,16 +97,14 @@ impl OsDragSink for MacOsDragSink {
 /// common case — most pasteboard writes are unrelated text). Called
 /// by the destination process on application activation.
 ///
-/// DATA-LOSS FIX (review): we previously called
-/// `clearContents()` *before* validating the JSON, which would wipe
-/// arbitrary unrelated clipboard contents from other apps whenever
-/// any string happened to be tagged with our type. Now we validate
-/// first and only clear on a successful round-trip.
+/// Validation precedes `clearContents()` so malformed tagged data never
+/// erases unrelated clipboard contents; only a valid round-trip is consumed.
 pub fn take_pending_payload() -> Option<TabPayload> {
     let pasteboard: Retained<NSPasteboard> = NSPasteboard::generalPasteboard();
     let type_str: Retained<NSString> = NSString::from_str(PASTEBOARD_TYPE);
     let value = pasteboard.stringForType(&type_str)?;
     let s = value.to_string();
+    // When: `TabPayload::from_json(&s)` fails, preserve malformed tagged data instead of clearing unrelated pasteboard contents.
     match TabPayload::from_json(&s) {
         Ok(p) => {
             let _ = pasteboard.clearContents();

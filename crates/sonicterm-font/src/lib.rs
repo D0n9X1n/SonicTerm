@@ -91,6 +91,8 @@ pub struct ClearShapeCache {}
 
 static FONT_ID: ::std::sync::atomic::AtomicUsize = ::std::sync::atomic::AtomicUsize::new(0);
 pub type LoadedFontId = usize;
+/// Allocates a process-unique identifier for a loaded font instance.
+// Ordering: `FONT_ID.fetch_add` uses `Relaxed`; IDs need uniqueness but publish no state.
 pub fn alloc_font_id() -> LoadedFontId {
     FONT_ID.fetch_add(1, ::std::sync::atomic::Ordering::Relaxed)
 }
@@ -130,18 +132,23 @@ impl std::fmt::Debug for LoadedFont {
 }
 
 impl LoadedFont {
+    /// Returns the metrics selected when this font stack was loaded.
     pub fn metrics(&self) -> FontMetrics {
         self.metrics
     }
 
+    /// Returns the text style from which this font stack was resolved.
     pub fn style(&self) -> &TextStyle {
         &self.text_style
     }
 
+    /// Returns this loaded font stack's process-unique identifier.
     pub fn id(&self) -> LoadedFontId {
         self.id
     }
 
+    // Lock order: mutate `handles` first and release that `RefCell` borrow; only then
+    // upgrade `font_config`, borrow its config, and borrow `shaper` plus `handles` for rebuild.
     fn insert_fallback_handles(&self, extra_handles: Vec<ParsedFont>) -> anyhow::Result<bool> {
         let mut loaded = false;
         {
@@ -165,6 +172,7 @@ impl LoadedFont {
         Ok(loaded)
     }
 
+    /// Shapes text, waiting and retrying when asynchronous fallback discovery is required.
     pub fn blocking_shape(
         &self,
         text: &str,
@@ -189,21 +197,28 @@ impl LoadedFont {
             ) {
                 Ok(tuple) => tuple,
                 Err(err) if err.downcast_ref::<ClearShapeCache>().is_some() => {
+                    // When: `err.downcast_ref::<ClearShapeCache>().is_some()` is true, retry.
                     continue;
                 }
-                Err(err) => return Err(err),
+                Err(err) => {
+                    // When: the guarded `ClearShapeCache` arm did not match, return `err`.
+                    return Err(err);
+                }
             };
 
             if !async_resolve {
+                // When: `async_resolve` is false, no fallback completion can improve this result.
                 return Ok(res);
             }
             if rx.recv().is_err() {
+                // When: `rx.recv().is_err()` is true, retain the result already shaped.
                 return Ok(res);
             }
         }
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Shapes text once and schedules any required fallback resolution asynchronously.
     pub fn shape<F: FnOnce() + Send + 'static, FS: FnOnce(&mut Vec<char>)>(
         &self,
         text: &str,
@@ -226,6 +241,8 @@ impl LoadedFont {
         Ok(res)
     }
 
+    // Lock order: `pending_fallback` -> `shaper`; afterward `shaper` ->
+    // `tried_glyphs` -> `font_config`. The helper owns the first nested edge.
     #[allow(clippy::too_many_arguments)]
     fn shape_impl<F: FnOnce() + Send + 'static, FS: FnOnce(&mut Vec<char>)>(
         &self,
@@ -242,9 +259,15 @@ impl LoadedFont {
         {
             let mut pending = self.pending_fallback.lock().unwrap();
             if !pending.is_empty() {
+                // When: `pending.is_empty()` is false, merge completed fallback handles before shaping.
                 match self.insert_fallback_handles(pending.split_off(0)) {
-                    Ok(true) => return Err(ClearShapeCache {})?,
-                    Ok(false) => {}
+                    Ok(true) => {
+                        // When: `insert_fallback_handles(...)` returns `Ok(true)`, invalidate shapes.
+                        return Err(ClearShapeCache {})?;
+                    }
+                    Ok(false) => {
+                        // When: `insert_fallback_handles(...)` returns `Ok(false)`, keep the shaper.
+                    }
                     Err(err) => {
                         log::error!("Error adding fallback: {:#}", err);
                     }
@@ -291,20 +314,24 @@ impl LoadedFont {
         result.map(|r| (async_resolve, r))
     }
 
+    /// Computes metrics for one resolved fallback index at this font's size and DPI.
     pub fn metrics_for_idx(&self, font_idx: usize) -> anyhow::Result<FontMetrics> {
         self.shaper.borrow().metrics_for_idx(font_idx, self.font_size, self.dpi)
     }
 
+    /// Returns the brightness multiplier used for a resolved font index.
     pub fn brightness_adjust(&self, font_idx: usize) -> f32 {
         let synthesize_dim =
             self.handles.borrow().get(font_idx).map(|p| p.synthesize_dim).unwrap_or(false);
         if synthesize_dim {
             0.5
         } else {
+            // When: `synthesize_dim` is false, preserve the glyph's original brightness.
             1.0
         }
     }
 
+    /// Rasterizes a glyph, creating and caching its fallback-specific rasterizer on first use.
     pub fn rasterize_glyph(
         &self,
         glyph_pos: u32,
@@ -314,6 +341,7 @@ impl LoadedFont {
         if let Some(raster) = rasterizers.get(&fallback) {
             raster.rasterize_glyph(glyph_pos, self.font_size, self.dpi)
         } else {
+            // When: no rasterizer is cached for `fallback`, construct one from its parsed handle.
             let raster_selection = self
                 .font_config
                 .upgrade()
@@ -329,6 +357,7 @@ impl LoadedFont {
         }
     }
 
+    /// Clones the resolved primary and fallback font handles in shaping order.
     pub fn clone_handles(&self) -> Vec<ParsedFont> {
         self.handles.borrow().clone()
     }
@@ -349,6 +378,7 @@ impl LoadedFont {
     pub fn is_configured_family(&self, font_idx: usize) -> bool {
         let handles = self.handles.borrow();
         let Some(handle) = handles.get(font_idx) else {
+            // When: `font_idx` is outside the resolved handle list, it cannot be configured.
             return false;
         };
         self.text_style
@@ -369,6 +399,7 @@ struct FallbackResolveInfo {
 }
 
 impl FallbackResolveInfo {
+    // Lock order: `pending` is released before `LAST_WARNING`; they are never nested.
     fn process(self) {
         let fallback_str = self.no_glyphs.iter().collect::<String>();
         let mut extra_handles = vec![];
@@ -496,6 +527,7 @@ impl FallbackResolveInfo {
                     url,
                 );
             } else {
+                // When: `show_warning` is false, emit only debug diagnostics.
                 log::debug!(
                     "No fonts contain glyphs for these codepoints: {}",
                     fallback_str.escape_unicode()
@@ -556,6 +588,8 @@ impl FontConfigInner {
         })
     }
 
+    // Lock order: `fonts` -> each of `config`, `title_font`, `pane_select_font`,
+    // `char_select_font`, `command_palette_font`, `metrics`, and `font_dirs`; those borrow serially.
     fn config_changed(&self, config: &ConfigHandle) -> anyhow::Result<()> {
         let mut fonts = self.fonts.borrow_mut();
         *self.config.borrow_mut() = config.clone();
@@ -577,6 +611,7 @@ impl FontConfigInner {
         completion: F,
     ) {
         if no_glyphs.is_empty() {
+            // When: `no_glyphs.is_empty()` is true, there is no fallback work to enqueue.
             return;
         }
 
@@ -631,7 +666,13 @@ impl FontConfigInner {
             fonts.push(font);
         }
 
-        let font_size = if cfg!(windows) { 10. } else { 12. };
+        let font_size = if cfg!(windows) {
+            // When: `cfg!(windows)` is true, use the Windows chrome font size.
+            10.
+        } else {
+            // When: `cfg!(windows)` is false, use the non-Windows chrome font size.
+            12.
+        };
 
         (TextStyle { foreground: None, font: fonts }, font_size)
     }
@@ -691,6 +732,7 @@ impl FontConfigInner {
         let mut title_font = self.title_font.borrow_mut();
 
         if let Some(entry) = title_font.as_ref() {
+            // When: `title_font` is cached, return its shared handle without resolving again.
             return Ok(Rc::clone(entry));
         }
 
@@ -705,6 +747,7 @@ impl FontConfigInner {
         let mut command_palette_font = self.command_palette_font.borrow_mut();
 
         if let Some(entry) = command_palette_font.as_ref() {
+            // When: `command_palette_font` is cached, reuse it without resolving again.
             return Ok(Rc::clone(entry));
         }
 
@@ -719,6 +762,7 @@ impl FontConfigInner {
         let mut char_select_font = self.char_select_font.borrow_mut();
 
         if let Some(entry) = char_select_font.as_ref() {
+            // When: `char_select_font` is cached, reuse it without resolving again.
             return Ok(Rc::clone(entry));
         }
 
@@ -733,6 +777,7 @@ impl FontConfigInner {
         let mut pane_select_font = self.pane_select_font.borrow_mut();
 
         if let Some(entry) = pane_select_font.as_ref() {
+            // When: `pane_select_font` is cached, reuse it without resolving again.
             return Ok(Rc::clone(entry));
         }
 
@@ -782,11 +827,19 @@ impl FontConfigInner {
                 }
 
                 if loaded.contains(attr) {
+                    // When: `loaded` already contains this attribute, avoid a duplicate handle.
                     continue;
                 }
                 let named_candidates: Vec<&ParsedFont> = candidates
                     .iter()
-                    .filter_map(|&p| if p.matches_name(attr) { Some(p) } else { None })
+                    .filter_map(|&p| {
+                        if p.matches_name(attr) {
+                            Some(p)
+                        } else {
+                            // When: `p.matches_name(attr)` is false, exclude this named candidate.
+                            None
+                        }
+                    })
                     .collect();
                 if let Some(idx) =
                     ParsedFont::best_matching_index(attr, &named_candidates, pixel_size)
@@ -854,8 +907,8 @@ impl FontConfigInner {
                     // This is the primary font selection
                     format!("Unable to load a font specified by your font={} configuration", attr)
                 } else if derived_from_primary {
-                    // it came from font_rules and may have been derived from
-                    // their primary font (we can't know for sure)
+                    // When: `is_primary` is false and `derived_from_primary` is true, explain
+                    // that a synthesized font rule may have inherited the primary family.
                     format!(
                         "Unable to load a font matching one of your font_rules: {}. \
                         Note that wezterm will synthesize font_rules to select bold \
@@ -863,6 +916,7 @@ impl FontConfigInner {
                         attr
                     )
                 } else {
+                    // When: both `is_primary` and `derived_from_primary` are false.
                     format!("Unable to load a font matching one of your font_rules: {}", attr)
                 };
 
@@ -886,12 +940,15 @@ impl FontConfigInner {
         let def_font = if !is_default && config.use_cap_height_to_scale_fallback_fonts {
             Some(self.default_font(myself)?)
         } else {
+            // When: `!is_default && config.use_cap_height_to_scale_fallback_fonts` is false,
+            // avoid resolving the default font because baseline scaling is not requested.
             None
         };
 
         let mut fonts = self.fonts.borrow_mut();
 
         if let Some(entry) = fonts.get(style) {
+            // When: `fonts` already contains this style, return the cached loaded font.
             return Ok(Rc::clone(entry));
         }
 
@@ -960,6 +1017,8 @@ impl FontConfigInner {
         Ok(loaded)
     }
 
+    // Lock order: `font_scale` -> `dpi` -> `fonts` -> `metrics` -> `title_font` ->
+    // `pane_select_font` -> `char_select_font` -> `command_palette_font`; borrows are serial.
     pub fn change_scaling(&self, font_scale: f64, dpi: usize) -> (f64, usize) {
         let prior_font = *self.font_scale.borrow();
         let prior_dpi = *self.dpi.borrow();
@@ -997,6 +1056,7 @@ impl FontConfigInner {
         {
             let metrics = self.metrics.borrow();
             if let Some(metrics) = metrics.as_ref() {
+                // When: default metrics are cached, return them without resolving the font again.
                 return Ok(*metrics);
             }
         }
@@ -1017,26 +1077,32 @@ impl FontConfiguration {
         Ok(Self { inner })
     }
 
+    /// Replaces the active configuration and invalidates every derived font cache.
     pub fn config_changed(&self, config: &ConfigHandle) -> anyhow::Result<()> {
         self.inner.config_changed(config)
     }
 
+    /// Returns a clone of the active font configuration handle.
     pub fn config(&self) -> ConfigHandle {
         self.inner.config.borrow().clone()
     }
 
+    /// Returns the cached or newly resolved window-title font.
     pub fn title_font(&self) -> anyhow::Result<Rc<LoadedFont>> {
         self.inner.title_font(&self.inner)
     }
 
+    /// Returns the cached or newly resolved command-palette font.
     pub fn command_palette_font(&self) -> anyhow::Result<Rc<LoadedFont>> {
         self.inner.command_palette_font(&self.inner)
     }
 
+    /// Returns the cached or newly resolved pane-selection font.
     pub fn pane_select_font(&self) -> anyhow::Result<Rc<LoadedFont>> {
         self.inner.pane_select_font(&self.inner)
     }
 
+    /// Returns the cached or newly resolved character-selection font.
     pub fn char_select_font(&self) -> anyhow::Result<Rc<LoadedFont>> {
         self.inner.char_select_font(&self.inner)
     }
@@ -1047,6 +1113,7 @@ impl FontConfiguration {
         self.inner.resolve_font(&self.inner, style)
     }
 
+    /// Updates font scaling and DPI, invalidating caches and returning prior values.
     pub fn change_scaling(&self, font_scale: f64, dpi: usize) -> (f64, usize) {
         self.inner.change_scaling(font_scale, dpi)
     }
@@ -1056,18 +1123,22 @@ impl FontConfiguration {
         self.inner.default_font(&self.inner)
     }
 
+    /// Returns the active font-size scale multiplier.
     pub fn get_font_scale(&self) -> f64 {
         self.inner.get_font_scale()
     }
 
+    /// Returns the active rasterization DPI.
     pub fn get_dpi(&self) -> usize {
         self.inner.get_dpi()
     }
 
+    /// Returns cached metrics for the configured baseline font.
     pub fn default_font_metrics(&self) -> Result<FontMetrics, Error> {
         self.inner.default_font_metrics(&self.inner)
     }
 
+    /// Lists parsed fonts from configured directories and bundled font data.
     pub fn list_fonts_in_font_dirs(&self) -> Vec<ParsedFont> {
         let mut font_dirs = self.inner.font_dirs.borrow().list_available();
         let mut built_in = self.inner.built_in.borrow().list_available();
@@ -1077,6 +1148,7 @@ impl FontConfiguration {
         font_dirs
     }
 
+    /// Enumerates all fonts exposed by the platform font locator.
     pub fn list_system_fonts(&self) -> anyhow::Result<Vec<ParsedFont>> {
         self.inner.locator.enumerate_all_fonts()
     }

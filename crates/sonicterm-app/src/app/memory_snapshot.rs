@@ -167,6 +167,7 @@ impl MemorySnapshot {
     #[must_use]
     pub fn render_renderers(&self) -> String {
         if self.renderers.is_empty() {
+            // When: `renderers` is empty, emit an explicit sentinel instead of an ambiguous blank field.
             return "none".to_string();
         }
         self.renderers.iter().map(RendererSummary::render).collect::<Vec<_>>().join("; ")
@@ -305,7 +306,10 @@ impl super::App {
 
         let mut renderers = Vec::new();
         for (window_id, window) in &self.windows {
-            let Some(renderer) = window.renderer.as_ref() else { continue };
+            let Some(renderer) = window.renderer.as_ref() else {
+                // When: this window has no renderer yet, omit a zero summary that would look like measured retention.
+                continue;
+            };
             renderers.push(summarize(
                 format!("{window_id:?}"),
                 "visible",

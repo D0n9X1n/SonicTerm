@@ -41,6 +41,7 @@ impl App {
     ) -> Option<(Tab, TabState, HashMap<u64, PaneState>)> {
         let ws = self.main_mut()?;
         if index >= ws.tab_states.len() || index >= ws.tabs.len() {
+            // When: `index` is absent from either parallel tab vector, reject without detaching partial state.
             return None;
         }
         let tab = ws.tabs.tabs().get(index).cloned()?;
@@ -55,6 +56,7 @@ impl App {
         }
         Some((tab, state, panes))
     }
+    // Lock order: for each pane, acquire `parser` before `redraw_target`; each guard is released before insertion.
     pub fn attach_tab_state(
         &mut self,
         index: usize,
@@ -93,6 +95,7 @@ impl App {
     ) -> Option<(Tab, TabState, HashMap<u64, PaneState>)> {
         let child = self.windows.get_mut(&src_id)?;
         if index >= child.tabs.len() || index >= child.tab_states.len() {
+            // When: `index` is absent from either child tab vector, reject without detaching partial state.
             return None;
         }
         let tab = child.tabs.tabs().get(index).cloned()?;
@@ -106,6 +109,7 @@ impl App {
         child.tabs.close(tab.id);
         Some((tab, state, panes))
     }
+    // Lock order: for each pane, acquire `parser` before `redraw_target`; each guard is released before insertion.
     pub fn attach_to_child(
         &mut self,
         dst_id: WindowId,
@@ -114,8 +118,14 @@ impl App {
         state: TabState,
         panes: HashMap<u64, PaneState>,
     ) -> bool {
-        let Some(child) = self.windows.get_mut(&dst_id) else { return false };
-        let Some(renderer) = child.renderer.as_ref() else { return false };
+        let Some(child) = self.windows.get_mut(&dst_id) else {
+            // When: `dst_id` has no child window, attachment has no valid destination.
+            return false;
+        };
+        let Some(renderer) = child.renderer.as_ref() else {
+            // When: destination `child` has no `renderer`, pane geometry cannot be resized safely.
+            return false;
+        };
         let (cols, rows) = renderer.cells();
         for (id, pane) in panes {
             pane.parser.lock().grid_mut().resize(cols, rows);

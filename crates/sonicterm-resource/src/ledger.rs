@@ -67,10 +67,14 @@ impl Ledger {
         }))
     }
 
+    // Ordering: next_owner load/failure use Relaxed; compare_exchange_weak uses
+    // AcqRel/Relaxed. The registry lock, not this counter, publishes records.
     pub(crate) fn allocate_owner_id(&self) -> Result<ResourceOwnerId, BudgetError> {
         let mut current = self.next_owner.load(Ordering::Relaxed);
         loop {
             if current == 0 || current == u64::MAX {
+                // When: zero cannot form a non-zero owner id, and MAX cannot be
+                // incremented without overflow; stop before panic or wrap to zero.
                 return Err(BudgetError::OwnerIdExhausted);
             }
             match self.next_owner.compare_exchange_weak(
@@ -79,7 +83,11 @@ impl Ledger {
                 Ordering::AcqRel,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => return ResourceOwnerId::new(current).ok_or(BudgetError::OwnerIdExhausted),
+                Ok(_) => {
+                    // When: compare_exchange_weak succeeds for current, so this
+                    // caller exclusively owns the pre-increment candidate.
+                    return ResourceOwnerId::new(current).ok_or(BudgetError::OwnerIdExhausted);
+                }
                 Err(observed) => current = observed,
             }
         }
@@ -114,6 +122,10 @@ impl Ledger {
         )
     }
 
+    // Lock order: registry lookup -> parent state -> parent usage -> registry
+    // insertion; lookup releases its shard guard before owner locks overlap.
+    // Ordering: registry_epoch fetch_add uses Release to announce hierarchy
+    // change; the registry lock publishes record while usage remains locked.
     pub(crate) fn create_child(
         &self,
         parent_id: ResourceOwnerId,
@@ -123,6 +135,8 @@ impl Ledger {
         let id = self.allocate_owner_id()?;
         let parent = self.registry.get(parent_id)?;
         if !self.child_kind_allowed(parent.kind, kind) {
+            // When: an unlisted parent-child pair has no valid accounting and
+            // close path, so reject it before child counts or registry state move.
             return Err(BudgetError::InvalidOwnerHierarchy {
                 process: self.process_kind,
                 parent: parent.kind,
@@ -139,6 +153,8 @@ impl Ledger {
         });
         let parent_state = parent.state.read();
         if *parent_state != OwnerState::Open {
+            // When: parent_state is not Open; its held state guard linearizes
+            // child rejection against concurrent close.
             return Err(BudgetError::InvalidOwnerState {
                 owner: parent_id,
                 expected: OwnerState::Open,
@@ -154,10 +170,14 @@ impl Ledger {
         Ok(id)
     }
 
+    // Lock order: registry lookup -> owner state write -> owner usage; lookup
+    // releases its shard guard before the two owner guards overlap.
     pub(crate) fn begin_close(&self, owner: ResourceOwnerId) -> Result<(), BudgetError> {
         let record = self.registry.get(owner)?;
         let mut state = record.state.write();
         if *state != OwnerState::Open {
+            // When: only one caller may own the Open-to-Closing transition;
+            // rejecting Closing also tells a competing closer it lost that role.
             return Err(BudgetError::InvalidOwnerState {
                 owner,
                 expected: OwnerState::Open,
@@ -170,10 +190,16 @@ impl Ledger {
         Ok(())
     }
 
+    // Lock order: state -> usage -> class, with usage ordered by owner id; all
+    // state/usage guards release before registry removal.
+    // Ordering: process_bytes load uses Acquire; registry_epoch fetch_add uses
+    // Release before removal. Root class/process samples span several instants.
     pub(crate) fn finish_close(&self, owner: ResourceOwnerId) -> Result<(), BudgetError> {
         let record = self.registry.get(owner)?;
         let mut state = record.state.write();
         if *state != OwnerState::Closing {
+            // When: state is not Closing; finish requires admission shutdown and
+            // rejects repeats that would decrement parent count twice.
             return Err(BudgetError::InvalidOwnerState {
                 owner,
                 expected: OwnerState::Closing,
@@ -183,6 +209,8 @@ impl Ledger {
         let mut records = if let Some(parent) = &record.parent {
             vec![parent.clone(), record.clone()]
         } else {
+            // When: the process root has no parent usage or open-child count to
+            // lock, so its guard set contains only itself.
             vec![record.clone()]
         };
         records.sort_by_key(|record| record.id);
@@ -190,6 +218,8 @@ impl Ledger {
         let owner_index = records.iter().position(|candidate| candidate.id == owner).unwrap();
         let usage = &guards[owner_index];
         if usage.open_children != 0 {
+            // When: usage open_children is nonzero; children close first so
+            // retained charges and parent references cannot outlive this record.
             return Err(BudgetError::OwnerHasLiveChildren { owner, children: usage.open_children });
         }
         let live_amount = if owner == self.root {
@@ -200,9 +230,13 @@ impl Ledger {
                 .ok_or(BudgetError::Overflow)?;
             ResourceAmount { bytes: self.process_bytes.load(Ordering::Acquire), items }
         } else {
+            // When: non-root usage already aggregates its subtree; only the root
+            // is omitted from per-owner accounting and needs process totals.
             usage.amount
         };
         if !live_amount.is_zero() {
+            // When: live_amount is not zero; tokens still resolve this record, so
+            // it remains Closing until both accounting axes drain.
             return Err(BudgetError::OwnerHasLiveCharges { owner, amount: live_amount });
         }
         *state = OwnerState::Closed;
@@ -246,6 +280,8 @@ impl Ledger {
         let states: Vec<_> = path.iter().map(|record| record.state.read()).collect();
         for (record, state) in path.iter().zip(states.iter()) {
             if **state != OwnerState::Open {
+                // When: state is not Open; a closing ancestor stops subtree
+                // admission and returned guards hold that decision through accounting.
                 return Err(BudgetError::InvalidOwnerState {
                     owner: record.id,
                     expected: OwnerState::Open,
@@ -260,6 +296,8 @@ impl Ledger {
         if path.first().is_some_and(|record| record.kind == OwnerKind::Process) {
             &path[1..]
         } else {
+            // When: a defensive non-rooted slice has no process prefix to strip;
+            // preserving every record is safer than dropping a real owner.
             path
         }
     }
@@ -275,10 +313,16 @@ impl Ledger {
         if candidate > limit {
             Err(BudgetError::LimitExceeded { scope, dimension, current, requested, limit })
         } else {
+            // When: candidate does not exceed limit; the inclusive ceiling and
+            // already-checked sum are returned for commit.
             Ok(candidate)
         }
     }
 
+    // Lock order: classes -> usage; usage follows root-to-leaf owner ids. State
+    // guards precede both; root usage is excluded to avoid inversion.
+    // Ordering: process_bytes load uses Acquire; compare_exchange_weak uses
+    // AcqRel/Acquire. Mutexes publish class and owner payloads.
     pub(crate) fn reserve(
         self: &Arc<Self>,
         owner: ResourceOwnerId,
@@ -309,8 +353,12 @@ impl Ledger {
             )?;
             let class_items =
                 usage.class_items[class].checked_add(amount.items).ok_or(BudgetError::Overflow)?;
+            // When: record class_items Some limit caps class_items; exceeding limit
+            // rejects before any owner, class, or process counter changes.
             if let Some(limit) = record.limits.class_items[class] {
                 if class_items > limit {
+                    // When: class_items exceeds limit after adding this request;
+                    // reject before any accounting counter changes.
                     return Err(BudgetError::LimitExceeded {
                         scope: BudgetScope::OwnerClass { owner: record.id, class },
                         dimension: BudgetDimension::Items,
@@ -330,8 +378,12 @@ impl Ledger {
         )?;
         let process_class_items =
             class_usage.items.checked_add(amount.items).ok_or(BudgetError::Overflow)?;
+        // When: limits class_items Some limit spans owners; process_class_items
+        // above limit is the final item rejection before later byte-only gates.
         if let Some(limit) = self.limits.class_items[class] {
             if process_class_items > limit {
+                // When: process_class_items exceeds limit across owners; this is
+                // the final item rejection before later byte-only gates.
                 return Err(BudgetError::LimitExceeded {
                     scope: BudgetScope::ProcessClass(class),
                     dimension: BudgetDimension::Items,
@@ -342,12 +394,16 @@ impl Ledger {
             }
         }
         if amount.is_zero() {
+            // When: amount is_zero after state and limit validation; no counter or
+            // epoch changes, so no snapshot is invalidated.
             return Ok(());
         }
         // Only a byte charge moves the process total, so an items-only reservation
         // skips the shared atomic entirely. The skipped check cannot reject: the
         // process total is only ever written to an already validated value.
         if amount.bytes > 0 {
+            // When: amount bytes is positive; process_bytes is the cross-class
+            // serialization point, so items-only requests skip its contention.
             let mut process = self.process_bytes.load(Ordering::Acquire);
             loop {
                 let candidate = Self::validate_limit(
@@ -363,7 +419,11 @@ impl Ledger {
                     Ordering::AcqRel,
                     Ordering::Acquire,
                 ) {
-                    Ok(_) => break,
+                    Ok(_) => {
+                        // When: this CAS owns the delta computed from the exact
+                        // process total validated in this iteration.
+                        break;
+                    }
                     Err(observed) => process = observed,
                 }
             }
@@ -388,6 +448,10 @@ impl Ledger {
         Ok(())
     }
 
+    // Lock order: classes -> usage in root-to-leaf owner order. No state guard is
+    // taken, so Closing owners can settle live tokens.
+    // Ordering: process_bytes fetch_sub uses AcqRel after class and usage
+    // reductions; mutexes publish the detailed accounting payload.
     pub(crate) fn release(
         &self,
         owner: ResourceOwnerId,
@@ -395,6 +459,8 @@ impl Ledger {
         amount: ResourceAmount,
     ) -> Result<(), BudgetError> {
         if amount.is_zero() {
+            // When: amount is_zero; skip owner lookup so a removed record cannot
+            // turn a no-op into a false release-failure diagnostic.
             return Ok(());
         }
         let path = self.path(owner)?;
@@ -403,6 +469,8 @@ impl Ledger {
         let mut owner_usage: Vec<_> =
             accounting_path.iter().map(|record| record.usage.lock()).collect();
         if class_usage.bytes < amount.bytes || class_usage.items < amount.items {
+            // When: class_usage bytes or items cannot cover amount; reject under
+            // its guard before subtraction or mutation.
             return Err(BudgetError::AccountingInvariant { owner, class });
         }
         for usage in &owner_usage {
@@ -410,6 +478,8 @@ impl Ledger {
                 || usage.class_bytes[class] < amount.bytes
                 || usage.class_items[class] < amount.items
             {
+                // When: any aggregate or class bucket on the ancestor path is
+                // short, reject the whole release before partial decrements diverge.
                 return Err(BudgetError::AccountingInvariant { owner, class });
             }
         }
@@ -431,10 +501,14 @@ impl Ledger {
     /// A failed release leaves the process ceiling permanently over-counted, so the
     /// count is exposed through snapshots to keep the violation observable in builds
     /// where debug assertions are compiled out.
+    // Ordering: release_failures fetch_add uses conservative AcqRel; atomic RMW
+    // prevents concurrent diagnostic increments from being lost.
     pub(crate) fn record_release_failure(&self) {
         self.release_failures.fetch_add(1, Ordering::AcqRel);
     }
 
+    // Lock order: classes sorted by ResourceClass -> usage sorted by owner id;
+    // target state precedes both, while source state stays unlocked for transfer-out.
     pub(crate) fn transfer(
         &self,
         source_owner: ResourceOwnerId,
@@ -446,10 +520,14 @@ impl Ledger {
         let source_path = self.path(source_owner)?;
         let target_path = self.path(target_owner)?;
         if amount.is_zero() {
+            // When: amount is_zero; source/target identity and target state still
+            // validate so an empty token cannot enter a Closing subtree.
             let _states = Self::validate_state_path(&target_path)?;
             return Ok(());
         }
         if source_owner == target_owner && source_class == target_class {
+            // When: source_owner/source_class equal target_owner/target_class;
+            // validate Open without subtracting, re-adding, or bumping epochs.
             return self.validate_open(target_owner);
         }
         let mut classes = vec![source_class];
@@ -474,6 +552,8 @@ impl Ledger {
             let source_only = source_ids.contains(&record.id) && !target_ids.contains(&record.id);
             let target_only = target_ids.contains(&record.id) && !source_ids.contains(&record.id);
             if source_only && !amount.component_le(usage.amount) {
+                // When: only source-exclusive ancestors lose aggregate usage;
+                // shared ancestors retain the charge while its attribution moves.
                 return Err(BudgetError::AccountingInvariant {
                     owner: source_owner,
                     class: source_class,
@@ -535,6 +615,8 @@ impl Ledger {
         if class_guards[source_index].bytes < amount.bytes
             || class_guards[source_index].items < amount.items
         {
+            // When: class_guards source_index cannot cover amount bytes/items;
+            // process shards need independent validation before mutation.
             return Err(BudgetError::AccountingInvariant {
                 owner: source_owner,
                 class: source_class,
@@ -597,6 +679,10 @@ impl Ledger {
         Ok(())
     }
 
+    // Lock order: state -> usage -> classes in enum order; each guard releases
+    // before the next, trading one instant for deadlock-free shard samples.
+    // Ordering: registry_epoch and release_failures loads use Acquire as
+    // independent samples; they do not make prior shard reads transactional.
     pub(crate) fn snapshot(&self, owner: ResourceOwnerId) -> Result<ResourceSnapshot, BudgetError> {
         let record = self.registry.get(owner)?;
         let owner_state = *record.state.read();
@@ -627,6 +713,8 @@ impl Ledger {
         let (owner_amount, owner_class_bytes, owner_class_items) = if owner == self.root {
             (process_amount, process_class_bytes, process_class_items)
         } else {
+            // When: root alone is excluded from per-owner accounting and uses
+            // process totals; every other subtree aggregate was cloned under its lock.
             (usage.amount, usage.class_bytes, usage.class_items)
         };
         Ok(ResourceSnapshot::new(

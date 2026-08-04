@@ -25,6 +25,13 @@ fn software_text_blend_matches_gpu_linear_source_over() {
 }
 
 #[test]
+fn malformed_utf8_hex_uses_black_fallback_without_panicking() {
+    assert_eq!(hex_to_wgpu_with_alpha("#0é000", 0.5), wgpu::Color::BLACK);
+    assert_eq!(hex_to_rgba("#0é000", 0.5), [0.0, 0.0, 0.0, 0.5]);
+    assert_eq!(hex_to_chrome_color("#0é000"), ChromeColor::rgb(0, 0, 0));
+}
+
+#[test]
 fn optimized_linear_encoder_matches_srgb_rounding() {
     for encoded_linear in 0..=u16::MAX {
         let linear = encoded_linear as f32 / u16::MAX as f32;

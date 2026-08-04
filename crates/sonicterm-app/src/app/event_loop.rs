@@ -68,12 +68,16 @@ impl App {
         for ws in self.windows.values_mut() {
             let Some(expires_at) = ws.notification.as_ref().and_then(|bubble| bubble.expires_at)
             else {
+                // When: a notification carries no expires_at; nothing in this pass
+                // expires it and it contributes no wake deadline.
                 continue;
             };
             if expires_at <= now {
                 ws.notification = None;
                 ws.request_redraw();
             } else {
+                // When: expires_at is still ahead of now; min-fold it so the loop
+                // wakes exactly when the soonest bubble is due, not later.
                 next = Some(next.map_or(expires_at, |cur| cur.min(expires_at)));
             }
         }
@@ -88,6 +92,8 @@ impl App {
         // not have an `ActiveEventLoop` handle, so honoring it here is
         // the first opportunity to call `el.exit()`.
         if self.pending_exit {
+            // When: pending_exit was set by any quit or last-window path; clear it
+            // before el.exit() so the drain cannot re-enter on a later pass.
             self.pending_exit = false;
             el.exit();
             return;
@@ -148,6 +154,8 @@ impl App {
     /// Every contributor min-folds. A deadline is a "wake no later than" bound,
     /// so the earliest one wins; a contributor that overwrote instead of
     /// folding would push an earlier deadline out past its due instant.
+    // Ordering: cursor_visible loads Relaxed; a stale read only mis-times the next
+    // blink wake, which the following do_about_to_wait pass corrects.
     fn wake_deadline(&self, notification_wake: Option<Instant>) -> Option<Instant> {
         let mut next: Option<Instant> = notification_wake;
         // Wake when the Cmd+Q confirmation window expires so a stale first press
@@ -221,12 +229,15 @@ impl App {
         // When our `WaitUntil(..)` timer expires, winit fires
         // `NewEvents(ResumeTimeReached)` and then nothing else unless
         // we explicitly ask. Request a redraw so the blink animation
-        // actually advances to the next phase bucket. review.
-        // Perf audit #9: this same wakeup also services a vsync-paced
-        // redraw deferred by the RedrawRequested handler — we clear
-        // `pending_redraw` here so the next render call services it
-        // and stale flags can't keep the loop hot.
+        // actually advances to the next phase bucket.
+        // This same wakeup also services a vsync-paced redraw deferred
+        // by the RedrawRequested handler — we clear `pending_redraw`
+        // here so the next render call services it and stale flags
+        // can't keep the loop hot.
         if matches!(cause, winit::event::StartCause::ResumeTimeReached { .. }) {
+            // When: cause matches ResumeTimeReached; winit sends nothing further on
+            // its own, so every deferred repaint must be re-requested here.
+
             // A wake armed solely to sample memory draws nothing.
             //
             // `do_about_to_wait` takes the sample later in this event-loop turn;
@@ -239,6 +250,8 @@ impl App {
             // Cleared on read. The flag describes the wake that just fired,
             // and leaving it set would suppress the next genuine render wake.
             if std::mem::take(&mut self.wake_is_memory_only) {
+                // When: wake_is_memory_only marks a diagnostic-only wake; repainting
+                // here would be a heartbeat redraw this crate's guardrails forbid.
                 return;
             }
             if let Some(w) = self.main_window() {
@@ -275,9 +288,13 @@ impl App {
             }
             UserEvent::OsDrag => self.drain_os_drag(),
             UserEvent::DragMoved => {
+                // When: DragMoved arrives; handle_os_drag_moved only drains the
+                // cursor mailbox, and the drag chip renders from tab_drag state.
                 let _ = self.handle_os_drag_moved();
             }
             UserEvent::DragEnded => {
+                // When: DragEnded arrives; handle_os_drag_ended routes the drop
+                // internally and returns the outcome only for tests to assert on.
                 let _ = self.handle_os_drag_ended();
             }
             UserEvent::RequestRedraw(window_id) => {
@@ -309,9 +326,8 @@ impl App {
         // Any path above that ran an action may have requested a new
         // top-level window; create it now that we have an ActiveEventLoop.
         self.drain_pending_window_creates(el);
-        // (speculative defensive fix): drain deferred
-        // OS-drag teardown AFTER `drain_pending_window_creates` so any
-        // tear-out-spawn from the `DroppedOnEmpty` branch has produced
+        // Drain deferred OS-drag teardown AFTER `drain_pending_window_creates`
+        // so any tear-out-spawn from the `DroppedOnEmpty` branch has produced
         // its new window before cross-window drag-residue cleanup
         // runs. Ordering is the entire point — do not move above.
         self.drain_pending_os_teardown();
@@ -325,7 +341,7 @@ impl App {
         );
     }
 
-    /// Drain a `UserEvent::ClearShapeCache` (P4 follow-up):
+    /// Drain a `UserEvent::ClearShapeCache`:
     /// an async font fallback family just landed in
     /// [`sonicterm_text::async_fallback::AsyncFallbackLoader`]. Clear every
     /// live renderer's shape / row / line caches (bumping `style_rev`)
@@ -345,6 +361,8 @@ impl App {
 
     pub(super) fn drain_open_script_requests(&mut self) -> usize {
         if self.main().is_none() {
+            // When: no main window exists yet to host a tab; returning before
+            // drain() leaves the requests queued for a later pass.
             return 0;
         }
         let requests = crate::open_script_bridge::drain();
@@ -415,7 +433,7 @@ impl App {
         super::install_native_window_background(&window, self.theme.colors.background.0.as_str());
         let dpi_scale = f64::from(window_dpi(&window));
 
-        // Perf audit #9: gate redraws to the monitor's vsync cadence.
+        // Gate redraws to the monitor's vsync cadence.
         // `refresh_rate_millihertz` returns e.g. 60_000 for 60Hz,
         // 120_000 for 120Hz ProMotion, etc. A zero or absent value
         // means winit could not determine it (headless, virtual
@@ -466,7 +484,7 @@ impl App {
         // user's GPU at all — no recovery path exists in a GPU-accelerated
         // terminal. Same justification as the `create_window` site above.
         .expect("init renderer");
-        // P4 follow-up wire: attach the async font fallback
+        // Attach the async font fallback
         // loader so frame-time misses on CJK / emoji / nerd-font
         // codepoints trigger a background `request_load` and a
         // `UserEvent::ClearShapeCache` wake-up on completion. Skipped
@@ -493,6 +511,8 @@ impl App {
         );
         renderer.set_software_render_degrade(self.software_render_degrade);
         if let Some(recorder) = &self.breadcrumb_recorder {
+            // When: a breadcrumb_recorder is installed; the adapter class is only
+            // knowable once the renderer exists, so it is recorded here.
             use sonicterm_logging::breadcrumbs::{
                 AdapterClass, BreadcrumbEvent, RendererIdentity, RendererMode,
             };
@@ -502,8 +522,12 @@ impl App {
                 if software_adapter { AdapterClass::Software } else { AdapterClass::Hardware };
             let identity = if cfg!(target_os = "windows") && renderer.is_software_render_degraded()
             {
+                // When: target_os is windows and the renderer degraded; that pairing
+                // gets its own identity so a later report separates it from wgpu.
                 RendererIdentity::Software
             } else {
+                // When: target_os is not windows, or is_software_render_degraded is
+                // false; Wgpu covers hardware and every non-degraded adapter.
                 RendererIdentity::Wgpu
             };
             let _ = recorder.record(BreadcrumbEvent::Renderer { identity, mode, adapter });
@@ -605,6 +629,8 @@ impl App {
         self.drain_pending_os_drag_payloads();
 
         if let Some(recorder) = &self.breadcrumb_recorder {
+            // When: a breadcrumb_recorder is installed; Ready marks the end of
+            // startup so a later hang is placed before or after the first frame.
             use sonicterm_logging::breadcrumbs::{BreadcrumbEvent, LifecycleEvent};
             let windows = u32::try_from(self.windows.len()).unwrap_or(u32::MAX);
             let panes = u32::try_from(

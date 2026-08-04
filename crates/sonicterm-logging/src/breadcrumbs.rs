@@ -85,6 +85,8 @@ impl FromStr for AppVersion {
                 .iter()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'.' | b'-' | b'+'))
         {
+            // When: bytes fails a shape check — empty, past VERSION_CAPACITY,
+            // or carrying syntax a caller could use as a free-form channel.
             return Err(AppVersionError);
         }
 
@@ -352,6 +354,8 @@ struct AtomicStats {
 }
 
 impl AtomicStats {
+    // Ordering: queued and dropped load Relaxed — each counter is read for
+    // reporting only and orders nothing against other memory.
     fn snapshot(&self) -> BreadcrumbStats {
         BreadcrumbStats {
             queued: self.queued.load(Ordering::Relaxed),
@@ -384,6 +388,8 @@ impl BreadcrumbRecorder {
     /// This method performs no filesystem IO and uses only `try_send`. It is
     /// therefore safe for latency-sensitive caller paths: pressure produces a
     /// drop result, never backpressure.
+    // Ordering: queued and dropped fetch_add Relaxed — the counters are a drop
+    // tally, never a happens-before edge for the event itself.
     #[must_use]
     pub fn record(&self, event: BreadcrumbEvent) -> RecordOutcome {
         match self.sender.try_send(WorkerMessage::Event(event)) {
@@ -486,6 +492,8 @@ fn run_worker(
         let batch_started = Instant::now();
 
         while !shutting_down && batch_started.elapsed() < MAX_BATCH_TIME {
+            // When: recv_timeout reports Timeout, the batch has gone idle, so
+            // the ring is persisted and the worker waits for the next message.
             match receiver.recv_timeout(COALESCE_IDLE) {
                 Ok(message) => {
                     shutting_down = process_message(message, &mut ring, limits.ring_capacity);
@@ -499,6 +507,8 @@ fn run_worker(
 
         persist_ring(path, &ring, limits.max_file_bytes)?;
         if shutting_down {
+            // When: shutting_down is set, the final ring is already persisted,
+            // so the loop ends rather than waiting for another message.
             break;
         }
     }
@@ -510,13 +520,23 @@ fn process_message(
     ring: &mut VecDeque<CapturedEvent>,
     capacity: usize,
 ) -> bool {
-    let WorkerMessage::Event(event) = message else { return true };
+    let WorkerMessage::Event(event) = message else {
+        // When: the message is Shutdown rather than an Event, so the worker is
+        // told to stop instead of being given something to record.
+        return true;
+    };
     if capacity == 0 {
+        // When: capacity is zero, the ring can hold nothing, so the event is
+        // dropped rather than pushed into a buffer with no room.
         return false;
     }
 
     if let Some(key) = event.key() {
+        // When: the event carries a coalescing key, so an older entry of the
+        // same class is replaced rather than kept alongside it.
         if let Some(index) = ring.iter().position(|captured| captured.event.key() == Some(key)) {
+            // When: position finds an index holding that key, so the stale
+            // entry is removed before the newer one is pushed.
             let _ = ring.remove(index);
         }
     }
@@ -539,6 +559,8 @@ fn persist_ring(path: &Path, ring: &VecDeque<CapturedEvent>, max_bytes: u64) -> 
         let line = captured.event.render(captured.timestamp_unix_ms);
         let line_bytes = line.len().saturating_add(1);
         if line_bytes > max_bytes.saturating_sub(used) {
+            // When: line_bytes would push past max_bytes, so the walk stops and
+            // the newest events are kept rather than the oldest.
             break;
         }
         used = used.saturating_add(line_bytes);
@@ -556,6 +578,8 @@ fn persist_ring(path: &Path, ring: &VecDeque<CapturedEvent>, max_bytes: u64) -> 
     match crate::path::replace_file(&temp, path) {
         Ok(()) => Ok(()),
         Err(error) => {
+            // When: replace_file fails, the temp file is removed so a failed
+            // rewrite leaves no partial snapshot beside the real one.
             let _ = std::fs::remove_file(&temp);
             Err(error)
         }
@@ -575,6 +599,8 @@ pub fn breadcrumb_path(log_dir: &Path, session_id: &str) -> io::Result<PathBuf> 
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
     {
+        // When: session_id is empty, over-long, or carries path syntax, so it
+        // could steer the write outside the breadcrumbs directory.
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "unsafe breadcrumb session id"));
     }
     Ok(log_dir.join("breadcrumbs").join(format!("breadcrumbs-{session_id}.log")))

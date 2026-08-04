@@ -6,9 +6,8 @@
 //! `HashMap<winit::WindowId, WindowKey>` registry, assigning
 //! monotonically-increasing `u64` ids on first sight.
 //!
-//! Introduced at M6a-expand-1 as part of the type-relocation inventory
-//! that lets the reducer (landing in M6a-expand-2) live in a
-//! windowing-agnostic crate.
+//! The opaque numeric key lets reducers and serialized state identify windows
+//! without depending on winit's platform-specific handle type.
 
 use std::fmt;
 

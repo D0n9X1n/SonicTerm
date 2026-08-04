@@ -187,32 +187,39 @@ pub fn sample() -> ProcessMemory {
 /// a number that might be another field entirely.
 #[cfg(target_os = "macos")]
 fn sample_platform() -> ProcessMemory {
-    // SAFETY: `proc_pidinfo` writes at most `size` bytes into `info`, which is
-    // a correctly-sized, correctly-aligned `proc_taskinfo` owned by this
-    // frame. The pid is this process. Zeroed first so a short write leaves
-    // defined bytes rather than uninitialised ones.
-    let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+    let mut info: libc::proc_taskinfo =
+        // SAFETY: `proc_taskinfo` is a plain C struct of integers, for which an
+        // all-zero bit pattern is a valid value. Zeroing first also means a
+        // short write below leaves defined bytes rather than uninitialised ones.
+        unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_taskinfo>();
     let Ok(size_arg) = libc::c_int::try_from(size) else {
+        // When: size does not fit a c_int, so the kernel cannot be asked for a
+        // struct that large and no measurement is possible.
         return ProcessMemory::unsupported();
     };
     let Ok(pid) = libc::c_int::try_from(std::process::id()) else {
+        // When: this process id does not fit a c_int, so it cannot be passed to
+        // proc_pidinfo and nothing can be sampled.
         return ProcessMemory::unsupported();
     };
-    // SAFETY: see above; the out-pointer is valid for `size_arg` bytes.
-    let written = unsafe {
-        libc::proc_pidinfo(
-            pid,
-            libc::PROC_PIDTASKINFO,
-            0,
-            std::ptr::addr_of_mut!(info).cast::<libc::c_void>(),
-            size_arg,
-        )
-    };
-    // A short or failed write means the kernel did not populate the struct.
-    // Anything read out of it would be the zeroes written above, which is a
-    // measurement that reads as "this process holds nothing".
+    let written =
+        // SAFETY: `proc_pidinfo` writes at most `size_arg` bytes through the
+        // out-pointer, which addresses `info` — a correctly-sized and
+        // correctly-aligned `proc_taskinfo` owned by this frame. `pid` is this
+        // process.
+        unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTASKINFO,
+                0,
+                std::ptr::addr_of_mut!(info).cast::<libc::c_void>(),
+                size_arg,
+            )
+        };
     if written != size_arg {
+        // When: written disagrees with size_arg, so the kernel left the struct
+        // unfilled and any figure read from it would be the zeroes above.
         return ProcessMemory::unsupported();
     }
 
@@ -242,22 +249,27 @@ fn sample_platform() -> ProcessMemory {
         ..Default::default()
     };
     if counters.cb == 0 {
+        // When: cb is zero, so the struct size did not fit a u32 and the API
+        // has no way to learn how many bytes it may write.
         return ProcessMemory::unsupported();
     }
 
-    // SAFETY: `counters` is a correctly-sized, correctly-aligned
-    // `PROCESS_MEMORY_COUNTERS_EX`; `cb` tells the API how many bytes it may
-    // write. The `EX` form is layout-compatible with the base structure, which
-    // is why the API is documented to take the cast — it reads `cb` to decide
-    // which it was given.
-    let queried = unsafe {
-        GetProcessMemoryInfo(
-            GetCurrentProcess(),
-            std::ptr::addr_of_mut!(counters).cast::<PROCESS_MEMORY_COUNTERS>(),
-            counters.cb,
-        )
-    };
+    let queried =
+        // SAFETY: `counters` is a correctly-sized, correctly-aligned
+        // `PROCESS_MEMORY_COUNTERS_EX`; `cb` tells the API how many bytes it may
+        // write. The `EX` form is layout-compatible with the base structure,
+        // which is why the API is documented to take the cast — it reads `cb`
+        // to decide which it was given.
+        unsafe {
+            GetProcessMemoryInfo(
+                GetCurrentProcess(),
+                std::ptr::addr_of_mut!(counters).cast::<PROCESS_MEMORY_COUNTERS>(),
+                counters.cb,
+            )
+        };
     if queried.is_err() {
+        // When: queried reports failure, so counters was left unpopulated and
+        // reading it would report an invented measurement.
         return ProcessMemory::unsupported();
     }
 
@@ -287,21 +299,22 @@ fn reserved_address_space() -> MemoryMetric {
 
     loop {
         let mut info = MEMORY_BASIC_INFORMATION::default();
-        // SAFETY: `info` is a correctly-sized, correctly-aligned out-parameter
-        // and `entry_size` describes it. `address` is only ever a region base
-        // the previous iteration reported, so it stays inside the space the
-        // API accepts.
-        let written = unsafe {
-            VirtualQuery(Some(address as *const core::ffi::c_void), &mut info, entry_size)
-        };
+        let written =
+            // SAFETY: `info` is a correctly-sized, correctly-aligned
+            // out-parameter and `entry_size` describes it. `address` is only
+            // ever a region base the previous iteration reported, so it stays
+            // inside the space the API accepts.
+            unsafe {
+                VirtualQuery(Some(address as *const core::ffi::c_void), &mut info, entry_size)
+            };
         if written == 0 {
-            // Walked off the end of the address space, which is the only
-            // documented way this terminates.
+            // When: written is zero, so VirtualQuery walked off the end of the
+            // address space — the only documented way this loop terminates.
             break;
         }
         let region = info.RegionSize as u64;
         if region == 0 {
-            // Defensive: a zero-size region would not advance `address` and
+            // When: region is zero, so address would not advance and the walk
             // would spin here forever.
             break;
         }
@@ -309,6 +322,8 @@ fn reserved_address_space() -> MemoryMetric {
             total = total.saturating_add(region);
         }
         let Some(next) = address.checked_add(info.RegionSize) else {
+            // When: checked_add overflows, so there is no next region base to
+            // query and the walk has reached the top of the address space.
             break;
         };
         address = next;

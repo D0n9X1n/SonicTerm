@@ -32,6 +32,7 @@ fn set_process_dpi_awareness() {}
 fn refresh_shell_associations() {
     use windows::Win32::UI::Shell::{SHChangeNotify, SHCNE_ASSOCCHANGED, SHCNF_IDLIST};
 
+    // SAFETY: this process-wide shell notification passes no item-list pointers or owned handles.
     unsafe {
         SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None);
     }
@@ -69,10 +70,8 @@ fn main() -> Result<()> {
     // still produces a crash dump. Logger init is deferred until
     // after the user's `[logging]` section has been read so its
     // `level` + retention knobs actually drive the runtime —
-    // `tracing_subscriber::try_init` only ever installs the first
-    // subscriber, so the previous "bootstrap-then-reinit" dance
-    // silently dropped the user-configured level (Haiku review of
-    // ).
+    // `tracing_subscriber::try_init` only installs the first subscriber;
+    // initializing before config load would silently discard the user's level.
     sonicterm_logging::install_panic_hook(sonicterm_logging::log_dir());
     // Exit-path tracing — drop guard + (Unix only) signal handlers.
     // See `crates/sonicterm-logging/src/exit_trace.rs`.
@@ -154,7 +153,8 @@ fn main() -> Result<()> {
         // Initialize OLE once on the main thread so RegisterDragDrop /
         // DoDragDrop are usable from the same thread that owns the
         // winit HWND.
-        os_drag_win::init_ole();
+        let ole_guard = os_drag_win::init_ole();
+        let ole_available = ole_guard.is_some();
         // Install the muda menubar the instant winit hands us an HWND.
         // muda's `init_for_hwnd` requires the window to exist; the
         // `on_window_ready` hook fires exactly once, right after
@@ -197,8 +197,12 @@ fn main() -> Result<()> {
             Box::new(move |raw| {
                 if let raw_window_handle::RawWindowHandle::Win32(h) = raw {
                     let hwnd = windows::Win32::Foundation::HWND(h.hwnd.get() as *mut _);
-                    backdrop::apply_backdrop(hwnd, backdrop_kind);
-                    let mac = menubar::WinMenu::new(hwnd);
+                    // SAFETY: winit just supplied this live HWND and the callback
+                    // uses it synchronously before the Window is released.
+                    unsafe { backdrop::apply_backdrop(hwnd, backdrop_kind) };
+                    let mac =
+                        // SAFETY: the same winit Window owns `hwnd` through menu installation.
+                        unsafe { menubar::WinMenu::new(hwnd) };
                     if let Err(e) = mac.install(Sender::new()) {
                         tracing::error!("WinMenu install failed: {e}");
                     }
@@ -211,17 +215,27 @@ fn main() -> Result<()> {
                 }
             });
         let result = {
-            // M6c: construct the AppStateMachine in the bin and hand
-            // it to the platform shell. State mutation routes through
-            // the reducer the shell owns — the bin no longer reaches
-            // into the monolithic `App` directly via `run_with_*`.
+            // Construct the state machine in the binary and hand it to the
+            // platform shell. State mutation routes through the reducer the shell
+            // owns, so the binary never reaches into `App`'s field layout.
             let machine =
                 sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default());
             let mut shell = sonicterm_app::shell::WindowsShell::new(machine, theme, config, keymap)
                 .with_asset_loaders(theme_loader, keymap_loader)
-                .with_os_drag_sink(os_drag_win::WinOsDragSink::arc())
-                .with_os_drag_backend(tab_drag_os::WinOsTabDragBackend::boxed())
                 .with_on_window_ready(on_window_ready);
+            if ole_available {
+                let drag_sink =
+                    // SAFETY: `ole_guard` proves successful OLE initialization on
+                    // this UI thread and remains live until after `shell.run()`.
+                    unsafe { os_drag_win::WinOsDragSink::arc() };
+                let drag_backend =
+                    // SAFETY: the same live `ole_guard` keeps the backend on an
+                    // initialized UI thread through `shell.run()`.
+                    unsafe { tab_drag_os::WinOsTabDragBackend::boxed() };
+                shell = shell.with_os_drag_sink(drag_sink).with_os_drag_backend(drag_backend);
+            } else {
+                tracing::warn!("OLE unavailable; native tab drag/drop is disabled");
+            }
             if let Some(recorder) = breadcrumb_recorder.clone() {
                 shell = shell.with_breadcrumb_recorder(recorder);
             }
@@ -230,7 +244,6 @@ fn main() -> Result<()> {
             }
             shell.run()
         };
-        os_drag_win::shutdown_ole();
         if result.is_ok() {
             if let Some(recorder) = &breadcrumb_recorder {
                 let _ =

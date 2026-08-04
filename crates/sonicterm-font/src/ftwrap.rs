@@ -7,7 +7,6 @@ use crate::rasterizer::colr::DrawOp;
 use anyhow::{anyhow, Context};
 use config::{configuration, FreeTypeLoadFlags, FreeTypeLoadTarget};
 pub use freetype::*;
-use memmap2::{Mmap, MmapOptions};
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::ffi::{c_int, c_void, CStr};
@@ -17,8 +16,10 @@ use std::mem::MaybeUninit;
 use std::os::raw::{c_long, c_uchar, c_ulong};
 use std::path::Path;
 use std::ptr;
+use std::rc::Rc;
 use std::sync::Arc;
 
+/// Reports whether a FreeType status code represents success.
 #[inline]
 pub fn succeeded(error: FT_Error) -> bool {
     error == freetype::FT_Err_Ok as FT_Error
@@ -39,11 +40,15 @@ pub fn ft_result<T>(err: FT_Error, t: T) -> anyhow::Result<T> {
     if succeeded(err) {
         Ok(t)
     } else {
+        // When: `succeeded(err)` is false, convert the FreeType failure into Rust context.
+        // SAFETY: `FT_Error_String` returns either null or a borrowed NUL-terminated
+        // error string whose storage is managed by FreeType and remains valid here.
         unsafe {
             let reason = FT_Error_String(err);
             if reason.is_null() {
                 Err(anyhow!("FreeType error {:?} 0x{:x}", err, err))
             } else {
+                // When: `reason.is_null()` is false, include FreeType's NUL-terminated description.
                 let reason = std::ffi::CStr::from_ptr(reason);
                 Err(anyhow!("FreeType error {:?} 0x{:x}: {}", err, err, reason.to_string_lossy()))
             }
@@ -59,6 +64,51 @@ fn render_mode_to_load_target(render_mode: FT_Render_Mode) -> u32 {
     ((render_mode as u32) & 15) << 16
 }
 
+fn checked_bitmap_buffer_len(
+    buffer: *mut c_uchar,
+    rows: u32,
+    pitch: usize,
+) -> anyhow::Result<usize> {
+    let len = rows as usize * pitch;
+    anyhow::ensure!(len > 0, "rendered glyph bitmap is empty");
+    anyhow::ensure!(!buffer.is_null(), "rendered glyph bitmap has a null buffer");
+    Ok(len)
+}
+
+fn checked_palette_storage<T>(ptr: *const T, count: FT_UShort) -> anyhow::Result<usize> {
+    anyhow::ensure!(count > 0, "palette storage is empty");
+    anyhow::ensure!(!ptr.is_null(), "palette storage is null");
+    Ok(count as usize)
+}
+
+struct MmVarGuard {
+    library: FT_Library,
+    ptr: *mut FT_MM_Var,
+}
+
+impl MmVarGuard {
+    fn from_success(library: FT_Library, ptr: *mut FT_MM_Var) -> anyhow::Result<Self> {
+        anyhow::ensure!(!ptr.is_null(), "FT_Get_MM_Var returned null on success");
+        Ok(Self { library, ptr })
+    }
+
+    fn get(&self) -> &FT_MM_Var {
+        // SAFETY: `from_success` rejected null and this guard owns the allocation until Drop.
+        unsafe { &*self.ptr }
+    }
+}
+
+// Lifecycle: `MmVarGuard` releases its `ptr` with `FT_Done_MM_Var` exactly once.
+impl Drop for MmVarGuard {
+    fn drop(&mut self) {
+        // SAFETY: `ptr` came from successful `FT_Get_MM_Var` for this live `library`.
+        unsafe {
+            FT_Done_MM_Var(self.library, self.ptr);
+        }
+    }
+}
+
+/// Resolves configured FreeType load flags and the render mode for a glyph request.
 pub fn compute_load_flags_from_config(
     freetype_load_flags: Option<FreeTypeLoadFlags>,
     freetype_load_target: Option<FreeTypeLoadTarget>,
@@ -101,12 +151,15 @@ pub struct Face {
     pub face: FT_Face,
     source: FontDataHandle,
     size: Option<FaceSize>,
-    lib: FT_Library,
+    library: Rc<LibraryInner>,
     palette: Option<&'static mut [FT_Color]>,
 }
 
+// Lifecycle: `Face` releases its owned `FT_Face` with `FT_Done_Face` exactly once.
 impl Drop for Face {
     fn drop(&mut self) {
+        // SAFETY: `self.library` keeps the creating FreeType library live; `self.face`
+        // is uniquely owned here and `FT_Done_Face` consumes it with its stream.
         unsafe {
             FT_Done_Face(self.face);
         }
@@ -147,62 +200,79 @@ pub struct IsSvg;
 pub struct IsColr1OrLater;
 
 impl Face {
+    /// Returns the face's family name, or an empty string when none is recorded.
     pub fn family_name(&self) -> String {
+        // SAFETY: `self.face` is live for this borrow; a non-null `family_name`
+        // points to face-owned NUL-terminated storage valid for the face lifetime.
         unsafe {
             if (*self.face).family_name.is_null() {
                 "".to_string()
             } else {
+                // When: the face record exposes a family-name string.
                 let c = CStr::from_ptr((*self.face).family_name);
                 c.to_string_lossy().to_string()
             }
         }
     }
 
+    /// Returns the face's style name, or an empty string when none is recorded.
     pub fn style_name(&self) -> String {
+        // SAFETY: `self.face` is live for this borrow; a non-null `style_name`
+        // points to face-owned NUL-terminated storage valid for the face lifetime.
         unsafe {
             if (*self.face).style_name.is_null() {
                 "".to_string()
             } else {
+                // When: the face record exposes a style-name string.
                 let c = CStr::from_ptr((*self.face).style_name);
                 c.to_string_lossy().to_string()
             }
         }
     }
 
+    /// Returns the face's PostScript name, or an empty string when unavailable.
     pub fn postscript_name(&self) -> String {
+        // SAFETY: `self.face` is live; a non-null pointer returned by
+        // `FT_Get_Postscript_Name` is face-owned NUL-terminated storage.
         unsafe {
             let c = FT_Get_Postscript_Name(self.face);
             if c.is_null() {
                 "".to_string()
             } else {
+                // When: `c.is_null()` is false, copy FreeType's PostScript name.
                 let c = CStr::from_ptr(c);
                 c.to_string_lossy().to_string()
             }
         }
     }
 
+    /// Parses each named variation instance exposed by this variable font face.
     pub fn variations(&self) -> anyhow::Result<Vec<ParsedFont>> {
         let mut mm = std::ptr::null_mut();
 
+        // SAFETY: only a successful `FT_Get_MM_Var` result is wrapped and read; the guard
+        // releases that allocation, and the face is reset before any parse error is returned.
         unsafe {
             ft_result(FT_Get_MM_Var(self.face, &mut mm), ()).context("FT_Get_MM_Var")?;
-
-            let mut res = vec![];
-            let num_styles = (*mm).num_namedstyles;
-            for i in 1..=num_styles {
-                FT_Set_Named_Instance(self.face, i);
-                let source = FontDataHandle {
-                    source: self.source.source.clone(),
-                    index: self.source.index,
-                    variation: i,
-                    origin: self.source.origin.clone(),
-                    coverage: self.source.coverage.clone(),
-                };
-                res.push(ParsedFont::from_face(self, source)?);
-            }
-
-            FT_Done_MM_Var(self.lib, mm);
+            let mm = MmVarGuard::from_success(self.library.lib, mm)?;
+            let num_styles = mm.get().num_namedstyles;
+            let result = (|| {
+                let mut res = vec![];
+                for i in 1..=num_styles {
+                    FT_Set_Named_Instance(self.face, i);
+                    let source = FontDataHandle {
+                        source: self.source.source.clone(),
+                        index: self.source.index,
+                        variation: i,
+                        origin: self.source.origin.clone(),
+                        coverage: self.source.coverage.clone(),
+                    };
+                    res.push(ParsedFont::from_face(self, source)?);
+                }
+                Ok::<_, anyhow::Error>(res)
+            })();
             FT_Set_Named_Instance(self.face, 0);
+            let res = result?;
 
             log::debug!("Variations: {:#?}", res);
 
@@ -210,20 +280,32 @@ impl Face {
         }
     }
 
+    /// Returns FreeType's name for a glyph index when the face provides one.
     pub fn get_glyph_name(&self, glyph_index: u32) -> Option<String> {
         let mut buf = [0u8; 128];
-        let res = unsafe {
-            FT_Get_Glyph_Name(self.face, glyph_index, buf.as_mut_ptr() as *mut _, buf.len() as _)
-        };
+        let res =
+            // SAFETY: `self.face` is live; `buf` provides `buf.len()` initialized writable bytes.
+            unsafe {
+                FT_Get_Glyph_Name(
+                    self.face,
+                    glyph_index,
+                    buf.as_mut_ptr() as *mut _,
+                    buf.len() as _,
+                )
+            };
         if res != 0 {
             None
         } else {
+            // When: `res != 0` is false, FreeType successfully copied the glyph name into `buf`.
             Some(String::from_utf8_lossy(&buf).into_owned())
         }
     }
 
+    /// Collects supported SFNT naming records grouped by their name identifier.
     pub fn get_sfnt_names(&self) -> HashMap<u32, Vec<NameRecord>> {
-        let num_names = unsafe { FT_Get_Sfnt_Name_Count(self.face) };
+        let num_names =
+            // SAFETY: `self.face` is a live FreeType face, the only query input.
+            unsafe { FT_Get_Sfnt_Name_Count(self.face) };
 
         let mut names = HashMap::new();
 
@@ -237,11 +319,15 @@ impl Face {
         };
 
         for i in 0..num_names {
-            if unsafe { FT_Get_Sfnt_Name(self.face, i, &mut sfnt_name) } != 0 {
+            if
+            // SAFETY: `self.face` is live; `sfnt_name` is writable output storage.
+            unsafe { FT_Get_Sfnt_Name(self.face, i, &mut sfnt_name) } != 0 {
+                // When: `FT_Get_Sfnt_Name(...) != 0`, this record could not be read.
                 continue;
             }
 
             if sfnt_name.string.is_null() {
+                // When: FreeType returned a record without string storage.
                 continue;
             }
 
@@ -253,12 +339,15 @@ impl Face {
                     | TT_NAME_ID_FONT_SUBFAMILY
                     | TT_NAME_ID_PS_NAME
             ) {
+                // When: `matches!(sfnt_name.name_id, ...)` is false, skip unrelated names.
                 continue;
             }
 
-            let bytes = unsafe {
-                from_raw_parts(sfnt_name.string as *const u8, sfnt_name.string_len as usize)
-            };
+            let bytes =
+                // SAFETY: `string` names `string_len` readable face-owned bytes after success.
+                unsafe {
+                    from_raw_parts(sfnt_name.string as *const u8, sfnt_name.string_len as usize)
+                };
 
             let encoding = match (sfnt_name.platform_id as u32, sfnt_name.encoding_id as u32) {
                 (TT_PLATFORM_MACINTOSH, TT_MAC_ID_JAPANESE)
@@ -275,6 +364,7 @@ impl Face {
                 (TT_PLATFORM_APPLE_UNICODE | TT_PLATFORM_ISO, _) => encoding_rs::UTF_16BE,
                 (TT_PLATFORM_MACINTOSH, TT_MAC_ID_ROMAN) => encoding_rs::MACINTOSH,
                 _ => {
+                    // When: `(platform_id, encoding_id)` matches no supported decoder tuple.
                     log::trace!(
                         "Skipping name_id={} because platform_id={} encoding_id={}",
                         sfnt_name.name_id,
@@ -298,12 +388,16 @@ impl Face {
         names
     }
 
+    /// Returns the face-owned OpenType `OS/2` table when the font contains one.
     pub fn get_os2_table(&self) -> Option<&TT_OS2> {
+        // SAFETY: `self.face` is live; a non-null table pointer returned by
+        // FreeType has `TT_OS2` layout and remains owned by the face.
         unsafe {
             let os2: *const TT_OS2 = FT_Get_Sfnt_Table(self.face, FT_Sfnt_Tag::FT_SFNT_OS2) as _;
             if os2.is_null() {
                 None
             } else {
+                // When: `os2.is_null()` is false, return this face's initialized `OS/2` table.
                 Some(&*os2)
             }
         }
@@ -327,21 +421,27 @@ impl Face {
     pub fn has_math_table(&self) -> bool {
         let tag = ft_make_tag(b'M', b'A', b'T', b'H');
         let mut len: FT_ULong = 0;
+        // SAFETY: `self.face` and `&mut len` are valid; a null buffer together
+        // with zero initial length is FreeType's documented table-existence query.
         unsafe { succeeded(FT_Load_Sfnt_Table(self.face, tag, 0, ptr::null_mut(), &mut len)) }
     }
 
     /// Returns the cap_height/units_per_EM ratio if known
     pub fn cap_height(&self) -> Option<f64> {
+        // SAFETY: `self.face` is live and `get_os2_table` returns storage owned
+        // by that same face, so both records remain valid for this borrow.
         unsafe {
             let os2 = self.get_os2_table()?;
             let units_per_em = (*self.face).units_per_EM;
             if units_per_em == 0 || os2.sCapHeight == 0 {
+                // When: `units_per_em == 0 || os2.sCapHeight == 0`, no ratio is usable.
                 return None;
             }
             Some(os2.sCapHeight as f64 / units_per_em as f64)
         }
     }
 
+    /// Returns the face's weight and width classes after named-instance scaling.
     pub fn weight_and_width(&self) -> (u16, u16) {
         let (base_weight, base_width) = self
             .get_os2_table()
@@ -358,82 +458,91 @@ impl Face {
     /// the base OS/2/default metrics. Any non-null `FT_MM_Var` allocation is
     /// freed exactly once before returning, including FreeType's error path.
     fn variation_axis_scalings(&self) -> Result<Vec<AxisScaling>, ()> {
+        // SAFETY: `self.face` and `self.library.lib` are live handles from the same
+        // FreeType library; only a successful MM query is wrapped and read.
         unsafe {
             let index = (*self.face).face_index;
             let variation = index >> 16;
             if variation <= 0 {
+                // When: face-index bits do not select a named variation instance.
                 return Ok(Vec::new());
             }
             let vidx = (variation - 1) as usize;
 
             let mut mm = std::ptr::null_mut();
-            let status = FT_Get_MM_Var(self.face, &mut mm);
-            if mm.is_null() {
+            if !succeeded(FT_Get_MM_Var(self.face, &mut mm)) {
+                // When: `succeeded(FT_Get_MM_Var(...))` is false, `mm` has no usable provenance.
+                return Err(());
+            }
+            let guard = MmVarGuard::from_success(self.library.lib, mm).map_err(|_| ())?;
+            let mm = guard.get();
+            if mm.num_namedstyles == 0
+                || mm.namedstyle.is_null()
+                || mm.num_axis == 0
+                || mm.axis.is_null()
+            {
+                // When: required named-style or variation-axis storage is absent.
                 return Err(());
             }
 
-            let result = (|| {
-                if !succeeded(status) {
-                    return Err(());
-                }
+            let styles = from_raw_parts(mm.namedstyle, mm.num_namedstyles as usize);
+            let instance = styles.get(vidx).ok_or(())?;
+            if instance.coords.is_null() {
+                // When: the selected named instance has no coordinate array.
+                return Err(());
+            }
 
-                let mm = &*mm;
-                if mm.num_namedstyles == 0
-                    || mm.namedstyle.is_null()
-                    || mm.num_axis == 0
-                    || mm.axis.is_null()
-                {
-                    return Err(());
-                }
-
-                let styles = from_raw_parts(mm.namedstyle, mm.num_namedstyles as usize);
-                let instance = styles.get(vidx).ok_or(())?;
-                if instance.coords.is_null() {
-                    return Err(());
-                }
-
-                let axes = from_raw_parts(mm.axis, mm.num_axis as usize);
-                let coords = from_raw_parts(instance.coords, mm.num_axis as usize);
-                Ok(axes
-                    .iter()
-                    .zip(coords.iter())
-                    .map(|(axis, &coord)| AxisScaling {
-                        tag: axis.tag,
-                        value: coord.to_num::<f64>(),
-                        default_value: axis.def.to_num::<f64>(),
-                    })
-                    .collect())
-            })();
-
-            FT_Done_MM_Var(self.lib, mm);
-            result
+            let axes = from_raw_parts(mm.axis, mm.num_axis as usize);
+            let coords = from_raw_parts(instance.coords, mm.num_axis as usize);
+            Ok(axes
+                .iter()
+                .zip(coords.iter())
+                .map(|(axis, &coord)| AxisScaling {
+                    tag: axis.tag,
+                    value: coord.to_num::<f64>(),
+                    default_value: axis.def.to_num::<f64>(),
+                })
+                .collect())
         }
     }
 
+    /// Reports whether FreeType marks this face as italic.
     pub fn italic(&self) -> bool {
+        // SAFETY: `self.face` is a live pointer to an initialized `FT_FaceRec_`.
         unsafe { ((*self.face).style_flags & FT_STYLE_FLAG_ITALIC as FT_Long) != 0 }
     }
 
+    /// Computes the Unicode and symbol character coverage advertised by the face.
     pub fn compute_coverage(&self) -> RangeSet<u32> {
         if let Some(coverage) = self.source.coverage.as_ref() {
+            // When: the locator already supplied authoritative cached coverage.
             return coverage.clone();
         }
         let mut coverage = RangeSet::new();
 
         for encoding in &[FT_Encoding::FT_ENCODING_UNICODE, FT_Encoding::FT_ENCODING_MS_SYMBOL] {
-            if unsafe { FT_Select_Charmap(self.face, *encoding) } != 0 {
+            if
+            // SAFETY: `self.face` is live and `encoding` is a valid FreeType enum value.
+            unsafe { FT_Select_Charmap(self.face, *encoding) } != 0 {
+                // When: this face does not expose the requested charmap encoding.
                 continue;
             }
 
             let mut glyph = 0;
-            let mut ucs4 = unsafe { FT_Get_First_Char(self.face, &mut glyph) };
+            let mut ucs4 =
+                // SAFETY: `self.face` is live and `glyph` is writable output storage.
+                unsafe { FT_Get_First_Char(self.face, &mut glyph) };
             if glyph == 0 {
+                // When: the selected charmap has no first mapped glyph.
                 break;
             }
             let mut ucs4_range_start = ucs4;
             loop {
-                let ucs4_new = unsafe { FT_Get_Next_Char(self.face, ucs4, &mut glyph) };
+                let ucs4_new =
+                    // SAFETY: the face is live and `glyph` is writable iterator output storage.
+                    unsafe { FT_Get_Next_Char(self.face, ucs4, &mut glyph) };
                 if glyph == 0 {
+                    // When: `glyph == 0`, FreeType reached the end of the selected charmap.
                     break;
                 }
                 if ucs4_new - ucs4 != 1 {
@@ -458,21 +567,32 @@ impl Face {
 
     /// Returns the bitmap strike sizes in this font
     pub fn pixel_sizes(&self) -> Vec<u16> {
-        let sizes = unsafe {
-            let rec = &(*self.face);
-            from_raw_parts(rec.available_sizes, rec.num_fixed_sizes as usize)
-        };
+        let sizes =
+            // SAFETY: `available_sizes` names `num_fixed_sizes` live face-owned records.
+            unsafe {
+                let rec = &(*self.face);
+                from_raw_parts(rec.available_sizes, rec.num_fixed_sizes as usize)
+            };
         sizes
             .iter()
-            .filter_map(|info| if info.height > 0 { Some(info.height as u16) } else { None })
+            .filter_map(|info| {
+                // When: `info.height > 0`, the strike height can be represented as `u16`.
+                if info.height > 0 {
+                    Some(info.height as u16)
+                } else {
+                    None
+                }
+            })
             .collect()
     }
 
     /// This is a wrapper around set_char_size and select_size
     /// that accounts for some weirdness with eg: color emoji
     pub fn set_font_size(&mut self, point_size: f64, dpi: u32) -> anyhow::Result<SelectedFontSize> {
+        // When: `self.size.as_ref()` is `Some`, compare its key before recomputing.
         if let Some(face_size) = self.size.as_ref() {
             if face_size.size == point_size && face_size.dpi == dpi {
+                // When: `face_size.size == point_size && face_size.dpi == dpi`, reuse cached metrics.
                 return Ok(SelectedFontSize {
                     width: face_size.cell_width,
                     height: face_size.cell_height,
@@ -508,13 +628,17 @@ impl Face {
                 }
             }
             Err(err) => {
+                // When: `set_char_size(...)` returns `Err`, inspect fixed bitmap strikes instead.
                 log::debug!("set_char_size: {:?}, will inspect strikes", err);
 
-                let sizes = unsafe {
-                    let rec = &(*self.face);
-                    from_raw_parts(rec.available_sizes, rec.num_fixed_sizes as usize)
-                };
+                let sizes =
+                    // SAFETY: `available_sizes` names `num_fixed_sizes` live face-owned records.
+                    unsafe {
+                        let rec = &(*self.face);
+                        from_raw_parts(rec.available_sizes, rec.num_fixed_sizes as usize)
+                    };
                 if sizes.is_empty() {
+                    // When: `sizes.is_empty()` is true, there is no bitmap fallback to select.
                     return Err(err);
                 }
                 // Find the best matching size; we look for the strike whose height
@@ -594,6 +718,7 @@ impl Face {
                 ..selected_size
             })
         } else {
+            // When: `compute_cap_height()` returns `Err`, keep metrics without cap height.
             Ok(selected_size)
         }
     }
@@ -606,6 +731,8 @@ impl Face {
         vert_resolution: FT_UInt,
     ) -> anyhow::Result<()> {
         ft_result(
+            // SAFETY: `self.face` is live and the scalar size/resolution values match
+            // the `FT_Set_Char_Size` parameter types.
             unsafe {
                 FT_Set_Char_Size(
                     self.face,
@@ -619,6 +746,7 @@ impl Face {
         )
         .context("FT_Set_Char_Size")?;
 
+        // SAFETY: `self.face` remains live and points to an initialized face record.
         unsafe {
             if (*self.face).height == 0 {
                 anyhow::bail!("font has 0 height, fallback to bitmaps");
@@ -629,11 +757,19 @@ impl Face {
     }
 
     fn select_size(&mut self, idx: usize) -> anyhow::Result<()> {
-        ft_result(unsafe { FT_Select_Size(self.face, idx as i32) }, ()).context("FT_Select_Size")
+        ft_result(
+            // SAFETY: `self.face` is live; `idx` indexes its fixed-size array.
+            unsafe { FT_Select_Size(self.face, idx as i32) },
+            (),
+        )
+        .context("FT_Select_Size")
     }
 
+    /// Replaces the face transform, using FreeType's identity transform when absent.
     pub fn set_transform(&mut self, matrix: Option<FT_Matrix>) {
         let mut matrix = matrix;
+        // SAFETY: `self.face` is live; the optional matrix pointer remains valid for the call,
+        // and FreeType copies its values rather than retaining the pointer.
         unsafe {
             FT_Set_Transform(
                 self.face,
@@ -646,11 +782,14 @@ impl Face {
         }
     }
 
+    /// Retrieves the root COLR paint handle for a glyph.
     pub fn get_color_glyph_paint(
         &mut self,
         glyph_index: FT_UInt,
         root_transform: FT_Color_Root_Transform,
     ) -> anyhow::Result<FT_Opaque_Paint_> {
+        // SAFETY: `self.face` is live and `result` provides writable storage; FreeType fully
+        // initializes it exactly when the returned status is one.
         unsafe {
             let mut result = MaybeUninit::<FT_Opaque_Paint_>::zeroed();
             let status = FT_Get_Color_Glyph_Paint(
@@ -662,33 +801,50 @@ impl Face {
             if status == 1 {
                 Ok(result.assume_init())
             } else {
+                // When: `status == 1` is false, FreeType did not initialize a root paint.
                 anyhow::bail!("FT_Get_Color_Glyph_Paint for glyph {glyph_index} failed");
             }
         }
     }
 
+    /// Retrieves the transformed COLR clip box for a glyph.
     pub fn get_color_glyph_clip_box(
         &mut self,
         glyph_index: FT_UInt,
     ) -> anyhow::Result<FT_ClipBox_> {
+        // SAFETY: `self.face` is live and `result` provides writable storage; FreeType fully
+        // initializes it exactly when the returned status is one.
         unsafe {
             let mut result = MaybeUninit::<FT_ClipBox_>::zeroed();
             let status = FT_Get_Color_Glyph_ClipBox(self.face, glyph_index, result.as_mut_ptr());
             if status == 1 {
                 Ok(result.assume_init())
             } else {
+                // When: `status == 1` is false, FreeType did not initialize a clip box.
                 anyhow::bail!("FT_Get_Color_Glyph_ClipBox for glyph {glyph_index} failed");
             }
         }
     }
 
-    pub fn get_paint(&mut self, paint: FT_Opaque_Paint_) -> anyhow::Result<FT_COLR_Paint_> {
+    /// Resolves a face-owned opaque COLR paint handle into its typed record.
+    ///
+    /// # Safety
+    ///
+    /// `paint` must come from this live face's COLRv1 paint graph and remain valid.
+    // SAFETY: callers must preserve the face-specific provenance of `paint`.
+    pub(crate) unsafe fn get_paint(
+        &mut self,
+        paint: FT_Opaque_Paint_,
+    ) -> anyhow::Result<FT_COLR_Paint_> {
+        // SAFETY: the caller establishes `paint` provenance; `result` is writable output
+        // and FreeType fully initializes it exactly when status is one.
         unsafe {
             let mut result = MaybeUninit::<FT_COLR_Paint_>::zeroed();
             let status = FT_Get_Paint(self.face, paint, result.as_mut_ptr());
             if status == 1 {
                 Ok(result.assume_init())
             } else {
+                // When: `status == 1` is false, FreeType did not initialize a paint record.
                 anyhow::bail!("FT_Get_Paint failed");
             }
         }
@@ -696,6 +852,8 @@ impl Face {
 
     /// Replace any palette entry overrides and select the specified palette
     pub fn select_palette(&mut self, index: FT_UShort) -> anyhow::Result<()> {
+        // SAFETY: `self.face` is live; successful palette queries initialize outputs,
+        // checked non-empty storage remains face-owned for the face lifetime.
         unsafe {
             self.palette.take();
 
@@ -708,9 +866,9 @@ impl Face {
 
             ft_result(FT_Palette_Select(self.face, index, &mut palette_ptr), ())
                 .with_context(|| format!("FT_Palette_Select for index={index}. Note: {pdata:?}"))?;
+            let palette_len = checked_palette_storage(palette_ptr, pdata.num_palette_entries)?;
 
-            let palette =
-                std::slice::from_raw_parts_mut(palette_ptr, pdata.num_palette_entries as usize);
+            let palette = std::slice::from_raw_parts_mut(palette_ptr, palette_len);
 
             self.palette.replace(palette);
 
@@ -718,6 +876,7 @@ impl Face {
         }
     }
 
+    /// Returns a copied color from the currently selected palette.
     pub fn get_palette_entry(&self, index: u32) -> anyhow::Result<FT_Color> {
         self.palette
             .as_ref()
@@ -726,19 +885,33 @@ impl Face {
             .ok_or_else(|| anyhow::anyhow!("invalid palette entry {index}"))
     }
 
+    /// Collects palette metadata and localized entry names for this face.
     pub fn get_palette_data(&self) -> anyhow::Result<PaletteInfo> {
+        // SAFETY: `self.face` is live; `FT_Palette_Data_Get` initializes `result` on success,
+        // and every non-empty child array is checked before constructing a borrowed slice.
         unsafe {
             let mut result = MaybeUninit::<FT_Palette_Data>::zeroed();
             ft_result(FT_Palette_Data_Get(self.face, result.as_mut_ptr()), ())
                 .context("FT_Palette_Data_Get")?;
 
             let data = result.assume_init();
-            let mut palettes = vec![];
+            if data.num_palettes == 0 {
+                // When: `data.num_palettes == 0`, FreeType exposes no palette arrays to read.
+                return Ok(PaletteInfo { num_palettes: 0, palettes: Vec::new() });
+            }
 
-            let name_ids = from_raw_parts(data.palette_name_ids, data.num_palettes as usize);
-            let flagses = from_raw_parts(data.palette_flags, data.num_palettes as usize);
-            let entry_name_ids =
-                from_raw_parts(data.palette_entry_name_ids, data.num_palette_entries as usize);
+            let palette_len = checked_palette_storage(data.palette_name_ids, data.num_palettes)?;
+            checked_palette_storage(data.palette_flags, data.num_palettes)?;
+            let name_ids = from_raw_parts(data.palette_name_ids, palette_len);
+            let flagses = from_raw_parts(data.palette_flags, palette_len);
+            // When: `data.num_palette_entries` selects either no array or checked storage.
+            let entry_name_ids = if data.num_palette_entries == 0 {
+                &[]
+            } else {
+                let entry_len =
+                    checked_palette_storage(data.palette_entry_name_ids, data.num_palette_entries)?;
+                from_raw_parts(data.palette_entry_name_ids, entry_len)
+            };
 
             let entry_names: Vec<String> = entry_name_ids
                 .iter()
@@ -748,6 +921,7 @@ impl Face {
                         .unwrap_or_else(|_| String::new())
                 })
                 .collect();
+            let mut palettes = Vec::with_capacity(palette_len);
 
             for (palette_index, (&name_id, &flags)) in
                 name_ids.iter().zip(flagses.iter()).enumerate()
@@ -762,11 +936,14 @@ impl Face {
                     entry_names: entry_names.clone(),
                 });
             }
-            Ok(PaletteInfo { num_palettes: data.num_palettes as usize, palettes })
+            Ok(PaletteInfo { num_palettes: palette_len, palettes })
         }
     }
 
+    /// Decodes one SFNT naming record by table index.
     pub fn get_sfnt_name(&self, i: FT_UInt) -> anyhow::Result<NameRecord> {
+        // SAFETY: `self.face` is live; a successful query initializes `sfnt_name`, whose
+        // string pointer refers to `string_len` face-owned readable bytes.
         unsafe {
             let mut sfnt_name = MaybeUninit::<FT_SfntName>::zeroed();
             ft_result(FT_Get_Sfnt_Name(self.face, i, sfnt_name.as_mut_ptr()), ())
@@ -811,26 +988,38 @@ impl Face {
         }
     }
 
-    pub fn get_paint_layers(
+    /// Advances a face-owned COLR layer iterator and returns its next paint handle.
+    ///
+    /// # Safety
+    ///
+    /// `iter` must be initialized from this live face's COLRv1 paint graph.
+    // SAFETY: callers must preserve the face-specific provenance of `iter`.
+    pub(crate) unsafe fn get_paint_layers(
         &mut self,
         iter: &mut FT_LayerIterator_,
     ) -> anyhow::Result<FT_Opaque_Paint_> {
+        // SAFETY: the caller establishes `iter` provenance; `result` is writable output
+        // and FreeType fully initializes it exactly when status is one.
         unsafe {
             let mut result = MaybeUninit::<FT_Opaque_Paint_>::zeroed();
             let status = FT_Get_Paint_Layers(self.face, iter, result.as_mut_ptr());
             if status == 1 {
                 Ok(result.assume_init())
             } else {
+                // When: `status == 1` is false, the iterator produced no initialized paint.
                 anyhow::bail!("FT_Get_Paint_Layers failed");
             }
         }
     }
 
+    /// Decomposes a glyph outline into renderer-independent drawing operations.
     pub fn load_glyph_outlines(
         &mut self,
         glyph_index: FT_UInt,
         load_flags: FT_Int32,
     ) -> anyhow::Result<Vec<DrawOp>> {
+        // SAFETY: `self.face` is live; a successful glyph load initializes its face-owned slot,
+        // and decomposition invokes the callbacks synchronously while `ops` is alive.
         unsafe {
             ft_result(FT_Load_Glyph(self.face, glyph_index, load_flags), ())
                 .with_context(|| format!("FT_Load_Glyph {glyph_index}"))?;
@@ -853,7 +1042,11 @@ impl Face {
 
             let mut ops = vec![];
 
+            // SAFETY: FreeType calls this only with a readable `to` vector and the live
+            // `Vec<DrawOp>` pointer supplied to `FT_Outline_Decompose` below.
             unsafe extern "C" fn move_to(to: *const FT_Vector, user: *mut c_void) -> c_int {
+                // SAFETY: the callback contract above makes `to` readable and `user` a unique,
+                // live pointer to the output vector for the duration of this call.
                 unsafe {
                     let ops = user as *mut Vec<DrawOp>;
                     let (to_x, to_y) = vector_x_y(&*to);
@@ -861,7 +1054,11 @@ impl Face {
                 }
                 0
             }
+            // SAFETY: FreeType calls this only with a readable `to` vector and the live
+            // `Vec<DrawOp>` pointer supplied to `FT_Outline_Decompose` below.
             unsafe extern "C" fn line_to(to: *const FT_Vector, user: *mut c_void) -> c_int {
+                // SAFETY: the callback contract above makes `to` readable and `user` a unique,
+                // live pointer to the output vector for the duration of this call.
                 unsafe {
                     let ops = user as *mut Vec<DrawOp>;
                     let (to_x, to_y) = vector_x_y(&*to);
@@ -869,11 +1066,15 @@ impl Face {
                 }
                 0
             }
+            // SAFETY: FreeType calls this only with readable `control` and `to` vectors
+            // and the live `Vec<DrawOp>` pointer supplied below.
             unsafe extern "C" fn conic_to(
                 control: *const FT_Vector,
                 to: *const FT_Vector,
                 user: *mut c_void,
             ) -> c_int {
+                // SAFETY: the callback contract above makes both vectors readable and `user` a
+                // unique, live pointer to the output vector for this call.
                 unsafe {
                     let ops = user as *mut Vec<DrawOp>;
                     let (control_x, control_y) = vector_x_y(&*control);
@@ -882,12 +1083,16 @@ impl Face {
                 }
                 0
             }
+            // SAFETY: FreeType calls this only with readable control and destination
+            // vectors and the live `Vec<DrawOp>` pointer supplied below.
             unsafe extern "C" fn cubic_to(
                 control1: *const FT_Vector,
                 control2: *const FT_Vector,
                 to: *const FT_Vector,
                 user: *mut c_void,
             ) -> c_int {
+                // SAFETY: the callback contract above makes all vectors readable and `user` a
+                // unique, live pointer to the output vector for this call.
                 unsafe {
                     let ops = user as *mut Vec<DrawOp>;
                     let (control1_x, control1_y) = vector_x_y(&*control1);
@@ -923,6 +1128,7 @@ impl Face {
         }
     }
 
+    /// Loads and renders one glyph, surfacing SVG and COLR-v1 glyphs to the caller.
     pub fn load_and_render_glyph(
         &mut self,
         glyph_index: FT_UInt,
@@ -930,6 +1136,8 @@ impl Face {
         render_mode: FT_Render_Mode,
         synthesize_bold: bool,
     ) -> anyhow::Result<&FT_GlyphSlotRec_> {
+        // SAFETY: `self.face` is live; successful load/render calls initialize its face-owned
+        // glyph slot, whose returned reference remains tied to this mutable face borrow.
         unsafe {
             if (*self.face).num_fixed_sizes > 0 {
                 let preflight_flags = bitmap_metrics_preflight_flags(load_flags);
@@ -957,6 +1165,7 @@ impl Face {
             let slot = &mut *(*self.face).glyph;
 
             if slot.format == FT_Glyph_Format_::FT_GLYPH_FORMAT_SVG {
+                // When: `slot.format == FT_GLYPH_FORMAT_SVG`, defer SVG decoding to the caller.
                 return Err(IsSvg.into());
             }
 
@@ -980,6 +1189,8 @@ impl Face {
                     )
                     .is_ok()
             {
+                // When: `slot.format == OUTLINE && get_color_glyph_paint(...).is_ok()`,
+                // let the caller render COLR v1+.
                 return Err(IsColr1OrLater.into());
             }
 
@@ -1009,7 +1220,9 @@ impl Face {
     /// `I` is chosen rather than `O` as `O` glyphs are often optically
     /// compensated and overshoot a little.
     fn compute_cap_height(&mut self) -> anyhow::Result<f64> {
-        let glyph_pos = unsafe { FT_Get_Char_Index(self.face, b'I' as _) };
+        let glyph_pos =
+            // SAFETY: `self.face` is live; the character code is a scalar input.
+            unsafe { FT_Get_Char_Index(self.face, b'I' as _) };
         if glyph_pos == 0 {
             anyhow::bail!("no I from which to compute cap height");
         }
@@ -1017,22 +1230,24 @@ impl Face {
         let ft_glyph = self.load_and_render_glyph(glyph_pos, load_flags, render_mode, false)?;
 
         let mode: FT_Pixel_Mode =
+            // SAFETY: successful rendering initializes `pixel_mode` to an enum discriminant.
             unsafe { std::mem::transmute(u32::from(ft_glyph.bitmap.pixel_mode)) };
 
         // pitch is the number of bytes per source row
         let pitch = ft_glyph.bitmap.pitch.unsigned_abs() as usize;
-        let data = unsafe {
-            std::slice::from_raw_parts_mut(
-                ft_glyph.bitmap.buffer,
-                ft_glyph.bitmap.rows as usize * pitch,
-            )
-        };
+        let data_len =
+            checked_bitmap_buffer_len(ft_glyph.bitmap.buffer, ft_glyph.bitmap.rows, pitch)?;
+        let data =
+            // SAFETY: `checked_bitmap_buffer_len` established a non-null buffer naming
+            // `data_len` live slot-owned writable bytes.
+            unsafe { std::slice::from_raw_parts_mut(ft_glyph.bitmap.buffer, data_len) };
 
         let mut first_row = None;
         let mut last_row = None;
 
         match mode {
             FT_Pixel_Mode::FT_PIXEL_MODE_LCD => {
+                // When: `mode` is LCD, scan three coverage bytes per logical pixel.
                 let width = ft_glyph.bitmap.width as usize / 3;
                 let height = ft_glyph.bitmap.rows as usize;
 
@@ -1043,6 +1258,7 @@ impl Face {
                             || data[src_offset + (x * 3) + 1] != 0
                             || data[src_offset + (x * 3) + 2] != 0
                         {
+                            // When: any `data[...] != 0` LCD term is true, this row has ink.
                             if first_row.is_none() {
                                 first_row.replace(y);
                             }
@@ -1054,6 +1270,7 @@ impl Face {
             }
 
             FT_Pixel_Mode::FT_PIXEL_MODE_BGRA => {
+                // When: `mode` is BGRA, scan each pixel's alpha byte for visible ink.
                 let width = ft_glyph.bitmap.width as usize;
                 let height = ft_glyph.bitmap.rows as usize;
                 'next_line_bgra: for y in 0..height {
@@ -1061,6 +1278,7 @@ impl Face {
                     for x in 0..width {
                         let alpha = data[src_offset + (x * 4) + 3];
                         if alpha != 0 {
+                            // When: `alpha != 0`, this BGRA row contains visible ink.
                             if first_row.is_none() {
                                 first_row.replace(y);
                             }
@@ -1071,12 +1289,14 @@ impl Face {
                 }
             }
             FT_Pixel_Mode::FT_PIXEL_MODE_GRAY => {
+                // When: `mode` is GRAY, each nonzero byte marks covered ink.
                 let width = ft_glyph.bitmap.width as usize;
                 let height = ft_glyph.bitmap.rows as usize;
                 'next_line_gray: for y in 0..height {
                     let src_offset = y * pitch;
                     for x in 0..width {
                         if data[src_offset + x] != 0 {
+                            // When: `data[src_offset + x] != 0`, this grayscale row contains ink.
                             if first_row.is_none() {
                                 first_row.replace(y);
                             }
@@ -1087,6 +1307,7 @@ impl Face {
                 }
             }
             FT_Pixel_Mode::FT_PIXEL_MODE_MONO => {
+                // When: `mode` is MONO, scan packed high-bit-first coverage bits.
                 let width = ft_glyph.bitmap.width as usize;
                 let height = ft_glyph.bitmap.rows as usize;
                 'next_line_mono: for y in 0..height {
@@ -1094,14 +1315,17 @@ impl Face {
                     let mut x = 0;
                     for i in 0..pitch {
                         if x >= width {
+                            // When: `x >= width`, ignore pitch padding after the logical row.
                             break;
                         }
                         let mut b = data[src_offset + i];
                         for _ in 0..8 {
                             if x >= width {
+                                // When: `x >= width`, stop before testing padding bits.
                                 break;
                             }
                             if b & 0x80 == 0x80 {
+                                // When: `b & 0x80 == 0x80`, this monochrome row contains ink.
                                 if first_row.is_none() {
                                     first_row.replace(y);
                                 }
@@ -1124,6 +1348,8 @@ impl Face {
     }
 
     fn cell_metrics(&mut self) -> ComputedCellMetrics {
+        // SAFETY: `self.face` and its selected size are live; successful glyph loads initialize
+        // the face-owned slot before its metrics are read.
         unsafe {
             let metrics = &(*(*self.face).size).metrics;
             let height = metrics.y_scale.to_num::<f64>() * f64::from((*self.face).height) / 64.0;
@@ -1133,6 +1359,7 @@ impl Face {
             for i in 32..128 {
                 let glyph_pos = FT_Get_Char_Index(self.face, i);
                 if glyph_pos == 0 {
+                    // When: `glyph_pos == 0`, this ASCII character is absent from the face.
                     continue;
                 }
                 let res = FT_Load_Glyph(self.face, glyph_pos, FT_LOAD_COLOR as i32);
@@ -1172,31 +1399,44 @@ impl Face {
     }
 }
 
-pub struct Library {
+struct LibraryInner {
     lib: FT_Library,
 }
 
-impl Drop for Library {
+// Lifecycle: `LibraryInner` releases its `FT_Library` with `FT_Done_FreeType` after all shared owners drop.
+impl Drop for LibraryInner {
     fn drop(&mut self) {
+        // SAFETY: `self.lib` is the live handle returned by `FT_Init_FreeType`, and the
+        // last shared owner is its unique release point.
         unsafe {
             FT_Done_FreeType(self.lib);
         }
     }
 }
 
+pub struct Library {
+    inner: Rc<LibraryInner>,
+}
+
 impl Library {
+    /// Initializes a FreeType library and applies SonicTerm's configured properties.
     pub fn new() -> anyhow::Result<Library> {
         let mut lib = ptr::null_mut();
-        let res = unsafe { FT_Init_FreeType(&mut lib as *mut _) };
+        let res =
+            // SAFETY: `lib` is writable output storage initialized by FreeType on success.
+            unsafe { FT_Init_FreeType(&mut lib as *mut _) };
         let lib = ft_result(res, lib).context("FT_Init_FreeType")?;
-        let mut lib = Library { lib };
+        let mut library = Library { inner: Rc::new(LibraryInner { lib }) };
 
         let config = configuration();
         if let Some(vers) = config.freetype_interpreter_version {
+            // When: `freetype_interpreter_version` is `Some`, override FreeType's default.
             let interpreter_version: FT_UInt = vers;
+            // SAFETY: `library.inner.lib` is live, both byte literals are NUL-terminated, and the
+            // property-value pointer remains readable for this synchronous call.
             unsafe {
                 FT_Property_Set(
-                    lib.lib,
+                    library.inner.lib,
                     b"truetype\0" as *const u8 as *const FT_String,
                     b"interpreter-version\0" as *const u8 as *const FT_String,
                     &interpreter_version as *const FT_UInt as *const _,
@@ -1206,9 +1446,11 @@ impl Library {
 
         {
             let no_long_names: FT_Bool = if config.freetype_pcf_long_family_names { 0 } else { 1 };
+            // SAFETY: `library.inner.lib` is live, both byte literals are NUL-terminated, and the
+            // property-value pointer remains readable for this synchronous call.
             unsafe {
                 FT_Property_Set(
-                    lib.lib,
+                    library.inner.lib,
                     b"pcf\0" as *const u8 as *const FT_String,
                     b"no-long-family-names\0" as *const u8 as *const FT_String,
                     &no_long_names as *const FT_Bool as *const _,
@@ -1221,9 +1463,9 @@ impl Library {
         // own copy of freetype, it is likewise disabled by default for
         // us too.  As a result, this call will generally fail.
         // Freetype is still able to render a decent result without it!
-        lib.set_lcd_filter(FT_LcdFilter::FT_LCD_FILTER_DEFAULT).ok();
+        library.set_lcd_filter(FT_LcdFilter::FT_LCD_FILTER_DEFAULT).ok();
 
-        Ok(lib)
+        Ok(library)
     }
 
     /// Returns the number of faces in a given font.
@@ -1231,8 +1473,11 @@ impl Library {
     /// For a TTC, it will be the number of contained fonts
     pub fn query_num_faces(&self, source: &FontDataSource) -> anyhow::Result<u32> {
         let face = self.new_face(source, -1).context("query_num_faces")?;
-        let num_faces = unsafe { (*face).num_faces }.try_into();
+        let num_faces =
+            // SAFETY: `face` points to the live initialized record returned by `new_face`.
+            unsafe { (*face).num_faces }.try_into();
 
+        // SAFETY: this temporary face is uniquely owned here and has not been released.
         unsafe {
             FT_Done_Face(face);
         }
@@ -1240,6 +1485,7 @@ impl Library {
         Ok(num_faces?)
     }
 
+    /// Opens a managed FreeType face for a locator handle and named variation.
     pub fn face_from_locator(&self, handle: &FontDataHandle) -> anyhow::Result<Face> {
         let source = handle.clone();
 
@@ -1252,7 +1498,7 @@ impl Library {
             .new_face(&source.source, index as _)
             .with_context(|| format!("face_from_locator({:?})", handle))?;
 
-        Ok(Face { face, lib: self.lib, source, size: None, palette: None })
+        Ok(Face { face, source, size: None, library: Rc::clone(&self.inner), palette: None })
     }
 
     fn new_face(&self, source: &FontDataSource, face_index: FT_Long) -> anyhow::Result<FT_Face> {
@@ -1274,15 +1520,20 @@ impl Library {
             params: ptr::null_mut(),
         };
 
-        let res = unsafe { FT_Open_Face(self.lib, &args, face_index, &mut face as *mut _) };
+        let res =
+            // SAFETY: `self.inner.lib`, `args`, and its stream are live; `face` is writable output,
+            // and FreeType assumes stream ownership before this call returns.
+            unsafe { FT_Open_Face(self.inner.lib, &args, face_index, &mut face as *mut _) };
 
         ft_result(res, face)
             .with_context(|| format!("FT_Open_Face(\"{:?}\", face_index={})", source, face_index))
     }
 
+    /// Selects the LCD filtering mode for this FreeType library.
     pub fn set_lcd_filter(&mut self, filter: FT_LcdFilter) -> anyhow::Result<()> {
+        // SAFETY: `self.inner.lib` is live and `filter` is a FreeType enum value.
         unsafe {
-            ft_result(FT_Library_SetLcdFilter(self.lib, filter), ())
+            ft_result(FT_Library_SetLcdFilter(self.inner.lib, filter), ())
                 .context("FT_Library_SetLcdFilter")
         }
     }
@@ -1303,7 +1554,6 @@ struct FreeTypeStream {
 #[allow(dead_code)]
 enum StreamBacking {
     File(BufReader<File>),
-    Map(Mmap),
     Static(&'static [u8]),
     Memory(Arc<Box<[u8]>>),
 }
@@ -1311,7 +1561,10 @@ enum StreamBacking {
 impl FreeTypeStream {
     pub fn from_source(source: &FontDataSource) -> anyhow::Result<FT_Stream> {
         let (backing, base, len) = match source {
-            FontDataSource::OnDisk(path) => return Self::open_path(path),
+            FontDataSource::OnDisk(path) => {
+                // When: `source` is on disk, construct the stream from that file path.
+                return Self::open_path(path);
+            }
             FontDataSource::BuiltIn { data, .. } => {
                 let base = data.as_ptr();
                 let len = data.len();
@@ -1347,6 +1600,7 @@ impl FreeTypeStream {
             name,
         });
         let stream = Box::into_raw(stream);
+        // SAFETY: `stream` is a stable live box pointer stored for `close` to reclaim.
         unsafe {
             (*stream).stream.descriptor.pointer = stream as *mut _;
             Ok(&mut (*stream).stream)
@@ -1368,44 +1622,24 @@ impl FreeTypeStream {
             anyhow::bail!("{} is too large to pass to freetype! (len={})", p.display(), len);
         }
 
-        let (backing, base) = match unsafe { MmapOptions::new().map(&file) } {
-            Ok(map) => {
-                let base = map.as_ptr() as *mut _;
-                (StreamBacking::Map(map), base)
-            }
-            Err(err) => {
-                log::warn!(
-                    "Unable to memory map {}: {}, will use regular file IO instead",
-                    p.display(),
-                    err
-                );
-                (StreamBacking::File(BufReader::new(file)), ptr::null_mut())
-            }
-        };
-
         let stream = Box::new(Self {
             stream: FT_StreamRec_ {
-                base,
+                base: ptr::null_mut(),
                 size: len as c_ulong,
                 pos: 0,
                 descriptor: FT_StreamDesc_ { pointer: ptr::null_mut() },
                 pathname: FT_StreamDesc_ { pointer: ptr::null_mut() },
-                read: if base.is_null() {
-                    Some(Self::read)
-                } else {
-                    // when backing is mmap, a null read routine causes
-                    // freetype to simply resolve data from `base`
-                    None
-                },
+                read: Some(Self::read),
                 close: Some(Self::close),
                 memory: ptr::null_mut(),
                 cursor: ptr::null_mut(),
                 limit: ptr::null_mut(),
             },
-            backing,
+            backing: StreamBacking::File(BufReader::new(file)),
             name: p.to_string_lossy().to_string(),
         });
         let stream = Box::into_raw(stream);
+        // SAFETY: `stream` is a stable live box pointer stored for `close` to reclaim.
         unsafe {
             (*stream).stream.descriptor.pointer = stream as *mut _;
             Ok(&mut (*stream).stream)
@@ -1413,6 +1647,8 @@ impl FreeTypeStream {
     }
 
     /// Called by freetype when it wants to read data from the file
+    // SAFETY: FreeType passes the live stream created here; for nonzero `count`, `buffer` names
+    // `count` writable bytes, and no concurrent callback aliases the boxed stream state.
     unsafe extern "C" fn read(
         stream: FT_Stream,
         offset: c_ulong,
@@ -1420,26 +1656,33 @@ impl FreeTypeStream {
         count: c_ulong,
     ) -> c_ulong {
         if count == 0 {
+            // When: `count == 0`, FreeType requests a seek-only result without copying bytes.
             return 0;
         }
 
-        let myself = unsafe { &mut *((*stream).descriptor.pointer as *mut Self) };
+        let myself =
+            // SAFETY: `stream` is live and its descriptor stores the stable owning box pointer.
+            unsafe { &mut *((*stream).descriptor.pointer as *mut Self) };
         match &mut myself.backing {
-            StreamBacking::Map(_) | StreamBacking::Static(_) | StreamBacking::Memory(_) => {
+            StreamBacking::Static(_) | StreamBacking::Memory(_) => {
                 log::error!("read called on memory data {} !?", myself.name);
                 0
             }
             StreamBacking::File(file) => {
+                // When: the backing is a file, serve FreeType's requested range via seek/read.
                 #[cfg(windows)]
                 let seek_offset = u64::from(offset);
                 #[cfg(not(windows))]
                 let seek_offset = offset;
                 if let Err(err) = file.seek(SeekFrom::Start(seek_offset)) {
+                    // When: `file.seek(...)` returns `Err`, report a zero-byte callback result.
                     log::error!("failed to seek {} to offset {}: {:#}", myself.name, offset, err);
                     return 0;
                 }
 
-                let buf = unsafe { std::slice::from_raw_parts_mut(buffer, count as usize) };
+                let buf =
+                    // SAFETY: nonzero `count` guarantees `buffer` names `count` writable bytes.
+                    unsafe { std::slice::from_raw_parts_mut(buffer, count as usize) };
                 match file.read(buf) {
                     Ok(len) => len as c_ulong,
                     Err(err) => {
@@ -1458,8 +1701,12 @@ impl FreeTypeStream {
     }
 
     /// Called by freetype when the stream is closed
+    // SAFETY: FreeType invokes this exactly once for the live stream whose descriptor stores the
+    // `Box::into_raw` pointer allocated by `from_source` or `open_path`.
     unsafe extern "C" fn close(stream: FT_Stream) {
-        let myself = unsafe { Box::from_raw((*stream).descriptor.pointer as *mut Self) };
+        let myself =
+            // SAFETY: the descriptor stores the unique unreclaimed box pointer for final drop.
+            unsafe { Box::from_raw((*stream).descriptor.pointer as *mut Self) };
         drop(myself);
     }
 }
@@ -1469,10 +1716,15 @@ impl FreeTypeStream {
 /// This is necessary because it is common for freetype to encode
 /// empty arrays in that way, and rust 1.78 will panic if a null
 /// ptr is passed in.
+// SAFETY: for a non-null `ptr`, the caller must provide `size` initialized contiguous `T` values
+// that remain readable and unmutated for the returned lifetime; null is accepted as empty.
 pub(crate) unsafe fn from_raw_parts<'a, T>(ptr: *const T, size: usize) -> &'a [T] {
     if ptr.is_null() {
         &[]
     } else {
+        // When: `ptr.is_null()` is false, expose the caller-guaranteed initialized elements.
+        // SAFETY: the function contract requires `ptr` to name `size` initialized contiguous
+        // elements that remain valid and unmutated for the returned lifetime.
         unsafe { std::slice::from_raw_parts(ptr, size) }
     }
 }
@@ -1501,10 +1753,12 @@ pub struct NameRecord {
     pub name: String,
 }
 
+/// Converts a FreeType 16.16 vector into floating-point coordinates.
 pub fn vector_x_y(vector: &FT_Vector) -> (f32, f32) {
     (vector.x.f16d16().to_num(), vector.y.f16d16().to_num())
 }
 
+/// Maps a FreeType COLR composite mode to the equivalent Cairo operator.
 pub fn composite_mode_to_operator(mode: FT_Composite_Mode) -> cairo::Operator {
     use cairo::Operator;
     use FT_Composite_Mode::*;
@@ -1564,6 +1818,7 @@ impl AxisScaling {
         if self.default_value != 0. {
             self.value / self.default_value
         } else {
+            // When: `self.default_value != 0.` is false, preserve a neutral scale.
             1.
         }
     }

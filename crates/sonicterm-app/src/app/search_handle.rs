@@ -37,25 +37,42 @@ use super::{
 impl App {
     pub(super) fn search_handle_ime_commit(&mut self, text: &str) -> bool {
         let (i, pane_id) = {
-            let Some(ws) = self.main() else { return false };
+            let Some(ws) = self.main() else {
+                // When: main returns None, no main-window search can consume the IME commit.
+                return false;
+            };
             let i = ws.tabs.active_index();
-            let Some(t) = ws.tab_states.get(i) else { return false };
+            let Some(t) = ws.tab_states.get(i) else {
+                // When: tab_states.get cannot find i, no active tab can consume the IME commit.
+                return false;
+            };
             if t.search.is_none() {
+                // When: search is None, the IME commit belongs to another input route.
                 return false;
             }
             (i, t.active_pane)
         };
         let mut search = {
-            let Some(ws) = self.main_mut() else { return false };
-            let Some(st) = ws.tab_states.get_mut(i) else { return false };
+            let Some(ws) = self.main_mut() else {
+                // When: main_mut returns None, the search state cannot be taken for the IME edit.
+                return false;
+            };
+            let Some(st) = ws.tab_states.get_mut(i) else {
+                // When: tab_states.get_mut cannot find i, the active search state is unavailable.
+                return false;
+            };
             match st.search.take() {
                 Some(s) => s,
-                None => return false,
+                None => {
+                    // When: search.take returns None, no search state remains to consume the IME commit.
+                    return false;
+                }
             }
         };
         let parser_arc = match self.main().and_then(|ws| ws.panes.get(&pane_id)) {
             Some(p) => p.parser.clone(),
             None => {
+                // When: panes.get returns None for pane_id, restore the detached search state.
                 if let Some(ws) = self.main_mut() {
                     if let Some(st) = ws.tab_states.get_mut(i) {
                         st.search = Some(search);
@@ -84,25 +101,42 @@ impl App {
         text: &str,
     ) -> bool {
         let (i, pane_id) = {
-            let Some(child) = self.windows.get(&win_id) else { return false };
+            let Some(child) = self.windows.get(&win_id) else {
+                // When: windows.get cannot find win_id, no child search can consume the IME commit.
+                return false;
+            };
             let i = child.tabs.active_index();
-            let Some(t) = child.tab_states.get(i) else { return false };
+            let Some(t) = child.tab_states.get(i) else {
+                // When: tab_states.get cannot find i, no child tab can consume the IME commit.
+                return false;
+            };
             if t.search.is_none() {
+                // When: search is None, the child IME commit belongs to another input route.
                 return false;
             }
             (i, t.active_pane)
         };
         let mut search = {
-            let Some(child) = self.windows.get_mut(&win_id) else { return false };
-            let Some(st) = child.tab_states.get_mut(i) else { return false };
+            let Some(child) = self.windows.get_mut(&win_id) else {
+                // When: windows.get_mut cannot find win_id, the child search state cannot be taken.
+                return false;
+            };
+            let Some(st) = child.tab_states.get_mut(i) else {
+                // When: tab_states.get_mut cannot find i, the child search state is unavailable.
+                return false;
+            };
             match st.search.take() {
                 Some(s) => s,
-                None => return false,
+                None => {
+                    // When: search.take returns None, no child search remains to handle input.
+                    return false;
+                }
             }
         };
         let parser_arc = match self.windows.get(&win_id).and_then(|c| c.panes.get(&pane_id)) {
             Some(p) => p.parser.clone(),
             None => {
+                // When: panes.get returns None for pane_id, restore the detached child search state.
                 if let Some(child) = self.windows.get_mut(&win_id) {
                     if let Some(st) = child.tab_states.get_mut(i) {
                         st.search = Some(search);
@@ -125,10 +159,17 @@ impl App {
 
     pub(super) fn search_handle_key(&mut self, event: &KeyEvent, mods: ModifiersState) -> bool {
         let (i, pane_id) = {
-            let Some(ws) = self.main() else { return false };
+            let Some(ws) = self.main() else {
+                // When: main returns None, no main-window search can handle the key.
+                return false;
+            };
             let i = ws.tabs.active_index();
-            let Some(t) = ws.tab_states.get(i) else { return false };
+            let Some(t) = ws.tab_states.get(i) else {
+                // When: tab_states.get cannot find i, no active tab can handle the search key.
+                return false;
+            };
             if t.search.is_none() {
+                // When: search is None, the key belongs to another input route.
                 return false;
             }
             (i, t.active_pane)
@@ -137,16 +178,26 @@ impl App {
         // `&mut SearchState` alongside the parser's grid borrow without
         // double-borrowing through `self.main_mut()` and `self.panes`.
         let mut search = {
-            let Some(ws) = self.main_mut() else { return false };
-            let Some(st) = ws.tab_states.get_mut(i) else { return false };
+            let Some(ws) = self.main_mut() else {
+                // When: main_mut returns None, the search state cannot be taken for key handling.
+                return false;
+            };
+            let Some(st) = ws.tab_states.get_mut(i) else {
+                // When: tab_states.get_mut cannot find i, the active search state is unavailable.
+                return false;
+            };
             match st.search.take() {
                 Some(s) => s,
-                None => return false,
+                None => {
+                    // When: search.take returns None, no search state remains to handle the key.
+                    return false;
+                }
             }
         };
         let parser_arc = match self.main().and_then(|ws| ws.panes.get(&pane_id)) {
             Some(p) => p.parser.clone(),
             None => {
+                // When: panes.get returns None for pane_id, restore the detached main search state.
                 // Restore so we don't drop user state on a missing pane.
                 if let Some(ws) = self.main_mut() {
                     if let Some(st) = ws.tab_states.get_mut(i) {
@@ -193,25 +244,42 @@ impl App {
         mods: ModifiersState,
     ) -> bool {
         let (i, pane_id) = {
-            let Some(child) = self.windows.get(&win_id) else { return false };
+            let Some(child) = self.windows.get(&win_id) else {
+                // When: windows.get cannot find win_id, no child search can handle the key.
+                return false;
+            };
             let i = child.tabs.active_index();
-            let Some(t) = child.tab_states.get(i) else { return false };
+            let Some(t) = child.tab_states.get(i) else {
+                // When: tab_states.get cannot find i, no child tab can handle the search key.
+                return false;
+            };
             if t.search.is_none() {
+                // When: search is None, the child key belongs to another input route.
                 return false;
             }
             (i, t.active_pane)
         };
         let mut search = {
-            let Some(child) = self.windows.get_mut(&win_id) else { return false };
-            let Some(st) = child.tab_states.get_mut(i) else { return false };
+            let Some(child) = self.windows.get_mut(&win_id) else {
+                // When: windows.get_mut cannot find win_id, the child search state cannot be taken.
+                return false;
+            };
+            let Some(st) = child.tab_states.get_mut(i) else {
+                // When: tab_states.get_mut cannot find i, the child search state is unavailable.
+                return false;
+            };
             match st.search.take() {
                 Some(s) => s,
-                None => return false,
+                None => {
+                    // When: search.take returns None, no child search remains to handle input.
+                    return false;
+                }
             }
         };
         let parser_arc = match self.windows.get(&win_id).and_then(|c| c.panes.get(&pane_id)) {
             Some(p) => p.parser.clone(),
             None => {
+                // When: panes.get returns None for pane_id, restore the detached child search state.
                 if let Some(child) = self.windows.get_mut(&win_id) {
                     if let Some(st) = child.tab_states.get_mut(i) {
                         st.search = Some(search);
@@ -276,30 +344,38 @@ fn apply_search_key(
         search.apply_text_edit(edit, grid);
         (true, true)
     } else {
+        // When: edit is None, interpret logical_key as search navigation or text input.
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => (true, false),
             Key::Named(NamedKey::Enter) => {
                 if search.current.is_none() {
+                    // An empty current match selects the nearest result to the anchor.
                     search.select_nearest(anchor_row, anchor_col);
                 } else if mods.shift_key() {
+                    // When: current is Some and shift_key is true, move to the previous match.
                     search.prev();
                 } else {
+                    // When: current is Some and shift_key is false, move to the next match.
                     search.next();
                 }
                 (true, true)
             }
             Key::Named(NamedKey::ArrowDown) => {
                 if search.current.is_none() {
+                    // An empty current match searches forward from the anchor.
                     search.next_from(anchor_row, anchor_col);
                 } else {
+                    // When: current is Some, advance to the next match.
                     search.next();
                 }
                 (true, true)
             }
             Key::Named(NamedKey::ArrowUp) => {
                 if search.current.is_none() {
+                    // An empty current match searches backward from the anchor.
                     search.prev_from(anchor_row, anchor_col);
                 } else {
+                    // When: current is Some, move to the previous match.
                     search.prev();
                 }
                 (true, true)
@@ -326,15 +402,20 @@ fn apply_search_key(
                         }
                         "g" | "G" => {
                             if search.current.is_none() {
+                                // Command-g without a current match selects the nearest result.
                                 search.select_nearest(anchor_row, anchor_col);
                             } else if mods.shift_key() {
+                                // When: current is Some and shift_key is true, command-shift-g moves backward.
                                 search.prev();
                             } else {
+                                // When: current is Some and shift_key is false, command-g moves forward.
                                 search.next();
                             }
                             consumed = true;
                         }
-                        _ => {}
+                        _ => {
+                            // When: s is not i, r, or g, leave the command modifier key unconsumed.
+                        }
                     }
                 }
                 if !consumed {
@@ -344,12 +425,17 @@ fn apply_search_key(
                 }
                 (true, true)
             }
-            _ => (false, true),
+            _ =>
+            // Unmatched logical keys remain available to another input route.
+            {
+                (false, true)
+            }
         }
     };
     let requested_view_top = if handled && keep_search {
         search.requested_scroll_row.map(|row| centered_search_view_top(grid, row))
     } else {
+        // When: handled or keep_search is false, request no search-driven viewport change.
         None
     };
     (handled, keep_search, requested_view_top)

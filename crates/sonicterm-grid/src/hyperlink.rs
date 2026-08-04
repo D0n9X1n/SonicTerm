@@ -19,6 +19,7 @@ pub use sonicterm_types::AdmissionRejection;
 /// reporting capacity for 16,384 entries has 28,672 buckets behind it.
 fn buckets_for(capacity: usize) -> usize {
     if capacity == 0 {
+        // When: `capacity == 0`, no hash table buckets are allocated.
         return 0;
     }
     let mut buckets = 1usize;
@@ -37,6 +38,7 @@ fn buckets_for(capacity: usize) -> usize {
 fn table_bytes_for<K, V>(capacity: usize) -> usize {
     let buckets = buckets_for(capacity);
     if buckets == 0 {
+        // When: `buckets == 0`, the table retains no entry or control-byte allocation.
         return 0;
     }
     buckets.saturating_mul(std::mem::size_of::<(K, V)>()).saturating_add(buckets).saturating_add(16)
@@ -107,13 +109,16 @@ impl HyperlinkRegistry {
         if uri.len() > MAX_HYPERLINK_URI_BYTES
             || id.is_some_and(|value| value.len() > MAX_HYPERLINK_CLIENT_ID_BYTES)
         {
+            // When: `uri` or client `id` exceeds its byte limit, reject the oversized link.
             return Err(AdmissionRejection::ItemTooLarge);
         }
         let key = (id.map(String::from), uri.to_string());
         if let Some(hid) = self.by_key.get(&key) {
+            // When: `self.by_key.get(&key)` returns `Some(hid)`, reuse the interned id.
             return Ok(*hid);
         }
         if self.by_id.len() >= MAX_HYPERLINKS {
+            // When: `self.by_id.len() >= MAX_HYPERLINKS`, reject a new distinct link.
             return Err(AdmissionRejection::ItemCountLimit);
         }
         let entry_bytes =
@@ -124,6 +129,7 @@ impl HyperlinkRegistry {
         // looked compliant — a cap that admits by one number and is judged by
         // another is the drift shape this milestone exists to remove.
         if self.retained_bytes().saturating_add(entry_bytes) > MAX_HYPERLINK_METADATA_BYTES {
+            // When: retained bytes plus `entry_bytes` exceed the metadata budget, reject admission.
             return Err(AdmissionRejection::PerOwnerBudget);
         }
         let hid = HyperlinkId::next();
@@ -195,6 +201,7 @@ impl HyperlinkRegistry {
         let before = self.by_id.len();
         self.by_id.retain(|hid, _| live.contains(hid));
         if self.by_id.len() == before {
+            // When: `self.by_id.len() == before`, the live-set sweep removed no entries.
             return 0;
         }
 

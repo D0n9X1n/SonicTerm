@@ -1,30 +1,15 @@
 //! Platform shells that drive the winit event loop on top of
 //! [`sonicterm_app_core::AppStateMachine`].
 //!
-//! M6b lands [`MacShell`]: the macOS bin (`crates/sonicterm-mac`)
-//! constructs the state machine itself, then hands it to
-//! `MacShell::new(...)` and calls `.run()`. The shell is the only
-//! place winit / wgpu / AppKit glue lives — the bin crate no longer
-//! touches the legacy monolithic `App` directly for state mutation.
+//! [`MacShell`] and [`WindowsShell`] receive an externally constructed state
+//! machine, build the platform event loop, and delegate event dispatch to
+//! [`crate::app::App`]. This keeps binary crates independent of `App`'s field
+//! layout while preserving one reducer/effect boundary on both platforms.
 //!
-//! M6c lands [`WindowsShell`] along the same lines: the Windows bin
-//! (`crates/sonicterm-windows`) constructs the state machine, then
-//! hands it to `WindowsShell::new(...)` and calls `.run()`. The
-//! Windows variant carries an extra `with_on_window_ready` hook that
-//! receives the `raw_window_handle::RawWindowHandle` of the first
-//! winit window — used by the bin to install the muda menubar +
-//! apply DWM backdrop on the bare HWND, both of which need the
-//! handle that only exists after `create_window` succeeds.
-//!
-//! Today the shell still delegates the actual event loop to the
-//! existing [`crate::app::App`] (which itself dispatches Intents
-//! through the held machine — wired in M6a-expand-2b/2c). The
-//! difference is that the machine is now constructed *by the shell*
-//! and passed in via [`crate::app::App::new_with_proxy_and_machine`],
-//! so the bin never has to know about `App`'s field layout. Once
-//! every per-Intent path is fully reduced through the machine (post
-//! M6c/d) the `App` indirection collapses and the shell will drive
-//! the loop directly.
+//! The Windows shell additionally exposes `with_on_window_ready`, whose hook
+//! receives the first window's `raw_window_handle::RawWindowHandle` after
+//! creation so platform code can install the muda menubar and DWM backdrop on
+//! a live HWND.
 
 use std::sync::Arc;
 
@@ -203,6 +188,7 @@ impl MacShell {
             app.set_on_window_ready(hook);
         }
         if let Some(p) = pending {
+            // When: `pending` carries a startup handoff, seed its tab before the event loop starts.
             let _ = app.new_tab_from_payload(&p);
         }
 
@@ -360,6 +346,7 @@ impl WindowsShell {
             app.set_on_window_ready(hook);
         }
         if let Some(p) = pending {
+            // When: `pending` carries a startup handoff, seed its tab before the event loop starts.
             let _ = app.new_tab_from_payload(&p);
         }
 

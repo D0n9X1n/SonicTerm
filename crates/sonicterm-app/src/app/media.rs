@@ -34,6 +34,8 @@ const MAX_INLINE_IMAGE_RENDER_SIDE: u32 = 1024;
 const MAX_RETAINED_INLINE_IMAGES: usize = 128;
 pub(super) const MAX_RETAINED_INLINE_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 
+// Ordering: NEXT_IMAGE_ID uses Relaxed; it only hands out distinct InlineImage
+// ids and publishes no other data.
 pub(super) fn decode_inline_image(event: &MediaEvent) -> Option<InlineImage> {
     let (width, height, bgra) = match event.protocol {
         MediaProtocol::Iterm2File | MediaProtocol::Kitty => decode_base64_image(&event.data)?,
@@ -57,6 +59,8 @@ fn decode_base64_image(encoded: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
         .ok()?;
     let (encoded_width, encoded_height) = reader.into_dimensions().ok()?;
     if !inline_image_decode_dimensions_allowed(encoded_width, encoded_height) {
+        // When: inline_image_decode_dimensions_allowed refuses encoded_width by
+        // encoded_height, the image is rejected before decode allocates pixels.
         tracing::warn!(
             encoded_width,
             encoded_height,
@@ -76,6 +80,8 @@ fn decode_base64_image(encoded: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     let image = image.to_rgba8();
     let (width, height) = image.dimensions();
     if width == 0 || height == 0 {
+        // When: width or height decodes to zero there is no pixel data to
+        // retain, so the image is dropped rather than stored as an empty buffer.
         return None;
     }
 
@@ -176,6 +182,8 @@ pub(super) const fn max_pane_residual_bytes() -> usize {
 }
 
 /// Read the live process-wide inline-media total.
+// Ordering: PROCESS_INLINE_MEDIA_BYTES is read with Acquire so the total seen
+// here reflects the AcqRel updates that published it.
 #[must_use]
 pub(super) fn process_inline_media_bytes() -> usize {
     PROCESS_INLINE_MEDIA_BYTES.load(Ordering::Acquire)
@@ -194,6 +202,8 @@ pub(super) fn process_inline_media_bytes() -> usize {
 /// Dividing the ceiling by the live pane count makes the two bounds one bound.
 /// N panes at `ceiling / N` sum to the ceiling by construction, so no pane has
 /// to evict on another's behalf and the pathological loop cannot arise.
+// Ordering: LIVE_INLINE_MEDIA_CHARGES is read with Acquire, pairing with the
+// AcqRel updates that add and remove pane charges.
 #[must_use]
 pub(super) fn pane_inline_media_budget() -> usize {
     let live = LIVE_INLINE_MEDIA_CHARGES.load(Ordering::Acquire).max(1);
@@ -227,6 +237,8 @@ pub(crate) struct InlineMediaCharge {
 pub(crate) type SharedInlineMediaCharge = Arc<Mutex<InlineMediaCharge>>;
 
 /// Create a charge handle for a new pane.
+// Ordering: LIVE_INLINE_MEDIA_CHARGES uses AcqRel so this increment is ordered
+// against the Drop decrement that returns the same pane's slot.
 pub(crate) fn new_inline_media_charge() -> SharedInlineMediaCharge {
     LIVE_INLINE_MEDIA_CHARGES.fetch_add(1, Ordering::AcqRel);
     Arc::new(Mutex::new(InlineMediaCharge::default()))
@@ -235,17 +247,25 @@ pub(crate) fn new_inline_media_charge() -> SharedInlineMediaCharge {
 impl InlineMediaCharge {
     /// Set this pane's charge to `bytes`, applying the difference to the
     /// process total.
+    // Ordering: PROCESS_INLINE_MEDIA_BYTES uses AcqRel so each pane's delta is
+    // ordered against every other pane's and the running total stays exact.
     fn set(&mut self, bytes: usize) {
         if bytes >= self.bytes {
             PROCESS_INLINE_MEDIA_BYTES.fetch_add(bytes - self.bytes, Ordering::AcqRel);
         } else {
+            // When: bytes falls below the previous charge the difference is
+            // subtracted instead, keeping the total equal to the live sum.
             PROCESS_INLINE_MEDIA_BYTES.fetch_sub(self.bytes - bytes, Ordering::AcqRel);
         }
         self.bytes = bytes;
     }
 }
 
+// Lifecycle: dropping InlineMediaCharge returns this pane's bytes to
+// PROCESS_INLINE_MEDIA_BYTES and releases its LIVE_INLINE_MEDIA_CHARGES slot.
 impl Drop for InlineMediaCharge {
+    // Ordering: PROCESS_INLINE_MEDIA_BYTES and LIVE_INLINE_MEDIA_CHARGES both
+    // use AcqRel so the bytes and the slot are returned as one ordered pair.
     fn drop(&mut self) {
         PROCESS_INLINE_MEDIA_BYTES.fetch_sub(self.bytes, Ordering::AcqRel);
         LIVE_INLINE_MEDIA_CHARGES.fetch_sub(1, Ordering::AcqRel);
@@ -294,6 +314,8 @@ pub(super) fn trim_inline_images_charged(
         // floor. That is a bound that can be stated, rather than a curve.
         MIN_PANE_INLINE_MEDIA_BYTES
     } else {
+        // When: process_inline_media_bytes sits under
+        // MAX_PROCESS_INLINE_MEDIA_BYTES each pane trims to its fair share.
         pane_inline_media_budget()
     };
     let before = retained_inline_media(images);
@@ -481,18 +503,26 @@ fn decode_sixel(data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
                 i += 1;
             }
             byte @ b'?'..=b'~' => {
+                // When: byte falls in the sixel data range its low six bits
+                // paint one column strip of six vertical pixels.
                 let bits = byte - 63;
                 for dx in 0..repeat {
                     let px = x + dx;
                     if px >= MAX_SIDE {
+                        // When: px has reached MAX_SIDE the column lies outside
+                        // the raster, so the rest of the repeat run writes nothing.
                         continue;
                     }
                     for bit in 0..6 {
                         if bits & (1 << bit) == 0 {
+                            // When: this bit is clear in bits the pixel stays
+                            // background, so no colour is written for that row.
                             continue;
                         }
                         let py = y + bit as usize;
                         if py >= MAX_SIDE {
+                            // When: py has reached MAX_SIDE the row lies below
+                            // the raster, so the remaining bits are discarded.
                             continue;
                         }
                         let off = (py * MAX_SIDE + px) * 4;
@@ -516,6 +546,8 @@ fn decode_sixel(data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     }
 
     if max_x == 0 || max_y == 0 {
+        // When: max_x or max_y stayed at zero no sixel byte painted anything,
+        // so there is no image to hand back.
         return None;
     }
 
@@ -531,7 +563,11 @@ fn skip_sixel_params(data: &[u8], i: &mut usize) {
     while *i < data.len() {
         match data[*i] {
             b'0'..=b'9' | b';' => *i += 1,
-            _ => break,
+            _ => {
+                // When: data holds a byte outside digits and ';' the parameter
+                // list has ended, so scanning stops with i on that byte.
+                break;
+            }
         }
     }
 }
@@ -545,7 +581,11 @@ fn parse_sixel_number(data: &[u8], i: &mut usize) -> Option<u32> {
                 value = value.saturating_mul(10).saturating_add(u32::from(data[*i] - b'0'));
                 *i += 1;
             }
-            _ => break,
+            _ => {
+                // When: data holds a byte outside the digit range the number is
+                // complete, so i stops there and the digits so far form value.
+                break;
+            }
         }
     }
     (*i > start).then_some(value)

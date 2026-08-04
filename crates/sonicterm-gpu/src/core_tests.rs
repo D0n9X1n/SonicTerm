@@ -1,5 +1,15 @@
 use super::*;
 
+#[test]
+fn renderer_resize_has_no_unchecked_wrapper() {
+    const SOURCE: &str = include_str!("core.rs");
+    assert!(!SOURCE.contains("pub fn resize(&mut self, width: u32, height: u32)"));
+    let lines = SOURCE.lines().collect::<Vec<_>>();
+    assert!(lines.windows(2).any(|pair| {
+        pair[0].trim() == "#[must_use]" && pair[1].trim_start().starts_with("pub fn try_resize")
+    }));
+}
+
 // --- Inline IME preedit opaque background -------------------------
 
 #[test]

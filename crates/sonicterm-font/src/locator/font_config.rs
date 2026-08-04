@@ -183,15 +183,23 @@ impl FontLocator for FontConfigFontLocator {
 
         'next_codepoint: for &c in codepoints {
             if !fonts.is_empty() {
+                // When: fonts already holds earlier resolutions, so this
+                // codepoint may be covered without another Fontconfig query.
                 let mut wanted_range = crate::rangeset::RangeSet::new();
                 wanted_range.add(c as u32);
                 for f in &fonts {
                     match f.coverage_intersection(&wanted_range) {
                         Ok(r) if !r.is_empty() => {
+                            // When: r is non-empty, an already-resolved font
+                            // covers c, so no new query is issued for it.
+
                             // already found a font with this one!
                             continue 'next_codepoint;
                         }
-                        _ => {}
+                        _ => {
+                            // When: coverage_intersection found nothing or
+                            // failed, so this font cannot satisfy c.
+                        }
                     }
                 }
             }
@@ -229,6 +237,8 @@ impl FontLocator for FontConfigFontLocator {
                     for pat in list.iter() {
                         let num = pat.charset_intersect_count(&charset)?;
                         if num == 0 {
+                            // When: num is zero, Fontconfig returned a font
+                            // that does not cover the requested charset.
                             log::error!(
                                 "Skipping bogus font-config result {:?} because it doesn't overlap",
                                 pat
@@ -254,6 +264,9 @@ impl FontLocator for FontConfigFontLocator {
                 }
 
                 if pushed_this_pass == 0 {
+                    // When: pushed_this_pass stayed zero, so the strict pass
+                    // found nothing and the any-spacing pass still may.
+
                     // If we get here on the first iteration, then we didn't
                     // find a monospace version of fonts with those codepoints,
                     // let's continue and try any matching font
@@ -274,6 +287,8 @@ impl FontLocator for FontConfigFontLocator {
         for pat in pattern.list().context("listing fonts from font-config")?.iter() {
             let file = pat.get_file().context("pat.get_file")?;
             if files.contains(&file) {
+                // When: files already holds this path, so a second Fontconfig
+                // entry for the same file is not parsed twice.
                 continue;
             }
             files.insert(file.clone());
@@ -294,6 +309,8 @@ impl FontLocator for FontConfigFontLocator {
 }
 
 fn to_fc_weight(w: FontWeight) -> std::os::raw::c_int {
+    // When: w is tested against each ascending FontWeight threshold, so the
+    // first bucket it fits picks that Fontconfig constant.
     if w <= FontWeight::THIN {
         fcwrap::FC_WEIGHT_THIN
     } else if w <= FontWeight::EXTRALIGHT {

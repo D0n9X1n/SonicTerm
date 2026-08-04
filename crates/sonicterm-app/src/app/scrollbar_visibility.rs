@@ -86,6 +86,8 @@ pub fn is_mouse_near_right_edge(
     cursor_y: f32,
 ) -> bool {
     if cursor_y < pane_y || cursor_y > pane_y + pane_h {
+        // When: cursor_y sits outside the pane band the horizontal edge test is
+        // skipped, so a neighbouring pane's gutter cannot claim the hover.
         return false;
     }
     let right = pane_x + pane_w;
@@ -125,13 +127,20 @@ pub fn tick(
             let visible_now = drag_active || state.mouse_near_right_edge || idle_ms < IDLE_HIDE_MS;
             let target = if visible_now { 1.0 } else { 0.0 };
             let dt_ms = now.saturating_duration_since(state.last_tick).as_millis().max(1) as f32;
-            let duration_ms =
-                if target > state.alpha { FADE_IN_MS as f32 } else { FADE_OUT_MS as f32 };
+            let duration_ms = if target > state.alpha {
+                FADE_IN_MS as f32
+            } else {
+                // When: target is at or below state.alpha the bar is dismissing,
+                // so the slower FADE_OUT_MS governs the step size.
+                FADE_OUT_MS as f32
+            };
             let step = dt_ms / duration_ms;
             let delta = target - state.alpha;
             if delta.abs() <= step {
                 state.alpha = target;
             } else {
+                // When: delta still exceeds step the alpha advances one frame's
+                // worth toward target and another redraw is needed.
                 state.alpha += step.copysign(delta);
             }
             state.alpha = state.alpha.clamp(0.0, 1.0);
@@ -145,6 +154,8 @@ pub fn tick(
 /// — used to decide whether to schedule another redraw next frame.
 pub fn is_animating(state: &ScrollbarVisState, mode: ScrollbarMode, drag_active: bool) -> bool {
     if !matches!(mode, ScrollbarMode::Auto) {
+        // When: mode matches Always or Never the alpha is pinned by tick, so
+        // no further frames need scheduling for a fade.
         return false;
     }
     let idle_ms = match state.last_active {
@@ -239,6 +250,8 @@ pub fn clear_hover_states(vis: &mut std::collections::HashMap<u64, ScrollbarVisS
 use super::App;
 
 impl App {
+    // Ordering: redraw_request_count uses Relaxed as a plain tally of redraw
+    // requests; it guards no other data, so no happens-before edge is required.
     fn request_scrollbar_redraw(&self) {
         self.redraw_request_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(w) = self.main_window() {
@@ -250,10 +263,14 @@ impl App {
     /// position. Returns `true` when any pane crosses the threshold.
     pub(crate) fn refresh_scrollbar_hover_from_cursor(&mut self) -> bool {
         if !matches!(self.config.appearance.scrollbar, ScrollbarMode::Auto) {
+            // When: the configured scrollbar matches Always or Never there is no
+            // hover threshold to cross, so no state is touched and no redraw runs.
             return false;
         }
         let pane_rects = self.compute_active_pane_rects();
         if pane_rects.is_empty() {
+            // When: pane_rects is empty the active tab has no laid-out panes, so
+            // there is nothing for the cursor to be near.
             return false;
         }
         let (cx, cy) = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
@@ -288,11 +305,19 @@ impl App {
         win_id: winit::window::WindowId,
     ) -> bool {
         if !matches!(self.config.appearance.scrollbar, ScrollbarMode::Auto) {
+            // When: the configured scrollbar matches Always or Never the child
+            // window has no fade to drive, so its hover flags stay untouched.
             return false;
         }
-        let Some(child) = self.windows.get(&win_id) else { return false };
+        let Some(child) = self.windows.get(&win_id) else {
+            // When: windows no longer holds win_id the torn-out window closed
+            // before this cursor move was handled.
+            return false;
+        };
         let pane_rects = Self::compute_pane_rects_for(child);
         if pane_rects.is_empty() {
+            // When: pane_rects is empty the child window has no laid-out panes to
+            // test against its cursor position.
             return false;
         }
         let cursor = (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32);

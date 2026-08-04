@@ -35,6 +35,7 @@ pub fn range_intersection<T: Integer + Copy + Debug>(
     if end > start {
         Some(start..end)
     } else {
+        // When: `end > start` is false, the ranges have no non-empty intersection.
         None
     }
 }
@@ -52,6 +53,7 @@ pub fn range_subtract<T: Integer + Copy + Debug>(
             // Intersection overlaps with the LHS
             None
         } else {
+            // When: `i_start == r1.start` is false, preserve the left remainder.
             // The LHS up to the intersection
             Some(r1.start..r1.end.min(i_start))
         };
@@ -60,12 +62,14 @@ pub fn range_subtract<T: Integer + Copy + Debug>(
             // Intersection overlaps with the RHS
             None
         } else {
+            // When: `i_end == r1.end` is false, preserve the right remainder.
             // The intersection up to the RHS
             Some(r1.end.min(i_end)..r1.end)
         };
 
         (a, b)
     } else {
+        // When: `i_end > i_start` is false, subtraction leaves `r1` unchanged.
         // No intersection, so we're left with r1 with nothing removed
         (Some(r1.clone()), None)
     }
@@ -76,8 +80,10 @@ pub fn range_union<T: Integer>(r1: Range<T>, r2: Range<T>) -> Range<T> {
     if range_is_empty(&r1) {
         r2
     } else if range_is_empty(&r2) {
+        // When: `r1` is non-empty but `r2` is empty, the union is `r1`.
         r1
     } else {
+        // When: both `range_is_empty(&r1)` and `range_is_empty(&r2)` are false, span them.
         let start = r1.start.min(r2.start);
         let end = r1.end.max(r2.end);
         start..end
@@ -115,6 +121,7 @@ impl<T: Integer + Copy + Debug + ToPrimitive> RangeSet<T> {
     pub fn contains(&self, value: T) -> bool {
         for r in &self.ranges {
             if r.contains(&value) {
+                // When: `r.contains(&value)` is true, membership is established.
                 return true;
             }
         }
@@ -185,7 +192,9 @@ impl<T: Integer + Copy + Debug + ToPrimitive> RangeSet<T> {
                     to_remove.push(idx);
                     to_add.push(a);
                 }
-                _ => {}
+                _ => {
+                    // When: subtraction left this stored range unchanged, no edit is needed.
+                }
             }
         }
 
@@ -213,10 +222,12 @@ impl<T: Integer + Copy + Debug + ToPrimitive> RangeSet<T> {
     /// Add a range of integers to the set
     pub fn add_range(&mut self, range: Range<T>) {
         if range_is_empty(&range) {
+            // When: `range_is_empty(&range)` is true, adding it cannot change the set.
             return;
         }
 
         if self.ranges.is_empty() {
+            // When: `self.ranges.is_empty()` is true, this range becomes the sole entry.
             self.ranges.push(range);
             return;
         }
@@ -278,9 +289,11 @@ impl<T: Integer + Copy + Debug + ToPrimitive> RangeSet<T> {
             }
         }
         if let Some(r) = self.ranges.get(idx + 1) {
+            // When: `self.ranges.get(idx + 1)` is `Some`, test a second adjacent candidate.
             if (intersects_range(r, range) || r.end == range.start || range.end == r.start)
                 && first.is_some()
             {
+                // When: the next range touches/intersects and `first.is_some()`, return both.
                 return (first, Some(idx + 1));
             }
         }
@@ -299,10 +312,13 @@ impl<T: Integer + Copy + Debug + ToPrimitive> RangeSet<T> {
             if range.start >= r.start && range.end <= r.end {
                 Ordering::Equal
             } else if range.start < r.start {
+                // When: containment is false and `range.start < r.start`, search lower indices.
                 Ordering::Greater
             } else if range.end > r.end {
+                // When: containment/start-before are false and `range.end > r.end`, search higher.
                 Ordering::Less
             } else {
+                // When: the ordered half-open range relations are inconsistent, the state is invalid.
                 unreachable!()
             }
         })

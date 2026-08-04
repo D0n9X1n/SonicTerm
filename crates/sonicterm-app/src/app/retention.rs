@@ -1,7 +1,7 @@
 //! What a pane actually retains, summed across its independent seams.
 //!
-//! Each subsystem meters its own memory: [`Grid::retained_amount`],
-//! [`Parser::retained_amount`], `HyperlinkRegistry::retained_bytes`, and the
+//! Each subsystem meters its own memory: `Grid::retained_amount`,
+//! `Parser::retained_amount`, `HyperlinkRegistry::retained_bytes`, and the
 //! pane's decoded inline media. Those figures are deliberately **disjoint** —
 //! each seam counts what it alone owns, so no allocation is charged twice —
 //! which also means no single one of them answers the question a user asks
@@ -20,13 +20,13 @@
 //! Two passes here do reclaim, and they are here for the same reason: both
 //! recover memory that the seam owning it cannot recover for itself, because
 //! the seam has no clock and no view above the pane.
-//! [`App::reclaim_stalled_captures`] cancels captures that stopped receiving,
+//! `App::reclaim_stalled_captures` cancels captures that stopped receiving,
 //! and [`trim_panes_over_media_ceiling`] revisits panes still holding an
 //! inline-media budget sized for an earlier, smaller session. A pane only
 //! re-evaluates that budget while it is *decoding*, so an idle pane never
 //! revisits it — this walk is what does.
 //!
-//! Both run *above* the log-level gate in [`App::sample_pane_retention`].
+//! Both run *above* the log-level gate in `App::sample_pane_retention`.
 //! Freeing memory is not a diagnostic: a user at the default log level has the
 //! same memory to get back as one running with `memory=debug`, and a
 //! reclamation gated on whether anyone is watching is a reclamation that never
@@ -249,6 +249,8 @@ fn add(left: ResourceAmount, right: ResourceAmount) -> ResourceAmount {
 /// front of the render path, which takes the same lock.
 pub fn trim_panes_over_media_ceiling<'a>(panes: impl IntoIterator<Item = &'a PaneState>) -> usize {
     if super::media::process_inline_media_bytes() <= super::media::MAX_PROCESS_INLINE_MEDIA_BYTES {
+        // When: process_inline_media_bytes is at or under the ceiling; every pane
+        // is entitled to its share, so nothing is over the line to reclaim.
         return 0;
     }
 
@@ -259,7 +261,11 @@ pub fn trim_panes_over_media_ceiling<'a>(panes: impl IntoIterator<Item = &'a Pan
         // remaining panes are entitled to a fair share rather than the floor.
         // Stopping there is the point: the pass reclaims what is over the
         // line and no more.
-        let Some(mut images) = pane.inline_images.try_lock() else { continue };
+        let Some(mut images) = pane.inline_images.try_lock() else {
+            // When: try_lock finds inline_images contended; that pane re-trims on
+            // its own thread, and blocking would front-run the render path.
+            continue;
+        };
         let before = super::media::retained_inline_media(&images).bytes;
         let evicted =
             super::media::trim_inline_images_charged(&mut images, &pane.inline_media_charge);
@@ -328,6 +334,8 @@ pub const STALL_SAMPLES_BEFORE_CANCEL: u8 = 2;
 #[must_use]
 pub fn retention_sample_due(last_sample: &mut Option<Instant>, now: Instant) -> bool {
     if last_sample.is_some_and(|last| now.duration_since(last) < RETENTION_SAMPLE_INTERVAL) {
+        // When: last_sample is newer than RETENTION_SAMPLE_INTERVAL; returning
+        // early leaves the timestamp so the next call still measures from it.
         return false;
     }
     *last_sample = Some(now);
@@ -404,6 +412,8 @@ pub fn charge_classes(
                 let outcome = if amount.component_le(current) {
                     held.get_mut().shrink(amount)
                 } else {
+                    // When: amount exceeds current on some component; try_grow can
+                    // be refused, and the held charge survives that refusal intact.
                     held.get_mut().try_grow(amount)
                 };
                 if let Err(error) = outcome {
@@ -416,7 +426,11 @@ pub fn charge_classes(
                 }
             }
             std::collections::hash_map::Entry::Vacant(slot) => {
+                // When: this class has no charge yet and its entry is Vacant; only
+                // opening a reservation puts the class in the ledger at all.
                 if amount.bytes == 0 && amount.items == 0 {
+                    // When: amount has zero bytes and zero items; charging nothing
+                    // would add a ledger row that never reports any usage.
                     continue;
                 }
                 match governor
@@ -450,7 +464,7 @@ pub fn charge_classes(
 /// check and nothing else; and it samples on an interval rather than every
 /// call.
 ///
-/// [`App::sample_pane_retention`] does not route through this. That path
+/// `App::sample_pane_retention` does not route through this. That path
 /// applies the same interval to a wider pass — one that reclaims memory and
 /// charges the governor as well as logging — so it takes the cadence itself
 /// and keeps the level check around the log lines alone. This entry point
@@ -464,9 +478,13 @@ pub fn sample_retention_if_due<'a>(
     panes: impl IntoIterator<Item = (&'a str, &'a PaneState)>,
 ) -> bool {
     if !tracing::enabled!(target: "memory", tracing::Level::DEBUG) {
+        // When: tracing has no memory-target reader at debug level; this walk
+        // exists only to produce those lines, so it would measure for nobody.
         return false;
     }
     if !retention_sample_due(last_sample, now) {
+        // When: retention_sample_due says the interval has not elapsed; the walk
+        // takes every parser lock and is far too costly to repeat per call.
         return false;
     }
     log_sampled_panes(panes);
@@ -484,7 +502,11 @@ pub fn log_sampled_panes<'a>(
     let mut session = PaneRetention::default();
     let mut sampled = 0usize;
     for (label, pane) in panes {
-        let Some(retention) = measure_pane(pane) else { continue };
+        let Some(retention) = measure_pane(pane) else {
+            // When: measure_pane returns None, meaning a lock was contended; a
+            // diagnostic must never stall the thread it is reporting from.
+            continue;
+        };
         log_pane_retention(label, &retention);
         session = PaneRetention {
             grid_visible: add(session.grid_visible, retention.grid_visible),
@@ -597,12 +619,15 @@ impl super::App {
         for window in self.windows.values_mut() {
             for (pane_id, pane) in window.panes.iter_mut() {
                 let Some(mut parser) = pane.parser.try_lock() else {
-                    // Contended means it is parsing, which means it is moving.
+                    // When: try_lock finds parser contended, so the pane is parsing
+                    // and therefore moving; clear the evidence rather than accrue it.
                     pane.last_capture_progress = None;
                     pane.capture_stall_samples = 0;
                     continue;
                 };
                 if parser.live_capture_count() == 0 {
+                    // When: live_capture_count is zero; with no transfer in flight
+                    // there is nothing to stall, and stale evidence would mislead.
                     pane.last_capture_progress = None;
                     pane.capture_stall_samples = 0;
                     continue;
@@ -612,13 +637,15 @@ impl super::App {
                 let unchanged = pane.last_capture_progress == Some(progress);
                 pane.last_capture_progress = Some(progress);
                 if !unchanged {
-                    // Any movement clears the evidence: the threshold is
-                    // consecutive silence, not cumulative.
+                    // When: progress moved since the last sample, so unchanged is
+                    // false; the threshold is consecutive silence, not cumulative.
                     pane.capture_stall_samples = 0;
                     continue;
                 }
                 pane.capture_stall_samples = pane.capture_stall_samples.saturating_add(1);
                 if pane.capture_stall_samples < STALL_SAMPLES_BEFORE_CANCEL {
+                    // When: capture_stall_samples has not reached the threshold; one
+                    // silent interval cannot tell a slow transfer from a dead one.
                     continue;
                 }
 
@@ -644,22 +671,36 @@ impl super::App {
     fn charge_pane_owners(&mut self) {
         let window_ids: Vec<super::WindowId> = self.windows.keys().copied().collect();
         for window_id in window_ids {
-            let Some(window) = self.windows.get(&window_id) else { continue };
+            let Some(window) = self.windows.get(&window_id) else {
+                // When: window_id came from a snapshot taken before this walk; a
+                // window closed since then has no panes left to charge.
+                continue;
+            };
             let pane_ids: Vec<u64> = window.panes.keys().copied().collect();
 
             for pane_id in pane_ids {
                 let Some(pane) = self.windows.get(&window_id).and_then(|w| w.panes.get(&pane_id))
                 else {
+                    // When: pane_id came from a snapshot taken before this walk; a
+                    // pane closed since then has no retention left to charge.
                     continue;
                 };
                 let Some(owner) = pane.owner.as_ref().map(super::OwnerGuard::id) else {
+                    // When: the pane holds no owner guard; without an owner id there
+                    // is no ledger identity to charge the retention against.
                     continue;
                 };
-                let Some(retention) = measure_pane(pane) else { continue };
+                let Some(retention) = measure_pane(pane) else {
+                    // When: measure_pane returns None on a contended lock; skipping
+                    // leaves this pane's charge at its previous figure.
+                    continue;
+                };
 
                 let Some(pane) =
                     self.windows.get_mut(&window_id).and_then(|w| w.panes.get_mut(&pane_id))
                 else {
+                    // When: the mutable re-lookup of pane_id fails; measure_pane
+                    // borrowed it immutably, so the charge needs a fresh borrow.
                     continue;
                 };
                 charge_pane_retention(&self.governor, owner, &mut pane.charges, &retention);
@@ -717,6 +758,8 @@ impl super::App {
         // across a session, and both answer questions on a scale of minutes.
         // A control loop that had to act within a frame could not read this.
         if !retention_sample_due(&mut self.last_retention_sample, now) {
+            // When: retention_sample_due says the interval has not elapsed; this
+            // pass walks every pane and reclaims, so it is far too costly per wake.
             return false;
         }
 
@@ -780,12 +823,16 @@ impl super::App {
         // its worker thread.
         let info_enabled = tracing::enabled!(target: "memory", tracing::Level::INFO);
         if info_enabled || self.breadcrumb_recorder.is_some() {
+            // When: info_enabled or a breadcrumb_recorder exists; the snapshot is
+            // built once here and shared, so neither consumer builds it twice.
             let snapshot = self.build_memory_snapshot();
             if info_enabled {
                 memory_snapshot::emit_memory_snapshot(&snapshot, self.last_memory_totals);
                 self.last_memory_totals = Some(snapshot.totals());
             }
             if let Some(recorder) = &self.breadcrumb_recorder {
+                // When: a breadcrumb_recorder is installed; these counts persist so
+                // a later hang report names the last known state.
                 use sonicterm_logging::breadcrumbs::BreadcrumbEvent;
                 let windows = u32::try_from(self.windows.len()).unwrap_or(u32::MAX);
                 let panes = u32::try_from(
@@ -805,6 +852,8 @@ impl super::App {
         }
 
         if !tracing::enabled!(target: "memory", tracing::Level::DEBUG) {
+            // When: tracing has no memory-target reader at debug level; the per-pane
+            // walk below is debug-only, and the totals above already emitted.
             return false;
         }
 

@@ -1,6 +1,6 @@
 //! Cross-platform PTY spawning.
 //!
-//! Wraps the [`portable-pty`] crate so callers don't need to depend on it
+//! Wraps the `portable-pty` crate so callers don't need to depend on it
 //! directly. `PtyHandle` owns the slave-side child and the master read/write
 //! pair, all decoupled by channels for use from the render thread.
 
@@ -119,13 +119,16 @@ struct RingCharge {
 }
 
 impl RingCharge {
+    // Ordering: `ring_bytes` uses `AcqRel` for atomic charge accounting; it does not guard ring memory.
     fn new(bytes: usize, meter: &Arc<QueuedOutputMeter>) -> Arc<Self> {
         meter.ring_bytes.fetch_add(bytes, Ordering::AcqRel);
         Arc::new(Self { bytes, meter: meter.clone() })
     }
 }
 
+// Lifecycle: dropping `RingCharge` releases its `ring_bytes` allocation charge.
 impl Drop for RingCharge {
+    // Ordering: `ring_bytes` uses `AcqRel` for atomic charge accounting; it does not synchronize ring release.
     fn drop(&mut self) {
         self.meter.ring_bytes.fetch_sub(self.bytes, Ordering::AcqRel);
     }
@@ -146,6 +149,7 @@ pub struct PtyOutputChunk {
 }
 
 impl PtyOutputChunk {
+    // Ordering: `payload_bytes` uses `AcqRel` for atomic payload accounting; it does not guard chunk data.
     fn new(bytes: Bytes, ring: Arc<RingCharge>, meter: &Arc<QueuedOutputMeter>) -> Self {
         meter.payload_bytes.fetch_add(bytes.len(), Ordering::AcqRel);
         Self { bytes, _ring: ring, meter: meter.clone() }
@@ -169,7 +173,9 @@ impl PtyOutputChunk {
     }
 }
 
+// Lifecycle: dropping `PtyOutputChunk` releases its `payload_bytes` queue charge.
 impl Drop for PtyOutputChunk {
+    // Ordering: `payload_bytes` uses `AcqRel` for atomic payload accounting; it does not synchronize chunk release.
     fn drop(&mut self) {
         self.meter.payload_bytes.fetch_sub(self.bytes.len(), Ordering::AcqRel);
     }
@@ -209,6 +215,10 @@ pub struct PtyChildExitProbe {
 
 impl PtyChildExitProbe {
     /// Return whether the child has exited without waiting for it.
+    ///
+    /// On Unix, observing a pending child exit also signals the child's process
+    /// group before returning `true`, so background descendants cannot survive
+    /// after the shell leader exits.
     pub fn has_exited(&self) -> Result<bool> {
         let mut child = self.child.lock();
         #[cfg(windows)]
@@ -216,13 +226,16 @@ impl PtyChildExitProbe {
         #[cfg(unix)]
         {
             if child.exited {
+                // When: `child.exited` records an earlier observation, so no new OS probe is needed.
                 return Ok(true);
             }
             let Some(pid) = child.child.process_id() else {
+                // When: `process_id` is unavailable, Unix cannot inspect an unreaped leader yet.
                 return Ok(false);
             };
             let observed = unix_child_exit_pending(pid)?;
             if !observed.pending {
+                // When: `pending` is false while the leader still runs, so teardown must not start.
                 return Ok(false);
             }
             // Recorded before signalling the group: teardown reaps the child,
@@ -262,11 +275,12 @@ struct UnixExitObservation {
 
 #[cfg(unix)]
 fn unix_child_exit_pending(pid: u32) -> std::io::Result<UnixExitObservation> {
-    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-    // SAFETY: info points to writable siginfo storage. WNOWAIT observes the
-    // exited leader without reaping it, keeping its pid/pgid reserved until
-    // teardown has signalled the process group.
-    let result = unsafe {
+    let mut info: libc::siginfo_t =
+        // SAFETY: zeroed `siginfo_t` is valid writable storage for `waitid` to initialize.
+        unsafe { std::mem::zeroed() };
+    let result =
+        // SAFETY: `info` is writable; `pid` identifies our child, and `WNOWAIT` preserves it for group signalling.
+        unsafe {
         libc::waitid(
             libc::P_PID,
             pid as libc::id_t,
@@ -275,16 +289,25 @@ fn unix_child_exit_pending(pid: u32) -> std::io::Result<UnixExitObservation> {
         )
     };
     if result == -1 {
+        // When: `result` is -1, so preserve the kernel error instead of interpreting `info`.
         return Err(std::io::Error::last_os_error());
     }
-    let pending = unsafe { info.si_pid() } != 0;
+    let pending =
+        // SAFETY: `info` was zeroed first, so `si_pid` is valid whether or not `waitid` wrote a status.
+        unsafe { info.si_pid() }
+            != 0;
     if !pending {
+        // When: `pending` is false, `WNOHANG` found no child exit status to record.
         return Ok(UnixExitObservation { pending: false, was_clean: None });
     }
     // `si_code` distinguishes a normal exit from a signal death; `si_status`
     // carries the exit code only in the former case. A child killed by a
     // signal is not a clean exit, and neither is a nonzero code.
-    let (code, status) = (info.si_code, unsafe { info.si_status() });
+    let (code, status) = (
+        info.si_code,
+        // SAFETY: pending exit status from `waitid` initialized the `si_status` union field.
+        unsafe { info.si_status() },
+    );
     let was_clean = match code {
         libc::CLD_EXITED => Some(status == 0),
         // Killed, dumped, trapped, stopped: not a clean exit, and we know it.
@@ -322,6 +345,7 @@ impl ChildState {
 
     fn has_exited(&mut self) -> std::io::Result<bool> {
         if self.exited {
+            // When: `self.exited` already consumed the status, so another `try_wait` cannot add information.
             return Ok(true);
         }
         if let Some(status) = self.child.try_wait()? {
@@ -350,6 +374,7 @@ where
 {
     signal_process_group(child, signal_group)?;
     if child.has_exited()? {
+        // When: `child` has exited after group signalling, so direct-pid termination is unnecessary.
         return Ok(());
     }
     if let Some(pid) = child.process_id() {
@@ -363,6 +388,7 @@ where
     G: FnMut(u32) -> std::io::Result<()>,
 {
     if child.process_group_signalled {
+        // When: `process_group_signalled` prevents duplicate group kills across teardown retries.
         return Ok(());
     }
     if let Some(unix_session_id) = child.unix_session_id {
@@ -384,7 +410,10 @@ fn unix_session_pids(session_id: u32) -> std::io::Result<Vec<u32>> {
     Ok(pids_by_type(ProcFilter::All)?
         .into_iter()
         .filter(|pid| {
-            *pid != 0 && unsafe { libc::getsid(*pid as libc::pid_t) } == session_id as libc::pid_t
+            *pid != 0
+                &&
+                // SAFETY: nonzero `pid` came from the live process table; `getsid` only reads its session id.
+                unsafe { libc::getsid(*pid as libc::pid_t) } == session_id as libc::pid_t
         })
         .collect())
 }
@@ -395,9 +424,14 @@ fn unix_session_pids(session_id: u32) -> std::io::Result<Vec<u32>> {
     for entry in std::fs::read_dir("/proc")? {
         let entry = entry?;
         let Some(pid) = entry.file_name().to_string_lossy().parse::<u32>().ok() else {
+            // When: a `/proc` entry is not a numeric `pid`, it cannot identify a session member.
             continue;
         };
-        if (unsafe { libc::getsid(pid as libc::pid_t) }) == session_id as libc::pid_t {
+        if (
+            // SAFETY: `pid` was parsed from a `/proc` process entry; `getsid` only reads its session id.
+            unsafe { libc::getsid(pid as libc::pid_t) }
+        ) == session_id as libc::pid_t
+        {
             pids.push(pid);
         }
     }
@@ -408,6 +442,7 @@ fn unix_session_pids(session_id: u32) -> std::io::Result<Vec<u32>> {
 fn terminate_unix_session(session_id: u32) -> std::io::Result<()> {
     // Signal the shell's original process group even if process-table access
     // is restricted.
+    // SAFETY: negative `session_id` targets the child-created process group; `kill` receives no pointers.
     unsafe {
         libc::kill(-(session_id as libc::pid_t), libc::SIGKILL);
     }
@@ -417,13 +452,18 @@ fn terminate_unix_session(session_id: u32) -> std::io::Result<()> {
             .filter(|pid| *pid != session_id && *pid != std::process::id())
             .collect::<Vec<_>>();
         if members.is_empty() {
+            // When: `members` is empty, every descendant is gone and session cleanup is complete.
             return Ok(());
         }
         for pid in members {
             // Recheck membership immediately before signalling.
-            if unsafe { libc::getsid(pid as libc::pid_t) } != session_id as libc::pid_t {
+            if
+            // SAFETY: `pid` was just enumerated as a live process; `getsid` only reads its session id.
+            unsafe { libc::getsid(pid as libc::pid_t) } != session_id as libc::pid_t {
+                // When: `getsid` no longer matches, pid reuse makes signalling this process unsafe.
                 continue;
             }
+            // SAFETY: membership was rechecked immediately above; `kill` receives the member pid by value.
             unsafe {
                 libc::kill(pid as libc::pid_t, libc::SIGKILL);
             }
@@ -471,12 +511,14 @@ fn pty_input_channel() -> (Sender<Outgoing>, Receiver<Outgoing>) {
     crossbeam_channel::bounded(PTY_INPUT_QUEUE_CAPACITY)
 }
 
+// Ordering: `queued_bytes` uses `Relaxed`; channel ownership supplies ordering, while the atomic tracks byte accounting only.
 fn try_queue_pty_input(
     tx: &Sender<Outgoing>,
     queued_bytes: &AtomicUsize,
     bytes: Vec<u8>,
 ) -> Result<(), PtyInputError> {
     if !pty_input_message_allowed(bytes.len()) {
+        // When: `bytes` exceeds the cap, reject it before charging or entering the bounded queue.
         return Err(PtyInputError::MessageTooLarge(bytes));
     }
     // Counted before the send, because once the message is in the channel the
@@ -496,6 +538,7 @@ fn try_queue_pty_input(
     })
 }
 
+/// Reports whether one input message fits the enforced per-message byte cap.
 #[must_use]
 pub fn pty_input_message_allowed(bytes: usize) -> bool {
     bytes <= MAX_PTY_INPUT_MESSAGE_BYTES
@@ -527,6 +570,7 @@ pub const fn max_pty_queued_input_bytes() -> usize {
 /// Maintained by the chunks as they are created and dropped, so this observes
 /// without consuming and may be sampled from any thread without disturbing the
 /// pump.
+// Ordering: `ring_bytes` uses `Acquire` to sample the atomic accounting value, not to guard ring memory.
 #[must_use]
 pub fn queued_output_bytes(handle: &PtyHandle) -> usize {
     handle.output_meter.ring_bytes.load(Ordering::Acquire)
@@ -537,6 +581,7 @@ pub fn queued_output_bytes(handle: &PtyHandle) -> usize {
 /// The sum of the queued view lengths — what the VT thread still has to parse.
 /// This is not the memory cost: 64 keystroke echoes are 64 bytes here and
 /// 65,536 bytes of pinned ring. [`queued_output_bytes`] reports the latter.
+// Ordering: `payload_bytes` uses `Acquire` to sample the atomic accounting value, not to guard payload data.
 #[must_use]
 pub fn queued_output_payload_bytes(handle: &PtyHandle) -> usize {
     handle.output_meter.payload_bytes.load(Ordering::Acquire)
@@ -560,6 +605,7 @@ pub const fn max_queued_output_ring_bytes() -> usize {
     PTY_OUTPUT_QUEUE_CAPACITY.saturating_mul(PTY_READ_RING_BYTES)
 }
 
+// Ordering: `ACTIVE_PTY_IO_THREADS` uses `Acquire` only for the test-visible atomic thread count.
 #[cfg(all(test, windows))]
 #[must_use]
 fn active_pty_io_threads() -> usize {
@@ -569,13 +615,16 @@ fn active_pty_io_threads() -> usize {
 struct ActivePtyIoThread;
 
 impl ActivePtyIoThread {
+    // Ordering: `ACTIVE_PTY_IO_THREADS` uses `AcqRel` for counting; only tests read it, so it orders no production state.
     fn enter() -> Self {
         ACTIVE_PTY_IO_THREADS.fetch_add(1, Ordering::AcqRel);
         Self
     }
 }
 
+// Lifecycle: dropping `ActivePtyIoThread` releases its `ACTIVE_PTY_IO_THREADS` count.
 impl Drop for ActivePtyIoThread {
+    // Ordering: `ACTIVE_PTY_IO_THREADS` uses `AcqRel` for counting; only tests read it, so it orders no production state.
     fn drop(&mut self) {
         ACTIVE_PTY_IO_THREADS.fetch_sub(1, Ordering::AcqRel);
     }
@@ -592,7 +641,10 @@ impl PtyIoThread {
         use std::os::windows::io::AsRawHandle;
         use windows::Win32::{Foundation::HANDLE, System::IO::CancelSynchronousIo};
 
-        let Some(handle) = self.handle.as_ref() else { return };
+        let Some(handle) = self.handle.as_ref() else {
+            // When: `handle` absent means the thread was finished or detached, leaving no I/O to cancel.
+            return;
+        };
         let thread_handle = HANDLE(handle.as_raw_handle());
         // SAFETY: JoinHandle owns a live Windows thread handle. Cancellation
         // only interrupts that thread's pending synchronous I/O.
@@ -618,6 +670,7 @@ impl PtyIoThread {
                 }
             }
         } else {
+            // When: `finished` is false, detach after warning rather than blocking shutdown past its bound.
             tracing::warn!("{name} did not exit within the PTY shutdown timeout");
             self.handle.take();
         }
@@ -671,10 +724,6 @@ pub struct PtyHandle {
 /// pass `clean_e2e: true` to suppress profile/logo and emit shell-family-
 /// specific clean-startup args.
 ///
-/// Added — pre-PR examples sent POSIX `printf` to PowerShell,
-/// producing zero output. PLAN v5 split the fix into:
-///   1. (this) — add opts + WindowsApps stub filter + shell-path accessor
-///   2. (next PR) — ShellDialect trait + golden fixtures + actual e2e fix
 #[derive(Clone, Debug)]
 pub struct ShellSpawnOpts {
     /// Suppress shell startup banner/profile and emit clean-mode args
@@ -713,16 +762,20 @@ impl PtyHandle {
     /// no-op because the underlying handle will report it's already gone.
     /// Called automatically on Drop, but exposed for callers that want
     /// deterministic shutdown earlier.
-    pub fn kill(&self) {
-        let mut child = self.child.lock();
-        let _ = terminate_child_for_platform(&mut child);
+    ///
+    /// # Errors
+    ///
+    /// Returns the platform termination error so explicit shutdown callers can
+    /// report or retry a child that could not be stopped.
+    pub fn kill(&self) -> std::io::Result<()> {
+        terminate_child_for_platform(&mut self.child.lock())
     }
 
     /// Process id of the underlying shell, if the platform reports it. Used
     /// by the tab-title renderer to probe the foreground process running in
-    /// this pane's pty (e.g. "zsh" vs "nvim" vs "ssh"). Returns `None` if
-    /// the OS layer doesn't expose a pid (rare) or if the child has already
-    /// exited.
+    /// this pane's pty (e.g. "zsh" vs "nvim" vs "ssh"). Returns `None` once
+    /// SonicTerm has observed exit; a natural exit can remain visible until
+    /// the next child-exit probe.
     pub fn pid(&self) -> Option<u32> {
         self.child.lock().process_id()
     }
@@ -754,6 +807,7 @@ impl PtyHandle {
     /// them is the difference between kilobytes and tens of megabytes.
     ///
     /// Observes without consuming, so any thread may sample it.
+    // Ordering: `queued_input_bytes` uses `Relaxed`; it is an accounting snapshot, not a synchronization edge.
     #[must_use]
     pub fn queued_input_bytes(&self) -> usize {
         self.queued_input_bytes.load(Ordering::Relaxed)
@@ -775,6 +829,7 @@ impl PtyHandle {
     }
 }
 
+// Lifecycle: dropping `PtyHandle` invokes `run_pty_teardown` for bounded I/O cancellation, child cleanup, and master close.
 impl Drop for PtyHandle {
     fn drop(&mut self) {
         let resize = std::mem::replace(&mut self.resize, Box::new(|_, _| {}));
@@ -834,6 +889,7 @@ impl PtyTeardownOps for PtyHandleTeardown<'_> {
             tracing::warn!(%error, "failed to terminate PTY child");
             self.termination_failed = true;
         } else {
+            // When: `result` succeeded, no termination retry is needed before leader reaping.
             self.termination_failed = false;
         }
     }
@@ -848,6 +904,7 @@ impl PtyTeardownOps for PtyHandleTeardown<'_> {
         if let (Some(reader), Some(resize)) =
             (self.handle.conpty_drain_reader.take(), self.resize.take())
         {
+            // When: both `conpty_drain_reader` and `resize` remain, close the master while output drains.
             let completed =
                 close_master_with_drain(reader, move || drop(resize), CONPTY_CLOSE_TIMEOUT);
             if !completed {
@@ -860,14 +917,17 @@ impl PtyTeardownOps for PtyHandleTeardown<'_> {
 
     fn reap_child(&mut self) {
         if self.termination_failed {
+            // When: `termination_failed` requests bounded retries before any leader reap can lose group identity.
             let deadline = Instant::now() + PTY_IO_SHUTDOWN_TIMEOUT;
             loop {
                 match terminate_child_for_platform(&mut self.handle.child.lock()) {
                     Ok(()) => {
+                        // When: `terminate_child_for_platform` succeeds, clear the retry flag before reaping.
                         self.termination_failed = false;
                         break;
                     }
                     Err(error) if Instant::now() >= deadline => {
+                        // When: `deadline` expired, leave the leader unreaped so its session id is not reused unsafely.
                         tracing::warn!(
                             %error,
                             "PTY session cleanup failed through the shutdown deadline; leader left unreaped"
@@ -880,11 +940,13 @@ impl PtyTeardownOps for PtyHandleTeardown<'_> {
         }
         let mut child = self.handle.child.lock();
         if child.exited {
+            // When: `child.exited` means a prior path already reaped the leader, so no status remains.
             return;
         }
         let pid_for_log = child.process_id();
         let deadline = std::time::Instant::now() + PTY_IO_SHUTDOWN_TIMEOUT;
         loop {
+            // When: `has_exited` true completes reaping; errors or the deadline stop bounded retries.
             match child.has_exited() {
                 Ok(true) => break,
                 Ok(false) if std::time::Instant::now() >= deadline => {
@@ -915,6 +977,7 @@ fn close_master_with_drain(
         match thread::Builder::new().name("sonic-conpty-drain".into()).spawn(move || {
             let mut buffer = [0u8; 8192];
             loop {
+                // When: `reader.read` data keeps draining; EOF or error ends it so ConPTY close can settle.
                 match reader.read(&mut buffer) {
                     Ok(0) | Err(_) => break,
                     Ok(_) => {}
@@ -924,6 +987,7 @@ fn close_master_with_drain(
         }) {
             Ok(thread) => thread,
             Err(error) => {
+                // When: drain `spawn` failed, leak `close_master` rather than close an undrained ConPTY, which can deadlock.
                 tracing::warn!(%error, "failed to spawn ConPTY drain thread");
                 std::mem::forget(close_master);
                 return false;
@@ -937,6 +1001,7 @@ fn close_master_with_drain(
         }) {
             Ok(thread) => thread,
             Err(error) => {
+                // When: close `spawn` fails, detach the active drainer and report incomplete close.
                 tracing::warn!(%error, "failed to spawn ConPTY close thread");
                 std::mem::forget(drain_thread);
                 return false;
@@ -948,17 +1013,21 @@ fn close_master_with_drain(
         Ok(()) | Err(crossbeam_channel::RecvTimeoutError::Disconnected)
     );
     if close_finished {
+        // When: `close_finished` permits joining the closer and waiting briefly for the drainer to observe EOF.
         let _ = close_thread.join();
         let drain_finished = matches!(
             drain_done_rx.recv_timeout(timeout),
             Ok(()) | Err(crossbeam_channel::RecvTimeoutError::Disconnected)
         );
         if drain_finished {
+            // When: `drain_finished` confirms the drainer exited, so joining cannot block beyond the deadline.
             let _ = drain_thread.join();
         } else {
+            // When: `drain_finished` is false, detach the drainer rather than extending Drop.
             drop(drain_thread);
         }
     } else {
+        // When: `close_finished` is false, detach both native workers so Drop remains bounded.
         drop(close_thread);
         drop(drain_thread);
     }
@@ -969,6 +1038,7 @@ fn apply_child_cwd(builder: &mut CommandBuilder, explicit: Option<&Path>, home: 
     if let Some(cwd) = explicit.filter(|cwd| cwd.is_dir()) {
         builder.cwd(cwd);
     } else if let Some(home) = home {
+        // When: `home` exists but no valid explicit directory does, use it as the child fallback.
         builder.cwd(home);
     }
 }
@@ -1006,6 +1076,7 @@ impl PtyHandle {
     }
 
     /// Internal: spawn `cmd` with `args` and explicit environment options.
+    // Ordering: `last_resize` uses `Relaxed`; it only deduplicates callback-local sizes and guards no other state.
     #[doc(hidden)]
     pub fn spawn_with_args_and_opts(
         cmd: &str,
@@ -1066,6 +1137,7 @@ impl PtyHandle {
         let resize = Box::new(move |cols: u16, rows: u16| {
             let packed = (u32::from(cols) << 16) | u32::from(rows);
             if last_resize.swap(packed, std::sync::atomic::Ordering::Relaxed) == packed {
+                // When: `last_resize` already equals `packed`, suppress a native reflow with unchanged geometry.
                 return;
             }
             // The public callback currently returns `()`, so this error cannot
@@ -1162,6 +1234,7 @@ fn spawn_reader_thread(
                 let initial_len = buf.len();
                 let read_cap = buf.capacity() - initial_len;
                 buf.resize(initial_len + read_cap, 0);
+                // When: `reader` data publishes its initialized prefix; EOF or error stops the pump.
                 match reader.read(&mut buf[initial_len..]) {
                     Ok(0) => break,
                     Ok(n) => {
@@ -1180,6 +1253,7 @@ fn spawn_reader_thread(
                         };
                         let chunk = PtyOutputChunk::new(chunk, charge, &meter);
                         if !send_pty_output(&tx, &cancel, chunk) {
+                            // When: `send_pty_output` reports cancellation or disconnection, stop the reader pump.
                             break;
                         }
                     }
@@ -1201,6 +1275,7 @@ fn spawn_reader_thread(
     PtyIoThread { handle: Some(handle), done }
 }
 
+// Ordering: `queued_bytes` uses `Relaxed`; channel transfer defines ownership, and the atomic reports queue accounting only.
 fn spawn_writer_thread(
     mut writer: Box<dyn Write + Send>,
     rx: Receiver<Outgoing>,
@@ -1227,6 +1302,7 @@ fn spawn_writer_thread(
                 // uncounted once when it leaves, so this cannot underflow.
                 queued_bytes.fetch_sub(bytes.len(), Ordering::Relaxed);
                 if let Err(e) = writer.write_all(&bytes) {
+                    // When: `write_all` fails, report it unless cancellation intentionally interrupted I/O.
                     if cancel.try_recv().is_err() {
                         tracing::warn!("pty write error: {e}");
                     }
@@ -1273,6 +1349,7 @@ pub fn shell_startup_args(shell_path: &str, opts: ShellSpawnOpts) -> Vec<String>
     if opts.clean_e2e {
         clean_e2e_args(shell_path)
     } else {
+        // When: `clean_e2e` is false, preserve the selected shell's normal interactive startup.
         interactive_shell_args(shell_path)
     }
 }
@@ -1294,6 +1371,7 @@ fn apply_terminal_locale_env(builder: &mut CommandBuilder) {
 #[cfg(not(target_os = "macos"))]
 fn apply_terminal_locale_env(_builder: &mut CommandBuilder) {}
 
+/// Reports whether macOS needs a UTF-8 locale fallback without overriding `LC_ALL`.
 #[doc(hidden)]
 pub fn should_apply_utf8_locale_fallback(
     lc_all: Option<&str>,
@@ -1301,16 +1379,19 @@ pub fn should_apply_utf8_locale_fallback(
     lang: Option<&str>,
 ) -> bool {
     if !is_empty_env(lc_all) {
+        // When: `lc_all` is explicit, it overrides lower-priority locale variables and must be preserved.
         return false;
     }
     !is_utf8_locale(lc_ctype) && !is_utf8_locale(lang)
 }
 
+/// Returns the `LANG` value used when no locale variables are set.
 #[doc(hidden)]
 pub const fn default_lang_utf8_locale() -> &'static str {
     DEFAULT_LANG_UTF8_LOCALE
 }
 
+/// Returns the UTF-8 `LC_CTYPE` value used by the macOS fallback.
 #[doc(hidden)]
 pub const fn default_lc_ctype_utf8_locale() -> &'static str {
     DEFAULT_LC_CTYPE_UTF8_LOCALE
@@ -1321,7 +1402,10 @@ fn is_empty_env(value: Option<&str>) -> bool {
 }
 
 fn is_utf8_locale(value: Option<&str>) -> bool {
-    let Some(value) = value else { return false };
+    let Some(value) = value else {
+        // When: `value` absent means no locale spelling can advertise UTF-8.
+        return false;
+    };
     let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
     normalized.contains("utf-8") || normalized.contains("utf8")
 }
@@ -1399,8 +1483,10 @@ fn registered_pwsh() -> Option<String> {
 
     const MAX_PATH_BYTES: u32 = 64 * 1024 + 2;
     let mut bytes = 0u32;
-    let status = unsafe {
-        RegGetValueW(
+    let status =
+        // SAFETY: this size query passes no data buffer and gives `bytes` as writable output storage.
+        unsafe {
+            RegGetValueW(
             HKEY_CURRENT_USER,
             w!("Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\pwsh.exe"),
             PCWSTR::null(),
@@ -1408,15 +1494,18 @@ fn registered_pwsh() -> Option<String> {
             None,
             None,
             Some(&mut bytes),
-        )
-    };
+            )
+        };
     if status != ERROR_SUCCESS || !(2..=MAX_PATH_BYTES).contains(&bytes) {
+        // When: `status` failed or `bytes` is implausible, do not allocate from untrusted registry size data.
         return None;
     }
 
     let mut value = vec![0u16; (bytes as usize).div_ceil(2)];
-    let status = unsafe {
-        RegGetValueW(
+    let status =
+        // SAFETY: `value` is writable for the byte count returned by the prior successful size query.
+        unsafe {
+            RegGetValueW(
             HKEY_CURRENT_USER,
             w!("Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\pwsh.exe"),
             PCWSTR::null(),
@@ -1424,9 +1513,10 @@ fn registered_pwsh() -> Option<String> {
             None,
             Some(value.as_mut_ptr().cast::<c_void>()),
             Some(&mut bytes),
-        )
-    };
+            )
+        };
     if status != ERROR_SUCCESS {
+        // When: the registry value read `status` failed, so `value` does not contain a usable path.
         return None;
     }
 
@@ -1460,6 +1550,7 @@ fn windowsapps_store_pwsh() -> Option<String> {
         // resource package (no real exe). The arch'd package
         // (`Microsoft.PowerShell_<ver>_x64__<pub>`) carries `pwsh.exe`.
         if !lname.starts_with("microsoft.powershell_") {
+            // When: `lname` is outside the PowerShell package family, it cannot contain the target executable.
             continue;
         }
         let pwsh = dir.join("pwsh.exe");
@@ -1516,6 +1607,7 @@ fn default_shell_program() -> String {
 fn path_lookup(name: &str) -> Option<String> {
     let candidate = Path::new(name);
     if candidate.components().count() > 1 && candidate.is_file() {
+        // When: `candidate` is an explicit existing path, return it without consulting PATH.
         return Some(candidate.to_string_lossy().to_string());
     }
     let path = std::env::var_os("PATH")?;
@@ -1525,6 +1617,7 @@ fn path_lookup(name: &str) -> Option<String> {
         .map(|dir: PathBuf| dir.join(name))
         .find(|candidate| {
             if !candidate.is_file() {
+                // When: `candidate` is not a file, PATH lookup cannot spawn it.
                 return false;
             }
             // skip Microsoft Store WindowsApps stubs for `pwsh.exe` /
@@ -1534,6 +1627,7 @@ fn path_lookup(name: &str) -> Option<String> {
             let lname = name.to_ascii_lowercase();
             let is_powershell = lname.ends_with("pwsh.exe") || lname.ends_with("powershell.exe");
             if is_powershell && !allow_windowsapps {
+                // When: `is_powershell` and aliases are disallowed, reject only a per-user WindowsApps stub.
                 let lpath = candidate.to_string_lossy().to_lowercase();
                 // Skip only per-user App Execution Alias stubs. The real
                 // Microsoft Store PowerShell package also lives under a
@@ -1543,6 +1637,7 @@ fn path_lookup(name: &str) -> Option<String> {
                 // fall back to Windows PowerShell 5.1, whose PSReadLine redraw
                 // path emits literal `?` bytes for CJK edits.
                 if is_windowsapps_alias_stub_path(&lpath) {
+                    // When: `lpath` matched the per-user alias stub path, so skip it.
                     return false;
                 }
             }
@@ -1613,6 +1708,7 @@ fn term_program_version(term_program: &str) -> &'static str {
 /// with a DCS query instead of enabling the feature outright.
 const WEZTERM_ADVERTISED_VERSION: &str = "20230712-072601";
 
+/// Applies terminal capability, identity, and locale variables to a child command.
 pub fn apply_child_pty_env(builder: &mut CommandBuilder, term_program: &str) {
     builder.env("TERM", "xterm-256color");
     builder.env("COLORTERM", "truecolor");

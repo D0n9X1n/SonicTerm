@@ -84,6 +84,7 @@ pub struct RasterizedGlyph {
 /// Rasterizes the specified glyph index in the associated font
 /// and returns the generated bitmap
 pub trait FontRasterizer {
+    /// Rasterize one glyph at the requested point size and DPI.
     fn rasterize_glyph(
         &self,
         glyph_pos: u32,
@@ -92,6 +93,7 @@ pub trait FontRasterizer {
     ) -> anyhow::Result<RasterizedGlyph>;
 }
 
+/// Construct the selected rasterizer, using FreeType as the non-Windows DirectWrite fallback.
 pub fn new_rasterizer(
     rasterizer: FontRasterizerSelection,
     handle: &ParsedFont,

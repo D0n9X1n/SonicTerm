@@ -19,6 +19,7 @@ pub struct Rect {
 }
 
 impl Rect {
+    /// Build a rectangle from its top-left origin and size in physical pixels.
     pub fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
         Self { x, y, w, h }
     }
@@ -36,6 +37,7 @@ pub struct Point {
 }
 
 impl Point {
+    /// Build a point in physical pixels, matching the coordinate space of [`Rect`].
     pub fn new(x: f32, y: f32) -> Self {
         Self { x, y }
     }
@@ -82,13 +84,16 @@ pub fn compute(
     width_px: f32,
 ) -> Option<ScrollbarGeometry> {
     if matches!(mode, ScrollbarMode::Never) {
+        // When: `mode` matches `ScrollbarMode::Never`, the bar is suppressed and has no geometry.
         return None;
     }
     if viewport_rows == 0 || width_px <= 0.0 || pane_rect.w <= 0.0 || pane_rect.h <= 0.0 {
+        // When: `viewport_rows` or `width_px` is degenerate, no track could be drawn at a usable size.
         return None;
     }
     let vp = viewport_rows as u64;
     if total_rows <= vp {
+        // When: `total_rows` fits within `vp`, nothing scrolled off-screen, so the bar stays hidden.
         return None;
     }
     let total = total_rows;
@@ -106,6 +111,7 @@ pub fn compute(
     let scroll_frac = if max_view_top == 0 {
         0.0
     } else {
+        // When: `max_view_top` is nonzero, clamping `view_top` to it keeps the fraction inside 0..=1.
         (view_top.min(max_view_top) as f32) / (max_view_top as f32)
     };
     let thumb_y = track_rect.y + scroll_frac * (track_rect.h - thumb_h);
@@ -117,14 +123,17 @@ pub fn compute(
 /// Classify a point against a precomputed geometry.
 pub fn hit_test(geometry: &ScrollbarGeometry, point: Point) -> HitTarget {
     if !geometry.track_rect.contains(point) {
+        // When: `point` falls outside `track_rect`, the pointer is over pane content, not the bar.
         return HitTarget::None;
     }
     if geometry.thumb_rect.contains(point) {
+        // When: `point` is inside `thumb_rect`, the press begins a drag rather than a page jump.
         return HitTarget::Thumb;
     }
     if point.y < geometry.thumb_rect.y {
         HitTarget::TrackAbove
     } else {
+        // When: `point` sits below `thumb_rect`, the page jump moves toward the live edge.
         HitTarget::TrackBelow
     }
 }
@@ -142,10 +151,12 @@ pub fn thumb_to_view_top(
     let vp = viewport_rows as u64;
     let max_view_top = total_rows.saturating_sub(vp);
     if max_view_top == 0 {
+        // When: `max_view_top` is zero, every row already fits, so dragging cannot move the view.
         return 0;
     }
     let travel = (geometry.track_rect.h - geometry.thumb_rect.h).max(0.0);
     if travel <= 0.0 {
+        // When: `travel` is nonpositive, the thumb fills the track and no drag distance maps to rows.
         return 0;
     }
     let dy = (thumb_y - geometry.track_rect.y).clamp(0.0, travel);

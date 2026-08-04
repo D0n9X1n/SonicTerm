@@ -5254,7 +5254,6 @@ dependencies = [
  "image",
  "lazy_static",
  "log",
- "memmap2",
  "metrics",
  "num",
  "objc",

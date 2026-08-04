@@ -92,7 +92,10 @@ Normal PR/main CI runs workspace unit tests plus a per-crate unit/build gate:
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-io --no-deps --features ssh
 cargo test --workspace --lib --bins
+bash scripts/check-authored-rust-comments.sh
 bash scripts/check-no-raw-process-exit.sh
 bash scripts/check-rust-version.sh
 bash scripts/check-window-owner-registration.sh
@@ -245,6 +248,19 @@ a reproduction.
   (`vt_tests.rs`) exist for this and carry the measured failure rate in their
   docs. Hold one for the whole life of any capture or charge the test creates,
   not merely while asserting about it.
+- **Authored Rust comments are enforced contracts.** Effectively public
+  functions and public trait functions require concise purpose Rustdoc; public
+  unsafe functions also require a `# Safety` section. Objective control-flow
+  boundaries require substantive `// When:` rationale, while mechanical value
+  selectors remain checker advisories. Every unsafe boundary requires
+  `// SAFETY:`, functions that order distinct locks require `// Lock order:`,
+  non-`SeqCst` atomic protocols require `// Ordering:`, and `Drop`
+  implementations require `// Lifecycle:`. Keep each marker at the exact anchor
+  accepted by `scripts/check-authored-rust-comments.sh`, bind its prose to the
+  relevant identifiers, and keep it within two comment lines and 160 characters.
+  The checker excludes vendored, generated, preserved-upstream, build, and
+  ordinary test contexts from non-safety rules; unsafe constructs still require
+  `// SAFETY:` in test code.
 - **Comments describe behavior, not history.** Explain what the code does and
   the problem it solves; do not cite issue/PR/Epic numbers or reviewer names
   in comments, log strings, or panic messages.

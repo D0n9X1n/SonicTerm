@@ -10,6 +10,7 @@
 
 use std::io::{BufRead, Write};
 
+// Lock order: acquire the `stdout` lock before the `stdin` lock for the helper's full exchange.
 fn main() {
     let stdout = std::io::stdout();
     let stdin = std::io::stdin();

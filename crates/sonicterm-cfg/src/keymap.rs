@@ -15,10 +15,16 @@ pub use sonicterm_types::{Action, BroadcastScope, Direction, ScrollAction};
 /// user keymap file.
 pub const fn platform_default_keymap_name() -> &'static str {
     if cfg!(target_os = "windows") {
+        // When: target_os is windows, so the seeded user keymap carries the
+        // Windows binding set.
         "sonicterm-windows"
     } else if cfg!(target_os = "macos") {
+        // When: target_os is macos, so the seeded user keymap carries the
+        // Apple binding set.
         "sonicterm-macos"
     } else {
+        // When: cfg matched neither Windows nor Apple, so the Linux binding
+        // set is the remaining default.
         "sonicterm-linux"
     }
 }
@@ -33,6 +39,8 @@ pub fn default_user_keymap_path() -> Option<std::path::PathBuf> {
 /// platform default if necessary.
 pub fn ensure_user_keymap_file(path: &Path) -> Result<()> {
     if path.exists() {
+        // When: path already exists, so seeding is skipped and the user's own
+        // edits survive.
         return Ok(());
     }
     if let Some(parent) = path.parent() {
@@ -165,12 +173,16 @@ impl Keymap {
     pub fn resolve_path(keymap: &str, asset_dir: &Path) -> PathBuf {
         let raw = Path::new(keymap);
         if raw.is_absolute() || raw.extension().is_some() || raw.components().count() > 1 {
+            // When: raw already looks like a path, so it is used verbatim and
+            // neither directory is searched.
             return raw.to_path_buf();
         }
         if let Some(user) = crate::config::default_config_dir()
             .map(|dir| dir.join("keymaps").join(format!("{keymap}.toml")))
             .filter(|path| path.exists())
         {
+            // When: a keymap of this name exists under the user config dir, it
+            // takes precedence over the bundled asset copy.
             return user;
         }
         asset_dir.join("keymaps").join(format!("{keymap}.toml"))
@@ -188,21 +200,12 @@ impl Keymap {
 
     /// Load a keymap from a TOML file at `path`, resiliently.
     ///
-    /// Historically this did one whole-document `toml::from_str::<Keymap>`,
-    /// so a single binding referencing an unknown/removed action (e.g.
-    /// `show_keymap_cheatsheet` after) failed the entire parse — at
-    /// which point `load_or_default` silently dropped *every* binding and
-    /// fell back to the bundled default, discarding all the user's
-    /// customizations. See.
-    ///
-    /// Now the parse is per-binding: each binding whose action can't be
-    /// resolved is skipped with a `WARN` that names the offending `keys`,
-    /// and the remaining bindings are kept. `Err` is returned only on a
-    /// *structural* problem (invalid TOML, missing `[meta]`), which still
-    /// warrants the bundled-default fallback. This honors the crate's
-    /// guardrail: "preserve unknown/future keys where possible" and
-    /// "surface parse errors clearly instead of silently accepting bad
-    /// config".
+    /// The parse is per-binding: each binding whose action cannot be resolved
+    /// is skipped with a `WARN` that names the offending `keys`, and the
+    /// remaining bindings are kept, so one unknown action variant never
+    /// discards the user's other customizations. `Err` is returned only for a
+    /// *structural* problem (invalid TOML, missing `[meta]`), which is the case
+    /// that warrants [`Self::load_or_default`]'s bundled-default fallback.
     pub fn load_strict(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path).with_context(|| format!("read {path:?}"))?;
         Self::parse_resilient(&text, &format!("{path:?}"))
@@ -213,8 +216,8 @@ impl Keymap {
     ///
     /// `source` is a human label used in warnings/errors (typically the
     /// quoted path). Returns `Err` only for structural TOML errors — a bad
-    /// action in one binding never poisons the others. Pure (no
-    /// filesystem) so it is unit-testable. See.
+    /// action in one binding never poisons the others. Performs no filesystem
+    /// access, so it is unit-testable on literal document text.
     pub fn parse_resilient(text: &str, source: &str) -> Result<Self> {
         // First pass: structural parse with the action left as a raw value
         // so an unknown action variant does NOT fail the whole document.
@@ -264,10 +267,16 @@ impl Keymap {
 
     fn bundled_default_text() -> &'static str {
         if cfg!(target_os = "windows") {
+            // When: target_os is windows, so the Windows defaults are embedded
+            // at compile time.
             include_str!("../../../assets/keymaps/sonicterm-windows.toml")
         } else if cfg!(target_os = "macos") {
+            // When: target_os is macos, so the Apple defaults are embedded at
+            // compile time.
             include_str!("../../../assets/keymaps/sonicterm-macos.toml")
         } else {
+            // When: cfg matched neither Windows nor Apple, so the Linux
+            // defaults are embedded at compile time.
             include_str!("../../../assets/keymaps/sonicterm-linux.toml")
         }
     }

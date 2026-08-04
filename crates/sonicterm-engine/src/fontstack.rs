@@ -73,8 +73,8 @@ pub struct FontStack {
 
 impl FontStack {
     /// Construct a [`FontStack`] using the project's default font
-    /// family ([`DEFAULT_FONT_FAMILY`] — "Rec Mono St.Helens") backed by
-    /// the synthesized [`FALLBACK_FAMILIES`] chain. On first call this
+    /// family (`DEFAULT_FONT_FAMILY` — "Rec Mono St.Helens") backed by
+    /// the synthesized `FALLBACK_FAMILIES` chain. On first call this
     /// installs a process-wide wezterm `Config` so that
     /// `FontConfiguration::new(None, dpi)` selects sonicterm's primary
     /// family instead of sonicterm-font's bundled JetBrains Mono default.
@@ -152,6 +152,8 @@ impl FontStack {
         })
     }
 
+    /// Apply a logical font scale and raster DPI, returning the values accepted
+    /// by the underlying font configuration.
     pub fn change_scaling(&self, font_scale: f64, dpi: usize) -> (f64, usize) {
         // Cell height is derived from the rasterizer scale, so the memoized
         // value cannot survive a scaling change.
@@ -260,6 +262,7 @@ impl Rasterizer for FontStack {
         let (font_idx, glyph_pos) = if key.glyph_id != 0 {
             (key.font_slot as usize, key.glyph_id)
         } else {
+            // When: `glyph_id` is zero, shape `ch` so fallback resolution supplies both glyph and font slot.
             let s = key.ch.to_string();
             let infos = font
                 .blocking_shape(&s, Some(Presentation::Text), Direction::LeftToRight, None, None)
@@ -270,10 +273,12 @@ impl Rasterizer for FontStack {
 
         let rg = font.rasterize_glyph(glyph_pos, font_idx).ok()?;
         if rg.data.is_empty() || rg.width == 0 || rg.height == 0 {
+            // When: empty raster data or dimensions cannot form a valid atlas tile.
             return None;
         }
         let expected_len = checked_glyph_rgba_len(rg.width, rg.height).ok()?;
         if rg.data.len() != expected_len {
+            // When: `rg.data.len()` differs from `expected_len`, reject malformed coverage before conversion or upload.
             log::warn!(
                 "font rasterizer returned invalid {}x{} glyph buffer: {} bytes, expected {}",
                 rg.width,
@@ -290,6 +295,7 @@ impl Rasterizer for FontStack {
             }
             (bgra, true, false)
         } else {
+            // When: `has_color` is false, derive monochrome or subpixel coverage from the raster channels.
             let has_subpixel_coverage =
                 rg.data.chunks_exact(4).any(|px| px[0] != px[1] || px[1] != px[2]);
             if has_subpixel_coverage {
@@ -299,6 +305,7 @@ impl Rasterizer for FontStack {
                 }
                 (bgra, false, true)
             } else {
+                // When: `has_subpixel_coverage` is false, one alpha mask replaces four redundant channel bytes.
                 let mask: Vec<u8> = rg.data.chunks_exact(4).map(|p| p[3]).collect();
                 (mask, false, false)
             }
@@ -354,6 +361,7 @@ impl FontStack {
     fn cell_h_px(&self) -> f64 {
         let cached = self.cell_h_px.get();
         if cached > 0.0 {
+            // When: positive `cached` metrics remain valid until `change_scaling` explicitly invalidates them.
             return cached;
         }
         let resolved = self.cell_metrics_raster_px().map(|m| m.cell_h).unwrap_or(0.0);
@@ -366,6 +374,7 @@ fn sanitize_weight_scale(scale: f32) -> f32 {
     if scale.is_finite() && (0.5..=5.0).contains(&scale) {
         scale
     } else {
+        // When: `scale` is nonfinite or outside the supported range, identity avoids pathological coverage math.
         1.0
     }
 }
@@ -387,6 +396,7 @@ const MAX_EMBOLDEN_RADIUS_PX: f64 = 1.0;
 /// below `1.0`, where [`thin_radius_px`] takes over instead.
 fn embolden_radius_px(scale: f32, cell_h: f64) -> f64 {
     if scale <= 1.0 || !cell_h.is_finite() || cell_h <= 0.0 {
+        // When: `scale` does not request growth or `cell_h` is unusable, disable emboldening instead of guessing a radius.
         return 0.0;
     }
     f64::from(scale - 1.0) * cell_h * EMBOLDEN_RADIUS_PER_CELL_H
@@ -405,6 +415,7 @@ const THIN_RADIUS_PER_CELL_H: f64 = 0.012;
 /// solid, so gamma alone leaves the stem exactly as wide as it started.
 fn thin_radius_px(scale: f32, cell_h: f64) -> f64 {
     if scale >= 1.0 || !cell_h.is_finite() || cell_h <= 0.0 {
+        // When: `scale` does not request thinning or `cell_h` is unusable, disable erosion instead of guessing a radius.
         return 0.0;
     }
     f64::from(1.0 - scale) * cell_h * THIN_RADIUS_PER_CELL_H
@@ -416,6 +427,7 @@ fn checked_coverage_len(width: usize, height: usize, channels: usize) -> Option<
         || width > MAX_RASTERIZED_GLYPH_DIMENSION
         || height > MAX_RASTERIZED_GLYPH_DIMENSION
     {
+        // When: `width` or `height` is zero or exceeds the raster limit, no legal allocation exists.
         return None;
     }
     width.checked_mul(height)?.checked_mul(channels)
@@ -434,11 +446,13 @@ fn erode_coverage(
     is_subpixel: bool,
 ) -> Option<Vec<u8>> {
     if radius <= 0.0 || width == 0 || height == 0 {
+        // When: `radius` or tile dimensions are nonpositive, erosion has no valid work to perform.
         return None;
     }
     let channels = if is_subpixel { 4 } else { 1 };
     let byte_len = checked_coverage_len(width, height, channels)?;
     if coverage.len() != byte_len {
+        // When: `coverage.len()` differs from `byte_len`, morphology would index outside the supplied tile.
         return None;
     }
     let pixel_len = width.checked_mul(height)?;
@@ -510,8 +524,18 @@ fn morph_axis(
                 if frac > 0.0 && best > 0 {
                     // Outer ring one step beyond the integer core, on both
                     // sides. Out-of-bounds reads as empty.
-                    let left = if i > whole { src[base + i - whole - 1] } else { 0 };
-                    let right = if i + whole + 1 < len { src[base + i + whole + 1] } else { 0 };
+                    let left = if i > whole {
+                        src[base + i - whole - 1]
+                    } else {
+                        // When: `i` has no sample beyond the left core, erosion sees empty space at the tile edge.
+                        0
+                    };
+                    let right = if i + whole + 1 < len {
+                        src[base + i + whole + 1]
+                    } else {
+                        // When: the right outer sample exceeds `len`, erosion sees empty space at the tile edge.
+                        0
+                    };
                     let ring = left.min(right);
                     if ring < best {
                         // Pull toward the ring minimum in proportion to frac.
@@ -521,6 +545,7 @@ fn morph_axis(
                 }
                 dst[base + i] = best;
             } else {
+                // When: `erode` is false, use a max filter to grow coverage without empty edge samples.
                 let mut best = 0u8;
                 for j in lo..=hi {
                     best = best.max(src[base + j]);
@@ -563,11 +588,13 @@ fn embolden_coverage(
     is_subpixel: bool,
 ) -> Option<(Vec<u8>, usize, usize, usize)> {
     if radius <= 0.0 || width == 0 || height == 0 {
+        // When: `radius` or tile dimensions are nonpositive, growth has no valid work to perform.
         return None;
     }
     let channels = if is_subpixel { 4 } else { 1 };
     let byte_len = checked_coverage_len(width, height, channels)?;
     if coverage.len() != byte_len {
+        // When: `coverage.len()` differs from `byte_len`, dilation would index outside the supplied tile.
         return None;
     }
     // A shape-independent ceiling prevents high-weight crop saturation without
@@ -647,6 +674,7 @@ fn embolden_coverage(
 
 fn scale_coverage(coverage: u8, scale: f32) -> u8 {
     if coverage == 0 || coverage == u8::MAX || (scale - 1.0).abs() < f32::EPSILON {
+        // When: `coverage` is an endpoint or `scale` is identity, gamma remapping cannot change the byte.
         return coverage;
     }
     let normalized = f32::from(coverage) / 255.0;
@@ -688,6 +716,7 @@ fn weight_scale_applies(is_color: bool, weight_bold: bool, is_configured_family:
 fn apply_regular_weight_scale(coverage: &mut [u8], scale: f32, is_subpixel: bool) {
     let scale = sanitize_weight_scale(scale);
     if (scale - 1.0).abs() < f32::EPSILON {
+        // When: sanitized `scale` is identity, leave every coverage byte and subpixel alpha untouched.
         return;
     }
     if is_subpixel {
@@ -698,6 +727,7 @@ fn apply_regular_weight_scale(coverage: &mut [u8], scale: f32, is_subpixel: bool
             pixel[3] = pixel[0].max(pixel[1]).max(pixel[2]);
         }
     } else {
+        // When: `is_subpixel` is false, each byte is a complete scalar coverage sample.
         for value in coverage {
             *value = scale_coverage(*value, scale);
         }

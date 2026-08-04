@@ -32,7 +32,8 @@ impl Hex {
     /// Parse `#rrggbb` into a typed color. Returns `None` for malformed values.
     pub fn color(&self) -> Option<Color> {
         let s = self.0.trim_start_matches('#');
-        if s.len() != 6 {
+        if s.len() != 6 || !s.is_ascii() {
+            // When: trimmed `s` is not six ASCII bytes, byte-pair slicing cannot yield an RGB triple.
             return None;
         }
         let r = u8::from_str_radix(&s[0..2], 16).ok()?;
@@ -85,6 +86,7 @@ impl Color {
             if c <= 0.04045 {
                 c / 12.92
             } else {
+                // When: `c` exceeds the linear sRGB segment, apply the standard 2.4 transfer curve.
                 ((c + 0.055) / 1.055).powf(2.4)
             }
         }
@@ -193,12 +195,14 @@ impl Theme {
     fn resolve_path_with(theme: &str, asset_dir: &Path, user_config_dir: Option<&Path>) -> PathBuf {
         let raw = Path::new(theme);
         if raw.is_absolute() || raw.extension().is_some() || raw.components().count() > 1 {
+            // When: `raw` already looks path-like, honor it directly instead of rewriting it as a theme name.
             return raw.to_path_buf();
         }
         if let Some(user) = user_config_dir
             .map(|dir| dir.join("themes").join(format!("{theme}.toml")))
             .filter(|path| path.exists())
         {
+            // When: a user theme path exists, prefer it over the bundled theme of the same name.
             return user;
         }
         asset_dir.join("themes").join(format!("{theme}.toml"))
@@ -314,6 +318,7 @@ fn canonical_theme_name(name: &str) -> String {
             out.push(ch);
             pending_dash = false;
         } else if !out.is_empty() {
+            // When: `ch` is non-alphanumeric and `out` is nonempty, defer one dash until more name content arrives.
             pending_dash = true;
         }
     }

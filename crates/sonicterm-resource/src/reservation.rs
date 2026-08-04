@@ -44,6 +44,8 @@ impl Reservation {
     pub fn commit(mut self, actual: ResourceAmount) -> Result<CommittedReservation, CommitError> {
         let current = self.charge().amount;
         if !actual.component_le(current) {
+            // When: actual exceeds current on an accounting axis; commit cannot
+            // retain capacity that admission never checked.
             return Err(CommitError {
                 reservation: self,
                 error: BudgetError::AmountExceedsCharge { requested: actual, available: current },
@@ -56,6 +58,8 @@ impl Reservation {
         // still letting live tokens finalize during teardown.
         let result = charge.ledger.release(charge.owner, charge.class, difference);
         if let Err(error) = result {
+            // When: result contains error before mutation, so the original full
+            // token remains the sole RAII owner and returns unchanged.
             return Err(CommitError { reservation: self, error });
         }
         let mut charge = self.charge.take().expect("live reservation charge");
@@ -87,6 +91,8 @@ impl Reservation {
         if let Err(error) =
             charge.ledger.transfer(charge.owner, charge.class, owner, class, charge.amount)
         {
+            // When: transfer returns error with ledger attribution unchanged;
+            // charge remains source-attributed for retry or release.
             return Err(TransferError { reservation: self, error });
         }
         let charge = self.charge.as_mut().expect("live reservation charge");
@@ -96,6 +102,8 @@ impl Reservation {
     }
 }
 
+// Lifecycle: Reservation owns charge until Drop uses take and release; successful
+// ownership moves consume it first, preserving exact-once release.
 impl Drop for Reservation {
     fn drop(&mut self) {
         if let Some(charge) = self.charge.take() {
@@ -135,6 +143,8 @@ impl CommittedReservation {
     pub fn shrink(&mut self, actual: ResourceAmount) -> Result<(), BudgetError> {
         let current = self.charge().amount;
         if !actual.component_le(current) {
+            // When: actual is not component_le current; shrink cannot increase an
+            // axis through a release path that skips admission.
             return Err(BudgetError::InvalidResize {
                 operation: sonicterm_types::ResizeOperation::Shrink,
                 current,
@@ -152,6 +162,8 @@ impl CommittedReservation {
     pub fn try_grow(&mut self, actual: ResourceAmount) -> Result<(), BudgetError> {
         let current = self.charge().amount;
         if !current.component_le(actual) {
+            // When: current is not component_le actual; a mixed or downward
+            // request needs release semantics this grow path cannot combine safely.
             return Err(BudgetError::InvalidResize {
                 operation: sonicterm_types::ResizeOperation::Grow,
                 current,
@@ -191,6 +203,8 @@ impl CommittedReservation {
         if let Err(error) =
             charge.ledger.transfer(charge.owner, charge.class, owner, class, charge.amount)
         {
+            // When: transfer returns error and charge remains at its source; the
+            // original token survives for retry or eventual release.
             return Err(CommittedTransferError { reservation: self, error });
         }
         let charge = self.charge.as_mut().expect("live committed charge");
@@ -200,6 +214,8 @@ impl CommittedReservation {
     }
 }
 
+// Lifecycle: CommittedReservation stays charged until Drop uses charge take and
+// release; transfer only rewrites attribution on the same token.
 impl Drop for CommittedReservation {
     fn drop(&mut self) {
         if let Some(charge) = self.charge.take() {

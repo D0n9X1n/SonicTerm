@@ -57,14 +57,21 @@ pub(super) fn observe_child_exit_cleanliness(probe: &PtyChildExitProbe) -> Optio
     let deadline = Instant::now() + CHILD_EXIT_OBSERVE_TIMEOUT;
     loop {
         match probe.has_exited() {
-            Ok(true) => return probe.exit_was_clean(),
-            Ok(false) => {}
+            Ok(true) => {
+                // When: has_exited returns Ok(true), report the child's recorded exit status.
+                return probe.exit_was_clean();
+            }
+            Ok(false) => {
+                // When: has_exited returns Ok(false), keep polling until the observation deadline.
+            }
             Err(error) => {
+                // When: has_exited returns Err(error), preserve an unknown exit classification.
                 tracing::debug!(%error, "failed to observe pane child exit");
                 return None;
             }
         }
         if Instant::now() >= deadline {
+            // When: Instant::now reaches deadline, stop waiting and preserve an unknown result.
             return None;
         }
         std::thread::sleep(CHILD_EXIT_POLL_INTERVAL);
@@ -100,12 +107,17 @@ pub(super) fn report_pane_exit(
     probe: &PtyChildExitProbe,
     pane_id: u64,
 ) {
-    let Some(proxy) = proxy else { return };
+    let Some(proxy) = proxy else {
+        // When: proxy is None, there is no event-loop recipient for the pane exit.
+        return;
+    };
     let was_clean = observe_child_exit_cleanliness(probe);
     let _ = proxy.send_event(UserEvent::PaneProcessExited { pane_id, was_clean });
 }
 
 impl App {
+    // Lock order: parser -> parser_clone; after parser_clone drops, inline_images_thread and command_events_thread lock separately.
+    // Ordering: pty_burst_gen uses Release; cursor_visible, kitty_flags, and app_cursor_keys use independent Relaxed snapshots.
     pub(super) fn spawn_pane(
         &self,
         pane_id: u64,
@@ -159,6 +171,7 @@ impl App {
             ),
         ) {
             Ok(pty) => {
+                // When: spawn_default_shell returns Ok(pty), initialize its input and VT worker threads.
                 match launch.draft_for_shell(pty.shell_program_path()) {
                     Ok(Some(draft)) => {
                         Self::queue_pty_input(
@@ -167,11 +180,15 @@ impl App {
                             draft.into_bytes(),
                         );
                     }
-                    Ok(None) => {}
+                    Ok(None) => {
+                        // When: draft_for_shell returns Ok(None), start the shell without staged script input.
+                    }
                     Err(rejection) => {
+                        // When: draft_for_shell returns Err(rejection), warn and notify the event loop.
                         let message = launch.draft_rejection_message(rejection);
                         tracing::warn!(%message);
                         if let Some(proxy) = self.event_loop_proxy.as_ref() {
+                            // When: event_loop_proxy is Some(proxy), surface the draft rejection to the UI.
                             let _ = proxy.send_event(UserEvent::ScriptDraftRejected { message });
                         }
                     }
@@ -215,8 +232,10 @@ impl App {
                             // thread whose reason for existing is that nothing
                             // should block here.
                             if let Err(error) = in_tx_reply.send(bytes) {
+                                // When: in_tx_reply.send returns Err(error), classify a disconnect or dropped reply.
                                 match error {
                                     sonicterm_io::pty::PtyInputError::WriterDisconnected(_) => {
+                                        // When: error is WriterDisconnected, stop the reply-forwarder thread.
                                         break;
                                     }
                                     // A full queue means the child is not
@@ -256,6 +275,8 @@ impl App {
                                 PANE_IDLE_WAIT
                             }) {
                                 Ok(bytes) => {
+                                    // When: recv_timeout returns Ok(bytes), parse and coalesce the batch.
+
                                     // /: bump generation so the
                                     // next RedrawRequested bypasses the
                                     // vsync coalescing gate. Counter (not
@@ -350,7 +371,9 @@ impl App {
                                                         );
                                                     }
                                                 }
-                                                _ => {}
+                                                _ => {
+                                                    // When: ev is an unhandled VtEvent, it has no app-side effect.
+                                                }
                                             }
                                         }
                                         // Mirror the parser's kitty-keyboard
@@ -400,7 +423,9 @@ impl App {
                                         pending_bytes,
                                         pending_for,
                                     ) {
+                                        // When: should_flush_pending_pty_redraw accepts pending_bytes and pending_for.
                                         if let Some(proxy) = redraw_proxy.as_ref() {
+                                            // When: redraw_proxy is Some(proxy), dispatch the coalesced frame.
                                             super::redraw_target::dispatch(
                                                 &redraw_target_thread,
                                                 |window_id| {
@@ -415,6 +440,7 @@ impl App {
                                         {
                                             crate::app::invariants::FlushReason::Buffer
                                         } else {
+                                            // A below-threshold buffer was flushed by elapsed interval.
                                             crate::app::invariants::FlushReason::Interval
                                         };
                                         redraw_probe
@@ -423,13 +449,17 @@ impl App {
                                         pending_since = None;
                                         pending_bytes = 0;
                                     } else {
+                                        // When: should_flush_pending_pty_redraw is false, retain the batch for coalescing.
                                         pending = true;
                                     }
                                 }
                                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                                    // When: recv_timeout returns Timeout, flush any trailing pending redraw.
                                     // Quiescent: flush trailing redraw.
                                     if pending {
+                                        // When: pending is true at Timeout, dispatch the coalesced trailing frame.
                                         if let Some(proxy) = redraw_proxy.as_ref() {
+                                            // When: redraw_proxy is Some(proxy), send the redraw through its current target.
                                             super::redraw_target::dispatch(
                                                 &redraw_target_thread,
                                                 |window_id| {
@@ -460,6 +490,7 @@ impl App {
                                     // and this loop never wakes on its own.
                                     #[cfg(windows)]
                                     if exit_probe.has_exited().unwrap_or(false) {
+                                        // When: has_exited is true on Windows, report the pane exit and stop polling.
                                         report_pane_exit(
                                             redraw_proxy.as_ref(),
                                             &exit_probe,
@@ -469,6 +500,8 @@ impl App {
                                     }
                                 }
                                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                                    // When: recv_timeout returns Disconnected, flush output and report exit.
+
                                     // The reader thread reached EOF on the pty
                                     // master and dropped its sender: every fd
                                     // on the slave side is closed, so the
@@ -481,7 +514,9 @@ impl App {
                                     // pending here, and on the hold-open path
                                     // nothing else will ask for that frame.
                                     if let Some(proxy) = redraw_proxy.as_ref() {
+                                        // When: redraw_proxy is Some(proxy), it can receive the final redraw.
                                         if pending {
+                                            // When: pending is true at Disconnected, dispatch the shell's final output.
                                             super::redraw_target::dispatch(
                                                 &redraw_target_thread,
                                                 |window_id| {
@@ -509,6 +544,7 @@ impl App {
                 Some(pty)
             }
             Err(e) => {
+                // A shell spawn failure retains a pane without a PTY.
                 tracing::error!("failed to spawn pty: {e}");
                 None
             }
@@ -530,15 +566,22 @@ impl App {
         let new_id = next_pane_id();
         let new_pane = self.spawn_pane(new_id, &super::pane_launch::PaneLaunch::default());
         let did_split = {
-            let Some(ws) = self.main_mut() else { return };
+            let Some(ws) = self.main_mut() else {
+                // When: main_mut returns None, there is no active window to split.
+                return;
+            };
             let i = ws.tabs.active_index();
             let split_ok = {
-                let Some(st) = ws.tab_states.get_mut(i) else { return };
+                let Some(st) = ws.tab_states.get_mut(i) else {
+                    // When: tab_states.get_mut cannot find i, there is no active tab tree to split.
+                    return;
+                };
                 let focus = st.active_pane;
                 if st.tree.split(focus, dir, new_id) {
                     st.active_pane = new_id;
                     true
                 } else {
+                    // When: tree.split returns false, keep the existing pane layout and ownership.
                     false
                 }
             };
@@ -563,17 +606,25 @@ impl App {
     }
     pub(super) fn close_active_pane(&mut self) {
         let outcome = {
-            let Some(ws) = self.main_mut() else { return };
+            let Some(ws) = self.main_mut() else {
+                // When: main_mut returns None, there is no active window pane to close.
+                return;
+            };
             let i = ws.tabs.active_index();
             let inner = {
-                let Some(st) = ws.tab_states.get_mut(i) else { return };
+                let Some(st) = ws.tab_states.get_mut(i) else {
+                    // When: tab_states.get_mut cannot find i, there is no active pane tree to close.
+                    return;
+                };
                 let focus = st.active_pane;
                 if matches!(st.tree, PaneTree::Leaf { id, .. } if id == focus) {
                     (Some(i), None)
                 } else {
+                    // When: matches finds no focused PaneTree::Leaf, close only the split pane.
                     let new_focus =
                         st.tree.leaves().into_iter().find(|id| *id != focus).unwrap_or(focus);
                     if st.tree.close(focus) {
+                        // A successful tree close activates its surviving sibling.
                         st.active_pane = new_focus;
                         // Same reason as the exit-driven path: the search was
                         // scanning the grid that just went away.
@@ -582,6 +633,7 @@ impl App {
                         }
                         (None, Some(focus))
                     } else {
+                        // When: tree.close returns false, preserve the pane and tab unchanged.
                         (None, None)
                     }
                 }
@@ -615,16 +667,28 @@ impl App {
                     w.request_redraw();
                 }
             }
-            _ => {}
+            _ => {
+                // When: outcome closes neither a tab nor a pane, no layout update is required.
+            }
         }
     }
     pub(super) fn focus_pane_dir(&mut self, dir: Direction) {
         let next = {
-            let Some(ws) = self.main_mut() else { return };
+            let Some(ws) = self.main_mut() else {
+                // When: main_mut returns None, there is no pane focus to move.
+                return;
+            };
             let i = ws.tabs.active_index();
-            let Some(st) = ws.tab_states.get_mut(i) else { return };
-            let Some(next) = st.tree.focus_neighbor(st.active_pane, dir) else { return };
+            let Some(st) = ws.tab_states.get_mut(i) else {
+                // When: tab_states.get_mut cannot find i, there is no active pane tree.
+                return;
+            };
+            let Some(next) = st.tree.focus_neighbor(st.active_pane, dir) else {
+                // When: focus_neighbor returns None, no pane exists in dir.
+                return;
+            };
             if st.active_pane == next {
+                // When: active_pane already equals next, leave focus unchanged.
                 return;
             }
             st.active_pane = next;
@@ -640,9 +704,15 @@ impl App {
 
     pub(super) fn toggle_active_pane_zoom(&mut self) {
         let toggled = {
-            let Some(ws) = self.main_mut() else { return };
+            let Some(ws) = self.main_mut() else {
+                // When: main_mut returns None, there is no pane zoom state to toggle.
+                return;
+            };
             let i = ws.tabs.active_index();
-            let Some(st) = ws.tab_states.get_mut(i) else { return };
+            let Some(st) = ws.tab_states.get_mut(i) else {
+                // When: tab_states.get_mut cannot find i, there is no active pane tree to zoom.
+                return;
+            };
             st.tree.toggle_zoom(st.active_pane)
         };
         if toggled {
@@ -662,16 +732,25 @@ impl App {
         kind: FrontmostKind,
         scope: sonicterm_cfg::keymap::BroadcastScope,
     ) {
-        let Some(source_pane) = self.active_pane_id_for_kind(kind) else { return };
+        let Some(source_pane) = self.active_pane_id_for_kind(kind) else {
+            // When: active_pane_id_for_kind returns None, no pane can source the broadcast.
+            return;
+        };
         self.broadcast = self.broadcast.toggled(scope, source_pane);
         self.request_redraw_all_terminal_windows();
     }
 
     pub(super) fn resize_active_split(&mut self, dir: Direction) {
         let resized = {
-            let Some(ws) = self.main_mut() else { return };
+            let Some(ws) = self.main_mut() else {
+                // When: main_mut returns None, there is no active split to resize.
+                return;
+            };
             let i = ws.tabs.active_index();
-            let Some(st) = ws.tab_states.get_mut(i) else { return };
+            let Some(st) = ws.tab_states.get_mut(i) else {
+                // When: tab_states.get_mut cannot find i, there is no active split tree.
+                return;
+            };
             st.tree.resize_split(st.active_pane, dir, 0.05)
         };
         if resized {
@@ -685,15 +764,21 @@ impl App {
     pub(super) fn resize_visible_panes(&mut self) {
         let rects = self.compute_active_pane_rects();
         let (cw, ch) = match self.test_viewport_override {
-            // Test-only viewport override (follow-up) —
-            // lets tests exercise close_active_pane's resize wiring
+            // The test-only viewport override lets tests exercise
+            // close_active_pane's resize wiring
             // without a live wgpu renderer. Production stays `None` and
             // falls through to the renderer-derived metrics below.
             Some((_, cw, ch)) => (cw, ch),
-            None => match self.main_renderer() {
-                Some(r) => r.cell_size(),
-                None => return,
-            },
+            None => {
+                // When: test_viewport_override is None, derive pane metrics from main_renderer.
+                match self.main_renderer() {
+                    Some(r) => r.cell_size(),
+                    None => {
+                        // When: test_viewport_override and main_renderer are None, pane metrics are unavailable.
+                        return;
+                    }
+                }
+            }
         };
         if let Some(panes) = self.main_panes() {
             let inset = self

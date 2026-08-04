@@ -86,6 +86,8 @@ pub fn record_loop_exiting() {
 /// gives us a "clean main return" marker line.
 pub struct ExitGuard(());
 
+// Lifecycle: dropping ExitGuard is what emits the clean-return marker; it reads
+// REASON to classify, so it must outlive every other shutdown step.
 impl Drop for ExitGuard {
     fn drop(&mut self) {
         match REASON.load(Ordering::SeqCst) {
@@ -121,6 +123,8 @@ impl Drop for ExitGuard {
 /// lifetime of the process.
 pub fn install_exit_logging(crash_dir: &Path) -> ExitGuard {
     if INSTALLED.swap(true, Ordering::SeqCst) {
+        // When: INSTALLED was already set, so the hooks are armed; installing
+        // again would leak a second alt-stack and re-open the log descriptor.
         return ExitGuard(());
     }
     let _ = CRASH_DIR.set(crash_dir.to_path_buf());
@@ -170,6 +174,9 @@ fn install_signal_handlers() {
 
     // Per-thread alt-stack so a stack overflow still has room to run
     // the handler. SIGSTKSZ on macOS is small; bump to 64 KiB.
+    // SAFETY: `buf` is leaked, so the memory the kernel switches to stays valid
+    // for the life of the process. `sigaltstack` only reads `ss`, and a null
+    // old-stack pointer means "do not report the previous stack".
     unsafe {
         const STK_SIZE: usize = 64 * 1024;
         let buf = Box::leak(vec![0u8; STK_SIZE].into_boxed_slice());
@@ -186,6 +193,9 @@ fn install_signal_handlers() {
         (libc::SIGFPE, "SIGFPE"),
     ];
     for (sig, _name) in signals {
+        // SAFETY: an all-zero `libc::sigaction` is a valid value for this plain
+        // C struct, and every field it is read through is written before the
+        // call. `sigaction` copies what it needs and retains no pointer.
         unsafe {
             let mut act: libc::sigaction = MaybeUninit::zeroed().assume_init();
             act.sa_sigaction = handle_signal as *const () as usize;
@@ -219,8 +229,13 @@ extern "C" fn handle_signal(
     // No tracing macros, no alloc, no locks.
     let fd = LOG_FD.load(Ordering::SeqCst);
     if fd >= 0 {
+        // When: fd is a real descriptor, so the marker can be written from the
+        // handler; a negative fd means the log was never opened for this path.
         let prefix: &[u8] = b"FATAL: ";
         let suffix: &[u8] = b" - sonic terminating (handler async-signal-safe path)\n";
+        // SAFETY: async-signal-safe by construction — only `write` and `fsync`
+        // on a descriptor opened before any signal could arrive, with pointers
+        // and lengths taken from `'static` byte slices.
         unsafe {
             libc::write(fd, prefix.as_ptr() as *const _, prefix.len());
             let name = signal_name(sig);
@@ -232,6 +247,9 @@ extern "C" fn handle_signal(
     }
     // SA_RESETHAND restored default disposition before delivery; just
     // re-raise so the kernel produces the .ips / core file.
+    // SAFETY: `raise` only re-delivers `sig` to this process. The default
+    // disposition is already restored, so this terminates rather than
+    // re-entering the handler.
     unsafe {
         libc::raise(sig);
     }

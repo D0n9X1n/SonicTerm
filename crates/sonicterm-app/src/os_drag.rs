@@ -144,6 +144,8 @@ impl TabPayload {
             out.push('=');
             out.push('=');
         } else if rem == 2 {
+            // When: rem is 2 the tail emits three alphabet characters plus one
+            // '=' so the output still ends on a whole quartet.
             let n = ((raw[i] as u32) << 16) | ((raw[i + 1] as u32) << 8);
             out.push(ALPH[((n >> 18) & 0x3F) as usize] as char);
             out.push(ALPH[((n >> 12) & 0x3F) as usize] as char);
@@ -167,6 +169,8 @@ impl TabPayload {
         }
         let bytes = b64.as_bytes();
         if !bytes.len().is_multiple_of(4) {
+            // When: bytes does not divide into whole quartets the loop below
+            // would index past the end, so malformed input is rejected first.
             return None;
         }
         let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
@@ -176,6 +180,8 @@ impl TabPayload {
             let v0 = table[c[0] as usize];
             let v1 = table[c[1] as usize];
             if v0 == 0xFF || v1 == 0xFF {
+                // When: v0 or v1 hits the 0xFF sentinel the quartet opens with a
+                // character outside the alphabet, so nothing partial is emitted.
                 return None;
             }
             let n0 = v0 as u32;
@@ -183,17 +189,25 @@ impl TabPayload {
             if c[2] == b'=' && c[3] == b'=' {
                 out.push(((n0 << 2) | (n1 >> 4)) as u8);
             } else if c[3] == b'=' {
+                // When: c ends in a single pad the quartet carries two bytes, so
+                // the third symbol is still real data.
                 let v2 = table[c[2] as usize];
                 if v2 == 0xFF {
+                    // When: v2 hits the 0xFF sentinel the single-pad quartet has an
+                    // invalid third symbol and the decode is abandoned.
                     return None;
                 }
                 let n2 = v2 as u32;
                 out.push(((n0 << 2) | (n1 >> 4)) as u8);
                 out.push((((n1 & 0xF) << 4) | (n2 >> 2)) as u8);
             } else {
+                // When: c carries no trailing pad the quartet is full and yields
+                // three bytes from all four symbols.
                 let v2 = table[c[2] as usize];
                 let v3 = table[c[3] as usize];
                 if v2 == 0xFF || v3 == 0xFF {
+                    // When: v2 or v3 hits the 0xFF sentinel an unpadded quartet holds
+                    // a character outside the alphabet, so the decode fails.
                     return None;
                 }
                 let n2 = v2 as u32;
@@ -210,13 +224,12 @@ impl TabPayload {
 
 /// Outcome of a single OS-drag handoff attempt.
 ///
-/// This is the load-bearing contract for the data-loss fix landed in
-/// the (review) follow-up to the source tab is *only*
-/// detached/killed when the sink reports [`Accepted`](Self::Accepted).
+/// The load-bearing contract against data loss: the source tab is *only*
+/// detached or killed when the sink reports [`Accepted`](Self::Accepted).
 /// Anything else — including "we wrote the payload to a pasteboard
 /// but have not heard back from a receiver" — leaves the source tab
-/// alive, because v1 has no cross-process consumption-ack channel
-/// yet and the alternative (kill-on-write-success) destroys user
+/// alive, because there is no cross-process consumption-ack channel
+/// and the alternative (kill-on-write-success) destroys user
 /// sessions when no second SonicTerm.app is running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DragAck {

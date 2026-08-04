@@ -45,6 +45,7 @@ pub struct AtlasUpload {
     scratch: Vec<u8>,
 }
 
+/// Build the nearest-filtered sampler descriptor used for glyph-atlas pixels.
 #[doc(hidden)]
 pub fn atlas_sampler_descriptor() -> wgpu::SamplerDescriptor<'static> {
     wgpu::SamplerDescriptor {
@@ -124,6 +125,7 @@ impl AtlasUpload {
         atlas.drain_dirty_rects_into(&mut self.dirty_rects);
         let dirty_rects = self.dirty_rects.len();
         if dirty_rects == 0 {
+            // When: `dirty_rects` is zero, skip queue writes and report an idle synchronization.
             return AtlasUploadStats::default();
         }
         coalesce_dirty_rects(&self.dirty_rects, &mut self.coalesced_rects);
@@ -204,6 +206,7 @@ fn merge_sorted_rects(
         if write > 0 && compatible(rects[write - 1], next) {
             merge(&mut rects[write - 1], next);
         } else {
+            // When: `next` is incompatible with the previous output rectangle, retain it as a new merge run.
             rects[write] = next;
             write += 1;
         }

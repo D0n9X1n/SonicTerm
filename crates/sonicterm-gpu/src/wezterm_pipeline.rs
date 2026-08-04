@@ -236,6 +236,8 @@ impl WeztermPipeline {
         let total_quads =
             quads.len() + images.len() + glyphs.len() + overlay_quads.len() + overlay_glyphs.len();
         if total_quads == 0 {
+            // When: total_quads is zero there is no geometry to upload, so returning
+            // early avoids writing empty buffers and issuing a zero-index draw.
             return;
         }
 
@@ -300,16 +302,26 @@ impl WeztermPipeline {
 
 fn push_glyph_instances(out: &mut Vec<Vertex>, glyphs: &[GlyphInstance], sw: f32, sh: f32) {
     for g in glyphs {
-        let Some((x, y, w, h)) = ndc_rect_to_pixels(g.rect, sw, sh) else { continue };
+        let Some((x, y, w, h)) = ndc_rect_to_pixels(g.rect, sw, sh) else {
+            // When: ndc_rect_to_pixels returns None the surface has zero extent, so this
+            // glyph is dropped instead of scaled against a zero-sized frame.
+            continue;
+        };
         if w <= 0.0 || h <= 0.0 {
+            // When: w or h is not positive the quad is degenerate or inverted, adding no
+            // fragments while still consuming vertices and indices in the batch.
             continue;
         }
         let color = g.color;
         let has_color = if g.flags[2] >= 0.5 {
             IS_IMAGE
         } else if g.flags[0] >= 0.5 {
+            // When: flags[0] marks a colour glyph, so the atlas already holds its RGB and
+            // the shader samples it directly instead of tinting coverage with fg_color.
             IS_COLOR_EMOJI
         } else {
+            // When: no flags bit is set, so the glyph is monochrome: atlas alpha is coverage
+            // and the shader scales fg_color by it, then applies foreground_text_hsb.
             IS_GLYPH
         };
         let [u0, v0, u1, v1] = g.uv;
@@ -320,18 +332,34 @@ fn push_glyph_instances(out: &mut Vec<Vertex>, glyphs: &[GlyphInstance], sw: f32
 
 fn push_quad_instances(out: &mut Vec<Vertex>, quads: &[QuadInstance], sw: f32, sh: f32) {
     for q in quads {
-        let Some((x, y, w, h)) = ndc_rect_to_pixels(q.rect, sw, sh) else { continue };
+        let Some((x, y, w, h)) = ndc_rect_to_pixels(q.rect, sw, sh) else {
+            // When: ndc_rect_to_pixels returns None the surface has zero extent, so this
+            // quad is dropped instead of scaled against a zero-sized frame.
+            continue;
+        };
         if w <= 0.0 || h <= 0.0 {
+            // When: w or h is not positive the quad is degenerate or inverted, adding no
+            // fragments while still consuming vertices and indices in the batch.
             continue;
         }
         let kind = if q.line_thickness_px > 0.0 {
             IS_LINE
         } else if q.radius_px > 0.0 {
+            // When: radius_px is positive the shader evaluates a rounded-rect distance
+            // field, so the corners stay antialiased instead of squared off.
             IS_ROUNDED_RECT
         } else {
+            // When: neither line_thickness_px nor radius_px is set the quad is a plain
+            // fill, so the shader emits fg_color with no distance-field pass.
             IS_SOLID_COLOR
         };
-        let size = if q.size_px[0] > 0.0 && q.size_px[1] > 0.0 { q.size_px } else { [w, h] };
+        let size = if q.size_px[0] > 0.0 && q.size_px[1] > 0.0 {
+            q.size_px
+        } else {
+            // When: size_px is unset the pixel extent w and h stand in, keeping the
+            // distance field in the same units the vertices were built from.
+            [w, h]
+        };
         let local = [
             [-size[0] * 0.5, -size[1] * 0.5],
             [size[0] * 0.5, -size[1] * 0.5],
@@ -389,6 +417,8 @@ fn push_rect_vertices(
 
 pub(crate) fn ndc_rect_to_pixels(rect: [f32; 4], sw: f32, sh: f32) -> Option<(f32, f32, f32, f32)> {
     if sw <= 0.0 || sh <= 0.0 {
+        // When: sw or sh is not positive the surface has no pixel extent and no NDC
+        // mapping exists, so every caller skips the primitive instead of scaling by zero.
         return None;
     }
     let x = (rect[0] + 1.0) * 0.5 * sw;

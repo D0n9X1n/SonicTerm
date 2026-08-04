@@ -31,9 +31,13 @@ pub fn open(url: &str) -> io::Result<()> {
 /// callers can also use it to gate which OSC 8 cells render as clickable.
 pub fn validate(url: &str) -> io::Result<()> {
     if url.is_empty() {
+        // When: url carries no scheme to match against the allow-list, so no
+        // handler may be spawned for it.
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty url"));
     }
     if url.len() > 4096 {
+        // When: url exceeds the 4096-char cap, bounding what reaches the
+        // platform handler regardless of scheme.
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "url too long"));
     }
     let lower = url.to_ascii_lowercase();
@@ -42,14 +46,21 @@ pub fn validate(url: &str) -> io::Result<()> {
         || lower.starts_with("mailto:")
         || lower.starts_with("file://");
     if !scheme_ok {
+        // When: scheme_ok rejects anything outside http, https, mailto, and
+        // file, so no other URI reaches a handler command.
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "scheme not allowed"));
     }
     for ch in url.chars() {
         match ch {
             '&' | '|' | '^' | '<' | '>' | '"' | '\'' | '`' | '\r' | '\n' | '\0' => {
+                // When: ch is a cmd or shell metacharacter that `start` would
+                // re-tokenize into a separate command, so the URI is refused.
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "forbidden character"));
             }
             c if c.is_control() => {
+                // When: c is any control code, which a URI must percent-encode
+                // rather than carry raw.
+
                 // Rejects the full Unicode control set: C0 (< 0x20),
                 // DEL (0x7F), and C1 (0x80..=0x9F). A raw control code
                 // is never legitimate in a URI (it must be %-encoded),
@@ -57,14 +68,20 @@ pub fn validate(url: &str) -> io::Result<()> {
                 // untrusted OSC 8 input.
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "control character"));
             }
-            _ => {}
+            _ => {
+                // When: ch is outside the forbidden and control sets, so it
+                // survives validation unchanged.
+            }
         }
     }
     Ok(())
 }
 
+/// Build the macOS default-handler command for `url`.
+///
+/// `open` receives the URI as one argv entry, so no shell re-tokenization
+/// applies; [`validate`] remains the gate that decides whether it may spawn.
 #[cfg(target_os = "macos")]
-#[doc(hidden)]
 #[doc(hidden)]
 pub fn build_command(url: &str) -> Command {
     let mut c = Command::new("open");
@@ -72,8 +89,13 @@ pub fn build_command(url: &str) -> Command {
     c
 }
 
+/// Build the Windows default-handler command for `url`.
+///
+/// `cmd /C start` re-parses its arguments through cmd's own tokenizer, which is
+/// why [`validate`] must reject shell metacharacters before this command spawns.
+/// The empty argument is `start`'s window title, so the URI is not consumed as
+/// one.
 #[cfg(target_os = "windows")]
-#[doc(hidden)]
 #[doc(hidden)]
 pub fn build_command(url: &str) -> Command {
     let mut c = Command::new("cmd");
@@ -81,8 +103,11 @@ pub fn build_command(url: &str) -> Command {
     c
 }
 
+/// Build the freedesktop default-handler command for `url`.
+///
+/// `xdg-open` receives the URI as one argv entry, so no shell re-tokenization
+/// applies; [`validate`] remains the gate that decides whether it may spawn.
 #[cfg(all(unix, not(target_os = "macos")))]
-#[doc(hidden)]
 #[doc(hidden)]
 pub fn build_command(url: &str) -> Command {
     let mut c = Command::new("xdg-open");
@@ -104,10 +129,6 @@ pub fn build_command(url: &str) -> Command {
 /// knows to swallow the click and skip selection start), `None`
 /// otherwise. Validation happens inside `open_fn` for the production
 /// path; this helper does not duplicate it.
-///
-/// This was extracted from `App::do_window_event`'s `MouseInput`
-/// arm so the modifier-aware dispatch decision is unit-testable
-/// without a real winit event loop.
 pub fn dispatch_modifier_click<F>(
     modifier_held: bool,
     uri_at_cell: Option<String>,
@@ -117,6 +138,8 @@ where
     F: FnOnce(&str) -> io::Result<()>,
 {
     if !modifier_held {
+        // When: modifier_held is absent, so the click falls through to
+        // selection start instead of opening a URI.
         return None;
     }
     let uri = uri_at_cell?;

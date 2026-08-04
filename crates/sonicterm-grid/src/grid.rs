@@ -127,7 +127,7 @@ pub struct PromptRegion {
     pub start_row: u64,
     /// Absolute row where the command output ended (OSC 133 ; D), if any.
     pub end_row: Option<u64>,
-    /// Exit code reported by OSC 133 ; D ; <code>, if any.
+    /// Exit code reported by `OSC 133 ; D ; <code>`, if any.
     pub exit_code: Option<i32>,
 }
 
@@ -163,9 +163,10 @@ pub struct Grid {
     pub default: Cell,
     /// Saved primary screen when the alt screen is active.
     alt_screen: Option<Box<Grid>>,
-    /// Monotonically increasing counter bumped by every mutator. Renderers
-    /// can compare the current revision with their last-observed value to
-    /// skip work when nothing has changed.
+    /// Per-grid wrapping revision used for coarse renderer change detection.
+    ///
+    /// Mutation paths that affect rendered terminal state advance it. Dirty-only
+    /// invalidation and metadata maintenance may leave it unchanged.
     revision: u64,
     /// Monotonic sequence for cell-content changes only.
     ///
@@ -238,8 +239,10 @@ impl Grid {
         }
     }
 
+    /// Enable or disable automatic wrapping at the right grid edge.
     pub fn set_autowrap(&mut self, enabled: bool) {
         if self.autowrap == enabled {
+            // When: `self.autowrap == enabled`, preserve pending-wrap state and revision.
             return;
         }
         self.autowrap = enabled;
@@ -247,10 +250,12 @@ impl Grid {
         self.bump();
     }
 
+    /// Return whether automatic wrapping at the right grid edge is enabled.
     pub fn autowrap(&self) -> bool {
         self.autowrap
     }
 
+    /// Return whether the next printable character must first wrap to a new row.
     pub fn pending_wrap(&self) -> bool {
         self.pending_wrap
     }
@@ -321,7 +326,14 @@ impl Grid {
     ///
     /// The iterator yields `usize` row indices in ascending order.
     pub fn dirty_rows(&self) -> impl Iterator<Item = usize> + '_ {
-        self.dirty_rows.iter().enumerate().filter_map(|(i, d)| if *d { Some(i) } else { None })
+        self.dirty_rows.iter().enumerate().filter_map(|(i, d)| {
+            if *d {
+                Some(i)
+            } else {
+                // When: `*d` is false, omit the clean row from the renderer's work list.
+                None
+            }
+        })
     }
 
     #[inline]
@@ -329,6 +341,7 @@ impl Grid {
         let lo = lo as usize;
         let hi = (hi_inclusive as usize).min(self.dirty_rows.len().saturating_sub(1));
         if lo >= self.dirty_rows.len() {
+            // When: `lo >= self.dirty_rows.len()`, no visible dirty bits exist to set.
             return;
         }
         for slot in &mut self.dirty_rows[lo..=hi] {
@@ -384,11 +397,13 @@ impl Grid {
     #[inline]
     fn content_changed_range(&mut self, lo: u16, hi_inclusive: u16) {
         if self.row_content_seq.is_empty() {
+            // When: `self.row_content_seq.is_empty()`, there is no content range to advance.
             return;
         }
         let lo = lo as usize;
         let hi = (hi_inclusive as usize).min(self.row_content_seq.len() - 1);
         if lo > hi {
+            // When: `lo > hi`, the requested visible-row range is empty.
             return;
         }
         let seq = self.next_content_seq();
@@ -401,6 +416,7 @@ impl Grid {
     #[inline]
     fn content_changed_all(&mut self) {
         if self.row_content_seq.is_empty() {
+            // When: `self.row_content_seq.is_empty()`, avoid advancing the sequence for no row.
             return;
         }
         let seq = self.next_content_seq();
@@ -412,6 +428,7 @@ impl Grid {
 
     fn content_changed_scrollback_all(&mut self) {
         if self.scrollback.is_empty() {
+            // When: `self.scrollback.is_empty()`, avoid advancing the sequence for no history row.
             return;
         }
         let seq = self.next_content_seq();
@@ -420,10 +437,13 @@ impl Grid {
         }
     }
 
-    /// Monotonic revision counter, bumped by every mutator. A fresh grid
-    /// is at revision 0; the first content change yields a value > 0.
-    /// Renderers can compare this against their last-observed revision to
-    /// skip rebuilding text/quads when nothing has changed.
+    /// This grid's wrapping revision for coarse rendered-state change detection.
+    ///
+    /// A fresh grid starts at zero. Mutation paths that affect rendered terminal
+    /// state advance it, while dirty-only invalidation such as
+    /// [`Self::mark_all_dirty`] may leave it unchanged. Renderers compare the
+    /// value with their last observation; ordering is meaningful only between
+    /// values from the same [`Grid`] and only until `u64` wraparound.
     #[inline]
     pub fn revision(&self) -> u64 {
         self.revision
@@ -439,11 +459,13 @@ impl Grid {
         self.alt_screen.is_some()
     }
 
-    /// Switch to the alt screen, saving the current visible+scrollback.
-    /// No-op if already on the alt screen.
+    /// Switch to the alt screen, saving the current visible and scrollback.
+    /// When already active, clears pending autowrap state but preserves the
+    /// existing saved primary and alternate contents.
     pub fn enter_alt_screen(&mut self) {
         self.clear_pending_wrap();
         if self.alt_screen.is_some() {
+            // When: `self.alt_screen.is_some()`, keep the already-saved primary unchanged.
             return;
         }
         let cols = self.cols;
@@ -487,11 +509,13 @@ impl Grid {
         self.bump();
     }
 
-    /// Leave the alt screen, restoring the saved primary screen. No-op if
-    /// not on the alt screen.
+    /// Leave the alt screen, restoring the saved primary screen. When no
+    /// primary is saved, clears pending autowrap state and otherwise preserves
+    /// the current screen.
     pub fn leave_alt_screen(&mut self) {
         self.clear_pending_wrap();
         let Some(saved) = self.alt_screen.take() else {
+            // When: no primary screen is saved, the grid is already on its primary screen.
             return;
         };
         let saved = *saved;
@@ -529,6 +553,7 @@ impl Grid {
                     self.row_content_seq.push_back(self.content_seq);
                 }
             } else {
+                // When: the restored primary is tall enough, discard rows beyond the active height.
                 self.visible.truncate(rows as usize);
                 self.row_content_seq.truncate(rows as usize);
             }
@@ -547,11 +572,13 @@ impl Grid {
         let (cols, rows) = bounded_grid_size(u64::from(cols), u64::from(rows));
         self.clear_pending_wrap();
         if cols == self.cols && rows == self.rows {
+            // When: dimensions are unchanged, preserve storage and revision without reflowing rows.
             return;
         }
         self.scrollback_limit = if self.is_alt() {
             0
         } else {
+            // When: `self.is_alt()` is false, bound history by the resized grid.
             bounded_scrollback_rows(cols, rows, self.scrollback_requested_limit)
         };
         if self.scrollback.len() > self.scrollback_limit {
@@ -694,6 +721,7 @@ impl Grid {
         if abs < sb {
             self.scrollback.get(abs as usize)
         } else {
+            // When: `abs >= sb`, resolve the absolute row against the visible buffer.
             let r = (abs - sb) as usize;
             self.visible.get(r)
         }
@@ -746,6 +774,7 @@ impl Grid {
         );
     }
 
+    /// Put a styled character at the cursor, wrapping and filling within an optional scroll region.
     #[allow(clippy::too_many_arguments)]
     pub fn put_char_styled_in_region(
         &mut self,
@@ -768,10 +797,14 @@ impl Grid {
         let width = if (ch as u32) >= 0x20 && (ch as u32) <= 0x7E {
             1u16
         } else {
+            // When: `ch` is outside printable ASCII, look up its Unicode width.
             unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) as u16
         };
+        // Zero-width codepoints (ZWJ U+200D, combining marks, etc.) belong to
+        // the current grapheme and must not advance the cursor.
         if width == 0 {
-            // Zero-width codepoint (ZWJ U+200D, combining marks, etc.).
+            // When: `width == 0`, extend the preceding grapheme without moving the cursor.
+
             // It must NOT advance the cursor, but it IS part of the
             // current cluster — the shaper needs to see it together
             // with the lead char so ZWJ sequences like 👨‍👩‍👧 actually
@@ -780,6 +813,7 @@ impl Grid {
             // there is no cluster to attach to and the codepoint is
             // dropped — matches every other terminal's behavior.
             if self.cursor.col == 0 {
+                // When: `self.cursor.col == 0`, no preceding grapheme exists on this row.
                 return;
             }
             let r = self.cursor.row as usize;
@@ -788,14 +822,16 @@ impl Grid {
             while c > 0 && self.visible[r][c].flags.contains(CellFlags::WIDE_CONT) {
                 c -= 1;
             }
+            // Reaching column zero on a continuation means there is no lead
+            // cell to attach this codepoint to safely.
             if self.visible[r][c].flags.contains(CellFlags::WIDE_CONT) {
-                // Reached col 0 still on a continuation — nothing to
-                // attach to safely.
+                // When: `self.visible[r][c]` is still `WIDE_CONT`, no valid lead cell exists.
                 return;
             }
             let lead = &mut self.visible[r][c];
             let existing_len = lead.extras().map_or(0, str::len);
             if existing_len.saturating_add(ch.len_utf8()) > MAX_CELL_EXTRAS_BYTES {
+                // When: `existing_len + ch.len_utf8()` exceeds `MAX_CELL_EXTRAS_BYTES`, drop `ch`.
                 return;
             }
             let mut s = match lead.take_extras() {
@@ -825,6 +861,7 @@ impl Grid {
                     effective_width = 1;
                 }
             } else {
+                // When: `self.autowrap` is false on overflow, overwrite the final column.
                 self.cursor.col = self.cols.saturating_sub(1);
                 effective_width = 1;
             }
@@ -836,8 +873,12 @@ impl Grid {
         Self::apply_rare_attrs(&mut fill, hyperlink, underline_style, underline_color);
         self.clear_wide_intersections(r, c, effective_width as usize, fill);
 
-        let cell_flags =
-            if effective_width == 2 { clean_flags | CellFlags::WIDE } else { clean_flags };
+        let cell_flags = if effective_width == 2 {
+            clean_flags | CellFlags::WIDE
+        } else {
+            // When: `effective_width != 2`, retain the ordinary cell flags.
+            clean_flags
+        };
         let mut lead = Cell::plain(ch, fg, bg, cell_flags);
         Self::apply_rare_attrs(&mut lead, hyperlink, underline_style, underline_color);
         self.visible[r][c] = lead;
@@ -852,6 +893,7 @@ impl Grid {
                 self.cursor.col = self.cols;
                 self.pending_wrap = true;
             } else {
+                // When: `self.autowrap` is false at the right edge, pin the cursor to the last column.
                 self.cursor.col = self.cols.saturating_sub(1);
             }
         }
@@ -865,6 +907,7 @@ impl Grid {
         let mut lo = start.min(cols);
         let mut hi = (start + width).min(cols);
         if lo >= hi {
+            // When: `lo >= hi`, the requested span cannot intersect a wide pair.
             return (lo, hi);
         }
         loop {
@@ -875,10 +918,12 @@ impl Grid {
                 if cell.flags.contains(CellFlags::WIDE) {
                     hi = hi.max((c + 2).min(cols));
                 } else if cell.flags.contains(CellFlags::WIDE_CONT) && c > 0 {
+                    // When: `cell.flags` contains `WIDE_CONT` and `c > 0`, include its lead cell.
                     lo = lo.min(c - 1);
                 }
             }
             if (lo, hi) == old {
+                // When: `(lo, hi) == old`, the scan found the complete wide-cell span.
                 return (lo, hi);
             }
         }
@@ -902,6 +947,7 @@ impl Grid {
             } else if flags.contains(CellFlags::WIDE_CONT)
                 && (c == 0 || !self.visible[row][c - 1].flags.contains(CellFlags::WIDE))
             {
+                // When: `flags` has `WIDE_CONT` without a preceding `WIDE`, replace the orphan.
                 self.visible[row][c] = fill.clone();
             }
         }
@@ -921,7 +967,9 @@ impl Grid {
 
     fn wrap_linefeed_with(&mut self, region: Option<(u16, u16)>, fill: Cell) {
         if let Some((top, bottom)) = region {
+            // When: `region` is `Some((top, bottom))`, apply its bottom margin.
             if self.cursor.row == bottom {
+                // When: `self.cursor.row == bottom`, scroll the region instead of the screen.
                 self.scroll_region_up_with(top, bottom, 1, fill);
                 return;
             }
@@ -950,10 +998,12 @@ impl Grid {
     pub fn linefeed_with(&mut self, fill: Cell) {
         self.clear_pending_wrap();
         let old = self.cursor.row;
+        // `scroll_up_with` already marks every row dirty when linefeed starts
+        // at the bottom edge.
         if self.cursor.row + 1 >= self.rows {
-            // scroll_up already marks every row dirty.
             self.scroll_up_with(1, fill);
         } else {
+            // When: `self.cursor.row + 1 < self.rows`, advance without scrolling.
             self.cursor.row += 1;
         }
         // Both leaving and arriving rows count as touched (cursor moved
@@ -987,11 +1037,10 @@ impl Grid {
     /// into scrollback.
     ///
     /// This is O(n) in `n` (the number of lines scrolled) rather than
-    /// O(rows × cols) — a `pop_front` rotates the `VecDeque`'s ring head
-    /// rather than memmove-ing every row down by one. The popped row is
-    /// recycled in place: its cells are reset to `Cell::default()` and the
-    /// row buffer is pushed onto the back of the deque, avoiding a
-    /// per-scroll allocation for the new blank row.
+    /// O(rows × cols): `pop_front` rotates the visible deque's ring head. With
+    /// scrollback disabled or already at capacity, an existing row is recycled
+    /// as the new blank line. While scrollback is still growing, the popped row
+    /// enters history and a new blank [`Line`] is allocated.
     pub fn scroll_up(&mut self, n: u16) {
         self.scroll_up_with(n, Cell::default());
     }
@@ -1003,18 +1052,21 @@ impl Grid {
         let cols = self.cols as usize;
         let n = usize::from(n).min(self.visible.len());
         if n == 0 {
+            // When: `n == 0`, the clamped scroll request has no effect.
             return;
         }
         let changed_at = self.next_content_seq();
         for _ in 0..n {
             let Some(mut row) = self.visible.pop_front() else {
+                // When: the visible deque pop returns `None`, stop rather than inventing rows.
                 break;
             };
             let _old_stamp = self.row_content_seq.pop_front();
+            // With scrollback disabled, recycle the row as the new blank line.
+            // Absolute row numbers stay fixed, so all visible positions are
+            // restamped after the rotation below.
             if self.scrollback_limit == 0 {
-                // Scrollback disabled — recycle the row straight back as
-                // the new blank line. Absolute row numbers stay fixed, so all
-                // visible positions are restamped after the rotation below.
+                // When: `self.scrollback_limit == 0`, recycle the row into the visible grid.
                 for cell in row.iter_mut() {
                     *cell = fill.clone();
                 }
@@ -1053,6 +1105,7 @@ impl Grid {
                 self.visible.push_back(recycled);
                 self.row_content_seq.push_back(changed_at);
             } else {
+                // When: `self.scrollback.len() < self.scrollback_limit`, retain `row` and add a blank.
                 self.scrollback.push_back(row);
                 let mut blank = Line::flat_filled(cols, fill.clone());
                 blank.set_content_seq(changed_at);
@@ -1114,15 +1167,18 @@ impl Grid {
         let cols = self.cols as usize;
         let rows = self.rows as usize;
         if rows == 0 {
+            // When: `rows == 0`, no visible screen region exists to shift down.
             return;
         }
         let n = (n as usize).min(rows);
         if n == 0 {
+            // When: `n == 0`, preserve row identity and revision.
             return;
         }
         for _ in 0..n {
             // Drop bottom row, recycle it as the new blank top row.
             let Some(mut row) = self.visible.pop_back() else {
+                // When: the visible deque pop returns `None`, stop rather than inventing rows.
                 break;
             };
             for cell in row.iter_mut() {
@@ -1141,9 +1197,9 @@ impl Grid {
     /// coordinates) UP by `n` lines. Rows above `top` and below
     /// `bottom` are left untouched; rows inside the region shift up
     /// by `n` and the bottom `n` rows of the region become blank.
-    /// Scrollback is NOT touched — this is the in-region scroll used
-    /// by DECSTBM / CSI S / IND-at-bottom-margin and must not push
-    /// into history.
+    /// Proper sub-regions do not touch scrollback. A region covering the whole
+    /// visible grid delegates to the full-screen scroll path, so ejected rows
+    /// enter history when scrollback is enabled.
     ///
     /// Every row in `[top, bottom]` is marked dirty: even rows whose
     /// content is "the same string they had two scrolls ago" must be
@@ -1163,11 +1219,13 @@ impl Grid {
         self.clear_pending_wrap();
         let rows = self.rows as usize;
         if rows == 0 {
+            // When: `rows == 0`, the requested scroll region is empty.
             return;
         }
         let top_i = top as usize;
         let bot_i = (bottom as usize).min(rows.saturating_sub(1));
         if top_i > bot_i {
+            // When: `top_i > bot_i`, reject the invalid scroll region.
             return;
         }
         // When the scroll region covers the entire visible grid, the
@@ -1182,12 +1240,14 @@ impl Grid {
         // leaving stale text bleeding through behind their UI. Fixes
         // (and the real cause).
         if top_i == 0 && bot_i == rows.saturating_sub(1) {
+            // When: `top_i == 0` and `bot_i` is the last row, route ejected rows to history.
             self.scroll_up_with(n, fill);
             return;
         }
         let region_len = bot_i - top_i + 1;
         let n = (n as usize).min(region_len);
         if n == 0 {
+            // When: `n == 0`, preserve every row in the scroll region.
             return;
         }
         // Shift content up by `n` within the region.
@@ -1196,6 +1256,7 @@ impl Grid {
             if src <= bot_i {
                 self.visible.swap(r, src);
             } else {
+                // When: `src > bot_i`, clear the exposed destination with no source row.
                 // Clear rows that have no source.
                 for cell in self.visible[r].iter_mut() {
                     *cell = fill.clone();
@@ -1217,7 +1278,7 @@ impl Grid {
     }
 
     /// Scroll a sub-region `[top, bottom]` (inclusive, visible-row
-    /// coordinates) DOWN by `n` lines. Mirror of [`scroll_region_up`];
+    /// coordinates) DOWN by `n` lines. Mirror of [`Self::scroll_region_up`];
     /// see that doc for the dirty-bit / cache-invalidation rationale.
     pub fn scroll_region_down(&mut self, top: u16, bottom: u16, n: u16) {
         self.scroll_region_down_with(top, bottom, n, Cell::default());
@@ -1228,16 +1289,19 @@ impl Grid {
         self.clear_pending_wrap();
         let rows = self.rows as usize;
         if rows == 0 {
+            // When: `rows == 0`, the requested scroll region is empty.
             return;
         }
         let top_i = top as usize;
         let bot_i = (bottom as usize).min(rows.saturating_sub(1));
         if top_i > bot_i {
+            // When: `top_i > bot_i`, reject the invalid scroll region.
             return;
         }
         let region_len = bot_i - top_i + 1;
         let n = (n as usize).min(region_len);
         if n == 0 {
+            // When: `n == 0`, preserve every row in the scroll region.
             return;
         }
         // Shift content down by `n` within the region (work from the
@@ -1249,6 +1313,7 @@ impl Grid {
                 let src = r - n;
                 self.visible.swap(r, src);
             } else {
+                // When: `r < top_i + n`, clear the exposed destination with no source row.
                 for cell in self.visible[r].iter_mut() {
                     *cell = fill.clone();
                 }
@@ -1398,6 +1463,7 @@ impl Grid {
     pub fn erase_cells_with(&mut self, row: u16, col: u16, n: usize, fill: Cell) {
         self.clear_pending_wrap();
         if row >= self.rows || col >= self.cols || n == 0 {
+            // When: `row >= self.rows`, `col >= self.cols`, or `n == 0`, there is nothing to erase.
             return;
         }
         let r = row as usize;
@@ -1423,6 +1489,7 @@ impl Grid {
     pub fn insert_cells_with(&mut self, row: u16, col: u16, n: usize, fill: Cell) {
         self.clear_pending_wrap();
         if row >= self.rows || col >= self.cols || n == 0 {
+            // When: `row >= self.rows`, `col >= self.cols`, or `n == 0`, there is no insertion.
             return;
         }
         let r = row as usize;
@@ -1462,6 +1529,7 @@ impl Grid {
     pub fn delete_cells_with(&mut self, row: u16, col: u16, n: usize, fill: Cell) {
         self.clear_pending_wrap();
         if row >= self.rows || col >= self.cols || n == 0 {
+            // When: `row >= self.rows`, `col >= self.cols`, or `n == 0`, there is no deletion.
             return;
         }
         let r = row as usize;
@@ -1510,6 +1578,7 @@ impl Grid {
             if row.is_clustered() {
                 cluster += 1;
             } else {
+                // When: the row is not compressed as a cluster, count it as flat storage.
                 flat += 1;
             }
         }
@@ -1525,13 +1594,14 @@ impl Grid {
         self.scrollback.iter().map(|r| r.approx_byte_size()).sum()
     }
 
-    /// review fix: reserved row slots in the scrollback container.
+    /// Return the number of row slots reserved by the scrollback container.
     #[doc(hidden)]
     pub fn scrollback_capacity(&self) -> usize {
         self.scrollback.capacity()
     }
 
-    /// review fix: approximate scrollback heap footprint for reporting.
+    /// Approximate the scrollback heap footprint for diagnostics.
+    ///
     /// Counts the scrollback `VecDeque` ring, reserved outer row slots, one
     /// inner `Vec` header per live row, plus each inner storage buffer's
     /// reserved capacity. This intentionally reports user-visible heap shape
@@ -1558,6 +1628,7 @@ impl Grid {
     pub fn record_prompt_start(&mut self) {
         let row = self.cursor_absolute_row();
         if matches!(self.prompts.back(), Some(p) if p.start_row == row && p.end_row.is_none()) {
+            // When: `matches!` finds an open prompt at `row`, coalesce the marker.
             return;
         }
         if self.prompts.len() >= PROMPT_REGION_LIMIT {
@@ -1594,6 +1665,7 @@ impl Grid {
         if rel < self.rows as u64 {
             Some(rel as u16)
         } else {
+            // When: `rel >= self.rows`, the prompt has no visible row.
             None
         }
     }
@@ -1619,8 +1691,12 @@ impl Grid {
     /// pane creation and on config hot-reload.
     pub fn set_scrollback_limit(&mut self, limit: usize) {
         self.scrollback_requested_limit = limit;
-        self.scrollback_limit =
-            if self.is_alt() { 0 } else { bounded_scrollback_rows(self.cols, self.rows, limit) };
+        self.scrollback_limit = if self.is_alt() {
+            0
+        } else {
+            // When: `self.is_alt()` is false, bound primary history by `limit` and grid size.
+            bounded_scrollback_rows(self.cols, self.rows, limit)
+        };
         if self.scrollback.len() > self.scrollback_limit {
             let excess = self.scrollback.len() - self.scrollback_limit;
             self.scrollback.drain(0..excess);
@@ -1635,7 +1711,10 @@ impl Grid {
 
     fn enforce_alt_memory_budget(&mut self) {
         let dropped = {
-            let Some(primary) = self.alt_screen.as_mut() else { return };
+            let Some(primary) = self.alt_screen.as_mut() else {
+                // When: no primary screen is saved, there is no alternate-screen budget to enforce.
+                return;
+            };
             let active_cells = u64::from(self.cols) * u64::from(self.rows);
             let primary_visible_cells = u64::from(primary.cols) * u64::from(primary.rows);
             let remaining_cells = u64::from(MAX_GRID_CELLS)
@@ -1789,7 +1868,7 @@ impl Grid {
     /// underline metadata allocate, neither of which the registry knows about.
     ///
     /// **Deliberately larger than the figure
-    /// [`Self::enforce_retained_capacity_budget`] acts on.** Enforcement can
+    /// `Self::enforce_retained_capacity_budget` acts on.** Enforcement can
     /// only shrink what `shrink_capacity_to_fit` reaches, which is row
     /// capacity; a rare-attribute box is freed by clearing the cell, not by
     /// compacting the row. Reporting the enforceable figure instead would make
@@ -1822,9 +1901,10 @@ impl Grid {
     /// which is the property that lets attribution improve without the
     /// aggregate moving.
     ///
-    /// Prompt regions and rare-attribute boxes belong to the screen that holds
-    /// their cells, so they are folded into the corresponding part rather than
-    /// reported separately.
+    /// Rare-attribute boxes follow the rows that own them, and live prompt
+    /// regions are attributed to `visible`. Container overhead—including the
+    /// saved primary's prompt-ring capacity while the alternate screen is
+    /// active—is also assigned to `visible` so the three parts sum exactly.
     #[must_use]
     pub fn retained_amount_by_region(&self) -> GridRegionAmounts {
         // Container bytes ride with the visible region rather than being split
@@ -1880,6 +1960,7 @@ impl Grid {
         // held exactly, so the reporting was honest and the comparison was not.
         let budget_bytes = MAX_GRID_CELLS as usize * std::mem::size_of::<Cell>();
         if self.retained_amount().bytes <= budget_bytes && !self.capacity_excess_is_material() {
+            // When: `retained_amount().bytes <= budget_bytes` and excess is immaterial, skip compaction.
             return;
         }
         for row in &mut self.visible {
@@ -1931,6 +2012,7 @@ impl Grid {
         // A grid with no history cannot trim, and one already inside the budget
         // has nothing to do.
         if self.scrollback.is_empty() || self.retained_amount().bytes <= budget_bytes {
+            // When: `self.scrollback.is_empty()` or retained bytes fit `budget_bytes`, skip trimming.
             return;
         }
 

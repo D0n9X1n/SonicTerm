@@ -92,6 +92,7 @@ pub trait BitmapImage {
         let dest_x = rect.origin.x.max(0) as usize;
         let dest_y = rect.origin.y.max(0) as usize;
         if dest_x >= dim_w || dest_y >= dim_h {
+            // When: `dest_x` or `dest_y` starts outside the image, clipping leaves no pixels to clear.
             return;
         }
         let word = color.as_bgra32();
@@ -137,18 +138,23 @@ pub trait BitmapImage {
                 buf[off + 3] = bytes[3];
             }
             if x == x1 && y == y1 {
+                // When: `x == x1` and `y == y1`, both coordinates reached the endpoint and the line is complete.
                 break;
             }
             let e2 = 2 * err;
             if e2 >= dy {
+                // When: `e2 >= dy`, the Bresenham error permits one horizontal step.
                 if x == x1 {
+                    // When: `x` already equals `x1`, another horizontal step would overshoot the endpoint.
                     break;
                 }
                 err += dy;
                 x += sx;
             }
             if e2 <= dx {
+                // When: `e2 <= dx`, the Bresenham error permits one vertical step.
                 if y == y1 {
+                    // When: `y` already equals `y1`, another vertical step would overshoot the endpoint.
                     break;
                 }
                 err += dx;

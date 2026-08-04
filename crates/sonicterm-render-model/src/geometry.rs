@@ -39,6 +39,7 @@ impl PixelRect {
         let x1 = self.right().min(bounds.right());
         let y1 = self.bottom().min(bounds.bottom());
         if x1 <= x0 || y1 <= y0 {
+            // When: `x1 <= x0` or `y1 <= y0`, the clipped rectangles share no positive pixel span.
             return None;
         }
         Some(PixelRect { x: x0, y: y0, w: (x1 - x0) as u32, h: (y1 - y0) as u32 })
@@ -79,7 +80,10 @@ impl DamageRect {
 
     /// Add a rectangle to the accumulated damage, clipping it to `bounds`.
     pub fn add_clipped(&mut self, rect: PixelRect, bounds: PixelRect) {
-        let Some(clipped) = rect.intersect(bounds) else { return };
+        let Some(clipped) = rect.intersect(bounds) else {
+            // When: `rect` has no overlap with `bounds`, it contributes no frame damage.
+            return;
+        };
         self.rect = Some(match self.rect {
             Some(existing) => existing.union(clipped),
             None => clipped,
@@ -131,6 +135,7 @@ pub fn snap_to_device_pixels(rect: (f32, f32, f32, f32), scale: f32) -> (f32, f3
     let (x, y, w, h) = rect;
     // Integer-scale fast path — see module doc.
     if scale.fract() == 0.0 {
+        // When: integer `scale` already aligns the established layout and rounding would shift font-derived edges.
         return rect;
     }
     let x_dev = (x * scale).round();

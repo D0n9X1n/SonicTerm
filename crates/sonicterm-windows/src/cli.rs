@@ -48,15 +48,17 @@ where
                 .context("decode --tear-out-payload JSON")?;
             out.tearout = Some(parsed);
         } else if arg == OsStr::new("--open-script") {
+            // When: `arg` selects script opening after the tear-out option was rejected; parse exactly one path.
             let Some(path) = args.next() else { bail!("--open-script requires a path argument") };
             if out.open_script.is_some() {
                 bail!("--open-script may be provided only once")
             }
             out.open_script = Some(PathBuf::from(path));
         } else if arg == OsStr::new("--refresh-shell-associations") {
+            // When: `arg` selects association refresh after both payload options were rejected; no path value is consumed.
             out.refresh_shell_associations = true;
         } else {
-            // Preserve the previous tolerance for launch-shim arguments we do not own.
+            // When: `arg` is not SonicTerm-owned, tolerate launch-shim metadata instead of breaking startup.
         }
     }
     if out.open_script.is_some() && out.tearout.is_some() {

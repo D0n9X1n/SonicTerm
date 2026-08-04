@@ -19,6 +19,7 @@ struct GithubRelease {
     prerelease: bool,
 }
 
+/// Query GitHub releases and compare the newest stable tag with `current`.
 pub fn check_latest_release(current: &str) -> UpdateCheckResult {
     let config = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(6))).build();
     let agent: ureq::Agent = config.into();
@@ -28,24 +29,29 @@ pub fn check_latest_release(current: &str) -> UpdateCheckResult {
         .header("Accept", "application/vnd.github+json")
         .call();
     let Ok(mut response) = response else {
+        // When: `response` is an error, report update status unavailable without blocking startup.
         return UpdateCheckResult::Unavailable;
     };
     let Ok(body) = response.body_mut().read_to_string() else {
+        // When: the response body cannot be read, preserve the nonfatal unavailable result.
         return UpdateCheckResult::Unavailable;
     };
     latest_release_from_json(current, &body).unwrap_or(UpdateCheckResult::Unavailable)
 }
 
+/// Parse release JSON and classify the newest non-draft, non-prerelease tag against `current`.
 pub fn latest_release_from_json(current: &str, body: &str) -> Option<UpdateCheckResult> {
     let releases: Vec<GithubRelease> = serde_json::from_str(body).ok()?;
     let latest = releases.into_iter().find(|release| !release.draft && !release.prerelease)?;
     if version_is_newer(current, &latest.tag_name) {
         Some(UpdateCheckResult::Newer { tag: latest.tag_name, url: latest.html_url })
     } else {
+        // When: `candidate` is not newer than `current`, report the installed version as current.
         Some(UpdateCheckResult::UpToDate)
     }
 }
 
+/// Return whether both semantic versions parse and `candidate` is greater than `current`.
 pub fn version_is_newer(current: &str, candidate: &str) -> bool {
     parse_version(candidate)
         .zip(parse_version(current))

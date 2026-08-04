@@ -29,6 +29,7 @@ impl App {
     /// uncertainty would discard a user's scrollback to no purpose.
     pub(super) fn handle_pane_process_exited(&mut self, pane_id: u64, was_clean: Option<bool>) {
         if was_clean != Some(true) {
+            // When: `was_clean` is false or unknown, preserve the pane and its scrollback for diagnosis.
             tracing::debug!(
                 pane = pane_id,
                 ?was_clean,
@@ -37,8 +38,7 @@ impl App {
             return;
         }
         let Some(site) = self.locate_exited_pane(pane_id) else {
-            // Nothing to close: the user got there first, or the pane was
-            // torn down while its exit was still being classified.
+            // When: `locate_exited_pane(pane_id)` returns no `site`, teardown raced and nothing remains to close.
             return;
         };
         // The intent describes what happened regardless of how much topology
@@ -49,6 +49,7 @@ impl App {
             status: 0,
         });
         if !site.sole_leaf {
+            // When: `site.sole_leaf` is false, reducer cleanup resized the surviving sibling and the tab remains usable.
             return;
         }
         // The tab's only pane is gone, so the tab has nothing left to show.
@@ -69,6 +70,7 @@ impl App {
                 w.request_redraw();
             }
         } else {
+            // When: `site.window` is a child, close through its child-local tab/window reaper.
             // Reaps its own window when the last tab goes.
             self.close_tab_at_in_child(site.window, site.tab_index);
         }

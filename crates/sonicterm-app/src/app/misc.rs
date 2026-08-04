@@ -43,11 +43,15 @@ impl App {
         let guard = pane.parser.try_lock()?;
         let grid = guard.grid();
         if row >= grid.rows || col >= grid.cols {
+            // When: row or col is past the grid's extent; the pointer was hit-tested
+            // against a grid that has since resized, so refuse before indexing.
             return None;
         }
         let r = grid.row(row);
         // First: OSC 8 hyperlink interned on the cell itself.
         if let Some(hid) = r[col as usize].hyperlink() {
+            // When: the cell carries an interned hyperlink id; an explicit OSC 8 URI
+            // outranks the plain-text scan below, which never sees this cell.
             let uri = guard.hyperlinks().lookup(hid).map(|h| h.uri.clone());
             drop(guard);
             return uri;
@@ -81,10 +85,14 @@ impl App {
         let guard = pane.parser.try_lock()?;
         let grid = guard.grid();
         if row >= grid.rows || col >= grid.cols {
+            // When: row or col is past the child grid's extent; a stale hit-test
+            // would index out of range, so refuse before touching the row.
             return None;
         }
         let r = grid.row(row);
         if let Some(hid) = r[col as usize].hyperlink() {
+            // When: the cell carries an interned hyperlink id; an explicit OSC 8 URI
+            // outranks the plain-text scan below, which never sees this cell.
             let uri = guard.hyperlinks().lookup(hid).map(|h| h.uri.clone());
             drop(guard);
             return uri;
@@ -133,12 +141,18 @@ impl App {
     /// selection when the parser is busy.
     pub(super) fn word_selection_at(&self, abs_row: u64, col: u16) -> Selection {
         let Some(pane_id) = self.active_pane_id() else {
+            // When: active_pane_id resolves to nothing; fall back to a point selection
+            // so a double-click still anchors at the clicked cell.
             return Selection::new(abs_row, col);
         };
         let Some(pane) = self.pane_by_id(pane_id) else {
+            // When: pane_by_id cannot resolve pane_id; without a grid the word bounds
+            // cannot be computed, so the point selection stands in.
             return Selection::new(abs_row, col);
         };
         let Some(guard) = pane.parser.try_lock() else {
+            // When: try_lock finds the parser busy; the render path never blocks on
+            // it, so return a point selection rather than stall on the word lookup.
             return Selection::new(abs_row, col);
         };
         let grid = guard.grid();
@@ -157,12 +171,18 @@ impl App {
     /// [`Self::word_selection_at`].
     pub(super) fn line_selection_at(&self, abs_row: u64) -> Selection {
         let Some(pane_id) = self.active_pane_id() else {
+            // When: active_pane_id resolves to nothing; fall back to a point selection
+            // so a triple-click still anchors somewhere instead of being dropped.
             return Selection::new(abs_row, 0);
         };
         let Some(pane) = self.pane_by_id(pane_id) else {
+            // When: pane_by_id cannot resolve pane_id; without a grid the row extent
+            // is unknown, so anchor a point selection at the clicked row.
             return Selection::new(abs_row, 0);
         };
         let Some(guard) = pane.parser.try_lock() else {
+            // When: try_lock finds the parser busy; the render path never blocks on
+            // it, so a point selection stands in rather than stalling the click.
             return Selection::new(abs_row, 0);
         };
         let grid = guard.grid();
@@ -244,6 +264,8 @@ impl App {
         let guard = pane.parser.try_lock()?;
         let grid = guard.grid();
         if row >= grid.rows || col >= grid.cols {
+            // When: row or col is past the grid's extent; the pointer was hit-tested
+            // against a grid that has since resized, so refuse before indexing.
             return None;
         }
         let r = grid.row(row);
@@ -259,6 +281,8 @@ impl App {
         let guard = pane.parser.try_lock()?;
         let grid = guard.grid();
         if row >= grid.rows {
+            // When: row is past grid.rows; the row was hit-tested against a grid that
+            // has since shrunk, so refuse rather than index a row that is gone.
             return None;
         }
         let r = grid.row(row);
@@ -329,12 +353,15 @@ impl App {
             .map(|st| st.active_pane);
         let hit = self.pane_at_cursor(cursor_pos.0 as f32, cursor_pos.1 as f32);
         if hit != active_id {
+            // When: hit names a pane other than active_id; the row text below is read
+            // from the active pane, so an inactive split would light up its URL.
             return None;
         }
         let r = self.main_renderer()?;
         let (row, col) = r.pixel_to_cell(cursor_pos.0 as f32, cursor_pos.1 as f32)?;
-        // OSC 8 has its own affordance — don't double up.
         if self.osc8_uri_at(row, col).is_some() {
+            // When: osc8_uri_at finds an interned link; OSC 8 carries its own
+            // always-on affordance, so plain-text detection must not double up.
             return None;
         }
         let row_text = self.focused_pane_row_text(row)?;
@@ -347,8 +374,12 @@ impl App {
     pub(super) fn url_open_modifier_held(&self) -> bool {
         let mods = self.main_modifiers();
         if cfg!(target_os = "macos") {
+            // When: cfg selects the macOS build; Cmd is the open-URL modifier there,
+            // so a plain hover stays a hint until super_key is held.
             mods.super_key()
         } else {
+            // When: cfg selects any non-macOS build; Ctrl is the open-URL modifier on
+            // Windows and Linux, so control_key gates the same affordance.
             mods.control_key()
         }
     }
@@ -375,6 +406,8 @@ impl App {
         let guard = pane.parser.try_lock()?;
         let grid = guard.grid();
         if row >= grid.rows || col >= grid.cols {
+            // When: row or col is past the child grid's extent; a stale hit-test would
+            // index out of range, so refuse instead of panicking.
             return None;
         }
         let hid = grid.row(row)[col as usize].hyperlink()?;
@@ -390,6 +423,8 @@ impl App {
         let guard = pane.parser.try_lock()?;
         let grid = guard.grid();
         if row >= grid.rows {
+            // When: row is past grid.rows; the hit-test ran against a grid the child
+            // window has since resized, so refuse before indexing out of range.
             return None;
         }
         let r = grid.row(row);
@@ -403,8 +438,12 @@ impl App {
     pub(super) fn child_url_open_modifier_held(&self, win_id: winit::window::WindowId) -> bool {
         let mods = self.windows.get(&win_id).map(|c| c.modifiers).unwrap_or_default();
         if cfg!(target_os = "macos") {
+            // When: cfg selects the macOS build; Cmd is the platform's open-in-browser
+            // modifier there, so the child window reads super_key.
             mods.super_key()
         } else {
+            // When: cfg selects any non-macOS build; Windows and Linux use Ctrl for
+            // the same gesture, so the child window reads control_key instead.
             mods.control_key()
         }
     }
@@ -422,6 +461,8 @@ impl App {
             for (id, rect) in App::compute_pane_rects_for(child) {
                 let (lx, ly) = (cursor_pos.0 as f32, cursor_pos.1 as f32);
                 if lx >= rect.x && lx < rect.x + rect.w && ly >= rect.y && ly < rect.y + rect.h {
+                    // When: the cursor lies inside this rect; the first containing
+                    // pane wins, so the walk stops rather than testing later rects.
                     found = Some(id);
                     break;
                 }
@@ -429,11 +470,15 @@ impl App {
             found
         };
         if hit != active_id {
+            // When: hit names a pane other than active_id; the row text below comes
+            // from the active pane, so an inactive split would light up its URL.
             return None;
         }
         let r = child.renderer.as_ref()?;
         let (row, col) = r.pixel_to_cell(cursor_pos.0 as f32, cursor_pos.1 as f32)?;
         if self.child_osc8_uri_at(win_id, row, col).is_some() {
+            // When: child_osc8_uri_at finds an OSC 8 link; it has its own always-on
+            // affordance, so plain-text detection must not double up on the cell.
             return None;
         }
         let row_text = self.child_focused_pane_row_text(win_id, row)?;
@@ -490,6 +535,8 @@ impl App {
     pub(super) fn open_ssh_pane(&mut self, target: &str) {
         match sonicterm_io::ssh::parse_target(target) {
             Ok(parsed) => {
+                // When: parse_target accepts the target; the result is only logged,
+                // since no build wires an SSH pane to a backend yet.
                 #[cfg(feature = "ssh")]
                 {
                     tracing::info!("ssh: connecting to {parsed} (pane backend wiring pending)");
@@ -509,8 +556,16 @@ impl App {
         }
     }
     pub(super) fn enter_copy_mode_for_kind(&mut self, kind: FrontmostKind) {
-        let Some(pane_id) = self.active_pane_id_for_kind(kind) else { return };
-        let Some(pane) = self.pane_by_id(pane_id) else { return };
+        let Some(pane_id) = self.active_pane_id_for_kind(kind) else {
+            // When: active_pane_id_for_kind finds no pane for this kind; copy mode
+            // has no grid to anchor its cursor in, so the request is dropped.
+            return;
+        };
+        let Some(pane) = self.pane_by_id(pane_id) else {
+            // When: pane_by_id cannot resolve pane_id; the pane closed before the
+            // action ran, so there is no cursor position to seed copy mode with.
+            return;
+        };
         let cursor = {
             let guard = pane.parser.lock();
             let grid = guard.grid();
@@ -534,7 +589,11 @@ impl App {
     }
 
     pub(super) fn enter_quick_select(&mut self) {
-        let Some(pane) = self.active_pane() else { return };
+        let Some(pane) = self.active_pane() else {
+            // When: active_pane resolves to nothing; quick-select needs a live grid
+            // to build its label set, so the overlay is not entered.
+            return;
+        };
         let state = {
             let guard = pane.parser.lock();
             let grid = guard.grid();
@@ -553,18 +612,34 @@ impl App {
         let window_id = match kind {
             FrontmostKind::Child(id) => id,
             FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {
-                let Some(id) = self.main_window_id else { return };
+                // When: kind is any FrontmostKind other than Child; all three resolve
+                // to the main window, which owns the selection being copied.
+                let Some(id) = self.main_window_id else {
+                    // When: main_window_id is unset; no main window has been created
+                    // yet, so there is no window to copy a selection from.
+                    return;
+                };
                 id
             }
         };
         let text = {
-            let Some(window) = self.windows.get_mut(&window_id) else { return };
+            let Some(window) = self.windows.get_mut(&window_id) else {
+                // When: windows no longer holds window_id; the window closed before
+                // the copy ran, so there is no selection left to read.
+                return;
+            };
             let Some(pane_id) =
                 window.tab_states.get(window.tabs.active_index()).map(|state| state.active_pane)
             else {
+                // When: tab_states has no entry at the active index; without a tab
+                // there is no active pane whose grid could supply the text.
                 return;
             };
-            let Some(pane) = window.panes.get(&pane_id) else { return };
+            let Some(pane) = window.panes.get(&pane_id) else {
+                // When: panes no longer holds pane_id; the pane closed between the
+                // selection and the copy, so there is no grid to read text from.
+                return;
+            };
             let parser = pane.parser.lock();
             let grid = parser.grid();
 
@@ -574,10 +649,18 @@ impl App {
             // normal window selection; copy-mode and search overlays are
             // independent state.
             if invalidate_selection_for_content(&mut window.selection, pane_id, grid) {
+                // When: invalidate_selection_for_content cleared the selection; the
+                // rows it covered no longer hold the text the user chose.
                 return;
             }
-            let Some(selection) = window.selection else { return };
+            let Some(selection) = window.selection else {
+                // When: window.selection is None; nothing is selected, so there is
+                // no text to place on the clipboard.
+                return;
+            };
             if selection.is_empty() {
+                // When: selection is empty; a bare click leaves a zero-width range,
+                // and copying it would clear the clipboard.
                 return;
             }
             selection.as_text(grid)
@@ -587,9 +670,13 @@ impl App {
 
     pub(super) fn set_clipboard_text(&mut self, text: String) {
         if text.is_empty() {
+            // When: text is empty; writing it would clear the user's clipboard,
+            // so leave the previous contents intact.
             return;
         }
         if self.test_clipboard_text.is_some() {
+            // When: test_clipboard_text is set; the suite captures the copy here
+            // so no real system clipboard is touched by a test run.
             self.test_clipboard_text = Some(text.clone());
             return;
         }
@@ -597,6 +684,8 @@ impl App {
             if let Err(e) = cb.set_text(text.clone()) {
                 tracing::warn!("clipboard set failed: {e}");
             } else {
+                // When: set_text succeeded; record the byte count so a silent
+                // clipboard failure stays distinguishable from a real copy.
                 tracing::info!("copied {} bytes", text.len());
             }
         }
@@ -605,16 +694,28 @@ impl App {
         let text = if let Some(text) = self.test_clipboard_text.clone() {
             Some(text)
         } else {
+            // When: test_clipboard_text is unset; read the real system clipboard,
+            // whose get_text error is discarded and reads as nothing to paste.
             self.clipboard.as_mut().and_then(|cb| cb.get_text().ok())
         };
-        let Some(text) = text else { return };
-        let Some(pane_id) = self.active_pane_id_for_kind(kind) else { return };
+        let Some(text) = text else {
+            // When: text is None; neither the test override nor the system
+            // clipboard yielded anything, so there is nothing to paste.
+            return;
+        };
+        let Some(pane_id) = self.active_pane_id_for_kind(kind) else {
+            // When: active_pane_id_for_kind finds no pane for this kind; there is
+            // no PTY to paste into, so the clipboard text is dropped.
+            return;
+        };
         let bracketed = self
             .pane_by_id(pane_id)
             .map(|p| p.parser.lock().bracketed_paste_enabled())
             .unwrap_or(false);
         let bytes = wrap_paste(&text, bracketed);
         if !sonicterm_io::pty::pty_input_message_allowed(bytes.len()) {
+            // When: pty_input_message_allowed rejects the wrapped clipboard text;
+            // warn with the size rather than push a message the writer refuses.
             self.show_notification_for_kind(
                 kind,
                 sonicterm_ui::overlays::NotificationLevel::Warning,
@@ -640,15 +741,23 @@ impl App {
             .collect::<Vec<_>>()
             .join(" ");
         if quoted.is_empty() {
+            // When: quoted is empty; the drop yielded no paths, so a paste would
+            // send only the bracketed-paste wrapper to the shell.
             return;
         }
-        let Some(pane_id) = self.active_pane_id_for_kind(kind) else { return };
+        let Some(pane_id) = self.active_pane_id_for_kind(kind) else {
+            // When: active_pane_id_for_kind finds no pane for this kind; there is
+            // no PTY to receive the dropped paths, so discard them.
+            return;
+        };
         let bracketed = self
             .pane_by_id(pane_id)
             .map(|p| p.parser.lock().bracketed_paste_enabled())
             .unwrap_or(false);
         let bytes = wrap_paste(&quoted, bracketed);
         if !sonicterm_io::pty::pty_input_message_allowed(bytes.len()) {
+            // When: pty_input_message_allowed rejects the wrapped paths; warn the
+            // user rather than push a message the PTY writer would refuse.
             self.show_notification_for_kind(
                 kind,
                 sonicterm_ui::overlays::NotificationLevel::Warning,
@@ -665,11 +774,23 @@ impl App {
     }
     pub(super) fn scroll_to_prompt(&mut self, forward: bool) {
         let updated = {
-            let Some(ws) = self.main_mut() else { return };
+            let Some(ws) = self.main_mut() else {
+                // When: main_mut has no WindowState; there is no viewport to move,
+                // so leave `updated` unset and skip the redraw below.
+                return;
+            };
             let i = ws.tabs.active_index();
-            let Some(st) = ws.tab_states.get(i) else { return };
+            let Some(st) = ws.tab_states.get(i) else {
+                // When: tab_states has no entry at the active index; without a tab
+                // there is no pane whose prompt rows could be searched.
+                return;
+            };
             let pane_id = st.active_pane;
-            let Some(pane) = ws.panes.get_mut(&pane_id) else { return };
+            let Some(pane) = ws.panes.get_mut(&pane_id) else {
+                // When: panes no longer holds pane_id; the tab's active pane closed,
+                // so there is no grid to search for a prompt row.
+                return;
+            };
             let new_top = {
                 let guard = pane.parser.lock();
                 let grid = guard.grid();
@@ -681,6 +802,8 @@ impl App {
                 tracing::info!(target = top, "scrolled to prompt row");
                 true
             } else {
+                // When: new_top is None; pick_prompt_target found no prompt row in
+                // this direction, so the viewport stays put and no redraw is asked for.
                 false
             }
         };
@@ -698,9 +821,8 @@ impl App {
         // In-process tear-out drain. The `Command::new`-based spawn
         // (`spawn_tearout_child` + `--tear-out-payload`) is still reached from
         // the Windows OLE drop path, so both routes exist.
-        // Ordering MUST stay before `drain_pending_os_teardown` (the
-        // invariant — `cancel_drag_session` must see the new
-        // child window already inserted).
+        // This drain MUST stay before `drain_pending_os_teardown`, so
+        // `cancel_drag_session` sees the new child window already inserted.
         if let Some(req) = self.pending_tear_out.take() {
             self.drain_pending_tear_out(el, req);
         }
@@ -718,9 +840,7 @@ impl App {
     /// so the operation fails rather than promoting a neighbour.
     ///
     /// Split out of the drain so it can be tested: the drain itself needs an
-    /// `ActiveEventLoop`, which exists only inside a running winit loop, and a
-    /// build that ignored the id entirely passed a suite that only exercised
-    /// the lookup helpers.
+    /// `ActiveEventLoop`, which exists only inside a running winit loop.
     pub(super) fn resolve_tear_out_source_index(
         &self,
         req: &crate::app::PendingTearOut,
@@ -738,6 +858,8 @@ impl App {
         let source_tab_idx = match self.resolve_tear_out_source_index(&req) {
             Some(idx) => idx,
             None => {
+                // When: resolve_tear_out_source_index cannot find the recorded tab
+                // id; abandon rather than tear out whichever tab inherited the slot.
                 tracing::warn!(
                     source = ?req.source_window,
                     recorded_idx = req.source_tab_idx,
@@ -749,9 +871,13 @@ impl App {
         let detached = if source_is_main {
             self.detach_tab_state(source_tab_idx)
         } else {
+            // When: source_is_main is false; the drag began in a child window, so
+            // detach from that child's tab list rather than the main window's.
             self.detach_from_child(req.source_window, source_tab_idx)
         };
         let Some((tab, state, panes)) = detached else {
+            // When: detached is None; the source tab vanished between resolving its
+            // index and detaching it, so there is nothing to install.
             tracing::warn!(
                 source = ?req.source_window,
                 idx = source_tab_idx,
@@ -764,6 +890,8 @@ impl App {
             .install_torn_out_window(el, tab, state, panes, req.drop_screen_pos, source)
             .is_none()
         {
+            // When: install_torn_out_window failed after consuming tab, state, and
+            // panes, so those shells are already dropped; only a child gets repaired.
             tracing::warn!(source = ?req.source_window, "drain_pending_tear_out: install failed");
             if !source_is_main {
                 self.tear_out_apply_child_source_side(req.source_window, source_tab_idx);
@@ -773,6 +901,8 @@ impl App {
         if source_is_main {
             self.tear_out_apply_source_side(source_tab_idx);
         } else {
+            // When: source_is_main is false; repair the child the tab left, reaping
+            // it when empty and otherwise activating the removed slot's neighbour.
             self.tear_out_apply_child_source_side(req.source_window, source_tab_idx);
         }
         tracing::info!(
@@ -782,16 +912,14 @@ impl App {
         );
     }
 
-    /// (speculative defensive fix): drain a deferred
-    /// `cancel_drag_session` request raised by `handle_os_drag_ended`
-    /// on the `DroppedOnEmpty` branch. Callers MUST invoke this
-    /// AFTER [`Self::drain_pending_window_creates`] so any
+    /// Drain a deferred `cancel_drag_session` request raised by
+    /// `handle_os_drag_ended` on the `DroppedOnEmpty` branch. Callers MUST
+    /// invoke this AFTER [`Self::drain_pending_window_creates`] so any
     /// tear-out-spawn has produced its new window before cross-window
     /// drag-residue cleanup mutates `self.windows`. The all-windows
     /// loop inside `cancel_drag_session` still runs UNCONDITIONALLY
-    /// when this drain fires (preserves the
-    /// `os_drag_cleanup.rs:172-201` idempotence guarantee — the flag
-    /// controls WHEN, not WHETHER).
+    /// when this drain fires, preserving that cleanup's idempotence —
+    /// the flag controls WHEN, not WHETHER.
     pub(super) fn drain_pending_os_teardown(&mut self) {
         if self.pending_os_teardown {
             self.pending_os_teardown = false;
@@ -799,18 +927,15 @@ impl App {
         }
     }
 
-    /// create a fresh
-    /// top-level terminal window, install its renderer, spawn one
-    /// tab + PTY-backed pane, register it with the OS-drag backend,
-    /// and mark it as the new frontmost window.
+    /// Create a fresh top-level terminal window, install its renderer,
+    /// spawn one tab + PTY-backed pane, register it with the OS-drag
+    /// backend, and mark it as the new frontmost window.
     ///
-    /// CRITICAL: this must work whether `self.windows` is empty or
-    /// not. The motivating bug: on macOS with
-    /// `quit_on_last_window_close = false`, after the user closes
-    /// the last window the process stays alive (dock icon + native
-    /// menubar), but Cmd+N was a no-op → the user was stuck with no
-    /// way to open a new window. After this fix, Cmd+N from the
-    /// dock-alive empty-windows state spawns a fresh terminal.
+    /// CRITICAL: this must work whether `self.windows` is empty or not.
+    /// On macOS with `quit_on_last_window_close = false`, the process
+    /// stays alive after the user closes the last window (dock icon +
+    /// native menubar), so Cmd+N from that empty-windows state must
+    /// still spawn a fresh terminal rather than do nothing.
     pub(super) fn create_new_terminal_window(&mut self, el: &ActiveEventLoop) {
         use sonicterm_ui::tabs::Tab;
 
@@ -827,6 +952,8 @@ impl App {
         let window = match el.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
+                // When: create_window is refused by the OS; log and leave the
+                // existing windows running rather than aborting the process.
                 tracing::error!("Action::NewWindow: create_window failed: {e}");
                 return;
             }
@@ -860,6 +987,8 @@ impl App {
         ) {
             Ok(r) => r,
             Err(e) => {
+                // When: GpuRenderer::new fails; return before the window is
+                // registered, so it closes instead of showing nothing forever.
                 tracing::error!("Action::NewWindow: renderer init failed: {e}");
                 return;
             }
@@ -869,6 +998,8 @@ impl App {
             &window,
             super::tear_out::ChildRendererOrigin::Fresh,
         ) {
+            // When: configure_child_renderer rejects the surface size; drop the
+            // window rather than register one whose cell grid would be unusable.
             let real_inner = window.inner_size();
             tracing::error!(
                 width = real_inner.width,
@@ -940,6 +1071,8 @@ impl App {
             self.windows.len()
         );
     }
+    // Ordering: redraw_request_count fetch_add is Relaxed; the counter is only
+    // incremented, never loaded, so it publishes no other memory.
     pub(super) fn drain_menubar_actions(&mut self, el: &ActiveEventLoop) {
         let mut ran_any = false;
         for action in crate::menubar_bridge::drain() {
@@ -969,12 +1102,12 @@ impl App {
         }
     }
     /// Test-only mirror of [`Self::drain_menubar_actions`] that omits the
-    /// `ActiveEventLoop`-dependent window-creation drain. Used by the
-    /// `close_pane_or_tab_semantics` regression suite to assert that a
-    /// menubar-bridged action increments [`Self::redraw_request_count`]
-    /// exactly once per drained action batch — the contract
-    /// added (Cmd+W "two presses" bug) and the follow-up
-    /// audit hardened with a real counter assertion.
+    /// `ActiveEventLoop`-dependent window-creation drain, so the drain can be
+    /// driven without a running winit loop. Bumps
+    /// [`Self::redraw_request_count`] once per drained action batch, matching
+    /// the first-press repaint contract in [`Self::drain_menubar_actions`].
+    // Ordering: redraw_request_count fetch_add is Relaxed; the counter is only
+    // incremented, never loaded, so it publishes no other memory.
     #[doc(hidden)]
     pub fn __test_drain_menubar_actions(&mut self) {
         let mut ran_any = false;
@@ -997,6 +1130,8 @@ impl App {
         self.drain_pending_os_drag_payloads();
         let drops = crate::os_drag_bridge::drain_file_drops();
         if drops.is_empty() {
+            // When: drops is empty; no file drop arrived, so skip the paste and
+            // the redraw that only a real drop needs.
             return;
         }
         for paths in drops {
@@ -1027,8 +1162,14 @@ impl App {
         self.reconcile_pane_owners();
     }
     pub(super) fn close_tab_at(&mut self, index: usize) {
-        let Some(ws) = self.main_mut() else { return };
+        let Some(ws) = self.main_mut() else {
+            // When: main_mut has no WindowState; there is no tab list to close
+            // from, so the request is dropped rather than treated as an error.
+            return;
+        };
         if index >= ws.tab_states.len() {
+            // When: index is past the end of tab_states; a close request that
+            // outlived its tab would panic in Vec::remove, so it is dropped.
             return;
         }
         let st = ws.tab_states.remove(index);
@@ -1042,6 +1183,8 @@ impl App {
     }
     pub(super) fn drain_pending_os_drag_payloads(&mut self) {
         if self.main_mut().is_none() || self.pending_os_drag_payloads.is_empty() {
+            // When: main_mut has no WindowState or pending_os_drag_payloads is
+            // empty; nothing can be replayed, so the queue waits for a later drain.
             return;
         }
         let pending = std::mem::take(&mut self.pending_os_drag_payloads);
@@ -1053,6 +1196,8 @@ impl App {
 
     pub fn new_tab_from_payload(&mut self, payload: &crate::os_drag::TabPayload) -> usize {
         if self.main_mut().is_none() {
+            // When: main_mut has no WindowState yet; queue the payload so a drop
+            // arriving before the main window exists is replayed, not lost.
             self.pending_os_drag_payloads.push(payload.clone());
             tracing::info!(
                 tab = %payload.tab_title,
@@ -1064,6 +1209,8 @@ impl App {
         let title = if payload.tab_title.is_empty() {
             "received tab".to_string()
         } else {
+            // When: the payload carries a tab_title; reuse the source tab's name
+            // so a dragged tab keeps its identity on the receiving window.
             payload.tab_title.clone()
         };
         self.new_tab(title);

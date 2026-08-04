@@ -36,21 +36,32 @@ fn descriptor_from_attr(attr: &FontAttributes) -> anyhow::Result<CFArray<CTFontD
         .parse::<CFString>()
         .map_err(|_| anyhow::anyhow!("failed to parse family name {} as CFString", attr.family))?;
 
-    let family_attr: CFString = unsafe { TCFType::wrap_under_get_rule(kCTFontFamilyNameAttribute) };
+    let family_attr: CFString =
+        // SAFETY: `kCTFontFamilyNameAttribute` is a non-null process-lifetime CoreText constant;
+        // get-rule wrapping retains it for this Rust owner without consuming the global reference.
+        unsafe { TCFType::wrap_under_get_rule(kCTFontFamilyNameAttribute) };
 
     let attributes = CFDictionary::from_CFType_pairs(&[(family_attr, family_name.as_CFType())]);
     let desc = core_text::font_descriptor::new_from_attributes(&attributes);
 
-    let array = unsafe {
-        core_text::font_descriptor::CTFontDescriptorCreateMatchingFontDescriptors(
-            desc.as_concrete_TypeRef(),
-            std::ptr::null(),
-        )
-    };
+    let array =
+        // SAFETY: `desc` is live; null requests no mandatory attributes, and CoreText returns
+        // a create-rule array or null without retaining either input pointer.
+        unsafe {
+            core_text::font_descriptor::CTFontDescriptorCreateMatchingFontDescriptors(
+                desc.as_concrete_TypeRef(),
+                std::ptr::null(),
+            )
+        };
     if array.is_null() {
         anyhow::bail!("no font matches {:?}", attr);
     } else {
-        Ok(unsafe { CFArray::wrap_under_get_rule(array) })
+        // When: `array.is_null()` is false, wrap the matching descriptor array.
+        Ok(
+            // SAFETY: the Create-rule function returned non-null +1 ownership;
+            // the wrapper consumes exactly that ownership.
+            unsafe { CFArray::wrap_under_create_rule(array) },
+        )
     }
 }
 
@@ -63,6 +74,7 @@ fn descriptor_from_attr(attr: &FontAttributes) -> anyhow::Result<CFArray<CTFontD
 fn handles_from_descriptor(descriptor: &CTFontDescriptor) -> Vec<ParsedFont> {
     let mut result = vec![];
     if let Some(path) = descriptor.font_path() {
+        // When: `descriptor.font_path()` is `Some`, parse every face in that file or collection.
         let source = FontDataSource::OnDisk(path);
         let _ =
             crate::parser::parse_and_collect_font_info(&source, &mut result, FontOrigin::CoreText);
@@ -94,7 +106,14 @@ impl FontLocator for CoreTextFontLocator {
                     // ourselves to name matches
                     let name_matches: Vec<_> = handles
                         .iter()
-                        .filter_map(|p| if p.matches_name(attr) { Some(p.clone()) } else { None })
+                        .filter_map(|p| {
+                            if p.matches_name(attr) {
+                                Some(p.clone())
+                            } else {
+                                // When: `p.matches_name(attr)` is false, exclude this TTC face.
+                                None
+                            }
+                        })
                         .collect();
                     if !name_matches.is_empty() {
                         handles = name_matches;
@@ -126,20 +145,28 @@ impl FontLocator for CoreTextFontLocator {
             let mut wanted = RangeSet::new();
             wanted.add(c as u32);
             let text = CFString::new(&c.to_string());
+            let utf16_len = c.len_utf16() as isize;
 
-            let font = unsafe {
-                CTFontCreateForString(
-                    menlo.as_concrete_TypeRef(),
-                    text.as_concrete_TypeRef(),
-                    CFRange::init(0, 1),
-                )
-            };
+            let font =
+                // SAFETY: `menlo` and `text` are live; `utf16_len` covers this
+                // scalar in CoreFoundation's UTF-16 coordinate space, and
+                // CoreText returns create-rule ownership or null.
+                unsafe {
+                    CTFontCreateForString(
+                        menlo.as_concrete_TypeRef(),
+                        text.as_concrete_TypeRef(),
+                        CFRange::init(0, utf16_len),
+                    )
+                };
 
             if font.is_null() {
+                // When: `font.is_null()` is true, CoreText found no fallback for this character.
                 continue;
             }
 
-            let font = unsafe { CTFont::wrap_under_create_rule(font) };
+            let font =
+                // SAFETY: `font` is non-null with +1 ownership; the wrapper consumes that ownership.
+                unsafe { CTFont::wrap_under_create_rule(font) };
 
             let candidates = handles_from_descriptor(&font.copy_descriptor());
 
@@ -149,8 +176,8 @@ impl FontLocator for CoreTextFontLocator {
                 if font.names().family == ".LastResort"
                     || font.names().postscript_name.as_deref() == Some("LastResort")
                 {
-                    // Always exclude a last resort font, as it has
-                    // placeholder glyphs for everything
+                    // When: the family/PS-name LastResort predicate is true, reject it.
+                    // Always exclude a last resort font, as it has placeholder glyphs for everything
                     continue;
                 }
 
@@ -158,9 +185,8 @@ impl FontLocator for CoreTextFontLocator {
                     && font.stretch() == FontStretch::Normal
                     && font.style() == FontStyle::Normal;
                 if !is_normal {
-                    // Only use normal attributed text for fallbacks,
-                    // otherwise we'll end up picking something with
-                    // undefined and undesirable attributes
+                    // When: `is_normal` is false, reject styled fallback candidates.
+                    // Only use normal attributed text for fallbacks; other attributes are undefined.
                     continue;
                 }
 
@@ -205,6 +231,7 @@ impl FontLocator for CoreTextFontLocator {
             if primary == Ordering::Equal {
                 a.cmp(b)
             } else {
+                // When: `primary == Ordering::Equal` is false, keep coverage ordering.
                 primary
             }
         });
@@ -242,19 +269,38 @@ mod objc_compat {
     #![allow(deprecated)]
 
     use cocoa::base::id;
-    use core_foundation::array::CFArray;
+    use core_foundation::array::{CFArray, CFArrayRef};
+    use core_foundation::base::TCFType;
     use core_foundation::string::CFString;
     pub(super) fn apple_languages() -> anyhow::Result<CFArray<CFString>> {
         use objc::*;
-        let user_defaults: id = unsafe { msg_send![class!(NSUserDefaults), standardUserDefaults] };
+        let user_defaults: id =
+            // SAFETY: Objective-C returns the shared autoreleased `NSUserDefaults` object; the
+            // pointer remains valid for the immediately following synchronous message send.
+            unsafe { msg_send![class!(NSUserDefaults), standardUserDefaults] };
 
         let apple_lang = "AppleLanguages"
             .parse::<CFString>()
             .map_err(|_| anyhow::anyhow!("failed to parse lang name en as CFString"))?;
 
-        Ok(unsafe { msg_send![user_defaults, stringArrayForKey:apple_lang] })
+        let languages: CFArrayRef =
+            // SAFETY: the receiver and key are live; this non-owning Objective-C
+            // result remains valid through the immediately following retain.
+            unsafe { msg_send![user_defaults, stringArrayForKey:apple_lang] };
+        if languages.is_null() {
+            anyhow::bail!("AppleLanguages is unavailable");
+        }
+        Ok(
+            // SAFETY: `languages` is a live +0 NSArray; get-rule wrapping
+            // retains the ownership later released by `CFArray::drop`.
+            unsafe { CFArray::wrap_under_get_rule(languages) },
+        )
     }
 }
+
+#[cfg(test)]
+#[path = "core_text_tests.rs"]
+mod core_text_tests;
 
 fn build_fallback_list_impl() -> anyhow::Result<Vec<ParsedFont>> {
     let menlo =
@@ -308,6 +354,7 @@ fn build_fallback_list_impl() -> anyhow::Result<Vec<ParsedFont>> {
             if seen.contains(&f.handle) {
                 None
             } else {
+                // When: `seen.contains(&f.handle)` is false, retain this first unique handle.
                 seen.insert(f.handle.clone());
                 Some(f)
             }

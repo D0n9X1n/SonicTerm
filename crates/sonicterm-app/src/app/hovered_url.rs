@@ -106,10 +106,12 @@ pub fn compute_hovered_url_underline(
     metrics: CellMetrics,
 ) -> Option<UnderlineRect> {
     if !modifier.open_url_modifier_held {
+        // When: the platform URL modifier is not held, hover remains non-clickable and draws no underline.
         return None;
     }
     let h = hovered?;
     if h.end_col <= h.start_col {
+        // When: `end_col <= start_col`, the detected range spans no cells and cannot produce geometry.
         return None;
     }
     let x = f32::from(h.start_col) * metrics.cell_w;
@@ -136,6 +138,7 @@ pub fn hovered_from_row(row_text: &str, row: u16, col: u16) -> Option<HoveredUrl
     let start_col = u16::try_from(start_chars).unwrap_or(u16::MAX);
     let end_col = u16::try_from(end_chars).unwrap_or(u16::MAX);
     if end_col <= start_col {
+        // When: `end_col <= start_col`, byte-to-cell conversion produced no drawable hover span.
         return None;
     }
     Some(HoveredUrl { row, start_col, end_col, url: m.url, active: false })

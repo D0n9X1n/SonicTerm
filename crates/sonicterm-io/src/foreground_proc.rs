@@ -73,6 +73,9 @@ struct SystemProcessInformation {
     // remaining fields ignored — NextEntryOffset takes us to the next record
 }
 
+const _: () =
+    assert!(std::mem::align_of::<u64>() >= std::mem::align_of::<SystemProcessInformation>());
+
 /// Best-effort `(pid, normalized_name)` of the deepest descendant of
 /// `pty_pid`. Returns `None` if the snapshot can't be taken or no
 /// descendant is found (in which case the caller should fall back to the
@@ -104,38 +107,35 @@ const MAX_BUFFER_BYTES: usize = 64 * 1024 * 1024;
 fn snapshot_processes() -> Option<Vec<ProcEntry>> {
     // Grow the buffer until ntdll stops complaining. Start at 1 MiB which is
     // enough for typical workstations (~600 procs × ~1 KiB record).
-    let mut buf: Vec<u8> = vec![0u8; 1024 * 1024];
+    let mut buf: Vec<u64> = vec![0u64; (1024 * 1024) / std::mem::size_of::<u64>()];
     for _attempt in 0..MAX_RETRIES {
         let mut return_length: u32 = 0;
-        // SAFETY: `buf` is a live, mutable, zero-initialized allocation of
-        // `buf.len()` bytes; we pass its pointer + length together so ntdll
-        // cannot write past the end. `return_length` is a valid &mut u32 for
-        // the duration of the call. The class id is the documented
-        // SystemProcessInformation = 5. On error we discard `buf`'s contents
-        // and either grow + retry or bail.
-        let status: NTSTATUS = unsafe {
-            NtQuerySystemInformation(
-                windows::Wdk::System::SystemInformation::SYSTEM_INFORMATION_CLASS(
-                    SYSTEM_PROCESS_INFORMATION_CLASS,
-                ),
-                buf.as_mut_ptr() as *mut c_void,
-                buf.len() as u32,
-                &mut return_length as *mut u32,
-            )
-        };
+        let status: NTSTATUS =
+            // SAFETY: `buf` and `return_length` are writable for their supplied byte sizes; class 5 accepts these pointers for this call.
+            unsafe {
+                NtQuerySystemInformation(
+                    windows::Wdk::System::SystemInformation::SYSTEM_INFORMATION_CLASS(
+                        SYSTEM_PROCESS_INFORMATION_CLASS,
+                    ),
+                    buf.as_mut_ptr().cast::<c_void>(),
+                    (buf.len() * std::mem::size_of::<u64>()) as u32,
+                    &mut return_length as *mut u32,
+                )
+            };
         if status == STATUS_INFO_LENGTH_MISMATCH {
-            // Grow generously — ntdll's returned length is a hint, not a
-            // hard requirement, and the table can race larger between calls.
-            let requested = (return_length as usize).max(buf.len().saturating_mul(2));
+            // When: `status` is STATUS_INFO_LENGTH_MISMATCH; grow past the hint because the process table can race larger between calls.
+            let current_bytes = buf.len().saturating_mul(std::mem::size_of::<u64>());
+            let requested = (return_length as usize).max(current_bytes.saturating_mul(2));
             let new_size = requested.min(MAX_BUFFER_BYTES);
-            if new_size <= buf.len() {
-                // Already at the cap and ntdll still wants more — bail.
+            if new_size <= current_bytes {
+                // When: `new_size` is capped and cannot exceed `current_bytes`, so retrying would repeat the same mismatch.
                 return None;
             }
-            buf.resize(new_size, 0);
+            buf.resize(new_size.div_ceil(std::mem::size_of::<u64>()), 0);
             continue;
         }
         if status.is_ok() {
+            // When: only a successful status makes the kernel-filled snapshot valid to parse.
             return Some(parse_snapshot(&buf));
         }
         return None;
@@ -144,30 +144,31 @@ fn snapshot_processes() -> Option<Vec<ProcEntry>> {
     None
 }
 
-fn parse_snapshot(buf: &[u8]) -> Vec<ProcEntry> {
+fn parse_snapshot(buf: &[u64]) -> Vec<ProcEntry> {
     let mut out = Vec::with_capacity(512);
     let mut offset: usize = 0;
-    while offset + std::mem::size_of::<SystemProcessInformation>() <= buf.len() {
-        // Read the record at this offset. The kernel guarantees alignment
-        // for SYSTEM_PROCESS_INFORMATION inside its packed list.
-        // SAFETY: `offset + size_of::<SystemProcessInformation>() <= buf.len()`
-        // is checked by the while-condition above, so `buf.as_ptr().add(offset)`
-        // stays within the allocation. The kernel guarantees natural alignment
-        // for SYSTEM_PROCESS_INFORMATION inside its packed list.
-        let record_ptr = unsafe { buf.as_ptr().add(offset) as *const SystemProcessInformation };
-        // SAFETY: `record_ptr` was just bounds-checked to point at a complete
-        // SystemProcessInformation record inside `buf`; reading the prefix
-        // fields (whose offsets are stable since NT 4) is well-defined.
-        let next = unsafe { (*record_ptr).next_entry_offset } as usize;
-        // SAFETY: same as above — `record_ptr` is a valid pointer to a fully
-        // contained SystemProcessInformation record.
-        let pid = unsafe { (*record_ptr).unique_process_id } as u32;
-        // SAFETY: same as above.
-        let parent = unsafe { (*record_ptr).inherited_from_unique_process_id } as u32;
-        // SAFETY: same as above.
-        let create_time = unsafe { (*record_ptr).create_time };
+    let byte_len = std::mem::size_of_val(buf);
+    while offset + std::mem::size_of::<SystemProcessInformation>() <= byte_len {
+        let record_ptr =
+            // SAFETY: the loop bound keeps `offset` and the declared prefix inside `buf`; field loads below are unaligned.
+            unsafe { buf.as_ptr().cast::<u8>().add(offset).cast::<SystemProcessInformation>() };
+        let next =
+            // SAFETY: `record_ptr` contains this prefix field; `read_unaligned` handles the kernel record offset.
+            unsafe { std::ptr::addr_of!((*record_ptr).next_entry_offset).read_unaligned() } as usize;
+        let pid =
+            // SAFETY: `record_ptr` contains this prefix field; `read_unaligned` handles the kernel record offset.
+            unsafe { std::ptr::addr_of!((*record_ptr).unique_process_id).read_unaligned() } as u32;
+        let parent =
+            // SAFETY: `record_ptr` contains this prefix field; `read_unaligned` handles the kernel record offset.
+            unsafe {
+                std::ptr::addr_of!((*record_ptr).inherited_from_unique_process_id).read_unaligned()
+            } as u32;
+        let create_time =
+            // SAFETY: `record_ptr` contains this prefix field; `read_unaligned` handles the kernel record offset.
+            unsafe { std::ptr::addr_of!((*record_ptr).create_time).read_unaligned() };
         out.push(ProcEntry { pid, parent, create_time });
         if next == 0 {
+            // When: `next` zero marks the final packed record, so advancing would revisit this entry.
             break;
         }
         offset = offset.saturating_add(next);
@@ -206,9 +207,10 @@ fn pick_deepest_leaf(snapshot: &[ProcEntry], root: u32) -> Option<u32> {
                 chosen_ctime = ctime;
             }
         } else {
+            // When: `kids` is nonempty, `cur` cannot be the leaf chosen as the foreground descendant.
             for &k in kids {
                 if k == cur || k == 0 {
-                    // defensive: avoid self-cycle and the idle process
+                    // When: `k` equal to `cur` would cycle; pid 0 is the idle process, never a runnable descendant.
                     continue;
                 }
                 frontier.push((k, depth + 1));
@@ -217,8 +219,7 @@ fn pick_deepest_leaf(snapshot: &[ProcEntry], root: u32) -> Option<u32> {
     }
 
     if chosen == root && chosen_depth == 0 {
-        // No descendants at all — return root so caller can still resolve a
-        // name for the shell itself (matches macOS behavior).
+        // When: `chosen` never moved off `root`, so report the shell pid rather than no process.
         return Some(root);
     }
     Some(chosen)
@@ -228,38 +229,30 @@ fn resolve_process_name(pid: u32) -> Option<String> {
     // PROCESS_QUERY_LIMITED_INFORMATION works against protected processes
     // and across UAC boundaries where the heavier query-information right
     // would be denied.
-    // SAFETY: `OpenProcess` is a documented Win32 entry point that takes a
-    // by-value access-mask + BOOL + pid; no pointer arguments. The returned
-    // HANDLE is owned by us and closed below via `CloseHandle`.
     let handle: HANDLE =
+        // SAFETY: `OpenProcess` takes only values here and returns an owned handle that this function closes.
         unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
     let mut buf: [MaybeUninit<u16>; 1024] = [MaybeUninit::uninit(); 1024];
     let mut size: u32 = buf.len() as u32;
-    // SAFETY: `handle` is a valid process handle we just opened. `buf` is a
-    // live stack allocation of `buf.len()` u16s; we pass that length via
-    // `size` so the kernel cannot overrun it. On return `size` holds the
-    // number of u16 code units actually written, which we use below.
-    let result = unsafe {
-        QueryFullProcessImageNameW(
-            handle,
-            PROCESS_NAME_FORMAT(0),
-            windows::core::PWSTR(buf.as_mut_ptr() as *mut u16),
-            &mut size as *mut u32,
-        )
-    };
-    // SAFETY: `handle` is the still-live handle returned by OpenProcess and
-    // has not been closed elsewhere.
-    let _ = unsafe { CloseHandle(handle) };
+    let result =
+        // SAFETY: `handle` is live, and `buf` is writable for the `size` units supplied to the API.
+        unsafe {
+            QueryFullProcessImageNameW(
+                handle,
+                PROCESS_NAME_FORMAT(0),
+                windows::core::PWSTR(buf.as_mut_ptr() as *mut u16),
+                &mut size as *mut u32,
+            )
+        };
+    let _ =
+        // SAFETY: `handle` is still owned and has not been closed since `OpenProcess` returned it.
+        unsafe { CloseHandle(handle) };
     if result.is_err() || size == 0 {
+        // When: `result` failed or `size` is zero, so no initialized image path can be normalized.
         return None;
     }
-    // SAFETY: kernel wrote `size` valid u16 code units into buf.
-    let slice = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u16, size as usize) };
+    let slice =
+        // SAFETY: success wrote `size` code units plus a NUL; `size` excludes the NUL, so this slice is initialized.
+        unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u16, size as usize) };
     Some(String::from_utf16_lossy(slice))
 }
-
-// NOTE (CLAUDE.md §5): Tests stay inline. They reach into the
-// crate-private `snapshot_processes`, `resolve_process_name`, and
-// `ProcEntry` (none of which are part of the public Windows
-// foreground-process API). Migrating would require bumping all three
-// to `pub` purely for tests.

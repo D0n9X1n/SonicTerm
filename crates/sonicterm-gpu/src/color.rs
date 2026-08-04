@@ -136,6 +136,7 @@ pub fn srgb_channel_to_linear(c: f64) -> f64 {
     if c <= 0.04045 {
         c / 12.92
     } else {
+        // When: `c` exceeds the linear sRGB segment, apply the standard 2.4 transfer curve.
         ((c + 0.055) / 1.055).powf(2.4)
     }
 }
@@ -156,7 +157,7 @@ pub fn hex_to_wgpu_with_alpha(h: &str, alpha: f32) -> wgpu::Color {
     let alpha = alpha.clamp(0.0, 1.0) as f64;
     let h = h.trim_start_matches('#');
     let parse = |i| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(0) as f64 / 255.0;
-    if h.len() == 6 {
+    if h.len() == 6 && h.is_ascii() {
         wgpu::Color {
             r: srgb_channel_to_linear(parse(0)) * alpha,
             g: srgb_channel_to_linear(parse(2)) * alpha,
@@ -164,6 +165,7 @@ pub fn hex_to_wgpu_with_alpha(h: &str, alpha: f32) -> wgpu::Color {
             a: alpha,
         }
     } else {
+        // When: trimmed `h` is not six ASCII bytes, use the documented opaque-black fallback.
         wgpu::Color::BLACK
     }
 }
@@ -184,10 +186,11 @@ pub fn hex_to_wgpu_with_alpha(h: &str, alpha: f32) -> wgpu::Color {
 pub fn hex_to_rgba(h: &str, alpha: f32) -> [f32; 4] {
     let h = h.trim_start_matches('#');
     let parse = |i| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(0) as usize;
-    if h.len() == 6 {
+    if h.len() == 6 && h.is_ascii() {
         let t = srgb_u8_to_linear_lut();
         [t[parse(0)], t[parse(2)], t[parse(4)], alpha]
     } else {
+        // When: trimmed `h` is not six ASCII bytes, preserve `alpha` over a black RGB fallback.
         [0.0, 0.0, 0.0, alpha]
     }
 }
@@ -204,9 +207,10 @@ pub fn hex_to_rgba(h: &str, alpha: f32) -> [f32; 4] {
 pub fn hex_to_chrome_color(h: &str) -> ChromeColor {
     let h = h.trim_start_matches('#');
     let parse = |i| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(0);
-    if h.len() == 6 {
+    if h.len() == 6 && h.is_ascii() {
         ChromeColor::rgb(parse(0), parse(2), parse(4))
     } else {
+        // When: trimmed `h` is not six ASCII bytes, return the documented opaque-black chrome color.
         ChromeColor::rgb(0, 0, 0)
     }
 }

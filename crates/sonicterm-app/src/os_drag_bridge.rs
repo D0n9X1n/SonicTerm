@@ -59,7 +59,9 @@ pub fn install_proxy(proxy: EventLoopProxy<UserEvent>) {
 
 fn wake() -> bool {
     if let Ok(slot) = proxy_slot().lock() {
+        // When: `proxy_slot().lock()` succeeds, inspect whether an event-loop wake target is installed.
         if let Some(p) = slot.as_ref() {
+            // When: `p` is installed, post one payload-free wake so the main loop drains queued drag data.
             return p.send_event(UserEvent::OsDrag).is_ok();
         }
     }
@@ -79,6 +81,7 @@ pub fn push_tab_payload(payload: TabPayload) -> bool {
 /// Returns `true` if the wake-up was posted.
 pub fn push_files(paths: Vec<PathBuf>) -> bool {
     if paths.is_empty() {
+        // When: `paths` is empty, avoid queuing a drop that cannot open anything or justify a wake.
         return false;
     }
     if let Ok(mut q) = file_queue().lock() {
@@ -90,13 +93,19 @@ pub fn push_files(paths: Vec<PathBuf>) -> bool {
 /// Drain every queued tab payload. Called by
 /// [`crate::app::App::drain_os_drag`].
 pub(crate) fn drain_tab_payloads() -> Vec<TabPayload> {
-    let Ok(mut q) = tab_queue().lock() else { return Vec::new() };
+    let Ok(mut q) = tab_queue().lock() else {
+        // When: `tab_queue().lock()` fails, return no payload rather than propagating poisoned shared state.
+        return Vec::new();
+    };
     q.drain(..).collect()
 }
 
 /// Drain every queued file-drop path list.
 pub(crate) fn drain_file_drops() -> Vec<Vec<PathBuf>> {
-    let Ok(mut q) = file_queue().lock() else { return Vec::new() };
+    let Ok(mut q) = file_queue().lock() else {
+        // When: `file_queue().lock()` fails, return no drop rather than propagating poisoned shared state.
+        return Vec::new();
+    };
     q.drain(..).collect()
 }
 

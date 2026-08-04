@@ -84,6 +84,13 @@ pub enum DrawOp {
     ClosePath,
 }
 
+/// Paint a COLRv1 linear gradient over the current clip.
+///
+/// `(x0, y0)`/`(x1, y1)` are the gradient's start and end anchors and
+/// `(x2, y2)` its rotation anchor; the three are reduced to the two-point form
+/// Cairo accepts. `color_line` is normalized first, so its stops are sorted and
+/// rescaled to 0..=1 and the anchors are re-interpolated across the original
+/// offset span. Stop colours are applied as straight (non-premultiplied) sRGBA.
 #[allow(clippy::too_many_arguments)]
 pub fn paint_linear_gradient(
     context: &Context,
@@ -117,6 +124,12 @@ pub fn paint_linear_gradient(
     Ok(())
 }
 
+/// Paint a COLRv1 radial gradient over the current clip.
+///
+/// `(x0, y0, r0)` and `(x1, y1, r1)` are the start and end circles. As with the
+/// linear case, `color_line` is normalized first and both centres and radii are
+/// re-interpolated across the original offset span, so the drawn circles match
+/// the range the stops actually cover.
 #[allow(clippy::too_many_arguments)]
 pub fn paint_radial_gradient(
     context: &Context,
@@ -281,6 +294,8 @@ fn apply_sweep_gradient_patches(
     mut end_angle: f64,
 ) {
     if start_angle == end_angle {
+        // When: start_angle equals end_angle the sweep has no width, so only
+        // Pad's flat fill outside the degenerate sweep can contribute.
         if color_line.extend == Extend::Pad {
             if start_angle > 0. {
                 let c = color_line.color_stops[0].color.into();
@@ -313,10 +328,14 @@ fn apply_sweep_gradient_patches(
     let n_stops = angles.len();
 
     if color_line.extend == Extend::Pad {
+        // When: color_line uses Extend::Pad, so angles outside the sweep are
+        // filled with the nearest end colour rather than repeated.
         let mut color0 = colors[0];
         let mut pos = 0;
         while pos < n_stops {
             if angles[pos] >= 0. {
+                // When: angles reached the visible range at pos, so the scan
+                // for the first drawable stop ends here.
                 if pos > 0 {
                     let k = (0. - angles[pos - 1]) / (angles[pos] - angles[pos - 1]);
 
@@ -327,6 +346,9 @@ fn apply_sweep_gradient_patches(
             pos += 1;
         }
         if pos == n_stops {
+            // When: pos ran past the last stop, so the whole colour line sits
+            // behind zero and its final colour fills the full turn.
+
             /* everything is below 0 */
             color0 = colors[n_stops - 1];
             add_sweep_gradient_patches(mesh, center, radius, 0., color0, PI_TIMES_2, color0);
@@ -348,6 +370,8 @@ fn apply_sweep_gradient_patches(
                     colors[pos],
                 );
             } else {
+                // When: angles[pos] overshot a full turn, so the span is cut at
+                // 2*PI with an interpolated colour and the scan stops.
                 let k = (PI_TIMES_2 - angles[pos - 1]) / (angles[pos] - angles[pos - 1]);
                 let color1 = colors[pos - 1].interpolate(colors[pos], k);
                 add_sweep_gradient_patches(
@@ -378,6 +402,8 @@ fn apply_sweep_gradient_patches(
             );
         }
     } else {
+        // When: color_line extends by Repeat or Reflect, so the stop list is
+        // tiled across the turn instead of padded.
         let span = angles[n_stops - 1] - angles[0];
         let mut k = 0isize;
         if angles[0] >= 0. {
@@ -387,17 +413,23 @@ fn apply_sweep_gradient_patches(
                     ss -= span;
                     k -= 1;
                 } else {
+                    // When: span runs backward, so k advances instead of
+                    // retreating to reach the same visible range.
                     ss += span;
                     k += 1;
                 }
             }
         } else if angles[0] < 0. {
+            // When: angles[0] starts behind zero, so tiles are stepped forward
+            // until the stop list reaches the visible range.
             let mut ee = angles[n_stops - 1];
             while ee < 0. {
                 if span > 0. {
                     ee += span;
                     k += 1;
                 } else {
+                    // When: span runs backward, so k steps back instead of
+                    // advancing to reach the same point.
                     ee -= span;
                     k -= 1;
                 }
@@ -421,6 +453,8 @@ fn apply_sweep_gradient_patches(
                     c0 = colors[n_stops - 1 - (i - 1)];
                     c1 = colors[n_stops - 1 - i];
                 } else {
+                    // When: this is an even tile, or color_line does not
+                    // Reflect, so stop order runs forward unmirrored.
                     a0 = angles[i - 1] + (l as f64) * span;
                     a1 = angles[i] + (l as f64) * span;
                     c0 = colors[i - 1];
@@ -428,6 +462,8 @@ fn apply_sweep_gradient_patches(
                 }
 
                 if a1 < 0. {
+                    // When: a1 is still behind zero, so this whole tile segment
+                    // lies outside the visible turn.
                     continue;
                 }
 
@@ -436,11 +472,15 @@ fn apply_sweep_gradient_patches(
                     let color = c0.interpolate(c1, f);
                     add_sweep_gradient_patches(mesh, center, radius, 0., color, a1, c1);
                 } else if a1 >= PI_TIMES_2 {
+                    // When: a1 reaches a full turn, so this segment closes the
+                    // sweep and no later tile can contribute.
                     let f = (PI_TIMES_2 - a0) / (a1 - a0);
                     let color = c0.interpolate(c1, f);
                     add_sweep_gradient_patches(mesh, center, radius, a0, c0, PI_TIMES_2, color);
                     return;
                 } else {
+                    // When: a0 and a1 both sit inside the visible turn, so the
+                    // segment is drawn whole with no clipping.
                     add_sweep_gradient_patches(mesh, center, radius, a0, c0, a1, c1);
                 }
             }
@@ -448,6 +488,13 @@ fn apply_sweep_gradient_patches(
     }
 }
 
+/// Paint a COLRv1 sweep gradient over the current clip.
+///
+/// Cairo has no sweep-gradient primitive, so the sweep is approximated by a
+/// mesh of Bezier patches spanning `start_angle`..`end_angle` around
+/// `(x0, y0)`. The radius is taken from the farthest corner of the current clip
+/// extents, so the mesh always covers the region being painted; the color
+/// line's extend mode decides how angles outside the sweep are filled.
 pub fn paint_sweep_gradient(
     context: &Context,
     x0: f64,
@@ -515,6 +562,8 @@ fn reduce_anchors(ReduceAnchorsIn { x0, y0, x1, y1, x2, y2 }: ReduceAnchorsIn) -
 
     let s = q2x * q2x + q2y * q2y;
     if s < 0.000001 {
+        // When: s is degenerate, the rotation anchor coincides with p0, so the
+        // anchors pass through unprojected rather than dividing by it.
         return ReduceAnchorsOut { xx0: x0, yy0: y0, xx1: x1, yy1: y1 };
     }
 
@@ -522,6 +571,12 @@ fn reduce_anchors(ReduceAnchorsIn { x0, y0, x1, y1, x2, y2 }: ReduceAnchorsIn) -
     ReduceAnchorsOut { xx0: x0, yy0: y0, xx1: x1 - k * q2x, yy1: y1 - k * q2y }
 }
 
+/// Replay a COLR glyph outline onto `context` as a fresh path.
+///
+/// Starts a new path, so any path already on `context` is discarded. Quadratic
+/// segments are raised to the equivalent cubic because Cairo has no quadratic
+/// primitive, which requires a current point — a `QuadTo` before any `MoveTo`
+/// is an error rather than a silent no-op.
 pub fn apply_draw_ops_to_context(ops: &[DrawOp], context: &Context) -> anyhow::Result<()> {
     let mut current = None;
     context.new_path();

@@ -48,6 +48,8 @@ fn hovered_url_needs_accent(
 
 fn cursor_char_slice_at(text: &str, cursor: usize) -> Option<&str> {
     if text.is_empty() || cursor >= text.len() {
+        // When: `cursor >= text.len()` — caret past the last char. No char to
+        // slice, so the caller falls back to its placeholder.
         return None;
     }
     let mut c = cursor.min(text.len());
@@ -161,6 +163,8 @@ fn preedit_has_visible_ink(preedit: &str) -> bool {
 /// still advance the caret. Pure so the gate is unit-testable without a GPU.
 fn preedit_caret_advance(preedit: &str, caret_byte: usize, font_size: f32) -> f32 {
     if !preedit_has_visible_ink(preedit) {
+        // When: `preedit_has_visible_ink` is false — the whitespace-only marked
+        // string macOS sends for Latin typing. Advancing would strand the block.
         return 0.0;
     }
     let mut cb = caret_byte.min(preedit.len());
@@ -233,6 +237,8 @@ fn effective_font_weight_scale(scale: f32) -> f32 {
     if scale.is_finite() && (0.5..=5.0).contains(&scale) {
         scale
     } else {
+        // When: `scale` is NaN, infinite, or outside 0.5..=5.0. 1.0 is the
+        // weight the font was drawn at, so a bad config still renders.
         1.0
     }
 }
@@ -253,8 +259,7 @@ fn software_block_glyph_target_rect(
 /// Resolve the title text colour for a single tab, honouring hover.
 ///
 /// Two cases, unified so a custom-coloured tab highlights on hover exactly
-/// like a default-coloured one (issue: custom tab title colour did not
-/// brighten under the cursor):
+/// like a default-coloured one:
 ///
 /// * **No custom colour** — pick `active_fg` when the tab is active *or*
 ///   hovered, else `inactive_fg`. This is the historical default-tab
@@ -281,6 +286,8 @@ fn tab_title_color(
             if active || hovered {
                 active_fg
             } else {
+                // When: neither `active` nor `hovered`, so nothing highlights
+                // the tab and it recedes to the dimmer foreground.
                 inactive_fg
             }
         }
@@ -292,6 +299,8 @@ fn tab_title_color(
             if active || hovered || active_panel_focused {
                 color
             } else {
+                // When: not `active`, `hovered`, or `active_panel_focused` — the
+                // user's colour recedes with the rest of the unfocused chrome.
                 scale_chrome_text_alpha(color, 0.55)
             }
         }
@@ -346,6 +355,8 @@ pub fn detect_software_rendering(info: &wgpu::AdapterInfo) -> bool {
 #[must_use]
 fn software_rendering_from(name: &str, device_type: wgpu::DeviceType) -> bool {
     if device_type == wgpu::DeviceType::Cpu {
+        // When: `device_type` is `Cpu` — authoritative, so no name match is
+        // needed. The string tests below cover rasterizers reporting otherwise.
         return true;
     }
     let name = name.to_ascii_lowercase();
@@ -389,6 +400,8 @@ pub fn emit_pane_scrollbar(
     // hidden / nearly-hidden early-out. Mirrors
     // `scrollbar_visibility::ALPHA_EMIT_FLOOR`.
     if alpha <= 0.01 {
+        // When: `alpha` is at the fade floor where the bar is invisible —
+        // emitting costs two quads per pane per frame for unseeable pixels.
         return 0;
     }
     let alpha = alpha.clamp(0.0, 1.0);
@@ -409,6 +422,8 @@ pub fn emit_pane_scrollbar(
         mode,
         scrollbar_width_px,
     ) else {
+        // When: `scrollbar::compute` yields None — nothing beyond the viewport
+        // to scroll, or mode is `Never`. No track or thumb to place.
         return 0;
     };
     let fg_hex = theme.colors.foreground.0.as_str();
@@ -455,6 +470,8 @@ fn splitter_rects_from_panes(pane_rects: &[(u64, PaneRect)], thickness: f32) -> 
                     rect: PaneRect::new(b.x - thickness * 0.5, y, thickness, h),
                 });
             } else if vertical_overlap && ((b.x + b.w) - a.x).abs() <= eps {
+                // When: `(b.x + b.w) - a.x` is the contact instead — the pair
+                // walk is unordered, so the splitter straddles a's left edge.
                 let y = a.y.max(b.y);
                 let h = (a.y + a.h).min(b.y + b.h) - y;
                 out.push(SplitterRect {
@@ -472,6 +489,8 @@ fn splitter_rects_from_panes(pane_rects: &[(u64, PaneRect)], thickness: f32) -> 
                     rect: PaneRect::new(x, b.y - thickness * 0.5, w, thickness),
                 });
             } else if horizontal_overlap && ((b.y + b.h) - a.y).abs() <= eps {
+                // When: `(b.y + b.h) - a.y` is the contact — mirrored pair
+                // order, so the splitter straddles a's top edge.
                 let x = a.x.max(b.x);
                 let w = (a.x + a.w).min(b.x + b.w) - x;
                 out.push(SplitterRect {
@@ -548,6 +567,8 @@ where
     I: IntoIterator<Item = usize>,
 {
     if cols == 0 || cell_w <= 0.0 || cell_h <= 0.0 || surface_w == 0 || surface_h == 0 {
+        // When: `cols` is 0, a cell metric is non-positive, or the surface is
+        // degenerate — a rect from these would name pixels that do not exist.
         return None;
     }
     let bounds = PixelRect { x: 0, y: 0, w: surface_w, h: surface_h };
@@ -633,13 +654,14 @@ where
     I: IntoIterator<Item = usize>,
 {
     if is_alt {
-        // A clean alt pane contributes no damage. A dirty one repaints its
-        // whole rectangle, clipped to the on-screen surface (which also
-        // yields `None` for a fully off-surface pane).
+        // When: `is_alt` — the app scrolls and moves content, so a row it did
+        // not re-emit can still be stale. Repaint the pane, not the row union.
         let has_dirty = dirty_rows.into_iter().next().is_some();
         return if has_dirty {
             pane_rect.intersect(PixelRect { x: 0, y: 0, w: surface_w, h: surface_h })
         } else {
+            // When: `has_dirty` is false — the app marked nothing, so the
+            // surface still holds pixels it considers current.
             None
         };
     }
@@ -675,6 +697,8 @@ pub(crate) struct RenderSignals {
 #[must_use]
 pub(crate) fn decide_render_mode(degrade: bool, signals: RenderSignals) -> RenderMode {
     if !degrade {
+        // When: `!degrade` — a real GPU presents. Frame-skipping exists to
+        // spare a CPU rasterizer; on hardware it costs more than it saves.
         return RenderMode::Full;
     }
     let force_full = signals.first_frame
@@ -693,6 +717,8 @@ pub(crate) fn decide_render_mode(degrade: bool, signals: RenderSignals) -> Rende
     if force_full || signals.dirty_damage.is_some() {
         RenderMode::Full
     } else {
+        // When: neither `force_full` nor `dirty_damage` — nothing visible
+        // differs, so the CPU rasterizer skips the pass entirely.
         RenderMode::Noop
     }
 }
@@ -722,6 +748,8 @@ fn desired_gpu_atlas_dimensions(software_presenter: bool, atlas: &GlyphAtlas) ->
     if software_presenter {
         (PLACEHOLDER_ATLAS_DIM, PLACEHOLDER_ATLAS_DIM)
     } else {
+        // When: `!software_presenter` — the GPU samples the atlas texture, so
+        // it must match the CPU atlas or the UVs address the wrong tiles.
         (atlas.width(), atlas.height())
     }
 }
@@ -802,10 +830,14 @@ pub(crate) fn validated_surface_size(
     let height = height.max(1);
     let max_dimension = device_max_dimension.clamp(1, MAX_SURFACE_DIMENSION);
     if width > max_dimension || height > max_dimension {
+        // When: an axis exceeds `max_dimension` — configuring the surface
+        // anyway is a driver-level failure, so the caller rejects the size.
         return None;
     }
     let bytes = u64::from(width).checked_mul(u64::from(height))?.checked_mul(4)?;
     if bytes > MAX_SURFACE_BYTES {
+        // When: `bytes > MAX_SURFACE_BYTES` — both axes legal, their product
+        // not. The ceiling bounds one surface against the process budget.
         return None;
     }
     Some(ValidatedSurfaceSize { width, height, bytes: usize::try_from(bytes).ok()? })
@@ -1204,7 +1236,7 @@ pub struct GpuRenderer {
     /// Active drag-chip overlay: translucent rect drawn at the cursor
     /// while a tab is held. Cleared on release.
     drag_chip: Option<DragChipOverlay>,
-    /// Optional async font fallback loader (P4 follow-up).
+    /// Optional async font fallback loader.
     /// When set, every transient `SwashRasterizer` built inside
     /// `render()` / `set_font` / `rebuild_for_scale` has the loader
     /// attached so misses on CJK / emoji / nerd-font codepoints fire a
@@ -1373,6 +1405,17 @@ pub struct PaneLayoutSnapshot {
     pub rows: u16,
 }
 
+/// Shape and emit one tab's title spans as glyph instances.
+///
+/// Each `(text, colour, attrs)` span is laid out through
+/// [`chrome_text::layout`] into the shared glyph atlas, so tab titles and
+/// terminal text draw from the same tiles in one pass. The pen advances by
+/// `avg_glyph_w` per character rather than by the shaper's advances, matching
+/// the column arithmetic the caller already used to truncate and centre the
+/// title.
+///
+/// `debug`, when supplied, receives one record per emitted glyph for tests
+/// asserting the atlas path was taken.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
 pub fn emit_tab_title_glyphs(
@@ -1398,6 +1441,8 @@ pub fn emit_tab_title_glyphs(
     let mut pen_x: f32 = 0.0;
     for (text, color, attrs) in spans {
         if text.is_empty() {
+            // When: `text.is_empty()` — the title builder emits empty spans for
+            // absent segments. Layout would yield no glyphs and no advance.
             continue;
         }
         let layout = chrome_text::layout(
@@ -1475,6 +1520,8 @@ fn measure_overlay_text_width(
     color: ChromeColor,
 ) -> f32 {
     if text.is_empty() {
+        // When: `text.is_empty()` — layout would still touch the atlas and
+        // rasterizer to produce a zero-width answer.
         return 0.0;
     }
     chrome_text::layout(
@@ -1493,6 +1540,14 @@ fn measure_overlay_text_width(
     .width_px
 }
 
+/// Emit one line of overlay text (palette query, rows, footer, search field)
+/// as clipped glyph instances.
+///
+/// Positions glyphs from an explicit pixel `origin_x`/`baseline_y` so a caller
+/// draws a multi-line overlay by calling once per line and advancing the
+/// baseline itself. Glyphs falling outside `bounds` are dropped by the layout
+/// clip, which is what keeps text inside a modal panel instead of painting
+/// across the terminal behind it.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_overlay_text_glyphs(
     glyph_atlas: &mut GlyphAtlas,
@@ -1512,6 +1567,8 @@ pub fn emit_overlay_text_glyphs(
     debug: Option<&mut Vec<OverlayTextGlyphDebug>>,
 ) {
     if text.is_empty() {
+        // When: `text.is_empty()` — an unset footer or empty query. Returning
+        // leaves `glyph_instances` untouched, so line advance is unaffected.
         return;
     }
     let [bx, by, bw, bh] = bounds;
@@ -1558,6 +1615,8 @@ static LIVE_RENDERERS: AtomicUsize = AtomicUsize::new(0);
 /// Intended for churn and lifecycle checks: take a reading, create and drop
 /// renderers, and compare. A surviving renderer leaves this above where it
 /// started.
+// Ordering: `LIVE_RENDERERS.load(Ordering::Acquire)`, pairing with the
+// `Ordering::AcqRel` RMWs in `new_async` and `Drop`. No payload is published.
 pub fn live_renderer_count() -> usize {
     LIVE_RENDERERS.load(Ordering::Acquire)
 }
@@ -1629,6 +1688,12 @@ impl GpuRenderer {
         pollster::block_on(Self::new_async(window, event_loop, theme, settings, None))
     }
 
+    /// Build a renderer that shares an existing wgpu instance, adapter, device,
+    /// and queue with another window.
+    ///
+    /// Every window after the first takes this path: one device serves all of
+    /// them, so opening a window neither re-enumerates adapters nor allocates a
+    /// second device. The surface, pipelines, and atlases are still per-window.
     pub fn new_with_shared_context(
         window: Arc<Window>,
         event_loop: &ActiveEventLoop,
@@ -1639,6 +1704,11 @@ impl GpuRenderer {
         pollster::block_on(Self::new_async(window, event_loop, theme, settings, Some(shared)))
     }
 
+    /// Clone the handles a sibling window needs to share this renderer's GPU
+    /// context, for passing to [`Self::new_with_shared_context`].
+    ///
+    /// The clones are wgpu reference-counted handles to one underlying device,
+    /// not copies of it.
     pub fn shared_context(&self) -> GpuSharedContext {
         GpuSharedContext {
             instance: self.instance.clone(),
@@ -1648,6 +1718,8 @@ impl GpuRenderer {
         }
     }
 
+    // Ordering: `LIVE_RENDERERS.fetch_add(1, Ordering::AcqRel)`, pairing with
+    // the `Ordering::AcqRel` decrement in `Drop`. Publishes no payload.
     async fn new_async(
         window: Arc<Window>,
         event_loop: &ActiveEventLoop,
@@ -1689,6 +1761,8 @@ impl GpuRenderer {
             );
             (shared.adapter, shared.device, shared.queue, software_rendering)
         } else {
+            // When: `shared` is None — this is the first window, so it
+            // enumerates adapters and opens the device later windows reuse.
             let adapter = instance
                 .request_adapter(&RequestAdapterOptions {
                     power_preference: wgpu::PowerPreference::HighPerformance,
@@ -1886,8 +1960,16 @@ impl GpuRenderer {
         let hyperlink_underline = hex_to_rgba(theme.colors.cursor.0.as_str(), 0.9);
         let splitter_color = splitter_color_from_theme(theme);
         let tint_alpha = match theme.appearance {
-            sonicterm_render_model::boundary::cfg::theme::Appearance::Dark => 0.14,
-            sonicterm_render_model::boundary::cfg::theme::Appearance::Light => 0.10,
+            sonicterm_render_model::boundary::cfg::theme::Appearance::Dark => {
+                // When: `Appearance::Dark` — dark needs more accent before
+                // the hyperlink tint reads as tinted at all.
+                0.14
+            }
+            sonicterm_render_model::boundary::cfg::theme::Appearance::Light => {
+                // When: `Appearance::Light` — 0.14 reads as a highlighter
+                // stripe over the text rather than a hint beneath it.
+                0.10
+            }
         };
         let hyperlink_tint = hex_to_rgba(theme.colors.cursor.0.as_str(), tint_alpha);
         let search_highlight = hex_to_rgba(theme.colors.bright.yellow.0.as_str(), 0.35);
@@ -1990,18 +2072,14 @@ impl GpuRenderer {
         })
     }
 
-    /// Reconfigure the surface for a new physical window size in
-    /// pixels. Clamps each dimension to ≥ 1 to keep wgpu happy on
-    /// minimize. Forces the next frame to render fresh.
-    pub fn resize(&mut self, width: u32, height: u32) {
-        let _ = self.try_resize(width, height);
-    }
-
     /// Checked resize used by window-event paths that must react to rejection.
+    #[must_use]
     pub fn try_resize(&mut self, width: u32, height: u32) -> bool {
         let max_dimension =
             self.device.limits().max_texture_dimension_2d.min(MAX_SURFACE_DIMENSION);
         let Some(size) = validated_surface_size(width, height, max_dimension) else {
+            // When: `validated_surface_size` returns None. The old surface
+            // stays configured — refusing is recoverable, resizing is not.
             tracing::error!(
                 target: "memory",
                 requested_width = width,
@@ -2015,6 +2093,8 @@ impl GpuRenderer {
             return false;
         };
         if self.config.width == size.width && self.config.height == size.height {
+            // When: the validated size equals the configured one — common on
+            // scale events. Reconfiguring would drop both caches for nothing.
             return true;
         }
         tracing::debug!(
@@ -2083,6 +2163,8 @@ impl GpuRenderer {
         if self.tab_bar_visible {
             self.tab_bar_logical_height()
         } else {
+            // When: `!tab_bar_visible` — the bar reserves nothing. Window
+            // padding is applied separately by the caller.
             0.0
         }
     }
@@ -2120,6 +2202,8 @@ impl GpuRenderer {
     pub fn set_titlebar_inset(&mut self, inset: f32) {
         let clamped = inset.max(0.0);
         if (self.titlebar_inset - clamped).abs() < f32::EPSILON {
+            // When: `titlebar_inset` is unchanged. This runs on every
+            // window-state event, so clearing the key would relayout each time.
             return;
         }
         self.titlebar_inset = clamped;
@@ -2131,6 +2215,8 @@ impl GpuRenderer {
     /// Invalidates the cached frame key so the next `render()` call rebuilds.
     pub fn set_tab_bar_visible(&mut self, visible: bool) -> bool {
         if self.tab_bar_visible == visible {
+            // When: `tab_bar_visible == visible`. `false` tells the caller no
+            // grid resize is needed for identical geometry.
             return false;
         }
         self.tab_bar_visible = visible;
@@ -2154,6 +2240,8 @@ impl GpuRenderer {
         mode: sonicterm_render_model::boundary::cfg::config::ScrollbarMode,
     ) -> bool {
         if self.scrollbar_mode == mode {
+            // When: `scrollbar_mode == mode`. Every reload calls this, so the
+            // early return keeps an unrelated edit from busting an idle frame.
             return false;
         }
         self.scrollbar_mode = mode;
@@ -2173,6 +2261,8 @@ impl GpuRenderer {
     pub fn set_panel_padding(&mut self, padding: f32) -> bool {
         let padding = padding.max(0.0);
         if (self.panel_padding - padding).abs() < f32::EPSILON {
+            // When: `(self.panel_padding - padding).abs() < f32::EPSILON` — a
+            // reload carried the same padding; `false` skips the relayout.
             return false;
         }
         self.panel_padding = padding;
@@ -2184,6 +2274,8 @@ impl GpuRenderer {
     /// next render redraws with the new geometry.
     pub fn set_cursor_shape(&mut self, shape: CursorShape) {
         if self.cursor_shape == shape {
+            // When: `self.cursor_shape == shape` — every config reload calls
+            // this, so clearing `last_frame_key` would redraw for no change.
             return;
         }
         self.cursor_shape = shape;
@@ -2200,6 +2292,8 @@ impl GpuRenderer {
     /// flipping the setting (no random mid-cycle pop).
     pub fn set_cursor_blink(&mut self, blink: bool) {
         if self.cursor_blink == blink {
+            // When: `self.cursor_blink == blink` — returning also preserves
+            // `blink_epoch`, so a reload cannot restart the blink phase.
             return;
         }
         self.cursor_blink = blink;
@@ -2245,7 +2339,7 @@ impl GpuRenderer {
 
     /// Update the cached "is the OS window focused" flag. Hides the
     /// text cursor when `false`. Bumps the FrameKey via
-    /// [`Self::last_frame_key`] so the next render is not skipped by
+    /// `Self::last_frame_key` so the next render is not skipped by
     /// the cache.
     /// Host-side storage this renderer holds, split by the class that owns it.
     ///
@@ -2285,8 +2379,14 @@ impl GpuRenderer {
         ResourceAmount::default()
     }
 
+    /// Update the cached keyboard-focus flag for the OS window.
+    ///
+    /// The text cursor is hidden while the window is unfocused, so a change
+    /// here alters what the next frame paints and invalidates the frame key.
     pub fn set_window_focused(&mut self, focused: bool) {
         if self.window_focused == focused {
+            // When: `window_focused == focused` — winit re-delivers focus
+            // events, and clearing the key would redraw for no visible change.
             return;
         }
         self.window_focused = focused;
@@ -2298,10 +2398,19 @@ impl GpuRenderer {
         self.window_focused
     }
 
+    /// Set the window label that renderer-internal timing logs are tagged with.
+    ///
+    /// Affects diagnostics only; no frame state changes, so the frame key is
+    /// deliberately left intact.
     pub fn set_render_timing_label(&mut self, label: &'static str) {
         self.render_timing_label = label;
     }
 
+    /// Start the short focus-confirmation flash on `pane_id`.
+    ///
+    /// The flash is bounded by `PANE_FOCUS_FLASH_DURATION` and animates
+    /// through the frame key's quantised bucket, so this requests one redraw
+    /// rather than starting a repeating timer.
     pub fn flash_pane_focus(&mut self, pane_id: u64) {
         self.pane_focus_flash = Some((pane_id, Instant::now()));
         self.last_frame_key = None;
@@ -2320,10 +2429,14 @@ impl GpuRenderer {
 
     fn pane_focus_flash_bucket(&mut self, now: Instant) -> u8 {
         let Some((_, started_at)) = self.pane_focus_flash else {
+            // When: `self.pane_focus_flash` is None — no flash is running, and
+            // 0 keeps the bucket out of the frame key so nothing animates.
             return 0;
         };
         let elapsed = now.saturating_duration_since(started_at);
         if elapsed >= PANE_FOCUS_FLASH_DURATION {
+            // When: `elapsed >= PANE_FOCUS_FLASH_DURATION` — clearing the field
+            // here is what ends the redraw chain; 0 matches the no-flash bucket.
             self.pane_focus_flash = None;
             return 0;
         }
@@ -2335,6 +2448,8 @@ impl GpuRenderer {
         let (pane_id, started_at) = self.pane_focus_flash?;
         let elapsed = now.saturating_duration_since(started_at);
         if elapsed >= PANE_FOCUS_FLASH_DURATION {
+            // When: `elapsed >= PANE_FOCUS_FLASH_DURATION`. This takes `&self`,
+            // so `pane_focus_flash_bucket` clears the field, not this.
             return None;
         }
         let t = elapsed.as_secs_f32() / PANE_FOCUS_FLASH_DURATION.as_secs_f32();
@@ -2459,8 +2574,12 @@ impl GpuRenderer {
         if cursor_row < view_top_abs {
             Some(cursor_row)
         } else if cursor_row >= view_top_abs.saturating_add(viewport_height) {
+            // When: `cursor_row >= view_top_abs + viewport_height` — cursor
+            // below the viewport; scroll so it lands on the last row.
             Some(cursor_row.saturating_add(1).saturating_sub(viewport_height))
         } else {
+            // When: `cursor_row` is already inside the viewport — return the
+            // caller's `viewport_top_abs` so an explicit scroll survives.
             viewport_top_abs
         }
     }
@@ -2478,8 +2597,12 @@ impl GpuRenderer {
         if cursor_row < view_top_abs {
             Some(cursor_row)
         } else if cursor_row >= view_top_abs.saturating_add(viewport_height) {
+            // When: `cursor_row >= view_top_abs + viewport_height` — cursor
+            // below the viewport; scroll so it lands on the last row.
             Some(cursor_row.saturating_add(1).saturating_sub(viewport_height))
         } else {
+            // When: `cursor_row` is already visible — return the caller's
+            // `viewport_top_abs` so an explicit scroll position survives.
             viewport_top_abs
         }
     }
@@ -2512,25 +2635,42 @@ impl GpuRenderer {
         // path in `snap_to_device_pixels`.
         let raw_fallback = snapped_cell_x.is_empty();
         if let Some((start, end)) = copy_mode.selected_range() {
+            // When: `copy_mode.selected_range()` is Some — copy mode has an
+            // anchored selection. The cursor quad below is emitted regardless.
             for row_abs in start.1..=end.1 {
                 let Some(visible_row) =
                     Self::viewport_relative_row(row_abs, view_top_abs, grid.rows)
                 else {
+                    // When: `viewport_relative_row` is None — a selection may
+                    // span scrollback, so off-screen rows are skipped.
                     continue;
                 };
-                let col_a = if row_abs == start.1 { start.0 } else { 0 }.min(grid.cols as usize);
+                let col_a = if row_abs == start.1 {
+                    start.0
+                } else {
+                    // When: `row_abs != start.1` — an interior or final row,
+                    // which starts at column 0, not the selection anchor.
+                    0
+                }
+                .min(grid.cols as usize);
                 let col_b = if row_abs == end.1 {
                     end.0.min(grid.cols.saturating_sub(1) as usize)
                 } else {
+                    // When: `row_abs != end.1` — an interior row of a
+                    // multi-row selection, which runs to the right edge.
                     grid.cols.saturating_sub(1) as usize
                 };
                 if col_b < col_a {
+                    // When: `col_b < col_a` — an empty span on this row, which
+                    // would still push a zero-width quad into the buffer.
                     continue;
                 }
                 let end_exclusive = col_b + 1;
                 let (x, w) = if raw_fallback {
                     (origin_x + col_a as f32 * cell_w, (end_exclusive - col_a) as f32 * cell_w)
                 } else {
+                    // When: `!raw_fallback` — a real snapped-edge cache, so the
+                    // quad takes device-pixel edges shared with glyph cells.
                     let cache_end = end_exclusive.min(snapped_cell_x.len() - 1);
                     let lo = snapped_cell_x[col_a];
                     let hi = snapped_cell_x[cache_end];
@@ -2546,6 +2686,8 @@ impl GpuRenderer {
         }
 
         if copy_mode.is_read_only() {
+            // When: `copy_mode.is_read_only()` — a read-only view has no
+            // editable cursor to draw, so only the selection quads above stand.
             return None;
         }
 
@@ -2554,6 +2696,8 @@ impl GpuRenderer {
         let (cx, cw) = if raw_fallback {
             (origin_x + copy_col as f32 * cell_w, cell_w)
         } else {
+            // When: `!raw_fallback` — a real snapped-edge cache, so the cursor
+            // takes the same edges as the glyph cell beneath it.
             let lo = snapped_cell_x[copy_col];
             let hi = snapped_cell_x[(copy_col + 1).min(snapped_cell_x.len() - 1)];
             (lo, hi - lo)
@@ -2587,6 +2731,8 @@ impl GpuRenderer {
             && (self.padding_top - t).abs() < f32::EPSILON
             && (self.padding_bottom - b).abs() < f32::EPSILON
         {
+            // When: all four `.abs() < f32::EPSILON` — a reload carried the
+            // same padding, so relayout and a frame-key clear are wasted.
             return;
         }
         self.padding_left = l;
@@ -2683,10 +2829,21 @@ impl GpuRenderer {
         self.software_rendering
     }
 
+    /// Whether the no-GPU degrade path is active for this window.
+    ///
+    /// Distinct from [`Self::is_software_rendering`]: that reports what the
+    /// adapter is, this reports the resolved policy after
+    /// `[appearance].software_render_mode` is applied, so `Force` degrades on
+    /// real hardware and `Off` declines to degrade on a CPU rasterizer.
     pub fn is_software_render_degraded(&self) -> bool {
         self.software_render_degrade
     }
 
+    /// Read one BGRA pixel out of the Windows software presentation buffer.
+    ///
+    /// Test-only inspector for the software path: it is the only way to assert
+    /// what that path actually wrote without a GPU readback. Returns `None`
+    /// when no software frame is allocated or the coordinates fall outside it.
     #[cfg(target_os = "windows")]
     #[doc(hidden)]
     pub fn __test_software_frame_pixel_bgra(&self, x: u32, y: u32) -> Option<[u8; 4]> {
@@ -2698,15 +2855,21 @@ impl GpuRenderer {
     /// surface with the software-render present tweaks.
     pub fn set_software_render_degrade(&mut self, degrade: bool) {
         if self.software_render_degrade == degrade {
+            // When: `software_render_degrade == degrade`. The body below
+            // reconfigures the surface and may drop both atlases.
             return;
         }
         let used_software_presenter = self.uses_windows_software_presenter();
         self.software_render_degrade = degrade;
         if degrade {
+            // Fifo, opaque compositing, and one frame of latency trade
+            // smoothness for the lowest CPU cost per presented frame.
             self.config.present_mode = PresentMode::Fifo;
             self.config.alpha_mode = CompositeAlphaMode::Opaque;
             self.config.desired_maximum_frame_latency = 1;
         } else {
+            // When: leaving degrade. The modes captured at construction are
+            // restored, so a backend without Mailbox does not acquire it here.
             self.config.present_mode = self.hardware_present_mode;
             self.config.alpha_mode = self.hardware_alpha_mode;
             self.config.desired_maximum_frame_latency = 2;
@@ -2718,9 +2881,13 @@ impl GpuRenderer {
         self.surface.configure(&self.device, &self.config);
         let uses_software_presenter = self.uses_windows_software_presenter();
         if used_software_presenter != uses_software_presenter {
+            // The software and GPU presenters size their atlas textures
+            // differently, so cached UVs do not survive the transition.
             self.row_glyph_cache.invalidate_all();
             self.line_quad_cache.invalidate_all();
             if !uses_software_presenter {
+                // GPU textures must grow from the placeholder dimensions the
+                // software path left behind.
                 self.reset_glyph_atlas_in_place("software_to_gpu");
                 self.reset_image_atlas();
                 self.glyph_atlas_retry_without_eviction = false;
@@ -2809,6 +2976,8 @@ impl GpuRenderer {
     /// stays stale until the next event nudges the loop.
     pub fn set_hover_cursor(&mut self, pos: Option<(f32, f32)>) -> bool {
         if self.hover_cursor == pos {
+            // When: `hover_cursor == pos`. This runs on every `CursorMoved`, so
+            // clearing the key here would defeat the frame cache during a drag.
             return false;
         }
         let prev = self.hover_cursor;
@@ -2826,13 +2995,18 @@ impl GpuRenderer {
         next: Option<(f32, f32)>,
     ) -> bool {
         if !self.tab_bar_visible {
+            // When: `!tab_bar_visible` — no bar on screen, so no position can
+            // be over one and no move changes tab chrome.
             return false;
         }
         let inset = self.tab_bar_y_offset();
         let bar_h = self.tab_bar_logical_height();
         let in_bar = |p: Option<(f32, f32)>| -> bool {
             match p {
+                // Only the y axis matters — the bar spans the window's width.
                 Some((_, y)) => y >= inset && y <= inset + bar_h,
+                // Pointer outside the window. The caller ORs the previous
+                // position, so leaving the bar still reports a change.
                 None => false,
             }
         };
@@ -2942,6 +3116,8 @@ impl GpuRenderer {
     /// promotion does.
     fn demote_image_atlas_if_idle(&mut self, has_inline_media: bool) {
         if has_inline_media {
+            // When: `has_inline_media` — the atlas is in use. The idle run
+            // resets to zero; demotion needs a sustained absence, not a net one.
             self.frames_without_inline_media = 0;
             return;
         }
@@ -2951,6 +3127,8 @@ impl GpuRenderer {
             has_inline_media,
             self.frames_without_inline_media,
         ) {
+            // When: `image_atlas_demotion_ready` is false — still placeholder-
+            // sized, or the idle run is short. Early demotion thrashes 16 MiB.
             return;
         }
 
@@ -2958,6 +3136,7 @@ impl GpuRenderer {
         let released_height = self.image_atlas.height();
         self.image_atlas = GlyphAtlas::new(PLACEHOLDER_ATLAS_DIM, PLACEHOLDER_ATLAS_DIM);
         if !self.uses_windows_software_presenter() {
+            // A GPU texture mirrors the atlas and must shrink with it.
             self.rebuild_image_upload_if_needed();
         }
         self.frames_without_inline_media = 0;
@@ -2983,10 +3162,14 @@ impl GpuRenderer {
         retained_inline_media_bytes: usize,
     ) -> bool {
         if !image_atlas_promotion_required(&self.image_atlas, has_inline_media) {
+            // When: `!image_atlas_promotion_required` — no media to draw, or
+            // already promoted. `false` keeps the caller's cached UVs valid.
             return false;
         }
         self.image_atlas = GlyphAtlas::default_size();
         if !self.uses_windows_software_presenter() {
+            // The GPU texture must grow to match the promoted atlas before
+            // anything samples it.
             self.rebuild_image_upload_if_needed();
         }
         tracing::debug!(
@@ -3018,6 +3201,8 @@ impl GpuRenderer {
             self.last_frame_key = None;
             true
         } else {
+            // When: `self.tab_close_override == parsed` — the override is
+            // unchanged, so `false` tells the caller nothing needs redrawing.
             false
         }
     }
@@ -3047,6 +3232,8 @@ impl GpuRenderer {
             && (self.cell_w - new_cell_w).abs() < f32::EPSILON
             && (self.cell_h - new_line_h).abs() < f32::EPSILON;
         if no_change {
+            // When: `no_change` — family, size, weight, and both cell metrics
+            // all match. The body below drops the atlas and both row caches.
             return;
         }
         self.font_family = family.to_string();
@@ -3076,13 +3263,15 @@ impl GpuRenderer {
     ///
     /// G1a: this used to drive a logical-vs-physical projection at draw
     /// time too. Post-takeover it only governs the rasterizer target
-    /// inside [`Self::raster_px`], so cell metrics are recomputed from
+    /// inside `Self::raster_px`, so cell metrics are recomputed from
     /// `FontStack::cell_metrics_raster_px` whenever the rasterizer
     /// target changes — there is no longer a "logical cell pitch
     /// independent of DPI" because the renderer's coordinate system
     /// IS raster pixels.
     pub fn set_scale_factor(&mut self, scale_factor: f32) {
         if !scale_factor_rebuild_required(self.scale_factor, scale_factor) {
+            // When: `!scale_factor_rebuild_required` — the DPI is unchanged
+            // within epsilon, and `rebuild_for_sf` re-rasterizes every glyph.
             return;
         }
         self.rebuild_for_sf(scale_factor);
@@ -3216,6 +3405,8 @@ impl GpuRenderer {
         retained_inline_media_bytes: usize,
     ) {
         if stats.dirty_rects == 0 {
+            // When: `stats.dirty_rects == 0` — no atlas region changed, so the
+            // upload was a no-op and logging it would bury the real ones.
             return;
         }
         tracing::debug!(
@@ -3259,8 +3450,16 @@ impl GpuRenderer {
         self.hyperlink_underline = hex_to_rgba(theme.colors.cursor.0.as_str(), 0.9);
         self.splitter_color = splitter_color_from_theme(theme);
         let tint_alpha = match theme.appearance {
-            sonicterm_render_model::boundary::cfg::theme::Appearance::Dark => 0.14,
-            sonicterm_render_model::boundary::cfg::theme::Appearance::Light => 0.10,
+            sonicterm_render_model::boundary::cfg::theme::Appearance::Dark => {
+                // When: `Appearance::Dark` — dark needs more accent before
+                // the hyperlink tint reads as tinted at all.
+                0.14
+            }
+            sonicterm_render_model::boundary::cfg::theme::Appearance::Light => {
+                // When: `Appearance::Light` — 0.14 reads as a highlighter
+                // stripe over the text rather than a hint beneath it.
+                0.10
+            }
         };
         self.hyperlink_tint = hex_to_rgba(theme.colors.cursor.0.as_str(), tint_alpha);
         self.search_highlight = hex_to_rgba(theme.colors.bright.yellow.0.as_str(), 0.35);
@@ -3276,9 +3475,9 @@ impl GpuRenderer {
     /// Drop every shape/row/line cache and bump `style_rev` so the next
     /// frame re-shapes from scratch. Called from the winit event loop
     /// in response to `UserEvent::ClearShapeCache` — itself fired by
-    /// the [`sonicterm_text::async_fallback::AsyncFallbackLoader`]
+    /// the `sonicterm_text::async_fallback::AsyncFallbackLoader`
     /// notifier when a CJK/emoji family finishes loading off the hot
-    /// startup path (P4 follow-up).
+    /// startup path.
     ///
     /// Without this method, freshly loaded fallback faces would not
     /// take effect until something else invalidated the caches
@@ -3361,22 +3560,30 @@ impl GpuRenderer {
         let sf = self.scale_factor;
         let content_bottom = surf_h - self.bottom_inset() - self.padding_bottom * sf;
         if py >= content_bottom {
+            // When: `py >= content_bottom` — the point is in the tab-bar strip
+            // or bottom padding; a phantom cell would extend grid selection.
             return None;
         }
         if py < self.top_inset() {
+            // When: `py < self.top_inset()` — above the grid, in the titlebar
+            // band or top padding, so no row corresponds to it.
             return None;
         }
         if self.last_pane_layout.is_empty() {
-            // Fallback: no render has run yet. Use the legacy
-            // single-grid arithmetic (window-wide padding + cell_w).
+            // When: `last_pane_layout.is_empty()` — no render has run yet, so
+            // legacy single-grid arithmetic (padding + cell_w) is used.
             let x = px - self.padding_left * sf;
             let y = py - self.top_inset();
             if x < 0.0 || y < 0.0 {
+                // When: `x < 0.0 || y < 0.0` — left of or above the grid
+                // origin, which floors to a negative cell index.
                 return None;
             }
             let col = (x / self.cell_w).floor() as i32;
             let row = (y / self.cell_h).floor() as i32;
             if col < 0 || row < 0 {
+                // When: `col < 0 || row < 0` — a fractional origin can still
+                // floor below zero after the non-negative check above.
                 return None;
             }
             return Some((row.min(u16::MAX as i32) as u16, col.min(u16::MAX as i32) as u16));
@@ -3393,6 +3600,8 @@ impl GpuRenderer {
         let local_x = px - pane.origin_x_logical;
         let local_y = py - pane.origin_y_logical;
         if local_x < 0.0 || local_y < 0.0 {
+            // When: `local_x < 0.0 || local_y < 0.0` — float error at a pane
+            // edge can push the point just outside the rect that matched.
             return None;
         }
         // Column: linear scan over the pane's snapped_cell_x edges so we
@@ -3405,10 +3614,14 @@ impl GpuRenderer {
         // straight division is correct. Clamp to the pane's grid.
         let row_f = local_y / pane.cell_h_logical;
         if row_f < 0.0 {
+            // When: `row_f < 0.0` — a non-positive `cell_h_logical` in the
+            // snapshot would invert the division.
             return None;
         }
         let row = row_f.floor() as i32;
         if row < 0 || row >= pane.rows as i32 {
+            // When: `row < 0 || row >= pane.rows` — the point is inside the
+            // pane rect but below its last text row, in trailing padding.
             return None;
         }
         Some((row as u16, col))
@@ -3418,8 +3631,8 @@ impl GpuRenderer {
     // wgpu submission. A parameter struct would either need 11 separate
     // borrow fields (no win over positional args) or force the App layer
     // to construct an interior-mutable wrapper around its own state —
-    // both worse than the current shape. Suppression stays with this
-    // explanatory comment review.
+    // both worse than the current shape. Keep the suppression beside this
+    // borrow-shape rationale.
     /// Render one frame: terminal grid + cursor + selection + overlays
     /// (tab bar, search, command palette, IME preedit). Submits to the
     /// wgpu queue and presents the surface. See the parameter comments
@@ -3453,6 +3666,8 @@ impl GpuRenderer {
         // separately. If all panes failed to lock (empty slice), skip the
         // frame — callers are expected to filter dropped locks before calling.
         if panes.is_empty() {
+            // When: `panes.is_empty()` — every pane's lock was dropped by the
+            // caller, so there is no grid to read and the frame is skipped.
             return Ok(());
         }
         let mut gpu_timing = tracing::enabled!(target: "render_timing", tracing::Level::DEBUG)
@@ -3540,13 +3755,12 @@ impl GpuRenderer {
         let pane_rects = pane_rects.as_slice();
         let broadcast_receiver_ids: Vec<u64> =
             panes.iter().filter(|p| p.is_broadcast_receiver).map(|p| p.id).collect();
-        // Part B step 3 (Fix 2): collect immutable per-pane views for ALL
-        // panes so the cell-emission body below can iterate per-pane. The
-        // grid is borrowed shared (`&Grid`) — every read in the loop
-        // (`scrollback_len`, `dirty_rows`, `row_at_abs`, `rows`, `cursor`,
-        // `prompts`) is immutable, so we don't need `&mut Grid` and we
-        // don't need raw pointers. This eliminates the overlapping
-        // `&mut Grid` UB risk Haiku flagged.
+        // Collect immutable per-pane views for ALL panes so the cell-emission
+        // body below can iterate per-pane. The grid is borrowed shared
+        // (`&Grid`) — every read in the loop (`scrollback_len`, `dirty_rows`,
+        // `row_at_abs`, `rows`, `cursor`, `prompts`) is immutable, so neither
+        // `&mut Grid` nor raw pointers are needed. Taking `&mut Grid` per pane
+        // would overlap borrows across panes sharing one grid.
         struct PaneView<'g> {
             grid: &'g Grid,
             pane_id: u64,
@@ -3558,8 +3772,7 @@ impl GpuRenderer {
             // but the grid hasn't yet been resynced (resize is debounced
             // through the PTY) the derived value is smaller than the
             // real pane rect and overlay quads at the trailing edge get
-            // clipped away, re-introducing the bleed-through set
-            // out to fix. See a review.
+            // clipped away, allowing terminal content to bleed through.
             rect_w: f32,
             rect_h: f32,
             /// The pane's FULL rect, padding included, in pixels.
@@ -3639,9 +3852,8 @@ impl GpuRenderer {
         // for pane geometry) rather than `grid.cols * cell_w`. After a
         // pane resize the grid resync is debounced through the PTY;
         // during that window the derived extent is *smaller* than the
-        // real pane rect, which clipped overlays inside the trailing
-        // edge and re-introduced the bleed-through set out to
-        // fix. a review.
+        // real pane rect, which would clip overlays inside the trailing
+        // edge and allow terminal content to bleed through.
         let active_pane_w: f32 = pane_views[active_view_idx].rect_w;
         let active_pane_h: f32 = pane_views[active_view_idx].rect_h;
         // Active grid borrow — shared, used by overlays that read the
@@ -3764,7 +3976,11 @@ impl GpuRenderer {
         let hover_tab_idx = {
             let mut idx: u32 = u32::MAX;
             if self.tab_bar_visible {
+                // When: `self.tab_bar_visible` — a hidden bar has no widgets to
+                // hit-test, and `u32::MAX` already means "no tab hovered".
                 if let Some((cx, cy)) = self.hover_cursor {
+                    // When: `self.hover_cursor` is Some — the pointer is inside
+                    // the window; `None` means it left and nothing is hovered.
                     let sw_log = self.config.width as f32;
                     let layout = TabBarLayout::compute_with_height(
                         tabs,
@@ -3779,12 +3995,20 @@ impl GpuRenderer {
                                 y: cy,
                             },
                         )) {
-                            sonicterm_render_model::boundary::ui::tabbar_view::TabHover::None => {}
+                            sonicterm_render_model::boundary::ui::tabbar_view::TabHover::None => {
+                                // When: `TabHover::None` — the pointer misses
+                                // this widget; later tabs are still tested.
+                            }
                             sonicterm_render_model::boundary::ui::tabbar_view::TabHover::Body => {
+                                // When: `TabHover::Body` — the pointer is over
+                                // the tab itself. Tabs cannot overlap, so stop.
                                 idx = t.idx as u32;
                                 break;
                             }
-                            sonicterm_render_model::boundary::ui::tabbar_view::TabHover::Close => {}
+                            sonicterm_render_model::boundary::ui::tabbar_view::TabHover::Close => {
+                                // When: `TabHover::Close` — close buttons are
+                                // no longer drawn, so this hover is ignored.
+                            }
                         }
                     }
                 }
@@ -3833,6 +4057,8 @@ impl GpuRenderer {
         if overlay_or_chrome_changed {
             damage.add_clipped(surface_rect, surface_rect);
         } else {
+            // When: `!overlay_or_chrome_changed` — only grid content can have
+            // changed, so damage narrows to the panes that reported it.
             for pv in &pane_views {
                 // The pane's full rect, not the content rect. Glyph ink can
                 // land in the padding band — a negative left side bearing at
@@ -3904,6 +4130,8 @@ impl GpuRenderer {
         };
         let pane_revs_len = key.pane_revs.len();
         if Some(&key) == self.last_frame_key.as_ref() {
+            // When: `key` equals `last_frame_key` — every input that can affect
+            // the image is unchanged, so the presented frame is still correct.
             self.skipped_frames = self.skipped_frames.wrapping_add(1);
             tracing::trace!(skipped = self.skipped_frames, "renderer: skipped unchanged frame");
             #[cfg(target_os = "windows")]
@@ -3956,6 +4184,8 @@ impl GpuRenderer {
             },
         );
         if matches!(render_mode, RenderMode::Noop) {
+            // When: `matches!(render_mode, RenderMode::Noop)` — nothing visible
+            // changed. The key is stored so the next frame compares against it.
             self.last_frame_key = Some(key);
             return Ok(());
         }
@@ -3974,17 +4204,13 @@ impl GpuRenderer {
         // Underline runs collected per pane. We record
         // (origin_x, origin_y, pane_cols, row, col_a, col_b) where
         // origin_{x,y} is the PANE's origin (pad / top_inset) and
-        // `pane_cols` is the originating pane's column count, captured
-        // at insert time. Pre-fix this was (row, col_a, col_b) and
-        // the emit loop used `active_origin_x/y` for every entry —
-        // placing inactive-pane underlines under the active pane's
-        // coordinates. Pre-fix the tuple gained origin_{x,y} but
-        // the emit loop still sized the per-origin snapped cache from
-        // `grid.cols` (== ACTIVE pane); a wider inactive pane with
-        // underlines past active.cols was clamped and truncated. We
-        // now carry `pane_cols` (option (a) per Haiku Step-4 revise)
-        // so the per-origin cache is built from the originating pane's
-        // width, not the active pane's.
+        // `pane_cols` is the originating pane's column count, captured at
+        // insert time, and each entry carries its own `origin_{x,y}`.
+        // Both are needed because the emit loop draws underlines from every
+        // pane: without the origin an inactive pane's underlines land under
+        // the active pane's coordinates, and without `pane_cols` the
+        // per-origin snapped-edge cache is sized from the active pane, so a
+        // wider inactive pane has its underlines clamped and truncated.
         let mut underlines: Vec<(
             f32,
             f32,
@@ -4023,7 +4249,7 @@ impl GpuRenderer {
         // relative to the cell top. Using ≈80% of cell height matches
         // a reasonable ascent for monospace fonts at the configured
         // line-height; finer baseline control would require querying
-        // font metrics, which is a follow-up polish item.
+        // font metrics.
         let baseline_y_in_cell = cell_h * 0.8;
         let software_presenter = self.uses_windows_software_presenter();
 
@@ -4056,6 +4282,8 @@ impl GpuRenderer {
             let hovered_url_accent: [f32; 4] = if hovered_url_needs_accent(hovered_url_cells) {
                 sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme).accent
             } else {
+                // When: `!hovered_url_needs_accent` — plain hover draws only
+                // the underline, so the accent is never sampled.
                 [0.0, 0.0, 0.0, 0.0]
             };
             // Part B step 3: iterate every pane. Each iteration rebinds
@@ -4121,10 +4349,14 @@ impl GpuRenderer {
                 let pane_hovered_url = if pv.is_active { hovered_url_cells } else { None };
                 for r in 0..grid.rows {
                     if !emit_full_rows && !grid.dirty_rows().any(|dirty| dirty == r as usize) {
+                        // When: `!emit_full_rows` and `r` is absent from
+                        // `dirty_rows` — the row's pixels are already correct.
                         continue;
                     }
                     let row_abs = view_top_abs + r as u64;
                     let Some(row) = grid.row_at_abs(row_abs) else {
+                        // When: `grid.row_at_abs(row_abs)` is None — that
+                        // absolute row is outside the scrollback still held.
                         continue;
                     };
                     // ------ Cache lookup ------
@@ -4179,6 +4411,8 @@ impl GpuRenderer {
                     if let Some(cached) =
                         self.row_glyph_cache.get(pane_id, row_abs, key, atlas_epoch)
                     {
+                        // When: `row_glyph_cache.get` is Some — the row hash and
+                        // atlas epoch both match, so shaped glyphs are reusable.
                         glyph_instances.extend_from_slice(&cached.glyphs);
                         for run in &cached.underlines {
                             underlines.push((pad, top_inset, grid.cols, r, *run));
@@ -4211,13 +4445,19 @@ impl GpuRenderer {
                     // of shaping).
                     for (col, cell) in row.iter().enumerate() {
                         if cell.flags.contains(CellFlags::WIDE_CONT) {
+                            // When: `WIDE_CONT` — the trailing half of a wide
+                            // glyph, whose decoration belongs to its lead cell.
                             continue;
                         }
                         last_visible_col = col as u16;
                         if let Some((style, color)) = underline_key(cell) {
                             match ul_start {
                                 Some((_, active_style, active_color))
-                                    if active_style == style && active_color == color => {}
+                                    if active_style == style && active_color == color =>
+                                {
+                                    // When: the guard holds — same style and
+                                    // colour, so the open run simply continues.
+                                }
                                 Some((s, active_style, active_color)) => {
                                     let end = (col as u16).saturating_sub(1);
                                     let run = sonicterm_text::row_glyph_cache::UnderlineRun {
@@ -4235,6 +4475,8 @@ impl GpuRenderer {
                                 }
                             }
                         } else if let Some((s, style, color)) = ul_start.take() {
+                            // When: `ul_start.take()` is Some — this cell has no
+                            // underline, so the open run ends and is emitted.
                             let end = (col as u16).saturating_sub(1);
                             let run = sonicterm_text::row_glyph_cache::UnderlineRun {
                                 start_col: s,
@@ -4267,6 +4509,8 @@ impl GpuRenderer {
                     let mut run_first_col: u16 = 0;
                     for (col, cell) in row.iter().enumerate() {
                         if cell.flags.contains(CellFlags::WIDE_CONT) {
+                            // When: `WIDE_CONT` — the trailing half of a wide
+                            // glyph, already shaped from its lead cell.
                             continue;
                         }
                         let style = RunStyle::from_cell(cell);
@@ -4366,14 +4610,14 @@ impl GpuRenderer {
                         },
                     );
                 }
-            } // end per-pane loop (Part B step 3)
+            } // end per-pane loop
         }
 
         let mut quads: Vec<QuadInstance> = Vec::new();
         // Overlay quads — drawn AFTER terminal text + main quads so that
         // palette / search-input / IME backgrounds visually cover the
-        // terminal content underneath. (Regression caught review:
-        // terminal glyphs were bleeding through overlay dialogs.)
+        // terminal content underneath. Emitted into the same vector as the
+        // main quads, terminal glyphs bleed through overlay dialogs.
         let mut quads_overlay: Vec<QuadInstance> = Vec::new();
 
         let inline_image_placements: Vec<InlineImagePlacement<'_>> = pane_views
@@ -4392,6 +4636,8 @@ impl GpuRenderer {
         let has_renderable_inline_media = inline_image_placements.iter().any(|placement| {
             let image = placement.image;
             if image.width == 0 || image.height == 0 || image.bgra.is_empty() {
+                // When: any dimension is 0 or `bgra` is empty — a failed or
+                // pending decode, which has no pixels to place.
                 return false;
             }
             let x = placement.origin_x + image.col as f32 * cell_w;
@@ -4483,6 +4729,8 @@ impl GpuRenderer {
             let max_rows =
                 ((pane_rect.h / cell_h).floor() as i32).clamp(0, i32::from(pv_grid.rows)) as u16;
             if max_cols == 0 || max_rows == 0 {
+                // When: `max_cols == 0 || max_rows == 0` — the pane rect is
+                // thinner than one cell, so no background quad would fit.
                 continue;
             }
             // per-pane snapped-edge cache for bg-fill runs. Per
@@ -4492,10 +4740,14 @@ impl GpuRenderer {
             let snapped_cell_x_bg = build_snapped_cell_x(pad_bg, cell_w, pv_grid.cols);
             for r in 0..max_rows {
                 if !emit_full_rows && !pv_grid.dirty_rows().any(|dirty| dirty == r as usize) {
+                    // When: `!emit_full_rows` and `r` is absent from
+                    // `dirty_rows` — this row's background is already correct.
                     continue;
                 }
                 let row_abs = view_top_abs_bg + r as u64;
                 let Some(row_cells) = pv_grid.row_at_abs(row_abs) else {
+                    // When: `pv_grid.row_at_abs(row_abs)` is None — the row is
+                    // outside the scrollback this pane still retains.
                     continue;
                 };
                 // G1a: pass 1.0 for the legacy DPI hash input
@@ -4515,6 +4767,8 @@ impl GpuRenderer {
                     sel_bbox_for_quads,
                 );
                 if let Some(cached) = self.line_quad_cache.get(pane_id, row_abs, key) {
+                    // When: `line_quad_cache.get` is Some — the row's contents,
+                    // style, and selection overlap are all unchanged.
                     quads.extend_from_slice(&cached.quads);
                     continue;
                 }
@@ -4691,6 +4945,8 @@ impl GpuRenderer {
                         cur_col -= 1;
                         cursor_span = 2;
                     } else if cell.flags.contains(CellFlags::WIDE) {
+                        // When: `WIDE` — the cursor is on the lead half, so the
+                        // block spans two columns from where it already is.
                         cursor_span = 2;
                     }
                 }
@@ -4829,6 +5085,8 @@ impl GpuRenderer {
             {
                 c
             } else {
+                // When: the `find` returned None — no cache exists yet for this
+                // origin and column count, so one is built and memoized.
                 let c = build_snapped_cell_x(*origin_x, self.cell_w, *pane_cols);
                 underline_caches.push((pad_bits, *pane_cols, c));
                 &underline_caches.last().unwrap().2
@@ -4877,6 +5135,8 @@ impl GpuRenderer {
                     sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme)
                         .accent
                 } else {
+                    // When: `!h.active` — plain hover with no modifier held, so
+                    // glyphs keep their colour and only a hint underline draws.
                     hex_to_rgba(theme.colors.ansi.yellow.0.as_str(), 0.9)
                 };
                 let active_grid_cols = pane_views[active_view_idx].grid.cols;
@@ -4968,9 +5228,13 @@ impl GpuRenderer {
         // not accidentally leave mirrored input enabled. This is intentionally
         // independent of the subtle split-pane seam styling above.
         if !broadcast_receiver_ids.is_empty() {
+            // When: `!broadcast_receiver_ids.is_empty()` — at least one pane
+            // mirrors input, which needs its red safety border and strip.
             let warning = hex_to_rgba(theme.colors.bright.red.0.as_str(), 1.0);
             for (id, r) in pane_rects {
                 if !broadcast_receiver_ids.contains(id) {
+                    // When: this pane's id is absent from the receiver set — it
+                    // does not mirror input, so it takes no warning chrome.
                     continue;
                 }
                 let t = 2.0_f32;
@@ -5005,9 +5269,11 @@ impl GpuRenderer {
             }
         }
         // -------- Tab bar ---------------------------------------------------
+        // The insertion gap below opens 8 px at the current drop slot when a
+        // drag is active over this bar.
         if self.tab_bar_visible {
-            // open an 8 px insertion gap at the
-            // current drop slot when a drag is active over this bar.
+            // When: `self.tab_bar_visible` — a hidden bar reserves no height,
+            // so its strip, tab quads, and titles are all skipped.
             let insertion_slot = self.drag_chip.as_ref().and_then(|c| c.insertion_slot);
             let source_tab_idx = self.drag_chip.as_ref().and_then(|c| c.source_tab_idx);
             let source_alpha = self.drag_chip.as_ref().map(|c| c.source_alpha).unwrap_or(1.0);
@@ -5097,9 +5363,15 @@ impl GpuRenderer {
             // titles visually smaller than body text.
             let native_em = self.raster_px(self.font_size);
             if let Some(stack) = self.font_stack.as_ref() {
+                // When: `self.font_stack` is Some — chrome text needs a shaper.
+                // Without one the bar quads still draw but carry no titles.
                 let mut tab_rasterizer = stack.clone();
                 for t in &layout.tabs {
-                    let Some(tab) = tabs.tabs().get(t.idx) else { continue };
+                    let Some(tab) = tabs.tabs().get(t.idx) else {
+                        // When: `tabs.tabs().get(t.idx)` is None — the layout
+                        // outlived a closed tab, so there is no title to draw.
+                        continue;
+                    };
                     let active = layout.active == Some(t.idx);
                     let active_panel_focused = active && self.window_focused;
                     let hovered = hover_tab_idx == t.idx as u32;
@@ -5164,6 +5436,8 @@ impl GpuRenderer {
         }
         // -------- Search highlights + badge --------------------------------
         if let Some(s) = search {
+            // When: `search` is Some — a search session is live, so its match
+            // highlights and status badge belong on this frame.
             let cur_idx = s.current;
             let view_top_abs = Self::resolved_view_top_abs(grid, viewport_top_abs);
             let match_bg = hex_to_rgba(theme.colors.ansi.yellow.0.as_str(), 1.0);
@@ -5180,10 +5454,14 @@ impl GpuRenderer {
                 s.matches[vis_start..vis_end].iter().enumerate().map(|(j, m)| (vis_start + j, m))
             {
                 if u64::from(m.row) < view_top_abs || m.col_end <= m.col_start {
+                    // When: the match row is above the viewport, or the span is
+                    // empty — neither yields a highlight quad with area.
                     continue;
                 }
                 let visible_row = u64::from(m.row) - view_top_abs;
                 if visible_row >= u64::from(grid.rows) {
+                    // When: `visible_row >= grid.rows` — the binary-searched
+                    // slice can include a row just past the last visible one.
                     continue;
                 }
                 // derive x/w from the active-pane snapped-edge
@@ -5204,10 +5482,12 @@ impl GpuRenderer {
                 let (bg_color, fg_color) = if Some(i) == cur_idx {
                     (current_bg, current_fg)
                 } else {
+                    // When: `Some(i) != cur_idx` — one of the other matches,
+                    // which stays yellow so the current one reads as selected.
                     (match_bg, match_fg)
                 };
-                // Clip the match highlight to the active pane (
-                // follow-up) — a long match that runs past the pane's
+                // Clip the match highlight to the active pane — a long
+                // match that runs past the pane's
                 // last column would otherwise paint into the neighbour.
                 if let Some((qx, qy, qw, qh)) = clip_rect_to_pane(
                     (x, y, w, self.cell_h),
@@ -5263,6 +5543,8 @@ impl GpuRenderer {
             if read_only_badge.is_some() {
                 SearchBarLayout::compute_at_row(sw, sh, content_w, 1, self.scale_factor)
             } else {
+                // When: `read_only_badge` is None — no badge occupies row 0, so
+                // the search bar takes the default top row.
                 SearchBarLayout::compute(sw, sh, content_w, self.scale_factor)
             }
         });
@@ -5399,6 +5681,8 @@ impl GpuRenderer {
         }
 
         if let Some((badge_x, badge_y, badge_w, badge_h)) = read_only_badge {
+            // When: `read_only_badge` is Some — copy mode is read-only, so the
+            // badge announces that typing will not reach the shell.
             let badge_bg = hex_to_rgba(theme.colors.bright.green.0.as_str(), 1.0);
             quads_overlay.push(QuadInstance::rounded(
                 px_to_ndc(badge_x, badge_y, badge_w, badge_h, sw, sh),
@@ -5407,6 +5691,8 @@ impl GpuRenderer {
                 self.chrome_px(READ_ONLY_BADGE_RADIUS),
             ));
             if let Some(stack) = self.font_stack.as_ref() {
+                // When: `font_stack` is Some — the badge quad is already
+                // pushed; without a shaper it draws as a bare rounded rect.
                 let native_em = stack
                     .cell_metrics_raster_px()
                     .ok()
@@ -5561,6 +5847,8 @@ impl GpuRenderer {
             let query_text = if palette_preedit.is_empty() {
                 None
             } else {
+                // When: `!palette_preedit.is_empty()` — an IME composition is
+                // live, so the label interleaves it with the typed query.
                 Some(command_palette_query_label(p, palette_preedit))
             };
             let layout = PaletteLayout::compute(p, sw, sh, self.panel_padding, self.scale_factor);
@@ -5572,12 +5860,16 @@ impl GpuRenderer {
             .map(str::to_string);
             (layout, query_text, caret_char)
         } else {
+            // When: `palette` is None — the command palette is closed, so no
+            // layout, query, or caret exists for the overlay pass to draw.
             (None, None, None)
         };
+        // Chrome colors are derived from the active theme so the palette
+        // tracks the user's chosen palette instead of hardcoded
+        // Tokyo Night literals (see UiPalette::from_theme).
         if let Some(layout) = &palette_layout {
-            // Chrome colors are derived from the active theme so the palette
-            // tracks the user's chosen palette instead of hardcoded
-            // Tokyo Night literals (see UiPalette::from_theme).
+            // When: `palette_layout` is Some — the palette is open, so its
+            // panel, query row, and result rows all need chrome this frame.
             let palette_chrome =
                 sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme);
             let accent_rgba = palette_chrome.accent;
@@ -5666,8 +5958,12 @@ impl GpuRenderer {
             let query_text = if let Some(text) = &palette_query_text {
                 text.replace('▏', "")
             } else if let Some(ph) = &layout.query_placeholder {
+                // When: no composed text but `layout.query_placeholder` is Some
+                // — an empty query shows its placeholder hint instead.
                 ph.clone()
             } else {
+                // When: `palette_query_text` and `layout.query_placeholder` are
+                // both None — the typed query stands alone.
                 layout.query_label.replace('▏', "")
             };
             let palette_font_size = self.raster_px(self.font_size);
@@ -5677,6 +5973,8 @@ impl GpuRenderer {
             // emission in an `if let Some(...)` so the palette path
             // degrades gracefully instead of panicking.
             if let Some(stack) = self.font_stack.as_ref() {
+                // When: `font_stack` is Some — palette quads are already
+                // pushed; without a shaper the panel draws with no text.
                 let palette_native_em = self.raster_px(self.font_size);
                 let mut palette_rasterizer = stack.clone();
                 // Query: vertically centre inside the query_row chrome.
@@ -5711,6 +6009,8 @@ impl GpuRenderer {
                 let caret_prefix = if let Some(text) = &palette_query_text {
                     text.split('▏').next().unwrap_or("")
                 } else {
+                    // When: `palette_query_text` is None — no composition, so
+                    // the caret prefix comes from the plain query label.
                     layout.query_label.split('▏').next().unwrap_or("")
                 };
                 let caret_x = query_origin_x
@@ -5761,7 +6061,11 @@ impl GpuRenderer {
                 // baseline aligns with the row's highlight quad.
                 let bounds_bg = [layout.bg.x, layout.bg.y, layout.bg.w, layout.bg.h];
                 for (i, label) in layout.row_labels.iter().enumerate() {
-                    let Some(row) = layout.rows.get(i) else { continue };
+                    let Some(row) = layout.rows.get(i) else {
+                        // When: `layout.rows.get(i)` is None — labels and rects
+                        // are parallel vectors that can disagree in length.
+                        continue;
+                    };
                     let shortcut = layout.row_shortcuts.get(i).and_then(|hint| hint.as_deref());
                     let swatch = layout.row_swatches.get(i).and_then(|v| v.as_deref());
                     let shortcut_font_size = palette_font_size;
@@ -5944,7 +6248,11 @@ impl GpuRenderer {
             && !palette_active
             && ime.map(|i| preedit_has_visible_ink(i.preedit())).unwrap_or(false)
         {
+            // When: `!search_active && !palette_active` and the preedit has ink
+            // — the other two anchor their own caret, leaving the cursor case.
             if let (Some(i), Some(stack)) = (ime, self.font_stack.as_ref()) {
+                // When: both `ime` and `font_stack` are Some — composing text
+                // needs a shaper; without one no preedit glyphs are emitted.
                 let text = i.preedit();
                 // Body-matched, DPI-scaled font size (same as terminal text).
                 let font_size = self.raster_px(self.font_size);
@@ -6031,6 +6339,8 @@ impl GpuRenderer {
                     let cached = self.preedit_glyph_cache.as_ref().unwrap();
                     overlay_glyph_instances.extend(cached.glyphs.iter().copied());
                 } else {
+                    // When: `!cache_hit` — text, placement, colour, or atlas
+                    // epoch changed, so the run is re-shaped and re-cached.
                     let before = overlay_glyph_instances.len();
                     emit_overlay_text_glyphs(
                         &mut self.glyph_atlas,
@@ -6122,7 +6432,7 @@ impl GpuRenderer {
         if let Some(chip) = self.drag_chip.clone() {
             const CHIP_W: f32 = 120.0;
             const CHIP_H: f32 = 24.0;
-            // follow-up: two independent multipliers compose here.
+            // Two independent multipliers compose here.
             // `chip.scale` is the tear-out ANIMATION ease (1.0 in-bar, 1.02
             // on tear); `dpi` is the display scale factor. The chip's logical
             // size + decorations must scale by DPI so it keeps a constant
@@ -6225,6 +6535,8 @@ impl GpuRenderer {
             }
             self.drag_chip_visual = Some(DragChipVisual { top_left: (x0, y0), size: (w, h) });
         } else {
+            // When: `self.drag_chip` is None — no tab is being dragged, so the
+            // recorded visual is cleared rather than left stale for tests.
             self.drag_chip_visual = None;
         }
 
@@ -6282,14 +6594,20 @@ impl GpuRenderer {
         gpu_lap!("overlays");
 
         if atlas_evicted_during_frame(atlas_epoch_at_frame_start, &self.glyph_atlas) {
+            // When: `atlas_evicted_during_frame` — a tile was recycled mid-
+            // assembly, so glyphs emitted earlier hold UVs into freed space.
             self.reset_glyph_atlas_after_eviction(atlas_epoch_at_frame_start);
             return Ok(());
         }
 
         #[cfg(target_os = "windows")]
         if self.software_render_degrade {
+            // When: `software_render_degrade` on Windows — frames reach the
+            // window through the CPU blitter, not the swapchain.
             let bg_clear = [self.bg.r as f32, self.bg.g as f32, self.bg.b as f32, self.bg.a as f32];
             if self.software_frame.is_none() {
+                // First degraded frame, or the buffer was released when the
+                // path last turned off.
                 self.software_frame = Some(crate::software_windows::WindowsSoftwareFrame::new(
                     self.config.width,
                     self.config.height,
@@ -6335,6 +6653,9 @@ impl GpuRenderer {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) => f,
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                // When: `Timeout` or `Occluded` — no texture was handed back,
+                // so there is nothing to draw into this frame.
+
                 // Invariant: any render() that returns without a successful
                 // present must force the next render() onto the full-redraw
                 // path. Otherwise an unchanged FrameKey hits the fast path at
@@ -6346,6 +6667,8 @@ impl GpuRenderer {
                 return Ok(());
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
+                // When: `Outdated` — the swapchain no longer matches the window
+                // (a resize landed between configure and acquire).
                 self.last_frame_key = None;
                 self.surface.configure(&self.device, &self.config);
                 self.last_frame_key = None;
@@ -6353,6 +6676,9 @@ impl GpuRenderer {
                 return Ok(());
             }
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
+                // When: `Suboptimal` — the swapchain still works but no longer
+                // matches the surface, so it is reconfigured before reuse.
+
                 // wgpu 29: Surface::configure panics if a SurfaceTexture is
                 // still alive. Drop the frame BEFORE reconfiguring.
                 drop(frame);
@@ -6363,6 +6689,8 @@ impl GpuRenderer {
                 return Ok(());
             }
             wgpu::CurrentSurfaceTexture::Lost => {
+                // When: `Lost` — the surface itself is gone (display change,
+                // driver reset), so it is recreated rather than reconfigured.
                 self.last_frame_key = None;
                 self.surface = self.instance.create_surface(self.window.clone())?;
                 self.surface.configure(&self.device, &self.config);
@@ -6371,6 +6699,8 @@ impl GpuRenderer {
                 return Ok(());
             }
             wgpu::CurrentSurfaceTexture::Validation => {
+                // When: `Validation` — a driver-level error the renderer cannot
+                // recover from by reconfiguring, so it propagates.
                 return Err(anyhow!("surface validation error"));
             }
         };
@@ -6384,6 +6714,8 @@ impl GpuRenderer {
         let damage_rect = if first_retained_frame || software_full_repaint {
             surface_rect
         } else {
+            // When: neither `first_retained_frame` nor `software_full_repaint`
+            // — the retained texture is valid, so only damage is redrawn.
             damage.rect().unwrap_or(surface_rect)
         };
         let bg_clear = [self.bg.r as f32, self.bg.g as f32, self.bg.b as f32, self.bg.a as f32];
@@ -6411,6 +6743,8 @@ impl GpuRenderer {
                         load: if first_retained_frame {
                             LoadOp::Clear(self.bg)
                         } else {
+                            // When: `!first_retained_frame` — the texture holds
+                            // the last frame, and clearing would discard it.
                             LoadOp::Load
                         },
                         store: wgpu::StoreOp::Store,
@@ -6535,13 +6869,21 @@ impl GpuRenderer {
         // edges with adjacent glyph cells at fractional DPI.
         let raw_fallback = snapped_cell_x.is_empty();
         for hint in &quick_select.hints {
-            let Some(visible_row) = hint.row.checked_sub(scrollback_len) else { continue };
+            let Some(visible_row) = hint.row.checked_sub(scrollback_len) else {
+                // When: `hint.row.checked_sub(scrollback_len)` is None — the
+                // hint sits above the viewport, in scrolled-off history.
+                continue;
+            };
             if visible_row >= visible_rows {
+                // When: `visible_row >= visible_rows` — below the viewport, so
+                // its background quad would land outside the pane.
                 continue;
             }
             let (x, w) = if raw_fallback {
                 (origin_x + hint.col_start as f32 * self.cell_w, self.cell_w)
             } else {
+                // When: `!raw_fallback` — a real snapped-edge cache, so hint
+                // backgrounds share device-pixel edges with glyph cells.
                 let col = (hint.col_start).min(snapped_cell_x.len().saturating_sub(2));
                 let lo = snapped_cell_x[col];
                 let hi = snapped_cell_x[col + 1];
@@ -6633,6 +6975,8 @@ impl GpuRenderer {
         software_presenter: bool,
     ) {
         if cells.is_empty() {
+            // When: `cells.is_empty()` — the run carries no cells, so there is
+            // nothing to shape and no glyph to emit.
             return;
         }
 
@@ -6663,6 +7007,8 @@ impl GpuRenderer {
         // Powerline / NF PUA codepoint, so the BlockKey dispatch is
         // safely skipped here.
         if run_is_ascii_fast(cells) {
+            // When: `run_is_ascii_fast` — every cell is 0x20..=0x7E, which
+            // cannot shape or need `BlockKey`, so each maps 1:1 to a tile.
             for (col, cell) in cells {
                 let key = sonicterm_types::glyph_key::GlyphKey {
                     ch: cell.ch,
@@ -6676,16 +7022,24 @@ impl GpuRenderer {
                 // without a FontStack) the glyph is silently skipped
                 // so the renderer still paints quads.
                 let Some(wt) = wt_raster.as_deref_mut() else {
+                    // When: `wt_raster` is None — a test fixture with no
+                    // FontStack; quads still paint, glyphs are skipped.
                     continue;
                 };
                 let info_opt = glyph_atlas.get_or_insert(key, wt);
                 let Some(info) = info_opt else {
+                    // When: `info_opt` is None — the rasterizer produced no
+                    // tile, so the cell would draw tofu.
                     if !cell.ch.is_whitespace() {
+                        // Blanks are intentionally tile-less and are not
+                        // reported as missing.
                         missing_chars_this_frame.push(cell.ch);
                     }
                     continue;
                 };
                 if info.px_size[0] == 0 || info.px_size[1] == 0 {
+                    // When: either axis of `info.px_size` is 0 — a zero-area
+                    // tile, which is what a space rasterizes to.
                     continue;
                 }
                 let cx = snapped_cell_x[*col as usize];
@@ -6705,10 +7059,17 @@ impl GpuRenderer {
                 let (gx, gy, gw, gh) =
                     sonicterm_render_model::geometry::snap_to_device_pixels((gx, gy, gw, gh), 1.0);
                 let color = cell_fg(cell, theme, fg_default);
-                let rgba =
-                    if info.is_color { [1.0, 1.0, 1.0, 1.0] } else { resolve_fg(*col, color) };
+                let rgba = if info.is_color {
+                    [1.0, 1.0, 1.0, 1.0]
+                } else {
+                    // When: `!info.is_color` — a monochrome mask, so the cell
+                    // foreground and any hover recolor apply to it.
+                    resolve_fg(*col, color)
+                };
                 trace_white_glyph(cell.ch, rgba, (gx, gy, gw, gh), "ascii");
                 if glyph_draw_is_degenerate(&info) {
+                    // When: `glyph_draw_is_degenerate` — the tile has area but
+                    // its UVs or metrics cannot produce a visible draw.
                     tracing::debug!(
                         target: "sonic::render::glyph",
                         ch = ?cell.ch,
@@ -6736,9 +7097,8 @@ impl GpuRenderer {
         // Identical to the legacy cluster-width overlay's input
         // assembly so wezterm sees the same input bytes.
         let Some(stack) = font_stack else {
-            // No FontStack → no shaper available; non-ASCII clusters
-            // emit nothing this frame. Test-only path (production
-            // always carries a stack).
+            // When: `font_stack` is None — no shaper, so non-ASCII clusters
+            // emit nothing. Test-only path; production always carries a stack.
             return;
         };
         let mut text = String::with_capacity(cells.len() * 2);
@@ -6757,12 +7117,18 @@ impl GpuRenderer {
             }
         }
         if text.is_empty() {
+            // When: `text.is_empty()` — every cell in the run was a wide
+            // continuation, so the shaper has no bytes to work on.
             return;
         }
 
         let infos = match stack.shape_text_with_style(&text, style.bold, style.italic) {
             Ok(v) => v,
-            Err(_) => return,
+            Err(_) => {
+                // When: `shape_text_with_style` returns `Err` — the face
+                // rejected the run, so no glyph ids exist to place.
+                return;
+            }
         };
 
         // Build a lookup from col → cell so we can recover per-cell
@@ -6830,6 +7196,8 @@ impl GpuRenderer {
             // wrong rendering (or tofu, if the chosen face lacks the
             // codepoint).
             if let Some(block_key) = sonicterm_block_glyph::BlockKey::from_char(lead_cell.ch) {
+                // When: `BlockKey::from_char` is Some — a box/block codepoint,
+                // drawn from vendored geometry rather than the font's glyph.
                 let cx = snapped_cell_x[g.lead_col as usize];
                 let cy = top_inset + f32::from(row) * cell_h;
                 let span = if is_wide { 2usize } else { cluster_cells };
@@ -6839,6 +7207,8 @@ impl GpuRenderer {
                     let cell_bottom = top_inset + (f32::from(row) + 1.0) * cell_h;
                     software_block_glyph_target_rect(cx, cy, cell_right, cell_bottom)
                 } else {
+                    // When: `!software_presenter` — the GPU path keeps the
+                    // established fractional font-cell geometry unchanged.
                     (cx, cy, cell_right - cx, cell_h)
                 };
                 // Hardware keeps the established font-cell geometry unchanged.
@@ -6962,9 +7332,13 @@ impl GpuRenderer {
                 let mut block_raster =
                     BlockSpriteRasterizer { sized_key, underline_h: underline_h_isize };
                 let Some(info) = glyph_atlas.get_or_insert(key, &mut block_raster) else {
+                    // When: `glyph_atlas.get_or_insert` is None — the block
+                    // sprite could not be rasterized or packed.
                     continue;
                 };
                 if info.px_size[0] == 0 || info.px_size[1] == 0 {
+                    // When: either axis of `info.px_size` is 0 — a zero-area
+                    // sprite, which has no pixels to blit.
                     continue;
                 }
                 // `block_sprite` was generated from this exact target size.
@@ -6976,6 +7350,8 @@ impl GpuRenderer {
                 let rgba = if info.is_color {
                     [1.0, 1.0, 1.0, 1.0]
                 } else {
+                    // When: `!info.is_color` — a monochrome mask, so the cell
+                    // foreground and any hover recolor are applied to it.
                     resolve_fg(g.lead_col, color)
                 };
                 tracing::debug!(
@@ -7005,8 +7381,12 @@ impl GpuRenderer {
             // emit tofu via `Rasterizer::rasterize` returning
             // None (when sonicterm-font's fallback chain has nothing).
             if g.glyph_id == 0 {
+                // When: `g.glyph_id == 0` — the shaper found no glyph for this
+                // cluster, so the char-fallback path runs instead.
                 let ch = lead_cell.ch;
                 if ch == '\0' || ch.is_whitespace() {
+                    // When: `ch == '\0' || ch.is_whitespace()` — both are
+                    // legitimately glyph-less and must not draw tofu.
                     continue;
                 }
                 // Drop the `resolve_slot` swash walk. wezterm
@@ -7023,11 +7403,15 @@ impl GpuRenderer {
                     glyph_id: 0,
                 };
                 let Some(wt) = wt_raster.as_deref_mut() else {
+                    // When: `wt_raster` is None — a test fixture with no
+                    // FontStack, so the fallback char cannot be rasterized.
                     continue;
                 };
                 let info_opt = glyph_atlas.get_or_insert(key, wt);
                 let Some(info) = info_opt else {
-                    // True tofu — wezterm fallback chain rejected.
+                    // When: `info_opt` is None — true tofu; the fallback chain
+                    // rejected the char, so an outline box is drawn instead.
+
                     let cx = snapped_cell_x[g.lead_col as usize];
                     let cy = top_inset + f32::from(row) * cell_h;
                     let inset = (cell_h * 0.12).max(1.0);
@@ -7042,6 +7426,8 @@ impl GpuRenderer {
                     continue;
                 };
                 if info.px_size[0] == 0 || info.px_size[1] == 0 {
+                    // When: either axis of `info.px_size` is 0 — the fallback
+                    // face produced a zero-area tile, which has no pixels.
                     continue;
                 }
                 let cx = snapped_cell_x[g.lead_col as usize];
@@ -7061,12 +7447,16 @@ impl GpuRenderer {
                 let rgba = if info.is_color {
                     [1.0, 1.0, 1.0, 1.0]
                 } else {
+                    // When: `!info.is_color` — a monochrome fallback glyph, so
+                    // it takes the cell foreground like ordinary text.
                     resolve_fg(g.lead_col, color)
                 };
                 let (gx, gy, gw, gh) =
                     sonicterm_render_model::geometry::snap_to_device_pixels((gx, gy, gw, gh), 1.0);
                 trace_white_glyph(lead_cell.ch, rgba, (gx, gy, gw, gh), "shaped_run");
                 if glyph_draw_is_degenerate(&info) {
+                    // When: `glyph_draw_is_degenerate` — the tile has area but
+                    // its UVs or metrics cannot produce a visible draw.
                     tracing::warn!(
                         target: "sonic::render::glyph",
                         ch = ?lead_cell.ch,
@@ -7102,12 +7492,18 @@ impl GpuRenderer {
             // resample helper isn't needed either. Atlas keys remain
             // identical (font_slot, glyph_id) so cached tiles survive.
             let Some(wt) = wt_raster.as_deref_mut() else {
+                // When: `wt_raster` is None — a test fixture with no FontStack,
+                // so the ligature glyph cannot be rasterized.
                 continue;
             };
             let Some(info) = glyph_atlas.get_or_insert(key, wt) else {
+                // When: `glyph_atlas.get_or_insert` is None — the face produced
+                // no tile for this shaped glyph id.
                 continue;
             };
             if info.px_size[0] == 0 || info.px_size[1] == 0 {
+                // When: either axis of `info.px_size` is 0 — a zero-area tile,
+                // which has no pixels to blit.
                 continue;
             }
             let cx = snapped_cell_x[g.lead_col as usize];
@@ -7131,12 +7527,19 @@ impl GpuRenderer {
             // cell collapses the ligature into a single-cell glyph
             // with an inert neighbour cell.
             let color = cell_fg(&lead_cell, theme, fg_default);
-            let rgba =
-                if info.is_color { [1.0, 1.0, 1.0, 1.0] } else { resolve_fg(g.lead_col, color) };
+            let rgba = if info.is_color {
+                [1.0, 1.0, 1.0, 1.0]
+            } else {
+                // When: `!info.is_color` — a monochrome mask, so the ligature
+                // takes the cell foreground like ordinary text.
+                resolve_fg(g.lead_col, color)
+            };
             let (gx, gy, gw, gh) =
                 sonicterm_render_model::geometry::snap_to_device_pixels((gx, gy, gw, gh), 1.0);
             trace_white_glyph(lead_cell.ch, rgba, (gx, gy, gw, gh), "ligature");
             if glyph_draw_is_degenerate(&info) {
+                // When: `glyph_draw_is_degenerate` — the tile has area but its
+                // UVs or metrics cannot produce a visible draw.
                 tracing::warn!(
                     target: "sonic::render::glyph",
                     ch = ?lead_cell.ch,
@@ -7159,7 +7562,11 @@ impl GpuRenderer {
     }
 }
 
+// Lifecycle: `GpuRenderer` releases its `LIVE_RENDERERS` slot here — the sole
+// decrement, paired with the increment in `new_async`.
 impl Drop for GpuRenderer {
+    // Ordering: `LIVE_RENDERERS.fetch_sub(1, Ordering::AcqRel)`, pairing with
+    // the `Ordering::AcqRel` increment in `new_async`. Publishes no payload.
     fn drop(&mut self) {
         // Paired with the increment in `new`. Together they make the live
         // count return to its starting value across balanced open/close
@@ -7181,6 +7588,8 @@ impl Drop for GpuRenderer {
 /// whole glyph path is excluded.
 fn trace_white_glyph(ch: char, rgba: [f32; 4], rect: (f32, f32, f32, f32), site: &'static str) {
     if rgba != [1.0, 1.0, 1.0, 1.0] {
+        // When: `rgba` is not pure white — the glyph cannot be the source of
+        // the stray white pixels this probe exists to identify.
         return;
     }
     tracing::warn!(
@@ -7232,6 +7641,8 @@ fn cell_fg(cell: &Cell, theme: &Theme, default: ChromeColor) -> ChromeColor {
         let default_fg = hex_to_chrome_color(theme.colors.foreground.0.as_str());
         (color_to_chrome(cell.bg, theme, default_bg), color_to_chrome(cell.fg, theme, default_fg))
     } else {
+        // When: no `INVERSE` flag — the ordinary case, where the cell's own
+        // fg and bg are used as written.
         let default_bg = hex_to_chrome_color(theme.colors.background.0.as_str());
         (color_to_chrome(cell.fg, theme, default), color_to_chrome(cell.bg, theme, default_bg))
     };
@@ -7241,6 +7652,8 @@ fn cell_fg(cell: &Cell, theme: &Theme, default: ChromeColor) -> ChromeColor {
     if cell.flags.contains(CellFlags::DIM) {
         dim_toward(fg, bg, DIM_BLEND)
     } else {
+        // When: no `DIM` flag — normal intensity, so the resolved foreground
+        // is returned unblended.
         fg
     }
 }
@@ -7285,11 +7698,15 @@ fn emit_inline_image_instances(
     for placement in allocation_order {
         let image = placement.image;
         if image.width == 0 || image.height == 0 || image.bgra.is_empty() {
+            // When: a dimension is 0 or `bgra` is empty — a failed or pending
+            // decode, which has no pixels to pack into the atlas.
             continue;
         }
         let x = placement.origin_x + image.col as f32 * cell_w;
         let y = placement.origin_y + image.row as f32 * cell_h;
         if x >= sw || y >= sh || x + image.width as f32 <= 0.0 || y + image.height as f32 <= 0.0 {
+            // When: `x >= sw || y >= sh` or the rect ends at or before the
+            // origin — wholly off-surface, so no draw could sample it.
             continue;
         }
         let key = sonicterm_types::glyph_key::GlyphKey {
@@ -7313,6 +7730,8 @@ fn emit_inline_image_instances(
                 }
             })
         else {
+            // When: `get_or_insert_lazy_without_eviction` is None — the image
+            // does not fit the bounded atlas; older ones are dropped first.
             skipped += 1;
             continue;
         };
@@ -7354,6 +7773,8 @@ fn push_underline_quads(
     color: [f32; 4],
 ) {
     if w <= 0.0 {
+        // When: `w <= 0.0` — an empty or inverted span, which would emit a
+        // quad with no area.
         return;
     }
     let bottom_y = y + cell_h - thickness;
@@ -7403,7 +7824,9 @@ fn push_underline_quads(
             let mut up = true;
             while sx < x + w {
                 let ex = (sx + step).min(x + w);
+                // When: up flips once per segment, so each curl stroke starts where the previous ended and the row reads as one wave, not dashes.
                 let sy = if up { mid_y + amp } else { mid_y - amp };
+                // When: up drives the end point to the opposite side of mid_y, giving this segment the inverse slope of its neighbour.
                 let ey = if up { mid_y - amp } else { mid_y + amp };
                 push_line_segment_px(out, sx, sy, ex, ey, thickness, sw, sh, color);
                 sx = ex;
@@ -7465,8 +7888,12 @@ pub fn cell_bg_rgba(cell: &Cell, theme: &Theme) -> Option<[f32; 4]> {
         let default_fg = hex_to_chrome_color(theme.colors.foreground.0.as_str());
         color_to_chrome(cell.fg, theme, default_fg)
     } else {
+        // When: INVERSE is clear, so the cell keeps its own bg and the glyph keeps fg; swapping them here too would cancel out reverse-video runs.
         match cell.bg {
-            Color::Default => return None,
+            Color::Default => {
+                // When: Color::Default defers to the surface LoadOp::Clear that already covers this cell, so blank regions cost zero quad instances.
+                return None;
+            }
             bg => color_to_chrome(bg, theme, ChromeColor::rgb(0, 0, 0)),
         }
     };
@@ -7545,6 +7972,7 @@ pub fn emit_cell_bg_quads_clipped(
     let max_cols = ((pane_rect.w / cell_w).floor() as i32).clamp(0, i32::from(grid.cols)) as u16;
     let max_rows = ((pane_rect.h / cell_h).floor() as i32).clamp(0, i32::from(grid.rows)) as u16;
     if max_cols == 0 || max_rows == 0 {
+        // When: max_cols or max_rows floors to zero, the pane tile cannot hold one whole cell; emitting anyway would paint bg into the neighbour pane.
         return;
     }
     // build this pane's snapped-edge cache once. Per the
@@ -7619,12 +8047,15 @@ pub fn build_snapped_cell_x(origin_x: f32, cell_w: f32, cols: u16) -> Vec<f32> {
 #[must_use]
 pub fn pixel_to_local_col(px: f32, edges: &[f32], cols: u16) -> Option<u16> {
     if cols == 0 || edges.len() < 2 {
+        // When: cols is zero or edges is malformed (len < 2), the pane has no addressable cell, so no pixel can resolve to a column.
         return None;
     }
     if px < edges[0] {
+        // When: px sits left of edges[0], it lands in the window padding rather than the grid, so no column owns it.
         return None;
     }
     if px >= edges[cols as usize] {
+        // When: px reaches edges[cols], it is past the grid's right edge in trailing padding; the half-open buckets end at that exact value.
         return None;
     }
     // Linear scan: half-open buckets edges[i] <= px < edges[i+1].
@@ -7634,6 +8065,7 @@ pub fn pixel_to_local_col(px: f32, edges: &[f32], cols: u16) -> Option<u16> {
     // input is monotone non-decreasing by construction.
     for i in 0..cols as usize {
         if px < edges[i + 1] {
+            // When: px falls under edges[i + 1], bucket i contains it; a boundary px resolves to the right-hand cell, matching the renderer's draw bias.
             return Some(i as u16);
         }
     }
@@ -7665,6 +8097,7 @@ pub fn emit_cell_bg_quads_for_row(
     {
         let row_abs = view_top_abs + r as u64;
         let Some(row) = grid.row_at_abs(row_abs) else {
+            // When: row_at_abs finds no row for row_abs, that absolute line has aged out of scrollback, so this viewport row has no cells to shade.
             return;
         };
         // Run-length encode adjacent same-bg cells into one quad.
@@ -7680,11 +8113,13 @@ pub fn emit_cell_bg_quads_for_row(
             |start: u16, end_exclusive: u16, color: [f32; 4], out: &mut Vec<QuadInstance>| {
                 let clipped_end = end_exclusive.min(max_cols);
                 if clipped_end <= start {
+                    // When: max_cols pulls clipped_end back to or before start, the run lies outside the pane tile and would push a zero-width quad.
                     return;
                 }
                 let (x, w) = if raw_fallback {
                     (pad + f32::from(start) * cell_w, f32::from(clipped_end - start) * cell_w)
                 } else {
+                    // When: raw_fallback is off, the run takes its edges from the shared snapped cache so bg meets the glyph cells exactly at fractional DPI.
                     let lo = snapped_cell_x[start as usize];
                     let hi = snapped_cell_x[clipped_end as usize];
                     (lo, hi - lo)
@@ -7696,6 +8131,7 @@ pub fn emit_cell_bg_quads_for_row(
             let bg = cell_bg_rgba(cell, theme);
             match (run_color, bg) {
                 (Some(prev), Some(cur)) if prev == cur => {
+                    // When: cur repeats prev, so the cell joins the open run and an 80-column fill stays one quad instead of eighty.
                     // extend run
                 }
                 (Some(prev), _) => {
@@ -7713,7 +8149,9 @@ pub fn emit_cell_bg_quads_for_row(
                     run_start = Some(col);
                     run_color = bg;
                 }
-                (None, None) => {}
+                (None, None) => {
+                    // When: neither run_color nor bg is set, the cell is default-bg with no run open; LoadOp::Clear already covers it.
+                }
             }
             col = col.saturating_add(1);
         }
@@ -7748,6 +8186,7 @@ fn indexed(i: u8, theme: &Theme) -> Option<ChromeColor> {
             let r = v / 36;
             let g = (v / 6) % 6;
             let b = v % 6;
+            // When: c is nonzero, the xterm 6x6x6 cube spaces levels at 55 + 40c rather than evenly, so 256-color ramps match other terminals.
             let to8bit = |c: u8| if c == 0 { 0 } else { c * 40 + 55 };
             Some(ChromeColor::rgb(to8bit(r), to8bit(g), to8bit(b)))
         }
@@ -7796,6 +8235,7 @@ pub fn collect_hyperlink_runs(grid: &Grid) -> Vec<(u16, u16, u16)> {
         let mut last_col: u16 = 0;
         for (col, cell) in row.iter().enumerate() {
             if cell.flags.contains(CellFlags::WIDE_CONT) {
+                // When: WIDE_CONT marks the trailing half of a wide cell, which inherits the lead cell's hyperlink, so it extends the run instead of breaking it.
                 if start.is_some() {
                     last_col = col as u16;
                 }
@@ -7819,7 +8259,9 @@ pub fn collect_hyperlink_runs(grid: &Grid) -> Vec<(u16, u16, u16)> {
                     }
                     current = None;
                 }
-                (None, None) => {}
+                (None, None) => {
+                    // When: the cell carries no hyperlink and current is unset, there is no run to open or close, so the walk just advances.
+                }
             }
         }
         if let (Some(s), Some(_)) = (start, current) {
@@ -7879,6 +8321,7 @@ pub fn selection_quad_rects(
     snapped_cell_x: &[f32],
 ) -> Vec<(f32, f32, f32, f32)> {
     if sel.is_empty() {
+        // When: sel covers no cells, returning an empty vec drops the previous frame's highlight rather than leaving a stale rect on screen.
         return Vec::new();
     }
     let (a, b) = sel.normalized();
@@ -7897,16 +8340,19 @@ pub fn selection_quad_rects(
     // column tests still compare against the true `a.0`/`b.0` (which may
     // sit off-screen), so partial first/last rows render correctly.
     if rows == 0 {
+        // When: rows is zero the viewport has no line to highlight, and `rows as u64 - 1` below would underflow into a bogus bottom bound.
         return out;
     }
     let view_bottom_abs = view_top_abs + (rows as u64 - 1);
     let first_abs = a.0.max(view_top_abs);
     let last_abs = b.0.min(view_bottom_abs);
     if first_abs > last_abs {
+        // When: first_abs passes last_abs, no absolute selection row intersects the viewport, so a selection deep in scrollback costs no per-row walk.
         return out; // selection entirely above or below the viewport
     }
     for abs_r in first_abs..=last_abs {
         let vr = (abs_r - view_top_abs) as u16;
+        // When: abs_r is past a.0 the row starts mid-selection, so col_a falls back to 0 and the highlight spans from the left edge.
         let col_a = if abs_r == a.0 { a.1 } else { 0 };
         // Note: do NOT clamp `col_b` to `cols - 1` here. The selection may
         // legitimately reach the grid's last column, and the per-pane clip
@@ -7914,18 +8360,24 @@ pub fn selection_quad_rects(
         // shrink the selection on the last row when the user dragged past
         // the rightmost cell — which is precisely the path that hides
         // bugs like the split-pane bleed-through.
+
+        // When: abs_r sits before b.0 the row ends mid-selection, so col_b runs to the last column and the highlight reads as continuous.
         let col_b = if abs_r == b.0 { b.1 } else { cols.saturating_sub(1) };
         if col_b < col_a {
+            // When: col_b lands left of col_a the row holds no selected span, and `end_exclusive - col_a` would wrap on u16.
             continue;
         }
         let end_exclusive = col_b.saturating_add(1);
         let (x, w) = if raw_fallback {
             (origin_x + f32::from(col_a) * cell_w, f32::from(end_exclusive - col_a) * cell_w)
         } else {
+            // When: raw_fallback is off, the rect takes its edges from the shared snapped cache so selection meets the glyph cells exactly at fractional DPI.
+
             // Clamp the right edge to the cache bounds (`cols + 1`); a
             // selection that touches col `cols - 1` reads `snapped[cols]`.
             let cache_end = end_exclusive.min((snapped_cell_x.len() - 1) as u16);
             if cache_end <= col_a {
+                // When: the cache clamp pulls cache_end back to or before col_a, the row's span falls outside the cached edges and would be zero-width.
                 continue;
             }
             let lo = snapped_cell_x[col_a as usize];
@@ -7965,6 +8417,7 @@ pub fn clip_rect_to_pane(
     if clipped_w > 0.0 && clipped_h > 0.0 {
         Some((clipped_x, clipped_y, clipped_w, clipped_h))
     } else {
+        // When: clipped_w or clipped_h collapses to zero, the rect lies wholly outside the pane; returning nothing keeps it out of the neighbour's tile.
         None
     }
 }
