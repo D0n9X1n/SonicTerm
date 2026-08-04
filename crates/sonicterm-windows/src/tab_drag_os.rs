@@ -164,7 +164,7 @@ impl OsTabDragBackend for WinOsTabDragBackend {
         }
         // When: only `DRAGDROP_S_DROP` completed a native drop; every other HRESULT retains the
         // source tab, while a completed drop is classified by its final effect.
-        let outcome = if outcome.hr != windows::Win32::System::Ole::DRAGDROP_S_DROP {
+        let outcome = if outcome.hr != windows::Win32::Foundation::DRAGDROP_S_DROP {
             DragOutcome::Cancelled
         } else {
             match outcome.effect {

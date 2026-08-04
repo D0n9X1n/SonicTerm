@@ -85,7 +85,7 @@ fn ole_drag_paths_reject_missing_initialization_and_empty_payloads() {
     assert!(OLE.contains("if payload_json.is_empty()"));
     assert!(OLE.contains("if len == 0"));
     assert!(TAB_DRAG.contains("let outcome ="));
-    assert!(TAB_DRAG.contains("if outcome.hr != windows::Win32::System::Ole::DRAGDROP_S_DROP"));
+    assert!(TAB_DRAG.contains("if outcome.hr != windows::Win32::Foundation::DRAGDROP_S_DROP"));
     assert!(TAB_DRAG.contains("DragOutcome::Cancelled"));
     assert!(!TAB_DRAG.contains("let effect ="));
     assert!(TAB_DRAG.contains("if registered"));
