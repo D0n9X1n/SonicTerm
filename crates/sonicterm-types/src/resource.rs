@@ -2,7 +2,7 @@
 //!
 //! Mutable accounting and reservation tokens live in `sonicterm-resource`.
 
-use enum_map::{Enum, EnumMap};
+use enum_map::{Array, Enum, EnumMap};
 use std::{fmt, num::NonZeroU64, time::Instant};
 
 /// Stable in-process identity for a resource owner.
@@ -139,6 +139,20 @@ pub enum ClassCoverage {
 }
 
 impl ResourceClass {
+    /// Number of variants in this enum.
+    ///
+    /// Derived from the enum-map array representation the `Enum` derive
+    /// generates, so it cannot drift from the variant list: adding a variant
+    /// widens the array and this constant follows. Callers that walk every
+    /// class pair it with [`Enum::from_usize`].
+    ///
+    /// This exists because the class-coverage tests assert exhaustiveness by
+    /// index rather than by matching, and [`ResourceClass`] is
+    /// `#[non_exhaustive]` — a hardcoded count would silently stop covering
+    /// the classes added after it was written, which is the failure those
+    /// tests exist to catch.
+    pub const COUNT: usize = <<Self as Enum>::Array<()> as Array>::LENGTH;
+
     /// This class's coverage decision.
     ///
     /// Exhaustive by construction: adding a variant to [`ResourceClass`] fails

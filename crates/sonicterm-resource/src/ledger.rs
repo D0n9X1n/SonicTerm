@@ -604,7 +604,7 @@ impl Ledger {
         let mut process_class_bytes = EnumMap::default();
         let mut process_class_items = EnumMap::default();
         let mut class_epochs = EnumMap::default();
-        for index in 0..ResourceClass::LENGTH {
+        for index in 0..ResourceClass::COUNT {
             let class = ResourceClass::from_usize(index);
             let class_usage = self.classes[class].lock();
             process_class_bytes[class] = class_usage.bytes;

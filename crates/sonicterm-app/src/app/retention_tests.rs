@@ -500,7 +500,7 @@ fn the_coverage_table_agrees_with_the_charge_sites() {
     // reporting it after it stops being true — which is what let two classes
     // stay recorded as charged while nothing read the seam that would have
     // charged them, and then let a later derivation inherit the same claim.
-    for index in 0..ResourceClass::LENGTH {
+    for index in 0..ResourceClass::COUNT {
         let class = ResourceClass::from_usize(index);
         if class.coverage() == ClassCoverage::Charged {
             assert!(
