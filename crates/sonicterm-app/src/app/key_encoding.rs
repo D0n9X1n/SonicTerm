@@ -1,7 +1,5 @@
 //! Keyboard event → byte encoding for the PTY side, plus
 //! `KeyName` mapping used by the keymap parser.
-//!
-//! Extracted from `app/mod.rs` from the monolithic app module.
 
 use sonicterm_cfg::keymap::ScrollAction;
 use winit::{
@@ -26,6 +24,8 @@ pub(super) fn encode_key(
 /// modifier.
 fn cursor_seq(app_cursor: bool, mods: ModifiersState, final_byte: u8) -> Vec<u8> {
     if let Some(modifier) = xterm_modifier_param(mods) {
+        // When: xterm_modifier_param yields a modifier the parameterized CSI
+        // form is used, so DECCKM's SS3 introducer is bypassed.
         let mut out = format!("\x1b[1;{modifier}").into_bytes();
         out.push(final_byte);
         return out;
@@ -61,48 +61,58 @@ pub fn encode_logical(
 ) -> Option<Vec<u8>> {
     let ctrl = mods.control_key();
     match key {
-        Key::Named(n) => Some(match n {
-            // Shift+Enter: under the kitty keyboard protocol, encode the
-            // disambiguated CSI-u form (codepoint 13 = Return, modifier 2 =
-            // 1 + Shift bit). Copilot CLI / claude treat this as "insert
-            // newline" rather than "submit". With no kitty flags active we
-            // fall back to the WezTerm-default ESC+CR, which most apps map to
-            // the same intent and is harmless for those that don't.
-            NamedKey::Enter if mods.shift_key() => {
-                if kitty_flags != 0 {
-                    b"\x1b[13;2u".to_vec()
-                } else {
-                    b"\x1b\r".to_vec()
+        Key::Named(n) => {
+            // When: key is a Named variant the bytes come from the named-key
+            // table below rather than the Character or fallback arms.
+            Some(match n {
+                // Shift+Enter: under the kitty keyboard protocol, encode the
+                // disambiguated CSI-u form (codepoint 13 = Return, modifier 2 =
+                // 1 + Shift bit). Copilot CLI / claude treat this as "insert
+                // newline" rather than "submit". With no kitty flags active we
+                // fall back to the WezTerm-default ESC+CR, which most apps map
+                // to the same intent and is harmless for those that don't.
+                NamedKey::Enter if mods.shift_key() => {
+                    if kitty_flags != 0 {
+                        b"\x1b[13;2u".to_vec()
+                    } else {
+                        // When: kitty_flags is zero the legacy ESC+CR is sent,
+                        // which most apps read as the same newline intent.
+                        b"\x1b\r".to_vec()
+                    }
                 }
-            }
-            NamedKey::Enter => b"\r".to_vec(),
-            NamedKey::Backspace => b"\x7f".to_vec(),
-            NamedKey::Tab => b"\t".to_vec(),
-            NamedKey::Escape => b"\x1b".to_vec(),
-            NamedKey::Space => b" ".to_vec(),
-            NamedKey::ArrowUp => cursor_seq(app_cursor, mods, b'A'),
-            NamedKey::ArrowDown => cursor_seq(app_cursor, mods, b'B'),
-            NamedKey::ArrowRight => cursor_seq(app_cursor, mods, b'C'),
-            NamedKey::ArrowLeft => cursor_seq(app_cursor, mods, b'D'),
-            NamedKey::Home => cursor_seq(app_cursor, mods, b'H'),
-            NamedKey::End => cursor_seq(app_cursor, mods, b'F'),
-            NamedKey::PageUp => tilde_seq(5, mods),
-            NamedKey::PageDown => tilde_seq(6, mods),
-            NamedKey::Delete => tilde_seq(3, mods),
-            NamedKey::F1 => encode_function_key(1, mods),
-            NamedKey::F2 => encode_function_key(2, mods),
-            NamedKey::F3 => encode_function_key(3, mods),
-            NamedKey::F4 => encode_function_key(4, mods),
-            NamedKey::F5 => encode_function_key(5, mods),
-            NamedKey::F6 => encode_function_key(6, mods),
-            NamedKey::F7 => encode_function_key(7, mods),
-            NamedKey::F8 => encode_function_key(8, mods),
-            NamedKey::F9 => encode_function_key(9, mods),
-            NamedKey::F10 => encode_function_key(10, mods),
-            NamedKey::F11 => encode_function_key(11, mods),
-            NamedKey::F12 => encode_function_key(12, mods),
-            _ => return None,
-        }),
+                NamedKey::Enter => b"\r".to_vec(),
+                NamedKey::Backspace => b"\x7f".to_vec(),
+                NamedKey::Tab => b"\t".to_vec(),
+                NamedKey::Escape => b"\x1b".to_vec(),
+                NamedKey::Space => b" ".to_vec(),
+                NamedKey::ArrowUp => cursor_seq(app_cursor, mods, b'A'),
+                NamedKey::ArrowDown => cursor_seq(app_cursor, mods, b'B'),
+                NamedKey::ArrowRight => cursor_seq(app_cursor, mods, b'C'),
+                NamedKey::ArrowLeft => cursor_seq(app_cursor, mods, b'D'),
+                NamedKey::Home => cursor_seq(app_cursor, mods, b'H'),
+                NamedKey::End => cursor_seq(app_cursor, mods, b'F'),
+                NamedKey::PageUp => tilde_seq(5, mods),
+                NamedKey::PageDown => tilde_seq(6, mods),
+                NamedKey::Delete => tilde_seq(3, mods),
+                NamedKey::F1 => encode_function_key(1, mods),
+                NamedKey::F2 => encode_function_key(2, mods),
+                NamedKey::F3 => encode_function_key(3, mods),
+                NamedKey::F4 => encode_function_key(4, mods),
+                NamedKey::F5 => encode_function_key(5, mods),
+                NamedKey::F6 => encode_function_key(6, mods),
+                NamedKey::F7 => encode_function_key(7, mods),
+                NamedKey::F8 => encode_function_key(8, mods),
+                NamedKey::F9 => encode_function_key(9, mods),
+                NamedKey::F10 => encode_function_key(10, mods),
+                NamedKey::F11 => encode_function_key(11, mods),
+                NamedKey::F12 => encode_function_key(12, mods),
+                _ => {
+                    // When: n is a named key with no entry above there is no
+                    // byte sequence to send, so nothing reaches the PTY.
+                    return None;
+                }
+            })
+        }
         Key::Character(s) => {
             if ctrl {
                 let mut bytes = Vec::with_capacity(1);
@@ -111,16 +121,22 @@ pub fn encode_logical(
                     if lower.is_ascii_lowercase() {
                         bytes.push((lower as u8) - b'a' + 1);
                     } else {
+                        // When: lower is not an ASCII letter there is no control
+                        // code to fold to, so the character passes through whole.
                         bytes.extend(ch.to_string().as_bytes());
                     }
                 }
                 Some(bytes)
             } else if mods.alt_key() {
+                // When: mods holds alt the bytes are prefixed with ESC, the meta
+                // encoding terminals expect for an alt chord.
                 let mut bytes = Vec::with_capacity(1 + s.len());
                 bytes.push(0x1b);
                 bytes.extend_from_slice(s.as_bytes());
                 Some(bytes)
             } else {
+                // When: neither ctrl nor mods alt is held the character's own
+                // UTF-8 bytes reach the PTY unchanged.
                 Some(s.as_bytes().to_vec())
             }
         }
@@ -200,6 +216,8 @@ fn xterm_modifier_param(mods: ModifiersState) -> Option<u8> {
     if bitmask == 0 {
         None
     } else {
+        // When: bitmask has any bit set the parameter is bitmask + 1, the
+        // 1-based form xterm, WezTerm, and tmux all decode.
         Some(bitmask + 1)
     }
 }
@@ -208,6 +226,11 @@ pub(super) fn key_event_to_string(event: &KeyEvent, mods: ModifiersState) -> Opt
     key_to_string(&event.logical_key, mods)
 }
 
+/// Canonical chord string for a key press, such as `ctrl+shift+p`.
+///
+/// Returns the first name [`key_candidates`] offers, which prefers the
+/// lower-case or `/`-for-`?` alias, so a binding written either way matches.
+/// `None` when the key has no keymap name.
 #[doc(hidden)]
 pub fn key_to_string(key: &Key, mods: ModifiersState) -> Option<String> {
     let mut candidates = key_candidates(key)?;
@@ -216,9 +239,18 @@ pub fn key_to_string(key: &Key, mods: ModifiersState) -> Option<String> {
     Some(chord_string(candidate.as_str(), mods))
 }
 
+/// Every chord string a key press can match, alias first.
+///
+/// The keymap parser tries each in order, so a binding written as `?` and one
+/// written as `/` both resolve to the same press. Empty when the key has no
+/// keymap name.
 #[doc(hidden)]
 pub fn key_to_strings(key: &Key, mods: ModifiersState) -> Vec<String> {
-    let Some(mut candidates) = key_candidates(key) else { return Vec::new() };
+    let Some(mut candidates) = key_candidates(key) else {
+        // When: key_candidates yields nothing the key has no keymap name, so
+        // no chord string can match it.
+        return Vec::new();
+    };
     candidates.dedup();
     candidates.into_iter().map(|candidate| chord_string(candidate.as_str(), mods)).collect()
 }
@@ -248,6 +280,8 @@ fn key_candidates(key: &Key) -> Option<Vec<KeyName>> {
         if s == "?" {
             candidates.push(KeyName::Static("/"));
         } else if s.chars().count() == 1 {
+            // When: s is a single character its lower-case form is offered
+            // first, so a binding written in either case still matches.
             let lower = s.to_ascii_lowercase();
             if lower != *s {
                 candidates.push(KeyName::Owned(lower));
@@ -258,37 +292,52 @@ fn key_candidates(key: &Key) -> Option<Vec<KeyName>> {
     Some(candidates)
 }
 
-#[doc(hidden)]
+/// Map a key to the name the keymap parser spells it with, such as `enter`.
+///
+/// Named keys resolve through a fixed table; character keys carry their own
+/// text. `None` for a named key outside that table and for dead or
+/// unidentified keys, which have no keymap spelling.
 #[doc(hidden)]
 pub fn key_name(key: &Key) -> Option<KeyName> {
     Some(match key {
-        Key::Named(n) => KeyName::Static(match n {
-            NamedKey::Enter => "enter",
-            NamedKey::Backspace => "backspace",
-            NamedKey::Tab => "tab",
-            NamedKey::Escape => "escape",
-            NamedKey::Space => "space",
-            NamedKey::ArrowUp => "up",
-            NamedKey::ArrowDown => "down",
-            NamedKey::ArrowRight => "right",
-            NamedKey::ArrowLeft => "left",
-            NamedKey::Home => "home",
-            NamedKey::End => "end",
-            NamedKey::PageUp => "pageup",
-            NamedKey::PageDown => "pagedown",
-            NamedKey::Delete => "delete",
-            NamedKey::F1 => "f1",
-            NamedKey::F2 => "f2",
-            NamedKey::F3 => "f3",
-            NamedKey::F4 => "f4",
-            _ => return None,
-        }),
+        Key::Named(n) => {
+            // When: key is a Named variant the spelling comes from the static
+            // table, so no allocation is needed for it.
+            KeyName::Static(match n {
+                NamedKey::Enter => "enter",
+                NamedKey::Backspace => "backspace",
+                NamedKey::Tab => "tab",
+                NamedKey::Escape => "escape",
+                NamedKey::Space => "space",
+                NamedKey::ArrowUp => "up",
+                NamedKey::ArrowDown => "down",
+                NamedKey::ArrowRight => "right",
+                NamedKey::ArrowLeft => "left",
+                NamedKey::Home => "home",
+                NamedKey::End => "end",
+                NamedKey::PageUp => "pageup",
+                NamedKey::PageDown => "pagedown",
+                NamedKey::Delete => "delete",
+                NamedKey::F1 => "f1",
+                NamedKey::F2 => "f2",
+                NamedKey::F3 => "f3",
+                NamedKey::F4 => "f4",
+                _ => {
+                    // When: n is outside the table above it has no keymap
+                    // spelling, so it cannot be bound.
+                    return None;
+                }
+            })
+        }
         Key::Character(s) => KeyName::Owned(s.to_string()),
-        _ => return None,
+        _ => {
+            // When: key is neither Named nor Character it is a dead or
+            // unidentified key, which carries no keymap spelling.
+            return None;
+        }
     })
 }
 
-#[doc(hidden)]
 #[doc(hidden)]
 #[derive(PartialEq, Eq)]
 pub enum KeyName {
@@ -297,6 +346,8 @@ pub enum KeyName {
 }
 
 impl KeyName {
+    /// Borrow the name as a string slice regardless of which variant holds it,
+    /// so callers can compare or format without matching first.
     pub fn as_str(&self) -> &str {
         match self {
             Self::Static(s) => s,

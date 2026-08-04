@@ -20,7 +20,13 @@ const DWMSBT_TABBEDWINDOW: u32 = 4;
 
 /// Apply the configured Windows compositor backdrop. Errors are swallowed —
 /// neither is critical; the terminal renders fine on an opaque BG.
-pub fn apply_backdrop(hwnd: HWND, backdrop: BackdropKind) {
+///
+/// # Safety
+///
+/// `hwnd` must name a live top-level window for the duration of this call.
+// SAFETY: callers must provide the live HWND required by the DWM and
+// raw-window-handle operations below.
+pub unsafe fn apply_backdrop(hwnd: HWND, backdrop: BackdropKind) {
     let result = match backdrop {
         BackdropKind::Opaque => Ok("opaque"),
         BackdropKind::Mica => apply_mica(hwnd),
@@ -55,9 +61,8 @@ fn apply_tabbed(hwnd: HWND) -> Result<&'static str, String> {
 }
 
 fn set_system_backdrop(hwnd: HWND, backdrop_type: u32) -> windows_core::Result<()> {
-    // SAFETY: `hwnd` is a live top-level window handle from winit, and the
-    // attribute payload is a pointer to a valid `u32` for the duration of the
-    // synchronous DWM call.
+    // SAFETY: the unsafe `apply_backdrop` contract guarantees a live HWND, and
+    // the attribute payload is a valid `u32` for this synchronous DWM call.
     unsafe {
         DwmSetWindowAttribute(
             hwnd,
@@ -70,10 +75,9 @@ fn set_system_backdrop(hwnd: HWND, backdrop_type: u32) -> windows_core::Result<(
 
 fn make_raw_handle(hwnd: HWND) -> RawWindowHandle {
     let h = std::num::NonZeroIsize::new(hwnd.0 as isize)
-        // PANIC: safe — `make_raw_handle` is called only from `apply_backdrop`
-        // (above) after winit has handed us a valid HWND for an existing
-        // window. A null HWND would mean winit lied; that's a Win32 / winit
-        // contract bug, not a recoverable runtime condition.
+        // PANIC: the unsafe caller contract guarantees a live, non-null HWND;
+        // a null value violates that contract rather than representing a
+        // recoverable backdrop failure.
         .expect("HWND is non-null when applying backdrop");
     let handle = Win32WindowHandle::new(h);
     // hinstance is optional for window-vibrancy's purposes.
@@ -88,10 +92,10 @@ struct HandleHolder(RawWindowHandle);
 
 impl HasWindowHandle for HandleHolder {
     fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
-        // SAFETY: `self.0` is a Win32 HWND that remains valid for the
-        // duration of `apply_backdrop`'s synchronous DWM calls — the
-        // caller passes a live HWND from the on_window_ready hook and
-        // we return the borrow only for the lifetime of `&self`.
-        Ok(unsafe { WindowHandle::borrow_raw(self.0) })
+        Ok(
+            // SAFETY: the unsafe constructor contract guarantees the Win32 HWND
+            // is live, and the borrowed handle cannot outlive `self`.
+            unsafe { WindowHandle::borrow_raw(self.0) },
+        )
     }
 }

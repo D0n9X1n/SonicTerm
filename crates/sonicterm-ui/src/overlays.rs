@@ -24,10 +24,9 @@ use crate::ime::ImeState;
 use crate::search::SearchState;
 use crate::tabbar_view::Rect;
 
-// TODO: switch to ui_tokens after merges. Until then the design
-// tokens Round 1 live here as named constants so that
-// `render.rs` and the integration tests can reference them by name and
-// stay self-documenting.
+// Overlay design tokens live here as named constants so the renderer and the
+// integration tests reference the same values by name and stay
+// self-documenting.
 
 /// Ideal modal width in physical pixels (Raycast-style redesign).
 pub const PALETTE_WIDTH: f32 = 520.0;
@@ -195,6 +194,8 @@ impl PaletteLayout {
         scale: f32,
     ) -> Option<PaletteLayout> {
         if !palette.is_open() {
+            // When: palette is_open reports closed, so there is no modal to
+            // place and the renderer draws nothing.
             return None;
         }
         // DPI scale for SIZE terms only. Window-relative POSITION terms
@@ -250,8 +251,13 @@ impl PaletteLayout {
         let list_bottom = footer.y - panel_padding;
         let avail = (list_bottom - list_top).max(0.0);
         let row_stride = row_height + row_gap;
-        let max_rows =
-            if row_stride > 0.0 { ((avail + row_gap) / row_stride).floor() as usize } else { 0 };
+        let max_rows = if row_stride > 0.0 {
+            ((avail + row_gap) / row_stride).floor() as usize
+        } else {
+            // When: row_stride collapses to zero because row height and gap are
+            // both zero, so no row fits and the division would be undefined.
+            0
+        };
 
         // Publish viewport size to the state so the next key press can
         // clamp scroll_offset correctly.
@@ -287,6 +293,8 @@ impl PaletteLayout {
                         row_shortcuts.push(None);
                         row_swatches.push(choice.hex.clone());
                     } else {
+                        // When: color_choices has no entry at item_index, so
+                        // the row stays blank instead of shifting the rest.
                         row_labels.push(String::new());
                         row_shortcuts.push(None);
                         row_swatches.push(None);
@@ -299,6 +307,8 @@ impl PaletteLayout {
                             palette.shortcut_hint_for_visible_index(item_index).map(str::to_string),
                         );
                     } else {
+                        // When: visible has no action at item_index, so the row
+                        // renders empty and keeps the list aligned.
                         row_labels.push(String::new());
                         row_shortcuts.push(None);
                     }
@@ -309,11 +319,15 @@ impl PaletteLayout {
         let selected_row = if total > 0 && selected >= window_start && selected < window_end {
             Some(selected - window_start)
         } else {
+            // When: selected falls outside the window_start..window_end slice,
+            // so no painted row carries the highlight.
             None
         };
         let query_label = if palette.mode() == CommandPaletteMode::TabColor {
             format!("Color for {}▏", palette.tab_color_title())
         } else {
+            // When: mode is any palette other than TabColor, so the row shows
+            // the typed query with its caret rather than a tab title.
             command_palette_query_label(palette, "")
         };
         let query_placeholder =
@@ -326,19 +340,27 @@ impl PaletteLayout {
                     CommandPaletteMode::TabColor => String::new(),
                 })
             } else {
+                // When: palette query already holds text, or mode is TabColor,
+                // so a placeholder would cover what the user typed.
                 None
             };
 
         let empty_label = if palette.mode() == CommandPaletteMode::RenameTab {
             None
         } else if total == 0 && !palette.query().is_empty() {
+            // When: total counts no match while palette query holds text, so
+            // the list explains the miss instead of rendering empty.
             Some(NO_MATCHES.to_string())
         } else {
+            // When: total counts at least one match, or the query is still
+            // empty, so the list speaks for itself.
             None
         };
         let empty_hint = if empty_label.is_some() {
             Some(String::from("Try settings, split, font, shortcut"))
         } else {
+            // When: empty_label is absent, so there is no empty state for a
+            // hint to elaborate on.
             None
         };
 
@@ -400,6 +422,8 @@ pub struct NotificationBubbleLayout {
 }
 
 impl NotificationBubbleLayout {
+    /// Place a notification bubble on `row` of the bottom-right stack,
+    /// reserving a square close button at its right edge.
     #[must_use]
     pub fn compute(
         window_w: f32,
@@ -438,6 +462,9 @@ impl SearchBarLayout {
         Self::compute_at_row(window_w, window_h, content_w, 0, scale)
     }
 
+    /// Place the bar on a stack row, where row `0` is the topmost slot and
+    /// each later row sits one bar height plus a margin below it. Rows above
+    /// `3` clamp so a deep stack cannot walk off the window.
     #[must_use]
     pub fn compute_at_row(
         window_w: f32,
@@ -473,6 +500,9 @@ impl SearchBarLayout {
     }
 }
 
+/// Render the palette query as one string with the caret glyph at the cursor
+/// and any `preedit` text inserted there. A cursor that lands mid-character
+/// falls back to the end of the query so the string stays valid UTF-8.
 #[must_use]
 pub fn command_palette_query_label(palette: &CommandPalette, preedit: &str) -> String {
     let query = palette.query();
@@ -488,6 +518,9 @@ pub fn command_palette_query_label(palette: &CommandPalette, preedit: &str) -> S
     label
 }
 
+/// Portion of the palette query that precedes the caret, including any
+/// `preedit` text. The renderer measures this string to position the block
+/// caret, so it must be built the same way as the full query label.
 #[must_use]
 pub fn command_palette_query_caret_prefix(palette: &CommandPalette, preedit: &str) -> String {
     let query = palette.query();
@@ -529,8 +562,8 @@ pub fn search_bar_label(search: &SearchState, preedit: &str) -> String {
 /// Measuring this string's width gives the x-offset of the renderer-owned
 /// block before the committed suffix and match counter.
 ///
-/// Both the block-cursor renderer ([`sonicterm-gpu`]) and the OS candidate
-/// area ([`sonicterm-app`]) measure this same string so they agree on the
+/// Both the block-cursor renderer (`sonicterm-gpu`) and the OS candidate
+/// area (`sonicterm-app`) measure this same string so they agree on the
 /// caret position regardless of how long the suffix grows.
 #[must_use]
 pub fn search_query_caret_prefix(search: &SearchState, preedit: &str) -> String {
@@ -568,6 +601,8 @@ impl ImePreeditLayout {
     ) -> Option<ImePreeditLayout> {
         let text = ime.preedit();
         if text.is_empty() {
+            // When: ime holds no in-flight preedit text, so there is no
+            // composition box to draw under the cursor.
             return None;
         }
         // SIZE sub-pads scale; cursor_x/cursor_y and the window clamps are

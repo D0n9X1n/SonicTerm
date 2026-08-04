@@ -7,8 +7,8 @@
 //! a [`WindowKeyRegistry`] to assign a stable monotonically-increasing
 //! `u64` to every distinct `winit::WindowId` on first sight.
 //!
-//! Introduced at M6a-expand-1 as the boundary layer for the reducer-bound
-//! refactor that lands in M6a-expand-2.
+//! Keeping the registry at this boundary lets reducers use stable identifiers
+//! without taking a dependency on winit's opaque window handles.
 
 use std::collections::HashMap;
 
@@ -80,6 +80,7 @@ impl WindowKeyRegistry {
     /// allocate a new monotonically-increasing key on first sight.
     pub fn intern(&mut self, id: WindowId) -> WindowKey {
         if let Some(k) = self.map.get(&id) {
+            // When: `id` was interned earlier, reuse its stable key rather than minting a second identity.
             return *k;
         }
         let key = WindowKey::new(self.next);

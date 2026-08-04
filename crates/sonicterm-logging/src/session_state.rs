@@ -119,7 +119,13 @@ impl SessionMarker {
         let mut state = None;
 
         for line in text.lines() {
-            let Some((key, value)) = line.split_once('=') else { continue };
+            let Some((key, value)) = line.split_once('=') else {
+                // When: the line carries no `=`, so split_once yields no
+                // key/value pair and there is no field to record.
+                continue;
+            };
+            // When: key names no field this build knows, so the value is
+            // ignored and a marker written by a newer version still parses.
             match key {
                 "id" => id = Some(value.to_string()),
                 "pid" => pid = value.parse::<u32>().ok(),
@@ -140,6 +146,8 @@ impl SessionMarker {
             || !valid_platform(&platform)
             || chrono::DateTime::parse_from_rfc3339(&started_at).is_err()
         {
+            // When: any of id, version, platform, or started_at fails its
+            // shape check, the marker is unusable and classifies as corrupt.
             return None;
         }
 
@@ -253,8 +261,12 @@ pub fn session_dir(log_dir: &Path) -> PathBuf {
 ///
 /// Returns an [`io::Error`] when the session directory cannot be created or
 /// the marker cannot be written.
+// Ordering: ARM_SEQUENCE uses Relaxed because it only needs distinct values per
+// call, not ordering against any other memory.
 pub fn arm(log_dir: &Path, version: &str) -> io::Result<ArmedSession> {
     if !valid_version(version) {
+        // When: valid_version rejects the caller's string, arming would write a
+        // marker that cannot be parsed back and would classify as corrupt.
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "version must be a bounded release-style ASCII identifier",
@@ -324,6 +336,8 @@ fn write_atomically(path: &Path, contents: &str) -> io::Result<()> {
     match crate::path::replace_file(&temp, path) {
         Ok(()) => Ok(()),
         Err(error) => {
+            // When: replace_file fails, the temp file is removed so a failed
+            // write leaves no partial marker behind to be read next launch.
             let _ = std::fs::remove_file(&temp);
             Err(error)
         }
@@ -342,6 +356,8 @@ fn write_atomically(path: &Path, contents: &str) -> io::Result<()> {
 pub fn scan_prior_sessions(log_dir: &Path, current: Option<&str>) -> Vec<PriorSession> {
     let dir = session_dir(log_dir);
     let Ok(entries) = std::fs::read_dir(&dir) else {
+        // When: read_dir cannot open dir, no session ever armed here, so there
+        // is nothing to report rather than a finding to invent.
         return Vec::new();
     };
 
@@ -349,28 +365,41 @@ pub fn scan_prior_sessions(log_dir: &Path, current: Option<&str>) -> Vec<PriorSe
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().is_some_and(|extension| extension == "tmp") {
+            // When: the extension is tmp, a write was interrupted partway, so
+            // the leftover names a session that never completed its marker.
             if temp_marker_pid(&path).is_some_and(process_is_alive) {
+                // When: temp_marker_pid names a live process, the write is
+                // still in flight rather than abandoned.
                 continue;
             }
             found.push(PriorSession::Corrupt { path });
             continue;
         }
         if path.extension().is_none_or(|extension| extension != "marker") {
+            // When: the extension is not marker, the file is not one this
+            // module wrote and must not be reported as a session.
             continue;
         }
         let Ok(text) = std::fs::read_to_string(&path) else {
+            // When: read_to_string fails, the marker exists but cannot be read,
+            // which is itself evidence rather than a reason to stay silent.
             found.push(PriorSession::Corrupt { path });
             continue;
         };
         let Some(marker) = SessionMarker::parse(&text) else {
+            // When: parse rejects the text, the marker is truncated or damaged,
+            // which is what a kill during startup looks like.
             found.push(PriorSession::Corrupt { path });
             continue;
         };
         if current.is_some_and(|current| current == marker.id) {
+            // When: the marker id is this launch's own current id, reporting it
+            // would make every session report itself.
             continue;
         }
         if marker.state == SessionState::Armed && process_is_alive(marker.pid) {
-            // Running right now, so it has not exited at all.
+            // When: marker.state is Armed and process_is_alive confirms the
+            // pid, so that session is running now rather than one that ended.
             continue;
         }
         found.push(match marker.state {
@@ -417,13 +446,22 @@ fn process_is_alive(pid: u32) -> bool {
     // process ever has id 0 on the platforms SonicTerm ships on, so a zero
     // here means a corrupt or synthetic marker: absent, not alive.
     if pid == 0 {
+        // When: pid is zero, kill would address this caller's own process group
+        // and report a corrupt marker as live, hiding the session it names.
         return false;
     }
-    let Ok(pid) = libc::pid_t::try_from(pid) else { return false };
-    // SAFETY: `kill` with signal 0 performs the permission and existence check
-    // without delivering anything. No memory is touched.
-    let result = unsafe { libc::kill(pid, 0) };
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        // When: pid does not fit a pid_t, so no process can carry it and the
+        // marker naming it cannot describe a live session.
+        return false;
+    };
+    let result =
+        // SAFETY: `kill` with signal 0 performs the permission and existence
+        // check without delivering anything. No memory is touched.
+        unsafe { libc::kill(pid, 0) };
     if result == 0 {
+        // When: kill reports zero in result, the process exists and this caller
+        // may signal it, so the marker's session is still running.
         return true;
     }
     // EPERM means the process exists but belongs to another user, which is
@@ -446,6 +484,8 @@ fn process_is_alive(pid: u32) -> bool {
     // id 0, so a zero means a corrupt or synthetic marker. Treating it as
     // absent keeps the two platforms classifying such a marker identically.
     if pid == 0 {
+        // When: pid is zero, no real process carries that id, so the marker
+        // holding it is corrupt or synthetic rather than live.
         return false;
     }
 
@@ -454,6 +494,8 @@ fn process_is_alive(pid: u32) -> bool {
     unsafe {
         match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
             Ok(handle) => {
+                // When: OpenProcess yields a handle, the process exists; the
+                // handle is closed at once because only existence was asked.
                 let _ = CloseHandle(handle);
                 true
             }

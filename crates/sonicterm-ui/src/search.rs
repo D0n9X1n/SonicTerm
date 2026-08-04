@@ -73,6 +73,8 @@ pub struct SearchState {
 }
 
 impl SearchState {
+    /// Create an idle search state: empty query, no matches, substring mode,
+    /// case-insensitive, and no pending scroll request.
     pub fn new() -> Self {
         Self::default()
     }
@@ -109,19 +111,31 @@ impl SearchState {
         (start, end)
     }
 
+    /// Caret position within [`Self::query`] as a UTF-8 byte offset, clamped
+    /// into range and moved back onto a character boundary before it is used.
     #[must_use]
     pub fn cursor(&self) -> usize {
         normalize_cursor(&self.query, self.cursor)
     }
 
+    /// Replace the whole query, park the caret at its end, and rescan `grid`.
+    ///
+    /// Focus resets: the rescan goes through [`Self::refresh`], so no match is
+    /// current afterwards and no scroll is requested.
     pub fn set_query(&mut self, query: impl Into<String>, grid: &Grid) {
         self.query = query.into();
         self.cursor = self.query.len();
         self.refresh(grid);
     }
 
+    /// Insert one typed character at the caret and rescan `grid`.
+    ///
+    /// The search field is single-line, so newline input is dropped rather
+    /// than stored; the caret and query are left untouched in that case.
     pub fn input_char(&mut self, ch: char, grid: &Grid) {
         if matches!(ch, '\r' | '\n') {
+            // When: ch matches a line break, which a single-line search field
+            // cannot hold; drop the keystroke instead of inserting it.
             return;
         }
         let cursor = self.cursor();
@@ -130,9 +144,16 @@ impl SearchState {
         self.refresh(grid);
     }
 
+    /// Insert a committed string at the caret and rescan `grid`; the app feeds
+    /// this from IME commit text.
+    ///
+    /// Line breaks are stripped first because the field is single-line; text
+    /// that was only line breaks leaves the query and caret unchanged.
     pub fn input_str(&mut self, text: &str, grid: &Grid) {
         let committed: String = text.chars().filter(|ch| !matches!(ch, '\r' | '\n')).collect();
         if committed.is_empty() {
+            // When: committed held nothing but line breaks, so there is no
+            // text left to insert after filtering.
             return;
         }
         let cursor = self.cursor();
@@ -141,6 +162,11 @@ impl SearchState {
         self.refresh(grid);
     }
 
+    /// Apply one caret movement or deletion to the query, moving the caret and
+    /// rescanning `grid` only when the edit actually changed the text.
+    ///
+    /// Pure caret moves keep the existing matches, so navigation through the
+    /// query does not disturb the highlight set.
     pub fn apply_text_edit(&mut self, edit: TextEdit, grid: &Grid) {
         let outcome = apply_edit(&mut self.query, self.cursor, edit);
         self.cursor = outcome.cursor;
@@ -149,6 +175,8 @@ impl SearchState {
         }
     }
 
+    /// Delete the character before the caret, rescanning `grid` only when that
+    /// removed something.
     pub fn backspace(&mut self, grid: &Grid) {
         self.apply_text_edit(TextEdit::DeleteBackward, grid);
     }
@@ -175,6 +203,8 @@ impl SearchState {
     /// Returns `true` if a rescan happened.
     pub fn maybe_refresh_for_revision(&mut self, grid: &Grid) -> bool {
         if !self.needs_rescan && grid.revision() == self.last_revision {
+            // When: no rescan was forced and grid still reports the revision
+            // already scanned, so the existing matches still describe it.
             return false;
         }
         self.needs_rescan = false;
@@ -196,11 +226,15 @@ impl SearchState {
         self.current = if self.matches.is_empty() {
             None
         } else if let Some(a) = anchor {
+            // When: anchor recorded the focused match from before the rescan;
+            // keep the user on that same entry where it survived.
             if let Some(i) =
                 self.matches.iter().position(|m| m.row == a.row && m.col_start == a.col_start)
             {
                 Some(i)
             } else {
+                // When: the anchored row and col_start no longer appear in
+                // matches, so fall back to the nearest preceding entry.
                 let preceding = self
                     .matches
                     .iter()
@@ -210,12 +244,20 @@ impl SearchState {
                 Some(preceding.unwrap_or(0))
             }
         } else {
+            // When: matches exist but anchor was empty, so nothing was focused
+            // before the rescan and nothing becomes focused now.
             None
         };
         self.update_scroll_request();
         true
     }
 
+    /// Recompute every match against `grid` unconditionally and drop the focus.
+    ///
+    /// Records the scrollback depth, visible height, and revision the scan ran
+    /// against, and clears any earlier regex error. Unlike
+    /// [`Self::maybe_refresh_for_revision`] it does not preserve the focused
+    /// match: `current` and the pending scroll request are both reset.
     pub fn refresh(&mut self, grid: &Grid) {
         self.scrollback_len = grid.scrollback_len() as u32;
         self.visible_rows = grid.rows;
@@ -235,8 +277,14 @@ impl SearchState {
         self.requested_scroll_row = None;
     }
 
+    /// Focus the next match, wrapping past the last one back to the first, and
+    /// request a scroll to the row it lands on.
+    ///
+    /// Starts at the first match when nothing is focused yet.
     pub fn next(&mut self) {
         if self.matches.is_empty() {
+            // When: matches holds nothing to step onto, so clear the focus and
+            // withdraw any pending scroll request.
             self.current = None;
             self.requested_scroll_row = None;
             return;
@@ -248,8 +296,14 @@ impl SearchState {
         self.update_scroll_request();
     }
 
+    /// Focus the previous match, wrapping past the first one back to the last,
+    /// and request a scroll to the row it lands on.
+    ///
+    /// Starts at the last match when nothing is focused yet.
     pub fn prev(&mut self) {
         if self.matches.is_empty() {
+            // When: matches offers no earlier entry to step back onto; drop the
+            // focus and the pending scroll request together.
             self.current = None;
             self.requested_scroll_row = None;
             return;
@@ -261,8 +315,15 @@ impl SearchState {
         self.update_scroll_request();
     }
 
+    /// Focus the match closest to cell (`row`, `col`) and request a scroll to
+    /// it.
+    ///
+    /// Row distance dominates; column distance breaks ties only among matches
+    /// already on `row`, measured to the nearest column inside the match.
     pub fn select_nearest(&mut self, row: u32, col: u16) {
         if self.matches.is_empty() {
+            // When: matches has no entry to compare against the given cell, so
+            // leave the focus and scroll request cleared.
             self.current = None;
             self.requested_scroll_row = None;
             return;
@@ -273,16 +334,25 @@ impl SearchState {
             .enumerate()
             .min_by_key(|(_, m)| {
                 let row_dist = m.row.abs_diff(row);
-                let col_dist =
-                    if row_dist == 0 { nearest_col_in_match(m, col).abs_diff(col) } else { 0 };
+                let col_dist = if row_dist == 0 {
+                    nearest_col_in_match(m, col).abs_diff(col)
+                } else {
+                    // When: row_dist is nonzero, so the row gap alone ranks this
+                    // match and the column distance is left at 0 unmeasured.
+                    0
+                };
                 (row_dist, col_dist)
             })
             .map(|(i, _)| i);
         self.update_scroll_request();
     }
 
+    /// Focus the first match that starts strictly after cell (`row`, `col`),
+    /// wrapping to the first match when none does, and request a scroll to it.
     pub fn next_from(&mut self, row: u32, col: u16) {
         if self.matches.is_empty() {
+            // When: matches contains no entry after the given cell or anywhere
+            // else, so clear the focus and the scroll request.
             self.current = None;
             self.requested_scroll_row = None;
             return;
@@ -292,8 +362,12 @@ impl SearchState {
         self.update_scroll_request();
     }
 
+    /// Focus the last match that starts strictly before cell (`row`, `col`),
+    /// wrapping to the final match when none does, and request a scroll to it.
     pub fn prev_from(&mut self, row: u32, col: u16) {
         if self.matches.is_empty() {
+            // When: matches contains no entry before the given cell, and none
+            // to wrap onto either; clear the focus and scroll request.
             self.current = None;
             self.requested_scroll_row = None;
             return;
@@ -306,6 +380,8 @@ impl SearchState {
         self.update_scroll_request();
     }
 
+    /// The currently focused match, or `None` when nothing is focused or the
+    /// stored index no longer addresses an entry in `matches`.
     pub fn current_match(&self) -> Option<MatchRange> {
         self.current.and_then(|i| self.matches.get(i).copied())
     }
@@ -327,12 +403,16 @@ impl SearchState {
     pub fn match_visible_row(&self, m: &MatchRange) -> Option<u16> {
         let visible_start = self.scrollback_len;
         if m.row < visible_start {
+            // When: m sits above visible_start in scrollback history, so it has
+            // no on-screen row to report.
             return None;
         }
         let r = m.row - visible_start;
         if r < self.visible_rows as u32 {
             Some(r as u16)
         } else {
+            // When: r lands past visible_rows, below the viewport captured at
+            // the last refresh, so there is no visible index for it.
             None
         }
     }
@@ -350,10 +430,14 @@ fn nearest_col_in_match(m: &MatchRange, col: u16) -> u16 {
 /// Returns matches with absolute row coordinates (see module docs).
 pub fn find_in_grid(grid: &Grid, query: &str, case_sensitive: bool) -> Vec<MatchRange> {
     if query.is_empty() {
+        // When: query gives nothing to look for, so report no ranges rather
+        // than scanning the grid.
         return Vec::new();
     }
     let needle: Vec<char> = query_chars(query, case_sensitive);
     if needle.is_empty() {
+        // When: needle came back with no chars to compare, and the row scanners
+        // below require at least one.
         return Vec::new();
     }
 
@@ -373,6 +457,8 @@ fn query_chars(input: &str, case_sensitive: bool) -> Vec<char> {
     if case_sensitive {
         input.chars().collect()
     } else {
+        // When: case_sensitive is off, so fold the needle to lowercase to meet
+        // the cells that visible_cells folds the same way.
         input.chars().flat_map(char::to_lowercase).collect()
     }
 }
@@ -385,6 +471,8 @@ pub fn find_regex_in_grid(
     case_sensitive: bool,
 ) -> Result<Vec<MatchRange>, String> {
     if pattern.is_empty() {
+        // When: pattern gives nothing to compile, so report no ranges instead
+        // of building a regex that would match everywhere.
         return Ok(Vec::new());
     }
     let prefix = if case_sensitive { "" } else { "(?i)" };
@@ -416,8 +504,13 @@ fn visible_cells(row: &Row, case_sensitive: bool) -> Vec<Visible<'_>> {
         .enumerate()
         .filter(|(_, c)| !c.flags.contains(CellFlags::WIDE_CONT))
         .map(|(i, c)| {
-            let chars: Vec<char> =
-                if case_sensitive { vec![c.ch] } else { c.ch.to_lowercase().collect() };
+            let chars: Vec<char> = if case_sensitive {
+                vec![c.ch]
+            } else {
+                // When: case_sensitive is off, so fold this cell to lowercase
+                // to meet a needle query_chars folded the same way.
+                c.ch.to_lowercase().collect()
+            };
             Visible { col: i as u16, is_wide: c.flags.contains(CellFlags::WIDE), chars, _cell: c }
         })
         .collect()
@@ -440,6 +533,8 @@ fn scan_row_substring(
         }
     }
     if flat.len() < needle.len() {
+        // When: this row's flat chars are fewer than needle needs, so no window
+        // can fit and out is left untouched.
         return;
     }
     let mut i = 0usize;
@@ -457,9 +552,13 @@ fn scan_row_substring(
             i = if next_cell < visible.len() {
                 owner.iter().position(|o| *o == next_cell).unwrap_or(flat.len())
             } else {
+                // When: next_cell is past the last entry of visible, so park i
+                // at the end of flat to finish this row.
                 flat.len()
             };
         } else {
+            // When: matched is false at this offset, so slide the window one
+            // char along and compare again.
             i += 1;
         }
     }
@@ -483,6 +582,8 @@ fn scan_row_regex(row: &Row, abs_row: u32, re: &Regex, out: &mut Vec<MatchRange>
     }
     for m in re.find_iter(&s) {
         if m.start() == m.end() {
+            // When: m spans zero bytes, so there is nothing to highlight and no
+            // end cell to look up at m.end() - 1.
             continue;
         }
         let start_cell = byte_to_cell[m.start()];

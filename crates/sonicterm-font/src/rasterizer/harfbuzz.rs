@@ -17,6 +17,11 @@ pub struct HarfbuzzRasterizer {
 }
 
 impl HarfbuzzRasterizer {
+    /// Open the font behind `parsed`'s locator handle for HarfBuzz painting.
+    ///
+    /// Installs the OpenType paint funcs, and applies synthetic slant/bold when
+    /// `parsed` requests them, so the face carries the same synthesis the
+    /// shaper assumed when it chose this font.
     pub fn from_locator(parsed: &ParsedFont) -> anyhow::Result<Self> {
         let mut font = Font::from_locator(&parsed.handle)?;
         font.set_ot_funcs();
@@ -65,6 +70,8 @@ impl FontRasterizer for HarfbuzzRasterizer {
         let width_px = width as usize;
         let height_px = height as usize;
         if width_px == 0 || height_px == 0 {
+            // When: width_px or height_px collapsed to zero, so the glyph has
+            // no ink and an empty bitmap stands in for it.
             return Ok(RasterizedGlyph {
                 data: vec![],
                 height: 0,
@@ -233,6 +240,8 @@ fn record_to_cairo_surface(paint_ops: Vec<PaintOp>) -> anyhow::Result<(Recording
                     let height = height as i32;
                     ImageSurface::create_for_data(data, Format::ARgb32, width, height, width * 4)?
                 } else {
+                    // When: format is not IS_PNG, no decoder here handles that
+                    // encoding, so the glyph fails instead of drawing garbage.
                     anyhow::bail!("NOT IMPL: PaintImage {}", hb_tag_to_string(format));
                 };
 
@@ -284,12 +293,16 @@ fn multiply_alpha(alpha: u8, color: u8) -> u8 {
 #[allow(dead_code)]
 fn demultiply_alpha(alpha: u8, color: u8) -> u8 {
     if alpha == 0 {
+        // When: alpha is zero, the premultiplied channel carries no recoverable
+        // colour and dividing by it would trap.
         return 0;
     }
     let v = ((color as u32) * 255) / alpha as u32;
     if v > 255 {
         255
     } else {
+        // When: v stayed inside the channel range, so the demultiplied value
+        // needs no saturation before narrowing.
         v as u8
     }
 }
@@ -324,6 +337,13 @@ fn rgba_to_argb_and_multiply(data: &mut [u8]) {
     }
 }
 
+/// Convert Cairo's native-endian premultiplied ARGB32 pixels to RGBA byte
+/// order in place.
+///
+/// Cairo stores ARGB32 as a native-endian `u32`, so the byte order differs
+/// between big- and little-endian targets; both spellings land on the same
+/// RGBA result. `data` must be a whole number of 4-byte pixels — a trailing
+/// partial pixel is left untouched by `chunks_exact_mut`.
 pub fn argb_to_rgba(data: &mut [u8]) {
     for pixel in data.chunks_exact_mut(4) {
         #[cfg(target_endian = "little")]
@@ -375,9 +395,15 @@ fn hb_paint_mode_to_operator(mode: hb_paint_composite_mode_t) -> Operator {
 }
 
 fn hb_color_to_rgba(color: hb_color_t) -> (f64, f64, f64, f64) {
-    let red = unsafe { hb_color_get_red(color) } as f64;
-    let green = unsafe { hb_color_get_green(color) } as f64;
-    let blue = unsafe { hb_color_get_blue(color) } as f64;
-    let alpha = unsafe { hb_color_get_alpha(color) } as f64;
-    (red / 255., green / 255., blue / 255., alpha / 255.)
+    // SAFETY: hb_color_t is a packed u32 passed by value, so each accessor only
+    // masks out one channel; no pointer is dereferenced and no HarfBuzz object
+    // lifetime is involved.
+    unsafe {
+        (
+            hb_color_get_red(color) as f64 / 255.,
+            hb_color_get_green(color) as f64 / 255.,
+            hb_color_get_blue(color) as f64 / 255.,
+            hb_color_get_alpha(color) as f64 / 255.,
+        )
+    }
 }

@@ -255,12 +255,18 @@ fn hwnd_for(window: &Window) -> Result<HWND, String> {
 }
 
 fn hwnd_pixel(hwnd: HWND, x: i32, y: i32) -> Result<u32, String> {
-    let hdc = unsafe { GetDC(Some(hwnd)) };
+    let hdc =
+        // SAFETY: `hwnd` is a live test window; `GetDC` returns a borrowed DC paired with `ReleaseDC` below.
+        unsafe { GetDC(Some(hwnd)) };
     if hdc.0.is_null() {
         return Err(String::from("GetDC returned null"));
     }
-    let observed = unsafe { GetPixel(hdc, x, y) }.0;
-    let _ = unsafe { ReleaseDC(Some(hwnd), hdc) };
+    let observed =
+        // SAFETY: `hdc` is live and `x`/`y` are scalar sample coordinates inside the test surface.
+        unsafe { GetPixel(hdc, x, y) }.0;
+    let _ =
+        // SAFETY: `hdc` came from `GetDC(Some(hwnd))` above and is released exactly once to the same window.
+        unsafe { ReleaseDC(Some(hwnd), hdc) };
     if observed == CLR_INVALID {
         return Err(String::from("GetPixel returned CLR_INVALID"));
     }

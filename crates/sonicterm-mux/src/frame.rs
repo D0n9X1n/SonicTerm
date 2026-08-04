@@ -14,6 +14,7 @@ pub fn write_frame<W: Write, M: Serialize>(w: &mut W, msg: &M) -> io::Result<()>
     let bytes = bincode::serde::encode_to_vec(msg, bincode::config::standard())
         .map_err(|e| io::Error::other(e.to_string()))?;
     if bytes.len() > MAX_FRAME {
+        // When: serialized `bytes` exceed `MAX_FRAME`, reject before emitting an unrepresentable length or payload.
         return Err(io::Error::other(format!("frame too large: {}", bytes.len())));
     }
     let len = (bytes.len() as u32).to_be_bytes();
@@ -31,6 +32,7 @@ pub fn read_frame<R: Read, M: DeserializeOwned>(r: &mut R) -> io::Result<M> {
     r.read_exact(&mut len_buf)?;
     let len = u32::from_be_bytes(len_buf) as usize;
     if len > MAX_FRAME {
+        // When: declared `len` exceeds `MAX_FRAME`, reject before allocating attacker-controlled storage.
         return Err(io::Error::other(format!("frame too large: {len}")));
     }
     let mut buf = vec![0u8; len];
@@ -38,6 +40,7 @@ pub fn read_frame<R: Read, M: DeserializeOwned>(r: &mut R) -> io::Result<M> {
     let (msg, consumed) = bincode::serde::decode_from_slice(&buf, bincode::config::standard())
         .map_err(|e| io::Error::other(e.to_string()))?;
     if consumed != len {
+        // When: bincode consumed fewer than `len` bytes, reject trailing data instead of accepting ambiguous framing.
         return Err(io::Error::other(format!(
             "frame payload has {} trailing bytes",
             len - consumed

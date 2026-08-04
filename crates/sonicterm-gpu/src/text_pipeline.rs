@@ -1,6 +1,6 @@
 //! Instanced text pipeline for the GPU glyph atlas.
 //!
-//! Consumes one [`GlyphInstance`] per visible cell and draws a single
+//! Consumes one [`crate::text_pipeline::GlyphInstance`] per visible cell and draws a single
 //! triangle-strip per instance, sampling the atlas alpha and modulating
 //! by the per-instance color. This is the half of B3 that replaces the
 //! pre-T9 per-frame text shape + atlas-rebuild on the terminal grid.
@@ -200,6 +200,7 @@ impl TextPipeline {
         instances: &[GlyphInstance],
     ) {
         if instances.is_empty() {
+            // When: `instances` is empty, avoid queue writes and a zero-instance render pass.
             return;
         }
         let needed = instances.len() as u64;
@@ -223,6 +224,7 @@ impl TextPipeline {
             queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(instances));
             self.capacity = cap;
         } else {
+            // When: `needed` fits current `capacity`, reuse the existing GPU buffer.
             queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(instances));
         }
         pass.set_pipeline(&self.pipeline);

@@ -39,8 +39,8 @@ pub struct DragChipOverlay {
 }
 
 /// Diagnostic snapshot of the most recently rendered drag chip.
-/// Production code must not depend on it; tests read it via
-/// [`crate::render::GpuRenderer::last_drag_chip_visual`].
+/// Production code must not depend on it; tests read it through the renderer's
+/// `GpuRenderer::last_drag_chip_visual` accessor.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DragChipVisual {
     /// Top-left of the chip in physical pixels.

@@ -17,6 +17,7 @@ pub enum BroadcastState {
 }
 
 impl BroadcastState {
+    /// Toggle broadcasting for `source_pane`, disabling an identical active scope or replacing any other state.
     #[must_use]
     pub fn toggled(self, scope: BroadcastScope, source_pane: PaneId) -> Self {
         match self {
@@ -29,12 +30,14 @@ impl BroadcastState {
         }
     }
 
+    /// Return panes receiving broadcast input, excluding the source and honoring the active scope.
     #[must_use]
     pub fn receiving_panes<T>(self, tabs: &[T], active_tab_idx: usize) -> BTreeSet<PaneId>
     where
         T: BroadcastTab,
     {
         let Self::On { scope, source_pane } = self else {
+            // When: `scope` and `source_pane` are unavailable in `Off` state, no pane receives duplicated input.
             return BTreeSet::new();
         };
         receiving_panes(tabs, scope, source_pane, active_tab_idx)
@@ -42,6 +45,7 @@ impl BroadcastState {
 }
 
 pub trait BroadcastTab {
+    /// Expose the pane tree used to enumerate broadcast destinations.
     fn pane_tree(&self) -> &PaneTree;
 }
 
@@ -51,6 +55,7 @@ impl BroadcastTab for PaneTree {
     }
 }
 
+/// Collect destination pane ids for the requested broadcast scope, excluding `source_pane`.
 #[must_use]
 pub fn receiving_panes<T>(
     tabs: &[T],

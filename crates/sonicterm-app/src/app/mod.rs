@@ -58,6 +58,8 @@ fn app_icon() -> Option<winit::window::Icon> {
             let img = match image::load_from_memory(PNG) {
                 Ok(i) => i.to_rgba8(),
                 Err(e) => {
+                    // When: `image::load_from_memory` rejected the embedded PNG; warn
+                    // with `e` and run iconless rather than failing window creation.
                     tracing::warn!("app_icon: decode sonic-256.png failed: {e}");
                     return None;
                 }
@@ -110,10 +112,17 @@ fn native_background_brush(rgb: (u8, u8, u8)) -> Option<isize> {
     let brushes = WINDOW_BG_BRUSHES.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     let mut brushes = brushes.lock().ok()?;
     if let Some(brush) = brushes.get(&color) {
+        // When: this `color` was already realized; reuse the cached handle so
+        // repeat theme applications do not leak one GDI brush per call.
         return Some(*brush);
     }
-    let brush = unsafe { CreateSolidBrush(COLORREF(color)) }.0 as isize;
+    let brush =
+        // SAFETY: `CreateSolidBrush` takes the COLORREF by value and has no
+        // pointer or lifetime preconditions; failure is reported as a null handle.
+        unsafe { CreateSolidBrush(COLORREF(color)) }.0 as isize;
     if brush == 0 {
+        // When: GDI refused the allocation and `brush` is null; report absence so
+        // callers keep the existing class brush instead of installing handle zero.
         return None;
     }
     brushes.insert(color, brush);
@@ -122,12 +131,34 @@ fn native_background_brush(rgb: (u8, u8, u8)) -> Option<isize> {
 
 #[cfg(target_os = "windows")]
 #[doc(hidden)]
+/// Point the window's class background at a brush of the configured theme color.
+///
+/// Windows paints newly exposed client area with the class brush before the
+/// swapchain presents, so leaving the default makes a resize flash white.
 pub fn install_native_window_background(window: &Window, bg_hex: &str) {
-    let Some(rgb) = parse_hex_rgb(bg_hex) else { return };
-    let Some(brush) = native_background_brush(rgb) else { return };
-    let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else { return };
-    let raw_window_handle::RawWindowHandle::Win32(h) = handle.as_raw() else { return };
+    let Some(rgb) = parse_hex_rgb(bg_hex) else {
+        // When: `bg_hex` is not a six-digit color, so there is nothing to realize;
+        // keep whatever background the class already carries.
+        return;
+    };
+    let Some(brush) = native_background_brush(rgb) else {
+        // When: `native_background_brush` exhausted GDI, so installing its null
+        // result would blank the class instead of theming it.
+        return;
+    };
+    let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
+        // When: `window_handle` reports no live handle, so no window class exists
+        // to retarget and the paint would land nowhere.
+        return;
+    };
+    let raw_window_handle::RawWindowHandle::Win32(h) = handle.as_raw() else {
+        // When: `handle` is not the `Win32` variant, so this class-word write does
+        // not apply to whatever backend produced it.
+        return;
+    };
     let hwnd = windows::Win32::Foundation::HWND(h.hwnd.get() as *mut _);
+    // SAFETY: `hwnd` is derived from a handle the window just reported as live,
+    // and `brush` outlives the class because the cache never frees its brushes.
     unsafe {
         let _ = windows::Win32::UI::WindowsAndMessaging::SetClassLongPtrW(
             hwnd,
@@ -139,12 +170,16 @@ pub fn install_native_window_background(window: &Window, bg_hex: &str) {
 
 #[cfg(not(target_os = "windows"))]
 #[doc(hidden)]
+/// Accept the theme background request on platforms with no window class to
+/// retarget, so window-creation sites stay identical across platforms.
 pub fn install_native_window_background(_window: &Window, _bg_hex: &str) {}
 
 #[cfg(target_os = "windows")]
 fn parse_hex_rgb(hex: &str) -> Option<(u8, u8, u8)> {
     let h = hex.strip_prefix('#').unwrap_or(hex);
-    if h.len() != 6 {
+    if h.len() != 6 || !h.is_ascii() {
+        // When: `h` is not exactly six ASCII bytes, so the fixed byte slices below
+        // could panic; refuse the value instead of indexing inside a code point.
         return None;
     }
     let r = u8::from_str_radix(&h[0..2], 16).ok()?;
@@ -165,6 +200,8 @@ pub fn with_backdrop_transparency(
     if backdrop == BackdropKind::Opaque || software_render_mode == SoftwareRenderMode::Force {
         attrs
     } else {
+        // When: `backdrop` asks the compositor for Mica or acrylic and the GPU
+        // path will present premultiplied alpha, which an opaque surface discards.
         attrs.with_transparent(true)
     }
 }
@@ -180,33 +217,18 @@ use sonicterm_ui::search::SearchState;
 use sonicterm_ui::selection::{SelectMode, Selection};
 use sonicterm_ui::tabs::{CommandStatus, Tab, TabBar};
 
-/// A child terminal window spawned by tearing a tab off the bar.
+/// Classification of a window tracked in the app's role-tagged window map.
 ///
-/// v2 (review fix): each child window now owns its own `GpuRenderer`
-/// bound to the new wgpu surface, plus the per-window interaction
-/// state (cursor pos, mouse-down flag, selection) needed to render
-/// the grid and route input back to the contained PTY. Single tab,
-/// single pane in v2 — tab-bar interactions inside a child (open new
-/// tab, close, drag) are intentionally deferred; the child is a
-/// "follow-on session window," not a full second App.
-///
-/// The PTY threads that were spawned for the detached pane keep
-/// running across the tear-out; their `redraw_target` Arc is swapped
-/// to point at this child's window so output from the shell triggers
-/// redraws on the correct surface (otherwise typing in the child
-/// would render onto the parent's window, which was the v1 bug).
-/// kind of window stored in the unified
-/// [`App::windows`] map. Today every torn-out terminal child window is
-/// `Terminal`.
-///
-/// Note: the main terminal window's authoritative state still lives
-/// directly on `App` (split across `App::tabs`, `App::panes`,
-/// `App::renderer`, etc.). Removing the `child_windows` field name
-/// and folding torn-out windows under one role-tagged map.
+/// Each tracked window carries a role, so callers can count or select windows
+/// by kind rather than by identity. Only terminals are tracked today, so the
+/// enum has a single variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowRole {
-    /// A terminal window (torn-out child today; main + child after
-    /// is absorbed).
+    /// A terminal window created by tearing a tab off the bar.
+    ///
+    /// The detached pane's PTY threads keep running across the tear-out; their
+    /// redraw target is repointed at the child's surface so shell output
+    /// redraws the window that now contains it rather than the parent.
     Terminal,
 }
 
@@ -235,6 +257,8 @@ pub fn next_click_count(prev: u8, same_cell: bool, within_interval: bool) -> u8 
     if same_cell && within_interval && (1..3).contains(&prev) {
         prev + 1
     } else {
+        // When: the press landed elsewhere, arrived after the gap, or `prev` already
+        // reached a triple, so it opens a fresh streak rather than extending one.
         1
     }
 }
@@ -431,6 +455,11 @@ fn append_bounded_command_events(
     }
 }
 
+/// Whether coalesced PTY output is due for a redraw.
+///
+/// Output is held back to batch a burst into one frame; it is released once it
+/// has grown past the byte threshold or waited out the latency cap, so a slow
+/// trickle still reaches the screen instead of waiting for more bytes.
 #[must_use]
 pub fn should_flush_pending_pty_redraw(pending_bytes: usize, pending_for: Duration) -> bool {
     pending_bytes >= PTY_REDRAW_FLUSH_BYTES || pending_for >= PTY_REDRAW_MAX_LATENCY
@@ -464,8 +493,12 @@ pub fn effective_frame_period(
     if software_render && composing {
         SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD
     } else if software_render {
+        // When: `software_render` rasterizes on the CPU with no preedit in
+        // flight, so the 40 fps cap applies rather than the lower composing one.
         SOFTWARE_RENDER_FRAME_PERIOD
     } else {
+        // When: `software_render` is unset, so a real GPU presents and the panel's
+        // own refresh governs rather than any CPU-oriented cap.
         monitor_period
     }
 }
@@ -491,6 +524,8 @@ pub fn software_render_frame_period(degrade: bool, monitor_period: Duration) -> 
     if degrade {
         SOFTWARE_RENDER_FRAME_PERIOD
     } else {
+        // When: `degrade` is unset, so the hardware path presents at whatever
+        // cadence the panel reports and nothing here narrows it.
         monitor_period
     }
 }
@@ -522,6 +557,10 @@ pub struct TearOutTiming {
 }
 
 impl TearOutTiming {
+    /// Start a timing record for one tear-out, with every phase still unmeasured.
+    ///
+    /// `source` names the gesture that began the tear-out, so timings from
+    /// different entry points stay distinguishable in the logs.
     #[must_use]
     pub fn new(source: &'static str, start: Instant) -> Self {
         Self {
@@ -534,6 +573,11 @@ impl TearOutTiming {
         }
     }
 
+    /// Milliseconds from the tear-out gesture to the child window's first frame.
+    ///
+    /// This is the user-visible latency of the whole tear-out, so it spans every
+    /// phase rather than any single one. A first render recorded before the
+    /// start instant saturates to zero instead of wrapping.
     #[must_use]
     pub fn total_until_first_render_ms(&self, first_render_at: Instant) -> f32 {
         first_render_at.saturating_duration_since(self.start).as_secs_f32() * 1000.0
@@ -542,17 +586,26 @@ impl TearOutTiming {
 
 pub const WARM_WINDOW_POOL_MAX: usize = 5;
 
+/// How many pre-created windows to hold ready, from the configured request.
+///
+/// Prewarmed windows trade idle memory for tear-out latency, so the request is
+/// capped and reduced when that trade is a poor one.
 #[must_use]
 pub fn warm_window_pool_target(configured: u8, software_rendering: bool) -> usize {
     if configured == 0 {
+        // When: `configured` opts out of prewarming, so no window is held and each
+        // tear-out pays full creation cost.
         return 0;
     }
     if software_rendering {
+        // When: `software_rendering` makes every spare window a full CPU surface,
+        // so hold one rather than the configured count.
         return 1;
     }
     usize::from(configured).min(WARM_WINDOW_POOL_MAX)
 }
 
+/// Whether another window should be prewarmed into the pool right now.
 #[must_use]
 pub fn warm_window_pool_should_spawn(
     current_len: usize,
@@ -566,6 +619,18 @@ pub struct WarmWindow {
     pub window: Arc<Window>,
     pub renderer: GpuRenderer,
     pub created_at: Instant,
+}
+
+/// Runs the two-phase governor close and returns any refusal to the caller.
+fn close_owner(
+    governor: &ResourceGovernor,
+    owner: ResourceOwnerId,
+) -> Result<(), sonicterm_types::BudgetError> {
+    governor.begin_close(owner).and_then(|()| governor.finish_close(owner))
+}
+
+fn open_url_effect(url: &str) -> std::io::Result<()> {
+    sonicterm_cfg::url_open::open(url)
 }
 
 /// Closes a governor owner when the thing that owned it drops.
@@ -607,17 +672,15 @@ impl std::fmt::Debug for OwnerGuard {
     }
 }
 
+// Lifecycle: dropping an `OwnerGuard` closes `owner` in the governor, releasing
+// its ledger record; a refusal leaves that record retained rather than retried.
 impl Drop for OwnerGuard {
     fn drop(&mut self) {
         // Charges must already be gone: `finish_close` refuses an owner still
         // holding them. `PaneState` declares `charges` before `owner`, and
         // Rust drops fields in declaration order, so the reservations release
         // before this runs.
-        if let Err(error) = self
-            .governor
-            .begin_close(self.owner)
-            .and_then(|()| self.governor.finish_close(self.owner))
-        {
+        if let Err(error) = close_owner(&self.governor, self.owner) {
             tracing::warn!(
                 target: "memory",
                 ?error,
@@ -693,8 +756,8 @@ pub struct WindowState {
     pub select_anchor: (u64, u16),
     pub copy_mode: Option<CopyModeState>,
     pub modifiers: ModifiersState,
-    // follow-up: `cursor_visible` moved to `PaneState` (per-pane
-    // Arc travels with tear-out). Read from
+    // `cursor_visible` lives on `PaneState`, not here: its per-pane Arc travels
+    // with the pane through tear-out. Read it via
     // `ws.panes.get(&active_pane).map(|p| p.cursor_visible.load(...))`.
     pub last_render: Instant,
     /// pointer-cursor-is-link latch. Mirrors
@@ -756,9 +819,8 @@ pub struct WindowState {
     /// `renderer.set_drag_chip(None)` call (when `Some(_)`), so the test
     /// observes the SAME loop iteration the production path runs — if
     /// someone deletes the per-window iteration the marker stays `Some(true)`
-    /// the test fails. This is the test seam a review
-    /// asked for (the `renderer: None` headless windows could not otherwise
-    /// observe `set_drag_chip(None)`).
+    /// and the test fails. Headless windows have `renderer: None`, so this seam
+    /// is their only way to observe `set_drag_chip(None)`.
     pub test_drag_chip_marker: Option<bool>,
     /// Test-only renderer-focus marker. Headless child windows have
     /// `renderer: None`, so focus lifecycle regression tests seed this marker
@@ -769,14 +831,14 @@ pub struct WindowState {
     pub test_renderer_focus_marker: Option<bool>,
     /// Test-only viewport override for this window's pane layout, mirroring
     /// [`App::test_viewport_override`] for the MAIN window. When `Some((outer,
-    /// cell_w, cell_h))`, [`App::compute_pane_rects_for`] uses `outer` instead
+    /// cell_w, cell_h))`, `App::compute_pane_rects_for` uses `outer` instead
     /// of the (absent in headless tests) renderer's logical size, and
-    /// [`crate::app::child_window::resize_visible_panes_in_child`] uses
+    /// `child_window::resize_visible_panes_in_child` uses
     /// `(cell_w, cell_h)` for cell metrics. Lets tests exercise the child
     /// split-pane Grid/PTY resize wiring (tear-out, Resized, close, split)
-    /// without a live wgpu surface — the path that the #pane-geom tear-out
-    /// regression slipped through because synthetic children have `renderer:
-    /// None` and the resize helper silently no-opped. Stays `None` in release.
+    /// without a live wgpu surface: synthetic children carry `renderer: None`,
+    /// so without this override the resize helper silently no-ops.
+    /// Stays `None` in release.
     #[doc(hidden)]
     pub test_pane_viewport: Option<(sonicterm_ui::pane::Rect, f32, f32)>,
 }
@@ -872,19 +934,35 @@ impl WindowState {
         Some(state)
     }
 
+    /// Absolute scrollback row under a viewport row of the active pane.
+    ///
+    /// Selections are anchored in absolute coordinates so they survive the
+    /// viewport scrolling underneath them. `None` once the pane or its grid is
+    /// unavailable.
     pub fn viewport_row_to_abs(&self, viewport_row: u16) -> Option<u64> {
         self.viewport_row_selection_state(viewport_row).map(|state| state.0)
     }
 
+    /// Selection produced by a click streak: word at two, line at three.
+    ///
+    /// The result carries the grid's content state, so a later paste can tell
+    /// whether the text it covers still stands. Any pane or lock failure
+    /// degrades to a bare caret selection rather than a stale range.
     pub fn multi_click_selection(&self, count: u8, abs_row: u64, col: u16) -> Selection {
         let Some(pane_id) = self.tab_states.get(self.tabs.active_index()).map(|st| st.active_pane)
         else {
+            // When: no `tab_states` entry backs the active index, so there is no
+            // pane whose grid could widen the click into a word or line.
             return Selection::new(abs_row, col);
         };
         let Some(pane) = self.panes.get(&pane_id) else {
+            // When: `pane_id` no longer resolves in `panes`, so the grid it named
+            // is gone and only the caret position stays meaningful.
             return Selection::new(abs_row, col);
         };
         let Some(guard) = pane.parser.try_lock() else {
+            // When: `try_lock` finds the parser busy with PTY output; yield rather
+            // than block the input path, keeping the click a plain caret.
             return Selection::new(abs_row, col);
         };
         let grid = guard.grid();
@@ -958,14 +1036,14 @@ impl WindowState {
         Some(sel)
     }
 
-    /// follow-up to clear the drag-chip overlay in one
-    /// place. The renderer's persistent overlay (drawn by the per-frame
-    /// emitter at render/core.rs:3945+) and the headless-test marker
-    /// (`test_drag_chip_marker`, asserted by os_drag_cleanup.rs) used
-    /// to be cleared by two parallel statements in `cancel_drag_session`.
-    /// A future refactor that split them would leave the regression
-    /// test green while breaking production. Unify both clears here so
-    /// every caller flips them in lock-step.
+    /// Clear the drag-chip overlay through a single call site.
+    ///
+    /// Two things represent the chip: the renderer's persistent overlay drawn
+    /// by the per-frame emitter, and the headless-test marker
+    /// (`test_drag_chip_marker`). Clearing them from separate statements lets a
+    /// later refactor split them, leaving the regression test green while
+    /// production keeps drawing the chip. Both clears live here so every caller
+    /// flips them in lock-step.
     ///
     /// **Contract:** this helper is
     /// **tolerant** — it is safe to call on a `WindowState` whose
@@ -1008,11 +1086,15 @@ impl WindowState {
     pub fn reorder_tab(&mut self, from: usize, to: usize) -> bool {
         let len = self.tabs.len();
         if from >= len || len == 0 {
+            // When: `from` names no live tab, so there is nothing to move and the
+            // caller must not be told the order changed.
             return false;
         }
         let last = len - 1;
         let to = to.min(last);
         if to == from {
+            // When: clamping `to` landed it back on `from`, so the drop target is
+            // the tab's existing slot and reordering would be a no-op.
             return false;
         }
         self.tabs.reorder(from, to);
@@ -1027,39 +1109,29 @@ impl WindowState {
 static NEXT_PANE_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_SYNTHETIC_CHILD_WINDOW_TAG: AtomicU64 = AtomicU64::new(1);
 
+// Ordering: `NEXT_SYNTHETIC_CHILD_WINDOW_TAG.fetch_add` uses `Relaxed`; only the
+// uniqueness of each returned tag matters, never its order against other writes.
 fn next_synthetic_child_window_id() -> WindowId {
     let tag = NEXT_SYNTHETIC_CHILD_WINDOW_TAG.fetch_add(1, Ordering::Relaxed);
-    // SAFETY: WindowId is `#[repr(transparent)] pub struct WindowId(u64)`
-    // in winit; use values below the synthetic main id so test-only child
-    // entries never collide with `synthetic_main_window_id()`.
-    unsafe { std::mem::transmute::<u64, WindowId>(u64::MAX - tag) }
+    WindowId::from(u64::MAX - tag)
 }
 
-/// stable synthetic `WindowId` used by the
-/// test-only [`App::__test_synthetic_main`] seam so the main entry in
-/// `App.windows` can be addressed without a live winit window. winit's
-/// `WindowId` is `#[repr(transparent)] struct WindowId(u64)` so a
-/// transmute from `u64::MAX` is a stable, collision-free id (real OS
-/// window ids never reach `u64::MAX` in practice; the existing
-/// per-test `synth_window_id(tag)` helpers also use the transmute
-/// pattern — see `tests/os_drag_dispatch_flow.rs`). Production never
-/// constructs this id — `do_resumed` always uses the real
-/// `window.id()` and explicitly clears any pre-existing synthetic
-/// entry first.
+/// Stable synthetic `WindowId` addressing the main window entry without a live
+/// winit window.
+///
+/// Lets a test seed the main entry in the window map directly. `u64::MAX` is
+/// collision-free because real OS window ids never reach it. Production never
+/// constructs this id: window creation uses the real `window.id()` and clears
+/// any pre-existing synthetic entry first.
 #[doc(hidden)]
 pub fn synthetic_main_window_id() -> WindowId {
-    // SAFETY: WindowId is `#[repr(transparent)] pub struct WindowId(u64)`
-    // in winit; this mirrors the test-only transmute pattern already in
-    // use under crates/sonicterm-app/tests/. Production code never reaches
-    // this function.
-    unsafe { std::mem::transmute::<u64, WindowId>(u64::MAX) }
+    WindowId::from(u64::MAX)
 }
 
-/// snapshot of the cheap scalar fields mirrored from
-/// classification of which terminal window currently
-/// owns the OS-frontmost focus. Returned by [`App::frontmost_kind`] and
-/// consumed by keymap_dispatch arms + menubar drain to decide where a
-/// chord like Cmd+T / Cmd+W / Cmd+\\ should land.
+/// Which terminal window currently owns the OS-frontmost focus.
+///
+/// Keymap dispatch and the menubar drain consume this to decide where a chord
+/// like Cmd+T / Cmd+W / Cmd+\\ should land.
 ///
 /// `Other` covers any non-terminal SonicTerm window; it explicitly does NOT
 /// route terminal actions and falls back to main as a safe default.
@@ -1083,18 +1155,26 @@ pub enum FrontmostKind {
 /// (0, 0) origin if the platform refuses to report position (e.g. on
 /// some Wayland configurations); on such platforms the drag-merge
 /// path is best-effort.
+/// Screen-global inner origin and inner size, as the drag-merge module's
+/// pure geometry struct.
+///
+/// A platform that refuses to report position reports a `(0, 0)` origin, which
+/// leaves drag-merge best-effort there rather than failing the drag outright.
 pub(super) fn window_geom(w: &Window) -> crate::tab_drag::WindowGeom {
     let origin = w.inner_position().map(|p| (p.x, p.y)).unwrap_or_else(|_| (0, 0));
     let size = w.inner_size();
     crate::tab_drag::WindowGeom { inner_origin: origin, inner_size: (size.width, size.height) }
 }
 
+/// This window's scale factor, as the `f32` the geometry helpers expect.
 #[inline]
 pub(super) fn window_dpi(w: &Window) -> f32 {
     w.scale_factor() as f32
 }
 
-#[doc(hidden)]
+/// Allocate the next process-unique pane id.
+// Ordering: `NEXT_PANE_ID.fetch_add` uses `Relaxed`; each caller needs a distinct
+// id, and no other memory is published through this counter.
 #[doc(hidden)]
 pub fn next_pane_id() -> u64 {
     NEXT_PANE_ID.fetch_add(1, Ordering::Relaxed)
@@ -1111,6 +1191,8 @@ pub fn wrap_paste(text: &str, bracketed: bool) -> Vec<u8> {
         v.extend_from_slice(b"\x1b[201~");
         v
     } else {
+        // When: `bracketed` is unset, so the guards would reach the shell as
+        // literal escape bytes rather than being consumed as markers.
         text.as_bytes().to_vec()
     }
 }
@@ -1132,6 +1214,8 @@ pub fn pick_prompt_target(
     let pick = if forward {
         grid.prompt_after(current_top_abs)
     } else {
+        // When: `forward` is unset, so the search runs backward from
+        // `current_top_abs` toward older scrollback instead of newer output.
         grid.prompt_before(current_top_abs)
     };
     pick.map(|p| p.start_row)
@@ -1231,7 +1315,11 @@ pub fn resize_panes_to_rects(
 ) {
     let [left, right, top, bottom] = content_inset;
     for (id, rect) in rects {
-        let Some(pane) = panes.get(id) else { continue };
+        let Some(pane) = panes.get(id) else {
+            // When: `id` names a pane already removed from `panes` — the layout
+            // list still carries it mid tab-close — so skip rather than resize it.
+            continue;
+        };
         let content_w = (rect.w - left - right).max(cell_w);
         let content_h = (rect.h - top - bottom).max(cell_h);
         let (cols, rows) = sonicterm_grid::grid::bounded_grid_size(
@@ -1326,6 +1414,8 @@ pub fn refresh_active_tab_title(
         .unwrap_or_else(|| auto_title.clone());
     let cur = tabs.active().map(|t| t.title.clone());
     if cur.as_deref() == Some(effective_title.as_str()) {
+        // When: the shown title already equals `effective_title`, so nothing needs
+        // repainting; only the stored auto base may still have drifted underneath.
         if tabs.active().is_some_and(|tab| tab.auto_title != auto_title) {
             tabs.set_active_title(auto_title);
         }
@@ -1376,15 +1466,12 @@ pub enum UserEvent {
     /// thread resolves the live window and requests its redraw; VT workers never
     /// call native window APIs directly.
     RequestRedraw(WindowId),
-    /// P4 follow-up: a previously-deferred font fallback
-    /// family finished loading in the
-    /// [`sonicterm_text::async_fallback::AsyncFallbackLoader`] background
-    /// thread. The handler walks every live window's `GpuRenderer`,
-    /// calls `clear_shape_cache()` (which bumps `style_rev` and drops
-    /// the shape / row / line caches), and issues
-    /// `window.request_redraw()` so the next frame re-shapes through
-    /// the newly available face and the user's tofu cells get
-    /// replaced by real glyphs.
+    /// A previously-deferred font fallback family finished loading in the
+    /// `sonicterm_text::async_fallback` background thread. The handler walks
+    /// every live window's `GpuRenderer`, calls `clear_shape_cache()` (which
+    /// bumps `style_rev` and drops the shape / row / line caches), and issues
+    /// `window.request_redraw()` so the next frame re-shapes through the newly
+    /// available face and the user's tofu cells get replaced by real glyphs.
     ClearShapeCache,
     /// Background update check finished; show a reusable notification bubble.
     UpdateCheckFinished { level: NotificationLevel, message: String },
@@ -1423,20 +1510,17 @@ fn pty_input_rejected_event(error: sonicterm_io::pty::PtyInputError) -> UserEven
     UserEvent::PtyInputRejected { bytes, reason }
 }
 
-/// Build an [`AsyncFallbackLoader`] whose notifier fires
+/// Build an async fallback loader whose notifier fires
 /// `UserEvent::ClearShapeCache` on `proxy`. The loader uses
-/// [`sonicterm_text::async_fallback::default_load_font_family`] for actual
+/// `sonicterm_text::async_fallback::default_load_font_family` for actual
 /// font resolution (zero-byte handle for OS-resident faces, which is
 /// what we want — cosmic-text's `FontSystem` does the real install on
 /// first use).
 ///
-/// This is the production wire that `Haiku` flagged as missing on
-/// pre-fix, the loader was wired only inside tests, and
-/// real frame-time misses never spawned `request_load` calls. With
-/// this helper, every `GpuRenderer::new` site in `sonicterm-app`
-/// constructs the loader from its event-loop proxy and hands it to
-/// `GpuRenderer::set_async_loader`. From that point on, a
-/// background font load completion bumps `style_rev` on every live
+/// This is the production wire for the async fallback loader. Every
+/// `GpuRenderer::new` site in `sonicterm-app` constructs the loader from its
+/// event-loop proxy and hands it to `GpuRenderer::set_async_loader`. From that
+/// point on, a background font load completion bumps `style_rev` on every live
 /// window and triggers a redraw — the tofu cells flip to real
 /// glyphs without the user having to type anything.
 /// The legacy `AsyncFallbackLoader` (cosmic-text/swash
@@ -1494,9 +1578,10 @@ fn init_tracing() {
     let _ = fmt().with_env_filter(filter).try_init();
 }
 
-/// Public re-export of [`init_tracing`] for the M6b platform shell
-/// (`crate::shell::MacShell::run`). Same idempotent `try_init`
-/// behaviour — no-op if a subscriber is already installed.
+/// Public wrapper over the crate's `init_tracing` for the platform shell.
+///
+/// Installs the subscriber idempotently through `try_init`, so a process that
+/// already has one keeps it rather than failing or installing a second.
 pub fn init_tracing_public() {
     init_tracing();
 }
@@ -1613,6 +1698,11 @@ pub struct PaneCommandEvent {
 }
 
 impl PaneState {
+    /// Build a pane around an existing parser and optional PTY.
+    ///
+    /// The governor owner is left unset here and assigned when the pane is
+    /// inserted into a window, so a pane that is built but never inserted
+    /// registers no owner to close.
     #[doc(hidden)]
     pub fn new(parser: Arc<Mutex<Parser>>, pty: Option<PtyHandle>) -> Self {
         Self {
@@ -1646,6 +1736,10 @@ pub struct TabState {
 }
 
 impl TabState {
+    /// Build a tab around a pane tree, focused on `active_pane`.
+    ///
+    /// The tab opens with no search session and an idle command status, so a
+    /// freshly created tab reports nothing running until its shell says so.
     #[doc(hidden)]
     pub fn new(tree: PaneTree, active_pane: u64) -> Self {
         Self { tree, active_pane, search: None, command: CommandStatus::Idle }
@@ -1738,8 +1832,7 @@ pub struct App {
     /// Move Tab to New Window action. Drained only while an ActiveEventLoop is
     /// available so every path uses the same native-window constructor.
     pub(super) pending_tear_out: Option<PendingTearOut>,
-    /// (speculative defensive fix): deferred
-    /// `cancel_drag_session` request. Set by `handle_os_drag_ended`
+    /// Deferred `cancel_drag_session` request. Set by `handle_os_drag_ended`
     /// on the `DroppedOnEmpty` branch instead of cancelling inline,
     /// so any tear-out-spawn produced by the existing
     /// `pending_new_window` drain runs to completion BEFORE
@@ -1749,14 +1842,12 @@ pub struct App {
     /// boundary in `event_loop.rs::do_user_event`. The
     /// `cancel_drag_session` all-windows loop runs **unconditionally**
     /// when drained — this flag controls only WHEN it runs, not
-    /// WHETHER (preserves the `os_drag_cleanup.rs:172-201`
-    /// idempotence guarantee).
+    /// WHETHER, so the cleanup stays idempotent.
     pub(super) pending_os_teardown: bool,
-    /// Haiku Step-4 2nd-pass REVISE: test-only callback fired
+    /// Test-only callback fired
     /// inside [`Self::cancel_drag_session`] AFTER the `self.windows.keys()`
     /// snapshot is collected but BEFORE the per-id iteration body runs.
-    /// Lets the regression test (`os_drag_cleanup.rs::
-    /// cancel_drag_session_tolerates_window_removed_before_iteration`)
+    /// Lets a regression test
     /// mutate `self.windows` in the exact race window that the
     /// `get_mut(&id).else { continue }` arm is designed to tolerate.
     /// Consumed (`take()`-d) at the call site so the closure is invoked
@@ -1932,12 +2023,12 @@ pub struct App {
     /// latency). Subsequent redraws driven purely by streaming PTY
     /// bytes within the same `frame_period` still coalesce onto the
     /// next vsync boundary via `pending_redraw`. Cleared on every
-    /// frame we actually render. See Haiku review.
+    /// frame we actually render.
     pub(super) input_dirty: bool,
     /// Shared with every VT-thread spawned in `spawn_pty_for_pane` (one
     /// per pane). Incremented by the VT loop whenever a non-empty chunk
     /// of PTY bytes is processed; sampled on each `RedrawRequested` to
-    /// decide whether to bypass the vsync coalescing gate. /.
+    /// decide whether to bypass the vsync coalescing gate.
     pub(super) pty_burst_gen: Arc<AtomicU32>,
     /// Last PTY-burst generation that a completed render observed. If
     /// the VT thread increments [`Self::pty_burst_gen`] during render,
@@ -2008,7 +2099,7 @@ pub struct App {
     /// window. Windows uses this slot to install the muda menubar,
     /// which requires the HWND at install time. Unused on macOS.
     pub(super) on_window_ready: Option<Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send>>,
-    /// Test-only redraw request counter (follow-up). Every
+    /// Test-only redraw request counter. Every
     /// production code path that calls `window.request_redraw()` after
     /// a `run_action` dispatch also bumps this counter in lock-step.
     /// Tests assert against this rather than the live winit window
@@ -2017,7 +2108,7 @@ pub struct App {
     #[doc(hidden)]
     pub redraw_request_count: std::sync::atomic::AtomicUsize,
     /// Test-only counter incremented on every call to
-    /// [`Self::reap_empty_child`] (Haiku follow-up). Lets tests
+    /// [`Self::reap_empty_child`]. Lets tests
     /// distinguish "child window cleanup went through the unified reap
     /// contract" from "a direct `windows.remove` happened" — both would
     /// shrink the `windows` map, but only the former nulls out straggler
@@ -2025,7 +2116,7 @@ pub struct App {
     /// release builds whose tests don't touch it.
     #[doc(hidden)]
     pub reap_call_count: std::sync::atomic::AtomicUsize,
-    /// Test-only viewport override (follow-up). When
+    /// Test-only viewport override. When
     /// `Some((outer, cell_w, cell_h))`, [`Self::compute_active_pane_rects`]
     /// uses `outer` instead of fetching the renderer's logical size and
     /// [`Self::resize_visible_panes`] uses `(cell_w, cell_h)` instead of
@@ -2035,13 +2126,13 @@ pub struct App {
     /// don't touch it.
     #[doc(hidden)]
     pub test_viewport_override: Option<(sonicterm_ui::pane::Rect, f32, f32)>,
-    /// M6a-expand-2b — winit-agnostic state machine. Routed Intents
+    /// Winit-agnostic state machine. Routed Intents
     /// (PTY write, scroll, hyperlink open, …) flow through here and
     /// the platform shell's [`Self::dispatch_effects`] translates the
     /// resulting [`AppEffect`] batch into concrete calls against the
     /// existing renderer / clipboard / PTY plumbing. Non-leaf paths
     /// (tab/pane/window lifecycle) continue to take the legacy direct
-    /// route until M6a-expand-2c lifts those into the reducer.
+    /// route rather than passing through the reducer.
     pub(crate) machine: sonicterm_app_core::AppStateMachine,
 }
 
@@ -2052,24 +2143,33 @@ impl sonicterm_ui::broadcast::BroadcastTab for TabState {
 }
 
 impl App {
-    /// Compute window-pixel rects for every pane in the active tab,
-    /// using the main window renderer's logical size + insets + padding.
-    /// Returns an empty Vec if there is no renderer yet (pre-Resumed) or
-    /// no active tab. Mirrors the inline computation in
-    /// `window_event.rs` (~line 110); factored so resize/config-reload
-    /// call sites stay one-liners.
+    /// Window-pixel rects for every pane in the active tab.
+    ///
+    /// Derived from the main renderer's logical size, insets, and padding, so
+    /// resize and config-reload sites share one geometry source. Empty before a
+    /// renderer exists or when no tab is active.
     pub(crate) fn compute_active_pane_rects(&self) -> Vec<(u64, sonicterm_ui::pane::Rect)> {
-        let Some(ws) = self.main() else { return Vec::new() };
+        let Some(ws) = self.main() else {
+            // When: `main` has no window yet, so no surface exists to derive a
+            // layout from and there is nothing to size panes against.
+            return Vec::new();
+        };
         let tab_idx = ws.tabs.active_index();
-        let Some(st) = ws.tab_states.get(tab_idx) else { return Vec::new() };
-        // Test-only viewport override (follow-up) — lets
-        // tests exercise this path without a live wgpu renderer. Production
-        // leaves `test_viewport_override` at `None` and falls through to the
-        // renderer-derived metrics below.
+        let Some(st) = ws.tab_states.get(tab_idx) else {
+            // When: `tab_idx` names no entry in `tab_states`, so no pane tree
+            // exists to lay out.
+            return Vec::new();
+        };
         if let Some((outer, _, _)) = self.test_viewport_override {
+            // When: `test_viewport_override` supplies the outer rect directly, so
+            // layout runs without a live renderer to read metrics from.
             return st.tree.layout(outer);
         }
-        let Some(r) = self.main_renderer() else { return Vec::new() };
+        let Some(r) = self.main_renderer() else {
+            // When: `main_renderer` is absent, so logical size and insets are
+            // unavailable and no rect can be computed.
+            return Vec::new();
+        };
         let (w, h) = r.logical_size();
         let top = (r.top_inset() - r.padding_top_px()).max(0.0);
         let bottom = r.bottom_inset();
@@ -2084,14 +2184,21 @@ impl App {
         child: &WindowState,
     ) -> Vec<(u64, sonicterm_ui::pane::Rect)> {
         let tab_idx = child.tabs.active_index();
-        let Some(st) = child.tab_states.get(tab_idx) else { return Vec::new() };
-        // Test-only viewport override (mirrors main `test_viewport_override`):
-        // headless child windows have `renderer: None`, so without this the
-        // child resize path can't be unit-tested. #pane-geom
+        let Some(st) = child.tab_states.get(tab_idx) else {
+            // When: `tab_idx` names no entry in the child's `tab_states`, so it
+            // carries no pane tree to lay out.
+            return Vec::new();
+        };
         if let Some((outer, _, _)) = child.test_pane_viewport {
+            // When: `test_pane_viewport` supplies the outer rect, so a headless
+            // child with no renderer still resolves its pane geometry.
             return st.tree.layout(outer);
         }
-        let Some(r) = child.renderer.as_ref() else { return Vec::new() };
+        let Some(r) = child.renderer.as_ref() else {
+            // When: the child's `renderer` is absent, so logical size and insets
+            // are unavailable and no rect can be computed.
+            return Vec::new();
+        };
         let (w, h) = r.logical_size();
         let top = (r.top_inset() - r.padding_top_px()).max(0.0);
         let bottom = r.bottom_inset();
@@ -2100,11 +2207,19 @@ impl App {
         st.tree.layout(outer)
     }
 
+    /// Build an app with no event-loop proxy.
+    ///
+    /// Without a proxy the app cannot post itself user events, so this suits
+    /// callers that drive it directly rather than through a running loop.
     #[doc(hidden)]
     pub fn new(theme: Theme, config: Config, keymap: Keymap) -> Self {
         Self::new_with_proxy(theme, config, keymap, None)
     }
 
+    /// Build an app that posts user events through `event_loop_proxy`.
+    ///
+    /// The state machine is built here rather than supplied, so callers that
+    /// already own one should hand it in instead.
     #[doc(hidden)]
     pub fn new_with_proxy(
         theme: Theme,
@@ -2121,12 +2236,12 @@ impl App {
         )
     }
 
-    /// M6b: constructor that accepts an externally-built
-    /// [`sonicterm_app_core::AppStateMachine`]. The platform shell
-    /// ([`crate::shell::MacShell`]) constructs the machine first,
-    /// then hands it in so all state mutation routes through the
-    /// reducer that the shell already owns — instead of `App`
-    /// silently building a parallel machine inside its `new_with_proxy`.
+    /// Build an app around an externally-built
+    /// [`sonicterm_app_core::AppStateMachine`].
+    ///
+    /// The platform shell constructs the machine first and hands it in, so all
+    /// state mutation routes through the reducer the shell already owns rather
+    /// than a second machine built here.
     pub fn new_with_proxy_and_machine(
         mut theme: Theme,
         config: Config,
@@ -2142,6 +2257,8 @@ impl App {
         let i18n = sonicterm_ui::i18n::I18n::new(if config.locale.is_empty() {
             None
         } else {
+            // When: `config` names a locale, so that tag selects the translation
+            // set instead of leaving the OS default to choose it.
             Some(config.locale.as_str())
         });
         let mut command_palette = CommandPalette::new();
@@ -2232,6 +2349,10 @@ impl App {
         self.breadcrumb_recorder = Some(recorder);
     }
 
+    /// Refresh every main-window tab's command status from its panes.
+    ///
+    /// Every tab is polled, not just the active one, so a background tab's
+    /// badge reflects work that finished while it was hidden.
     #[doc(hidden)]
     pub fn poll_command_events_for_all_tabs(&mut self) {
         let n = self.main_tab_states().map(|ts| ts.len()).unwrap_or(0);
@@ -2241,8 +2362,16 @@ impl App {
     }
 
     pub(super) fn poll_command_events_for_tab(&mut self, tab_idx: usize) {
-        let Some(id) = self.main_window_id else { return };
-        let Some(ws) = self.windows.get_mut(&id) else { return };
+        let Some(id) = self.main_window_id else {
+            // When: `main_window_id` is unset, so no tab bar exists yet to carry
+            // the status this poll would produce.
+            return;
+        };
+        let Some(ws) = self.windows.get_mut(&id) else {
+            // When: `id` no longer resolves in `windows`, so the state this poll
+            // would write into is already gone.
+            return;
+        };
         poll_command_events_for_tab_state(
             &ws.panes,
             &mut ws.tab_states,
@@ -2252,6 +2381,10 @@ impl App {
         );
     }
 
+    /// Test seam: queue a command event on a pane without running a shell.
+    ///
+    /// Lets a test drive command-status and badge behavior from synthetic
+    /// events instead of waiting on real process transitions.
     #[doc(hidden)]
     pub fn __test_push_pane_command_event(
         &mut self,
@@ -2265,11 +2398,18 @@ impl App {
         }
     }
 
+    /// Test seam: the command status a tab currently reports.
+    ///
+    /// `None` when no main window or no tab sits at `tab_idx`.
     #[doc(hidden)]
     pub fn __test_command_status_for_tab(&self, tab_idx: usize) -> Option<CommandStatus> {
         self.main_tab_states()?.get(tab_idx).map(|st| st.command.clone())
     }
 
+    /// Test seam: the badge a tab would render at `now`.
+    ///
+    /// Badge text depends on whether the tab is the active one, so this
+    /// resolves activeness the same way the tab bar does.
     #[doc(hidden)]
     pub fn __test_tab_badge(&self, tab_idx: usize, now: Instant) -> Option<&'static str> {
         let tabs = self.main_tabs()?;
@@ -2279,6 +2419,11 @@ impl App {
     }
 }
 
+/// Drain one tab's pane command events into its command status and tab badge.
+///
+/// Events are collected across every leaf pane in the tab, so a command that
+/// finished in a non-focused split still updates the tab. A finished command
+/// holds its badge for a few seconds before the status lapses.
 #[doc(hidden)]
 pub fn poll_command_events_for_tab_state(
     panes: &HashMap<u64, PaneState>,
@@ -2287,7 +2432,11 @@ pub fn poll_command_events_for_tab_state(
     config: &Config,
     tab_idx: usize,
 ) {
-    let Some(tab_state) = tab_states.get_mut(tab_idx) else { return };
+    let Some(tab_state) = tab_states.get_mut(tab_idx) else {
+        // When: `get_mut` cannot resolve `tab_idx`, so nothing exists to receive
+        // the drained events and the panes are left holding them.
+        return;
+    };
     let pane_ids = tab_state.tree.leaves();
     let mut events = Vec::new();
     for pane_id in pane_ids {
@@ -2297,6 +2446,8 @@ pub fn poll_command_events_for_tab_state(
         }
     }
     if events.is_empty() {
+        // When: no pane produced `events`, so the existing status and badge
+        // already describe the tab and republishing would only churn.
         return;
     }
     for ev in events {
@@ -2307,7 +2458,10 @@ pub fn poll_command_events_for_tab_state(
                     CommandStatus::Done { exit, until: ev.at + Duration::from_secs(3) };
                 maybe_notify_long_command(config, ev.duration, exit);
             }
-            CommandEvent::PromptStart => {}
+            CommandEvent::PromptStart => {
+                // When: `PromptStart` marks the shell drawing its prompt, not a
+                // command boundary, so the tab's running/done status stands.
+            }
         }
     }
     if let Some(t) = tab_states.get(tab_idx).map(|st| st.command.clone()) {
@@ -2315,6 +2469,10 @@ pub fn poll_command_events_for_tab_state(
     }
 }
 
+/// Refresh every tab of a torn-out child window from its panes.
+///
+/// A child runs its own tab bar, so it polls independently of the main window
+/// rather than inheriting the main window's sweep.
 #[doc(hidden)]
 pub fn poll_command_events_for_child_window(child: &mut WindowState, config: &Config) {
     for tab_idx in 0..child.tab_states.len() {
@@ -2329,16 +2487,28 @@ pub fn poll_command_events_for_child_window(child: &mut WindowState, config: &Co
 }
 
 fn maybe_notify_long_command(config: &Config, duration: Option<Duration>, exit: Option<u8>) {
-    let Some(duration) = duration else { return };
+    let Some(duration) = duration else {
+        // When: the event carries no `duration`, so elapsed time cannot be
+        // compared against the threshold that makes a command "long".
+        return;
+    };
     if !config.notifications.long_command {
+        // When: `config` disables long_command notifications, so a finished
+        // command stays silent however long it ran.
         return;
     }
     if duration.as_secs() <= config.notifications.threshold_secs {
+        // When: `duration` sits within threshold_secs, so the user was not
+        // waiting long enough for a desktop interruption to be welcome.
         return;
     }
     let result = match exit {
         Some(0) => "completed successfully",
-        Some(code) => return notify_command_done(format!("Command failed with exit code {code}")),
+        Some(code) => {
+            // When: `code` is nonzero, so the message names the failure rather
+            // than the generic completion wording built below.
+            return notify_command_done(format!("Command failed with exit code {code}"));
+        }
         None => "completed",
     };
     notify_command_done(format!("Command {result} after {}s", duration.as_secs()));
@@ -2470,6 +2640,8 @@ impl App {
         self.i18n = sonicterm_ui::i18n::I18n::new(if requested.is_empty() {
             None
         } else {
+            // When: `requested` names a locale tag, so it selects the bundle
+            // directly instead of leaving the OS default to decide.
             Some(requested)
         });
     }
@@ -2553,14 +2725,16 @@ impl App {
     /// `do_about_to_wait`.
     pub(super) fn reap_empty_main_window_after_close(&mut self) {
         if !self.main_tabs().map(|t| t.is_empty()).unwrap_or(true) {
+            // When: `main_tabs` still holds a tab, so the window is in use and
+            // the drained-window teardown below would close live work.
             return;
         }
         if self.child_window_count() == 0 {
             self.hide_main_window();
             self.request_exit_if_no_active_windows();
         } else {
-            // Children still own tabs — just hide main; exit decision
-            // happens when the last child closes.
+            // When: `child_window_count` is nonzero, so tabs survive elsewhere;
+            // hide main and leave the exit decision to the last child closing.
             self.hide_main_window();
         }
     }
@@ -2615,13 +2789,19 @@ impl App {
                     w.request_redraw();
                 }
             } else {
+                // When: `id` is not `main_window_id`, so the redraw is requested
+                // on the torn-out child's own surface rather than main's.
                 ws.request_redraw();
             }
         }
     }
 
     fn write_to_pty(&self, bytes: Vec<u8>) {
-        let Some(active_id) = self.active_pane_id() else { return };
+        let Some(active_id) = self.active_pane_id() else {
+            // When: `active_pane_id` resolves nothing, so there is no focused
+            // target to receive the bytes and no source to broadcast from.
+            return;
+        };
         self.write_to_pane(active_id, bytes.clone());
         self.broadcast_from(active_id, bytes);
     }
@@ -2641,6 +2821,8 @@ impl App {
     /// The production child handler drains `pending_new_window` immediately
     /// after `run_action`; this helper exposes the same post-dispatch state
     /// without requiring a live `ActiveEventLoop`.
+    // Ordering: `kitty_flags` and `app_cursor_keys` both load `Relaxed`; each is a
+    // self-contained pane flag whose read is ordered against no other location.
     #[doc(hidden)]
     pub fn __test_dispatch_key_or_encode_pty_with_drain(
         &mut self,
@@ -2650,10 +2832,16 @@ impl App {
     ) -> (Option<Action>, Option<Vec<u8>>) {
         for key_str in key_to_strings(key, mods) {
             if let Some(action) = self.keymap.lookup(&key_str).cloned() {
+                // When: `keymap` resolves `key_str` to an action, so binding
+                // dispatch is tried before falling back to PTY byte encoding.
                 if keymap_dispatch::terminal_input_passthrough_binding(&key_str, &action) {
+                    // When: this `action` is a passthrough binding, so the key
+                    // belongs to the terminal and the next spelling is tried.
                     continue;
                 }
                 if self.run_action(&action) {
+                    // When: `run_action` consumed the chord, so the caller gets
+                    // the action and no encoded bytes reach the PTY.
                     if simulate_drain && self.pending_new_window {
                         self.pending_new_window = false;
                     }
@@ -2673,16 +2861,11 @@ impl App {
     }
 
     fn write_to_pane(&self, pane_id: u64, bytes: Vec<u8>) {
-        // M6a-expand-2b leaf-routing demonstration: the keystroke /
-        // broadcast / encoded-input path now flows through the
+        // The keystroke / broadcast / encoded-input path flows through the
         // winit-agnostic `AppStateMachine`. The reducer translates
-        // `AppIntent::PtyWrite` into `AppEffect::PtyWrite { pane,
-        // data }`, and `dispatch_pty_write_effect` is the boundary
-        // method that performs the actual bounded PTY input enqueue. The
-        // net behaviour is identical to the pre-2b direct call; the
-        // boundary is what changes so subsequent migration PRs
-        // (2c+) can lift more state into the reducer without
-        // touching this call site again.
+        // `AppIntent::PtyWrite` into `AppEffect::PtyWrite { pane, data }`, and
+        // `dispatch_pty_write_effect` is the boundary method that performs the
+        // actual bounded PTY input enqueue.
         let intent = sonicterm_app_core::AppIntent::PtyWrite {
             pane: sonicterm_app_core::PaneId(pane_id),
             bytes: bytes::Bytes::from(bytes),
@@ -2693,7 +2876,7 @@ impl App {
         // throwaway transient machine — the reducer for PtyWrite is
         // pure (it does not touch `AppState`), so this is
         // semantically equivalent to dispatching through `self.machine`
-        // and avoids a structural borrow refactor (deferred to 2c).
+        // without requiring a structural borrow refactor.
         let mut transient =
             sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default());
         for effect in transient.handle(intent) {
@@ -2704,9 +2887,11 @@ impl App {
     /// Boundary handler for [`sonicterm_app_core::AppEffect::PtyWrite`].
     ///
     /// Resolves the pane id back to a live [`PtyHandle`] in any terminal
-    /// window and forwards the bytes. M6a-expand-2b boundary layer per spec §9.
+    /// window and forwards the bytes.
     pub(crate) fn dispatch_pty_write_effect(&self, effect: &sonicterm_app_core::AppEffect) {
         if let sonicterm_app_core::AppEffect::PtyWrite { pane, data } = effect {
+            // When: the effect is `PtyWrite`, so `pane` and `data` name a live
+            // target to resolve before any bytes are enqueued.
             let pane_id = pane.0;
             let bytes = data.to_vec();
             // Test-only ledger: skipped entirely in production so we don't
@@ -2715,7 +2900,11 @@ impl App {
             if self.pty_write_log_enabled {
                 self.test_pty_writes.lock().push((pane_id, bytes.clone()));
             }
-            let Some(p) = self.pane_by_id(pane_id) else { return };
+            let Some(p) = self.pane_by_id(pane_id) else {
+                // When: `pane_by_id` resolves nothing, so the pane closed before
+                // its bytes were enqueued and they have nowhere to land.
+                return;
+            };
             if let Some(pty) = p.pty.as_ref() {
                 Self::queue_pty_input(self.event_loop_proxy.as_ref(), pty, bytes);
             }
@@ -2728,6 +2917,8 @@ impl App {
         bytes: Vec<u8>,
     ) {
         if let Err(error) = pty.send_input_nonblocking(bytes) {
+            // When: `send_input_nonblocking` refused the bytes, so the writer is
+            // gone or saturated and the input is surfaced rather than retried.
             let event = pty_input_rejected_event(error);
             let UserEvent::PtyInputRejected { bytes, reason } = &event else {
                 unreachable!("PTY rejection helper must build a rejection event");
@@ -2738,17 +2929,19 @@ impl App {
                 "terminal input was not queued because the PTY writer is unavailable or saturated"
             );
             if let Some(proxy) = proxy {
+                // When: a `proxy` exists, so the rejection can reach the event
+                // loop; input is never re-sent, only reported.
                 let _ = proxy.send_event(event);
             }
         }
     }
 
     /// Generic boundary dispatcher for an Effect batch produced by the
-    /// state machine. M6a-expand-2b handles the leaf classes (PTY,
+    /// state machine. The leaf classes (PTY,
     /// clipboard set, OpenURL, Quit, Render-reasons that map to a
-    /// redraw request). Non-leaf classes (WindowOpen, ChildSpawn,
-    /// MenubarUpdate, …) intentionally fall through to a tracing
-    /// debug — they land in 2c.
+    /// redraw request) are handled here. Non-leaf classes (WindowOpen,
+    /// ChildSpawn, MenubarUpdate, …) fall through to a tracing debug
+    /// rather than being dispatched.
     pub(crate) fn dispatch_effects(
         &mut self,
         effects: smallvec::SmallVec<[sonicterm_app_core::AppEffect; 4]>,
@@ -2760,20 +2953,26 @@ impl App {
                     self.dispatch_pty_write_effect(&effect);
                 }
                 AppEffect::ClipboardSet { text } => {
+                    // When: the effect is `ClipboardSet`, so nonempty `text` is
+                    // written and empty text stays a no-op contract sentinel.
                     if !text.is_empty() {
+                        // When: `text` carries a payload, so it replaces the
+                        // clipboard; empty text would clear what the user copied.
                         if let Some(cb) = self.clipboard.as_mut() {
+                            // When: a `cb` handle exists, so the write is
+                            // attempted and a backend refusal is not fatal here.
                             let _ = cb.set_text(text);
                         }
                     }
-                    // Empty text sentinel (M6a-expand-2b CopySelection):
+                    // Empty text sentinel for CopySelection:
                     // the boundary's existing `copy_selection` already
                     // resolved the selection; the sentinel exists so
                     // the Intent→Effect contract is observable in
-                    // tests. Real text payloads land in 2c.
+                    // tests, and carries no text payload.
                 }
                 AppEffect::OpenURL { url } => {
-                    if sonicterm_cfg::url_open::validate(&url).is_ok() {
-                        let _ = sonicterm_cfg::url_open::open(&url);
+                    if let Err(error) = open_url_effect(&url) {
+                        tracing::warn!(%error, "failed to open URL effect");
                     }
                 }
                 AppEffect::Quit => {
@@ -2785,7 +2984,7 @@ impl App {
                         self.redraw_request_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     }
                 }
-                // ── PTY class (M6a-expand-2c-wire) ────────────────────
+                // ── PTY class ─────────────────────────────────────────
                 //
                 // PtyClose: the per-pane `PtyHandle::Drop` impl already
                 // SIGKILLs the child (CLAUDE.md §4 land-mine). Removing
@@ -2859,6 +3058,8 @@ impl App {
                 // Notification: route through the existing
                 // `notify_command_done` path (test capture friendly).
                 AppEffect::Notification { title, body } => {
+                    // When: the effect is `Notification`, so `title` and `body`
+                    // are joined into the one line the notifier accepts.
                     let combined = if title.is_empty() { body } else { format!("{title}: {body}") };
                     notify_command_done(combined);
                 }
@@ -2950,9 +3151,8 @@ impl App {
                 // ── Menubar ──────────────────────────────────────────
                 //
                 // MenubarUpdate: macOS rebuilds the NSMenu through the
-                // existing `menubar_bridge`; Windows is a log-only
-                // no-op per FINAL spec §5 (muda's menubar is owned by
-                // the platform code path directly). We surface a debug
+                // existing `menubar_bridge`; Windows is a log-only no-op because
+                // the platform path owns its muda menubar directly. We surface a debug
                 // log either way so the request is observable.
                 AppEffect::MenubarUpdate(model) => {
                     tracing::debug!(
@@ -2997,7 +3197,11 @@ impl App {
     }
 
     pub(super) fn next_main_tab(&mut self) -> bool {
-        let Some(tabs) = self.main_tabs_mut() else { return false };
+        let Some(tabs) = self.main_tabs_mut() else {
+            // When: `main_tabs_mut` resolves nothing, so no tab bar exists to
+            // advance and the caller must not be told focus moved.
+            return false;
+        };
         tabs.next();
         self.resize_visible_panes();
         if let Some(w) = self.main_window() {
@@ -3007,7 +3211,11 @@ impl App {
     }
 
     pub(super) fn prev_main_tab(&mut self) -> bool {
-        let Some(tabs) = self.main_tabs_mut() else { return false };
+        let Some(tabs) = self.main_tabs_mut() else {
+            // When: `main_tabs_mut` resolves nothing, so no tab bar exists to
+            // step backward through.
+            return false;
+        };
         tabs.prev();
         self.resize_visible_panes();
         if let Some(w) = self.main_window() {
@@ -3017,7 +3225,11 @@ impl App {
     }
 
     pub(super) fn activate_main_tab(&mut self, idx: usize) -> bool {
-        let Some(tabs) = self.main_tabs_mut() else { return false };
+        let Some(tabs) = self.main_tabs_mut() else {
+            // When: `main_tabs_mut` resolves nothing, so `idx` names no tab that
+            // could be brought to the front.
+            return false;
+        };
         tabs.activate(idx);
         self.resize_visible_panes();
         if let Some(w) = self.main_window() {
@@ -3028,6 +3240,8 @@ impl App {
 
     pub(super) fn activate_last_main_tab(&mut self) -> bool {
         let Some(last) = self.main_tabs().map(|t| t.len().saturating_sub(1)) else {
+            // When: `main_tabs` resolves nothing, so there is no `last` index to
+            // activate.
             return false;
         };
         self.activate_main_tab(last)
@@ -3039,10 +3253,14 @@ impl App {
         let mut redraw_main = false;
 
         if let Some(ws) = self.main_mut() {
+            // When: `main_mut` resolves a window, so its tabs are searched for
+            // the pane before any child window is considered.
             let active_tab = ws.tabs.active_index();
             for (tab_idx, st) in ws.tab_states.iter_mut().enumerate() {
                 let leaves = st.tree.leaves();
                 if !leaves.contains(&pane_id) {
+                    // When: this tab's `leaves` exclude `pane_id`, so its split
+                    // tree does not hold the pane being closed.
                     continue;
                 }
                 if leaves.len() > 1 && st.tree.close(pane_id) {
@@ -3075,6 +3293,8 @@ impl App {
             }
         }
         if closed {
+            // When: the main sweep already `closed` the pane, so scanning child
+            // windows would only rediscover work that is done.
             return true;
         }
 
@@ -3085,6 +3305,8 @@ impl App {
             for (tab_idx, st) in ws.tab_states.iter_mut().enumerate() {
                 let leaves = st.tree.leaves();
                 if !leaves.contains(&pane_id) {
+                    // When: this tab's `leaves` exclude `pane_id`, so this child's
+                    // split tree does not hold the pane being closed.
                     continue;
                 }
                 if leaves.len() > 1 && st.tree.close(pane_id) {
@@ -3106,6 +3328,8 @@ impl App {
                 break;
             }
             if ws.panes.remove(&pane_id).is_some() {
+                // When: `panes` actually held `pane_id`, so its removal is what
+                // drops the PTY and the surviving splits need re-laying out.
                 if resize_child {
                     child_window::resize_visible_panes_in_child(ws);
                 }
@@ -3121,7 +3345,7 @@ impl App {
 
     /// Drive a single [`AppIntent`] through the state machine and
     /// dispatch the resulting Effects through the boundary layer.
-    /// M6a-expand-2b entry point — wires the winit-flavoured shell
+    /// Wires the winit-flavoured shell
     /// into the winit-agnostic reducer.
     pub fn dispatch_intent(&mut self, intent: sonicterm_app_core::AppIntent) {
         let effects = self.machine.handle(intent);
@@ -3129,8 +3353,14 @@ impl App {
     }
 
     fn broadcast_from(&self, active_id: u64, bytes: Vec<u8>) {
-        let BroadcastState::On { source_pane, .. } = self.broadcast else { return };
+        let BroadcastState::On { source_pane, .. } = self.broadcast else {
+            // When: `broadcast` is not `On`, so there is no fan-out group and the
+            // bytes belong to the focused pane alone.
+            return;
+        };
         if active_id != source_pane {
+            // When: `active_id` is not the `source_pane` that armed the
+            // broadcast, so typing here must not fan out to the group.
             return;
         }
         let receivers = self.broadcast_receivers();
@@ -3141,6 +3371,8 @@ impl App {
 
     pub(crate) fn broadcast_receivers(&self) -> std::collections::BTreeSet<u64> {
         let BroadcastState::On { scope, source_pane } = self.broadcast else {
+            // When: `broadcast` is not `On`, so no `scope` or `source_pane`
+            // defines a group and the receiver set is empty.
             return Default::default();
         };
         self.broadcast_receivers_for(scope, source_pane)
@@ -3155,12 +3387,16 @@ impl App {
         for ws in self.windows.values() {
             match scope {
                 BroadcastScope::Tab => {
+                    // When: `scope` is `Tab`, so only panes sharing the source's
+                    // own tab receive the fan-out.
                     if let Some((tab_idx, _)) = ws
                         .tab_states
                         .iter()
                         .enumerate()
                         .find(|(_, tab)| tab.tree.leaves().contains(&source_pane))
                     {
+                        // When: a tab's `leaves` hold `source_pane`, so that tab's
+                        // panes are the receiver set for this window.
                         receivers.extend(sonicterm_ui::broadcast::receiving_panes(
                             &ws.tab_states,
                             scope,
@@ -3248,7 +3484,7 @@ impl App {
     }
 
     /// Test-only: install the headless pane-viewport seam on the main window
-    /// so resize wiring runs without a renderer. #pane-geom
+    /// so resize wiring runs without a renderer.
     #[doc(hidden)]
     pub fn __test_set_main_pane_viewport(
         &mut self,
@@ -3276,7 +3512,7 @@ impl App {
     }
 
     /// Test-only: install the headless per-window pane-viewport seam on a child
-    /// so the split/close resize wiring runs without a renderer. #pane-geom
+    /// so the split/close resize wiring runs without a renderer.
     #[doc(hidden)]
     pub fn __test_set_child_pane_viewport(
         &mut self,
@@ -3447,16 +3683,26 @@ impl App {
         self.windows.get(&id).map(|ws| ws.pressed_tab)
     }
 
+    /// Test seam: whether a window is tracking a held mouse button.
+    ///
+    /// `None` when `id` names no tracked window, which distinguishes an
+    /// unknown window from one with no button held.
     #[doc(hidden)]
     pub fn __test_child_mouse_down(&self, id: WindowId) -> Option<bool> {
         self.windows.get(&id).map(|ws| ws.mouse_down)
     }
 
+    /// Test seam: whether a window has a tab drag in progress.
+    ///
+    /// `None` when `id` names no tracked window.
     #[doc(hidden)]
     pub fn __test_child_has_drag_session(&self, id: WindowId) -> Option<bool> {
         self.windows.get(&id).map(|ws| ws.drag_session.is_some())
     }
 
+    /// Test seam: whether a window is a drop target for the current drag.
+    ///
+    /// `None` when `id` names no tracked window.
     #[doc(hidden)]
     pub fn __test_child_has_drag_target(&self, id: WindowId) -> Option<bool> {
         self.windows.get(&id).map(|ws| ws.drag_target.is_some())
@@ -3476,6 +3722,8 @@ impl App {
             ws.test_drag_chip_marker = Some(present);
             true
         } else {
+            // When: `windows` tracks no entry for this id, so no drag-chip marker
+            // could be seeded and the caller is told the seam did nothing.
             false
         }
     }
@@ -3516,6 +3764,8 @@ impl App {
         with_drag_session: bool,
     ) -> bool {
         let Some(ws) = self.windows.get_mut(&id) else {
+            // When: `windows` tracks no entry for this id, so there is no child
+            // state to seed drag residue onto.
             return false;
         };
         ws.pressed_tab = pressed_tab;
@@ -3608,14 +3858,22 @@ impl App {
         modifiers: ModifiersState,
     ) -> bool {
         if !self.command_palette.is_open() || self.palette_ime_is_composing() {
+            // When: `command_palette` is shut, or an IME preedit owns its input,
+            // so a core text edit would corrupt composition or edit nothing.
             return self.command_palette.is_open();
         }
         if self.command_palette.mode()
             == sonicterm_ui::command_palette::CommandPaletteMode::TabColor
         {
+            // When: `TabColor` mode owns the keystroke, so it counts as handled
+            // without editing the query text behind the picker.
             return true;
         }
-        let Some(edit) = text_edit::core_text_edit_for_key(key, modifiers) else { return false };
+        let Some(edit) = text_edit::core_text_edit_for_key(key, modifiers) else {
+            // When: `core_text_edit_for_key` maps this key to no edit, so the
+            // query is untouched and the key is reported unhandled.
+            return false;
+        };
         self.command_palette.apply_text_edit(edit);
         self.request_redraw_for_overlay(self.palette_attached_window);
         true
@@ -3646,6 +3904,8 @@ impl App {
         if self.command_palette.is_open() && self.palette_attached_window.is_none() {
             "palette"
         } else {
+            // When: `command_palette` is shut, or `palette_attached_window` names
+            // a child, so the main window's IME anchor is the terminal grid.
             "terminal"
         }
     }
@@ -3697,7 +3957,7 @@ impl App {
     /// Test-only invoker for `open_search_in_child`. Mirrors the
     /// pattern used by `__test_invoke_close_active_tab_in_child` so
     /// integration tests can assert the stale-id no-op contract for
-    /// the overlay routing follow-up.
+    /// overlay routing.
     #[doc(hidden)]
     pub fn __test_invoke_open_search_in_child(&mut self, id: WindowId) -> bool {
         self.open_search_in_child(id)
@@ -3707,11 +3967,27 @@ impl App {
     #[doc(hidden)]
     pub fn __test_set_main_search_query(&mut self, query: &str) -> bool {
         self.open_search();
-        let Some(ws) = self.main_mut() else { return false };
+        let Some(ws) = self.main_mut() else {
+            // When: `main_mut` resolves nothing, so no window holds the search
+            // session the query was meant to seed.
+            return false;
+        };
         let i = ws.tabs.active_index();
-        let Some(tab) = ws.tab_states.get_mut(i) else { return false };
-        let Some(search) = tab.search.as_mut() else { return false };
-        let Some(pane) = ws.panes.get(&tab.active_pane) else { return false };
+        let Some(tab) = ws.tab_states.get_mut(i) else {
+            // When: `tab_states` has no entry at the active index `i`, so no tab
+            // carries the search state to install into.
+            return false;
+        };
+        let Some(search) = tab.search.as_mut() else {
+            // When: this `tab` has no open `search`, so the seam refuses rather
+            // than fabricating a session the user never opened.
+            return false;
+        };
+        let Some(pane) = ws.panes.get(&tab.active_pane) else {
+            // When: `panes` cannot resolve `tab.active_pane`, so there is no grid
+            // for `set_query` to match the term against.
+            return false;
+        };
         search.set_query(query, pane.parser.lock().grid());
         true
     }
@@ -3720,13 +3996,31 @@ impl App {
     #[doc(hidden)]
     pub fn __test_set_child_search_query(&mut self, id: WindowId, query: &str) -> bool {
         if !self.open_search_in_child(id) {
+            // When: `open_search_in_child` could not open search for this id, so
+            // there is no session for the query to land in.
             return false;
         }
-        let Some(ws) = self.windows.get_mut(&id) else { return false };
+        let Some(ws) = self.windows.get_mut(&id) else {
+            // When: `windows` no longer tracks this id, so the child vanished
+            // between opening search and installing the query.
+            return false;
+        };
         let i = ws.tabs.active_index();
-        let Some(tab) = ws.tab_states.get_mut(i) else { return false };
-        let Some(search) = tab.search.as_mut() else { return false };
-        let Some(pane) = ws.panes.get(&tab.active_pane) else { return false };
+        let Some(tab) = ws.tab_states.get_mut(i) else {
+            // When: `tab_states` has no entry at the active index `i`, so the
+            // child carries no tab to install the query into.
+            return false;
+        };
+        let Some(search) = tab.search.as_mut() else {
+            // When: this `tab` has no open `search`, so the seam refuses rather
+            // than fabricating a session.
+            return false;
+        };
+        let Some(pane) = ws.panes.get(&tab.active_pane) else {
+            // When: `panes` cannot resolve `tab.active_pane`, so there is no grid
+            // for `set_query` to match against.
+            return false;
+        };
         search.set_query(query, pane.parser.lock().grid());
         true
     }
@@ -3740,17 +4034,43 @@ impl App {
         key: &winit::keyboard::Key,
         modifiers: ModifiersState,
     ) -> bool {
-        let Some(edit) = text_edit::search_text_edit_for_key(key, modifiers) else { return false };
+        let Some(edit) = text_edit::search_text_edit_for_key(key, modifiers) else {
+            // When: `search_text_edit_for_key` maps this key to no edit, so the
+            // search term is untouched and the key is reported unhandled.
+            return false;
+        };
         let target = id.or(self.main_window_id);
-        let Some(target) = target else { return false };
-        let Some(ws) = self.windows.get_mut(&target) else { return false };
+        let Some(target) = target else {
+            // When: neither the supplied id nor `main_window_id` yields a
+            // `target`, so no window owns the search this edit would change.
+            return false;
+        };
+        let Some(ws) = self.windows.get_mut(&target) else {
+            // When: `windows` no longer tracks `target`, so the window closed
+            // between resolving it and applying the edit.
+            return false;
+        };
         if ws.ime.is_composing() {
+            // When: `ime` is mid-composition, so the key belongs to the preedit
+            // and a core edit would cut the composition in half.
             return true;
         }
         let i = ws.tabs.active_index();
-        let Some(tab) = ws.tab_states.get_mut(i) else { return false };
-        let Some(search) = tab.search.as_mut() else { return false };
-        let Some(pane) = ws.panes.get(&tab.active_pane) else { return false };
+        let Some(tab) = ws.tab_states.get_mut(i) else {
+            // When: `tab_states` has no entry at the active index `i`, so no tab
+            // holds the search this edit would change.
+            return false;
+        };
+        let Some(search) = tab.search.as_mut() else {
+            // When: this `tab` has no open `search`, so the edit is refused
+            // rather than opening a session the user did not ask for.
+            return false;
+        };
+        let Some(pane) = ws.panes.get(&tab.active_pane) else {
+            // When: `panes` cannot resolve `tab.active_pane`, so re-matching the
+            // term has no grid to search.
+            return false;
+        };
         search.apply_text_edit(edit, pane.parser.lock().grid());
         true
     }
@@ -3767,7 +4087,11 @@ impl App {
     /// Test-only: seed main IME preedit state.
     #[doc(hidden)]
     pub fn __test_set_main_ime_preedit(&mut self, text: &str) -> bool {
-        let Some(ws) = self.main_mut() else { return false };
+        let Some(ws) = self.main_mut() else {
+            // When: `main_mut` resolves nothing, so no window holds the IME state
+            // this preedit would seed.
+            return false;
+        };
         ws.ime.handle_preedit(text, Some((text.len(), text.len())));
         true
     }
@@ -3810,6 +4134,8 @@ impl App {
     ) -> Option<Selection> {
         let mut selection = selection?;
         if selection.pane_id.is_some() {
+            // When: `selection` already names a `pane_id`, so rebinding it would
+            // move the caller's range onto a different pane.
             return Some(selection);
         }
         let pane_id = window.tab_states.get(window.tabs.active_index())?.active_pane;
@@ -3828,10 +4154,22 @@ impl App {
     /// Test-only: set the synthetic main window's selection.
     #[doc(hidden)]
     pub fn __test_set_main_selection(&mut self, selection: Option<Selection>) -> bool {
-        let Some(id) = self.main_window_id else { return false };
-        let Some(window) = self.windows.get(&id) else { return false };
+        let Some(id) = self.main_window_id else {
+            // When: `main_window_id` is unset, so no main window exists to carry
+            // the selection.
+            return false;
+        };
+        let Some(window) = self.windows.get(&id) else {
+            // When: `windows` no longer tracks this id, so the content state the
+            // selection binds to cannot be read.
+            return false;
+        };
         let selection = Self::bind_test_selection(window, selection);
-        let Some(window) = self.windows.get_mut(&id) else { return false };
+        let Some(window) = self.windows.get_mut(&id) else {
+            // When: the window disappeared between binding and assignment, so the
+            // bound selection has nowhere to be stored.
+            return false;
+        };
         window.selection = selection;
         true
     }
@@ -3843,13 +4181,25 @@ impl App {
         id: WindowId,
         selection: Option<Selection>,
     ) -> bool {
-        let Some(window) = self.windows.get(&id) else { return false };
+        let Some(window) = self.windows.get(&id) else {
+            // When: `windows` tracks no entry for this id, so the content state
+            // the selection binds to cannot be read.
+            return false;
+        };
         let selection = Self::bind_test_selection(window, selection);
-        let Some(window) = self.windows.get_mut(&id) else { return false };
+        let Some(window) = self.windows.get_mut(&id) else {
+            // When: the window disappeared between binding and assignment, so the
+            // bound selection has nowhere to be stored.
+            return false;
+        };
         window.selection = selection;
         true
     }
 
+    /// Test seam: give a tracked window a live winit window and renderer.
+    ///
+    /// Lets a test promote a synthetic headless entry into one that can render,
+    /// without going through real window creation. `false` when `id` is unknown.
     #[doc(hidden)]
     pub fn __test_attach_window_renderer(
         &mut self,
@@ -3857,17 +4207,29 @@ impl App {
         window: Arc<Window>,
         renderer: GpuRenderer,
     ) -> bool {
-        let Some(state) = self.windows.get_mut(&id) else { return false };
+        let Some(state) = self.windows.get_mut(&id) else {
+            // When: `windows` tracks no entry for this id, so there is no state to
+            // hold the window handle or its renderer.
+            return false;
+        };
         state.window = Some(window);
         state.renderer = Some(renderer);
         true
     }
 
+    /// Test seam: the selection a window currently holds.
+    ///
+    /// The outer `None` means `id` is unknown; the inner `None` means the
+    /// window is tracked but has no selection.
     #[doc(hidden)]
     pub fn __test_window_selection(&self, id: WindowId) -> Option<Option<Selection>> {
         self.windows.get(&id).map(|state| state.selection)
     }
 
+    /// Test seam: one pixel of a window's software-rendered frame, as BGRA.
+    ///
+    /// Lets a test assert what the CPU rasterizer actually produced. `None`
+    /// when the window is unknown, has no renderer, or the frame is absent.
     #[cfg(target_os = "windows")]
     #[doc(hidden)]
     pub fn __test_window_software_frame_pixel_bgra(
@@ -3879,23 +4241,44 @@ impl App {
         self.windows.get(&id)?.renderer.as_ref()?.__test_software_frame_pixel_bgra(x, y)
     }
 
+    /// Test seam: force the no-GPU degrade path on or off.
+    ///
+    /// Bypasses runtime detection so a test can exercise software-render
+    /// pacing on a machine that has a working GPU.
     #[doc(hidden)]
     pub fn __test_set_software_render_degrade(&mut self, degrade: bool) {
         self.software_render_degrade = degrade;
     }
 
+    /// Test seam: whether the main window has a redraw waiting on the gate.
+    ///
+    /// Lets a test assert that a redraw was coalesced rather than drawn.
     #[doc(hidden)]
     pub fn __test_main_redraw_deferred(&self) -> bool {
         self.pending_redraw
     }
 
+    /// Test seam: backdate a window's last-render instant.
+    ///
+    /// Frame pacing measures elapsed time since the last render, so moving
+    /// this lets a test cross a frame boundary without waiting. `false` when
+    /// `id` is unknown.
     #[doc(hidden)]
     pub fn __test_set_window_last_render(&mut self, id: WindowId, last_render: Instant) -> bool {
-        let Some(state) = self.windows.get_mut(&id) else { return false };
+        let Some(state) = self.windows.get_mut(&id) else {
+            // When: `windows` tracks no entry for this id, so no render timestamp
+            // exists to backdate.
+            return false;
+        };
         state.last_render = last_render;
         true
     }
 
+    /// Test seam: a window's cell width, cell height, and top inset.
+    ///
+    /// These are the metrics pane layout divides by, so a test can check
+    /// geometry against the same numbers production uses. `None` when the
+    /// window is unknown or has no renderer.
     #[doc(hidden)]
     pub fn __test_window_cell_geometry(&self, id: WindowId) -> Option<(f32, f32, f32)> {
         let renderer = self.windows.get(&id)?.renderer.as_ref()?;
@@ -3912,6 +4295,8 @@ impl App {
         bytes: &[u8],
     ) -> bool {
         let Some(pane) = self.windows.get(&id).and_then(|c| c.panes.get(&pane_id)) else {
+            // When: neither `windows` nor its `panes` resolve the request, so the
+            // bytes have no parser to advance.
             return false;
         };
         pane.parser.lock().advance(bytes);
@@ -3922,6 +4307,8 @@ impl App {
     #[doc(hidden)]
     pub fn __test_clear_child_pane_dirty(&self, id: WindowId, pane_id: u64) -> bool {
         let Some(pane) = self.windows.get(&id).and_then(|c| c.panes.get(&pane_id)) else {
+            // When: neither `windows` nor its `panes` resolve the request, so no
+            // grid exists whose dirty rows could be cleared.
             return false;
         };
         pane.parser.lock().grid_mut().clear_dirty();
@@ -3938,7 +4325,11 @@ impl App {
     /// Test-only: seed child IME preedit state.
     #[doc(hidden)]
     pub fn __test_set_child_ime_preedit(&mut self, id: WindowId, text: &str) -> bool {
-        let Some(child) = self.windows.get_mut(&id) else { return false };
+        let Some(child) = self.windows.get_mut(&id) else {
+            // When: `windows` tracks no entry for this id, so no child holds the
+            // IME state this preedit would seed.
+            return false;
+        };
         child.ime.handle_preedit(text, Some((text.len(), text.len())));
         true
     }
@@ -3966,7 +4357,11 @@ impl App {
     /// Test-only: seed the headless renderer-focus marker for a child window.
     #[doc(hidden)]
     pub fn __test_set_child_renderer_focus_marker(&mut self, id: WindowId, focused: bool) -> bool {
-        let Some(child) = self.windows.get_mut(&id) else { return false };
+        let Some(child) = self.windows.get_mut(&id) else {
+            // When: `windows` tracks no entry for this id, so no child carries the
+            // renderer-focus marker to update.
+            return false;
+        };
         child.test_renderer_focus_marker = Some(focused);
         true
     }
@@ -4122,8 +4517,14 @@ impl App {
         // Cloned before the window borrow: `ResourceGovernor` is a handle over
         // an `Arc<Ledger>`, so this shares the ledger rather than copying it.
         let governor_handle = self.governor.clone();
-        let Some(window) = self.windows.get(&id) else { return };
+        let Some(window) = self.windows.get(&id) else {
+            // When: `windows` tracks no entry for this id, so an owner created
+            // here would have no window to retain or close it.
+            return;
+        };
         if window.owner.is_some() {
+            // When: this `window` already holds an owner, so creating another
+            // would leave a duplicate hierarchy node no one closes.
             return;
         }
         let owner =
@@ -4169,9 +4570,15 @@ impl App {
     ) -> bool {
         let Some(pane) = self.windows.get_mut(&source).and_then(|w| w.panes.remove(&pane_id))
         else {
+            // When: `source` yields no `pane_id`, so nothing was detached and both
+            // windows keep the panes they had.
             return false;
         };
-        let Some(window) = self.windows.get_mut(&destination) else { return false };
+        let Some(window) = self.windows.get_mut(&destination) else {
+            // When: `destination` no longer resolves, so the already-removed pane
+            // has nowhere to land and drops with its PTY.
+            return false;
+        };
         window.panes.insert(pane_id, pane);
         self.reattribute_pane_owners();
         true
@@ -4248,6 +4655,8 @@ impl App {
     ) -> bool {
         let Some(pane) = self.windows.get_mut(&window).and_then(|w| w.panes.get_mut(&pane_id))
         else {
+            // When: neither `window` nor its `panes` resolve the request, so no
+            // grid exists whose scrollback `limit` could be set.
             return false;
         };
         pane.parser.lock().grid_mut().set_scrollback_limit(limit);
@@ -4343,8 +4752,14 @@ impl App {
     pub(super) fn reconcile_pane_owners(&mut self) {
         let window_ids: Vec<WindowId> = self.windows.keys().copied().collect();
         for window_id in window_ids {
-            let Some(window) = self.windows.get(&window_id) else { continue };
+            let Some(window) = self.windows.get(&window_id) else {
+                // When: `window_id` no longer resolves, so its pane set is gone
+                // and there is nothing left to reconcile owners against.
+                continue;
+            };
             let Some(window_owner) = window.owner.as_ref().map(OwnerGuard::id) else {
+                // When: this `window` holds no owner, so `create_child` has no
+                // parent to hang pane owners from.
                 continue;
             };
 
@@ -4362,13 +4777,15 @@ impl App {
                     pane_owner_limits(),
                 ) {
                     Ok(owner) => {
+                        // When: the governor granted `owner`, so it must reach a
+                        // pane or be closed; an unheld owner leaks its record.
                         if let Some(pane) =
                             self.windows.get_mut(&window_id).and_then(|w| w.panes.get_mut(&pane_id))
                         {
                             pane.owner = Some(OwnerGuard::new(self.governor.clone(), owner));
                         } else {
-                            // The pane vanished between listing and assigning.
-                            // Close the owner rather than leak it.
+                            // When: `panes` no longer resolves `pane_id`, so the
+                            // owner would leak unless it is closed here.
                             let _ = self.governor.begin_close(owner);
                             let _ = self.governor.finish_close(owner);
                         }
@@ -4407,8 +4824,14 @@ impl App {
     pub(super) fn reattribute_pane_owners(&mut self) {
         let window_ids: Vec<WindowId> = self.windows.keys().copied().collect();
         for window_id in window_ids {
-            let Some(window) = self.windows.get(&window_id) else { continue };
+            let Some(window) = self.windows.get(&window_id) else {
+                // When: `window_id` no longer resolves, so no pane set remains
+                // whose owners could be reattributed.
+                continue;
+            };
             let Some(window_owner) = window.owner.as_ref().map(OwnerGuard::id) else {
+                // When: this `window` holds no owner, so there is no destination
+                // parent to move its pane owners onto.
                 continue;
             };
 
@@ -4429,6 +4852,8 @@ impl App {
                     let Some(pane) =
                         self.windows.get_mut(&window_id).and_then(|w| w.panes.get_mut(&pane_id))
                     else {
+                        // When: `pane_id` vanished after the list was taken, so
+                        // clearing charges would touch a pane already gone.
                         continue;
                     };
                     pane.charges.clear();
@@ -4474,7 +4899,11 @@ impl App {
     }
 
     pub(super) fn release_window_owner(&mut self, id: WindowId) {
-        let Some(window) = self.windows.get_mut(&id) else { return };
+        let Some(window) = self.windows.get_mut(&id) else {
+            // When: `id` no longer resolves, so the map exposes no guards to
+            // drain and the owner records are already unreachable.
+            return;
+        };
         // Charges must be released before the owner closes.
         //
         // `finish_close` refuses an owner that still holds charges, and this
@@ -4492,6 +4921,10 @@ impl App {
         drop(window.owner.take());
     }
 
+    /// The main window's pane map.
+    ///
+    /// `None` before a main window exists, which distinguishes "no window yet"
+    /// from "a window holding no panes".
     pub fn main_panes(&self) -> Option<&HashMap<u64, PaneState>> {
         Some(&self.windows.get(&self.main_window_id?)?.panes)
     }
@@ -4571,15 +5004,29 @@ impl App {
         self.windows.get_mut(&id)
     }
 
+    /// Which terminal window currently holds OS focus.
+    ///
+    /// Keymap dispatch routes window-scoped chords by this, so a stale or
+    /// unfocused id resolves to `None` rather than defaulting to main.
     #[doc(hidden)]
     pub fn frontmost_kind(&self) -> FrontmostKind {
-        let Some(id) = self.frontmost_window else { return FrontmostKind::None };
+        let Some(id) = self.frontmost_window else {
+            // When: `frontmost_window` recorded nothing, so focus is unknown and
+            // callers fall back to main rather than guessing a target.
+            return FrontmostKind::None;
+        };
         if let Some(w) = self.main_window() {
+            // When: `main_window` exists, so its identity is checked before the
+            // recorded `id` is treated as a torn-out child.
             if w.id() == id {
+                // When: `w` carries the focused `id`, so the chord lands on main
+                // and the child lookup below is unnecessary.
                 return FrontmostKind::Main;
             }
         }
         if self.windows.contains_key(&id) {
+            // When: `windows` still tracks `id` after the main check, so focus
+            // sits on a live torn-out child.
             return FrontmostKind::Child(id);
         }
         // Recorded id doesn't match anything live (rare: window closed
@@ -4597,6 +5044,8 @@ impl App {
     #[doc(hidden)]
     pub fn clear_stale_frontmost(&mut self) -> bool {
         if self.frontmost_window.is_some() && self.frontmost_kind() == FrontmostKind::None {
+            // When: `frontmost_window` names a window `frontmost_kind` can no
+            // longer classify, so the record outlived the window it points at.
             self.frontmost_window = None;
             return true;
         }
@@ -4611,8 +5060,8 @@ impl App {
         self.close_active_tab_in_child(id)
     }
 
-    /// Test-only invoker for [`Self::reap_empty_child`]. Used by the
-    /// follow-up regression that pins `App::transfer_tab` onto
+    /// Test-only invoker for [`Self::reap_empty_child`]. Pins
+    /// `App::transfer_tab` onto
     /// the unified empty-window cleanup contract: a stale id is a
     /// silent no-op (no panic, no spurious `windows` mutation), which
     /// is the only behaviour we can reliably pin without a live
@@ -4781,9 +5230,7 @@ impl App {
     /// Without this gate, the production sequence (lone tab → cursor
     /// crosses tear-out threshold → cursor finally enters another
     /// window's bar) is impossible: the threshold trip would clear the
-    /// gesture before the user ever reaches a sibling bar. Haiku
-    /// review caught this.
-    #[doc(hidden)]
+    /// gesture before the user ever reaches a sibling bar.
     #[doc(hidden)]
     pub fn __test_set_drag_target(
         &mut self,
@@ -4835,6 +5282,10 @@ impl App {
         self.test_post_snapshot_hook = Some(Box::new(f));
     }
 
+    /// How many torn-out child windows are live.
+    ///
+    /// The shadow main entry is excluded, so this counts only windows a user
+    /// tore off rather than every entry in the map.
     #[doc(hidden)]
     pub fn child_window_count(&self) -> usize {
         self.windows.len().saturating_sub(self.shadow_main_count())
@@ -4910,6 +5361,8 @@ impl App {
     #[doc(hidden)]
     pub fn __test_synthetic_main(&mut self) {
         if self.main_window_id.is_some() {
+            // When: `main_window_id` is already set, so seeding a second entry
+            // would displace the identity live state is keyed by.
             return;
         }
         let id = synthetic_main_window_id();
@@ -4981,6 +5434,8 @@ impl App {
     #[doc(hidden)]
     pub fn __test_seed_pane_theme_colors(&mut self, pane_id: u64) -> bool {
         let Some(pane) = self.main().and_then(|ws| ws.panes.get(&pane_id)) else {
+            // When: `pane_id` resolves to no pane, so there is no parser whose
+            // theme reply slots could be seeded.
             return false;
         };
         let mut parser = pane.parser.lock();
@@ -4993,6 +5448,8 @@ impl App {
     #[doc(hidden)]
     pub fn __test_advance_pane_parser(&self, pane_id: u64, bytes: &[u8]) -> bool {
         let Some(pane) = self.main().and_then(|ws| ws.panes.get(&pane_id)) else {
+            // When: `pane_id` resolves to no pane, so the `bytes` have no parser
+            // to advance and are dropped rather than misrouted.
             return false;
         };
         pane.parser.lock().advance(bytes);
@@ -5019,7 +5476,11 @@ impl App {
     /// CRLF so callers can predict the row count.
     #[doc(hidden)]
     pub fn __test_grow_pane_scrollback(&self, pane_id: u64, n: u32) -> u64 {
-        let Some(pane) = self.main().and_then(|ws| ws.panes.get(&pane_id)) else { return 0 };
+        let Some(pane) = self.main().and_then(|ws| ws.panes.get(&pane_id)) else {
+            // When: `pane_id` resolves to no pane, so no scrollback was grown and
+            // the reported row count is zero.
+            return 0;
+        };
         let mut buf = Vec::with_capacity((n as usize) * 8);
         for i in 0..n {
             use std::io::Write;
@@ -5065,6 +5526,8 @@ impl App {
             st.active_pane = pane_id;
             true
         } else {
+            // When: `main_tab_states_mut` resolves no entry at `tab_idx`, so no
+            // tab exists whose focus could be repointed.
             false
         }
     }
@@ -5188,8 +5651,16 @@ impl App {
     /// snapshot registry tracks every visible tab-bar state change.
     pub(super) fn publish_main_window_tab_bar(&self) {
         use sonicterm_ui::tabbar_view::TabBarLayout;
-        let Some(w) = self.main_window() else { return };
-        let Some(r) = self.main_renderer() else { return };
+        let Some(w) = self.main_window() else {
+            // When: `main_window` does not exist yet, so there is no surface whose
+            // tab-bar geometry could be published.
+            return;
+        };
+        let Some(r) = self.main_renderer() else {
+            // When: `main_renderer` is absent, so tab-bar height and insets cannot
+            // be measured and any published rect would be invented.
+            return;
+        };
         let inner_origin = w.inner_position().map(|p| (p.x, p.y)).unwrap_or((0, 0));
         let inner_size = {
             let s = w.inner_size();
@@ -5220,15 +5691,27 @@ impl App {
     /// path right after `Renderer::render`.
     pub fn publish_child_window_tab_bar(&self, id: WindowId) {
         use sonicterm_ui::tabbar_view::TabBarLayout;
-        let Some(child) = self.windows.get(&id) else { return };
-        let Some(win) = child.window.as_ref() else { return };
+        let Some(child) = self.windows.get(&id) else {
+            // When: `id` tracks no window, so there is no child tab bar to
+            // publish geometry for.
+            return;
+        };
+        let Some(win) = child.window.as_ref() else {
+            // When: this `child` has no live window, so screen geometry cannot be
+            // measured and the snapshot would carry stale coordinates.
+            return;
+        };
         let inner_origin = win.inner_position().map(|p| (p.x, p.y)).unwrap_or((0, 0));
         let inner_size = {
             let s = win.inner_size();
             (s.width, s.height)
         };
         let raster_w = inner_size.0 as f32;
-        let Some(r) = child.renderer.as_ref() else { return };
+        let Some(r) = child.renderer.as_ref() else {
+            // When: this `child` has no renderer, so tab-bar height is unknown and
+            // the layout below has no metrics to compute against.
+            return;
+        };
         let layout =
             TabBarLayout::compute_with_height(&child.tabs, raster_w, r.tab_bar_logical_height())
                 .with_top_offset(r.tab_bar_y_offset())
@@ -5253,8 +5736,16 @@ impl App {
         payload_json: String,
         drag_image_png: Vec<u8>,
     ) -> bool {
-        let Some(handle) = self.os_drag_app_handle() else { return false };
-        let Some(backend) = self.os_drag_backend.as_mut() else { return false };
+        let Some(handle) = self.os_drag_app_handle() else {
+            // When: no `os_drag_app_handle` can be built, so the platform has no
+            // drag context and recording a source would strand it.
+            return false;
+        };
+        let Some(backend) = self.os_drag_backend.as_mut() else {
+            // When: no `os_drag_backend` is installed, so nothing can carry the
+            // session and the source must not be recorded.
+            return false;
+        };
         backend.begin_session(handle, source_window, source_tab_idx, payload_json, drag_image_png);
         self.os_drag_source = Some((source_window, source_tab_idx));
         true
@@ -5286,8 +5777,16 @@ impl App {
         window_id: WindowId,
         window: &std::sync::Arc<winit::window::Window>,
     ) {
-        let Some(handle) = self.os_drag_app_handle() else { return };
-        let Some(backend) = self.os_drag_backend.as_mut() else { return };
+        let Some(handle) = self.os_drag_app_handle() else {
+            // When: no `os_drag_app_handle` can be built, so the window cannot be
+            // registered as a drop target on this platform.
+            return;
+        };
+        let Some(backend) = self.os_drag_backend.as_mut() else {
+            // When: no `os_drag_backend` is installed, so per-window registration
+            // has nothing to register against.
+            return;
+        };
         backend.register_window(handle, window_id, window);
     }
 
@@ -5323,7 +5822,11 @@ impl App {
         let source = self.os_drag_source.take();
         match outcome {
             os_drag::DragOutcome::DroppedOnBar { target_window, target_slot } => {
+                // When: the drop landed on a bar, so `target_window` and
+                // `target_slot` name where the dragged tab should be inserted.
                 let Some((src_win, src_idx)) = source else {
+                    // When: no `source` was recorded, so there is no tab to move
+                    // and the stale drag state is cancelled instead.
                     tracing::warn!(
                         "os_drag_session: DroppedOnBar arrived with no recorded source — cancelling"
                     );
@@ -5374,12 +5877,13 @@ impl App {
                         drop_screen_pos: Some(drop_screen_pos),
                     });
                 } else {
+                    // When: no source was recorded, so no tab can be torn out and
+                    // the drop is logged rather than acted on.
                     tracing::warn!(
                         "os_drag_session: DroppedOnEmpty without recorded source — no tear-out"
                     );
                 }
-                // (speculative defensive fix per PM
-                // override): do NOT call `cancel_drag_session` inline
+                // Do NOT call `cancel_drag_session` inline
                 // here. The `DroppedOnEmpty` path triggers a
                 // tear-out-spawn that creates a brand new top-level
                 // window via the `pending_new_window` /
@@ -5425,11 +5929,19 @@ impl App {
         self.main().and_then(|ws| ws.pressed_tab)
     }
 
+    /// Test seam: whether the main window is tracking a held mouse button.
+    ///
+    /// Reports `false` when no main window exists, so a caller sees the same
+    /// "nothing held" answer either way.
     #[doc(hidden)]
     pub fn __test_mouse_down(&self) -> bool {
         self.main().map(|ws| ws.mouse_down).unwrap_or(false)
     }
 
+    /// Test seam: set which tab the main window treats as pressed.
+    ///
+    /// Seeds a synthetic main window first, so a test can drive tab-press
+    /// behavior without a live winit window.
     #[doc(hidden)]
     pub fn __test_set_pressed_tab(&mut self, v: Option<usize>) {
         self.__test_synthetic_main();
@@ -5438,6 +5950,10 @@ impl App {
         }
     }
 
+    /// Test seam: set whether the main window holds a mouse button.
+    ///
+    /// Seeds a synthetic main window first, so drag gestures can be driven
+    /// without real pointer events.
     #[doc(hidden)]
     pub fn __test_set_mouse_down(&mut self, v: bool) {
         self.__test_synthetic_main();
@@ -5459,6 +5975,8 @@ impl App {
     #[doc(hidden)]
     pub fn __test_set_pane_pty(&mut self, id: u64, pty: Option<PtyHandle>) -> bool {
         let Some(pane) = self.main_mut().and_then(|ws| ws.panes.get_mut(&id)) else {
+            // When: `id` resolves to no pane, so the supplied `pty` has no owner
+            // and is dropped instead of installed.
             return false;
         };
         pane.pty = pty;
@@ -5500,7 +6018,7 @@ impl App {
         // `os_drag_cleanup.rs:172-201` asserts this on a re-armed
         // second invocation.
         let ids: Vec<_> = self.windows.keys().copied().collect();
-        // Haiku Step-4 2nd-pass REVISE: invoke the test-only
+        // Invoke the test-only
         // post-snapshot hook AFTER `ids` is collected but BEFORE the
         // iteration body starts. The `take()` releases the hook so it
         // never re-fires, and (more importantly) leaves no live borrow
@@ -5523,8 +6041,8 @@ impl App {
         // the lot.
         for id in ids {
             let Some(ws) = self.windows.get_mut(&id) else {
-                // Window vanished between snapshot and iteration —
-                // nothing to clean. Tolerant by design.
+                // When: `windows` dropped `id` between the snapshot and this
+                // iteration, so its residue is already gone with the window.
                 continue;
             };
             if ws.drag_session.take().is_some() {
@@ -5538,15 +6056,15 @@ impl App {
             // window, mirroring the focus-loss cleanup.
             ws.scrollbar_drag = None;
             ws.splitter_drag = None;
-            // follow-up to clear the renderer's persistent
+            // Clear the renderer's persistent
             // drag-chip overlay AND the headless-test marker via a single
             // helper so production and test paths can never diverge. The
-            // per-frame emitter at render/core.rs:3945+ keeps drawing
+            // per-frame emitter keeps drawing
             // whatever Some(_) value sits in the renderer, so leaving it
             // behind ships a stale chip until something else triggers a
             // set_drag_chip(None). For headless test windows the renderer
             // is None — the `test_drag_chip_marker` mirror is what
-            // os_drag_cleanup.rs asserts against.
+            // the cleanup tests assert against.
             ws.clear_drag_chip();
             // Force a repaint so the cleared chip actually leaves the
             // screen instead of waiting for the next external event.
@@ -5568,11 +6086,11 @@ impl App {
     ///
     /// Returns `Ok(())` when the transfer happened, or a
     /// [`TransferError`] describing the validation failure. The
-    /// pre-validation step is intentional: review (Haiku) found
-    /// that the prior `bool` API silently dropped the detached tab —
+    /// pre-validation step is deliberate: a `bool` API that detaches
+    /// first silently drops the detached tab —
     /// killing its child shell via `PtyHandle::Drop` — when the target
-    /// window vanished between gesture-start and drop. We now refuse to
-    /// touch source state until *both* endpoints have been proven
+    /// window vanishes between gesture-start and drop. Source state is
+    /// left untouched until *both* endpoints have been proven
     /// reachable.
     #[doc(hidden)]
     pub fn transfer_tab(
@@ -5583,25 +6101,37 @@ impl App {
         target_idx: usize,
     ) -> Result<(), TransferError> {
         // 0) pre-validate BOTH endpoints before mutating any window.
-        //    Data-loss fix (, Haiku review): detaching and then
+        //    Detaching and then
         //    failing to attach drops the `PaneState`, which kills the
         //    child shell via `PtyHandle::Drop`.
         match source {
             None => {
+                // When: `source` is `None`, so the main window is the origin and
+                // its bounds are proven before anything detaches.
                 let main = self.main().ok_or(TransferError::SourceMissing)?;
                 if source_idx >= main.tab_states.len() || source_idx >= main.tabs.len() {
+                    // When: `source_idx` exceeds either `main` collection, so
+                    // refusing now avoids detaching a tab that does not exist.
                     return Err(TransferError::SourceIndexOutOfBounds);
                 }
             }
             Some(id) => {
+                // When: `source` names a child, so that window is the origin and
+                // its bounds are proven before anything detaches.
                 let src = self.windows.get(&id).ok_or(TransferError::SourceMissing)?;
                 if source_idx >= src.tab_states.len() || source_idx >= src.tabs.len() {
+                    // When: `source_idx` exceeds either `src` collection, so
+                    // refusing now avoids detaching a tab that does not exist.
                     return Err(TransferError::SourceIndexOutOfBounds);
                 }
             }
         }
         if let Some(id) = target {
+            // When: `target` names a child, so its existence is proven before the
+            // source tab is detached and could be dropped.
             if !self.windows.contains_key(&id) {
+                // When: `windows` lacks `id`, so refusing now leaves the source
+                // tab attached rather than destroying it mid-move.
                 return Err(TransferError::TargetMissing);
             }
         }
@@ -5612,6 +6142,9 @@ impl App {
             Some(id) => self.detach_from_child(id, source_idx),
         };
         let Some((tab, state, panes)) = detached else {
+            // When: `detached` yielded no tab despite validation, so refusing is
+            // the only move that cannot drop a live shell.
+
             // Shouldn't happen — step 0 validated. Defensive bail.
             return Err(TransferError::SourceIndexOutOfBounds);
         };
@@ -5620,12 +6153,11 @@ impl App {
         match target {
             None => self.attach_tab_state(target_idx, tab, state, panes),
             Some(id) => {
+                // When: `target` names a child, so the detached tab is handed to
+                // that window's attach path.
                 if !self.attach_to_child(id, target_idx, tab, state, panes) {
-                    // Defensive: target was present at step 0 but vanished
-                    // (e.g. closed on another thread). Re-attach to source
-                    // would require holding the moved values, but we've
-                    // already passed ownership to attach_to_child which
-                    // returned false; treat as TargetMissing.
+                    // When: `attach_to_child` refused after preflight and already
+                    // owns the moved values, so the tab cannot return to source.
                     return Err(TransferError::TargetMissing);
                 }
             }
@@ -5659,14 +6191,12 @@ impl App {
             if let Some(id) = source {
                 // child window — route through the unified empty-window
                 // cleanup contract so straggler redraw targets get nulled
-                // the "child reaped" trace fires (follow-up:
-                // bypassing this dropped to a raw `windows.remove` which
-                // skipped both bits of bookkeeping).
+                // and the "child reaped" trace fires; a raw
+                // `windows.remove` skips both bits of bookkeeping.
                 self.reap_empty_child(id);
             } else {
-                // main window — leave the App to its existing
-                // last-tab-closed handling (already covered
-                // hiding the main window when its tabs vec empties).
+                // When: the emptied `source` is the main window, so its own
+                // last-tab-closed handling hides it rather than reaping it.
             }
         }
         Ok(())
@@ -5674,10 +6204,9 @@ impl App {
 }
 
 /// Why a transfer rejected the gesture without losing the tab. Returned
-/// by [`App::transfer_tab`]; introduced to fix the
-/// Haiku-flagged data-loss bug where a missing-target attach silently
-/// dropped the detached `PaneState` (killing its child shell via
-/// `PtyHandle::Drop`).
+/// by [`App::transfer_tab`]. A missing-target attach would otherwise
+/// silently drop the detached `PaneState`, killing its child shell via
+/// `PtyHandle::Drop`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[doc(hidden)]
 pub enum TransferError {
@@ -5717,6 +6246,10 @@ impl ApplicationHandler<UserEvent> for App {
         sonicterm_logging::record_loop_exiting();
     }
 }
+
+#[cfg(test)]
+#[path = "effect_cleanup_tests.rs"]
+mod effect_cleanup_tests;
 
 #[cfg(test)]
 #[path = "click_count_tests.rs"]

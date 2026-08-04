@@ -1,9 +1,8 @@
-//! Cursor-related rendering helpers extracted from `render.rs`.
+//! Cursor-related rendering helpers.
 //!
-//! Moved from `sonicterm-shared::render::cursor` in M7e of the workspace
-//! refactor: all helpers consume `QuadInstance` / `GlyphInstance` and
-//! emit pixel-to-NDC quads, so they belong on the GPU side of the layer
-//! split.
+//! These helpers consume `QuadInstance` / `GlyphInstance` and emit
+//! pixel-to-NDC quads, keeping cursor geometry on the GPU side of the
+//! renderer-model boundary.
 
 use crate::quad::{px_to_ndc, QuadInstance};
 use crate::text_pipeline::GlyphInstance;
@@ -51,6 +50,7 @@ pub fn push_hollow_rect(
     t: f32,
 ) {
     if sw <= 0.0 || sh <= 0.0 || cell_w <= 0.0 || cell_h <= 0.0 {
+        // When: `sw`, `sh`, `cell_w`, or `cell_h` is nonpositive, no valid cursor outline can be projected.
         return;
     }
     let t = t.min(cell_w * 0.5).min(cell_h * 0.5);
@@ -102,6 +102,7 @@ fn clip_rect_to_pane_local(
     if clipped_w > 0.0 && clipped_h > 0.0 {
         Some((clipped_x, clipped_y, clipped_w, clipped_h))
     } else {
+        // When: `clipped_w` or `clipped_h` is nonpositive, this edge contributes no visible pane pixels.
         None
     }
 }
@@ -131,6 +132,7 @@ pub fn push_hollow_rect_clipped(
     pane_h: f32,
 ) {
     if sw <= 0.0 || sh <= 0.0 || cell_w <= 0.0 || cell_h <= 0.0 {
+        // When: `sw`, `sh`, `cell_w`, or `cell_h` is nonpositive, no valid cursor outline can be projected.
         return;
     }
     let t = t.min(cell_w * 0.5).min(cell_h * 0.5);
@@ -218,6 +220,7 @@ pub fn recolor_cursor_glyphs(
     bg_rgba: [f32; 4],
 ) {
     if sw <= 0.0 || sh <= 0.0 {
+        // When: `sw` or `sh` is nonpositive, NDC inversion cannot produce a meaningful cursor overlap.
         return;
     }
     let cursor_rect = (cell_x, cell_y, cell_w, cell_h);

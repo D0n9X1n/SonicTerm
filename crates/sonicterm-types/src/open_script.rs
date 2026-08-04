@@ -29,7 +29,9 @@ impl OpenScriptRequest {
         let launch_path = if original_path.is_absolute() {
             original_path.clone()
         } else {
+            // When: `original_path` is relative, resolve it against the process cwd captured at launch.
             if !initial_cwd.is_absolute() {
+                // When: `initial_cwd` is relative, joining it cannot produce the absolute launch contract.
                 return Err(OpenScriptResolveError::InitialCwdNotAbsolute);
             }
             initial_cwd.join(&original_path)
@@ -46,6 +48,7 @@ impl OpenScriptRequest {
         F: FnOnce() -> Option<PathBuf>,
     {
         if original_path.is_absolute() {
+            // When: `original_path` is already absolute, avoid querying cwd so launch cannot fail on unrelated process state.
             return Ok(Self { launch_path: original_path.clone(), original_path });
         }
         let initial_cwd = cwd_lookup().ok_or(OpenScriptResolveError::InitialCwdUnavailable)?;

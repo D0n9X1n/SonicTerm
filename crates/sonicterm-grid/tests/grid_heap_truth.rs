@@ -16,18 +16,25 @@ static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
 
 struct Counting;
 
+// SAFETY: Operations forward exact pointers, layouts, and sizes to `System`; atomic bookkeeping allocates nothing and cannot re-enter.
 unsafe impl GlobalAlloc for Counting {
+    // SAFETY: `layout` must be valid; the atomic byte update is allocation-free before forwarding it unchanged.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         LIVE_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+        // SAFETY: `layout` is the exact valid layout received under `GlobalAlloc::alloc`.
         unsafe { System.alloc(layout) }
     }
+    // SAFETY: `ptr` and its original `layout` must match; allocation-free bookkeeping cannot re-enter deallocation.
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         LIVE_BYTES.fetch_sub(layout.size(), Ordering::Relaxed);
+        // SAFETY: `ptr` and original `layout` are forwarded unchanged from the valid deallocation call.
         unsafe { System.dealloc(ptr, layout) }
     }
+    // SAFETY: `ptr`, original `layout`, and `new_size` must be valid; atomic bookkeeping allocates nothing and cannot re-enter.
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         LIVE_BYTES.fetch_add(new_size.saturating_sub(layout.size()), Ordering::Relaxed);
         LIVE_BYTES.fetch_sub(layout.size().saturating_sub(new_size), Ordering::Relaxed);
+        // SAFETY: `ptr`, original `layout`, and `new_size` are forwarded unchanged under `GlobalAlloc::realloc`.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
 }

@@ -39,10 +39,12 @@ pub struct ReaperLimits {
 impl ReaperLimits {
     /// Create limits, rejecting a zero ceiling.
     ///
-    /// A zero ceiling would admit nothing while still accepting reservations,
-    /// so it is refused at construction rather than deadlocking a caller later.
+    /// A zero ceiling disables task admission, blocking work, or handle ownership,
+    /// so it is refused at construction rather than creating a partial supervisor.
     pub fn new(max_tasks: usize, max_helpers: usize, max_handles: usize) -> Option<Self> {
         if max_tasks == 0 || max_helpers == 0 || max_handles == 0 {
+            // When: max_tasks, max_helpers, or max_handles is zero, disabling one
+            // supervisor axis; reject the partial limit set as unusable.
             return None;
         }
         Some(Self { max_tasks, max_helpers, max_handles })
@@ -126,6 +128,8 @@ struct HelperSlot {
     state: Arc<SupervisorState>,
 }
 
+// Lifecycle: HelperSlot Drop decrements state counters helpers through lock when
+// its helper call ends, including after the supervisor abandons that call.
 impl Drop for HelperSlot {
     fn drop(&mut self) {
         self.state.counters.lock().helpers -= 1;
@@ -157,6 +161,8 @@ impl core::fmt::Debug for ReapSlot {
     }
 }
 
+// Lifecycle: ReapSlot Drop decrements counters tasks and calls slot_released
+// notify_one unless enqueue marked consumed and transferred settlement ownership.
 impl Drop for ReapSlot {
     fn drop(&mut self) {
         if !self.consumed {
@@ -202,9 +208,13 @@ impl ReaperSupervisor {
     pub fn try_reserve_slot(&self) -> Result<ReapSlot, ReapAdmission> {
         let mut counters = self.state.counters.lock();
         if !counters.admitting {
+            // When: counters admitting is false after shutdown; refusal preserves
+            // caller ownership instead of creating unreported work.
             return Err(ReapAdmission::ShuttingDown);
         }
         if counters.tasks >= self.state.limits.max_tasks {
+            // When: counters tasks reaches state limits max_tasks; try-reserve
+            // returns immediately while the caller still owns its resource.
             return Err(ReapAdmission::QueueFull);
         }
         counters.tasks += 1;
@@ -216,15 +226,21 @@ impl ReaperSupervisor {
         let mut counters = self.state.counters.lock();
         loop {
             if !counters.admitting {
+                // When: counters admitting is false after an unlocked wait;
+                // shutdown cannot issue a new slot after closing the gate.
                 return Err(ReapAdmission::ShuttingDown);
             }
             if counters.tasks < self.state.limits.max_tasks {
+                // When: counters tasks is below state limits max_tasks; claim
+                // capacity under the guard so another waiter cannot take it.
                 counters.tasks += 1;
                 return Ok(ReapSlot { state: self.state.clone(), consumed: false });
             }
             if self.state.slot_released.wait_until(&mut counters, deadline).timed_out()
                 && counters.tasks >= self.state.limits.max_tasks
             {
+                // When: the deadline elapsed and capacity remains full after the
+                // guard was reacquired; a racing release therefore wins over timeout.
                 return Err(ReapAdmission::QueueFull);
             }
         }
@@ -234,9 +250,13 @@ impl ReaperSupervisor {
     pub fn try_reserve_handle(&self) -> Result<(), ReapAdmission> {
         let mut counters = self.state.counters.lock();
         if !counters.admitting {
+            // When: counters admitting is false; only release_handle decrements
+            // handles, so a late reservation would remain visible in live_handles.
             return Err(ReapAdmission::ShuttingDown);
         }
         if counters.handles >= self.state.limits.max_handles {
+            // When: counters handles reaches state limits max_handles; this API
+            // cannot wait because release_handle has no wake signal.
             return Err(ReapAdmission::QueueFull);
         }
         counters.handles += 1;
@@ -292,6 +312,8 @@ impl ReaperSupervisor {
             let mut still_running = Vec::with_capacity(in_flight.len());
             for (handle, mut task) in in_flight.drain(..) {
                 if !handle.is_finished() {
+                    // When: handle is not is_finished; joining it would hand the
+                    // deadline to a native call that may never return.
                     still_running.push((handle, task));
                     continue;
                 }
@@ -300,9 +322,8 @@ impl ReaperSupervisor {
                 if result.releases_charge() {
                     self.settle(task, result, &mut progress);
                 } else {
-                    // Back off before retrying. Re-deferring at the current
-                    // instant would be collected by the requeue pass on this
-                    // same iteration, respawning the call immediately.
+                    // When: result does not releases_charge; defer with retry_at
+                    // instead of settling or immediately respawning the call.
                     deferred.push((self.retry_at(), task));
                 }
             }
@@ -332,6 +353,8 @@ impl ReaperSupervisor {
                     if at <= now {
                         queue.push_back(pending);
                     } else {
+                        // When: at remains above now; requeueing before that
+                        // instant would turn deferred polling into queue spin.
                         still_deferred.push((at, pending));
                     }
                 }
@@ -341,8 +364,16 @@ impl ReaperSupervisor {
 
             let task = self.state.queue.lock().pop_front();
             let Some(mut task) = task else {
+                // When: task is absent while other collections may still own
+                // work; drive those owners to a reported disposition before exit.
+
+                // When: in_flight or pending_work is not is_empty; drive blocking
+                // work here and leave deferred-only work to the path below.
                 if !in_flight.is_empty() || !pending_work.is_empty() {
                     if cancel.is_cancelled() || self.clock.now() >= deadline {
+                        // When: cancel is_cancelled or clock now reaches deadline;
+                        // outstanding calls take a terminal disposition here.
+
                         // Out of time. A call still running is abandoned rather
                         // than joined: joining here is what made the deadline
                         // advisory, and a wedged native call would hold the
@@ -356,6 +387,8 @@ impl ReaperSupervisor {
                                 task.on_completion(result);
                                 self.settle(task, result, &mut progress);
                             } else {
+                                // When: handle is not is_finished at cutoff; task
+                                // is TimedOut while its thread holds the permit.
                                 task.on_completion(ReapResult::TimedOut);
                                 self.settle(task, ReapResult::TimedOut, &mut progress);
                             }
@@ -377,12 +410,16 @@ impl ReaperSupervisor {
                     // deadline real, where joining would surrender it to
                     // whatever the call decides to do.
                     if in_flight.iter().any(|(handle, _)| handle.is_finished()) {
+                        // When: in_flight iter has an is_finished handle; join it
+                        // before sleeping so completed charges settle promptly.
                         let mut ready = Vec::with_capacity(in_flight.len());
                         let mut running = Vec::with_capacity(in_flight.len());
                         for entry in in_flight.drain(..) {
                             if entry.0.is_finished() {
                                 ready.push(entry);
                             } else {
+                                // When: entry is not finished; keep it in flight
+                                // because dropping it detaches work and releases charges.
                                 running.push(entry);
                             }
                         }
@@ -393,6 +430,8 @@ impl ReaperSupervisor {
                             if result.releases_charge() {
                                 self.settle(task, result, &mut progress);
                             } else {
+                                // When: result does not releases_charge after join;
+                                // retry after backoff instead of reporting settlement.
                                 deferred.push((self.retry_at(), task));
                             }
                         }
@@ -403,9 +442,14 @@ impl ReaperSupervisor {
                     );
                     continue;
                 }
-                let Some(next_poll) = deferred.iter().map(|(at, _)| *at).min() else { break };
+                let Some(next_poll) = deferred.iter().map(|(at, _)| *at).min() else {
+                    // When: no queued, running, pending, or deferred task remains,
+                    // so this invocation has nothing left it can drive.
+                    break;
+                };
                 if cancel.is_cancelled() || next_poll > deadline {
-                    // Nothing will become ready in time: settle what is left.
+                    // When: cancellation arrived or the earliest wakeup exceeds
+                    // the deadline, so force deferred work instead of waiting.
                     for (_, mut pending) in deferred.drain(..) {
                         let outcome = pending.force_cancel();
                         let result = if outcome.is_settled() {
@@ -428,6 +472,8 @@ impl ReaperSupervisor {
                     if at <= now {
                         queue.push_back(pending);
                     } else {
+                        // When: at remains above now; requeueing before that
+                        // instant would turn deferred polling into queue spin.
                         still_deferred.push((at, pending));
                     }
                 }
@@ -437,8 +483,8 @@ impl ReaperSupervisor {
             };
             let now = self.clock.now();
             if now >= deadline || cancel.is_cancelled() {
-                // Out of time: force cancellation, and keep the charge if the
-                // resource did not actually settle.
+                // When: now reaches deadline or cancel is_cancelled after pop;
+                // force task and retain its charge unless cancellation settles.
                 let outcome = task.force_cancel();
                 let result =
                     if outcome.is_settled() { ReapResult::Settled } else { ReapResult::TimedOut };
@@ -473,6 +519,8 @@ impl ReaperSupervisor {
                         task.on_completion(result);
                         self.settle(task, result, &mut progress);
                     } else {
+                        // When: at is within deadline; defer this PollAfter task
+                        // rather than force-cancelling work that can still run in time.
                         progress.polls += 1;
                         deferred.push((at, task));
                     }
@@ -500,9 +548,13 @@ impl ReaperSupervisor {
         task: Box<dyn ReapTask>,
         in_flight: &mut Vec<(std::thread::JoinHandle<ReapResult>, Box<dyn ReapTask>)>,
     ) -> Option<(Box<dyn FnOnce() -> ReapResult + Send>, Box<dyn ReapTask>)> {
+        // End this guard before spawn: the failure path re-locks counters on this
+        // thread, while a started helper needs that lock when its call ends.
         {
             let mut counters = self.state.counters.lock();
             if counters.helpers >= self.state.limits.max_helpers {
+                // When: counters helpers reaches state limits max_helpers; return
+                // the pair untouched so a later pass retries the same call.
                 return Some((work, task));
             }
             counters.helpers += 1;
@@ -546,14 +598,20 @@ impl ReaperSupervisor {
         self.clock.now().checked_add(FAILED_CALL_BACKOFF).unwrap_or_else(|| self.clock.now())
     }
 
+    // Lock order: counters -> retained for unresolved tasks; terminal cleanup
+    // takes retained alone, so no reverse acquisition path exists.
     fn settle(&self, task: Box<dyn ReapTask>, result: ReapResult, progress: &mut ReaperProgress) {
         let owner = task.owner();
         let mut counters = self.state.counters.lock();
         counters.tasks -= 1;
         if result.releases_charge() {
             progress.settled += 1;
+            // Task destruction runs under counters; a task destructor must not
+            // re-enter this supervisor or it will relock a non-reentrant mutex.
             drop(task);
         } else {
+            // When: the result did not release the charge, so name this owner
+            // unresolved before moving the task into retained storage.
             progress.unresolved += 1;
             // One entry per owner, not per task. The field names which owners
             // are unresolved, so a second unsettled task from an owner already
@@ -573,6 +631,8 @@ impl ReaperSupervisor {
 
     /// Stop admitting, cancel everything, and report the terminal disposition.
     pub fn shutdown(&self, deadline: Instant, cancel: &CancelToken) -> ShutdownReport {
+        // This temporary guard must end at the semicolon: run_until settles work
+        // by locking counters again, so retaining it across the call deadlocks.
         self.state.counters.lock().admitting = false;
         let progress = self.run_until(deadline, cancel);
         let counters = self.state.counters.lock();
@@ -602,10 +662,10 @@ impl ReaperSupervisor {
 
     /// Tasks retained because they finished without settling.
     ///
-    /// Their charges stay attributed to the original owner and are released
-    /// only when the supervisor itself is dropped, which is the terminal
-    /// cleanup the contract defers them to. A non-zero count in a healthy
-    /// process means something never gave its resources back.
+    /// Their charges stay attributed to the original owner until
+    /// [`Self::release_retained`] explicitly surrenders them or the supervisor
+    /// itself is dropped. A non-zero count in a healthy process means something
+    /// never gave its resources back.
     pub fn retained_tasks(&self) -> usize {
         self.state.retained.lock().len()
     }

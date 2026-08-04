@@ -246,7 +246,7 @@ impl TabBarSnapshot {
         sx >= l && sx < r && sy >= t && sy < b
     }
 
-    /// Build a [`TabBarSnapshot`] from a computed [`TabBarLayout`] in
+    /// Build a [`TabBarSnapshot`] from a computed `TabBarLayout` in
     /// window-local raster px plus the destination window's raster-px
     /// inner origin. All output rects are in screen-global raster px —
     /// the same coordinate system the OS reports drop cursors in.
@@ -293,6 +293,7 @@ impl TabBarSnapshot {
         for (i, (&l, &r)) in self.tab_lefts.iter().zip(self.tab_rights.iter()).enumerate() {
             let midx = (l + r) / 2;
             if sx < midx {
+                // When: `sx` lies left of this tab midpoint, insert before this tab.
                 return i;
             }
         }
@@ -355,6 +356,7 @@ impl TabBarRegistry {
         let g = self.snapshots.lock().unwrap_or_else(|p| p.into_inner());
         for snap in g.iter() {
             if snap.bar_contains(sx, sy) {
+                // When: `snap.bar_contains(sx, sy)` is true, return that window's resolved destination slot.
                 return Some((snap.window, snap.drop_slot(sx)));
             }
         }

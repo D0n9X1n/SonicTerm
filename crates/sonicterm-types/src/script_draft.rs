@@ -64,9 +64,11 @@ pub fn shell_quote_powershell(value: &str) -> String {
 pub fn format_script_draft(dialect: ShellDialect, path: &Path) -> Result<String, DraftRejection> {
     let value = path.to_str().ok_or(DraftRejection::NonUnicodePath)?;
     if !path.is_absolute() {
+        // When: `path` is relative, executing it would depend on mutable shell cwd rather than the resolved launch target.
         return Err(DraftRejection::NonAbsolutePath);
     }
     if value.chars().any(char::is_control) {
+        // When: `value` contains control input, reject it before it can become an extra shell command or keystroke.
         return Err(DraftRejection::ControlCharacter);
     }
 
@@ -87,6 +89,7 @@ pub fn format_script_draft(dialect: ShellDialect, path: &Path) -> Result<String,
             if value.contains(['%', '!', '"']) {
                 Err(DraftRejection::CmdUnsafeCharacter)
             } else {
+                // When: `value` lacks cmd expansion or quote characters, double quotes preserve it as one path argument.
                 Ok(format!("\"{value}\""))
             }
         }

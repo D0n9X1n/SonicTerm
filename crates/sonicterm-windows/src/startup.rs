@@ -10,7 +10,10 @@ fn startup_open_script<F>(parsed: &ParsedCli, cwd_lookup: F) -> Result<Option<Op
 where
     F: FnOnce() -> Option<PathBuf>,
 {
-    let Some(original_path) = parsed.open_script.clone() else { return Ok(None) };
+    let Some(original_path) = parsed.open_script.clone() else {
+        // When: `open_script` is absent, startup has no script request to resolve or queue.
+        return Ok(None);
+    };
     let display = original_path.display().to_string();
     OpenScriptRequest::resolve_with_cwd_lookup(original_path, cwd_lookup)
         .map(Some)
@@ -29,7 +32,10 @@ where
     F: FnOnce() -> Option<PathBuf>,
     S: FnOnce(OpenScriptRequest),
 {
-    let Some(request) = startup_open_script(parsed, cwd_lookup)? else { return Ok(false) };
+    let Some(request) = startup_open_script(parsed, cwd_lookup)? else {
+        // When: startup produced no `request`, leave the bridge untouched and report that nothing was queued.
+        return Ok(false);
+    };
     sink(request);
     Ok(true)
 }

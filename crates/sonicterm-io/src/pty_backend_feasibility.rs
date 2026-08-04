@@ -395,6 +395,7 @@ pub fn drive_conpty_close<O: ConPtyCloseOps>(ops: &O) -> CloseOutcome {
             if ops.output_pending() && !ops.drainer_active() {
                 CloseOutcome::WouldDeadlock
             } else {
+                // When: `output_pending` is false or `drainer_active` is true, blocking close can settle.
                 CloseOutcome::Completed
             }
         }

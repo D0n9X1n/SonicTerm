@@ -39,6 +39,7 @@ pub enum FontDataSource {
 }
 
 impl FontDataSource {
+    /// Returns the display name for memory data or the lossy path for an on-disk font.
     pub fn name_or_path_str(&self) -> Cow<'_, str> {
         match self {
             Self::OnDisk(path) => path.to_string_lossy(),
@@ -47,6 +48,7 @@ impl FontDataSource {
         }
     }
 
+    /// Returns the lossy filesystem path for an on-disk source.
     pub fn path_str(&self) -> Option<Cow<'_, str>> {
         match self {
             Self::OnDisk(path) => Some(path.to_string_lossy()),
@@ -55,6 +57,7 @@ impl FontDataSource {
         }
     }
 
+    /// Loads font bytes, borrowing memory sources and owning bytes read from disk.
     pub fn load_data<'a>(&'a self) -> anyhow::Result<Cow<'a, [u8]>> {
         match self {
             Self::OnDisk(path) => {
@@ -168,22 +171,27 @@ impl Ord for FontDataHandle {
 }
 
 impl FontDataHandle {
+    /// Returns this handle's source name or filesystem path for display.
     pub fn name_or_path_str(&self) -> Cow<'_, str> {
         self.source.name_or_path_str()
     }
 
+    /// Returns this handle's filesystem path when its source is on disk.
     pub fn path_str(&self) -> Option<Cow<'_, str>> {
         self.source.path_str()
     }
 
+    /// Returns the face index within the source font or collection.
     pub fn index(&self) -> u32 {
         self.index
     }
 
+    /// Replaces the face index within the source font or collection.
     pub fn set_index(&mut self, idx: u32) {
         self.index = idx;
     }
 
+    /// Formats the source, face index, variation, and origin for diagnostics.
     pub fn diagnostic_string(&self) -> String {
         let source = match &self.source {
             FontDataSource::OnDisk(path) => format!("{}", path.display()),
@@ -194,6 +202,7 @@ impl FontDataHandle {
         if self.index == 0 && self.variation == 0 {
             format!("{}, {}", source, self.origin)
         } else {
+            // When: `index == 0 && variation == 0` is false, include both selectors.
             format!("{} index={} variation={}, {}", source, self.index, self.variation, self.origin)
         }
     }
@@ -209,31 +218,37 @@ pub trait FontLocator {
         pixel_size: u16,
     ) -> anyhow::Result<Vec<ParsedFont>>;
 
+    /// Enumerates every font visible to this platform locator.
     fn enumerate_all_fonts(&self) -> anyhow::Result<Vec<ParsedFont>> {
         Ok(vec![])
     }
 
+    /// Locates fonts that cover any of the requested fallback codepoints.
     fn locate_fallback_for_codepoints(
         &self,
         codepoints: &[char],
     ) -> anyhow::Result<Vec<ParsedFont>>;
 }
 
+/// Constructs the platform font locator selected by configuration.
 pub fn new_locator(locator: FontLocatorSelection) -> Arc<dyn FontLocator + Send + Sync> {
     match locator {
         FontLocatorSelection::FontConfig => {
+            // When: `locator` selects FontConfig, construct it only on supported Unix targets.
             #[cfg(all(unix, not(target_os = "macos")))]
             return Arc::new(font_config::FontConfigFontLocator {});
             #[cfg(not(all(unix, not(target_os = "macos"))))]
             panic!("fontconfig not compiled in");
         }
         FontLocatorSelection::CoreText => {
+            // When: `locator` selects CoreText, construct it only on macOS.
             #[cfg(target_os = "macos")]
             return Arc::new(core_text::CoreTextFontLocator {});
             #[cfg(not(target_os = "macos"))]
             panic!("CoreText not compiled in");
         }
         FontLocatorSelection::Gdi => {
+            // When: `locator` selects GDI, construct it only on Windows.
             #[cfg(windows)]
             return Arc::new(gdi::GdiFontLocator {});
             #[cfg(not(windows))]

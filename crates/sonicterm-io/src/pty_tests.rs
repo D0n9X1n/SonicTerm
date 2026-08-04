@@ -16,12 +16,19 @@ struct MockChild {
     try_wait_calls: Arc<AtomicUsize>,
     kill_calls: Arc<AtomicUsize>,
     events: Arc<Mutex<Vec<&'static str>>>,
+    running: bool,
+    process_id: Option<u32>,
+    kill_error: Option<std::io::ErrorKind>,
 }
 
 impl ChildKiller for MockChild {
     fn kill(&mut self) -> std::io::Result<()> {
         self.kill_calls.fetch_add(1, Ordering::Relaxed);
-        Ok(())
+        self.events.lock().push("kill");
+        match self.kill_error {
+            Some(kind) => Err(std::io::Error::new(kind, "mock kill failed")),
+            None => Ok(()),
+        }
     }
 
     fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
@@ -33,7 +40,7 @@ impl Child for MockChild {
     fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
         self.try_wait_calls.fetch_add(1, Ordering::Relaxed);
         self.events.lock().push("wait");
-        Ok(Some(ExitStatus::with_exit_code(0)))
+        Ok((!self.running).then(|| ExitStatus::with_exit_code(0)))
     }
 
     fn wait(&mut self) -> std::io::Result<ExitStatus> {
@@ -41,7 +48,7 @@ impl Child for MockChild {
     }
 
     fn process_id(&self) -> Option<u32> {
-        Some(4242)
+        self.process_id
     }
 
     #[cfg(windows)]
@@ -706,13 +713,43 @@ fn observed_shell_exit_still_kills_background_process_group() {
     }
     assert!(probe.has_exited().expect("shell exited"));
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while unsafe { libc::kill(background_pid, 0) } == 0 && std::time::Instant::now() < deadline {
+    while
+    // SAFETY: `kill` takes scalars and touches no memory; signal 0 only tests whether the reparented background pid still exists.
+    unsafe { libc::kill(background_pid, 0) } == 0 && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
-    // SAFETY: signal 0 only probes existence and does not modify the process.
-    assert_eq!(unsafe { libc::kill(background_pid, 0) }, -1);
+    assert_eq!(
+        // SAFETY: `kill` takes scalars and touches no memory; signal 0 only tests whether the reparented background pid still exists.
+        unsafe { libc::kill(background_pid, 0) },
+        -1
+    );
     assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
     drop(pty);
+}
+
+#[test]
+fn explicit_kill_returns_termination_failure() {
+    let try_wait_calls = Arc::new(AtomicUsize::new(0));
+    let kill_calls = Arc::new(AtomicUsize::new(0));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let child = MockChild {
+        try_wait_calls: try_wait_calls.clone(),
+        kill_calls: kill_calls.clone(),
+        events: events.clone(),
+        running: true,
+        process_id: None,
+        kill_error: Some(std::io::ErrorKind::PermissionDenied),
+    };
+    let mut child = ChildState::new(Box::new(child), None);
+
+    let error = terminate_child_for_platform(&mut child)
+        .expect_err("explicit kill must surface termination failure");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(error.to_string(), "mock kill failed");
+    assert_eq!(try_wait_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(kill_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(*events.lock(), ["wait", "kill"]);
 }
 
 #[test]
@@ -724,6 +761,9 @@ fn termination_signals_group_before_reaping_exited_leader() {
         try_wait_calls: try_wait_calls.clone(),
         kill_calls: kill_calls.clone(),
         events: events.clone(),
+        running: false,
+        process_id: Some(4242),
+        kill_error: None,
     };
     let child = Arc::new(Mutex::new(ChildState::new(Box::new(child), Some(4242))));
 
@@ -762,6 +802,9 @@ fn failed_session_cleanup_remains_retryable() {
         try_wait_calls: Arc::new(AtomicUsize::new(0)),
         kill_calls: Arc::new(AtomicUsize::new(0)),
         events: Arc::new(Mutex::new(Vec::new())),
+        running: false,
+        process_id: Some(4242),
+        kill_error: None,
     };
     let mut child = ChildState::new(Box::new(child), Some(4242));
 

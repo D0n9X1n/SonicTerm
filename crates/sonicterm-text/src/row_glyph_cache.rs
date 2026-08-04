@@ -263,6 +263,7 @@ pub fn row_hash(
     )
 }
 
+/// Hash row content and rendering inputs without requiring a concrete cell container.
 #[allow(clippy::too_many_arguments)]
 pub fn row_hash_cells<I, C>(
     view_top_abs: u64,
@@ -295,6 +296,7 @@ where
         let (lo, hi) = if (s_row, s_col) <= (e_row, e_col) {
             ((s_row, s_col), (e_row, e_col))
         } else {
+            // When: `(s_row, s_col)` follows `(e_row, e_col)`, normalize endpoints so drag direction cannot change the hash.
             ((e_row, e_col), (s_row, s_col))
         };
         // Only fold the bbox in if it overlaps this absolute row. A

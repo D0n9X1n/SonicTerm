@@ -79,6 +79,8 @@ impl UiPalette {
         let accent = if strong_focus {
             color::double_saturate_hex(&p.tab.active_fg.0)
         } else {
+            // When: strong_focus is off, so the accent keeps the theme's own
+            // saturation rather than the boosted accessibility variant.
             color::hex(&p.tab.active_fg.0)
         };
         let bg_elevated = color::hex(&p.background.0);
@@ -123,6 +125,7 @@ impl From<&Theme> for UiPalette {
 /// Extension trait wired into `sonicterm_cfg::theme::Theme` so call sites can
 /// write `theme.ui_palette()`.
 pub trait ThemeUiPaletteExt {
+    /// Chrome palette derived from this theme's colors.
     fn ui_palette(&self) -> UiPalette;
 }
 
@@ -140,6 +143,8 @@ pub mod color {
         if v <= 0.040_448_237 {
             v / 12.92
         } else {
+            // When: v sits above the sRGB linear-segment cutoff, so the curved
+            // gamma expression applies instead of the straight scale.
             ((v + 0.055) / 1.055).powf(2.4)
         }
     }
@@ -164,9 +169,13 @@ pub mod color {
         let s = s.strip_prefix('#').unwrap_or(s);
         let bytes = s.as_bytes();
         if bytes.len() != 6 && bytes.len() != 8 {
+            // When: bytes is neither a 6- nor 8-digit body, so the text cannot
+            // be a hex color; report the opaque-black sentinel.
             return SENTINEL;
         }
         if !bytes.iter().all(u8::is_ascii_hexdigit) {
+            // When: bytes holds a character outside the hex alphabet, so no
+            // channel can be decoded; report the opaque-black sentinel.
             return SENTINEL;
         }
         #[inline]
@@ -185,7 +194,13 @@ pub mod color {
         let r = pair(bytes, 0);
         let g = pair(bytes, 2);
         let b = pair(bytes, 4);
-        let a = if bytes.len() == 8 { pair(bytes, 6) as f32 / 255.0 } else { 1.0 };
+        let a = if bytes.len() == 8 {
+            pair(bytes, 6) as f32 / 255.0
+        } else {
+            // When: bytes carries no trailing alpha pair, so the color is
+            // fully opaque.
+            1.0
+        };
         rgba8_premul_linear(r, g, b, a)
     }
 
@@ -200,6 +215,8 @@ pub mod color {
         let (lr, lg, lb) = if old_a > f32::EPSILON {
             (c[0] / old_a, c[1] / old_a, c[2] / old_a)
         } else {
+            // When: old_a is effectively zero, so dividing it out would be
+            // undefined; start from black and let the new alpha scale it.
             (0.0, 0.0, 0.0)
         };
         [lr * a, lg * a, lb * a, a]
@@ -224,9 +241,13 @@ pub mod color {
         let body = trimmed.strip_prefix('#').unwrap_or(trimmed);
         let bytes = body.as_bytes();
         if bytes.len() != 6 && bytes.len() != 8 {
+            // When: bytes is neither a 6- nor 8-digit body, so there is no
+            // color to shift; report the opaque-black sentinel.
             return SENTINEL;
         }
         if !bytes.iter().all(u8::is_ascii_hexdigit) {
+            // When: bytes holds a character outside the hex alphabet, so no
+            // channel can be decoded; report the opaque-black sentinel.
             return SENTINEL;
         }
         #[inline]
@@ -245,7 +266,13 @@ pub mod color {
         let r = pair(bytes, 0) as f32 / 255.0;
         let g = pair(bytes, 2) as f32 / 255.0;
         let b = pair(bytes, 4) as f32 / 255.0;
-        let a = if bytes.len() == 8 { pair(bytes, 6) as f32 / 255.0 } else { 1.0 };
+        let a = if bytes.len() == 8 {
+            pair(bytes, 6) as f32 / 255.0
+        } else {
+            // When: bytes carries no trailing alpha pair, so the color is
+            // fully opaque.
+            1.0
+        };
 
         // sRGB → HSL (sRGB-space lightness; this is the perceptual knob
         // designers expect for "+5%/-8% lightness" — *not* a linear-light
@@ -269,15 +296,27 @@ pub mod color {
         let min = r.min(g).min(b);
         let l = (max + min) * 0.5;
         if (max - min).abs() < f32::EPSILON {
+            // When: max and min coincide, the color is a pure grey with no
+            // hue or saturation to recover.
             return (0.0, 0.0, l);
         }
         let d = max - min;
-        let s = if l > 0.5 { d / (2.0 - max - min) } else { d / (max + min) };
+        let s = if l > 0.5 {
+            d / (2.0 - max - min)
+        } else {
+            // When: l sits in the darker half, so the spread is normalized
+            // against max + min rather than its reflection about white.
+            d / (max + min)
+        };
         let h = if (max - r).abs() < f32::EPSILON {
             ((g - b) / d) + if g < b { 6.0 } else { 0.0 }
         } else if (max - g).abs() < f32::EPSILON {
+            // When: `g` is the max channel, so hue comes from the green sector,
+            // offsetting the blue-red spread by 2.
             ((b - r) / d) + 2.0
         } else {
+            // When: neither `r` nor `g` is the max channel, so blue leads and
+            // hue comes from the blue sector, offset by 4.
             ((r - g) / d) + 4.0
         } / 6.0;
         (h, s, l)
@@ -286,9 +325,17 @@ pub mod color {
     /// HSL (0..1) → sRGB (0..1).
     fn hsl_to_srgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
         if s.abs() < f32::EPSILON {
+            // When: s is effectively zero, the color is grey, so every channel
+            // equals the lightness and no hue sector applies.
             return (l, l, l);
         }
-        let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+        let q = if l < 0.5 {
+            l * (1.0 + s)
+        } else {
+            // When: l sits in the lighter half, so the upper bound compresses
+            // toward white as l + s * (1 - l) instead of scaling from black.
+            l + s - l * s
+        };
         let p = 2.0 * l - q;
         let hue_to_rgb = |p: f32, q: f32, mut t: f32| -> f32 {
             if t < 0.0 {
@@ -298,12 +345,18 @@ pub mod color {
                 t -= 1.0;
             }
             if t < 1.0 / 6.0 {
+                // When: t falls in the first sixth of the wheel, the channel is
+                // still climbing from p toward q.
                 return p + (q - p) * 6.0 * t;
             }
             if t < 0.5 {
+                // When: t falls in the second sixth, the channel is held at its
+                // peak q across the plateau.
                 return q;
             }
             if t < 2.0 / 3.0 {
+                // When: t falls in the third sector, the channel descends from q
+                // back toward p.
                 return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
             }
             p

@@ -45,6 +45,7 @@ pub fn find_urls(text: &str) -> Vec<UrlMatch> {
         // Find the next plausible scheme start. We anchor on ASCII
         // letters because every supported scheme begins with one.
         if !bytes[i].is_ascii_alphabetic() {
+            // When: `bytes[i]` is not ASCII alphabetic, it cannot start an allow-listed scheme.
             i += 1;
             continue;
         }
@@ -57,13 +58,16 @@ pub fn find_urls(text: &str) -> Vec<UrlMatch> {
             // panicking. Schemes are pure ASCII so a non-boundary end
             // index can never be a real match anyway.
             if let Some(slice) = text.get(i..i + sb.len()) {
+                // When: `text.get(...)` yields `slice`, the candidate ended on UTF-8 boundaries and can be compared safely.
                 if slice.eq_ignore_ascii_case(s) {
+                    // When: `slice` equals `s` ignoring case, retain this scheme length and stop probing alternatives.
                     matched_scheme = Some(sb.len());
                     break;
                 }
             }
         }
         let Some(scheme_len) = matched_scheme else {
+            // When: `matched_scheme` is absent, advance one byte and continue searching for a scheme start.
             i += 1;
             continue;
         };
@@ -71,6 +75,7 @@ pub fn find_urls(text: &str) -> Vec<UrlMatch> {
         // (e.g. `xhttp://`) should not count — the previous char,
         // if any, must not itself be a URL body char.
         if i > 0 && is_url_body_char(bytes[i - 1] as char) {
+            // When: `i` follows a URL-body character, this scheme text is embedded in a larger token.
             i += 1;
             continue;
         }
@@ -85,11 +90,13 @@ pub fn find_urls(text: &str) -> Vec<UrlMatch> {
             if matches!(last, ')' | ']' | '.' | ',' | ';' | ':' | '!' | '?') {
                 end -= 1;
             } else {
+                // When: `matches!(last, ...)` is false, preserve `last` as part of the candidate URL.
                 break;
             }
         }
         // Require at least one body byte after the scheme.
         if end <= i + scheme_len {
+            // When: `end` contains no body beyond `scheme_len`, skip the empty URL candidate.
             i += scheme_len;
             continue;
         }
@@ -113,6 +120,7 @@ pub fn url_at_char_col(text: &str, col: usize) -> Option<UrlMatch> {
     let mut byte = None;
     for (i, (b, _)) in text.char_indices().enumerate() {
         if i == col {
+            // When: character index `i` reaches `col`, retain its UTF-8 byte offset for URL lookup.
             byte = Some(b);
             break;
         }

@@ -164,23 +164,30 @@ fn best_name(records: &[crate::ftwrap::NameRecord]) -> String {
                 apple.replace(rec);
             }
             freetype::TT_PLATFORM_MICROSOFT => {
+                // When: `platform_id` is Microsoft, prefer an English Windows name when present.
                 let is_english = (rec.language_id & 0x3ff) == 0x9;
                 if is_english {
+                    // When: `is_english` is true, return this preferred Microsoft record.
                     return rec.name.clone();
                 }
                 win.replace(rec);
             }
-            _ => {}
+            _ => {
+                // When: `platform_id` is unsupported, exclude this record from fallback choices.
+            }
         }
     }
 
     if let Some(rec) = apple {
+        // When: `apple` is `Some` after no English Microsoft return, use that record.
         return rec.name.clone();
     }
     if let Some(rec) = win {
+        // When: `win` is `Some` after `apple` was `None`, use the Microsoft fallback.
         return rec.name.clone();
     }
     if let Some(rec) = uni {
+        // When: `uni` is `Some` after `apple` and `win` were `None`, use that fallback.
         return rec.name.clone();
     }
     records[0].name.clone()
@@ -195,6 +202,7 @@ fn name_from_table(
 ) -> Option<String> {
     for id in ids {
         if let Some(name_list) = names.get(id).filter(|records| !records.is_empty()) {
+            // When: `names.get(id).filter(...)` is `Some`, return this ID's best name.
             return Some(best_name(name_list));
         }
     }
@@ -221,6 +229,7 @@ fn names_from_table(
 }
 
 impl Names {
+    /// Builds canonical names and aliases from a FreeType face's decoded SFNT name table.
     pub fn from_ft_face(face: &crate::ftwrap::Face) -> Names {
         // We don't simply use the freetype functions to retrieve names,
         // as freetype has a limited set of encodings that it supports.
@@ -247,6 +256,7 @@ impl Names {
         let full_name = if sub_family.is_empty() {
             family.to_string()
         } else {
+            // When: `sub_family.is_empty()` is false, include it in the full display name.
             format!("{} {}", family, sub_family)
         };
 
@@ -267,20 +277,24 @@ impl Names {
 }
 
 impl ParsedFont {
+    /// Opens and parses the face identified by a locator handle.
     pub fn from_locator(handle: &FontDataHandle) -> anyhow::Result<Self> {
         let lib = crate::ftwrap::Library::new()?;
         let face = lib.face_from_locator(handle)?;
         Self::from_face(&face, handle.clone())
     }
 
+    /// Formats this font's aliases for diagnostic output.
     pub fn aka(&self) -> String {
         if self.names.aliases.is_empty() {
             String::new()
         } else {
+            // When: aliases are present, join them into the diagnostic AKA prefix.
             format!("(AKA: {}) ", self.names.aliases.join(", "))
         }
     }
 
+    /// Formats this parsed font as a single WezTerm-style Lua font expression.
     pub fn lua_name(&self) -> String {
         format!(
             "wezterm.font(\"{}\", {{weight={}, stretch=\"{}\", style=\"{}\"}})",
@@ -288,6 +302,7 @@ impl ParsedFont {
         )
     }
 
+    /// Formats resolved font handles as a diagnostic Lua fallback expression.
     pub fn lua_fallback(handles: &[Self]) -> String {
         let mut code = "wezterm.font_with_fallback({\n".to_string();
 
@@ -299,6 +314,7 @@ impl ParsedFont {
             if p.synthesize_bold {
                 code.push_str("  -- Will synthesize bold\n");
             } else if p.synthesize_dim {
+                // When: `p.synthesize_bold` is false and `p.synthesize_dim` is true.
                 code.push_str("  -- Will synthesize dim\n");
             }
             if p.assume_emoji_presentation {
@@ -335,6 +351,8 @@ impl ParsedFont {
             {
                 code.push_str(&format!("  \"{}\",\n", p.names.family));
             } else {
+                // When: `weight == REGULAR && stretch == Normal && style == Normal &&`
+                // every optional override `is_none()` is false, emit a Lua table.
                 code.push_str(&format!("  {{family=\"{}\"", p.names.family));
                 if p.weight != FontWeight::REGULAR {
                     code.push_str(&format!(", weight={}", p.weight));
@@ -377,6 +395,7 @@ impl ParsedFont {
         code
     }
 
+    /// Parses names, metrics, capabilities, and style metadata from an open FreeType face.
     pub fn from_face(face: &crate::ftwrap::Face, handle: FontDataHandle) -> anyhow::Result<Self> {
         let style = if face.italic() { FontStyle::Italic } else { FontStyle::Normal };
         let (ot_weight, width) = face.weight_and_width();
@@ -404,6 +423,8 @@ impl ParsedFont {
         };
 
         let has_svg =
+            // SAFETY: `face.face` is a live pointer to an initialized FreeType face record;
+            // reading `face_flags` does not outlive the wrapper borrow.
             unsafe { (((*face.face).face_flags as u32) & crate::ftwrap::FT_FACE_FLAG_SVG) != 0 };
 
         if has_svg && config::configuration().ignore_svg_fonts {
@@ -411,6 +432,8 @@ impl ParsedFont {
         }
 
         let has_color =
+            // SAFETY: `face.face` is a live pointer to an initialized FreeType face record;
+            // reading `face_flags` does not outlive the wrapper borrow.
             unsafe { (((*face.face).face_flags as u32) & crate::ftwrap::FT_FACE_FLAG_COLOR) != 0 };
         let assume_emoji_presentation = has_color;
         let is_math_font = face.has_math_table();
@@ -424,8 +447,10 @@ impl ParsedFont {
                 if lower.contains("italic") || lower.contains("kursiv") {
                     FontStyle::Italic
                 } else if lower.contains("oblique") {
+                    // When: no italic label matched but the name contains `oblique`, correct it.
                     FontStyle::Oblique
                 } else {
+                    // When: the normal face name contains no italic or oblique label, keep normal.
                     FontStyle::Normal
                 }
             }
@@ -434,6 +459,7 @@ impl ParsedFont {
                 if lower.contains("oblique") {
                     FontStyle::Oblique
                 } else {
+                    // When: `lower.contains("oblique")` is false, retain italic style.
                     FontStyle::Italic
                 }
             }
@@ -443,6 +469,7 @@ impl ParsedFont {
 
         let weight = match weight {
             FontWeight::REGULAR => {
+                // When: OpenType reports regular weight, refine it from ordered name labels.
                 let lower = names.full_name.to_lowercase();
                 let mut weight = weight;
                 for (label, candidate) in &[
@@ -462,6 +489,7 @@ impl ParsedFont {
                     ("thin", FontWeight::THIN),
                 ] {
                     if lower.contains(label) {
+                        // When: `lower.contains(label)` is true, use this first ordered weight label.
                         weight = *candidate;
                         break;
                     }
@@ -473,6 +501,7 @@ impl ParsedFont {
 
         let stretch = match stretch {
             FontStretch::Normal => {
+                // When: OpenType reports normal stretch, refine it from ordered name labels.
                 let lower = names.full_name.to_lowercase();
                 let mut stretch = stretch;
                 for (label, value) in &[
@@ -488,6 +517,7 @@ impl ParsedFont {
                     ("expanded", FontStretch::Expanded),
                 ] {
                     if lower.contains(label) {
+                        // When: `lower.contains(label)` is true, use this first ordered stretch label.
                         stretch = *value;
                         break;
                     }
@@ -540,55 +570,70 @@ impl ParsedFont {
         Ok(wanted.intersection(&cov))
     }
 
+    /// Returns the canonical names and aliases parsed for this font.
     pub fn names(&self) -> &Names {
         &self.names
     }
 
+    /// Returns the parsed or name-refined font weight.
     pub fn weight(&self) -> FontWeight {
         self.weight
     }
 
+    /// Returns the parsed or name-refined font stretch.
     pub fn stretch(&self) -> FontStretch {
         self.stretch
     }
 
+    /// Returns the parsed or name-refined font style.
     pub fn style(&self) -> FontStyle {
         self.style
     }
 
+    /// Reports whether a requested family matches this font's origin, names, or path.
     pub fn matches_name(&self, attr: &FontAttributes) -> bool {
         if matches!(
             &self.handle.origin,
             FontOrigin::FontConfigMatch(requested) if requested == &attr.family
         ) {
+            // When: `matches!(origin, FontConfigMatch(requested) if requested == family)` is true.
             return true;
         }
         if attr.family == self.names.family {
+            // When: `attr.family == self.names.family`, accept the canonical family match.
             return true;
         }
         if let Some(path) = self.handle.path_str() {
+            // When: `self.handle.path_str()` is `Some`, compare the explicit path.
             if attr.family == path {
+                // When: `attr.family == path`, the request directly names this font file.
                 return true;
             }
         }
         self.matches_full_or_ps_name(attr) || self.matches_alias(attr)
     }
 
+    /// Reports whether a requested family equals any parsed family alias.
     pub fn matches_alias(&self, attr: &FontAttributes) -> bool {
         for a in &self.names.aliases {
             if *a == attr.family {
+                // When: an alias equals the requested family, accept the font.
                 return true;
             }
         }
         false
     }
 
+    /// Reports whether a requested family equals the full or PostScript name.
     pub fn matches_full_or_ps_name(&self, attr: &FontAttributes) -> bool {
         if attr.family == self.names.full_name {
+            // When: `attr.family == self.names.full_name`, accept the full-name match.
             return true;
         }
         if let Some(ps) = self.names.postscript_name.as_ref() {
+            // When: `postscript_name.as_ref()` is `Some`, compare that name.
             if attr.family == *ps {
+                // When: `attr.family == *ps`, accept the PostScript-name match.
                 return true;
             }
         }
@@ -599,13 +644,14 @@ impl ParsedFont {
     /// This implementation is derived from the `find_best_match` function
     /// in the font-kit crate which is
     /// Copyright © 2018 The Pathfinder Project Developers.
-    /// https://drafts.csswg.org/css-fonts-3/#font-style-matching says
+    /// <https://drafts.csswg.org/css-fonts-3/#font-style-matching> says
     pub fn best_matching_index<P: std::ops::Deref<Target = Self> + std::fmt::Debug>(
         attr: &FontAttributes,
         fonts: &[P],
         pixel_size: u16,
     ) -> Option<usize> {
         if fonts.is_empty() {
+            // When: `fonts.is_empty()` is true, no candidate index can be selected.
             return None;
         }
 
@@ -616,8 +662,8 @@ impl ParsedFont {
         let stretch = if candidates.iter().any(|&idx| fonts[idx].stretch == attr.stretch) {
             attr.stretch
         } else if attr.stretch <= FontStretch::Normal {
-            // Find the closest stretch, looking at narrower first before
-            // looking at wider candidates
+            // When: no exact stretch exists and `attr.stretch <= Normal`, prefer narrower.
+            // Find the closest stretch, looking at narrower first before looking at wider candidates
             match candidates
                 .iter()
                 .filter(|&&idx| fonts[idx].stretch < attr.stretch)
@@ -632,6 +678,7 @@ impl ParsedFont {
                 }
             }
         } else {
+            // When: no exact stretch exists and the request is wider than normal, prefer wider.
             // Look at wider values, then narrower values
             match candidates
                 .iter()
@@ -672,17 +719,17 @@ impl ParsedFont {
         } else if attr.weight == FontWeight::REGULAR
             && candidates.iter().any(|&idx| fonts[idx].weight == FontWeight::MEDIUM)
         {
-            // https://drafts.csswg.org/css-fonts-3/#font-style-matching says
-            // that if they want weight=400 and we don't have 400,
-            // look at weight 500 first
+            // When: the regular/medium availability predicate is true, choose medium first.
+            // CSS Fonts says that if weight 400 is unavailable, look at weight 500 first.
             FontWeight::MEDIUM
         } else if attr.weight == FontWeight::MEDIUM
             && candidates.iter().any(|&idx| fonts[idx].weight == FontWeight::REGULAR)
         {
-            // Similarly, look at regular before Medium if they wanted
-            // Medium and we didn't have it
+            // When: `attr.weight == MEDIUM` and a regular candidate exists, choose regular.
+            // Similarly, look at regular before medium when medium is unavailable.
             FontWeight::REGULAR
         } else if attr.weight <= FontWeight::MEDIUM {
+            // When: no exact/special-case weight matches and the request is medium or lighter.
             // Find best lighter weight, else best heavier weight
             match candidates
                 .iter()
@@ -698,6 +745,7 @@ impl ParsedFont {
                 }
             }
         } else {
+            // When: no exact match exists and the requested weight is heavier than medium.
             // Find best heavier weight, else best lighter weight
             match candidates
                 .iter()
@@ -720,6 +768,8 @@ impl ParsedFont {
         // Check for best matching pixel strike, but only if all
         // candidates have pixel strikes
         if candidates.iter().all(|&idx| !fonts[idx].pixel_sizes.is_empty()) {
+            // When: `candidates.iter().all(|idx| !pixel_sizes.is_empty())` is true,
+            // compare each candidate's nearest strike distance.
             if let Some((_distance, idx)) = candidates
                 .iter()
                 .map(|&idx| {
@@ -733,6 +783,7 @@ impl ParsedFont {
                 })
                 .min()
             {
+                // When: `.min()` returns `Some`, select its nearest-strike candidate.
                 return Some(idx);
             }
         }
@@ -741,6 +792,7 @@ impl ParsedFont {
         candidates.into_iter().next()
     }
 
+    /// Selects and removes the best matching font, then applies requested synthesis.
     pub fn best_match(
         attr: &FontAttributes,
         pixel_size: u16,
@@ -862,6 +914,7 @@ pub(crate) fn load_built_in_fonts(font_info: &mut Vec<ParsedFont>) -> anyhow::Re
     Ok(())
 }
 
+/// Parses a font source and returns its best face for the requested attributes.
 pub fn best_matching_font(
     source: &FontDataSource,
     font_attr: &FontAttributes,
@@ -903,6 +956,7 @@ pub(crate) fn parse_and_collect_font_info(
                 font_info.push(parsed);
             }
         } else {
+            // When: `face.variations()` returns `Err`, parse the base face instead.
             let parsed = ParsedFont::from_locator(&locator)?;
             font_info.push(parsed);
         }

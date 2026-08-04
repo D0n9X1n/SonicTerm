@@ -71,14 +71,20 @@ impl FontRasterizer for FreeTypeRasterizer {
         ) {
             Ok(g) => g,
             Err(err) => {
+                // When: err came back from load_and_render_glyph, so the glyph
+                // may still be renderable by another path.
                 if err.root_cause().downcast_ref::<IsSvg>().is_some()
                     || err.root_cause().downcast_ref::<IsColr1OrLater>().is_some()
                 {
+                    // When: the root_cause is an SVG or COLRv1 glyph, which
+                    // FreeType cannot raster, so a colour path takes over.
                     drop(face);
 
                     let config = config::configuration();
                     match config.font_colr_rasterizer {
                         FontRasterizerSelection::FreeType => {
+                            // When: FreeType is the configured COLR rasterizer,
+                            // so outlines are walked with hinting disabled.
                             return self.rasterize_outlines(
                                 glyph_pos,
                                 load_flags | FT_LOAD_NO_HINTING as i32,
@@ -86,6 +92,8 @@ impl FontRasterizer for FreeTypeRasterizer {
                         }
                         FontRasterizerSelection::Harfbuzz
                         | FontRasterizerSelection::DirectWrite => {
+                            // When: Harfbuzz or DirectWrite is configured, so
+                            // the HarfBuzz painter renders this glyph instead.
                             return self.hb_raster.rasterize_glyph(glyph_pos, size, dpi);
                         }
                     }
@@ -95,6 +103,8 @@ impl FontRasterizer for FreeTypeRasterizer {
         };
 
         let mode: ftwrap::FT_Pixel_Mode =
+            // SAFETY: pixel_mode is the FT_Pixel_Mode discriminant FreeType
+            // just wrote into this slot, so it is a valid variant of that enum.
             unsafe { mem::transmute(u32::from(ft_glyph.bitmap.pixel_mode)) };
 
         // pitch is the number of bytes per source row
@@ -116,7 +126,10 @@ impl FontRasterizer for FreeTypeRasterizer {
                 "FreeType bitmap source requires {source_len} bytes, limit is {MAX_RASTERIZED_GLYPH_BYTES}"
             );
         }
-        let data = unsafe { crate::ftwrap::from_raw_parts(ft_glyph.bitmap.buffer, source_len) };
+        let data =
+            // SAFETY: source_len is rows*pitch, the extent FreeType allocated
+            // for this bitmap, and the borrowed face keeps the slot alive.
+            unsafe { crate::ftwrap::from_raw_parts(ft_glyph.bitmap.buffer, source_len) };
 
         let glyph = match mode {
             ftwrap::FT_Pixel_Mode::FT_PIXEL_MODE_LCD => {
@@ -159,11 +172,15 @@ impl FreeTypeRasterizer {
             let mut x = 0;
             for i in 0..pitch {
                 if x >= width {
+                    // When: x reached width, so the remaining bytes in this row
+                    // are pitch padding rather than glyph pixels.
                     break;
                 }
                 let mut b = data[src_offset + i];
                 for _ in 0..8 {
                     if x >= width {
+                        // When: x reached width mid-byte, so the low bits of
+                        // this byte are padding past the glyph edge.
                         break;
                     }
                     if b & 0x80 == 0x80 {
@@ -344,6 +361,8 @@ impl FreeTypeRasterizer {
         let height = ft_glyph.bitmap.rows as usize;
 
         if width == 0 || height == 0 {
+            // When: width or height is zero, so there is no ink to copy.
+
             // Handle this case separately; the ImageBuffer
             // constructor doesn't like 0-size dimensions
             return Ok(RasterizedGlyph {
@@ -396,6 +415,12 @@ impl FreeTypeRasterizer {
         })
     }
 
+    /// Open the font behind `parsed`'s locator handle for FreeType rasterizing.
+    ///
+    /// Owns its own `FT_Library` and face, applies the synthetic-italic
+    /// transform when `parsed` requests it, and builds the HarfBuzz rasterizer
+    /// used as the fallback for SVG and COLRv1 glyphs FreeType cannot render.
+    /// `display_pixel_geometry` selects the subpixel order used for LCD modes.
     pub fn from_locator(
         parsed: &ParsedFont,
         display_pixel_geometry: DisplayPixelGeometry,
@@ -404,6 +429,8 @@ impl FreeTypeRasterizer {
         let lib = ftwrap::Library::new()?;
         let mut face = lib.face_from_locator(&parsed.handle)?;
         let has_color =
+            // SAFETY: face_from_locator returned an initialized FT_Face, and
+            // `face` owns it for the whole read of its face_flags bitfield.
             unsafe { (((*face.face).face_flags as u32) & ftwrap::FT_FACE_FLAG_COLOR) != 0 };
 
         if parsed.synthesize_italic {
@@ -448,12 +475,16 @@ impl FreeTypeRasterizer {
         // any skew that may have been applied to the font.
         // So let's extract the offending scaling factors and we'll
         // compensate when we rasterize the paths.
-        let (scale_x, scale_y) = unsafe {
-            let upem = (*face.face).units_per_EM as f64;
-            let metrics = (*(*face.face).size).metrics;
-            log::trace!("upem={upem}, metrics: {metrics:#?}");
+        let (scale_x, scale_y) = {
+            // SAFETY: `rasterize_glyph` called `set_font_size` before this fallback,
+            // so the borrowed face has a live size slot with initialized scale metrics.
+            unsafe {
+                let upem = (*face.face).units_per_EM as f64;
+                let metrics = (*(*face.face).size).metrics;
+                log::trace!("upem={upem}, metrics: {metrics:#?}");
 
-            (1. / metrics.x_scale.to_num::<f64>(), 1. / metrics.y_scale.to_num::<f64>())
+                (1. / metrics.x_scale.to_num::<f64>(), 1. / metrics.y_scale.to_num::<f64>())
+            }
         };
 
         let palette = face.get_palette_data()?;
@@ -486,6 +517,8 @@ fn rasterize_from_ops(
     let width_px = width as usize;
     let height_px = height as usize;
     if width_px == 0 || height_px == 0 {
+        // When: width_px or height_px collapsed to zero, so the paint ops
+        // covered no pixels and an empty bitmap stands in.
         return Ok(RasterizedGlyph {
             data: vec![],
             height: 0,
@@ -539,8 +572,13 @@ impl<'a> Walker<'a> {
     fn walk_paint(&mut self, paint: FT_Opaque_Paint_, level: usize) -> anyhow::Result<()> {
         use FT_PaintFormat_::*;
 
-        let paint = self.face.get_paint(paint)?;
+        let paint =
+            // SAFETY: every recursive handle originates from `get_color_glyph_paint`,
+            // this face's decoded paint, or this face's layer iterator and is consumed synchronously.
+            unsafe { self.face.get_paint(paint) }?;
 
+        // SAFETY: `paint.format` selects each union arm; layer iterators come from this face's
+        // selected arm and are consumed by `get_paint_layers` only during this synchronous walk.
         unsafe {
             match paint.format {
                 FT_COLR_PAINTFORMAT_COLR_LAYERS => {
@@ -762,6 +800,8 @@ impl<'a> Walker<'a> {
             // tint this with the actual color in the correct context
             (0xff, 0xff, 0xff, 1.0)
         } else {
+            // When: palette_index names a real entry rather than the 0xffff
+            // foreground sentinel, so the palette supplies the colour.
             let color = self.face.get_palette_entry(c.palette_index as _)?;
             (color.red, color.green, color.blue, color.alpha as f64 / 255.)
         };
@@ -776,12 +816,22 @@ impl<'a> Walker<'a> {
         loop {
             let mut stop = MaybeUninit::<FT_ColorStop>::zeroed();
 
-            if unsafe { FT_Get_Colorline_Stops(self.face.face, stop.as_mut_ptr(), &mut iter) } == 0
-            {
+            let got_stop = {
+                // SAFETY: the borrowed face keeps this FT_Face alive, and
+                // FreeType writes through the out-pointer into the zeroed slot.
+                unsafe { FT_Get_Colorline_Stops(self.face.face, stop.as_mut_ptr(), &mut iter) }
+            };
+            if got_stop == 0 {
+                // When: got_stop is zero, the iterator is exhausted, so the
+                // colour line has no further stops to decode.
                 break;
             }
 
-            let stop = unsafe { stop.assume_init() };
+            let stop = {
+                // SAFETY: got_stop was non-zero, so FreeType initialized the
+                // stop slot this reads.
+                unsafe { stop.assume_init() }
+            };
 
             color_stops.push(ColorStop {
                 offset: stop.stop_offset.to_num(),

@@ -85,10 +85,12 @@ pub struct PresentationWidth<'a> {
 }
 
 impl<'a> PresentationWidth<'a> {
+    /// Return the cell width for a cluster range; the current placeholder reports zero.
     pub fn num_cells(&self, _cluster_range: Range<usize>) -> u8 {
         0
     }
 
+    /// Map a byte offset to its cell index; the current placeholder is identity.
     pub fn byte_to_cell_idx(&self, start_byte: usize) -> usize {
         start_byte
     }
@@ -119,6 +121,7 @@ pub trait FontShaper {
 
 pub use config::FontShaperSelection;
 
+/// Construct the configured font shaper, rejecting removed implementations.
 pub fn new_shaper(
     config: &config::ConfigHandle,
     handles: &[ParsedFont],

@@ -69,3 +69,7 @@ impl WindowsSoftwarePresenterPreference {
         matches!(self, Self::Force)
     }
 }
+
+#[cfg(test)]
+#[path = "software_presenter_tests.rs"]
+mod software_presenter_tests;

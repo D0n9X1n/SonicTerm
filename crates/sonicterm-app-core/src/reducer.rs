@@ -31,11 +31,10 @@ pub(crate) fn reduce_leaf(
         AppIntent::PtyBurst { pane: _, generation: _ } => {
             // Render the affected window. The platform boundary owns
             // the pane→window map (it lives in `App.windows` / the
-            // pane tree); for 2b we emit a "best-known" Render with
+            // pane tree), so this emits a "best-known" Render with
             // a sentinel window id of 0 — the boundary's
             // `dispatch_effects` ignores the window field on Render
-            // and uses its frontmost-window discriminator. 2c will
-            // route this through `AppState` once panes migrate.
+            // and uses its frontmost-window discriminator.
             out.push(AppEffect::Render {
                 window: sonicterm_types::WindowKey::new(0),
                 reason: RedrawReason::PtyBurst,
@@ -48,18 +47,18 @@ pub(crate) fn reduce_leaf(
 
         // ── Keyboard / IME leaf ─────────────────────────────────────
         AppIntent::Key { window, code: _, mods: _, pressed } => {
-            // The actual byte encoding stays at the platform boundary
-            // until 2c (keymap.rs is winit-flavoured). Emit a Render
+            // The actual byte encoding stays at the platform boundary,
+            // since `keymap.rs` is winit-flavoured. Emit a Render
             // so the cursor blink resets immediately on key down.
             if pressed {
                 out.push(AppEffect::Render { window, reason: RedrawReason::UserInput });
             }
         }
         AppIntent::ImeCommit { window, text } => {
-            // Per spec §3: commit goes to the focused pane's PTY.
-            // Pane is implicit (focused at write time); 2b boundary
-            // resolves it. We carry the bytes verbatim.
-            // Use pane sentinel 0 — boundary translates to focused pane.
+            // Commit goes to the focused pane's PTY. The pane is
+            // implicit (focused at write time) and the boundary
+            // resolves it, so the bytes are carried verbatim against
+            // pane sentinel 0.
             out.push(AppEffect::PtyWrite {
                 pane: crate::supporting::PaneId(0),
                 data: text.into_bytes().into(),
@@ -74,13 +73,13 @@ pub(crate) fn reduce_leaf(
 
         // ── Clipboard leaf ──────────────────────────────────────────
         AppIntent::CopySelection { window: _ } => {
-            // 2b: the actual selection text resolution happens at the
+            // The actual selection text resolution happens at the
             // boundary (selection lives on WindowState). We emit a
             // ClipboardSet sentinel with an empty payload; the
             // boundary's `dispatch_effects` substitutes the real
             // selected text it just resolved. This keeps the Effect
-            // surface stable even though AppState doesn't carry the
-            // selection yet.
+            // surface stable even though AppState does not carry the
+            // selection.
             out.push(AppEffect::ClipboardSet { text: String::new() });
         }
         AppIntent::Paste { window: _, text, bracketed: _ } => {
@@ -91,8 +90,8 @@ pub(crate) fn reduce_leaf(
         }
 
         // ── Scroll leaf — emit Render(Scroll); scroll mutation
-        // happens at the boundary in 2b (scroll lives on the
-        // grid/pane, not AppState). 2c lifts it into AppState. ─────
+        // happens at the boundary, since scroll lives on the
+        // grid/pane rather than AppState. ─────────────────────────
         AppIntent::ScrollUp { window, .. }
         | AppIntent::ScrollDown { window, .. }
         | AppIntent::ScrollPageUp { window }
@@ -103,7 +102,7 @@ pub(crate) fn reduce_leaf(
             out.push(AppEffect::Render { window, reason: RedrawReason::Scroll });
         }
 
-        // ── Mouse wheel — leaf in 2b (scroll dispatch at boundary). ─
+        // ── Mouse wheel — scroll dispatch happens at the boundary. ──
         AppIntent::MouseWheel { window, .. } => {
             out.push(AppEffect::Render { window, reason: RedrawReason::Scroll });
         }
@@ -138,9 +137,9 @@ pub(crate) fn reduce_leaf(
             out.push(AppEffect::Quit);
         }
 
-        // ── Window lifecycle (M6a-expand-2c-window) ─────────────────
+        // ── Window lifecycle ────────────────────────────────────────
         //
-        // Per FINAL spec §3:
+        // Intent → effect mapping:
         //   NewWindow           → WindowOpen + (deferred MenubarUpdate)
         //   WindowCloseRequested→ WindowClose [+ Quit if last]
         //   WindowFocused       → Render(Focus) (only on transition)
@@ -203,9 +202,9 @@ pub(crate) fn reduce_leaf(
             // session-restore) to read it.
         }
 
-        // ── Tab lifecycle (M6a-expand-2c-tab) ───────────────────────
+        // ── Tab lifecycle ───────────────────────────────────────────
         //
-        // Per FINAL spec §3:
+        // Intent → effect mapping:
         //   NewTab        → Render(TabAdded)   + tab_count++ + active_tab_idx = new_idx
         //   CloseTab      → Render(TabRemoved) + tab_count-- + active_tab_idx reset if matched
         //   NextTab       → Render(TabSwitch)  + active_tab_idx = (cur+1) % tab_count
@@ -216,10 +215,9 @@ pub(crate) fn reduce_leaf(
         //                   the boundary's `os_drag` path drives the new-window creation
         //                   in its own dispatch_intent call)
         //
-        // Multi-window tab state lifts in 2c-pane (`AppState` will own
-        // a per-WindowKey tab vector). Until then `tab_count` /
-        // `active_tab_idx` track the focused window only — the
-        // boundary in `sonicterm-app::app::WindowState.tabs` remains
+        // `tab_count` / `active_tab_idx` track the focused window
+        // only — the boundary in
+        // `sonicterm-app::app::WindowState.tabs` remains
         // source-of-truth for actual tab content + the visible strip.
         AppIntent::NewTab { window, cwd: _ } => {
             _state.tab_count = _state.tab_count.saturating_add(1);
@@ -237,14 +235,22 @@ pub(crate) fn reduce_leaf(
             // transition (not a no-op).
             match _state.active_tab_idx {
                 Some(cur) if cur == idx => {
-                    _state.active_tab_idx =
-                        if _state.tab_count == 0 { None } else { Some(cur.saturating_sub(1)) };
+                    _state.active_tab_idx = if _state.tab_count == 0 {
+                        None
+                    } else {
+                        // When: tab_count still holds tabs the tracker steps back
+                        // one slot so the next activate reads as a real change.
+                        Some(cur.saturating_sub(1))
+                    };
                 }
                 Some(cur) if cur > idx => {
                     // Indices above the removed one shift down by one.
                     _state.active_tab_idx = Some(cur - 1);
                 }
-                _ => {}
+                _ => {
+                    // When: active_tab_idx is unset, or idx sits after the closed
+                    // tab, the tracker is left exactly as it was.
+                }
             }
             out.push(AppEffect::Render { window, reason: RedrawReason::TabRemoved });
         }
@@ -255,6 +261,8 @@ pub(crate) fn reduce_leaf(
                 _state.active_tab_idx = Some(next);
                 out.push(AppEffect::Render { window, reason: RedrawReason::TabSwitch });
             } else if _state.tab_count == 1 && _state.active_tab_idx.is_none() {
+                // When: tab_count is 1 with an unset active_tab_idx the tracker
+                // adopts the only slot; no switch occurred, so no Render.
                 _state.active_tab_idx = Some(0);
             }
         }
@@ -266,14 +274,19 @@ pub(crate) fn reduce_leaf(
                 _state.active_tab_idx = Some(prev);
                 out.push(AppEffect::Render { window, reason: RedrawReason::TabSwitch });
             } else if _state.tab_count == 1 && _state.active_tab_idx.is_none() {
+                // When: tab_count is 1 with an unset active_tab_idx the tracker
+                // adopts the only slot; no switch occurred, so no Render.
                 _state.active_tab_idx = Some(0);
             }
         }
         AppIntent::GoToTab { window, idx } => {
-            // Out-of-range: drop silently (matches boundary's
-            // saturating `tabs.activate(i)` — clamps to last valid).
+            // When: GoToTab names a slot past the end it is clamped to the last
+            // valid tab, matching the boundary's saturating `tabs.activate(i)`.
+
             let n = _state.tab_count as usize;
             if n == 0 {
+                // When: n is zero there is no tab to activate, so the intent is
+                // dropped without touching the tracker or emitting a Render.
                 return;
             }
             let clamped = idx.min(n - 1);
@@ -288,22 +301,29 @@ pub(crate) fn reduce_leaf(
             // path then re-issues a `NewTab` Intent on the new
             // window once winit has returned its WindowId.
             //
-            // 2c-misc: emit the WindowOpen cascade in the same batch
-            // so consumers observe both halves of the tear-out in a
-            // single `handle()` call. (The reducer currently lacks
-            // access to the state-machine's `pending` queue; using
-            // the `out` batch keeps the contract observable without
-            // changing the reducer signature.)
+            // The WindowOpen cascade is emitted in the same batch so
+            // consumers observe both halves of the tear-out in a single
+            // `handle()` call. The reducer has no access to the
+            // state-machine's `pending` queue, so the `out` batch keeps
+            // that contract observable without changing the signature.
             _state.tab_count = _state.tab_count.saturating_sub(1);
             match _state.active_tab_idx {
                 Some(cur) if cur == src_tab => {
-                    _state.active_tab_idx =
-                        if _state.tab_count == 0 { None } else { Some(cur.saturating_sub(1)) };
+                    _state.active_tab_idx = if _state.tab_count == 0 {
+                        None
+                    } else {
+                        // When: tab_count still holds tabs the tracker steps back
+                        // one slot so the next activate reads as a real change.
+                        Some(cur.saturating_sub(1))
+                    };
                 }
                 Some(cur) if cur > src_tab => {
                     _state.active_tab_idx = Some(cur - 1);
                 }
-                _ => {}
+                _ => {
+                    // When: active_tab_idx is unset, or src_tab sits after the
+                    // active tab, the tracker survives the tear-out unchanged.
+                }
             }
             _state.live_window_count = _state.live_window_count.saturating_add(1);
             out.push(AppEffect::Render { window: src_window, reason: RedrawReason::TabRemoved });
@@ -313,9 +333,9 @@ pub(crate) fn reduce_leaf(
             });
         }
 
-        // ── Pane lifecycle / navigation (M6a-expand-2c-pane) ────────
+        // ── Pane lifecycle / navigation ─────────────────────────────
         //
-        // Per FINAL spec §3:
+        // Intent → effect mapping:
         //   SplitPane         → Render(Layout)  + pane_count++ + focus = new
         //   ClosePane         → Render(Layout)  + pane_count-- + focus clamp
         //   ResizePane        → Render(Layout)  (no count mutation)
@@ -355,6 +375,8 @@ pub(crate) fn reduce_leaf(
             _state.focused_pane_idx = if _state.pane_count == 0 {
                 None
             } else {
+                // When: pane_count still holds leaves the focus tracker is
+                // clamped to the last surviving index rather than cleared.
                 let cur = _state.focused_pane_idx.unwrap_or(0);
                 let max = (_state.pane_count as usize).saturating_sub(1);
                 Some(cur.min(max))
@@ -378,9 +400,9 @@ pub(crate) fn reduce_leaf(
             }
         }
 
-        // ── Mouse (M6a-expand-2c-mouse) ─────────────────────────────
+        // ── Mouse ───────────────────────────────────────────────────
         //
-        // Per FINAL spec §3:
+        // Intent → effect mapping:
         //   MouseButton(pressed,Left)  → Render(Selection) (transition;
         //                                 boundary owns selection geom)
         //                              + tracks `mouse_left_down`
@@ -400,7 +422,6 @@ pub(crate) fn reduce_leaf(
         // drag_session}` remain source-of-truth for the actual hit-tests
         // (tab drag, selection extend, scrollbar drag, OSC8 hover); the
         // reducer's job here is the observability + dedupe surface.
-        // MouseWheel + HoverUrl were routed in 2b and stay there.
         AppIntent::MouseButton { window, pressed, button, mods: _, pos } => {
             _state.last_mouse_pos = Some(pos);
             let is_left = matches!(button, crate::supporting::MouseButton::Left);
@@ -411,9 +432,8 @@ pub(crate) fn reduce_leaf(
                     out.push(AppEffect::Render { window, reason: RedrawReason::Selection });
                 }
             } else {
-                // Right / middle / extra: emit UserInput so the boundary
-                // can repaint a freshly-pasted region or a context menu
-                // affordance immediately.
+                // When: is_left is false the press is right, middle, or extra, so
+                // UserInput lets the boundary repaint a paste or context menu.
                 out.push(AppEffect::Render { window, reason: RedrawReason::UserInput });
             }
         }
@@ -433,17 +453,16 @@ pub(crate) fn reduce_leaf(
             }
         }
 
-        // ── Non-leaf — stubs (full reducer arms land in 2c-misc) ────
         AppIntent::FilesDropped { .. } | AppIntent::Tick { .. } => {
-            // Intentionally empty per spec §3 (record-only / clock-only).
+            // When: the intent is FilesDropped or Tick it is record-only, so the
+            // reducer mutates no state and emits no effect.
         }
 
-        // ── ForegroundProcChanged (M6a-expand-2c-misc) ──────────────
+        // ── ForegroundProcChanged ───────────────────────────────────
         //
-        // Per FINAL spec §3: emits Render(TitleOrTab) when the
-        // process name actually changed (transition-guarded like
-        // WindowFocused). The boundary's per-pane proc snapshot
-        // remains source-of-truth.
+        // Emits Render(TitleOrTab) when the process name actually
+        // changed (transition-guarded like WindowFocused). The
+        // boundary's per-pane proc snapshot remains source-of-truth.
         AppIntent::ForegroundProcChanged { pane: _, name } => {
             if _state.fg_proc_name != name {
                 _state.fg_proc_name = name;
@@ -454,12 +473,12 @@ pub(crate) fn reduce_leaf(
             }
         }
 
-        // ── Selection (M6a-expand-2c-misc) ──────────────────────────
+        // ── Selection ───────────────────────────────────────────────
         //
-        // Per FINAL spec §3: every selection mutation emits
-        // Render(Selection). Start/End/Clear additionally flip
-        // `selection_active`. Extend always emits while a selection
-        // is active (drag-extend repaint gate).
+        // Every selection mutation emits Render(Selection).
+        // Start/End/Clear additionally flip `selection_active`.
+        // Extend always emits while a selection is active
+        // (drag-extend repaint gate).
         AppIntent::SelectionStart { window, anchor: _, mode: _ } => {
             _state.selection_active = true;
             out.push(AppEffect::Render { window, reason: RedrawReason::Selection });
@@ -482,12 +501,11 @@ pub(crate) fn reduce_leaf(
             }
         }
 
-        // ── Search overlay (M6a-expand-2c-misc) ─────────────────────
+        // ── Search overlay ──────────────────────────────────────────
         //
-        // Per FINAL spec §3: Open/Close are transition-guarded
-        // (Render(Overlay) only on the actual open/close). Query
-        // and Step always emit while the overlay is open
-        // (search-result repaint gate).
+        // Open/Close are transition-guarded (Render(Overlay) only on
+        // the actual open/close). Query and Step always emit while
+        // the overlay is open (search-result repaint gate).
         AppIntent::OpenSearch { window } => {
             if !_state.search_open {
                 _state.search_open = true;
@@ -506,14 +524,14 @@ pub(crate) fn reduce_leaf(
             }
         }
 
-        // ── Command palette (M6a-expand-2c-misc) ────────────────────
+        // ── Command palette ─────────────────────────────────────────
         //
-        // Per FINAL spec §3: Toggle flips `palette_open` and emits
-        // Render(Overlay) on every transition. Filter/Step emit
-        // while open. Submit closes the palette (emits Overlay) and
-        // the cascaded Intent the choice translates to lands as a
-        // separate dispatch_intent from the boundary's palette
-        // handler (see overlays.rs).
+        // Toggle flips `palette_open` and emits Render(Overlay) on
+        // every transition. Filter/Step emit while open. Submit
+        // closes the palette (emits Overlay) and the cascaded Intent
+        // the choice translates to arrives as a separate
+        // dispatch_intent from the boundary's palette handler
+        // (see overlays.rs).
         AppIntent::ToggleCommandPalette { window } => {
             _state.palette_open = !_state.palette_open;
             out.push(AppEffect::Render { window, reason: RedrawReason::Overlay });
@@ -531,7 +549,7 @@ pub(crate) fn reduce_leaf(
             }
         }
 
-        // ── OS drag outcome (M6a-expand-2c-misc) ────────────────────
+        // ── OS drag outcome ─────────────────────────────────────────
         //
         // The drag completes (committed or not). Emit `OsDragEnd`
         // so the boundary's pending-drag table can settle.
@@ -542,11 +560,11 @@ pub(crate) fn reduce_leaf(
             });
         }
 
-        // ── Broadcast scope (M6a-expand-2c-misc) ────────────────────
+        // ── Broadcast scope ─────────────────────────────────────────
         //
-        // Per FINAL spec §3: changing scope re-paints the title /
-        // tab strip (broadcast indicator glyph). Transition-guarded
-        // — no-op set emits nothing.
+        // Changing scope re-paints the title / tab strip (broadcast
+        // indicator glyph). Transition-guarded — no-op set emits
+        // nothing.
         AppIntent::SetBroadcastScope { scope } => {
             if _state.broadcast_scope != scope {
                 _state.broadcast_scope = scope;

@@ -1,12 +1,9 @@
 //! Platform-agnostic modifier-key bitflags.
 //!
 //! `ModKey` is a winit-free replacement for `winit::keyboard::ModifiersState`
-//! used by platform-agnostic crates (`sonicterm-app-core`, future
-//! `sonicterm-reducer`). The conversion from `ModifiersState` lives
-//! at the platform boundary in `sonicterm-app` so this crate stays
-//! winit-free.
-//!
-//! Introduced at M6a-expand-1.
+//! used by platform-agnostic crates such as `sonicterm-app-core`. Conversion
+//! from `ModifiersState` lives at the `sonicterm-app` platform boundary so this
+//! crate remains independent of winit.
 
 use bitflags::bitflags;
 

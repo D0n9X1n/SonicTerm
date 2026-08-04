@@ -65,10 +65,13 @@ impl QuitHold {
     /// chord does not accidentally quit.
     pub fn on_press(&mut self, now: Instant, is_repeat: bool) -> QuitHoldAction {
         if is_repeat {
+            // When: `is_repeat` comes from holding the first chord, ignore it so one physical press cannot confirm quit.
             return QuitHoldAction::None;
         }
         if let Some(deadline) = self.confirm_until {
+            // When: `confirm_until` is armed, compare this independent press with its confirmation window.
             if now <= deadline {
+                // When: `now` is within `deadline`, consume the armed state and confirm the requested quit.
                 self.confirm_until = None;
                 return QuitHoldAction::Quit;
             }

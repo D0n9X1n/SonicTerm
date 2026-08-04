@@ -53,12 +53,16 @@ pub struct SplitterHit {
 }
 
 impl Rect {
+    /// Build a rectangle from its top-left origin and size.
     pub fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
         Self { x, y, w, h }
     }
+    /// Return the midpoint, which `focus_neighbor` uses to rank spatial neighbours.
     pub fn center(&self) -> (f32, f32) {
         (self.x + self.w * 0.5, self.y + self.h * 0.5)
     }
+    /// Report whether a point lies inside, treating right and bottom edges as outside
+    /// so abutting panes never both claim the same pixel.
     pub fn contains(&self, x: f32, y: f32) -> bool {
         x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
     }
@@ -72,6 +76,7 @@ fn coalesce_splitter_rects(mut splitters: Vec<SplitterRect>) -> Vec<SplitterRect
         'outer: for i in 0..splitters.len() {
             for j in (i + 1)..splitters.len() {
                 if let Some(merged) = merge_splitter(splitters[i], splitters[j], eps) {
+                    // When: `merge_splitter` returned `Some`, restart the scan because removal shifts indices.
                     splitters[i] = merged;
                     splitters.remove(j);
                     changed = true;
@@ -85,18 +90,22 @@ fn coalesce_splitter_rects(mut splitters: Vec<SplitterRect>) -> Vec<SplitterRect
 
 fn merge_splitter(a: SplitterRect, b: SplitterRect, eps: f32) -> Option<SplitterRect> {
     if a.axis != b.axis {
+        // When: `a.axis` differs from `b.axis`, the seams cross rather than continue one line.
         return None;
     }
 
     match a.axis {
         SplitAxis::Vertical => {
+            // When: `a.axis` is Vertical, the seams may only join along a shared x and width.
             if (a.rect.x - b.rect.x).abs() > eps || (a.rect.w - b.rect.w).abs() > eps {
+                // When: `a.rect.x` or `a.rect.w` differs beyond `eps`, the seams sit on separate columns.
                 return None;
             }
             let top = a.rect.y.min(b.rect.y);
             let bottom = (a.rect.y + a.rect.h).max(b.rect.y + b.rect.h);
             let combined_h = a.rect.h + b.rect.h;
             if bottom - top - combined_h > eps {
+                // When: the span exceeds `combined_h`, a gap separates the seams, so they are not one run.
                 return None;
             }
             Some(SplitterRect {
@@ -105,13 +114,16 @@ fn merge_splitter(a: SplitterRect, b: SplitterRect, eps: f32) -> Option<Splitter
             })
         }
         SplitAxis::Horizontal => {
+            // When: `a.axis` is Horizontal, the seams may only join along a shared y and height.
             if (a.rect.y - b.rect.y).abs() > eps || (a.rect.h - b.rect.h).abs() > eps {
+                // When: `a.rect.y` or `a.rect.h` differs beyond `eps`, the seams sit on separate rows.
                 return None;
             }
             let left = a.rect.x.min(b.rect.x);
             let right = (a.rect.x + a.rect.w).max(b.rect.x + b.rect.w);
             let combined_w = a.rect.w + b.rect.w;
             if right - left - combined_w > eps {
+                // When: the span exceeds `combined_w`, a gap separates the seams, so they are not one run.
                 return None;
             }
             Some(SplitterRect {
@@ -123,10 +135,14 @@ fn merge_splitter(a: SplitterRect, b: SplitterRect, eps: f32) -> Option<Splitter
 }
 
 impl PaneTree {
+    /// Build a single-pane tree that starts unzoomed.
     pub fn leaf(id: PaneId) -> Self {
         PaneTree::Leaf { id, zoomed_pane_id: None }
     }
 
+    /// Return the pane currently zoomed to fill the tab, if any.
+    ///
+    /// Both variants carry the flag so it survives a split or collapse.
     pub fn zoomed_pane_id(&self) -> Option<PaneId> {
         match self {
             PaneTree::Leaf { zoomed_pane_id, .. } | PaneTree::Split { zoomed_pane_id, .. } => {
@@ -143,8 +159,12 @@ impl PaneTree {
         }
     }
 
+    /// Zoom `active_pane` to fill the tab, or unzoom when it is already zoomed.
+    ///
+    /// Returns whether the zoom state changed.
     pub fn toggle_zoom(&mut self, active_pane: PaneId) -> bool {
         if self.zoomed_pane_id() == Some(active_pane) {
+            // When: `zoomed_pane_id` already names `active_pane`, the repeat toggle restores the split view.
             self.set_zoomed_pane_id(None);
             return true;
         }
@@ -153,6 +173,7 @@ impl PaneTree {
             self.set_zoomed_pane_id(Some(active_pane));
             true
         } else {
+            // When: `contains_leaf` is false, `active_pane` lives in another tab, so nothing zooms.
             false
         }
     }
@@ -189,8 +210,12 @@ impl PaneTree {
             PaneTree::Leaf { id, .. } if *id == focus => {
                 let existing = PaneTree::leaf(*id);
                 let new_leaf = PaneTree::leaf(new_id);
-                let (first, second) =
-                    if new_first { (new_leaf, existing) } else { (existing, new_leaf) };
+                let (first, second) = if new_first {
+                    (new_leaf, existing)
+                } else {
+                    // When: `new_first` is false, the existing pane keeps the leading position.
+                    (existing, new_leaf)
+                };
                 *self = PaneTree::Split {
                     axis,
                     ratio: 0.5,
@@ -230,15 +255,18 @@ impl PaneTree {
         match self {
             PaneTree::Leaf { .. } => false,
             PaneTree::Split { axis, ratio, first, second, .. } => {
+                // When: `self` is a `Split`, only the divider directly above `active_pane` may move.
                 let directly_owns_active = matches!(first.as_ref(), PaneTree::Leaf { id, .. } if *id == active_pane)
                     || matches!(second.as_ref(), PaneTree::Leaf { id, .. } if *id == active_pane);
                 if directly_owns_active {
+                    // When: `directly_owns_active` is true, this node owns the divider the user is resizing.
                     let axis_matches = matches!(
                         (*axis, dir),
                         (SplitAxis::Vertical, Direction::Left | Direction::Right)
                             | (SplitAxis::Horizontal, Direction::Up | Direction::Down)
                     );
                     if axis_matches {
+                        // When: `axis_matches` is true, the drag direction moves this divider's ratio.
                         *ratio = (*ratio + delta).clamp(0.1, 0.9);
                         return true;
                     }
@@ -272,18 +300,22 @@ impl PaneTree {
     /// collapses to that child. Returns true if anything was removed.
     pub fn close(&mut self, id: PaneId) -> bool {
         if let PaneTree::Leaf { id: leaf, .. } = self {
+            // When: `self` is a `Leaf`, a root pane has no parent split to collapse into.
             return *leaf == id;
         }
         let zoomed = self.zoomed_pane_id().filter(|zoomed| *zoomed != id);
         let mut surviving: Option<PaneTree> = None;
         if let PaneTree::Split { first, second, .. } = self {
+            // When: `self` is a `Split`, either child may be the target or contain it deeper.
             let first_is = matches!(first.as_ref(), PaneTree::Leaf { id: l, .. } if *l == id);
             let second_is = matches!(second.as_ref(), PaneTree::Leaf { id: l, .. } if *l == id);
             if first_is {
                 surviving = Some(std::mem::replace(second.as_mut(), PaneTree::leaf(0)));
             } else if second_is {
+                // When: `second_is` is true, the first child survives and replaces this split.
                 surviving = Some(std::mem::replace(first.as_mut(), PaneTree::leaf(0)));
             } else if first.close(id) || second.close(id) {
+                // When: `first.close` or `second.close` succeeded, a deeper split already collapsed.
                 self.set_zoomed_pane_id(zoomed);
                 return true;
             }
@@ -293,6 +325,7 @@ impl PaneTree {
             *self = t;
             true
         } else {
+            // When: `surviving` is `None`, no child matched `id`, so the tree is unchanged.
             false
         }
     }
@@ -300,7 +333,9 @@ impl PaneTree {
     /// Recursively compute each visible leaf's rectangle inside `outer`.
     pub fn layout(&self, outer: Rect) -> Vec<(PaneId, Rect)> {
         if let Some(id) = self.zoomed_pane_id() {
+            // When: `zoomed_pane_id` is `Some`, one pane may claim the whole rectangle.
             if self.contains_leaf(id) {
+                // When: `contains_leaf` is true, the zoomed pane is live here and hides its siblings.
                 return vec![(id, outer)];
             }
         }
@@ -340,6 +375,7 @@ impl PaneTree {
     /// per-pane cell padding inside each pane.
     pub fn splitter_rects(&self, outer: Rect, thickness: f32) -> Vec<SplitterRect> {
         if self.zoomed_pane_id().is_some_and(|id| self.contains_leaf(id)) {
+            // When: `zoomed_pane_id` names a leaf here, one pane covers the tab and hides every seam.
             return Vec::new();
         }
 
@@ -348,8 +384,13 @@ impl PaneTree {
         coalesce_splitter_rects(out)
     }
 
+    /// Find the splitter seam under a point, identified for a later drag.
+    ///
+    /// The returned [`SplitterId`] records the child path taken, so a drag can
+    /// address the same divider after the tree is re-laid out.
     pub fn hit_splitter(&self, outer: Rect, thickness: f32, x: f32, y: f32) -> Option<SplitterHit> {
         if self.zoomed_pane_id().is_some_and(|id| self.contains_leaf(id)) {
+            // When: `zoomed_pane_id` names a leaf here, no seam is drawn, so none can be hit.
             return None;
         }
         let mut path = Vec::new();
@@ -366,59 +407,73 @@ impl PaneTree {
     ) -> Option<SplitterHit> {
         match self {
             PaneTree::Leaf { .. } => None,
-            PaneTree::Split { axis, ratio, first, second, .. } => match axis {
-                SplitAxis::Vertical => {
-                    let w1 = outer.w * *ratio;
-                    let r1 = Rect::new(outer.x, outer.y, w1, outer.h);
-                    let r2 = Rect::new(outer.x + w1, outer.y, outer.w - w1, outer.h);
-                    let seam =
-                        Rect::new(outer.x + w1 - thickness * 0.5, outer.y, thickness, outer.h);
-                    if seam.contains(x, y) {
-                        return Some(SplitterHit {
-                            id: SplitterId(path.clone()),
-                            axis: *axis,
-                            rect: seam,
-                        });
+            PaneTree::Split { axis, ratio, first, second, .. } => {
+                // When: `self` is a `Split`, its own seam is tested before descending into children.
+                match axis {
+                    SplitAxis::Vertical => {
+                        // When: `axis` is Vertical, the seam is a vertical strip at the child boundary.
+                        let w1 = outer.w * *ratio;
+                        let r1 = Rect::new(outer.x, outer.y, w1, outer.h);
+                        let r2 = Rect::new(outer.x + w1, outer.y, outer.w - w1, outer.h);
+                        let seam =
+                            Rect::new(outer.x + w1 - thickness * 0.5, outer.y, thickness, outer.h);
+                        if seam.contains(x, y) {
+                            // When: `seam` contains the point, this divider wins over any child seam below it.
+                            return Some(SplitterHit {
+                                id: SplitterId(path.clone()),
+                                axis: *axis,
+                                rect: seam,
+                            });
+                        }
+                        path.push(false);
+                        let hit = first.hit_splitter_into(r1, thickness, x, y, path);
+                        path.pop();
+                        if hit.is_some() {
+                            // When: `hit` is `Some`, the first child claimed the point, so stop descending.
+                            return hit;
+                        }
+                        path.push(true);
+                        let hit = second.hit_splitter_into(r2, thickness, x, y, path);
+                        path.pop();
+                        hit
                     }
-                    path.push(false);
-                    let hit = first.hit_splitter_into(r1, thickness, x, y, path);
-                    path.pop();
-                    if hit.is_some() {
-                        return hit;
+                    SplitAxis::Horizontal => {
+                        // When: `axis` is Horizontal, the seam is a horizontal strip at the child boundary.
+                        let h1 = outer.h * *ratio;
+                        let r1 = Rect::new(outer.x, outer.y, outer.w, h1);
+                        let r2 = Rect::new(outer.x, outer.y + h1, outer.w, outer.h - h1);
+                        let seam =
+                            Rect::new(outer.x, outer.y + h1 - thickness * 0.5, outer.w, thickness);
+                        if seam.contains(x, y) {
+                            // When: `seam` contains the point, this divider wins over any child seam inside it.
+                            return Some(SplitterHit {
+                                id: SplitterId(path.clone()),
+                                axis: *axis,
+                                rect: seam,
+                            });
+                        }
+                        path.push(false);
+                        let hit = first.hit_splitter_into(r1, thickness, x, y, path);
+                        path.pop();
+                        if hit.is_some() {
+                            // When: `hit` is `Some`, the first child claimed the point, so stop descending.
+                            return hit;
+                        }
+                        path.push(true);
+                        let hit = second.hit_splitter_into(r2, thickness, x, y, path);
+                        path.pop();
+                        hit
                     }
-                    path.push(true);
-                    let hit = second.hit_splitter_into(r2, thickness, x, y, path);
-                    path.pop();
-                    hit
                 }
-                SplitAxis::Horizontal => {
-                    let h1 = outer.h * *ratio;
-                    let r1 = Rect::new(outer.x, outer.y, outer.w, h1);
-                    let r2 = Rect::new(outer.x, outer.y + h1, outer.w, outer.h - h1);
-                    let seam =
-                        Rect::new(outer.x, outer.y + h1 - thickness * 0.5, outer.w, thickness);
-                    if seam.contains(x, y) {
-                        return Some(SplitterHit {
-                            id: SplitterId(path.clone()),
-                            axis: *axis,
-                            rect: seam,
-                        });
-                    }
-                    path.push(false);
-                    let hit = first.hit_splitter_into(r1, thickness, x, y, path);
-                    path.pop();
-                    if hit.is_some() {
-                        return hit;
-                    }
-                    path.push(true);
-                    let hit = second.hit_splitter_into(r2, thickness, x, y, path);
-                    path.pop();
-                    hit
-                }
-            },
+            }
         }
     }
 
+    /// Move the divider named by `id` in response to a pointer drag.
+    ///
+    /// `delta_x` and `delta_y` are in the same units as `outer`; the component
+    /// matching the divider's axis is converted to a ratio against that
+    /// divider's own rectangle, so nested splits track the cursor at any depth.
     pub fn resize_splitter_by_delta(
         &mut self,
         id: &SplitterId,
@@ -439,12 +494,15 @@ impl PaneTree {
         match self {
             PaneTree::Leaf { .. } => false,
             PaneTree::Split { axis, ratio, first, second, .. } => {
+                // When: `self` is a `Split`, `path` decides whether this divider moves or a child's does.
                 if path.is_empty() {
+                    // When: `path` is empty, this is the addressed divider, so apply the drag here.
                     let denom = match axis {
                         SplitAxis::Vertical => outer.w,
                         SplitAxis::Horizontal => outer.h,
                     };
                     if denom <= 0.0 {
+                        // When: `denom` is nonpositive, the split has no extent to convert pixels into a ratio.
                         return false;
                     }
                     let delta = match axis {
@@ -461,6 +519,7 @@ impl PaneTree {
                         let child_outer = if !path[0] {
                             Rect::new(outer.x, outer.y, w1, outer.h)
                         } else {
+                            // When: `path` selects the second child, its rectangle starts after `w1`.
                             Rect::new(outer.x + w1, outer.y, outer.w - w1, outer.h)
                         };
                         if !path[0] {
@@ -471,6 +530,7 @@ impl PaneTree {
                                 delta_y,
                             )
                         } else {
+                            // When: `path` selects the second child, recurse there with the remaining path.
                             second.resize_splitter_by_delta_inner(
                                 &path[1..],
                                 child_outer,
@@ -484,6 +544,7 @@ impl PaneTree {
                         let child_outer = if !path[0] {
                             Rect::new(outer.x, outer.y, outer.w, h1)
                         } else {
+                            // When: `path` selects the second child, its rectangle starts below `h1`.
                             Rect::new(outer.x, outer.y + h1, outer.w, outer.h - h1)
                         };
                         if !path[0] {
@@ -494,6 +555,7 @@ impl PaneTree {
                                 delta_y,
                             )
                         } else {
+                            // When: `path` selects the second child, recurse there with the remaining path.
                             second.resize_splitter_by_delta_inner(
                                 &path[1..],
                                 child_outer,
@@ -509,7 +571,9 @@ impl PaneTree {
 
     fn splitter_rects_into(&self, outer: Rect, thickness: f32, out: &mut Vec<SplitterRect>) {
         match self {
-            PaneTree::Leaf { .. } => {}
+            PaneTree::Leaf { .. } => {
+                // When: `self` is a `Leaf`, it has no interior boundary, so it contributes no seam.
+            }
             PaneTree::Split { axis, ratio, first, second, .. } => match axis {
                 SplitAxis::Vertical => {
                     let w1 = outer.w * *ratio;
@@ -551,6 +615,7 @@ impl PaneTree {
         let mut best: Option<(f32, PaneId)> = None;
         for (id, r) in &panes {
             if *id == focus {
+                // When: `id` equals `focus`, the origin pane cannot be its own neighbour.
                 continue;
             }
             let (cx, cy) = r.center();
@@ -561,6 +626,7 @@ impl PaneTree {
                 Direction::Down => cy > my + 1e-6 && r.x < me.x + me.w && r.x + r.w > me.x,
             };
             if !candidate {
+                // When: `candidate` is false, this pane is not in `dir` or misses the focus band entirely.
                 continue;
             }
             let dist = match dir {
@@ -570,7 +636,9 @@ impl PaneTree {
                 Direction::Down => (cy - my).abs() + (mx - cx).abs() * 0.01,
             };
             match best {
-                Some((d, _)) if d <= dist => {}
+                Some((d, _)) if d <= dist => {
+                    // When: `d` is at most `dist`, an earlier pane is nearer, so `best` is kept.
+                }
                 _ => best = Some((dist, *id)),
             }
         }

@@ -15,10 +15,16 @@ fn generate_rgb_to_srgb8_table() -> [u8; 256] {
 
 fn linear_f32_to_srgb8(f: f32) -> u8 {
     let f = f.clamp(0.0, 1.0);
-    let srgb = if f <= 0.003_130_8 { f * 12.92 } else { f.powf(1.0 / 2.4) * 1.055 - 0.055 };
+    let srgb = if f <= 0.003_130_8 {
+        f * 12.92
+    } else {
+        // When: `f <= 0.003_130_8` is false, apply the nonlinear sRGB transfer curve.
+        f.powf(1.0 / 2.4) * 1.055 - 0.055
+    };
     (srgb * 255.0 + 0.5).clamp(0.0, 255.0) as u8
 }
 
+/// Converts an eight-bit linear-light channel to its eight-bit sRGB encoding.
 pub fn linear_u8_to_srgb8(f: u8) -> u8 {
     RGB_TO_SRGB_TABLE[f as usize]
 }
@@ -28,20 +34,24 @@ pub fn linear_u8_to_srgb8(f: u8) -> u8 {
 pub struct SrgbaPixel(u32);
 
 impl SrgbaPixel {
+    /// Packs red, green, blue, and alpha bytes into the stored big-endian pixel layout.
     pub fn rgba(red: u8, green: u8, blue: u8, alpha: u8) -> Self {
         let word = (blue as u32) << 24 | (green as u32) << 16 | (red as u32) << 8 | alpha as u32;
         Self(word.to_be())
     }
 
+    /// Unpacks this pixel into red, green, blue, and alpha bytes.
     pub fn as_rgba(self) -> (u8, u8, u8, u8) {
         let host = u32::from_be(self.0);
         ((host >> 8) as u8, (host >> 16) as u8, (host >> 24) as u8, (host & 0xff) as u8)
     }
 
+    /// Returns the stored big-endian SRGBA32 word.
     pub fn as_srgba32(self) -> u32 {
         self.0
     }
 
+    /// Converts this pixel to normalized red, green, blue, and alpha components.
     pub fn as_srgba_tuple(self) -> (f32, f32, f32, f32) {
         let SrgbaTuple(r, g, b, a) = self.into();
         (r, g, b, a)
@@ -53,20 +63,24 @@ impl SrgbaPixel {
 pub struct SrgbaTuple(pub f32, pub f32, pub f32, pub f32);
 
 impl SrgbaTuple {
+    /// Multiplies each color channel by alpha while preserving alpha.
     pub fn premultiply(self) -> Self {
         let Self(r, g, b, a) = self;
         Self(r * a, g * a, b * a, a)
     }
 
+    /// Divides premultiplied color channels by nonzero alpha.
     pub fn demultiply(self) -> Self {
         let Self(r, g, b, a) = self;
         if a != 0.0 {
             Self(r / a, g / a, b / a, a)
         } else {
+            // When: `a != 0.0` is false, preserve transparent channels without division.
             self
         }
     }
 
+    /// Interpolates two colors in premultiplied-alpha space by factor `k`.
     pub fn interpolate(self, other: Self, k: f64) -> Self {
         let k = k as f32;
         let Self(r0, g0, b0, a0) = self.premultiply();

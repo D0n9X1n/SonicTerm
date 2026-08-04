@@ -86,7 +86,9 @@ impl App {
                     w.request_redraw();
                 }
             }
-            super::quit_hold::QuitHoldAction::None => {}
+            super::quit_hold::QuitHoldAction::None => {
+                // When: on_press returns QuitHoldAction::None, leave the current quit guard unchanged.
+            }
             super::quit_hold::QuitHoldAction::Quit => {
                 self.pending_exit = true;
             }
@@ -121,13 +123,17 @@ impl App {
         let bubble = sonicterm_ui::overlays::NotificationBubble { level, message, expires_at };
         match kind {
             FrontmostKind::Child(id) => {
+                // When: kind is FrontmostKind::Child(id), prefer that child's notification surface.
                 if let Some(child) = self.windows.get_mut(&id) {
+                    // When: windows.get_mut finds id, install the bubble and finish child routing.
                     child.notification = Some(bubble);
                     child.request_redraw();
                     return;
                 }
             }
-            FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {}
+            FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {
+                // When: kind is Main, None, or Other, use the main notification surface.
+            }
         }
         if let Some(ws) = self.main_mut() {
             ws.notification = Some(bubble);
@@ -141,6 +147,7 @@ impl App {
         let Some((message, scale, font_size, window_w, window_h, read_only, search_open)) =
             self.notification_hit_inputs(kind)
         else {
+            // When: notification_hit_inputs returns None, no visible close control can be hit.
             return false;
         };
         let content_w =
@@ -155,17 +162,22 @@ impl App {
             && y >= layout.close.y
             && y < layout.close.y + layout.close.h;
         if !inside {
+            // When: inside is false, the pointer missed the notification close control.
             return false;
         }
         match kind {
             FrontmostKind::Child(id) => {
+                // When: kind is FrontmostKind::Child(id), dismiss that child's notification first.
                 if let Some(child) = self.windows.get_mut(&id) {
+                    // When: windows.get_mut finds id, clear its notification and finish child routing.
                     child.notification = None;
                     child.request_redraw();
                     return true;
                 }
             }
-            FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {}
+            FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {
+                // When: kind is Main, None, or Other, use the main notification surface.
+            }
         }
         if let Some(ws) = self.main_mut() {
             ws.notification = None;
@@ -234,6 +246,7 @@ impl App {
             None,
         );
         let Some(proxy) = self.event_loop_proxy.clone() else {
+            // When: event_loop_proxy is None, replace the progress bubble with an error.
             self.show_notification_for_kind(
                 kind,
                 sonicterm_ui::overlays::NotificationLevel::Error,
@@ -285,6 +298,7 @@ impl App {
         let _ = self.clear_stale_frontmost();
         if self.read_only_active_for_kind(self.frontmost_kind()) && !read_only_allows_action(action)
         {
+            // When: READONLY is active and read_only_allows_action rejects action, consume it safely.
             return true;
         }
         match action {
@@ -294,8 +308,9 @@ impl App {
             Action::PasteFromClipboard => self.paste_clipboard_for_kind(self.frontmost_kind()),
             Action::ReloadConfig => self.force_reload_config(),
             Action::NewTab => {
-                // M6a-expand-2c-tab: notify the reducer the user
-                // asked for a new tab. The reducer bumps tab_count,
+                // When: action is Action::NewTab, create a tab in the routed terminal window.
+
+                // Notify the reducer before creating the tab. It bumps tab_count,
                 // sets active_tab_idx, and emits Render(TabAdded).
                 // Boundary below remains source-of-truth for the
                 // actual tab spawn (it owns the PtyHandle/Grid/Parser
@@ -311,7 +326,9 @@ impl App {
                 // fallback — `frontmost_window` is set by the same focus
                 // event so the back-compat path was redundant.
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    // When: frontmost_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.spawn_tab_in_child(id) {
+                        // When: spawn_tab_in_child succeeds for id, the child fully consumed NewTab.
                         return true;
                     }
                     // Child vanished between focus and dispatch — clear
@@ -322,8 +339,9 @@ impl App {
                 self.new_tab(format!("shell {n}"));
             }
             Action::CloseTab => {
-                // M6a-expand-2c-tab: notify reducer first so
-                // tab_count/active_tab_idx stay in sync.
+                // When: action is Action::CloseTab, close the routed window's active tab.
+
+                // Notify the reducer first so tab_count and active_tab_idx stay in sync.
                 let active_idx = self.main_tabs().map(|t| t.active_index()).unwrap_or(0);
                 self.dispatch_intent(sonicterm_app_core::AppIntent::CloseTab {
                     window: sonicterm_types::WindowKey::new(0),
@@ -331,7 +349,9 @@ impl App {
                 });
                 // route to frontmost window.
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    // When: frontmost_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.close_active_tab_in_child(id) {
+                        // When: close_active_tab_in_child succeeds for id, the child fully consumed CloseTab.
                         return true;
                     }
                     self.frontmost_window = None;
@@ -341,11 +361,14 @@ impl App {
                 self.reap_empty_main_window_after_close();
             }
             Action::NextTab => {
+                // When: action is Action::NextTab, activate the routed window's next tab.
                 self.dispatch_intent(sonicterm_app_core::AppIntent::NextTab {
                     window: sonicterm_types::WindowKey::new(0),
                 });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    // When: frontmost_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.next_tab_in_child(id) {
+                        // When: next_tab_in_child succeeds for id, the child fully consumed NextTab.
                         return true;
                     }
                     self.frontmost_window = None;
@@ -353,11 +376,14 @@ impl App {
                 self.next_main_tab();
             }
             Action::PrevTab => {
+                // When: action is Action::PrevTab, activate the routed window's previous tab.
                 self.dispatch_intent(sonicterm_app_core::AppIntent::PrevTab {
                     window: sonicterm_types::WindowKey::new(0),
                 });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    // When: frontmost_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.prev_tab_in_child(id) {
+                        // When: prev_tab_in_child succeeds for id, the child fully consumed PrevTab.
                         return true;
                     }
                     self.frontmost_window = None;
@@ -365,12 +391,15 @@ impl App {
                 self.prev_main_tab();
             }
             Action::ActivateTab(i) => {
+                // When: action is Action::ActivateTab(i), activate index i in the routed window.
                 self.dispatch_intent(sonicterm_app_core::AppIntent::GoToTab {
                     window: sonicterm_types::WindowKey::new(0),
                     idx: *i,
                 });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    // When: frontmost_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.activate_tab_in_child(id, *i) {
+                        // When: activate_tab_in_child succeeds for id and i, the child consumed ActivateTab.
                         return true;
                     }
                     self.frontmost_window = None;
@@ -378,8 +407,11 @@ impl App {
                 self.activate_main_tab(*i);
             }
             Action::ActivateLastTab => {
+                // When: action is Action::ActivateLastTab, activate the routed window's final tab.
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    // When: frontmost_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.activate_last_tab_in_child(id) {
+                        // When: activate_last_tab_in_child succeeds for id, the child consumed ActivateLastTab.
                         return true;
                     }
                     self.frontmost_window = None;
@@ -387,11 +419,13 @@ impl App {
                 self.activate_last_main_tab();
             }
             Action::SplitRight => {
+                // When: action is Action::SplitRight, split the routed active pane to the right.
+
                 // route to frontmost window so Cmd+D
                 // typed in a torn-out child splits THAT window's active
                 // pane, not the main window's.
-                // M6a-expand-2c-pane: notify the reducer first so
-                // `pane_count` / `focused_pane_idx` track the topology;
+                // Notify the reducer first so pane_count and focused_pane_idx
+                // track the topology;
                 // the boundary's `split_active*` remains source-of-truth
                 // for actual geometry.
                 self.dispatch_intent(sonicterm_app_core::AppIntent::SplitPane {
@@ -399,7 +433,9 @@ impl App {
                     dir: sonicterm_app_core::SplitDir::Right,
                 });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    // When: frontmost_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.split_active_pane_in_child(id, Direction::Right) {
+                        // When: split_active_pane_in_child succeeds to the Right, the child consumed SplitRight.
                         return true;
                     }
                     self.frontmost_window = None;
@@ -407,12 +443,15 @@ impl App {
                 self.split_active(Direction::Right);
             }
             Action::SplitDown => {
+                // When: action is Action::SplitDown, split the routed active pane downward.
                 self.dispatch_intent(sonicterm_app_core::AppIntent::SplitPane {
                     window: sonicterm_types::WindowKey::new(0),
                     dir: sonicterm_app_core::SplitDir::Down,
                 });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    // When: frontmost_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.split_active_pane_in_child(id, Direction::Down) {
+                        // When: split_active_pane_in_child succeeds Down, the child consumed SplitDown.
                         return true;
                     }
                     self.frontmost_window = None;
@@ -420,11 +459,14 @@ impl App {
                 self.split_active(Direction::Down);
             }
             Action::ClosePane => {
+                // When: action is Action::ClosePane, close the routed active pane.
                 self.dispatch_intent(sonicterm_app_core::AppIntent::ClosePane {
                     window: sonicterm_types::WindowKey::new(0),
                 });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    // When: frontmost_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.close_active_pane_in_child(id) {
+                        // When: close_active_pane_in_child succeeds for id, the child consumed ClosePane.
                         return true;
                     }
                     self.frontmost_window = None;
@@ -432,11 +474,15 @@ impl App {
                 self.close_active_pane();
             }
             Action::CloseActivePaneOrTab => {
+                // When: action is Action::CloseActivePaneOrTab, close a split pane or its single-pane tab.
+
                 // Cmd+W routes to frontmost window.
                 // Without this, a Cmd+W typed in a torn-out child window
                 // closed a tab in the original main window (bug #3).
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    // When: frontmost_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.close_active_pane_or_tab_in_child(id) {
+                        // When: close_active_pane_or_tab_in_child succeeds, the child consumed the close.
                         return true;
                     }
                     self.frontmost_window = None;
@@ -461,6 +507,7 @@ impl App {
                 if pane_count > 1 {
                     self.close_active_pane();
                 } else {
+                    // When: pane_count is at most one, close the single-pane tab at i.
                     self.close_tab_at(i);
                 }
                 // Unified reap path: if the main window's tabs vec is
@@ -472,8 +519,11 @@ impl App {
                 self.reap_empty_main_window_after_close();
             }
             Action::TogglePaneZoom => {
+                // When: action is Action::TogglePaneZoom, toggle zoom in the routed active pane.
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    // When: frontmost_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.toggle_active_pane_zoom_in_child(id) {
+                        // When: toggle_active_pane_zoom_in_child succeeds, the child consumed TogglePaneZoom.
                         return true;
                     }
                     self.frontmost_window = None;
@@ -482,8 +532,10 @@ impl App {
             }
             Action::ToggleBroadcast { scope } => self.toggle_broadcast(*scope),
             Action::FocusPane(d) => {
-                // M6a-expand-2c-pane: notify reducer (emits
-                // Render(Focus) when pane_count >= 2; no-op otherwise).
+                // When: action is Action::FocusPane(d), move focus in direction d.
+
+                // Notify the reducer; it emits Render(Focus) when pane_count
+                // is at least two and otherwise leaves focus unchanged.
                 let dir = match d {
                     Direction::Left => sonicterm_app_core::SplitDir::Left,
                     Direction::Right => sonicterm_app_core::SplitDir::Right,
@@ -507,7 +559,9 @@ impl App {
                 };
                 self.dispatch_intent(intent);
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    // When: frontmost_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.focus_pane_dir_in_child(id, *d) {
+                        // When: focus_pane_dir_in_child succeeds for id and d, the child consumed FocusPane.
                         return true;
                     }
                     self.frontmost_window = None;
@@ -515,13 +569,16 @@ impl App {
                 self.focus_pane_dir(*d);
             }
             Action::ResizePaneLeft => {
+                // When: action is Action::ResizePaneLeft, grow the routed pane leftward.
                 self.dispatch_intent(sonicterm_app_core::AppIntent::ResizePane {
                     window: sonicterm_types::WindowKey::new(0),
                     dir: sonicterm_app_core::SplitDir::Left,
                     cells: 1,
                 });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    // When: frontmost_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.resize_active_split_in_child(id, Direction::Left) {
+                        // When: resize_active_split_in_child succeeds Left, the child consumed ResizePaneLeft.
                         return true;
                     }
                     self.frontmost_window = None;
@@ -529,13 +586,16 @@ impl App {
                 self.resize_active_split(Direction::Left);
             }
             Action::ResizePaneRight => {
+                // When: action is Action::ResizePaneRight, grow the routed pane rightward.
                 self.dispatch_intent(sonicterm_app_core::AppIntent::ResizePane {
                     window: sonicterm_types::WindowKey::new(0),
                     dir: sonicterm_app_core::SplitDir::Right,
                     cells: 1,
                 });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    // When: frontmost_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.resize_active_split_in_child(id, Direction::Right) {
+                        // When: resize_active_split_in_child succeeds Right, the child consumed ResizePaneRight.
                         return true;
                     }
                     self.frontmost_window = None;
@@ -543,13 +603,16 @@ impl App {
                 self.resize_active_split(Direction::Right);
             }
             Action::ResizePaneUp => {
+                // When: action is Action::ResizePaneUp, grow the routed pane upward.
                 self.dispatch_intent(sonicterm_app_core::AppIntent::ResizePane {
                     window: sonicterm_types::WindowKey::new(0),
                     dir: sonicterm_app_core::SplitDir::Up,
                     cells: 1,
                 });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    // When: frontmost_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.resize_active_split_in_child(id, Direction::Up) {
+                        // When: resize_active_split_in_child succeeds Up, the child consumed ResizePaneUp.
                         return true;
                     }
                     self.frontmost_window = None;
@@ -557,13 +620,16 @@ impl App {
                 self.resize_active_split(Direction::Up);
             }
             Action::ResizePaneDown => {
+                // When: action is Action::ResizePaneDown, grow the routed pane downward.
                 self.dispatch_intent(sonicterm_app_core::AppIntent::ResizePane {
                     window: sonicterm_types::WindowKey::new(0),
                     dir: sonicterm_app_core::SplitDir::Down,
                     cells: 1,
                 });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    // When: frontmost_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.resize_active_split_in_child(id, Direction::Down) {
+                        // When: resize_active_split_in_child succeeds Down, the child consumed ResizePaneDown.
                         return true;
                     }
                     self.frontmost_window = None;
@@ -571,10 +637,14 @@ impl App {
                 self.resize_active_split(Direction::Down);
             }
             Action::OpenSearch => {
+                // When: action is Action::OpenSearch, open search in the routed terminal window.
+
                 // Route to the frontmost child window so Cmd+F opens search in a
                 // torn-out window instead of the main one. (#pane-search)
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    // When: frontmost_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.open_search_in_child(id) {
+                        // When: open_search_in_child succeeds for id, the child consumed OpenSearch.
                         return true;
                     }
                     self.frontmost_window = None;
@@ -599,17 +669,16 @@ impl App {
             Action::RenameTab => self.start_rename_active_tab(),
             Action::UpdateTabColor => self.start_update_tab_color(),
             Action::NewWindow => {
+                // NewWindow queues a fresh top-level terminal window.
                 // set the pending
                 // flag; `drain_pending_window_creates` consumes it with
                 // the live `ActiveEventLoop` and builds a fresh
-                // top-level terminal window. Works whether or not
-                // `self.windows` is empty — the dock-alive
-                // post-close-last-window case (macOS,
-                // quit_on_last_window_close=false) is the motivating
-                // bug Haiku flagged.
+                // top-level terminal window. This also works when
+                // `self.windows` is empty, preserving the dock-alive
+                // post-close-last-window case on macOS when
+                // quit_on_last_window_close=false.
                 self.pending_new_window = true;
-                // M6a-expand-2c-window: notify the reducer the user
-                // asked for a new window. The reducer bumps
+                // Notify the reducer that a new window was requested. It bumps
                 // `live_window_count` and emits a `WindowOpen` Effect
                 // (currently trace-stubbed in `dispatch_effects`; the
                 // production `drain_pending_window_creates` boundary
@@ -620,6 +689,8 @@ impl App {
                 });
             }
             Action::MoveTabToNewWindow => {
+                // MoveTabToNewWindow resolves the active tab's source window.
+                // MoveTabToNewWindow queues the routed active tab for tear-out.
                 let source_window = match self.frontmost_kind() {
                     FrontmostKind::Child(id) => Some(id),
                     FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {
@@ -631,11 +702,16 @@ impl App {
                 }
             }
             Action::Scroll(kind) => {
+                // When: action is Action::Scroll(kind), translate kind into a signed pane delta.
+
                 // replace the "not yet wired up" stub. Translate
                 // ScrollAction → signed line delta and route through the
                 // canonical `scroll_pane` mutator (which also handles
                 // alt-screen no-op + clamping + auto-follow snap-back).
-                let Some(pane_id) = self.active_pane_id() else { return true };
+                let Some(pane_id) = self.active_pane_id() else {
+                    // When: active_pane_id returns None, consume Scroll without changing a viewport.
+                    return true;
+                };
                 let viewport_rows = self.active_pane_viewport_rows().unwrap_or(24);
                 let delta: i32 = match kind {
                     ScrollAction::LineUp => -1,
@@ -648,7 +724,10 @@ impl App {
                 self.scroll_pane(pane_id, delta);
             }
             Action::ResizePane { dir, amount } => {
+                // When: action is ResizePane with dir and amount, apply amount increments in dir.
+                // ResizePane applies amount increments in dir.
                 if *amount == 0 {
+                    // When: amount is zero, consume ResizePane without changing the layout.
                     return true;
                 }
                 self.dispatch_intent(sonicterm_app_core::AppIntent::ResizePane {
@@ -657,11 +736,13 @@ impl App {
                     cells: *amount,
                 });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
+                    // When: frontmost_kind is FrontmostKind::Child(id), route the action to that child.
                     let mut routed = false;
                     for _ in 0..*amount {
                         routed = self.resize_active_split_in_child(id, *dir) || routed;
                     }
                     if routed {
+                        // When: routed is true, at least one child resize consumed the action.
                         return true;
                     }
                     self.frontmost_window = None;
@@ -711,6 +792,7 @@ impl App {
         let _ = self.clear_stale_frontmost();
         let source_kind = self.kind_for(source_window_id);
         if self.read_only_active_for_kind(source_kind) && !read_only_allows_action(action) {
+            // When: source_kind is READONLY and action is not allowed, consume it without dispatch.
             return true;
         }
         match action {
@@ -720,12 +802,15 @@ impl App {
             Action::PasteFromClipboard => self.paste_clipboard_for_kind(source_kind),
             Action::ReloadConfig => self.force_reload_config(),
             Action::NewTab => {
+                // When: action is Action::NewTab, create a tab in the routed terminal window.
                 self.dispatch_intent(sonicterm_app_core::AppIntent::NewTab {
                     window: sonicterm_types::WindowKey::new(0),
                     cwd: None,
                 });
                 if let FrontmostKind::Child(id) = source_kind {
+                    // When: source_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.spawn_tab_in_child(id) {
+                        // When: spawn_tab_in_child succeeds for id, the child fully consumed NewTab.
                         return true;
                     }
                 }
@@ -733,13 +818,16 @@ impl App {
                 self.new_tab(format!("shell {n}"));
             }
             Action::CloseTab => {
+                // When: action is Action::CloseTab, close the routed window's active tab.
                 let active_idx = self.main_tabs().map(|t| t.active_index()).unwrap_or(0);
                 self.dispatch_intent(sonicterm_app_core::AppIntent::CloseTab {
                     window: sonicterm_types::WindowKey::new(0),
                     idx: active_idx,
                 });
                 if let FrontmostKind::Child(id) = source_kind {
+                    // When: source_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.close_active_tab_in_child(id) {
+                        // When: close_active_tab_in_child succeeds for id, the child fully consumed CloseTab.
                         return true;
                     }
                 }
@@ -748,85 +836,109 @@ impl App {
                 self.reap_empty_main_window_after_close();
             }
             Action::NextTab => {
+                // When: action is Action::NextTab, activate the routed window's next tab.
                 self.dispatch_intent(sonicterm_app_core::AppIntent::NextTab {
                     window: sonicterm_types::WindowKey::new(0),
                 });
                 if let FrontmostKind::Child(id) = source_kind {
+                    // When: source_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.next_tab_in_child(id) {
+                        // When: next_tab_in_child succeeds for id, the child fully consumed NextTab.
                         return true;
                     }
                 }
                 self.next_main_tab();
             }
             Action::PrevTab => {
+                // When: action is Action::PrevTab, activate the routed window's previous tab.
                 self.dispatch_intent(sonicterm_app_core::AppIntent::PrevTab {
                     window: sonicterm_types::WindowKey::new(0),
                 });
                 if let FrontmostKind::Child(id) = source_kind {
+                    // When: source_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.prev_tab_in_child(id) {
+                        // When: prev_tab_in_child succeeds for id, the child fully consumed PrevTab.
                         return true;
                     }
                 }
                 self.prev_main_tab();
             }
             Action::ActivateTab(i) => {
+                // When: action is Action::ActivateTab(i), activate index i in the routed window.
                 self.dispatch_intent(sonicterm_app_core::AppIntent::GoToTab {
                     window: sonicterm_types::WindowKey::new(0),
                     idx: *i,
                 });
                 if let FrontmostKind::Child(id) = source_kind {
+                    // When: source_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.activate_tab_in_child(id, *i) {
+                        // When: activate_tab_in_child succeeds for id and i, the child consumed ActivateTab.
                         return true;
                     }
                 }
                 self.activate_main_tab(*i);
             }
             Action::ActivateLastTab => {
+                // When: action is Action::ActivateLastTab, activate the routed window's final tab.
                 if let FrontmostKind::Child(id) = source_kind {
+                    // When: source_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.activate_last_tab_in_child(id) {
+                        // When: activate_last_tab_in_child succeeds for id, the child consumed ActivateLastTab.
                         return true;
                     }
                 }
                 self.activate_last_main_tab();
             }
             Action::SplitRight => {
+                // When: action is Action::SplitRight, split the routed active pane to the right.
                 self.dispatch_intent(sonicterm_app_core::AppIntent::SplitPane {
                     window: sonicterm_types::WindowKey::new(0),
                     dir: sonicterm_app_core::SplitDir::Right,
                 });
                 if let FrontmostKind::Child(id) = source_kind {
+                    // When: source_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.split_active_pane_in_child(id, Direction::Right) {
+                        // When: split_active_pane_in_child succeeds to the Right, the child consumed SplitRight.
                         return true;
                     }
                 }
                 self.split_active(Direction::Right);
             }
             Action::SplitDown => {
+                // When: action is Action::SplitDown, split the routed active pane downward.
                 self.dispatch_intent(sonicterm_app_core::AppIntent::SplitPane {
                     window: sonicterm_types::WindowKey::new(0),
                     dir: sonicterm_app_core::SplitDir::Down,
                 });
                 if let FrontmostKind::Child(id) = source_kind {
+                    // When: source_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.split_active_pane_in_child(id, Direction::Down) {
+                        // When: split_active_pane_in_child succeeds Down, the child consumed SplitDown.
                         return true;
                     }
                 }
                 self.split_active(Direction::Down);
             }
             Action::ClosePane => {
+                // When: action is Action::ClosePane, close the routed active pane.
                 self.dispatch_intent(sonicterm_app_core::AppIntent::ClosePane {
                     window: sonicterm_types::WindowKey::new(0),
                 });
                 if let FrontmostKind::Child(id) = source_kind {
+                    // When: source_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.close_active_pane_in_child(id) {
+                        // When: close_active_pane_in_child succeeds for id, the child consumed ClosePane.
                         return true;
                     }
                 }
                 self.close_active_pane();
             }
             Action::CloseActivePaneOrTab => {
+                // When: action is Action::CloseActivePaneOrTab, close a split pane or its single-pane tab.
                 if let FrontmostKind::Child(id) = source_kind {
+                    // When: source_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.close_active_pane_or_tab_in_child(id) {
+                        // When: close_active_pane_or_tab_in_child succeeds, the child consumed the close.
                         return true;
                     }
                 }
@@ -842,13 +954,17 @@ impl App {
                 if pane_count > 1 {
                     self.close_active_pane();
                 } else {
+                    // When: pane_count is at most one, close the single-pane tab at i.
                     self.close_tab_at(i);
                 }
                 self.reap_empty_main_window_after_close();
             }
             Action::TogglePaneZoom => {
+                // When: action is Action::TogglePaneZoom, toggle zoom in the routed active pane.
                 if let FrontmostKind::Child(id) = source_kind {
+                    // When: source_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.toggle_active_pane_zoom_in_child(id) {
+                        // When: toggle_active_pane_zoom_in_child succeeds, the child consumed TogglePaneZoom.
                         return true;
                     }
                 }
@@ -856,6 +972,7 @@ impl App {
             }
             Action::ToggleBroadcast { scope } => self.toggle_broadcast_for(source_kind, *scope),
             Action::FocusPane(d) => {
+                // When: action is Action::FocusPane(d), move focus in direction d.
                 let dir = match d {
                     Direction::Left => sonicterm_app_core::SplitDir::Left,
                     Direction::Right => sonicterm_app_core::SplitDir::Right,
@@ -879,66 +996,83 @@ impl App {
                 };
                 self.dispatch_intent(intent);
                 if let FrontmostKind::Child(id) = source_kind {
+                    // When: source_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.focus_pane_dir_in_child(id, *d) {
+                        // When: focus_pane_dir_in_child succeeds for id and d, the child consumed FocusPane.
                         return true;
                     }
                 }
                 self.focus_pane_dir(*d);
             }
             Action::ResizePaneLeft => {
+                // When: action is Action::ResizePaneLeft, grow the routed pane leftward.
                 self.dispatch_intent(sonicterm_app_core::AppIntent::ResizePane {
                     window: sonicterm_types::WindowKey::new(0),
                     dir: sonicterm_app_core::SplitDir::Left,
                     cells: 1,
                 });
                 if let FrontmostKind::Child(id) = source_kind {
+                    // When: source_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.resize_active_split_in_child(id, Direction::Left) {
+                        // When: resize_active_split_in_child succeeds Left, the child consumed ResizePaneLeft.
                         return true;
                     }
                 }
                 self.resize_active_split(Direction::Left);
             }
             Action::ResizePaneRight => {
+                // When: action is Action::ResizePaneRight, grow the routed pane rightward.
                 self.dispatch_intent(sonicterm_app_core::AppIntent::ResizePane {
                     window: sonicterm_types::WindowKey::new(0),
                     dir: sonicterm_app_core::SplitDir::Right,
                     cells: 1,
                 });
                 if let FrontmostKind::Child(id) = source_kind {
+                    // When: source_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.resize_active_split_in_child(id, Direction::Right) {
+                        // When: resize_active_split_in_child succeeds Right, the child consumed ResizePaneRight.
                         return true;
                     }
                 }
                 self.resize_active_split(Direction::Right);
             }
             Action::ResizePaneUp => {
+                // When: action is Action::ResizePaneUp, grow the routed pane upward.
                 self.dispatch_intent(sonicterm_app_core::AppIntent::ResizePane {
                     window: sonicterm_types::WindowKey::new(0),
                     dir: sonicterm_app_core::SplitDir::Up,
                     cells: 1,
                 });
                 if let FrontmostKind::Child(id) = source_kind {
+                    // When: source_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.resize_active_split_in_child(id, Direction::Up) {
+                        // When: resize_active_split_in_child succeeds Up, the child consumed ResizePaneUp.
                         return true;
                     }
                 }
                 self.resize_active_split(Direction::Up);
             }
             Action::ResizePaneDown => {
+                // When: action is Action::ResizePaneDown, grow the routed pane downward.
                 self.dispatch_intent(sonicterm_app_core::AppIntent::ResizePane {
                     window: sonicterm_types::WindowKey::new(0),
                     dir: sonicterm_app_core::SplitDir::Down,
                     cells: 1,
                 });
                 if let FrontmostKind::Child(id) = source_kind {
+                    // When: source_kind is FrontmostKind::Child(id), route the action to that child.
                     if self.resize_active_split_in_child(id, Direction::Down) {
+                        // When: resize_active_split_in_child succeeds Down, the child consumed ResizePaneDown.
                         return true;
                     }
                 }
                 self.resize_active_split(Direction::Down);
             }
             Action::ResizePane { dir, amount } => {
+                // When: action is ResizePane with dir and amount, apply amount increments in dir.
+                // ResizePane applies amount increments in dir.
                 if *amount == 0 {
+                    // When: amount is zero, consume ResizePane without changing the layout.
                     return true;
                 }
                 self.dispatch_intent(sonicterm_app_core::AppIntent::ResizePane {
@@ -947,29 +1081,33 @@ impl App {
                     cells: *amount,
                 });
                 if let FrontmostKind::Child(id) = source_kind {
+                    // Child sources receive every resize increment.
                     for _ in 0..*amount {
                         self.resize_active_split_in_child(id, *dir);
                     }
                 } else {
+                    // When: source_kind is not Child, resize the main active split.
                     for _ in 0..*amount {
                         self.resize_active_split(*dir);
                     }
                 }
             }
             Action::MoveTabToNewWindow => {
+                // MoveTabToNewWindow routes tear-out from source_window_id.
+                // MoveTabToNewWindow queues the routed active tab for tear-out.
                 if self.windows.contains_key(&source_window_id) {
+                    // A registered source window can queue its active tab for tear-out.
                     self.queue_active_tab_tear_out(source_window_id);
                 }
             }
             Action::ToggleFullscreen => self.toggle_fullscreen_for(source_kind),
-            // Non-routed arms — delegate to the cached-frontmost
-            // dispatcher. These either don't touch per-window state
-            // (clipboard, theme, config) or have their own routing
-            // (NewWindow correctly creates a new top-level regardless
-            // of source). OpenSearch / palette use the main-window
-            // overlay singleton today — follow-up for
-            // per-window overlay routing.
-            _ => return self.run_action(action),
+            // Non-routed arms delegate to the cached-frontmost dispatcher.
+            // Clipboard, theme, and config avoid window-local state; NewWindow
+            // creates its own top level; search and palette use the main overlay.
+            _ => {
+                // When: action is not source-routed here, delegate it to run_action.
+                return self.run_action(action);
+            }
         }
         true
     }
@@ -980,11 +1118,14 @@ impl App {
     /// to the window that produced it.
     fn kind_for(&self, id: WindowId) -> FrontmostKind {
         if let Some(w) = self.main_window() {
+            // When: main_window returns w, compare its id before checking children.
             if w.id() == id {
+                // When: w.id equals id, classify the explicit source as Main.
                 return FrontmostKind::Main;
             }
         }
         if self.windows.contains_key(&id) {
+            // When: windows contains id, classify the explicit source as Child.
             return FrontmostKind::Child(id);
         }
         FrontmostKind::None
@@ -992,13 +1133,16 @@ impl App {
 
     fn toggle_fullscreen_for(&mut self, kind: FrontmostKind) {
         if let FrontmostKind::Child(id) = kind {
+            // When: kind is FrontmostKind::Child(id), toggle that window before falling back.
             if let Some(window) = self.windows.get(&id).and_then(|child| child.window.as_ref()) {
+                // When: child.window is Some(window), toggle it and finish child routing.
                 toggle_window_fullscreen(window);
                 return;
             }
             self.frontmost_window = None;
         }
         if let Some(window) = self.main_window() {
+            // The main fallback toggles its available window.
             toggle_window_fullscreen(window);
         }
     }
@@ -1017,6 +1161,7 @@ fn toggle_window_fullscreen(window: &Window) {
     if window.fullscreen().is_some() {
         window.set_fullscreen(None);
     } else {
+        // When: window.fullscreen is None, enter borderless fullscreen.
         window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
     }
 }

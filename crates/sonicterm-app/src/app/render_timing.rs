@@ -10,6 +10,7 @@ pub struct RenderTiming {
 impl RenderTiming {
     pub fn start(window: &'static str) -> Option<Self> {
         if !tracing::enabled!(target: "render_timing", tracing::Level::DEBUG) {
+            // When: `render_timing` debug tracing is disabled, avoid timer allocation and per-lap bookkeeping.
             return None;
         }
         let now = Instant::now();

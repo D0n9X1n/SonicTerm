@@ -1,17 +1,17 @@
 //! sonicterm-mux server: owns PTYs across client disconnects.
 //!
-//! v0.1 design notes:
+//! Shape of the current protocol implementation:
 //!
-//! - Single in-flight client per server process (Attach replaces any prior
-//!   subscriber). Multi-client fanout is FUTURE work.
-//! - Each `Spawn` creates a fresh `Session` containing one `Pane`. Multi-pane
-//!   sessions / pane splits inside a session are FUTURE work; the protocol
-//!   already carries the distinction so clients can grow into it.
-//! - Per-pane replay buffer: ring of the last `REPLAY_CAP` bytes (256 KiB).
-//!   On Attach the server flushes the entire buffer to the client before
-//!   resuming live forwarding. That is good enough to restore the visible
-//!   screen of any reasonable shell prompt; a true scrollback-aware replay
-//!   is FUTURE work.
+//! - One in-flight client per server process: Attach replaces any prior
+//!   subscriber rather than fanning output out to several.
+//! - Each `Spawn` creates a fresh `Session` holding one `Pane`. The protocol
+//!   distinguishes sessions from panes, so a client may address them
+//!   separately even though the server never puts two panes in one session.
+//! - Per-pane replay buffer: a ring of the last `REPLAY_CAP` bytes (256 KiB).
+//!   On Attach the server flushes the whole ring before resuming live
+//!   forwarding, which restores the visible screen of a shell prompt. The
+//!   ring stores raw bytes with no VT parsing, so it replays what was
+//!   written rather than a reconstructed scrollback.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -36,9 +36,10 @@ pub const REPLAY_CAP: usize = 256 * 1024;
 
 /// Per-client subscriber channel capacity. Bounded so a runaway or
 /// malicious PTY cannot OOM the server by outpacing a slow / wedged
-/// consumer. When the channel is full we drop the OLDEST queued message
-/// so the freshest output still reaches the client. 4096 frames @ ~8 KiB
-/// each is a soft ceiling of ~32 MiB per attached pane.
+/// consumer. Output stops one slot short of capacity so control messages can
+/// still arrive; once saturated, newer output is dropped while the queued
+/// prefix remains. 4096 frames @ ~8 KiB is a soft ceiling of ~32 MiB per
+/// attached pane.
 pub const CHANNEL_CAP: usize = 4096;
 
 /// Maximum bytes stored in one queued subscriber output message.
@@ -68,6 +69,8 @@ impl SubscriberSink {
     /// control messages are never evicted.
     pub fn send_drop_oldest(&self, msg: ServerMsg) -> Result<()> {
         let ServerMsg::Output { pane_id, bytes } = msg else {
+            // When: msg is a control reply rather than Output, so it is never evicted — it is
+            // either queued or reported to the caller as an error.
             return match self.tx.try_send(msg) {
                 Ok(()) => Ok(()),
                 Err(TrySendError::Full(_)) => {
@@ -82,12 +85,22 @@ impl SubscriberSink {
                 .capacity()
                 .is_some_and(|capacity| self.tx.len() >= capacity.saturating_sub(1))
             {
+                // When: tx has one slot left, so reserve it for a control message and drop this
+                // output chunk instead of filling the mailbox.
                 return Ok(());
             }
             match self.tx.try_send(ServerMsg::Output { pane_id, bytes: chunk.to_vec() }) {
-                Ok(()) => {}
-                Err(TrySendError::Full(_)) => return Ok(()),
+                Ok(()) => {
+                    // When: try_send queued this chunk, so continue with the next one.
+                }
+                Err(TrySendError::Full(_)) => {
+                    // When: TrySendError::Full means the mailbox filled mid-chunk, so keep the
+                    // already-queued prefix and stop rather than reporting an error.
+                    return Ok(());
+                }
                 Err(TrySendError::Disconnected(_)) => {
+                    // When: Disconnected means the client is gone, so surface an error and let
+                    // the caller drop this subscriber.
                     return Err(anyhow!("subscriber disconnected"));
                 }
             }
@@ -134,9 +147,12 @@ impl Pane {
         PaneInfo { id: self.id, cmd: self.cmd.clone(), cols: self.cols, rows: self.rows }
     }
 
-    fn kill(&self) {
+    // Ordering: alive is stored Release so the reader thread's Acquire load observes the
+    // shutdown request before pty.kill tears the PTY down underneath it.
+    fn kill(&self) -> Result<()> {
         self.alive.store(false, Ordering::Release);
-        self.pty.kill();
+        self.pty.kill()?;
+        Ok(())
     }
 }
 
@@ -200,6 +216,8 @@ impl ServerState {
         Ok(ids)
     }
 
+    // Ordering: next_session and next_pane only mint unique ids, so Relaxed suffices — no other
+    // state is published through these counters.
     fn spawn_paused(self: &Arc<Self>, cmd: &str, cols: u16, rows: u16) -> Result<PendingPaneStart> {
         let session_id = self.next_session.fetch_add(1, Ordering::Relaxed);
         let pane_id = self.next_pane.fetch_add(1, Ordering::Relaxed);
@@ -213,6 +231,8 @@ impl ServerState {
     /// Subscribe `tx` as the new live consumer for every pane in
     /// `session_id`. Returns the pane info list to send in AttachOk.
     /// Also drains each pane's replay buffer to the new subscriber.
+    // Lock order: sessions -> replay -> subscriber -> attached. sessions is held across the whole
+    // walk; replay and subscriber are per-pane and released before attached is taken.
     pub fn attach(&self, session_id: SessionId, sink: SubscriberSink) -> Result<Vec<PaneInfo>> {
         let sessions = self.sessions.lock();
         let session =
@@ -224,6 +244,8 @@ impl ServerState {
             // sees replay-then-live in order.
             let replay_bytes: Vec<u8> = pane.replay.lock().iter().copied().collect();
             if !replay_bytes.is_empty() {
+                // When: replay_bytes holds buffered output, so flush it before the sink goes
+                // live; a full mailbox drops replay rather than failing the attach.
                 let _ = sink
                     .send_drop_oldest(ServerMsg::Output { pane_id: pane.id, bytes: replay_bytes });
             }
@@ -235,10 +257,14 @@ impl ServerState {
 
     /// Drop the current attachment: clear each pane's subscriber slot so live
     /// output again only accumulates into the replay ring.
+    // Lock order: attached -> sessions -> subscriber. attached is released by take() before
+    // sessions is acquired, so the pair is never held together.
     pub fn detach(&self) {
         let attached = self.attached.lock().take();
         if let Some(sid) = attached {
             if let Some(session) = self.sessions.lock().get(&sid) {
+                // A pane reaper can remove the session between the attached and sessions locks,
+                // leaving nothing to clear.
                 for pane in session.panes.values() {
                     *pane.subscriber.lock() = None;
                 }
@@ -250,13 +276,19 @@ impl ServerState {
     /// no client is currently attached. Used by the auto-subscribe-on-Spawn
     /// convenience path so a freshly-spawned pane streams its output back
     /// to the spawner without requiring an explicit Attach.
+    // Lock order: sessions -> attached -> subscriber, matching attach so the two entry points
+    // cannot deadlock against each other.
     pub fn subscribe_if_unattached(&self, session_id: SessionId, sink: SubscriberSink) {
         let sessions = self.sessions.lock();
         let mut attached = self.attached.lock();
         if attached.is_some() {
+            // When: attached is already set, so a client owns the stream; the spawn convenience
+            // path must not steal it.
             return;
         }
         if let Some(session) = sessions.get(&session_id) {
+            // The pane can exit between spawn and this call; a missing session leaves attached
+            // untouched.
             for pane in session.panes.values() {
                 *pane.subscriber.lock() = Some(sink.clone());
             }
@@ -303,14 +335,15 @@ impl ServerState {
     /// session contains a pane with that id.
     pub fn kill_pane(&self, pane_id: PaneId) -> Result<()> {
         let pane = self.take_pane(pane_id).ok_or_else(|| anyhow!("unknown pane {pane_id}"))?;
-        pane.kill();
-        Ok(())
+        pane.kill()
     }
 
     fn reap_pane(&self, pane_id: PaneId) {
         drop(self.take_pane(pane_id));
     }
 
+    // Lock order: sessions -> attached. The sessions guard is scoped to the inner block and
+    // released before attached is taken, so the two are never held together.
     fn take_pane(&self, pane_id: PaneId) -> Option<Pane> {
         let (pane, empty_session) = {
             let mut sessions = self.sessions.lock();
@@ -321,6 +354,8 @@ impl ServerState {
             let pane = session.panes.remove(&pane_id).expect("pane found above");
             let empty_session = session.panes.is_empty().then_some(session_id);
             if empty_session.is_some() {
+                // Drop the session with its last pane so a later Attach cannot name an empty
+                // entry.
                 sessions.remove(&session_id);
             }
             (pane, empty_session)
@@ -328,6 +363,8 @@ impl ServerState {
         if let Some(session_id) = empty_session {
             let mut attached = self.attached.lock();
             if *attached == Some(session_id) {
+                // Only clear the attachment that named this session; a client that attached
+                // elsewhere in the meantime keeps its own.
                 *attached = None;
             }
         }
@@ -338,6 +375,8 @@ impl ServerState {
 fn find_pane(sessions: &HashMap<SessionId, Session>, pane_id: PaneId) -> Result<&Pane> {
     for session in sessions.values() {
         if let Some(pane) = session.panes.get(&pane_id) {
+            // When: this session owns pane_id, so stop the scan here; pane ids are unique
+            // across sessions.
             return Ok(pane);
         }
     }
@@ -348,6 +387,8 @@ fn notify_subscriber_exit(subscriber: &Mutex<Option<SubscriberSink>>, pane_id: P
     let sink = subscriber.lock().take();
     if let Some(sink) = sink {
         if let Err(error) = sink.send_control(ServerMsg::Exit { pane_id }) {
+            // A client that vanished during teardown is the expected disconnect path, so this
+            // stays at debug rather than warn.
             tracing::debug!(
                 pane_id,
                 error = %error,
@@ -361,6 +402,8 @@ fn send_reply(sink: &SubscriberSink, message: ServerMsg) -> Result<()> {
     sink.send_control(message)
 }
 
+// Lock order: replay -> subscriber. The replay guard is scoped to the trim block and released
+// before subscriber is cloned, so a slow send never blocks PTY buffering.
 fn forward_pane_output<T: AsRef<[u8]>>(
     chunk: T,
     replay: &Mutex<VecDeque<u8>>,
@@ -377,6 +420,8 @@ fn forward_pane_output<T: AsRef<[u8]>>(
     }
     let subscriber = subscriber.lock().clone();
     if let Some(sink) = subscriber {
+        // When: a subscriber is installed, so fan this chunk out live; with none attached the
+        // bytes stay in the replay ring until a client attaches.
         let _ = sink.send_drop_oldest(ServerMsg::Output { pane_id, bytes: bytes.to_vec() });
     }
 }
@@ -390,12 +435,16 @@ fn drain_ready_pane_output<T: AsRef<[u8]>>(
     let ready = out_rx.len();
     for _ in 0..ready {
         let Ok(chunk) = out_rx.try_recv() else {
+            // When: try_recv found the queue empty or closed, so the snapshot taken from
+            // out_rx.len() is already drained.
             break;
         };
         forward_pane_output(chunk, replay, subscriber, pane_id);
     }
 }
 
+// Ordering: r_alive is loaded Acquire so this thread observes the Release store in Pane::kill
+// before it stops draining and reaps the pane.
 fn build_pane(
     pane_id: PaneId,
     cmd: &str,
@@ -425,6 +474,8 @@ fn build_pane(
     let r_alive = alive.clone();
     let reader_thread = thread::spawn(move || {
         if start_rx.recv().is_err() {
+            // When: start_rx closed before a start signal arrived, so the caller abandoned this
+            // pane between build_pane and start; exit without touching the PTY.
             return;
         }
         let mut exit_probe_warned = false;
@@ -433,6 +484,8 @@ fn build_pane(
         let child_has_exited = |exit_probe_warned: &mut bool| match child_exit.has_exited() {
             Ok(exited) => exited,
             Err(error) => {
+                // A failed probe is reported as "still running" so a broken probe cannot cut a
+                // live pane's output short; the warning is latched to one line per pane.
                 if !*exit_probe_warned {
                     tracing::warn!(pane_id, %error, "failed to probe mux pane child exit");
                     *exit_probe_warned = true;
@@ -443,23 +496,37 @@ fn build_pane(
         while r_alive.load(Ordering::Acquire) {
             let now = Instant::now();
             if exit_drain_deadline.is_some_and(|deadline| now >= deadline) {
+                // When: the exit_drain_deadline grace window elapsed, so stop waiting for
+                // trailing output the exited child will never produce.
                 break;
             }
             let chunk = {
                 let wait = if let Some(deadline) = exit_drain_deadline {
+                    // Inside the drain grace window the wait is bounded by the deadline, so no
+                    // further exit probe is needed.
                     deadline.saturating_duration_since(now)
                 } else {
+                    // When: exit_drain_deadline is unset, so wake at next_exit_probe to test
+                    // whether the child has exited.
                     next_exit_probe.saturating_duration_since(now)
                 };
                 match out_rx.recv_timeout(wait) {
                     Ok(chunk) => chunk,
-                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                        // When: Disconnected means the PTY reader closed out_rx, so no further
+                        // output can arrive and the pane is finished.
+                        break;
+                    }
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                        // When: Timeout fired without output, so re-test liveness and child exit
+                        // before waiting again.
                         if !r_alive.load(Ordering::Acquire) {
+                            // When: r_alive was cleared by Pane::kill, so stop draining.
                             break;
                         }
                         let now = Instant::now();
                         if exit_drain_deadline.is_some_and(|deadline| now >= deadline) {
+                            // When: the exit_drain_deadline grace window closed while waiting.
                             break;
                         }
                         if exit_drain_deadline.is_none() && child_has_exited(&mut exit_probe_warned)
@@ -504,10 +571,13 @@ fn build_pane(
     ))
 }
 
-/// Handle one connected client using the legacy three-argument API.
+/// Handle one connected client, running teardown with no writer-shutdown hook.
 ///
-/// Transport-aware servers should prefer [`handle_connection_with_shutdown`]
-/// so blocked writes can be interrupted during teardown.
+/// This is the three-argument form of [`handle_connection_with_shutdown`], kept
+/// as a public entry point for callers that hold no transport handle to
+/// interrupt. Prefer the four-argument form where one is available: without a
+/// hook, a write blocked on a peer that never reads is only bounded by the
+/// writer-shutdown timeout.
 pub fn handle_connection<S>(state: Arc<ServerState>, read_half: S, write_half: S) -> Result<()>
 where
     S: Read + Write + Send + 'static,
@@ -541,6 +611,8 @@ where
     let writer_thread = thread::spawn(move || {
         while let Ok(msg) = rx_writer.recv() {
             if crate::frame::write_frame(&mut write_half, &msg).is_err() {
+                // When: write_frame failed, so the transport is broken; stop draining rather
+                // than spin on a socket that will never accept bytes again.
                 break;
             }
         }
@@ -550,6 +622,8 @@ where
     // Request loop on this thread.
     let mut request_error = None;
     while let Ok(msg) = crate::frame::read_frame::<_, ClientMsg>(&mut read_half) {
+        // When: ClientMsg::Spawn is the only request that creates server-side state before the
+        // client can name it, so a failed reply must reap the pane rather than leak a PTY.
         let result = match msg {
             ClientMsg::ListSessions => {
                 send_reply(&sink, ServerMsg::Sessions(state.list_sessions()))
@@ -564,6 +638,8 @@ where
             }
             ClientMsg::Spawn { cmd, cols, rows } => match state.spawn_paused(&cmd, cols, rows) {
                 Ok(pending) => {
+                    // When: spawn_paused built the pane with its reader still parked, so the
+                    // client learns pid before any output can be produced.
                     let sid = pending.session_id;
                     let pid = pending.pane_id;
                     // Convenience: if the client isn't yet attached to any
@@ -574,6 +650,8 @@ where
                     match send_reply(&sink, ServerMsg::Spawned { session_id: sid, pane_id: pid }) {
                         Ok(()) => pending.start(),
                         Err(error) => {
+                            // When: send_reply failed, so the client never learned pid and could
+                            // not kill the pane itself; reap it here instead of leaking a PTY.
                             let _ = state.kill_pane(pid);
                             Err(error)
                         }
@@ -585,6 +663,8 @@ where
                 if let Err(e) = state.input(pane_id, bytes) {
                     send_reply(&sink, ServerMsg::Error(e.to_string()))
                 } else {
+                    // When: input succeeded, so the client is owed no reply and the request
+                    // loop continues.
                     Ok(())
                 }
             }
@@ -592,6 +672,7 @@ where
                 if let Err(e) = state.resize(pane_id, cols, rows) {
                     send_reply(&sink, ServerMsg::Error(e.to_string()))
                 } else {
+                    // When: resize succeeded, so no reply frame is owed.
                     Ok(())
                 }
             }
@@ -599,11 +680,15 @@ where
                 if let Err(e) = state.kill_pane(pane_id) {
                     send_reply(&sink, ServerMsg::Error(e.to_string()))
                 } else {
+                    // When: kill_pane succeeded, so no reply frame is owed; the pane's reader
+                    // thread sends the Exit frame as it winds down.
                     Ok(())
                 }
             }
         };
         if let Err(error) = result {
+            // When: a reply could not be delivered, so the transport is unusable; record the
+            // error and leave the loop to run teardown once.
             request_error = Some(error);
             break;
         }

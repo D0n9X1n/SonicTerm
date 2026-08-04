@@ -366,8 +366,9 @@ fn a_sigkilled_child_is_detected_on_the_next_launch() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
-    // SAFETY: `kill` targets a child this process spawned and owns.
-    let killed = unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGKILL) };
+    let killed =
+        // SAFETY: `kill` takes scalar pid/signal values; `child.id()` names the helper this test spawned and still owns.
+        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGKILL) };
     let _ = child.wait();
 
     assert!(armed, "the helper never wrote a marker; the kill proved nothing");

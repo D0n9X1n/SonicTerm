@@ -1,12 +1,11 @@
 //! Wezterm-driven chrome text helper.
 //!
-//! Replaces the 11 `legacy-chrome TextRenderer` chrome sites in `core.rs`
-//! (tab titles, search input, palette query/rows/footer, IME preedit,
-//! broadcast banner, drag-chip title)
-//! plus the `tab_spans.rs` glyphon path. Every chrome string now flows
-//! through the same `FontStack` raster path + `GlyphAtlas` + `TextPipeline`
-//! path the terminal grid uses — no second font system, no second
-//! atlas, no second render pass.
+//! Every chrome string — tab titles, search input, palette query/rows/footer,
+//! IME preedit, broadcast banner, drag-chip title — flows through the same
+//! `FontStack` raster path, `GlyphAtlas`, and `TextPipeline` the terminal grid
+//! uses. One font system, one atlas, one render pass: chrome and grid text
+//! cannot drift apart in shaping, hinting, or colour handling, and a glyph
+//! rasterized for either is already warm for the other.
 //!
 //! ## Pipeline
 //!
@@ -19,9 +18,8 @@
 //!    the caller hands the vec to the existing
 //!    [`crate::text_pipeline::TextPipeline`] for the draw call.
 //!
-//! No new wgpu binding setup; no new render pass; no new shader. The
-//! chrome ride-shares the terminal text pipeline (separate vec, same
-//! pipeline).
+//! The chrome ride-shares the terminal text pipeline: a separate vec, the
+//! same pipeline, so no extra wgpu binding setup, render pass, or shader.
 //!
 //! ## Font size scaling
 //!
@@ -144,10 +142,14 @@ pub fn layout(
 ) -> ChromeTextLayout {
     let mut out = ChromeTextLayout { glyphs: Vec::new(), width_px: 0.0, height_px: 0.0 };
     if text.is_empty() {
+        // When: text is empty there is no run to shape, so width_px and height_px stay
+        // zero and a centering caller measures against a zero-width box.
         return out;
     }
     let (sw, sh) = screen;
     if sw <= 0.0 || sh <= 0.0 {
+        // When: sw or sh is not positive px_to_ndc would divide by zero, so the run is
+        // dropped rather than emitting glyphs at non-finite NDC coordinates.
         return out;
     }
 
@@ -186,10 +188,20 @@ pub fn layout(
 
     let shaped = match font_stack.shape_text_with_style(text, attrs.bold, attrs.italic) {
         Ok(v) => v,
-        Err(_) => return out,
+        Err(_) => {
+            // When: shape_text_with_style fails there are no glyph identities to key the
+            // atlas by, so the run is dropped rather than painted from guessed ids.
+            return out;
+        }
     };
 
-    let scale = if native_em_px > 0.0 { font_size_px / native_em_px } else { 1.0 };
+    let scale = if native_em_px > 0.0 {
+        font_size_px / native_em_px
+    } else {
+        // When: native_em_px is not positive the ratio would be non-finite, so tiles
+        // project at their rasterized size instead of collapsing the whole run.
+        1.0
+    };
     let rgba = chrome_color_to_linear_rgba(color);
 
     // Layout walker: track the running x-advance independently of the
@@ -226,9 +238,15 @@ pub fn layout(
         let key = if glyph_pos != 0 {
             GlyphKey::shaped(lead_ch, font_idx, glyph_pos, attrs.bold, attrs.italic)
         } else {
+            // When: glyph_pos is zero the shaper reported notdef, so the key carries
+            // lead_ch and slot 0 for the rasterizer to resolve through the charmap.
+
             // Skip pure blanks (space / control chars) — they have no
             // pixels and don't need an atlas slot.
             if lead_ch == '\0' || lead_ch.is_whitespace() {
+                // When: lead_ch is whitespace or NUL the glyph has no pixels, so the pen
+                // advances without consuming an atlas slot that a visible glyph needs.
+
                 // Advance the pen for whitespace using wezterm's
                 // reported `x_advance` (scaled). Spaces still need to
                 // contribute width so the next glyph lands at the
@@ -237,6 +255,9 @@ pub fn layout(
                 pen_x += if adv > 0.0 {
                     adv
                 } else {
+                    // When: adv is zero the shaper reported no advance for this blank, so
+                    // the unicode-width estimate keeps the next glyph from overlapping it.
+
                     // Fall back to the unicode-width estimate when
                     // wezterm reported zero (some shapers do this
                     // for ASCII spaces).
@@ -256,9 +277,16 @@ pub fn layout(
 
         let info = match atlas.get_or_insert(key, wt_raster) {
             Some(i) => i,
-            None => continue,
+            None => {
+                // When: get_or_insert returns None the tile could not be rasterized or
+                // placed, so the glyph is dropped this frame rather than painted stale.
+                continue;
+            }
         };
         if info.px_size[0] == 0 || info.px_size[1] == 0 {
+            // When: px_size is zero the tile covers no pixels, yet it still carries the
+            // shaper's advance, so the pen must move or the rest of the run shifts left.
+
             // No-pixel glyph (e.g. ascii space hit via the shaped
             // path). Still need to advance the pen by the shaper's
             // x_advance so the next glyph lands correctly.
@@ -281,7 +309,7 @@ pub fn layout(
         // Pixel-snap the glyph ORIGIN to the integer device-pixel grid.
         // The glyph atlas uses nearest filtering, so keeping the origin on a
         // device-pixel boundary avoids uneven texel selection and the soft,
-        // smeared look on tab titles / chrome (#blurry-tabs). Snapping the draw
+        // smeared look on tab titles and other chrome. Snapping the draw
         // origin (not the advance — `pen_x` stays fractional so cluster
         // spacing is still shaper-accurate) makes each tile land on whole
         // pixels and sample 1:1 with the raster. We round the final
@@ -292,7 +320,11 @@ pub fn layout(
 
         // Clip cull: reject glyphs entirely outside the supplied rect.
         if let Some(c) = clip {
+            // When: clip is set the run paints inside a modal, so each tile is tested
+            // against c before it can paint across the palette or IME border.
             if gx + gw < c.x || gx > c.x + c.w || gy + gh < c.y || gy > c.y + c.h {
+                // When: the tile falls wholly outside c it cannot paint, but the advance
+                // still applies or every later glyph in the run shifts left.
                 pen_x += advance;
                 last_pen_x = pen_x;
                 continue;
@@ -300,7 +332,13 @@ pub fn layout(
         }
 
         let rect = px_to_ndc(gx, gy, gw, gh, sw, sh);
-        let inst_color = if info.is_color { [1.0, 1.0, 1.0, 1.0] } else { rgba };
+        let inst_color = if info.is_color {
+            [1.0, 1.0, 1.0, 1.0]
+        } else {
+            // When: is_color is false the tile holds coverage rather than colour, so the
+            // chrome rgba supplies the hue and the coverage only scales it.
+            rgba
+        };
         // Apply the requested alpha. `chrome_color_to_linear_rgba`
         // returns `a = 1.0`, so callers that want dimmed chrome (the
         // drag chip ghost path via `scale_chrome_text_alpha`) need
@@ -339,11 +377,10 @@ pub fn layout(
 /// `uv.w` (the texture's larger v, i.e. the BOTTOM of the bitmap) at
 /// `c.y = 0` and `uv.y` (the texture's smaller v, i.e. the TOP of the
 /// bitmap) at `c.y = 1` — so the corner with the smaller v sample MUST
-/// be the smaller-NDC-y corner. A prior implementation here returned
-/// `y0 = top_NDC` and `h_ndc < 0`, which made `c.y = 0` land at the
-/// visual TOP of the quad while sampling the BOTTOM of the bitmap —
-/// vertically mirroring every chrome glyph (Bug 3 of the
-/// post-wezterm-takeover smoke).
+/// be the smaller-NDC-y corner. Returning `y0 = top_NDC` with a negative
+/// `h_ndc` instead would put `c.y = 0` at the visual TOP of the quad
+/// while sampling the BOTTOM of the bitmap, mirroring every chrome
+/// glyph vertically.
 #[inline]
 fn px_to_ndc(px_x: f32, px_y: f32, px_w: f32, px_h: f32, sw: f32, sh: f32) -> [f32; 4] {
     let nx = (px_x / sw) * 2.0 - 1.0;

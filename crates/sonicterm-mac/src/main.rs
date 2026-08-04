@@ -21,10 +21,8 @@ fn main() -> Result<()> {
     // still produces a crash dump. Logger init is deferred until
     // after the user's `[logging]` section has been read so its
     // `level` + retention knobs actually drive the runtime —
-    // `tracing_subscriber::try_init` only ever installs the first
-    // subscriber, so the previous "bootstrap-then-reinit" dance
-    // silently dropped the user-configured level (Haiku review of
-    // ).
+    // `tracing_subscriber::try_init` only installs the first subscriber;
+    // initializing before config load would silently discard the user's level.
     sonicterm_logging::install_panic_hook(sonicterm_logging::log_dir());
     // Install signal + drop-guard exit tracing immediately after the
     // panic hook so EVERY exit path (panic / signal / clean /
@@ -105,6 +103,7 @@ fn main() -> Result<()> {
         // Disable AppKit's native window tab strip for SonicTerm only.
         // This is a process-local NSWindow class setting, not a system
         // preference change; SonicTerm draws its own tab bar.
+        // SAFETY: this class method runs on the AppKit thread before any SonicTerm NSWindow is created.
         unsafe {
             let ns_window = objc2::class!(NSWindow);
             let _: () = objc2::msg_send![ns_window, setAllowsAutomaticWindowTabbing: false];
@@ -131,11 +130,8 @@ fn main() -> Result<()> {
             Box::new(|raw| {
                 if let raw_window_handle::RawWindowHandle::AppKit(h) = raw {
                     // h.ns_view is `NonNull<c_void>` pointing at an NSView*.
-                    // SAFETY: winit hands us a live NSView on the main
-                    // thread before the event loop starts; we only invoke
-                    // the zero-arg `window` accessor and set a process-local
-                    // NSWindow property.
                     let view: *mut objc2::runtime::AnyObject = h.ns_view.as_ptr().cast();
+                    // SAFETY: winit supplied a live main-thread NSView; the returned NSWindow is used synchronously and null-checked.
                     unsafe {
                         let window: *mut objc2::runtime::AnyObject = objc2::msg_send![view, window];
                         if !window.is_null() {
@@ -150,10 +146,9 @@ fn main() -> Result<()> {
         if let Some(p) = &pending {
             tracing::info!(tab = %p.tab_title, "os_drag_mac: pending payload at startup; will spawn destination tab");
         }
-        // M6b: construct the AppStateMachine in the bin and hand it
-        // to the platform shell. State mutation routes through the
-        // reducer the shell owns — the bin no longer reaches into
-        // the monolithic `App` directly via `run_with_*`.
+        // Construct the state machine in the binary and hand it to the
+        // platform shell. State mutation routes through the reducer the shell
+        // owns, so the binary never reaches into `App`'s field layout.
         open_documents::install();
         let machine =
             sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default());

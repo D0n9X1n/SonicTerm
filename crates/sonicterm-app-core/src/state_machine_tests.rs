@@ -150,6 +150,22 @@ fn drain_pending_at_max_cascade_depth_does_not_panic() {
     assert_eq!(drained.len(), MAX_CASCADE_DEPTH);
 }
 
+#[test]
+fn release_overflow_uses_the_common_class_sort() {
+    fn has_clear_then_break(source: &str) -> bool {
+        source
+            .lines()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|pair| pair[0].trim() == "self.pending.clear();" && pair[1].trim() == "break;")
+    }
+
+    const SOURCE: &str = include_str!("state_machine.rs");
+    assert!(!SOURCE.contains("return out;"));
+    assert!(has_clear_then_break(SOURCE));
+    assert!(has_clear_then_break("self.pending.clear();\r\n    break;\r\n"));
+}
+
 #[cfg(debug_assertions)]
 #[test]
 #[should_panic(expected = "MAX_CASCADE_DEPTH")]

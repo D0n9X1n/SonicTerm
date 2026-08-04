@@ -58,17 +58,29 @@ pub fn clear_all_rotated(log_dir: &Path) -> (usize, u64) {
     let mut bytes = 0u64;
     let active = active_log(log_dir);
     if let Ok(read) = std::fs::read_dir(log_dir) {
+        // When: read_dir enumerates log_dir; an unreadable directory leaves
+        // nothing to remove and the pass reports zero rather than failing.
         for entry in read.flatten() {
             let name = entry.file_name();
-            let Some(name_str) = name.to_str() else { continue };
+            let Some(name_str) = name.to_str() else {
+                // When: name is not UTF-8, so to_str yields nothing to match
+                // against the rotation prefix.
+                continue;
+            };
             if name_str == log_file_name() {
+                // When: name_str is the live log_file_name, which this pass
+                // never deletes — only its rotated siblings are removable.
                 continue;
             }
             if !name_str.starts_with(ROTATED_PREFIX) {
+                // When: name_str lacks ROTATED_PREFIX, so it is another
+                // writer's file sharing the directory and not ours to delete.
                 continue;
             }
             let path = entry.path();
             if Some(&path) == active.as_ref() {
+                // When: path is the active file the appender still holds open;
+                // removing it would cut the running session's log.
                 continue;
             }
             let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
@@ -111,6 +123,8 @@ fn active_log(log_dir: &Path) -> Option<PathBuf> {
             let name = e.file_name();
             let name_str = name.to_str()?;
             if !name_str.starts_with(ROTATED_PREFIX) && name_str != log_file_name() {
+                // When: name_str is neither a ROTATED_PREFIX file nor
+                // log_file_name, so this appender never wrote it.
                 return None;
             }
             let mtime = e.metadata().ok().and_then(|m| m.modified().ok())?;
@@ -135,12 +149,24 @@ fn active_log(log_dir: &Path) -> Option<PathBuf> {
 /// timestamp-suffixed file via [`enforce_rotated_logs`].
 fn enforce_size_rotation(log_dir: &Path, cfg: &LoggingConfig) {
     if cfg.max_file_size_mb == 0 {
+        // When: max_file_size_mb is zero, the size axis is switched off and the
+        // daily boundary plus the count cap are all that bound the logs.
         return;
     }
     let limit_bytes = cfg.max_file_size_mb.saturating_mul(1024 * 1024);
-    let Some(active) = active_log(log_dir) else { return };
-    let Ok(meta) = std::fs::metadata(&active) else { return };
+    let Some(active) = active_log(log_dir) else {
+        // When: active_log finds no candidate, the directory holds no log file
+        // to rotate.
+        return;
+    };
+    let Ok(meta) = std::fs::metadata(&active) else {
+        // When: metadata on active fails, its size is unknown, and rotating on
+        // a guess would rename a file that is still within budget.
+        return;
+    };
     if meta.len() <= limit_bytes {
+        // When: meta reports at most limit_bytes, so the active file is inside
+        // its budget and must keep its name.
         return;
     }
     let ts =
@@ -172,6 +198,8 @@ fn enforce_size_rotation(log_dir: &Path, cfg: &LoggingConfig) {
 
 fn enforce_rotated_logs(log_dir: &Path, cfg: &LoggingConfig) {
     let active = active_log(log_dir);
+    // When: read_dir on log_dir either enumerates the rotated files or fails,
+    // in which case there is nothing to enforce and the pass gives up.
     let mut rotated: Vec<(PathBuf, SystemTime)> = match std::fs::read_dir(log_dir) {
         Ok(read) => read
             .flatten()
@@ -179,13 +207,19 @@ fn enforce_rotated_logs(log_dir: &Path, cfg: &LoggingConfig) {
                 let name = e.file_name();
                 let name_str = name.to_str()?;
                 if name_str == log_file_name() {
+                    // When: name_str is the live log_file_name, which retention
+                    // never evicts.
                     return None;
                 }
                 if !name_str.starts_with(ROTATED_PREFIX) {
+                    // When: name_str lacks ROTATED_PREFIX, so it belongs to
+                    // another writer sharing the directory.
                     return None;
                 }
                 let path = e.path();
                 if Some(&path) == active.as_ref() {
+                    // When: path is the active file the appender holds open, so
+                    // the count and age axes must not consider it.
                     return None;
                 }
                 let mtime = e.metadata().ok().and_then(|m| m.modified().ok())?;
@@ -202,6 +236,8 @@ fn enforce_rotated_logs(log_dir: &Path, cfg: &LoggingConfig) {
 
     let now = SystemTime::now();
     if cfg.max_age_days > 0 {
+        // When: max_age_days is above zero, the age axis is active and evicts
+        // before the count cap; zero disables it and leaves count authoritative.
         let cutoff = Duration::from_secs(u64::from(cfg.max_age_days) * 86_400);
         rotated.retain(|(p, mtime)| {
             let age = now.duration_since(*mtime).unwrap_or_default();
@@ -211,6 +247,8 @@ fn enforce_rotated_logs(log_dir: &Path, cfg: &LoggingConfig) {
                 }
                 false
             } else {
+                // When: age is within cutoff, the file is young enough to keep
+                // and stays for the count axis to judge.
                 true
             }
         });
@@ -261,6 +299,8 @@ fn enforce_artifact_bounds(
     max_age_days: u32,
     max_bytes: u64,
 ) {
+    // When: read_dir on dir either enumerates the artifacts or fails, and a
+    // missing artifact directory means there is nothing to bound.
     let mut artifacts: Vec<Artifact> = match std::fs::read_dir(dir) {
         Ok(read) => read
             .flatten()
@@ -268,10 +308,14 @@ fn enforce_artifact_bounds(
                 let name = entry.file_name();
                 let name = name.to_str()?;
                 if !accepts(name) {
+                    // When: accepts rejects name, so the entry belongs to
+                    // another writer sharing the directory, not this class.
                     return None;
                 }
                 let metadata = entry.metadata().ok()?;
                 if !metadata.is_file() {
+                    // When: metadata reports a non-file such as a
+                    // subdirectory, which carries no artifact bytes to evict.
                     return None;
                 }
                 Some(Artifact {
@@ -286,10 +330,14 @@ fn enforce_artifact_bounds(
     artifacts.sort_by_key(|artifact| artifact.modified);
 
     if max_age_days > 0 {
+        // When: max_age_days is above zero, the age axis is active and evicts
+        // before the count and byte caps; zero switches that axis off.
         let now = SystemTime::now();
         let cutoff = Duration::from_secs(u64::from(max_age_days).saturating_mul(86_400));
         artifacts.retain(|artifact| {
             if now.duration_since(artifact.modified).unwrap_or_default() <= cutoff {
+                // When: the artifact is within cutoff, so it is young enough to
+                // keep and only the count and byte axes may evict it.
                 return true;
             }
             remove_artifact(&artifact.path);
@@ -319,6 +367,8 @@ fn crash_dir_from(log_dir: &Path) -> PathBuf {
     if canonical.parent() == Some(log_dir) {
         canonical
     } else {
+        // When: canonical does not sit under log_dir, the caller passed a
+        // custom directory, so the crashes path is derived from that instead.
         log_dir.join("crashes")
     }
 }

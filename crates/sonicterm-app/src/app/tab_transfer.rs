@@ -2,10 +2,8 @@
 //!
 //! Implements the *pure* tab-transfer primitive that moves a `Tab`
 //! (with its `TabState` and the full `PaneState` graph it owns)
-//! between two `TabContainer`s. The OS-level NSDraggingSession / OLE
-//! integration that *invokes* this primitive ships in a follow-up
-//! commit at the time (the simulated
-//! primitive + tests; OS-drag hookup deferred to a follow-up").
+//! between two `TabContainer`s. Platform drag backends invoke the same pure
+//! transfer seam after resolving source and destination window/tab identities.
 //!
 //! Why a separate "container" struct rather than just operating on
 //! `WindowState` / `App` directly: the canonical drop-target windows
@@ -50,6 +48,7 @@ impl Default for TabContainer {
 }
 
 impl TabContainer {
+    /// Construct an empty GPU-free tab container for transfer tests and pure logic.
     pub fn new() -> Self {
         Self { tabs: TabBar::new(), tab_states: Vec::new(), panes: HashMap::new() }
     }
@@ -104,6 +103,7 @@ pub fn transfer_tab_between(
     dst_idx: usize,
 ) -> TransferOutcome {
     if src_idx >= src.tabs.len() || src_idx >= src.tab_states.len() {
+        // When: `src_idx` is absent from either parallel vector, reject without detaching partial state.
         return TransferOutcome::SourceIndexOutOfRange;
     }
 
@@ -140,11 +140,13 @@ pub fn transfer_tab_between(
 #[doc(hidden)]
 pub fn reorder_within(c: &mut TabContainer, src_idx: usize, dst_idx: usize) -> TransferOutcome {
     if src_idx >= c.tabs.len() || src_idx >= c.tab_states.len() {
+        // When: `src_idx` is absent from either parallel vector, reject without changing the container.
         return TransferOutcome::SourceIndexOutOfRange;
     }
     let last = c.tabs.len().saturating_sub(1);
     let to = dst_idx.min(last);
     if to == src_idx {
+        // When: clamped destination `to` equals `src_idx`, preserve identity and report an idempotent no-op.
         return TransferOutcome::NoOp;
     }
     c.tabs.reorder(src_idx, to);

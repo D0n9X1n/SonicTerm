@@ -27,10 +27,14 @@ fn resolve_asset_dir(
     exists: impl Fn(&std::path::Path) -> bool,
 ) -> std::path::PathBuf {
     if let Some(exe) = current_exe {
+        // When: `current_exe` is available, inspect its bundle-relative asset location before using the source-tree fallback.
         if let Some(macos) = exe.parent() {
+            // When: `exe` has a parent directory, it may be the macOS bundle's executable directory.
             if let Some(contents) = macos.parent() {
+                // When: the executable directory has a parent, construct the adjacent `Resources/assets` candidate.
                 let bundled = contents.join("Resources").join("assets");
                 if exists(&bundled) {
+                    // When: `bundled` exists, prefer packaged assets so installed applications do not read workspace files.
                     return bundled;
                 }
             }

@@ -62,6 +62,11 @@ pub enum FontStretch {
 }
 
 impl FontStretch {
+    /// Map an OpenType `usWidthClass` to the nearest stretch variant.
+    ///
+    /// Values outside the defined 1..=9 range are clamped to the nearest
+    /// extreme rather than rejected, so a malformed OS/2 table still yields a
+    /// usable width instead of failing font load.
     pub fn from_opentype_stretch(width: u16) -> Self {
         match width {
             1 => Self::UltraCondensed,
@@ -78,6 +83,10 @@ impl FontStretch {
         }
     }
 
+    /// Return the OpenType `usWidthClass` value for this stretch.
+    ///
+    /// Always in 1..=9, so it round-trips through
+    /// [`Self::from_opentype_stretch`] unchanged.
     pub fn to_opentype_stretch(self) -> u16 {
         match self {
             Self::UltraCondensed => 1,
@@ -126,18 +135,31 @@ impl FontWeight {
     pub const BLACK: FontWeight = FontWeight(900);
     pub const EXTRABLACK: FontWeight = FontWeight(1000);
 
+    /// Wrap a raw OpenType `usWeightClass` value.
+    ///
+    /// Any `u16` is accepted, not just the named constants above, so variable
+    /// fonts and non-standard weights survive a round trip unchanged.
     pub const fn from_opentype_weight(weight: u16) -> Self {
         Self(weight)
     }
 
+    /// Return the raw OpenType `usWeightClass` value.
     pub fn to_opentype_weight(self) -> u16 {
         self.0
     }
 
+    /// Return the weight 200 units lighter, saturating at zero.
+    ///
+    /// Used for the half-bright text style; the step is applied to the raw
+    /// OpenType scale, so it may land between named constants.
     pub fn lighter(self) -> Self {
         Self::from_opentype_weight(self.to_opentype_weight().saturating_sub(200))
     }
 
+    /// Return the weight 200 units bolder.
+    ///
+    /// Used for the synthetic-bold text style; the step is applied to the raw
+    /// OpenType scale, so it may land between named constants.
     pub fn bolder(self) -> Self {
         Self::from_opentype_weight(self.to_opentype_weight() + 200)
     }
@@ -151,6 +173,8 @@ impl Default for FontWeight {
 
 impl Display for FontWeight {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        // When: Self matches a named FontWeight constant, that label is quoted;
+        // an unnamed weight falls through to its bare numeric value.
         let label = if *self == Self::EXTRABLACK {
             "ExtraBlack"
         } else if *self == Self::BLACK {
@@ -218,6 +242,10 @@ bitflags::bitflags! {
 }
 
 impl FreeTypeLoadFlags {
+    /// Load flags used when rendering at hidpi scale factors.
+    ///
+    /// Disables hinting: at high pixel densities the hinted outline distorts
+    /// stem positions more than it improves legibility.
     pub fn default_hidpi() -> Self {
         Self::NO_HINTING
     }
@@ -271,10 +299,15 @@ pub struct FontAttributes {
 }
 
 impl FontAttributes {
+    /// Attributes naming `family` with every other field left at its default.
     pub fn new(family: &str) -> Self {
         Self { family: family.into(), ..Default::default() }
     }
 
+    /// Attributes naming `family`, marked as a fallback entry.
+    ///
+    /// The fallback flag keeps the entry out of primary-font matching: it is
+    /// consulted only for codepoints the configured fonts do not cover.
     pub fn new_fallback(family: &str) -> Self {
         Self { family: family.into(), is_fallback: true, ..Default::default() }
     }
@@ -322,6 +355,12 @@ impl Default for TextStyle {
 }
 
 impl TextStyle {
+    /// Return a copy whose first font is reduced to its base family name.
+    ///
+    /// Style words such as `Bold` or `Condensed` are trimmed from the end of
+    /// the family repeatedly, so `"IBM Plex Mono SemiBold"` reduces to
+    /// `"IBM Plex Mono"`. Only the first entry is reduced; fallback entries
+    /// keep the family they were configured with.
     pub fn reduce_first_font_to_family(&self) -> Self {
         fn reduce(mut family: &str) -> String {
             loop {
@@ -345,6 +384,8 @@ impl TextStyle {
                     family = family.trim().trim_end_matches(suffix);
                 }
                 if family == start {
+                    // When: family stopped changing, so every recognized style
+                    // suffix has been trimmed and the base name remains.
                     break;
                 }
             }
@@ -368,6 +409,11 @@ impl TextStyle {
         }
     }
 
+    /// Return a copy with every font one step bolder.
+    ///
+    /// Each entry is marked synthetic, which tells the font stack this weight
+    /// was derived rather than configured, so it may synthesize the emboldening
+    /// when no real face at that weight exists.
     pub fn make_bold(&self) -> Self {
         Self {
             foreground: self.foreground.clone(),
@@ -384,6 +430,10 @@ impl TextStyle {
         }
     }
 
+    /// Return a copy with every font one step lighter.
+    ///
+    /// Backs the half-bright (dim) attribute. Each entry is marked synthetic,
+    /// so the font stack knows the weight was derived rather than configured.
     pub fn make_half_bright(&self) -> Self {
         Self {
             foreground: self.foreground.clone(),
@@ -400,6 +450,10 @@ impl TextStyle {
         }
     }
 
+    /// Return a copy with every font switched to the italic style.
+    ///
+    /// Each entry is marked synthetic, so the font stack may skew the upright
+    /// face when the family ships no true italic.
     pub fn make_italic(&self) -> Self {
         Self {
             foreground: self.foreground.clone(),
@@ -416,6 +470,12 @@ impl TextStyle {
         }
     }
 
+    /// Return the configured fonts followed by the implicit fallback chain.
+    ///
+    /// The default family is appended when the user's list does not already
+    /// contain it, then an emoji font and a symbol font, so codepoints outside
+    /// the configured fonts still resolve. Appended entries are marked as
+    /// fallbacks and are searched only after every configured font misses.
     pub fn font_with_fallback(&self) -> Vec<FontAttributes> {
         let mut font = self.font.clone();
         let mut default_font = FontAttributes::default();
@@ -454,6 +514,8 @@ pub enum FontLocatorSelection {
 
 impl Default for FontLocatorSelection {
     fn default() -> Self {
+        // When: cfg picks each platform's native discovery API, so font lookup
+        // matches what other applications on that system resolve.
         if cfg!(windows) {
             Self::Gdi
         } else if cfg!(target_os = "macos") {
@@ -473,6 +535,8 @@ pub enum FontRasterizerSelection {
 
 impl Default for FontRasterizerSelection {
     fn default() -> Self {
+        // When: cfg picks the rasterizer native to the platform, so glyph
+        // rendering matches local system conventions.
         if cfg!(windows) {
             Self::DirectWrite
         } else {
@@ -529,6 +593,13 @@ pub struct Config {
 }
 
 impl Config {
+    /// Build the built-in font configuration.
+    ///
+    /// Every field carries its compiled-in default, and the handle is stamped
+    /// with a fresh generation so consumers can tell one config revision from
+    /// the next and invalidate caches keyed on it.
+    // Ordering: CONFIG_GENERATION uses Relaxed because the counter only needs
+    // each config to get a distinct value, not to order other writes.
     pub fn default_config() -> Self {
         Self {
             font_size: 12.0,
@@ -564,6 +635,10 @@ impl Config {
         }
     }
 
+    /// Return this config's generation stamp.
+    ///
+    /// Distinct per constructed [`Config`], so a cache keyed on it is
+    /// invalidated whenever the configuration is replaced.
     pub fn generation(&self) -> usize {
         self.generation
     }
@@ -581,10 +656,18 @@ pub struct ConfigHandle {
 }
 
 impl ConfigHandle {
+    /// Wrap `config` in a cheaply cloneable shared handle.
+    ///
+    /// The inner [`Config`] is immutable once wrapped; a configuration change
+    /// installs a whole new handle rather than mutating this one.
     pub fn new(config: Config) -> Self {
         Self { inner: Arc::new(config) }
     }
 
+    /// Return the wrapped config's generation stamp.
+    ///
+    /// Compare against a previously observed value to detect that the
+    /// configuration was replaced and dependent caches must be rebuilt.
     pub fn generation(&self) -> usize {
         self.inner.generation()
     }
@@ -598,14 +681,29 @@ impl Deref for ConfigHandle {
     }
 }
 
+/// Return a handle to the process-wide font configuration.
+///
+/// The handle is a snapshot: a later [`use_this_configuration`] call does not
+/// change an already-returned handle, so a caller holding one keeps reading a
+/// consistent config. Panics if the config lock was poisoned by a panicking
+/// writer, since font setup cannot proceed on unknown state.
 pub fn configuration() -> ConfigHandle {
     CONFIG.lock().expect("font config lock poisoned").clone()
 }
 
+/// Install `config` as the process-wide font configuration.
+///
+/// Handles already returned by [`configuration`] keep their previous snapshot;
+/// only subsequent calls observe the new config. Its fresh generation stamp is
+/// what lets consumers notice the change and rebuild caches.
 pub fn use_this_configuration(config: Config) {
     *CONFIG.lock().expect("font config lock poisoned") = ConfigHandle::new(config);
 }
 
+/// Report a font-configuration error through the registered callback.
+///
+/// Does nothing when no callback is installed, so this crate never depends on
+/// a UI being present to surface an error.
 pub fn show_error(error: &str) {
     if let Some(callback) = *SHOW_ERROR.lock().expect("show error lock poisoned") {
         callback(error);

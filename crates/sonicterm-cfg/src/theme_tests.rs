@@ -15,7 +15,7 @@ fn temp_dir(label: &str) -> PathBuf {
 fn hex_parsing_accepts_hash_or_plain_and_rejects_malformed_values() {
     assert_eq!(Hex("#102030".into()).rgb(), Some((0x10, 0x20, 0x30)));
     assert_eq!(Hex("abcdef".into()).rgba(), Some([0xab, 0xcd, 0xef, 255]));
-    for bad in ["", "#123", "#gg0000", "#12345678"] {
+    for bad in ["", "#123", "#gg0000", "#12345678", "#0é000"] {
         assert_eq!(Hex(bad.into()).color(), None);
     }
 }

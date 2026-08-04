@@ -8,9 +8,8 @@
 //! tail -f, htop) re-emit the same per-row geometry every frame even
 //! though the row content hasn't changed since the last redraw.
 //!
-//! Moved from `sonicterm-shared::render::row_quad_cache` in M7e of the
-//! workspace refactor — caches `QuadInstance`, so it belongs on the
-//! GPU side of the layer split.
+//! The cache owns `QuadInstance` output, so it stays on the GPU side of the
+//! renderer-model boundary rather than leaking GPU records into shared types.
 //!
 //! On a cache hit the renderer can `extend_from_slice` the cached
 //! `Vec<QuadInstance>` directly into the frame's quad vector and skip
@@ -184,6 +183,7 @@ pub fn row_quad_hash(
     )
 }
 
+/// Hash row cells and every geometry/style input that changes cached background quads.
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn row_quad_hash_cells<I, C>(
@@ -223,6 +223,7 @@ where
         let (lo, hi) = if (s_row, s_col) <= (e_row, e_col) {
             ((s_row, s_col), (e_row, e_col))
         } else {
+            // When: `(s_row, s_col)` follows `(e_row, e_col)`, normalize endpoints so drag direction cannot change the key.
             ((e_row, e_col), (s_row, s_col))
         };
         if row_abs >= lo.0 && row_abs <= hi.0 {

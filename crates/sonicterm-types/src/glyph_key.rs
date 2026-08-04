@@ -27,8 +27,8 @@ pub struct GlyphKey {
     /// reserved as the "no shaping was used" sentinel — the rasterizer
     /// falls back to the char-based charmap lookup in that case.
     ///
-    /// Widened to u32 to hold sonicterm-font freetype glyph indices
-    /// (Phase 4) which can exceed u16 for large fonts (e.g. CJK).
+    /// Uses `u32` because FreeType glyph indices can exceed `u16` for large
+    /// fonts such as CJK families.
     pub glyph_id: u32,
 }
 
@@ -43,6 +43,7 @@ impl GlyphKey {
     #[inline]
     pub fn from_cell(c: &Cell) -> Option<Self> {
         if c.flags.contains(CellFlags::WIDE_CONT) {
+            // When: `WIDE_CONT` marks the trailing half of a wide glyph, which must not allocate a separate atlas tile.
             return None;
         }
         Some(Self {

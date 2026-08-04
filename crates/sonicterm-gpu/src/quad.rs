@@ -110,8 +110,7 @@ impl QuadInstance {
 /// (`[accent.r, accent.g, accent.b, 0.16]`) or the IME pre-edit
 /// background (`[0.10, 0.11, 0.14, 0.95]`) — must wrap them with this
 /// helper before stuffing them into a `QuadInstance`, otherwise the
-/// chrome renders much brighter than intended (the regression
-/// caught review).
+/// chrome renders much brighter than intended.
 ///
 /// Opaque colors (`a == 1.0`) pass through unchanged — premultiplying
 /// by 1.0 is the identity, so it's safe (and a no-op) to wrap every
@@ -302,6 +301,7 @@ impl QuadPipeline {
         instances: &[QuadInstance],
     ) {
         if instances.is_empty() {
+            // When: `instances` is empty, avoid a queue write and zero-instance draw.
             return;
         }
         if instances.len() as u64 > self.capacity {
@@ -327,6 +327,7 @@ impl QuadPipeline {
             self.capacity = cap;
             queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(instances));
         } else {
+            // When: instance count fits `capacity`, reuse the existing GPU buffer.
             queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(instances));
         }
         pass.set_pipeline(&self.pipeline);
@@ -449,6 +450,7 @@ pub fn push_mask_icon_quads(out: &mut Vec<QuadInstance>, params: MaskIconParams<
         for col in 0..8 {
             let alpha = f32::from(mask[row * 8 + col]) / 255.0;
             if alpha <= 0.0 {
+                // When: `alpha` is zero, this mask cell emits no visible quad.
                 continue;
             }
             let mut c = color;

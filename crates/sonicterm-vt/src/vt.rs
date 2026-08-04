@@ -62,8 +62,8 @@ pub const MAX_MEDIA_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 /// the number of panes, and nothing bounds the number of panes.
 ///
 /// Public so the bound can be measured against real heap from outside the
-/// crate. A ceiling checked only against the arithmetic it was derived from is
-/// how the composition above passed review in the first place.
+/// crate. Checking only per-parser arithmetic would miss the cross-pane
+/// composition this process-wide ceiling controls.
 pub const MAX_PROCESS_CAPTURE_STAGING_BYTES: usize = 64 * 1024 * 1024;
 
 /// Smallest staging budget an admitted capture is ever given.
@@ -120,10 +120,12 @@ static LIVE_MEDIA_CAPTURES: AtomicUsize = AtomicUsize::new(0);
 /// size that is not a power of two, and `Vec` growth rounds up: a 6 MiB budget
 /// is held in an 8 MiB allocation, so the pool would be handing out bytes the
 /// allocator does not honour and the ceiling would fail by the rounding.
+// Ordering: pool uses Relaxed because reservation totals enforce capacity without publishing payload data.
 fn reserve_from(pool: &AtomicUsize, capacity: usize, want: usize) -> bool {
     let mut reserved = pool.load(Ordering::Relaxed);
     loop {
         if want > capacity.saturating_sub(reserved) {
+            // When: want cannot fit without exceeding capacity, so refusing preserves the process-wide staging ceiling.
             return false;
         }
         match pool.compare_exchange_weak(
@@ -132,7 +134,10 @@ fn reserve_from(pool: &AtomicUsize, capacity: usize, want: usize) -> bool {
             Ordering::Relaxed,
             Ordering::Relaxed,
         ) {
-            Ok(_) => return true,
+            Ok(_) => {
+                // When: pool accepted the full reservation, so the caller may stage against the enlarged budget.
+                return true;
+            }
             Err(current) => reserved = current,
         }
     }
@@ -161,6 +166,7 @@ impl StagingReservation {
     /// and for Sixel to a silently cut-off picture, which is the broken
     /// picture the floor exists to prevent rather than an approximation of the
     /// image the user asked for.
+    // Ordering: LIVE_MEDIA_CAPTURES uses Relaxed because it is an observational count, not a publication barrier.
     fn admit() -> Self {
         LIVE_MEDIA_CAPTURES.fetch_add(1, Ordering::Relaxed);
         let floor = if reserve_from(
@@ -170,6 +176,7 @@ impl StagingReservation {
         ) {
             MIN_CAPTURE_STAGING_BYTES
         } else {
+            // When: reserve_from refuses the floor, so admitting without staging would permit a partial media payload.
             tracing::warn!(
                 guaranteed = GUARANTEED_CONCURRENT_CAPTURES,
                 "media capture refused: staging pool is fully committed to captures \
@@ -200,9 +207,11 @@ impl StagingReservation {
     fn try_double(&mut self) -> bool {
         let current = self.budget();
         if current == 0 || current >= MAX_MEDIA_PAYLOAD_BYTES {
+            // When: current is absent or capped, so further growth would violate admission or the per-capture ceiling.
             return false;
         }
         if !reserve_from(&CAPTURE_GROWTH_RESERVED, CAPTURE_GROWTH_POOL_BYTES, current) {
+            // When: reserve_from cannot grant current bytes atomically, so retaining a partial grant would undercount heap capacity.
             return false;
         }
         self.growth += current;
@@ -218,7 +227,9 @@ impl Clone for StagingReservation {
     }
 }
 
+// Lifecycle: dropping StagingReservation returns floor and growth bytes to both pools and decrements LIVE_MEDIA_CAPTURES.
 impl Drop for StagingReservation {
+    // Ordering: LIVE_MEDIA_CAPTURES, CAPTURE_FLOOR_RESERVED, and CAPTURE_GROWTH_RESERVED use Relaxed for independent accounting totals.
     fn drop(&mut self) {
         LIVE_MEDIA_CAPTURES.fetch_sub(1, Ordering::Relaxed);
         CAPTURE_FLOOR_RESERVED.fetch_sub(self.floor, Ordering::Relaxed);
@@ -322,6 +333,7 @@ impl MediaCapture {
         self.seen = self.seen.saturating_add(1);
 
         if self.data.len() < self.reservation.budget() {
+            // When: data still fits its reservation budget, so keeping byte preserves a complete payload without exceeding the pool.
             self.data.push(byte);
             return;
         }
@@ -331,6 +343,7 @@ impl MediaCapture {
         // put a contended atomic on the hot path of a transfer that is already
         // known to be capped.
         if !self.growth_exhausted && self.reservation.try_double() {
+            // When: growth_exhausted is clear and reservation doubles, so byte can be kept without staging beyond the granted capacity.
             self.data.push(byte);
             return;
         }
@@ -368,6 +381,7 @@ impl MediaCapture {
     /// cannot tell that image from a complete one that happens to be shorter.
     fn into_event(self, row: u16, col: u16) -> Option<MediaEvent> {
         if !self.whole() {
+            // When: whole is false, dispatch would expose a refused capture or a silently truncated Sixel image.
             return None;
         }
         Some(MediaEvent {
@@ -381,6 +395,7 @@ impl MediaCapture {
 
     fn into_kitty_event(mut self, row: u16, col: u16) -> Option<MediaEvent> {
         if !self.admitted() {
+            // When: admitted is false, so the process pool refused this capture and no payload bytes are safe to dispatch.
             return None;
         }
         if self.pending_esc {
@@ -388,9 +403,11 @@ impl MediaCapture {
             self.pending_esc = false;
         }
         if !self.whole() {
+            // When: whole is false after restoring pending ESC, so decoding would consume an incomplete Kitty payload.
             return None;
         }
         if self.data.first().copied() != Some(b'G') {
+            // When: data lacks Kitty's G introducer, so treating the remaining bytes as graphics would misclassify an APC sequence.
             return None;
         }
         let payload = &self.data[1..];
@@ -446,8 +463,8 @@ pub enum CommandEvent {
     CmdEnd(Option<u8>),
 }
 
-/// Streaming parser wrapping `vte::Parser` and a [`Performer`] that owns the
-/// grid + current SGR attributes.
+/// Streaming parser wrapping `vte::Parser` and an internal performer that owns
+/// the grid plus the current SGR attributes.
 pub struct Parser {
     inner: vte::Parser,
     performer: Performer,
@@ -580,27 +597,32 @@ impl Parser {
         let len = bytes.len();
         while i < len {
             if self.discarding_oversized_escape {
+                // When: discarding_oversized_escape owns this byte, so feeding vte could print a cancelled payload into the grid.
                 self.consume_discarded_escape_byte(bytes[i]);
                 i += 1;
                 continue;
             }
             if self.apc_capture.is_some() {
+                // When: apc_capture is active, so bytes belong to Kitty payload staging rather than ordinary terminal text.
                 self.consume_apc_byte(bytes[i]);
                 i += 1;
                 continue;
             }
             if self.performer.dcs_capture.is_some() && matches!(bytes[i], 0x18 | 0x1a) {
+                // When: dcs_capture receives CAN or SUB, abort the sequence before its remaining bytes can become image data.
                 self.inner = vte::Parser::new();
                 self.reset_cancelled_escape();
                 i += 1;
                 continue;
             }
             if self.performer.ground && bytes[i..].starts_with(b"\x1b_") {
+                // When: ground sees the APC introducer in bytes, switch to Kitty capture before printable payload reaches the grid.
                 self.performer.ground = false;
                 self.apc_capture = Some(MediaCapture::new(MediaProtocol::Kitty, String::new()));
                 i += 2;
                 continue;
             }
+            // When: performer ground chooses the safe ASCII bypass; otherwise vte retains the escape until dispatch.
             if self.performer.ground {
                 // memchr3 for ESC / BEL / LF — the three commonest break
                 // bytes — gives us a cheap upper bound on the run length.
@@ -611,13 +633,15 @@ impl Parser {
                 while run_end < upper {
                     let b = bytes[i + run_end];
                     if !(0x20..=0x7E).contains(&b) {
+                        // When: b is not printable ASCII, stop before the fast path bypasses vte control or UTF-8 decoding.
                         break;
                     }
                     run_end += 1;
                 }
+                // When: run_end covers printable ASCII, so direct graphic dispatch preserves the same cells while skipping vte.
                 if run_end > 0 {
-                    // SAFETY: every byte in [i..i+run_end] is in [0x20, 0x7E],
-                    // i.e. valid 1-byte UTF-8 = the same code point as the byte.
+                    // Every byte in [i..i+run_end] is in [0x20, 0x7E], i.e.
+                    // valid one-byte UTF-8 with the same code point as the byte.
                     for &b in &bytes[i..i + run_end] {
                         self.performer.print_graphic(b as char);
                     }
@@ -662,6 +686,7 @@ impl Parser {
                 let start = i;
                 while i < len && !self.performer.ground {
                     if self.performer.dcs_capture.is_some() && matches!(bytes[i], 0x18 | 0x1a) {
+                        // When: dcs_capture sees CAN or SUB mid-escape, reset vte so cancelled image bytes cannot survive to unhook.
                         self.inner = vte::Parser::new();
                         self.reset_cancelled_escape();
                         i += 1;
@@ -679,9 +704,11 @@ impl Parser {
                             self.escape_bytes_in_flight = 1;
                             true
                         } else {
+                            // When: escape_family remains Ground, this byte is a control dispatch rather than a counted escape.
                             false
                         }
                     } else {
+                        // When: escape_family already identifies the sequence, do not restart byte accounting mid-flight.
                         false
                     };
                     if self.escape_family == EscapeFamily::Esc && !started_escape {
@@ -697,8 +724,10 @@ impl Parser {
                         && !started_escape
                         && !media_capture_has_own_budget
                     {
+                        // When: escape_family is active beyond its introducer and media_capture_has_own_budget is false, enforce the generic cap.
                         self.escape_bytes_in_flight = self.escape_bytes_in_flight.saturating_add(1);
                         if self.escape_bytes_in_flight > MAX_ESCAPE_SEQUENCE_BYTES {
+                            // When: escape_bytes_in_flight exceeds MAX_ESCAPE_SEQUENCE_BYTES, discard through a terminator instead of retaining more input.
                             let pending_esc = self.pending_esc;
                             self.begin_discarding_oversized_escape(pending_esc);
                             self.consume_discarded_escape_byte(bytes[i]);
@@ -772,6 +801,7 @@ impl Parser {
         let terminated =
             string_terminated || final_byte || abandoned_by_newline || matches!(byte, 0x18 | 0x1a);
         if terminated {
+            // When: terminated marks the escape boundary, so parser ground may resume without exposing discarded payload bytes.
             self.discarding_oversized_escape = false;
             self.discard_escape_pending_esc = false;
             self.discard_exits_on_newline = false;
@@ -790,13 +820,19 @@ impl Parser {
 
     fn consume_apc_byte(&mut self, byte: u8) {
         if matches!(byte, 0x18 | 0x1a) {
+            // When: matches recognizes CAN or SUB, cancel APC staging before aborted Kitty data can become media.
             self.reset_cancelled_escape();
             return;
         }
-        let Some(capture) = self.apc_capture.as_mut() else { return };
+        let Some(capture) = self.apc_capture.as_mut() else {
+            // When: apc_capture vanished, ignore this byte rather than treating payload continuation as a new sequence.
+            return;
+        };
         if capture.pending_esc {
+            // When: capture has a pending_esc, resolve whether byte completes ST before committing either byte to the payload.
             capture.pending_esc = false;
             if byte == b'\\' {
+                // When: byte completes ST, dispatch the capture only after its whole-payload checks succeed.
                 let capture = self.apc_capture.take().expect("capture present");
                 let row = self.performer.grid.cursor.row;
                 let col = self.performer.grid.cursor.col;
@@ -811,12 +847,14 @@ impl Parser {
         if byte == 0x1b {
             capture.pending_esc = true;
         } else {
+            // When: byte is not ESC, it is unambiguously Kitty payload and can be staged immediately.
             capture.append_byte(byte);
         }
     }
 
     fn observe_osc4_byte(&mut self, byte: u8) {
         if let Some(mut raw_osc) = self.raw_osc.take() {
+            // When: raw_osc is active, preserve the uncapped OSC 4 stream before vte splits or truncates its parameters.
             match &mut raw_osc {
                 RawOsc::Probe { saw_four } => match byte {
                     b'4' if !*saw_four => {
@@ -848,8 +886,10 @@ impl Parser {
         }
 
         if self.pending_esc {
+            // When: pending_esc is set, inspect byte for the OSC introducer before forwarding later content to raw capture.
             self.pending_esc = false;
             if byte == b']' {
+                // When: byte opens OSC after ESC, start probing for command 4 so batched palette queries remain intact.
                 self.raw_osc = Some(RawOsc::Probe { saw_four: false });
                 return;
             }
@@ -889,12 +929,12 @@ impl Parser {
         }
     }
 
-    /// Bytes this parser has fed into media captures over its lifetime.
+    /// Bytes received by the media capture currently in flight.
     ///
-    /// Monotonic, and advances only while a capture is actually receiving. A
-    /// host that samples this periodically can tell a stalled capture from a
-    /// slow one — the distinction the parser cannot make, having no clock —
-    /// by observing that the figure has not moved between two samples.
+    /// Advances only while that capture is receiving, then returns to zero when
+    /// it completes or is cancelled. A host samples this only while
+    /// [`Self::live_capture_count`] is non-zero; equal consecutive values then
+    /// distinguish a stalled capture from one that is still receiving.
     ///
     /// Paired with [`Parser::cancel_capture`], this is what lets a stalled
     /// transfer's staging be reclaimed. Neither half is useful alone: the
@@ -908,7 +948,8 @@ impl Parser {
             .sum()
     }
 
-    /// Abandon any capture in flight, releasing its staging allocation.
+    /// Abandon any capture or raw OSC palette accumulation in flight, releasing
+    /// its retained allocation.
     ///
     /// Returns the bytes released. The partially-received payload is
     /// discarded rather than dispatched: a fragment of an image decodes to
@@ -927,10 +968,12 @@ impl Parser {
     /// the user their transfer, so the staleness threshold belongs to the host
     /// where the clock and the user's configuration both are.
     ///
-    /// Returns 0 and does nothing when no capture is in flight.
+    /// Returns 0 and does nothing only when neither a media capture nor a raw
+    /// OSC palette accumulation is retaining bytes.
     pub fn cancel_capture(&mut self) -> usize {
         let released = self.retained_amount().bytes;
         if released == 0 && self.live_capture_count() == 0 {
+            // When: released and live_capture_count show no capture, keep ground unchanged rather than swallowing ordinary output.
             return 0;
         }
         self.inner = vte::Parser::new();
@@ -1169,6 +1212,7 @@ impl Performer {
         (top, bot)
     }
 
+    // Ordering: reply_queue_full_warned uses Relaxed because it suppresses duplicate warnings without publishing reply bytes.
     fn reply(&self, bytes: &[u8]) {
         if let Some(tx) = &self.reply_tx {
             match tx.try_send(bytes.to_vec()) {
@@ -1183,7 +1227,9 @@ impl Performer {
                         tracing::warn!("terminal reply dropped because the reply queue is full");
                     }
                 }
-                Err(crossbeam_channel::TrySendError::Disconnected(_)) => {}
+                Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                    // When: TrySendError::Disconnected means no host can receive bytes, so dropping the reply avoids blocking parser progress.
+                }
             }
         }
     }
@@ -1192,7 +1238,10 @@ impl Performer {
         let terminator: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
         let mut parts = raw_pairs.split(|&byte| byte == b';');
         while let Some(idx) = parts.next() {
-            let Some(spec) = parts.next() else { break };
+            let Some(spec) = parts.next() else {
+                // When: spec is missing from the index/spec pair, stop before replying with a mismatched palette entry.
+                break;
+            };
             let idx = std::str::from_utf8(idx).ok().and_then(|s| s.trim().parse::<u8>().ok());
             let spec = std::str::from_utf8(spec).ok().map(str::trim);
             if let (Some(idx), Some("?")) = (idx, spec) {
@@ -1329,6 +1378,7 @@ impl Performer {
         let mut iter = params.iter();
         while let Some(slice) = iter.next() {
             let p = slice.first().copied().unwrap_or(0);
+            // When: p selects a supported SGR mutation; unsupported values leave the current rendition unchanged for forward compatibility.
             match p {
                 0 => self.reset_attrs(),
                 1 => self.flags |= CellFlags::BOLD,
@@ -1424,6 +1474,7 @@ impl Performer {
                     if set {
                         self.grid.enter_alt_screen();
                     } else {
+                        // When: set is false for mode 47, reveal the primary buffer without restoring a saved cursor.
                         self.grid.leave_alt_screen();
                     }
                     let (r, c) = (self.grid.cursor.row, self.grid.cursor.col);
@@ -1442,6 +1493,7 @@ impl Performer {
                     if set {
                         self.grid.enter_alt_screen();
                     } else {
+                        // When: set is false for mode 1047, reveal the primary buffer while leaving cursor ownership unchanged.
                         self.grid.leave_alt_screen();
                     }
                     let (r, c) = (self.grid.cursor.row, self.grid.cursor.col);
@@ -1458,6 +1510,7 @@ impl Performer {
                     if set {
                         self.saved_cursor = Some(self.grid.cursor);
                     } else if let Some(c) = self.saved_cursor {
+                        // When: saved_cursor supplies c during reset, restore the position without switching screen buffers.
                         self.grid.goto(c.row, c.col);
                     }
                     let (r, c) = (self.grid.cursor.row, self.grid.cursor.col);
@@ -1479,6 +1532,7 @@ impl Performer {
                             self.grid.enter_alt_screen();
                         }
                     } else {
+                        // When: set is false for mode 1049, return to primary cells before restoring their saved cursor.
                         self.grid.leave_alt_screen();
                         if let Some(c) = self.saved_cursor.take() {
                             self.grid.goto(c.row, c.col);
@@ -1496,20 +1550,22 @@ impl Performer {
                 1006 => self.mouse_sgr = set,
                 1000 | 1002 | 1003 => self.mouse_tracking = set,
                 1004 => self.focus_reporting = set,
-                2026 => { /* synchronized output (BSU/ESU) — accept silently for now;
-                     defer-paint optimisation tracked separately. Prevents future
-                     smear classes from apps that wrap updates in ?2026 h/l. */
+                2026 => {
+                    // When: code 2026 is synchronized output; accept the mode while retaining immediate painting semantics.
                 }
-                _ => {}
+                _ => {
+                    // When: code is not implemented, preserve current terminal state so unknown private modes remain compatible.
+                }
             }
         }
     }
 }
 
 /// Parse an OSC 7 payload (typically `file://host/path`) into a filesystem
-/// path. Strips the scheme + host, and percent-decodes `%XX` escapes so
-/// names with spaces / unicode round-trip correctly. Empty / malformed
-/// inputs return an empty string.
+/// path. Strips a `file://` scheme and host when present, and percent-decodes
+/// valid `%XX` escapes so names with spaces and Unicode round-trip correctly.
+/// Input without a path separator is decoded as-is, and malformed escapes are
+/// preserved literally.
 pub fn parse_osc7_cwd(raw: &str) -> String {
     let stripped = raw.strip_prefix("file://").unwrap_or(raw);
     // After `file://` the next `/` starts the absolute path; anything
@@ -1527,7 +1583,9 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
+            // When: bytes has a complete percent triplet at i, decode it only if both following digits are hexadecimal.
             if let (Some(h), Some(l)) = (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2])) {
+                // When: hex_nibble produced h and l, combine them into the original byte instead of preserving the escape text.
                 out.push((h << 4) | l);
                 i += 3;
                 continue;
@@ -1581,10 +1639,12 @@ fn join_osc_params(params: &[&[u8]]) -> String {
 /// prefix would cost a decode that is guaranteed to fail.
 fn parse_iterm2_file_event(payload: &[u8], row: u16, col: u16) -> Option<MediaEvent> {
     if !payload.starts_with(b"File=") {
+        // When: payload lacks the iTerm2 File prefix, do not reinterpret an unrelated OSC 1337 command as media.
         return None;
     }
     let (metadata, data) = split_once_byte(payload, b':')?;
     if data.len() > MAX_MEDIA_PAYLOAD_BYTES {
+        // When: data exceeds MAX_MEDIA_PAYLOAD_BYTES, refuse the whole image rather than dispatching a partial base64 payload.
         tracing::warn!(
             payload_bytes = data.len(),
             cap = MAX_MEDIA_PAYLOAD_BYTES,
@@ -1629,11 +1689,14 @@ impl Perform for Performer {
                 {
                     self.grid.scroll_region_up_with(top, bot, 1, self.erase_fill_cell());
                 } else {
+                    // When: cursor row is not bot or no margin is active, linefeed without scrolling the DECSTBM region.
                     self.grid.linefeed_with(self.erase_fill_cell());
                 }
             }
             0x0D => self.grid.carriage_return(),
-            _ => {}
+            _ => {
+                // When: byte is an unhandled C0 control, leave cells unchanged while keeping the parser outside ground.
+            }
         }
         // NB: do NOT set ground=true here. vte may call execute() while still
         // inside an ESC/CSI/OSC/DCS state machine (C0 bytes are dispatched
@@ -1648,28 +1711,37 @@ impl Perform for Performer {
         if action != 'b' {
             self.reset_last_printed_char();
         }
+        // When: inter begins with ?, route private operations without falling through to ordinary CSI actions.
         if inter.first() == Some(&b'?') {
             match action {
                 'h' => {
+                    // When: action requests DECSET, apply private modes and finish this CSI before normal dispatch.
                     self.handle_dec_private_mode(params, true);
                     return;
                 }
                 'l' => {
+                    // When: action requests DECRST, clear private modes and finish this CSI before normal dispatch.
                     self.handle_dec_private_mode(params, false);
                     return;
                 }
                 'u' => {
+                    // When: action requests a Kitty query, reply with active flags and finish this CSI exactly once.
                     // Kitty keyboard protocol query: report the active flags.
                     let flags = self.kitty_keyboard_flags();
                     self.reply(format!("\x1b[?{flags}u").as_bytes());
                     return;
                 }
-                _ => return,
+                _ => {
+                    // When: action has no private handler, consume it here so it cannot be misread as ordinary CSI.
+                    return;
+                }
             }
         }
         let p0 = || params.iter().next().and_then(|s| s.first().copied()).unwrap_or(0);
         let p1 = || params.iter().nth(1).and_then(|s| s.first().copied()).unwrap_or(0);
         // CSI with `>` intermediate — secondary DA / XTVERSION.
+
+        // When: inter begins with >, handle identity replies or Kitty stack pushes before ordinary CSI dispatch.
         if inter.first() == Some(&b'>') {
             match action {
                 'c' => {
@@ -1690,13 +1762,17 @@ impl Perform for Performer {
                     // misbehaving app can't grow it without bound.
                     self.kitty_kbd_flags.push(p0() as u8);
                 }
-                _ => {}
+                _ => {
+                    // When: action is unsupported for >, ignore it without mutating identity or keyboard state.
+                }
             }
             return;
         }
         // CSI with `<` intermediate — kitty keyboard protocol pop.
         // `CSI < number u` pops up to `number` (default 1) entries off the
         // flag stack. Other `<`-prefixed sequences are not used by SonicTerm.
+
+        // When: inter begins with <, consume the keyboard-pop namespace without treating it as a normal CSI action.
         if inter.first() == Some(&b'<') {
             if action == 'u' {
                 let n = (p0() as usize).max(1);
@@ -1710,6 +1786,8 @@ impl Perform for Performer {
         // selects all (1)/set-or (2)/reset-and (3); we keep the common cases
         // and otherwise replace. With an empty stack there is nothing to set,
         // so push the requested flags as the active set.
+
+        // When: inter begins with =, consume the keyboard-set namespace before normal CSI action routing.
         if inter.first() == Some(&b'=') {
             if action == 'u' {
                 let flags = p0() as u8;
@@ -1724,6 +1802,7 @@ impl Perform for Performer {
                 if let Some(top) = self.kitty_kbd_flags.last_mut() {
                     *top = next;
                 } else if self.kitty_kbd_flags.len() < KITTY_KBD_STACK_MAX {
+                    // When: kitty_kbd_flags has no top and remains below KITTY_KBD_STACK_MAX, push next as the active flag set.
                     self.kitty_kbd_flags.push(next);
                 }
             }
@@ -1793,7 +1872,9 @@ impl Perform for Performer {
                     0 => self.grid.erase_below_with(self.erase_fill_cell()),
                     1 => self.grid.erase_above_with(self.erase_fill_cell()),
                     2 | 3 => self.grid.erase_screen_with(self.erase_fill_cell()),
-                    _ => {}
+                    _ => {
+                        // When: mode is not a defined ED operation, preserve every cell instead of erasing an unintended region.
+                    }
                 }
             }
             'K' => {
@@ -1814,7 +1895,9 @@ impl Perform for Performer {
                     0 => self.grid.erase_line_to_end_with(self.erase_fill_cell()),
                     1 => self.grid.erase_line_to_start_with(self.erase_fill_cell()),
                     2 => self.grid.erase_line_with(self.erase_fill_cell()),
-                    _ => {}
+                    _ => {
+                        // When: mode is not a defined EL operation, preserve the row instead of blanking cells the sender did not select.
+                    }
                 }
             }
             'L' => {
@@ -1886,15 +1969,18 @@ impl Perform for Performer {
                     }
                 }
             }
-            'n' => match p0() {
-                5 => self.reply(b"\x1b[0n"),
-                6 => {
-                    let row = self.grid.cursor.row.saturating_add(1);
-                    let col = self.grid.cursor.col.saturating_add(1);
-                    self.reply(format!("\x1b[{row};{col}R").as_bytes());
+            'n' => {
+                // When: action requests DSR, answer only supported p0 queries so no terminal status is fabricated.
+                match p0() {
+                    5 => self.reply(b"\x1b[0n"),
+                    6 => {
+                        let row = self.grid.cursor.row.saturating_add(1);
+                        let col = self.grid.cursor.col.saturating_add(1);
+                        self.reply(format!("\x1b[{row};{col}R").as_bytes());
+                    }
+                    _ => {}
                 }
-                _ => {}
-            },
+            }
             'c' => {
                 // Primary DA — VT220 with 132-columns (62) + printer port (c).
                 let p = p0();
@@ -1925,14 +2011,24 @@ impl Perform for Performer {
                 let top_p = p0();
                 let bot_p = p1();
                 let cur_before = (self.grid.cursor.row, self.grid.cursor.col);
-                let new_top = if top_p == 0 { 0 } else { top_p.saturating_sub(1) };
-                let new_bot =
-                    if bot_p == 0 { rows.saturating_sub(1) } else { bot_p.saturating_sub(1) };
+                let new_top = if top_p == 0 {
+                    0
+                } else {
+                    // When: top_p is explicit, convert its one-based DEC coordinate to the grid's zero-based row.
+                    top_p.saturating_sub(1)
+                };
+                let new_bot = if bot_p == 0 {
+                    rows.saturating_sub(1)
+                } else {
+                    // When: bot_p is explicit, convert its one-based DEC coordinate to the grid's zero-based row.
+                    bot_p.saturating_sub(1)
+                };
                 let (applied_top, applied_bot) = if new_top < new_bot && new_bot < rows {
                     self.scroll_top = Some(new_top);
                     self.scroll_bottom = Some(new_bot);
                     (new_top, new_bot)
                 } else {
+                    // When: new_top and new_bot do not form an ordered region within rows, reset DECSTBM to the full screen.
                     self.scroll_top = None;
                     self.scroll_bottom = None;
                     (0, rows.saturating_sub(1))
@@ -1944,7 +2040,9 @@ impl Perform for Performer {
                     cur_before
                 );
             }
-            _ => {}
+            _ => {
+                // When: action is unsupported, complete the CSI without moving the cursor or changing styled grid cells.
+            }
         }
     }
 
@@ -1955,6 +2053,7 @@ impl Perform for Performer {
             .first()
             .and_then(|s| std::str::from_utf8(s).ok())
             .and_then(|s| s.parse::<u16>().ok());
+        // When: code selects a supported OSC contract; unknown codes complete without mutating terminal state.
         match code {
             Some(0) | Some(2) => {
                 if let Some(text) = params.get(1).and_then(|s| std::str::from_utf8(s).ok()) {
@@ -1991,6 +2090,7 @@ impl Perform for Performer {
                             uri: String::new(),
                         });
                     } else {
+                        // When: uri is non-empty, intern it before assigning cells so rejected links remain plain text rather than dangling ids.
                         let mut admission = self.hyperlinks.intern_or_reject(id_norm, uri);
                         // Only a rejection that reclamation could plausibly
                         // relieve is worth a grid scan. An oversized URI is
@@ -2044,6 +2144,7 @@ impl Perform for Performer {
                                     admission = self.hyperlinks.intern_or_reject(id_norm, uri);
                                 }
                             } else {
+                                // When: hyperlink_reclaim_backoff remains active, skip the full-grid scan that just proved unproductive.
                                 self.hyperlink_reclaim_backoff -= 1;
                             }
                         }
@@ -2054,6 +2155,7 @@ impl Perform for Performer {
                                 uri: uri.to_string(),
                             });
                         } else {
+                            // When: current_hyperlink is absent after admission, emit closure so following cells cannot inherit a rejected URI.
                             self.events.push(VtEvent::Hyperlink { id: None, uri: String::new() });
                             tracing::warn!(
                                 target: "memory",
@@ -2090,6 +2192,7 @@ impl Perform for Performer {
                 // this path as a fallback for synthetic/direct Performer tests
                 // for any capture miss, but avoid duplicate replies.
                 if self.suppress_next_osc4 {
+                    // When: suppress_next_osc4 marks a query already answered from raw bytes, avoid sending a duplicate palette reply.
                     self.suppress_next_osc4 = false;
                     return;
                 }
@@ -2113,6 +2216,7 @@ impl Perform for Performer {
                 // shows query-reply is sufficient to fix.
                 let payload = params.get(1).and_then(|s| std::str::from_utf8(s).ok());
                 if payload != Some("?") {
+                    // When: payload is not a query marker, ignore unsupported OSC color-setting input rather than changing the theme.
                     return;
                 }
                 let rgb = match code {
@@ -2121,7 +2225,10 @@ impl Perform for Performer {
                     12 => self.theme_cursor.or(self.theme_fg),
                     _ => None,
                 };
-                let Some((r, g, b)) = rgb else { return };
+                let Some((r, g, b)) = rgb else {
+                    // When: rgb is unavailable, omit the reply rather than reporting a color the host never supplied.
+                    return;
+                };
                 let terminator: &[u8] = if bell_terminated { b"\x07" } else { b"\x1b\\" };
                 let mut buf = Vec::with_capacity(24);
                 buf.extend_from_slice(b"\x1b]");
@@ -2174,7 +2281,9 @@ impl Perform for Performer {
                         let exit = exit_i32.and_then(|n| u8::try_from(n).ok());
                         self.events.push(VtEvent::Command(CommandEvent::CmdEnd(exit)));
                     }
-                    _ => {}
+                    _ => {
+                        // When: kind is not a recognized shell marker, preserve prompt boundaries and emit no command event.
+                    }
                 }
             }
             _ => {}
@@ -2254,6 +2363,7 @@ impl Perform for Performer {
                 if self.grid.cursor.row == bot {
                     self.grid.scroll_region_up(top, bot, 1);
                 } else {
+                    // When: cursor row is not bot, IND advances within the grid without scrolling the active region.
                     let new_row = (self.grid.cursor.row + 1).min(self.grid.rows.saturating_sub(1));
                     let col = self.grid.cursor.col;
                     self.grid.goto(new_row, col);
@@ -2266,6 +2376,7 @@ impl Perform for Performer {
                 if self.grid.cursor.row == top {
                     self.grid.scroll_region_down(top, bot, 1);
                 } else {
+                    // When: cursor row is not top, RI moves upward without scrolling cells in the active region.
                     let new_row = self.grid.cursor.row.saturating_sub(1);
                     let col = self.grid.cursor.col;
                     self.grid.goto(new_row, col);
@@ -2278,11 +2389,14 @@ impl Perform for Performer {
                     self.grid.scroll_region_up(top, bot, 1);
                     self.grid.goto(self.grid.cursor.row, 0);
                 } else {
+                    // When: cursor row is not bot, NEL advances normally and returns to column zero without scrolling.
                     let new_row = (self.grid.cursor.row + 1).min(self.grid.rows.saturating_sub(1));
                     self.grid.goto(new_row, 0);
                 }
             }
-            _ => {}
+            _ => {
+                // When: byte is not a supported ESC final, leave cursor and screen state unchanged.
+            }
         }
     }
 }

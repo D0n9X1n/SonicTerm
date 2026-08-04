@@ -19,7 +19,7 @@
 //!    in-flight gesture and preserves the source tab. Same-process tab merging
 //!    remains handled by SonicTerm's in-process geometry/transfer path.
 //!
-//! ## Known integration constraint (tracked separately)
+//! ## AppKit drag initiation constraint
 //!
 //! `beginDraggingSessionWithItems:event:source:` requires the source
 //! `NSView` to emit the call from a mouse-event handler the AppKit
@@ -31,8 +31,8 @@
 //! [`crate::os_drag_mac`]; lifting it requires either (a) a custom
 //! `NSView` atop `CAMetalLayer` that owns mouse-down handling
 //! directly, or (b) a winit hook that exposes the live `NSEvent` to
-//! user code. Both are large pieces of work — tracked as a follow-up
-//! to a follow-up rather than blocking it.
+//! user code. Neither boundary is available through the current winit
+//! integration, so native cursor capture cannot start from this backend.
 //!
 //! Until that lifts, this backend is a pasteboard publisher plus a synchronous
 //! cancellation callback. It does not implement native cursor capture or a
@@ -95,7 +95,9 @@ fn write_payload_to_pasteboard(json: &str) -> bool {
     let type_str: Retained<NSString> = NSString::from_str(PASTEBOARD_TYPE);
     let types: Retained<NSArray<NSString>> =
         NSArray::from_retained_slice(std::slice::from_ref(&type_str));
-    let _ = unsafe { pasteboard.declareTypes_owner(&types, None) };
+    let _ =
+        // SAFETY: retained pasteboard/type objects outlive this synchronous declaration; owner is intentionally nil.
+        unsafe { pasteboard.declareTypes_owner(&types, None) };
     let value: Retained<NSString> = NSString::from_str(json);
     pasteboard.setString_forType(&value, &type_str)
 }
@@ -126,6 +128,7 @@ impl OsTabDragBackend for MacOsTabDragBackend {
         let json = if payload_json.is_empty() {
             build_payload_json(source_window, source_tab_idx)
         } else {
+            // When: `payload_json` is nonempty, preserve the full serialized tab payload for later adoption.
             payload_json
         };
 

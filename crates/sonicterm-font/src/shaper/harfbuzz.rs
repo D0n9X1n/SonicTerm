@@ -40,6 +40,8 @@ fn get_only_char(s: &str) -> Option<char> {
     if chars.next().is_some() {
         None
     } else {
+        // When: chars yielded nothing further, so this cluster is a single
+        // scalar and can take the lone-char shortcut.
         Some(first_char)
     }
 }
@@ -92,6 +94,13 @@ pub struct HarfbuzzShaper {
 /// characters equal to the number of graphemes in the
 /// original string.  That isn't perfect, but it should
 /// be good enough to indicate that something isn't right.
+/// Build the placeholder string shown when no font can shape `s`.
+///
+/// Returns one placeholder per grapheme, so the substitute occupies the same
+/// cell count as the text it replaces. Failed text normally renders as U+FFFD,
+/// but text that is *already* all U+FFFD switches to `'?'`, which keeps the
+/// fallback output distinguishable from input that genuinely contained
+/// replacement characters.
 fn make_question_string(s: &str) -> String {
     let len = s.graphemes(true).count();
     let mut result = String::new();
@@ -105,6 +114,8 @@ fn make_question_string(s: &str) -> String {
 fn is_question_string(s: &str) -> bool {
     for c in s.chars() {
         if c != std::char::REPLACEMENT_CHARACTER {
+            // When: c is an ordinary character, so s carries real text rather
+            // than being wholly replacement characters.
             return false;
         }
     }
@@ -112,6 +123,12 @@ fn is_question_string(s: &str) -> bool {
 }
 
 impl HarfbuzzShaper {
+    /// Build a shaper over `handles`, ordered most- to least-preferred.
+    ///
+    /// Faces are opened lazily: each slot starts empty and is populated on the
+    /// first shaping attempt that reaches it, so a large fallback list costs
+    /// nothing until it is actually consulted. Per-font HarfBuzz features come
+    /// from `config` and are overridden per handle when one names its own.
     pub fn new(config: &ConfigHandle, handles: &[ParsedFont]) -> anyhow::Result<Self> {
         let lib = ftwrap::Library::new()?;
         let handles = handles.to_vec();
@@ -137,13 +154,19 @@ impl HarfbuzzShaper {
         dpi: u32,
     ) -> anyhow::Result<Option<RefMut<'_, FontPair>>> {
         if font_idx >= self.handles.len() {
+            // When: font_idx ran past the configured handles, so the fallback
+            // chain is exhausted rather than missing a face.
             return Ok(None);
         }
         match self.fonts.get(font_idx) {
             None => Ok(None),
             Some(opt_pair) => {
+                // When: `self.fonts.get(font_idx)` returns `Some`, inspect that
+                // fallback slot rather than treating the index as absent.
                 let mut opt_pair = opt_pair.borrow_mut();
                 if opt_pair.is_none() {
+                    // When: `opt_pair.is_none()` is true, load and cache the
+                    // requested fallback before returning its mutable borrow.
                     let handle = &self.handles[font_idx];
                     log::trace!("shaper wants {} {:?}", font_idx, handle);
                     let face = self.lib.face_from_locator(&handle.handle)?;
@@ -151,13 +174,18 @@ impl HarfbuzzShaper {
                     let font = if USE_OT_FACE {
                         harfbuzz::Font::from_locator(&handle.handle)?
                     } else {
+                        // When: USE_OT_FACE is off, so the face is driven
+                        // through FreeType with config-derived load flags.
                         let (load_flags, _) = ftwrap::compute_load_flags_from_config(
                             handle.freetype_load_flags,
                             handle.freetype_load_target,
                             handle.freetype_render_target,
                             Some(dpi),
                         );
-                        let mut font = harfbuzz::Font::new(face.face);
+                        let mut font =
+                            // SAFETY: `face` owns a live FreeType face and remains
+                            // in the FontPair after HarfBuzz takes its reference.
+                            unsafe { harfbuzz::Font::new(face.face) };
                         font.set_load_flags(load_flags);
                         font
                     };
@@ -189,6 +217,8 @@ impl HarfbuzzShaper {
         }
     }
 
+    // Lock order: font before last_size_and_dpi while shaping, then opt_pair
+    // alone during cleanup, after both of those are dropped.
     #[allow(clippy::too_many_arguments)]
     fn do_shape(
         &self,
@@ -229,8 +259,14 @@ impl HarfbuzzShaper {
         loop {
             match self.load_fallback(font_idx, dpi).context("load_fallback")? {
                 Some(mut pair) => {
+                    // When: load_fallback produced a pair, so this font_idx has
+                    // a usable face to attempt shaping with.
                     if let Some(p) = presentation {
+                        // When: presentation names a required emoji or text
+                        // form, so a mismatched face must be skipped.
                         if pair.presentation != p {
+                            // When: pair.presentation disagrees with p, so this
+                            // font would render the wrong form.
                             log::trace!(
                                 "wanted presentation is {p:?} != font \
                                      presentation {:?} so skip \
@@ -250,6 +286,8 @@ impl HarfbuzzShaper {
                         let pixel_size = if selected_font_size.is_scaled {
                             (point_size * dpi as f64 / 72.) as u32
                         } else {
+                            // When: selected_font_size is a fixed strike rather
+                            // than scalable, so its own height is the ppem.
                             selected_font_size.height as u32
                         };
 
@@ -282,11 +320,15 @@ impl HarfbuzzShaper {
                     break;
                 }
                 None => {
+                    // When: load_fallback returned nothing, so every configured
+                    // font has been tried and these chars stay unresolved.
                     for c in s.chars() {
                         no_glyphs.push(c);
                     }
 
                     if presentation.is_some() {
+                        // When: presentation forced a form that no font offered,
+                        // so the same fonts are retried without that constraint.
                         log::debug!(
                             "Ran out of fallback options, retry shape with no presentation"
                         );
@@ -399,20 +441,33 @@ impl HarfbuzzShaper {
             }
 
             if let Some(ref mut cluster) = info_clusters.last_mut() {
+                // When: cluster is the run built so far, so this glyph may join
+                // it instead of opening a new one.
+
                 // Don't fragment runs of unresolved codepoints; they could be a sequence
                 // that shapes together in a fallback font.
                 if info.codepoint == 0 && !no_more_fallbacks {
+                    // When: info.codepoint is notdef and fallbacks remain, so
+                    // this glyph stays merged for a later font to shape.
                     let prior = cluster.last_mut().unwrap();
                     // This logic essentially merges `info` into `prior` by
                     // extending the length of prior by `info`.
                     // We can only do that if they are contiguous.
                     // Take care, as the shaper may have re-ordered things!
                     if prior.codepoint == 0 || prior.cluster == info.cluster {
+                        // When: prior is itself unresolved or covers the same
+                        // cluster, so the two may describe one merged run.
                         if prior.cluster + prior.len == info.cluster {
+                            // When: prior ends exactly where info begins, so the
+                            // two are contiguous and fold into one entry.
+
                             // Coalesce with prior
                             prior.len += info.len;
                             continue;
                         } else if info.cluster + info.len == prior.cluster {
+                            // When: info ends where prior begins, so the shaper
+                            // reordered them and they swap before merging.
+
                             // We actually precede prior; we must have been
                             // re-ordered by the shaper. Re-arrange and
                             // coalesce
@@ -420,6 +475,9 @@ impl HarfbuzzShaper {
                             prior.len += info.len;
                             continue;
                         } else if info.cluster + info.len == prior.cluster + prior.len {
+                            // When: info and prior end together, so info is
+                            // already covered and adds nothing.
+
                             // Overlaps and coincide with the end of prior; this one folds away.
                             // This can happen with NFD rather than NFC text.
                             continue;
@@ -432,6 +490,8 @@ impl HarfbuzzShaper {
                 // opportunity to coalesce runs of unresolved codepoints,
                 // otherwise we can produce incorrect shaping
                 if cluster.last().unwrap().cluster == info.cluster {
+                    // When: cluster's last entry names the same cluster as info,
+                    // so this glyph belongs to that run rather than a new one.
                     cluster.push(info);
                     continue;
                 }
@@ -450,6 +510,9 @@ impl HarfbuzzShaper {
             let substr = &s[sub_range.clone()];
 
             if cluster_info.incomplete {
+                // When: cluster_info is incomplete, so at least one glyph is
+                // notdef and the next fallback font is asked to shape it.
+
                 // One or more entries didn't have a corresponding glyph,
                 // so try a fallback
 
@@ -508,6 +571,8 @@ impl HarfbuzzShaper {
                 let weighted_cell_width = if total_width == 0. {
                     1
                 } else {
+                    // When: total_width is non-zero, so each glyph takes a share
+                    // of the cluster's cells proportional to its advance.
                     (cluster_info.cell_width as f64 * info.x_advance as f64 / total_width).ceil()
                         as u8
                 };
@@ -534,6 +599,9 @@ impl HarfbuzzShaper {
                     );
                     opt_pair.borrow_mut().take();
                 } else if let Some(pair) = &mut *opt_pair.borrow_mut() {
+                    // When: opt_pair still holds a face that did resolve glyphs,
+                    // so it is marked to survive this unload pass.
+
                     // We shaped something: mark this pair up so that it sticks around
                     pair.shaped_any = true;
                 }
@@ -592,27 +660,36 @@ impl FontShaper for HarfbuzzShaper {
 
         let key = MetricsKey { font_idx, size: NotNan::new(size).unwrap(), dpi };
         if let Some(metrics) = self.metrics.borrow().get(&key) {
+            // When: metrics for this key were computed earlier, so the cached
+            // value is reused instead of re-measuring the face.
             return Ok(*metrics);
         }
 
         let scale = self.handles[font_idx].scale.unwrap_or(1.);
 
         let selected_size = pair.face.set_font_size(size * scale, dpi)?;
-        let y_scale = unsafe { (*(*pair.face.face).size).metrics.y_scale.to_num::<f64>() };
+        let (y_scale, raw_descender, raw_underline_thickness, raw_underline_position) = {
+            // SAFETY: `pair` borrows the loaded FontPair for this whole read, so
+            // its FT_Face stays alive, and set_font_size above populated the
+            // size slot these metrics are read through.
+            unsafe {
+                let face = pair.face.face;
+                (
+                    (*(*face).size).metrics.y_scale.to_num::<f64>(),
+                    (*(*face).size).metrics.descender.f26d6().to_num(),
+                    (*face).underline_thickness as f64,
+                    (*face).underline_position as f64,
+                )
+            }
+        };
         let mut metrics = FontMetrics {
             cell_height: PixelLength::new(selected_size.height),
             cell_width: PixelLength::new(selected_size.width),
             // Note: face.face.descender is useless, we have to go through
             // face.face.size.metrics to get to the real descender!
-            descender: PixelLength::new(unsafe {
-                (*(*pair.face.face).size).metrics.descender.f26d6().to_num()
-            }),
-            underline_thickness: PixelLength::new(
-                unsafe { (*pair.face.face).underline_thickness as f64 } * y_scale / 64.,
-            ),
-            underline_position: PixelLength::new(
-                unsafe { (*pair.face.face).underline_position as f64 } * y_scale / 64.,
-            ),
+            descender: PixelLength::new(raw_descender),
+            underline_thickness: PixelLength::new(raw_underline_thickness * y_scale / 64.),
+            underline_position: PixelLength::new(raw_underline_position * y_scale / 64.),
             cap_height_ratio: selected_size.cap_height_to_height_ratio,
             cap_height: selected_size.cap_height.map(PixelLength::new),
             is_scaled: selected_size.is_scaled,
@@ -662,6 +739,8 @@ impl FontShaper for HarfbuzzShaper {
             let diff = (theoretical_height - selected_size.height).abs();
             let factor = diff / theoretical_height;
             if factor < 2.0 {
+                // When: factor is within tolerance, so this face's cell height
+                // is close enough to the theoretical one to stop searching.
                 log::trace!(
                     "idx {} cell_height is {}, which is {} away from theoretical
                      height (factor {}). Seems good enough",
@@ -682,6 +761,8 @@ impl FontShaper for HarfbuzzShaper {
             );
 
             if metrics_idx + 1 >= self.handles.len() {
+                // When: metrics_idx names the last handle, so no better-matching
+                // face remains and this one is kept despite the mismatch.
                 log::warn!(
                     "metrics: I wanted to skip idx {} because diff={} factor={} \
                     theoretical_height={} cell_height={}, but there are no more \

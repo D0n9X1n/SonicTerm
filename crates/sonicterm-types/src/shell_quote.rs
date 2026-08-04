@@ -16,6 +16,7 @@ pub fn shell_quote_posix(s: &str) -> String {
         if ch == '\'' {
             out.push_str("'\\''");
         } else {
+            // When: `ch` is not a quote delimiter, it is literal inside the surrounding single quotes.
             out.push(ch);
         }
     }

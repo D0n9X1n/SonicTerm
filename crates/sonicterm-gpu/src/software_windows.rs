@@ -49,6 +49,8 @@ impl WindowsSoftwareFrame {
             if size.bytes > self.pixels.capacity() || size.bytes < self.pixels.capacity() / 2 {
                 self.pixels = vec![0; size.bytes];
             } else {
+                // When: the request still fits capacity and is at least half of it, resize
+                // reuses the allocation so a window drag does not reallocate every frame.
                 self.pixels.resize(size.bytes, 0);
             }
             tracing::debug!(
@@ -94,11 +96,15 @@ impl WindowsSoftwareFrame {
 
     pub(crate) fn present(&self, window: &Window) -> anyhow::Result<()> {
         let hwnd = hwnd_for_window(window)?;
+        // SAFETY: hwnd is the live Win32 handle of the window being presented, and
+        // pixels holds width * height * 4 bytes, the exact extent the blit describes.
         unsafe { blit_bgra_to_hwnd(hwnd, self.width, self.height, &self.pixels) }
     }
 
     pub(crate) fn pixel_bgra_at(&self, x: u32, y: u32) -> Option<[u8; 4]> {
         if x >= self.width || y >= self.height {
+            // When: x or y exceeds width or height the flat offset would silently land on
+            // the next row's pixel rather than fail, so the probe reports no pixel.
             return None;
         }
         let off = ((y * self.width + x) * 4) as usize;
@@ -121,12 +127,20 @@ impl WindowsSoftwareFrame {
         let sw = self.width as f32;
         let sh = self.height as f32;
         for q in quads {
-            let Some((x, y, w, h)) = ndc_rect_to_pixels(q.rect, sw, sh) else { continue };
+            let Some((x, y, w, h)) = ndc_rect_to_pixels(q.rect, sw, sh) else {
+                // When: ndc_rect_to_pixels returns None the frame has zero extent, so this
+                // quad is dropped rather than scaled against a zero-sized surface.
+                continue;
+            };
             if q.line_thickness_px > 0.0 {
                 self.draw_line_quad(q, x, y, w, h);
             } else if q.radius_px > 0.0 {
+                // When: radius_px is positive the fill derives per-pixel coverage from a
+                // corner distance field, which a rectangular span cannot express.
                 self.fill_rounded_rect(x, y, w, h, q.color, q.radius_px);
             } else {
+                // When: neither line_thickness_px nor radius_px is set the quad is a plain
+                // rectangle, so the span is written directly with no coverage term.
                 self.fill_rect(x, y, w, h, q.color);
             }
         }
@@ -136,8 +150,14 @@ impl WindowsSoftwareFrame {
         let sw = self.width as f32;
         let sh = self.height as f32;
         for g in glyphs {
-            let Some((x, y, w, h)) = ndc_rect_to_pixels(g.rect, sw, sh) else { continue };
+            let Some((x, y, w, h)) = ndc_rect_to_pixels(g.rect, sw, sh) else {
+                // When: ndc_rect_to_pixels returns None the frame has zero extent, so this
+                // glyph is dropped rather than scaled against a zero-sized surface.
+                continue;
+            };
             if w <= 0.0 || h <= 0.0 {
+                // When: w or h is not positive the glyph covers no pixels, and blit_glyph
+                // divides by both to build its atlas sample coordinates.
                 continue;
             }
             self.blit_glyph(atlas, g, x, y, w, h);
@@ -150,6 +170,8 @@ impl WindowsSoftwareFrame {
         let x1 = (x + w - 0.5).ceil().min(self.width as f32) as i32;
         let y1 = (y + h - 0.5).ceil().min(self.height as f32) as i32;
         if x1 <= x0 || y1 <= y0 {
+            // When: x1 or y1 collapsed past its origin the clamp to frame bounds left an
+            // empty span, so an off-surface quad is a no-op rather than a stray write.
             return;
         }
         let src = premul_linear_rgba_to_premul_bgra_f32(color);
@@ -168,6 +190,8 @@ impl WindowsSoftwareFrame {
         let x1 = (x + w).ceil().min(self.width as f32) as i32;
         let y1 = (y + h).ceil().min(self.height as f32) as i32;
         if x1 <= x0 || y1 <= y0 {
+            // When: x1 or y1 collapsed past its origin the rounded rect is entirely
+            // off-surface, so no pixel can receive a corner coverage term.
             return;
         }
         let src = premul_linear_rgba_to_premul_bgra_f32(color);
@@ -188,6 +212,8 @@ impl WindowsSoftwareFrame {
                 let d = outside + inside - r;
                 let coverage = (0.5 - d).clamp(0.0, 1.0);
                 if coverage <= 0.0 {
+                    // When: coverage is zero the pixel lies outside the corner radius, so
+                    // blending would square off the corner this path exists to round.
                     continue;
                 }
                 let mut c = src;
@@ -202,7 +228,13 @@ impl WindowsSoftwareFrame {
     }
 
     fn draw_line_quad(&mut self, q: &QuadInstance, x: f32, y: f32, w: f32, h: f32) {
-        let size = if q.size_px[0] > 0.0 && q.size_px[1] > 0.0 { q.size_px } else { [w, h] };
+        let size = if q.size_px[0] > 0.0 && q.size_px[1] > 0.0 {
+            q.size_px
+        } else {
+            // When: size_px is unset the pixel extent w and h stand in, keeping the segment
+            // distance in the same units the endpoints were offset in.
+            [w, h]
+        };
         let center_x = x + w * 0.5;
         let center_y = y + h * 0.5;
         let ax = center_x + q.line_a[0];
@@ -214,6 +246,8 @@ impl WindowsSoftwareFrame {
         let x1 = (x + size[0].max(w)).ceil().min(self.width as f32) as i32;
         let y1 = (y + size[1].max(h)).ceil().min(self.height as f32) as i32;
         if x1 <= x0 || y1 <= y0 {
+            // When: x1 or y1 collapsed past its origin the line's padded bounds fell
+            // outside the frame, so no pixel is near enough the segment to shade.
             return;
         }
         let src = premul_linear_rgba_to_premul_bgra_f32(q.color);
@@ -226,6 +260,8 @@ impl WindowsSoftwareFrame {
                 let d = distance_to_segment(px, py, ax, ay, bx, by) - half;
                 let coverage = (1.0 - d.clamp(0.0, 1.0)).clamp(0.0, 1.0);
                 if coverage <= 0.0 {
+                    // When: coverage is zero the pixel sits farther than half the stroke
+                    // from the segment, so blending would widen the drawn line.
                     continue;
                 }
                 let mut c = src;
@@ -250,6 +286,8 @@ impl WindowsSoftwareFrame {
     ) {
         let [u0, v0, u1, v1] = glyph.uv;
         if u1 <= u0 || v1 <= v0 {
+            // When: u1 or v1 does not exceed its origin the glyph has no atlas rectangle
+            // to sample, so drawing it would read a zero-width region and blend nothing.
             return;
         }
         let atlas_w = atlas.width().max(1);
@@ -259,6 +297,8 @@ impl WindowsSoftwareFrame {
         let ax1 = (u1 * atlas_w as f32).round().clamp(0.0, atlas_w as f32) as u32;
         let ay1 = (v1 * atlas_h as f32).round().clamp(0.0, atlas_h as f32) as u32;
         if ax1 <= ax0 || ay1 <= ay0 {
+            // When: ax1 or ay1 rounds onto its origin the tile spans no atlas texel, and
+            // the later (ax1 - 1) clamp would underflow on unsigned atlas coordinates.
             return;
         }
         let src_w_u = (ax1 - ax0).max(1);
@@ -266,13 +306,27 @@ impl WindowsSoftwareFrame {
         let src_w = src_w_u as f32;
         let src_h = src_h_u as f32;
         let one_to_one = (w - src_w).abs() < 0.01 && (h - src_h).abs() < 0.01;
-        let draw_x = if one_to_one { x.round() } else { x };
-        let draw_y = if one_to_one { y.round() } else { y };
+        let draw_x = if one_to_one {
+            x.round()
+        } else {
+            // When: one_to_one is false the glyph is being scaled, so the fractional
+            // origin is kept and the sampler interpolates across the destination span.
+            x
+        };
+        let draw_y = if one_to_one {
+            y.round()
+        } else {
+            // When: one_to_one is false the vertical origin stays fractional for the same
+            // reason, keeping rows aligned with the scaled sample coordinates.
+            y
+        };
         let x0 = draw_x.floor().max(0.0) as i32;
         let y0 = draw_y.floor().max(0.0) as i32;
         let x1 = (draw_x + w).ceil().min(self.width as f32) as i32;
         let y1 = (draw_y + h).ceil().min(self.height as f32) as i32;
         if x1 <= x0 || y1 <= y0 {
+            // When: x1 or y1 collapsed past its origin the glyph's destination span is
+            // empty, so the atlas is never sampled for a row that cannot appear.
             return;
         }
         let atlas_pixels = atlas.pixels_bgra();
@@ -298,6 +352,8 @@ impl WindowsSoftwareFrame {
                     let sy = ay0 + (yy - y0) as u32;
                     bgra_pixel_at(atlas_pixels, atlas_w, sx.min(atlas_w - 1), sy.min(atlas_h - 1))
                 } else if image {
+                    // When: image is set the source is inline media being scaled, where
+                    // bilinear taps smooth the result instead of blocking it up.
                     sample_atlas_bilinear_in_rect(
                         atlas_pixels,
                         atlas_w,
@@ -307,6 +363,9 @@ impl WindowsSoftwareFrame {
                         (ax0, ay0, ax1, ay1),
                     )
                 } else {
+                    // When: neither one_to_one nor image holds the glyph is scaled text,
+                    // which takes nearest sampling so no neighbour bleeds into its edges.
+
                     // Nearest, clamped to this glyph's own tile. The clamp is
                     // what makes neighbour bleed impossible rather than
                     // merely unlikely.
@@ -316,12 +375,20 @@ impl WindowsSoftwareFrame {
                 };
                 let dst_off = row + xx as usize * 4;
                 if color_glyph {
+                    // When: color_glyph is set the atlas already holds premultiplied
+                    // colour, so the sample is blended as-is and glyph.color cannot tint.
                     if sample[3] <= 0.0 {
+                        // When: sample alpha is zero the texel is fully transparent, so
+                        // blending would cost work and leave the destination unchanged.
                         continue;
                     }
                     blend_premul_bgra(&mut self.pixels[dst_off..dst_off + 4], sample);
                 } else if subpixel_glyph {
+                    // When: subpixel_glyph is set the sample carries per-channel coverage
+                    // rather than one alpha, so R, G and B are weighted separately.
                     if sample[3] <= 0.0 {
+                        // When: sample alpha is zero no channel of this texel is covered,
+                        // so every subpixel weight would be zero.
                         continue;
                     }
                     blend_subpixel_bgra(
@@ -331,8 +398,12 @@ impl WindowsSoftwareFrame {
                         fg_alpha,
                     );
                 } else {
+                    // When: neither color_glyph nor subpixel_glyph is set the atlas holds
+                    // grayscale coverage, so glyph.color is scaled by it and blended.
                     let cov = grayscale_coverage(sample);
                     if cov <= 0.0 {
+                        // When: cov is zero the texel contributes nothing, so the
+                        // premultiplied source would be fully transparent.
                         continue;
                     }
                     let src = [
@@ -356,21 +427,34 @@ fn hwnd_for_window(window: &Window) -> anyhow::Result<HWND> {
     }
 }
 
+// SAFETY: callers pass a live HWND for the window being presented and a pixels slice
+// holding width * height * 4 bytes, the exact extent the blit below describes to GDI.
 unsafe fn blit_bgra_to_hwnd(
     hwnd: HWND,
     width: u32,
     height: u32,
     pixels: &[u8],
 ) -> anyhow::Result<()> {
-    let hdc = unsafe { GetDC(Some(hwnd)) };
+    let hdc =
+        // SAFETY: GetDC only reads hwnd, and reports failure as a null HDC rather than
+        // by trapping, which the null check below rejects before any drawing use.
+        unsafe { GetDC(Some(hwnd)) };
     if hdc.0.is_null() {
         anyhow::bail!("GetDC failed");
     }
-    let result = unsafe { blit_bgra_to_hdc(hdc, width, height, pixels) };
-    let _ = unsafe { ReleaseDC(Some(hwnd), hdc) };
+    let result =
+        // SAFETY: hdc is non-null on this path, and width, height and pixels carry this
+        // function's own precondition forward unchanged.
+        unsafe { blit_bgra_to_hdc(hdc, width, height, pixels) };
+    let _ =
+        // SAFETY: releases exactly the hdc GetDC returned, paired with the same hwnd, on
+        // every path that reached the acquisition.
+        unsafe { ReleaseDC(Some(hwnd), hdc) };
     result
 }
 
+// SAFETY: callers pass a valid HDC and a pixels slice holding width * height * 4 bytes
+// in BGRA order, since GDI reads that extent directly from the pointer below.
 unsafe fn blit_bgra_to_hdc(hdc: HDC, width: u32, height: u32, pixels: &[u8]) -> anyhow::Result<()> {
     let bmi = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
@@ -384,7 +468,10 @@ unsafe fn blit_bgra_to_hdc(hdc: HDC, width: u32, height: u32, pixels: &[u8]) -> 
         },
         bmiColors: [RGBQUAD::default(); 1],
     };
-    let rows = unsafe {
+    let rows =
+        // SAFETY: bmi describes height rows of width BGRA texels, the same extent the
+        // caller guaranteed in pixels; biHeight is negated to read the slice top-down.
+        unsafe {
         SetDIBitsToDevice(
             hdc,
             0,
@@ -419,6 +506,8 @@ fn linear_rgba_to_bgra(color: [f32; 4]) -> [u8; 4] {
 fn premul_linear_rgba_to_premul_bgra_f32(color: [f32; 4]) -> [f32; 4] {
     let a = color[3].clamp(0.0, 1.0);
     if a <= 0.0 {
+        // When: a is zero the premultiplied colour carries no recoverable hue, and the
+        // unpremultiply divides by it, so a transparent texel is returned instead.
         return [0.0; 4];
     }
     let r = (color[0] / a).clamp(0.0, 1.0);
@@ -430,6 +519,8 @@ fn premul_linear_rgba_to_premul_bgra_f32(color: [f32; 4]) -> [f32; 4] {
 fn premul_linear_rgba_to_straight_srgb(color: [f32; 4]) -> [f32; 3] {
     let a = color[3].clamp(0.0, 1.0);
     if a <= 0.0 {
+        // When: a is zero there is no straight colour to recover, since every channel
+        // below is divided by it to undo premultiplication.
         return [0.0; 3];
     }
     [
@@ -460,6 +551,8 @@ fn sample_atlas_bilinear_in_rect(
     let max_x = max_x.min(width);
     let max_y = max_y.min(height);
     if width == 0 || height == 0 || pixels.is_empty() || min_x >= max_x || min_y >= max_y {
+        // When: the rect collapsed or pixels is empty there is no texel inside this
+        // glyph's own tile, and the (max_x - 1) clamp below would underflow.
         return [0.0; 4];
     }
     // Atlas tiles are packed without padding, so both bilinear taps must stay
@@ -488,6 +581,8 @@ fn sample_atlas_bilinear_in_rect(
 fn bgra_pixel_at(pixels: &[u8], width: u32, x: u32, y: u32) -> [f32; 4] {
     let off = ((y * width + x) * 4) as usize;
     if off + 4 > pixels.len() {
+        // When: off runs past pixels the coordinate lies outside the atlas upload, so a
+        // transparent texel is returned rather than panicking on the slice.
         return [0.0; 4];
     }
     bgra8_to_premul_f32(&pixels[off..off + 4])
@@ -527,6 +622,8 @@ fn linear_to_srgb(v: f32) -> f32 {
     if v <= 0.003_130_8 {
         v * 12.92
     } else {
+        // When: v is above the linear toe the sRGB transfer curve switches to its gamma
+        // segment, which the two pieces are chosen to meet continuously at that value.
         1.055 * v.powf(1.0 / 2.4) - 0.055
     }
 }
@@ -541,7 +638,13 @@ fn distance_to_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> 
     let wx = px - ax;
     let wy = py - ay;
     let denom = vx * vx + vy * vy;
-    let t = if denom <= f32::EPSILON { 0.0 } else { ((wx * vx + wy * vy) / denom).clamp(0.0, 1.0) };
+    let t = if denom <= f32::EPSILON {
+        0.0
+    } else {
+        // When: denom exceeds EPSILON the segment has length, so the projection is
+        // clamped to it and the distance measures the segment, not its infinite line.
+        ((wx * vx + wy * vy) / denom).clamp(0.0, 1.0)
+    };
     let cx = ax + t * vx;
     let cy = ay + t * vy;
     ((px - cx).powi(2) + (py - cy).powi(2)).sqrt()

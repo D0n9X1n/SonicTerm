@@ -60,6 +60,8 @@ pub struct Selection {
 }
 
 impl Selection {
+    /// Point anchor at `(row, col)`: an unanchored, empty selection that a
+    /// subsequent drag extends.
     pub fn new(row: u64, col: u16) -> Self {
         Self {
             start: (row, col),
@@ -106,6 +108,8 @@ impl Selection {
         self.scrollback_evicted = scrollback_evicted;
     }
 
+    /// Move the free end of the selection to `(row, col)`, leaving the anchor
+    /// and the recorded content baseline untouched.
     pub fn extend(&mut self, row: u64, col: u16) {
         self.end = (row, col);
     }
@@ -149,10 +153,14 @@ impl Selection {
     /// that single cell — it does not expand across whitespace.
     pub fn word_at(grid: &Grid, row: u64, col: u16) -> Selection {
         let Some(line) = grid.row_at_abs(row) else {
+            // When: row_at_abs resolves no line at that absolute row because it
+            // fell out of scrollback; fall back to a bare point anchor.
             return Selection::new(row, col);
         };
         let len = line.len();
         if len == 0 {
+            // When: len is zero, so the row holds no cells to scan for word
+            // boundaries; anchor on the clicked cell instead.
             return Selection::new(row, col);
         }
         // Build a per-column char slice for the row. A WIDE_CONT cell (the
@@ -166,6 +174,8 @@ impl Selection {
             if cell.flags.contains(CellFlags::WIDE_CONT) {
                 chars.push(last_lead);
             } else {
+                // When: cell carries its own glyph, so record it as the lead
+                // that any following WIDE_CONT half repeats.
                 last_lead = cell.ch;
                 chars.push(cell.ch);
             }
@@ -290,6 +300,8 @@ pub fn plain_text_from_grid_range(
     let mut first = true;
     for row_idx in start_row..=end_row {
         let Some(row) = grid.row_at_abs(row_idx) else {
+            // When: row_at_abs runs past the last buffered row; stop
+            // serializing rather than emitting blank lines.
             break;
         };
         if !first {
@@ -297,17 +309,27 @@ pub fn plain_text_from_grid_range(
         }
         first = false;
         let col_start = if row_idx == start_row { start_col } else { 0 }.min(row.len());
-        let requested_end = if row_idx == end_row { end_col.saturating_add(1) } else { row.len() };
+        let requested_end = if row_idx == end_row {
+            end_col.saturating_add(1)
+        } else {
+            // When: row_idx is an intermediate row inside the span, so the
+            // whole row width belongs to the selection.
+            row.len()
+        };
         let requested_end = requested_end.min(row.len());
         let col_end = if strip_right_frame {
             detached_right_frame(row, col_start, requested_end)
                 .map_or(requested_end, |(content_end, _)| content_end)
         } else {
+            // When: strip_right_frame found no coherent multi-row border, so
+            // copy the requested width verbatim.
             requested_end
         };
         let mut line = String::new();
         for cell in row.get_range(col_start, col_end) {
             if cell.flags.contains(CellFlags::WIDE_CONT) {
+                // When: cell is the trailing half of a wide glyph; its lead
+                // cell already contributed the character.
                 continue;
             }
             line.push(cell.ch);
@@ -322,21 +344,31 @@ pub fn plain_text_from_grid_range(
 
 fn has_coherent_right_frame(grid: &Grid, start_col: usize, start_row: u64, end_row: u64) -> bool {
     if start_row >= end_row {
+        // When: start_row and end_row coincide, so there is no multi-row
+        // border for a single-row selection to strip.
         return false;
     }
     let mut saw_vertical_side = false;
     for row_idx in start_row..=end_row {
         let Some(row) = grid.row_at_abs(row_idx) else {
+            // When: row_at_abs cannot read a row in the span, so the border
+            // cannot be confirmed and the text is copied unchanged.
             return false;
         };
         let col_start = if row_idx == start_row { start_col } else { 0 }.min(row.len());
         let Some((_, frame)) = detached_right_frame(row, col_start, row.len()) else {
+            // When: detached_right_frame isolates no glyph on this row, so the
+            // candidate border is not coherent across the span.
             return false;
         };
         if row_idx == end_row {
+            // When: row_idx reaches end_row, the border is complete only if
+            // vertical sides preceded this closing corner.
             return saw_vertical_side && is_lower_right_frame_corner(frame);
         }
         if !is_vertical_frame_side(frame) {
+            // When: is_vertical_frame_side rejects this glyph, the column holds
+            // content rather than a border, so nothing is stripped.
             return false;
         }
         saw_vertical_side = true;
@@ -346,6 +378,8 @@ fn has_coherent_right_frame(grid: &Grid, start_col: usize, start_row: u64, end_r
 
 fn detached_right_frame(row: &Row, col_start: usize, col_end: usize) -> Option<(usize, char)> {
     if col_end != row.len() || col_end <= col_start {
+        // When: col_end stops short of the row width or spans nothing, so no
+        // right-edge glyph can be examined.
         return None;
     }
     let mut last_non_space = col_end;
@@ -353,6 +387,8 @@ fn detached_right_frame(row: &Row, col_start: usize, col_end: usize) -> Option<(
         last_non_space -= 1;
     }
     if last_non_space == col_start {
+        // When: last_non_space rewinds to col_start, the span is blank and has
+        // no trailing glyph to classify.
         return None;
     }
     let frame_col = last_non_space - 1;
@@ -362,6 +398,8 @@ fn detached_right_frame(row: &Row, col_start: usize, col_end: usize) -> Option<(
         && !row[frame_col - 1].flags.contains(CellFlags::WIDE_CONT)
         && row[frame_col - 1].ch.is_whitespace();
     if !at_right_edge || !detached {
+        // When: at_right_edge or detached fails, the glyph sits inside ordinary
+        // text rather than standing alone at the pane border.
         return None;
     }
     let mut content_end = frame_col;
@@ -388,7 +426,7 @@ fn is_lower_right_frame_corner(ch: char) -> bool {
 const WORD_CONNECTORS: &[char] = &['_', '-', '.', '/', ':', '~'];
 
 /// True when `ch` should be treated as part of a word for double-click
-/// selection: any Unicode alphanumeric, or one of [`WORD_CONNECTORS`].
+/// selection: any Unicode alphanumeric, or one of `WORD_CONNECTORS`.
 /// Whitespace and other punctuation are word boundaries.
 pub fn is_word_char(ch: char) -> bool {
     ch.is_alphanumeric() || WORD_CONNECTORS.contains(&ch)
@@ -404,10 +442,14 @@ pub fn is_word_char(ch: char) -> bool {
 /// - An empty slice returns `(0, 0)`.
 pub fn word_bounds(chars: &[char], col: usize) -> (usize, usize) {
     if chars.is_empty() {
+        // When: chars is empty, there is no cell to expand from, so report the
+        // degenerate span at the origin.
         return (0, 0);
     }
     let col = col.min(chars.len() - 1);
     if !is_word_char(chars[col]) {
+        // When: is_word_char rejects the clicked cell, the span stays that one
+        // cell instead of swallowing the surrounding whitespace.
         return (col, col);
     }
     let mut left = col;
@@ -435,16 +477,24 @@ pub fn word_bounds(chars: &[char], col: usize) -> (usize, usize) {
 #[must_use]
 pub fn revalidate_selection(selection: &mut Selection, pane_id: u64, grid: &Grid) -> bool {
     if selection.is_empty() {
+        // When: is_empty reports a bare point anchor, nothing is highlighted,
+        // so no revalidation verdict is needed.
         return false;
     }
     if selection.pane_id != Some(pane_id) || selection.on_alt_screen != grid.is_alt() {
+        // When: pane_id or on_alt_screen no longer matches the grid, the rows
+        // behind the selection are unrelated and it must be dropped.
         return true;
     }
 
     let evicted = grid.scrollback_evicted().saturating_sub(selection.scrollback_evicted);
     if !selection.on_alt_screen && evicted > 0 {
+        // When: evicted counts rows dropped from scrollback since the endpoints
+        // were recorded, so rebase them before comparing changed rows.
         let ((first_row, _), _) = selection.normalized();
         if first_row < evicted {
+            // When: first_row names a line already evicted, the selection's
+            // text is gone and the range cannot be rebased.
             return true;
         }
         selection.start.0 -= evicted;

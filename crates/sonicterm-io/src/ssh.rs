@@ -1,8 +1,8 @@
 //! SSH client backend.
 //!
-//! Provides [`SshHandle`], an API-compatible sibling to
+//! Provides `SshHandle`, an API-compatible sibling to
 //! [`crate::pty::PtyHandle`] that runs a remote interactive shell over SSH
-//! using the pure-Rust [`russh`] client. Bytes flow over crossbeam channels
+//! using the pure-Rust `russh` client. Bytes flow over crossbeam channels
 //! so the rest of the engine (Parser, Grid, App) is unchanged: the choice
 //! between a local pty and an SSH session is just which struct lives in
 //! the pane.
@@ -19,15 +19,14 @@
 //! as untrusted. [`validate_host`] applies a strict allow-list of
 //! characters before any russh call, even though russh itself doesn't
 //! shell-execute the host (defense in depth). Port is parsed as u16. We
-//! never accept passwords on the command line — auth is key-file or
-//! ssh-agent only.
+//! never accept passwords on the command line; authentication uses key files only.
 //!
 //! ## Auth precedence
 //!
-//! 1. If `SSH_AUTH_SOCK` is set, try ssh-agent first.
-//! 2. Otherwise (or on agent failure), try `~/.ssh/id_ed25519` then
-//!    `~/.ssh/id_rsa` if the caller did not pass an explicit key path.
-//! 3. If the caller passed an explicit key path, only that file is tried.
+//! 1. If the caller passes an explicit key path, only that file is tried.
+//! 2. Otherwise, try `~/.ssh/id_ed25519` then `~/.ssh/id_rsa`.
+//!
+//! SSH-agent authentication is not implemented.
 //!
 //! Password / keyboard-interactive auth is intentionally not supported
 //! in v1.
@@ -50,6 +49,7 @@ impl fmt::Display for SshTarget {
         if self.port == 22 {
             write!(f, "{}@{}", self.user, self.host)
         } else {
+            // When: `port` is nondefault, include it so formatting preserves the target endpoint.
             write!(f, "{}@{}:{}", self.user, self.host, self.port)
         }
     }
@@ -60,34 +60,42 @@ impl fmt::Display for SshTarget {
 /// reaches the network.
 pub fn parse_target(s: &str) -> Result<SshTarget, SshError> {
     if s.is_empty() {
+        // When: `s` is empty, no user or host can be parsed without inventing identity.
         return Err(SshError::ParseTarget("empty target".into()));
     }
     if s.len() > 256 {
+        // When: `s` exceeds the target bound, reject it before parsing or allocation.
         return Err(SshError::ParseTarget("target too long".into()));
     }
     let (user, rest) =
         s.split_once('@').ok_or_else(|| SshError::ParseTarget("missing '@'".into()))?;
     if user.is_empty() {
+        // When: `user` is empty, authentication has no remote account name.
         return Err(SshError::ParseTarget("empty user".into()));
     }
     validate_user(user)?;
 
     let (host, port) = if let Some((h, p)) = rest.rsplit_once(':') {
+        // When: `rest` splits at its last colon; bare IPv6 must be bracketed or its tail parses as a port.
         // Bracketed IPv6 with port: `[::1]:2222` — strip the brackets.
         let (h, p) = if let Some(stripped) = h.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
             (stripped, p)
         } else {
+            // When: `h` has no brackets to strip, so it is already the bare host.
             (h, p)
         };
         let port: u16 = p.parse().map_err(|_| SshError::ParseTarget(format!("bad port {p:?}")))?;
         if port == 0 {
+            // When: `port` is zero, no TCP service endpoint can be contacted.
             return Err(SshError::ParseTarget("port 0".into()));
         }
         (h, port)
     } else {
+        // When: `rest` has no explicit port suffix, use the SSH default.
         (rest, 22)
     };
     if host.is_empty() {
+        // When: `host` is empty, network resolution has no destination.
         return Err(SshError::ParseTarget("empty host".into()));
     }
     validate_host(host)?;
@@ -100,11 +108,13 @@ pub fn parse_target(s: &str) -> Result<SshTarget, SshError> {
 /// CR LF, etc). Length capped at 253 (DNS limit).
 pub fn validate_host(host: &str) -> Result<(), SshError> {
     if host.is_empty() || host.len() > 253 {
+        // When: `host` is empty or exceeds the DNS bound, reject it before network access.
         return Err(SshError::ParseTarget("host length out of range".into()));
     }
     for ch in host.chars() {
         let ok = ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_' | ':');
         if !ok {
+            // When: `ok` is false, the host contains a character outside the network-name allow-list.
             return Err(SshError::ParseTarget(format!("forbidden char in host: {ch:?}")));
         }
     }
@@ -115,11 +125,13 @@ pub fn validate_host(host: &str) -> Result<(), SshError> {
 /// `._-`. Length capped at 64.
 pub fn validate_user(user: &str) -> Result<(), SshError> {
     if user.is_empty() || user.len() > 64 {
+        // When: `user` is empty or exceeds the account-name bound, reject it before authentication.
         return Err(SshError::ParseTarget("user length out of range".into()));
     }
     for ch in user.chars() {
         let ok = ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-');
         if !ok {
+            // When: `ok` is false, the username contains a character outside the account-name allow-list.
             return Err(SshError::ParseTarget(format!("forbidden char in user: {ch:?}")));
         }
     }
@@ -168,7 +180,7 @@ mod live {
         /// Set to true on drop; the background tokio task observes this and
         /// closes the channel + disconnects cleanly.
         shutdown: Arc<Mutex<bool>>,
-        /// One-shot resize sender consumed by the bg task.
+        /// Resize sender; Drop also sends `(0, 0)` to wake the background task.
         resize_tx: Sender<(u16, u16)>,
     }
 
@@ -176,9 +188,10 @@ mod live {
         /// Connect to `target` with the given auth source.
         ///
         /// `key_path_or_agent`:
-        /// - `Some(path)` — try that key file (no agent, no other keys).
-        /// - `None` — try `SSH_AUTH_SOCK` first; fall back to default
-        ///   `~/.ssh/id_ed25519` then `~/.ssh/id_rsa`.
+        /// - `Some(path)` — try only that key file.
+        /// - `None` — try `~/.ssh/id_ed25519` then `~/.ssh/id_rsa`.
+        ///
+        /// SSH-agent authentication is not implemented.
         pub fn connect(
             target: SshTarget,
             key_path_or_agent: Option<PathBuf>,
@@ -193,6 +206,7 @@ mod live {
             super::validate_host(&target.host)?;
             super::validate_user(&target.user)?;
             if target.port == 0 {
+                // When: `target.port` is zero, reject a directly constructed target before network access.
                 return Err(SshError::ParseTarget("port 0".into()));
             }
 
@@ -210,6 +224,7 @@ mod live {
                         match tokio::runtime::Builder::new_current_thread().enable_all().build() {
                             Ok(rt) => rt,
                             Err(e) => {
+                                // When: runtime construction fails, the session thread cannot drive any SSH future.
                                 tracing::error!("ssh: failed to build runtime: {e}");
                                 return;
                             }
@@ -238,11 +253,12 @@ mod live {
         }
     }
 
+    // Lifecycle: dropping `SshHandle` sets `shutdown` and queues a `resize_tx` nudge; the 16 ms poll observes shutdown and disconnects.
     impl Drop for SshHandle {
         fn drop(&mut self) {
             *self.shutdown.lock() = true;
-            // Nudge the background task awake so it observes shutdown
-            // promptly instead of waiting for the next read tick.
+            // Queue a sentinel so the next resize drain does no remote resize.
+            // The channel poll timeout bounds when the task observes shutdown.
             let _ = self.resize_tx.send((0, 0));
         }
     }
@@ -315,10 +331,12 @@ mod live_impl {
 
         loop {
             if *shutdown.lock() {
+                // When: `shutdown` is set by Drop or input loss, leave the poll loop and disconnect cleanly.
                 break;
             }
             // Drain pending user input (non-blocking).
             loop {
+                // When: `in_rx` data is sent; empty ends this drain, while disconnection requests shutdown.
                 match in_rx.try_recv() {
                     Ok(bytes) => {
                         if let Err(e) = chan.data(bytes.as_slice()).await {
@@ -335,32 +353,37 @@ mod live_impl {
             // Drain pending resize requests (last wins).
             let mut latest_resize: Option<(u16, u16)> = None;
             loop {
+                // When: `resize_rx` yields a zero `c`/`r` nudge, a real `pair`, or an error ending this drain.
                 match resize_rx.try_recv() {
-                    Ok((c, r)) if c == 0 && r == 0 => {} // shutdown nudge
+                    Ok((c, r)) if c == 0 && r == 0 => {}
                     Ok(pair) => latest_resize = Some(pair),
                     Err(_) => break,
                 }
             }
             if let Some((c, r)) = latest_resize {
+                // When: `latest_resize` exists, send only the newest queued dimensions to the server.
                 let _ = chan.window_change(u32::from(c), u32::from(r), 0, 0).await;
             }
 
             // Poll the channel for output without blocking forever.
             let next = tokio::time::timeout(Duration::from_millis(16), chan.wait()).await;
+            // When: `next` data is forwarded, stream end stops, control is ignored, and timeout repolls.
             match next {
                 Ok(Some(ChannelMsg::Data { data })) => {
                     if out_tx.send(data.to_vec()).is_err() {
+                        // When: `out_tx` has no consumer, stop the remote session instead of buffering output.
                         break;
                     }
                 }
                 Ok(Some(ChannelMsg::ExtendedData { data, ext: _ })) => {
                     if out_tx.send(data.to_vec()).is_err() {
+                        // When: `out_tx` has no consumer, stop the remote session instead of buffering output.
                         break;
                     }
                 }
                 Ok(Some(ChannelMsg::Eof)) | Ok(Some(ChannelMsg::Close)) | Ok(None) => break,
                 Ok(Some(_)) => {}
-                Err(_) => {} // timeout — loop again
+                Err(_) => {}
             }
         }
 
@@ -375,15 +398,18 @@ mod live_impl {
         explicit_key: Option<PathBuf>,
     ) -> Result<(), SshError> {
         if let Some(path) = explicit_key {
+            // When: `explicit_key` is supplied, try only that file as the caller requested.
             return try_key_file(sess, user, &path).await;
         }
         // ssh-agent fallback is not wired up: agent auth requires implementing
         // a custom `Signer`, so only on-disk keys are tried here.
         if let Some(home) = std::env::var_os("HOME") {
+            // When: `home` is available, probe the supported default private-key paths in order.
             let home = PathBuf::from(home);
             for name in ["id_ed25519", "id_rsa"] {
                 let p = home.join(".ssh").join(name);
                 if p.exists() && try_key_file(sess, user, &p).await.is_ok() {
+                    // When: `p` exists and authenticates successfully, no later default key is needed.
                     return Ok(());
                 }
             }
@@ -410,6 +436,7 @@ mod live_impl {
         if result.success() {
             Ok(())
         } else {
+            // When: `result.success` is false, the server rejected this public key.
             Err(SshError::AuthExhausted)
         }
     }

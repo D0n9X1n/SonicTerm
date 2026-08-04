@@ -407,6 +407,7 @@ impl ResourceAmount {
     /// Subtract both dimensions, rejecting component-wise underflow.
     pub fn checked_sub(self, other: Self) -> Result<Self, BudgetError> {
         if !other.component_le(self) {
+            // When: `other` exceeds either component, subtraction would underflow that accounting axis.
             return Err(BudgetError::AmountExceedsCharge { requested: other, available: self });
         }
         Ok(Self { bytes: self.bytes - other.bytes, items: self.items - other.items })

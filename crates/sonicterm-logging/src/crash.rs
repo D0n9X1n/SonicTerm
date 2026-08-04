@@ -84,6 +84,7 @@ impl Visit for MessageVisitor {
         if field.name() == "message" {
             self.message = Some(format!("{value:?}"));
         } else if self.message.is_none() {
+            // When: no message field was recorded yet, retain the first debug field as crash context.
             self.message = Some(format!("{}={value:?}", field.name()));
         }
     }
@@ -92,6 +93,7 @@ impl Visit for MessageVisitor {
         if field.name() == "message" {
             self.message = Some(value.to_string());
         } else if self.message.is_none() {
+            // When: no message field was recorded yet, retain the first string field as crash context.
             self.message = Some(format!("{}={value}", field.name()));
         }
     }
@@ -114,6 +116,7 @@ static SESSION_ID: OnceLock<String> = OnceLock::new();
 /// process, and a second call could only overwrite it with a later, wrong one.
 pub fn set_session_id(id: &str) {
     if valid_session_id(id) {
+        // When: `id` passes the bounded allow-list, store the first process session tag for later dumps.
         let _ = SESSION_ID.set(id.to_string());
     }
 }
@@ -207,8 +210,12 @@ fn summarize(info: &std::panic::PanicInfo<'_>) -> String {
 #[allow(deprecated)]
 fn write_dump(info: &std::panic::PanicInfo<'_>) -> std::io::Result<()> {
     let dir = PANIC_DIR.get().cloned().unwrap_or_else(crate::path::crash_dir);
-    let crashes =
-        if dir.file_name().is_some_and(|n| n == "crashes") { dir } else { dir.join("crashes") };
+    let crashes = if dir.file_name().is_some_and(|n| n == "crashes") {
+        dir
+    } else {
+        // When: configured `dir` is the log root rather than `crashes`, append the crash subdirectory once.
+        dir.join("crashes")
+    };
     std::fs::create_dir_all(&crashes)?;
     let stamp = chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S%.3fZ");
     let path = crashes.join(format!("crash-{stamp}.log"));

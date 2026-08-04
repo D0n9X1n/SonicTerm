@@ -1,12 +1,12 @@
 //! sonicterm-mux daemon entrypoint.
 //!
 //! Subcommands:
-//!   sonicterm-mux daemon --socket <path>     run the server
-//!   sonicterm-mux list   --socket <path>     list live sessions
-//!   sonicterm-mux kill <pane_id> --socket <path>
 //!
-//! v0.1 — minimal CLI; future versions may grow flags for foreground mode,
-//! pid-file, log-file, etc.
+//! ```text
+//! sonicterm-mux daemon --socket <path>          run the server
+//! sonicterm-mux list --socket <path>            list live sessions
+//! sonicterm-mux kill <pane_id> --socket <path>  terminate a pane
+//! ```
 
 #[cfg(windows)]
 use std::io::Write;
@@ -145,6 +145,7 @@ fn serve_stream(state: Arc<ServerState>, stream: Stream) -> Result<()> {
         handle_connection_with_shutdown(state, stream, SharedWriter(writer), move || {
             let Stream::NamedPipe(named_pipe) = shutdown.as_ref();
             let writer_handle = HANDLE(named_pipe.as_handle().as_raw_handle());
+            // SAFETY: `writer_handle` comes from this live named pipe; cancellation and disconnect take it by value.
             unsafe {
                 let _ = CancelIoEx(writer_handle, None);
                 let _ = DisconnectNamedPipe(writer_handle);

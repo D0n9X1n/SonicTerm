@@ -42,14 +42,14 @@ pub fn unlimited_owner_limits() -> OwnerLimits {
 /// inconsistency untestable from outside this crate, including the diagnostic
 /// banner whose whole purpose is to make it impossible to miss.
 ///
-/// This constructs a [`Charge`] the ledger never issued, so dropping it
+/// This constructs a `Charge` the ledger never issued, so dropping it
 /// attempts to release bytes that were never reserved. `Charge` is
 /// `pub(crate)`, which is why the helper has to live here rather than in the
 /// crate that formats the result.
 ///
-/// Feature-gated behind `test-util` and therefore unreachable from a release
-/// build: nothing here should ever run in production, since its only purpose
-/// is to corrupt accounting on purpose.
+/// Available only when a dependent opts into `test-util`. This is an
+/// intentionally destructive test seam: callers must restrict it to diagnostic
+/// tests and never invoke it from a production path.
 pub fn corrupt_ledger_accounting(governor: &ResourceGovernor) -> ResourceOwnerId {
     let owner = governor
         .create_child(governor.root_owner(), OwnerKind::Window, unlimited_owner_limits())

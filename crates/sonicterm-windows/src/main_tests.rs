@@ -26,6 +26,71 @@ fn integration_test_target_is_present() {
     assert_eq!(env!("CARGO_PKG_NAME"), "sonicterm-windows");
 }
 
+#[test]
+fn software_presenter_tests_are_declared_by_their_source_module() {
+    const SOURCE: &str = include_str!("software_presenter.rs");
+
+    assert!(SOURCE.contains("#[path = \"software_presenter_tests.rs\"]"));
+    assert!(SOURCE.contains("mod software_presenter_tests;"));
+}
+
+#[test]
+fn ole_shutdown_is_owned_by_same_thread_guard() {
+    const MAIN: &str = include_str!("main.rs");
+    const OLE: &str = include_str!("os_drag_win.rs");
+
+    assert!(MAIN.lines().any(|line| line.trim() == "let ole_guard = os_drag_win::init_ole();"));
+    assert!(MAIN.contains("let ole_available = ole_guard.is_some();"));
+    assert!(MAIN.contains("if ole_available"));
+    assert!(MAIN.contains("OLE unavailable; native tab drag/drop is disabled"));
+    assert!(
+        OLE.contains("pub struct OleGuard(std::marker::PhantomData<*const ()>)"),
+        "OleGuard must remain !Send so OleUninitialize runs on the OleInitialize thread"
+    );
+    assert!(OLE.contains("pub fn init_ole() -> Option<OleGuard>"));
+    assert!(OLE.contains("impl Drop for OleGuard"));
+    assert!(!MAIN.contains("shutdown_ole"));
+}
+
+#[test]
+fn raw_hwnd_and_ole_entry_points_are_explicitly_unsafe() {
+    const MAIN: &str = include_str!("main.rs");
+    const OLE: &str = include_str!("os_drag_win.rs");
+    const BACKDROP: &str = include_str!("backdrop.rs");
+    const MENU: &str = include_str!("menubar.rs");
+    const TAB_DRAG: &str = include_str!("tab_drag_os.rs");
+
+    assert!(OLE
+        .lines()
+        .any(|line| line.trim_start().starts_with("pub(crate) unsafe fn begin_tab_drag")));
+    assert!(OLE
+        .lines()
+        .any(|line| line.trim_start().starts_with("pub unsafe fn register_for_window")));
+    assert!(BACKDROP
+        .lines()
+        .any(|line| line.trim_start().starts_with("pub unsafe fn apply_backdrop")));
+    assert!(MENU.lines().any(|line| line.trim_start().starts_with("pub unsafe fn new")));
+    assert!(TAB_DRAG.lines().any(|line| line.trim_start().starts_with("pub unsafe fn boxed")));
+    assert!(!TAB_DRAG.contains("pub fn new() -> Self"));
+    assert!(!TAB_DRAG.contains("impl Default for WinOsTabDragBackend"));
+    assert!(MAIN.contains("if ole_available"));
+}
+
+#[test]
+fn ole_drag_paths_reject_missing_initialization_and_empty_payloads() {
+    const OLE: &str = include_str!("os_drag_win.rs");
+    const TAB_DRAG: &str = include_str!("tab_drag_os.rs");
+
+    assert!(OLE.contains("if !ole_initialized_on_current_thread()"));
+    assert!(OLE.contains("if payload_json.is_empty()"));
+    assert!(OLE.contains("if len == 0"));
+    assert!(TAB_DRAG.contains("let outcome ="));
+    assert!(TAB_DRAG.contains("if outcome.hr != windows::Win32::System::Ole::DRAGDROP_S_DROP"));
+    assert!(TAB_DRAG.contains("DragOutcome::Cancelled"));
+    assert!(!TAB_DRAG.contains("let effect ="));
+    assert!(TAB_DRAG.contains("if registered"));
+}
+
 /// No caller may answer the detection question with a literal.
 ///
 /// `should_use(false)` in `main.rs` made the branch unreachable under `Auto`,

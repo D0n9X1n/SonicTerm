@@ -46,11 +46,12 @@ impl CancelSource {
     ///
     /// Repeat calls keep the first reason: the original cause of teardown is the
     /// useful one for diagnosis, and later cascading reasons would mask it.
+    // Ordering: cancelled store uses Release after reason is installed; the mutex
+    // and condition variable, not the atomic alone, prevent missed waits.
     pub fn cancel(&self, reason: CancelReason) {
         let mut current = self.state.reason.lock();
         if current.is_none() {
             *current = Some(reason);
-            // Release under the lock so no waiter can miss the transition.
             self.state.cancelled.store(true, Ordering::Release);
         }
         drop(current);
@@ -58,6 +59,8 @@ impl CancelSource {
     }
 
     /// Return whether cancellation was already published.
+    // Ordering: cancelled load uses Acquire with cancel's Release; stale false is
+    // only an early observation because this level-triggered flag never clears.
     #[inline]
     pub fn is_cancelled(&self) -> bool {
         self.state.cancelled.load(Ordering::Acquire)
@@ -78,6 +81,8 @@ pub struct CancelToken {
 
 impl CancelToken {
     /// Return whether cancellation has been published.
+    // Ordering: cancelled load uses Acquire without taking the reason mutex;
+    // callers that need the reason acquire that lock separately.
     #[inline]
     pub fn is_cancelled(&self) -> bool {
         self.state.cancelled.load(Ordering::Acquire)
@@ -104,6 +109,8 @@ impl CancelToken {
         let mut reason = self.state.reason.lock();
         while reason.is_none() {
             if self.state.signal.wait_until(&mut reason, deadline).timed_out() && reason.is_none() {
+                // When: the protected reason remains absent after the deadline;
+                // cancellation racing the timeout wins once the mutex is reacquired.
                 return false;
             }
         }

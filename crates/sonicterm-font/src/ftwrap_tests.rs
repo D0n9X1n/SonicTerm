@@ -79,6 +79,77 @@ fn unrelated_axes_are_ignored() {
 }
 
 #[test]
+fn faces_retain_shared_library_ownership() {
+    const SOURCE: &str = include_str!("ftwrap.rs");
+
+    assert!(SOURCE.contains("struct LibraryInner"));
+    assert!(SOURCE.contains("library: Rc<LibraryInner>"));
+    assert!(SOURCE.contains("library: Rc::clone(&self.inner)"));
+}
+
+#[test]
+fn face_remains_valid_after_creating_library_drops() {
+    let handle = FontDataHandle {
+        source: FontDataSource::OnDisk(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../assets/fonts/RecMonoSt.Helens-Regular.ttf"),
+        ),
+        index: 0,
+        variation: 0,
+        origin: crate::locator::FontOrigin::FontDirs,
+        coverage: None,
+    };
+    let face = {
+        let library = Library::new().unwrap();
+        library.face_from_locator(&handle).unwrap()
+    };
+
+    assert!(!face.family_name().is_empty());
+    drop(face);
+}
+
+#[test]
+fn bitmap_storage_checks_reject_empty_and_null_buffers() {
+    assert!(checked_bitmap_buffer_len(std::ptr::null_mut(), 0, 0).is_err());
+    assert!(checked_bitmap_buffer_len(std::ptr::null_mut(), 1, 1).is_err());
+
+    let mut byte = 0u8;
+    assert_eq!(checked_bitmap_buffer_len(&mut byte, 1, 1).unwrap(), 1);
+}
+
+#[test]
+fn palette_storage_checks_reject_empty_and_null_buffers() {
+    assert!(checked_palette_storage(std::ptr::null_mut::<FT_Color>(), 0).is_err());
+    assert!(checked_palette_storage(std::ptr::null_mut::<FT_Color>(), 1).is_err());
+
+    let mut color = MaybeUninit::<FT_Color>::uninit();
+    assert_eq!(checked_palette_storage(color.as_mut_ptr(), 1).unwrap(), 1);
+
+    const SOURCE: &str = include_str!("ftwrap.rs");
+    assert!(SOURCE.contains("if data.num_palettes == 0"));
+    assert!(SOURCE.contains("if data.num_palette_entries == 0"));
+}
+
+#[test]
+fn mm_var_cleanup_and_colr_provenance_are_explicit() {
+    const SOURCE: &str = include_str!("ftwrap.rs");
+
+    assert!(SOURCE.contains("struct MmVarGuard"));
+    assert!(SOURCE.contains("pub(crate) unsafe fn get_paint"));
+    assert!(SOURCE.contains("pub(crate) unsafe fn get_paint_layers"));
+}
+
+#[test]
+fn disk_streams_use_callback_io_and_size_proofs_name_the_real_initializer() {
+    const SOURCE: &str = include_str!("ftwrap.rs");
+    const RASTERIZER: &str = include_str!("rasterizer/freetype.rs");
+
+    assert!(!SOURCE.contains("MmapOptions"));
+    assert!(!SOURCE.contains("StreamBacking::Map"));
+    assert!(!RASTERIZER.contains("face_from_locator set a character size"));
+}
+
+#[test]
 fn bitmap_preflight_loads_metrics_without_rendering_pixels() {
     let flags = bitmap_metrics_preflight_flags(FT_LOAD_RENDER as FT_Int32);
 

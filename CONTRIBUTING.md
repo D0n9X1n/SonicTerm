@@ -30,11 +30,23 @@ CI runs workspace unit tests and a per-crate unit/build gate on macOS and
 Windows. Run them locally first:
 
 ```bash
-cargo fmt --all -- --check
+cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-io --no-deps --features ssh
 cargo test --workspace --lib --bins
+bash scripts/check-authored-rust-comments.sh
 bash scripts/check-no-raw-process-exit.sh
+bash scripts/check-rust-version.sh
+bash scripts/check-window-owner-registration.sh
 bash scripts/check-workspace-crates.sh
+bash scripts/pty-backend-feasibility.sh --check
+bash scripts/test-resource-inventory.sh
+bash scripts/test-resource-baseline-evidence.sh
+bash scripts/test-soak-harness.sh
+bash scripts/test-release-notes.sh
+bash scripts/test-wiki-publish.sh
 scripts/rust-logic-coverage.sh
 ```
 
@@ -64,7 +76,13 @@ Scope is the crate or component (`app-core`, `gpu`, `mac`, `windows`, `types`,
 
 - `rustfmt` settings live in `rustfmt.toml`.
 - `clippy` settings live in `clippy.toml`.
-- Public APIs should be documented.
+- Effectively public authored functions and public trait functions need purpose
+  Rustdoc; public unsafe functions also need a `# Safety` section.
+- Use substantive `// When:`, `// SAFETY:`, `// Lock order:`, `// Ordering:`,
+  and `// Lifecycle:` comments at the exact boundaries required by
+  `scripts/check-authored-rust-comments.sh`. Keep marker prose tied to the
+  relevant identifiers, within two comment lines and 160 characters, and about
+  current behavior rather than issue or implementation history.
 - Keep code production-focused and small; tests should cover meaningful behavior
   and edge cases rather than derives, getters, or exports.
 

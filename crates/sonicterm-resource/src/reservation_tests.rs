@@ -5,7 +5,7 @@ fn reservation_and_committed_tokens_are_not_clone() {
     // An inherent associated const is preferred over the blanket trait const, so
     // `IS_CLONE` resolves to `true` only when the probed type actually implements
     // `Clone`. A future `#[derive(Clone)]` on either token would duplicate every
-    // charge and is caught here rather than at review time.
+    // charge, so this test fails before the accounting invariant can regress.
     struct Probe<T>(core::marker::PhantomData<T>);
 
     trait NotClone {

@@ -32,6 +32,7 @@
 
 #![cfg(target_os = "windows")]
 
+use std::cell::Cell;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use sonicterm_app::os_drag::{DragAck, OsDragSink, PendingPayloadSlot, TabPayload};
@@ -39,8 +40,8 @@ use sonicterm_app::os_drag::{DragAck, OsDragSink, PendingPayloadSlot, TabPayload
 use windows::core::HRESULT;
 use windows::core::{implement, w, BOOL, PCWSTR};
 use windows::Win32::Foundation::{
-    DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DV_E_FORMATETC, DV_E_TYMED, E_NOTIMPL, HWND,
-    OLE_E_ADVISENOTSUPPORTED, POINTL, S_OK, WPARAM,
+    CO_E_NOTINITIALIZED, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DV_E_FORMATETC, DV_E_TYMED,
+    E_INVALIDARG, E_NOTIMPL, HWND, OLE_E_ADVISENOTSUPPORTED, POINTL, S_OK, WPARAM,
 };
 use windows::Win32::System::Com::{
     IDataObject, IDataObject_Impl, IEnumFORMATETC, DATADIR_GET, DVASPECT_CONTENT, FORMATETC,
@@ -48,7 +49,7 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
 use windows::Win32::System::Memory::{
-    GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
+    GlobalAlloc, GlobalFree, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
 };
 use windows::Win32::System::Ole::{
     DoDragDrop, IDropSource, IDropSource_Impl, IDropTarget, IDropTarget_Impl, OleInitialize,
@@ -65,9 +66,10 @@ use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
 fn cf_sonic_tab() -> u16 {
     static CF: OnceLock<u16> = OnceLock::new();
     *CF.get_or_init(|| {
-        // SAFETY: `RegisterClipboardFormatW` is process-global and
-        // thread-safe; the wide string literal is null-terminated.
-        let id = unsafe { RegisterClipboardFormatW(w!("com.sonic-terminal.tab.v1")) };
+        let id =
+            // SAFETY: RegisterClipboardFormatW is process-global and callable from any thread,
+            // and the wide literal is null-terminated by the `w!` macro.
+            unsafe { RegisterClipboardFormatW(w!("com.sonic-terminal.tab.v1")) };
         if id == 0 {
             tracing::error!("RegisterClipboardFormatW(com.sonic-terminal.tab.v1) returned 0");
         }
@@ -150,24 +152,45 @@ fn snapshot_drop_outcome_handle() -> Option<sonicterm_app::app::os_drag::AppHand
 
 // ---- OLE process-wide init ---------------------------------------------------
 
-/// Call once on Windows startup, before any drag-drop API. Idempotent
-/// across re-invocations within the same process (Windows refcounts
-/// internally) but should still be paired with a single
-/// [`shutdown_ole`] at exit.
-pub fn init_ole() {
-    // SAFETY: `OleInitialize` is the documented one-call-per-thread
-    // init for the apartment-threaded COM model OLE drag-drop needs.
-    let hr = unsafe { OleInitialize(None) };
-    if hr.is_err() {
-        tracing::error!(?hr, "OleInitialize failed");
+thread_local! {
+    static OLE_INIT_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+fn ole_initialized_on_current_thread() -> bool {
+    OLE_INIT_DEPTH.get() != 0
+}
+
+/// Same-thread guard for one successful [`init_ole`] call.
+pub struct OleGuard(std::marker::PhantomData<*const ()>);
+
+// Lifecycle: OleGuard Drop calls OleUninitialize to release this thread's
+// successful OLE initialization without permitting cross-thread ownership.
+impl Drop for OleGuard {
+    fn drop(&mut self) {
+        OLE_INIT_DEPTH.set(OLE_INIT_DEPTH.get().saturating_sub(1));
+        // SAFETY: OleGuard is created only after OleInitialize succeeds and is
+        // retained on the initializing thread until this matching drop.
+        unsafe { OleUninitialize() };
     }
 }
 
-/// Tear down OLE. Safe to call on a thread that never called
-/// `OleInitialize` — Windows will simply ignore it.
-pub fn shutdown_ole() {
-    // SAFETY: paired with init_ole; harmless if init failed.
-    unsafe { OleUninitialize() };
+/// Initialize OLE for this thread before any drag-drop API.
+///
+/// Returns a guard only on success; dropping it performs the required matching
+/// `OleUninitialize`, including when startup exits early.
+pub fn init_ole() -> Option<OleGuard> {
+    let hr =
+        // SAFETY: OleInitialize is the documented one-call-per-thread init for the
+        // apartment-threaded COM model OLE drag-drop needs.
+        unsafe { OleInitialize(None) };
+    if hr.is_err() {
+        // When: hr reports failure, so return no guard — an OleGuard would later call
+        // OleUninitialize for an initialization that never succeeded.
+        tracing::error!(?hr, "OleInitialize failed");
+        return None;
+    }
+    OLE_INIT_DEPTH.set(OLE_INIT_DEPTH.get().saturating_add(1));
+    Some(OleGuard(std::marker::PhantomData))
 }
 
 // ---- IDataObject implementation ---------------------------------------------
@@ -192,25 +215,37 @@ impl SonicTermDataObject {
 #[allow(non_snake_case)]
 impl IDataObject_Impl for SonicTermDataObject_Impl {
     fn GetData(&self, pformatetcin: *const FORMATETC) -> windows::core::Result<STGMEDIUM> {
-        // SAFETY: caller guarantees pformatetcin is a valid FORMATETC.
-        let fmt = unsafe { &*pformatetcin };
+        let fmt =
+            // SAFETY: OLE guarantees pformatetcin points at a live FORMATETC for the duration
+            // of this call, and the borrow does not outlive it.
+            unsafe { &*pformatetcin };
         if !self.matches(fmt) {
+            // When: fmt names a format this object does not publish, so report DV_E_FORMATETC
+            // rather than hand back an unrelated medium.
             return Err(DV_E_FORMATETC.into());
         }
         // Allocate moveable HGLOBAL and copy JSON bytes in.
         let len = self.json.len();
-        // SAFETY: GMEM_MOVEABLE + positive size is the documented
-        // allocator pattern for clipboard/drag payloads.
-        let hglobal = unsafe { GlobalAlloc(GMEM_MOVEABLE, len) }
-            .map_err(|_| windows::core::Error::from(E_NOTIMPL))?;
-        // SAFETY: pointer returned by GlobalLock is valid for `len`
-        // bytes until GlobalUnlock; we only touch it within this scope.
+        if len == 0 {
+            // When: `len == 0`, no valid HGLOBAL medium can be advertised.
+            return Err(E_INVALIDARG.into());
+        }
+        let hglobal =
+            // SAFETY: GMEM_MOVEABLE with a positive size is the documented allocator pattern
+            // for clipboard and drag payloads.
+            unsafe { GlobalAlloc(GMEM_MOVEABLE, len) }
+                .map_err(|_| windows::core::Error::from(E_NOTIMPL))?;
+        // SAFETY: GlobalLock returns a pointer valid for `len` bytes until GlobalUnlock, and
+        // the copy stays inside that window.
         unsafe {
             let dst = GlobalLock(hglobal) as *mut u8;
-            if !dst.is_null() {
-                std::ptr::copy_nonoverlapping(self.json.as_ptr(), dst, len);
-                let _ = GlobalUnlock(hglobal);
+            if dst.is_null() {
+                // When: `dst.is_null()` is true, release the allocation and refuse an empty medium.
+                let _ = GlobalFree(hglobal);
+                return Err(E_NOTIMPL.into());
             }
+            std::ptr::copy_nonoverlapping(self.json.as_ptr(), dst, len);
+            let _ = GlobalUnlock(hglobal);
         }
         let mut medium = STGMEDIUM { tymed: TYMED_HGLOBAL.0 as u32, ..Default::default() };
         medium.u.hGlobal = hglobal;
@@ -226,11 +261,15 @@ impl IDataObject_Impl for SonicTermDataObject_Impl {
     }
 
     fn QueryGetData(&self, pformatetc: *const FORMATETC) -> windows::core::HRESULT {
-        // SAFETY: caller guarantees pformatetc is a valid pointer.
-        let fmt = unsafe { &*pformatetc };
+        let fmt =
+            // SAFETY: OLE guarantees pformatetc points at a live FORMATETC for this call, and
+            // the borrow does not outlive it.
+            unsafe { &*pformatetc };
         if self.matches(fmt) {
             S_OK
         } else {
+            // When: fmt names a format this object does not publish, so answer DV_E_FORMATETC
+            // and let the caller offer another format.
             DV_E_FORMATETC
         }
     }
@@ -290,16 +329,22 @@ impl IDropSource_Impl for SonicTermDropSource_Impl {
     ) -> windows::core::HRESULT {
         use windows::Win32::System::SystemServices::MK_LBUTTON;
         if fescapepressed.as_bool() {
+            // When: fescapepressed is OLE's own ESC report, so cancel before looking at any
+            // button state.
             return DRAGDROP_S_CANCEL;
         }
-        // ESC also checked explicitly (callers occasionally feed
-        // grfKeyState without the BOOL).
-        // SAFETY: GetAsyncKeyState is thread-safe.
-        if unsafe { GetAsyncKeyState(VK_ESCAPE.0 as i32) } as u16 & 0x8000 != 0 {
+        let escape_held =
+            // SAFETY: GetAsyncKeyState reads process-global keyboard state and is callable
+            // from any thread; VK_ESCAPE is a constant virtual-key code.
+            unsafe { GetAsyncKeyState(VK_ESCAPE.0 as i32) };
+        if escape_held as u16 & 0x8000 != 0 {
+            // When: escape_held has its high bit set, so ESC is down even though callers
+            // sometimes pass grfkeystate without setting the escape BOOL.
             return DRAGDROP_S_CANCEL;
         }
-        // Primary button released → drop.
         if (grfkeystate & MK_LBUTTON).0 == 0 {
+            // When: grfkeystate no longer carries MK_LBUTTON, so the primary button was
+            // released and OLE should finish the drop.
             return DRAGDROP_S_DROP;
         }
         S_OK
@@ -316,9 +361,9 @@ impl IDropSource_Impl for SonicTermDropSource_Impl {
 // ---- Public source-side entry points ----------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DragDropOutcome {
-    hr: HRESULT,
-    effect: u32,
+pub(crate) struct DragDropOutcome {
+    pub(crate) hr: HRESULT,
+    pub(crate) effect: u32,
 }
 
 /// Synchronously run a `DoDragDrop` loop carrying `payload_json` as the
@@ -330,23 +375,40 @@ struct DragDropOutcome {
 /// MUST be called on a thread that has called `OleInitialize` —
 /// typically the main UI thread.
 fn begin_tab_drag_outcome(payload_json: &str) -> DragDropOutcome {
+    if !ole_initialized_on_current_thread() {
+        // When: `ole_initialized_on_current_thread()` is false, DoDragDrop cannot be called safely.
+        return DragDropOutcome { hr: CO_E_NOTINITIALIZED, effect: DROPEFFECT_NONE.0 };
+    }
+    if payload_json.is_empty() {
+        // When: `payload_json.is_empty()` is true, reject it before constructing IDataObject.
+        return DragDropOutcome { hr: E_INVALIDARG, effect: DROPEFFECT_NONE.0 };
+    }
     let data: IDataObject = SonicTermDataObject { json: payload_json.as_bytes().to_vec() }.into();
     let source: IDropSource = SonicTermDropSource.into();
     let mut effect = DROPEFFECT_NONE;
-    // SAFETY: DoDragDrop is the documented entry point. Both COM
-    // objects outlive the call (kept on the stack here).
-    let hr = unsafe {
-        DoDragDrop(&data, &source, DROPEFFECT_COPY | DROPEFFECT_MOVE, &mut effect as *mut _)
-    };
+    let hr =
+        // SAFETY: the caller is the OLE-initialized UI thread; `data`, `source`,
+        // and `effect` are stack-owned here and outlive the modal call.
+        unsafe {
+            DoDragDrop(&data, &source, DROPEFFECT_COPY | DROPEFFECT_MOVE, &mut effect as *mut _)
+        };
     if hr.is_err() {
         tracing::warn!(?hr, "DoDragDrop returned error");
     }
     DragDropOutcome { hr, effect: effect.0 }
 }
 
+/// Begin a native OLE drag and return its HRESULT and final effect.
+///
+/// # Safety
+///
+/// The caller must have successfully called [`init_ole`] on this thread and
+/// must keep that initialization alive for the duration of the modal drag.
 #[allow(dead_code)]
-pub fn begin_tab_drag(payload_json: &str) -> u32 {
-    begin_tab_drag_outcome(payload_json).effect
+// SAFETY: callers must uphold the OLE apartment contract required by
+// `begin_tab_drag_outcome` and `DoDragDrop`.
+pub(crate) unsafe fn begin_tab_drag(payload_json: &str) -> DragDropOutcome {
+    begin_tab_drag_outcome(payload_json)
 }
 
 // ---- OsDragSink wiring ------------------------------------------------------
@@ -359,7 +421,15 @@ pub fn begin_tab_drag(payload_json: &str) -> u32 {
 pub struct WinOsDragSink;
 
 impl WinOsDragSink {
-    pub fn arc() -> Arc<dyn OsDragSink> {
+    /// Construct the sink after OLE initialization succeeds on the UI thread.
+    ///
+    /// # Safety
+    ///
+    /// The returned sink must be invoked only on the thread whose live
+    /// [`OleGuard`] represents that initialization.
+    // SAFETY: callers must keep the matching `OleGuard` live and invoke the
+    // sink only on its OLE-initialized UI thread.
+    pub unsafe fn arc() -> Arc<dyn OsDragSink> {
         Arc::new(WinOsDragSink)
     }
 }
@@ -369,10 +439,17 @@ impl OsDragSink for WinOsDragSink {
         let json = match payload.to_json() {
             Ok(s) => s,
             Err(e) => {
+                // When: to_json failed, so there is no CF_SONIC_TAB blob to publish; never
+                // enter DoDragDrop, which would drag an empty payload.
                 tracing::error!(?e, "TabPayload serialize failed; not starting drag");
                 return DragAck::NotAcknowledged;
             }
         };
+        if !ole_initialized_on_current_thread() {
+            // When: `ole_initialized_on_current_thread()` is false, retain the source tab.
+            tracing::error!("OLE is not initialized on this thread; tab drag ignored");
+            return DragAck::NotAcknowledged;
+        }
         let outcome = begin_tab_drag_outcome(&json);
         drag_ack_for_outcome(outcome, &json, spawn_tearout_child)
     }
@@ -384,12 +461,17 @@ fn drag_ack_for_outcome(
     spawn_child: impl FnOnce(&str) -> DragAck,
 ) -> DragAck {
     if outcome.hr == DRAGDROP_S_DROP && outcome.effect == DROPEFFECT_NONE.0 {
+        // When: DROPEFFECT_NONE after a drop means no OLE target claimed the tab, so treat
+        // the release point as a tear-out rather than a cancel.
         return spawn_child(payload_json);
     }
     if outcome.hr == DRAGDROP_S_DROP && outcome.effect == DROPEFFECT_MOVE.0 {
+        // When: DROPEFFECT_MOVE means a peer SonicTerm target accepted the tab, so the source
+        // tab may be removed.
         return DragAck::Accepted;
     }
     if outcome.hr == DRAGDROP_S_CANCEL {
+        // When: DRAGDROP_S_CANCEL means the user pressed ESC, so the source tab stays put.
         return DragAck::NotAcknowledged;
     }
     DragAck::NotAcknowledged
@@ -399,6 +481,8 @@ fn spawn_tearout_child(payload_json: &str) -> DragAck {
     let exe = match std::env::current_exe() {
         Ok(path) => path,
         Err(e) => {
+            // When: current_exe failed, so there is no image path to relaunch and the tab must
+            // stay in the source window.
             tracing::error!(?e, "Windows tab tear-out: current_exe failed");
             return DragAck::NotAcknowledged;
         }
@@ -426,9 +510,13 @@ impl DropTarget {
     /// a generic file drop).
     fn preferred_effect(data: &IDataObject) -> DROPEFFECT {
         if has_format(data, cf_sonic_tab(), TYMED_HGLOBAL.0 as u32) {
+            // When: data publishes CF_SONIC_TAB, so a sibling window's tab outranks any file
+            // payload and moves rather than copies.
             return DROPEFFECT_MOVE;
         }
         if has_format(data, CF_HDROP.0, TYMED_HGLOBAL.0 as u32) {
+            // When: data publishes CF_HDROP, so this is an Explorer file drop, which copies
+            // paths into the pane instead of moving anything.
             return DROPEFFECT_COPY;
         }
         DROPEFFECT_NONE
@@ -445,12 +533,14 @@ impl IDropTarget_Impl for DropTarget_Impl {
         pdweffect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
         let Some(data) = pdataobj.as_ref() else {
-            // SAFETY: caller-provided out-pointer is non-null per OLE.
+            // When: pdataobj carried no data object, so no format can be inspected and the
+            // cursor must show "no drop".
+            // SAFETY: OLE owns pdweffect and guarantees it is non-null for this callback.
             unsafe { *pdweffect = DROPEFFECT_NONE };
             return Ok(());
         };
         let eff = DropTarget::preferred_effect(data);
-        // SAFETY: out-param is OLE-managed.
+        // SAFETY: OLE owns pdweffect and guarantees it is non-null for this callback.
         unsafe { *pdweffect = eff };
         Ok(())
     }
@@ -462,9 +552,11 @@ impl IDropTarget_Impl for DropTarget_Impl {
         pdweffect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
         // Keep whatever DragEnter chose — the cursor will reflect it.
-        // SAFETY: out-param is OLE-managed.
+        // SAFETY: OLE owns pdweffect and guarantees it is non-null for this callback.
         unsafe {
             if (*pdweffect).0 == 0 {
+                // A cleared effect is restated as DROPEFFECT_NONE so OLE never reads an unset
+                // value back out of the out-param.
                 *pdweffect = DROPEFFECT_NONE;
             }
         }
@@ -483,7 +575,9 @@ impl IDropTarget_Impl for DropTarget_Impl {
         pdweffect: *mut DROPEFFECT,
     ) -> windows::core::Result<()> {
         let Some(data) = pdataobj.as_ref() else {
-            // SAFETY: out-param is OLE-managed.
+            // When: pdataobj carried no data object, so there is nothing to parse; report the
+            // gesture as cancelled so the source tab stays where it is.
+            // SAFETY: OLE owns pdweffect and guarantees it is non-null for this callback.
             unsafe { *pdweffect = DROPEFFECT_NONE };
             if let Some(handle) = snapshot_drop_outcome_handle() {
                 handle.post_drag_ended(sonicterm_app::app::os_drag::DragOutcome::Cancelled);
@@ -492,17 +586,18 @@ impl IDropTarget_Impl for DropTarget_Impl {
         };
         // CF_SONIC_TAB takes priority.
         if let Some(json) = read_hglobal_utf8(data, cf_sonic_tab()) {
+            // When: read_hglobal_utf8 returned a CF_SONIC_TAB blob, so resolve a SonicTerm
+            // destination before considering any file payload.
             match TabPayload::from_json(&json) {
                 Ok(_p) => {
-                    // resolve the real
-                    // destination via the shared TabBarRegistry the App
-                    // publishes into every frame. Falls back to
-                    // DroppedOnEmpty (tear out at drop point) when the
-                    // cursor isn't over any registered SonicTerm tab bar
-                    // but IS over a SonicTerm window's client area. If the
-                    // cursor isn't over any SonicTerm window at all we
-                    // still report DroppedOnEmpty so the source side
-                    // spawns a tear-out at the drop point.
+                    // When: from_json parsed the payload, so resolve the real destination via
+                    // the shared TabBarRegistry the App publishes into every frame.
+
+                    // Falls back to DroppedOnEmpty (tear out at drop point) when the cursor
+                    // isn't over any registered SonicTerm tab bar but IS over a SonicTerm
+                    // window's client area. If the cursor isn't over any SonicTerm window at
+                    // all we still report DroppedOnEmpty so the source side spawns a tear-out
+                    // at the drop point.
                     if let Some(handle) = snapshot_drop_outcome_handle() {
                         let outcome = match handle.query_tab_bar_slot(pt.x, pt.y) {
                             Some((target_window, target_slot)) => {
@@ -517,11 +612,14 @@ impl IDropTarget_Impl for DropTarget_Impl {
                         };
                         handle.post_drag_ended(outcome);
                     }
-                    // SAFETY: OLE out-param.
+                    // SAFETY: OLE owns pdweffect and guarantees it is non-null for this
+                    // callback.
                     unsafe { *pdweffect = DROPEFFECT_MOVE };
                     return Ok(());
                 }
                 Err(e) => {
+                    // A malformed blob means another producer published our clipboard format,
+                    // so report Cancelled and let the file-drop path below try the same data.
                     tracing::warn!(?e, "CF_SONIC_TAB JSON malformed; ignoring");
                     if let Some(handle) = snapshot_drop_outcome_handle() {
                         handle.post_drag_ended(sonicterm_app::app::os_drag::DragOutcome::Cancelled);
@@ -531,10 +629,8 @@ impl IDropTarget_Impl for DropTarget_Impl {
         }
         // Fall through to CF_HDROP file drop.
         if let Some(paths) = read_hdrop(data) {
-            // Route through the bridge so the main thread spawns the
-            // paste action under the App borrow. Falling back to the
-            // legacy install_file_drop_sink callback if one was
-            // installed for tests / future use.
+            // When: the drop carries CF_HDROP, so route the paths through the bridge and let
+            // the main thread spawn the paste action under the App borrow.
             let pathbufs: Vec<std::path::PathBuf> =
                 paths.iter().map(std::path::PathBuf::from).collect();
             sonicterm_app::os_drag_bridge::push_files(pathbufs);
@@ -542,9 +638,11 @@ impl IDropTarget_Impl for DropTarget_Impl {
                 let quoted = paths.iter().map(|p| shell_quote(p)).collect::<Vec<_>>().join(" ");
                 sink(quoted);
             } else {
+                // When: no file_drop_sink is installed, so the bridge push above is the only
+                // delivery and this records that the paths took that route.
                 tracing::debug!(?paths, "CF_HDROP routed via os_drag_bridge");
             }
-            // SAFETY: OLE out-param.
+            // SAFETY: OLE owns pdweffect and guarantees it is non-null for this callback.
             unsafe { *pdweffect = DROPEFFECT_COPY };
             return Ok(());
         }
@@ -556,7 +654,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
                 drop_screen_pos: (pt.x, pt.y),
             });
         }
-        // SAFETY: OLE out-param.
+        // SAFETY: OLE owns pdweffect and guarantees it is non-null for this callback.
         unsafe { *pdweffect = DROPEFFECT_NONE };
         Ok(())
     }
@@ -572,7 +670,8 @@ fn has_format(data: &IDataObject, cf: u16, tymed: u32) -> bool {
         lindex: -1,
         tymed,
     };
-    // SAFETY: QueryGetData accepts a borrowed FORMATETC by pointer.
+    // SAFETY: QueryGetData borrows fmt for the duration of the call and does not retain it;
+    // fmt lives on this stack frame.
     unsafe { data.QueryGetData(&fmt as *const _).is_ok() }
 }
 
@@ -587,29 +686,36 @@ fn read_hglobal_utf8(data: &IDataObject, cf: u16) -> Option<String> {
         lindex: -1,
         tymed: TYMED_HGLOBAL.0 as u32,
     };
-    // SAFETY: GetData returns an STGMEDIUM owned by the caller; we
-    // ReleaseStgMedium it before returning.
-    let mut medium: STGMEDIUM = unsafe { data.GetData(&fmt as *const _).ok()? };
-    let result = unsafe {
-        let hglobal = windows::Win32::Foundation::HGLOBAL(medium.u.hGlobal.0);
-        let size = GlobalSize(hglobal);
-        if size == 0 {
-            None
-        } else {
-            let ptr = GlobalLock(hglobal) as *const u8;
-            if ptr.is_null() {
+    let mut medium: STGMEDIUM =
+        // SAFETY: GetData yields an STGMEDIUM this function owns; the matching
+        // ReleaseStgMedium below runs on every return path.
+        unsafe { data.GetData(&fmt as *const _).ok()? };
+    let result =
+        // SAFETY: the medium's HGLOBAL stays valid until ReleaseStgMedium, and the slice is
+        // read only between GlobalLock and GlobalUnlock.
+        unsafe {
+            let hglobal = windows::Win32::Foundation::HGLOBAL(medium.u.hGlobal.0);
+            let size = GlobalSize(hglobal);
+            if size == 0 {
                 None
             } else {
-                let slice = std::slice::from_raw_parts(ptr, size);
-                // Strip trailing nulls (some sources pad).
-                let end = slice.iter().position(|&b| b == 0).unwrap_or(size);
-                let s = String::from_utf8_lossy(&slice[..end]).into_owned();
-                let _ = GlobalUnlock(hglobal);
-                Some(s)
+                // When: size is non-zero, so the blob has bytes worth locking and decoding.
+                let ptr = GlobalLock(hglobal) as *const u8;
+                if ptr.is_null() {
+                    None
+                } else {
+                    // When: ptr is a live lock, so the bytes can be read and copied out before
+                    // GlobalUnlock.
+                    let slice = std::slice::from_raw_parts(ptr, size);
+                    // Strip trailing nulls (some sources pad).
+                    let end = slice.iter().position(|&b| b == 0).unwrap_or(size);
+                    let s = String::from_utf8_lossy(&slice[..end]).into_owned();
+                    let _ = GlobalUnlock(hglobal);
+                    Some(s)
+                }
             }
-        }
-    };
-    // SAFETY: medium came from GetData and must be released.
+        };
+    // SAFETY: medium came from GetData above and must be released exactly once.
     unsafe { ReleaseStgMedium(&mut medium as *mut _) };
     result
 }
@@ -623,31 +729,39 @@ fn read_hdrop(data: &IDataObject) -> Option<Vec<String>> {
         lindex: -1,
         tymed: TYMED_HGLOBAL.0 as u32,
     };
-    // SAFETY: GetData / ReleaseStgMedium pair.
-    let mut medium: STGMEDIUM = unsafe { data.GetData(&fmt as *const _).ok()? };
-    let result = unsafe {
-        let hdrop = HDROP(medium.u.hGlobal.0);
-        let n = DragQueryFileW(hdrop, 0xFFFF_FFFF, None);
-        if n == 0 {
-            None
-        } else {
-            let mut out = Vec::with_capacity(n as usize);
-            // First call with None to get required buffer length, then
-            // again with the buffer.
-            for i in 0..n {
-                let needed = DragQueryFileW(hdrop, i, None) as usize;
-                if needed == 0 {
-                    continue;
+    let mut medium: STGMEDIUM =
+        // SAFETY: GetData yields an STGMEDIUM this function owns; the matching
+        // ReleaseStgMedium below runs on every return path.
+        unsafe { data.GetData(&fmt as *const _).ok()? };
+    let result =
+        // SAFETY: the medium's HDROP stays valid until ReleaseStgMedium, and every
+        // DragQueryFileW call writes only into a buffer sized by its own length query.
+        unsafe {
+            let hdrop = HDROP(medium.u.hGlobal.0);
+            let n = DragQueryFileW(hdrop, 0xFFFF_FFFF, None);
+            if n == 0 {
+                None
+            } else {
+                // When: n is non-zero, so the HDROP names files worth querying one by one.
+                let mut out = Vec::with_capacity(n as usize);
+                // First call with None to get required buffer length, then
+                // again with the buffer.
+                for i in 0..n {
+                    let needed = DragQueryFileW(hdrop, i, None) as usize;
+                    if needed == 0 {
+                        // When: needed is zero, so this entry has no path text; skip it rather
+                        // than push an empty string into the paste.
+                        continue;
+                    }
+                    let mut buf = vec![0u16; needed + 1];
+                    let got = DragQueryFileW(hdrop, i, Some(&mut buf)) as usize;
+                    buf.truncate(got);
+                    out.push(String::from_utf16_lossy(&buf));
                 }
-                let mut buf = vec![0u16; needed + 1];
-                let got = DragQueryFileW(hdrop, i, Some(&mut buf)) as usize;
-                buf.truncate(got);
-                out.push(String::from_utf16_lossy(&buf));
+                Some(out)
             }
-            Some(out)
-        }
-    };
-    // SAFETY: medium came from GetData and must be released.
+        };
+    // SAFETY: medium came from GetData above and must be released exactly once.
     unsafe { ReleaseStgMedium(&mut medium as *mut _) };
     result
 }
@@ -671,15 +785,27 @@ pub use sonicterm_types::shell_quote_posix as shell_quote;
 /// The HWND must be a valid, currently-alive window owned by the
 /// calling thread, and OLE must have been initialized via
 /// [`init_ole`] on that same thread.
-pub unsafe fn register_for_window(hwnd: HWND) {
+// SAFETY: the caller's contract above guarantees a live, thread-owned HWND and an OLE-initialized
+// thread, which is exactly what RegisterDragDrop requires.
+pub unsafe fn register_for_window(hwnd: HWND) -> bool {
+    if !ole_initialized_on_current_thread() {
+        // When: `ole_initialized_on_current_thread()` is false, registration cannot satisfy OLE's apartment contract.
+        tracing::error!("RegisterDragDrop skipped because OLE is not initialized on this thread");
+        return false;
+    }
     let target: IDropTarget = DropTarget.into();
-    // SAFETY: contract above.
-    let hr = unsafe { RegisterDragDrop(hwnd, &target) };
+    let hr =
+        // SAFETY: hwnd is caller-guaranteed live and OLE-initialized on this thread; OLE
+        // takes its own reference to `target`, so the local may drop afterwards.
+        unsafe { RegisterDragDrop(hwnd, &target) };
     if hr.is_err() {
         tracing::error!(?hr, "RegisterDragDrop failed");
+        false
     } else {
-        // OLE holds its own ref; we can let `target` drop here.
+        // When: hr reports success, so OLE now holds its own reference and this window will
+        // receive IDropTarget callbacks.
         tracing::debug!("RegisterDragDrop installed");
+        true
     }
 }
 
@@ -689,10 +815,14 @@ pub unsafe fn register_for_window(hwnd: HWND) {
 /// # Safety
 ///
 /// Caller must ensure the HWND is still valid.
+// SAFETY: the caller's contract above guarantees the HWND is still valid, which is all
+// RevokeDragDrop requires; an unregistered window simply returns an error.
 #[allow(dead_code)]
 pub unsafe fn unregister_for_window(hwnd: HWND) {
-    // SAFETY: contract above.
-    let hr = unsafe { RevokeDragDrop(hwnd) };
+    let hr =
+        // SAFETY: hwnd is caller-guaranteed still valid, and RevokeDragDrop tolerates a
+        // window that was never registered by returning an error.
+        unsafe { RevokeDragDrop(hwnd) };
     if hr.is_err() {
         tracing::debug!(?hr, "RevokeDragDrop returned (ignorable if never registered)");
     }
@@ -707,6 +837,7 @@ fn _suppress() {
     let _ = PCWSTR::null();
 }
 
-// NOTE (CLAUDE.md §5): Tests stay inline. `sonicterm-windows` is a `[[bin]]`
-// crate (no `lib.rs`), so integration tests under `tests/` cannot
-// reference the bin's items by path.
+// `sonicterm-windows` is a `[[bin]]` crate with no `lib.rs`, so integration
+// tests under `tests/` cannot reference this module's items by path. Coverage
+// for these entry points therefore lives in-crate, in the sibling
+// `<module>_tests.rs` files this crate declares from their own modules.

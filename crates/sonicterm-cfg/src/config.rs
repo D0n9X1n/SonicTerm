@@ -433,6 +433,7 @@ impl FontConfig {
         if self.weight_scale.is_finite() && (0.5..=5.0).contains(&self.weight_scale) {
             self.weight_scale
         } else {
+            // When: `weight_scale` is nonfinite or outside the supported range, preserve native coverage with identity.
             1.0
         }
     }
@@ -496,6 +497,7 @@ impl Config {
             }
         }
         if path.exists() {
+            // When: `path` already exists, preserve the user's config and only ensure companion directories/examples.
             return Ok(());
         }
         std::fs::write(path, default_config_template()).with_context(|| format!("write {path:?}"))
@@ -515,6 +517,7 @@ impl Config {
     /// visible rather than silently masked.
     pub fn load_strict(path: &Path) -> Result<Self> {
         if !path.exists() {
+            // When: `path` is absent, use built-in defaults rather than treating first launch as a load error.
             return Ok(Self::default());
         }
         let text = std::fs::read_to_string(path).with_context(|| format!("read {path:?}"))?;
@@ -551,6 +554,7 @@ impl Config {
     /// for w in cfg_warnings { tracing::warn!(target: "sonicterm-cfg", "{w}"); }
     /// ```
     pub fn load_or_default_collecting(path: &Path, warnings: &mut Vec<String>) -> Self {
+        // When: `load_strict(path)` errors, preserve startup with defaults and retain its diagnostic for later logging.
         match Self::load_strict(path) {
             Ok(cfg) => cfg,
             Err(e) => {
@@ -568,9 +572,9 @@ impl Config {
         Ok(toml::to_string_pretty(self)?)
     }
 
-    /// Atomically write this config to `path`, creating parent dirs if
-    /// needed. Writes to `<path>.tmp` and renames over the destination so
-    /// a crash mid-write cannot corrupt the existing file.
+    /// Replace this config at `path`, creating parent directories if needed.
+    /// Writes a same-directory temporary file then renames it, so readers see
+    /// either complete process-written contents; this does not claim power-loss durability.
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -625,6 +629,7 @@ fn seed_user_examples(config_dir: &Path) -> Result<()> {
 
 fn write_if_missing(path: &Path, content: &str) -> Result<()> {
     if path.exists() {
+        // When: `path` already exists, preserve the user's example override instead of reseeding it.
         return Ok(());
     }
     if let Some(parent) = path.parent() {

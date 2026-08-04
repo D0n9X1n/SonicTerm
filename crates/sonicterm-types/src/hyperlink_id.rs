@@ -15,6 +15,7 @@ pub struct HyperlinkId(pub u64);
 
 impl HyperlinkId {
     /// Allocate a new globally-unique `HyperlinkId`.
+    // Ordering: `NEXT_HYPERLINK_ID` uses `Relaxed`; atomic fetch-add guarantees unique ids, which publish no other data.
     pub fn next() -> Self {
         Self(NEXT_HYPERLINK_ID.fetch_add(1, Ordering::Relaxed))
     }

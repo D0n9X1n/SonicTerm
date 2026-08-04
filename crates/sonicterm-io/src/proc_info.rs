@@ -3,11 +3,9 @@
 //! Used by the tab-title renderer to pick a Nerd Font icon based on what's
 //! actually running in the pane right now (zsh vs nvim vs ssh vs cargo).
 //!
-//! macOS uses `libproc`'s `pidpath` + a simple `proc_listpids`-based walk
-//! to find the deepest descendant of the shell pid: when you type `nvim
-//! foo`, the shell forks `nvim` and waits — `nvim` becomes the foreground
-//! process and we want its name, not the shell's. Linux/Windows are stubs
-//! for v1; we'll fill them in when those platforms come online.
+//! macOS uses `libproc`; Windows snapshots the native process table. Both
+//! walk to the deepest shell descendant so `nvim foo` reports `nvim`, not the
+//! waiting shell. Other platforms return no foreground-process name.
 
 /// Best-effort foreground process name for the pty whose shell has the
 /// given `pid`. Returns the *basename* (no path, no leading `-`), or `None`
@@ -23,11 +21,14 @@ pub fn foreground_process(pid: u32) -> Option<String> {
     macos::foreground_process(pid)
 }
 
+/// Best-effort basename of the deepest Windows shell descendant, normalized
+/// for title matching. Falls back to the shell; returns `None` if probing fails.
 #[cfg(windows)]
 pub fn foreground_process(pid: u32) -> Option<String> {
     crate::foreground_proc::current_foreground_pid(pid).map(|(_pid, name)| name)
 }
 
+/// Reports no foreground process on platforms without an implementation.
 #[cfg(not(any(target_os = "macos", windows)))]
 pub fn foreground_process(_pid: u32) -> Option<String> {
     None
@@ -64,6 +65,7 @@ mod macos {
         let mut entries: Vec<(u32, u32)> = Vec::with_capacity(all.len());
         for p in all {
             if p == 0 {
+                // When: `p` is the macOS kernel task, never a descendant of a user shell.
                 continue;
             }
             if let Ok(info) = pidinfo::<BSDInfo>(p as i32, 0) {
