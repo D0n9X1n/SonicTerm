@@ -42,8 +42,8 @@ impl WindowsSoftwarePresenterPreference {
     /// A real caller cannot exist here yet for a structural reason:
     /// `detected_software_adapter` comes from the renderer, and the renderer is
     /// built inside `WindowsShell` — after this crate's startup code runs. The
-    /// caller will arrive with [`SoftwareSurface`], which is also not yet
-    /// constructed outside tests.
+    /// live `WindowsSoftwareFrame` is likewise owned inside `sonicterm-gpu`
+    /// rather than constructed by this crate.
     ///
     /// Kept because the decision it encodes is verified against the app's copy
     /// (`should_degrade_for_software_render`) across the whole `(mode,

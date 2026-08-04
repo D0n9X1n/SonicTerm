@@ -80,7 +80,7 @@ fn cf_sonic_tab() -> u16 {
 // ---- Pending-payload slot ----------------------------------------------------
 
 /// Global single-slot mailbox written by the OLE worker thread (via
-/// [`DropTarget::Drop`]) and drained by the winit main thread via
+/// the `IDropTarget::Drop` callback) and drained by the winit main thread via
 /// [`take_pending_payload`]. Mac uses NSPasteboard instead, so this
 /// slot is Windows-only.
 static PENDING_PAYLOAD: PendingPayloadSlot = PendingPayloadSlot::new();

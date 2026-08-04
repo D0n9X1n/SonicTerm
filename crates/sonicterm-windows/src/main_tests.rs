@@ -77,6 +77,15 @@ fn raw_hwnd_and_ole_entry_points_are_explicitly_unsafe() {
 }
 
 #[test]
+fn windows_only_rustdoc_avoids_links_to_generated_or_deleted_items() {
+    const OLE: &str = include_str!("os_drag_win.rs");
+    const PRESENTER: &str = include_str!("software_presenter.rs");
+
+    assert!(!OLE.contains("[`DropTarget::Drop`]"));
+    assert!(!PRESENTER.contains("[`SoftwareSurface`]"));
+}
+
+#[test]
 fn ole_drag_paths_reject_missing_initialization_and_empty_payloads() {
     const OLE: &str = include_str!("os_drag_win.rs");
     const TAB_DRAG: &str = include_str!("tab_drag_os.rs");
