@@ -263,7 +263,7 @@ impl LoadedFont {
                 match self.insert_fallback_handles(pending.split_off(0)) {
                     Ok(true) => {
                         // When: `insert_fallback_handles(...)` returns `Ok(true)`, invalidate shapes.
-                        return Err(ClearShapeCache {})?;
+                        return Err(ClearShapeCache {}.into());
                     }
                     Ok(false) => {
                         // When: `insert_fallback_handles(...)` returns `Ok(false)`, keep the shaper.

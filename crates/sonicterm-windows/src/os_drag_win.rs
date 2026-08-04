@@ -40,8 +40,8 @@ use sonicterm_app::os_drag::{DragAck, OsDragSink, PendingPayloadSlot, TabPayload
 use windows::core::HRESULT;
 use windows::core::{implement, w, BOOL, PCWSTR};
 use windows::Win32::Foundation::{
-    CO_E_NOTINITIALIZED, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DV_E_FORMATETC, DV_E_TYMED,
-    E_INVALIDARG, E_NOTIMPL, HWND, OLE_E_ADVISENOTSUPPORTED, POINTL, S_OK, WPARAM,
+    GlobalFree, CO_E_NOTINITIALIZED, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DV_E_FORMATETC,
+    DV_E_TYMED, E_INVALIDARG, E_NOTIMPL, HWND, OLE_E_ADVISENOTSUPPORTED, POINTL, S_OK, WPARAM,
 };
 use windows::Win32::System::Com::{
     IDataObject, IDataObject_Impl, IEnumFORMATETC, DATADIR_GET, DVASPECT_CONTENT, FORMATETC,
@@ -49,7 +49,7 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
 use windows::Win32::System::Memory::{
-    GlobalAlloc, GlobalFree, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
+    GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
 };
 use windows::Win32::System::Ole::{
     DoDragDrop, IDropSource, IDropSource_Impl, IDropTarget, IDropTarget_Impl, OleInitialize,
@@ -80,7 +80,7 @@ fn cf_sonic_tab() -> u16 {
 // ---- Pending-payload slot ----------------------------------------------------
 
 /// Global single-slot mailbox written by the OLE worker thread (via
-/// [`DropTarget::Drop`]) and drained by the winit main thread via
+/// the `IDropTarget::Drop` callback) and drained by the winit main thread via
 /// [`take_pending_payload`]. Mac uses NSPasteboard instead, so this
 /// slot is Windows-only.
 static PENDING_PAYLOAD: PendingPayloadSlot = PendingPayloadSlot::new();
@@ -241,7 +241,7 @@ impl IDataObject_Impl for SonicTermDataObject_Impl {
             let dst = GlobalLock(hglobal) as *mut u8;
             if dst.is_null() {
                 // When: `dst.is_null()` is true, release the allocation and refuse an empty medium.
-                let _ = GlobalFree(hglobal);
+                let _ = GlobalFree(Some(hglobal));
                 return Err(E_NOTIMPL.into());
             }
             std::ptr::copy_nonoverlapping(self.json.as_ptr(), dst, len);
