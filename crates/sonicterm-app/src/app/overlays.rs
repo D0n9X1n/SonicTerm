@@ -166,8 +166,7 @@ impl App {
                 size.width as f32,
                 size.height as f32,
                 renderer.scale_factor(),
-                sonicterm_ui::tab_spans::tab_title_font_size(renderer.font_size())
-                    * renderer.scale_factor(),
+                renderer.font_size() * renderer.scale_factor(),
                 renderer.cell_w,
             )
         } else {
@@ -184,8 +183,7 @@ impl App {
                 size.width as f32,
                 size.height as f32,
                 renderer.scale_factor(),
-                sonicterm_ui::tab_spans::tab_title_font_size(renderer.font_size())
-                    * renderer.scale_factor(),
+                renderer.font_size() * renderer.scale_factor(),
                 renderer.cell_w,
             )
         };

@@ -440,8 +440,7 @@ impl App {
                         w.inner_size().height as f32,
                         self.config.appearance.panel_padding,
                         r.scale_factor(),
-                        sonicterm_ui::tab_spans::tab_title_font_size(r.font_size())
-                            * r.scale_factor(),
+                        r.font_size() * r.scale_factor(),
                         r.cell_w,
                     )
                 });
@@ -716,8 +715,7 @@ impl App {
                             // scaled by the renderer's scale factor or the IME
                             // caret rect drifts on HiDPI displays.
                             let scale = r.scale_factor();
-                            let font_size =
-                                sonicterm_ui::tab_spans::tab_title_font_size(r.font_size()) * scale;
+                            let font_size = r.font_size() * scale;
                             let icon_w = r.measure_overlay_text_width(SEARCH_BADGE_ICON, font_size);
                             let content_w = icon_w
                                 + SEARCH_BAR_ICON_GAP * scale

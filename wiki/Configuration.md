@@ -9,9 +9,9 @@ SonicTerm reads one cross-platform config file:
 ```
 
 The file is created on first launch. Named user themes and keymaps live beside
-it under `themes/` and `keymaps/`. Unknown top-level TOML keys are preserved
-when SonicTerm loads and saves the config, helping newer keys survive an older
-round trip.
+it under `themes/` and `keymaps/`. Loading accepts unknown top-level TOML keys.
+The targeted **Save Current Settings** operation described below preserves
+unknown top-level and nested keys instead of rewriting the complete config.
 
 ## Complete starter example
 
@@ -143,14 +143,20 @@ currently no `[font].font_rasterizer` key in `sonicterm.toml`.
 `weight_scale` is also adjustable from the command palette without editing the
 file: **Increase Font Weight (Bolder)** and **Decrease Font Weight (Thinner)**
 step it by `0.25`, and **Reset Font Weight to Config** returns to the configured
-value. Searching `bolder`, `thinner`, `heavier`, or `lighter` finds them. Those
-adjustments last for the session; the file stays the source of truth on the next
-reload. None of them have a default key binding, but all three can be bound —
-see [Keybindings](Keybindings).
+value. Searching `bolder`, `thinner`, `heavier`, or `lighter` finds them. Weight
+adjustments are session-only unless you run **Save Current Settings**; otherwise
+a reload or restart returns to the value in the file. None of the three weight
+actions has a default key binding, but all can be bound — see
+[Keybindings](Keybindings).
 
-Changing font fields live updates every renderer and invalidates text caches.
-Family, size, and line-height changes also resize each visible pane's grid and
-PTY using its own pane rectangle; weight-only changes preserve metrics.
+Live `size` and `weight_scale` changes rebuild the shared configured font stack
+used by regular terminal text, tab titles, notifications, and the command
+palette's query, rows, shortcuts, footer, and other regular chrome. The weight
+change applies only to regular glyphs from the configured family: fallback
+glyphs, color emoji, and SGR or otherwise intentional bold retain their existing
+behavior. Font changes also invalidate text caches. Family, size, and line-height
+changes resize each visible pane's grid and PTY using its own pane rectangle;
+weight-only changes preserve metrics.
 
 ### Window and appearance
 
@@ -229,15 +235,33 @@ SonicTerm preserves and reloads them, but they do not yet change presentation.
 `long_command` enables completion notifications for commands exceeding
 `threshold_secs`.
 
-## Editing and reloading
+## Saving, editing, and reloading
 
-Use the command palette entries **Edit sonicterm.toml**, **Edit keymap.toml**,
-and **Reload Config**.
+Use the command palette entries **Save Current Settings**, **Edit
+sonicterm.toml**, **Edit keymap.toml**, and **Reload Config**.
+
+**Save Current Settings** patches only two values in
+`~/.sonicterm/sonicterm.toml`: the current zoomed `[font].size` and the active
+safe `[font].weight_scale`. It intentionally leaves theme, locale, every
+unrelated known setting, unknown top-level and nested keys, comments, and
+supported ordering and formatting intact. It also leaves window, pane, tab, and
+other runtime modes untouched. The command does not reload or reapply the file,
+because both saved values are already live.
+
+If the config file is missing, SonicTerm creates its commented starter file
+before patching the two font values. The patch is written to a temporary file in
+the config directory and atomically replaces the config, so readers see the old
+or new complete file; this does not promise durability through power loss. If
+the current file is malformed, SonicTerm refuses to patch it. On success, the font-size and weight reset
+baselines advance to the saved values and an Info confirmation appears. On any
+failure, the old file, live values, and reset baselines remain intact, and an
+Error notification appears.
 
 SonicTerm reads configuration at startup and then only when you run **Reload
-Config**. There is no background file watcher, so saving a file does not apply
-it — this keeps a watcher thread and its filesystem handles out of the running
-process. Edit freely, then reload when you want the changes to take effect.
+Config**. There is no background file watcher, so saving an external edit does
+not apply it — this keeps a watcher thread and its filesystem handles out of the
+running process. Edit freely, then reload when you want the changes to take
+effect.
 
 A reload re-reads `sonicterm.toml` together with the theme and keymap files it
 names, even when the `theme` and `keymap` selectors are unchanged. Editing the
@@ -278,7 +302,8 @@ SonicTerm 使用一个跨平台配置文件：
 ```
 
 首次启动会创建该文件。同级的 `themes/` 与 `keymaps/` 保存命名用户主题和键位映射。
-SonicTerm 在读写配置时会保留未知顶层 TOML key，避免较新 key 被旧版本往返保存时丢失。
+读取时允许未知顶层 TOML key。下文的定向 **Save Current Settings** 操作会保留未知顶层与
+嵌套 key，而不是重写完整配置。
 
 ## 完整初始示例
 
@@ -398,11 +423,15 @@ macOS/其它 Unix 使用 FreeType。当前 `sonicterm.toml` 中不存在
 `weight_scale` 也可以直接在命令面板中调整，无需编辑文件：**Increase Font Weight
 (Bolder)** 和 **Decrease Font Weight (Thinner)** 每次调整 `0.25`，**Reset Font
 Weight to Config** 回到配置值。搜索 `bolder`、`thinner`、`heavier`、`lighter` 均可
-找到。这些调整只在当前会话生效；下次重载时仍以配置文件为准。三者默认都没有绑定快捷键，
-但都可以绑定——参见 [Keybindings](Keybindings)。
+找到。除非运行 **Save Current Settings**，否则字重调整只在当前会话生效；重载或重启会
+回到文件中的值。三种字重 action 默认都没有快捷键，但都可以绑定——参见
+[Keybindings](Keybindings)。
 
-运行时改变字体会更新全部 renderer 并使文本 cache 失效。family、size、line-height
-变更还会按各自 pane rect resize 每个可见窗格的 grid 与 PTY；仅修改 weight 不改变 metrics。
+运行时改变 `size` 或 `weight_scale` 会重建共享的已配置字体栈；普通终端文本、Tab 标题、
+通知，以及命令面板的查询文本、结果行、快捷键提示、footer 和其它普通 chrome 都使用该字体栈。
+字重变化只作用于已配置字体族中的普通字形；回退字形、彩色 emoji、SGR 或其它有意加粗的文本
+保持原有行为。字体变更还会使文本 cache 失效。family、size、line-height 变更会按各自
+pane rect resize 每个可见窗格的 grid 与 PTY；仅修改 weight 不改变 metrics。
 
 ### 窗口与外观
 
@@ -465,13 +494,25 @@ macOS/其它 Unix 使用 `$SHELL`。`term_program` 写入子进程的 `TERM_PROG
 目前是仅配置层保留字段：SonicTerm 会保存并在重载时应用它们，但尚不会改变呈现。
 `long_command` 为运行超过 `threshold_secs` 的命令启用完成通知。
 
-## 编辑与重载
+## 保存、编辑与重载
 
-使用命令面板中的 **Edit sonicterm.toml**、**Edit keymap.toml**、**Reload Config**。
+使用命令面板中的 **Save Current Settings**、**Edit sonicterm.toml**、**Edit
+keymap.toml** 和 **Reload Config**。
+
+**Save Current Settings** 只会修补 `~/.sonicterm/sonicterm.toml` 中的两个值：当前缩放后的
+`[font].size` 与当前有效且安全的 `[font].weight_scale`。它会有意保留主题、locale、所有
+无关的已知设置、未知顶层与嵌套 key、注释，以及受支持的顺序和格式；窗口、窗格、Tab 与其它
+运行时模式也不会变化。该命令不重载或重新应用文件，因为保存的两个值已经实时生效。
+
+若配置文件不存在，SonicTerm 会先创建带注释的初始配置，再修补这两个字体值。修补内容先写入
+配置目录中的临时文件，再以原子方式替换配置，因此读取者会看到完整旧文件或完整新文件；这不
+承诺断电后的持久性。若当前文件格式错误，SonicTerm 会拒绝修补。成功时，字号与字重的重置基线
+会推进到所保存的值，并显示 Info 确认；任何失败都会保持旧文件、实时值
+与重置基线不变，并显示 Error 通知。
 
 SonicTerm 只在启动时读取配置，之后仅在运行 **Reload Config** 时重新读取。没有后台
-文件 watcher，因此保存文件不会自动生效——这样运行进程中就不存在 watcher 线程及其文件
-系统句柄。可以自由编辑，需要生效时再重载。
+文件 watcher，因此保存外部编辑不会自动生效——这样运行进程中就不存在 watcher 线程及其
+文件系统句柄。可以自由编辑，需要生效时再重载。
 
 重载会连同 `sonicterm.toml` 一起重新读取它所指定的主题与 keymap 文件，即使 `theme`
 和 `keymap` 选择器没有变化。因此修改自定义主题或自定义命名 keymap 的文件内容也会在

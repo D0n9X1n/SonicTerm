@@ -807,9 +807,7 @@ impl App {
                                 let mut palette = self.command_palette.clone();
                                 let size = win.inner_size();
                                 let scale = r.scale_factor();
-                                let font_size =
-                                    sonicterm_ui::tab_spans::tab_title_font_size(r.font_size())
-                                        * scale;
+                                let font_size = r.font_size() * scale;
                                 if let Some(layout) = PaletteLayout::compute(
                                     &mut palette,
                                     size.width as f32,
@@ -843,9 +841,7 @@ impl App {
                                 let search_prefix = search_query_caret_prefix(search, preedit);
                                 let window_size = win.inner_size();
                                 let scale = r.scale_factor();
-                                let font_size =
-                                    sonicterm_ui::tab_spans::tab_title_font_size(r.font_size())
-                                        * scale;
+                                let font_size = r.font_size() * scale;
                                 let icon_w =
                                     r.measure_overlay_text_width(SEARCH_BADGE_ICON, font_size);
                                 let content_w = icon_w

@@ -19,7 +19,7 @@ use sonicterm_render_model::boundary::cfg::theme::{Color as ThemeColor, Theme};
 use sonicterm_render_model::boundary::grid::grid::{
     bounded_grid_size, Cell, CellFlags, Color, Grid, UnderlineStyle,
 };
-use sonicterm_types::{ResourceAmount, ResourceClass};
+use sonicterm_types::{GlyphRasterVariant, ResourceAmount, ResourceClass};
 use wgpu::{
     CommandEncoderDescriptor, CompositeAlphaMode, DeviceDescriptor, Instance, InstanceDescriptor,
     LoadOp, Operations, PresentMode, RenderPassColorAttachment, RenderPassDescriptor,
@@ -73,6 +73,11 @@ fn palette_cursor_char<'a>(
     })
 }
 
+fn palette_footer_font_size(body_font_size: f32) -> f32 {
+    (body_font_size - 1.0).max(1.0)
+}
+
+const PALETTE_FOOTER_INSET_X: f32 = 12.0;
 const READ_ONLY_BADGE_ICON: &str = "";
 const READ_ONLY_BADGE_LABEL: &str = "READONLY";
 const SEARCH_BADGE_ICON: &str = "";
@@ -240,6 +245,34 @@ fn effective_font_weight_scale(scale: f32) -> f32 {
         // When: `scale` is NaN, infinite, or outside 0.5..=5.0. 1.0 is the
         // weight the font was drawn at, so a bad config still renders.
         1.0
+    }
+}
+
+struct RendererFontStacks {
+    body: Option<sonicterm_engine::FontStack>,
+    tab_title: Option<sonicterm_engine::FontStack>,
+    palette_footer: Option<sonicterm_engine::FontStack>,
+}
+
+fn renderer_font_stacks(
+    family: &str,
+    body_size: f32,
+    dpi: usize,
+    weight_scale: f32,
+) -> RendererFontStacks {
+    let build = |size: f32| {
+        sonicterm_engine::FontStack::try_new_full_with_weight(
+            family,
+            f64::from(size),
+            dpi,
+            weight_scale,
+        )
+        .ok()
+    };
+    RendererFontStacks {
+        body: build(body_size),
+        tab_title: build(tab_title_font_size(body_size)),
+        palette_footer: build(palette_footer_font_size(body_size)),
     }
 }
 
@@ -1200,6 +1233,10 @@ pub struct GpuRenderer {
     /// bundled fonts on disk) can still construct a `GpuRenderer`
     /// even though the grid path is degraded.
     pub(crate) font_stack: Option<sonicterm_engine::FontStack>,
+    /// Native-size stack for tab titles (`body + 1`).
+    tab_title_font_stack: Option<sonicterm_engine::FontStack>,
+    /// Native-size stack for the command-palette footer (`body - 1`).
+    palette_footer_font_stack: Option<sonicterm_engine::FontStack>,
     /// Per-row glyph cache. Stores the shaped
     /// `GlyphInstance`s, underline coalescing, and missing-tofu list
     /// for each visible row, keyed by absolute row index + a content
@@ -1408,8 +1445,8 @@ pub struct PaneLayoutSnapshot {
 /// Shape and emit one tab's title spans as glyph instances.
 ///
 /// Each `(text, colour, attrs)` span is laid out through
-/// [`chrome_text::layout`] into the shared glyph atlas, so tab titles and
-/// terminal text draw from the same tiles in one pass. The pen advances by
+/// [`chrome_text::layout`] into the shared glyph atlas. Title and terminal
+/// tiles remain distinct cache entries but draw through the same pass. The pen advances by
 /// `avg_glyph_w` per character rather than by the shaper's advances, matching
 /// the column arithmetic the caller already used to truncate and centre the
 /// title.
@@ -1434,8 +1471,7 @@ pub fn emit_tab_title_glyphs(
 ) {
     // Chrome_text-driven port of the tab-title emit loop. Each
     // span is shaped through sonicterm-font and rasterized through the
-    // same FontStack raster path the grid uses, so chrome and grid
-    // share atlas tiles freely. The legacy SwashRasterizer +
+    // supplied native-size FontStack into the shared atlas. The legacy SwashRasterizer +
     // cosmic-text `shape_run` path is gone (T10 deletes the
     // helpers entirely; T14 has already migrated this site off them).
     let mut pen_x: f32 = 0.0;
@@ -1445,7 +1481,7 @@ pub fn emit_tab_title_glyphs(
             // absent segments. Layout would yield no glyphs and no advance.
             continue;
         }
-        let layout = chrome_text::layout(
+        let layout = chrome_text::layout_with_raster_variant(
             font_stack,
             wt_raster,
             glyph_atlas,
@@ -1457,6 +1493,7 @@ pub fn emit_tab_title_glyphs(
             (pen_x, baseline_y),
             (sw, sh),
             None,
+            GlyphRasterVariant::TabTitle,
         );
         let count_pre = glyph_instances.len();
         glyph_instances.extend(layout.glyphs.iter().copied());
@@ -1600,6 +1637,7 @@ pub fn emit_overlay_text_glyphs(
         }
     }
 }
+
 /// Renderers constructed but not yet dropped, across the whole process.
 ///
 /// A renderer's own `retained_amounts()` cannot answer "did the last one go
@@ -1927,15 +1965,9 @@ impl GpuRenderer {
         // metrics match the renderer's raster-px coordinate system.
         // Font size in points equals sonicterm's logical font_size.
         let fs_dpi = (72.0 * sf).round() as usize;
-        let font_stack = sonicterm_engine::FontStack::try_new_full_with_weight(
-            font_family,
-            font_size as f64,
-            fs_dpi,
-            font_weight_scale,
-        )
-        .ok();
+        let font_stacks = renderer_font_stacks(font_family, font_size, fs_dpi, font_weight_scale);
         let (cell_w, natural_cell_h) =
-            match font_stack.as_ref().and_then(|s| s.cell_metrics_raster_px().ok()) {
+            match font_stacks.body.as_ref().and_then(|s| s.cell_metrics_raster_px().ok()) {
                 Some(m) => (m.cell_w as f32, m.cell_h as f32),
                 None => (font_size * 0.6 * sf, font_size * 1.2 * sf),
             };
@@ -2061,7 +2093,9 @@ impl GpuRenderer {
             titlebar_inset: 0.0,
             last_missing_chars: Vec::new(),
             // `shape_cache` field deleted with the cosmic-text path.
-            font_stack,
+            font_stack: font_stacks.body,
+            tab_title_font_stack: font_stacks.tab_title,
+            palette_footer_font_stack: font_stacks.palette_footer,
             row_glyph_cache: sonicterm_text::row_glyph_cache::RowGlyphCache::new(),
             line_quad_cache: crate::row_quad_cache::LineQuadCache::new(),
             last_emit_origins: Vec::new(),
@@ -3212,15 +3246,9 @@ impl GpuRenderer {
     pub fn set_font(&mut self, family: &str, size: f32, line_height_mult: f32, weight_scale: f32) {
         let weight_scale = effective_font_weight_scale(weight_scale);
         let dpi = (72.0 * self.scale_factor).round().max(1.0) as usize;
-        let new_stack = sonicterm_engine::FontStack::try_new_full_with_weight(
-            family,
-            f64::from(size),
-            dpi,
-            weight_scale,
-        )
-        .ok();
+        let new_stacks = renderer_font_stacks(family, size, dpi, weight_scale);
         let (new_cell_w, natural_cell_h) =
-            match new_stack.as_ref().and_then(|s| s.cell_metrics_raster_px().ok()) {
+            match new_stacks.body.as_ref().and_then(|s| s.cell_metrics_raster_px().ok()) {
                 Some(m) => (m.cell_w as f32, m.cell_h as f32),
                 None => (self.raster_px(size * 0.6), self.raster_px(size * 1.2)),
             };
@@ -3241,7 +3269,9 @@ impl GpuRenderer {
         self.line_height = new_line_h;
         self.font_weight_scale = weight_scale;
         self.line_height_mult = line_height_mult.max(0.0).max(0.01);
-        self.font_stack = new_stack;
+        self.font_stack = new_stacks.body;
+        self.tab_title_font_stack = new_stacks.tab_title;
+        self.palette_footer_font_stack = new_stacks.palette_footer;
         self.cell_w = new_cell_w;
         self.cell_h = new_line_h;
         self.reset_glyph_atlas_in_place("font_change");
@@ -3324,27 +3354,23 @@ impl GpuRenderer {
         // from sonicterm-font when the rasterizer target moves. Falls
         // back to the prior measurement if the font stack rejects the
         // load (e.g. test fixtures without bundled fonts).
-        if let Some(stack) = self.font_stack.as_ref() {
-            // DPI fix: the atlas + caches above are cleared, but glyphs would
-            // otherwise re-rasterize through a font stack still holding the
-            // DPI from the previous display. Push the new rasterizer DPI in
-            // first (same `72 * scale_factor` contract as startup, core.rs
-            // FontStack::try_new_full) so re-rasterized glyphs and the cell
-            // metrics below both reflect the new scale factor. Preserve the
-            // user's logical font scale by reusing the current value.
-            let fs_dpi = (72.0 * sf).round() as usize;
+        // DPI fix: the atlas + caches above are cleared, but glyphs would
+        // otherwise re-rasterize through stacks still holding the prior DPI.
+        let fs_dpi = (72.0 * sf).round() as usize;
+        for stack in [
+            self.font_stack.as_ref(),
+            self.tab_title_font_stack.as_ref(),
+            self.palette_footer_font_stack.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
             stack.change_scaling(stack.get_font_scale(), fs_dpi);
+        }
+        if let Some(stack) = self.font_stack.as_ref() {
             if let Ok(m) = stack.cell_metrics_raster_px() {
                 self.cell_w = m.cell_w as f32;
                 let natural = m.cell_h as f32;
-                // E1: recompute cell_h from the freshly-rasterized
-                // natural height using the STORED line-height multiplier.
-                // The prior code derived the multiplier as
-                // `self.line_height / natural`, then `natural * multiplier`
-                // — which algebraically cancels back to the old
-                // `self.line_height`, pinning cell_h to the previous DPI
-                // while cell_w correctly updated. Using the stored mult lets
-                // height track the scale factor like width does.
                 self.cell_h = natural * self.line_height_mult.max(0.01);
                 self.line_height = self.cell_h;
             }
@@ -5355,16 +5381,9 @@ impl GpuRenderer {
             // bar lives at 2x.
             let title_top = bar_y + ((bar_h - tab_raster_px * 1.2) / 2.0).max(0.0);
             let tab_baseline_y = title_top + tab_raster_px * 0.95;
-            // Chrome text scales atlas-native tiles by
-            // `requested_raster_px / native_em`. The atlas tiles come from
-            // FontStack's point-size em (`font_size * scale_factor`), not
-            // from the terminal cell height (which also includes line-height
-            // / row-box padding). Using `cell_h` here made `font + 2` tab
-            // titles visually smaller than body text.
-            let native_em = self.raster_px(self.font_size);
-            if let Some(stack) = self.font_stack.as_ref() {
-                // When: `self.font_stack` is Some — chrome text needs a shaper.
-                // Without one the bar quads still draw but carry no titles.
+            let native_em = tab_raster_px;
+            if let Some(stack) = self.tab_title_font_stack.as_ref() {
+                // When: `self.tab_title_font_stack` is Some — title text has a native shaper; otherwise only bar quads draw.
                 let mut tab_rasterizer = stack.clone();
                 for t in &layout.tabs {
                     let Some(tab) = tabs.tabs().get(t.idx) else {
@@ -5397,7 +5416,7 @@ impl GpuRenderer {
                     if source_tab_idx == Some(t.idx) {
                         color = scale_chrome_text_alpha(color, source_alpha);
                     }
-                    let measure = chrome_text::layout(
+                    let measure = chrome_text::layout_with_raster_variant(
                         stack,
                         &mut tab_rasterizer,
                         &mut self.glyph_atlas,
@@ -5409,10 +5428,11 @@ impl GpuRenderer {
                         (0.0, tab_baseline_y),
                         (sw, sh),
                         None,
+                        GlyphRasterVariant::TabTitle,
                     );
                     let origin_x =
                         t.title_rect.x + ((t.title_rect.w - measure.width_px) * 0.5).max(0.0);
-                    let final_layout = chrome_text::layout(
+                    let final_layout = chrome_text::layout_with_raster_variant(
                         stack,
                         &mut tab_rasterizer,
                         &mut self.glyph_atlas,
@@ -5429,6 +5449,7 @@ impl GpuRenderer {
                             w: t.title_rect.w,
                             h: t.title_rect.h,
                         }),
+                        GlyphRasterVariant::TabTitle,
                     );
                     glyph_instances.extend(final_layout.glyphs);
                 }
@@ -5514,13 +5535,13 @@ impl GpuRenderer {
         let read_only_badge = read_only_mode.then(|| {
             // Content width = icon + gap + "READONLY", in the badge's own
             // (DPI-scaled) font, so the badge hugs its text.
-            let badge_font = self.raster_px((tab_title_font_size(self.font_size) + 2.0).max(1.0));
+            let badge_font = self.raster_px((self.font_size + 2.0).max(1.0));
             let content_w = estimate_badge_text_width(READ_ONLY_BADGE_ICON, badge_font)
                 + self.chrome_px(SEARCH_BAR_ICON_GAP)
                 + estimate_badge_text_width(READ_ONLY_BADGE_LABEL, badge_font);
             read_only_badge_rect(sw, sh, self.scale_factor, content_w)
         });
-        let search_font_size = self.raster_px(tab_title_font_size(self.font_size).max(1.0));
+        let search_font_size = self.raster_px(self.font_size.max(1.0));
         // When search is active and the IME has a non-empty composing run, splice
         // the preedit into the label at the query caret so the whole bar renders
         // as one continuous string: the box grows to fit it and the ` · N/M`
@@ -5699,8 +5720,7 @@ impl GpuRenderer {
                     .map(|m| m.cell_h as f32)
                     .unwrap_or(self.cell_h);
                 let mut wt = stack.clone();
-                let font_size =
-                    self.raster_px((tab_title_font_size(self.font_size) + 2.0).max(1.0));
+                let font_size = self.raster_px((self.font_size + 2.0).max(1.0));
                 let text_color = hex_to_chrome_color(theme.colors.background.0.as_str());
                 let baseline = badge_y
                     + (badge_h + font_size * 0.8) * 0.5
@@ -5769,8 +5789,7 @@ impl GpuRenderer {
         }
 
         if let Some(bubble) = notification {
-            let notification_font_size =
-                self.raster_px(tab_title_font_size(self.font_size).max(1.0));
+            let notification_font_size = self.raster_px(self.font_size.max(1.0));
             let content_w = estimate_badge_text_width(&bubble.message, notification_font_size);
             let row = u8::from(read_only_badge.is_some()) + u8::from(search_bar_layout.is_some());
             let layout =
@@ -6210,27 +6229,34 @@ impl GpuRenderer {
                     }
                 }
 
-                let footer_font_size = (palette_font_size - 1.0).max(1.0);
-                let footer_origin_x = layout.footer.x + 12.0;
-                let footer_baseline_y =
-                    layout.footer.y + (layout.footer.h + footer_font_size * 0.8) * 0.5;
-                emit_overlay_text_glyphs(
-                    &mut self.glyph_atlas,
-                    stack,
-                    footer_font_size,
-                    palette_native_em,
-                    &mut palette_rasterizer,
-                    &layout.footer_label,
-                    self.search_fg,
-                    ChromeAttrs::default(),
-                    footer_origin_x,
-                    footer_baseline_y,
-                    [layout.footer.x, layout.footer.y, layout.footer.w, layout.footer.h],
-                    sw,
-                    sh,
-                    &mut overlay_glyph_instances,
-                    None,
-                );
+                if let Some(footer_stack) = self.palette_footer_font_stack.as_ref() {
+                    let footer_font_size = self.raster_px(palette_footer_font_size(self.font_size));
+                    let footer_native_em = footer_font_size;
+                    let mut footer_rasterizer = footer_stack.clone();
+                    let footer_origin_x = layout.footer.x + self.chrome_px(PALETTE_FOOTER_INSET_X);
+                    let footer_baseline_y =
+                        layout.footer.y + (layout.footer.h + footer_font_size * 0.8) * 0.5;
+                    let footer_layout = chrome_text::layout_with_raster_variant(
+                        footer_stack,
+                        &mut footer_rasterizer,
+                        &mut self.glyph_atlas,
+                        &layout.footer_label,
+                        self.search_fg,
+                        ChromeAttrs::default(),
+                        footer_font_size,
+                        footer_native_em,
+                        (footer_origin_x, footer_baseline_y),
+                        (sw, sh),
+                        Some(ChromeClip {
+                            x: layout.footer.x,
+                            y: layout.footer.y,
+                            w: layout.footer.w,
+                            h: layout.footer.h,
+                        }),
+                        GlyphRasterVariant::PaletteFooter,
+                    );
+                    overlay_glyph_instances.extend(footer_layout.glyphs);
+                }
             }
         }
 
@@ -7016,6 +7042,7 @@ impl GpuRenderer {
                     weight_bold: style.bold,
                     italic: style.italic,
                     glyph_id: 0,
+                    raster_variant: GlyphRasterVariant::Normal,
                 };
                 // Sonicterm-font owns the atlas. No swash
                 // fallback — when `wt_raster` is None (test fixture
@@ -7270,6 +7297,7 @@ impl GpuRenderer {
                     weight_bold: false,
                     italic: false,
                     glyph_id: glyph_id_u32,
+                    raster_variant: GlyphRasterVariant::Normal,
                 };
                 // Wrap `block_sprite` in a thin `Rasterizer` so the
                 // atlas only computes the sprite on a cache miss.
@@ -7401,6 +7429,7 @@ impl GpuRenderer {
                     weight_bold: style.bold,
                     italic: style.italic,
                     glyph_id: 0,
+                    raster_variant: GlyphRasterVariant::Normal,
                 };
                 let Some(wt) = wt_raster.as_deref_mut() else {
                     // When: `wt_raster` is None — a test fixture with no
@@ -7715,6 +7744,7 @@ fn emit_inline_image_instances(
             weight_bold: false,
             italic: false,
             glyph_id: fold_u64_to_u32(image.id),
+            raster_variant: GlyphRasterVariant::Normal,
         };
         let Some(info) =
             image_atlas.get_or_insert_lazy_without_eviction(key, image.width, image.height, || {

@@ -31,6 +31,37 @@ fn move_tab_to_new_window_is_searchable_and_unbound_by_default() {
 }
 
 #[test]
+fn save_current_settings_is_present_exhaustively_labeled_and_unbound_by_default() {
+    let actions = palette_actions();
+    assert!(actions.contains(&Action::SaveCurrentSettings));
+    assert!(covers_every_variant_kind());
+    assert_eq!(crate::command_label::label(&Action::SaveCurrentSettings), "Save Current Settings");
+    assert_eq!(action_display_name(&Action::SaveCurrentSettings), "SaveCurrentSettings");
+
+    let mut palette = CommandPalette::new();
+    palette.set_keymap(&Keymap::default());
+    let index = palette
+        .visible()
+        .iter()
+        .position(|action| matches!(action, Action::SaveCurrentSettings))
+        .expect("Save Current Settings should be in the default palette");
+    assert_eq!(palette.shortcut_hint_for_visible_index(index), None);
+}
+
+#[test]
+fn save_current_settings_is_searchable_by_expected_terms() {
+    for query in ["save", "persist", "save font", "current settings"] {
+        let mut palette = CommandPalette::new();
+        palette.set_keymap(&Keymap::default());
+        palette.set_query(query);
+        assert!(
+            palette.visible().iter().any(|action| matches!(action, Action::SaveCurrentSettings)),
+            "{query:?} should find Save Current Settings"
+        );
+    }
+}
+
+#[test]
 fn palette_imports_concrete_keymap_theme_actions_and_shortcuts() {
     let keymap = Keymap {
         meta: Meta { name: "test".into(), version: "1.0".into() },

@@ -255,7 +255,15 @@ native allocation with its matching destroy function.
 
 `GlyphAtlas` is a 2048×2048 CPU-side BGRA8 atlas (about 16 MiB). A shelf packer
 allocates new tiles; freed rectangles are reused before extending shelves.
-Entries are keyed by font slot, glyph id, character, and rendering variant.
+Entries are keyed by font slot, glyph id, character, style, and native raster
+role. Terminal text, command-palette query/results, and ordinary chrome use the
+configured body size; command-palette footer text uses `max(body - 1, 1)`; tab
+titles use `body + 1`. The renderer keeps matching font stacks for those three
+sizes with the same family, DPI, and weight scale. Their role tags prevent the
+shared atlas from returning a normal-size bitmap for a footer or tab title, so
+all three sizes draw their natively rasterized tiles at 1:1 rather than scaling
+a cached body tile. Font and DPI changes rebuild all three stacks and invalidate
+the shared atlas together.
 
 Insertion behavior:
 
@@ -569,7 +577,12 @@ OS 报告前台可执行文件后，SonicTerm 会规范化其 basename，并执�
 ## 字形图集
 
 `GlyphAtlas` 是 2048×2048 的 CPU 侧 BGRA8 atlas，约 16 MiB。shelf packer 分配新 tile；
-扩展 shelf 前先复用释放矩形。entry key 包含 font slot、glyph id、字符和渲染变体。
+扩展 shelf 前先复用释放矩形。entry key 包含 font slot、glyph id、字符、样式和原生光栅角色。
+终端文字、命令面板查询/结果和普通 chrome 使用已配置的正文大小；命令面板页脚使用
+`max(正文 - 1, 1)`；标签页标题使用 `正文 + 1`。renderer 为这三种大小保留匹配的字体栈，
+并让它们共享相同的 family、DPI 和 weight scale。角色标签可防止共享 atlas 把正文大小的
+位图返回给页脚或标签页标题，因此三种大小都以 1:1 绘制原生光栅 tile，而不是缩放缓存的
+正文 tile。字体或 DPI 变化会一起重建三个字体栈并使共享 atlas 失效。
 
 插入行为：
 

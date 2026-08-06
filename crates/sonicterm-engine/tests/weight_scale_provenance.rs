@@ -55,6 +55,7 @@ fn facts(stack: &mut FontStack, ch: char) -> TileFacts {
             italic: false,
             // Force shaping so the actual handle index is resolved.
             glyph_id: 0,
+            raster_variant: sonicterm_types::GlyphRasterVariant::Normal,
         })
         .unwrap_or_else(|| panic!("tracked font fixtures must rasterize {ch:?}"));
     let (w, h) = (tile.width as usize, tile.height as usize);
@@ -124,6 +125,7 @@ fn a_fallback_after_the_primary_is_not_reweighted() {
         weight_bold: false,
         italic: false,
         glyph_id,
+        raster_variant: sonicterm_types::GlyphRasterVariant::Normal,
     };
     let base = base_stack.rasterize(key).expect("base fallback tile");
     let heavy = heavy_stack.rasterize(key).expect("heavy fallback tile");

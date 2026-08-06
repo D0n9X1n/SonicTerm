@@ -1,10 +1,16 @@
 //! User configuration (TOML).
 
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::keymap::open_in_default_app;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use toml_edit::{DocumentMut, Item, Table, TableLike};
+
+static FONT_PERSIST_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
@@ -567,6 +573,36 @@ impl Config {
         }
     }
 
+    /// Persist runtime font size and weight without rewriting unrelated TOML.
+    ///
+    /// This validates and reparses the current disk document before atomically
+    /// replacing it; comments, unknown keys, ordering, and scalar decoration are
+    /// preserved. The replacement does not claim directory-fsync durability.
+    pub fn persist_font_runtime_values(path: &Path, size: f32, weight_scale: f32) -> Result<()> {
+        validate_font_runtime_values(size, weight_scale)?;
+        if !path.exists() {
+            Self::ensure_user_config_file(path)?;
+        }
+
+        let destination = canonical_destination(path)?;
+        let bytes = std::fs::read(&destination)
+            .with_context(|| format!("read config for font persistence at {destination:?}"))?;
+        let text = std::str::from_utf8(&bytes)
+            .with_context(|| format!("decode config for font persistence at {destination:?}"))?;
+        let line_ending = line_ending_convention(text)?;
+        let _: Self = toml::from_str(text)
+            .with_context(|| format!("strictly parse config at {destination:?}"))?;
+        let normalized = normalize_for_toml_edit(text, line_ending);
+        let mut document: DocumentMut = normalized
+            .parse()
+            .with_context(|| format!("format-preserving parse config at {destination:?}"))?;
+
+        patch_font_runtime_values(&mut document, size, weight_scale)?;
+        let rendered = apply_line_ending(document.to_string(), line_ending);
+        verify_persisted_font_runtime_values(&rendered, size, weight_scale)?;
+        atomic_replace_with_permissions(&destination, rendered.as_bytes())
+    }
+
     /// Serialize to a TOML string.
     pub fn to_toml(&self) -> Result<String> {
         Ok(toml::to_string_pretty(self)?)
@@ -593,6 +629,214 @@ impl Config {
         std::fs::write(&tmp, toml).with_context(|| format!("write {tmp:?}"))?;
         std::fs::rename(&tmp, path).with_context(|| format!("rename {:?} -> {:?}", tmp, path))?;
         Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum LineEnding {
+    Lf,
+    CrLf,
+}
+
+fn validate_font_runtime_values(size: f32, weight_scale: f32) -> Result<()> {
+    if !size.is_finite() || size <= 0.0 {
+        bail!("font size must be finite and greater than zero");
+    }
+    if !weight_scale.is_finite() || !(0.5..=5.0).contains(&weight_scale) {
+        bail!("font weight scale must be finite and in 0.5..=5.0");
+    }
+    Ok(())
+}
+
+fn canonical_destination(path: &Path) -> Result<PathBuf> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("inspect config destination {path:?}"))?;
+    if metadata.file_type().is_symlink() {
+        std::fs::canonicalize(path).with_context(|| format!("resolve config symlink {path:?}"))
+    } else {
+        // When: `!metadata.file_type().is_symlink()`, replace the regular destination path directly.
+        Ok(path.to_path_buf())
+    }
+}
+
+fn line_ending_convention(text: &str) -> Result<LineEnding> {
+    let bytes = text.as_bytes();
+    let mut saw_lf = false;
+    let mut saw_crlf = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\r' => {
+                if bytes.get(index + 1) != Some(&b'\n') {
+                    bail!("config contains a bare carriage return");
+                }
+                saw_crlf = true;
+                index += 2;
+            }
+            b'\n' => {
+                saw_lf = true;
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    if saw_lf && saw_crlf {
+        bail!("config mixes LF and CRLF line endings");
+    }
+    Ok(if saw_crlf { LineEnding::CrLf } else { LineEnding::Lf })
+}
+
+fn normalize_for_toml_edit(text: &str, line_ending: LineEnding) -> std::borrow::Cow<'_, str> {
+    if matches!(line_ending, LineEnding::CrLf) {
+        std::borrow::Cow::Owned(text.replace("\r\n", "\n"))
+    } else {
+        // When: matches!(line_ending, LineEnding::CrLf) is false, toml_edit can parse the original LF bytes directly.
+        std::borrow::Cow::Borrowed(text)
+    }
+}
+
+fn apply_line_ending(mut rendered: String, line_ending: LineEnding) -> String {
+    if matches!(line_ending, LineEnding::CrLf) {
+        rendered = rendered.replace('\n', "\r\n");
+    }
+    rendered
+}
+
+fn patch_font_runtime_values(
+    document: &mut DocumentMut,
+    size: f32,
+    weight_scale: f32,
+) -> Result<()> {
+    if document.get("font").is_none() {
+        document.insert("font", Item::Table(Table::new()));
+    }
+    let font = document
+        .get_mut("font")
+        .and_then(Item::as_table_like_mut)
+        .ok_or_else(|| anyhow::anyhow!("font must be a table or inline table"))?;
+    patch_numeric_value(font, "size", size)?;
+    patch_numeric_value(font, "weight_scale", weight_scale)
+}
+
+fn patch_numeric_value(table: &mut dyn TableLike, key: &str, value: f32) -> Result<()> {
+    let mut replacement =
+        value.to_string().parse::<Item>().with_context(|| format!("format font {key}"))?;
+    if let Some(existing) = table.get_mut(key) {
+        if !existing.is_integer() && !existing.is_float() {
+            bail!("font.{key} must be an integer or float");
+        }
+        let existing_decor = existing.as_value().expect("numeric items are values").decor().clone();
+        *replacement.as_value_mut().expect("parsed numeric item is a value").decor_mut() =
+            existing_decor;
+        *existing = replacement;
+    } else {
+        // When: the font key is absent, insert only that scalar without rebuilding the surrounding table.
+        table.insert(key, replacement);
+    }
+    Ok(())
+}
+
+fn verify_persisted_font_runtime_values(
+    rendered: &str,
+    size: f32,
+    weight_scale: f32,
+) -> Result<()> {
+    let config: Config = toml::from_str(rendered).context("reparse rendered config")?;
+    if config.font.size != size || config.font.weight_scale != weight_scale {
+        bail!("rendered font values do not match the requested runtime values");
+    }
+    Ok(())
+}
+
+struct TempFileGuard {
+    path: PathBuf,
+    file: Option<File>,
+}
+
+impl TempFileGuard {
+    // Ordering: FONT_PERSIST_TEMP_SEQUENCE uses Relaxed because create_new enforces uniqueness without inter-thread state publication.
+    fn create(destination: &Path) -> Result<Self> {
+        let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+        let file_name =
+            destination.file_name().unwrap_or_else(|| std::ffi::OsStr::new("sonicterm.toml"));
+        loop {
+            let sequence = FONT_PERSIST_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let mut temp_name = file_name.to_os_string();
+            temp_name.push(format!(".{}.{}.tmp", std::process::id(), sequence));
+            let path = parent.join(temp_name);
+            // When: create_new finds an existing PID/sequence temp, advance without truncating that file.
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(file) => return Ok(Self { path, file: Some(file) }),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(error).with_context(|| format!("create temporary config {path:?}"));
+                }
+            }
+        }
+    }
+}
+
+// Lifecycle: TempFileGuard drop releases its uncommitted temp path; successful rename consumes that path before release.
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if self.file.take().is_some() || self.path.exists() {
+            // When: `self.file` was open or `self.path.exists()`, remove the staged temp best-effort.
+            #[cfg(windows)]
+            #[allow(clippy::permissions_set_readonly_false)]
+            if let Ok(metadata) = std::fs::metadata(&self.path) {
+                // When: metadata is readable, clear only the staged file's read-only bit before deletion.
+                let mut permissions = metadata.permissions();
+                if permissions.readonly() {
+                    // When: permissions.readonly() is true on the staged temp,
+                    // clear it so a failed replacement cannot strand that file.
+                    permissions.set_readonly(false);
+                    let _ = std::fs::set_permissions(&self.path, permissions);
+                }
+            }
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn atomic_replace_with_permissions(destination: &Path, bytes: &[u8]) -> Result<()> {
+    let permissions = std::fs::metadata(destination)
+        .with_context(|| format!("read config permissions at {destination:?}"))?
+        .permissions();
+    let mut temp = TempFileGuard::create(destination)?;
+    let file = temp.file.as_mut().expect("temporary file remains open before replacement");
+    file.write_all(bytes).with_context(|| format!("write temporary config {:?}", temp.path))?;
+    file.sync_all().with_context(|| format!("sync temporary config {:?}", temp.path))?;
+    std::fs::set_permissions(&temp.path, permissions)
+        .with_context(|| format!("copy config permissions to {:?}", temp.path))?;
+    temp.file.take();
+    replace_file(&temp.path, destination)
+        .with_context(|| format!("replace config {:?} -> {destination:?}", temp.path))
+}
+
+fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(source, destination)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::{
+            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        };
+
+        let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+        let destination: Vec<u16> = destination.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: both UTF-16 paths are NUL-terminated and remain live through the same-volume replacement call.
+        unsafe {
+            MoveFileExW(
+                PCWSTR(source.as_ptr()),
+                PCWSTR(destination.as_ptr()),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        }
+        .map_err(std::io::Error::other)
     }
 }
 

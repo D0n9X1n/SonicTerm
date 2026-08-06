@@ -82,6 +82,7 @@ fn a_long_lived_atlas_stays_bounded_and_its_eviction_runs() {
                 weight_bold: index % 2 == 0,
                 italic: index % 3 == 0,
                 glyph_id: u32::try_from(glyph_id % u64::from(u32::MAX)).unwrap_or(1),
+                raster_variant: sonicterm_types::GlyphRasterVariant::Normal,
             };
             let _ = atlas.get_or_insert(key, &mut rasterizer);
         }

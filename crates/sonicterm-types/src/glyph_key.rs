@@ -7,6 +7,18 @@
 
 use crate::cell::{Cell, CellFlags};
 
+/// Native raster role of a glyph tile within one renderer atlas lifetime.
+#[repr(u8)]
+#[derive(Hash, Eq, PartialEq, Copy, Clone, Debug)]
+pub enum GlyphRasterVariant {
+    /// Terminal text and chrome rendered at the configured body size.
+    Normal,
+    /// Command-palette footer rendered natively one logical pixel smaller.
+    PaletteFooter,
+    /// Tab titles rendered natively one logical pixel larger.
+    TabTitle,
+}
+
 /// Stable identity of an atlas glyph tile.
 #[derive(Hash, Eq, PartialEq, Copy, Clone, Debug)]
 pub struct GlyphKey {
@@ -30,6 +42,9 @@ pub struct GlyphKey {
     /// Uses `u32` because FreeType glyph indices can exceed `u16` for large
     /// fonts such as CJK families.
     pub glyph_id: u32,
+    /// Native raster role. Roles with different point sizes must not share one
+    /// atlas entry even when their font slot and glyph id match.
+    pub raster_variant: GlyphRasterVariant,
 }
 
 impl GlyphKey {
@@ -52,26 +67,48 @@ impl GlyphKey {
             weight_bold: c.flags.contains(CellFlags::BOLD),
             italic: c.flags.contains(CellFlags::ITALIC),
             glyph_id: 0,
+            raster_variant: GlyphRasterVariant::Normal,
         })
     }
 
     /// Convenience constructor for tests.
     #[inline]
     pub fn new(ch: char, weight_bold: bool, italic: bool) -> Self {
-        Self { ch, font_slot: 0, weight_bold, italic, glyph_id: 0 }
+        Self {
+            ch,
+            font_slot: 0,
+            weight_bold,
+            italic,
+            glyph_id: 0,
+            raster_variant: GlyphRasterVariant::Normal,
+        }
     }
 
     /// Constructor pinning a specific font slot.
     #[inline]
     pub fn with_slot(ch: char, font_slot: u8, weight_bold: bool, italic: bool) -> Self {
-        Self { ch, font_slot, weight_bold, italic, glyph_id: 0 }
+        Self {
+            ch,
+            font_slot,
+            weight_bold,
+            italic,
+            glyph_id: 0,
+            raster_variant: GlyphRasterVariant::Normal,
+        }
     }
 
     /// Constructor for a *shaped* glyph: identity comes from
     /// `(font_slot, glyph_id, weight_bold, italic)`, not the codepoint.
     #[inline]
     pub fn shaped(ch: char, font_slot: u8, glyph_id: u32, weight_bold: bool, italic: bool) -> Self {
-        Self { ch, font_slot, weight_bold, italic, glyph_id }
+        Self {
+            ch,
+            font_slot,
+            weight_bold,
+            italic,
+            glyph_id,
+            raster_variant: GlyphRasterVariant::Normal,
+        }
     }
 
     /// Return a new key with `font_slot` replaced.
@@ -79,5 +116,12 @@ impl GlyphKey {
     #[must_use]
     pub fn with_font_slot(self, font_slot: u8) -> Self {
         Self { font_slot, ..self }
+    }
+
+    /// Return a new key assigned to a native raster role.
+    #[inline]
+    #[must_use]
+    pub fn with_raster_variant(self, raster_variant: GlyphRasterVariant) -> Self {
+        Self { raster_variant, ..self }
     }
 }

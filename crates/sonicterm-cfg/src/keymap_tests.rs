@@ -44,6 +44,10 @@ fn every_bundled_keymap_parses_with_no_dead_actions() {
             km.bindings.iter().all(|binding| binding.action.0 != Action::MoveTabToNewWindow),
             "bundled {os} keymap must leave Move Tab to New Window unbound"
         );
+        assert!(
+            km.bindings.iter().all(|binding| binding.action.0 != Action::SaveCurrentSettings),
+            "bundled {os} keymap must leave Save Current Settings unbound"
+        );
     }
 }
 
@@ -60,6 +64,21 @@ action = "move_tab_to_new_window"
 "#;
     let keymap: Keymap = toml::from_str(source).expect("action should deserialize");
     assert_eq!(keymap.lookup("alt+shift+n"), Some(&Action::MoveTabToNewWindow));
+}
+
+#[test]
+fn save_current_settings_action_parses_for_user_bindings() {
+    let source = r#"
+[meta]
+name = "test"
+version = "1"
+
+[[binding]]
+keys = "alt+shift+s"
+action = "save_current_settings"
+"#;
+    let keymap: Keymap = toml::from_str(source).expect("action should deserialize");
+    assert_eq!(keymap.lookup("alt+shift+s"), Some(&Action::SaveCurrentSettings));
 }
 
 /// `bundled_default()` (the runtime fallback) parses for the host platform.

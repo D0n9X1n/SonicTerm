@@ -4,6 +4,12 @@ const ACTIVE: TabSpanColor = TabSpanColor::rgb(255, 128, 0);
 const INACTIVE: TabSpanColor = TabSpanColor::rgb(128, 128, 128);
 
 #[test]
+fn tab_titles_are_one_logical_pixel_larger_than_body_text() {
+    assert_eq!(tab_title_font_size(13.0), 14.0);
+    assert_eq!(tab_title_font_size(1.0), 2.0);
+}
+
+#[test]
 fn active_padding_is_colored_while_inactive_titles_start_at_their_center() {
     let tabs = [
         TabSpanInput {

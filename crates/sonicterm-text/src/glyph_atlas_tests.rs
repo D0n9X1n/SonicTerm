@@ -56,7 +56,14 @@ fn subpixel_text_coverage_copies_bgra_channels() {
     let mut rasterizer = SubpixelRasterizer;
     let info = atlas
         .get_or_insert(
-            GlyphKey { ch: 'V', font_slot: 0, weight_bold: false, italic: false, glyph_id: 1 },
+            GlyphKey {
+                ch: 'V',
+                font_slot: 0,
+                weight_bold: false,
+                italic: false,
+                glyph_id: 1,
+                raster_variant: sonicterm_types::GlyphRasterVariant::Normal,
+            },
             &mut rasterizer,
         )
         .expect("subpixel tile inserts");
@@ -282,6 +289,7 @@ fn v120_stale_atlas_identity_invalidates_all_dependents_888() {
         weight_bold: false,
         italic: false,
         glyph_id: n,
+        raster_variant: sonicterm_types::GlyphRasterVariant::Normal,
     };
 
     let fresh = atlas.identity();
@@ -339,6 +347,7 @@ fn retained_amount_reports_pixels_and_resident_entries() {
         weight_bold: false,
         italic: false,
         glyph_id: n,
+        raster_variant: sonicterm_types::GlyphRasterVariant::Normal,
     };
     for n in 33..43u32 {
         atlas.get_or_insert(key(n), &mut raster);
@@ -371,6 +380,7 @@ fn retained_amount_falls_when_eviction_reclaims_entries() {
         weight_bold: false,
         italic: false,
         glyph_id: n,
+        raster_variant: sonicterm_types::GlyphRasterVariant::Normal,
     };
 
     for n in 33..40u32 {
@@ -429,14 +439,26 @@ fn reusing_a_freed_slot_leaves_the_evicted_glyphs_pixels_in_the_margin() {
         },
     };
 
-    let big_key =
-        GlyphKey { ch: 'B', font_slot: 0, weight_bold: false, italic: false, glyph_id: 1 };
+    let big_key = GlyphKey {
+        ch: 'B',
+        font_slot: 0,
+        weight_bold: false,
+        italic: false,
+        glyph_id: 1,
+        raster_variant: sonicterm_types::GlyphRasterVariant::Normal,
+    };
     atlas.get_or_insert(big_key, &mut rasterizer).expect("the big glyph fits an empty atlas");
     assert_eq!(atlas.sample(3, 3), 255, "the big glyph paints the far corner of the slot");
 
     // Force the big glyph out and put the small one in its place.
-    let small_key =
-        GlyphKey { ch: 'S', font_slot: 0, weight_bold: false, italic: false, glyph_id: 2 };
+    let small_key = GlyphKey {
+        ch: 'S',
+        font_slot: 0,
+        weight_bold: false,
+        italic: false,
+        glyph_id: 2,
+        raster_variant: sonicterm_types::GlyphRasterVariant::Normal,
+    };
     atlas.tick_frame();
     let small = atlas
         .get_or_insert(small_key, &mut rasterizer)
@@ -496,7 +518,14 @@ fn a_zero_area_uv_points_at_the_first_packed_glyph_not_at_nothing() {
         is_color: false,
         is_subpixel: false,
     });
-    let first = GlyphKey { ch: 'A', font_slot: 0, weight_bold: false, italic: false, glyph_id: 1 };
+    let first = GlyphKey {
+        ch: 'A',
+        font_slot: 0,
+        weight_bold: false,
+        italic: false,
+        glyph_id: 1,
+        raster_variant: sonicterm_types::GlyphRasterVariant::Normal,
+    };
     let info = atlas.get_or_insert(first, &mut opaque).expect("first glyph packs");
     assert_eq!(info.uv[0], 0.0, "the first glyph is packed at the atlas origin");
     assert_eq!(info.uv[1], 0.0, "the first glyph is packed at the atlas origin");
@@ -517,7 +546,14 @@ fn a_zero_area_uv_points_at_the_first_packed_glyph_not_at_nothing() {
         is_color: true,
         is_subpixel: false,
     });
-    let blank = GlyphKey { ch: ' ', font_slot: 0, weight_bold: false, italic: false, glyph_id: 2 };
+    let blank = GlyphKey {
+        ch: ' ',
+        font_slot: 0,
+        weight_bold: false,
+        italic: false,
+        glyph_id: 2,
+        raster_variant: sonicterm_types::GlyphRasterVariant::Normal,
+    };
     let sentinel = atlas.get_or_insert(blank, &mut empty).expect("empty tile caches a sentinel");
 
     assert_eq!(sentinel.uv, [0.0, 0.0, 0.0, 0.0], "empty tiles cache a zero-area UV");

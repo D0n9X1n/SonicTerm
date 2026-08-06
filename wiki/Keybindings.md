@@ -173,6 +173,7 @@ Directions are `left`, `right`, `up`, `down`. Scroll values are `line_up`,
 | Edit config file | `edit_config_file` |
 | Edit keymap file | `open_keymap_file` |
 | Reload config | `reload_config` |
+| Save current font settings (no default binding) | `save_current_settings` |
 
 ### Example: make pane resize larger
 
@@ -248,10 +249,11 @@ their own readline/ZLE behavior.
 ### READONLY mode shortcut policy
 
 `enter_copy_mode` opens READONLY mode. In this mode SonicTerm blocks terminal
-input and only allows shortcut actions for tab switching, pane focus, and search:
-`next_tab`, `prev_tab`, `{ activate_tab = N }`, `activate_last_tab`,
-`{ focus_pane = "left|right|up|down" }`, `open_search`, and
-`check_for_updates`.
+input and only allows shortcut actions for tab switching, pane focus, search,
+update checks, and saving current font settings: `next_tab`, `prev_tab`,
+`{ activate_tab = N }`, `activate_last_tab`,
+`{ focus_pane = "left|right|up|down" }`, `open_search`, `check_for_updates`, and
+`save_current_settings`.
 
 All other shortcuts are ignored by READONLY mode and are not forwarded to the
 terminal. Search remains editable inside READONLY mode.
@@ -424,6 +426,7 @@ action = { toggle_broadcast = { scope = "tab" } }
 | 编辑配置文件 | `edit_config_file` |
 | 编辑 keymap 文件 | `open_keymap_file` |
 | 重新加载配置 | `reload_config` |
+| 保存当前字体设置（默认无绑定） | `save_current_settings` |
 
 ### 示例：把 pane resize 改大
 
@@ -492,8 +495,9 @@ readline/ZLE 行为。
 ### READONLY 模式快捷键策略
 
 `enter_copy_mode` 会进入 READONLY 模式。在这个模式下，SonicTerm 会阻止输入进入终端，
-只允许四个类别的快捷键：切换 Tab、切换 Pane 焦点、搜索、检查更新。对应 action 是
+只允许切换 Tab、切换 Pane 焦点、搜索、检查更新和保存当前字体设置。对应 action 是
 `next_tab`、`prev_tab`、`{ activate_tab = N }`、`activate_last_tab`、
-`{ focus_pane = "left|right|up|down" }`、`open_search` 和 `check_for_updates`。
+`{ focus_pane = "left|right|up|down" }`、`open_search`、`check_for_updates` 和
+`save_current_settings`。
 
 其它快捷键会被 READONLY 模式忽略，也不会转发给终端。READONLY 中打开搜索框后，搜索框仍然可以编辑。
