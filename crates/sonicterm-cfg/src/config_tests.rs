@@ -229,6 +229,60 @@ fn persist_font_runtime_values_rejects_bad_input_and_documents_without_changes()
 }
 
 #[test]
+fn persist_font_runtime_values_rejects_busy_process_and_cross_process_locks() {
+    let dir = font_persist_test_dir("busy-lock");
+    let path = dir.join("sonicterm.toml");
+    let original = b"[font]\nsize = 13\nweight_scale = 1\n";
+    std::fs::write(&path, original).unwrap();
+
+    let process_guard = ProcessSavePathGuard::acquire(&path).unwrap();
+    assert!(Config::persist_font_runtime_values(&path, 14.0, 2.0).is_err());
+    drop(process_guard);
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+
+    let mut lock_name = path.file_name().unwrap().to_os_string();
+    lock_name.push(".save.lock");
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join(lock_name))
+        .unwrap();
+    lock.lock().unwrap();
+    assert!(Config::persist_font_runtime_values(&path, 14.0, 2.0).is_err());
+    lock.unlock().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn persist_font_runtime_values_rejects_a_concurrent_disk_change() {
+    let dir = font_persist_test_dir("concurrent-change");
+    let path = dir.join("sonicterm.toml");
+    let original = b"theme = \"before\"\n[font]\nsize = 13\nweight_scale = 1\n";
+    let concurrent = b"theme = \"after\"\n[font]\nsize = 13\nweight_scale = 1\n";
+    std::fs::write(&path, original).unwrap();
+
+    let result =
+        Config::persist_font_runtime_values_before_commit(&path, 14.0, 2.0, |destination| {
+            std::fs::write(destination, concurrent)
+                .with_context(|| format!("write concurrent config at {destination:?}"))
+        });
+
+    assert!(result.is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), concurrent);
+    let staged = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+        .collect::<Vec<_>>();
+    assert!(staged.is_empty(), "conflicted save left staged temp files: {staged:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn persist_font_runtime_values_is_idempotent_and_replaces_existing_destination() {
     let dir = font_persist_test_dir("repeat");
     let path = dir.join("sonicterm.toml");

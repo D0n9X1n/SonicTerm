@@ -260,20 +260,19 @@ fn renderer_font_stacks(
     dpi: usize,
     weight_scale: f32,
 ) -> RendererFontStacks {
-    let build = |size: f32| {
-        sonicterm_engine::FontStack::try_new_full_with_weight(
-            family,
-            f64::from(size),
-            dpi,
-            weight_scale,
-        )
-        .ok()
-    };
-    RendererFontStacks {
-        body: build(body_size),
-        tab_title: build(tab_title_font_size(body_size)),
-        palette_footer: build(palette_footer_font_size(body_size)),
-    }
+    let body = sonicterm_engine::FontStack::try_new_full_with_weight(
+        family,
+        f64::from(body_size),
+        dpi,
+        weight_scale,
+    )
+    .ok();
+    let tab_title =
+        body.as_ref().map(|stack| stack.with_font_size(f64::from(tab_title_font_size(body_size))));
+    let palette_footer = body
+        .as_ref()
+        .map(|stack| stack.with_font_size(f64::from(palette_footer_font_size(body_size))));
+    RendererFontStacks { body, tab_title, palette_footer }
 }
 
 fn software_block_glyph_target_rect(

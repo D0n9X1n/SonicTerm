@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use toml_edit::{DocumentMut, Item, Table, TableLike};
 
 static FONT_PERSIST_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static FONT_PERSIST_PROCESS_PATHS: std::sync::Mutex<Vec<PathBuf>> =
+    std::sync::Mutex::new(Vec::new());
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
@@ -579,12 +581,25 @@ impl Config {
     /// replacing it; comments, unknown keys, ordering, and scalar decoration are
     /// preserved. The replacement does not claim directory-fsync durability.
     pub fn persist_font_runtime_values(path: &Path, size: f32, weight_scale: f32) -> Result<()> {
+        Self::persist_font_runtime_values_before_commit(path, size, weight_scale, |_| Ok(()))
+    }
+
+    fn persist_font_runtime_values_before_commit<F>(
+        path: &Path,
+        size: f32,
+        weight_scale: f32,
+        before_commit: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(&Path) -> Result<()>,
+    {
         validate_font_runtime_values(size, weight_scale)?;
         if !path.exists() {
             Self::ensure_user_config_file(path)?;
         }
 
         let destination = canonical_destination(path)?;
+        let _save_lock = ConfigSaveLock::acquire(&destination)?;
         let bytes = std::fs::read(&destination)
             .with_context(|| format!("read config for font persistence at {destination:?}"))?;
         let text = std::str::from_utf8(&bytes)
@@ -600,7 +615,7 @@ impl Config {
         patch_font_runtime_values(&mut document, size, weight_scale)?;
         let rendered = apply_line_ending(document.to_string(), line_ending);
         verify_persisted_font_runtime_values(&rendered, size, weight_scale)?;
-        atomic_replace_with_permissions(&destination, rendered.as_bytes())
+        atomic_replace_if_unchanged(&destination, &bytes, rendered.as_bytes(), before_commit)
     }
 
     /// Serialize to a TOML string.
@@ -748,6 +763,79 @@ fn verify_persisted_font_runtime_values(
     Ok(())
 }
 
+struct ProcessSavePathGuard {
+    path: PathBuf,
+}
+
+impl ProcessSavePathGuard {
+    fn acquire(destination: &Path) -> Result<Self> {
+        let mut paths = FONT_PERSIST_PROCESS_PATHS
+            .lock()
+            .map_err(|_| anyhow::anyhow!("config save path registry is poisoned"))?;
+        // A duplicate path means one window already owns this config's save slot.
+        if paths.iter().any(|path| path == destination) {
+            bail!("another SonicTerm window is saving the config; retry the save");
+        }
+        paths.push(destination.to_path_buf());
+        Ok(Self { path: destination.to_path_buf() })
+    }
+}
+
+// Lifecycle: ProcessSavePathGuard drop removes its canonical destination from the in-process save registry.
+impl Drop for ProcessSavePathGuard {
+    fn drop(&mut self) {
+        // A poisoned registry cannot be repaired safely during unwinding; the
+        // process is already failing, so cleanup remains best-effort.
+        if let Ok(mut paths) = FONT_PERSIST_PROCESS_PATHS.lock() {
+            paths.retain(|path| path != &self.path);
+        }
+    }
+}
+
+struct ConfigSaveLock {
+    _process: ProcessSavePathGuard,
+    file: File,
+}
+
+impl ConfigSaveLock {
+    fn acquire(destination: &Path) -> Result<Self> {
+        // OS advisory locks may not conflict with another descriptor in this
+        // process, so a path registry covers sibling windows as well.
+        let process = ProcessSavePathGuard::acquire(destination)?;
+        let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+        let mut name = destination
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("sonicterm.toml"))
+            .to_os_string();
+        name.push(".save.lock");
+        let path = parent.join(name);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("open config save lock {path:?}"))?;
+        let lock_result = file.try_lock();
+        if matches!(lock_result, Err(std::fs::TryLockError::WouldBlock)) {
+            // A held sidecar means another process owns this config's persistent save slot.
+            bail!("another SonicTerm instance is saving the config; retry the save");
+        }
+        if let Err(std::fs::TryLockError::Error(error)) = lock_result {
+            // When: `lock_result` carries an OS `Error`, preserve that context instead of calling it contention.
+            return Err(error).with_context(|| format!("lock config save path {path:?}"));
+        }
+        Ok(Self { _process: process, file })
+    }
+}
+
+// Lifecycle: ConfigSaveLock drop releases the advisory lock; the sidecar stays so every process locks the same inode.
+impl Drop for ConfigSaveLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
 struct TempFileGuard {
     path: PathBuf,
     file: Option<File>,
@@ -798,7 +886,15 @@ impl Drop for TempFileGuard {
     }
 }
 
-fn atomic_replace_with_permissions(destination: &Path, bytes: &[u8]) -> Result<()> {
+fn atomic_replace_if_unchanged<F>(
+    destination: &Path,
+    expected: &[u8],
+    bytes: &[u8],
+    before_commit: F,
+) -> Result<()>
+where
+    F: FnOnce(&Path) -> Result<()>,
+{
     let permissions = std::fs::metadata(destination)
         .with_context(|| format!("read config permissions at {destination:?}"))?
         .permissions();
@@ -809,6 +905,16 @@ fn atomic_replace_with_permissions(destination: &Path, bytes: &[u8]) -> Result<(
     std::fs::set_permissions(&temp.path, permissions)
         .with_context(|| format!("copy config permissions to {:?}", temp.path))?;
     temp.file.take();
+
+    before_commit(destination)?;
+    // The sidecar serializes SonicTerm writers; this final byte comparison also
+    // rejects an external editor change observed after parsing.
+    let current = std::fs::read(destination)
+        .with_context(|| format!("re-read config before replacement at {destination:?}"))?;
+    if current != expected {
+        bail!("config changed while current font settings were being saved; retry the save");
+    }
+
     replace_file(&temp.path, destination)
         .with_context(|| format!("replace config {:?} -> {destination:?}", temp.path))
 }
@@ -822,18 +928,19 @@ fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
     {
         use std::os::windows::ffi::OsStrExt;
         use windows::core::PCWSTR;
-        use windows::Win32::Storage::FileSystem::{
-            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-        };
+        use windows::Win32::Storage::FileSystem::{ReplaceFileW, REPLACEFILE_WRITE_THROUGH};
 
         let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
         let destination: Vec<u16> = destination.as_os_str().encode_wide().chain(Some(0)).collect();
-        // SAFETY: both UTF-16 paths are NUL-terminated and remain live through the same-volume replacement call.
+        // SAFETY: both UTF-16 paths are NUL-terminated and live through the call; ReplaceFileW preserves destination metadata.
         unsafe {
-            MoveFileExW(
-                PCWSTR(source.as_ptr()),
+            ReplaceFileW(
                 PCWSTR(destination.as_ptr()),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                PCWSTR(source.as_ptr()),
+                PCWSTR::null(),
+                REPLACEFILE_WRITE_THROUGH,
+                None,
+                None,
             )
         }
         .map_err(std::io::Error::other)

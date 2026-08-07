@@ -350,6 +350,34 @@ fn save_action_dispatch_persists_real_file_and_shows_confirmation() {
 }
 
 #[test]
+fn palette_enter_saves_once_and_targets_the_attached_child() {
+    let path = temp_config_path("save-palette-enter");
+    remove_test_path(&path);
+    std::fs::write(&path, b"[font]\nsize = 13\nweight_scale = 1\n")
+        .expect("write palette-enter config");
+
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_synthetic_main();
+    let child = app.__test_seed_child_window(&["child"]);
+    app.__test_set_frontmost_window(Some(child));
+    let _path_guard = App::set_test_current_settings_path(path.clone());
+    assert!(app.run_action(&Action::OpenCommandPalette));
+    app.__test_set_palette_query("current settings");
+
+    assert!(app.__test_command_palette_handle_key(&winit::keyboard::Key::Named(
+        winit::keyboard::NamedKey::Enter,
+    )));
+
+    assert!(!app.__test_palette_open());
+    assert_eq!(app.__test_child_notification_message(child), Some("Current font settings saved"));
+    assert_eq!(app.__test_main_notification_message(), None);
+    let saved = std::fs::read_to_string(&path).expect("read palette-enter config");
+    assert_eq!(saved.matches("size = 13").count(), 1);
+    assert_eq!(saved.matches("weight_scale = 1").count(), 1);
+    remove_test_path(&path);
+}
+
+#[test]
 fn source_window_save_action_writes_once_and_targets_the_child_notification() {
     let path = temp_config_path("save-source-window-dispatch");
     remove_test_path(&path);

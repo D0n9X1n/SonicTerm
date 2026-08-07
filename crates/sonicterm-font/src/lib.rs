@@ -545,9 +545,23 @@ enum Entity {
     PaneSelect,
 }
 
+/// Loaded-face identity includes native point size because bitmap-strike
+/// selection and shaping metrics can differ even when the text style is equal.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct LoadedFontKey {
+    style: TextStyle,
+    font_size_bits: u64,
+}
+
+impl LoadedFontKey {
+    fn new(style: &TextStyle, font_size: f64) -> Self {
+        Self { style: style.clone(), font_size_bits: font_size.to_bits() }
+    }
+}
+
 struct FontConfigInner {
-    fonts: RefCell<HashMap<TextStyle, Rc<LoadedFont>>>,
-    metrics: RefCell<Option<FontMetrics>>,
+    fonts: RefCell<HashMap<LoadedFontKey, Rc<LoadedFont>>>,
+    metrics: RefCell<HashMap<u64, FontMetrics>>,
     dpi: RefCell<usize>,
     font_scale: RefCell<f64>,
     config: RefCell<ConfigHandle>,
@@ -574,7 +588,7 @@ impl FontConfigInner {
         Ok(Self {
             fonts: RefCell::new(HashMap::new()),
             locator,
-            metrics: RefCell::new(None),
+            metrics: RefCell::new(HashMap::new()),
             title_font: RefCell::new(None),
             pane_select_font: RefCell::new(None),
             char_select_font: RefCell::new(None),
@@ -599,7 +613,7 @@ impl FontConfigInner {
         self.pane_select_font.borrow_mut().take();
         self.char_select_font.borrow_mut().take();
         self.command_palette_font.borrow_mut().take();
-        self.metrics.borrow_mut().take();
+        self.metrics.borrow_mut().clear();
         *self.font_dirs.borrow_mut() = Arc::new(FontDatabase::with_font_dirs(config)?);
         Ok(())
     }
@@ -935,24 +949,43 @@ impl FontConfigInner {
     /// Given a text style, load (with caching) the font that best
     /// matches according to the fontconfig pattern.
     fn resolve_font(&self, myself: &Rc<Self>, style: &TextStyle) -> anyhow::Result<Rc<LoadedFont>> {
-        let config = self.config.borrow();
+        let font_size = self.config.borrow().font_size;
+        self.resolve_font_at_size(myself, style, font_size)
+    }
+
+    fn resolve_font_at_size(
+        &self,
+        myself: &Rc<Self>,
+        style: &TextStyle,
+        font_size: f64,
+    ) -> anyhow::Result<Rc<LoadedFont>> {
+        let effective_size = font_size * *self.font_scale.borrow();
+        self.resolve_font_at_effective_size(myself, style, effective_size)
+    }
+
+    fn resolve_font_at_effective_size(
+        &self,
+        myself: &Rc<Self>,
+        style: &TextStyle,
+        requested_size: f64,
+    ) -> anyhow::Result<Rc<LoadedFont>> {
+        let key = LoadedFontKey::new(style, requested_size);
+        if let Some(entry) = self.fonts.borrow().get(&key) {
+            // When: `fonts` contains `key`, reuse the face whose style and native size both match.
+            return Ok(Rc::clone(entry));
+        }
+
+        let config = self.config.borrow().clone();
         let is_default = *style == config.font;
         let def_font = if !is_default && config.use_cap_height_to_scale_fallback_fonts {
-            Some(self.default_font(myself)?)
+            Some(self.resolve_font_at_effective_size(myself, &config.font, requested_size)?)
         } else {
             // When: `!is_default && config.use_cap_height_to_scale_fallback_fonts` is false,
             // avoid resolving the default font because baseline scaling is not requested.
             None
         };
 
-        let mut fonts = self.fonts.borrow_mut();
-
-        if let Some(entry) = fonts.get(style) {
-            // When: `fonts` already contains this style, return the cached loaded font.
-            return Ok(Rc::clone(entry));
-        }
-
-        let mut font_size = config.font_size * *self.font_scale.borrow();
+        let mut font_size = requested_size;
         let dpi = *self.dpi.borrow() as u32;
         let pixel_size = (font_size * dpi as f64 / 72.0) as u16;
 
@@ -1012,7 +1045,7 @@ impl FontConfigInner {
             pixel_geometry: config.display_pixel_geometry,
         });
 
-        fonts.insert(style.clone(), Rc::clone(&loaded));
+        self.fonts.borrow_mut().insert(key, Rc::clone(&loaded));
 
         Ok(loaded)
     }
@@ -1026,7 +1059,7 @@ impl FontConfigInner {
         *self.dpi.borrow_mut() = dpi;
         *self.font_scale.borrow_mut() = font_scale;
         self.fonts.borrow_mut().clear();
-        self.metrics.borrow_mut().take();
+        self.metrics.borrow_mut().clear();
         self.title_font.borrow_mut().take();
         // E4: a DPI/scale change must drop the chrome font caches too,
         // not just title_font — otherwise the command palette / char-select /
@@ -1053,18 +1086,27 @@ impl FontConfigInner {
     }
 
     pub fn default_font_metrics(&self, myself: &Rc<Self>) -> Result<FontMetrics, Error> {
-        {
-            let metrics = self.metrics.borrow();
-            if let Some(metrics) = metrics.as_ref() {
-                // When: default metrics are cached, return them without resolving the font again.
-                return Ok(*metrics);
-            }
+        let font_size = self.config.borrow().font_size;
+        self.default_font_metrics_at_size(myself, font_size)
+    }
+
+    fn default_font_metrics_at_size(
+        &self,
+        myself: &Rc<Self>,
+        font_size: f64,
+    ) -> Result<FontMetrics, Error> {
+        let effective_size = font_size * *self.font_scale.borrow();
+        let key = effective_size.to_bits();
+        if let Some(metrics) = self.metrics.borrow().get(&key) {
+            // When: this native size has cached metrics, return them without resolving again.
+            return Ok(*metrics);
         }
 
-        let font = self.default_font(myself)?;
+        let style = self.config.borrow().font.clone();
+        let font = self.resolve_font_at_effective_size(myself, &style, effective_size)?;
         let metrics = font.metrics();
 
-        *self.metrics.borrow_mut() = Some(metrics);
+        self.metrics.borrow_mut().insert(key, metrics);
 
         Ok(metrics)
     }
@@ -1108,9 +1150,18 @@ impl FontConfiguration {
     }
 
     /// Given a text style, load (with caching) the font that best
-    /// matches according to the fontconfig pattern.
+    /// matches according to the fontconfig pattern at the configured size.
     pub fn resolve_font(&self, style: &TextStyle) -> anyhow::Result<Rc<LoadedFont>> {
         self.inner.resolve_font(&self.inner, style)
+    }
+
+    /// Resolve a text style at an explicit logical point size.
+    pub fn resolve_font_at_size(
+        &self,
+        style: &TextStyle,
+        font_size: f64,
+    ) -> anyhow::Result<Rc<LoadedFont>> {
+        self.inner.resolve_font_at_size(&self.inner, style, font_size)
     }
 
     /// Updates font scaling and DPI, invalidating caches and returning prior values.
@@ -1136,6 +1187,11 @@ impl FontConfiguration {
     /// Returns cached metrics for the configured baseline font.
     pub fn default_font_metrics(&self) -> Result<FontMetrics, Error> {
         self.inner.default_font_metrics(&self.inner)
+    }
+
+    /// Returns cached metrics for the baseline font at an explicit point size.
+    pub fn default_font_metrics_at_size(&self, font_size: f64) -> Result<FontMetrics, Error> {
+        self.inner.default_font_metrics_at_size(&self.inner, font_size)
     }
 
     /// Lists parsed fonts from configured directories and bundled font data.

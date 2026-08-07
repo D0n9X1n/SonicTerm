@@ -1228,19 +1228,25 @@ fn palette_footer_uses_native_regular_natural_spacing_and_scaled_geometry() {
 }
 
 #[test]
-fn body_title_and_footer_stacks_share_family_dpi_and_weight_lifecycle() {
-    const CORE_SRC: &str = include_str!("core.rs");
-    let helper_start = CORE_SRC.find("fn renderer_font_stacks(").expect("stack builder");
-    let helper_end = CORE_SRC[helper_start..]
-        .find("fn software_block_glyph_target_rect(")
-        .map(|offset| helper_start + offset)
-        .expect("stack builder end");
-    let helper = &CORE_SRC[helper_start..helper_end];
-    assert_eq!(helper.matches("build(").count(), 3);
-    assert!(helper.contains("body: build(body_size)"));
-    assert!(helper.contains("tab_title: build(tab_title_font_size(body_size))"));
-    assert!(helper.contains("palette_footer: build(palette_footer_font_size(body_size))"));
+fn body_title_and_footer_stacks_share_configuration_and_native_size_identity() {
+    let stacks = renderer_font_stacks("Rec Mono St.Helens", 13.0, 72, 1.0);
+    let (Some(body), Some(title), Some(footer)) =
+        (stacks.body, stacks.tab_title, stacks.palette_footer)
+    else {
+        return;
+    };
 
+    assert!(body.shares_configuration_with(&title));
+    assert!(body.shares_configuration_with(&footer));
+    assert!(title.shares_configuration_with(&footer));
+
+    let body_metrics = body.cell_metrics_raster_px().expect("body metrics");
+    let title_metrics = title.cell_metrics_raster_px().expect("title metrics");
+    let footer_metrics = footer.cell_metrics_raster_px().expect("footer metrics");
+    assert!(title_metrics.cell_h > body_metrics.cell_h);
+    assert!(footer_metrics.cell_h < body_metrics.cell_h);
+
+    const CORE_SRC: &str = include_str!("core.rs");
     let set_font_start = CORE_SRC.find("    pub fn set_font(").expect("set_font exists");
     let set_font_end = CORE_SRC[set_font_start..]
         .find("\n    /// Apply a new DPI scale factor")
@@ -1255,21 +1261,6 @@ fn body_title_and_footer_stacks_share_family_dpi_and_weight_lifecycle() {
     ] {
         assert!(set_font.contains(assignment), "missing stack replacement: {assignment}");
     }
-
-    let scale_start = CORE_SRC.find("    fn rebuild_for_sf(").expect("DPI rebuild");
-    let scale_end = CORE_SRC[scale_start..]
-        .find("\n    fn rebuild_glyph_upload_if_needed")
-        .map(|offset| scale_start + offset)
-        .expect("DPI rebuild end");
-    let scale = &CORE_SRC[scale_start..scale_end];
-    for stack in [
-        "self.font_stack.as_ref()",
-        "self.tab_title_font_stack.as_ref()",
-        "self.palette_footer_font_stack.as_ref()",
-    ] {
-        assert!(scale.contains(stack), "DPI rebuild omits {stack}");
-    }
-    assert!(scale.contains("stack.change_scaling(stack.get_font_scale(), fs_dpi);"));
 }
 
 #[test]

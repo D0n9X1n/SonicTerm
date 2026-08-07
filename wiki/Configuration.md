@@ -249,13 +249,17 @@ other runtime modes untouched. The command does not reload or reapply the file,
 because both saved values are already live.
 
 If the config file is missing, SonicTerm creates its commented starter file
-before patching the two font values. The patch is written to a temporary file in
-the config directory and atomically replaces the config, so readers see the old
-or new complete file; this does not promise durability through power loss. If
-the current file is malformed, SonicTerm refuses to patch it. On success, the font-size and weight reset
-baselines advance to the saved values and an Info confirmation appears. On any
-failure, the old file, live values, and reset baselines remain intact, and an
-Error notification appears.
+before patching the two font values. Saves take a non-blocking process and
+cross-process lock on the persistent `sonicterm.toml.save.lock` sidecar, then
+recheck the exact bytes read immediately before committing. If another SonicTerm
+instance is saving, or the final comparison observes an editor change, SonicTerm
+refuses the write and asks you to retry rather than overwriting the newer file. The patch
+is written to a temporary file in the config directory and atomically replaces
+the config, so readers see the old or new complete file; this does not promise
+durability through power loss. A malformed file is also refused. On success, the
+font-size and weight reset baselines advance to the saved values and an Info
+confirmation appears. On any failure, the existing file, live values, and reset
+baselines remain intact, and an Error notification appears.
 
 SonicTerm reads configuration at startup and then only when you run **Reload
 Config**. There is no background file watcher, so saving an external edit does
@@ -504,11 +508,13 @@ keymap.toml** 和 **Reload Config**。
 无关的已知设置、未知顶层与嵌套 key、注释，以及受支持的顺序和格式；窗口、窗格、Tab 与其它
 运行时模式也不会变化。该命令不重载或重新应用文件，因为保存的两个值已经实时生效。
 
-若配置文件不存在，SonicTerm 会先创建带注释的初始配置，再修补这两个字体值。修补内容先写入
-配置目录中的临时文件，再以原子方式替换配置，因此读取者会看到完整旧文件或完整新文件；这不
-承诺断电后的持久性。若当前文件格式错误，SonicTerm 会拒绝修补。成功时，字号与字重的重置基线
-会推进到所保存的值，并显示 Info 确认；任何失败都会保持旧文件、实时值
-与重置基线不变，并显示 Error 通知。
+若配置文件不存在，SonicTerm 会先创建带注释的初始配置，再修补这两个字体值。保存时会以
+非阻塞方式取得进程内锁和跨进程锁；跨进程锁使用持久的 `sonicterm.toml.save.lock` sidecar，
+并在提交前立即重新核对最初读取的精确字节。若另一个 SonicTerm 实例正在保存，或最终核对发现
+编辑器已经修改配置，SonicTerm 会拒绝写入并提示重试，而不会覆盖较新的文件。修补内容先写入配置目录
+中的临时文件，再以原子方式替换配置，因此读取者会看到完整旧文件或完整新文件；这不承诺断电后
+的持久性。格式错误的文件同样会被拒绝。成功时，字号与字重的重置基线会推进到所保存的值，并
+显示 Info 确认；任何失败都会保持已有文件、实时值与重置基线不变，并显示 Error 通知。
 
 SonicTerm 只在启动时读取配置，之后仅在运行 **Reload Config** 时重新读取。没有后台
 文件 watcher，因此保存外部编辑不会自动生效——这样运行进程中就不存在 watcher 线程及其
