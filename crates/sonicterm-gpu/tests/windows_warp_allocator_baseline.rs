@@ -9,12 +9,14 @@ const FOUR_MIB: u64 = 4 * 1024 * 1024;
 const CANDIDATE_RESERVED_LIMIT: u64 = 64 * 1024 * 1024;
 const CANDIDATE_LARGEST_BLOCK_LIMIT: u64 = 128 * 1024 * 1024;
 
+/// GPU resources held alive while allocator reports are compared.
 struct RepresentativeAllocations {
     _vertex: wgpu::Buffer,
     _sampled: wgpu::Texture,
     _render_target: wgpu::Texture,
 }
 
+/// Allocate the same buffer and texture workload on either policy's device.
 fn representative_allocations(device: &wgpu::Device) -> RepresentativeAllocations {
     let vertex = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("allocator baseline vertex"),
@@ -45,6 +47,10 @@ fn representative_allocations(device: &wgpu::Device) -> RepresentativeAllocation
     RepresentativeAllocations { _vertex: vertex, _sampled: sampled, _render_target: render_target }
 }
 
+/// WARP's production policy stays below absolute reserve bounds and improves on the control.
+///
+/// Two DX12 devices on the same forced fallback adapter hold identical live resources; allocator
+/// reports therefore isolate the memory-hint policy while also proving the reporting capability.
 #[test]
 fn warp_memory_usage_policy_reduces_allocator_reserve() {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {

@@ -598,8 +598,6 @@ event-loop stall or starvation.
 **A stale marker proves the session did not finish. It does not say why.**
 `SIGKILL`, a power cut, an OOM kill, and a hard reset are indistinguishable
 from the marker alone, so the report names no cause rather than guessing one.
-The observed 32 GiB incident is absent from the copied logs and is not claimed
-fixed by the allocator policy or these diagnostics.
 
 Three properties are worth knowing when reading a report:
 
@@ -1188,8 +1186,7 @@ private commit 仍明确为 `unsupported`。
 说明 event loop 发生了 stall 或 starvation。
 
 **残留标记只能证明会话没有正常结束，不能说明原因。** 仅凭标记无法区分 `SIGKILL`、
-断电、OOM 终止与硬重启，因此报告不会臆测原因。观测到的 32 GiB 事件未出现在复制的
-日志中，因此不会声称分配策略或这些诊断已经修复了该事件。
+断电、OOM 终止与硬重启，因此报告不会臆测原因。
 
 阅读报告时有三点值得了解：
 

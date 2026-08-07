@@ -11,6 +11,7 @@ struct FakeRenderer {
     id: u64,
 }
 
+/// Build a unique five-field allocator reading so selection and summing mistakes are visible.
 fn fake_allocator(id: u64) -> sonicterm_gpu::core::AllocatorSnapshot {
     sonicterm_gpu::core::AllocatorSnapshot {
         allocated_bytes: id,
@@ -21,6 +22,10 @@ fn fake_allocator(id: u64) -> sonicterm_gpu::core::AllocatorSnapshot {
     }
 }
 
+/// The main renderer supplies the shared-device report exactly once.
+///
+/// A counted accessor and unique fixture values fail if production reads peer renderers or sums
+/// their reports.
 #[test]
 fn shared_allocator_is_read_once_from_the_main_renderer_without_summing() {
     let calls = std::cell::Cell::new(0);
@@ -44,6 +49,10 @@ fn shared_allocator_is_read_once_from_the_main_renderer_without_summing() {
     assert_eq!(reading.snapshot, Some(fake_allocator(1)));
 }
 
+/// Visible fallback chooses the lowest renderer label regardless of input order.
+///
+/// Three permutations model nondeterministic `HashMap` iteration and must produce one identical
+/// read and attribution.
 #[test]
 fn visible_allocator_selection_is_stable_across_input_order() {
     let a = FakeRenderer { id: 1 };
@@ -69,6 +78,9 @@ fn visible_allocator_selection_is_stable_across_input_order() {
     }
 }
 
+/// The first warm renderer is used only when no visible renderer is available.
+///
+/// The counted accessor proves the fallback performs one query against warm slot zero.
 #[test]
 fn allocator_selection_uses_warm_only_without_a_visible_renderer() {
     let calls = std::cell::Cell::new(0);
@@ -85,6 +97,9 @@ fn allocator_selection_uses_warm_only_without_a_visible_renderer() {
     assert_eq!(reading.snapshot, Some(fake_allocator(7)));
 }
 
+/// A renderer-less snapshot performs no allocator query and returns no reading.
+///
+/// The accessor counter stays zero, distinguishing absence from an unsupported backend report.
 #[test]
 fn allocator_selection_reads_nothing_when_no_renderer_exists() {
     let calls = std::cell::Cell::new(0);
@@ -96,6 +111,9 @@ fn allocator_selection_reads_nothing_when_no_renderer_exists() {
     assert_eq!(reading, None);
 }
 
+/// An unsupported backend is still queried once and retained as an explicit absent report.
+///
+/// Returning `None` from the counted accessor separates backend capability from no-renderer state.
 #[test]
 fn unsupported_allocator_report_is_still_exactly_one_read() {
     let calls = std::cell::Cell::new(0);
@@ -416,7 +434,10 @@ fn visible_and_warm_renderers_are_both_reported_with_their_roles() {
     assert!(rendered.contains("glyph=128/3"), "warm glyph atlas bytes/items: {rendered}");
 }
 
-/// Renderer totals fold every renderer and every part.
+/// Renderer breakdown text is stable even when summaries arrive in a different order.
+///
+/// Two snapshots with reversed inputs exercise the production serializer, which sorts by role and
+/// label before joining entries.
 #[test]
 fn renderer_breakdown_order_is_stable_across_input_order() {
     let make = |label: &str, role| RendererSummary {
@@ -444,6 +465,7 @@ fn renderer_breakdown_order_is_stable_across_input_order() {
     assert_eq!(first.render_renderers(), second.render_renderers());
 }
 
+/// Renderer totals fold every renderer and every retained part.
 #[test]
 fn renderer_totals_fold_every_renderer() {
     let events = capture(|| emit_memory_snapshot(&populated_snapshot(), None));
@@ -489,6 +511,10 @@ fn a_session_with_no_renderer_says_none() {
     assert_eq!(event.text("allocator_allocated_bytes"), Some("none"));
 }
 
+/// A measured allocator report emits one complete scalar field set.
+///
+/// Distinct fixture values prove every field comes from the single authoritative reading rather
+/// than one copy per visible or warm renderer.
 #[test]
 fn measured_allocator_is_emitted_once_without_renderer_multiplication() {
     let events = capture(|| emit_memory_snapshot(&populated_snapshot(), None));
@@ -504,6 +530,10 @@ fn measured_allocator_is_emitted_once_without_renderer_multiplication() {
     assert_eq!(event.text("allocator_largest_block_bytes"), Some("49"));
 }
 
+/// Backend-unavailable allocator telemetry is explicit and keeps its reader identity.
+///
+/// Clearing only the report exercises the unsupported state without turning it into no-renderer
+/// or measured zeroes.
 #[test]
 fn unsupported_allocator_report_is_explicit_not_zero() {
     let mut snapshot = populated_snapshot();

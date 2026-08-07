@@ -369,6 +369,7 @@ impl EventKey {
         Self::RetentionSnapshot,
     ];
 
+    /// Map the stable wire order onto the fixed pinned-state slots.
     const fn index(self) -> usize {
         match self {
             Self::Version => 0,
@@ -452,6 +453,7 @@ enum WorkerMessage {
     Shutdown,
 }
 
+/// Out-of-band shutdown signal shared with a potentially blocked sampler.
 #[derive(Debug, Default)]
 struct SamplerCancellation {
     cancelled: Mutex<bool>,
@@ -459,16 +461,19 @@ struct SamplerCancellation {
 }
 
 impl SamplerCancellation {
+    /// Publish cancellation and wake every sampler waiting on the condition variable.
     fn cancel(&self) {
         let mut cancelled = self.cancelled.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         *cancelled = true;
         self.changed.notify_all();
     }
 
+    /// Read the cancellation flag while recovering a poisoned test or shutdown lock.
     fn is_cancelled(&self) -> bool {
         *self.cancelled.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Block a test sampler until writer shutdown publishes cancellation.
     #[cfg(test)]
     fn wait_until_cancelled(&self) {
         let mut cancelled = self.cancelled.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -479,14 +484,18 @@ impl SamplerCancellation {
     }
 }
 
+/// Pluggable fixed-cost sampler used to make worker scheduling deterministic in tests.
 trait PressureSampler: Send + Sync + 'static {
+    /// Produce one pressure reading, or `None` when cancellation suppresses delivery.
     fn sample(&self, cancellation: &SamplerCancellation) -> Option<ProcessPressure>;
 }
 
+/// Production pressure sampler backed by the platform counter query.
 #[derive(Debug)]
 struct OsPressureSampler;
 
 impl PressureSampler for OsPressureSampler {
+    /// Reject samples that begin or finish after cancellation becomes visible.
     fn sample(&self, cancellation: &SamplerCancellation) -> Option<ProcessPressure> {
         if cancellation.is_cancelled() {
             // When: cancellation.is_cancelled before the query, no new sample
@@ -571,6 +580,7 @@ impl BreadcrumbWriter {
         Self::start_with_sampler_boxed(log_dir, session_id, limits, Arc::new(OsPressureSampler))
     }
 
+    /// Spawn a writer with an injected sampler for deterministic scheduling tests.
     #[cfg(test)]
     fn start_with_sampler<S: PressureSampler>(
         log_dir: &Path,
@@ -581,6 +591,7 @@ impl BreadcrumbWriter {
         Self::start_with_sampler_boxed(log_dir, session_id, limits, Arc::new(sampler))
     }
 
+    /// Validate bounds, create the bounded channel, and transfer all IO to the worker.
     fn start_with_sampler_boxed(
         log_dir: &Path,
         session_id: &str,
@@ -617,6 +628,7 @@ impl BreadcrumbWriter {
         Ok(self.stats.snapshot())
     }
 
+    /// Cancel sampling before queueing shutdown, then join the worker exactly once.
     fn cancel_and_join(&mut self) -> io::Result<()> {
         self.cancellation.cancel();
         let _ = self.sender.send(WorkerMessage::Shutdown);
@@ -635,6 +647,7 @@ impl Drop for BreadcrumbWriter {
     }
 }
 
+/// Reject limits that cannot preserve bounded scheduling and mandatory records.
 fn validate_limits(limits: BreadcrumbLimits) -> io::Result<()> {
     let required = required_file_bytes(limits.ring_capacity)?;
     if limits.max_file_bytes < MIN_FILE_BYTES
@@ -655,6 +668,7 @@ fn validate_limits(limits: BreadcrumbLimits) -> io::Result<()> {
     Ok(())
 }
 
+/// Compute the worst-case bytes for all pinned records, lifecycle slots, and one history line.
 fn required_file_bytes(lifecycle_capacity: usize) -> io::Result<u64> {
     let timestamp = i64::MIN;
     let version = AppVersion { bytes: [b'9'; VERSION_CAPACITY], len: VERSION_CAPACITY as u8 };
@@ -705,6 +719,7 @@ fn required_file_bytes(lifecycle_capacity: usize) -> io::Result<u64> {
         .ok_or_else(|| invalid_limits("breadcrumb byte bound overflow"))
 }
 
+/// Return the serialized byte bound for one maximum-valued pressure record.
 fn maximum_history_line_bytes() -> io::Result<u64> {
     rendered_line_bytes(render_pressure(
         i64::MIN,
@@ -715,6 +730,7 @@ fn maximum_history_line_bytes() -> io::Result<u64> {
     ))
 }
 
+/// Count one rendered line including its trailing newline with checked arithmetic.
 fn rendered_line_bytes(line: String) -> io::Result<u64> {
     u64::try_from(line.len())
         .ok()
@@ -722,6 +738,7 @@ fn rendered_line_bytes(line: String) -> io::Result<u64> {
         .ok_or_else(|| invalid_limits("rendered breadcrumb line exceeds u64"))
 }
 
+/// Construct one consistent error kind for arithmetic and configuration bounds.
 fn invalid_limits(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
@@ -742,6 +759,7 @@ struct WorkerState {
 }
 
 impl WorkerState {
+    /// Allocate bounded lifecycle and pressure rings alongside fixed pinned slots.
     fn new(lifecycle_capacity: usize, history_capacity: usize) -> Self {
         Self {
             pinned: [None; 6],
@@ -752,6 +770,7 @@ impl WorkerState {
         }
     }
 
+    /// Replace keyed state in its stable slot while appending lifecycle transitions.
     fn capture(&mut self, event: BreadcrumbEvent) {
         let captured =
             CapturedEvent { timestamp_unix_ms: chrono::Utc::now().timestamp_millis(), event };
@@ -761,6 +780,7 @@ impl WorkerState {
         }
     }
 
+    /// Append one lifecycle transition, evicting the oldest at capacity.
     fn capture_lifecycle(&mut self, captured: CapturedEvent) {
         if self.lifecycle.len() >= self.lifecycle_capacity {
             // When: lifecycle.len reaches lifecycle_capacity, discard the oldest
@@ -770,6 +790,7 @@ impl WorkerState {
         self.lifecycle.push_back(captured);
     }
 
+    /// Timestamp one pressure sample and keep only the configured newest window.
     fn capture_pressure(&mut self, pressure: ProcessPressure) {
         while self.history.len() >= self.history_capacity {
             let _ = self.history.pop_front();
@@ -777,6 +798,7 @@ impl WorkerState {
         self.history.push_back((chrono::Utc::now().timestamp_millis(), pressure));
     }
 
+    /// Render mandatory state first, then the newest pressure suffix that fits.
     fn render_for_limit(&self, max_bytes: u64) -> Vec<String> {
         let max_bytes = usize::try_from(max_bytes).unwrap_or(usize::MAX);
         let mut lines = Vec::new();
@@ -807,11 +829,13 @@ impl WorkerState {
     }
 }
 
+/// Append one mandatory line and account for its newline in the byte budget.
 fn push_line(lines: &mut Vec<String>, used: &mut usize, line: String) {
     *used = used.saturating_add(line.len().saturating_add(1));
     lines.push(line);
 }
 
+/// Serialize one fixed-cost pressure sample without virtual-address-space data.
 fn render_pressure(timestamp_unix_ms: i64, pressure: ProcessPressure) -> String {
     format!(
         "time_unix_ms={timestamp_unix_ms} event=resource_history private_committed={} resident={}",
@@ -819,6 +843,10 @@ fn render_pressure(timestamp_unix_ms: i64, pressure: ProcessPressure) -> String 
     )
 }
 
+/// Run immediate and deadline pressure samples beside bounded event batching.
+///
+/// Sampling deadlines take priority over caller traffic; cancellation drains at
+/// most one bounded queue snapshot before the final atomic persistence.
 fn run_worker(
     receiver: mpsc::Receiver<WorkerMessage>,
     path: &Path,
@@ -902,6 +930,7 @@ fn run_worker(
     Ok(())
 }
 
+/// Convert channel timeout and disconnect states into explicit worker messages.
 fn receive_next_message(
     receiver: &mpsc::Receiver<WorkerMessage>,
     timeout: Duration,
@@ -913,6 +942,7 @@ fn receive_next_message(
     }
 }
 
+/// Apply an event to worker state and report whether shutdown was requested.
 fn process_message(message: WorkerMessage, state: &mut WorkerState) -> bool {
     match message {
         WorkerMessage::Event(event) => {
@@ -924,10 +954,12 @@ fn process_message(message: WorkerMessage, state: &mut WorkerState) -> bool {
     }
 }
 
+/// Persist one bounded snapshot through the platform's atomic replacement seam.
 fn persist_state(path: &Path, state: &WorkerState, max_bytes: u64) -> io::Result<()> {
     persist_state_with_replace(path, state, max_bytes, crate::path::replace_file)
 }
 
+/// Write a complete temporary snapshot and remove it if replacement fails.
 fn persist_state_with_replace(
     path: &Path,
     state: &WorkerState,

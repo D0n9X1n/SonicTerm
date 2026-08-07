@@ -77,6 +77,9 @@ fn an_enormous_delta_saturates_rather_than_panicking() {
 }
 
 /// The pressure shape carries only fixed-cost process figures.
+///
+/// Exhaustive destructuring makes any added field update this test, so a costly
+/// virtual-address-space metric cannot enter the frequent sample unnoticed.
 #[test]
 fn process_pressure_has_no_virtual_address_space_field() {
     let ProcessPressure { private_committed, resident } = ProcessPressure::unsupported();
@@ -85,6 +88,9 @@ fn process_pressure_has_no_virtual_address_space_field() {
 }
 
 /// The Windows pressure path never starts the address-space walk.
+///
+/// A thread-local counter surrounds both call orders to distinguish the cheap
+/// pressure query from the full sampler's single `VirtualQuery` traversal.
 #[cfg(windows)]
 #[test]
 fn pressure_sampling_skips_reserved_address_space_in_both_call_orders() {
@@ -102,6 +108,8 @@ fn pressure_sampling_skips_reserved_address_space_in_both_call_orders() {
 }
 
 /// macOS pressure sampling reports the supported resident figure honestly.
+///
+/// The live platform query must yield resident bytes while preserving the unavailable commit field.
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_pressure_measures_resident_and_declares_private_unsupported() {

@@ -91,6 +91,7 @@ pub enum AllocatorSource {
 }
 
 impl AllocatorSource {
+    /// Return the stable wire label for the selected renderer class.
     const fn as_str(self) -> &'static str {
         match self {
             Self::MainWindow => "main",
@@ -111,6 +112,7 @@ pub struct AllocatorReading {
     pub snapshot: Option<AllocatorSnapshot>,
 }
 
+/// One allocator field rendered as a number or an explicit absence sentinel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AllocatorMetric {
     Measured(u64),
@@ -128,6 +130,7 @@ impl fmt::Display for AllocatorMetric {
     }
 }
 
+/// Capability state that tells readers how to interpret every allocator field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AllocatorState {
     Measured,
@@ -145,6 +148,10 @@ impl fmt::Display for AllocatorState {
     }
 }
 
+/// Select one renderer in main/visible/warm priority and read its shared device once.
+///
+/// Visible candidates use their lowest label so `HashMap` iteration cannot change attribution;
+/// `FnOnce` makes a second allocator query impossible in this call.
 fn read_authoritative_allocator<'a, T>(
     main: Option<(&'a str, &'a T)>,
     visible: &[(&'a str, &'a T)],
@@ -273,6 +280,7 @@ impl MemorySnapshot {
         renderers.into_iter().map(RendererSummary::render).collect::<Vec<_>>().join("; ")
     }
 
+    /// Classify allocator telemetry as measured, backend-unsupported, or renderer-absent.
     fn allocator_state(&self) -> AllocatorState {
         match self.allocator.as_ref().and_then(|reading| reading.snapshot) {
             Some(_) => AllocatorState::Measured,
@@ -281,6 +289,7 @@ impl MemorySnapshot {
         }
     }
 
+    /// Project one measured allocator scalar while preserving both absence states.
     fn allocator_metric(&self, read: impl FnOnce(AllocatorSnapshot) -> u64) -> AllocatorMetric {
         match self.allocator.as_ref().and_then(|reading| reading.snapshot) {
             Some(snapshot) => AllocatorMetric::Measured(read(snapshot)),
@@ -289,10 +298,12 @@ impl MemorySnapshot {
         }
     }
 
+    /// Return the selected renderer-class label, or `none` before any renderer exists.
     fn allocator_source(&self) -> &'static str {
         self.allocator.as_ref().map_or("none", |reading| reading.source.as_str())
     }
 
+    /// Return the selected renderer identifier, or `none` when no query was attempted.
     fn allocator_label(&self) -> &str {
         self.allocator.as_ref().map_or("none", |reading| reading.label.as_str())
     }
@@ -419,6 +430,10 @@ impl super::App {
     /// as [`super::retention::measure_pane`] does — a diagnostic must never
     /// stall the thread it reports from. Skips are counted so the emitted line
     /// can say the total is partial.
+    ///
+    /// Allocator reports describe the shared device, so the cycle queries one
+    /// renderer in main/visible/warm priority instead of summing duplicate
+    /// reports from every window.
     pub(super) fn build_memory_snapshot(&self) -> MemorySnapshot {
         let mut session = PaneRetention::default();
         let mut panes_sampled = 0usize;

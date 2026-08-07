@@ -385,6 +385,9 @@ pub enum DeviceMemoryPolicy {
 }
 
 /// Select the device memory policy for an adapter classification.
+///
+/// Software adapters minimize allocator reserve; hardware adapters retain
+/// wgpu's performance-oriented policy.
 #[doc(hidden)]
 #[must_use]
 pub fn device_memory_policy_from(software_rendering: bool) -> DeviceMemoryPolicy {
@@ -395,6 +398,9 @@ pub fn device_memory_policy_from(software_rendering: bool) -> DeviceMemoryPolicy
 }
 
 /// Build the sole wgpu device descriptor used by the renderer.
+///
+/// Starting from wgpu defaults changes only `memory_hints`, keeping policy
+/// selection independent from feature and limit negotiation.
 #[doc(hidden)]
 #[must_use]
 pub fn device_descriptor_for(software_rendering: bool) -> DeviceDescriptor<'static> {
@@ -433,6 +439,7 @@ pub fn allocator_snapshot_from(report: &wgpu::AllocatorReport) -> AllocatorSnaps
     }
 }
 
+/// Preserve report unavailability while projecting an available report to scalar counters.
 fn allocator_snapshot_from_report(
     report: Option<wgpu::AllocatorReport>,
 ) -> Option<AllocatorSnapshot> {

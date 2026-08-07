@@ -32,12 +32,14 @@ fn version() -> AppVersion {
     "1.2.3".parse().expect("valid version")
 }
 
+/// Deterministic sampler that exposes each delivered value to the test thread.
 struct SequenceSampler {
     next: AtomicU64,
     ticks: std::sync::mpsc::Sender<u64>,
 }
 
 impl PressureSampler for SequenceSampler {
+    /// Increment both the pressure fixture and an observation channel unless cancelled.
     fn sample(&self, cancellation: &SamplerCancellation) -> Option<ProcessPressure> {
         if cancellation.is_cancelled() {
             return None;
@@ -51,11 +53,13 @@ impl PressureSampler for SequenceSampler {
     }
 }
 
+/// Sampler that holds the worker until its out-of-band cancellation signal arrives.
 struct BlockingSampler {
     entered: std::sync::mpsc::SyncSender<()>,
 }
 
 impl PressureSampler for BlockingSampler {
+    /// Announce entry, wait for cancellation, and suppress a post-cancel sample.
     fn sample(&self, cancellation: &SamplerCancellation) -> Option<ProcessPressure> {
         let _ = self.entered.send(());
         cancellation.wait_until_cancelled();
@@ -63,6 +67,9 @@ impl PressureSampler for BlockingSampler {
     }
 }
 
+/// Startup persists a pressure sample before the long periodic deadline.
+///
+/// A one-hour interval and observed sequence value prove the worker sampled immediately.
 #[test]
 fn immediate_pressure_sample_is_persisted() {
     let dir = scratch("immediate-pressure");
@@ -93,6 +100,9 @@ fn immediate_pressure_sample_is_persisted() {
     fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
+/// Ordinary receive deadlines repeatedly invoke the pressure sampler.
+///
+/// The sampler's channel supplies deterministic ticks, avoiding timing assertions or test sleeps.
 #[test]
 fn pressure_sampler_runs_on_ordinary_deadlines_without_sleeps() {
     let dir = scratch("deadline-pressure");
@@ -117,6 +127,9 @@ fn pressure_sampler_runs_on_ordinary_deadlines_without_sleeps() {
     fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
+/// Shutdown wakes a blocked sampler and persists no result after cancellation.
+///
+/// The blocking fixture announces entry, then only the cancellation condition can release it.
 #[test]
 fn shutdown_cancels_a_blocked_sampler_and_records_no_cancelled_sample() {
     let dir = scratch("cancel-pressure");
@@ -148,6 +161,10 @@ fn shutdown_cancels_a_blocked_sampler_and_records_no_cancelled_sample() {
     fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
+/// A full event queue cannot prevent shutdown of a blocked sampler.
+///
+/// Capacity one fills the channel before shutdown; the out-of-band cancellation path must still
+/// release and join the worker.
 #[test]
 fn full_queue_during_blocked_sample_does_not_strand_shutdown() {
     let dir = scratch("full-queue-cancel");
@@ -182,6 +199,10 @@ fn full_queue_during_blocked_sample_does_not_strand_shutdown() {
     fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
+/// Dropping the writer stops its worker even while another sender remains alive.
+///
+/// A retained recorder prevents channel disconnect, so only explicit cancellation and join can
+/// complete the drop thread.
 #[test]
 fn dropping_writer_exits_even_while_a_recorder_clone_is_alive() {
     let dir = scratch("drop-pressure");
@@ -210,6 +231,10 @@ fn dropping_writer_exits_even_while_a_recorder_clone_is_alive() {
     fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
+/// A long run preserves mandatory records while bounding history to its newest suffix.
+///
+/// Monotonic sample values expose gaps, stale retention, and accidental eviction of pinned or
+/// lifecycle records.
 #[test]
 fn long_sampling_run_keeps_mandatory_records_and_only_newest_history() {
     let dir = scratch("long-pressure");
@@ -295,6 +320,9 @@ fn long_sampling_run_keeps_mandatory_records_and_only_newest_history() {
     fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
+/// Continuous caller traffic cannot starve an elapsed pressure deadline.
+///
+/// A producer floods the bounded queue while the sequence channel must still observe a later tick.
 #[test]
 fn continuous_events_do_not_starve_pressure_deadlines() {
     let dir = scratch("deadline-priority");
@@ -328,6 +356,9 @@ fn continuous_events_do_not_starve_pressure_deadlines() {
     fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
+/// The computed file cap fits every configured lifecycle slot plus pressure history.
+///
+/// Filling all 64 slots exercises the serialized worst-case structure under the derived budget.
 #[test]
 fn large_lifecycle_capacity_stays_within_dynamic_file_cap() {
     let dir = scratch("large-lifecycle");
@@ -366,6 +397,9 @@ fn large_lifecycle_capacity_stays_within_dynamic_file_cap() {
     fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
+/// Failed replacement leaves the previous complete file and removes its candidate.
+///
+/// An injected permission error exercises the cleanup branch without depending on platform IO.
 #[test]
 fn failed_atomic_replace_preserves_prior_file_and_removes_temp() {
     let dir = scratch("atomic-failure");
@@ -472,6 +506,9 @@ fn writer_persists_allowlisted_events_on_its_background_thread() {
     fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
+/// Maximum allocator values render every field without truncation or overflow.
+///
+/// Distinct field names around boundary values catch omissions in the retention wire format.
 #[test]
 fn retention_snapshot_renders_all_maximum_allocator_fields() {
     let rendered = BreadcrumbEvent::RetentionSnapshot {
@@ -498,6 +535,9 @@ fn retention_snapshot_renders_all_maximum_allocator_fields() {
     }
 }
 
+/// A missing allocator report renders an explicit unsupported sentinel.
+///
+/// The exact suffix distinguishes unavailable capability from an allocator measured at zero.
 #[test]
 fn retention_snapshot_renders_explicitly_unsupported_allocator() {
     let rendered = BreadcrumbEvent::RetentionSnapshot {
@@ -510,6 +550,9 @@ fn retention_snapshot_renders_explicitly_unsupported_allocator() {
     assert!(rendered.ends_with("allocator=unsupported"), "{rendered}");
 }
 
+/// Allocator retention does not make queued breadcrumb events heap-owning or non-`Copy`.
+///
+/// Compile-time trait assertions pin the fixed-cost event representation used by `try_send`.
 #[test]
 fn breadcrumb_event_and_allocator_remain_copy() {
     fn assert_copy<T: Copy>() {}
@@ -517,6 +560,9 @@ fn breadcrumb_event_and_allocator_remain_copy() {
     assert_copy::<BreadcrumbAllocator>();
 }
 
+/// Default cadence and capacity retain exactly four minutes of pressure evidence.
+///
+/// Multiplying both configured values catches a drift in either axis that changes the window.
 #[test]
 fn default_pressure_window_is_four_minutes() {
     let limits = BreadcrumbLimits::default();
@@ -552,6 +598,9 @@ fn lifecycle_history_is_ordered_and_not_coalesced() {
     fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
+/// Worker serialization orders pinned state, lifecycle transitions, then newest history.
+///
+/// Out-of-order insertion and an over-capacity history ring expose ordering and eviction mistakes.
 #[test]
 fn worker_state_serializes_pinned_lifecycle_then_newest_history() {
     let mut state = WorkerState::new(3, 2);
@@ -589,6 +638,9 @@ fn worker_state_serializes_pinned_lifecycle_then_newest_history() {
     assert!(!text.contains("private_committed=10"));
 }
 
+/// The tight valid byte cap preserves mandatory records and at least one history sample.
+///
+/// Starting a real worker at the derived bound verifies validation and serialization agree.
 #[test]
 fn valid_binding_cap_preserves_mandatory_and_newest_history() {
     let dir = scratch("binding-cap");
@@ -664,6 +716,9 @@ fn repeated_state_is_coalesced_to_the_latest_value() {
     fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
+/// Writer startup rejects every zero, over-maximum, and under-budget limit boundary.
+///
+/// A table drives the production validator, followed by an accepted maximum-history control.
 #[test]
 fn start_rejects_each_invalid_limit() {
     let dir = scratch("invalid-limits");
@@ -711,6 +766,9 @@ fn start_rejects_each_invalid_limit() {
     fs::remove_dir_all(dir).expect("remove scratch directory");
 }
 
+/// The required byte budget grows with lifecycle capacity from a valid minimum.
+///
+/// Comparing minimum and larger capacities pins the dynamic term rather than a fixed file floor.
 #[test]
 fn dynamic_file_budget_includes_mandatory_records_and_one_history() {
     let minimum = required_file_bytes(MIN_LIFECYCLE_CAPACITY).expect("required bytes");

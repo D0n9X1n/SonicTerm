@@ -256,6 +256,7 @@ fn macos_task_info() -> Option<libc::proc_taskinfo> {
     Some(info)
 }
 
+/// Expand one validated macOS task-info record into the full memory shape.
 #[cfg(target_os = "macos")]
 fn sample_platform() -> ProcessMemory {
     let Some(info) = macos_task_info() else {
@@ -270,6 +271,7 @@ fn sample_platform() -> ProcessMemory {
     }
 }
 
+/// Project the fixed-cost fields from one validated macOS task-info record.
 #[cfg(target_os = "macos")]
 fn sample_pressure_platform() -> ProcessPressure {
     let Some(info) = macos_task_info() else {
@@ -318,6 +320,7 @@ fn windows_counters() -> Option<windows::Win32::System::ProcessStatus::PROCESS_M
     Some(counters)
 }
 
+/// Project Windows commit and working-set counters without walking address space.
 #[cfg(windows)]
 fn sample_pressure_platform() -> ProcessPressure {
     let Some(counters) = windows_counters() else {
@@ -351,11 +354,13 @@ std::thread_local! {
     static RESERVED_ADDRESS_SPACE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// Reset the per-thread address-space walk probe before a Windows sampler test.
 #[cfg(all(test, windows))]
 fn reset_reserved_address_space_calls() {
     RESERVED_ADDRESS_SPACE_CALLS.set(0);
 }
 
+/// Read the per-thread address-space walk probe after a Windows sampler call.
 #[cfg(all(test, windows))]
 fn reserved_address_space_calls() -> usize {
     RESERVED_ADDRESS_SPACE_CALLS.get()
@@ -420,6 +425,7 @@ fn sample_platform() -> ProcessMemory {
     ProcessMemory::unsupported()
 }
 
+/// Unsupported platforms preserve absence for both pressure figures.
 #[cfg(not(any(target_os = "macos", windows)))]
 fn sample_pressure_platform() -> ProcessPressure {
     ProcessPressure::unsupported()
