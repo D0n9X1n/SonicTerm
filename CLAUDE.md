@@ -227,6 +227,16 @@ a reproduction.
   Embedded upstream FreeType, libpng, zlib, and HarfBuzz scripts retain their
   vendored layouts and are exempt. Packaging executables belong in `scripts/`,
   while maintained packaging instructions belong on the `Packaging` wiki page.
+- **Every code change gets an authored-comment pass, including unit tests.**
+  Before declaring work complete, inspect every changed Rust implementation and
+  unit-test file for missing comments. Public APIs require concise purpose
+  Rustdoc; non-obvious control flow, invariants, ownership, units, platform
+  behavior, ignored failures, safety, and performance constraints require
+  rationale at the relevant code. Every added or materially changed unit test
+  requires a concise comment stating the behavior or contract it protects and
+  explaining any non-obvious setup or assertion. Passing the comment checker is
+  only the minimum; its test exclusions are not permission to leave tests
+  undocumented. Do not add comments that merely restate syntax.
 - **Unit tests use the exact flat `file_tests.rs` sibling pattern, never inline.**
   For every source file `foo.rs`, put its unit tests beside it in
   `foo_tests.rs` and declare them from `foo.rs` with

@@ -68,6 +68,7 @@ action = "move_tab_to_new_window"
 
 #[test]
 fn save_current_settings_action_parses_for_user_bindings() {
+    // Contract: users can bind the save action even though bundled keymaps leave it unbound.
     let source = r#"
 [meta]
 name = "test"

@@ -65,6 +65,34 @@ fn make_glyphinfo(text: &str, num_cells: u8, font_idx: usize, info: &Info) -> Gl
     }
 }
 
+// A synthetic replacement has its own byte offsets, but the renderer must still
+// address it through the source cluster and occupy the source cluster's cells.
+fn restore_replacement_cluster(glyphs: &mut [GlyphInfo], source_start: usize, source_cells: u8) {
+    let total_advance: f64 = glyphs.iter().map(|glyph| glyph.x_advance.get()).sum();
+    let last = glyphs.len().saturating_sub(1);
+    let mut remaining_cells = source_cells;
+
+    for (index, glyph) in glyphs.iter_mut().enumerate() {
+        glyph.cluster = source_start as u32;
+        let cells = if index == last {
+            // The final glyph receives every unassigned source cell so rounding
+            // cannot shrink the replacement cluster.
+            remaining_cells
+        } else if total_advance == 0.0 {
+            // When: total_advance is zero, advance weights cannot divide the
+            // source span, so reserve at most one cell for this non-final glyph.
+            1.min(remaining_cells)
+        } else {
+            // When: total_advance is non-zero, divide the source span by each
+            // replacement glyph's relative advance without exceeding the remainder.
+            ((f64::from(source_cells) * glyph.x_advance.get() / total_advance).ceil() as u8)
+                .min(remaining_cells)
+        };
+        glyph.num_cells = cells;
+        remaining_cells = remaining_cells.saturating_sub(cells);
+    }
+}
+
 struct FontPair {
     face: ftwrap::Face,
     font: RefCell<harfbuzz::Font>,
@@ -536,22 +564,29 @@ impl HarfbuzzShaper {
                     first_info.cluster..first_info.cluster + first_info.len,
                     presentation_width,
                 ) {
-                    Ok(shape) => Ok(shape),
+                    Ok(shape) => shape,
                     Err(e) => {
                         error!("{:?} for {:?}", e, substr);
-                        self.do_shape(
+                        let replacement = make_question_string(substr);
+                        let mut glyphs = self.do_shape(
                             0,
-                            &make_question_string(substr),
+                            &replacement,
                             font_size,
                             dpi,
                             no_glyphs,
                             presentation,
                             direction,
-                            sub_range,
-                            presentation_width,
-                        )
+                            0..replacement.len(),
+                            None,
+                        )?;
+                        restore_replacement_cluster(
+                            &mut glyphs,
+                            cluster_info.start,
+                            cluster_info.cell_width,
+                        );
+                        glyphs
                     }
-                }?;
+                };
 
                 cluster.append(&mut shape);
                 continue;
@@ -880,3 +915,7 @@ impl<'a> ClusterResolver<'a> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "harfbuzz_tests.rs"]
+mod harfbuzz_tests;

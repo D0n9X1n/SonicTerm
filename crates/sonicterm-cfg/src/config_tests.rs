@@ -96,6 +96,7 @@ fn seeding_user_examples_writes_theme_and_platform_keymaps() {
 
 #[test]
 fn persist_font_runtime_values_changes_only_decorated_font_scalars() {
+    // Contract: persistence changes only font scalars while preserving formatting and unknown keys.
     let nonce =
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
     let dir = std::env::temp_dir().join(format!(
@@ -148,6 +149,7 @@ fn font_persist_test_dir(label: &str) -> std::path::PathBuf {
 
 #[test]
 fn persist_font_runtime_values_handles_integer_missing_and_inline_fields() {
+    // Contract: persistence supports every valid TOML shape used for the two font scalars.
     let dir = font_persist_test_dir("shapes");
     let integer_path = dir.join("integer.toml");
     let missing_fields_path = dir.join("missing-fields.toml");
@@ -177,6 +179,7 @@ fn persist_font_runtime_values_handles_integer_missing_and_inline_fields() {
 
 #[test]
 fn persist_font_runtime_values_creates_starter_then_patches_it() {
+    // Contract: a missing destination is seeded with user examples before live values are applied.
     let dir = font_persist_test_dir("missing-destination");
     let path = dir.join("config").join("sonicterm.toml");
 
@@ -194,6 +197,7 @@ fn persist_font_runtime_values_creates_starter_then_patches_it() {
 
 #[test]
 fn persist_font_runtime_values_rejects_bad_input_and_documents_without_changes() {
+    // Contract: invalid values or documents fail without changing the destination bytes.
     let dir = font_persist_test_dir("rejections");
     let valid_path = dir.join("valid.toml");
     let malformed_path = dir.join("malformed.toml");
@@ -230,6 +234,7 @@ fn persist_font_runtime_values_rejects_bad_input_and_documents_without_changes()
 
 #[test]
 fn persist_font_runtime_values_rejects_busy_process_and_cross_process_locks() {
+    // Contract: both in-process and filesystem locks prevent concurrent config replacement.
     let dir = font_persist_test_dir("busy-lock");
     let path = dir.join("sonicterm.toml");
     let original = b"[font]\nsize = 13\nweight_scale = 1\n";
@@ -259,6 +264,7 @@ fn persist_font_runtime_values_rejects_busy_process_and_cross_process_locks() {
 
 #[test]
 fn persist_font_runtime_values_rejects_a_concurrent_disk_change() {
+    // Contract: compare-before-replace preserves a concurrent writer and removes staged files.
     let dir = font_persist_test_dir("concurrent-change");
     let path = dir.join("sonicterm.toml");
     let original = b"theme = \"before\"\n[font]\nsize = 13\nweight_scale = 1\n";
@@ -284,6 +290,7 @@ fn persist_font_runtime_values_rejects_a_concurrent_disk_change() {
 
 #[test]
 fn persist_font_runtime_values_is_idempotent_and_replaces_existing_destination() {
+    // Contract: repeated saves are byte-idempotent while replacing an existing destination.
     let dir = font_persist_test_dir("repeat");
     let path = dir.join("sonicterm.toml");
     std::fs::write(&path, "theme = \"keep\"\n[font]\nsize = 13.0\nweight_scale = 1.0\n").unwrap();
@@ -301,6 +308,7 @@ fn persist_font_runtime_values_is_idempotent_and_replaces_existing_destination()
 
 #[test]
 fn persist_font_runtime_values_retains_crlf_and_rejects_mixed_endings() {
+    // Contract: homogeneous line endings survive, while ambiguous mixed documents stay untouched.
     let dir = font_persist_test_dir("line-endings");
     let crlf_path = dir.join("crlf.toml");
     let mixed_path = dir.join("mixed.toml");
@@ -339,6 +347,7 @@ fn persist_font_runtime_values_retains_crlf_and_rejects_mixed_endings() {
 #[test]
 #[allow(clippy::permissions_set_readonly_false)]
 fn failed_read_only_save_removes_the_staged_temp_file() {
+    // Contract: a Windows read-only replacement failure leaves no staged temporary file.
     let dir = font_persist_test_dir("readonly-cleanup");
     let path = dir.join("sonicterm.toml");
     let original = b"[font]\nsize = 13\nweight_scale = 1\n";
@@ -365,6 +374,7 @@ fn failed_read_only_save_removes_the_staged_temp_file() {
 #[cfg(unix)]
 #[test]
 fn persist_font_runtime_values_follows_symlink_and_preserves_permissions() {
+    // Contract: Unix saves update the symlink target without replacing the link or its mode.
     use std::os::unix::fs::{symlink, PermissionsExt};
 
     let dir = font_persist_test_dir("symlink");

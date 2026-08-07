@@ -15,6 +15,7 @@ fn exports_core_cell_contracts() {
 
 #[test]
 fn glyph_keys_default_to_normal_raster_identity() {
+    // Contract: every legacy glyph-key constructor preserves normal raster identity by default.
     let cell = Cell::plain('A', Color::Default, Color::Default, CellFlags::empty());
 
     assert_eq!(GlyphKey::from_cell(&cell).unwrap().raster_variant, GlyphRasterVariant::Normal);
@@ -31,6 +32,7 @@ fn glyph_keys_default_to_normal_raster_identity() {
 
 #[test]
 fn glyph_raster_variant_separates_otherwise_identical_atlas_keys() {
+    // Contract: raster roles participate in glyph identity and cannot alias one atlas entry.
     let normal = GlyphKey::shaped('A', 0, 17, false, false);
     let footer = normal.with_raster_variant(GlyphRasterVariant::PaletteFooter);
     let title = normal.with_raster_variant(GlyphRasterVariant::TabTitle);

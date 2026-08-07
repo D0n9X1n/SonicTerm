@@ -32,6 +32,7 @@ fn move_tab_to_new_window_is_searchable_and_unbound_by_default() {
 
 #[test]
 fn save_current_settings_is_present_exhaustively_labeled_and_unbound_by_default() {
+    // Contract: the save action is fully represented in the palette but has no default shortcut.
     let actions = palette_actions();
     assert!(actions.contains(&Action::SaveCurrentSettings));
     assert!(covers_every_variant_kind());
@@ -50,6 +51,7 @@ fn save_current_settings_is_present_exhaustively_labeled_and_unbound_by_default(
 
 #[test]
 fn save_current_settings_is_searchable_by_expected_terms() {
+    // Contract: common persistence and font-setting terms all discover the save action.
     for query in ["save", "persist", "save font", "current settings"] {
         let mut palette = CommandPalette::new();
         palette.set_keymap(&Keymap::default());

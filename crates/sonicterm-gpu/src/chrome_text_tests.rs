@@ -4,6 +4,7 @@ use super::*;
 
 #[test]
 fn native_raster_roles_use_distinct_tiles_without_projection_scaling() {
+    // Contract: each chrome role has a distinct atlas tile drawn at its native raster size.
     let _font_lock = TRACKED_FONT_STACK_LOCK.lock().expect("font fixture lock");
     let mut atlas = GlyphAtlas::new(512, 512);
     let screen = (800.0, 100.0);
