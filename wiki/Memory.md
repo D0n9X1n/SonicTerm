@@ -32,6 +32,15 @@ With one to four panes open, each gets the full 64 MiB image allowance. Beyond
 that the share shrinks — twenty panes get about 12.8 MiB each — so opening
 many panes that all display images will evict older ones.
 
+### wgpu allocation policy
+
+Detected software adapters request wgpu `MemoryHints::MemoryUsage`; hardware
+adapters retain `MemoryHints::Performance`. On Windows this includes DX12 WARP.
+With wgpu 30 on D3D12, the policy changes initial allocator blocks from 128 MiB
+device / 64 MiB host to 8 MiB device / 4 MiB host. It is a block-sizing and
+placement hint, not a resource cap: buffers, textures, and other resources
+larger than those initial blocks still allocate.
+
 ### Scrollback is bounded twice
 
 `[terminal].scrollback` sets a row count, and retained bytes are bounded
@@ -78,7 +87,14 @@ and the only one that survives a session nobody expected to have to explain:
 | `process_*_bytes` | What the OS says the whole process holds | Compare against the session total — a large gap is allocator or driver memory, not retention |
 | `session_total_bytes` + seam fields | Everything the panes hold, summed | See the per-seam table below |
 | `renderer_total_bytes`, `renderers=` | Glyph and image atlases, software frame, per renderer | Close windows for `visible`; lower the warm-pool size for `warm` |
+| Shared wgpu allocator | Allocated and reserved bytes, allocation and block counts, and the largest block, aggregated once per device/context | Compare reserved against allocated; visible and warm renderers sharing a context do not multiply this report |
 | `*_delta` | Movement since the previous snapshot | Read the direction, not the magnitude |
+
+The allocator portion has three explicit states: measured figures, backend
+reporting unsupported, and no renderer. Unsupported is not zero, and no
+renderer is not a failed measurement. It stays on this existing 30-second
+aggregate cadence; it is not sampled per frame or on the independent 5-second
+resource-history cadence.
 
 Three readings mean "no number" and they are not interchangeable.
 `unsupported` means this platform exposes no such figure — on macOS,
@@ -256,6 +272,14 @@ SonicTerm 会限制自身占用的内存，并报告实际占用情况。本页�
 缩小——20 个面板时每个约 12.8 MiB——因此打开大量同时显示图像的面板会导致较
 早的图像被清除。
 
+### wgpu 分配策略
+
+检测到的软件 adapter 会请求 wgpu `MemoryHints::MemoryUsage`；硬件 adapter 仍使用
+`MemoryHints::Performance`。在 Windows 上，这包括 DX12 WARP。在 D3D12 上使用
+wgpu 30 时，该策略会把初始分配器块从 device 128 MiB / host 64 MiB 改为
+device 8 MiB / host 4 MiB。这只是块大小与放置提示，不是资源上限：大于这些初始块的
+buffer、texture 与其它资源仍然可以分配。
+
 ### 回滚缓冲受两重限制
 
 `[terminal].scrollback` 设定行数，而保留字节另有 24 MiB 的独立限制。带有超
@@ -298,7 +322,12 @@ level = "info"
 | `process_*_bytes` | 操作系统所报告的整个进程占用 | 与会话总量对比——差距很大说明是分配器或驱动内存，而非保留量 |
 | `session_total_bytes` 及各接缝字段 | 所有窗格保留量的总和 | 参见下方按接缝划分的表格 |
 | `renderer_total_bytes`、`renderers=` | 每个渲染器的字形图集、图像图集与软件帧 | `visible` 可关闭窗口；`warm` 可调低预热池大小 |
+| 共享 wgpu 分配器 | 每个 device/context 的已分配与已保留字节、allocation 与 block 数量、最大 block | 比较 reserved 与 allocated；共享同一 context 的可见和预热渲染器不会重复计数 |
 | `*_delta` | 相对上一次快照的变化 | 关注方向，而非绝对值 |
+
+分配器部分明确区分三种状态：已测量的数据、backend 不支持报告，以及没有渲染器。
+不支持不等于零，没有渲染器也不等于测量失败。它沿用既有的 30 秒聚合周期；不会
+逐帧采样，也不使用独立的 5 秒资源历史周期。
 
 有三种读数表示“没有数值”，且彼此不可互换。`unsupported` 表示该平台不提供此数据
 ——在 macOS 上 private/committed 即为不支持，因为该平台上有意义的数据是

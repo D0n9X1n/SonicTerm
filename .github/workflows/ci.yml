@@ -142,6 +142,10 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo test -p sonicterm-gpu --test windows_software_present_capability -- --nocapture
 
+      - name: Verify Windows WARP allocator baseline
+        if: runner.os == 'Windows'
+        run: cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture
+
       - name: Verify Windows selection presentation
         if: runner.os == 'Windows'
         run: cargo test -p sonicterm-app --test windows_software_selection_present -- --nocapture

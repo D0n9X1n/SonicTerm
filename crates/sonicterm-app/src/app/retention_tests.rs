@@ -969,6 +969,15 @@ fn production_sampling_persists_breadcrumbs_with_the_memory_log_switched_off() {
     }
     assert!(written.contains("windows=2 panes=1"), "wrong app counts: {written}");
     assert!(written.contains("live_renderers="), "missing renderer count: {written}");
+    assert!(
+        written.contains("allocator=unsupported")
+            || (written.contains("allocator_allocated_bytes=")
+                && written.contains("allocator_reserved_bytes=")
+                && written.contains("allocator_allocations=")
+                && written.contains("allocator_blocks=")
+                && written.contains("allocator_largest_block_bytes=")),
+        "allocator state was omitted or fabricated: {written}"
+    );
 
     std::fs::remove_dir_all(dir).expect("remove breadcrumb scratch directory");
 }

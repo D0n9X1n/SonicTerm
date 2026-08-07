@@ -158,6 +158,15 @@ timer, and an otherwise idle session wakes on that cadence to take the sample.
 records the due sample in `AboutToWait`, so an idle session is measured without
 repainting.
 
+The aggregate also reports the shared wgpu allocator **once per device/context**,
+not once per visible or warm renderer. A measured report contains
+`allocator_allocated_bytes`, `allocator_reserved_bytes`,
+`allocator_allocations`, `allocator_blocks`, and
+`allocator_largest_block_bytes`. `allocator_state` explicitly distinguishes
+`measured`, `unsupported` when the selected backend exposes no report, and
+`none` when no renderer exists. It remains on this 30-second aggregate cadence; it
+is neither per-frame data nor part of the 5-second process-history sampler.
+
 #### Pane and session retention
 
 At `debug` level, `target="memory"` samples what each pane retains, at most
@@ -550,9 +559,47 @@ A marker carries only process identity — session id, pid, version, platform,
 start time, and state. No shell, no command, no environment, no window or tab
 titles, no paths you opened.
 
+Alongside it, a background breadcrumb worker takes one immediate fixed-cost
+process sample and then another every 5 seconds. It retains at most 48 samples,
+about four minutes. The stable wire record is exactly
+`event=resource_history private_committed=... resident=...`: there is no
+`virtual` field. On Windows this uses fixed-cost `GetProcessMemoryInfo`; the
+expensive `VirtualQuery` walk of virtual address space remains only on the
+30-second full `event=resource` / `memory snapshot` path. macOS private commit
+remains explicitly `unsupported`.
+
+The breadcrumb file has three partitions:
+
+- The latest version, platform, renderer and adapter, counts, full resource
+  sample, retention, and allocator state are pinned. Full process state uses
+  `event=resource private_committed=... resident=... virtual=...`; retention
+  uses `event=retention session_bytes=... renderer_bytes=...
+  live_renderers=...`. Allocator state uses either `allocator=unsupported` or
+  the same five `allocator_*` fields listed in the aggregate report.
+- Lifecycle transitions remain ordered and bounded.
+- `resource_history` is rolling; only its oldest samples are evicted.
+
+History therefore cannot evict identity or retention. Custom file budgets are
+accepted only when validation proves that the configured budget can hold the
+mandatory pinned records, configured lifecycle (`ring_capacity`) capacity, and
+one maximum-width history record. The documented minimum is 4096 bytes, but
+that does not imply every `ring_capacity` fits every budget. Within an accepted
+budget, mandatory state is preserved first and the newest history that fits is
+retained.
+
+Each rewrite is a same-directory atomic replace. A hard OOM or
+`TerminateProcess` cannot run a handler, so the surviving artifact is the last
+complete **pre-OOM breadcrumb**, not an OOM dump and not proof of cause. If the
+process dies during a rewrite, the in-progress temporary write may be lost while
+the prior complete file survives. A timestamp gap in which `resource_history`
+continues after the pinned `retention` timestamp stops is evidence of an
+event-loop stall or starvation.
+
 **A stale marker proves the session did not finish. It does not say why.**
 `SIGKILL`, a power cut, an OOM kill, and a hard reset are indistinguishable
 from the marker alone, so the report names no cause rather than guessing one.
+The observed 32 GiB incident is absent from the copied logs and is not claimed
+fixed by the allocator policy or these diagnostics.
 
 Three properties are worth knowing when reading a report:
 
@@ -751,6 +798,14 @@ SonicTerm 所依赖的 API 无法获取；用替代值上报，等于在唯一�
 采样沿用既有的 30 秒保留量节奏，而非新增计时器；空闲会话也会按该节奏唤醒以完成
 采样。**该次唤醒不会绘制任何帧。** 它先在 `NewEvents` 中抑制重绘，再在
 `AboutToWait` 中记录到期采样，因此空闲会话被测量时不会重绘。
+
+聚合报告还会按每个 device/context 对共享 wgpu 分配器**只报告一次**，而不是对每个
+可见或预热渲染器各报告一次。已测量的报告包含
+`allocator_allocated_bytes`、`allocator_reserved_bytes`、
+`allocator_allocations`、`allocator_blocks` 与
+`allocator_largest_block_bytes`。`allocator_state` 明确区分 `measured`、所选 backend
+不提供报告时的 `unsupported`，以及没有渲染器时的 `none`。它仍沿用 30 秒聚合周期；既
+不是逐帧数据，也不属于 5 秒进程历史采样器。
 
 #### 窗格与会话保留量
 
@@ -1104,8 +1159,37 @@ grep 'did not reach its shutdown path' ~/.sonicterm/logs/sonicterm.log
 标记只记录进程身份——会话 id、pid、版本、平台、启动时间与状态。不含 shell、命令、
 环境变量、窗口或标签标题，也不含你打开过的任何路径。
 
+与此同时，后台面包屑 worker 会立即做一次固定成本的进程采样，之后每 5 秒再采样一次；
+最多保留 48 个样本，约四分钟。稳定的 wire 记录严格为
+`event=resource_history private_committed=... resident=...`，没有 `virtual` 字段。
+Windows 使用固定成本的 `GetProcessMemoryInfo`；代价较高的 `VirtualQuery` 虚拟地址空间
+遍历只保留在每 30 秒一次的完整 `event=resource` / `memory snapshot` 路径。macOS 的
+private commit 仍明确为 `unsupported`。
+
+面包屑文件分为三个区段：
+
+- 最新 version、platform、renderer 与 adapter、counts、完整 resource 样本、retention
+  和 allocator 状态固定保留。完整进程状态使用
+  `event=resource private_committed=... resident=... virtual=...`；retention 使用
+  `event=retention session_bytes=... renderer_bytes=... live_renderers=...`。allocator
+  状态使用 `allocator=unsupported`，或聚合报告中列出的同一组五个 `allocator_*` 字段；
+- lifecycle transition 保持有序且有界；
+- `resource_history` 滚动保留，只淘汰最旧的历史样本。
+
+因此历史无法挤掉身份或 retention。只有当校验能证明配置预算容得下强制保留的固定状态、
+配置的 lifecycle（`ring_capacity`）容量与一条最大宽度历史记录时，才接受自定义文件预算；
+文档下限为 4096 bytes，但这不表示每种 `ring_capacity` 都适合每个预算。对已接受的预算，
+先保留强制状态，再保留能够放下的最新历史。
+
+每次重写都在同一目录内做原子替换。硬 OOM 或 `TerminateProcess` 无法执行 handler，
+所以最终留下的是最后一份完整的 **OOM 前面包屑**，不是 OOM dump，也不是原因证明。
+若进程在重写中途终止，正在写的临时文件可能丢失，而此前完整文件仍会保留。如果
+`resource_history` 时间戳继续前进，但固定的 `retention` 时间戳停止，二者之间的空档
+说明 event loop 发生了 stall 或 starvation。
+
 **残留标记只能证明会话没有正常结束，不能说明原因。** 仅凭标记无法区分 `SIGKILL`、
-断电、OOM 终止与硬重启，因此报告不会臆测原因。
+断电、OOM 终止与硬重启，因此报告不会臆测原因。观测到的 32 GiB 事件未出现在复制的
+日志中，因此不会声称分配策略或这些诊断已经修复了该事件。
 
 阅读报告时有三点值得了解：
 

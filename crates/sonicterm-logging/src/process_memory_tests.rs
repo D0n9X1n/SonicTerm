@@ -76,6 +76,40 @@ fn an_enormous_delta_saturates_rather_than_panicking() {
     assert!(matches!(delta, MemoryDelta::Changed(_)), "must produce a figure, not panic");
 }
 
+/// The pressure shape carries only fixed-cost process figures.
+#[test]
+fn process_pressure_has_no_virtual_address_space_field() {
+    let ProcessPressure { private_committed, resident } = ProcessPressure::unsupported();
+    assert_eq!(private_committed, MemoryMetric::Unsupported);
+    assert_eq!(resident, MemoryMetric::Unsupported);
+}
+
+/// The Windows pressure path never starts the address-space walk.
+#[cfg(windows)]
+#[test]
+fn pressure_sampling_skips_reserved_address_space_in_both_call_orders() {
+    reset_reserved_address_space_calls();
+    let _ = sample_pressure();
+    assert_eq!(reserved_address_space_calls(), 0);
+    let _ = sample();
+    assert_eq!(reserved_address_space_calls(), 1);
+
+    reset_reserved_address_space_calls();
+    let _ = sample();
+    assert_eq!(reserved_address_space_calls(), 1);
+    let _ = sample_pressure();
+    assert_eq!(reserved_address_space_calls(), 1);
+}
+
+/// macOS pressure sampling reports the supported resident figure honestly.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_pressure_measures_resident_and_declares_private_unsupported() {
+    let pressure = sample_pressure();
+    assert!(matches!(pressure.resident, MemoryMetric::Bytes(bytes) if bytes > 0));
+    assert_eq!(pressure.private_committed, MemoryMetric::Unsupported);
+}
+
 /// The sampler answers, and its answer is internally consistent.
 ///
 /// Deliberately not asserting a byte range: this runs on developer machines

@@ -158,6 +158,36 @@ impl ProcessMemory {
     }
 }
 
+/// Fixed-cost process figures suitable for frequent pressure sampling.
+///
+/// Virtual address space is intentionally absent because Windows obtains it by
+/// walking every region in the process rather than from the fixed-cost counter
+/// query used for committed and resident bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessPressure {
+    /// Memory charged to this process alone and not backed by a clean file page.
+    pub private_committed: MemoryMetric,
+    /// Pages resident in physical memory.
+    pub resident: MemoryMetric,
+}
+
+impl ProcessPressure {
+    /// Return a pressure sample with both figures unavailable.
+    #[must_use]
+    pub const fn unsupported() -> Self {
+        Self { private_committed: MemoryMetric::Unsupported, resident: MemoryMetric::Unsupported }
+    }
+}
+
+/// Read the fixed-cost process-pressure figures from the OS.
+///
+/// Never walks virtual address space. A failed query reports both figures as
+/// [`MemoryMetric::Unsupported`].
+#[must_use]
+pub fn sample_pressure() -> ProcessPressure {
+    sample_pressure_platform()
+}
+
 /// Read this process's memory figures from the OS.
 ///
 /// Cheap enough for the thirty-second sampling cadence and nowhere near cheap
@@ -186,7 +216,7 @@ pub fn sample() -> ProcessMemory {
 /// snapshot learns that this figure is not available rather than being handed
 /// a number that might be another field entirely.
 #[cfg(target_os = "macos")]
-fn sample_platform() -> ProcessMemory {
+fn macos_task_info() -> Option<libc::proc_taskinfo> {
     let mut info: libc::proc_taskinfo =
         // SAFETY: `proc_taskinfo` is a plain C struct of integers, for which an
         // all-zero bit pattern is a valid value. Zeroing first also means a
@@ -196,12 +226,12 @@ fn sample_platform() -> ProcessMemory {
     let Ok(size_arg) = libc::c_int::try_from(size) else {
         // When: size does not fit a c_int, so the kernel cannot be asked for a
         // struct that large and no measurement is possible.
-        return ProcessMemory::unsupported();
+        return None;
     };
     let Ok(pid) = libc::c_int::try_from(std::process::id()) else {
         // When: this process id does not fit a c_int, so it cannot be passed to
         // proc_pidinfo and nothing can be sampled.
-        return ProcessMemory::unsupported();
+        return None;
     };
     let written =
         // SAFETY: `proc_pidinfo` writes at most `size_arg` bytes through the
@@ -220,9 +250,19 @@ fn sample_platform() -> ProcessMemory {
     if written != size_arg {
         // When: written disagrees with size_arg, so the kernel left the struct
         // unfilled and any figure read from it would be the zeroes above.
-        return ProcessMemory::unsupported();
+        return None;
     }
 
+    Some(info)
+}
+
+#[cfg(target_os = "macos")]
+fn sample_platform() -> ProcessMemory {
+    let Some(info) = macos_task_info() else {
+        // When: macos_task_info produced no complete kernel record, so every
+        // full-sample metric must remain explicitly unsupported.
+        return ProcessMemory::unsupported();
+    };
     ProcessMemory {
         private_committed: MemoryMetric::Unsupported,
         resident: MemoryMetric::Bytes(info.pti_resident_size),
@@ -230,15 +270,22 @@ fn sample_platform() -> ProcessMemory {
     }
 }
 
-/// Windows: `GetProcessMemoryInfo` plus a `VirtualQuery` walk.
-///
-/// `PrivateUsage` is the commit charge for this process — the figure that
-/// matters when the system runs out of commit — and `WorkingSetSize` is the
-/// resident set. Neither structure carries reserved address space, so the
-/// virtual figure is summed by walking the address space; that walk is why
-/// this function is too expensive for a per-frame path.
+#[cfg(target_os = "macos")]
+fn sample_pressure_platform() -> ProcessPressure {
+    let Some(info) = macos_task_info() else {
+        // When: macos_task_info produced no complete kernel record, so the
+        // fixed-cost pressure metrics cannot be reported.
+        return ProcessPressure::unsupported();
+    };
+    ProcessPressure {
+        private_committed: MemoryMetric::Unsupported,
+        resident: MemoryMetric::Bytes(info.pti_resident_size),
+    }
+}
+
+/// Read Windows commit and working-set counters in one fixed-cost query.
 #[cfg(windows)]
-fn sample_platform() -> ProcessMemory {
+fn windows_counters() -> Option<windows::Win32::System::ProcessStatus::PROCESS_MEMORY_COUNTERS_EX> {
     use windows::Win32::System::ProcessStatus::{
         GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
     };
@@ -251,15 +298,12 @@ fn sample_platform() -> ProcessMemory {
     if counters.cb == 0 {
         // When: cb is zero, so the struct size did not fit a u32 and the API
         // has no way to learn how many bytes it may write.
-        return ProcessMemory::unsupported();
+        return None;
     }
 
     let queried =
-        // SAFETY: `counters` is a correctly-sized, correctly-aligned
-        // `PROCESS_MEMORY_COUNTERS_EX`; `cb` tells the API how many bytes it may
-        // write. The `EX` form is layout-compatible with the base structure,
-        // which is why the API is documented to take the cast — it reads `cb`
-        // to decide which it was given.
+        // SAFETY: `counters` is correctly sized and aligned, and `cb` bounds the
+        // documented base-structure pointer cast used for the extended form.
         unsafe {
             GetProcessMemoryInfo(
                 GetCurrentProcess(),
@@ -268,11 +312,33 @@ fn sample_platform() -> ProcessMemory {
             )
         };
     if queried.is_err() {
-        // When: queried reports failure, so counters was left unpopulated and
-        // reading it would report an invented measurement.
-        return ProcessMemory::unsupported();
+        // When: queried reports failure, counters contains no measurement.
+        return None;
     }
+    Some(counters)
+}
 
+#[cfg(windows)]
+fn sample_pressure_platform() -> ProcessPressure {
+    let Some(counters) = windows_counters() else {
+        // When: windows_counters returns None, neither fixed-cost pressure
+        // counter carries a measurement.
+        return ProcessPressure::unsupported();
+    };
+    ProcessPressure {
+        private_committed: MemoryMetric::Bytes(counters.PrivateUsage as u64),
+        resident: MemoryMetric::Bytes(counters.WorkingSetSize as u64),
+    }
+}
+
+/// Windows: fixed-cost counters plus a `VirtualQuery` walk.
+#[cfg(windows)]
+fn sample_platform() -> ProcessMemory {
+    let Some(counters) = windows_counters() else {
+        // When: windows_counters returns None, the full sample has no
+        // trustworthy commit or working-set basis.
+        return ProcessMemory::unsupported();
+    };
     ProcessMemory {
         private_committed: MemoryMetric::Bytes(counters.PrivateUsage as u64),
         resident: MemoryMetric::Bytes(counters.WorkingSetSize as u64),
@@ -280,17 +346,30 @@ fn sample_platform() -> ProcessMemory {
     }
 }
 
-/// Sum every region of this process's address space that is not free.
+#[cfg(all(test, windows))]
+std::thread_local! {
+    static RESERVED_ADDRESS_SPACE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(all(test, windows))]
+fn reset_reserved_address_space_calls() {
+    RESERVED_ADDRESS_SPACE_CALLS.set(0);
+}
+
+#[cfg(all(test, windows))]
+fn reserved_address_space_calls() -> usize {
+    RESERVED_ADDRESS_SPACE_CALLS.get()
+}
+
+/// Sum every non-free region in this process's address space.
 ///
-/// `GetProcessMemoryInfo` reports commit and working set but not reserved
-/// address space, and reserved space is exactly the figure that makes a
-/// process look enormous while it is behaving. Walking the regions is the
-/// documented way to obtain it.
-///
-/// Bounded by construction: each step advances past the region just measured,
-/// and a region of zero size ends the walk rather than repeating it.
+/// Bounded by advancing past each measured region; a zero-sized region ends the
+/// walk rather than repeating it.
 #[cfg(windows)]
 fn reserved_address_space() -> MemoryMetric {
+    #[cfg(test)]
+    RESERVED_ADDRESS_SPACE_CALLS.set(RESERVED_ADDRESS_SPACE_CALLS.get().saturating_add(1));
+
     use windows::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_FREE};
 
     let mut total: u64 = 0;
@@ -339,6 +418,11 @@ fn reserved_address_space() -> MemoryMetric {
 #[cfg(not(any(target_os = "macos", windows)))]
 fn sample_platform() -> ProcessMemory {
     ProcessMemory::unsupported()
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn sample_pressure_platform() -> ProcessPressure {
+    ProcessPressure::unsupported()
 }
 
 #[cfg(test)]

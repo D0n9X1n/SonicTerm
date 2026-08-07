@@ -111,6 +111,8 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-io --no-deps --features ssh
 cargo metadata --no-deps --format-version 1
 cargo test --workspace --lib --bins
+# Windows only: deterministic DX12 WARP allocator baseline
+cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture
 bash scripts/check-authored-rust-comments.sh
 bash scripts/check-no-raw-process-exit.sh
 bash scripts/check-rust-version.sh
@@ -126,10 +128,14 @@ scripts/rust-logic-coverage.sh
 ```
 
 The root `CLAUDE.md` is authoritative for this gate; CI also runs the
-resource-evidence, soak, and wiki-publisher checks listed here. Note that
-`cargo test --workspace --lib --bins` excludes integration tests — the
-cross-crate suites, including the counting-allocator heap-truth tests, run under
-`scripts/rust-logic-coverage.sh`.
+resource-evidence, soak, and wiki-publisher checks listed here. The WARP command
+is Windows-only and runs explicitly in Windows CI and Windows release unit
+tests. It requests a headless DX12 CPU fallback, requires WARP and an allocator
+report, then compares the old default policy with the production software-adapter
+policy. Missing capability or report data and reserve/largest-block threshold
+failures fail the gate. Note that `cargo test --workspace --lib --bins` excludes
+integration tests — the cross-crate suites, including the counting-allocator
+heap-truth tests, run under `scripts/rust-logic-coverage.sh`.
 
 Release preparation additionally builds the shipping platform binary, for
 example:
@@ -159,6 +165,12 @@ flowchart TD
     exitpolicy["process-exit policy"]
     wstest["cargo test --workspace --lib --bins"]
     percrate["per-crate unit/build gate"]
+    hostprobe["host window capability probe"]
+    adapterprobe["adapter classification probe"]
+    churn["renderer churn baseline"]
+    softpresent["Windows only: software presentation capability"]
+    warp["Verify Windows WARP allocator baseline"]
+    selection["Windows only: selection presentation"]
     notes["release-note unit test"]
     pty["frozen PTY feasibility evidence check"]
     inventory["resource inventory verification"]
@@ -172,7 +184,13 @@ flowchart TD
     rustdoc --> exitpolicy
     exitpolicy --> wstest
     wstest --> percrate
-    percrate --> notes
+    percrate --> hostprobe
+    hostprobe --> adapterprobe
+    adapterprobe --> churn
+    churn --> softpresent
+    softpresent --> warp
+    warp --> selection
+    selection --> notes
     notes --> pty
     pty --> inventory
     inventory --> soak
@@ -184,8 +202,15 @@ CI runs `cargo fmt --all --check`, the authored Rust comment checker, strict
 workspace Rustdoc, and `cargo clippy --workspace --all-targets` with warnings
 denied. The `sonicterm-io` SSH feature receives separate clippy and strict
 Rustdoc passes because `--all-targets` does not enable optional features.
-`deny.toml` is present but no `cargo deny check` job enforces it, so dependency
-policy is checked by hand rather than by a gate.
+Windows additionally runs the explicit `Verify Windows WARP allocator baseline`
+step, which executes the deterministic `windows_warp_allocator_baseline`
+integration test. It requests DX12 CPU fallback and compares the old
+wgpu default against the production software-adapter memory policy. The gate
+fails without WARP or an allocator report, when production reserved bytes are
+not below 64 MiB, when the largest block is not below 128 MiB, or when
+production reserved bytes do not improve on the control. `deny.toml` is present
+but no `cargo deny check` job enforces it, so dependency policy is checked by
+hand rather than by a gate.
 
 ## Coverage boundary
 
@@ -207,7 +232,11 @@ Pushing a matching `v*` tag starts `.github/workflows/release.yml`:
 flowchart TD
     tag["vX.Y.Z tag"]
     mactest["macOS workspace/per-crate/release-note tests"]
-    wintest["Windows workspace/per-crate/release-note tests"]
+    wintest["Windows workspace/per-crate tests"]
+    softpresent["Windows software presentation capability"]
+    warp["Verify Windows WARP allocator baseline"]
+    selection["Windows selection presentation"]
+    notes["Windows release-note test"]
     macx86["build macOS x86_64 binary"]
     macarm["build macOS aarch64 binary"]
     dmg["verify architectures and package two DMGs"]
@@ -218,16 +247,26 @@ flowchart TD
     publish(["publish GitHub Release"])
 
     tag --> mactest
-    mactest --> wintest
-    wintest --> macx86
-    macx86 --> macarm
+    tag --> wintest
+    wintest --> softpresent
+    softpresent --> warp
+    warp --> selection
+    selection --> notes
+    mactest --> macx86
+    mactest --> macarm
+    macx86 --> dmg
     macarm --> dmg
-    dmg --> msi
+    notes --> msi
+    dmg --> download
     msi --> download
     download --> require
     require --> sums
     sums --> publish
 ```
+
+The Windows allocator test is release-blocking. The current verified Windows
+release dependency is `unit-tests-windows → build-windows → publish`, so a WARP
+baseline failure prevents both the MSI build and publication.
 
 Pre-release tags containing `-` are marked prerelease automatically.
 
@@ -425,6 +464,8 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-io --no-deps --features ssh
 cargo metadata --no-deps --format-version 1
 cargo test --workspace --lib --bins
+# Windows only: deterministic DX12 WARP allocator baseline
+cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture
 bash scripts/check-authored-rust-comments.sh
 bash scripts/check-no-raw-process-exit.sh
 bash scripts/check-rust-version.sh
@@ -440,8 +481,12 @@ scripts/rust-logic-coverage.sh
 ```
 
 根 `CLAUDE.md` 是这组 gate 的权威来源；CI 也会运行这里列出的资源证据、soak 和
-Wiki publisher 检查。注意 `cargo test --workspace --lib --bins` 不包含集成测试——跨 crate
-套件（含计数分配器 heap-truth 测试）由 `scripts/rust-logic-coverage.sh` 执行。
+Wiki publisher 检查。WARP 命令仅适用于 Windows，并在 Windows CI 与 Windows release
+unit tests 中显式运行。它请求 headless DX12 CPU fallback，要求得到 WARP 与 allocator
+report，再比较旧的默认策略和生产环境的软件 adapter 策略。缺少 capability/report，
+或 reserve/largest-block threshold 失败，都会让 gate 失败。注意
+`cargo test --workspace --lib --bins` 不包含集成测试——跨 crate 套件（含计数分配器
+heap-truth 测试）由 `scripts/rust-logic-coverage.sh` 执行。
 
 release prep 还要构建发布平台二进制，例如：
 
@@ -468,6 +513,12 @@ flowchart TD
     exitpolicy["process-exit policy"]
     wstest["cargo test --workspace --lib --bins"]
     percrate["per-crate unit/build gate"]
+    hostprobe["host window capability probe"]
+    adapterprobe["adapter classification probe"]
+    churn["renderer churn baseline"]
+    softpresent["仅 Windows：software presentation capability"]
+    warp["Verify Windows WARP allocator baseline"]
+    selection["仅 Windows：selection presentation"]
     notes["release-note unit test"]
     pty["冻结的 PTY feasibility evidence 校验"]
     inventory["resource inventory 校验"]
@@ -481,7 +532,13 @@ flowchart TD
     rustdoc --> exitpolicy
     exitpolicy --> wstest
     wstest --> percrate
-    percrate --> notes
+    percrate --> hostprobe
+    hostprobe --> adapterprobe
+    adapterprobe --> churn
+    churn --> softpresent
+    softpresent --> warp
+    warp --> selection
+    selection --> notes
     notes --> pty
     pty --> inventory
     inventory --> soak
@@ -492,8 +549,13 @@ flowchart TD
 CI 会运行 `cargo fmt --all --check`、第一方 Rust 注释 checker、严格 workspace
 Rustdoc，以及 warning 视为错误的 `cargo clippy --workspace --all-targets`。由于
 `--all-targets` 不会启用 optional feature，`sonicterm-io` 的 `ssh` feature 另有
-clippy 和严格 Rustdoc gate。`deny.toml` 存在，但没有 `cargo deny check` job
-强制执行它，因此依赖策略靠人工检查，而不是由 gate 保证。
+clippy 和严格 Rustdoc gate。Windows 还会运行显式的
+`Verify Windows WARP allocator baseline` 步骤，执行确定性的
+`windows_warp_allocator_baseline` integration test。它请求 DX12 CPU fallback，并比较
+旧的 wgpu 默认策略与生产环境的软件 adapter 内存策略。没有 WARP 或 allocator report、
+生产策略的 reserved bytes 不低于 64 MiB、最大 block 不低于 128 MiB，或生产策略的
+reserved bytes 未优于 control，都会使 gate 失败。`deny.toml` 存在，但没有
+`cargo deny check` job 强制执行它，因此依赖策略靠人工检查，而不是由 gate 保证。
 
 ## Coverage 边界
 
@@ -510,7 +572,11 @@ push 匹配的 `v*` tag 会启动 `.github/workflows/release.yml`：
 flowchart TD
     tag["vX.Y.Z tag"]
     mactest["macOS workspace/per-crate/release-note 测试"]
-    wintest["Windows workspace/per-crate/release-note 测试"]
+    wintest["Windows workspace/per-crate 测试"]
+    softpresent["Windows software presentation capability"]
+    warp["Verify Windows WARP allocator baseline"]
+    selection["Windows selection presentation"]
+    notes["Windows release-note 测试"]
     macx86["构建 macOS x86_64 binary"]
     macarm["构建 macOS aarch64 binary"]
     dmg["校验架构并打包两个 DMG"]
@@ -521,16 +587,26 @@ flowchart TD
     publish(["发布 GitHub Release"])
 
     tag --> mactest
-    mactest --> wintest
-    wintest --> macx86
-    macx86 --> macarm
+    tag --> wintest
+    wintest --> softpresent
+    softpresent --> warp
+    warp --> selection
+    selection --> notes
+    mactest --> macx86
+    mactest --> macarm
+    macx86 --> dmg
     macarm --> dmg
-    dmg --> msi
+    notes --> msi
+    dmg --> download
     msi --> download
     download --> require
     require --> sums
     sums --> publish
 ```
+
+Windows allocator 测试会阻断发布。当前已验证的 Windows release dependency 是
+`unit-tests-windows → build-windows → publish`，因此 WARP baseline 失败会阻止 MSI
+构建与发布。
 
 包含 `-` 的 prerelease tag 会自动标记为 prerelease。
 

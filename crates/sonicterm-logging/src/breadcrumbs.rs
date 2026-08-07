@@ -16,15 +16,27 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::process_memory::{self, ProcessMemory};
+use crate::process_memory::{self, ProcessMemory, ProcessPressure};
 
 const VERSION_CAPACITY: usize = 64;
 const COALESCE_IDLE: Duration = Duration::from_millis(5);
 const MAX_BATCH_TIME: Duration = Duration::from_millis(50);
+/// Smallest supported breadcrumb file budget in bytes.
+pub const MIN_FILE_BYTES: u64 = 4096;
+/// Smallest lifecycle history that preserves started, ready, and shutdown.
+pub const MIN_LIFECYCLE_CAPACITY: usize = 3;
+/// Largest accepted ordered lifecycle history.
+pub const MAX_LIFECYCLE_CAPACITY: usize = 4096;
+/// Largest accepted pending-event queue for one breadcrumb writer.
+pub const MAX_QUEUE_CAPACITY: usize = 4096;
+/// Largest accepted in-memory pressure-history ring.
+pub const MAX_HISTORY_CAPACITY: usize = 4096;
+/// Longest accepted interval between independent pressure samples.
+pub const MAX_PRESSURE_INTERVAL: Duration = Duration::from_secs(86_400);
 
 /// A validated application version suitable for a breadcrumb.
 ///
@@ -209,6 +221,21 @@ impl LifecycleEvent {
     }
 }
 
+/// Allocator counters permitted in a retention breadcrumb.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BreadcrumbAllocator {
+    /// Bytes assigned to live allocations.
+    pub allocated_bytes: u64,
+    /// Bytes reserved across allocator blocks.
+    pub reserved_bytes: u64,
+    /// Number of live allocations.
+    pub allocations: u32,
+    /// Number of allocator blocks.
+    pub blocks: u32,
+    /// Largest allocator block in bytes.
+    pub largest_block_bytes: u64,
+}
+
 /// One privacy-allowlisted breadcrumb.
 ///
 /// No variant accepts arbitrary text. In particular there is no terminal,
@@ -245,6 +272,8 @@ pub enum BreadcrumbEvent {
         renderer_bytes: u64,
         /// Number of live renderer instances.
         live_renderers: u32,
+        /// Allocator counters when this build can query them.
+        allocator: Option<BreadcrumbAllocator>,
     },
     /// An allowlisted lifecycle transition.
     Lifecycle(LifecycleEvent),
@@ -289,10 +318,30 @@ impl BreadcrumbEvent {
                 "{prefix}event=resource private_committed={} resident={} virtual={}",
                 memory.private_committed, memory.resident, memory.virtual_bytes
             ),
-            Self::RetentionSnapshot { session_bytes, renderer_bytes, live_renderers } => format!(
-                "{prefix}event=retention session_bytes={session_bytes} \
-                 renderer_bytes={renderer_bytes} live_renderers={live_renderers}"
-            ),
+            Self::RetentionSnapshot {
+                session_bytes,
+                renderer_bytes,
+                live_renderers,
+                allocator,
+            } => {
+                let base = format!(
+                    "{prefix}event=retention session_bytes={session_bytes} \
+                     renderer_bytes={renderer_bytes} live_renderers={live_renderers}"
+                );
+                match allocator {
+                    Some(allocator) => format!(
+                        "{base} allocator_allocated_bytes={} allocator_reserved_bytes={} \
+                         allocator_allocations={} allocator_blocks={} \
+                         allocator_largest_block_bytes={}",
+                        allocator.allocated_bytes,
+                        allocator.reserved_bytes,
+                        allocator.allocations,
+                        allocator.blocks,
+                        allocator.largest_block_bytes
+                    ),
+                    None => format!("{base} allocator=unsupported"),
+                }
+            }
             Self::Lifecycle(event) => {
                 format!("{prefix}event=lifecycle lifecycle={}", event.as_str())
             }
@@ -310,20 +359,52 @@ enum EventKey {
     RetentionSnapshot,
 }
 
+impl EventKey {
+    const ORDER: [Self; 6] = [
+        Self::Version,
+        Self::Platform,
+        Self::Renderer,
+        Self::Counts,
+        Self::ResourceSnapshot,
+        Self::RetentionSnapshot,
+    ];
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Version => 0,
+            Self::Platform => 1,
+            Self::Renderer => 2,
+            Self::Counts => 3,
+            Self::ResourceSnapshot => 4,
+            Self::RetentionSnapshot => 5,
+        }
+    }
+}
+
 /// Bounds for one breadcrumb writer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BreadcrumbLimits {
     /// Maximum events waiting for the worker. A full queue drops new events.
     pub queue_capacity: usize,
-    /// Maximum coalesced events retained in memory.
+    /// Maximum ordered lifecycle transitions retained in memory.
     pub ring_capacity: usize,
     /// Maximum bytes persisted in the session breadcrumb file.
     pub max_file_bytes: u64,
+    /// Cadence for fixed-cost process-pressure samples.
+    pub pressure_interval: Duration,
+    /// Maximum process-pressure samples retained in memory.
+    pub history_capacity: usize,
 }
 
 impl Default for BreadcrumbLimits {
     fn default() -> Self {
-        Self { queue_capacity: 128, ring_capacity: 64, max_file_bytes: 64 * 1024 }
+        Self {
+            queue_capacity: 128,
+            ring_capacity: 64,
+            max_file_bytes: 64 * 1024,
+            pressure_interval: Duration::from_secs(5),
+            history_capacity: 48,
+        }
     }
 }
 
@@ -364,10 +445,62 @@ impl AtomicStats {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkerMessage {
     Event(BreadcrumbEvent),
+    Deadline,
     Shutdown,
+}
+
+#[derive(Debug, Default)]
+struct SamplerCancellation {
+    cancelled: Mutex<bool>,
+    changed: Condvar,
+}
+
+impl SamplerCancellation {
+    fn cancel(&self) {
+        let mut cancelled = self.cancelled.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *cancelled = true;
+        self.changed.notify_all();
+    }
+
+    fn is_cancelled(&self) -> bool {
+        *self.cancelled.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[cfg(test)]
+    fn wait_until_cancelled(&self) {
+        let mut cancelled = self.cancelled.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        while !*cancelled {
+            cancelled =
+                self.changed.wait(cancelled).unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+}
+
+trait PressureSampler: Send + Sync + 'static {
+    fn sample(&self, cancellation: &SamplerCancellation) -> Option<ProcessPressure>;
+}
+
+#[derive(Debug)]
+struct OsPressureSampler;
+
+impl PressureSampler for OsPressureSampler {
+    fn sample(&self, cancellation: &SamplerCancellation) -> Option<ProcessPressure> {
+        if cancellation.is_cancelled() {
+            // When: cancellation.is_cancelled before the query, no new sample
+            // may begin or be delivered to the worker.
+            return None;
+        }
+        let pressure = process_memory::sample_pressure();
+        if cancellation.is_cancelled() {
+            // When: shutdown arrived during the fixed-cost query, its result is
+            // discarded rather than becoming post-cancellation history.
+            return None;
+        }
+        Some(pressure)
+    }
 }
 
 /// A cheap, clonable handle used by UI, renderer, and PTY paths.
@@ -420,27 +553,51 @@ impl BreadcrumbRecorder {
 pub struct BreadcrumbWriter {
     sender: mpsc::SyncSender<WorkerMessage>,
     stats: Arc<AtomicStats>,
+    cancellation: Arc<SamplerCancellation>,
     worker: Option<thread::JoinHandle<io::Result<()>>>,
 }
 
 impl BreadcrumbWriter {
     /// Spawn a writer for one session.
     ///
-    /// The function validates the session id and spawns a thread, but performs
-    /// no filesystem IO. Directory creation and all writes happen on the worker.
+    /// The function validates the session id and spawns its background worker,
+    /// but performs no filesystem IO on the caller.
     ///
     /// # Errors
     ///
-    /// Returns [`io::ErrorKind::InvalidInput`] for an unsafe session id, or the
-    /// thread-spawn error when the worker cannot be started.
+    /// Returns [`io::ErrorKind::InvalidInput`] for unsafe input limits or session
+    /// id, or a thread-spawn error.
     pub fn start(log_dir: &Path, session_id: &str, limits: BreadcrumbLimits) -> io::Result<Self> {
+        Self::start_with_sampler_boxed(log_dir, session_id, limits, Arc::new(OsPressureSampler))
+    }
+
+    #[cfg(test)]
+    fn start_with_sampler<S: PressureSampler>(
+        log_dir: &Path,
+        session_id: &str,
+        limits: BreadcrumbLimits,
+        sampler: S,
+    ) -> io::Result<Self> {
+        Self::start_with_sampler_boxed(log_dir, session_id, limits, Arc::new(sampler))
+    }
+
+    fn start_with_sampler_boxed(
+        log_dir: &Path,
+        session_id: &str,
+        limits: BreadcrumbLimits,
+        pressure_sampler: Arc<dyn PressureSampler>,
+    ) -> io::Result<Self> {
+        validate_limits(limits)?;
         let path = breadcrumb_path(log_dir, session_id)?;
         let (sender, receiver) = mpsc::sync_channel(limits.queue_capacity);
         let stats = Arc::new(AtomicStats::default());
-        let worker = thread::Builder::new()
-            .name("sonicterm-breadcrumbs".to_string())
-            .spawn(move || run_worker(receiver, &path, limits))?;
-        Ok(Self { sender, stats, worker: Some(worker) })
+        let cancellation = Arc::new(SamplerCancellation::default());
+        let worker_cancellation = Arc::clone(&cancellation);
+        let worker =
+            thread::Builder::new().name("sonicterm-breadcrumbs".to_string()).spawn(move || {
+                run_worker(receiver, &path, limits, pressure_sampler, &worker_cancellation)
+            })?;
+        Ok(Self { sender, stats, cancellation, worker: Some(worker) })
     }
 
     /// Return a clonable non-blocking recorder.
@@ -449,22 +606,124 @@ impl BreadcrumbWriter {
         BreadcrumbRecorder { sender: self.sender.clone(), stats: Arc::clone(&self.stats) }
     }
 
-    /// Flush queued events, stop the worker, and return final counters.
-    ///
-    /// Shutdown may wait for the background worker. Latency-sensitive paths use
-    /// [`BreadcrumbRecorder::record`], which never waits.
+    /// Flush queued events, stop the background worker, and return counters.
     ///
     /// # Errors
     ///
-    /// Returns a worker filesystem error or [`io::ErrorKind::Other`] if the
-    /// worker panicked.
+    /// Returns a worker filesystem error or [`io::ErrorKind::Other`] if a worker
+    /// panicked.
     pub fn shutdown(mut self) -> io::Result<BreadcrumbStats> {
-        let _ = self.sender.send(WorkerMessage::Shutdown);
-        let result = self.worker.take().map_or(Ok(()), |worker| {
-            worker.join().map_err(|_| io::Error::other("breadcrumb worker panicked"))?
-        });
-        result.map(|()| self.stats.snapshot())
+        self.cancel_and_join()?;
+        Ok(self.stats.snapshot())
     }
+
+    fn cancel_and_join(&mut self) -> io::Result<()> {
+        self.cancellation.cancel();
+        let _ = self.sender.send(WorkerMessage::Shutdown);
+        if let Some(worker) = self.worker.take() {
+            worker.join().map_err(|_| io::Error::other("breadcrumb worker panicked"))??;
+        }
+        Ok(())
+    }
+}
+
+// Lifecycle: BreadcrumbWriter::drop cancels and joins its worker thread handle;
+// completed shutdown has already released that handle.
+impl Drop for BreadcrumbWriter {
+    fn drop(&mut self) {
+        let _ = self.cancel_and_join();
+    }
+}
+
+fn validate_limits(limits: BreadcrumbLimits) -> io::Result<()> {
+    let required = required_file_bytes(limits.ring_capacity)?;
+    if limits.max_file_bytes < MIN_FILE_BYTES
+        || limits.max_file_bytes < required
+        || limits.ring_capacity < MIN_LIFECYCLE_CAPACITY
+        || limits.ring_capacity > MAX_LIFECYCLE_CAPACITY
+        || limits.history_capacity == 0
+        || limits.history_capacity > MAX_HISTORY_CAPACITY
+        || limits.queue_capacity == 0
+        || limits.queue_capacity > MAX_QUEUE_CAPACITY
+        || limits.pressure_interval.is_zero()
+        || limits.pressure_interval > MAX_PRESSURE_INTERVAL
+    {
+        // When: a size/capacity bound fails or pressure_interval is unusable,
+        // starting cannot preserve the bounded scheduling and storage contract.
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid breadcrumb limits"));
+    }
+    Ok(())
+}
+
+fn required_file_bytes(lifecycle_capacity: usize) -> io::Result<u64> {
+    let timestamp = i64::MIN;
+    let version = AppVersion { bytes: [b'9'; VERSION_CAPACITY], len: VERSION_CAPACITY as u8 };
+    let pinned = [
+        BreadcrumbEvent::Version(version),
+        BreadcrumbEvent::Platform(Platform::Windows),
+        BreadcrumbEvent::Renderer {
+            identity: RendererIdentity::Software,
+            mode: RendererMode::Software,
+            adapter: AdapterClass::Software,
+        },
+        BreadcrumbEvent::Counts { windows: u32::MAX, panes: u32::MAX },
+        BreadcrumbEvent::ResourceSnapshot(ProcessMemory {
+            private_committed: crate::process_memory::MemoryMetric::Bytes(u64::MAX),
+            resident: crate::process_memory::MemoryMetric::Bytes(u64::MAX),
+            virtual_bytes: crate::process_memory::MemoryMetric::Bytes(u64::MAX),
+        }),
+        BreadcrumbEvent::RetentionSnapshot {
+            session_bytes: u64::MAX,
+            renderer_bytes: u64::MAX,
+            live_renderers: u32::MAX,
+            allocator: Some(BreadcrumbAllocator {
+                allocated_bytes: u64::MAX,
+                reserved_bytes: u64::MAX,
+                allocations: u32::MAX,
+                blocks: u32::MAX,
+                largest_block_bytes: u64::MAX,
+            }),
+        },
+    ];
+    let pinned_bytes = pinned.iter().try_fold(0u64, |total, event| {
+        rendered_line_bytes(event.render(timestamp)).and_then(|bytes| {
+            total.checked_add(bytes).ok_or_else(|| invalid_limits("breadcrumb byte bound overflow"))
+        })
+    })?;
+    let lifecycle_line = rendered_line_bytes(
+        BreadcrumbEvent::Lifecycle(LifecycleEvent::CleanShutdown).render(timestamp),
+    )?;
+    let lifecycle_count = u64::try_from(lifecycle_capacity)
+        .map_err(|_| invalid_limits("lifecycle capacity exceeds u64"))?;
+    let lifecycle_bytes = lifecycle_line
+        .checked_mul(lifecycle_count)
+        .ok_or_else(|| invalid_limits("lifecycle byte bound overflow"))?;
+    let history_bytes = maximum_history_line_bytes()?;
+    pinned_bytes
+        .checked_add(lifecycle_bytes)
+        .and_then(|bytes| bytes.checked_add(history_bytes))
+        .ok_or_else(|| invalid_limits("breadcrumb byte bound overflow"))
+}
+
+fn maximum_history_line_bytes() -> io::Result<u64> {
+    rendered_line_bytes(render_pressure(
+        i64::MIN,
+        ProcessPressure {
+            private_committed: crate::process_memory::MemoryMetric::Bytes(u64::MAX),
+            resident: crate::process_memory::MemoryMetric::Bytes(u64::MAX),
+        },
+    ))
+}
+
+fn rendered_line_bytes(line: String) -> io::Result<u64> {
+    u64::try_from(line.len())
+        .ok()
+        .and_then(|bytes| bytes.checked_add(1))
+        .ok_or_else(|| invalid_limits("rendered breadcrumb line exceeds u64"))
+}
+
+fn invalid_limits(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -473,113 +732,223 @@ struct CapturedEvent {
     event: BreadcrumbEvent,
 }
 
+#[derive(Debug)]
+struct WorkerState {
+    pinned: [Option<CapturedEvent>; 6],
+    lifecycle: VecDeque<CapturedEvent>,
+    history: VecDeque<(i64, ProcessPressure)>,
+    lifecycle_capacity: usize,
+    history_capacity: usize,
+}
+
+impl WorkerState {
+    fn new(lifecycle_capacity: usize, history_capacity: usize) -> Self {
+        Self {
+            pinned: [None; 6],
+            lifecycle: VecDeque::with_capacity(lifecycle_capacity),
+            history: VecDeque::with_capacity(history_capacity),
+            lifecycle_capacity,
+            history_capacity,
+        }
+    }
+
+    fn capture(&mut self, event: BreadcrumbEvent) {
+        let captured =
+            CapturedEvent { timestamp_unix_ms: chrono::Utc::now().timestamp_millis(), event };
+        match event.key() {
+            Some(key) => self.pinned[key.index()] = Some(captured),
+            None => self.capture_lifecycle(captured),
+        }
+    }
+
+    fn capture_lifecycle(&mut self, captured: CapturedEvent) {
+        if self.lifecycle.len() >= self.lifecycle_capacity {
+            // When: lifecycle.len reaches lifecycle_capacity, discard the oldest
+            // transition before appending the accepted captured transition.
+            let _ = self.lifecycle.pop_front();
+        }
+        self.lifecycle.push_back(captured);
+    }
+
+    fn capture_pressure(&mut self, pressure: ProcessPressure) {
+        while self.history.len() >= self.history_capacity {
+            let _ = self.history.pop_front();
+        }
+        self.history.push_back((chrono::Utc::now().timestamp_millis(), pressure));
+    }
+
+    fn render_for_limit(&self, max_bytes: u64) -> Vec<String> {
+        let max_bytes = usize::try_from(max_bytes).unwrap_or(usize::MAX);
+        let mut lines = Vec::new();
+        let mut used = 0usize;
+        for key in EventKey::ORDER {
+            if let Some(captured) = self.pinned[key.index()] {
+                push_line(&mut lines, &mut used, captured.event.render(captured.timestamp_unix_ms));
+            }
+        }
+        for captured in &self.lifecycle {
+            push_line(&mut lines, &mut used, captured.event.render(captured.timestamp_unix_ms));
+        }
+
+        let mut selected_history = VecDeque::new();
+        for (timestamp, pressure) in self.history.iter().rev() {
+            let line = render_pressure(*timestamp, *pressure);
+            let bytes = line.len().saturating_add(1);
+            if bytes > max_bytes.saturating_sub(used) {
+                // When: bytes exceeds max_bytes - used, this next-oldest history
+                // line and every older line are omitted from the byte budget.
+                break;
+            }
+            used = used.saturating_add(bytes);
+            selected_history.push_front(line);
+        }
+        lines.extend(selected_history);
+        lines
+    }
+}
+
+fn push_line(lines: &mut Vec<String>, used: &mut usize, line: String) {
+    *used = used.saturating_add(line.len().saturating_add(1));
+    lines.push(line);
+}
+
+fn render_pressure(timestamp_unix_ms: i64, pressure: ProcessPressure) -> String {
+    format!(
+        "time_unix_ms={timestamp_unix_ms} event=resource_history private_committed={} resident={}",
+        pressure.private_committed, pressure.resident
+    )
+}
+
 fn run_worker(
     receiver: mpsc::Receiver<WorkerMessage>,
     path: &Path,
     limits: BreadcrumbLimits,
+    sampler: Arc<dyn PressureSampler>,
+    cancellation: &SamplerCancellation,
 ) -> io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "breadcrumb path has no parent")
     })?;
     std::fs::create_dir_all(parent)?;
 
-    let mut ring = VecDeque::with_capacity(limits.ring_capacity);
-    // `recv` ends only when every sender is gone, which is what a dropped
-    // writer looks like from here. Blocking on the first message of each batch
-    // is what keeps an idle session from spinning this thread.
-    while let Ok(first) = receiver.recv() {
-        let mut shutting_down = process_message(first, &mut ring, limits.ring_capacity);
-        let batch_started = Instant::now();
+    let mut state = WorkerState::new(limits.ring_capacity, limits.history_capacity);
+    if let Some(pressure) = sampler.sample(cancellation) {
+        state.capture_pressure(pressure);
+    }
+    persist_state(path, &state, limits.max_file_bytes)?;
+    let mut next_sample_at = Instant::now() + limits.pressure_interval;
 
-        while !shutting_down && batch_started.elapsed() < MAX_BATCH_TIME {
-            // When: recv_timeout reports Timeout, the batch has gone idle, so
-            // the ring is persisted and the worker waits for the next message.
-            match receiver.recv_timeout(COALESCE_IDLE) {
-                Ok(message) => {
-                    shutting_down = process_message(message, &mut ring, limits.ring_capacity);
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => break,
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    shutting_down = true;
+    loop {
+        if cancellation.is_cancelled() {
+            // When: cancellation is set, drain at most the bounded queue snapshot,
+            // persist it, and exit even if recorder clones remain alive.
+            for message in
+                std::iter::from_fn(|| receiver.try_recv().ok()).take(limits.queue_capacity)
+            {
+                let _ = process_message(message, &mut state);
+            }
+            persist_state(path, &state, limits.max_file_bytes)?;
+            break;
+        }
+        let now = Instant::now();
+        if now >= next_sample_at {
+            // When: now reaches next_sample_at, sample before receiving another
+            // caller event so a continuously populated queue cannot starve it.
+            if let Some(pressure) = sampler.sample(cancellation) {
+                state.capture_pressure(pressure);
+                persist_state(path, &state, limits.max_file_bytes)?;
+            }
+            next_sample_at = Instant::now() + limits.pressure_interval;
+            continue;
+        }
+
+        let message = receive_next_message(
+            &receiver,
+            next_sample_at.saturating_duration_since(Instant::now()),
+        );
+        if message == WorkerMessage::Deadline {
+            // When: message is Deadline, return to the priority check so the
+            // sampler runs before any subsequently queued caller event.
+            continue;
+        }
+        let mut shutting_down = process_message(message, &mut state);
+        let batch_started = Instant::now();
+        while !shutting_down
+            && !cancellation.is_cancelled()
+            && batch_started.elapsed() < MAX_BATCH_TIME
+            && Instant::now() < next_sample_at
+        {
+            let until_deadline = next_sample_at.saturating_duration_since(Instant::now());
+            let wait = COALESCE_IDLE.min(until_deadline);
+            match receiver.recv_timeout(wait) {
+                Ok(message) => shutting_down = process_message(message, &mut state),
+                Err(error) => {
+                    // When: recv_timeout returns an error, Timeout closes this
+                    // batch and Disconnected also requests worker shutdown.
+                    if error == mpsc::RecvTimeoutError::Disconnected {
+                        shutting_down = true;
+                    }
+                    break;
                 }
             }
         }
-
-        persist_ring(path, &ring, limits.max_file_bytes)?;
+        persist_state(path, &state, limits.max_file_bytes)?;
         if shutting_down {
-            // When: shutting_down is set, the final ring is already persisted,
-            // so the loop ends rather than waiting for another message.
+            // When: shutting_down is set, the final accepted state is persisted
+            // before the worker exits.
             break;
         }
     }
     Ok(())
 }
 
-fn process_message(
-    message: WorkerMessage,
-    ring: &mut VecDeque<CapturedEvent>,
-    capacity: usize,
-) -> bool {
-    let WorkerMessage::Event(event) = message else {
-        // When: the message is Shutdown rather than an Event, so the worker is
-        // told to stop instead of being given something to record.
-        return true;
-    };
-    if capacity == 0 {
-        // When: capacity is zero, the ring can hold nothing, so the event is
-        // dropped rather than pushed into a buffer with no room.
-        return false;
+fn receive_next_message(
+    receiver: &mpsc::Receiver<WorkerMessage>,
+    timeout: Duration,
+) -> WorkerMessage {
+    match receiver.recv_timeout(timeout) {
+        Ok(message) => message,
+        Err(mpsc::RecvTimeoutError::Timeout) => WorkerMessage::Deadline,
+        Err(mpsc::RecvTimeoutError::Disconnected) => WorkerMessage::Shutdown,
     }
-
-    if let Some(key) = event.key() {
-        // When: the event carries a coalescing key, so an older entry of the
-        // same class is replaced rather than kept alongside it.
-        if let Some(index) = ring.iter().position(|captured| captured.event.key() == Some(key)) {
-            // When: position finds an index holding that key, so the stale
-            // entry is removed before the newer one is pushed.
-            let _ = ring.remove(index);
-        }
-    }
-    while ring.len() >= capacity {
-        let _ = ring.pop_front();
-    }
-    ring.push_back(CapturedEvent {
-        timestamp_unix_ms: chrono::Utc::now().timestamp_millis(),
-        event,
-    });
-    false
 }
 
-fn persist_ring(path: &Path, ring: &VecDeque<CapturedEvent>, max_bytes: u64) -> io::Result<()> {
-    let max_bytes = usize::try_from(max_bytes).unwrap_or(usize::MAX);
-    let mut selected = VecDeque::new();
-    let mut used = 0usize;
-
-    for captured in ring.iter().rev() {
-        let line = captured.event.render(captured.timestamp_unix_ms);
-        let line_bytes = line.len().saturating_add(1);
-        if line_bytes > max_bytes.saturating_sub(used) {
-            // When: line_bytes would push past max_bytes, so the walk stops and
-            // the newest events are kept rather than the oldest.
-            break;
+fn process_message(message: WorkerMessage, state: &mut WorkerState) -> bool {
+    match message {
+        WorkerMessage::Event(event) => {
+            state.capture(event);
+            false
         }
-        used = used.saturating_add(line_bytes);
-        selected.push_front(line);
+        WorkerMessage::Deadline => false,
+        WorkerMessage::Shutdown => true,
     }
+}
 
+fn persist_state(path: &Path, state: &WorkerState, max_bytes: u64) -> io::Result<()> {
+    persist_state_with_replace(path, state, max_bytes, crate::path::replace_file)
+}
+
+fn persist_state_with_replace(
+    path: &Path,
+    state: &WorkerState,
+    max_bytes: u64,
+    replace: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+    let lines = state.render_for_limit(max_bytes);
+    let used = lines.iter().map(|line| line.len().saturating_add(1)).sum();
     let mut contents = String::with_capacity(used);
-    for line in selected {
+    for line in lines {
         contents.push_str(&line);
         contents.push('\n');
     }
 
     let temp = path.with_extension("tmp");
     std::fs::write(&temp, contents)?;
-    match crate::path::replace_file(&temp, path) {
+    match replace(&temp, path) {
         Ok(()) => Ok(()),
         Err(error) => {
-            // When: replace_file fails, the temp file is removed so a failed
-            // rewrite leaves no partial snapshot beside the real one.
+            // When: replace returns error, remove the partial candidate and
+            // retain the previous complete destination.
             let _ = std::fs::remove_file(&temp);
             Err(error)
         }
