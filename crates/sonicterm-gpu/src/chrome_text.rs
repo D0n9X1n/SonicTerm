@@ -10,10 +10,9 @@
 //! ## Pipeline
 //!
 //! 1. `WtChromeRun::layout`  — sonicterm-font shapes the text run.
-//! 2. `GlyphAtlas::get_or_insert` — caches the rasterized tile under a
-//!    `GlyphKey { font_slot, glyph_id, bold, italic, ch }` so repeat
-//!    chrome strings (every tab title rerender, every keystroke in the
-//!    search box) re-use the same tile.
+//! 2. `GlyphAtlas::get_or_insert` caches the rasterized tile under font,
+//!    style, glyph, and native-raster-role identity. Body, footer, and tab-title
+//!    tiles coexist in one atlas without sharing differently sized bitmaps.
 //! 3. `GlyphInstance` records are pushed into a caller-owned `Vec`;
 //!    the caller hands the vec to the existing
 //!    [`crate::text_pipeline::TextPipeline`] for the draw call.
@@ -23,25 +22,38 @@
 //!
 //! ## Font size scaling
 //!
-//! `FontStack` rasterizes at whatever size it was
-//! configured for (the terminal font size). Chrome strings frequently
-//! want a different size (search bar: `font_size * 0.85`; tab title:
-//! `font_size + 1.0`; palette: `font_size`; etc.). We project the
-//! atlas's native px tile into the requested `font_size_px` by scaling
-//! `info.px_size` / `info.px_offset` / `advance` by
-//! `font_size_px / native_em_px`. Glyph identity in the atlas is
-//! preserved (same `GlyphKey` regardless of requested chrome size), so
-//! a tab title at 13pt and a palette query at 12pt share atlas tiles
-//! freely.
+//! Most chrome uses the body `FontStack` and normal raster role. Surfaces with
+//! a distinct native size use a matching stack and raster role, keeping
+//! `font_size_px == native_em_px` so their atlas tiles project 1:1.
 
 use sonicterm_engine::FontStack;
 use sonicterm_text::glyph_atlas::{GlyphAtlas, Rasterizer};
 use sonicterm_text::GlyphInstance;
-use sonicterm_types::GlyphKey;
+use sonicterm_types::{GlyphKey, GlyphRasterVariant};
 use std::collections::HashMap;
 use unicode_width::UnicodeWidthChar;
 
 use crate::color::{chrome_color_to_linear_rgba, ChromeColor};
+
+#[cfg(test)]
+#[path = "chrome_text_tests.rs"]
+mod chrome_text_tests;
+
+#[cfg(test)]
+pub(crate) static TRACKED_FONT_STACK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn tracked_font_stack(font_size: f64) -> FontStack {
+    let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+    FontStack::try_new_with_font_dirs_for_test(
+        &[("Rec Mono St.Helens", false)],
+        vec![assets],
+        font_size,
+        72,
+        1.0,
+    )
+    .expect("bundled test font must load")
+}
 
 /// Result of laying out a chrome text run into atlas glyph instances.
 ///
@@ -99,8 +111,8 @@ pub struct ChromeAttrs {
 /// Arguments:
 ///
 /// - `font_stack`: SonicTerm's WezTerm-compatible font stack.
-/// - `wt_raster`: rasterizer that backs the atlas. Same instance the
-///   grid uses; chrome strings warm tiles for free.
+/// - `wt_raster`: rasterizer that backs the atlas. Normal chrome uses the
+///   body stack; native-size roles use the matching title/footer stack.
 /// - `atlas`: shared glyph atlas. Chrome and grid coexist in one atlas.
 /// - `text`: the text to lay out. UTF-8; handled per codepoint (no
 ///   ligature shaping across span boundaries — call once per styled
@@ -109,14 +121,9 @@ pub struct ChromeAttrs {
 ///   (emoji) ignore this and paint from the strike's own colors.
 /// - `attrs`: bold / italic — only used to derive the atlas key for
 ///   now; wezterm's font selection happens through the loaded face.
-/// - `font_size_px`: requested chrome glyph size in raster px. The
-///   atlas tile is rasterized at the loaded font's native em and
-///   scaled down/up here so chrome strings at different sizes share
-///   tiles.
-/// - `native_em_px`: the loaded font's native em size in raster px.
-///   Pass `cell_metrics_raster_px().cell_h` (the same value the
-///   grid path uses to project atlas tiles); chrome tiles end up
-///   pixel-identical to the corresponding grid glyph.
+/// - `font_size_px`: requested chrome glyph size in raster px.
+/// - `native_em_px`: the supplied stack's native em in raster px. Native-size
+///   callers pass the same value as `font_size_px` for 1:1 projection.
 /// - `origin`: `(x, baseline_y)` of the run in raster px. The
 ///   baseline matches the row that grid text would paint on.
 /// - `screen`: `(sw, sh)` raster-px dimensions of the surface, used
@@ -139,6 +146,69 @@ pub fn layout(
     origin: (f32, f32),
     screen: (f32, f32),
     clip: Option<ChromeClip>,
+) -> ChromeTextLayout {
+    layout_with_raster_variant(
+        font_stack,
+        wt_raster,
+        atlas,
+        text,
+        color,
+        attrs,
+        font_size_px,
+        native_em_px,
+        origin,
+        screen,
+        clip,
+        GlyphRasterVariant::Normal,
+    )
+}
+
+/// Layout one chrome run with an explicit native raster role.
+#[allow(clippy::too_many_arguments)]
+pub fn layout_with_raster_variant(
+    font_stack: &FontStack,
+    wt_raster: &mut impl Rasterizer,
+    atlas: &mut GlyphAtlas,
+    text: &str,
+    color: ChromeColor,
+    attrs: ChromeAttrs,
+    font_size_px: f32,
+    native_em_px: f32,
+    origin: (f32, f32),
+    screen: (f32, f32),
+    clip: Option<ChromeClip>,
+    raster_variant: GlyphRasterVariant,
+) -> ChromeTextLayout {
+    layout_with_raster_variant_impl(
+        font_stack,
+        wt_raster,
+        atlas,
+        text,
+        color,
+        attrs,
+        font_size_px,
+        native_em_px,
+        origin,
+        screen,
+        clip,
+        raster_variant,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn layout_with_raster_variant_impl(
+    font_stack: &FontStack,
+    wt_raster: &mut impl Rasterizer,
+    atlas: &mut GlyphAtlas,
+    text: &str,
+    color: ChromeColor,
+    attrs: ChromeAttrs,
+    font_size_px: f32,
+    native_em_px: f32,
+    origin: (f32, f32),
+    screen: (f32, f32),
+    clip: Option<ChromeClip>,
+    raster_variant: GlyphRasterVariant,
 ) -> ChromeTextLayout {
     let mut out = ChromeTextLayout { glyphs: Vec::new(), width_px: 0.0, height_px: 0.0 };
     if text.is_empty() {
@@ -237,6 +307,7 @@ pub fn layout(
         let font_idx = u8::try_from(g.font_idx).unwrap_or(u8::MAX);
         let key = if glyph_pos != 0 {
             GlyphKey::shaped(lead_ch, font_idx, glyph_pos, attrs.bold, attrs.italic)
+                .with_raster_variant(raster_variant)
         } else {
             // When: glyph_pos is zero the shaper reported notdef, so the key carries
             // lead_ch and slot 0 for the rasterizer to resolve through the charmap.
@@ -268,6 +339,7 @@ pub fn layout(
                 continue;
             }
             GlyphKey::with_slot(lead_ch, 0, attrs.bold, attrs.italic)
+                .with_raster_variant(raster_variant)
         };
 
         // Chrome doesn't carry per-cell flags beyond `(bold, italic)` —

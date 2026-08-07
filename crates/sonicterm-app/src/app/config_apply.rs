@@ -6,6 +6,7 @@
 #![allow(unused_imports)]
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{atomic::Ordering, Arc};
 use std::time::{Duration, Instant};
 
@@ -35,6 +36,24 @@ use super::{
     shell_quote_posix, with_integrated_titlebar, wrap_paste, App, PaneState, TabState, UserEvent,
     WindowState,
 };
+
+#[cfg(test)]
+std::thread_local! {
+    static TEST_CURRENT_SETTINGS_PATH: std::cell::RefCell<Option<PathBuf>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+#[cfg(test)]
+pub(super) struct TestCurrentSettingsPathGuard;
+
+// Lifecycle: TestCurrentSettingsPathGuard drop clears the thread-local path override after each test.
+#[cfg(test)]
+impl Drop for TestCurrentSettingsPathGuard {
+    fn drop(&mut self) {
+        TEST_CURRENT_SETTINGS_PATH.with(|slot| *slot.borrow_mut() = None);
+    }
+}
 
 fn propagate_theme_to_pane_parsers(panes: &HashMap<u64, PaneState>, theme: &Theme) {
     for pane in panes.values() {
@@ -633,6 +652,43 @@ impl App {
         }
         tracing::info!("font size -> {size}pt");
     }
+
+    /// Resolve SonicTerm's standard user-config path for saving current settings.
+    pub(super) fn current_settings_path() -> anyhow::Result<PathBuf> {
+        #[cfg(test)]
+        if let Some(path) = TEST_CURRENT_SETTINGS_PATH.with(|slot| slot.borrow().clone()) {
+            // When: a test installs an explicit path, dispatch exercises the real
+            // save action without mutating process-global HOME or user files.
+            return Ok(path);
+        }
+        Config::default_path()
+            .context("resolve the default SonicTerm config path for saving current settings")
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_test_current_settings_path(path: PathBuf) -> TestCurrentSettingsPathGuard {
+        TEST_CURRENT_SETTINGS_PATH.with(|slot| {
+            assert!(slot.borrow().is_none(), "test config path override already installed");
+            *slot.borrow_mut() = Some(path);
+        });
+        TestCurrentSettingsPathGuard
+    }
+
+    /// Persist the live font size and effective regular-text weight to `path`.
+    ///
+    /// Saving changes only the two reset baselines after the atomic config write
+    /// succeeds. It deliberately does not reload config or reapply live renderers:
+    /// the values already came from the running session.
+    pub(super) fn save_current_settings_to(&mut self, path: &Path) -> anyhow::Result<()> {
+        let size = self.config.font.size;
+        let weight_scale = self.config.font.effective_weight_scale();
+        Config::persist_font_runtime_values(path, size, weight_scale)
+            .with_context(|| format!("persist current font settings to {}", path.display()))?;
+        self.configured_font_size = size;
+        self.configured_weight_scale = weight_scale;
+        Ok(())
+    }
+
     pub(super) fn toggle_tab_bar(&mut self) {
         self.tab_bar_visible = !self.tab_bar_visible;
         let visible = self.tab_bar_visible;

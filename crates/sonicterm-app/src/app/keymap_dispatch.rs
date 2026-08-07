@@ -48,6 +48,7 @@ pub(super) fn read_only_allows_action(action: &Action) -> bool {
             | Action::FocusPane(_)
             | Action::OpenSearch
             | Action::CheckForUpdates
+            | Action::SaveCurrentSettings
     )
 }
 
@@ -206,8 +207,7 @@ impl App {
                 Some((
                     message,
                     renderer.scale_factor(),
-                    sonicterm_ui::tab_spans::tab_title_font_size(renderer.font_size())
-                        * renderer.scale_factor(),
+                    renderer.font_size() * renderer.scale_factor(),
                     size.width as f32,
                     size.height as f32,
                     read_only,
@@ -227,8 +227,7 @@ impl App {
                 Some((
                     message,
                     renderer.scale_factor(),
-                    sonicterm_ui::tab_spans::tab_title_font_size(renderer.font_size())
-                        * renderer.scale_factor(),
+                    renderer.font_size() * renderer.scale_factor(),
                     size.width as f32,
                     size.height as f32,
                     read_only,
@@ -236,6 +235,60 @@ impl App {
                 ))
             }
         }
+    }
+
+    /// Save the current font settings to `path` and report the result on
+    /// `kind`'s notification surface.
+    pub(super) fn save_current_settings_to_for_kind(
+        &mut self,
+        path: &std::path::Path,
+        kind: FrontmostKind,
+    ) {
+        match self.save_current_settings_to(path) {
+            Ok(()) => {
+                tracing::info!(path = %path.display(), "saved current font settings");
+                self.show_notification_for_kind(
+                    kind,
+                    sonicterm_ui::overlays::NotificationLevel::Info,
+                    "Current font settings saved".to_string(),
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %format_args!("{error:#}"),
+                    "unable to save current font settings"
+                );
+                self.show_notification_for_kind(
+                    kind,
+                    sonicterm_ui::overlays::NotificationLevel::Error,
+                    "Unable to save current font settings; existing config unchanged".to_string(),
+                );
+            }
+        }
+    }
+
+    /// Resolve the production config path, save, and route its notification.
+    pub(super) fn save_current_settings_for_kind(&mut self, kind: FrontmostKind) {
+        let path = match Self::current_settings_path() {
+            Ok(path) => path,
+            Err(error) => {
+                // When: current_settings_path cannot resolve the user's config
+                // location, report failure on the source without mutating state.
+                tracing::warn!(
+                    path = "<unresolved>",
+                    error = %format_args!("{error:#}"),
+                    "unable to save current font settings"
+                );
+                self.show_notification_for_kind(
+                    kind,
+                    sonicterm_ui::overlays::NotificationLevel::Error,
+                    "Unable to save current font settings; existing config unchanged".to_string(),
+                );
+                return;
+            }
+        };
+        self.save_current_settings_to_for_kind(&path, kind);
     }
 
     pub(super) fn start_update_check_for_kind(&mut self, kind: FrontmostKind) {
@@ -654,6 +707,9 @@ impl App {
             Action::EditConfigFile => self.open_config_file(),
             Action::OpenKeymapFile => self.open_keymap_file(),
             Action::CheckForUpdates => self.start_update_check_for_kind(self.frontmost_kind()),
+            Action::SaveCurrentSettings => {
+                self.save_current_settings_for_kind(self.frontmost_kind())
+            }
             Action::OpenCommandPalette => self.toggle_command_palette(),
             Action::ScrollToPrevPrompt => self.scroll_to_prompt(false),
             Action::ScrollToNextPrompt => self.scroll_to_prompt(true),
@@ -801,6 +857,7 @@ impl App {
             Action::EnterQuickSelect => self.enter_quick_select(),
             Action::PasteFromClipboard => self.paste_clipboard_for_kind(source_kind),
             Action::ReloadConfig => self.force_reload_config(),
+            Action::SaveCurrentSettings => self.save_current_settings_for_kind(source_kind),
             Action::NewTab => {
                 // When: action is Action::NewTab, create a tab in the routed terminal window.
                 self.dispatch_intent(sonicterm_app_core::AppIntent::NewTab {

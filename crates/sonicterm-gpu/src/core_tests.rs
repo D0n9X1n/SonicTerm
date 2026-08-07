@@ -624,6 +624,7 @@ fn inline_image_atlas_skips_older_images_without_eviction() {
         weight_bold: false,
         italic: false,
         glyph_id: fold_u64_to_u32(2),
+        raster_variant: GlyphRasterVariant::Normal,
     };
     let older_key = sonicterm_types::GlyphKey { glyph_id: fold_u64_to_u32(1), ..newer_key };
     assert_eq!(skipped, 1);
@@ -1183,6 +1184,139 @@ fn palette_cursor_uses_placeholder_only_for_an_empty_query() {
     assert_eq!(palette_cursor_char("abc", 0, Some("Search commands…")), Some("a"));
     assert_eq!(palette_cursor_char("abc", 3, Some("Search commands…")), None);
     assert_eq!(palette_cursor_char("", 0, None), None);
+}
+
+#[test]
+fn palette_footer_is_one_logical_pixel_smaller_and_native_at_windows_scales() {
+    assert_eq!(palette_footer_font_size(13.0), 12.0);
+    assert_eq!(palette_footer_font_size(1.0), 1.0);
+
+    for scale in [1.0_f32, 1.25, 1.5, 1.75] {
+        let requested_font_size = palette_footer_font_size(13.0) * scale;
+        let native_em = palette_footer_font_size(13.0) * scale;
+
+        assert_eq!(requested_font_size, 12.0 * scale);
+        assert_eq!(
+            requested_font_size.to_bits(),
+            native_em.to_bits(),
+            "footer {requested_font_size}px rescales a {native_em}px atlas tile at {scale}x"
+        );
+    }
+}
+
+#[test]
+fn palette_footer_uses_native_regular_natural_spacing_and_scaled_geometry() {
+    const CORE_SRC: &str = include_str!("core.rs");
+    let start = CORE_SRC
+        .find("if let Some(footer_stack) = self.palette_footer_font_stack.as_ref()")
+        .expect("footer must use its native stack");
+    let end = CORE_SRC[start..]
+        .find("// Inline IME preedit at the TERMINAL CURSOR")
+        .map(|offset| start + offset)
+        .expect("footer block must end before inline IME rendering");
+    let footer = &CORE_SRC[start..end];
+
+    assert!(footer.contains("let mut footer_rasterizer = footer_stack.clone();"));
+    assert!(footer.contains("let footer_native_em = footer_font_size;"));
+    assert!(footer.contains("chrome_text::layout_with_raster_variant("));
+    assert!(footer.contains("GlyphRasterVariant::PaletteFooter"));
+    assert!(footer.contains("ChromeAttrs::default(),"), "footer text remains regular");
+    assert!(!footer.contains("tracking"), "footer must keep the font's natural advances");
+    assert!(!footer.contains("bold: true"), "footer must not request a bold face");
+    assert!(footer.contains("self.chrome_px(PALETTE_FOOTER_INSET_X)"));
+    assert!(footer.contains("Some(ChromeClip {"));
+}
+
+#[test]
+fn body_title_and_footer_stacks_share_configuration_and_native_size_identity() {
+    const CORE_SRC: &str = include_str!("core.rs");
+    let helper_start = CORE_SRC.find("fn renderer_font_stacks(").expect("stack builder");
+    let helper_end = CORE_SRC[helper_start..]
+        .find("fn software_block_glyph_target_rect(")
+        .map(|offset| helper_start + offset)
+        .expect("stack builder end");
+    let helper = &CORE_SRC[helper_start..helper_end];
+    assert_eq!(helper.matches("try_new_full_with_weight(").count(), 1);
+    assert_eq!(helper.matches("with_font_size(").count(), 2);
+
+    // Platform locators can accept a family without resolving it on a CI host;
+    // the tracked asset fixture makes the native-size metric assertion real.
+    let _font_lock = crate::chrome_text::TRACKED_FONT_STACK_LOCK.lock().expect("font fixture lock");
+    let body = crate::chrome_text::tracked_font_stack(13.0);
+    let title = body.with_font_size(14.0);
+    let footer = body.with_font_size(12.0);
+    assert!(body.shares_configuration_with(&title));
+    assert!(body.shares_configuration_with(&footer));
+    assert!(title.shares_configuration_with(&footer));
+
+    let body_metrics = body.cell_metrics_raster_px().expect("body metrics");
+    let title_metrics = title.cell_metrics_raster_px().expect("title metrics");
+    let footer_metrics = footer.cell_metrics_raster_px().expect("footer metrics");
+    assert!(title_metrics.cell_h > body_metrics.cell_h);
+    assert!(footer_metrics.cell_h < body_metrics.cell_h);
+
+    let set_font_start = CORE_SRC.find("    pub fn set_font(").expect("set_font exists");
+    let set_font_end = CORE_SRC[set_font_start..]
+        .find("\n    /// Apply a new DPI scale factor")
+        .map(|offset| set_font_start + offset)
+        .expect("set_font has a bounded body");
+    let set_font = &CORE_SRC[set_font_start..set_font_end];
+    assert!(set_font.contains("renderer_font_stacks(family, size, dpi, weight_scale)"));
+    for assignment in [
+        "self.font_stack = new_stacks.body;",
+        "self.tab_title_font_stack = new_stacks.tab_title;",
+        "self.palette_footer_font_stack = new_stacks.palette_footer;",
+    ] {
+        assert!(set_font.contains(assignment), "missing stack replacement: {assignment}");
+    }
+}
+
+#[test]
+fn title_size_helper_is_used_only_for_title_stack_and_title_rendering() {
+    const CORE_SRC: &str = include_str!("core.rs");
+    assert_eq!(CORE_SRC.matches("tab_title_font_size(").count(), 2);
+    assert!(CORE_SRC.contains("if let Some(stack) = self.tab_title_font_stack.as_ref()"));
+    assert!(CORE_SRC.contains("GlyphRasterVariant::TabTitle"));
+}
+
+#[test]
+fn longest_palette_footer_fits_supported_panel_width_with_natural_spacing() {
+    use sonicterm_render_model::boundary::ui::command_palette::{
+        CommandPalette, CommandPaletteMode,
+    };
+    use sonicterm_render_model::boundary::ui::overlays::{PaletteLayout, PALETTE_WIDTH};
+
+    let _font_lock = crate::chrome_text::TRACKED_FONT_STACK_LOCK.lock().expect("font fixture lock");
+    let mut longest = String::new();
+    let mut supported_width = 0.0_f32;
+    for mode in
+        [CommandPaletteMode::Commands, CommandPaletteMode::RenameTab, CommandPaletteMode::TabColor]
+    {
+        let mut palette = CommandPalette::new();
+        match mode {
+            CommandPaletteMode::Commands => palette.open(),
+            CommandPaletteMode::RenameTab => palette.start_rename_tab("tab"),
+            CommandPaletteMode::TabColor => palette.start_tab_color_picker("tab", Vec::new()),
+        }
+        let layout = PaletteLayout::compute(&mut palette, 4000.0, 2400.0, 0.0, 1.0)
+            .expect("open palette has layout");
+        assert_eq!(layout.footer.w, PALETTE_WIDTH - 2.0);
+        if layout.footer_label.chars().count() > longest.chars().count() {
+            longest = layout.footer_label;
+            supported_width = layout.footer.w;
+        }
+    }
+
+    let available = supported_width - PALETTE_FOOTER_INSET_X;
+    for body_font_size in [13.0_f64, 14.5, 18.0] {
+        let footer_font_size = f64::from(palette_footer_font_size(body_font_size as f32));
+        let stack = crate::chrome_text::tracked_font_stack(footer_font_size);
+        let shaped = stack.measure_text_width(&longest).expect("tracked footer font shapes");
+        assert!(
+            shaped <= available + f32::EPSILON,
+            "footer at body {body_font_size}px must fit: {shaped}px text in {available}px: {longest:?}"
+        );
+    }
 }
 
 #[test]

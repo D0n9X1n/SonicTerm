@@ -127,8 +127,10 @@ pub enum Action {
     DecreaseFontWeight,
     /// Reset regular-text weight to the configured `weight_scale`.
     ResetFontWeight,
+    /// Persist the current font size and weight without persisting the session theme.
+    SaveCurrentSettings,
 
-    /// Apply a theme by name (live-applied; persists to config on next save).
+    /// Apply a theme by name for the current session.
     /// Bound from the View → Theme submenu in the macOS menubar.
     ApplyTheme(String),
 

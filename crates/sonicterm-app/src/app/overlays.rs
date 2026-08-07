@@ -166,8 +166,7 @@ impl App {
                 size.width as f32,
                 size.height as f32,
                 renderer.scale_factor(),
-                sonicterm_ui::tab_spans::tab_title_font_size(renderer.font_size())
-                    * renderer.scale_factor(),
+                renderer.font_size() * renderer.scale_factor(),
                 renderer.cell_w,
             )
         } else {
@@ -184,8 +183,7 @@ impl App {
                 size.width as f32,
                 size.height as f32,
                 renderer.scale_factor(),
-                sonicterm_ui::tab_spans::tab_title_font_size(renderer.font_size())
-                    * renderer.scale_factor(),
+                renderer.font_size() * renderer.scale_factor(),
                 renderer.cell_w,
             )
         };
@@ -203,14 +201,14 @@ impl App {
 
     fn command_palette_text_edit(
         &self,
-        event: &KeyEvent,
+        logical_key: &winit::keyboard::Key,
     ) -> Option<sonicterm_ui::text_edit::TextEdit> {
         let mods = match self.palette_attached_window {
             Some(id) => self.windows.get(&id).map(|ws| ws.modifiers),
             None => self.main().map(|ws| ws.modifiers),
         }
         .unwrap_or_else(ModifiersState::empty);
-        super::text_edit::core_text_edit_for_key(&event.logical_key, mods)
+        super::text_edit::core_text_edit_for_key(logical_key, mods)
     }
 
     fn command_palette_tab_count(&self) -> usize {
@@ -254,6 +252,13 @@ impl App {
     }
 
     pub(super) fn command_palette_handle_key(&mut self, event: &KeyEvent) -> bool {
+        self.command_palette_handle_logical_key(&event.logical_key)
+    }
+
+    pub(super) fn command_palette_handle_logical_key(
+        &mut self,
+        logical_key: &winit::keyboard::Key,
+    ) -> bool {
         use winit::keyboard::{Key, NamedKey};
         if !self.command_palette.is_open() {
             // When: command_palette is closed no palette state may change here;
@@ -264,7 +269,7 @@ impl App {
         if self.palette_ime_is_composing() {
             // When: palette_ime_is_composing is true the IME owns the keystroke;
             // swallow every key so a half-formed CJK sequence cannot also navigate.
-            if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+            if matches!(*logical_key, Key::Named(NamedKey::Escape)) {
                 if let Some(ws) = match self.palette_attached_window {
                     Some(id) => self.windows.get_mut(&id),
                     None => self.main_mut(),
@@ -279,7 +284,7 @@ impl App {
         if self.command_palette.mode()
             == sonicterm_ui::command_palette::CommandPaletteMode::TabColor
         {
-            match &event.logical_key {
+            match logical_key {
                 Key::Named(NamedKey::Escape) => {
                     self.command_palette.close();
                     self.palette_attached_window = None;
@@ -303,7 +308,7 @@ impl App {
                 }
                 _ => true,
             }
-        } else if let Some(edit) = self.command_palette_text_edit(event) {
+        } else if let Some(edit) = self.command_palette_text_edit(logical_key) {
             // When: command_palette_text_edit maps the chord to an emacs ctrl edit
             // (ctrl+a, ctrl+k, ctrl+w); it rewrites the query in rename and list modes.
             self.command_palette.apply_text_edit(edit);
@@ -315,7 +320,7 @@ impl App {
         {
             // When: mode is RenameTab the query holds the tab title, so Enter
             // commits it via rename_active_tab_body instead of running an action.
-            match &event.logical_key {
+            match logical_key {
                 Key::Named(NamedKey::Escape) => {
                     self.command_palette.close();
                     self.palette_attached_window = None;
@@ -385,7 +390,7 @@ impl App {
         } else {
             // When: mode is neither TabColor nor RenameTab the palette shows
             // the command list, where Enter runs the selected action.
-            match &event.logical_key {
+            match logical_key {
                 Key::Named(NamedKey::Escape) => {
                     self.command_palette.close();
                     self.palette_attached_window = None;

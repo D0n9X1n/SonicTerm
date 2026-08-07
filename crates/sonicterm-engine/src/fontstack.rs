@@ -65,6 +65,7 @@ pub struct CellMetricsPx {
 #[derive(Clone)]
 pub struct FontStack {
     fc: Rc<FontConfiguration>,
+    font_size_pt: f64,
     regular_weight_scale: f32,
     /// Memoized cell height in raster px, used to size outline growth.
     /// `0.0` means "not yet computed"; invalidated on scaling changes.
@@ -113,6 +114,7 @@ impl FontStack {
         )?;
         Ok(Self {
             fc: Rc::new(fc),
+            font_size_pt,
             regular_weight_scale: sanitize_weight_scale(regular_weight_scale),
             cell_h_px: Cell::new(0.0),
         })
@@ -147,9 +149,32 @@ impl FontStack {
         let fc = FontConfiguration::new(Some(config::ConfigHandle::new(cfg)), dpi)?;
         Ok(Self {
             fc: Rc::new(fc),
+            font_size_pt,
             regular_weight_scale: sanitize_weight_scale(regular_weight_scale),
             cell_h_px: Cell::new(0.0),
         })
+    }
+
+    /// Create a native-size view that shares this stack's font configuration.
+    ///
+    /// Size stays part of sonicterm-font's loaded-face cache key, so bitmap
+    /// strikes remain correct without duplicating font databases and fallback
+    /// infrastructure for every chrome size in every window.
+    #[must_use]
+    pub fn with_font_size(&self, font_size_pt: f64) -> Self {
+        Self {
+            fc: Rc::clone(&self.fc),
+            font_size_pt,
+            regular_weight_scale: self.regular_weight_scale,
+            cell_h_px: Cell::new(0.0),
+        }
+    }
+
+    /// Whether two stacks share one font configuration and its databases.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn shares_configuration_with(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.fc, &other.fc)
     }
 
     /// Apply a logical font scale and raster DPI, returning the values accepted
@@ -192,7 +217,7 @@ impl FontStack {
         if italic {
             style = style.make_italic();
         }
-        self.fc.resolve_font(&style)
+        self.fc.resolve_font_at_size(&style, self.font_size_pt)
     }
 
     /// Measure a left-to-right text run in raster pixels using the same
@@ -221,7 +246,7 @@ impl FontStack {
     pub fn glyph_id_for_family_for_test(&self, family: &str, ch: char) -> Result<u32> {
         let style = TextStyle { font: vec![config::FontAttributes::new(family)], foreground: None };
         self.fc
-            .resolve_font(&style)?
+            .resolve_font_at_size(&style, self.font_size_pt)?
             .blocking_shape(
                 &ch.to_string(),
                 Some(Presentation::Text),
@@ -246,7 +271,7 @@ impl FontStack {
     /// in the hot path should propagate; tests can `unwrap` once
     /// they've confirmed sonicterm-font picked something up.
     pub fn cell_metrics_raster_px(&self) -> Result<CellMetricsPx> {
-        let m = self.fc.default_font_metrics()?;
+        let m = self.fc.default_font_metrics_at_size(self.font_size_pt)?;
         Ok(CellMetricsPx {
             cell_w: m.cell_width.get(),
             cell_h: m.cell_height.get(),

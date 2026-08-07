@@ -277,7 +277,7 @@ During `RedrawRequested`, the app attempts to lock every visible pane parser
 without blocking. One failed lock defers the complete frame. Successful guards
 supply all `PaneRender` inputs to the renderer.
 
-## Config reload
+## Config save and reload
 
 Configuration is read at startup and then only when the user runs **Reload
 Config** from the command palette (`Action::ReloadConfig`). There is no
@@ -289,6 +289,21 @@ names, then applies changes to all live windows and panes. Depending on the
 field, reload can update theme colors, key hints, padding, scrollback limits,
 cursor, renderer cache state, and the warm-window pool. Invalid input is
 reported rather than silently replacing the active config.
+
+**Save Current Settings** (`Action::SaveCurrentSettings`) is deliberately
+narrower than reload. It patches only the current zoomed `[font].size` and active
+safe `[font].weight_scale` in `~/.sonicterm/sonicterm.toml`, preserving all
+unrelated known settings, unknown top-level and nested keys, comments, and
+supported order and formatting. Theme, locale, window/pane/tab state, and other
+runtime modes are untouched. Since the two values are already live, saving does
+not reload or reapply them.
+
+If the config is missing, save first creates the commented starter file. It then
+writes a same-directory temporary file and atomically replaces the config without
+claiming power-loss durability. A malformed current config is refused. Success
+advances both font reset baselines and shows an Info
+confirmation; failure leaves the old file, live values, and baselines intact and
+shows Error.
 
 ## Tab drag and tear-out
 
@@ -380,7 +395,7 @@ flowchart TD
 | Input actions/encoding | `crates/sonicterm-app/src/app/{keymap_dispatch,key_encoding}.rs` |
 | Pane spawning | `crates/sonicterm-app/src/app/spawn_pane.rs` |
 | Drag/transfer | `crates/sonicterm-app/src/app/{tear_out,tab_transfer,tab_state}.rs` |
-| Config reload | `crates/sonicterm-app/src/app/config_apply.rs` |
+| Config save/reload | `crates/sonicterm-app/src/app/config_apply.rs` |
 | Reducer boundary | `crates/sonicterm-app-core/src/` |
 
 ## 中文
@@ -618,7 +633,7 @@ PTY worker 不会逐字节重绘，而是累积输出，在达到字节阈值或
 收到 `RedrawRequested` 时，app 非阻塞尝试锁住每个可见窗格 parser。任一个失败就推迟整帧；
 全部成功后才向 renderer 提供完整 `PaneRender`。
 
-## 配置重载
+## 配置保存与重载
 
 配置只在启动时读取，之后仅在用户从命令面板运行 **Reload Config**
 （`Action::ReloadConfig`）时重新读取。没有后台 watcher，因此不会有定时、文件系统事件
@@ -627,6 +642,17 @@ PTY worker 不会逐字节重绘，而是累积输出，在达到字节阈值或
 重载会重新解析 `sonicterm.toml`，并重新读取它所指定的主题与 keymap 文件，然后应用到所有
 实时窗口和窗格。不同字段可更新主题颜色、快捷键提示、padding、scrollback 上限、光标、
 renderer 缓存和预热窗口池。无效输入会报告错误，而不是默默替换活动配置。
+
+**Save Current Settings**（`Action::SaveCurrentSettings`）刻意比重载更窄。它只修补
+`~/.sonicterm/sonicterm.toml` 中当前缩放后的 `[font].size` 和当前有效且安全的
+`[font].weight_scale`，并保留所有无关的已知设置、未知顶层与嵌套 key、注释，以及受支持的
+顺序和格式。主题、locale、窗口/窗格/Tab 状态与其它运行时模式都不改变。由于这两个值已经
+实时生效，保存不会重载或重新应用它们。
+
+若配置不存在，保存会先创建带注释的初始配置。随后写入同目录临时文件，再以原子方式替换配置，
+但不承诺断电后的持久性。当前配置格式错误时会拒绝保存。成功会推进两个字体重置基线并显示
+Info 确认；失败会保持旧文件、实时值
+与基线不变，并显示 Error。
 
 ## 标签页拖动和撕离
 
@@ -709,5 +735,5 @@ flowchart TD
 | 输入 action/编码 | `crates/sonicterm-app/src/app/{keymap_dispatch,key_encoding}.rs` |
 | 窗格启动 | `crates/sonicterm-app/src/app/spawn_pane.rs` |
 | 拖动/转移 | `crates/sonicterm-app/src/app/{tear_out,tab_transfer,tab_state}.rs` |
-| 配置重载 | `crates/sonicterm-app/src/app/config_apply.rs` |
+| 配置保存/重载 | `crates/sonicterm-app/src/app/config_apply.rs` |
 | Reducer 边界 | `crates/sonicterm-app-core/src/` |

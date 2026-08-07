@@ -98,21 +98,9 @@ pub struct TabSpanInput<'a> {
 pub const TAB_TITLE_PADDING_PX: f32 = 6.0;
 
 /// Tab-title font size given the body terminal font size, in logical px.
-///
-/// Tab titles render at **exactly the body font size**. They previously
-/// rendered 1.0 pt larger (`body + 1.0`), but the chrome text path
-/// rasterizes each glyph once at the grid em (`font_size * scale_factor`)
-/// and then projects the atlas tile to the requested chrome size by
-/// bilinearly scaling it. At `body + 1` that is a ~1.08× upscale of an
-/// already-rasterized tile, which is sampled with linear filtering and
-/// reads as soft/blurry tab titles on HiDPI. Matching the body size makes
-/// the projection scale exactly 1.0, so tab glyphs reuse the grid atlas
-/// tiles 1:1 and render as crisply as terminal text. Restoring the larger
-/// size *without* the blur requires a size-keyed atlas that rasterizes
-/// chrome glyphs natively at the tab pixel size.
 #[must_use]
 pub fn tab_title_font_size(body_font_size: f32) -> f32 {
-    body_font_size
+    body_font_size + 1.0
 }
 
 /// Output of [`build_tab_title_rich_text_spans`]: a vec of

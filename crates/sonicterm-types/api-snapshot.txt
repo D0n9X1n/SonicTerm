@@ -10,11 +10,14 @@ pub sonicterm_types::action::Action::ClosePane
 pub sonicterm_types::action::Action::CloseTab
 pub sonicterm_types::action::Action::CopyToClipboard
 pub sonicterm_types::action::Action::DecreaseFontSize
+pub sonicterm_types::action::Action::DecreaseFontWeight
 pub sonicterm_types::action::Action::EditConfigFile
 pub sonicterm_types::action::Action::EnterCopyMode
 pub sonicterm_types::action::Action::EnterQuickSelect
 pub sonicterm_types::action::Action::FocusPane(sonicterm_types::action::Direction)
 pub sonicterm_types::action::Action::IncreaseFontSize
+pub sonicterm_types::action::Action::IncreaseFontWeight
+pub sonicterm_types::action::Action::MoveTabToNewWindow
 pub sonicterm_types::action::Action::NewTab
 pub sonicterm_types::action::Action::NewWindow
 pub sonicterm_types::action::Action::NextTab
@@ -28,6 +31,7 @@ pub sonicterm_types::action::Action::QuitApp
 pub sonicterm_types::action::Action::ReloadConfig
 pub sonicterm_types::action::Action::RenameTab
 pub sonicterm_types::action::Action::ResetFontSize
+pub sonicterm_types::action::Action::ResetFontWeight
 pub sonicterm_types::action::Action::ResizePane
 pub sonicterm_types::action::Action::ResizePane::amount: u16
 pub sonicterm_types::action::Action::ResizePane::dir: sonicterm_types::action::Direction
@@ -35,6 +39,7 @@ pub sonicterm_types::action::Action::ResizePaneDown
 pub sonicterm_types::action::Action::ResizePaneLeft
 pub sonicterm_types::action::Action::ResizePaneRight
 pub sonicterm_types::action::Action::ResizePaneUp
+pub sonicterm_types::action::Action::SaveCurrentSettings
 pub sonicterm_types::action::Action::Scroll(sonicterm_types::action::ScrollAction)
 pub sonicterm_types::action::Action::ScrollToNextPrompt
 pub sonicterm_types::action::Action::ScrollToPrevPrompt
@@ -416,17 +421,41 @@ impl core::marker::UnsafeUnpin for sonicterm_types::geom::Pos
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::geom::Pos
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::geom::Pos
 pub mod sonicterm_types::glyph_key
+#[repr(u8)] pub enum sonicterm_types::glyph_key::GlyphRasterVariant
+pub sonicterm_types::glyph_key::GlyphRasterVariant::Normal
+pub sonicterm_types::glyph_key::GlyphRasterVariant::PaletteFooter
+pub sonicterm_types::glyph_key::GlyphRasterVariant::TabTitle
+impl core::clone::Clone for sonicterm_types::glyph_key::GlyphRasterVariant
+pub fn sonicterm_types::glyph_key::GlyphRasterVariant::clone(&self) -> sonicterm_types::glyph_key::GlyphRasterVariant
+impl core::cmp::Eq for sonicterm_types::glyph_key::GlyphRasterVariant
+impl core::cmp::PartialEq for sonicterm_types::glyph_key::GlyphRasterVariant
+pub fn sonicterm_types::glyph_key::GlyphRasterVariant::eq(&self, &sonicterm_types::glyph_key::GlyphRasterVariant) -> bool
+impl core::fmt::Debug for sonicterm_types::glyph_key::GlyphRasterVariant
+pub fn sonicterm_types::glyph_key::GlyphRasterVariant::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::glyph_key::GlyphRasterVariant
+pub fn sonicterm_types::glyph_key::GlyphRasterVariant::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::glyph_key::GlyphRasterVariant
+impl core::marker::StructuralPartialEq for sonicterm_types::glyph_key::GlyphRasterVariant
+impl core::marker::Freeze for sonicterm_types::glyph_key::GlyphRasterVariant
+impl core::marker::Send for sonicterm_types::glyph_key::GlyphRasterVariant
+impl core::marker::Sync for sonicterm_types::glyph_key::GlyphRasterVariant
+impl core::marker::Unpin for sonicterm_types::glyph_key::GlyphRasterVariant
+impl core::marker::UnsafeUnpin for sonicterm_types::glyph_key::GlyphRasterVariant
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::glyph_key::GlyphRasterVariant
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::glyph_key::GlyphRasterVariant
 pub struct sonicterm_types::glyph_key::GlyphKey
 pub sonicterm_types::glyph_key::GlyphKey::ch: char
 pub sonicterm_types::glyph_key::GlyphKey::font_slot: u8
 pub sonicterm_types::glyph_key::GlyphKey::glyph_id: u32
 pub sonicterm_types::glyph_key::GlyphKey::italic: bool
+pub sonicterm_types::glyph_key::GlyphKey::raster_variant: sonicterm_types::glyph_key::GlyphRasterVariant
 pub sonicterm_types::glyph_key::GlyphKey::weight_bold: bool
 impl sonicterm_types::glyph_key::GlyphKey
 pub fn sonicterm_types::glyph_key::GlyphKey::from_cell(&sonicterm_types::cell::Cell) -> core::option::Option<Self>
 pub fn sonicterm_types::glyph_key::GlyphKey::new(char, bool, bool) -> Self
 pub fn sonicterm_types::glyph_key::GlyphKey::shaped(char, u8, u32, bool, bool) -> Self
 pub fn sonicterm_types::glyph_key::GlyphKey::with_font_slot(self, u8) -> Self
+pub fn sonicterm_types::glyph_key::GlyphKey::with_raster_variant(self, sonicterm_types::glyph_key::GlyphRasterVariant) -> Self
 pub fn sonicterm_types::glyph_key::GlyphKey::with_slot(char, u8, bool, bool) -> Self
 impl core::clone::Clone for sonicterm_types::glyph_key::GlyphKey
 pub fn sonicterm_types::glyph_key::GlyphKey::clone(&self) -> sonicterm_types::glyph_key::GlyphKey
@@ -729,7 +758,76 @@ impl core::marker::Unpin for sonicterm_types::mod_key::ModKey
 impl core::marker::UnsafeUnpin for sonicterm_types::mod_key::ModKey
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::mod_key::ModKey
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::mod_key::ModKey
+pub mod sonicterm_types::open_script
+pub enum sonicterm_types::open_script::OpenScriptResolveError
+pub sonicterm_types::open_script::OpenScriptResolveError::InitialCwdNotAbsolute
+pub sonicterm_types::open_script::OpenScriptResolveError::InitialCwdUnavailable
+impl core::clone::Clone for sonicterm_types::open_script::OpenScriptResolveError
+pub fn sonicterm_types::open_script::OpenScriptResolveError::clone(&self) -> sonicterm_types::open_script::OpenScriptResolveError
+impl core::cmp::Eq for sonicterm_types::open_script::OpenScriptResolveError
+impl core::cmp::PartialEq for sonicterm_types::open_script::OpenScriptResolveError
+pub fn sonicterm_types::open_script::OpenScriptResolveError::eq(&self, &sonicterm_types::open_script::OpenScriptResolveError) -> bool
+impl core::fmt::Debug for sonicterm_types::open_script::OpenScriptResolveError
+pub fn sonicterm_types::open_script::OpenScriptResolveError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::open_script::OpenScriptResolveError
+impl core::marker::StructuralPartialEq for sonicterm_types::open_script::OpenScriptResolveError
+impl core::marker::Freeze for sonicterm_types::open_script::OpenScriptResolveError
+impl core::marker::Send for sonicterm_types::open_script::OpenScriptResolveError
+impl core::marker::Sync for sonicterm_types::open_script::OpenScriptResolveError
+impl core::marker::Unpin for sonicterm_types::open_script::OpenScriptResolveError
+impl core::marker::UnsafeUnpin for sonicterm_types::open_script::OpenScriptResolveError
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::open_script::OpenScriptResolveError
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::open_script::OpenScriptResolveError
+pub struct sonicterm_types::open_script::OpenScriptRequest
+pub sonicterm_types::open_script::OpenScriptRequest::launch_path: std::path::PathBuf
+pub sonicterm_types::open_script::OpenScriptRequest::original_path: std::path::PathBuf
+impl sonicterm_types::open_script::OpenScriptRequest
+pub fn sonicterm_types::open_script::OpenScriptRequest::pane_cwd(&self) -> core::option::Option<&std::path::Path>
+pub fn sonicterm_types::open_script::OpenScriptRequest::resolve(std::path::PathBuf, &std::path::Path) -> core::result::Result<Self, sonicterm_types::open_script::OpenScriptResolveError>
+pub fn sonicterm_types::open_script::OpenScriptRequest::resolve_with_cwd_lookup<F>(std::path::PathBuf, F) -> core::result::Result<Self, sonicterm_types::open_script::OpenScriptResolveError> where F: core::ops::function::FnOnce() -> core::option::Option<std::path::PathBuf>
+impl core::clone::Clone for sonicterm_types::open_script::OpenScriptRequest
+pub fn sonicterm_types::open_script::OpenScriptRequest::clone(&self) -> sonicterm_types::open_script::OpenScriptRequest
+impl core::cmp::Eq for sonicterm_types::open_script::OpenScriptRequest
+impl core::cmp::PartialEq for sonicterm_types::open_script::OpenScriptRequest
+pub fn sonicterm_types::open_script::OpenScriptRequest::eq(&self, &sonicterm_types::open_script::OpenScriptRequest) -> bool
+impl core::fmt::Debug for sonicterm_types::open_script::OpenScriptRequest
+pub fn sonicterm_types::open_script::OpenScriptRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for sonicterm_types::open_script::OpenScriptRequest
+impl core::marker::Freeze for sonicterm_types::open_script::OpenScriptRequest
+impl core::marker::Send for sonicterm_types::open_script::OpenScriptRequest
+impl core::marker::Sync for sonicterm_types::open_script::OpenScriptRequest
+impl core::marker::Unpin for sonicterm_types::open_script::OpenScriptRequest
+impl core::marker::UnsafeUnpin for sonicterm_types::open_script::OpenScriptRequest
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::open_script::OpenScriptRequest
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::open_script::OpenScriptRequest
 pub mod sonicterm_types::resource
+#[non_exhaustive] pub enum sonicterm_types::resource::AdmissionRejection
+pub sonicterm_types::resource::AdmissionRejection::Cancelled
+pub sonicterm_types::resource::AdmissionRejection::ItemCountLimit
+pub sonicterm_types::resource::AdmissionRejection::ItemTooLarge
+pub sonicterm_types::resource::AdmissionRejection::PerOwnerBudget
+pub sonicterm_types::resource::AdmissionRejection::ProcessBudget
+impl sonicterm_types::resource::AdmissionRejection
+pub fn sonicterm_types::resource::AdmissionRejection::code(self) -> &'static str
+pub fn sonicterm_types::resource::AdmissionRejection::is_retryable_after_reclaim(self) -> bool
+impl core::clone::Clone for sonicterm_types::resource::AdmissionRejection
+pub fn sonicterm_types::resource::AdmissionRejection::clone(&self) -> sonicterm_types::resource::AdmissionRejection
+impl core::cmp::Eq for sonicterm_types::resource::AdmissionRejection
+impl core::cmp::PartialEq for sonicterm_types::resource::AdmissionRejection
+pub fn sonicterm_types::resource::AdmissionRejection::eq(&self, &sonicterm_types::resource::AdmissionRejection) -> bool
+impl core::fmt::Debug for sonicterm_types::resource::AdmissionRejection
+pub fn sonicterm_types::resource::AdmissionRejection::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::resource::AdmissionRejection
+pub fn sonicterm_types::resource::AdmissionRejection::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::resource::AdmissionRejection
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::AdmissionRejection
+impl core::marker::Freeze for sonicterm_types::resource::AdmissionRejection
+impl core::marker::Send for sonicterm_types::resource::AdmissionRejection
+impl core::marker::Sync for sonicterm_types::resource::AdmissionRejection
+impl core::marker::Unpin for sonicterm_types::resource::AdmissionRejection
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::AdmissionRejection
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::AdmissionRejection
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::AdmissionRejection
 #[non_exhaustive] pub enum sonicterm_types::resource::BudgetDimension
 pub sonicterm_types::resource::BudgetDimension::Bytes
 pub sonicterm_types::resource::BudgetDimension::Items
@@ -828,6 +926,31 @@ impl core::marker::Unpin for sonicterm_types::resource::BudgetScope
 impl core::marker::UnsafeUnpin for sonicterm_types::resource::BudgetScope
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::BudgetScope
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::BudgetScope
+pub enum sonicterm_types::resource::ClassCoverage
+pub sonicterm_types::resource::ClassCoverage::Charged
+pub sonicterm_types::resource::ClassCoverage::FeatureGated
+pub sonicterm_types::resource::ClassCoverage::MeasuredNegligible
+pub sonicterm_types::resource::ClassCoverage::MeasuredNegligible::per_pane_bytes: usize
+pub sonicterm_types::resource::ClassCoverage::SubsystemAbsent
+pub sonicterm_types::resource::ClassCoverage::TransientWithinCall
+pub sonicterm_types::resource::ClassCoverage::UnchargedRetention
+pub sonicterm_types::resource::ClassCoverage::UnchargedRetention::per_owner_bytes: usize
+impl core::clone::Clone for sonicterm_types::resource::ClassCoverage
+pub fn sonicterm_types::resource::ClassCoverage::clone(&self) -> sonicterm_types::resource::ClassCoverage
+impl core::cmp::Eq for sonicterm_types::resource::ClassCoverage
+impl core::cmp::PartialEq for sonicterm_types::resource::ClassCoverage
+pub fn sonicterm_types::resource::ClassCoverage::eq(&self, &sonicterm_types::resource::ClassCoverage) -> bool
+impl core::fmt::Debug for sonicterm_types::resource::ClassCoverage
+pub fn sonicterm_types::resource::ClassCoverage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::resource::ClassCoverage
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::ClassCoverage
+impl core::marker::Freeze for sonicterm_types::resource::ClassCoverage
+impl core::marker::Send for sonicterm_types::resource::ClassCoverage
+impl core::marker::Sync for sonicterm_types::resource::ClassCoverage
+impl core::marker::Unpin for sonicterm_types::resource::ClassCoverage
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::ClassCoverage
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::ClassCoverage
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::ClassCoverage
 #[non_exhaustive] pub enum sonicterm_types::resource::DisconnectReason
 pub sonicterm_types::resource::DisconnectReason::Cancelled
 pub sonicterm_types::resource::DisconnectReason::SustainedPressure
@@ -924,6 +1047,26 @@ impl core::marker::Unpin for sonicterm_types::resource::OwnerState
 impl core::marker::UnsafeUnpin for sonicterm_types::resource::OwnerState
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::OwnerState
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::OwnerState
+pub enum sonicterm_types::resource::PaneSeamTerm
+pub sonicterm_types::resource::PaneSeamTerm::ChargedToAnotherOwnerKind
+pub sonicterm_types::resource::PaneSeamTerm::Contributes
+pub sonicterm_types::resource::PaneSeamTerm::NotChargedInProduction
+impl core::clone::Clone for sonicterm_types::resource::PaneSeamTerm
+pub fn sonicterm_types::resource::PaneSeamTerm::clone(&self) -> sonicterm_types::resource::PaneSeamTerm
+impl core::cmp::Eq for sonicterm_types::resource::PaneSeamTerm
+impl core::cmp::PartialEq for sonicterm_types::resource::PaneSeamTerm
+pub fn sonicterm_types::resource::PaneSeamTerm::eq(&self, &sonicterm_types::resource::PaneSeamTerm) -> bool
+impl core::fmt::Debug for sonicterm_types::resource::PaneSeamTerm
+pub fn sonicterm_types::resource::PaneSeamTerm::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::resource::PaneSeamTerm
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::PaneSeamTerm
+impl core::marker::Freeze for sonicterm_types::resource::PaneSeamTerm
+impl core::marker::Send for sonicterm_types::resource::PaneSeamTerm
+impl core::marker::Sync for sonicterm_types::resource::PaneSeamTerm
+impl core::marker::Unpin for sonicterm_types::resource::PaneSeamTerm
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::PaneSeamTerm
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::PaneSeamTerm
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::PaneSeamTerm
 #[non_exhaustive] pub enum sonicterm_types::resource::PressureOutcome<T>
 pub sonicterm_types::resource::PressureOutcome::Accepted
 pub sonicterm_types::resource::PressureOutcome::Accepted::receipt: sonicterm_types::resource::DeliveryReceipt
@@ -1016,6 +1159,11 @@ pub sonicterm_types::resource::ResourceClass::RemoteOutput
 pub sonicterm_types::resource::ResourceClass::SoftwareFrame
 pub sonicterm_types::resource::ResourceClass::Surface
 pub sonicterm_types::resource::ResourceClass::UploadStaging
+impl sonicterm_types::resource::ResourceClass
+pub const sonicterm_types::resource::ResourceClass::COUNT: usize
+pub const fn sonicterm_types::resource::ResourceClass::coverage(self) -> sonicterm_types::resource::ClassCoverage
+impl sonicterm_types::resource::ResourceClass
+pub const fn sonicterm_types::resource::ResourceClass::pane_seam_term(self) -> sonicterm_types::resource::PaneSeamTerm
 impl core::clone::Clone for sonicterm_types::resource::ResourceClass
 pub fn sonicterm_types::resource::ResourceClass::clone(&self) -> sonicterm_types::resource::ResourceClass
 impl core::cmp::Eq for sonicterm_types::resource::ResourceClass
@@ -1032,11 +1180,9 @@ pub fn sonicterm_types::resource::ResourceClass::hash<__H: core::hash::Hasher>(&
 impl core::marker::Copy for sonicterm_types::resource::ResourceClass
 impl core::marker::StructuralPartialEq for sonicterm_types::resource::ResourceClass
 impl enum_map::internal::Enum for sonicterm_types::resource::ResourceClass
-pub const sonicterm_types::resource::ResourceClass::LENGTH: usize
+pub type sonicterm_types::resource::ResourceClass::Array<__EnumMapInternalV> = [__EnumMapInternalV; 22]
 pub fn sonicterm_types::resource::ResourceClass::from_usize(usize) -> Self
 pub fn sonicterm_types::resource::ResourceClass::into_usize(self) -> usize
-impl<V> enum_map::internal::EnumArray<V> for sonicterm_types::resource::ResourceClass
-pub type sonicterm_types::resource::ResourceClass::Array = [V; 22]
 impl core::marker::Freeze for sonicterm_types::resource::ResourceClass
 impl core::marker::Send for sonicterm_types::resource::ResourceClass
 impl core::marker::Sync for sonicterm_types::resource::ResourceClass
@@ -1120,6 +1266,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::Owne
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::OwnerLimits
 pub struct sonicterm_types::resource::OwnerView
 pub sonicterm_types::resource::OwnerView::amount: sonicterm_types::resource::ResourceAmount
+pub sonicterm_types::resource::OwnerView::bytes_limit: usize
 pub sonicterm_types::resource::OwnerView::class_bytes: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
 pub sonicterm_types::resource::OwnerView::class_items: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
 pub sonicterm_types::resource::OwnerView::epoch: u64
@@ -1214,6 +1361,7 @@ impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::Resourc
 pub sonicterm_types::resource::ResourceSnapshot::class_epochs: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, u64>
 pub sonicterm_types::resource::ResourceSnapshot::owner: sonicterm_types::resource::ResourceOwnerId
 pub sonicterm_types::resource::ResourceSnapshot::owner_amount: sonicterm_types::resource::ResourceAmount
+pub sonicterm_types::resource::ResourceSnapshot::owner_bytes_limit: usize
 pub sonicterm_types::resource::ResourceSnapshot::owner_class_bytes: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
 pub sonicterm_types::resource::ResourceSnapshot::owner_class_items: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
 pub sonicterm_types::resource::ResourceSnapshot::owner_epoch: u64
@@ -1260,6 +1408,53 @@ impl core::marker::Unpin for sonicterm_types::resource::RetryToken
 impl core::marker::UnsafeUnpin for sonicterm_types::resource::RetryToken
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::RetryToken
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::RetryToken
+pub mod sonicterm_types::script_draft
+pub enum sonicterm_types::script_draft::DraftRejection
+pub sonicterm_types::script_draft::DraftRejection::CmdUnsafeCharacter
+pub sonicterm_types::script_draft::DraftRejection::ControlCharacter
+pub sonicterm_types::script_draft::DraftRejection::NonAbsolutePath
+pub sonicterm_types::script_draft::DraftRejection::NonUnicodePath
+pub sonicterm_types::script_draft::DraftRejection::UnsupportedPair
+impl core::clone::Clone for sonicterm_types::script_draft::DraftRejection
+pub fn sonicterm_types::script_draft::DraftRejection::clone(&self) -> sonicterm_types::script_draft::DraftRejection
+impl core::cmp::Eq for sonicterm_types::script_draft::DraftRejection
+impl core::cmp::PartialEq for sonicterm_types::script_draft::DraftRejection
+pub fn sonicterm_types::script_draft::DraftRejection::eq(&self, &sonicterm_types::script_draft::DraftRejection) -> bool
+impl core::fmt::Debug for sonicterm_types::script_draft::DraftRejection
+pub fn sonicterm_types::script_draft::DraftRejection::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::script_draft::DraftRejection
+impl core::marker::StructuralPartialEq for sonicterm_types::script_draft::DraftRejection
+impl core::marker::Freeze for sonicterm_types::script_draft::DraftRejection
+impl core::marker::Send for sonicterm_types::script_draft::DraftRejection
+impl core::marker::Sync for sonicterm_types::script_draft::DraftRejection
+impl core::marker::Unpin for sonicterm_types::script_draft::DraftRejection
+impl core::marker::UnsafeUnpin for sonicterm_types::script_draft::DraftRejection
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::script_draft::DraftRejection
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::script_draft::DraftRejection
+pub enum sonicterm_types::script_draft::ShellDialect
+pub sonicterm_types::script_draft::ShellDialect::Cmd
+pub sonicterm_types::script_draft::ShellDialect::Posix
+pub sonicterm_types::script_draft::ShellDialect::PowerShell
+pub sonicterm_types::script_draft::ShellDialect::Unknown
+impl core::clone::Clone for sonicterm_types::script_draft::ShellDialect
+pub fn sonicterm_types::script_draft::ShellDialect::clone(&self) -> sonicterm_types::script_draft::ShellDialect
+impl core::cmp::Eq for sonicterm_types::script_draft::ShellDialect
+impl core::cmp::PartialEq for sonicterm_types::script_draft::ShellDialect
+pub fn sonicterm_types::script_draft::ShellDialect::eq(&self, &sonicterm_types::script_draft::ShellDialect) -> bool
+impl core::fmt::Debug for sonicterm_types::script_draft::ShellDialect
+pub fn sonicterm_types::script_draft::ShellDialect::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::script_draft::ShellDialect
+impl core::marker::StructuralPartialEq for sonicterm_types::script_draft::ShellDialect
+impl core::marker::Freeze for sonicterm_types::script_draft::ShellDialect
+impl core::marker::Send for sonicterm_types::script_draft::ShellDialect
+impl core::marker::Sync for sonicterm_types::script_draft::ShellDialect
+impl core::marker::Unpin for sonicterm_types::script_draft::ShellDialect
+impl core::marker::UnsafeUnpin for sonicterm_types::script_draft::ShellDialect
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::script_draft::ShellDialect
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::script_draft::ShellDialect
+pub fn sonicterm_types::script_draft::classify_shell(&str) -> sonicterm_types::script_draft::ShellDialect
+pub fn sonicterm_types::script_draft::format_script_draft(sonicterm_types::script_draft::ShellDialect, &std::path::Path) -> core::result::Result<alloc::string::String, sonicterm_types::script_draft::DraftRejection>
+pub fn sonicterm_types::script_draft::shell_quote_powershell(&str) -> alloc::string::String
 pub mod sonicterm_types::shell_quote
 pub fn sonicterm_types::shell_quote::shell_quote_posix(&str) -> alloc::string::String
 pub mod sonicterm_types::traits
@@ -1300,10 +1495,10 @@ pub fn sonicterm_types::traits::painter::Painter::paint_frame(&mut self, &dyn so
 pub fn sonicterm_types::traits::painter::Painter::resize_surface(&mut self, u32, u32)
 pub mod sonicterm_types::traits::pty
 pub trait sonicterm_types::traits::pty::PtyTransport: core::marker::Send
-pub fn sonicterm_types::traits::pty::PtyTransport::read(&mut self, &mut [u8]) -> std::io::error::Result<usize>
-pub fn sonicterm_types::traits::pty::PtyTransport::resize(&mut self, u16, u16) -> std::io::error::Result<()>
-pub fn sonicterm_types::traits::pty::PtyTransport::try_wait(&mut self) -> std::io::error::Result<core::option::Option<i32>>
-pub fn sonicterm_types::traits::pty::PtyTransport::write(&mut self, &[u8]) -> std::io::error::Result<usize>
+pub fn sonicterm_types::traits::pty::PtyTransport::read(&mut self, &mut [u8]) -> core::io::error::Result<usize>
+pub fn sonicterm_types::traits::pty::PtyTransport::resize(&mut self, u16, u16) -> core::io::error::Result<()>
+pub fn sonicterm_types::traits::pty::PtyTransport::try_wait(&mut self) -> core::io::error::Result<core::option::Option<i32>>
+pub fn sonicterm_types::traits::pty::PtyTransport::write(&mut self, &[u8]) -> core::io::error::Result<usize>
 pub mod sonicterm_types::traits::window
 pub trait sonicterm_types::traits::window::WindowBackend: core::marker::Send
 pub fn sonicterm_types::traits::window::WindowBackend::inner_size_px(&self) -> (u32, u32)
@@ -1333,10 +1528,10 @@ pub trait sonicterm_types::traits::Painter: core::marker::Send
 pub fn sonicterm_types::traits::Painter::paint_frame(&mut self, &dyn sonicterm_types::traits::painter::FrameLike) -> core::result::Result<(), sonicterm_types::traits::painter::PaintError>
 pub fn sonicterm_types::traits::Painter::resize_surface(&mut self, u32, u32)
 pub trait sonicterm_types::traits::PtyTransport: core::marker::Send
-pub fn sonicterm_types::traits::PtyTransport::read(&mut self, &mut [u8]) -> std::io::error::Result<usize>
-pub fn sonicterm_types::traits::PtyTransport::resize(&mut self, u16, u16) -> std::io::error::Result<()>
-pub fn sonicterm_types::traits::PtyTransport::try_wait(&mut self) -> std::io::error::Result<core::option::Option<i32>>
-pub fn sonicterm_types::traits::PtyTransport::write(&mut self, &[u8]) -> std::io::error::Result<usize>
+pub fn sonicterm_types::traits::PtyTransport::read(&mut self, &mut [u8]) -> core::io::error::Result<usize>
+pub fn sonicterm_types::traits::PtyTransport::resize(&mut self, u16, u16) -> core::io::error::Result<()>
+pub fn sonicterm_types::traits::PtyTransport::try_wait(&mut self) -> core::io::error::Result<core::option::Option<i32>>
+pub fn sonicterm_types::traits::PtyTransport::write(&mut self, &[u8]) -> core::io::error::Result<usize>
 pub trait sonicterm_types::traits::WindowBackend: core::marker::Send
 pub fn sonicterm_types::traits::WindowBackend::inner_size_px(&self) -> (u32, u32)
 pub fn sonicterm_types::traits::WindowBackend::request_redraw(&self)
@@ -1383,11 +1578,14 @@ pub sonicterm_types::Action::ClosePane
 pub sonicterm_types::Action::CloseTab
 pub sonicterm_types::Action::CopyToClipboard
 pub sonicterm_types::Action::DecreaseFontSize
+pub sonicterm_types::Action::DecreaseFontWeight
 pub sonicterm_types::Action::EditConfigFile
 pub sonicterm_types::Action::EnterCopyMode
 pub sonicterm_types::Action::EnterQuickSelect
 pub sonicterm_types::Action::FocusPane(sonicterm_types::action::Direction)
 pub sonicterm_types::Action::IncreaseFontSize
+pub sonicterm_types::Action::IncreaseFontWeight
+pub sonicterm_types::Action::MoveTabToNewWindow
 pub sonicterm_types::Action::NewTab
 pub sonicterm_types::Action::NewWindow
 pub sonicterm_types::Action::NextTab
@@ -1401,6 +1599,7 @@ pub sonicterm_types::Action::QuitApp
 pub sonicterm_types::Action::ReloadConfig
 pub sonicterm_types::Action::RenameTab
 pub sonicterm_types::Action::ResetFontSize
+pub sonicterm_types::Action::ResetFontWeight
 pub sonicterm_types::Action::ResizePane
 pub sonicterm_types::Action::ResizePane::amount: u16
 pub sonicterm_types::Action::ResizePane::dir: sonicterm_types::action::Direction
@@ -1408,6 +1607,7 @@ pub sonicterm_types::Action::ResizePaneDown
 pub sonicterm_types::Action::ResizePaneLeft
 pub sonicterm_types::Action::ResizePaneRight
 pub sonicterm_types::Action::ResizePaneUp
+pub sonicterm_types::Action::SaveCurrentSettings
 pub sonicterm_types::Action::Scroll(sonicterm_types::action::ScrollAction)
 pub sonicterm_types::Action::ScrollToNextPrompt
 pub sonicterm_types::Action::ScrollToPrevPrompt
@@ -1438,6 +1638,33 @@ impl core::marker::Unpin for sonicterm_types::action::Action
 impl core::marker::UnsafeUnpin for sonicterm_types::action::Action
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::action::Action
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::action::Action
+#[non_exhaustive] pub enum sonicterm_types::AdmissionRejection
+pub sonicterm_types::AdmissionRejection::Cancelled
+pub sonicterm_types::AdmissionRejection::ItemCountLimit
+pub sonicterm_types::AdmissionRejection::ItemTooLarge
+pub sonicterm_types::AdmissionRejection::PerOwnerBudget
+pub sonicterm_types::AdmissionRejection::ProcessBudget
+impl sonicterm_types::resource::AdmissionRejection
+pub fn sonicterm_types::resource::AdmissionRejection::code(self) -> &'static str
+pub fn sonicterm_types::resource::AdmissionRejection::is_retryable_after_reclaim(self) -> bool
+impl core::clone::Clone for sonicterm_types::resource::AdmissionRejection
+pub fn sonicterm_types::resource::AdmissionRejection::clone(&self) -> sonicterm_types::resource::AdmissionRejection
+impl core::cmp::Eq for sonicterm_types::resource::AdmissionRejection
+impl core::cmp::PartialEq for sonicterm_types::resource::AdmissionRejection
+pub fn sonicterm_types::resource::AdmissionRejection::eq(&self, &sonicterm_types::resource::AdmissionRejection) -> bool
+impl core::fmt::Debug for sonicterm_types::resource::AdmissionRejection
+pub fn sonicterm_types::resource::AdmissionRejection::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::resource::AdmissionRejection
+pub fn sonicterm_types::resource::AdmissionRejection::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::resource::AdmissionRejection
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::AdmissionRejection
+impl core::marker::Freeze for sonicterm_types::resource::AdmissionRejection
+impl core::marker::Send for sonicterm_types::resource::AdmissionRejection
+impl core::marker::Sync for sonicterm_types::resource::AdmissionRejection
+impl core::marker::Unpin for sonicterm_types::resource::AdmissionRejection
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::AdmissionRejection
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::AdmissionRejection
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::AdmissionRejection
 pub enum sonicterm_types::BroadcastScope
 pub sonicterm_types::BroadcastScope::AllTabs
 pub sonicterm_types::BroadcastScope::Tab
@@ -1605,6 +1832,31 @@ impl core::marker::Unpin for sonicterm_types::lifecycle::CancelReason
 impl core::marker::UnsafeUnpin for sonicterm_types::lifecycle::CancelReason
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::lifecycle::CancelReason
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::lifecycle::CancelReason
+pub enum sonicterm_types::ClassCoverage
+pub sonicterm_types::ClassCoverage::Charged
+pub sonicterm_types::ClassCoverage::FeatureGated
+pub sonicterm_types::ClassCoverage::MeasuredNegligible
+pub sonicterm_types::ClassCoverage::MeasuredNegligible::per_pane_bytes: usize
+pub sonicterm_types::ClassCoverage::SubsystemAbsent
+pub sonicterm_types::ClassCoverage::TransientWithinCall
+pub sonicterm_types::ClassCoverage::UnchargedRetention
+pub sonicterm_types::ClassCoverage::UnchargedRetention::per_owner_bytes: usize
+impl core::clone::Clone for sonicterm_types::resource::ClassCoverage
+pub fn sonicterm_types::resource::ClassCoverage::clone(&self) -> sonicterm_types::resource::ClassCoverage
+impl core::cmp::Eq for sonicterm_types::resource::ClassCoverage
+impl core::cmp::PartialEq for sonicterm_types::resource::ClassCoverage
+pub fn sonicterm_types::resource::ClassCoverage::eq(&self, &sonicterm_types::resource::ClassCoverage) -> bool
+impl core::fmt::Debug for sonicterm_types::resource::ClassCoverage
+pub fn sonicterm_types::resource::ClassCoverage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::resource::ClassCoverage
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::ClassCoverage
+impl core::marker::Freeze for sonicterm_types::resource::ClassCoverage
+impl core::marker::Send for sonicterm_types::resource::ClassCoverage
+impl core::marker::Sync for sonicterm_types::resource::ClassCoverage
+impl core::marker::Unpin for sonicterm_types::resource::ClassCoverage
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::ClassCoverage
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::ClassCoverage
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::ClassCoverage
 pub enum sonicterm_types::Color
 pub sonicterm_types::Color::Default
 pub sonicterm_types::Color::Indexed(u8)
@@ -1680,6 +1932,28 @@ impl core::marker::Unpin for sonicterm_types::resource::DisconnectReason
 impl core::marker::UnsafeUnpin for sonicterm_types::resource::DisconnectReason
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::DisconnectReason
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::DisconnectReason
+pub enum sonicterm_types::DraftRejection
+pub sonicterm_types::DraftRejection::CmdUnsafeCharacter
+pub sonicterm_types::DraftRejection::ControlCharacter
+pub sonicterm_types::DraftRejection::NonAbsolutePath
+pub sonicterm_types::DraftRejection::NonUnicodePath
+pub sonicterm_types::DraftRejection::UnsupportedPair
+impl core::clone::Clone for sonicterm_types::script_draft::DraftRejection
+pub fn sonicterm_types::script_draft::DraftRejection::clone(&self) -> sonicterm_types::script_draft::DraftRejection
+impl core::cmp::Eq for sonicterm_types::script_draft::DraftRejection
+impl core::cmp::PartialEq for sonicterm_types::script_draft::DraftRejection
+pub fn sonicterm_types::script_draft::DraftRejection::eq(&self, &sonicterm_types::script_draft::DraftRejection) -> bool
+impl core::fmt::Debug for sonicterm_types::script_draft::DraftRejection
+pub fn sonicterm_types::script_draft::DraftRejection::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::script_draft::DraftRejection
+impl core::marker::StructuralPartialEq for sonicterm_types::script_draft::DraftRejection
+impl core::marker::Freeze for sonicterm_types::script_draft::DraftRejection
+impl core::marker::Send for sonicterm_types::script_draft::DraftRejection
+impl core::marker::Sync for sonicterm_types::script_draft::DraftRejection
+impl core::marker::Unpin for sonicterm_types::script_draft::DraftRejection
+impl core::marker::UnsafeUnpin for sonicterm_types::script_draft::DraftRejection
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::script_draft::DraftRejection
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::script_draft::DraftRejection
 #[non_exhaustive] pub enum sonicterm_types::DropReason
 pub sonicterm_types::DropReason::Policy
 pub sonicterm_types::DropReason::Superseded
@@ -1701,6 +1975,28 @@ impl core::marker::Unpin for sonicterm_types::resource::DropReason
 impl core::marker::UnsafeUnpin for sonicterm_types::resource::DropReason
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::DropReason
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::DropReason
+#[repr(u8)] pub enum sonicterm_types::GlyphRasterVariant
+pub sonicterm_types::GlyphRasterVariant::Normal
+pub sonicterm_types::GlyphRasterVariant::PaletteFooter
+pub sonicterm_types::GlyphRasterVariant::TabTitle
+impl core::clone::Clone for sonicterm_types::glyph_key::GlyphRasterVariant
+pub fn sonicterm_types::glyph_key::GlyphRasterVariant::clone(&self) -> sonicterm_types::glyph_key::GlyphRasterVariant
+impl core::cmp::Eq for sonicterm_types::glyph_key::GlyphRasterVariant
+impl core::cmp::PartialEq for sonicterm_types::glyph_key::GlyphRasterVariant
+pub fn sonicterm_types::glyph_key::GlyphRasterVariant::eq(&self, &sonicterm_types::glyph_key::GlyphRasterVariant) -> bool
+impl core::fmt::Debug for sonicterm_types::glyph_key::GlyphRasterVariant
+pub fn sonicterm_types::glyph_key::GlyphRasterVariant::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for sonicterm_types::glyph_key::GlyphRasterVariant
+pub fn sonicterm_types::glyph_key::GlyphRasterVariant::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for sonicterm_types::glyph_key::GlyphRasterVariant
+impl core::marker::StructuralPartialEq for sonicterm_types::glyph_key::GlyphRasterVariant
+impl core::marker::Freeze for sonicterm_types::glyph_key::GlyphRasterVariant
+impl core::marker::Send for sonicterm_types::glyph_key::GlyphRasterVariant
+impl core::marker::Sync for sonicterm_types::glyph_key::GlyphRasterVariant
+impl core::marker::Unpin for sonicterm_types::glyph_key::GlyphRasterVariant
+impl core::marker::UnsafeUnpin for sonicterm_types::glyph_key::GlyphRasterVariant
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::glyph_key::GlyphRasterVariant
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::glyph_key::GlyphRasterVariant
 pub enum sonicterm_types::LifecycleState
 pub sonicterm_types::LifecycleState::Cancelling
 pub sonicterm_types::LifecycleState::Closed
@@ -1740,6 +2036,25 @@ impl core::marker::Unpin for sonicterm_types::lifecycle::LifecycleState
 impl core::marker::UnsafeUnpin for sonicterm_types::lifecycle::LifecycleState
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::lifecycle::LifecycleState
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::lifecycle::LifecycleState
+pub enum sonicterm_types::OpenScriptResolveError
+pub sonicterm_types::OpenScriptResolveError::InitialCwdNotAbsolute
+pub sonicterm_types::OpenScriptResolveError::InitialCwdUnavailable
+impl core::clone::Clone for sonicterm_types::open_script::OpenScriptResolveError
+pub fn sonicterm_types::open_script::OpenScriptResolveError::clone(&self) -> sonicterm_types::open_script::OpenScriptResolveError
+impl core::cmp::Eq for sonicterm_types::open_script::OpenScriptResolveError
+impl core::cmp::PartialEq for sonicterm_types::open_script::OpenScriptResolveError
+pub fn sonicterm_types::open_script::OpenScriptResolveError::eq(&self, &sonicterm_types::open_script::OpenScriptResolveError) -> bool
+impl core::fmt::Debug for sonicterm_types::open_script::OpenScriptResolveError
+pub fn sonicterm_types::open_script::OpenScriptResolveError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::open_script::OpenScriptResolveError
+impl core::marker::StructuralPartialEq for sonicterm_types::open_script::OpenScriptResolveError
+impl core::marker::Freeze for sonicterm_types::open_script::OpenScriptResolveError
+impl core::marker::Send for sonicterm_types::open_script::OpenScriptResolveError
+impl core::marker::Sync for sonicterm_types::open_script::OpenScriptResolveError
+impl core::marker::Unpin for sonicterm_types::open_script::OpenScriptResolveError
+impl core::marker::UnsafeUnpin for sonicterm_types::open_script::OpenScriptResolveError
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::open_script::OpenScriptResolveError
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::open_script::OpenScriptResolveError
 #[non_exhaustive] pub enum sonicterm_types::OwnerKind
 pub sonicterm_types::OwnerKind::AppPane
 pub sonicterm_types::OwnerKind::Attachment
@@ -1806,6 +2121,26 @@ impl core::marker::Unpin for sonicterm_types::traits::painter::PaintError
 impl core::marker::UnsafeUnpin for sonicterm_types::traits::painter::PaintError
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::traits::painter::PaintError
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::traits::painter::PaintError
+pub enum sonicterm_types::PaneSeamTerm
+pub sonicterm_types::PaneSeamTerm::ChargedToAnotherOwnerKind
+pub sonicterm_types::PaneSeamTerm::Contributes
+pub sonicterm_types::PaneSeamTerm::NotChargedInProduction
+impl core::clone::Clone for sonicterm_types::resource::PaneSeamTerm
+pub fn sonicterm_types::resource::PaneSeamTerm::clone(&self) -> sonicterm_types::resource::PaneSeamTerm
+impl core::cmp::Eq for sonicterm_types::resource::PaneSeamTerm
+impl core::cmp::PartialEq for sonicterm_types::resource::PaneSeamTerm
+pub fn sonicterm_types::resource::PaneSeamTerm::eq(&self, &sonicterm_types::resource::PaneSeamTerm) -> bool
+impl core::fmt::Debug for sonicterm_types::resource::PaneSeamTerm
+pub fn sonicterm_types::resource::PaneSeamTerm::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::resource::PaneSeamTerm
+impl core::marker::StructuralPartialEq for sonicterm_types::resource::PaneSeamTerm
+impl core::marker::Freeze for sonicterm_types::resource::PaneSeamTerm
+impl core::marker::Send for sonicterm_types::resource::PaneSeamTerm
+impl core::marker::Sync for sonicterm_types::resource::PaneSeamTerm
+impl core::marker::Unpin for sonicterm_types::resource::PaneSeamTerm
+impl core::marker::UnsafeUnpin for sonicterm_types::resource::PaneSeamTerm
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::PaneSeamTerm
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::PaneSeamTerm
 #[non_exhaustive] pub enum sonicterm_types::PressureOutcome<T>
 pub sonicterm_types::PressureOutcome::Accepted
 pub sonicterm_types::PressureOutcome::Accepted::receipt: sonicterm_types::resource::DeliveryReceipt
@@ -1943,6 +2278,11 @@ pub sonicterm_types::ResourceClass::RemoteOutput
 pub sonicterm_types::ResourceClass::SoftwareFrame
 pub sonicterm_types::ResourceClass::Surface
 pub sonicterm_types::ResourceClass::UploadStaging
+impl sonicterm_types::resource::ResourceClass
+pub const sonicterm_types::resource::ResourceClass::COUNT: usize
+pub const fn sonicterm_types::resource::ResourceClass::coverage(self) -> sonicterm_types::resource::ClassCoverage
+impl sonicterm_types::resource::ResourceClass
+pub const fn sonicterm_types::resource::ResourceClass::pane_seam_term(self) -> sonicterm_types::resource::PaneSeamTerm
 impl core::clone::Clone for sonicterm_types::resource::ResourceClass
 pub fn sonicterm_types::resource::ResourceClass::clone(&self) -> sonicterm_types::resource::ResourceClass
 impl core::cmp::Eq for sonicterm_types::resource::ResourceClass
@@ -1959,11 +2299,9 @@ pub fn sonicterm_types::resource::ResourceClass::hash<__H: core::hash::Hasher>(&
 impl core::marker::Copy for sonicterm_types::resource::ResourceClass
 impl core::marker::StructuralPartialEq for sonicterm_types::resource::ResourceClass
 impl enum_map::internal::Enum for sonicterm_types::resource::ResourceClass
-pub const sonicterm_types::resource::ResourceClass::LENGTH: usize
+pub type sonicterm_types::resource::ResourceClass::Array<__EnumMapInternalV> = [__EnumMapInternalV; 22]
 pub fn sonicterm_types::resource::ResourceClass::from_usize(usize) -> Self
 pub fn sonicterm_types::resource::ResourceClass::into_usize(self) -> usize
-impl<V> enum_map::internal::EnumArray<V> for sonicterm_types::resource::ResourceClass
-pub type sonicterm_types::resource::ResourceClass::Array = [V; 22]
 impl core::marker::Freeze for sonicterm_types::resource::ResourceClass
 impl core::marker::Send for sonicterm_types::resource::ResourceClass
 impl core::marker::Sync for sonicterm_types::resource::ResourceClass
@@ -2020,6 +2358,27 @@ impl core::marker::Unpin for sonicterm_types::action::ScrollAction
 impl core::marker::UnsafeUnpin for sonicterm_types::action::ScrollAction
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::action::ScrollAction
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::action::ScrollAction
+pub enum sonicterm_types::ShellDialect
+pub sonicterm_types::ShellDialect::Cmd
+pub sonicterm_types::ShellDialect::Posix
+pub sonicterm_types::ShellDialect::PowerShell
+pub sonicterm_types::ShellDialect::Unknown
+impl core::clone::Clone for sonicterm_types::script_draft::ShellDialect
+pub fn sonicterm_types::script_draft::ShellDialect::clone(&self) -> sonicterm_types::script_draft::ShellDialect
+impl core::cmp::Eq for sonicterm_types::script_draft::ShellDialect
+impl core::cmp::PartialEq for sonicterm_types::script_draft::ShellDialect
+pub fn sonicterm_types::script_draft::ShellDialect::eq(&self, &sonicterm_types::script_draft::ShellDialect) -> bool
+impl core::fmt::Debug for sonicterm_types::script_draft::ShellDialect
+pub fn sonicterm_types::script_draft::ShellDialect::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for sonicterm_types::script_draft::ShellDialect
+impl core::marker::StructuralPartialEq for sonicterm_types::script_draft::ShellDialect
+impl core::marker::Freeze for sonicterm_types::script_draft::ShellDialect
+impl core::marker::Send for sonicterm_types::script_draft::ShellDialect
+impl core::marker::Sync for sonicterm_types::script_draft::ShellDialect
+impl core::marker::Unpin for sonicterm_types::script_draft::ShellDialect
+impl core::marker::UnsafeUnpin for sonicterm_types::script_draft::ShellDialect
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::script_draft::ShellDialect
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::script_draft::ShellDialect
 pub enum sonicterm_types::UnderlineStyle
 pub sonicterm_types::UnderlineStyle::Curly
 pub sonicterm_types::UnderlineStyle::Dashed
@@ -2269,12 +2628,14 @@ pub sonicterm_types::GlyphKey::ch: char
 pub sonicterm_types::GlyphKey::font_slot: u8
 pub sonicterm_types::GlyphKey::glyph_id: u32
 pub sonicterm_types::GlyphKey::italic: bool
+pub sonicterm_types::GlyphKey::raster_variant: sonicterm_types::glyph_key::GlyphRasterVariant
 pub sonicterm_types::GlyphKey::weight_bold: bool
 impl sonicterm_types::glyph_key::GlyphKey
 pub fn sonicterm_types::glyph_key::GlyphKey::from_cell(&sonicterm_types::cell::Cell) -> core::option::Option<Self>
 pub fn sonicterm_types::glyph_key::GlyphKey::new(char, bool, bool) -> Self
 pub fn sonicterm_types::glyph_key::GlyphKey::shaped(char, u8, u32, bool, bool) -> Self
 pub fn sonicterm_types::glyph_key::GlyphKey::with_font_slot(self, u8) -> Self
+pub fn sonicterm_types::glyph_key::GlyphKey::with_raster_variant(self, sonicterm_types::glyph_key::GlyphRasterVariant) -> Self
 pub fn sonicterm_types::glyph_key::GlyphKey::with_slot(char, u8, bool, bool) -> Self
 impl core::clone::Clone for sonicterm_types::glyph_key::GlyphKey
 pub fn sonicterm_types::glyph_key::GlyphKey::clone(&self) -> sonicterm_types::glyph_key::GlyphKey
@@ -2459,6 +2820,28 @@ impl core::marker::Unpin for sonicterm_types::mod_key::ModKey
 impl core::marker::UnsafeUnpin for sonicterm_types::mod_key::ModKey
 impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::mod_key::ModKey
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::mod_key::ModKey
+pub struct sonicterm_types::OpenScriptRequest
+pub sonicterm_types::OpenScriptRequest::launch_path: std::path::PathBuf
+pub sonicterm_types::OpenScriptRequest::original_path: std::path::PathBuf
+impl sonicterm_types::open_script::OpenScriptRequest
+pub fn sonicterm_types::open_script::OpenScriptRequest::pane_cwd(&self) -> core::option::Option<&std::path::Path>
+pub fn sonicterm_types::open_script::OpenScriptRequest::resolve(std::path::PathBuf, &std::path::Path) -> core::result::Result<Self, sonicterm_types::open_script::OpenScriptResolveError>
+pub fn sonicterm_types::open_script::OpenScriptRequest::resolve_with_cwd_lookup<F>(std::path::PathBuf, F) -> core::result::Result<Self, sonicterm_types::open_script::OpenScriptResolveError> where F: core::ops::function::FnOnce() -> core::option::Option<std::path::PathBuf>
+impl core::clone::Clone for sonicterm_types::open_script::OpenScriptRequest
+pub fn sonicterm_types::open_script::OpenScriptRequest::clone(&self) -> sonicterm_types::open_script::OpenScriptRequest
+impl core::cmp::Eq for sonicterm_types::open_script::OpenScriptRequest
+impl core::cmp::PartialEq for sonicterm_types::open_script::OpenScriptRequest
+pub fn sonicterm_types::open_script::OpenScriptRequest::eq(&self, &sonicterm_types::open_script::OpenScriptRequest) -> bool
+impl core::fmt::Debug for sonicterm_types::open_script::OpenScriptRequest
+pub fn sonicterm_types::open_script::OpenScriptRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for sonicterm_types::open_script::OpenScriptRequest
+impl core::marker::Freeze for sonicterm_types::open_script::OpenScriptRequest
+impl core::marker::Send for sonicterm_types::open_script::OpenScriptRequest
+impl core::marker::Sync for sonicterm_types::open_script::OpenScriptRequest
+impl core::marker::Unpin for sonicterm_types::open_script::OpenScriptRequest
+impl core::marker::UnsafeUnpin for sonicterm_types::open_script::OpenScriptRequest
+impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::open_script::OpenScriptRequest
+impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::open_script::OpenScriptRequest
 pub struct sonicterm_types::OwnerLimits
 pub sonicterm_types::OwnerLimits::class_bytes: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
 pub sonicterm_types::OwnerLimits::class_items: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, core::option::Option<usize>>
@@ -2476,6 +2859,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for sonicterm_types::resource::Owne
 impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::OwnerLimits
 pub struct sonicterm_types::OwnerView
 pub sonicterm_types::OwnerView::amount: sonicterm_types::resource::ResourceAmount
+pub sonicterm_types::OwnerView::bytes_limit: usize
 pub sonicterm_types::OwnerView::class_bytes: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
 pub sonicterm_types::OwnerView::class_items: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
 pub sonicterm_types::OwnerView::epoch: u64
@@ -2593,6 +2977,7 @@ impl core::panic::unwind_safe::UnwindSafe for sonicterm_types::resource::Resourc
 pub sonicterm_types::ResourceSnapshot::class_epochs: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, u64>
 pub sonicterm_types::ResourceSnapshot::owner: sonicterm_types::resource::ResourceOwnerId
 pub sonicterm_types::ResourceSnapshot::owner_amount: sonicterm_types::resource::ResourceAmount
+pub sonicterm_types::ResourceSnapshot::owner_bytes_limit: usize
 pub sonicterm_types::ResourceSnapshot::owner_class_bytes: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
 pub sonicterm_types::ResourceSnapshot::owner_class_items: enum_map::EnumMap<sonicterm_types::resource::ResourceClass, usize>
 pub sonicterm_types::ResourceSnapshot::owner_epoch: u64
@@ -2679,13 +3064,16 @@ pub trait sonicterm_types::Painter: core::marker::Send
 pub fn sonicterm_types::Painter::paint_frame(&mut self, &dyn sonicterm_types::traits::painter::FrameLike) -> core::result::Result<(), sonicterm_types::traits::painter::PaintError>
 pub fn sonicterm_types::Painter::resize_surface(&mut self, u32, u32)
 pub trait sonicterm_types::PtyTransport: core::marker::Send
-pub fn sonicterm_types::PtyTransport::read(&mut self, &mut [u8]) -> std::io::error::Result<usize>
-pub fn sonicterm_types::PtyTransport::resize(&mut self, u16, u16) -> std::io::error::Result<()>
-pub fn sonicterm_types::PtyTransport::try_wait(&mut self) -> std::io::error::Result<core::option::Option<i32>>
-pub fn sonicterm_types::PtyTransport::write(&mut self, &[u8]) -> std::io::error::Result<usize>
+pub fn sonicterm_types::PtyTransport::read(&mut self, &mut [u8]) -> core::io::error::Result<usize>
+pub fn sonicterm_types::PtyTransport::resize(&mut self, u16, u16) -> core::io::error::Result<()>
+pub fn sonicterm_types::PtyTransport::try_wait(&mut self) -> core::io::error::Result<core::option::Option<i32>>
+pub fn sonicterm_types::PtyTransport::write(&mut self, &[u8]) -> core::io::error::Result<usize>
 pub trait sonicterm_types::WindowBackend: core::marker::Send
 pub fn sonicterm_types::WindowBackend::inner_size_px(&self) -> (u32, u32)
 pub fn sonicterm_types::WindowBackend::request_redraw(&self)
 pub fn sonicterm_types::WindowBackend::scale_factor(&self) -> f64
 pub fn sonicterm_types::WindowBackend::set_title(&self, &str)
+pub fn sonicterm_types::classify_shell(&str) -> sonicterm_types::script_draft::ShellDialect
+pub fn sonicterm_types::format_script_draft(sonicterm_types::script_draft::ShellDialect, &std::path::Path) -> core::result::Result<alloc::string::String, sonicterm_types::script_draft::DraftRejection>
 pub fn sonicterm_types::shell_quote_posix(&str) -> alloc::string::String
+pub fn sonicterm_types::shell_quote_powershell(&str) -> alloc::string::String

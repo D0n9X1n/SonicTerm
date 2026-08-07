@@ -1,7 +1,25 @@
 use super::*;
-use crate::app::App;
+use crate::app::{App, FrontmostKind};
 use sonicterm_cfg::keymap::Keymap;
 use sonicterm_cfg::theme::Theme;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+static NEXT_TEMP_PATH: AtomicU64 = AtomicU64::new(0);
+
+fn temp_config_path(case: &str) -> PathBuf {
+    let sequence = NEXT_TEMP_PATH.fetch_add(1, AtomicOrdering::Relaxed);
+    std::env::temp_dir()
+        .join(format!("sonicterm-app-{case}-{}-{sequence}.toml", std::process::id()))
+}
+
+fn remove_test_path(path: &std::path::Path) {
+    if path.is_dir() {
+        std::fs::remove_dir_all(path).expect("remove test directory");
+    } else if path.exists() {
+        std::fs::remove_file(path).expect("remove test file");
+    }
+}
 
 /// Regression: `ResetFontSize` (Cmd+0) used to return to
 /// `FontConfig::default().size` — a compile-time constant the user never
@@ -211,6 +229,207 @@ fn applying_a_config_moves_the_weight_reset_target() {
     app.change_font_weight(0.5);
     app.reset_font_weight();
     assert_eq!(app.config.font.weight_scale, 3.0);
+}
+
+#[test]
+fn save_current_settings_persists_transient_font_values_without_reapplying_them() {
+    let path = temp_config_path("save-font-values");
+    remove_test_path(&path);
+    let mut stored = Config::default();
+    stored.font.size = 13.0;
+    stored.font.weight_scale = 1.25;
+    std::fs::write(&path, stored.to_toml().expect("serialize starting config"))
+        .expect("write starting config");
+
+    let mut app = App::new(Theme::default(), stored, Keymap::default());
+    app.change_font_size(2.0);
+    app.change_font_weight(0.5);
+    let live_size = app.config.font.size;
+    let live_weight = app.config.font.effective_weight_scale();
+
+    app.save_current_settings_to(&path).expect("save transient values");
+
+    let persisted = Config::load_strict(&path).expect("strictly read saved config");
+    assert_eq!(persisted.font.size, live_size);
+    assert_eq!(persisted.font.effective_weight_scale(), live_weight);
+    assert_eq!(app.config.font.size, live_size, "save must not reload the live config");
+    assert_eq!(
+        app.config.font.effective_weight_scale(),
+        live_weight,
+        "save must not reapply the renderer or live config",
+    );
+    remove_test_path(&path);
+}
+
+#[test]
+fn successful_save_advances_both_reset_baselines() {
+    let path = temp_config_path("save-reset-baselines");
+    remove_test_path(&path);
+    let mut cfg = Config::default();
+    cfg.font.size = 14.0;
+    cfg.font.weight_scale = 1.0;
+    std::fs::write(&path, cfg.to_toml().expect("serialize starting config"))
+        .expect("write starting config");
+    let mut app = App::new(Theme::default(), cfg, Keymap::default());
+
+    app.change_font_size(3.0);
+    app.change_font_weight(0.75);
+    let saved_size = app.config.font.size;
+    let saved_weight = app.config.font.effective_weight_scale();
+    app.save_current_settings_to(&path).expect("save current values");
+
+    assert_eq!(app.configured_font_size, saved_size);
+    assert_eq!(app.configured_weight_scale, saved_weight);
+    app.change_font_size(1.0);
+    app.change_font_weight(0.25);
+    app.reset_font_size();
+    app.reset_font_weight();
+    assert_eq!(app.config.font.size, saved_size);
+    assert_eq!(app.config.font.effective_weight_scale(), saved_weight);
+    remove_test_path(&path);
+}
+
+#[test]
+fn failed_save_preserves_disk_live_values_and_reset_baselines() {
+    let path = temp_config_path("save-failure");
+    remove_test_path(&path);
+    std::fs::write(&path, b"[font]\nsize = 'wrong shape'\nweight_scale = 1.0\n")
+        .expect("write invalid original config");
+    let before = std::fs::read(&path).expect("read original config bytes");
+
+    let mut cfg = Config::default();
+    cfg.font.size = 12.0;
+    cfg.font.weight_scale = 1.0;
+    let mut app = App::new(Theme::default(), cfg, Keymap::default());
+    app.change_font_size(4.0);
+    app.change_font_weight(0.5);
+    let live_size = app.config.font.size;
+    let live_weight = app.config.font.effective_weight_scale();
+    let baseline_size = app.configured_font_size;
+    let baseline_weight = app.configured_weight_scale;
+
+    assert!(app.save_current_settings_to(&path).is_err());
+
+    assert_eq!(std::fs::read(&path).expect("read unchanged config"), before);
+    assert_eq!(app.config.font.size, live_size);
+    assert_eq!(app.config.font.effective_weight_scale(), live_weight);
+    assert_eq!(app.configured_font_size, baseline_size);
+    assert_eq!(app.configured_weight_scale, baseline_weight);
+    remove_test_path(&path);
+}
+
+#[test]
+fn read_only_allows_explicit_save_current_settings_action() {
+    assert!(super::super::keymap_dispatch::read_only_allows_action(&Action::SaveCurrentSettings));
+}
+
+#[test]
+fn save_action_dispatch_persists_real_file_and_shows_confirmation() {
+    let path = temp_config_path("save-action-dispatch");
+    remove_test_path(&path);
+    std::fs::write(
+        &path,
+        b"# preserve this comment\ntheme = 'wezterm'\n[font]\nsize = 13 # size note\nweight_scale = 1 # weight note\nunknown_font_key = 'keep'\n",
+    )
+    .expect("write action-dispatch config");
+
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_synthetic_main();
+    let _path_guard = App::set_test_current_settings_path(path.clone());
+    assert!(app.run_action(&Action::IncreaseFontSize));
+    assert!(app.run_action(&Action::IncreaseFontWeight));
+    assert!(app.run_action(&Action::SaveCurrentSettings));
+
+    let saved = std::fs::read_to_string(&path).expect("read action-dispatch config");
+    assert!(saved.contains("# preserve this comment"));
+    assert!(saved.contains("unknown_font_key = 'keep'"));
+    assert!(saved.contains("size = 14"));
+    assert!(saved.contains("weight_scale = 1.25"));
+    assert_eq!(app.__test_main_notification_message(), Some("Current font settings saved"));
+    remove_test_path(&path);
+}
+
+#[test]
+fn palette_enter_saves_once_and_targets_the_attached_child() {
+    let path = temp_config_path("save-palette-enter");
+    remove_test_path(&path);
+    std::fs::write(&path, b"[font]\nsize = 13\nweight_scale = 1\n")
+        .expect("write palette-enter config");
+
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_synthetic_main();
+    let child = app.__test_seed_child_window(&["child"]);
+    app.__test_set_frontmost_window(Some(child));
+    let _path_guard = App::set_test_current_settings_path(path.clone());
+    assert!(app.run_action(&Action::OpenCommandPalette));
+    app.__test_set_palette_query("current settings");
+
+    assert!(app.__test_command_palette_handle_key(&winit::keyboard::Key::Named(
+        winit::keyboard::NamedKey::Enter,
+    )));
+
+    assert!(!app.__test_palette_open());
+    assert_eq!(app.__test_child_notification_message(child), Some("Current font settings saved"));
+    assert_eq!(app.__test_main_notification_message(), None);
+    let saved = std::fs::read_to_string(&path).expect("read palette-enter config");
+    assert_eq!(saved.matches("size = 13").count(), 1);
+    assert_eq!(saved.matches("weight_scale = 1").count(), 1);
+    remove_test_path(&path);
+}
+
+#[test]
+fn source_window_save_action_writes_once_and_targets_the_child_notification() {
+    let path = temp_config_path("save-source-window-dispatch");
+    remove_test_path(&path);
+    std::fs::write(&path, b"[font]\nsize = 13\nweight_scale = 1\n")
+        .expect("write source-window config");
+
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_synthetic_main();
+    let child = app.__test_seed_child_window(&["child"]);
+    app.__test_set_frontmost_window(None);
+    let _path_guard = App::set_test_current_settings_path(path.clone());
+
+    assert!(app.run_action_for_window(&Action::SaveCurrentSettings, child));
+
+    assert_eq!(app.__test_child_notification_message(child), Some("Current font settings saved"));
+    assert_eq!(app.__test_main_notification_message(), None);
+    let saved = std::fs::read_to_string(&path).expect("read source-window config");
+    assert_eq!(saved.matches("size = 13").count(), 1);
+    assert_eq!(saved.matches("weight_scale = 1").count(), 1);
+    remove_test_path(&path);
+}
+
+#[test]
+fn save_notification_helper_routes_success_and_failure_to_the_requested_kind() {
+    let success_path = temp_config_path("save-notification-success");
+    remove_test_path(&success_path);
+    let failure_path = success_path.with_extension("directory");
+    remove_test_path(&failure_path);
+    std::fs::create_dir(&failure_path).expect("create invalid directory target");
+    std::fs::write(failure_path.join("sentinel"), b"keep directory nonempty")
+        .expect("write failure sentinel");
+
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_synthetic_main();
+    let child = app.__test_seed_child_window(&["child"]);
+    app.save_current_settings_to_for_kind(&success_path, FrontmostKind::Child(child));
+    assert_eq!(app.__test_child_notification_message(child), Some("Current font settings saved"));
+    assert_eq!(app.__test_main_notification_message(), None);
+
+    app.save_current_settings_to_for_kind(&failure_path, FrontmostKind::Main);
+    assert_eq!(
+        app.__test_main_notification_message(),
+        Some("Unable to save current font settings; existing config unchanged")
+    );
+    assert_eq!(
+        app.__test_child_notification_message(child),
+        Some("Current font settings saved"),
+        "failure routing must not overwrite the child's success bubble",
+    );
+
+    remove_test_path(&failure_path);
+    remove_test_path(&success_path);
 }
 
 /// Clearing the software-render mode restores the monitor's frame period.

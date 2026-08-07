@@ -3849,6 +3849,12 @@ impl App {
         self.command_palette.cursor()
     }
 
+    /// Test-only: replace the command-palette query and refresh its selection.
+    #[doc(hidden)]
+    pub fn __test_set_palette_query(&mut self, query: &str) {
+        self.command_palette.set_query(query);
+    }
+
     /// Test-only: drive command-palette core editing without constructing a
     /// platform-private winit `KeyEvent`.
     #[doc(hidden)]
@@ -3885,10 +3891,10 @@ impl App {
         self.command_palette.start_rename_tab(title);
     }
 
-    /// Test-only: drive command-palette key handling.
+    /// Test-only: drive command-palette key handling by logical key.
     #[doc(hidden)]
-    pub fn __test_command_palette_handle_key(&mut self, event: &winit::event::KeyEvent) -> bool {
-        self.command_palette_handle_key(event)
+    pub fn __test_command_palette_handle_key(&mut self, key: &winit::keyboard::Key) -> bool {
+        self.command_palette_handle_logical_key(key)
     }
 
     /// Test-only: drive command-palette IME handling.
