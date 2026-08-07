@@ -843,10 +843,24 @@ impl super::App {
                 .unwrap_or(u32::MAX);
                 let _ = recorder.record(BreadcrumbEvent::Counts { windows, panes });
                 let _ = recorder.record(BreadcrumbEvent::ResourceSnapshot(snapshot.process));
+                // Reuse the cycle's authoritative shared-device reading; querying
+                // another renderer here could duplicate or disagree with the log.
+                let allocator = snapshot.allocator.as_ref().and_then(|reading| {
+                    reading.snapshot.map(|allocator| {
+                        sonicterm_logging::breadcrumbs::BreadcrumbAllocator {
+                            allocated_bytes: allocator.allocated_bytes,
+                            reserved_bytes: allocator.reserved_bytes,
+                            allocations: allocator.allocations,
+                            blocks: allocator.blocks,
+                            largest_block_bytes: allocator.largest_block_bytes,
+                        }
+                    })
+                });
                 let _ = recorder.record(BreadcrumbEvent::RetentionSnapshot {
                     session_bytes: u64::try_from(snapshot.session_bytes()).unwrap_or(u64::MAX),
                     renderer_bytes: u64::try_from(snapshot.renderer_bytes()).unwrap_or(u64::MAX),
                     live_renderers: u32::try_from(snapshot.live_renderers).unwrap_or(u32::MAX),
+                    allocator,
                 });
             }
         }

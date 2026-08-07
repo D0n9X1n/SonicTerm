@@ -406,6 +406,78 @@ fn software_render_degrade_from(mode: SoftwareRenderMode, detected: bool) -> boo
     }
 }
 
+/// Memory-allocation strategy selected for a wgpu device.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceMemoryPolicy {
+    /// Favor lower allocator reserve on software adapters.
+    MemoryUsage,
+    /// Favor rendering performance on hardware adapters.
+    Performance,
+}
+
+/// Select the device memory policy for an adapter classification.
+///
+/// Software adapters minimize allocator reserve; hardware adapters retain
+/// wgpu's performance-oriented policy.
+#[doc(hidden)]
+#[must_use]
+pub fn device_memory_policy_from(software_rendering: bool) -> DeviceMemoryPolicy {
+    match software_rendering {
+        true => DeviceMemoryPolicy::MemoryUsage,
+        false => DeviceMemoryPolicy::Performance,
+    }
+}
+
+/// Build the sole wgpu device descriptor used by the renderer.
+///
+/// Starting from wgpu defaults changes only `memory_hints`, keeping policy
+/// selection independent from feature and limit negotiation.
+#[doc(hidden)]
+#[must_use]
+pub fn device_descriptor_for(software_rendering: bool) -> DeviceDescriptor<'static> {
+    let memory_hints = match device_memory_policy_from(software_rendering) {
+        DeviceMemoryPolicy::MemoryUsage => wgpu::MemoryHints::MemoryUsage,
+        DeviceMemoryPolicy::Performance => wgpu::MemoryHints::Performance,
+    };
+    DeviceDescriptor { memory_hints, ..DeviceDescriptor::default() }
+}
+
+/// Aggregate allocator usage without retaining allocation labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AllocatorSnapshot {
+    /// Bytes occupied by live GPU allocations.
+    pub allocated_bytes: u64,
+    /// Bytes reserved by GPU memory blocks.
+    pub reserved_bytes: u64,
+    /// Number of live GPU allocations.
+    pub allocations: u32,
+    /// Number of reserved GPU memory blocks.
+    pub blocks: u32,
+    /// Size of the largest reserved GPU memory block.
+    pub largest_block_bytes: u64,
+}
+
+/// Summarize a wgpu allocator report without reading allocation names.
+#[doc(hidden)]
+#[must_use]
+pub fn allocator_snapshot_from(report: &wgpu::AllocatorReport) -> AllocatorSnapshot {
+    AllocatorSnapshot {
+        allocated_bytes: report.total_allocated_bytes,
+        reserved_bytes: report.total_reserved_bytes,
+        allocations: u32::try_from(report.allocations.len()).unwrap_or(u32::MAX),
+        blocks: u32::try_from(report.blocks.len()).unwrap_or(u32::MAX),
+        largest_block_bytes: report.blocks.iter().map(|block| block.size).max().unwrap_or(0),
+    }
+}
+
+/// Preserve report unavailability while projecting an available report to scalar counters.
+fn allocator_snapshot_from_report(
+    report: Option<wgpu::AllocatorReport>,
+) -> Option<AllocatorSnapshot> {
+    report.as_ref().map(allocator_snapshot_from)
+}
+
 /// Emit a pane's scrollbar (track + thumb) into `quads_overlay` using the
 /// shared geometry model. No-op when the pane has nothing to scroll, the
 /// mode is `Never`, or `alpha` is at or below the emit floor.
@@ -1788,12 +1860,14 @@ impl GpuRenderer {
         let (adapter, device, queue, software_rendering) = if let Some(shared) = shared {
             let info = shared.adapter.get_info();
             let software_rendering = detect_software_rendering(&info);
+            let device_memory_policy = device_memory_policy_from(software_rendering);
             tracing::info!(
                 backend = ?info.backend,
                 name = %info.name,
                 driver = %info.driver,
                 device_type = ?info.device_type,
                 software_rendering,
+                device_memory_policy = ?device_memory_policy,
                 "wgpu adapter reused"
             );
             (shared.adapter, shared.device, shared.queue, software_rendering)
@@ -1811,12 +1885,14 @@ impl GpuRenderer {
                 .map_err(|e| anyhow!("no suitable GPU adapter: {e}"))?;
             let info = adapter.get_info();
             let software_rendering = detect_software_rendering(&info);
+            let device_memory_policy = device_memory_policy_from(software_rendering);
             tracing::info!(
                 backend = ?info.backend,
                 name = %info.name,
                 driver = %info.driver,
                 device_type = ?info.device_type,
                 software_rendering,
+                device_memory_policy = ?device_memory_policy,
                 "wgpu adapter selected"
             );
             if software_rendering {
@@ -1837,7 +1913,7 @@ impl GpuRenderer {
                 );
             }
             let (device, queue) = adapter
-                .request_device(&DeviceDescriptor::default())
+                .request_device(&device_descriptor_for(software_rendering))
                 .await
                 .context("request device")?;
             (adapter, device, queue, software_rendering)
@@ -2853,6 +2929,15 @@ impl GpuRenderer {
             estimate,
             self.font_stack.as_ref().and_then(|stack| stack.measure_text_width(text).ok()),
         )
+    }
+
+    /// Return current allocator totals when the selected backend exposes them.
+    ///
+    /// `None` means allocator reporting is unavailable; it does not represent
+    /// an allocator with zero usage.
+    #[must_use]
+    pub fn allocator_snapshot(&self) -> Option<AllocatorSnapshot> {
+        allocator_snapshot_from_report(self.device.generate_allocator_report())
     }
 
     /// True when wgpu fell back to a CPU/software rasterizer for this window.

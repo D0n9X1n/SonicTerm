@@ -923,6 +923,9 @@ fn an_idle_pane_gives_back_a_budget_sized_for_a_smaller_session() {
 /// No subscriber is installed here, so the gate is closed: this enters the
 /// real production path with the level check failing, and asserts the trim
 /// happened anyway. Moving the call below the gate fails this test.
+///
+/// The allocator assertion accepts either one complete measured field set or
+/// the explicit unsupported sentinel, never omission or fabricated zeroes.
 #[test]
 fn production_sampling_persists_breadcrumbs_with_the_memory_log_switched_off() {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -969,6 +972,15 @@ fn production_sampling_persists_breadcrumbs_with_the_memory_log_switched_off() {
     }
     assert!(written.contains("windows=2 panes=1"), "wrong app counts: {written}");
     assert!(written.contains("live_renderers="), "missing renderer count: {written}");
+    assert!(
+        written.contains("allocator=unsupported")
+            || (written.contains("allocator_allocated_bytes=")
+                && written.contains("allocator_reserved_bytes=")
+                && written.contains("allocator_allocations=")
+                && written.contains("allocator_blocks=")
+                && written.contains("allocator_largest_block_bytes=")),
+        "allocator state was omitted or fabricated: {written}"
+    );
 
     std::fs::remove_dir_all(dir).expect("remove breadcrumb scratch directory");
 }

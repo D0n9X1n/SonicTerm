@@ -119,6 +119,18 @@ The second clippy line is not a duplicate. `--workspace --all-targets` does
 not imply `--all-features`, and `ssh` is off by default, so the SSH backend is
 compiled by no other command in this list.
 
+Run this additional deterministic allocator gate on Windows only; Windows CI
+and Windows release unit tests run it explicitly:
+
+```bash
+cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture
+```
+
+It requests a DX12 CPU fallback and fails when WARP or allocator reporting is
+unavailable, when production reserved bytes are not below 64 MiB, when the
+largest block is not below 128 MiB, or when production reserved bytes do not
+improve on the old default policy.
+
 Two more limits worth knowing before trusting a green run:
 
 - `rust-logic-coverage.sh` measures a deterministic-logic subset and skips 11
@@ -131,7 +143,10 @@ Two more limits worth knowing before trusting a green run:
   Cairo dependency is host-architecture-only. Windows CI is the only place
   those are exercised.
 
-For release prep also run:
+For release prep also run the shipping-platform build and, on Windows, the
+release-blocking allocator gate above. The Windows release dependency is
+`unit-tests-windows → build-windows → publish`, so a failed WARP baseline blocks
+the MSI and publication. For example, the macOS build is:
 
 ```bash
 cargo build --release -p sonicterm-mac

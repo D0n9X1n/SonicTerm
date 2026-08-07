@@ -1,5 +1,70 @@
 use super::*;
 
+/// Software adapters select low reserve while hardware keeps the performance policy.
+///
+/// Exercising both classification values pins the policy seam before descriptor construction.
+#[test]
+fn device_memory_policy_selects_usage_for_software_and_performance_for_hardware() {
+    assert_eq!(device_memory_policy_from(true), DeviceMemoryPolicy::MemoryUsage);
+    assert_eq!(device_memory_policy_from(false), DeviceMemoryPolicy::Performance);
+}
+
+/// Device descriptors carry the policy's exact wgpu memory hint.
+///
+/// Inspecting both descriptors prevents device creation from silently reverting to the default.
+#[test]
+fn device_descriptor_uses_the_selected_memory_hint() {
+    assert!(matches!(device_descriptor_for(true).memory_hints, wgpu::MemoryHints::MemoryUsage));
+    assert!(matches!(device_descriptor_for(false).memory_hints, wgpu::MemoryHints::Performance));
+}
+
+/// Allocator projection retains totals, counts, and the largest block without labels.
+///
+/// Distinct totals and uneven block sizes expose field swaps, bad counts, and a wrong maximum.
+#[test]
+fn allocator_snapshot_maps_report_totals_counts_and_largest_block() {
+    let report = wgpu::AllocatorReport {
+        allocations: vec![
+            wgpu::wgt::AllocationReport {
+                name: String::from("must-not-be-read"),
+                offset: 0,
+                size: 19,
+            },
+            wgpu::wgt::AllocationReport {
+                name: String::from("also-must-not-be-read"),
+                offset: 64,
+                size: 23,
+            },
+        ],
+        blocks: vec![
+            wgpu::wgt::MemoryBlockReport { size: 128, allocations: 0..1 },
+            wgpu::wgt::MemoryBlockReport { size: 512, allocations: 1..2 },
+            wgpu::wgt::MemoryBlockReport { size: 256, allocations: 2..2 },
+        ],
+        total_allocated_bytes: 42,
+        total_reserved_bytes: 896,
+    };
+
+    assert_eq!(
+        allocator_snapshot_from(&report),
+        AllocatorSnapshot {
+            allocated_bytes: 42,
+            reserved_bytes: 896,
+            allocations: 2,
+            blocks: 3,
+            largest_block_bytes: 512,
+        }
+    );
+}
+
+/// An unavailable backend report remains absence rather than a zero-valued snapshot.
+///
+/// Passing `None` through the production adapter preserves capability state for callers.
+#[test]
+fn allocator_snapshot_preserves_an_unavailable_report_as_none() {
+    assert_eq!(allocator_snapshot_from_report(None), None);
+}
+
 #[test]
 fn renderer_resize_has_no_unchecked_wrapper() {
     const SOURCE: &str = include_str!("core.rs");

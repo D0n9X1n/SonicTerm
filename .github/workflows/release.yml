@@ -78,6 +78,9 @@ jobs:
       - name: Verify Windows software presentation capability
         run: cargo test -p sonicterm-gpu --test windows_software_present_capability -- --nocapture
 
+      - name: Verify Windows WARP allocator baseline
+        run: cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture
+
       - name: Verify Windows selection presentation
         run: cargo test -p sonicterm-app --test windows_software_selection_present -- --nocapture
 

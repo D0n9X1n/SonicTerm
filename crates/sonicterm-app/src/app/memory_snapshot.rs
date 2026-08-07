@@ -28,7 +28,7 @@
 //! renderer breakdown carries a window's *identifier* and *role*, never its
 //! title.
 //!
-//! ## Three kinds of "no number"
+//! ## Kinds of "no number"
 //!
 //! A figure can be absent for reasons that are not interchangeable, and
 //! collapsing them would put an invented measurement in the one report whose
@@ -38,14 +38,21 @@
 //! - there is no earlier sample to compare against, or the figure itself is
 //!   unsupported — [`MemoryDelta::Unavailable`];
 //! - a pane's lock was held, so it was skipped rather than waited on — counted
-//!   and reported as `panes_contended`.
+//!   and reported as `panes_contended`;
+//! - an allocator backend was selected but exposes no report — emitted as
+//!   `allocator_state=unsupported` and unsupported allocator metrics;
+//! - no renderer existed to identify a shared device — emitted as
+//!   `allocator_state=none` and `none` allocator metrics.
 //!
-//! The last one matters more than it looks. Measurement here uses `try_lock`
+//! The pane-contention case matters more than it looks. Measurement here uses `try_lock`
 //! and skips what it cannot read, so a session under heavy output can report a
 //! total assembled from a subset of its panes. Reporting the total without the
 //! skip count would understate the session at exactly the moment it is largest,
 //! and a reader would have no way to know.
 
+use std::fmt;
+
+use sonicterm_gpu::core::AllocatorSnapshot;
 use sonicterm_logging::process_memory::{self, MemoryDelta, MemoryMetric, ProcessMemory};
 
 use super::retention::PaneRetention;
@@ -70,6 +77,100 @@ pub struct RendererSummary {
     pub image_atlas: sonicterm_types::ResourceAmount,
     /// Windows software presentation buffer; zero elsewhere.
     pub software_frame: sonicterm_types::ResourceAmount,
+}
+
+/// Renderer class selected as the authoritative shared-device reader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AllocatorSource {
+    /// The application's main window renderer.
+    MainWindow,
+    /// A deterministic visible-window fallback.
+    VisibleWindow,
+    /// The first hidden warm-pool renderer.
+    WarmPool,
+}
+
+impl AllocatorSource {
+    /// Return the stable wire label for the selected renderer class.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::MainWindow => "main",
+            Self::VisibleWindow => "visible",
+            Self::WarmPool => "warm",
+        }
+    }
+}
+
+/// Result of asking one authoritative renderer for shared allocator state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AllocatorReading {
+    /// Which renderer class supplied the shared-device reading.
+    pub source: AllocatorSource,
+    /// Renderer identifier, never a window title.
+    pub label: String,
+    /// Backend report, or `None` when that backend cannot produce one.
+    pub snapshot: Option<AllocatorSnapshot>,
+}
+
+/// One allocator field rendered as a number or an explicit absence sentinel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AllocatorMetric {
+    Measured(u64),
+    Unsupported,
+    NoRenderer,
+}
+
+impl fmt::Display for AllocatorMetric {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Measured(bytes) => write!(formatter, "{bytes}"),
+            Self::Unsupported => formatter.write_str("unsupported"),
+            Self::NoRenderer => formatter.write_str("none"),
+        }
+    }
+}
+
+/// Capability state that tells readers how to interpret every allocator field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AllocatorState {
+    Measured,
+    Unsupported,
+    NoRenderer,
+}
+
+impl fmt::Display for AllocatorState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Measured => formatter.write_str("measured"),
+            Self::Unsupported => formatter.write_str("unsupported"),
+            Self::NoRenderer => formatter.write_str("none"),
+        }
+    }
+}
+
+/// Select one renderer in main/visible/warm priority and read its shared device once.
+///
+/// Visible candidates use their lowest label so `HashMap` iteration cannot change attribution;
+/// `FnOnce` makes a second allocator query impossible in this call.
+fn read_authoritative_allocator<'a, T>(
+    main: Option<(&'a str, &'a T)>,
+    visible: &[(&'a str, &'a T)],
+    warm: &[(&'a str, &'a T)],
+    read: impl FnOnce(&T) -> Option<AllocatorSnapshot>,
+) -> Option<AllocatorReading> {
+    // When: main Some selects its device; visible min_by_key and warm first provide ordered fallbacks; empty inputs return None.
+    let (source, label, renderer) = if let Some((label, renderer)) = main {
+        (AllocatorSource::MainWindow, label, renderer)
+    } else if let Some((label, renderer)) = visible.iter().min_by_key(|(label, _)| *label).copied()
+    {
+        (AllocatorSource::VisibleWindow, label, renderer)
+    } else if let Some((label, renderer)) = warm.first().copied() {
+        (AllocatorSource::WarmPool, label, renderer)
+    } else {
+        return None;
+    };
+
+    Some(AllocatorReading { source, label: label.to_string(), snapshot: read(renderer) })
 }
 
 impl RendererSummary {
@@ -127,6 +228,8 @@ pub struct MemorySnapshot {
     pub panes_contended: usize,
     /// Every renderer, visible and warm.
     pub renderers: Vec<RendererSummary>,
+    /// Shared-device allocator state read from one authoritative renderer.
+    pub allocator: Option<AllocatorReading>,
     /// `GpuRenderer` instances alive process-wide.
     ///
     /// Read from the renderer crate's own counter rather than derived from
@@ -170,7 +273,39 @@ impl MemorySnapshot {
             // When: `renderers` is empty, emit an explicit sentinel instead of an ambiguous blank field.
             return "none".to_string();
         }
-        self.renderers.iter().map(RendererSummary::render).collect::<Vec<_>>().join("; ")
+        let mut renderers = self.renderers.iter().collect::<Vec<_>>();
+        renderers.sort_by(|left, right| {
+            (left.role, left.label.as_str()).cmp(&(right.role, right.label.as_str()))
+        });
+        renderers.into_iter().map(RendererSummary::render).collect::<Vec<_>>().join("; ")
+    }
+
+    /// Classify allocator telemetry as measured, backend-unsupported, or renderer-absent.
+    fn allocator_state(&self) -> AllocatorState {
+        match self.allocator.as_ref().and_then(|reading| reading.snapshot) {
+            Some(_) => AllocatorState::Measured,
+            None if self.allocator.is_some() => AllocatorState::Unsupported,
+            None => AllocatorState::NoRenderer,
+        }
+    }
+
+    /// Project one measured allocator scalar while preserving both absence states.
+    fn allocator_metric(&self, read: impl FnOnce(AllocatorSnapshot) -> u64) -> AllocatorMetric {
+        match self.allocator.as_ref().and_then(|reading| reading.snapshot) {
+            Some(snapshot) => AllocatorMetric::Measured(read(snapshot)),
+            None if self.allocator.is_some() => AllocatorMetric::Unsupported,
+            None => AllocatorMetric::NoRenderer,
+        }
+    }
+
+    /// Return the selected renderer-class label, or `none` before any renderer exists.
+    fn allocator_source(&self) -> &'static str {
+        self.allocator.as_ref().map_or("none", |reading| reading.source.as_str())
+    }
+
+    /// Return the selected renderer identifier, or `none` when no query was attempted.
+    fn allocator_label(&self) -> &str {
+        self.allocator.as_ref().map_or("none", |reading| reading.label.as_str())
     }
 
     /// The figures a later sample diffs against.
@@ -276,6 +411,14 @@ pub fn emit_memory_snapshot(snapshot: &MemorySnapshot, previous: Option<MemoryTo
         renderer_delta = %counted_delta(previous.map(|p| p.renderer_bytes), renderer_bytes),
         live_renderers = snapshot.live_renderers,
         renderers = %snapshot.render_renderers(),
+        allocator_state = %snapshot.allocator_state(),
+        allocator_source = snapshot.allocator_source(),
+        allocator_label = snapshot.allocator_label(),
+        allocator_allocated_bytes = %snapshot.allocator_metric(|allocator| allocator.allocated_bytes),
+        allocator_reserved_bytes = %snapshot.allocator_metric(|allocator| allocator.reserved_bytes),
+        allocator_allocations = %snapshot.allocator_metric(|allocator| u64::from(allocator.allocations)),
+        allocator_blocks = %snapshot.allocator_metric(|allocator| u64::from(allocator.blocks)),
+        allocator_largest_block_bytes = %snapshot.allocator_metric(|allocator| allocator.largest_block_bytes),
         "memory snapshot"
     );
 }
@@ -287,6 +430,10 @@ impl super::App {
     /// as [`super::retention::measure_pane`] does — a diagnostic must never
     /// stall the thread it reports from. Skips are counted so the emitted line
     /// can say the total is partial.
+    ///
+    /// Allocator reports describe the shared device, so the cycle queries one
+    /// renderer in main/visible/warm priority instead of summing duplicate
+    /// reports from every window.
     pub(super) fn build_memory_snapshot(&self) -> MemorySnapshot {
         let mut session = PaneRetention::default();
         let mut panes_sampled = 0usize;
@@ -305,25 +452,39 @@ impl super::App {
         }
 
         let mut renderers = Vec::new();
+        let mut visible_allocator_candidates = Vec::new();
         for (window_id, window) in &self.windows {
             let Some(renderer) = window.renderer.as_ref() else {
                 // When: this window has no renderer yet, omit a zero summary that would look like measured retention.
                 continue;
             };
-            renderers.push(summarize(
-                format!("{window_id:?}"),
-                "visible",
-                &renderer.retained_amounts(),
-            ));
+            let label = format!("{window_id:?}");
+            renderers.push(summarize(label.clone(), "visible", &renderer.retained_amounts()));
+            visible_allocator_candidates.push((label, renderer));
         }
+        let mut warm_allocator_candidates = Vec::new();
         for (index, warm) in self.warm_window_pool.iter().enumerate() {
-            renderers.push(summarize(
-                format!("{index}"),
-                "warm",
-                &warm.renderer.retained_amounts(),
-            ));
+            let label = format!("{index}");
+            renderers.push(summarize(label.clone(), "warm", &warm.renderer.retained_amounts()));
+            warm_allocator_candidates.push((label, &warm.renderer));
         }
 
+        let main_label = self.main_window_id.map(|window_id| format!("{window_id:?}"));
+        let main_allocator = main_label.as_deref().zip(self.main_renderer());
+        let visible_allocator_refs = visible_allocator_candidates
+            .iter()
+            .map(|(label, renderer)| (label.as_str(), *renderer))
+            .collect::<Vec<_>>();
+        let warm_allocator_refs = warm_allocator_candidates
+            .iter()
+            .map(|(label, renderer)| (label.as_str(), *renderer))
+            .collect::<Vec<_>>();
+        let allocator = read_authoritative_allocator(
+            main_allocator,
+            &visible_allocator_refs,
+            &warm_allocator_refs,
+            sonicterm_gpu::core::GpuRenderer::allocator_snapshot,
+        );
         MemorySnapshot {
             process: process_memory::sample(),
             session,
@@ -331,6 +492,7 @@ impl super::App {
             panes_sampled,
             panes_contended,
             renderers,
+            allocator,
             live_renderers: sonicterm_gpu::core::live_renderer_count(),
         }
     }

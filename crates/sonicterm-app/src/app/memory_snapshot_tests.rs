@@ -5,6 +5,128 @@ use std::time::{Duration, Instant};
 
 use sonicterm_types::ResourceAmount;
 use tracing::field::{Field, Visit};
+
+#[derive(Debug)]
+struct FakeRenderer {
+    id: u64,
+}
+
+/// Build a unique five-field allocator reading so selection and summing mistakes are visible.
+fn fake_allocator(id: u64) -> sonicterm_gpu::core::AllocatorSnapshot {
+    sonicterm_gpu::core::AllocatorSnapshot {
+        allocated_bytes: id,
+        reserved_bytes: id + 10,
+        allocations: u32::try_from(id + 20).expect("fixture fits u32"),
+        blocks: u32::try_from(id + 30).expect("fixture fits u32"),
+        largest_block_bytes: id + 40,
+    }
+}
+
+/// The main renderer supplies the shared-device report exactly once.
+///
+/// A counted accessor and unique fixture values fail if production reads peer renderers or sums
+/// their reports.
+#[test]
+fn shared_allocator_is_read_once_from_the_main_renderer_without_summing() {
+    let calls = std::cell::Cell::new(0);
+    let main = FakeRenderer { id: 1 };
+    let visible_a = FakeRenderer { id: 2 };
+    let visible_b = FakeRenderer { id: 3 };
+    let warm = FakeRenderer { id: 4 };
+    let visible = [("WindowId(3)", &visible_a), ("WindowId(2)", &visible_b)];
+    let warm = [("0", &warm)];
+
+    let reading =
+        read_authoritative_allocator(Some(("WindowId(1)", &main)), &visible, &warm, |renderer| {
+            calls.set(calls.get() + 1);
+            Some(fake_allocator(renderer.id))
+        })
+        .expect("main renderer selected");
+
+    assert_eq!(calls.get(), 1);
+    assert_eq!(reading.source, AllocatorSource::MainWindow);
+    assert_eq!(reading.label, "WindowId(1)");
+    assert_eq!(reading.snapshot, Some(fake_allocator(1)));
+}
+
+/// Visible fallback chooses the lowest renderer label regardless of input order.
+///
+/// Three permutations model nondeterministic `HashMap` iteration and must produce one identical
+/// read and attribution.
+#[test]
+fn visible_allocator_selection_is_stable_across_input_order() {
+    let a = FakeRenderer { id: 1 };
+    let b = FakeRenderer { id: 2 };
+    let c = FakeRenderer { id: 3 };
+    let orders = [
+        [("WindowId(9)", &a), ("WindowId(2)", &b), ("WindowId(5)", &c)],
+        [("WindowId(5)", &c), ("WindowId(9)", &a), ("WindowId(2)", &b)],
+        [("WindowId(2)", &b), ("WindowId(5)", &c), ("WindowId(9)", &a)],
+    ];
+
+    for visible in orders {
+        let calls = std::cell::Cell::new(0);
+        let reading = read_authoritative_allocator(None, &visible, &[], |renderer| {
+            calls.set(calls.get() + 1);
+            Some(fake_allocator(renderer.id))
+        })
+        .expect("visible renderer selected");
+        assert_eq!(calls.get(), 1);
+        assert_eq!(reading.source, AllocatorSource::VisibleWindow);
+        assert_eq!(reading.label, "WindowId(2)");
+        assert_eq!(reading.snapshot, Some(fake_allocator(2)));
+    }
+}
+
+/// The first warm renderer is used only when no visible renderer is available.
+///
+/// The counted accessor proves the fallback performs one query against warm slot zero.
+#[test]
+fn allocator_selection_uses_warm_only_without_a_visible_renderer() {
+    let calls = std::cell::Cell::new(0);
+    let warm = FakeRenderer { id: 7 };
+    let reading = read_authoritative_allocator(None, &[], &[("0", &warm)], |renderer| {
+        calls.set(calls.get() + 1);
+        Some(fake_allocator(renderer.id))
+    })
+    .expect("warm renderer selected");
+
+    assert_eq!(calls.get(), 1);
+    assert_eq!(reading.source, AllocatorSource::WarmPool);
+    assert_eq!(reading.label, "0");
+    assert_eq!(reading.snapshot, Some(fake_allocator(7)));
+}
+
+/// A renderer-less snapshot performs no allocator query and returns no reading.
+///
+/// The accessor counter stays zero, distinguishing absence from an unsupported backend report.
+#[test]
+fn allocator_selection_reads_nothing_when_no_renderer_exists() {
+    let calls = std::cell::Cell::new(0);
+    let reading = read_authoritative_allocator::<FakeRenderer>(None, &[], &[], |renderer| {
+        calls.set(calls.get() + 1);
+        Some(fake_allocator(renderer.id))
+    });
+    assert_eq!(calls.get(), 0);
+    assert_eq!(reading, None);
+}
+
+/// An unsupported backend is still queried once and retained as an explicit absent report.
+///
+/// Returning `None` from the counted accessor separates backend capability from no-renderer state.
+#[test]
+fn unsupported_allocator_report_is_still_exactly_one_read() {
+    let calls = std::cell::Cell::new(0);
+    let main = FakeRenderer { id: 1 };
+    let reading = read_authoritative_allocator(Some(("WindowId(1)", &main)), &[], &[], |_| {
+        calls.set(calls.get() + 1);
+        None
+    })
+    .expect("main renderer selected");
+
+    assert_eq!(calls.get(), 1);
+    assert_eq!(reading.snapshot, None);
+}
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::{EnvFilter, Layer, Registry};
 
@@ -149,6 +271,11 @@ fn populated_snapshot() -> MemorySnapshot {
                 software_frame: ResourceAmount::default(),
             },
         ],
+        allocator: Some(AllocatorReading {
+            source: AllocatorSource::MainWindow,
+            label: "WindowId(1)".to_string(),
+            snapshot: Some(fake_allocator(9)),
+        }),
         live_renderers: 2,
     }
 }
@@ -162,6 +289,7 @@ fn empty_snapshot() -> MemorySnapshot {
         panes_sampled: 0,
         panes_contended: 0,
         renderers: Vec::new(),
+        allocator: None,
         live_renderers: 0,
     }
 }
@@ -222,6 +350,14 @@ fn every_field_is_emitted_even_when_it_holds_nothing() {
         "renderer_delta",
         "live_renderers",
         "renderers",
+        "allocator_state",
+        "allocator_source",
+        "allocator_label",
+        "allocator_allocated_bytes",
+        "allocator_reserved_bytes",
+        "allocator_allocations",
+        "allocator_blocks",
+        "allocator_largest_block_bytes",
     ] {
         assert!(
             present.contains(&field),
@@ -298,7 +434,38 @@ fn visible_and_warm_renderers_are_both_reported_with_their_roles() {
     assert!(rendered.contains("glyph=128/3"), "warm glyph atlas bytes/items: {rendered}");
 }
 
-/// Renderer totals fold every renderer and every part.
+/// Renderer breakdown text is stable even when summaries arrive in a different order.
+///
+/// Two snapshots with reversed inputs exercise the production serializer, which sorts by role and
+/// label before joining entries.
+#[test]
+fn renderer_breakdown_order_is_stable_across_input_order() {
+    let make = |label: &str, role| RendererSummary {
+        label: label.to_string(),
+        role,
+        glyph_atlas: ResourceAmount::default(),
+        image_atlas: ResourceAmount::default(),
+        software_frame: ResourceAmount::default(),
+    };
+    let mut first = empty_snapshot();
+    first.renderers = vec![
+        make("WindowId(9)", "visible"),
+        make("1", "warm"),
+        make("WindowId(2)", "visible"),
+        make("0", "warm"),
+    ];
+    let mut second = empty_snapshot();
+    second.renderers = vec![
+        make("0", "warm"),
+        make("WindowId(2)", "visible"),
+        make("1", "warm"),
+        make("WindowId(9)", "visible"),
+    ];
+
+    assert_eq!(first.render_renderers(), second.render_renderers());
+}
+
+/// Renderer totals fold every renderer and every retained part.
 #[test]
 fn renderer_totals_fold_every_renderer() {
     let events = capture(|| emit_memory_snapshot(&populated_snapshot(), None));
@@ -336,7 +503,48 @@ fn the_live_renderer_count_is_reported_independently_of_the_summaries() {
 #[test]
 fn a_session_with_no_renderer_says_none() {
     let events = capture(|| emit_memory_snapshot(&empty_snapshot(), None));
-    assert_eq!(events[0].text("renderers"), Some("none"));
+    let event = &events[0];
+    assert_eq!(event.text("renderers"), Some("none"));
+    assert_eq!(event.text("allocator_state"), Some("none"));
+    assert_eq!(event.text("allocator_source"), Some("none"));
+    assert_eq!(event.text("allocator_label"), Some("none"));
+    assert_eq!(event.text("allocator_allocated_bytes"), Some("none"));
+}
+
+/// A measured allocator report emits one complete scalar field set.
+///
+/// Distinct fixture values prove every field comes from the single authoritative reading rather
+/// than one copy per visible or warm renderer.
+#[test]
+fn measured_allocator_is_emitted_once_without_renderer_multiplication() {
+    let events = capture(|| emit_memory_snapshot(&populated_snapshot(), None));
+    let event = &events[0];
+
+    assert_eq!(event.text("allocator_state"), Some("measured"));
+    assert_eq!(event.text("allocator_source"), Some("main"));
+    assert_eq!(event.text("allocator_label"), Some("WindowId(1)"));
+    assert_eq!(event.text("allocator_allocated_bytes"), Some("9"));
+    assert_eq!(event.text("allocator_reserved_bytes"), Some("19"));
+    assert_eq!(event.text("allocator_allocations"), Some("29"));
+    assert_eq!(event.text("allocator_blocks"), Some("39"));
+    assert_eq!(event.text("allocator_largest_block_bytes"), Some("49"));
+}
+
+/// Backend-unavailable allocator telemetry is explicit and keeps its reader identity.
+///
+/// Clearing only the report exercises the unsupported state without turning it into no-renderer
+/// or measured zeroes.
+#[test]
+fn unsupported_allocator_report_is_explicit_not_zero() {
+    let mut snapshot = populated_snapshot();
+    snapshot.allocator.as_mut().expect("allocator reading").snapshot = None;
+    let events = capture(|| emit_memory_snapshot(&snapshot, None));
+    let event = &events[0];
+    assert_eq!(event.text("allocator_state"), Some("unsupported"));
+    assert_eq!(event.text("allocator_source"), Some("main"));
+    assert_eq!(event.text("allocator_label"), Some("WindowId(1)"));
+    assert_eq!(event.text("allocator_allocated_bytes"), Some("unsupported"));
+    assert_eq!(event.text("allocator_reserved_bytes"), Some("unsupported"));
 }
 
 /// The first sample of a session has nothing to compare against, and says so.
