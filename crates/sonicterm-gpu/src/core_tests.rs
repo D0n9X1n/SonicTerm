@@ -1229,13 +1229,22 @@ fn palette_footer_uses_native_regular_natural_spacing_and_scaled_geometry() {
 
 #[test]
 fn body_title_and_footer_stacks_share_configuration_and_native_size_identity() {
-    let stacks = renderer_font_stacks("Rec Mono St.Helens", 13.0, 72, 1.0);
-    let (Some(body), Some(title), Some(footer)) =
-        (stacks.body, stacks.tab_title, stacks.palette_footer)
-    else {
-        return;
-    };
+    const CORE_SRC: &str = include_str!("core.rs");
+    let helper_start = CORE_SRC.find("fn renderer_font_stacks(").expect("stack builder");
+    let helper_end = CORE_SRC[helper_start..]
+        .find("fn software_block_glyph_target_rect(")
+        .map(|offset| helper_start + offset)
+        .expect("stack builder end");
+    let helper = &CORE_SRC[helper_start..helper_end];
+    assert_eq!(helper.matches("try_new_full_with_weight(").count(), 1);
+    assert_eq!(helper.matches("with_font_size(").count(), 2);
 
+    // Platform locators can accept a family without resolving it on a CI host;
+    // the tracked asset fixture makes the native-size metric assertion real.
+    let _font_lock = crate::chrome_text::TRACKED_FONT_STACK_LOCK.lock().expect("font fixture lock");
+    let body = crate::chrome_text::tracked_font_stack(13.0);
+    let title = body.with_font_size(14.0);
+    let footer = body.with_font_size(12.0);
     assert!(body.shares_configuration_with(&title));
     assert!(body.shares_configuration_with(&footer));
     assert!(title.shares_configuration_with(&footer));
@@ -1246,7 +1255,6 @@ fn body_title_and_footer_stacks_share_configuration_and_native_size_identity() {
     assert!(title_metrics.cell_h > body_metrics.cell_h);
     assert!(footer_metrics.cell_h < body_metrics.cell_h);
 
-    const CORE_SRC: &str = include_str!("core.rs");
     let set_font_start = CORE_SRC.find("    pub fn set_font(").expect("set_font exists");
     let set_font_end = CORE_SRC[set_font_start..]
         .find("\n    /// Apply a new DPI scale factor")
