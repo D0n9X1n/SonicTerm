@@ -78,6 +78,7 @@ fn raw_hwnd_and_ole_entry_points_are_explicitly_unsafe() {
 
 #[test]
 fn windows_only_rustdoc_avoids_links_to_generated_or_deleted_items() {
+    // Contract: Windows-only Rustdoc never depends on generated or removed link targets.
     const OLE: &str = include_str!("os_drag_win.rs");
     const PRESENTER: &str = include_str!("software_presenter.rs");
 

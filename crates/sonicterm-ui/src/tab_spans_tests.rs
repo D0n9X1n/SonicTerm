@@ -5,6 +5,7 @@ const INACTIVE: TabSpanColor = TabSpanColor::rgb(128, 128, 128);
 
 #[test]
 fn tab_titles_are_one_logical_pixel_larger_than_body_text() {
+    // Contract: tab titles remain one logical pixel larger than body text at every size.
     assert_eq!(tab_title_font_size(13.0), 14.0);
     assert_eq!(tab_title_font_size(1.0), 2.0);
 }

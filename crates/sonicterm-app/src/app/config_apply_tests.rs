@@ -233,6 +233,7 @@ fn applying_a_config_moves_the_weight_reset_target() {
 
 #[test]
 fn save_current_settings_persists_transient_font_values_without_reapplying_them() {
+    // Contract: saving writes live font values without reloading or mutating the running config.
     let path = temp_config_path("save-font-values");
     remove_test_path(&path);
     let mut stored = Config::default();
@@ -263,6 +264,7 @@ fn save_current_settings_persists_transient_font_values_without_reapplying_them(
 
 #[test]
 fn successful_save_advances_both_reset_baselines() {
+    // Contract: a successful save makes the persisted font values the new reset baselines.
     let path = temp_config_path("save-reset-baselines");
     remove_test_path(&path);
     let mut cfg = Config::default();
@@ -291,6 +293,7 @@ fn successful_save_advances_both_reset_baselines() {
 
 #[test]
 fn failed_save_preserves_disk_live_values_and_reset_baselines() {
+    // Contract: a failed save changes neither disk bytes, live values, nor reset baselines.
     let path = temp_config_path("save-failure");
     remove_test_path(&path);
     std::fs::write(&path, b"[font]\nsize = 'wrong shape'\nweight_scale = 1.0\n")
@@ -320,11 +323,13 @@ fn failed_save_preserves_disk_live_values_and_reset_baselines() {
 
 #[test]
 fn read_only_allows_explicit_save_current_settings_action() {
+    // Contract: READONLY blocks terminal input but permits this explicit configuration action.
     assert!(super::super::keymap_dispatch::read_only_allows_action(&Action::SaveCurrentSettings));
 }
 
 #[test]
 fn save_action_dispatch_persists_real_file_and_shows_confirmation() {
+    // Contract: dispatch persists only live font scalars and confirms success to the user.
     let path = temp_config_path("save-action-dispatch");
     remove_test_path(&path);
     std::fs::write(
@@ -351,6 +356,7 @@ fn save_action_dispatch_persists_real_file_and_shows_confirmation() {
 
 #[test]
 fn palette_enter_saves_once_and_targets_the_attached_child() {
+    // Contract: palette submission saves once and routes confirmation to its attached child.
     let path = temp_config_path("save-palette-enter");
     remove_test_path(&path);
     std::fs::write(&path, b"[font]\nsize = 13\nweight_scale = 1\n")
@@ -379,6 +385,7 @@ fn palette_enter_saves_once_and_targets_the_attached_child() {
 
 #[test]
 fn source_window_save_action_writes_once_and_targets_the_child_notification() {
+    // Contract: source-window dispatch saves once and reports to that child, not the main window.
     let path = temp_config_path("save-source-window-dispatch");
     remove_test_path(&path);
     std::fs::write(&path, b"[font]\nsize = 13\nweight_scale = 1\n")
@@ -402,6 +409,7 @@ fn source_window_save_action_writes_once_and_targets_the_child_notification() {
 
 #[test]
 fn save_notification_helper_routes_success_and_failure_to_the_requested_kind() {
+    // Contract: success and failure notifications target only the requested window kind.
     let success_path = temp_config_path("save-notification-success");
     remove_test_path(&success_path);
     let failure_path = success_path.with_extension("directory");

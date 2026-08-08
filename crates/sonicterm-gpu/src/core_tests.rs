@@ -1253,6 +1253,7 @@ fn palette_cursor_uses_placeholder_only_for_an_empty_query() {
 
 #[test]
 fn palette_footer_is_one_logical_pixel_smaller_and_native_at_windows_scales() {
+    // Contract: footer text stays one logical pixel smaller and rasterizes at native scale.
     assert_eq!(palette_footer_font_size(13.0), 12.0);
     assert_eq!(palette_footer_font_size(1.0), 1.0);
 
@@ -1271,6 +1272,7 @@ fn palette_footer_is_one_logical_pixel_smaller_and_native_at_windows_scales() {
 
 #[test]
 fn palette_footer_uses_native_regular_natural_spacing_and_scaled_geometry() {
+    // Contract: footer rendering uses its native regular stack, natural advances, and inset clip.
     const CORE_SRC: &str = include_str!("core.rs");
     let start = CORE_SRC
         .find("if let Some(footer_stack) = self.palette_footer_font_stack.as_ref()")
@@ -1294,6 +1296,7 @@ fn palette_footer_uses_native_regular_natural_spacing_and_scaled_geometry() {
 
 #[test]
 fn body_title_and_footer_stacks_share_configuration_and_native_size_identity() {
+    // Contract: chrome roles share font configuration but retain distinct native size identities.
     const CORE_SRC: &str = include_str!("core.rs");
     let helper_start = CORE_SRC.find("fn renderer_font_stacks(").expect("stack builder");
     let helper_end = CORE_SRC[helper_start..]
@@ -1338,6 +1341,7 @@ fn body_title_and_footer_stacks_share_configuration_and_native_size_identity() {
 
 #[test]
 fn title_size_helper_is_used_only_for_title_stack_and_title_rendering() {
+    // Contract: title sizing cannot leak into body or footer stack construction and rendering.
     const CORE_SRC: &str = include_str!("core.rs");
     assert_eq!(CORE_SRC.matches("tab_title_font_size(").count(), 2);
     assert!(CORE_SRC.contains("if let Some(stack) = self.tab_title_font_stack.as_ref()"));
@@ -1346,6 +1350,7 @@ fn title_size_helper_is_used_only_for_title_stack_and_title_rendering() {
 
 #[test]
 fn longest_palette_footer_fits_supported_panel_width_with_natural_spacing() {
+    // Contract: the longest localized footer fits every supported body size without compression.
     use sonicterm_render_model::boundary::ui::command_palette::{
         CommandPalette, CommandPaletteMode,
     };
