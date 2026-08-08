@@ -77,8 +77,7 @@ panel_padding = 2.0
 software_render_mode = "auto" # auto | force | off
 
 [render]
-# Keep v2 unless bisecting a rendering regression.
-glyph_fit = "v2"
+# Reserved compatibility key; the current renderer does not read it.
 alt_screen_bg_fill = "v2"
 
 [accessibility]
@@ -220,12 +219,17 @@ live.
 See [Logging](Logging). `warn` is the default. Debug enables renderer timing and
 other diagnostic events.
 
-### Render switches
+### Render compatibility
 
-`glyph_fit` and `alt_screen_bg_fill` select the current `v2` behavior or a
-legacy `v1` fallback for regression diagnosis. They are implementation rollback
-switches, not appearance preferences; keep `v2` unless investigating a specific
-rendering problem.
+`alt_screen_bg_fill` remains deserializable as a reserved compatibility key,
+but the current renderer does not read it. New behavior should not depend on
+choosing `v1` or `v2` here.
+
+Older files may contain `glyph_fit = "v1"` or `"v2"`. SonicTerm still accepts
+that unknown key so those files load, but it was never connected to the runtime
+renderer and is no longer emitted or documented as active configuration. The
+single-cell status-marker fit is now a renderer correctness invariant rather
+than a user-selectable appearance switch.
 
 ### Accessibility and notifications
 
@@ -371,8 +375,7 @@ panel_padding = 2.0
 software_render_mode = "auto" # auto | force | off
 
 [render]
-# 除非定位渲染回归，否则保持 v2。
-glyph_fit = "v2"
+# 保留的兼容 key；当前 renderer 不读取它。
 alt_screen_bg_fill = "v2"
 
 [accessibility]
@@ -487,10 +490,15 @@ macOS/其它 Unix 使用 `$SHELL`。`term_program` 写入子进程的 `TERM_PROG
 
 见 [日志 / Logging](Logging)。默认 `warn`；`debug` 会启用 renderer timing 与更多诊断事件。
 
-### Render switch
+### Render 兼容设置
 
-`glyph_fit` 和 `alt_screen_bg_fill` 可选择当前 `v2` 或用于回归定位的旧 `v1`。
-它们是实现 rollback switch，不是外观偏好；除非调查具体渲染问题，否则保持 `v2`。
+`alt_screen_bg_fill` 仍可反序列化为保留的兼容 key，但当前 renderer 不读取它。新行为
+不应依赖在这里选择 `v1` 或 `v2`。
+
+旧配置可能包含 `glyph_fit = "v1"` 或 `"v2"`。SonicTerm 仍把这个未知 key 作为兼容
+输入接受，因此旧文件可以继续加载；但它从未连接到运行时 renderer，现在也不再由配置
+序列化或文档列为生效设置。单 cell 状态标记的适配现在是 renderer 正确性约束，而不是
+用户可选的外观开关。
 
 ### 无障碍与通知
 

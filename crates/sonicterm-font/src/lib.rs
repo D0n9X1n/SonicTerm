@@ -398,6 +398,33 @@ struct FallbackResolveInfo {
     config: ConfigHandle,
 }
 
+fn select_fallback_fonts(
+    extra_handles: &mut Vec<ParsedFont>,
+    wanted: &mut RangeSet<u32>,
+    sort_by_coverage: bool,
+) {
+    if wanted.len() > 1 && sort_by_coverage {
+        extra_handles.sort_by_cached_key(|font| {
+            font.coverage_intersection(wanted).map(|coverage| coverage.len()).unwrap_or(0)
+        });
+        extra_handles.reverse();
+    }
+
+    // Math faces can win raw coverage while drawing shared text symbols outside
+    // their advances. Stable demotion preserves coverage order within each group.
+    extra_handles.sort_by_key(|font| font.is_math_font);
+    extra_handles.retain(|font| match font.coverage_intersection(wanted) {
+        Ok(coverage) if coverage.is_empty() => false,
+        Ok(coverage) => {
+            // Reserve this face's coverage so later faces remain only when they
+            // contribute another unresolved glyph.
+            *wanted = wanted.difference(&coverage);
+            true
+        }
+        Err(_) => false,
+    });
+}
+
 impl FallbackResolveInfo {
     // Lock order: `pending` is released before `LAST_WARNING`; they are never nested.
     fn process(self) {
@@ -445,49 +472,16 @@ impl FallbackResolveInfo {
             extra_handles
         );
 
-        if wanted.len() > 1 && self.config.sort_fallback_fonts_by_coverage {
-            // Sort by ascending coverage
-            extra_handles.sort_by_cached_key(|p| {
-                p.coverage_intersection(&wanted).map(|r| r.len()).unwrap_or(0)
-            });
-            // Re-arrange to descending coverage
-            extra_handles.reverse();
-            log::trace!(
-                "Fallback fonts that match {} after sorting are: {:#?}",
-                fallback_str.escape_unicode(),
-                extra_handles
-            );
-        }
-
-        // Math fonts are drawn to the em square rather than to a text advance,
-        // so a glyph taken from one overflows the cell it lands in: a warning
-        // sign resolved from STIX Two Math measured 43x35 against a 15x21 cell,
-        // overlapping its neighbour while the advance stayed put.
-        //
-        // They are demoted rather than dropped. Ranking is by coverage of the
-        // batch being resolved, and a math font covers a great many symbol
-        // codepoints, so it outranks a text font that covers each of them
-        // perfectly well — that is how one came to serve glyphs Menlo already
-        // had. Sorting them last lets the reduction below take a text font
-        // wherever one exists, while still leaving a math font available for a
-        // codepoint nothing else carries. Excluding them outright would have
-        // turned such a codepoint into tofu.
-        //
-        // A stable sort, so the coverage order above survives within each
-        // group. This runs after that sort for the same reason.
-        extra_handles.sort_by_key(|p| p.is_math_font);
-
-        // iteratively reduce to just the fonts that we need
-        extra_handles.retain(|p| match p.coverage_intersection(&wanted) {
-            Ok(cov) if cov.is_empty() => false,
-            Ok(cov) => {
-                // Remove the matches from the set, so that we avoid
-                // picking up multiple fonts for the same glyphs
-                wanted = wanted.difference(&cov);
-                true
-            }
-            Err(_) => false,
-        });
+        select_fallback_fonts(
+            &mut extra_handles,
+            &mut wanted,
+            self.config.sort_fallback_fonts_by_coverage,
+        );
+        log::trace!(
+            "Fallback fonts that match {} after selection are: {:#?}",
+            fallback_str.escape_unicode(),
+            extra_handles
+        );
 
         if !extra_handles.is_empty() {
             let mut pending = self.pending.lock().unwrap();

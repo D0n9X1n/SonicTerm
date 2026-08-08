@@ -633,6 +633,115 @@ fn hardware_block_glyph_geometry_stays_fractional() {
 }
 
 #[test]
+fn status_markers_fit_the_same_single_cell_geometry() {
+    // Contract: every Claude Code circle marker uses the same width-bound fit policy.
+    let natural = (4.0, 7.0, 24.0, 12.0);
+    let cell = (10.0, 20.0, 12.0, 20.0);
+
+    for marker in ['\u{23fa}', '\u{25ef}', '\u{25cf}'] {
+        assert_eq!(
+            fit_single_cell_status_marker(marker, 1, false, false, natural, cell),
+            (10.0, 27.0, 12.0, 6.0)
+        );
+    }
+}
+
+#[test]
+fn status_marker_fit_preserves_aspect_ratio_when_height_binds() {
+    // Contract: tall marker tiles remain centered and proportional inside one cell.
+    let fitted = fit_single_cell_status_marker(
+        '\u{23fa}',
+        1,
+        false,
+        false,
+        (2.0, 3.0, 8.0, 32.0),
+        (10.0, 20.0, 12.0, 16.0),
+    );
+
+    assert_eq!(fitted, (14.0, 20.0, 4.0, 16.0));
+    assert_eq!(fitted.2 / fitted.3, 8.0 / 32.0);
+}
+
+#[test]
+fn status_marker_fit_centers_without_enlarging_small_tiles() {
+    // Contract: an already-contained marker keeps its raster size and is only centered.
+    let fitted = fit_single_cell_status_marker(
+        '\u{25ef}',
+        1,
+        false,
+        false,
+        (11.0, 23.0, 6.0, 8.0),
+        (10.0, 20.0, 12.0, 16.0),
+    );
+
+    assert_eq!(fitted, (13.0, 24.0, 6.0, 8.0));
+}
+
+#[test]
+fn status_marker_fit_leaves_ineligible_geometry_unchanged() {
+    // Contract: the targeted policy cannot alter ordinary text, wide cells, or multi-cell clusters.
+    let natural = (-8.0, 3.0, 16.0, 20.0);
+    let cell = (0.0, 0.0, 10.0, 20.0);
+
+    assert_eq!(fit_single_cell_status_marker('x', 1, false, false, natural, cell), natural);
+    assert_eq!(fit_single_cell_status_marker('\u{23fa}', 1, true, false, natural, cell), natural);
+    assert_eq!(fit_single_cell_status_marker('\u{23fa}', 2, false, false, natural, cell), natural);
+    assert_eq!(fit_single_cell_status_marker('\u{23fa}', 1, false, true, natural, cell), natural);
+}
+
+#[test]
+fn status_marker_fit_leaves_multi_cell_ligature_geometry_unchanged() {
+    // Contract: both halves of a two-cell `=>` ligature retain their natural overhang.
+    let cell = (0.0, 0.0, 10.0, 20.0);
+    let equals_half = (-8.0, 1.0, 16.0, 20.0);
+    let arrow_half = (2.0, 1.0, 16.0, 20.0);
+
+    assert_eq!(fit_single_cell_status_marker('=', 2, false, false, equals_half, cell), equals_half);
+    assert_eq!(fit_single_cell_status_marker('>', 2, false, false, arrow_half, cell), arrow_half);
+}
+
+#[test]
+fn status_marker_fit_leaves_degenerate_geometry_unchanged() {
+    // Contract: a zero-area glyph or cell cannot produce a meaningful fit ratio.
+    let glyph = (1.0, 2.0, 0.0, 12.0);
+    let cell = (10.0, 20.0, 12.0, 20.0);
+
+    assert_eq!(fit_single_cell_status_marker('\u{25cf}', 1, false, false, glyph, cell), glyph);
+    assert_eq!(
+        fit_single_cell_status_marker(
+            '\u{25cf}',
+            1,
+            false,
+            false,
+            (1.0, 2.0, 8.0, 12.0),
+            (10.0, 20.0, 0.0, 20.0)
+        ),
+        (1.0, 2.0, 8.0, 12.0)
+    );
+}
+
+#[test]
+fn status_marker_fit_is_wired_before_both_terminal_glyph_emissions() {
+    // Contract: fallback and shaped producers both fit before creating GlyphInstance rectangles.
+    const SOURCE: &str = include_str!("core.rs");
+    const CALL: &str = "let (gx, gy, gw, gh) = fit_single_cell_status_marker(";
+    const PUSH: &str = "glyph_instances.push(GlyphInstance";
+    let fallback_start = SOURCE.find("if g.glyph_id == 0 {").expect("fallback branch");
+    let shaped_offset = SOURCE[fallback_start..]
+        .find("let key = sonicterm_types::glyph_key::GlyphKey::shaped(")
+        .expect("shaped branch");
+    let shaped_start = fallback_start + shaped_offset;
+
+    assert_eq!(SOURCE.matches(CALL).count(), 2);
+    for section in [&SOURCE[fallback_start..shaped_start], &SOURCE[shaped_start..]] {
+        let fit = section.find(CALL).expect("shared marker fit call");
+        let push = section.find(PUSH).expect("glyph instance emission");
+        assert!(section.contains("lead_cell.extras().is_some()"));
+        assert!(fit < push, "marker fitting must precede GlyphInstance creation");
+    }
+}
+
+#[test]
 fn inline_image_atlas_starts_placeholder_and_promotes_once() {
     let placeholder = GlyphAtlas::new(PLACEHOLDER_ATLAS_DIM, PLACEHOLDER_ATLAS_DIM);
     assert!(!image_atlas_promotion_required(&placeholder, false));

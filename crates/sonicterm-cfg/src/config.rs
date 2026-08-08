@@ -49,11 +49,7 @@ pub struct Config {
     /// Appearance and compositor backdrop settings.
     #[serde(default)]
     pub appearance: AppearanceConfig,
-    /// Render pipeline implementation toggles.
-    /// Each knob selects between v1 (legacy) and v2 (wezterm-parity) impls.
-    /// Defaults to v2 everywhere; flip to v1 to revert per-symptom on a
-    /// regression report. See `crates/sonicterm-text/src/swash_rasterizer.rs`
-    /// and `crates/sonicterm-gpu/src/core.rs`.
+    /// Render-pipeline compatibility settings.
     #[serde(default)]
     pub render: RenderConfig,
     /// Deprecated compatibility key for the former tab close `×` button.
@@ -235,39 +231,24 @@ impl Default for AppearanceConfig {
     }
 }
 
-/// Render pipeline knobs.
-///
-/// Each field selects between `v1` (legacy) and `v2` (wezterm-parity) impls.
-/// Defaults are `v2`, matching wezterm's behavior. Set a field to `v1` in
-/// `sonicterm.toml` under `[render]` to revert that specific symptom path
-/// if a regression appears in the field. The two flags are independent so
-/// glyph-fit and alt-screen-bg rollback are decoupled.
+/// Render-pipeline compatibility settings.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct RenderConfig {
-    /// Glyph-fit pipeline used by `sonicterm-text::swash_rasterizer::apply_symbol_fit`.
-    /// `v2` (default) plumbs `num_cells` through shaping → rasterizer and
-    /// allows `cell_width * (num_cells + 0.25)` headroom; `v1` is the
-    /// pre- clamp-to-advance behavior that left Powerline triangles at
-    /// 1-cell width and over-scaled Nerd-Font PUA icons.
-    pub glyph_fit: RenderImpl,
-    /// Alt-screen background fill mode used by `sonicterm-gpu::core` paint.
-    /// `v2` (default) keeps the wgpu clear-color opaque and emits a single
-    /// full-viewport translucent bottom-layer quad carrying `bg_opacity`;
-    /// `v1` is the pre- behavior that baked `bg_opacity` into the
-    /// clear and produced a pale wash in vim/nvim alt-screen because
-    /// default-bg cells skip their quad and reveal the translucent clear.
+    /// Reserved legacy selector for alt-screen background behavior.
+    ///
+    /// The current renderer does not read this value; it remains deserializable
+    /// so existing files continue to load.
     pub alt_screen_bg_fill: RenderImpl,
 }
 
-/// Render-pipeline impl selector for [`RenderConfig`]. Lowercase TOML.
+/// Lowercase TOML selector retained for legacy render configuration.
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum RenderImpl {
-    /// Legacy pre- impl. Use if v2 regresses something in your env.
+    /// Legacy selector value.
     V1,
-    /// wezterm-parity impl (default). Glyph-fit plumbing or opaque-clear
-    /// + viewport-quad alt-screen bg, depending on which field this is on.
+    /// Default selector value.
     #[default]
     V2,
 }
@@ -1141,8 +1122,7 @@ panel_padding = {panel_padding}
 software_render_mode = "auto"
 
 [render]
-# Renderer behavior switches. Keep "v2" unless bisecting a rendering regression.
-glyph_fit = "v2"
+# Reserved compatibility key; the current renderer does not read it.
 alt_screen_bg_fill = "v2"
 
 [accessibility]

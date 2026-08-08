@@ -247,6 +247,14 @@ atlas rasterizer trait and converts font output to `RasterTile`.
 - COLR/HarfBuzz paint paths support layered color glyphs and linear, radial, and
   sweep gradients through Cairo-backed drawing.
 
+Before terminal glyph instances are created, the standalone Claude Code circle
+markers `⏺` (U+23FA), `◯` (U+25EF), and `●` (U+25CF) receive a targeted fit
+only when the shaped cluster occupies one non-wide cell and carries no combining
+or variation-selector extras. An oversized tile shrinks uniformly to the cell
+bounds and is centered without changing its aspect ratio; an already-contained
+tile is only centered. Ordinary text, composite clusters, wide glyphs, custom
+block glyphs, and multi-cell ligatures keep their natural raster geometry.
+
 Raw FreeType, HarfBuzz, and Fontconfig handles live in binding crates. Safe
 wrappers in `sonicterm-font::{ftwrap,hbwrap,fcwrap}` own lifetimes and pair each
 native allocation with its matching destroy function.
@@ -340,9 +348,12 @@ or disable degradation (`off`). Degradation lowers frame frequency, disables
 per-frame fade work, uses FIFO/opaque presentation, and reduces frame latency.
 
 On Windows, `WindowsSoftwareFrame` composes quads and atlas glyphs into a BGRA
-buffer and presents it to the HWND through GDI `SetDIBitsToDevice`. The Windows
-binary also contains a retained dirty-rectangle `SoftwareSurface` primitive;
-the active renderer composition path currently lives in `sonicterm-gpu`.
+buffer and presents it to the HWND through GDI `SetDIBitsToDevice`. It consumes
+the same producer-built `GlyphInstance` rectangles as `WeztermPipeline`, so the
+single-cell status-marker fit is identical in hardware and software rendering;
+neither presenter carries a second fitting policy. The Windows binary also
+contains a retained dirty-rectangle `SoftwareSurface` primitive; the active
+renderer composition path currently lives in `sonicterm-gpu`.
 
 ## Where to read the code
 
@@ -571,6 +582,12 @@ OS 报告前台可执行文件后，SonicTerm 会规范化其 basename，并执�
 - FreeType 处理 monochrome、grayscale、LCD 次像素、BGRA color strike，以及 COLR/SVG 交接。
 - COLR/HarfBuzz paint 路径通过 Cairo-backed 绘制支持分层彩色字形和线性、径向、扫描渐变。
 
+在创建终端 glyph instance 前，独立的 Claude Code 圆形标记 `⏺`（U+23FA）、`◯`
+（U+25EF）和 `●`（U+25CF）只会在 shaped cluster 占一个非宽 cell 且不包含组合字符或
+variation selector extras 时进行定向适配。过大的 tile 按统一比例缩小到 cell 边界并居中，
+不改变纵横比；已经位于边界内的 tile 只会居中。普通文本、复合 cluster、宽字形、自定义
+block glyph 与多 cell ligature 都保持字体提供的自然光栅几何。
+
 原始 FreeType、HarfBuzz、Fontconfig handle 留在 binding crate；
 `sonicterm-font::{ftwrap,hbwrap,fcwrap}` 的安全 wrapper 管理生命周期，并为每次原生分配匹配 destroy 调用。
 
@@ -642,8 +659,10 @@ adapter 检测可识别 WARP、llvmpipe、SwiftShader 等 CPU device。`software
 强制降级或关闭降级。降级会降低帧率、关闭逐帧 fade、使用 FIFO/opaque 呈现并减少 frame latency。
 
 Windows 上，`WindowsSoftwareFrame` 把 quad 和 atlas glyph 合成进 BGRA buffer，并通过 GDI
-`SetDIBitsToDevice` 呈现到 HWND。Windows 二进制还包含 retained dirty-rectangle `SoftwareSurface` primitive；
-当前实际 renderer 合成路径位于 `sonicterm-gpu`。
+`SetDIBitsToDevice` 呈现到 HWND。它与 `WeztermPipeline` 使用同一批由上游构建的
+`GlyphInstance` rect，因此单 cell 状态标记在硬件与软件渲染中使用完全相同的适配几何；
+两个 presenter 都没有第二套适配策略。Windows 二进制还包含 retained dirty-rectangle
+`SoftwareSurface` primitive；当前实际 renderer 合成路径位于 `sonicterm-gpu`。
 
 ## 从哪里阅读源码
 

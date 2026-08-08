@@ -288,6 +288,39 @@ fn software_block_glyph_target_rect(
     (left, top, right - left, bottom - top)
 }
 
+/// Fits standalone Claude Code circle markers inside one cell without distortion.
+pub(crate) fn fit_single_cell_status_marker(
+    ch: char,
+    cluster_cells: usize,
+    is_wide: bool,
+    has_extras: bool,
+    natural: (f32, f32, f32, f32),
+    cell: (f32, f32, f32, f32),
+) -> (f32, f32, f32, f32) {
+    // When: ch is not approved, cluster_cells is not one, is_wide is true, or
+    // has_extras is true, preserve the font rasterizer's geometry exactly.
+    if !matches!(ch, '\u{23fa}' | '\u{25ef}' | '\u{25cf}')
+        || cluster_cells != 1
+        || is_wide
+        || has_extras
+    {
+        return natural;
+    }
+
+    let (_, _, glyph_w, glyph_h) = natural;
+    let (cell_x, cell_y, cell_w, cell_h) = cell;
+    // When: glyph_w, glyph_h, cell_w, or cell_h is non-positive, no meaningful
+    // fit ratio exists, so preserve the natural rectangle.
+    if glyph_w <= 0.0 || glyph_h <= 0.0 || cell_w <= 0.0 || cell_h <= 0.0 {
+        return natural;
+    }
+
+    let scale = (cell_w / glyph_w).min(cell_h / glyph_h).min(1.0);
+    let fitted_w = glyph_w * scale;
+    let fitted_h = glyph_h * scale;
+    (cell_x + (cell_w - fitted_w) * 0.5, cell_y + (cell_h - fitted_h) * 0.5, fitted_w, fitted_h)
+}
+
 /// Resolve the title text colour for a single tab, honouring hover.
 ///
 /// Two cases, unified so a custom-coloured tab highlights on hover exactly
@@ -7550,12 +7583,18 @@ impl GpuRenderer {
                 let gy = cy + baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
                 let gw = info.px_size[0] as f32 * inv_s;
                 let gh = info.px_size[1] as f32 * inv_s;
-                // Bug 2 / wezterm-takeover § "Prefer wezterm everywhere":
-                // No `gw > cell_pixel_width_snapped` clamp here either —
-                // see the matching comment in the main shaped branch below.
-                // sonicterm-font sizes glyphs to the cell box natively for
-                // typical cells; ligature halves intentionally exceed it
-                // and must be allowed to.
+                let cell_right =
+                    snapped_cell_x.get(g.lead_col as usize + 1).copied().unwrap_or(cx + cell_w);
+                let (gx, gy, gw, gh) = fit_single_cell_status_marker(
+                    ch,
+                    cluster_cells,
+                    is_wide,
+                    lead_cell.extras().is_some(),
+                    (gx, gy, gw, gh),
+                    (cx, cy, cell_right - cx, cell_h),
+                );
+                // All other glyphs keep their natural raster geometry. In
+                // particular, multi-cell ligature halves may exceed one cell.
                 let color = cell_fg(&lead_cell, theme, fg_default);
                 let rgba = if info.is_color {
                     [1.0, 1.0, 1.0, 1.0]
@@ -7626,19 +7665,18 @@ impl GpuRenderer {
             let gy = cy + baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
             let gw = info.px_size[0] as f32 * inv_s;
             let gh = info.px_size[1] as f32 * inv_s;
-            // Bug 2 / wezterm-takeover § "Prefer wezterm everywhere":
-            // No `gw > cell_pixel_width_snapped` clamp here. Half-
-            // ligature glyphs from sonicterm-font's GSUB substitutions
-            // (e.g. `=>` substitutes the source `=` into glyph_id
-            // 41082 and `>` into glyph_id 40766; each is a 16-px-wide
-            // bitmap with `bearing_x = -8` so the two halves visually
-            // fuse across cells N and N+1) MUST be allowed to extend
-            // beyond a single cell — wezterm-gui takes the same
-            // approach (see `wezterm-gui/src/termwindow/render/
-            // screen_line.rs` `width = sprite.coords.size.width *
-            // scale`, no cell-width cap). Squashing the bitmap to one
-            // cell collapses the ligature into a single-cell glyph
-            // with an inert neighbour cell.
+            let cell_right =
+                snapped_cell_x.get(g.lead_col as usize + 1).copied().unwrap_or(cx + cell_w);
+            let (gx, gy, gw, gh) = fit_single_cell_status_marker(
+                lead_cell.ch,
+                cluster_cells,
+                is_wide,
+                lead_cell.extras().is_some(),
+                (gx, gy, gw, gh),
+                (cx, cy, cell_right - cx, cell_h),
+            );
+            // Multi-cell ligature halves keep their natural overhang so paired
+            // glyphs such as `=>` continue to fuse across adjacent cells.
             let color = cell_fg(&lead_cell, theme, fg_default);
             let rgba = if info.is_color {
                 [1.0, 1.0, 1.0, 1.0]

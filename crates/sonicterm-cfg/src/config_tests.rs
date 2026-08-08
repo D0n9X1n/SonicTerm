@@ -76,6 +76,21 @@ fn default_config_paths_live_under_dot_sonicterm() {
 }
 
 #[test]
+fn legacy_glyph_fit_values_parse_without_remaining_active_config() {
+    // Contract: old v1/v2 files keep loading after the never-wired switch leaves the schema.
+    for value in ["v1", "v2"] {
+        let cfg: Config = toml::from_str(&format!(
+            "[render]\nglyph_fit = \"{value}\"\nalt_screen_bg_fill = \"v2\"\n"
+        ))
+        .unwrap();
+
+        assert_eq!(cfg.render.alt_screen_bg_fill, RenderImpl::V2);
+        assert!(!cfg.to_toml().unwrap().contains("glyph_fit"));
+    }
+    assert!(!default_config_template().contains("glyph_fit"));
+}
+
+#[test]
 fn seeding_user_examples_writes_theme_and_platform_keymaps() {
     let nonce =
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();

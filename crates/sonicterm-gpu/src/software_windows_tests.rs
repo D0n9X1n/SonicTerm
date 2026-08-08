@@ -1,5 +1,5 @@
 use super::*;
-use crate::quad::px_to_ndc;
+use crate::{core::fit_single_cell_status_marker, quad::px_to_ndc};
 use sonicterm_text::glyph_atlas::{RasterTile, Rasterizer};
 use sonicterm_types::GlyphKey;
 
@@ -448,6 +448,58 @@ fn one_to_one_sampling_is_size_based_not_fractional_position_based() {
     let one_to_one = (w - src_w).abs() < 0.01 && (h - src_h).abs() < 0.01;
 
     assert!(one_to_one);
+}
+
+#[test]
+fn software_frame_draws_status_marker_in_shared_fitted_rect() {
+    // Contract: software presentation consumes the producer's centered fit without a second policy.
+    let mut atlas = GlyphAtlas::new(8, 8);
+    let info = atlas
+        .get_or_insert(
+            GlyphKey::new('\u{23fa}', false, false),
+            &mut TileRasterizer(RasterTile {
+                width: 8,
+                height: 8,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 8.0,
+                coverage: vec![255; 64],
+                is_color: false,
+                is_subpixel: false,
+            }),
+        )
+        .expect("status marker inserts");
+    let fitted = fit_single_cell_status_marker(
+        '\u{23fa}',
+        1,
+        false,
+        false,
+        (2.0, 1.0, 8.0, 8.0),
+        (2.0, 1.0, 4.0, 6.0),
+    );
+    let mut frame = WindowsSoftwareFrame::new(10, 8, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+
+    frame.draw_glyphs(
+        &atlas,
+        &[GlyphInstance {
+            rect: px_to_ndc(fitted.0, fitted.1, fitted.2, fitted.3, 10.0, 8.0),
+            uv: info.uv,
+            color: [1.0; 4],
+            flags: [0.0; 4],
+        }],
+    );
+
+    assert_eq!(fitted, (2.0, 2.0, 4.0, 4.0));
+    for y in 0..8 {
+        for x in 0..10 {
+            let expected = if (2..6).contains(&x) && (2..6).contains(&y) {
+                [255, 255, 255, 255]
+            } else {
+                [0, 0, 0, 255]
+            };
+            assert_eq!(frame.pixel_bgra(x, y), expected, "unexpected pixel at ({x}, {y})");
+        }
+    }
 }
 
 #[test]
