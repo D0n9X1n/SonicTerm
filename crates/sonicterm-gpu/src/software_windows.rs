@@ -320,10 +320,12 @@ impl WindowsSoftwareFrame {
             // reason, keeping rows aligned with the scaled sample coordinates.
             y
         };
-        let x0 = draw_x.floor().max(0.0) as i32;
-        let y0 = draw_y.floor().max(0.0) as i32;
-        let x1 = (draw_x + w).ceil().min(self.width as f32) as i32;
-        let y1 = (draw_y + h).ceil().min(self.height as f32) as i32;
+        // Rasterize destination pixels whose centers lie inside the glyph rect.
+        // This also absorbs tiny NDC round-trip error at exact integer edges.
+        let x0 = (draw_x - 0.5).ceil().max(0.0) as i32;
+        let y0 = (draw_y - 0.5).ceil().max(0.0) as i32;
+        let x1 = (draw_x + w - 0.5).ceil().min(self.width as f32) as i32;
+        let y1 = (draw_y + h - 0.5).ceil().min(self.height as f32) as i32;
         if x1 <= x0 || y1 <= y0 {
             // When: x1 or y1 collapsed past its origin the glyph's destination span is
             // empty, so the atlas is never sampled for a row that cannot appear.
