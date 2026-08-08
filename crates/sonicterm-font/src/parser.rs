@@ -36,10 +36,9 @@ pub struct ParsedFont {
     /// Whether the face carries an OpenType `MATH` table.
     ///
     /// Math fonts draw to the em square rather than to a text advance, so
-    /// their glyphs overflow a terminal cell — a warning sign resolved from
-    /// one measured 43x35 against a 15x21 cell. Auto-fallback resolution
-    /// excludes them for that reason; a family the user names explicitly is
-    /// still honored.
+    /// their glyphs can overflow a terminal cell. Auto-fallback resolution
+    /// demotes them behind text faces while retaining math-only coverage; a
+    /// family the user names explicitly is still honored.
     pub is_math_font: bool,
     pub pixel_sizes: Vec<u16>,
     pub is_built_in_fallback: bool,
