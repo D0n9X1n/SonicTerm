@@ -288,7 +288,7 @@ fn software_block_glyph_target_rect(
     (left, top, right - left, bottom - top)
 }
 
-/// Fits standalone Claude Code circle markers inside one cell without distortion.
+/// Normalizes standalone Claude Code circle markers inside one cell without distortion.
 pub(crate) fn fit_single_cell_status_marker(
     ch: char,
     cluster_cells: usize,
@@ -315,7 +315,7 @@ pub(crate) fn fit_single_cell_status_marker(
         return natural;
     }
 
-    let scale = (cell_w / glyph_w).min(cell_h / glyph_h).min(1.0);
+    let scale = (cell_w / glyph_w).min(cell_h / glyph_h);
     let fitted_w = glyph_w * scale;
     let fitted_h = glyph_h * scale;
     (cell_x + (cell_w - fitted_w) * 0.5, cell_y + (cell_h - fitted_h) * 0.5, fitted_w, fitted_h)

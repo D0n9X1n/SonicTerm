@@ -662,19 +662,20 @@ fn status_marker_fit_preserves_aspect_ratio_when_height_binds() {
     assert_eq!(fitted.2 / fitted.3, 8.0 / 32.0);
 }
 
+/// Hollow and solid fallback tiles normalize to one outer cell-constrained size.
+///
+/// Unequal square source tiles model the observed fallback-font mismatch: the hollow circle
+/// exceeds the cell while the solid circle is naturally smaller than it.
 #[test]
-fn status_marker_fit_centers_without_enlarging_small_tiles() {
-    // Contract: an already-contained marker keeps its raster size and is only centered.
-    let fitted = fit_single_cell_status_marker(
-        '\u{25ef}',
-        1,
-        false,
-        false,
-        (11.0, 23.0, 6.0, 8.0),
-        (10.0, 20.0, 12.0, 16.0),
-    );
+fn status_marker_fit_enlarges_small_tiles_to_match_oversized_tiles() {
+    let cell = (10.0, 20.0, 6.0, 8.0);
+    let hollow =
+        fit_single_cell_status_marker('\u{25ef}', 1, false, false, (8.0, 18.0, 8.0, 8.0), cell);
+    let solid =
+        fit_single_cell_status_marker('\u{25cf}', 1, false, false, (11.0, 22.0, 4.0, 4.0), cell);
 
-    assert_eq!(fitted, (13.0, 24.0, 6.0, 8.0));
+    assert_eq!(hollow, (10.0, 21.0, 6.0, 6.0));
+    assert_eq!(solid, hollow);
 }
 
 #[test]
