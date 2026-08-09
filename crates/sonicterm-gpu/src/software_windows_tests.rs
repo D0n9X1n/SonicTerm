@@ -450,54 +450,88 @@ fn one_to_one_sampling_is_size_based_not_fractional_position_based() {
     assert!(one_to_one);
 }
 
+/// Software presentation gives unequal hollow and solid source tiles equal outer bounds.
+///
+/// Separate frames make the destination mask directly comparable while retaining one untouched
+/// pixel around every cell edge so any neighboring-row or neighboring-column bleed is visible.
 #[test]
-fn software_frame_draws_status_marker_in_shared_fitted_rect() {
-    // Contract: software presentation consumes the producer's centered fit without a second policy.
-    let mut atlas = GlyphAtlas::new(8, 8);
-    let info = atlas
-        .get_or_insert(
-            GlyphKey::new('\u{23fa}', false, false),
-            &mut TileRasterizer(RasterTile {
-                width: 8,
-                height: 8,
-                offset_x: 0,
-                offset_y: 0,
-                advance: 8.0,
-                coverage: vec![255; 64],
-                is_color: false,
-                is_subpixel: false,
-            }),
-        )
-        .expect("status marker inserts");
-    let fitted = fit_single_cell_status_marker(
-        '\u{23fa}',
-        1,
-        false,
-        false,
-        (2.0, 1.0, 8.0, 8.0),
-        (2.0, 1.0, 4.0, 6.0),
-    );
-    let mut frame = WindowsSoftwareFrame::new(10, 8, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+fn software_frame_draws_hollow_and_solid_status_markers_at_equal_size() {
+    fn draw(marker: char, source_size: u32, hollow: bool) -> WindowsSoftwareFrame {
+        let coverage = (0..source_size)
+            .flat_map(|y| {
+                (0..source_size).map(move |x| {
+                    if !hollow || x == 0 || y == 0 || x + 1 == source_size || y + 1 == source_size {
+                        255
+                    } else {
+                        0
+                    }
+                })
+            })
+            .collect();
+        let mut atlas = GlyphAtlas::new(16, 8);
+        let info = atlas
+            .get_or_insert(
+                GlyphKey::new(marker, false, false),
+                &mut TileRasterizer(RasterTile {
+                    width: source_size,
+                    height: source_size,
+                    offset_x: 0,
+                    offset_y: 0,
+                    advance: source_size as f32,
+                    coverage,
+                    is_color: false,
+                    is_subpixel: false,
+                }),
+            )
+            .expect("status marker inserts");
+        let fitted = fit_single_cell_status_marker(
+            marker,
+            1,
+            false,
+            false,
+            (2.0, 2.0, source_size as f32, source_size as f32),
+            (2.0, 2.0, 6.0, 8.0),
+        );
+        let mut frame =
+            WindowsSoftwareFrame::new(10, 10, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+        frame.draw_glyphs(
+            &atlas,
+            &[GlyphInstance {
+                rect: px_to_ndc(fitted.0, fitted.1, fitted.2, fitted.3, 10.0, 10.0),
+                uv: info.uv,
+                color: [1.0; 4],
+                flags: [0.0; 4],
+            }],
+        );
+        frame
+    }
 
-    frame.draw_glyphs(
-        &atlas,
-        &[GlyphInstance {
-            rect: px_to_ndc(fitted.0, fitted.1, fitted.2, fitted.3, 10.0, 8.0),
-            uv: info.uv,
-            color: [1.0; 4],
-            flags: [0.0; 4],
-        }],
-    );
+    fn ink_bounds(frame: &WindowsSoftwareFrame) -> Option<(u32, u32, u32, u32)> {
+        let mut bounds = None;
+        for y in 0..10 {
+            for x in 0..10 {
+                if frame.pixel_bgra(x, y) != [0, 0, 0, 255] {
+                    let (left, top, right, bottom) = bounds.unwrap_or((x, y, x, y));
+                    bounds = Some((left.min(x), top.min(y), right.max(x), bottom.max(y)));
+                }
+            }
+        }
+        bounds
+    }
 
-    assert_eq!(fitted, (2.0, 2.0, 4.0, 4.0));
-    for y in 0..8 {
+    let hollow = draw('\u{25ef}', 8, true);
+    let solid = draw('\u{25cf}', 4, false);
+    assert_eq!(ink_bounds(&hollow), Some((2, 3, 7, 8)));
+    assert_eq!(ink_bounds(&solid), ink_bounds(&hollow));
+    assert_eq!(hollow.pixel_bgra(4, 5), [0, 0, 0, 255]);
+    assert_eq!(solid.pixel_bgra(4, 5), [255, 255, 255, 255]);
+
+    for y in 0..10 {
         for x in 0..10 {
-            let expected = if (2..6).contains(&x) && (2..6).contains(&y) {
-                [255, 255, 255, 255]
-            } else {
-                [0, 0, 0, 255]
-            };
-            assert_eq!(frame.pixel_bgra(x, y), expected, "unexpected pixel at ({x}, {y})");
+            if !(2..8).contains(&x) || !(3..9).contains(&y) {
+                assert_eq!(hollow.pixel_bgra(x, y), [0, 0, 0, 255]);
+                assert_eq!(solid.pixel_bgra(x, y), [0, 0, 0, 255]);
+            }
         }
     }
 }

@@ -250,10 +250,11 @@ atlas rasterizer trait and converts font output to `RasterTile`.
 Before terminal glyph instances are created, the standalone Claude Code circle
 markers `⏺` (U+23FA), `◯` (U+25EF), and `●` (U+25CF) receive a targeted fit
 only when the shaped cluster occupies one non-wide cell and carries no combining
-or variation-selector extras. An oversized tile shrinks uniformly to the cell
-bounds and is centered without changing its aspect ratio; an already-contained
-tile is only centered. Ordinary text, composite clusters, wide glyphs, custom
-block glyphs, and multi-cell ligatures keep their natural raster geometry.
+or variation-selector extras. Each eligible tile scales uniformly up or down to
+the largest aspect-preserving rectangle inside the cell, then centers on both
+axes. This normalizes hollow and solid fallback glyphs whose natural tile sizes
+differ. Ordinary text, composite clusters, wide glyphs, custom block glyphs,
+and multi-cell ligatures keep their natural raster geometry.
 
 Raw FreeType, HarfBuzz, and Fontconfig handles live in binding crates. Safe
 wrappers in `sonicterm-font::{ftwrap,hbwrap,fcwrap}` own lifetimes and pair each
@@ -584,9 +585,10 @@ OS 报告前台可执行文件后，SonicTerm 会规范化其 basename，并执�
 
 在创建终端 glyph instance 前，独立的 Claude Code 圆形标记 `⏺`（U+23FA）、`◯`
 （U+25EF）和 `●`（U+25CF）只会在 shaped cluster 占一个非宽 cell 且不包含组合字符或
-variation selector extras 时进行定向适配。过大的 tile 按统一比例缩小到 cell 边界并居中，
-不改变纵横比；已经位于边界内的 tile 只会居中。普通文本、复合 cluster、宽字形、自定义
-block glyph 与多 cell ligature 都保持字体提供的自然光栅几何。
+variation selector extras 时进行定向适配。每个符合条件的 tile 都会按统一比例放大或缩小为
+cell 内保持纵横比的最大矩形，然后沿两个轴居中。这样可统一自然 tile 尺寸不同的空心和实心
+回退字形。普通文本、复合 cluster、宽字形、自定义 block glyph 与多 cell ligature 都保持
+字体提供的自然光栅几何。
 
 原始 FreeType、HarfBuzz、Fontconfig handle 留在 binding crate；
 `sonicterm-font::{ftwrap,hbwrap,fcwrap}` 的安全 wrapper 管理生命周期，并为每次原生分配匹配 destroy 调用。
