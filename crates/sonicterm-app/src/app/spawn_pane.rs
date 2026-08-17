@@ -673,32 +673,21 @@ impl App {
         }
     }
     pub(super) fn focus_pane_dir(&mut self, dir: Direction) {
-        let next = {
-            let Some(ws) = self.main_mut() else {
-                // When: main_mut returns None, there is no pane focus to move.
-                return;
-            };
-            let i = ws.tabs.active_index();
-            let Some(st) = ws.tab_states.get_mut(i) else {
-                // When: tab_states.get_mut cannot find i, there is no active pane tree.
-                return;
-            };
-            let Some(next) = st.tree.focus_neighbor(st.active_pane, dir) else {
-                // When: focus_neighbor returns None, no pane exists in dir.
-                return;
-            };
-            if st.active_pane == next {
-                // When: active_pane already equals next, leave focus unchanged.
-                return;
-            }
-            st.active_pane = next;
-            next
+        let Some(window) = self.main_mut() else {
+            // When: main_mut returns None, there is no pane focus to move.
+            return;
         };
-        if let Some(r) = self.main_renderer_mut() {
-            r.flash_pane_focus(next);
-        }
-        if let Some(w) = self.main_window() {
-            w.request_redraw();
+        let tab_idx = window.tabs.active_index();
+        let Some(next) = window
+            .tab_states
+            .get(tab_idx)
+            .and_then(|tab| tab.tree.focus_neighbor(tab.active_pane, dir))
+        else {
+            // When: the active tab has no pane in `dir`, focus stays unchanged.
+            return;
+        };
+        if let Some(change) = window.begin_pane_focus_change(next) {
+            window.finish_pane_focus_change(change);
         }
     }
 

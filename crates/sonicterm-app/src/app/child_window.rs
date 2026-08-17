@@ -38,9 +38,10 @@ use super::scrollbar_input::HitOutcome;
 use super::{
     invalidate_selection_for_content,
     key_encoding::{encode_key, encode_logical, key_event_to_string, key_name, key_to_strings},
-    mark_all_panes_dirty, next_pane_id, pick_prompt_target, poll_command_events_for_child_window,
-    resize_all_panes, shell_quote_posix, with_integrated_titlebar, wrap_paste, App, FrontmostKind,
-    PaneState, TabState, UserEvent, WindowState,
+    mark_all_panes_dirty, next_pane_id, pane_id_at_point, pick_prompt_target,
+    poll_command_events_for_child_window, resize_all_panes, shell_quote_posix,
+    with_integrated_titlebar, wrap_paste, App, FrontmostKind, PaneState, TabState, UserEvent,
+    WindowState,
 };
 
 const SEARCH_BADGE_ICON: &str = "";
@@ -273,68 +274,43 @@ impl App {
                 // Modifier-click opens a URL: Cmd (macOS) / Ctrl (Win/Linux) +
                 // click on an OSC 8 or auto-detected URL, gated by the same pure
                 // `dispatch_modifier_click` the main window uses so a plain click
-                // never opens.
-                //
-                // Switch the active pane to the one under the cursor first.
-                // `child_hyperlink_uri_at` resolves against the ACTIVE pane's
-                // grid, but in a split the click may land on an inactive pane —
-                // without this, Cmd-clicking a URL in pane B would open pane A's
-                // URL or miss entirely. The main match below re-runs the (now
-                // idempotent) focus switch.
+                // never opens. Resolve against the pane under the pointer without
+                // consuming the focus transition that owns dirtying and feedback.
                 {
-                    if let Some(c) = self.windows.get(&win_id) {
-                        // When: `windows` still holds `win_id`, so pane rects can
-                        // be computed to attribute the click before opening.
-                        let rects = App::compute_pane_rects_for(c);
-                        if rects.len() > 1 {
-                            // When: `rects` holds more than one pane, so the click
-                            // must be attributed before the URI is resolved.
-                            let mut clicked = None;
-                            for (id, rect) in &rects {
-                                if px >= rect.x
-                                    && px < rect.x + rect.w
-                                    && py >= rect.y
-                                    && py < rect.y + rect.h
-                                {
-                                    // When: `px`/`py` fall inside this `rect`, so
-                                    // this pane owns the click and the walk ends.
-                                    clicked = Some(*id);
-                                    break;
-                                }
-                            }
-                            if let Some(id) = clicked {
-                                if let Some(c) = self.windows.get_mut(&win_id) {
-                                    let ti = c.tabs.active_index();
-                                    if let Some(st) = c.tab_states.get_mut(ti) {
-                                        st.active_pane = id;
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    let clicked_pane = self.windows.get(&win_id).and_then(|child| {
+                        let rects = App::compute_pane_rects_for(child);
+                        pane_id_at_point(&rects, px, py).or_else(|| {
+                            let tab_idx = child.tabs.active_index();
+                            child.tab_states.get(tab_idx).map(|tab| tab.active_pane)
+                        })
+                    });
                     let mods_held = self.child_url_open_modifier_held(win_id);
                     let cell = self
                         .windows
                         .get(&win_id)
-                        .and_then(|c| c.renderer.as_ref())
-                        .and_then(|r| r.pixel_to_cell(px, py));
-                    if let Some((row, col)) = cell {
-                        // When: the press maps to a `row`/`col` cell, so a
-                        // hyperlink under it can be resolved and opened.
-                        let uri = self.child_hyperlink_uri_at(win_id, row, col);
+                        .and_then(|child| child.renderer.as_ref())
+                        .and_then(|renderer| renderer.pixel_to_cell(px, py));
+                    if let (Some(pane_id), Some((row, col))) = (clicked_pane, cell) {
+                        // When: the press resolves to one pane and cell, inspect that
+                        // pane's grid rather than mutating focus just to find its URL.
+                        let uri = self.child_hyperlink_uri_at(win_id, pane_id, row, col);
                         let opened =
                             sonicterm_cfg::url_open::dispatch_modifier_click(mods_held, uri, |u| {
-                                let r = sonicterm_cfg::url_open::open(u);
-                                if let Err(ref e) = r {
-                                    tracing::warn!("url_open failed: {e}");
+                                let result = sonicterm_cfg::url_open::open(u);
+                                if let Err(ref error) = result {
+                                    tracing::warn!("url_open failed: {error}");
                                 }
-                                r
+                                result
                             });
                         if opened.is_some() {
-                            // When: `opened` holds a result, so a URL launched and
-                            // the press must not also start a selection drag.
-                            if let Some(c) = self.windows.get_mut(&win_id) {
-                                c.mouse_down = false;
+                            // When: `opened.is_some()` confirms the URL launcher consumed
+                            // the press, focus and flash its pane before returning.
+                            if let Some(child) = self.windows.get_mut(&win_id) {
+                                child.mouse_down = false;
+                                if let Some(change) = child.begin_pointer_pane_focus_change(pane_id)
+                                {
+                                    child.finish_pane_focus_change(change);
+                                }
                             }
                             return;
                         }
@@ -1234,43 +1210,17 @@ impl App {
                             return;
                         }
                         child.mouse_down = true;
-                        // Click-to-focus the pane under the cursor in a split child
-                        // window. The `flash_pane_focus` is deferred to after `r`'s
-                        // last use below, which needs `&mut renderer`.
-                        let mut pane_focus_flash: Option<u64> = None;
-                        {
-                            let (px, py) = (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32);
-                            let pane_rects = App::compute_pane_rects_for(child);
-                            if pane_rects.len() > 1 {
-                                // When: `pane_rects` holds more than one pane, so the
-                                // press may move focus between splits.
-                                let tab_idx = child.tabs.active_index();
-                                for (id, rect) in &pane_rects {
-                                    if px >= rect.x
-                                        && px < rect.x + rect.w
-                                        && py >= rect.y
-                                        && py < rect.y + rect.h
-                                    {
-                                        // When: `px`/`py` fall inside this `rect`, so
-                                        // this pane takes focus and the walk ends.
-                                        if let Some(st) = child.tab_states.get_mut(tab_idx) {
-                                            if st.active_pane != *id {
-                                                st.active_pane = *id;
-                                                pane_focus_flash = Some(*id);
-                                            }
-                                        }
-                                        break;
-                                    }
-                                }
-                                if pane_focus_flash.is_some() {
-                                    mark_all_panes_dirty(&child.panes);
-                                }
-                            }
-                        }
-                        // `pixel_to_cell` expects raster px.
-                        if let Some((row, col)) =
-                            r.pixel_to_cell(child.cursor_pos.0 as f32, child.cursor_pos.1 as f32)
-                        {
+                        let (px, py) = (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32);
+                        let pane_rects = App::compute_pane_rects_for(child);
+                        let target = (pane_rects.len() > 1)
+                            .then(|| pane_id_at_point(&pane_rects, px, py))
+                            .flatten();
+                        // `pixel_to_cell` expects raster px. Resolve it before the
+                        // mutable focus transition ends the renderer borrow.
+                        let cell = r.pixel_to_cell(px, py);
+                        let pane_focus_change = target
+                            .and_then(|pane_id| child.begin_pointer_pane_focus_change(pane_id));
+                        if let Some((row, col)) = cell {
                             // Multi-click selection: 1 = point, 2 = word,
                             // 3 = line. Mirrors the main-window path in
                             // window_event.rs. `multi_click_selection` locks
@@ -1310,17 +1260,17 @@ impl App {
                             };
                             child.select_anchor = (abs_row, col);
                             child.selection = Some(sel);
-                            mark_all_panes_dirty(&child.panes);
-                        }
-                        // The pane-focus flash is deferred to here because `r`'s
-                        // last use was `pixel_to_cell`, so the &renderer borrow
-                        // has ended and &mut renderer is available.
-                        if let Some(id) = pane_focus_flash {
-                            if let Some(r) = child.renderer.as_mut() {
-                                r.flash_pane_focus(id);
+                            if pane_focus_change.is_none() {
+                                mark_all_panes_dirty(&child.panes);
                             }
                         }
-                        child.request_redraw();
+                        if let Some(change) = pane_focus_change {
+                            child.finish_pane_focus_change(change);
+                        } else {
+                            // When: `pane_focus_change` is `None`, no focus transition
+                            // owns the final redraw request, so issue it directly.
+                            child.request_redraw();
+                        }
                     }
                     ElementState::Released => {
                         // When: the button was `Released`, so any drag, selection or
@@ -2537,30 +2487,19 @@ impl App {
             return false;
         };
         let tab_idx = child.tabs.active_index();
-        let Some(st) = child.tab_states.get_mut(tab_idx) else {
-            // When: `tab_states` has no entry at `tab_idx`, so there is no pane
-            // tree to walk for a neighbor.
-            return false;
+        let Some(next) = child
+            .tab_states
+            .get(tab_idx)
+            .and_then(|tab| tab.tree.focus_neighbor(tab.active_pane, dir))
+        else {
+            // When: no neighbor exists in `dir`, this child still consumes the
+            // recognized action instead of allowing it to mutate the main window.
+            return true;
         };
-        if let Some(next) = st.tree.focus_neighbor(st.active_pane, dir) {
-            // When: `focus_neighbor` found a pane in `dir`, so focus moves there
-            // and the child repaints to show the new active pane.
-            if st.active_pane == next {
-                // When: `active_pane` already equals `next`, so focus does not
-                // move and no flash or redraw is warranted.
-                return true;
-            }
-            st.active_pane = next;
-            if let Some(r) = child.renderer.as_mut() {
-                r.flash_pane_focus(next);
-            }
-            child.request_redraw();
-            true
-        } else {
-            // When: `focus_neighbor` found nothing in `dir` — still routed to
-            // this child, so the action is consumed rather than hitting main.
-            true
+        if let Some(change) = child.begin_pane_focus_change(next) {
+            child.finish_pane_focus_change(change);
         }
+        true
     }
 
     /// Toggle zoom on the active pane in the given child window.

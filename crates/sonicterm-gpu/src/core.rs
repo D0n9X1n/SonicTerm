@@ -40,6 +40,17 @@ use sonicterm_render_model::boundary::ui::tab_spans::tab_title_font_size;
 const PANE_FOCUS_FLASH_DURATION: Duration = Duration::from_millis(360);
 const PANE_FOCUS_FLASH_BUCKET: Duration = Duration::from_millis(16);
 
+fn pane_focus_flash_sample(elapsed: Duration) -> Option<(u8, f32)> {
+    if elapsed >= PANE_FOCUS_FLASH_DURATION {
+        // When: `elapsed` reaches the bounded lifetime, no flash frame remains.
+        return None;
+    }
+    let bucket = ((elapsed.as_millis() / PANE_FOCUS_FLASH_BUCKET.as_millis()) + 1)
+        .min(u128::from(u8::MAX)) as u8;
+    let t = elapsed.as_secs_f32() / PANE_FOCUS_FLASH_DURATION.as_secs_f32();
+    Some((bucket, (1.0 - t).powi(2) * 0.12))
+}
+
 fn hovered_url_needs_accent(
     hovered: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
 ) -> bool {
@@ -2576,26 +2587,25 @@ impl GpuRenderer {
             return 0;
         };
         let elapsed = now.saturating_duration_since(started_at);
-        if elapsed >= PANE_FOCUS_FLASH_DURATION {
-            // When: `elapsed >= PANE_FOCUS_FLASH_DURATION` — clearing the field
-            // here is what ends the redraw chain; 0 matches the no-flash bucket.
+        let Some((bucket, _)) = pane_focus_flash_sample(elapsed) else {
+            // When: `pane_focus_flash_sample(elapsed)` returns `None`, the bounded
+            // flash expired; clearing its state ends the redraw chain.
             self.pane_focus_flash = None;
             return 0;
-        }
-        ((elapsed.as_millis() / PANE_FOCUS_FLASH_BUCKET.as_millis()) + 1).min(u128::from(u8::MAX))
-            as u8
+        };
+        bucket
     }
 
     fn pane_focus_flash_alpha(&self, now: Instant) -> Option<(u64, f32)> {
         let (pane_id, started_at) = self.pane_focus_flash?;
         let elapsed = now.saturating_duration_since(started_at);
-        if elapsed >= PANE_FOCUS_FLASH_DURATION {
-            // When: `elapsed >= PANE_FOCUS_FLASH_DURATION`. This takes `&self`,
-            // so `pane_focus_flash_bucket` clears the field, not this.
-            return None;
-        }
-        let t = elapsed.as_secs_f32() / PANE_FOCUS_FLASH_DURATION.as_secs_f32();
-        Some((pane_id, (1.0 - t).powi(2) * 0.12))
+        pane_focus_flash_sample(elapsed).map(|(_, alpha)| (pane_id, alpha))
+    }
+
+    /// Return the pane targeted by the live focus flash, for integration diagnostics.
+    #[doc(hidden)]
+    pub fn __test_pane_focus_flash_target(&self) -> Option<u64> {
+        self.pane_focus_flash.map(|(pane_id, _)| pane_id)
     }
 
     /// Current physical surface width in pixels.
