@@ -72,16 +72,15 @@ impl App {
         sonicterm_cfg::url_scan::url_at_char_col(&row_text, col as usize).map(|m| m.url)
     }
 
-    /// Child-window mirror of [`Self::hyperlink_uri_at`]: resolve the URI
-    /// (OSC 8 first, then plain-text scan) under `(row, col)` in the active
-    /// pane of the child window `win_id`. Used for modifier-click open. (#pane-url)
+    /// Resolve the URI under `(row, col)` in `pane_id` of child window `win_id`.
     pub(super) fn child_hyperlink_uri_at(
         &self,
         win_id: winit::window::WindowId,
+        pane_id: u64,
         row: u16,
         col: u16,
     ) -> Option<String> {
-        let pane = self.child_active_pane(win_id)?;
+        let pane = self.windows.get(&win_id)?.panes.get(&pane_id)?;
         let guard = pane.parser.try_lock()?;
         let grid = guard.grid();
         if row >= grid.rows || col >= grid.cols {

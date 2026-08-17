@@ -26,7 +26,10 @@ use winit::{
 };
 
 use super::key_encoding::{encode_key, key_event_to_string, key_to_strings};
-use super::{invalidate_selection_for_content, mark_all_panes_dirty, App, FrontmostKind, TabState};
+use super::{
+    invalidate_selection_for_content, mark_all_panes_dirty, pane_id_at_point, App, FrontmostKind,
+    TabState,
+};
 
 const SPLITTER_HIT_THICKNESS: f32 = 8.0;
 const SEARCH_BADGE_ICON: &str = "";
@@ -1569,6 +1572,7 @@ impl App {
                                 }
                             }
                         }
+                        let mut pane_focus_change = None;
                         if let Some((w, h, top, pl, pr_pad, bottom, pb)) = renderer_geom {
                             // When: renderer_geom is Some, derive pane hit regions for focus and selection.
                             let tab_idx = self.main_tabs().map(|t| t.active_index()).unwrap_or(0);
@@ -1586,37 +1590,12 @@ impl App {
                                 })
                                 .unwrap_or_default();
                             if pane_rects.len() > 1 {
-                                // When: pane_rects has multiple entries, focus the pane containing the press.
                                 let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
-                                let (lx, ly) = (cp.0 as f32, cp.1 as f32);
-                                let mut newly_focused = None;
-                                for (id, rect) in &pane_rects {
-                                    if lx >= rect.x
-                                        && lx < rect.x + rect.w
-                                        && ly >= rect.y
-                                        && ly < rect.y + rect.h
-                                    {
-                                        // When: lx and ly lie within rect, make that pane leaf active.
-                                        if let Some(st) = self
-                                            .main_tab_states_mut()
-                                            .and_then(|ts| ts.get_mut(tab_idx))
-                                        {
-                                            if st.active_pane != *id {
-                                                st.active_pane = *id;
-                                                newly_focused = Some(*id);
-                                                if let Some(panes) = self.main_panes() {
-                                                    mark_all_panes_dirty(panes);
-                                                }
-                                            }
-                                        }
-                                        break;
-                                    }
-                                }
-                                if let Some(id) = newly_focused {
-                                    // A newly focused pane flashes its border to expose the focus change.
-                                    if let Some(r) = self.main_renderer_mut() {
-                                        r.flash_pane_focus(id);
-                                    }
+                                let target =
+                                    pane_id_at_point(&pane_rects, cp.0 as f32, cp.1 as f32);
+                                if let (Some(target), Some(window)) = (target, self.main_mut()) {
+                                    pane_focus_change =
+                                        window.begin_pointer_pane_focus_change(target);
                                 }
                             }
                             // `pixel_to_cell` expects PHYSICAL px.
@@ -1645,9 +1624,13 @@ impl App {
                                     },
                                 );
                                 if opened.is_some() {
-                                    // When: opened is Some, consume the modifier-click before selection.
+                                    // When: opened is Some, consume the modifier-click before selection
+                                    // after presenting any focus change for the clicked pane.
                                     if let Some(ws) = self.main_mut() {
                                         ws.mouse_down = false;
+                                        if let Some(change) = pane_focus_change.take() {
+                                            ws.finish_pane_focus_change(change);
+                                        }
                                     }
                                     return;
                                 }
@@ -1694,12 +1677,20 @@ impl App {
                                     ws.select_anchor = (abs_row, col);
                                 }
                                 self.selection_set(Some(sel));
-                                if let Some(panes) = self.main_panes() {
-                                    mark_all_panes_dirty(panes);
+                                if pane_focus_change.is_none() {
+                                    if let Some(panes) = self.main_panes() {
+                                        mark_all_panes_dirty(panes);
+                                    }
                                 }
                             }
                         }
-                        if let Some(w) = self.main_window() {
+                        if let Some(change) = pane_focus_change {
+                            if let Some(window) = self.main_mut() {
+                                window.finish_pane_focus_change(change);
+                            }
+                        } else if let Some(w) = self.main_window() {
+                            // When: `pane_focus_change` is `None` and `main_window`
+                            // exists, no transition owns the final redraw request.
                             w.request_redraw();
                         }
                     }

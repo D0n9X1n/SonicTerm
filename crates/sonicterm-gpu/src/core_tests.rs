@@ -1288,6 +1288,20 @@ fn overlay_active_forces_full() {
     );
 }
 
+/// Focus feedback advances through visible buckets and expires exactly at its bound.
+#[test]
+fn pane_focus_flash_sample_advances_and_expires() {
+    let first = pane_focus_flash_sample(Duration::ZERO).expect("flash starts visible");
+    let next = pane_focus_flash_sample(Duration::from_millis(16)).expect("second bucket visible");
+    let last =
+        pane_focus_flash_sample(Duration::from_millis(359)).expect("last millisecond visible");
+
+    assert_eq!(first.0, 1);
+    assert_eq!(next.0, 2);
+    assert!(first.1 > next.1 && next.1 > last.1, "flash alpha must fade monotonically");
+    assert_eq!(pane_focus_flash_sample(Duration::from_millis(360)), None);
+}
+
 #[test]
 fn damage_empty_is_noop() {
     assert_eq!(decide_render_mode(true, RenderSignals::default()), RenderMode::Noop);

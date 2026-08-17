@@ -691,6 +691,12 @@ impl Drop for OwnerGuard {
     }
 }
 
+/// One validated active-pane transition awaiting its visual feedback frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PaneFocusChange {
+    pub(crate) pane_id: u64,
+}
+
 pub struct WindowState {
     /// Window classification — see [`WindowRole`].
     pub role: WindowRole,
@@ -873,6 +879,35 @@ impl WindowState {
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
+    }
+
+    /// Change focus to a leaf in the active tab and return the feedback token.
+    fn begin_pane_focus_change(&mut self, pane_id: u64) -> Option<PaneFocusChange> {
+        let tab_idx = self.tabs.active_index();
+        let tab = self.tab_states.get_mut(tab_idx)?;
+        if tab.active_pane == pane_id || !tab.tree.leaves().contains(&pane_id) {
+            // When: the target is already active or belongs to another tab, no
+            // focus transition occurred and existing feedback must not restart.
+            return None;
+        }
+        tab.active_pane = pane_id;
+        Some(PaneFocusChange { pane_id })
+    }
+
+    /// Begin pointer focus and discard selection owned by the previous pane.
+    fn begin_pointer_pane_focus_change(&mut self, pane_id: u64) -> Option<PaneFocusChange> {
+        let change = self.begin_pane_focus_change(pane_id)?;
+        self.selection = None;
+        Some(change)
+    }
+
+    /// Present one validated pane-focus transition after related input work.
+    fn finish_pane_focus_change(&mut self, change: PaneFocusChange) {
+        mark_all_panes_dirty(&self.panes);
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.flash_pane_focus(change.pane_id);
+        }
+        self.request_redraw();
     }
 
     /// Record a left-press at grid cell `(row, col)` and return the
@@ -1331,6 +1366,11 @@ pub fn resize_panes_to_rects(
             (pty.resize)(cols, rows);
         }
     }
+}
+
+/// Return the pane whose half-open rectangle contains `(x, y)`.
+fn pane_id_at_point(rects: &[(u64, sonicterm_ui::pane::Rect)], x: f32, y: f32) -> Option<u64> {
+    rects.iter().find_map(|(id, rect)| rect.contains(x, y).then_some(*id))
 }
 
 /// Mark every pane's grid fully dirty. Used by triggers that change
@@ -4232,6 +4272,12 @@ impl App {
         self.windows.get(&id).map(|state| state.selection)
     }
 
+    /// Test seam: the pane targeted by a window's real renderer flash state.
+    #[doc(hidden)]
+    pub fn __test_window_pane_focus_flash_target(&self, id: WindowId) -> Option<u64> {
+        self.windows.get(&id)?.renderer.as_ref()?.__test_pane_focus_flash_target()
+    }
+
     /// Test seam: one pixel of a window's software-rendered frame, as BGRA.
     ///
     /// Lets a test assert what the CPU rasterizer actually produced. `None`
@@ -6260,6 +6306,10 @@ mod effect_cleanup_tests;
 #[cfg(test)]
 #[path = "click_count_tests.rs"]
 mod click_count_tests;
+
+#[cfg(test)]
+#[path = "focus_feedback_tests.rs"]
+mod focus_feedback_tests;
 
 #[cfg(test)]
 #[path = "native_window_title_tests.rs"]
