@@ -154,7 +154,8 @@ Rust logic.
 ## Pull-request CI
 
 `.github/workflows/ci.yml` runs on pull requests and on pushes to `main`, with a
-macOS 14 / Windows latest matrix:
+macOS 14 / Windows latest matrix plus a focused Ubuntu compile/test job for the
+Linux path-reveal boundary:
 
 ```mermaid
 flowchart TD
@@ -177,8 +178,10 @@ flowchart TD
     soak["deterministic soak control gate"]
     baseline["resource baseline evidence collector test + capture"]
     coverage(["macOS only: install cargo-llvm-cov and enforce coverage"])
+    linux(["Ubuntu: cfg/vt/app clippy + tests for path handling"])
 
     checkout --> cairo
+    checkout --> linux
     cairo --> comments
     comments --> rustdoc
     rustdoc --> exitpolicy
@@ -201,7 +204,11 @@ flowchart TD
 CI runs `cargo fmt --all --check`, the authored Rust comment checker, strict
 workspace Rustdoc, and `cargo clippy --workspace --all-targets` with warnings
 denied. The `sonicterm-io` SSH feature receives separate clippy and strict
-Rustdoc passes because `--all-targets` does not enable optional features.
+Rustdoc passes because `--all-targets` does not enable optional features. A
+separate Ubuntu job installs Cairo/Fontconfig and window-system development
+packages, then runs strict clippy and tests for `sonicterm-vt`, `sonicterm-cfg`,
+and `sonicterm-app`. This compiles the Linux desktop-portal path reveal code; it
+does not add a shipping Linux binary.
 Windows additionally runs the explicit `Verify Windows WARP allocator baseline`
 step, which executes the deterministic `windows_warp_allocator_baseline`
 integration test. It requests DX12 CPU fallback and compares the old
@@ -502,7 +509,7 @@ cargo build --release -p sonicterm-mac
 ## Pull-request CI
 
 `.github/workflows/ci.yml` 在 PR 以及推送到 `main` 时运行 macOS 14 /
-Windows latest matrix：
+Windows latest matrix，并运行一个聚焦于 Linux 路径显示边界的 Ubuntu compile/test job：
 
 ```mermaid
 flowchart TD
@@ -525,8 +532,10 @@ flowchart TD
     soak["确定性 soak control gate"]
     baseline["resource baseline evidence 收集器测试与采集"]
     coverage(["仅 macOS：安装 cargo-llvm-cov 并执行 coverage gate"])
+    linux(["Ubuntu：路径处理的 cfg/vt/app clippy + test"])
 
     checkout --> cairo
+    checkout --> linux
     cairo --> comments
     comments --> rustdoc
     rustdoc --> exitpolicy
@@ -549,7 +558,9 @@ flowchart TD
 CI 会运行 `cargo fmt --all --check`、第一方 Rust 注释 checker、严格 workspace
 Rustdoc，以及 warning 视为错误的 `cargo clippy --workspace --all-targets`。由于
 `--all-targets` 不会启用 optional feature，`sonicterm-io` 的 `ssh` feature 另有
-clippy 和严格 Rustdoc gate。Windows 还会运行显式的
+clippy 和严格 Rustdoc gate。单独的 Ubuntu job 会安装 Cairo/Fontconfig 与窗口系统开发包，
+再对 `sonicterm-vt`、`sonicterm-cfg`、`sonicterm-app` 运行严格 clippy 与测试。
+它会编译 Linux desktop-portal 路径显示代码，但不会新增可发布的 Linux 二进制。Windows 还会运行显式的
 `Verify Windows WARP allocator baseline` 步骤，执行确定性的
 `windows_warp_allocator_baseline` integration test。它请求 DX12 CPU fallback，并比较
 旧的 wgpu 默认策略与生产环境的软件 adapter 内存策略。没有 WARP 或 allocator report、

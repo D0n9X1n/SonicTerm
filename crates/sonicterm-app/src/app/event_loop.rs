@@ -312,6 +312,9 @@ impl App {
             UserEvent::ScriptDraftRejected { message } => {
                 self.handle_script_draft_rejected(message);
             }
+            UserEvent::PathProbeFinished(result) => {
+                self.handle_path_probe_finished(result);
+            }
             UserEvent::PtyInputRejected { bytes, reason } => {
                 self.show_notification_for_kind(
                     self.frontmost_kind(),
@@ -610,6 +613,7 @@ impl App {
             ime: sonicterm_ui::ime::ImeState::new(),
             ime_cursor_throttle: sonicterm_ui::ime::ImeCursorThrottle::new(),
             hovered_url: None,
+            path_probe: super::path_target::PathProbeState::default(),
             notification: None,
             hidden: false,
             scrollbar_drag: None,

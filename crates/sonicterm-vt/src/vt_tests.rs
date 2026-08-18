@@ -1,8 +1,8 @@
 use super::{
-    MediaCapture, MediaProtocol, Parser, VtEvent, CAPTURE_FLOOR_POOL_BYTES,
-    CAPTURE_GROWTH_POOL_BYTES, GUARANTEED_CONCURRENT_CAPTURES, LIVE_MEDIA_CAPTURES,
-    MAX_ESCAPE_SEQUENCE_BYTES, MAX_MEDIA_PAYLOAD_BYTES, MAX_PROCESS_CAPTURE_STAGING_BYTES,
-    MIN_CAPTURE_STAGING_BYTES,
+    parse_osc7_cwd_snapshot, MediaCapture, MediaProtocol, Osc7Cwd, Parser, VtEvent,
+    CAPTURE_FLOOR_POOL_BYTES, CAPTURE_GROWTH_POOL_BYTES, GUARANTEED_CONCURRENT_CAPTURES,
+    LIVE_MEDIA_CAPTURES, MAX_ESCAPE_SEQUENCE_BYTES, MAX_MEDIA_PAYLOAD_BYTES,
+    MAX_PROCESS_CAPTURE_STAGING_BYTES, MIN_CAPTURE_STAGING_BYTES,
 };
 use sonicterm_grid::grid::{CellFlags, Grid};
 use std::sync::atomic::Ordering;
@@ -38,6 +38,51 @@ fn serialised_captures() -> std::sync::MutexGuard<'static, ()> {
 
 fn row_text(parser: &Parser, row: u16) -> String {
     parser.grid().row(row).iter().map(|cell| cell.ch).collect()
+}
+
+/// OSC 7 parsing keeps authority provenance while decoding the filesystem path.
+#[test]
+fn osc7_snapshot_preserves_authority_and_decodes_path() {
+    assert_eq!(
+        parse_osc7_cwd_snapshot("file://remote-host/home/user/My%20Files"),
+        Some(Osc7Cwd { authority: "remote-host".into(), path: "/home/user/My Files".into() })
+    );
+    assert_eq!(
+        parse_osc7_cwd_snapshot("file:///tmp/work"),
+        Some(Osc7Cwd { authority: String::new(), path: "/tmp/work".into() })
+    );
+}
+
+/// Malformed file authorities do not produce a path-resolution snapshot.
+#[test]
+fn osc7_snapshot_rejects_malformed_file_payloads() {
+    assert_eq!(parse_osc7_cwd_snapshot("file://remote-host"), None);
+    assert_eq!(parse_osc7_cwd_snapshot("file://"), None);
+    assert_eq!(parse_osc7_cwd_snapshot("file://bad host/tmp"), None);
+    assert_eq!(parse_osc7_cwd_snapshot("file:///tmp/bad%2"), None);
+    assert_eq!(parse_osc7_cwd_snapshot("file:///tmp/bad%GG"), None);
+    assert_eq!(parse_osc7_cwd_snapshot("file:///tmp/%0Aescape"), None);
+}
+
+/// Parser retains typed OSC 7 provenance while preserving the legacy cwd title path.
+#[test]
+fn parser_exposes_typed_osc7_snapshot_without_changing_cwd() {
+    let mut parser = Parser::new(Grid::new(16, 2));
+    parser.advance(b"\x1b]7;file://remote-host/home/user\x1b\\");
+
+    assert_eq!(parser.cwd(), Some("/home/user"));
+    assert_eq!(
+        parser.osc7_cwd(),
+        Some(&Osc7Cwd { authority: "remote-host".into(), path: "/home/user".into() })
+    );
+    let revision = parser.cwd_revision();
+
+    // A malformed update remains available to legacy title rendering but
+    // revokes the strict snapshot used to authorize relative local paths.
+    parser.advance(b"\x1b]7;file:///tmp/bad%GG\x1b\\");
+    assert_eq!(parser.cwd(), Some("/tmp/bad%GG"));
+    assert_eq!(parser.osc7_cwd(), None);
+    assert_ne!(parser.cwd_revision(), revision);
 }
 
 #[test]

@@ -11,7 +11,7 @@ fn cell(ch: char) -> Cell {
 #[test]
 fn hovered_url_cells_contains_exactly_its_half_open_row_span_regardless_of_active_hint() {
     for active in [false, true] {
-        let hovered = HoveredUrlCells { row: 3, start_col: 5, end_col: 10, active };
+        let hovered = HoveredUrlCells { pane_id: 7, row: 3, start_col: 5, end_col: 10, active };
 
         assert!(hovered.contains(3, 5), "start is inclusive");
         assert!(hovered.contains(3, 9), "last column before end is included");
@@ -25,8 +25,8 @@ fn hovered_url_cells_contains_exactly_its_half_open_row_span_regardless_of_activ
 #[test]
 fn hovered_url_cells_empty_or_reversed_span_contains_nothing() {
     for hovered in [
-        HoveredUrlCells { row: 0, start_col: 8, end_col: 8, active: true },
-        HoveredUrlCells { row: 0, start_col: 9, end_col: 4, active: true },
+        HoveredUrlCells { pane_id: 7, row: 0, start_col: 8, end_col: 8, active: true },
+        HoveredUrlCells { pane_id: 7, row: 0, start_col: 9, end_col: 4, active: true },
     ] {
         assert!(!(0..=u16::MAX).any(|col| hovered.contains(0, col)));
     }

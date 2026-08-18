@@ -62,9 +62,9 @@ by default and the CI workflows are first-party files worth finding.
 | --- | --- |
 | `sonicterm-types` | Shared contract types and trait seams. |
 | `sonicterm-resource` | Resource governor: ledger, owner hierarchy, reservations, reaper. |
-| `sonicterm-vt` | VT/ANSI parsing. |
+| `sonicterm-vt` | VT/ANSI parsing, including host-aware OSC 7 state. |
 | `sonicterm-grid` | Cells, scrollback, dirty rows. |
-| `sonicterm-cfg` | Config, themes, keymaps, URL safety. |
+| `sonicterm-cfg` | Config, themes, keymaps, URL/path detection, URI safety. |
 | `sonicterm-io` | PTY/process/SSH IO. |
 | `sonicterm-text` | Glyph atlas and row text cache. |
 | `sonicterm-font` | Font discovery, shaping, fallback, rasterization. |
@@ -78,7 +78,7 @@ by default and the CI workflows are first-party files worth finding.
 | `sonicterm-ui` | Tabs, palette, search, selection, IME. |
 | `sonicterm-gpu` | wgpu renderer. |
 | `sonicterm-app-core` | Winit-independent reducer/state. |
-| `sonicterm-app` | Cross-platform app orchestration. |
+| `sonicterm-app` | Cross-platform app orchestration, path probes, and native reveal. |
 | `sonicterm-mac` | macOS binary/glue. |
 | `sonicterm-windows` | Windows binary/glue. |
 | `sonicterm-mux` | Future mux daemon. |
@@ -130,6 +130,10 @@ It requests a DX12 CPU fallback and fails when WARP or allocator reporting is
 unavailable, when production reserved bytes are not below 64 MiB, when the
 largest block is not below 128 MiB, or when production reserved bytes do not
 improve on the old default policy.
+
+Linux-gated path handling is compiled and tested by the focused `linux-paths`
+Ubuntu CI job (`sonicterm-vt`, `sonicterm-cfg`, and `sonicterm-app`). It is a
+compile/test boundary only; SonicTerm still ships macOS and Windows binaries.
 
 Two more limits worth knowing before trusting a green run:
 

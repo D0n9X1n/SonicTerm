@@ -21,6 +21,9 @@ cargo test -p sonicterm-vt
 - Parser changes affect rendering and input semantics; add targeted tests
   for escape-sequence regressions.
 - Keep PTY writes outside parser/grid locks.
+- Preserve OSC 7 authority separately from its decoded path. Tab titles may use
+  the permissive path, but relative local-path authorization must use the strict
+  host-aware snapshot.
 - Media capture staging is drawn from a process-wide pool, not per-parser.
   A capture that cannot be staged is refused and renders nothing; do not add
   a path that stages unconditionally or renders a partial payload. A cut

@@ -35,6 +35,8 @@ pub struct ModifierState {
 /// detect a real state change cheaply with `PartialEq`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HoveredUrl {
+    /// Pane whose grid owns the target.
+    pub pane_id: u64,
     /// Row in the viewport (0 = top visible row).
     pub row: u16,
     /// Inclusive start column of the URL on this row.
@@ -61,6 +63,7 @@ impl HoveredUrl {
     #[must_use]
     pub fn to_cells(&self) -> sonicterm_render_model::inputs::HoveredUrlCells {
         sonicterm_render_model::inputs::HoveredUrlCells {
+            pane_id: self.pane_id,
             row: self.row,
             start_col: self.start_col,
             end_col: self.end_col,
@@ -128,7 +131,7 @@ pub fn compute_hovered_url_underline(
 /// pushes one char per cell, so the byte→char mapping is the natural
 /// `char_indices().position(...)`).
 #[must_use]
-pub fn hovered_from_row(row_text: &str, row: u16, col: u16) -> Option<HoveredUrl> {
+pub fn hovered_from_row(row_text: &str, pane_id: u64, row: u16, col: u16) -> Option<HoveredUrl> {
     let m = sonicterm_cfg::url_scan::url_at_char_col(row_text, col as usize)?;
     // Convert byte offsets back to char columns. The grid lays one
     // char per visual cell, so chars_count(prefix) == column index.
@@ -141,7 +144,7 @@ pub fn hovered_from_row(row_text: &str, row: u16, col: u16) -> Option<HoveredUrl
         // When: `end_col <= start_col`, byte-to-cell conversion produced no drawable hover span.
         return None;
     }
-    Some(HoveredUrl { row, start_col, end_col, url: m.url, active: false })
+    Some(HoveredUrl { pane_id, row, start_col, end_col, url: m.url, active: false })
 }
 
 #[cfg(test)]

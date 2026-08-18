@@ -108,6 +108,19 @@ impl App {
             // When: is_warm_window_id identifies win_id as unpromoted, ignore its event.
             return;
         }
+        if matches!(
+            &event,
+            WindowEvent::KeyboardInput { .. }
+                | WindowEvent::MouseWheel { .. }
+                | WindowEvent::Ime(_)
+                | WindowEvent::Resized(_)
+                | WindowEvent::ScaleFactorChanged { .. }
+                | WindowEvent::Focused(false)
+        ) {
+            if let Some(window) = self.windows.get_mut(&win_id) {
+                window.invalidate_path_hover();
+            }
+        }
         // Tear-out child windows: route to the dedicated handler so
         // each child renders/handles input on its own surface.
         // the main window also lives in `self.windows`
@@ -167,7 +180,8 @@ impl App {
             }
 
             WindowEvent::RedrawRequested => {
-                // When: RedrawRequested renders the main surface or defers a streaming-only frame.
+                // When: `RedrawRequested` arrives, revalidate pointer authorization so PTY, CWD, and viewport changes revoke stale targets.
+                self.refresh_target_hover(win_id);
                 let was_dirty = self.input_dirty;
                 let pty_burst_snapshot = self.pty_burst_gen.load(Ordering::Acquire);
                 let pty_burst = pty_burst_snapshot != self.last_seen_burst_gen;
@@ -984,13 +998,10 @@ impl App {
             WindowEvent::ModifiersChanged(m) => {
                 if let Some(ws) = self.main_mut() {
                     ws.modifiers = m.state();
+                    ws.path_probe.invalidate();
                 }
-                // Releasing the open-URL modifier must clear any
-                // visible Cmd+hover URL underline (and revert the
-                // pointer to default if it was previously shown). We
-                // recompute hover state from the last cursor position
-                // so a subsequent re-press while still hovering brings
-                // the affordance back without needing a CursorMoved.
+                // Modifier transitions receive a fresh probe epoch; live
+                // modifier state is still rechecked at click time.
                 self.refresh_hovered_url();
                 if let Some(w) = self.main_window() {
                     w.request_redraw();
@@ -1006,11 +1017,11 @@ impl App {
                 if let Some(ws) = self.main_mut() {
                     ws.splitter_hover = None;
                 }
+                if let Some(window_id) = self.main_window_id {
+                    self.clear_target_hover(window_id);
+                }
                 if let Some(w) = self.main_window() {
                     w.set_cursor(CursorIcon::Default);
-                }
-                if self.main_mut().and_then(|ws| ws.hovered_url.take()).is_some() {
-                    redraw = true;
                 }
                 if self.clear_scrollbar_hover() {
                     redraw = true;
@@ -1282,6 +1293,9 @@ impl App {
                     // unconditional pointer affordance.
                     if !self.refresh_splitter_hover(lx, ly) {
                         self.refresh_hovered_url();
+                    } else if let Some(window_id) = self.main_window_id {
+                        // When: splitter hover owns the pointer in `window_id`, clear any terminal target beneath it.
+                        self.clear_target_hover(window_id);
                     }
                 }
             }
@@ -1526,10 +1540,10 @@ impl App {
                                 0.0,
                             )
                         });
-                        let pixel_to_cell = {
+                        let pixel_target = {
                             let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
                             self.main_renderer()
-                                .and_then(|r| r.pixel_to_cell(cp.0 as f32, cp.1 as f32))
+                                .and_then(|r| r.pixel_to_pane_cell(cp.0 as f32, cp.1 as f32))
                         };
                         // scrollbar input has priority over
                         // selection start. Done BEFORE the pane-focus switch
@@ -1589,43 +1603,29 @@ impl App {
                                     st.tree.layout(outer)
                                 })
                                 .unwrap_or_default();
+                            let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
+                            let geometry_pane =
+                                pane_id_at_point(&pane_rects, cp.0 as f32, cp.1 as f32);
+                            let clicked_pane = pixel_target
+                                .and_then(|(pane_id, _, _)| (pane_id != 0).then_some(pane_id))
+                                .or(geometry_pane);
                             if pane_rects.len() > 1 {
-                                let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
-                                let target =
-                                    pane_id_at_point(&pane_rects, cp.0 as f32, cp.1 as f32);
-                                if let (Some(target), Some(window)) = (target, self.main_mut()) {
+                                if let (Some(target), Some(window)) =
+                                    (clicked_pane, self.main_mut())
+                                {
                                     pane_focus_change =
                                         window.begin_pointer_pane_focus_change(target);
                                 }
                             }
-                            // `pixel_to_cell` expects PHYSICAL px.
-                            if let Some((row, col)) = pixel_to_cell {
-                                // When: pixel_to_cell is Some(row, col), handle links and initialize selection.
-
-                                // Modifier-click on a hyperlink opens it.
-                                // On macOS the modifier is Cmd (super); on
-                                // Windows / Linux it's Ctrl. The parser lock
-                                // is released inside hyperlink_uri_at before
-                                // we ever call sonicterm_cfg::url_open::open,
-                                // so no grid lock is held across the spawn.
-                                // Dispatch decision lives in the pure
-                                // `dispatch_modifier_click` helper so it can
-                                // be unit-tested without a real winit mouse
-                                // event (see its tests in sonicterm-cfg).
-                                let opened = sonicterm_cfg::url_open::dispatch_modifier_click(
-                                    self.url_open_modifier_held(),
-                                    self.hyperlink_uri_at(row, col),
-                                    |uri| {
-                                        let r = sonicterm_cfg::url_open::open(uri);
-                                        if let Err(ref e) = r {
-                                            tracing::warn!("url_open failed: {e}");
-                                        }
-                                        r
+                            if let Some((_, row, col)) = pixel_target {
+                                // When: `pixel_target` identifies a rendered cell, pair its coordinates with the same-snapshot pane before activation.
+                                let opened = self.main_window_id.zip(clicked_pane).is_some_and(
+                                    |(window_id, pane_id)| {
+                                        self.activate_target_at(window_id, pane_id, row, col)
                                     },
                                 );
-                                if opened.is_some() {
-                                    // When: opened is Some, consume the modifier-click before selection
-                                    // after presenting any focus change for the clicked pane.
+                                if opened {
+                                    // When: `opened` is true, consume the target click after presenting any focus change for the clicked pane.
                                     if let Some(ws) = self.main_mut() {
                                         ws.mouse_down = false;
                                         if let Some(change) = pane_focus_change.take() {

@@ -10,7 +10,7 @@ and URL safety. This crate is the only place that should parse
 - `theme.rs` - theme schema and named/path loading.
 - `keymap.rs` - keymap schema and action binding resolution.
 - `assets.rs` - bundled and user asset directory lookup.
-- `url_scan.rs` / `url_open.rs` - URL detection and safe open policy.
+- `url_scan.rs` / `url_open.rs` - typed URL/path detection and safe URI-open policy.
 - `dimension.rs` - size/unit helpers shared with font and UI code.
 
 ## Local gate
@@ -24,7 +24,8 @@ cargo test -p sonicterm-cfg
 - Preserve unknown/future TOML keys when possible.
 - Theme/keymap loading must check both bundled assets and user override
   directories under `~/.sonicterm/`.
-- URL handling is security-sensitive; keep allow/deny policy explicit.
+- URL/path handling is security-sensitive. Preserve `Uri` versus
+  `PathCandidate` provenance; raw paths must never enter the URI opener.
 
 ## Cross-references
 - Consumed by: `sonicterm-app`, `sonicterm-mac`, `sonicterm-windows`,

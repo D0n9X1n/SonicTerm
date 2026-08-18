@@ -271,13 +271,16 @@ impl App {
                     self.set_child_splitter_cursor(win_id, hit.axis);
                     return;
                 }
-                // Modifier-click opens a URL: Cmd (macOS) / Ctrl (Win/Linux) +
-                // click on an OSC 8 or auto-detected URL, gated by the same pure
-                // `dispatch_modifier_click` the main window uses so a plain click
-                // never opens. Resolve against the pane under the pointer without
-                // consuming the focus transition that owns dirtying and feedback.
+                // Modifier-click opens a URI or existence-authorized path in
+                // the exact rendered pane. Pane identity and cell coordinates
+                // come from one device-pixel-snapped renderer snapshot.
                 {
-                    let clicked_pane = self.windows.get(&win_id).and_then(|child| {
+                    let pixel_target = self
+                        .windows
+                        .get(&win_id)
+                        .and_then(|child| child.renderer.as_ref())
+                        .and_then(|renderer| renderer.pixel_to_pane_cell(px, py));
+                    let geometry_pane = self.windows.get(&win_id).and_then(|child| {
                         let rects = App::compute_pane_rects_for(child);
                         pane_id_at_point(&rects, px, py).or_else(|| {
                             let tab_idx = child.tabs.active_index();
@@ -285,26 +288,15 @@ impl App {
                         })
                     });
                     let mods_held = self.child_url_open_modifier_held(win_id);
-                    let cell = self
-                        .windows
-                        .get(&win_id)
-                        .and_then(|child| child.renderer.as_ref())
-                        .and_then(|renderer| renderer.pixel_to_cell(px, py));
-                    if let (Some(pane_id), Some((row, col))) = (clicked_pane, cell) {
-                        // When: the press resolves to one pane and cell, inspect that
-                        // pane's grid rather than mutating focus just to find its URL.
-                        let uri = self.child_hyperlink_uri_at(win_id, pane_id, row, col);
-                        let opened =
-                            sonicterm_cfg::url_open::dispatch_modifier_click(mods_held, uri, |u| {
-                                let result = sonicterm_cfg::url_open::open(u);
-                                if let Err(ref error) = result {
-                                    tracing::warn!("url_open failed: {error}");
-                                }
-                                result
-                            });
-                        if opened.is_some() {
-                            // When: `opened.is_some()` confirms the URL launcher consumed
-                            // the press, focus and flash its pane before returning.
+                    if let Some((rendered_pane, row, col)) = pixel_target {
+                        // When: `pixel_target` identifies a rendered cell, activate only the pane identity from that same snapshot or its fallback.
+                        let pane_id =
+                            (rendered_pane != 0).then_some(rendered_pane).or(geometry_pane);
+                        let opened = pane_id.is_some_and(|pane_id| {
+                            mods_held && self.activate_target_at(win_id, pane_id, row, col)
+                        });
+                        if let Some(pane_id) = pane_id.filter(|_| opened) {
+                            // When: `pane_id` survives the `opened` filter, focus and flash that exact pane before consuming the click.
                             if let Some(child) = self.windows.get_mut(&win_id) {
                                 child.mouse_down = false;
                                 if let Some(change) = child.begin_pointer_pane_focus_change(pane_id)
@@ -373,11 +365,9 @@ impl App {
                 }
             }
             WindowEvent::ModifiersChanged(m) => {
-                // Pressing/releasing Cmd over a URL flips the hint→active state
-                // (yellow → accent + pointer). Refresh here so the transition is
-                // immediate. The main match also records `child.modifiers`.
                 if let Some(c) = self.windows.get_mut(&win_id) {
                     c.modifiers = m.state();
+                    c.path_probe.invalidate();
                 }
                 self.refresh_hovered_url_in_child(win_id);
             }
@@ -390,6 +380,11 @@ impl App {
                 // When: any other `event` needs no pre-match handling, so it
                 // falls through to the main match below.
             }
+        }
+        if matches!(event, WindowEvent::RedrawRequested) {
+            // Re-read before the long-lived palette/window borrows below so
+            // PTY, CWD, and viewport changes revoke stale path authorization.
+            self.refresh_target_hover(win_id);
         }
         // Split-borrow the palette out so the renderer can mutate it even though
         // `child` borrows `self.windows` below. Disjoint fields — safe. Computed
@@ -942,8 +937,9 @@ impl App {
                 // The pointer left this child, so every hover highlight it owns
                 // must be dropped: URL, scrollbar and tab-bar alike.
 
-                // Drop any Cmd-hover URL highlight when the cursor leaves.
-                if child.hovered_url.take().is_some() {
+                // Drop path authorization and all target visuals when the pointer leaves.
+                child.path_probe.invalidate();
+                if child.hovered_url.take().is_some() || child.hover_link {
                     child.hover_link = false;
                     child.request_redraw();
                 }

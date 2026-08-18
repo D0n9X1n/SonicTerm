@@ -12,6 +12,7 @@ drag/tear-out, and the platform shell abstractions.
 - `src/app/keymap_dispatch.rs` - action execution and READONLY whitelist.
 - `src/app/event_loop.rs` - window creation and window-ready hooks.
 - `src/app/spawn_pane.rs` - PTY thread pump and redraw coalescing.
+- `src/app/path_target.rs` - contextual path resolution, existence probes, and reveal workers.
 - `src/app/tab_transfer.rs`, `tear_out.rs`, `child_window.rs` - tab movement.
 - `src/app/config_apply.rs` - explicit reload of `~/.sonicterm/sonicterm.toml`.
 - `src/shell.rs` - `MacShell` and `WindowsShell` builders.
@@ -39,6 +40,9 @@ cargo build -p sonicterm-app
   default. Diagnostics belong on `memory`, which is off unless someone is
   investigating.
 - Window-ready hooks fire once, immediately after winit creates the window.
+- Raw path hover never performs filesystem I/O on the event-loop thread.
+  Clickability requires a current epoch-keyed existence result, and reveal work
+  stays bounded and reveal-only.
 
 ## Cross-references
 - Consumes: `sonicterm-app-core`, `sonicterm-vt`, `sonicterm-grid`,
