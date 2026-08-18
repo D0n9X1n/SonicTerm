@@ -3,6 +3,7 @@ use super::HoveredUrl;
 #[test]
 fn to_cells_preserves_range_and_drops_url() {
     let h = HoveredUrl {
+        pane_id: 7,
         row: 4,
         start_col: 6,
         end_col: 21,
@@ -10,6 +11,7 @@ fn to_cells_preserves_range_and_drops_url() {
         active: true,
     };
     let cells = h.to_cells();
+    assert_eq!(cells.pane_id, 7);
     assert_eq!(cells.row, 4);
     assert_eq!(cells.start_col, 6);
     assert_eq!(cells.end_col, 21);
@@ -19,6 +21,7 @@ fn to_cells_preserves_range_and_drops_url() {
 fn to_cells_then_contains_detects_inside_and_outside() {
     // URL occupies viewport row 4, columns 6..21.
     let h = HoveredUrl {
+        pane_id: 7,
         row: 4,
         start_col: 6,
         end_col: 21,

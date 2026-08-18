@@ -3703,6 +3703,14 @@ impl GpuRenderer {
     /// hit-test before rendering, but tests / early input events
     /// previously did and the legacy behaviour is preserved for them.
     pub fn pixel_to_cell(&self, px: f32, py: f32) -> Option<(u16, u16)> {
+        self.pixel_to_pane_cell(px, py).map(|(_, row, col)| (row, col))
+    }
+
+    /// Translate physical pixels into the exact rendered pane and cell.
+    ///
+    /// The pane identity and cell coordinates come from one layout snapshot, so
+    /// split-pane clicks cannot mix app geometry with device-pixel-snapped edges.
+    pub fn pixel_to_pane_cell(&self, px: f32, py: f32) -> Option<(u64, u16, u16)> {
         // G1a: winit physical px == renderer raster px. Use raw.
         // When the tab bar is pinned to the bottom of the window, clicks
         // inside the bar strip must NOT resolve to a phantom grid cell —
@@ -3739,7 +3747,7 @@ impl GpuRenderer {
                 // floor below zero after the non-negative check above.
                 return None;
             }
-            return Some((row.min(u16::MAX as i32) as u16, col.min(u16::MAX as i32) as u16));
+            return Some((0, row.min(u16::MAX as i32) as u16, col.min(u16::MAX as i32) as u16));
         }
         // Pane resolution: find the pane whose raster-px rect contains
         // (px, py). Split panes have different origins, so this MUST
@@ -3777,7 +3785,7 @@ impl GpuRenderer {
             // pane rect but below its last text row, in trailing padding.
             return None;
         }
-        Some((row as u16, col))
+        Some((pane.id, row as u16, col))
     }
 
     // `render` threads 11 distinct slices of borrowed app state through
@@ -4495,11 +4503,11 @@ impl GpuRenderer {
                 // fast path in `snap_to_device_pixels` makes this a no-op at
                 // scale 1.0/2.0 (mac dHash snapshots stay green).
                 let snapped_cell_x: Vec<f32> = build_snapped_cell_x(pad, cell_w, grid.cols);
-                // The Cmd-hover URL recolor applies only to the active
-                // pane (the hover hit-test runs against the focused
-                // pane). Non-active panes always pass `None` so split
-                // panes never inherit another pane's hover accent.
-                let pane_hovered_url = if pv.is_active { hovered_url_cells } else { None };
+                // Hover recolor applies only to the pane named by the hit-test.
+                // Filtering by identity prevents a split at the same row/columns
+                // from inheriting another pane's target accent.
+                let pane_hovered_url =
+                    hovered_url_cells.filter(|hovered| hovered.pane_id == pv.pane_id);
                 for r in 0..grid.rows {
                     if !emit_full_rows && !grid.dirty_rows().any(|dirty| dirty == r as usize) {
                         // When: `!emit_full_rows` and `r` is absent from
@@ -5272,52 +5280,52 @@ impl GpuRenderer {
             );
         }
 
-        // Cmd-hover URL underline. The hovered URL's glyphs are
-        // recolored to the theme accent in the glyph loop; draw a matching
-        // accent underline here as a per-frame overlay (not cached — hover
-        // state isn't part of the row cache key for underlines). Uses the
-        // active pane's origin + snapped cell edges so it lines up with the
-        // recolored text. `hovered_url_cells` is already gated to the active
-        // pane and to Cmd-held hover.
+        // Hover target underline. The pane id travels with the hit so an
+        // inactive split can reveal its own path without painting the active
+        // pane at the same row and columns.
         if let Some(h) = hovered_url_cells {
             if h.end_col > h.start_col {
-                // Two-tier hover: `active` (open-URL modifier held) → theme
-                // accent underline matching the recolored glyphs; plain hover
-                // → a yellow HINT underline only (no glyph recolor). #URL-hint
-                let hov_accent = if h.active {
-                    sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme)
+                if let Some(hovered_view) = pane_views.iter().find(|view| view.pane_id == h.pane_id)
+                {
+                    // Two-tier hover: `active` (open modifier held) uses the
+                    // theme accent; plain URL hover keeps the yellow hint.
+                    let hov_accent = if h.active {
+                        sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(
+                            theme,
+                        )
                         .accent
-                } else {
-                    // When: `!h.active` — plain hover with no modifier held, so
-                    // glyphs keep their colour and only a hint underline draws.
-                    hex_to_rgba(theme.colors.ansi.yellow.0.as_str(), 0.9)
-                };
-                let active_grid_cols = pane_views[active_view_idx].grid.cols;
-                let hcache = build_snapped_cell_x(active_origin_x, self.cell_w, active_grid_cols);
-                let last_col = active_grid_cols.saturating_sub(1);
-                let col_a = h.start_col.min(last_col) as usize;
-                let col_b = h.end_col.min(active_grid_cols) as usize; // exclusive edge
-                let hx = hcache
-                    .get(col_a)
-                    .copied()
-                    .unwrap_or(active_origin_x + f32::from(h.start_col) * self.cell_w);
-                let hw = hcache
-                    .get(col_b.min(hcache.len().saturating_sub(1)))
-                    .map(|r| r - hx)
-                    .unwrap_or_else(|| f32::from(h.end_col - h.start_col) * self.cell_w);
-                let hy = active_origin_y + f32::from(h.row) * self.cell_h;
-                push_underline_quads(
-                    &mut quads,
-                    UnderlineStyle::Single,
-                    hx,
-                    hy,
-                    hw,
-                    self.cell_h,
-                    underline_thickness,
-                    sw,
-                    sh,
-                    hov_accent,
-                );
+                    } else {
+                        // When: `h.active` is false, render the non-clickable hover hint in the theme's yellow rather than the action accent.
+                        hex_to_rgba(theme.colors.ansi.yellow.0.as_str(), 0.9)
+                    };
+                    let hovered_grid_cols = hovered_view.grid.cols;
+                    let hcache =
+                        build_snapped_cell_x(hovered_view.origin_x, self.cell_w, hovered_grid_cols);
+                    let last_col = hovered_grid_cols.saturating_sub(1);
+                    let col_a = h.start_col.min(last_col) as usize;
+                    let col_b = h.end_col.min(hovered_grid_cols) as usize;
+                    let hx = hcache
+                        .get(col_a)
+                        .copied()
+                        .unwrap_or(hovered_view.origin_x + f32::from(h.start_col) * self.cell_w);
+                    let hw = hcache
+                        .get(col_b.min(hcache.len().saturating_sub(1)))
+                        .map(|right| right - hx)
+                        .unwrap_or_else(|| f32::from(h.end_col - h.start_col) * self.cell_w);
+                    let hy = hovered_view.origin_y + f32::from(h.row) * self.cell_h;
+                    push_underline_quads(
+                        &mut quads,
+                        UnderlineStyle::Single,
+                        hx,
+                        hy,
+                        hw,
+                        self.cell_h,
+                        underline_thickness,
+                        sw,
+                        sh,
+                        hov_accent,
+                    );
+                }
             }
         }
 

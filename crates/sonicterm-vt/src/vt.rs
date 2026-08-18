@@ -463,6 +463,15 @@ pub enum CommandEvent {
     CmdEnd(Option<u8>),
 }
 
+/// Host-aware working directory reported through OSC 7.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Osc7Cwd {
+    /// URI authority from `file://authority/path`; empty for local shorthand.
+    pub authority: String,
+    /// Percent-decoded filesystem path.
+    pub path: String,
+}
+
 /// Streaming parser wrapping `vte::Parser` and an internal performer that owns
 /// the grid plus the current SGR attributes.
 pub struct Parser {
@@ -1054,12 +1063,21 @@ impl Parser {
         self.performer.title.as_deref()
     }
 
-    /// Latest OSC 7 working directory (sticky), or `None` if the shell hasn't
-    /// reported one. Stored as a filesystem path (the `file://host/` prefix
-    /// is stripped at parse time); used by the tab-title renderer to show
-    /// `parent/leaf` of the current cwd.
+    /// Latest OSC 7 working-directory path (sticky), or `None` if the shell
+    /// has not reported one. Kept for tab-title compatibility; security-sensitive
+    /// consumers must use [`Self::osc7_cwd`] so authority provenance is retained.
     pub fn cwd(&self) -> Option<&str> {
         self.performer.cwd.as_deref()
+    }
+
+    /// Latest host-aware OSC 7 working-directory snapshot.
+    pub fn osc7_cwd(&self) -> Option<&Osc7Cwd> {
+        self.performer.osc7_cwd.as_ref()
+    }
+
+    /// Monotonic identity of the latest accepted OSC 7 update.
+    pub fn cwd_revision(&self) -> u64 {
+        self.performer.cwd_revision
     }
 }
 
@@ -1103,10 +1121,12 @@ struct Performer {
     focus_reporting: bool,
     /// Latest OSC 0/2 title (sticky — survives consumed events).
     title: Option<String>,
-    /// Latest OSC 7 working directory (sticky), filesystem path with the
-    /// `file://host/` prefix already stripped. `None` until the shell sends
-    /// one — modern zsh/bash/fish ship with cwd-reporting prompts.
+    /// Latest permissively-decoded OSC 7 path used only for tab titles.
     cwd: Option<String>,
+    /// Latest strictly parsed host-aware snapshot used for path resolution.
+    osc7_cwd: Option<Osc7Cwd>,
+    /// Monotonic identity of OSC 7 updates, including same-value ABA changes.
+    cwd_revision: u64,
     reply_tx: Option<Sender<Vec<u8>>>,
     reply_queue_full_warned: std::sync::atomic::AtomicBool,
     sequence_dispatched: bool,
@@ -1184,6 +1204,8 @@ impl Performer {
             focus_reporting: false,
             title: None,
             cwd: None,
+            osc7_cwd: None,
+            cwd_revision: 0,
             reply_tx,
             reply_queue_full_warned: std::sync::atomic::AtomicBool::new(false),
             sequence_dispatched: false,
@@ -1561,20 +1583,74 @@ impl Performer {
     }
 }
 
-/// Parse an OSC 7 payload (typically `file://host/path`) into a filesystem
-/// path. Strips a `file://` scheme and host when present, and percent-decodes
-/// valid `%XX` escapes so names with spaces and Unicode round-trip correctly.
-/// Input without a path separator is decoded as-is, and malformed escapes are
-/// preserved literally.
+/// Parse an OSC 7 payload while retaining its authority provenance.
+///
+/// `file://authority/path` requires a path separator after the authority.
+/// Scheme-less payloads remain accepted for compatibility and carry an empty
+/// authority. Valid `%XX` escapes in the path are decoded; malformed escapes
+/// remain literal.
+pub fn parse_osc7_cwd_snapshot(raw: &str) -> Option<Osc7Cwd> {
+    let (authority, path_text) = if let Some(rest) = raw.strip_prefix("file://") {
+        // When: `raw` has a `file://` prefix, preserve its authority so callers can distinguish local and remote paths.
+        let path_start = rest.find('/')?;
+        let authority = &rest[..path_start];
+        if !authority
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+        {
+            // When: `authority` contains characters outside the OSC 7 host grammar, revoke the trusted CWD snapshot.
+            return None;
+        }
+        (authority, &rest[path_start..])
+    } else {
+        // When: `raw` has no `file://` prefix, retain compatibility while representing its authority as local and empty.
+        ("", raw)
+    };
+    let path = percent_decode_strict(path_text)?;
+    if path.is_empty() || path.chars().any(char::is_control) {
+        // When: decoded `path` is empty or contains control characters, reject it as an unsafe filesystem base.
+        return None;
+    }
+    Some(Osc7Cwd { authority: authority.to_string(), path })
+}
+
+/// Parse an OSC 7 payload into its filesystem path for legacy callers.
+///
+/// This preserves the permissive title behavior: malformed percent escapes stay
+/// literal and a `file://` authority is discarded. Security-sensitive code must
+/// use [`parse_osc7_cwd_snapshot`] so authority and malformed-input provenance
+/// cannot be lost.
 pub fn parse_osc7_cwd(raw: &str) -> String {
     let stripped = raw.strip_prefix("file://").unwrap_or(raw);
-    // After `file://` the next `/` starts the absolute path; anything
-    // before it is the (often empty) hostname which we discard.
     let path_part = match stripped.find('/') {
-        Some(i) => &stripped[i..],
+        Some(index) => &stripped[index..],
         None => stripped,
     };
     percent_decode(path_part)
+}
+
+fn percent_decode_strict(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            // When: `bytes[index]` starts an escape, require and decode exactly one complete hexadecimal triplet.
+            if index + 2 >= bytes.len() {
+                // When: fewer than two bytes follow `%`, reject the truncated OSC 7 escape instead of preserving ambiguity.
+                return None;
+            }
+            let high = hex_nibble(bytes[index + 1])?;
+            let low = hex_nibble(bytes[index + 2])?;
+            out.push((high << 4) | low);
+            index += 3;
+        } else {
+            // When: `bytes[index]` is not `%`, preserve the literal path byte unchanged.
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 fn percent_decode(s: &str) -> String {
@@ -2069,9 +2145,11 @@ impl Perform for Performer {
                 // scheme), strip the host component when present, and
                 // percent-decode the path so spaces/unicode survive.
                 if let Some(raw) = params.get(1).and_then(|s| std::str::from_utf8(s).ok()) {
-                    let path = parse_osc7_cwd(raw);
-                    if !path.is_empty() {
-                        self.cwd = Some(path);
+                    self.cwd_revision = self.cwd_revision.wrapping_add(1);
+                    self.osc7_cwd = parse_osc7_cwd_snapshot(raw);
+                    let title_path = parse_osc7_cwd(raw);
+                    if !title_path.is_empty() {
+                        self.cwd = Some(title_path);
                     }
                 }
             }

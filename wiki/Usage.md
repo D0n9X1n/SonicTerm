@@ -38,6 +38,32 @@ Windows deliberately uses `Alt` as the application modifier so common
 applications. A few familiar compatibility aliases such as `Ctrl+T`,
 `Ctrl+Shift+C`, and `Ctrl+Shift+V` are also bundled.
 
+### Revealing local paths
+
+Hold `Cmd` on macOS or `Ctrl` on Windows/Linux while pointing at an existing
+local path printed in terminal output. Once the background existence check
+finishes, the path receives the active underline and pointer; click to reveal the
+item in Finder, Explorer, or the Linux desktop portal. Raw paths are revealed,
+not launched through their file association, so a printed script or application
+is not executed by this action. Existing OSC 8 links and `http://`, `https://`,
+`mailto:`, and `file://` URLs keep their existing behavior.
+
+SonicTerm recognizes native absolute paths such as `/usr/local/etc`,
+`C:/Users/dotan`, and `C:\\Users\\dotan`. It also recognizes explicit relative
+forms such as `./file`, `../file`, and `../../file` (with slash or backslash on
+Windows). A relative path is eligible only when that exact pane has reported an
+absolute local working directory through OSC 7. A missing, malformed, or
+foreign-host OSC 7 value fails closed; SonicTerm never substitutes its process
+working directory, another pane, or `HOME`.
+
+Existence checks run off the window thread. Missing or inaccessible entries stay
+ordinary text and a stale check cannot authorize a changed row, pane, working
+directory, or viewport. Spaces delimit candidates. Bare relative names,
+`~`/environment expansion, UNC/network/WSL/remote paths, editor
+`:line:column` suffixes, wrapped multi-row paths, and tokens containing wide or
+combining cells are not clickable in this version. Linux reveal requires an
+xdg-desktop-portal implementation with `OpenDirectory` support.
+
 ### Opening script files
 
 Installed builds can be selected as a handler for runnable script files. On
@@ -132,6 +158,26 @@ set to avoid duplicate input.
 Windows 特意使用 `Alt` 作为应用级修饰键，使常见的 `Ctrl+<字母>` 仍可传给
 PowerShell、cmd、readline 和终端程序。同时保留 `Ctrl+T`、`Ctrl+Shift+C`、
 `Ctrl+Shift+V` 等常见兼容别名。
+
+### 在文件管理器中显示本地路径
+
+鼠标指向终端输出中的现有本地路径时，在 macOS 按住 `Cmd`，在 Windows/Linux
+按住 `Ctrl`。后台存在性检查完成后，路径会显示 active underline 与 pointer；点击后会在
+Finder、Explorer 或 Linux desktop portal 中显示该项目。原始路径只会被显示，不会通过
+文件关联启动，因此终端输出中的脚本或应用不会被此操作执行。现有 OSC 8 link，以及
+`http://`、`https://`、`mailto:`、`file://` URL 的行为保持不变。
+
+SonicTerm 可识别 `/usr/local/etc`、`C:/Users/dotan`、`C:\\Users\\dotan`
+等原生绝对路径，也可识别 `./file`、`../file`、`../../file` 等显式相对路径
+（Windows 可使用 slash 或 backslash）。相对路径只有在该准确 pane 通过 OSC 7 报告了
+本机绝对工作目录时才可用。缺失、格式错误或来自远端 host 的 OSC 7 值都会 fail closed；
+SonicTerm 不会改用进程工作目录、其他 pane 或 `HOME`。
+
+存在性检查不会阻塞窗口线程。不存在或无法访问的条目保持普通文本；过期结果也不能授权
+已变化的行、pane、工作目录或 viewport。空格会结束候选路径。本版本不支持裸相对名称、
+`~`/环境变量展开、UNC/network/WSL/远端路径、editor `:line:column` 后缀、跨行路径，
+或含宽字符/组合 cell 的 token。Linux 显示功能要求 xdg-desktop-portal 实现支持
+`OpenDirectory`。
 
 ### 打开脚本文件
 

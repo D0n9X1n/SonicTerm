@@ -33,7 +33,52 @@ pub struct UrlMatch {
     pub url: String,
 }
 
+/// Provenance carried from text detection to click dispatch.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DetectedTarget {
+    /// An allow-listed URI detected by the existing URL scanner.
+    Uri(String),
+    /// Native filesystem syntax that still requires contextual resolution and
+    /// an existence probe before it may become clickable.
+    PathCandidate(String),
+}
+
+/// One typed URI or path-candidate span in a terminal row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetMatch {
+    /// Byte offset (inclusive) in the scanned row.
+    pub start: usize,
+    /// Byte offset (exclusive) in the scanned row.
+    pub end: usize,
+    /// Detected value and its immutable provenance.
+    pub target: DetectedTarget,
+}
+
+/// Filesystem grammar used when recognizing raw terminal text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathStyle {
+    /// POSIX root and slash-separated dot-relative syntax.
+    Posix,
+    /// Windows drive-rooted and slash/backslash dot-relative syntax.
+    Windows,
+}
+
+impl PathStyle {
+    /// Grammar native to the current build target.
+    #[must_use]
+    pub const fn native() -> Self {
+        if cfg!(target_os = "windows") {
+            // When: `target_os` is Windows, accept drive-rooted and backslash-relative path syntax.
+            Self::Windows
+        } else {
+            // When: `target_os` is not Windows, restrict raw paths to POSIX syntax.
+            Self::Posix
+        }
+    }
+}
+
 const SCHEMES: &[&str] = &["https://", "http://", "mailto:", "file://"];
+const MAX_TARGET_BYTES: usize = 4096;
 
 /// Return every URL substring of `text` whose scheme is on our
 /// allow-list and which passes [`validate`].
@@ -127,6 +172,231 @@ pub fn url_at_char_col(text: &str, col: usize) -> Option<UrlMatch> {
     }
     let byte = byte?;
     url_at_byte(text, byte)
+}
+
+/// Return every URI or raw native-path candidate in `text` for this platform.
+#[must_use]
+pub fn find_targets(text: &str) -> Vec<TargetMatch> {
+    find_targets_for_style(text, PathStyle::native())
+}
+
+/// Return every URI or raw native-path candidate using an explicit grammar.
+///
+/// The explicit style keeps cross-platform syntax tests deterministic. URI
+/// matches retain priority and the legacy [`find_urls`] implementation remains
+/// the only source of URI spans.
+#[must_use]
+pub fn find_targets_for_style(text: &str, style: PathStyle) -> Vec<TargetMatch> {
+    let urls = find_urls(text);
+    let mut matches = urls
+        .iter()
+        .map(|url| TargetMatch {
+            start: url.start,
+            end: url.end,
+            target: DetectedTarget::Uri(url.url.clone()),
+        })
+        .collect::<Vec<_>>();
+
+    for (start, _) in text.char_indices() {
+        if urls.iter().any(|url| start >= url.start && start < url.end) {
+            // When: `start` lies inside a validated URI span, preserve URI provenance instead of rescanning its path-like text.
+            continue;
+        }
+        if !is_path_start_boundary(text, start) || !has_path_prefix(&text[start..], style) {
+            // When: `start` lacks either a token boundary or native path prefix, it cannot begin a raw path candidate.
+            continue;
+        }
+        let mut end = text.len();
+        for (offset, ch) in text[start..].char_indices().skip(1) {
+            if is_path_delimiter(ch) {
+                // When: `ch` is a path delimiter, terminate the candidate before that character.
+                end = start + offset;
+                break;
+            }
+        }
+        end = trim_matching_wrapper(text, start, end);
+        let Some(candidate) = text.get(start..end) else {
+            // When: `start..end` is not a UTF-8 boundary range, discard the malformed candidate span.
+            continue;
+        };
+        if !validate_path_candidate(candidate, style) {
+            // When: `candidate` violates the selected native grammar, keep it inert terminal text.
+            continue;
+        }
+        if urls.iter().any(|url| start < url.end && end > url.start) {
+            // When: the raw candidate overlaps any URI span, URI provenance wins for the entire overlap.
+            continue;
+        }
+        matches.push(TargetMatch {
+            start,
+            end,
+            target: DetectedTarget::PathCandidate(candidate.to_string()),
+        });
+    }
+
+    matches.sort_by_key(|matched| matched.start);
+    matches.dedup_by(|right, left| right.start == left.start && right.end == left.end);
+    matches
+}
+
+/// Return the typed target covering byte offset `byte_col` for this platform.
+#[must_use]
+pub fn target_at_byte(text: &str, byte_col: usize) -> Option<TargetMatch> {
+    target_at_byte_for_style(text, byte_col, PathStyle::native())
+}
+
+/// Return the typed target covering byte offset `byte_col` for `style`.
+#[must_use]
+pub fn target_at_byte_for_style(
+    text: &str,
+    byte_col: usize,
+    style: PathStyle,
+) -> Option<TargetMatch> {
+    find_targets_for_style(text, style)
+        .into_iter()
+        .find(|matched| byte_col >= matched.start && byte_col < matched.end)
+}
+
+/// Return the typed target covering character column `col` for this platform.
+#[must_use]
+pub fn target_at_char_col(text: &str, col: usize) -> Option<TargetMatch> {
+    target_at_char_col_for_style(text, col, PathStyle::native())
+}
+
+/// Return the typed target covering character column `col` for `style`.
+#[must_use]
+pub fn target_at_char_col_for_style(
+    text: &str,
+    col: usize,
+    style: PathStyle,
+) -> Option<TargetMatch> {
+    let byte = text.char_indices().nth(col).map(|(byte, _)| byte)?;
+    target_at_byte_for_style(text, byte, style)
+}
+
+fn is_path_start_boundary(text: &str, start: usize) -> bool {
+    if start == 0 {
+        // When: `start` is zero, the candidate begins at a row boundary without requiring a preceding delimiter.
+        return true;
+    }
+    text[..start].chars().next_back().is_some_and(|ch| {
+        ch.is_whitespace() || matches!(ch, '(' | '[' | '{' | '"' | '\'' | '`' | '<' | '>')
+    })
+}
+
+fn is_path_delimiter(ch: char) -> bool {
+    ch.is_whitespace() || ch.is_control() || matches!(ch, '"' | '\'' | '`' | '<' | '>')
+}
+
+fn trim_matching_wrapper(text: &str, start: usize, mut end: usize) -> usize {
+    let opener = text[..start].chars().next_back();
+    let closing = match opener {
+        Some('(') => Some(')'),
+        Some('[') => Some(']'),
+        Some('{') => Some('}'),
+        _ => None,
+    };
+    if closing.is_some() && text[..end].chars().next_back() == closing {
+        let last = text[..end].char_indices().next_back().map_or(end, |(index, _)| index);
+        if last >= start {
+            end = last;
+        }
+    }
+    end
+}
+
+fn has_path_prefix(candidate: &str, style: PathStyle) -> bool {
+    match style {
+        PathStyle::Posix => {
+            (candidate.starts_with('/') && !candidate.starts_with("//"))
+                || candidate.starts_with("./")
+                || candidate.starts_with("../")
+        }
+        PathStyle::Windows => {
+            let bytes = candidate.as_bytes();
+            let drive_absolute = bytes.len() >= 3
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':'
+                && is_windows_separator(bytes[2] as char);
+            drive_absolute
+                || candidate.starts_with("./")
+                || candidate.starts_with(".\\")
+                || candidate.starts_with("../")
+                || candidate.starts_with("..\\")
+        }
+    }
+}
+
+fn validate_path_candidate(candidate: &str, style: PathStyle) -> bool {
+    if candidate.is_empty()
+        || candidate.len() > MAX_TARGET_BYTES
+        || candidate.chars().any(char::is_control)
+        || has_editor_location_suffix(candidate)
+    {
+        // When: `candidate` is empty, overlong, controlled, or editor-suffixed, it is not a raw filesystem target.
+        return false;
+    }
+    match style {
+        PathStyle::Posix => {
+            // When: `style` is POSIX, require slash-only local path syntax with at least one named component.
+            if candidate.contains('\\') || candidate.starts_with("//") {
+                // When: POSIX `candidate` contains a backslash or double-slash root, reject cross-platform and network ambiguity.
+                return false;
+            }
+            has_named_component(candidate.split('/'))
+        }
+        PathStyle::Windows => {
+            // When: `style` is Windows, apply drive-path component and reserved-character rules.
+            if candidate.starts_with("\\\\") || candidate.starts_with("//") {
+                // When: Windows `candidate` begins with a double separator, reject unsupported UNC and network paths.
+                return false;
+            }
+            for (index, ch) in candidate.char_indices() {
+                if matches!(ch, '<' | '>' | '"' | '|' | '?' | '*') || (ch == ':' && index != 1) {
+                    // When: `ch` is reserved or a colon outside drive `index` 1, reject the Windows candidate.
+                    return false;
+                }
+            }
+            let bytes = candidate.as_bytes();
+            let component_text = if bytes.len() >= 3
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':'
+                && is_windows_separator(bytes[2] as char)
+            {
+                // A drive-root prefix is syntax, so validate only the components after it.
+                &candidate[3..]
+            } else {
+                // When: `bytes` do not begin with a drive root, validate the complete explicit-relative candidate.
+                candidate
+            };
+            has_named_component(component_text.split(['/', '\\']))
+        }
+    }
+}
+
+fn has_named_component<'a>(mut components: impl Iterator<Item = &'a str>) -> bool {
+    components.any(|component| !component.is_empty() && component != "." && component != "..")
+}
+
+fn has_editor_location_suffix(candidate: &str) -> bool {
+    let trimmed = candidate.trim_end_matches(['/', '\\']);
+    let Some((prefix, last)) = trimmed.rsplit_once(':') else {
+        // When: `trimmed` has no colon suffix, it cannot encode an editor line or column location.
+        return false;
+    };
+    if last.is_empty() || !last.bytes().all(|byte| byte.is_ascii_digit()) {
+        // When: `last` is empty or nonnumeric, its colon is ordinary filename content rather than an editor location.
+        return false;
+    }
+    prefix
+        .rsplit_once(':')
+        .is_some_and(|(_, line)| !line.is_empty() && line.bytes().all(|byte| byte.is_ascii_digit()))
+        || !matches!(prefix.as_bytes(), [drive] if drive.is_ascii_alphabetic())
+}
+
+#[inline]
+fn is_windows_separator(ch: char) -> bool {
+    matches!(ch, '/' | '\\')
 }
 
 #[inline]

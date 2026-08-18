@@ -114,11 +114,13 @@ pub struct UnderlineRect {
 /// the renderer so it can recolor the URL's glyphs with the theme
 /// accent (in addition to the [`UnderlineRect`] hover underline).
 ///
-/// Coordinates mirror `sonicterm_app`'s `HoveredUrl`: `row` is the
-/// viewport row (0 = top visible row, same index the glyph-emit loop
-/// uses), `start_col` is inclusive, and `end_col` is exclusive.
+/// Coordinates mirror `sonicterm_app`'s `HoveredUrl`: `pane_id` selects
+/// the owning split, `row` is the viewport row, `start_col` is inclusive,
+/// and `end_col` is exclusive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HoveredUrlCells {
+    /// Pane whose grid owns this target.
+    pub pane_id: u64,
     /// Viewport row of the URL (0 = top visible row).
     pub row: u16,
     /// Inclusive start column of the URL on this row.

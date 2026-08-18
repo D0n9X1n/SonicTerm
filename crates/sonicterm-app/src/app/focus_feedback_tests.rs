@@ -129,10 +129,11 @@ fn child_url_attribution_does_not_mutate_focus() {
         b"\x1b]8;;https://example.com\x1b\\A\x1b]8;;\x1b\\",
     ));
 
-    assert_eq!(
-        app.child_hyperlink_uri_at(child, target, 0, 0).as_deref(),
-        Some("https://example.com")
-    );
+    let resolved = app.cell_target_at(child, target, 0, 0).expect("OSC 8 target");
+    assert!(matches!(
+        resolved.target,
+        super::path_target::ResolvedCellTarget::Uri(ref uri) if uri == "https://example.com"
+    ));
     assert_eq!(app.__test_child_active_pane(child), Some(active));
 }
 

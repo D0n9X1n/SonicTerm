@@ -217,3 +217,100 @@ fn shell_meta_in_body_ends_the_match_before_the_meta_char() {
     assert!(validate(&m[0].url).is_ok());
     assert!(!m[0].url.contains('&'));
 }
+
+/// Native path scanning distinguishes path provenance without changing URL-only APIs.
+#[test]
+fn finds_native_absolute_and_explicit_relative_paths() {
+    let posix =
+        find_targets_for_style("open /usr/local/etc then ./file and ../../file", PathStyle::Posix);
+    assert_eq!(
+        posix.iter().map(|m| &m.target).collect::<Vec<_>>(),
+        vec![
+            &DetectedTarget::PathCandidate("/usr/local/etc".into()),
+            &DetectedTarget::PathCandidate("./file".into()),
+            &DetectedTarget::PathCandidate("../../file".into()),
+        ]
+    );
+
+    let windows = find_targets_for_style(
+        r"open C:/Users/dotan then C:\Users\dotan and ..\..\file",
+        PathStyle::Windows,
+    );
+    assert_eq!(
+        windows.iter().map(|m| &m.target).collect::<Vec<_>>(),
+        vec![
+            &DetectedTarget::PathCandidate("C:/Users/dotan".into()),
+            &DetectedTarget::PathCandidate(r"C:\Users\dotan".into()),
+            &DetectedTarget::PathCandidate(r"..\..\file".into()),
+        ]
+    );
+}
+
+/// Roots, implicit relatives, drive-relative paths, and UNC paths never become candidates.
+#[test]
+fn rejects_ambiguous_or_unsupported_path_forms() {
+    for text in ["/", "./", "../", "file", "~/file", "//server/share"] {
+        assert!(
+            find_targets_for_style(text, PathStyle::Posix).is_empty(),
+            "unexpected POSIX target in {text:?}"
+        );
+    }
+    for text in [r"C:\", "C:foo", "file", r"~\file", r"\\server\share"] {
+        assert!(
+            find_targets_for_style(text, PathStyle::Windows).is_empty(),
+            "unexpected Windows target in {text:?}"
+        );
+    }
+}
+
+/// URI matches outrank path-looking slashes and remain absent from path-only quick select.
+#[test]
+fn typed_scanning_preserves_uri_precedence_and_url_compatibility() {
+    let text = "https://example.com/a file:///tmp/a /tmp/b";
+    let targets = find_targets_for_style(text, PathStyle::Posix);
+    assert_eq!(
+        targets.iter().map(|m| &m.target).collect::<Vec<_>>(),
+        vec![
+            &DetectedTarget::Uri("https://example.com/a".into()),
+            &DetectedTarget::Uri("file:///tmp/a".into()),
+            &DetectedTarget::PathCandidate("/tmp/b".into()),
+        ]
+    );
+    assert_eq!(find_urls(text).len(), 2, "URL-only API must ignore raw paths");
+}
+
+/// Wrappers are excluded while ordinary filename punctuation and trailing separators survive.
+#[test]
+fn path_spans_obey_wrappers_and_preserve_filename_punctuation() {
+    let text = "(/tmp/a.txt) [/tmp/b,] /tmp/c!/";
+    let targets = find_targets_for_style(text, PathStyle::Posix);
+    assert_eq!(
+        targets.iter().map(|m| (&text[m.start..m.end], &m.target)).collect::<Vec<_>>(),
+        vec![
+            ("/tmp/a.txt", &DetectedTarget::PathCandidate("/tmp/a.txt".into())),
+            ("/tmp/b,", &DetectedTarget::PathCandidate("/tmp/b,".into())),
+            ("/tmp/c!/", &DetectedTarget::PathCandidate("/tmp/c!/".into())),
+        ]
+    );
+}
+
+/// Character-column lookup stays byte-accurate across a single-cell Unicode prefix and path.
+#[test]
+fn typed_path_lookup_maps_utf8_byte_and_character_columns() {
+    let text = "é /tmp/café";
+    let found =
+        target_at_char_col_for_style(text, 4, PathStyle::Posix).expect("column inside the path");
+    assert_eq!(found.target, DetectedTarget::PathCandidate("/tmp/café".into()));
+    assert_eq!(&text[found.start..found.end], "/tmp/café");
+}
+
+/// Editor line/column suffixes are not interpreted as filesystem names.
+#[test]
+fn rejects_editor_location_suffixes() {
+    for candidate in ["/tmp/file.rs:12", "/tmp/file.rs:12:4", "./file:9"] {
+        assert!(find_targets_for_style(candidate, PathStyle::Posix).is_empty());
+    }
+    for candidate in [r"C:\work\file.rs:12", r".\file.rs:12:4"] {
+        assert!(find_targets_for_style(candidate, PathStyle::Windows).is_empty());
+    }
+}

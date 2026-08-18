@@ -791,8 +791,10 @@ pub struct WindowState {
     /// own IMK runloop traffic independently. Every read path goes through
     /// `self.main()?.ime_cursor_throttle`.
     pub ime_cursor_throttle: sonicterm_ui::ime::ImeCursorThrottle,
-    /// Per-window hovered URL (Cmd-held underline + pointer cursor).
+    /// Per-window hovered URL or validated local-path span.
     pub hovered_url: Option<hovered_url::HoveredUrl>,
+    /// Epoch-guarded existence decision for the raw path under this pointer.
+    pub(in crate::app) path_probe: path_target::PathProbeState,
     pub notification: Option<NotificationBubble>,
     /// "this window is hidden / drained" latch.
     /// Promoted from the App-level `main_hidden` bool so the visibility
@@ -908,6 +910,19 @@ impl WindowState {
             renderer.flash_pane_focus(change.pane_id);
         }
         self.request_redraw();
+    }
+
+    /// Revoke any path authorization and remove pointer-owned target visuals.
+    fn invalidate_path_hover(&mut self) {
+        let changed =
+            self.path_probe.invalidate() | self.hovered_url.take().is_some() | self.hover_link;
+        self.hover_link = false;
+        if changed {
+            if let Some(window) = self.window.as_ref() {
+                window.set_cursor(winit::window::CursorIcon::Default);
+            }
+            self.request_redraw();
+        }
     }
 
     /// Record a left-press at grid cell `(row, col)` and return the
@@ -1534,6 +1549,8 @@ pub enum UserEvent {
         /// User-facing explanation of why no draft was inserted.
         message: String,
     },
+    /// A raw-path existence probe completed off the event-loop thread.
+    PathProbeFinished(path_target::PathProbeResult),
     /// A bounded PTY input enqueue failed. Retains the rejected bytes until
     /// the event-loop thread can show a user-actionable notification.
     PtyInputRejected {
@@ -1592,6 +1609,7 @@ pub mod os_drag;
 mod overlays;
 mod pane_exit;
 mod pane_launch;
+mod path_target;
 mod quit_hold;
 mod redraw_target;
 mod render_timing;
@@ -2013,6 +2031,10 @@ pub struct App {
     /// Proxy used to wake the idle event loop. `None` in tests that
     /// construct `App` directly via [`App::new`] without a real event loop.
     pub(super) event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
+    /// Bounded workers for existence probes and native file-manager reveal.
+    pub(in crate::app) path_workers: Option<path_target::PathWorkers>,
+    /// Local hostname used to reject foreign-authority OSC 7 snapshots.
+    pub(super) local_hostname: String,
     /// Minimum interval between two successive frames. Defaults to 1/60s
     /// and is updated in `resumed` from the current monitor's reported
     /// refresh rate. Used by the RedrawRequested handler to skip an
@@ -2305,6 +2327,16 @@ impl App {
         command_palette.set_keymap(&keymap);
         let configured_font_size = config.font.size;
         let configured_weight_scale = config.font.effective_weight_scale();
+        let path_workers = event_loop_proxy.as_ref().and_then(|proxy| {
+            match path_target::PathWorkers::start(proxy.clone()) {
+                Ok(workers) => Some(workers),
+                Err(error) => {
+                    tracing::warn!(%error, "path workers unavailable");
+                    None
+                }
+            }
+        });
+        let local_hostname = gethostname::gethostname().to_string_lossy().into_owned();
         Self {
             theme,
             config,
@@ -2352,6 +2384,8 @@ impl App {
             theme_loader: None,
             keymap_loader: None,
             event_loop_proxy,
+            path_workers,
+            local_hostname,
             // Default to 60 Hz until `resumed` probes the actual
             // monitor refresh rate. ~16.667 ms = 1/60 s.
             frame_period: Duration::from_micros(16_667),
@@ -3699,6 +3733,7 @@ impl App {
             ime: ImeState::new(),
             ime_cursor_throttle: sonicterm_ui::ime::ImeCursorThrottle::new(),
             hovered_url: None,
+            path_probe: path_target::PathProbeState::default(),
             notification: None,
             hidden: false,
             scrollbar_drag: None,
@@ -5446,6 +5481,7 @@ impl App {
             ime: ImeState::new(),
             ime_cursor_throttle: sonicterm_ui::ime::ImeCursorThrottle::new(),
             hovered_url: None,
+            path_probe: path_target::PathProbeState::default(),
             notification: None,
             hidden: false,
             scrollbar_drag: None,

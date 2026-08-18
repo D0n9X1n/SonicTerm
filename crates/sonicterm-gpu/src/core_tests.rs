@@ -1519,12 +1519,14 @@ fn plain_url_hover_does_not_need_accent_palette() {
 
     assert!(!hovered_url_needs_accent(None));
     assert!(!hovered_url_needs_accent(Some(HoveredUrlCells {
+        pane_id: 7,
         row: 0,
         start_col: 1,
         end_col: 5,
         active: false,
     })));
     assert!(hovered_url_needs_accent(Some(HoveredUrlCells {
+        pane_id: 7,
         row: 0,
         start_col: 1,
         end_col: 5,
