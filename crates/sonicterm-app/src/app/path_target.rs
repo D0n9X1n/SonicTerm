@@ -226,7 +226,7 @@ fn classify_local_target(path: &Path) -> PathOpenDecision {
     PathOpenDecision::Blocked
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn classify_nonsymlink_metadata(
     path: &Path,
 ) -> Result<(std::fs::Metadata, PathKind), PathOpenDecision> {
