@@ -12,14 +12,20 @@ fail() {
 [[ -x "$builder" ]] || fail "package builder is missing or not executable"
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/sonicterm-linux-package.XXXXXX")"
+tmp="$(cd "$tmp" && pwd -P)"
 trap 'rm -rf "$tmp"' EXIT
 
 fake_binary="$tmp/sonicterm"
 printf '#!/bin/sh\nexit 0\n' > "$fake_binary"
 chmod 755 "$fake_binary"
 
-SOURCE_DATE_EPOCH=1700000000 "$builder" --stage-only "$fake_binary" v9.8.7 "$tmp/dist"
 stage="$tmp/dist/.linux-package-work/SonicTerm-v9.8.7-linux-x86_64"
+stage_output="$({
+  cd "$tmp"
+  SOURCE_DATE_EPOCH=1700000000 "$builder" --stage-only "$fake_binary" v9.8.7 dist
+})"
+[[ "$stage_output" == "staged Linux payload: $stage" ]] || \
+  fail "relative output directory did not resolve to an absolute staged path"
 
 [[ -x "$stage/sonicterm" ]] || fail "portable binary is missing or not executable"
 for required in \
