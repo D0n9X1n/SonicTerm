@@ -41,9 +41,9 @@ for required in \
   [[ -f "$stage/$required" ]] || fail "staged payload is missing $required"
 done
 
-[[ "$(stat -f '%Lp' "$stage/sonicterm" 2>/dev/null || stat -c '%a' "$stage/sonicterm")" == "755" ]] || \
+[[ "$(stat -c '%a' "$stage/sonicterm" 2>/dev/null || stat -f '%Lp' "$stage/sonicterm")" == "755" ]] || \
   fail "staged binary mode is not 755"
-[[ "$(stat -f '%Lp' "$stage/LICENSE" 2>/dev/null || stat -c '%a' "$stage/LICENSE")" == "644" ]] || \
+[[ "$(stat -c '%a' "$stage/LICENSE" 2>/dev/null || stat -f '%Lp' "$stage/LICENSE")" == "644" ]] || \
   fail "staged data mode is not 644"
 
 for required_text in \
