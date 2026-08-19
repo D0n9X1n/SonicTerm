@@ -1434,8 +1434,8 @@ fn body_title_and_footer_stacks_share_configuration_and_native_size_identity() {
 
     // Platform locators can accept a family without resolving it on a CI host;
     // the tracked asset fixture makes the native-size metric assertion real.
-    let _font_lock = crate::chrome_text::TRACKED_FONT_STACK_LOCK.lock().expect("font fixture lock");
-    let body = crate::chrome_text::tracked_font_stack(13.0);
+    let _font_lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK.lock().expect("font fixture lock");
+    let body = crate::lib_tests::tracked_font_stack(13.0);
     let title = body.with_font_size(14.0);
     let footer = body.with_font_size(12.0);
     assert!(body.shares_configuration_with(&title));
@@ -1483,7 +1483,7 @@ fn longest_palette_footer_fits_supported_panel_width_with_natural_spacing() {
     };
     use sonicterm_render_model::boundary::ui::overlays::{PaletteLayout, PALETTE_WIDTH};
 
-    let _font_lock = crate::chrome_text::TRACKED_FONT_STACK_LOCK.lock().expect("font fixture lock");
+    let _font_lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK.lock().expect("font fixture lock");
     let mut longest = String::new();
     let mut supported_width = 0.0_f32;
     for mode in
@@ -1507,7 +1507,7 @@ fn longest_palette_footer_fits_supported_panel_width_with_natural_spacing() {
     let available = supported_width - PALETTE_FOOTER_INSET_X;
     for body_font_size in [13.0_f64, 14.5, 18.0] {
         let footer_font_size = f64::from(palette_footer_font_size(body_font_size as f32));
-        let stack = crate::chrome_text::tracked_font_stack(footer_font_size);
+        let stack = crate::lib_tests::tracked_font_stack(footer_font_size);
         let shaped = stack.measure_text_width(&longest).expect("tracked footer font shapes");
         assert!(
             shaped <= available + f32::EPSILON,

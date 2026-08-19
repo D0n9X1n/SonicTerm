@@ -11,6 +11,27 @@ fail() {
 
 [[ -x "$builder" ]] || fail "package builder is missing or not executable"
 
+production_sources=(
+  ':(glob)crates/*/src/**/*.rs'
+  ':(exclude,glob)crates/*/src/**/*_tests.rs'
+)
+production_source_files="$(git -C "$root" ls-files -- "${production_sources[@]}")"
+[[ -n "$production_source_files" ]] || fail "production Rust source scan matched no files"
+
+production_manifest_paths=""
+if production_manifest_paths="$(
+  git -C "$root" grep -n -F 'CARGO_MANIFEST_DIR' -- "${production_sources[@]}" 2>&1
+)"; then
+  printf '%s\n' "$production_manifest_paths" >&2
+  fail "production Rust source embeds CARGO_MANIFEST_DIR"
+else
+  production_manifest_status=$?
+  if [[ $production_manifest_status -ne 1 ]]; then
+    printf '%s\n' "$production_manifest_paths" >&2
+    fail "production Rust source scan failed"
+  fi
+fi
+
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/sonicterm-linux-package.XXXXXX")"
 tmp="$(cd "$tmp" && pwd -P)"
 trap 'rm -rf "$tmp"' EXIT

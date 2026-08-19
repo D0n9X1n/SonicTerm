@@ -14,16 +14,22 @@
 /// different theme, keymap, font, or localization trees.
 #[must_use]
 pub fn asset_dir() -> std::path::PathBuf {
-    let manifest_fallback =
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+    let current_dir = std::env::current_dir().ok();
+    let development_fallback = development_asset_dir(current_dir.as_deref());
     let linux_fhs =
         cfg!(target_os = "linux").then_some(std::path::Path::new("/usr/share/sonicterm/assets"));
     resolve_asset_dir(
         std::env::current_exe().ok().as_deref(),
         linux_fhs,
-        manifest_fallback,
+        development_fallback,
         std::path::Path::exists,
     )
+}
+
+fn development_asset_dir(current_dir: Option<&std::path::Path>) -> std::path::PathBuf {
+    current_dir
+        .map(|directory| directory.join("assets"))
+        .unwrap_or_else(|| std::path::PathBuf::from("assets"))
 }
 
 fn resolve_asset_dir(

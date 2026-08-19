@@ -43,7 +43,17 @@ fn linux_fhs_assets_precede_source_tree_fallback() {
 }
 
 #[test]
-fn missing_packaged_assets_fall_back_to_manifest_assets() {
+fn development_assets_are_derived_from_runtime_working_directory() {
+    // Protect release binaries from retaining the build host path while preserving workspace runs.
+    assert_eq!(
+        development_asset_dir(Some(Path::new("/workspace"))),
+        PathBuf::from("/workspace/assets")
+    );
+    assert_eq!(development_asset_dir(None), PathBuf::from("assets"));
+}
+
+#[test]
+fn missing_packaged_assets_fall_back_to_development_assets() {
     // Protect development runs and hosts where the executable path cannot be inspected.
     let fallback = PathBuf::from("/workspace/assets");
     assert_eq!(

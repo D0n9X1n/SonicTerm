@@ -39,22 +39,6 @@ use crate::color::{chrome_color_to_linear_rgba, ChromeColor};
 #[path = "chrome_text_tests.rs"]
 mod chrome_text_tests;
 
-#[cfg(test)]
-pub(crate) static TRACKED_FONT_STACK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-#[cfg(test)]
-pub(crate) fn tracked_font_stack(font_size: f64) -> FontStack {
-    let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
-    FontStack::try_new_with_font_dirs_for_test(
-        &[("Rec Mono St.Helens", false)],
-        vec![assets],
-        font_size,
-        72,
-        1.0,
-    )
-    .expect("bundled test font must load")
-}
-
 /// Result of laying out a chrome text run into atlas glyph instances.
 ///
 /// `glyphs` is ready to be appended to the caller's `Vec<GlyphInstance>`
