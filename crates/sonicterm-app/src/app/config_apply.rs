@@ -443,6 +443,15 @@ impl App {
             }
         }
 
+        // A policy reload revokes results produced under the previous target rules.
+        if new_cfg.terminal.clickable_local_targets != self.config.terminal.clickable_local_targets
+            || new_cfg.terminal.clickable_bare_names != self.config.terminal.clickable_bare_names
+        {
+            for window in self.windows.values_mut() {
+                window.invalidate_path_hover();
+            }
+        }
+
         // Scrollback depth: re-apply to every live pane across all windows
         // (and all tabs — every pane lives in `ws.panes`, inactive tabs
         // included). Lowering the cap drains excess history immediately.

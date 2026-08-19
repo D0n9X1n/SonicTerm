@@ -793,7 +793,7 @@ pub struct WindowState {
     pub ime_cursor_throttle: sonicterm_ui::ime::ImeCursorThrottle,
     /// Per-window hovered URL or validated local-path span.
     pub hovered_url: Option<hovered_url::HoveredUrl>,
-    /// Epoch-guarded existence decision for the raw path under this pointer.
+    /// Epoch-guarded openability decision for the local target under this pointer.
     pub(in crate::app) path_probe: path_target::PathProbeState,
     pub notification: Option<NotificationBubble>,
     /// "this window is hidden / drained" latch.
@@ -1549,7 +1549,7 @@ pub enum UserEvent {
         /// User-facing explanation of why no draft was inserted.
         message: String,
     },
-    /// A raw-path existence probe completed off the event-loop thread.
+    /// A local-target openability probe completed off the event-loop thread.
     PathProbeFinished(path_target::PathProbeResult),
     /// A bounded PTY input enqueue failed. Retains the rejected bytes until
     /// the event-loop thread can show a user-actionable notification.
@@ -2031,7 +2031,7 @@ pub struct App {
     /// Proxy used to wake the idle event loop. `None` in tests that
     /// construct `App` directly via [`App::new`] without a real event loop.
     pub(super) event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
-    /// Bounded workers for existence probes and native file-manager reveal.
+    /// Bounded workers for openability probes and native direct-open dispatch.
     pub(in crate::app) path_workers: Option<path_target::PathWorkers>,
     /// Local hostname used to reject foreign-authority OSC 7 snapshots.
     pub(super) local_hostname: String,

@@ -114,6 +114,82 @@ fn applying_a_config_clamps_an_out_of_range_weight_scale() {
     assert_eq!(app.config.font.effective_weight_scale(), 1.0, "out-of-range falls back to 1.0");
 }
 
+/// Reloading either local-target kill switch immediately revokes every window's hover state.
+#[test]
+fn local_target_switch_reload_revokes_all_window_authorization() {
+    use crate::app::hovered_url::HoveredUrl;
+    use crate::app::path_target::{PathKind, PathOpenDecision, PathProbeKey, PathProbeResult};
+    use sonicterm_vt::vt::Osc7Cwd;
+
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_synthetic_main();
+    let child_id = app.__test_seed_child_window(&["child"]);
+    let window_ids = [app.main_window_id.expect("synthetic main"), child_id];
+
+    for window_id in window_ids {
+        let key = PathProbeKey {
+            window_id,
+            pane_id: 7,
+            viewport_row: 2,
+            absolute_row: 22,
+            view_top: 20,
+            start_col: 4,
+            end_col: 10,
+            candidate: "entry".into(),
+            resolved_path: PathBuf::from("/work/entry"),
+            cwd: Some(Osc7Cwd { authority: String::new(), path: "/work".into() }),
+            cwd_revision: 3,
+            content_seq: 11,
+            scrollback_evicted: 0,
+            alt_screen: false,
+        };
+        let window = app.windows.get_mut(&window_id).expect("seeded window");
+        let request = window.path_probe.request(key.clone()).expect("new target probe");
+        assert!(window.path_probe.accept(
+            &PathProbeResult { request, decision: PathOpenDecision::Openable(PathKind::Directory) },
+            Some(&key),
+        ));
+        window.hovered_url = Some(HoveredUrl {
+            pane_id: 7,
+            row: 2,
+            start_col: 4,
+            end_col: 10,
+            url: "entry".into(),
+            active: true,
+        });
+        window.hover_link = true;
+    }
+
+    let mut reloaded = app.config.clone();
+    reloaded.terminal.clickable_bare_names = false;
+    app.apply_new_config(reloaded);
+
+    for window_id in window_ids {
+        let window = app.windows.get(&window_id).expect("seeded window");
+        assert!(window.hovered_url.is_none());
+        assert!(!window.hover_link);
+        assert!(window
+            .path_probe
+            .decision_for(&PathProbeKey {
+                window_id,
+                pane_id: 7,
+                viewport_row: 2,
+                absolute_row: 22,
+                view_top: 20,
+                start_col: 4,
+                end_col: 10,
+                candidate: "entry".into(),
+                resolved_path: PathBuf::from("/work/entry"),
+                cwd: Some(Osc7Cwd { authority: String::new(), path: "/work".into() }),
+                cwd_revision: 3,
+                content_seq: 11,
+                scrollback_evicted: 0,
+                alt_screen: false,
+            })
+            .is_none());
+    }
+}
+
 /// A reload re-reads the theme and keymap files even when `[theme]` and
 /// `[keymap]` still name the same ones. Those are separate files whose
 /// contents change without the name changing, so comparing names would make

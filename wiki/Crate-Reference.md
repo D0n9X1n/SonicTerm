@@ -124,8 +124,9 @@ foreground-process detection, and optional SSH implementation.
 ### `sonicterm-cfg`
 
 **Role:** only parser for `sonicterm.toml`, theme/keymap TOML, dimensions, asset
-lookup, typed URL/path scanning, and safe URI-open policy. Raw filesystem
-candidates retain distinct provenance for the app's existence/reveal boundary.
+lookup, typed URI/explicit-path/contextual-bare scanning, and safe URI-open
+policy. Filesystem provenance stays distinct for the app's asynchronous
+openability and direct-open boundary.
 
 **Consumes:** types, logging. **Consumed by:** app, platform binaries, UI,
 render-model.
@@ -267,8 +268,8 @@ window/tab/pane topology remains authoritative in `sonicterm-app`.
 
 **Role:** cross-platform winit orchestration. Owns live windows, renderers,
 tabs, pane trees, PTYs/parsers, input routing, config reload, redraw scheduling,
-overlays, tab transfer, platform shell abstractions, bounded path-existence
-workers, and reveal-only native file-manager dispatch.
+overlays, tab transfer, platform shell abstractions, bounded target-openability
+workers, and type-stable direct-open dispatch through native platform APIs.
 
 **Consumes:** app-core, terminal stack, cfg/UI/render-model, GPU, resource, logging.
 **Consumed by:** macOS and Windows binaries.
@@ -448,7 +449,8 @@ OSC 7 会分别保留 authority 与解码后的路径，供 host-aware 工作目
 ### `sonicterm-cfg`
 
 **职责：** 唯一负责解析 `sonicterm.toml`、theme/keymap TOML、dimension、asset lookup、
-类型化 URL/path scan 和安全 URI 打开策略。原始文件系统候选会保留独立 provenance，交给 app 的存在性/显示边界。
+类型化 URI/显式路径/contextual 裸名称 scan 和安全 URI 打开策略。文件系统 provenance 保持独立，
+交给 app 的异步可打开性与 direct-open 边界。
 
 **依赖：** types、logging。**被依赖：** app、平台二进制、UI、render-model。
 
@@ -570,7 +572,8 @@ COLR color glyph 与原生 handle wrapper。
 ### `sonicterm-app`
 
 **职责：** 跨平台 winit 编排；拥有实时窗口、renderer、标签页、pane tree、PTY/parser、输入路由、配置重载、
-重绘调度、overlay、tab transfer、平台 shell abstraction、有界路径存在性 worker，以及只显示不执行的原生文件管理器 dispatch。
+重绘调度、overlay、tab transfer、平台 shell abstraction、有界目标可打开性 worker，以及通过平台原生 API
+执行的目标类型稳定 direct-open dispatch。
 
 **依赖：** app-core、终端栈、cfg/UI/render-model、GPU、resource、logging。**被依赖：** macOS 与 Windows 二进制。
 

@@ -78,7 +78,7 @@ by default and the CI workflows are first-party files worth finding.
 | `sonicterm-ui` | Tabs, palette, search, selection, IME. |
 | `sonicterm-gpu` | wgpu renderer. |
 | `sonicterm-app-core` | Winit-independent reducer/state. |
-| `sonicterm-app` | Cross-platform app orchestration, path probes, and native reveal. |
+| `sonicterm-app` | Cross-platform app orchestration, path probes, and native direct-open. |
 | `sonicterm-mac` | macOS binary/glue. |
 | `sonicterm-windows` | Windows binary/glue. |
 | `sonicterm-mux` | Future mux daemon. |

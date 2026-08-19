@@ -5171,6 +5171,7 @@ dependencies = [
  "enum-map",
  "gethostname",
  "image",
+ "libc",
  "notify-rust",
  "parking_lot",
  "pollster",

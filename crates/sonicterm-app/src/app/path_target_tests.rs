@@ -1,5 +1,5 @@
 use super::*;
-use sonicterm_cfg::url_scan::DetectedTarget;
+use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme, url_scan::DetectedTarget};
 use sonicterm_grid::grid::{Cell, CellFlags, Color, Row};
 
 fn ascii_row(text: &str) -> Row {
@@ -19,6 +19,71 @@ fn row_lookup_returns_path_candidate_with_cell_span() {
     assert_eq!(found.start_col, 4);
     assert_eq!(found.end_col, 10);
     assert_eq!(found.matched.target, DetectedTarget::PathCandidate("./file".into()));
+}
+
+/// Contextual `ls` names retain bare-name provenance and exact cell bounds.
+#[test]
+fn row_lookup_returns_contextual_bare_name_span() {
+    let row = ascii_row("drwxr-xr-x user 18 Aug 12:30 sonicterm");
+    let found = bare_target_at_row_cell(&row, 34, PathStyle::Posix)
+        .expect("bare directory name under column");
+    assert_eq!(found.start_col, 29);
+    assert_eq!(found.end_col, 38);
+    assert_eq!(found.matched.target, DetectedTarget::BareName("sonicterm".into()));
+}
+
+/// Contextual bare names require the exact pane's trusted local OSC 7 directory.
+#[test]
+fn bare_name_resolution_is_host_aware() {
+    let target = DetectedTarget::BareName("sonicterm".into());
+    let local = Osc7Cwd { authority: "localhost".into(), path: "/work".into() };
+    assert_eq!(
+        resolve_detected_path(&target, PathStyle::Posix, Some(&local), "host"),
+        Some(PathBuf::from("/work/sonicterm"))
+    );
+    let foreign = Osc7Cwd { authority: "remote".into(), path: "/work".into() };
+    assert_eq!(resolve_detected_path(&target, PathStyle::Posix, Some(&foreign), "host"), None);
+    assert_eq!(resolve_detected_path(&target, PathStyle::Posix, None, "host"), None);
+
+    let root = Osc7Cwd { authority: String::new(), path: "/".into() };
+    assert_eq!(
+        resolve_detected_path(&target, PathStyle::Posix, Some(&root), "host"),
+        Some(PathBuf::from("/sonicterm"))
+    );
+}
+
+/// App lookup resolves a bare row token from only the clicked pane's local OSC 7 state.
+#[test]
+fn app_cell_lookup_uses_exact_pane_osc7_for_bare_names() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let local_window = app.__test_seed_child_window(&["local"]);
+    let local_pane = app.__test_child_pane_ids(local_window).unwrap()[0];
+    let (local_osc7, expected) = if cfg!(target_os = "windows") {
+        (
+            b"\x1b]7;file:///C:/tmp/work\x1b\\sonicterm".as_slice(),
+            PathBuf::from(r"C:\tmp\work\sonicterm"),
+        )
+    } else {
+        (b"\x1b]7;file:///tmp/work\x1b\\sonicterm".as_slice(), PathBuf::from("/tmp/work/sonicterm"))
+    };
+    assert!(app.__test_advance_child_pane_parser(local_window, local_pane, local_osc7));
+
+    let resolved = app.cell_target_at(local_window, local_pane, 0, 2).expect("local bare target");
+    assert!(matches!(
+        resolved.target,
+        ResolvedCellTarget::Path(ref key)
+            if key.candidate == "sonicterm" && key.resolved_path == expected
+    ));
+
+    let foreign_window = app.__test_seed_child_window(&["foreign"]);
+    let foreign_pane = app.__test_child_pane_ids(foreign_window).unwrap()[0];
+    let foreign_osc7 = if cfg!(target_os = "windows") {
+        b"\x1b]7;file://remote-host/C:/tmp/work\x1b\\sonicterm".as_slice()
+    } else {
+        b"\x1b]7;file://remote-host/tmp/work\x1b\\sonicterm".as_slice()
+    };
+    assert!(app.__test_advance_child_pane_parser(foreign_window, foreign_pane, foreign_osc7));
+    assert!(app.cell_target_at(foreign_window, foreign_pane, 0, 2).is_none());
 }
 
 /// A wide continuation is token content, not whitespace that can expose a suffix path.
@@ -41,7 +106,7 @@ fn wide_cell_rejects_the_entire_surrounding_path_token() {
     assert!(target_at_row_cell(&row, 8, PathStyle::Posix).is_none());
 }
 
-/// Combining extras reject a whole token instead of revealing an ASCII fragment.
+/// Combining extras reject a whole token instead of exposing an ASCII fragment.
 #[test]
 fn combining_extras_reject_the_entire_surrounding_path_token() {
     let mut cells = "./cafe/file"
@@ -93,6 +158,22 @@ fn windows_relative_resolution_normalizes_drive_form() {
     );
 }
 
+/// URI, explicit-path, and contextual-bare provenance obey independent kill-switch precedence.
+#[test]
+fn local_target_switches_do_not_change_uri_behavior() {
+    let uri = DetectedTarget::Uri("https://example.com".into());
+    let explicit = DetectedTarget::PathCandidate("./file".into());
+    let bare = DetectedTarget::BareName("file".into());
+
+    for local in [false, true] {
+        for contextual in [false, true] {
+            assert!(detected_target_enabled(&uri, local, contextual));
+            assert_eq!(detected_target_enabled(&explicit, local, contextual), local);
+            assert_eq!(detected_target_enabled(&bare, local, contextual), local && contextual);
+        }
+    }
+}
+
 /// Probe epochs wrap rather than saturate so identity can never stick at u64::MAX.
 #[test]
 fn probe_epoch_advances_and_wraps() {
@@ -100,90 +181,159 @@ fn probe_epoch_advances_and_wraps() {
     assert_eq!(ProbeEpoch(u64::MAX).next(), ProbeEpoch::INITIAL);
 }
 
-/// macOS reveal passes one normalized path argument after the reveal flag.
+/// macOS direct-open passes one normalized target after the option terminator.
 #[test]
-fn macos_reveal_spec_is_absolute_and_reveal_only() {
-    let spec = macos_reveal_spec("/tmp/file/").expect("valid absolute path");
+fn macos_open_spec_opens_the_target_itself() {
+    let spec = macos_open_spec("/tmp/file/").expect("valid absolute path");
     assert_eq!(spec.program, PathBuf::from("/usr/bin/open"));
-    assert_eq!(spec.args, ["-R", "/tmp/file"]);
-    assert_eq!(macos_reveal_spec("relative/file"), None);
+    assert_eq!(spec.args, ["--", "/tmp/file"]);
+    assert_eq!(macos_open_spec("relative/file"), None);
 }
 
-/// Explorer comes from the trusted shared Windows directory and receives one select argument.
+/// macOS blocks bundles, installers, executable mode, script suffixes, and executable content.
 #[test]
-fn windows_reveal_spec_uses_one_trusted_select_argument() {
-    let spec = windows_reveal_spec(r"C:\Windows", "C:/Users/dotan/")
-        .expect("valid Windows directory and target");
-    assert_eq!(spec.program, PathBuf::from(r"C:\Windows\explorer.exe"));
-    assert_eq!(spec.args, [r"/select,C:\Users\dotan"]);
-
-    let root = windows_reveal_spec("C:", r"C:\file").expect("root install normalizes");
-    assert_eq!(root.program, PathBuf::from(r"C:\explorer.exe"));
-    assert_eq!(windows_reveal_spec("Windows", r"C:\file"), None);
-    assert_eq!(windows_reveal_spec(r"\\server\Windows", r"C:\file"), None);
+fn macos_open_policy_blocks_launcher_classes() {
+    for path in [
+        "/tmp/App.app",
+        "/tmp/run.command",
+        "/tmp/install.pkg",
+        "/tmp/image.dmg",
+        "/tmp/link.webloc",
+        "/tmp/run.sh",
+        "/tmp/run.py",
+        "/tmp/run.rb",
+        "/tmp/run.pl",
+        "/tmp/run.zsh",
+    ] {
+        assert!(
+            macos_file_policy(Path::new(path), b"ordinary", false).is_blocked(),
+            "unexpected openable {path}"
+        );
+    }
+    for prefix in [
+        b"#!/bin/sh".as_slice(),
+        b"\x7fELF\x02\x01\x01\0".as_slice(),
+        b"MZ\x90\0\0\0\0\0".as_slice(),
+        b"\xcf\xfa\xed\xfe\0\0\0\0".as_slice(),
+        b"\xfe\xed\xfa\xcf\0\0\0\0".as_slice(),
+        b"\xca\xfe\xba\xbe\0\0\0\0".as_slice(),
+        b"\xbe\xba\xfe\xca\0\0\0\0".as_slice(),
+    ] {
+        assert!(
+            macos_file_policy(Path::new("/tmp/tool"), prefix, false).is_blocked(),
+            "unexpected openable executable prefix {prefix:?}"
+        );
+    }
+    assert!(macos_file_policy(Path::new("/tmp/tool"), b"ordinary", true).is_blocked());
+    assert_eq!(
+        macos_file_policy(Path::new("/tmp/readme.txt"), b"notes", false),
+        PathOpenDecision::Openable(PathKind::File)
+    );
 }
 
-/// Windows directory lookup retries a required-size response and validates termination.
+/// macOS production classification blocks an extensionless executable before LaunchServices.
+#[cfg(target_os = "macos")]
 #[test]
-fn windows_directory_query_retries_and_normalizes_root() {
-    let mut calls = 0;
-    let directory = query_system_windows_directory(|buffer| {
-        calls += 1;
-        if calls == 1 {
-            return 300;
-        }
-        assert_eq!(buffer.len(), 301);
-        let encoded = "C:".encode_utf16().collect::<Vec<_>>();
-        buffer[..encoded.len()].copy_from_slice(&encoded);
-        buffer[encoded.len()] = 0;
-        encoded.len() as u32
-    })
-    .expect("valid root directory");
+fn macos_classification_rejects_executable_mode() {
+    use std::os::unix::fs::PermissionsExt;
 
-    assert_eq!(calls, 2);
-    assert_eq!(directory, r"C:\");
+    let path = std::env::temp_dir().join(format!(
+        "sonicterm-macos-executable-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    std::fs::write(&path, b"ordinary").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert_eq!(classify_macos_target(&path), PathOpenDecision::Blocked);
+    std::fs::remove_file(path).unwrap();
 }
 
-/// Invalid API outputs fail closed before an executable path is constructed.
+/// Windows launcher, PATHEXT, ADS, and trailing-dot names are blocked before ShellExecuteExW.
 #[test]
-fn windows_directory_query_rejects_invalid_results() {
-    assert!(query_system_windows_directory(|_| 0).is_err());
-    assert!(query_system_windows_directory(|buffer| {
-        let encoded = "Windows".encode_utf16().collect::<Vec<_>>();
-        buffer[..encoded.len()].copy_from_slice(&encoded);
-        buffer[encoded.len()] = 0;
-        encoded.len() as u32
-    })
-    .is_err());
-    assert!(query_system_windows_directory(|buffer| {
-        let encoded = r"\\server\Windows".encode_utf16().collect::<Vec<_>>();
-        buffer[..encoded.len()].copy_from_slice(&encoded);
-        buffer[encoded.len()] = 0;
-        encoded.len() as u32
-    })
-    .is_err());
-    assert!(query_system_windows_directory(|buffer| {
-        buffer[0] = 0xd800;
-        buffer[1] = 0;
-        1
-    })
-    .is_err());
-    assert!(query_system_windows_directory(|buffer| {
-        let encoded = r"C:\Windows".encode_utf16().collect::<Vec<_>>();
-        buffer[..encoded.len()].copy_from_slice(&encoded);
-        buffer[encoded.len()] = 1;
-        encoded.len() as u32
-    })
-    .is_err());
+fn windows_open_policy_blocks_launcher_classes() {
+    for path in [
+        r"C:\tmp\run.exe",
+        r"C:\tmp\run.ps1",
+        r"C:\tmp\link.lnk",
+        r"C:\tmp\file.txt:payload",
+        r"C:\tmp\name. ",
+    ] {
+        assert!(
+            windows_path_policy(Path::new(path), Some(".EXE;.COM;.BAT;.CMD")).is_blocked(),
+            "unexpected openable {path}"
+        );
+    }
+    assert_eq!(
+        windows_path_policy(Path::new(r"C:\tmp\readme.txt"), Some(".EXE;.COM;.BAT;.CMD")),
+        PathOpenDecision::Openable(PathKind::File)
+    );
 }
 
-/// The Linux reveal adapter receives an already-opened file identity, not its pathname.
+/// Linux blocks desktop launchers and executable content without relying on unreliable mode bits.
 #[test]
-fn reveal_target_adapter_owns_an_open_file() {
+fn linux_open_policy_sniffs_unsafe_content() {
+    assert!(linux_file_policy(Path::new("/tmp/tool.desktop"), b"[Desktop Entry]").is_blocked());
+    assert!(linux_file_policy(Path::new("/tmp/tool.AppImage"), b"ordinary").is_blocked());
+    assert!(linux_file_policy(Path::new("/tmp/tool"), b"\x7fELF").is_blocked());
+    assert!(linux_file_policy(Path::new("/tmp/tool"), b"#!/bin/sh").is_blocked());
+    assert!(linux_file_policy(Path::new("/tmp/tool"), b"MZ\0\0").is_blocked());
+    assert_eq!(
+        linux_file_policy(Path::new("/tmp/readme.txt"), b"notes"),
+        PathOpenDecision::Openable(PathKind::File)
+    );
+}
+
+/// The Linux fallback uses only a fixed executable and one argv-separated absolute target.
+#[test]
+fn linux_fallback_spec_keeps_target_out_of_the_command_name() {
+    let Some(spec) = linux_xdg_open_spec(Path::new("/tmp/file name")) else {
+        return;
+    };
+    assert!(matches!(spec.program.to_str(), Some("/usr/bin/xdg-open" | "/bin/xdg-open")));
+    assert_eq!(spec.args, ["/tmp/file name"]);
+    assert_eq!(linux_xdg_open_spec(Path::new("relative/file")), None);
+}
+
+/// Real filesystem classification accepts files/directories and rejects symlinks and sockets.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn filesystem_classification_rejects_identity_indirection_and_special_entries() {
+    use std::os::unix::fs::symlink;
+    use std::os::unix::net::UnixListener;
+
+    let root = std::env::temp_dir().join(format!(
+        "sonicterm-path-kinds-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    let file = root.join("notes.txt");
+    let directory = root.join("folder");
+    let link = root.join("link");
+    let socket = root.join("socket");
+    std::fs::write(&file, b"notes").unwrap();
+    std::fs::create_dir(&directory).unwrap();
+    symlink(&file, &link).unwrap();
+    let listener = UnixListener::bind(&socket).unwrap();
+
+    assert_eq!(classify_local_target(&file), PathOpenDecision::Openable(PathKind::File));
+    assert_eq!(classify_local_target(&directory), PathOpenDecision::Openable(PathKind::Directory));
+    assert_eq!(classify_local_target(&link), PathOpenDecision::Blocked);
+    assert_eq!(classify_local_target(&socket), PathOpenDecision::Blocked);
+    assert_eq!(classify_local_target(&root.join("missing")), PathOpenDecision::Missing);
+
+    drop(listener);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// The Linux open adapter receives an already-opened file identity, not its pathname.
+#[test]
+fn open_target_adapter_owns_an_open_file() {
     use std::io::Write;
 
     let path = std::env::temp_dir().join(format!(
-        "sonicterm-path-reveal-{}-{}",
+        "sonicterm-path-open-{}-{}",
         std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
     ));
@@ -191,10 +341,10 @@ fn reveal_target_adapter_owns_an_open_file() {
     created.write_all(b"identity").unwrap();
     drop(created);
 
-    let length = with_opened_reveal_target(&path, |file| Ok(file.metadata()?.len())).unwrap();
+    let length = with_opened_target(&path, |file| Ok(file.metadata()?.len())).unwrap();
     assert_eq!(length, 8);
     std::fs::remove_file(&path).unwrap();
-    assert!(with_opened_reveal_target(&path, |_| Ok(())).is_err());
+    assert!(with_opened_target(&path, |_| Ok(())).is_err());
 }
 
 fn probe_key(path: &str, view_top: u64) -> PathProbeKey {
@@ -222,12 +372,12 @@ fn probe_state_requires_current_epoch_key_and_modifier() {
     let mut state = PathProbeState::default();
     let key = probe_key("/work/file", 20);
     let request = state.request(key.clone()).expect("new candidate schedules a probe");
-    let result = PathProbeResult { request, exists: true };
+    let result = PathProbeResult { request, decision: PathOpenDecision::Openable(PathKind::File) };
 
     assert!(state.accept(&result, Some(&key)));
     assert!(!state.authorized(&key, false), "modifier release must deactivate authorization");
     assert!(state.authorized(&key, true));
-    assert_eq!(state.decision_for(&key), Some(true));
+    assert_eq!(state.decision_for(&key), Some(PathOpenDecision::Openable(PathKind::File)));
 }
 
 /// A transient inability to re-read the pointer target must allow the same path to be probed again.
@@ -237,7 +387,10 @@ fn unavailable_fresh_target_does_not_wedge_probe_state() {
     let key = probe_key("/work/file", 20);
     let request = state.request(key.clone()).expect("first request");
 
-    assert!(!state.accept(&PathProbeResult { request, exists: true }, None));
+    assert!(!state.accept(
+        &PathProbeResult { request, decision: PathOpenDecision::Openable(PathKind::File) },
+        None
+    ));
     assert!(state.request(key).is_some(), "the same target must be eligible for a retry");
 }
 
@@ -250,11 +403,13 @@ fn probe_epoch_rejects_same_key_after_leave_and_reenter() {
     state.invalidate();
     let second = state.request(key.clone()).expect("re-enter schedules a new epoch");
 
-    let delayed_positive = PathProbeResult { request: first, exists: true };
+    let delayed_positive =
+        PathProbeResult { request: first, decision: PathOpenDecision::Openable(PathKind::File) };
     assert!(!state.accept(&delayed_positive, Some(&key)));
     assert!(!state.authorized(&key, true));
 
-    let current_positive = PathProbeResult { request: second, exists: true };
+    let current_positive =
+        PathProbeResult { request: second, decision: PathOpenDecision::Openable(PathKind::File) };
     assert!(state.accept(&current_positive, Some(&key)));
     assert!(state.authorized(&key, true));
 }
@@ -271,14 +426,20 @@ fn probe_epoch_rejects_viewport_round_trip_results() {
     state.invalidate();
     let current = state.request(key.clone()).expect("scroll-back request");
 
-    assert!(!state.accept(&PathProbeResult { request: old, exists: false }, Some(&key)));
+    assert!(!state.accept(
+        &PathProbeResult { request: old, decision: PathOpenDecision::Missing },
+        Some(&key)
+    ));
     assert_eq!(state.decision_for(&key), None);
-    assert!(state.accept(&PathProbeResult { request: current, exists: true }, Some(&key)));
+    assert!(state.accept(
+        &PathProbeResult { request: current, decision: PathOpenDecision::Openable(PathKind::File) },
+        Some(&key)
+    ));
 }
 
-/// Filesystem probe results authorize an existing entry and revoke the same entry once missing.
+/// Filesystem probes authorize an openable entry and revoke the same entry once missing.
 #[test]
-fn filesystem_existence_controls_path_authorization() {
+fn filesystem_openability_controls_path_authorization() {
     let path = std::env::temp_dir().join(format!(
         "sonicterm-path-probe-{}-{}",
         std::process::id(),
@@ -290,7 +451,7 @@ fn filesystem_existence_controls_path_authorization() {
     let key = probe_key(path.to_str().unwrap(), 20);
     let existing = PathProbeResult {
         request: state.request(key.clone()).unwrap(),
-        exists: path_exists(&path),
+        decision: classify_local_target(&path),
     };
     assert!(state.accept(&existing, Some(&key)));
     assert!(state.authorized(&key, true));
@@ -299,7 +460,7 @@ fn filesystem_existence_controls_path_authorization() {
     state.invalidate();
     let missing = PathProbeResult {
         request: state.request(key.clone()).unwrap(),
-        exists: path_exists(&path),
+        decision: classify_local_target(&path),
     };
     assert!(state.accept(&missing, Some(&key)));
     assert!(!state.authorized(&key, true));

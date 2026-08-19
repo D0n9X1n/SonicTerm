@@ -277,6 +277,10 @@ pub struct TerminalConfig {
     pub term_program: String,
     /// Scrollback buffer depth, in rows.
     pub scrollback: usize,
+    /// Whether native absolute and explicit-relative filesystem targets are clickable.
+    pub clickable_local_targets: bool,
+    /// Whether whole bare components may resolve against trusted pane CWD.
+    pub clickable_bare_names: bool,
     /// Blink the cursor.
     pub cursor_blink: bool,
     /// Cursor shape.
@@ -456,6 +460,8 @@ impl Default for TerminalConfig {
             shell: None,
             term_program: "SonicTerm".to_string(),
             scrollback: 1_000,
+            clickable_local_targets: true,
+            clickable_bare_names: true,
             cursor_blink: false,
             cursor_shape: CursorShape::default(),
         }
@@ -1077,6 +1083,11 @@ term_program = "{term_program}"
 
 # Scrollback line limit per pane.
 scrollback = {scrollback}
+
+# Cmd/Ctrl-click safe local files and directories after asynchronous validation.
+clickable_local_targets = true
+# Also resolve whole bare tokens (such as `ls` names) against trusted pane CWD.
+clickable_bare_names = true
 
 # Cursor behavior. Shape: "block", "bar", or "underline".
 cursor_blink = false
