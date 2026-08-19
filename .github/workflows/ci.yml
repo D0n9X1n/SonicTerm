@@ -207,6 +207,10 @@ jobs:
     name: ubuntu 22.04 / workspace, packages, X11, Wayland
     runs-on: ubuntu-latest
     container: ubuntu:22.04
+    env:
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: ${{ github.workspace }}
     steps:
       - name: Install runner and native dependencies
         env:
