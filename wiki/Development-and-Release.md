@@ -11,7 +11,7 @@
 
 ```text
 Cargo.toml                 workspace members, shared version/dependencies/lints
-crates/                    23 first-party Rust crates
+crates/                    24 first-party Rust crates
 assets/                    fonts, themes, keymaps, icons, i18n, screenshots
 wiki/                      canonical bilingual documentation, all of it
 scripts/                   flat first-party shell/PowerShell automation
@@ -29,12 +29,15 @@ crate and internal path requirement.
 cargo build
 cargo run -p sonicterm-mac       # macOS
 cargo run -p sonicterm-windows   # Windows
+cargo run -p sonicterm-linux     # Linux; binary name is sonicterm
 ```
 
 Windows CI and release builds install static Cairo through vcpkg. macOS release
-builders install Cairo and pkg-config through Homebrew. Native Fontconfig,
-FreeType, HarfBuzz, AppKit, Win32, and installer behavior require their relevant
-platform or build boundary; do not replace those checks with empty symbol tests.
+builders install Cairo and pkg-config through Homebrew. Ubuntu 22.04 builders
+install Cairo, Fontconfig, X11, Wayland, Mesa Vulkan/lavapipe, Xvfb, Weston, and
+Debian package tools. Native Fontconfig, FreeType, HarfBuzz, AppKit, Win32,
+X11/Wayland, and installer behavior require their relevant platform or build
+boundary; do not replace those checks with empty symbol tests.
 
 ## Crate-local guidance
 
@@ -122,6 +125,8 @@ bash scripts/pty-backend-feasibility.sh --check
 bash scripts/test-resource-inventory.sh
 bash scripts/test-resource-baseline-evidence.sh
 bash scripts/test-soak-harness.sh
+bash scripts/test-linux-packages.sh
+bash scripts/test-release-assets.sh
 bash scripts/test-release-notes.sh
 bash scripts/test-wiki-publish.sh
 scripts/rust-logic-coverage.sh
@@ -153,9 +158,10 @@ Rust logic.
 
 ## Pull-request CI
 
-`.github/workflows/ci.yml` runs on pull requests and on pushes to `main`, with a
-macOS 14 / Windows latest matrix plus a focused Ubuntu compile/test job for the
-Linux local-target openability and direct-open boundary:
+`.github/workflows/ci.yml` runs on pull requests and pushes to `main`. The macOS
+14 / Windows latest matrix retains platform-native gates, while an Ubuntu 22.04
+container runs the full workspace and per-crate gates, builds both Linux package
+formats, and executes each package on X11 and Wayland:
 
 ```mermaid
 flowchart TD
@@ -178,10 +184,16 @@ flowchart TD
     soak["deterministic soak control gate"]
     baseline["resource baseline evidence collector test + capture"]
     coverage(["macOS only: install cargo-llvm-cov and enforce coverage"])
-    linux(["Ubuntu: cfg/vt/app clippy + tests for path handling"])
+    linuxbuild["Ubuntu 22.04: full clippy/docs/unit/per-crate gates"]
+    linuxpkg["build + validate deb and tar.gz"]
+    linuxx11["packaged tar/deb on X11/Xvfb + lavapipe"]
+    linuxwayland(["packaged tar/deb on Wayland/Weston + lavapipe"])
 
     checkout --> cairo
-    checkout --> linux
+    checkout --> linuxbuild
+    linuxbuild --> linuxpkg
+    linuxpkg --> linuxx11
+    linuxx11 --> linuxwayland
     cairo --> comments
     comments --> rustdoc
     rustdoc --> exitpolicy
@@ -204,12 +216,14 @@ flowchart TD
 CI runs `cargo fmt --all --check`, the authored Rust comment checker, strict
 workspace Rustdoc, and `cargo clippy --workspace --all-targets` with warnings
 denied. The `sonicterm-io` SSH feature receives separate clippy and strict
-Rustdoc passes because `--all-targets` does not enable optional features. A
-separate Ubuntu job installs Cairo/Fontconfig and window-system development
-packages, then runs strict clippy and tests for `sonicterm-vt`, `sonicterm-cfg`,
-and `sonicterm-app`. This compiles the Linux fd-based portal opener, fixed
-`xdg-open` fallback, and local-target policy; it does not add a shipping Linux
-binary.
+Rustdoc passes because `--all-targets` does not enable optional features. The
+Ubuntu 22.04 job runs those full gates plus every per-crate test/build boundary,
+builds the shipping `sonicterm` binary, validates desktop/AppStream metadata and
+the generated Debian dependency field, and uploads both Linux packages. It then
+runs the extracted tar and installed Debian layouts under X11/Xvfb and headless
+Wayland/Weston with `WGPU_BACKEND=vulkan` and Mesa lavapipe. A smoke cannot pass
+without a real window, GPU initialization, `/bin/sh` PTY marker round-trip, and a
+subsequent native presentation.
 Windows additionally runs the explicit `Verify Windows WARP allocator baseline`
 step, which executes the deterministic `windows_warp_allocator_baseline`
 integration test. It requests DX12 CPU fallback and compares the old
@@ -239,51 +253,44 @@ Pushing a matching `v*` tag starts `.github/workflows/release.yml`:
 ```mermaid
 flowchart TD
     tag["vX.Y.Z tag"]
-    mactest["macOS workspace/per-crate/release-note tests"]
-    wintest["Windows workspace/per-crate tests"]
-    softpresent["Windows software presentation capability"]
-    warp["Verify Windows WARP allocator baseline"]
-    selection["Windows selection presentation"]
-    notes["Windows release-note test"]
-    macx86["build macOS x86_64 binary"]
-    macarm["build macOS aarch64 binary"]
-    dmg["verify architectures and package two DMGs"]
-    msi["build Windows x64 binary and WiX MSI"]
-    download["download all artifacts on Ubuntu"]
-    require["require at least one DMG and MSI"]
-    sums["generate SHA256SUMS.txt and release notes"]
-    publish(["publish GitHub Release"])
+    validate["validate tag against every workspace package"]
+    mactest["macOS workspace/per-crate tests"]
+    wintest["Windows workspace/per-crate + WARP/presentation tests"]
+    linuxtest["Ubuntu 22.04 workspace/per-crate/tooling tests"]
+    macbuild["build x86_64 + aarch64 binaries"]
+    dmg["package + register two DMGs"]
+    msi["build + register Windows x64 MSI"]
+    linuxpkg["build + register Linux deb and tar.gz"]
+    linuxsmoke["tar/deb × X11/Wayland runtime smokes"]
+    manifest["consolidate fragments; verify five required tuples + hashes"]
+    notes["generate manifest-driven notes + SHA256SUMS.txt"]
+    publish(["publish exact validated paths"])
 
-    tag --> mactest
-    tag --> wintest
-    wintest --> softpresent
-    softpresent --> warp
-    warp --> selection
-    selection --> notes
-    mactest --> macx86
-    mactest --> macarm
-    macx86 --> dmg
-    macarm --> dmg
-    notes --> msi
-    dmg --> download
-    msi --> download
-    download --> require
-    require --> sums
-    sums --> publish
+    tag --> validate
+    validate --> mactest
+    validate --> wintest
+    validate --> linuxtest
+    mactest --> macbuild --> dmg
+    wintest --> msi
+    linuxtest --> linuxpkg --> linuxsmoke
+    dmg --> manifest
+    msi --> manifest
+    linuxsmoke --> manifest
+    manifest --> notes --> publish
 ```
 
-The Windows allocator test is release-blocking. The current verified Windows
-release dependency is `unit-tests-windows → build-windows → publish`, so a WARP
-baseline failure prevents both the MSI build and publication.
-
+All three platform chains are release-blocking. In particular,
+`unit-tests-windows → build-windows → publish` keeps the WARP allocator baseline
+in the Windows path, while `unit-tests-linux → package-linux → publish` requires
+both packaged layouts to pass X11 and Wayland smokes before publication.
 Pre-release tags containing `-` are marked prerelease automatically.
 
 ### macOS assets
 
 The workflow publishes:
 
-- `SonicTerm-<version>-mac-aarch64.dmg`
-- `SonicTerm-<version>-mac-x86_64.dmg`
+- `SonicTerm-<tag>-mac-aarch64.dmg`
+- `SonicTerm-<tag>-mac-x86_64.dmg`
 
 The package includes themes, keymaps, fonts, icons, i18n, app metadata, and an
 ad-hoc signature. Release verification checks each binary's architecture with
@@ -291,14 +298,30 @@ ad-hoc signature. Release verification checks each binary's architecture with
 
 ### Windows assets
 
-The workflow publishes an x64 `.msi` built with `cargo wix` and WiX 3.14. The
-MSI contains the executable, themes, keymaps, bundled fonts, and shortcuts.
+The workflow publishes `SonicTerm-<tag>-windows-x86_64.msi`, built with
+`cargo wix` and WiX 3.14. The MSI contains the executable, themes, keymaps,
+bundled fonts, and shortcuts.
+
+### Linux assets
+
+The workflow publishes:
+
+- `SonicTerm-<tag>-linux-x86_64.deb`
+- `SonicTerm-<tag>-linux-x86_64.tar.gz`
+
+Both come from one staged payload and contain the shipping `sonicterm` binary,
+complete runtime assets, licenses, and README. The Debian package additionally
+installs desktop/AppStream metadata and the hicolor icon.
 
 ### Shared assets
 
-The publish job creates `SHA256SUMS.txt` over all DMG/MSI files and generates
-release notes from commits since the previous tag. The release workflow fails
-if either a DMG or MSI is absent.
+Each package job emits typed asset fragments. The publish job downloads only
+those package bundles, revalidates every hash and the five required
+platform/architecture/kind tuples, rejects duplicate or unregistered
+release-like files, and generates `release-assets.json`, deterministic
+`SHA256SUMS.txt`, and an exact upload-path list. Release notes enumerate the
+manifest generically, so adding an optional artifact kind does not require a
+release-note script change.
 
 ## Manual release checks
 
@@ -344,7 +367,12 @@ prove the published pages render and link correctly.
 | File | Purpose |
 | --- | --- |
 | `scripts/check-authored-rust-comments.sh` | test and enforce first-party Rust comment contracts |
-| `scripts/release-notes.sh` | commit-derived release notes and asset list |
+| `scripts/make-linux-packages.sh` | build reproducible Linux tar and Debian packages from one payload |
+| `scripts/smoke-linux-packages.sh` | run packaged tar/deb layouts on X11 and Wayland with lavapipe |
+| `scripts/prepare-release-assets.py` | validate tag versions, register assets, and consolidate manifest/checksums/uploads |
+| `scripts/test-linux-packages.sh` | validate Linux source and built-package contracts |
+| `scripts/test-release-assets.sh` | validate generic release fragments and exact upload selection |
+| `scripts/release-notes.sh` | manifest-driven release notes and asset list |
 | `scripts/test-release-notes.sh` | throwaway-repository unit test for notes |
 | `scripts/publish-wiki.sh` | deletion-aware flat wiki mirror builder |
 | `scripts/test-wiki-publish.sh` | throwaway-repository wiki publication test |
@@ -369,6 +397,8 @@ prove the published pages render and link correctly.
 | Exit policy | `scripts/check-no-raw-process-exit.sh` |
 | macOS package | `scripts/make-macos-dmg.sh`, `Packaging` |
 | Windows package | `crates/sonicterm-windows/wix/main.wxs`, `Packaging` |
+| Linux package/runtime smoke | `scripts/{make,smoke,test}-linux-packages.sh`, `Packaging` |
+| Release manifest | `scripts/prepare-release-assets.py`, `scripts/test-release-assets.sh` |
 | Wiki publication rule | root `CLAUDE.md` under “Wiki” |
 
 ## 中文
@@ -382,7 +412,7 @@ prove the published pages render and link correctly.
 
 ```text
 Cargo.toml                 workspace member、共享版本/依赖/lint
-crates/                    23 个第一方 Rust crate
+crates/                    24 个第一方 Rust crate
 assets/                    字体、主题、keymap、icon、i18n、截图
 wiki/                      规范双语文档，全部文档均在此
 scripts/                   扁平第一方 shell/PowerShell 自动化
@@ -399,11 +429,14 @@ crate 和内部 path requirement 的权威版本。
 cargo build
 cargo run -p sonicterm-mac       # macOS
 cargo run -p sonicterm-windows   # Windows
+cargo run -p sonicterm-linux     # Linux; binary name is sonicterm
 ```
 
-Windows CI/release 经 vcpkg 安装静态 Cairo；macOS release builder 经 Homebrew 安装 Cairo 与 pkg-config。
-Fontconfig、FreeType、HarfBuzz、AppKit、Win32 和 installer 行为需要相应平台/build boundary，
-不能用空洞的符号测试代替。
+Windows CI/release 经 vcpkg 安装静态 Cairo；macOS release builder 经 Homebrew 安装 Cairo 与
+pkg-config。Ubuntu 22.04 builder 会安装 Cairo、Fontconfig、X11、Wayland、Mesa
+Vulkan/lavapipe、Xvfb、Weston 与 Debian 打包工具。Fontconfig、FreeType、HarfBuzz、
+AppKit、Win32、X11/Wayland 和 installer 行为需要相应平台/build boundary，不能用空洞的
+符号测试代替。
 
 ## Crate 本地说明
 
@@ -483,6 +516,8 @@ bash scripts/pty-backend-feasibility.sh --check
 bash scripts/test-resource-inventory.sh
 bash scripts/test-resource-baseline-evidence.sh
 bash scripts/test-soak-harness.sh
+bash scripts/test-linux-packages.sh
+bash scripts/test-release-assets.sh
 bash scripts/test-release-notes.sh
 bash scripts/test-wiki-publish.sh
 scripts/rust-logic-coverage.sh
@@ -509,8 +544,9 @@ cargo build --release -p sonicterm-mac
 
 ## Pull-request CI
 
-`.github/workflows/ci.yml` 在 PR 以及推送到 `main` 时运行 macOS 14 /
-Windows latest matrix，并运行一个聚焦于 Linux 本地目标可打开性与 direct-open 边界的 Ubuntu compile/test job：
+`.github/workflows/ci.yml` 在 PR 与推送到 `main` 时运行。macOS 14 / Windows
+latest matrix 保留平台原生 gate；Ubuntu 22.04 container 则运行完整 workspace 与
+per-crate gate，构建两种 Linux package，并在 X11 与 Wayland 上执行每一种 package：
 
 ```mermaid
 flowchart TD
@@ -533,10 +569,16 @@ flowchart TD
     soak["确定性 soak control gate"]
     baseline["resource baseline evidence 收集器测试与采集"]
     coverage(["仅 macOS：安装 cargo-llvm-cov 并执行 coverage gate"])
-    linux(["Ubuntu：路径处理的 cfg/vt/app clippy + test"])
+    linuxbuild["Ubuntu 22.04：完整 clippy/doc/unit/per-crate gate"]
+    linuxpkg["构建并验证 deb 与 tar.gz"]
+    linuxx11["打包 tar/deb：X11/Xvfb + lavapipe"]
+    linuxwayland(["打包 tar/deb：Wayland/Weston + lavapipe"])
 
     checkout --> cairo
-    checkout --> linux
+    checkout --> linuxbuild
+    linuxbuild --> linuxpkg
+    linuxpkg --> linuxx11
+    linuxx11 --> linuxwayland
     cairo --> comments
     comments --> rustdoc
     rustdoc --> exitpolicy
@@ -559,10 +601,12 @@ flowchart TD
 CI 会运行 `cargo fmt --all --check`、第一方 Rust 注释 checker、严格 workspace
 Rustdoc，以及 warning 视为错误的 `cargo clippy --workspace --all-targets`。由于
 `--all-targets` 不会启用 optional feature，`sonicterm-io` 的 `ssh` feature 另有
-clippy 和严格 Rustdoc gate。单独的 Ubuntu job 会安装 Cairo/Fontconfig 与窗口系统开发包，
-再对 `sonicterm-vt`、`sonicterm-cfg`、`sonicterm-app` 运行严格 clippy 与测试。
-它会编译 Linux fd-based portal opener、固定 `xdg-open` fallback 与本地目标 policy，
-但不会新增可发布的 Linux 二进制。Windows 还会运行显式的
+clippy 和严格 Rustdoc gate。Ubuntu 22.04 job 会运行这些完整 gate 和每个 crate 的
+测试/构建边界，构建发布用 `sonicterm` 二进制，验证 desktop/AppStream metadata 与生成的
+Debian dependency field，并上传两种 Linux package。随后，它会让解压后的 tar 与安装后的
+Debian layout 分别在 X11/Xvfb 与 headless Wayland/Weston 下运行，设置
+`WGPU_BACKEND=vulkan` 并使用 Mesa lavapipe。没有真实窗口、GPU 初始化、`/bin/sh`
+PTY marker 往返和后续原生呈现，smoke 就不能通过。Windows 还会运行显式的
 `Verify Windows WARP allocator baseline` 步骤，执行确定性的
 `windows_warp_allocator_baseline` integration test。它请求 DX12 CPU fallback，并比较
 旧的 wgpu 默认策略与生产环境的软件 adapter 内存策略。没有 WARP 或 allocator report、
@@ -584,64 +628,70 @@ push 匹配的 `v*` tag 会启动 `.github/workflows/release.yml`：
 ```mermaid
 flowchart TD
     tag["vX.Y.Z tag"]
-    mactest["macOS workspace/per-crate/release-note 测试"]
-    wintest["Windows workspace/per-crate 测试"]
-    softpresent["Windows software presentation capability"]
-    warp["Verify Windows WARP allocator baseline"]
-    selection["Windows selection presentation"]
-    notes["Windows release-note 测试"]
-    macx86["构建 macOS x86_64 binary"]
-    macarm["构建 macOS aarch64 binary"]
-    dmg["校验架构并打包两个 DMG"]
-    msi["构建 Windows x64 binary 和 WiX MSI"]
-    download["Ubuntu 下载所有 artifact"]
-    require["要求至少存在 DMG 和 MSI"]
-    sums["生成 SHA256SUMS.txt 与 release notes"]
-    publish(["发布 GitHub Release"])
+    validate["校验 tag 与全部 workspace package 版本"]
+    mactest["macOS workspace/per-crate 测试"]
+    wintest["Windows workspace/per-crate + WARP/presentation 测试"]
+    linuxtest["Ubuntu 22.04 workspace/per-crate/tooling 测试"]
+    macbuild["构建 x86_64 + aarch64 binary"]
+    dmg["打包并登记两个 DMG"]
+    msi["构建并登记 Windows x64 MSI"]
+    linuxpkg["构建并登记 Linux deb 与 tar.gz"]
+    linuxsmoke["tar/deb × X11/Wayland runtime smoke"]
+    manifest["合并 fragment；验证五个必需 tuple 与 hash"]
+    notes["生成 manifest 驱动的 release note 与 SHA256SUMS.txt"]
+    publish(["发布精确验证后的路径"])
 
-    tag --> mactest
-    tag --> wintest
-    wintest --> softpresent
-    softpresent --> warp
-    warp --> selection
-    selection --> notes
-    mactest --> macx86
-    mactest --> macarm
-    macx86 --> dmg
-    macarm --> dmg
-    notes --> msi
-    dmg --> download
-    msi --> download
-    download --> require
-    require --> sums
-    sums --> publish
+    tag --> validate
+    validate --> mactest
+    validate --> wintest
+    validate --> linuxtest
+    mactest --> macbuild --> dmg
+    wintest --> msi
+    linuxtest --> linuxpkg --> linuxsmoke
+    dmg --> manifest
+    msi --> manifest
+    linuxsmoke --> manifest
+    manifest --> notes --> publish
 ```
 
-Windows allocator 测试会阻断发布。当前已验证的 Windows release dependency 是
-`unit-tests-windows → build-windows → publish`，因此 WARP baseline 失败会阻止 MSI
-构建与发布。
-
-包含 `-` 的 prerelease tag 会自动标记为 prerelease。
+三个平台链都会阻断发布。`unit-tests-windows → build-windows → publish` 让 WARP
+allocator baseline 保持在 Windows 路径中；`unit-tests-linux → package-linux → publish`
+则要求两种 package layout 都通过 X11 与 Wayland smoke 后才能发布。包含 `-` 的 prerelease
+tag 会自动标记为 prerelease。
 
 ### macOS 资产
 
 workflow 发布：
 
-- `SonicTerm-<version>-mac-aarch64.dmg`
-- `SonicTerm-<version>-mac-x86_64.dmg`
+- `SonicTerm-<tag>-mac-aarch64.dmg`
+- `SonicTerm-<tag>-mac-x86_64.dmg`
 
 package 包含 theme、keymap、font、icon、i18n、app metadata 和 ad-hoc signature。
 构建 DMG 前用 `lipo` 校验 binary architecture。
 
 ### Windows 资产
 
-workflow 发布由 `cargo wix` 和 WiX 3.14 生成的 x64 `.msi`，包含 executable、theme、keymap、
-内置字体和 shortcut。
+workflow 发布由 `cargo wix` 和 WiX 3.14 构建的
+`SonicTerm-<tag>-windows-x86_64.msi`，其中包含 executable、theme、keymap、内置字体与
+shortcut。
+
+### Linux 资产
+
+workflow 发布：
+
+- `SonicTerm-<tag>-linux-x86_64.deb`
+- `SonicTerm-<tag>-linux-x86_64.tar.gz`
+
+两者都来自同一个 staged payload，并包含发布用 `sonicterm` 二进制、完整 runtime asset、
+license 与 README；Debian package 还安装 desktop/AppStream metadata 与 hicolor icon。
 
 ### 共享资产
 
-publish job 为全部 DMG/MSI 生成 `SHA256SUMS.txt`，并根据上一个 tag 之后的 commit 生成 release notes。
-缺少 DMG 或 MSI 时 workflow 失败。
+每个平台 package job 都会输出类型化 asset fragment。publish job 只下载这些 package
+bundle，重新验证每个 hash 与五个必需 platform/architecture/kind tuple，拒绝重复或未登记的
+release-like 文件，并生成 `release-assets.json`、确定性的 `SHA256SUMS.txt` 和精确
+upload-path list。release note 会通用遍历 manifest，因此添加可选 artifact kind 不需要修改
+release-note 脚本。
 
 ## 手工发布检查
 
@@ -669,7 +719,12 @@ workflow 使用生命周期短、只限本仓库的 `GITHUB_TOKEN`，并仅授�
 | 文件 | 用途 |
 | --- | --- |
 | `scripts/check-authored-rust-comments.sh` | 测试并执行第一方 Rust 注释契约 |
-| `scripts/release-notes.sh` | 根据 commit 生成 release note 与资产列表 |
+| `scripts/make-linux-packages.sh` | 从同一个 payload 构建可复现 Linux tar 与 Debian package |
+| `scripts/smoke-linux-packages.sh` | 使用 lavapipe 在 X11 与 Wayland 上运行打包 tar/deb layout |
+| `scripts/prepare-release-assets.py` | 校验 tag 版本、登记 asset，并合并 manifest/checksum/upload |
+| `scripts/test-linux-packages.sh` | 验证 Linux source 与已构建 package 契约 |
+| `scripts/test-release-assets.sh` | 验证通用 release fragment 与精确 upload 选择 |
+| `scripts/release-notes.sh` | 生成 manifest 驱动的 release note 与资产列表 |
 | `scripts/test-release-notes.sh` | 在临时仓库中测试 note 脚本 |
 | `scripts/publish-wiki.sh` | 构建可同步删除的扁平 Wiki 镜像 |
 | `scripts/test-wiki-publish.sh` | 在临时仓库中测试 Wiki 发布 |
@@ -694,4 +749,6 @@ workflow 使用生命周期短、只限本仓库的 `GITHUB_TOKEN`，并仅授�
 | Exit policy | `scripts/check-no-raw-process-exit.sh` |
 | macOS package | `scripts/make-macos-dmg.sh`, `Packaging` |
 | Windows package | `crates/sonicterm-windows/wix/main.wxs`, `Packaging` |
+| Linux package/runtime smoke | `scripts/{make,smoke,test}-linux-packages.sh`, `Packaging` |
+| Release manifest | `scripts/prepare-release-assets.py`, `scripts/test-release-assets.sh` |
 | Wiki 发布规则 | 根 `CLAUDE.md` 的“Wiki”章节 |

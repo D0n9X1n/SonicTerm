@@ -1,8 +1,7 @@
 //! SonicTerm Terminal — macOS entry point.
 
-use std::path::PathBuf;
-
 use anyhow::Result;
+use sonicterm_cfg::assets::asset_dir;
 use sonicterm_cfg::config::Config;
 use sonicterm_cfg::keymap::Keymap;
 use sonicterm_cfg::theme::Theme;
@@ -218,22 +217,4 @@ fn load_theme(name: &str) -> Theme {
 
 fn load_keymap(name: &str) -> Keymap {
     Keymap::load_name_or_default(name, &asset_dir())
-}
-
-/// Bundled assets live next to the binary inside the `.app` bundle.
-/// In dev (`cargo run`), fall back to the workspace-root `assets/` dir.
-fn asset_dir() -> PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        // `.../SonicTerm.app/Contents/MacOS/sonicterm-mac` → `.../Contents/Resources/assets`
-        if let Some(macos) = exe.parent() {
-            if let Some(contents) = macos.parent() {
-                let bundled = contents.join("Resources").join("assets");
-                if bundled.exists() {
-                    return bundled;
-                }
-            }
-        }
-    }
-    // dev fallback
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets")
 }

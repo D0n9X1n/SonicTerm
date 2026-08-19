@@ -9,6 +9,17 @@ fn exports_default_filter_and_config() {
     assert_eq!(LoggingConfig::default().max_rotated_files, 3);
 }
 
+/// An explicit runtime directory owns both ordinary and signal-safe log output.
+#[test]
+fn explicit_log_directory_controls_every_log_sink() {
+    // Protect isolated runtime smokes from leaking either sink into the user's default log tree.
+    let directory = std::path::Path::new("/isolated/sonicterm");
+    assert_eq!(crate::exit_trace::exit_log_path(directory), directory.join(crate::log_file_name()));
+
+    const LINUX_SOURCE: &str = include_str!("../../sonicterm-linux/src/main.rs");
+    assert!(LINUX_SOURCE.contains("sonicterm_logging::init_in(&log_config, &log_dir)"));
+}
+
 // ---------------------------------------------------------------------------
 // Custom target reachability
 //
@@ -454,6 +465,7 @@ fn platform_startup_reports_postmortem_evidence_before_artifact_cleanup() {
     for (platform, source) in [
         ("macOS", include_str!("../../sonicterm-mac/src/main.rs")),
         ("Windows", include_str!("../../sonicterm-windows/src/main.rs")),
+        ("Linux", include_str!("../../sonicterm-linux/src/main.rs")),
     ] {
         let report = source
             .find("postmortem::report_prior_sessions")

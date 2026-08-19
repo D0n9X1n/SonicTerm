@@ -242,6 +242,43 @@ fn resolve_spawn_shell_prefers_nonempty_override() {
     assert_eq!(resolve_spawn_shell(Some("   ")), default_shell());
 }
 
+/// Unix shell selection accepts only executable candidates and preserves priority.
+#[cfg(unix)]
+#[test]
+fn unix_default_shell_prefers_valid_environment_then_passwd_then_sh() {
+    let executable =
+        |path: &Path| matches!(path.to_str(), Some("/env/sh" | "/passwd/sh" | "/bin/sh"));
+
+    assert_eq!(
+        resolve_unix_default_shell_with(Some("/env/sh"), Some("/passwd/sh"), executable),
+        "/env/sh"
+    );
+    assert_eq!(
+        resolve_unix_default_shell_with(Some("/missing"), Some("/passwd/sh"), executable),
+        "/passwd/sh"
+    );
+    assert_eq!(
+        resolve_unix_default_shell_with(Some("  "), Some("/missing"), executable),
+        "/bin/sh"
+    );
+}
+
+/// Unix shell selection rejects a non-executable file rather than trusting its pathname.
+#[cfg(unix)]
+#[test]
+fn unix_default_shell_rejects_non_executable_candidates() {
+    let executable = |path: &Path| path == Path::new("/bin/sh");
+
+    assert_eq!(
+        resolve_unix_default_shell_with(
+            Some("/tmp/plain-file"),
+            Some("/tmp/passwd-file"),
+            executable
+        ),
+        "/bin/sh"
+    );
+}
+
 #[cfg(target_os = "windows")]
 #[test]
 fn windows_default_shell_prefers_registered_pwsh_before_store_and_legacy() {
@@ -686,9 +723,20 @@ fn a_clean_child_exit_becomes_observable_while_the_handle_lives() {
     drop(pty);
 }
 
+#[test]
+fn linux_proc_stat_treats_zombie_and_dead_members_as_terminated() {
+    // Protect session cleanup from waiting on non-runnable descendants that container PID 1 has not reaped.
+    assert_eq!(linux_proc_stat_is_active("41 (sleep worker) R 1 2 3"), Some(true));
+    assert_eq!(linux_proc_stat_is_active("42 (sleep worker) Z 1 2 3"), Some(false));
+    assert_eq!(linux_proc_stat_is_active("43 (name with ) inside) X 1 2 3"), Some(false));
+    assert_eq!(linux_proc_stat_is_active("44 (name with ) inside) x 1 2 3"), Some(false));
+    assert_eq!(linux_proc_stat_is_active("malformed"), None);
+}
+
 #[cfg(unix)]
 #[test]
 fn observed_shell_exit_still_kills_background_process_group() {
+    // Protect teardown from leaving a runnable descendant behind when the shell leader exits first.
     let args = vec!["-c".to_string(), "trap '' HUP; sleep 30 & echo $!; exit 0".to_string()];
     let pty = PtyHandle::spawn_with_args("/bin/sh", &args, 80, 24).expect("spawn shell");
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -713,17 +761,15 @@ fn observed_shell_exit_still_kills_background_process_group() {
     }
     assert!(probe.has_exited().expect("shell exited"));
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while
-    // SAFETY: `kill` takes scalars and touches no memory; signal 0 only tests whether the reparented background pid still exists.
-    unsafe { libc::kill(background_pid, 0) } == 0 && std::time::Instant::now() < deadline {
+    while unix_process_is_active(background_pid as u32).expect("probe background process")
+        && std::time::Instant::now() < deadline
+    {
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(
-        // SAFETY: `kill` takes scalars and touches no memory; signal 0 only tests whether the reparented background pid still exists.
-        unsafe { libc::kill(background_pid, 0) },
-        -1
+    assert!(
+        !unix_process_is_active(background_pid as u32).expect("background process terminated"),
+        "the background process remained runnable after its shell leader exited"
     );
-    assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
     drop(pty);
 }
 

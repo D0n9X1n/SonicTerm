@@ -418,6 +418,40 @@ fn unix_session_pids(session_id: u32) -> std::io::Result<Vec<u32>> {
         .collect())
 }
 
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
+fn linux_proc_stat_is_active(stat: &str) -> Option<bool> {
+    let (_, suffix) = stat.rsplit_once(") ")?;
+    let state = suffix.as_bytes().first().copied()?;
+    Some(!matches!(state, b'Z' | b'X' | b'x'))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn unix_process_is_active(pid: u32) -> std::io::Result<bool> {
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => Ok(linux_proc_stat_is_active(&stat).unwrap_or(true)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(all(target_os = "macos", test))]
+fn unix_process_is_active(pid: u32) -> std::io::Result<bool> {
+    if (
+        // SAFETY: `kill` receives a process id by value; signal 0 only probes process existence.
+        unsafe { libc::kill(pid as libc::pid_t, 0) }
+    ) == 0
+    {
+        // When: `libc::kill(pid as libc::pid_t, 0) == 0`, the process still exists.
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        // When: `error.raw_os_error() == Some(libc::ESRCH)`, the process no longer exists.
+        return Ok(false);
+    }
+    Err(error)
+}
+
 #[cfg(all(unix, not(target_os = "macos")))]
 fn unix_session_pids(session_id: u32) -> std::io::Result<Vec<u32>> {
     let mut pids = Vec::new();
@@ -432,6 +466,11 @@ fn unix_session_pids(session_id: u32) -> std::io::Result<Vec<u32>> {
             unsafe { libc::getsid(pid as libc::pid_t) }
         ) == session_id as libc::pid_t
         {
+            // When: `libc::getsid(pid as libc::pid_t) == session_id as libc::pid_t`, inspect this session member's state.
+            if !unix_process_is_active(pid)? {
+                // When: `unix_process_is_active(pid)` is false, this terminated session member needs no signal.
+                continue;
+            }
             pids.push(pid);
         }
     }
@@ -1598,9 +1637,84 @@ fn store_pkg_version(pwsh_path: &Path) -> [u64; 4] {
     out
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(unix)]
+fn resolve_unix_default_shell_with(
+    environment_shell: Option<&str>,
+    passwd_shell: Option<&str>,
+    executable: impl Fn(&Path) -> bool,
+) -> String {
+    environment_shell
+        .into_iter()
+        .chain(passwd_shell)
+        .map(str::trim)
+        .filter(|candidate| !candidate.is_empty())
+        .find(|candidate| executable(Path::new(candidate)))
+        .unwrap_or("/bin/sh")
+        .to_string()
+}
+
+#[cfg(unix)]
+fn unix_shell_is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(unix)]
+fn passwd_shell() -> Option<String> {
+    use std::ffi::CStr;
+
+    let mut capacity = 16 * 1024;
+    loop {
+        let mut record: libc::passwd =
+            // SAFETY: zeroed `passwd` is writable output storage for `getpwuid_r`.
+            unsafe { std::mem::zeroed() };
+        let mut result = std::ptr::null_mut();
+        let mut buffer = vec![0u8; capacity];
+        let status =
+            // SAFETY: `record`, `buffer`, and `result` remain writable for this call; `getuid` supplies the current real user id.
+            unsafe {
+                libc::getpwuid_r(
+                    libc::getuid(),
+                    &mut record,
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                    &mut result,
+                )
+            };
+        if status == libc::ERANGE && capacity < 1024 * 1024 {
+            // When: `status` is `ERANGE`, retry with bounded larger storage instead of reading a partial record.
+            capacity *= 2;
+            continue;
+        }
+        if status != 0 || result.is_null() || record.pw_shell.is_null() {
+            // When: lookup `status`, `result`, or `pw_shell` is invalid, no trustworthy passwd shell is available.
+            return None;
+        }
+        return
+            // SAFETY: successful `getpwuid_r` stores a NUL-terminated `pw_shell` pointer into the live `buffer`.
+            unsafe { CStr::from_ptr(record.pw_shell) }
+                .to_str()
+                .ok()
+                .map(str::to_string);
+    }
+}
+
+#[cfg(unix)]
 fn default_shell_program() -> String {
-    std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
+    let environment_shell = std::env::var("SHELL").ok();
+    let passwd_shell = passwd_shell();
+    resolve_unix_default_shell_with(
+        environment_shell.as_deref(),
+        passwd_shell.as_deref(),
+        unix_shell_is_executable,
+    )
+}
+
+#[cfg(all(not(unix), not(target_os = "windows")))]
+fn default_shell_program() -> String {
+    "/bin/sh".to_string()
 }
 
 #[cfg(target_os = "windows")]

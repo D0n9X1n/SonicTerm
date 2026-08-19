@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn native_raster_roles_use_distinct_tiles_without_projection_scaling() {
     // Contract: each chrome role has a distinct atlas tile drawn at its native raster size.
-    let _font_lock = TRACKED_FONT_STACK_LOCK.lock().expect("font fixture lock");
+    let _font_lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK.lock().expect("font fixture lock");
     let mut atlas = GlyphAtlas::new(512, 512);
     let screen = (800.0, 100.0);
     let cases = [
@@ -16,7 +16,7 @@ fn native_raster_roles_use_distinct_tiles_without_projection_scaling() {
     let mut tile_sizes = Vec::new();
 
     for (size, variant) in cases {
-        let stack = tracked_font_stack(size);
+        let stack = crate::lib_tests::tracked_font_stack(size);
         let shaped = stack.shape_text("M").expect("tracked font shapes M");
         let glyph = shaped.iter().find(|glyph| glyph.glyph_pos != 0).expect("tracked font has M");
         let key = GlyphKey::shaped(

@@ -23,7 +23,9 @@ cargo test -p sonicterm-logging
   without sanitization.
 - Avoid holding logging locks across PTY or renderer operations.
 - Init can happen only once; preserve the current bootstrap-then-user-config
-  behavior in macOS and Windows binaries.
+  behavior in all platform binaries. Runtime smokes use `init_in` so diagnostic
+  state stays outside the user's default log tree.
 
 ## Cross-references
-- Consumed by: `sonicterm-mac`, `sonicterm-windows`, `sonicterm-app`.
+- Consumed by: `sonicterm-mac`, `sonicterm-windows`, `sonicterm-linux`,
+  `sonicterm-app`.

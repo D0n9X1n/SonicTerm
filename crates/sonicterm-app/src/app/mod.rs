@@ -4,6 +4,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    path::PathBuf,
     sync::{
         atomic::{AtomicU32, AtomicU64, Ordering},
         Arc,
@@ -76,11 +77,16 @@ fn app_icon() -> Option<winit::window::Icon> {
         .clone()
 }
 
-/// Attach the bundled SonicTerm icon to a window's attributes. Applied at
-/// every window-creation site (main window, new window, tab tear-out
-/// children) so all windows show the logo in the title bar and taskbar.
+/// Attach packaged platform identity and the bundled SonicTerm icon to a
+/// window's attributes. Applied at every window-creation site.
 #[doc(hidden)]
 pub fn with_app_icon(attrs: WindowAttributes) -> WindowAttributes {
+    #[cfg(target_os = "linux")]
+    let attrs = {
+        use winit::platform::wayland::WindowAttributesExtWayland;
+
+        attrs.with_name(LINUX_DESKTOP_ID, LINUX_INSTANCE_NAME)
+    };
     let attrs = attrs.with_window_icon(app_icon());
     // winit's `with_window_icon` only sets `ICON_SMALL` (the 16px title-bar
     // icon). The taskbar button uses `ICON_BIG`, which must be set
@@ -242,6 +248,12 @@ pub struct SplitterDragState {
 /// Native OS window title. Keep static; terminal/tab titles render inside
 /// SonicTerm's own tab bar.
 pub const NATIVE_WINDOW_TITLE: &str = "SonicTerm";
+
+/// Linux desktop entry, AppStream component, and Wayland application ID.
+pub const LINUX_DESKTOP_ID: &str = "com.d0n9x1n.SonicTerm";
+
+/// Linux X11 `WM_CLASS` instance paired with [`LINUX_DESKTOP_ID`].
+pub const LINUX_INSTANCE_NAME: &str = "sonicterm";
 
 /// Maximum gap (ms) between consecutive left-presses on the same cell for
 /// them to count as a double/triple click. Beyond this the streak resets
@@ -1559,6 +1571,8 @@ pub enum UserEvent {
         /// Human-readable rejection reason.
         reason: String,
     },
+    /// The bounded Linux package-smoke watchdog expired.
+    RuntimeSmokeTimeout,
 }
 
 fn pty_input_rejected_event(error: sonicterm_io::pty::PtyInputError) -> UserEvent {
@@ -1612,6 +1626,8 @@ mod pane_launch;
 mod path_target;
 mod quit_hold;
 mod redraw_target;
+mod runtime_smoke;
+pub use runtime_smoke::RuntimeSmokeFailure;
 mod render_timing;
 pub mod renderer_retention;
 pub mod retention;
@@ -1829,6 +1845,8 @@ pub struct PendingTearOut {
 pub struct App {
     pub(super) theme: Theme,
     pub(super) config: Config,
+    /// Packaged font directories retained for every renderer and live font rebuild.
+    pub(super) font_dirs: Vec<PathBuf>,
     /// Font size the loaded config asked for, in logical px. `ResetFontSize`
     /// returns here rather than to the compile-time default, so Cmd+0 restores
     /// the user's configured size instead of a value they never chose.
@@ -2035,6 +2053,8 @@ pub struct App {
     pub(in crate::app) path_workers: Option<path_target::PathWorkers>,
     /// Local hostname used to reject foreign-authority OSC 7 snapshots.
     pub(super) local_hostname: String,
+    /// Hidden Linux package-smoke state; absent during ordinary application runs.
+    pub(super) runtime_smoke: Option<runtime_smoke::RuntimeSmokeState>,
     /// Minimum interval between two successive frames. Defaults to 1/60s
     /// and is updated in `resumed` from the current monitor's reported
     /// refresh rate. Used by the RedrawRequested handler to skip an
@@ -2327,6 +2347,7 @@ impl App {
         command_palette.set_keymap(&keymap);
         let configured_font_size = config.font.size;
         let configured_weight_scale = config.font.effective_weight_scale();
+        let font_dirs = vec![sonicterm_cfg::assets::asset_dir().join("fonts")];
         let path_workers = event_loop_proxy.as_ref().and_then(|proxy| {
             match path_target::PathWorkers::start(proxy.clone()) {
                 Ok(workers) => Some(workers),
@@ -2340,6 +2361,7 @@ impl App {
         Self {
             theme,
             config,
+            font_dirs,
             configured_font_size,
             configured_weight_scale,
             keymap,
@@ -2386,6 +2408,7 @@ impl App {
             event_loop_proxy,
             path_workers,
             local_hostname,
+            runtime_smoke: None,
             // Default to 60 Hz until `resumed` probes the actual
             // monitor refresh rate. ~16.667 ms = 1/60 s.
             frame_period: Duration::from_micros(16_667),

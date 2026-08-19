@@ -5363,6 +5363,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "sonicterm-linux"
+version = "1.2.2"
+dependencies = [
+ "anyhow",
+ "roxmltree 0.21.1",
+ "sonicterm-app",
+ "sonicterm-app-core",
+ "sonicterm-cfg",
+ "sonicterm-engine",
+ "sonicterm-logging",
+ "tracing",
+]
+
+[[package]]
 name = "sonicterm-logging"
 version = "1.2.2"
 dependencies = [

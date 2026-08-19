@@ -22,6 +22,8 @@ cargo build -p sonicterm-engine
 - Prefer moving stable contracts into `sonicterm-types` when multiple
   crates need them.
 - Do not depend on vendor font modules; use Sonic-owned font crates.
+- Preserve configured packaged font directories alongside native discovery; the
+  Linux package relies on all four bundled Rec Mono faces without installation.
 
 ## Cross-references
 - Consumes: `sonicterm-font-config`, `sonicterm-font`, `sonicterm-grid`,

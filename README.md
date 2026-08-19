@@ -18,10 +18,10 @@
 
 </div>
 
-SonicTerm is a native macOS + Windows terminal with the quality-of-life features
-you expect from a modern editor: searchable commands, split panes, draggable
-tabs, editable TOML config, bundled Nerd-Font-patched typography, and a renderer
-that is designed around GPU quads instead of CPU blits.
+SonicTerm is a native macOS, Windows, and Linux terminal with the quality-of-life
+features you expect from a modern editor: searchable commands, split panes,
+draggable tabs, editable TOML config, bundled Nerd-Font-patched typography, and
+a renderer that is designed around GPU quads instead of CPU blits.
 
 It aims to feel small, sharp, and quiet: no Electron shell, no heavyweight
 runtime, no required GUI preferences pane, and no global dotfile sprawl. User
@@ -75,8 +75,8 @@ back when the context belongs with the original session again.
 
 ## Why try it?
 
-- **Native macOS + Windows app** — small binaries, no Electron, no web runtime.
-- **GPU renderer** — wgpu on Metal / D3D12, with atlas-backed text and batched
+- **Native macOS, Windows, and Linux app** — small binaries, no Electron, no web runtime.
+- **GPU renderer** — wgpu on Metal, D3D12, and Vulkan, with atlas-backed text and batched
   quads for cells, chrome, selection, cursor, search, and overlays. Glyphs
   rasterize with DirectWrite on Windows (FreeType elsewhere and as fallback).
   Detects the no-GPU case (RDP / VM software rasterizer) and degrades gracefully

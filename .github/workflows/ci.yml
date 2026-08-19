@@ -203,10 +203,47 @@ jobs:
         shell: bash
         run: scripts/rust-logic-coverage.sh
 
-  linux-paths:
-    name: ubuntu / path handling
+  linux:
+    name: ubuntu 22.04 / workspace, packages, X11, Wayland
     runs-on: ubuntu-latest
+    container: ubuntu:22.04
+    env:
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: ${{ github.workspace }}
     steps:
+      - name: Install runner and native dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates \
+            curl \
+            git \
+            build-essential \
+            zstd \
+            pkg-config \
+            libcairo2-dev \
+            libfontconfig1-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-0 \
+            binutils \
+            dpkg-dev \
+            file \
+            desktop-file-utils \
+            appstream \
+            lintian \
+            mesa-vulkan-drivers \
+            libvulkan1 \
+            xvfb \
+            x11-utils \
+            weston \
+            python3
+
       - uses: actions/checkout@v7
 
       - name: Install Rust
@@ -214,28 +251,95 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - name: Install native build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            pkg-config \
-            libcairo2-dev \
-            libfontconfig1-dev \
-            libwayland-dev \
-            libx11-dev \
-            libxcb1-dev \
-            libxkbcommon-dev
-
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: linux-paths
+          shared-key: linux-ubuntu-22.04
 
       - name: Check formatting
         run: cargo fmt --all --check
 
-      - name: Check Linux path crates
-        run: cargo clippy -p sonicterm-vt -p sonicterm-cfg -p sonicterm-app --all-targets -- -D warnings
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Test Linux path crates
-        run: cargo test -p sonicterm-vt -p sonicterm-cfg -p sonicterm-app
+      - name: Clippy optional ssh backend
+        run: cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings
+
+      - name: Check public Rustdoc
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+
+      - name: Check optional ssh Rustdoc
+        run: RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-io --no-deps --features ssh
+
+      - name: Run workspace unit tests
+        run: cargo test --workspace --lib --bins
+
+      - name: Run per-crate unit/build gate
+        run: bash scripts/check-workspace-crates.sh
+
+      - name: Run source and release tooling gates
+        run: |
+          bash scripts/check-authored-rust-comments.sh
+          bash scripts/check-no-raw-process-exit.sh
+          bash scripts/check-rust-version.sh
+          bash scripts/check-window-owner-registration.sh
+          bash scripts/test-linux-packages.sh
+          bash scripts/test-release-assets.sh
+          bash scripts/test-release-notes.sh
+          bash scripts/test-wiki-publish.sh
+
+      - name: Build Linux release binary
+        run: cargo build --release -p sonicterm-linux
+
+      - name: Build and validate Linux packages
+        id: packages
+        shell: bash
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 | python3 -c '
+          import json, sys
+          metadata = json.load(sys.stdin)
+          members = set(metadata["workspace_members"])
+          versions = {package["version"] for package in metadata["packages"] if package["id"] in members}
+          if len(versions) != 1:
+              raise SystemExit(f"workspace versions differ: {sorted(versions)}")
+          print(versions.pop())
+          ')"
+          tag="v${version}"
+          python3 scripts/prepare-release-assets.py check-version --tag "$tag"
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)" \
+            bash scripts/make-linux-packages.sh target/release/sonicterm "$tag" dist
+          tarball="dist/SonicTerm-${tag}-linux-x86_64.tar.gz"
+          deb="dist/SonicTerm-${tag}-linux-x86_64.deb"
+          bash scripts/test-linux-packages.sh "$tarball" "$deb"
+          desktop-file-validate \
+            "dist/.linux-package-work/SonicTerm-${tag}-linux-x86_64/share/applications/com.d0n9x1n.SonicTerm.desktop"
+          appstreamcli validate --no-net \
+            "dist/.linux-package-work/SonicTerm-${tag}-linux-x86_64/share/metainfo/com.d0n9x1n.SonicTerm.metainfo.xml"
+          if ! lintian "$deb"; then
+            echo "::warning::lintian reported advisory Linux package findings"
+          fi
+          {
+            echo "tag=$tag"
+            echo "tarball=$tarball"
+            echo "deb=$deb"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run packaged X11 and Wayland smokes
+        run: bash scripts/smoke-linux-packages.sh "${{ steps.packages.outputs.tarball }}" "${{ steps.packages.outputs.deb }}"
+
+      - name: Upload Linux package smoke logs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: sonicterm-linux-smoke-logs-${{ github.sha }}
+          path: sonicterm-*-smoke.log
+          if-no-files-found: ignore
+
+      - name: Upload Linux packages
+        uses: actions/upload-artifact@v5
+        with:
+          name: sonicterm-linux-packages-${{ github.sha }}
+          path: |
+            ${{ steps.packages.outputs.tarball }}
+            ${{ steps.packages.outputs.deb }}
+          if-no-files-found: error

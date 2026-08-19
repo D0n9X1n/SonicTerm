@@ -107,9 +107,35 @@ impl FontStack {
         dpi: usize,
         regular_weight_scale: f32,
     ) -> Result<Self> {
+        Self::try_new_full_with_weight_and_font_dirs(
+            primary_family,
+            font_size_pt,
+            dpi,
+            regular_weight_scale,
+            &[],
+        )
+    }
+
+    /// Construct a [`FontStack`] with packaged font directories searched before
+    /// platform-native discovery and the built-in fallback database.
+    ///
+    /// Native CoreText, GDI, or Fontconfig lookup remains enabled so a user's
+    /// nonbundled configured family and system fallback fonts keep resolving.
+    pub fn try_new_full_with_weight_and_font_dirs(
+        primary_family: &str,
+        font_size_pt: f64,
+        dpi: usize,
+        regular_weight_scale: f32,
+        font_dirs: &[PathBuf],
+    ) -> Result<Self> {
         install_default_config(primary_family, font_size_pt);
         let fc = FontConfiguration::new(
-            Some(build_config(primary_family, font_size_pt, FALLBACK_FAMILIES)),
+            Some(build_config_with_font_dirs(
+                primary_family,
+                font_size_pt,
+                FALLBACK_FAMILIES,
+                font_dirs,
+            )),
             dpi,
         )?;
         Ok(Self {
@@ -774,10 +800,11 @@ fn install_default_config(primary_family: &str, font_size_pt: f64) {
     });
 }
 
-fn build_config(
+fn build_config_with_font_dirs(
     primary_family: &str,
     font_size_pt: f64,
     fallback_families: &[&str],
+    font_dirs: &[PathBuf],
 ) -> config::ConfigHandle {
     let mut cfg = config::Config::default_config();
     let mut font_attrs = Vec::with_capacity(1 + fallback_families.len());
@@ -787,6 +814,7 @@ fn build_config(
     }
     cfg.font = config::TextStyle { font: font_attrs, foreground: None };
     cfg.font_size = font_size_pt;
+    cfg.font_dirs = font_dirs.to_vec();
     config::ConfigHandle::new(cfg)
 }
 

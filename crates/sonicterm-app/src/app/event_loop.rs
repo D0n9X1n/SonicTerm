@@ -21,7 +21,10 @@ use winit::{
     window::{CursorIcon, Window, WindowAttributes, WindowId},
 };
 
-use super::{mark_all_panes_dirty, window_dpi, with_integrated_titlebar, App, UserEvent};
+use super::{
+    mark_all_panes_dirty, runtime_smoke::RuntimeSmokeFailure, window_dpi, with_integrated_titlebar,
+    App, UserEvent,
+};
 use sonicterm_ui::selection::SelectMode;
 use winit::event_loop::ControlFlow;
 
@@ -325,6 +328,16 @@ impl App {
                     ),
                 );
             }
+            UserEvent::RuntimeSmokeTimeout => {
+                // When: `event` is `RuntimeSmokeTimeout`, classify the boundary before exiting.
+                if let Some(smoke) = self.runtime_smoke.as_mut() {
+                    // When: `self.runtime_smoke.as_mut()` yields `smoke`, preserve its active boundary.
+                    let failure = smoke.timeout_failure();
+                    smoke.fail(failure);
+                    el.exit();
+                    return;
+                }
+            }
         }
         // Any path above that ran an action may have requested a new
         // top-level window; create it now that we have an ActiveEventLoop.
@@ -425,7 +438,23 @@ impl App {
             self.config.appearance.backdrop,
             self.config.appearance.software_render_mode,
         ));
-        let window = Arc::new(el.create_window(attrs).expect("create window"));
+        let window = match el.create_window(attrs) {
+            Ok(window) => Arc::new(window),
+            Err(error) => {
+                // When: `el.create_window(attrs)` returns `Err(error)`, smoke exits while normal startup panics.
+                if let Some(smoke) = self.runtime_smoke.as_mut() {
+                    // When: `self.runtime_smoke.as_mut()` yields `smoke`, retain the display failure.
+                    tracing::error!(%error, "runtime smoke could not create a window");
+                    smoke.fail(RuntimeSmokeFailure::Display);
+                    el.exit();
+                    return;
+                }
+                panic!("create window: {error}");
+            }
+        };
+        if let Some(smoke) = self.runtime_smoke.as_mut() {
+            smoke.begin_gpu();
+        }
         // PANIC (above): `create_window` only fails when winit cannot reach
         // the windowing system at all (no display, broken connection). At
         // app startup this is unrecoverable — the user has no terminal to
@@ -458,12 +487,13 @@ impl App {
             }
         }
 
-        let mut renderer = GpuRenderer::new(
+        let renderer_result = GpuRenderer::new(
             window.clone(),
             el,
             &self.theme,
             sonicterm_gpu::core::RendererSettings {
                 font_family: &self.config.font.family,
+                font_dirs: &self.font_dirs,
                 font_size: self.config.font.size,
                 line_height_mult: self.config.font.line_height,
                 font_weight_scale: self.config.font.effective_weight_scale(),
@@ -482,11 +512,21 @@ impl App {
                 },
                 role: "main",
             },
-        )
-        // PANIC: renderer init failure means wgpu cannot initialize on the
-        // user's GPU at all — no recovery path exists in a GPU-accelerated
-        // terminal. Same justification as the `create_window` site above.
-        .expect("init renderer");
+        );
+        let mut renderer = match renderer_result {
+            Ok(renderer) => renderer,
+            Err(error) => {
+                // When: `renderer_result` is `Err(error)`, smoke exits while normal startup panics.
+                if let Some(smoke) = self.runtime_smoke.as_mut() {
+                    // When: `self.runtime_smoke.as_mut()` yields `smoke`, retain the GPU failure.
+                    tracing::error!(%error, "runtime smoke could not initialize the renderer");
+                    smoke.fail(RuntimeSmokeFailure::Gpu);
+                    el.exit();
+                    return;
+                }
+                panic!("init renderer: {error}");
+            }
+        };
         // Attach the async font fallback
         // loader so frame-time misses on CJK / emoji / nerd-font
         // codepoints trigger a background `request_load` and a
@@ -629,7 +669,37 @@ impl App {
 
         // Seed script-file tabs when launch events arrived before the window;
         // otherwise preserve the normal one-shell startup.
+        if let Some(smoke) = self.runtime_smoke.as_mut() {
+            smoke.begin_pty();
+        }
         self.seed_initial_tabs();
+        if self.runtime_smoke.is_some() {
+            // When: `self.runtime_smoke.is_some()` is true, verify and exercise the smoke PTY.
+            let command = self.runtime_smoke.as_ref().map(|smoke| smoke.command().to_vec());
+            let active_pane = self
+                .main_active_pane_id()
+                .and_then(|pane_id| self.main().and_then(|window| window.panes.get(&pane_id)));
+            let smoke_failure = match (active_pane.and_then(|pane| pane.pty.as_ref()), command) {
+                (Some(pty), Some(command)) if pty.shell_program_path() == "/bin/sh" => {
+                    pty.send_input_nonblocking(command).err().map(|error| {
+                        tracing::error!(%error, "runtime smoke could not queue its shell marker");
+                        RuntimeSmokeFailure::Marker
+                    })
+                }
+                _ => Some(RuntimeSmokeFailure::Pty),
+            };
+            if let Some(failure) = smoke_failure {
+                // When: `smoke_failure` contains `failure`, retain that PTY/marker boundary.
+                if let Some(smoke) = self.runtime_smoke.as_mut() {
+                    smoke.fail(failure);
+                }
+                el.exit();
+                return;
+            }
+            if let Some(smoke) = self.runtime_smoke.as_mut() {
+                smoke.begin_marker_wait();
+            }
+        }
         self.drain_pending_os_drag_payloads();
 
         if let Some(recorder) = &self.breadcrumb_recorder {

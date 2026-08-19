@@ -1,38 +1,26 @@
 //! Platform shells that drive the winit event loop on top of
 //! [`sonicterm_app_core::AppStateMachine`].
 //!
-//! [`MacShell`] and [`WindowsShell`] receive an externally constructed state
-//! machine, build the platform event loop, and delegate event dispatch to
-//! [`crate::app::App`]. This keeps binary crates independent of `App`'s field
-//! layout while preserving one reducer/effect boundary on both platforms.
-//!
-//! The Windows shell additionally exposes `with_on_window_ready`, whose hook
-//! receives the first window's `raw_window_handle::RawWindowHandle` after
-//! creation so platform code can install the muda menubar and DWM backdrop on
-//! a live HWND.
+//! [`MacShell`], [`WindowsShell`], and [`LinuxShell`] receive an externally
+//! constructed state machine and delegate shared event-loop setup to one
+//! platform-neutral runner. Platform wrappers expose only the hooks supported
+//! by their native binary.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
-use winit::event_loop::{ControlFlow, EventLoop};
+use winit::event_loop::{ControlFlow, EventLoop, EventLoopProxy};
 
 use crate::app::os_drag::OsTabDragBackend;
-use crate::app::{App, KeymapLoader, ThemeLoader, UserEvent};
+use crate::app::{App, KeymapLoader, RuntimeSmokeFailure, ThemeLoader, UserEvent};
 use crate::os_drag::{OsDragSink, TabPayload};
 use sonicterm_app_core::AppStateMachine;
 use sonicterm_cfg::config::Config;
 use sonicterm_cfg::keymap::Keymap;
 use sonicterm_cfg::theme::Theme;
-/// macOS platform shell. Owns the externally-built
-/// [`AppStateMachine`] and the winit event loop; translates winit
-/// events into Intents (via the embedded `App` dispatcher) and
-/// consumes the returned `AppEffect` batch through the existing
-/// renderer / clipboard / PTY plumbing.
-///
-/// Constructed by `crates/sonicterm-mac/src/main.rs`. Builder-style:
-/// every optional hook has a `with_*` setter; `.run()` consumes the
-/// shell and blocks until the event loop exits.
-pub struct MacShell {
+
+struct ShellRunner {
     machine: AppStateMachine,
     theme: Theme,
     config: Config,
@@ -44,20 +32,11 @@ pub struct MacShell {
     pending: Option<TabPayload>,
     breadcrumb_recorder: Option<sonicterm_logging::breadcrumbs::BreadcrumbRecorder>,
     on_resumed: Option<Box<dyn FnOnce() + Send>>,
-    /// one-shot hook fired the instant `create_window` returns
-    /// with the raw AppKit window handle. The mac bin uses this slot
-    /// to apply AppKit-only per-window setup. Mirrors
-    /// [`WindowsShell::with_on_window_ready`].
     on_window_ready: Option<Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send>>,
 }
 
-impl MacShell {
-    /// Build a shell wrapping the caller-constructed state machine.
-    /// The bin (`sonicterm-mac::main`) builds the machine via
-    /// `AppStateMachine::new(AppState::default())` first, then hands
-    /// it here — the shell never silently creates a parallel one.
-    #[must_use]
-    pub fn new(machine: AppStateMachine, theme: Theme, config: Config, keymap: Keymap) -> Self {
+impl ShellRunner {
+    fn new(machine: AppStateMachine, theme: Theme, config: Config, keymap: Keymap) -> Self {
         Self {
             machine,
             theme,
@@ -74,38 +53,134 @@ impl MacShell {
         }
     }
 
-    /// Install loaders so live theme/keymap reload works.
+    fn install_bridges(proxy: &EventLoopProxy<UserEvent>) {
+        crate::menubar_bridge::install_proxy(proxy.clone());
+        crate::os_drag_bridge::install_proxy(proxy.clone());
+        crate::open_script_bridge::install_proxy(proxy.clone());
+    }
+
+    fn into_app(self, proxy: EventLoopProxy<UserEvent>) -> App {
+        let mut app = App::new_with_proxy_and_machine(
+            self.theme,
+            self.config,
+            self.keymap,
+            Some(proxy),
+            self.machine,
+        );
+        if let Some(recorder) = self.breadcrumb_recorder {
+            app.set_breadcrumb_recorder(recorder);
+        }
+        app.theme_loader = self.theme_loader;
+        app.keymap_loader = self.keymap_loader;
+        if let Some(sink) = self.os_drag_sink {
+            app.os_drag_sink = Some(sink);
+        }
+        if let Some(backend) = self.os_drag_backend {
+            app.set_os_drag_backend(backend);
+        }
+        if let Some(hook) = self.on_resumed {
+            app.on_resumed = Some(hook);
+        }
+        if let Some(hook) = self.on_window_ready {
+            app.set_on_window_ready(hook);
+        }
+        if let Some(payload) = self.pending {
+            // When: `pending` carries a startup handoff, seed its tab before the event loop starts.
+            let _ = app.new_tab_from_payload(&payload);
+        }
+        app
+    }
+
+    fn run(self) -> Result<()> {
+        crate::app::init_tracing_public();
+        let event_loop =
+            EventLoop::<UserEvent>::with_user_event().build().context("create event loop")?;
+        event_loop.set_control_flow(ControlFlow::Wait);
+        let proxy = event_loop.create_proxy();
+        Self::install_bridges(&proxy);
+        let mut app = self.into_app(proxy);
+
+        event_loop.run_app(&mut app).context("run event loop")?;
+        Ok(())
+    }
+
+    fn run_smoke(mut self, timeout: Duration) -> Result<(), RuntimeSmokeFailure> {
+        self.config.terminal.shell = Some("/bin/sh".to_string());
+        self.config.window.warm_window_pool = 0;
+        crate::app::init_tracing_public();
+        let event_loop = EventLoop::<UserEvent>::with_user_event()
+            .build()
+            .map_err(|_| RuntimeSmokeFailure::EventLoop)?;
+        event_loop.set_control_flow(ControlFlow::Wait);
+        let proxy = event_loop.create_proxy();
+        Self::install_bridges(&proxy);
+        let mut app = self.into_app(proxy.clone());
+        app.install_runtime_smoke(std::process::id());
+
+        let (cancel_tx, cancel_rx) = std::sync::mpsc::sync_channel(1);
+        let watchdog = std::thread::Builder::new()
+            .name("sonicterm-runtime-smoke-watchdog".to_string())
+            .spawn(move || {
+                if matches!(
+                    cancel_rx.recv_timeout(timeout),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                ) {
+                    // When: `matches!(cancel_rx.recv_timeout(timeout), Err(RecvTimeoutError::Timeout))` is true, classify the active boundary.
+                    let _ = proxy.send_event(UserEvent::RuntimeSmokeTimeout);
+                }
+            })
+            .map_err(|_| RuntimeSmokeFailure::EventLoop)?;
+
+        let run_result = event_loop.run_app(&mut app);
+        let _ = cancel_tx.send(());
+        let _ = watchdog.join();
+        run_result.map_err(|_| RuntimeSmokeFailure::EventLoop)?;
+        app.runtime_smoke_result()
+    }
+}
+
+/// macOS shell around the shared application runner.
+pub struct MacShell {
+    runner: ShellRunner,
+}
+
+impl MacShell {
+    /// Build a shell around the caller-constructed state machine.
+    #[must_use]
+    pub fn new(machine: AppStateMachine, theme: Theme, config: Config, keymap: Keymap) -> Self {
+        Self { runner: ShellRunner::new(machine, theme, config, keymap) }
+    }
+
+    /// Install loaders used by live theme and keymap reload.
     #[must_use]
     pub fn with_asset_loaders(
         mut self,
         theme_loader: ThemeLoader,
         keymap_loader: KeymapLoader,
     ) -> Self {
-        self.theme_loader = Some(theme_loader);
-        self.keymap_loader = Some(keymap_loader);
+        self.runner.theme_loader = Some(theme_loader);
+        self.runner.keymap_loader = Some(keymap_loader);
         self
     }
 
-    /// Install the platform OS-drag sink (NSPasteboard on mac).
+    /// Install the macOS pasteboard drag sink.
     #[must_use]
     pub fn with_os_drag_sink(mut self, sink: Arc<dyn OsDragSink>) -> Self {
-        self.os_drag_sink = Some(sink);
+        self.runner.os_drag_sink = Some(sink);
         self
     }
 
-    /// Install the OS handoff backend (NSPasteboard publication on macOS,
-    /// OLE drag/drop on Windows).
+    /// Install the macOS drag-session backend.
     #[must_use]
     pub fn with_os_drag_backend(mut self, backend: Box<dyn OsTabDragBackend>) -> Self {
-        self.os_drag_backend = Some(backend);
+        self.runner.os_drag_backend = Some(backend);
         self
     }
 
-    /// Seed an already-received tab payload (a tear-out from another
-    /// SonicTerm process found on the pasteboard at startup).
+    /// Seed a tab payload received before startup.
     #[must_use]
     pub fn with_pending_payload(mut self, pending: TabPayload) -> Self {
-        self.pending = Some(pending);
+        self.runner.pending = Some(pending);
         self
     }
 
@@ -115,165 +190,75 @@ impl MacShell {
         mut self,
         recorder: sonicterm_logging::breadcrumbs::BreadcrumbRecorder,
     ) -> Self {
-        self.breadcrumb_recorder = Some(recorder);
+        self.runner.breadcrumb_recorder = Some(recorder);
         self
     }
 
-    /// One-shot hook fired at the top of the first `resumed` tick —
-    /// the mac bin uses it to install the native NSMenu once winit
-    /// has built the AppKit event loop.
+    /// Install the one-shot hook run on the first resumed event.
     #[must_use]
     pub fn with_on_resumed(mut self, hook: Box<dyn FnOnce() + Send>) -> Self {
-        self.on_resumed = Some(hook);
+        self.runner.on_resumed = Some(hook);
         self
     }
 
-    /// one-shot hook fired the instant `create_window` returns,
-    /// with the raw AppKit window handle. Mirrors
-    /// [`WindowsShell::with_on_window_ready`] — same signature, same
-    /// plumbing into the cross-platform firing site in
-    /// `app/event_loop.rs`.
+    /// Install the one-shot hook run after the first native window is created.
     #[must_use]
     pub fn with_on_window_ready(
         mut self,
         hook: Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send>,
     ) -> Self {
-        self.on_window_ready = Some(hook);
+        self.runner.on_window_ready = Some(hook);
         self
     }
 
-    /// Consume the shell, build the winit event loop, install the
-    /// menubar / OS-drag bridges, and run until the loop exits.
+    /// Run the application until the event loop exits.
     pub fn run(self) -> Result<()> {
-        let MacShell {
-            machine,
-            theme,
-            config,
-            keymap,
-            theme_loader,
-            keymap_loader,
-            os_drag_sink,
-            os_drag_backend,
-            pending,
-            breadcrumb_recorder,
-            on_resumed,
-            on_window_ready,
-        } = self;
-
-        crate::app::init_tracing_public();
-        let event_loop =
-            EventLoop::<UserEvent>::with_user_event().build().context("create event loop")?;
-        event_loop.set_control_flow(ControlFlow::Wait);
-        let proxy = event_loop.create_proxy();
-        crate::menubar_bridge::install_proxy(proxy.clone());
-        crate::os_drag_bridge::install_proxy(proxy.clone());
-        crate::open_script_bridge::install_proxy(proxy.clone());
-
-        let mut app = App::new_with_proxy_and_machine(theme, config, keymap, Some(proxy), machine);
-        if let Some(recorder) = breadcrumb_recorder {
-            app.set_breadcrumb_recorder(recorder);
-        }
-        app.theme_loader = theme_loader;
-        app.keymap_loader = keymap_loader;
-        if let Some(sink) = os_drag_sink {
-            app.os_drag_sink = Some(sink);
-        }
-        if let Some(b) = os_drag_backend {
-            app.set_os_drag_backend(b);
-        }
-        if let Some(hook) = on_resumed {
-            app.on_resumed = Some(hook);
-        }
-        if let Some(hook) = on_window_ready {
-            app.set_on_window_ready(hook);
-        }
-        if let Some(p) = pending {
-            // When: `pending` carries a startup handoff, seed its tab before the event loop starts.
-            let _ = app.new_tab_from_payload(&p);
-        }
-
-        event_loop.run_app(&mut app).context("run event loop")?;
-        Ok(())
+        self.runner.run()
     }
 }
 
-/// Windows platform shell. Symmetric peer of [`MacShell`] — owns the
-/// caller-built [`AppStateMachine`] and the winit event loop, and
-/// drives the existing renderer / PTY plumbing through the embedded
-/// `App` dispatcher. Adds [`WindowsShell::with_on_window_ready`] for
-/// the muda menubar + DWM backdrop install which need the bare
-/// HWND that only exists after `create_window` succeeds.
-///
-/// Constructed by `crates/sonicterm-windows/src/main.rs`. Builder
-/// style — every optional hook has a `with_*` setter; `.run()`
-/// consumes the shell and blocks until the event loop exits.
+/// Windows shell around the shared application runner.
 pub struct WindowsShell {
-    machine: AppStateMachine,
-    theme: Theme,
-    config: Config,
-    keymap: Keymap,
-    theme_loader: Option<ThemeLoader>,
-    keymap_loader: Option<KeymapLoader>,
-    os_drag_sink: Option<Arc<dyn OsDragSink>>,
-    os_drag_backend: Option<Box<dyn OsTabDragBackend>>,
-    pending: Option<TabPayload>,
-    breadcrumb_recorder: Option<sonicterm_logging::breadcrumbs::BreadcrumbRecorder>,
-    on_window_ready: Option<Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send>>,
+    runner: ShellRunner,
 }
 
 impl WindowsShell {
-    /// Build a shell wrapping the caller-constructed state machine.
-    /// The bin (`sonicterm-windows::main`) builds the machine via
-    /// `AppStateMachine::new(AppState::default())` first, then hands
-    /// it here — the shell never silently creates a parallel one.
+    /// Build a shell around the caller-constructed state machine.
     #[must_use]
     pub fn new(machine: AppStateMachine, theme: Theme, config: Config, keymap: Keymap) -> Self {
-        Self {
-            machine,
-            theme,
-            config,
-            keymap,
-            theme_loader: None,
-            keymap_loader: None,
-            os_drag_sink: None,
-            os_drag_backend: None,
-            pending: None,
-            breadcrumb_recorder: None,
-            on_window_ready: None,
-        }
+        Self { runner: ShellRunner::new(machine, theme, config, keymap) }
     }
 
-    /// Install loaders so live theme/keymap reload works.
+    /// Install loaders used by live theme and keymap reload.
     #[must_use]
     pub fn with_asset_loaders(
         mut self,
         theme_loader: ThemeLoader,
         keymap_loader: KeymapLoader,
     ) -> Self {
-        self.theme_loader = Some(theme_loader);
-        self.keymap_loader = Some(keymap_loader);
+        self.runner.theme_loader = Some(theme_loader);
+        self.runner.keymap_loader = Some(keymap_loader);
         self
     }
 
-    /// Install the platform OS-drag sink (OLE drop target on Windows).
+    /// Install the Windows OLE drag sink.
     #[must_use]
     pub fn with_os_drag_sink(mut self, sink: Arc<dyn OsDragSink>) -> Self {
-        self.os_drag_sink = Some(sink);
+        self.runner.os_drag_sink = Some(sink);
         self
     }
 
-    /// Install the OS-level drag-session backend (OLE DoDragDrop on Windows).
+    /// Install the Windows OLE drag-session backend.
     #[must_use]
     pub fn with_os_drag_backend(mut self, backend: Box<dyn OsTabDragBackend>) -> Self {
-        self.os_drag_backend = Some(backend);
+        self.runner.os_drag_backend = Some(backend);
         self
     }
 
-    /// Seed an already-received tab payload (a tear-out from another
-    /// SonicTerm process received via env / pasteboard at startup).
+    /// Seed a tab payload received before startup.
     #[must_use]
     pub fn with_pending_payload(mut self, pending: TabPayload) -> Self {
-        self.pending = Some(pending);
+        self.runner.pending = Some(pending);
         self
     }
 
@@ -283,74 +268,77 @@ impl WindowsShell {
         mut self,
         recorder: sonicterm_logging::breadcrumbs::BreadcrumbRecorder,
     ) -> Self {
-        self.breadcrumb_recorder = Some(recorder);
+        self.runner.breadcrumb_recorder = Some(recorder);
         self
     }
 
-    /// One-shot hook fired the instant `create_window` returns, with
-    /// the raw `HWND` handle. The Windows bin uses this slot to
-    /// install the muda menubar + apply DWM backdrop — both require
-    /// the HWND that only exists after winit has built the window.
+    /// Install the one-shot hook run after the first native window is created.
     #[must_use]
     pub fn with_on_window_ready(
         mut self,
         hook: Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send>,
     ) -> Self {
-        self.on_window_ready = Some(hook);
+        self.runner.on_window_ready = Some(hook);
         self
     }
 
-    /// Consume the shell, build the winit event loop, install the
-    /// OS-drag + window-ready bridges, and run until the loop exits.
+    /// Run the application until the event loop exits.
     pub fn run(self) -> Result<()> {
-        let WindowsShell {
-            machine,
-            theme,
-            config,
-            keymap,
-            theme_loader,
-            keymap_loader,
-            os_drag_sink,
-            os_drag_backend,
-            pending,
-            breadcrumb_recorder,
-            on_window_ready,
-        } = self;
+        self.runner.run()
+    }
+}
 
-        crate::app::init_tracing_public();
-        let event_loop =
-            EventLoop::<UserEvent>::with_user_event().build().context("create event loop")?;
-        event_loop.set_control_flow(ControlFlow::Wait);
-        let proxy = event_loop.create_proxy();
-        // Same bridges as MacShell: cheap + safe on Windows — the
-        // menubar bridge proxy is harmless if NSMenu never fires
-        // (it won't on Win32), and the OS-drag bridge proxy is
-        // required so OLE drop callbacks can wake the loop.
-        crate::menubar_bridge::install_proxy(proxy.clone());
-        crate::os_drag_bridge::install_proxy(proxy.clone());
-        crate::open_script_bridge::install_proxy(proxy.clone());
+/// Linux shell around the shared application runner.
+pub struct LinuxShell {
+    runner: ShellRunner,
+}
 
-        let mut app = App::new_with_proxy_and_machine(theme, config, keymap, Some(proxy), machine);
-        if let Some(recorder) = breadcrumb_recorder {
-            app.set_breadcrumb_recorder(recorder);
-        }
-        app.theme_loader = theme_loader;
-        app.keymap_loader = keymap_loader;
-        if let Some(sink) = os_drag_sink {
-            app.os_drag_sink = Some(sink);
-        }
-        if let Some(b) = os_drag_backend {
-            app.set_os_drag_backend(b);
-        }
-        if let Some(hook) = on_window_ready {
-            app.set_on_window_ready(hook);
-        }
-        if let Some(p) = pending {
-            // When: `pending` carries a startup handoff, seed its tab before the event loop starts.
-            let _ = app.new_tab_from_payload(&p);
-        }
+impl LinuxShell {
+    /// Build a shell around the caller-constructed state machine.
+    #[must_use]
+    pub fn new(machine: AppStateMachine, theme: Theme, config: Config, keymap: Keymap) -> Self {
+        Self { runner: ShellRunner::new(machine, theme, config, keymap) }
+    }
 
-        event_loop.run_app(&mut app).context("run event loop")?;
-        Ok(())
+    /// Install loaders used by live theme and keymap reload.
+    #[must_use]
+    pub fn with_asset_loaders(
+        mut self,
+        theme_loader: ThemeLoader,
+        keymap_loader: KeymapLoader,
+    ) -> Self {
+        self.runner.theme_loader = Some(theme_loader);
+        self.runner.keymap_loader = Some(keymap_loader);
+        self
+    }
+
+    /// Install the nonblocking postmortem breadcrumb recorder.
+    #[must_use]
+    pub fn with_breadcrumb_recorder(
+        mut self,
+        recorder: sonicterm_logging::breadcrumbs::BreadcrumbRecorder,
+    ) -> Self {
+        self.runner.breadcrumb_recorder = Some(recorder);
+        self
+    }
+
+    /// Install the one-shot hook run after the first native window is created.
+    #[must_use]
+    pub fn with_on_window_ready(
+        mut self,
+        hook: Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send>,
+    ) -> Self {
+        self.runner.on_window_ready = Some(hook);
+        self
+    }
+
+    /// Run the application until the event loop exits.
+    pub fn run(self) -> Result<()> {
+        self.runner.run()
+    }
+
+    /// Run the bounded Linux package smoke through display, GPU, PTY, grid, and presentation.
+    pub fn run_smoke(self, timeout: Duration) -> Result<(), RuntimeSmokeFailure> {
+        self.runner.run_smoke(timeout)
     }
 }

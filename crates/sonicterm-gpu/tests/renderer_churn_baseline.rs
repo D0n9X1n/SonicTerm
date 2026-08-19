@@ -71,6 +71,7 @@ impl ApplicationHandler for Churn {
 
             let settings = RendererSettings {
                 font_family: "monospace",
+                font_dirs: &[],
                 font_size: 14.0,
                 line_height_mult: 1.2,
                 font_weight_scale: 1.0,

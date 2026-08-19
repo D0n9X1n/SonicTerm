@@ -22,7 +22,6 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::OnceLock;
 
 /// Reason recorded for the upcoming process exit. Read by the drop
 /// guard so the final log line classifies what happened.
@@ -45,7 +44,6 @@ pub enum ExitReason {
 
 static REASON: AtomicU8 = AtomicU8::new(ExitReason::Clean as u8);
 static INSTALLED: AtomicBool = AtomicBool::new(false);
-static CRASH_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// Pre-opened raw fd for sonicterm.log (best-effort) so async-signal-safe
 /// handlers can `write(2)` without going through tracing/alloc.
 ///
@@ -121,26 +119,29 @@ impl Drop for ExitGuard {
 /// so that even a panic during the rest of `main` is caught with the
 /// log machinery already armed. Returns a guard to keep alive for the
 /// lifetime of the process.
-pub fn install_exit_logging(crash_dir: &Path) -> ExitGuard {
+pub fn install_exit_logging(log_dir: &Path) -> ExitGuard {
     if INSTALLED.swap(true, Ordering::SeqCst) {
         // When: INSTALLED was already set, so the hooks are armed; installing
         // again would leak a second alt-stack and re-open the log descriptor.
         return ExitGuard(());
     }
-    let _ = CRASH_DIR.set(crash_dir.to_path_buf());
 
     // Best-effort open the active log file for async-signal-safe writes.
     // We re-open append-mode so we don't share a buffered handle with the
     // tracing-appender (its writer is in another thread and may have
     // pending bytes — that's fine, we just append our marker line).
-    let log_path = crate::path::log_dir().join(crate::path::log_file_name());
-    open_log_fd(&log_path);
+    let _ = std::fs::create_dir_all(log_dir);
+    open_log_fd(&exit_log_path(log_dir));
 
     install_alloc_error_logging();
     #[cfg(unix)]
     install_signal_handlers();
 
     ExitGuard(())
+}
+
+pub(crate) fn exit_log_path(log_dir: &Path) -> PathBuf {
+    log_dir.join(crate::path::log_file_name())
 }
 
 fn open_log_fd(_path: &Path) {

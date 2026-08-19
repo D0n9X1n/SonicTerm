@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=SonicTerm
+GenericName=Terminal Emulator
+Comment=Fast GPU-accelerated terminal emulator
+Exec=sonicterm
+Icon=com.d0n9x1n.SonicTerm
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;command;prompt;
+StartupNotify=true
+StartupWMClass=com.d0n9x1n.SonicTerm

@@ -115,6 +115,8 @@ pub enum Platform {
     MacOs,
     /// Microsoft Windows.
     Windows,
+    /// Linux desktops.
+    Linux,
     /// A non-shipping platform used for development or tests.
     Other,
 }
@@ -131,7 +133,11 @@ impl Platform {
         {
             Self::Windows
         }
-        #[cfg(not(any(target_os = "macos", windows)))]
+        #[cfg(target_os = "linux")]
+        {
+            Self::Linux
+        }
+        #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
         {
             Self::Other
         }
@@ -141,6 +147,7 @@ impl Platform {
         match self {
             Self::MacOs => "macos",
             Self::Windows => "windows",
+            Self::Linux => "linux",
             Self::Other => "other",
         }
     }

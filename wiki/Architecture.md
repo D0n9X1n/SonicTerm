@@ -16,7 +16,7 @@ final architecture.
 SonicTerm is organized around five goals:
 
 1. keep the terminal protocol and grid independent of the window system;
-2. keep native AppKit/Win32 work at the platform edge;
+2. keep native AppKit/Win32/Linux desktop work at the platform edge;
 3. keep PTY workers off the winit event-loop thread;
 4. carry renderer input through one explicit render-model seam;
 5. retain pixels and rebuild only damaged terminal rows when correctness allows.
@@ -25,7 +25,7 @@ SonicTerm is organized around five goals:
 
 ```mermaid
 flowchart TD
-    bin["macOS/Windows binary"]
+    bin["macOS/Windows/Linux binary"]
     app["sonicterm-app<br/>winit orchestration, authoritative live topology"]
     core["sonicterm-app-core"]
     rm["sonicterm-render-model"]
@@ -67,7 +67,7 @@ those three implementation crates.
 | `sonicterm-render-model` | renderer-facing pane/overlay/geometry bundles | wgpu policy |
 | `sonicterm-text` / font crates | shaping, fallback, rasterization, glyph caches | window lifecycle |
 | `sonicterm-gpu` | frame assembly, damage, caches, wgpu/software drawing | PTY ownership or app topology |
-| `sonicterm-app` | authoritative windows/tabs/panes/PTYs and event routing | platform-specific AppKit/Win32 policy where a shell seam exists |
+| `sonicterm-app` | authoritative windows/tabs/panes/PTYs and event routing | platform-specific AppKit/Win32/Linux desktop policy where a shell seam exists |
 | platform crates | startup, native menus, drag/drop, installers | reusable cross-platform behavior |
 
 ## State ownership today
@@ -140,7 +140,7 @@ UI/model:   sonicterm-cfg -> sonicterm-ui -> sonicterm-render-model
 fonts:      font-config/fontconfig/freetype/harfbuzz -> font -> engine/text
 rendering:  render-model + text + engine + block-glyph -> sonicterm-gpu
 app:        app-core + terminal + UI/model + GPU -> sonicterm-app
-platform:   sonicterm-app -> sonicterm-mac / sonicterm-windows
+platform:   sonicterm-app -> sonicterm-mac / sonicterm-windows / sonicterm-linux
 future:     sonicterm-io -> sonicterm-mux (not used by the GUI today)
 ```
 
@@ -159,7 +159,7 @@ This is a conceptual grouping; the exact edge list is in [Crate Reference](Crate
 | Render boundary | `crates/sonicterm-render-model/src/{pane_render,inputs,lib}.rs` |
 | Renderer | `crates/sonicterm-gpu/src/core.rs` |
 | Font adapter | `crates/sonicterm-engine/src/fontstack.rs` |
-| Platform entry points | `crates/sonicterm-{mac,windows}/src/main.rs` |
+| Platform entry points | `crates/sonicterm-{mac,windows,linux}/src/main.rs` |
 
 For the invariants these boundaries hold to, see
 [Architecture Internals](Architecture-Internals).
@@ -178,7 +178,7 @@ For the invariants these boundaries hold to, see
 SonicTerm 的组织方式围绕五个目标：
 
 1. 终端协议和网格不依赖窗口系统；
-2. AppKit/Win32 原生工作留在平台边缘；
+2. AppKit/Win32/Linux desktop 原生工作留在平台边缘；
 3. PTY worker 不阻塞 winit 事件循环线程；
 4. 渲染输入只通过明确的 render-model 接缝传递；
 5. 保留上一帧像素，在正确性允许时只重建受损的终端行。
@@ -187,7 +187,7 @@ SonicTerm 的组织方式围绕五个目标：
 
 ```mermaid
 flowchart TD
-    bin["macOS/Windows 二进制"]
+    bin["macOS/Windows/Linux 二进制"]
     app["sonicterm-app<br/>winit 编排与权威实时拓扑"]
     core["sonicterm-app-core"]
     rm["sonicterm-render-model"]
@@ -283,7 +283,7 @@ UI/模型：   sonicterm-cfg -> sonicterm-ui -> sonicterm-render-model
 字体：      font-config/fontconfig/freetype/harfbuzz -> font -> engine/text
 渲染：      render-model + text + engine + block-glyph -> sonicterm-gpu
 应用：      app-core + terminal + UI/model + GPU -> sonicterm-app
-平台：      sonicterm-app -> sonicterm-mac / sonicterm-windows
+平台：      sonicterm-app -> sonicterm-mac / sonicterm-windows / sonicterm-linux
 未来：      sonicterm-io -> sonicterm-mux（当前 GUI 未使用）
 ```
 
@@ -302,6 +302,6 @@ UI/模型：   sonicterm-cfg -> sonicterm-ui -> sonicterm-render-model
 | 渲染边界 | `crates/sonicterm-render-model/src/{pane_render,inputs,lib}.rs` |
 | 渲染器 | `crates/sonicterm-gpu/src/core.rs` |
 | 字体适配 | `crates/sonicterm-engine/src/fontstack.rs` |
-| 平台入口 | `crates/sonicterm-{mac,windows}/src/main.rs` |
+| 平台入口 | `crates/sonicterm-{mac,windows,linux}/src/main.rs` |
 
 这些边界所遵守的不变量见 [Architecture Internals](Architecture-Internals)。

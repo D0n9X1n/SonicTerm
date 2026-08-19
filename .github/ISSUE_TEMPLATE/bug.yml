@@ -13,7 +13,7 @@ body:
     id: os
     attributes:
       label: OS
-      options: [macOS 14, macOS 15, Windows 11, Other]
+      options: [macOS 14, macOS 15, Windows 11, Linux X11, Linux Wayland, Other]
     validations:
       required: true
   - type: textarea

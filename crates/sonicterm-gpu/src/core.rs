@@ -8,6 +8,7 @@
 //! no second atlas, no second render pass.
 
 use std::{
+    path::PathBuf,
     sync::atomic::{AtomicUsize, Ordering},
     sync::Arc,
     time::{Duration, Instant},
@@ -219,6 +220,8 @@ fn preedit_bg_rect(
 pub struct RendererSettings<'a> {
     /// Font family to use for terminal text.
     pub font_family: &'a str,
+    /// Packaged directories searched before platform-native font discovery.
+    pub font_dirs: &'a [PathBuf],
     /// Font size in points.
     pub font_size: f32,
     /// Line-height multiplier.
@@ -270,12 +273,14 @@ fn renderer_font_stacks(
     body_size: f32,
     dpi: usize,
     weight_scale: f32,
+    font_dirs: &[PathBuf],
 ) -> RendererFontStacks {
-    let body = sonicterm_engine::FontStack::try_new_full_with_weight(
+    let body = sonicterm_engine::FontStack::try_new_full_with_weight_and_font_dirs(
         family,
         f64::from(body_size),
         dpi,
         weight_scale,
+        font_dirs,
     )
     .ok();
     let tab_title =
@@ -1195,6 +1200,7 @@ pub struct GpuRenderer {
     glyph_atlas_retry_without_eviction: bool,
 
     font_family: String,
+    font_dirs: Vec<PathBuf>,
     font_size: f32,
     line_height: f32,
     font_weight_scale: f32,
@@ -1314,6 +1320,8 @@ pub struct GpuRenderer {
     /// Cumulative count of frames skipped via the FrameKey fast-path.
     /// Exposed via tracing::trace for `RUST_LOG=trace` hit-rate dashboards.
     skipped_frames: u64,
+    /// Frames that reached a native presentation boundary successfully.
+    successful_frame_count: u64,
     #[cfg(target_os = "windows")]
     software_frame: Option<crate::software_windows::WindowsSoftwareFrame>,
     /// Window label used in renderer-internal timing logs.
@@ -1882,6 +1890,7 @@ impl GpuRenderer {
     ) -> Result<Self> {
         let RendererSettings {
             font_family,
+            font_dirs,
             font_size,
             line_height_mult,
             font_weight_scale,
@@ -1896,7 +1905,7 @@ impl GpuRenderer {
         // field below and only re-used by the rasterizer-target helper.
         let sf = window.scale_factor() as f32;
         let instance = shared.as_ref().map(|s| s.instance.clone()).unwrap_or_else(|| {
-            Instance::new(InstanceDescriptor::new_with_display_handle(Box::new(
+            Instance::new(InstanceDescriptor::new_with_display_handle_from_env(Box::new(
                 event_loop.owned_display_handle(),
             )))
         });
@@ -2084,7 +2093,8 @@ impl GpuRenderer {
         // metrics match the renderer's raster-px coordinate system.
         // Font size in points equals sonicterm's logical font_size.
         let fs_dpi = (72.0 * sf).round() as usize;
-        let font_stacks = renderer_font_stacks(font_family, font_size, fs_dpi, font_weight_scale);
+        let font_stacks =
+            renderer_font_stacks(font_family, font_size, fs_dpi, font_weight_scale, font_dirs);
         let (cell_w, natural_cell_h) =
             match font_stacks.body.as_ref().and_then(|s| s.cell_metrics_raster_px().ok()) {
                 Some(m) => (m.cell_w as f32, m.cell_h as f32),
@@ -2161,6 +2171,7 @@ impl GpuRenderer {
             frames_without_inline_media: 0,
             glyph_atlas_retry_without_eviction: false,
             font_family: font_family.to_string(),
+            font_dirs: font_dirs.to_vec(),
             font_size,
             line_height,
             font_weight_scale,
@@ -2205,6 +2216,7 @@ impl GpuRenderer {
             last_frame_key: None,
             preedit_glyph_cache: None,
             skipped_frames: 0,
+            successful_frame_count: 0,
             #[cfg(target_os = "windows")]
             software_frame: None,
             render_timing_label: role,
@@ -2951,6 +2963,14 @@ impl GpuRenderer {
         (self.cell_w, self.cell_h)
     }
 
+    /// Number of frames that completed a native presentation successfully.
+    ///
+    /// Skipped, occluded, outdated, lost, and failed frames do not advance it.
+    #[must_use]
+    pub fn successful_frame_count(&self) -> u64 {
+        self.successful_frame_count
+    }
+
     /// Current font family in effect. Test-only inspector for the
     /// live-reload path; production code reads font fields directly.
     #[doc(hidden)]
@@ -3373,7 +3393,7 @@ impl GpuRenderer {
     pub fn set_font(&mut self, family: &str, size: f32, line_height_mult: f32, weight_scale: f32) {
         let weight_scale = effective_font_weight_scale(weight_scale);
         let dpi = (72.0 * self.scale_factor).round().max(1.0) as usize;
-        let new_stacks = renderer_font_stacks(family, size, dpi, weight_scale);
+        let new_stacks = renderer_font_stacks(family, size, dpi, weight_scale, &self.font_dirs);
         let (new_cell_w, natural_cell_h) =
             match new_stacks.body.as_ref().and_then(|s| s.cell_metrics_raster_px().ok()) {
                 Some(m) => (m.cell_w as f32, m.cell_h as f32),
@@ -6968,6 +6988,7 @@ impl GpuRenderer {
         damaged_rows: usize,
         gpu_timing: Option<(Instant, Instant, Vec<(&'static str, f32)>)>,
     ) {
+        self.successful_frame_count = self.successful_frame_count.saturating_add(1);
         if std::mem::take(&mut self.glyph_atlas_retry_without_eviction) {
             self.glyph_atlas.set_eviction_enabled(true);
             self.row_glyph_cache.invalidate_all();

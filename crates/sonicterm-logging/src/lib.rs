@@ -52,7 +52,7 @@ pub use exit_trace::{exit_with, install_exit_logging, record_loop_exiting, ExitG
 pub use path::{crash_dir, log_dir, log_file_name};
 pub use process_memory::{MemoryDelta, MemoryMetric, ProcessMemory};
 
-use std::io;
+use std::{io, path::Path};
 
 use tracing_subscriber::{
     layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer, Registry,
@@ -165,14 +165,25 @@ pub fn filter_for_level(level: LogLevel) -> &'static str {
 /// a hostile filesystem the caller can choose to continue with a
 /// no-op log setup.
 pub fn init(cfg: &LoggingConfig) -> io::Result<LoggingGuard> {
-    let dir = path::log_dir();
-    std::fs::create_dir_all(&dir)?;
+    init_in(cfg, &path::log_dir())
+}
+
+/// Initialize tracing in an explicitly selected log directory.
+///
+/// Platform diagnostics and isolated runtime probes use this when their session
+/// state must not share the default user log directory.
+///
+/// # Errors
+///
+/// Returns an [`io::Error`] when `dir` cannot be created.
+pub fn init_in(cfg: &LoggingConfig, dir: &Path) -> io::Result<LoggingGuard> {
+    std::fs::create_dir_all(dir)?;
 
     // Size-based rotation isn't a native tracing-appender feature, so
     // we use daily rotation as the appender's own knob and rely on
     // `cleanup_old_files` to enforce size + count + age caps. Rotated
     // file names follow `sonicterm.log.YYYY-MM-DD`.
-    let file_appender = tracing_appender::rolling::daily(&dir, path::log_file_name());
+    let file_appender = tracing_appender::rolling::daily(dir, path::log_file_name());
     let (file_writer, guard) = tracing_appender::non_blocking(file_appender);
 
     let filter_src =
