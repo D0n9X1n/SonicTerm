@@ -1,9 +1,9 @@
 # Packaging / 打包
 
-How to build a distributable macOS DMG or Windows MSI locally, and what the
-release workflow does differently.
+How to build distributable macOS, Windows, and Linux packages locally, and what
+the release workflow does differently.
 
-如何在本地构建可分发的 macOS DMG 或 Windows MSI，以及发布工作流的不同之处。
+如何在本地构建可分发的 macOS、Windows 与 Linux 安装包，以及发布工作流的不同之处。
 
 Packaging executables live with the other first-party entry points in
 `scripts/`. Pushing a `v*` tag runs the release workflow and publishes assets;
@@ -98,12 +98,50 @@ and user choices intact.
 when the shell is not elevated. ICE validation is skipped; the MSI contents and
 installability are unaffected.
 
+### Linux
+
+Linux packages target x86_64 and a glibc 2.35 baseline. The release job builds
+inside `ubuntu:22.04`, then creates both artifacts from one staged payload:
+
+- `SonicTerm-<tag>-linux-x86_64.tar.gz` — relocatable `sonicterm` plus an
+  adjacent `assets/` tree;
+- `SonicTerm-<tag>-linux-x86_64.deb` — `/usr/bin/sonicterm`, FHS assets,
+  desktop entry, AppStream metadata, hicolor icon, licenses, and README.
+
+On an x86_64 Linux host with the native build and Debian package tools installed:
+
+```bash
+cargo build --release -p sonicterm-linux
+tag="v$(cargo metadata --no-deps --format-version 1 | \
+  python3 -c 'import json,sys; d=json.load(sys.stdin); m=set(d["workspace_members"]); v={p["version"] for p in d["packages"] if p["id"] in m}; assert len(v)==1; print(v.pop())')"
+SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)" \
+  bash scripts/make-linux-packages.sh target/release/sonicterm "$tag" dist
+bash scripts/test-linux-packages.sh \
+  "dist/SonicTerm-${tag}-linux-x86_64.tar.gz" \
+  "dist/SonicTerm-${tag}-linux-x86_64.deb"
+```
+
+The builder checks ELF architecture and glibc symbol versions, derives Debian
+`Depends` with `dpkg-shlibdeps`, normalizes timestamps and ownership, and verifies
+all four Rec Mono faces plus themes, keymaps, icons, and i18n. The Debian package
+uses `com.d0n9x1n.SonicTerm` consistently for its desktop ID, Wayland application
+ID, X11 class, AppStream component, and hicolor icon.
+
+CI validates both package layouts, then runs each one under X11/Xvfb and headless
+Wayland/Weston with Vulkan forced to Mesa lavapipe. A smoke passes only after a
+window and GPU surface exist, `/bin/sh` starts in a PTY, a non-literal marker
+round-trips into the grid, and a later frame reaches native presentation.
+
 ### Releases
 
 The release workflow performs these steps automatically when a `v*` tag is
-pushed. Local packaging only writes files under `dist/`. Pushing the tag is a
-separate, owner-approved action — running a packaging script locally does not
-publish anything.
+pushed. Each package job registers its files in typed asset fragments. The
+publish job revalidates their hashes and required platform/architecture/kind
+tuples, then creates `release-assets.json`, deterministic `SHA256SUMS.txt`, and an
+exact upload-path list. Missing, altered, duplicate, or unregistered release
+files block publication. Local packaging only writes files under `dist/`.
+Pushing the tag is a separate, owner-approved action — running a packaging
+script locally does not publish anything.
 
 ## 中文
 
@@ -185,8 +223,45 @@ capabilities 和各扩展名的 `OpenWithProgids`，不会设置扩展名默认�
 `LGHT1105: Validation could not run due to system policy`。
 这只是跳过了 ICE 验证，不影响 MSI 的内容与可安装性。
 
+### Linux
+
+Linux 安装包面向 x86_64，并以 glibc 2.35 为基线。发布 job 在
+`ubuntu:22.04` 中构建，再从同一个 staged payload 生成两个 artifact：
+
+- `SonicTerm-<tag>-linux-x86_64.tar.gz` —— 可重定位的 `sonicterm` 与相邻
+  `assets/` 目录；
+- `SonicTerm-<tag>-linux-x86_64.deb` —— `/usr/bin/sonicterm`、FHS 资产、
+  desktop entry、AppStream metadata、hicolor icon、license 与 README。
+
+在已安装原生构建工具和 Debian 打包工具的 x86_64 Linux 主机上运行：
+
+```bash
+cargo build --release -p sonicterm-linux
+tag="v$(cargo metadata --no-deps --format-version 1 | \
+  python3 -c 'import json,sys; d=json.load(sys.stdin); m=set(d["workspace_members"]); v={p["version"] for p in d["packages"] if p["id"] in m}; assert len(v)==1; print(v.pop())')"
+SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)" \
+  bash scripts/make-linux-packages.sh target/release/sonicterm "$tag" dist
+bash scripts/test-linux-packages.sh \
+  "dist/SonicTerm-${tag}-linux-x86_64.tar.gz" \
+  "dist/SonicTerm-${tag}-linux-x86_64.deb"
+```
+
+builder 会检查 ELF 架构与 glibc symbol version，用 `dpkg-shlibdeps` 推导
+Debian `Depends`，规范化 timestamp 与 owner，并验证四个 Rec Mono 字体、theme、
+keymap、icon 与 i18n。Debian package 的 desktop ID、Wayland application ID、
+X11 class、AppStream component 与 hicolor icon 都使用
+`com.d0n9x1n.SonicTerm`。
+
+CI 会验证两种 package layout，再让每一种分别在 X11/Xvfb 与 headless
+Wayland/Weston 下运行，并强制 Vulkan 使用 Mesa lavapipe。只有原生窗口与 GPU
+surface 已创建、`/bin/sh` 已在 PTY 中启动、非 literal marker 已往返进入 grid，
+且随后一帧完成原生呈现，smoke 才会通过。
+
 ### 发布
 
-推送 `v*` 标签时，发布工作流会自动执行上述步骤。本地打包只会在 `dist/`
-下写入文件。推送标签是一个独立的、需所有者批准的动作——
-在本地运行打包脚本不会发布任何东西。
+推送 `v*` 标签时，发布工作流会自动执行上述步骤。每个平台打包 job 会把文件登记到
+类型化 asset fragment；publish job 会重新验证 hash 与必需的
+platform/architecture/kind tuple，再生成 `release-assets.json`、确定性的
+`SHA256SUMS.txt` 和精确 upload-path list。缺失、被修改、重复或未登记的 release
+文件都会阻止发布。本地打包只会在 `dist/` 下写入文件。推送标签是一个独立的、
+需所有者批准的动作——在本地运行打包脚本不会发布任何东西。

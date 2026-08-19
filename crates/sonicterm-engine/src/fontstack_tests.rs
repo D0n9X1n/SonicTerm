@@ -1,4 +1,5 @@
 use super::*;
+use std::path::Path;
 
 #[test]
 fn regular_weight_scale_preserves_identity_and_extremes() {
@@ -81,10 +82,52 @@ fn bold_style_resolves_separately_from_regular_style() {
 
 #[test]
 fn explicit_config_records_requested_font_size() {
-    let cfg = build_config("Rec Mono St.Helens", 17.0, &["Symbols Nerd Font Mono"]);
+    let cfg =
+        build_config_with_font_dirs("Rec Mono St.Helens", 17.0, &["Symbols Nerd Font Mono"], &[]);
     assert_eq!(cfg.font_size, 17.0);
     assert_eq!(cfg.font.font[0].family, "Rec Mono St.Helens");
     assert_eq!(cfg.font.font[1].family, "Symbols Nerd Font Mono");
+}
+
+#[test]
+fn production_font_dirs_resolve_all_packaged_rec_mono_styles() {
+    // Protect packaged startup and live reload without disabling native fallback discovery.
+    let fonts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+    let config = build_config_with_font_dirs(
+        DEFAULT_FONT_FAMILY,
+        14.0,
+        FALLBACK_FAMILIES,
+        std::slice::from_ref(&fonts),
+    );
+    assert_eq!(config.font_locator, config::FontLocatorSelection::default());
+    assert_eq!(config.font_dirs, vec![fonts.clone()]);
+
+    let stack = FontStack::try_new_full_with_weight_and_font_dirs(
+        DEFAULT_FONT_FAMILY,
+        14.0,
+        72,
+        1.0,
+        &[fonts],
+    )
+    .expect("tracked packaged fonts must build the production stack");
+
+    for (bold, italic, expected_file) in [
+        (false, false, "RecMonoSt.Helens-Regular.ttf"),
+        (true, false, "RecMonoSt.Helens-Bold.ttf"),
+        (false, true, "RecMonoSt.Helens-Italic.ttf"),
+        (true, true, "RecMonoSt.Helens-BoldItalic.ttf"),
+    ] {
+        let font = stack.font_for_style(bold, italic).expect("packaged style must resolve");
+        let primary = font.clone_handles().into_iter().next().expect("configured face");
+        assert_eq!(primary.handle.origin, sonicterm_font::locator::FontOrigin::FontDirs);
+        assert_eq!(primary.names().family, DEFAULT_FONT_FAMILY);
+        assert_eq!(
+            primary.handle.path_str().as_deref().map(Path::new).and_then(Path::file_name),
+            Some(expected_file.as_ref())
+        );
+        assert!(!primary.synthesize_bold, "packaged bold face must be selected directly");
+        assert!(!primary.synthesize_italic, "packaged italic face must be selected directly");
+    }
 }
 
 /// Regression: a window moving between displays of different scale

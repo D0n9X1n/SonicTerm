@@ -31,6 +31,8 @@ building against a dependency's newer API while every other gate stays green.
   discard errors in new code.
 - Keep platform-specific details behind this crate so app/UI code stays
   cross-platform.
+- Unix automatic shell selection is executable `$SHELL`, then the current
+  user's executable passwd shell, then `/bin/sh`; explicit config still wins.
 
 ## Cross-references
 - Consumed by: `sonicterm-app`, `sonicterm-mux`. Platform binaries reach it

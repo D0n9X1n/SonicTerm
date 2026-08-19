@@ -3,11 +3,12 @@
 ## English
 
 > This page is the crate map, with dependency and code-navigation detail for
-> all 23 workspace crates.
+> all 24 workspace crates.
 
 The workspace version in the root `Cargo.toml` applies to every first-party
 crate. `sonicterm-app` is the default workspace member, while the shipping
-binaries are `sonicterm-mac` and `sonicterm-windows`.
+binaries are `sonicterm-mac`, `sonicterm-windows`, and `sonicterm-linux` (whose
+installed binary name is `sonicterm`).
 
 ## Dependency overview
 
@@ -25,6 +26,7 @@ flowchart BT
     app["sonicterm-app"]
     mac["mac"]
     win["windows"]
+    linux["linux"]
     fontsrc["font-config + fontconfig + freetype + harfbuzz"]
     font["sonicterm-font"]
     engine["engine"]
@@ -45,6 +47,7 @@ flowchart BT
     app --> appcore
     mac --> app
     win --> app
+    linux --> app
 
     font --> fontsrc
     engine --> font
@@ -272,7 +275,7 @@ overlays, tab transfer, platform shell abstractions, bounded target-openability
 workers, and type-stable direct-open dispatch through native platform APIs.
 
 **Consumes:** app-core, terminal stack, cfg/UI/render-model, GPU, resource, logging.
-**Consumed by:** macOS and Windows binaries.
+**Consumed by:** macOS, Windows, and Linux binaries.
 
 **Feature:** `ssh` forwards to `sonicterm-io/ssh`; the live SSH session is not
 fully wired into the GUI today.
@@ -301,6 +304,17 @@ Local PTY/ConPTY transport remains behind `sonicterm-io`.
 **Read:** `src/{main,backdrop,menubar,os_drag_win,software_presenter}.rs`,
 `build.rs`, `wix/main.wxs`.
 
+### `sonicterm-linux`
+
+**Role:** Linux `sonicterm` binary, X11/Wayland desktop identity, production
+startup/diagnostics, packaged-font preflight, Linux capability normalization,
+and desktop/AppStream package metadata. Unsupported native menu, notification,
+backdrop, foreground-title, and cross-process tab-drag hooks degrade safely.
+
+**Consumes:** app-core, app, cfg, engine, logging.
+
+**Read:** `src/main.rs`, `resources/`, and `scripts/make-linux-packages.sh`.
+
 ### `sonicterm-logging`
 
 **Role:** rolling file/stderr tracing, retention cleanup, panic hook, crash
@@ -328,18 +342,19 @@ packaged by the release workflow.
 | Local PTY terminal | shipping |
 | macOS Apple Silicon + Intel DMG | shipping |
 | Windows x64 MSI | shipping |
+| Linux x86_64 deb and tar.gz, X11 and Wayland | shipping |
 | SSH transport | optional implementation seam; GUI connection incomplete |
 | `sonicterm-mux` | workspace/future daemon; not shipped |
-| Linux keymap/fontconfig support | lower-layer support; no Linux GUI binary in workspace |
 
 Every crate contains a local `CLAUDE.md` with its guardrails and local gate.
 
 ## 中文
 
-> 本页即 crate 映射，并为全部 23 个 workspace crate 提供依赖与代码导航细节。
+> 本页即 crate 映射，并为全部 24 个 workspace crate 提供依赖与代码导航细节。
 
 根 `Cargo.toml` 中的 workspace 版本适用于所有第一方 crate。`sonicterm-app` 是默认 member，
-实际发布二进制是 `sonicterm-mac` 与 `sonicterm-windows`。
+实际发布二进制是 `sonicterm-mac`、`sonicterm-windows` 与 `sonicterm-linux`；Linux
+安装后的二进制名为 `sonicterm`。
 
 ## 依赖概览
 
@@ -357,6 +372,7 @@ flowchart BT
     app["sonicterm-app"]
     mac["mac"]
     win["windows"]
+    linux["linux"]
     fontsrc["font-config + fontconfig + freetype + harfbuzz"]
     font["sonicterm-font"]
     engine["engine"]
@@ -377,6 +393,7 @@ flowchart BT
     app --> appcore
     mac --> app
     win --> app
+    linux --> app
 
     font --> fontsrc
     engine --> font
@@ -575,7 +592,7 @@ COLR color glyph 与原生 handle wrapper。
 重绘调度、overlay、tab transfer、平台 shell abstraction、有界目标可打开性 worker，以及通过平台原生 API
 执行的目标类型稳定 direct-open dispatch。
 
-**依赖：** app-core、终端栈、cfg/UI/render-model、GPU、resource、logging。**被依赖：** macOS 与 Windows 二进制。
+**依赖：** app-core、终端栈、cfg/UI/render-model、GPU、resource、logging。**被依赖：** macOS、Windows 与 Linux 二进制。
 
 **Feature：** `ssh` 转发到 `sonicterm-io/ssh`；实时 SSH session 当前尚未完整接入 GUI。
 
@@ -601,6 +618,16 @@ Windows software-present support、resource 与 WiX packaging。本地 PTY/ConPT
 
 **阅读：** `src/{main,backdrop,menubar,os_drag_win,software_presenter}.rs`、`build.rs`、`wix/main.wxs`。
 
+### `sonicterm-linux`
+
+**职责：** Linux `sonicterm` 二进制、X11/Wayland desktop identity、生产启动与诊断、
+打包字体 preflight、Linux capability normalization，以及 desktop/AppStream 打包 metadata。
+不支持的原生菜单、通知、backdrop、前台进程标题和跨进程 tab drag hook 会安全降级。
+
+**依赖：** app-core、app、cfg、engine、logging。
+
+**阅读：** `src/main.rs`、`resources/` 与 `scripts/make-linux-packages.sh`。
+
 ### `sonicterm-logging`
 
 **职责：** rolling file/stderr tracing、保留策略、panic hook、crash dump、signal/exit tracing 和规范 process-exit funnel。
@@ -625,8 +652,8 @@ attach/input/resize/kill 操作。
 | 本地 PTY 终端 | 已发布 |
 | macOS Apple Silicon + Intel DMG | 已发布 |
 | Windows x64 MSI | 已发布 |
+| Linux x86_64 deb 与 tar.gz、X11 与 Wayland | 已发布 |
 | SSH transport | 可选实现接缝；GUI 连接未完成 |
 | `sonicterm-mux` | workspace/未来 daemon；未发布 |
-| Linux keymap/fontconfig 支持 | 底层支持；workspace 中无 Linux GUI 二进制 |
 
 每个 crate 都有本地 `CLAUDE.md`，记录 guardrail 与 local gate。

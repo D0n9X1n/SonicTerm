@@ -1428,7 +1428,8 @@ fn body_title_and_footer_stacks_share_configuration_and_native_size_identity() {
         .map(|offset| helper_start + offset)
         .expect("stack builder end");
     let helper = &CORE_SRC[helper_start..helper_end];
-    assert_eq!(helper.matches("try_new_full_with_weight(").count(), 1);
+    assert_eq!(helper.matches("try_new_full_with_weight_and_font_dirs(").count(), 1);
+    assert!(helper.contains("font_dirs"));
     assert_eq!(helper.matches("with_font_size(").count(), 2);
 
     // Platform locators can accept a family without resolving it on a CI host;
@@ -1453,7 +1454,9 @@ fn body_title_and_footer_stacks_share_configuration_and_native_size_identity() {
         .map(|offset| set_font_start + offset)
         .expect("set_font has a bounded body");
     let set_font = &CORE_SRC[set_font_start..set_font_end];
-    assert!(set_font.contains("renderer_font_stacks(family, size, dpi, weight_scale)"));
+    assert!(
+        set_font.contains("renderer_font_stacks(family, size, dpi, weight_scale, &self.font_dirs)")
+    );
     for assignment in [
         "self.font_stack = new_stacks.body;",
         "self.tab_title_font_stack = new_stacks.tab_title;",
@@ -2008,6 +2011,30 @@ fn a_zero_area_glyph_is_recognised_as_degenerate() {
     assert!(glyph_draw_is_degenerate(&GlyphInfo { uv: [0.2, 0.1, 0.2, 0.2], ..base }));
     assert!(glyph_draw_is_degenerate(&GlyphInfo { uv: [0.1, 0.2, 0.2, 0.2], ..base }));
     assert!(glyph_draw_is_degenerate(&GlyphInfo { uv: [0.3, 0.1, 0.2, 0.2], ..base }));
+}
+
+#[test]
+fn production_instance_honours_wgpu_backend_selection() {
+    // Protect deterministic CI and user diagnostics from an ignored `WGPU_BACKEND` override.
+    const CORE_SRC: &str = include_str!("core.rs");
+    assert!(CORE_SRC.contains("InstanceDescriptor::new_with_display_handle_from_env"));
+    assert!(!CORE_SRC.contains("InstanceDescriptor::new_with_display_handle(Box::new"));
+}
+
+#[test]
+fn successful_frame_counter_advances_only_after_native_presentation() {
+    // Protect runtime smoke from accepting a skipped, occluded, outdated, lost, or failed frame.
+    const CORE_SRC: &str = include_str!("core.rs");
+    assert!(CORE_SRC.contains("pub fn successful_frame_count(&self) -> u64"));
+    let finish_start = CORE_SRC.find("    fn finish_successful_frame(").expect("present cleanup");
+    let finish_end = CORE_SRC[finish_start..]
+        .find("\n    /// This function only emits")
+        .map(|offset| finish_start + offset)
+        .expect("bounded present cleanup");
+    let finish = &CORE_SRC[finish_start..finish_end];
+    assert!(finish.contains("self.successful_frame_count ="));
+    assert!(finish.contains("saturating_add(1)"));
+    assert_eq!(finish.matches("saturating_add(1);").count(), 1);
 }
 
 fn selection_for_rows(start: u64, end: u64) -> Selection {

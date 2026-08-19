@@ -15,7 +15,7 @@ drag/tear-out, and the platform shell abstractions.
 - `src/app/path_target.rs` - contextual target resolution, openability probes, and direct-open workers.
 - `src/app/tab_transfer.rs`, `tear_out.rs`, `child_window.rs` - tab movement.
 - `src/app/config_apply.rs` - explicit reload of `~/.sonicterm/sonicterm.toml`.
-- `src/shell.rs` - `MacShell` and `WindowsShell` builders.
+- `src/shell.rs` - shared shell runner with thin macOS, Windows, and Linux builders.
 
 ## Local gate
 ```bash
@@ -52,4 +52,4 @@ cargo build -p sonicterm-app
 - Consumes: `sonicterm-app-core`, `sonicterm-vt`, `sonicterm-grid`,
   `sonicterm-io`, `sonicterm-cfg`, `sonicterm-render-model`,
   `sonicterm-ui`, `sonicterm-gpu`.
-- Consumed by: `sonicterm-mac`, `sonicterm-windows`.
+- Consumed by: `sonicterm-mac`, `sonicterm-windows`, `sonicterm-linux`.

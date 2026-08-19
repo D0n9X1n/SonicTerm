@@ -242,6 +242,43 @@ fn resolve_spawn_shell_prefers_nonempty_override() {
     assert_eq!(resolve_spawn_shell(Some("   ")), default_shell());
 }
 
+/// Unix shell selection accepts only executable candidates and preserves priority.
+#[cfg(unix)]
+#[test]
+fn unix_default_shell_prefers_valid_environment_then_passwd_then_sh() {
+    let executable =
+        |path: &Path| matches!(path.to_str(), Some("/env/sh" | "/passwd/sh" | "/bin/sh"));
+
+    assert_eq!(
+        resolve_unix_default_shell_with(Some("/env/sh"), Some("/passwd/sh"), executable),
+        "/env/sh"
+    );
+    assert_eq!(
+        resolve_unix_default_shell_with(Some("/missing"), Some("/passwd/sh"), executable),
+        "/passwd/sh"
+    );
+    assert_eq!(
+        resolve_unix_default_shell_with(Some("  "), Some("/missing"), executable),
+        "/bin/sh"
+    );
+}
+
+/// Unix shell selection rejects a non-executable file rather than trusting its pathname.
+#[cfg(unix)]
+#[test]
+fn unix_default_shell_rejects_non_executable_candidates() {
+    let executable = |path: &Path| path == Path::new("/bin/sh");
+
+    assert_eq!(
+        resolve_unix_default_shell_with(
+            Some("/tmp/plain-file"),
+            Some("/tmp/passwd-file"),
+            executable
+        ),
+        "/bin/sh"
+    );
+}
+
 #[cfg(target_os = "windows")]
 #[test]
 fn windows_default_shell_prefers_registered_pwsh_before_store_and_legacy() {

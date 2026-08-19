@@ -113,23 +113,29 @@ observed with `waitid(..., WNOWAIT)`; teardown repeatedly terminates every
 process in the unreaped leader's session before reaping, so session identity
 cannot be reused first. Windows teardown caches process exit and keeps a
 dedicated cloned output reader draining concurrently with ConPTY master close.
-Both platforms use bounded thread, close, and child-exit deadlines.
+The Unix and Windows implementations both use bounded thread, close, and
+child-exit deadlines.
 
 Terminal-input enqueue is non-blocking and bounded. Saturation, disconnection,
 and oversized messages return typed errors that **retain the rejected bytes**
 instead of reporting false success; callers forward those bytes to the event
 loop for a visible retry notification.
 
-Native GPU presentation, real PTYs/SSH, AppKit/Win32 handles, generated C ABI
-behaviour, and installer signing are verified by build, integration, platform
-CI, and release smoke checks rather than hollow unit tests.
+Native GPU presentation, real PTYs/SSH, AppKit/Win32/X11/Wayland handles,
+generated C ABI behaviour, and installer signing are verified by build,
+integration, platform CI, and release smoke checks rather than hollow unit
+tests.
 
 ### Release and verification boundary
 
 The workspace version in root `Cargo.toml` is authoritative for all first-party
 crates and internal requirements. Releases are created only by pushing an
-owner-approved `v*` tag. The tag workflow builds the expected macOS DMG(s),
-Windows MSI, generated release notes, and checksum manifest.
+owner-approved `v*` tag whose version matches every workspace package. The tag
+workflow builds two macOS DMGs, one Windows MSI, and Linux x86_64 `.deb` and
+`.tar.gz` packages. Each package is registered in a typed fragment; publication
+requires all five tuples, revalidates hashes, rejects unregistered release-like
+files, and emits `release-assets.json`, deterministic `SHA256SUMS.txt`, and an
+exact upload-path list.
 
 Packaging procedure is documented in [Packaging](Packaging); the release
 sequence and CI layout are in
@@ -222,20 +228,25 @@ PTY 句柄拥有各自的原生读写线程。Unix 上的自然退出通过
 `waitid(..., WNOWAIT)` 观察；拆除时会在回收之前反复终止未回收 leader
 所在会话中的每一个进程，因此会话标识不可能被抢先复用。
 Windows 上的拆除会缓存进程退出状态，并保持一个专用的克隆输出读取器
-与 ConPTY 主端关闭并发地持续排空。两个平台都使用有上限的线程、关闭与子进程退出期限。
+与 ConPTY 主端关闭并发地持续排空。Unix 与 Windows 实现都使用有上限的线程、
+关闭与子进程退出期限。
 
 终端输入的入队是非阻塞且有界的。饱和、断开与超大消息会返回带类型的错误，
 并**保留被拒绝的字节**，而不是谎报成功；调用方会把这些字节转发给事件循环，
 以便给出可见的重试提示。
 
-原生 GPU 呈现、真实 PTY/SSH、AppKit/Win32 句柄、生成的 C ABI 行为以及安装包签名，
-都由构建、集成、平台 CI 与发布冒烟检查来验证，而不是靠空洞的单元测试。
+原生 GPU 呈现、真实 PTY/SSH、AppKit/Win32/X11/Wayland 句柄、生成的 C ABI
+行为以及安装包签名，都由构建、集成、平台 CI 与发布冒烟检查来验证，而不是靠空洞的
+单元测试。
 
 ### 发布与验证边界
 
 根 `Cargo.toml` 中的 workspace 版本对所有第一方 crate 与内部依赖要求具有权威性。
-发布只能通过推送经所有者批准的 `v*` 标签来创建。该标签工作流会构建预期的
-macOS DMG、Windows MSI、生成的发布说明以及校验和清单。
+发布只能通过推送经所有者批准、且版本与全部 workspace package 一致的 `v*` 标签来创建。
+该标签工作流会构建两个 macOS DMG、一个 Windows MSI，以及 Linux x86_64 `.deb`
+与 `.tar.gz`。每个平台 package 都登记到类型化 fragment；发布要求五个 tuple 全部存在、
+重新验证 hash、拒绝未登记的 release-like 文件，并生成 `release-assets.json`、确定性的
+`SHA256SUMS.txt` 与精确 upload-path list。
 
 打包步骤见 [Packaging](Packaging)；发布流程与 CI 布局见
 [Development and Release](Development-and-Release)。

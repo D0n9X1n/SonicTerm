@@ -170,6 +170,7 @@ fn make_renderer(
         theme,
         RendererSettings {
             font_family: &config.font.family,
+            font_dirs: &[],
             font_size: config.font.size,
             line_height_mult: config.font.line_height,
             font_weight_scale: config.font.effective_weight_scale(),

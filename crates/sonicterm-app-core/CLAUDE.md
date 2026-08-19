@@ -29,4 +29,5 @@ cargo build -p sonicterm-app-core
 
 ## Cross-references
 - Consumes: `sonicterm-types`.
-- Consumed by: `sonicterm-app`, `sonicterm-mac`, `sonicterm-windows`.
+- Consumed by: `sonicterm-app`, `sonicterm-mac`, `sonicterm-windows`,
+  `sonicterm-linux`.

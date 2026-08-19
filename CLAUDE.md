@@ -1,7 +1,7 @@
 # CLAUDE.md — SonicTerm
 
-SonicTerm is a GPU-accelerated terminal for macOS and Windows. Keep changes
-small, typed, and cross-platform unless the crate is explicitly platform-only.
+SonicTerm is a GPU-accelerated terminal for macOS, Windows, and Linux. Keep
+changes small, typed, and cross-platform unless the crate is explicitly platform-only.
 The workspace version is the source of truth (`Cargo.toml` `[workspace.package]`).
 
 ## Read first
@@ -12,7 +12,7 @@ The workspace version is the source of truth (`Cargo.toml` `[workspace.package]`
 - [`wiki/Logging.md`](wiki/Logging.md) — logs, diagnostics, retention, hang investigation.
 - [`wiki/Memory.md`](wiki/Memory.md) — what each subsystem holds, and the resource governor.
 - [`wiki/Rendering-Modes.md`](wiki/Rendering-Modes.md) — software vs GPU rendering and frame pacing.
-- [`wiki/Packaging.md`](wiki/Packaging.md) — local macOS and Windows packaging.
+- [`wiki/Packaging.md`](wiki/Packaging.md) — local macOS, Windows, and Linux packaging.
 
 **Canonical documentation rule:** `wiki/` is the single documentation surface,
 for agents and humans alike. It carries the technical detail — architecture,
@@ -81,6 +81,7 @@ by default and the CI workflows are first-party files worth finding.
 | `sonicterm-app` | Cross-platform app orchestration, path probes, and native direct-open. |
 | `sonicterm-mac` | macOS binary/glue. |
 | `sonicterm-windows` | Windows binary/glue. |
+| `sonicterm-linux` | Linux binary/glue and package metadata. |
 | `sonicterm-mux` | Future mux daemon. |
 | `sonicterm-logging` | Logs, panic hook, exit tracing. |
 
@@ -104,6 +105,8 @@ bash scripts/pty-backend-feasibility.sh --check
 bash scripts/test-resource-inventory.sh
 bash scripts/test-resource-baseline-evidence.sh
 bash scripts/test-soak-harness.sh
+bash scripts/test-linux-packages.sh
+bash scripts/test-release-assets.sh
 bash scripts/test-release-notes.sh
 bash scripts/test-wiki-publish.sh
 scripts/rust-logic-coverage.sh
@@ -131,14 +134,16 @@ unavailable, when production reserved bytes are not below 64 MiB, when the
 largest block is not below 128 MiB, or when production reserved bytes do not
 improve on the old default policy.
 
-Linux-gated path handling is compiled and tested by the focused `linux-paths`
-Ubuntu CI job (`sonicterm-vt`, `sonicterm-cfg`, and `sonicterm-app`). It is a
-compile/test boundary only; SonicTerm still ships macOS and Windows binaries.
+The Ubuntu 22.04 CI job runs the full workspace and per-crate gates, builds the
+shipping `sonicterm` Linux binary, produces `.deb` and `.tar.gz` packages, and
+runs both packaged layouts on X11/Xvfb and Wayland/Weston with Vulkan/lavapipe.
+The smoke exits successfully only after window creation, GPU initialization,
+`/bin/sh` PTY marker round-trip, and a subsequent native frame presentation.
 
 Two more limits worth knowing before trusting a green run:
 
 - `rust-logic-coverage.sh` measures a deterministic-logic subset and skips 11
-  of the 23 crates outright, including `sonicterm-app` and `sonicterm-gpu`. A
+  of the 24 crates outright, including `sonicterm-app` and `sonicterm-gpu`. A
   passing coverage figure says nothing about code in those crates. It is also
   macOS-only in CI.
 - Tests behind `#![cfg(target_os = "windows")]` compile to nothing on macOS,
@@ -159,7 +164,8 @@ cargo build --release -p sonicterm-mac
 Before opening a release PR, verify that README and `wiki/` match any changed
 config, logging, window, palette, or input behavior.
 After pushing a release tag, verify the GitHub release workflow finishes and
-publishes the expected macOS DMG(s), Windows MSI, and checksum assets.
+publishes two macOS DMGs, the Windows MSI, Linux `.deb` and `.tar.gz`,
+`release-assets.json`, and `SHA256SUMS.txt` from the exact validated upload list.
 
 ## Debugging
 
@@ -300,7 +306,8 @@ SonicTerm releases are created by pushing a `v*` tag. The tag workflow builds:
 
 - macOS Apple Silicon and Intel `.dmg` files
 - Windows x64 `.msi`
-- release notes from commits since the previous tag
+- Linux x86_64 `.deb` and `.tar.gz`
+- a validated asset manifest, checksums, and release notes from commits since the previous tag
 
 ## Wiki
 

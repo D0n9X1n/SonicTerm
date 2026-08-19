@@ -1,0 +1,30 @@
+[package]
+name = "sonicterm-linux"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description = "SonicTerm Terminal — Linux app"
+
+[lints]
+workspace = true
+
+[dependencies]
+sonicterm-app.workspace = true
+sonicterm-app-core.workspace = true
+sonicterm-cfg.workspace = true
+sonicterm-engine.workspace = true
+sonicterm-logging.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[[bin]]
+name = "sonicterm"
+path = "src/main.rs"
+
+[dev-dependencies]
+roxmltree = "0.21"

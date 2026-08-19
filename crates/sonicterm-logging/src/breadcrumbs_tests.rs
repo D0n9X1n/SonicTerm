@@ -32,6 +32,15 @@ fn version() -> AppVersion {
     "1.2.3".parse().expect("valid version")
 }
 
+#[test]
+fn linux_is_a_first_class_breadcrumb_platform() {
+    // Protect Linux diagnostics from collapsing into the non-shipping fallback identity.
+    assert_eq!(
+        BreadcrumbEvent::Platform(Platform::Linux).render(0),
+        "time_unix_ms=0 event=platform platform=linux"
+    );
+}
+
 /// Deterministic sampler that exposes each delivered value to the test thread.
 struct SequenceSampler {
     next: AtomicU64,

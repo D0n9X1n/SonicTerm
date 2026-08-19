@@ -4,9 +4,8 @@
 //! conhost behind the GPU window.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-use std::path::PathBuf;
-
 use anyhow::Result;
+use sonicterm_cfg::assets::asset_dir;
 use sonicterm_cfg::config::Config;
 use sonicterm_cfg::keymap::Keymap;
 use sonicterm_cfg::theme::Theme;
@@ -307,19 +306,6 @@ fn load_keymap(name: &str) -> Keymap {
         }
     }
     Keymap::load_name_or_default(name, &asset_dir())
-}
-
-/// Installer copies assets next to the .exe; in dev, fall back to workspace.
-fn asset_dir() -> PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let bundled = dir.join("assets");
-            if bundled.exists() {
-                return bundled;
-            }
-        }
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets")
 }
 
 #[cfg(test)]

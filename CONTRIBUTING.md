@@ -16,6 +16,7 @@ PRs are all welcome.
    ```bash
    cargo run -p sonicterm-mac        # macOS
    cargo run -p sonicterm-windows    # Windows
+   cargo run -p sonicterm-linux      # Linux (binary name: sonicterm)
    ```
 
 Crates live under `crates/`. Before changing boundaries or diagnostics, read
@@ -26,8 +27,9 @@ Crates live under `crates/`. Before changing boundaries or diagnostics, read
 
 ## Before opening a PR
 
-CI runs workspace unit tests and a per-crate unit/build gate on macOS and
-Windows. Run them locally first:
+CI runs workspace unit tests and a per-crate unit/build gate on macOS, Windows,
+and Ubuntu 22.04. Linux CI also builds both package formats and runs packaged
+X11 and Wayland runtime smokes. Run the host-independent gates locally first:
 
 ```bash
 cargo fmt --all --check
@@ -45,6 +47,8 @@ bash scripts/pty-backend-feasibility.sh --check
 bash scripts/test-resource-inventory.sh
 bash scripts/test-resource-baseline-evidence.sh
 bash scripts/test-soak-harness.sh
+bash scripts/test-linux-packages.sh
+bash scripts/test-release-assets.sh
 bash scripts/test-release-notes.sh
 bash scripts/test-wiki-publish.sh
 scripts/rust-logic-coverage.sh
@@ -69,8 +73,8 @@ docs:         add config schema
 chore(ci):    cache cargo registry
 ```
 
-Scope is the crate or component (`app-core`, `gpu`, `mac`, `windows`, `types`,
-`ci`, `assets`, ...). This drives the auto-generated changelog at release time.
+Scope is the crate or component (`app-core`, `gpu`, `mac`, `windows`, `linux`,
+`types`, `ci`, `assets`, ...). This drives the auto-generated changelog at release time.
 
 ## Code style
 
@@ -90,9 +94,10 @@ Scope is the crate or component (`app-core`, `gpu`, `mac`, `windows`, `types`,
 
 Maintainers only:
 
-1. Ensure the workspace version in `Cargo.toml` is `1.1.7`.
-2. Tag: `git tag v1.1.7 && git push origin v1.1.7`.
-3. `release.yml` builds `.dmg` + `.msi` and publishes a GitHub Release.
+1. Ensure the workspace version in `Cargo.toml` matches the intended tag.
+2. Create and push the owner-approved `vX.Y.Z` tag.
+3. `release.yml` validates the tag, builds two DMGs, one MSI, one Linux `.deb`,
+   and one Linux `.tar.gz`, then publishes only the manifest-validated assets.
 
 Pre-release tags (e.g. `v1.2.0-alpha.1`) are auto-marked as pre-release.
 

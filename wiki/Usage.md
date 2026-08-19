@@ -9,6 +9,12 @@ Download the appropriate installer from the
 
 - macOS Apple Silicon or Intel: architecture-specific `.dmg`
 - Windows x64: `.msi`
+- Linux x86_64 with glibc 2.35 or newer: `.deb` or portable `.tar.gz`
+
+Install the Debian package with `sudo apt install ./SonicTerm-<tag>-linux-x86_64.deb`.
+For the portable archive, extract it and run the `sonicterm` binary from its
+payload directory so the adjacent `assets/` tree remains available. Both X11
+and Wayland are supported.
 
 On first launch SonicTerm creates `~/.sonicterm/`, writes a starter
 `sonicterm.toml`, and seeds editable theme and keymap examples. Runtime state is
@@ -19,21 +25,21 @@ kept under this one directory.
 These are the bundled defaults. The complete and editable list is on the
 [Keybindings](Keybindings) page.
 
-| Action | macOS | Windows |
-| --- | --- | --- |
-| New tab | `Cmd+T` | `Alt+T` or `Ctrl+T` |
-| Close active pane or tab | `Cmd+W` | `Alt+W` |
-| Split right | `Cmd+D` | `Alt+D` |
-| Split down | `Cmd+Shift+D` | `Alt+Shift+D` |
-| Focus panes | `Cmd+Shift+H/J/K/L` | `Alt+Shift+H/J/K/L` |
-| Command palette | `Cmd+Shift+P` | `Alt+Shift+P` |
-| Search | `Cmd+F` | `Alt+F` |
-| READONLY / copy mode | `Cmd+[` | `Alt+[` |
-| Broadcast to current tab | `Cmd+Shift+B` | `Alt+Shift+B` |
-| Quick-select URLs | `Cmd+Shift+Space` | `Alt+Shift+Space` |
-| Reload config | `Cmd+R` | `Alt+R` |
+| Action | macOS | Windows | Linux |
+| --- | --- | --- | --- |
+| New tab | `Cmd+T` | `Alt+T` or `Ctrl+T` | `Alt+T` or `Ctrl+T` |
+| Close active pane or tab | `Cmd+W` | `Alt+W` | `Alt+W` |
+| Split right | `Cmd+D` | `Alt+D` | `Alt+D` |
+| Split down | `Cmd+Shift+D` | `Alt+Shift+D` | `Alt+Shift+D` |
+| Focus panes | `Cmd+Shift+H/J/K/L` | `Alt+Shift+H/J/K/L` | `Alt+Shift+H/J/K/L` |
+| Command palette | `Cmd+Shift+P` | `Alt+Shift+P` | `Alt+Shift+P` |
+| Search | `Cmd+F` | `Alt+F` | `Alt+F` |
+| READONLY / copy mode | `Cmd+[` | `Alt+[` | `Alt+[` |
+| Broadcast to current tab | `Cmd+Shift+B` | `Alt+Shift+B` | `Alt+Shift+B` |
+| Quick-select URLs | `Cmd+Shift+Space` | `Alt+Shift+Space` | `Alt+Shift+Space` |
+| Reload config | `Cmd+R` | `Alt+R` | `Alt+R` |
 
-Windows deliberately uses `Alt` as the application modifier so common
+Windows and Linux deliberately use `Alt` as the application modifier so common
 `Ctrl+<letter>` chords continue to reach PowerShell, cmd, readline, and terminal
 applications. A few familiar compatibility aliases such as `Ctrl+T`,
 `Ctrl+Shift+C`, and `Ctrl+Shift+V` are also bundled.
@@ -156,6 +162,11 @@ set to avoid duplicate input.
 
 - macOS Apple Silicon 或 Intel：对应架构的 `.dmg`
 - Windows x64：`.msi`
+- Linux x86_64（glibc 2.35 或更高版本）：`.deb` 或便携 `.tar.gz`
+
+使用 `sudo apt install ./SonicTerm-<tag>-linux-x86_64.deb` 安装 Debian 包。
+使用便携归档时，请先解压，再从 payload 目录运行 `sonicterm`，以保留二进制旁的
+`assets/` 目录。X11 与 Wayland 均受支持。
 
 首次启动时，SonicTerm 会创建 `~/.sonicterm/`，生成初始
 `sonicterm.toml`，并写入可编辑的主题和 keymap 示例。运行时用户状态都集中在这个目录。
@@ -164,21 +175,21 @@ set to avoid duplicate input.
 
 下表是内置默认值；完整且可编辑的列表见 [快捷键 / Keybindings](Keybindings)。
 
-| 功能 | macOS | Windows |
-| --- | --- | --- |
-| 新建标签页 | `Cmd+T` | `Alt+T` 或 `Ctrl+T` |
-| 关闭当前窗格或标签页 | `Cmd+W` | `Alt+W` |
-| 向右分屏 | `Cmd+D` | `Alt+D` |
-| 向下分屏 | `Cmd+Shift+D` | `Alt+Shift+D` |
-| 切换窗格焦点 | `Cmd+Shift+H/J/K/L` | `Alt+Shift+H/J/K/L` |
-| 命令面板 | `Cmd+Shift+P` | `Alt+Shift+P` |
-| 搜索 | `Cmd+F` | `Alt+F` |
-| READONLY / 复制模式 | `Cmd+[` | `Alt+[` |
-| 广播到当前标签页 | `Cmd+Shift+B` | `Alt+Shift+B` |
-| URL 快速选择 | `Cmd+Shift+Space` | `Alt+Shift+Space` |
-| 重新加载配置 | `Cmd+R` | `Alt+R` |
+| 功能 | macOS | Windows | Linux |
+| --- | --- | --- | --- |
+| 新建标签页 | `Cmd+T` | `Alt+T` 或 `Ctrl+T` | `Alt+T` 或 `Ctrl+T` |
+| 关闭当前窗格或标签页 | `Cmd+W` | `Alt+W` | `Alt+W` |
+| 向右分屏 | `Cmd+D` | `Alt+D` | `Alt+D` |
+| 向下分屏 | `Cmd+Shift+D` | `Alt+Shift+D` | `Alt+Shift+D` |
+| 切换窗格焦点 | `Cmd+Shift+H/J/K/L` | `Alt+Shift+H/J/K/L` | `Alt+Shift+H/J/K/L` |
+| 命令面板 | `Cmd+Shift+P` | `Alt+Shift+P` | `Alt+Shift+P` |
+| 搜索 | `Cmd+F` | `Alt+F` | `Alt+F` |
+| READONLY / 复制模式 | `Cmd+[` | `Alt+[` | `Alt+[` |
+| 广播到当前标签页 | `Cmd+Shift+B` | `Alt+Shift+B` | `Alt+Shift+B` |
+| URL 快速选择 | `Cmd+Shift+Space` | `Alt+Shift+Space` | `Alt+Shift+Space` |
+| 重新加载配置 | `Cmd+R` | `Alt+R` | `Alt+R` |
 
-Windows 特意使用 `Alt` 作为应用级修饰键，使常见的 `Ctrl+<字母>` 仍可传给
+Windows 与 Linux 特意使用 `Alt` 作为应用级修饰键，使常见的 `Ctrl+<字母>` 仍可传给
 PowerShell、cmd、readline 和终端程序。同时保留 `Ctrl+T`、`Ctrl+Shift+C`、
 `Ctrl+Shift+V` 等常见兼容别名。
 

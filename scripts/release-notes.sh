@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
-# Generate GitHub Release notes for a tag from commits since the previous tag.
+# Generate GitHub Release notes from the validated release-asset manifest.
 set -euo pipefail
 
 TAG="${1:-${GITHUB_REF_NAME:-}}"
+MANIFEST="${2:-${RELEASE_ASSET_MANIFEST:-dist/release-assets.json}}"
 if [[ -z "$TAG" ]]; then
-  echo "usage: $0 <tag>" >&2
+  echo "usage: $0 <tag> [release-assets.json]" >&2
+  exit 2
+fi
+if [[ ! -f "$MANIFEST" ]]; then
+  echo "release asset manifest not found: $MANIFEST" >&2
   exit 2
 fi
 
@@ -15,13 +20,29 @@ fi
 
 echo "# SonicTerm ${TAG}"
 echo
-echo "## Installers"
+echo "## Downloads"
 echo
-echo "- macOS Apple Silicon: download \`SonicTerm-${TAG}-mac-aarch64.dmg\`."
-echo "- macOS Intel: download \`SonicTerm-${TAG}-mac-x86_64.dmg\`."
-echo "- Windows: download the \`.msi\` artifact."
-echo "- Downloadable files are attached to this GitHub Release, including \`SHA256SUMS.txt\`."
-echo "- Both installers are unsigned for ${TAG}; macOS may require right-click → Open."
+python3 - "$MANIFEST" "$TAG" <<'PY'
+import json
+import pathlib
+import sys
+
+manifest_path = pathlib.Path(sys.argv[1])
+tag = sys.argv[2]
+manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+if manifest.get("tag") != tag:
+    raise SystemExit(f"manifest tag {manifest.get('tag')!r} does not match {tag!r}")
+assets = manifest.get("assets")
+if not isinstance(assets, list) or not assets:
+    raise SystemExit("release asset manifest has no assets")
+for asset in assets:
+    print(
+        f"- {asset['platform']} / {asset['arch']} / {asset['kind']}: "
+        f"download `{asset['name']}`."
+    )
+PY
+echo "- Integrity metadata: \`release-assets.json\` and \`SHA256SUMS.txt\`."
+echo "- Release packages are unsigned for ${TAG}; macOS may require right-click → Open."
 echo
 
 if [[ -n "$PREVIOUS_TAG" ]]; then
@@ -39,5 +60,6 @@ fi
 echo
 echo "## Verification"
 echo
-echo "- Unit tests run in CI on macOS and Windows."
-echo "- Release workflow builds the macOS dmg and Windows msi from the tagged commit."
+echo "- Unit tests run in CI on macOS, Windows, and Linux."
+echo "- The release workflow validates tag/workspace-version consistency and all manifest-registered assets."
+echo "- Linux packages pass X11/Xvfb and Wayland/Weston runtime smokes before publication."

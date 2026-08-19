@@ -27,8 +27,9 @@ use winit::{
 
 use super::key_encoding::{encode_key, key_event_to_string, key_to_strings};
 use super::{
-    invalidate_selection_for_content, mark_all_panes_dirty, pane_id_at_point, App, FrontmostKind,
-    TabState,
+    invalidate_selection_for_content, mark_all_panes_dirty, pane_id_at_point,
+    runtime_smoke::{grid_contains_marker, RuntimeSmokeFailure},
+    App, FrontmostKind, TabState,
 };
 
 const SPLITTER_HIT_THICKNESS: f32 = 8.0;
@@ -436,6 +437,23 @@ impl App {
                     return;
                 }
 
+                let marker_observed = self.runtime_smoke.as_ref().is_some_and(|smoke| {
+                    smoke.is_waiting_for_marker()
+                        && guards.iter().any(|(_, parser, _)| {
+                            grid_contains_marker(parser.grid(), smoke.marker())
+                        })
+                });
+                if marker_observed {
+                    let baseline =
+                        self.main_renderer().map(GpuRenderer::successful_frame_count).unwrap_or(0);
+                    if let Some(smoke) = self.runtime_smoke.as_mut() {
+                        smoke.begin_present_wait(baseline);
+                    }
+                }
+                let smoke_waiting_for_present =
+                    self.runtime_smoke.as_ref().is_some_and(|smoke| smoke.is_waiting_for_present());
+                let mut smoke_presented_count = None;
+
                 if let Some(r) = self.main_renderer_mut() {
                     r.set_inactive_pane_cursors(Vec::new());
                 }
@@ -691,6 +709,12 @@ impl App {
                             ws_hovered_url_cells,
                         ) {
                             tracing::warn!("render error: {e}");
+                            if smoke_waiting_for_present {
+                                smoke_presented_count = Some(Err(RuntimeSmokeFailure::Present));
+                            }
+                        } else if smoke_waiting_for_present {
+                            // When: `smoke_waiting_for_present` is true, retain the post-render native-present count.
+                            smoke_presented_count = Some(Ok(r.successful_frame_count()));
                         }
                         if let Some(t) = timing.as_mut() {
                             t.lap("render");
@@ -787,6 +811,32 @@ impl App {
                                 );
                                 w.set_ime_cursor_area(pos, size);
                             }
+                        }
+                    }
+                }
+                if let Some(presented) = smoke_presented_count {
+                    // When: `smoke_presented_count` contains `presented`, classify this marker-bearing frame.
+                    match presented {
+                        Ok(count) => {
+                            // When: `presented` is `Ok(count)`, compare it with the frozen baseline.
+                            let complete = self
+                                .runtime_smoke
+                                .as_mut()
+                                .and_then(|smoke| smoke.observe_presented_frame(count))
+                                .is_some_and(|result| result.is_ok());
+                            if complete {
+                                // When: `complete` is true, the marker-bearing frame reached native presentation.
+                                el.exit();
+                                return;
+                            }
+                        }
+                        Err(failure) => {
+                            // When: `presented` is `Err(failure)`, retain presentation as the failed boundary.
+                            if let Some(smoke) = self.runtime_smoke.as_mut() {
+                                smoke.fail(failure);
+                            }
+                            el.exit();
+                            return;
                         }
                     }
                 }

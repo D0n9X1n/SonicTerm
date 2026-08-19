@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.d0n9x1n.SonicTerm</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>SonicTerm</name>
+  <summary>Fast GPU-accelerated terminal emulator</summary>
+  <description>
+    <p>SonicTerm is a native GPU-accelerated terminal with searchable commands, split panes, configurable keybindings, and bundled typography.</p>
+  </description>
+  <launchable type="desktop-id">com.d0n9x1n.SonicTerm.desktop</launchable>
+  <provides>
+    <binary>sonicterm</binary>
+  </provides>
+  <categories>
+    <category>System</category>
+    <category>TerminalEmulator</category>
+  </categories>
+  <url type="homepage">https://github.com/D0n9X1n/SonicTerm</url>
+  <content_rating type="oars-1.1"/>
+</component>

@@ -16,7 +16,7 @@ flowchart TD
     log["initialize logging with [logging]"]
     theme["load theme and keymap"]
     asm["create AppStateMachine"]
-    shell["build MacShell or WindowsShell"]
+    shell["build MacShell, WindowsShell, or LinuxShell"]
     loop["create winit EventLoop&lt;UserEvent&gt;"]
     app["create App and run ApplicationHandler"]
     resumed["resumed: create first native window and GpuRenderer"]
@@ -34,10 +34,10 @@ flowchart TD
     resumed --> pane
 ```
 
-Both platform binaries install panic/exit diagnostics before normal startup
-work, then defer the tracing subscriber until after the user logging config has
-been read. Loading failures can therefore be surfaced without permanently
-locking in the wrong log level.
+All three platform binaries install panic/exit diagnostics before normal
+startup work, then defer the tracing subscriber until after the user logging
+config has been read. Loading failures can therefore be surfaced without
+permanently locking in the wrong log level.
 
 Windows sets per-monitor-v2 DPI awareness before winit creates an HWND and may
 accept a private `--tear-out-payload` used for cross-process tab drag. macOS
@@ -45,17 +45,19 @@ disables AppKit automatic window tabbing before the event loop starts.
 
 ## Shell construction
 
-`MacShell` and `WindowsShell` are builders around the same cross-platform app.
-They install platform hooks for:
+`MacShell`, `WindowsShell`, and `LinuxShell` are thin builders around one shared
+platform-neutral runner. They supply the platform hooks that exist for:
 
 - native menus;
-- window-ready work that requires a real NSWindow or HWND;
+- window-ready work that requires a real native window;
 - OS drag/drop handoff;
 - theme/keymap asset loader closures;
 - an optional pending tab payload.
 
-`run()` creates `EventLoop<UserEvent>`, installs proxy bridges, constructs
-`App`, and calls `run_app`.
+Linux leaves unsupported native menu, notification, and cross-process tab-drag
+hooks absent rather than blocking or panicking. `run()` creates
+`EventLoop<UserEvent>`, installs the available proxy bridges, constructs `App`,
+and calls `run_app`.
 
 ## Winit lifecycle
 
@@ -388,7 +390,7 @@ flowchart TD
 
 | Topic | Primary paths |
 | --- | --- |
-| Platform startup | `crates/sonicterm-{mac,windows}/src/main.rs` |
+| Platform startup | `crates/sonicterm-{mac,windows,linux}/src/main.rs` |
 | Shell builder | `crates/sonicterm-app/src/shell.rs` |
 | App and WindowState | `crates/sonicterm-app/src/app/mod.rs` |
 | Winit callbacks | `crates/sonicterm-app/src/app/{event_loop,window_event}.rs` |
@@ -413,7 +415,7 @@ flowchart TD
     log["根据 [logging] 初始化日志"]
     theme["读取主题和 keymap"]
     asm["创建 AppStateMachine"]
-    shell["构建 MacShell 或 WindowsShell"]
+    shell["构建 MacShell、WindowsShell 或 LinuxShell"]
     loop["创建 winit EventLoop&lt;UserEvent&gt;"]
     app["创建 App 并运行 ApplicationHandler"]
     resumed["resumed：创建首个原生窗口和 GpuRenderer"]
@@ -431,7 +433,7 @@ flowchart TD
     resumed --> pane
 ```
 
-两个平台二进制都会先安装 panic/退出诊断，再执行普通启动工作；tracing subscriber 则等到
+三个平台二进制都会先安装 panic/退出诊断，再执行普通启动工作；tracing subscriber 则等到
 读取用户日志配置后才安装。这样既能暴露配置加载错误，又不会永久锁定错误日志级别。
 
 Windows 会在 winit 创建 HWND 前启用 per-monitor-v2 DPI awareness，并可接收内部
@@ -439,15 +441,17 @@ Windows 会在 winit 创建 HWND 前启用 per-monitor-v2 DPI awareness，并可
 
 ## Shell 构建
 
-`MacShell` 和 `WindowsShell` 都是同一个跨平台 app 的 builder。它们安装：
+`MacShell`、`WindowsShell` 和 `LinuxShell` 是同一个平台中立 runner 外的轻量 builder。
+它们提供各平台实际存在的 hook：
 
 - 原生菜单；
-- 只有真实 NSWindow 或 HWND 出现后才能执行的 window-ready 工作；
+- 只有真实原生窗口出现后才能执行的 window-ready 工作；
 - OS 拖放交接；
 - 主题与 keymap 资产加载闭包；
 - 可选的待接收标签页 payload。
 
-`run()` 创建 `EventLoop<UserEvent>`，安装 proxy bridge，构建 `App`，然后调用 `run_app`。
+Linux 会让不支持的原生菜单、通知与跨进程 tab drag hook 保持缺席，而不是阻塞或 panic。
+`run()` 创建 `EventLoop<UserEvent>`，安装可用的 proxy bridge，构建 `App`，然后调用 `run_app`。
 
 ## Winit 生命周期
 
@@ -728,7 +732,7 @@ flowchart TD
 
 | 主题 | 主要路径 |
 | --- | --- |
-| 平台启动 | `crates/sonicterm-{mac,windows}/src/main.rs` |
+| 平台启动 | `crates/sonicterm-{mac,windows,linux}/src/main.rs` |
 | Shell builder | `crates/sonicterm-app/src/shell.rs` |
 | App 与 WindowState | `crates/sonicterm-app/src/app/mod.rs` |
 | Winit 回调 | `crates/sonicterm-app/src/app/{event_loop,window_event}.rs` |

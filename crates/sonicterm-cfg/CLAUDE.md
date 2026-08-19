@@ -30,4 +30,4 @@ cargo test -p sonicterm-cfg
 
 ## Cross-references
 - Consumed by: `sonicterm-app`, `sonicterm-mac`, `sonicterm-windows`,
-  `sonicterm-ui`, `sonicterm-gpu`, `sonicterm-block-glyph`.
+  `sonicterm-linux`, `sonicterm-ui`, `sonicterm-gpu`, `sonicterm-block-glyph`.

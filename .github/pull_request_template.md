@@ -15,7 +15,7 @@
 - [ ] config / UI (`sonicterm-cfg`, `sonicterm-ui`)
 - [ ] text / fonts (`sonicterm-text`, `sonicterm-font*`, `sonicterm-engine`)
 - [ ] rendering (`sonicterm-render-model`, `sonicterm-block-glyph`, `sonicterm-gpu`)
-- [ ] app / platform (`sonicterm-app`, `sonicterm-mac`, `sonicterm-windows`)
+- [ ] app / platform (`sonicterm-app`, `sonicterm-mac`, `sonicterm-windows`, `sonicterm-linux`)
 - [ ] logging / CI / release / docs / assets
 
 ## Authored Rust contract
@@ -39,6 +39,8 @@
 - [ ] `bash scripts/test-resource-inventory.sh`
 - [ ] `bash scripts/test-resource-baseline-evidence.sh`
 - [ ] `bash scripts/test-soak-harness.sh`
+- [ ] `bash scripts/test-linux-packages.sh`
+- [ ] `bash scripts/test-release-assets.sh`
 - [ ] `bash scripts/test-release-notes.sh`
 - [ ] `bash scripts/test-wiki-publish.sh`
 - [ ] `scripts/rust-logic-coverage.sh`

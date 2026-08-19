@@ -2,9 +2,9 @@
 
 ## English
 
-SonicTerm is a native, GPU-accelerated terminal for macOS and Windows. This
-wiki contains both the user guide and a source-backed explanation of how the
-project works internally.
+SonicTerm is a native, GPU-accelerated terminal for macOS, Windows, and Linux.
+This wiki contains both the user guide and a source-backed explanation of how
+the project works internally.
 
 Memory is a first-class concern: every subsystem that can grow has a ceiling,
 the ones that matter are process-wide rather than per-pane, and anything
@@ -27,8 +27,8 @@ level. [Memory](Memory) covers what is bounded and how to read it.
 - [Terminal IO and VT](Terminal-IO-and-VT) — PTYs, optional SSH, VT parsing, grids, scrollback, and mux status
 - [From Keypress to Pixel](From-Keypress-to-Pixel) — how one typed `A` travels through the child program, grid, font stack, and renderer
 - [Rendering and Fonts](Rendering-and-Fonts) — damage, glyph shaping, atlases, wgpu, and software rendering
-- [Platform Integration](Platform-Integration) — AppKit/macOS and Win32/Windows boundaries
-- [Crate Reference](Crate-Reference) — all 23 workspace crates and their relationships
+- [Platform Integration](Platform-Integration) — AppKit/macOS, Win32/Windows, and X11/Wayland Linux boundaries
+- [Crate Reference](Crate-Reference) — all 24 workspace crates and their relationships
 - [Development and Release](Development-and-Release) — tests, CI, packaging, and the `v*` release pipeline
 
 This wiki is the canonical documentation surface: architecture and invariants
@@ -39,8 +39,8 @@ build procedures in [Packaging](Packaging).
 
 ## 中文
 
-SonicTerm 是一个面向 macOS 和 Windows 的原生 GPU 加速终端。本 Wiki 同时包含
-用户手册，以及基于源码整理的项目内部工作原理说明。
+SonicTerm 是一个面向 macOS、Windows 和 Linux 的原生 GPU 加速终端。本 Wiki
+同时包含用户手册，以及基于源码整理的项目内部工作原理说明。
 
 内存是首要关注点：每个可能增长的子系统都有上限，其中最关键的是进程级而非按
 面板计的限制，并且 SonicTerm 丢弃的任何可见内容都会在默认日志级别下记录。
@@ -62,8 +62,8 @@ SonicTerm 是一个面向 macOS 和 Windows 的原生 GPU 加速终端。本 Wik
 - [终端 IO 与 VT / Terminal IO and VT](Terminal-IO-and-VT) — PTY、可选 SSH、VT 解析、网格、回滚缓冲与 mux 状态
 - [从按键到像素 / From Keypress to Pixel](From-Keypress-to-Pixel) — 一个输入的 `A` 如何经过子程序、网格、字体栈与渲染器
 - [渲染与字体 / Rendering and Fonts](Rendering-and-Fonts) — 损坏区域、字形塑形、图集、wgpu 与软件渲染
-- [平台集成 / Platform Integration](Platform-Integration) — AppKit/macOS 与 Win32/Windows 边界
-- [Crate 参考 / Crate Reference](Crate-Reference) — 工作区全部 23 个 crate 及其关系
+- [平台集成 / Platform Integration](Platform-Integration) — AppKit/macOS、Win32/Windows 与 X11/Wayland Linux 边界
+- [Crate 参考 / Crate Reference](Crate-Reference) — 工作区全部 24 个 crate 及其关系
 - [开发与发布 / Development and Release](Development-and-Release) — 测试、CI、打包与 `v*` 发布流水线
 
 本 Wiki 即规范文档面：架构与不变量见 [Architecture](Architecture) 与

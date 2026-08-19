@@ -14,9 +14,24 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  validate-release-tag:
+    name: Validate release tag and workspace version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Validate tag against every workspace package
+        run: python3 scripts/prepare-release-assets.py check-version --tag "${{ github.ref_name }}"
+
+      - name: Test release asset tooling
+        run: bash scripts/test-release-assets.sh
+
   unit-tests-mac:
     name: macOS / unit tests
     runs-on: macos-14
+    needs: [validate-release-tag]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -38,6 +53,7 @@ jobs:
   unit-tests-windows:
     name: Windows / unit tests
     runs-on: windows-latest
+    needs: [validate-release-tag]
     env:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
     steps:
@@ -87,6 +103,52 @@ jobs:
       - name: Run release-note unit test
         shell: bash
         run: bash scripts/test-release-notes.sh
+
+  unit-tests-linux:
+    name: Linux / unit tests
+    runs-on: ubuntu-latest
+    needs: [validate-release-tag]
+    container: ubuntu:22.04
+    steps:
+      - name: Install runner and native dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates \
+            curl \
+            git \
+            build-essential \
+            zstd \
+            pkg-config \
+            libcairo2-dev \
+            libfontconfig1-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            python3
+
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-unit-linux-ubuntu-22.04
+
+      - name: Run unit tests
+        run: cargo test --workspace --lib --bins
+
+      - name: Run per-crate unit/build gate
+        run: bash scripts/check-workspace-crates.sh
+
+      - name: Run Linux release tooling tests
+        run: |
+          bash scripts/test-linux-packages.sh
+          bash scripts/test-release-assets.sh
+          bash scripts/test-release-notes.sh
 
   build-mac-x86_64:
     name: Build macOS x86_64 binary
@@ -179,15 +241,34 @@ jobs:
           brew install create-dmg imagemagick
           bash scripts/bake-icons.sh
 
-      - name: Build dmg
+      - name: Build and register dmg assets
         run: |
           bash scripts/make-macos-dmg.sh dist/aarch64/sonicterm-mac "${{ github.ref_name }}" mac-aarch64
           bash scripts/make-macos-dmg.sh dist/x86_64/sonicterm-mac "${{ github.ref_name }}" mac-x86_64
+          python3 scripts/prepare-release-assets.py fragment \
+            --tag "${{ github.ref_name }}" \
+            --asset "dist/SonicTerm-${{ github.ref_name }}-mac-aarch64.dmg" \
+            --platform macos \
+            --arch aarch64 \
+            --kind dmg \
+            --output dist/macos-aarch64-dmg.asset.json
+          python3 scripts/prepare-release-assets.py fragment \
+            --tag "${{ github.ref_name }}" \
+            --asset "dist/SonicTerm-${{ github.ref_name }}-mac-x86_64.dmg" \
+            --platform macos \
+            --arch x86_64 \
+            --kind dmg \
+            --output dist/macos-x86_64-dmg.asset.json
 
       - uses: actions/upload-artifact@v5
         with:
-          name: sonicterm-mac
-          path: dist/*.dmg
+          name: release-assets-macos
+          path: |
+            dist/SonicTerm-${{ github.ref_name }}-mac-aarch64.dmg
+            dist/SonicTerm-${{ github.ref_name }}-mac-x86_64.dmg
+            dist/macos-aarch64-dmg.asset.json
+            dist/macos-x86_64-dmg.asset.json
+          if-no-files-found: error
 
   build-windows:
     name: Build Windows msi
@@ -239,22 +320,144 @@ jobs:
       - name: Build release binary
         run: cargo build --release --target x86_64-pc-windows-msvc -p sonicterm-windows
 
-      - name: Build msi
+      - name: Build and register msi asset
+        shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Push-Location crates\sonicterm-windows
           cargo wix --package sonicterm-windows --no-build --nocapture --output ..\..\dist\
           Pop-Location
+          $packages = @(Get-ChildItem dist -Filter *.msi)
+          if ($packages.Count -ne 1) {
+            throw "Expected one MSI from cargo-wix, found $($packages.Count)"
+          }
+          $name = "SonicTerm-${{ github.ref_name }}-windows-x86_64.msi"
+          Move-Item -LiteralPath $packages[0].FullName -Destination "dist\$name"
+          python scripts\prepare-release-assets.py fragment `
+            --tag "${{ github.ref_name }}" `
+            --asset "dist\$name" `
+            --platform windows `
+            --arch x86_64 `
+            --kind msi `
+            --output dist\windows-x86_64-msi.asset.json
 
       - uses: actions/upload-artifact@v5
         with:
-          name: sonicterm-windows
-          path: dist/*.msi
+          name: release-assets-windows
+          path: |
+            dist/SonicTerm-${{ github.ref_name }}-windows-x86_64.msi
+            dist/windows-x86_64-msi.asset.json
+          if-no-files-found: error
+
+  package-linux:
+    name: Package Linux deb and tar.gz
+    runs-on: ubuntu-latest
+    needs: [unit-tests-linux]
+    container: ubuntu:22.04
+    steps:
+      - name: Install runner, package, and runtime dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates \
+            curl \
+            git \
+            build-essential \
+            zstd \
+            pkg-config \
+            libcairo2-dev \
+            libfontconfig1-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            binutils \
+            dpkg-dev \
+            file \
+            desktop-file-utils \
+            appstream \
+            lintian \
+            mesa-vulkan-drivers \
+            libvulkan1 \
+            xvfb \
+            x11-utils \
+            weston \
+            python3
+
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-linux-ubuntu-22.04
+
+      - name: Build Linux release binary
+        run: cargo build --release -p sonicterm-linux
+
+      - name: Build, validate, and register Linux packages
+        shell: bash
+        run: |
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)" \
+            bash scripts/make-linux-packages.sh \
+              target/release/sonicterm \
+              "${{ github.ref_name }}" \
+              dist
+          tarball="dist/SonicTerm-${{ github.ref_name }}-linux-x86_64.tar.gz"
+          deb="dist/SonicTerm-${{ github.ref_name }}-linux-x86_64.deb"
+          bash scripts/test-linux-packages.sh "$tarball" "$deb"
+          desktop-file-validate \
+            "dist/.linux-package-work/SonicTerm-${{ github.ref_name }}-linux-x86_64/share/applications/com.d0n9x1n.SonicTerm.desktop"
+          appstreamcli validate --no-net \
+            "dist/.linux-package-work/SonicTerm-${{ github.ref_name }}-linux-x86_64/share/metainfo/com.d0n9x1n.SonicTerm.metainfo.xml"
+          if ! lintian "$deb"; then
+            echo "::warning::lintian reported advisory Linux package findings"
+          fi
+          python3 scripts/prepare-release-assets.py fragment \
+            --tag "${{ github.ref_name }}" \
+            --asset "$tarball" \
+            --platform linux \
+            --arch x86_64 \
+            --kind tar.gz \
+            --output dist/linux-x86_64-tar-gz.asset.json
+          python3 scripts/prepare-release-assets.py fragment \
+            --tag "${{ github.ref_name }}" \
+            --asset "$deb" \
+            --platform linux \
+            --arch x86_64 \
+            --kind deb \
+            --output dist/linux-x86_64-deb.asset.json
+
+      - name: Run packaged X11 and Wayland smokes
+        run: |
+          bash scripts/smoke-linux-packages.sh \
+            "dist/SonicTerm-${{ github.ref_name }}-linux-x86_64.tar.gz" \
+            "dist/SonicTerm-${{ github.ref_name }}-linux-x86_64.deb"
+
+      - name: Upload Linux package smoke logs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: sonicterm-linux-release-smoke-logs
+          path: sonicterm-*-smoke.log
+          if-no-files-found: ignore
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: release-assets-linux
+          path: |
+            dist/SonicTerm-${{ github.ref_name }}-linux-x86_64.tar.gz
+            dist/SonicTerm-${{ github.ref_name }}-linux-x86_64.deb
+            dist/linux-x86_64-tar-gz.asset.json
+            dist/linux-x86_64-deb.asset.json
+          if-no-files-found: error
 
   publish:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
-    needs: [package-mac, build-windows]
+    needs: [package-mac, build-windows, package-linux]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -262,34 +465,36 @@ jobs:
 
       - uses: actions/download-artifact@v5
         with:
+          pattern: release-assets-*
           path: dist
           merge-multiple: true
 
-      - name: Prepare downloadable release assets
+      - name: Consolidate and validate release assets
+        id: assets
         shell: bash
         run: |
-          shopt -s nullglob
-          dmg=(dist/*.dmg)
-          msi=(dist/*.msi)
-          if ((${#dmg[@]} == 0 || ${#msi[@]} == 0)); then
-            echo "Expected both macOS .dmg and Windows .msi release assets in dist/" >&2
-            find dist -maxdepth 2 -type f -print >&2
-            exit 1
-          fi
-          (cd dist && shasum -a 256 ./*.dmg ./*.msi > SHA256SUMS.txt)
+          python3 scripts/prepare-release-assets.py consolidate \
+            --tag "${{ github.ref_name }}" \
+            --dist dist
+          {
+            echo 'paths<<RELEASE_ASSETS'
+            cat dist/release-upload-paths.txt
+            echo 'RELEASE_ASSETS'
+          } >> "$GITHUB_OUTPUT"
           ls -lh dist
 
       - name: Generate release notes
-        run: bash scripts/release-notes.sh "${{ github.ref_name }}" > RELEASE_NOTES.md
+        run: |
+          bash scripts/release-notes.sh \
+            "${{ github.ref_name }}" \
+            dist/release-assets.json \
+            > RELEASE_NOTES.md
 
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: SonicTerm ${{ github.ref_name }}
           body_path: RELEASE_NOTES.md
-          files: |
-            dist/*.dmg
-            dist/*.msi
-            dist/SHA256SUMS.txt
+          files: ${{ steps.assets.outputs.paths }}
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}

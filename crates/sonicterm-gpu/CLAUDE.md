@@ -38,6 +38,10 @@ cargo build -p sonicterm-gpu
 - Upgrade `wgpu` and the `sonicterm-font`/`sonicterm-text` glyph stack as a
   tested set, not one at a time. (`glyphon`/`cosmic-text` were removed; text
   now flows through the Sonic-owned atlas + rasterizer.)
+- Production instance creation honors `WGPU_BACKEND`; Linux package smokes force
+  Vulkan/lavapipe and require a native presentation after the PTY marker arrives.
+- Retain packaged font directories across live font reloads; dropping them can
+  make a fresh Linux install resolve a different or missing face.
 
 ## Cross-references
 - Consumes: `sonicterm-render-model`, `sonicterm-text`, `sonicterm-types`,

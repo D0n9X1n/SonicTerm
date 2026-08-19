@@ -69,6 +69,7 @@ fn run_probe(active: &ActiveEventLoop) -> Result<Capability, String> {
     theme.colors.selection_bg = Hex(SELECTION_HEX.to_string());
     let settings = RendererSettings {
         font_family: "monospace",
+        font_dirs: &[],
         font_size: 14.0,
         line_height_mult: 1.2,
         font_weight_scale: 1.0,

@@ -107,6 +107,7 @@ impl App {
     ) -> sonicterm_gpu::core::RendererSettings<'_> {
         sonicterm_gpu::core::RendererSettings {
             font_family: &self.config.font.family,
+            font_dirs: &self.font_dirs,
             font_size: self.config.font.size,
             line_height_mult: self.config.font.line_height,
             font_weight_scale: self.config.font.effective_weight_scale(),
