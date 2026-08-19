@@ -15,7 +15,8 @@
 #[must_use]
 pub fn asset_dir() -> std::path::PathBuf {
     let current_dir = std::env::current_dir().ok();
-    let development_fallback = development_asset_dir(current_dir.as_deref());
+    let development_fallback =
+        development_asset_dir(current_dir.as_deref(), std::path::Path::exists);
     let linux_fhs =
         cfg!(target_os = "linux").then_some(std::path::Path::new("/usr/share/sonicterm/assets"));
     resolve_asset_dir(
@@ -26,10 +27,22 @@ pub fn asset_dir() -> std::path::PathBuf {
     )
 }
 
-fn development_asset_dir(current_dir: Option<&std::path::Path>) -> std::path::PathBuf {
-    current_dir
-        .map(|directory| directory.join("assets"))
-        .unwrap_or_else(|| std::path::PathBuf::from("assets"))
+fn development_asset_dir(
+    current_dir: Option<&std::path::Path>,
+    exists: impl Fn(&std::path::Path) -> bool,
+) -> std::path::PathBuf {
+    let Some(current_dir) = current_dir else {
+        // When: `current_dir` is `None`, no runtime directory can anchor development lookup.
+        return std::path::PathBuf::from("assets");
+    };
+    for directory in current_dir.ancestors() {
+        let candidate = directory.join("assets");
+        if exists(&candidate) {
+            // When: `exists(&candidate)` is true, this ancestor provides the development asset tree.
+            return candidate;
+        }
+    }
+    current_dir.join("assets")
 }
 
 fn resolve_asset_dir(

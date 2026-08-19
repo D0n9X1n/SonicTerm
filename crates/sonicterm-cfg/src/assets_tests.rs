@@ -43,13 +43,27 @@ fn linux_fhs_assets_precede_source_tree_fallback() {
 }
 
 #[test]
-fn development_assets_are_derived_from_runtime_working_directory() {
-    // Protect release binaries from retaining the build host path while preserving workspace runs.
+fn development_assets_are_discovered_from_runtime_working_directory_ancestors() {
+    // Protect workspace and per-crate runs without retaining the build host path in release binaries.
+    let workspace_assets = PathBuf::from("/workspace/assets");
     assert_eq!(
-        development_asset_dir(Some(Path::new("/workspace"))),
-        PathBuf::from("/workspace/assets")
+        development_asset_dir(Some(Path::new("/workspace")), |path| path == workspace_assets),
+        workspace_assets
     );
-    assert_eq!(development_asset_dir(None), PathBuf::from("assets"));
+    assert_eq!(
+        development_asset_dir(Some(Path::new("/workspace/crates/sonicterm-linux")), |path| {
+            path == workspace_assets
+        }),
+        workspace_assets
+    );
+    let crate_assets = PathBuf::from("/workspace/crates/sonicterm-linux/assets");
+    assert_eq!(
+        development_asset_dir(Some(Path::new("/workspace/crates/sonicterm-linux")), |path| {
+            path == crate_assets || path == workspace_assets
+        }),
+        crate_assets
+    );
+    assert_eq!(development_asset_dir(None, |_| false), PathBuf::from("assets"));
 }
 
 #[test]
