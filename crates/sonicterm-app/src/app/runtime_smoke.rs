@@ -100,7 +100,6 @@ impl RuntimeSmokeState {
 
     pub(crate) fn begin_present_wait(&mut self, baseline: u64) {
         if self.phase == RuntimeSmokePhase::Marker {
-            // When: the marker first appears, freeze the preceding presentation count as the proof baseline.
             self.phase = RuntimeSmokePhase::Present { baseline };
         }
     }
@@ -114,7 +113,7 @@ impl RuntimeSmokeState {
         current: u64,
     ) -> Option<Result<(), RuntimeSmokeFailure>> {
         let RuntimeSmokePhase::Present { baseline } = self.phase else {
-            // When: no marker-bearing frame is pending, presentation cannot complete this smoke.
+            // When: `self.phase` is not `RuntimeSmokePhase::Present`, no marker-bearing frame is pending.
             return None;
         };
         if current <= baseline {
