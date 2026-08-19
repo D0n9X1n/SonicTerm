@@ -418,6 +418,35 @@ fn unix_session_pids(session_id: u32) -> std::io::Result<Vec<u32>> {
         .collect())
 }
 
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
+fn linux_proc_stat_is_active(stat: &str) -> Option<bool> {
+    let (_, suffix) = stat.rsplit_once(") ")?;
+    let state = suffix.as_bytes().first().copied()?;
+    Some(!matches!(state, b'Z' | b'X' | b'x'))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn unix_process_is_active(pid: u32) -> std::io::Result<bool> {
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => Ok(linux_proc_stat_is_active(&stat).unwrap_or(true)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn unix_process_is_active(pid: u32) -> std::io::Result<bool> {
+    // SAFETY: `kill` receives a process id by value; signal 0 only probes process existence.
+    if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(false);
+    }
+    Err(error)
+}
+
 #[cfg(all(unix, not(target_os = "macos")))]
 fn unix_session_pids(session_id: u32) -> std::io::Result<Vec<u32>> {
     let mut pids = Vec::new();
@@ -432,6 +461,10 @@ fn unix_session_pids(session_id: u32) -> std::io::Result<Vec<u32>> {
             unsafe { libc::getsid(pid as libc::pid_t) }
         ) == session_id as libc::pid_t
         {
+            if !unix_process_is_active(pid)? {
+                // When: `unix_process_is_active(pid)` is false, this terminated session member needs no signal.
+                continue;
+            }
             pids.push(pid);
         }
     }
