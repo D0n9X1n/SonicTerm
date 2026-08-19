@@ -78,6 +78,7 @@ for required_text in \
   "SonicTerm-\${tag}-linux-x86_64.deb" \
   'dpkg-shlibdeps' \
   'debian/control' \
+  'libxkbcommon-x11-0' \
   'SOURCE_DATE_EPOCH' \
   '--sort=name' \
   '--numeric-owner' \
@@ -128,6 +129,9 @@ architecture="$(dpkg-deb -f "$deb" Architecture)"
 [[ "$architecture" == "amd64" ]] || fail "Debian architecture is $architecture, expected amd64"
 depends="$(dpkg-deb -f "$deb" Depends)"
 [[ -n "$depends" ]] || fail "Debian Depends is empty"
+printf '%s\n' "$depends" | grep -Eq \
+  '(^|,)[[:space:]]*libxkbcommon-x11-0(:[a-z0-9-]+)?([[:space:]]*\([^)]*\))?([[:space:]]*,|$)' || \
+  fail "Debian Depends omits dynamically loaded libxkbcommon-x11-0"
 
 readelf -h "$deb_root/usr/bin/sonicterm" | grep -Fq 'Advanced Micro Devices X86-64' || \
   fail "Debian executable is not x86_64 ELF"

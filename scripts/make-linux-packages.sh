@@ -164,6 +164,11 @@ depends="$(perl -ne 'print $1 if /^shlibs:Depends=(.*)$/' "$substvars")"
   printf 'dpkg-shlibdeps produced no shlibs:Depends\n' >&2
   exit 1
 }
+x11_runtime_dependency="libxkbcommon-x11-0"
+if ! printf '%s\n' "$depends" | grep -Eq \
+  "(^|,)[[:space:]]*$x11_runtime_dependency(:[a-z0-9-]+)?([[:space:]]*\\([^)]*\\))?([[:space:]]*,|$)"; then
+  depends="$depends, $x11_runtime_dependency"
+fi
 
 cat > "$deb_root/DEBIAN/control" <<CONTROL
 Package: sonicterm

@@ -121,11 +121,14 @@ bash scripts/test-linux-packages.sh \
   "dist/SonicTerm-${tag}-linux-x86_64.deb"
 ```
 
-The builder checks ELF architecture and glibc symbol versions, derives Debian
-`Depends` with `dpkg-shlibdeps`, normalizes timestamps and ownership, and verifies
-all four Rec Mono faces plus themes, keymaps, icons, and i18n. The Debian package
-uses `com.d0n9x1n.SonicTerm` consistently for its desktop ID, Wayland application
-ID, X11 class, AppStream component, and hicolor icon.
+The builder checks ELF architecture and glibc symbol versions, derives linked
+Debian `Depends` with `dpkg-shlibdeps`, and adds `libxkbcommon-x11-0` because winit
+loads that X11 keyboard library at runtime rather than through the ELF dependency
+table. It also normalizes timestamps and ownership and verifies all four Rec Mono
+faces plus themes, keymaps, icons, and i18n. Portable-archive hosts must provide
+`libxkbcommon-x11.so.0` for X11; the Debian package installs it through `Depends`.
+The Debian package uses `com.d0n9x1n.SonicTerm` consistently for its desktop ID,
+Wayland application ID, X11 class, AppStream component, and hicolor icon.
 
 CI validates both package layouts, then runs each one under X11/Xvfb and headless
 Wayland/Weston with Vulkan forced to Mesa lavapipe. A smoke passes only after a
@@ -247,8 +250,11 @@ bash scripts/test-linux-packages.sh \
 ```
 
 builder 会检查 ELF 架构与 glibc symbol version，用 `dpkg-shlibdeps` 推导
-Debian `Depends`，规范化 timestamp 与 owner，并验证四个 Rec Mono 字体、theme、
-keymap、icon 与 i18n。Debian package 的 desktop ID、Wayland application ID、
+已链接的 Debian `Depends`；由于 winit 在运行时加载 X11 键盘库而不会把它写入
+ELF dependency table，builder 还会加入 `libxkbcommon-x11-0`。它也会规范化
+timestamp 与 owner，并验证四个 Rec Mono 字体、theme、keymap、icon 与 i18n。
+使用便携归档的主机若运行 X11，必须提供 `libxkbcommon-x11.so.0`；Debian package
+会通过 `Depends` 安装它。Debian package 的 desktop ID、Wayland application ID、
 X11 class、AppStream component 与 hicolor icon 都使用
 `com.d0n9x1n.SonicTerm`。
 

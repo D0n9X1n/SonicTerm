@@ -177,9 +177,11 @@ faces work without system installation while native fallback remains available.
 
 `scripts/make-linux-packages.sh` builds one relocatable `.tar.gz` and one FHS
 `.deb` from the same staged payload. Ubuntu 22.04 supplies the glibc 2.35 build
-baseline; `dpkg-shlibdeps` generates Debian dependencies. CI extracts and runs
-both layouts on X11/Xvfb and headless Wayland/Weston with Vulkan/lavapipe. The
-hidden smoke succeeds only after window creation, GPU initialization, a
+baseline; `dpkg-shlibdeps` generates linked Debian dependencies, while the package
+also declares `libxkbcommon-x11-0` because winit loads it dynamically for X11. CI
+extracts and runs both layouts on X11/Xvfb and headless Wayland/Weston with
+Vulkan/lavapipe. The hidden smoke succeeds only after window creation, GPU
+initialization, a
 `/bin/sh` PTY marker round-trip into the grid, and a subsequent native frame
 presentation.
 
@@ -373,9 +375,11 @@ bold-italic 四种 face 无需系统安装即可工作，同时保留原生 fall
 ### 安装包与 runtime 证明
 
 `scripts/make-linux-packages.sh` 从同一个 staged payload 构建可重定位 `.tar.gz` 与 FHS
-`.deb`。Ubuntu 22.04 提供 glibc 2.35 构建基线；`dpkg-shlibdeps` 生成 Debian dependency。
-CI 会解压并运行两种 layout，让它们分别在 X11/Xvfb 与 headless Wayland/Weston 下使用
-Vulkan/lavapipe。只有完成窗口创建、GPU 初始化、`/bin/sh` PTY marker 往返进入 grid，
+`.deb`。Ubuntu 22.04 提供 glibc 2.35 构建基线；`dpkg-shlibdeps` 生成已链接的 Debian
+dependency，而 package 还会声明 `libxkbcommon-x11-0`，因为 winit 会在 X11 下动态
+加载它。CI 会解压并运行两种 layout，让它们分别在 X11/Xvfb 与 headless
+Wayland/Weston 下使用 Vulkan/lavapipe。只有完成窗口创建、GPU 初始化、`/bin/sh`
+PTY marker 往返进入 grid，
 并随后完成一帧原生呈现，隐藏 smoke 才会成功。
 
 ## 平台矩阵

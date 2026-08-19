@@ -381,6 +381,7 @@ jobs:
             libx11-dev \
             libxcb1-dev \
             libxkbcommon-dev \
+            libxkbcommon-x11-0 \
             binutils \
             dpkg-dev \
             file \
