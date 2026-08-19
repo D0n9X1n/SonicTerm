@@ -38,9 +38,10 @@ pub struct UrlMatch {
 pub enum DetectedTarget {
     /// An allow-listed URI detected by the existing URL scanner.
     Uri(String),
-    /// Native filesystem syntax that still requires contextual resolution and
-    /// an existence probe before it may become clickable.
+    /// Native absolute or explicit-relative filesystem syntax.
     PathCandidate(String),
+    /// One contextual filesystem component resolved only against trusted pane CWD.
+    BareName(String),
 }
 
 /// One typed URI or path-candidate span in a terminal row.
@@ -272,6 +273,73 @@ pub fn target_at_char_col_for_style(
 ) -> Option<TargetMatch> {
     let byte = text.char_indices().nth(col).map(|(byte, _)| byte)?;
     target_at_byte_for_style(text, byte, style)
+}
+
+/// Return one contextual bare filesystem component covering character column `col`.
+///
+/// This API is deliberately separate from [`find_targets_for_style`]: callers
+/// must already have pane CWD context and must preserve URI/explicit-path
+/// precedence before considering ordinary terminal words as filesystem names.
+#[must_use]
+pub fn bare_name_at_char_col_for_style(
+    text: &str,
+    col: usize,
+    style: PathStyle,
+) -> Option<TargetMatch> {
+    let (byte, clicked) = text.char_indices().nth(col)?;
+    if is_path_delimiter(clicked) {
+        // When: `clicked` is a token delimiter, do not transfer a neighboring component's identity onto this cell.
+        return None;
+    }
+    if target_at_byte_for_style(text, byte, style).is_some() {
+        // When: an allow-listed URI or explicit path owns `byte`, its stronger provenance wins.
+        return None;
+    }
+    let start = text[..byte]
+        .char_indices()
+        .rev()
+        .find_map(|(index, ch)| is_path_delimiter(ch).then_some(index + ch.len_utf8()))
+        .unwrap_or(0);
+    let end = text[byte..]
+        .char_indices()
+        .find_map(|(offset, ch)| is_path_delimiter(ch).then_some(byte + offset))
+        .unwrap_or(text.len());
+    let candidate = text.get(start..end)?;
+    let adjacent_wrapper = text[..start]
+        .chars()
+        .next_back()
+        .is_some_and(|ch| is_path_delimiter(ch) && !ch.is_whitespace())
+        || text[end..]
+            .chars()
+            .next()
+            .is_some_and(|ch| is_path_delimiter(ch) && !ch.is_whitespace());
+    if adjacent_wrapper || !validate_bare_name(candidate, style) {
+        // When: wrappers or unsafe component syntax make `candidate` ambiguous, leave it as ordinary text.
+        return None;
+    }
+    Some(TargetMatch { start, end, target: DetectedTarget::BareName(candidate.to_string()) })
+}
+
+fn validate_bare_name(candidate: &str, style: PathStyle) -> bool {
+    if candidate.is_empty()
+        || candidate.len() > MAX_TARGET_BYTES
+        || matches!(candidate, "." | "..")
+        || candidate.chars().any(char::is_control)
+        || candidate.contains(['/', '\\'])
+        || candidate.ends_with(['*', '@', '=', '|'])
+        || has_editor_location_suffix(candidate)
+    {
+        // When: `candidate` has unsafe component, decoration, or editor-suffix syntax, keep contextual output inert.
+        return false;
+    }
+    match style {
+        PathStyle::Posix => !candidate.contains('\0'),
+        PathStyle::Windows => {
+            !candidate.contains(':')
+                && !candidate.chars().any(|ch| matches!(ch, '<' | '>' | '"' | '|' | '?' | '*'))
+                && !candidate.ends_with(['.', ' '])
+        }
+    }
 }
 
 fn is_path_start_boundary(text: &str, start: usize) -> bool {

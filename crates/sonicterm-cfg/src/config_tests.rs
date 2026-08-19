@@ -39,6 +39,28 @@ fn default_warm_window_pool_keeps_one_spare() {
     assert!(template.contains("0 disables"));
 }
 
+/// Local target and contextual bare-name activation are default-on and documented kill switches.
+#[test]
+fn clickable_local_target_switches_default_on_and_parse_independently() {
+    let defaults = Config::default();
+    assert!(defaults.terminal.clickable_local_targets);
+    assert!(defaults.terminal.clickable_bare_names);
+    let template = default_config_template();
+    assert!(template.contains("clickable_local_targets = true"));
+    assert!(template.contains("clickable_bare_names = true"));
+
+    let cfg: Config = toml::from_str(
+        r#"
+[terminal]
+clickable_local_targets = false
+clickable_bare_names = true
+"#,
+    )
+    .unwrap();
+    assert!(!cfg.terminal.clickable_local_targets);
+    assert!(cfg.terminal.clickable_bare_names);
+}
+
 #[test]
 fn default_cursor_does_not_blink() {
     let cfg = Config::default();

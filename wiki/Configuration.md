@@ -54,6 +54,10 @@ warm_window_pool = 1
 # shell = "pwsh.exe"
 term_program = "SonicTerm"
 scrollback = 1000
+# Cmd/Ctrl-click asynchronously validated local files and directories.
+clickable_local_targets = true
+# Also resolve whole bare tokens against the exact pane's trusted OSC 7 CWD.
+clickable_bare_names = true
 cursor_blink = false
 cursor_shape = "block"       # block | bar | underline
 
@@ -214,6 +218,17 @@ that do not yet recognize SonicTerm may work with `term_program = "WezTerm"`.
 oldest history; `0` disables history. Cursor shape and blink settings update
 live.
 
+`clickable_local_targets` controls raw absolute, explicit-relative, and
+contextual bare filesystem targets; it defaults to `true`. Setting it to `false`
+leaves URI and OSC 8 activation unchanged. `clickable_bare_names` is a
+subordinate default-on switch: it permits whole tokens to resolve against the
+exact pane's trustworthy local OSC 7 CWD only while
+`clickable_local_targets` is also enabled. This intentionally may activate any
+column token when a same-named eligible entry exists in that CWD; see
+[Usage](Usage) for grammar and blocked target classes. Reloading either switch
+immediately revokes existing local-target hover and probe authorization in every
+window.
+
 ### Logging
 
 See [Logging](Logging). `warn` is the default. Debug enables renderer timing and
@@ -352,6 +367,10 @@ warm_window_pool = 1
 # shell = "pwsh.exe"
 term_program = "SonicTerm"
 scrollback = 1000
+# 使用 Cmd/Ctrl 点击经过异步验证的本地文件和目录。
+clickable_local_targets = true
+# 同时按准确 pane 的可信 OSC 7 CWD 解析完整裸 token。
+clickable_bare_names = true
 cursor_blink = false
 cursor_shape = "block"       # block | bar | underline
 
@@ -485,6 +504,13 @@ macOS/其它 Unix 使用 `$SHELL`。`term_program` 写入子进程的 `TERM_PROG
 某些暂不识别 SonicTerm 的程序可尝试 `term_program = "WezTerm"`。
 
 `scrollback` 按窗格保存；重载调小会立即删除最老历史，`0` 关闭历史。光标形状与 blink 会在重载时生效。
+
+`clickable_local_targets` 控制原始绝对路径、显式相对路径和 contextual 裸文件系统目标，默认
+为 `true`；设为 `false` 不影响 URI 与 OSC 8 activation。`clickable_bare_names` 是默认开启的
+从属 switch：只有 `clickable_local_targets` 同时启用时，它才允许完整 token 按准确 pane 的
+可信本机 OSC 7 CWD 解析。这会有意允许任何列 token 在 CWD 中存在同名合格条目时变为目标；
+grammar 与阻止的目标类别见 [用法 / Usage](Usage)。重载任一 switch 都会立即撤销所有窗口中
+已有的本地目标 hover 与 probe authorization。
 
 ### 日志
 

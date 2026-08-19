@@ -2,8 +2,8 @@
 
 ## Purpose
 Configuration, themes, keymaps, bundled/user asset lookup, dimensions,
-and URL safety. This crate is the only place that should parse
-`sonicterm.toml`, theme TOML, keymap TOML, and clickable URLs.
+and target safety. This crate is the only place that should parse
+`sonicterm.toml`, theme TOML, keymap TOML, and clickable URI/path text.
 
 ## Key files
 - `config.rs` - user config schema, defaults, load/fallback behavior.
@@ -24,8 +24,9 @@ cargo test -p sonicterm-cfg
 - Preserve unknown/future TOML keys when possible.
 - Theme/keymap loading must check both bundled assets and user override
   directories under `~/.sonicterm/`.
-- URL/path handling is security-sensitive. Preserve `Uri` versus
-  `PathCandidate` provenance; raw paths must never enter the URI opener.
+- URI/path handling is security-sensitive. Preserve `Uri`, `PathCandidate`, and
+  `BareName` provenance; contextual bare-name lookup stays separate from explicit
+  scanning, and filesystem targets must never enter the URI opener.
 
 ## Cross-references
 - Consumed by: `sonicterm-app`, `sonicterm-mac`, `sonicterm-windows`,

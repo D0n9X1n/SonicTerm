@@ -155,7 +155,7 @@ Rust logic.
 
 `.github/workflows/ci.yml` runs on pull requests and on pushes to `main`, with a
 macOS 14 / Windows latest matrix plus a focused Ubuntu compile/test job for the
-Linux path-reveal boundary:
+Linux local-target openability and direct-open boundary:
 
 ```mermaid
 flowchart TD
@@ -207,8 +207,9 @@ denied. The `sonicterm-io` SSH feature receives separate clippy and strict
 Rustdoc passes because `--all-targets` does not enable optional features. A
 separate Ubuntu job installs Cairo/Fontconfig and window-system development
 packages, then runs strict clippy and tests for `sonicterm-vt`, `sonicterm-cfg`,
-and `sonicterm-app`. This compiles the Linux desktop-portal path reveal code; it
-does not add a shipping Linux binary.
+and `sonicterm-app`. This compiles the Linux fd-based portal opener, fixed
+`xdg-open` fallback, and local-target policy; it does not add a shipping Linux
+binary.
 Windows additionally runs the explicit `Verify Windows WARP allocator baseline`
 step, which executes the deterministic `windows_warp_allocator_baseline`
 integration test. It requests DX12 CPU fallback and compares the old
@@ -509,7 +510,7 @@ cargo build --release -p sonicterm-mac
 ## Pull-request CI
 
 `.github/workflows/ci.yml` 在 PR 以及推送到 `main` 时运行 macOS 14 /
-Windows latest matrix，并运行一个聚焦于 Linux 路径显示边界的 Ubuntu compile/test job：
+Windows latest matrix，并运行一个聚焦于 Linux 本地目标可打开性与 direct-open 边界的 Ubuntu compile/test job：
 
 ```mermaid
 flowchart TD
@@ -560,7 +561,8 @@ Rustdoc，以及 warning 视为错误的 `cargo clippy --workspace --all-targets
 `--all-targets` 不会启用 optional feature，`sonicterm-io` 的 `ssh` feature 另有
 clippy 和严格 Rustdoc gate。单独的 Ubuntu job 会安装 Cairo/Fontconfig 与窗口系统开发包，
 再对 `sonicterm-vt`、`sonicterm-cfg`、`sonicterm-app` 运行严格 clippy 与测试。
-它会编译 Linux desktop-portal 路径显示代码，但不会新增可发布的 Linux 二进制。Windows 还会运行显式的
+它会编译 Linux fd-based portal opener、固定 `xdg-open` fallback 与本地目标 policy，
+但不会新增可发布的 Linux 二进制。Windows 还会运行显式的
 `Verify Windows WARP allocator baseline` 步骤，执行确定性的
 `windows_warp_allocator_baseline` integration test。它请求 DX12 CPU fallback，并比较
 旧的 wgpu 默认策略与生产环境的软件 adapter 内存策略。没有 WARP 或 allocator report、

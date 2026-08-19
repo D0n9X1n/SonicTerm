@@ -304,6 +304,73 @@ fn typed_path_lookup_maps_utf8_byte_and_character_columns() {
     assert_eq!(&text[found.start..found.end], "/tmp/café");
 }
 
+/// Contextual bare-name scanning keeps provenance separate from explicit paths and URIs.
+#[test]
+fn contextual_bare_names_cover_ls_tokens_without_widening_target_scan() {
+    let text = "drwxr-xr-x user 18 Aug 12:30 sonicterm";
+    let found = bare_name_at_char_col_for_style(text, 34, PathStyle::Posix)
+        .expect("column inside the ls name");
+    assert_eq!(found.target, DetectedTarget::BareName("sonicterm".into()));
+    assert_eq!(&text[found.start..found.end], "sonicterm");
+    assert!(
+        find_targets_for_style(text, PathStyle::Posix).is_empty(),
+        "ordinary words must remain absent from explicit target APIs"
+    );
+
+    let dotfile = bare_name_at_char_col_for_style(".DS_Store", 2, PathStyle::Posix)
+        .expect("dotfile is one contextual component");
+    assert_eq!(dotfile.target, DetectedTarget::BareName(".DS_Store".into()));
+    assert!(
+        bare_name_at_char_col_for_style(text, 10, PathStyle::Posix).is_none(),
+        "whitespace must not inherit the token before it"
+    );
+}
+
+/// Contextual bare-name grammar rejects path syntax, editor suffixes, and ambiguous pseudo-components.
+#[test]
+fn contextual_bare_names_reject_non_components() {
+    for candidate in [".", "..", "./file", "../file", "/tmp/file", "file:12", "a/b", "a\\b"] {
+        assert!(
+            bare_name_at_char_col_for_style(candidate, 0, PathStyle::Posix).is_none(),
+            "unexpected contextual POSIX name {candidate:?}"
+        );
+    }
+    for candidate in [".", "..", r".\file", r"C:\file", "file:12", "a/b", r"a\b"] {
+        assert!(
+            bare_name_at_char_col_for_style(candidate, 0, PathStyle::Windows).is_none(),
+            "unexpected contextual Windows name {candidate:?}"
+        );
+    }
+}
+
+/// Quoted or decorated `ls` output stays inert because it does not identify one exact component.
+#[test]
+fn contextual_bare_names_reject_quoted_and_classified_output() {
+    for (text, col) in [
+        ("'sonicterm'", 2),
+        ("\"sonicterm\"", 2),
+        ("`sonicterm`", 2),
+        ("sonicterm*", 2),
+        ("sonicterm@", 2),
+        ("sonicterm=", 2),
+        ("sonicterm|", 2),
+        (r"sonicterm\ name", 2),
+    ] {
+        assert!(
+            bare_name_at_char_col_for_style(text, col, PathStyle::Posix).is_none(),
+            "ambiguous output became a contextual target: {text:?}"
+        );
+    }
+}
+
+/// URI-looking text never acquires contextual filesystem provenance.
+#[test]
+fn contextual_bare_lookup_preserves_uri_precedence() {
+    for text in ["https://example.com", "mailto:user@example.com", "file:///tmp/a"] {
+        assert!(bare_name_at_char_col_for_style(text, 0, PathStyle::Posix).is_none());
+    }
+}
+
 /// Editor line/column suffixes are not interpreted as filesystem names.
 #[test]
 fn rejects_editor_location_suffixes() {

@@ -38,31 +38,54 @@ Windows deliberately uses `Alt` as the application modifier so common
 applications. A few familiar compatibility aliases such as `Ctrl+T`,
 `Ctrl+Shift+C`, and `Ctrl+Shift+V` are also bundled.
 
-### Revealing local paths
+### Opening local filesystem targets
 
-Hold `Cmd` on macOS or `Ctrl` on Windows/Linux while pointing at an existing
-local path printed in terminal output. Once the background existence check
-finishes, the path receives the active underline and pointer; click to reveal the
-item in Finder, Explorer, or the Linux desktop portal. Raw paths are revealed,
-not launched through their file association, so a printed script or application
-is not executed by this action. Existing OSC 8 links and `http://`, `https://`,
-`mailto:`, and `file://` URLs keep their existing behavior.
+Hold `Cmd` on macOS or `Ctrl` on Windows/Linux while pointing at an eligible
+local filesystem target printed in terminal output. Once the background
+openability check finishes, the target receives the active underline and
+pointer. Clicking opens the target itself: directories open in the platform file
+manager, while ordinary files open in their default associated application.
+Existing OSC 8 links and `http://`, `https://`, `mailto:`, and `file://` URLs keep
+their existing behavior and take precedence over filesystem detection.
 
 SonicTerm recognizes native absolute paths such as `/usr/local/etc`,
 `C:/Users/dotan`, and `C:\\Users\\dotan`. It also recognizes explicit relative
 forms such as `./file`, `../file`, and `../../file` (with slash or backslash on
-Windows). A relative path is eligible only when that exact pane has reported an
+Windows). Explicit relative paths and whole bare components such as `sonicterm`
+or `.DS_Store` resolve only when that exact pane has reported a trustworthy
 absolute local working directory through OSC 7. A missing, malformed, or
 foreign-host OSC 7 value fails closed; SonicTerm never substitutes its process
 working directory, another pane, or `HOME`.
 
-Existence checks run off the window thread. Missing or inaccessible entries stay
-ordinary text and a stale check cannot authorize a changed row, pane, working
-directory, or viewport. Spaces delimit candidates. Bare relative names,
-`~`/environment expansion, UNC/network/WSL/remote paths, editor
-`:line:column` suffixes, wrapped multi-row paths, and tokens containing wide or
-combining cells are not clickable in this version. Linux reveal requires an
-xdg-desktop-portal implementation with `OpenDirectory` support.
+Bare-name detection deliberately does not parse `ls` columns. Any whole token in
+a row can become clickable when an identically named eligible entry exists in
+the trusted pane CWD—even an owner, size, or date token. Quoted or escaped names
+containing spaces and `ls -F` decorations (`*`, `@`, `=`, `|`) remain inert
+unless OSC 8 provides their identity. Set
+`terminal.clickable_bare_names = false` to disable this contextual behavior, or
+`terminal.clickable_local_targets = false` to disable all raw local-target
+activation; neither switch changes URI or OSC 8 handling.
+
+Openability checks and native opens run on bounded workers, never on the window
+thread. Missing, inaccessible, stale, symlink/reparse-point, socket, device, and
+other special entries stay ordinary text. A result cannot authorize a changed
+row, pane, CWD, viewport, target kind, or modifier state. Launcher, executable,
+script, shortcut, and installer classes also remain inert: macOS blocks app
+bundles, executable mode, common script suffixes, shebang/ELF/PE content, and
+Mach-O/fat-binary magic; Windows blocks PATHEXT and known launcher classes plus
+ADS/trailing-dot/trailing-space names, and Linux blocks
+`.desktop`, `.AppImage`, ELF, shebang, and `MZ` content. `~`/environment
+expansion, UNC/network/WSL/remote paths, editor `:line:column` suffixes,
+wrapped multi-row paths, and tokens containing wide or combining cells are not
+clickable.
+
+macOS revalidates immediately before `/usr/bin/open -- <target>`, but
+LaunchServices can still observe a later pathname replacement or show quarantine
+prompts. Windows revalidates before a COM-initialized `ShellExecuteExW` call and
+never invokes a shell. Linux prefers an already-open file descriptor through the
+desktop portal; when portal infrastructure is unavailable, a fixed
+`/usr/bin/xdg-open` or `/bin/xdg-open` fallback revalidates first but retains the
+usual pathname race between that check and the external opener.
 
 ### Opening script files
 
@@ -159,25 +182,42 @@ Windows 特意使用 `Alt` 作为应用级修饰键，使常见的 `Ctrl+<字母
 PowerShell、cmd、readline 和终端程序。同时保留 `Ctrl+T`、`Ctrl+Shift+C`、
 `Ctrl+Shift+V` 等常见兼容别名。
 
-### 在文件管理器中显示本地路径
+### 打开本地文件系统目标
 
-鼠标指向终端输出中的现有本地路径时，在 macOS 按住 `Cmd`，在 Windows/Linux
-按住 `Ctrl`。后台存在性检查完成后，路径会显示 active underline 与 pointer；点击后会在
-Finder、Explorer 或 Linux desktop portal 中显示该项目。原始路径只会被显示，不会通过
-文件关联启动，因此终端输出中的脚本或应用不会被此操作执行。现有 OSC 8 link，以及
-`http://`、`https://`、`mailto:`、`file://` URL 的行为保持不变。
+鼠标指向终端输出中的合格本地文件系统目标时，在 macOS 按住 `Cmd`，在 Windows/Linux
+按住 `Ctrl`。后台可打开性检查完成后，目标会显示 active underline 与 pointer。点击会
+打开目标本身：目录在平台文件管理器中打开，普通文件由默认关联应用打开。现有 OSC 8 link，
+以及 `http://`、`https://`、`mailto:`、`file://` URL 的行为保持不变，并且优先于
+文件系统检测。
 
 SonicTerm 可识别 `/usr/local/etc`、`C:/Users/dotan`、`C:\\Users\\dotan`
 等原生绝对路径，也可识别 `./file`、`../file`、`../../file` 等显式相对路径
-（Windows 可使用 slash 或 backslash）。相对路径只有在该准确 pane 通过 OSC 7 报告了
-本机绝对工作目录时才可用。缺失、格式错误或来自远端 host 的 OSC 7 值都会 fail closed；
-SonicTerm 不会改用进程工作目录、其他 pane 或 `HOME`。
+（Windows 可使用 slash 或 backslash）。显式相对路径和 `sonicterm`、`.DS_Store`
+这类完整裸 component，只有在该准确 pane 通过 OSC 7 报告了可信本机绝对工作目录时才会
+解析。缺失、格式错误或来自远端 host 的 OSC 7 值都会 fail closed；SonicTerm 不会改用
+进程工作目录、其他 pane 或 `HOME`。
 
-存在性检查不会阻塞窗口线程。不存在或无法访问的条目保持普通文本；过期结果也不能授权
-已变化的行、pane、工作目录或 viewport。空格会结束候选路径。本版本不支持裸相对名称、
-`~`/环境变量展开、UNC/network/WSL/远端路径、editor `:line:column` 后缀、跨行路径，
-或含宽字符/组合 cell 的 token。Linux 显示功能要求 xdg-desktop-portal 实现支持
-`OpenDirectory`。
+裸名称检测不会解析 `ls` 的列。只要可信 pane CWD 中存在同名合格条目，一行中的任意完整
+token 都可能变为可点击目标——包括 owner、size 或 date token。带空格的 quoted/escaped
+名称和 `ls -F` 装饰（`*`、`@`、`=`、`|`）保持 inert，除非 OSC 8 提供明确 identity。
+设置 `terminal.clickable_bare_names = false` 可关闭这种 contextual 行为；设置
+`terminal.clickable_local_targets = false` 可关闭全部原始本地目标 activation。两者都不影响
+URI 或 OSC 8。
+
+可打开性检查与原生打开动作都在有界 worker 上运行，不会阻塞窗口线程。不存在、无法访问、
+过期、symlink/reparse point、socket、device 及其它特殊条目保持普通文本；检查结果不能授权
+已变化的行、pane、CWD、viewport、目标类型或修饰键状态。launcher、executable、script、
+shortcut 和 installer 类也保持 inert：macOS 阻止 app bundle、可执行 mode、常见 script
+后缀、shebang/ELF/PE 内容，以及 Mach-O/fat-binary magic；Windows 阻止 PATHEXT、已知
+launcher 类、ADS、末尾点和末尾空格；Linux 阻止 `.desktop`、
+`.AppImage`、ELF、shebang 与 `MZ` 内容。`~`/环境变量展开、UNC/network/WSL/远端路径、
+editor `:line:column` 后缀、跨行路径，以及含宽字符/组合 cell 的 token 均不可点击。
+
+macOS 在调用 `/usr/bin/open -- <target>` 前立即重新验证，但 LaunchServices 仍可能观察到
+之后发生的路径替换，也可能显示 quarantine prompt。Windows 在 COM-initialized
+`ShellExecuteExW` 前重新验证，且永不调用 shell。Linux 优先把已打开的 file descriptor
+交给 desktop portal；portal 基础设施不可用时，固定的 `/usr/bin/xdg-open` 或
+`/bin/xdg-open` fallback 会先重新验证，但检查与外部 opener 之间仍保留通常的 pathname race。
 
 ### 打开脚本文件
 
