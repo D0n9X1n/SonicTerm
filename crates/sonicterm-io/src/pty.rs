@@ -434,14 +434,19 @@ fn unix_process_is_active(pid: u32) -> std::io::Result<bool> {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", test))]
 fn unix_process_is_active(pid: u32) -> std::io::Result<bool> {
-    // SAFETY: `kill` receives a process id by value; signal 0 only probes process existence.
-    if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+    if (
+        // SAFETY: `kill` receives a process id by value; signal 0 only probes process existence.
+        unsafe { libc::kill(pid as libc::pid_t, 0) }
+    ) == 0
+    {
+        // When: `libc::kill(pid as libc::pid_t, 0) == 0`, the process still exists.
         return Ok(true);
     }
     let error = std::io::Error::last_os_error();
     if error.raw_os_error() == Some(libc::ESRCH) {
+        // When: `error.raw_os_error() == Some(libc::ESRCH)`, the process no longer exists.
         return Ok(false);
     }
     Err(error)
@@ -461,6 +466,7 @@ fn unix_session_pids(session_id: u32) -> std::io::Result<Vec<u32>> {
             unsafe { libc::getsid(pid as libc::pid_t) }
         ) == session_id as libc::pid_t
         {
+            // When: `libc::getsid(pid as libc::pid_t) == session_id as libc::pid_t`, inspect this session member's state.
             if !unix_process_is_active(pid)? {
                 // When: `unix_process_is_active(pid)` is false, this terminated session member needs no signal.
                 continue;
