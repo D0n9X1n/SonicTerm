@@ -11,6 +11,27 @@ fail() {
 
 [[ -x "$prepare" ]] || fail "prepare-release-assets.py is missing or not executable"
 
+release_workflow="$root/.github/workflows/release.yml"
+linux_unit_job="$(python3 - "$release_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text()
+matched = re.search(
+    r"(?ms)^  unit-tests-linux:\n.*?(?=^  [a-z][a-z0-9_-]*:\n|\Z)",
+    text,
+)
+if matched is None:
+    raise SystemExit("release workflow has no unit-tests-linux job")
+print(matched.group(0), end="")
+PY
+)"
+for runtime_dependency in mesa-vulkan-drivers libvulkan1; do
+  grep -Fq -- "$runtime_dependency" <<<"$linux_unit_job" || \
+    fail "release Linux unit job is missing $runtime_dependency for adapter enumeration"
+done
+
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/sonic-release-assets.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
 dist="$tmp/dist"

@@ -132,6 +132,8 @@ jobs:
             libx11-dev \
             libxcb1-dev \
             libxkbcommon-dev \
+            mesa-vulkan-drivers \
+            libvulkan1 \
             python3
 
       - uses: actions/checkout@v7
