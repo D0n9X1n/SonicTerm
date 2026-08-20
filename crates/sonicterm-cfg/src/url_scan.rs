@@ -208,12 +208,18 @@ pub fn find_targets_for_style(text: &str, style: PathStyle) -> Vec<TargetMatch> 
             continue;
         }
         let mut end = text.len();
+        let mut ambiguous_delimiter = false;
         for (offset, ch) in text[start..].char_indices().skip(1) {
             if is_path_delimiter(ch) {
-                // When: `ch` is a path delimiter, terminate the candidate before that character.
+                // When: `is_path_delimiter(ch)` truncates path syntax, record whether it makes the complete token ambiguous.
+                ambiguous_delimiter = ch.is_control() || !ch.is_whitespace();
                 end = start + offset;
                 break;
             }
+        }
+        if ambiguous_delimiter {
+            // When: `ambiguous_delimiter` split the token at a quote or wrapper, leave the complete token inert.
+            continue;
         }
         end = trim_matching_wrapper(text, start, end);
         let Some(candidate) = text.get(start..end) else {
@@ -347,9 +353,10 @@ fn is_path_start_boundary(text: &str, start: usize) -> bool {
         // When: `start` is zero, the candidate begins at a row boundary without requiring a preceding delimiter.
         return true;
     }
-    text[..start].chars().next_back().is_some_and(|ch| {
-        ch.is_whitespace() || matches!(ch, '(' | '[' | '{' | '"' | '\'' | '`' | '<' | '>')
-    })
+    text[..start]
+        .chars()
+        .next_back()
+        .is_some_and(|ch| ch.is_whitespace() || matches!(ch, '(' | '[' | '{' | '<' | '>'))
 }
 
 fn is_path_delimiter(ch: char) -> bool {
@@ -379,6 +386,8 @@ fn has_path_prefix(candidate: &str, style: PathStyle) -> bool {
             (candidate.starts_with('/') && !candidate.starts_with("//"))
                 || candidate.starts_with("./")
                 || candidate.starts_with("../")
+                || candidate.starts_with("~/")
+                || has_contextual_relative_prefix(candidate, style)
         }
         PathStyle::Windows => {
             let bytes = candidate.as_bytes();
@@ -391,8 +400,45 @@ fn has_path_prefix(candidate: &str, style: PathStyle) -> bool {
                 || candidate.starts_with(".\\")
                 || candidate.starts_with("../")
                 || candidate.starts_with("..\\")
+                || candidate.starts_with("~/")
+                || candidate.starts_with("~\\")
+                || has_contextual_relative_prefix(candidate, style)
         }
     }
+}
+
+fn has_contextual_relative_prefix(candidate: &str, style: PathStyle) -> bool {
+    let end = candidate
+        .char_indices()
+        .find_map(|(index, ch)| is_path_delimiter(ch).then_some(index))
+        .unwrap_or(candidate.len());
+    let token = &candidate[..end];
+    let separator = match style {
+        PathStyle::Posix => token.char_indices().find(|(_, ch)| *ch == '/'),
+        PathStyle::Windows => token.char_indices().find(|(_, ch)| is_windows_separator(*ch)),
+    };
+    let Some((separator, _)) = separator else {
+        // When: `token` contains no native separator, leave it to contextual bare-name lookup.
+        return false;
+    };
+    let first = &token[..separator];
+    let last = match style {
+        PathStyle::Posix => token.rsplit('/').next().unwrap_or_default(),
+        PathStyle::Windows => token.rsplit(['/', '\\']).next().unwrap_or_default(),
+    };
+    if first.is_empty()
+        || matches!(first, "." | "..")
+        || matches!(last, "" | "." | "..")
+        || token.chars().any(|ch| {
+            matches!(ch, '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\'' | '`' | '<' | '>')
+        })
+        || token.contains(['~', '$'])
+        || (style == PathStyle::Windows && token.contains('%'))
+    {
+        // When: `first`, `last`, or `token` carries ambiguous wrapper, expansion, or pseudo-component syntax, keep it inert.
+        return false;
+    }
+    !first.contains(':')
 }
 
 fn validate_path_candidate(candidate: &str, style: PathStyle) -> bool {
@@ -411,7 +457,8 @@ fn validate_path_candidate(candidate: &str, style: PathStyle) -> bool {
                 // When: POSIX `candidate` contains a backslash or double-slash root, reject cross-platform and network ambiguity.
                 return false;
             }
-            has_named_component(candidate.split('/'))
+            let component_text = candidate.strip_prefix("~/").unwrap_or(candidate);
+            has_named_component(component_text.split('/'))
         }
         PathStyle::Windows => {
             // When: `style` is Windows, apply drive-path component and reserved-character rules.
@@ -433,8 +480,11 @@ fn validate_path_candidate(candidate: &str, style: PathStyle) -> bool {
             {
                 // A drive-root prefix is syntax, so validate only the components after it.
                 &candidate[3..]
+            } else if candidate.starts_with("~/") || candidate.starts_with("~\\") {
+                // When: `candidate` starts with current-home syntax, validate only the path below that prefix.
+                &candidate[2..]
             } else {
-                // When: `bytes` do not begin with a drive root, validate the complete explicit-relative candidate.
+                // When: `bytes` do not begin with a drive or home root, validate the complete explicit-relative candidate.
                 candidate
             };
             has_named_component(component_text.split(['/', '\\']))

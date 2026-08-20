@@ -808,14 +808,49 @@ pub(super) fn bare_target_at_row_cell(row: &Row, col: u16, style: PathStyle) -> 
     row_target_at_cell(row, col, style, bare_name_at_char_col_for_style)
 }
 
+/// Return the first configured home variable that is valid for the native path grammar.
+pub(super) fn native_home_dir() -> Option<PathBuf> {
+    let variables = if cfg!(target_os = "windows") {
+        // When: `target_os` is Windows, prefer `USERPROFILE` before validating fallback `HOME`.
+        ["USERPROFILE", "HOME"]
+    } else {
+        // When: `target_os` is not Windows, prefer `HOME` before validating fallback `USERPROFILE`.
+        ["HOME", "USERPROFILE"]
+    };
+    variables.into_iter().filter_map(std::env::var_os).find_map(|value| {
+        let value = value.to_str()?;
+        match PathStyle::native() {
+            PathStyle::Posix => normalize_posix_cwd(value).map(PathBuf::from),
+            PathStyle::Windows => normalize_windows_home(value).map(PathBuf::from),
+        }
+    })
+}
+
 pub(super) fn resolve_path_candidate(
     candidate: &str,
     style: PathStyle,
     cwd: Option<&Osc7Cwd>,
+    home: Option<&Path>,
     local_hostname: &str,
 ) -> Option<PathBuf> {
-    let relative = is_explicit_relative(candidate, style);
-    let combined = if relative {
+    let home_relative = is_home_relative(candidate, style);
+    let relative =
+        is_explicit_relative(candidate, style) || is_contextual_relative(candidate, style);
+    let combined = if home_relative {
+        let home = home?.to_str()?;
+        let suffix = &candidate[2..];
+        match style {
+            PathStyle::Posix => {
+                let home = normalize_posix_cwd(home)?;
+                format!("{}/{}", home.trim_end_matches('/'), suffix)
+            }
+            PathStyle::Windows => {
+                let home = normalize_windows_home(home)?;
+                format!("{}\\{}", home.trim_end_matches(['/', '\\']), suffix)
+            }
+        }
+    } else if relative {
+        // When: `candidate` is dot-relative or separator-relative, resolve it only from this pane's trusted local CWD.
         let cwd = cwd.filter(|cwd| authority_is_local(&cwd.authority, local_hostname))?;
         match style {
             PathStyle::Posix => format!("{}/{}", cwd.path.trim_end_matches('/'), candidate),
@@ -825,7 +860,7 @@ pub(super) fn resolve_path_candidate(
             }
         }
     } else {
-        // When: `candidate` is absolute rather than `relative`, resolve it without consulting OSC 7 state.
+        // When: `candidate` is absolute rather than home-relative or dot-relative, resolve it without contextual state.
         candidate.to_string()
     };
     match style {
@@ -838,12 +873,13 @@ pub(super) fn resolve_detected_path(
     target: &DetectedTarget,
     style: PathStyle,
     cwd: Option<&Osc7Cwd>,
+    home: Option<&Path>,
     local_hostname: &str,
 ) -> Option<PathBuf> {
     match target {
         DetectedTarget::Uri(_) => None,
         DetectedTarget::PathCandidate(candidate) => {
-            resolve_path_candidate(candidate, style, cwd, local_hostname)
+            resolve_path_candidate(candidate, style, cwd, home, local_hostname)
         }
         DetectedTarget::BareName(candidate) => {
             // When: `target` is `BareName`, require one safe component and the exact pane's trusted local CWD.
@@ -928,6 +964,27 @@ fn authority_is_local(authority: &str, local_hostname: &str) -> bool {
         || (!local_hostname.is_empty() && authority.eq_ignore_ascii_case(local_hostname))
 }
 
+fn is_home_relative(candidate: &str, style: PathStyle) -> bool {
+    match style {
+        PathStyle::Posix => candidate.starts_with("~/"),
+        PathStyle::Windows => candidate.starts_with("~/") || candidate.starts_with("~\\"),
+    }
+}
+
+fn is_contextual_relative(candidate: &str, style: PathStyle) -> bool {
+    match style {
+        PathStyle::Posix => !candidate.starts_with('/') && candidate.contains('/'),
+        PathStyle::Windows => {
+            let bytes = candidate.as_bytes();
+            let drive_absolute = bytes.len() >= 3
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':'
+                && matches!(bytes[2], b'/' | b'\\');
+            !drive_absolute && candidate.contains(['/', '\\'])
+        }
+    }
+}
+
 fn is_explicit_relative(candidate: &str, style: PathStyle) -> bool {
     match style {
         PathStyle::Posix => candidate.starts_with("./") || candidate.starts_with("../"),
@@ -968,6 +1025,19 @@ fn normalize_posix_absolute(path: &str) -> Option<String> {
         }
     }
     (!components.is_empty()).then(|| format!("/{}", components.join("/")))
+}
+
+fn normalize_windows_home(path: &str) -> Option<String> {
+    let bytes = path.as_bytes();
+    if bytes.len() < 3
+        || !bytes[0].is_ascii_alphabetic()
+        || bytes[1] != b':'
+        || !matches!(bytes[2], b'/' | b'\\')
+    {
+        // When: `bytes` lack a drive-root separator, reject drive-relative home input instead of promoting `C:` to `C:\`.
+        return None;
+    }
+    normalize_windows_absolute(path)
 }
 
 fn normalize_windows_cwd(path: &str) -> Option<String> {
@@ -1134,8 +1204,13 @@ impl App {
                     DetectedTarget::Uri(_) => unreachable!(),
                 };
                 let cwd = parser.osc7_cwd().cloned();
-                let resolved_path =
-                    resolve_detected_path(&target, style, cwd.as_ref(), &self.local_hostname)?;
+                let resolved_path = resolve_detected_path(
+                    &target,
+                    style,
+                    cwd.as_ref(),
+                    self.home_dir.as_deref(),
+                    &self.local_hostname,
+                )?;
                 let key = PathProbeKey {
                     window_id,
                     pane_id,

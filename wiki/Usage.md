@@ -55,13 +55,16 @@ Existing OSC 8 links and `http://`, `https://`, `mailto:`, and `file://` URLs ke
 their existing behavior and take precedence over filesystem detection.
 
 SonicTerm recognizes native absolute paths such as `/usr/local/etc`,
-`C:/Users/dotan`, and `C:\\Users\\dotan`. It also recognizes explicit relative
-forms such as `./file`, `../file`, and `../../file` (with slash or backslash on
-Windows). Explicit relative paths and whole bare components such as `sonicterm`
-or `.DS_Store` resolve only when that exact pane has reported a trustworthy
-absolute local working directory through OSC 7. A missing, malformed, or
-foreign-host OSC 7 value fails closed; SonicTerm never substitutes its process
-working directory, another pane, or `HOME`.
+`C:/Users/dotan`, and `C:\\Users\\dotan`; current-home paths such as `~/notes`
+(and `~\\notes` on Windows); separator-relative paths such as `src/main.rs`
+(and `src\\main.rs` on Windows); and explicit dot-relative forms such as
+`./file`, `../file`, and `../../file`. Current-home paths resolve against the
+local user's native absolute home directory. Separator-relative paths,
+dot-relative paths, and whole bare components such as `sonicterm` or `.DS_Store`
+resolve only when that exact pane has reported a trustworthy absolute local
+working directory through OSC 7. A missing, malformed, or foreign-host OSC 7
+value fails closed; SonicTerm never substitutes its process working directory
+or another pane.
 
 Bare-name detection deliberately does not parse `ls` columns. Any whole token in
 a row can become clickable when an identically named eligible entry exists in
@@ -80,10 +83,10 @@ script, shortcut, and installer classes also remain inert: macOS blocks app
 bundles, executable mode, common script suffixes, shebang/ELF/PE content, and
 Mach-O/fat-binary magic; Windows blocks PATHEXT and known launcher classes plus
 ADS/trailing-dot/trailing-space names, and Linux blocks
-`.desktop`, `.AppImage`, ELF, shebang, and `MZ` content. `~`/environment
-expansion, UNC/network/WSL/remote paths, editor `:line:column` suffixes,
-wrapped multi-row paths, and tokens containing wide or combining cells are not
-clickable.
+`.desktop`, `.AppImage`, ELF, shebang, and `MZ` content. Named-user home
+syntax (`~user`), environment-variable expansion, UNC/network/WSL/remote paths,
+editor `:line:column` suffixes, wrapped multi-row paths, and tokens containing
+wide or combining cells are not clickable.
 
 macOS revalidates immediately before `/usr/bin/open -- <target>`, but
 LaunchServices can still observe a later pathname replacement or show quarantine
@@ -202,11 +205,12 @@ PowerShell、cmd、readline 和终端程序。同时保留 `Ctrl+T`、`Ctrl+Shif
 文件系统检测。
 
 SonicTerm 可识别 `/usr/local/etc`、`C:/Users/dotan`、`C:\\Users\\dotan`
-等原生绝对路径，也可识别 `./file`、`../file`、`../../file` 等显式相对路径
-（Windows 可使用 slash 或 backslash）。显式相对路径和 `sonicterm`、`.DS_Store`
-这类完整裸 component，只有在该准确 pane 通过 OSC 7 报告了可信本机绝对工作目录时才会
-解析。缺失、格式错误或来自远端 host 的 OSC 7 值都会 fail closed；SonicTerm 不会改用
-进程工作目录、其他 pane 或 `HOME`。
+等原生绝对路径，`~/notes`（Windows 也支持 `~\\notes`）等当前用户主目录路径，
+`src/main.rs`（Windows 也支持 `src\\main.rs`）等带分隔符的相对路径，以及 `./file`、
+`../file`、`../../file` 等显式点相对路径。当前用户主目录路径按本机绝对主目录解析。
+带分隔符的相对路径、点相对路径和 `sonicterm`、`.DS_Store` 这类完整裸 component，只有在
+该准确 pane 通过 OSC 7 报告了可信本机绝对工作目录时才会解析。缺失、格式错误或来自远端
+host 的 OSC 7 值都会 fail closed；SonicTerm 不会改用进程工作目录或其他 pane。
 
 裸名称检测不会解析 `ls` 的列。只要可信 pane CWD 中存在同名合格条目，一行中的任意完整
 token 都可能变为可点击目标——包括 owner、size 或 date token。带空格的 quoted/escaped
@@ -221,8 +225,9 @@ URI 或 OSC 8。
 shortcut 和 installer 类也保持 inert：macOS 阻止 app bundle、可执行 mode、常见 script
 后缀、shebang/ELF/PE 内容，以及 Mach-O/fat-binary magic；Windows 阻止 PATHEXT、已知
 launcher 类、ADS、末尾点和末尾空格；Linux 阻止 `.desktop`、
-`.AppImage`、ELF、shebang 与 `MZ` 内容。`~`/环境变量展开、UNC/network/WSL/远端路径、
-editor `:line:column` 后缀、跨行路径，以及含宽字符/组合 cell 的 token 均不可点击。
+`.AppImage`、ELF、shebang 与 `MZ` 内容。命名用户主目录语法（`~user`）、环境变量展开、
+UNC/network/WSL/远端路径、editor `:line:column` 后缀、跨行路径，以及含宽字符/组合
+cell 的 token 均不可点击。
 
 macOS 在调用 `/usr/bin/open -- <target>` 前立即重新验证，但 LaunchServices 仍可能观察到
 之后发生的路径替换，也可能显示 quarantine prompt。Windows 在 COM-initialized
