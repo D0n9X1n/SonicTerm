@@ -96,7 +96,7 @@ grep -Fq 'unregistered release-like files' "$tmp/unregistered.out" || \
   fail "unregistered asset failure was not actionable"
 rm "$dist/SonicTerm-v9.8.7-unregistered.deb"
 
-"$prepare" check-version --tag v1.2.3 --repo-root "$root" >/dev/null
+"$prepare" check-version --tag v1.2.4 --repo-root "$root" >/dev/null
 if "$prepare" check-version --tag v9.8.7 --repo-root "$root" >"$tmp/version.out" 2>&1; then
   fail "mismatched tag/workspace version was accepted"
 fi
