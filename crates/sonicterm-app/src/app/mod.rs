@@ -2051,6 +2051,8 @@ pub struct App {
     pub(super) event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
     /// Bounded workers for openability probes and native direct-open dispatch.
     pub(in crate::app) path_workers: Option<path_target::PathWorkers>,
+    /// Current native home captured once for deterministic `~/` target resolution.
+    pub(super) home_dir: Option<PathBuf>,
     /// Local hostname used to reject foreign-authority OSC 7 snapshots.
     pub(super) local_hostname: String,
     /// Hidden Linux package-smoke state; absent during ordinary application runs.
@@ -2357,6 +2359,7 @@ impl App {
                 }
             }
         });
+        let home_dir = path_target::native_home_dir();
         let local_hostname = gethostname::gethostname().to_string_lossy().into_owned();
         Self {
             theme,
@@ -2407,6 +2410,7 @@ impl App {
             keymap_loader: None,
             event_loop_proxy,
             path_workers,
+            home_dir,
             local_hostname,
             runtime_smoke: None,
             // Default to 60 Hz until `resumed` probes the actual

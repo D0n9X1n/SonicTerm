@@ -218,22 +218,27 @@ fn shell_meta_in_body_ends_the_match_before_the_meta_char() {
     assert!(!m[0].url.contains('&'));
 }
 
-/// Native path scanning distinguishes path provenance without changing URL-only APIs.
+/// Native path scanning covers absolute, dot-relative, and current-home-relative syntax.
 #[test]
-fn finds_native_absolute_and_explicit_relative_paths() {
-    let posix =
-        find_targets_for_style("open /usr/local/etc then ./file and ../../file", PathStyle::Posix);
+fn finds_supported_native_path_forms() {
+    let posix = find_targets_for_style(
+        "open /usr/local/etc then ./file ../../file ~/notes ~/.config/file src/main.rs",
+        PathStyle::Posix,
+    );
     assert_eq!(
         posix.iter().map(|m| &m.target).collect::<Vec<_>>(),
         vec![
             &DetectedTarget::PathCandidate("/usr/local/etc".into()),
             &DetectedTarget::PathCandidate("./file".into()),
             &DetectedTarget::PathCandidate("../../file".into()),
+            &DetectedTarget::PathCandidate("~/notes".into()),
+            &DetectedTarget::PathCandidate("~/.config/file".into()),
+            &DetectedTarget::PathCandidate("src/main.rs".into()),
         ]
     );
 
     let windows = find_targets_for_style(
-        r"open C:/Users/dotan then C:\Users\dotan and ..\..\file",
+        r"open C:/Users/dotan C:\Users\dotan ..\..\file ~\notes ~/AppData/file src\main.rs lib/main.rs",
         PathStyle::Windows,
     );
     assert_eq!(
@@ -242,23 +247,121 @@ fn finds_native_absolute_and_explicit_relative_paths() {
             &DetectedTarget::PathCandidate("C:/Users/dotan".into()),
             &DetectedTarget::PathCandidate(r"C:\Users\dotan".into()),
             &DetectedTarget::PathCandidate(r"..\..\file".into()),
+            &DetectedTarget::PathCandidate(r"~\notes".into()),
+            &DetectedTarget::PathCandidate("~/AppData/file".into()),
+            &DetectedTarget::PathCandidate(r"src\main.rs".into()),
+            &DetectedTarget::PathCandidate("lib/main.rs".into()),
         ]
     );
 }
 
-/// Roots, implicit relatives, drive-relative paths, and UNC paths never become candidates.
+/// The supported target matrix keeps every URI and native path family typed distinctly.
+#[test]
+fn supported_plain_text_target_matrix_is_detected() {
+    for (style, text, expected) in [
+        (PathStyle::Posix, "http://example.com", DetectedTarget::Uri("http://example.com".into())),
+        (
+            PathStyle::Posix,
+            "https://example.com/path",
+            DetectedTarget::Uri("https://example.com/path".into()),
+        ),
+        (
+            PathStyle::Posix,
+            "mailto:user@example.com",
+            DetectedTarget::Uri("mailto:user@example.com".into()),
+        ),
+        (PathStyle::Posix, "file:///tmp/file", DetectedTarget::Uri("file:///tmp/file".into())),
+        (PathStyle::Posix, "/tmp/file", DetectedTarget::PathCandidate("/tmp/file".into())),
+        (PathStyle::Posix, "./file", DetectedTarget::PathCandidate("./file".into())),
+        (PathStyle::Posix, "../file", DetectedTarget::PathCandidate("../file".into())),
+        (PathStyle::Posix, "~/file", DetectedTarget::PathCandidate("~/file".into())),
+        (PathStyle::Posix, "src/main.rs", DetectedTarget::PathCandidate("src/main.rs".into())),
+        (
+            PathStyle::Windows,
+            r"C:\Users\name\file",
+            DetectedTarget::PathCandidate(r"C:\Users\name\file".into()),
+        ),
+        (
+            PathStyle::Windows,
+            "C:/Users/name/file",
+            DetectedTarget::PathCandidate("C:/Users/name/file".into()),
+        ),
+        (PathStyle::Windows, r".\file", DetectedTarget::PathCandidate(r".\file".into())),
+        (PathStyle::Windows, r"..\file", DetectedTarget::PathCandidate(r"..\file".into())),
+        (PathStyle::Windows, r"~\file", DetectedTarget::PathCandidate(r"~\file".into())),
+        (PathStyle::Windows, "~/file", DetectedTarget::PathCandidate("~/file".into())),
+        (PathStyle::Windows, r"src\main.rs", DetectedTarget::PathCandidate(r"src\main.rs".into())),
+        (PathStyle::Windows, "src/main.rs", DetectedTarget::PathCandidate("src/main.rs".into())),
+    ] {
+        let found = find_targets_for_style(text, style);
+        assert_eq!(found.len(), 1, "one target expected in {text:?}");
+        assert_eq!(found[0].target, expected, "wrong target provenance for {text:?}");
+        assert_eq!(&text[found[0].start..found[0].end], text, "wrong span for {text:?}");
+    }
+
+    for style in [PathStyle::Posix, PathStyle::Windows] {
+        let bare = bare_name_at_char_col_for_style("sonicterm", 2, style)
+            .expect("a whole contextual component remains supported");
+        assert_eq!(bare.target, DetectedTarget::BareName("sonicterm".into()));
+    }
+}
+
+/// Roots, implicit relatives, named-home expansion, variables, and network paths stay inert.
 #[test]
 fn rejects_ambiguous_or_unsupported_path_forms() {
-    for text in ["/", "./", "../", "file", "~/file", "//server/share"] {
+    for text in [
+        "/",
+        "./",
+        "../",
+        "~/",
+        "file",
+        "~other/file",
+        "$HOME/file",
+        "${HOME}/file",
+        "//server/share",
+    ] {
         assert!(
             find_targets_for_style(text, PathStyle::Posix).is_empty(),
             "unexpected POSIX target in {text:?}"
         );
     }
-    for text in [r"C:\", "C:foo", "file", r"~\file", r"\\server\share"] {
+    for text in
+        [r"C:\", "C:foo", "file", "~\\", r"~other\file", r"%USERPROFILE%\file", r"\\server\share"]
+    {
         assert!(
             find_targets_for_style(text, PathStyle::Windows).is_empty(),
             "unexpected Windows target in {text:?}"
+        );
+    }
+}
+
+/// Quoted paths and unsupported URI lookalikes remain inert rather than becoming relative paths.
+#[test]
+fn rejects_quoted_paths_and_unsupported_uri_lookalikes() {
+    for text in [
+        "\"~/file\"",
+        "'src/main.rs'",
+        "`src/main.rs`",
+        "src/\"main.rs\"",
+        "src/'main.rs'",
+        "src/`main.rs`",
+        "src/(main.rs)",
+        "src/",
+        "src/\nmain.rs",
+        "src/\rmain.rs",
+        "src/\tmain.rs",
+        "ftp://example.com/file",
+    ] {
+        assert!(
+            find_targets_for_style(text, PathStyle::Posix).is_empty(),
+            "ambiguous or unsupported target detected in {text:?}"
+        );
+    }
+    for text in [r#"src\"main.rs\""#, r"src\'main.rs'", r"src\`main.rs`", "src\\", "src\\\nmain.rs"]
+    {
+        assert!(
+            find_targets_for_style(text, PathStyle::Windows).is_empty(),
+            "ambiguous Windows target detected in {text:?}"
         );
     }
 }

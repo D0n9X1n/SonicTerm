@@ -21,6 +21,17 @@ fn row_lookup_returns_path_candidate_with_cell_span() {
     assert_eq!(found.matched.target, DetectedTarget::PathCandidate("./file".into()));
 }
 
+/// Home-relative paths retain typed provenance and exact cell bounds before expansion.
+#[test]
+fn row_lookup_returns_home_relative_path_with_cell_span() {
+    let row = ascii_row("see ~/notes now");
+    let found = target_at_row_cell(&row, 7, PathStyle::Posix).expect("home path under column");
+
+    assert_eq!(found.start_col, 4);
+    assert_eq!(found.end_col, 11);
+    assert_eq!(found.matched.target, DetectedTarget::PathCandidate("~/notes".into()));
+}
+
 /// Contextual `ls` names retain bare-name provenance and exact cell bounds.
 #[test]
 fn row_lookup_returns_contextual_bare_name_span() {
@@ -38,18 +49,74 @@ fn bare_name_resolution_is_host_aware() {
     let target = DetectedTarget::BareName("sonicterm".into());
     let local = Osc7Cwd { authority: "localhost".into(), path: "/work".into() };
     assert_eq!(
-        resolve_detected_path(&target, PathStyle::Posix, Some(&local), "host"),
+        resolve_detected_path(&target, PathStyle::Posix, Some(&local), None, "host"),
         Some(PathBuf::from("/work/sonicterm"))
     );
     let foreign = Osc7Cwd { authority: "remote".into(), path: "/work".into() };
-    assert_eq!(resolve_detected_path(&target, PathStyle::Posix, Some(&foreign), "host"), None);
-    assert_eq!(resolve_detected_path(&target, PathStyle::Posix, None, "host"), None);
+    assert_eq!(
+        resolve_detected_path(&target, PathStyle::Posix, Some(&foreign), None, "host"),
+        None
+    );
+    assert_eq!(resolve_detected_path(&target, PathStyle::Posix, None, None, "host"), None);
 
     let root = Osc7Cwd { authority: String::new(), path: "/".into() };
     assert_eq!(
-        resolve_detected_path(&target, PathStyle::Posix, Some(&root), "host"),
+        resolve_detected_path(&target, PathStyle::Posix, Some(&root), None, "host"),
         Some(PathBuf::from("/sonicterm"))
     );
+}
+
+/// App lookup expands a home-relative row token before constructing its probe key.
+#[test]
+fn app_cell_lookup_resolves_home_relative_paths() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let (home, candidate, expected) = if cfg!(target_os = "windows") {
+        (PathBuf::from(r"C:\Users\tester"), r"~\notes", PathBuf::from(r"C:\Users\tester\notes"))
+    } else {
+        (PathBuf::from("/Users/tester"), "~/notes", PathBuf::from("/Users/tester/notes"))
+    };
+    app.home_dir = Some(home);
+    let window = app.__test_seed_child_window(&["home"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    assert!(app.__test_advance_child_pane_parser(window, pane, candidate.as_bytes()));
+
+    let resolved = app.cell_target_at(window, pane, 0, 2).expect("home-relative target");
+    assert!(matches!(
+        resolved.target,
+        ResolvedCellTarget::Path(ref key)
+            if key.candidate == candidate && key.resolved_path == expected
+    ));
+}
+
+/// App lookup resolves a separator-relative row token from the clicked pane's OSC 7 CWD.
+#[test]
+fn app_cell_lookup_resolves_contextual_relative_paths() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let (osc7, candidate, expected) = if cfg!(target_os = "windows") {
+        (
+            b"\x1b]7;file:///C:/work/project\x1b\\".as_slice(),
+            r"src\main.rs",
+            PathBuf::from(r"C:\work\project\src\main.rs"),
+        )
+    } else {
+        (
+            b"\x1b]7;file:///work/project\x1b\\".as_slice(),
+            "src/main.rs",
+            PathBuf::from("/work/project/src/main.rs"),
+        )
+    };
+    let window = app.__test_seed_child_window(&["relative"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    let mut output = osc7.to_vec();
+    output.extend_from_slice(candidate.as_bytes());
+    assert!(app.__test_advance_child_pane_parser(window, pane, &output));
+
+    let resolved = app.cell_target_at(window, pane, 0, 2).expect("separator-relative target");
+    assert!(matches!(
+        resolved.target,
+        ResolvedCellTarget::Path(ref key)
+            if key.candidate == candidate && key.resolved_path == expected
+    ));
 }
 
 /// App lookup resolves a bare row token from only the clicked pane's local OSC 7 state.
@@ -125,13 +192,88 @@ fn combining_extras_reject_the_entire_surrounding_path_token() {
 fn posix_relative_resolution_is_host_aware_and_root_clamped() {
     let cwd = Osc7Cwd { authority: "localhost".into(), path: "/work/project".into() };
     assert_eq!(
-        resolve_path_candidate("../../file", PathStyle::Posix, Some(&cwd), "my-host"),
+        resolve_path_candidate("../../file", PathStyle::Posix, Some(&cwd), None, "my-host"),
         Some(PathBuf::from("/file"))
     );
 
     let foreign = Osc7Cwd { authority: "remote-host".into(), path: "/work/project".into() };
-    assert_eq!(resolve_path_candidate("./file", PathStyle::Posix, Some(&foreign), "my-host"), None);
-    assert_eq!(resolve_path_candidate("./file", PathStyle::Posix, None, "my-host"), None);
+    assert_eq!(
+        resolve_path_candidate("./file", PathStyle::Posix, Some(&foreign), None, "my-host"),
+        None
+    );
+    assert_eq!(resolve_path_candidate("./file", PathStyle::Posix, None, None, "my-host"), None);
+}
+
+/// Separator-relative paths resolve only from the exact pane's trusted local OSC 7 directory.
+#[test]
+fn contextual_relative_resolution_is_host_aware() {
+    let local = Osc7Cwd { authority: "localhost".into(), path: "/work/project".into() };
+    assert_eq!(
+        resolve_path_candidate("src/main.rs", PathStyle::Posix, Some(&local), None, "host"),
+        Some(PathBuf::from("/work/project/src/main.rs"))
+    );
+    let foreign = Osc7Cwd { authority: "remote".into(), path: "/work/project".into() };
+    assert_eq!(
+        resolve_path_candidate("src/main.rs", PathStyle::Posix, Some(&foreign), None, "host"),
+        None
+    );
+    assert_eq!(resolve_path_candidate("src/main.rs", PathStyle::Posix, None, None, "host"), None);
+
+    let windows = Osc7Cwd { authority: String::new(), path: "/C:/work/project".into() };
+    assert_eq!(
+        resolve_path_candidate(r"src\main.rs", PathStyle::Windows, Some(&windows), None, "host"),
+        Some(PathBuf::from(r"C:\work\project\src\main.rs"))
+    );
+}
+
+/// Current-home paths use only a validated native absolute home and normalize below its root.
+#[test]
+fn home_relative_resolution_uses_valid_native_home() {
+    assert_eq!(
+        resolve_path_candidate(
+            "~/work/../notes",
+            PathStyle::Posix,
+            None,
+            Some(Path::new("/Users/tester")),
+            "host",
+        ),
+        Some(PathBuf::from("/Users/tester/notes"))
+    );
+    assert_eq!(
+        resolve_path_candidate(
+            "~/../../notes",
+            PathStyle::Posix,
+            None,
+            Some(Path::new("/Users/tester")),
+            "host",
+        ),
+        Some(PathBuf::from("/notes"))
+    );
+    assert_eq!(
+        resolve_path_candidate(
+            r"~\work\..\notes",
+            PathStyle::Windows,
+            None,
+            Some(Path::new(r"C:\Users\tester")),
+            "host",
+        ),
+        Some(PathBuf::from(r"C:\Users\tester\notes"))
+    );
+    assert_eq!(
+        resolve_path_candidate(
+            "~/notes",
+            PathStyle::Posix,
+            None,
+            Some(Path::new("relative/home")),
+            "host",
+        ),
+        None
+    );
+    assert_eq!(
+        resolve_path_candidate(r"~\file", PathStyle::Windows, None, Some(Path::new("C:")), "host",),
+        None
+    );
+    assert_eq!(resolve_path_candidate("~/notes", PathStyle::Posix, None, None, "host"), None);
 }
 
 /// The exact local hostname is accepted case-insensitively without weakening foreign-host checks.
@@ -139,7 +281,7 @@ fn posix_relative_resolution_is_host_aware_and_root_clamped() {
 fn local_hostname_authority_is_accepted() {
     let cwd = Osc7Cwd { authority: "MY-HOST".into(), path: "/work".into() };
     assert_eq!(
-        resolve_path_candidate("./file", PathStyle::Posix, Some(&cwd), "my-host"),
+        resolve_path_candidate("./file", PathStyle::Posix, Some(&cwd), None, "my-host"),
         Some(PathBuf::from("/work/file"))
     );
 }
@@ -149,11 +291,11 @@ fn local_hostname_authority_is_accepted() {
 fn windows_relative_resolution_normalizes_drive_form() {
     let cwd = Osc7Cwd { authority: String::new(), path: "/C:/work/project".into() };
     assert_eq!(
-        resolve_path_candidate(r"..\..\file", PathStyle::Windows, Some(&cwd), "host"),
+        resolve_path_candidate(r"..\..\file", PathStyle::Windows, Some(&cwd), None, "host"),
         Some(PathBuf::from(r"C:\file"))
     );
     assert_eq!(
-        resolve_path_candidate("C:/Users/dotan/", PathStyle::Windows, None, "host"),
+        resolve_path_candidate("C:/Users/dotan/", PathStyle::Windows, None, None, "host"),
         Some(PathBuf::from(r"C:\Users\dotan"))
     );
 }
