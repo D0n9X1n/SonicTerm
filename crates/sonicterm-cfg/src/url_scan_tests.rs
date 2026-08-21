@@ -466,6 +466,133 @@ fn contextual_bare_names_reject_quoted_and_classified_output() {
     }
 }
 
+/// Spaced explicit and contextual paths produce bounded full-span candidates on every cell.
+#[test]
+fn spaced_path_candidates_cover_each_pointed_cell() {
+    for (style, text, expected) in [
+        (PathStyle::Windows, r"C:\Program Files\SonicTerm", r"C:\Program Files\SonicTerm"),
+        (PathStyle::Windows, r"~\My Folder\file.txt", r"~\My Folder\file.txt"),
+        (PathStyle::Windows, r"src\My Folder\file.txt", r"src\My Folder\file.txt"),
+        (PathStyle::Posix, "/tmp/My Folder", "/tmp/My Folder"),
+        (PathStyle::Posix, "~/My Folder/file.txt", "~/My Folder/file.txt"),
+        (PathStyle::Posix, "./My Folder/file.txt", "./My Folder/file.txt"),
+        (PathStyle::Posix, "src/My Folder/file.txt", "src/My Folder/file.txt"),
+        (PathStyle::Posix, "My Folder", "My Folder"),
+    ] {
+        let character_count = text.chars().count();
+        for col in 0..character_count {
+            let matches = target_candidates_at_char_col_for_style(text, col, style, true);
+            assert!(
+                matches.iter().any(|matched| {
+                    &text[matched.start..matched.end] == expected
+                        && matches!(
+                            matched.target,
+                            DetectedTarget::PathCandidate(_) | DetectedTarget::BareName(_)
+                        )
+                }),
+                "missing full candidate at column {col} in {text:?}: {matches:?}"
+            );
+            assert!(matches.len() <= MAX_PATH_CANDIDATES_PER_CELL);
+        }
+    }
+}
+
+/// Windows spaced candidates reject trailing-dot and trailing-space normalization aliases.
+#[test]
+fn windows_spaced_candidates_reject_normalization_aliases() {
+    for text in [r"C:\tmp\bad.\name", r"C:\tmp\bad \name", "My Folder "] {
+        assert!(
+            target_candidates_at_char_col_for_style(
+                text,
+                text.chars().count().saturating_sub(1),
+                PathStyle::Windows,
+                true,
+            )
+            .iter()
+            .all(|matched| &text[matched.start..matched.end] != text),
+            "normalization-sensitive candidate detected in {text:?}"
+        );
+    }
+}
+
+/// Existing wrapper trimming remains available through the focused candidate API.
+#[test]
+fn focused_candidates_preserve_matching_wrapper_support() {
+    let text = "(/tmp/My Folder)";
+    let matches = target_candidates_at_char_col_for_style(text, 4, PathStyle::Posix, true);
+    assert!(matches.iter().any(|matched| {
+        &text[matched.start..matched.end] == "/tmp/My Folder"
+            && matched.target == DetectedTarget::PathCandidate("/tmp/My Folder".into())
+    }));
+}
+
+/// URI spans and hard delimiters prevent spaced filesystem reconstruction across provenance.
+#[test]
+fn spaced_candidates_preserve_uri_and_hard_boundaries() {
+    let uri = "https://example.com/a path";
+    let found = target_candidates_at_char_col_for_style(uri, 8, PathStyle::Posix, true);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].target, DetectedTarget::Uri("https://example.com/a".into()));
+
+    let tabbed = "/tmp/My\tFolder";
+    for col in 0..tabbed.chars().count() {
+        assert!(
+            target_candidates_at_char_col_for_style(tabbed, col, PathStyle::Posix, true)
+                .iter()
+                .all(|matched| matched.start < 7 && matched.end <= 7 || matched.start > 7),
+            "candidate crossed the tab at {col}: {tabbed:?}"
+        );
+    }
+    for text in [
+        "\"/tmp/My Folder\"",
+        "'/tmp/My Folder'",
+        "\"/tmp/My Folder",
+        "/tmp/My Folder\"",
+        r"/tmp/My\ Folder",
+    ] {
+        for col in 0..text.chars().count() {
+            assert!(
+                target_candidates_at_char_col_for_style(text, col, PathStyle::Posix, true)
+                    .is_empty(),
+                "quoted or escaped segment exposed a partial target at {col} in {text:?}"
+            );
+        }
+    }
+    let mixed = r#""/tmp/My Folder" /tmp/Other Folder"#;
+    let unquoted = mixed.find("/tmp/Other").unwrap();
+    let col = mixed[..unquoted].chars().count() + 5;
+    assert!(target_candidates_at_char_col_for_style(mixed, col, PathStyle::Posix, true)
+        .iter()
+        .any(|matched| &mixed[matched.start..matched.end] == "/tmp/Other Folder"));
+}
+
+/// Candidate enumeration and each reconstructed path stay within their explicit work bounds.
+#[test]
+fn spaced_candidate_enumeration_is_bounded() {
+    let supported = (0..MAX_SPACED_PATH_TOKENS)
+        .map(|index| format!("part{index}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let supported_matches = target_candidates_at_char_col_for_style(
+        &supported,
+        supported.chars().count() / 2,
+        PathStyle::Posix,
+        true,
+    );
+    assert!(supported_matches
+        .iter()
+        .any(|matched| supported[matched.start..matched.end] == supported));
+
+    let text = (0..128).map(|index| format!("part{index}")).collect::<Vec<_>>().join(" ");
+    let middle = text.chars().count() / 2;
+    let matches = target_candidates_at_char_col_for_style(&text, middle, PathStyle::Posix, true);
+    assert!(matches.len() <= MAX_PATH_CANDIDATES_PER_CELL);
+    assert!(matches.iter().all(|matched| matched.end - matched.start <= MAX_TARGET_BYTES));
+    assert!(matches.iter().all(|matched| {
+        text[matched.start..matched.end].split(' ').count() <= MAX_SPACED_PATH_TOKENS
+    }));
+}
+
 /// URI-looking text never acquires contextual filesystem provenance.
 #[test]
 fn contextual_bare_lookup_preserves_uri_precedence() {

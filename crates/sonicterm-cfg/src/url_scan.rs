@@ -80,6 +80,9 @@ impl PathStyle {
 
 const SCHEMES: &[&str] = &["https://", "http://", "mailto:", "file://"];
 const MAX_TARGET_BYTES: usize = 4096;
+const MAX_SPACED_PATH_TOKENS: usize = 8;
+const MAX_PATH_CANDIDATES_PER_CELL: usize =
+    MAX_SPACED_PATH_TOKENS * (MAX_SPACED_PATH_TOKENS + 1) / 2 + 1;
 
 /// Return every URL substring of `text` whose scheme is on our
 /// allow-list and which passes [`validate`].
@@ -281,6 +284,136 @@ pub fn target_at_char_col_for_style(
     target_at_byte_for_style(text, byte, style)
 }
 
+/// Return bounded URI or filesystem candidates covering character column `col`.
+///
+/// Ordinary ASCII spaces are soft boundaries so an asynchronous filesystem
+/// probe can disambiguate existing names containing spaces. Controls, other
+/// whitespace, unsafe wrappers, URI spans, and the byte cap remain hard limits.
+#[must_use]
+pub fn target_candidates_at_char_col_for_style(
+    text: &str,
+    col: usize,
+    style: PathStyle,
+    include_bare_names: bool,
+) -> Vec<TargetMatch> {
+    let Some((clicked_byte, clicked)) = text.char_indices().nth(col) else {
+        // When: `col` lies beyond the row, no candidate can own the pointed cell.
+        return Vec::new();
+    };
+    let urls = find_urls(text);
+    if let Some(url) = urls.iter().find(|url| clicked_byte >= url.start && clicked_byte < url.end) {
+        // When: a validated URI owns `clicked_byte`, return only that stronger provenance.
+        return vec![TargetMatch {
+            start: url.start,
+            end: url.end,
+            target: DetectedTarget::Uri(url.url.clone()),
+        }];
+    }
+    if is_path_hard_delimiter(clicked) {
+        // When: `clicked` is a control, quote, or non-space whitespace, do not bridge its hard boundary.
+        return Vec::new();
+    }
+
+    let segment_start = text[..clicked_byte]
+        .char_indices()
+        .rev()
+        .find_map(|(index, ch)| is_path_hard_delimiter(ch).then_some(index + ch.len_utf8()))
+        .unwrap_or(0);
+    let segment_end = text[clicked_byte..]
+        .char_indices()
+        .find_map(|(offset, ch)| is_path_hard_delimiter(ch).then_some(clicked_byte + offset))
+        .unwrap_or(text.len());
+    if quoted_spaced_segment(text, segment_start, segment_end) {
+        // When: `quoted_spaced_segment` is true, reject every partial reconstruction inside that quote-delimited range.
+        return Vec::new();
+    }
+    let tokens = soft_space_token_spans(text, segment_start, segment_end);
+    let clicked_token =
+        tokens.iter().position(|(start, end)| clicked_byte >= *start && clicked_byte < *end);
+    // When: `clicked` is an ordinary space, anchor between named tokens; otherwise `clicked_token` owns the candidate.
+    let clicked_gap = if clicked == ' ' {
+        let left = tokens.iter().rposition(|(_, end)| *end <= clicked_byte);
+        let right = tokens.iter().position(|(start, _)| *start > clicked_byte);
+        left.zip(right)
+    } else {
+        None
+    };
+
+    let Some((anchor_start, anchor_end)) =
+        clicked_token.map(|index| (index, index)).or(clicked_gap)
+    else {
+        // When: no named token or bounded inter-token gap owns `clicked_byte`, leave the cell inert.
+        return Vec::new();
+    };
+    let first_left = anchor_end.saturating_add(1).saturating_sub(MAX_SPACED_PATH_TOKENS);
+    let mut candidates = target_at_byte_for_style(text, clicked_byte, style)
+        .filter(|matched| !matches!(matched.target, DetectedTarget::Uri(_)))
+        .map(|matched| vec![(1, matched)])
+        .unwrap_or_default();
+    for left_index in first_left..=anchor_start {
+        let last_right = tokens
+            .len()
+            .saturating_sub(1)
+            .min(left_index.saturating_add(MAX_SPACED_PATH_TOKENS - 1));
+        for right_index in anchor_end.max(left_index)..=last_right {
+            let (start, end) =
+                trim_outer_path_wrapper(text, tokens[left_index].0, tokens[right_index].1, style);
+            if clicked_byte < start || clicked_byte >= end {
+                // When: `clicked_byte` falls outside wrapper-trimmed `start..end`, this span cannot represent its target.
+                continue;
+            }
+            let Some(candidate) = text.get(start..end) else {
+                // When: `start..end` misses UTF-8 boundaries, reject the malformed candidate span.
+                continue;
+            };
+            if candidate.len() > MAX_TARGET_BYTES
+                || escaped_space_path(text, start, candidate, style)
+                || unsafe_wrapper_adjacent(text, start, end)
+                || urls.iter().any(|url| start < url.end && end > url.start)
+            {
+                // When: `candidate` exceeds a hard safety boundary or overlaps URI provenance, leave the range inert.
+                continue;
+            }
+            let target =
+                if has_path_prefix(candidate, style) && validate_path_candidate(candidate, style) {
+                    DetectedTarget::PathCandidate(candidate.to_string())
+                } else if include_bare_names && validate_bare_name(candidate, style) {
+                    // When: `candidate` has no explicit prefix, retain contextual provenance for exact-pane CWD resolution.
+                    DetectedTarget::BareName(candidate.to_string())
+                } else {
+                    // When: `candidate` satisfies neither explicit nor enabled contextual grammar, leave it inert.
+                    continue;
+                };
+            let token_count = right_index - left_index + 1;
+            candidates.push((token_count, TargetMatch { start, end, target }));
+        }
+    }
+
+    candidates.sort_by(|(_, left), (_, right)| {
+        left.start
+            .cmp(&right.start)
+            .then_with(|| left.end.cmp(&right.end))
+            .then_with(|| target_sort_key(&left.target).cmp(&target_sort_key(&right.target)))
+    });
+    candidates.dedup_by(|(_, right), (_, left)| {
+        right.start == left.start && right.end == left.end && right.target == left.target
+    });
+    candidates.sort_by(|(left_count, left), (right_count, right)| {
+        left_count
+            .cmp(right_count)
+            .then_with(|| (left.end - left.start).cmp(&(right.end - right.start)))
+            .then_with(|| left.start.cmp(&right.start))
+    });
+    candidates.truncate(MAX_PATH_CANDIDATES_PER_CELL);
+    candidates.sort_by(|(_, left), (_, right)| {
+        (right.end - right.start)
+            .cmp(&(left.end - left.start))
+            .then_with(|| left.start.cmp(&right.start))
+            .then_with(|| left.end.cmp(&right.end))
+    });
+    candidates.into_iter().map(|(_, candidate)| candidate).collect()
+}
+
 /// Return one contextual bare filesystem component covering character column `col`.
 ///
 /// This API is deliberately separate from [`find_targets_for_style`]: callers
@@ -326,6 +459,14 @@ pub fn bare_name_at_char_col_for_style(
     Some(TargetMatch { start, end, target: DetectedTarget::BareName(candidate.to_string()) })
 }
 
+fn target_sort_key(target: &DetectedTarget) -> (u8, &str) {
+    match target {
+        DetectedTarget::Uri(value) => (0, value),
+        DetectedTarget::PathCandidate(value) => (1, value),
+        DetectedTarget::BareName(value) => (2, value),
+    }
+}
+
 fn validate_bare_name(candidate: &str, style: PathStyle) -> bool {
     if candidate.is_empty()
         || candidate.len() > MAX_TARGET_BYTES
@@ -361,6 +502,85 @@ fn is_path_start_boundary(text: &str, start: usize) -> bool {
 
 fn is_path_delimiter(ch: char) -> bool {
     ch.is_whitespace() || ch.is_control() || matches!(ch, '"' | '\'' | '`' | '<' | '>')
+}
+
+fn is_path_hard_delimiter(ch: char) -> bool {
+    (ch.is_whitespace() && ch != ' ')
+        || ch.is_control()
+        || matches!(ch, '"' | '\'' | '`' | '<' | '>')
+}
+
+fn quoted_spaced_segment(text: &str, start: usize, end: usize) -> bool {
+    let starts_at_content = text[start..end].chars().next().is_some_and(|ch| ch != ' ');
+    let ends_at_content = text[start..end].chars().next_back().is_some_and(|ch| ch != ' ');
+    let left_quote =
+        text[..start].chars().next_back().is_some_and(|ch| matches!(ch, '"' | '\'' | '`'));
+    let right_quote = text[end..].chars().next().is_some_and(|ch| matches!(ch, '"' | '\'' | '`'));
+    left_quote && starts_at_content || right_quote && ends_at_content
+}
+
+fn escaped_space_path(text: &str, start: usize, candidate: &str, style: PathStyle) -> bool {
+    style == PathStyle::Posix
+        && (candidate.contains("\\ ")
+            || text[..start].strip_suffix(' ').is_some_and(|prefix| prefix.ends_with('\\')))
+}
+
+fn soft_space_token_spans(text: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut token_start = None;
+    for (offset, ch) in text[start..end].char_indices() {
+        let index = start + offset;
+        if ch == ' ' {
+            if let Some(token_start) = token_start.take() {
+                spans.push((token_start, index));
+            }
+        } else if token_start.is_none() {
+            // When: `token_start` is absent at non-space `ch`, record the opening byte of this named run.
+            token_start = Some(index);
+        }
+    }
+    if let Some(token_start) = token_start {
+        spans.push((token_start, end));
+    }
+    spans
+}
+
+fn unsafe_wrapper_adjacent(text: &str, start: usize, end: usize) -> bool {
+    text[..start]
+        .chars()
+        .next_back()
+        .is_some_and(|ch| is_path_hard_delimiter(ch) && !ch.is_whitespace())
+        || text[end..]
+            .chars()
+            .next()
+            .is_some_and(|ch| is_path_hard_delimiter(ch) && !ch.is_whitespace())
+}
+
+fn trim_outer_path_wrapper(
+    text: &str,
+    mut start: usize,
+    mut end: usize,
+    style: PathStyle,
+) -> (usize, usize) {
+    let Some(first) = text[start..end].chars().next() else {
+        // When: `text[start..end].chars().next()` is absent, there is no wrapper pair to remove.
+        return (start, end);
+    };
+    let Some(last) = text[start..end].chars().next_back() else {
+        // When: `text[start..end].chars().next_back()` is absent, preserve the original boundaries.
+        return (start, end);
+    };
+    if !matches!((first, last), ('(', ')') | ('[', ']') | ('{', '}')) {
+        // When: `matches!((first, last), ...)` is false, retain literal punctuation.
+        return (start, end);
+    }
+    start += first.len_utf8();
+    end -= last.len_utf8();
+    if start >= end || !has_path_prefix(&text[start..end], style) {
+        // When: `start >= end || !has_path_prefix(...)`, restore the wrapper as literal filename punctuation.
+        return (start - first.len_utf8(), end + last.len_utf8());
+    }
+    (start, end)
 }
 
 fn trim_matching_wrapper(text: &str, start: usize, mut end: usize) -> usize {
@@ -487,7 +707,11 @@ fn validate_path_candidate(candidate: &str, style: PathStyle) -> bool {
                 // When: `bytes` do not begin with a drive or home root, validate the complete explicit-relative candidate.
                 candidate
             };
-            has_named_component(component_text.split(['/', '\\']))
+            let components = component_text.split(['/', '\\']).collect::<Vec<_>>();
+            has_named_component(components.iter().copied())
+                && components.iter().all(|component| {
+                    matches!(*component, "" | "." | "..") || !component.ends_with(['.', ' '])
+                })
         }
     }
 }

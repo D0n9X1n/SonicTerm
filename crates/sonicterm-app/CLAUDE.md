@@ -44,9 +44,10 @@ cargo build -p sonicterm-app
   Clickability requires a current epoch-keyed typed openability result. Direct-open
   work stays bounded, revalidates target kind, and blocks executable/launcher,
   symlink/reparse-point, and special-file classes before native dispatch.
-- Bare terminal tokens resolve only against the exact pane's trustworthy local
-  OSC 7 CWD, after OSC 8, URI, and explicit-path precedence; never fall back to
-  process CWD, another pane, or HOME.
+- Contextual terminal candidates, including names containing ordinary spaces,
+  resolve only against the exact pane's trustworthy local OSC 7 CWD, after OSC 8,
+  URI, and explicit-path precedence; never fall back to process CWD, another pane,
+  or HOME. Candidate enumeration and background probes stay explicitly bounded.
 
 ## Cross-references
 - Consumes: `sonicterm-app-core`, `sonicterm-vt`, `sonicterm-grid`,

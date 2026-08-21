@@ -220,16 +220,18 @@ live.
 
 `clickable_local_targets` controls raw absolute, current-home (`~/...`),
 separator-relative (`src/main.rs`), explicit dot-relative, and contextual bare
-filesystem targets; it defaults to `true`. Setting it to `false` leaves URI and
-OSC 8 activation unchanged.
-`clickable_bare_names` is a
-subordinate default-on switch: it permits whole tokens to resolve against the
-exact pane's trustworthy local OSC 7 CWD only while
-`clickable_local_targets` is also enabled. This intentionally may activate any
-column token when a same-named eligible entry exists in that CWD; see
-[Usage](Usage) for grammar and blocked target classes. Reloading either switch
-immediately revokes existing local-target hover and probe authorization in every
-window.
+filesystem targets, including forms containing ordinary spaces; it defaults to
+`true`. Setting it to `false` leaves URI and OSC 8 activation unchanged.
+`clickable_bare_names` is a subordinate default-on switch: it permits row-local
+candidates to resolve against the exact pane's trustworthy local OSC 7 CWD only
+while `clickable_local_targets` is also enabled. A bounded background probe
+checks at most 37 candidates of no more than eight non-space parts and selects
+the longest unambiguous openable candidate containing the pointed cell; blocked
+or equally long ambiguous candidates fail closed. This intentionally
+may activate column text when a same-named eligible entry exists in that CWD;
+see [Usage](Usage) for grammar and blocked target classes. Reloading either
+switch immediately revokes existing local-target hover and probe authorization
+in every window.
 
 ### Logging
 
@@ -508,13 +510,14 @@ macOS/其它 Unix 使用 `$SHELL`。`term_program` 写入子进程的 `TERM_PROG
 `scrollback` 按窗格保存；重载调小会立即删除最老历史，`0` 关闭历史。光标形状与 blink 会在重载时生效。
 
 `clickable_local_targets` 控制原始绝对路径、当前用户主目录路径（`~/...`）、带分隔符的
-相对路径（`src/main.rs`）、显式点相对路径和 contextual 裸文件系统目标，默认为 `true`；
-设为 `false` 不影响 URI 与 OSC 8 activation。
-`clickable_bare_names` 是默认开启的
-从属 switch：只有 `clickable_local_targets` 同时启用时，它才允许完整 token 按准确 pane 的
-可信本机 OSC 7 CWD 解析。这会有意允许任何列 token 在 CWD 中存在同名合格条目时变为目标；
-grammar 与阻止的目标类别见 [用法 / Usage](Usage)。重载任一 switch 都会立即撤销所有窗口中
-已有的本地目标 hover 与 probe authorization。
+相对路径（`src/main.rs`）、显式点相对路径和 contextual 裸文件系统目标，也支持包含普通空格
+的形式；默认为 `true`，设为 `false` 不影响 URI 与 OSC 8 activation。
+`clickable_bare_names` 是默认开启的从属 switch：只有 `clickable_local_targets` 同时启用时，
+它才允许行内候选按准确 pane 的可信本机 OSC 7 CWD 解析。有界后台 probe 最多检查 37 个候选，
+每个候选最多跨越 8 个非空格部分，并选取包含鼠标 cell 的最长、无歧义且可打开候选；被阻止或
+同长度有歧义的候选会 fail closed。这会有意允许列文本
+在 CWD 中存在同名合格条目时变为目标；grammar 与阻止的目标类别见 [用法 / Usage](Usage)。
+重载任一 switch 都会立即撤销所有窗口中已有的本地目标 hover 与 probe authorization。
 
 ### 日志
 

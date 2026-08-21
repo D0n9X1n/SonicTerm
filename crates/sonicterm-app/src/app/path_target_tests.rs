@@ -1,6 +1,7 @@
 use super::*;
 use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme, url_scan::DetectedTarget};
 use sonicterm_grid::grid::{Cell, CellFlags, Color, Row};
+use sonicterm_types::HyperlinkId;
 
 fn ascii_row(text: &str) -> Row {
     Row::from_flat(
@@ -84,7 +85,9 @@ fn app_cell_lookup_resolves_home_relative_paths() {
     assert!(matches!(
         resolved.target,
         ResolvedCellTarget::Path(ref key)
-            if key.candidate == candidate && key.resolved_path == expected
+            if key.candidates.iter().any(|probe| {
+                probe.display() == candidate && probe.resolved_path == expected
+            })
     ));
 }
 
@@ -115,8 +118,50 @@ fn app_cell_lookup_resolves_contextual_relative_paths() {
     assert!(matches!(
         resolved.target,
         ResolvedCellTarget::Path(ref key)
-            if key.candidate == candidate && key.resolved_path == expected
+            if key.candidates.iter().any(|probe| {
+                probe.display() == candidate && probe.resolved_path == expected
+            })
     ));
+}
+
+/// App lookup resolves a spaced name from the exact pane CWD across every cell in its span.
+#[test]
+fn app_cell_lookup_resolves_spaced_contextual_names() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let (osc7, candidate, expected) = if cfg!(target_os = "windows") {
+        (
+            b"\x1b]7;file:///C:/Users/tester\x1b\\".as_slice(),
+            "OneDrive - Microsoft",
+            PathBuf::from(r"C:\Users\tester\OneDrive - Microsoft"),
+        )
+    } else {
+        (
+            b"\x1b]7;file:///home/tester\x1b\\".as_slice(),
+            "My Folder",
+            PathBuf::from("/home/tester/My Folder"),
+        )
+    };
+    let window = app.__test_seed_child_window(&["spaced"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    let mut output = osc7.to_vec();
+    output.extend_from_slice(candidate.as_bytes());
+    assert!(app.__test_advance_child_pane_parser(window, pane, &output));
+
+    for col in 0..candidate.chars().count() {
+        let resolved = app
+            .cell_target_at(window, pane, 0, u16::try_from(col).unwrap())
+            .expect("spaced contextual target");
+        assert!(matches!(
+            resolved.target,
+            ResolvedCellTarget::Path(ref key)
+                if key.candidates.iter().any(|probe| {
+                    probe.display() == candidate
+                        && probe.start_col == 0
+                        && usize::from(probe.end_col) == candidate.chars().count()
+                        && probe.resolved_path == expected
+                })
+        ));
+    }
 }
 
 /// App lookup resolves a bare row token from only the clicked pane's local OSC 7 state.
@@ -139,7 +184,9 @@ fn app_cell_lookup_uses_exact_pane_osc7_for_bare_names() {
     assert!(matches!(
         resolved.target,
         ResolvedCellTarget::Path(ref key)
-            if key.candidate == "sonicterm" && key.resolved_path == expected
+            if key.candidates.iter().any(|probe| {
+                probe.display() == "sonicterm" && probe.resolved_path == expected
+            })
     ));
 
     let foreign_window = app.__test_seed_child_window(&["foreign"]);
@@ -151,6 +198,47 @@ fn app_cell_lookup_uses_exact_pane_osc7_for_bare_names() {
     };
     assert!(app.__test_advance_child_pane_parser(foreign_window, foreign_pane, foreign_osc7));
     assert!(app.cell_target_at(foreign_window, foreign_pane, 0, 2).is_none());
+}
+
+/// Spaced paths map scanner byte ranges back to one exact grid-cell span.
+#[test]
+fn row_candidates_preserve_complete_spaced_path_span() {
+    for (style, text) in [
+        (PathStyle::Windows, r"C:\Program Files\SonicTerm"),
+        (PathStyle::Posix, "/tmp/My Folder"),
+        (PathStyle::Posix, "My Folder"),
+    ] {
+        for col in 0..text.chars().count() {
+            let candidates = row_target_candidates_at_cell(
+                &ascii_row(text),
+                u16::try_from(col).unwrap(),
+                style,
+                true,
+            );
+            assert!(
+                candidates.iter().any(|candidate| {
+                    candidate.start_col == 0
+                        && usize::from(candidate.end_col) == text.chars().count()
+                        && match &candidate.matched.target {
+                            DetectedTarget::PathCandidate(value)
+                            | DetectedTarget::BareName(value) => value == text,
+                            DetectedTarget::Uri(_) => false,
+                        }
+                }),
+                "missing full row span at {col} in {text:?}: {candidates:?}"
+            );
+        }
+    }
+}
+
+/// Hyperlink provenance inside a candidate prevents plain-text path reconstruction.
+#[test]
+fn row_candidates_do_not_cross_osc8_cells() {
+    let mut row = ascii_row("/tmp/My Folder");
+    row.iter_mut().nth(6).unwrap().set_hyperlink(Some(HyperlinkId(7)));
+    assert!(row_target_candidates_at_cell(&row, 2, PathStyle::Posix, true)
+        .iter()
+        .all(|candidate| candidate.end_col <= 6));
 }
 
 /// A wide continuation is token content, not whitespace that can expose a suffix path.
@@ -297,6 +385,14 @@ fn windows_relative_resolution_normalizes_drive_form() {
     assert_eq!(
         resolve_path_candidate("C:/Users/dotan/", PathStyle::Windows, None, None, "host"),
         Some(PathBuf::from(r"C:\Users\dotan"))
+    );
+    assert_eq!(
+        resolve_path_candidate(r"C:\Users\bad.\name", PathStyle::Windows, None, None, "host"),
+        None
+    );
+    assert_eq!(
+        resolve_path_candidate(r"C:\Users\bad \name", PathStyle::Windows, None, None, "host"),
+        None
     );
 }
 
@@ -489,6 +585,15 @@ fn open_target_adapter_owns_an_open_file() {
     assert!(with_opened_target(&path, |_| Ok(())).is_err());
 }
 
+fn probe_candidate(display: &str, path: &str, start_col: u16) -> PathProbeCandidate {
+    PathProbeCandidate {
+        start_col,
+        end_col: start_col + u16::try_from(display.chars().count()).unwrap(),
+        target: DetectedTarget::PathCandidate(display.into()),
+        resolved_path: PathBuf::from(path),
+    }
+}
+
 fn probe_key(path: &str, view_top: u64) -> PathProbeKey {
     PathProbeKey {
         window_id: winit::window::WindowId::dummy(),
@@ -496,15 +601,23 @@ fn probe_key(path: &str, view_top: u64) -> PathProbeKey {
         viewport_row: 2,
         absolute_row: view_top + 2,
         view_top,
-        start_col: 4,
-        end_col: 10,
-        candidate: "./file".into(),
-        resolved_path: PathBuf::from(path),
+        pointed_col: 4,
+        candidates: vec![probe_candidate("./file", path, 4)],
         cwd: Some(Osc7Cwd { authority: String::new(), path: "/work".into() }),
         cwd_revision: 3,
         content_seq: 11,
         scrollback_evicted: 0,
         alt_screen: false,
+    }
+}
+
+fn openable_result(request: PathProbeRequest) -> PathProbeResult {
+    PathProbeResult {
+        selection: Some(PathProbeSelection {
+            candidate: request.key.candidates[0].clone(),
+            decision: PathOpenDecision::Openable(PathKind::File),
+        }),
+        request,
     }
 }
 
@@ -514,12 +627,27 @@ fn probe_state_requires_current_epoch_key_and_modifier() {
     let mut state = PathProbeState::default();
     let key = probe_key("/work/file", 20);
     let request = state.request(key.clone()).expect("new candidate schedules a probe");
-    let result = PathProbeResult { request, decision: PathOpenDecision::Openable(PathKind::File) };
+    let result = openable_result(request);
 
     assert!(state.accept(&result, Some(&key)));
     assert!(!state.authorized(&key, false), "modifier release must deactivate authorization");
     assert!(state.authorized(&key, true));
     assert_eq!(state.decision_for(&key), Some(PathOpenDecision::Openable(PathKind::File)));
+}
+
+/// Accepted full spans remain authorized while the pointer moves across their cells.
+#[test]
+fn probe_state_retains_selection_across_the_full_spaced_span() {
+    let mut state = PathProbeState::default();
+    let mut key = probe_key("/work/My Folder", 20);
+    key.candidates = vec![probe_candidate("My Folder", "/work/My Folder", 4)];
+    let result = openable_result(state.request(key.clone()).unwrap());
+    assert!(state.accept(&result, Some(&key)));
+
+    let mut moved = key.clone();
+    moved.pointed_col = 8;
+    assert!(state.request(moved.clone()).is_none());
+    assert!(state.authorized(&moved, true));
 }
 
 /// A transient inability to re-read the pointer target must allow the same path to be probed again.
@@ -529,10 +657,7 @@ fn unavailable_fresh_target_does_not_wedge_probe_state() {
     let key = probe_key("/work/file", 20);
     let request = state.request(key.clone()).expect("first request");
 
-    assert!(!state.accept(
-        &PathProbeResult { request, decision: PathOpenDecision::Openable(PathKind::File) },
-        None
-    ));
+    assert!(!state.accept(&openable_result(request), None));
     assert!(state.request(key).is_some(), "the same target must be eligible for a retry");
 }
 
@@ -545,14 +670,9 @@ fn probe_epoch_rejects_same_key_after_leave_and_reenter() {
     state.invalidate();
     let second = state.request(key.clone()).expect("re-enter schedules a new epoch");
 
-    let delayed_positive =
-        PathProbeResult { request: first, decision: PathOpenDecision::Openable(PathKind::File) };
-    assert!(!state.accept(&delayed_positive, Some(&key)));
+    assert!(!state.accept(&openable_result(first), Some(&key)));
     assert!(!state.authorized(&key, true));
-
-    let current_positive =
-        PathProbeResult { request: second, decision: PathOpenDecision::Openable(PathKind::File) };
-    assert!(state.accept(&current_positive, Some(&key)));
+    assert!(state.accept(&openable_result(second), Some(&key)));
     assert!(state.authorized(&key, true));
 }
 
@@ -568,15 +688,82 @@ fn probe_epoch_rejects_viewport_round_trip_results() {
     state.invalidate();
     let current = state.request(key.clone()).expect("scroll-back request");
 
-    assert!(!state.accept(
-        &PathProbeResult { request: old, decision: PathOpenDecision::Missing },
-        Some(&key)
-    ));
+    assert!(!state.accept(&PathProbeResult { request: old, selection: None }, Some(&key)));
     assert_eq!(state.decision_for(&key), None);
-    assert!(state.accept(
-        &PathProbeResult { request: current, decision: PathOpenDecision::Openable(PathKind::File) },
-        Some(&key)
+    assert!(state.accept(&openable_result(current), Some(&key)));
+}
+
+/// Longest openable selection wins without falling back past a blocked existing tier.
+#[test]
+fn candidate_selection_prefers_longest_and_fails_closed() {
+    let candidates = vec![
+        probe_candidate("OneDrive - Microsoft", "/work/OneDrive - Microsoft", 0),
+        probe_candidate("OneDrive", "/work/OneDrive", 0),
+    ];
+    let selected = select_openable_candidate(&candidates, |path| {
+        if path.ends_with("OneDrive - Microsoft") {
+            PathOpenDecision::Openable(PathKind::Directory)
+        } else {
+            PathOpenDecision::Openable(PathKind::File)
+        }
+    })
+    .expect("longest candidate");
+    assert_eq!(selected.candidate.display(), "OneDrive - Microsoft");
+
+    assert!(select_openable_candidate(&candidates, |path| {
+        if path.ends_with("OneDrive - Microsoft") {
+            PathOpenDecision::Blocked
+        } else {
+            PathOpenDecision::Openable(PathKind::Directory)
+        }
+    })
+    .is_none());
+}
+
+/// Real filesystem classification selects the complete spaced entry over an existing short prefix.
+#[test]
+fn filesystem_selection_prefers_complete_spaced_entry() {
+    let root = std::env::temp_dir().join(format!(
+        "sonicterm-spaced-selection-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
     ));
+    let short = root.join("OneDrive");
+    let complete = root.join("OneDrive - Microsoft");
+    std::fs::create_dir_all(&short).unwrap();
+    std::fs::create_dir(&complete).unwrap();
+    let candidates = vec![
+        PathProbeCandidate {
+            start_col: 0,
+            end_col: 20,
+            target: DetectedTarget::BareName("OneDrive - Microsoft".into()),
+            resolved_path: complete.clone(),
+        },
+        PathProbeCandidate {
+            start_col: 0,
+            end_col: 8,
+            target: DetectedTarget::BareName("OneDrive".into()),
+            resolved_path: short,
+        },
+    ];
+
+    let selected = select_openable_candidate(&candidates, classify_local_target)
+        .expect("complete spaced directory is openable");
+    assert_eq!(selected.candidate.resolved_path, complete);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Equal-length positive candidates remain inert rather than choosing by row order.
+#[test]
+fn equal_length_openable_candidates_are_ambiguous() {
+    let candidates = vec![
+        probe_candidate("Left Name", "/work/Left Name", 0),
+        probe_candidate("Name Here", "/work/Name Here", 5),
+    ];
+    assert!(select_openable_candidate(&candidates, |_| {
+        PathOpenDecision::Openable(PathKind::Directory)
+    })
+    .is_none());
 }
 
 /// Filesystem probes authorize an openable entry and revoke the same entry once missing.
@@ -591,18 +778,20 @@ fn filesystem_openability_controls_path_authorization() {
 
     let mut state = PathProbeState::default();
     let key = probe_key(path.to_str().unwrap(), 20);
+    let request = state.request(key.clone()).unwrap();
     let existing = PathProbeResult {
-        request: state.request(key.clone()).unwrap(),
-        decision: classify_local_target(&path),
+        selection: select_openable_candidate(&request.key.candidates, classify_local_target),
+        request,
     };
     assert!(state.accept(&existing, Some(&key)));
     assert!(state.authorized(&key, true));
 
     std::fs::remove_file(&path).unwrap();
     state.invalidate();
+    let request = state.request(key.clone()).unwrap();
     let missing = PathProbeResult {
-        request: state.request(key.clone()).unwrap(),
-        decision: classify_local_target(&path),
+        selection: select_openable_candidate(&request.key.candidates, classify_local_target),
+        request,
     };
     assert!(state.accept(&missing, Some(&key)));
     assert!(!state.authorized(&key, true));

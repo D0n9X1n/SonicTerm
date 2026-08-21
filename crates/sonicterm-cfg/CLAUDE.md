@@ -25,8 +25,9 @@ cargo test -p sonicterm-cfg
 - Theme/keymap loading must check both bundled assets and user override
   directories under `~/.sonicterm/`.
 - URI/path handling is security-sensitive. Preserve `Uri`, `PathCandidate`, and
-  `BareName` provenance; contextual bare-name lookup stays separate from explicit
-  scanning, and filesystem targets must never enter the URI opener.
+  `BareName` provenance; contextual candidate lookup stays separate from explicit
+  scanning, spaced-candidate enumeration stays bounded, and filesystem targets
+  must never enter the URI opener.
 
 ## Cross-references
 - Consumed by: `sonicterm-app`, `sonicterm-mac`, `sonicterm-windows`,

@@ -8,7 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 use sonicterm_cfg::url_scan::{
-    bare_name_at_char_col_for_style, find_targets_for_style, DetectedTarget, PathStyle, TargetMatch,
+    bare_name_at_char_col_for_style, find_targets_for_style,
+    target_candidates_at_char_col_for_style, DetectedTarget, PathStyle, TargetMatch,
 };
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::{Cell, CellFlags, Row};
@@ -59,7 +60,31 @@ impl ProbeEpoch {
     }
 }
 
-/// Immutable identity of one raw path at one rendered pane cell range.
+/// One typed filesystem candidate carried to the background probe worker.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PathProbeCandidate {
+    pub(crate) start_col: u16,
+    pub(crate) end_col: u16,
+    pub(crate) target: DetectedTarget,
+    pub(crate) resolved_path: PathBuf,
+}
+
+impl PathProbeCandidate {
+    fn display(&self) -> &str {
+        match &self.target {
+            DetectedTarget::PathCandidate(candidate) | DetectedTarget::BareName(candidate) => {
+                candidate
+            }
+            DetectedTarget::Uri(_) => unreachable!(),
+        }
+    }
+
+    fn span_len(&self) -> u16 {
+        self.end_col.saturating_sub(self.start_col)
+    }
+}
+
+/// Immutable identity of one bounded candidate set at one rendered pane cell.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PathProbeKey {
     pub(crate) window_id: WindowId,
@@ -67,10 +92,8 @@ pub struct PathProbeKey {
     pub(crate) viewport_row: u16,
     pub(crate) absolute_row: u64,
     pub(crate) view_top: u64,
-    pub(crate) start_col: u16,
-    pub(crate) end_col: u16,
-    pub(crate) candidate: String,
-    pub(crate) resolved_path: PathBuf,
+    pub(crate) pointed_col: u16,
+    pub(crate) candidates: Vec<PathProbeCandidate>,
     pub(crate) cwd: Option<Osc7Cwd>,
     pub(crate) cwd_revision: u64,
     pub(crate) content_seq: u64,
@@ -85,11 +108,18 @@ pub struct PathProbeRequest {
     pub(crate) key: PathProbeKey,
 }
 
+/// Selected candidate and openability returned by the background probe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathProbeSelection {
+    pub(crate) candidate: PathProbeCandidate,
+    pub(crate) decision: PathOpenDecision,
+}
+
 /// Openability result returned to the event loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathProbeResult {
     pub(crate) request: PathProbeRequest,
-    pub(crate) decision: PathOpenDecision,
+    pub(crate) selection: Option<PathProbeSelection>,
 }
 
 /// Per-window authorization state for the raw path currently under the pointer.
@@ -97,7 +127,7 @@ pub struct PathProbeResult {
 pub(crate) struct PathProbeState {
     epoch: ProbeEpoch,
     current: Option<PathProbeKey>,
-    decision: Option<PathOpenDecision>,
+    selection: Option<PathProbeSelection>,
 }
 
 impl Default for ProbeEpoch {
@@ -108,11 +138,11 @@ impl Default for ProbeEpoch {
 
 impl PathProbeState {
     pub(super) fn invalidate(&mut self) -> bool {
-        let changed = self.current.is_some() || self.decision.is_some();
+        let changed = self.current.is_some() || self.selection.is_some();
         if changed {
             self.epoch = self.epoch.next();
             self.current = None;
-            self.decision = None;
+            self.selection = None;
         }
         changed
     }
@@ -122,9 +152,19 @@ impl PathProbeState {
             // When: `key` is already current, retain its epoch and avoid duplicating an in-flight openability probe.
             return None;
         }
+        if self.current.as_ref().is_some_and(|current| same_probe_context(current, &key))
+            && self
+                .selection
+                .as_ref()
+                .is_some_and(|selection| key_supports_selection(&key, selection))
+        {
+            // When: `key` points elsewhere inside the accepted full span, retain its authorization under the same row identity.
+            self.current = Some(key);
+            return None;
+        }
         self.epoch = self.epoch.next();
         self.current = Some(key.clone());
-        self.decision = None;
+        self.selection = None;
         Some(PathProbeRequest { epoch: self.epoch, key })
     }
 
@@ -138,40 +178,68 @@ impl PathProbeState {
             // When: `result` differs from the current epoch or key, reject it without disturbing a newer probe.
             return false;
         }
-        if fresh != Some(&result.request.key) {
-            // When: `fresh` no longer reproduces the current key, revoke it so a transient read failure can re-probe.
+        if !fresh.is_some_and(|fresh| match result.selection.as_ref() {
+            Some(selection) => {
+                same_probe_context(fresh, &result.request.key)
+                    && key_supports_selection(fresh, selection)
+            }
+            None => fresh == &result.request.key,
+        }) {
+            // When: `fresh` no longer reproduces the request context and selected span, revoke the stale authorization.
             self.epoch = self.epoch.next();
             self.current = None;
-            self.decision = None;
+            self.selection = None;
             return false;
         }
-        self.decision = Some(result.decision);
+        self.current = fresh.cloned();
+        self.selection = result.selection.clone();
         true
     }
 
-    pub(super) fn authorized_kind(
+    pub(super) fn authorized_selection(
         &self,
         key: &PathProbeKey,
         modifier_held: bool,
-    ) -> Option<PathKind> {
+    ) -> Option<&PathProbeSelection> {
         if !modifier_held || self.current.as_ref() != Some(key) {
             // When: `modifier_held` is false or `current` differs from `key`, no probe result authorizes this click.
             return None;
         }
-        match self.decision {
-            Some(PathOpenDecision::Openable(kind)) => Some(kind),
-            Some(PathOpenDecision::Blocked | PathOpenDecision::Missing) | None => None,
-        }
+        self.selection
+            .as_ref()
+            .filter(|selection| matches!(selection.decision, PathOpenDecision::Openable(_)))
     }
 
+    #[cfg(test)]
     pub(super) fn authorized(&self, key: &PathProbeKey, modifier_held: bool) -> bool {
-        self.authorized_kind(key, modifier_held).is_some()
+        self.authorized_selection(key, modifier_held).is_some()
     }
 
     #[cfg(test)]
     pub(super) fn decision_for(&self, key: &PathProbeKey) -> Option<PathOpenDecision> {
-        (self.current.as_ref() == Some(key)).then_some(self.decision).flatten()
+        (self.current.as_ref() == Some(key))
+            .then(|| self.selection.as_ref().map(|selection| selection.decision))
+            .flatten()
     }
+}
+
+fn same_probe_context(left: &PathProbeKey, right: &PathProbeKey) -> bool {
+    left.window_id == right.window_id
+        && left.pane_id == right.pane_id
+        && left.viewport_row == right.viewport_row
+        && left.absolute_row == right.absolute_row
+        && left.view_top == right.view_top
+        && left.cwd == right.cwd
+        && left.cwd_revision == right.cwd_revision
+        && left.content_seq == right.content_seq
+        && left.scrollback_evicted == right.scrollback_evicted
+        && left.alt_screen == right.alt_screen
+}
+
+fn key_supports_selection(key: &PathProbeKey, selection: &PathProbeSelection) -> bool {
+    key.pointed_col >= selection.candidate.start_col
+        && key.pointed_col < selection.candidate.end_col
+        && key.candidates.contains(&selection.candidate)
 }
 
 /// Coalescing one-slot mailbox: one request runs while only the newest waits.
@@ -463,6 +531,40 @@ fn linux_file_policy(path: &Path, prefix: &[u8]) -> PathOpenDecision {
     }
 }
 
+fn select_openable_candidate(
+    candidates: &[PathProbeCandidate],
+    mut classify: impl FnMut(&Path) -> PathOpenDecision,
+) -> Option<PathProbeSelection> {
+    let mut index = 0;
+    while index < candidates.len() {
+        let span_len = candidates[index].span_len();
+        let mut openable = Vec::new();
+        let mut blocked = false;
+        while index < candidates.len() && candidates[index].span_len() == span_len {
+            let candidate = &candidates[index];
+            match classify(&candidate.resolved_path) {
+                decision @ PathOpenDecision::Openable(_) => {
+                    openable.push(PathProbeSelection { candidate: candidate.clone(), decision });
+                }
+                PathOpenDecision::Blocked => blocked = true,
+                PathOpenDecision::Missing => {
+                    // When: `classify` returns `PathOpenDecision::Missing`, keep searching shorter candidate tiers.
+                }
+            }
+            index += 1;
+        }
+        if blocked || openable.len() > 1 {
+            // When: the longest existing tier is blocked or ambiguous, fail closed instead of falling back to a shorter path.
+            return None;
+        }
+        if let Some(selection) = openable.pop() {
+            // When: `openable.pop()` returns the sole longest positive candidate, authorize its complete span.
+            return Some(selection);
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PathOpenRequest {
     path: PathBuf,
@@ -493,11 +595,12 @@ impl PathWorkers {
                         // When: a coalesced wake has no `request`, resume waiting without probing stale state.
                         continue;
                     };
-                    let decision = classify_local_target(&request.key.resolved_path);
+                    let selection =
+                        select_openable_candidate(&request.key.candidates, classify_local_target);
                     if probe_proxy
                         .send_event(super::UserEvent::PathProbeFinished(PathProbeResult {
                             request,
-                            decision,
+                            selection,
                         }))
                         .is_err()
                     {
@@ -808,6 +911,55 @@ pub(super) fn bare_target_at_row_cell(row: &Row, col: u16, style: PathStyle) -> 
     row_target_at_cell(row, col, style, bare_name_at_char_col_for_style)
 }
 
+fn row_target_candidates_at_cell(
+    row: &Row,
+    col: u16,
+    style: PathStyle,
+    include_bare_names: bool,
+) -> Vec<RowTarget> {
+    let cells = row.iter().collect::<Vec<_>>();
+    let col = usize::from(col);
+    if cells.get(col).is_none() {
+        // When: `col` lies beyond the materialized row, no scanner span can own it.
+        return Vec::new();
+    }
+    let mut text = String::with_capacity(cells.len());
+    let mut byte_ranges = Vec::with_capacity(cells.len());
+    for cell in &cells {
+        let start = text.len();
+        // When: `cell.flags` contains `WIDE_CONT`, retain its column with a non-path sentinel; otherwise retain `cell.ch`.
+        let ch = if cell.flags.contains(CellFlags::WIDE_CONT) { '\u{fdd0}' } else { cell.ch };
+        text.push(ch);
+        byte_ranges.push((start, text.len()));
+    }
+
+    target_candidates_at_char_col_for_style(&text, col, style, include_bare_names)
+        .into_iter()
+        .filter_map(|matched| {
+            let start_col = byte_ranges.iter().position(|(start, _)| *start == matched.start)?;
+            let end_col = byte_ranges
+                .iter()
+                .position(|(start, _)| *start >= matched.end)
+                .unwrap_or(cells.len());
+            if start_col >= end_col
+                || start_col > col
+                || end_col <= col
+                || cells[start_col..end_col]
+                    .iter()
+                    .any(|cell| unsafe_path_cell(cell) || cell.hyperlink().is_some())
+            {
+                // When: the span misses `col` or crosses unsafe cell identity, reject the complete candidate.
+                return None;
+            }
+            Some(RowTarget {
+                matched,
+                start_col: u16::try_from(start_col).ok()?,
+                end_col: u16::try_from(end_col).ok()?,
+            })
+        })
+        .collect()
+}
+
 /// Return the first configured home variable that is valid for the native path grammar.
 pub(super) fn native_home_dir() -> Option<PathBuf> {
     let variables = if cfg!(target_os = "windows") {
@@ -1088,6 +1240,10 @@ fn normalize_windows_absolute(path: &str) -> Option<String> {
                 // When: `value` contains a reserved Windows path character, reject the component.
                 return None;
             }
+            value if value.ends_with(['.', ' ']) => {
+                // When: `value` ends in a dot or space, reject Windows normalization aliases before probing.
+                return None;
+            }
             value => components.push(value),
         }
     }
@@ -1174,70 +1330,91 @@ impl App {
         let style = PathStyle::native();
         let clickable_local_targets = self.config.terminal.clickable_local_targets;
         let clickable_bare_names = self.config.terminal.clickable_bare_names;
-        let row_target = target_at_row_cell(row, col, style).or_else(|| {
+        let legacy_target = target_at_row_cell(row, col, style).or_else(|| {
             (clickable_local_targets && clickable_bare_names)
                 .then(|| bare_target_at_row_cell(row, col, style))
                 .flatten()
-        })?;
-        if !detected_target_enabled(
-            &row_target.matched.target,
-            clickable_local_targets,
-            clickable_bare_names,
-        ) {
-            // When: the target's provenance is disabled, keep it inert without weakening URI precedence.
-            return None;
-        }
-        match row_target.matched.target {
-            DetectedTarget::Uri(uri) => Some(CellTargetSnapshot {
+        });
+        if let Some(RowTarget {
+            matched: TargetMatch { target: DetectedTarget::Uri(uri), .. },
+            start_col,
+            end_col,
+        }) = legacy_target
+        {
+            // When: `legacy_target` is an allow-listed URI, preserve its precedence over every filesystem candidate.
+            return Some(CellTargetSnapshot {
                 pane_id,
                 viewport_row,
-                start_col: row_target.start_col,
-                end_col: row_target.end_col,
+                start_col,
+                end_col,
                 display: uri.clone(),
                 explicit_hyperlink: false,
                 target: ResolvedCellTarget::Uri(uri),
-            }),
-            target @ (DetectedTarget::PathCandidate(_) | DetectedTarget::BareName(_)) => {
-                let candidate = match &target {
-                    DetectedTarget::PathCandidate(candidate)
-                    | DetectedTarget::BareName(candidate) => candidate.clone(),
-                    DetectedTarget::Uri(_) => unreachable!(),
-                };
-                let cwd = parser.osc7_cwd().cloned();
+            });
+        }
+        if !clickable_local_targets {
+            // When: `clickable_local_targets` is false, leave non-URI text inert before resolving any candidate set.
+            return None;
+        }
+
+        let cwd = parser.osc7_cwd().cloned();
+        let mut candidates = row_target_candidates_at_cell(row, col, style, clickable_bare_names)
+            .into_iter()
+            .filter(|row_target| {
+                detected_target_enabled(
+                    &row_target.matched.target,
+                    clickable_local_targets,
+                    clickable_bare_names,
+                )
+            })
+            .filter_map(|row_target| {
                 let resolved_path = resolve_detected_path(
-                    &target,
+                    &row_target.matched.target,
                     style,
                     cwd.as_ref(),
                     self.home_dir.as_deref(),
                     &self.local_hostname,
                 )?;
-                let key = PathProbeKey {
-                    window_id,
-                    pane_id,
-                    viewport_row,
-                    absolute_row,
-                    view_top,
+                Some(PathProbeCandidate {
                     start_col: row_target.start_col,
                     end_col: row_target.end_col,
-                    candidate: candidate.clone(),
+                    target: row_target.matched.target,
                     resolved_path,
-                    cwd,
-                    cwd_revision: parser.cwd_revision(),
-                    content_seq: grid.content_seq(),
-                    scrollback_evicted: grid.scrollback_evicted(),
-                    alt_screen: grid.is_alt(),
-                };
-                Some(CellTargetSnapshot {
-                    pane_id,
-                    viewport_row,
-                    start_col: row_target.start_col,
-                    end_col: row_target.end_col,
-                    display: candidate,
-                    explicit_hyperlink: false,
-                    target: ResolvedCellTarget::Path(key),
                 })
-            }
-        }
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| {
+            right
+                .span_len()
+                .cmp(&left.span_len())
+                .then_with(|| left.start_col.cmp(&right.start_col))
+                .then_with(|| left.end_col.cmp(&right.end_col))
+        });
+        candidates.dedup();
+        let display = candidates.first()?.display().to_string();
+        let key = PathProbeKey {
+            window_id,
+            pane_id,
+            viewport_row,
+            absolute_row,
+            view_top,
+            pointed_col: col,
+            candidates,
+            cwd,
+            cwd_revision: parser.cwd_revision(),
+            content_seq: grid.content_seq(),
+            scrollback_evicted: grid.scrollback_evicted(),
+            alt_screen: grid.is_alt(),
+        };
+        Some(CellTargetSnapshot {
+            pane_id,
+            viewport_row,
+            start_col: col,
+            end_col: col.saturating_add(1),
+            display,
+            explicit_hyperlink: false,
+            target: ResolvedCellTarget::Path(key),
+        })
     }
 
     fn pointer_target(&self, window_id: WindowId) -> Option<CellTargetSnapshot> {
@@ -1278,8 +1455,17 @@ impl App {
                 }
                 Some(target @ CellTargetSnapshot { target: ResolvedCellTarget::Path(key), .. }) => {
                     probe_request = window.path_probe.request(key.clone());
-                    if window.path_probe.authorized(key, modifier_held) {
-                        hovered = Some(target.hovered(true));
+                    if let Some(selection) =
+                        window.path_probe.authorized_selection(key, modifier_held)
+                    {
+                        hovered = Some(super::hovered_url::HoveredUrl {
+                            pane_id: target.pane_id,
+                            row: target.viewport_row,
+                            start_col: selection.candidate.start_col,
+                            end_col: selection.candidate.end_col,
+                            url: selection.candidate.display().to_string(),
+                            active: true,
+                        });
                     }
                 }
                 None => {
@@ -1384,19 +1570,21 @@ impl App {
             }
             ResolvedCellTarget::Path(key) => {
                 // When: `target.target` is `Path`, activation requires the current typed probe result and bounded opener.
-                let Some(kind) = self
-                    .windows
-                    .get(&window_id)
-                    .and_then(|window| window.path_probe.authorized_kind(&key, modifier_held))
-                else {
-                    // When: `authorized_kind` returns no `kind`, leave a missing, blocked, or stale target to normal selection.
+                let Some(selection) = self.windows.get(&window_id).and_then(|window| {
+                    window.path_probe.authorized_selection(&key, modifier_held).cloned()
+                }) else {
+                    // When: `authorized_selection` returns no target, leave a missing, blocked, or stale path to normal selection.
+                    return false;
+                };
+                let PathOpenDecision::Openable(kind) = selection.decision else {
+                    // When: a retained selection is no longer openable, do not enqueue native activation.
                     return false;
                 };
                 let Some(workers) = &self.path_workers else {
                     // When: `path_workers` yields no `workers`, do not consume a click that cannot reach the bounded opener.
                     return false;
                 };
-                match workers.open(key.resolved_path, kind) {
+                match workers.open(selection.candidate.resolved_path, kind) {
                     Ok(true) => true,
                     Ok(false) => {
                         tracing::warn!("path open queue full; request dropped");

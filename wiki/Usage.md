@@ -58,19 +58,25 @@ SonicTerm recognizes native absolute paths such as `/usr/local/etc`,
 `C:/Users/dotan`, and `C:\\Users\\dotan`; current-home paths such as `~/notes`
 (and `~\\notes` on Windows); separator-relative paths such as `src/main.rs`
 (and `src\\main.rs` on Windows); and explicit dot-relative forms such as
-`./file`, `../file`, and `../../file`. Current-home paths resolve against the
-local user's native absolute home directory. Separator-relative paths,
-dot-relative paths, and whole bare components such as `sonicterm` or `.DS_Store`
-resolve only when that exact pane has reported a trustworthy absolute local
-working directory through OSC 7. A missing, malformed, or foreign-host OSC 7
-value fails closed; SonicTerm never substitutes its process working directory
-or another pane.
+`./file`, `../file`, and `../../file`. These forms may contain ordinary spaces,
+for example `/tmp/My Folder`, `C:\\Program Files\\SonicTerm`, or
+`./My Folder/file.txt`. Current-home paths resolve against the local user's
+native absolute home directory. Separator-relative paths, dot-relative paths,
+and contextual names such as `sonicterm`, `.DS_Store`, or `My Folder` resolve
+only when that exact pane has reported a trustworthy absolute local working
+directory through OSC 7. A missing, malformed, or foreign-host OSC 7 value fails
+closed; SonicTerm never substitutes its process working directory or another
+pane.
 
-Bare-name detection deliberately does not parse `ls` columns. Any whole token in
-a row can become clickable when an identically named eligible entry exists in
-the trusted pane CWD—even an owner, size, or date token. Quoted or escaped names
-containing spaces and `ls -F` decorations (`*`, `@`, `=`, `|`) remain inert
-unless OSC 8 provides their identity. Set
+Bare-name detection deliberately does not parse `ls` columns. Any row-local
+candidate can become clickable when an identically named eligible entry exists
+in the trusted pane CWD—even text spanning ordinary spaces. SonicTerm asks the
+bounded background probe to test at most 37 candidates, each spanning no more
+than eight non-space parts, and uses the longest unambiguous openable span
+containing the pointed cell. A blocked existing span or equal-length ambiguity
+fails closed rather than falling back to a shorter name. Quoted or escaped names
+and `ls -F` decorations (`*`, `@`, `=`, `|`)
+remain inert unless OSC 8 provides their identity. Set
 `terminal.clickable_bare_names = false` to disable this contextual behavior, or
 `terminal.clickable_local_targets = false` to disable all raw local-target
 activation; neither switch changes URI or OSC 8 handling.
@@ -207,15 +213,20 @@ PowerShell、cmd、readline 和终端程序。同时保留 `Ctrl+T`、`Ctrl+Shif
 SonicTerm 可识别 `/usr/local/etc`、`C:/Users/dotan`、`C:\\Users\\dotan`
 等原生绝对路径，`~/notes`（Windows 也支持 `~\\notes`）等当前用户主目录路径，
 `src/main.rs`（Windows 也支持 `src\\main.rs`）等带分隔符的相对路径，以及 `./file`、
-`../file`、`../../file` 等显式点相对路径。当前用户主目录路径按本机绝对主目录解析。
-带分隔符的相对路径、点相对路径和 `sonicterm`、`.DS_Store` 这类完整裸 component，只有在
-该准确 pane 通过 OSC 7 报告了可信本机绝对工作目录时才会解析。缺失、格式错误或来自远端
-host 的 OSC 7 值都会 fail closed；SonicTerm 不会改用进程工作目录或其他 pane。
+`../file`、`../../file` 等显式点相对路径。这些形式可以包含普通空格，例如
+`/tmp/My Folder`、`C:\\Program Files\\SonicTerm` 或 `./My Folder/file.txt`。
+当前用户主目录路径按本机绝对主目录解析。带分隔符的相对路径、点相对路径，以及
+`sonicterm`、`.DS_Store`、`My Folder` 这类 contextual 名称，只有在该准确 pane 通过
+OSC 7 报告了可信本机绝对工作目录时才会解析。缺失、格式错误或来自远端 host 的 OSC 7
+值都会 fail closed；SonicTerm 不会改用进程工作目录或其他 pane。
 
-裸名称检测不会解析 `ls` 的列。只要可信 pane CWD 中存在同名合格条目，一行中的任意完整
-token 都可能变为可点击目标——包括 owner、size 或 date token。带空格的 quoted/escaped
-名称和 `ls -F` 装饰（`*`、`@`、`=`、`|`）保持 inert，除非 OSC 8 提供明确 identity。
-设置 `terminal.clickable_bare_names = false` 可关闭这种 contextual 行为；设置
+裸名称检测不会解析 `ls` 的列。只要可信 pane CWD 中存在同名合格条目，行内候选（包括跨越
+普通空格的文本）就可能变为可点击目标。SonicTerm 由有界后台 probe 检查最多 37 个候选，
+每个候选最多跨越 8 个非空格部分，并选取包含鼠标 cell 的最长、无歧义且可打开 span。若已有
+较长 span 被阻止，或同长度候选有歧义，则 fail closed，不会退回较短名称。quoted/escaped
+名称和 `ls -F` 装饰（`*`、`@`、
+`=`、`|`）保持 inert，除非 OSC 8 提供明确 identity。设置
+`terminal.clickable_bare_names = false` 可关闭这种 contextual 行为；设置
 `terminal.clickable_local_targets = false` 可关闭全部原始本地目标 activation。两者都不影响
 URI 或 OSC 8。
 

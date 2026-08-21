@@ -118,7 +118,10 @@ fn applying_a_config_clamps_an_out_of_range_weight_scale() {
 #[test]
 fn local_target_switch_reload_revokes_all_window_authorization() {
     use crate::app::hovered_url::HoveredUrl;
-    use crate::app::path_target::{PathKind, PathOpenDecision, PathProbeKey, PathProbeResult};
+    use crate::app::path_target::{
+        PathKind, PathOpenDecision, PathProbeCandidate, PathProbeKey, PathProbeResult,
+        PathProbeSelection,
+    };
     use sonicterm_vt::vt::Osc7Cwd;
 
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
@@ -127,16 +130,20 @@ fn local_target_switch_reload_revokes_all_window_authorization() {
     let window_ids = [app.main_window_id.expect("synthetic main"), child_id];
 
     for window_id in window_ids {
+        let candidate = PathProbeCandidate {
+            start_col: 4,
+            end_col: 9,
+            target: sonicterm_cfg::url_scan::DetectedTarget::BareName("entry".into()),
+            resolved_path: PathBuf::from("/work/entry"),
+        };
         let key = PathProbeKey {
             window_id,
             pane_id: 7,
             viewport_row: 2,
             absolute_row: 22,
             view_top: 20,
-            start_col: 4,
-            end_col: 10,
-            candidate: "entry".into(),
-            resolved_path: PathBuf::from("/work/entry"),
+            pointed_col: 4,
+            candidates: vec![candidate.clone()],
             cwd: Some(Osc7Cwd { authority: String::new(), path: "/work".into() }),
             cwd_revision: 3,
             content_seq: 11,
@@ -146,7 +153,13 @@ fn local_target_switch_reload_revokes_all_window_authorization() {
         let window = app.windows.get_mut(&window_id).expect("seeded window");
         let request = window.path_probe.request(key.clone()).expect("new target probe");
         assert!(window.path_probe.accept(
-            &PathProbeResult { request, decision: PathOpenDecision::Openable(PathKind::Directory) },
+            &PathProbeResult {
+                request,
+                selection: Some(PathProbeSelection {
+                    candidate,
+                    decision: PathOpenDecision::Openable(PathKind::Directory),
+                }),
+            },
             Some(&key),
         ));
         window.hovered_url = Some(HoveredUrl {
@@ -176,10 +189,13 @@ fn local_target_switch_reload_revokes_all_window_authorization() {
                 viewport_row: 2,
                 absolute_row: 22,
                 view_top: 20,
-                start_col: 4,
-                end_col: 10,
-                candidate: "entry".into(),
-                resolved_path: PathBuf::from("/work/entry"),
+                pointed_col: 4,
+                candidates: vec![PathProbeCandidate {
+                    start_col: 4,
+                    end_col: 9,
+                    target: sonicterm_cfg::url_scan::DetectedTarget::BareName("entry".into()),
+                    resolved_path: PathBuf::from("/work/entry"),
+                }],
                 cwd: Some(Osc7Cwd { authority: String::new(), path: "/work".into() }),
                 cwd_revision: 3,
                 content_seq: 11,
