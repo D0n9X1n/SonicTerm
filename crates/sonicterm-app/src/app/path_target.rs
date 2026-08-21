@@ -1,5 +1,6 @@
 //! Contextual filesystem-target detection, validation, and direct-open contracts.
 
+use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -152,13 +153,12 @@ impl PathProbeState {
             // When: `key` is already current, retain its epoch and avoid duplicating an in-flight openability probe.
             return None;
         }
-        if self.current.as_ref().is_some_and(|current| same_probe_context(current, &key))
-            && self
-                .selection
+        if self.current.as_ref().is_some_and(|current| {
+            self.selection
                 .as_ref()
-                .is_some_and(|selection| key_supports_selection(&key, selection))
-        {
-            // When: `key` points elsewhere inside the accepted full span, retain its authorization under the same row identity.
+                .is_some_and(|selection| key_preserves_selection(current, &key, selection))
+        }) {
+            // When: `key` adds no unprobed equal-or-longer contender, retain the selected span under the same row identity.
             self.current = Some(key);
             return None;
         }
@@ -179,10 +179,7 @@ impl PathProbeState {
             return false;
         }
         if !fresh.is_some_and(|fresh| match result.selection.as_ref() {
-            Some(selection) => {
-                same_probe_context(fresh, &result.request.key)
-                    && key_supports_selection(fresh, selection)
-            }
+            Some(selection) => key_preserves_selection(&result.request.key, fresh, selection),
             None => fresh == &result.request.key,
         }) {
             // When: `fresh` no longer reproduces the request context and selected span, revoke the stale authorization.
@@ -236,10 +233,28 @@ fn same_probe_context(left: &PathProbeKey, right: &PathProbeKey) -> bool {
         && left.alt_screen == right.alt_screen
 }
 
-fn key_supports_selection(key: &PathProbeKey, selection: &PathProbeSelection) -> bool {
-    key.pointed_col >= selection.candidate.start_col
-        && key.pointed_col < selection.candidate.end_col
-        && key.candidates.contains(&selection.candidate)
+fn key_preserves_selection(
+    probed: &PathProbeKey,
+    destination: &PathProbeKey,
+    selection: &PathProbeSelection,
+) -> bool {
+    let selected = &selection.candidate;
+    // When: destination identity or selected-span ownership changes, discard authorization before any candidate-set work.
+    if !same_probe_context(probed, destination)
+        || destination.pointed_col < selected.start_col
+        || destination.pointed_col >= selected.end_col
+        || !destination.candidates.contains(selected)
+    {
+        return false;
+    }
+    let probed_candidates = probed.candidates.iter().collect::<HashSet<_>>();
+    probed_candidates.contains(selected)
+        // Shorter candidates cannot change a winner selected before their tier.
+        && destination
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.span_len() >= selected.span_len())
+            .all(|candidate| probed_candidates.contains(candidate))
 }
 
 /// Coalescing one-slot mailbox: one request runs while only the newest waits.

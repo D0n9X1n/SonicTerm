@@ -206,8 +206,10 @@ pub fn find_targets_for_style(text: &str, style: PathStyle) -> Vec<TargetMatch> 
             // When: `start` lies inside a validated URI span, preserve URI provenance instead of rescanning its path-like text.
             continue;
         }
-        if !is_path_start_boundary(text, start) || !has_path_prefix(&text[start..], style) {
-            // When: `start` lacks either a token boundary or native path prefix, it cannot begin a raw path candidate.
+        if !is_path_start_boundary(text, start)
+            || text[start..].chars().next().is_none_or(is_path_delimiter)
+        {
+            // When: `start` lacks a token boundary or lands on its delimiter, it cannot begin a raw path candidate.
             continue;
         }
         let mut end = text.len();
@@ -229,8 +231,8 @@ pub fn find_targets_for_style(text: &str, style: PathStyle) -> Vec<TargetMatch> 
             // When: `start..end` is not a UTF-8 boundary range, discard the malformed candidate span.
             continue;
         };
-        if !validate_path_candidate(candidate, style) {
-            // When: `candidate` violates the selected native grammar, keep it inert terminal text.
+        if !has_path_prefix(candidate, style) || !validate_path_candidate(candidate, style) {
+            // When: `candidate` lacks a native prefix or violates its grammar, keep it inert terminal text.
             continue;
         }
         if urls.iter().any(|url| start < url.end && end > url.start) {
@@ -514,9 +516,21 @@ fn quoted_spaced_segment(text: &str, start: usize, end: usize) -> bool {
     let starts_at_content = text[start..end].chars().next().is_some_and(|ch| ch != ' ');
     let ends_at_content = text[start..end].chars().next_back().is_some_and(|ch| ch != ' ');
     let left_quote =
-        text[..start].chars().next_back().is_some_and(|ch| matches!(ch, '"' | '\'' | '`'));
-    let right_quote = text[end..].chars().next().is_some_and(|ch| matches!(ch, '"' | '\'' | '`'));
-    left_quote && starts_at_content || right_quote && ends_at_content
+        text[..start].char_indices().next_back().filter(|(_, ch)| matches!(ch, '"' | '\'' | '`'));
+    let right_quote = text[end..].chars().next().filter(|ch| matches!(ch, '"' | '\'' | '`'));
+    let left_is_wrapper = left_quote.is_some_and(|(index, _)| {
+        text[..index]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| ch.is_whitespace() || matches!(ch, '=' | ':' | '(' | '[' | '{' | '<'))
+    });
+    let right_closes_or_is_unmatched =
+        right_quote.is_some_and(|quote| !text[end + quote.len_utf8()..].contains(quote));
+    // Quote wrappers make every inner candidate ambiguous, even when spaces pad the delimiters.
+    left_is_wrapper
+        || right_closes_or_is_unmatched
+        || left_quote.is_some() && starts_at_content
+        || right_quote.is_some() && ends_at_content
 }
 
 fn escaped_space_path(text: &str, start: usize, candidate: &str, style: PathStyle) -> bool {
@@ -628,34 +642,34 @@ fn has_path_prefix(candidate: &str, style: PathStyle) -> bool {
 }
 
 fn has_contextual_relative_prefix(candidate: &str, style: PathStyle) -> bool {
-    let end = candidate
+    let syntax_end = candidate
         .char_indices()
         .find_map(|(index, ch)| is_path_delimiter(ch).then_some(index))
         .unwrap_or(candidate.len());
-    let token = &candidate[..end];
+    let syntax_prefix = &candidate[..syntax_end];
     let separator = match style {
-        PathStyle::Posix => token.char_indices().find(|(_, ch)| *ch == '/'),
-        PathStyle::Windows => token.char_indices().find(|(_, ch)| is_windows_separator(*ch)),
+        PathStyle::Posix => candidate.char_indices().find(|(_, ch)| *ch == '/'),
+        PathStyle::Windows => candidate.char_indices().find(|(_, ch)| is_windows_separator(*ch)),
     };
     let Some((separator, _)) = separator else {
-        // When: `token` contains no native separator, leave it to contextual bare-name lookup.
+        // When: `candidate` contains no native separator, leave it to contextual bare-name lookup.
         return false;
     };
-    let first = &token[..separator];
+    let first = &candidate[..separator];
     let last = match style {
-        PathStyle::Posix => token.rsplit('/').next().unwrap_or_default(),
-        PathStyle::Windows => token.rsplit(['/', '\\']).next().unwrap_or_default(),
+        PathStyle::Posix => candidate.rsplit('/').next().unwrap_or_default(),
+        PathStyle::Windows => candidate.rsplit(['/', '\\']).next().unwrap_or_default(),
     };
     if first.is_empty()
         || matches!(first, "." | "..")
         || matches!(last, "" | "." | "..")
-        || token.chars().any(|ch| {
+        || syntax_prefix.chars().any(|ch| {
             matches!(ch, '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\'' | '`' | '<' | '>')
         })
-        || token.contains(['~', '$'])
-        || (style == PathStyle::Windows && token.contains('%'))
+        || syntax_prefix.contains(['~', '$'])
+        || (style == PathStyle::Windows && syntax_prefix.contains('%'))
     {
-        // When: `first`, `last`, or `token` carries ambiguous wrapper, expansion, or pseudo-component syntax, keep it inert.
+        // When: `first`, `last`, or `syntax_prefix` carries ambiguous wrapper, expansion, or pseudo-component syntax, keep it inert.
         return false;
     }
     !first.contains(':')

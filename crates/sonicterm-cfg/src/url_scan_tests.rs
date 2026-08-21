@@ -473,10 +473,15 @@ fn spaced_path_candidates_cover_each_pointed_cell() {
         (PathStyle::Windows, r"C:\Program Files\SonicTerm", r"C:\Program Files\SonicTerm"),
         (PathStyle::Windows, r"~\My Folder\file.txt", r"~\My Folder\file.txt"),
         (PathStyle::Windows, r"src\My Folder\file.txt", r"src\My Folder\file.txt"),
+        (PathStyle::Windows, r"My Folder\file.txt", r"My Folder\file.txt"),
         (PathStyle::Posix, "/tmp/My Folder", "/tmp/My Folder"),
         (PathStyle::Posix, "~/My Folder/file.txt", "~/My Folder/file.txt"),
         (PathStyle::Posix, "./My Folder/file.txt", "./My Folder/file.txt"),
         (PathStyle::Posix, "src/My Folder/file.txt", "src/My Folder/file.txt"),
+        (PathStyle::Posix, "src/My Folder (copy)/file.txt", "src/My Folder (copy)/file.txt"),
+        (PathStyle::Posix, "src/My Folder [copy]/file.txt", "src/My Folder [copy]/file.txt"),
+        (PathStyle::Posix, "src/My Folder {copy}/file.txt", "src/My Folder {copy}/file.txt"),
+        (PathStyle::Posix, "My Folder/file.txt", "My Folder/file.txt"),
         (PathStyle::Posix, "My Folder", "My Folder"),
     ] {
         let character_count = text.chars().count();
@@ -493,6 +498,55 @@ fn spaced_path_candidates_cover_each_pointed_cell() {
                 "missing full candidate at column {col} in {text:?}: {matches:?}"
             );
             assert!(matches.len() <= MAX_PATH_CANDIDATES_PER_CELL);
+        }
+    }
+}
+
+/// Spaced separator-relative paths retain explicit provenance without bare-name fallback.
+#[test]
+fn spaced_contextual_paths_keep_path_candidate_provenance() {
+    for (style, text) in
+        [(PathStyle::Windows, r"My Folder\file.txt"), (PathStyle::Posix, "My Folder/file.txt")]
+    {
+        for col in 0..text.chars().count() {
+            let matches = target_candidates_at_char_col_for_style(text, col, style, false);
+            assert!(
+                matches.iter().any(|matched| {
+                    matched.start == 0
+                        && matched.end == text.len()
+                        && matched.target == DetectedTarget::PathCandidate(text.into())
+                }),
+                "missing explicit full candidate at column {col} in {text:?}: {matches:?}"
+            );
+        }
+    }
+}
+
+/// Whole-row scanning keeps ordinary spaces as path-token boundaries.
+#[test]
+fn whole_row_scanning_does_not_join_spaced_path_tokens() {
+    for (style, text, expected_start) in [
+        (PathStyle::Windows, r"My Folder\file.txt", None),
+        (PathStyle::Posix, "My Folder/file.txt", None),
+        (PathStyle::Windows, r"  src\main.rs", Some(2)),
+        (PathStyle::Posix, "  src/main.rs", Some(2)),
+    ] {
+        let matches = find_targets_for_style(text, style);
+        assert!(matches.iter().all(|matched| match &matched.target {
+            DetectedTarget::PathCandidate(candidate) => {
+                !candidate.starts_with(' ') && matched.start != 1
+            }
+            DetectedTarget::Uri(_) | DetectedTarget::BareName(_) => true,
+        }));
+        if let Some(expected_start) = expected_start {
+            assert!(matches.iter().any(|matched| {
+                matched.start == expected_start
+                    && matched.end == text.len()
+                    && matched.target
+                        == DetectedTarget::PathCandidate(text[expected_start..].into())
+            }));
+        } else {
+            assert!(matches.iter().all(|matched| matched.start > 0 || matched.end < text.len()));
         }
     }
 }
@@ -558,12 +612,42 @@ fn spaced_candidates_preserve_uri_and_hard_boundaries() {
             );
         }
     }
-    let mixed = r#""/tmp/My Folder" /tmp/Other Folder"#;
-    let unquoted = mixed.find("/tmp/Other").unwrap();
-    let col = mixed[..unquoted].chars().count() + 5;
-    assert!(target_candidates_at_char_col_for_style(mixed, col, PathStyle::Posix, true)
-        .iter()
-        .any(|matched| &mixed[matched.start..matched.end] == "/tmp/Other Folder"));
+    for text in [
+        "\" /tmp/My Folder \"",
+        "' /tmp/My Folder '",
+        "` /tmp/My Folder `",
+        "\" /tmp/My Folder",
+        "/tmp/My Folder \"",
+        "' /tmp/My Folder",
+        "/tmp/My Folder '",
+        "` /tmp/My Folder",
+        "/tmp/My Folder `",
+        "key=\" /tmp/My Folder",
+        "key=' /tmp/My Folder",
+        "key=` /tmp/My Folder",
+    ] {
+        for col in 0..text.chars().count() {
+            assert!(
+                target_candidates_at_char_col_for_style(text, col, PathStyle::Posix, true)
+                    .is_empty(),
+                "padded quoted segment exposed a partial target at {col} in {text:?}"
+            );
+        }
+    }
+    for (mixed, path) in [
+        (r#""/tmp/My Folder" /tmp/Other Folder"#, "/tmp/Other Folder"),
+        ("owners' /tmp/Other Folder", "/tmp/Other Folder"),
+        (r#"/tmp/Other Folder "quoted value""#, "/tmp/Other Folder"),
+    ] {
+        let unquoted = mixed.find(path).unwrap();
+        let col = mixed[..unquoted].chars().count() + 5;
+        assert!(
+            target_candidates_at_char_col_for_style(mixed, col, PathStyle::Posix, true)
+                .iter()
+                .any(|matched| &mixed[matched.start..matched.end] == path),
+            "lexical quote context suppressed an unquoted path in {mixed:?}"
+        );
+    }
 }
 
 /// Candidate enumeration and each reconstructed path stay within their explicit work bounds.

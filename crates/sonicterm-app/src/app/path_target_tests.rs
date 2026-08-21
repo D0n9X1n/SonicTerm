@@ -635,19 +635,61 @@ fn probe_state_requires_current_epoch_key_and_modifier() {
     assert_eq!(state.decision_for(&key), Some(PathOpenDecision::Openable(PathKind::File)));
 }
 
-/// Accepted full spans remain authorized while the pointer moves across their cells.
+/// Accepted spans retain authorization when a destination adds only a shorter candidate.
 #[test]
-fn probe_state_retains_selection_across_the_full_spaced_span() {
+fn probe_state_retains_selection_across_irrelevant_candidate_changes() {
     let mut state = PathProbeState::default();
     let mut key = probe_key("/work/My Folder", 20);
-    key.candidates = vec![probe_candidate("My Folder", "/work/My Folder", 4)];
+    let selected = probe_candidate("My Folder", "/work/My Folder", 4);
+    key.candidates = vec![selected.clone()];
     let result = openable_result(state.request(key.clone()).unwrap());
     assert!(state.accept(&result, Some(&key)));
 
     let mut moved = key.clone();
     moved.pointed_col = 8;
+    moved.candidates.push(probe_candidate("Folder", "/work/Folder", 7));
     assert!(state.request(moved.clone()).is_none());
     assert!(state.authorized(&moved, true));
+}
+
+/// A newly visible equal or longer candidate revokes authorization and schedules a fresh probe.
+#[test]
+fn probe_state_reprobes_for_new_competing_candidates() {
+    for competing in [
+        probe_candidate("Name Here", "/work/Name Here", 5),
+        probe_candidate("Name Here Extra", "/work/Name Here Extra", 5),
+    ] {
+        let mut state = PathProbeState::default();
+        let selected = probe_candidate("Left Name", "/work/Left Name", 0);
+        let mut key = probe_key("/work/Left Name", 20);
+        key.pointed_col = 1;
+        key.candidates = vec![selected.clone()];
+        let result = openable_result(state.request(key.clone()).unwrap());
+        assert!(state.accept(&result, Some(&key)));
+
+        let mut moved = key.clone();
+        moved.pointed_col = 6;
+        moved.candidates = vec![competing.clone(), selected.clone()];
+        assert!(state.request(moved.clone()).is_some(), "candidate: {competing:?}");
+        assert!(!state.authorized(&moved, true), "candidate: {competing:?}");
+    }
+}
+
+/// An in-flight result cannot authorize a destination with an unprobed competing candidate.
+#[test]
+fn probe_state_rejects_results_after_candidate_set_expands() {
+    let mut state = PathProbeState::default();
+    let selected = probe_candidate("Left Name", "/work/Left Name", 0);
+    let mut key = probe_key("/work/Left Name", 20);
+    key.pointed_col = 1;
+    key.candidates = vec![selected.clone()];
+    let request = state.request(key.clone()).unwrap();
+
+    let mut moved = key.clone();
+    moved.pointed_col = 6;
+    moved.candidates = vec![probe_candidate("Name Here", "/work/Name Here", 5), selected];
+    assert!(!state.accept(&openable_result(request), Some(&moved)));
+    assert!(state.request(moved).is_some());
 }
 
 /// A transient inability to re-read the pointer target must allow the same path to be probed again.
