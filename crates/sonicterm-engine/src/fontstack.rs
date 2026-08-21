@@ -341,23 +341,23 @@ impl Rasterizer for FontStack {
         }
         let (mut coverage, is_color, is_subpixel) = if rg.has_color {
             let mut bgra = Vec::with_capacity(rg.data.len());
-            for px in rg.data.chunks_exact(4) {
+            for px in rg.data.as_chunks::<4>().0.iter() {
                 bgra.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
             }
             (bgra, true, false)
         } else {
             // When: `has_color` is false, derive monochrome or subpixel coverage from the raster channels.
             let has_subpixel_coverage =
-                rg.data.chunks_exact(4).any(|px| px[0] != px[1] || px[1] != px[2]);
+                rg.data.as_chunks::<4>().0.iter().any(|px| px[0] != px[1] || px[1] != px[2]);
             if has_subpixel_coverage {
                 let mut bgra = Vec::with_capacity(rg.data.len());
-                for px in rg.data.chunks_exact(4) {
+                for px in rg.data.as_chunks::<4>().0.iter() {
                     bgra.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
                 }
                 (bgra, false, true)
             } else {
                 // When: `has_subpixel_coverage` is false, one alpha mask replaces four redundant channel bytes.
-                let mask: Vec<u8> = rg.data.chunks_exact(4).map(|p| p[3]).collect();
+                let mask: Vec<u8> = rg.data.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
                 (mask, false, false)
             }
         };
@@ -530,7 +530,7 @@ fn erode_coverage(
         }
     }
     if is_subpixel {
-        for px in out.chunks_exact_mut(4) {
+        for px in out.as_chunks_mut::<4>().0 {
             px[3] = px[0].max(px[1]).max(px[2]);
         }
     }
@@ -696,7 +696,7 @@ fn embolden_coverage(
 
     if is_subpixel {
         // Alpha is the envelope of the dilated RGB coverage.
-        for px in out.chunks_exact_mut(4) {
+        for px in out.as_chunks_mut::<4>().0 {
             px[3] = px[0].max(px[1]).max(px[2]);
         }
     }
@@ -771,7 +771,7 @@ fn apply_regular_weight_scale(coverage: &mut [u8], scale: f32, is_subpixel: bool
         return;
     }
     if is_subpixel {
-        for pixel in coverage.chunks_exact_mut(4) {
+        for pixel in coverage.as_chunks_mut::<4>().0 {
             pixel[0] = scale_coverage(pixel[0], scale);
             pixel[1] = scale_coverage(pixel[1], scale);
             pixel[2] = scale_coverage(pixel[2], scale);

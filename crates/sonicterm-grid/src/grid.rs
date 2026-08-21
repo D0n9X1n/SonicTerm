@@ -279,9 +279,7 @@ impl Grid {
     /// unchanged from the renderer's point of view).
     #[inline]
     pub fn clear_dirty(&mut self) {
-        for d in &mut self.dirty_rows {
-            *d = false;
-        }
+        self.dirty_rows.fill(false);
     }
 
     /// Number of rows currently marked dirty. Useful for tests and for
@@ -300,9 +298,7 @@ impl Grid {
 
     #[inline]
     fn mark_all(&mut self) {
-        for d in &mut self.dirty_rows {
-            *d = true;
-        }
+        self.dirty_rows.fill(true);
     }
 
     /// Mark every row dirty. Public alias of the internal `mark_all`

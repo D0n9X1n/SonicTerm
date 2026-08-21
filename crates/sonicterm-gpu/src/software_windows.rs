@@ -118,7 +118,7 @@ impl WindowsSoftwareFrame {
 
     fn clear(&mut self, color: [f32; 4]) {
         let px = linear_rgba_to_bgra(color);
-        for p in self.pixels.chunks_exact_mut(4) {
+        for p in self.pixels.as_chunks_mut::<4>().0 {
             p.copy_from_slice(&px);
         }
     }
