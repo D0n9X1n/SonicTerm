@@ -7496,7 +7496,7 @@ impl GpuRenderer {
                         // directly from `sonicterm-text` once that
                         // crate compiles again.
                         let alpha_mask: Vec<u8> =
-                            block_tile.coverage.chunks_exact(4).map(|px| px[3]).collect();
+                            block_tile.coverage.as_chunks::<4>().0.iter().map(|px| px[3]).collect();
                         Some(sonicterm_text::glyph_atlas::RasterTile {
                             width: block_tile.width,
                             height: block_tile.height,

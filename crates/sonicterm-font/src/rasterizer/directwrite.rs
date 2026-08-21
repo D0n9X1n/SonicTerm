@@ -114,7 +114,9 @@ impl DirectWriteRasterizer {
             .create_alpha_texture(DWRITE_TEXTURE_CLEARTYPE_3x1, bounds)
             .map_err(|hr| anyhow::anyhow!("CreateAlphaTexture failed: 0x{hr:08x}"))?;
         let mut data = vec![0u8; data_len];
-        for (src, dst) in texture.chunks_exact(3).zip(data.chunks_exact_mut(4)) {
+        for (src, dst) in
+            texture.as_chunks::<3>().0.iter().zip(data.as_chunks_mut::<4>().0.iter_mut())
+        {
             let r = enhance_text_coverage(src[0]);
             let g = enhance_text_coverage(src[1]);
             let b = enhance_text_coverage(src[2]);

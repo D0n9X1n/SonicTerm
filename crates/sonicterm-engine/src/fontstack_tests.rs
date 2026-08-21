@@ -314,7 +314,7 @@ fn embolden_recomputes_subpixel_alpha_from_dilated_rgb() {
     let (grown, w, h, _) =
         embolden_coverage(&coverage, 4, 3, 1.0, true).expect("subpixel dilation");
     assert_eq!(grown.len(), w * h * 4);
-    for px in grown.chunks_exact(4) {
+    for px in grown.as_chunks::<4>().0 {
         assert_eq!(px[3], px[0].max(px[1]).max(px[2]), "alpha must envelope RGB");
     }
 }
@@ -408,7 +408,7 @@ fn erosion_keeps_tile_geometry_and_subpixel_alpha_consistent() {
     let coverage = vec![200u8; 4 * 4 * 4];
     let eroded = erode_coverage(&coverage, 4, 4, 0.5, true).expect("subpixel erosion");
     assert_eq!(eroded.len(), coverage.len(), "erosion must not resize the tile");
-    for px in eroded.chunks_exact(4) {
+    for px in eroded.as_chunks::<4>().0 {
         assert_eq!(px[3], px[0].max(px[1]).max(px[2]), "alpha must envelope RGB");
     }
 }
