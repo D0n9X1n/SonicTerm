@@ -164,6 +164,10 @@ mutate_nested_page() {
   printf '# Nested\n\n## English\n\n## 中文\n' > "$1/wiki/nested/Page.md"
 }
 
+mutate_non_ascii_page() {
+  printf '# malformed\n' > "$1/wiki/坏页.md"
+}
+
 mutate_md_link() {
   python3 - "$1/wiki/Usage.md" <<'PY'
 from pathlib import Path
@@ -274,6 +278,7 @@ assert_checker_rejects duplicate-marker 'wiki/Usage.md:' mutate_duplicate_marker
 assert_checker_rejects reordered-markers 'wiki/Usage.md:' mutate_reordered_markers
 assert_checker_rejects heading-mismatch 'wiki/Usage.md:' mutate_heading_mismatch
 assert_checker_rejects nested-page 'wiki/nested/Page.md:' mutate_nested_page
+assert_checker_rejects non-ascii-page 'wiki/坏页.md:' mutate_non_ascii_page
 assert_checker_rejects md-link 'wiki/Usage.md:' mutate_md_link
 assert_checker_rejects md-anchor-link 'cross-page link must omit .md' mutate_md_anchor_link
 assert_checker_rejects unknown-link 'wiki/Usage.md:' mutate_unknown_link

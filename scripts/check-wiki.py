@@ -40,7 +40,7 @@ def repository_root() -> Path:
 def tracked_wiki_paths(root: Path) -> list[PurePosixPath]:
     """Return tracked wiki files in deterministic repository-relative order."""
     completed = subprocess.run(
-        ["git", "ls-files", "--", "wiki/**"],
+        ["git", "ls-files", "-z", "--", "wiki/**"],
         capture_output=True,
         check=False,
         cwd=root,
@@ -48,10 +48,12 @@ def tracked_wiki_paths(root: Path) -> list[PurePosixPath]:
     if completed.returncode != 0:
         detail = completed.stderr.decode("utf-8", errors="replace").strip()
         raise RuntimeError(f"git ls-files failed: {detail or 'unknown error'}")
+    try:
+        output = completed.stdout.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise RuntimeError(f"git ls-files returned a non-UTF-8 path: {error}") from error
     return sorted(
-        PurePosixPath(line)
-        for line in completed.stdout.decode("utf-8").splitlines()
-        if line
+        PurePosixPath(path) for path in output.split("\0") if path
     )
 
 
