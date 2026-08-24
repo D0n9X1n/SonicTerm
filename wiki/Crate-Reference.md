@@ -2,658 +2,682 @@
 
 ## English
 
-> This page is the crate map, with dependency and code-navigation detail for
-> all 24 workspace crates.
-
-The workspace version in the root `Cargo.toml` applies to every first-party
-crate. `sonicterm-app` is the default workspace member, while the shipping
-binaries are `sonicterm-mac`, `sonicterm-windows`, and `sonicterm-linux` (whose
-installed binary name is `sonicterm`).
+This is the canonical map of the 24 Rust crates in the Cargo workspace. The root
+`Cargo.toml` supplies their version, edition, Rust version, authors, license, and
+repository metadata. `sonicterm-app` is the default workspace member. The
+shipping binaries are `sonicterm-mac`, `sonicterm-windows`, and
+`sonicterm-linux`; the Linux executable is named `sonicterm`.
 
 ## Dependency overview
 
 ```mermaid
 flowchart BT
     types["sonicterm-types"]
-    grid["grid"]
-    cfg["cfg"]
-    appcore["app-core"]
-    vt["vt"]
-    ui["ui"]
-    rm["render-model"]
-    io["io"]
-    gpu["gpu"]
-    app["sonicterm-app"]
-    mac["mac"]
-    win["windows"]
-    linux["linux"]
-    fontsrc["font-config + fontconfig + freetype + harfbuzz"]
+    resource["sonicterm-resource"]
+    grid["sonicterm-grid"]
+    vt["sonicterm-vt"]
+    io["sonicterm-io"]
+    logging["sonicterm-logging"]
+    cfg["sonicterm-cfg"]
+    text["sonicterm-text"]
+    ui["sonicterm-ui"]
+    model["sonicterm-render-model"]
+    fontparts["font-config · fontconfig · freetype · harfbuzz"]
     font["sonicterm-font"]
-    engine["engine"]
-    text["text"]
-    mux["sonicterm-mux<br/>standalone, not used by app"]
-    res["sonicterm-resource<br/>retained-memory ledger"]
+    engine["sonicterm-engine"]
+    block["sonicterm-block-glyph"]
+    gpu["sonicterm-gpu"]
+    core["sonicterm-app-core"]
+    app["sonicterm-app"]
+    platforms["mac · windows · linux"]
+    mux["sonicterm-mux<br/>standalone"]
 
+    resource --> types
     grid --> types
-    cfg --> types
-    appcore --> types
     vt --> grid
+    vt --> types
+    io --> types
+    logging --> types
+    cfg --> logging
+    cfg --> types
+    text --> types
     ui --> cfg
-    rm --> ui
-    io --> vt
-    gpu --> rm
-    app --> io
-    app --> gpu
-    app --> appcore
-    mac --> app
-    win --> app
-    linux --> app
-
-    font --> fontsrc
+    ui --> grid
+    ui --> text
+    model --> cfg
+    model --> grid
+    model --> ui
+    font --> fontparts
     engine --> font
-    text --> font
+    engine --> grid
+    engine --> text
+    gpu --> block
+    gpu --> model
     gpu --> engine
     gpu --> text
-
+    core --> types
+    app --> core
+    app --> vt
+    app --> io
+    app --> cfg
+    app --> ui
+    app --> model
+    app --> gpu
+    app --> resource
+    app --> logging
+    platforms --> app
+    platforms --> core
     mux --> io
-    res --> types
-    app --> res
 ```
 
-The diagram omits some utility edges; each crate entry below lists its important
-relationships.
+The diagram shows the main architecture edges. Each entry below gives the exact
+first-party Cargo dependencies.
 
 ## Contracts and terminal core
 
 ### `sonicterm-types`
 
-**Role:** dependency-light shared contracts: cells, colors, actions, modifier
-keys, geometry, glyph/window/hyperlink ids, shell quoting, and backend traits.
+**Role:** dependency-light contracts shared across the workspace: cells,
+geometry, colors, actions, modifier keys, glyph/window/hyperlink identifiers,
+shell quoting, resource types, and backend traits.
 
-**Important API:** `Cell`, `CellFlags`, `Color`, `Action`, `Direction`,
-`BroadcastScope`, `GlyphKey`, `WindowKey`, `PtyTransport`, `Painter`,
-`ClipboardBackend`, `WindowBackend`.
+**First-party dependencies:** none.
 
-**Read:** `src/{cell,action,glyph_key,geom}.rs`, `src/traits/`.
+**Read:** `src/{cell,action,glyph_key,geom,resource}.rs`, `src/traits/`.
 
 ### `sonicterm-resource`
 
-**Role:** process-local resource governor. Owns a sharded ledger over one
-immutable process root, an owner hierarchy, RAII reservation tokens that
-release their charge when dropped, level-triggered cancellation, and a bounded
-reaper supervisor that admits work only when a slot is free.
+**Role:** process-local resource governor with owner hierarchy, sharded ledger,
+RAII reservations, cancellation tokens, and a bounded reaper supervisor.
 
-**Important API:** `ResourceGovernor`, `Reservation`, `CommittedReservation`,
-`CancelSource`, `CancelToken`, `ReaperSupervisor`, `ReaperLimits`, `ReapTask`,
-`ReapSlot`, `ShutdownReport`, `Clock`/`TestClock`.
-
-**Consumes:** `sonicterm-types`.
+**First-party dependencies:** `sonicterm-types`.
 
 **Read:** `src/{ledger,owner,reservation,reaper,cancel}.rs`.
 
 ### `sonicterm-grid`
 
-**Role:** primary/alternate screens, visible rows, bounded scrollback, cursor,
-wide/combining cells, prompt regions, dirty rows, and line compression.
+**Role:** primary and alternate screens, visible rows, bounded scrollback,
+cursor state, wide and combining cells, hyperlinks, prompt regions, dirty rows,
+and line storage.
 
-**Consumes:** `sonicterm-types`. **Consumed by:** VT, UI, app, render-model,
-engine.
+**First-party dependencies:** `sonicterm-types`.
 
-**Read:** `src/grid.rs`, `src/line.rs`, `src/hyperlink.rs`.
+**Read:** `src/{grid,line,hyperlink}.rs`.
 
 ### `sonicterm-vt`
 
-**Role:** vte-based ANSI/VT parser and performer. Converts control sequences to
-grid mutations, terminal replies, and typed events; OSC 7 keeps authority and
-decoded path separate for host-aware working-directory consumers.
+**Role:** vte-based ANSI/VT parser and performer. It turns control sequences into
+grid changes, terminal replies, and typed events. OSC 7 retains authority and
+decoded path separately for host-aware working-directory use.
 
-**Consumes:** grid, types. **Consumed by:** app.
+**First-party dependencies:** `sonicterm-grid`, `sonicterm-types`.
 
-**Read:** `src/vt.rs`, plus `tests/autowrap` and `tests/control_sequences`.
+**Read:** `src/vt.rs`, `tests/{autowrap,control_sequences}.rs`.
 
 ### `sonicterm-io`
 
-**Role:** local PTY/process transport, child cleanup, resize, shell selection,
-foreground-process detection, and optional SSH implementation.
+**Role:** local PTY and process transport, resize and child cleanup, shell
+selection, foreground-process discovery, and the optional SSH backend.
 
-**Consumes:** types. **Consumed by:** app and mux.
+**First-party dependencies:** `sonicterm-types`.
 
-**Feature:** `ssh` enables `russh`, Tokio, and async-trait. It is off by default.
+**Feature:** `ssh` enables `russh`, Tokio, and `async-trait`; it is off by
+default.
 
-**Read:** `src/pty.rs`, `src/ssh.rs`, `src/{proc_info,foreground_proc}.rs`.
+**Read:** `src/{pty,ssh,proc_info,foreground_proc}.rs`.
 
-## Configuration and UI
+## Configuration, UI, and frame data
+
+### `sonicterm-logging`
+
+**Role:** tracing sinks, log retention, panic artifacts, fatal-exit markers,
+session markers, bounded breadcrumbs, postmortem discovery, and process-memory
+sampling.
+
+**First-party dependencies:** `sonicterm-types`; tests additionally use
+`sonicterm-resource` with `test-util`.
+
+**Read:** `src/{lib,config,cleanup,crash,exit_trace,breadcrumbs,postmortem,session_state}.rs`.
+Detailed fields and procedures belong on [Logging](Logging).
 
 ### `sonicterm-cfg`
 
-**Role:** only parser for `sonicterm.toml`, theme/keymap TOML, dimensions, asset
-lookup, typed URI/explicit-path/contextual-bare scanning, and safe URI-open
-policy. Filesystem provenance stays distinct for the app's asynchronous
-openability and direct-open boundary.
+**Role:** the only parser for `sonicterm.toml`, theme and keymap TOML, dimensions,
+asset lookup, typed URI/path detection, and safe URI-open policy.
 
-**Consumes:** types, logging. **Consumed by:** app, platform binaries, UI,
-render-model.
+**First-party dependencies:** `sonicterm-logging`, `sonicterm-types`.
 
 **Read:** `src/{config,theme,keymap,assets,url_scan,url_open,dimension}.rs`.
 
 ### `sonicterm-ui`
 
-**Role:** renderer-independent UI state and layout: tabs, command palette,
-search, selection, copy/READONLY mode, pane trees, scrollbar, IME, broadcast,
+**Role:** renderer-independent UI state and layout for tabs, panes, command
+palette, search, selection, READONLY/copy mode, scrollbar, IME, broadcast,
 notifications, and localization.
 
-**Consumes:** types, cfg, grid, text. **Consumed by:** app and render-model.
+**First-party dependencies:** `sonicterm-cfg`, `sonicterm-grid`,
+`sonicterm-text`, `sonicterm-types`.
 
 **Read:** `src/{tabs,pane,command_palette,search,selection,copy_mode,ime,overlays,i18n}.rs`.
 
 ### `sonicterm-render-model`
 
-**Role:** renderer-facing pane, geometry, and overlay bundles. It re-exports
-grid/config/UI type identities through `boundary::{grid,cfg,ui}` so GPU has one
-declared seam.
+**Role:** renderer-neutral pane, geometry, overlay, and input bundles. It
+re-exports grid/config/UI type identities through `boundary::{grid,cfg,ui}` so
+the GPU crate has one declared model boundary.
 
-**Consumes:** types, grid, cfg, UI. **Consumed by:** app and GPU.
+**First-party dependencies:** `sonicterm-cfg`, `sonicterm-grid`,
+`sonicterm-types`, `sonicterm-ui`.
 
 **Read:** `src/{pane_render,inputs,geometry,lib}.rs`.
 
 ## Text and fonts
 
+### `sonicterm-text`
+
+**Role:** CPU glyph atlas, row glyph cache, shaping records, and the
+`GlyphInstance` data consumed by the renderer.
+
+**First-party dependencies:** `sonicterm-types`.
+
+**Read:** `src/{glyph_atlas,row_glyph_cache,shape,lib}.rs`.
+
 ### `sonicterm-font-config`
 
-**Role:** configuration value model used by the absorbed font stack: text
-styles, font attributes, weights, stretches, rasterizer selection, and font
-policy. Its library crate name is `config`.
+**Role:** font configuration value model: text styles, attributes, weights,
+stretches, rasterizer selection, and policy. Its Rust library name is `config`.
 
-**Feature:** `distro-defaults` adjusts platform/distribution font defaults.
+**First-party dependencies:** none.
+
+**Feature:** `distro-defaults` changes platform/distribution defaults.
 
 **Read:** `src/lib.rs`.
 
 ### `sonicterm-fontconfig`
 
-**Role:** generated Fontconfig ABI and build/link shim for non-macOS font
-discovery. `build.rs` probes system Fontconfig through pkg-config.
+**Role:** generated Fontconfig ABI plus the build/link shim used for non-macOS
+font discovery. `build.rs` probes system Fontconfig through pkg-config.
 
-**Consumed by:** `sonicterm-font` on Unix platforms.
+**First-party dependencies:** none.
 
-**Read:** `build.rs`, generated `src/lib.rs` at the ABI boundary.
+**Read:** `build.rs`, generated `src/lib.rs`.
 
 ### `sonicterm-freetype`
 
-**Role:** generated FreeType ABI plus fixed-point helpers. `build.rs` compiles
-vendored zlib, libpng, and FreeType and exports include/library paths.
+**Role:** generated FreeType ABI and fixed-point helpers. `build.rs` compiles the
+embedded zlib, libpng, and FreeType sources and exports their build paths.
 
-**Consumed by:** font and HarfBuzz wrapper crates.
+**First-party dependencies:** none.
 
-**Read:** `build.rs`, `bindings.h`, `src/{lib,types,fixed_point}.rs`; treat
-`freetype2/`, `libpng/`, and `zlib/` as embedded upstream implementation.
+**Read:** `build.rs`, `bindings.h`, `src/{lib,types,fixed_point}.rs`.
 
 ### `sonicterm-harfbuzz`
 
 **Role:** generated HarfBuzz ABI. `build.rs` compiles the embedded HarfBuzz C++
 amalgamation against the FreeType build.
 
-**Consumes:** FreeType wrapper. **Consumed by:** font.
+**First-party dependencies:** `sonicterm-freetype` under the dependency alias
+`freetype`.
 
-**Read:** `build.rs`, `bindings.h`, generated `src/lib.rs`; treat `harfbuzz/` as
-embedded upstream implementation.
+**Read:** `build.rs`, `bindings.h`, generated `src/lib.rs`.
 
 ### `sonicterm-font`
 
-**Role:** safe font discovery, database and matching, HarfBuzz shaping,
-fallback, FreeType/DirectWrite/HarfBuzz rasterization, COLR color glyphs, and
-native-handle wrappers.
+**Role:** safe font discovery and matching, HarfBuzz shaping, fallback,
+FreeType/DirectWrite/HarfBuzz rasterization, COLR glyphs, and native-handle
+wrappers.
 
-**Consumes:** font-config, fontconfig, freetype, harfbuzz. **Consumed by:** engine.
+**First-party dependencies:** `sonicterm-font-config` as `config`,
+`sonicterm-freetype` as `freetype`, and `sonicterm-harfbuzz` as `harfbuzz`;
+Android and non-macOS Unix builds also use `sonicterm-fontconfig` as
+`fontconfig`.
 
-**Features:** optional vendor-family switches are present for font-stack
-compatibility.
+**Features:** `vendor-jetbrains`, `vendor-nerd-font-symbols`,
+`vendor-noto-emoji`, and `vendor-roboto` compatibility switches.
 
-**Read:** `src/db.rs`, `src/locator/`, `src/shaper/`, `src/rasterizer/`, and
+**Read:** `src/db.rs`, `src/locator/`, `src/shaper/`, `src/rasterizer/`,
 `src/{ftwrap,hbwrap,fcwrap,parser}.rs`.
 
 ### `sonicterm-engine`
 
-**Role:** small renderer-facing font seam. `FontStack` converts font shaping and
-raster output to cell metrics and atlas `RasterTile`s.
+**Role:** small font-facing engine seam. `FontStack` turns shaping and raster
+results into cell metrics and atlas `RasterTile`s.
 
-**Consumes:** font, font-config, grid, text, types. **Consumed by:** GPU.
+**First-party dependencies:** `sonicterm-font-config` as `config`,
+`sonicterm-font`, `sonicterm-grid`, `sonicterm-text`, `sonicterm-types`.
 
 **Read:** `src/fontstack.rs`.
 
-### `sonicterm-text`
-
-**Role:** CPU glyph atlas, row glyph cache, shaping records, and the
-`GlyphInstance` handed to GPU.
-
-**Consumes:** types plus headless image/font utilities. **Consumed by:** UI,
-engine, GPU, app.
-
-**Read:** `src/{glyph_atlas,row_glyph_cache,shape,lib}.rs`.
-
 ### `sonicterm-block-glyph`
 
-**Role:** geometry and rasterization for box drawing, blocks, Powerline,
-Braille, sextants, octants, and synthetic terminal symbols.
+**Role:** geometry and rasterization for box drawing, block elements,
+Powerline, Braille, sextants, octants, and synthetic terminal symbols.
 
-**Consumes:** tiny-skia and geometry helpers. **Consumed by:** GPU.
+**First-party dependencies:** none.
 
-**Provenance:** adapted from WezTerm; see `LICENSE-WEZTERM`.
-
-**Read:** `src/{lib,glue}.rs` and the public boundary of `src/customglyph.rs`.
+**Read:** `src/{lib,glue,customglyph}.rs`; attribution is in
+`LICENSE-WEZTERM`.
 
 ## Renderer and application
 
 ### `sonicterm-gpu`
 
-**Role:** wgpu device/surface owner, frame assembly, dirty-row damage, quad and
-glyph emission, atlas upload, retained frame, software-adapter detection, and
-Windows CPU rendering.
+**Role:** wgpu device and surface owner, frame assembly, dirty-row damage, quad
+and glyph emission, atlas upload, retained frames, software-adapter detection,
+and Windows CPU presentation data.
 
-**Consumes:** types, text, render-model, engine, block-glyph. **Consumed by:** app.
+**First-party dependencies:** `sonicterm-block-glyph`, `sonicterm-engine`,
+`sonicterm-render-model`, `sonicterm-text`, `sonicterm-types`.
 
-**Read:** `src/core.rs`, `src/wezterm_pipeline.rs`, `src/atlas_upload.rs`,
-`src/{row_quad_cache,chrome_text,cursor,color,software_windows}.rs`.
+**Read:** `src/{core,atlas_upload,row_quad_cache,chrome_text,cursor,color,software_windows}.rs`.
 
 ### `sonicterm-app-core`
 
 **Role:** backend-free `AppIntent`, `AppEffect`, `AppState`, reducer, stable
-effect ordering, and state machine.
+effect ordering, and state machine. Live window/tab/pane topology remains in
+`sonicterm-app`.
 
-**Consumes:** types plus small data utilities. **Consumed by:** app and platform
-binaries.
-
-**Current boundary:** reducer state mirrors many transitions, while live
-window/tab/pane topology remains authoritative in `sonicterm-app`.
+**First-party dependencies:** `sonicterm-types`.
 
 **Read:** `src/{app_state,intent,effect,reducer,state_machine}.rs`.
 
 ### `sonicterm-app`
 
-**Role:** cross-platform winit orchestration. Owns live windows, renderers,
-tabs, pane trees, PTYs/parsers, input routing, config reload, redraw scheduling,
-overlays, tab transfer, platform shell abstractions, bounded target-openability
-workers, and type-stable direct-open dispatch through native platform APIs.
+**Role:** cross-platform winit orchestration for windows, renderers, tabs,
+panes, PTYs/parsers, input, config reload, redraw, overlays, tab transfer,
+bounded target probes, and native direct-open dispatch.
 
-**Consumes:** app-core, terminal stack, cfg/UI/render-model, GPU, resource, logging.
-**Consumed by:** macOS, Windows, and Linux binaries.
+**First-party dependencies:** `sonicterm-app-core`, `sonicterm-cfg`,
+`sonicterm-gpu`, `sonicterm-grid`, `sonicterm-io`, `sonicterm-logging`,
+`sonicterm-render-model`, `sonicterm-resource`, `sonicterm-text`,
+`sonicterm-types`, `sonicterm-ui`, `sonicterm-vt`.
 
-**Feature:** `ssh` forwards to `sonicterm-io/ssh`; the live SSH session is not
-fully wired into the GUI today.
+**Feature:** `ssh` forwards to `sonicterm-io/ssh`. The GUI does not complete a
+live SSH connection.
 
-**Read:** `src/app/mod.rs`, `src/app/{event_loop,window_event,spawn_pane,keymap_dispatch,key_encoding,path_target,tear_out}.rs`, `src/shell.rs`.
+**Read:** `src/app/mod.rs`,
+`src/app/{event_loop,window_event,spawn_pane,keymap_dispatch,path_target,tear_out}.rs`,
+`src/shell.rs`.
 
-## Platform and future binaries
+## Platform and standalone crates
 
 ### `sonicterm-mac`
 
-**Role:** macOS binary, AppKit setup, NSMenu, NSPasteboard/tab dragging, and
-platform package entry.
+**Role:** macOS binary and AppKit glue: startup, NSMenu, open-document events,
+NSPasteboard tab handoff, NSWindow setup, and bundle entry point.
 
-**Consumes:** app-core, app, cfg, logging.
+**First-party dependencies:** `sonicterm-app`, `sonicterm-app-core`,
+`sonicterm-cfg`, `sonicterm-logging`.
 
-**Read:** `src/{main,menubar,os_drag_mac,tab_drag_os}.rs`.
+**Read:** `src/{main,menubar,open_documents,os_drag_mac,tab_drag_os}.rs`.
+Native details belong on [Platform Integration](Platform-Integration).
 
 ### `sonicterm-windows`
 
-**Role:** Windows binary, DPI/Win32 setup, muda menu, DWM backdrop, OLE tab
-drag/drop, Windows software-present support, resources, and WiX packaging.
-Local PTY/ConPTY transport remains behind `sonicterm-io`.
+**Role:** Windows binary and Win32 GUI glue: DPI setup, CLI, `muda` menu, DWM
+backdrop, OLE tab drag/drop, software presentation support, Win32 resources, and
+WiX metadata. ConPTY remains behind `sonicterm-io`.
 
-**Consumes:** app-core, app, cfg, logging, types.
+**First-party dependencies:** `sonicterm-app`, `sonicterm-app-core`,
+`sonicterm-cfg`, `sonicterm-logging`, `sonicterm-types`.
 
-**Read:** `src/{main,backdrop,menubar,os_drag_win,software_presenter}.rs`,
+**Read:** `src/{main,cli,startup,backdrop,menubar,os_drag_win,software_presenter}.rs`,
 `build.rs`, `wix/main.wxs`.
 
 ### `sonicterm-linux`
 
-**Role:** Linux `sonicterm` binary, X11/Wayland desktop identity, production
-startup/diagnostics, packaged-font preflight, Linux capability normalization,
-and desktop/AppStream package metadata. Unsupported native menu, notification,
-backdrop, foreground-title, and cross-process tab-drag hooks degrade safely.
+**Role:** shipping Linux `sonicterm` binary: X11/Wayland identity, capability
+normalization, diagnostics, packaged-font preflight, and desktop/AppStream
+metadata.
 
-**Consumes:** app-core, app, cfg, engine, logging.
+**First-party dependencies:** `sonicterm-app`, `sonicterm-app-core`,
+`sonicterm-cfg`, `sonicterm-engine`, `sonicterm-logging`.
 
-**Read:** `src/main.rs`, `resources/`, and `scripts/make-linux-packages.sh`.
-
-### `sonicterm-logging`
-
-**Role:** rolling file/stderr tracing, retention cleanup, panic hook, crash
-dumps, signal/exit tracing, and the canonical process-exit funnel.
-
-**Consumed by:** cfg, app, platform binaries.
-
-**Read:** `src/{lib,config,sinks,cleanup,crash,exit_trace,path}.rs`.
+**Read:** `src/main.rs`, `resources/`.
 
 ### `sonicterm-mux`
 
-**Role:** experimental standalone persistent-PTY multiplexer daemon. It has a
-framed bincode protocol, raw-byte replay ring, and attach/input/resize/kill
-operations.
+**Role:** standalone persistent-PTY multiplexer daemon with a framed bincode
+protocol, raw-byte replay ring, and attach/input/resize/kill operations. It is a
+workspace crate, is not consumed by the GUI, and is not included in release
+packages.
 
-**Consumes:** IO. **Consumed by:** no GUI/platform crate today. It is not
-packaged by the release workflow.
+**First-party dependencies:** `sonicterm-io`.
 
 **Read:** `src/{main,proto,frame,server}.rs`.
 
-## Feature and shipping status
-
-| Surface | Status |
-| --- | --- |
-| Local PTY terminal | shipping |
-| macOS Apple Silicon + Intel DMG | shipping |
-| Windows x64 MSI | shipping |
-| Linux x86_64 deb and tar.gz, X11 and Wayland | shipping |
-| SSH transport | optional implementation seam; GUI connection incomplete |
-| `sonicterm-mux` | workspace/future daemon; not shipped |
-
-Every crate contains a local `CLAUDE.md` with its guardrails and local gate.
+Every crate has a local `CLAUDE.md` with its guardrails and local gate. Package
+layouts belong on [Packaging](Packaging); CI and release behavior belong on
+[Development and Release](Development-and-Release).
 
 ## 中文
 
-> 本页即 crate 映射，并为全部 24 个 workspace crate 提供依赖与代码导航细节。
-
-根 `Cargo.toml` 中的 workspace 版本适用于所有第一方 crate。`sonicterm-app` 是默认 member，
-实际发布二进制是 `sonicterm-mac`、`sonicterm-windows` 与 `sonicterm-linux`；Linux
-安装后的二进制名为 `sonicterm`。
+本页是 Cargo workspace 中 24 个 Rust crate 的规范映射。根 `Cargo.toml`
+统一提供版本、edition、Rust 版本、作者、许可证和仓库信息。默认 workspace member
+是 `sonicterm-app`。发布的二进制 crate 是 `sonicterm-mac`、
+`sonicterm-windows` 和 `sonicterm-linux`；Linux 可执行文件名为 `sonicterm`。
 
 ## 依赖概览
 
 ```mermaid
 flowchart BT
     types["sonicterm-types"]
-    grid["grid"]
-    cfg["cfg"]
-    appcore["app-core"]
-    vt["vt"]
-    ui["ui"]
-    rm["render-model"]
-    io["io"]
-    gpu["gpu"]
-    app["sonicterm-app"]
-    mac["mac"]
-    win["windows"]
-    linux["linux"]
-    fontsrc["font-config + fontconfig + freetype + harfbuzz"]
+    resource["sonicterm-resource"]
+    grid["sonicterm-grid"]
+    vt["sonicterm-vt"]
+    io["sonicterm-io"]
+    logging["sonicterm-logging"]
+    cfg["sonicterm-cfg"]
+    text["sonicterm-text"]
+    ui["sonicterm-ui"]
+    model["sonicterm-render-model"]
+    fontparts["font-config · fontconfig · freetype · harfbuzz"]
     font["sonicterm-font"]
-    engine["engine"]
-    text["text"]
-    mux["sonicterm-mux<br/>独立，app 未使用"]
-    res["sonicterm-resource<br/>常驻内存账本"]
+    engine["sonicterm-engine"]
+    block["sonicterm-block-glyph"]
+    gpu["sonicterm-gpu"]
+    core["sonicterm-app-core"]
+    app["sonicterm-app"]
+    platforms["mac · windows · linux"]
+    mux["sonicterm-mux<br/>独立运行"]
 
+    resource --> types
     grid --> types
-    cfg --> types
-    appcore --> types
     vt --> grid
+    vt --> types
+    io --> types
+    logging --> types
+    cfg --> logging
+    cfg --> types
+    text --> types
     ui --> cfg
-    rm --> ui
-    io --> vt
-    gpu --> rm
-    app --> io
-    app --> gpu
-    app --> appcore
-    mac --> app
-    win --> app
-    linux --> app
-
-    font --> fontsrc
+    ui --> grid
+    ui --> text
+    model --> cfg
+    model --> grid
+    model --> ui
+    font --> fontparts
     engine --> font
-    text --> font
+    engine --> grid
+    engine --> text
+    gpu --> block
+    gpu --> model
     gpu --> engine
     gpu --> text
-
+    core --> types
+    app --> core
+    app --> vt
+    app --> io
+    app --> cfg
+    app --> ui
+    app --> model
+    app --> gpu
+    app --> resource
+    app --> logging
+    platforms --> app
+    platforms --> core
     mux --> io
-    res --> types
-    app --> res
 ```
 
-图中省略部分工具依赖；下方每个 crate 会列出重要关系。
+图中只画主要架构依赖。下方每个条目列出准确的第一方 Cargo 依赖。
 
 ## 契约与终端核心
 
 ### `sonicterm-types`
 
-**职责：** 依赖轻量的共享契约：cell、颜色、action、修饰键、几何、glyph/window/hyperlink id、
-shell quoting 和后端 trait。
+**职责：** 供整个 workspace 共用的轻量契约，包括单元格、几何、颜色、操作、
+修饰键、字形/窗口/超链接标识、shell 引用、资源类型和后端 trait。
 
-**重要 API：** `Cell`、`CellFlags`、`Color`、`Action`、`Direction`、`BroadcastScope`、
-`GlyphKey`、`WindowKey`、`PtyTransport`、`Painter`、`ClipboardBackend`、`WindowBackend`。
+**第一方依赖：** 无。
 
-**阅读：** `src/{cell,action,glyph_key,geom}.rs`、`src/traits/`。
+**阅读：** `src/{cell,action,glyph_key,geom,resource}.rs`、`src/traits/`。
 
 ### `sonicterm-resource`
 
-**职责：** 进程内资源治理器。基于唯一不可变进程根的分片 ledger、owner 层级、
-drop 时自动归还额度的 RAII reservation token、电平触发的取消机制，以及只在有空闲
-slot 时才接收任务的有界 reaper supervisor。
+**职责：** 进程内资源治理器，包含 owner 层级、分片账本、自动释放的 RAII
+预留、取消 token 和有界回收任务管理器。
 
-**重要 API：** `ResourceGovernor`、`Reservation`、`CommittedReservation`、
-`CancelSource`、`CancelToken`、`ReaperSupervisor`、`ReaperLimits`、`ReapTask`、
-`ReapSlot`、`ShutdownReport`、`Clock`/`TestClock`。
-
-**依赖：** types。
+**第一方依赖：** `sonicterm-types`。
 
 **阅读：** `src/{ledger,owner,reservation,reaper,cancel}.rs`。
 
 ### `sonicterm-grid`
 
-**职责：** 主/备用屏幕、可见行、有界 scrollback、光标、宽/组合 cell、prompt region、脏行和 line 压缩。
+**职责：** 主屏幕和备用屏幕、可见行、有界回滚缓冲、光标、宽字符和组合字符、
+超链接、提示区、脏行与行存储。
 
-**依赖：** types。**被依赖：** VT、UI、app、render-model、engine。
+**第一方依赖：** `sonicterm-types`。
 
-**阅读：** `src/grid.rs`、`src/line.rs`、`src/hyperlink.rs`。
+**阅读：** `src/{grid,line,hyperlink}.rs`。
 
 ### `sonicterm-vt`
 
-**职责：** 基于 vte 的 ANSI/VT parser/performer，把控制序列转为 grid 修改、终端回复和类型化事件；
-OSC 7 会分别保留 authority 与解码后的路径，供 host-aware 工作目录消费者使用。
+**职责：** 基于 vte 的 ANSI/VT 解析器与执行器，把控制序列转换为网格修改、
+终端回复和类型化事件。OSC 7 会分别保留主机 authority 与解码后的路径，供需要
+识别主机的工作目录逻辑使用。
 
-**依赖：** grid、types。**被依赖：** app。
+**第一方依赖：** `sonicterm-grid`、`sonicterm-types`。
 
-**阅读：** `src/vt.rs`，以及 `tests/autowrap`、`tests/control_sequences`。
+**阅读：** `src/vt.rs`、`tests/{autowrap,control_sequences}.rs`。
 
 ### `sonicterm-io`
 
-**职责：** 本地 PTY/进程 transport、子进程清理、resize、shell 选择、前台进程检测和可选 SSH。
+**职责：** 本地 PTY 与进程传输、调整大小和子进程清理、shell 选择、前台进程
+发现，以及可选 SSH 后端。
 
-**依赖：** types。**被依赖：** app 与 mux。
+**第一方依赖：** `sonicterm-types`。
 
-**Feature：** `ssh` 启用 `russh`、Tokio、async-trait，默认关闭。
+**Feature：** `ssh` 会启用 `russh`、Tokio 和 `async-trait`，默认关闭。
 
-**阅读：** `src/pty.rs`、`src/ssh.rs`、`src/{proc_info,foreground_proc}.rs`。
+**阅读：** `src/{pty,ssh,proc_info,foreground_proc}.rs`。
 
-## 配置与 UI
+## 配置、界面与帧数据
+
+### `sonicterm-logging`
+
+**职责：** tracing 输出、日志保留、panic 工件、致命退出标记、会话标记、
+有界诊断记录、事后证据发现和进程内存采样。
+
+**第一方依赖：** `sonicterm-types`；测试还以 `test-util` 使用
+`sonicterm-resource`。
+
+**阅读：** `src/{lib,config,cleanup,crash,exit_trace,breadcrumbs,postmortem,session_state}.rs`。
+具体字段和排查方法见[日志](Logging)。
 
 ### `sonicterm-cfg`
 
-**职责：** 唯一负责解析 `sonicterm.toml`、theme/keymap TOML、dimension、asset lookup、
-类型化 URI/显式路径/contextual 裸名称 scan 和安全 URI 打开策略。文件系统 provenance 保持独立，
-交给 app 的异步可打开性与 direct-open 边界。
+**职责：** 唯一负责解析 `sonicterm.toml`、主题和键位 TOML、尺寸、资源查找、
+类型化 URI/路径识别，以及安全 URI 打开策略。
 
-**依赖：** types、logging。**被依赖：** app、平台二进制、UI、render-model。
+**第一方依赖：** `sonicterm-logging`、`sonicterm-types`。
 
 **阅读：** `src/{config,theme,keymap,assets,url_scan,url_open,dimension}.rs`。
 
 ### `sonicterm-ui`
 
-**职责：** renderer 无关 UI state/layout：标签页、命令面板、搜索、选区、copy/READONLY、pane tree、
-scrollbar、IME、broadcast、notification、localization。
+**职责：** 与渲染器无关的界面状态和布局，包括标签页、窗格、命令面板、搜索、
+选区、READONLY/复制模式、滚动条、输入法、广播、通知和本地化。
 
-**依赖：** types、cfg、grid、text。**被依赖：** app 与 render-model。
+**第一方依赖：** `sonicterm-cfg`、`sonicterm-grid`、`sonicterm-text`、
+`sonicterm-types`。
 
 **阅读：** `src/{tabs,pane,command_palette,search,selection,copy_mode,ime,overlays,i18n}.rs`。
 
 ### `sonicterm-render-model`
 
-**职责：** 面向 renderer 的 pane、geometry、overlay bundle；通过 `boundary::{grid,cfg,ui}` 重新导出
-类型身份，使 GPU 只有一个声明接缝。
+**职责：** 与具体渲染器无关的窗格、几何、覆盖层和输入数据。它通过
+`boundary::{grid,cfg,ui}` 重新导出网格、配置和界面类型，让 GPU crate 只依赖一条
+明确的模型边界。
 
-**依赖：** types、grid、cfg、UI。**被依赖：** app 与 GPU。
+**第一方依赖：** `sonicterm-cfg`、`sonicterm-grid`、`sonicterm-types`、
+`sonicterm-ui`。
 
 **阅读：** `src/{pane_render,inputs,geometry,lib}.rs`。
 
 ## 文本与字体
 
+### `sonicterm-text`
+
+**职责：** CPU 字形图集、行级字形缓存、塑形记录，以及渲染器使用的
+`GlyphInstance` 数据。
+
+**第一方依赖：** `sonicterm-types`。
+
+**阅读：** `src/{glyph_atlas,row_glyph_cache,shape,lib}.rs`。
+
 ### `sonicterm-font-config`
 
-**职责：** 被吸收字体栈使用的配置值模型：text style、font attribute、weight、stretch、rasterizer selection 和字体策略。
-其 library crate 名为 `config`。
+**职责：** 字体配置值模型，包括文本样式、属性、字重、宽度、光栅器选择和策略。
+Rust library 名为 `config`。
 
-**Feature：** `distro-defaults` 调整平台/发行版字体默认值。
+**第一方依赖：** 无。
+
+**Feature：** `distro-defaults` 调整平台或发行版默认值。
 
 **阅读：** `src/lib.rs`。
 
 ### `sonicterm-fontconfig`
 
-**职责：** 生成的 Fontconfig ABI 与 build/link shim，用于非 macOS 字体发现；`build.rs` 经 pkg-config 探测系统 Fontconfig。
+**职责：** 生成的 Fontconfig ABI 和非 macOS 字体发现所用的构建/链接封装。
+`build.rs` 通过 pkg-config 探测系统 Fontconfig。
 
-**被依赖：** Unix 上的 `sonicterm-font`。
+**第一方依赖：** 无。
 
-**阅读：** `build.rs`，以及 ABI 边界上的生成 `src/lib.rs`。
+**阅读：** `build.rs`、生成的 `src/lib.rs`。
 
 ### `sonicterm-freetype`
 
-**职责：** 生成的 FreeType ABI 与 fixed-point helper。`build.rs` 编译内嵌 zlib、libpng、FreeType 并导出 include/library 路径。
+**职责：** 生成的 FreeType ABI 和定点数工具。`build.rs` 编译内嵌的 zlib、libpng
+与 FreeType，并导出构建路径。
 
-**被依赖：** font 与 HarfBuzz wrapper。
+**第一方依赖：** 无。
 
-**阅读：** `build.rs`、`bindings.h`、`src/{lib,types,fixed_point}.rs`；把 `freetype2/`、`libpng/`、`zlib/`
-视作内嵌上游实现。
+**阅读：** `build.rs`、`bindings.h`、`src/{lib,types,fixed_point}.rs`。
 
 ### `sonicterm-harfbuzz`
 
-**职责：** 生成的 HarfBuzz ABI；`build.rs` 针对 FreeType build 编译内嵌 HarfBuzz C++ amalgamation。
+**职责：** 生成的 HarfBuzz ABI。`build.rs` 针对 FreeType 构建结果编译内嵌的
+HarfBuzz C++ 合并源码。
 
-**依赖：** FreeType wrapper。**被依赖：** font。
+**第一方依赖：** 以依赖别名 `freetype` 使用 `sonicterm-freetype`。
 
-**阅读：** `build.rs`、`bindings.h`、生成 `src/lib.rs`；把 `harfbuzz/` 视作内嵌上游实现。
+**阅读：** `build.rs`、`bindings.h`、生成的 `src/lib.rs`。
 
 ### `sonicterm-font`
 
-**职责：** 安全字体发现、database/matching、HarfBuzz shaping、fallback、FreeType/DirectWrite/HarfBuzz raster、
-COLR color glyph 与原生 handle wrapper。
+**职责：** 安全的字体发现和匹配、HarfBuzz 塑形、回退、
+FreeType/DirectWrite/HarfBuzz 光栅化、COLR 字形和原生 handle 封装。
 
-**依赖：** font-config、fontconfig、freetype、harfbuzz。**被依赖：** engine。
+**第一方依赖：** 以 `config` 使用 `sonicterm-font-config`，以 `freetype` 使用
+`sonicterm-freetype`，以 `harfbuzz` 使用 `sonicterm-harfbuzz`；Android 和非 macOS
+Unix 构建还以 `fontconfig` 使用 `sonicterm-fontconfig`。
 
-**Feature：** 保留若干 vendor-family switch 以兼容字体栈。
+**Features：** `vendor-jetbrains`、`vendor-nerd-font-symbols`、
+`vendor-noto-emoji`、`vendor-roboto` 兼容开关。
 
 **阅读：** `src/db.rs`、`src/locator/`、`src/shaper/`、`src/rasterizer/`、
 `src/{ftwrap,hbwrap,fcwrap,parser}.rs`。
 
 ### `sonicterm-engine`
 
-**职责：** 小型 renderer-facing font seam。`FontStack` 把字体 shaping/raster 输出转换为 cell metric 和 atlas `RasterTile`。
+**职责：** 小型字体引擎边界。`FontStack` 把塑形与光栅结果转换为单元格尺寸和
+图集 `RasterTile`。
 
-**依赖：** font、font-config、grid、text、types。**被依赖：** GPU。
+**第一方依赖：** 以 `config` 使用 `sonicterm-font-config`，另依赖
+`sonicterm-font`、`sonicterm-grid`、`sonicterm-text`、`sonicterm-types`。
 
 **阅读：** `src/fontstack.rs`。
 
-### `sonicterm-text`
-
-**职责：** CPU glyph atlas、row glyph cache、shaping record，以及交给 GPU 的 `GlyphInstance`。
-
-**依赖：** types 与 headless image/font utility。**被依赖：** UI、engine、GPU、app。
-
-**阅读：** `src/{glyph_atlas,row_glyph_cache,shape,lib}.rs`。
-
 ### `sonicterm-block-glyph`
 
-**职责：** box drawing、block、Powerline、Braille、sextant、octant 和 synthetic terminal symbol 的几何与光栅化。
+**职责：** 方框线、块元素、Powerline、Braille、六分块、八分块和合成终端符号的
+几何与光栅化。
 
-**依赖：** tiny-skia 与 geometry helper。**被依赖：** GPU。
+**第一方依赖：** 无。
 
-**来源：** 从 WezTerm 适配；见 `LICENSE-WEZTERM`。
-
-**阅读：** `src/{lib,glue}.rs` 与 `src/customglyph.rs` 公共边界。
+**阅读：** `src/{lib,glue,customglyph}.rs`；来源说明见 `LICENSE-WEZTERM`。
 
 ## 渲染与应用
 
 ### `sonicterm-gpu`
 
-**职责：** wgpu device/surface、帧组装、脏行 damage、quad/glyph 生成、atlas 上传、保留帧、软件 adapter 检测和 Windows CPU 渲染。
+**职责：** wgpu 设备与 surface、帧组装、脏行损伤、quad 与字形输出、图集上传、
+保留帧、软件 adapter 检测，以及 Windows CPU 呈现数据。
 
-**依赖：** types、text、render-model、engine、block-glyph。**被依赖：** app。
+**第一方依赖：** `sonicterm-block-glyph`、`sonicterm-engine`、
+`sonicterm-render-model`、`sonicterm-text`、`sonicterm-types`。
 
-**阅读：** `src/core.rs`、`src/wezterm_pipeline.rs`、`src/atlas_upload.rs`、
-`src/{row_quad_cache,chrome_text,cursor,color,software_windows}.rs`。
+**阅读：** `src/{core,atlas_upload,row_quad_cache,chrome_text,cursor,color,software_windows}.rs`。
 
 ### `sonicterm-app-core`
 
-**职责：** 后端无关 `AppIntent`、`AppEffect`、`AppState`、reducer、稳定 effect 排序和 state machine。
+**职责：** 不依赖后端的 `AppIntent`、`AppEffect`、`AppState`、reducer、稳定的
+effect 顺序和状态机。实时窗口/标签页/窗格结构仍由 `sonicterm-app` 持有。
 
-**依赖：** types 与小型数据 utility。**被依赖：** app 和平台二进制。
-
-**当前边界：** reducer state 镜像许多转换，实时 window/tab/pane topology 仍以 `sonicterm-app` 为准。
+**第一方依赖：** `sonicterm-types`。
 
 **阅读：** `src/{app_state,intent,effect,reducer,state_machine}.rs`。
 
 ### `sonicterm-app`
 
-**职责：** 跨平台 winit 编排；拥有实时窗口、renderer、标签页、pane tree、PTY/parser、输入路由、配置重载、
-重绘调度、overlay、tab transfer、平台 shell abstraction、有界目标可打开性 worker，以及通过平台原生 API
-执行的目标类型稳定 direct-open dispatch。
+**职责：** 跨平台 winit 编排，管理窗口、渲染器、标签页、窗格、PTY/解析器、
+输入、配置重载、重绘、覆盖层、标签页转移、有界目标探测和原生直接打开。
 
-**依赖：** app-core、终端栈、cfg/UI/render-model、GPU、resource、logging。**被依赖：** macOS、Windows 与 Linux 二进制。
+**第一方依赖：** `sonicterm-app-core`、`sonicterm-cfg`、`sonicterm-gpu`、
+`sonicterm-grid`、`sonicterm-io`、`sonicterm-logging`、
+`sonicterm-render-model`、`sonicterm-resource`、`sonicterm-text`、
+`sonicterm-types`、`sonicterm-ui`、`sonicterm-vt`。
 
-**Feature：** `ssh` 转发到 `sonicterm-io/ssh`；实时 SSH session 当前尚未完整接入 GUI。
+**Feature：** `ssh` 转发到 `sonicterm-io/ssh`。GUI 尚不能完成实时 SSH 连接。
 
-**阅读：** `src/app/mod.rs`、`src/app/{event_loop,window_event,spawn_pane,keymap_dispatch,key_encoding,path_target,tear_out}.rs`、
+**阅读：** `src/app/mod.rs`、
+`src/app/{event_loop,window_event,spawn_pane,keymap_dispatch,path_target,tear_out}.rs`、
 `src/shell.rs`。
 
-## 平台与未来二进制
+## 平台与独立 crate
 
 ### `sonicterm-mac`
 
-**职责：** macOS 二进制、AppKit 设置、NSMenu、NSPasteboard/tab drag 与平台 package 入口。
+**职责：** macOS 二进制与 AppKit 胶水，包括启动、NSMenu、打开文档事件、
+NSPasteboard 标签页交接、NSWindow 设置和 app bundle 入口。
 
-**依赖：** app-core、app、cfg、logging。
+**第一方依赖：** `sonicterm-app`、`sonicterm-app-core`、`sonicterm-cfg`、
+`sonicterm-logging`。
 
-**阅读：** `src/{main,menubar,os_drag_mac,tab_drag_os}.rs`。
+**阅读：** `src/{main,menubar,open_documents,os_drag_mac,tab_drag_os}.rs`。
+原生边界见[平台集成](Platform-Integration)。
 
 ### `sonicterm-windows`
 
-**职责：** Windows 二进制、DPI/Win32 设置、muda menu、DWM backdrop、OLE tab drag/drop、
-Windows software-present support、resource 与 WiX packaging。本地 PTY/ConPTY transport 仍隐藏在 `sonicterm-io` 后。
+**职责：** Windows 二进制与 Win32 界面胶水，包括 DPI 设置、CLI、`muda` 菜单、
+DWM backdrop、OLE 标签页拖放、软件呈现支持、Win32 资源和 WiX metadata。
+ConPTY 仍封装在 `sonicterm-io` 后。
 
-**依赖：** app-core、app、cfg、logging、types。
+**第一方依赖：** `sonicterm-app`、`sonicterm-app-core`、`sonicterm-cfg`、
+`sonicterm-logging`、`sonicterm-types`。
 
-**阅读：** `src/{main,backdrop,menubar,os_drag_win,software_presenter}.rs`、`build.rs`、`wix/main.wxs`。
+**阅读：** `src/{main,cli,startup,backdrop,menubar,os_drag_win,software_presenter}.rs`、
+`build.rs`、`wix/main.wxs`。
 
 ### `sonicterm-linux`
 
-**职责：** Linux `sonicterm` 二进制、X11/Wayland desktop identity、生产启动与诊断、
-打包字体 preflight、Linux capability normalization，以及 desktop/AppStream 打包 metadata。
-不支持的原生菜单、通知、backdrop、前台进程标题和跨进程 tab drag hook 会安全降级。
+**职责：** 发布用 Linux `sonicterm` 二进制，包括 X11/Wayland identity、能力收敛、
+诊断、打包字体预检和 desktop/AppStream metadata。
 
-**依赖：** app-core、app、cfg、engine、logging。
+**第一方依赖：** `sonicterm-app`、`sonicterm-app-core`、`sonicterm-cfg`、
+`sonicterm-engine`、`sonicterm-logging`。
 
-**阅读：** `src/main.rs`、`resources/` 与 `scripts/make-linux-packages.sh`。
-
-### `sonicterm-logging`
-
-**职责：** rolling file/stderr tracing、保留策略、panic hook、crash dump、signal/exit tracing 和规范 process-exit funnel。
-
-**被依赖：** cfg、app、平台二进制。
-
-**阅读：** `src/{lib,config,sinks,cleanup,crash,exit_trace,path}.rs`。
+**阅读：** `src/main.rs`、`resources/`。
 
 ### `sonicterm-mux`
 
-**职责：** 实验性独立持久 PTY multiplexer daemon，包含 framed bincode protocol、原始字节 replay ring 和
-attach/input/resize/kill 操作。
+**职责：** 独立的持久 PTY multiplexer daemon，提供 framed bincode 协议、原始字节
+回放环，以及 attach/input/resize/kill 操作。它属于 workspace，但 GUI 不依赖它，
+发布包也不包含它。
 
-**依赖：** IO。**被依赖：** 当前无 GUI/平台 crate；release workflow 不打包。
+**第一方依赖：** `sonicterm-io`。
 
 **阅读：** `src/{main,proto,frame,server}.rs`。
 
-## Feature 与发布状态
-
-| Surface | 状态 |
-| --- | --- |
-| 本地 PTY 终端 | 已发布 |
-| macOS Apple Silicon + Intel DMG | 已发布 |
-| Windows x64 MSI | 已发布 |
-| Linux x86_64 deb 与 tar.gz、X11 与 Wayland | 已发布 |
-| SSH transport | 可选实现接缝；GUI 连接未完成 |
-| `sonicterm-mux` | workspace/未来 daemon；未发布 |
-
-每个 crate 都有本地 `CLAUDE.md`，记录 guardrail 与 local gate。
+每个 crate 都有本地 `CLAUDE.md`，记录约束和本地 gate。安装包布局见[打包](Packaging)；
+CI 与发布行为见[开发与发布](Development-and-Release)。

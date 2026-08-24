@@ -2,109 +2,47 @@
 
 ## English
 
-> Canonical packaging instructions:
-> [Packaging](Packaging).
-> Canonical release boundary:
-> [Architecture Internals](Architecture-Internals).
+This page owns contributor gates, pull-request CI, release publication, and the
+one-way GitHub Wiki mirror. Crate responsibilities belong on
+[Crate Reference](Crate-Reference), local package commands and layouts on
+[Packaging](Packaging), native boundaries on
+[Platform Integration](Platform-Integration), and diagnostic fields on
+[Logging](Logging).
 
-## Repository layout
+## Repository and toolchain
 
 ```text
-Cargo.toml                 workspace members, shared version/dependencies/lints
-crates/                    24 first-party Rust crates
-assets/                    fonts, themes, keymaps, icons, i18n, screenshots
-wiki/                      canonical bilingual documentation, all of it
-scripts/                   flat first-party shell/PowerShell automation
-.github/                   CI, release, issue, PR, and dependency automation
+Cargo.toml     workspace members, shared package metadata, dependencies, profiles, lints
+crates/        24 first-party Rust crates
+assets/        fonts, themes, keymaps, icons, localization, screenshots
+wiki/          canonical bilingual documentation
+scripts/       flat first-party shell and PowerShell automation
+.github/       CI, release, wiki publication, issue, PR, and dependency automation
 ```
 
-The workspace uses Rust edition 2021 and a pinned minimum Rust version from the
-root manifest. `rust-toolchain.toml` selects stable with rustfmt and clippy.
-`Cargo.toml [workspace.package].version` is authoritative for every first-party
-crate and internal path requirement.
+The workspace uses resolver 2, Rust edition 2021, and minimum Rust 1.95.
+`rust-toolchain.toml` selects stable with rustfmt and clippy. The authoritative
+version is `Cargo.toml [workspace.package].version`; every workspace package and
+internal path requirement uses it.
 
-## Build and run
+Build or run the platform entry point on its native host:
 
 ```sh
 cargo build
 cargo run -p sonicterm-mac       # macOS
 cargo run -p sonicterm-windows   # Windows
-cargo run -p sonicterm-linux     # Linux; binary name is sonicterm
+cargo run -p sonicterm-linux     # Linux; executable name: sonicterm
 ```
 
-Windows CI and release builds install static Cairo through vcpkg. macOS release
-builders install Cairo and pkg-config through Homebrew. Ubuntu 22.04 builders
-install Cairo, Fontconfig, X11, Wayland, Mesa Vulkan/lavapipe, Xvfb, Weston, and
-Debian package tools. Native Fontconfig, FreeType, HarfBuzz, AppKit, Win32,
-X11/Wayland, and installer behavior require their relevant platform or build
-boundary; do not replace those checks with empty symbol tests.
-
-## Crate-local guidance
-
-Every crate has a local `CLAUDE.md` describing purpose, key files, local gate,
-guardrails, and cross-references. Read the root instructions and the relevant
-crate instructions before changing a boundary.
-
-The short crate map is [Crate Reference](Crate-Reference) and
-[Crate Reference](Crate-Reference).
-
-## Test organization
-
-Unit tests follow one exact flat sibling convention:
-
-```text
-foo.rs
-foo_tests.rs
-```
-
-`foo.rs` declares:
-
-```rust
-#[cfg(test)]
-#[path = "foo_tests.rs"]
-mod foo_tests;
-```
-
-Crate roots use `lib_tests.rs` or `main_tests.rs`. Do not create inline
-`mod tests`, generic `tests.rs`, or `<module>/tests.rs`. A crate's `tests/`
-directory is reserved for genuine integration tests that exercise public or
+Every crate has a local `CLAUDE.md`. Unit tests use the flat sibling pattern
+`foo.rs` + `foo_tests.rs`, declared with `#[cfg(test)] #[path =
+"foo_tests.rs"] mod foo_tests;`. Crate roots use `lib_tests.rs` or
+`main_tests.rs`; `tests/` is reserved for integration tests through public or
 cross-crate behavior.
 
-The test surface includes:
+## Local verification gate
 
-- reducer intent/effect contracts;
-- VT control-sequence and same-frame dirty-row regressions;
-- grid wide-cell, scrollback, line-storage, and hyperlink behavior;
-- UI tabs/search/selection/IME/pane layout;
-- text atlas and row-cache behavior;
-- GPU pure damage/color/software-composition helpers;
-- app cross-window, redraw, broadcast, resize, and update flows;
-- platform-specific CLI and software-present primitives.
-
-## Authored Rust comment contract
-
-First-party Rust comments are part of the checked source contract. Effectively
-public authored functions and public trait functions require concise purpose
-Rustdoc; public unsafe functions also require a `# Safety` section. Objective
-control-flow boundaries require substantive `// When:` rationale, while
-mechanical value selectors remain advisories. Unsafe boundaries require
-`// SAFETY:`, functions that order distinct locks require `// Lock order:`,
-non-`SeqCst` atomic protocols require `// Ordering:`, and `Drop`
-implementations require `// Lifecycle:`.
-
-Each marker stays at the exact checker-required anchor, names the relevant
-identifiers, and is limited to two comment lines and 160 characters. Comments
-describe current behavior and why the boundary exists, never issue, pull-request,
-or authoring history. Vendored, generated, preserved-upstream, build, and
-ordinary test contexts are excluded from non-safety rules; unsafe constructs in
-test code still require `// SAFETY:`. Run
-`scripts/check-authored-rust-comments.sh` to execute the checker's contract tests
-before scanning the repository.
-
-## Local gates
-
-The complete local verification set documented by the architecture and PR
-template is:
+Run the repository gate to the end:
 
 ```sh
 cargo fmt --all --check
@@ -112,10 +50,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-io --no-deps --features ssh
-cargo metadata --no-deps --format-version 1
 cargo test --workspace --lib --bins
-# Windows only: deterministic DX12 WARP allocator baseline
-cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture
 bash scripts/check-authored-rust-comments.sh
 bash scripts/check-no-raw-process-exit.sh
 bash scripts/check-rust-version.sh
@@ -132,370 +67,254 @@ bash scripts/test-wiki-publish.sh
 scripts/rust-logic-coverage.sh
 ```
 
-The root `CLAUDE.md` is authoritative for this gate; CI also runs the
-resource-evidence, soak, and wiki-publisher checks listed here. The WARP command
-is Windows-only and runs explicitly in Windows CI and Windows release unit
-tests. It requests a headless DX12 CPU fallback, requires WARP and an allocator
-report, then compares the old default policy with the production software-adapter
-policy. Missing capability or report data and reserve/largest-block threshold
-failures fail the gate. Note that `cargo test --workspace --lib --bins` excludes
-integration tests — the cross-crate suites, including the counting-allocator
-heap-truth tests, run under `scripts/rust-logic-coverage.sh`.
+The separate SSH clippy and Rustdoc commands are required because
+`--all-targets` does not enable optional features. `cargo test --workspace --lib
+--bins` excludes every integration-test binary. `check-workspace-crates.sh`
+derives all members from Cargo metadata and runs each package's library/binary
+and `--tests` surface; do not stop after the workspace unit command.
 
-Release preparation additionally builds the shipping platform binary, for
-example:
+The authored-comment checker enforces purpose Rustdoc on effectively public
+functions and public trait functions, `# Safety` on public unsafe functions, and
+anchored `// When:`, `// SAFETY:`, `// Lock order:`, `// Ordering:`, and
+`// Lifecycle:` contracts. `check-no-raw-process-exit.sh` requires shipping code
+to exit through `sonicterm_logging::exit_with`.
+
+On Windows, also run the release-blocking deterministic allocator test:
+
+```sh
+cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture
+```
+
+It requires a DX12 WARP adapter and allocator report. Production reserved bytes
+must be below 64 MiB, the largest block below 128 MiB, and production reserved
+bytes below the old-default control. Windows CI is the only reliable compiler
+and runner for `#![cfg(target_os = "windows")]` tests; on macOS such files can
+compile to no tests. Cross-compiling is unavailable because the Cairo build is
+host-architecture-specific.
+
+Release preparation also builds the shipping platform binary, for example:
 
 ```sh
 cargo build --release -p sonicterm-mac
 ```
 
-`check-no-raw-process-exit.sh` requires shipped process exits to pass through
-`sonicterm_logging::exit_with`. `check-workspace-crates.sh` derives all members
-from Cargo metadata and runs each crate's supported unit/build gate.
-`rust-logic-coverage.sh` uses `cargo llvm-cov`, excludes native/non-deterministic
-boundaries by explicit regex, and requires 80% line coverage of deterministic
-Rust logic.
+## Pull-request and main CI
 
-## Pull-request CI
+`.github/workflows/ci.yml` runs on pull requests and pushes to `main`.
 
-`.github/workflows/ci.yml` runs on pull requests and pushes to `main`. The macOS
-14 / Windows latest matrix retains platform-native gates, while an Ubuntu 22.04
-container runs the full workspace and per-crate gates, builds both Linux package
-formats, and executes each package on X11 and Wayland:
+### macOS 14 and Windows latest
 
-```mermaid
-flowchart TD
-    checkout["checkout + stable Rust"]
-    cairo["Windows: cache/install Cairo with vcpkg"]
-    comments["authored Rust comment contract"]
-    rustdoc["strict workspace + SSH Rustdoc"]
-    exitpolicy["process-exit policy"]
-    wstest["cargo test --workspace --lib --bins"]
-    percrate["per-crate unit/build gate"]
-    hostprobe["host window capability probe"]
-    adapterprobe["adapter classification probe"]
-    churn["renderer churn baseline"]
-    softpresent["Windows only: software presentation capability"]
-    warp["Verify Windows WARP allocator baseline"]
-    selection["Windows only: selection presentation"]
-    notes["release-note unit test"]
-    pty["frozen PTY feasibility evidence check"]
-    inventory["resource inventory verification"]
-    soak["deterministic soak control gate"]
-    baseline["resource baseline evidence collector test + capture"]
-    coverage(["macOS only: install cargo-llvm-cov and enforce coverage"])
-    linuxbuild["Ubuntu 22.04: full clippy/docs/unit/per-crate gates"]
-    linuxpkg["build + validate deb and tar.gz"]
-    linuxx11["packaged tar/deb on X11/Xvfb + lavapipe"]
-    linuxwayland(["packaged tar/deb on Wayland/Weston + lavapipe"])
+Both matrix hosts run:
 
-    checkout --> cairo
-    checkout --> linuxbuild
-    linuxbuild --> linuxpkg
-    linuxpkg --> linuxx11
-    linuxx11 --> linuxwayland
-    cairo --> comments
-    comments --> rustdoc
-    rustdoc --> exitpolicy
-    exitpolicy --> wstest
-    wstest --> percrate
-    percrate --> hostprobe
-    hostprobe --> adapterprobe
-    adapterprobe --> churn
-    churn --> softpresent
-    softpresent --> warp
-    warp --> selection
-    selection --> notes
-    notes --> pty
-    pty --> inventory
-    inventory --> soak
-    soak --> baseline
-    baseline --> coverage
-```
+- rustfmt, workspace clippy, optional-SSH clippy, Cargo metadata, declared
+  Rust-version verification, process-exit and window-owner checks;
+- authored Rust comments, strict workspace and optional-SSH Rustdoc;
+- workspace unit tests and the per-crate library/binary/integration gate;
+- host-window, adapter-classification, and renderer-churn probes;
+- release-note, wiki-publisher, PTY feasibility, resource inventory, soak, and
+  resource-baseline tooling tests, followed by a real resource-baseline capture
+  and artifact upload.
 
-CI runs `cargo fmt --all --check`, the authored Rust comment checker, strict
-workspace Rustdoc, and `cargo clippy --workspace --all-targets` with warnings
-denied. The `sonicterm-io` SSH feature receives separate clippy and strict
-Rustdoc passes because `--all-targets` does not enable optional features. The
-Ubuntu 22.04 job runs those full gates plus every per-crate test/build boundary,
-builds the shipping `sonicterm` binary, validates desktop/AppStream metadata and
-the generated Debian dependency field, and uploads both Linux packages. It then
-runs the extracted tar and installed Debian layouts under X11/Xvfb and headless
-Wayland/Weston with `WGPU_BACKEND=vulkan` and Mesa lavapipe. A smoke cannot pass
-without a real window, GPU initialization, `/bin/sh` PTY marker round-trip, and a
-subsequent native presentation.
-Windows additionally runs the explicit `Verify Windows WARP allocator baseline`
-step, which executes the deterministic `windows_warp_allocator_baseline`
-integration test. It requests DX12 CPU fallback and compares the old
-wgpu default against the production software-adapter memory policy. The gate
-fails without WARP or an allocator report, when production reserved bytes are
-not below 64 MiB, when the largest block is not below 128 MiB, or when
-production reserved bytes do not improve on the control. `deny.toml` is present
-but no `cargo deny check` job enforces it, so dependency policy is checked by
-hand rather than by a gate.
+Windows additionally installs static Cairo through vcpkg and runs software
+presentation capability, WARP allocator, and software-selection presentation
+tests. macOS additionally installs `cargo-llvm-cov` and runs the deterministic
+logic coverage gate.
 
-## Coverage boundary
+### Ubuntu 22.04
 
-Coverage is designed for deterministic Rust logic. The script excludes native
-GPU surfaces, real PTYs/SSH, AppKit/Win32, generated FFI, installer code, and
-similar boundaries where a unit test would not prove the real behavior. Those
-surfaces rely on platform CI, integration tests, release builds, and manual smoke
-checks.
+The Linux container installs Cairo, Fontconfig, X11, Wayland, Mesa
+Vulkan/lavapipe, Xvfb, Weston, and Debian packaging tools. It runs full format,
+clippy, Rustdoc, workspace unit, per-crate, authored-comment, exit, Rust-version,
+window-owner, Linux package, release-asset, release-note, and wiki-publisher
+gates. It then:
 
-The coverage job currently runs only on macOS. Windows-only deterministic logic
-is compiled and tested by Windows CI but does not contribute to the llvm-cov
-threshold.
+1. builds `sonicterm-linux` in release mode;
+2. derives one workspace version from Cargo metadata;
+3. creates and validates the x86_64 `.tar.gz` and `.deb`;
+4. validates desktop/AppStream metadata and runs advisory `lintian`;
+5. runs both package layouts on X11/Xvfb and Wayland/Weston with Vulkan/lavapipe;
+6. uploads the packages, or smoke logs on failure.
 
-## Release sequence
+A package smoke cannot pass without a native window, GPU initialization,
+`/bin/sh` PTY marker round-trip, and a later native frame presentation.
 
-Pushing a matching `v*` tag starts `.github/workflows/release.yml`:
+## Gate blind spots
+
+- `cargo test --workspace --lib --bins` omits integration tests. The per-crate
+  gate is what runs `--tests` for all 24 packages.
+- `rust-logic-coverage.sh` requires 80% line coverage only for its selected
+  deterministic subset. Its ignore regex excludes 11 whole crates, including
+  `sonicterm-app` and `sonicterm-gpu`, plus named native/controller files in
+  other crates. It runs only on macOS CI. A green percentage does not cover
+  native windows, real PTYs/SSH, GPU surfaces, generated FFI, installers, or
+  Windows-only logic.
+- `deny.toml` records advisory, license, source, and wildcard-dependency policy,
+  but no CI job runs `cargo deny check`.
+- Native AppKit, Win32, X11/Wayland, font-discovery, PTY, GPU, and installer
+  behavior still depends on platform tests, package smokes, release builds, and
+  manual use; a symbol-only test cannot prove those boundaries.
+
+## Release workflow
+
+Pushing a tag matching `v<semver>` starts `.github/workflows/release.yml`.
+Owner approval to push the tag is separate from running local packaging.
+Pre-release tags containing `-` are marked prerelease.
 
 ```mermaid
 flowchart TD
     tag["vX.Y.Z tag"]
-    validate["validate tag against every workspace package"]
-    mactest["macOS workspace/per-crate tests"]
-    wintest["Windows workspace/per-crate + WARP/presentation tests"]
-    linuxtest["Ubuntu 22.04 workspace/per-crate/tooling tests"]
-    macbuild["build x86_64 + aarch64 binaries"]
-    dmg["package + register two DMGs"]
-    msi["build + register Windows x64 MSI"]
-    linuxpkg["build + register Linux deb and tar.gz"]
-    linuxsmoke["tar/deb × X11/Wayland runtime smokes"]
-    manifest["consolidate fragments; verify five required tuples + hashes"]
-    notes["generate manifest-driven notes + SHA256SUMS.txt"]
-    publish(["publish exact validated paths"])
+    validate["validate tag against all 24 workspace packages<br/>test release-asset tooling"]
+    mtest["macOS unit + per-crate + release-note tests"]
+    wtest["Windows unit + per-crate + software/WARP/selection tests"]
+    ltest["Ubuntu 22.04 unit + per-crate + Linux/release tooling tests"]
+    macbuild["build x86_64 and aarch64 binaries"]
+    dmg["package and register two DMGs"]
+    msi["build and register x64 MSI"]
+    linux["build, validate, smoke, and register deb + tar.gz"]
+    manifest["consolidate fragments<br/>verify five required tuples and hashes"]
+    notes["generate manifest-driven notes"]
+    publish["publish exact validated paths"]
 
     tag --> validate
-    validate --> mactest
-    validate --> wintest
-    validate --> linuxtest
-    mactest --> macbuild --> dmg
-    wintest --> msi
-    linuxtest --> linuxpkg --> linuxsmoke
+    validate --> mtest
+    validate --> wtest
+    validate --> ltest
+    mtest --> macbuild --> dmg
+    wtest --> msi
+    ltest --> linux
     dmg --> manifest
     msi --> manifest
-    linuxsmoke --> manifest
+    linux --> manifest
     manifest --> notes --> publish
 ```
 
-All three platform chains are release-blocking. In particular,
-`unit-tests-windows → build-windows → publish` keeps the WARP allocator baseline
-in the Windows path, while `unit-tests-linux → package-linux → publish` requires
-both packaged layouts to pass X11 and Wayland smokes before publication.
-Pre-release tags containing `-` are marked prerelease automatically.
+All three platform chains block publication. In particular,
+`unit-tests-windows → build-windows → publish` keeps the WARP allocator gate in
+the MSI path, and `unit-tests-linux → package-linux → publish` requires both
+package layouts to pass both display-system smokes.
 
-### macOS assets
+### Published assets
 
-The workflow publishes:
+The five required package assets are:
 
 - `SonicTerm-<tag>-mac-aarch64.dmg`
 - `SonicTerm-<tag>-mac-x86_64.dmg`
-
-The package includes themes, keymaps, fonts, icons, i18n, app metadata, and an
-ad-hoc signature. Release verification checks each binary's architecture with
-`lipo` before building the DMGs.
-
-### Windows assets
-
-The workflow publishes `SonicTerm-<tag>-windows-x86_64.msi`, built with
-`cargo wix` and WiX 3.14. The MSI contains the executable, themes, keymaps,
-bundled fonts, and shortcuts.
-
-### Linux assets
-
-The workflow publishes:
-
+- `SonicTerm-<tag>-windows-x86_64.msi`
 - `SonicTerm-<tag>-linux-x86_64.deb`
 - `SonicTerm-<tag>-linux-x86_64.tar.gz`
 
-Both come from one staged payload and contain the shipping `sonicterm` binary,
-complete runtime assets, licenses, and README. The Debian package additionally
-installs desktop/AppStream metadata and the hicolor icon.
+Each package job emits a typed fragment containing tag, flat filename,
+platform, architecture, kind, and SHA-256. The publish job downloads only the
+registered package bundles, verifies each file and hash, requires the five
+platform/architecture/kind tuples, rejects duplicate tuples/names and
+unregistered release-like files, then generates:
 
-### Shared assets
+- `release-assets.json`
+- deterministic `SHA256SUMS.txt`, including the manifest hash
+- `release-upload-paths.txt`, the exact list supplied to GitHub Release
 
-Each package job emits typed asset fragments. The publish job downloads only
-those package bundles, revalidates every hash and the five required
-platform/architecture/kind tuples, rejects duplicate or unregistered
-release-like files, and generates `release-assets.json`, deterministic
-`SHA256SUMS.txt`, and an exact upload-path list. Release notes enumerate the
-manifest generically, so adding an optional artifact kind does not require a
-release-note script change.
+Release notes enumerate the manifest and commits since the preceding tag. The
+GitHub Release receives the five packages, `release-assets.json`, and
+`SHA256SUMS.txt`; fragment files and `release-upload-paths.txt` are internal
+workflow data.
 
 ## Manual release checks
 
-Before a release, verify user-facing README, canonical docs, and all tracked
-`wiki/` pages against changed config, input, logging, palette, rendering, and
-window behavior. Recommended smoke checks include:
+Before pushing a tag:
 
-- launch the packaged app;
-- exercise Vim/nvim alternate-screen entry, scrolling, and exit;
-- create busy multi-pane output;
-- tear a tab into a child window, close it, and confirm surviving windows remain
-  responsive and child processes are reaped;
-- inspect hardware/software adapter logs where relevant.
+- verify the workspace version and intended tag;
+- run the full gate and native release build;
+- compare README and every affected wiki page with current config, logging,
+  input, palette, rendering, window, platform, and package behavior;
+- launch the package, exercise alternate-screen entry/exit, scrolling, busy
+  panes, tab tear-out and child cleanup, and inspect adapter logs where relevant.
 
-## Documentation and Wiki workflow
+After pushing, verify every release job and the exact uploaded assets and
+checksums. A local package build is not publication.
 
-The repository-tracked `wiki/` directory is the only source of truth for
-SonicTerm's bilingual user documentation. Edit the relevant Markdown pages in
-the same branch and pull request as the behavior they describe so code and user
-guidance are reviewed and versioned together.
+## Wiki source and publication
 
-`.github/workflows/publish-wiki.yml` runs after every push to `main` — including
-every merged pull request — and can also be run with `workflow_dispatch`. It
-publishes the directory as a one-way GitHub Wiki mirror. `scripts/publish-wiki.sh`
-replaces the flat Markdown page set on the wiki's `master` branch, which carries
-page additions, changes, renames, and deletions; an unchanged mirror succeeds
-without creating a commit. Browser edits are not source and are overwritten by
-the next publication.
+The tracked `wiki/` directory is the only documentation source of truth. Every
+page has one `## English` half and one `## 中文` half with matching heading-depth
+order and equivalent facts. Cross-page source links use bare page names. The
+checker also requires a flat Markdown tree, valid links, navigation from each
+Home language half to every page, and all Cargo workspace package names in both
+Crate Reference halves:
 
-The workflow authenticates with its short-lived, repository-scoped
-`GITHUB_TOKEN` and grants only `contents: write`; no PAT, GitHub App key, or
-long-lived secret is stored. Do not replace it with an account-wide classic PAT.
+```sh
+python3 scripts/check-wiki.py
+bash scripts/test-wiki-publish.sh
+```
 
-After every pull request merges, verify the newest `publish-wiki.yml` run
-corresponds to the merge SHA. When `wiki/` changed, the newest wiki commit must
-also correspond to that SHA; otherwise the run should report a successful no-op
-without creating a wiki commit. Then inspect the live Wiki and click representative
-English and Chinese navigation links. A successful workflow exit alone does not
-prove the published pages render and link correctly.
+`.github/workflows/publish-wiki.yml` runs after every push to `main`, including
+every merged pull request, and by `workflow_dispatch`. It uses the short-lived,
+repository-scoped `GITHUB_TOKEN` with `contents: write` to clone
+`D0n9X1n/SonicTerm.wiki.git`. `scripts/publish-wiki.sh` replaces the flat
+Markdown set and commits `Publish wiki from <source-sha>` only when content
+changed. The workflow pushes `HEAD:master`; the Wiki's rendered branch is
+`master`. Renames and deletions propagate, and an unchanged mirror is a
+successful no-op.
 
-## Other automation
+Browser edits are not source and are overwritten by the next publication. Do
+not use a PAT, GitHub App private key, or other long-lived credential for this
+workflow.
 
-| File | Purpose |
-| --- | --- |
-| `scripts/check-authored-rust-comments.sh` | test and enforce first-party Rust comment contracts |
-| `scripts/make-linux-packages.sh` | build reproducible Linux tar and Debian packages from one payload |
-| `scripts/smoke-linux-packages.sh` | run packaged tar/deb layouts on X11 and Wayland with lavapipe |
-| `scripts/prepare-release-assets.py` | validate tag versions, register assets, and consolidate manifest/checksums/uploads |
-| `scripts/test-linux-packages.sh` | validate Linux source and built-package contracts |
-| `scripts/test-release-assets.sh` | validate generic release fragments and exact upload selection |
-| `scripts/release-notes.sh` | manifest-driven release notes and asset list |
-| `scripts/test-release-notes.sh` | throwaway-repository unit test for notes |
-| `scripts/publish-wiki.sh` | deletion-aware flat wiki mirror builder |
-| `scripts/test-wiki-publish.sh` | throwaway-repository wiki publication test |
-| `.github/workflows/publish-wiki.yml` | publish `wiki/` to the GitHub Wiki after merge |
-| `scripts/bake-icons.sh` | regenerate platform icon exports |
-| `scripts/regenerate-freetype.sh` | regenerate FreeType bindings |
-| `scripts/regenerate-harfbuzz.sh` | regenerate HarfBuzz bindings |
-| `scripts/setup-windows-cairo.ps1` | install/export static Cairo via vcpkg |
-| `deny.toml` | advisory, license, source, and wildcard-dependency policy |
-| `.github/dependabot.yml` | weekly dependency update policy |
+After every merge, verify the newest publication run corresponds to the merge
+SHA:
 
-## Where to read the code
+```sh
+gh run list --workflow=publish-wiki.yml --limit 3
+gh run view <run-id>
+tmp="$(mktemp -d)"
+git clone "https://github.com/D0n9X1n/SonicTerm.wiki.git" "$tmp/wiki"
+git -C "$tmp/wiki" log -1 --oneline
+ls "$tmp/wiki"
+```
 
-| Topic | Primary paths |
-| --- | --- |
-| Contributor workflow | `CONTRIBUTING.md`, `.github/pull_request_template.md` |
-| CI | `.github/workflows/ci.yml` |
-| Wiki publication | `.github/workflows/publish-wiki.yml`, `scripts/publish-wiki.sh` |
-| Release | `.github/workflows/release.yml` |
-| Coverage | `scripts/rust-logic-coverage.sh` |
-| Per-crate gate | `scripts/check-workspace-crates.sh` |
-| Exit policy | `scripts/check-no-raw-process-exit.sh` |
-| macOS package | `scripts/make-macos-dmg.sh`, `Packaging` |
-| Windows package | `crates/sonicterm-windows/wix/main.wxs`, `Packaging` |
-| Linux package/runtime smoke | `scripts/{make,smoke,test}-linux-packages.sh`, `Packaging` |
-| Release manifest | `scripts/prepare-release-assets.py`, `scripts/test-release-assets.sh` |
-| Wiki publication rule | root `CLAUDE.md` under “Wiki” |
+When `wiki/` changed, the newest Wiki commit must identify that merge SHA. When
+it did not change, the run should report a successful no-op without a new Wiki
+commit. Finally open the live Wiki and click representative English and Chinese
+links; workflow success alone does not prove rendering and navigation.
 
 ## 中文
 
-> 规范打包说明：
-> [Packaging](Packaging)。
-> 规范发布边界：
-> [Architecture Internals](Architecture-Internals)。
+本页负责贡献者 gate、pull-request CI、release 发布和 GitHub Wiki 单向镜像。Crate 职责见
+[Crate 参考](Crate-Reference)，本地打包命令与布局见[打包](Packaging)，原生边界见
+[平台集成](Platform-Integration)，诊断字段见[日志](Logging)。
 
-## 仓库布局
+## 仓库与工具链
 
 ```text
-Cargo.toml                 workspace member、共享版本/依赖/lint
-crates/                    24 个第一方 Rust crate
-assets/                    字体、主题、keymap、icon、i18n、截图
-wiki/                      规范双语文档，全部文档均在此
-scripts/                   扁平第一方 shell/PowerShell 自动化
-.github/                   CI、发布、issue、PR 和依赖自动化
+Cargo.toml     workspace member、共享 package metadata、依赖、profile、lint
+crates/        24 个第一方 Rust crate
+assets/        字体、主题、键位、图标、本地化、截图
+wiki/          规范双语文档
+scripts/       扁平的第一方 shell 与 PowerShell 自动化
+.github/       CI、release、Wiki 发布、issue、PR 与依赖自动化
 ```
 
-workspace 使用 Rust edition 2021，最低 Rust 版本由根 manifest 固定。`rust-toolchain.toml`
-选择 stable，并安装 rustfmt 与 clippy。`Cargo.toml [workspace.package].version` 是全部第一方
-crate 和内部 path requirement 的权威版本。
+Workspace 使用 resolver 2、Rust edition 2021，最低 Rust 版本为 1.95。
+`rust-toolchain.toml` 选择 stable，并安装 rustfmt 与 clippy。权威版本位于
+`Cargo.toml [workspace.package].version`；所有 workspace package 与内部 path requirement
+都使用该版本。
 
-## 构建与运行
+请在对应原生主机上构建或运行平台入口：
 
 ```sh
 cargo build
 cargo run -p sonicterm-mac       # macOS
 cargo run -p sonicterm-windows   # Windows
-cargo run -p sonicterm-linux     # Linux; binary name is sonicterm
+cargo run -p sonicterm-linux     # Linux；可执行文件名为 sonicterm
 ```
 
-Windows CI/release 经 vcpkg 安装静态 Cairo；macOS release builder 经 Homebrew 安装 Cairo 与
-pkg-config。Ubuntu 22.04 builder 会安装 Cairo、Fontconfig、X11、Wayland、Mesa
-Vulkan/lavapipe、Xvfb、Weston 与 Debian 打包工具。Fontconfig、FreeType、HarfBuzz、
-AppKit、Win32、X11/Wayland 和 installer 行为需要相应平台/build boundary，不能用空洞的
-符号测试代替。
+每个 crate 都有本地 `CLAUDE.md`。单元测试采用扁平 sibling 形式 `foo.rs` +
+`foo_tests.rs`，并由 `#[cfg(test)] #[path = "foo_tests.rs"] mod foo_tests;` 声明。
+Crate root 使用 `lib_tests.rs` 或 `main_tests.rs`；`tests/` 只用于通过 public API 或跨
+crate 行为的 integration test。
 
-## Crate 本地说明
+## 本地验证 gate
 
-每个 crate 都有本地 `CLAUDE.md`，记录 purpose、关键文件、local gate、guardrail 和 cross-reference。
-修改边界前先阅读根说明和相关 crate 说明。
-
-简短 crate 映射见 [Crate 参考](Crate-Reference) 与
-[Crate Reference](Crate-Reference)。
-
-## 测试组织
-
-单元测试使用唯一的扁平 sibling 规范：
-
-```text
-foo.rs
-foo_tests.rs
-```
-
-`foo.rs` 中声明：
-
-```rust
-#[cfg(test)]
-#[path = "foo_tests.rs"]
-mod foo_tests;
-```
-
-crate root 使用 `lib_tests.rs` 或 `main_tests.rs`。不要创建 inline `mod tests`、通用 `tests.rs`
-或 `<module>/tests.rs`。crate 的 `tests/` 目录只用于真正通过 public API 或跨 crate 行为的 integration test。
-
-测试覆盖包括：
-
-- reducer intent/effect 契约；
-- VT 控制序列与同帧脏行回归；
-- grid 宽字符、scrollback、line storage、hyperlink；
-- UI 标签页、搜索、选区、IME、pane layout；
-- text atlas 与 row cache；
-- GPU 纯 damage/color/software composition helper；
-- app 跨窗口、redraw、broadcast、resize 与 update flow；
-- 平台专属 CLI 与 software-present primitive。
-
-## 第一方 Rust 注释契约
-
-第一方 Rust 注释属于受检查的源码契约。有效公开的第一方函数和公开 trait
-函数必须有简洁的用途 Rustdoc；公开 unsafe 函数还必须有 `# Safety` 章节。
-客观控制流边界必须有实质性的 `// When:` 理由，而机械式值选择器只作为
-advisory。unsafe 边界必须有 `// SAFETY:`；对不同锁规定获取顺序的函数必须有
-`// Lock order:`；使用非 `SeqCst` 原子顺序的协议必须有 `// Ordering:`；
-`Drop` 实现必须有 `// Lifecycle:`。
-
-每个 marker 必须位于 checker 要求的准确锚点，点名相关 identifier，并限制在
-两行注释、160 个字符以内。注释只描述当前行为以及边界存在的原因，不记录 issue、
-pull request 或编写历史。vendored、generated、保留的 upstream、build 和普通 test
-上下文不执行非 safety 规则；test 代码中的 unsafe construct 仍需 `// SAFETY:`。
-运行 `scripts/check-authored-rust-comments.sh` 时，会先执行 checker 契约测试，再扫描
-整个仓库。
-
-## 本地 gate
-
-架构文档与 PR template 记录的完整本地验证集合：
+请把仓库 gate 完整运行到最后：
 
 ```sh
 cargo fmt --all --check
@@ -503,10 +322,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-io --no-deps --features ssh
-cargo metadata --no-deps --format-version 1
 cargo test --workspace --lib --bins
-# Windows only: deterministic DX12 WARP allocator baseline
-cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture
 bash scripts/check-authored-rust-comments.sh
 bash scripts/check-no-raw-process-exit.sh
 bash scripts/check-rust-version.sh
@@ -523,232 +339,187 @@ bash scripts/test-wiki-publish.sh
 scripts/rust-logic-coverage.sh
 ```
 
-根 `CLAUDE.md` 是这组 gate 的权威来源；CI 也会运行这里列出的资源证据、soak 和
-Wiki publisher 检查。WARP 命令仅适用于 Windows，并在 Windows CI 与 Windows release
-unit tests 中显式运行。它请求 headless DX12 CPU fallback，要求得到 WARP 与 allocator
-report，再比较旧的默认策略和生产环境的软件 adapter 策略。缺少 capability/report，
-或 reserve/largest-block threshold 失败，都会让 gate 失败。注意
-`cargo test --workspace --lib --bins` 不包含集成测试——跨 crate 套件（含计数分配器
-heap-truth 测试）由 `scripts/rust-logic-coverage.sh` 执行。
+必须单独运行 SSH clippy 与 Rustdoc，因为 `--all-targets` 不会启用 optional feature。
+`cargo test --workspace --lib --bins` 会排除所有 integration-test binary。
+`check-workspace-crates.sh` 从 Cargo metadata 推导 member，并对每个 package 运行
+library/binary 和 `--tests`；不能在 workspace unit command 后就停止。
 
-release prep 还要构建发布平台二进制，例如：
+第一方注释 checker 要求有效公开函数和公开 trait 函数带用途 Rustdoc，公开 unsafe 函数带
+`# Safety`，并检查准确锚定的 `// When:`、`// SAFETY:`、`// Lock order:`、
+`// Ordering:` 和 `// Lifecycle:` 契约。`check-no-raw-process-exit.sh` 要求发布代码通过
+`sonicterm_logging::exit_with` 退出。
+
+Windows 还要运行会阻断 release 的确定性 allocator 测试：
+
+```sh
+cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture
+```
+
+它要求 DX12 WARP adapter 和 allocator report。生产策略 reserved bytes 必须低于 64 MiB，
+最大 block 低于 128 MiB，且生产策略 reserved bytes 低于旧默认 control。只有 Windows CI
+能可靠编译并运行 `#![cfg(target_os = "windows")]` 测试；在 macOS 上，这类文件可能编译成
+零个测试。Cairo 构建依赖主机架构，因此无法用 cross-compile 替代。
+
+Release 准备还要构建发布平台二进制，例如：
 
 ```sh
 cargo build --release -p sonicterm-mac
 ```
 
-`check-no-raw-process-exit.sh` 要求发布代码只通过 `sonicterm_logging::exit_with` 退出。
-`check-workspace-crates.sh` 从 Cargo metadata 推导 member 并运行各 crate 可支持的 unit/build gate。
-`rust-logic-coverage.sh` 使用 `cargo llvm-cov`，通过显式 regex 排除原生/非确定性边界，并要求确定性 Rust logic
-达到 80% line coverage。
+## Pull-request 与 main CI
 
-## Pull-request CI
+`.github/workflows/ci.yml` 在 pull request 和推送到 `main` 时运行。
 
-`.github/workflows/ci.yml` 在 PR 与推送到 `main` 时运行。macOS 14 / Windows
-latest matrix 保留平台原生 gate；Ubuntu 22.04 container 则运行完整 workspace 与
-per-crate gate，构建两种 Linux package，并在 X11 与 Wayland 上执行每一种 package：
+### macOS 14 与 Windows latest
 
-```mermaid
-flowchart TD
-    checkout["checkout + stable Rust"]
-    cairo["Windows：缓存/安装 vcpkg Cairo"]
-    comments["第一方 Rust 注释契约"]
-    rustdoc["严格 workspace + SSH Rustdoc"]
-    exitpolicy["process-exit policy"]
-    wstest["cargo test --workspace --lib --bins"]
-    percrate["per-crate unit/build gate"]
-    hostprobe["host window capability probe"]
-    adapterprobe["adapter classification probe"]
-    churn["renderer churn baseline"]
-    softpresent["仅 Windows：software presentation capability"]
-    warp["Verify Windows WARP allocator baseline"]
-    selection["仅 Windows：selection presentation"]
-    notes["release-note unit test"]
-    pty["冻结的 PTY feasibility evidence 校验"]
-    inventory["resource inventory 校验"]
-    soak["确定性 soak control gate"]
-    baseline["resource baseline evidence 收集器测试与采集"]
-    coverage(["仅 macOS：安装 cargo-llvm-cov 并执行 coverage gate"])
-    linuxbuild["Ubuntu 22.04：完整 clippy/doc/unit/per-crate gate"]
-    linuxpkg["构建并验证 deb 与 tar.gz"]
-    linuxx11["打包 tar/deb：X11/Xvfb + lavapipe"]
-    linuxwayland(["打包 tar/deb：Wayland/Weston + lavapipe"])
+两个 matrix host 都运行：
 
-    checkout --> cairo
-    checkout --> linuxbuild
-    linuxbuild --> linuxpkg
-    linuxpkg --> linuxx11
-    linuxx11 --> linuxwayland
-    cairo --> comments
-    comments --> rustdoc
-    rustdoc --> exitpolicy
-    exitpolicy --> wstest
-    wstest --> percrate
-    percrate --> hostprobe
-    hostprobe --> adapterprobe
-    adapterprobe --> churn
-    churn --> softpresent
-    softpresent --> warp
-    warp --> selection
-    selection --> notes
-    notes --> pty
-    pty --> inventory
-    inventory --> soak
-    soak --> baseline
-    baseline --> coverage
-```
+- rustfmt、workspace clippy、optional-SSH clippy、Cargo metadata、声明 Rust 版本校验、
+  process-exit 与 window-owner 检查；
+- 第一方 Rust 注释、严格 workspace 与 optional-SSH Rustdoc；
+- workspace unit test 和逐 crate library/binary/integration gate；
+- host-window、adapter 分类和 renderer churn probe；
+- release-note、Wiki publisher、PTY feasibility、resource inventory、soak 和
+  resource-baseline 工具测试，随后采集真实 resource baseline 并上传 artifact。
 
-CI 会运行 `cargo fmt --all --check`、第一方 Rust 注释 checker、严格 workspace
-Rustdoc，以及 warning 视为错误的 `cargo clippy --workspace --all-targets`。由于
-`--all-targets` 不会启用 optional feature，`sonicterm-io` 的 `ssh` feature 另有
-clippy 和严格 Rustdoc gate。Ubuntu 22.04 job 会运行这些完整 gate 和每个 crate 的
-测试/构建边界，构建发布用 `sonicterm` 二进制，验证 desktop/AppStream metadata 与生成的
-Debian dependency field，并上传两种 Linux package。随后，它会让解压后的 tar 与安装后的
-Debian layout 分别在 X11/Xvfb 与 headless Wayland/Weston 下运行，设置
-`WGPU_BACKEND=vulkan` 并使用 Mesa lavapipe。没有真实窗口、GPU 初始化、`/bin/sh`
-PTY marker 往返和后续原生呈现，smoke 就不能通过。Windows 还会运行显式的
-`Verify Windows WARP allocator baseline` 步骤，执行确定性的
-`windows_warp_allocator_baseline` integration test。它请求 DX12 CPU fallback，并比较
-旧的 wgpu 默认策略与生产环境的软件 adapter 内存策略。没有 WARP 或 allocator report、
-生产策略的 reserved bytes 不低于 64 MiB、最大 block 不低于 128 MiB，或生产策略的
-reserved bytes 未优于 control，都会使 gate 失败。`deny.toml` 存在，但没有
-`cargo deny check` job 强制执行它，因此依赖策略靠人工检查，而不是由 gate 保证。
+Windows 还通过 vcpkg 安装静态 Cairo，并运行 software presentation capability、WARP
+allocator 和 software-selection presentation 测试。macOS 还安装 `cargo-llvm-cov`，运行
+确定性 logic coverage gate。
 
-## Coverage 边界
+### Ubuntu 22.04
 
-coverage 面向确定性 Rust logic。脚本排除原生 GPU surface、真实 PTY/SSH、AppKit/Win32、生成 FFI、
-installer 等单元测试无法证明真实行为的边界。这些 surface 依赖平台 CI、integration test、release build 和手工 smoke check。
+Linux container 会安装 Cairo、Fontconfig、X11、Wayland、Mesa Vulkan/lavapipe、Xvfb、
+Weston 和 Debian 打包工具。它运行完整 format、clippy、Rustdoc、workspace unit、逐 crate、
+第一方注释、exit、Rust 版本、window-owner、Linux package、release-asset、release-note 和
+Wiki publisher gate。随后：
 
-coverage job 当前只在 macOS 运行。Windows-only 确定性 logic 会在 Windows CI 编译和测试，但不计入 llvm-cov threshold。
+1. 以 release 模式构建 `sonicterm-linux`；
+2. 从 Cargo metadata 推导唯一 workspace 版本；
+3. 生成并验证 x86_64 `.tar.gz` 与 `.deb`；
+4. 验证 desktop/AppStream metadata，并以 advisory 方式运行 `lintian`；
+5. 用 Vulkan/lavapipe 在 X11/Xvfb 和 Wayland/Weston 上运行两种 package layout；
+6. 上传 package，失败时上传 smoke log。
 
-## 发布顺序
+没有原生窗口、GPU 初始化、`/bin/sh` PTY marker 往返和之后的原生 frame 呈现，
+package smoke 就不能通过。
 
-push 匹配的 `v*` tag 会启动 `.github/workflows/release.yml`：
+## Gate 盲区
+
+- `cargo test --workspace --lib --bins` 不运行 integration test；逐 crate gate 才会对
+  24 个 package 运行 `--tests`。
+- `rust-logic-coverage.sh` 只对选中的确定性代码子集要求 80% line coverage。其 ignore
+  regex 完全排除 11 个 crate，包括 `sonicterm-app` 与 `sonicterm-gpu`，还排除其它 crate
+  中点名的原生/控制器文件。它只在 macOS CI 运行。Coverage 通过不能证明原生窗口、真实
+  PTY/SSH、GPU surface、生成 FFI、installer 或 Windows-only logic。
+- `deny.toml` 记录 advisory、license、source 与 wildcard dependency policy，但没有 CI job
+  运行 `cargo deny check`。
+- AppKit、Win32、X11/Wayland、字体发现、PTY、GPU 和 installer 的真实行为仍依赖平台测试、
+  package smoke、release build 与手工使用；只检查 symbol 不能证明这些边界。
+
+## Release workflow
+
+推送符合 `v<semver>` 的 tag 会启动 `.github/workflows/release.yml`。所有者批准推送 tag
+与本地运行打包是两件事。含 `-` 的 pre-release tag 会自动标为 prerelease。
 
 ```mermaid
 flowchart TD
     tag["vX.Y.Z tag"]
-    validate["校验 tag 与全部 workspace package 版本"]
-    mactest["macOS workspace/per-crate 测试"]
-    wintest["Windows workspace/per-crate + WARP/presentation 测试"]
-    linuxtest["Ubuntu 22.04 workspace/per-crate/tooling 测试"]
-    macbuild["构建 x86_64 + aarch64 binary"]
+    validate["核对 tag 与全部 24 个 workspace package<br/>测试 release-asset 工具"]
+    mtest["macOS unit + 逐 crate + release-note 测试"]
+    wtest["Windows unit + 逐 crate + software/WARP/selection 测试"]
+    ltest["Ubuntu 22.04 unit + 逐 crate + Linux/release 工具测试"]
+    macbuild["构建 x86_64 与 aarch64 binary"]
     dmg["打包并登记两个 DMG"]
-    msi["构建并登记 Windows x64 MSI"]
-    linuxpkg["构建并登记 Linux deb 与 tar.gz"]
-    linuxsmoke["tar/deb × X11/Wayland runtime smoke"]
-    manifest["合并 fragment；验证五个必需 tuple 与 hash"]
-    notes["生成 manifest 驱动的 release note 与 SHA256SUMS.txt"]
-    publish(["发布精确验证后的路径"])
+    msi["构建并登记 x64 MSI"]
+    linux["构建、验证、smoke 并登记 deb + tar.gz"]
+    manifest["合并 fragment<br/>验证五个必需 tuple 与 hash"]
+    notes["生成 manifest 驱动的 release note"]
+    publish["发布精确验证后的路径"]
 
     tag --> validate
-    validate --> mactest
-    validate --> wintest
-    validate --> linuxtest
-    mactest --> macbuild --> dmg
-    wintest --> msi
-    linuxtest --> linuxpkg --> linuxsmoke
+    validate --> mtest
+    validate --> wtest
+    validate --> ltest
+    mtest --> macbuild --> dmg
+    wtest --> msi
+    ltest --> linux
     dmg --> manifest
     msi --> manifest
-    linuxsmoke --> manifest
+    linux --> manifest
     manifest --> notes --> publish
 ```
 
-三个平台链都会阻断发布。`unit-tests-windows → build-windows → publish` 让 WARP
-allocator baseline 保持在 Windows 路径中；`unit-tests-linux → package-linux → publish`
-则要求两种 package layout 都通过 X11 与 Wayland smoke 后才能发布。包含 `-` 的 prerelease
-tag 会自动标记为 prerelease。
+三个平台链都会阻断发布。`unit-tests-windows → build-windows → publish` 把 WARP allocator
+gate 留在 MSI 路径中；`unit-tests-linux → package-linux → publish` 要求两种 package layout
+都通过两种 display system smoke。
 
-### macOS 资产
+### 发布资产
 
-workflow 发布：
+五个必需 package asset 为：
 
 - `SonicTerm-<tag>-mac-aarch64.dmg`
 - `SonicTerm-<tag>-mac-x86_64.dmg`
-
-package 包含 theme、keymap、font、icon、i18n、app metadata 和 ad-hoc signature。
-构建 DMG 前用 `lipo` 校验 binary architecture。
-
-### Windows 资产
-
-workflow 发布由 `cargo wix` 和 WiX 3.14 构建的
-`SonicTerm-<tag>-windows-x86_64.msi`，其中包含 executable、theme、keymap、内置字体与
-shortcut。
-
-### Linux 资产
-
-workflow 发布：
-
+- `SonicTerm-<tag>-windows-x86_64.msi`
 - `SonicTerm-<tag>-linux-x86_64.deb`
 - `SonicTerm-<tag>-linux-x86_64.tar.gz`
 
-两者都来自同一个 staged payload，并包含发布用 `sonicterm` 二进制、完整 runtime asset、
-license 与 README；Debian package 还安装 desktop/AppStream metadata 与 hicolor icon。
+每个 package job 会生成类型化 fragment，记录 tag、扁平文件名、platform、architecture、kind
+和 SHA-256。Publish job 只下载已登记的 package bundle，验证文件与 hash，要求五个
+platform/architecture/kind tuple，拒绝重复 tuple/名称和未登记的 release-like 文件，然后生成：
 
-### 共享资产
+- `release-assets.json`
+- 确定性的 `SHA256SUMS.txt`，其中也包含 manifest hash
+- `release-upload-paths.txt`，即传给 GitHub Release 的精确列表
 
-每个平台 package job 都会输出类型化 asset fragment。publish job 只下载这些 package
-bundle，重新验证每个 hash 与五个必需 platform/architecture/kind tuple，拒绝重复或未登记的
-release-like 文件，并生成 `release-assets.json`、确定性的 `SHA256SUMS.txt` 和精确
-upload-path list。release note 会通用遍历 manifest，因此添加可选 artifact kind 不需要修改
-release-note 脚本。
+Release note 会列出 manifest 内容和上一个 tag 之后的 commit。GitHub Release 最终收到五个
+package、`release-assets.json` 和 `SHA256SUMS.txt`；fragment 文件和
+`release-upload-paths.txt` 只是 workflow 内部数据。
 
 ## 手工发布检查
 
-release 前，对照配置、输入、日志、palette、rendering 和 window 行为检查 README、规范 docs 和仓库内全部 `wiki/` 页面。
-建议 smoke check：
+推送 tag 前：
 
-- 启动打包后的 app；
-- 测试 Vim/nvim 备用屏幕进入、滚动与退出；
-- 创建繁忙多窗格输出；
-- 把 tab 拖到子窗口并关闭，确认存活窗口仍响应、子进程被回收；
-- 相关情况下检查硬件/软件 adapter 日志。
+- 确认 workspace 版本和目标 tag；
+- 运行完整 gate 与原生 release build；
+- 对照当前 config、logging、input、palette、rendering、window、platform 和 package 行为，
+  检查 README 与所有受影响 Wiki 页面；
+- 启动 package，测试备用屏幕进入/退出、滚动、繁忙窗格、标签页拖出与子进程清理，
+  并在相关场景检查 adapter 日志。
 
-## 文档与 Wiki 工作流
+推送后，验证每个 release job，以及实际上传的精确资产和 checksum。本地生成 package 不等于发布。
 
-仓库内受版本控制的 `wiki/` 目录是 SonicTerm 双语用户文档的唯一事实来源。请在描述相关行为的同一分支和 pull request 中编辑对应 Markdown 页面，让代码和用户指南一起接受审查并保持版本一致。
+## Wiki 源码与发布
 
-`.github/workflows/publish-wiki.yml` 会在每次推送到 `main` 后运行——包括每个合并的 pull request——也支持 `workflow_dispatch` 手动运行，并把该目录单向发布为 GitHub Wiki 镜像。`scripts/publish-wiki.sh` 会替换 Wiki `master` 分支上的全部扁平 Markdown 页面，因此新增、修改、重命名和删除都会同步；内容未变化时会成功结束且不创建空 commit。网页端编辑不是事实来源，并会在下次发布时被覆盖。
+受版本控制的 `wiki/` 是唯一文档事实来源。每页包含一个 `## English` 和一个 `## 中文`，
+两半标题深度顺序一致、事实等价。跨页链接使用不带扩展名的页面名。Checker 还要求 Markdown
+树保持扁平、链接有效、Home 的两个语言半页都能导航到每个页面，并要求 Crate Reference
+两半都包含 Cargo workspace 全部 package 名：
 
-workflow 使用生命周期短、只限本仓库的 `GITHUB_TOKEN`，并仅授予 `contents: write`；不保存 PAT、GitHub App key 或其它长期 secret。不要改用覆盖整个账号的 classic PAT。
+```sh
+python3 scripts/check-wiki.py
+bash scripts/test-wiki-publish.sh
+```
 
-每个 pull request 合并后，都要确认最新的 `publish-wiki.yml` run 对应 merge SHA。若 `wiki/` 有变更，最新 Wiki commit 也必须对应该 SHA；若无变更，该 run 应成功 no-op 且不创建 Wiki commit。随后打开在线 Wiki，并点击具有代表性的英文和中文导航链接。workflow 成功退出本身不能证明发布页面可以正确渲染和跳转。
+`.github/workflows/publish-wiki.yml` 在每次推送到 `main` 后运行，包括每个合并的 pull request，
+也支持 `workflow_dispatch`。它使用生命周期短、只限本仓库且具有 `contents: write` 的
+`GITHUB_TOKEN` 克隆 `D0n9X1n/SonicTerm.wiki.git`。`scripts/publish-wiki.sh` 替换全部
+扁平 Markdown；只有内容变化时才提交 `Publish wiki from <source-sha>`。Workflow 推送
+`HEAD:master`，Wiki 的渲染分支是 `master`。重命名和删除都会同步；内容相同时成功 no-op。
 
-## 其它自动化
+网页端编辑不是事实来源，下次发布会覆盖它。该 workflow 不应使用 PAT、GitHub App private key
+或其它长期凭据。
 
-| 文件 | 用途 |
-| --- | --- |
-| `scripts/check-authored-rust-comments.sh` | 测试并执行第一方 Rust 注释契约 |
-| `scripts/make-linux-packages.sh` | 从同一个 payload 构建可复现 Linux tar 与 Debian package |
-| `scripts/smoke-linux-packages.sh` | 使用 lavapipe 在 X11 与 Wayland 上运行打包 tar/deb layout |
-| `scripts/prepare-release-assets.py` | 校验 tag 版本、登记 asset，并合并 manifest/checksum/upload |
-| `scripts/test-linux-packages.sh` | 验证 Linux source 与已构建 package 契约 |
-| `scripts/test-release-assets.sh` | 验证通用 release fragment 与精确 upload 选择 |
-| `scripts/release-notes.sh` | 生成 manifest 驱动的 release note 与资产列表 |
-| `scripts/test-release-notes.sh` | 在临时仓库中测试 note 脚本 |
-| `scripts/publish-wiki.sh` | 构建可同步删除的扁平 Wiki 镜像 |
-| `scripts/test-wiki-publish.sh` | 在临时仓库中测试 Wiki 发布 |
-| `.github/workflows/publish-wiki.yml` | 合并后把 `wiki/` 发布到 GitHub Wiki |
-| `scripts/bake-icons.sh` | 重新生成平台 icon export |
-| `scripts/regenerate-freetype.sh` | 重新生成 FreeType binding |
-| `scripts/regenerate-harfbuzz.sh` | 重新生成 HarfBuzz binding |
-| `scripts/setup-windows-cairo.ps1` | 通过 vcpkg 安装/导出静态 Cairo |
-| `deny.toml` | advisory、license、source 与 wildcard dependency policy |
-| `.github/dependabot.yml` | 每周依赖更新策略 |
+每次合并后，确认最新发布 run 对应 merge SHA：
 
-## 从哪里阅读源码
+```sh
+gh run list --workflow=publish-wiki.yml --limit 3
+gh run view <run-id>
+tmp="$(mktemp -d)"
+git clone "https://github.com/D0n9X1n/SonicTerm.wiki.git" "$tmp/wiki"
+git -C "$tmp/wiki" log -1 --oneline
+ls "$tmp/wiki"
+```
 
-| 主题 | 主要路径 |
-| --- | --- |
-| Contributor workflow | `CONTRIBUTING.md`, `.github/pull_request_template.md` |
-| CI | `.github/workflows/ci.yml` |
-| Wiki 发布 | `.github/workflows/publish-wiki.yml`, `scripts/publish-wiki.sh` |
-| Release | `.github/workflows/release.yml` |
-| Coverage | `scripts/rust-logic-coverage.sh` |
-| Per-crate gate | `scripts/check-workspace-crates.sh` |
-| Exit policy | `scripts/check-no-raw-process-exit.sh` |
-| macOS package | `scripts/make-macos-dmg.sh`, `Packaging` |
-| Windows package | `crates/sonicterm-windows/wix/main.wxs`, `Packaging` |
-| Linux package/runtime smoke | `scripts/{make,smoke,test}-linux-packages.sh`, `Packaging` |
-| Release manifest | `scripts/prepare-release-assets.py`, `scripts/test-release-assets.sh` |
-| Wiki 发布规则 | 根 `CLAUDE.md` 的“Wiki”章节 |
+若 `wiki/` 有变化，最新 Wiki commit 必须标识该 merge SHA；若无变化，run 应成功 no-op 且不
+创建新 Wiki commit。最后打开在线 Wiki，点击具有代表性的英文和中文链接；workflow 成功本身
+不能证明页面渲染和导航正确。
