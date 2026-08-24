@@ -189,6 +189,14 @@ pub(super) fn take_pointer_release(
     })
 }
 
+/// Consume a gesture interrupted by focus loss and release terminal ownership.
+pub(super) fn take_focus_loss_pointer_release(
+    gesture: &mut Option<PointerGesture>,
+    modifiers: ModifiersState,
+) -> Option<PointerMotionRoute> {
+    take_pointer_release(gesture, modifiers)
+}
+
 /// Clear a gesture whose release can no longer arrive.
 pub(super) fn cancel_pointer_gesture(gesture: &mut Option<PointerGesture>) -> bool {
     gesture.take().is_some()
@@ -1071,18 +1079,30 @@ impl App {
                 // stale composition state on the next focus-in. Toggling
                 // `set_ime_allowed` nudges the OS to re-attach the input
                 // context cleanly on macOS / Windows.
-                if let Some(ws) = self.main_mut() {
-                    ws.ime.cancel();
-                    if !focused {
-                        // Focus loss cancels drags that cannot receive their release event.
-                        // A drag interrupted by focus loss never gets its
-                        // button-release; drop the gesture so it doesn't
-                        // resume on the next stray cursor move.
+                let pointer_release = if !focused {
+                    self.main_mut().and_then(|ws| {
+                        let modifiers = ws.modifiers;
+                        let release =
+                            take_focus_loss_pointer_release(&mut ws.pointer_gesture, modifiers);
+                        ws.ime.cancel();
                         ws.scrollbar_drag = None;
                         ws.splitter_drag = None;
-                        ws.pointer_gesture = None;
                         ws.mouse_down = false;
+                        release
+                    })
+                } else {
+                    // When: `focused` is true, reset IME state without releasing a pointer gesture.
+                    if let Some(ws) = self.main_mut() {
+                        ws.ime.cancel();
                     }
+                    None
+                };
+                // Focus-loss cleanup released every window-state borrow before
+                // the bounded effect path resolves the latched press pane.
+                if let Some((pane_id, bytes)) = pointer_release
+                    .and_then(|route| pointer_route_bytes(route, PointerReportKind::LeftRelease))
+                {
+                    self.write_to_pane(pane_id, bytes);
                 }
                 // Propagate window focus to the renderer so the text cursor
                 // disappears when the window is inactive.

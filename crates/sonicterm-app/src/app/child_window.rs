@@ -1840,6 +1840,7 @@ impl App {
 impl App {
     pub(super) fn handle_child_focus_changed(&mut self, win_id: WindowId, focused: bool) {
         let mut focus_report: Option<(u64, Vec<u8>)> = None;
+        let mut pointer_release: Option<(u64, Vec<u8>)> = None;
         if let Some(child) = self.windows.get_mut(&win_id) {
             if focused {
                 // Unified frontmost tracker; `frontmost_kind()` discriminates
@@ -1856,12 +1857,22 @@ impl App {
             }
 
             child.ime.cancel();
+            // Focus loss must release terminal ownership before clearing child
+            // drags whose native button-up cannot arrive.
             if !focused {
-                // Drop any in-flight drag interrupted by focus loss — it
-                // never gets a button-release otherwise.
+                let modifiers = child.modifiers;
+                pointer_release = super::window_event::take_focus_loss_pointer_release(
+                    &mut child.pointer_gesture,
+                    modifiers,
+                )
+                .and_then(|route| {
+                    super::window_event::pointer_route_bytes(
+                        route,
+                        super::window_event::PointerReportKind::LeftRelease,
+                    )
+                });
                 child.scrollbar_drag = None;
                 child.splitter_drag = None;
-                child.pointer_gesture = None;
                 child.mouse_down = false;
             }
             if let Some(r) = child.renderer.as_mut() {
@@ -1884,6 +1895,11 @@ impl App {
                 }
             }
             child.request_redraw();
+        }
+        // The child borrow ended before either bounded pane write; pointer
+        // release targets the press pane while DEC focus targets the active pane.
+        if let Some((pane_id, bytes)) = pointer_release {
+            self.write_to_pane(pane_id, bytes);
         }
         if let Some((pane_id, bytes)) = focus_report {
             self.write_to_pane(pane_id, bytes);

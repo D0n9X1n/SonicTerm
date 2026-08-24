@@ -1,7 +1,8 @@
 use super::{
     begin_pointer_gesture, cancel_pointer_gesture, is_quit_chord, no_button_motion_report,
-    pointer_report_bytes, route_pressed_pointer_motion, take_pointer_release, wheel_report_bytes,
-    PointerCell, PointerGestureOwner, PointerMotionRoute, PointerReportKind,
+    pointer_report_bytes, route_pressed_pointer_motion, take_focus_loss_pointer_release,
+    take_pointer_release, wheel_report_bytes, PointerCell, PointerGestureOwner, PointerMotionRoute,
+    PointerReportKind,
 };
 use sonicterm_cfg::keymap::Action;
 use sonicterm_vt::vt::MouseTracking;
@@ -312,6 +313,57 @@ fn terminal_release_uses_press_pane_profile_and_last_same_pane_cell() {
             modifiers: ModifiersState::ALT,
         })
     );
+}
+
+#[test]
+fn focus_loss_releases_terminal_owner_and_silently_clears_local_owner() {
+    // Focus loss consumes both owners, but only a terminal-owned gesture emits
+    // a release from its latched pane/profile/cell with current modifiers.
+    let mut terminal = begin_pointer_gesture(
+        pointer_cell(7, 1, 2),
+        MouseTracking::ButtonMotion,
+        false,
+        ModifiersState::empty(),
+        false,
+    );
+    if let Some(gesture) = terminal.as_mut() {
+        let _ = route_pressed_pointer_motion(
+            gesture,
+            Some(pointer_cell(7, 4, 5)),
+            ModifiersState::empty(),
+        );
+    }
+    assert_eq!(
+        take_focus_loss_pointer_release(&mut terminal, ModifiersState::ALT),
+        Some(PointerMotionRoute::Report {
+            pane_id: 7,
+            sgr: false,
+            row: 4,
+            col: 5,
+            modifiers: ModifiersState::ALT,
+        })
+    );
+    assert_eq!(terminal, None);
+
+    let mut local = begin_pointer_gesture(
+        pointer_cell(9, 3, 6),
+        MouseTracking::AnyMotion,
+        true,
+        ModifiersState::SHIFT,
+        false,
+    );
+    assert_eq!(take_focus_loss_pointer_release(&mut local, ModifiersState::empty()), None);
+    assert_eq!(local, None);
+}
+
+#[test]
+fn main_and_child_focus_loss_share_release_helper() {
+    // Both runtime focus-loss branches must consume the same pure release
+    // contract before their bounded pane write, preserving window parity.
+    let main_source = include_str!("window_event.rs");
+    let child_source = include_str!("child_window.rs");
+    assert!(main_source.contains("take_focus_loss_pointer_release("));
+    assert!(child_source.contains("take_focus_loss_pointer_release("));
 }
 
 #[test]
