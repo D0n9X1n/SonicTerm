@@ -1,263 +1,358 @@
 # Rendering Modes / 渲染模式
 
-SonicTerm draws either on the GPU or on the CPU, and the two paths are paced
-differently. This page explains how the choice is made, what changes when it
-lands on the CPU path, and how to override the decision.
-
-SonicTerm 既可以在 GPU 上绘制，也可以在 CPU 上绘制，两条路径的帧节奏并不相同。
-本页说明这个选择是如何做出的、落到 CPU 路径后会发生什么变化，以及如何覆盖该决定。
-
-Related: [Rendering and Fonts](Rendering-and-Fonts) · [Configuration](Configuration) · [Logging](Logging) · [Architecture Internals](Architecture-Internals)
-
 ## English
 
-### Why there are two paths
+SonicTerm always creates a wgpu adapter and device, then resolves whether to use
+normal GPU policy or software-render degradation. On Windows, degradation also
+switches final drawing to a CPU BGRA frame presented through GDI. On macOS and
+Linux, degradation keeps wgpu presentation but applies the lower-cost pacing and
+surface policy.
 
-A GPU rasterizes a frame in parallel, at effectively no cost to the CPU. A
-software rasterizer draws every pixel on the CPU, competing with the parser,
-the PTY pump, and the shell itself for the same cores.
+Text shaping, rasterization, and atlas ownership are described in
+[Rendering and Fonts](Rendering-and-Fonts). Configuration keys are listed in
+[Configuration](Configuration), and retained host memory is in [Memory](Memory).
 
-Running the software path at a 120 Hz monitor's cadence would spend the
-machine's CPU redrawing a terminal that mostly has not changed. SonicTerm
-detects that case and slows the frame cadence rather than letting rendering
-crowd out the work the terminal exists to do.
+### Adapter classification and selection
 
-### How the path is chosen
+Software classification is a pure function over `wgpu::AdapterInfo`. It returns
+true when `device_type == Cpu`, or when the lowercased adapter name contains one
+of:
 
-Detection is a pure function of the adapter wgpu hands back — an adapter whose
-device type is CPU, or whose name matches a known software rasterizer:
+```text
+microsoft basic render driver
+llvmpipe
+swiftshader
+software adapter
+```
+
+The classification selects wgpu allocation policy as well as rendering policy.
+Software adapters request `MemoryHints::MemoryUsage`; hardware adapters request
+`MemoryHints::Performance`.
+
+`[appearance].software_render_mode` resolves the degradation flag:
+
+| Value | Result |
+| --- | --- |
+| `auto` | follow adapter classification |
+| `force` | enable degradation on any adapter |
+| `off` | disable degradation on any adapter |
+
+The setting reloads live. Resolution always starts from the monitor’s own frame
+period, so switching from degradation to `off` restores the monitor cadence
+instead of retaining the previous cap. On Windows, `force` also overrides any
+transparent backdrop with `opaque`, because the GDI presenter cannot composite
+Mica, Acrylic, or Tabbed transparency. `auto` does not change the configured
+backdrop at platform startup.
 
 ```mermaid
 flowchart TD
-    A[wgpu selects an adapter] --> B{device_type == Cpu?}
-    B -- yes --> S[software rendering]
-    B -- no --> C{name matches a known<br/>software rasterizer?}
-    C -- "Microsoft Basic Render Driver<br/>llvmpipe · SwiftShader<br/>software adapter" --> S
-    C -- no --> H[hardware rendering]
-
-    S --> M{software_render_mode}
-    H --> M
-    M -- auto --> D[follow detection]
-    M -- force --> F[always degrade]
-    M -- off --> N[never degrade]
-
-    classDef hardware fill:#1b5e20,stroke:#66bb6a,stroke-width:2px,color:#ffffff
-    classDef software fill:#e65100,stroke:#ffb74d,stroke-width:2px,color:#ffffff
-    classDef decision fill:#0d47a1,stroke:#64b5f6,stroke-width:2px,color:#ffffff
-    classDef override fill:#4a148c,stroke:#ba68c8,stroke-width:2px,color:#ffffff
-
-    class H,D hardware
-    class S,F software
-    class B,C,M decision
-    class N,A override
+    adapter["wgpu adapter"] --> cpu{"device type is Cpu?"}
+    cpu -- yes --> detected["software detected"]
+    cpu -- no --> name{"name matches known software rasterizer?"}
+    name -- yes --> detected
+    name -- no --> hardware["hardware detected"]
+    detected --> setting{"software_render_mode"}
+    hardware --> setting
+    setting -- auto --> follow["follow detection"]
+    setting -- force --> degrade["degradation on"]
+    setting -- off --> normal["degradation off"]
+    follow --> platform{"resolved flag"}
+    degrade --> platform
+    normal --> platform
+    platform -- "Windows + on" --> gdi["CPU BGRA + GDI present"]
+    platform -- "macOS/Linux + on" --> wgpuSlow["wgpu + degraded policy"]
+    platform -- off --> wgpuFast["normal wgpu policy"]
 ```
 
-Detection is deliberately a pure function over the adapter's name and device
-type, so it is unit-testable without a live GPU.
+### Normal GPU policy
 
-### What changes on the software path
+The hardware path follows the monitor period. A missing or zero monitor refresh
+rate keeps the 60 Hz default. Surface presentation prefers `Mailbox` when the
+backend offers it and otherwise uses `Fifo`. Opaque backdrops use
+`CompositeAlphaMode::Opaque`; transparent backdrops use
+`CompositeAlphaMode::PreMultiplied`. The desired maximum frame latency is 2.
 
-Only the frame cadence and the per-frame fade animation. Output, scrollback,
-fonts, and colour are identical — a session on the software path shows the same
-pixels, just refreshed less often.
+SonicTerm renders into a retained offscreen frame texture. A frame key covers
+visible pane revisions, geometry, selection, tabs, overlays, hover, inline
+media, font/style state, and other image-affecting inputs. Hardware rendering
+still performs the full renderer assembly when a changed frame is requested;
+unchanged frame keys return without rebuilding or submitting a new frame.
+
+Surface-acquisition paths that do not successfully present clear the cached
+frame key. `Outdated` and `Suboptimal` reconfigure the surface; `Lost` recreates
+it; validation errors propagate. A `SurfaceTexture` is dropped before
+reconfiguration. The next frame therefore cannot treat a blank or replaced
+swapchain as already rendered.
+
+### Software-render degradation
+
+Degradation replaces the monitor period with an exact 25,000 µs period, about
+40 fps. This is an override, not `max(monitor_period, 25 ms)`: even a slower
+30 Hz monitor resolves to 25 ms. While an IME composition is active, the period
+is 83,333 µs, about 12 fps. Ending composition immediately restores 25,000 µs.
+The hardware path ignores the IME cap.
+
+| Path | Frame period |
+| --- | --- |
+| hardware | monitor period |
+| degraded software | 25,000 µs (~40 fps) |
+| degraded software with IME composition | 83,333 µs (~12 fps) |
+
+On the degraded path, all redraws—including input redraws—are coalesced to the
+resolved period because every frame is CPU-expensive. Scrollbar auto-hide still
+snaps to its final state, but its fade does not request intermediate frames.
+The wgpu surface uses `Fifo`, opaque compositing, and desired maximum frame
+latency 1.
+
+The hidden warm-renderer pool defaults to one. A configured value of `0`
+disables it. Hardware honors targets through 5; degradation caps every nonzero
+target at 1.
+
+### Windows CPU presentation
+
+When degradation is active on Windows, `WindowsSoftwareFrame` composes the same
+producer-built quads, text glyphs, color glyphs, and inline-image instances into
+a complete premultiplied BGRA buffer. It presents the full frame to the HWND with
+GDI `SetDIBitsToDevice`; retained GPU damage is not used as a second software
+presentation policy.
+
+The software frame is limited to 16,384 pixels on either axis and 160 MiB total.
+Construction or resize beyond either limit fails without replacing the existing
+valid allocation. A frame-key hit can re-present the existing CPU frame without
+recomposing it.
+
+The CPU glyph and image atlases remain the source sampled by software drawing.
+Their GPU mirrors are 1×1 placeholders while the GDI presenter is active.
+Returning to GPU presentation rebuilds full-size GPU atlas textures, resets
+atlas metadata and UV-bearing caches, and forces a full redraw.
+
+### Retained pixels and damage
+
+Damage is a correctness boundary, not only an optimization. Every VT/grid
+mutation must mark the affected rows in the same update.
 
 ```mermaid
-flowchart LR
-    A[frame due] --> B{software rendering?}
-    B -- no --> H["monitor period<br/>(8.3 ms at 120 Hz)"]
-    B -- yes --> C{IME composing?}
-    C -- no --> S["25 ms — 40 fps"]
-    C -- yes --> I["83.3 ms — 12 fps"]
-
-    classDef hardware fill:#1b5e20,stroke:#66bb6a,stroke-width:2px,color:#ffffff
-    classDef software fill:#e65100,stroke:#ffb74d,stroke-width:2px,color:#ffffff
-    classDef compose fill:#b71c1c,stroke:#ef5350,stroke-width:2px,color:#ffffff
-    classDef decision fill:#0d47a1,stroke:#64b5f6,stroke-width:2px,color:#ffffff
-
-    class H hardware
-    class S software
-    class I compose
-    class B,C decision
-    class A decision
+flowchart TD
+    change["visible state changed"] --> screen{"screen buffer"}
+    screen -- primary --> rows["union dirty viewport rows"]
+    screen -- alternate --> dirty{"any dirty row?"}
+    dirty -- yes --> pane["complete surface-clipped pane"]
+    dirty -- no --> none["no terminal damage"]
+    rows --> union["union with UI and overlay damage"]
+    pane --> union
+    none --> union
+    union --> retained["redraw retained frame inside damage scissor"]
+    retained --> present["blit and present"]
 ```
 
-The hardware path is never capped — it follows the monitor. A faster monitor is
-clamped to the software cap only when the software path is active.
+A primary-screen pane can repaint the union of dirty viewport rows. Row bounds
+use floor/ceil rules at fractional DPI so adjacent rows leave no seam. If an
+alternate-screen pane has any dirty row, the complete surface-clipped pane is
+damaged. This covers TUI scrolling, insert/delete line, reverse index, erase,
+and other fixed-position updates where a narrow row set can otherwise leave
+stale pixels.
 
-### The IME drop
+The offscreen frame is cleared on first use and loaded on retained frames. The
+GPU draw order is:
 
-While an input method is composing, the cadence drops further, to ~12 fps. The
-composition popup is drawn by the platform IME, not by SonicTerm, so a slower
-terminal repaint costs the typist little while freeing CPU for the IME itself.
-
-The cadence must recover once composition commits. A cap that engages and never
-releases would leave the session at 12 fps indefinitely — the behaviour worth
-checking after any change to this path, and one that never appears on macOS
-because the degrade path does not run there.
-
-### Latency
-
-| path | frame period | worst-case wait for a keystroke |
-| --- | --- | --- |
-| hardware, 60 Hz | 16.7 ms | 16.7 ms |
-| hardware, 120 Hz | 8.3 ms | 8.3 ms |
-| software | 25 ms | 25 ms |
-| software, composing | 83.3 ms | ~83 ms |
-
-A keystroke arriving just after a frame waits one full period before it is
-drawn. That is the quantity to judge when deciding whether the software cap is
-set correctly.
-
-### Overriding the decision
-
-```toml
-[appearance]
-software_render_mode = "auto"   # auto | force | off
+```text
+base quads -> base glyphs -> overlay quads -> overlay glyphs
 ```
 
-| value | behaviour | when to use |
-| --- | --- | --- |
-| `auto` | degrade when a software rasterizer is detected | the default; correct on real hardware and in VMs alike |
-| `force` | always degrade, whatever the adapter reports | remote sessions that report a GPU but rasterize on the CPU |
-| `off` | never degrade, whatever the adapter reports | a software adapter you know is fast enough, or when measuring the uncapped path |
+A scissor limits redraw to the damage rectangle. `FrameBlitter` copies the
+retained frame to the swapchain before submit and present. The surface format is fixed to `TextureFormat::Bgra8UnormSrgb`; colors are
+converted to linear values before shader use so the sRGB target performs the
+only gamma encoding.
 
-`force` is the useful one over RDP and in VDI, where the adapter can look like a
-GPU while every frame is drawn on the CPU.
+### Diagnostics
 
-### Confirming which path a session took
+Startup logs the adapter backend, name, device type, and
+`software_rendering=true|false`. When degradation resolves on, the app logs:
 
-The adapter decision is logged at startup:
-
-```
-wgpu adapter selected backend=Dx12 name=Microsoft Basic Render Driver
-  device_type=Cpu software_rendering=true
-WARN No hardware GPU — wgpu fell back to a software rasterizer (CPU).
-  Rendering will be degraded to stay responsive (lower frame cap, no fade
-  animation). Common cause: RDP / VM without GPU passthrough.
+```text
+software-render degrade engaged
 ```
 
-`software_rendering=true` is the field to read. The warning names the usual
-cause, because a machine that should have a GPU and reports `device_type=Cpu`
-usually has a driver or passthrough problem rather than a SonicTerm problem.
+with `detected`, `mode`, and `frame_period` fields. On Windows, breadcrumb
+renderer identity distinguishes CPU/GDI software presentation from wgpu.
+
+For frame phase timing, set `[logging].level = "debug"` and read the
+`render_timing` target. Memory snapshots and allocator-state interpretation are
+owned by [Logging](Logging) and [Memory](Memory).
+
+### Code locations
+
+| Topic | Primary paths |
+| --- | --- |
+| Adapter classification and surface policy | `crates/sonicterm-gpu/src/core.rs` |
+| Config-to-degradation decision | `crates/sonicterm-app/src/app/{mod,event_loop,config_apply}.rs` |
+| Frame pacing | `crates/sonicterm-app/src/app/mod.rs` |
+| Retained frame and damage | `crates/sonicterm-gpu/src/core.rs` |
+| GPU draw and blit | `crates/sonicterm-gpu/src/wezterm_pipeline.rs` |
+| Windows CPU frame | `crates/sonicterm-gpu/src/software_windows.rs` |
+| Windows backdrop override | `crates/sonicterm-windows/src/{main,software_presenter}.rs` |
 
 ## 中文
 
-### 为什么存在两条路径
+SonicTerm 总会先创建 wgpu 适配器和设备，再决定使用正常 GPU 策略还是软件渲染降级。
+Windows 上，降级还会把最终绘制切换为 CPU BGRA 帧，并通过 GDI 呈现。macOS 与 Linux
+上的降级仍使用 wgpu 呈现，但采用更低开销的帧节奏和表面策略。
 
-GPU 会并行光栅化一帧，对 CPU 而言几乎没有开销。而软件光栅化器会在 CPU 上绘制每一个像素，
-与解析器、PTY 泵以及 shell 本身争抢同样的核心。
+文字塑形、光栅化和图集所有权见[渲染与字体](Rendering-and-Fonts)。配置键见
+[配置](Configuration)，主机端保留内存见[内存](Memory)。
 
-若让软件路径按 120 Hz 显示器的节奏运行，机器的 CPU 将耗费在重绘一个大部分并未变化的终端上。
-SonicTerm 会检测这种情况并降低帧节奏，而不是让渲染挤占终端本该完成的工作。
+### 适配器分类与选择
 
-### 路径是如何选择的
+软件分类是只依赖 `wgpu::AdapterInfo` 的纯函数。`device_type == Cpu` 时返回 true；
+否则把适配器名称转成小写，并检查是否包含：
 
-检测是对 wgpu 返回的适配器所做的纯函数判断——设备类型为 CPU 的适配器，
-或名称匹配已知软件光栅化器的适配器：
+```text
+microsoft basic render driver
+llvmpipe
+swiftshader
+software adapter
+```
+
+分类同时决定 wgpu 分配策略和渲染策略。软件适配器请求
+`MemoryHints::MemoryUsage`，硬件适配器请求 `MemoryHints::Performance`。
+
+`[appearance].software_render_mode` 决定是否降级：
+
+| 取值 | 结果 |
+| --- | --- |
+| `auto` | 跟随适配器分类 |
+| `force` | 在任何适配器上启用降级 |
+| `off` | 在任何适配器上关闭降级 |
+
+该设置可实时重载。每次都从显示器自身帧周期重新计算，因此从降级切换到 `off` 会恢复
+显示器节奏，不会保留旧上限。Windows 上，`force` 还会把所有透明背景材质覆盖为
+`opaque`，因为 GDI 呈现器无法合成 Mica、Acrylic 或 Tabbed 透明效果。平台启动时，
+`auto` 不会改变配置的 `backdrop`。
 
 ```mermaid
 flowchart TD
-    A[wgpu 选择适配器] --> B{device_type 是 Cpu？}
-    B -- 是 --> S[软件渲染]
-    B -- 否 --> C{名称是否匹配已知的<br/>软件光栅化器？}
-    C -- "Microsoft Basic Render Driver<br/>llvmpipe · SwiftShader<br/>software adapter" --> S
-    C -- 否 --> H[硬件渲染]
-
-    S --> M{software_render_mode}
-    H --> M
-    M -- auto --> D[遵循检测结果]
-    M -- force --> F[始终降级]
-    M -- off --> N[从不降级]
-
-    classDef hardware fill:#1b5e20,stroke:#66bb6a,stroke-width:2px,color:#ffffff
-    classDef software fill:#e65100,stroke:#ffb74d,stroke-width:2px,color:#ffffff
-    classDef decision fill:#0d47a1,stroke:#64b5f6,stroke-width:2px,color:#ffffff
-    classDef override fill:#4a148c,stroke:#ba68c8,stroke-width:2px,color:#ffffff
-
-    class H,D hardware
-    class S,F software
-    class B,C,M decision
-    class N,A override
+    adapter["wgpu 适配器"] --> cpu{"设备类型是 Cpu？"}
+    cpu -- 是 --> detected["检测为软件"]
+    cpu -- 否 --> name{"名称匹配已知软件光栅器？"}
+    name -- 是 --> detected
+    name -- 否 --> hardware["检测为硬件"]
+    detected --> setting{"software_render_mode"}
+    hardware --> setting
+    setting -- auto --> follow["跟随检测"]
+    setting -- force --> degrade["启用降级"]
+    setting -- off --> normal["关闭降级"]
+    follow --> platform{"最终标志"}
+    degrade --> platform
+    normal --> platform
+    platform -- "Windows + 启用" --> gdi["CPU BGRA + GDI 呈现"]
+    platform -- "macOS/Linux + 启用" --> wgpuSlow["wgpu + 降级策略"]
+    platform -- 关闭 --> wgpuFast["正常 wgpu 策略"]
 ```
 
-检测被刻意写成仅依赖适配器名称与设备类型的纯函数，因此无需真实 GPU 即可进行单元测试。
+### 正常 GPU 策略
 
-### 软件路径上会有什么变化
+硬件路径跟随显示器周期。无法取得刷新率或刷新率为零时，保留 60 Hz 默认值。表面呈现
+优先选择后端支持的 `Mailbox`，否则使用 `Fifo`。不透明 backdrop 使用
+`CompositeAlphaMode::Opaque`，透明 backdrop 使用
+`CompositeAlphaMode::PreMultiplied`。期望最大帧延迟为 2。
 
-只有帧节奏和逐帧淡入淡出动画会变。输出、回滚、字体与颜色完全一致——
-软件路径上的会话显示的是相同的像素，只是刷新得没那么频繁。
+SonicTerm 绘制到保留式离屏帧纹理。帧键覆盖可见窗格修订号、几何、选区、标签页、
+浮层、悬停、内联媒体、字体/样式状态以及其它影响画面的输入。硬件路径收到有变化的
+帧请求时仍执行完整渲染器组装；帧键完全相同时直接返回，不重建也不提交新帧。
+
+任何未成功呈现的表面获取路径都会清除缓存帧键。`Outdated` 和 `Suboptimal` 会重新配置
+表面，`Lost` 会重新创建，校验错误则向上传递。重新配置前必须先释放
+`SurfaceTexture`。因此下一帧不会把空白或已替换的交换链误认为已经绘制。
+
+### 软件渲染降级
+
+降级会把显示器周期替换为精确的 25,000 µs，约 40 fps。这是直接覆盖，不是
+`max(monitor_period, 25 ms)`：即使显示器只有 30 Hz，也会解析为 25 ms。输入法组字期间
+周期变为 83,333 µs，约 12 fps；组字结束立即恢复 25,000 µs。硬件路径不使用输入法上限。
+
+| 路径 | 帧周期 |
+| --- | --- |
+| 硬件 | 显示器周期 |
+| 降级软件 | 25,000 µs（约 40 fps） |
+| 降级软件且输入法组字中 | 83,333 µs（约 12 fps） |
+
+降级路径会把所有重绘（包括输入引起的重绘）合并到最终周期，因为每帧都需要昂贵的 CPU
+工作。滚动条自动隐藏仍会直接到达最终状态，但淡出过程不请求中间帧。wgpu 表面使用
+`Fifo`、不透明合成和期望最大帧延迟 1。
+
+隐藏预热渲染器池默认保留一个。配置为 `0` 表示关闭。硬件最多接受目标值 5；降级时
+任何非零目标都会限制为 1。
+
+### Windows CPU 呈现
+
+Windows 上启用降级时，`WindowsSoftwareFrame` 把同一套上游生成的矩形、文字字形、
+彩色字形和内联图像实例合成到完整的预乘 BGRA 缓冲，再用 GDI
+`SetDIBitsToDevice` 呈现到 HWND。软件路径总是呈现完整帧，不把保留式 GPU 损伤规则
+再当作第二套软件呈现策略。
+
+软件帧任一轴最多 16,384 像素，总量最多 160 MiB。创建或调整尺寸超过任一限制时会失败，
+并保留原有有效分配。帧键命中时可直接再次呈现已有 CPU 帧，无需重新合成。
+
+软件绘制仍从 CPU 字形图集和图像图集取样；GDI 呈现启用时，它们的 GPU 镜像是 1×1
+占位符。回到 GPU 呈现时会重建全尺寸 GPU 图集纹理、重置图集元数据与携带 UV 的缓存，
+并强制完整重绘。
+
+### 保留像素与损伤区域
+
+损伤区域是正确性边界，不只是性能优化。每次 VT/网格修改都必须在同一轮更新中标记受
+影响的行。
 
 ```mermaid
-flowchart LR
-    A[该出帧了] --> B{是否软件渲染？}
-    B -- 否 --> H["显示器周期<br/>（120 Hz 时为 8.3 毫秒）"]
-    B -- 是 --> C{输入法是否正在组字？}
-    C -- 否 --> S["25 毫秒 — 40 fps"]
-    C -- 是 --> I["83.3 毫秒 — 12 fps"]
-
-    classDef hardware fill:#1b5e20,stroke:#66bb6a,stroke-width:2px,color:#ffffff
-    classDef software fill:#e65100,stroke:#ffb74d,stroke-width:2px,color:#ffffff
-    classDef compose fill:#b71c1c,stroke:#ef5350,stroke-width:2px,color:#ffffff
-    classDef decision fill:#0d47a1,stroke:#64b5f6,stroke-width:2px,color:#ffffff
-
-    class H hardware
-    class S software
-    class I compose
-    class B,C decision
-    class A decision
+flowchart TD
+    change["可见状态变化"] --> screen{"屏幕缓冲区"}
+    screen -- 主屏幕 --> rows["合并视口脏行"]
+    screen -- 备用屏幕 --> dirty{"有任一脏行？"}
+    dirty -- 是 --> pane["完整表面裁剪窗格"]
+    dirty -- 否 --> none["无终端损伤"]
+    rows --> union["与界面及浮层损伤合并"]
+    pane --> union
+    none --> union
+    union --> retained["在损伤裁剪内重绘保留帧"]
+    retained --> present["复制并呈现"]
 ```
 
-硬件路径永远不会被限帧——它跟随显示器。只有在软件路径处于活动状态时，
-更快的显示器周期才会被钳制到软件上限。
+主屏幕窗格可以只重绘视口脏行的并集。分数 DPI 下的行边界使用 floor/ceil，避免相邻行
+之间出现缝隙。备用屏幕窗格只要有一行标脏，就损伤完整的表面裁剪窗格。这覆盖 TUI
+滚动、插入/删除行、反向索引、擦除等固定位置更新，避免窄行集合留下旧像素。
 
-### 输入法降频
+离屏帧第一次使用时清除，保留帧中继续加载。GPU 绘制顺序为：
 
-当输入法正在组字时，节奏会进一步降至约 12 fps。组字候选框由平台输入法绘制，
-而非由 SonicTerm 绘制，因此放慢终端重绘对打字者影响很小，却能为输入法本身腾出 CPU。
-
-组字提交后，节奏必须恢复。一个只降不升的限制会让会话无限期停留在 12 fps——
-这是修改该路径后最值得检查的行为，而且它在 macOS 上永远不会出现，因为降级路径在那里根本不运行。
-
-### 延迟
-
-| 路径 | 帧周期 | 按键的最坏等待时间 |
-| --- | --- | --- |
-| 硬件，60 Hz | 16.7 毫秒 | 16.7 毫秒 |
-| 硬件，120 Hz | 8.3 毫秒 | 8.3 毫秒 |
-| 软件 | 25 毫秒 | 25 毫秒 |
-| 软件，组字中 | 83.3 毫秒 | 约 83 毫秒 |
-
-刚好在一帧之后到达的按键，需要等待一个完整周期才会被绘制。
-这正是判断软件上限设置是否合适时需要衡量的量。
-
-### 覆盖该决定
-
-```toml
-[appearance]
-software_render_mode = "auto"   # auto | force | off
+```text
+基础矩形 -> 基础字形 -> 浮层矩形 -> 浮层字形
 ```
 
-| 取值 | 行为 | 适用场景 |
-| --- | --- | --- |
-| `auto` | 检测到软件光栅化器时降级 | 默认值；在真实硬件与虚拟机上都正确 |
-| `force` | 无论适配器如何报告，始终降级 | 报告有 GPU 但实际由 CPU 光栅化的远程会话 |
-| `off` | 无论适配器如何报告，从不降级 | 你确知足够快的软件适配器，或需要测量不限帧的路径时 |
+裁剪矩形把重绘限制在损伤区域内。`FrameBlitter` 在提交和呈现前把保留帧复制到交换链。
+表面格式固定为 `TextureFormat::Bgra8UnormSrgb`；颜色在进入着色器前转为线性值，
+让 sRGB 目标只执行一次伽马编码。
 
-`force` 在 RDP 与 VDI 场景下尤其有用——那里的适配器看起来像 GPU，
-但每一帧其实都在 CPU 上绘制。
+### 诊断
 
-### 确认会话走了哪条路径
+启动日志会记录适配器后端、名称、设备类型和 `software_rendering=true|false`。最终启用
+降级时，应用会记录：
 
-适配器决策会在启动时记录：
-
-```
-wgpu adapter selected backend=Dx12 name=Microsoft Basic Render Driver
-  device_type=Cpu software_rendering=true
-WARN No hardware GPU — wgpu fell back to a software rasterizer (CPU).
-  Rendering will be degraded to stay responsive (lower frame cap, no fade
-  animation). Common cause: RDP / VM without GPU passthrough.
+```text
+software-render degrade engaged
 ```
 
-需要查看的字段是 `software_rendering=true`。该警告指出了常见原因，
-因为一台本应有 GPU 却报告 `device_type=Cpu` 的机器，
-通常是驱动或显卡直通的问题，而不是 SonicTerm 的问题。
+并附带 `detected`、`mode`、`frame_period` 字段。Windows 的面包屑渲染器身份会把
+CPU/GDI 软件呈现与 wgpu 区分开。
+
+若要查看各帧阶段耗时，把 `[logging].level` 设为 `"debug"`，读取 `render_timing` 日志目标。
+内存快照与分配器状态的解释由[日志](Logging)和[内存](Memory)负责。
+
+### 代码位置
+
+| 主题 | 主要路径 |
+| --- | --- |
+| 适配器分类与表面策略 | `crates/sonicterm-gpu/src/core.rs` |
+| 配置到降级决策 | `crates/sonicterm-app/src/app/{mod,event_loop,config_apply}.rs` |
+| 帧节奏 | `crates/sonicterm-app/src/app/mod.rs` |
+| 保留帧与损伤 | `crates/sonicterm-gpu/src/core.rs` |
+| GPU 绘制与复制 | `crates/sonicterm-gpu/src/wezterm_pipeline.rs` |
+| Windows CPU 帧 | `crates/sonicterm-gpu/src/software_windows.rs` |
+| Windows backdrop 覆盖 | `crates/sonicterm-windows/src/{main,software_presenter}.rs` |
