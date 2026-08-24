@@ -159,10 +159,11 @@ GPU draw order is:
 base quads -> base glyphs -> overlay quads -> overlay glyphs
 ```
 
-A scissor limits redraw to the damage rectangle. `FrameBlitter` copies the
-retained frame to the swapchain before submit and present. The surface format is fixed to `TextureFormat::Bgra8UnormSrgb`; colors are
-converted to linear values before shader use so the sRGB target performs the
-only gamma encoding.
+A scissor limits redraw to the damage rectangle. The renderer’s
+`wgpu::util::TextureBlitter` copies the retained frame to the swapchain before
+submit and present. The surface format is fixed to
+`TextureFormat::Bgra8UnormSrgb`; colors are converted to linear values before
+shader use so the sRGB target performs the only gamma encoding.
 
 ### Diagnostics
 
@@ -326,9 +327,9 @@ flowchart TD
 基础矩形 -> 基础字形 -> 浮层矩形 -> 浮层字形
 ```
 
-裁剪矩形把重绘限制在损伤区域内。`FrameBlitter` 在提交和呈现前把保留帧复制到交换链。
-表面格式固定为 `TextureFormat::Bgra8UnormSrgb`；颜色在进入着色器前转为线性值，
-让 sRGB 目标只执行一次伽马编码。
+裁剪矩形把重绘限制在损伤区域内。渲染器的 `wgpu::util::TextureBlitter` 在提交和
+呈现前把保留帧复制到交换链。表面格式固定为 `TextureFormat::Bgra8UnormSrgb`；颜色在
+进入着色器前转为线性值，让 sRGB 目标只执行一次伽马编码。
 
 ### 诊断
 

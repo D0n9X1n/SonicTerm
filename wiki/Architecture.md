@@ -204,10 +204,10 @@ The exact safety conditions are in
 | Group | Direction |
 | --- | --- |
 | contracts | `sonicterm-types` |
-| accounting | `sonicterm-resource` is used by app/logging code and owns no terminal or frame payload |
+| accounting | `sonicterm-resource` feeds `sonicterm-app`; logging tests also use it, and it owns no terminal or frame payload |
 | terminal | `sonicterm-io` supplies bytes; `sonicterm-vt` interprets them; `sonicterm-grid` stores the result |
 | UI model | `sonicterm-cfg` and `sonicterm-grid` feed `sonicterm-ui`; all three feed `sonicterm-render-model` |
-| fonts | `sonicterm-font-config` and native wrappers feed `sonicterm-font`, then `sonicterm-engine` and `sonicterm-text` |
+| fonts | `sonicterm-font-config` and native wrappers feed `sonicterm-font`; `sonicterm-font` and `sonicterm-text` independently feed `sonicterm-engine` |
 | rendering | render model, engine, text, types, and block glyphs feed `sonicterm-gpu` |
 | app | app core, terminal, UI, rendering, logging, and resource crates feed `sonicterm-app` |
 | platform | `sonicterm-app` feeds `sonicterm-mac`, `sonicterm-windows`, and `sonicterm-linux` |
@@ -405,10 +405,10 @@ macOS 使用 CoreText 发现字体，Windows 使用 GDI，Linux 使用 Fontconfi
 | 分组 | 方向 |
 | --- | --- |
 | 契约 | `sonicterm-types` |
-| 记账 | 应用和日志代码使用 `sonicterm-resource`；该 crate 不持有终端或帧数据 |
+| 记账 | `sonicterm-resource` 输入 `sonicterm-app`；日志测试也使用它；该 crate 不持有终端或帧数据 |
 | 终端 | `sonicterm-io` 提供字节，`sonicterm-vt` 解释字节，`sonicterm-grid` 保存结果 |
 | 界面模型 | `sonicterm-cfg` 和 `sonicterm-grid` 输入 `sonicterm-ui`；三者再输入 `sonicterm-render-model` |
-| 字体 | `sonicterm-font-config` 和原生包装 crate 输入 `sonicterm-font`，随后输入 `sonicterm-engine` 与 `sonicterm-text` |
+| 字体 | `sonicterm-font-config` 和原生包装 crate 输入 `sonicterm-font`；`sonicterm-font` 与 `sonicterm-text` 分别输入 `sonicterm-engine` |
 | 渲染 | 渲染模型、字体引擎、文本、公共类型和块字符输入 `sonicterm-gpu` |
 | 应用 | 应用核心、终端、界面、渲染、日志和资源 crate 输入 `sonicterm-app` |
 | 平台 | `sonicterm-app` 输入 `sonicterm-mac`、`sonicterm-windows` 和 `sonicterm-linux` |

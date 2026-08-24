@@ -261,9 +261,9 @@ The adapted WezTerm implementation is attributed in
 | --- | --- |
 | Render boundary | `crates/sonicterm-render-model/src/{pane_render,inputs,geometry}.rs` |
 | Renderer font adapter | `crates/sonicterm-engine/src/fontstack.rs` |
-| Discovery and matching | `crates/sonicterm-font/src/{db,locator}.rs` |
+| Discovery and matching | `crates/sonicterm-font/src/db.rs`, `crates/sonicterm-font/src/locator/` |
 | HarfBuzz shaping | `crates/sonicterm-font/src/shaper/harfbuzz.rs` |
-| Rasterization and native wrappers | `crates/sonicterm-font/src/{rasterizer,ftwrap,hbwrap,fcwrap}.rs` |
+| Rasterization and native wrappers | `crates/sonicterm-font/src/rasterizer/`, `crates/sonicterm-font/src/{ftwrap,hbwrap,fcwrap}.rs` |
 | CPU atlas and row cache | `crates/sonicterm-text/src/{glyph_atlas,row_glyph_cache,shape}.rs` |
 | Atlas upload and image atlas | `crates/sonicterm-gpu/src/{core,atlas_upload}.rs` |
 | Custom glyphs | `crates/sonicterm-block-glyph/src/` |
@@ -488,9 +488,9 @@ CPU/GPU 占位符启动，仅在出现可渲染媒体时提升为 2048×2048；�
 | --- | --- |
 | 渲染边界 | `crates/sonicterm-render-model/src/{pane_render,inputs,geometry}.rs` |
 | 渲染器字体适配 | `crates/sonicterm-engine/src/fontstack.rs` |
-| 发现与匹配 | `crates/sonicterm-font/src/{db,locator}.rs` |
+| 发现与匹配 | `crates/sonicterm-font/src/db.rs`、`crates/sonicterm-font/src/locator/` |
 | HarfBuzz 塑形 | `crates/sonicterm-font/src/shaper/harfbuzz.rs` |
-| 光栅化与原生包装 | `crates/sonicterm-font/src/{rasterizer,ftwrap,hbwrap,fcwrap}.rs` |
+| 光栅化与原生包装 | `crates/sonicterm-font/src/rasterizer/`、`crates/sonicterm-font/src/{ftwrap,hbwrap,fcwrap}.rs` |
 | CPU 图集与行缓存 | `crates/sonicterm-text/src/{glyph_atlas,row_glyph_cache,shape}.rs` |
 | 图集上传与图像图集 | `crates/sonicterm-gpu/src/{core,atlas_upload}.rs` |
 | 自定义字形 | `crates/sonicterm-block-glyph/src/` |

@@ -135,8 +135,8 @@ SonicTerm/
     └── icons/exports/{sonic.ico,sonic.icns}
 ```
 
-It creates a Start-menu shortcut and enables the desktop-shortcut feature by
-default. It registers SonicTerm ProgIDs, Default Apps capabilities, and
+It creates a Start-menu shortcut and sets the `INSTALLDESKTOPSHORTCUT` property
+to `1` by default. It registers SonicTerm ProgIDs, Default Apps capabilities, and
 `OpenWithProgids` for `.ps1`, `.cmd`, `.bat`, and `.sh`, then broadcasts
 `SHCNE_ASSOCCHANGED` after install or uninstall. It never writes an extension
 default or `UserChoice`, and uninstall removes only SonicTerm's values. The MSI
@@ -227,8 +227,10 @@ installation.
 
 ## Release handoff
 
-A pushed `v*` tag causes the release workflow to build two macOS DMGs, one
-Windows MSI, and the Linux Debian and tar packages. Package jobs register typed
+A pushed tag matching `v[0-9]+.[0-9]+.[0-9]+*` starts the release workflow.
+Its version validator then requires a supported semantic-version tag matching
+all workspace packages. The workflow builds two macOS DMGs, one Windows MSI,
+and the Linux Debian and tar packages. Package jobs register typed
 asset fragments; publication accepts only the validated asset set and also
 uploads `release-assets.json` and `SHA256SUMS.txt`. See
 [Development and Release](Development-and-Release) for the blocking graph and
@@ -359,8 +361,9 @@ SonicTerm/
     └── icons/exports/{sonic.ico,sonic.icns}
 ```
 
-它创建开始菜单快捷方式，默认启用桌面快捷方式 feature。它为 `.ps1`、`.cmd`、`.bat`
-和 `.sh` 注册 SonicTerm ProgID、Default Apps capabilities 与 `OpenWithProgids`，并在安装
+它创建开始菜单快捷方式，并把 `INSTALLDESKTOPSHORTCUT` property 的默认值设为 `1`。
+它为 `.ps1`、`.cmd`、`.bat` 和 `.sh` 注册 SonicTerm ProgID、Default Apps capabilities
+与 `OpenWithProgids`，并在安装
 或卸载后广播 `SHCNE_ASSOCCHANGED`。它不会写扩展名默认值或 `UserChoice`；卸载只删除
 SonicTerm 自己的值。MSI 未签名。
 
@@ -442,7 +445,9 @@ SonicTerm Debian 安装。
 
 ## 发布交接
 
-推送 `v*` tag 后，release workflow 会构建两个 macOS DMG、一个 Windows MSI，以及 Linux
-Debian 与 tar 包。各 package job 会登记类型化 asset fragment；发布只接受通过校验的资产集，
-并一同上传 `release-assets.json` 和 `SHA256SUMS.txt`。阻断关系和验证步骤见
+推送匹配 `v[0-9]+.[0-9]+.[0-9]+*` 的 tag 会启动 release workflow。版本校验器随后要求
+tag 是受支持的语义版本，并与所有 workspace package 一致。工作流会构建两个 macOS DMG、
+一个 Windows MSI，以及 Linux Debian 与 tar 包。各 package job 会登记类型化 asset
+fragment；发布只接受通过校验的资产集，并一同上传 `release-assets.json` 和
+`SHA256SUMS.txt`。阻断关系和验证步骤见
 [开发与发布](Development-and-Release)。

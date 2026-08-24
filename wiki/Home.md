@@ -30,7 +30,7 @@ level. [Memory](Memory) covers what is bounded and how to read it.
 - [Rendering Modes](Rendering-Modes) — renderer selection and frame pacing
 - [Platform Integration](Platform-Integration) — AppKit/macOS, Win32/Windows, and X11/Wayland Linux boundaries
 - [Crate Reference](Crate-Reference) — all 24 workspace crates and their relationships
-- [Development and Release](Development-and-Release) — tests, CI, packaging, and the `v*` release pipeline
+- [Development and Release](Development-and-Release) — tests, CI, packaging, and the semantic-version tag release pipeline
 
 This wiki is the canonical documentation surface: architecture and invariants
 in [Architecture](Architecture) and
@@ -66,7 +66,7 @@ SonicTerm 是一个面向 macOS、Windows 和 Linux 的原生 GPU 加速终端�
 - [渲染模式 / Rendering Modes](Rendering-Modes) — 渲染器选择与帧调度
 - [平台集成 / Platform Integration](Platform-Integration) — AppKit/macOS、Win32/Windows 与 X11/Wayland Linux 边界
 - [Crate 参考 / Crate Reference](Crate-Reference) — 工作区全部 24 个 crate 及其关系
-- [开发与发布 / Development and Release](Development-and-Release) — 测试、CI、打包与 `v*` 发布流水线
+- [开发与发布 / Development and Release](Development-and-Release) — 测试、CI、打包与语义版本 tag 发布流水线
 
 本 Wiki 即规范文档面：架构与不变量见 [Architecture](Architecture) 与
 [Architecture Internals](Architecture-Internals)，crate 映射见

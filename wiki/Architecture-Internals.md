@@ -37,7 +37,7 @@ limits include:
 | Process VT capture staging | `MAX_PROCESS_CAPTURE_STAGING_BYTES = 64 MiB`, with a `MIN_CAPTURE_STAGING_BYTES = 4 MiB` floor and `GUARANTEED_CONCURRENT_CAPTURES = 13` |
 | PTY input | 4 queued messages; each message is at most 16 MiB |
 | PTY output | 64 queued chunks plus one blocked sender chunk; each retained reader ring is 64 KiB; structural worst case is 65 rings, or 4.0625 MiB |
-| Retained inline media | 128 images and 64 MiB per pane; 256 MiB process ceiling; each rendered side is at most 1,024 pixels |
+| Retained inline media | 128 images and 64 MiB per pane; 256 MiB process target plus at most one 4 MiB newest-image residual per live pane before reclamation converges; each rendered side is at most 1,024 pixels |
 
 A grid report includes cell storage, rare attributes, combining text, row
 containers, and reserved capacity. Scrollback is limited by configured rows and
@@ -224,8 +224,9 @@ an incomplete native close into success.
 ### Release verification boundary
 
 Root `Cargo.toml` `[workspace.package]` is the version source. The release
-workflow accepts a `v*` tag only when `prepare-release-assets.py check-version`
-finds that tag version on every workspace package.
+workflow starts for tags matching `v[0-9]+.[0-9]+.[0-9]+*`. It continues only
+when `prepare-release-assets.py check-version` parses the tag as a semantic
+version and finds that version on every workspace package.
 
 The workflow builds five required package tuples:
 
@@ -267,10 +268,11 @@ The workflow does not perform Developer ID signing, notarization, or a packaged
 DMG launch smoke. The Windows workflow does not sign or install-run the MSI.
 Installer signing is therefore not a verified release invariant.
 
-The release workflow does not run every command in the repository's normal
-local gate. Full unit, per-crate integration, formatting, lint, documentation,
-policy, resource, wiki, and coverage checks remain the responsibility of normal
-CI described in [Development and Release](Development-and-Release).
+Release jobs run workspace unit tests, the per-crate unit/build gate, release
+asset and note tests, Windows presentation and allocator tests, and Linux package
+smokes. They do not repeat every normal CI check: formatting, Clippy, Rustdoc,
+policy checks, resource baselines, wiki publication tests, and coverage remain in
+normal CI described in [Development and Release](Development-and-Release).
 
 ### Source and check map
 
@@ -318,7 +320,7 @@ CI described in [Development and Release](Development-and-Release).
 | 进程级 VT 捕获暂存 | `MAX_PROCESS_CAPTURE_STAGING_BYTES = 64 MiB`，保底值 `MIN_CAPTURE_STAGING_BYTES = 4 MiB`，`GUARANTEED_CONCURRENT_CAPTURES = 13` |
 | PTY 输入 | 最多排队 4 条消息；每条最多 16 MiB |
 | PTY 输出 | 最多 64 个排队数据块，另有一个阻塞中的发送数据块；每个读缓冲环为 64 KiB；结构最坏值为 65 个缓冲环，即 4.0625 MiB |
-| 常驻内联媒体 | 每窗格最多 128 张图和 64 MiB；进程上限 256 MiB；参与渲染的图像单边最多 1,024 像素 |
+| 常驻内联媒体 | 每窗格最多 128 张图和 64 MiB；进程目标为 256 MiB，回收收敛前每个存活窗格最多另保留一份 4 MiB 最新图像余量；参与渲染的图像单边最多 1,024 像素 |
 
 网格报告包含单元格、少见属性、组合文字、行容器和预留容量。回滚历史同时受配置行数和
 常驻字节数限制。滚动路径按批次摊销检查字节预算。
@@ -464,9 +466,9 @@ Windows 拆除先给 reader 500 ms，再给 writer 500 ms，然后关闭主端�
 
 ### 发布验证边界
 
-根目录 `Cargo.toml` 的 `[workspace.package]` 是版本来源。发布工作流只接受通过
-`prepare-release-assets.py check-version` 的 `v*` 标签；标签版本必须与每个 workspace
-package 一致。
+根目录 `Cargo.toml` 的 `[workspace.package]` 是版本来源。发布工作流只由匹配
+`v[0-9]+.[0-9]+.[0-9]+*` 的 tag 启动；随后 `prepare-release-assets.py check-version`
+必须把 tag 解析为语义版本，并确认该版本与每个 workspace package 一致。
 
 工作流构建五组必需包：
 
@@ -502,8 +504,9 @@ macOS 打包会检查二进制架构和应用的 ad-hoc 签名。工作流没有
 公证或 DMG 打包后启动冒烟测试。Windows 工作流也没有签名 MSI 或安装运行它。因此，
 安装包签名不是当前已验证的发布不变量。
 
-发布工作流不会运行仓库普通本地闸门中的全部命令。完整单元测试、逐 crate 集成测试、格式、
-静态检查、文档、策略、资源、Wiki 和覆盖率检查由普通 CI 负责，详见
+发布任务会运行 workspace 单元测试、逐 crate 单元/构建闸门、发布资产与说明测试、Windows
+呈现和分配器测试，以及 Linux 包冒烟测试。它不会重复普通 CI 的全部检查；格式、Clippy、
+Rustdoc、策略检查、资源基线、Wiki 发布测试和覆盖率仍由普通 CI 负责，详见
 [开发与发布](Development-and-Release)。
 
 ### 源码与检查索引

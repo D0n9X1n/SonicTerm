@@ -122,8 +122,7 @@ selection, foreground-process discovery, and the optional SSH backend.
 
 **First-party dependencies:** `sonicterm-types`.
 
-**Feature:** `ssh` enables `russh`, Tokio, and `async-trait`; it is off by
-default.
+**Feature:** `ssh` enables `russh` and Tokio; it is off by default.
 
 **Read:** `src/{pty,ssh,proc_info,foreground_proc}.rs`.
 
@@ -196,8 +195,9 @@ stretches, rasterizer selection, and policy. Its Rust library name is `config`.
 
 ### `sonicterm-fontconfig`
 
-**Role:** generated Fontconfig ABI plus the build/link shim used for non-macOS
-font discovery. `build.rs` probes system Fontconfig through pkg-config.
+**Role:** generated Fontconfig ABI plus the build/link shim used for Android and
+non-macOS Unix font discovery. `build.rs` probes system Fontconfig through
+pkg-config.
 
 **First-party dependencies:** none.
 
@@ -469,7 +469,7 @@ flowchart BT
 
 **第一方依赖：** `sonicterm-types`。
 
-**Feature：** `ssh` 会启用 `russh`、Tokio 和 `async-trait`，默认关闭。
+**Feature：** `ssh` 会启用 `russh` 和 Tokio，默认关闭。
 
 **阅读：** `src/{pty,ssh,proc_info,foreground_proc}.rs`。
 
@@ -540,8 +540,8 @@ Rust library 名为 `config`。
 
 ### `sonicterm-fontconfig`
 
-**职责：** 生成的 Fontconfig ABI 和非 macOS 字体发现所用的构建/链接封装。
-`build.rs` 通过 pkg-config 探测系统 Fontconfig。
+**职责：** 生成的 Fontconfig ABI，以及 Android 和非 macOS Unix 字体发现所用的
+构建/链接封装。`build.rs` 通过 pkg-config 探测系统 Fontconfig。
 
 **第一方依赖：** 无。
 

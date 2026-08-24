@@ -8,16 +8,13 @@ terminal-control protocols, grid rules, and terminal input routing. Rendering is
 [Rendering and Fonts](Rendering-and-Fonts) and [Rendering Modes](Rendering-Modes);
 resource totals are in [Memory](Memory).
 
-### Scope and shipping status
+### Scope
 
-The local PTY, parser, grid, and existing keyboard/paste paths ship on macOS,
-Windows, and Linux. The `MouseTracking` gesture-routing and alternate-screen
-copy-completion contract below is current but unshipped; released builds do not
-yet contain that complete path.
-
-The optional SSH transport exists behind the `sonicterm-io/ssh` feature, but no
-shipping GUI call site connects an `SshHandle`. `sonicterm-mux` is a standalone
-workspace binary that is not used by the GUI and is not packaged.
+The local PTY, parser, grid, keyboard, paste, mouse-tracking, selection, and copy
+paths are cross-platform application behavior. The optional SSH transport exists
+behind the `sonicterm-io/ssh` feature, but no shipping GUI call site connects an
+`SshHandle`. `sonicterm-mux` is a standalone workspace binary that is not used
+by the GUI and is not packaged.
 
 ### Byte and thread flow
 
@@ -250,15 +247,11 @@ SonicTerm 的终端核心在子进程与有界单元格网格之间传递字节�
 [渲染与字体](Rendering-and-Fonts)和[渲染模式](Rendering-Modes)，资源总量见
 [内存](Memory)。
 
-### 范围与发布状态
+### 范围
 
-本地 PTY、解析器、网格以及现有键盘和粘贴路径已在 macOS、Windows、Linux 发布。
-下文的 `MouseTracking` 手势路由和备用屏幕复制完成规则属于当前契约，但尚未发布；
-已发布版本还没有完整实现这条路径。
-
-可选 SSH 传输位于 `sonicterm-io/ssh` 功能之后，但发布版 GUI 没有创建
-`SshHandle` 的调用点。`sonicterm-mux` 是工作区中的独立二进制，GUI 不使用，
-发布包也不包含。
+本地 PTY、解析器、网格、键盘、粘贴、鼠标追踪、选择与复制路径属于跨平台应用行为。
+可选 SSH 传输位于 `sonicterm-io/ssh` 功能之后，但发布版 GUI 没有创建 `SshHandle`
+的调用点。`sonicterm-mux` 是工作区中的独立二进制，GUI 不使用，发布包也不包含。
 
 ### 字节与线程流
 
