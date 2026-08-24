@@ -544,6 +544,10 @@ fn shell_quoted_bare_name(
         return None;
     }
     let candidate = text.get(start..end)?;
+    if candidate.starts_with(' ') || candidate.ends_with(' ') {
+        // When: `candidate` has an outer space, reject padded or adjacent quote fragments as ambiguous.
+        return None;
+    }
     if candidate.split(' ').filter(|part| !part.is_empty()).count() > MAX_SPACED_PATH_TOKENS {
         // When: the quoted candidate exceeds `MAX_SPACED_PATH_TOKENS`, preserve the shared work bound.
         return None;

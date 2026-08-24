@@ -502,6 +502,16 @@ fn shell_quoted_spaced_names_produce_one_unwrapped_candidate() {
             "ambiguous shell text became clickable: {ambiguous:?}"
         );
     }
+
+    let fragments = "'ab ' ' cd'";
+    let inter_quote_space = fragments.find("' '").unwrap() + 1;
+    assert!(target_candidates_at_char_col_for_style(
+        fragments,
+        inter_quote_space,
+        PathStyle::Posix,
+        true,
+    )
+    .is_empty());
 }
 
 /// Spaced explicit and contextual paths produce bounded full-span candidates on every cell.
