@@ -2,502 +2,441 @@
 
 ## English
 
-SonicTerm keymaps are TOML files. Bundled defaults live in `assets/keymaps/`,
-and editable user copies live in:
+### Keymap files
+
+SonicTerm keymaps are TOML files. Bundled files live in `assets/keymaps/`.
+Editable copies live in:
 
 ```text
 ~/.sonicterm/keymaps/
-├── sonicterm-macos.toml
-├── sonicterm-windows.toml
-└── sonicterm-linux.toml
 ```
 
-The active keymap is selected from `~/.sonicterm/sonicterm.toml`:
+The first launch seeds `sonicterm-macos.toml`, `sonicterm-windows.toml`, and
+`sonicterm-linux.toml`. The active file comes from `keymap` in
+`~/.sonicterm/sonicterm.toml`. A name checks the user directory before bundled
+assets. A path is used directly.
 
-```toml
-keymap = "sonicterm-macos"
-```
-
-You can also point `keymap` at any TOML file path.
+**Edit keymap.toml** opens the platform-default user file. If `keymap` names a
+different file, edit that file directly. Run **Reload Config** after saving.
+SonicTerm has no keymap file watcher.
 
 ### Default shortcuts
 
-`Cmd` is the SonicTerm app modifier on macOS; `Alt` is the app modifier on
-Windows. On Windows, `Ctrl+<letter>` is left to the shell (Ctrl+C = SIGINT,
-Ctrl+R = history search, Ctrl+W = kill word, …), so a few terminal-standard
-aliases (`Ctrl+T`, `Ctrl+Shift+C`, `Ctrl+Shift+V`) are also bound.
+The macOS application modifier is `Cmd`. Windows and Linux use `Alt`, which
+leaves most `Ctrl+<letter>` input available to shells and terminal applications.
+The listed `Alt` chords can therefore replace shell Meta bindings.
 
-| Action | macOS | Windows |
-| --- | --- | --- |
-| New tab | `Cmd+T` (`Cmd+Shift+T`) | `Alt+T` / `Ctrl+T` (`Alt+Shift+T`) |
-| Close pane or tab | `Cmd+W` | `Alt+W` |
-| Next tab | `Cmd+Shift+]` / `Cmd+Right` | `Alt+Shift+]` / `Alt+Right` |
-| Previous tab | `Cmd+Shift+[` / `Cmd+Left` | `Alt+Shift+[` / `Alt+Left` |
-| Activate tab 1–8 | `Cmd+1` … `Cmd+8` | `Alt+1` … `Alt+8` |
-| Activate last tab | `Cmd+9` | `Alt+9` |
-| Split right | `Cmd+D` | `Alt+D` |
-| Split down | `Cmd+Shift+D` | `Alt+Shift+D` |
-| Close pane | `Cmd+Shift+W` | `Alt+Shift+W` |
-| Zoom pane | `Cmd+Shift+Z` | `Alt+Shift+Z` |
-| Focus pane (left/down/up/right) | `Cmd+Shift+H/J/K/L` | `Alt+Shift+H/J/K/L` |
-| Resize pane (left/right/up/down) | `Cmd+Shift+Arrow` | `Alt+Shift+Arrow` |
-| Broadcast to tab | `Cmd+Shift+B` | `Alt+Shift+B` |
-| Broadcast to all tabs | `Cmd+Ctrl+Shift+B` | `Ctrl+Alt+Shift+B` |
-| READONLY / copy mode | `Cmd+[` | `Alt+[` |
-| Copy | `Cmd+C` | `Alt+C` / `Ctrl+Shift+C` |
-| Paste | `Cmd+V` | `Ctrl+Shift+V` |
-| Increase font size | `Cmd+=` / `Cmd++` | `Alt+=` / `Alt++` |
-| Decrease font size | `Cmd+-` | `Alt+-` |
-| Reset font size (to configured `size`) | `Cmd+0` | `Alt+0` |
-| New window | `Cmd+N` | `Alt+N` |
-| Quit app (confirm) | `Cmd+Q`, then `Cmd+Q` again within 5s | — |
-| Toggle fullscreen | `Cmd+Enter` / `Cmd+Shift+F` | `Alt+Enter` / `Alt+Shift+F` / `F11` |
-| Search | `Cmd+F` | `Alt+F` |
-| Command palette | `Cmd+Shift+P` | `Alt+Shift+P` |
-| Quick select URLs | `Cmd+Shift+Space` | `Alt+Shift+Space` |
-| Scroll line up/down | `Cmd+Up` / `Cmd+Down` | `Alt+Up` / `Alt+Down` |
-| Scroll page up/down | `Cmd+PageUp` / `Cmd+PageDown` | `Alt+PageUp` / `Alt+PageDown` |
-| Scroll to top/bottom | `Cmd+Home` / `Cmd+End` | `Alt+Home` / `Alt+End` |
-| Reload config | `Cmd+R` / `Cmd+Shift+R` | `Alt+R` / `Alt+Shift+R` |
+| Action | macOS | Windows | Linux |
+| --- | --- | --- | --- |
+| New tab | `Cmd+T`, `Cmd+Shift+T` | `Alt+T`, `Alt+Shift+T`, `Ctrl+T` | `Alt+T`, `Alt+Shift+T`, `Ctrl+T` |
+| Close active pane or tab | `Cmd+W` | `Alt+W` | `Alt+W` |
+| Next tab | `Cmd+Shift+]`, `Cmd+Right` | `Alt+Shift+]`, `Alt+Right` | `Alt+Shift+]`, `Alt+Right` |
+| Previous tab | `Cmd+Shift+[`, `Cmd+Left` | `Alt+Shift+[`, `Alt+Left` | `Alt+Shift+[`, `Alt+Left` |
+| Activate tabs 1–8 | `Cmd+1` … `Cmd+8` | `Alt+1` … `Alt+8` | `Alt+1` … `Alt+8` |
+| Activate last tab | `Cmd+9` | `Alt+9` | `Alt+9` |
+| Split right | `Cmd+D` | `Alt+D` | `Alt+D` |
+| Split down | `Cmd+Shift+D` | `Alt+Shift+D` | `Alt+Shift+D` |
+| Close pane | `Cmd+Shift+W` | `Alt+Shift+W` | `Alt+Shift+W` |
+| Toggle pane zoom | `Cmd+Shift+Z` | `Alt+Shift+Z` | `Alt+Shift+Z` |
+| Focus pane left/down/up/right | `Cmd+Shift+H/J/K/L` | `Alt+Shift+H/J/K/L` | `Alt+Shift+H/J/K/L` |
+| Resize pane left/right/up/down | `Cmd+Shift+Arrow` | `Alt+Shift+Arrow` | `Alt+Shift+Arrow` |
+| Broadcast to current tab | `Cmd+Shift+B` | `Alt+Shift+B` | `Alt+Shift+B` |
+| Broadcast to all tabs | `Cmd+Ctrl+Shift+B` | `Ctrl+Alt+Shift+B` | `Ctrl+Alt+Shift+B` |
+| Enter READONLY mode | `Cmd+[` | `Alt+[` | `Alt+[` |
+| Copy selection | `Cmd+C` | `Alt+C`, `Ctrl+Shift+C` | `Alt+C`, `Ctrl+Shift+C` |
+| Paste | `Cmd+V` | `Ctrl+Shift+V` | `Alt+V`, `Ctrl+Shift+V` |
+| Increase font size | `Cmd+=`, `Cmd+Shift+=`, `Cmd++` | `Alt+=`, `Alt+Shift+=`, `Alt++` | `Alt+=`, `Alt+Shift+=`, `Alt++` |
+| Decrease font size | `Cmd+-` | `Alt+-` | `Alt+-` |
+| Reset font size to config | `Cmd+0` | `Alt+0` | `Alt+0` |
+| New window | `Cmd+N` | `Alt+N` | `Alt+N` |
+| Toggle fullscreen | `Cmd+Shift+F`, `Cmd+Enter` | `Alt+Shift+F`, `Alt+Enter`, `F11` | `Alt+Shift+F`, `Alt+Enter`, `F11` |
+| Search | `Cmd+F` | `Alt+F` | `Alt+F` |
+| Command palette | `Cmd+Shift+P` | `Alt+Shift+P` | `Alt+Shift+P` |
+| Quick-select URLs | `Cmd+Shift+Space` | `Alt+Shift+Space` | `Alt+Shift+Space` |
+| Scroll one line | `Cmd+Up`, `Cmd+Down` | `Alt+Up`, `Alt+Down` | `Alt+Up`, `Alt+Down` |
+| Scroll one page | `Cmd+PageUp`, `Cmd+PageDown` | `Alt+PageUp`, `Alt+PageDown` | `Alt+PageUp`, `Alt+PageDown` |
+| Scroll to top or bottom | `Cmd+Home`, `Cmd+End` | `Alt+Home`, `Alt+End` | `Alt+Home`, `Alt+End` |
+| Reload config | `Cmd+R`, `Cmd+Shift+R` | `Alt+R`, `Alt+Shift+R` | `Alt+R`, `Alt+Shift+R` |
+| Quit from keyboard | Press `Cmd+Q` twice within 5 seconds | — | — |
 
-The action model also supports prompt navigation (`scroll_to_prev_prompt`,
-`scroll_to_next_prompt`), theme application, update checks, and an experimental
-SSH-pane action. Those are not all bound by default; SSH transport is optional
-and its live GUI session is not yet a complete shipping feature.
+On macOS, the first `Cmd+Q` displays **Press ⌘Q one more time to quit**. Auto-repeat
+does not confirm the quit. The prompt expires after 5 seconds. The native
+**Quit SonicTerm** menu item quits immediately.
 
-These are the bundled defaults; every row is editable in the keymap TOML below.
+Windows deliberately does not bind `Alt+V`; that chord continues to the PTY.
+Use `Ctrl+Shift+V` for paste. Linux binds both `Alt+V` and `Ctrl+Shift+V`.
 
-> **Quit confirmation (macOS).** `Cmd+Q` does not quit immediately. The first
-> press shows a red **“Press ⌘Q one more time to quit”** alert in the top-right
-> corner. Press `Cmd+Q` again within 5 seconds to quit; otherwise the alert
-> closes automatically and nothing happens. The **Quit SonicTerm** menu item
-> (no key equivalent) quits at once.
+### TOML syntax
 
-### Edit the platform-default user keymap
-
-1. Open the command palette.
-2. Run **Edit keymap.toml**. This opens the platform-default user file.
-3. Edit that file, or manually open the custom path named by `keymap`.
-4. Save, then run **Reload Config**. This applies to any keymap the `keymap`
-   key names, including custom-named files — a reload re-reads the keymap file
-   whether or not the selector changed, so no rename or restart is needed.
-
-When a keymap reloads successfully, command-palette shortcut hints update with it.
-
-### Binding syntax
-
-Each shortcut is one `[[binding]]` table:
+A keymap needs a `[meta]` table and zero or more `[[binding]]` tables:
 
 ```toml
+[meta]
+name = "my-keymap"
+version = "1.0"
+
 [[binding]]
 keys = "super+shift+p"
 action = "open_command_palette"
 
 [[binding]]
-keys = "super+d"
-action = "split_right"
+keys = "super+1"
+action = { activate_tab = 0 }
 ```
 
-Modifier names:
+Key names are lower case. Modifiers are normalized in this order:
 
-| Modifier | Meaning |
+```text
+super+ctrl+alt+shift+key
+```
+
+| Name | Meaning |
 | --- | --- |
-| `super` | Command on macOS, Windows/Super key on Windows. App modifier on macOS. |
+| `super` | Command on macOS; the Super/Windows key on Windows and Linux |
 | `ctrl` | Control |
+| `alt` | Option on macOS; Alt on Windows and Linux |
 | `shift` | Shift |
-| `alt` | Option on macOS, Alt on Windows/Linux. App modifier on Windows and Linux. |
 
-The default macOS keymap mostly uses `super` (Command). The default Windows and
-Linux keymaps use `alt` as SonicTerm's app modifier so `ctrl` shortcuts keep
-working inside the shell. Windows/Linux keep a few compatibility aliases such as
-`ctrl+t` and `ctrl+shift+c` / `ctrl+shift+v`.
+Chord lookup is case-insensitive. If the same chord appears more than once, the
+first matching binding wins. Keys with no binding go to the terminal. One
+Windows exception is preserved: an `alt+v` binding to `paste_from_clipboard`
+still passes through to the terminal.
 
-Keys are written in lower case. Modifier order is normalized as
-`super+ctrl+alt+shift+key`. Examples: `super+t`, `super+shift+p`, `alt+d`,
-`alt+shift+d`, `ctrl+alt+shift+b`, `alt+left`, `alt+pageup`, `super+enter`.
+### Actions
 
-### Actions with parameters
+Actions without arguments use a string. The active action names are:
 
-Some actions need a value; pane resize also has direction-specific shortcut actions:
+| Group | Actions |
+| --- | --- |
+| Tabs | `new_tab`, `close_tab`, `close_active_pane_or_tab`, `next_tab`, `prev_tab`, `activate_last_tab` |
+| Panes | `split_right`, `split_down`, `close_pane`, `toggle_pane_zoom`, `resize_pane_left`, `resize_pane_right`, `resize_pane_up`, `resize_pane_down` |
+| Clipboard and navigation | `copy_to_clipboard`, `paste_from_clipboard`, `enter_copy_mode`, `enter_quick_select` |
+| Font | `increase_font_size`, `decrease_font_size`, `reset_font_size`, `increase_font_weight`, `decrease_font_weight`, `reset_font_weight`, `save_current_settings` |
+| UI | `toggle_tab_bar`, `rename_tab`, `update_tab_color`, `open_search`, `open_command_palette` |
+| Window and app | `new_window`, `move_tab_to_new_window`, `toggle_fullscreen`, `quit_app` |
+| Files and maintenance | `edit_config_file`, `open_keymap_file`, `reload_config`, `check_for_updates` |
+| Shell navigation | `scroll_to_prev_prompt`, `scroll_to_next_prompt` |
+
+Parameterized actions use inline TOML tables:
 
 ```toml
 [[binding]]
-keys = "super+1"
-action = { activate_tab = 0 }
+keys = "super+3"
+action = { activate_tab = 2 }
 
 [[binding]]
 keys = "super+shift+h"
 action = { focus_pane = "left" }
-
-[[binding]]
-keys = "super+shift+left"
-action = "resize_pane_left"
-
-[[binding]]
-keys = "super+up"
-action = { scroll = "line_up" }
-
-[[binding]]
-keys = "super+shift+b"
-action = { toggle_broadcast = { scope = "tab" } }
-```
-
-Directions are `left`, `right`, `up`, `down`. Scroll values are `line_up`,
-`line_down`, `page_up`, `page_down`, `to_top`, and `to_bottom`.
-
-### Common action names
-
-| Action | TOML value |
-| --- | --- |
-| New tab | `new_tab` |
-| Close tab | `close_tab` |
-| Close active pane or tab | `close_active_pane_or_tab` |
-| Next / previous tab | `next_tab`, `prev_tab` |
-| Split pane | `split_right`, `split_down` |
-| Close pane | `close_pane` |
-| Zoom pane | `toggle_pane_zoom` |
-| Focus pane | `{ focus_pane = "left" }` |
-| Resize pane | `resize_pane_left`, `resize_pane_right`, `resize_pane_up`, `resize_pane_down` |
-| Copy / paste | `copy_to_clipboard`, `paste_from_clipboard` |
-| Read-only navigation mode | `enter_copy_mode` |
-| Quick select URL hints | `enter_quick_select` |
-| Font size | `increase_font_size`, `decrease_font_size`, `reset_font_size` |
-| Font weight | `increase_font_weight`, `decrease_font_weight`, `reset_font_weight` |
-| New window | `new_window` |
-| Move active tab to new window | `move_tab_to_new_window` |
-| Quit app | `quit_app` |
-| Fullscreen | `toggle_fullscreen` |
-| Search | `open_search` |
-| Command palette | `open_command_palette` |
-| Update tab color | `update_tab_color` |
-| Edit config file | `edit_config_file` |
-| Edit keymap file | `open_keymap_file` |
-| Reload config | `reload_config` |
-| Save current font settings (no default binding) | `save_current_settings` |
-
-### Example: make pane resize larger
-
-The default keymaps bind the four `resize_pane_*` actions listed above, which
-use the built-in step size. Use the parameterized `resize_pane` form when you
-want a different step:
-
-These examples use macOS `super`; on Windows/Linux use `alt` for the same app-level chord.
-
-```toml
-[[binding]]
-keys = "super+shift+left"
-action = { resize_pane = { dir = "left", amount = 10 } }
 
 [[binding]]
 keys = "super+shift+right"
 action = { resize_pane = { dir = "right", amount = 10 } }
+
+[[binding]]
+keys = "super+pageup"
+action = { scroll = "page_up" }
+
+[[binding]]
+keys = "super+shift+b"
+action = { toggle_broadcast = { scope = "tab" } }
+
+[[binding]]
+keys = "super+shift+1"
+action = { apply_theme = "nord" }
 ```
 
-### Example: use Vim-style pane focus
+`activate_tab` is zero-based. Directions are `left`, `right`, `up`, and `down`.
+Each named resize action moves the divider by 5%. `resize_pane.amount` repeats
+that 5% step; `0` does nothing. Scroll values are
+`line_up`, `line_down`, `page_up`, `page_down`, `to_top`, and `to_bottom`.
+Broadcast scopes are `tab` and `all_tabs`.
 
-```toml
-[[binding]]
-keys = "super+shift+h"
-action = { focus_pane = "left" }
+Font-size actions step by `1` point and clamp the live size to `8..=48`.
+Font-weight actions step by `0.25` and clamp to `0.5..=5.0`. Reset returns to
+the last loaded or saved config value. The weight and save actions have no
+default shortcut, but they are available in the command palette.
 
-[[binding]]
-keys = "super+shift+j"
-action = { focus_pane = "down" }
+### Selection and explicit copy
 
-[[binding]]
-keys = "super+shift+k"
-action = { focus_pane = "up" }
+A normal drag selects cells. A double-click selects a word, and a triple-click
+selects a line. Continuing to drag after a double- or triple-click extends by
+whole words or lines. Releasing a drag does not copy automatically.
 
-[[binding]]
-keys = "super+shift+l"
-action = { focus_pane = "right" }
-```
+When a terminal application enables mouse tracking, an unmodified left-button
+gesture belongs to that application. Start with `Shift+Left` to give the whole
+gesture to SonicTerm and select local text instead. The owner is fixed on the
+button press, so changing Shift or the application’s tracking mode during the
+drag does not transfer it.
 
-At startup, an invalid selected keymap is logged and falls back to the bundled
-platform default. A failed reload leaves the current in-memory keymap active.
-Keymap edits apply when you run **Reload Config** from the command palette;
-there is no file watcher.
+`copy_to_clipboard` copies a valid explicit selection. On the primary screen,
+the selection remains highlighted after a successful copy. On the alternate
+screen, a successful clipboard write clears the explicit selection and redraws
+the window immediately. A clipboard failure keeps that valid selection so the
+copy can be retried. If selected cells changed before the copy, SonicTerm clears
+the stale selection and leaves the clipboard unchanged.
 
-### Terminal-style editing in app text fields
+### READONLY and quick select
 
-When terminal search, command-palette filtering, or tab renaming owns keyboard
-input, SonicTerm provides the same core single-line editing controls in every
-field. Search has a movable caret; editing and IME composition occur at that
-caret in both the main window and torn-out windows.
+`enter_copy_mode` opens READONLY mode at the terminal cursor. It blocks all PTY
+input and does not create a selection. These local controls remain active:
 
-| Key | App text-field action |
+| Key | READONLY action |
 | --- | --- |
-| `Ctrl+A` | Move to the start |
-| `Ctrl+E` | Move to the end |
-| `Ctrl+B` / `Ctrl+F` | Move one Unicode character left / right |
-| `Ctrl+H` | Delete one Unicode character backward |
-| `Ctrl+D` | Delete one Unicode character forward |
+| `Left` / `h` | Move one cell left |
+| `Down` / `j` | Move one row down |
+| `Up` / `k` | Move one row up |
+| `Right` / `l` | Move one cell right |
+| `w` / `b` | Move to the next / previous word |
+| `0` / `$` | Move to the start / end of the row |
+| `g` / `G` | Move to the top / bottom |
+| `Escape` | Exit READONLY mode |
+
+READONLY also permits keymap actions that switch or activate tabs, focus panes,
+open search, check for updates, or save current font settings. All other bound
+actions are consumed without running and without reaching the PTY. Search text
+is still editable.
+
+`enter_quick_select` labels up to 26 URLs on the current screen with `a` through
+`z`. Press a label to copy that URL and close the overlay. Press `Escape` to
+cancel.
+
+### App text fields
+
+Search, command-palette filtering, and tab renaming support the same single-line
+editing controls. These exact chords work only while an app text field owns
+input:
+
+| Key | Action |
+| --- | --- |
+| `Ctrl+A` / `Ctrl+E` | Move to start / end |
+| `Ctrl+B` / `Ctrl+F` | Move left / right by one Unicode character |
+| `Ctrl+H` / `Ctrl+D` | Delete backward / forward by one Unicode character |
 | `Ctrl+W` | Delete left whitespace, then the previous non-whitespace run |
-| `Ctrl+U` | Delete from the start through the caret |
-| `Ctrl+K` | Delete from the caret through the end |
+| `Ctrl+U` / `Ctrl+K` | Delete from start to caret / caret to end |
+| `Left`, `Right`, `Home`, `End`, `Delete` | Standard caret movement and forward deletion |
 
-Search also supports the standard unmodified `Left`, `Right`, `Home`, `End`,
-and `Delete` keys for caret movement and forward deletion, matching the command
-palette and tab rename fields.
+Adding Shift, Alt, or Super makes a different chord. When no SonicTerm text
+field is active, `Ctrl+<letter>` continues to the PTY.
 
-These are exact field-local chords; adding Shift, Alt, or Super does not alias
-them. The tab-color picker is selection-only and does not use text editing.
-When no SonicTerm text field is active, the same `Ctrl+<letter>` keys continue
-to the PTY as terminal control bytes, so shells and terminal applications keep
-their own readline/ZLE behavior.
+### Load failures
 
-### READONLY mode shortcut policy
-
-`enter_copy_mode` opens READONLY mode. In this mode SonicTerm blocks terminal
-input and only allows shortcut actions for tab switching, pane focus, search,
-update checks, and saving current font settings: `next_tab`, `prev_tab`,
-`{ activate_tab = N }`, `activate_last_tab`,
-`{ focus_pane = "left|right|up|down" }`, `open_search`, `check_for_updates`, and
-`save_current_settings`.
-
-All other shortcuts are ignored by READONLY mode and are not forwarded to the
-terminal. Search remains editable inside READONLY mode.
+At startup, invalid TOML or a missing `[meta]` table falls back to the bundled
+platform keymap. During reload, the current in-memory keymap remains active
+instead. A structurally valid keymap handles bad actions per binding: SonicTerm
+logs a warning, skips that binding, and keeps the rest. A successful reload also
+updates command-palette shortcut hints.
 
 ## 中文
 
-SonicTerm 的快捷键是 TOML 文件。内置默认文件在 `assets/keymaps/`，首次启动后会
-复制一份可编辑版本到：
+### Keymap 文件
+
+SonicTerm 的 keymap 是 TOML 文件。内置文件位于 `assets/keymaps/`。用户可编辑
+副本位于：
 
 ```text
 ~/.sonicterm/keymaps/
-├── sonicterm-macos.toml
-├── sonicterm-windows.toml
-└── sonicterm-linux.toml
 ```
 
-当前使用哪个 keymap，由 `~/.sonicterm/sonicterm.toml` 决定：
+首次启动会写入 `sonicterm-macos.toml`、`sonicterm-windows.toml` 和
+`sonicterm-linux.toml`。当前文件由 `~/.sonicterm/sonicterm.toml` 中的
+`keymap` 决定。使用名称时，SonicTerm 先查找用户目录，再查找内置资产。使用路径时
+直接读取该文件。
 
-```toml
-keymap = "sonicterm-macos"
-```
-
-也可以把 `keymap` 写成任意 TOML 文件路径。
+**Edit keymap.toml** 打开当前平台的默认用户文件。如果 `keymap` 指向其它文件，
+请直接编辑那个文件。保存后执行 **Reload Config**。SonicTerm 没有 keymap 文件 watcher。
 
 ### 默认快捷键
 
-macOS 上的应用修饰键是 `Cmd`；Windows 上是 `Alt`。在 Windows 上，`Ctrl+<字母>`
-仍然交给 shell（Ctrl+C = SIGINT，Ctrl+R = 历史搜索，Ctrl+W = 删除单词……），
-因此另外保留了几个终端通用的兼容别名（`Ctrl+T`、`Ctrl+Shift+C`、`Ctrl+Shift+V`）。
+macOS 的应用修饰键是 `Cmd`。Windows 和 Linux 使用 `Alt`，这样大多数
+`Ctrl+<字母>` 可以继续交给 shell 和终端程序。表中的 `Alt` 快捷键也会占用 shell
+原有的 Meta 快捷键。
 
-| 功能 | macOS | Windows |
-| --- | --- | --- |
-| 新建 Tab | `Cmd+T`（`Cmd+Shift+T`） | `Alt+T` / `Ctrl+T`（`Alt+Shift+T`） |
-| 关闭 Pane 或 Tab | `Cmd+W` | `Alt+W` |
-| 下一个 Tab | `Cmd+Shift+]` / `Cmd+Right` | `Alt+Shift+]` / `Alt+Right` |
-| 上一个 Tab | `Cmd+Shift+[` / `Cmd+Left` | `Alt+Shift+[` / `Alt+Left` |
-| 切换到 Tab 1–8 | `Cmd+1` … `Cmd+8` | `Alt+1` … `Alt+8` |
-| 切换到最后一个 Tab | `Cmd+9` | `Alt+9` |
-| 向右分屏 | `Cmd+D` | `Alt+D` |
-| 向下分屏 | `Cmd+Shift+D` | `Alt+Shift+D` |
-| 关闭 Pane | `Cmd+Shift+W` | `Alt+Shift+W` |
-| 放大 Pane（Zoom） | `Cmd+Shift+Z` | `Alt+Shift+Z` |
-| 切换 Pane 焦点（左/下/上/右） | `Cmd+Shift+H/J/K/L` | `Alt+Shift+H/J/K/L` |
-| 调整 Pane 大小（左/右/上/下） | `Cmd+Shift+方向键` | `Alt+Shift+方向键` |
-| 广播到当前 Tab | `Cmd+Shift+B` | `Alt+Shift+B` |
-| 广播到所有 Tab | `Cmd+Ctrl+Shift+B` | `Ctrl+Alt+Shift+B` |
-| READONLY / 复制模式 | `Cmd+[` | `Alt+[` |
-| 复制 | `Cmd+C` | `Alt+C` / `Ctrl+Shift+C` |
-| 粘贴 | `Cmd+V` | `Ctrl+Shift+V` |
-| 增大字号 | `Cmd+=` / `Cmd++` | `Alt+=` / `Alt++` |
-| 减小字号 | `Cmd+-` | `Alt+-` |
-| 重置字号（回到配置的 `size`） | `Cmd+0` | `Alt+0` |
-| 新建窗口 | `Cmd+N` | `Alt+N` |
-| 退出应用（确认） | 先按 `Cmd+Q`，5 秒内再按一次 `Cmd+Q` | — |
-| 切换全屏 | `Cmd+Enter` / `Cmd+Shift+F` | `Alt+Enter` / `Alt+Shift+F` / `F11` |
-| 搜索 | `Cmd+F` | `Alt+F` |
-| 命令面板 | `Cmd+Shift+P` | `Alt+Shift+P` |
-| URL 快速选择 | `Cmd+Shift+Space` | `Alt+Shift+Space` |
-| 上滚 / 下滚一行 | `Cmd+Up` / `Cmd+Down` | `Alt+Up` / `Alt+Down` |
-| 上滚 / 下滚一页 | `Cmd+PageUp` / `Cmd+PageDown` | `Alt+PageUp` / `Alt+PageDown` |
-| 滚动到顶部 / 底部 | `Cmd+Home` / `Cmd+End` | `Alt+Home` / `Alt+End` |
-| 重新加载配置 | `Cmd+R` / `Cmd+Shift+R` | `Alt+R` / `Alt+Shift+R` |
+| 功能 | macOS | Windows | Linux |
+| --- | --- | --- | --- |
+| 新建标签页 | `Cmd+T`、`Cmd+Shift+T` | `Alt+T`、`Alt+Shift+T`、`Ctrl+T` | `Alt+T`、`Alt+Shift+T`、`Ctrl+T` |
+| 关闭当前 pane 或标签页 | `Cmd+W` | `Alt+W` | `Alt+W` |
+| 下一个标签页 | `Cmd+Shift+]`、`Cmd+Right` | `Alt+Shift+]`、`Alt+Right` | `Alt+Shift+]`、`Alt+Right` |
+| 上一个标签页 | `Cmd+Shift+[`、`Cmd+Left` | `Alt+Shift+[`、`Alt+Left` | `Alt+Shift+[`、`Alt+Left` |
+| 切换到标签页 1–8 | `Cmd+1` … `Cmd+8` | `Alt+1` … `Alt+8` | `Alt+1` … `Alt+8` |
+| 切换到最后一个标签页 | `Cmd+9` | `Alt+9` | `Alt+9` |
+| 向右分屏 | `Cmd+D` | `Alt+D` | `Alt+D` |
+| 向下分屏 | `Cmd+Shift+D` | `Alt+Shift+D` | `Alt+Shift+D` |
+| 关闭 pane | `Cmd+Shift+W` | `Alt+Shift+W` | `Alt+Shift+W` |
+| 切换 pane zoom | `Cmd+Shift+Z` | `Alt+Shift+Z` | `Alt+Shift+Z` |
+| 向左/下/上/右切换 pane | `Cmd+Shift+H/J/K/L` | `Alt+Shift+H/J/K/L` | `Alt+Shift+H/J/K/L` |
+| 向左/右/上/下调整 pane | `Cmd+Shift+方向键` | `Alt+Shift+方向键` | `Alt+Shift+方向键` |
+| 广播到当前标签页 | `Cmd+Shift+B` | `Alt+Shift+B` | `Alt+Shift+B` |
+| 广播到所有标签页 | `Cmd+Ctrl+Shift+B` | `Ctrl+Alt+Shift+B` | `Ctrl+Alt+Shift+B` |
+| 进入 READONLY 模式 | `Cmd+[` | `Alt+[` | `Alt+[` |
+| 复制选区 | `Cmd+C` | `Alt+C`、`Ctrl+Shift+C` | `Alt+C`、`Ctrl+Shift+C` |
+| 粘贴 | `Cmd+V` | `Ctrl+Shift+V` | `Alt+V`、`Ctrl+Shift+V` |
+| 增大字号 | `Cmd+=`、`Cmd+Shift+=`、`Cmd++` | `Alt+=`、`Alt+Shift+=`、`Alt++` | `Alt+=`、`Alt+Shift+=`、`Alt++` |
+| 减小字号 | `Cmd+-` | `Alt+-` | `Alt+-` |
+| 把字号重置为配置值 | `Cmd+0` | `Alt+0` | `Alt+0` |
+| 新建窗口 | `Cmd+N` | `Alt+N` | `Alt+N` |
+| 切换全屏 | `Cmd+Shift+F`、`Cmd+Enter` | `Alt+Shift+F`、`Alt+Enter`、`F11` | `Alt+Shift+F`、`Alt+Enter`、`F11` |
+| 搜索 | `Cmd+F` | `Alt+F` | `Alt+F` |
+| 命令面板 | `Cmd+Shift+P` | `Alt+Shift+P` | `Alt+Shift+P` |
+| 快速选择 URL | `Cmd+Shift+Space` | `Alt+Shift+Space` | `Alt+Shift+Space` |
+| 滚动一行 | `Cmd+Up`、`Cmd+Down` | `Alt+Up`、`Alt+Down` | `Alt+Up`、`Alt+Down` |
+| 滚动一页 | `Cmd+PageUp`、`Cmd+PageDown` | `Alt+PageUp`、`Alt+PageDown` | `Alt+PageUp`、`Alt+PageDown` |
+| 滚动到顶部或底部 | `Cmd+Home`、`Cmd+End` | `Alt+Home`、`Alt+End` | `Alt+Home`、`Alt+End` |
+| 重载配置 | `Cmd+R`、`Cmd+Shift+R` | `Alt+R`、`Alt+Shift+R` | `Alt+R`、`Alt+Shift+R` |
+| 用键盘退出 | 5 秒内按两次 `Cmd+Q` | — | — |
 
-action 模型还支持 prompt 导航（`scroll_to_prev_prompt`、`scroll_to_next_prompt`）、
-应用主题、检查更新和实验性 SSH pane action。这些 action 并非全部带有默认绑定；SSH transport
-是可选实现，其实时 GUI session 目前还不是完整发布功能。
+macOS 中，第一次按 `Cmd+Q` 会显示 **Press ⌘Q one more time to quit**。
+按键自动重复不会确认退出。提示会在 5 秒后失效。原生菜单中的
+**Quit SonicTerm** 会立即退出。
 
-以上是内置默认值；下面的 keymap TOML 里每一行都可以自定义。
+Windows 特意不绑定 `Alt+V`；该组合键会继续发送给 PTY。请使用
+`Ctrl+Shift+V` 粘贴。Linux 同时绑定 `Alt+V` 和 `Ctrl+Shift+V`。
 
-> **退出确认（macOS）。** `Cmd+Q` 不会立即退出。第一次按下时，右上角会显示红色的
-> **“Press ⌘Q one more time to quit”** 提示；5 秒内再次按 `Cmd+Q` 才会退出，
-> 超时后提示自动关闭且不执行任何操作。原生菜单里的 **Quit SonicTerm** 没有快捷键，
-> 点击该菜单项会立即退出。
+### TOML 格式
 
-### 修改平台默认用户 keymap
-
-1. 打开命令面板。
-2. 执行 **Edit keymap.toml**；它会打开平台默认用户文件。
-3. 编辑该文件，或手动打开 `keymap` 指向的自定义路径。
-4. 保存后执行 **Reload Config**。这对 `keymap` 指向的任何 keymap 都有效，包括自定义
-   名称的文件——重载会重新读取 keymap 文件，无论选择器是否变化，因此无需改名或重启。
-
-keymap 成功重载时，命令面板中的快捷键提示也会一起更新。
-
-### 绑定格式
-
-每个快捷键都是一个 `[[binding]]`：
+Keymap 必须有 `[meta]`，并可以包含任意数量的 `[[binding]]`：
 
 ```toml
+[meta]
+name = "my-keymap"
+version = "1.0"
+
 [[binding]]
 keys = "super+shift+p"
 action = "open_command_palette"
 
 [[binding]]
-keys = "super+d"
-action = "split_right"
+keys = "super+1"
+action = { activate_tab = 0 }
 ```
 
-修饰键名称：
+按键名使用小写。修饰键按以下顺序规范化：
 
-| 修饰键 | 含义 |
+```text
+super+ctrl+alt+shift+key
+```
+
+| 名称 | 含义 |
 | --- | --- |
-| `super` | macOS 上是 Command，Windows 上是 Windows/Super 键；macOS 的应用修饰键 |
+| `super` | macOS 上的 Command；Windows 和 Linux 上的 Super/Windows 键 |
 | `ctrl` | Control |
+| `alt` | macOS 上的 Option；Windows 和 Linux 上的 Alt |
 | `shift` | Shift |
-| `alt` | macOS 上是 Option，Windows/Linux 上是 Alt；Windows 和 Linux 的应用修饰键 |
 
-默认 macOS keymap 主要使用 `super`（Command）。默认 Windows / Linux keymap 使用
-`alt` 作为 SonicTerm 的应用修饰键，这样 `ctrl` 快捷键可以继续交给 shell 使用。
-Windows / Linux 仍保留少量兼容别名，例如 `ctrl+t` 和 `ctrl+shift+c` / `ctrl+shift+v`。
+快捷键匹配不区分大小写。同一组合键出现多次时，第一个匹配的 binding 生效。
+没有 binding 的按键会发送给终端。Windows 有一个保留例外：即使把 `alt+v`
+绑定到 `paste_from_clipboard`，它仍会发送给终端。
 
-按键名用小写，修饰键会按 `super+ctrl+alt+shift+key` 的顺序规范化。比如：
-`super+t`、`super+shift+p`、`alt+d`、`alt+shift+d`、`ctrl+alt+shift+b`、
-`alt+left`、`alt+pageup`、`super+enter`。
+### Action
 
-### 带参数的 action
+不带参数的 action 使用字符串。当前有效名称如下：
 
-有些 action 需要额外参数；Pane resize 也提供按方向命名的快捷 action：
+| 分组 | Action |
+| --- | --- |
+| 标签页 | `new_tab`、`close_tab`、`close_active_pane_or_tab`、`next_tab`、`prev_tab`、`activate_last_tab` |
+| Pane | `split_right`、`split_down`、`close_pane`、`toggle_pane_zoom`、`resize_pane_left`、`resize_pane_right`、`resize_pane_up`、`resize_pane_down` |
+| 剪贴板与导航 | `copy_to_clipboard`、`paste_from_clipboard`、`enter_copy_mode`、`enter_quick_select` |
+| 字体 | `increase_font_size`、`decrease_font_size`、`reset_font_size`、`increase_font_weight`、`decrease_font_weight`、`reset_font_weight`、`save_current_settings` |
+| UI | `toggle_tab_bar`、`rename_tab`、`update_tab_color`、`open_search`、`open_command_palette` |
+| 窗口与应用 | `new_window`、`move_tab_to_new_window`、`toggle_fullscreen`、`quit_app` |
+| 文件与维护 | `edit_config_file`、`open_keymap_file`、`reload_config`、`check_for_updates` |
+| Shell 导航 | `scroll_to_prev_prompt`、`scroll_to_next_prompt` |
+
+带参数的 action 使用 inline TOML table：
 
 ```toml
 [[binding]]
-keys = "super+1"
-action = { activate_tab = 0 }
+keys = "super+3"
+action = { activate_tab = 2 }
 
 [[binding]]
 keys = "super+shift+h"
 action = { focus_pane = "left" }
-
-[[binding]]
-keys = "super+shift+left"
-action = "resize_pane_left"
-
-[[binding]]
-keys = "super+up"
-action = { scroll = "line_up" }
-
-[[binding]]
-keys = "super+shift+b"
-action = { toggle_broadcast = { scope = "tab" } }
-```
-
-方向值是 `left`、`right`、`up`、`down`。滚动值是 `line_up`、`line_down`、
-`page_up`、`page_down`、`to_top`、`to_bottom`。
-
-### 常用 action 名称
-
-| 功能 | TOML 值 |
-| --- | --- |
-| 新建 Tab | `new_tab` |
-| 关闭 Tab | `close_tab` |
-| 关闭当前 Pane 或 Tab | `close_active_pane_or_tab` |
-| 下一个 / 上一个 Tab | `next_tab`, `prev_tab` |
-| 分屏 | `split_right`, `split_down` |
-| 关闭 Pane | `close_pane` |
-| 放大 Pane | `toggle_pane_zoom` |
-| 切换 Pane 焦点 | `{ focus_pane = "left" }` |
-| 调整 Pane 大小 | `resize_pane_left`, `resize_pane_right`, `resize_pane_up`, `resize_pane_down` |
-| 复制 / 粘贴 | `copy_to_clipboard`, `paste_from_clipboard` |
-| 只读导航模式 | `enter_copy_mode` |
-| URL 快速选择 | `enter_quick_select` |
-| 字体大小 | `increase_font_size`, `decrease_font_size`, `reset_font_size` |
-| 字体粗细 | `increase_font_weight`, `decrease_font_weight`, `reset_font_weight` |
-| 新建窗口 | `new_window` |
-| 将当前 Tab 移至新窗口 | `move_tab_to_new_window` |
-| 退出应用 | `quit_app` |
-| 全屏 | `toggle_fullscreen` |
-| 搜索 | `open_search` |
-| 命令面板 | `open_command_palette` |
-| 修改 Tab 颜色 | `update_tab_color` |
-| 编辑配置文件 | `edit_config_file` |
-| 编辑 keymap 文件 | `open_keymap_file` |
-| 重新加载配置 | `reload_config` |
-| 保存当前字体设置（默认无绑定） | `save_current_settings` |
-
-### 示例：把 pane resize 改大
-
-默认 keymap 绑定的是上表列出的四个 `resize_pane_*` action，使用内置步长。若需要
-不同的步长，请使用带参数的 `resize_pane` 形式：
-
-下面示例使用 macOS 的 `super`；Windows/Linux 上同样的应用级快捷键请把 `super` 换成 `alt`。
-
-```toml
-[[binding]]
-keys = "super+shift+left"
-action = { resize_pane = { dir = "left", amount = 10 } }
 
 [[binding]]
 keys = "super+shift+right"
 action = { resize_pane = { dir = "right", amount = 10 } }
+
+[[binding]]
+keys = "super+pageup"
+action = { scroll = "page_up" }
+
+[[binding]]
+keys = "super+shift+b"
+action = { toggle_broadcast = { scope = "tab" } }
+
+[[binding]]
+keys = "super+shift+1"
+action = { apply_theme = "nord" }
 ```
 
-### 示例：Vim 风格切换 pane
+`activate_tab` 从 `0` 开始。方向值是 `left`、`right`、`up`、`down`。
+每个命名 resize action 会把 divider 移动 5%。`resize_pane.amount` 表示重复这个
+5% step 的次数；`0` 不执行调整。滚动值是 `line_up`、
+`line_down`、`page_up`、`page_down`、`to_top`、`to_bottom`。广播范围是
+`tab` 和 `all_tabs`。
 
-```toml
-[[binding]]
-keys = "super+shift+h"
-action = { focus_pane = "left" }
+字号 action 每次调整 `1` point，并把当前字号限制在 `8..=48`。字重 action
+每次调整 `0.25`，范围是 `0.5..=5.0`。Reset 会回到最近加载或保存的配置值。
+字重与保存 action 默认没有快捷键，但可从命令面板执行。
 
-[[binding]]
-keys = "super+shift+j"
-action = { focus_pane = "down" }
+### 选区与显式复制
 
-[[binding]]
-keys = "super+shift+k"
-action = { focus_pane = "up" }
+普通拖动按 cell 选择。双击选择单词，三击选择整行。双击或三击后继续拖动时，
+会按完整单词或整行扩展。松开鼠标不会自动复制。
 
-[[binding]]
-keys = "super+shift+l"
-action = { focus_pane = "right" }
-```
+终端程序启用 mouse tracking 后，未加修饰键的左键 gesture 归该程序处理。
+从 `Shift+左键` 开始可以把整个 gesture 交给 SonicTerm，在本地选择文字。
+Gesture owner 在按下鼠标时确定；拖动过程中改变 Shift 状态或程序的 tracking mode
+不会转移 owner。
 
-启动时，选中的 keymap 解析失败会记录日志并回退到平台内置默认值；重载失败时则继续使用当前内存中的 keymap。keymap 的修改在你从命令面板执行 **Reload Config** 时生效；系统中没有文件 watcher。
+`copy_to_clipboard` 会复制仍然有效的显式选区。在 primary screen 中，复制成功后
+选区仍保持高亮。在 alternate screen 中，写入剪贴板成功后会清除显式选区并立即
+重绘窗口。如果剪贴板写入失败，有效选区会保留，用户可以重试。如果复制前所选
+cell 已经变化，SonicTerm 会清除过期选区，并保持剪贴板不变。
 
-### 应用文本框中的终端风格编辑
+### READONLY 与快速选择
 
-当终端搜索、命令面板筛选或 Tab 重命名文本框接管键盘输入时，SonicTerm 在所有文本框中
-提供一致的核心单行编辑键。搜索框现在也有可移动光标；主窗口和拖出的子窗口都会在该光标
-位置执行编辑和 IME 组合输入。
+`enter_copy_mode` 会在终端光标处进入 READONLY 模式。它阻止所有 PTY 输入，
+也不会创建选区。以下本地控制仍可使用：
 
-| 按键 | 应用文本框行为 |
+| 按键 | READONLY 行为 |
 | --- | --- |
-| `Ctrl+A` | 移到开头 |
-| `Ctrl+E` | 移到结尾 |
+| `Left` / `h` | 向左移动一个 cell |
+| `Down` / `j` | 向下移动一行 |
+| `Up` / `k` | 向上移动一行 |
+| `Right` / `l` | 向右移动一个 cell |
+| `w` / `b` | 移到下一个 / 上一个单词 |
+| `0` / `$` | 移到行首 / 行尾 |
+| `g` / `G` | 移到顶部 / 底部 |
+| `Escape` | 退出 READONLY 模式 |
+
+READONLY 还允许执行切换或激活标签页、切换 pane 焦点、打开搜索、检查更新、保存
+当前字体设置的 keymap action。其它已绑定 action 会被直接拦截，不执行，也不会发送
+给 PTY。搜索框仍可编辑。
+
+`enter_quick_select` 会用 `a` 到 `z` 标记当前屏幕上最多 26 个 URL。按对应字母
+可复制 URL 并关闭 overlay。按 `Escape` 取消。
+
+### 应用文本框
+
+搜索、命令面板筛选和标签页重命名使用同一套单行编辑控制。只有应用文本框接管输入时，
+以下精确组合键才生效：
+
+| 按键 | 行为 |
+| --- | --- |
+| `Ctrl+A` / `Ctrl+E` | 移到开头 / 结尾 |
 | `Ctrl+B` / `Ctrl+F` | 向左 / 向右移动一个 Unicode 字符 |
-| `Ctrl+H` | 向后删除一个 Unicode 字符 |
-| `Ctrl+D` | 向前删除一个 Unicode 字符 |
-| `Ctrl+W` | 先删除光标左侧空白，再删除前一个连续非空白片段 |
-| `Ctrl+U` | 删除开头到光标之间的内容 |
-| `Ctrl+K` | 删除光标到结尾之间的内容 |
+| `Ctrl+H` / `Ctrl+D` | 向后 / 向前删除一个 Unicode 字符 |
+| `Ctrl+W` | 删除左侧空白，再删除前一个连续非空白片段 |
+| `Ctrl+U` / `Ctrl+K` | 删除开头到光标 / 光标到结尾 |
+| `Left`、`Right`、`Home`、`End`、`Delete` | 标准光标移动和向前删除 |
 
-搜索框还支持未带修饰键的 `Left`、`Right`、`Home`、`End` 和 `Delete`，用于移动
-光标和向前删除；这与命令面板和 Tab 重命名文本框保持一致。
+额外按下 Shift、Alt 或 Super 会形成不同组合键。没有 SonicTerm 文本框接管输入时，
+`Ctrl+<字母>` 会继续发送给 PTY。
 
-这些是文本框内的精确组合键；额外按下 Shift、Alt 或 Super 不会被当成同一个编辑命令。
-Tab 颜色选择器只用于选择，不属于文本输入。没有 SonicTerm 文本框处于活动状态时，同样的
-`Ctrl+<字母>` 仍会作为终端控制字节发送给 PTY，因此 shell 和终端程序会继续使用自己的
-readline/ZLE 行为。
+### 加载失败
 
-### READONLY 模式快捷键策略
-
-`enter_copy_mode` 会进入 READONLY 模式。在这个模式下，SonicTerm 会阻止输入进入终端，
-只允许切换 Tab、切换 Pane 焦点、搜索、检查更新和保存当前字体设置。对应 action 是
-`next_tab`、`prev_tab`、`{ activate_tab = N }`、`activate_last_tab`、
-`{ focus_pane = "left|right|up|down" }`、`open_search`、`check_for_updates` 和
-`save_current_settings`。
-
-其它快捷键会被 READONLY 模式忽略，也不会转发给终端。READONLY 中打开搜索框后，搜索框仍然可以编辑。
+启动时，如果 TOML 无效或缺少 `[meta]`，SonicTerm 会回退到当前平台的内置 keymap。
+重载时遇到同样错误，会继续使用内存中的当前 keymap。结构正确的 keymap 会按 binding
+处理错误 action：SonicTerm 记录 warning，只跳过该 binding，并保留其它 binding。
+重载成功后，命令面板中的快捷键提示也会更新。
