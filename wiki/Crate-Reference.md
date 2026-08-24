@@ -112,7 +112,8 @@ decoded path separately for host-aware working-directory use.
 
 **First-party dependencies:** `sonicterm-grid`, `sonicterm-types`.
 
-**Read:** `src/vt.rs`, `tests/{autowrap,control_sequences}.rs`.
+**Read:** `src/vt.rs`, `tests/autowrap/main.rs`,
+`tests/control_sequences/main.rs`.
 
 ### `sonicterm-io`
 
@@ -458,7 +459,8 @@ flowchart BT
 
 **第一方依赖：** `sonicterm-grid`、`sonicterm-types`。
 
-**阅读：** `src/vt.rs`、`tests/{autowrap,control_sequences}.rs`。
+**阅读：** `src/vt.rs`、`tests/autowrap/main.rs`、
+`tests/control_sequences/main.rs`。
 
 ### `sonicterm-io`
 

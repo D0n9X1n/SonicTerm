@@ -76,12 +76,15 @@ selector.
 ### Tab handoff
 
 The macOS OS-handoff backend writes a serialized `TabPayload` to the general
-NSPasteboard under `com.sonic-terminal.tab.v1`. Another SonicTerm process may
-consume a valid payload on activation. The backend does not create an
-`NSDraggingSession`, so it provides no native cursor preview. Publishing to the
-pasteboard is not receiver acknowledgement; the source tab remains alive unless
-a transfer path explicitly commits adoption. Same-process movement uses the
-shared in-process tab-transfer path.
+NSPasteboard under `com.sonic-terminal.tab.v1`. `sonicterm-mac` checks for that
+payload exactly once at process startup, before `MacShell::run`. A valid startup
+payload is removed from the pasteboard and passed to the shell as pending input;
+an already-running peer does not check again when it becomes active. The backend
+is startup-only on the receiving side and does not create an `NSDraggingSession`,
+so it provides no native cursor preview. A pasteboard write returns
+`NotAcknowledged`, so the source tab stays live and the app uses its normal
+in-process tear-out path. Same-process movement uses the shared in-process
+tab-transfer path.
 
 ### App resources
 
@@ -266,10 +269,12 @@ handler。回调只把路径放入共享 open-script 队列；窗口与 PTY 仍�
 ### 标签页交接
 
 macOS 的操作系统交接后端把序列化 `TabPayload` 写入 general NSPasteboard，类型为
-`com.sonic-terminal.tab.v1`。另一个 SonicTerm 进程可在激活时读取有效 payload。
-该后端不会创建 `NSDraggingSession`，因此没有原生光标预览。写入 pasteboard 不代表接收端
-确认；除非某条转移路径明确提交接收，源标签页会继续保留。同进程移动使用共享的进程内
-标签页转移路径。
+`com.sonic-terminal.tab.v1`。`sonicterm-mac` 仅在进程启动时、`MacShell::run` 之前检查
+一次该 payload；若内容有效，就从 pasteboard 删除并作为 pending input 交给 shell。
+已经运行的 peer 再次变为 active 时不会重新检查。因此接收端仅支持启动时读取，而且该
+后端不会创建 `NSDraggingSession`，也没有原生光标预览。写入 pasteboard 返回
+`NotAcknowledged`，所以源标签页继续保留，app 会走常规的进程内 tear-out 路径。同进程
+移动使用共享的进程内标签页转移路径。
 
 ### App 资源
 
