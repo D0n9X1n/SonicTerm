@@ -250,7 +250,8 @@ def main() -> int:
                     f"{path}: heading-depth sequences differ: "
                     f"English {english_depths}; 中文 {chinese_depths}"
                 )
-        validate_links(path, lines, page_stems, errors)
+            for half in halves:
+                validate_links(path, half, page_stems, errors)
 
     home = PurePosixPath("wiki/Home.md")
     if home not in halves_by_path:
