@@ -1,10 +1,10 @@
 use super::{
-    begin_pointer_gesture, cancel_pointer_gesture, is_quit_chord, no_button_motion_report,
-    pointer_report_bytes, route_pressed_pointer_motion, take_focus_loss_pointer_release,
-    take_pointer_release, wheel_report_bytes, PointerCell, PointerGestureOwner, PointerMotionRoute,
-    PointerReportKind,
+    begin_pointer_gesture, cancel_pointer_gesture, is_quit_chord, native_scrollbar_owns_pointer,
+    no_button_motion_report, pointer_report_bytes, route_pressed_pointer_motion,
+    take_focus_loss_pointer_release, take_pointer_release, wheel_report_bytes, PointerCell,
+    PointerGestureOwner, PointerMotionRoute, PointerReportKind,
 };
-use sonicterm_cfg::keymap::Action;
+use sonicterm_cfg::{config::ScrollbarMode, keymap::Action};
 use sonicterm_vt::vt::MouseTracking;
 use winit::keyboard::ModifiersState;
 
@@ -235,6 +235,83 @@ fn terminal_motion_obeys_latched_tracking_mode() {
             expected_report
         );
     }
+}
+
+#[test]
+fn native_scrollbar_owns_only_its_right_gutter() {
+    // Always mode owns the drawn eight-pixel gutter even without an Auto hover
+    // latch, while center cells and Never mode stay available to terminal motion.
+    let pane = sonicterm_ui::pane::Rect::new(10.0, 20.0, 200.0, 120.0);
+    assert!(native_scrollbar_owns_pointer(
+        ScrollbarMode::Always,
+        pane,
+        205.0,
+        60.0,
+        8.0,
+        false,
+        false,
+    ));
+    assert!(!native_scrollbar_owns_pointer(
+        ScrollbarMode::Always,
+        pane,
+        100.0,
+        60.0,
+        8.0,
+        false,
+        false,
+    ));
+    assert!(!native_scrollbar_owns_pointer(
+        ScrollbarMode::Never,
+        pane,
+        205.0,
+        60.0,
+        8.0,
+        true,
+        true,
+    ));
+    assert!(native_scrollbar_owns_pointer(
+        ScrollbarMode::Auto,
+        pane,
+        205.0,
+        60.0,
+        8.0,
+        true,
+        false,
+    ));
+    assert!(native_scrollbar_owns_pointer(
+        ScrollbarMode::Auto,
+        pane,
+        205.0,
+        60.0,
+        8.0,
+        false,
+        true,
+    ));
+    assert!(!native_scrollbar_owns_pointer(
+        ScrollbarMode::Auto,
+        pane,
+        205.0,
+        60.0,
+        8.0,
+        false,
+        false,
+    ));
+}
+
+#[test]
+fn main_and_child_no_button_paths_share_scrollbar_ownership() {
+    // Both runtime paths must call the same gutter predicate so Always and Auto
+    // scrollbar ownership cannot drift between main and torn-out windows.
+    assert_eq!(
+        include_str!("window_event.rs").matches("native_scrollbar_owns_pointer(").count(),
+        2,
+        "main source must define and call the shared ownership helper",
+    );
+    assert_eq!(
+        include_str!("child_window.rs").matches("native_scrollbar_owns_pointer(").count(),
+        1,
+        "child source must call the shared ownership helper once",
+    );
 }
 
 #[test]

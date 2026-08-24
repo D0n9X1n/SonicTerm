@@ -8,7 +8,7 @@
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use sonicterm_cfg::keymap::Action;
+use sonicterm_cfg::{config::ScrollbarMode, keymap::Action};
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::Grid;
 use sonicterm_ui::copy_mode::CopyModeState;
@@ -151,6 +151,43 @@ pub(super) fn route_pressed_pointer_motion(
         col: gesture.last_cell.col,
         modifiers,
     }
+}
+
+/// Decide whether the visible native scrollbar owns a pointer in its gutter.
+pub(super) fn native_scrollbar_owns_pointer(
+    mode: ScrollbarMode,
+    pane: sonicterm_ui::pane::Rect,
+    x: f32,
+    y: f32,
+    gutter_width: f32,
+    edge_active: bool,
+    visible: bool,
+) -> bool {
+    let interactive = match mode {
+        ScrollbarMode::Always => true,
+        ScrollbarMode::Auto => edge_active || visible,
+        ScrollbarMode::Never => false,
+    };
+    if !interactive {
+        // When: no scrollbar is interactive, terminal motion keeps the pane's whole cell surface.
+        return false;
+    }
+    let width = gutter_width.max(0.0).min(pane.w.max(0.0));
+    x >= pane.x + pane.w - width && x < pane.x + pane.w && y >= pane.y && y < pane.y + pane.h
+}
+
+/// Inset a pane rect to the content area that owns the rendered scrollbar.
+pub(super) fn pointer_scrollbar_content_rect(
+    pane: sonicterm_ui::pane::Rect,
+    insets: [f32; 4],
+    minimum: (f32, f32),
+) -> sonicterm_ui::pane::Rect {
+    sonicterm_ui::pane::Rect::new(
+        pane.x + insets[0],
+        pane.y + insets[2],
+        (pane.w - insets[0] - insets[1]).max(minimum.0),
+        (pane.h - insets[2] - insets[3]).max(minimum.1),
+    )
 }
 
 /// Build live no-button motion only for the current pane's AnyMotion mode.
@@ -1578,12 +1615,56 @@ impl App {
                         // When: splitter hover owns the pointer in `window_id`, clear any terminal target beneath it.
                         self.clear_target_hover(window_id);
                     }
-                    let scrollbar_hover = self.main().is_some_and(|ws| {
-                        ws.scrollbar_vis.values().any(|state| state.mouse_near_right_edge)
-                    });
+                    let scrollbar_owned = self
+                        .pane_at_cursor(lx, ly)
+                        .and_then(|pane_id| {
+                            let pane = self
+                                .compute_active_pane_rects()
+                                .into_iter()
+                                .find_map(|(id, rect)| (id == pane_id).then_some(rect))?;
+                            let (edge_active, visible) = self.main().map_or((false, false), |ws| {
+                                ws.scrollbar_vis.get(&pane_id).map_or((false, false), |state| {
+                                    (
+                                        state.mouse_near_right_edge,
+                                        state.alpha
+                                            > crate::app::scrollbar_visibility::ALPHA_EMIT_FLOOR,
+                                    )
+                                })
+                            });
+                            let (content, gutter_width) = self.main_renderer().map_or(
+                                (pane, crate::app::scrollbar_input::SCROLLBAR_WIDTH_PX),
+                                |renderer| {
+                                    let content = pointer_scrollbar_content_rect(
+                                        pane,
+                                        [
+                                            renderer.padding_left_px(),
+                                            renderer.padding_right_px(),
+                                            renderer.padding_top_px(),
+                                            renderer.padding_bottom_px(),
+                                        ],
+                                        renderer.cell_size(),
+                                    );
+                                    (
+                                        content,
+                                        crate::app::scrollbar_input::SCROLLBAR_WIDTH_PX
+                                            * renderer.scale_factor(),
+                                    )
+                                },
+                            );
+                            Some(native_scrollbar_owns_pointer(
+                                self.config.appearance.scrollbar,
+                                content,
+                                lx,
+                                ly,
+                                gutter_width,
+                                edge_active,
+                                visible,
+                            ))
+                        })
+                        .unwrap_or(false);
                     let target_hover =
                         self.main().is_some_and(|ws| ws.hovered_url.is_some() || ws.hover_link);
-                    let ui_consumed_motion = splitter_hover || scrollbar_hover || target_hover;
+                    let ui_consumed_motion = splitter_hover || scrollbar_owned || target_hover;
                     if !ui_consumed_motion {
                         let pointer_cell = self
                             .main_renderer()

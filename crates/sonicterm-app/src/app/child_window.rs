@@ -974,11 +974,58 @@ impl App {
                         )
                     })
                 } else {
-                    // When: `child.mouse_down` is false, current child UI hover may suppress no-button terminal motion.
+                    // When: `child.mouse_down` is false, child chrome may suppress no-button terminal motion.
+                    let scrollbar_owned = pointer_cell.is_some_and(|cell| {
+                        let pane = App::compute_pane_rects_for(child)
+                            .into_iter()
+                            .find_map(|(id, rect)| (id == cell.pane_id).then_some(rect));
+                        pane.is_some_and(|pane| {
+                            let (edge_active, visible) = child
+                                .scrollbar_vis
+                                .get(&cell.pane_id)
+                                .map_or((false, false), |state| {
+                                    (
+                                        state.mouse_near_right_edge,
+                                        state.alpha
+                                            > crate::app::scrollbar_visibility::ALPHA_EMIT_FLOOR,
+                                    )
+                                });
+                            let (content, gutter_width) = child.renderer.as_ref().map_or(
+                                (pane, crate::app::scrollbar_input::SCROLLBAR_WIDTH_PX),
+                                |renderer| {
+                                    let content =
+                                        super::window_event::pointer_scrollbar_content_rect(
+                                            pane,
+                                            [
+                                                renderer.padding_left_px(),
+                                                renderer.padding_right_px(),
+                                                renderer.padding_top_px(),
+                                                renderer.padding_bottom_px(),
+                                            ],
+                                            renderer.cell_size(),
+                                        );
+                                    (
+                                        content,
+                                        crate::app::scrollbar_input::SCROLLBAR_WIDTH_PX
+                                            * renderer.scale_factor(),
+                                    )
+                                },
+                            );
+                            super::window_event::native_scrollbar_owns_pointer(
+                                config.appearance.scrollbar,
+                                content,
+                                position.x as f32,
+                                position.y as f32,
+                                gutter_width,
+                                edge_active,
+                                visible,
+                            )
+                        })
+                    });
                     let ui_consumed = child.splitter_hover.is_some()
                         || child.hovered_url.is_some()
                         || child.hover_link
-                        || child.scrollbar_vis.values().any(|state| state.mouse_near_right_edge);
+                        || scrollbar_owned;
                     pointer_cell.and_then(|cell| {
                         child.panes.get(&cell.pane_id).and_then(|pane| {
                             let parser = pane.parser.lock();
