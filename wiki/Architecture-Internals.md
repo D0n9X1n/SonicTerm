@@ -36,7 +36,7 @@ limits include:
 | VT media payload | `MAX_MEDIA_PAYLOAD_BYTES = 16 MiB` |
 | Process VT capture staging | `MAX_PROCESS_CAPTURE_STAGING_BYTES = 64 MiB`, with a `MIN_CAPTURE_STAGING_BYTES = 4 MiB` floor and `GUARANTEED_CONCURRENT_CAPTURES = 13` |
 | PTY input | 4 queued messages; each message is at most 16 MiB |
-| PTY output | 64 chunks; each retained reader ring is 64 KiB; structural worst case is 4 MiB |
+| PTY output | 64 queued chunks plus one blocked sender chunk; each retained reader ring is 64 KiB; structural worst case is 65 rings, or 4.0625 MiB |
 | Retained inline media | 128 images and 64 MiB per pane; 256 MiB process ceiling; each rendered side is at most 1,024 pixels |
 
 A grid report includes cell storage, rare attributes, combining text, row
@@ -317,7 +317,7 @@ CI described in [Development and Release](Development-and-Release).
 | VT 媒体负载 | `MAX_MEDIA_PAYLOAD_BYTES = 16 MiB` |
 | 进程级 VT 捕获暂存 | `MAX_PROCESS_CAPTURE_STAGING_BYTES = 64 MiB`，保底值 `MIN_CAPTURE_STAGING_BYTES = 4 MiB`，`GUARANTEED_CONCURRENT_CAPTURES = 13` |
 | PTY 输入 | 最多排队 4 条消息；每条最多 16 MiB |
-| PTY 输出 | 最多 64 个数据块；每个读缓冲环为 64 KiB；结构最坏值为 4 MiB |
+| PTY 输出 | 最多 64 个排队数据块，另有一个阻塞中的发送数据块；每个读缓冲环为 64 KiB；结构最坏值为 65 个缓冲环，即 4.0625 MiB |
 | 常驻内联媒体 | 每窗格最多 128 张图和 64 MiB；进程上限 256 MiB；参与渲染的图像单边最多 1,024 像素 |
 
 网格报告包含单元格、少见属性、组合文字、行容器和预留容量。回滚历史同时受配置行数和

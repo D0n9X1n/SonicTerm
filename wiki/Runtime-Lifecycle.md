@@ -378,10 +378,14 @@ file, live settings, and baselines unchanged and shows an Error notification.
 ### Tab movement and tear-out
 
 In-process reorder, merge, and tear-out move live `Tab`, `TabState`, and
-`PaneState` values. `PtyHandle` is not cloned or respawned. Each moved pane gets
-the destination `WindowId` in its shared redraw target. Transfer validates the
-source and destination before moving state because dropping a pane terminates
-its child.
+`PaneState` values. `PtyHandle` is not cloned or respawned. Each successfully
+attached pane gets the destination `WindowId` in its shared redraw target.
+
+`transfer_tab` checks source bounds and destination-window existence before it
+detaches. That check does not prove a child destination has a renderer. If
+`attach_to_child` then refuses, the detached panes drop and their children
+terminate. Direct `merge_child_into_target` and `merge_main_into_child` also
+detach before attachment and have the same loss-on-failure behavior.
 
 The hidden warm-window pool reduces tear-out latency:
 
@@ -794,8 +798,11 @@ tracing subscriber，只能在下次进程启动时生效。
 ### 标签页移动与拆出
 
 进程内重排、合并和拆出会移动存活的 `Tab`、`TabState` 和 `PaneState`。`PtyHandle` 不会复制
-或重启。每个移动窗格的共享重绘目标会改成目标 `WindowId`。代码会在移动状态前验证源端和
-目标端，因为误析构窗格会终止子进程。
+或重启。窗格成功附加后，共享重绘目标会改成目标 `WindowId`。
+
+`transfer_tab` 会在移除前检查源下标和目标窗口是否存在，但这不能证明子窗口目标拥有渲染器。
+若 `attach_to_child` 随后拒绝附加，已移除的窗格会被析构，其子进程也会终止。
+`merge_child_into_target` 与 `merge_main_into_child` 同样先移除、后附加，失败时也会丢失窗格。
 
 隐藏预热窗口池用于降低拆出延迟：
 

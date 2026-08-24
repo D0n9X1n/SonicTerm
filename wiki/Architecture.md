@@ -188,9 +188,11 @@ and release rules.
   whole frame.
 - A tab transfer moves each live `PaneState` and `PtyHandle`. It changes the
   shared redraw `WindowId`; it does not clone or restart the shell.
-- Dropping `PtyHandle` starts bounded process and I/O teardown. Transfer code
-  validates both endpoints before it removes a pane because an accidental drop
-  terminates the child.
+- Dropping `PtyHandle` starts bounded process and I/O teardown. The typed
+  `transfer_tab` path checks source bounds and destination-window existence
+  before detaching. Direct drag-merge and fresh tear-out paths can still lose a
+  pane after detachment if destination setup fails; that drop terminates the
+  child.
 - Terminal mutations mark damage in the same frame. Cache invalidation follows
   font, scale, theme, surface, atlas, and topology changes.
 
@@ -391,8 +393,9 @@ macOS 使用 CoreText 发现字体，Windows 使用 GDI，Linux 使用 Fontconfi
 - 渲染路径不会阻塞等待解析器。任一必需锁不可用时，整帧都会推迟。
 - 转移标签页会移动每个存活的 `PaneState` 和 `PtyHandle`。代码只修改共享重绘
   `WindowId`，不会复制或重启 shell。
-- 析构 `PtyHandle` 会开始有时限的进程与 I/O 清理。转移代码先验证源端和目标端，再移除
-  窗格，因为误析构会终止子进程。
+- 析构 `PtyHandle` 会开始有时限的进程与 I/O 清理。类型化 `transfer_tab` 路径会在移除前
+  检查源下标和目标窗口是否存在。直接拖动合并和新窗口拆出在移除后仍可能因目标设置失败而
+  丢失窗格；析构该窗格会终止子进程。
 - 终端修改在同一帧标记损伤区域。字体、缩放、主题、表面、图集和拓扑变化会使对应缓存失效。
 
 完整安全条件见 [架构内部机制](Architecture-Internals)。

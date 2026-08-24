@@ -218,10 +218,11 @@ The output channel holds 64 chunks. A full channel does not drop output. The
 reader waits in a blocking select, which lets the operating system's PTY buffers
 apply back-pressure to the child.
 
-The structural maximum is 64 distinct 64 KiB rings, or 4 MiB. Small shell
-output normally keeps many queued views in one ring. `queued_output_bytes`
-reports pinned ring allocation; `queued_output_payload_bytes` reports bytes
-waiting to be parsed.
+The channel can hold 64 chunks. The reader constructs one more chunk before a
+full-channel send blocks. If every chunk pins a distinct 64 KiB ring, the
+structural maximum is 65 rings, or 4.0625 MiB. Small shell output normally keeps
+many queued views in one ring. `queued_output_bytes` reports pinned ring
+allocation; `queued_output_payload_bytes` reports bytes waiting to be parsed.
 
 A pane created through the main path uses `sonicterm-vt-loop`. A pane created
 directly in a torn-out window uses `sonicterm-vt-loop-child`. A pane whose PTY
@@ -692,8 +693,9 @@ Unix 上由 `portable-pty` 提供原生 PTY。Windows 上由它提供 ConPTY。�
 输出通道最多保存 64 个数据块。通道满时不会丢弃输出。reader 会在阻塞 select 中等待，
 让操作系统的 PTY 缓冲区向子程序施加背压。
 
-结构最坏情况是 64 个互不相同的 64 KiB 缓冲环，共 4 MiB。普通 shell 小块输出通常让许多
-排队视图共用一个缓冲环。`queued_output_bytes` 报告被占住的缓冲环分配量；
+通道最多保存 64 个数据块。reader 会先构造下一个数据块，再因通道已满而阻塞。若每个数据块
+都占住不同的 64 KiB 缓冲环，结构最坏情况为 65 个缓冲环，即 4.0625 MiB。普通 shell 的
+小块输出通常让许多排队视图共用一个缓冲环。`queued_output_bytes` 报告被占住的缓冲环分配量；
 `queued_output_payload_bytes` 报告等待解析的负载字节。
 
 主路径创建的窗格使用 `sonicterm-vt-loop`。直接在拆出窗口里创建的窗格使用
