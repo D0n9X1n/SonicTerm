@@ -30,7 +30,7 @@ use super::key_encoding::{encode_key, key_event_to_string, key_to_strings};
 use super::{
     invalidate_selection_for_content, mark_all_panes_dirty, pane_id_at_point,
     runtime_smoke::{grid_contains_marker, RuntimeSmokeFailure},
-    App, FrontmostKind, PointerCell, PointerGesture, PointerGestureOwner, TabState,
+    App, FrontmostKind, PointerCell, PointerGesture, PointerGestureOwner, TabState, WindowState,
 };
 
 const SPLITTER_HIT_THICKNESS: f32 = 8.0;
@@ -125,6 +125,31 @@ pub(super) fn begin_pointer_gesture(
         }
     };
     Some(PointerGesture { owner, press_pane: cell.pane_id, last_cell: cell })
+}
+
+impl WindowState {
+    /// Begin one grid press from this window's live modifier state.
+    pub(super) fn begin_pointer_press(
+        &mut self,
+        cell: PointerCell,
+        tracking: MouseTracking,
+        sgr: bool,
+    ) -> Option<Vec<u8>> {
+        let gesture = begin_pointer_gesture(cell, tracking, sgr, self.modifiers, false);
+        self.pointer_gesture = gesture;
+        let PointerGestureOwner::Terminal { sgr, .. } = gesture?.owner else {
+            // When: `gesture.owner` is Local, preserve the selection and emit no terminal report.
+            return None;
+        };
+        self.selection = None;
+        Some(pointer_report_bytes(
+            sgr,
+            PointerReportKind::LeftPress,
+            self.modifiers,
+            cell.row,
+            cell.col,
+        ))
+    }
 }
 
 /// Route motion for an already-latched left-button gesture.
@@ -2043,37 +2068,11 @@ impl App {
                                             parser_mouse_profile(&parser)
                                         })
                                         .unwrap_or((MouseTracking::Off, false));
-                                    let modifiers = self
-                                        .main()
-                                        .map(|ws| ws.modifiers)
-                                        .unwrap_or_else(ModifiersState::empty);
-                                    let gesture = begin_pointer_gesture(
-                                        cell, profile.0, profile.1, modifiers, false,
-                                    );
-                                    let terminal_press = gesture.and_then(|gesture| {
-                                        let PointerGestureOwner::Terminal { sgr, .. } =
-                                            gesture.owner
-                                        else {
-                                            // When: `gesture.owner` is Local, preserve the existing selection path.
-                                            return None;
-                                        };
-                                        Some((
-                                            gesture,
-                                            pointer_report_bytes(
-                                                sgr,
-                                                PointerReportKind::LeftPress,
-                                                modifiers,
-                                                row,
-                                                col,
-                                            ),
-                                        ))
+                                    let terminal_press = self.main_mut().and_then(|window| {
+                                        window.begin_pointer_press(cell, profile.0, profile.1)
                                     });
-                                    if let Some((gesture, bytes)) = terminal_press {
-                                        // When: `terminal_press` contains a gesture and bytes, latch after focus and enqueue with no parser guard.
-                                        if let Some(ws) = self.main_mut() {
-                                            ws.pointer_gesture = Some(gesture);
-                                            ws.selection = None;
-                                        }
+                                    if let Some(bytes) = terminal_press {
+                                        // When: `terminal_press` contains bytes, the window latched terminal ownership before the unguarded enqueue.
                                         self.write_to_pane(cell.pane_id, bytes);
                                         if let Some(change) = pane_focus_change {
                                             if let Some(window) = self.main_mut() {
@@ -2081,9 +2080,6 @@ impl App {
                                             }
                                         }
                                         return;
-                                    }
-                                    if let Some(ws) = self.main_mut() {
-                                        ws.pointer_gesture = gesture;
                                     }
                                 }
                                 // Multi-click selection: 1 = point, 2 = word,

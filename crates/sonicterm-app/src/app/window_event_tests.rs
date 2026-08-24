@@ -10,7 +10,7 @@ use sonicterm_cfg::{
     keymap::{Action, Keymap},
     theme::Theme,
 };
-use sonicterm_ui::pane::SplitAxis;
+use sonicterm_ui::{pane::SplitAxis, selection::Selection};
 use sonicterm_vt::vt::MouseTracking;
 use winit::keyboard::ModifiersState;
 
@@ -119,6 +119,39 @@ fn legacy_pointer_reports_clamp_large_coordinates() {
         ),
         vec![0x1b, b'[', b'M', 32, 255, 255]
     );
+}
+
+#[test]
+fn window_press_uses_live_shift_and_latches_the_real_owner() {
+    // This is the transition called by both main and child handlers. Reading
+    // `window.modifiers` here prevents either call site from substituting stale state.
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window_id = app.__test_seed_child_window(&["child"]);
+    let pane = app.__test_child_pane_ids(window_id).expect("seeded child window")[0];
+    let cell = pointer_cell(pane, 2, 3);
+    let window = app.windows.get_mut(&window_id).unwrap();
+    window.selection = Some(Selection::new(2, 3));
+    window.modifiers = ModifiersState::SHIFT;
+
+    assert_eq!(window.begin_pointer_press(cell, MouseTracking::ButtonMotion, true), None);
+    assert!(matches!(
+        window.pointer_gesture.map(|gesture| gesture.owner),
+        Some(PointerGestureOwner::Local)
+    ));
+    assert!(window.selection.is_some());
+    assert_eq!(take_pointer_release(&mut window.pointer_gesture, ModifiersState::empty()), None);
+
+    window.selection = Some(Selection::new(2, 3));
+    window.modifiers = ModifiersState::empty();
+    assert_eq!(
+        window.begin_pointer_press(cell, MouseTracking::ButtonMotion, true),
+        Some(b"\x1b[<0;4;3M".to_vec())
+    );
+    assert!(matches!(
+        window.pointer_gesture.map(|gesture| gesture.owner),
+        Some(PointerGestureOwner::Terminal { tracking: MouseTracking::ButtonMotion, sgr: true })
+    ));
+    assert!(window.selection.is_none());
 }
 
 #[test]

@@ -1359,34 +1359,10 @@ impl App {
                                         super::window_event::parser_mouse_profile(&parser)
                                     })
                                     .unwrap_or((sonicterm_vt::vt::MouseTracking::Off, false));
-                                let gesture = super::window_event::begin_pointer_gesture(
-                                    pointer_cell,
-                                    tracking,
-                                    sgr,
-                                    child.modifiers,
-                                    false,
-                                );
-                                let terminal_press = gesture.and_then(|gesture| {
-                                    let PointerGestureOwner::Terminal { sgr, .. } = gesture.owner
-                                    else {
-                                        // When: `gesture.owner` is Local, preserve the child selection path.
-                                        return None;
-                                    };
-                                    Some((
-                                        gesture,
-                                        super::window_event::pointer_report_bytes(
-                                            sgr,
-                                            super::window_event::PointerReportKind::LeftPress,
-                                            child.modifiers,
-                                            row,
-                                            col,
-                                        ),
-                                    ))
-                                });
-                                if let Some((gesture, bytes)) = terminal_press {
-                                    // When: `terminal_press` contains a gesture and bytes, latch after focus and enqueue without parser guards.
-                                    child.pointer_gesture = Some(gesture);
-                                    child.selection = None;
+                                let terminal_press =
+                                    child.begin_pointer_press(pointer_cell, tracking, sgr);
+                                if let Some(bytes) = terminal_press {
+                                    // When: `terminal_press` contains bytes, the child latched terminal ownership before the unguarded enqueue.
                                     if let Some(change) = pane_focus_change {
                                         child.finish_pane_focus_change(change);
                                     }
@@ -1394,7 +1370,6 @@ impl App {
                                     self.write_to_pane(pane_id, bytes);
                                     return;
                                 }
-                                child.pointer_gesture = gesture;
                             }
                             // Multi-click selection: 1 = point, 2 = word,
                             // 3 = line. Mirrors the main-window path in

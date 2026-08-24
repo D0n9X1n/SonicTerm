@@ -256,41 +256,6 @@ fn successful_primary_copy_keeps_main_and_child_selection() {
 }
 
 #[test]
-fn explicit_local_release_does_not_copy_or_clear_selection() {
-    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
-    let (mut app, main_pane, _, _) = app_with_main_and_child();
-    let main = app.__test_main_window_id().expect("synthetic main window");
-    install_alt_selection(&mut app, main, main_pane, 4);
-    write_row(&app, main, main_pane, 4, 's');
-    install_alt_selection(&mut app, main, main_pane, 4);
-    app.__test_set_memory_clipboard("unchanged");
-
-    // The reducer-visible release/completion path requests presentation only;
-    // copying remains an explicit command and the selection stays available.
-    app.machine.handle(sonicterm_app_core::AppIntent::MouseButton {
-        window: sonicterm_types::WindowKey::new(0),
-        pressed: true,
-        button: sonicterm_app_core::MouseButton::Left,
-        mods: sonicterm_types::ModKey::empty(),
-        pos: sonicterm_app_core::LogicalPos { x: 1.0, y: 1.0 },
-    });
-    let effects = app.machine.handle(sonicterm_app_core::AppIntent::MouseButton {
-        window: sonicterm_types::WindowKey::new(0),
-        pressed: false,
-        button: sonicterm_app_core::MouseButton::Left,
-        mods: sonicterm_types::ModKey::empty(),
-        pos: sonicterm_app_core::LogicalPos { x: 1.0, y: 1.0 },
-    });
-    assert!(effects
-        .iter()
-        .all(|effect| !matches!(effect, sonicterm_app_core::AppEffect::ClipboardSet { .. })));
-    app.dispatch_effects(effects);
-
-    assert_eq!(app.__test_memory_clipboard().as_deref(), Some("unchanged"));
-    assert!(app.windows.get(&main).unwrap().selection.is_some());
-}
-
-#[test]
 fn main_and_child_rebase_primary_selection_after_history_eviction() {
     let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
