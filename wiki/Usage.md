@@ -122,10 +122,11 @@ named user’s home.
 The background probe checks at most 37 candidates, and each candidate spans at
 most eight non-space parts. SonicTerm chooses the longest unambiguous openable
 candidate containing the pointed cell. A blocked candidate or equal-length
-ambiguity fails closed instead of falling back to a shorter name. Quoted or
-escaped names, `ls -F` suffixes (`*`, `@`, `=`, `|`), editor
-`:line:column` suffixes, wrapped paths, and tokens with wide or combining cells
-are not raw clickable targets.
+ambiguity fails closed instead of falling back to a shorter name. A complete
+standalone single-quoted contextual name, such as `'My Folder'` from `ll`, is
+treated as `My Folder`. Other quoted or escaped names, `ls -F` suffixes (`*`,
+`@`, `=`, `|`), editor `:line:column` suffixes, wrapped paths, and tokens with
+wide or combining cells are not raw clickable targets.
 
 Only regular files and directories are eligible. Missing, inaccessible,
 symlink/reparse-point, socket, device, executable, launcher, script, shortcut,
@@ -283,9 +284,10 @@ SonicTerm 不会改用进程工作目录、其它 pane 的目录或命名用户�
 
 后台 probe 最多检查 37 个候选，每个候选最多跨 8 个非空格部分。SonicTerm 会选择
 包含鼠标 cell 的最长、无歧义且可打开候选。遇到 blocked 候选或同长度歧义时会
-fail closed，不会退回较短名称。带引号或转义的名称、`ls -F` 后缀（`*`、`@`、
-`=`、`|`）、editor `:line:column` 后缀、跨行路径，以及含宽字符或组合 cell 的
-token 都不会成为原始可点击目标。
+fail closed，不会退回较短名称。`ll` 输出的完整独立单引号上下文名称，例如
+`'My Folder'`，会按 `My Folder` 处理。其它带引号或转义的名称、`ls -F` 后缀
+（`*`、`@`、`=`、`|`）、editor `:line:column` 后缀、跨行路径，以及含宽字符或
+组合 cell 的 token 都不会成为原始可点击目标。
 
 只有普通文件和目录可以打开。不存在、不可访问、symlink/reparse point、socket、
 device、executable、launcher、script、shortcut、installer、network、UNC、WSL 和

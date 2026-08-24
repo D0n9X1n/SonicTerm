@@ -466,6 +466,44 @@ fn contextual_bare_names_reject_quoted_and_classified_output() {
     }
 }
 
+/// Shell-quoted spaced names unwrap only one complete contextual component.
+#[test]
+fn shell_quoted_spaced_names_produce_one_unwrapped_candidate() {
+    let text = "drwxr-xr-x@ - user 23 Aug 21:54 'ff ff'";
+    let start = text.find("ff ff").unwrap();
+    let start_col = text[..start].chars().count();
+    for col in start_col..start_col + "ff ff".chars().count() {
+        assert_eq!(
+            target_candidates_at_char_col_for_style(text, col, PathStyle::Posix, true),
+            vec![TargetMatch {
+                start,
+                end: start + "ff ff".len(),
+                target: DetectedTarget::BareName("ff ff".into()),
+            }]
+        );
+    }
+    assert!(target_candidates_at_char_col_for_style(text, start_col, PathStyle::Posix, false)
+        .is_empty());
+
+    for ambiguous in [
+        "key='ff ff'",
+        "prefix'ff ff'",
+        "'ff ff'suffix",
+        "'ff ff",
+        "ff ff'",
+        "\"ff ff\"",
+        "'/tmp/ff ff'",
+        "'one two three four five six seven eight nine'",
+    ] {
+        let col = ambiguous.find(' ').unwrap();
+        assert!(
+            target_candidates_at_char_col_for_style(ambiguous, col, PathStyle::Posix, true)
+                .is_empty(),
+            "ambiguous shell text became clickable: {ambiguous:?}"
+        );
+    }
+}
+
 /// Spaced explicit and contextual paths produce bounded full-span candidates on every cell.
 #[test]
 fn spaced_path_candidates_cover_each_pointed_cell() {
