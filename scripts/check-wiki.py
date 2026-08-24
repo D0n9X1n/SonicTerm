@@ -183,11 +183,12 @@ def validate_home_links(
     if halves is None:
         return
     for language, lines in zip(("English", "中文"), halves, strict=True):
-        linked = {
-            unquote(urlsplit(target).path)
-            for _, target in link_targets(lines)
-            if not target.startswith("#")
-        }
+        linked: set[str] = set()
+        for _, target in link_targets(lines):
+            parsed = urlsplit(unquote(target))
+            if target.startswith("#") or parsed.scheme or parsed.netloc:
+                continue
+            linked.add(parsed.path)
         for stem in sorted(other_stems - linked):
             errors.append(f"wiki/Home.md: {language} half is missing link to {stem}")
 
