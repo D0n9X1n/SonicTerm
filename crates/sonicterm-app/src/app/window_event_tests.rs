@@ -246,6 +246,7 @@ fn any_motion_without_pressed_gesture_uses_current_pane_profile_and_modifiers() 
             MouseTracking::AnyMotion,
             false,
             ModifiersState::SHIFT | ModifiersState::CONTROL,
+            false,
         ),
         Some(PointerMotionRoute::Report {
             pane_id: 9,
@@ -261,6 +262,17 @@ fn any_motion_without_pressed_gesture_uses_current_pane_profile_and_modifiers() 
             MouseTracking::ButtonMotion,
             true,
             ModifiersState::empty(),
+            false,
+        ),
+        None
+    );
+    assert_eq!(
+        no_button_motion_report(
+            pointer_cell(9, 2, 5),
+            MouseTracking::AnyMotion,
+            true,
+            ModifiersState::empty(),
+            true,
         ),
         None
     );

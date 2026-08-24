@@ -974,6 +974,11 @@ impl App {
                         )
                     })
                 } else {
+                    // When: `child.mouse_down` is false, current child UI hover may suppress no-button terminal motion.
+                    let ui_consumed = child.splitter_hover.is_some()
+                        || child.hovered_url.is_some()
+                        || child.hover_link
+                        || child.scrollbar_vis.values().any(|state| state.mouse_near_right_edge);
                     pointer_cell.and_then(|cell| {
                         child.panes.get(&cell.pane_id).and_then(|pane| {
                             let parser = pane.parser.lock();
@@ -984,15 +989,23 @@ impl App {
                                 tracking,
                                 sgr,
                                 child.modifiers,
+                                ui_consumed,
                             )
                         })
                     })
                 };
                 if let Some(route) = pointer_route {
+                    // When: `pointer_route` exists, its latched or live owner decides whether child motion reaches the PTY.
                     match route {
-                        super::window_event::PointerMotionRoute::Local => {}
-                        super::window_event::PointerMotionRoute::None => return,
+                        super::window_event::PointerMotionRoute::Local => {
+                            // When: `route` is Local, continue into child selection motion.
+                        }
+                        super::window_event::PointerMotionRoute::None => {
+                            // When: `route` is None, Button mode consumes the child move without bytes.
+                            return;
+                        }
                         report @ super::window_event::PointerMotionRoute::Report { .. } => {
+                            // When: `route` contains Report data, encode terminal motion for the child pane.
                             let kind = if child.mouse_down {
                                 super::window_event::PointerReportKind::HeldLeftMotion
                             } else {
@@ -1276,8 +1289,10 @@ impl App {
                         let pane_focus_change = pointer_cell
                             .and_then(|cell| child.begin_pointer_pane_focus_change(cell.pane_id));
                         if let Some(pointer_cell) = pointer_cell {
+                            // When: `pointer_cell` resolves a rendered grid cell, route focus and press through its exact pane.
                             let PointerCell { pane_id, row, col } = pointer_cell;
                             if pane_id != 0 {
+                                // When: `pane_id` is nonzero, snapshot that live pane's terminal mouse profile.
                                 let (tracking, sgr) = child
                                     .panes
                                     .get(&pane_id)
@@ -1296,8 +1311,7 @@ impl App {
                                 let terminal_press = gesture.and_then(|gesture| {
                                     let PointerGestureOwner::Terminal { sgr, .. } = gesture.owner
                                     else {
-                                        // When: local selection owns this press,
-                                        // preserve the established child selection path.
+                                        // When: `gesture.owner` is Local, preserve the child selection path.
                                         return None;
                                     };
                                     Some((
@@ -1312,6 +1326,7 @@ impl App {
                                     ))
                                 });
                                 if let Some((gesture, bytes)) = terminal_press {
+                                    // When: `terminal_press` contains a gesture and bytes, latch after focus and enqueue without parser guards.
                                     child.pointer_gesture = Some(gesture);
                                     child.selection = None;
                                     if let Some(change) = pane_focus_change {
@@ -1393,8 +1408,7 @@ impl App {
                             )
                         });
                         if terminal_owned {
-                            // Gesture state was consumed before this bounded enqueue;
-                            // a rejected write therefore cannot relatch it.
+                            // When: `terminal_owned` is true, consume state before bounded enqueue so rejection cannot relatch it.
                             child.mouse_down = false;
                             child.scrollbar_drag = None;
                             child.splitter_drag = None;

@@ -80,11 +80,21 @@ pub(super) fn pointer_report_bytes(
     let col = u32::from(col) + 1;
     let row = u32::from(row) + 1;
     if sgr {
-        let terminator = if matches!(kind, PointerReportKind::LeftRelease) { 'm' } else { 'M' };
+        let terminator = match kind {
+            PointerReportKind::LeftRelease => 'm',
+            PointerReportKind::LeftPress
+            | PointerReportKind::HeldLeftMotion
+            | PointerReportKind::NoButtonMotion => 'M',
+        };
         format!("\x1b[<{cb};{col};{row}{terminator}").into_bytes()
     } else {
-        let legacy_cb =
-            if matches!(kind, PointerReportKind::LeftRelease) { 3 + modifier_bits } else { cb };
+        // When: `sgr` is false, legacy release uses no-button base 3 while other events retain `cb`.
+        let legacy_cb = match kind {
+            PointerReportKind::LeftRelease => 3 + modifier_bits,
+            PointerReportKind::LeftPress
+            | PointerReportKind::HeldLeftMotion
+            | PointerReportKind::NoButtonMotion => cb,
+        };
         vec![
             0x1b,
             b'[',
@@ -105,13 +115,14 @@ pub(super) fn begin_pointer_gesture(
     ui_consumed: bool,
 ) -> Option<PointerGesture> {
     if ui_consumed {
-        // When: SonicTerm chrome consumed the press, no terminal-grid gesture exists.
+        // When: `ui_consumed` is true, SonicTerm chrome consumed the press and no grid gesture exists.
         return None;
     }
-    let owner = if tracking == MouseTracking::Off || modifiers.shift_key() {
-        PointerGestureOwner::Local
-    } else {
-        PointerGestureOwner::Terminal { tracking, sgr }
+    let owner = match (tracking, modifiers.shift_key()) {
+        (MouseTracking::Off, _) | (_, true) => PointerGestureOwner::Local,
+        (MouseTracking::Button | MouseTracking::ButtonMotion | MouseTracking::AnyMotion, false) => {
+            PointerGestureOwner::Terminal { tracking, sgr }
+        }
     };
     Some(PointerGesture { owner, press_pane: cell.pane_id, last_cell: cell })
 }
@@ -148,8 +159,9 @@ pub(super) fn no_button_motion_report(
     tracking: MouseTracking,
     sgr: bool,
     modifiers: ModifiersState,
+    ui_consumed: bool,
 ) -> Option<PointerMotionRoute> {
-    (tracking == MouseTracking::AnyMotion).then_some(PointerMotionRoute::Report {
+    (!ui_consumed && tracking == MouseTracking::AnyMotion).then_some(PointerMotionRoute::Report {
         pane_id: cell.pane_id,
         sgr,
         row: cell.row,
@@ -188,7 +200,7 @@ pub(super) fn pointer_route_bytes(
     kind: PointerReportKind,
 ) -> Option<(u64, Vec<u8>)> {
     let PointerMotionRoute::Report { pane_id, sgr, row, col, modifiers } = route else {
-        // When: local ownership or a suppressed motion produced no terminal report.
+        // When: `route` is Local or None, ownership or mode suppressed the terminal report.
         return None;
     };
     Some((pane_id, pointer_report_bytes(sgr, kind, modifiers, row, col)))
@@ -1377,12 +1389,17 @@ impl App {
                             .map(|gesture| route_pressed_pointer_motion(gesture, cell, modifiers))
                     });
                     if let Some(route) = gesture_route {
-                        // When: a grid gesture is latched, its press-time owner wins
-                        // before the local scrollbar/selection continuation paths.
+                        // When: `gesture_route` exists, its press-time owner wins before local continuation paths.
                         match route {
-                            PointerMotionRoute::Local => {}
-                            PointerMotionRoute::None => return,
+                            PointerMotionRoute::Local => {
+                                // When: `route` is Local, continue into SonicTerm's selection or scrollbar motion.
+                            }
+                            PointerMotionRoute::None => {
+                                // When: `route` is None, Button mode suppresses held motion and consumes the move.
+                                return;
+                            }
                             report @ PointerMotionRoute::Report { .. } => {
+                                // When: `route` carries Report data, encode and enqueue held-left motion.
                                 if let Some((pane_id, bytes)) =
                                     pointer_route_bytes(report, PointerReportKind::HeldLeftMotion)
                                 {
@@ -1566,7 +1583,7 @@ impl App {
                                 .map(|ws| ws.modifiers)
                                 .unwrap_or_else(ModifiersState::empty);
                             if let Some(route) =
-                                no_button_motion_report(cell, tracking, sgr, modifiers)
+                                no_button_motion_report(cell, tracking, sgr, modifiers, false)
                             {
                                 if let Some((pane_id, bytes)) =
                                     pointer_route_bytes(route, PointerReportKind::NoButtonMotion)
@@ -1916,6 +1933,7 @@ impl App {
                                 let pointer_cell =
                                     clicked_pane.map(|pane_id| PointerCell { pane_id, row, col });
                                 if let Some(cell) = pointer_cell {
+                                    // When: `pointer_cell` resolves the rendered grid, snapshot that exact pane's protocol profile.
                                     let profile = self
                                         .main()
                                         .and_then(|ws| ws.panes.get(&cell.pane_id))
@@ -1935,8 +1953,7 @@ impl App {
                                         let PointerGestureOwner::Terminal { sgr, .. } =
                                             gesture.owner
                                         else {
-                                            // When: local selection owns this press,
-                                            // preserve the existing selection path.
+                                            // When: `gesture.owner` is Local, preserve the existing selection path.
                                             return None;
                                         };
                                         Some((
@@ -1951,8 +1968,7 @@ impl App {
                                         ))
                                     });
                                     if let Some((gesture, bytes)) = terminal_press {
-                                        // Focus was already resolved before terminal routing;
-                                        // latch and enqueue only after every parser guard ended.
+                                        // When: `terminal_press` contains a gesture and bytes, latch after focus and enqueue with no parser guard.
                                         if let Some(ws) = self.main_mut() {
                                             ws.pointer_gesture = Some(gesture);
                                             ws.selection = None;
@@ -2030,7 +2046,7 @@ impl App {
                         }
                     }
                     ElementState::Released => {
-                        // Released primary-pointer state commits or cancels active gestures.
+                        // When: `state` is Released, commit or cancel the press-latched pointer gesture.
 
                         // Notify the reducer of the release transition so selection
                         // observability emits Render(Selection).
@@ -2068,8 +2084,7 @@ impl App {
                             }
                         }
                         if terminal_owned {
-                            // When: the terminal owned this gesture, release does
-                            // not run selection, tab-drag, or chrome cleanup paths.
+                            // When: `terminal_owned` is true, release skips selection, tab-drag, and chrome cleanup.
                             if let Some(ws) = self.main_mut() {
                                 ws.mouse_down = false;
                             }
