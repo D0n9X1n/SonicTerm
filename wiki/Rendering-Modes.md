@@ -156,7 +156,7 @@ The offscreen frame is cleared on first use and loaded on retained frames. The
 GPU draw order is:
 
 ```text
-base quads -> base glyphs -> overlay quads -> overlay glyphs
+base quads -> inline images -> base glyphs -> overlay quads -> overlay glyphs
 ```
 
 A scissor limits redraw to the damage rectangle. The renderer’s
@@ -189,7 +189,8 @@ owned by [Logging](Logging) and [Memory](Memory).
 | Config-to-degradation decision | `crates/sonicterm-app/src/app/{mod,event_loop,config_apply}.rs` |
 | Frame pacing | `crates/sonicterm-app/src/app/mod.rs` |
 | Retained frame and damage | `crates/sonicterm-gpu/src/core.rs` |
-| GPU draw and blit | `crates/sonicterm-gpu/src/wezterm_pipeline.rs` |
+| GPU draw | `crates/sonicterm-gpu/src/wezterm_pipeline.rs` |
+| Retained-frame blit | `crates/sonicterm-gpu/src/core.rs` |
 | Windows CPU frame | `crates/sonicterm-gpu/src/software_windows.rs` |
 | Windows backdrop override | `crates/sonicterm-windows/src/{main,software_presenter}.rs` |
 
@@ -324,7 +325,7 @@ flowchart TD
 离屏帧第一次使用时清除，保留帧中继续加载。GPU 绘制顺序为：
 
 ```text
-基础矩形 -> 基础字形 -> 浮层矩形 -> 浮层字形
+基础矩形 -> 内联图像 -> 基础字形 -> 浮层矩形 -> 浮层字形
 ```
 
 裁剪矩形把重绘限制在损伤区域内。渲染器的 `wgpu::util::TextureBlitter` 在提交和
@@ -354,6 +355,7 @@ CPU/GDI 软件呈现与 wgpu 区分开。
 | 配置到降级决策 | `crates/sonicterm-app/src/app/{mod,event_loop,config_apply}.rs` |
 | 帧节奏 | `crates/sonicterm-app/src/app/mod.rs` |
 | 保留帧与损伤 | `crates/sonicterm-gpu/src/core.rs` |
-| GPU 绘制与复制 | `crates/sonicterm-gpu/src/wezterm_pipeline.rs` |
+| GPU 绘制 | `crates/sonicterm-gpu/src/wezterm_pipeline.rs` |
+| 保留帧复制 | `crates/sonicterm-gpu/src/core.rs` |
 | Windows CPU 帧 | `crates/sonicterm-gpu/src/software_windows.rs` |
 | Windows backdrop 覆盖 | `crates/sonicterm-windows/src/{main,software_presenter}.rs` |

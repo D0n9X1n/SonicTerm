@@ -100,12 +100,12 @@ def heading_depths(lines: list[str]) -> list[int]:
     return depths
 
 
-def link_targets(lines: list[str]) -> list[tuple[int, str]]:
+def link_targets(lines: list[str], start_line: int = 1) -> list[tuple[int, str]]:
     """Return inline Markdown link destinations outside fenced code blocks."""
     links: list[tuple[int, str]] = []
     fence: str | None = None
     fence_length = 0
-    for line_number, line in enumerate(lines, start=1):
+    for line_number, line in enumerate(lines, start=start_line):
         marker = FENCE_PATTERN.match(line)
         if marker:
             run = marker.group(1)
@@ -131,9 +131,10 @@ def validate_links(
     lines: list[str],
     page_stems: set[str],
     errors: list[str],
+    start_line: int = 1,
 ) -> None:
     """Validate bare cross-page links while allowing local anchors and URLs."""
-    for line_number, raw_target in link_targets(lines):
+    for line_number, raw_target in link_targets(lines, start_line):
         target = unquote(raw_target)
         if target.startswith("#"):
             continue
@@ -250,8 +251,10 @@ def main() -> int:
                     f"{path}: heading-depth sequences differ: "
                     f"English {english_depths}; 中文 {chinese_depths}"
                 )
-            for half in halves:
-                validate_links(path, half, page_stems, errors)
+            english_marker = lines.index(ENGLISH_MARKER)
+            chinese_marker = lines.index(CHINESE_MARKER)
+            validate_links(path, halves[0], page_stems, errors, english_marker + 2)
+            validate_links(path, halves[1], page_stems, errors, chinese_marker + 2)
 
     home = PurePosixPath("wiki/Home.md")
     if home not in halves_by_path:
