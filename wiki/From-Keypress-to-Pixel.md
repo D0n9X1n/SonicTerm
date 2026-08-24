@@ -73,6 +73,11 @@ and queue. There is no adapter-free renderer. Windows CPU/GDI presentation is a
 branch inside an initialized `GpuRenderer`; it cannot recover from failed wgpu
 startup.
 
+These are the same setup objects described throughout this page: the renderer
+owns one window's drawing state; each window owns a wgpu surface; the first
+renderer obtains the shared adapter, device, and queue. Exact identifiers and
+API names remain in code style below.
+
 ```mermaid
 flowchart TD
     window["native window + wgpu surface"] --> adapter{"compatible adapter?"}
@@ -149,15 +154,21 @@ Alt modifier uses its UTF-8 bytes unchanged.
 | UTF-8 | `0x41` |
 | Decimal byte | `65` |
 
-Control is checked before Alt. Control+A becomes `0x01`. Control+Alt+A also uses
-the Control branch. Alt+A prefixes `ESC` to the UTF-8 bytes. Shift and
-Super/Meta do not change a `Key::Character` in this encoder; they may have
-changed the logical character or matched a key binding earlier.
+Other keys and modifiers follow four distinct rules:
 
-Named cursor, Home, and End keys use the active pane's lock-free DECCKM snapshot.
-Unmodified application-cursor keys use SS3. Modified forms use xterm
-parameterized CSI. Function keys use xterm forms. With nonzero kitty keyboard
-flags, Shift+Enter uses `CSI 13 ; 2 u`; plain `A` is unaffected.
+- **Control and keymap precedence:** a configured keymap may consume a chord
+  before PTY encoding. Otherwise Control is checked before Alt: Control+A
+  becomes `0x01`, and Control+Alt+A still uses the Control branch.
+- **Text modifiers:** without Control, Alt+A prefixes `ESC` to the UTF-8 bytes.
+  Shift and Super/Meta do not change a `Key::Character` in this encoder; they
+  may already have changed the logical character.
+- **Cursor and function keys:** named cursor, Home, and End keys use the active
+  pane's lock-free DECCKM snapshot. Unmodified application-cursor keys use SS3;
+  modified forms use xterm parameterized CSI. Function keys use xterm forms.
+- **kitty Shift+Enter:** with nonzero kitty keyboard flags, Shift+Enter uses
+  `CSI 13 ; 2 u`.
+
+Plain `A` is unaffected, so this page continues to follow it.
 
 ### 4. The bytes enter one or more PTYs
 
@@ -253,10 +264,13 @@ stays on the final column. A pending wrap from the preceding character is
 resolved before storing `A`.
 
 Dirty means “this row changed.” The dirty bit, content sequence, and grid
-revision serve different purposes: repaint work, content identity, and coarse
-frame identity. Wide characters use `WIDE` and `WIDE_CONT` cells. Zero-width
-characters append to the lead cell's `extras`, capped by
-`MAX_CELL_EXTRAS_BYTES = 64`; a code point that would exceed the cap is dropped.
+revision are separate bookkeeping signals for repaint work, content identity,
+and coarse frame identity.
+
+Cell representation is a separate concern. Wide characters use `WIDE` and
+`WIDE_CONT` cells. Zero-width characters append to the lead cell's `extras`,
+capped by `MAX_CELL_EXTRAS_BYTES = 64`; a code point that would exceed the cap
+is dropped.
 
 ### 8. The VT worker requests a later redraw
 
@@ -289,11 +303,10 @@ and requests the frame again.
 
 On `RedrawRequested`, the app computes the active tab's pane rectangles. It
 uses `try_lock` for every required inline-image store and every active-tab
-parser. It keeps all parser guards for the render call.
-
-If one lock is unavailable, the app drops every collected guard, records a
-pending redraw, and returns without calling the renderer. The frame is complete
-or absent; SonicTerm does not present a mix of old and new pane state.
+parser, and keeps all parser guards for the render call. If one lock is
+unavailable, it drops every collected guard, records a pending redraw, and
+returns without calling the renderer. The frame is complete or absent;
+SonicTerm does not present a mix of old and new pane state.
 
 For each visible pane, the app builds `PaneRender` with:
 
@@ -341,10 +354,16 @@ cached atlas epoch rejects UVs from before an eviction.
 also covers pane origin and extent because moving or clipping a pane changes
 quad geometry.
 
-Both caches hold about four times the total visible rows across all panes. A
-size change or capacity hit clears the affected cache. Dirty rows invalidate
-absolute-row entries. Frame-specific cursor, selection, search, quick-select,
-IME, palette, and notification overlays are assembled separately.
+Their capacity, invalidation, and current use are separate facts:
+
+- **Capacity:** both caches hold about four times the total visible rows across
+  all panes. A size change or capacity hit clears the affected cache.
+- **Invalidation:** font, theme, scale, surface-size, and atlas changes clear the
+  appropriate caches. Dirty rows invalidate absolute-row entries.
+- **Current status:** both cache types define pane-local invalidation methods,
+  but the current renderer has no production caller for them. Frame-specific
+  cursor, selection, search, quick-select, IME, palette, and notification
+  overlays are assembled separately.
 
 ### 11. Text becomes glyph instances
 
@@ -358,9 +377,10 @@ The shortcut is not a second font system. An atlas miss still calls
 ligature-capable runs call `FontStack::shape_text_with_style`, which uses
 HarfBuzz and maps shaped clusters back to terminal columns.
 
-The configured primary family is followed by the code-owned fallback list:
-JetBrains Mono, Symbols Nerd Font Mono, and Noto Color Emoji. Platform discovery
-can add fonts for unresolved clusters.
+The font stack looks for the first face that can draw each glyph. It tries the
+configured primary family, then the code-owned fallback list—JetBrains Mono,
+Symbols Nerd Font Mono, and Noto Color Emoji—and finally platform-discovered
+faces for unresolved clusters.
 
 Font discovery and normal rasterization differ by platform:
 
@@ -471,8 +491,66 @@ None of those acquisition paths clears dirty rows. An eviction-aborted frame
 also leaves them set. `RenderMode::Noop` stores a key but does not present or
 clear dirty rows because it produced no image.
 
-After a drawn frame completes, the window system compositor can display the new
-pixels. The echoed `A` is now visible.
+After a drawn frame completes, the window compositor and display system scan out
+the newly presented pixels. The echoed `A` is now visible.
+
+### Cache invalidation triggers
+
+These changes invalidate different rendering state:
+
+- **Font settings:** changing the family, size, line height, or weight rebuilds
+  the font stacks, resets glyph-atlas metadata, and invalidates both row caches
+  and the `FrameKey`.
+- **DPI:** a DPI change retargets font scaling, rebuilds matching atlas upload
+  resources, invalidates both row caches and the `FrameKey`, then requests a
+  redraw.
+- **Theme:** a theme change updates renderer colors, advances the style
+  revision, invalidates both row caches and the `FrameKey`, and marks every
+  pane row dirty.
+- **Surface size:** an accepted surface resize replaces the retained-frame
+  texture and invalidates both row caches and the `FrameKey` before pane grids
+  and PTYs are resized.
+- **Pane topology:** a different pane layout changes the topology fields in the
+  next `FrameKey`; it does not by itself clear the row caches.
+
+### What happens when the pane closes
+
+Dropping a `PtyHandle` first signals the reader and writer to cancel, cancels
+pending synchronous I/O where the platform supports it, and terminates the
+child. The remaining bounded sequence differs by platform.
+
+**Unix PTY**
+
+Before teardown, `waitid(P_PID, ..., WEXITED | WNOHANG | WNOWAIT)` can observe a
+natural exit without releasing the session id. Teardown then:
+
+1. kills the original process group and repeatedly kills active members of the
+   same session;
+2. closes the PTY master;
+3. waits up to 500 ms for the reader, then independently up to 500 ms for the
+   writer; a timeout warns and detaches that thread;
+4. if termination failed, retries it for a separate 500 ms; if cleanup still
+   cannot be proved, leaves the leader unreaped so its id cannot be reused
+   unsafely;
+5. otherwise, gives child exit and reaping a separate 500 ms before warning and
+   returning.
+
+**Windows ConPTY**
+
+Teardown then:
+
+1. waits up to 500 ms for the reader, then independently up to 500 ms for the
+   writer; a timeout warns and detaches that thread;
+2. starts `sonic-conpty-drain` to drain a cloned reader and
+   `sonic-conpty-close` to close the master;
+3. waits up to 2 seconds for close; a timeout warns and detaches both helpers;
+4. after a successful close, waits up to another 2 seconds for the drainer to
+   observe EOF; a drain timeout silently detaches it;
+5. gives child exit and reaping a separate 500 ms before warning and returning.
+
+Failure to start either ConPTY helper warns and reports an incomplete close.
+These bounds keep `Drop` from blocking the UI indefinitely; an incomplete
+native close is not reported as success.
 
 ### Why `A` may not appear
 
@@ -505,7 +583,7 @@ pixels. The echoed `A` is now visible.
 
 ## 中文
 
-本页跟踪一个普通大写 `A` 在当前应用中的完整路径。假设窗格已经获得焦点，并且命令面板、
+本页跟踪大写英文字母 `A` 在当前应用中的完整路径。假设窗格已经获得焦点，并且命令面板、
 搜索框、复制模式、输入法组字和键位绑定都没有接管该按键。
 
 按下 `A` 不会直接画出 `A`。SonicTerm 先把字节发给子程序。只有子程序通过伪终端
@@ -528,7 +606,7 @@ flowchart LR
     frame["完整 PaneRender 帧"]
     font["FontStack + GlyphAtlas"]
     choice{"呈现器"}
-    wgpu["保留式 wgpu 帧"]
+    wgpu["wgpu 保留帧"]
     cpu["WindowsSoftwareFrame + GDI"]
     pixels(["窗口像素"])
 
@@ -548,8 +626,9 @@ flowchart LR
 硬件不可用时，wgpu 仍可能返回 CPU 适配器。后续窗口通过 `GpuSharedContext` 复用第一套
 适配器、设备和队列；每个窗口仍有自己的表面和渲染器状态。
 
-设备类型为 `Cpu`，或者名称包含 Microsoft Basic Render Driver、llvmpipe、SwiftShader、
-software adapter 时，SonicTerm 把它认作软件适配器。设备内存策略跟随这个检测结果：
+设备类型为 `Cpu`，或者名称包含 `Microsoft Basic Render Driver`、`llvmpipe`、
+`SwiftShader` 或“软件适配器”时，SonicTerm 把它认作软件适配器。设备内存策略跟随这个
+检测结果：
 
 - 软件适配器：`MemoryHints::MemoryUsage`；
 - 硬件适配器：`MemoryHints::Performance`。
@@ -567,6 +646,10 @@ WARP 或其它 CPU 适配器继续使用普通 wgpu 路径。设备内存策略�
 每个可见终端窗口都需要可用的 wgpu 表面、适配器、设备和队列。SonicTerm 没有完全不需要
 适配器的渲染器。Windows CPU/GDI 呈现只是已经初始化的 `GpuRenderer` 内部的一条分支，
 不能挽救 wgpu 启动失败。
+
+本页后文沿用这些初始化对象：渲染器保存一个窗口的绘制状态，每个窗口拥有自己的 wgpu 表面，
+第一个渲染器取得后续窗口共享的适配器、设备和队列。精确的标识符和 API 名称仍用代码样式
+保留。
 
 ```mermaid
 flowchart TD
@@ -637,13 +720,17 @@ winit 发送按下状态的 `WindowEvent::KeyboardInput`。SonicTerm 使用
 | UTF-8 | `0x41` |
 | 十进制字节 | `65` |
 
-Control 比 Alt 先判断。Control+A 变成 `0x01`。Control+Alt+A 也走 Control 分支。
-Alt+A 会在 UTF-8 字节前加 `ESC`。Shift 和 Super/Meta 不会在这个编码器里修改
-`Key::Character`；它们可能已经改变逻辑字符，或更早匹配了键位。
+其它按键和修饰键遵循四条不同规则：
 
-方向键、Home 和 End 会读取活动窗格的无锁 DECCKM 快照。未加修饰键的应用光标模式使用
-SS3。带修饰键时使用 xterm 参数化 CSI。功能键使用 xterm 序列。kitty keyboard flag 非零时，
-Shift+Enter 使用 `CSI 13 ; 2 u`；普通 `A` 不受影响。
+- **Control 与键位优先级：** 配置的键位可能在 PTY 编码前接管组合键。否则先判断 Control，
+  再判断 Alt：Control+A 变成 `0x01`，Control+Alt+A 仍走 Control 分支。
+- **文字修饰键：** 没有 Control 时，Alt+A 会在 UTF-8 字节前加 `ESC`。Shift 和
+  Super/Meta 不会在这个编码器里修改 `Key::Character`；它们可能已经改变逻辑字符。
+- **方向键与功能键：** 方向键、Home 和 End 会读取活动窗格的无锁 DECCKM 快照。未加
+  修饰键的应用光标模式使用 SS3；带修饰键时使用 xterm 参数化 CSI。功能键使用 xterm 序列。
+- **kitty Shift+Enter：** kitty 键盘标志非零时，Shift+Enter 使用 `CSI 13 ; 2 u`。
+
+普通 `A` 不受影响，因此本页继续跟踪它。
 
 ### 4. 字节进入一个或多个 PTY
 
@@ -721,9 +808,11 @@ APC 输入会在 vte 之前被截获。
 可打印字符才真正换行。关闭自动换行时，光标停在最后一列。前一个字符留下的待换行状态会在
 写入 `A` 前处理。
 
-脏行表示“这一行发生了变化”。脏位、内容序号和网格 revision 分别用于重绘工作、内容身份和
-粗粒度帧身份。宽字符使用 `WIDE` 与 `WIDE_CONT` 单元格。零宽字符附加到首单元格的
-`extras`，上限为 `MAX_CELL_EXTRAS_BYTES = 64`；超过上限的码点会被丢弃。
+脏行表示“这一行发生了变化”。脏位、内容序号和网格修订号是三种独立的记账信号，分别用于
+重绘工作、内容身份和粗粒度帧身份。
+
+单元格如何表示字符是另一件事。宽字符使用 `WIDE` 与 `WIDE_CONT` 单元格。零宽字符附加到
+首单元格的 `extras`，上限为 `MAX_CELL_EXTRAS_BYTES = 64`；超过上限的码点会被丢弃。
 
 ### 8. VT 工作线程请求稍后重绘
 
@@ -749,11 +838,10 @@ PTY 输出最多等待一个显示器帧周期。最终降级状态启用时，�
 
 ### 9. 事件循环构建完整帧
 
-收到 `RedrawRequested` 后，应用先计算活动标签页的窗格矩形。它对每个必需内联图像存储和
-活动标签页解析器使用 `try_lock`，并让所有解析器保护对象一直存活到渲染调用结束。
-
-任一锁不可用时，应用释放已经取得的全部保护对象，记录待重绘状态，并在不调用渲染器的
-情况下返回。帧要么完整，要么不存在；SonicTerm 不会呈现新旧窗格状态混合的画面。
+收到 `RedrawRequested` 后，应用先计算活动标签页的窗格矩形。它对每个必需的内联图像存储
+和活动标签页解析器使用 `try_lock`，并让所有解析器锁守卫一直存活到渲染调用结束。任一锁
+不可用时，应用会释放已经取得的全部锁守卫，记录待重绘状态，并在不调用渲染器的情况下
+返回。帧要么完整，要么不存在；SonicTerm 不会呈现新旧窗格状态混合的画面。
 
 应用为每个可见窗格构建 `PaneRender`，其中包含：
 
@@ -793,8 +881,14 @@ PTY 输出最多等待一个显示器帧周期。最终降级状态启用时，�
 `LineQuadCache` 用相似的键保存合并后的背景四边形。它的哈希还覆盖窗格原点和范围，因为
 移动或裁剪窗格会改变四边形几何。
 
-两种缓存容量约为所有窗格可见行总数的四倍。尺寸变化或达到容量时会清空对应缓存。脏行会
-使绝对行条目失效。光标、选区、搜索、快速选择、输入法、命令面板和通知等逐帧浮层另行组装。
+容量、失效条件和当前使用状态是三件不同的事：
+
+- **容量：** 两种缓存的容量都约为所有窗格可见行总数的四倍。尺寸变化或达到容量时，
+  对应缓存会整体清空。
+- **失效条件：** 字体、主题、缩放比例、表面尺寸或图集变化会清除相应缓存；脏行会使
+  绝对行条目失效。
+- **当前状态：** 两种缓存都提供仅使单个窗格失效的方法，但当前渲染器的生产路径没有调用
+  这些方法。光标、选区、搜索、快速选择、输入法、命令面板和通知等逐帧浮层另行组装。
 
 ### 11. 文字变成字形实例
 
@@ -806,8 +900,9 @@ PTY 输出最多等待一个显示器帧周期。最终降级状态启用时，�
 文字、回退字体和可能形成连字的文字段会调用 `FontStack::shape_text_with_style`，由 HarfBuzz
 塑形，再把字形簇映射回终端列。
 
-配置的主字体后面接着代码内固定的回退列表：JetBrains Mono、Symbols Nerd Font Mono 和
-Noto Color Emoji。平台字体发现还可以为未解析的字形簇补充字体。
+字体栈会为每个字形寻找第一个能绘制它的字体。它先尝试配置的主字体，再依次尝试代码内置的
+JetBrains Mono、Symbols Nerd Font Mono 和 Noto Color Emoji；仍找不到时，最后使用平台发现的
+备用字体来处理尚未解析的字形簇。
 
 各平台的字体发现和普通光栅化如下：
 
@@ -898,7 +993,53 @@ wgpu 绘制前：
 这些路径都不会清除脏行。因图集淘汰而放弃的帧也保留脏行。`RenderMode::Noop` 会保存键，
 但不呈现、不清除脏行，因为它没有生成新画面。
 
-真正画完一帧后，窗口系统合成器可以显示新像素。回显的 `A` 此时才出现在屏幕上。
+真正画完一帧后，窗口合成器和显示系统会把新呈现的像素送到屏幕上。回显的 `A` 此时才
+出现在屏幕上。
+
+### 缓存失效触发条件
+
+以下变化会使不同的渲染状态失效：
+
+- **字体设置：** 改变字体家族、字号、行高或字重会重建字体栈、重置字形图集元数据，
+  并使两种行缓存和 `FrameKey` 失效。
+- **DPI：** DPI 变化会重新设定字体缩放，重建匹配的图集上传资源，使两种行缓存和
+  `FrameKey` 失效，然后请求重绘。
+- **主题：** 主题变化会更新渲染器颜色、推进样式修订号，使两种行缓存和 `FrameKey` 失效，
+  并把每个窗格的所有行标为脏行。
+- **表面尺寸：** 接受新的表面尺寸后，会替换保留帧纹理，使两种行缓存和 `FrameKey` 失效，
+  然后调整窗格网格和 PTY 的大小。
+- **窗格拓扑：** 不同的窗格布局会改变下一份 `FrameKey` 中的拓扑字段；它本身不会清空
+  行缓存。
+
+### 窗格关闭时会发生什么
+
+释放 `PtyHandle` 时，代码会先通知读取与写入线程取消操作，在平台支持时取消仍在等待的同步
+I/O，然后终止子进程。之后的有界顺序因平台而异。
+
+**Unix PTY**
+
+清理前，`waitid(P_PID, ..., WEXITED | WNOHANG | WNOWAIT)` 可以观察自然退出而不释放会话编号。
+随后按顺序清理：
+
+1. 杀死原进程组，并反复杀死同一会话中仍存活的成员；
+2. 关闭 PTY 主端；
+3. 最多等待读取线程 500 ms，再独立等待写入线程最多 500 ms；超时会记录警告并分离该线程；
+4. 若终止失败，另用 500 ms 重试；如果仍无法证明清理完成，就保留未回收的主进程，避免其
+   编号被不安全地复用；
+5. 否则，再用独立的 500 ms 等待子进程退出并回收；到期后记录警告并返回。
+
+**Windows ConPTY**
+
+随后按顺序清理：
+
+1. 最多等待读取线程 500 ms，再独立等待写入线程最多 500 ms；超时会记录警告并分离该线程；
+2. 启动 `sonic-conpty-drain` 通过克隆的 reader 排空输出，并启动 `sonic-conpty-close` 关闭主端；
+3. 最多等待关闭操作 2 秒；超时会记录警告并分离两个辅助线程；
+4. 关闭成功后，再最多等待 2 秒，让排空线程观察 EOF；排空超时会静默分离该线程；
+5. 再用独立的 500 ms 等待子进程退出并回收；到期后记录警告并返回。
+
+任一 ConPTY 辅助线程启动失败时，代码会记录警告并报告关闭未完成。这些时限保证 `Drop`
+不会无限阻塞界面；原生关闭未完成时，代码不会谎报成功。
 
 ### `A` 可能不出现的原因
 
