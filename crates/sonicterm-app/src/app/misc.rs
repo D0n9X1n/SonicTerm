@@ -294,7 +294,7 @@ impl App {
                 id
             }
         };
-        let text = {
+        let (text, clear_after_copy) = {
             let Some(window) = self.windows.get_mut(&window_id) else {
                 // When: windows no longer holds window_id; the window closed before
                 // the copy ran, so there is no selection left to read.
@@ -335,31 +335,49 @@ impl App {
                 // and copying it would clear the clipboard.
                 return;
             }
-            selection.as_text(grid)
+            (selection.as_text(grid), selection.on_alt_screen)
         };
-        self.set_clipboard_text(text);
+        if self.set_clipboard_text(text) && clear_after_copy {
+            // A volatile selection is consumed only after confirmed clipboard delivery.
+            if let Some(window) = self.windows.get_mut(&window_id) {
+                // Clear the highlight and invalidate retained rows before requesting its frame.
+                window.selection = None;
+                mark_all_panes_dirty(&window.panes);
+                window.request_redraw();
+            }
+        }
     }
 
-    pub(super) fn set_clipboard_text(&mut self, text: String) {
+    pub(super) fn set_clipboard_text(&mut self, text: String) -> bool {
         if text.is_empty() {
             // When: text is empty; writing it would clear the user's clipboard,
             // so leave the previous contents intact.
-            return;
+            return false;
+        }
+        if self.test_clipboard_write_failure {
+            // When: `test_clipboard_write_failure` is true, reject at the set_text
+            // boundary without changing the in-memory or system clipboard.
+            return false;
         }
         if self.test_clipboard_text.is_some() {
             // When: test_clipboard_text is set; the suite captures the copy here
             // so no real system clipboard is touched by a test run.
             self.test_clipboard_text = Some(text.clone());
-            return;
+            return true;
         }
-        if let Some(cb) = self.clipboard.as_mut() {
-            if let Err(e) = cb.set_text(text.clone()) {
-                tracing::warn!("clipboard set failed: {e}");
-            } else {
-                // When: set_text succeeded; record the byte count so a silent
-                // clipboard failure stays distinguishable from a real copy.
-                tracing::info!("copied {} bytes", text.len());
-            }
+        let Some(cb) = self.clipboard.as_mut() else {
+            // When: no clipboard handle was created, no write occurred and callers
+            // must preserve any selection that depends on confirmed delivery.
+            return false;
+        };
+        if let Err(e) = cb.set_text(text.clone()) {
+            tracing::warn!("clipboard set failed: {e}");
+            false
+        } else {
+            // When: set_text succeeded; record the byte count so a silent
+            // clipboard failure stays distinguishable from a real copy.
+            tracing::info!("copied {} bytes", text.len());
+            true
         }
     }
     pub(super) fn paste_clipboard_for_kind(&mut self, kind: FrontmostKind) {

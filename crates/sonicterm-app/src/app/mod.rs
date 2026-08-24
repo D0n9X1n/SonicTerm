@@ -1905,6 +1905,11 @@ pub struct App {
     /// and writes use this buffer instead.
     #[doc(hidden)]
     pub(super) test_clipboard_text: Option<String>,
+    /// Test-only clipboard write rejection injected at the production write
+    /// boundary. Disabled in every constructor so ordinary runs retain the real
+    /// clipboard behavior and the in-memory success seam remains opt-in.
+    #[doc(hidden)]
+    pub(super) test_clipboard_write_failure: bool,
     /// Test-only PTY write ledger. `write_to_pane` records every boundary write
     /// here before resolving the pane to a real PTY, so headless tests can assert
     /// which pane an action targeted without constructing a process-backed PTY.
@@ -2397,6 +2402,7 @@ impl App {
             keymap,
             clipboard: Clipboard::new().ok(),
             test_clipboard_text: None,
+            test_clipboard_write_failure: false,
             test_pty_writes: Arc::new(Mutex::new(Vec::new())),
             // No event-loop proxy ⇒ headless/test construction ⇒ record PTY
             // writes for assertions. Production always passes `Some(proxy)`,
@@ -4244,6 +4250,12 @@ impl App {
     #[doc(hidden)]
     pub fn __test_memory_clipboard(&self) -> Option<String> {
         self.test_clipboard_text.clone()
+    }
+
+    /// Test-only: make clipboard writes fail before either clipboard seam changes.
+    #[doc(hidden)]
+    pub fn __test_set_clipboard_write_failure(&mut self, enabled: bool) {
+        self.test_clipboard_write_failure = enabled;
     }
 
     /// Test-only: drain the PTY write ledger populated by `write_to_pane`.
