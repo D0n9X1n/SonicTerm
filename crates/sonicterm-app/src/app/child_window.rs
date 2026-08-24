@@ -46,6 +46,21 @@ use super::{
 
 const SEARCH_BADGE_ICON: &str = "";
 
+/// Route live child-window motion after applying every child chrome owner.
+pub(super) fn child_no_button_motion_report(
+    child: &WindowState,
+    cell: PointerCell,
+    tracking: sonicterm_vt::vt::MouseTracking,
+    sgr: bool,
+    scrollbar_owned: bool,
+) -> Option<super::window_event::PointerMotionRoute> {
+    let ui_consumed = child.splitter_hover.is_some()
+        || child.hovered_url.is_some()
+        || child.hover_link
+        || scrollbar_owned;
+    super::window_event::no_button_motion_report(cell, tracking, sgr, child.modifiers, ui_consumed)
+}
+
 fn estimate_overlay_text_width(text: &str, font_size: f32) -> f32 {
     text.chars().map(|ch| if ch.is_ascii() { 0.58 } else { 1.0 }).sum::<f32>() * font_size
 }
@@ -1022,21 +1037,17 @@ impl App {
                             )
                         })
                     });
-                    let ui_consumed = child.splitter_hover.is_some()
-                        || child.hovered_url.is_some()
-                        || child.hover_link
-                        || scrollbar_owned;
                     pointer_cell.and_then(|cell| {
                         child.panes.get(&cell.pane_id).and_then(|pane| {
                             let parser = pane.parser.lock();
                             let (tracking, sgr) =
                                 super::window_event::parser_mouse_profile(&parser);
-                            super::window_event::no_button_motion_report(
+                            child_no_button_motion_report(
+                                child,
                                 cell,
                                 tracking,
                                 sgr,
-                                child.modifiers,
-                                ui_consumed,
+                                scrollbar_owned,
                             )
                         })
                     })

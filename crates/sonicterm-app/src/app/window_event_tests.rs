@@ -4,7 +4,13 @@ use super::{
     take_focus_loss_pointer_release, take_pointer_release, wheel_report_bytes, PointerCell,
     PointerGestureOwner, PointerMotionRoute, PointerReportKind,
 };
-use sonicterm_cfg::{config::ScrollbarMode, keymap::Action};
+use crate::app::{child_window::child_no_button_motion_report, hovered_url::HoveredUrl, App};
+use sonicterm_cfg::{
+    config::{Config, ScrollbarMode},
+    keymap::{Action, Keymap},
+    theme::Theme,
+};
+use sonicterm_ui::pane::SplitAxis;
 use sonicterm_vt::vt::MouseTracking;
 use winit::keyboard::ModifiersState;
 
@@ -444,28 +450,76 @@ fn main_and_child_focus_loss_share_release_helper() {
 }
 
 #[test]
-fn main_and_child_callers_share_one_pointer_decision_contract() {
-    // Main and child wrappers deliberately delegate to this one pure decision;
-    // equivalent surface inputs therefore produce one identical owner value.
-    fn main_decision() -> Option<super::PointerGesture> {
-        begin_pointer_gesture(
-            pointer_cell(11, 6, 7),
-            MouseTracking::ButtonMotion,
+fn child_no_button_motion_respects_each_child_ui_owner() {
+    // Production child routing computes `ui_consumed` from these exact fields;
+    // each owner must suppress AnyMotion while an otherwise identical cell reports.
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["child"]);
+    let pane = app.__test_child_pane_ids(window).expect("seeded child window")[0];
+    let cell = pointer_cell(pane, 6, 7);
+
+    let child = app.windows.get(&window).expect("seeded child state");
+    assert!(matches!(
+        child_no_button_motion_report(child, cell, MouseTracking::AnyMotion, true, false),
+        Some(PointerMotionRoute::Report { pane_id, .. }) if pane_id == pane
+    ));
+
+    app.windows.get_mut(&window).unwrap().splitter_hover = Some(SplitAxis::Vertical);
+    assert_eq!(
+        child_no_button_motion_report(
+            app.windows.get(&window).unwrap(),
+            cell,
+            MouseTracking::AnyMotion,
             true,
-            ModifiersState::empty(),
             false,
-        )
-    }
-    fn child_decision() -> Option<super::PointerGesture> {
-        begin_pointer_gesture(
-            pointer_cell(11, 6, 7),
-            MouseTracking::ButtonMotion,
+        ),
+        None
+    );
+    app.windows.get_mut(&window).unwrap().splitter_hover = None;
+
+    app.windows.get_mut(&window).unwrap().hovered_url = Some(HoveredUrl {
+        pane_id: pane,
+        row: 6,
+        start_col: 7,
+        end_col: 8,
+        url: "https://example.com".into(),
+        active: true,
+    });
+    assert_eq!(
+        child_no_button_motion_report(
+            app.windows.get(&window).unwrap(),
+            cell,
+            MouseTracking::AnyMotion,
             true,
-            ModifiersState::empty(),
             false,
-        )
-    }
-    assert_eq!(main_decision(), child_decision());
+        ),
+        None
+    );
+    app.windows.get_mut(&window).unwrap().hovered_url = None;
+
+    app.windows.get_mut(&window).unwrap().hover_link = true;
+    assert_eq!(
+        child_no_button_motion_report(
+            app.windows.get(&window).unwrap(),
+            cell,
+            MouseTracking::AnyMotion,
+            true,
+            false,
+        ),
+        None
+    );
+    app.windows.get_mut(&window).unwrap().hover_link = false;
+
+    assert_eq!(
+        child_no_button_motion_report(
+            app.windows.get(&window).unwrap(),
+            cell,
+            MouseTracking::AnyMotion,
+            true,
+            true,
+        ),
+        None
+    );
 }
 
 #[test]
