@@ -407,8 +407,9 @@ invalidates `RowGlyphCache`, abandons the frame, and requests another one. The
 next frame retries with eviction disabled. One successful presentation enables
 it again.
 
-A `GlyphInstance` stores a device-space rectangle, atlas UVs, linear-space
-foreground modulation, and flags for color, subpixel, and image-atlas sampling.
+A `GlyphInstance` stores a normalized-device-coordinate (NDC) rectangle, atlas
+UVs, linear-space foreground modulation, and flags for color, subpixel, and
+image-atlas sampling.
 The row cache stores this prepared instance with the atlas epoch.
 
 The inline-image atlas is separate. It starts at 1 × 1, promotes to 2,048 × 2,048
@@ -843,8 +844,8 @@ Noto Color Emoji。平台字体发现还可以为未解析的字形簇补充字�
 图集，使 `RowGlyphCache` 失效，放弃当前帧并请求下一帧。下一帧关闭淘汰后重试。
 成功呈现一帧后再重新启用淘汰。
 
-`GlyphInstance` 保存设备空间矩形、图集 UV、线性空间前景调制色，以及彩色、子像素和图像
-图集采样标志。行缓存会连同图集代次保存这个准备好的实例。
+`GlyphInstance` 保存归一化设备坐标（NDC）矩形、图集 UV、线性空间前景调制色，以及
+彩色、子像素和图像图集采样标志。行缓存会连同图集代次保存这个准备好的实例。
 
 内联图像使用独立图集。它从 1 × 1 开始，出现可见媒体时扩展到 2,048 × 2,048，连续
 240 个已渲染帧没有内联媒体后再缩回占位符。

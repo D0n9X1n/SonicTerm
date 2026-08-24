@@ -238,7 +238,7 @@ The exact safety conditions are in
 ### 系统结构
 
 SonicTerm 把终端行为与原生窗口、画面呈现分开。伪终端（PTY）是窗格与子进程之间的
-操作系统通道。PTY 工作不会占用 winit 事件循环线程。
+操作系统通道。PTY 工作线程不在 winit 事件循环线程上运行。
 
 ```mermaid
 flowchart TD
@@ -284,7 +284,7 @@ flowchart TD
 | `sonicterm-font-config` 与字体包装 crate | 字体配置和生成的 FFI 边界 | 应用与渲染器拓扑 |
 | `sonicterm-font` / `sonicterm-engine` / `sonicterm-text` | 字体发现、塑形、光栅化、图集数据和行字形缓存 | 窗口生命周期和 PTY 所有权 |
 | `sonicterm-gpu` | 损伤区域、行缓存、背景缓存、组帧、wgpu 和 Windows CPU 合成 | 应用拓扑和子进程 |
-| `sonicterm-app` | winit 处理器、实时拓扑、PTY 接线、重绘调度和配置应用 | AppKit、Win32、X11、Wayland 的平台专属设置 |
+| `sonicterm-app` | winit 处理器、实时拓扑、PTY 接线、重绘调度和配置应用 | 已有 shell 接缝负责的 AppKit、Win32、X11 或 Wayland 平台设置 |
 | 平台 crate | 程序启动、原生菜单、拖放、背景效果钩子和包元数据 | 可复用的终端行为 |
 
 渲染器只有一个声明过的终端与界面类型边界。`sonicterm-gpu` 依赖
