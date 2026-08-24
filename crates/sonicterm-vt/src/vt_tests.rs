@@ -200,6 +200,16 @@ fn decrst_resets_the_active_mouse_tracking_mode() {
     assert_eq!(parser.mouse_tracking(), MouseTracking::Off);
 }
 
+/// Resetting the active mode turns tracking off without restoring its predecessor.
+#[test]
+fn active_mouse_tracking_reset_does_not_restore_the_prior_mode() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+
+    parser.advance(b"\x1b[?1000h\x1b[?1002h\x1b[?1002l");
+
+    assert_eq!(parser.mouse_tracking(), MouseTracking::Off);
+}
+
 /// DECRST for an inactive tracking mode leaves the current selection unchanged.
 #[test]
 fn decrst_ignores_an_inactive_mouse_tracking_mode() {
