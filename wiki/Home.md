@@ -27,6 +27,7 @@ level. [Memory](Memory) covers what is bounded and how to read it.
 - [Terminal IO and VT](Terminal-IO-and-VT) — PTYs, optional SSH, VT parsing, grids, scrollback, and mux status
 - [From Keypress to Pixel](From-Keypress-to-Pixel) — how one typed `A` travels through the child program, grid, font stack, and renderer
 - [Rendering and Fonts](Rendering-and-Fonts) — damage, glyph shaping, atlases, wgpu, and software rendering
+- [Rendering Modes](Rendering-Modes) — renderer selection and frame pacing
 - [Platform Integration](Platform-Integration) — AppKit/macOS, Win32/Windows, and X11/Wayland Linux boundaries
 - [Crate Reference](Crate-Reference) — all 24 workspace crates and their relationships
 - [Development and Release](Development-and-Release) — tests, CI, packaging, and the `v*` release pipeline
@@ -62,6 +63,7 @@ SonicTerm 是一个面向 macOS、Windows 和 Linux 的原生 GPU 加速终端�
 - [终端 IO 与 VT / Terminal IO and VT](Terminal-IO-and-VT) — PTY、可选 SSH、VT 解析、网格、回滚缓冲与 mux 状态
 - [从按键到像素 / From Keypress to Pixel](From-Keypress-to-Pixel) — 一个输入的 `A` 如何经过子程序、网格、字体栈与渲染器
 - [渲染与字体 / Rendering and Fonts](Rendering-and-Fonts) — 损坏区域、字形塑形、图集、wgpu 与软件渲染
+- [渲染模式 / Rendering Modes](Rendering-Modes) — 渲染器选择与帧调度
 - [平台集成 / Platform Integration](Platform-Integration) — AppKit/macOS、Win32/Windows 与 X11/Wayland Linux 边界
 - [Crate 参考 / Crate Reference](Crate-Reference) — 工作区全部 24 个 crate 及其关系
 - [开发与发布 / Development and Release](Development-and-Release) — 测试、CI、打包与 `v*` 发布流水线
