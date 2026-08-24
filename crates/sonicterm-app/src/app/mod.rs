@@ -24,7 +24,7 @@ use sonicterm_resource::ResourceGovernor;
 use sonicterm_types::{
     GovernorLimits, OwnerKind, OwnerLimits, ProcessKind, ResourceClass, ResourceOwnerId,
 };
-use sonicterm_vt::vt::{CommandEvent, Parser};
+use sonicterm_vt::vt::{CommandEvent, MouseTracking, Parser};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -709,6 +709,31 @@ pub(crate) struct PaneFocusChange {
     pub(crate) pane_id: u64,
 }
 
+/// Pane-local cell resolved from one renderer layout snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PointerCell {
+    pub(super) pane_id: u64,
+    pub(super) row: u16,
+    pub(super) col: u16,
+}
+
+/// Owner chosen once when a left-button grid gesture begins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PointerGestureOwner {
+    /// SonicTerm selection owns the gesture until release.
+    Local,
+    /// The terminal owns the gesture with its press-time protocol profile.
+    Terminal { tracking: MouseTracking, sgr: bool },
+}
+
+/// Left-button gesture retained independently by each terminal window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PointerGesture {
+    pub(super) owner: PointerGestureOwner,
+    pub(super) press_pane: u64,
+    pub(super) last_cell: PointerCell,
+}
+
 pub struct WindowState {
     /// Window classification — see [`WindowRole`].
     pub role: WindowRole,
@@ -750,6 +775,8 @@ pub struct WindowState {
     pub(crate) owner: Option<OwnerGuard>,
     pub cursor_pos: (f64, f64),
     pub mouse_down: bool,
+    /// Press-latched routing for the current left-button grid gesture.
+    pub(crate) pointer_gesture: Option<PointerGesture>,
     pub selection: Option<Selection>,
     /// Multi-click tracking for word/line selection. `last_click_time` is
     /// the timestamp of the most recent left-press; `last_click_cell` is
@@ -3743,6 +3770,7 @@ impl App {
             panes,
             cursor_pos: (0.0, 0.0),
             mouse_down: false,
+            pointer_gesture: None,
             selection: None,
             last_click_time: None,
             last_click_cell: (0, 0),
@@ -5491,6 +5519,7 @@ impl App {
             panes: HashMap::new(),
             cursor_pos: (0.0, 0.0),
             mouse_down: false,
+            pointer_gesture: None,
             selection: None,
             last_click_time: None,
             last_click_cell: (0, 0),
@@ -6166,6 +6195,7 @@ impl App {
             ws.drag_target = None;
             ws.pressed_tab = None;
             ws.mouse_down = false;
+            window_event::cancel_pointer_gesture(&mut ws.pointer_gesture);
             // also abandon any scrollbar/splitter drag residue —
             // a global drag-cancel should leave no gesture half-held on any
             // window, mirroring the focus-loss cleanup.

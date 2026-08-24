@@ -40,8 +40,8 @@ use super::{
     key_encoding::{encode_key, encode_logical, key_event_to_string, key_name, key_to_strings},
     mark_all_panes_dirty, next_pane_id, pane_id_at_point, pick_prompt_target,
     poll_command_events_for_child_window, resize_all_panes, shell_quote_posix,
-    with_integrated_titlebar, wrap_paste, App, FrontmostKind, PaneState, TabState, UserEvent,
-    WindowState,
+    with_integrated_titlebar, wrap_paste, App, FrontmostKind, PaneState, PointerCell,
+    PointerGestureOwner, TabState, UserEvent, WindowState,
 };
 
 const SEARCH_BADGE_ICON: &str = "";
@@ -957,6 +957,58 @@ impl App {
                 // When: a `CursorMoved` reaches the main match, so no drag was in
                 // flight and this move drives hover, drag chips and selection.
                 child.cursor_pos = (position.x, position.y);
+                let pointer_cell = child
+                    .renderer
+                    .as_ref()
+                    .and_then(|renderer| {
+                        renderer.pixel_to_pane_cell(position.x as f32, position.y as f32)
+                    })
+                    .map(|(pane_id, row, col)| PointerCell { pane_id, row, col });
+                let pointer_route = if child.mouse_down {
+                    let modifiers = child.modifiers;
+                    child.pointer_gesture.as_mut().map(|gesture| {
+                        super::window_event::route_pressed_pointer_motion(
+                            gesture,
+                            pointer_cell,
+                            modifiers,
+                        )
+                    })
+                } else {
+                    pointer_cell.and_then(|cell| {
+                        child.panes.get(&cell.pane_id).and_then(|pane| {
+                            let parser = pane.parser.lock();
+                            let (tracking, sgr) =
+                                super::window_event::parser_mouse_profile(&parser);
+                            super::window_event::no_button_motion_report(
+                                cell,
+                                tracking,
+                                sgr,
+                                child.modifiers,
+                            )
+                        })
+                    })
+                };
+                if let Some(route) = pointer_route {
+                    match route {
+                        super::window_event::PointerMotionRoute::Local => {}
+                        super::window_event::PointerMotionRoute::None => return,
+                        report @ super::window_event::PointerMotionRoute::Report { .. } => {
+                            let kind = if child.mouse_down {
+                                super::window_event::PointerReportKind::HeldLeftMotion
+                            } else {
+                                super::window_event::PointerReportKind::NoButtonMotion
+                            };
+                            let report = super::window_event::pointer_route_bytes(report, kind);
+                            // Drop every child/parser/renderer borrow before the
+                            // bounded effect path resolves and enqueues the PTY write.
+                            let _ = child;
+                            if let Some((pane_id, bytes)) = report {
+                                self.write_to_pane(pane_id, bytes);
+                            }
+                            return;
+                        }
+                    }
+                }
                 let Some(r) = child.renderer.as_mut() else {
                     // When: this child has no `renderer`, so pointer pixels
                     // cannot be resolved to cells or tab-bar geometry.
@@ -1100,20 +1152,22 @@ impl App {
                 if delta_lines != 0 {
                     if let Some(pane_id) = child_pane_at_cursor(child, lx, ly) {
                         let cell = child.renderer.as_ref().and_then(|r| r.pixel_to_cell(lx, ly));
-                        let (is_alt, tracking_on, sgr, app_cursor) = child
+                        let (is_alt, tracking, sgr, app_cursor) = child
                             .panes
                             .get(&pane_id)
                             .map(|pane| {
                                 let parser = pane.parser.lock();
+                                let (tracking, sgr) =
+                                    super::window_event::parser_mouse_profile(&parser);
                                 (
                                     parser.grid().is_alt(),
-                                    parser.mouse_tracking_enabled(),
-                                    parser.mouse_sgr_enabled(),
+                                    tracking,
+                                    sgr,
                                     parser.application_cursor_keys(),
                                 )
                             })
-                            .unwrap_or((false, false, false, false));
-                        if is_alt && tracking_on {
+                            .unwrap_or((false, sonicterm_vt::vt::MouseTracking::Off, false, false));
+                        if is_alt && tracking != sonicterm_vt::vt::MouseTracking::Off {
                             let up = delta_lines < 0;
                             let (col1, row1) =
                                 cell.map(|(r, c)| (c as u32 + 1, r as u32 + 1)).unwrap_or((1, 1));
@@ -1206,17 +1260,69 @@ impl App {
                             return;
                         }
                         child.mouse_down = true;
+                        child.pointer_gesture = None;
                         let (px, py) = (child.cursor_pos.0 as f32, child.cursor_pos.1 as f32);
                         let pane_rects = App::compute_pane_rects_for(child);
-                        let target = (pane_rects.len() > 1)
-                            .then(|| pane_id_at_point(&pane_rects, px, py))
-                            .flatten();
-                        // `pixel_to_cell` expects raster px. Resolve it before the
-                        // mutable focus transition ends the renderer borrow.
-                        let cell = r.pixel_to_cell(px, py);
-                        let pane_focus_change = target
-                            .and_then(|pane_id| child.begin_pointer_pane_focus_change(pane_id));
-                        if let Some((row, col)) = cell {
+                        // Pane and cell must come from one renderer snapshot; app
+                        // geometry is only the early-render fallback for pane id 0.
+                        let pixel_target = r.pixel_to_pane_cell(px, py);
+                        let geometry_pane = pane_id_at_point(&pane_rects, px, py);
+                        let pointer_cell = pixel_target.and_then(|(rendered_pane, row, col)| {
+                            (rendered_pane != 0)
+                                .then_some(rendered_pane)
+                                .or(geometry_pane)
+                                .map(|pane_id| PointerCell { pane_id, row, col })
+                        });
+                        let pane_focus_change = pointer_cell
+                            .and_then(|cell| child.begin_pointer_pane_focus_change(cell.pane_id));
+                        if let Some(pointer_cell) = pointer_cell {
+                            let PointerCell { pane_id, row, col } = pointer_cell;
+                            if pane_id != 0 {
+                                let (tracking, sgr) = child
+                                    .panes
+                                    .get(&pane_id)
+                                    .map(|pane| {
+                                        let parser = pane.parser.lock();
+                                        super::window_event::parser_mouse_profile(&parser)
+                                    })
+                                    .unwrap_or((sonicterm_vt::vt::MouseTracking::Off, false));
+                                let gesture = super::window_event::begin_pointer_gesture(
+                                    pointer_cell,
+                                    tracking,
+                                    sgr,
+                                    child.modifiers,
+                                    false,
+                                );
+                                let terminal_press = gesture.and_then(|gesture| {
+                                    let PointerGestureOwner::Terminal { sgr, .. } = gesture.owner
+                                    else {
+                                        // When: local selection owns this press,
+                                        // preserve the established child selection path.
+                                        return None;
+                                    };
+                                    Some((
+                                        gesture,
+                                        super::window_event::pointer_report_bytes(
+                                            sgr,
+                                            super::window_event::PointerReportKind::LeftPress,
+                                            child.modifiers,
+                                            row,
+                                            col,
+                                        ),
+                                    ))
+                                });
+                                if let Some((gesture, bytes)) = terminal_press {
+                                    child.pointer_gesture = Some(gesture);
+                                    child.selection = None;
+                                    if let Some(change) = pane_focus_change {
+                                        child.finish_pane_focus_change(change);
+                                    }
+                                    let _ = child;
+                                    self.write_to_pane(pane_id, bytes);
+                                    return;
+                                }
+                                child.pointer_gesture = gesture;
+                            }
                             // Multi-click selection: 1 = point, 2 = word,
                             // 3 = line. Mirrors the main-window path in
                             // window_event.rs. `multi_click_selection` locks
@@ -1271,6 +1377,34 @@ impl App {
                     ElementState::Released => {
                         // When: the button was `Released`, so any drag, selection or
                         // tab-move started by the press is resolved here.
+                        let modifiers = child.modifiers;
+                        let terminal_owned = matches!(
+                            child.pointer_gesture.as_ref().map(|gesture| gesture.owner),
+                            Some(PointerGestureOwner::Terminal { .. })
+                        );
+                        let pointer_release = super::window_event::take_pointer_release(
+                            &mut child.pointer_gesture,
+                            modifiers,
+                        );
+                        let release_report = pointer_release.and_then(|route| {
+                            super::window_event::pointer_route_bytes(
+                                route,
+                                super::window_event::PointerReportKind::LeftRelease,
+                            )
+                        });
+                        if terminal_owned {
+                            // Gesture state was consumed before this bounded enqueue;
+                            // a rejected write therefore cannot relatch it.
+                            child.mouse_down = false;
+                            child.scrollbar_drag = None;
+                            child.splitter_drag = None;
+                            child.request_redraw();
+                            let _ = child;
+                            if let Some((pane_id, bytes)) = release_report {
+                                self.write_to_pane(pane_id, bytes);
+                            }
+                            return;
+                        }
                         let session = child.drag_session.take();
                         let foreign = child.drag_target.take();
                         let pressed = child.pressed_tab.take();
@@ -1713,6 +1847,8 @@ impl App {
                 // never gets a button-release otherwise.
                 child.scrollbar_drag = None;
                 child.splitter_drag = None;
+                child.pointer_gesture = None;
+                child.mouse_down = false;
             }
             if let Some(r) = child.renderer.as_mut() {
                 r.set_window_focused(focused);

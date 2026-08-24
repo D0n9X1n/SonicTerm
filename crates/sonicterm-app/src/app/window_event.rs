@@ -18,10 +18,11 @@ use sonicterm_ui::overlays::{
 };
 use sonicterm_ui::selection::{plain_text_from_grid_range, SelectMode, Selection};
 use sonicterm_ui::tabbar_view::TabBarLayout;
+use sonicterm_vt::vt::MouseTracking;
 use winit::{
     event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::ActiveEventLoop,
-    keyboard::{Key, NamedKey},
+    keyboard::{Key, ModifiersState, NamedKey},
     window::{CursorIcon, WindowId},
 };
 
@@ -29,11 +30,174 @@ use super::key_encoding::{encode_key, key_event_to_string, key_to_strings};
 use super::{
     invalidate_selection_for_content, mark_all_panes_dirty, pane_id_at_point,
     runtime_smoke::{grid_contains_marker, RuntimeSmokeFailure},
-    App, FrontmostKind, TabState,
+    App, FrontmostKind, PointerCell, PointerGesture, PointerGestureOwner, TabState,
 };
 
 const SPLITTER_HIT_THICKNESS: f32 = 8.0;
 const SEARCH_BADGE_ICON: &str = "";
+
+/// Pointer event encoded for a terminal mouse protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PointerReportKind {
+    LeftPress,
+    LeftRelease,
+    HeldLeftMotion,
+    NoButtonMotion,
+}
+
+/// Pure terminal pointer route produced after ownership and cell resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PointerMotionRoute {
+    Local,
+    None,
+    Report { pane_id: u64, sgr: bool, row: u16, col: u16, modifiers: ModifiersState },
+}
+
+/// Encode one pane-local pointer report in SGR or classic X10 form.
+pub(super) fn pointer_report_bytes(
+    sgr: bool,
+    kind: PointerReportKind,
+    modifiers: ModifiersState,
+    row: u16,
+    col: u16,
+) -> Vec<u8> {
+    let mut modifier_bits = 0;
+    if modifiers.shift_key() {
+        modifier_bits += 4;
+    }
+    if modifiers.alt_key() || modifiers.super_key() {
+        modifier_bits += 8;
+    }
+    if modifiers.control_key() {
+        modifier_bits += 16;
+    }
+    let base: u32 = match kind {
+        PointerReportKind::LeftPress | PointerReportKind::LeftRelease => 0,
+        PointerReportKind::HeldLeftMotion => 32,
+        PointerReportKind::NoButtonMotion => 35,
+    };
+    let cb = base + modifier_bits;
+    let col = u32::from(col) + 1;
+    let row = u32::from(row) + 1;
+    if sgr {
+        let terminator = if matches!(kind, PointerReportKind::LeftRelease) { 'm' } else { 'M' };
+        format!("\x1b[<{cb};{col};{row}{terminator}").into_bytes()
+    } else {
+        let legacy_cb =
+            if matches!(kind, PointerReportKind::LeftRelease) { 3 + modifier_bits } else { cb };
+        vec![
+            0x1b,
+            b'[',
+            b'M',
+            (legacy_cb + 32).min(255) as u8,
+            (col.min(223) + 32) as u8,
+            (row.min(223) + 32) as u8,
+        ]
+    }
+}
+
+/// Choose and latch the owner of a left-button grid press.
+pub(super) fn begin_pointer_gesture(
+    cell: PointerCell,
+    tracking: MouseTracking,
+    sgr: bool,
+    modifiers: ModifiersState,
+    ui_consumed: bool,
+) -> Option<PointerGesture> {
+    if ui_consumed {
+        // When: SonicTerm chrome consumed the press, no terminal-grid gesture exists.
+        return None;
+    }
+    let owner = if tracking == MouseTracking::Off || modifiers.shift_key() {
+        PointerGestureOwner::Local
+    } else {
+        PointerGestureOwner::Terminal { tracking, sgr }
+    };
+    Some(PointerGesture { owner, press_pane: cell.pane_id, last_cell: cell })
+}
+
+/// Route motion for an already-latched left-button gesture.
+pub(super) fn route_pressed_pointer_motion(
+    gesture: &mut PointerGesture,
+    cell: Option<PointerCell>,
+    modifiers: ModifiersState,
+) -> PointerMotionRoute {
+    let PointerGestureOwner::Terminal { tracking, sgr } = gesture.owner else {
+        // When: local selection owns the gesture, current parser/modifier state cannot steal it.
+        return PointerMotionRoute::Local;
+    };
+    if let Some(cell) = cell.filter(|cell| cell.pane_id == gesture.press_pane) {
+        gesture.last_cell = cell;
+    }
+    if tracking == MouseTracking::Button {
+        // When: Button mode reports transitions only, suppress held motion.
+        return PointerMotionRoute::None;
+    }
+    PointerMotionRoute::Report {
+        pane_id: gesture.press_pane,
+        sgr,
+        row: gesture.last_cell.row,
+        col: gesture.last_cell.col,
+        modifiers,
+    }
+}
+
+/// Build live no-button motion only for the current pane's AnyMotion mode.
+pub(super) fn no_button_motion_report(
+    cell: PointerCell,
+    tracking: MouseTracking,
+    sgr: bool,
+    modifiers: ModifiersState,
+) -> Option<PointerMotionRoute> {
+    (tracking == MouseTracking::AnyMotion).then_some(PointerMotionRoute::Report {
+        pane_id: cell.pane_id,
+        sgr,
+        row: cell.row,
+        col: cell.col,
+        modifiers,
+    })
+}
+
+/// Consume a left-button gesture and return its terminal release route, if any.
+pub(super) fn take_pointer_release(
+    gesture: &mut Option<PointerGesture>,
+    modifiers: ModifiersState,
+) -> Option<PointerMotionRoute> {
+    let gesture = gesture.take()?;
+    let PointerGestureOwner::Terminal { sgr, .. } = gesture.owner else {
+        // When: local selection owns the gesture, release stays entirely local.
+        return None;
+    };
+    Some(PointerMotionRoute::Report {
+        pane_id: gesture.press_pane,
+        sgr,
+        row: gesture.last_cell.row,
+        col: gesture.last_cell.col,
+        modifiers,
+    })
+}
+
+/// Clear a gesture whose release can no longer arrive.
+pub(super) fn cancel_pointer_gesture(gesture: &mut Option<PointerGesture>) -> bool {
+    gesture.take().is_some()
+}
+
+/// Convert a pure pointer route into one pane-targeted protocol payload.
+pub(super) fn pointer_route_bytes(
+    route: PointerMotionRoute,
+    kind: PointerReportKind,
+) -> Option<(u64, Vec<u8>)> {
+    let PointerMotionRoute::Report { pane_id, sgr, row, col, modifiers } = route else {
+        // When: local ownership or a suppressed motion produced no terminal report.
+        return None;
+    };
+    Some((pane_id, pointer_report_bytes(sgr, kind, modifiers, row, col)))
+}
+
+/// Snapshot the terminal's tracking mode and SGR/legacy encoding profile.
+pub(super) fn parser_mouse_profile(parser: &sonicterm_vt::vt::Parser) -> (MouseTracking, bool) {
+    (parser.mouse_tracking(), parser.mouse_sgr_enabled())
+}
 
 /// Encode `count` mouse-wheel reports for an app that has mouse tracking on.
 /// Wheel buttons per xterm: 64 = up, 65 = down (press only, no release).
@@ -904,6 +1068,8 @@ impl App {
                         // resume on the next stray cursor move.
                         ws.scrollbar_drag = None;
                         ws.splitter_drag = None;
+                        ws.pointer_gesture = None;
+                        ws.mouse_down = false;
                     }
                 }
                 // Propagate window focus to the renderer so the text cursor
@@ -1086,10 +1252,10 @@ impl App {
                 // When: WindowEvent::CursorMoved supplies position, update pointer interaction.
 
                 // CursorMoved refreshes pointer-driven overlays, drags, selection, and cross-window targets.
+                let (lx, ly) = (position.x as f32, position.y as f32);
                 if let Some(ws) = self.main_mut() {
                     ws.cursor_pos = (position.x, position.y);
                 }
-                let (lx, ly) = (position.x as f32, position.y as f32);
                 // Notify the reducer so last_mouse_pos tracks the cursor; its
                 // identity check implicitly coalesces sub-pixel jitter
                 // bursts into a single Render(Hover) per frame.
@@ -1198,7 +1364,34 @@ impl App {
                     return;
                 }
                 if self.main().map(|ws| ws.mouse_down).unwrap_or(false) {
-                    // When: mouse_down is true, apply scrollbar or text-selection drag semantics.
+                    // When: mouse_down is true, apply scrollbar, terminal, or text-selection drag semantics.
+
+                    let cell = self
+                        .main_renderer()
+                        .and_then(|r| r.pixel_to_pane_cell(lx, ly))
+                        .map(|(pane_id, row, col)| PointerCell { pane_id, row, col });
+                    let gesture_route = self.main_mut().and_then(|ws| {
+                        let modifiers = ws.modifiers;
+                        ws.pointer_gesture
+                            .as_mut()
+                            .map(|gesture| route_pressed_pointer_motion(gesture, cell, modifiers))
+                    });
+                    if let Some(route) = gesture_route {
+                        // When: a grid gesture is latched, its press-time owner wins
+                        // before the local scrollbar/selection continuation paths.
+                        match route {
+                            PointerMotionRoute::Local => {}
+                            PointerMotionRoute::None => return,
+                            report @ PointerMotionRoute::Report { .. } => {
+                                if let Some((pane_id, bytes)) =
+                                    pointer_route_bytes(report, PointerReportKind::HeldLeftMotion)
+                                {
+                                    self.write_to_pane(pane_id, bytes);
+                                }
+                                return;
+                            }
+                        }
+                    }
 
                     // scrollbar drag takes priority over
                     // selection extension while a thumb is held. Match
@@ -1334,18 +1527,54 @@ impl App {
                         }
                     }
                 } else {
-                    // When: mouse_down is false, update hover affordances instead of drag state.
+                    // When: mouse_down is false, update SonicTerm hover owners before terminal motion.
 
                     // Hover-without-button: recompute the OSC8/auto-URL
                     // hover state. Auto-detected URLs are gated on the
                     // platform open-URL modifier (Cmd / Ctrl) per the
                     // v1.0 Cmd-held-hover affordance; OSC 8 keeps its
                     // unconditional pointer affordance.
-                    if !self.refresh_splitter_hover(lx, ly) {
+                    let splitter_hover = self.refresh_splitter_hover(lx, ly);
+                    if !splitter_hover {
                         self.refresh_hovered_url();
                     } else if let Some(window_id) = self.main_window_id {
                         // When: splitter hover owns the pointer in `window_id`, clear any terminal target beneath it.
                         self.clear_target_hover(window_id);
+                    }
+                    let scrollbar_hover = self.main().is_some_and(|ws| {
+                        ws.scrollbar_vis.values().any(|state| state.mouse_near_right_edge)
+                    });
+                    let target_hover =
+                        self.main().is_some_and(|ws| ws.hovered_url.is_some() || ws.hover_link);
+                    let ui_consumed_motion = splitter_hover || scrollbar_hover || target_hover;
+                    if !ui_consumed_motion {
+                        let pointer_cell = self
+                            .main_renderer()
+                            .and_then(|r| r.pixel_to_pane_cell(lx, ly))
+                            .map(|(pane_id, row, col)| PointerCell { pane_id, row, col });
+                        let pointer_profile = pointer_cell.and_then(|cell| {
+                            self.main().and_then(|ws| ws.panes.get(&cell.pane_id)).map(|pane| {
+                                let parser = pane.parser.lock();
+                                let (tracking, sgr) = parser_mouse_profile(&parser);
+                                (cell, tracking, sgr)
+                            })
+                        });
+                        if let Some((cell, tracking, sgr)) = pointer_profile {
+                            // The parser snapshot ends before the bounded PTY effect path.
+                            let modifiers = self
+                                .main()
+                                .map(|ws| ws.modifiers)
+                                .unwrap_or_else(ModifiersState::empty);
+                            if let Some(route) =
+                                no_button_motion_report(cell, tracking, sgr, modifiers)
+                            {
+                                if let Some((pane_id, bytes)) =
+                                    pointer_route_bytes(route, PointerReportKind::NoButtonMotion)
+                                {
+                                    self.write_to_pane(pane_id, bytes);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1398,19 +1627,18 @@ impl App {
                         // the lock, then DROP it before any PTY write
                         // (CLAUDE.md §4).
                         let cell = self.main_renderer().and_then(|r| r.pixel_to_cell(lx, ly));
-                        let (is_alt, tracking_on, sgr, app_cursor) = self
+                        let (is_alt, tracking, sgr, app_cursor) = self
                             .main()
                             .and_then(|ws| ws.panes.get(&pane_id))
                             .map(|pane| {
                                 let parser = pane.parser.lock();
                                 let is_alt = parser.grid().is_alt();
-                                let tracking_on = parser.mouse_tracking_enabled();
-                                let sgr = parser.mouse_sgr_enabled();
+                                let (tracking, sgr) = parser_mouse_profile(&parser);
                                 let app_cursor = parser.application_cursor_keys();
-                                (is_alt, tracking_on, sgr, app_cursor)
+                                (is_alt, tracking, sgr, app_cursor)
                             })
-                            .unwrap_or((false, false, false, false));
-                        if is_alt && tracking_on {
+                            .unwrap_or((false, MouseTracking::Off, false, false));
+                        if is_alt && tracking != MouseTracking::Off {
                             // Alternate-screen mouse tracking encodes wheel reports for the PTY.
                             // App wants mouse events: emit one wheel report per
                             // line of motion at the cell under the cursor.
@@ -1429,7 +1657,7 @@ impl App {
                                 }
                             }
                         } else if is_alt {
-                            // When: is_alt is true without tracking_on, translate wheel motion to arrows.
+                            // When: is_alt is true with tracking Off, translate wheel motion to arrows.
 
                             // Build the arrow sequence: ESC O A/B in
                             // application-cursor-keys mode, else ESC [ A/B.
@@ -1495,6 +1723,7 @@ impl App {
                         }
                         if let Some(ws) = self.main_mut() {
                             ws.mouse_down = true;
+                            ws.pointer_gesture = None;
                         }
                         // re-arm the OS-drag
                         // handoff gate so the CursorMoved threshold check
@@ -1684,6 +1913,62 @@ impl App {
                                     }
                                     return;
                                 }
+                                let pointer_cell =
+                                    clicked_pane.map(|pane_id| PointerCell { pane_id, row, col });
+                                if let Some(cell) = pointer_cell {
+                                    let profile = self
+                                        .main()
+                                        .and_then(|ws| ws.panes.get(&cell.pane_id))
+                                        .map(|pane| {
+                                            let parser = pane.parser.lock();
+                                            parser_mouse_profile(&parser)
+                                        })
+                                        .unwrap_or((MouseTracking::Off, false));
+                                    let modifiers = self
+                                        .main()
+                                        .map(|ws| ws.modifiers)
+                                        .unwrap_or_else(ModifiersState::empty);
+                                    let gesture = begin_pointer_gesture(
+                                        cell, profile.0, profile.1, modifiers, false,
+                                    );
+                                    let terminal_press = gesture.and_then(|gesture| {
+                                        let PointerGestureOwner::Terminal { sgr, .. } =
+                                            gesture.owner
+                                        else {
+                                            // When: local selection owns this press,
+                                            // preserve the existing selection path.
+                                            return None;
+                                        };
+                                        Some((
+                                            gesture,
+                                            pointer_report_bytes(
+                                                sgr,
+                                                PointerReportKind::LeftPress,
+                                                modifiers,
+                                                row,
+                                                col,
+                                            ),
+                                        ))
+                                    });
+                                    if let Some((gesture, bytes)) = terminal_press {
+                                        // Focus was already resolved before terminal routing;
+                                        // latch and enqueue only after every parser guard ended.
+                                        if let Some(ws) = self.main_mut() {
+                                            ws.pointer_gesture = Some(gesture);
+                                            ws.selection = None;
+                                        }
+                                        self.write_to_pane(cell.pane_id, bytes);
+                                        if let Some(change) = pane_focus_change {
+                                            if let Some(window) = self.main_mut() {
+                                                window.finish_pane_focus_change(change);
+                                            }
+                                        }
+                                        return;
+                                    }
+                                    if let Some(ws) = self.main_mut() {
+                                        ws.pointer_gesture = gesture;
+                                    }
+                                }
                                 // Multi-click selection: 1 = point, 2 = word,
                                 // 3 = line. Record the click against the main
                                 // window's streak state, then build the right
@@ -1759,6 +2044,36 @@ impl App {
                                 mods: sonicterm_types::ModKey::empty(),
                                 pos: sonicterm_app_core::LogicalPos { x: lx as f64, y: ly as f64 },
                             });
+                        }
+                        let (terminal_owned, pointer_release) = self
+                            .main_mut()
+                            .map(|ws| {
+                                let terminal_owned = matches!(
+                                    ws.pointer_gesture.as_ref().map(|gesture| gesture.owner),
+                                    Some(PointerGestureOwner::Terminal { .. })
+                                );
+                                let modifiers = ws.modifiers;
+                                let release =
+                                    take_pointer_release(&mut ws.pointer_gesture, modifiers);
+                                (terminal_owned, release)
+                            })
+                            .unwrap_or((false, None));
+                        // Clear before enqueue: saturation or disconnect must not
+                        // leave the completed gesture latched for a later event.
+                        if let Some(route) = pointer_release {
+                            if let Some((pane_id, bytes)) =
+                                pointer_route_bytes(route, PointerReportKind::LeftRelease)
+                            {
+                                self.write_to_pane(pane_id, bytes);
+                            }
+                        }
+                        if terminal_owned {
+                            // When: the terminal owned this gesture, release does
+                            // not run selection, tab-drag, or chrome cleanup paths.
+                            if let Some(ws) = self.main_mut() {
+                                ws.mouse_down = false;
+                            }
+                            return;
                         }
                         // end any active scrollbar drag — do this
                         // unconditionally on release so a drag that ended
