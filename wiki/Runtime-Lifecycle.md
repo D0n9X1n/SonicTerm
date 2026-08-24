@@ -2,742 +2,874 @@
 
 ## English
 
-This page follows SonicTerm from process start to process exit. For terminal
-bytes and rendering internals, continue with [Terminal IO and VT](Terminal-IO-and-VT)
-and [Rendering and Fonts](Rendering-and-Fonts).
+This page owns runtime ownership and state changes, from process startup to
+process exit. See [Architecture](Architecture) for crate boundaries,
+[From Keypress to Pixel](From-Keypress-to-Pixel) for the byte-to-frame path, and
+[Architecture Internals](Architecture-Internals) for load-bearing checks.
 
-## Startup sequence
+### Process startup
 
 ```mermaid
 flowchart TD
-    main["main()"]
-    trace["install panic and exit tracing"]
-    cfg["load sonicterm.toml (collect warnings)"]
-    log["initialize logging with [logging]"]
-    theme["load theme and keymap"]
-    asm["create AppStateMachine"]
-    shell["build MacShell, WindowsShell, or LinuxShell"]
-    loop["create winit EventLoop&lt;UserEvent&gt;"]
-    app["create App and run ApplicationHandler"]
-    resumed["resumed: create first native window and GpuRenderer"]
-    pane(["create first tab and spawn its PTY pane"])
+    platform["platform preflight"]
+    diagnostics["panic hook, exit trace, session marker, breadcrumbs"]
+    config["load sonicterm.toml<br/>collect fallback warnings"]
+    logging["initialize [logging]<br/>replay warnings"]
+    assets["load theme, keymap, packaged fonts"]
+    machine["create AppStateMachine"]
+    shell["create platform Shell"]
+    loop["ShellRunner creates EventLoop&lt;UserEvent&gt;"]
+    app["create App and install bridges"]
+    resumed["resumed callback"]
+    window["create native window + GpuRenderer"]
+    pane["seed startup tabs and PTY panes"]
 
-    main --> trace
-    trace --> cfg
-    cfg --> log
-    log --> theme
-    theme --> asm
-    asm --> shell
-    shell --> loop
-    loop --> app
-    app --> resumed
-    resumed --> pane
+    platform --> diagnostics --> config --> logging --> assets --> machine --> shell
+    shell --> loop --> app --> resumed --> window --> pane
 ```
 
-All three platform binaries install panic/exit diagnostics before normal
-startup work, then defer the tracing subscriber until after the user logging
-config has been read. Loading failures can therefore be surfaced without
-permanently locking in the wrong log level.
+macOS and Linux install panic and exit diagnostics before config loading.
+Windows first sets per-monitor-v2 DPI awareness, parses CLI options, and queues
+a startup script request. `--refresh-shell-associations` returns before the
+normal diagnostics path. Other Windows startup continues with the same panic,
+exit, session, breadcrumb, config, and logging setup.
 
-Windows sets per-monitor-v2 DPI awareness before winit creates an HWND and may
-accept a private `--tear-out-payload` used for cross-process tab drag. macOS
-disables AppKit automatic window tabbing before the event loop starts.
+A missing or invalid startup config falls back to defaults and records a
+warning. The binaries delay logging initialization until after `[logging]` is
+available, then replay collected warnings. Logging initialization itself is
+best-effort.
 
-## Shell construction
+All three binaries arm a session marker before normal application work. They
+associate crash artifacts with that session and start a non-blocking breadcrumb
+writer when available. An orderly return records `CleanShutdown`, flushes the
+writer, and marks the session clean.
 
-`MacShell`, `WindowsShell`, and `LinuxShell` are thin builders around one shared
-platform-neutral runner. They supply the platform hooks that exist for:
+Platform startup adds these steps:
 
-- native menus;
-- window-ready work that requires a real native window;
-- OS drag/drop handoff;
-- theme/keymap asset loader closures;
-- an optional pending tab payload.
+- macOS disables AppKit automatic window tabbing before any SonicTerm window.
+  It installs the native menu from the first `resumed` callback and applies
+  `setTabbingMode: 2` after each native window exists.
+- Windows initializes OLE on the UI thread. DWM backdrop and the `muda` menu are
+  installed after an HWND exists. Native tab drag registration uses the same
+  UI thread.
+- Linux forces unsupported material backdrops to opaque and preflights all four
+  packaged Rec Mono font faces. `--runtime-smoke` uses an isolated state
+  directory and a 30-second watchdog.
 
-Linux leaves unsupported native menu, notification, and cross-process tab-drag
-hooks absent rather than blocking or panicking. `run()` creates
-`EventLoop<UserEvent>`, installs the available proxy bridges, constructs `App`,
-and calls `run_app`.
+The binaries load theme and keymap assets, create
+`AppStateMachine::new(AppState::default())`, build `MacShell`, `WindowsShell`, or
+`LinuxShell`, and call `run`.
 
-## Winit lifecycle
+### Shell and event-loop construction
 
-`App` implements `ApplicationHandler<UserEvent>`. Its callbacks delegate to
-small lifecycle methods:
+Each platform shell wraps one `ShellRunner`. The runner owns the state machine,
+theme, config, keymap, optional asset loaders, native drag hooks, startup
+payload, breadcrumb recorder, and one-shot native-window hooks.
 
-| Callback | Main responsibility |
+`ShellRunner::run`:
+
+1. calls idempotent tracing initialization;
+2. creates `EventLoop<UserEvent>` with `ControlFlow::Wait`;
+3. installs menu, OS-drag, and open-script proxy bridges;
+4. constructs `App` with the state machine and event-loop proxy;
+5. installs the optional hooks and backends;
+6. queues any startup tab payload;
+7. calls `run_app`.
+
+A startup tab payload cannot be installed before a `WindowState` exists.
+`new_tab_from_payload` therefore stores it in `pending_os_drag_payloads`.
+After `resumed` creates the default startup shell, the app drains that queue and
+creates an additional destination tab.
+
+`App` implements `ApplicationHandler<UserEvent>`:
+
+| Callback | Responsibility |
 | --- | --- |
-| `resumed` | create the first window, renderer, and first tab/pane |
-| `user_event` | menu, OS-drag, update, and typed redraw events |
-| `window_event` | keyboard, mouse, IME, resize, focus, redraw, and close |
-| `new_events` | wake scheduled redraws when `WaitUntil` expires |
-| `about_to_wait` | combine frame pacing, cursor blink, notifications, quit deadlines, and periodic resource-retention sampling |
-| `exiting` | record an orderly event-loop exit |
+| `resumed` | run the one-shot resumed hook; create the first native window, renderer, owner records, tabs, and panes |
+| `user_event` | handle typed redraw, menu, open-script, drag, update, process-exit, path-probe, input-rejection, and smoke events |
+| `window_event` | handle keyboard, mouse, IME, resize, focus, redraw, and close for one `WindowId` |
+| `new_events` | service `WaitUntil` deadlines and request deferred frames |
+| `about_to_wait` | drain pending exit; maintain warm windows; sample/reclaim memory; expire notifications; choose the next wait deadline |
+| `exiting` | record orderly event-loop exit |
 
-A load-bearing rule in `user_event` is that pending window creation is drained
-before pending OS-drag teardown. Otherwise a tab tear-out could clean up state
-before the destination window has entered the window map.
+After each `user_event`, pending window creation is drained before deferred
+OS-drag teardown. This order lets a `DroppedOnEmpty` tear-out install its new
+window before drag cleanup scans the live window map.
 
-## Window, tab, and pane ownership
+### First window and pane
+
+`do_resumed` first runs the one-shot `on_resumed` hook. It bounds the configured
+cell geometry, creates the native window, enables IME, applies the native
+background, and reads the monitor refresh period.
+
+Normal startup treats native window or renderer creation failure as fatal and
+panics because there is no terminal window in which to report the failure.
+Linux runtime smoke records `Display` or `Gpu` failure and exits instead.
+
+`GpuRenderer::new` creates or selects the shared wgpu context and builds the
+window-specific surface, retained frame, atlases, caches, and font stacks. The
+app resolves software-render degradation after the adapter is known and updates
+frame pacing.
+
+The app then:
+
+1. registers native drag hooks for the window;
+2. runs `on_window_ready` for platform work that needs a real handle;
+3. creates the main `WindowState`;
+4. inserts it with a `Window` resource owner;
+5. creates startup script tabs or one default shell tab;
+6. replays queued OS-drag payloads;
+7. records `Ready` breadcrumbs.
+
+### Window, tab, and pane ownership
+
+```mermaid
+flowchart TD
+    app["App"] --> windows["HashMap&lt;WindowId, WindowState&gt;"]
+    app --> process["ResourceGovernor Process owner"]
+    app --> machine["AppStateMachine"]
+    windows --> window["WindowState"]
+    window --> native["Arc&lt;Window&gt; + GpuRenderer"]
+    window --> tabs["TabBar + Vec&lt;TabState&gt;"]
+    window --> panes["HashMap&lt;PaneId, PaneState&gt;"]
+    window --> winowner["Window owner guard"]
+    tabs --> tab["TabState<br/>PaneTree + active pane + search + command"]
+    panes --> pane["PaneState"]
+    pane --> parser["Arc&lt;Mutex&lt;Parser&gt;&gt;<br/>Parser owns Grid"]
+    pane --> pty["Option&lt;PtyHandle&gt;"]
+    pane --> redraw["Arc&lt;Mutex&lt;Option&lt;WindowId&gt;&gt;&gt;"]
+    pane --> media["inline images + media charge"]
+    pane --> paneowner["AppPane owner + class charges"]
+```
+
+The main window is one entry in `App::windows`. `main_window_id` identifies it.
+Torn-out windows use the same `WindowState` type and the same event map.
+
+`TabBar` stores tab identity, title, order, and active index. The parallel
+`Vec<TabState>` stores one `PaneTree` per tab. Tree leaves are pane ids.
+`WindowState::panes` stores the live `PaneState` objects for every tab in that
+window.
+
+`PaneState` owns the parser and optional PTY handle. The parser owns the grid.
+The pane also owns terminal-mode atomics, command events, inline images, its
+shared redraw target, resource reservations, and owner guard.
+
+Process-wide state stays on `App`. This includes the command palette and its
+attached window, broadcast state, resource governor, state machine, warm-window
+pool, native drag backends, and event-loop scheduling flags.
+
+### Creating tabs and splits
+
+A main-window tab allocates a pane id, creates parser/grid state, attempts to
+spawn a PTY, starts worker threads on success, inserts one `Tab`, and inserts a
+single-leaf `PaneTree`. It immediately reconciles the new pane's `AppPane`
+owner.
+
+A main-window split creates another `PaneState`, replaces the active tree leaf
+with a horizontal or vertical split, focuses the new leaf, immediately
+reconciles its owner, resizes each visible grid and PTY to its own rectangle,
+flashes focus, and requests redraw.
+
+Child-window tab and split helpers perform the same pane, tree, resize, and
+redraw work. They do not call owner reconciliation at the insertion site. Those
+new panes remain ownerless until another reconciliation pass, normally the next
+30-second retention sample or another operation that invokes reconciliation.
+
+If PTY spawn fails, the pane remains in the topology with `pty: None`. It has a
+parser and grid but no reader, writer, VT worker, or child process.
+
+### Pane process exit
+
+A pane closes automatically only when its child has a known clean exit: status
+zero and no terminating signal. The VT worker classifies the exit and sends
+`UserEvent::PaneProcessExited { pane_id, was_clean }`.
+
+| Classification | Result |
+| --- | --- |
+| `Some(true)` | close the pane; close its tab if it was the sole leaf; close or hide the window according to normal empty-window policy |
+| `Some(false)` | keep the pane and its scrollback visible |
+| `None` | keep the pane and its scrollback visible |
+
+The worker, not the event loop, waits for exit status. PTY EOF and child status
+becoming observable are unordered. `observe_child_exit_cleanliness` polls for
+at most 250 ms with a 10 ms interval. It reports `None` on timeout or probe
+failure.
+
+Unix and Windows discover exit differently.
+
+On macOS and Linux, the PTY reader reaches EOF and drops the output sender. The
+VT worker sees channel disconnection. Its receive timeout is one hour, so an idle
+pane has no periodic exit poll.
+
+On Windows, the pane's own `HPCON` keeps the output channel open until
+`PtyHandle` drops. The VT worker polls `PtyChildExitProbe` every 500 ms. That is
+two wakeups per second per idle pane.
+
+Before reporting Unix exit, the probe uses `waitid(..., WNOWAIT)` and kills the
+child's process group/session descendants. It preserves status long enough to
+classify clean versus unclean exit.
+
+### Resource ownership and retention
+
+The GUI's live resource tree is:
 
 ```text
-App
-  windows: HashMap<WindowId, WindowState>
-    WindowState
-      native window + GpuRenderer
-      TabBar + Vec<TabState>
-        TabState
-          PaneTree
-          active pane id
-          per-tab search state
-      panes: HashMap<PaneId, PaneState>
-        PaneState
-          Parser/Grid behind Arc<Mutex<_>>
-          optional PtyHandle
-          redraw target WindowId
-          inline images and terminal mode atomics
+Process
+  Window
+    AppPane
 ```
 
-The main window is one entry in the same map as child windows. Accessors resolve
-`main_window_id`; child-window event handling uses the same underlying
-`WindowState` representation.
+`App` creates the `Process` root. Inserting a window creates its `Window`
+owner. Registering a window also reconciles panes already inside it. A failed
+window registration logs a warning and leaves the window usable, but the window
+and its panes stay outside hierarchy accounting for that window's lifetime.
 
-A new tab spawns one pane, adds a `Tab`, and creates a leaf `PaneTree`. Splitting
-spawns another pane and replaces the focused leaf with a horizontal or vertical
-split. The tree computes pane rectangles; every visible grid and PTY is resized
-to its allocated cell area.
+Pane owners use `PANE_COMMITTED_BUDGET_BYTES`, which is twice the sum of the
+charged seam caps. Process and window owners use tracking-only limits. The
+per-seam caps remain the real memory limits; the pane budget is a total-ledger
+backstop.
 
-## When a pane's shell exits
+`about_to_wait` calls `sample_pane_retention`. The first call samples
+immediately. Later calls run every 30 seconds. A dedicated memory deadline wakes
+an otherwise idle event loop. A memory-only wake does not request a frame.
 
-A pane whose child process ends closes **only if that child exited cleanly** —
-status zero, not killed by a signal. The pane's VT worker notices the exit,
-classifies it, and posts `PaneProcessExited` to the event loop:
+Each due pass runs in this order:
 
-| Child's exit | Pane and tab |
-| --- | --- |
-| Clean (status 0) | Pane closes. If it was the tab's only pane, the tab closes; if that was the window's last tab, the window goes with it. |
-| Non-zero status, or killed by a signal | Both stay open, with the shell's last output still on screen. |
-| Status could not be read | Both stay open. |
+1. cancel captures whose progress was unchanged for two consecutive samples;
+2. trim idle panes if process inline media exceeds 256 MiB;
+3. repair pane-owner parentage and register ownerless panes;
+4. measure each pane and resize its live charges;
+5. emit aggregate, pane, session, and renderer diagnostics when their log levels
+   are enabled;
+6. record non-blocking resource breadcrumbs when a recorder exists.
 
-Holding the pane open on an unclean exit is the point of the policy rather than
-a limitation of it: closing discards the scrollback, and the output of a shell
-that died badly is the part the user most needs to read. The third row follows
-the same reasoning — an unreadable status is uncertainty, and discarding a
-user's scrollback on our own uncertainty is the worse failure.
+Reclamation and charging are independent of log level. `measure_pane` uses
+`try_lock` for the parser and inline-image store. A contended pane is skipped and
+keeps its previous charge.
 
-Classification happens on the VT worker, not the event loop. EOF on the pty
-master and the child becoming reapable are unordered, so a single probe at EOF
-can read "still running" for a shell that has already gone; the worker waits
-briefly for the answer, which is work the event-loop thread must never do. Past
-that bound the exit is reported as unknown, and the pane stays open.
+Moving a pane between windows carries its old owner guard. Re-attribution finds
+that parent mismatch, clears the old charges, closes the old owner, and creates
+a new owner below the destination window. The new owner is recharged from a new
+measurement during the next charge pass. An eager transfer outside a due sample
+can therefore show zero ledger usage for that pane until the next 30-second
+pass.
 
-**How the worker learns of the exit differs by platform**, because only one of
-the two gets a signal for free:
+Renderer surfaces, glyph atlases, image atlases, and software frames are
+reported separately. They are not charged to this governor.
 
-| Platform | Signal | Idle cost |
-| --- | --- | --- |
-| macOS, Linux | The pty reader reaches EOF once the child's last slave fd closes, so the worker's output channel disconnects on its own. | None — an idle pane never wakes. |
-| Windows | The ConPTY master is held open by the pane's own PTY handle, whose `HPCON` is released only when that handle drops — which happens when the pane closes. The channel therefore never disconnects while the pane lives, so the worker polls the exit probe instead. | Two wakeups per second per idle pane. |
+Release order is leaf-first:
 
-The Windows column is not a missing optimization. Waiting for that channel
-would mean waiting for the pane to close in order to learn that it should
-close, so the poll is what makes the policy reachable there at all.
+1. drop or clear pane `CommittedReservation` values;
+2. drop the pane `OwnerGuard`;
+3. drop the window `OwnerGuard` after all pane guards.
 
-## Resource ownership and retention charging
+A governor owner refuses to close while it has charges or open children.
+`OwnerGuard::drop` logs a warning and leaves a refused record retained. It does
+not retry.
 
-Alongside the window/tab/pane tree, `App` holds a process-local **resource
-governor** from `sonicterm-resource` that tracks retained memory. The owner tree
-it instantiates mirrors the first two levels of the topology above:
+### Input and effect state changes
 
-```text
-Process (created with App)
-  Window   (one per live window)
-    AppPane (one per live pane)
-```
+Keyboard ownership and terminal-byte encoding are summarized in
+[From Keypress to Pixel](From-Keypress-to-Pixel). The key lifecycle is:
+local owner → keymap → `encode_key` → PTY intent/effect → bounded input queue.
 
-The resource contract also permits `AppPane -> LocalPty`, shared font/raster/
-atlas owners, and a mux branch, but nothing creates those today — they are
-reserved capacity, not live topology.
-
-The governor is an accounting layer, not a limiter. It is constructed with an
-unlimited process ceiling, and window owners are created with tracking-only
-limits; the per-seam caps described in [Logging](Logging) are what actually
-bound memory. Only the per-pane owner carries a budget, and that figure is
-derived from the seam caps and sits above them, so it acts as a tripwire for a
-seam that has stopped bounding rather than as a second limit.
-
-Renderer retention — glyph atlas and software frame — is measured and logged but
-is **not** charged to the governor; `sonicterm-gpu` has no dependency on the
-resource crate. A governor total is a total of what the app charges, not of what
-the process holds.
-
-Lifecycle:
-
-- **Startup.** `App` creates the governor and its immutable process root.
-- **Window registration.** A new window registers a `Window` owner and
-  immediately reconciles its panes, because a window arrives with panes already
-  populated. A window that fails to register keeps working, but is never
-  retried: reconcile skips a window that has no owner, so it and its panes stay
-  outside accounting for that window's life.
-- **Pane registration.** A pane gets its `AppPane` owner when it is created — a
-  new tab and a split each reconcile immediately rather than waiting for the
-  next sample — and panes migrated during tear-out are registered as part of
-  that migration. This happens at every log level.
-- **Charging.** The idle-wake path samples what each pane retains and moves that
-  pane's charges to match. Charges are resized in place rather than released and
-  re-taken, so the ledger never briefly reads zero for memory that is still
-  held. **This runs at every log level**, because charging is not a diagnostic:
-  it is what fills the ledger the per-pane budget is enforced against, and a
-  governor that only charged while someone was watching would apply no limit in
-  the sessions that ship. A pane whose parser lock is busy is skipped and keeps
-  its previous charge until the next pass.
-- **Migration.** Moving a pane between windows re-attributes its charges to the
-  destination window's owner, so a torn-out tab does not leave its memory
-  accounted to the window it left. Re-attribution runs in the same pass as
-  charging, at every log level.
-- **Release.** Charges are pane-owned RAII tokens, and teardown is two ordered
-  steps: the pane's charge tokens release first, then the owner guards close the
-  pane and window records. The order is load-bearing — closing an owner is
-  refused while it still holds charges, so `PaneState` declares `charges` before
-  `owner` and relies on Rust dropping fields in declaration order. A window
-  dropping does not itself free pane memory; its panes' charges release first,
-  and a leaked charge surfaces as a refused close rather than a silent
-  undercount.
-
-The retention log lines are the diagnostic half of this pass: setting the
-`memory` target to debug adds a `pane retention` line per pane and a
-`session retention` line per session, at most once every 30 seconds. Charging
-and re-attribution above run on that same 30-second cadence, whether or not the
-log lines are switched on — so a default session maintains the ledger without
-writing anything. Figures are therefore up to 30 seconds old; they back a
-tripwire and a growth curve, neither of which needs a fresher number. Neither
-half blocks the loop — a pane whose parser lock is contended is skipped rather
-than waited on.
-
-## Input routing order
-
-Keyboard input is handled in this order:
-
-1. quit confirmation chord;
-2. command palette editing;
-3. active IME composition;
-4. terminal search editing;
-5. READONLY/copy-mode handling;
-6. configured keymap actions;
-7. terminal byte encoding and PTY write.
-
-This order prevents search or IME text from leaking into the shell. In READONLY
-mode, disallowed actions are consumed rather than executed or forwarded.
-
-Key encoding reads terminal modes exposed by the active parser:
-
-- DECCKM selects SS3 versus CSI cursor-key sequences;
-- kitty keyboard flags select CSI-u encodings where needed;
-- ordinary text and unbound chords fall through to PTY bytes.
-
-If broadcast mode is active, bytes written by the source pane are copied to the
-calculated receiver panes after the source write.
-
-## Intent and effect dispatch
+`App::dispatch_intent` routes one `AppIntent` through
+`AppStateMachine::handle`. The reducer updates `AppState` and returns a stable
+class-sorted effect batch. `App::dispatch_effects` then crosses application
+boundaries.
 
 ```mermaid
 flowchart TD
-    input["input/lifecycle code"]
-    intent["App::dispatch_intent(AppIntent)"]
-    handle["AppStateMachine::handle"]
-    reducer["reducer updates mirror AppState"]
-    sort["stable effect-class sort"]
-    effects["App::dispatch_effects"]
-    boundary(["PTY / redraw / clipboard / URL / window / native boundary"])
+    source["input or lifecycle code"]
+    intent["AppIntent"]
+    machine["AppStateMachine::handle"]
+    state["update backend-free AppState"]
+    effects["stable class-sorted AppEffect batch"]
+    dispatch["App::dispatch_effects"]
+    boundary["PTY, redraw, clipboard, URL, window, menu, log"]
+    live["App / WindowState live mutation when required"]
 
-    input --> intent
-    intent --> handle
-    handle --> reducer
-    reducer --> sort
-    sort --> effects
-    effects --> boundary
+    source --> intent --> machine --> state --> effects --> dispatch --> boundary
+    source --> live
+    dispatch --> live
 ```
 
-Current implementation note: `sonicterm-app-core` mirrors many transitions, but
-`WindowState` and `PaneTree` remain authoritative for live topology. Some
-effects are therefore observability records while the existing app operation
-performs the real mutation.
+The two state domains are explicit. `AppState` is authoritative for values the
+reducer owns. `App` and `WindowState` are authoritative for live winit windows,
+`PaneTree`, parsers, renderers, and PTYs. Some effects perform work directly.
+Others record a reducer decision while the native path performs the mutation.
 
-## Redraw scheduling
+### Redraw and wait lifecycle
 
-PTY workers never redraw per byte. They accumulate output and flush a typed
-`UserEvent::RequestRedraw(WindowId)` after a byte threshold or short time
-threshold. The event-loop thread resolves the current window and invokes native
-`request_redraw`.
+A pane VT worker coalesces output and sends
+`UserEvent::RequestRedraw(WindowId)` after 128 KiB, 8 ms maximum age, or 3 ms of
+quiet. The event-loop thread resolves the current id. Transfer changes the
+shared redraw target, so the worker follows the pane.
 
-A redraw request may still be delayed to the next frame boundary when output is
-streaming. The effective period follows the monitor refresh rate on hardware,
-and uses lower software-render limits under software adapters. Cursor blinking,
-notification expiry, quit confirmation, and deferred redraws are folded into
-one `ControlFlow::WaitUntil` deadline rather than a permanent heartbeat.
+`RedrawRequested` can still be delayed to the next frame boundary. Hardware
+uses the monitor period. Resolved degradation uses 25 ms, or 83.333 ms during
+IME composition. Pure user input bypasses pacing on hardware; degradation can
+coalesce it.
 
-During `RedrawRequested`, the app attempts to lock every visible pane parser
-without blocking. One failed lock defers the complete frame. Successful guards
-supply all `PaneRender` inputs to the renderer.
+The event loop combines these deadlines into one `ControlFlow::WaitUntil`:
 
-## Config save and reload
+- pending main-window redraw;
+- pending child-window redraws;
+- cursor blink;
+- notification expiry;
+- five-second quit confirmation;
+- 30-second memory sampling.
 
-Configuration is read at startup and then only when the user runs **Reload
-Config** from the command palette (`Action::ReloadConfig`). There is no
-background watcher, so nothing re-reads the config on a timer, on a filesystem
-event, or during ordinary window events.
+The earliest deadline wins. With no deadline, `ControlFlow::Wait` parks the
+loop. A memory-only wake performs retention work without creating a heartbeat
+redraw.
 
-A reload re-parses `sonicterm.toml` and re-reads the theme and keymap files it
-names, then applies changes to all live windows and panes. Depending on the
-field, reload can update theme colors, key hints, padding, scrollback limits,
-cursor, renderer cache state, and the warm-window pool. Invalid input is
-reported rather than silently replacing the active config.
+Frame collection uses non-blocking parser and image locks. One unavailable lock
+defers the complete frame and arms another deadline. Successful guards remain
+alive through `GpuRenderer::render`.
 
-**Save Current Settings** (`Action::SaveCurrentSettings`) is deliberately
-narrower than reload. It patches only the current zoomed `[font].size` and active
-safe `[font].weight_scale` in `~/.sonicterm/sonicterm.toml`, preserving all
-unrelated known settings, unknown top-level and nested keys, comments, and
-supported order and formatting. Theme, locale, window/pane/tab state, and other
-runtime modes are untouched. Since the two values are already live, saving does
-not reload or reapply them.
+### Config reload and save
 
-If the config is missing, save first creates the commented starter file. It then
-writes a same-directory temporary file and atomically replaces the config without
-claiming power-loss durability. A malformed current config is refused. Success
-advances both font reset baselines and shows an Info
-confirmation; failure leaves the old file, live values, and baselines intact and
-shows Error.
+Configuration is loaded at startup and re-read only by
+`Action::ReloadConfig`. There is no filesystem watcher or periodic reload.
 
-## Tab drag and tear-out
+Reload strictly parses `sonicterm.toml`. A parse failure keeps the active config
+and writes a warning; it does not show a user notification. A successful base
+parse clears the warm-window pool, then applies the new settings to all live
+windows and panes.
 
-There are two related paths:
+Theme and keymap files are loaded separately. A theme or keymap load failure
+writes a warning and retains the previously loaded asset. Other valid config
+fields still apply, and the new base config becomes active. `[logging]` changes
+cannot replace the installed tracing subscriber; they take effect on the next
+process launch.
 
-- in-process dragging uses global screen rectangles to merge a tab into another
-  SonicTerm window;
-- OS handoff uses pasteboard payload polling on macOS (without a native
-  `NSDraggingSession`) and OLE drag/drop on Windows; either path can carry a
-  serialized payload to another process.
+Depending on changed fields, reload can:
 
-For an in-process transfer, the live tab state and every `PaneState` move. The
-PTY is not cloned or respawned. Each pane's shared redraw target is updated to
-the destination `WindowId`. Transfer validates source and destination before
-mutation because dropping a pane would terminate its child process.
+- update theme colors and parser palette replies;
+- rebuild fonts and resize grids and PTYs when metrics change;
+- update locale, cursor, padding, opacity, scrollbar, and panel layout;
+- switch resolved software-render policy and surface settings;
+- update scrollback, tab width, notification settings, and key hints;
+- clear and later rebuild the warm-window pool.
 
-A small pool of hidden, fully initialized child windows reduces tear-out
-latency. Consuming one schedules replenishment up to the configured cap.
+**Save Current Settings** writes only the live `[font].size` and effective
+`[font].weight_scale`. It does not save theme, locale, tabs, panes, or other
+runtime state. The values are already live, so save does not reload or reapply
+them.
 
-## Shutdown
+Save behavior is:
 
-Closing a pane drops its `PtyHandle`, which terminates and boundedly reaps the
-child. Closing a main window while child windows remain can hide the main window
-instead of exiting. When no active windows remain, `pending_exit` is consumed in
-`about_to_wait`, which calls `ActiveEventLoop::exit`.
+1. validate finite font size and `weight_scale` in `0.5..=5.0`;
+2. create the commented starter config if the file is absent;
+3. resolve a destination symlink;
+4. take an in-process path lock and a cross-process sidecar lock;
+5. strict-parse the current file and preserve LF or CRLF convention;
+6. patch only the two numeric values while preserving comments, unknown keys,
+   order, decoration, and permissions;
+7. write and `sync_all` a unique same-directory temporary file;
+8. reject an external edit detected before replacement;
+9. atomically rename or replace the destination.
 
-On macOS, `Cmd+Q` uses a two-press confirmation: the first non-repeat press shows
-“Press ⌘Q one more time to quit”; a second press within five seconds exits. The
-native menu's explicit Quit command can exit immediately.
+The operation does not claim directory-fsync or power-loss durability. Success
+updates both reset baselines and shows an Info notification. Failure leaves the
+file, live settings, and baselines unchanged and shows an Error notification.
 
-## Representative sequences
+### Tab movement and tear-out
 
-### New split
+In-process reorder, merge, and tear-out move live `Tab`, `TabState`, and
+`PaneState` values. `PtyHandle` is not cloned or respawned. Each successfully
+attached pane gets the destination `WindowId` in its shared redraw target.
 
-```mermaid
-flowchart TD
-    keymap["keymap split_right"]
-    action["run action for frontmost window"]
-    spawn["spawn new PTY + Parser/Grid + worker threads"]
-    split["PaneTree::split(active, Right, new_id)"]
-    resize["resize every visible pane/grid/PTY"]
-    focus["focus new leaf"]
-    redraw(["request redraw"])
+`transfer_tab` checks source bounds and destination-window existence before it
+detaches. That check does not prove a child destination has a renderer. If
+`attach_to_child` then refuses, the detached panes drop and their children
+terminate. Direct `merge_child_into_target` and `merge_main_into_child` also
+detach before attachment and have the same loss-on-failure behavior.
 
-    keymap --> action
-    action --> spawn
-    spawn --> split
-    split --> resize
-    resize --> focus
-    focus --> redraw
-```
+The hidden warm-window pool reduces tear-out latency:
 
-### PTY output
+- default target: 1;
+- zero disables the pool;
+- normal hardware target: at most 5;
+- an actual software adapter or resolved degradation caps every nonzero target
+  at 1.
 
-```mermaid
-flowchart TD
-    bytes["child bytes"]
-    chan["PTY reader channel"]
-    worker["VT worker"]
-    mutate["parser/grid mutation under lock"]
-    side["update mode/title/media side effects"]
-    release["release lock"]
-    coalesce["coalesced RequestRedraw(WindowId)"]
-    winit["winit thread"]
-    req["RedrawRequested"]
-    trylock["try_lock all panes"]
-    render(["render"])
+`about_to_wait` removes excess entries and creates at most one missing warm
+window per pass. Adoption is last-in, first-out. A consumed entry is replaced on
+a later idle pass. Warm windows stay outside `App::windows` and have no resource
+owner until promoted.
 
-    bytes --> chan
-    chan --> worker
-    worker --> mutate
-    mutate --> side
-    side --> release
-    release --> coalesce
-    coalesce --> winit
-    winit --> req
-    req --> trylock
-    trylock --> render
-```
+A fresh tear-out detaches the tab before creating its destination window. If
+native window creation, renderer initialization, or child-size validation then
+fails, the moved panes drop and their child processes terminate. There is no
+rollback to the source window.
 
-## Where to read the code
+Native drag support differs by platform:
 
-| Topic | Primary paths |
+- Windows OLE supports an in-process drag gesture and same-process drop routing.
+  A drop onto empty desktop becomes in-process tear-out.
+- macOS publishes a pasteboard payload but starts no `NSDraggingSession` and
+  receives no destination acknowledgment. The sink returns
+  `DragAck::NotAcknowledged`, so the source stays local and falls back to
+  in-process tear-out.
+- Linux installs no native drag backend. In-process window merge and tear-out
+  remain available.
+
+The startup CLI and pasteboard paths can seed a serialized payload when a new
+process launches. The Windows OLE destination currently parses an external
+payload but does not enqueue it into the app. The macOS gesture has no native
+destination acknowledgment. Native drag therefore does not complete an
+acknowledged cross-process transfer. A source tab is never detached solely on
+an unacknowledged payload publication.
+
+### Pane and window closure
+
+Closing a pane removes it from its `PaneTree` and pane map. Dropping its
+`PtyHandle` starts bounded I/O cancellation, child termination, native master
+close, and reap. Exact platform deadlines are in
+[Architecture Internals](Architecture-Internals).
+
+If a pane was the only leaf, closing it closes the tab. Child windows are reaped
+when their last tab closes. The main window can become hidden while child
+windows remain. Its `WindowState` remains the identified main entry until a
+later policy shows or replaces it.
+
+When an action sets `pending_exit`, `about_to_wait` clears it and calls
+`ActiveEventLoop::exit`. With no active terminal window, normal last-window
+policy also reaches this path.
+
+On macOS, the Cmd+Q chord uses a two-press guard. The first non-repeat press shows
+`Press ⌘Q one more time to quit`. A second press within five seconds exits.
+Auto-repeat is ignored. The explicit native Quit command can request exit
+without this key-chord guard.
+
+A queued redraw from a closed pane contains only `WindowId`. If that window
+still exists, it may request one harmless extra frame. If the id is stale, the
+event loop ignores it. The removed pane can no longer contribute `PaneRender`.
+
+### Clean process exit
+
+`run_app` returns after the event loop exits. The platform binary records a
+`CleanShutdown` breadcrumb only for an orderly result. It then shuts down the
+breadcrumb writer. After the writer flushes, it marks the armed session clean.
+
+If startup or runtime returns an error, the clean marker remains absent. Panic,
+exit, session-state, and breadcrumb records let the next launch classify the
+previous session.
+
+Linux runtime smoke maps each failed boundary to a stable nonzero exit code. An
+orderly smoke result also flushes breadcrumbs and marks its session clean.
+
+### Source map
+
+| Lifecycle | Primary paths |
 | --- | --- |
 | Platform startup | `crates/sonicterm-{mac,windows,linux}/src/main.rs` |
-| Shell builder | `crates/sonicterm-app/src/shell.rs` |
-| App and WindowState | `crates/sonicterm-app/src/app/mod.rs` |
-| Winit callbacks | `crates/sonicterm-app/src/app/{event_loop,window_event}.rs` |
-| Input actions/encoding | `crates/sonicterm-app/src/app/{keymap_dispatch,key_encoding}.rs` |
-| Pane spawning | `crates/sonicterm-app/src/app/spawn_pane.rs` |
-| Drag/transfer | `crates/sonicterm-app/src/app/{tear_out,tab_transfer,tab_state}.rs` |
-| Config save/reload | `crates/sonicterm-app/src/app/config_apply.rs` |
-| Reducer boundary | `crates/sonicterm-app-core/src/` |
+| Shell runner | `crates/sonicterm-app/src/shell.rs` |
+| Winit callbacks and waits | `crates/sonicterm-app/src/app/{event_loop,window_event}.rs` |
+| App, window, tab, and pane ownership | `crates/sonicterm-app/src/app/{mod,tab_state}.rs` |
+| Main and child pane creation | `crates/sonicterm-app/src/app/{spawn_pane,child_window,misc}.rs` |
+| Pane exit policy | `crates/sonicterm-app/src/app/pane_exit.rs` |
+| Resource charging | `crates/sonicterm-app/src/app/retention.rs` |
+| Config reload and save | `crates/sonicterm-app/src/app/config_apply.rs`, `crates/sonicterm-cfg/src/config.rs` |
+| Tab transfer and tear-out | `crates/sonicterm-app/src/app/{tab_transfer,tear_out,child_window}.rs` |
+| Native drag backends | `crates/sonicterm-{mac,windows}/src/{os_drag_*,tab_drag_os}.rs` |
+| PTY teardown | `crates/sonicterm-io/src/pty.rs` |
 
 ## 中文
 
-本页从进程启动一直跟踪到退出。终端字节和渲染细节分别见
-[终端 IO 与 VT](Terminal-IO-and-VT) 和 [渲染与字体](Rendering-and-Fonts)。
+本页只说明运行时所有权和状态变化，范围从进程启动到进程退出。crate 边界见
+[架构](Architecture)，字节到画面的路径见 [从按键到像素](From-Keypress-to-Pixel)，
+关键验证条件见 [架构内部机制](Architecture-Internals)。
 
-## 启动顺序
+### 进程启动
 
 ```mermaid
 flowchart TD
-    main["main()"]
-    trace["安装 panic 与退出追踪"]
-    cfg["读取 sonicterm.toml（收集 warning）"]
-    log["根据 [logging] 初始化日志"]
-    theme["读取主题和 keymap"]
-    asm["创建 AppStateMachine"]
-    shell["构建 MacShell、WindowsShell 或 LinuxShell"]
-    loop["创建 winit EventLoop&lt;UserEvent&gt;"]
-    app["创建 App 并运行 ApplicationHandler"]
-    resumed["resumed：创建首个原生窗口和 GpuRenderer"]
-    pane(["创建首个标签页并启动它的 PTY 窗格"])
+    platform["平台预检"]
+    diagnostics["panic hook、退出追踪、会话标记、面包屑"]
+    config["读取 sonicterm.toml<br/>收集回退 warning"]
+    logging["按 [logging] 初始化<br/>重新输出 warning"]
+    assets["读取主题、键位和包内字体"]
+    machine["创建 AppStateMachine"]
+    shell["创建平台 Shell"]
+    loop["ShellRunner 创建 EventLoop&lt;UserEvent&gt;"]
+    app["创建 App 并安装桥接"]
+    resumed["resumed 回调"]
+    window["创建原生窗口和 GpuRenderer"]
+    pane["建立启动标签页和 PTY 窗格"]
 
-    main --> trace
-    trace --> cfg
-    cfg --> log
-    log --> theme
-    theme --> asm
-    asm --> shell
-    shell --> loop
-    loop --> app
-    app --> resumed
-    resumed --> pane
+    platform --> diagnostics --> config --> logging --> assets --> machine --> shell
+    shell --> loop --> app --> resumed --> window --> pane
 ```
 
-三个平台二进制都会先安装 panic/退出诊断，再执行普通启动工作；tracing subscriber 则等到
-读取用户日志配置后才安装。这样既能暴露配置加载错误，又不会永久锁定错误日志级别。
+macOS 和 Linux 会在读取配置前安装 panic 与退出诊断。Windows 先设置 per-monitor-v2 DPI，
+解析命令行，并排队启动脚本请求。`--refresh-shell-associations` 会在普通诊断路径前直接返回。
+其它 Windows 启动路径随后执行相同的 panic、退出、会话、面包屑、配置和日志初始化。
 
-Windows 会在 winit 创建 HWND 前启用 per-monitor-v2 DPI awareness，并可接收内部
-`--tear-out-payload` 以支持跨进程标签页拖动。macOS 在事件循环启动前关闭 AppKit 自动窗口标签化。
+启动配置缺失或无效时，应用使用默认值并保存 warning。三个二进制都等拿到 `[logging]` 后
+才初始化日志，再输出此前收集的 warning。日志初始化本身采用尽力而为策略。
 
-## Shell 构建
+三个二进制都会在普通应用工作前建立会话标记。它们把崩溃产物关联到该会话，并在可用时启动
+非阻塞面包屑 writer。有序返回会记录 `CleanShutdown`，刷完 writer，再把会话标成干净。
 
-`MacShell`、`WindowsShell` 和 `LinuxShell` 是同一个平台中立 runner 外的轻量 builder。
-它们提供各平台实际存在的 hook：
+平台启动还会执行以下工作：
 
-- 原生菜单；
-- 只有真实原生窗口出现后才能执行的 window-ready 工作；
-- OS 拖放交接；
-- 主题与 keymap 资产加载闭包；
-- 可选的待接收标签页 payload。
+- macOS 在任何 SonicTerm 窗口出现前关闭 AppKit 自动标签页。第一次 `resumed` 回调安装原生
+  菜单；每个原生窗口出现后调用 `setTabbingMode: 2`。
+- Windows 在界面线程初始化 OLE。HWND 出现后才安装 DWM 背景和 `muda` 菜单。原生标签页
+  拖动注册也在同一界面线程完成。
+- Linux 把不支持的材质背景改为不透明，并预检四个包内 Rec Mono 字体文件。
+  `--runtime-smoke` 使用隔离状态目录和 30 秒看门狗。
 
-Linux 会让不支持的原生菜单、通知与跨进程 tab drag hook 保持缺席，而不是阻塞或 panic。
-`run()` 创建 `EventLoop<UserEvent>`，安装可用的 proxy bridge，构建 `App`，然后调用 `run_app`。
+三个二进制随后读取主题和键位，创建
+`AppStateMachine::new(AppState::default())`，构建 `MacShell`、`WindowsShell` 或
+`LinuxShell`，再调用 `run`。
 
-## Winit 生命周期
+### Shell 与事件循环构建
+
+每个平台 shell 都包装同一个 `ShellRunner`。runner 持有状态机、主题、配置、键位、可选资源
+加载器、原生拖动钩子、启动 payload、面包屑 recorder 和一次性原生窗口钩子。
+
+`ShellRunner::run` 依次：
+
+1. 执行可重复调用的 tracing 初始化；
+2. 创建 `EventLoop<UserEvent>`，初始 `ControlFlow::Wait`；
+3. 安装菜单、OS 拖动和脚本打开代理桥；
+4. 用状态机和事件循环代理构建 `App`；
+5. 安装可选钩子与平台后端；
+6. 排队启动标签页 payload；
+7. 调用 `run_app`。
+
+启动 payload 到达时如果还没有 `WindowState`，就不能直接建立标签页。
+`new_tab_from_payload` 会把它存入 `pending_os_drag_payloads`。`resumed` 先创建默认 shell，
+随后再清空该队列，建立额外的目标标签页。
 
 `App` 实现 `ApplicationHandler<UserEvent>`：
 
-| 回调 | 主要职责 |
+| 回调 | 职责 |
 | --- | --- |
-| `resumed` | 创建首个窗口、renderer 和首个标签页/窗格 |
-| `user_event` | 菜单、OS 拖动、更新和类型化重绘事件 |
-| `window_event` | 键盘、鼠标、IME、resize、focus、redraw 和 close |
-| `new_events` | `WaitUntil` 到期时唤醒计划重绘 |
-| `about_to_wait` | 合并帧节奏、光标闪烁、通知、退出 deadline 和周期性资源占用采样 |
-| `exiting` | 记录有序事件循环退出 |
+| `resumed` | 运行一次性 resumed 钩子；创建首个原生窗口、渲染器、所有者记录、标签页和窗格 |
+| `user_event` | 处理类型化重绘、菜单、脚本打开、拖动、更新、进程退出、路径探测、输入拒绝和冒烟事件 |
+| `window_event` | 按 `WindowId` 处理键盘、鼠标、输入法、尺寸、焦点、重绘和关闭 |
+| `new_events` | 处理 `WaitUntil` 到期，并请求延迟帧 |
+| `about_to_wait` | 消费待退出状态；维护预热窗口；采样和回收内存；让通知过期；选择下一次唤醒期限 |
+| `exiting` | 记录事件循环有序退出 |
 
-`user_event` 中一个关键顺序是：先排空待创建窗口，再清理待处理 OS 拖动状态，否则标签页拖出时，
-目标窗口还没进入窗口 map，旧状态就可能先被清理。
+每个 `user_event` 处理完后，代码会先创建待处理窗口，再执行延迟的 OS 拖动清理。这样
+`DroppedOnEmpty` 拆出路径能先把新窗口放进存活窗口表，拖动清理随后再遍历该表。
 
-## 窗口、标签页和窗格所有权
+### 首个窗口与窗格
+
+`do_resumed` 先运行一次性 `on_resumed` 钩子。随后限制配置的单元格几何，创建原生窗口，
+开启输入法，设置原生背景，并读取显示器刷新周期。
+
+普通启动中，原生窗口或渲染器创建失败会 panic。此时没有终端窗口可以显示错误，因此该失败
+不可继续。Linux 运行冒烟测试则记录 `Display` 或 `Gpu` 失败后退出。
+
+`GpuRenderer::new` 创建或选择共享 wgpu 上下文，再建立窗口专用表面、保留帧、图集、缓存和
+字体栈。适配器确定后，应用才解析软件渲染降级状态并更新帧节奏。
+
+随后应用：
+
+1. 为窗口注册原生拖动钩子；
+2. 运行需要真实窗口句柄的 `on_window_ready`；
+3. 创建主 `WindowState`；
+4. 连同 `Window` 资源所有者一起插入；
+5. 建立启动脚本标签页，或一个默认 shell 标签页；
+6. 重放排队的 OS 拖动 payload；
+7. 记录 `Ready` 面包屑。
+
+### 窗口、标签页与窗格所有权
+
+```mermaid
+flowchart TD
+    app["App"] --> windows["HashMap&lt;WindowId, WindowState&gt;"]
+    app --> process["ResourceGovernor Process 所有者"]
+    app --> machine["AppStateMachine"]
+    windows --> window["WindowState"]
+    window --> native["Arc&lt;Window&gt; + GpuRenderer"]
+    window --> tabs["TabBar + Vec&lt;TabState&gt;"]
+    window --> panes["HashMap&lt;PaneId, PaneState&gt;"]
+    window --> winowner["Window 所有者保护对象"]
+    tabs --> tab["TabState<br/>PaneTree + 活动窗格 + 搜索 + 命令"]
+    panes --> pane["PaneState"]
+    pane --> parser["Arc&lt;Mutex&lt;Parser&gt;&gt;<br/>Parser 持有 Grid"]
+    pane --> pty["Option&lt;PtyHandle&gt;"]
+    pane --> redraw["Arc&lt;Mutex&lt;Option&lt;WindowId&gt;&gt;&gt;"]
+    pane --> media["内联图像 + 媒体计费"]
+    pane --> paneowner["AppPane 所有者 + 分类计费"]
+```
+
+主窗口是 `App::windows` 中的普通条目，由 `main_window_id` 标识。拆出窗口使用同一种
+`WindowState`，并进入同一事件表。
+
+`TabBar` 保存标签页身份、标题、顺序和活动下标。与之平行的 `Vec<TabState>` 为每个标签页
+保存一棵 `PaneTree`。树叶是窗格编号。`WindowState::panes` 保存该窗口全部标签页中的
+存活 `PaneState`。
+
+`PaneState` 持有解析器和可选 PTY 句柄。网格由解析器持有。窗格还持有终端模式原子值、命令
+事件、内联图像、共享重绘目标、资源预留和所有者保护对象。
+
+进程级状态保存在 `App`。其中包括命令面板及其所在窗口、广播状态、资源总账、状态机、预热
+窗口池、原生拖动后端和事件循环调度标志。
+
+### 创建标签页与分屏
+
+主窗口新标签页会分配窗格编号，创建解析器和网格，尝试启动 PTY，成功时启动工作线程，
+插入一个 `Tab`，并插入单叶 `PaneTree`。随后立即协调新窗格的 `AppPane` 所有者。
+
+主窗口分屏会创建另一个 `PaneState`，把活动树叶替换为横向或纵向分支，聚焦新树叶，立即
+协调其所有者，按各自矩形调整每个可见网格和 PTY，显示焦点闪烁，并请求重绘。
+
+子窗口的新标签页和分屏辅助函数也会创建窗格、修改树、调整尺寸并重绘，但插入位置没有调用
+所有者协调。这些新窗格会暂时没有所有者，直到其它协调过程运行，通常是下一次 30 秒常驻
+内存采样，或者另一个会触发协调的操作。
+
+PTY 启动失败时，窗格仍留在拓扑中，`pty: None`。它有解析器和网格，但没有 reader、writer、
+VT 工作线程或子进程。
+
+### 窗格进程退出
+
+只有子进程被确认干净退出时，窗格才会自动关闭：退出码为零，且没有终止信号。VT 工作线程
+负责分类，并发送 `UserEvent::PaneProcessExited { pane_id, was_clean }`。
+
+| 分类 | 结果 |
+| --- | --- |
+| `Some(true)` | 关闭窗格；若它是唯一树叶，则关闭标签页；再按普通空窗口策略关闭或隐藏窗口 |
+| `Some(false)` | 保留窗格和回滚历史 |
+| `None` | 保留窗格和回滚历史 |
+
+等待退出状态的是工作线程，不是事件循环。PTY EOF 与子进程状态可见之间没有固定顺序。
+`observe_child_exit_cleanliness` 最多等待 250 ms，每 10 ms 探测一次。超时或探测失败时返回
+`None`。
+
+Unix 与 Windows 的退出发现路径不同。
+
+macOS 和 Linux 的 PTY reader 读到 EOF 后会丢弃输出 sender，VT 工作线程随即看到通道
+断开。receive timeout 为一小时，因此空闲窗格没有周期退出轮询。
+
+Windows 窗格自己的 `HPCON` 会让输出通道保持打开，直到 `PtyHandle` 析构。VT 工作线程
+每 500 ms 轮询一次 `PtyChildExitProbe`，即每个空闲窗格每秒唤醒两次。
+
+Unix 上报退出前，探针使用 `waitid(..., WNOWAIT)`，并杀死子进程组和同会话后代。这样既能
+保留状态用于判断干净或异常退出，又不会让后台后代继续存活。
+
+### 资源所有权与常驻内存
+
+图形界面的实际资源树如下：
 
 ```text
-App
-  windows: HashMap<WindowId, WindowState>
-    WindowState
-      原生窗口 + GpuRenderer
-      TabBar + Vec<TabState>
-        TabState
-          PaneTree
-          活动窗格 id
-          每标签页搜索状态
-      panes: HashMap<PaneId, PaneState>
-        PaneState
-          Arc<Mutex<_>> 内的 Parser/Grid
-          可选 PtyHandle
-          重绘目标 WindowId
-          内联图像和终端模式原子值
+Process
+  Window
+    AppPane
 ```
 
-主窗口也是该 map 中的一项，由 `main_window_id` 定位。子窗口事件处理使用同一种
-`WindowState` 表示。
+`App` 创建 `Process` 根。插入窗口时创建其 `Window` 所有者。注册窗口也会协调已经在窗口中的
+窗格。窗口所有者注册失败时会记录 warning，但窗口仍可使用；该窗口及其窗格在剩余寿命内都
+不会进入层级记账。
 
-新标签页会启动一个窗格、添加 `Tab`，并创建单叶 `PaneTree`。分屏会启动另一个窗格，
-把当前叶节点替换为横向或纵向 split。树计算窗格矩形，每个可见 grid 和 PTY 随其单元格区域 resize。
+窗格所有者使用 `PANE_COMMITTED_BUDGET_BYTES`，即已计费接缝上限总和的两倍。进程和窗口
+所有者只跟踪数据。各接缝上限仍是真正内存限制；窗格预算只是总账警戒线。
 
-## 窗格 shell 退出时
+`about_to_wait` 调用 `sample_pane_retention`。第一次调用立即采样，之后每 30 秒一次。专用
+内存期限会唤醒完全空闲的事件循环。只由内存期限触发的唤醒不会请求新帧。
 
-子进程结束的窗格**只在该子进程干净退出时**关闭——退出码为 0，且不是被信号杀死。
-窗格的 VT worker 发现该退出后对其做出判定，并向事件循环投递
-`PaneProcessExited`：
+每次到期后按以下顺序执行：
 
-| 子进程退出方式 | 窗格与标签页 |
-| --- | --- |
-| 干净退出（退出码 0） | 关闭窗格。若它是该标签页唯一的窗格，标签页一并关闭；若那是窗口最后一个标签页，窗口也随之关闭。 |
-| 非零退出码，或被信号杀死 | 两者都保留，shell 最后的输出仍留在屏幕上。 |
-| 无法读到退出状态 | 两者都保留。 |
+1. 取消连续两次采样都没有推进的捕获；
+2. 进程内联媒体超过 256 MiB 时，清理空闲窗格；
+3. 修复窗格所有者父级，并注册没有所有者的窗格；
+4. 测量每个窗格，并原地调整存活计费；
+5. 日志级别允许时，输出合计、窗格、会话和渲染器诊断；
+6. recorder 可用时，写入非阻塞资源面包屑。
 
-非干净退出时保留窗格是该策略的目的，而不是它的局限：关闭会丢弃 scrollback，
-而异常终止的 shell 的输出恰恰是用户最需要阅读的部分。第三行出于同样的理由——
-读不到状态属于不确定，而因我们自己的不确定去丢弃用户的 scrollback 是更严重的失败。
+回收和计费不受日志级别控制。`measure_pane` 对解析器和内联图像存储使用 `try_lock`。
+锁竞争的窗格会被跳过，并保留上次计费值。
 
-判定发生在 VT worker 上，而不是事件循环。pty master 的 EOF 与子进程变为可回收
-之间没有先后关系，因此仅在 EOF 处探测一次，可能把已经结束的 shell 读成"仍在运行"；
-worker 会为此短暂等待，而这类等待绝不能放在事件循环线程上。超过该时限后退出被
-报告为未知，窗格保持打开。
+窗格跨窗口移动时会带着原所有者保护对象。重新归属过程发现父级不匹配后，会清空旧计费，
+关闭旧所有者，并在目标窗口下创建新所有者。下一轮计费使用新测量值为它重新计费。因此，
+若即时转移发生在采样到期之外，该窗格在下一次 30 秒计费前可能显示为总账零占用。
 
-**worker 得知该退出的方式因平台而异**，因为只有一个平台能免费拿到这个信号：
+渲染器表面、字形图集、图像图集和软件帧单独报告，不计入这份总账。
 
-| 平台 | 信号 | 空闲开销 |
-| --- | --- | --- |
-| macOS、Linux | 子进程最后一个 slave fd 关闭后，pty reader 读到 EOF，worker 的输出通道随之自行断开。 | 无——空闲窗格从不唤醒。 |
-| Windows | ConPTY master 由窗格自己的 PTY handle 持有，其 `HPCON` 只在该 handle 析构时释放，而这发生在窗格关闭时。因此窗格存活期间通道永不断开，worker 改为轮询退出探针。 | 每个空闲窗格每秒两次唤醒。 |
+释放顺序从叶子开始：
 
-Windows 一列不是尚未完成的优化。等待那个通道，等于为了得知窗格应当关闭而先等待
-窗格关闭；轮询才是让该策略在该平台上可达的前提。
+1. 析构或清空窗格的 `CommittedReservation`；
+2. 析构窗格 `OwnerGuard`；
+3. 全部窗格保护对象结束后，再析构窗口 `OwnerGuard`。
 
-## 资源所有权与占用计费
+所有者仍有计费或子节点时，总账会拒绝关闭。`OwnerGuard::drop` 会记录 warning 并保留被拒绝
+的记录，不会重试。
 
-除窗口/标签页/窗格树外，`App` 还持有一个来自 `sonicterm-resource` 的进程内
-**资源 governor**，用于跟踪常驻内存。它实际建立的 owner 树对应上面拓扑的前两层：
+### 输入与效果状态变化
 
-```text
-Process（随 App 创建）
-  Window   （每个存活窗口一个）
-    AppPane （每个存活窗格一个）
-```
+键盘所有权和终端字节编码见 [从按键到像素](From-Keypress-to-Pixel)。按键生命周期可以概括为：
+本地输入所有者 → 键位 → `encode_key` → PTY 意图/效果 → 有界输入队列。
 
-资源契约同时允许 `AppPane -> LocalPty`、共享字体/光栅/atlas owner 以及 mux 分支，
-但目前没有任何代码创建它们——它们是契约中预留的容量，而非当前的实际拓扑。
-
-governor 是记账层而非限额层。它以无上限的进程额度构建，窗口 owner 只做跟踪而不
-设限；真正约束内存的是 [日志 / Logging](Logging) 中描述的各接缝上限。只有窗格
-owner 带有预算，且该数值由各接缝上限推导并高于它们，因此它是用于捕捉「某个接缝
-已不再限制自身」的绊线，而不是第二道限额。
-
-渲染器的常驻内存（字形 atlas 与软件帧）会被测量并记录日志，但**不会**计入
-governor：`sonicterm-gpu` 并不依赖 resource crate。因此 governor 的总量是「app 计费
-的总量」，而不是「进程实际持有的总量」。
-
-生命周期：
-
-- **启动。** `App` 创建 governor 及其不可变进程根。
-- **窗口注册。** 新窗口注册 `Window` owner 后立即协调其窗格，因为窗口出现时其
-  窗格已经存在。注册失败的窗口仍可正常工作，但不会重试：协调过程会跳过没有 owner
-  的窗口，因此在该窗口的整个生命周期内，它及其窗格都不会出现在记账中。
-- **窗格注册。** 窗格在创建时即获得 `AppPane` owner——新建标签页与分屏都会立即
-  协调，而不等待下一次采样；撕离迁移的窗格则在迁移过程中完成注册。这在任何日志
-  级别下都会发生。
-- **计费。** 空闲唤醒路径会采样每个窗格的常驻内存，并把该窗格的 charge 调整到
-  相应数值。charge 采用原地缩放而非先释放再重新申请，因此账本不会在内存仍被持有
-  时短暂读到零。**这在任何日志级别下都会发生**，因为计费并非诊断：它负责填充
-  「窗格预算据以生效」的账本，而一个只在有人观察时才计费的 governor，在实际发布
-  的会话中不会施加任何限制。parser 锁被占用的窗格会被跳过，并保留上一次的
-  charge，直到下一轮采样。
-- **迁移。** 在窗口之间移动窗格会把其 charge 重新归属到目标窗口的 owner，因此
-  撕离的标签页不会把内存继续记在原窗口名下。重新归属与计费在同一轮中执行，在任何
-  日志级别下都会发生，但都受同一个 30 秒采样间隔约束。
-- **释放。** charge 是归属于窗格的 RAII token，拆除分为有序的两步：先释放该窗格的
-  charge token，再由 owner guard 关闭窗格与窗口记录。这个顺序是关键——owner 仍持有
-  charge 时会拒绝关闭，因此 `PaneState` 把 `charges` 声明在 `owner` 之前，依赖 Rust
-  按声明顺序 drop 字段。窗口被 drop 本身并不直接释放窗格内存：先释放其窗格的
-  charge，而泄漏的 charge 会表现为关闭被拒绝，而不是无声的少计。
-
-这一轮中属于诊断的部分是占用日志：把 `memory` target 设为 debug 后，会为每个窗格
-输出一行 `pane retention`，并为整个会话输出一行 `session retention`，且最多每 30
-秒一次。上面的计费与重新归属按同样的 30 秒节奏执行，无论日志是否开启——因此默认
-会话同样会维护账本，只是不写日志。由此，这些数字最多可能滞后 30 秒；它们支撑的是
-一条警戒线和一条增长曲线，两者都不需要更新的数字。两者都不会阻塞事件循环——
-parser 锁被占用的窗格会被跳过而非等待。
-
-## 输入路由顺序
-
-键盘输入按以下顺序处理：
-
-1. 退出确认组合键；
-2. 命令面板编辑；
-3. 活跃 IME 组合输入；
-4. 终端搜索编辑；
-5. READONLY/复制模式；
-6. 用户 keymap action；
-7. 终端字节编码和 PTY 写入。
-
-这个顺序防止搜索或 IME 文本泄漏到 shell。READONLY 中不允许的 action 会被消费，而不是执行或转发。
-
-编码逻辑读取活动 parser 暴露的终端模式：
-
-- DECCKM 决定光标键使用 SS3 还是 CSI；
-- kitty keyboard flag 在需要时选择 CSI-u；
-- 普通文本和未绑定组合键落入 PTY 字节路径。
-
-广播开启后，源窗格写入完成，再把同一字节复制到计算出的接收窗格。
-
-## Intent 与 effect 派发
+`App::dispatch_intent` 把一个 `AppIntent` 交给 `AppStateMachine::handle`。归约器更新
+`AppState`，并返回按类别稳定排序的一批效果。`App::dispatch_effects` 随后跨越应用边界。
 
 ```mermaid
 flowchart TD
-    input["输入/生命周期代码"]
-    intent["App::dispatch_intent(AppIntent)"]
-    handle["AppStateMachine::handle"]
-    reducer["reducer 更新镜像 AppState"]
-    sort["稳定 effect 分类排序"]
-    effects["App::dispatch_effects"]
-    boundary(["PTY / 重绘 / 剪贴板 / URL / 窗口 / 原生边界"])
+    source["输入或生命周期代码"]
+    intent["AppIntent"]
+    machine["AppStateMachine::handle"]
+    state["更新不依赖后端的 AppState"]
+    effects["按类别稳定排序的 AppEffect"]
+    dispatch["App::dispatch_effects"]
+    boundary["PTY、重绘、剪贴板、URL、窗口、菜单、日志"]
+    live["需要时修改 App / WindowState 实时状态"]
 
-    input --> intent
-    intent --> handle
-    handle --> reducer
-    reducer --> sort
-    sort --> effects
-    effects --> boundary
+    source --> intent --> machine --> state --> effects --> dispatch --> boundary
+    source --> live
+    dispatch --> live
 ```
 
-当前 `sonicterm-app-core` 已镜像许多转换，但实时拓扑仍以 `WindowState` 和 `PaneTree` 为准。
-因此部分 effect 是可观测记录，实际修改仍由现有 app 操作完成。
+两套状态的范围明确分开。归约器持有的值以 `AppState` 为准。实时 winit 窗口、`PaneTree`、
+解析器、渲染器和 PTY 以 `App` 与 `WindowState` 为准。一部分效果直接执行工作，另一部分只
+记录归约器决定，实际修改由原生路径完成。
 
-## 重绘调度
+### 重绘与等待生命周期
 
-PTY worker 不会逐字节重绘，而是累积输出，在达到字节阈值或短时间阈值后发送类型化
-`UserEvent::RequestRedraw(WindowId)`。事件循环线程解析当前窗口，再调用原生 `request_redraw`。
+窗格 VT 工作线程会合并输出，并在 128 KiB、最大等待 8 ms 或安静 3 ms 后发送
+`UserEvent::RequestRedraw(WindowId)`。事件循环线程查找当前编号。转移操作修改共享重绘目标，
+因此工作线程会跟随窗格。
 
-持续输出时，重绘请求还可能推迟到下一个帧边界。硬件路径按显示器刷新率；软件 adapter
-使用更低帧率。光标闪烁、通知过期、退出确认和延迟重绘被合并到一个
-`ControlFlow::WaitUntil` deadline，而不是永久 heartbeat。
+`RedrawRequested` 仍可能推迟到下一个帧边界。硬件使用显示器周期。最终降级状态使用 25 ms，
+输入法组字时使用 83.333 ms。硬件上的纯用户输入不受帧节奏限制；降级策略可以合并它。
 
-收到 `RedrawRequested` 时，app 非阻塞尝试锁住每个可见窗格 parser。任一个失败就推迟整帧；
-全部成功后才向 renderer 提供完整 `PaneRender`。
+事件循环把以下期限合并进一个 `ControlFlow::WaitUntil`：
 
-## 配置保存与重载
+- 主窗口待重绘；
+- 各子窗口待重绘；
+- 光标闪烁；
+- 通知过期；
+- 五秒退出确认；
+- 30 秒内存采样。
 
-配置只在启动时读取，之后仅在用户从命令面板运行 **Reload Config**
-（`Action::ReloadConfig`）时重新读取。没有后台 watcher，因此不会有定时、文件系统事件
-或普通窗口事件触发的重复读取。
+最早期限优先。没有期限时使用 `ControlFlow::Wait` 停住循环。只由内存期限触发的唤醒会执行
+常驻内存工作，不会制造心跳重绘。
 
-重载会重新解析 `sonicterm.toml`，并重新读取它所指定的主题与 keymap 文件，然后应用到所有
-实时窗口和窗格。不同字段可更新主题颜色、快捷键提示、padding、scrollback 上限、光标、
-renderer 缓存和预热窗口池。无效输入会报告错误，而不是默默替换活动配置。
+帧收集对解析器和图像使用非阻塞锁。任一锁不可用时会推迟完整帧并设置下一次期限。成功取得的
+保护对象一直存活到 `GpuRenderer::render` 返回。
 
-**Save Current Settings**（`Action::SaveCurrentSettings`）刻意比重载更窄。它只修补
-`~/.sonicterm/sonicterm.toml` 中当前缩放后的 `[font].size` 和当前有效且安全的
-`[font].weight_scale`，并保留所有无关的已知设置、未知顶层与嵌套 key、注释，以及受支持的
-顺序和格式。主题、locale、窗口/窗格/Tab 状态与其它运行时模式都不改变。由于这两个值已经
-实时生效，保存不会重载或重新应用它们。
+### 配置重载与保存
 
-若配置不存在，保存会先创建带注释的初始配置。随后写入同目录临时文件，再以原子方式替换配置，
-但不承诺断电后的持久性。当前配置格式错误时会拒绝保存。成功会推进两个字体重置基线并显示
-Info 确认；失败会保持旧文件、实时值
-与基线不变，并显示 Error。
+配置在启动时读取，之后只有 `Action::ReloadConfig` 会再次读取。没有文件系统 watcher，
+也没有周期重载。
 
-## 标签页拖动和撕离
+重载会严格解析 `sonicterm.toml`。解析失败时保留当前配置并记录 warning，不显示用户通知。
+基础配置解析成功后，代码先清空预热窗口池，再把新设置应用到全部存活窗口和窗格。
 
-存在两条相关路径：
+主题和键位文件分别读取。主题或键位加载失败时，会记录 warning 并继续使用之前加载的资源。
+其它有效配置字段仍会应用，新的基础配置也会成为活动配置。`[logging]` 变化无法替换已经安装的
+tracing subscriber，只能在下次进程启动时生效。
 
-- 进程内拖动使用全局屏幕矩形，把标签页合并到另一个 SonicTerm 窗口；
-- OS handoff 在 macOS 使用 pasteboard payload polling（没有原生 `NSDraggingSession`），在 Windows 使用 OLE drag/drop；两者都可把序列化 payload 交给另一个进程。
+根据字段变化，重载可以：
 
-进程内转移会移动现有 tab state 和所有 `PaneState`。PTY 不克隆、不重启；每个窗格共享的
-重绘目标更新为目标 `WindowId`。转移在修改前验证源和目标，因为误删窗格会终止其子进程。
+- 更新主题颜色和解析器调色板回复；
+- 重建字体；字形度量改变时调整网格和 PTY；
+- 更新语言、光标、内边距、透明度、滚动条和面板布局；
+- 切换最终软件渲染策略与表面设置；
+- 更新回滚历史、标签页宽度、通知设置和键位提示；
+- 清空预热窗口池，并在之后逐步重建。
 
-一小组隐藏且已完整初始化的子窗口可降低拖出延迟；消耗一个后会按配置上限补充。
+**Save Current Settings** 只写当前 `[font].size` 和有效的 `[font].weight_scale`。
+它不保存主题、语言、标签页、窗格或其它运行时状态。这两个值已经生效，因此保存不会重载或
+重新应用它们。
 
-## 退出
+保存过程如下：
 
-关闭窗格会析构 `PtyHandle`，从而终止并限时回收子进程。若仍有子窗口，关闭主窗口可只隐藏主窗口。
-没有活动窗口时，`about_to_wait` 消费 `pending_exit` 并调用 `ActiveEventLoop::exit`。
+1. 检查字体大小为有限正数，`weight_scale` 位于 `0.5..=5.0`；
+2. 文件不存在时创建带注释的初始配置；
+3. 解析目标符号链接；
+4. 获取进程内路径锁和跨进程 sidecar 锁；
+5. 严格解析当前文件，并保留 LF 或 CRLF 约定；
+6. 只修改两个数值，同时保留注释、未知 key、顺序、装饰和权限；
+7. 写入并 `sync_all` 一个同目录唯一临时文件；
+8. 替换前若发现外部编辑，则拒绝保存；
+9. 原子重命名或替换目标文件。
 
-macOS 的 `Cmd+Q` 使用两次按键确认：第一次非重复按键显示“Press ⌘Q one more time to quit”；
-五秒内第二次按键才退出。原生菜单的明确 Quit 命令可立即退出。
+该过程不承诺目录 fsync 或断电持久性。成功后更新两个重置基线并显示 Info 通知。失败时文件、
+实时设置和基线都保持不变，并显示 Error 通知。
 
-## 代表性流程
+### 标签页移动与拆出
 
-### 新分屏
+进程内重排、合并和拆出会移动存活的 `Tab`、`TabState` 和 `PaneState`。`PtyHandle` 不会复制
+或重启。窗格成功附加后，共享重绘目标会改成目标 `WindowId`。
 
-```mermaid
-flowchart TD
-    keymap["keymap split_right"]
-    action["对最前窗口执行 action"]
-    spawn["启动新 PTY + Parser/Grid + worker thread"]
-    split["PaneTree::split(active, Right, new_id)"]
-    resize["resize 所有可见窗格/grid/PTY"]
-    focus["聚焦新叶节点"]
-    redraw(["请求重绘"])
+`transfer_tab` 会在移除前检查源下标和目标窗口是否存在，但这不能证明子窗口目标拥有渲染器。
+若 `attach_to_child` 随后拒绝附加，已移除的窗格会被析构，其子进程也会终止。
+`merge_child_into_target` 与 `merge_main_into_child` 同样先移除、后附加，失败时也会丢失窗格。
 
-    keymap --> action
-    action --> spawn
-    spawn --> split
-    split --> resize
-    resize --> focus
-    focus --> redraw
-```
+隐藏预热窗口池用于降低拆出延迟：
 
-### PTY 输出
+- 默认目标为 1；
+- 0 表示关闭；
+- 普通硬件最多 5；
+- 真实软件适配器或最终降级状态启用时，任何非零目标都限制为 1。
 
-```mermaid
-flowchart TD
-    bytes["子进程字节"]
-    chan["PTY reader channel"]
-    worker["VT worker"]
-    mutate["锁内修改 parser/grid"]
-    side["更新模式/标题/媒体 side effect"]
-    release["释放锁"]
-    coalesce["合并的 RequestRedraw(WindowId)"]
-    winit["winit 线程"]
-    req["RedrawRequested"]
-    trylock["try_lock 全部窗格"]
-    render(["render"])
+`about_to_wait` 会删除多余条目，并且每次最多新建一个缺失窗口。采用后进先出。消耗的条目在
+之后的空闲轮次补充。预热窗口在提升前不进入 `App::windows`，也没有资源所有者。
 
-    bytes --> chan
-    chan --> worker
-    worker --> mutate
-    mutate --> side
-    side --> release
-    release --> coalesce
-    coalesce --> winit
-    winit --> req
-    req --> trylock
-    trylock --> render
-```
+新建窗口的拆出路径会先从源窗口移除标签页，再创建目标窗口。如果原生窗口创建、渲染器初始化
+或子窗口尺寸验证随后失败，已经移动的窗格会被析构，其子进程会终止。代码不会回滚到源窗口。
 
-## 从哪里阅读源码
+各平台原生拖动能力不同：
 
-| 主题 | 主要路径 |
+- Windows OLE 支持进程内拖动手势和同进程落点路由。落到空白桌面会转为进程内拆出。
+- macOS 会发布 pasteboard payload，但不会启动 `NSDraggingSession`，也收不到目标确认。
+  sink 返回 `DragAck::NotAcknowledged`，因此源标签页留在本地，并回退到进程内拆出。
+- Linux 不安装原生拖动后端。进程内窗口合并和拆出仍可使用。
+
+启动命令行和 pasteboard 路径可以在新进程启动时提供序列化 payload。Windows OLE 目标端
+目前会解析外部 payload，但不会把它排入应用。macOS 手势没有原生目标确认。因此，原生拖动
+不会完成带确认的跨进程转移。仅发布未确认 payload 时，源标签页不会被移除。
+
+### 窗格与窗口关闭
+
+关闭窗格会把它从 `PaneTree` 和窗格表中删除。析构 `PtyHandle` 会启动有时限的 I/O 取消、
+子进程终止、原生主端关闭和回收。各平台具体期限见
+[架构内部机制](Architecture-Internals)。
+
+窗格是唯一树叶时，关闭窗格会关闭标签页。子窗口最后一个标签页关闭后会被回收。仍有子窗口时，
+主窗口可以进入隐藏状态。其 `WindowState` 仍是被标识的主条目，直到之后的策略重新显示或替换它。
+
+某个 action 设置 `pending_exit` 后，`about_to_wait` 会清除该标志并调用
+`ActiveEventLoop::exit`。没有活动终端窗口时，普通最后窗口策略也会到达这条路径。
+
+macOS 的 Cmd+Q 使用两次按键确认。第一次非重复按键显示
+`Press ⌘Q one more time to quit`。五秒内第二次按键才退出。自动重复会被忽略。原生菜单中的
+明确 Quit 命令可以不经过这套键盘确认直接请求退出。
+
+已经关闭窗格留下的排队重绘事件只包含 `WindowId`。窗口仍存在时，它可能多请求一帧；编号已
+过期时，事件循环会忽略它。被删除的窗格无法再提供 `PaneRender`。
+
+### 进程干净退出
+
+事件循环退出后，`run_app` 返回。只有有序结果才会让平台二进制记录 `CleanShutdown` 面包屑。
+随后它关闭面包屑 writer。writer 刷新完成后，代码把本次会话标为干净。
+
+启动或运行过程返回错误时，不会写入干净标记。panic、退出、会话状态和面包屑记录让下一次
+启动能够判断上一会话的情况。
+
+Linux 运行冒烟测试会把每个失败边界映射为稳定的非零退出码。有序冒烟结果同样会刷新面包屑
+并把会话标为干净。
+
+### 源码索引
+
+| 生命周期 | 主要路径 |
 | --- | --- |
 | 平台启动 | `crates/sonicterm-{mac,windows,linux}/src/main.rs` |
-| Shell builder | `crates/sonicterm-app/src/shell.rs` |
-| App 与 WindowState | `crates/sonicterm-app/src/app/mod.rs` |
-| Winit 回调 | `crates/sonicterm-app/src/app/{event_loop,window_event}.rs` |
-| 输入 action/编码 | `crates/sonicterm-app/src/app/{keymap_dispatch,key_encoding}.rs` |
-| 窗格启动 | `crates/sonicterm-app/src/app/spawn_pane.rs` |
-| 拖动/转移 | `crates/sonicterm-app/src/app/{tear_out,tab_transfer,tab_state}.rs` |
-| 配置保存/重载 | `crates/sonicterm-app/src/app/config_apply.rs` |
-| Reducer 边界 | `crates/sonicterm-app-core/src/` |
+| Shell runner | `crates/sonicterm-app/src/shell.rs` |
+| Winit 回调与等待 | `crates/sonicterm-app/src/app/{event_loop,window_event}.rs` |
+| 应用、窗口、标签页和窗格所有权 | `crates/sonicterm-app/src/app/{mod,tab_state}.rs` |
+| 主窗口与子窗口的窗格创建 | `crates/sonicterm-app/src/app/{spawn_pane,child_window,misc}.rs` |
+| 窗格退出策略 | `crates/sonicterm-app/src/app/pane_exit.rs` |
+| 资源计费 | `crates/sonicterm-app/src/app/retention.rs` |
+| 配置重载与保存 | `crates/sonicterm-app/src/app/config_apply.rs`、`crates/sonicterm-cfg/src/config.rs` |
+| 标签页转移与拆出 | `crates/sonicterm-app/src/app/{tab_transfer,tear_out,child_window}.rs` |
+| 原生拖动后端 | `crates/sonicterm-{mac,windows}/src/{os_drag_*,tab_drag_os}.rs` |
+| PTY 拆除 | `crates/sonicterm-io/src/pty.rs` |

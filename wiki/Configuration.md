@@ -2,588 +2,383 @@
 
 ## English
 
-SonicTerm reads one cross-platform config file:
+### Files and lookup
+
+SonicTerm uses one cross-platform config file:
 
 ```text
 ~/.sonicterm/sonicterm.toml
 ```
 
-The file is created on first launch. Named user themes and keymaps live beside
-it under `themes/` and `keymaps/`. Loading accepts unknown top-level TOML keys.
-The targeted **Save Current Settings** operation described below preserves
-unknown top-level and nested keys instead of rewriting the complete config.
+The first launch creates this file and seeds editable examples under
+`~/.sonicterm/themes/` and `~/.sonicterm/keymaps/`.
 
-## Complete starter example
+`theme` and `keymap` accept either a name or a TOML path. A named value first
+checks the matching user directory, then the bundled `assets/` directory. A
+path-like value is used directly.
 
-The example below mirrors the currently generated starter surface. Defaults are
-shown explicitly; omit fields you do not want to override.
+SonicTerm tolerates and preserves unknown TOML keys. Unknown keys do not change
+behavior unless the running build implements them.
+
+### Supported keys and defaults
+
+#### Top level
+
+| Key | Default | Behavior |
+| --- | --- | --- |
+| `theme` | `"wezterm"` | Selects a theme. See [Themes](Themes). |
+| `keymap` | `"sonicterm-macos"`, `"sonicterm-windows"`, or `"sonicterm-linux"` | Selects the platform keymap. See [Keybindings](Keybindings). |
+| `locale` | `""` | Selects `en`, `zh-CN`, or `ja`. Empty uses `SONIC_LOCALE`, then the OS locale, then `en`. |
+| `quit_on_last_window_close` | `true` | On macOS, `false` keeps the process available from the Dock after the last window closes. Other platforms always exit with no windows. |
+| `tab_max_width` | `240` | Maximum width of one tab in logical pixels. A non-finite or non-positive value is ignored. Crowded tabs still share the available width. |
+
+#### `[font]`
+
+| Key | Default | Behavior |
+| --- | --- | --- |
+| `family` | `"Rec Mono St.Helens"` | Primary font family. Missing glyphs use the fallback chain. |
+| `size` | `13` | Font size in points. |
+| `line_height` | `1.3` | Line-height multiplier. |
+| `weight_scale` | `1.0` | Regular-text weight for the configured family. Valid values are `0.5..=5.0`; other values become `1.0`. Cell metrics, fallback glyphs, color emoji, and SGR bold do not change. |
+
+Font changes apply to terminal text and regular application text. Changes to
+`family`, `size`, or `line_height` resize every visible pane and its PTY.
+`weight_scale` keeps the existing metrics. For shaping and fallback details, see
+[Rendering and Fonts](Rendering-and-Fonts).
+
+#### `[window]`
+
+| Key | Default | Behavior |
+| --- | --- | --- |
+| `cols` | `100` | Initial columns for a new window. |
+| `rows` | `30` | Initial rows for a new window. |
+| `padding_left` | `12` | Left content padding in logical pixels. |
+| `padding_right` | `12` | Right content padding in logical pixels. |
+| `padding_top` | `8` | Top content padding in logical pixels. |
+| `padding_bottom` | `4` | Bottom content padding in logical pixels. |
+| `decorations` | `true` | Enables native title-bar decorations for new windows. |
+| `warm_window_pool` | `1` | Number of hidden child windows kept for fast tab tear-out. `0` disables the pool. Hardware rendering caps it at `5`; software rendering caps any nonzero value at `1`. |
+
+Grid dimensions are never allowed to allocate without bounds. Each axis is at
+most `4096`, the visible grid is at most `524288` cells, and the complete grid
+including history is at most `1048576` cells.
+
+#### `[terminal]`
+
+| Key | Default | Behavior |
+| --- | --- | --- |
+| `shell` | omitted | Shell for new panes. Windows tries `pwsh.exe` from `PATH`, registered PowerShell 7, the real Microsoft Store package, Windows PowerShell, then `cmd.exe`. Unix tries an executable `$SHELL`, the current user’s executable passwd shell, then `/bin/sh`. An explicit non-empty value wins. |
+| `term_program` | `"SonicTerm"` | `TERM_PROGRAM` for new child PTYs. `TERM_PROGRAM_VERSION` is SonicTerm’s version, except `term_program = "WezTerm"` advertises `20230712-072601`. |
+| `scrollback` | `1000` | Requested history rows per pane. `0` disables history. Grid and retained-byte budgets may lower the effective limit. |
+| `clickable_local_targets` | `true` | Allows validated raw local files and directories to open. URI and OSC 8 links are independent. |
+| `clickable_bare_names` | `true` | Allows contextual names to resolve against the exact pane’s trusted local OSC 7 working directory. It only works when `clickable_local_targets` is also `true`. |
+| `cursor_blink` | `false` | Enables cursor blinking. |
+| `cursor_shape` | `"block"` | Accepts `block`, `bar`, or `underline`. |
+
+The scrollback row setting and the memory budget both apply. Rich rows can hit
+the byte budget before the row count. See [Memory](Memory).
+
+#### `[appearance]`
+
+| Key | Default | Behavior |
+| --- | --- | --- |
+| `backdrop` | `"opaque"` | Accepts `opaque`, `mica`, `acrylic`, or `tabbed`. Windows applies the named DWM material on a best-effort basis. Linux starts as `opaque` and warns if another value was requested. macOS treats non-opaque values as alpha-capable windows; the Windows material names do not select a macOS material. |
+| `opacity` | `1.0` | Terminal background opacity, clamped to `0.0..=1.0`. |
+| `scrollbar` | `"auto"` | Accepts `auto`, `always`, or `never`. `always` is still hidden when there is no history to scroll. |
+| `panel_padding` | `2.0` | Inner padding for floating panels in logical pixels. Negative values act as `0`. |
+| `software_render_mode` | `"auto"` | `auto` degrades when the adapter is software-rendered, `force` always degrades, and `off` never degrades. |
+
+Software degradation lowers frame and animation cost. On Windows,
+`software_render_mode = "force"` also makes new windows opaque because the
+software presenter cannot composite transparency. If a non-opaque backdrop was
+configured, SonicTerm logs a warning with the configured and applied values.
+`auto` does not override the configured backdrop.
+
+The scrollbar thumb can be dragged. Clicking its track moves one viewport.
+`auto` shows it during scrolling, dragging, or pointer proximity to the pane’s
+right edge.
+
+#### `[accessibility]`
+
+| Key | Default | Behavior |
+| --- | --- | --- |
+| `high_contrast` | `false` | Replaces the active theme foreground and background with `#ffffff` and `#000000`. |
+| `reduced_motion` | `false` | Parsed and retained, but currently has no presentation effect. |
+| `strong_focus` | `false` | Parsed and retained, but currently has no presentation effect. |
+
+#### `[notifications]`
+
+| Key | Default | Behavior |
+| --- | --- | --- |
+| `long_command` | `false` | Enables long-command desktop notifications on Windows. macOS and Linux currently do not send this notification. |
+| `threshold_secs` | `10` | A reported command duration must be greater than this value. |
+
+#### `[logging]`
+
+| Key | Default |
+| --- | --- |
+| `level` | `"warn"` |
+| `max_file_size_mb` | `10` |
+| `max_rotated_files` | `3` |
+| `max_age_days` | `2` |
+| `max_crash_dumps` | `10` |
+| `max_crash_age_days` | `2` |
+| `max_crash_bytes` | `10485760` |
+| `max_breadcrumb_files` | `10` |
+| `max_breadcrumb_age_days` | `2` |
+| `max_breadcrumb_bytes` | `1048576` |
+
+`level` accepts `error`, `warn`, `info`, or `debug`. Logging is initialized at
+startup, so logging changes require a restart. For file locations, cleanup
+rules, and diagnostics, see [Logging](Logging).
+
+### Editing and reloading
+
+Use **Edit sonicterm.toml** in the command palette to open the standard config
+file. SonicTerm reads it at startup and when you run **Reload Config**. There is
+no file watcher.
+
+A reload always re-reads the selected theme and keymap files, even when their
+names did not change. The following settings apply to existing windows:
+
+- theme, keymap, and locale;
+- font family, size, line height, and weight;
+- content padding, opacity, scrollbar, and panel padding;
+- cursor shape and blink;
+- scrollback and local-target policy;
+- tab width, warm-window target, software degradation, accessibility, and
+  notification settings.
+
+Some settings affect only objects created after the reload:
+
+- `cols`, `rows`, `decorations`, and the native `backdrop` affect new windows;
+- `shell` and `term_program` affect new panes;
+- logging settings require a restart.
+
+Changing `backdrop` or `software_render_mode` can involve native window setup.
+Restart SonicTerm when you need the complete native-window change, not only the
+live renderer policy.
+
+### Saving current font settings
+
+**Save Current Settings** changes only these two values in
+`~/.sonicterm/sonicterm.toml`:
 
 ```toml
-theme = "wezterm"
-# Platform default: sonicterm-macos / sonicterm-windows / sonicterm-linux
-keymap = "sonicterm-macos"
-# Empty means: SONIC_LOCALE, then OS locale, then English.
-locale = ""
-# macOS can remain active in the Dock when this is false. Other platforms exit
-# when no windows remain.
-quit_on_last_window_close = true
-tab_max_width = 240
-
 [font]
-family = "Rec Mono St.Helens"
 size = 13
-line_height = 1.3
 weight_scale = 1.0
-
-[window]
-cols = 100
-rows = 30
-padding_left = 12
-padding_right = 12
-padding_top = 8
-padding_bottom = 4
-decorations = true
-# Legacy compatibility keys; prefer [appearance] for new settings.
-opacity = 1.0
-blur = false
-warm_window_pool = 1
-
-[terminal]
-# Omit to auto-detect. Windows: pwsh -> Windows PowerShell -> cmd.
-# macOS/Linux: $SHELL.
-# shell = "pwsh.exe"
-term_program = "SonicTerm"
-scrollback = 1000
-# Cmd/Ctrl-click asynchronously validated local files and directories.
-clickable_local_targets = true
-# Also resolve whole bare tokens against the exact pane's trusted OSC 7 CWD.
-clickable_bare_names = true
-cursor_blink = false
-cursor_shape = "block"       # block | bar | underline
-
-[logging]
-level = "warn"               # error | warn | info | debug
-max_file_size_mb = 10
-max_rotated_files = 3
-max_age_days = 2
-max_crash_dumps = 10
-max_crash_age_days = 2
-max_crash_bytes = 10485760        # 10 MiB
-max_breadcrumb_files = 10
-max_breadcrumb_age_days = 2
-max_breadcrumb_bytes = 1048576    # 1 MiB
-
-[appearance]
-backdrop = "opaque"           # opaque | mica | acrylic | tabbed
-opacity = 1.0
-scrollbar = "auto"            # auto | always | never
-panel_padding = 2.0
-software_render_mode = "auto" # auto | force | off
-
-[render]
-# Reserved compatibility key; the current renderer does not read it.
-alt_screen_bg_fill = "v2"
-
-[accessibility]
-high_contrast = false
-reduced_motion = false
-strong_focus = false
-
-[notifications]
-long_command = false
-threshold_secs = 10
 ```
 
-## Sections and behavior
+The saved values are the current session font size and effective
+`weight_scale`. The command preserves comments, ordering, line endings, and all
+other known or unknown keys. It does not save the session theme or any other
+runtime state, and it does not reload because both values are already active.
 
-### Top-level selection
+If the file is missing, SonicTerm creates the starter file first. A
+process-local lock and the persistent `sonicterm.toml.save.lock` sidecar prevent
+two SonicTerm saves from running together. SonicTerm also compares the exact
+file bytes again before replacement. A concurrent editor change, malformed
+TOML, invalid font value, or lock conflict refuses the write. The existing file
+and reset baselines remain unchanged, and an Error notification appears.
 
-- `theme` accepts a name or a direct TOML path. Named lookup checks
-  `~/.sonicterm/themes/<name>.toml` before bundled assets.
-- `keymap` accepts a name or direct TOML path and follows the same user-before-bundled rule.
-- `locale` supports the bundled `en`, `zh-CN`, and `ja` catalogs. An empty value negotiates automatically.
-- `tab_max_width` caps a single tab in logical pixels; tabs still shrink evenly when the bar is crowded.
-- `quit_on_last_window_close=false` keeps the macOS process available from the Dock after its final window closes.
+A successful save writes a temporary file in the config directory and replaces
+the config atomically. An Info notification confirms the save. This guarantees
+that readers see a complete old or new file; it does not guarantee survival of
+a sudden power loss.
 
-`tab_close_button_color` is accepted only for compatibility with older config
-files. The close button is no longer drawn, so this key currently has no visual
-effect and should not be added to new configurations.
+### Errors and recovery
 
-### Font
+At startup, an unreadable or malformed config logs a warning and uses defaults
+so SonicTerm can still open. An invalid selected theme falls back to bundled
+`wezterm`. An invalid selected keymap falls back to the bundled platform
+keymap.
 
-`family`, `size`, `line_height`, and `weight_scale` are the public SonicTerm
-font config. `weight_scale = 1.0` preserves native glyph coverage. Accepted
-values are `0.5..=5.0`; invalid values fall back to `1.0`. Below `1.0` thins
-text, above `1.0` thickens it, and neither changes cell metrics or replaces
-SGR bold.
-
-**`weight_scale` acts on the configured `family` alone.** A character that
-family does not contain is drawn from a fallback font, at the weight that
-font's own designer chose, and stays there whatever this setting says. That
-boundary is deliberate: the setting names one family, and reweighting a
-different one applies your intent for your font to a font you never chose. The
-mismatch shows wherever the two sit side by side — a fallback glyph growing or
-thinning while its neighbour from your family does not move with it.
-
-`weight_scale` works in two stages, and both run at every value other than
-`1.0`. The first remaps glyph coverage, which shifts the antialiased edge only.
-Because a stem pixel that is already fully opaque can be neither darkened nor
-lightened, coverage alone has little effect on HiDPI/Retina displays, where
-stem cores are solid. The second changes the rasterized outline — growing above
-`1.0`, eroding below it — which adds or removes real ink and stays visible at
-any display scale. Growth is cropped back into the original glyph tile and
-capped at one raster pixel independently of the glyph's spare bitmap margin.
-Tile dimensions, origin, cell metrics, and advances therefore stay fixed, so a
-weight change does not double as a size change and flat-sided glyphs are not
-suppressed merely because they touch a tile edge. Values around `2.0`-`3.0`
-suit most HiDPI screens; `5.0` is deliberately heavy, and `0.5` deliberately
-light.
-
-The platform rasterizer policy is internal: DirectWrite is the Windows
-default with FreeType fallback, while macOS/other Unix use FreeType. There is
-currently no `[font].font_rasterizer` key in `sonicterm.toml`.
-
-`weight_scale` is also adjustable from the command palette without editing the
-file: **Increase Font Weight (Bolder)** and **Decrease Font Weight (Thinner)**
-step it by `0.25`, and **Reset Font Weight to Config** returns to the configured
-value. Searching `bolder`, `thinner`, `heavier`, or `lighter` finds them. Weight
-adjustments are session-only unless you run **Save Current Settings**; otherwise
-a reload or restart returns to the value in the file. None of the three weight
-actions has a default key binding, but all can be bound — see
-[Keybindings](Keybindings).
-
-Live `size` and `weight_scale` changes rebuild the shared configured font stack
-used by regular terminal text, tab titles, notifications, and the command
-palette's query, rows, shortcuts, footer, and other regular chrome. The weight
-change applies only to regular glyphs from the configured family: fallback
-glyphs, color emoji, and SGR or otherwise intentional bold retain their existing
-behavior. Font changes also invalidate text caches. Family, size, and line-height
-changes resize each visible pane's grid and PTY using its own pane rectangle;
-weight-only changes preserve metrics.
-
-### Window and appearance
-
-`[window].cols` and `rows` define the initial grid for new windows. Padding is in
-logical pixels around terminal content. `warm_window_pool` controls hidden,
-pre-created child windows used to reduce tab tear-out latency. `0` disables the
-pool, while the default `1` retains one instant tear-out spare. Hardware honors
-configured targets up to `5`; software rendering caps every nonzero value at
-one to bound the per-renderer memory baseline. When a pooled window is adopted,
-SonicTerm reapplies the current font (including session weight), theme, tab-bar
-visibility, native background, display scale, and size before revealing it, so
-its first visible frame cannot expose the stale state captured while it waited.
-
-Use `[appearance].opacity` and `backdrop` for active appearance configuration.
-The older `[window].opacity` and `blur` fields still deserialize, but current
-startup and reload paths do not use them; they should not be relied upon.
-Backdrop materials are platform-dependent; unsupported choices fall back rather
-than changing terminal semantics.
-
-The scrollbar is interactive: drag its thumb to move through history, or click
-above/below the thumb to page by one viewport. In `auto` mode it appears around
-scroll/drag activity or pointer proximity to the pane's right edge.
-
-`software_render_mode` controls no-GPU handling:
-
-- `auto` follows adapter detection;
-- `force` always uses the degraded/software policy;
-- `off` never engages it.
-
-The degraded path lowers frame frequency and animation cost. Windows can compose
-and present a deterministic CPU BGRA frame through GDI.
-
-**`force` overrides `backdrop` on Windows.** The software presenter cannot
-composite transparency, so a window under `force` is opaque whatever `backdrop`
-says — `mica`, `acrylic`, and `tabbed` all resolve to `opaque`. Nothing on
-screen distinguishes "the backdrop was applied" from "the backdrop was
-overridden", so SonicTerm says so at `warn` level:
-
-```
-software_render_mode = force overrides the configured backdrop;
-the software presenter cannot composite transparency
-  configured=Mica applied=Opaque
-```
-
-`auto` does not do this: it degrades rendering when detection finds a software
-adapter, and leaves a configured backdrop alone. Only `force` overrides it.
-
-### Terminal
-
-If `shell` is absent, Windows searches for PowerShell 7 (including Store
-packages), Windows PowerShell, then cmd; macOS/other Unix use `$SHELL`.
-`term_program` becomes the child process's `TERM_PROGRAM` value. Some programs
-that do not yet recognize SonicTerm may work with `term_program = "WezTerm"`.
-
-`scrollback` is per pane. Reducing it through reload immediately removes the
-oldest history; `0` disables history. Cursor shape and blink settings update
-live.
-
-`clickable_local_targets` controls raw absolute, current-home (`~/...`),
-separator-relative (`src/main.rs`), explicit dot-relative, and contextual bare
-filesystem targets, including forms containing ordinary spaces; it defaults to
-`true`. Setting it to `false` leaves URI and OSC 8 activation unchanged.
-`clickable_bare_names` is a subordinate default-on switch: it permits row-local
-candidates to resolve against the exact pane's trustworthy local OSC 7 CWD only
-while `clickable_local_targets` is also enabled. A bounded background probe
-checks at most 37 candidates of no more than eight non-space parts and selects
-the longest unambiguous openable candidate containing the pointed cell; blocked
-or equally long ambiguous candidates fail closed. This intentionally
-may activate column text when a same-named eligible entry exists in that CWD;
-see [Usage](Usage) for grammar and blocked target classes. Reloading either
-switch immediately revokes existing local-target hover and probe authorization
-in every window.
-
-### Logging
-
-See [Logging](Logging). `warn` is the default. Debug enables renderer timing and
-other diagnostic events.
-
-### Render compatibility
-
-`alt_screen_bg_fill` remains deserializable as a reserved compatibility key,
-but the current renderer does not read it. New behavior should not depend on
-choosing `v1` or `v2` here.
-
-Older files may contain `glyph_fit = "v1"` or `"v2"`. SonicTerm still accepts
-that unknown key so those files load, but it was never connected to the runtime
-renderer and is no longer emitted or documented as active configuration. The
-single-cell status-marker fit is now a renderer correctness invariant rather
-than a user-selectable appearance switch.
-
-### Accessibility and notifications
-
-`high_contrast` is active and reapplies theme colors as white-on-black.
-`reduced_motion` and `strong_focus` are currently config-only reserved fields:
-SonicTerm preserves and reloads them, but they do not yet change presentation.
-`long_command` enables completion notifications for commands exceeding
-`threshold_secs`.
-
-## Saving, editing, and reloading
-
-Use the command palette entries **Save Current Settings**, **Edit
-sonicterm.toml**, **Edit keymap.toml**, and **Reload Config**.
-
-**Save Current Settings** patches only two values in
-`~/.sonicterm/sonicterm.toml`: the current zoomed `[font].size` and the active
-safe `[font].weight_scale`. It intentionally leaves theme, locale, every
-unrelated known setting, unknown top-level and nested keys, comments, and
-supported ordering and formatting intact. It also leaves window, pane, tab, and
-other runtime modes untouched. The command does not reload or reapply the file,
-because both saved values are already live.
-
-If the config file is missing, SonicTerm creates its commented starter file
-before patching the two font values. Saves take a non-blocking process and
-cross-process lock on the persistent `sonicterm.toml.save.lock` sidecar, then
-recheck the exact bytes read immediately before committing. If another SonicTerm
-instance is saving, or the final comparison observes an editor change, SonicTerm
-refuses the write and asks you to retry rather than overwriting the newer file. The patch
-is written to a temporary file in the config directory and atomically replaces
-the config, so readers see the old or new complete file; this does not promise
-durability through power loss. A malformed file is also refused. On success, the
-font-size and weight reset baselines advance to the saved values and an Info
-confirmation appears. On any failure, the existing file, live values, and reset
-baselines remain intact, and an Error notification appears.
-
-SonicTerm reads configuration at startup and then only when you run **Reload
-Config**. There is no background file watcher, so saving an external edit does
-not apply it — this keeps a watcher thread and its filesystem handles out of the
-running process. Edit freely, then reload when you want the changes to take
-effect.
-
-A reload re-reads `sonicterm.toml` together with the theme and keymap files it
-names, even when the `theme` and `keymap` selectors are unchanged. Editing the
-contents of a custom theme or custom-named keymap therefore applies on reload;
-no rename or restart is needed.
-
-A malformed file is logged and the previous active config remains in use.
-Startup is more forgiving: an invalid existing config produces a warning and
-starts with defaults so the app remains launchable.
-
-Font, locale, cursor, padding, scrollbar policy, scrollback, theme, and keymap
-all apply on reload. Native decorations and certain platform setup may still
-require a new window or restart.
-
-## Layout diagrams
-
-```text
-+----------------------- window -----------------------+
-| tab/title UI                                         |
-| padding_top                                          |
-| padding_left  terminal pane grid  padding_right      |
-| padding_bottom                                       |
-+------------------------------------------------------+
-
-+------------- floating panel -------------+
-| panel_padding                           |
-| command/search content                  |
-| panel_padding                           |
-+-----------------------------------------+
-```
+During **Reload Config**, an unreadable or malformed `sonicterm.toml` leaves the
+entire current config active. If the config itself parses but its theme or
+keymap fails, SonicTerm keeps the current theme or keymap, logs the error, and
+applies the other valid settings. A structurally valid keymap skips only
+bindings whose action cannot be parsed; the other bindings remain active.
 
 ## 中文
 
-SonicTerm 使用一个跨平台配置文件：
+### 文件与查找顺序
+
+SonicTerm 在所有平台使用同一个配置文件：
 
 ```text
 ~/.sonicterm/sonicterm.toml
 ```
 
-首次启动会创建该文件。同级的 `themes/` 与 `keymaps/` 保存命名用户主题和键位映射。
-读取时允许未知顶层 TOML key。下文的定向 **Save Current Settings** 操作会保留未知顶层与
-嵌套 key，而不是重写完整配置。
+首次启动会创建这个文件，并在 `~/.sonicterm/themes/` 和
+`~/.sonicterm/keymaps/` 中写入可编辑示例。
 
-## 完整初始示例
+`theme` 和 `keymap` 可以写名称，也可以写 TOML 路径。使用名称时，SonicTerm
+先查找用户目录，再查找内置 `assets/` 目录。看起来像路径的值会直接使用。
 
-下面示例对应当前生成的 starter surface，并显式写出默认值；不需要覆盖的字段可以省略。
+SonicTerm 允许并保留 TOML 中的未知 key。当前 build 没有实现的未知 key 不会改变行为。
+
+### 支持的 key 与默认值
+
+#### 顶层
+
+| Key | 默认值 | 行为 |
+| --- | --- | --- |
+| `theme` | `"wezterm"` | 选择主题。参见 [主题](Themes)。 |
+| `keymap` | `"sonicterm-macos"`、`"sonicterm-windows"` 或 `"sonicterm-linux"` | 选择当前平台的 keymap。参见 [快捷键](Keybindings)。 |
+| `locale` | `""` | 选择 `en`、`zh-CN` 或 `ja`。空值依次使用 `SONIC_LOCALE`、系统 locale、`en`。 |
+| `quit_on_last_window_close` | `true` | macOS 中设为 `false` 后，最后一个窗口关闭时进程仍留在 Dock。其它平台没有窗口时一定退出。 |
+| `tab_max_width` | `240` | 单个标签页的最大逻辑像素宽度。非有限值或非正值会被忽略。标签太多时仍会平均分配宽度。 |
+
+#### `[font]`
+
+| Key | 默认值 | 行为 |
+| --- | --- | --- |
+| `family` | `"Rec Mono St.Helens"` | 主字体族。缺失的字符使用回退字体。 |
+| `size` | `13` | 字号，单位为 point。 |
+| `line_height` | `1.3` | 行高倍率。 |
+| `weight_scale` | `1.0` | 只调整所配置字体族的普通文字粗细。有效范围是 `0.5..=5.0`；其它值会变成 `1.0`。Cell metrics、回退字形、彩色 emoji 和 SGR bold 不变。 |
+
+字体设置会同时用于终端文字和普通应用文字。修改 `family`、`size` 或
+`line_height` 时，每个可见 pane 的 grid 与 PTY 都会重新调整大小。只修改
+`weight_scale` 不会改变 metrics。字体 shaping 与 fallback 的详细说明见
+[渲染与字体](Rendering-and-Fonts)。
+
+#### `[window]`
+
+| Key | 默认值 | 行为 |
+| --- | --- | --- |
+| `cols` | `100` | 新窗口的初始列数。 |
+| `rows` | `30` | 新窗口的初始行数。 |
+| `padding_left` | `12` | 内容左侧 padding，单位为逻辑像素。 |
+| `padding_right` | `12` | 内容右侧 padding，单位为逻辑像素。 |
+| `padding_top` | `8` | 内容上方 padding，单位为逻辑像素。 |
+| `padding_bottom` | `4` | 内容下方 padding，单位为逻辑像素。 |
+| `decorations` | `true` | 为新窗口启用原生标题栏装饰。 |
+| `warm_window_pool` | `1` | 为快速拖出标签页预留的隐藏子窗口数量。`0` 关闭预热池。硬件渲染最多保留 `5` 个；软件渲染会把任何非零值限制为 `1`。 |
+
+Grid 尺寸始终有上限。每个轴最多是 `4096`，可见 grid 最多包含
+`524288` 个 cell，包含历史记录的完整 grid 最多包含 `1048576` 个 cell。
+
+#### `[terminal]`
+
+| Key | 默认值 | 行为 |
+| --- | --- | --- |
+| `shell` | 省略 | 新 pane 使用的 shell。Windows 依次尝试 `PATH` 中的 `pwsh.exe`、已注册的 PowerShell 7、Microsoft Store 中的真实程序、Windows PowerShell、`cmd.exe`。Unix 依次尝试可执行的 `$SHELL`、当前用户 passwd 中的可执行 shell、`/bin/sh`。非空显式值优先。 |
+| `term_program` | `"SonicTerm"` | 新子 PTY 的 `TERM_PROGRAM`。`TERM_PROGRAM_VERSION` 通常是 SonicTerm 版本；`term_program = "WezTerm"` 时为 `20230712-072601`。 |
+| `scrollback` | `1000` | 每个 pane 请求保留的历史行数。`0` 关闭历史记录。Grid 和内存字节预算可能进一步降低实际值。 |
+| `clickable_local_targets` | `true` | 允许打开经过验证的原始本地文件和目录。URI 与 OSC 8 link 不受它控制。 |
+| `clickable_bare_names` | `true` | 允许按准确 pane 的可信本机 OSC 7 工作目录解析上下文名称。只有 `clickable_local_targets` 同时为 `true` 时才生效。 |
+| `cursor_blink` | `false` | 让光标闪烁。 |
+| `cursor_shape` | `"block"` | 可选 `block`、`bar` 或 `underline`。 |
+
+Scrollback 行数与内存预算会同时限制历史记录。包含丰富属性的行可能先达到
+字节预算。参见 [内存](Memory)。
+
+#### `[appearance]`
+
+| Key | 默认值 | 行为 |
+| --- | --- | --- |
+| `backdrop` | `"opaque"` | 可选 `opaque`、`mica`、`acrylic`、`tabbed`。Windows 会尽力应用对应 DWM 材质。Linux 启动时只使用 `opaque`，请求其它值会记录 warning。macOS 只把非 `opaque` 值当作需要 alpha 的窗口；这些 Windows 材质名称不会选择 macOS 材质。 |
+| `opacity` | `1.0` | 终端背景透明度，会限制在 `0.0..=1.0`。 |
+| `scrollbar` | `"auto"` | 可选 `auto`、`always`、`never`。没有可滚动历史时，`always` 也不会显示。 |
+| `panel_padding` | `2.0` | 浮动面板内部 padding，单位为逻辑像素。负值按 `0` 处理。 |
+| `software_render_mode` | `"auto"` | `auto` 在检测到软件 adapter 时降级；`force` 始终降级；`off` 从不降级。 |
+
+软件降级会降低帧率与动画成本。Windows 中，`software_render_mode = "force"`
+还会让新窗口变为不透明，因为软件 presenter 不能合成透明效果。如果配置了非
+`opaque` backdrop，SonicTerm 会记录包含配置值与实际值的 warning。`auto`
+不会覆盖 backdrop。
+
+滚动条 thumb 可以拖动。点击 track 会滚动一个 viewport。`auto` 会在滚动、
+拖动或鼠标靠近 pane 右边缘时显示。
+
+#### `[accessibility]`
+
+| Key | 默认值 | 行为 |
+| --- | --- | --- |
+| `high_contrast` | `false` | 把当前主题的前景色和背景色改为 `#ffffff` 与 `#000000`。 |
+| `reduced_motion` | `false` | 可以解析和保留，但目前不会改变界面。 |
+| `strong_focus` | `false` | 可以解析和保留，但目前不会改变界面。 |
+
+#### `[notifications]`
+
+| Key | 默认值 | 行为 |
+| --- | --- | --- |
+| `long_command` | `false` | 在 Windows 上启用长命令桌面通知。macOS 和 Linux 目前不发送此通知。 |
+| `threshold_secs` | `10` | 命令报告的耗时必须大于此值。 |
+
+#### `[logging]`
+
+| Key | 默认值 |
+| --- | --- |
+| `level` | `"warn"` |
+| `max_file_size_mb` | `10` |
+| `max_rotated_files` | `3` |
+| `max_age_days` | `2` |
+| `max_crash_dumps` | `10` |
+| `max_crash_age_days` | `2` |
+| `max_crash_bytes` | `10485760` |
+| `max_breadcrumb_files` | `10` |
+| `max_breadcrumb_age_days` | `2` |
+| `max_breadcrumb_bytes` | `1048576` |
+
+`level` 可选 `error`、`warn`、`info`、`debug`。Logging 在启动时初始化，
+所以修改这些值后需要重启。文件位置、清理规则和诊断方法见 [日志](Logging)。
+
+### 编辑与重载
+
+在命令面板中执行 **Edit sonicterm.toml** 可以打开标准配置文件。SonicTerm
+只在启动和执行 **Reload Config** 时读取它，没有文件 watcher。
+
+每次重载都会重新读取所选主题与 keymap 文件，即使名称没有变化。以下设置会
+应用到现有窗口：
+
+- 主题、keymap 与 locale；
+- 字体族、字号、行高与字重；
+- 内容 padding、opacity、滚动条和 panel padding；
+- 光标形状与闪烁；
+- scrollback 与本地目标策略；
+- 标签页宽度、预热窗口目标、软件降级、无障碍与通知设置。
+
+有些设置只影响重载后新建的对象：
+
+- `cols`、`rows`、`decorations` 和原生 `backdrop` 只影响新窗口；
+- `shell` 与 `term_program` 只影响新 pane；
+- logging 设置需要重启。
+
+修改 `backdrop` 或 `software_render_mode` 可能涉及原生窗口初始化。如果需要完整
+应用原生窗口变化，而不只是更新 renderer 策略，请重启 SonicTerm。
+
+### 保存当前字体设置
+
+**Save Current Settings** 只修改 `~/.sonicterm/sonicterm.toml` 中的两个值：
 
 ```toml
-theme = "wezterm"
-# 平台默认：sonicterm-macos / sonicterm-windows / sonicterm-linux
-keymap = "sonicterm-macos"
-# 空字符串表示：SONIC_LOCALE -> OS locale -> English。
-locale = ""
-# macOS 中设为 false 时，最后一个窗口关闭后可继续留在 Dock；其它平台无窗口时退出。
-quit_on_last_window_close = true
-tab_max_width = 240
-
 [font]
-family = "Rec Mono St.Helens"
 size = 13
-line_height = 1.3
 weight_scale = 1.0
-
-[window]
-cols = 100
-rows = 30
-padding_left = 12
-padding_right = 12
-padding_top = 8
-padding_bottom = 4
-decorations = true
-# 旧版兼容 key；新配置优先使用 [appearance]。
-opacity = 1.0
-blur = false
-warm_window_pool = 1
-
-[terminal]
-# 省略则自动探测。Windows：pwsh -> Windows PowerShell -> cmd；
-# macOS/Linux：$SHELL。
-# shell = "pwsh.exe"
-term_program = "SonicTerm"
-scrollback = 1000
-# 使用 Cmd/Ctrl 点击经过异步验证的本地文件和目录。
-clickable_local_targets = true
-# 同时按准确 pane 的可信 OSC 7 CWD 解析完整裸 token。
-clickable_bare_names = true
-cursor_blink = false
-cursor_shape = "block"       # block | bar | underline
-
-[logging]
-level = "warn"               # error | warn | info | debug
-max_file_size_mb = 10
-max_rotated_files = 3
-max_age_days = 2
-max_crash_dumps = 10
-max_crash_age_days = 2
-max_crash_bytes = 10485760        # 10 MiB
-max_breadcrumb_files = 10
-max_breadcrumb_age_days = 2
-max_breadcrumb_bytes = 1048576    # 1 MiB
-
-[appearance]
-backdrop = "opaque"           # opaque | mica | acrylic | tabbed
-opacity = 1.0
-scrollbar = "auto"            # auto | always | never
-panel_padding = 2.0
-software_render_mode = "auto" # auto | force | off
-
-[render]
-# 保留的兼容 key；当前 renderer 不读取它。
-alt_screen_bg_fill = "v2"
-
-[accessibility]
-high_contrast = false
-reduced_motion = false
-strong_focus = false
-
-[notifications]
-long_command = false
-threshold_secs = 10
 ```
 
-## 配置分区与行为
+写入的是当前会话字号和当前有效的 `weight_scale`。该命令会保留注释、顺序、
+换行格式，以及其它所有已知或未知 key。它不会保存当前会话主题或其它运行状态。
+这两个值已经生效，因此保存后不会重载。
 
-### 顶层选择
+如果文件不存在，SonicTerm 会先创建初始文件。进程内锁和持久的
+`sonicterm.toml.save.lock` sidecar 会阻止两个 SonicTerm 同时保存。替换文件前，
+程序还会再次比较精确字节。编辑器并发修改、TOML 格式错误、字体值无效或锁冲突
+都会拒绝写入。现有文件和 reset 基线保持不变，并显示 Error 通知。
 
-- `theme` 接受名称或直接 TOML 路径。命名查找先看 `~/.sonicterm/themes/<name>.toml`，再看内置资产。
-- `keymap` 同样接受名称或直接路径，并遵循用户文件优先。
-- `locale` 支持内置 `en`、`zh-CN`、`ja`；空值自动协商。
-- `tab_max_width` 限制单个标签页逻辑像素宽度；标签拥挤时仍会平均缩小。
-- `quit_on_last_window_close=false` 允许 macOS 最后窗口关闭后进程仍留在 Dock。
+保存成功时，SonicTerm 会先在配置目录写入临时文件，再原子替换配置，并显示
+Info 通知。读取者只会看到完整旧文件或完整新文件；突然断电时的持久性不在此保证内。
 
-`tab_close_button_color` 仅为兼容旧配置而继续接受。当前不再绘制关闭按钮，因此该 key
-没有视觉效果，不应加入新配置。
+### 错误与恢复
 
-### 字体
+启动时，如果配置不可读或 TOML 格式错误，SonicTerm 会记录 warning 并使用默认值，
+保证应用仍可打开。所选主题无效时回退到内置 `wezterm`。所选 keymap 无效时回退到
+当前平台的内置 keymap。
 
-`family`、`size`、`line_height`、`weight_scale` 是 SonicTerm 对外字体配置。
-`weight_scale = 1.0` 保持字体原始覆盖率。允许范围为 `0.5..=5.0`；无效值回退为 `1.0`。
-小于 `1.0` 会让文本更细，大于 `1.0` 会让其更粗；两者都不会改变 cell metrics
-或替代 SGR bold。
-
-**`weight_scale` 只作用于所配置的 `family`。** 该字体不包含的字符会由回退字体绘制，
-其粗细由那个字体自己的设计者决定，无论本设置取何值都保持不变。这条边界是刻意的：
-该设置指名的是一个字体族，而去改变另一个字体族，等于把你对自己字体的意图施加到
-一个你从未选择的字体上。两者相邻时这种不一致最为明显——回退字形变粗或变细，而
-来自你所配置字体的邻居纹丝不动。
-
-`weight_scale` 分两个阶段生效，且在 `1.0` 以外的任何取值下两个阶段都会执行。第一阶段
-重映射字形覆盖率，仅影响抗锯齿边缘。由于已经完全不透明的字干像素既无法进一步加深也
-无法变浅，在 HiDPI/Retina 屏幕上字干核心本身就是实心的，因此仅靠覆盖率几乎看不出变化。
-第二阶段改变光栅化轮廓——大于 `1.0` 时扩张，小于 `1.0` 时收缩——真正增减墨量，在任何
-缩放比例下都可见。扩张结果会裁回原始字形 tile，并使用与字形空白边距无关的一个光栅像素
-上限。因此 tile 尺寸、原点、cell metrics 与 advance 均保持不变：调整粗细不会同时改变
-视觉尺寸，平直边缘的字形也不会仅因接触 tile 边缘而失去加粗效果。HiDPI 屏幕通常适合
-`2.0`-`3.0`；`5.0` 属于刻意加粗的极值，`0.5` 则是刻意变细的极值。
-
-平台 rasterizer policy 在内部决定：Windows 默认 DirectWrite 并以 FreeType 回退；
-macOS/其它 Unix 使用 FreeType。当前 `sonicterm.toml` 中不存在
-`[font].font_rasterizer` key。
-
-`weight_scale` 也可以直接在命令面板中调整，无需编辑文件：**Increase Font Weight
-(Bolder)** 和 **Decrease Font Weight (Thinner)** 每次调整 `0.25`，**Reset Font
-Weight to Config** 回到配置值。搜索 `bolder`、`thinner`、`heavier`、`lighter` 均可
-找到。除非运行 **Save Current Settings**，否则字重调整只在当前会话生效；重载或重启会
-回到文件中的值。三种字重 action 默认都没有快捷键，但都可以绑定——参见
-[Keybindings](Keybindings)。
-
-运行时改变 `size` 或 `weight_scale` 会重建共享的已配置字体栈；普通终端文本、Tab 标题、
-通知，以及命令面板的查询文本、结果行、快捷键提示、footer 和其它普通 chrome 都使用该字体栈。
-字重变化只作用于已配置字体族中的普通字形；回退字形、彩色 emoji、SGR 或其它有意加粗的文本
-保持原有行为。字体变更还会使文本 cache 失效。family、size、line-height 变更会按各自
-pane rect resize 每个可见窗格的 grid 与 PTY；仅修改 weight 不改变 metrics。
-
-### 窗口与外观
-
-`[window].cols`、`rows` 定义新窗口初始 grid。padding 是终端内容周围的逻辑像素。
-`warm_window_pool` 控制用于降低 tab tear-out 延迟的隐藏预创建子窗口。设为 `0` 会关闭
-该池；默认值 `1` 保留一个可立即 tear-out 的预热窗口。硬件渲染会遵循不超过 `5` 的
-配置目标；软件渲染会把任何非零值限制为 `1`，以约束每个 renderer 的内存基线。预热窗口
-被采用时，SonicTerm 会先重新应用当前字体（包括会话内字重）、主题、标签栏可见性、原生
-背景、显示缩放与尺寸，再将窗口显示出来，因此首个可见帧不会暴露等待期间缓存的旧状态。
-
-当前生效的外观配置是 `[appearance].opacity` 与 `backdrop`。旧的 `[window].opacity`、
-`blur` 仍可反序列化，但当前启动与重载路径不会使用它们，不应依赖。Backdrop material
-依赖平台；不支持的选项会回退，不改变终端语义。
-
-滚动条支持交互：拖动 thumb 可浏览历史，点击 thumb 上方或下方的 track 会按一整个视口翻页。
-`auto` 模式会在滚动/拖动活动或指针靠近窗格右边缘时显示。
-
-`software_render_mode` 控制无 GPU 情况：
-
-- `auto` 跟随 adapter 检测；
-- `force` 始终使用降级/软件策略；
-- `off` 从不启用降级。
-
-降级会降低帧率与动画成本。Windows 可通过 GDI 合成并呈现确定性的 CPU BGRA frame。
-
-**在 Windows 上，`force` 会覆盖 `backdrop`。** 软件呈现器无法合成透明效果，因此
-`force` 下的窗口一律不透明，无论 `backdrop` 配置为何 —— `mica`、`acrylic`、
-`tabbed` 都会被解析为 `opaque`。屏幕上无法区分「背景效果已生效」与「背景效果被
-覆盖」，因此 SonicTerm 会在 `warn` 级别写出说明：
-
-```
-software_render_mode = force overrides the configured backdrop;
-the software presenter cannot composite transparency
-  configured=Mica applied=Opaque
-```
-
-`auto` 不会这样做：它在检测到软件 adapter 时降级渲染，但保留已配置的背景效果。
-只有 `force` 会覆盖它。
-
-### 终端
-
-未配置 `shell` 时，Windows 依次查找 PowerShell 7（含 Store package）、Windows PowerShell、cmd；
-macOS/其它 Unix 使用 `$SHELL`。`term_program` 写入子进程的 `TERM_PROGRAM`。
-某些暂不识别 SonicTerm 的程序可尝试 `term_program = "WezTerm"`。
-
-`scrollback` 按窗格保存；重载调小会立即删除最老历史，`0` 关闭历史。光标形状与 blink 会在重载时生效。
-
-`clickable_local_targets` 控制原始绝对路径、当前用户主目录路径（`~/...`）、带分隔符的
-相对路径（`src/main.rs`）、显式点相对路径和 contextual 裸文件系统目标，也支持包含普通空格
-的形式；默认为 `true`，设为 `false` 不影响 URI 与 OSC 8 activation。
-`clickable_bare_names` 是默认开启的从属 switch：只有 `clickable_local_targets` 同时启用时，
-它才允许行内候选按准确 pane 的可信本机 OSC 7 CWD 解析。有界后台 probe 最多检查 37 个候选，
-每个候选最多跨越 8 个非空格部分，并选取包含鼠标 cell 的最长、无歧义且可打开候选；被阻止或
-同长度有歧义的候选会 fail closed。这会有意允许列文本
-在 CWD 中存在同名合格条目时变为目标；grammar 与阻止的目标类别见 [用法 / Usage](Usage)。
-重载任一 switch 都会立即撤销所有窗口中已有的本地目标 hover 与 probe authorization。
-
-### 日志
-
-见 [日志 / Logging](Logging)。默认 `warn`；`debug` 会启用 renderer timing 与更多诊断事件。
-
-### Render 兼容设置
-
-`alt_screen_bg_fill` 仍可反序列化为保留的兼容 key，但当前 renderer 不读取它。新行为
-不应依赖在这里选择 `v1` 或 `v2`。
-
-旧配置可能包含 `glyph_fit = "v1"` 或 `"v2"`。SonicTerm 仍把这个未知 key 作为兼容
-输入接受，因此旧文件可以继续加载；但它从未连接到运行时 renderer，现在也不再由配置
-序列化或文档列为生效设置。单 cell 状态标记的适配现在是 renderer 正确性约束，而不是
-用户可选的外观开关。
-
-### 无障碍与通知
-
-`high_contrast` 已生效，会把主题重新应用为白字黑底。`reduced_motion` 和 `strong_focus`
-目前是仅配置层保留字段：SonicTerm 会保存并在重载时应用它们，但尚不会改变呈现。
-`long_command` 为运行超过 `threshold_secs` 的命令启用完成通知。
-
-## 保存、编辑与重载
-
-使用命令面板中的 **Save Current Settings**、**Edit sonicterm.toml**、**Edit
-keymap.toml** 和 **Reload Config**。
-
-**Save Current Settings** 只会修补 `~/.sonicterm/sonicterm.toml` 中的两个值：当前缩放后的
-`[font].size` 与当前有效且安全的 `[font].weight_scale`。它会有意保留主题、locale、所有
-无关的已知设置、未知顶层与嵌套 key、注释，以及受支持的顺序和格式；窗口、窗格、Tab 与其它
-运行时模式也不会变化。该命令不重载或重新应用文件，因为保存的两个值已经实时生效。
-
-若配置文件不存在，SonicTerm 会先创建带注释的初始配置，再修补这两个字体值。保存时会以
-非阻塞方式取得进程内锁和跨进程锁；跨进程锁使用持久的 `sonicterm.toml.save.lock` sidecar，
-并在提交前立即重新核对最初读取的精确字节。若另一个 SonicTerm 实例正在保存，或最终核对发现
-编辑器已经修改配置，SonicTerm 会拒绝写入并提示重试，而不会覆盖较新的文件。修补内容先写入配置目录
-中的临时文件，再以原子方式替换配置，因此读取者会看到完整旧文件或完整新文件；这不承诺断电后
-的持久性。格式错误的文件同样会被拒绝。成功时，字号与字重的重置基线会推进到所保存的值，并
-显示 Info 确认；任何失败都会保持已有文件、实时值与重置基线不变，并显示 Error 通知。
-
-SonicTerm 只在启动时读取配置，之后仅在运行 **Reload Config** 时重新读取。没有后台
-文件 watcher，因此保存外部编辑不会自动生效——这样运行进程中就不存在 watcher 线程及其
-文件系统句柄。可以自由编辑，需要生效时再重载。
-
-重载会连同 `sonicterm.toml` 一起重新读取它所指定的主题与 keymap 文件，即使 `theme`
-和 `keymap` 选择器没有变化。因此修改自定义主题或自定义命名 keymap 的文件内容也会在
-重载时生效，无需改名或重启。
-
-文件损坏时会记录错误并继续使用旧配置。启动更宽容：已有配置损坏时发 warning 并以默认值
-启动，保证 app 可打开。
-
-字体、locale、光标、padding、scrollbar policy、scrollback、主题和 keymap 都会在重载时
-生效。原生 decorations 和部分平台初始化仍可能需要新窗口或重启。
-
-## 布局示意
-
-```text
-+----------------------- window -----------------------+
-| tab/title UI                                         |
-| padding_top                                          |
-| padding_left  terminal pane grid  padding_right      |
-| padding_bottom                                       |
-+------------------------------------------------------+
-
-+------------- floating panel -------------+
-| panel_padding                           |
-| command/search content                  |
-| panel_padding                           |
-+-----------------------------------------+
-```
+执行 **Reload Config** 时，如果 `sonicterm.toml` 不可读或格式错误，当前整套配置
+保持不变。如果配置本身有效，但主题或 keymap 读取失败，SonicTerm 会保留当前主题
+或 keymap、记录错误，并应用其它有效设置。结构正确的 keymap 中，如果只有某个
+binding 的 action 无法解析，SonicTerm 只跳过该 binding，其它 binding 仍会生效。

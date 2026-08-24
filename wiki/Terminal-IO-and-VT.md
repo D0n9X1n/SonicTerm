@@ -2,541 +2,438 @@
 
 ## English
 
-This page explains the path between a shell process and the cells shown by
-SonicTerm. Local PTY operation is the shipping path. SSH and the mux daemon are
-present in the workspace but have narrower status described below.
+SonicTerm’s terminal core moves bytes between a child process and a bounded
+cell grid. This page owns the local PTY (pseudo-terminal) lifecycle, VT
+terminal-control protocols, grid rules, and terminal input routing. Rendering is covered by
+[Rendering and Fonts](Rendering-and-Fonts) and [Rendering Modes](Rendering-Modes);
+resource totals are in [Memory](Memory).
 
-## End-to-end byte flow
+### Scope
 
-```mermaid
-flowchart TD
-    child["child process"]
-    reader["PTY master reader thread"]
-    recv["crossbeam Receiver&lt;Bytes&gt;"]
-    worker["per-pane VT worker"]
-    parser["vte::Parser + SonicTerm Performer"]
-    grid["Grid cells / scrollback / dirty rows / VtEvent"]
-    redraw["typed redraw event"]
-    app(["app + renderer"])
+The local PTY, parser, grid, keyboard, paste, mouse-tracking, selection, and copy
+paths are cross-platform application behavior. The optional SSH transport exists
+behind the `sonicterm-io/ssh` feature, but no shipping GUI call site connects an
+`SshHandle`. `sonicterm-mux` is a standalone workspace binary that is not used
+by the GUI and is not packaged.
 
-    child --> reader
-    reader --> recv
-    recv --> worker
-    worker --> parser
-    parser --> grid
-    grid --> redraw
-    redraw --> app
-
-    input["keyboard / paste / terminal reply"]
-    sender["Sender&lt;Vec&lt;u8&gt;&gt;"]
-    writer["PTY writer thread"]
-    child2(["child process"])
-
-    input --> sender
-    sender --> writer
-    writer --> child2
-```
-
-The reader uses `bytes::Bytes` so parsed output can move through the channel
-without repeatedly copying large bursts. Input uses owned `Vec<u8>` messages.
-Terminal replies such as DSR, DA, XTVERSION, palette queries, and kitty keyboard
-queries use the same writer channel as user input, but parser/grid locks are
-released before those writes occur.
-
-## Local PTY lifecycle
-
-`PtyHandle` owns:
-
-- the output receiver and input sender;
-- a deduplicating resize closure;
-- the child process behind a mutex;
-- the selected shell program path.
-
-Spawn sequence:
+### Byte and thread flow
 
 ```mermaid
 flowchart TD
-    shell["resolve configured/default shell"]
-    pair["open native PTY pair through portable-pty"]
-    env["set TERM, COLORTERM, TERM_PROGRAM, TERM_PROGRAM_VERSION"]
-    spawn["spawn child and close the slave in the parent"]
-    reader(["start sonic-pty-reader"])
-    writer(["start sonic-pty-writer"])
+    child["child process"] --> reader["sonic-pty-reader"]
+    reader --> output["bounded Receiver&lt;Bytes&gt;"]
+    output --> worker["per-pane VT worker"]
+    worker --> parser["vte::Parser + Performer"]
+    parser --> grid["Grid + VtEvent"]
+    grid --> redraw["typed redraw event"]
+    redraw --> app["winit app and renderer"]
 
-    shell --> pair
-    pair --> env
-    env --> spawn
-    spawn --> reader
-    spawn --> writer
+    input["keyboard, paste, mouse, terminal reply"] --> queue["bounded Sender&lt;Vec&lt;u8&gt;&gt;"]
+    queue --> writer["sonic-pty-writer"]
+    writer --> child
 ```
 
-On Windows, automatic shell selection prefers PowerShell 7 (`pwsh.exe`),
-including Microsoft Store installs, then Windows PowerShell, then `cmd.exe`.
-On Unix it uses `$SHELL`, falling back to `/bin/zsh`. macOS zsh/bash launches as
-a login shell in normal operation. Clean end-to-end test mode suppresses shell
-profiles.
+The reader splits a reusable 64 KiB `BytesMut` ring into reference-counted
+`bytes::Bytes` views. The output channel holds at most 64 chunks. A full channel
+blocks the reader and lets the OS PTY apply backpressure; it does not grow.
+Queued views can pin at most 64 distinct rings, or 4 MiB, although measured
+shell workloads pin one 64 KiB ring.
 
-The resize closure packs rows and columns into one atomic value and suppresses
-identical resizes. This avoids unnecessary SIGWINCH/ConPTY reflow when switching
-tabs or recomputing an unchanged layout.
+Terminal input is non-blocking. Its channel holds four `Vec<u8>` messages, each
+at most 16 MiB. Oversize, full-queue, and disconnected-writer failures return a
+typed `PtyInputError` that retains the rejected bytes for retry or a visible
+notification. Parser replies use the same bounded sender and never write while
+a parser or grid lock is held.
 
-`PtyHandle::drop` is a process-lifecycle boundary: Unix sends SIGKILL first,
-then the portable child kill method is attempted, followed by a bounded wait.
-A warning is logged rather than hanging the UI forever if the child cannot be
-reaped within the deadline.
+The VT worker coalesces output before requesting a frame. A quiet interval of
+3 ms flushes a trailing batch; a batch also flushes after 128 KiB or 8 ms. It
+copies the current `WindowId` under a short guard, releases the guard, and posts
+`UserEvent::RequestRedraw`. Worker threads do not call AppKit, Win32, or winit
+window methods.
 
-## App-side pane workers
+### Local PTY contract
 
-Each pane combines a `PtyHandle`, `Parser`, and `Grid`. The app starts:
+`PtyHandle` owns the child, PTY master, reader and writer threads, bounded
+channels, selected shell path, and a resize callback. The callback packs
+`(cols, rows)` into one atomic value and suppresses identical requests, avoiding
+unnecessary SIGWINCH or ConPTY reflow.
 
-- a VT reply thread that forwards parser-generated replies to the PTY writer;
-- a VT worker that receives child output, advances the parser, extracts title,
-  media, and command side effects, and coalesces redraw notifications.
+If `[terminal].shell` is absent:
 
-The worker holds the parser mutex only while reading and mutating terminal state.
-It then releases the guard before copying the current redraw target and posting
-`UserEvent::RequestRedraw`. This prevents an AppKit/Win32 call while a parser
-lock is held and lets the target window change during tab transfer.
+- Windows tries PowerShell 7 (`pwsh.exe`, including registered and Microsoft
+  Store installations), Windows PowerShell, then `cmd.exe`.
+- Unix uses an executable `$SHELL`, then the current user’s executable passwd
+  shell, then `/bin/sh`.
+- Normal macOS launches zsh/tcsh/csh with `-l` and bash/fish with `--login`.
+  Clean end-to-end mode instead suppresses profiles and banners.
 
-## VT parser
+The child starts in an explicit valid working directory when supplied,
+otherwise in `HOME` when available. SonicTerm sets:
+
+```text
+TERM=xterm-256color
+COLORTERM=truecolor
+TERM_PROGRAM=<configured term_program>
+TERM_PROGRAM_VERSION=<matching terminal version>
+```
+
+For `TERM_PROGRAM=SonicTerm`, the version is the workspace package version. For
+`TERM_PROGRAM=WezTerm`, SonicTerm advertises `20230712-072601`, the fixed
+capability-compatible WezTerm version.
+
+Dropping `PtyHandle` cancels native IO, terminates the child, closes the PTY,
+and attempts bounded reaping. Reader and writer shutdown and child reaping use
+a 500 ms deadline. Unix kills the child session and rechecks descendants before
+reaping the leader, so a reused process or session id is not signalled. Windows
+drains a cloned ConPTY reader while closing the master, with a 2 s close
+deadline. Timeout and cleanup failures are logged; teardown does not wait
+forever.
+
+### VT parser and protocols
 
 `sonicterm-vt::Parser` wraps `vte::Parser` and a SonicTerm `Performer`. The
-performer owns the grid and current terminal attributes. The parser includes an
-ASCII fast path: while the state machine is in ground state, printable runs are
-inserted in bulk until an escape/control byte appears.
+performer owns the `Grid` and terminal attributes. In ground state, printable
+ASCII runs are inserted in bulk until an escape or control byte appears.
 
-Supported behavior includes:
+Current protocol support includes:
 
-- cursor movement, save/restore, insert/delete characters and lines;
-- erase operations with background-color erase semantics;
-- SGR attributes, indexed color, true color, underline styles and colors;
-- primary and alternate screens, DECSTBM scroll regions, reverse index;
-- autowrap, application cursor keys, cursor visibility and shape;
-- bracketed paste, focus reporting, mouse tracking, SGR mouse mode;
-- kitty keyboard flag push/pop/set/query;
-- OSC titles, working directory, hyperlinks, clipboard events, palette/color queries;
-- OSC 133 shell-integration prompt markers;
-- iTerm2, kitty, and Sixel media events with a 16 MiB payload cap.
+- cursor movement, save/restore, insert/delete character and line, erase,
+  DECSTBM, reverse index, autowrap, cursor visibility and shape;
+- SGR styles, indexed and true color, underline style and color, and
+  background-color erase semantics;
+- primary and alternate screens, application cursor keys, bracketed paste,
+  focus reporting, and kitty keyboard flag set/push/pop/query;
+- OSC 0/2 titles, host-aware OSC 7 working directory, OSC 8 hyperlinks, OSC 52
+  clipboard events, OSC 4/10/11/12 color queries, and OSC 133 prompt markers;
+- DSR, DA, XTVERSION, palette, and kitty keyboard replies;
+- iTerm2, kitty, and Sixel media events.
 
-Media transfers draw staging from a 64 MiB process-wide pool, which
-guarantees 13 simultaneous transfers at the 4 MiB floor. A transfer that
-cannot be staged is refused and renders nothing rather than rendering
-partially, and an oversized or truncated Sixel is likewise dropped: a cut
-Sixel is byte-identical to a complete short one, so a partial render would
-be indistinguishable from correct output. A transfer that stops receiving
-for a full minute is abandoned and its staging reclaimed. See
-[Memory](Memory) for the bounds and how to read them from the log.
+OSC 7 keeps the decoded path separate from its authority-bearing, host-aware
+snapshot. Relative local-path authorization uses only the strict snapshot. A
+raw OSC 4 collector, capped at 4 KiB, preserves palette queries that exceed
+vte’s parameter count and suppresses the truncated duplicate callback.
 
-The parser returns `VtEvent`s such as title changes, bell, hyperlink, clipboard,
-media, command state, and cursor visibility. The app consumes these outside the
-parser hot path.
+An escape sequence may retain at most 1 MiB. After that, the parser discards
+through the sequence terminator instead of treating the payload as printable
+text. One media payload is limited to 16 MiB. In-flight media captures share a
+64 MiB process staging pool, with a 4 MiB floor and 13 simultaneous captures
+guaranteed at that floor. A capture that cannot reserve staging is refused and
+renders nothing. Oversized, cancelled, or truncated media is not partially
+rendered; after cancellation the parser continues swallowing that payload until
+its terminator. Two unchanged 30 s progress samples cancel a stalled capture,
+so the stated stall interval is one minute.
 
-A raw OSC 4 capture exists because vte limits the number of OSC parameters. It
-collects the full palette query and suppresses the truncated duplicate callback.
+### Mouse tracking and selection
 
-## Grid model
+`MouseTracking` has one current value; modes do not form a stack:
 
-A `Grid` owns:
+| DEC mode | `MouseTracking` | Reports |
+| --- | --- | --- |
+| reset/default | `Off` | SonicTerm owns pointer gestures |
+| `DECSET ?1000` | `Button` | button press and release |
+| `DECSET ?1002` | `ButtonMotion` | button events and motion while a button is held |
+| `DECSET ?1003` | `AnyMotion` | button events, held motion, and no-button motion |
 
-- visible rows and bounded scrollback as `VecDeque<Line>`;
-- cursor and default cell state;
-- an optional boxed alternate-screen grid;
-- a revision counter and per-visible-row dirty flags;
-- up to 256 prompt regions in scrollback-absolute coordinates;
-- autowrap and pending-wrap state.
+The last `DECSET` among `?1000`, `?1002`, and `?1003` wins. `DECRST` for the
+active mode sets `Off`; reset of an inactive mode is a no-op. It does not
+restore an older mode. RIS also restores `Off`.
 
-Every meaningful mutation increments the revision and marks the affected rows.
-`clear_dirty` is presentation bookkeeping and does not increment the revision.
-A fresh grid starts fully dirty.
+A TUI is a terminal user interface: a full-screen text application running
+inside the terminal.
 
-### Wide and combining characters
+`DECSET ?1006` controls SGR mouse encoding independently; it does not enable
+tracking. Application-owned clicks, releases, wheel input, and eligible motion
+use SGR reports when `?1006` is active and the current legacy report otherwise.
+SGR uses one-based `CSI < Cb ; Cx ; Cy M` and lowercase `m` for release. Legacy
+uses `CSI M` plus three biased bytes and clamps the protocol coordinates to 223.
+Wheel reports use button codes 64 for up and 65 for down and have no release
+report.
 
-Width-two characters use a lead cell with `WIDE` plus a continuation cell with
-`WIDE_CONT`. Mutations expand or repair ranges so half a wide glyph cannot be
-left behind. Zero-width combining characters attach to the preceding lead
-cell's `extras` field, walking backward over a continuation cell if necessary.
+A press chooses and latches one gesture owner:
 
-### Scrolling and history
+- an unmodified press while tracking is active belongs to the TUI;
+- a Shift-press belongs to SonicTerm’s local selection, even while tracking is
+  active;
+- a press while tracking is `Off` is local;
+- a press consumed by tabs, splitters, scrollbars, or other chrome creates no
+  terminal gesture.
 
-Full-screen upward scrolling moves ejected rows into the scrollback deque and
-reuses old storage where possible. Region scrolling changes only the configured
-margin area; a full-height region deliberately uses the history-producing path.
-Changing the scrollback limit trims the oldest rows immediately. Cell-content
-changes advance a monotonic sequence and stamp only affected visible rows;
-cursor movement and presentation-only dirtiness do not. Ordinary primary-screen
-scrolling carries stamps with the text moving into history. Alternate-screen,
-zero-history, and partial-region scrolling instead restamp the fixed screen
-positions whose content changed. Visible stamps stay bounded by visible rows, while each bounded history row carries one stamp so a changed row keeps its identity when it enters scrollback.
+The gesture owner, press pane, tracking mode, and SGR/legacy profile are latched
+until release. Later modifier, pane-focus, mode, or `?1006` changes do not steal
+the gesture. A terminal release uses the press pane/profile and the last valid
+cell seen in that pane. `Button` suppresses held motion; `ButtonMotion` and
+`AnyMotion` report it. With no button held, only the current `AnyMotion` mode
+reports motion, using the current pane and encoding profile.
 
-### Line storage
+Selections are bound to their pane, primary/alternate buffer, content sequence,
+and scrollback-eviction baseline. Primary-screen scrolling carries selected
+text into history and rebases surviving endpoints. A buffer or pane change, an
+evicted selected row, or a changed row intersecting the selection clears it;
+unrelated row changes do not. The check runs before rendering and immediately
+before copy.
 
-`Line` switches transparently between:
+For an explicit alternate-screen copy, a successful clipboard write clears the
+selection. Clipboard failure preserves it so the user can retry. If content has
+become stale, SonicTerm clears the selection without copying and leaves the
+clipboard unchanged.
 
-- `Flat(Vec<Cell>)` for arbitrary content;
-- run-length `Cluster(Vec<Cluster>)` for repetitive rows.
+### Grid storage and invariants
 
-A line compresses only when the clustered representation is materially smaller.
-Content-equal flat and clustered lines iterate and hash identically. Mutating a
-clustered row degrades it to flat only when required, preserving rare metadata
-such as hyperlinks, combining codepoints, colors, and wide-cell flags.
+A `Grid` owns visible rows, bounded scrollback, cursor/default-cell state, dirty
+rows, content sequence numbers, an optional boxed saved primary screen, and up
+to 256 OSC 133 prompt regions in scrollback-absolute coordinates.
 
-### Prompt regions and selection access
+The exact geometry bounds are:
 
-OSC 133 prompt boundaries are stored in absolute history coordinates, enabling
-“previous/next prompt” navigation after scrolling. Selection state lives in
-`sonicterm-ui`; the grid exposes visible, scrollback, and absolute-row accessors
-so selection and search can operate across history.
+- at most 4,096 columns or rows on either axis;
+- at most 524,288 visible cells in one primary or alternate screen;
+- at most 1,048,576 cells across visible rows, history, and a saved primary
+  screen;
+- at most 64 UTF-8 bytes of combining/zero-width extras per cell.
 
-Selections record their pane, screen buffer, content sequence, and scrollback-
-eviction baseline. Ordinary primary-screen scrolling therefore carries selected
-text into history. If bounded history later removes older rows, fully surviving
-endpoints are rebased; a selection that lost any selected row is cleared. On
-either screen, changing panes or buffers clears the selection, and a post-baseline
-content change clears it only when the changed row intersects the selected range.
-The alternate screen has no scrollback, so a full-screen application scrolls by
-repainting fixed rows. Repainting an unrelated status line, spinner, or other row
-preserves the selection, as does a wheel event the application ignores at a
-scroll boundary. The same check runs before main/child rendering and again
-immediately before copy, preventing replacement text from reaching the clipboard
-while a redraw is still queued.
+The retained-byte enforcement target is
+`MAX_GRID_CELLS × size_of::<Cell>()`, about 24 MiB on the current build. It is a
+shared grid budget, not a second 24 MiB scrollback allowance. The configured
+`[terminal].scrollback` row count can bind first. Every 512 scrolled rows, the
+grid checks retained capacity; if compaction cannot bring it under the target,
+it drops oldest history in 64-row blocks. Lowering the configured row limit
+drops old rows immediately.
 
-## Optional SSH status
+Width-two characters use a `WIDE` lead cell and `WIDE_CONT` continuation. Range
+mutations expand or repair around them so half a glyph cannot remain. Combining
+characters attach to the previous lead cell. `Line` stores arbitrary rows as
+`Flat(Vec<Cell>)` and materially smaller repetitive rows as run-length
+`Cluster(Vec<Cluster>)`; both representations iterate and hash identically.
 
-The `sonicterm-io/ssh` feature adds a `russh` transport with PTY-like input,
-output, and resize channels. A dedicated thread runs a current-thread Tokio
-runtime. Authentication checks an explicit key or common `~/.ssh/id_ed25519`
-and `id_rsa` files.
+Every content mutation advances the grid revision, marks affected rows, and
+stamps changed content. Cursor-only and presentation-only changes do not advance
+the content sequence. Primary full-screen scroll moves row identity into
+history. Alternate-screen, zero-history, and partial-region scroll restamp the
+fixed screen positions that changed.
 
-Current limitations:
+### Unshipped transport seams
 
-- host keys are accepted unconditionally; no key is persisted or compared on later connections, so server identity is not authenticated;
-- ssh-agent, password, and keyboard-interactive auth are not implemented;
-- the GUI parses/validates SSH targets, but no shipping app call site currently connects an `SshHandle`.
+The optional `ssh` feature runs `russh` on a dedicated current-thread Tokio
+runtime and exposes PTY-like input, output, and resize channels. It checks an
+explicit key or `~/.ssh/id_ed25519` and `~/.ssh/id_rsa`. Host keys are accepted
+without persistence or comparison; ssh-agent, password, and
+keyboard-interactive authentication are absent. Because the GUI does not create
+an `SshHandle`, this is not a shipping remote-session feature.
 
-Treat SSH as an implementation seam, not a fully integrated user feature.
+`sonicterm-mux` currently implements length-prefixed bincode messages for list,
+spawn, attach, detach, input, resize, and kill. A session has a PTY, a 256 KiB
+raw-byte replay ring, and a bounded subscriber queue that drops its oldest event
+under backpressure. It forwards bytes without server-side VT parsing or
+grid-aware scrollback. No GUI or platform crate depends on it, and release
+workflows do not package it.
 
-## Mux daemon status
-
-`sonicterm-mux` is a standalone future persistent-PTY daemon. It is a workspace
-member and depends on `sonicterm-io`, but the GUI/platform crates do not depend
-on it and the release workflow does not package it.
-
-Its current protocol uses length-prefixed bincode messages for list, spawn,
-attach, detach, input, resize, and kill. Each session owns a PTY, a 256 KiB raw
-byte replay ring, and a bounded subscriber channel that drops the oldest event
-under back-pressure. It forwards raw bytes; it does not yet run server-side VT
-parsing or expose grid-aware scrollback.
-
-## Concurrency rules
-
-| Boundary | Rule |
-| --- | --- |
-| PTY reader/writer | dedicated named threads; channel handoff |
-| Child process object | mutex only for pid/kill/wait operations |
-| Parser/Grid | one mutable owner at a time through the pane parser lock |
-| PTY replies | never write while holding parser/grid locks |
-| Redraw target | copy `WindowId` under a short guard, then post after release |
-| Mux | session map lock outside per-pane replay/subscriber locks |
-
-## Representative sequences
-
-### Terminal reply
-
-```mermaid
-flowchart TD
-    csi["application sends CSI 6 n"]
-    dsr["vte dispatches DSR query"]
-    perf["Performer computes cursor row/column"]
-    reply["reply Sender&lt;Vec&lt;u8&gt;&gt;"]
-    path["VT-reply/PTY writer path"]
-    child(["child receives CSI &lt;row&gt;;&lt;col&gt; R"])
-
-    csi --> dsr
-    dsr --> perf
-    perf --> reply
-    reply --> path
-    path --> child
-```
-
-### Alternate-screen scroll
-
-```mermaid
-flowchart TD
-    enter["TUI enters DECSET 1049"]
-    save["save cursor + enter blank alternate grid"]
-    dirty["mark full pane dirty"]
-    scroll["linefeed/scroll inside alternate grid"]
-    repaint["any dirty alt-screen row causes full clipped-pane repaint"]
-    restore(["DECRST 1049 restores primary grid and marks it dirty"])
-
-    enter --> save
-    save --> dirty
-    dirty --> scroll
-    scroll --> repaint
-    repaint --> restore
-```
-
-## Where to read the code
+### Code locations
 
 | Topic | Primary paths |
 | --- | --- |
-| PTY/process boundary | `crates/sonicterm-io/src/pty.rs` |
+| PTY, shell, queues, teardown | `crates/sonicterm-io/src/pty.rs` |
 | Optional SSH | `crates/sonicterm-io/src/ssh.rs` |
-| Pane worker pump | `crates/sonicterm-app/src/app/spawn_pane.rs` |
-| VT parsing | `crates/sonicterm-vt/src/vt.rs` |
-| Grid and dirty rows | `crates/sonicterm-grid/src/grid.rs` |
-| Line compression | `crates/sonicterm-grid/src/line.rs` |
-| Hyperlink registry | `crates/sonicterm-grid/src/hyperlink.rs` |
-| Mux protocol/server | `crates/sonicterm-mux/src/{proto,frame,server,main}.rs` |
+| Pane worker and redraw coalescing | `crates/sonicterm-app/src/app/spawn_pane.rs` |
+| Main/child input routing | `crates/sonicterm-app/src/app/{window_event,child_window}.rs` |
+| VT parser and modes | `crates/sonicterm-vt/src/vt.rs` |
+| Grid and line storage | `crates/sonicterm-grid/src/{grid,line,hyperlink}.rs` |
+| Selection and copy | `crates/sonicterm-ui/src/selection.rs`, `crates/sonicterm-app/src/app/misc.rs` |
+| Mux protocol | `crates/sonicterm-mux/src/{proto,frame,server,main}.rs` |
 
 ## 中文
 
-本页解释 shell 进程与 SonicTerm 屏幕单元格之间的路径。本地 PTY 是当前发布版本的实际路径；
-SSH 和 mux daemon 虽在工作区中，但状态更受限，见下文。
+SonicTerm 的终端核心在子进程与有界单元格网格之间传递字节。本页负责本地 PTY
+生命周期、VT 协议、网格规则和终端输入路由。渲染见
+[渲染与字体](Rendering-and-Fonts)和[渲染模式](Rendering-Modes)，资源总量见
+[内存](Memory)。
 
-## 端到端字节流
+### 范围
 
-```mermaid
-flowchart TD
-    child["子进程"]
-    reader["PTY master reader 线程"]
-    recv["crossbeam Receiver&lt;Bytes&gt;"]
-    worker["每窗格 VT worker"]
-    parser["vte::Parser + SonicTerm Performer"]
-    grid["Grid 单元格 / scrollback / 脏行 / VtEvent"]
-    redraw["类型化重绘事件"]
-    app(["app + renderer"])
+本地 PTY、解析器、网格、键盘、粘贴、鼠标追踪、选择与复制路径属于跨平台应用行为。
+可选 SSH 传输位于 `sonicterm-io/ssh` 功能之后，但发布版 GUI 没有创建 `SshHandle`
+的调用点。`sonicterm-mux` 是工作区中的独立二进制，GUI 不使用，发布包也不包含。
 
-    child --> reader
-    reader --> recv
-    recv --> worker
-    worker --> parser
-    parser --> grid
-    grid --> redraw
-    redraw --> app
-
-    input["键盘 / 粘贴 / 终端回复"]
-    sender["Sender&lt;Vec&lt;u8&gt;&gt;"]
-    writer["PTY writer 线程"]
-    child2(["子进程"])
-
-    input --> sender
-    sender --> writer
-    writer --> child2
-```
-
-reader 使用 `bytes::Bytes`，使大批输出通过 channel 时避免反复复制；输入使用拥有所有权的
-`Vec<u8>`。DSR、DA、XTVERSION、调色板查询和 kitty keyboard 查询等回复与用户输入共用
-writer channel，但执行写入前会释放 parser/grid 锁。
-
-## 本地 PTY 生命周期
-
-`PtyHandle` 拥有：
-
-- 输出 receiver 和输入 sender；
-- 去重 resize 闭包；
-- mutex 后的子进程对象；
-- 已选择的 shell 路径。
-
-启动流程：
+### 字节与线程流
 
 ```mermaid
 flowchart TD
-    shell["解析配置/default shell"]
-    pair["通过 portable-pty 打开原生 PTY pair"]
-    env["设置 TERM、COLORTERM、TERM_PROGRAM、TERM_PROGRAM_VERSION"]
-    spawn["启动子进程，父进程关闭 slave"]
-    reader(["启动 sonic-pty-reader"])
-    writer(["启动 sonic-pty-writer"])
+    child["子进程"] --> reader["sonic-pty-reader"]
+    reader --> output["有界 Receiver&lt;Bytes&gt;"]
+    output --> worker["每窗格 VT 工作线程"]
+    worker --> parser["vte::Parser + Performer"]
+    parser --> grid["Grid + VtEvent"]
+    grid --> redraw["类型化重绘事件"]
+    redraw --> app["winit 应用与渲染器"]
 
-    shell --> pair
-    pair --> env
-    env --> spawn
-    spawn --> reader
-    spawn --> writer
+    input["键盘、粘贴、鼠标、终端回复"] --> queue["有界 Sender&lt;Vec&lt;u8&gt;&gt;"]
+    queue --> writer["sonic-pty-writer"]
+    writer --> child
 ```
 
-Windows 自动选择顺序是 PowerShell 7（含 Microsoft Store 安装）、Windows PowerShell、
-`cmd.exe`。Unix 使用 `$SHELL`，找不到时回退 `/bin/zsh`。正常 macOS 运行中 zsh/bash
-以 login shell 启动；干净 E2E 测试模式会禁用 shell profile。
+读取线程把可复用的 64 KiB `BytesMut` 环形缓冲拆成引用计数的 `bytes::Bytes`
+视图。输出通道最多保留 64 个数据块。通道满时读取线程等待，由操作系统 PTY
+施加背压，不会继续增长。排队视图最多可固定 64 个不同的环形缓冲，即 4 MiB；
+实测普通 shell 工作负载只固定一个 64 KiB 环形缓冲。
 
-resize 闭包把行列打包进一个原子值，并忽略完全相同的 resize，避免切换标签页或重复布局时产生
-多余 SIGWINCH/ConPTY reflow。
+终端输入不阻塞。通道最多保存四条 `Vec<u8>` 消息，每条最多 16 MiB。消息过大、
+队列已满或写入端断开时，会返回带类型的 `PtyInputError`，其中仍保留被拒绝的字节，
+便于重试或显示通知。解析器回复使用同一个有界发送端；持有解析器或网格锁时绝不写 PTY。
 
-`PtyHandle::drop` 是进程生命周期边界：Unix 先发 SIGKILL，再调用 portable child kill，
-然后限时等待。超过 deadline 时记录 warning，而不是让 UI 永久卡住。
+VT 工作线程会先合并输出，再请求一帧。连续 3 ms 没有新数据时刷新尾批次；批次达到
+128 KiB 或等待 8 ms 也会刷新。线程在短暂加锁时复制当前 `WindowId`，释放锁后发送
+`UserEvent::RequestRedraw`。工作线程不调用 AppKit、Win32 或 winit 窗口方法。
 
-## App 侧窗格 worker
+### 本地 PTY 契约
 
-每个窗格组合一个 `PtyHandle`、`Parser` 和 `Grid`。app 启动：
+`PtyHandle` 拥有子进程、PTY 主端、读写线程、有界通道、已选 shell 路径和尺寸调整
+回调。回调把 `(cols, rows)` 打包到一个原子值中，并忽略相同请求，避免多余的
+SIGWINCH 或 ConPTY 重排。
 
-- VT reply 线程，把 parser 生成的回复转发给 PTY writer；
-- VT worker，接收子进程输出、推进 parser、提取标题/媒体/命令 side effect，并合并重绘通知。
+未配置 `[terminal].shell` 时：
 
-worker 只在读取和修改终端状态时持有 parser mutex；之后释放 guard，再复制当前重绘目标并发送
-`UserEvent::RequestRedraw`。这样既不在 parser 锁内调用 AppKit/Win32，也允许标签页转移时更换目标窗口。
+- Windows 依次尝试 PowerShell 7（`pwsh.exe`，包括注册安装和 Microsoft Store
+  安装）、Windows PowerShell、`cmd.exe`。
+- Unix 依次使用可执行的 `$SHELL`、当前用户 passwd 记录中的可执行 shell、`/bin/sh`。
+- macOS 正常运行时，zsh/tcsh/csh 使用 `-l`，bash/fish 使用 `--login`。
+  干净端到端测试模式则关闭配置文件和启动横幅。
 
-## VT parser
+若提供了有效的显式工作目录，子进程从该目录启动；否则在可用时使用 `HOME`。
+SonicTerm 设置：
 
-`sonicterm-vt::Parser` 包装 `vte::Parser` 与 SonicTerm `Performer`；performer 拥有 grid 和当前终端属性。
-当状态机处于 ground state 时，parser 的 ASCII 快速路径会批量插入可打印字符，直到遇到 escape/control byte。
-
-支持行为包括：
-
-- 光标移动、保存/恢复、插入/删除字符和行；
-- 带背景色擦除语义的 erase；
-- SGR 属性、索引色、真彩色、下划线样式和颜色；
-- 主/备用屏幕、DECSTBM 滚动区域、reverse index；
-- 自动换行、应用光标键、光标可见性和形状；
-- bracketed paste、focus report、mouse tracking、SGR mouse；
-- kitty keyboard flag 的 push/pop/set/query；
-- OSC 标题、工作目录、超链接、剪贴板事件、调色板/颜色查询；
-- OSC 133 shell integration prompt marker；
-- iTerm2、kitty 和 Sixel 媒体事件，payload 上限 16 MiB。
-
-媒体传输从进程级 64 MiB 暂存池中申请空间，可保证 13 个并发传输获得 4 MiB
-的下限配额。无法获得暂存空间的传输会被拒绝并且不显示任何内容，而不是显示
-残缺图像；超长或被截断的 Sixel 同样会被丢弃：被截断的 Sixel 与完整的短
-Sixel 在字节层面无法区分，因此部分渲染的结果与正确输出无从辨别。整整一分钟
-没有收到新数据的传输会被放弃，其暂存空间随之回收。限制范围及如何从日志中
-查看，参见 [内存 / Memory](Memory)。
-
-parser 返回标题变化、bell、超链接、剪贴板、媒体、命令状态和光标可见性等 `VtEvent`，
-app 在 parser 热路径之外消费。
-
-由于 vte 限制 OSC 参数数量，代码对 OSC 4 做原始捕获，收集完整调色板查询并抑制截断后的重复 callback。
-
-## Grid 模型
-
-`Grid` 拥有：
-
-- 以 `VecDeque<Line>` 保存的可见行和有界 scrollback；
-- 光标与默认 cell 状态；
-- 可选 boxed 备用屏幕 grid；
-- revision 计数和可见行脏标记；
-- 最多 256 个 scrollback 绝对坐标 prompt region；
-- autowrap 与 pending-wrap 状态。
-
-每次有效修改都会递增 revision 并标记相关行。`clear_dirty` 只是呈现 bookkeeping，不递增 revision。
-新 grid 初始时全部为脏。
-
-### 宽字符与组合字符
-
-双宽字符使用带 `WIDE` 的 lead cell 与带 `WIDE_CONT` 的 continuation cell。修改范围会扩展或修复，
-避免留下半个宽字形。零宽组合字符附着到前一个 lead cell 的 `extras`；必要时跨过 continuation 回找。
-
-### 滚动和历史
-
-全屏向上滚动会把离开屏幕的行放入 scrollback，并尽量复用旧存储。region scroll 只修改 margin；
-如果 region 覆盖完整高度，则故意走会产生历史的路径。调小 scrollback 上限会立即丢弃最老行。
-cell 内容修改会递增单调序列，并只为受影响的可见行记录时间戳；光标移动和仅呈现层面的脏标记
-不会递增该序列。主屏幕普通滚动会让时间戳随文本进入历史；备用屏幕、零历史和局部 region
-滚动则为内容改变的固定屏幕位置重新记录时间戳。可见区时间戳受可见行数约束；每个有界历史行另带一个时间戳，使发生变化的行进入 scrollback 后仍保留内容身份。
-
-### Line 存储
-
-`Line` 可透明切换：
-
-- 任意内容使用 `Flat(Vec<Cell>)`；
-- 重复内容使用 run-length `Cluster(Vec<Cluster>)`。
-
-只有 clustered 表示显著更小时才压缩。内容相同的 flat 和 cluster 行迭代及 hash 结果一致。
-修改 clustered 行只在必要时退化为 flat，并保留超链接、组合码点、颜色和宽字符标记等稀有元数据。
-
-### Prompt region 与选区访问
-
-OSC 133 prompt 边界以绝对历史坐标保存，因此滚动后仍可跳转上一个/下一个 prompt。选区状态位于
-`sonicterm-ui`；grid 暴露可见行、scrollback 和绝对行访问器，供选区与搜索跨历史工作。
-
-选区会记录所属窗格、屏幕 buffer、内容序列与 scrollback 淘汰基线。主屏幕普通滚动因此会让所选
-文本随同行进入历史；有界历史随后淘汰更老行时，完全存活的端点会重新基准化，而任何已失去所选行的
-选区都会清除。在任一屏幕上，切换窗格或 buffer 都会清除选区；基线之后的内容变化仅在修改行与选区
-范围相交时才清除它。备用屏幕没有 scrollback，全屏应用通过重绘固定行实现滚动，因此仅重绘无关的
-状态行、spinner 或其他行仍会保留选区；被应用在滚动边界忽略的滚轮事件同样会保留选区。主窗口与
-子窗口都会在渲染前执行同一检查，并在复制前立即再次检查，避免重绘尚在队列中时把替换后的文本
-写入剪贴板。
-
-## 可选 SSH 状态
-
-`sonicterm-io/ssh` feature 增加基于 `russh` 的 transport，提供类似 PTY 的输入、输出和 resize channel。
-专用线程运行 current-thread Tokio runtime。认证检查显式 key，或常见的
-`~/.ssh/id_ed25519`、`id_rsa`。
-
-当前限制：
-
-- host key 被无条件接受；不会保存 key，也不会在后续连接中比较，因此服务器身份没有经过认证；
-- 尚无 ssh-agent、密码或 keyboard-interactive auth；
-- GUI 会解析/校验 SSH target，但发布应用中当前没有连接 `SshHandle` 的调用点。
-
-因此应把 SSH 看作实现接缝，而不是已完整集成的用户功能。
-
-## Mux daemon 状态
-
-`sonicterm-mux` 是未来的持久 PTY daemon。它是 workspace member 并依赖 `sonicterm-io`，
-但 GUI/平台 crate 不依赖它，release workflow 也不打包它。
-
-当前协议使用带长度前缀的 bincode message，支持 list、spawn、attach、detach、input、resize 和 kill。
-每个 session 拥有 PTY、256 KiB 原始字节 replay ring，以及在背压时丢弃最老事件的有界 subscriber channel。
-它只转发原始字节，尚未做服务端 VT 解析或 grid-aware scrollback。
-
-## 并发规则
-
-| 边界 | 规则 |
-| --- | --- |
-| PTY reader/writer | 专用命名线程，通过 channel 交接 |
-| 子进程对象 | 仅 pid/kill/wait 操作持有 mutex |
-| Parser/Grid | 通过窗格 parser 锁保证单一可变所有者 |
-| PTY 回复 | 持有 parser/grid 锁时绝不写 PTY |
-| 重绘目标 | 短 guard 内复制 `WindowId`，释放后再发事件 |
-| Mux | session map 外层锁先于每窗格 replay/subscriber 锁 |
-
-## 代表性流程
-
-### 终端回复
-
-```mermaid
-flowchart TD
-    csi["应用发送 CSI 6 n"]
-    dsr["vte 派发 DSR 查询"]
-    perf["Performer 计算光标行列"]
-    reply["reply Sender&lt;Vec&lt;u8&gt;&gt;"]
-    path["VT-reply/PTY writer 路径"]
-    child(["子进程收到 CSI &lt;row&gt;;&lt;col&gt; R"])
-
-    csi --> dsr
-    dsr --> perf
-    perf --> reply
-    reply --> path
-    path --> child
+```text
+TERM=xterm-256color
+COLORTERM=truecolor
+TERM_PROGRAM=<配置的 term_program>
+TERM_PROGRAM_VERSION=<与终端身份匹配的版本>
 ```
 
-### 备用屏幕滚动
+`TERM_PROGRAM=SonicTerm` 时使用工作区包版本。`TERM_PROGRAM=WezTerm` 时固定报告
+与已实现能力匹配的 WezTerm 版本 `20230712-072601`。
 
-```mermaid
-flowchart TD
-    enter["TUI 进入 DECSET 1049"]
-    save["保存光标并进入空白 alternate grid"]
-    dirty["标记完整窗格为脏"]
-    scroll["alternate grid 内 linefeed/scroll"]
-    repaint["任一 alt-screen 脏行导致完整裁剪窗格重绘"]
-    restore(["DECRST 1049 恢复 primary grid 并标脏"])
+释放 `PtyHandle` 时会取消原生 IO、终止子进程、关闭 PTY，并限时回收进程。读写线程
+退出和子进程回收的期限是 500 ms。Unix 会终止子进程会话，并在回收主进程前重新
+核对后代，避免向已复用的进程号或会话号发信号。Windows 在关闭 ConPTY 主端时并行
+排空一个克隆读取端，关闭期限为 2 s。超时和清理失败会写日志，析构不会无限等待。
 
-    enter --> save
-    save --> dirty
-    dirty --> scroll
-    scroll --> repaint
-    repaint --> restore
-```
+### VT 解析器与协议
 
-## 从哪里阅读源码
+`sonicterm-vt::Parser` 包装 `vte::Parser` 与 SonicTerm `Performer`。`Performer`
+拥有 `Grid` 和终端属性。状态机处于基态时，会批量插入可打印 ASCII，
+直到遇到转义或控制字节。
+
+当前协议支持：
+
+- 光标移动、保存/恢复、插入/删除字符与行、擦除、DECSTBM、反向索引、自动换行、
+  光标可见性和形状；
+- SGR 样式、索引色、真彩色、下划线样式与颜色，以及按背景色擦除；
+- 主屏幕与备用屏幕、应用光标键、括号粘贴、焦点报告，以及 kitty 键盘标志的
+  set/push/pop/query；
+- OSC 0/2 标题、带主机校验的 OSC 7 工作目录、OSC 8 超链接、OSC 52 剪贴板事件、
+  OSC 4/10/11/12 颜色查询、OSC 133 提示符标记；
+- DSR、DA、XTVERSION、调色板和 kitty 键盘回复；
+- iTerm2、kitty 与 Sixel 媒体事件。
+
+OSC 7 分开保存解码路径和带权限含义的主机校验快照。相对本地路径授权只使用严格
+快照。原始 OSC 4 收集器上限为 4 KiB，用于保留超过 vte 参数数量上限的调色板查询，
+并抑制被截断的重复回调。
+
+单条转义序列最多保留 1 MiB；超过后，解析器会一直丢弃到序列终止符，不会把负载
+当作可打印文本。单个媒体负载上限为 16 MiB。传输中的媒体捕获共用进程级 64 MiB
+暂存池，每个捕获下限为 4 MiB，可保证 13 个并发捕获都获得该下限。无法预留暂存
+空间时会拒绝整个捕获，不显示任何内容。超大、已取消或截断的媒体都不会局部显示；
+取消后，解析器仍会吞掉该负载直到终止符。连续两次 30 s 采样都没有进度时取消捕获，
+因此声明的停滞时间是一分钟。
+
+### 鼠标跟踪与选区
+
+`MouseTracking` 只有一个当前值；各模式不会形成栈：
+
+| DEC 模式 | `MouseTracking` | 报告内容 |
+| --- | --- | --- |
+| 重置/默认 | `Off` | 指针手势由 SonicTerm 处理 |
+| `DECSET ?1000` | `Button` | 按下与释放 |
+| `DECSET ?1002` | `ButtonMotion` | 按键事件以及按住按键时的移动 |
+| `DECSET ?1003` | `AnyMotion` | 按键事件、按住时移动和无按键移动 |
+
+`?1000`、`?1002`、`?1003` 中最后一次 `DECSET` 生效。对当前模式执行 `DECRST`
+会切换为 `Off`；重置非当前模式不做任何事，也不会恢复更早的模式。RIS 同样恢复
+`Off`。
+
+TUI 指在终端内运行的全屏文本界面程序。
+
+`DECSET ?1006` 只控制 SGR 鼠标编码，与是否启用跟踪相互独立。`?1006` 生效时，
+应用拥有的点击、释放、滚轮和符合条件的移动使用 SGR 报告，否则使用当前旧式报告。
+SGR 使用从 1 开始的 `CSI < Cb ; Cx ; Cy M`，释放使用小写 `m`。旧式格式使用
+`CSI M` 加三个偏移字节，并把协议坐标限制在 223。滚轮向上、向下分别使用按键码
+64、65，不发送释放报告。
+
+按下时只选择并锁定一个手势所有者：
+
+- 跟踪启用时，无修饰键按下交给 TUI；
+- 即使跟踪启用，按住 Shift 开始的手势仍由 SonicTerm 本地选区处理；
+- 跟踪为 `Off` 时，手势由本地处理；
+- 标签栏、分隔条、滚动条或其它界面先消费按下事件时，不创建终端手势。
+
+手势所有者、按下时的窗格、跟踪模式和 SGR/旧式编码配置会一直锁定到释放。之后的
+修饰键、窗格焦点、模式或 `?1006` 变化都不能夺走手势。终端释放报告使用按下时的
+窗格和编码配置，以及该窗格内最后一个有效单元格。`Button` 不报告按住移动；
+`ButtonMotion` 与 `AnyMotion` 会报告。没有按键按下时，只有当前 `AnyMotion` 会
+报告移动，并使用当前窗格与当前编码配置。
+
+选区会绑定所属窗格、主/备用缓冲区、内容序列和回滚淘汰基线。主屏幕滚动会让选中
+文本进入历史，并重新定位仍存活的端点。切换缓冲区或窗格、淘汰已选行，或修改与选区
+相交的行都会清除选区；无关行变化不会。渲染前和复制前都会执行检查。
+
+显式复制备用屏幕选区时，剪贴板写入成功后清除选区；写入失败则保留，便于重试。
+若所选内容已经过期，SonicTerm 会清除选区但不复制，剪贴板保持不变。
+
+### 网格存储与不变量
+
+`Grid` 拥有可见行、有界回滚、光标与默认单元格状态、脏行、内容序列号、可选的盒装
+已保存主屏幕，以及最多 256 个使用回滚绝对坐标的 OSC 133 提示符区域。
+
+精确几何上限为：
+
+- 任一轴最多 4,096 列或行；
+- 单个主屏幕或备用屏幕最多 524,288 个可见单元格；
+- 可见行、历史和已保存主屏幕合计最多 1,048,576 个单元格；
+- 每个单元格最多保存 64 个 UTF-8 字节的组合字符或零宽附加内容。
+
+保留字节的执行目标是 `MAX_GRID_CELLS × size_of::<Cell>()`，当前构建约为 24 MiB。
+这是共享网格预算，不是额外再给回滚 24 MiB。配置的 `[terminal].scrollback` 行数
+可能先达到上限。每滚动 512 行检查一次保留容量；若压缩仍不能降到目标内，则以每批
+64 行删除最老历史。降低配置行数时会立即删除旧行。
+
+双宽字符使用带 `WIDE` 的首单元格和带 `WIDE_CONT` 的续单元格。范围修改会围绕它们
+扩展或修复，不能留下半个字形。组合字符附着到前一个首单元格。`Line` 用
+`Flat(Vec<Cell>)` 保存任意行，用显著更小的游程 `Cluster(Vec<Cluster>)` 保存重复行；
+两种表示的迭代和哈希结果相同。
+
+每次内容修改都会推进网格修订计数、标记受影响行并记录内容序列。仅移动光标或改变
+呈现状态不会推进内容序列。主屏幕全屏滚动会让行身份随文本进入历史；备用屏幕、无历史
+和局部区域滚动则为发生变化的固定屏幕位置重新记录序列。
+
+### 未发布的传输接缝
+
+可选 `ssh` 功能在专用单线程 Tokio 运行时上运行 `russh`，并提供类似 PTY 的输入、
+输出和尺寸调整通道。它检查显式密钥或 `~/.ssh/id_ed25519`、`~/.ssh/id_rsa`。
+主机密钥会被直接接受，不保存也不在后续连接中比较；没有 ssh-agent、密码或键盘交互
+认证。GUI 不创建 `SshHandle`，因此这不是已发布的远程会话功能。
+
+`sonicterm-mux` 当前使用带长度前缀的 bincode 消息，支持 `list`、`spawn`、`attach`、
+`detach`、`input`、`resize`、`kill`。每个会话拥有一个 PTY、256 KiB 原始字节回放环和有界
+订阅队列；发生背压时队列丢弃最早事件。它只转发字节，不在服务端解析 VT，也不提供
+网格感知回滚。GUI 和平台 crate 都不依赖它，发布流程也不打包。
+
+### 代码位置
 
 | 主题 | 主要路径 |
 | --- | --- |
-| PTY/进程边界 | `crates/sonicterm-io/src/pty.rs` |
+| PTY、shell、队列、析构 | `crates/sonicterm-io/src/pty.rs` |
 | 可选 SSH | `crates/sonicterm-io/src/ssh.rs` |
-| 窗格 worker pump | `crates/sonicterm-app/src/app/spawn_pane.rs` |
-| VT 解析 | `crates/sonicterm-vt/src/vt.rs` |
-| Grid 与脏行 | `crates/sonicterm-grid/src/grid.rs` |
-| Line 压缩 | `crates/sonicterm-grid/src/line.rs` |
-| 超链接 registry | `crates/sonicterm-grid/src/hyperlink.rs` |
-| Mux 协议/server | `crates/sonicterm-mux/src/{proto,frame,server,main}.rs` |
+| 窗格工作线程与重绘合并 | `crates/sonicterm-app/src/app/spawn_pane.rs` |
+| 主窗口/子窗口输入路由 | `crates/sonicterm-app/src/app/{window_event,child_window}.rs` |
+| VT 解析器与模式 | `crates/sonicterm-vt/src/vt.rs` |
+| 网格与行存储 | `crates/sonicterm-grid/src/{grid,line,hyperlink}.rs` |
+| 选区与复制 | `crates/sonicterm-ui/src/selection.rs`、`crates/sonicterm-app/src/app/misc.rs` |
+| Mux 协议 | `crates/sonicterm-mux/src/{proto,frame,server,main}.rs` |

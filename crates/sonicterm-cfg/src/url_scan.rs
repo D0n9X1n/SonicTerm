@@ -325,8 +325,14 @@ pub fn target_candidates_at_char_col_for_style(
         .char_indices()
         .find_map(|(offset, ch)| is_path_hard_delimiter(ch).then_some(clicked_byte + offset))
         .unwrap_or(text.len());
+    if let Some(shell_name) =
+        shell_quoted_bare_name(text, segment_start, segment_end, style, include_bare_names)
+    {
+        // When: `shell_quoted_bare_name` returns `shell_name`, expose only its complete unwrapped identity.
+        return vec![shell_name];
+    }
     if quoted_spaced_segment(text, segment_start, segment_end) {
-        // When: `quoted_spaced_segment` is true, reject every partial reconstruction inside that quote-delimited range.
+        // When: `quoted_spaced_segment` is true, reject every partial reconstruction around unsupported quote syntax.
         return Vec::new();
     }
     let tokens = soft_space_token_spans(text, segment_start, segment_end);
@@ -510,6 +516,47 @@ fn is_path_hard_delimiter(ch: char) -> bool {
     (ch.is_whitespace() && ch != ' ')
         || ch.is_control()
         || matches!(ch, '"' | '\'' | '`' | '<' | '>')
+}
+
+fn shell_quoted_bare_name(
+    text: &str,
+    start: usize,
+    end: usize,
+    style: PathStyle,
+    include_bare_names: bool,
+) -> Option<TargetMatch> {
+    if !include_bare_names || !text[start..end].contains(' ') {
+        // When: `include_bare_names` is false or the segment contains no space, preserve ordinary scanning.
+        return None;
+    }
+    let quote_start = start.checked_sub(1)?;
+    if text.as_bytes().get(quote_start) != Some(&b'\'') || text.as_bytes().get(end) != Some(&b'\'')
+    {
+        // When: `text.as_bytes().get(quote_start)` or `get(end)` is not an ASCII single quote, retain strict rejection.
+        return None;
+    }
+    let left_boundary = text[..quote_start].chars().next_back();
+    let right_boundary = text[end + 1..].chars().next();
+    if left_boundary.is_some_and(|ch| !ch.is_whitespace())
+        || right_boundary.is_some_and(|ch| !ch.is_whitespace())
+    {
+        // When: `left_boundary` or `right_boundary` is non-whitespace, reject assignment, concatenation, and prose syntax.
+        return None;
+    }
+    let candidate = text.get(start..end)?;
+    if candidate.starts_with(' ') || candidate.ends_with(' ') {
+        // When: `candidate` has an outer space, reject padded or adjacent quote fragments as ambiguous.
+        return None;
+    }
+    if candidate.split(' ').filter(|part| !part.is_empty()).count() > MAX_SPACED_PATH_TOKENS {
+        // When: the quoted candidate exceeds `MAX_SPACED_PATH_TOKENS`, preserve the shared work bound.
+        return None;
+    }
+    validate_bare_name(candidate, style).then(|| TargetMatch {
+        start,
+        end,
+        target: DetectedTarget::BareName(candidate.to_string()),
+    })
 }
 
 fn quoted_spaced_segment(text: &str, start: usize, end: usize) -> bool {

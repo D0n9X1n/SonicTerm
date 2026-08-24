@@ -1,78 +1,108 @@
 # Packaging / 打包
 
-How to build distributable macOS, Windows, and Linux packages locally, and what
-the release workflow does differently.
-
-如何在本地构建可分发的 macOS、Windows 与 Linux 安装包，以及发布工作流的不同之处。
-
-Packaging executables live with the other first-party entry points in
-`scripts/`. Pushing a `v*` tag runs the release workflow and publishes assets;
-local packaging commands only create files under `dist/`.
-
-Related: [Development and Release](Development-and-Release) · [Architecture Internals](Architecture-Internals)
-
 ## English
 
-### macOS
+This page owns local packaging commands and installed/portable layouts. Running
+these commands writes under `dist/`; it does not publish a release. The complete
+tag, CI, asset-validation, and publication flow belongs on
+[Development and Release](Development-and-Release). Native behavior inside each
+package belongs on [Platform Integration](Platform-Integration).
 
-The release workflow builds separate Apple Silicon and Intel binaries, then runs
-`scripts/bake-icons.sh` and `scripts/make-macos-dmg.sh` from the repository
-root. The packaging script assembles `SonicTerm.app`, copies the runtime assets
-and bundled fonts, applies an ad-hoc signature, and creates the
-architecture-specific DMG in `dist/`.
+## Version and output boundary
 
-For a local package, install the build and packaging tools, build the native
-release binary, and use a suffix that identifies the host architecture:
+The root `Cargo.toml [workspace.package].version` is the version source for every
+first-party crate. When a local command needs the version, read all workspace
+members from Cargo metadata and require one shared value:
+
+```bash
+version="$(cargo metadata --no-deps --format-version 1 | python3 -c '
+import json, sys
+metadata = json.load(sys.stdin)
+members = set(metadata["workspace_members"])
+versions = {p["version"] for p in metadata["packages"] if p["id"] in members}
+assert len(versions) == 1, sorted(versions)
+print(versions.pop())
+')"
+```
+
+Release tags add the `v` prefix. `scripts/prepare-release-assets.py
+check-version` rejects a tag that does not match every workspace package.
+First-party packaging executables are direct children of `scripts/`.
+
+## macOS package
+
+### Requirements and command
+
+Build on the target macOS architecture. The current bundle declares macOS 14.0
+as its minimum. Install Cairo/pkg-config for the Rust build and `create-dmg` plus
+ImageMagick for packaging:
 
 ```bash
 brew install cairo pkg-config create-dmg imagemagick
 cargo build --release -p sonicterm-mac
 bash scripts/bake-icons.sh
 
+version="$(cargo metadata --no-deps --format-version 1 | python3 -c '
+import json, sys
+metadata = json.load(sys.stdin)
+members = set(metadata["workspace_members"])
+versions = {p["version"] for p in metadata["packages"] if p["id"] in members}
+assert len(versions) == 1, sorted(versions)
+print(versions.pop())
+')"
 case "$(uname -m)" in
-  arm64)  artifact_suffix=mac-aarch64 ;;
-  x86_64) artifact_suffix=mac-x86_64 ;;
-  *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+  arm64)  suffix=mac-aarch64 ;;
+  x86_64) suffix=mac-x86_64 ;;
+  *) printf 'unsupported architecture: %s\n' "$(uname -m)" >&2; exit 1 ;;
 esac
 
-version="$(cargo metadata --no-deps --format-version 1 | \
-  python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
 bash scripts/make-macos-dmg.sh \
   target/release/sonicterm-mac \
   "$version" \
-  "$artifact_suffix"
+  "$suffix"
 ```
 
-The generated `Info.plist` also declares `.sh`, `.command`, and `.tool`
-shell-document types at `Alternate` handler rank. This makes the installed app
-eligible for Finder's **Open With** without changing the user's current
-association.
+The output is `dist/SonicTerm-<version>-<suffix>.dmg`. The script uses
+`create-dmg`, with `hdiutil` as a fallback.
 
-The app bundle is ad-hoc signed for internal consistency, but it is **not**
-signed with an Apple Developer ID and **not** notarized. A downloaded build can
-therefore show the normal unidentified-developer warning; use Finder's **Open**
-context-menu action if macOS blocks the first launch.
+### Bundle layout and trust
 
-### Windows
+The DMG contains `SonicTerm.app`:
 
-The MSI is built by `cargo wix` from
-`crates/sonicterm-windows/wix/main.wxs`.
+```text
+SonicTerm.app/Contents/
+├── MacOS/sonicterm-mac
+├── Info.plist
+└── Resources/
+    ├── assets/{fonts,themes,keymaps,icons,i18n}/
+    ├── Fonts/*.ttf
+    └── sonic.icns
+```
 
-Install Rust's MSVC target, vcpkg, cargo-wix, and WiX Toolset 3. Make
-`vcpkg.exe` reachable through `VCPKG_ROOT`, `VCPKG_INSTALLATION_ROOT`, or
-`C:\vcpkg` before running the setup script:
+`Info.plist` records the supplied version, bundle id
+`com.d0n9x1n.sonicterm`, `ATSApplicationFontsPath=Fonts`, and alternate handlers
+for `public.shell-script` and `com.apple.terminal.shell-script`. The script
+verifies all four Rec Mono faces.
+
+After assembling all resources, the script applies and verifies an ad-hoc
+signature. It does not use an Apple Developer ID and does not notarize. A
+downloaded package can therefore show the standard unidentified-developer
+warning; Finder's **Open** context-menu action allows the first launch.
+
+## Windows package
+
+### Requirements and command
+
+Use a Windows x64 host with the MSVC target, vcpkg, `cargo-wix`, and WiX Toolset
+3.14. `scripts/setup-windows-cairo.ps1` looks for `vcpkg.exe` through
+`VCPKG_ROOT`, `VCPKG_INSTALLATION_ROOT`, or `C:\vcpkg` and installs static Cairo
+plus pkgconf.
 
 ```powershell
 rustup target add x86_64-pc-windows-msvc
 cargo install cargo-wix --locked
 choco install wixtoolset --no-progress -y
-```
 
-Restart the shell after installing WiX if its `bin` directory is not yet on
-`PATH`. Then run the same package sequence as the release workflow, from the
-repository root:
-
-```powershell
 . .\scripts\setup-windows-cairo.ps1
 cargo build --release --target x86_64-pc-windows-msvc -p sonicterm-windows
 New-Item -ItemType Directory -Force -Path dist | Out-Null
@@ -81,39 +111,57 @@ cargo wix --package sonicterm-windows --no-build --nocapture --output ..\..\dist
 Pop-Location
 ```
 
-`setup-windows-cairo.ps1` exports `PKG_CONFIG` and `PKG_CONFIG_PATH` into the
-**current process**, so it must be sourced in the same shell that runs the
-build. A separate shell will fail in `cairo-sys-rs` with "The pkg-config command
-could not be found."
+Dot-source the Cairo script in the same PowerShell process as the build. It sets
+`PKG_CONFIG`, `PKG_CONFIG_PATH`, and `SYSTEM_DEPS_CAIRO_LINK=static` for that
+process. Starting a different shell loses those values. If WiX was just
+installed, restart the shell or add its `bin` directory to `PATH`.
 
-The MSI registers application-specific ProgIDs, Default Apps capabilities, and
-per-extension `OpenWithProgids` entries for `.ps1`, `.cmd`, `.bat`, and `.sh`.
-It does not set extension defaults or `UserChoice`. Install and uninstall each
-run the installed executable with `--refresh-shell-associations` after their
-registry mutation; that mode only broadcasts `SHCNE_ASSOCCHANGED` and opens no
-window. Uninstall removes SonicTerm's own values while leaving other handlers
-and user choices intact.
+An unelevated build may print `LGHT1105: Validation could not run due to system
+policy`. That warning means ICE validation did not run; it does not by itself
+change the MSI contents.
 
-`light.exe` may warn `LGHT1105: Validation could not run due to system policy`
-when the shell is not elevated. ICE validation is skipped; the MSI contents and
-installability are unaffected.
+### Installed layout and registration
 
-### Linux
+`cargo wix` consumes `crates/sonicterm-windows/wix/main.wxs`. The per-machine
+MSI installs this core layout under `Program Files\SonicTerm`:
 
-Linux packages target x86_64 and a glibc 2.35 baseline. The release job builds
-inside `ubuntu:22.04`, then creates both artifacts from one staged payload:
+```text
+SonicTerm/
+├── sonicterm-windows.exe
+└── assets/
+    ├── themes/*.toml
+    ├── keymaps/*.toml
+    ├── fonts/*.ttf
+    └── icons/exports/{sonic.ico,sonic.icns}
+```
 
-- `SonicTerm-<tag>-linux-x86_64.tar.gz` — relocatable `sonicterm` plus an
-  adjacent `assets/` tree;
-- `SonicTerm-<tag>-linux-x86_64.deb` — `/usr/bin/sonicterm`, FHS assets,
-  desktop entry, AppStream metadata, hicolor icon, licenses, and README.
+It creates a Start-menu shortcut and sets the `INSTALLDESKTOPSHORTCUT` property
+to `1` by default. It registers SonicTerm ProgIDs, Default Apps capabilities, and
+`OpenWithProgids` for `.ps1`, `.cmd`, `.bat`, and `.sh`, then broadcasts
+`SHCNE_ASSOCCHANGED` after install or uninstall. It never writes an extension
+default or `UserChoice`, and uninstall removes only SonicTerm's values. The MSI
+is unsigned.
 
-On an x86_64 Linux host with the native build and Debian package tools installed:
+## Linux packages
+
+### Requirements and command
+
+Linux packages target x86_64 with a glibc 2.35 maximum symbol baseline. The
+release builder is Ubuntu 22.04. A local full build needs the native Rust/Cairo,
+Fontconfig, X11, and Wayland development dependencies plus `tar`, `gzip`,
+`dpkg-deb`, `dpkg-shlibdeps`, `readelf`, `file`, Perl, and Python 3.
 
 ```bash
 cargo build --release -p sonicterm-linux
-tag="v$(cargo metadata --no-deps --format-version 1 | \
-  python3 -c 'import json,sys; d=json.load(sys.stdin); m=set(d["workspace_members"]); v={p["version"] for p in d["packages"] if p["id"] in m}; assert len(v)==1; print(v.pop())')"
+version="$(cargo metadata --no-deps --format-version 1 | python3 -c '
+import json, sys
+metadata = json.load(sys.stdin)
+members = set(metadata["workspace_members"])
+versions = {p["version"] for p in metadata["packages"] if p["id"] in members}
+assert len(versions) == 1, sorted(versions)
+print(versions.pop())
+')"
+tag="v${version}"
 SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)" \
   bash scripts/make-linux-packages.sh target/release/sonicterm "$tag" dist
 bash scripts/test-linux-packages.sh \
@@ -121,88 +169,168 @@ bash scripts/test-linux-packages.sh \
   "dist/SonicTerm-${tag}-linux-x86_64.deb"
 ```
 
-The builder checks ELF architecture and glibc symbol versions, derives linked
-Debian `Depends` with `dpkg-shlibdeps`, and adds `libxkbcommon-x11-0` because winit
-loads that X11 keyboard library at runtime rather than through the ELF dependency
-table. It also normalizes timestamps and ownership and verifies all four Rec Mono
-faces plus themes, keymaps, icons, and i18n. Portable-archive hosts must provide
-`libxkbcommon-x11.so.0` for X11; the Debian package installs it through `Depends`.
-The Debian package uses `com.d0n9x1n.SonicTerm` consistently for its desktop ID,
-Wayland application ID, X11 class, AppStream component, and hicolor icon.
+On a non-Linux host, `scripts/make-linux-packages.sh --stage-only` can assemble
+the common payload, but it cannot create or validate the ELF packages.
 
-CI validates both package layouts, then runs each one under X11/Xvfb and headless
-Wayland/Weston with Vulkan forced to Mesa lavapipe. A smoke passes only after a
-window and GPU surface exist, `/bin/sh` starts in a PTY, a non-literal marker
-round-trips into the grid, and a later frame reaches native presentation.
+### Portable and Debian layouts
 
-### Releases
+Both artifacts come from one normalized staged payload. Timestamps use
+`SOURCE_DATE_EPOCH`; tar ownership is root/root with numeric ids.
 
-The release workflow performs these steps automatically when a `v*` tag is
-pushed. Each package job registers its files in typed asset fragments. The
-publish job revalidates their hashes and required platform/architecture/kind
-tuples, then creates `release-assets.json`, deterministic `SHA256SUMS.txt`, and an
-exact upload-path list. Missing, altered, duplicate, or unregistered release
-files block publication. Local packaging only writes files under `dist/`.
-Pushing the tag is a separate, owner-approved action — running a packaging
-script locally does not publish anything.
+The relocatable archive is
+`SonicTerm-<tag>-linux-x86_64.tar.gz`:
+
+```text
+SonicTerm-<tag>-linux-x86_64/
+├── sonicterm
+├── assets/{fonts,themes,keymaps,icons,i18n}/
+├── share/applications/com.d0n9x1n.SonicTerm.desktop
+├── share/metainfo/com.d0n9x1n.SonicTerm.metainfo.xml
+├── share/icons/hicolor/256x256/apps/com.d0n9x1n.SonicTerm.png
+├── LICENSE
+├── LICENSE-Rec-Mono-OFL-1.1
+└── README.md
+```
+
+The Debian package is `SonicTerm-<tag>-linux-x86_64.deb` and installs:
+
+```text
+/usr/bin/sonicterm
+/usr/share/sonicterm/assets/{fonts,themes,keymaps,icons,i18n}/
+/usr/share/applications/com.d0n9x1n.SonicTerm.desktop
+/usr/share/metainfo/com.d0n9x1n.SonicTerm.metainfo.xml
+/usr/share/icons/hicolor/256x256/apps/com.d0n9x1n.SonicTerm.png
+/usr/share/doc/sonicterm/{copyright,LICENSE-Rec-Mono-OFL-1.1,README.md}
+```
+
+The builder checks x86_64 ELF identity and rejects GLIBC requirements newer
+than 2.35. `dpkg-shlibdeps` derives linked `Depends`; the script also adds
+`libxkbcommon-x11-0` because winit loads it dynamically for X11. The portable
+archive's host must provide `libxkbcommon-x11.so.0` when using X11. The package
+script verifies all four Rec Mono faces plus themes, keymaps, icons, and English
+and Simplified Chinese catalogs.
+
+### Package validation and runtime proof
+
+`scripts/test-linux-packages.sh` checks the source contract and, when paths are
+provided, both built layouts. CI additionally validates the desktop entry,
+AppStream metadata, and Debian dependency field. `lintian` findings are advisory
+in CI.
+
+`scripts/smoke-linux-packages.sh` requires root in an ephemeral Linux container.
+It extracts the tarball, installs the Debian package, forces Vulkan through Mesa
+lavapipe, and runs both layouts first on X11/Xvfb and then on headless
+Wayland/Weston. Each `--runtime-smoke` must create a native window and GPU
+surface, start `/bin/sh` in a PTY, receive a marker in the grid, and present a
+later native frame. The script refuses to replace an existing SonicTerm Debian
+installation.
+
+## Release handoff
+
+A pushed tag matching `v[0-9]+.[0-9]+.[0-9]+*` starts the release workflow.
+Its version validator then requires a supported semantic-version tag matching
+all workspace packages. The workflow builds two macOS DMGs, one Windows MSI,
+and the Linux Debian and tar packages. Package jobs register typed
+asset fragments; publication accepts only the validated asset set and also
+uploads `release-assets.json` and `SHA256SUMS.txt`. See
+[Development and Release](Development-and-Release) for the blocking graph and
+verification steps.
 
 ## 中文
 
-### macOS
+本页负责本地打包命令和安装/便携布局。运行这些命令只会在 `dist/` 下生成文件，不会发布
+release。完整的 tag、CI、资产校验与发布流程见[开发与发布](Development-and-Release)；
+各安装包中的原生行为见[平台集成](Platform-Integration)。
 
-发布工作流会分别构建 Apple Silicon 与 Intel 两个二进制，然后在仓库根目录运行
-`scripts/bake-icons.sh` 与 `scripts/make-macos-dmg.sh`。打包脚本会组装
-`SonicTerm.app`、复制运行时资源与内置字体、施加 ad-hoc 签名，
-并在 `dist/` 中生成对应架构的 DMG。
+## 版本与输出边界
 
-如需本地打包，请先安装构建与打包工具，构建原生 release 二进制，
-并使用能标识主机架构的后缀：
+根 `Cargo.toml [workspace.package].version` 是所有第一方 crate 的版本来源。本地命令需要
+版本时，应通过 Cargo metadata 读取所有 workspace member，并确认只有一个共同版本：
+
+```bash
+version="$(cargo metadata --no-deps --format-version 1 | python3 -c '
+import json, sys
+metadata = json.load(sys.stdin)
+members = set(metadata["workspace_members"])
+versions = {p["version"] for p in metadata["packages"] if p["id"] in members}
+assert len(versions) == 1, sorted(versions)
+print(versions.pop())
+')"
+```
+
+Release tag 会增加 `v` 前缀。`scripts/prepare-release-assets.py check-version` 会拒绝
+不能匹配每个 workspace package 的 tag。第一方打包可执行脚本都直接位于 `scripts/`。
+
+## macOS 安装包
+
+### 要求与命令
+
+请在目标 macOS 架构上构建。当前 bundle 声明最低 macOS 14.0。Rust 构建需要
+Cairo/pkg-config，打包需要 `create-dmg` 和 ImageMagick：
 
 ```bash
 brew install cairo pkg-config create-dmg imagemagick
 cargo build --release -p sonicterm-mac
 bash scripts/bake-icons.sh
 
+version="$(cargo metadata --no-deps --format-version 1 | python3 -c '
+import json, sys
+metadata = json.load(sys.stdin)
+members = set(metadata["workspace_members"])
+versions = {p["version"] for p in metadata["packages"] if p["id"] in members}
+assert len(versions) == 1, sorted(versions)
+print(versions.pop())
+')"
 case "$(uname -m)" in
-  arm64)  artifact_suffix=mac-aarch64 ;;
-  x86_64) artifact_suffix=mac-x86_64 ;;
-  *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+  arm64)  suffix=mac-aarch64 ;;
+  x86_64) suffix=mac-x86_64 ;;
+  *) printf 'unsupported architecture: %s\n' "$(uname -m)" >&2; exit 1 ;;
 esac
 
-version="$(cargo metadata --no-deps --format-version 1 | \
-  python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
 bash scripts/make-macos-dmg.sh \
   target/release/sonicterm-mac \
   "$version" \
-  "$artifact_suffix"
+  "$suffix"
 ```
 
-生成的 `Info.plist` 还以 `Alternate` handler rank 声明 `.sh`、`.command` 和
-`.tool` shell document type，使安装后的应用出现在 Finder **打开方式**中，但不会修改用户当前关联。
+输出为 `dist/SonicTerm-<version>-<suffix>.dmg`。脚本优先使用 `create-dmg`，失败时回退到
+`hdiutil`。
 
-该 app bundle 会施加 ad-hoc 签名以保证内部一致性，但**没有**使用
-Apple Developer ID 签名，也**没有**经过公证（notarize）。因此下载得到的构建
-可能会出现常见的「来自身份不明的开发者」提示；若 macOS 阻止首次启动，
-请使用 Finder 右键菜单中的**打开**。
+### Bundle 布局与信任
 
-### Windows
+DMG 内包含 `SonicTerm.app`：
 
-MSI 由 `cargo wix` 基于 `crates/sonicterm-windows/wix/main.wxs` 构建。
+```text
+SonicTerm.app/Contents/
+├── MacOS/sonicterm-mac
+├── Info.plist
+└── Resources/
+    ├── assets/{fonts,themes,keymaps,icons,i18n}/
+    ├── Fonts/*.ttf
+    └── sonic.icns
+```
 
-请安装 Rust 的 MSVC 目标、vcpkg、cargo-wix 以及 WiX Toolset 3。
-在运行安装脚本之前，请确保可通过 `VCPKG_ROOT`、`VCPKG_INSTALLATION_ROOT`
-或 `C:\vcpkg` 找到 `vcpkg.exe`：
+`Info.plist` 写入传入的版本、bundle id `com.d0n9x1n.sonicterm`、
+`ATSApplicationFontsPath=Fonts`，并为 `public.shell-script` 和
+`com.apple.terminal.shell-script` 声明 alternate handler。脚本会检查四个 Rec Mono 字体。
+
+所有资源组装完成后，脚本会施加并校验 ad-hoc 签名。它不使用 Apple Developer ID，也不
+做 notarize。下载的安装包可能显示标准的“无法验证开发者”提示；首次启动可使用 Finder
+右键菜单中的**打开**。
+
+## Windows 安装包
+
+### 要求与命令
+
+请使用 Windows x64 主机，并安装 MSVC target、vcpkg、`cargo-wix` 和 WiX Toolset 3.14。
+`scripts/setup-windows-cairo.ps1` 会通过 `VCPKG_ROOT`、
+`VCPKG_INSTALLATION_ROOT` 或 `C:\vcpkg` 查找 `vcpkg.exe`，再安装静态 Cairo 和 pkgconf。
 
 ```powershell
 rustup target add x86_64-pc-windows-msvc
 cargo install cargo-wix --locked
 choco install wixtoolset --no-progress -y
-```
 
-如果安装 WiX 后其 `bin` 目录尚未加入 `PATH`，请重启终端。
-随后在仓库根目录运行与发布工作流相同的打包序列：
-
-```powershell
 . .\scripts\setup-windows-cairo.ps1
 cargo build --release --target x86_64-pc-windows-msvc -p sonicterm-windows
 New-Item -ItemType Directory -Force -Path dist | Out-Null
@@ -211,37 +339,53 @@ cargo wix --package sonicterm-windows --no-build --nocapture --output ..\..\dist
 Pop-Location
 ```
 
-`setup-windows-cairo.ps1` 会把 `PKG_CONFIG` 与 `PKG_CONFIG_PATH` 导出到
-**当前进程**，因此它必须在运行构建的同一个 shell 中被 source。
-换一个 shell 会导致 `cairo-sys-rs` 报错：
-「The pkg-config command could not be found.」
+必须在执行 build 的同一个 PowerShell 进程中 dot-source Cairo 脚本。它会为当前进程设置
+`PKG_CONFIG`、`PKG_CONFIG_PATH` 和 `SYSTEM_DEPS_CAIRO_LINK=static`；换一个 shell
+就会丢失。如果刚安装 WiX，请重启 shell 或把其 `bin` 目录加入 `PATH`。
 
-MSI 为 `.ps1`、`.cmd`、`.bat`、`.sh` 注册应用专属 ProgID、Default Apps
-capabilities 和各扩展名的 `OpenWithProgids`，不会设置扩展名默认值或 `UserChoice`。
-安装与卸载会在 registry 修改完成后，以 `--refresh-shell-associations` 调用已安装 executable；
-该模式只广播 `SHCNE_ASSOCCHANGED`，不会打开窗口。卸载仅移除 SonicTerm 自己的值，
-保留其它 handler 和用户选择。
+非管理员 shell 可能输出 `LGHT1105: Validation could not run due to system policy`。
+这表示没有执行 ICE validation，本身不改变 MSI 内容。
 
-当 shell 未以管理员权限运行时，`light.exe` 可能会警告
-`LGHT1105: Validation could not run due to system policy`。
-这只是跳过了 ICE 验证，不影响 MSI 的内容与可安装性。
+### 安装布局与注册
 
-### Linux
+`cargo wix` 使用 `crates/sonicterm-windows/wix/main.wxs`。Per-machine MSI 的核心布局位于
+`Program Files\SonicTerm`：
 
-Linux 安装包面向 x86_64，并以 glibc 2.35 为基线。发布 job 在
-`ubuntu:22.04` 中构建，再从同一个 staged payload 生成两个 artifact：
+```text
+SonicTerm/
+├── sonicterm-windows.exe
+└── assets/
+    ├── themes/*.toml
+    ├── keymaps/*.toml
+    ├── fonts/*.ttf
+    └── icons/exports/{sonic.ico,sonic.icns}
+```
 
-- `SonicTerm-<tag>-linux-x86_64.tar.gz` —— 可重定位的 `sonicterm` 与相邻
-  `assets/` 目录；
-- `SonicTerm-<tag>-linux-x86_64.deb` —— `/usr/bin/sonicterm`、FHS 资产、
-  desktop entry、AppStream metadata、hicolor icon、license 与 README。
+它创建开始菜单快捷方式，并把 `INSTALLDESKTOPSHORTCUT` property 的默认值设为 `1`。
+它为 `.ps1`、`.cmd`、`.bat` 和 `.sh` 注册 SonicTerm ProgID、Default Apps capabilities
+与 `OpenWithProgids`，并在安装
+或卸载后广播 `SHCNE_ASSOCCHANGED`。它不会写扩展名默认值或 `UserChoice`；卸载只删除
+SonicTerm 自己的值。MSI 未签名。
 
-在已安装原生构建工具和 Debian 打包工具的 x86_64 Linux 主机上运行：
+## Linux 安装包
+
+### 要求与命令
+
+Linux 安装包面向 x86_64，GLIBC symbol version 上限为 2.35。Release builder 使用
+Ubuntu 22.04。本地完整打包需要 Rust/Cairo、Fontconfig、X11、Wayland 开发依赖，以及
+`tar`、`gzip`、`dpkg-deb`、`dpkg-shlibdeps`、`readelf`、`file`、Perl 和 Python 3。
 
 ```bash
 cargo build --release -p sonicterm-linux
-tag="v$(cargo metadata --no-deps --format-version 1 | \
-  python3 -c 'import json,sys; d=json.load(sys.stdin); m=set(d["workspace_members"]); v={p["version"] for p in d["packages"] if p["id"] in m}; assert len(v)==1; print(v.pop())')"
+version="$(cargo metadata --no-deps --format-version 1 | python3 -c '
+import json, sys
+metadata = json.load(sys.stdin)
+members = set(metadata["workspace_members"])
+versions = {p["version"] for p in metadata["packages"] if p["id"] in members}
+assert len(versions) == 1, sorted(versions)
+print(versions.pop())
+')"
+tag="v${version}"
 SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)" \
   bash scripts/make-linux-packages.sh target/release/sonicterm "$tag" dist
 bash scripts/test-linux-packages.sh \
@@ -249,25 +393,61 @@ bash scripts/test-linux-packages.sh \
   "dist/SonicTerm-${tag}-linux-x86_64.deb"
 ```
 
-builder 会检查 ELF 架构与 glibc symbol version，用 `dpkg-shlibdeps` 推导
-已链接的 Debian `Depends`；由于 winit 在运行时加载 X11 键盘库而不会把它写入
-ELF dependency table，builder 还会加入 `libxkbcommon-x11-0`。它也会规范化
-timestamp 与 owner，并验证四个 Rec Mono 字体、theme、keymap、icon 与 i18n。
-使用便携归档的主机若运行 X11，必须提供 `libxkbcommon-x11.so.0`；Debian package
-会通过 `Depends` 安装它。Debian package 的 desktop ID、Wayland application ID、
-X11 class、AppStream component 与 hicolor icon 都使用
-`com.d0n9x1n.SonicTerm`。
+非 Linux 主机可用 `scripts/make-linux-packages.sh --stage-only` 组装共同 payload，
+但不能生成或校验 ELF 安装包。
 
-CI 会验证两种 package layout，再让每一种分别在 X11/Xvfb 与 headless
-Wayland/Weston 下运行，并强制 Vulkan 使用 Mesa lavapipe。只有原生窗口与 GPU
-surface 已创建、`/bin/sh` 已在 PTY 中启动、非 literal marker 已往返进入 grid，
-且随后一帧完成原生呈现，smoke 才会通过。
+### 便携与 Debian 布局
 
-### 发布
+两个 artifact 来自同一个规范化 staged payload。时间戳取自 `SOURCE_DATE_EPOCH`；tar
+中的 owner/group 是数值形式的 root/root。
 
-推送 `v*` 标签时，发布工作流会自动执行上述步骤。每个平台打包 job 会把文件登记到
-类型化 asset fragment；publish job 会重新验证 hash 与必需的
-platform/architecture/kind tuple，再生成 `release-assets.json`、确定性的
-`SHA256SUMS.txt` 和精确 upload-path list。缺失、被修改、重复或未登记的 release
-文件都会阻止发布。本地打包只会在 `dist/` 下写入文件。推送标签是一个独立的、
-需所有者批准的动作——在本地运行打包脚本不会发布任何东西。
+可重定位归档为 `SonicTerm-<tag>-linux-x86_64.tar.gz`：
+
+```text
+SonicTerm-<tag>-linux-x86_64/
+├── sonicterm
+├── assets/{fonts,themes,keymaps,icons,i18n}/
+├── share/applications/com.d0n9x1n.SonicTerm.desktop
+├── share/metainfo/com.d0n9x1n.SonicTerm.metainfo.xml
+├── share/icons/hicolor/256x256/apps/com.d0n9x1n.SonicTerm.png
+├── LICENSE
+├── LICENSE-Rec-Mono-OFL-1.1
+└── README.md
+```
+
+Debian package 为 `SonicTerm-<tag>-linux-x86_64.deb`，安装到：
+
+```text
+/usr/bin/sonicterm
+/usr/share/sonicterm/assets/{fonts,themes,keymaps,icons,i18n}/
+/usr/share/applications/com.d0n9x1n.SonicTerm.desktop
+/usr/share/metainfo/com.d0n9x1n.SonicTerm.metainfo.xml
+/usr/share/icons/hicolor/256x256/apps/com.d0n9x1n.SonicTerm.png
+/usr/share/doc/sonicterm/{copyright,LICENSE-Rec-Mono-OFL-1.1,README.md}
+```
+
+Builder 会检查 x86_64 ELF，并拒绝高于 2.35 的 GLIBC requirement。`dpkg-shlibdeps`
+推导已链接的 `Depends`；脚本还会加入 `libxkbcommon-x11-0`，因为 winit 在 X11 下动态
+加载它。便携归档的主机在使用 X11 时必须提供 `libxkbcommon-x11.so.0`。打包脚本会验证
+四个 Rec Mono 字体，以及主题、键位、图标、英文和简体中文 catalog。
+
+### 安装包校验与运行证明
+
+`scripts/test-linux-packages.sh` 会检查源码契约；传入路径时还会验证两种已构建布局。
+CI 另行验证 desktop entry、AppStream metadata 和 Debian dependency field；`lintian`
+结果在 CI 中只作提示。
+
+`scripts/smoke-linux-packages.sh` 要求在临时 Linux container 中以 root 运行。它解压 tarball、
+安装 Debian package、强制 Vulkan 使用 Mesa lavapipe，然后先在 X11/Xvfb、再在 headless
+Wayland/Weston 上运行两种布局。每个 `--runtime-smoke` 必须创建原生窗口和 GPU surface、
+在 PTY 中启动 `/bin/sh`、让 marker 进入 grid，并呈现之后的一帧。脚本会拒绝替换已有的
+SonicTerm Debian 安装。
+
+## 发布交接
+
+推送匹配 `v[0-9]+.[0-9]+.[0-9]+*` 的 tag 会启动 release workflow。版本校验器随后要求
+tag 是受支持的语义版本，并与所有 workspace package 一致。工作流会构建两个 macOS DMG、
+一个 Windows MSI，以及 Linux Debian 与 tar 包。各 package job 会登记类型化 asset
+fragment；发布只接受通过校验的资产集，并一同上传 `release-assets.json` 和
+`SHA256SUMS.txt`。阻断关系和验证步骤见
+[开发与发布](Development-and-Release)。

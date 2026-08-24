@@ -30,12 +30,41 @@ fn install_alt_selection(app: &mut App, window: WindowId, pane_id: u64, row: u64
     });
 }
 
+fn install_primary_selection(app: &mut App, window: WindowId, pane_id: u64, row: u64) {
+    let (seq, is_alt, evicted) = {
+        let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
+        let parser = pane.parser.lock();
+        let grid = parser.grid();
+        (grid.content_seq(), grid.is_alt(), grid.scrollback_evicted())
+    };
+    assert!(!is_alt, "primary selection fixture must stay on the primary screen");
+    app.windows.get_mut(&window).unwrap().selection = Some(Selection {
+        start: (row, 0),
+        end: (row, 3),
+        anchored: true,
+        pane_id: Some(pane_id),
+        content_seq: seq,
+        on_alt_screen: is_alt,
+        scrollback_evicted: evicted,
+    });
+}
+
 fn write_row(app: &App, window: WindowId, pane_id: u64, row: u16, ch: char) {
     let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
     let mut parser = pane.parser.lock();
     let grid = parser.grid_mut();
     grid.goto(row, 0);
     grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+}
+
+fn clear_pane_dirty(app: &App, window: WindowId, pane_id: u64) {
+    let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
+    pane.parser.lock().grid_mut().clear_dirty();
+}
+
+fn pane_dirty_count(app: &App, window: WindowId, pane_id: u64) -> usize {
+    let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
+    pane.parser.lock().grid().dirty_count()
 }
 
 fn run_invalidation(app: &mut App, window: WindowId, pane_id: u64) -> bool {
@@ -98,12 +127,68 @@ fn main_and_child_preserve_selection_for_unrelated_alt_updates() {
 }
 
 #[test]
-fn copy_before_redraw_rejects_stale_alt_content_in_main_and_child() {
+fn valid_alt_copy_clears_main_and_child_selection_after_writing_exact_text() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
+    let main = app.__test_main_window_id().expect("synthetic main window");
+
+    // A successful explicit copy is the commit point for an alternate-screen
+    // selection: exact text reaches the clipboard before its highlight clears.
+    for (kind, window, pane) in
+        [(FrontmostKind::Main, main, main_pane), (FrontmostKind::Child(child), child, child_pane)]
+    {
+        install_alt_selection(&mut app, window, pane, 4);
+        write_row(&app, window, pane, 4, 's');
+        install_alt_selection(&mut app, window, pane, 4);
+        clear_pane_dirty(&app, window, pane);
+        app.__test_set_memory_clipboard("unchanged");
+
+        app.copy_selection_for_kind(kind);
+
+        assert_eq!(app.__test_memory_clipboard().as_deref(), Some("s"));
+        assert!(app.windows.get(&window).unwrap().selection.is_none());
+        assert!(
+            pane_dirty_count(&app, window, pane) > 0,
+            "{window:?} must repaint cleared highlight"
+        );
+    }
+}
+
+#[test]
+fn clipboard_failure_preserves_valid_alt_selection_clipboard_and_clean_rows() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
+    let main = app.__test_main_window_id().expect("synthetic main window");
+    app.__test_set_memory_clipboard("original");
+    app.__test_set_clipboard_write_failure(true);
+
+    // A rejected clipboard write is not completion: the valid volatile range and
+    // existing clipboard survive, and no repaint is scheduled just to clear it.
+    for (kind, window, pane) in
+        [(FrontmostKind::Main, main, main_pane), (FrontmostKind::Child(child), child, child_pane)]
+    {
+        install_alt_selection(&mut app, window, pane, 4);
+        write_row(&app, window, pane, 4, 'f');
+        install_alt_selection(&mut app, window, pane, 4);
+        clear_pane_dirty(&app, window, pane);
+
+        app.copy_selection_for_kind(kind);
+
+        assert_eq!(app.__test_memory_clipboard().as_deref(), Some("original"));
+        assert!(app.windows.get(&window).unwrap().selection.is_some());
+        assert_eq!(pane_dirty_count(&app, window, pane), 0);
+    }
+}
+
+#[test]
+fn stale_alt_copy_clears_before_write_and_preserves_clipboard() {
     let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
     let main = app.__test_main_window_id().expect("synthetic main window");
     app.__test_set_memory_clipboard("unchanged");
 
+    // Stale alternate-screen rows are rejected before the clipboard boundary,
+    // so replacement terminal output can never overwrite the prior clipboard.
     for (kind, window, pane) in
         [(FrontmostKind::Main, main, main_pane), (FrontmostKind::Child(child), child, child_pane)]
     {
@@ -118,26 +203,55 @@ fn copy_before_redraw_rejects_stale_alt_content_in_main_and_child() {
 }
 
 #[test]
-fn copy_before_redraw_preserves_selection_for_unrelated_alt_updates() {
+fn unrelated_alt_update_still_copies_then_clears_selection() {
     let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
     let main = app.__test_main_window_id().expect("synthetic main window");
 
+    // Row-level validation ignores unrelated TUI updates, but a later successful
+    // explicit copy still consumes the valid alternate-screen selection.
     for (kind, window, pane) in
         [(FrontmostKind::Main, main, main_pane), (FrontmostKind::Child(child), child, child_pane)]
     {
         install_alt_selection(&mut app, window, pane, 4);
         write_row(&app, window, pane, 4, 's');
-        // Rebind after writing the selected text: the baseline represents what
-        // the user saw and selected, not the blank screen before it arrived.
         install_alt_selection(&mut app, window, pane, 4);
         write_row(&app, window, pane, 8, 'x');
+        clear_pane_dirty(&app, window, pane);
         app.__test_set_memory_clipboard("unchanged");
 
         app.copy_selection_for_kind(kind);
 
         assert_eq!(app.__test_memory_clipboard().as_deref(), Some("s"));
+        assert!(app.windows.get(&window).unwrap().selection.is_none());
+        assert!(
+            pane_dirty_count(&app, window, pane) > 0,
+            "{window:?} must repaint cleared highlight"
+        );
+    }
+}
+
+#[test]
+fn successful_primary_copy_keeps_main_and_child_selection() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
+    let main = app.__test_main_window_id().expect("synthetic main window");
+
+    // Primary-screen selections remain reusable after an explicit successful
+    // copy; only alternate-screen volatility changes the completion policy.
+    for (kind, window, pane) in
+        [(FrontmostKind::Main, main, main_pane), (FrontmostKind::Child(child), child, child_pane)]
+    {
+        write_row(&app, window, pane, 4, 'p');
+        install_primary_selection(&mut app, window, pane, 4);
+        clear_pane_dirty(&app, window, pane);
+        app.__test_set_memory_clipboard("unchanged");
+
+        app.copy_selection_for_kind(kind);
+
+        assert_eq!(app.__test_memory_clipboard().as_deref(), Some("p"));
         assert!(app.windows.get(&window).unwrap().selection.is_some());
+        assert_eq!(pane_dirty_count(&app, window, pane), 0);
     }
 }
 

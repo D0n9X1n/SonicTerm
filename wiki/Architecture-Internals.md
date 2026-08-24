@@ -1,252 +1,523 @@
-# Architecture Internals / 架构内幕
-
-Engineering detail behind the architecture: how accounting claims are verified,
-which rendering invariants are load-bearing, where the native boundaries sit,
-and what the release gate actually checks.
-
-架构背后的工程细节：记账声明如何被验证、哪些渲染不变量是承重的、
-原生边界位于何处，以及发布闸门实际检查了什么。
-
-For the shape of the system, start with [Architecture](Architecture). For what
-each crate does, see [Crate Reference](Crate-Reference). Memory accounting and
-the resource governor live in [Memory](Memory).
+# Architecture Internals / 架构内部机制
 
 ## English
 
-### Accounting verification
+This page owns the checks and invariants that keep the architecture honest. See
+[Architecture](Architecture) for system shape, [Runtime Lifecycle](Runtime-Lifecycle)
+for ownership changes, and [Memory](Memory) for the full resource inventory.
 
-Accounting claims are verified against **real heap**, not against the number the
-figure was derived from.
+### Heap-truth accounting
 
-Every accounting defect found during this work shared one shape: a reported
-figure measured against its own derivation, each with a test that passed. A grid
-figure under-reported by 1.67×, a queued-output figure restated a constant, and
-the hyperlink registry under-reported by 4.8×.
+A retained-memory report is tested against live heap, not against the formula
+that produced the report. The relevant integration tests install a counting
+`#[global_allocator]` and observe allocation, deallocation, and reallocation.
+They check three properties:
 
-The ground truth is a counting `#[global_allocator]` that tracks live bytes
-across allocate, deallocate, and reallocate. These tests assert both directions:
+- the reported value does not materially understate live heap;
+- the reported value does not materially overstate live heap;
+- live heap itself stops within the enforced cap and stated tolerance.
 
-- a reported figure does not **understate** real heap — an undercount admits
-  allocation past the cap;
-- and does not wildly **overstate** it — an overcount refuses work while memory
-  is available;
-- and that real heap, not merely the reported figure, stops below the cap.
+These tests must stay in `tests/`. A `#[global_allocator]` applies to the whole
+crate, so a sibling unit-test module cannot isolate it.
 
-With tables uncounted, the hyperlink registry stopped at 8,388,244 bytes against
-a cap of 8,388,608 — compliant on its own number — while actually holding
-roughly 12.1 MB.
+The allocator is process-global. Every test in one measurement binary holds a
+file-local `Mutex` for its full measurement lifetime. The test builds fixture
+strings and buffers before opening the measurement window. Otherwise sibling
+work or test-harness allocations become part of the subject's result.
 
-Two constraints are structural rather than stylistic:
+The heap-truth checks cover the grid, hyperlink registry, PTY queues, VT capture
+staging, inline media, owner close, and long-lived atlas. Important enforced
+limits include:
 
-- **`#[global_allocator]` is crate-wide**, so these must live in `tests/` as
-  integration tests. They cannot be flat sibling unit tests.
-- **The counting allocator is process-global**, so every test in such a file must
-  serialize on a file-local `Mutex`. Two tests measuring concurrently attribute
-  each other's allocations to whichever one is reading. Measured: all pass
-  serially and all fail in parallel, reporting a 5.80× "undercount" that was
-  entirely sibling noise. The lock is used rather than `--test-threads=1`,
-  because the gate cannot be told to serialize one file — and a suite that only
-  works under a flag is a suite that will eventually run without it.
+| Seam | Current limit |
+| --- | --- |
+| Grid storage | `MAX_GRID_CELLS = 1,048,576`; visible geometry is capped by `MAX_VISIBLE_GRID_CELLS = 524,288` |
+| Hyperlink registry | `MAX_HYPERLINKS = 16,384`, `MAX_HYPERLINK_URI_BYTES = 8 KiB`, `MAX_HYPERLINK_CLIENT_ID_BYTES = 1 KiB`, `MAX_HYPERLINK_METADATA_BYTES = 8 MiB` |
+| VT media payload | `MAX_MEDIA_PAYLOAD_BYTES = 16 MiB` |
+| Process VT capture staging | `MAX_PROCESS_CAPTURE_STAGING_BYTES = 64 MiB`, with a `MIN_CAPTURE_STAGING_BYTES = 4 MiB` floor and `GUARANTEED_CONCURRENT_CAPTURES = 13` |
+| PTY input | 4 queued messages; each message is at most 16 MiB |
+| PTY output | 64 queued chunks plus one blocked sender chunk; each retained reader ring is 64 KiB; structural worst case is 65 rings, or 4.0625 MiB |
+| Retained inline media | 128 images and 64 MiB per pane; 256 MiB process target plus at most one 4 MiB newest-image residual per live pane before reclamation converges; each rendered side is at most 1,024 pixels |
 
-Allocation-measuring tests must also build their fixture data **before** the
-measurement window. A `format!` per iteration inside the window attributes the
-harness's own garbage to the subject under test.
+A grid report includes cell storage, rare attributes, combining text, row
+containers, and reserved capacity. Scrollback is limited by configured rows and
+retained bytes. The scroll path checks the byte budget in amortized batches.
 
-### Rendering and redraw invariants
+The hyperlink registry counts its URI strings and both hash tables. `clear`
+shrinks those tables. The registry may reclaim unreferenced entries when full;
+it does not sweep the grid for every OSC 8 link.
 
-SonicTerm retains rendered pixels between frames, so damage calculation is part
-of terminal correctness rather than a paint optimization.
+The PTY output report counts ring allocations pinned by queued `Bytes` views.
+It does not multiply the slot count by an assumed chunk size, and it does not
+mistake payload length for retained allocation.
 
-- A dirty alternate-screen pane repaints its complete surface-clipped pane.
-  Primary-screen panes retain narrow dirty-row damage.
-- VT/grid mutations mark affected rows in the same frame — including scrolling,
-  insert/delete line, reverse index, erase, resize, and wide-cell repair.
-- Grid geometry budgets include retained row allocation, not only visible
-  `cols × rows`. Material column shrink compacts surviving rows while adjacent
-  resize oscillation retains reusable capacity, and history-limit reductions
-  release excess `VecDeque` capacity.
-- Clipboard serialization preserves isolated or incomplete right-edge
-  box-drawing text, and removes only a coherent multi-row side ending in a
-  lower-right frame corner.
-- CAN/SUB cancellation resets VT escape accounting before cancelled DCS media
-  can reach `unhook` and emit an incomplete image.
-- Windows software rendering keeps the established full-surface presenter path;
-  it is not coupled to retained GPU damage decisions.
-- **Pane VT workers never call native window APIs.** After output coalescing
-  they copy the pane's `WindowId` under a short mutex guard and send
-  `UserEvent::RequestRedraw`; the winit event-loop thread resolves the live
-  window and calls `request_redraw()` after the guard has been released.
-- Tear-out and tab transfer update the pane's redraw target by `WindowId`, so a
-  worker survives migration without retaining an `Arc<Window>` or calling
-  AppKit/Win32 from the worker thread.
+### Resource ledger invariants
 
-### Font and native boundaries
+The GUI creates this live owner tree:
 
-Font discovery, shaping, and rasterization stay split from renderer policy.
-Generated FreeType/HarfBuzz/Fontconfig bindings stay in their wrapper crates;
-`sonicterm-font` owns safe allocation and fallback behaviour.
+```text
+Process
+  Window
+    AppPane
+```
 
-Variable-font metadata is optional: malformed, missing, or out-of-range
-variation metadata falls back to base OS/2 default weight and width rather than
-aborting the app. Embedded bitmap strikes are loaded metrics-only and checked
-against the glyph allocation budget before FreeType may decode their pixels.
+Process and window owners use tracking-only limits. Each `AppPane` owner uses
+`PANE_COMMITTED_BUDGET_BYTES`. That value is twice
+`PANE_SEAM_CAP_SUM_BYTES`, which is calculated from the grid, inline-media,
+hyperlink, parser-capture, PTY-output, and PTY-input seam caps.
 
-Atlas behaviour is deliberately lazy:
+The seam caps remain the primary enforcement points. The pane budget is a
+backstop. Retention is measured before it is charged, so a failed charge does
+not undo memory already retained. A failed growth keeps the previous charge. A
+failed new charge leaves that class absent and writes a `memory` debug record.
 
-- Glyph and image atlas textures initialize through dirty-tile uploads.
-- Same-dimension atlas resets clear metadata and packing state in place, without
-  zeroing or replacing the retained CPU pixel allocation. Cached UV generations
-  are invalidated before newly inserted tiles can overwrite sampled rectangles.
-- The inline-image atlas starts as a 1×1 CPU/GPU placeholder and promotes to its
-  bounded full size only when a renderable image first appears.
-- On Windows, deterministic software presentation keeps the full CPU glyph atlas
-  but replaces GPU atlas textures with 1×1 placeholders. Returning to GPU
-  presentation recreates matching textures, resets atlas metadata and UV-bearing
-  caches, and forces a full redraw before the new textures can be sampled.
+A pane owns one `CommittedReservation` per charged `ResourceClass`. A charge is
+resized in place with `try_grow` or `shrink`; it is not released and recreated
+between samples.
 
-The hidden warm-renderer pool defaults to one on every adapter. A configured
-value of zero disables it; hardware honours values up to five, while software
-rendering caps every nonzero target at one.
+Close order is load-bearing:
 
-PTY handles own their native reader and writer threads. Unix natural exit is
-observed with `waitid(..., WNOWAIT)`; teardown repeatedly terminates every
-process in the unreaped leader's session before reaping, so session identity
-cannot be reused first. Windows teardown caches process exit and keeps a
-dedicated cloned output reader draining concurrently with ConPTY master close.
-The Unix and Windows implementations both use bounded thread, close, and
-child-exit deadlines.
+1. clear pane charges;
+2. close each `AppPane` owner;
+3. close the parent `Window` owner.
 
-Terminal-input enqueue is non-blocking and bounded. Saturation, disconnection,
-and oversized messages return typed errors that **retain the rejected bytes**
-instead of reporting false success; callers forward those bytes to the event
-loop for a visible retry notification.
+`PaneState` declares `charges` before `owner`. `WindowState` declares `panes`
+before its window `owner`. Rust drops fields in declaration order, so the normal
+drop path follows the same leaf-first rule. `finish_close` refuses an owner with
+live charges or children. `OwnerGuard::drop` logs a warning and retains a refused
+record; it does not retry.
 
-Native GPU presentation, real PTYs/SSH, AppKit/Win32/X11/Wayland handles,
-generated C ABI behaviour, and installer signing are verified by build,
-integration, platform CI, and release smoke checks rather than hollow unit
-tests.
+A failed window-owner registration leaves the window usable but omits that
+window and its panes from hierarchy accounting for the rest of the window's
+life. A failed pane-owner registration leaves the pane usable; periodic
+reconciliation can retry it. Renderer-owned surfaces, glyph atlases, and
+software frames are measured outside this ledger.
 
-### Release and verification boundary
+### Rendering correctness invariants
 
-The workspace version in root `Cargo.toml` is authoritative for all first-party
-crates and internal requirements. Releases are created only by pushing an
-owner-approved `v*` tag whose version matches every workspace package. The tag
-workflow builds two macOS DMGs, one Windows MSI, and Linux x86_64 `.deb` and
-`.tar.gz` packages. Each package is registered in a typed fragment; publication
-requires all five tuples, revalidates hashes, rejects unregistered release-like
-files, and emits `release-assets.json`, deterministic `SHA256SUMS.txt`, and an
-exact upload-path list.
+SonicTerm retains rendered pixels between frames. Damage therefore decides
+correctness, not only speed.
 
-Packaging procedure is documented in [Packaging](Packaging); the release
-sequence and CI layout are in
-[Development and Release](Development-and-Release).
+- A primary-screen pane contributes the union of its dirty-row strips. The strips
+  include pane padding and are clipped to the pane and surface.
+- A dirty alternate-screen pane contributes its complete surface-clipped pane.
+  A clean alternate-screen pane contributes no damage.
+- Changes to terminal cells mark affected rows in the same frame. This includes
+  scrolling, reverse index, line insertion/deletion, erase, resize, and
+  wide-cell repair.
+- Changes to overlays or window chrome promote damage to the full surface.
+- A degraded wgpu frame with work repaints the full surface. Windows degraded
+  presentation also composes a full CPU surface.
+- `RenderMode::Noop` is available only under resolved degradation when no visible
+  signal changed. It does not present or clear dirty rows.
+
+The event-loop thread collects a complete frame without waiting on the VT
+worker. It uses `try_lock` for every active-tab parser and for required
+inline-image stores. If any lock is unavailable, it drops all collected guards,
+records a pending redraw, and does not call `GpuRenderer::render`.
+
+Dirty rows clear only in `finish_successful_frame`:
+
+- on Windows CPU presentation, after `SetDIBitsToDevice` returns success;
+- on wgpu presentation, after command submission and `queue.present(frame)` are
+  invoked.
+
+`SetDIBitsToDevice` can report failure. wgpu's present call has no result that
+reports a later presentation failure. Surface timeout, occlusion, outdated,
+suboptimal, and lost results invalidate the frame key and request another
+redraw. Outdated and suboptimal surfaces are reconfigured. A lost surface is
+recreated. Validation errors propagate. None of these acquisition failures
+clears dirty rows.
+
+Grid geometry accounts for retained row allocations, not only visible
+`cols × rows`. A material column shrink compacts rows. Adjacent resize changes
+keep reusable capacity to avoid repeated allocation. Reducing the scrollback
+limit releases excess `VecDeque` capacity.
+
+Clipboard serialization keeps isolated or incomplete right-edge box drawing.
+It removes only a coherent multi-row side that ends in a lower-right frame
+corner.
+
+CAN and SUB cancel an active escape sequence. The parser resets escape
+accounting before a cancelled DCS or APC media sequence can emit a partial
+image. A host-cancelled stalled capture discards the remaining payload until its
+terminating boundary instead of printing it into the grid.
+
+### Atlas and font invariants
+
+The CPU glyph atlas is fixed at 2,048 × 2,048 BGRA8 pixels, about 16 MiB. Its
+metadata holds at most `MAX_ATLAS_ENTRIES = 16,384` entries, including blank and
+missing sentinels.
+
+On a miss, the atlas uses reclaimed rectangles before its shelf packer. Under
+metadata or packing pressure, it deterministically evicts the coldest quarter.
+An eviction changes the atlas epoch. If that happens during frame assembly, the
+renderer discards the frame, resets the atlas in place, invalidates UV-bearing
+row caches, and requests a new frame. The retry disables eviction until one
+frame presents successfully. The fixed pixel allocation does not grow.
+
+`RowGlyphCache` and `LineQuadCache` use keys based on pane id, absolute row, and
+row hash. Their capacities are about four times the sum of visible rows across
+all panes. A capacity or geometry-size change clears the affected cache. Dirty
+rows invalidate their absolute-row entries. Font, theme, scale, surface resize,
+and atlas replacement invalidate the corresponding caches.
+
+The inline-image atlas starts as a 1 × 1 CPU/GPU placeholder. It promotes to a
+2,048 × 2,048 atlas when renderable media appears. After 240 rendered frames
+without inline media, it returns to the placeholder. Text and image atlases are
+separate so image pressure cannot evict text glyphs.
+
+On Windows degraded presentation, the full CPU atlases remain available while
+GPU atlas textures become 1 × 1 placeholders. Returning to wgpu presentation
+recreates matching textures, resets atlas state, invalidates UV-bearing caches,
+and forces a full redraw before sampling the new textures.
+
+Font discovery, shaping, and rasterization stay separate from renderer policy.
+Generated FFI bindings remain in their wrapper crates. Malformed, missing, or
+out-of-range variable-font metadata falls back to base OS/2 weight and width.
+FreeType embedded bitmap strikes are checked against the 2,048-pixel and 16 MiB
+glyph allocation limits before pixel decoding.
+
+The hidden warm-window pool defaults to one. Zero disables it. Normal hardware
+accepts at most five. An actual software adapter or resolved degradation caps
+any nonzero target at one. A live config reload clears the pool; later
+`about_to_wait` passes rebuild it one entry at a time.
+
+### PTY and native-thread invariants
+
+Terminal input enqueue is non-blocking. `PtyHandle::send_input_nonblocking`
+uses `try_send` on a four-message channel. A message over 16 MiB, a full queue,
+or a disconnected writer returns `PtyInputError` with the original bytes. The
+app posts `UserEvent::PtyInputRejected`, logs the reason, and shows an error
+notification. It does not replay the bytes automatically.
+
+The PTY reader uses a reusable 64 KiB `BytesMut` allocation. It sends
+`PtyOutputChunk` views through a 64-slot channel. A full channel blocks the
+reader and lets the operating system apply back-pressure; output is not dropped.
+
+A pane VT worker holds only that pane's parser lock while advancing VT state and
+collecting side effects. It releases the lock before the event-loop proxy or any
+native-window work. Tear-out changes the shared redraw `WindowId`, so the worker
+follows the pane without retaining `Arc<Window>`.
+
+`PtyHandle::drop` always starts with cancellation, synchronous-I/O cancellation
+where supported, and child termination. The remaining order differs by platform.
+
+On Unix, `waitid(P_PID, ..., WEXITED | WNOHANG | WNOWAIT)` observes natural
+exit without releasing the session id. Teardown kills the original process group
+and repeatedly kills active members of the same session. It closes the master
+before waiting for I/O threads. Reader and writer each get 500 ms. Termination
+retry and child reap each use a separate 500 ms deadline. If session cleanup
+cannot be proved, the leader remains unreaped so its id cannot be reused
+unsafely.
+
+On Windows, teardown waits up to 500 ms for the reader and another 500 ms for
+the writer before master close. `sonic-conpty-drain` drains a cloned reader while
+`sonic-conpty-close` closes the master. Close gets 2 seconds. If close succeeds,
+drain gets another 2 seconds. Timeouts detach the helpers. Helper-start or close
+failure returns an incomplete-close result and warns. Child exit/reap has a
+separate 500 ms bound.
+
+These deadlines keep `Drop` from blocking the UI indefinitely. They do not turn
+an incomplete native close into success.
+
+### Release verification boundary
+
+Root `Cargo.toml` `[workspace.package]` is the version source. The release
+workflow starts for tags matching `v[0-9]+.[0-9]+.[0-9]+*`. It continues only
+when `prepare-release-assets.py check-version` parses the tag as a semantic
+version and finds that version on every workspace package.
+
+The workflow builds five required package tuples:
+
+| Platform | Architecture | Package |
+| --- | --- | --- |
+| macOS | `aarch64` | `.dmg` |
+| macOS | `x86_64` | `.dmg` |
+| Windows | `x86_64` | `.msi` |
+| Linux | `x86_64` | `.deb` |
+| Linux | `x86_64` | `.tar.gz` |
+
+Each package has a typed JSON fragment. Consolidation requires all five tuples,
+rejects duplicate names or tuples, recalculates hashes, and rejects unregistered
+`.dmg`, `.msi`, `.deb`, and `.tar.gz` files in `dist`. It emits
+`release-assets.json`, deterministic `SHA256SUMS.txt`, and
+`release-upload-paths.txt`. The release action uploads only the paths in that
+list.
+
+Windows release tests run:
+
+```bash
+cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture
+```
+
+The gate requires WARP and allocator reporting. Production reserved bytes must
+be below 64 MiB. The largest block must be below 128 MiB. The
+`MemoryHints::MemoryUsage` candidate must reserve fewer bytes than the
+`MemoryHints::Performance` control under the same allocations. The workflow
+dependency is `unit-tests-windows → build-windows → publish`, so this gate
+blocks the MSI and publication.
+
+Linux package verification builds both `.deb` and `.tar.gz` layouts. The runtime
+smoke runs them on X11/Xvfb and Wayland/Weston with Vulkan/lavapipe. It requires
+window creation, GPU initialization, a `/bin/sh` PTY marker round trip, and a
+later native presentation.
+
+macOS packaging verifies binary architecture and the app's ad-hoc signature.
+The workflow does not perform Developer ID signing, notarization, or a packaged
+DMG launch smoke. The Windows workflow does not sign or install-run the MSI.
+Installer signing is therefore not a verified release invariant.
+
+Release jobs run workspace unit tests, the per-crate unit/build gate, release
+asset and note tests, Windows presentation and allocator tests, and Linux package
+smokes. They do not repeat every normal CI check: formatting, Clippy, Rustdoc,
+policy checks, resource baselines, wiki publication tests, and coverage remain in
+normal CI described in [Development and Release](Development-and-Release).
+
+### Source and check map
+
+| Contract | Primary source or check |
+| --- | --- |
+| Heap-truth tests | `crates/sonicterm-{grid,io,vt,app,resource,text}/tests/` |
+| Resource inventory and baseline | `scripts/test-resource-inventory.sh`, `scripts/test-resource-baseline-evidence.sh` |
+| Damage and present completion | `crates/sonicterm-gpu/src/core.rs` |
+| Glyph atlas and row caches | `crates/sonicterm-text/src/{glyph_atlas,row_glyph_cache}.rs`, `crates/sonicterm-gpu/src/row_quad_cache.rs` |
+| PTY teardown | `crates/sonicterm-io/src/pty.rs` |
+| Owner and charge ordering | `crates/sonicterm-app/src/app/{mod,retention}.rs` |
+| Release asset contract | `scripts/prepare-release-assets.py`, `scripts/test-release-assets.sh` |
+| Release job graph | `.github/workflows/release.yml` |
 
 ## 中文
 
-### 记账验证
+本页集中说明验证架构真实性的检查和关键不变量。系统结构见
+[架构](Architecture)，所有权变化见 [运行时生命周期](Runtime-Lifecycle)，完整资源清单见
+[内存](Memory)。
 
-记账声明是针对**真实堆内存**验证的，而不是针对该数字自身的推导过程验证。
+### 以真实堆内存验证记账
 
-本轮工作中发现的每一个记账缺陷都有同一种形态：一个上报数字仅与它自己的推导方式
-互相印证，而且各自都有一个通过的测试。网格数字少报了 1.67 倍，排队输出数字只是
-复述了一个常量，超链接注册表少报了 4.8 倍。
+常驻内存报告必须与实际存活的堆内存比较，不能只验证生成报告的公式。对应的集成测试会安装
+计数型 `#[global_allocator]`，记录分配、释放和重新分配。测试同时检查三件事：
 
-基准事实来自一个计数型 `#[global_allocator]`，它在分配、释放、重分配全过程中
-跟踪存活字节。这些测试同时断言两个方向：
+- 报告值不能明显低于实际存活堆内存；
+- 报告值不能明显高于实际存活堆内存；
+- 实际堆内存必须停在已实施的上限与声明的容差内。
 
-- 上报数字不得**低估**真实堆内存——少计会让分配越过上限；
-- 也不得严重**高估**——多计会在内存尚可用时拒绝工作；
-- 并且真正停在上限之下的必须是真实堆内存，而不仅仅是上报数字。
+这类测试必须放在 `tests/` 中。`#[global_allocator]` 作用于整个 crate，同级单元测试模块
+无法把它隔离开。
 
-在表结构未被计入时，超链接注册表停在 8,388,244 字节、上限为 8,388,608——
-按它自己的数字看完全合规——而实际持有约 12.1 MB。
+分配器是进程全局状态。同一个测量测试二进制中的每个测试，都要在整个测量期间持有文件内
+`Mutex`。夹具字符串和缓冲区要在测量窗口开始前创建。否则，并发测试或测试框架本身的分配
+会被算进被测对象。
 
-有两条约束是结构性的，而非风格问题：
+真实堆内存检查覆盖网格、超链接注册表、PTY 队列、VT 捕获暂存、内联媒体、所有者关闭和
+长寿命图集。主要上限如下：
 
-- **`#[global_allocator]` 作用于整个 crate**，因此这类测试必须作为集成测试放在
-  `tests/` 中，不能写成平级的同名单元测试文件。
-- **计数分配器是进程全局的**，因此这类文件中的每个测试都必须在文件级 `Mutex`
-  上串行化。两个同时测量的测试会把彼此的分配算到正在读取的那一个头上。
-  实测：串行时全部通过，并行时全部失败，并报出 5.80 倍的「少计」，
-  而那完全是同文件测试造成的噪声。这里使用锁而不是 `--test-threads=1`，
-  是因为无法只让闸门对某一个文件串行——而一套只有加了标志才正确的测试，
-  终将在没有该标志的情况下运行。
+| 接缝 | 当前上限 |
+| --- | --- |
+| 网格存储 | `MAX_GRID_CELLS = 1,048,576`；可见几何受 `MAX_VISIBLE_GRID_CELLS = 524,288` 限制 |
+| 超链接注册表 | `MAX_HYPERLINKS = 16,384`、`MAX_HYPERLINK_URI_BYTES = 8 KiB`、`MAX_HYPERLINK_CLIENT_ID_BYTES = 1 KiB`、`MAX_HYPERLINK_METADATA_BYTES = 8 MiB` |
+| VT 媒体负载 | `MAX_MEDIA_PAYLOAD_BYTES = 16 MiB` |
+| 进程级 VT 捕获暂存 | `MAX_PROCESS_CAPTURE_STAGING_BYTES = 64 MiB`，保底值 `MIN_CAPTURE_STAGING_BYTES = 4 MiB`，`GUARANTEED_CONCURRENT_CAPTURES = 13` |
+| PTY 输入 | 最多排队 4 条消息；每条最多 16 MiB |
+| PTY 输出 | 最多 64 个排队数据块，另有一个阻塞中的发送数据块；每个读缓冲环为 64 KiB；结构最坏值为 65 个缓冲环，即 4.0625 MiB |
+| 常驻内联媒体 | 每窗格最多 128 张图和 64 MiB；进程目标为 256 MiB，回收收敛前每个存活窗格最多另保留一份 4 MiB 最新图像余量；参与渲染的图像单边最多 1,024 像素 |
 
-测量分配的测试还必须在测量窗口**之前**构建其夹具数据。
-在窗口内每轮迭代调用一次 `format!`，会把测试框架自身产生的垃圾算到被测对象头上。
+网格报告包含单元格、少见属性、组合文字、行容器和预留容量。回滚历史同时受配置行数和
+常驻字节数限制。滚动路径按批次摊销检查字节预算。
 
-### 渲染与重绘不变量
+超链接注册表会统计 URI 字符串和两张哈希表。`clear` 会收缩这些表。注册表满时可以清理
+未被引用的条目，但不会在每条 OSC 8 超链接到来时遍历整个网格。
 
-SonicTerm 会在帧之间保留已渲染的像素，因此损伤区域（damage）计算属于终端正确性的
-一部分，而不只是绘制层面的优化。
+PTY 输出报告统计被排队 `Bytes` 视图占住的读缓冲环。它不会用槽位数乘一个假定的数据块
+大小，也不会把负载长度误当成常驻分配量。
 
-- 处于备用屏幕且被标脏的窗格，会重绘其完整的、经表面裁剪的窗格区域；
-  主屏幕窗格则保留窄粒度的脏行损伤。
-- VT/网格的修改会在同一帧内标记受影响的行——包括滚动、插入/删除行、反向索引、
-  擦除、调整大小以及宽字符单元修复。
-- 网格几何预算包含保留的行分配，而不仅是可见的 `cols × rows`。
-  实质性的列收缩会压紧存活行，而相邻的反复缩放会保留可复用容量，
-  历史行数上限下调则会释放多余的 `VecDeque` 容量。
-- 剪贴板序列化会保留孤立或不完整的右边缘制表符文本，
-  仅移除以右下角框线结尾的、完整连贯的多行边框。
-- CAN/SUB 取消会在被取消的 DCS 媒体到达 `unhook` 并输出不完整图像之前，
-  重置 VT 转义序列记账。
-- Windows 软件渲染沿用既有的整表面呈现路径；它不与保留式 GPU 损伤决策耦合。
-- **窗格的 VT 工作线程从不调用原生窗口 API。** 在合并输出之后，
-  它们在短暂的互斥保护下复制窗格的 `WindowId` 并发送 `UserEvent::RequestRedraw`；
-  由 winit 事件循环线程解析出存活窗口，并在释放保护之后调用 `request_redraw()`。
-- 拆出（tear-out）与标签页转移会按 `WindowId` 更新窗格的重绘目标，
-  因此工作线程无需持有 `Arc<Window>`、也无需从工作线程调用 AppKit/Win32
-  即可在迁移后继续存活。
+### 资源总账不变量
 
-### 字体与原生边界
+图形界面建立的实际所有者树如下：
 
-字体发现、整形与光栅化始终与渲染器策略分离。生成的
-FreeType/HarfBuzz/Fontconfig 绑定保留在各自的包装 crate 中；
-`sonicterm-font` 负责安全的分配与回退行为。
+```text
+Process
+  Window
+    AppPane
+```
 
-可变字体元数据是可选的：格式错误、缺失或超出范围的变体元数据会回退到
-基础 OS/2 默认字重与字宽，而不是让应用中止。内嵌位图 strike 仅按度量信息加载，
-并在 FreeType 解码其像素之前先对照字形分配预算进行检查。
+进程和窗口所有者只跟踪数据，不设置有限额度。每个 `AppPane` 所有者使用
+`PANE_COMMITTED_BUDGET_BYTES`。该值等于 `PANE_SEAM_CAP_SUM_BYTES` 的两倍，后者由网格、
+内联媒体、超链接、解析器捕获、PTY 输出和 PTY 输入接缝上限计算得出。
 
-图集（atlas）的行为是刻意惰性的：
+各接缝上限仍是主要限制点。窗格预算只是总账警戒线。代码先保留内存，再测量并计费，因此
+计费失败不会撤销已经保留的内存。增长失败时保留原计费值。新类别计费失败时，该类别保持
+缺失，并写一条 `memory` debug 记录。
 
-- 字形与图像图集纹理通过脏瓦片上传来初始化。
-- 同尺寸的图集重置会就地清除元数据与打包状态，
-  而不会清零或替换已保留的 CPU 像素分配。缓存的 UV 代次会在新插入的瓦片
-  覆盖已被采样的矩形之前失效。
-- 内联图像图集以 1×1 的 CPU/GPU 占位符起步，
-  仅在首次出现可渲染图像时才提升到其受限的完整尺寸。
-- 在 Windows 上，确定性软件呈现会保留完整的 CPU 字形图集，
-  但将 GPU 图集纹理替换为 1×1 占位符。回到 GPU 呈现时会重建匹配的纹理、
-  重置图集元数据与携带 UV 的缓存，并在新纹理可被采样之前强制一次完整重绘。
+窗格为每个已计费的 `ResourceClass` 持有一个 `CommittedReservation`。计费通过
+`try_grow` 或 `shrink` 原地调整，不会在两次采样之间先释放再重新创建。
 
-隐藏的预热渲染器池在所有适配器上默认为 1。配置为 0 表示禁用；
-硬件渲染最多接受 5，而软件渲染会把任何非零目标都限制为 1。
+关闭顺序不能改变：
 
-PTY 句柄拥有各自的原生读写线程。Unix 上的自然退出通过
-`waitid(..., WNOWAIT)` 观察；拆除时会在回收之前反复终止未回收 leader
-所在会话中的每一个进程，因此会话标识不可能被抢先复用。
-Windows 上的拆除会缓存进程退出状态，并保持一个专用的克隆输出读取器
-与 ConPTY 主端关闭并发地持续排空。Unix 与 Windows 实现都使用有上限的线程、
-关闭与子进程退出期限。
+1. 清空窗格计费；
+2. 关闭每个 `AppPane` 所有者；
+3. 关闭父级 `Window` 所有者。
 
-终端输入的入队是非阻塞且有界的。饱和、断开与超大消息会返回带类型的错误，
-并**保留被拒绝的字节**，而不是谎报成功；调用方会把这些字节转发给事件循环，
-以便给出可见的重试提示。
+`PaneState` 把 `charges` 声明在 `owner` 前面。`WindowState` 把 `panes` 声明在窗口
+`owner` 前面。Rust 按声明顺序析构字段，因此普通析构路径也遵循先叶子、后父级的规则。
+`finish_close` 会拒绝仍有计费或子节点的所有者。`OwnerGuard::drop` 遇到拒绝时会记录
+warning 并保留该记录，不会重试。
 
-原生 GPU 呈现、真实 PTY/SSH、AppKit/Win32/X11/Wayland 句柄、生成的 C ABI
-行为以及安装包签名，都由构建、集成、平台 CI 与发布冒烟检查来验证，而不是靠空洞的
-单元测试。
+窗口所有者注册失败时，窗口仍可使用，但该窗口及其窗格在剩余寿命内都不会进入层级记账。
+窗格所有者注册失败时，窗格仍可使用；周期协调可以再次尝试。渲染器持有的表面、字形图集和
+软件帧不进入这份总账，另行测量。
 
-### 发布与验证边界
+### 渲染正确性不变量
 
-根 `Cargo.toml` 中的 workspace 版本对所有第一方 crate 与内部依赖要求具有权威性。
-发布只能通过推送经所有者批准、且版本与全部 workspace package 一致的 `v*` 标签来创建。
-该标签工作流会构建两个 macOS DMG、一个 Windows MSI，以及 Linux x86_64 `.deb`
-与 `.tar.gz`。每个平台 package 都登记到类型化 fragment；发布要求五个 tuple 全部存在、
-重新验证 hash、拒绝未登记的 release-like 文件，并生成 `release-assets.json`、确定性的
-`SHA256SUMS.txt` 与精确 upload-path list。
+SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画面是否正确，不只是性能优化。
 
-打包步骤见 [Packaging](Packaging)；发布流程与 CI 布局见
-[Development and Release](Development-and-Release)。
+- 主屏幕窗格贡献所有脏行条带的并集。条带包含窗格内边距，并裁剪到窗格和表面。
+- 备用屏幕窗格只要有脏行，就贡献整个经表面裁剪的窗格。没有脏行时不贡献损伤区域。
+- 终端单元格变化会在同一帧标记受影响的行，包括滚动、反向索引、插入或删除行、擦除、
+  调整大小和宽字符修复。
+- 界面浮层或窗口装饰变化会把损伤区域扩大到整个表面。
+- 已降级的 wgpu 帧只要有工作，就重画整个表面。Windows 降级呈现也会合成完整 CPU 表面。
+- 只有最终降级状态启用且没有可见信号变化时，才能使用 `RenderMode::Noop`。该路径不呈现，
+  也不清除脏行。
+
+事件循环线程获取完整帧时不会等待 VT 工作线程。它对活动标签页的每个解析器和所需内联图像
+存储使用 `try_lock`。任一锁不可用时，代码释放已经取得的所有保护对象，记录待重绘状态，
+并且不调用 `GpuRenderer::render`。
+
+脏行只在 `finish_successful_frame` 中清除：
+
+- Windows CPU 呈现要等 `SetDIBitsToDevice` 成功返回；
+- wgpu 呈现要等命令提交并调用 `queue.present(frame)`。
+
+`SetDIBitsToDevice` 可以报告失败。wgpu 的 present 调用不会返回能够表示后续呈现失败的结果。
+表面超时、遮挡、过期、次优或丢失时，代码会使帧键失效并请求重绘。过期和次优表面会重新
+配置。丢失的表面会重新创建。验证错误向上传播。这些表面获取失败都不会清除脏行。
+
+网格几何记账包含保留的行分配，不只计算可见的 `cols × rows`。列数大幅减少时会压紧行。
+相邻尺寸变化会保留可复用容量，避免反复分配。降低回滚历史上限会释放多余的
+`VecDeque` 容量。
+
+复制到剪贴板时会保留孤立或不完整的右边框线。只有连贯的多行侧边框，并且最终以右下角
+框线字符收尾时，才会删除该边框。
+
+CAN 和 SUB 会取消当前转义序列。解析器会先重置转义记账，防止被取消的 DCS 或 APC 媒体
+序列输出不完整图像。主机取消停滞捕获后，解析器会丢弃剩余负载直到结束边界，不会把它打印
+到网格。
+
+### 图集与字体不变量
+
+CPU 字形图集固定为 2,048 × 2,048 个 BGRA8 像素，约 16 MiB。元数据最多保存
+`MAX_ATLAS_ENTRIES = 16,384` 个条目，包括空白和缺失哨兵。
+
+未命中时，图集先使用回收矩形，再使用分层打包器。元数据或打包空间不足时，图集会按确定
+规则淘汰最冷的四分之一。淘汰会改变图集代次。如果组帧期间发生淘汰，渲染器会放弃该帧，
+就地重置图集，使携带 UV 的行缓存失效，并请求新帧。重试期间会关闭淘汰，直到成功呈现一帧。
+固定像素分配不会增长。
+
+`RowGlyphCache` 和 `LineQuadCache` 的键由窗格编号、绝对行号和行哈希组成。两者容量约为
+所有窗格可见行总数的四倍。容量或几何尺寸变化会清空对应缓存。脏行会使其绝对行条目失效。
+字体、主题、缩放、表面尺寸和图集替换会使对应缓存失效。
+
+内联图像图集从 1 × 1 的 CPU/GPU 占位符开始。出现可渲染媒体时，它扩展为
+2,048 × 2,048。连续 240 个已渲染帧没有内联媒体后，它回到占位符。文字和图像使用独立
+图集，因此图像压力不会淘汰文字字形。
+
+Windows 降级呈现会保留完整 CPU 图集，同时把 GPU 图集纹理缩成 1 × 1 占位符。回到 wgpu
+呈现时，代码重新创建匹配纹理、重置图集状态、使所有携带 UV 的缓存失效，并在采样新纹理前
+强制完整重绘。
+
+字体发现、塑形和光栅化与渲染器策略分离。生成的 FFI 绑定只留在各自包装 crate 内。
+可变字体元数据格式错误、缺失或越界时，代码回退到基础 OS/2 字重和字宽。FreeType 内嵌
+位图字形会在解码像素前先检查 2,048 像素和 16 MiB 的字形分配上限。
+
+隐藏预热窗口池默认为 1。设为 0 会关闭它。普通硬件路径最多接受 5。真实软件适配器或最终
+降级状态启用时，任何非零目标都限制为 1。实时配置重载会清空池；后续
+`about_to_wait` 每次最多重建一个条目。
+
+### PTY 与原生线程不变量
+
+终端输入采用非阻塞入队。`PtyHandle::send_input_nonblocking` 对四条消息的通道调用
+`try_send`。消息超过 16 MiB、队列已满或 writer 已断开时，会返回保留原始字节的
+`PtyInputError`。应用发送 `UserEvent::PtyInputRejected`，记录原因并显示错误通知。
+它不会自动重放这些字节。
+
+PTY reader 使用可复用的 64 KiB `BytesMut` 分配，并通过 64 槽通道发送
+`PtyOutputChunk` 视图。通道满时 reader 阻塞，让操作系统施加背压；输出不会被丢弃。
+
+每窗格 VT 工作线程只在推进 VT 状态和收集副作用时持有该窗格的解析器锁。它会在访问事件
+循环代理或执行任何原生窗口工作前释放锁。拆出操作只修改共享的重绘 `WindowId`，因此工作
+线程可以跟随窗格，无需持有 `Arc<Window>`。
+
+`PtyHandle::drop` 都先发送取消信号，在平台支持时取消同步 I/O，然后终止子进程。后续顺序
+按平台区分。
+
+Unix 使用 `waitid(P_PID, ..., WEXITED | WNOHANG | WNOWAIT)` 观察自然退出，
+但不释放会话编号。拆除时先杀死原进程组，再反复杀死同会话中的活动成员。主端在等待 I/O
+线程前关闭。reader 和 writer 各有 500 ms。终止重试和子进程回收各有独立的 500 ms。
+若无法证明会话清理完成，leader 保持未回收，避免编号被不安全地复用。
+
+Windows 拆除先给 reader 500 ms，再给 writer 500 ms，然后关闭主端。
+`sonic-conpty-drain` 通过克隆 reader 排空输出，`sonic-conpty-close` 关闭主端。
+关闭最多等待 2 秒。关闭成功后，排空再独立等待 2 秒。超时会分离辅助线程。
+辅助线程启动失败或关闭失败会返回未完成结果并记录 warning。子进程退出与回收另有
+500 ms 上限。
+
+这些期限保证 `Drop` 不会无限阻塞界面。原生关闭未完成时，代码不会谎报成功。
+
+### 发布验证边界
+
+根目录 `Cargo.toml` 的 `[workspace.package]` 是版本来源。发布工作流只由匹配
+`v[0-9]+.[0-9]+.[0-9]+*` 的 tag 启动；随后 `prepare-release-assets.py check-version`
+必须把 tag 解析为语义版本，并确认该版本与每个 workspace package 一致。
+
+工作流构建五组必需包：
+
+| 平台 | 架构 | 包 |
+| --- | --- | --- |
+| macOS | `aarch64` | `.dmg` |
+| macOS | `x86_64` | `.dmg` |
+| Windows | `x86_64` | `.msi` |
+| Linux | `x86_64` | `.deb` |
+| Linux | `x86_64` | `.tar.gz` |
+
+每个包都有类型化 JSON 片段。汇总步骤要求五组全部存在，拒绝重复文件名或重复元组，重新
+计算哈希，并拒绝 `dist` 中未登记的 `.dmg`、`.msi`、`.deb` 和 `.tar.gz` 文件。它生成
+`release-assets.json`、确定性 `SHA256SUMS.txt` 和 `release-upload-paths.txt`。发布 action
+只上传该路径清单中的文件。
+
+Windows 发布测试运行：
+
+```bash
+cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture
+```
+
+该闸门要求 WARP 和分配器报告可用。生产策略预留字节必须低于 64 MiB，最大块必须低于
+128 MiB。在相同分配负载下，`MemoryHints::MemoryUsage` 候选必须比
+`MemoryHints::Performance` 对照预留更少字节。工作流依赖关系为
+`unit-tests-windows → build-windows → publish`，因此失败会阻止 MSI 和发布。
+
+Linux 包验证会构建 `.deb` 与 `.tar.gz` 两种布局。运行冒烟测试在 X11/Xvfb 和
+Wayland/Weston 上使用 Vulkan/lavapipe。测试要求窗口创建、GPU 初始化、`/bin/sh` PTY
+标记往返，以及之后一次原生呈现。
+
+macOS 打包会检查二进制架构和应用的 ad-hoc 签名。工作流没有执行 Developer ID 签名、
+公证或 DMG 打包后启动冒烟测试。Windows 工作流也没有签名 MSI 或安装运行它。因此，
+安装包签名不是当前已验证的发布不变量。
+
+发布任务会运行 workspace 单元测试、逐 crate 单元/构建闸门、发布资产与说明测试、Windows
+呈现和分配器测试，以及 Linux 包冒烟测试。它不会重复普通 CI 的全部检查；格式、Clippy、
+Rustdoc、策略检查、资源基线、Wiki 发布测试和覆盖率仍由普通 CI 负责，详见
+[开发与发布](Development-and-Release)。
+
+### 源码与检查索引
+
+| 契约 | 主要源码或检查 |
+| --- | --- |
+| 真实堆内存测试 | `crates/sonicterm-{grid,io,vt,app,resource,text}/tests/` |
+| 资源清单与基线 | `scripts/test-resource-inventory.sh`、`scripts/test-resource-baseline-evidence.sh` |
+| 损伤区域与呈现完成 | `crates/sonicterm-gpu/src/core.rs` |
+| 字形图集与行缓存 | `crates/sonicterm-text/src/{glyph_atlas,row_glyph_cache}.rs`、`crates/sonicterm-gpu/src/row_quad_cache.rs` |
+| PTY 拆除 | `crates/sonicterm-io/src/pty.rs` |
+| 所有者与计费顺序 | `crates/sonicterm-app/src/app/{mod,retention}.rs` |
+| 发布资产契约 | `scripts/prepare-release-assets.py`、`scripts/test-release-assets.sh` |
+| 发布任务依赖图 | `.github/workflows/release.yml` |

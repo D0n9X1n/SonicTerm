@@ -1,5 +1,5 @@
 use super::{
-    parse_osc7_cwd_snapshot, MediaCapture, MediaProtocol, Osc7Cwd, Parser, VtEvent,
+    parse_osc7_cwd_snapshot, MediaCapture, MediaProtocol, MouseTracking, Osc7Cwd, Parser, VtEvent,
     CAPTURE_FLOOR_POOL_BYTES, CAPTURE_GROWTH_POOL_BYTES, GUARANTEED_CONCURRENT_CAPTURES,
     LIVE_MEDIA_CAPTURES, MAX_ESCAPE_SEQUENCE_BYTES, MAX_MEDIA_PAYLOAD_BYTES,
     MAX_PROCESS_CAPTURE_STAGING_BYTES, MIN_CAPTURE_STAGING_BYTES,
@@ -163,44 +163,90 @@ fn dec_private_mode_1_toggles_application_cursor_keys() {
     assert!(!parser.application_cursor_keys());
 }
 
+/// Each DECSET tracking code selects its distinct current mouse-reporting mode.
 #[test]
-fn dec_private_mode_1000_toggles_mouse_tracking() {
+fn decset_selects_each_mouse_tracking_mode() {
     let mut parser = Parser::new(Grid::new(8, 2));
-    assert!(!parser.mouse_tracking_enabled());
+    assert_eq!(parser.mouse_tracking(), MouseTracking::Off);
 
-    parser.advance(b"\x1b[?1000h");
-    assert!(parser.mouse_tracking_enabled());
-
-    parser.advance(b"\x1b[?1000l");
-    assert!(!parser.mouse_tracking_enabled());
+    for (sequence, expected) in [
+        (b"\x1b[?1000h".as_slice(), MouseTracking::Button),
+        (b"\x1b[?1002h".as_slice(), MouseTracking::ButtonMotion),
+        (b"\x1b[?1003h".as_slice(), MouseTracking::AnyMotion),
+    ] {
+        parser.advance(sequence);
+        assert_eq!(parser.mouse_tracking(), expected);
+    }
 }
 
+/// Selecting another tracking mode replaces the current mode without stacking it.
 #[test]
-fn dec_private_mode_1002_1003_toggle_mouse_tracking() {
+fn last_mouse_tracking_decset_wins() {
     let mut parser = Parser::new(Grid::new(8, 2));
 
+    parser.advance(b"\x1b[?1003h\x1b[?1000h\x1b[?1002h");
+
+    assert_eq!(parser.mouse_tracking(), MouseTracking::ButtonMotion);
+}
+
+/// DECRST turns tracking off when it names the currently selected mode.
+#[test]
+fn decrst_resets_the_active_mouse_tracking_mode() {
+    let mut parser = Parser::new(Grid::new(8, 2));
     parser.advance(b"\x1b[?1002h");
-    assert!(parser.mouse_tracking_enabled());
-    parser.advance(b"\x1b[?1002l");
-    assert!(!parser.mouse_tracking_enabled());
 
-    parser.advance(b"\x1b[?1003h");
-    assert!(parser.mouse_tracking_enabled());
-    parser.advance(b"\x1b[?1003l");
-    assert!(!parser.mouse_tracking_enabled());
+    parser.advance(b"\x1b[?1002l");
+
+    assert_eq!(parser.mouse_tracking(), MouseTracking::Off);
 }
 
+/// Resetting the active mode turns tracking off without restoring its predecessor.
+#[test]
+fn active_mouse_tracking_reset_does_not_restore_the_prior_mode() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+
+    parser.advance(b"\x1b[?1000h\x1b[?1002h\x1b[?1002l");
+
+    assert_eq!(parser.mouse_tracking(), MouseTracking::Off);
+}
+
+/// DECRST for an inactive tracking mode leaves the current selection unchanged.
+#[test]
+fn decrst_ignores_an_inactive_mouse_tracking_mode() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    parser.advance(b"\x1b[?1003h");
+
+    parser.advance(b"\x1b[?1000l\x1b[?1002l");
+
+    assert_eq!(parser.mouse_tracking(), MouseTracking::AnyMotion);
+}
+
+/// RIS restores mouse tracking to Off alongside the other initial terminal modes.
 #[test]
 fn ris_resets_app_cursor_keys_and_mouse_tracking() {
     let mut parser = Parser::new(Grid::new(8, 2));
-    parser.advance(b"\x1b[?1h\x1b[?1000h");
+    parser.advance(b"\x1b[?1h\x1b[?1003h");
     assert!(parser.application_cursor_keys());
-    assert!(parser.mouse_tracking_enabled());
+    assert_eq!(parser.mouse_tracking(), MouseTracking::AnyMotion);
 
     parser.advance(b"\x1bc");
 
     assert!(!parser.application_cursor_keys());
-    assert!(!parser.mouse_tracking_enabled());
+    assert_eq!(parser.mouse_tracking(), MouseTracking::Off);
+}
+
+/// SGR report encoding can toggle independently without selecting a tracking mode.
+#[test]
+fn sgr_mouse_encoding_does_not_enable_tracking() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+
+    parser.advance(b"\x1b[?1006h");
+    assert!(parser.mouse_sgr_enabled());
+    assert_eq!(parser.mouse_tracking(), MouseTracking::Off);
+
+    parser.advance(b"\x1b[?1002h\x1b[?1006l");
+    assert!(!parser.mouse_sgr_enabled());
+    assert_eq!(parser.mouse_tracking(), MouseTracking::ButtonMotion);
 }
 
 #[test]

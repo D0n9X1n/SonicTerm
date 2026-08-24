@@ -28,6 +28,20 @@ use sonicterm_types::ResourceAmount;
 /// Version string reported in answer to CSI > q (XTVERSION).
 pub const SONIC_VERSION: &str = "SonicTerm 0.7";
 
+/// Current DEC mouse tracking mode selected by the terminal application.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub enum MouseTracking {
+    /// Mouse tracking is disabled.
+    #[default]
+    Off,
+    /// Report button presses and releases.
+    Button,
+    /// Report button events and motion while a button is held.
+    ButtonMotion,
+    /// Report button events and all pointer motion.
+    AnyMotion,
+}
+
 /// Largest staging buffer a single capture may hold when it is the only one
 /// in flight.
 ///
@@ -1041,10 +1055,8 @@ impl Parser {
         self.performer.app_cursor_keys
     }
 
-    /// Whether any of DECSET ?1000/?1002/?1003 (mouse tracking) is currently
-    /// enabled. When true, the host should forward wheel events to the PTY as
-    /// mouse reports rather than synthesizing scroll/arrow-key motion.
-    pub fn mouse_tracking_enabled(&self) -> bool {
+    /// Return the current DEC mouse tracking mode selected by the application.
+    pub fn mouse_tracking(&self) -> MouseTracking {
         self.performer.mouse_tracking
     }
 
@@ -1114,10 +1126,8 @@ struct Performer {
     /// synthetic arrow sequences SonicTerm emits for alt-screen wheel scroll)
     /// must use the `ESC O A` form instead of `ESC [ A`.
     app_cursor_keys: bool,
-    /// DECSET ?1000/?1002/?1003 — X10/button/any-motion mouse tracking. When
-    /// any of these is on the application wants raw mouse reports, so the host
-    /// must forward wheel events to the PTY rather than synthesizing scroll.
-    mouse_tracking: bool,
+    /// DECSET ?1000/?1002/?1003 mouse tracking selected by the application.
+    mouse_tracking: MouseTracking,
     focus_reporting: bool,
     /// Latest OSC 0/2 title (sticky — survives consumed events).
     title: Option<String>,
@@ -1200,7 +1210,7 @@ impl Performer {
             bracketed_paste: false,
             mouse_sgr: false,
             app_cursor_keys: false,
-            mouse_tracking: false,
+            mouse_tracking: MouseTracking::default(),
             focus_reporting: false,
             title: None,
             cwd: None,
@@ -1356,7 +1366,7 @@ impl Performer {
         self.bracketed_paste = false;
         self.mouse_sgr = false;
         self.app_cursor_keys = false;
-        self.mouse_tracking = false;
+        self.mouse_tracking = MouseTracking::Off;
         self.focus_reporting = false;
         self.current_hyperlink = None;
         self.scroll_top = None;
@@ -1570,7 +1580,20 @@ impl Performer {
                 }
                 2004 => self.bracketed_paste = set,
                 1006 => self.mouse_sgr = set,
-                1000 | 1002 | 1003 => self.mouse_tracking = set,
+                1000 | 1002 | 1003 => {
+                    let mode = match code {
+                        1000 => MouseTracking::Button,
+                        1002 => MouseTracking::ButtonMotion,
+                        1003 => MouseTracking::AnyMotion,
+                        _ => unreachable!(),
+                    };
+                    if set {
+                        self.mouse_tracking = mode;
+                    } else if self.mouse_tracking == mode {
+                        // When: DECRST names the selected mode, disable tracking without restoring an older selection.
+                        self.mouse_tracking = MouseTracking::Off;
+                    }
+                }
                 1004 => self.focus_reporting = set,
                 2026 => {
                     // When: code 2026 is synchronized output; accept the mode while retaining immediate painting semantics.

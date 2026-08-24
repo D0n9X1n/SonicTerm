@@ -2,456 +2,457 @@
 
 ## English
 
-SonicTerm bounds what it holds and reports what it is holding. This page
-covers both: what each subsystem keeps and what happens when it fills, then
-how to read that from the log when a session grows more than you expect.
+SonicTerm bounds memory at the subsystem that owns it, then reports retained
+host memory by pane, renderer, and process. This page owns resource limits,
+ownership, and accounting. Protocol details are in
+[Terminal IO and VT](Terminal-IO-and-VT); atlas behavior is in
+[Rendering and Fonts](Rendering-and-Fonts); log storage and postmortem evidence
+are in [Logging](Logging).
 
-### Why bounds alone are not the whole story
+### Resource limits
 
-Every subsystem here has a limit. That is necessary and not sufficient — a
-session with many panes can leave every individual limit intact while the sum
-climbs, which is exactly the shape behind reported multi-gigabyte growth. So
-some limits are per-pane, some are process-wide, and the ones that matter most
-are the process-wide ones.
-
-### What each subsystem holds
-
-| What | Limit | What happens at the limit |
+| Owner | Exact bound | Behavior at the bound |
 | --- | --- | --- |
-| Decoded inline images | 256 MiB across the process; each pane gets a share of that, floored at 4 MiB and capped at 64 MiB | Oldest images are discarded. Each pane always keeps its newest one |
-| In-flight image transfers | 64 MiB of staging across the process; 4 MiB guaranteed per transfer | A 14th simultaneous transfer is refused and shows nothing |
-| One image payload | 16 MiB | The transfer is refused rather than truncated |
-| Grid cells | 1,048,576 cells; scrollback additionally bounded by 24 MiB of retained bytes | Oldest scrollback rows are dropped |
-| Escape sequence | 1 MiB | The sequence is discarded through its terminator |
-| Hyperlink targets | 16,384 links, 8 KiB per URI | Links whose cells have scrolled away are reclaimed, then the new one is admitted |
-| PTY input message | 16 MiB, 4 queued | Oversized input is refused |
-| PTY output queue | 64 chunks | The reader waits rather than growing |
-| Software render frame | 160 MiB | Larger surfaces are refused |
+| Grid geometry | axis ≤ 4,096; one visible screen ≤ 524,288 cells; visible + history + saved primary ≤ 1,048,576 cells | dimensions and requested history are clamped |
+| Grid retained storage | `MAX_GRID_CELLS × size_of::<Cell>()`, about 24 MiB on the current build, shared by visible/history/saved primary | compact row capacity, then drop oldest history in 64-row blocks; scroll-path checks are amortized every 512 rows |
+| Cell combining extras | 64 UTF-8 bytes per cell | additional zero-width data is not retained |
+| OSC 8 registry | 16,384 links, 8 KiB per URI, 1 KiB per client id, 8 MiB combined metadata | reclaim entries no retained cell references, then admit; otherwise refuse the new link |
+| Escape sequence | 1 MiB | discard through its terminator |
+| Media payload | 16 MiB per transfer | refuse rather than truncate or partially render |
+| Media capture staging | 64 MiB process-wide; 4 MiB floor; 13 concurrent floor reservations guaranteed | refuse an unstaged capture; cancel after two unchanged 30 s progress samples |
+| Decoded inline images | 64 MiB and 128 images per pane; 256 MiB process target divided across live panes; 4 MiB minimum and newest image retained | discard oldest images; a process under pressure may retain at most one 4 MiB newest-image residual per live pane beyond the target until the idle-pane pass converges |
+| Encoded image dimensions | declared width/height ≤ 2,048 and pixels ≤ 2,048² | reject before decode |
+| Rendered image dimensions | width/height ≤ 1,024; BGRA8 ≤ 4 MiB | resize iTerm2/kitty images; Sixel decodes into the bounded buffer |
+| PTY input | four queued messages, 16 MiB each | return `MessageTooLarge`, `QueueFull`, or `WriterDisconnected` with the bytes intact |
+| PTY output | 64 queued chunks plus one blocked sender chunk, each backed by a 64 KiB reader ring; structural worst case 4.0625 MiB | block the reader and apply OS backpressure |
+| Glyph atlas | one 2048×2048 BGRA8 CPU atlas per renderer, 16 MiB and 16,384 entries | evict the coldest quarter and retry |
+| Image atlas | 1×1 placeholder; 2048×2048 BGRA8 only while media is active | skip older images when full; release to placeholder after 240 media-free frames |
+| Windows software frame | axis ≤ 16,384; total ≤ 160 MiB | reject construction or resize and preserve the old valid allocation |
+| Pane command events | 1,024 events | drop the oldest and shrink retained vector capacity |
 
-With one to four panes open, each gets the full 64 MiB image allowance. Beyond
-that the share shrinks — twenty panes get about 12.8 MiB each — so opening
-many panes that all display images will evict older ones.
+The inline-media figure is deliberately stated as a process **target**, not an
+absolute 256 MiB ceiling. Every pane must keep its newest image, and one decoded
+image is bounded at 4 MiB. The stateable aggregate bound under pressure is
+therefore:
 
-### wgpu allocation policy
-
-Detected software adapters request wgpu `MemoryHints::MemoryUsage`; hardware
-adapters retain `MemoryHints::Performance`. On Windows this includes DX12 WARP.
-With wgpu 30 on D3D12, the policy changes initial allocator blocks from 128 MiB
-device / 64 MiB host to 8 MiB device / 4 MiB host. It is a block-sizing and
-placement hint, not a resource cap: buffers, textures, and other resources
-larger than those initial blocks still allocate.
-
-### Scrollback is bounded twice
-
-`[terminal].scrollback` sets a row count, and retained bytes are bounded
-separately at 24 MiB. Rows carrying hyperlinks, combining marks, or non-default
-underlines cost more than plain text, so a byte budget can be reached before
-the row count is.
-
-At the default 1,000 rows this never happens. If you raise `scrollback`
-substantially and your output is link-heavy, expect to retain fewer rows than
-the number you set.
-
-### Two things SonicTerm discards that you can see
-
-Most reclamation is invisible and uninteresting. Two cases are neither, so
-they are logged at the **default** level — you do not need to have enabled
-debug logging beforehand:
-
-```
-grep 'memory::reclaimed' ~/.sonicterm/logs/sonicterm.log
+```text
+256 MiB + live_panes × 4 MiB
 ```
 
-| Line | What happened | What to do |
-| --- | --- | --- |
-| `cancelled a media capture that stopped receiving` | An image transfer delivered nothing for a full minute and was abandoned. The image will not appear | Re-send it. Common after a laptop sleeps mid-transfer or an SSH link drops |
-| `discarded inline images from idle panes` | Total decoded image memory crossed the process ceiling, so older images were dropped from panes you were not using | Re-send the images you still need, or keep fewer panes holding images |
+While `live_panes × 4 MiB` fits the target, the periodic idle-pane walk returns
+the total to 256 MiB or below. The larger formula is the pre-convergence bound,
+and remains the bound when the required one-image-per-pane floor itself exceeds
+the target.
 
-Both lines carry the byte figures involved.
+The grid’s approximate 24 MiB figure is also one shared bound, not “24 MiB of
+scrollback plus the visible screen.” `[terminal].scrollback` sets a row limit;
+cell count and retained bytes can bind first when rows carry hyperlinks,
+combining marks, or non-default underline metadata.
 
-### Reading what a session is holding
+### Ownership model
 
-The aggregate answer needs only `info`:
+`sonicterm-resource` provides the process-local resource governor: an owner
+hierarchy, accounting ledger, and RAII reservation tokens. RAII ties cleanup to
+an object's lifetime: a reservation owns its charge and releases it on drop. The governor answers how much is held, by
+which owner, in which `ResourceClass`; it does not own the memory.
+
+Production GUI topology is:
+
+```mermaid
+flowchart TD
+    process["Process"] --> window["Window"]
+    window --> pane["AppPane"]
+```
+
+The type system also defines `SharedFont`, `SharedRaster`, `SharedAtlas`,
+`LocalPty`, and mux owner kinds, but the GUI does not register those nodes.
+Current production registration is only `Process → Window → AppPane`.
+
+Owner ids are monotonic and never reused. Legal parent/child combinations depend
+on `ProcessKind` and are checked at creation. An owner moves from `Open` to
+`Closing` to `Closed`; closing stops new children and reservations, and final
+close requires zero live children and charges.
+
+A window and its owner are inserted as one operation. Panes are reconciled under
+their actual window on pane creation and every 30 s retention pass. Tab transfer
+reattributes pane ownership to the destination window and closes the old pane
+owner. If window registration fails, the window remains usable but its subtree
+is omitted from hierarchy accounting. If pane registration fails, a later
+reconcile can retry it while the window has an owner.
+
+### Enforcement and the pane tripwire
+
+Each seam—an ownership boundary such as the grid, parser, or PTY queue—enforces
+its own limit. The GUI governor uses unlimited process and
+per-class limits, and window owners are tracking-only. This avoids maintaining a
+second set of process limits that can drift from the code doing the allocation.
+
+Each `AppPane` owner does have one committed-byte tripwire. It is derived from
+the actual seam constants:
+
+```text
+PANE_SEAM_CAP_SUM_BYTES =
+    MAX_GRID_CELLS × size_of::<Cell>()
+  + MAX_RETAINED_INLINE_IMAGE_BYTES
+  + MAX_HYPERLINK_METADATA_BYTES
+  + MAX_MEDIA_PAYLOAD_BYTES
+  + MAX_ESCAPE_SEQUENCE_BYTES
+  + max_queued_output_ring_bytes()
+  + max_pty_queued_input_bytes()
+
+PANE_COMMITTED_BUDGET_BYTES = 2 × PANE_SEAM_CAP_SUM_BYTES
+```
+
+The factor of 2 leaves room for allocator capacity, amortized overshoot, and the
+newest-image residual. It is a backstop for a seam that stopped bounding or
+under-reported its retention, not a second normal allocation policy. Pane
+charges are remeasured and moved to committed reservations every retention pass;
+they are not accumulated from historical events.
+
+### What is counted
+
+One pane report contains eight disjoint seams:
+
+| Field | Owned memory |
+| --- | --- |
+| `grid_visible_bytes` | visible rows, prompt storage, and rare cell attributes |
+| `grid_history_bytes` | retained scrollback rows |
+| `grid_alternate_bytes` | saved primary screen while the alternate screen is active |
+| `parser_bytes` | in-flight escape and media-capture buffers |
+| `hyperlink_bytes` | interned OSC 8 ids and URIs |
+| `inline_media_bytes` | decoded image pixels retained by the pane |
+| `pty_output_bytes` | ring memory pinned by queued PTY output |
+| `pty_input_bytes` | queued input vectors |
+
+`total_bytes` is their sum. `largest_seam` names the largest part. A
+`session retention` line sums the same fields across sampled panes.
+
+Renderer memory is separate because it is window-owned rather than pane-owned:
+
+- `glyph_atlas_bytes`: CPU glyph atlas capacity;
+- `image_atlas_bytes`: CPU inline-image atlas capacity;
+- `software_frame_bytes`: Windows CPU/GDI frame, zero elsewhere.
+
+These are host-memory copies. GPU textures and buffers are not included because
+the driver owns them and wgpu does not expose their sizes. Every visible and
+warm renderer is listed. `live_renderers` comes from an independent process-wide
+counter; a count larger than the listed renderer set indicates a live renderer
+that is no longer reachable from window topology.
+
+### Aggregate snapshot
+
+Set the log level to `info` for one `memory snapshot` at most every 30 s:
 
 ```toml
 [logging]
 level = "info"
 ```
 
-**`memory snapshot`** — one line at most every 30 seconds, carrying process,
-session, and renderer figures together. This is the record to reach for first,
-and the only one that survives a session nobody expected to have to explain:
+The line combines:
 
-| Field group | What it covers | What you can do |
-| --- | --- | --- |
-| `process_*_bytes` | What the OS says the whole process holds | Compare against the session total — a large gap is allocator or driver memory, not retention |
-| `session_total_bytes` + seam fields | Everything the panes hold, summed | See the per-seam table below |
-| `renderer_total_bytes`, `renderers=` | Glyph and image atlases, software frame, per renderer | Close windows for `visible`; lower the warm-pool size for `warm` |
-| Shared wgpu allocator | Allocated and reserved bytes, allocation and block counts, and the largest block, aggregated once per device/context | Compare reserved against allocated; visible and warm renderers sharing a context do not multiply this report |
-| `*_delta` | Movement since the previous snapshot | Read the direction, not the magnitude |
+- `process_private_committed_bytes`, `process_resident_bytes`, and
+  `process_virtual_bytes` from the OS, with deltas;
+- the session total and all eight pane seams;
+- `panes_total`, `panes_sampled`, and `panes_contended`;
+- renderer totals, roles, and `live_renderers`;
+- one shared-device allocator reading.
 
-The allocator portion has three explicit states: measured figures, backend
-reporting unsupported, and no renderer. Unsupported is not zero, and no
-renderer is not a failed measurement. It stays on this existing 30-second
-aggregate cadence; it is not sampled per frame or on the independent 5-second
-resource-history cadence.
+`process_virtual_bytes` is reserved address space, not consumption. GPU
+processes can reserve hundreds of gigabytes without holding that much resident
+memory. Compare resident/private figures with `session_total_bytes` and
+`renderer_total_bytes`.
 
-Three readings mean "no number" and they are not interchangeable.
-`unsupported` means this platform exposes no such figure — on macOS,
-private/committed is unsupported, because the meaningful figure there is
-`phys_footprint` and SonicTerm cannot reach it without guessing.
-`unavailable` on a delta means there was no previous sample to compare
-against. `panes_contended=N` means N panes were skipped because they were
-busy, so the session total is **partial**.
+Absence states are explicit:
 
-**`process_virtual_bytes` is not consumption.** It is reserved address space,
-routinely in the hundreds of gigabytes for a GPU process, and routinely
-harmless. Compare `process_resident_bytes` and `session_total_bytes` when
-asking whether a session is actually large.
+| Value | Meaning |
+| --- | --- |
+| `unsupported` | the platform or backend does not expose this figure |
+| `unavailable` | no previous comparable sample exists |
+| `panes_contended=N` | N busy panes were skipped; the session total is partial |
+| `allocator_state=none` | no renderer exists, so no allocator was queried |
 
-The remaining detail is diagnostics and needs `debug`:
+On macOS, private/committed is `unsupported`; SonicTerm reports resident and
+virtual memory but does not substitute an invented value for `phys_footprint`.
+On Windows, private/committed is `PrivateUsage` and resident is
+`WorkingSetSize`. Linux and other platforms without a process-memory sampler
+report all three OS figures as `unsupported`; pane, renderer, and allocator
+accounting still runs.
+
+The allocator is sampled once per shared device/context, from the main renderer
+or a deterministic visible/warm fallback. A measured report includes:
+
+```text
+allocator_allocated_bytes
+allocator_reserved_bytes
+allocator_allocations
+allocator_blocks
+allocator_largest_block_bytes
+```
+
+Software adapters use wgpu 30 `MemoryHints::MemoryUsage`; hardware adapters use
+`MemoryHints::Performance`. On D3D12, the software policy changes initial
+allocator blocks from 128 MiB device / 64 MiB host to 8 MiB device / 4 MiB host.
+Those are placement and block-sizing hints, not allocation caps; larger
+resources still allocate.
+
+### Detailed retention and reclamation
+
+Set `debug` for per-pane and per-renderer lines:
 
 ```toml
 [logging]
 level = "debug"
 ```
 
-The detail pass runs at most once every 30 seconds. An idle session arms that
-sampling deadline itself, and a sampling-only wake does not request a redraw.
+The 30 s pass uses `try_lock`; it never waits for a pane parser. Registration,
+reconciliation, charging, stalled-capture cancellation, and idle-media
+reclamation run at every log level. Only emission is gated. A sampling-only
+wake does not request a redraw.
 
-**`pane retention`** — one per pane:
+Two reclamations remove user-visible content and therefore log on the
+`memory::reclaimed` target even at the default `warn` level:
 
-| Field | What it covers | What you can do |
-| --- | --- | --- |
-| `grid_visible_bytes` | Cells currently on screen | Nothing — it is the screen |
-| `grid_history_bytes` | Scrollback | Lower `scrollback` |
-| `grid_alternate_bytes` | The screen saved behind a full-screen program | Nothing — it frees itself on exit |
-| `parser_bytes` | Escape sequences and image transfers being parsed right now | Nothing — transient |
-| `hyperlink_bytes` | OSC 8 link targets | Nothing — reclaimed as links scroll away |
-| `inline_media_bytes` | Decoded inline images | Display fewer images, or fewer panes |
-| `pty_output_bytes` | Queued PTY output | Nothing — bounded by the queue |
-| `pty_input_bytes` | Input queued toward the shell | Nothing unless you paste very large payloads |
-
-`total_bytes` is their sum, and `largest_seam` names the biggest one, which is
-where to look first.
-
-**`session retention`** — one for the whole process, summing every pane, with
-the same fields plus `panes`. **This is the line that matters for growth**: a
-session can hold far more than any single pane suggests, and this is the only
-figure that shows it.
-
-### Reading a growth report
-
-Compare `session retention` lines over time, not just the first and last.
-Sampling is rate-limited and runs on the idle-wake path, so a gap in the log
-means nothing woke the loop — not that memory was flat across it.
-
-Then look at which seam moved. `inline_media_bytes` climbing means images;
-`grid_history_bytes` climbing means scrollback; `parser_bytes` staying high
-means a transfer is stuck rather than transient.
-
-### How the accounting works
-
-`sonicterm-resource` owns a process-local **resource governor**: the accounting
-and attribution layer behind the figures above. It answers "how much is held, by
-which owner, in which class". It is not the layer that bounds allocation.
-
-#### Enforcement belongs to the seams
-
-Per-seam caps enforce. The governor accounts, attributes, and backstops. The GUI
-process deliberately constructs its governor with an unlimited process byte
-ceiling and tracking-only window limits.
-
-That is a design decision, not an omission. Two limits that must agree and are
-maintained separately will drift, and the one that stops agreeing keeps
-reporting itself as enforced. Each seam — grid cells, retained inline media,
-interned hyperlink metadata, parser capture staging, escape sequences in flight,
-command events — already bounds itself and is tested at its own boundary.
-
-The one governor limit that does bind is the pane owner's committed budget. It
-is **a tripwire, not a second enforcement point**: it is computed as the sum of
-the per-seam caps times a headroom multiplier, so it cannot disagree with the
-seam caps — it is derived from them — and sits far enough above correct
-operation that it never fires there. What it catches is the failure the
-per-seam caps structurally cannot: a seam that has stopped bounding while still
-reporting itself as bounded.
-
-#### Owner hierarchy
-
-Owners form a tree with one immutable process root. IDs are allocated
-monotonically and never reused, and which parent may hold which child is fixed
-per process kind and rejected at creation time rather than left to convention.
-
-```mermaid
-flowchart TD
-    P[Process root] --> W[Window]
-    W --> A[AppPane]
-    A -.-> L[LocalPty]
-    P -.-> SF[SharedFont]
-    P -.-> SR[SharedRaster]
-    P -.-> SA[SharedAtlas]
-    P -.-> MC[MuxConnection]
-
-    classDef live fill:#1b5e20,stroke:#66bb6a,stroke-width:2px,color:#ffffff
-    classDef reserved fill:#37474f,stroke:#90a4ae,stroke-width:1px,color:#eceff1,stroke-dasharray: 4 3
-
-    class P,W,A live
-    class L,SF,SR,SA,MC reserved
+```sh
+grep 'memory::reclaimed' ~/.sonicterm/logs/sonicterm.log
 ```
 
-Solid nodes are what production instantiates today: `Process → Window →
-AppPane`. Dashed nodes are permitted by the ledger but never registered — no
-code path creates them. They are reserved capacity in the contract, not live
-topology.
+| Message | Meaning |
+| --- | --- |
+| `cancelled a media capture that stopped receiving` | no bytes arrived for two 30 s intervals; staging was released and the image will not appear |
+| `discarded inline images from idle panes` | older images were removed from panes that held a share sized for fewer live panes |
 
-Each owner is `Open`, then `Closing`, then `Closed`. `Closing` stops admitting
-new reservations and new children while still letting live tokens finalize
-during teardown. Closing is refused while an owner still has live children or
-nonzero charges.
+A large single snapshot is not evidence of growth. Compare several consecutive
+samples. Rising `grid_history_bytes` points to scrollback; rising
+`inline_media_bytes` points to images; `parser_bytes` that remains high across
+samples points to an in-flight transfer. A nonzero `panes_contended` means the
+aggregate understates the session.
 
-Registration failure is not retried uniformly, and the difference matters:
+### Code locations
 
-- A **pane** that fails to register keeps working and is picked up by the next
-  reconcile pass, which registers any unowned pane under an already-registered
-  window. Reconcile runs whenever a pane is created — new tab or split — and
-  again on every retention pass, at every log level.
-- A **window** that fails to register is never retried. Reconcile skips a window
-  that has no owner, so neither it nor any of its panes appears in hierarchy
-  accounting for the rest of that window's life.
-
-In both cases the window or pane keeps working: a diagnostic gap is preferred
-over a lost window.
-
-#### Charging runs at every log level
-
-Owner registration, charging, and the retention log lines are three separate
-things, and the distinction matters when reading a snapshot:
-
-- **Owners always exist.** A window owner is registered when the window is
-  created, a pane owner when the pane is created. This happens at every log
-  level, and it is structural rather than conventional: inserting a window and
-  registering its owner are one operation.
-- **Charging always runs.** The pass that samples what a pane retains and moves
-  its charges to match runs on the idle-wake path at every log level.
-- **Only emission is gated.** `info` on `target="memory"` admits the aggregate
-  snapshot; `debug` additionally admits per-pane and allocation/release detail.
-  Neither level controls whether the figures are collected.
-
-So a session running at the default level is still fully accounted. Raise the
-level to `info` for the aggregate or `debug` for the diagnostic detail.
-
----
+| Topic | Primary paths |
+| --- | --- |
+| Governor, ledger, reservations | `crates/sonicterm-resource/src/{ledger,owner,reservation}.rs` |
+| Resource contracts and owner kinds | `crates/sonicterm-types/src/resource.rs` |
+| Pane limits and owner registration | `crates/sonicterm-app/src/app/mod.rs` |
+| Pane measurement, charging, reclamation | `crates/sonicterm-app/src/app/retention.rs` |
+| Aggregate snapshot | `crates/sonicterm-app/src/app/memory_snapshot.rs` |
+| Inline-media limits | `crates/sonicterm-app/src/app/media.rs` |
+| Grid and hyperlink limits | `crates/sonicterm-grid/src/{grid,hyperlink}.rs` |
+| Parser capture limits | `crates/sonicterm-vt/src/vt.rs` |
+| PTY queue limits | `crates/sonicterm-io/src/pty.rs` |
+| Renderer retention and allocator report | `crates/sonicterm-gpu/src/core.rs` |
 
 ## 中文
 
-SonicTerm 会限制自身占用的内存，并报告实际占用情况。本页涵盖两部分：各子系
-统保留什么内容、达到上限时会发生什么，以及当会话内存超出预期时如何从日志中
-读取这些信息。
+SonicTerm 在真正拥有内存的子系统边界实施限制，再按窗格、渲染器和进程报告保留的
+主机内存。本页负责资源上限、所有权与记账。协议细节见[终端 IO 与 VT](Terminal-IO-and-VT)，
+图集行为见[渲染与字体](Rendering-and-Fonts)，日志存储与故障后证据见[日志](Logging)。
 
-### 为什么仅有上限还不够
+### 资源上限
 
-这里的每个子系统都有限制。这是必要的，但并不充分——面板较多的会话可能每个
-单项限制都未被突破，而总量却在攀升，这正是此前报告的数 GB 内存增长的形态。
-因此部分限制是按面板计的，部分是进程级的，而最关键的是进程级限制。
-
-### 各子系统保留的内容
-
-| 内容 | 上限 | 达到上限时 |
+| 所有者 | 精确上限 | 达到上限时 |
 | --- | --- | --- |
-| 已解码的内联图像 | 进程共 256 MiB；每个面板分得其中一份，下限 4 MiB，上限 64 MiB | 丢弃最早的图像。每个面板始终保留最新的一张 |
-| 传输中的图像 | 进程共 64 MiB 暂存；每个传输保证 4 MiB | 第 14 个并发传输会被拒绝且不显示 |
-| 单张图像负载 | 16 MiB | 拒绝传输，而非截断 |
-| 网格单元 | 1,048,576 个单元；回滚缓冲另受 24 MiB 保留字节限制 | 丢弃最早的回滚行 |
-| 转义序列 | 1 MiB | 丢弃该序列直至其终止符 |
-| 超链接目标 | 16,384 个链接，每个 URI 8 KiB | 回收已滚出屏幕的链接，然后接纳新链接 |
-| PTY 输入消息 | 16 MiB，队列 4 条 | 拒绝超大输入 |
-| PTY 输出队列 | 64 个数据块 | 读取端等待，而非增长 |
-| 软件渲染帧 | 160 MiB | 拒绝更大的表面 |
+| 网格几何 | 任一轴 ≤ 4,096；单个可见屏幕 ≤ 524,288 个单元格；可见区 + 历史 + 已保存主屏幕 ≤ 1,048,576 个单元格 | 限制尺寸和请求的历史行数 |
+| 网格保留存储 | `MAX_GRID_CELLS × size_of::<Cell>()`，当前构建约 24 MiB，由可见区/历史/已保存主屏幕共用 | 压缩行容量，再以每批 64 行删除最老历史；滚动路径每 512 行摊销检查一次 |
+| 单元格组合附加内容 | 每个单元格 64 个 UTF-8 字节 | 不再保留额外零宽数据 |
+| OSC 8 注册表 | 16,384 个链接；每个 URI 8 KiB；每个客户端 id 1 KiB；合计元数据 8 MiB | 回收已无保留单元格引用的条目后接纳；仍无空间则拒绝新链接 |
+| 转义序列 | 1 MiB | 一直丢弃到终止符 |
+| 媒体负载 | 每个传输 16 MiB | 拒绝，不截断也不局部显示 |
+| 媒体捕获暂存 | 进程共 64 MiB；下限 4 MiB；保证 13 个并发下限预留 | 无法暂存时拒绝；连续两次 30 s 采样无进度后取消 |
+| 已解码内联图像 | 每窗格 64 MiB 且最多 128 张；256 MiB 进程目标按存活窗格平分；最小 4 MiB 且保留最新一张 | 删除最老图像；在空闲窗格扫描收敛前，受压进程最多可在目标之外为每个存活窗格保留一份 4 MiB 最新图像余量 |
+| 编码图像尺寸 | 声明宽高 ≤ 2,048，像素数 ≤ 2,048² | 解码前拒绝 |
+| 渲染图像尺寸 | 宽高 ≤ 1,024；BGRA8 ≤ 4 MiB | 缩放 iTerm2/kitty 图像；Sixel 解码进有界缓冲 |
+| PTY 输入 | 队列四条，每条 16 MiB | 返回 `MessageTooLarge`、`QueueFull` 或 `WriterDisconnected`，并保留原字节 |
+| PTY 输出 | 64 个排队数据块，加一个阻塞中的发送数据块；每个由 64 KiB 读取环形缓冲支持；结构最坏值为 4.0625 MiB | 阻塞读取线程，由操作系统施加背压 |
+| 字形图集 | 每渲染器一个 2048×2048 BGRA8 CPU 图集，16 MiB、16,384 个条目 | 淘汰最冷的四分之一并重试 |
+| 图像图集 | 默认 1×1 占位符；仅媒体活跃时使用 2048×2048 BGRA8 | 填满时跳过较早图像；连续 240 个无媒体帧后释放为占位符 |
+| Windows 软件帧 | 任一轴 ≤ 16,384；总量 ≤ 160 MiB | 拒绝创建或调整尺寸，并保留旧的有效分配 |
+| 窗格命令事件 | 1,024 个事件 | 丢弃最早事件并缩小向量容量 |
 
-打开 1 至 4 个面板时，每个面板可获得完整的 64 MiB 图像配额。超出之后配额会
-缩小——20 个面板时每个约 12.8 MiB——因此打开大量同时显示图像的面板会导致较
-早的图像被清除。
+内联媒体的 256 MiB 被准确称为进程**目标**，不是绝对上限。每个窗格都必须保留最新
+图像，而单张已解码图像最多 4 MiB。因此受压时可陈述的总上限为：
 
-### wgpu 分配策略
-
-检测到的软件 adapter 会请求 wgpu `MemoryHints::MemoryUsage`；硬件 adapter 仍使用
-`MemoryHints::Performance`。在 Windows 上，这包括 DX12 WARP。在 D3D12 上使用
-wgpu 30 时，该策略会把初始分配器块从 device 128 MiB / host 64 MiB 改为
-device 8 MiB / host 4 MiB。这只是块大小与放置提示，不是资源上限：大于这些初始块的
-buffer、texture 与其它资源仍然可以分配。
-
-### 回滚缓冲受两重限制
-
-`[terminal].scrollback` 设定行数，而保留字节另有 24 MiB 的独立限制。带有超
-链接、组合字符或非默认下划线的行比纯文本占用更多，因此可能在达到行数上限前
-先触及字节预算。
-
-在默认的 1,000 行下不会发生这种情况。如果你大幅调高 `scrollback` 且输出包含
-大量链接，实际保留的行数会少于所设定的数值。
-
-### SonicTerm 会丢弃的两类可见内容
-
-大多数内存回收是不可见且无需关注的。以下两种情况并非如此，因此它们在**默认**
-级别下即会记录——你无需事先开启 debug 日志：
-
-```
-grep 'memory::reclaimed' ~/.sonicterm/logs/sonicterm.log
+```text
+256 MiB + 存活窗格数 × 4 MiB
 ```
 
-| 日志行 | 发生了什么 | 可采取的措施 |
-| --- | --- | --- |
-| `cancelled a media capture that stopped receiving` | 图像传输整整一分钟没有新数据，已被放弃。该图像不会显示 | 重新发送。笔记本在传输中途休眠或 SSH 连接中断后常见 |
-| `discarded inline images from idle panes` | 已解码图像的总内存超出进程上限，因此丢弃了未使用面板中较早的图像 | 重新发送仍需要的图像，或减少持有图像的面板数量 |
+只要 `存活窗格数 × 4 MiB` 仍能放进目标内，周期性空闲窗格扫描就会把总量降回
+256 MiB 或以下。较大的公式既描述收敛前的边界，也在每窗格一张图像的最低需求本身
+超过目标时继续作为上限。
 
-两种日志行都会附带相关的字节数。
+网格约 24 MiB 的数值同样是一个共享上限，不是“回滚 24 MiB 再加可见屏幕”。
+`[terminal].scrollback` 设置行数上限；带超链接、组合字符或非默认下划线元数据的行更大，
+因此单元格数量或保留字节可能先达到上限。
 
-### 查看会话的实际占用
+### 所有权模型
 
-聚合结论只需要 `info` 级别：
+`sonicterm-resource` 提供进程内资源治理器：所有者层级、记账账本和 RAII 预留令牌。
+RAII 表示把清理绑定到对象生命周期；预留令牌拥有自己的记账额，释放时自动归还。治理器回答“哪个所有者以哪个
+`ResourceClass` 持有多少”，但不拥有内存本身。
+
+生产 GUI 拓扑为：
+
+```mermaid
+flowchart TD
+    process["Process"] --> window["Window"]
+    window --> pane["AppPane"]
+```
+
+类型系统还定义了 `SharedFont`、`SharedRaster`、`SharedAtlas`、`LocalPty` 和 mux
+所有者种类，但 GUI 不注册这些节点。当前生产注册只有 `Process → Window → AppPane`。
+
+所有者 id 单调递增且永不复用。合法父子组合取决于 `ProcessKind`，创建时会检查。
+所有者状态从 `Open` 变为 `Closing`，再变为 `Closed`；进入 `Closing` 后不再接纳新子节点
+和新预留，最终关闭要求没有存活子节点和记账额。
+
+窗口插入与其所有者注册是同一个操作。窗格创建时和每次 30 s 保留量扫描时，都会把窗格
+协调到实际窗口下面。标签页转移会把窗格所有权重新归到目标窗口，并关闭旧窗格所有者。
+若窗口注册失败，窗口仍可使用，但整个子树不会出现在层级记账中。若窗格注册失败，只要
+窗口已有所有者，之后的协调扫描仍可重试。
+
+### 限制执行与窗格绊线
+
+每个接缝（即网格、解析器或 PTY 队列这样的所有权边界）负责执行自己的上限。GUI 治理器的进程和按类别上限为无限，窗口所有者也只用于
+跟踪。这样不会再维护一套可能与实际分配代码漂移的进程级限制。
+
+每个 `AppPane` 所有者仍有一个已提交字节绊线。它直接由实际接缝常量计算：
+
+```text
+PANE_SEAM_CAP_SUM_BYTES =
+    MAX_GRID_CELLS × size_of::<Cell>()
+  + MAX_RETAINED_INLINE_IMAGE_BYTES
+  + MAX_HYPERLINK_METADATA_BYTES
+  + MAX_MEDIA_PAYLOAD_BYTES
+  + MAX_ESCAPE_SEQUENCE_BYTES
+  + max_queued_output_ring_bytes()
+  + max_pty_queued_input_bytes()
+
+PANE_COMMITTED_BUDGET_BYTES = 2 × PANE_SEAM_CAP_SUM_BYTES
+```
+
+系数 2 为分配器容量、摊销过冲和最新图像余量留出空间。它用于发现某个接缝已经停止
+设限或少报保留量，不是正常分配的第二套策略。每次保留量扫描都会重新测量窗格记账额，
+并移动到已提交预留；不会从历史事件不断累加。
+
+### 记账内容
+
+单个窗格报告包含八个互不重叠的接缝：
+
+| 字段 | 所属内存 |
+| --- | --- |
+| `grid_visible_bytes` | 可见行、提示符存储和稀有单元格属性 |
+| `grid_history_bytes` | 保留的回滚行 |
+| `grid_alternate_bytes` | 备用屏幕活跃时保存的主屏幕 |
+| `parser_bytes` | 传输中的转义序列和媒体捕获缓冲 |
+| `hyperlink_bytes` | 驻留的 OSC 8 id 与 URI |
+| `inline_media_bytes` | 窗格保留的已解码图像像素 |
+| `pty_output_bytes` | 排队 PTY 输出固定的环形缓冲内存 |
+| `pty_input_bytes` | 排队输入向量 |
+
+`total_bytes` 是八项之和，`largest_seam` 指出最大项。`session retention` 行会对所有
+已采样窗格汇总同样字段。
+
+渲染器内存单独报告，因为它属于窗口而不是窗格：
+
+- `glyph_atlas_bytes`：CPU 字形图集容量；
+- `image_atlas_bytes`：CPU 内联图像图集容量；
+- `software_frame_bytes`：Windows CPU/GDI 帧，其它平台为零。
+
+这些都是主机内存副本。GPU 纹理与缓冲不在其中，因为显卡驱动拥有它们，wgpu 也不提供
+大小。报告会列出所有可见和预热渲染器。`live_renderers` 来自独立的进程级计数器；若该
+计数大于可列出的渲染器集合，说明有一个仍存活但已无法从窗口拓扑访问的渲染器。
+
+### 聚合快照
+
+把日志级别设为 `info`，最多每 30 s 得到一条 `memory snapshot`：
 
 ```toml
 [logging]
 level = "info"
 ```
 
-**`memory snapshot`**——最多每 30 秒一行，同时承载进程、会话与渲染器数据。这是
-应当首先查看的记录，也是唯一能在“没人预料到需要解释”的会话中留存下来的记录：
+该行合并：
 
-| 字段组 | 含义 | 可采取的措施 |
-| --- | --- | --- |
-| `process_*_bytes` | 操作系统所报告的整个进程占用 | 与会话总量对比——差距很大说明是分配器或驱动内存，而非保留量 |
-| `session_total_bytes` 及各接缝字段 | 所有窗格保留量的总和 | 参见下方按接缝划分的表格 |
-| `renderer_total_bytes`、`renderers=` | 每个渲染器的字形图集、图像图集与软件帧 | `visible` 可关闭窗口；`warm` 可调低预热池大小 |
-| 共享 wgpu 分配器 | 每个 device/context 的已分配与已保留字节、allocation 与 block 数量、最大 block | 比较 reserved 与 allocated；共享同一 context 的可见和预热渲染器不会重复计数 |
-| `*_delta` | 相对上一次快照的变化 | 关注方向，而非绝对值 |
+- 操作系统给出的 `process_private_committed_bytes`、`process_resident_bytes`、
+  `process_virtual_bytes` 及其变化量；
+- 会话总量和全部八个窗格接缝；
+- `panes_total`、`panes_sampled`、`panes_contended`；
+- 渲染器总量、角色和 `live_renderers`；
+- 一次共享设备分配器读数。
 
-分配器部分明确区分三种状态：已测量的数据、backend 不支持报告，以及没有渲染器。
-不支持不等于零，没有渲染器也不等于测量失败。它沿用既有的 30 秒聚合周期；不会
-逐帧采样，也不使用独立的 5 秒资源历史周期。
+`process_virtual_bytes` 是保留地址空间，不是实际占用。GPU 进程可能保留数百 GB 地址空间，
+但并未常驻同等内存。应把 resident/private 数据与 `session_total_bytes`、
+`renderer_total_bytes` 对照。
 
-有三种读数表示“没有数值”，且彼此不可互换。`unsupported` 表示该平台不提供此数据
-——在 macOS 上 private/committed 即为不支持，因为该平台上有意义的数据是
-`phys_footprint`，而 SonicTerm 无法在不猜测的前提下获取它。增量为
-`unavailable` 表示没有可供比较的上一次采样。`panes_contended=N` 表示有 N 个窗格
-因繁忙而被跳过，因此会话总量是**不完整的**。
+没有数值时会明确说明原因：
 
-**`process_virtual_bytes` 不是实际占用。** 它是已保留的地址空间，对 GPU 进程而言
-常达数百 GB，且通常无害。判断会话是否真的很大时，应比较
-`process_resident_bytes` 与 `session_total_bytes`。
+| 取值 | 含义 |
+| --- | --- |
+| `unsupported` | 平台或后端不提供该数据 |
+| `unavailable` | 没有可比较的上一次采样 |
+| `panes_contended=N` | N 个繁忙窗格被跳过，会话总量不完整 |
+| `allocator_state=none` | 没有渲染器，因此没有查询分配器 |
 
-其余明细属于诊断信息，需要 `debug` 级别：
+macOS 的私有/已提交内存为 `unsupported`；SonicTerm 会报告常驻与虚拟内存，
+但不会拿虚构值替代 `phys_footprint`。Windows 的私有/已提交内存是 `PrivateUsage`，
+常驻内存是 `WorkingSetSize`。Linux 与其它没有进程内存采样器的平台会把三项操作系统
+数据都报告为 `unsupported`；窗格、渲染器和分配器记账仍会运行。
+
+分配器按共享设备/上下文只采样一次，来源优先为主渲染器，否则使用确定性的可见或
+预热回退。可测量报告包含：
+
+```text
+allocator_allocated_bytes
+allocator_reserved_bytes
+allocator_allocations
+allocator_blocks
+allocator_largest_block_bytes
+```
+
+软件适配器在 wgpu 30 中使用 `MemoryHints::MemoryUsage`，硬件适配器使用
+`MemoryHints::Performance`。D3D12 上，软件策略把初始分配器块从设备 128 MiB / 主机 64 MiB 改为
+设备 8 MiB / 主机 4 MiB。这些只是放置与块大小提示，不是分配上限；
+更大的资源仍可分配。
+
+### 详细保留量与回收
+
+设置 `debug` 后可查看按窗格和按渲染器的行：
 
 ```toml
 [logging]
 level = "debug"
 ```
 
-明细采样最多每 30 秒运行一次。空闲会话会自行安排采样截止时间，而仅用于采样的
-唤醒不会请求重绘。
+30 s 扫描使用 `try_lock`，绝不等待窗格解析器。注册、协调、记账、停滞捕获取消和空闲
+媒体回收在所有日志级别下都会运行，只有日志输出受级别控制。仅用于采样的唤醒不会请求重绘。
 
-**`pane retention`**——每个面板一行：
+两种回收会移除用户可见内容，因此即使在默认 `warn` 级别也写入
+`memory::reclaimed` 日志目标：
 
-| 字段 | 含义 | 可采取的措施 |
-| --- | --- | --- |
-| `grid_visible_bytes` | 当前显示在屏幕上的单元格 | 无 — 这就是屏幕本身 |
-| `grid_history_bytes` | 回滚缓冲 | 调低 `scrollback` |
-| `grid_alternate_bytes` | 全屏程序背后保存的主屏幕 | 无 — 程序退出时自动释放 |
-| `parser_bytes` | 当前正在解析的转义序列与图像传输 | 无 — 瞬时占用 |
-| `hyperlink_bytes` | OSC 8 链接目标 | 无 — 链接滚出后自动回收 |
-| `inline_media_bytes` | 已解码的内联图像 | 减少图像使用，或减少面板数量 |
-| `pty_output_bytes` | 排队中的 PTY 输出 | 无 — 受队列限制 |
-| `pty_input_bytes` | 排队发往 shell 的输入 | 除非粘贴超大内容，否则无需处理 |
-
-`total_bytes` 是它们之和，`largest_seam` 指出占用最大的一项，应优先从该项
-着手排查。
-
-**`session retention`**——整个进程一行，汇总所有面板，字段与上表相同并额外
-包含 `panes`。**这是排查内存增长时最关键的一行**：会话的实际占用可能远超任
-何单个面板所显示的数值，而只有这个数字能揭示这一点。
-
-### 解读内存增长报告
-
-应比较不同时间点的 `session retention` 行，而不只看首尾两行。采样受速率限制
-且运行在空闲唤醒路径上，因此日志中的间隔仅表示期间没有唤醒事件，并不代表内存
-在此期间保持平稳。
-
-随后查看是哪一项发生了变化。`inline_media_bytes` 上升说明是图像；
-`grid_history_bytes` 上升说明是回滚缓冲；`parser_bytes` 持续偏高则说明某个
-传输卡住了，而非瞬时占用。
-
-### 记账机制是如何工作的
-
-`sonicterm-resource` 拥有一个进程内的**资源治理器**（resource governor）：
-它是上述数字背后的记账与归属层。它回答的是「持有了多少、由哪个所有者持有、
-属于哪个类别」，而不是限制分配的那一层。
-
-#### 约束属于各个接缝
-
-真正实施限制的是各接缝自身的上限。治理器负责记账、归属与兜底。GUI 进程刻意
-将其治理器构造为进程字节上限无限、窗口限制仅用于跟踪。
-
-这是设计决定，而非疏漏。两个必须保持一致却分别维护的限制终将漂移，而那个已经
-不再一致的限制仍会把自己报告为「已生效」。每个接缝——网格单元、保留的内联媒体、
-驻留的超链接元数据、解析器捕获暂存、传输中的转义序列、命令事件——都已各自设限，
-并在各自的边界处受测试覆盖。
-
-治理器中唯一真正生效的限制是窗格所有者的已提交预算。它是**一根绊线，而不是
-第二道强制点**：它由各接缝上限之和乘以余量系数算得，因此不可能与接缝上限相互
-矛盾——它本就派生自后者——并且高到在正常运行时永不触发。它捕捉的是各接缝上限
-在结构上无法捕捉的故障：某个接缝已经停止设限，却仍把自己报告为受限。
-
-#### 所有者层级
-
-所有者构成一棵树，根节点是唯一且不可变的进程根。ID 单调分配且永不复用，
-哪个父节点可以持有哪种子节点，按进程类型固定，并在创建时直接拒绝非法组合，
-而不是依赖约定。
-
-```mermaid
-flowchart TD
-    P[进程根] --> W[窗口 Window]
-    W --> A[窗格 AppPane]
-    A -.-> L[LocalPty]
-    P -.-> SF[SharedFont]
-    P -.-> SR[SharedRaster]
-    P -.-> SA[SharedAtlas]
-    P -.-> MC[MuxConnection]
-
-    classDef live fill:#1b5e20,stroke:#66bb6a,stroke-width:2px,color:#ffffff
-    classDef reserved fill:#37474f,stroke:#90a4ae,stroke-width:1px,color:#eceff1,stroke-dasharray: 4 3
-
-    class P,W,A live
-    class L,SF,SR,SA,MC reserved
+```sh
+grep 'memory::reclaimed' ~/.sonicterm/logs/sonicterm.log
 ```
 
-实线节点是当前生产环境真正实例化的部分：`进程 → 窗口 → 窗格`。虚线节点虽然被
-账本允许，却从未被注册——没有任何代码路径会创建它们。它们是契约中预留的容量，
-而不是活跃的拓扑结构。
+| 消息 | 含义 |
+| --- | --- |
+| `cancelled a media capture that stopped receiving` | 连续两个 30 s 周期没有字节到达；已释放暂存，该图像不会显示 |
+| `discarded inline images from idle panes` | 从仍持有较少窗格时期份额的窗格中删除了较早图像 |
 
-每个所有者依次处于 `Open`、`Closing`、`Closed` 三种状态。`Closing` 会停止接纳
-新的预留与新的子节点，同时仍允许存活的令牌在拆除过程中完成结算。若某个所有者
-仍有存活的子节点或非零的记账额，关闭会被拒绝。
+单个偏大快照不能证明持续增长。应比较连续多次采样。`grid_history_bytes` 上升指向回滚；
+`inline_media_bytes` 上升指向图像；`parser_bytes` 连续多次保持较高说明有传输尚未结束。
+`panes_contended` 非零表示聚合值低估了会话。
 
-注册失败并非一律重试，其中的差异很重要：
+### 代码位置
 
-- **窗格**注册失败后仍可正常工作，并会被下一次协调（reconcile）扫描接管——
-  该扫描会把任何无主窗格挂到已注册的窗口之下。协调在每次创建窗格时运行
-  （新标签页或分屏），也在每一次保留量采样时运行，且在所有日志级别下都会执行。
-- **窗口**注册失败则永不重试。协调会跳过没有所有者的窗口，因此在该窗口的整个
-  生命周期内，它及其所有窗格都不会出现在层级记账中。
-
-两种情况下窗口或窗格都能继续工作：宁可留下诊断盲区，也不要丢失一个窗口。
-
-#### 记账在所有日志级别下都会运行
-
-所有者注册、记账、保留量日志行是三件相互独立的事情，阅读快照时必须区分：
-
-- **所有者始终存在。** 窗口所有者在窗口创建时注册，窗格所有者在窗格创建时注册。
-  这在所有日志级别下都会发生，而且是结构性的而非约定性的：插入窗口与注册其
-  所有者是同一个操作。
-- **记账始终运行。** 采样窗格保留量并相应调整其记账额的那一趟处理，运行在空闲
-  唤醒路径上，在所有日志级别下都会执行。
-- **只有日志输出受开关控制。** `target="memory"` 上的 `info` 会接纳聚合快照；
-  `debug` 还会接纳按窗格与分配/释放明细。两者都不控制这些数字是否被收集。
-
-因此，运行在默认级别下的会话依然被完整记账。把级别调到 `info` 可查看聚合快照，
-调到 `debug` 可查看诊断明细。
+| 主题 | 主要路径 |
+| --- | --- |
+| 治理器、账本、预留 | `crates/sonicterm-resource/src/{ledger,owner,reservation}.rs` |
+| 资源契约与所有者种类 | `crates/sonicterm-types/src/resource.rs` |
+| 窗格限制与所有者注册 | `crates/sonicterm-app/src/app/mod.rs` |
+| 窗格测量、记账、回收 | `crates/sonicterm-app/src/app/retention.rs` |
+| 聚合快照 | `crates/sonicterm-app/src/app/memory_snapshot.rs` |
+| 内联媒体上限 | `crates/sonicterm-app/src/app/media.rs` |
+| 网格与超链接上限 | `crates/sonicterm-grid/src/{grid,hyperlink}.rs` |
+| 解析器捕获上限 | `crates/sonicterm-vt/src/vt.rs` |
+| PTY 队列上限 | `crates/sonicterm-io/src/pty.rs` |
+| 渲染器保留量与分配器报告 | `crates/sonicterm-gpu/src/core.rs` |

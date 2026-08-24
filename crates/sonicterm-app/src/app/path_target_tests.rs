@@ -124,6 +124,44 @@ fn app_cell_lookup_resolves_contextual_relative_paths() {
     ));
 }
 
+/// App lookup resolves a shell-quoted spaced `ll` name from the exact pane CWD.
+#[test]
+fn app_cell_lookup_resolves_shell_quoted_spaced_name() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let row = "drwxr-xr-x@ - d0n9x1n 23 Aug 21:54 'ff ff'";
+    let name_start = row.find("ff ff").unwrap();
+    let name_start_col = row[..name_start].chars().count();
+    let window = app.__test_seed_child_window(&["quoted"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    let (osc7, expected) = if cfg!(target_os = "windows") {
+        (
+            b"\x1b]7;file:///C:/Users/d0n9x1n\x1b\\".as_slice(),
+            PathBuf::from(r"C:\Users\d0n9x1n\ff ff"),
+        )
+    } else {
+        (b"\x1b]7;file:///Users/d0n9x1n\x1b\\".as_slice(), PathBuf::from("/Users/d0n9x1n/ff ff"))
+    };
+    let mut output = osc7.to_vec();
+    output.extend_from_slice(row.as_bytes());
+    assert!(app.__test_advance_child_pane_parser(window, pane, &output));
+
+    for col in name_start_col..name_start_col + "ff ff".chars().count() {
+        let resolved = app
+            .cell_target_at(window, pane, 0, u16::try_from(col).unwrap())
+            .expect("shell-quoted contextual target");
+        assert!(matches!(
+            resolved.target,
+            ResolvedCellTarget::Path(ref key)
+                if key.candidates.iter().any(|probe| {
+                    probe.display() == "ff ff"
+                        && usize::from(probe.start_col) == name_start_col
+                        && usize::from(probe.end_col) == name_start_col + "ff ff".chars().count()
+                        && probe.resolved_path == expected
+                })
+        ));
+    }
+}
+
 /// App lookup resolves a spaced name from the exact pane CWD across every cell in its span.
 #[test]
 fn app_cell_lookup_resolves_spaced_contextual_names() {

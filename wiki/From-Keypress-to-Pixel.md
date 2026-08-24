@@ -1,1483 +1,1071 @@
 # From Keypress to Pixel / 从按键到像素
 
-What really happens after you press `A`—told first as a tiny story, then as an
-exact map of SonicTerm's current code.
-
-按下 `A` 以后究竟发生了什么——先讲一个小小的故事，再给出 SonicTerm 当前代码的
-精确地图。
-
-Related / 相关: [Architecture](Architecture) · [Terminal IO and VT](Terminal-IO-and-VT) · [Rendering and Fonts](Rendering-and-Fonts)
-
 ## English
 
-### The smallest true story
+This page follows one plain uppercase `A` through the current application. The
+pane has focus. No palette, search field, copy mode, IME composition, or key
+binding consumes the key.
 
-Imagine that `A` is a little letter riding in an envelope.
-
-It must make **two trips**:
-
-1. **You → the program:** SonicTerm puts `A` in an envelope and gives it to the
-   shell or other program running in the pane.
-2. **The program → SonicTerm → the screen:** if that program sends `A` back,
-   SonicTerm puts it in a cell, makes a tiny picture of its shape, and paints
-   that picture on the window.
-
-The most important fact is this:
-
-> Pressing `A` does not paint `A` directly. SonicTerm first sends the key to the
-> child program. SonicTerm paints only the output that comes back through the
-> pseudo-terminal.
-
-An ordinary interactive shell usually has **echo** enabled, so it sends the
-`A` back right away. That makes the round trip look instant. A full-screen app
-such as an editor can turn echo off, keep the key, and send back something else—or
-nothing at all.
+Pressing `A` does not draw `A` directly. SonicTerm sends bytes to the child
+program. It draws only bytes that return through the pseudo-terminal (PTY).
+An interactive shell usually echoes the byte, which makes the round trip look
+immediate.
 
 ```mermaid
 flowchart LR
-    finger["Finger presses A"] --> door["SonicTerm receives the key"]
-    door --> envelope["UTF-8 envelope: 0x41"]
-    envelope --> child["Shell or terminal program"]
-    child -- "echoes or redraws" --> bytes["Output bytes return"]
-    bytes --> grid["A goes into a grid cell"]
-    grid --> stamp["Font makes an A-shaped stamp"]
-    stamp --> painter["GPU or Windows CPU painter"]
-    painter --> screen["A lights up on the screen"]
+    key["WindowEvent::KeyboardInput<br/>logical A"]
+    encode["encode_key / encode_logical<br/>UTF-8 0x41"]
+    inq["bounded PTY input queue"]
+    writer["sonic-pty-writer"]
+    child["child process"]
+    reader["sonic-pty-reader"]
+    outq["bounded PTY output queue"]
+    worker["per-pane VT worker"]
+    parser["Parser::advance / Performer"]
+    grid["Grid cell A<br/>dirty row + revision"]
+    event["RequestRedraw(WindowId)"]
+    frame["complete PaneRender frame"]
+    font["FontStack + GlyphAtlas"]
+    choice{"presenter"}
+    wgpu["retained wgpu frame"]
+    cpu["WindowsSoftwareFrame + GDI"]
+    pixels(["window pixels"])
+
+    key --> encode --> inq --> writer --> child
+    child --> reader --> outq --> worker --> parser --> grid
+    grid --> event --> frame --> font --> choice
+    choice -- "wgpu" --> wgpu --> pixels
+    choice -- "Windows degraded" --> cpu --> pixels
 ```
 
-### Meet the helpers
+### 1. Window setup prepares the path
 
-| Helper in the story | What it really is |
-| --- | --- |
-| The door | winit's `WindowEvent::KeyboardInput` |
-| The envelope maker | `encode_key` / `encode_logical` |
-| The tube to the program | a PTY on macOS or ConPTY-backed PTY on Windows |
-| The program | the shell, editor, TUI, or other child process in the pane |
-| The listener | `sonic-pty-reader`, plus `sonicterm-vt-loop` for a main-created pane or `sonicterm-vt-loop-child` for a pane created directly in a torn-out window |
-| The rule reader | public `sonicterm_vt::vt::Parser` and its private `Performer` |
-| The box of letter places | `sonicterm_grid::grid::Grid` |
-| The font helper | `sonicterm-engine::FontStack` and `sonicterm-font` |
-| The stamp book | the CPU `GlyphAtlas`; wgpu also keeps a texture copy, while the Windows CPU painter reads the CPU copy directly |
-| The painter | wgpu, or the Windows software frame when that path is active |
+The first native window and renderer are created in `App::do_resumed`.
+SonicTerm enables IME input, records the monitor period, and creates a wgpu
+surface.
 
-### Before the key: SonicTerm has already built the road
+The first renderer requests a high-performance adapter compatible with that
+surface. `force_fallback_adapter` is false. wgpu may still return a CPU adapter
+when hardware is unavailable. Later windows reuse the first adapter, device,
+and queue through `GpuSharedContext`; each window has its own surface and
+renderer state.
 
-The same character pipeline is prepared when a window opens, before anyone
-presses `A`:
+A software adapter is detected when its device type is `Cpu`, or its name
+identifies Microsoft Basic Render Driver, llvmpipe, SwiftShader, or a software
+adapter. Adapter detection selects the device memory hint:
 
-1. The winit event-loop thread creates the native window and enables IME events.
-2. The first renderer creates a wgpu instance; later windows clone the shared
-   instance. Every renderer creates a surface for its own native window.
-3. The first renderer asks wgpu for a high-performance adapter compatible with
-   its surface. SonicTerm does not explicitly force a fallback adapter, but wgpu
-   may return a CPU/software adapter when no usable hardware adapter is available.
-   Later renderers reuse the first renderer's adapter, device, and queue.
-4. SonicTerm records the adapter backend, name, driver, and device type, then
-   classifies it as software when its type is `Cpu` or its name identifies
-   Microsoft Basic Render Driver, llvmpipe, SwiftShader, or a software adapter.
-5. For the first renderer, a wgpu device and queue are requested. An actually
-   detected software adapter uses `MemoryHints::MemoryUsage`; a hardware adapter
-   uses `MemoryHints::Performance`. This memory choice follows the real adapter,
-   not a later `force`/`off` override, and is inherited by later renderers through
-   the shared device and queue.
-6. SonicTerm configures a BGRA8 sRGB surface, creates the text pipeline and
-   retained frame, creates the CPU glyph atlas and 1×1 inline-image placeholder
-   atlas with their matching GPU uploads, then builds font stacks at the window
-   DPI. The image atlas expands only when an image is needed.
-7. `[appearance].software_render_mode` and the detected adapter are combined to
-   choose the resolved **degrade** state.
+- software adapter: `MemoryHints::MemoryUsage`;
+- hardware adapter: `MemoryHints::Performance`.
 
-“Without a GPU” has a precise meaning here: **without a hardware GPU, but with a
-usable wgpu software adapter**. There is no completely adapter-free/headless
-renderer. If wgpu cannot create a compatible surface, return any suitable
-adapter, or open a device, renderer initialization fails and SonicTerm cannot
-show a terminal window. Even Windows' CPU/GDI presentation path is selected
-inside an already-created `GpuRenderer`, so it still requires that startup wgpu
-adapter/device setup.
-
-```mermaid
-flowchart TD
-    window["Native window + wgpu surface"] --> adapter{"Usable wgpu adapter?"}
-    adapter -- "no" --> stop["Renderer initialization fails;<br/>no terminal window"]
-    adapter -- "yes" --> classify{"CPU type or known<br/>software-adapter name?"}
-    classify -- "hardware" --> detectedNo["detected = false"]
-    classify -- "software / WARP" --> detectedYes["detected = true"]
-    detectedNo --> policy{"software_render_mode"}
-    detectedYes --> policy
-    policy -- "auto" --> follow["degrade = detected"]
-    policy -- "force" --> force["degrade = true"]
-    policy -- "off" --> off["degrade = false"]
-    follow --> platform{"platform + degrade"}
-    force --> platform
-    off --> platform
-    platform -- "macOS, either value" --> mac["wgpu presentation"]
-    platform -- "Windows, false" --> wingpu["wgpu presentation"]
-    platform -- "Windows, true" --> wincpu["CPU BGRA composition + GDI"]
-```
-
-#### The configuration truth table
+`[appearance].software_render_mode` then resolves presentation policy:
 
 | Actual adapter | `auto` | `force` | `off` |
 | --- | --- | --- | --- |
-| Hardware | normal state | degraded state | normal state |
-| CPU/software | degraded state | degraded state | normal state, even though wgpu still rasterizes on the CPU |
-
-The word **degraded** describes a resolved policy, not the adapter itself.
-`force` can degrade a real GPU; `off` can decline to degrade WARP or another CPU
-adapter.
-
-#### The four concrete presentation cases
-
-| Case | Final painter | Atlas used for `A` | Pacing and surface policy |
-| --- | --- | --- | --- |
-| macOS, `degrade = false` | wgpu, normally Metal when the selected backend is an ordinary native backend | full CPU atlas plus matching wgpu texture | monitor period; Mailbox when supported, otherwise FIFO; configured transparency allowed; up to 2 frames of surface latency |
-| macOS, `degrade = true` | still wgpu—there is no macOS GDI-like CPU-frame branch | full CPU atlas plus matching wgpu texture | 25 ms period (~40 fps), 83.333 ms while IME composes (~12 fps); FIFO, opaque, 1 frame of surface latency, no fade-driven extra frames |
-| Windows, `degrade = false` | wgpu, normally D3D12 when the selected backend is an ordinary native backend | full CPU atlas plus matching wgpu texture | monitor period; Mailbox when supported, otherwise FIFO; configured transparency allowed; up to 2 frames of surface latency |
-| Windows, `degrade = true` | `WindowsSoftwareFrame` composes on the CPU, then GDI `SetDIBitsToDevice` copies BGRA pixels to the HWND | full CPU atlas; GPU glyph/image textures are reduced to 1×1 placeholders because this presenter does not sample them | 25 ms period (~40 fps), 83.333 ms while IME composes; full-surface CPU composition, opaque window, no fade-driven extra frames |
-
-There is one easy-to-miss fifth combination inside the table: Windows on WARP
-with `software_render_mode = "off"`. The adapter is software, but `degrade` is
-false, so SonicTerm uses the normal wgpu texture/draw/present path on that CPU
-adapter rather than the GDI software frame. Conversely, `force` on a hardware
-Windows machine selects the CPU/GDI frame even though the detected adapter is
-hardware.
-
-wgpu chooses the compatible backend; SonicTerm does not hard-code Metal or
-D3D12 in this constructor. Those are the normal native backends, but the selected
-backend is logged, and a GLES backend is explicitly warned about.
-
-#### Platform-specific input, child process, and font work
-
-| Boundary | macOS | Windows |
-| --- | --- | --- |
-| Keyboard event | AppKit input reaches the same winit `KeyboardInput` / `Ime` handlers used by the cross-platform app | Win32 input reaches those same winit handlers |
-| PTY implementation | `portable-pty` opens a native Unix PTY | `portable-pty` opens ConPTY |
-| Default shell | `$SHELL`, falling back to `/bin/zsh`; zsh/tcsh/csh receive `-l`, while bash/fish receive `--login` | PowerShell 7 is preferred, then Windows PowerShell, then `cmd.exe`; PowerShell startup selects UTF-8 console input/output |
-| Locale/encoding help | if `LC_ALL` is not explicit and neither `LC_CTYPE` nor `LANG` says UTF-8, SonicTerm sets `LC_CTYPE=UTF-8` and, only when `LANG` is empty, `LANG=en_US.UTF-8` | PowerShell startup sets .NET console input/output and `$OutputEncoding` to UTF-8 and changes the code page to 65001 |
-| Font discovery | CoreText locator | GDI/DirectWrite-backed locator |
-| Text shaping | HarfBuzz through `sonicterm-font` | HarfBuzz through the same `sonicterm-font` layer |
-| Normal glyph rasterizer | FreeType | DirectWrite; if it cannot be constructed for a face, FreeType is the fallback |
-| Final native presentation | wgpu surface | wgpu surface, or GDI only when resolved degradation is active |
-
-The platform differences sit at the edges. From encoded bytes through VT
-parsing, grid cells, dirty rows, row caches, `GlyphKey`, `GlyphInstance`, color,
-and placement, the model is shared.
-
-### Trip one: from your finger to the child program
-
-#### 1. The operating system tells SonicTerm about the key
-
-For this example, assume:
-
-- the terminal pane has focus;
-- the command palette, search, READONLY/copy mode, and IME composition are not
-  consuming the key;
-- no configured keybinding claims `A` as a SonicTerm action;
-- the logical character reported by the keyboard layout is uppercase `A`.
-
-winit delivers a pressed `WindowEvent::KeyboardInput`. SonicTerm uses the
-layout-resolved `logical_key`, not the physical key position, so the operating
-system and active keyboard layout have already decided that this press means
-uppercase `A`.
-
-Before encoding any terminal bytes, the owning window offers the event to every
-local input owner. The exact order differs slightly because main and torn-out
-windows store their local state differently, but both finish with keymap dispatch
-and only then PTY encoding:
-
-| Main window | Torn-out child window |
-| --- | --- |
-| quit guard → command palette → active IME composition → search → copy/READONLY mode → keymap → PTY encoding | quit guard → copy/READONLY mode → attached command palette → active IME composition → search → keymap → PTY encoding |
-
-Any owner that consumes the key returns immediately. A shortcut belongs to
-SonicTerm; only an unclaimed text key belongs to the terminal program.
-
-An input method takes a nearby but separate path. While an IME is composing,
-raw keyboard events are suppressed, because sending them as well would type the
-text twice. `Ime::Commit` ends composition and makes the committed UTF-8 text
-eligible for delivery—but an open palette or search field can consume that
-commit, and copy/READONLY mode discards it. Only a commit with no local text
-owner reaches the PTY.
-
-#### 2. SonicTerm turns the logical key into bytes
-
-`encode_key` calls `encode_logical`. For an ordinary `Key::Character` with no
-Control or Alt modifier, SonicTerm sends the character's UTF-8 bytes unchanged.
-
-For uppercase Latin `A`:
-
-| Meaning | Value |
-| --- | --- |
-| Character | `A` |
-| Unicode code point | `U+0041` |
-| UTF-8 | one byte: `0x41` |
-| Decimal byte value | `65` |
-
-Other modifiers can make different envelopes. Control is checked first:
-Control+A becomes byte `0x01`, and Control+Alt+A still takes that Control branch.
-Without Control, Alt+A prefixes `ESC` before the UTF-8 bytes. Shift and
-Super/Meta do not alter a `Key::Character` inside this encoder—the keyboard
-layout has already produced `A`, although a keymap may have consumed the chord
-earlier. Named keys use terminal protocols instead: unmodified arrows honor the
-pane's lock-free application-cursor-mode snapshot, while modified arrows use
-xterm's parameterized CSI form regardless of that mode. Function keys use
-xterm-style sequences. Of the kitty keyboard protocol, the current encoder uses
-the pane's nonzero flags specifically to encode Shift+Enter as CSI-u. This page
-keeps following plain `A`.
-
-#### 3. The bytes are routed to the focused pane
-
-`write_to_pty` finds the active pane and writes it exactly once. Broadcast fan-out
-happens only when broadcast is on **and** that active pane is still the source
-pane that armed it. `BroadcastScope::Tab` chooses the other panes in the source's
-tab; `BroadcastScope::AllTabs` chooses peers across tabs and windows. The source
-is excluded from the receiver set, so it is never written twice.
-
-Every destination independently crosses the backend-free app boundary as:
-
-```text
-AppIntent::PtyWrite → AppEffect::PtyWrite → live PaneState → PtyHandle
-```
-
-The final enqueue is deliberately non-blocking. A pane with a live local PTY has
-an input queue of **4 messages**, and each message may be at most **16 MiB**.
-`PtyHandle::send_input_nonblocking` uses `try_send`: an oversized, full, or
-disconnected write is refused with the original bytes preserved in the typed
-error. The app carries those bytes into `UserEvent::PtyInputRejected`, logs the
-reason, and shows a notification instead of silently pretending the key was
-delivered. It does not automatically retry, because replaying input later could
-put bytes into the wrong application state. A one-byte `A` normally enters the
-queue immediately.
-
-#### 4. The PTY writer gives `A` to the program
-
-The dedicated `sonic-pty-writer` thread receives the byte vector, writes all of
-it to the PTY master, then makes a best-effort `flush` whose result is ignored. The operating system's PTY machinery
-then presents that input to the child side, where the shell or current terminal
-application reads it.
-
-SonicTerm has still painted no `A`.
-
-### The turn-around: why `A` normally comes back
-
-In an ordinary interactive shell, the child-side terminal machinery usually has
-echo enabled. The `0x41` input therefore appears again as output from the child
-side of the PTY. It may come back alone or next to prompts, colors, cursor
-commands, and other bytes.
-
-| macOS Unix PTY | Windows ConPTY |
-| --- | --- |
-| The PTY slave's termios line discipline normally has `ECHO` enabled. A raw-mode application changes those modes and draws for itself. | The pseudoconsole/console input mode and the running application decide whether input is echoed or replaced by an application redraw. |
-
-Echo is a child-side behavior, not a SonicTerm shortcut:
-
-- a shell with echo enabled sends `A` back;
-- an editor in raw mode may consume `A`, update its own buffer, and send a whole
-  redraw made of text plus VT control sequences;
-- a password prompt may intentionally send no visible character;
-- a program may transform the key and output something different.
-
-On both platforms SonicTerm follows the same rule: whatever bytes return through
-the PTY master are what its VT parser interprets and displays.
-
-### Trip two: from child output to a terminal cell
-
-#### 5. The PTY reader carries output to the pane worker
-
-The dedicated `sonic-pty-reader` thread reads the PTY master into a reusable,
-contiguous **64 KiB `BytesMut` backing allocation**. It splits each filled prefix
-into a ref-counted `Bytes` view wrapped by `PtyOutputChunk`; this is reusable
-flat storage, not a circular ring buffer. If old views still pin that allocation,
-`reserve` may create another backing allocation.
-
-The output channel is bounded to **64 chunks**. A full channel does not drop the
-next chunk: the reader waits in a blocking channel select, eventually letting the
-operating system's PTY buffers apply back-pressure to the child. The theoretical
-worst case is 64 distinct 64 KiB allocations pinned at once (4 MiB), while small
-shell echoes normally share one backing allocation.
-
-A pane created through the main path uses `sonicterm-vt-loop`; one created
-directly inside a torn-out child window uses `sonicterm-vt-loop-child`. The worker
-receives each chunk, locks that pane's parser for the whole parse batch and its
-parser-derived snapshots, and calls `Parser::advance`. A pane whose PTY failed to
-spawn remains visible but has no PTY reader/writer or VT worker.
-
-#### 6. The VT parser decides whether a byte is text or an instruction
-
-A terminal stream is not only letters. It can also contain instructions such
-as “move the cursor,” “use red,” or “clear this row.” `sonicterm-vt::Parser`
-uses a VT state machine to tell those apart.
-
-Plain `A` is printable ASCII. When no escape sequence is in progress, the
-parser's fast path sends it straight to `Performer::print_graphic`. Other
-printable UTF-8 text is decoded by vte and reaches the same `print_graphic`
-function through `Perform::print`. Control bytes and escape sequences instead
-use callbacks such as `execute`, `csi_dispatch`, `osc_dispatch`, and
-`esc_dispatch`; they do not all become text. One protocol—Kitty graphics,
-arriving as an APC sequence (`ESC _`)—is intercepted before vte sees those
-bytes; Sixel and other DCS use vte's `hook`/`put`/`unhook` callbacks.
-
-The performer attaches the current terminal attributes—foreground, background,
-bold, italic, underline, inverse, and an interned hyperlink id—and asks the grid
-to store the character. The URI string itself remains in the hyperlink registry.
-
-#### 7. The grid puts `A` in one cell
-
-`Grid::put_char_styled_in_region` knows printable ASCII `A` has width one. It:
-
-1. writes a `Cell` containing `A` and its current style at the cursor;
-2. advances the cursor by one column in the ordinary interior case;
-3. marks that row dirty;
-4. advances the separate content sequence and stamps that row;
-5. advances the coarse grid revision.
-
-At the right margin, the cursor rule is more precise: with autowrap enabled it
-moves to the one-past-edge sentinel and sets `pending_wrap`, so the **next**
-printable character performs the line wrap; with autowrap disabled it remains
-pinned to the final column. A pending wrap from an earlier character is resolved
-before `A` is written.
-
-“Dirty” does not mean bad. It means: **this row changed, so the painter must look
-at it again.** The dirty bit, content sequence, and grid revision are three
-different signals: repaint work, selection/content identity, and coarse rendered
-state. Wide characters normally use adjacent `WIDE` and `WIDE_CONT` cells;
-zero-width combining characters attach to the previous lead cell's `extras`
-string, capped at 64 UTF-8 bytes; a codepoint that would exceed that budget is
-dropped. `A` needs one ordinary cell.
-
-#### 8. The worker asks the window for a future redraw
-
-The VT worker releases the parser lock before touching the window system. It
-tracks pending bytes and age instead of requesting one frame per chunk:
-
-- **128 KiB pending** flushes a redraw immediately;
-- **8 ms maximum age** flushes a continuing stream;
-- otherwise **3 ms with no next chunk** flushes the trailing output.
-
-After one of those boundaries, it copies the pane's current `WindowId` under a
-short redraw-target lock, releases that lock, and posts
-`UserEvent::RequestRedraw(WindowId)` through the event-loop proxy.
-
-The winit event-loop thread resolves that id in the live window map and calls
-`request_redraw()`; a stale id is simply ignored. A second event-loop pacing gate
-can coalesce the resulting `RedrawRequested` to the next frame boundary. A typed
-character becomes visible through its PTY echo, so that redraw counts as a PTY
-burst even though the original keyboard event marked input dirty. Hardware keeps
-pure input redraws immediate, while a PTY echo is bounded by one monitor frame;
-resolved software degradation coalesces even pure input redraws to its CPU frame
-cap. Nothing is dropped—the event loop schedules a timed wake and requests the
-frame again.
-
-This separation also lets a pane move to another window: tear-out changes only
-the shared `WindowId`, so the existing worker follows the pane without calling
-AppKit or Win32 directly.
-
-### From a terminal cell to a tiny picture
-
-#### 9. The event loop takes one coherent snapshot
-
-When `RedrawRequested` arrives, the app uses `try_lock` for every active-tab
-pane parser and for the window's inline-image stores. If any required lock is
-busy, it defers the whole frame. It never calls the renderer with only part of
-the required pane state.
-
-For each visible pane in the active tab, the app builds a `PaneRender` containing
-its stable pane id, mutable grid view, pixel rectangle, viewport, focus,
-cursor style, scrollbar alpha, broadcast-receiver state, and shallow-cloned
-inline-image records whose pixel payloads remain shared `Arc<[u8]>` allocations.
-The current app assembly supplies `CursorStyle::default()` here. Cursor position
-remains in the grid. The app passes the pane slice plus theme, cursor visibility,
-selection, copy mode, tabs, search, palette, IME, the active pane's viewport top,
-notification, and hovered-URL state as explicit arguments to
-`GpuRenderer::render`—there is no single consolidated UI snapshot object on this
-production call.
-
-The parser locks are acquired with `try_lock` and retained for the frame. Inline
-image stores are also sampled with `try_lock`; that pass currently visits the
-window's pane registry, including hidden-tab panes. If any required lock is
-busy, the app drops every acquired guard, records a pending redraw, returns
-without calling the renderer, and retries from a timed event-loop wake. The
-contract is “all required snapshots are available or no render call,” not one
-simultaneous transaction across all independent locks.
-
-#### 10. The renderer finds the changed row
-
-The renderer compares a frame fingerprint with the last successful frame. If
-nothing visible changed, it can skip the work. Here the grid revision and dirty
-row say that the cell containing `A` is new.
-
-SonicTerm keeps previous pixels in a distinct offscreen texture. On the normal
-non-degraded wgpu path, a primary-screen pane contributes the union of its
-dirty-row strips, clipped to the pane and surface. A dirty alternate-screen pane
-instead contributes its whole clipped pane—not the whole window—because
-full-screen apps move regions in ways for which a narrow row union would leave
-stale pixels. The retained render pass loads the old texture and its scissor lets
-pixels outside the final damage survive.
-
-Resolved degradation changes this last step: whenever a degraded frame has real
-work, the wgpu branch promotes damage to the **full surface**. On Windows that
-same state selects `WindowsSoftwareFrame`, which also clears and composes a full
-surface. Thus narrow primary-row damage applies to normal retained wgpu
-presentation, while degraded presentation deliberately spends less often but
-repaints whole frames when it does run.
-
-Pixel damage and CPU frame assembly are separate. The current hardware policy
-uses `RenderMode::Full`, so it can visit every visible row while the row cache
-cheaply replays unchanged rows; only the damage scissor changes retained pixels.
-Resolved degradation can return `Noop` when no visible signal changed. The dirty
-mark for our row invalidates that row's cache entry, so its cells are grouped and
-emitted again.
-
-#### 11. `A` becomes a glyph request
-
-Cells with the same style are grouped into runs. A simple printable-ASCII run
-containing `A` can use the renderer's conservative ASCII fast path: `A` maps
-one-to-one to a `GlyphKey` without shaping the whole run.
-
-That is only a shortcut, not a second font system. On an atlas miss,
-`FontStack::rasterize` still resolves the real font face and glyph. More complex
-text—Unicode, combining marks, fallback fonts, or ligature-capable runs—uses
-`FontStack::shape_text_with_style`, which drives SonicTerm's HarfBuzz-backed
-font stack and maps shaped clusters back to terminal columns.
-
-The font stack chooses a face that contains the glyph. The user's primary family
-is followed by SonicTerm's synthesized fallback chain—JetBrains Mono, Symbols
-Nerd Font Mono, and Noto Color Emoji—and `sonicterm-font` can continue resolving
-missing clusters through platform-discovered fallback faces. This family list is
-currently code-owned, not a `sonicterm.toml` list. SonicTerm normally uses
-DirectWrite rasterization on Windows and FreeType elsewhere. On Windows,
-DirectWrite construction or per-glyph failure falls back to FreeType; built-in
-or memory-only font data that DirectWrite cannot open also takes that fallback.
-
-For the renderer, a “style run” means only the bold and italic bits, because
-those select a different face. Foreground color is carried later on each glyph
-instance and does not split shaping. The ASCII shortcut is also exact: every cell
-must be printable ASCII, have no combining `extras`, carry neither wide-cell
-flag, and contain none of the ligature triggers `= ! < > - _ : | & *`. A plain
-`A` qualifies even when bold or italic; the style bits simply become part of its
-`GlyphKey`.
-
-#### 11a. Shape, color, and decorations are separate jobs
-
-The `Cell` still carries more than the font shaper needs:
-
-- `ch` is the lead character;
-- `fg` and `bg` are the theme default, one of 256 indexed colors, or a 24-bit RGB value;
-- flags include bold, italic, underline, strikethrough, inverse, dim, hidden,
-  blink, and wide-cell markers;
-- rare boxed data holds the hyperlink id, combining `extras`, non-default
-  underline style, and an explicit underline color.
-
-The active renderer path uses those pieces at different stages. Bold and italic
-choose the shape face. Foreground is resolved after shaping; inverse swaps the
-foreground/background roles, and dim blends the foreground 45% toward the
-effective background in the stored sRGB-encoded color space. Default and indexed
-colors resolve through the current theme; draw values are then converted to
-linear light where the sRGB surface or CPU blend expects it, preventing gamma
-from being applied twice.
-
-Backgrounds are not glyphs. Non-default adjacent backgrounds are coalesced into
-wide base quads; the theme-default background is omitted because the damage
-background/clear already supplies it. Underline runs are coalesced separately
-and become single, double, curly, dotted, or dashed quads, using SGR 58's
-explicit color when present and otherwise the cell foreground. Selection,
-cursor, search, hyperlink, IME, and palette visuals are later quads or glyphs in
-the painter order.
-
-The VT parser also stores blink, hidden, and strikethrough flags, but the current
-terminal renderer has no flag-specific draw branch for those three. This page
-describes the code that exists rather than implying an unimplemented visual
-step.
-
-#### 11b. Two row caches avoid repeating different work
-
-A changed row invalidates two separate caches:
-
-- `RowGlyphCache` stores the row's `GlyphInstance`s, underline runs, tofu quads,
-  and missing-codepoint list under the three-part key `(pane id, absolute row,
-  row hash)`. The hash covers cell contents, style revision, cell geometry, and
-  selection overlap. The atlas eviction count is stored alongside the cached
-  value and compared after lookup; a mismatch rejects UVs that may now point at
-  another atlas tile.
-- `LineQuadCache` stores coalesced background `QuadInstance`s under a parallel
-  pane/absolute-row/hash key. Its hash also covers pane origin and pane extent,
-  because moving or clipping a split changes background geometry.
-
-Both caches are sized to roughly four times the sum of visible rows across all
-panes. A size change or capacity hit clears that cache wholesale. Font, theme,
-scale, resize, and atlas replacement clear the appropriate cache; dirty rows
-invalidate absolute-row entries. Both cache types define pane-local invalidation,
-but the current renderer has no production caller for those methods. Cursor,
-selection, search, quick-select, and other frame-specific overlays are not
-replayed as background-cache payloads.
-
-#### 12. The font helper cuts an `A`-shaped stamp
-
-Rasterization turns the font's outline for `A` into a small rectangle of pixel
-coverage plus placement measurements:
-
-- how wide and tall the bitmap is;
-- where it sits relative to the cell baseline;
-- whether it is ordinary coverage, subpixel coverage, or a self-colored glyph.
-
-This is not yet a screen pixel. It is a reusable little stamp.
-
-#### 13. The stamp goes into the glyph atlas
-
-`GlyphAtlas::get_or_insert` looks for the glyph key in a fixed **2048×2048
-BGRA8 CPU atlas** (about 16 MiB), whose metadata is capped at **16,384 entries**.
-
-- On a hit, SonicTerm reuses the existing tile and refreshes its last-used frame.
-- On a miss, `FontStack` rasterizes it, the atlas tries a reclaimed rectangle and
-  then its shelf packer, copies coverage into BGRA storage, and records that
-  rectangle as dirty.
-- Monochrome coverage is replicated into BGRA channels; color and subpixel BGRA
-  data are copied as provided.
-- A space gets a zero-area cached entry because there is no ink or upload.
-- A failed or impossibly oversized raster gets a zero-area sentinel, avoiding an
-  expensive retry every frame; the renderer skips the degenerate draw or emits
-  its tofu fallback where that path applies.
-- At metadata or packing pressure, the atlas implementation deterministically
-  evicts the coldest quarter. Because instances already assembled in that frame
-  may now hold stale UVs, the renderer detects the changed eviction count,
-  resets the whole atlas in place, invalidates `RowGlyphCache`, abandons the
-  current frame, and requests a fresh one. The next frame retries with eviction
-  disabled; a successful presentation restores eviction. The fixed pixel
-  allocation never grows.
-
-The renderer computes `A`'s physical-pixel placement from the cell, baseline,
-bearing, and tile size, snaps it to device pixels, then converts it to normalized
-device coordinates. Its `GlyphInstance` stores that NDC `rect`, normalized atlas
-UVs, linear-space foreground modulation, and a packed four-component flag vector:
-`x` marks a self-colored glyph, `y` marks subpixel coverage, `z` selects the
-separate inline-image atlas, and `w` is reserved. An ordinary `A` leaves the image
-selector clear. In effect the record says:
-
-> Sample this atlas rectangle for `A`, place it over this cell, and tint ordinary
-> coverage with this foreground color.
-
-The row cache remembers that instance for later unchanged frames under the key
-`(pane, absolute row, row hash)`. It stores the atlas eviction count alongside
-the entry and compares it after lookup, rejecting a hit whose UVs may now point
-at a different tile.
-
-### From the stamp to light on the display
-
-#### 14. The wgpu path uploads only new atlas pieces
-
-On the normal wgpu path, `AtlasUpload::sync` drains the atlas's dirty rectangles.
-If `A` was newly rasterized, only its tightly packed region is written to the
-GPU texture. If its tile was already warm, the upload is zero bytes. The Windows
-CPU presenter does not perform this glyph-texture upload: it reads the CPU atlas,
-clears the CPU atlas's dirty list, and keeps GPU glyph/image textures as 1×1
-placeholders.
-
-The wgpu path then acquires the window surface and draws into the retained
-offscreen frame inside the damage scissor. The literal first item is a background
-quad that clears the damaged region; the unified pipeline then draws these
-categories in order:
-
-```text
-damage background + base quads → inline images → base glyphs → overlay quads → overlay glyphs
-```
-
-An ordinary `A` is a textured rectangle whose atlas alpha coverage is multiplied
-by the cell's linear-space foreground color. Color glyphs and inline images keep
-the tile's own colors instead of receiving ordinary text tint. The frame blitter
-copies the retained result to the swapchain surface, wgpu submits the commands,
-and the surface is presented.
-
-#### 15. Windows software rendering uses the same prepared letter
-
-When Windows' resolved degrade state is true, `WindowsSoftwareFrame` consumes the
-same upstream `GlyphInstance` and CPU glyph atlas. It prepares and clears one
-full-window BGRA buffer, blends base quads, images, glyphs, overlay quads, and
-overlay glyphs, then uses GDI `SetDIBitsToDevice` to copy the complete width ×
-height image to the HWND. Its CPU buffer accepts at most 16,384 pixels per axis
-and 160 MiB of four-byte BGRA pixels. A wgpu surface has the same 160 MiB byte
-ceiling, but its per-axis ceiling is the lower of 16,384 and the device's
-`max_texture_dimension_2d`.
-
-The outcomes are deliberately distinct. An invalid initial window size makes
-renderer construction fail. A rejected later `try_resize` returns `false` and
-leaves the old surface configured, so the event path can preserve the previous
-usable size. `WindowsSoftwareFrame::new` or `prepare` returns its own error before
-allocating if a CPU-frame size fails validation. None of those size checks is a
-GDI presentation result.
-
-This branch does not reshape `A`, choose another font, or invent a second
-placement policy. GPU and Windows CPU presentation differ in who paints the
-pixels, but start from the same grid cell, font result, atlas tile, placement,
-and color. It is not a rescue path for total wgpu initialization failure:
-`auto`, `force`, and `off` select it only inside a renderer that already has an
-adapter and device.
-
-#### 16. The frame succeeds, and the row becomes clean
-
-For a frame that actually draws, `finish_successful_frame` remembers its
-`FrameKey` and clears every rendered pane's dirty bits only after Windows GDI
-presentation returns `Ok`, or, on the wgpu path, after command submission and
-`queue.present(frame)` have been invoked. GDI `SetDIBitsToDevice` can report a
-failure, which returns before the finish step. wgpu's `present` call itself has
-no success result, so SonicTerm cannot directly observe a post-present failure
-there.
-
-Before a wgpu draw, timeout/occlusion, outdated, suboptimal, and lost surface
-acquisition results invalidate the cached key and request another redraw;
-outdated and suboptimal reconfigure the surface, while lost recreates it. A
-validation error is propagated. No failed acquisition clears the grid's dirty
-bits.
-
-There is one deliberate non-present exception: under resolved degradation,
-`RenderMode::Noop` may cache the new key and return when nothing visible changed.
-It neither presents nor clears dirty rows, because there is no new picture to
-complete.
-
-After a drawn frame succeeds, the window compositor and display scan out the
-newly presented pixels. Now you see `A`.
-
-### Who does each job
-
-The journey crosses several owners, but each mutable object still has one clear
-home:
-
-| Actor | Owns this part of the journey | Boundary rule |
-| --- | --- | --- |
-| winit event-loop thread | keyboard/IME routing, keymap actions, live windows/tabs/panes, coherent frame collection, `GpuRenderer::render`, wgpu submission, and Windows GDI presentation | the only thread that resolves a `WindowId` to a native window or presents a frame; render-path parser access uses `try_lock`, while resize, config reload, input, search/copy work, and tear-out or child-window installation can deliberately take a blocking `lock` |
-| `sonic-pty-writer` per live PTY | removes owned `Vec<u8>` messages from the bounded input channel, calls `write_all`, then attempts `flush` | a failed write stops the writer; flush is best-effort |
-| child process and OS PTY/ConPTY | shell line discipline, echo/raw mode, application input handling, and output buffering | decides whether `A`, another redraw, or no visible output comes back |
-| `sonic-pty-reader` per live PTY | blocking reads into reusable `BytesMut` storage and bounded output-channel delivery | waits rather than dropping when the 64-slot output channel is full |
-| per-pane VT worker | locks that pane's `Parser`, advances VT state, mutates its `Grid`, mirrors cursor/keyboard-mode atomics, collects typed side effects, then coalesces redraw requests | drops the parser lock before any event-loop proxy or native-window work |
-| per-pane VT-reply worker (`sonicterm-vt-reply` or `sonicterm-vt-reply-child`) | forwards parser-generated DSR/DA/XTVERSION/palette/keyboard replies into the same typed PTY input seam | sends non-blockingly; a disconnected writer ends the thread, while a full queue may drop an idempotent status reply rather than stall parsing |
-| font stack and renderer objects | font databases, shape/raster caches, CPU atlases, row caches, retained frame, and presenter state | invoked by the render path; current `sonicterm-engine` and `sonicterm-gpu` code receives wrapper outputs rather than raw FreeType/HarfBuzz/Fontconfig/DirectWrite handles, which are used inside `sonicterm-font` |
+| Hardware | normal | degraded | normal |
+| CPU/software | degraded | degraded | normal |
+
+“Degraded” is a policy, not an adapter type. `force` degrades a hardware
+adapter. `off` keeps the normal wgpu path even on WARP or another CPU adapter.
+The device memory hint still follows the real adapter.
+
+Every visible terminal window requires a usable wgpu surface, adapter, device,
+and queue. There is no adapter-free renderer. Windows CPU/GDI presentation is a
+branch inside an initialized `GpuRenderer`; it cannot recover from failed wgpu
+startup.
+
+These are the same setup objects described throughout this page: the renderer
+owns one window's drawing state; each window owns a wgpu surface; the first
+renderer obtains the shared adapter, device, and queue. Exact identifiers and
+API names remain in code style below.
 
 ```mermaid
-flowchart LR
-    subgraph ui["winit event-loop thread"]
-        key["Keyboard / IME routing"]
-        snap["Coherent pane snapshot"]
-        render["Shape, atlas, frame, present"]
-    end
-    subgraph input["per-PTY input"]
-        inq["bounded input queue"]
-        writer["sonic-pty-writer"]
-    end
-    child["child process + PTY / ConPTY"]
-    subgraph output["per-PTY output"]
-        reader["sonic-pty-reader"]
-        outq["bounded output queue"]
-        vt["per-pane VT worker"]
-        reply["per-pane VT-reply worker"]
-    end
-
-    key --> inq --> writer --> child
-    child --> reader --> outq --> vt
-    vt -->|"Parser / Grid changed"| snap --> render
-    vt -->|"RequestRedraw(WindowId)"| ui
-    vt -->|"terminal query reply"| reply --> inq
+flowchart TD
+    window["native window + wgpu surface"] --> adapter{"compatible adapter?"}
+    adapter -- "no" --> fail["renderer initialization fails"]
+    adapter -- "yes" --> classify{"software adapter?"}
+    classify --> policy{"software_render_mode"}
+    policy -- "auto" --> auto["degrade = detected"]
+    policy -- "force" --> force["degrade = true"]
+    policy -- "off" --> off["degrade = false"]
+    auto --> platform{"platform + degrade"}
+    force --> platform
+    off --> platform
+    platform -- "Windows + true" --> gdi["CPU BGRA + GDI"]
+    platform -- "all other cases" --> gpu["wgpu surface"]
 ```
 
-### Changing rendering paths while SonicTerm is running
+The renderer configures a BGRA8 sRGB surface. Normal presentation uses Mailbox
+when supported and FIFO otherwise. It permits configured transparency and asks
+for at most two frames of surface latency. Degraded presentation uses FIFO,
+opaque alpha, and one frame of latency.
 
-An explicit config reload can change `software_render_mode` without changing the
-actual adapter. SonicTerm discards the warm-window pool at the start of reload;
-those renderers are destroyed rather than transitioned and are rebuilt later
-from the new configuration. It recomputes the resolved degrade flag for the main
-renderer and every torn-out child renderer, then each changed live renderer:
+Normal frame pacing follows the monitor period. Degraded pacing uses 25 ms,
+about 40 fps. While IME composition is active, it uses 83.333 ms, about 12 fps.
+Degraded mode also removes fade-driven extra frames.
 
-1. switches FIFO/Mailbox, alpha mode, and maximum frame latency as required;
-2. reconfigures the existing wgpu surface;
-3. invalidates its `FrameKey` and requests a full redraw.
+On macOS and Linux, both policy states still present through wgpu. On Windows,
+`degrade = true` selects `WindowsSoftwareFrame` and GDI
+`SetDIBitsToDevice`. Windows with WARP and `software_render_mode = "off"` uses
+the normal wgpu texture and present path on the CPU adapter.
 
-On macOS, this remains a wgpu presenter in both states, so the full GPU atlas
-textures remain. On Windows, crossing the degrade boundary also crosses between
-the wgpu and CPU/GDI presenters. Their GPU atlas dimensions differ, so both row
-caches are invalidated. Entering CPU presentation rebuilds GPU glyph/image
-textures as 1×1 placeholders while retaining the full CPU glyph atlas. Returning
-to wgpu resets glyph metadata and image-atlas state, recreates matching full-size
-textures, invalidates every UV-bearing cache, and forces a new frame before those
-textures are sampled. The real adapter's `MemoryHints` choice does not change;
-it was fixed when the device was created.
+Renderer construction also creates:
 
-Those other changes do not all share one invalidation switch. Font family,
-point size, line height, or weight changes rebuild the font stacks, reset glyph
-atlas metadata, and invalidate both renderer row caches and the frame key. A DPI
-change additionally retargets font scaling and rebuilds matching atlas uploads.
-A theme change updates renderer colors, bumps the style revision, invalidates the
-row caches and frame key, and the app explicitly marks every pane row dirty.
-An accepted surface resize replaces the retained frame texture, invalidates the
-row caches and frame key, then resizes pane grids and PTYs; a topology change
-supplies a different pane layout to frame construction. These paths therefore do
-not reuse `A` with an incompatible size, color, UV, or position, but not every
-path marks grid rows dirty.
+- a retained offscreen frame texture;
+- a fixed 2,048 × 2,048 CPU glyph atlas;
+- matching GPU glyph storage, except for the Windows degraded 1 × 1 placeholder;
+- a 1 × 1 inline-image atlas placeholder;
+- font stacks at the window DPI;
+- row glyph and background-quad caches.
+
+### 2. The key reaches the active input owner
+
+winit sends a pressed `WindowEvent::KeyboardInput`. SonicTerm uses
+`event.logical_key`, so the operating system and active keyboard layout have
+already resolved the character as uppercase `A`.
+
+A local input owner may stop the route. The main window checks:
+
+1. quit confirmation;
+2. command palette;
+3. active IME composition;
+4. search;
+5. READONLY or copy mode;
+6. configured keymap;
+7. PTY encoding.
+
+A torn-out window checks quit confirmation first, then its local copy mode,
+attached palette, active IME composition, search, keymap, and PTY encoding.
+The copy-mode position differs because child-window state is local to that
+`WindowState`.
+
+While an IME composition is active, raw key events do not reach the PTY. An
+`Ime::Commit` supplies UTF-8 text after composition. A palette or search field
+can consume that commit. READONLY or copy mode can discard it.
+
+### 3. `A` becomes terminal input bytes
+
+`encode_key` calls `encode_logical`. A plain `Key::Character` with no Control or
+Alt modifier uses its UTF-8 bytes unchanged.
+
+| Property | Value |
+| --- | --- |
+| Character | `A` |
+| Code point | `U+0041` |
+| UTF-8 | `0x41` |
+| Decimal byte | `65` |
+
+Other keys and modifiers follow four distinct rules:
+
+- **Control and keymap precedence:** a configured keymap may consume a chord
+  before PTY encoding. Otherwise Control is checked before Alt: Control+A
+  becomes `0x01`, and Control+Alt+A still uses the Control branch.
+- **Text modifiers:** without Control, Alt+A prefixes `ESC` to the UTF-8 bytes.
+  Shift and Super/Meta do not change a `Key::Character` in this encoder; they
+  may already have changed the logical character.
+- **Cursor and function keys:** named cursor, Home, and End keys use the active
+  pane's lock-free DECCKM snapshot. Unmodified application-cursor keys use SS3;
+  modified forms use xterm parameterized CSI. Function keys use xterm forms.
+- **kitty Shift+Enter:** with nonzero kitty keyboard flags, Shift+Enter uses
+  `CSI 13 ; 2 u`.
+
+Plain `A` is unaffected, so this page continues to follow it.
+
+### 4. The bytes enter one or more PTYs
+
+The app writes the focused source pane exactly once. Broadcast adds peers only
+when the focused pane is still the pane that armed broadcast.
+`BroadcastScope::Tab` selects peers in that tab.
+`BroadcastScope::AllTabs` selects peers across tabs and windows. The source is
+excluded from the receiver set.
+
+Each destination crosses this boundary:
+
+```text
+AppIntent::PtyWrite → AppEffect::PtyWrite → PaneState → PtyHandle
+```
+
+The state-machine reducer for this write is pure. `write_to_pane` uses a
+transient `AppStateMachine` because its broadcast caller has only `&self`.
+`dispatch_pty_write_effect` resolves the pane id back to the live `PtyHandle`.
+
+`PtyHandle::send_input_nonblocking` uses `try_send`:
+
+- queue capacity: 4 messages per pane;
+- message limit: 16 MiB;
+- rejection cases: `MessageTooLarge`, `QueueFull`, `WriterDisconnected`.
+
+Every `PtyInputError` retains the rejected `Vec<u8>`. The app posts
+`UserEvent::PtyInputRejected`, logs the reason, and displays an error
+notification with the byte count. It does not retry automatically because the
+child's input state may change before a later replay.
+
+The dedicated `sonic-pty-writer` thread removes the owned byte vector, calls
+`write_all`, then attempts a best-effort `flush`. A failed write stops the
+writer. At this point SonicTerm has drawn no `A`.
+
+### 5. The child decides what comes back
+
+The child program receives `0x41` from its PTY side. An ordinary interactive
+shell usually has echo enabled, so `0x41` returns as output. Echo belongs to the
+child-side terminal behavior, not to SonicTerm.
+
+A raw-mode editor can consume `A` and send a larger redraw. A password prompt
+can send no visible output. A program can send different text. SonicTerm parses
+only the bytes that return through the PTY master.
+
+On Unix, `portable-pty` supplies a native PTY. On Windows it supplies ConPTY.
+The shared byte, VT, grid, font, and renderer path starts after this platform
+boundary.
+
+### 6. The PTY reader applies bounded back-pressure
+
+`sonic-pty-reader` reads into a reusable contiguous 64 KiB `BytesMut`
+allocation. It splits filled prefixes into reference-counted `Bytes` views and
+wraps them in `PtyOutputChunk`. This is reusable flat storage, not a circular
+ring data structure. If old views pin the allocation, `reserve` can allocate
+another 64 KiB ring.
+
+The output channel holds 64 chunks. A full channel does not drop output. The
+reader waits in a blocking select, which lets the operating system's PTY buffers
+apply back-pressure to the child.
+
+The channel can hold 64 chunks. The reader constructs one more chunk before a
+full-channel send blocks. If every chunk pins a distinct 64 KiB ring, the
+structural maximum is 65 rings, or 4.0625 MiB. Small shell output normally keeps
+many queued views in one ring. `queued_output_bytes` reports pinned ring
+allocation; `queued_output_payload_bytes` reports bytes waiting to be parsed.
+
+A pane created through the main path uses `sonicterm-vt-loop`. A pane created
+directly in a torn-out window uses `sonicterm-vt-loop-child`. A pane whose PTY
+spawn fails remains visible but has no PTY reader, writer, or VT worker.
+
+### 7. The VT parser updates the grid
+
+The pane worker receives a chunk and holds that pane's parser lock for
+`Parser::advance` and parser-derived snapshots.
+
+Plain ASCII `A` takes the parser's printable fast path to
+`Performer::print_graphic`. Other printable UTF-8 reaches the same operation
+through vte. Controls and escapes use `execute`, `csi_dispatch`, `osc_dispatch`,
+`esc_dispatch`, or DCS `hook`/`put`/`unhook`. Kitty graphics APC input is
+intercepted before vte.
+
+The performer applies the current foreground, background, bold, italic,
+underline, inverse, and hyperlink id. The URI remains in the hyperlink registry.
+The performer then calls the grid.
+
+`Grid::put_char_styled_in_region` stores `A` as a width-one `Cell`. It advances
+the cursor in the ordinary case, marks the row dirty, advances the row content
+sequence, and advances the coarse grid revision.
+
+At the right margin, autowrap sets a one-past-edge cursor and `pending_wrap`.
+The next printable character performs the wrap. Without autowrap, the cursor
+stays on the final column. A pending wrap from the preceding character is
+resolved before storing `A`.
+
+Dirty means “this row changed.” The dirty bit, content sequence, and grid
+revision are separate bookkeeping signals for repaint work, content identity,
+and coarse frame identity.
+
+Cell representation is a separate concern. Wide characters use `WIDE` and
+`WIDE_CONT` cells. Zero-width characters append to the lead cell's `extras`,
+capped by `MAX_CELL_EXTRAS_BYTES = 64`; a code point that would exceed the cap
+is dropped.
+
+### 8. The VT worker requests a later redraw
+
+The worker mirrors cursor visibility, kitty keyboard flags, and DECCKM into
+atomics while it holds the parser lock. It collects title, command, and media
+side effects. It then releases the parser lock before it reaches the event-loop
+proxy.
+
+Redraw requests are coalesced by bytes and time:
+
+- 128 KiB pending output flushes immediately;
+- 8 ms maximum pending age flushes a continuing stream;
+- otherwise 3 ms without another chunk flushes trailing output.
+
+At a flush boundary, the worker copies the pane's current `WindowId` under a
+short redraw-target lock. It releases that lock and sends
+`UserEvent::RequestRedraw(WindowId)`. The winit thread looks up the live window
+and calls `request_redraw()`. A stale id is ignored.
+
+This indirection lets a pane move between windows. Transfer changes the shared
+`WindowId`; the existing worker and child process continue unchanged.
+
+A second pacing gate may defer streaming output to the next frame boundary.
+Hardware keeps pure input redraws immediate. PTY output is bounded by the
+monitor frame period. Resolved degradation also coalesces pure input redraws to
+the software frame period. A timed `ControlFlow::WaitUntil` wakes the event loop
+and requests the frame again.
+
+### 9. The event loop builds a complete frame
+
+On `RedrawRequested`, the app computes the active tab's pane rectangles. It
+uses `try_lock` for every required inline-image store and every active-tab
+parser, and keeps all parser guards for the render call. If one lock is
+unavailable, it drops every collected guard, records a pending redraw, and
+returns without calling the renderer. The frame is complete or absent;
+SonicTerm does not present a mix of old and new pane state.
+
+For each visible pane, the app builds `PaneRender` with:
+
+- stable pane id;
+- mutable grid view;
+- pixel rectangle and viewport;
+- active status and cursor style;
+- broadcast-receiver status;
+- scrollbar alpha;
+- shallow-cloned inline-image records with shared `Arc<[u8]>` pixels.
+
+The production call passes the pane slice plus explicit theme, cursor,
+selection, copy mode, tabs, search, palette, IME, viewport, notification, and
+hovered-URL data to `GpuRenderer::render`. It does not construct one aggregate
+`RenderInputs` value.
+
+### 10. Damage and row caches select work
+
+The renderer compares a `FrameKey` with the last successful frame. The key
+covers grid revisions and visible UI state. An identical key can skip frame
+assembly. On Windows degraded presentation, an identical key can re-present the
+existing CPU buffer.
+
+When only grid content changed:
+
+- a primary-screen pane contributes clipped dirty-row strips;
+- a dirty alternate-screen pane contributes its full clipped pane;
+- a clean pane contributes no damage.
+
+Overlay, chrome, resize, tab, selection, viewport, or topology changes can
+promote damage to the full surface. A degraded wgpu frame with work always uses
+full-surface damage. Windows degraded presentation also clears and composes a
+full CPU frame.
+
+The hardware policy uses `RenderMode::Full`, so it may visit every visible row.
+Retained pixels are still limited by the damage scissor. Row caches make
+unchanged row assembly cheap.
+
+`RowGlyphCache` stores `GlyphInstance` values, underline runs, tofu quads, and
+missing-codepoint data. Its key is `(pane id, absolute row, row hash)`. The hash
+covers cells, style revision, cell geometry, scale, and selection overlap. The
+cached atlas epoch rejects UVs from before an eviction.
+
+`LineQuadCache` stores coalesced background quads under a parallel key. Its hash
+also covers pane origin and extent because moving or clipping a pane changes
+quad geometry.
+
+Their capacity, invalidation, and current use are separate facts:
+
+- **Capacity:** both caches hold about four times the total visible rows across
+  all panes. A size change or capacity hit clears the affected cache.
+- **Invalidation:** font, theme, scale, surface-size, and atlas changes clear the
+  appropriate caches. Dirty rows invalidate absolute-row entries.
+- **Current status:** both cache types define pane-local invalidation methods,
+  but the current renderer has no production caller for them. Frame-specific
+  cursor, selection, search, quick-select, IME, palette, and notification
+  overlays are assembled separately.
+
+### 11. Text becomes glyph instances
+
+Cells with compatible font style form runs. A conservative printable-ASCII run
+can skip full shaping. Each cell must contain printable ASCII, no combining
+`extras`, no wide-cell flag, and none of these ligature triggers:
+`= ! < > - _ : | & *`. Plain `A` qualifies.
+
+The shortcut is not a second font system. An atlas miss still calls
+`FontStack::rasterize`. Unicode, combining text, fallback fonts, and
+ligature-capable runs call `FontStack::shape_text_with_style`, which uses
+HarfBuzz and maps shaped clusters back to terminal columns.
+
+The font stack looks for the first face that can draw each glyph. It tries the
+configured primary family, then the code-owned fallback list—JetBrains Mono,
+Symbols Nerd Font Mono, and Noto Color Emoji—and finally platform-discovered
+faces for unresolved clusters.
+
+Font discovery and normal rasterization differ by platform:
+
+| Platform | Discovery | Default rasterizer |
+| --- | --- | --- |
+| macOS | CoreText | FreeType |
+| Windows | GDI | DirectWrite, with FreeType fallback |
+| Linux | Fontconfig | FreeType |
+
+Bold and italic select a face. Foreground color does not split shaping runs.
+After shaping, the renderer resolves theme defaults, 256-color indices, and
+24-bit RGB. Inverse swaps foreground and background. Dim blends foreground 45%
+toward the effective background in stored sRGB-encoded space before draw values
+are converted as required for the sRGB surface or CPU blend.
+
+Backgrounds are quads, not glyphs. Adjacent equal non-default backgrounds are
+coalesced. The default background comes from the damage clear. Underline runs
+become single, double, curly, dotted, or dashed quads. An explicit SGR 58 color
+wins; otherwise underline uses foreground color.
+
+The parser stores blink, hidden, and strikethrough flags. The current terminal
+renderer has no flag-specific draw branch for those three.
+
+### 12. Rasterization fills the glyph atlas
+
+Rasterization returns a bitmap and placement metrics: width, height, bearing,
+advance, and whether the data is monochrome, subpixel, or self-colored. This is
+a reusable tile, not a screen pixel.
+
+`GlyphAtlas::get_or_insert` uses a fixed 2,048 × 2,048 BGRA8 CPU allocation,
+about 16 MiB. Metadata is capped at 16,384 entries.
+
+- A hit reuses the tile and refreshes its last-used frame.
+- A miss rasterizes, tries a reclaimed rectangle, then uses the shelf packer.
+- Monochrome coverage is copied into BGRA channels. Color and subpixel BGRA data
+  keep their supplied channel data.
+- A space uses a zero-area entry.
+- Failed or impossible rasterization uses a zero-area sentinel to avoid retrying
+  every frame.
+- Under pressure, the atlas evicts the coldest quarter deterministically.
+
+An eviction during frame assembly can invalidate instances emitted earlier in
+that frame. The renderer detects the changed epoch, resets the atlas in place,
+invalidates `RowGlyphCache`, abandons the frame, and requests another one. The
+next frame retries with eviction disabled. One successful presentation enables
+it again.
+
+A `GlyphInstance` stores a normalized-device-coordinate (NDC) rectangle, atlas
+UVs, linear-space foreground modulation, and flags for color, subpixel, and
+image-atlas sampling.
+The row cache stores this prepared instance with the atlas epoch.
+
+The inline-image atlas is separate. It starts at 1 × 1, promotes to 2,048 × 2,048
+when visible media appears, and demotes after 240 rendered frames without
+inline media.
+
+### 13. The selected presenter produces pixels
+
+On the wgpu path, `AtlasUpload::sync` uploads only dirty atlas rectangles. A warm
+`A` tile uploads no new bytes. The renderer acquires the surface, draws into the
+retained offscreen texture inside the damage scissor, blits to the surface,
+submits commands, and calls `queue.present(frame)`.
+
+The layer order is:
+
+```text
+damage background and base quads → inline images → base glyphs → overlay quads → overlay glyphs
+```
+
+Ordinary text samples atlas coverage and multiplies it by foreground color.
+Color glyphs and inline images retain their own colors.
+
+On Windows with `degrade = true`, `WindowsSoftwareFrame` receives the same
+prepared quads, `GlyphInstance` values, CPU glyph atlas, and image atlas. It
+clears one full-window BGRA buffer, blends the layers, and calls
+`SetDIBitsToDevice` for the HWND. GPU glyph and image textures remain 1 × 1
+placeholders because this presenter does not sample them.
+
+Both presenters apply these frame limits:
+
+- maximum side: 16,384 pixels;
+- maximum BGRA bytes: 160 MiB;
+- wgpu also clamps the side to the device's `max_texture_dimension_2d`.
+
+An invalid initial size makes renderer construction fail. A rejected later
+`try_resize` returns `false` and keeps the previous usable surface.
+`WindowsSoftwareFrame::new` and `prepare` reject an invalid CPU frame before
+allocation.
+
+### 14. Success clears the dirty row
+
+Windows CPU presentation calls `finish_successful_frame` only after
+`SetDIBitsToDevice` returns success. wgpu calls it after command submission and
+`queue.present(frame)`. The wgpu present call itself has no success result for a
+later compositor failure.
+
+`finish_successful_frame` stores the new `FrameKey`, increments the successful
+frame count, and clears every rendered pane's dirty rows.
+
+Before a wgpu draw:
+
+- timeout or occlusion invalidates the key and requests another redraw;
+- outdated or suboptimal also reconfigures the surface;
+- lost recreates the surface;
+- validation errors return an error.
+
+None of those acquisition paths clears dirty rows. An eviction-aborted frame
+also leaves them set. `RenderMode::Noop` stores a key but does not present or
+clear dirty rows because it produced no image.
+
+After a drawn frame completes, the window compositor and display system scan out
+the newly presented pixels. The echoed `A` is now visible.
+
+### Cache invalidation triggers
+
+These changes invalidate different rendering state:
+
+- **Font settings:** changing the family, size, line height, or weight rebuilds
+  the font stacks, resets glyph-atlas metadata, and invalidates both row caches
+  and the `FrameKey`.
+- **DPI:** a DPI change retargets font scaling, rebuilds matching atlas upload
+  resources, invalidates both row caches and the `FrameKey`, then requests a
+  redraw.
+- **Theme:** a theme change updates renderer colors, advances the style
+  revision, invalidates both row caches and the `FrameKey`, and marks every
+  pane row dirty.
+- **Surface size:** an accepted surface resize replaces the retained-frame
+  texture and invalidates both row caches and the `FrameKey` before pane grids
+  and PTYs are resized.
+- **Pane topology:** a different pane layout changes the topology fields in the
+  next `FrameKey`; it does not by itself clear the row caches.
 
 ### What happens when the pane closes
 
-Moving a tab or tearing it into another window **inside this SonicTerm process**
-does not drop its `PtyHandle`: the live pane, parser, PTY, and worker ownership
-move together, and only the shared redraw `WindowId` changes. Closing the pane
-does drop the handle. An accepted cross-process OS drag is also different: after
-the destination acknowledges the serialized tab payload, the source detaches and
-drops its local panes, ending their local shells through `PtyHandle`. Each drop is
-a process-lifecycle boundary rather than a simple channel close.
+Dropping a `PtyHandle` first signals the reader and writer to cancel, cancels
+pending synchronous I/O where the platform supports it, and terminates the
+child. The remaining bounded sequence differs by platform.
 
-Every platform begins teardown in the same order: signal the reader/writer
-cancellation channels, cancel pending synchronous I/O where supported, and
-terminate the child. The remaining order is platform-specific and bounded:
+**Unix PTY**
 
-| macOS / Unix PTY | Windows ConPTY |
+Before teardown, `waitid(P_PID, ..., WEXITED | WNOHANG | WNOWAIT)` can observe a
+natural exit without releasing the session id. Teardown then:
+
+1. kills the original process group and repeatedly kills active members of the
+   same session;
+2. closes the PTY master;
+3. waits up to 500 ms for the reader, then independently up to 500 ms for the
+   writer; a timeout warns and detaches that thread;
+4. if termination failed, retries it for a separate 500 ms; if cleanup still
+   cannot be proved, leaves the leader unreaped so its id cannot be reused
+   unsafely;
+5. otherwise, gives child exit and reaping a separate 500 ms before warning and
+   returning.
+
+**Windows ConPTY**
+
+Teardown then:
+
+1. waits up to 500 ms for the reader, then independently up to 500 ms for the
+   writer; a timeout warns and detaches that thread;
+2. starts `sonic-conpty-drain` to drain a cloned reader and
+   `sonic-conpty-close` to close the master;
+3. waits up to 2 seconds for close; a timeout warns and detaches both helpers;
+4. after a successful close, waits up to another 2 seconds for the drainer to
+   observe EOF; a drain timeout silently detaches it;
+5. gives child exit and reaping a separate 500 ms before warning and returning.
+
+Failure to start either ConPTY helper warns and reports an incomplete close.
+These bounds keep `Drop` from blocking the UI indefinitely; an incomplete
+native close is not reported as success.
+
+### Why `A` may not appear
+
+| Boundary | Normal reason |
 | --- | --- |
-| Before teardown, the natural-exit probe uses `waitid(..., WEXITED \| WNOHANG \| WNOWAIT)` so it can observe status without reaping the leader or releasing its session identity; this probe is not teardown's first step. Drop then kills the original process group, repeatedly enumerates and kills remaining session members, closes the PTY master, waits up to 500 ms for the reader and independently up to 500 ms for the writer, and performs a separately bounded leader-reap check. If session cleanup still cannot be proved through its retry deadline, the leader is deliberately left unreaped rather than allowing its session id to be reused unsafely. | Teardown cancels pending reader/writer I/O, terminates the child, waits up to 500 ms for the reader and independently up to 500 ms for the writer, then starts dedicated `sonic-conpty-drain` and `sonic-conpty-close` helpers. The close helper gets up to 2 seconds. A close timeout produces the caller's incomplete-close warning and detaches both helpers. Failure to spawn either helper warns on that helper's own path, returns the same incomplete result, and therefore also produces the caller warning. If close finishes, the drainer gets its own additional wait of up to 2 seconds to observe EOF; a drain timeout detaches it silently. Teardown then performs a separately bounded child-exit/reap check instead of blocking the UI forever. |
+| Local input owner | palette, search, copy/READONLY mode, IME, or a key binding consumed it |
+| Child program | echo is off, the program drew something else, or it emitted nothing |
+| PTY input | the message was too large, the queue was full, or the writer disconnected; the app shows an error |
+| Pane process | PTY spawn failed, so the visible pane has no worker |
+| Frame collection | a parser or image lock was busy; the whole frame was deferred |
+| Renderer | a surface or atlas recovery path requested a later frame |
+| Cache | work was reused; the visible result is unchanged |
 
-Once the pane and its parser disappear, no later PTY bytes can mutate its grid.
-A redraw event already queued by that pane carries only a `WindowId`: if the
-window still exists it may harmlessly request one more frame, and if the window
-is gone the event-loop lookup ignores the stale id. Either way, the closed pane
-can no longer contribute a `PaneRender`.
+### Source map
 
-### The whole journey, with the real boundaries
-
-```mermaid
-flowchart TD
-    key["winit KeyboardInput: Character A"]
-    encode["encode_logical → UTF-8 0x41"]
-    effect["AppIntent/AppEffect::PtyWrite"]
-    inputq["bounded PTY input queue"]
-    writer["sonic-pty-writer"]
-    child["PTY child: shell or terminal app"]
-    echo["child-side echo or app redraw"]
-    reader["sonic-pty-reader"]
-    outputq["bounded PTY output queue"]
-    worker["per-pane VT worker"]
-    parser["Parser::advance / Performer"]
-    cell["Grid cell A + dirty row + revision"]
-    event["UserEvent::RequestRedraw"]
-    snapshot["coherent PaneRender snapshot"]
-    row["dirty-row walk / row cache"]
-    font["FontStack: shape when needed + rasterize"]
-    atlas["CPU GlyphAtlas + GlyphInstance"]
-    choice{"presentation path"}
-    gpu["dirty atlas upload + wgpu retained frame"]
-    cpu["Windows CPU BGRA frame + GDI"]
-    pixels["presented window pixels"]
-
-    key --> encode --> effect --> inputq --> writer --> child
-    child --> echo --> reader --> outputq --> worker --> parser --> cell
-    cell --> event --> snapshot --> row --> font --> atlas --> choice
-    choice -- "GPU" --> gpu --> pixels
-    choice -- "Windows software" --> cpu --> pixels
-```
-
-### Why the letter might not appear
-
-The route also explains normal cases where pressing `A` shows no literal `A`:
-
-| Stop or change | What happened |
+| Step | Primary paths |
 | --- | --- |
-| Command palette, search, copy/READONLY handling, or a SonicTerm keymap action | That owner consumed the key before PTY encoding |
-| IME composition | SonicTerm waits for committed text instead of sending raw keys |
-| READONLY/copy mode | Terminal input is intentionally blocked |
-| Password prompt | The child intentionally disabled visible echo |
-| Editor or TUI | The app consumed `A` and emitted its own redraw |
-| Full/disconnected PTY input queue | The write was refused and surfaced as a notification |
-| Busy parser during redraw | The frame was deferred until all panes could be snapshotted coherently |
-| Warm row/glyph cache | Work was reused; the visible result is still the same |
-
-### Where to read the code
-
-| Step | Current source |
-| --- | --- |
-| Main and torn-out-window keyboard/IME routing | `crates/sonicterm-app/src/app/{window_event,child_window}.rs`, `crates/sonicterm-ui/src/ime.rs` |
-| Palette/search/copy/READONLY/keymap precedence | `crates/sonicterm-app/src/app/{window_event,child_window,keymap_dispatch}.rs`, `crates/sonicterm-ui/src/copy_mode.rs` |
-| Key-to-byte encoding and terminal-mode snapshots | `crates/sonicterm-app/src/app/{key_encoding,spawn_pane,child_window}.rs` |
-| Broadcast receiver selection and fan-out | `crates/sonicterm-app/src/app/{mod,child_window}.rs`, `crates/sonicterm-ui/src/broadcast.rs` |
-| Intent/effect translation | `crates/sonicterm-app-core/src/{intent,effect,reducer,state_machine}.rs` |
-| Live pane lookup, bounded PTY enqueue, and rejection notification | `crates/sonicterm-app/src/app/{mod,event_loop}.rs` |
-| Native PTY/ConPTY spawn, queues, reader/writer threads, and teardown | `crates/sonicterm-io/src/pty.rs` |
-| Main/child VT workers, reply workers, and redraw handoff | `crates/sonicterm-app/src/app/{spawn_pane,child_window,redraw_target,event_loop,tear_out}.rs` |
-| VT byte parsing, terminal modes, and performer | `crates/sonicterm-vt/src/vt.rs` |
-| Cell representation | `crates/sonicterm-types/src/cell.rs` |
-| Cell insertion, cursor/wrap rules, content sequence, revision, and dirty rows | `crates/sonicterm-grid/src/grid.rs` |
-| Main/child coherent frame assembly | `crates/sonicterm-app/src/app/{window_event,child_window}.rs` |
-| Pane frame boundary | `crates/sonicterm-render-model/src/pane_render.rs` |
-| Adapter detection, render mode, damage, row walk, glyph instances, and surface recovery | `crates/sonicterm-gpu/src/core.rs` |
-| Glyph and background row caches | `crates/sonicterm-text/src/row_glyph_cache.rs`, `crates/sonicterm-gpu/src/row_quad_cache.rs` |
-| Font configuration, discovery, shaping, and rasterization | `crates/sonicterm-font-config/src/lib.rs`, `crates/sonicterm-engine/src/fontstack.rs`, `crates/sonicterm-font/src/{locator,shaper,rasterizer}/` |
-| CPU glyph atlas | `crates/sonicterm-text/src/glyph_atlas.rs` |
-| GPU atlas upload and unified draw | `crates/sonicterm-gpu/src/{atlas_upload,wezterm_pipeline}.rs` |
-| Windows CPU composition and GDI present | `crates/sonicterm-gpu/src/software_windows.rs` |
-| Software-mode config and live presenter transitions | `crates/sonicterm-cfg/src/config.rs`, `crates/sonicterm-app/src/app/{event_loop,config_apply}.rs`, `crates/sonicterm-gpu/src/core.rs` |
+| Keyboard and IME routing | `crates/sonicterm-app/src/app/{window_event,child_window}.rs` |
+| Key encoding | `crates/sonicterm-app/src/app/key_encoding.rs` |
+| Intent/effect PTY boundary | `crates/sonicterm-app-core/src/{intent,effect,reducer,state_machine}.rs`, `crates/sonicterm-app/src/app/mod.rs` |
+| PTY queues and threads | `crates/sonicterm-io/src/pty.rs` |
+| VT workers and redraw coalescing | `crates/sonicterm-app/src/app/{spawn_pane,child_window,redraw_target}.rs` |
+| VT parsing | `crates/sonicterm-vt/src/vt.rs` |
+| Cell insertion and dirty rows | `crates/sonicterm-grid/src/grid.rs` |
+| Frame collection | `crates/sonicterm-app/src/app/{window_event,child_window}.rs` |
+| Pane frame type | `crates/sonicterm-render-model/src/pane_render.rs` |
+| Damage, caches, glyph instances, and presentation | `crates/sonicterm-gpu/src/{core,row_quad_cache,software_windows}.rs` |
+| Fonts | `crates/sonicterm-engine/src/fontstack.rs`, `crates/sonicterm-font/src/` |
+| CPU glyph atlas and row glyph cache | `crates/sonicterm-text/src/{glyph_atlas,row_glyph_cache}.rs` |
 
 ## 中文
 
-### 最短、也最真实的故事
+本页跟踪大写英文字母 `A` 在当前应用中的完整路径。假设窗格已经获得焦点，并且命令面板、
+搜索框、复制模式、输入法组字和键位绑定都没有接管该按键。
 
-想象一下，`A` 是一封坐在小信封里的字母。
-
-它必须旅行**两次**：
-
-1. **你 → 程序：** SonicTerm 把 `A` 装进信封，交给窗格中运行的 shell 或其它程序。
-2. **程序 → SonicTerm → 屏幕：** 如果程序把 `A` 送回来，SonicTerm 就把它放进一个格子，
-   做出它形状的小图片，再把图片画到窗口上。
-
-最重要的事实是：
-
-> 按下 `A` 并不会直接把 `A` 画出来。SonicTerm 先把按键发给子程序。
-> SonicTerm 只绘制子程序通过伪终端送回来的输出。
-
-普通交互式 shell 通常开启了**回显（echo）**，所以它会立刻把 `A` 送回来。
-这让来回旅行看起来像是瞬间完成的。编辑器等全屏程序可以关闭回显，收下按键，
-然后送回其它内容，也可以什么都不送回来。
+按下 `A` 不会直接画出 `A`。SonicTerm 先把字节发给子程序。只有子程序通过伪终端
+（PTY）送回来的字节才会进入画面。交互式 shell 通常会回显该字节，所以整个往返看起来
+几乎没有延迟。
 
 ```mermaid
 flowchart LR
-    finger["小手按下 A"] --> door["SonicTerm 收到按键"]
-    door --> envelope["UTF-8 信封：0x41"]
-    envelope --> child["Shell 或终端程序"]
-    child -- "回显或重画" --> bytes["输出字节回来"]
-    bytes --> grid["A 放进网格单元"]
-    grid --> stamp["字体做出 A 形状的小印章"]
-    stamp --> painter["GPU 或 Windows CPU 画家"]
-    painter --> screen["A 在屏幕上亮起来"]
+    key["WindowEvent::KeyboardInput<br/>逻辑字符 A"]
+    encode["encode_key / encode_logical<br/>UTF-8 0x41"]
+    inq["有界 PTY 输入队列"]
+    writer["sonic-pty-writer"]
+    child["子进程"]
+    reader["sonic-pty-reader"]
+    outq["有界 PTY 输出队列"]
+    worker["每窗格 VT 工作线程"]
+    parser["Parser::advance / Performer"]
+    grid["网格单元 A<br/>脏行 + revision"]
+    event["RequestRedraw(WindowId)"]
+    frame["完整 PaneRender 帧"]
+    font["FontStack + GlyphAtlas"]
+    choice{"呈现器"}
+    wgpu["wgpu 保留帧"]
+    cpu["WindowsSoftwareFrame + GDI"]
+    pixels(["窗口像素"])
+
+    key --> encode --> inq --> writer --> child
+    child --> reader --> outq --> worker --> parser --> grid
+    grid --> event --> frame --> font --> choice
+    choice -- "wgpu" --> wgpu --> pixels
+    choice -- "Windows 降级" --> cpu --> pixels
 ```
 
-### 认识这些小帮手
+### 1. 窗口初始化准备整条路径
 
-| 故事里的帮手 | 真正的名字 |
-| --- | --- |
-| 门口 | winit 的 `WindowEvent::KeyboardInput` |
-| 做信封的人 | `encode_key` / `encode_logical` |
-| 通往程序的管道 | macOS 上的 PTY，或 Windows 上由 ConPTY 支撑的 PTY |
-| 程序 | 窗格中的 shell、编辑器、TUI 或其它子进程 |
-| 听声音的人 | `sonic-pty-reader`；主路径创建的窗格使用 `sonicterm-vt-loop`，直接在拆出窗口中创建的窗格使用 `sonicterm-vt-loop-child` |
-| 读规则的人 | 公共的 `sonicterm_vt::vt::Parser` 及其私有 `Performer` |
-| 放字母位置的盒子 | `sonicterm_grid::grid::Grid` |
-| 字体帮手 | `sonicterm-engine::FontStack` 与 `sonicterm-font` |
-| 印章本 | CPU `GlyphAtlas`；wgpu 还保留一份 texture 副本，而 Windows CPU 画家直接读取 CPU 副本 |
-| 画家 | wgpu；或 Windows 软件路径启用时的 software frame |
+第一个原生窗口和渲染器由 `App::do_resumed` 创建。SonicTerm 开启输入法事件，记录显示器
+帧周期，并创建 wgpu 表面。
 
-### 按键之前：SonicTerm 已经铺好了路
+第一个渲染器请求与该表面兼容的高性能适配器。`force_fallback_adapter` 为 false。
+硬件不可用时，wgpu 仍可能返回 CPU 适配器。后续窗口通过 `GpuSharedContext` 复用第一套
+适配器、设备和队列；每个窗口仍有自己的表面和渲染器状态。
 
-窗口打开时，同一条字符流水线就已经准备好；这发生在任何人按下 `A` 之前：
+设备类型为 `Cpu`，或者名称包含 `Microsoft Basic Render Driver`、`llvmpipe`、
+`SwiftShader` 或“软件适配器”时，SonicTerm 把它认作软件适配器。设备内存策略跟随这个
+检测结果：
 
-1. winit event-loop 线程创建原生窗口，并允许输入法事件。
-2. 第一个 renderer 创建 wgpu instance；后续 window clone 共享的 instance。每个 renderer
-   都为自己的原生 window 创建 surface。
-3. 第一个 renderer 请求 wgpu 寻找与其 surface 兼容的 high-performance adapter。SonicTerm
-   不会显式强制 fallback adapter；但没有可用硬件 adapter 时，wgpu 可能返回 CPU/software
-   adapter。后续 renderer 复用第一个 renderer 的 adapter、device 与 queue。
-4. SonicTerm 记录 adapter backend、名称、driver 与 device type；当 device type 为
-   `Cpu`，或名称表明它是 Microsoft Basic Render Driver、llvmpipe、SwiftShader 或
-   software adapter 时，将其分类为软件 adapter。
-5. 第一个 renderer 请求 wgpu device 与 queue。真正检测到的软件 adapter 使用
-   `MemoryHints::MemoryUsage`；硬件 adapter 使用 `MemoryHints::Performance`。这个内存选择
-   跟随真实 adapter，而不是后面的 `force`/`off` 覆盖值；后续 renderer 通过共享 device 与
-   queue 继承该选择。
-6. SonicTerm 配置 BGRA8 sRGB surface，创建文字 pipeline 与 retained frame，创建 CPU glyph
-   atlas、1×1 inline-image 占位 atlas 及其匹配的 GPU upload，然后按窗口 DPI 构建 font stack。
-   只有真正需要图像时，image atlas 才会扩展。
-7. `[appearance].software_render_mode` 与检测到的 adapter 一起决定最终的
-   **degrade（降级）**状态。
+- 软件适配器：`MemoryHints::MemoryUsage`；
+- 硬件适配器：`MemoryHints::Performance`。
 
-这里的“没有 GPU”有一个精确含义：**没有硬件 GPU，但仍有可用的 wgpu 软件 adapter**。
-SonicTerm 没有完全不需要 adapter 的 headless renderer。如果 wgpu 无法创建兼容 surface、
-找不到任何合适 adapter，或无法打开 device，renderer 初始化就会失败，SonicTerm 也无法
-显示终端窗口。即使 Windows 的 CPU/GDI 呈现路径也是在已经创建好的 `GpuRenderer` 内部
-选择的，所以启动时仍需要完成 wgpu adapter/device 设置。
+随后由 `[appearance].software_render_mode` 决定呈现策略：
+
+| 实际适配器 | `auto` | `force` | `off` |
+| --- | --- | --- | --- |
+| 硬件 | 正常 | 降级 | 正常 |
+| CPU/软件 | 降级 | 降级 | 正常 |
+
+“降级”表示最终策略，不表示适配器种类。`force` 会让硬件适配器进入降级策略。`off` 会让
+WARP 或其它 CPU 适配器继续使用普通 wgpu 路径。设备内存策略仍按真实适配器选择。
+
+每个可见终端窗口都需要可用的 wgpu 表面、适配器、设备和队列。SonicTerm 没有完全不需要
+适配器的渲染器。Windows CPU/GDI 呈现只是已经初始化的 `GpuRenderer` 内部的一条分支，
+不能挽救 wgpu 启动失败。
+
+本页后文沿用这些初始化对象：渲染器保存一个窗口的绘制状态，每个窗口拥有自己的 wgpu 表面，
+第一个渲染器取得后续窗口共享的适配器、设备和队列。精确的标识符和 API 名称仍用代码样式
+保留。
 
 ```mermaid
 flowchart TD
-    window["原生窗口 + wgpu surface"] --> adapter{"有可用的 wgpu adapter？"}
-    adapter -- "没有" --> stop["Renderer 初始化失败；<br/>没有终端窗口"]
-    adapter -- "有" --> classify{"CPU 类型或已知的<br/>软件 adapter 名称？"}
-    classify -- "硬件" --> detectedNo["detected = false"]
-    classify -- "软件 / WARP" --> detectedYes["detected = true"]
-    detectedNo --> policy{"software_render_mode"}
-    detectedYes --> policy
-    policy -- "auto" --> follow["degrade = detected"]
+    window["原生窗口 + wgpu 表面"] --> adapter{"有兼容适配器？"}
+    adapter -- "没有" --> fail["渲染器初始化失败"]
+    adapter -- "有" --> classify{"软件适配器？"}
+    classify --> policy{"software_render_mode"}
+    policy -- "auto" --> auto["degrade = detected"]
     policy -- "force" --> force["degrade = true"]
     policy -- "off" --> off["degrade = false"]
-    follow --> platform{"平台 + degrade"}
+    auto --> platform{"平台 + degrade"}
     force --> platform
     off --> platform
-    platform -- "macOS，任一值" --> mac["wgpu 呈现"]
-    platform -- "Windows，false" --> wingpu["wgpu 呈现"]
-    platform -- "Windows，true" --> wincpu["CPU BGRA 合成 + GDI"]
+    platform -- "Windows + true" --> gdi["CPU BGRA + GDI"]
+    platform -- "其它情况" --> gpu["wgpu 表面"]
 ```
 
-#### 配置真值表
+渲染器使用 BGRA8 sRGB 表面。正常呈现优先使用 Mailbox，不支持时使用 FIFO；允许配置的
+透明效果，并请求最多两帧表面延迟。降级呈现使用 FIFO、不透明 alpha 和一帧延迟。
 
-| 实际 adapter | `auto` | `force` | `off` |
-| --- | --- | --- | --- |
-| 硬件 | 正常状态 | 降级状态 | 正常状态 |
-| CPU/software | 降级状态 | 降级状态 | 正常状态，即使 wgpu 仍在 CPU 上光栅化 |
+正常帧节奏跟随显示器。降级时周期为 25 ms，约 40 fps。输入法组字期间为 83.333 ms，
+约 12 fps。降级策略还会停止仅由淡出动画触发的额外帧。
 
-**Degraded（已降级）**描述的是最终策略，不是 adapter 本身。`force` 可以让真实 GPU
-进入降级状态；`off` 可以拒绝对 WARP 或其它 CPU adapter 做降级处理。
+macOS 和 Linux 在两种策略下都通过 wgpu 呈现。Windows 只有在 `degrade = true` 时使用
+`WindowsSoftwareFrame` 和 GDI `SetDIBitsToDevice`。Windows 使用 WARP 且
+`software_render_mode = "off"` 时，仍在 CPU 适配器上走普通 wgpu 纹理与呈现路径。
 
-#### 四种具体呈现情况
+渲染器初始化还会创建：
 
-| 情况 | 最终画家 | `A` 使用的 atlas | 帧节奏与 surface 策略 |
-| --- | --- | --- | --- |
-| macOS，`degrade = false` | wgpu；当选中的 backend 为常规原生 backend 时通常是 Metal | 完整 CPU atlas 加匹配的 wgpu texture | 跟随显示器周期；支持时用 Mailbox，否则 FIFO；允许配置的透明效果；surface latency 最多 2 帧 |
-| macOS，`degrade = true` | 仍然是 wgpu——macOS 没有类似 GDI 的 CPU frame 分支 | 完整 CPU atlas 加匹配的 wgpu texture | 25 ms 周期（约 40 fps），输入法组字时 83.333 ms（约 12 fps）；FIFO、不透明、surface latency 1 帧，不再为 fade 追加帧 |
-| Windows，`degrade = false` | wgpu；当选中的 backend 为常规原生 backend 时通常是 D3D12 | 完整 CPU atlas 加匹配的 wgpu texture | 跟随显示器周期；支持时用 Mailbox，否则 FIFO；允许配置的透明效果；surface latency 最多 2 帧 |
-| Windows，`degrade = true` | `WindowsSoftwareFrame` 在 CPU 上合成，再由 GDI `SetDIBitsToDevice` 把 BGRA 像素复制到 HWND | 完整 CPU atlas；GPU glyph/image texture 缩成 1×1 占位符，因为该 presenter 不会采样它们 | 25 ms 周期（约 40 fps），输入法组字时 83.333 ms（约 12 fps）；CPU 每次合成完整 surface、窗口不透明、不再为 fade 追加帧 |
+- 保留上一帧的离屏纹理；
+- 固定 2,048 × 2,048 的 CPU 字形图集；
+- 匹配的 GPU 字形存储；Windows 降级时改用 1 × 1 占位符；
+- 1 × 1 的内联图像图集占位符；
+- 按窗口 DPI 建立的字体栈；
+- 行字形缓存和背景四边形缓存。
 
-表中还有一个很容易忽略的第五种组合：Windows 使用 WARP，但
-`software_render_mode = "off"`。adapter 是软件 adapter，但 `degrade` 为 false，
-所以 SonicTerm 会在这个 CPU adapter 上使用正常的 wgpu texture/draw/present 路径，
-而不是 GDI software frame。反过来，在有硬件 GPU 的 Windows 机器上使用 `force`，
-即使检测结果是硬件，也会选择 CPU/GDI frame。
+### 2. 按键先交给当前输入所有者
 
-兼容 backend 由 wgpu 选择；SonicTerm 的这个 constructor 不会硬编码 Metal 或 D3D12。
-它们是常见的原生 backend，但实际选择会写入日志；如果选到 GLES，SonicTerm 会明确警告。
+winit 发送按下状态的 `WindowEvent::KeyboardInput`。SonicTerm 使用
+`event.logical_key`，因此操作系统和当前键盘布局已经把它解析为大写 `A`。
 
-#### 各平台不同的输入、子进程与字体工作
+本地输入所有者可以中止后续路径。主窗口按以下顺序检查：
 
-| 边界 | macOS | Windows |
-| --- | --- | --- |
-| 键盘事件 | AppKit 输入进入跨平台 app 共用的 winit `KeyboardInput` / `Ime` handler | Win32 输入进入相同的 winit handler |
-| PTY 实现 | `portable-pty` 打开原生 Unix PTY | `portable-pty` 打开 ConPTY |
-| 默认 shell | `$SHELL`，没有时回退 `/bin/zsh`；zsh/tcsh/csh 接收 `-l`，bash/fish 接收 `--login` | 优先 PowerShell 7，其次 Windows PowerShell，最后 `cmd.exe`；PowerShell 启动时选择 UTF-8 console 输入/输出 |
-| Locale/编码辅助 | 若 `LC_ALL` 未显式设置，且 `LC_CTYPE` 与 `LANG` 都未声明 UTF-8，SonicTerm 设置 `LC_CTYPE=UTF-8`；仅当 `LANG` 为空时再设置 `LANG=en_US.UTF-8` | PowerShell 启动时把 .NET console input/output 与 `$OutputEncoding` 设为 UTF-8，并把 code page 改为 65001 |
-| 字体发现 | CoreText locator | GDI/DirectWrite-backed locator |
-| 文字 shaping | 通过 `sonicterm-font` 使用 HarfBuzz | 通过相同的 `sonicterm-font` 层使用 HarfBuzz |
-| 普通 glyph rasterizer | FreeType | DirectWrite；某个 face 无法构建 DirectWrite rasterizer 时回退 FreeType |
-| 最终原生呈现 | wgpu surface | wgpu surface；只有最终降级状态启用时才使用 GDI |
+1. 退出确认；
+2. 命令面板；
+3. 活跃输入法组字；
+4. 搜索；
+5. READONLY 或复制模式；
+6. 配置键位；
+7. PTY 编码。
 
-平台差异留在边缘。从编码后的字节开始，经过 VT 解析、grid cell、dirty row、row cache、
-`GlyphKey`、`GlyphInstance`、颜色与位置，使用的模型都是共享的。
+拆出窗口先检查退出确认，然后依次检查本窗口的复制模式、附着的命令面板、输入法组字、
+搜索、键位和 PTY 编码。复制模式的位置不同，因为子窗口把这份状态保存在自己的
+`WindowState` 中。
 
-### 第一次旅行：从手指到子程序
+输入法正在组字时，原始按键不会进入 PTY。`Ime::Commit` 在组字完成后提供 UTF-8 文本。
+命令面板或搜索框可以消费提交文本。READONLY 或复制模式可以丢弃它。
 
-#### 1. 操作系统把按键告诉 SonicTerm
+### 3. `A` 变成终端输入字节
 
-这个例子假设：
+`encode_key` 调用 `encode_logical`。普通 `Key::Character` 在没有 Control 或 Alt 时，
+会原样使用其 UTF-8 字节。
 
-- 终端窗格拥有焦点；
-- 命令面板、搜索、READONLY/copy mode 和输入法组字没有接管按键；
-- 配置的快捷键没有把 `A` 认作 SonicTerm 自己的 action；
-- 当前键盘布局报告的逻辑字符是大写 `A`。
-
-winit 送来一个按下状态的 `WindowEvent::KeyboardInput`。SonicTerm 使用经过键盘布局解析的
-`logical_key`，而不是按键的物理位置；因此操作系统与当前键盘布局已经决定这次按键表示
-大写 `A`。
-
-在编码任何终端字节之前，拥有该窗口的 input router 会依次把事件交给每个本地输入所有者。
-主窗口与拆出窗口保存本地状态的方式略有不同，因此顺序不完全相同；但两者最后都会先处理
-keymap，只有未被接管的按键才进入 PTY 编码：
-
-| 主窗口 | 拆出的子窗口 |
-| --- | --- |
-| quit guard → command palette → 活跃 IME 组字 → search → copy/READONLY mode → keymap → PTY 编码 | quit guard → copy/READONLY mode → 挂载的 command palette → 活跃 IME 组字 → search → keymap → PTY 编码 |
-
-任何一个所有者消费按键后都会立即返回。快捷键属于 SonicTerm；只有没有被接管的文字按键
-才属于终端程序。
-
-输入法走的是相邻但独立的路径。输入法正在组字时，原始键盘事件会被抑制；否则同时发送
-原始按键会把同一段文字输入两次。`Ime::Commit` 会结束组字，让已提交的 UTF-8 文字具备
-发送资格——但打开的 palette 或 search field 可以消费该 commit，copy/READONLY mode
-会丢弃它。只有没有本地文字所有者的 commit 才进入 PTY。
-
-#### 2. SonicTerm 把逻辑按键变成字节
-
-`encode_key` 调用 `encode_logical`。对没有按住 Control 或 Alt 的普通
-`Key::Character`，SonicTerm 会原样发送该字符的 UTF-8 字节。
-
-大写拉丁字母 `A` 是：
-
-| 含义 | 值 |
+| 属性 | 值 |
 | --- | --- |
 | 字符 | `A` |
-| Unicode 码点 | `U+0041` |
-| UTF-8 | 一个字节：`0x41` |
-| 十进制字节值 | `65` |
+| 码点 | `U+0041` |
+| UTF-8 | `0x41` |
+| 十进制字节 | `65` |
 
-其它修饰键会做出不同的信封。Control 最先判断：Control+A 变成字节 `0x01`，
-Control+Alt+A 仍然走 Control 分支。没有 Control 时，Alt+A 会在 UTF-8 字节前加 `ESC`。
-Shift 与 Super/Meta 不会在这个 encoder 内修改 `Key::Character`——键盘布局此前已经生成
-`A`，但 keymap 可能更早消费该 chord。Named key 使用终端协议：未修改的方向键遵循窗格中
-无锁保存的 application-cursor-mode snapshot；带修饰键的方向键则不看该 mode，使用 xterm
-parameterized CSI。功能键使用 xterm-style sequence。当前 encoder 对 kitty keyboard protocol
-的使用更窄：窗格 flag 非零时，专门把 Shift+Enter 编码为 CSI-u。本页继续追踪普通的 `A`。
+其它按键和修饰键遵循四条不同规则：
 
-#### 3. 字节被送到有焦点的窗格
+- **Control 与键位优先级：** 配置的键位可能在 PTY 编码前接管组合键。否则先判断 Control，
+  再判断 Alt：Control+A 变成 `0x01`，Control+Alt+A 仍走 Control 分支。
+- **文字修饰键：** 没有 Control 时，Alt+A 会在 UTF-8 字节前加 `ESC`。Shift 和
+  Super/Meta 不会在这个编码器里修改 `Key::Character`；它们可能已经改变逻辑字符。
+- **方向键与功能键：** 方向键、Home 和 End 会读取活动窗格的无锁 DECCKM 快照。未加
+  修饰键的应用光标模式使用 SS3；带修饰键时使用 xterm 参数化 CSI。功能键使用 xterm 序列。
+- **kitty Shift+Enter：** kitty 键盘标志非零时，Shift+Enter 使用 `CSI 13 ; 2 u`。
 
-`write_to_pty` 找出当前活动窗格，并且只写入它一次。只有 broadcast 已开启，且该活动窗格
-仍是启动 broadcast 的 source pane 时，才会 fan-out。`BroadcastScope::Tab` 选择 source
-所在标签页中的其它窗格；`BroadcastScope::AllTabs` 选择跨标签页和窗口的 peer。receiver set
-会排除 source，因此 source 永远不会收到两次写入。
+普通 `A` 不受影响，因此本页继续跟踪它。
 
-每个 destination 都独立穿过与后端无关的 app 边界：
+### 4. 字节进入一个或多个 PTY
+
+应用只向获得焦点的源窗格写一次。只有当前窗格仍是开启广播的源窗格时，才会添加接收窗格。
+`BroadcastScope::Tab` 选择同一标签页的其它窗格。`BroadcastScope::AllTabs` 选择跨标签页和
+窗口的其它窗格。接收集合会排除源窗格。
+
+每个目标都经过以下边界：
 
 ```text
-AppIntent::PtyWrite → AppEffect::PtyWrite → 存活的 PaneState → PtyHandle
+AppIntent::PtyWrite → AppEffect::PtyWrite → PaneState → PtyHandle
 ```
 
-最后的入队刻意设计为非阻塞。拥有存活本地 PTY 的窗格有一个 **4 条消息**的输入队列，
-每条消息最多 **16 MiB**。`PtyHandle::send_input_nonblocking` 使用 `try_send`：消息太大、
-队列已满或 writer 已断开时，写入会被拒绝，类型化错误中仍保留原始字节。app 把这些字节
-带入 `UserEvent::PtyInputRejected`，记录原因并显示通知，而不会假装按键已经成功送达。
-它不会自动重试，因为稍后重放输入可能把字节送进已经改变的应用状态。一个字节的 `A`
-通常会立刻进入队列。
+这次写入的状态机归约是纯操作。`write_to_pane` 的广播调用者只有 `&self`，因此它使用一套
+临时 `AppStateMachine`。`dispatch_pty_write_effect` 再把窗格编号解析为存活的 `PtyHandle`。
 
-#### 4. PTY writer 把 `A` 交给程序
+`PtyHandle::send_input_nonblocking` 使用 `try_send`：
 
-专用 `sonic-pty-writer` 线程收到字节向量，把它完整写入 PTY master，再执行一次忽略结果的 best-effort `flush`。
-操作系统的 PTY 机制随后把输入呈现给 child side，由 shell 或当前终端应用读取。
+- 每窗格队列容量为 4 条消息；
+- 每条消息最多 16 MiB；
+- 拒绝类型为 `MessageTooLarge`、`QueueFull`、`WriterDisconnected`。
 
-此时 SonicTerm 仍然没有画出任何 `A`。
+每个 `PtyInputError` 都保留被拒绝的 `Vec<u8>`。应用发送
+`UserEvent::PtyInputRejected`，记录原因，并显示带字节数的错误通知。它不会自动重试，
+因为稍后重放时，子程序的输入状态可能已经改变。
 
-### 转身回来：为什么通常会看到 `A`
+专用 `sonic-pty-writer` 线程取出字节向量，调用 `write_all`，然后尝试一次不保证成功的
+`flush`。写入失败会结束 writer。此时 SonicTerm 还没有画出任何 `A`。
 
-普通交互式 shell 中，child side 的终端机制通常开启了回显。因此输入的 `0x41` 会再次作为
-PTY child side 的输出出现；它可能单独回来，也可能与提示符、颜色、光标命令等其它字节一起回来。
+### 5. 子程序决定返回什么
 
-| macOS Unix PTY | Windows ConPTY |
-| --- | --- |
-| PTY slave 的 termios line discipline 通常开启 `ECHO`。raw-mode 应用会修改这些 mode，并自行绘制。 | pseudoconsole/console input mode 与正在运行的应用共同决定输入是被回显，还是被应用自己的重画取代。 |
+子程序从 PTY 一侧收到 `0x41`。普通交互式 shell 通常开启回显，因此 `0x41` 会作为输出
+返回。回显属于子程序一侧的终端行为，不是 SonicTerm 自行显示输入。
 
-回显是 child side 的行为，不是 SonicTerm 偷走的捷径：
+原始模式编辑器可以消费 `A`，再发送更大的重画。密码提示可以不发送任何可见输出。
+程序也可以发送不同内容。SonicTerm 只解析 PTY 主端实际返回的字节。
 
-- 开启回显的 shell 会把 `A` 送回来；
-- raw mode 中的编辑器可能收下 `A`、修改自己的 buffer，再发送由文字和 VT 控制序列组成的整次重画；
-- 密码提示可能故意不发送任何可见字符；
-- 程序也可以改变按键，输出完全不同的内容。
+Unix 上由 `portable-pty` 提供原生 PTY。Windows 上由它提供 ConPTY。经过这个平台边界后，
+字节、VT、网格、字体和渲染路径都是共享的。
 
-两个平台遵循同一条 SonicTerm 规则：只有从 PTY master 返回的字节，才会由 VT parser 解释并显示。
+### 6. PTY reader 施加有界背压
 
-### 第二次旅行：从子程序输出到终端单元格
+`sonic-pty-reader` 把数据读入可复用、连续的 64 KiB `BytesMut` 分配。它把已填充前缀拆成
+带引用计数的 `Bytes` 视图，再包装为 `PtyOutputChunk`。这是可复用的平坦存储，不是循环
+环形数据结构。旧视图仍占用该分配时，`reserve` 可能再分配一个 64 KiB 缓冲环。
 
-#### 5. PTY reader 把输出交给窗格 worker
+输出通道最多保存 64 个数据块。通道满时不会丢弃输出。reader 会在阻塞 select 中等待，
+让操作系统的 PTY 缓冲区向子程序施加背压。
 
-专用 `sonic-pty-reader` 线程把 PTY master 的数据读入一个可复用、连续的
-**64 KiB `BytesMut` backing allocation**。它把每段已填充的前缀 split 成带引用计数的
-`Bytes` view，再包装为 `PtyOutputChunk`；这是可复用的平坦存储，不是循环 ring buffer。
-如果旧 view 仍占用该 allocation，`reserve` 可能创建另一个 backing allocation。
+通道最多保存 64 个数据块。reader 会先构造下一个数据块，再因通道已满而阻塞。若每个数据块
+都占住不同的 64 KiB 缓冲环，结构最坏情况为 65 个缓冲环，即 4.0625 MiB。普通 shell 的
+小块输出通常让许多排队视图共用一个缓冲环。`queued_output_bytes` 报告被占住的缓冲环分配量；
+`queued_output_payload_bytes` 报告等待解析的负载字节。
 
-输出 channel 上限为 **64 个 chunk**。channel 满时不会丢弃下一个 chunk：reader 会在阻塞式
-channel select 中等待，最终让操作系统 PTY buffer 对子程序施加背压。理论最坏情况是同时占住
-64 个不同的 64 KiB allocation（4 MiB）；普通 shell 的小块回显通常共享同一个 allocation。
+主路径创建的窗格使用 `sonicterm-vt-loop`。直接在拆出窗口里创建的窗格使用
+`sonicterm-vt-loop-child`。PTY 启动失败时，窗格仍然可见，但没有 PTY reader、writer 或
+VT 工作线程。
 
-通过主路径创建的窗格使用 `sonicterm-vt-loop`；直接在拆出窗口内创建的窗格使用
-`sonicterm-vt-loop-child`。worker 收到每个 chunk 后，在整个 parse batch 及其 parser-derived
-snapshot 期间锁住该窗格的 parser，并调用 `Parser::advance`。如果窗格的 PTY 启动失败，
-窗格仍会保留在界面中，但没有 PTY reader/writer 或 VT worker。
+### 7. VT 解析器修改网格
 
-#### 6. VT parser 判断字节是文字还是指令
+窗格工作线程收到数据块后，在 `Parser::advance` 和读取解析器快照期间持有该窗格的解析器锁。
 
-终端数据流里不只有字母，也可以有“移动光标”“使用红色”“清除此行”等指令。
-`sonicterm-vt::Parser` 使用 VT 状态机把两者分开。
+普通 ASCII `A` 通过可打印字符快速路径进入 `Performer::print_graphic`。其它可打印 UTF-8
+由 vte 解码后进入同一操作。控制字符和转义序列会调用 `execute`、`csi_dispatch`、
+`osc_dispatch`、`esc_dispatch`，或 DCS 的 `hook`、`put`、`unhook`。Kitty graphics 的
+APC 输入会在 vte 之前被截获。
 
-普通 `A` 是可打印 ASCII。在没有转义序列进行时，parser fast path 会直接把它交给
-`Performer::print_graphic`。其它 UTF-8 可打印文字由 vte 状态机解码，再通过
-`Perform::print` 调用同一个 `print_graphic`；控制字节和 escape sequence 则由
-`execute`、`csi_dispatch`、`osc_dispatch`、`esc_dispatch` 等其它 callback 处理，并不都
-变成文字。只有一个协议——以 APC 序列（`ESC _`）到达的 Kitty graphics——会在进入 vte
-前被截获；Sixel 与其它 DCS 通过 vte 的 `hook`/`put`/`unhook` callback 处理。
+执行器附上当前前景色、背景色、粗体、斜体、下划线、反色和超链接编号。URI 本身留在
+超链接注册表中。随后执行器调用网格。
 
-performer 会附上当前终端属性——前景、背景、粗体、斜体、下划线、反色和已驻留的
-hyperlink id——再请 grid 保存字符；URI 字符串本身留在 hyperlink registry 中。
+`Grid::put_char_styled_in_region` 把 `A` 保存为宽度一的 `Cell`。普通情况下，它推进光标，
+把该行标脏，推进行内容序号，并推进粗粒度网格 revision。
 
-#### 7. Grid 把 `A` 放入一个单元格
+到达右边界时，自动换行会把光标放到越过末列一格的位置，并设置 `pending_wrap`。下一个
+可打印字符才真正换行。关闭自动换行时，光标停在最后一列。前一个字符留下的待换行状态会在
+写入 `A` 前处理。
 
-`Grid::put_char_styled_in_region` 知道可打印 ASCII `A` 的宽度为一。它会：
+脏行表示“这一行发生了变化”。脏位、内容序号和网格修订号是三种独立的记账信号，分别用于
+重绘工作、内容身份和粗粒度帧身份。
 
-1. 在光标位置写入包含 `A` 与当前样式的 `Cell`；
-2. 在普通的行中间位置，把光标向右移动一列；
-3. 把这一行标记为 dirty；
-4. 推进独立的 content sequence，并给这一行盖上该 sequence；
-5. 推进粗粒度的 grid revision。
+单元格如何表示字符是另一件事。宽字符使用 `WIDE` 与 `WIDE_CONT` 单元格。零宽字符附加到
+首单元格的 `extras`，上限为 `MAX_CELL_EXTRAS_BYTES = 64`；超过上限的码点会被丢弃。
 
-在右边界，光标规则更精确：autowrap 开启时，光标会移动到越过末列一格的 sentinel 并设置
-`pending_wrap`，由**下一个**可打印字符真正换行；autowrap 关闭时，光标仍钉在最后一列。
-如果前一个字符留下了 pending wrap，会先处理换行，再写入 `A`。
+### 8. VT 工作线程请求稍后重绘
 
-“Dirty” 不是“脏坏了”，而是：**这一行变了，画家必须再看它一次。** dirty bit、content
-sequence 与 grid revision 是三个不同信号：分别表示重画工作、选区/内容身份与粗粒度渲染状态。
-宽字符通常使用相邻的 `WIDE` 与 `WIDE_CONT` cell；零宽组合字符附着到前一个 lead cell 的
-`extras` 字符串，该字符串最多保留 64 个 UTF-8 byte；超过预算的 codepoint 会被丢弃。
-`A` 只需要一个普通 cell。
+工作线程在持有解析器锁时，把光标可见性、kitty keyboard flag 和 DECCKM 镜像到原子值，
+并收集标题、命令和媒体副作用。随后先释放解析器锁，再访问事件循环代理。
 
-#### 8. Worker 请求窗口稍后重画
+重绘请求按字节和时间合并：
 
-VT worker 会先释放 parser lock，再接触窗口系统。它跟踪 pending bytes 与等待时间，
-而不是每个 chunk 都请求一帧：
+- 待处理输出达到 128 KiB 时立即发出；
+- 连续数据的最大等待时间为 8 ms；
+- 否则，3 ms 没有新数据时发出尾部重绘。
 
-- pending 达到 **128 KiB** 时立即发出重画；
-- 连续数据等待达到 **8 ms 最大延迟**时发出重画；
-- 否则，连续 **3 ms 没有下一个 chunk**时发出尾部重画。
+达到任一边界后，工作线程在短暂的重绘目标锁内复制当前 `WindowId`。释放锁后，它发送
+`UserEvent::RequestRedraw(WindowId)`。winit 线程查找存活窗口并调用 `request_redraw()`。
+过期编号会被忽略。
 
-达到任一边界后，它在短暂的 redraw-target lock 下复制窗格当前的 `WindowId`，释放 lock，
-再通过 event-loop proxy 发送 `UserEvent::RequestRedraw(WindowId)`。
+这层间接关系让窗格可以跨窗口移动。转移只修改共享 `WindowId`；现有工作线程和子进程
+保持不变。
 
-winit event-loop 线程在存活窗口 map 中解析该 id，再调用 `request_redraw()`；过期 id 会直接
-忽略。第二层 event-loop pacing gate 可以把随后到达的 `RedrawRequested` 合并到下一个 frame
-boundary。输入字符是通过 PTY 回显才变得可见，因此该重画既带有原始键盘事件留下的 input-dirty，
-也属于 PTY burst。硬件路径让纯输入重画立即发生，但 PTY 回显最多等待一个显示器 frame；
-最终降级状态启用时，连纯输入重画也会合并到 CPU frame cap。内容不会丢失——event loop
-安排定时唤醒，再次请求该帧。
-
-这种分离还允许窗格搬到另一个窗口：tear-out 只改变共享 `WindowId`，现有 worker 就能跟随
-窗格，而不必直接调用 AppKit 或 Win32。
-
-### 从终端单元格到一张小图片
-
-#### 9. 事件循环取得一份一致的快照
-
-`RedrawRequested` 到达时，app 会对活动标签页中每个窗格的 parser，以及该窗口的
-inline-image store 使用 `try_lock`。只要任一必要 lock 正忙，就推迟整帧。它绝不会只带着
-部分必需的窗格状态去调用 renderer。
-
-app 为活动标签页中的每个可见窗格构建一个 `PaneRender`，包含稳定 pane id、可变 grid view、
-像素矩形、viewport、焦点、cursor style、scrollbar alpha、broadcast-receiver 状态和浅层
-clone 的内联图像；像素 payload 是共享的 `Arc<[u8]>` allocation，不会被逐字节复制。当前 app
-assembly 在这里提供 `CursorStyle::default()`。光标位置仍在 grid 内。app 把 pane slice，
-以及 theme、cursor visibility、selection、copy mode、tabs、search、palette、IME、活动 pane 的
-viewport top、notification 与 hovered-URL 状态作为显式参数交给 `GpuRenderer::render`；生产调用中
-没有一个合并后的 UI snapshot object。
+第二层帧节奏控制可能把持续输出推迟到下一个帧边界。硬件路径让纯输入重绘立即发生。
+PTY 输出最多等待一个显示器帧周期。最终降级状态启用时，纯输入重绘也会合并到软件帧周期。
+定时 `ControlFlow::WaitUntil` 会重新唤醒事件循环并请求该帧。
 
-parser lock 通过 `try_lock` 获取，并在 frame 期间保持。inline-image store 也通过 `try_lock`
-采样；该 pass 当前会访问窗口 pane registry，包括隐藏标签页中的窗格。如果任一必要 lock 正忙，
-app 会释放已经取得的所有 guard，记录 pending redraw，不调用 renderer 就返回，并由定时的
-event-loop wake 重试。契约是“所有需要的 snapshot 都可用，否则不调用 render”，而不是所有
-独立 lock 在同一瞬间组成一个事务。
+### 9. 事件循环构建完整帧
 
-#### 10. Renderer 找出改变的那一行
+收到 `RedrawRequested` 后，应用先计算活动标签页的窗格矩形。它对每个必需的内联图像存储
+和活动标签页解析器使用 `try_lock`，并让所有解析器锁守卫一直存活到渲染调用结束。任一锁
+不可用时，应用会释放已经取得的全部锁守卫，记录待重绘状态，并在不调用渲染器的情况下
+返回。帧要么完整，要么不存在；SonicTerm 不会呈现新旧窗格状态混合的画面。
 
-renderer 会把 frame fingerprint 与上一帧成功呈现的 frame 比较。如果可见内容没有变化，
-就可以跳过工作。这里 grid revision 与 dirty row 表示包含 `A` 的 cell 是新的。
-
-SonicTerm 把上一帧像素保存在独立的 offscreen texture 中。在正常、非降级的 wgpu 路径上，
-primary-screen 窗格贡献各 dirty-row strip 的并集，并裁剪到窗格与 surface。dirty
-alternate-screen 窗格则贡献整个裁剪后的窗格——不是整个窗口——因为全屏应用会移动区域，
-只画窄 row union 会留下旧像素。retained render pass 会 load 旧 texture，scissor 让最终
-damage 之外的像素继续保留。
-
-最终降级状态会改变最后一步：只要降级 frame 真有工作，wgpu 分支会把 damage 提升为
-**完整 surface**。Windows 上，同一状态会选择 `WindowsSoftwareFrame`，它同样先清空并合成
-完整 surface。因此窄 primary-row damage 属于正常 retained wgpu 呈现；降级呈现则减少绘制
-次数，但真正运行时刻意重画完整 frame。
-
-Pixel damage 与 CPU frame assembly 是两件不同的事。当前硬件策略使用 `RenderMode::Full`，
-所以可以访问所有可见行，而 row cache 会廉价重放未改变的行；真正改变 retained pixel 的只有
-damage scissor。最终降级状态下，如果没有任何可见 signal 变化，可以返回 `Noop`。
-我们的行带有 dirty mark，因此该行 cache entry 会失效，cell 会重新分组并发出。
-
-#### 11. `A` 变成 glyph 请求
-
-样式相同的 cell 会组成 run。包含 `A` 的简单可打印 ASCII run 可以走 renderer 的保守
-ASCII fast path：`A` 一对一变成一个 `GlyphKey`，无需对整个 run 做 shaping。
+应用为每个可见窗格构建 `PaneRender`，其中包含：
 
-这只是一条捷径，不是第二套字体系统。atlas miss 时，`FontStack::rasterize` 仍会解析真正的
-font face 与 glyph。更复杂的文字——Unicode、组合字符、fallback font 或可能形成连字的 run——
-会使用 `FontStack::shape_text_with_style`，驱动 SonicTerm 的 HarfBuzz-backed 字体栈，
-再把 shaped cluster 映射回终端列。
+- 稳定窗格编号；
+- 可变网格视图；
+- 像素矩形和视口；
+- 活动状态和光标样式；
+- 广播接收状态；
+- 滚动条透明度；
+- 浅复制的内联图像记录，像素仍由共享 `Arc<[u8]>` 持有。
 
-字体栈会选择一个包含该 glyph 的 face。用户 primary family 后面接着 SonicTerm 在代码中
-合成的 fallback chain：JetBrains Mono、Symbols Nerd Font Mono、Noto Color Emoji；
-`sonicterm-font` 还能继续从平台发现的 fallback face 中解析缺失 cluster。这个 family list
-目前由代码拥有，不是 `sonicterm.toml` 中的列表。Windows 通常使用 DirectWrite 光栅化，
-其它平台通常使用 FreeType。Windows 上，DirectWrite 构建失败或单个 glyph 光栅失败时会回退
-FreeType；DirectWrite 无法打开的 built-in 或 memory-only font data 也走该回退。
+生产调用把窗格数组，以及独立的主题、光标、选区、复制模式、标签页、搜索、命令面板、
+输入法、视口、通知和悬停 URL 数据交给 `GpuRenderer::render`。它不会构建一个总的
+`RenderInputs` 对象。
 
-对 renderer 而言，“style run”只包含 bold 与 italic bit，因为只有它们会选择不同 face。
-前景色稍后才放入每个 glyph instance，不会切分 shaping run。ASCII shortcut 的条件也很精确：
-每个 cell 都必须是可打印 ASCII、没有组合 `extras`、不带任何 wide-cell flag，并且不包含
-ligature trigger `= ! < > - _ : | & *`。普通 `A` 即使是 bold 或 italic 也符合条件；
-style bit 只是成为 `GlyphKey` 的一部分。
+### 10. 损伤区域和行缓存选择工作量
 
-#### 11a. Shape、颜色和装饰各做各的工作
+渲染器把 `FrameKey` 与上一帧成功画面比较。该键覆盖网格 revision 和可见界面状态。完全
+相同的键可以跳过组帧。Windows 降级呈现还可以在键相同时重新呈现已有 CPU 缓冲区。
 
-`Cell` 保存的内容比 font shaper 所需的更多：
+只有网格内容变化时：
 
-- `ch` 是 lead character；
-- `fg` 与 `bg` 可以是 theme default、256 色 indexed color 或 24-bit RGB；
-- flag 包含 bold、italic、underline、strikethrough、inverse、dim、hidden、blink 与 wide-cell marker；
-- 较少使用的 boxed data 保存 hyperlink id、组合 `extras`、非默认 underline style 和显式 underline color。
-
-活跃 renderer 会在不同阶段使用这些信息。Bold 与 italic 选择 shape face。前景色在 shaping
-以后解析；inverse 交换前景与背景的职责，dim 在存储的 sRGB-encoded color space 中把前景色
-向有效背景混合 45%。Default 与 indexed color 通过当前 theme 解析；随后在 sRGB surface 或
-CPU blend 需要的位置把 draw value 转成 linear light，避免 gamma 被应用两次。
-
-背景不是 glyph。相邻、相同的非默认背景会合并成宽 base quad；theme-default 背景会省略，
-因为 damage background/clear 已经提供它。Underline run 也会单独合并，变成 single、double、
-curly、dotted 或 dashed quad；存在 SGR 58 显式颜色时使用它，否则跟随 cell foreground。
-Selection、cursor、search、hyperlink、IME 与 palette visual 是 painter order 中更晚的 quad 或 glyph。
+- 主屏幕窗格贡献经过裁剪的脏行条带；
+- 有脏行的备用屏幕窗格贡献完整裁剪窗格；
+- 干净窗格不贡献损伤区域。
 
-VT parser 还会保存 blink、hidden 与 strikethrough flag，但当前 terminal renderer 没有针对这三个
-flag 的 draw branch。本页只描述现有代码，不把尚未实现的视觉步骤写成已经存在。
-
-#### 11b. 两个 row cache 避免重复不同的工作
-
-改变的行会让两个独立 cache 失效：
-
-- `RowGlyphCache` 使用三部分 key `(pane id, absolute row, row hash)` 保存该行的
-  `GlyphInstance`、underline run、tofu quad 与 missing-codepoint list。hash 覆盖 cell content、
-  style revision、cell geometry 与 selection overlap。atlas eviction 计数随 cached value 一起
-  保存，并在 lookup 之后比较；不匹配时会拒绝 UV 可能已指向其它 atlas tile 的 entry。
-- `LineQuadCache` 使用平行的 pane/absolute-row/hash key 保存合并后的背景 `QuadInstance`。
-  它的 hash 还包含 pane origin 与 pane extent，因为 split 的移动或裁剪会改变背景几何。
-
-两个 cache 的容量都约为所有窗格 visible row 总数的四倍。尺寸变化或达到容量时会整体清空该
-cache。Font、theme、scale、resize 与 atlas replacement 会清除对应 cache；dirty row 会使
-absolute-row entry 失效。两种 cache type 都定义了 pane-local invalidation，但当前 renderer 没有
-生产调用点。Cursor、selection、search、quick-select 与其它逐帧 overlay 不会作为
-background-cache payload 被重放。
+浮层、窗口装饰、尺寸、标签页、选区、视口或拓扑变化可以把损伤扩大到整个表面。
+有实际工作的降级 wgpu 帧总是使用完整表面。Windows 降级呈现也会清空并合成完整 CPU 帧。
 
-#### 12. 字体帮手刻出 `A` 形状的小印章
+硬件策略使用 `RenderMode::Full`，因此可能访问每个可见行。真正改变保留像素的区域仍由
+损伤裁剪决定。行缓存让未改变行的组装成本保持较低。
 
-光栅化会把字体中的 `A` 轮廓变成一块小小的像素 coverage 矩形，并附带摆放尺寸：
+`RowGlyphCache` 保存 `GlyphInstance`、下划线段、缺字框和缺失码点。键为
+`(pane id, absolute row, row hash)`。哈希覆盖单元格、样式 revision、单元格几何、缩放和
+选区重叠。缓存中的图集代次会拒绝淘汰前生成的 UV。
 
-- bitmap 有多宽、多高；
-- 相对 cell baseline 应该放在哪里；
-- 它是普通 coverage、subpixel coverage，还是自带颜色的 glyph。
+`LineQuadCache` 用相似的键保存合并后的背景四边形。它的哈希还覆盖窗格原点和范围，因为
+移动或裁剪窗格会改变四边形几何。
 
-这还不是屏幕像素，只是一枚可以复用的小印章。
+容量、失效条件和当前使用状态是三件不同的事：
 
-#### 13. 印章放进 glyph atlas
+- **容量：** 两种缓存的容量都约为所有窗格可见行总数的四倍。尺寸变化或达到容量时，
+  对应缓存会整体清空。
+- **失效条件：** 字体、主题、缩放比例、表面尺寸或图集变化会清除相应缓存；脏行会使
+  绝对行条目失效。
+- **当前状态：** 两种缓存都提供仅使单个窗格失效的方法，但当前渲染器的生产路径没有调用
+  这些方法。光标、选区、搜索、快速选择、输入法、命令面板和通知等逐帧浮层另行组装。
 
-`GlyphAtlas::get_or_insert` 会在固定的 **2048×2048 BGRA8 CPU atlas**
-（约 16 MiB）中查找 glyph key；metadata 上限为 **16,384 个 entry**。
+### 11. 文字变成字形实例
 
-- 命中时，SonicTerm 复用已有 tile，并刷新它的 last-used frame；
-- 未命中时，`FontStack` 光栅化 glyph，atlas 先尝试回收矩形，再尝试 shelf packer，
-  把 coverage 复制到 BGRA storage，并把该矩形记录为 dirty；
-- 单色 coverage 会复制到 BGRA 各 channel；彩色与 subpixel BGRA 数据按原样复制；
-- 空格没有墨迹或 upload，因此使用零面积 cached entry；
-- 光栅失败或尺寸大到根本放不下时，会缓存零面积 sentinel，避免每帧重复做昂贵尝试；
-  renderer 会跳过退化 draw，或在对应路径画 tofu fallback；
-- metadata 或 packing 遇到压力时，atlas 实现会确定性淘汰最冷的四分之一。因为本帧较早
-  组装的 instance 可能已经持有过期 UV，renderer 会检测 eviction 计数变化，就地 reset
-  整个 atlas、使 `RowGlyphCache` 失效、放弃当前 frame，并请求一个新 frame。下一帧会在
-  eviction 关闭时重试；成功呈现后重新开启 eviction。固定 pixel allocation 永远不会增长。
+字体样式兼容的单元格会组成文字段。保守的可打印 ASCII 文字段可以跳过完整塑形。每个单元格
+都必须是可打印 ASCII，没有组合 `extras`，没有宽字符标志，也不能包含这些连字触发字符：
+`= ! < > - _ : | & *`。普通 `A` 满足条件。
 
-renderer 根据 cell、baseline、bearing 与 tile size 计算 `A` 的物理像素位置，snap 到 device
-pixel，再转换为 normalized device coordinate。`GlyphInstance` 保存 NDC `rect`、归一化 atlas
-UV、linear-space 前景调制色，以及一个打包的四分量 flag vector：`x` 表示自带颜色的 glyph，
-`y` 表示 subpixel coverage，`z` 选择独立的 inline-image atlas，`w` 保留不用。普通 `A` 不会
-设置 image selector。这个 record 表达的意思大致是：
+这条捷径不是第二套字体系统。图集未命中时仍会调用 `FontStack::rasterize`。Unicode、组合
+文字、回退字体和可能形成连字的文字段会调用 `FontStack::shape_text_with_style`，由 HarfBuzz
+塑形，再把字形簇映射回终端列。
 
-> 采样 atlas 中 `A` 的这个矩形，把它放在这个 cell 上，并用这个前景色给普通 coverage 着色。
+字体栈会为每个字形寻找第一个能绘制它的字体。它先尝试配置的主字体，再依次尝试代码内置的
+JetBrains Mono、Symbols Nerd Font Mono 和 Noto Color Emoji；仍找不到时，最后使用平台发现的
+备用字体来处理尚未解析的字形簇。
 
-row cache 使用 key `(pane, absolute row, row hash)` 记住该 instance；atlas eviction 计数
-随 entry 一起保存，并在 lookup 命中后比较，拒绝 UV 可能已指向其它 tile 的 entry。
+各平台的字体发现和普通光栅化如下：
 
-### 从印章到显示器上的光
-
-#### 14. wgpu 路径只上传新的 atlas 小块
-
-在普通 wgpu 路径中，`AtlasUpload::sync` 会取走 atlas 的 dirty rectangle。
-如果 `A` 刚刚完成光栅化，就只把它紧密打包的小区域写入 GPU texture；如果 tile 已经 warm，
-本帧上传零字节。Windows CPU presenter 不执行这次 glyph texture 上传；它使用 CPU atlas，
-清除 CPU atlas 的 dirty list，并把 GPU glyph/image texture 保持为 1×1 占位符。
-
-wgpu 路径随后获取 window surface，并在 damage scissor 内绘制 retained offscreen frame。
-真正的第一项是清理 damage 的背景 quad，之后统一 pipeline 按以下类别顺序绘制：
-
-```text
-damage background + base quads → inline images → base glyphs → overlay quads → overlay glyphs
-```
-
-普通 `A` glyph 是一个带纹理的矩形；atlas alpha coverage 会乘上 cell 的 linear-space
-前景色。彩色 glyph 与 inline image 使用 tile 自己的颜色，不做普通文字 tint。frame blitter
-把 retained 结果复制到 swapchain surface，wgpu 提交 command，surface 随后 present。
-
-#### 15. Windows 软件渲染复用同一个准备好的字母
-
-如果 Windows 的最终 degrade 状态为 true，`WindowsSoftwareFrame` 会使用同一个上游
-`GlyphInstance` 与 CPU glyph atlas。它先按 window 尺寸准备并清空完整 BGRA buffer，依次
-混合 base quad、image、glyph、overlay quad 与 overlay glyph，再用 GDI
-`SetDIBitsToDevice` 把完整 width × height 的像素复制到 HWND。它的 CPU buffer 单边最多接受
-16,384 像素，四字节 BGRA pixel 总量最多 160 MiB。wgpu surface 也有同样的 160 MiB byte
-上限，但单边上限是 16,384 与 device `max_texture_dimension_2d` 中较小的一个。
-
-这些结果被刻意分开。初始 window size 无效会让 renderer construction 失败；之后
-`try_resize` 拒绝尺寸时返回 `false`，并保留旧 surface 配置，让 event path 可以继续使用之前
-可用的尺寸。CPU frame 尺寸未通过验证时，`WindowsSoftwareFrame::new` 或 `prepare` 会在分配
-之前返回自己的 error。这些 size check 都不是 GDI presentation result。
-
-它不会重新 shape `A`、重新选择 font，也不会发明第二套 placement policy。GPU 与 Windows
-CPU software path 的差别是由谁画像素；两者都从同一个 grid cell、字体结果、atlas tile、
-位置和颜色开始。该路径不是 wgpu 初始化失败后的救援方案；`auto`、`force`、`off` 在已有
-adapter/device 的 renderer 内选择它。
-
-#### 16. 帧成功后，这一行变回 clean
-
-对真正执行 draw 的 frame，只有 Windows GDI presentation 返回 `Ok`，或 wgpu 路径已经提交
-command 并调用 `queue.present(frame)` 之后，`finish_successful_frame` 才会记住 `FrameKey`
-并清除每个已渲染窗格的 dirty bit。GDI `SetDIBitsToDevice` 可以报告失败，此时会在 finish
-step 前返回；wgpu 的 `present` 调用本身不返回 success result，因此 SonicTerm 无法直接观察
-present 之后的失败。
-
-在 wgpu draw 之前，timeout/occlusion、outdated、suboptimal 与 lost surface acquisition
-result 都会让 cached key 失效并请求重画；outdated 与 suboptimal 会重新 configure surface，
-lost 会重建 surface，validation error 则向上传播。任何失败的 acquisition 都不会清除 grid
-dirty bit。
-
-有一个刻意的“不 present”例外：最终降级状态下，如果没有任何可见变化，
-`RenderMode::Noop` 可以缓存新 key 后返回。它既不 present，也不清除 dirty row，因为没有
-新画面需要完成。
-
-真正绘制的 frame 成功后，window compositor 与显示器扫描新呈现的像素。现在你看见了 `A`。
-
-### 每一项工作由谁完成
-
-这趟旅程跨越多个 owner，但每个可变对象仍有清晰的归属：
-
-| Actor | 负责旅程中的哪一段 | 边界规则 |
+| 平台 | 字体发现 | 默认光栅器 |
 | --- | --- | --- |
-| winit event-loop 线程 | keyboard/IME 路由、keymap action、存活的 window/tab/pane、一致 frame 收集、`GpuRenderer::render`、wgpu submit 与 Windows GDI present | 唯一把 `WindowId` 解析为原生窗口或呈现 frame 的线程；render path 上访问 parser 使用 `try_lock`，而 resize、config reload、输入、search/copy 工作，以及 tear-out 或 child-window installation 可有意使用阻塞 `lock` |
-| 每个存活 PTY 的 `sonic-pty-writer` | 从有界输入 channel 取出拥有所有权的 `Vec<u8>`，调用 `write_all`，然后尝试 `flush` | write 失败会结束 writer；flush 是 best-effort |
-| 子进程与 OS PTY/ConPTY | shell line discipline、echo/raw mode、应用输入处理与输出 buffering | 决定送回 `A`、另一份重画，还是不送回任何可见输出 |
-| 每个存活 PTY 的 `sonic-pty-reader` | 阻塞读取到可复用 `BytesMut`，再交给有界输出 channel | 64-slot 输出 channel 已满时等待而不是丢弃 |
-| 每窗格 VT worker | 锁住该窗格的 `Parser`、推进 VT state、修改 `Grid`、镜像 cursor/keyboard-mode atomic、收集类型化 side effect，再合并 redraw request | 在触碰 event-loop proxy 或原生窗口之前释放 parser lock |
-| 每窗格 VT-reply worker（`sonicterm-vt-reply` 或 `sonicterm-vt-reply-child`） | 把 parser 生成的 DSR/DA/XTVERSION/palette/keyboard reply 送回同一类型化 PTY 输入接缝 | 非阻塞发送；writer 断开时结束线程，queue 满时可丢弃幂等状态回复，而不是拖住 parsing |
-| font stack 与 renderer object | font database、shape/raster cache、CPU atlas、row cache、retained frame 与 presenter state | 由 render path 调用；当前 `sonicterm-engine` 与 `sonicterm-gpu` 代码接收 wrapper output，而不是 `sonicterm-font` 内部使用的原始 FreeType/HarfBuzz/Fontconfig/DirectWrite handle |
+| macOS | CoreText | FreeType |
+| Windows | GDI | DirectWrite，失败时回退 FreeType |
+| Linux | Fontconfig | FreeType |
 
-```mermaid
-flowchart LR
-    subgraph ui["winit event-loop 线程"]
-        key["Keyboard / IME 路由"]
-        snap["一致的 pane snapshot"]
-        render["Shape、atlas、frame、present"]
-    end
-    subgraph input["每 PTY 输入"]
-        inq["有界输入 queue"]
-        writer["sonic-pty-writer"]
-    end
-    child["子进程 + PTY / ConPTY"]
-    subgraph output["每 PTY 输出"]
-        reader["sonic-pty-reader"]
-        outq["有界输出 queue"]
-        vt["每窗格 VT worker"]
-        reply["每窗格 VT-reply worker"]
-    end
+粗体和斜体负责选择字形。前景色不会切分塑形文字段。塑形后，渲染器解析主题默认色、256 色
+索引和 24 位 RGB。反色会交换前景与背景。dim 会在保存的 sRGB 编码空间内，把前景向有效
+背景混合 45%，随后再按 sRGB 表面或 CPU 混合的需要转换绘制值。
 
-    key --> inq --> writer --> child
-    child --> reader --> outq --> vt
-    vt -->|"Parser / Grid 已改变"| snap --> render
-    vt -->|"RequestRedraw(WindowId)"| ui
-    vt -->|"终端 query reply"| reply --> inq
+背景是四边形，不是字形。相邻且相同的非默认背景会合并。默认背景来自损伤清理。下划线段会
+形成单线、双线、波浪、点线或虚线四边形。有 SGR 58 显式颜色时使用它，否则使用前景色。
+
+解析器会保存 blink、hidden 和 strikethrough 标志。当前终端渲染器没有针对这三个标志的
+专用绘制分支。
+
+### 12. 光栅化填充字形图集
+
+光栅化返回位图和摆放度量，包括宽度、高度、bearing、advance，以及数据属于单色、子像素还是
+自带颜色。这是一块可复用的小图，不是屏幕像素。
+
+`GlyphAtlas::get_or_insert` 使用固定 2,048 × 2,048 BGRA8 CPU 分配，约 16 MiB。
+元数据最多 16,384 条。
+
+- 命中时复用图块，并刷新最后使用帧；
+- 未命中时先光栅化，再尝试回收矩形，最后使用分层打包器；
+- 单色覆盖率会复制到 BGRA 通道；彩色和子像素 BGRA 保留原通道数据；
+- 空格使用零面积条目；
+- 光栅化失败或尺寸不可能放入时使用零面积哨兵，避免每帧重试；
+- 遇到压力时，图集按确定规则淘汰最冷的四分之一。
+
+组帧期间发生淘汰时，之前发出的字形实例可能已经失效。渲染器检测到代次变化后，会就地重置
+图集，使 `RowGlyphCache` 失效，放弃当前帧并请求下一帧。下一帧关闭淘汰后重试。
+成功呈现一帧后再重新启用淘汰。
+
+`GlyphInstance` 保存归一化设备坐标（NDC）矩形、图集 UV、线性空间前景调制色，以及
+彩色、子像素和图像图集采样标志。行缓存会连同图集代次保存这个准备好的实例。
+
+内联图像使用独立图集。它从 1 × 1 开始，出现可见媒体时扩展到 2,048 × 2,048，连续
+240 个已渲染帧没有内联媒体后再缩回占位符。
+
+### 13. 选定的呈现器产生像素
+
+wgpu 路径中，`AtlasUpload::sync` 只上传脏矩形。已经缓存的 `A` 不会产生新的图集上传。
+渲染器取得表面，在损伤裁剪内画入保留式离屏纹理，再复制到表面、提交命令并调用
+`queue.present(frame)`。
+
+图层顺序为：
+
+```text
+损伤背景和基础四边形 → 内联图像 → 基础字形 → 浮层四边形 → 浮层字形
 ```
 
-### SonicTerm 运行中切换渲染路径
+普通文字采样图集覆盖率，并乘以前景色。彩色字形和内联图像保留自身颜色。
 
-显式 config reload 可以改变 `software_render_mode`，但不会改变实际 adapter。SonicTerm 会在
-reload 开始时丢弃整个 warm-window pool；这些 renderer 不执行状态转换，而是被销毁，稍后按
-新配置重建。SonicTerm 会为 main renderer 与每个 torn-out child renderer 重新计算最终
-degrade flag；每个状态改变的存活 renderer 随后：
+Windows 且 `degrade = true` 时，`WindowsSoftwareFrame` 接收同一批准备好的四边形、
+`GlyphInstance`、CPU 字形图集和图像图集。它清空完整窗口 BGRA 缓冲区，按顺序混合图层，
+再对 HWND 调用 `SetDIBitsToDevice`。GPU 字形和图像纹理保持 1 × 1 占位符，因为这条路径
+不会采样它们。
 
-1. 按需要切换 FIFO/Mailbox、alpha mode 与 maximum frame latency；
-2. 重新 configure 现有 wgpu surface；
-3. 使 `FrameKey` 失效并请求完整 redraw。
+两种呈现器都使用以下帧限制：
 
-macOS 在两种状态下都仍由 wgpu 呈现，因此完整 GPU atlas texture 会保留。Windows 跨越
-degrade 边界时，也会在 wgpu presenter 与 CPU/GDI presenter 之间切换。两者使用不同的 GPU
-atlas 尺寸，因此两个 row cache 都会失效。进入 CPU 呈现时，GPU glyph/image texture 会重建为
-1×1 占位符，同时保留完整 CPU glyph atlas。返回 wgpu 时会 reset glyph metadata 与 image-atlas
-state，重新创建匹配的完整 texture，使每个带 UV 的 cache 失效，并在采样新 texture 之前强制
-产生新 frame。真实 adapter 的 `MemoryHints` 不会改变；它在 device 创建时已经确定。
+- 单边最多 16,384 像素；
+- BGRA 总字节最多 160 MiB；
+- wgpu 还会把单边限制在设备的 `max_texture_dimension_2d` 内。
 
-这些其它变化并不共用一个 invalidation switch。Font family、point size、line height 或 weight
-变化会重建 font stack、reset glyph atlas metadata，并使两个 renderer row cache 与 frame key
-失效。DPI 变化还会重新设定 font scaling，并重建与之匹配的 atlas upload。Theme 变化会更新
-renderer color、递增 style revision、使 row cache 与 frame key 失效，而且 app 会显式把每个 pane
-的所有 row 标记为 dirty。被接受的 surface resize 会替换 retained frame texture、使 row cache 与
-frame key 失效，再 resize pane grid 与 PTY；topology 变化则向 frame construction 提供不同的 pane
-layout。因此这些路径都不会用不兼容的尺寸、颜色、UV 或位置来复用 `A`，但并非每条路径都会
-把 grid row 标记为 dirty。
+初始尺寸无效时，渲染器构建失败。之后 `try_resize` 拒绝尺寸时返回 `false`，继续使用之前的
+可用表面。`WindowsSoftwareFrame::new` 和 `prepare` 会在分配前拒绝无效 CPU 帧。
+
+### 14. 成功后清除脏行
+
+Windows CPU 呈现只有在 `SetDIBitsToDevice` 成功后才调用 `finish_successful_frame`。
+wgpu 在提交命令并调用 `queue.present(frame)` 后调用它。wgpu present 本身没有可表示后续
+合成器失败的返回值。
+
+`finish_successful_frame` 保存新的 `FrameKey`，增加成功帧计数，并清除每个已渲染窗格的脏行。
+
+wgpu 绘制前：
+
+- 超时或遮挡会使键失效并请求重绘；
+- 过期或次优还会重新配置表面；
+- 表面丢失会重新创建；
+- 验证错误会返回错误。
+
+这些路径都不会清除脏行。因图集淘汰而放弃的帧也保留脏行。`RenderMode::Noop` 会保存键，
+但不呈现、不清除脏行，因为它没有生成新画面。
+
+真正画完一帧后，窗口合成器和显示系统会把新呈现的像素送到屏幕上。回显的 `A` 此时才
+出现在屏幕上。
+
+### 缓存失效触发条件
+
+以下变化会使不同的渲染状态失效：
+
+- **字体设置：** 改变字体家族、字号、行高或字重会重建字体栈、重置字形图集元数据，
+  并使两种行缓存和 `FrameKey` 失效。
+- **DPI：** DPI 变化会重新设定字体缩放，重建匹配的图集上传资源，使两种行缓存和
+  `FrameKey` 失效，然后请求重绘。
+- **主题：** 主题变化会更新渲染器颜色、推进样式修订号，使两种行缓存和 `FrameKey` 失效，
+  并把每个窗格的所有行标为脏行。
+- **表面尺寸：** 接受新的表面尺寸后，会替换保留帧纹理，使两种行缓存和 `FrameKey` 失效，
+  然后调整窗格网格和 PTY 的大小。
+- **窗格拓扑：** 不同的窗格布局会改变下一份 `FrameKey` 中的拓扑字段；它本身不会清空
+  行缓存。
 
 ### 窗格关闭时会发生什么
 
-在**同一个 SonicTerm 进程内**移动 tab 或把它拆到另一个窗口，不会 drop 其 `PtyHandle`：
-存活 pane、parser、PTY 与 worker ownership 会一起移动，只有共享 redraw `WindowId` 改变。
-真正关闭窗格会 drop handle。已被接收的跨进程 OS drag 也不同：destination 确认序列化 tab
-payload 后，source 会 detach 并 drop 本地 pane，通过 `PtyHandle` 结束其本地 shell。每次 drop
-都是进程生命周期边界，而不只是关闭 channel。
+释放 `PtyHandle` 时，代码会先通知读取与写入线程取消操作，在平台支持时取消仍在等待的同步
+I/O，然后终止子进程。之后的有界顺序因平台而异。
 
-每个平台都以相同顺序开始 teardown：向 reader/writer cancellation channel 发信号，在支持时取消
-pending synchronous I/O，然后终止 child。剩余顺序因平台而异，并且都有 deadline：
+**Unix PTY**
 
-| macOS / Unix PTY | Windows ConPTY |
+清理前，`waitid(P_PID, ..., WEXITED | WNOHANG | WNOWAIT)` 可以观察自然退出而不释放会话编号。
+随后按顺序清理：
+
+1. 杀死原进程组，并反复杀死同一会话中仍存活的成员；
+2. 关闭 PTY 主端；
+3. 最多等待读取线程 500 ms，再独立等待写入线程最多 500 ms；超时会记录警告并分离该线程；
+4. 若终止失败，另用 500 ms 重试；如果仍无法证明清理完成，就保留未回收的主进程，避免其
+   编号被不安全地复用；
+5. 否则，再用独立的 500 ms 等待子进程退出并回收；到期后记录警告并返回。
+
+**Windows ConPTY**
+
+随后按顺序清理：
+
+1. 最多等待读取线程 500 ms，再独立等待写入线程最多 500 ms；超时会记录警告并分离该线程；
+2. 启动 `sonic-conpty-drain` 通过克隆的 reader 排空输出，并启动 `sonic-conpty-close` 关闭主端；
+3. 最多等待关闭操作 2 秒；超时会记录警告并分离两个辅助线程；
+4. 关闭成功后，再最多等待 2 秒，让排空线程观察 EOF；排空超时会静默分离该线程；
+5. 再用独立的 500 ms 等待子进程退出并回收；到期后记录警告并返回。
+
+任一 ConPTY 辅助线程启动失败时，代码会记录警告并报告关闭未完成。这些时限保证 `Drop`
+不会无限阻塞界面；原生关闭未完成时，代码不会谎报成功。
+
+### `A` 可能不出现的原因
+
+| 边界 | 正常原因 |
 | --- | --- |
-| Teardown 之前，natural-exit probe 使用 `waitid(..., WEXITED \| WNOHANG \| WNOWAIT)`，所以可以观察 status，而不会 reap leader 或释放其 session identity；这个 probe 并不是 teardown 的第一步。Drop 随后杀死原始 process group，反复枚举并杀死仍存活的 session member，关闭 PTY master，给 reader 最多 500 ms，再独立给 writer 最多 500 ms，并执行另一个有界 leader-reap 检查。若经过重试 deadline 仍无法证明 session 已清理，会刻意让 leader 保持 unreaped，避免其 session id 被不安全地复用。 | Teardown 会取消 reader/writer 的 pending I/O、终止 child，给 reader 最多 500 ms，再独立给 writer 最多 500 ms，然后启动专用 `sonic-conpty-drain` 与 `sonic-conpty-close` helper。close helper 最多等待 2 秒。close timeout 会产生 caller 的 incomplete-close warning，并 detach 两个 helper。任一 helper spawn 失败会在该 helper 自己的路径记录 warning、返回同一个 incomplete result，因此也会产生 caller warning。若 close 完成，drainer 会再独立获得最多 2 秒来观察 EOF；drain timeout 会静默 detach。之后 teardown 执行另一个有界 child-exit/reap 检查，而不会永远阻塞 UI。 |
+| 本地输入所有者 | 命令面板、搜索、复制/READONLY 模式、输入法或键位消费了按键 |
+| 子程序 | 关闭了回显、画了其它内容，或没有输出 |
+| PTY 输入 | 消息过大、队列已满或 writer 已断开；应用会显示错误 |
+| 窗格进程 | PTY 启动失败，因此可见窗格没有工作线程 |
+| 帧收集 | 解析器或图像锁正忙；整帧被推迟 |
+| 渲染器 | 表面或图集恢复路径要求稍后重画 |
+| 缓存 | 复用了已有工作；可见结果不变 |
 
-pane 与 parser 消失后，后续 PTY byte 无法再修改其 grid。该 pane 先前已经排队的 redraw event
-只携带 `WindowId`：window 仍存在时，它可能无害地再请求一帧；window 已消失时，event-loop lookup
-会忽略过期 id。无论哪种情况，已关闭 pane 都无法再贡献 `PaneRender`。
+### 源码索引
 
-### 完整旅程与真实边界
-
-```mermaid
-flowchart TD
-    key["winit KeyboardInput：字符 A"]
-    encode["encode_logical → UTF-8 0x41"]
-    effect["AppIntent/AppEffect::PtyWrite"]
-    inputq["有界 PTY 输入队列"]
-    writer["sonic-pty-writer"]
-    child["PTY child：shell 或终端应用"]
-    echo["child-side 回显或应用重画"]
-    reader["sonic-pty-reader"]
-    outputq["有界 PTY 输出队列"]
-    worker["每窗格 VT worker"]
-    parser["Parser::advance / Performer"]
-    cell["Grid cell A + dirty row + revision"]
-    event["UserEvent::RequestRedraw"]
-    snapshot["一致的 PaneRender 快照"]
-    row["dirty-row 遍历 / row cache"]
-    font["FontStack：需要时 shape + rasterize"]
-    atlas["CPU GlyphAtlas + GlyphInstance"]
-    choice{"呈现路径"}
-    gpu["dirty atlas 上传 + wgpu retained frame"]
-    cpu["Windows CPU BGRA frame + GDI"]
-    pixels["已呈现的窗口像素"]
-
-    key --> encode --> effect --> inputq --> writer --> child
-    child --> echo --> reader --> outputq --> worker --> parser --> cell
-    cell --> event --> snapshot --> row --> font --> atlas --> choice
-    choice -- "GPU" --> gpu --> pixels
-    choice -- "Windows 软件" --> cpu --> pixels
-```
-
-### 为什么字母可能不会出现
-
-这条路线也能解释一些按下 `A` 却没有显示普通 `A` 的正常情况：
-
-| 停下或改变的位置 | 发生了什么 |
+| 步骤 | 主要路径 |
 | --- | --- |
-| Command palette、search、copy/READONLY 处理或 SonicTerm keymap action | 该所有者在 PTY 编码之前消费了按键 |
-| 输入法组字 | SonicTerm 等待提交文本，而不发送原始按键 |
-| READONLY/copy mode | 终端输入被有意阻止 |
-| 密码提示 | 子程序故意关闭可见回显 |
-| 编辑器或 TUI | 应用消费了 `A`，并输出自己的重画 |
-| PTY 输入队列已满或断开 | 写入被拒绝，并显示为通知 |
-| 重画时 parser 正忙 | 帧被推迟，直到所有窗格都能形成一致快照 |
-| row/glyph cache 已 warm | 工作被复用；可见结果仍然相同 |
-
-### 从哪里阅读源码
-
-| 步骤 | 当前源码 |
-| --- | --- |
-| 主窗口与拆出窗口的 keyboard/IME 路由 | `crates/sonicterm-app/src/app/{window_event,child_window}.rs`、`crates/sonicterm-ui/src/ime.rs` |
-| Palette/search/copy/READONLY/keymap 优先级 | `crates/sonicterm-app/src/app/{window_event,child_window,keymap_dispatch}.rs`、`crates/sonicterm-ui/src/copy_mode.rs` |
-| 按键到字节的编码与终端模式 snapshot | `crates/sonicterm-app/src/app/{key_encoding,spawn_pane,child_window}.rs` |
-| Broadcast receiver 选择与 fan-out | `crates/sonicterm-app/src/app/{mod,child_window}.rs`、`crates/sonicterm-ui/src/broadcast.rs` |
-| Intent/effect 转换 | `crates/sonicterm-app-core/src/{intent,effect,reducer,state_machine}.rs` |
-| 存活 pane 查找、有界 PTY 入队与拒绝通知 | `crates/sonicterm-app/src/app/{mod,event_loop}.rs` |
-| 原生 PTY/ConPTY 启动、queue、reader/writer 线程与 teardown | `crates/sonicterm-io/src/pty.rs` |
-| 主/子窗口 VT worker、reply worker 与 redraw 交接 | `crates/sonicterm-app/src/app/{spawn_pane,child_window,redraw_target,event_loop,tear_out}.rs` |
-| VT 字节解析、终端模式与 performer | `crates/sonicterm-vt/src/vt.rs` |
-| Cell 表示 | `crates/sonicterm-types/src/cell.rs` |
-| Cell 插入、光标/wrap 规则、content sequence、revision 与 dirty row | `crates/sonicterm-grid/src/grid.rs` |
-| 主/子窗口一致 frame 组装 | `crates/sonicterm-app/src/app/{window_event,child_window}.rs` |
-| Pane frame 边界 | `crates/sonicterm-render-model/src/pane_render.rs` |
-| Adapter 检测、render mode、damage、row walk、glyph instance 与 surface 恢复 | `crates/sonicterm-gpu/src/core.rs` |
-| Glyph 与背景 row cache | `crates/sonicterm-text/src/row_glyph_cache.rs`、`crates/sonicterm-gpu/src/row_quad_cache.rs` |
-| Font 配置、发现、shaping 与 rasterization | `crates/sonicterm-font-config/src/lib.rs`、`crates/sonicterm-engine/src/fontstack.rs`、`crates/sonicterm-font/src/{locator,shaper,rasterizer}/` |
-| CPU glyph atlas | `crates/sonicterm-text/src/glyph_atlas.rs` |
-| GPU atlas 上传与统一绘制 | `crates/sonicterm-gpu/src/{atlas_upload,wezterm_pipeline}.rs` |
-| Windows CPU 合成与 GDI present | `crates/sonicterm-gpu/src/software_windows.rs` |
-| Software-mode 配置与运行中 presenter 转换 | `crates/sonicterm-cfg/src/config.rs`、`crates/sonicterm-app/src/app/{event_loop,config_apply}.rs`、`crates/sonicterm-gpu/src/core.rs` |
+| 键盘与输入法路由 | `crates/sonicterm-app/src/app/{window_event,child_window}.rs` |
+| 按键编码 | `crates/sonicterm-app/src/app/key_encoding.rs` |
+| 意图/效果 PTY 边界 | `crates/sonicterm-app-core/src/{intent,effect,reducer,state_machine}.rs`、`crates/sonicterm-app/src/app/mod.rs` |
+| PTY 队列与线程 | `crates/sonicterm-io/src/pty.rs` |
+| VT 工作线程与重绘合并 | `crates/sonicterm-app/src/app/{spawn_pane,child_window,redraw_target}.rs` |
+| VT 解析 | `crates/sonicterm-vt/src/vt.rs` |
+| 单元格插入与脏行 | `crates/sonicterm-grid/src/grid.rs` |
+| 帧收集 | `crates/sonicterm-app/src/app/{window_event,child_window}.rs` |
+| 窗格帧类型 | `crates/sonicterm-render-model/src/pane_render.rs` |
+| 损伤区域、缓存、字形实例和呈现 | `crates/sonicterm-gpu/src/{core,row_quad_cache,software_windows}.rs` |
+| 字体 | `crates/sonicterm-engine/src/fontstack.rs`、`crates/sonicterm-font/src/` |
+| CPU 字形图集和行字形缓存 | `crates/sonicterm-text/src/{glyph_atlas,row_glyph_cache}.rs` |
