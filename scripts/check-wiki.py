@@ -215,6 +215,8 @@ def validate_crate_reference(
 
 def main() -> int:
     """Validate wiki layout, bilingual structure, links, navigation, and crates."""
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
     root = repository_root()
     errors: list[str] = []
     try:
