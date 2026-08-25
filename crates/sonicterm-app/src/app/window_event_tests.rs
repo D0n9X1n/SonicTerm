@@ -338,6 +338,24 @@ fn native_scrollbar_owns_only_its_right_gutter() {
 }
 
 #[test]
+fn keyboard_and_modifier_transitions_preserve_path_probe_authorization() {
+    // Holding Ctrl can emit repeated keyboard/modifier events; neither changes
+    // target identity, so main and child paths must retain the accepted probe.
+    let main_source = include_str!("window_event.rs").replace("\r\n", "\n");
+    let invalidation_start = main_source
+        .find("if matches!(\n            &event,")
+        .expect("path-hover invalidation match");
+    let invalidation_end = main_source[invalidation_start..]
+        .find("// Tear-out child windows")
+        .map(|offset| invalidation_start + offset)
+        .expect("end of path-hover invalidation match");
+    let invalidation_match = &main_source[invalidation_start..invalidation_end];
+    assert!(!invalidation_match.contains("WindowEvent::KeyboardInput"));
+    assert!(!main_source.contains("ws.path_probe.invalidate();"));
+    assert!(!include_str!("child_window.rs").contains("c.path_probe.invalidate();"));
+}
+
+#[test]
 fn main_and_child_no_button_paths_share_scrollbar_ownership() {
     // Both runtime paths must call the same gutter predicate so Always and Auto
     // scrollbar ownership cannot drift between main and torn-out windows.

@@ -350,7 +350,12 @@ impl App {
             // replacement content during that window. This mutates only the
             // normal window selection; copy-mode and search overlays are
             // independent state.
-            if invalidate_selection_for_content(&mut window.selection, pane_id, grid) {
+            if invalidate_selection_for_content(
+                &mut window.selection,
+                &mut window.select_anchor,
+                pane_id,
+                grid,
+            ) {
                 // When: invalidate_selection_for_content cleared the selection; the
                 // rows it covered no longer hold the text the user chose.
                 return;

@@ -30,6 +30,13 @@ pub enum SelectMode {
     Line,
 }
 
+/// Exact selected-cell identity bound to one screen-buffer incarnation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectionContentFingerprint {
+    screen_epoch: u64,
+    cells: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Selection {
     pub start: (u64, u16), // (abs_row, col)
@@ -64,7 +71,7 @@ pub struct Selection {
     /// `None` keeps legacy/headless constructors usable. Production mouse paths
     /// bind this from the live grid so same-value repaints survive while any
     /// character, style, hyperlink, wide-cell, or combining change invalidates.
-    pub content_fingerprint: Option<u64>,
+    pub content_fingerprint: Option<SelectionContentFingerprint>,
 }
 
 impl Selection {
@@ -487,7 +494,10 @@ pub fn word_bounds(chars: &[char], col: usize) -> (usize, usize) {
     (left, right)
 }
 
-fn selection_content_fingerprint(selection: &Selection, grid: &Grid) -> Option<u64> {
+fn selection_content_fingerprint(
+    selection: &Selection,
+    grid: &Grid,
+) -> Option<SelectionContentFingerprint> {
     let ((first_row, first_col), (last_row, last_col)) = selection.normalized();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     (last_row.saturating_sub(first_row), first_col, last_col).hash(&mut hasher);
@@ -507,7 +517,7 @@ fn selection_content_fingerprint(selection: &Selection, grid: &Grid) -> Option<u
             cell.hash(&mut hasher);
         }
     }
-    Some(hasher.finish())
+    Some(SelectionContentFingerprint { screen_epoch: grid.screen_epoch(), cells: hasher.finish() })
 }
 
 /// Whether a selection must be dropped because content changed underneath it.
@@ -523,11 +533,6 @@ fn selection_content_fingerprint(selection: &Selection, grid: &Grid) -> Option<u
 /// TUI repaint of a fixed row invalidates exactly that row.
 #[must_use]
 pub fn revalidate_selection(selection: &mut Selection, pane_id: u64, grid: &Grid) -> bool {
-    if selection.is_empty() {
-        // When: is_empty reports a bare point anchor, nothing is highlighted,
-        // so no revalidation verdict is needed.
-        return false;
-    }
     if selection.pane_id != Some(pane_id) || selection.on_alt_screen != grid.is_alt() {
         // When: pane_id or on_alt_screen no longer matches the grid, the rows
         // behind the selection are unrelated and it must be dropped.
@@ -547,6 +552,11 @@ pub fn revalidate_selection(selection: &mut Selection, pane_id: u64, grid: &Grid
         selection.start.0 -= evicted;
         selection.end.0 -= evicted;
         selection.scrollback_evicted = grid.scrollback_evicted();
+    }
+    if selection.is_empty() {
+        // When: `selection.is_empty()` remains true after identity and eviction
+        // updates, retain the rebased point anchor without hashing a highlight.
+        return false;
     }
 
     let ((first_row, _), (last_row, _)) = selection.normalized();

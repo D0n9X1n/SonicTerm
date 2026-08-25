@@ -74,7 +74,12 @@ fn run_invalidation(app: &mut App, window: WindowId, pane_id: u64) -> bool {
     let window = app.windows.get_mut(&window).unwrap();
     let pane = window.panes.get(&pane_id).unwrap();
     let parser = pane.parser.lock();
-    invalidate_selection_for_content(&mut window.selection, pane_id, parser.grid())
+    invalidate_selection_for_content(
+        &mut window.selection,
+        &mut window.select_anchor,
+        pane_id,
+        parser.grid(),
+    )
 }
 
 #[test]
@@ -278,6 +283,63 @@ fn successful_primary_copy_keeps_main_and_child_selection() {
         assert_eq!(app.__test_memory_clipboard().as_deref(), Some("p"));
         assert!(app.windows.get(&window).unwrap().selection.is_some());
         assert_eq!(pane_dirty_count(&app, window, pane), 0);
+    }
+}
+
+/// Revalidation rebases the active drag anchor before a later motion rebuilds the range.
+#[test]
+fn main_and_child_continue_dragging_from_rebased_anchor_after_history_eviction() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
+    let main = app.__test_main_window_id().expect("synthetic main window");
+
+    for (window, pane_id) in [(main, main_pane), (child, child_pane)] {
+        let selection = {
+            let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
+            let mut parser = pane.parser.lock();
+            let grid = parser.grid_mut();
+            grid.set_scrollback_limit(1);
+            grid.goto(0, 0);
+            grid.put_char('A', Color::Default, Color::Default, CellFlags::empty());
+            grid.goto(1, 0);
+            grid.put_char('B', Color::Default, Color::Default, CellFlags::empty());
+            grid.scroll_up(1);
+            Selection {
+                start: (1, 0),
+                end: (1, 0),
+                anchored: true,
+                pane_id: Some(pane_id),
+                content_seq: grid.content_seq(),
+                on_alt_screen: false,
+                scrollback_evicted: grid.scrollback_evicted(),
+                content_fingerprint: None,
+            }
+            .with_content_fingerprint(grid)
+        };
+        {
+            let state = app.windows.get_mut(&window).unwrap();
+            state.selection = Some(selection);
+            state.select_anchor = (1, 0);
+        }
+        {
+            let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
+            let mut parser = pane.parser.lock();
+            let grid = parser.grid_mut();
+            grid.goto(1, 0);
+            grid.put_char('C', Color::Default, Color::Default, CellFlags::empty());
+            grid.scroll_up(1);
+        }
+
+        assert!(!run_invalidation(&mut app, window, pane_id));
+        let anchor = app.windows.get(&window).unwrap().select_anchor;
+        assert_eq!(anchor, (0, 0));
+        let continued = if window == main {
+            app.cell_drag_selection_at(anchor, 0, 1)
+        } else {
+            app.windows.get(&window).unwrap().cell_drag_selection(anchor, 0, 1)
+        }
+        .expect("continued drag selection");
+        assert_eq!(continued.normalized().0, (0, 0));
     }
 }
 

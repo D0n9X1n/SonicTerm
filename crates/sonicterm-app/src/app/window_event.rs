@@ -357,8 +357,7 @@ impl App {
         }
         if matches!(
             &event,
-            WindowEvent::KeyboardInput { .. }
-                | WindowEvent::MouseWheel { .. }
+            WindowEvent::MouseWheel { .. }
                 | WindowEvent::Ime(_)
                 | WindowEvent::Resized(_)
                 | WindowEvent::ScaleFactorChanged { .. }
@@ -755,6 +754,7 @@ impl App {
                     {
                         invalidate_selection_for_content(
                             &mut ws.selection,
+                            &mut ws.select_anchor,
                             active_id,
                             guards[active_pos].1.grid(),
                         );
@@ -1309,10 +1309,9 @@ impl App {
             WindowEvent::ModifiersChanged(m) => {
                 if let Some(ws) = self.main_mut() {
                     ws.modifiers = m.state();
-                    ws.path_probe.invalidate();
                 }
-                // Modifier transitions receive a fresh probe epoch; live
-                // modifier state is still rechecked at click time.
+                // Modifier state changes activation without changing the probed
+                // target identity; click and redraw paths still revalidate it.
                 self.refresh_hovered_url();
                 if let Some(w) = self.main_window() {
                     w.request_redraw();

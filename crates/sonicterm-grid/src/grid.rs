@@ -175,6 +175,13 @@ pub struct Grid {
     /// ask which rows changed afterward, matching WezTerm's selection seqno
     /// policy without clearing on a blinking cursor or theme redraw.
     content_seq: u64,
+    /// Monotonic identity of the active primary or alternate screen incarnation.
+    ///
+    /// Every real screen transition advances it, including a complete
+    /// primary-to-alternate-to-primary round trip whose restored cells compare
+    /// equal. Selection fingerprints retain this value so buffer ABA cannot make
+    /// replacement screen identity look unchanged.
+    screen_epoch: u64,
     /// Last content sequence for each visible row. This follows row identity
     /// during primary-screen scrolling, where `scrollback_len()` advances with
     /// the text, but screen-position scrolls (alternate screen and DECSTBM
@@ -226,6 +233,7 @@ impl Grid {
             alt_screen: None,
             revision: 0,
             content_seq: 0,
+            screen_epoch: 0,
             row_content_seq: vec![0; rows as usize].into(),
             scrollback_evicted: 0,
             rows_since_budget_check: 0,
@@ -350,6 +358,12 @@ impl Grid {
     #[inline]
     pub fn content_seq(&self) -> u64 {
         self.content_seq
+    }
+
+    /// Current primary/alternate screen incarnation identity.
+    #[inline]
+    pub fn screen_epoch(&self) -> u64 {
+        self.screen_epoch
     }
 
     /// Visible row indices whose cell content changed after `seq`.
@@ -485,6 +499,7 @@ impl Grid {
             alt_screen: None,
             revision: 0,
             content_seq: self.content_seq,
+            screen_epoch: self.screen_epoch,
             row_content_seq: std::mem::replace(
                 &mut self.row_content_seq,
                 vec![self.content_seq; rows as usize].into(),
@@ -497,6 +512,7 @@ impl Grid {
             pending_wrap: false,
         };
         self.alt_screen = Some(Box::new(saved));
+        self.screen_epoch = self.screen_epoch.saturating_add(1);
         self.scrollback_limit = 0;
         self.enforce_alt_memory_budget();
         self.enforce_retained_capacity_budget();
@@ -515,6 +531,7 @@ impl Grid {
             return;
         };
         let saved = *saved;
+        self.screen_epoch = self.screen_epoch.saturating_add(1);
         self.scrollback_evicted = self.scrollback_evicted.saturating_add(saved.scrollback_evicted);
         let content_seq = self.content_seq.max(saved.content_seq);
         self.visible = saved.visible;

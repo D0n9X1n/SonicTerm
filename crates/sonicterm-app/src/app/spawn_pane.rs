@@ -61,20 +61,16 @@ pub(super) fn osc52_clipboard_write_event(selection: char, data: &str) -> Option
         // When: `selection` is not clipboard `c`, or `data` is a query/empty, refuse the unsupported operation.
         return None;
     }
-    let estimated = base64::decoded_len_estimate(data.len());
-    if estimated > MAX_OSC52_CLIPBOARD_BYTES {
-        // When: `estimated` exceeds the decoded clipboard cap, reject before allocating the output buffer.
+    let max_encoded = MAX_OSC52_CLIPBOARD_BYTES.div_ceil(3) * 4;
+    if data.len() > max_encoded {
+        // When: `data` cannot encode a payload within the decoded cap, reject before allocating the output buffer.
         return None;
     }
-    let mut decoded = vec![0u8; estimated];
+    let mut decoded = vec![0u8; MAX_OSC52_CLIPBOARD_BYTES];
     let written = base64::engine::general_purpose::STANDARD
         .decode_slice(data.as_bytes(), &mut decoded)
         .ok()?;
     decoded.truncate(written);
-    if decoded.len() > MAX_OSC52_CLIPBOARD_BYTES {
-        // When: `decoded` exceeds the hard cap despite the conservative estimate, reject before UTF-8 conversion.
-        return None;
-    }
     let text = String::from_utf8(decoded).ok()?;
     (!text.is_empty()).then_some(UserEvent::ClipboardWrite { text })
 }

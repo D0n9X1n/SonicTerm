@@ -1528,8 +1528,7 @@ pub fn mark_all_panes_dirty(panes: &HashMap<u64, PaneState>) {
     }
 }
 
-/// Clear the authoritative window selection when its alternate-screen content
-/// is no longer the content the user selected.
+/// Revalidate the authoritative selection and rebase its active drag anchor.
 ///
 /// Callers already hold the active pane's parser guard during frame assembly;
 /// accepting `&Grid` avoids re-locking that parser and the AB-BA deadlock such a
@@ -1538,14 +1537,25 @@ pub fn mark_all_panes_dirty(panes: &HashMap<u64, PaneState>) {
 #[doc(hidden)]
 pub fn invalidate_selection_for_content(
     selection: &mut Option<Selection>,
+    select_anchor: &mut (u64, u16),
     pane_id: u64,
     grid: &Grid,
 ) -> bool {
+    let (anchor_belongs_to_selection, previous_evicted) =
+        selection.as_ref().map_or((false, grid.scrollback_evicted()), |selection| {
+            (selection.contains(select_anchor.0, select_anchor.1), selection.scrollback_evicted)
+        });
     let should_clear = selection.as_mut().is_some_and(|selection| {
         sonicterm_ui::selection::revalidate_selection(selection, pane_id, grid)
     });
     if should_clear {
         *selection = None;
+    } else if anchor_belongs_to_selection {
+        // When: `anchor_belongs_to_selection` is true, apply the selection endpoints' scrollback rebase to its drag anchor.
+        let rebased_rows = selection
+            .as_ref()
+            .map_or(0, |selection| selection.scrollback_evicted.saturating_sub(previous_evicted));
+        select_anchor.0 = select_anchor.0.saturating_sub(rebased_rows);
     }
     should_clear
 }

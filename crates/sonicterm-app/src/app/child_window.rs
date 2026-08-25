@@ -382,7 +382,6 @@ impl App {
             WindowEvent::ModifiersChanged(m) => {
                 if let Some(c) = self.windows.get_mut(&win_id) {
                     c.modifiers = m.state();
-                    c.path_probe.invalidate();
                 }
                 self.refresh_hovered_url_in_child(win_id);
             }
@@ -626,6 +625,7 @@ impl App {
                         .expect("active pane guard collected above");
                     invalidate_selection_for_content(
                         &mut child.selection,
+                        &mut child.select_anchor,
                         active_id,
                         guards[active_pos].1.grid(),
                     );

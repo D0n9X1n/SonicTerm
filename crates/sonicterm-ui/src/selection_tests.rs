@@ -432,6 +432,19 @@ fn same_value_repaint_preserves_selection() {
     assert_eq!(selection.content_seq, grid.content_seq());
 }
 
+/// A complete primary-to-alternate-to-primary round trip replaces buffer identity even when restored cells match.
+#[test]
+fn screen_buffer_round_trip_invalidates_without_intermediate_revalidation() {
+    let mut grid = Grid::new(12, 12);
+    write_row(&mut grid, 4, 'x');
+    let mut selection = anchored_selection(&grid, 4, 4);
+
+    grid.enter_alt_screen();
+    grid.leave_alt_screen();
+
+    assert!(revalidate_selection(&mut selection, PANE_ID, &grid));
+}
+
 /// Every logical cell-identity class invalidates a selected range when changed.
 #[test]
 fn character_style_hyperlink_wide_and_combining_changes_invalidate_selection() {
@@ -542,6 +555,27 @@ fn a_bare_point_anchor_is_not_invalidated_as_a_selection() {
         !revalidate_selection(&mut selection, PANE_ID, &grid),
         "a click point that release handling treats as empty must not become a content selection"
     );
+}
+
+/// Scrollback eviction rebases a point anchor before its first drag motion.
+#[test]
+fn bare_primary_point_rebases_before_selection_extension() {
+    let mut grid = Grid::new(4, 2);
+    grid.set_scrollback_limit(1);
+    write_row(&mut grid, 0, 'A');
+    write_row(&mut grid, 1, 'B');
+    grid.scroll_up(1);
+    let mut selection = Selection::new(1, 0).with_content_state(
+        PANE_ID,
+        grid.content_seq(),
+        false,
+        grid.scrollback_evicted(),
+    );
+    write_row(&mut grid, 1, 'C');
+    grid.scroll_up(1);
+
+    assert!(!revalidate_selection(&mut selection, PANE_ID, &grid));
+    assert_eq!(selection.start, (0, 0));
 }
 
 #[test]

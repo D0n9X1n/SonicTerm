@@ -27,6 +27,21 @@ fn osc52_clipboard_write_decodes_bounded_utf8() {
     );
 }
 
+/// The documented OSC 52 cap accepts its exact byte count and rejects the next byte.
+#[test]
+fn osc52_clipboard_write_enforces_actual_decoded_boundary() {
+    let exact = vec![b'x'; MAX_OSC52_CLIPBOARD_BYTES];
+    let exact_encoded = base64::engine::general_purpose::STANDARD.encode(&exact);
+    let accepted = osc52_clipboard_write_event('c', &exact_encoded);
+    assert!(
+        matches!(accepted, Some(UserEvent::ClipboardWrite { text }) if text.len() == exact.len())
+    );
+
+    let oversized = vec![b'x'; MAX_OSC52_CLIPBOARD_BYTES + 1];
+    let oversized_encoded = base64::engine::general_purpose::STANDARD.encode(oversized);
+    assert_eq!(osc52_clipboard_write_event('c', &oversized_encoded), None);
+}
+
 /// Queries, unsupported targets, malformed data, and oversized writes fail closed.
 #[test]
 fn osc52_clipboard_write_rejects_unsupported_or_unsafe_payloads() {
