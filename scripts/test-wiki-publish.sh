@@ -296,7 +296,7 @@ assert_checker_rejects non-ascii-page 'wiki/坏页.md:' mutate_non_ascii_page
 assert_checker_rejects md-link 'wiki/Usage.md:' mutate_md_link
 assert_checker_rejects md-anchor-link 'cross-page link must omit .md' mutate_md_anchor_link
 assert_checker_rejects unknown-link 'wiki/Usage.md:' mutate_unknown_link
-assert_checker_rejects english-fence-before-chinese-link 'wiki/Usage.md:249:' mutate_english_fence_before_chinese_link
+assert_checker_rejects english-fence-before-chinese-link 'cross-page link target does not exist: Missing-Page' mutate_english_fence_before_chinese_link
 assert_checker_rejects external-home-english-link 'wiki/Home.md:' mutate_external_home_english_link
 assert_checker_rejects missing-home-english-link 'wiki/Home.md:' mutate_missing_home_english_link
 assert_checker_rejects missing-home-chinese-link 'wiki/Home.md:' mutate_missing_home_chinese_link

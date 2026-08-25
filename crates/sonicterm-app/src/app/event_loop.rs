@@ -315,6 +315,9 @@ impl App {
             UserEvent::ScriptDraftRejected { message } => {
                 self.handle_script_draft_rejected(message);
             }
+            UserEvent::ClipboardWrite { text } => {
+                self.handle_clipboard_write(text);
+            }
             UserEvent::PathProbeFinished(result) => {
                 self.handle_path_probe_finished(result);
             }
@@ -347,6 +350,10 @@ impl App {
         // its new window before cross-window drag-residue cleanup
         // runs. Ordering is the entire point — do not move above.
         self.drain_pending_os_teardown();
+    }
+
+    pub(super) fn handle_clipboard_write(&mut self, text: String) {
+        self.set_clipboard_text(text);
     }
 
     pub(super) fn handle_script_draft_rejected(&mut self, message: String) {
@@ -609,6 +616,7 @@ impl App {
             }
         }
         renderer.set_titlebar_inset(0.0);
+        let _ = super::apply_terminal_window_minimum(&window, &mut renderer);
         // Apply the user's `tab_close_button_color` from sonicterm.toml
         // BEFORE the first frame so a custom always-visible × shows
         // up on the very first paint, not after a config edit.

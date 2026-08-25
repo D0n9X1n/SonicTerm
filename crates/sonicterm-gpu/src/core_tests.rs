@@ -2046,6 +2046,7 @@ fn selection_for_rows(start: u64, end: u64) -> Selection {
         content_seq: 0,
         on_alt_screen: false,
         scrollback_evicted: 0,
+        content_fingerprint: None,
     }
 }
 

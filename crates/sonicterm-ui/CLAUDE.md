@@ -25,6 +25,8 @@ cargo test -p sonicterm-ui
   ignored.
 - READONLY UI must align with app-level behavior: terminal input blocked,
   search and safe navigation shortcuts allowed.
+- Selection validity fingerprints exact selected cells. Same-value repaints must
+  survive; character, style, hyperlink, wide-cell, or combining changes must not.
 - Keep localized labels and command labels in sync when adding actions.
 
 ## Cross-references

@@ -9,6 +9,8 @@
 //! (via `viewport_row_to_abs`) before building/extending a `Selection`, and
 //! the renderer maps the absolute row back to a viewport row for drawing.
 
+use std::hash::{Hash, Hasher};
+
 use sonicterm_grid::grid::{CellFlags, Grid, Row};
 
 /// The granularity a drag extends at, set on press by the click count.
@@ -26,6 +28,13 @@ pub enum SelectMode {
     Word,
     /// Triple-click: drag extends by whole rows, keeping the anchor row.
     Line,
+}
+
+/// Exact selected-cell identity bound to one screen-buffer incarnation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectionContentFingerprint {
+    screen_epoch: u64,
+    cells: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +66,12 @@ pub struct Selection {
     /// Number of oldest scrollback rows already removed when the endpoints were
     /// recorded. A later eviction rebases surviving absolute rows by the delta.
     pub scrollback_evicted: u64,
+    /// Hash of the exact selected cell range at the latest creation/extension.
+    ///
+    /// `None` keeps legacy/headless constructors usable. Production mouse paths
+    /// bind this from the live grid so same-value repaints survive while any
+    /// character, style, hyperlink, wide-cell, or combining change invalidates.
+    pub content_fingerprint: Option<SelectionContentFingerprint>,
 }
 
 impl Selection {
@@ -71,6 +86,7 @@ impl Selection {
             content_seq: 0,
             on_alt_screen: false,
             scrollback_evicted: 0,
+            content_fingerprint: None,
         }
     }
 
@@ -87,6 +103,13 @@ impl Selection {
         self.content_seq = content_seq;
         self.on_alt_screen = on_alt_screen;
         self.scrollback_evicted = scrollback_evicted;
+        self
+    }
+
+    /// Bind the exact selected-cell fingerprint from `grid` to this selection.
+    #[must_use]
+    pub fn with_content_fingerprint(mut self, grid: &Grid) -> Self {
+        self.content_fingerprint = selection_content_fingerprint(&self, grid);
         self
     }
 
@@ -190,7 +213,9 @@ impl Selection {
             content_seq: grid.content_seq(),
             on_alt_screen: grid.is_alt(),
             scrollback_evicted: grid.scrollback_evicted(),
+            content_fingerprint: None,
         }
+        .with_content_fingerprint(grid)
     }
 
     /// Select the whole row under `abs_row` — the triple-click behavior.
@@ -210,7 +235,9 @@ impl Selection {
             content_seq: grid.content_seq(),
             on_alt_screen: grid.is_alt(),
             scrollback_evicted: grid.scrollback_evicted(),
+            content_fingerprint: None,
         }
+        .with_content_fingerprint(grid)
     }
 
     /// Word-mode drag (WezTerm `SelectionMode::Word`): the selection spans
@@ -242,7 +269,9 @@ impl Selection {
             content_seq: grid.content_seq(),
             on_alt_screen: grid.is_alt(),
             scrollback_evicted: grid.scrollback_evicted(),
+            content_fingerprint: None,
         }
+        .with_content_fingerprint(grid)
     }
 
     /// Line-mode drag (WezTerm `SelectionMode::Line`): the selection spans
@@ -267,7 +296,9 @@ impl Selection {
             content_seq: grid.content_seq(),
             on_alt_screen: grid.is_alt(),
             scrollback_evicted: grid.scrollback_evicted(),
+            content_fingerprint: None,
         }
+        .with_content_fingerprint(grid)
     }
 
     /// Serialize the covered cells from `grid`. Rows are scrollback-ABSOLUTE
@@ -463,6 +494,32 @@ pub fn word_bounds(chars: &[char], col: usize) -> (usize, usize) {
     (left, right)
 }
 
+fn selection_content_fingerprint(
+    selection: &Selection,
+    grid: &Grid,
+) -> Option<SelectionContentFingerprint> {
+    let ((first_row, first_col), (last_row, last_col)) = selection.normalized();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (last_row.saturating_sub(first_row), first_col, last_col).hash(&mut hasher);
+    for row_index in first_row..=last_row {
+        let row = grid.row_at_abs(row_index)?;
+        // When: `row_index` reaches either selection boundary, use that boundary's column; intermediate rows use their full width.
+        let start = if row_index == first_row { usize::from(first_col) } else { 0 };
+        let end = if row_index == last_row {
+            usize::from(last_col).saturating_add(1)
+        } else {
+            // When: `row_index != last_row`, hash the full intermediate-row width.
+            row.len()
+        };
+        start.min(row.len()).hash(&mut hasher);
+        end.min(row.len()).hash(&mut hasher);
+        for cell in row.get_range(start.min(row.len()), end.min(row.len())) {
+            cell.hash(&mut hasher);
+        }
+    }
+    Some(SelectionContentFingerprint { screen_epoch: grid.screen_epoch(), cells: hasher.finish() })
+}
+
 /// Whether a selection must be dropped because content changed underneath it.
 ///
 /// Mirrors WezTerm's changed-since-selection rule: compare only rows whose
@@ -476,11 +533,6 @@ pub fn word_bounds(chars: &[char], col: usize) -> (usize, usize) {
 /// TUI repaint of a fixed row invalidates exactly that row.
 #[must_use]
 pub fn revalidate_selection(selection: &mut Selection, pane_id: u64, grid: &Grid) -> bool {
-    if selection.is_empty() {
-        // When: is_empty reports a bare point anchor, nothing is highlighted,
-        // so no revalidation verdict is needed.
-        return false;
-    }
     if selection.pane_id != Some(pane_id) || selection.on_alt_screen != grid.is_alt() {
         // When: pane_id or on_alt_screen no longer matches the grid, the rows
         // behind the selection are unrelated and it must be dropped.
@@ -501,14 +553,31 @@ pub fn revalidate_selection(selection: &mut Selection, pane_id: u64, grid: &Grid
         selection.end.0 -= evicted;
         selection.scrollback_evicted = grid.scrollback_evicted();
     }
+    if selection.is_empty() {
+        // When: `selection.is_empty()` remains true after identity and eviction
+        // updates, retain the rebased point anchor without hashing a highlight.
+        return false;
+    }
 
     let ((first_row, _), (last_row, _)) = selection.normalized();
     let live_top = grid.scrollback_len() as u64;
-    grid.scrollback_rows_changed_since(selection.content_seq)
+    let intersects_changed_row = grid
+        .scrollback_rows_changed_since(selection.content_seq)
         .chain(
             grid.visible_rows_changed_since(selection.content_seq).map(|row| live_top + row as u64),
         )
-        .any(|row| row >= first_row && row <= last_row)
+        .any(|row| row >= first_row && row <= last_row);
+    if !intersects_changed_row {
+        // When: `intersects_changed_row` is false, avoid hashing untouched selected cells.
+        return false;
+    }
+    match selection.content_fingerprint {
+        Some(expected) if selection_content_fingerprint(selection, grid) == Some(expected) => {
+            selection.content_seq = grid.content_seq();
+            false
+        }
+        Some(_) | None => true,
+    }
 }
 
 #[cfg(test)]

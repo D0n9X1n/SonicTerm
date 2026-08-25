@@ -20,7 +20,8 @@ cargo test -p sonicterm-vt
   background, inverse, underline, or hyperlink data.
 - Parser changes affect rendering and input semantics; add targeted tests
   for escape-sequence regressions.
-- Keep PTY writes outside parser/grid locks.
+- Keep PTY writes outside parser/grid locks. OSC 52 remains a typed host event;
+  native clipboard policy and decoding belong above the parser.
 - Preserve OSC 7 authority separately from its decoded path. Tab titles may use
   the permissive path, but relative local-path authorization must use the strict
   host-aware snapshot.

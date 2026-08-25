@@ -164,8 +164,8 @@ impl App {
         }
         let real_sf = window_dpi(window);
         renderer.force_rebuild_for_scale(real_sf);
-        let real_inner = window.inner_size();
-        renderer.try_resize(real_inner.width.max(1), real_inner.height.max(1))
+        let target = super::apply_terminal_window_minimum(window, renderer);
+        renderer.try_resize(target.width.max(1), target.height.max(1))
     }
 
     pub(super) fn warm_window_pool_maintain(&mut self, el: &ActiveEventLoop) {

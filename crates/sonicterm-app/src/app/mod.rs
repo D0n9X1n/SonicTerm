@@ -260,6 +260,64 @@ pub const LINUX_INSTANCE_NAME: &str = "sonicterm";
 /// to a single click.
 pub const MULTI_CLICK_MS: u128 = 400;
 
+/// Hard minimum terminal content width in cells for every native window.
+pub const MIN_WINDOW_COLS: u16 = 30;
+/// Hard minimum terminal content height in cells for every native window.
+pub const MIN_WINDOW_ROWS: u16 = 10;
+
+/// Compute the physical inner-window floor that preserves a 30×10 terminal grid.
+#[must_use]
+pub fn minimum_terminal_inner_size(
+    cell_w: f32,
+    cell_h: f32,
+    padding_left: f32,
+    padding_right: f32,
+    top_inset: f32,
+    bottom_inset: f32,
+    padding_bottom: f32,
+) -> winit::dpi::PhysicalSize<u32> {
+    let width = (f32::from(MIN_WINDOW_COLS) * cell_w + padding_left + padding_right).ceil();
+    let height =
+        (f32::from(MIN_WINDOW_ROWS) * cell_h + top_inset + bottom_inset + padding_bottom).ceil();
+    winit::dpi::PhysicalSize::new(width.max(1.0) as u32, height.max(1.0) as u32)
+}
+
+/// Refresh one native window's minimum from its live renderer geometry.
+pub fn apply_terminal_window_minimum(
+    window: &Window,
+    renderer: &mut GpuRenderer,
+) -> winit::dpi::PhysicalSize<u32> {
+    let (cell_w, cell_h) = renderer.cell_size();
+    let minimum = minimum_terminal_inner_size(
+        cell_w,
+        cell_h,
+        renderer.padding_left_px(),
+        renderer.padding_right_px(),
+        renderer.top_inset(),
+        renderer.bottom_inset(),
+        renderer.padding_bottom_px(),
+    );
+    window.set_min_inner_size(Some(minimum));
+    let current = window.inner_size();
+    let target = winit::dpi::PhysicalSize::new(
+        current.width.max(minimum.width),
+        current.height.max(minimum.height),
+    );
+    if target != current {
+        // When: `target != current`, grow the undersized axes without shrinking the others.
+        let _ = window.request_inner_size(target);
+        let _ = renderer.try_resize(target.width, target.height);
+    }
+    target
+}
+
+fn apply_window_state_minimum(window: &mut WindowState) {
+    if let (Some(native), Some(renderer)) = (window.window.as_ref(), window.renderer.as_mut()) {
+        // When: both native window and renderer exist, refresh their shared minimum geometry.
+        let _ = apply_terminal_window_minimum(native, renderer);
+    }
+}
+
 /// Multi-click counter. Returns the new click count (1, 2, 3, then wraps
 /// back to 1 after a triple). A click counts as a continuation when it
 /// lands on the same cell within the multi-click interval; otherwise the
@@ -1070,6 +1128,33 @@ impl WindowState {
         sel
     }
 
+    /// Cell-mode drag for this window's active pane with an exact content fingerprint.
+    pub fn cell_drag_selection(
+        &self,
+        anchor: (u64, u16),
+        cursor_viewport_row: u16,
+        col: u16,
+    ) -> Option<Selection> {
+        let pane_id = self.tab_states.get(self.tabs.active_index()).map(|st| st.active_pane)?;
+        let pane = self.panes.get(&pane_id)?;
+        let guard = pane.parser.try_lock()?;
+        let grid = guard.grid();
+        let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
+        let cursor_abs = view_top + u64::from(cursor_viewport_row);
+        let mut selection = Selection::new(anchor.0, anchor.1);
+        selection.extend(cursor_abs, col);
+        let selection = selection
+            .with_content_state(
+                pane_id,
+                grid.content_seq(),
+                grid.is_alt(),
+                grid.scrollback_evicted(),
+            )
+            .with_content_fingerprint(grid);
+        drop(guard);
+        Some(selection)
+    }
+
     /// Word-mode drag for THIS window's active pane: union of the word at the
     /// scrollback-ABSOLUTE `anchor` cell and the word at the cursor cell.
     /// `cursor_viewport_row` is converted to an absolute row inside the same
@@ -1443,8 +1528,7 @@ pub fn mark_all_panes_dirty(panes: &HashMap<u64, PaneState>) {
     }
 }
 
-/// Clear the authoritative window selection when its alternate-screen content
-/// is no longer the content the user selected.
+/// Revalidate the authoritative selection and rebase its active drag anchor.
 ///
 /// Callers already hold the active pane's parser guard during frame assembly;
 /// accepting `&Grid` avoids re-locking that parser and the AB-BA deadlock such a
@@ -1453,14 +1537,25 @@ pub fn mark_all_panes_dirty(panes: &HashMap<u64, PaneState>) {
 #[doc(hidden)]
 pub fn invalidate_selection_for_content(
     selection: &mut Option<Selection>,
+    select_anchor: &mut (u64, u16),
     pane_id: u64,
     grid: &Grid,
 ) -> bool {
+    let (anchor_belongs_to_selection, previous_evicted) =
+        selection.as_ref().map_or((false, grid.scrollback_evicted()), |selection| {
+            (selection.contains(select_anchor.0, select_anchor.1), selection.scrollback_evicted)
+        });
     let should_clear = selection.as_mut().is_some_and(|selection| {
         sonicterm_ui::selection::revalidate_selection(selection, pane_id, grid)
     });
     if should_clear {
         *selection = None;
+    } else if anchor_belongs_to_selection {
+        // When: `anchor_belongs_to_selection` is true, apply the selection endpoints' scrollback rebase to its drag anchor.
+        let rebased_rows = selection
+            .as_ref()
+            .map_or(0, |selection| selection.scrollback_evicted.saturating_sub(previous_evicted));
+        select_anchor.0 = select_anchor.0.saturating_sub(rebased_rows);
     }
     should_clear
 }
@@ -1587,6 +1682,14 @@ pub enum UserEvent {
     ScriptDraftRejected {
         /// User-facing explanation of why no draft was inserted.
         message: String,
+    },
+    /// A validated OSC 52 clipboard write reached the event-loop thread.
+    ///
+    /// The VT worker decodes and bounds the payload before constructing this
+    /// event; native clipboard access remains confined to the app thread.
+    ClipboardWrite {
+        /// UTF-8 text requested by the terminal application.
+        text: String,
     },
     /// A local-target openability probe completed off the event-loop thread.
     PathProbeFinished(path_target::PathProbeResult),

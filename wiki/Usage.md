@@ -87,9 +87,38 @@ lasts until release.
 Use the platform copy shortcut after selecting. A successful explicit copy on
 the alternate screen clears that selection and removes its highlight. A failed
 clipboard write leaves a still-valid selection in place so you can retry. A
-primary-screen selection remains after a successful copy. If the selected cells
-changed before the copy, SonicTerm clears the stale selection and does not copy
-replacement text.
+primary-screen selection remains after a successful copy. Repainting selected
+cells to the same complete character/style/hyperlink/wide/combining identity
+keeps the selection; an actual selected-cell change clears it before copy.
+Terminal applications may also write UTF-8 text through OSC 52 target `c` up to
+512 KiB. Clipboard reads/queries, malformed Base64, other selection targets, and
+oversized writes are ignored.
+
+#### Copilot CLI inside rmux
+
+Copilot CLI uses mouse tracking for transcript selection and for scrolling while
+a drag reaches an edge. When it runs inside rmux, leave rmux's standard
+conditional pane bindings in place so a mouse-aware nested application receives
+the complete press, drag, release, and wheel stream:
+
+```tmux
+set -g mouse on
+bind -n MouseDown1Pane { select-pane -t=; send -M }
+bind -n MouseDrag1Pane { if -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' { send -M } { copy-mode -M } }
+set -s set-clipboard on
+```
+
+With these settings, Copilot owns selection and can extend it through its virtual
+scrolling transcript. rmux relays Copilot's OSC 52 clipboard write to SonicTerm,
+which writes it to the native clipboard. `set-clipboard on` trusts programs in
+rmux panes to replace that clipboard; keep rmux's safer default if pane output is
+not trusted.
+
+Do not force every `MouseDrag1Pane` into rmux `copy-mode -M` for this workflow.
+That makes rmux, rather than Copilot, own the drag and wheel; scrolling then walks
+rmux history outside Copilot's live alternate screen. A Shift-drag remains the
+SonicTerm-local fallback, but it can select only the cells currently rendered by
+SonicTerm and cannot drive Copilot's virtual transcript scrolling.
 
 READONLY mode blocks terminal input while you inspect history. Arrow keys or
 `h/j/k/l` move its reading cursor; `w/b`, `0/$`, and `g` / `G` move by word, line, and buffer. Press `Escape` to exit. READONLY does not create a text
@@ -102,7 +131,9 @@ controls and whitelist.
 Hold `Cmd` on macOS or `Ctrl` on Windows and Linux while pointing at a target.
 A valid target becomes underlined; click it to open. OSC 8 links and plain-text
 `http://`, `https://`, `mailto:`, and `file://` URIs take priority over raw
-filesystem detection.
+filesystem detection. Unrelated terminal output and same-value repaints do not
+blink an unchanged target; changing the pointed row, target, CWD, viewport, or
+openability identity revokes authorization and requires a fresh probe.
 
 Raw local targets include:
 
@@ -256,8 +287,34 @@ Gesture owner 在第一次按下鼠标时确定，并保持到松开。
 
 选好后使用当前平台的复制快捷键。在 alternate screen 中，显式复制成功后会清除
 该选区并移除高亮。剪贴板写入失败时，只要选区仍有效，它就会保留，方便重试。
-Primary screen 中复制成功后，选区仍保留。如果复制前所选 cell 已变化，SonicTerm
-会清除过期选区，不会复制替换后的文字。
+Primary screen 中复制成功后，选区仍保留。若选中 cell 只是按完全相同的字符、style、
+hyperlink、宽字符结构和组合字符重新绘制，选区会保留；实际 cell identity 改变时，
+SonicTerm 会在复制前清除它。终端程序也可通过 OSC 52 的 `c` target 写入最多 512 KiB
+的 UTF-8 文字。剪贴板读取/查询、格式错误的 Base64、其它 selection target 和超限写入
+都会被忽略。
+
+#### 在 rmux 中运行 Copilot CLI
+
+Copilot CLI 使用 mouse tracking 选择会话文字，并在拖动到边缘时滚动内容。它在 rmux
+中运行时，应保留 rmux 的标准条件式 pane 绑定，让支持鼠标的内层程序收到完整的按下、
+drag、松开与 wheel 事件流：
+
+```tmux
+set -g mouse on
+bind -n MouseDown1Pane { select-pane -t=; send -M }
+bind -n MouseDrag1Pane { if -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' { send -M } { copy-mode -M } }
+set -s set-clipboard on
+```
+
+这些设置让 Copilot 持有选区，并可跨其虚拟滚动会话继续扩展。rmux 会把 Copilot 的
+OSC 52 剪贴板写入转发给 SonicTerm，再由 SonicTerm 写入原生剪贴板。
+`set-clipboard on` 也表示信任 rmux pane 内的程序改写剪贴板；若不信任 pane 输出，
+应保留 rmux 更安全的默认值。
+
+此工作流不要强制所有 `MouseDrag1Pane` 进入 rmux `copy-mode -M`。否则 drag 与 wheel
+会归 rmux，而不是 Copilot；滚动会进入 Copilot live alternate screen 之外的 rmux
+history。Shift-drag 仍可作为 SonicTerm 本地选区后备，但它只能选择 SonicTerm 当前已经
+绘制的 cell，不能驱动 Copilot 的虚拟会话滚动。
 
 READONLY 模式会在查看历史记录时阻止终端输入。方向键或 `h/j/k/l` 移动阅读光标；
 `w/b`、`0/$`、`g` / `G` 分别按单词、行和 buffer 移动。按 `Escape`
@@ -268,7 +325,9 @@ READONLY 模式会在查看历史记录时阻止终端输入。方向键或 `h/j
 
 鼠标指向目标时，macOS 按住 `Cmd`，Windows 和 Linux 按住 `Ctrl`。有效目标会显示
 下划线；点击即可打开。OSC 8 link 和普通文字中的 `http://`、`https://`、
-`mailto:`、`file://` URI 优先于原始文件系统检测。
+`mailto:`、`file://` URI 优先于原始文件系统检测。无关终端输出和同值重绘不会让
+未变化的目标闪烁；pointed row、target、CWD、viewport 或可打开 identity 改变时，
+授权会被撤销并重新 probe。
 
 原始本地目标包括：
 

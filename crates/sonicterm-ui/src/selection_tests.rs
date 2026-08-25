@@ -223,6 +223,7 @@ fn word_at_single_char_word_is_not_empty() {
     assert_eq!(sel.end, (0, 0));
     assert!(sel.anchored);
     assert!(!sel.is_empty());
+    assert!(sel.content_fingerprint.is_some());
     assert_eq!(sel.as_text(&grid), "x");
 }
 
@@ -280,6 +281,7 @@ fn multiline_copy_omits_whitespace_separated_right_edge_frame_glyphs() {
         content_seq: 0,
         on_alt_screen: false,
         scrollback_evicted: 0,
+        content_fingerprint: None,
     };
 
     assert_eq!(selection.as_text(&grid), "[Environment]::Set(\n    \"VALUE\",\n)");
@@ -306,6 +308,7 @@ fn partial_final_row_selection_omits_coherent_right_edge_frame() {
         content_seq: 0,
         on_alt_screen: false,
         scrollback_evicted: 0,
+        content_fingerprint: None,
     };
 
     assert_eq!(selection.as_text(&grid), "first\nmiddle\nlast");
@@ -361,6 +364,7 @@ fn as_text_spans_scrollback_into_live_region() {
         content_seq: 0,
         on_alt_screen: false,
         scrollback_evicted: 0,
+        content_fingerprint: None,
     };
     assert_eq!(sel.as_text(&grid), "alpha beta\ngamma delta");
 }
@@ -378,6 +382,7 @@ fn as_text_stops_at_unavailable_absolute_row() {
         content_seq: 0,
         on_alt_screen: false,
         scrollback_evicted: 0,
+        content_fingerprint: None,
     };
     assert_eq!(sel.as_text(&grid), "only line");
 }
@@ -401,12 +406,62 @@ fn anchored_selection(grid: &Grid, start_row: u64, end_row: u64) -> Selection {
         content_seq: grid.content_seq(),
         on_alt_screen: grid.is_alt(),
         scrollback_evicted: grid.scrollback_evicted(),
+        content_fingerprint: None,
     }
+    .with_content_fingerprint(grid)
 }
 
 fn write_row(grid: &mut Grid, row: u16, ch: char) {
     grid.goto(row, 0);
     grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+}
+
+/// Repainting selected cells to the same complete value preserves the selection.
+#[test]
+fn same_value_repaint_preserves_selection() {
+    let mut grid = alt_grid();
+    write_row(&mut grid, 4, 'x');
+    let mut selection = anchored_selection(&grid, 4, 4);
+    let before = selection.content_seq;
+
+    let same = grid.row(4)[0].clone();
+    grid.row_mut(4)[0] = same;
+
+    assert!(grid.content_seq() > before);
+    assert!(!revalidate_selection(&mut selection, PANE_ID, &grid));
+    assert_eq!(selection.content_seq, grid.content_seq());
+}
+
+/// A complete primary-to-alternate-to-primary round trip replaces buffer identity even when restored cells match.
+#[test]
+fn screen_buffer_round_trip_invalidates_without_intermediate_revalidation() {
+    let mut grid = Grid::new(12, 12);
+    write_row(&mut grid, 4, 'x');
+    let mut selection = anchored_selection(&grid, 4, 4);
+
+    grid.enter_alt_screen();
+    grid.leave_alt_screen();
+
+    assert!(revalidate_selection(&mut selection, PANE_ID, &grid));
+}
+
+/// Every logical cell-identity class invalidates a selected range when changed.
+#[test]
+fn character_style_hyperlink_wide_and_combining_changes_invalidate_selection() {
+    let mutations: [fn(&mut sonicterm_grid::grid::Cell); 5] = [
+        |cell| cell.ch = 'y',
+        |cell| cell.fg = Color::Indexed(3),
+        |cell| cell.set_hyperlink(Some(sonicterm_types::HyperlinkId(7))),
+        |cell| cell.flags.insert(CellFlags::WIDE),
+        |cell| cell.set_extras(Some("\u{301}".into())),
+    ];
+    for mutate in mutations {
+        let mut grid = alt_grid();
+        write_row(&mut grid, 4, 'x');
+        let mut selection = anchored_selection(&grid, 4, 4);
+        mutate(&mut grid.row_mut(4)[2]);
+        assert!(revalidate_selection(&mut selection, PANE_ID, &grid));
+    }
 }
 
 #[test]
@@ -502,6 +557,27 @@ fn a_bare_point_anchor_is_not_invalidated_as_a_selection() {
     );
 }
 
+/// Scrollback eviction rebases a point anchor before its first drag motion.
+#[test]
+fn bare_primary_point_rebases_before_selection_extension() {
+    let mut grid = Grid::new(4, 2);
+    grid.set_scrollback_limit(1);
+    write_row(&mut grid, 0, 'A');
+    write_row(&mut grid, 1, 'B');
+    grid.scroll_up(1);
+    let mut selection = Selection::new(1, 0).with_content_state(
+        PANE_ID,
+        grid.content_seq(),
+        false,
+        grid.scrollback_evicted(),
+    );
+    write_row(&mut grid, 1, 'C');
+    grid.scroll_up(1);
+
+    assert!(!revalidate_selection(&mut selection, PANE_ID, &grid));
+    assert_eq!(selection.start, (0, 0));
+}
+
 #[test]
 fn an_anchored_single_cell_is_invalidated_when_its_alt_row_changes() {
     let mut grid = alt_grid();
@@ -513,6 +589,7 @@ fn an_anchored_single_cell_is_invalidated_when_its_alt_row_changes() {
         content_seq: grid.content_seq(),
         on_alt_screen: true,
         scrollback_evicted: 0,
+        content_fingerprint: None,
     };
     write_row(&mut grid, 4, 'x');
 
@@ -572,7 +649,8 @@ fn rewriting_a_selected_primary_row_invalidates_it() {
     let mut grid = Grid::new(12, 3);
     let mut selection = anchored_selection(&grid, 1, 1);
 
-    write_row(&mut grid, 1, 'x');
+    grid.goto(1, 2);
+    grid.put_char('x', Color::Default, Color::Default, CellFlags::empty());
 
     assert!(revalidate_selection(&mut selection, PANE_ID, &grid));
 }
@@ -592,6 +670,7 @@ fn scrollback_eviction_rebases_a_surviving_primary_selection() {
         content_seq: grid.content_seq(),
         on_alt_screen: false,
         scrollback_evicted: grid.scrollback_evicted(),
+        content_fingerprint: None,
     };
     write_row(&mut grid, 1, 'C');
 
@@ -615,6 +694,7 @@ fn primary_write_then_scroll_still_invalidates_the_selected_history_row() {
         content_seq: grid.content_seq(),
         on_alt_screen: false,
         scrollback_evicted: grid.scrollback_evicted(),
+        content_fingerprint: None,
     };
 
     write_row(&mut grid, 0, 'X');
@@ -637,6 +717,7 @@ fn scrollback_eviction_clears_a_range_that_lost_selected_rows() {
         content_seq: grid.content_seq(),
         on_alt_screen: false,
         scrollback_evicted: grid.scrollback_evicted(),
+        content_fingerprint: None,
     };
 
     grid.scroll_up(1);

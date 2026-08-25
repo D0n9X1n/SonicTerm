@@ -129,6 +129,36 @@ impl App {
         sel
     }
 
+    /// Cell-mode drag from absolute `anchor` to the current viewport cell.
+    ///
+    /// Returns a fully grid-bound selection so its exact content fingerprint
+    /// can distinguish same-value repaints from replacement content.
+    pub(super) fn cell_drag_selection_at(
+        &self,
+        anchor: (u64, u16),
+        cursor_viewport_row: u16,
+        col: u16,
+    ) -> Option<Selection> {
+        let pane_id = self.active_pane_id()?;
+        let pane = self.pane_by_id(pane_id)?;
+        let guard = pane.parser.try_lock()?;
+        let grid = guard.grid();
+        let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
+        let cursor_abs = view_top + u64::from(cursor_viewport_row);
+        let mut selection = Selection::new(anchor.0, anchor.1);
+        selection.extend(cursor_abs, col);
+        let selection = selection
+            .with_content_state(
+                pane_id,
+                grid.content_seq(),
+                grid.is_alt(),
+                grid.scrollback_evicted(),
+            )
+            .with_content_fingerprint(grid);
+        drop(guard);
+        Some(selection)
+    }
+
     /// Word-mode drag (double-click then drag): union of the word at the
     /// scrollback-ABSOLUTE `anchor` cell and the word at the cursor cell.
     /// `cursor_viewport_row` is the live viewport row from `pixel_to_cell`;
@@ -320,7 +350,12 @@ impl App {
             // replacement content during that window. This mutates only the
             // normal window selection; copy-mode and search overlays are
             // independent state.
-            if invalidate_selection_for_content(&mut window.selection, pane_id, grid) {
+            if invalidate_selection_for_content(
+                &mut window.selection,
+                &mut window.select_anchor,
+                pane_id,
+                grid,
+            ) {
                 // When: invalidate_selection_for_content cleared the selection; the
                 // rows it covered no longer hold the text the user chose.
                 return;

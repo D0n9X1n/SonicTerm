@@ -109,6 +109,12 @@ pub fn renderer_panel_padding_differs(old_cfg: &Config, new_cfg: &Config) -> boo
 }
 
 impl App {
+    fn refresh_all_window_minimums(&mut self) {
+        for window in self.windows.values_mut() {
+            super::apply_window_state_minimum(window);
+        }
+    }
+
     pub(super) fn apply_new_config(&mut self, new_cfg: Config) {
         // Config is only applied on an explicit user reload, so it must
         // render immediately rather than at the next vsync deadline.
@@ -301,6 +307,12 @@ impl App {
                 pad[2],
                 pad[3],
             );
+        }
+
+        if (font_changed && config_diff_changes_font_metrics(&self.config, &new_cfg))
+            || padding_changed
+        {
+            self.refresh_all_window_minimums();
         }
 
         if (new_cfg.appearance.opacity - self.config.appearance.opacity).abs() > f32::EPSILON {
@@ -648,6 +660,7 @@ impl App {
             ];
             resize_panes_to_rects(&child.panes, &rects, cw, ch, inset);
         }
+        self.refresh_all_window_minimums();
         if let Some(w) = self.main_window() {
             w.request_redraw();
         }
@@ -731,6 +744,7 @@ impl App {
                 resize_panes_to_rects(&child.panes, &rects, cw, ch, inset);
             }
         }
+        self.refresh_all_window_minimums();
         if let Some(w) = self.main_window() {
             w.request_redraw();
         }

@@ -13,6 +13,41 @@ use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
 /// frame boundary and any other contributor.
 const COMPOSE_PERIOD: Duration = crate::app::SOFTWARE_RENDER_COMPOSE_FRAME_PERIOD;
 
+/// The hard window floor rounds fractional physical geometry upward.
+#[test]
+fn minimum_terminal_inner_size_preserves_thirty_by_ten_cells() {
+    let size = crate::app::minimum_terminal_inner_size(8.25, 17.5, 3.2, 4.1, 6.4, 25.3, 2.2);
+
+    assert_eq!(size.width, 255);
+    assert_eq!(size.height, 209);
+    assert_eq!(crate::app::MIN_WINDOW_COLS, 30);
+    assert_eq!(crate::app::MIN_WINDOW_ROWS, 10);
+}
+
+/// Every terminal-window constructor installs the shared live-renderer floor.
+#[test]
+fn all_terminal_window_creation_paths_apply_the_minimum() {
+    let main = include_str!("event_loop.rs");
+    let tear_out = include_str!("tear_out.rs");
+
+    assert!(main.contains("apply_terminal_window_minimum(&window, &mut renderer)"));
+    assert!(tear_out.contains("apply_terminal_window_minimum(window, renderer)"));
+    assert!(tear_out.contains("fn create_warm_window"));
+    assert!(tear_out.contains("fn install_torn_out_window"));
+}
+
+/// DPI, font, padding, and tab-bar changes all refresh native minimums.
+#[test]
+fn live_metric_change_paths_refresh_the_minimum() {
+    let main_events = include_str!("window_event.rs");
+    let child_events = include_str!("child_window.rs");
+    let config = include_str!("config_apply.rs");
+
+    assert!(main_events.contains("apply_window_state_minimum(ws)"));
+    assert!(child_events.contains("apply_window_state_minimum(child)"));
+    assert!(config.matches("refresh_all_window_minimums();").count() >= 3);
+}
+
 fn app_with_main_window() -> App {
     let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
     app.__test_synthetic_main();

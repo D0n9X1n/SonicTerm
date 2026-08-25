@@ -12,22 +12,24 @@ fn app_with_main_and_child() -> (App, u64, WindowId, u64) {
 }
 
 fn install_alt_selection(app: &mut App, window: WindowId, pane_id: u64, row: u64) {
-    let (seq, is_alt) = {
+    let selection = {
         let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
         let mut parser = pane.parser.lock();
         let grid = parser.grid_mut();
         grid.enter_alt_screen();
-        (grid.content_seq(), grid.is_alt())
+        Selection {
+            start: (row, 0),
+            end: (row, 3),
+            anchored: true,
+            pane_id: Some(pane_id),
+            content_seq: grid.content_seq(),
+            on_alt_screen: grid.is_alt(),
+            scrollback_evicted: 0,
+            content_fingerprint: None,
+        }
+        .with_content_fingerprint(grid)
     };
-    app.windows.get_mut(&window).unwrap().selection = Some(Selection {
-        start: (row, 0),
-        end: (row, 3),
-        anchored: true,
-        pane_id: Some(pane_id),
-        content_seq: seq,
-        on_alt_screen: is_alt,
-        scrollback_evicted: 0,
-    });
+    app.windows.get_mut(&window).unwrap().selection = Some(selection);
 }
 
 fn install_primary_selection(app: &mut App, window: WindowId, pane_id: u64, row: u64) {
@@ -46,6 +48,7 @@ fn install_primary_selection(app: &mut App, window: WindowId, pane_id: u64, row:
         content_seq: seq,
         on_alt_screen: is_alt,
         scrollback_evicted: evicted,
+        content_fingerprint: None,
     });
 }
 
@@ -71,7 +74,12 @@ fn run_invalidation(app: &mut App, window: WindowId, pane_id: u64) -> bool {
     let window = app.windows.get_mut(&window).unwrap();
     let pane = window.panes.get(&pane_id).unwrap();
     let parser = pane.parser.lock();
-    invalidate_selection_for_content(&mut window.selection, pane_id, parser.grid())
+    invalidate_selection_for_content(
+        &mut window.selection,
+        &mut window.select_anchor,
+        pane_id,
+        parser.grid(),
+    )
 }
 
 #[test]
@@ -89,6 +97,29 @@ fn main_and_child_clear_when_selected_alt_content_changes() {
             app.windows.get(&window).unwrap().selection.is_none(),
             "{window:?} must not leave stale selected text copyable"
         );
+    }
+}
+
+#[test]
+fn main_and_child_preserve_selection_across_same_value_repaints() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
+    let main = app.__test_main_window_id().expect("synthetic main window");
+
+    for (window, pane) in [(main, main_pane), (child, child_pane)] {
+        write_row(&app, window, pane, 4, 'x');
+        install_alt_selection(&mut app, window, pane, 4);
+        let same = {
+            let pane = app.windows.get(&window).unwrap().panes.get(&pane).unwrap();
+            pane.parser.lock().grid().row(4)[0].clone()
+        };
+        {
+            let pane = app.windows.get(&window).unwrap().panes.get(&pane).unwrap();
+            pane.parser.lock().grid_mut().row_mut(4)[0] = same;
+        }
+
+        assert!(!run_invalidation(&mut app, window, pane));
+        assert!(app.windows.get(&window).unwrap().selection.is_some());
     }
 }
 
@@ -255,6 +286,63 @@ fn successful_primary_copy_keeps_main_and_child_selection() {
     }
 }
 
+/// Revalidation rebases the active drag anchor before a later motion rebuilds the range.
+#[test]
+fn main_and_child_continue_dragging_from_rebased_anchor_after_history_eviction() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
+    let main = app.__test_main_window_id().expect("synthetic main window");
+
+    for (window, pane_id) in [(main, main_pane), (child, child_pane)] {
+        let selection = {
+            let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
+            let mut parser = pane.parser.lock();
+            let grid = parser.grid_mut();
+            grid.set_scrollback_limit(1);
+            grid.goto(0, 0);
+            grid.put_char('A', Color::Default, Color::Default, CellFlags::empty());
+            grid.goto(1, 0);
+            grid.put_char('B', Color::Default, Color::Default, CellFlags::empty());
+            grid.scroll_up(1);
+            Selection {
+                start: (1, 0),
+                end: (1, 0),
+                anchored: true,
+                pane_id: Some(pane_id),
+                content_seq: grid.content_seq(),
+                on_alt_screen: false,
+                scrollback_evicted: grid.scrollback_evicted(),
+                content_fingerprint: None,
+            }
+            .with_content_fingerprint(grid)
+        };
+        {
+            let state = app.windows.get_mut(&window).unwrap();
+            state.selection = Some(selection);
+            state.select_anchor = (1, 0);
+        }
+        {
+            let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
+            let mut parser = pane.parser.lock();
+            let grid = parser.grid_mut();
+            grid.goto(1, 0);
+            grid.put_char('C', Color::Default, Color::Default, CellFlags::empty());
+            grid.scroll_up(1);
+        }
+
+        assert!(!run_invalidation(&mut app, window, pane_id));
+        let anchor = app.windows.get(&window).unwrap().select_anchor;
+        assert_eq!(anchor, (0, 0));
+        let continued = if window == main {
+            app.cell_drag_selection_at(anchor, 0, 1)
+        } else {
+            app.windows.get(&window).unwrap().cell_drag_selection(anchor, 0, 1)
+        }
+        .expect("continued drag selection");
+        assert_eq!(continued.normalized().0, (0, 0));
+    }
+}
+
 #[test]
 fn main_and_child_rebase_primary_selection_after_history_eviction() {
     let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
@@ -286,6 +374,7 @@ fn main_and_child_rebase_primary_selection_after_history_eviction() {
             content_seq: seq,
             on_alt_screen: false,
             scrollback_evicted: evicted,
+            content_fingerprint: None,
         });
         {
             let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
@@ -335,6 +424,7 @@ fn copy_before_redraw_uses_rebased_primary_text() {
             content_seq: seq,
             on_alt_screen: false,
             scrollback_evicted: evicted,
+            content_fingerprint: None,
         });
         {
             let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
@@ -375,6 +465,7 @@ fn copy_before_redraw_rejects_a_selected_primary_row_rewritten_then_scrolled() {
             content_seq: seq,
             on_alt_screen: false,
             scrollback_evicted: evicted,
+            content_fingerprint: None,
         });
         write_row(&app, window, pane_id, 0, 'X');
         {

@@ -59,6 +59,12 @@ Font changes apply to terminal text and regular application text. Changes to
 | `decorations` | `true` | Enables native title-bar decorations for new windows. |
 | `warm_window_pool` | `1` | Number of hidden child windows kept for fast tab tear-out. `0` disables the pool. Hardware rendering caps it at `5`; software rendering caps any nonzero value at `1`. |
 
+`cols` and `rows` set only the initial size. Every native terminal window has a
+hard, non-configurable minimum inner size equal to 30 columns by 10 rows. The
+pixel floor is recomputed from the live font, DPI, padding, titlebar, and tab-bar
+geometry, including after live font/padding reloads and tab-bar visibility
+changes.
+
 Grid dimensions are never allowed to allocate without bounds. Each axis is at
 most `4096`, the visible grid is at most `524288` cells, and the complete grid
 including history is at most `1048576` cells.
@@ -256,6 +262,10 @@ SonicTerm 允许并保留 TOML 中的未知 key。当前 build 没有实现的�
 | `padding_bottom` | `4` | 内容下方 padding，单位为逻辑像素。 |
 | `decorations` | `true` | 为新窗口启用原生标题栏装饰。 |
 | `warm_window_pool` | `1` | 为快速拖出标签页预留的隐藏子窗口数量。`0` 关闭预热池。硬件渲染最多保留 `5` 个；软件渲染会把任何非零值限制为 `1`。 |
+
+`cols` 与 `rows` 只设置初始大小。每个原生终端窗口都有不可配置的硬最小内区大小：
+30 列 × 10 行。像素下限会按当前字体、DPI、padding、标题栏和标签栏 geometry 重新计算，
+包括实时重载字体/padding 以及切换标签栏可见性之后。
 
 Grid 尺寸始终有上限。每个轴最多是 `4096`，可见 grid 最多包含
 `524288` 个 cell，包含历史记录的完整 grid 最多包含 `1048576` 个 cell。

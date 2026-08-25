@@ -165,12 +165,14 @@ cell seen in that pane. `Button` suppresses held motion; `ButtonMotion` and
 `AnyMotion` report it. With no button held, only the current `AnyMotion` mode
 reports motion, using the current pane and encoding profile.
 
-Selections are bound to their pane, primary/alternate buffer, content sequence,
-and scrollback-eviction baseline. Primary-screen scrolling carries selected
-text into history and rebases surviving endpoints. A buffer or pane change, an
-evicted selected row, or a changed row intersecting the selection clears it;
-unrelated row changes do not. The check runs before rendering and immediately
-before copy.
+Selections are bound to their pane, a monotonic primary/alternate screen epoch,
+content sequence, and scrollback-eviction baseline. Primary-screen scrolling
+carries selected text into history and rebases both surviving endpoints and the
+active drag anchor. A screen epoch or pane change, an evicted selected row, or a
+changed row intersecting the selection clears it; unrelated row changes and
+same-value repaints do not. The epoch rejects a primary-to-alternate-to-primary
+ABA transition even when the restored cells match. The check runs before
+rendering and immediately before copy.
 
 For an explicit alternate-screen copy, a successful clipboard write clears the
 selection. Clipboard failure preserves it so the user can retry. If content has
@@ -380,9 +382,11 @@ SGR 使用从 1 开始的 `CSI < Cb ; Cx ; Cy M`，释放使用小写 `m`。旧�
 `ButtonMotion` 与 `AnyMotion` 会报告。没有按键按下时，只有当前 `AnyMotion` 会
 报告移动，并使用当前窗格与当前编码配置。
 
-选区会绑定所属窗格、主/备用缓冲区、内容序列和回滚淘汰基线。主屏幕滚动会让选中
-文本进入历史，并重新定位仍存活的端点。切换缓冲区或窗格、淘汰已选行，或修改与选区
-相交的行都会清除选区；无关行变化不会。渲染前和复制前都会执行检查。
+选区会绑定所属窗格、单调递增的主/备用屏幕 epoch、内容序列和回滚淘汰基线。
+主屏幕滚动会让选中文本进入历史，并重新定位仍存活的端点与当前 drag anchor。
+屏幕 epoch 或窗格变化、淘汰已选行，或修改与选区相交的行都会清除选区；无关行变化
+与同值重绘不会。即使恢复后的 cell 相同，epoch 也会拒绝“主屏幕→备用屏幕→主屏幕”
+的 ABA 切换。渲染前和复制前都会执行检查。
 
 显式复制备用屏幕选区时，剪贴板写入成功后清除选区；写入失败则保留，便于重试。
 若所选内容已经过期，SonicTerm 会清除选区但不复制，剪贴板保持不变。
