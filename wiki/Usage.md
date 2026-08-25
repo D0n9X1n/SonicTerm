@@ -87,9 +87,12 @@ lasts until release.
 Use the platform copy shortcut after selecting. A successful explicit copy on
 the alternate screen clears that selection and removes its highlight. A failed
 clipboard write leaves a still-valid selection in place so you can retry. A
-primary-screen selection remains after a successful copy. If the selected cells
-changed before the copy, SonicTerm clears the stale selection and does not copy
-replacement text.
+primary-screen selection remains after a successful copy. Repainting selected
+cells to the same complete character/style/hyperlink/wide/combining identity
+keeps the selection; an actual selected-cell change clears it before copy.
+Terminal applications may also write UTF-8 text through OSC 52 target `c` up to
+512 KiB. Clipboard reads/queries, malformed Base64, other selection targets, and
+oversized writes are ignored.
 
 READONLY mode blocks terminal input while you inspect history. Arrow keys or
 `h/j/k/l` move its reading cursor; `w/b`, `0/$`, and `g` / `G` move by word, line, and buffer. Press `Escape` to exit. READONLY does not create a text
@@ -102,7 +105,9 @@ controls and whitelist.
 Hold `Cmd` on macOS or `Ctrl` on Windows and Linux while pointing at a target.
 A valid target becomes underlined; click it to open. OSC 8 links and plain-text
 `http://`, `https://`, `mailto:`, and `file://` URIs take priority over raw
-filesystem detection.
+filesystem detection. Unrelated terminal output and same-value repaints do not
+blink an unchanged target; changing the pointed row, target, CWD, viewport, or
+openability identity revokes authorization and requires a fresh probe.
 
 Raw local targets include:
 
@@ -256,8 +261,11 @@ Gesture owner 在第一次按下鼠标时确定，并保持到松开。
 
 选好后使用当前平台的复制快捷键。在 alternate screen 中，显式复制成功后会清除
 该选区并移除高亮。剪贴板写入失败时，只要选区仍有效，它就会保留，方便重试。
-Primary screen 中复制成功后，选区仍保留。如果复制前所选 cell 已变化，SonicTerm
-会清除过期选区，不会复制替换后的文字。
+Primary screen 中复制成功后，选区仍保留。若选中 cell 只是按完全相同的字符、style、
+hyperlink、宽字符结构和组合字符重新绘制，选区会保留；实际 cell identity 改变时，
+SonicTerm 会在复制前清除它。终端程序也可通过 OSC 52 的 `c` target 写入最多 512 KiB
+的 UTF-8 文字。剪贴板读取/查询、格式错误的 Base64、其它 selection target 和超限写入
+都会被忽略。
 
 READONLY 模式会在查看历史记录时阻止终端输入。方向键或 `h/j/k/l` 移动阅读光标；
 `w/b`、`0/$`、`g` / `G` 分别按单词、行和 buffer 移动。按 `Escape`
@@ -268,7 +276,9 @@ READONLY 模式会在查看历史记录时阻止终端输入。方向键或 `h/j
 
 鼠标指向目标时，macOS 按住 `Cmd`，Windows 和 Linux 按住 `Ctrl`。有效目标会显示
 下划线；点击即可打开。OSC 8 link 和普通文字中的 `http://`、`https://`、
-`mailto:`、`file://` URI 优先于原始文件系统检测。
+`mailto:`、`file://` URI 优先于原始文件系统检测。无关终端输出和同值重绘不会让
+未变化的目标闪烁；pointed row、target、CWD、viewport 或可打开 identity 改变时，
+授权会被撤销并重新 probe。
 
 原始本地目标包括：
 

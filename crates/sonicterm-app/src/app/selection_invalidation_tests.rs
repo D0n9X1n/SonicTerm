@@ -12,22 +12,24 @@ fn app_with_main_and_child() -> (App, u64, WindowId, u64) {
 }
 
 fn install_alt_selection(app: &mut App, window: WindowId, pane_id: u64, row: u64) {
-    let (seq, is_alt) = {
+    let selection = {
         let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
         let mut parser = pane.parser.lock();
         let grid = parser.grid_mut();
         grid.enter_alt_screen();
-        (grid.content_seq(), grid.is_alt())
+        Selection {
+            start: (row, 0),
+            end: (row, 3),
+            anchored: true,
+            pane_id: Some(pane_id),
+            content_seq: grid.content_seq(),
+            on_alt_screen: grid.is_alt(),
+            scrollback_evicted: 0,
+            content_fingerprint: None,
+        }
+        .with_content_fingerprint(grid)
     };
-    app.windows.get_mut(&window).unwrap().selection = Some(Selection {
-        start: (row, 0),
-        end: (row, 3),
-        anchored: true,
-        pane_id: Some(pane_id),
-        content_seq: seq,
-        on_alt_screen: is_alt,
-        scrollback_evicted: 0,
-    });
+    app.windows.get_mut(&window).unwrap().selection = Some(selection);
 }
 
 fn install_primary_selection(app: &mut App, window: WindowId, pane_id: u64, row: u64) {
@@ -46,6 +48,7 @@ fn install_primary_selection(app: &mut App, window: WindowId, pane_id: u64, row:
         content_seq: seq,
         on_alt_screen: is_alt,
         scrollback_evicted: evicted,
+        content_fingerprint: None,
     });
 }
 
@@ -89,6 +92,29 @@ fn main_and_child_clear_when_selected_alt_content_changes() {
             app.windows.get(&window).unwrap().selection.is_none(),
             "{window:?} must not leave stale selected text copyable"
         );
+    }
+}
+
+#[test]
+fn main_and_child_preserve_selection_across_same_value_repaints() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
+    let main = app.__test_main_window_id().expect("synthetic main window");
+
+    for (window, pane) in [(main, main_pane), (child, child_pane)] {
+        write_row(&app, window, pane, 4, 'x');
+        install_alt_selection(&mut app, window, pane, 4);
+        let same = {
+            let pane = app.windows.get(&window).unwrap().panes.get(&pane).unwrap();
+            pane.parser.lock().grid().row(4)[0].clone()
+        };
+        {
+            let pane = app.windows.get(&window).unwrap().panes.get(&pane).unwrap();
+            pane.parser.lock().grid_mut().row_mut(4)[0] = same;
+        }
+
+        assert!(!run_invalidation(&mut app, window, pane));
+        assert!(app.windows.get(&window).unwrap().selection.is_some());
     }
 }
 
@@ -286,6 +312,7 @@ fn main_and_child_rebase_primary_selection_after_history_eviction() {
             content_seq: seq,
             on_alt_screen: false,
             scrollback_evicted: evicted,
+            content_fingerprint: None,
         });
         {
             let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
@@ -335,6 +362,7 @@ fn copy_before_redraw_uses_rebased_primary_text() {
             content_seq: seq,
             on_alt_screen: false,
             scrollback_evicted: evicted,
+            content_fingerprint: None,
         });
         {
             let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
@@ -375,6 +403,7 @@ fn copy_before_redraw_rejects_a_selected_primary_row_rewritten_then_scrolled() {
             content_seq: seq,
             on_alt_screen: false,
             scrollback_evicted: evicted,
+            content_fingerprint: None,
         });
         write_row(&app, window, pane_id, 0, 'X');
         {

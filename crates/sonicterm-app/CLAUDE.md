@@ -25,7 +25,9 @@ cargo build -p sonicterm-app
 ## Guardrails
 - Render paths use `try_lock`, not blocking `lock`; avoid AB-BA deadlocks
   with PTY/parser work on the main thread.
-- Keep PTY redraw coalescing burst-aware; never redraw per byte.
+- Keep PTY redraw coalescing burst-aware; never redraw per byte. OSC 52 writes
+  must stay bounded and reach the native clipboard only on the event-loop thread;
+  clipboard reads/queries remain unsupported.
 - Search input has priority over READONLY. In READONLY, only the explicit
   safe action whitelist may execute or reach the PTY.
 - Do not add unconditional heartbeat redraws at the tail of event handling.
@@ -40,6 +42,8 @@ cargo build -p sonicterm-app
   default. Diagnostics belong on `memory`, which is off unless someone is
   investigating.
 - Window-ready hooks fire once, immediately after winit creates the window.
+- Every terminal window enforces the shared 30-column by 10-row native inner-size
+  floor from live renderer geometry and refreshes it after metric/DPI changes.
 - Local-target hover never performs filesystem I/O on the event-loop thread.
   Clickability requires a current epoch-keyed typed openability result. Direct-open
   work stays bounded, revalidates target kind, and blocks executable/launcher,

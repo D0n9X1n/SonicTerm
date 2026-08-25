@@ -1298,6 +1298,7 @@ impl App {
                 if let Some(id) = self.main_window_id {
                     if let Some(ws) = self.windows.get_mut(&id) {
                         crate::app::apply_dpi_to_renderer_if_present(&mut ws.renderer, dpi_scale);
+                        crate::app::apply_window_state_minimum(ws);
                     }
                 }
                 if let Some(w) = self.main_window() {
@@ -1565,19 +1566,10 @@ impl App {
                                 }
                                 SelectMode::Cell => None,
                             };
-                            // Cell-mode extend needs the cursor's ABSOLUTE row
-                            // too. Resolve it before the &mut borrow below.
-                            // None = no active pane / parser busy → SKIP this
-                            // move rather than fall back to the viewport row:
-                            // treating a viewport row as absolute while scrolled
-                            // would extend a far-away anchor (e.g. abs 1000) down
-                            // to a small on-screen row and balloon the selection.
-                            // Only Cell mode consumes it, so skip the extra
-                            // try_lock for word/line drags.
-                            let cursor_selection_state = if matches!(mode, SelectMode::Cell) {
-                                self.viewport_row_selection_state(row)
+                            let cell_replacement = if matches!(mode, SelectMode::Cell) {
+                                self.cell_drag_selection_at(anchor, row, col)
                             } else {
-                                // When: matches does not find SelectMode::Cell, replacement has absolute state.
+                                // When: `matches!(mode, SelectMode::Cell)` is false, `replacement` owns the word/line range.
                                 None
                             };
                             // selection lives on WindowState.
@@ -1587,19 +1579,9 @@ impl App {
                                 if let Some(sel) = ws.selection.as_mut() {
                                     match ws.select_mode {
                                         SelectMode::Cell => {
-                                            // Don't let a stray CursorMoved
-                                            // collapse a double/triple-click
-                                            // (word/line) selection down to the
-                                            // cursor cell. Only a plain
-                                            // point-drag extends. Skip if
-                                            // the absolute row was unavailable.
                                             if !sel.anchored {
-                                                if let Some((abs, pane_id, seq, is_alt, evicted)) =
-                                                    cursor_selection_state
-                                                {
-                                                    sel.extend_with_content_state(
-                                                        abs, col, pane_id, seq, is_alt, evicted,
-                                                    );
+                                                if let Some(new_sel) = cell_replacement {
+                                                    *sel = new_sel;
                                                     mark_all_panes_dirty(&ws.panes);
                                                     if let Some(w) = ws.window.as_ref() {
                                                         w.request_redraw();

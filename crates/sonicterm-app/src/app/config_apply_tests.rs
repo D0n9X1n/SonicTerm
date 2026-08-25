@@ -146,7 +146,7 @@ fn local_target_switch_reload_revokes_all_window_authorization() {
             candidates: vec![candidate.clone()],
             cwd: Some(Osc7Cwd { authority: String::new(), path: "/work".into() }),
             cwd_revision: 3,
-            content_seq: 11,
+            row_fingerprint: 11,
             scrollback_evicted: 0,
             alt_screen: false,
         };
@@ -198,7 +198,7 @@ fn local_target_switch_reload_revokes_all_window_authorization() {
                 }],
                 cwd: Some(Osc7Cwd { authority: String::new(), path: "/work".into() }),
                 cwd_revision: 3,
-                content_seq: 11,
+                row_fingerprint: 11,
                 scrollback_evicted: 0,
                 alt_screen: false,
             })

@@ -97,7 +97,7 @@ pub struct PathProbeKey {
     pub(crate) candidates: Vec<PathProbeCandidate>,
     pub(crate) cwd: Option<Osc7Cwd>,
     pub(crate) cwd_revision: u64,
-    pub(crate) content_seq: u64,
+    pub(crate) row_fingerprint: u64,
     pub(crate) scrollback_evicted: u64,
     pub(crate) alt_screen: bool,
 }
@@ -228,7 +228,7 @@ fn same_probe_context(left: &PathProbeKey, right: &PathProbeKey) -> bool {
         && left.view_top == right.view_top
         && left.cwd == right.cwd
         && left.cwd_revision == right.cwd_revision
-        && left.content_seq == right.content_seq
+        && left.row_fingerprint == right.row_fingerprint
         && left.scrollback_evicted == right.scrollback_evicted
         && left.alt_screen == right.alt_screen
 }
@@ -1120,6 +1120,14 @@ fn cell_delimiter(cell: &Cell) -> bool {
         || matches!(cell.ch, '"' | '\'' | '`' | '<' | '>')
 }
 
+fn row_fingerprint(row: &Row) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    row.hash(&mut hasher);
+    hasher.finish()
+}
+
 fn unsafe_path_cell(cell: &&Cell) -> bool {
     cell.flags.intersects(CellFlags::WIDE | CellFlags::WIDE_CONT)
         || cell.extras().is_some_and(|extras| !extras.is_empty())
@@ -1417,7 +1425,7 @@ impl App {
             candidates,
             cwd,
             cwd_revision: parser.cwd_revision(),
-            content_seq: grid.content_seq(),
+            row_fingerprint: row_fingerprint(row),
             scrollback_evicted: grid.scrollback_evicted(),
             alt_screen: grid.is_alt(),
         };

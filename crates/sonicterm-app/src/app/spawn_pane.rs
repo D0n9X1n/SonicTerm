@@ -9,6 +9,7 @@ use std::sync::{atomic::Ordering, Arc};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use base64::Engine;
 use parking_lot::Mutex;
 use sonicterm_cfg::config::Config;
 use sonicterm_cfg::keymap::{Action, Direction, Keymap, ScrollAction};
@@ -46,6 +47,37 @@ use super::{
 const CHILD_EXIT_OBSERVE_TIMEOUT: Duration = Duration::from_millis(250);
 /// Gap between exit observations while waiting.
 const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// Maximum decoded UTF-8 text one OSC 52 write may place on the clipboard.
+pub(super) const MAX_OSC52_CLIPBOARD_BYTES: usize = 512 * 1024;
+
+/// Decode one ordinary OSC 52 clipboard write into a bounded app-thread event.
+///
+/// Only target `c` writes are accepted. Queries (`?`), unsupported selections,
+/// malformed Base64, non-UTF-8 payloads, and decoded output above the hard cap
+/// remain inert and can never expose or mutate the native clipboard.
+pub(super) fn osc52_clipboard_write_event(selection: char, data: &str) -> Option<UserEvent> {
+    if selection != 'c' || data == "?" || data.is_empty() {
+        // When: `selection` is not clipboard `c`, or `data` is a query/empty, refuse the unsupported operation.
+        return None;
+    }
+    let estimated = base64::decoded_len_estimate(data.len());
+    if estimated > MAX_OSC52_CLIPBOARD_BYTES {
+        // When: `estimated` exceeds the decoded clipboard cap, reject before allocating the output buffer.
+        return None;
+    }
+    let mut decoded = vec![0u8; estimated];
+    let written = base64::engine::general_purpose::STANDARD
+        .decode_slice(data.as_bytes(), &mut decoded)
+        .ok()?;
+    decoded.truncate(written);
+    if decoded.len() > MAX_OSC52_CLIPBOARD_BYTES {
+        // When: `decoded` exceeds the hard cap despite the conservative estimate, reject before UTF-8 conversion.
+        return None;
+    }
+    let text = String::from_utf8(decoded).ok()?;
+    (!text.is_empty()).then_some(UserEvent::ClipboardWrite { text })
+}
 
 /// Whether the pane's child exited cleanly, waiting briefly for it to become
 /// observable.
@@ -309,6 +341,7 @@ impl App {
                                     // section as a defence-in-depth rule.
                                     let mut new_title: Option<String> = None;
                                     let mut command_side_effects = Vec::new();
+                                    let mut clipboard_requests = Vec::new();
                                     let mut inline_images = Vec::new();
                                     {
                                         let mut p = parser_clone.lock();
@@ -322,6 +355,9 @@ impl App {
                                                         v,
                                                         std::sync::atomic::Ordering::Relaxed,
                                                     );
+                                                }
+                                                VtEvent::Clipboard { selection, data } => {
+                                                    clipboard_requests.push((selection, data));
                                                 }
                                                 VtEvent::Command(event) => {
                                                     let now = Instant::now();
@@ -391,6 +427,17 @@ impl App {
                                             p.application_cursor_keys(),
                                             std::sync::atomic::Ordering::Relaxed,
                                         );
+                                    }
+                                    if let Some(proxy) = redraw_proxy.as_ref() {
+                                        // When: `redraw_proxy.as_ref()` yields `proxy`, decode and deliver clipboard writes after releasing the parser lock.
+                                        for (selection, data) in clipboard_requests {
+                                            if let Some(event) =
+                                                osc52_clipboard_write_event(selection, &data)
+                                            {
+                                                // When: `osc52_clipboard_write_event` returns `event`, deliver its bounded text to the app thread.
+                                                let _ = proxy.send_event(event);
+                                            }
+                                        }
                                     }
                                     if !inline_images.is_empty() {
                                         // Evicted images are carried out of

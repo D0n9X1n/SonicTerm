@@ -934,6 +934,7 @@ impl App {
             WindowEvent::ScaleFactorChanged { scale_factor: dpi_scale, .. } => {
                 child.dpi_scale = dpi_scale;
                 if apply_dpi_to_renderer_if_present(&mut child.renderer, dpi_scale) {
+                    crate::app::apply_window_state_minimum(child);
                     child.request_redraw();
                 }
             }
@@ -1150,32 +1151,18 @@ impl App {
                             }
                             SelectMode::Cell => None,
                         };
-                        // Cell-mode extend needs the cursor's ABSOLUTE row, and
-                        // only Cell mode consumes it. `None` means the parser was
-                        // busy, in which case the extend is skipped rather than
-                        // falling back to viewport-as-absolute, which would
-                        // balloon a scrolled selection.
-                        let cursor_selection_state =
-                            if matches!(child.select_mode, SelectMode::Cell) {
-                                child.viewport_row_selection_state(row)
-                            } else {
-                                // When: `matches` is false, so this is a word or
-                                // line drag that recomputes its own region.
-                                None
-                            };
+                        let cell_replacement = if matches!(child.select_mode, SelectMode::Cell) {
+                            child.cell_drag_selection(child.select_anchor, row, col)
+                        } else {
+                            // When: `matches!(child.select_mode, SelectMode::Cell)` is false, `replacement` owns the word/line range.
+                            None
+                        };
                         if let Some(sel) = child.selection.as_mut() {
                             match child.select_mode {
                                 SelectMode::Cell => {
-                                    // Mirror the main window: don't collapse an
-                                    // anchored (word/line) selection on a plain
-                                    // cell move. Skip if abs row missing.
                                     if !sel.anchored {
-                                        if let Some((abs, pane_id, seq, is_alt, evicted)) =
-                                            cursor_selection_state
-                                        {
-                                            sel.extend_with_content_state(
-                                                abs, col, pane_id, seq, is_alt, evicted,
-                                            );
+                                        if let Some(new_sel) = cell_replacement {
+                                            *sel = new_sel;
                                             mark_all_panes_dirty(&child.panes);
                                             child.request_redraw();
                                         }

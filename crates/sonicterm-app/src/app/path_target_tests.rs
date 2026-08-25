@@ -643,7 +643,7 @@ fn probe_key(path: &str, view_top: u64) -> PathProbeKey {
         candidates: vec![probe_candidate("./file", path, 4)],
         cwd: Some(Osc7Cwd { authority: String::new(), path: "/work".into() }),
         cwd_revision: 3,
-        content_seq: 11,
+        row_fingerprint: 11,
         scrollback_evicted: 0,
         alt_screen: false,
     }
@@ -754,6 +754,33 @@ fn probe_epoch_rejects_same_key_after_leave_and_reenter() {
     assert!(!state.authorized(&key, true));
     assert!(state.accept(&openable_result(second), Some(&key)));
     assert!(state.authorized(&key, true));
+}
+
+/// Unrelated grid mutations preserve authorization when pointed-row identity is unchanged.
+#[test]
+fn probe_state_ignores_unrelated_grid_mutation() {
+    let mut state = PathProbeState::default();
+    let key = probe_key("/work/file", 20);
+    let result = openable_result(state.request(key.clone()).unwrap());
+    assert!(state.accept(&result, Some(&key)));
+
+    let unchanged_row = key.clone();
+    assert!(state.request(unchanged_row.clone()).is_none());
+    assert!(state.authorized(&unchanged_row, true));
+}
+
+/// Pointed-row identity changes revoke authorization and schedule a fresh probe.
+#[test]
+fn probe_state_reprobes_after_pointed_row_changes() {
+    let mut state = PathProbeState::default();
+    let key = probe_key("/work/file", 20);
+    let result = openable_result(state.request(key.clone()).unwrap());
+    assert!(state.accept(&result, Some(&key)));
+
+    let mut changed = key.clone();
+    changed.row_fingerprint = changed.row_fingerprint.wrapping_add(1);
+    assert!(state.request(changed.clone()).is_some());
+    assert!(!state.authorized(&changed, true));
 }
 
 /// A viewport round trip with the same visible value still gets a distinct epoch.

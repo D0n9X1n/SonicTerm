@@ -31,6 +31,7 @@ fn selected_row(cols_inclusive: u16) -> Selection {
         content_seq: 0,
         on_alt_screen: false,
         scrollback_evicted: 0,
+        content_fingerprint: None,
     }
 }
 
