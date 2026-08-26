@@ -13,7 +13,7 @@ level. [Memory](Memory) covers what is bounded and how to read it.
 
 ### User guide
 
-- [Usage](Usage) — installation, panes, tabs, READONLY mode, and common actions
+- [Usage](Usage) — installation, panes, tabs, rmux/tmux integration, READONLY mode, and common actions
 - [Configuration](Configuration) — `~/.sonicterm/sonicterm.toml` and reload behavior
 - [Keybindings](Keybindings) — bundled keymaps, binding syntax, and actions
 - [Themes](Themes) — bundled palettes and custom theme authoring
@@ -49,7 +49,7 @@ SonicTerm 是一个面向 macOS、Windows 和 Linux 的原生 GPU 加速终端�
 
 ### 用户手册
 
-- [用法 / Usage](Usage) — 安装、窗格、标签页、READONLY 模式和常用操作
+- [用法 / Usage](Usage) — 安装、窗格、标签页、rmux/tmux 集成、READONLY 模式和常用操作
 - [配置 / Configuration](Configuration) — `~/.sonicterm/sonicterm.toml` 与配置重载
 - [快捷键 / Keybindings](Keybindings) — 内置键位映射、绑定语法和 action
 - [主题 / Themes](Themes) — 内置配色和自定义主题

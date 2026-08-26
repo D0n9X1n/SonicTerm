@@ -177,7 +177,8 @@ rendering and immediately before copy.
 For an explicit alternate-screen copy, a successful clipboard write clears the
 selection. Clipboard failure preserves it so the user can retry. If content has
 become stale, SonicTerm clears the selection without copying and leaves the
-clipboard unchanged.
+clipboard unchanged. Operational rmux/tmux mouse ownership and OSC 52 setup are
+documented in [Usage](Usage).
 
 ### Grid storage and invariants
 
@@ -389,7 +390,8 @@ SGR 使用从 1 开始的 `CSI < Cb ; Cx ; Cy M`，释放使用小写 `m`。旧�
 的 ABA 切换。渲染前和复制前都会执行检查。
 
 显式复制备用屏幕选区时，剪贴板写入成功后清除选区；写入失败则保留，便于重试。
-若所选内容已经过期，SonicTerm 会清除选区但不复制，剪贴板保持不变。
+若所选内容已经过期，SonicTerm 会清除选区但不复制，剪贴板保持不变。rmux/tmux 的
+mouse ownership 与 OSC 52 实际配置见 [用法](Usage)。
 
 ### 网格存储与不变量
 
