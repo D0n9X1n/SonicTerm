@@ -931,12 +931,13 @@ impl App {
                 child.ime_cursor_throttle.reset();
                 child.request_redraw();
             }
-            WindowEvent::ScaleFactorChanged { scale_factor: dpi_scale, .. } => {
-                child.dpi_scale = dpi_scale;
-                if apply_dpi_to_renderer_if_present(&mut child.renderer, dpi_scale) {
-                    crate::app::apply_window_state_minimum(child);
-                    child.request_redraw();
-                }
+            WindowEvent::ScaleFactorChanged { scale_factor: dpi_scale, mut inner_size_writer } => {
+                // When: ScaleFactorChanged arrives for a child, commit the same synchronous physical target as the main path.
+                let _ = crate::app::apply_window_dpi_transition(
+                    child,
+                    dpi_scale,
+                    &mut inner_size_writer,
+                );
             }
             WindowEvent::ModifiersChanged(m) => {
                 child.modifiers = m.state();

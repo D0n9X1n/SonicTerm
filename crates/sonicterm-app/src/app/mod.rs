@@ -27,7 +27,7 @@ use sonicterm_types::{
 use sonicterm_vt::vt::{CommandEvent, MouseTracking, Parser};
 use winit::{
     application::ApplicationHandler,
-    event::WindowEvent,
+    event::{InnerSizeWriter, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoopProxy},
     keyboard::ModifiersState,
     window::{Window, WindowAttributes, WindowId},
@@ -280,6 +280,158 @@ pub fn minimum_terminal_inner_size(
     let height =
         (f32::from(MIN_WINDOW_ROWS) * cell_h + top_inset + bottom_inset + padding_bottom).ceil();
     winit::dpi::PhysicalSize::new(width.max(1.0) as u32, height.max(1.0) as u32)
+}
+
+/// Resolve one DPI transition to a bounded physical inner size.
+///
+/// The current physical size is projected through the old and new scales to
+/// preserve logical geometry. The live terminal minimum wins, while the
+/// destination monitor's available inner area caps the result so a low-to-high
+/// DPI move cannot create an unreachable native window.
+#[must_use]
+fn dpi_transition_inner_size(
+    current: winit::dpi::PhysicalSize<u32>,
+    old_scale: f64,
+    new_scale: f64,
+    minimum: winit::dpi::PhysicalSize<u32>,
+    available_inner: winit::dpi::PhysicalSize<u32>,
+) -> winit::dpi::PhysicalSize<u32> {
+    let suggested =
+        current.to_logical::<f64>(old_scale.max(0.1)).to_physical::<u32>(new_scale.max(0.1));
+    let upper_width = available_inner.width.max(minimum.width);
+    let upper_height = available_inner.height.max(minimum.height);
+    winit::dpi::PhysicalSize::new(
+        suggested.width.max(minimum.width).min(upper_width),
+        suggested.height.max(minimum.height).min(upper_height),
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn destination_available_inner_size(
+    window: &Window,
+    old_scale: f64,
+    new_scale: f64,
+    minimum: winit::dpi::PhysicalSize<u32>,
+) -> winit::dpi::PhysicalSize<u32> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+
+    let outer = window.outer_size();
+    let inner = window.inner_size();
+    let decoration_scale = new_scale.max(0.1) / old_scale.max(0.1);
+    let decoration_width =
+        (f64::from(outer.width.saturating_sub(inner.width)) * decoration_scale).ceil() as u32;
+    let decoration_height =
+        (f64::from(outer.height.saturating_sub(inner.height)) * decoration_scale).ceil() as u32;
+    let Ok(handle) = window.window_handle() else {
+        // When: no native handle is available, preserve the minimum without inventing a monitor cap.
+        return winit::dpi::PhysicalSize::new(u32::MAX, u32::MAX);
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        // When: the handle is not Win32, this Windows-only monitor query cannot classify it.
+        return winit::dpi::PhysicalSize::new(u32::MAX, u32::MAX);
+    };
+    let hwnd = windows::Win32::Foundation::HWND(handle.hwnd.get() as *mut _);
+    let monitor =
+        // SAFETY: hwnd is the live winit window; the API returns an opaque monitor handle.
+        unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    let mut info =
+        MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    if !
+        // SAFETY: info points to initialized writable storage with cbSize set as required.
+        unsafe { GetMonitorInfoW(monitor, &mut info) }
+        .as_bool()
+    {
+        // When: GetMonitorInfoW fails, preserve the minimum without applying an unproven cap.
+        return winit::dpi::PhysicalSize::new(u32::MAX, u32::MAX);
+    }
+    let work_width = u32::try_from(info.rcWork.right.saturating_sub(info.rcWork.left)).unwrap_or(0);
+    let work_height =
+        u32::try_from(info.rcWork.bottom.saturating_sub(info.rcWork.top)).unwrap_or(0);
+    winit::dpi::PhysicalSize::new(
+        work_width.saturating_sub(decoration_width).max(minimum.width),
+        work_height.saturating_sub(decoration_height).max(minimum.height),
+    )
+}
+
+#[cfg(not(target_os = "windows"))]
+fn destination_available_inner_size(
+    _window: &Window,
+    _old_scale: f64,
+    _new_scale: f64,
+    _minimum: winit::dpi::PhysicalSize<u32>,
+) -> winit::dpi::PhysicalSize<u32> {
+    winit::dpi::PhysicalSize::new(u32::MAX, u32::MAX)
+}
+
+/// Apply one scale-factor transition to native, renderer, and pane geometry.
+fn apply_window_dpi_transition(
+    window: &mut WindowState,
+    dpi_scale: f64,
+    inner_size_writer: &mut InnerSizeWriter,
+) -> Option<winit::dpi::PhysicalSize<u32>> {
+    let old_scale = window.dpi_scale;
+    window.dpi_scale = dpi_scale;
+    let native = window.window.as_ref()?.clone();
+    let renderer = window.renderer.as_mut()?;
+    let old_inner = native.inner_size();
+    renderer.set_scale_factor(dpi_scale as f32);
+    let suggested =
+        old_inner.to_logical::<f64>(old_scale.max(0.1)).to_physical::<u32>(dpi_scale.max(0.1));
+
+    let (cell_w, cell_h) = renderer.cell_size();
+    let minimum = minimum_terminal_inner_size(
+        cell_w,
+        cell_h,
+        renderer.padding_left_px(),
+        renderer.padding_right_px(),
+        renderer.top_inset(),
+        renderer.bottom_inset(),
+        renderer.padding_bottom_px(),
+    );
+    native.set_min_inner_size(Some(minimum));
+    if native.is_maximized() || native.fullscreen().is_some() {
+        // When: native is maximized or fullscreen, propagate new metrics while Windows owns native sizing.
+        child_window::resize_visible_panes_in_child(window);
+        window.ime_cursor_throttle.reset();
+        native.request_redraw();
+        return None;
+    }
+    let available = destination_available_inner_size(&native, old_scale, dpi_scale, minimum);
+    let target = dpi_transition_inner_size(old_inner, old_scale, dpi_scale, minimum, available);
+    if !renderer.try_resize(target.width, target.height) {
+        // When: try_resize rejects target, leave the native writer untouched and await Resized.
+        return None;
+    }
+    if let Err(error) = inner_size_writer.request_inner_size(target) {
+        // When: request_inner_size returns error, restore the renderer extent before returning.
+        let _ = renderer.try_resize(old_inner.width, old_inner.height);
+        tracing::warn!(
+            ?error,
+            old_scale,
+            new_scale = dpi_scale,
+            ?old_inner,
+            ?target,
+            "DPI transition size rejected"
+        );
+        return None;
+    }
+    child_window::resize_visible_panes_in_child(window);
+    window.ime_cursor_throttle.reset();
+    tracing::info!(
+        old_scale,
+        new_scale = dpi_scale,
+        ?old_inner,
+        ?suggested,
+        ?minimum,
+        ?available,
+        ?target,
+        "DPI transition synchronized"
+    );
+    window.request_redraw();
+    Some(target)
 }
 
 /// Refresh one native window's minimum from its live renderer geometry.

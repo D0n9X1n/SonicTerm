@@ -113,6 +113,11 @@ correctness, not only speed.
 - Windows software glyph presentation stabilizes NDC roundoff at integer and
   half-pixel origins before one-to-one raster placement. The row glyph cache also
   keys the viewport row slot because cached instances carry screen coordinates.
+- A display-scale transition commits one physical inner size through winit's
+  event-scoped writer. That size preserves logical geometry where it fits, stays
+  above the 30×10 terminal minimum, and is capped by the destination monitor work
+  area; renderer surface, pane grids/PTYs, IME geometry, and redraw follow the
+  same target before Windows applies `WM_DPICHANGED`.
 
 The event-loop thread collects a complete frame without waiting on the VT
 worker. It uses `try_lock` for every active-tab parser and for required
@@ -142,6 +147,18 @@ It removes only a coherent multi-row side that ends in a lower-right frame
 corner. On Windows, a successful OSC 52 write gets one delayed reassertion only
 when the clipboard has reverted to the exact text observed before that write;
 a newer or unreadable clipboard owner is never overwritten.
+
+Nested applications under rmux/tmux emit OSC 52 through `DCS tmux` passthrough.
+Trusted sessions require both options; `set-clipboard` alone does not relay the
+wrapper:
+
+```tmux
+set -s set-clipboard on
+set -g allow-passthrough on
+```
+
+Both options trust pane output. Arbitrary DCS passthrough remains outside
+SonicTerm's OSC 52 parser; the multiplexer must validate and unwrap it.
 
 CAN and SUB cancel an active escape sequence. The parser resets escape
 accounting before a cancelled DCS or APC media sequence can emit a partial
@@ -386,6 +403,9 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
   也不清除脏行。
 - Windows 软件字形呈现会在一对一光栅定位前，稳定 NDC 反算在整数与半像素原点附近的误差。
   行字形缓存还会把视口行槽纳入键值，因为缓存实例携带屏幕坐标。
+- 显示缩放切换会通过 winit 的事件内 writer 一次提交一个物理 inner size。该尺寸在可容纳时
+  保持逻辑几何，不低于 30×10 终端下限，并受目标显示器 work area 限制；renderer surface、
+  pane grid/PTY、IME 几何与重绘都在 Windows 应用 `WM_DPICHANGED` 前跟随同一个目标。
 
 事件循环线程获取完整帧时不会等待 VT 工作线程。它对活动标签页的每个解析器和所需内联图像
 存储使用 `try_lock`。任一锁不可用时，代码释放已经取得的所有保护对象，记录待重绘状态，
@@ -407,6 +427,17 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
 复制到剪贴板时会保留孤立或不完整的右边框线。只有连贯的多行侧边框，并且最终以右下角
 框线字符收尾时，才会删除该边框。在 Windows 上，成功的 OSC 52 写入最多只会延迟重写一次，
 且仅当剪贴板回到写入前读取到的同一文本时执行；新的或无法读取的剪贴板所有者不会被覆盖。
+
+rmux/tmux 内的程序会通过 `DCS tmux` passthrough 发出 OSC 52。可信会话必须同时启用以下
+两项；只启用 `set-clipboard` 不会转发该 wrapper：
+
+```tmux
+set -s set-clipboard on
+set -g allow-passthrough on
+```
+
+两项设置都表示信任 pane 输出。任意 DCS passthrough 不进入 SonicTerm 的 OSC 52 解析器；
+multiplexer 必须先验证并解包。
 
 CAN 和 SUB 会取消当前转义序列。解析器会先重置转义记账，防止被取消的 DCS 或 APC 媒体
 序列输出不完整图像。主机取消停滞捕获后，解析器会丢弃剩余负载直到结束边界，不会把它打印
