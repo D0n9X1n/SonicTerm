@@ -24,6 +24,53 @@ fn minimum_terminal_inner_size_preserves_thirty_by_ten_cells() {
     assert_eq!(crate::app::MIN_WINDOW_ROWS, 10);
 }
 
+/// DPI transitions preserve logical size while applying the new physical minimum.
+#[test]
+fn dpi_transition_size_preserves_logical_geometry_and_minimum() {
+    let low_to_high = crate::app::dpi_transition_inner_size(
+        winit::dpi::PhysicalSize::new(800, 600),
+        1.0,
+        1.75,
+        winit::dpi::PhysicalSize::new(700, 500),
+        winit::dpi::PhysicalSize::new(1600, 900),
+    );
+    assert_eq!(low_to_high, winit::dpi::PhysicalSize::new(1400, 900));
+
+    let high_to_low = crate::app::dpi_transition_inner_size(
+        winit::dpi::PhysicalSize::new(1400, 900),
+        1.75,
+        1.0,
+        winit::dpi::PhysicalSize::new(700, 500),
+        winit::dpi::PhysicalSize::new(1600, 900),
+    );
+    assert_eq!(high_to_low, winit::dpi::PhysicalSize::new(800, 514));
+}
+
+/// Main and child scale handlers synchronously commit the same transition policy.
+#[test]
+fn main_and_child_scale_handlers_use_inner_size_writer() {
+    let main = include_str!("window_event.rs");
+    let child = include_str!("child_window.rs");
+    let shared = include_str!("mod.rs");
+
+    for source in [main, child] {
+        assert!(source.contains("inner_size_writer"));
+        assert!(source.contains("apply_window_dpi_transition("));
+    }
+    assert!(shared.contains("native.is_maximized() || native.fullscreen().is_some()"));
+    let renderer_resize = shared.find("renderer.try_resize(target.width, target.height)").unwrap();
+    let native_resize = shared.find("inner_size_writer.request_inner_size(target)").unwrap();
+    assert!(renderer_resize < native_resize, "renderer rejection must precede native commit");
+}
+
+/// Canonical rmux instructions name both application-passthrough requirements.
+#[test]
+fn rmux_osc52_documentation_enables_clipboard_and_passthrough() {
+    let internals = include_str!("../../../../wiki/Architecture-Internals.md");
+    assert!(internals.matches("set -s set-clipboard on").count() >= 2);
+    assert!(internals.matches("set -g allow-passthrough on").count() >= 2);
+}
+
 /// Every terminal-window constructor installs the shared live-renderer floor.
 #[test]
 fn all_terminal_window_creation_paths_apply_the_minimum() {
@@ -43,8 +90,8 @@ fn live_metric_change_paths_refresh_the_minimum() {
     let child_events = include_str!("child_window.rs");
     let config = include_str!("config_apply.rs");
 
-    assert!(main_events.contains("apply_window_state_minimum(ws)"));
-    assert!(child_events.contains("apply_window_state_minimum(child)"));
+    assert!(main_events.contains("apply_window_dpi_transition("));
+    assert!(child_events.contains("apply_window_dpi_transition("));
     assert!(config.matches("refresh_all_window_minimums();").count() >= 3);
 }
 

@@ -1291,18 +1291,18 @@ impl App {
                 }
             }
 
-            WindowEvent::ScaleFactorChanged { scale_factor: dpi_scale, .. } => {
-                if let Some(ws) = self.main_mut() {
-                    ws.dpi_scale = dpi_scale;
-                }
+            WindowEvent::ScaleFactorChanged { scale_factor: dpi_scale, mut inner_size_writer } => {
+                // When: ScaleFactorChanged arrives, synchronously bind native and renderer geometry to one physical target.
                 if let Some(id) = self.main_window_id {
+                    // When: main_window_id identifies the live main window, update exactly that state.
                     if let Some(ws) = self.windows.get_mut(&id) {
-                        crate::app::apply_dpi_to_renderer_if_present(&mut ws.renderer, dpi_scale);
-                        crate::app::apply_window_state_minimum(ws);
+                        // When: windows still contains id, apply the shared transition before winit commits WM_DPICHANGED.
+                        let _ = crate::app::apply_window_dpi_transition(
+                            ws,
+                            dpi_scale,
+                            &mut inner_size_writer,
+                        );
                     }
-                }
-                if let Some(w) = self.main_window() {
-                    w.request_redraw();
                 }
             }
 
