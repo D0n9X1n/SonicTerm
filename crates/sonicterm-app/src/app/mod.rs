@@ -1971,6 +1971,21 @@ pub struct PendingTearOut {
     pub drop_screen_pos: Option<(i32, i32)>,
 }
 
+/// Delay allowing a failing Windows clipboard helper to release its open handle.
+#[cfg(target_os = "windows")]
+const OSC52_CLIPBOARD_REASSERT_DELAY: Duration = Duration::from_millis(150);
+
+#[cfg(target_os = "windows")]
+#[derive(Debug)]
+pub(super) struct PendingOsc52Reassert {
+    /// Clipboard text to restore after the helper releases the clipboard.
+    text: String,
+    /// Clipboard value observed before the OSC write.
+    previous_text: Option<String>,
+    /// Event-loop deadline for the one permitted reassertion.
+    due: Instant,
+}
+
 #[doc(hidden)]
 pub struct App {
     pub(super) theme: Theme,
@@ -2002,6 +2017,9 @@ pub struct App {
     // split-borrow the fields disjointly; taking two `main_*_mut()` accessors
     // together is a double borrow of the same map entry.
     pub(super) clipboard: Option<Clipboard>,
+    #[cfg(target_os = "windows")]
+    /// One delayed OSC 52 write that survives a failing clipboard helper's cleanup.
+    pub(super) pending_osc52_reassert: Option<PendingOsc52Reassert>,
     /// Test-only in-memory clipboard override for integration tests that need
     /// to observe copy/paste routing without depending on a desktop clipboard
     /// service. `None` means production arboard behavior; `Some(_)` means reads
@@ -2504,6 +2522,8 @@ impl App {
             configured_weight_scale,
             keymap,
             clipboard: Clipboard::new().ok(),
+            #[cfg(target_os = "windows")]
+            pending_osc52_reassert: None,
             test_clipboard_text: None,
             test_clipboard_write_failure: false,
             test_pty_writes: Arc::new(Mutex::new(Vec::new())),

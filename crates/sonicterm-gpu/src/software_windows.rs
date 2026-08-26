@@ -314,7 +314,7 @@ impl WindowsSoftwareFrame {
             x
         };
         let draw_y = if one_to_one {
-            y.round()
+            stabilize_half_pixel_origin(y).round()
         } else {
             // When: one_to_one is false the vertical origin stays fractional for the same
             // reason, keeping rows aligned with the scaled sample coordinates.
@@ -534,6 +534,18 @@ fn premul_linear_rgba_to_straight_srgb(color: [f32; 4]) -> [f32; 3] {
 
 fn bgra8_to_premul_f32(px: &[u8]) -> [f32; 4] {
     [px[0] as f32 / 255.0, px[1] as f32 / 255.0, px[2] as f32 / 255.0, px[3] as f32 / 255.0]
+}
+
+fn stabilize_half_pixel_origin(value: f32) -> f32 {
+    // NDC reconstruction can place one shared half-pixel edge on opposite sides
+    // of `round` for different glyph heights; recover only that numerical noise.
+    let nearest_half = (value * 2.0).round() * 0.5;
+    if (value - nearest_half).abs() <= 0.001 {
+        nearest_half
+    } else {
+        // When: value differs materially from nearest_half, preserve the intended fraction.
+        value
+    }
 }
 
 #[cfg(test)]

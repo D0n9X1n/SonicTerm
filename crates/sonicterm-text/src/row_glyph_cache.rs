@@ -225,8 +225,8 @@ impl RowGlyphCache {
 /// Compute the cache key for a row.
 ///
 /// Inputs folded in:
-/// * `view_top_abs + r` — moving the viewport reuses cached rows
-///   whose absolute position matches.
+/// * `view_top_abs + r` — identifies the row's scrollback content.
+/// * `r` — identifies its viewport Y slot because cached glyphs carry screen coordinates.
 /// * row cell contents (Cell already derives Hash).
 /// * `style_rev` — opaque counter bumped on theme / palette / default
 ///   fg/bg changes; lets the renderer invalidate without iterating.
@@ -282,6 +282,7 @@ where
     let mut h = DefaultHasher::new();
     let row_abs = view_top_abs + r as u64;
     row_abs.hash(&mut h);
+    r.hash(&mut h);
     for cell in row_cells {
         cell.borrow().hash(&mut h);
     }

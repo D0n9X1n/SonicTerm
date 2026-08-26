@@ -161,6 +161,10 @@ impl App {
     // blink wake, which the following do_about_to_wait pass corrects.
     fn wake_deadline(&self, notification_wake: Option<Instant>) -> Option<Instant> {
         let mut next: Option<Instant> = notification_wake;
+        #[cfg(target_os = "windows")]
+        if let Some(pending) = self.pending_osc52_reassert.as_ref() {
+            next = Some(next.map_or(pending.due, |current| current.min(pending.due)));
+        }
         // Wake when the Cmd+Q confirmation window expires so a stale first press
         // does not make a much later Cmd+Q quit unexpectedly.
         if let Some(at) = self.quit_hold.deadline() {
@@ -240,6 +244,8 @@ impl App {
         if matches!(cause, winit::event::StartCause::ResumeTimeReached { .. }) {
             // When: cause matches ResumeTimeReached; winit sends nothing further on
             // its own, so every deferred repaint must be re-requested here.
+            #[cfg(target_os = "windows")]
+            self.reassert_osc52_clipboard_if_due(Instant::now());
 
             // A wake armed solely to sample memory draws nothing.
             //
@@ -353,7 +359,39 @@ impl App {
     }
 
     pub(super) fn handle_clipboard_write(&mut self, text: String) {
-        self.set_clipboard_text(text);
+        #[cfg(not(target_os = "windows"))]
+        let _ = self.set_clipboard_text(text);
+        #[cfg(target_os = "windows")]
+        {
+            let previous_text = self.clipboard_text_for_reassert();
+            if !self.set_clipboard_text(text.clone()) {
+                // When: set_clipboard_text returns false, no successful value exists to reassert.
+                return;
+            }
+            self.pending_osc52_reassert = Some(super::PendingOsc52Reassert {
+                text,
+                previous_text,
+                due: Instant::now() + super::OSC52_CLIPBOARD_REASSERT_DELAY,
+            });
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(super) fn reassert_osc52_clipboard_if_due(&mut self, now: Instant) {
+        if self.pending_osc52_reassert.as_ref().is_none_or(|pending| pending.due > now) {
+            // When: pending_osc52_reassert is absent or due is after now, do nothing.
+            return;
+        }
+        let pending = self.pending_osc52_reassert.take().expect("due reassertion present");
+        let Some(previous_text) = pending.previous_text else {
+            // When: previous_text was unavailable, avoid overwriting an unreadable clipboard owner.
+            return;
+        };
+        if self.clipboard_text_for_reassert().as_deref() != Some(previous_text.as_str()) {
+            // When: clipboard_text_for_reassert differs from previous_text, preserve that newer owner.
+            return;
+        }
+        let _ = self.set_clipboard_text(pending.text);
     }
 
     pub(super) fn handle_script_draft_rejected(&mut self, message: String) {
