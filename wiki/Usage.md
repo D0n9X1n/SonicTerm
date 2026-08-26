@@ -94,37 +94,107 @@ Terminal applications may also write UTF-8 text through OSC 52 target `c` up to
 512 KiB. Clipboard reads/queries, malformed Base64, other selection targets, and
 oversized writes are ignored.
 
-#### Copilot CLI inside rmux
-
-Copilot CLI uses mouse tracking for transcript selection and for scrolling while
-a drag reaches an edge. When it runs inside rmux, leave rmux's standard
-conditional pane bindings in place so a mouse-aware nested application receives
-the complete press, drag, release, and wheel stream:
-
-```tmux
-set -g mouse on
-bind -n MouseDown1Pane { select-pane -t=; send -M }
-bind -n MouseDrag1Pane { if -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' { send -M } { copy-mode -M } }
-set -s set-clipboard on
-```
-
-With these settings, Copilot owns selection and can extend it through its virtual
-scrolling transcript. rmux relays Copilot's OSC 52 clipboard write to SonicTerm,
-which writes it to the native clipboard. `set-clipboard on` trusts programs in
-rmux panes to replace that clipboard; keep rmux's safer default if pane output is
-not trusted.
-
-Do not force every `MouseDrag1Pane` into rmux `copy-mode -M` for this workflow.
-That makes rmux, rather than Copilot, own the drag and wheel; scrolling then walks
-rmux history outside Copilot's live alternate screen. A Shift-drag remains the
-SonicTerm-local fallback, but it can select only the cells currently rendered by
-SonicTerm and cannot drive Copilot's virtual transcript scrolling.
-
 READONLY mode blocks terminal input while you inspect history. Arrow keys or
 `h/j/k/l` move its reading cursor; `w/b`, `0/$`, and `g` / `G` move by word, line, and buffer. Press `Escape` to exit. READONLY does not create a text
 selection. Search, tab switching, pane focus, update checks, and saving current
 font settings remain available. See [Keybindings](Keybindings) for the exact
 controls and whitelist.
+
+### rmux and tmux integration
+
+SonicTerm starts child PTYs with `TERM=xterm-256color` and
+`COLORTERM=truecolor`. Configure rmux/tmux to advertise `tmux-256color` to
+programs inside panes; do not change SonicTerm itself to `TERM=tmux-256color`:
+
+```tmux
+set -g default-terminal "tmux-256color"
+set -as terminal-features ",tmux-256color:RGB"
+```
+
+rmux needs a separate outer-terminal capability to relay the active pane's
+working directory to SonicTerm. Enable title/path updates and advertise OSC 7
+for the `xterm-256color` terminal that SonicTerm exposes to rmux:
+
+```tmux
+set -g set-titles on
+set -as terminal-features ",xterm-256color:RGB:osc7"
+```
+
+The shell inside each pane must emit OSC 7 when its working directory changes.
+rmux records that report and, with both settings above, emits the active pane's
+path to SonicTerm. `#{pane_current_path}` is process-inspection metadata for rmux
+formats; it is not substituted for a missing shell report. After changing
+`terminal-features`, reload the configuration and detach/reattach so the outer
+client capabilities are resolved again, then render a fresh prompt.
+
+This relay lets SonicTerm resolve `src/main.rs`, `./file`, and bare names against
+the exact pane. On Windows and Linux, hold `Ctrl` while pointing at the text; an
+eligible target becomes underlined and can be clicked. SonicTerm still fails
+closed when OSC 7 is absent, malformed, or names a foreign host: it never guesses
+from process CWD, rmux status metadata, another pane, or a named user's home.
+Absolute paths do not require OSC 7.
+
+The outer terminal, multiplexer, and nested TUI form three independent input and
+clipboard layers. The layer that owns the initial mouse press owns the complete
+gesture until release:
+
+| Gesture or copy path | Owner | Result |
+| --- | --- | --- |
+| Unmodified drag while the nested app requests mouse tracking | Nested app through rmux/tmux | App selection and app-controlled edge scrolling |
+| Unmodified drag without nested mouse tracking, with multiplexer mouse mode on | rmux/tmux | Multiplexer copy-mode selection |
+| `Shift` held before mouse-down | SonicTerm | Local terminal selection of currently rendered cells |
+| Multiplexer copy command | rmux/tmux | Multiplexer buffer plus configured system/OSC 52 copy |
+| Nested app OSC 52 write | Nested app, relayed by the multiplexer | SonicTerm native clipboard write |
+
+For tmux-compatible rmux behavior, keep the standard conditional pane bindings
+instead of forcing every drag into copy mode:
+
+```tmux
+set -g mouse on
+bind -n MouseDown1Pane { select-pane -t=; send -M }
+bind -n MouseDrag1Pane { if -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' { send -M } { copy-mode -M } }
+```
+
+The equivalent tmux defaults select the pane, forward mouse reports when the
+inner program requests them, and enter copy mode otherwise. These semantics are
+important for TUIs with virtual transcripts, such as Copilot CLI: only the
+nested app can reveal additional transcript rows while a drag reaches an edge.
+If every `MouseDrag1Pane` is rebound to `copy-mode -M`, the wheel and drag belong
+to the multiplexer and can scroll into multiplexer history outside the app's live
+alternate screen.
+
+There are two clipboard paths:
+
+```tmux
+# Allow trusted pane applications and multiplexer copies to reach SonicTerm by OSC 52.
+set -s set-clipboard on
+
+# Optional alternative for rmux/tmux copy mode on Windows.
+set -s copy-command 'powershell -NoProfile -NonInteractive -Command "[Console]::InputEncoding=[Text.Encoding]::UTF8; Set-Clipboard -Value ([Console]::In.ReadToEnd())"'
+```
+
+`set-clipboard on` lets programs in panes replace the outer native clipboard;
+use it only for trusted pane output. The external `copy-command` path applies to
+multiplexer-owned copy mode. On Windows, it must declare UTF-8 input; `clip.exe`
+or a bare `$input | Set-Clipboard` can corrupt box drawing, CJK, accents, and
+emoji through the console code page.
+
+Troubleshooting:
+
+- If a drag highlights only while the button is held and disappears on release,
+  inspect which layer owns the press. A nested mouse-aware TUI may be drawing its
+  own transient selection.
+- If copy mode scrolls outside the nested TUI, restore the conditional
+  `MouseDrag1Pane` binding so the nested app owns mouse tracking and edge scroll.
+- If selection works but the native clipboard does not change, enable trusted
+  OSC 52 relay with `set-clipboard on`, or configure a UTF-8 `copy-command` for
+  multiplexer-owned copies.
+- Hold `Shift` before mouse-down for a SonicTerm-local fallback. It cannot drive
+  a nested application's virtual scrolling because SonicTerm sees only rendered
+  cells.
+
+See [Terminal IO and VT](Terminal-IO-and-VT) for the pointer-protocol and OSC 52
+boundaries.
 
 ### Open URLs and local targets
 
@@ -293,33 +363,94 @@ SonicTerm 会在复制前清除它。终端程序也可通过 OSC 52 的 `c` tar
 的 UTF-8 文字。剪贴板读取/查询、格式错误的 Base64、其它 selection target 和超限写入
 都会被忽略。
 
-#### 在 rmux 中运行 Copilot CLI
+READONLY 模式会在查看历史记录时阻止终端输入。方向键或 `h/j/k/l` 移动阅读光标；
+`w/b`、`0/$`、`g` / `G` 分别按单词、行和 buffer 移动。按 `Escape`
+退出。READONLY 不创建文字选区。搜索、切换标签页、切换 pane 焦点、检查更新和保存
+当前字体设置仍可使用。完整控制与允许列表见 [快捷键](Keybindings)。
 
-Copilot CLI 使用 mouse tracking 选择会话文字，并在拖动到边缘时滚动内容。它在 rmux
-中运行时，应保留 rmux 的标准条件式 pane 绑定，让支持鼠标的内层程序收到完整的按下、
-drag、松开与 wheel 事件流：
+### rmux 与 tmux 集成
+
+SonicTerm 启动子 PTY 时设置 `TERM=xterm-256color` 与
+`COLORTERM=truecolor`。rmux/tmux 应向 pane 内程序报告 `tmux-256color`；不要把
+SonicTerm 自身的 `TERM` 改成 `tmux-256color`：
+
+```tmux
+set -g default-terminal "tmux-256color"
+set -as terminal-features ",tmux-256color:RGB"
+```
+
+rmux 还需要单独声明外层终端能力，才能把活动 pane 的工作目录转发给 SonicTerm。
+请启用 title/path 更新，并为 SonicTerm 向 rmux 暴露的 `xterm-256color` 声明 OSC 7：
+
+```tmux
+set -g set-titles on
+set -as terminal-features ",xterm-256color:RGB:osc7"
+```
+
+每个 pane 内的 shell 必须在工作目录变化时发出 OSC 7。rmux 会记录该报告，并在上述
+两项设置都生效时把活动 pane 的路径发给 SonicTerm。`#{pane_current_path}` 是 rmux
+format 使用的进程检查元数据；shell 没有报告时，rmux 不会用它代替 OSC 7。修改
+`terminal-features` 后，请重新加载配置并 detach/reattach，让外层 client 重新解析能力，
+然后显示一次新 prompt。
+
+完成转发后，SonicTerm 才能相对于准确 pane 解析 `src/main.rs`、`./file` 和 bare name。
+Windows 与 Linux 上，指向文字时按住 `Ctrl`；可打开目标会显示下划线，随后可以点击。
+OSC 7 缺失、格式错误或声明远端 host 时，SonicTerm 仍会 fail closed：它不会从进程 CWD、
+rmux status 元数据、其它 pane 或命名用户 home 猜测目录。绝对路径不依赖 OSC 7。
+
+外层终端、multiplexer 和内层 TUI 是三个独立的输入与剪贴板层。第一次按下鼠标时
+取得所有权的层，会一直持有完整 gesture 直到松开：
+
+| Gesture 或复制路径 | 所有者 | 结果 |
+| --- | --- | --- |
+| 内层程序请求 mouse tracking 时的无修饰键 drag | 通过 rmux/tmux 交给内层程序 | 程序选区与程序控制的边缘滚动 |
+| 内层未请求 mouse tracking 且 multiplexer mouse mode 已开启时的无修饰键 drag | rmux/tmux | Multiplexer copy-mode 选区 |
+| mouse-down 前已按住 `Shift` | SonicTerm | 对当前已绘制 cell 建立本地终端选区 |
+| Multiplexer copy 命令 | rmux/tmux | Multiplexer buffer 加已配置的系统/OSC 52 复制 |
+| 内层程序发出 OSC 52 write | 内层程序，由 multiplexer 转发 | SonicTerm 写入原生剪贴板 |
+
+若要让 rmux 采用兼容 tmux 的行为，应保留标准条件式 pane 绑定，不要强制所有 drag
+都进入 copy mode：
 
 ```tmux
 set -g mouse on
 bind -n MouseDown1Pane { select-pane -t=; send -M }
 bind -n MouseDrag1Pane { if -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' { send -M } { copy-mode -M } }
-set -s set-clipboard on
 ```
 
-这些设置让 Copilot 持有选区，并可跨其虚拟滚动会话继续扩展。rmux 会把 Copilot 的
-OSC 52 剪贴板写入转发给 SonicTerm，再由 SonicTerm 写入原生剪贴板。
-`set-clipboard on` 也表示信任 rmux pane 内的程序改写剪贴板；若不信任 pane 输出，
-应保留 rmux 更安全的默认值。
+tmux 的等效默认规则会先选择 pane；内层程序请求 mouse report 时转发，否则进入 copy
+mode。对于 Copilot CLI 等具有虚拟会话记录的 TUI，这一点不能改变：drag 到边缘时，
+只有内层程序知道如何显示更多会话行。若把所有 `MouseDrag1Pane` 都改绑到
+`copy-mode -M`，drag 与 wheel 会归 multiplexer，并可能滚入应用 live alternate
+screen 之外的 multiplexer history。
 
-此工作流不要强制所有 `MouseDrag1Pane` 进入 rmux `copy-mode -M`。否则 drag 与 wheel
-会归 rmux，而不是 Copilot；滚动会进入 Copilot live alternate screen 之外的 rmux
-history。Shift-drag 仍可作为 SonicTerm 本地选区后备，但它只能选择 SonicTerm 当前已经
-绘制的 cell，不能驱动 Copilot 的虚拟会话滚动。
+剪贴板有两条路径：
 
-READONLY 模式会在查看历史记录时阻止终端输入。方向键或 `h/j/k/l` 移动阅读光标；
-`w/b`、`0/$`、`g` / `G` 分别按单词、行和 buffer 移动。按 `Escape`
-退出。READONLY 不创建文字选区。搜索、切换标签页、切换 pane 焦点、检查更新和保存
-当前字体设置仍可使用。完整控制与允许列表见 [快捷键](Keybindings)。
+```tmux
+# 允许可信 pane 程序和 multiplexer copy 通过 OSC 52 到达 SonicTerm。
+set -s set-clipboard on
+
+# Windows 上 rmux/tmux copy mode 的可选外部路径。
+set -s copy-command 'powershell -NoProfile -NonInteractive -Command "[Console]::InputEncoding=[Text.Encoding]::UTF8; Set-Clipboard -Value ([Console]::In.ReadToEnd())"'
+```
+
+`set-clipboard on` 允许 pane 内程序替换外层原生剪贴板，只应对可信 pane 输出开启。
+外部 `copy-command` 路径用于 multiplexer 自己持有的 copy mode。在 Windows 上，该命令
+必须声明 UTF-8 输入；`clip.exe` 或裸 `$input | Set-Clipboard` 可能经过 console code
+page 破坏框线字符、CJK、重音字符和 emoji。
+
+排查方法：
+
+- 若高亮只在按住鼠标时出现、松开即消失，先确认 press 归哪一层；支持鼠标的内层 TUI
+  可能正在绘制自己的临时选区。
+- 若 copy mode 滚出内层 TUI，请恢复条件式 `MouseDrag1Pane` 绑定，让内层程序持有 mouse
+  tracking 与边缘滚动。
+- 若可以选择但原生剪贴板不变，请用 `set-clipboard on` 开启可信 OSC 52 relay；若复制由
+  multiplexer 持有，则配置 UTF-8 `copy-command`。
+- mouse-down 前按住 `Shift` 可使用 SonicTerm 本地选区后备。它只能看到已绘制 cell，
+  因此不能驱动内层程序的虚拟滚动。
+
+Pointer protocol 与 OSC 52 边界见 [终端 IO 与 VT](Terminal-IO-and-VT)。
 
 ### 打开 URL 与本地目标
 
