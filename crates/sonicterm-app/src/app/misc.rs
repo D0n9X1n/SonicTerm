@@ -383,7 +383,20 @@ impl App {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    pub(super) fn clipboard_text_for_reassert(&mut self) -> Option<String> {
+        if let Some(text) = self.test_clipboard_text.as_ref() {
+            // When: test_clipboard_text contains text, expose the test clipboard snapshot.
+            return Some(text.clone());
+        }
+        self.clipboard.as_mut().and_then(|clipboard| clipboard.get_text().ok())
+    }
+
     pub(super) fn set_clipboard_text(&mut self, text: String) -> bool {
+        #[cfg(target_os = "windows")]
+        {
+            self.pending_osc52_reassert = None;
+        }
         if text.is_empty() {
             // When: text is empty; writing it would clear the user's clipboard,
             // so leave the previous contents intact.

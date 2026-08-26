@@ -9,6 +9,20 @@ fn row_hash_cells_accepts_owned_cells() {
     assert_ne!(hash, 0);
 }
 
+/// A cached absolute row must not replay coordinates from a different viewport slot.
+#[test]
+fn row_hash_distinguishes_screen_position_for_the_same_absolute_row() {
+    let cells = vec![Cell::plain('V', Color::Default, Color::Default, Default::default())];
+
+    let top_slot = row_hash_cells(10, 0, &cells, 1, 10.0, 20.0, 1.0, None);
+    let next_slot = row_hash_cells(9, 1, &cells, 1, 10.0, 20.0, 1.0, None);
+
+    assert_ne!(
+        top_slot, next_slot,
+        "one absolute row at two viewport Y positions carries different glyph geometry"
+    );
+}
+
 #[test]
 fn resizing_per_pane_to_differing_row_counts_thrashes_the_cache() {
     // Pins the BUG the renderer fix avoids: calling `resize(pane.rows)` once

@@ -450,6 +450,68 @@ fn one_to_one_sampling_is_size_based_not_fractional_position_based() {
     assert!(one_to_one);
 }
 
+/// One row baseline must survive NDC roundoff independently of each glyph's height.
+#[test]
+fn regular_glyph_heights_share_one_software_pixel_origin() {
+    let mut atlas = GlyphAtlas::new(2, 10);
+    let short = atlas
+        .get_or_insert(
+            GlyphKey::new('I', false, false),
+            &mut TileRasterizer(RasterTile {
+                width: 1,
+                height: 1,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 1.0,
+                coverage: vec![255],
+                is_color: false,
+                is_subpixel: false,
+            }),
+        )
+        .expect("short regular glyph inserts");
+    let tall = atlas
+        .get_or_insert(
+            GlyphKey::new('V', false, false),
+            &mut TileRasterizer(RasterTile {
+                width: 1,
+                height: 9,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 1.0,
+                coverage: vec![255; 9],
+                is_color: false,
+                is_subpixel: false,
+            }),
+        )
+        .expect("tall regular glyph inserts");
+    let mut frame = WindowsSoftwareFrame::new(2, 65, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+
+    frame.draw_glyphs(
+        &atlas,
+        &[
+            GlyphInstance {
+                rect: px_to_ndc(0.0, 0.5, 1.0, 1.0, 2.0, 65.0),
+                uv: short.uv,
+                color: [1.0; 4],
+                flags: [0.0; 4],
+            },
+            GlyphInstance {
+                rect: px_to_ndc(1.0, 0.5, 1.0, 9.0, 2.0, 65.0),
+                uv: tall.uv,
+                color: [1.0; 4],
+                flags: [0.0; 4],
+            },
+        ],
+    );
+
+    let first_ink_row = |x| (0..65).find(|&y| frame.pixel_bgra(x, y) != [0, 0, 0, 255]);
+    assert_eq!(
+        first_ink_row(0),
+        first_ink_row(1),
+        "regular glyphs emitted from one baseline must not land on different software rows"
+    );
+}
+
 /// Software presentation gives unequal hollow and solid source tiles equal outer bounds.
 ///
 /// Separate frames make the destination mask directly comparable while retaining one untouched

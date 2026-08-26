@@ -141,6 +141,22 @@ fn no_armed_contributor_parks_the_loop() {
     assert_eq!(app.wake_deadline(None), None);
 }
 
+/// The Windows OSC 52 repair participates in the event-loop wake fold.
+#[cfg(target_os = "windows")]
+#[test]
+fn pending_osc52_reassertion_arms_its_deadline() {
+    let mut app = app_with_main_window();
+    app.__test_set_memory_clipboard("old");
+    app.handle_clipboard_write("Copilot selection".into());
+    let due = app
+        .pending_osc52_reassert
+        .as_ref()
+        .expect("successful OSC 52 write arms a reassertion")
+        .due;
+
+    assert_eq!(app.wake_deadline(None), Some(due));
+}
+
 /// Drive a run of frames and return the gap between each consecutive pair.
 ///
 /// Each iteration asks the pacing path for the next wake, then advances

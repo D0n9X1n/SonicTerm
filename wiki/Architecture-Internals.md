@@ -110,6 +110,9 @@ correctness, not only speed.
   presentation also composes a full CPU surface.
 - `RenderMode::Noop` is available only under resolved degradation when no visible
   signal changed. It does not present or clear dirty rows.
+- Windows software glyph presentation stabilizes NDC roundoff at integer and
+  half-pixel origins before one-to-one raster placement. The row glyph cache also
+  keys the viewport row slot because cached instances carry screen coordinates.
 
 The event-loop thread collects a complete frame without waiting on the VT
 worker. It uses `try_lock` for every active-tab parser and for required
@@ -136,7 +139,9 @@ limit releases excess `VecDeque` capacity.
 
 Clipboard serialization keeps isolated or incomplete right-edge box drawing.
 It removes only a coherent multi-row side that ends in a lower-right frame
-corner.
+corner. On Windows, a successful OSC 52 write gets one delayed reassertion only
+when the clipboard has reverted to the exact text observed before that write;
+a newer or unreadable clipboard owner is never overwritten.
 
 CAN and SUB cancel an active escape sequence. The parser resets escape
 accounting before a cancelled DCS or APC media sequence can emit a partial
@@ -379,6 +384,8 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
 - 已降级的 wgpu 帧只要有工作，就重画整个表面。Windows 降级呈现也会合成完整 CPU 表面。
 - 只有最终降级状态启用且没有可见信号变化时，才能使用 `RenderMode::Noop`。该路径不呈现，
   也不清除脏行。
+- Windows 软件字形呈现会在一对一光栅定位前，稳定 NDC 反算在整数与半像素原点附近的误差。
+  行字形缓存还会把视口行槽纳入键值，因为缓存实例携带屏幕坐标。
 
 事件循环线程获取完整帧时不会等待 VT 工作线程。它对活动标签页的每个解析器和所需内联图像
 存储使用 `try_lock`。任一锁不可用时，代码释放已经取得的所有保护对象，记录待重绘状态，
@@ -398,7 +405,8 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
 `VecDeque` 容量。
 
 复制到剪贴板时会保留孤立或不完整的右边框线。只有连贯的多行侧边框，并且最终以右下角
-框线字符收尾时，才会删除该边框。
+框线字符收尾时，才会删除该边框。在 Windows 上，成功的 OSC 52 写入最多只会延迟重写一次，
+且仅当剪贴板回到写入前读取到的同一文本时执行；新的或无法读取的剪贴板所有者不会被覆盖。
 
 CAN 和 SUB 会取消当前转义序列。解析器会先重置转义记账，防止被取消的 DCS 或 APC 媒体
 序列输出不完整图像。主机取消停滞捕获后，解析器会丢弃剩余负载直到结束边界，不会把它打印
