@@ -126,6 +126,11 @@ Their GPU mirrors are 1×1 placeholders while the GDI presenter is active.
 Returning to GPU presentation rebuilds full-size GPU atlas textures, resets
 atlas metadata and UV-bearing caches, and forces a full redraw.
 
+Glyph sampling resolves one-to-one geometry independently on each axis. A glyph
+that needs horizontal resampling still uses the stabilized vertical origin when
+its height is native-sized, so adjacent letters sharing a baseline cannot land
+on different software pixel rows merely because their bitmap widths differ.
+
 ### Retained pixels and damage
 
 Damage is a correctness boundary, not only an optimization. Every VT/grid
@@ -298,6 +303,10 @@ Windows 上启用降级时，`WindowsSoftwareFrame` 把同一套上游生成的�
 软件绘制仍从 CPU 字形图集和图像图集取样；GDI 呈现启用时，它们的 GPU 镜像是 1×1
 占位符。回到 GPU 呈现时会重建全尺寸 GPU 图集纹理、重置图集元数据与携带 UV 的缓存，
 并强制完整重绘。
+
+字形取样会分别判断水平轴和垂直轴是否一比一。即使某个字形需要水平重采样，只要高度
+保持原生尺寸，就仍使用稳定后的垂直原点；因此共享同一基线的相邻字母不会仅因位图宽度
+不同而落到不同的软件像素行。
 
 ### 保留像素与损伤区域
 

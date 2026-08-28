@@ -512,6 +512,68 @@ fn regular_glyph_heights_share_one_software_pixel_origin() {
     );
 }
 
+/// Horizontal-only glyph scaling must not change its vertical software-pixel origin.
+#[test]
+fn horizontally_scaled_glyphs_keep_their_shared_vertical_origin() {
+    let mut atlas = GlyphAtlas::new(20, 10);
+    let wide = atlas
+        .get_or_insert(
+            GlyphKey::new('P', false, false),
+            &mut TileRasterizer(RasterTile {
+                width: 10,
+                height: 10,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 10.0,
+                coverage: vec![255; 100],
+                is_color: false,
+                is_subpixel: false,
+            }),
+        )
+        .expect("wide glyph inserts");
+    let exact = atlas
+        .get_or_insert(
+            GlyphKey::new('R', false, false),
+            &mut TileRasterizer(RasterTile {
+                width: 9,
+                height: 10,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 9.0,
+                coverage: vec![255; 90],
+                is_color: false,
+                is_subpixel: false,
+            }),
+        )
+        .expect("exact glyph inserts");
+    let mut frame = WindowsSoftwareFrame::new(40, 100, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+
+    frame.draw_glyphs(
+        &atlas,
+        &[
+            GlyphInstance {
+                rect: px_to_ndc(0.0, 1.5, 9.0, 10.0, 40.0, 100.0),
+                uv: wide.uv,
+                color: [1.0; 4],
+                flags: [0.0; 4],
+            },
+            GlyphInstance {
+                rect: px_to_ndc(20.0, 1.5, 9.0, 10.0, 40.0, 100.0),
+                uv: exact.uv,
+                color: [1.0; 4],
+                flags: [0.0; 4],
+            },
+        ],
+    );
+
+    let first_ink_row = |x| (0..100).find(|&y| frame.pixel_bgra(x, y) != [0, 0, 0, 255]);
+    assert_eq!(
+        first_ink_row(0),
+        first_ink_row(20),
+        "horizontal resampling must not choose a different vertical rounding path"
+    );
+}
+
 /// Software presentation gives unequal hollow and solid source tiles equal outer bounds.
 ///
 /// Separate frames make the destination mask directly comparable while retaining one untouched

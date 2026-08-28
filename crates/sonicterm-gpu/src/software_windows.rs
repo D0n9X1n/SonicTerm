@@ -305,19 +305,19 @@ impl WindowsSoftwareFrame {
         let src_h_u = (ay1 - ay0).max(1);
         let src_w = src_w_u as f32;
         let src_h = src_h_u as f32;
-        let one_to_one = (w - src_w).abs() < 0.01 && (h - src_h).abs() < 0.01;
-        let draw_x = if one_to_one {
+        let one_to_one_x = (w - src_w).abs() < 0.01;
+        let one_to_one_y = (h - src_h).abs() < 0.01;
+        let one_to_one = one_to_one_x && one_to_one_y;
+        let draw_x = if one_to_one_x {
             x.round()
         } else {
-            // When: one_to_one is false the glyph is being scaled, so the fractional
-            // origin is kept and the sampler interpolates across the destination span.
+            // When: `one_to_one_x` is false, keep X fractional for horizontal resampling.
             x
         };
-        let draw_y = if one_to_one {
+        let draw_y = if one_to_one_y {
             stabilize_half_pixel_origin(y).round()
         } else {
-            // When: one_to_one is false the vertical origin stays fractional for the same
-            // reason, keeping rows aligned with the scaled sample coordinates.
+            // When: `one_to_one_y` is false, keep Y fractional for vertical resampling.
             y
         };
         // Rasterize destination pixels whose centers lie inside the glyph rect.
