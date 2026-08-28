@@ -5,7 +5,7 @@ fn row_hash_cells_accepts_owned_cells() {
         Cell::plain('a', Color::Default, Color::Default, Default::default()),
         Cell::plain('b', Color::Default, Color::Default, Default::default()),
     ];
-    let hash = row_hash_cells(0, 0, cells, 1, 10.0, 20.0, 1.0, None);
+    let hash = row_hash_cells(0, 0, cells, 1, 10.0, 20.0, 1.0, 0.0, 0.0, 800.0, 600.0, None);
     assert_ne!(hash, 0);
 }
 
@@ -14,13 +14,33 @@ fn row_hash_cells_accepts_owned_cells() {
 fn row_hash_distinguishes_screen_position_for_the_same_absolute_row() {
     let cells = vec![Cell::plain('V', Color::Default, Color::Default, Default::default())];
 
-    let top_slot = row_hash_cells(10, 0, &cells, 1, 10.0, 20.0, 1.0, None);
-    let next_slot = row_hash_cells(9, 1, &cells, 1, 10.0, 20.0, 1.0, None);
+    let top_slot = row_hash_cells(10, 0, &cells, 1, 10.0, 20.0, 1.0, 0.0, 0.0, 800.0, 600.0, None);
+    let next_slot = row_hash_cells(9, 1, &cells, 1, 10.0, 20.0, 1.0, 0.0, 0.0, 800.0, 600.0, None);
 
     assert_ne!(
         top_slot, next_slot,
         "one absolute row at two viewport Y positions carries different glyph geometry"
     );
+}
+
+/// Cached NDC cannot survive a pane move even when content and cell metrics match.
+#[test]
+fn row_hash_distinguishes_pane_origin() {
+    let cells = [Cell::plain('x', Color::Default, Color::Default, Default::default())];
+    let before = row_hash_cells(0, 0, &cells, 1, 10.0, 20.0, 1.0, 12.0, 8.0, 800.0, 600.0, None);
+    let moved = row_hash_cells(0, 0, &cells, 1, 10.0, 20.0, 1.0, 13.0, 9.0, 800.0, 600.0, None);
+
+    assert_ne!(before, moved, "pane movement changes every cached glyph rectangle");
+}
+
+/// Cached NDC cannot survive projection against a different surface extent.
+#[test]
+fn row_hash_distinguishes_surface_extent() {
+    let cells = [Cell::plain('x', Color::Default, Color::Default, Default::default())];
+    let before = row_hash_cells(0, 0, &cells, 1, 10.0, 20.0, 1.0, 12.0, 8.0, 800.0, 600.0, None);
+    let resized = row_hash_cells(0, 0, &cells, 1, 10.0, 20.0, 1.0, 12.0, 8.0, 801.0, 601.0, None);
+
+    assert_ne!(before, resized, "surface projection changes cached NDC coordinates");
 }
 
 #[test]

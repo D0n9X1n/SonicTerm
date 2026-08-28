@@ -308,22 +308,27 @@ impl WindowsSoftwareFrame {
         let one_to_one_x = (w - src_w).abs() < 0.01;
         let one_to_one_y = (h - src_h).abs() < 0.01;
         let one_to_one = one_to_one_x && one_to_one_y;
-        let draw_x = if one_to_one_x {
-            x.round()
-        } else {
-            // When: `one_to_one_x` is false, keep X fractional for horizontal resampling.
+        // Images retain fractional placement only on axes that are resampled. Every text axis uses
+        // one stabilized destination origin regardless of the source tile dimensions.
+        let image = glyph.flags[2] >= 0.5;
+        let draw_x = if image && !one_to_one_x {
             x
-        };
-        let draw_y = if one_to_one_y {
-            stabilize_half_pixel_origin(y).round()
         } else {
-            // When: `one_to_one_y` is false, keep Y fractional for vertical resampling.
-            y
+            // When: `image && !one_to_one_x` is false, X uses pixel-aligned nearest sampling.
+            stabilize_half_pixel_origin(x).round()
         };
-        // Rasterize destination pixels whose centers lie inside the glyph rect.
-        // This also absorbs tiny NDC round-trip error at exact integer edges.
-        let x0 = (draw_x - 0.5).ceil().max(0.0) as i32;
-        let y0 = (draw_y - 0.5).ceil().max(0.0) as i32;
+        let draw_y = if image && !one_to_one_y {
+            y
+        } else {
+            // When: `image && !one_to_one_y` is false, Y uses pixel-aligned nearest sampling.
+            stabilize_half_pixel_origin(y).round()
+        };
+        // Keep the unclipped bounds: native sampling must advance past source texels hidden above
+        // or left of the frame rather than restarting from the tile's first row or column.
+        let unclipped_x0 = (draw_x - 0.5).ceil() as i32;
+        let unclipped_y0 = (draw_y - 0.5).ceil() as i32;
+        let x0 = unclipped_x0.max(0);
+        let y0 = unclipped_y0.max(0);
         let x1 = (draw_x + w - 0.5).ceil().min(self.width as f32) as i32;
         let y1 = (draw_y + h - 0.5).ceil().min(self.height as f32) as i32;
         if x1 <= x0 || y1 <= y0 {
@@ -339,7 +344,6 @@ impl WindowsSoftwareFrame {
         // Inline images set flags[2]; glyphs leave it clear. Only images want
         // bilinear scaling — a glyph sampled bilinearly reads its atlas
         // neighbours and blends them into its own edges.
-        let image = glyph.flags[2] >= 0.5;
         for yy in y0..y1 {
             let ty = ((yy as f32 + 0.5 - draw_y) / h).clamp(0.0, 0.999_999);
             let sy = ay0 as f32 + src_h * ty;
@@ -350,8 +354,8 @@ impl WindowsSoftwareFrame {
                 // Match the GPU pipeline: glyphs use nearest sampling while
                 // inline images retain intentional bilinear scaling.
                 let sample = if one_to_one {
-                    let sx = ax0 + (xx - x0) as u32;
-                    let sy = ay0 + (yy - y0) as u32;
+                    let sx = ax0 + (xx - unclipped_x0) as u32;
+                    let sy = ay0 + (yy - unclipped_y0) as u32;
                     bgra_pixel_at(atlas_pixels, atlas_w, sx.min(atlas_w - 1), sy.min(atlas_h - 1))
                 } else if image {
                     // When: image is set the source is inline media being scaled, where

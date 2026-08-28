@@ -574,6 +574,190 @@ fn horizontally_scaled_glyphs_keep_their_shared_vertical_origin() {
     );
 }
 
+/// Vertical resampling must not change the destination row chosen for text.
+#[test]
+fn vertically_scaled_glyphs_keep_their_shared_destination_origin() {
+    let mut atlas = GlyphAtlas::new(2, 20);
+    let native = atlas
+        .get_or_insert(
+            GlyphKey::new('N', false, false),
+            &mut TileRasterizer(RasterTile {
+                width: 1,
+                height: 10,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 1.0,
+                coverage: vec![255; 10],
+                is_color: false,
+                is_subpixel: false,
+            }),
+        )
+        .expect("native glyph inserts");
+    let scaled = atlas
+        .get_or_insert(
+            GlyphKey::new('S', false, false),
+            &mut TileRasterizer(RasterTile {
+                width: 1,
+                height: 9,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 1.0,
+                coverage: vec![255; 9],
+                is_color: false,
+                is_subpixel: false,
+            }),
+        )
+        .expect("scaled glyph inserts");
+    let mut frame = WindowsSoftwareFrame::new(3, 20, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+
+    frame.draw_glyphs(
+        &atlas,
+        &[
+            GlyphInstance {
+                rect: px_to_ndc(0.0, 1.5, 1.0, 10.0, 3.0, 20.0),
+                uv: native.uv,
+                color: [1.0; 4],
+                flags: [0.0; 4],
+            },
+            GlyphInstance {
+                rect: px_to_ndc(2.0, 1.5, 1.0, 10.0, 3.0, 20.0),
+                uv: scaled.uv,
+                color: [1.0; 4],
+                flags: [0.0; 4],
+            },
+        ],
+    );
+
+    let first_ink_row = |x| (0..20).find(|&y| frame.pixel_bgra(x, y) != [0, 0, 0, 255]);
+    assert_eq!(first_ink_row(0), first_ink_row(2));
+}
+
+/// Horizontal resampling must not change the destination column chosen for text.
+#[test]
+fn horizontally_scaled_glyphs_keep_their_shared_destination_origin() {
+    let mut atlas = GlyphAtlas::new(20, 2);
+    let native = atlas
+        .get_or_insert(
+            GlyphKey::new('N', false, false),
+            &mut TileRasterizer(RasterTile {
+                width: 10,
+                height: 1,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 10.0,
+                coverage: vec![255; 10],
+                is_color: false,
+                is_subpixel: false,
+            }),
+        )
+        .expect("native glyph inserts");
+    let scaled = atlas
+        .get_or_insert(
+            GlyphKey::new('S', false, false),
+            &mut TileRasterizer(RasterTile {
+                width: 9,
+                height: 1,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 9.0,
+                coverage: vec![255; 9],
+                is_color: false,
+                is_subpixel: false,
+            }),
+        )
+        .expect("scaled glyph inserts");
+    let mut frame = WindowsSoftwareFrame::new(20, 3, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+
+    frame.draw_glyphs(
+        &atlas,
+        &[
+            GlyphInstance {
+                rect: px_to_ndc(1.5, 0.0, 10.0, 1.0, 20.0, 3.0),
+                uv: native.uv,
+                color: [1.0; 4],
+                flags: [0.0; 4],
+            },
+            GlyphInstance {
+                rect: px_to_ndc(1.5, 2.0, 10.0, 1.0, 20.0, 3.0),
+                uv: scaled.uv,
+                color: [1.0; 4],
+                flags: [0.0; 4],
+            },
+        ],
+    );
+
+    let first_ink_col = |y| (0..20).find(|&x| frame.pixel_bgra(x, y) != [0, 0, 0, 255]);
+    assert_eq!(first_ink_col(0), first_ink_col(2));
+}
+
+/// Native top clipping skips every source row hidden above the frame.
+#[test]
+fn one_to_one_top_clip_advances_the_source_row() {
+    let mut atlas = GlyphAtlas::new(1, 2);
+    let glyph = atlas
+        .get_or_insert(
+            GlyphKey::new('T', false, false),
+            &mut TileRasterizer(RasterTile {
+                width: 1,
+                height: 2,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 1.0,
+                coverage: vec![0, 255],
+                is_color: false,
+                is_subpixel: false,
+            }),
+        )
+        .expect("top-clipped glyph inserts");
+    let mut frame = WindowsSoftwareFrame::new(1, 1, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+
+    frame.draw_glyphs(
+        &atlas,
+        &[GlyphInstance {
+            rect: px_to_ndc(0.0, -1.0, 1.0, 2.0, 1.0, 1.0),
+            uv: glyph.uv,
+            color: [1.0; 4],
+            flags: [0.0; 4],
+        }],
+    );
+
+    assert_eq!(frame.pixel_bgra(0, 0), [255, 255, 255, 255]);
+}
+
+/// Native left clipping skips every source column hidden left of the frame.
+#[test]
+fn one_to_one_left_clip_advances_the_source_column() {
+    let mut atlas = GlyphAtlas::new(2, 1);
+    let glyph = atlas
+        .get_or_insert(
+            GlyphKey::new('L', false, false),
+            &mut TileRasterizer(RasterTile {
+                width: 2,
+                height: 1,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 2.0,
+                coverage: vec![0, 255],
+                is_color: false,
+                is_subpixel: false,
+            }),
+        )
+        .expect("left-clipped glyph inserts");
+    let mut frame = WindowsSoftwareFrame::new(1, 1, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+
+    frame.draw_glyphs(
+        &atlas,
+        &[GlyphInstance {
+            rect: px_to_ndc(-1.0, 0.0, 2.0, 1.0, 1.0, 1.0),
+            uv: glyph.uv,
+            color: [1.0; 4],
+            flags: [0.0; 4],
+        }],
+    );
+
+    assert_eq!(frame.pixel_bgra(0, 0), [255, 255, 255, 255]);
+}
+
 /// Software presentation gives unequal hollow and solid source tiles equal outer bounds.
 ///
 /// Separate frames make the destination mask directly comparable while retaining one untouched
@@ -764,6 +948,41 @@ fn scaled_image_keeps_bilinear_sampling() {
     assert!((120..=135).contains(&middle[0]), "image scaling should interpolate: {middle:?}");
     assert_eq!(middle[0], middle[1]);
     assert_eq!(middle[1], middle[2]);
+}
+
+/// Horizontal-only image scaling keeps its native vertical pixel origin.
+#[test]
+fn horizontally_scaled_image_keeps_native_vertical_origin() {
+    let mut atlas = GlyphAtlas::new(2, 1);
+    let info = atlas
+        .get_or_insert(
+            GlyphKey::new('\u{fffc}', false, false),
+            &mut TileRasterizer(RasterTile {
+                width: 2,
+                height: 1,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 2.0,
+                coverage: vec![255; 8],
+                is_color: true,
+                is_subpixel: false,
+            }),
+        )
+        .expect("image tile inserts");
+    let mut frame = WindowsSoftwareFrame::new(4, 4, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+
+    frame.draw_glyphs(
+        &atlas,
+        &[GlyphInstance {
+            rect: px_to_ndc(0.0, 1.5, 4.0, 1.0, 4.0, 4.0),
+            uv: info.uv,
+            color: [1.0; 4],
+            flags: [1.0, 0.0, 1.0, 0.0],
+        }],
+    );
+
+    assert_eq!(frame.pixel_bgra(0, 2), [255, 255, 255, 255]);
+    assert_eq!(frame.pixel_bgra(0, 1), [0, 0, 0, 255]);
 }
 
 #[test]

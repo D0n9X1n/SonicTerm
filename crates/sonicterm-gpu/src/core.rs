@@ -304,6 +304,37 @@ fn software_block_glyph_target_rect(
     (left, top, right - left, bottom - top)
 }
 
+/// Apply HarfBuzz positioning while preserving the raster tile's size.
+fn positioned_shaped_glyph_rect(
+    natural: (f32, f32, f32, f32),
+    x_offset: f32,
+    y_offset: f32,
+) -> (f32, f32, f32, f32) {
+    (natural.0 + x_offset, natural.1 + y_offset, natural.2, natural.3)
+}
+
+/// Resolve a shaped glyph's horizontal offset from its cluster-local running pen.
+fn shaped_cluster_x_offset(
+    prior_col: &mut Option<u16>,
+    pen_x: &mut f32,
+    glyph: &sonicterm_text::shape::ShapedGlyph,
+) -> f32 {
+    if *prior_col != Some(glyph.lead_col) {
+        // A new terminal cluster anchors its pen to the lead cell instead of carrying the
+        // preceding cluster's accumulated advance.
+        *prior_col = Some(glyph.lead_col);
+        *pen_x = 0.0;
+    }
+    let offset = *pen_x + glyph.x_offset;
+    *pen_x += glyph.x_advance;
+    offset
+}
+
+/// Reserve vertical retained-damage margin for native glyph bearings and GPOS offsets.
+fn terminal_vertical_ink_pad(cell_h: f32, metrics: Option<sonicterm_engine::CellMetricsPx>) -> f32 {
+    metrics.map(|metrics| metrics.cell_h as f32).unwrap_or(cell_h).max(0.0).ceil()
+}
+
 /// Normalizes standalone Claude Code circle markers inside one cell without distortion.
 pub(crate) fn fit_single_cell_status_marker(
     ch: char,
@@ -703,6 +734,7 @@ use sonicterm_text::{
     shape::{run_is_ascii_fast, RunStyle},
 };
 
+#[cfg(test)]
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 fn dirty_rows_damage_rect<I>(
@@ -713,6 +745,28 @@ fn dirty_rows_damage_rect<I>(
     cols: u16,
     cell_w: f32,
     cell_h: f32,
+    surface_w: u32,
+    surface_h: u32,
+) -> Option<PixelRect>
+where
+    I: IntoIterator<Item = usize>,
+{
+    dirty_rows_damage_rect_with_ink_pad(
+        dirty_rows, pane_rect, origin_x, origin_y, cols, cell_w, cell_h, 0.0, surface_w, surface_h,
+    )
+}
+
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+fn dirty_rows_damage_rect_with_ink_pad<I>(
+    dirty_rows: I,
+    pane_rect: PixelRect,
+    origin_x: f32,
+    origin_y: f32,
+    cols: u16,
+    cell_w: f32,
+    cell_h: f32,
+    vertical_ink_pad: f32,
     surface_w: u32,
     surface_h: u32,
 ) -> Option<PixelRect>
@@ -756,8 +810,9 @@ where
         // when the cell is later cleared but only this row is dirty, the bottom
         // 1px of the old block survives as a stray underline-like mark.
         // Covering through the next row's top edge closes the rounding seam.
-        let top = (origin_y + row as f32 * cell_h).floor() as i32;
-        let next_top = (origin_y + (row as f32 + 1.0) * cell_h).ceil() as i32;
+        let ink_pad = vertical_ink_pad.max(0.0);
+        let top = (origin_y + row as f32 * cell_h - ink_pad).floor() as i32;
+        let next_top = (origin_y + (row as f32 + 1.0) * cell_h + ink_pad).ceil() as i32;
         let row_h = (next_top - top).max(1) as u32;
         damage.add_clipped(PixelRect { x, y: top, w: row_w, h: row_h }, pane_bounds);
     }
@@ -782,13 +837,14 @@ where
 /// * `None` for an alt-screen pane with no dirty rows (clean -> no repaint).
 /// * the full pane rectangle clipped to the surface for a dirty alt-screen
 ///   pane — a complete pane repaint, never an unconditional full-window one.
-/// * the existing narrow dirty-row union ([`dirty_rows_damage_rect`]) for a
-///   normal-screen pane.
+/// * the narrow, glyph-padded dirty-row union ([`dirty_rows_damage_rect_with_ink_pad`])
+///   for a normal-screen pane.
 ///
 /// The alt-screen decision is independent of cell metrics, so sparse /
 /// scattered dirty rows and fractional cell heights all resolve to the same
 /// complete-pane repaint; the surface clip both bounds the rect to on-screen
 /// pixels and rejects a fully off-surface pane.
+#[cfg(test)]
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 fn pane_damage_rect<I>(
@@ -800,6 +856,30 @@ fn pane_damage_rect<I>(
     cols: u16,
     cell_w: f32,
     cell_h: f32,
+    surface_w: u32,
+    surface_h: u32,
+) -> Option<PixelRect>
+where
+    I: IntoIterator<Item = usize>,
+{
+    pane_damage_rect_with_ink_pad(
+        is_alt, dirty_rows, pane_rect, origin_x, origin_y, cols, cell_w, cell_h, 0.0, surface_w,
+        surface_h,
+    )
+}
+
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+fn pane_damage_rect_with_ink_pad<I>(
+    is_alt: bool,
+    dirty_rows: I,
+    pane_rect: PixelRect,
+    origin_x: f32,
+    origin_y: f32,
+    cols: u16,
+    cell_w: f32,
+    cell_h: f32,
+    vertical_ink_pad: f32,
     surface_w: u32,
     surface_h: u32,
 ) -> Option<PixelRect>
@@ -818,8 +898,17 @@ where
             None
         };
     }
-    dirty_rows_damage_rect(
-        dirty_rows, pane_rect, origin_x, origin_y, cols, cell_w, cell_h, surface_w, surface_h,
+    dirty_rows_damage_rect_with_ink_pad(
+        dirty_rows,
+        pane_rect,
+        origin_x,
+        origin_y,
+        cols,
+        cell_w,
+        cell_h,
+        vertical_ink_pad,
+        surface_w,
+        surface_h,
     )
 }
 
@@ -4235,6 +4324,10 @@ impl GpuRenderer {
         });
         let mut damage = DamageRect::empty();
         let surface_rect = full_surface_rect(self.config.width, self.config.height);
+        let vertical_ink_pad = terminal_vertical_ink_pad(
+            self.cell_h,
+            self.font_stack.as_ref().and_then(|stack| stack.cell_metrics_raster_px().ok()),
+        );
         if overlay_or_chrome_changed {
             damage.add_clipped(surface_rect, surface_rect);
         } else {
@@ -4251,7 +4344,7 @@ impl GpuRenderer {
                 // because that is where the cell grid actually starts. Only
                 // the bounding rectangle widens.
                 let pane_rect = pv.full_rect;
-                if let Some(rect) = pane_damage_rect(
+                if let Some(rect) = pane_damage_rect_with_ink_pad(
                     pv.grid.is_alt(),
                     pv.grid.dirty_rows(),
                     pane_rect,
@@ -4260,6 +4353,7 @@ impl GpuRenderer {
                     pv.grid.cols,
                     self.cell_w,
                     self.cell_h,
+                    vertical_ink_pad,
                     self.config.width,
                     self.config.height,
                 ) {
@@ -4559,6 +4653,10 @@ impl GpuRenderer {
                         cell_w,
                         cell_h,
                         1.0,
+                        pad,
+                        top_inset,
+                        sw,
+                        sh,
                         sel_bbox,
                     );
                     // Fold the Cmd-hover URL span into the cache key for
@@ -7346,6 +7444,7 @@ impl GpuRenderer {
                 font_slot: u8::try_from(info.font_idx).unwrap_or(u8::MAX),
                 glyph_id: info.glyph_pos,
                 x_advance: info.x_advance.get() as f32,
+                x_offset: info.x_offset.get() as f32,
                 y_offset: info.y_offset.get() as f32,
                 ch: lead_ch,
             });
@@ -7354,6 +7453,8 @@ impl GpuRenderer {
         #[cfg(debug_assertions)]
         debug_assert!(shaped_glyph_columns_are_monotonic(&shaped));
 
+        let mut positioned_cluster_col = None;
+        let mut positioned_cluster_pen_x = 0.0;
         for g in &shaped {
             let lead_cell = cell_by_col.get(&g.lead_col).cloned().unwrap_or_default();
             let is_wide = lead_cell.flags.contains(CellFlags::WIDE);
@@ -7560,6 +7661,11 @@ impl GpuRenderer {
 
             // ── Normal wezterm-shape path (non-block cluster) ──
             //
+            let shape_x_offset = shaped_cluster_x_offset(
+                &mut positioned_cluster_col,
+                &mut positioned_cluster_pen_x,
+                g,
+            );
             // Post-glyphon the char-fallback path is wezterm-
             // only. FontStack is the sole rasterizer; missing chars
             // emit tofu via `Rasterizer::rasterize` returning
@@ -7622,6 +7728,8 @@ impl GpuRenderer {
                 let gy = cy + baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
                 let gw = info.px_size[0] as f32 * inv_s;
                 let gh = info.px_size[1] as f32 * inv_s;
+                let (gx, gy, gw, gh) =
+                    positioned_shaped_glyph_rect((gx, gy, gw, gh), shape_x_offset, g.y_offset);
                 let cell_right =
                     snapped_cell_x.get(g.lead_col as usize + 1).copied().unwrap_or(cx + cell_w);
                 let (gx, gy, gw, gh) = fit_single_cell_status_marker(
@@ -7704,6 +7812,8 @@ impl GpuRenderer {
             let gy = cy + baseline_y_in_cell + info.px_offset[1] as f32 * inv_s;
             let gw = info.px_size[0] as f32 * inv_s;
             let gh = info.px_size[1] as f32 * inv_s;
+            let (gx, gy, gw, gh) =
+                positioned_shaped_glyph_rect((gx, gy, gw, gh), shape_x_offset, g.y_offset);
             let cell_right =
                 snapped_cell_x.get(g.lead_col as usize + 1).copied().unwrap_or(cx + cell_w);
             let (gx, gy, gw, gh) = fit_single_cell_status_marker(
