@@ -164,6 +164,31 @@ fn change_scaling_rescales_cell_metrics_with_dpi() {
     );
 }
 
+/// The Windows fallback stack emits real OpenType mark positioning for the renderer to preserve.
+#[cfg(target_os = "windows")]
+#[test]
+fn packaged_shaper_emits_nonzero_mark_offsets() {
+    let fonts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+    let stack = FontStack::try_new_full_with_weight_and_font_dirs(
+        DEFAULT_FONT_FAMILY,
+        15.0,
+        96,
+        1.0,
+        &[fonts],
+    )
+    .expect("packaged font stack");
+    let glyphs = stack.shape_text("مُحَمَّد").expect("Arabic marks shape through fallback");
+
+    assert!(
+        glyphs.iter().any(|glyph| glyph.x_offset.get().abs() >= 0.5),
+        "fixture must exercise horizontal mark positioning"
+    );
+    assert!(
+        glyphs.iter().any(|glyph| glyph.y_offset.get() <= -3.0),
+        "fixture must exercise vertical mark positioning"
+    );
+}
+
 #[test]
 fn shaped_text_width_covers_mixed_ascii_cjk_and_status_text() {
     let stack = match FontStack::try_new(72) {

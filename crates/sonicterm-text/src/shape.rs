@@ -75,7 +75,7 @@ pub fn run_is_ascii_fast(cells: &[(u16, Cell)]) -> bool {
 /// - `glyph_id` — freetype glyph index inside the resolved face
 ///   (`GlyphInfo::glyph_pos`). `0` means notdef; caller should treat
 ///   as missing.
-/// - `x_advance`, `y_offset` — raster-px metrics for instance
+/// - `x_advance`, `x_offset`, `y_offset` — raster-px metrics for instance
 ///   placement; come straight from wezterm's `PixelLength`
 ///   (`.get() as f32`).
 /// - `ch` — first codepoint of the cluster, kept purely for tofu /
@@ -102,6 +102,9 @@ pub struct ShapedGlyph {
     /// Shaper-reported advance width in raster px
     /// (`GlyphInfo::x_advance.get() as f32`).
     pub x_advance: f32,
+    /// Shaper-reported horizontal offset in raster px
+    /// (`GlyphInfo::x_offset.get() as f32`). Positive = right.
+    pub x_offset: f32,
     /// Shaper-reported vertical offset in raster px
     /// (`GlyphInfo::y_offset.get() as f32`). Positive = down per
     /// sonicterm-font convention.

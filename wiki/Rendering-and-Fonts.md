@@ -140,9 +140,11 @@ These are Private Use Area codepoints supplied by the bundled Rec Mono faces:
 ### Shaping and fallback
 
 HarfBuzz shapes style runs into glyph ids, clusters, advances, and offsets.
-Clusters are mapped back to terminal columns. Missing clusters are retried with
-successive fallback faces; final notdef or replacement output is used instead
-of stopping the application.
+Clusters are mapped back to terminal columns. Within one cluster, glyph placement
+uses the running HarfBuzz pen plus each glyph's horizontal and vertical offsets;
+the next cluster resets that pen to its lead terminal cell. Missing clusters are
+retried with successive fallback faces; final notdef or replacement output is
+used instead of stopping the application.
 
 The printable-ASCII fast path bypasses HarfBuzz only when the run has no
 combining extras, wide-cell flags, or common ligature participants. The guarded
@@ -182,9 +184,11 @@ rectangle is used by GPU and Windows software presentation.
 
 `RowGlyphCache` stores glyph instances, underlines, missing-glyph records, and
 tofu quads under `(pane id, absolute row, row hash)`. `LineQuadCache` stores
-background and decoration quads under the matching row identity. Cache keys
-include cell content, font/style revision, cell metrics, display scale, atlas
-generation, and a selection rectangle only when it intersects that row.
+background and decoration quads under the matching row identity. Because cached
+glyph instances already carry projected screen coordinates, their keys include
+pane origin and surface extent as well as cell content, font/style revision, cell
+metrics, display scale, atlas generation, and a selection rectangle only when it
+intersects that row.
 
 Font, theme, scale, pane identity, atlas reset, or UV generation changes
 invalidate the affected entries. A font or DPI change rebuilds the body, footer,
@@ -395,7 +399,9 @@ U+F07B，否则使用终端字形 U+F489。
 ### 塑形与回退
 
 HarfBuzz 把样式片段塑形成字形 id、字符簇、推进量和偏移量，再把字符簇映射回终端列。
-缺失字符簇会依次尝试回退字体；最后使用 `.notdef` 或替代字形，不会停止应用。
+同一字符簇内的字形位置由 HarfBuzz 的累计笔位置与每个字形的水平、垂直偏移共同决定；
+进入下一个字符簇时，笔位置会重置到其首个终端单元格。缺失字符簇会依次尝试回退字体；
+最后使用 `.notdef` 或替代字形，不会停止应用。
 
 只有在片段没有组合附加内容、双宽单元格标志或常见连字参与字符时，可打印 ASCII
 快速路径才绕过 HarfBuzz。受保护字符为：
@@ -426,9 +432,9 @@ macOS 和其它 Unix 使用 FreeType。FreeType 支持单色、灰度、LCD 次�
 ### 行缓存与塑形缓存
 
 `RowGlyphCache` 按 `(pane id, absolute row, row hash)` 保存字形实例、下划线、缺失字形
-记录和缺字方框。`LineQuadCache` 按相同的行身份保存背景与装饰矩形。缓存键包含单元格
-内容、字体/样式修订号、单元格度量、显示缩放、图集代次，以及仅在选区与该行相交时
-加入的选区矩形。
+记录和缺字方框。`LineQuadCache` 按相同的行身份保存背景与装饰矩形。由于缓存的字形实例
+已携带投影后的屏幕坐标，其缓存键除单元格内容、字体/样式修订号、单元格度量、显示缩放、
+图集代次及仅在选区与该行相交时加入的选区矩形外，还包含 pane 原点和表面尺寸。
 
 字体、主题、缩放、窗格身份、图集重置或 UV 代次变化都会使相关条目失效。字体或 DPI
 变化会一起重建正文、页脚和标签页标题字体栈，并使共享字形图集失效：

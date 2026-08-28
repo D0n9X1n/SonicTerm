@@ -232,6 +232,8 @@ impl RowGlyphCache {
 ///   fg/bg changes; lets the renderer invalidate without iterating.
 /// * `cell_w`, `cell_h`, `scale_factor` — geometry changes redraw
 ///   every cell at a new physical position.
+/// * `origin_x`, `origin_y` — the pane origin embedded into each cached glyph.
+/// * `surface_w`, `surface_h` — the projection extent used to build cached NDC.
 /// * `selection` bbox — but only when it overlaps row `r`. A
 ///   selection outside this row's range doesn't change its rendering.
 ///
@@ -249,6 +251,10 @@ pub fn row_hash(
     cell_w: f32,
     cell_h: f32,
     scale_factor: f32,
+    origin_x: f32,
+    origin_y: f32,
+    surface_w: f32,
+    surface_h: f32,
     selection: Option<(u64, u16, u64, u16)>,
 ) -> u64 {
     row_hash_cells(
@@ -259,6 +265,10 @@ pub fn row_hash(
         cell_w,
         cell_h,
         scale_factor,
+        origin_x,
+        origin_y,
+        surface_w,
+        surface_h,
         selection,
     )
 }
@@ -273,6 +283,10 @@ pub fn row_hash_cells<I, C>(
     cell_w: f32,
     cell_h: f32,
     scale_factor: f32,
+    origin_x: f32,
+    origin_y: f32,
+    surface_w: f32,
+    surface_h: f32,
     selection: Option<(u64, u16, u64, u16)>,
 ) -> u64
 where
@@ -290,6 +304,10 @@ where
     cell_w.to_bits().hash(&mut h);
     cell_h.to_bits().hash(&mut h);
     scale_factor.to_bits().hash(&mut h);
+    origin_x.to_bits().hash(&mut h);
+    origin_y.to_bits().hash(&mut h);
+    surface_w.to_bits().hash(&mut h);
+    surface_h.to_bits().hash(&mut h);
     if let Some((s_row, s_col, e_row, e_col)) = selection {
         // Normalise so (start, end) order doesn't perturb the hash. Rows
         // are scrollback-ABSOLUTE, so we compare against this row's

@@ -562,6 +562,214 @@ impl sonicterm_text::glyph_atlas::Rasterizer for OnePixelAtlasGlyph {
     }
 }
 
+#[cfg(target_os = "windows")]
+struct SolidTallAtlasGlyph;
+
+#[cfg(target_os = "windows")]
+impl sonicterm_text::glyph_atlas::Rasterizer for SolidTallAtlasGlyph {
+    fn rasterize(
+        &mut self,
+        _key: sonicterm_types::GlyphKey,
+    ) -> Option<sonicterm_text::glyph_atlas::RasterTile> {
+        Some(sonicterm_text::glyph_atlas::RasterTile {
+            width: 1,
+            height: 30,
+            offset_x: 0,
+            offset_y: 0,
+            advance: 1.0,
+            coverage: vec![255; 30],
+            is_color: false,
+            is_subpixel: false,
+        })
+    }
+}
+
+/// Padded dirty damage clears real GPU glyph ink outside a compressed cell row.
+#[cfg(target_os = "windows")]
+#[test]
+fn warp_retained_redraw_clears_overhanging_glyph_ink() {
+    const WIDTH: u32 = 2;
+    const HEIGHT: u32 = 64;
+    const BYTES_PER_ROW: u32 = 256;
+
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::DX12,
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::LowPower,
+        compatible_surface: None,
+        force_fallback_adapter: true,
+        apply_limit_buckets: false,
+    }))
+    .expect("Windows WARP fallback adapter");
+    let (device, queue) = pollster::block_on(adapter.request_device(&device_descriptor_for(true)))
+        .expect("WARP device");
+    let mut pipeline =
+        crate::wezterm_pipeline::WeztermPipeline::new(&device, wgpu::TextureFormat::Bgra8Unorm, 2);
+    let mut atlas = GlyphAtlas::new(1, 30);
+    let glyph = atlas
+        .get_or_insert(sonicterm_types::GlyphKey::new('T', false, false), &mut SolidTallAtlasGlyph)
+        .expect("tall glyph inserts");
+    let mut upload = crate::atlas_upload::AtlasUpload::new(
+        &device,
+        &atlas,
+        pipeline.texture_bind_group_layout(),
+    );
+    upload.sync(&queue, &mut atlas);
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("retained overhang test target"),
+        size: wgpu::Extent3d { width: WIDTH, height: HEIGHT, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Bgra8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&Default::default());
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("retained overhang readback"),
+        size: u64::from(BYTES_PER_ROW) * u64::from(HEIGHT),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let glyphs = [sonicterm_text::GlyphInstance {
+        rect: crate::quad::px_to_ndc(0.0, 10.0, 1.0, 30.0, WIDTH as f32, HEIGHT as f32),
+        uv: glyph.uv,
+        color: [1.0; 4],
+        flags: [0.0; 4],
+    }];
+    let mut encoder = device.create_command_encoder(&Default::default());
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("retained overhang initial pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pipeline.draw_frame(
+            &device,
+            &queue,
+            &mut pass,
+            upload.bind_group(),
+            upload.bind_group(),
+            WIDTH as f32,
+            HEIGHT as f32,
+            &[],
+            &[],
+            &glyphs,
+            &[],
+            &[],
+        );
+    }
+    encoder.copy_texture_to_buffer(
+        target.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(BYTES_PER_ROW),
+                rows_per_image: Some(HEIGHT),
+            },
+        },
+        wgpu::Extent3d { width: WIDTH, height: HEIGHT, depth_or_array_layers: 1 },
+    );
+    queue.submit([encoder.finish()]);
+    let slice = readback.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    device.poll(wgpu::PollType::wait_indefinitely()).expect("poll initial WARP readback");
+    let bytes = slice.get_mapped_range().expect("mapped initial WARP readback");
+    assert_ne!(&bytes[35 * BYTES_PER_ROW as usize..35 * BYTES_PER_ROW as usize + 3], &[0, 0, 0]);
+    drop(bytes);
+    readback.unmap();
+
+    let damage = dirty_rows_damage_rect_with_ink_pad(
+        [0usize],
+        sonicterm_render_model::geometry::PixelRect { x: 0, y: 10, w: WIDTH, h: 40 },
+        0.0,
+        10.0,
+        1,
+        2.0,
+        12.0,
+        18.0,
+        WIDTH,
+        HEIGHT,
+    )
+    .expect("dirty row produces padded damage");
+    let clear = crate::quad::QuadInstance::sharp(
+        crate::quad::px_to_ndc(
+            damage.x as f32,
+            damage.y as f32,
+            damage.w as f32,
+            damage.h as f32,
+            WIDTH as f32,
+            HEIGHT as f32,
+        ),
+        [0.0, 0.0, 0.0, 1.0],
+    );
+    let mut encoder = device.create_command_encoder(&Default::default());
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("retained overhang clear pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_scissor_rect(damage.x as u32, damage.y as u32, damage.w, damage.h);
+        pipeline.draw_frame(
+            &device,
+            &queue,
+            &mut pass,
+            upload.bind_group(),
+            upload.bind_group(),
+            WIDTH as f32,
+            HEIGHT as f32,
+            &[clear],
+            &[],
+            &[],
+            &[],
+            &[],
+        );
+    }
+    encoder.copy_texture_to_buffer(
+        target.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(BYTES_PER_ROW),
+                rows_per_image: Some(HEIGHT),
+            },
+        },
+        wgpu::Extent3d { width: WIDTH, height: HEIGHT, depth_or_array_layers: 1 },
+    );
+    queue.submit([encoder.finish()]);
+    let slice = readback.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    device.poll(wgpu::PollType::wait_indefinitely()).expect("poll WARP readback");
+    let bytes = slice.get_mapped_range().expect("mapped WARP readback");
+
+    assert_eq!(&bytes[35 * BYTES_PER_ROW as usize..35 * BYTES_PER_ROW as usize + 3], &[0, 0, 0]);
+}
+
 #[test]
 fn atlas_eviction_during_frame_requires_retry() {
     let mut atlas = GlyphAtlas::new(1, 1);
@@ -955,6 +1163,90 @@ fn dirty_rows_damage_rect_closes_fractional_cell_seam() {
         r2.y + r2.h as i32,
         r3.y
     );
+}
+
+/// Retained damage reserves one native line above and below every changed row.
+#[test]
+fn terminal_ink_pad_uses_native_font_height() {
+    let metrics = sonicterm_engine::CellMetricsPx {
+        cell_w: 12.0,
+        cell_h: 24.0,
+        underline_h: 1.0,
+        descender: -5.0,
+    };
+
+    assert_eq!(terminal_vertical_ink_pad(31.2, Some(metrics)), 24.0);
+    assert_eq!(terminal_vertical_ink_pad(24.0, Some(metrics)), 24.0);
+    assert_eq!(terminal_vertical_ink_pad(12.0, Some(metrics)), 24.0);
+}
+
+/// Missing font metrics conservatively use the configured row height.
+#[test]
+fn terminal_ink_pad_falls_back_to_row_height() {
+    assert_eq!(terminal_vertical_ink_pad(12.2, None), 13.0);
+}
+
+/// Font ink outside a compressed row expands retained GPU damage in both directions.
+#[test]
+fn dirty_rows_damage_rect_covers_vertical_glyph_overhang() {
+    let damage = dirty_rows_damage_rect_with_ink_pad(
+        [2usize],
+        sonicterm_render_model::geometry::PixelRect { x: 0, y: 0, w: 600, h: 800 },
+        0.0,
+        0.0,
+        80,
+        10.0,
+        12.0,
+        12.0,
+        600,
+        800,
+    )
+    .expect("one dirty row yields padded damage");
+
+    assert_eq!(damage.y, 12, "12 px of preceding-row overhang is repainted");
+    assert_eq!(damage.y + damage.h as i32, 48, "following-row overhang is repainted too");
+}
+
+/// Ink padding remains clipped to the pane rather than repainting peer panes.
+#[test]
+fn dirty_rows_damage_rect_clips_vertical_overhang_to_pane() {
+    let pane = sonicterm_render_model::geometry::PixelRect { x: 0, y: 30, w: 600, h: 24 };
+    let damage = dirty_rows_damage_rect_with_ink_pad(
+        [0usize],
+        pane,
+        0.0,
+        30.0,
+        80,
+        10.0,
+        12.0,
+        20.0,
+        600,
+        800,
+    )
+    .expect("padded row intersects its pane");
+
+    assert_eq!(damage, pane);
+}
+
+/// Alternate screens already repaint the pane and ignore row-level ink padding.
+#[test]
+fn pane_damage_rect_alt_ignores_redundant_ink_padding() {
+    let pane = sonicterm_render_model::geometry::PixelRect { x: 10, y: 20, w: 200, h: 300 };
+    let damage = pane_damage_rect_with_ink_pad(
+        true,
+        [3usize],
+        pane,
+        10.0,
+        20.0,
+        80,
+        10.0,
+        12.0,
+        40.0,
+        800,
+        600,
+    );
+
+    assert_eq!(damage, Some(pane));
 }
 
 #[test]
@@ -1537,6 +1829,39 @@ fn plain_url_hover_does_not_need_accent_palette() {
     })));
 }
 
+/// HarfBuzz placement offsets move the origin without resizing the tile.
+#[test]
+fn shaped_glyph_position_applies_signed_offsets() {
+    let natural = (12.0, 24.0, 8.0, 10.0);
+    assert_eq!(positioned_shaped_glyph_rect(natural, 2.5, -7.25), (14.5, 16.75, 8.0, 10.0));
+    assert_eq!(positioned_shaped_glyph_rect(natural, -0.5, 3.0), (11.5, 27.0, 8.0, 10.0));
+}
+
+/// Shaped glyphs accumulate advances within one cluster and reset at the next cell.
+#[test]
+fn shaped_cluster_position_uses_running_harfbuzz_pen() {
+    use sonicterm_text::shape::ShapedGlyph;
+
+    let mut col = None;
+    let mut pen = 0.0;
+    let first = ShapedGlyph {
+        lead_col: 3,
+        cluster_cells: 1,
+        font_slot: 0,
+        glyph_id: 1,
+        x_advance: 6.0,
+        x_offset: 1.5,
+        y_offset: 0.0,
+        ch: 'م',
+    };
+    let mark = ShapedGlyph { glyph_id: 2, x_advance: 0.0, x_offset: -2.0, ..first };
+    let next = ShapedGlyph { lead_col: 4, glyph_id: 3, x_advance: 5.0, x_offset: 0.5, ..first };
+
+    assert_eq!(shaped_cluster_x_offset(&mut col, &mut pen, &first), 1.5);
+    assert_eq!(shaped_cluster_x_offset(&mut col, &mut pen, &mark), 4.0);
+    assert_eq!(shaped_cluster_x_offset(&mut col, &mut pen, &next), 0.5);
+}
+
 #[test]
 fn shaped_glyph_column_check_allows_multiple_glyphs_in_one_cell_cluster() {
     use sonicterm_text::shape::ShapedGlyph;
@@ -1548,6 +1873,7 @@ fn shaped_glyph_column_check_allows_multiple_glyphs_in_one_cell_cluster() {
             font_slot: 0,
             glyph_id: 1,
             x_advance: 0.0,
+            x_offset: 0.0,
             y_offset: 0.0,
             ch: '✔',
         },
@@ -1557,6 +1883,7 @@ fn shaped_glyph_column_check_allows_multiple_glyphs_in_one_cell_cluster() {
             font_slot: 0,
             glyph_id: 2,
             x_advance: 0.0,
+            x_offset: 0.0,
             y_offset: 0.0,
             ch: '✔',
         },
@@ -1566,6 +1893,7 @@ fn shaped_glyph_column_check_allows_multiple_glyphs_in_one_cell_cluster() {
             font_slot: 0,
             glyph_id: 3,
             x_advance: 0.0,
+            x_offset: 0.0,
             y_offset: 0.0,
             ch: 'x',
         },
@@ -1585,6 +1913,7 @@ fn shaped_glyph_column_check_rejects_backtracking_columns() {
             font_slot: 0,
             glyph_id: 1,
             x_advance: 0.0,
+            x_offset: 0.0,
             y_offset: 0.0,
             ch: 'x',
         },
@@ -1594,6 +1923,7 @@ fn shaped_glyph_column_check_rejects_backtracking_columns() {
             font_slot: 0,
             glyph_id: 2,
             x_advance: 0.0,
+            x_offset: 0.0,
             y_offset: 0.0,
             ch: 'y',
         },

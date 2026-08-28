@@ -179,6 +179,21 @@ pub fn layout_with_raster_variant(
     )
 }
 
+/// Combine the shaped pen, raster bearing, and HarfBuzz offset before pixel snapping.
+fn positioned_glyph_origin(
+    pen_x: f32,
+    raster_offset_x: f32,
+    shape_offset_x: f32,
+    baseline_y: f32,
+    raster_offset_y: f32,
+    shape_offset_y: f32,
+) -> (f32, f32) {
+    (
+        (pen_x + raster_offset_x + shape_offset_x).round(),
+        (baseline_y + raster_offset_y + shape_offset_y).round(),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn layout_with_raster_variant_impl(
     font_stack: &FontStack,
@@ -361,6 +376,7 @@ fn layout_with_raster_variant_impl(
 
         // Wezterm-font reports `y_offset` positive-down (matches the
         // grid path). Apply it on top of the baseline.
+        let extra_x = (g.x_offset.get() as f32) * scale;
         let extra_y = (g.y_offset.get() as f32) * scale;
         // Pixel-snap the glyph ORIGIN to the integer device-pixel grid.
         // The glyph atlas uses nearest filtering, so keeping the origin on a
@@ -371,8 +387,7 @@ fn layout_with_raster_variant_impl(
         // pixels and sample 1:1 with the raster. We round the final
         // device-space position rather than `pen_x` so accumulated
         // advances don't drift.
-        let gx = (pen_x + off_x).round();
-        let gy = (baseline_y + off_y + extra_y).round();
+        let (gx, gy) = positioned_glyph_origin(pen_x, off_x, extra_x, baseline_y, off_y, extra_y);
 
         // Clip cull: reject glyphs entirely outside the supplied rect.
         if let Some(c) = clip {

@@ -2,6 +2,12 @@ use sonicterm_text::glyph_atlas::GlyphAtlas;
 
 use super::*;
 
+/// Chrome glyph placement combines raster and HarfBuzz offsets before snapping.
+#[test]
+fn positioned_origin_applies_both_offset_sources() {
+    assert_eq!(positioned_glyph_origin(10.25, -1.0, 2.5, 20.5, -8.0, -3.25), (12.0, 9.0));
+}
+
 #[test]
 fn native_raster_roles_use_distinct_tiles_without_projection_scaling() {
     // Contract: each chrome role has a distinct atlas tile drawn at its native raster size.

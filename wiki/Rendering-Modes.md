@@ -126,10 +126,11 @@ Their GPU mirrors are 1×1 placeholders while the GDI presenter is active.
 Returning to GPU presentation rebuilds full-size GPU atlas textures, resets
 atlas metadata and UV-bearing caches, and forces a full redraw.
 
-Glyph sampling resolves one-to-one geometry independently on each axis. A glyph
-that needs horizontal resampling still uses the stabilized vertical origin when
-its height is native-sized, so adjacent letters sharing a baseline cannot land
-on different software pixel rows merely because their bitmap widths differ.
+Text glyphs use one stabilized destination-pixel origin regardless of whether
+an atlas tile is sampled one-to-one or resampled on either axis. Source sampling
+remains nearest and clamped to the glyph's own tile; clipping at the top or left
+advances past the hidden source rows or columns. Scaled inline images retain
+fractional positioning and bilinear sampling.
 
 ### Retained pixels and damage
 
@@ -151,11 +152,13 @@ flowchart TD
 ```
 
 A primary-screen pane can repaint the union of dirty viewport rows. Row bounds
-use floor/ceil rules at fractional DPI so adjacent rows leave no seam. If an
-alternate-screen pane has any dirty row, the complete surface-clipped pane is
-damaged. This covers TUI scrolling, insert/delete line, reverse index, erase,
-and other fixed-position updates where a narrow row set can otherwise leave
-stale pixels.
+use floor/ceil rules at fractional DPI so adjacent rows leave no seam, then
+expand vertically by one native font-cell height so glyph bearings, positioned
+marks, and compressed line spacing cannot leave ink outside the retained-frame
+scissor. The expansion remains pane- and surface-clipped. If an alternate-screen
+pane has any dirty row, the complete surface-clipped pane is damaged. This covers
+TUI scrolling, insert/delete line, reverse index, erase, and other fixed-position
+updates where a narrow row set can otherwise leave stale pixels.
 
 The offscreen frame is cleared on first use and loaded on retained frames. The
 GPU draw order is:
@@ -304,9 +307,9 @@ Windows 上启用降级时，`WindowsSoftwareFrame` 把同一套上游生成的�
 占位符。回到 GPU 呈现时会重建全尺寸 GPU 图集纹理、重置图集元数据与携带 UV 的缓存，
 并强制完整重绘。
 
-字形取样会分别判断水平轴和垂直轴是否一比一。即使某个字形需要水平重采样，只要高度
-保持原生尺寸，就仍使用稳定后的垂直原点；因此共享同一基线的相邻字母不会仅因位图宽度
-不同而落到不同的软件像素行。
+文字字形无论图集图块是按一比一取样，还是任一轴需要重采样，都使用同一套稳定后的目标
+像素原点。源图块仍采用最近点取样并限制在字形自身矩形内；顶部或左侧被裁剪时，会跳过
+不可见的源行或源列。缩放后的内联图像则继续保留分数位置和双线性取样。
 
 ### 保留像素与损伤区域
 
@@ -328,8 +331,10 @@ flowchart TD
 ```
 
 主屏幕窗格可以只重绘视口脏行的并集。分数 DPI 下的行边界使用 floor/ceil，避免相邻行
-之间出现缝隙。备用屏幕窗格只要有一行标脏，就损伤完整的表面裁剪窗格。这覆盖 TUI
-滚动、插入/删除行、反向索引、擦除等固定位置更新，避免窄行集合留下旧像素。
+之间出现缝隙；随后在垂直方向各扩展一个原生字体单元高度，使字形 bearing、定位标记和
+压缩行距不会把墨迹留在保留帧裁剪范围之外。扩展后的区域仍限制在 pane 和表面边界内。
+备用屏幕窗格只要有一行标脏，就损伤完整的表面裁剪窗格。这覆盖 TUI 滚动、插入/删除行、
+反向索引、擦除等固定位置更新，避免窄行集合留下旧像素。
 
 离屏帧第一次使用时清除，保留帧中继续加载。GPU 绘制顺序为：
 
