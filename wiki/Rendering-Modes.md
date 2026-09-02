@@ -74,9 +74,12 @@ backend offers it and otherwise uses `Fifo`. Opaque backdrops use
 
 SonicTerm renders into a retained offscreen frame texture. A frame key covers
 visible pane revisions, geometry, selection, tabs, overlays, hover, inline
-media, font/style state, and other image-affecting inputs. Hardware rendering
-still performs the full renderer assembly when a changed frame is requested;
-unchanged frame keys return without rebuilding or submitting a new frame.
+media, font/style state, and other image-affecting inputs. Effective scrollbar
+opacity is stored as sorted `(pane id, u16 alpha)` pairs: `Never`, panes without
+scrollback, and opacity at or below the shared emit floor all map to zero.
+Hardware rendering still performs the full renderer assembly when a changed
+frame is requested; unchanged frame keys return without rebuilding or
+submitting a new frame.
 
 Surface-acquisition paths that do not successfully present clear the cached
 frame key. `Outdated` and `Suboptimal` reconfigure the surface; `Lost` recreates
@@ -99,10 +102,11 @@ The hardware path ignores the IME cap.
 | degraded software with IME composition | 83,333 µs (~12 fps) |
 
 On the degraded path, all redraws—including input redraws—are coalesced to the
-resolved period because every frame is CPU-expensive. Scrollbar auto-hide still
-snaps to its final state, but its fade does not request intermediate frames.
-The wgpu surface uses `Fifo`, opaque compositing, and desired maximum frame
-latency 1.
+resolved period because every frame is CPU-expensive. Scrollbar auto-hide snaps
+immediately to visible after activity and uses one deadline at the 600 ms idle
+boundary to snap hidden; it never creates a fade heartbeat. Accelerated windows
+retain the 150 ms fade-in and 300 ms fade-out. The wgpu surface uses `Fifo`,
+opaque compositing, and desired maximum frame latency 1.
 
 The hidden warm-renderer pool defaults to one. A configured value of `0`
 disables it. Hardware honors targets through 5; degradation caps every nonzero
@@ -267,8 +271,10 @@ flowchart TD
 `CompositeAlphaMode::PreMultiplied`。期望最大帧延迟为 2。
 
 SonicTerm 绘制到保留式离屏帧纹理。帧键覆盖可见窗格修订号、几何、选区、标签页、
-浮层、悬停、内联媒体、字体/样式状态以及其它影响画面的输入。硬件路径收到有变化的
-帧请求时仍执行完整渲染器组装；帧键完全相同时直接返回，不重建也不提交新帧。
+浮层、悬停、内联媒体、字体/样式状态以及其它影响画面的输入。滚动条有效透明度保存为按窗格
+编号排序的 `(pane id, u16 alpha)`；`Never`、没有回滚历史的窗格，以及不高于共享发射阈值
+的透明度都映射为零。硬件路径收到有变化的帧请求时仍执行完整渲染器组装；帧键完全相同时
+直接返回，不重建也不提交新帧。
 
 任何未成功呈现的表面获取路径都会清除缓存帧键。`Outdated` 和 `Suboptimal` 会重新配置
 表面，`Lost` 会重新创建，校验错误则向上传递。重新配置前必须先释放
@@ -287,7 +293,8 @@ SonicTerm 绘制到保留式离屏帧纹理。帧键覆盖可见窗格修订号�
 | 降级软件且输入法组字中 | 83,333 µs（约 12 fps） |
 
 降级路径会把所有重绘（包括输入引起的重绘）合并到最终周期，因为每帧都需要昂贵的 CPU
-工作。滚动条自动隐藏仍会直接到达最终状态，但淡出过程不请求中间帧。wgpu 表面使用
+工作。滚动条在活动后立即跳到可见，并只在 600 ms 空闲边界设置一次截止时间以跳到隐藏；
+它不会形成淡出心跳。加速窗口仍保留 150 ms 淡入和 300 ms 淡出。wgpu 表面使用
 `Fifo`、不透明合成和期望最大帧延迟 1。
 
 隐藏预热渲染器池默认保留一个。配置为 `0` 表示关闭。硬件最多接受目标值 5；降级时

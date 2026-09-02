@@ -15,7 +15,9 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
-use sonicterm_render_model::boundary::cfg::config::{BackdropKind, SoftwareRenderMode};
+use sonicterm_render_model::boundary::cfg::config::{
+    BackdropKind, ScrollbarMode, SoftwareRenderMode,
+};
 use sonicterm_render_model::boundary::cfg::theme::{Color as ThemeColor, Theme};
 use sonicterm_render_model::boundary::grid::grid::{
     bounded_grid_size, Cell, CellFlags, Color, Grid, UnderlineStyle,
@@ -40,6 +42,37 @@ use sonicterm_render_model::boundary::ui::tab_spans::tab_title_font_size;
 
 const PANE_FOCUS_FLASH_DURATION: Duration = Duration::from_millis(360);
 const PANE_FOCUS_FLASH_BUCKET: Duration = Duration::from_millis(16);
+
+fn effective_scrollbar_bucket(
+    mode: ScrollbarMode,
+    scrollback_len: usize,
+    viewport_rows: u16,
+    alpha: f32,
+) -> u16 {
+    if matches!(mode, ScrollbarMode::Never)
+        || scrollback_len == 0
+        || viewport_rows == 0
+        || alpha <= sonicterm_render_model::boundary::ui::scrollbar::ALPHA_EMIT_FLOOR
+    {
+        // When: no scrollbar pixels can be emitted, all equivalent states share bucket zero.
+        return 0;
+    }
+    (alpha.clamp(0.0, 1.0) * f32::from(u16::MAX)).round() as u16
+}
+
+fn pane_scrollbar_identity<I>(mode: ScrollbarMode, panes: I) -> Vec<(u64, u16)>
+where
+    I: IntoIterator<Item = (u64, usize, u16, f32)>,
+{
+    let mut identity: Vec<_> = panes
+        .into_iter()
+        .map(|(pane_id, scrollback_len, viewport_rows, alpha)| {
+            (pane_id, effective_scrollbar_bucket(mode, scrollback_len, viewport_rows, alpha))
+        })
+        .collect();
+    identity.sort_unstable_by_key(|(pane_id, _)| *pane_id);
+    identity
+}
 
 fn pane_focus_flash_sample(elapsed: Duration) -> Option<(u8, f32)> {
     if elapsed >= PANE_FOCUS_FLASH_DURATION {
@@ -108,11 +141,8 @@ pub struct SurfaceAppearance {
     pub backdrop: BackdropKind,
     /// Theme background opacity.
     pub opacity: f32,
-    /// Scrollbar visibility policy. `Auto` and `Always` both
-    /// draw the bar when the pane has scrollback beyond the viewport;
-    /// `Never` suppresses it. Hover-driven auto-hide for `Auto` is
-    /// not implemented — `Auto` behaves like Always-when-
-    /// scrollable.
+    /// Scrollbar visibility policy. `Auto` consumes per-pane opacity from the
+    /// app, `Always` draws whenever scrollback exists, and `Never` suppresses it.
     pub scrollbar: sonicterm_render_model::boundary::cfg::config::ScrollbarMode,
     /// Padding between overlay panel chrome and inner content.
     pub panel_padding: f32,
@@ -581,9 +611,7 @@ pub fn emit_pane_scrollbar(
     alpha: f32,
     scale: f32,
 ) -> usize {
-    // hidden / nearly-hidden early-out. Mirrors
-    // `scrollbar_visibility::ALPHA_EMIT_FLOOR`.
-    if alpha <= 0.01 {
+    if alpha <= sonicterm_render_model::boundary::ui::scrollbar::ALPHA_EMIT_FLOOR {
         // When: `alpha` is at the fade floor where the bar is invisible —
         // emitting costs two quads per pane per frame for unseeable pixels.
         return 0;
@@ -931,6 +959,7 @@ pub(crate) struct RenderSignals {
     pub selection_change: bool,
     pub tab_switch: bool,
     pub pane_topology_change: bool,
+    pub scrollbar_change: bool,
     pub overlay_active_or_toggled: bool,
     pub degrade_state_changed: bool,
     pub dirty_damage: Option<PixelRect>,
@@ -954,6 +983,7 @@ pub(crate) fn decide_render_mode(degrade: bool, signals: RenderSignals) -> Rende
         || signals.selection_change
         || signals.tab_switch
         || signals.pane_topology_change
+        || signals.scrollbar_change
         || signals.overlay_active_or_toggled
         || signals.degrade_state_changed;
     if force_full || signals.dirty_damage.is_some() {
@@ -1509,7 +1539,7 @@ pub struct GpuRenderer {
 /// frame. If two consecutive frames produce an equal key the second one
 /// is a no-op for the user, so the renderer skips text shaping, quad
 /// rebuild and GPU submission entirely.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct FrameKey {
     grid_revision: u64,
     /// Per-pane grid revisions. Part B step 5: split panes each own a Grid,
@@ -1517,6 +1547,8 @@ struct FrameKey {
     /// invalidate the cached frame even though `grid_revision` (active pane)
     /// is unchanged.
     pane_revs: Vec<(u64, u64, Option<u64>)>,
+    /// Sorted per-pane opacity buckets for scrollbar pixels that can be emitted.
+    pane_scrollbar_alpha: Vec<(u64, u16)>,
     selection: Option<Selection>,
     copy_mode: Option<CopyModeState>,
     quick_select_hint_count: u32,
@@ -4081,6 +4113,12 @@ impl GpuRenderer {
             .iter()
             .map(|pv| (pv.pane_id, pv.grid.revision(), pv.viewport_top_abs))
             .collect();
+        let pane_scrollbar_alpha = pane_scrollbar_identity(
+            self.scrollbar_mode,
+            pane_views.iter().map(|pane| {
+                (pane.pane_id, pane.grid.scrollback_len(), pane.grid.rows, pane.scrollbar_alpha)
+            }),
+        );
         let retained_inline_media_bytes = pane_views
             .iter()
             .flat_map(|view| view.inline_images)
@@ -4296,8 +4334,13 @@ impl GpuRenderer {
             || ime.is_some_and(|i| i.is_composing() || !i.preedit().is_empty())
             || self.drag_chip.is_some()
             || self.pane_focus_flash.is_some();
+        let scrollbar_changed = self
+            .last_frame_key
+            .as_ref()
+            .is_none_or(|prev| prev.pane_scrollbar_alpha != pane_scrollbar_alpha);
         let overlay_or_chrome_changed = self.last_frame_key.as_ref().is_none_or(|prev| {
-            prev.selection != selection.copied()
+            scrollbar_changed
+                || prev.selection != selection.copied()
                 || prev.copy_mode != copy_mode.cloned()
                 || prev.quick_select_hint_count != quick_select_hint_count
                 || prev.cursor_visible != cursor_visible
@@ -4367,6 +4410,7 @@ impl GpuRenderer {
         let key = FrameKey {
             grid_revision: grid.revision(),
             pane_revs: pane_revs_vec,
+            pane_scrollbar_alpha,
             selection: selection.copied(),
             copy_mode: copy_mode.cloned(),
             quick_select_hint_count,
@@ -4453,6 +4497,7 @@ impl GpuRenderer {
                         || prev.pane_rect_hash != pane_rect_hash
                         || prev.pane_revs.len() != pane_revs_len
                 }),
+                scrollbar_change: scrollbar_changed,
                 overlay_active_or_toggled: overlay_active || overlay_or_chrome_changed,
                 degrade_state_changed: false,
                 dirty_damage,
@@ -5093,12 +5138,9 @@ impl GpuRenderer {
             }
         }
 
-        // per-pane scrollbar emit. Runs once per pane, AFTER
-        // the per-row bg quads so the bar paints above any colored cell
-        // background but below selection / cursor / modal overlays
-        // (those land in `quads_overlay` later in the function). Auto
-        // mode behaves like Always-when-scrollable here — hover-driven
-        // auto-hide is not implemented.
+        // Per-pane scrollbar emit. Runs after row backgrounds and before
+        // selection, cursor, and modal overlays. Auto opacity comes from the
+        // app state machine; geometry remains shared with hit-testing.
         for pv in &pane_views {
             let pane_rect = PaneRect { x: pv.origin_x, y: pv.origin_y, w: pv.rect_w, h: pv.rect_h };
             let pv_grid: &Grid = pv.grid;

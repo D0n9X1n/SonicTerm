@@ -326,9 +326,11 @@ hovered-URL data to `GpuRenderer::render`. It does not construct one aggregate
 ### 10. Damage and row caches select work
 
 The renderer compares a `FrameKey` with the last successful frame. The key
-covers grid revisions and visible UI state. An identical key can skip frame
-assembly. On Windows degraded presentation, an identical key can re-present the
-existing CPU buffer.
+covers grid revisions and visible UI state, including sorted per-pane scrollbar
+alpha quantized to `u16`. States that emit no scrollbar pixels—`Never`, no
+scrollback, or alpha at the shared floor—share bucket zero. An identical key can
+skip frame assembly. On Windows degraded presentation, an identical key can
+re-present the existing CPU buffer.
 
 When only grid content changed:
 
@@ -336,10 +338,10 @@ When only grid content changed:
 - a dirty alternate-screen pane contributes its full clipped pane;
 - a clean pane contributes no damage.
 
-Overlay, chrome, resize, tab, selection, viewport, or topology changes can
-promote damage to the full surface. A degraded wgpu frame with work always uses
-full-surface damage. Windows degraded presentation also clears and composes a
-full CPU frame.
+Overlay, chrome, scrollbar-alpha, resize, tab, selection, viewport, or topology
+changes can promote damage to the full surface. A degraded wgpu frame with work
+always uses full-surface damage. Windows degraded presentation also clears and
+composes a full CPU frame.
 
 The hardware policy uses `RenderMode::Full`, so it may visit every visible row.
 Retained pixels are still limited by the damage scissor. Row caches make
@@ -861,8 +863,10 @@ PTY 输出最多等待一个显示器帧周期。最终降级状态启用时，�
 
 ### 10. 损伤区域和行缓存选择工作量
 
-渲染器把 `FrameKey` 与上一帧成功画面比较。该键覆盖网格 revision 和可见界面状态。完全
-相同的键可以跳过组帧。Windows 降级呈现还可以在键相同时重新呈现已有 CPU 缓冲区。
+渲染器把 `FrameKey` 与上一帧成功画面比较。该键覆盖网格 revision 和可见界面状态，
+包括按窗格编号排序并量化为 `u16` 的滚动条透明度。不会发射滚动条像素的状态——`Never`、
+没有回滚历史或透明度处于共享阈值——统一使用零桶。完全相同的键可以跳过组帧。Windows
+降级呈现还可以在键相同时重新呈现已有 CPU 缓冲区。
 
 只有网格内容变化时：
 
@@ -870,8 +874,9 @@ PTY 输出最多等待一个显示器帧周期。最终降级状态启用时，�
 - 有脏行的备用屏幕窗格贡献完整裁剪窗格；
 - 干净窗格不贡献损伤区域。
 
-浮层、窗口装饰、尺寸、标签页、选区、视口或拓扑变化可以把损伤扩大到整个表面。
-有实际工作的降级 wgpu 帧总是使用完整表面。Windows 降级呈现也会清空并合成完整 CPU 帧。
+浮层、窗口装饰、滚动条透明度、尺寸、标签页、选区、视口或拓扑变化可以把损伤扩大到
+整个表面。有实际工作的降级 wgpu 帧总是使用完整表面。Windows 降级呈现也会清空并合成
+完整 CPU 帧。
 
 硬件策略使用 `RenderMode::Full`，因此可能访问每个可见行。真正改变保留像素的区域仍由
 损伤裁剪决定。行缓存让未改变行的组装成本保持较低。

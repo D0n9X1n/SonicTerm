@@ -7,16 +7,16 @@
 //!
 //! Semantics (Auto mode):
 //! - Scrollbar is hidden by default (alpha 0).
-//! - Becomes visible (alpha lerps to 1 over ~150 ms) when any of:
-//!   - mouse is within `EDGE_PROXIMITY_PX` of the pane's right edge, OR
-//!   - the pane saw scroll/drag activity within the last `IDLE_HIDE_MS`.
-//! - Fades back to 0 over ~300 ms once the conditions stop holding and
-//!   the idle delay elapses.
+//! - Interaction targets alpha 1 while edge hover, drag, or recent activity holds.
+//! - [`ScrollbarMotion::Animated`] uses 150 ms fade-in and 300 ms fade-out frames.
+//! - [`ScrollbarMotion::Snap`] assigns targets immediately and uses one idle deadline.
 //!
 //! Always / Never short-circuit to alpha 1.0 / 0.0 with no animation.
 
 use sonicterm_cfg::config::ScrollbarMode;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+pub use sonicterm_ui::scrollbar::ALPHA_EMIT_FLOOR;
 
 /// Logical-pixel distance from the pane's right edge that counts as
 /// "hovering the scrollbar gutter" and shows the bar.
@@ -32,9 +32,27 @@ pub const FADE_IN_MS: u64 = 150;
 /// Fade-out duration (slower — gentle dismissal).
 pub const FADE_OUT_MS: u64 = 300;
 
-/// Below this alpha the renderer skips emitting the scrollbar quads
-/// entirely (saves two `QuadInstance` writes per pane per frame).
-pub const ALPHA_EMIT_FLOOR: f32 = 0.01;
+/// Whether scrollbar opacity advances through fade frames or reaches its target immediately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollbarMotion {
+    /// Advance opacity over the configured fade duration.
+    Animated,
+    /// Assign target opacity immediately and rely on one idle-hide deadline.
+    Snap,
+}
+
+/// Resolve a window's scrollbar motion from renderer state, falling back only before attachment.
+pub(crate) fn window_scrollbar_motion(
+    renderer_degraded: Option<bool>,
+    app_degraded: bool,
+) -> ScrollbarMotion {
+    if renderer_degraded.unwrap_or(app_degraded) {
+        ScrollbarMotion::Snap
+    } else {
+        // When: renderer_degraded or app_degraded resolves false, preserve accelerated animation.
+        ScrollbarMotion::Animated
+    }
+}
 
 /// Per-pane visibility state. Constructed lazily on first use; lives
 /// inside `WindowState.scrollbar_vis` keyed by `pane_id`.
@@ -55,8 +73,7 @@ pub struct ScrollbarVisState {
     /// Sticky bit: cursor is currently inside the right-edge proximity
     /// strip. When `true` we override the idle-hide timer.
     pub mouse_near_right_edge: bool,
-    /// Last frame's `tick` instant. Drives the per-frame lerp step
-    /// independent of monitor refresh.
+    /// Last [`tick`] instant. Drives animated steps and records the latest snap.
     pub last_tick: Instant,
 }
 
@@ -94,84 +111,127 @@ pub fn is_mouse_near_right_edge(
     cursor_x >= right - EDGE_PROXIMITY_PX && cursor_x <= right + EDGE_PROXIMITY_PX.min(8.0)
 }
 
-/// Step the alpha animation one frame. Returns the new alpha.
-///
-/// `drag_active` should be `true` while a scrollbar-thumb drag is in
-/// progress on this pane (per `ScrollbarDragState`).
-///
-/// For `Always` the returned alpha is always 1.0; for `Never` always 0.0
-/// (state struct is bypassed but kept in lock-step so a live mode swap
-/// snaps without a stale stored alpha).
+fn auto_target(state: &ScrollbarVisState, drag_active: bool, now: Instant) -> f32 {
+    let recently_active = state.last_active.is_some_and(|active| {
+        now.saturating_duration_since(active).as_millis() < u128::from(IDLE_HIDE_MS)
+    });
+    if drag_active || state.mouse_near_right_edge || recently_active {
+        1.0
+    } else {
+        // When: drag_active, mouse_near_right_edge, and recently_active are false, Auto targets hidden.
+        0.0
+    }
+}
+
+/// Step the scrollbar opacity according to the selected motion policy.
 pub fn tick(
     state: &mut ScrollbarVisState,
     mode: ScrollbarMode,
     drag_active: bool,
+    motion: ScrollbarMotion,
     now: Instant,
 ) -> f32 {
-    match mode {
-        ScrollbarMode::Always => {
-            state.alpha = 1.0;
-            state.last_tick = now;
-            1.0
-        }
-        ScrollbarMode::Never => {
-            state.alpha = 0.0;
-            state.last_tick = now;
-            0.0
-        }
-        ScrollbarMode::Auto => {
-            let idle_ms = match state.last_active {
-                Some(t) => now.saturating_duration_since(t).as_millis() as u64,
-                None => u64::MAX,
-            };
-            let visible_now = drag_active || state.mouse_near_right_edge || idle_ms < IDLE_HIDE_MS;
-            let target = if visible_now { 1.0 } else { 0.0 };
-            let dt_ms = now.saturating_duration_since(state.last_tick).as_millis().max(1) as f32;
-            let duration_ms = if target > state.alpha {
-                FADE_IN_MS as f32
-            } else {
-                // When: target is at or below state.alpha the bar is dismissing,
-                // so the slower FADE_OUT_MS governs the step size.
-                FADE_OUT_MS as f32
-            };
-            let step = dt_ms / duration_ms;
-            let delta = target - state.alpha;
-            if delta.abs() <= step {
-                state.alpha = target;
-            } else {
-                // When: delta still exceeds step the alpha advances one frame's
-                // worth toward target and another redraw is needed.
-                state.alpha += step.copysign(delta);
-            }
-            state.alpha = state.alpha.clamp(0.0, 1.0);
-            state.last_tick = now;
-            state.alpha
-        }
+    let target = match mode {
+        ScrollbarMode::Always => 1.0,
+        ScrollbarMode::Never => 0.0,
+        ScrollbarMode::Auto => auto_target(state, drag_active, now),
+    };
+    if !matches!(mode, ScrollbarMode::Auto) || matches!(motion, ScrollbarMotion::Snap) {
+        // When: `matches` selects fixed mode or Snap motion, assign the target without a fade frame.
+        state.alpha = target;
+        state.last_tick = now;
+        return target;
     }
+
+    let dt_ms = now.saturating_duration_since(state.last_tick).as_millis().max(1) as f32;
+    let duration_ms = if target > state.alpha {
+        FADE_IN_MS as f32
+    } else {
+        // When: `target` is at or below `state.alpha`, use the gentler fade-out duration.
+        FADE_OUT_MS as f32
+    };
+    let step = dt_ms / duration_ms;
+    let delta = target - state.alpha;
+    if delta.abs() <= step {
+        state.alpha = target;
+    } else {
+        // When: delta remains larger than step, advance once so a later frame can finish the fade.
+        state.alpha += step.copysign(delta);
+    }
+    state.alpha = state.alpha.clamp(0.0, 1.0);
+    state.last_tick = now;
+    state.alpha
 }
 
-/// `true` when the per-frame `tick` will still produce visible change
-/// — used to decide whether to schedule another redraw next frame.
-pub fn is_animating(state: &ScrollbarVisState, mode: ScrollbarMode, drag_active: bool) -> bool {
-    if !matches!(mode, ScrollbarMode::Auto) {
-        // When: mode matches Always or Never the alpha is pinned by tick, so
-        // no further frames need scheduling for a fade.
+/// Whether another opacity frame is required at the supplied instant.
+pub fn is_animating(
+    state: &ScrollbarVisState,
+    mode: ScrollbarMode,
+    drag_active: bool,
+    motion: ScrollbarMotion,
+    now: Instant,
+) -> bool {
+    if !matches!(mode, ScrollbarMode::Auto) || matches!(motion, ScrollbarMotion::Snap) {
+        // When: `matches` selects fixed mode or Snap motion, no intermediate opacity remains.
         return false;
     }
-    let idle_ms = match state.last_active {
-        Some(t) => t.elapsed().as_millis() as u64,
-        None => u64::MAX,
-    };
-    let visible_now = drag_active || state.mouse_near_right_edge || idle_ms < IDLE_HIDE_MS;
-    let target = if visible_now { 1.0 } else { 0.0 };
+    let target = auto_target(state, drag_active, now);
     (state.alpha - target).abs() > f32::EPSILON
-        // Even when alpha is currently parked at 1.0, the idle window may
-        // close shortly and trigger a fade-out. Keep scheduling frames until
-        // that boundary passes so Auto mode does not freeze fully visible
-        // until the next unrelated terminal event.
-        || idle_ms < IDLE_HIDE_MS
-        || (visible_now && state.alpha < 1.0)
-        || (!visible_now && state.alpha > 0.0)
+        || state.last_active.is_some_and(|active| {
+            now.saturating_duration_since(active).as_millis() < u128::from(IDLE_HIDE_MS)
+        })
+}
+
+/// Earliest idle-hide deadline held by a visible snapped scrollbar.
+pub fn next_snap_deadline(
+    vis: &std::collections::HashMap<u64, ScrollbarVisState>,
+    mode: ScrollbarMode,
+    drag_active_on_pane: Option<u64>,
+) -> Option<Instant> {
+    if !matches!(mode, ScrollbarMode::Auto) {
+        // When: `matches` rejects Auto mode, no idle transition or hide wake exists.
+        return None;
+    }
+    vis.iter()
+        .filter(|(id, state)| {
+            state.alpha > ALPHA_EMIT_FLOOR
+                && !state.mouse_near_right_edge
+                && drag_active_on_pane != Some(**id)
+        })
+        .filter_map(|(_, state)| {
+            state.last_active.map(|active| active + Duration::from_millis(IDLE_HIDE_MS))
+        })
+        .min()
+}
+
+/// Expire due snapped scrollbars and report whether visible opacity changed.
+pub fn expire_due_snaps(
+    vis: &mut std::collections::HashMap<u64, ScrollbarVisState>,
+    mode: ScrollbarMode,
+    drag_active_on_pane: Option<u64>,
+    now: Instant,
+) -> bool {
+    if !matches!(mode, ScrollbarMode::Auto) {
+        // When: `matches` rejects Auto mode, expiration must preserve fixed visibility.
+        return false;
+    }
+    let mut changed = false;
+    for (id, state) in vis {
+        if state.mouse_near_right_edge || drag_active_on_pane == Some(*id) {
+            // When: mouse_near_right_edge is true or drag_active_on_pane matches id, visibility still holds.
+            continue;
+        }
+        let due = state
+            .last_active
+            .is_some_and(|active| active + Duration::from_millis(IDLE_HIDE_MS) <= now);
+        if due && state.alpha > ALPHA_EMIT_FLOOR {
+            state.alpha = 0.0;
+            state.last_active = None;
+            state.last_tick = now;
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// One-shot helper used at the top of the render path: for the given
@@ -179,6 +239,7 @@ pub fn is_animating(state: &ScrollbarVisState, mode: ScrollbarMode, drag_active:
 /// `mouse_near_right_edge` from the current cursor, tick the alpha,
 /// and return a map of `(pane_id -> alpha)` for `PaneRender`. Closed
 /// panes are pruned from `vis` in-place.
+#[allow(clippy::too_many_arguments)]
 pub fn update_and_collect(
     vis: &mut std::collections::HashMap<u64, ScrollbarVisState>,
     panes: &[(u64, f32, f32, f32, f32)],
@@ -186,6 +247,7 @@ pub fn update_and_collect(
     active_id: u64,
     drag_active_on_pane: Option<u64>,
     mode: ScrollbarMode,
+    motion: ScrollbarMotion,
     now: Instant,
 ) -> std::collections::HashMap<u64, f32> {
     let live_ids: std::collections::HashSet<u64> = panes.iter().map(|(id, ..)| *id).collect();
@@ -200,7 +262,7 @@ pub fn update_and_collect(
         }
         state.mouse_near_right_edge = near;
         let drag = drag_active_on_pane == Some(id) && id == active_id;
-        let alpha = tick(state, mode, drag, now);
+        let alpha = tick(state, mode, drag, motion, now);
         out.insert(id, alpha);
     }
     out

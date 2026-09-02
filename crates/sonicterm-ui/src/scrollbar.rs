@@ -9,6 +9,9 @@
 
 use sonicterm_cfg::config::ScrollbarMode;
 
+/// Lowest alpha that emits visible scrollbar geometry or frame identity.
+pub const ALPHA_EMIT_FLOOR: f32 = 0.01;
+
 /// Axis-aligned rectangle in physical pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
