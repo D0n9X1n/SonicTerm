@@ -118,6 +118,14 @@ broken; `check-workspace-crates.sh` is the step that runs `--tests` per crate
 and catches that. A green `cargo test --workspace --lib --bins` on its own
 means the unit tests pass, not that CI will.
 
+**Never merge or enable auto-merge while any required pull-request CI job is
+queued, in progress, missing, cancelled, unexpectedly skipped, or failed.** The
+macOS, Windows, and Ubuntu jobs must each finish with `SUCCESS` on the exact
+reviewed head commit before merge. In particular, Windows must compile and run
+its Windows-only tests successfully; green macOS/Ubuntu results, local gates, or
+review approval cannot substitute for that result. After merge, verify `main` CI
+and Wiki publication before starting the next serialized PR.
+
 The second clippy line is not a duplicate. `--workspace --all-targets` does
 not imply `--all-features`, and `ssh` is off by default, so the SSH backend is
 compiled by no other command in this list.
