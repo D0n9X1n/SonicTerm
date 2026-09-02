@@ -34,15 +34,24 @@ pub(crate) enum PathKind {
     Directory,
 }
 
-/// Result of asynchronous local-target validation.
+/// Result of asynchronous local-target validation, including the permitted native action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PathOpenDecision {
+    /// Open through the platform's ordinary default-application path.
     Openable(PathKind),
+    /// Reveal in the native file manager without opening or executing the target.
+    Revealable(PathKind),
+    /// Existing target whose identity or content is not safe to dispatch.
     Blocked,
+    /// Target did not exist when probed.
     Missing,
 }
 
 impl PathOpenDecision {
+    fn is_actionable(self) -> bool {
+        matches!(self, Self::Openable(_) | Self::Revealable(_))
+    }
+
     #[cfg(any(target_os = "macos", target_os = "windows", test))]
     fn is_blocked(self) -> bool {
         self == Self::Blocked
@@ -202,9 +211,7 @@ impl PathProbeState {
             // When: `modifier_held` is false or `current` differs from `key`, no probe result authorizes this click.
             return None;
         }
-        self.selection
-            .as_ref()
-            .filter(|selection| matches!(selection.decision, PathOpenDecision::Openable(_)))
+        self.selection.as_ref().filter(|selection| selection.decision.is_actionable())
     }
 
     #[cfg(test)]
@@ -350,24 +357,11 @@ fn macos_file_policy(path: &Path, prefix: &[u8], executable_mode: bool) -> PathO
         "mpkg",
         "dmg",
         "webloc",
-        "sh",
-        "bash",
-        "zsh",
-        "csh",
-        "tcsh",
-        "ksh",
-        "fish",
-        "py",
-        "pyw",
-        "rb",
-        "pl",
-        "pm",
-        "php",
-        "lua",
-        "tcl",
         "osascript",
-        "js",
-        "jxa",
+    ];
+    const REVEALABLE_EXTENSIONS: &[&str] = &[
+        "sh", "bash", "zsh", "csh", "tcsh", "ksh", "fish", "py", "pyw", "rb", "pl", "pm", "php",
+        "lua", "tcl", "js", "jxa",
     ];
     const EXECUTABLE_MAGICS: &[&[u8]] = &[
         b"\x7fELF",
@@ -385,11 +379,16 @@ fn macos_file_policy(path: &Path, prefix: &[u8], executable_mode: bool) -> PathO
     let extension = path.extension().and_then(|value| value.to_str()).unwrap_or_default();
     let blocked_extension =
         BLOCKED_EXTENSIONS.iter().any(|blocked| extension.eq_ignore_ascii_case(blocked));
+    let revealable_extension =
+        REVEALABLE_EXTENSIONS.iter().any(|suffix| extension.eq_ignore_ascii_case(suffix));
     let blocked_content = EXECUTABLE_MAGICS.iter().any(|magic| prefix.starts_with(magic));
     if executable_mode || blocked_extension || blocked_content {
         PathOpenDecision::Blocked
+    } else if revealable_extension {
+        // When: `revealable_extension` is the sole restriction, Finder may select the inert source without opening it.
+        PathOpenDecision::Revealable(PathKind::File)
     } else {
-        // When: `executable_mode`, `blocked_extension`, and `blocked_content` are false, allow the regular file.
+        // When: `executable_mode`, `blocked_extension`, `blocked_content`, and `revealable_extension` are false, allow the file.
         PathOpenDecision::Openable(PathKind::File)
     }
 }
@@ -553,13 +552,13 @@ fn select_openable_candidate(
     let mut index = 0;
     while index < candidates.len() {
         let span_len = candidates[index].span_len();
-        let mut openable = Vec::new();
+        let mut actionable = Vec::new();
         let mut blocked = false;
         while index < candidates.len() && candidates[index].span_len() == span_len {
             let candidate = &candidates[index];
             match classify(&candidate.resolved_path) {
-                decision @ PathOpenDecision::Openable(_) => {
-                    openable.push(PathProbeSelection { candidate: candidate.clone(), decision });
+                decision @ (PathOpenDecision::Openable(_) | PathOpenDecision::Revealable(_)) => {
+                    actionable.push(PathProbeSelection { candidate: candidate.clone(), decision });
                 }
                 PathOpenDecision::Blocked => blocked = true,
                 PathOpenDecision::Missing => {
@@ -568,12 +567,12 @@ fn select_openable_candidate(
             }
             index += 1;
         }
-        if blocked || openable.len() > 1 {
+        if blocked || actionable.len() > 1 {
             // When: the longest existing tier is blocked or ambiguous, fail closed instead of falling back to a shorter path.
             return None;
         }
-        if let Some(selection) = openable.pop() {
-            // When: `openable.pop()` returns the sole longest positive candidate, authorize its complete span.
+        if let Some(selection) = actionable.pop() {
+            // When: `actionable.pop()` returns the sole longest candidate, authorize its exact action and span.
             return Some(selection);
         }
     }
@@ -583,7 +582,7 @@ fn select_openable_candidate(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PathOpenRequest {
     path: PathBuf,
-    expected_kind: PathKind,
+    expected_decision: PathOpenDecision,
 }
 
 /// App-owned handles for the bounded path probe and open workers.
@@ -631,7 +630,7 @@ impl PathWorkers {
             .name("sonicterm-path-open".into())
             .spawn(move || {
                 while let Ok(request) = open_rx.recv() {
-                    if let Err(error) = open_path(&request.path, request.expected_kind) {
+                    if let Err(error) = open_path(&request.path, request.expected_decision) {
                         tracing::warn!(path = ?request.path, %error, "path open failed");
                     }
                 }
@@ -651,8 +650,12 @@ impl PathWorkers {
     ///
     /// `Ok(false)` means the bounded worker already has one running and one
     /// waiting request; the click is still consumed and the extra open drops.
-    pub(super) fn open(&self, path: PathBuf, expected_kind: PathKind) -> io::Result<bool> {
-        match self.open.try_send(PathOpenRequest { path, expected_kind }) {
+    pub(super) fn open(
+        &self,
+        path: PathBuf,
+        expected_decision: PathOpenDecision,
+    ) -> io::Result<bool> {
+        match self.open.try_send(PathOpenRequest { path, expected_decision }) {
             Ok(()) => Ok(true),
             Err(TrySendError::Full(_)) => Ok(false),
             Err(TrySendError::Disconnected(_)) => {
@@ -687,9 +690,12 @@ fn run_command(spec: CommandSpec) -> io::Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn open_path(path: &Path, expected_kind: PathKind) -> io::Result<()> {
-    if classify_macos_target(path) != PathOpenDecision::Openable(expected_kind) {
-        // When: `classify_macos_target` no longer returns `expected_kind`, reject a changed or newly blocked target.
+fn macos_validated_open_spec(
+    path: &Path,
+    expected_decision: PathOpenDecision,
+) -> io::Result<CommandSpec> {
+    if classify_macos_target(path) != expected_decision {
+        // When: `classify_macos_target` no longer matches `expected_decision`, reject changed identity, kind, or action.
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "changed or blocked macOS target",
@@ -698,13 +704,25 @@ fn open_path(path: &Path, expected_kind: PathKind) -> io::Result<()> {
     let text = path
         .to_str()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path is not UTF-8"))?;
-    let spec = macos_open_spec(text)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid macOS path"))?;
-    run_command(spec)
+    match expected_decision {
+        PathOpenDecision::Openable(_) => macos_open_spec(text),
+        PathOpenDecision::Revealable(_) => macos_reveal_spec(text),
+        PathOpenDecision::Blocked | PathOpenDecision::Missing => None,
+    }
+    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid macOS path"))
+}
+
+#[cfg(target_os = "macos")]
+fn open_path(path: &Path, expected_decision: PathOpenDecision) -> io::Result<()> {
+    run_command(macos_validated_open_spec(path, expected_decision)?)
 }
 
 #[cfg(target_os = "windows")]
-fn open_path(path: &Path, expected_kind: PathKind) -> io::Result<()> {
+fn open_path(path: &Path, expected_decision: PathOpenDecision) -> io::Result<()> {
+    let PathOpenDecision::Openable(expected_kind) = expected_decision else {
+        // When: `expected_decision` is not `Openable`, Windows has no reveal-only dispatch contract.
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "unsupported Windows action"));
+    };
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
@@ -799,9 +817,13 @@ fn linux_portal_unavailable(error: &ashpd::Error) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn open_path(path: &Path, expected_kind: PathKind) -> io::Result<()> {
+fn open_path(path: &Path, expected_decision: PathOpenDecision) -> io::Result<()> {
     use ashpd::desktop::open_uri::OpenFileRequest;
 
+    let PathOpenDecision::Openable(expected_kind) = expected_decision else {
+        // When: `expected_decision` is not `Openable`, Linux has no reveal-only dispatch contract.
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "unsupported Linux action"));
+    };
     let portal = with_opened_target(path, |file| {
         if classify_linux_file(path, file)? != PathOpenDecision::Openable(expected_kind) {
             // When: `classify_linux_file` differs from `expected_kind`, reject identity or type changes before portal handoff.
@@ -872,7 +894,7 @@ fn linux_xdg_open_spec(path: &Path) -> Option<CommandSpec> {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-fn open_path(_path: &Path, _expected_kind: PathKind) -> io::Result<()> {
+fn open_path(_path: &Path, _expected_decision: PathOpenDecision) -> io::Result<()> {
     Err(io::Error::new(io::ErrorKind::Unsupported, "path open is unsupported"))
 }
 
@@ -956,14 +978,21 @@ fn row_target_candidates_at_cell(
                 .iter()
                 .position(|(start, _)| *start >= matched.end)
                 .unwrap_or(cells.len());
+            let mut source_end_col = end_col;
+            while source_end_col < cells.len()
+                && matches!(cells[source_end_col].ch, ',' | ';' | '.' | ':' | '!' | '?')
+            {
+                source_end_col += 1;
+            }
             if start_col >= end_col
                 || start_col > col
                 || end_col <= col
-                || cells[start_col..end_col]
+                || source_end_col < end_col
+                || cells[start_col..source_end_col]
                     .iter()
                     .any(|cell| unsafe_path_cell(cell) || cell.hyperlink().is_some())
             {
-                // When: the span misses `col` or crosses unsafe cell identity, reject the complete candidate.
+                // When: the visible or literal source span misses ownership or crosses unsafe cells, reject the candidate.
                 return None;
             }
             Some(RowTarget {
@@ -1095,6 +1124,15 @@ pub(super) fn macos_open_spec(path: &str) -> Option<CommandSpec> {
     Some(CommandSpec {
         program: PathBuf::from("/usr/bin/open"),
         args: vec!["--".to_string(), path],
+    })
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn macos_reveal_spec(path: &str) -> Option<CommandSpec> {
+    let path = normalize_posix_absolute(path)?;
+    Some(CommandSpec {
+        program: PathBuf::from("/usr/bin/open"),
+        args: vec!["-R".to_string(), "--".to_string(), path],
     })
 }
 
@@ -1599,15 +1637,15 @@ impl App {
                     // When: `authorized_selection` returns no target, leave a missing, blocked, or stale path to normal selection.
                     return false;
                 };
-                let PathOpenDecision::Openable(kind) = selection.decision else {
-                    // When: a retained selection is no longer openable, do not enqueue native activation.
+                if !selection.decision.is_actionable() {
+                    // When: `selection.decision` is not actionable, never enqueue a blocked or missing target.
                     return false;
-                };
+                }
                 let Some(workers) = &self.path_workers else {
                     // When: `path_workers` yields no `workers`, do not consume a click that cannot reach the bounded opener.
                     return false;
                 };
-                match workers.open(selection.candidate.resolved_path, kind) {
+                match workers.open(selection.candidate.resolved_path, selection.decision) {
                     Ok(true) => true,
                     Ok(false) => {
                         tracing::warn!("path open queue full; request dropped");

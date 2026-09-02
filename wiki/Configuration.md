@@ -76,8 +76,8 @@ including history is at most `1048576` cells.
 | `shell` | omitted | Shell for new panes. Windows tries `pwsh.exe` from `PATH`, registered PowerShell 7, the real Microsoft Store package, Windows PowerShell, then `cmd.exe`. Unix tries an executable `$SHELL`, the current user’s executable passwd shell, then `/bin/sh`. An explicit non-empty value wins. |
 | `term_program` | `"SonicTerm"` | `TERM_PROGRAM` for new child PTYs. `TERM_PROGRAM_VERSION` is SonicTerm’s version, except `term_program = "WezTerm"` advertises `20230712-072601`. |
 | `scrollback` | `1000` | Requested history rows per pane. `0` disables history. Grid and retained-byte budgets may lower the effective limit. |
-| `clickable_local_targets` | `true` | Allows validated raw local files and directories to open. URI and OSC 8 links are independent. |
-| `clickable_bare_names` | `true` | Allows contextual names to resolve against the exact pane’s trusted local OSC 7 working directory. It only works when `clickable_local_targets` is also `true`. |
+| `clickable_local_targets` | `true` | Allows validated raw local files and directories to activate. On macOS, inert source/script files are reveal-only. URI and OSC 8 links are independent. |
+| `clickable_bare_names` | `true` | Allows contextual names to resolve against the exact pane’s trusted local OSC 7 working directory. Separator-relative paths require that same trusted pane CWD. It only works when `clickable_local_targets` is also `true`. |
 | `cursor_blink` | `false` | Enables cursor blinking. |
 | `cursor_shape` | `"block"` | Accepts `block`, `bar`, or `underline`. |
 
@@ -277,8 +277,8 @@ Grid 尺寸始终有上限。每个轴最多是 `4096`，可见 grid 最多包�
 | `shell` | 省略 | 新 pane 使用的 shell。Windows 依次尝试 `PATH` 中的 `pwsh.exe`、已注册的 PowerShell 7、Microsoft Store 中的真实程序、Windows PowerShell、`cmd.exe`。Unix 依次尝试可执行的 `$SHELL`、当前用户 passwd 中的可执行 shell、`/bin/sh`。非空显式值优先。 |
 | `term_program` | `"SonicTerm"` | 新子 PTY 的 `TERM_PROGRAM`。`TERM_PROGRAM_VERSION` 通常是 SonicTerm 版本；`term_program = "WezTerm"` 时为 `20230712-072601`。 |
 | `scrollback` | `1000` | 每个 pane 请求保留的历史行数。`0` 关闭历史记录。Grid 和内存字节预算可能进一步降低实际值。 |
-| `clickable_local_targets` | `true` | 允许打开经过验证的原始本地文件和目录。URI 与 OSC 8 link 不受它控制。 |
-| `clickable_bare_names` | `true` | 允许按准确 pane 的可信本机 OSC 7 工作目录解析上下文名称。只有 `clickable_local_targets` 同时为 `true` 时才生效。 |
+| `clickable_local_targets` | `true` | 允许操作经过验证的原始本地文件和目录。macOS 上的普通源文件或脚本只能在 Finder 中显示。URI 与 OSC 8 link 不受它控制。 |
+| `clickable_bare_names` | `true` | 允许按准确 pane 的可信本机 OSC 7 工作目录解析上下文名称。带分隔符的相对路径也要求同一可信 pane CWD。只有 `clickable_local_targets` 同时为 `true` 时才生效。 |
 | `cursor_blink` | `false` | 让光标闪烁。 |
 | `cursor_shape` | `"block"` | 可选 `block`、`bar` 或 `underline`。 |
 

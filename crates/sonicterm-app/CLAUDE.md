@@ -45,9 +45,9 @@ cargo build -p sonicterm-app
 - Every terminal window enforces the shared 30-column by 10-row native inner-size
   floor from live renderer geometry and refreshes it after metric/DPI changes.
 - Local-target hover never performs filesystem I/O on the event-loop thread.
-  Clickability requires a current epoch-keyed typed openability result. Direct-open
-  work stays bounded, revalidates target kind, and blocks executable/launcher,
-  symlink/reparse-point, and special-file classes before native dispatch.
+  Clickability requires a current epoch-keyed typed open-or-reveal result. Native
+  dispatch stays bounded, revalidates the exact action and target kind, and blocks
+  executable/launcher, symlink/reparse-point, and special-file classes.
 - Contextual terminal candidates, including names containing ordinary spaces,
   resolve only against the exact pane's trustworthy local OSC 7 CWD, after OSC 8,
   URI, and explicit-path precedence; never fall back to process CWD, another pane,

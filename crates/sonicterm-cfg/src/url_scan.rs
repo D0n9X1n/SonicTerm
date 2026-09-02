@@ -49,7 +49,7 @@ pub enum DetectedTarget {
 pub struct TargetMatch {
     /// Byte offset (inclusive) in the scanned row.
     pub start: usize,
-    /// Byte offset (exclusive) in the scanned row.
+    /// Byte offset (exclusive) of the visible target span.
     pub end: usize,
     /// Detected value and its immutable provenance.
     pub target: DetectedTarget,
@@ -83,6 +83,14 @@ const MAX_TARGET_BYTES: usize = 4096;
 const MAX_SPACED_PATH_TOKENS: usize = 8;
 const MAX_PATH_CANDIDATES_PER_CELL: usize =
     MAX_SPACED_PATH_TOKENS * (MAX_SPACED_PATH_TOKENS + 1) / 2 + 1;
+
+struct FocusedCandidateGroup {
+    token_count: usize,
+    source_start: usize,
+    source_end: usize,
+    has_prose_fallback: bool,
+    candidates: Vec<TargetMatch>,
+}
 
 /// Return every URL substring of `text` whose scheme is on our
 /// allow-list and which passes [`validate`].
@@ -354,10 +362,7 @@ pub fn target_candidates_at_char_col_for_style(
         return Vec::new();
     };
     let first_left = anchor_end.saturating_add(1).saturating_sub(MAX_SPACED_PATH_TOKENS);
-    let mut candidates = target_at_byte_for_style(text, clicked_byte, style)
-        .filter(|matched| !matches!(matched.target, DetectedTarget::Uri(_)))
-        .map(|matched| vec![(1, matched)])
-        .unwrap_or_default();
+    let mut groups = Vec::new();
     for left_index in first_left..=anchor_start {
         let last_right = tokens
             .len()
@@ -382,44 +387,125 @@ pub fn target_candidates_at_char_col_for_style(
                 // When: `candidate` exceeds a hard safety boundary or overlaps URI provenance, leave the range inert.
                 continue;
             }
-            let target =
-                if has_path_prefix(candidate, style) && validate_path_candidate(candidate, style) {
-                    DetectedTarget::PathCandidate(candidate.to_string())
-                } else if include_bare_names && validate_bare_name(candidate, style) {
-                    // When: `candidate` has no explicit prefix, retain contextual provenance for exact-pane CWD resolution.
-                    DetectedTarget::BareName(candidate.to_string())
-                } else {
-                    // When: `candidate` satisfies neither explicit nor enabled contextual grammar, leave it inert.
-                    continue;
-                };
             let token_count = right_index - left_index + 1;
-            candidates.push((token_count, TargetMatch { start, end, target }));
+            if let Some(group) = focused_candidate_group(
+                text,
+                clicked_byte,
+                style,
+                include_bare_names,
+                token_count,
+                start,
+                end,
+            ) {
+                groups.push(group);
+            }
         }
     }
 
-    candidates.sort_by(|(_, left), (_, right)| {
-        left.start
-            .cmp(&right.start)
-            .then_with(|| left.end.cmp(&right.end))
-            .then_with(|| target_sort_key(&left.target).cmp(&target_sort_key(&right.target)))
+    groups.sort_by(|left, right| {
+        right
+            .has_prose_fallback
+            .cmp(&left.has_prose_fallback)
+            .then_with(|| left.token_count.cmp(&right.token_count))
+            .then_with(|| {
+                (left.source_end - left.source_start).cmp(&(right.source_end - right.source_start))
+            })
+            .then_with(|| left.source_start.cmp(&right.source_start))
     });
-    candidates.dedup_by(|(_, right), (_, left)| {
-        right.start == left.start && right.end == left.end && right.target == left.target
+    groups.dedup_by(|right, left| {
+        right.source_start == left.source_start && right.source_end == left.source_end
     });
-    candidates.sort_by(|(left_count, left), (right_count, right)| {
-        left_count
-            .cmp(right_count)
-            .then_with(|| (left.end - left.start).cmp(&(right.end - right.start)))
-            .then_with(|| left.start.cmp(&right.start))
-    });
-    candidates.truncate(MAX_PATH_CANDIDATES_PER_CELL);
-    candidates.sort_by(|(_, left), (_, right)| {
+
+    let mut candidates = Vec::new();
+    for group in groups {
+        if candidates.len() + group.candidates.len() > MAX_PATH_CANDIDATES_PER_CELL {
+            // When: the complete `group` would exceed the cap, skip it rather than orphaning its literal or fallback.
+            continue;
+        }
+        candidates.extend(group.candidates);
+    }
+    candidates.sort_by(|left, right| {
         (right.end - right.start)
             .cmp(&(left.end - left.start))
             .then_with(|| left.start.cmp(&right.start))
             .then_with(|| left.end.cmp(&right.end))
     });
-    candidates.into_iter().map(|(_, candidate)| candidate).collect()
+    candidates
+}
+
+fn focused_candidate_group(
+    text: &str,
+    clicked_byte: usize,
+    style: PathStyle,
+    include_bare_names: bool,
+    token_count: usize,
+    start: usize,
+    source_end: usize,
+) -> Option<FocusedCandidateGroup> {
+    let one_trim = text[start..source_end]
+        .char_indices()
+        .next_back()
+        .filter(|(_, ch)| is_prose_path_punctuation(*ch))
+        .map(|(offset, _)| start + offset);
+    let mut full_trim = source_end;
+    while let Some((offset, ch)) = text[start..full_trim].char_indices().next_back() {
+        if !is_prose_path_punctuation(ch) {
+            // When: `ch` is not prose punctuation, stop before trimming legal filename content.
+            break;
+        }
+        full_trim = start + offset;
+    }
+    let mut ends = vec![source_end];
+    if let Some(one_trim) = one_trim {
+        ends.push(one_trim);
+    }
+    if full_trim < source_end {
+        ends.push(full_trim);
+    }
+    ends.sort_unstable_by(|left, right| right.cmp(left));
+    ends.dedup();
+
+    let mut candidates = ends
+        .into_iter()
+        .filter(|end| clicked_byte < *end)
+        .filter_map(|end| {
+            let candidate = text.get(start..end)?;
+            let target = detected_path_target(candidate, style, include_bare_names)?;
+            Some(TargetMatch { start, end, target })
+        })
+        .collect::<Vec<_>>();
+    candidates.dedup_by(|right, left| right.end == left.end && right.target == left.target);
+    if candidates.is_empty() {
+        // When: `candidates.is_empty()` after grammar filtering, omit the source span entirely.
+        return None;
+    }
+    Some(FocusedCandidateGroup {
+        token_count,
+        source_start: start,
+        source_end,
+        has_prose_fallback: candidates.iter().any(|candidate| candidate.end < source_end),
+        candidates,
+    })
+}
+
+fn detected_path_target(
+    candidate: &str,
+    style: PathStyle,
+    include_bare_names: bool,
+) -> Option<DetectedTarget> {
+    if has_path_prefix(candidate, style) && validate_path_candidate(candidate, style) {
+        Some(DetectedTarget::PathCandidate(candidate.to_string()))
+    } else if include_bare_names && validate_bare_name(candidate, style) {
+        // When: `include_bare_names && validate_bare_name(...)` holds, preserve CWD-only contextual provenance.
+        Some(DetectedTarget::BareName(candidate.to_string()))
+    } else {
+        // When: explicit path and `include_bare_names` predicates reject `candidate`, leave the span inert.
+        None
+    }
+}
+
+fn is_prose_path_punctuation(ch: char) -> bool {
+    matches!(ch, ',' | ';' | '.' | ':' | '!' | '?')
 }
 
 /// Return one contextual bare filesystem component covering character column `col`.
@@ -465,14 +551,6 @@ pub fn bare_name_at_char_col_for_style(
         return None;
     }
     Some(TargetMatch { start, end, target: DetectedTarget::BareName(candidate.to_string()) })
-}
-
-fn target_sort_key(target: &DetectedTarget) -> (u8, &str) {
-    match target {
-        DetectedTarget::Uri(value) => (0, value),
-        DetectedTarget::PathCandidate(value) => (1, value),
-        DetectedTarget::BareName(value) => (2, value),
-    }
 }
 
 fn validate_bare_name(candidate: &str, style: PathStyle) -> bool {
