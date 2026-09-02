@@ -40,6 +40,7 @@ pub(crate) enum PathOpenDecision {
     /// Open through the platform's ordinary default-application path.
     Openable(PathKind),
     /// Reveal in the native file manager without opening or executing the target.
+    #[cfg(any(target_os = "macos", test))]
     Revealable(PathKind),
     /// Existing target whose identity or content is not safe to dispatch.
     Blocked,
@@ -49,7 +50,15 @@ pub(crate) enum PathOpenDecision {
 
 impl PathOpenDecision {
     fn is_actionable(self) -> bool {
-        matches!(self, Self::Openable(_) | Self::Revealable(_))
+        match self {
+            Self::Openable(_) => true,
+            #[cfg(any(target_os = "macos", test))]
+            Self::Revealable(_) => {
+                // When: `self` is `Revealable`, permit the same epoch-keyed click path without opening the target.
+                true
+            }
+            Self::Blocked | Self::Missing => false,
+        }
     }
 
     #[cfg(any(target_os = "macos", target_os = "windows", test))]
@@ -557,7 +566,12 @@ fn select_openable_candidate(
         while index < candidates.len() && candidates[index].span_len() == span_len {
             let candidate = &candidates[index];
             match classify(&candidate.resolved_path) {
-                decision @ (PathOpenDecision::Openable(_) | PathOpenDecision::Revealable(_)) => {
+                decision @ PathOpenDecision::Openable(_) => {
+                    actionable.push(PathProbeSelection { candidate: candidate.clone(), decision });
+                }
+                #[cfg(any(target_os = "macos", test))]
+                decision @ PathOpenDecision::Revealable(_) => {
+                    // When: `decision` is `Revealable`, retain its exact Finder-only action in this candidate tier.
                     actionable.push(PathProbeSelection { candidate: candidate.clone(), decision });
                 }
                 PathOpenDecision::Blocked => blocked = true,
