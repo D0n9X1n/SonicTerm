@@ -12,11 +12,14 @@ use windows::Win32::{
 use winit::window::Window;
 
 use crate::{
-    color::{blend_premul_linear_over_srgb_bgra, grayscale_coverage},
+    color::{blend_premul_linear_over_srgb_bgra, grayscale_coverage, LinearOverSrgbBgraLut},
     core::{validated_surface_size, MAX_SURFACE_DIMENSION},
     quad::QuadInstance,
     wezterm_pipeline::ndc_rect_to_pixels,
 };
+
+/// Conservative bounded area that amortizes one constant-source blend table.
+const LINEAR_BLEND_LUT_MIN_PIXELS: usize = 32 * 32;
 
 pub(crate) struct WindowsSoftwareFrame {
     width: u32,
@@ -174,12 +177,26 @@ impl WindowsSoftwareFrame {
             // empty span, so an off-surface quad is a no-op rather than a stray write.
             return;
         }
-        let src = premul_linear_rgba_to_premul_bgra_f32(color);
-        for yy in y0..y1 {
-            let row = yy as usize * self.width as usize * 4;
-            for xx in x0..x1 {
-                let off = row + xx as usize * 4;
-                blend_premul_bgra(&mut self.pixels[off..off + 4], src);
+        let pixel_count = (x1 - x0) as usize * (y1 - y0) as usize;
+        if pixel_count >= LINEAR_BLEND_LUT_MIN_PIXELS {
+            // Table lookup amortizes construction while preserving the direct blend's bytes.
+            let blend = LinearOverSrgbBgraLut::new(color);
+            for yy in y0..y1 {
+                let row = yy as usize * self.width as usize * 4;
+                for xx in x0..x1 {
+                    let off = row + xx as usize * 4;
+                    blend.blend(&mut self.pixels[off..off + 4]);
+                }
+            }
+        } else {
+            // When: `pixel_count < LINEAR_BLEND_LUT_MIN_PIXELS`, direct blending costs less
+            // than constructing four complete byte lookup tables for this source.
+            for yy in y0..y1 {
+                let row = yy as usize * self.width as usize * 4;
+                for xx in x0..x1 {
+                    let off = row + xx as usize * 4;
+                    blend_premul_linear_over_srgb_bgra(&mut self.pixels[off..off + 4], color);
+                }
             }
         }
     }
@@ -194,7 +211,14 @@ impl WindowsSoftwareFrame {
             // off-surface, so no pixel can receive a corner coverage term.
             return;
         }
-        let src = premul_linear_rgba_to_premul_bgra_f32(color);
+        let pixel_count = (x1 - x0) as usize * (y1 - y0) as usize;
+        let full_coverage_blend = if pixel_count >= LINEAR_BLEND_LUT_MIN_PIXELS {
+            Some(LinearOverSrgbBgraLut::new(color))
+        } else {
+            // When: `pixel_count < LINEAR_BLEND_LUT_MIN_PIXELS`, rounded bounds cannot
+            // amortize table construction, so all pixels use direct blending.
+            None
+        };
         let half_w = w * 0.5;
         let half_h = h * 0.5;
         let r = radius.min(half_w).min(half_h).max(0.0);
@@ -216,13 +240,25 @@ impl WindowsSoftwareFrame {
                     // blending would square off the corner this path exists to round.
                     continue;
                 }
-                let mut c = src;
-                c[0] *= coverage;
-                c[1] *= coverage;
-                c[2] *= coverage;
-                c[3] *= coverage;
                 let off = row + xx as usize * 4;
-                blend_premul_bgra(&mut self.pixels[off..off + 4], c);
+                if coverage >= 1.0 {
+                    if let Some(blend) = &full_coverage_blend {
+                        blend.blend(&mut self.pixels[off..off + 4]);
+                    } else {
+                        // When: `full_coverage_blend` is `None`, these small rounded bounds
+                        // use the exact direct operation for fully covered pixels too.
+                        blend_premul_linear_over_srgb_bgra(&mut self.pixels[off..off + 4], color);
+                    }
+                } else {
+                    // When: partial coverage changes all premultiplied source components, blend that edge directly.
+                    let src = [
+                        color[0] * coverage,
+                        color[1] * coverage,
+                        color[2] * coverage,
+                        color[3] * coverage,
+                    ];
+                    blend_premul_linear_over_srgb_bgra(&mut self.pixels[off..off + 4], src);
+                }
             }
         }
     }
@@ -250,7 +286,14 @@ impl WindowsSoftwareFrame {
             // outside the frame, so no pixel is near enough the segment to shade.
             return;
         }
-        let src = premul_linear_rgba_to_premul_bgra_f32(q.color);
+        let pixel_count = (x1 - x0) as usize * (y1 - y0) as usize;
+        let full_coverage_blend = if pixel_count >= LINEAR_BLEND_LUT_MIN_PIXELS {
+            Some(LinearOverSrgbBgraLut::new(q.color))
+        } else {
+            // When: `pixel_count < LINEAR_BLEND_LUT_MIN_PIXELS`, padded line bounds cannot
+            // amortize table construction, so all stroke pixels use direct blending.
+            None
+        };
         let half = (q.line_thickness_px * 0.5).max(0.5);
         for yy in y0..y1 {
             let row = yy as usize * self.width as usize * 4;
@@ -264,13 +307,25 @@ impl WindowsSoftwareFrame {
                     // from the segment, so blending would widen the drawn line.
                     continue;
                 }
-                let mut c = src;
-                c[0] *= coverage;
-                c[1] *= coverage;
-                c[2] *= coverage;
-                c[3] *= coverage;
                 let off = row + xx as usize * 4;
-                blend_premul_bgra(&mut self.pixels[off..off + 4], c);
+                if coverage >= 1.0 {
+                    if let Some(blend) = &full_coverage_blend {
+                        blend.blend(&mut self.pixels[off..off + 4]);
+                    } else {
+                        // When: `full_coverage_blend` is `None`, these small line bounds use
+                        // the exact direct operation for fully covered stroke pixels too.
+                        blend_premul_linear_over_srgb_bgra(&mut self.pixels[off..off + 4], q.color);
+                    }
+                } else {
+                    // When: partial coverage changes all premultiplied source components, blend that edge directly.
+                    let src = [
+                        q.color[0] * coverage,
+                        q.color[1] * coverage,
+                        q.color[2] * coverage,
+                        q.color[3] * coverage,
+                    ];
+                    blend_premul_linear_over_srgb_bgra(&mut self.pixels[off..off + 4], src);
+                }
             }
         }
     }
@@ -507,19 +562,6 @@ fn linear_rgba_to_bgra(color: [f32; 4]) -> [u8; 4] {
         to_u8(linear_to_srgb(color[0].clamp(0.0, 1.0))),
         to_u8(a),
     ]
-}
-
-fn premul_linear_rgba_to_premul_bgra_f32(color: [f32; 4]) -> [f32; 4] {
-    let a = color[3].clamp(0.0, 1.0);
-    if a <= 0.0 {
-        // When: a is zero the premultiplied colour carries no recoverable hue, and the
-        // unpremultiply divides by it, so a transparent texel is returned instead.
-        return [0.0; 4];
-    }
-    let r = (color[0] / a).clamp(0.0, 1.0);
-    let g = (color[1] / a).clamp(0.0, 1.0);
-    let b = (color[2] / a).clamp(0.0, 1.0);
-    [linear_to_srgb(b) * a, linear_to_srgb(g) * a, linear_to_srgb(r) * a, a]
 }
 
 fn premul_linear_rgba_to_straight_srgb(color: [f32; 4]) -> [f32; 3] {

@@ -212,15 +212,47 @@ fn adjacent_sharp_rects_do_not_overlap_edges() {
     assert_eq!(frame.pixel_bgra(0, 2), [0, 0, 0, 255]);
 }
 
+/// A sharp quad must blend premultiplied linear channels before sRGB encoding.
 #[test]
 fn premultiplied_quad_blends_over_background() {
     let mut frame = WindowsSoftwareFrame::new(1, 1, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+
     frame.fill_rect(0.0, 0.0, 1.0, 1.0, [0.5, 0.0, 0.0, 0.5]);
-    let px = frame.pixel_bgra(0, 0);
-    assert!((120..=135).contains(&px[2]), "premultiplied red should stay half intensity: {px:?}");
-    assert_eq!(px[0], 0);
-    assert_eq!(px[1], 0);
-    assert_eq!(px[3], 255);
+
+    assert_eq!(frame.pixel_bgra(0, 0), [0, 0, 188, 255]);
+}
+
+/// A sharp quad at the lookup cutoff must preserve the direct blend's exact result.
+#[test]
+fn large_premultiplied_quad_uses_exact_linear_lookup() {
+    let mut frame = WindowsSoftwareFrame::new(32, 32, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+
+    frame.fill_rect(0.0, 0.0, 32.0, 32.0, [0.5, 0.0, 0.0, 0.5]);
+
+    assert_eq!(frame.pixel_bgra(0, 0), [0, 0, 188, 255]);
+    assert_eq!(frame.pixel_bgra(31, 31), [0, 0, 188, 255]);
+}
+
+/// Quad blending must source-over alpha without applying an sRGB transfer to alpha.
+#[test]
+fn premultiplied_quad_keeps_translucent_destination_alpha() {
+    let mut frame = WindowsSoftwareFrame::new(1, 1, [0.2, 0.1, 0.05, 0.4]).expect("valid frame");
+
+    frame.fill_rect(0.0, 0.0, 1.0, 1.0, [0.3, 0.1, 0.05, 0.5]);
+
+    assert_eq!(frame.pixel_bgra(0, 0), [77, 108, 170, 179]);
+}
+
+/// Rounded coverage must scale every premultiplied source component before linear blending.
+#[test]
+fn rounded_rect_blends_full_and_partial_coverage_in_linear_light() {
+    let mut frame = WindowsSoftwareFrame::new(8, 8, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
+
+    frame.fill_rounded_rect(1.0, 1.0, 6.0, 6.0, [0.5, 0.0, 0.0, 0.5], 3.0);
+
+    assert_eq!(frame.pixel_bgra(4, 4), [0, 0, 188, 255]);
+    assert!(frame.pixel_bgra(2, 1)[2].abs_diff(147) <= 1);
+    assert_eq!(frame.pixel_bgra(1, 1), [0, 0, 0, 255]);
 }
 
 #[test]
@@ -232,19 +264,24 @@ fn rounded_rect_antialiases_corner_pixels() {
     assert!(corner[0] < 255, "corner should be partially or fully clipped by radius: {corner:?}");
 }
 
+/// Line coverage must scale every premultiplied source component before linear blending.
 #[test]
 fn line_quad_antialiases_near_segment() {
     let mut frame = WindowsSoftwareFrame::new(8, 8, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
     let q = QuadInstance::line(
         px_to_ndc(1.0, 1.0, 6.0, 6.0, 8.0, 8.0),
-        [0.0, 1.0, 0.0, 1.0],
+        [0.0, 0.5, 0.0, 0.5],
         [6.0, 6.0],
         [-3.0, -3.0],
         [3.0, 3.0],
         1.0,
     );
+
     frame.draw_line_quad(&q, 1.0, 1.0, 6.0, 6.0);
-    assert!(frame.pixel_bgra(1, 1)[1] > 0);
+
+    assert_eq!(frame.pixel_bgra(4, 4), [0, 188, 0, 255]);
+    let edge = frame.pixel_bgra(1, 2);
+    assert!(edge[1].abs_diff(169) <= 1, "partial line edge must blend in linear light: {edge:?}");
     assert_eq!(frame.pixel_bgra(7, 0), [0, 0, 0, 255]);
 }
 

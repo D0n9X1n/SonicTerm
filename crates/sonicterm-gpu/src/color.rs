@@ -259,6 +259,11 @@ pub(crate) fn grayscale_coverage(coverage: [f32; 4]) -> f32 {
     coverage[2] * 0.2126 + coverage[1] * 0.7152 + coverage[0] * 0.0722
 }
 
+/// Blend premultiplied linear RGBA over retained BGRA8 framebuffer bytes.
+///
+/// Destination RGB is sRGB-encoded and destination alpha is linear UNORM. The
+/// output decodes RGB, applies source-over once in linear light, re-encodes RGB,
+/// and source-overs alpha without applying an sRGB transfer to it.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn blend_premul_linear_over_srgb_bgra(dst: &mut [u8], src: [f32; 4]) {
     let src_alpha = src[3].clamp(0.0, 1.0);
@@ -270,6 +275,35 @@ pub(crate) fn blend_premul_linear_over_srgb_bgra(dst: &mut [u8], src: [f32; 4]) 
     dst[2] = linear_channel_to_srgb_u8(src[0] + decode[dst[2] as usize] * inverse_alpha);
     let dst_alpha = dst[3] as f32 / 255.0;
     dst[3] = ((src_alpha + dst_alpha * inverse_alpha) * 255.0).round() as u8;
+}
+
+/// Precomputed exact source-over results for one constant premultiplied linear source.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) struct LinearOverSrgbBgraLut {
+    channels: [[u8; 256]; 4],
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+impl LinearOverSrgbBgraLut {
+    pub(crate) fn new(src: [f32; 4]) -> Self {
+        let mut channels = [[0; 256]; 4];
+        for value in 0..=u8::MAX {
+            let mut dst = [value; 4];
+            blend_premul_linear_over_srgb_bgra(&mut dst, src);
+            for channel in 0..4 {
+                channels[channel][value as usize] = dst[channel];
+            }
+        }
+        Self { channels }
+    }
+
+    #[inline]
+    pub(crate) fn blend(&self, dst: &mut [u8]) {
+        dst[0] = self.channels[0][dst[0] as usize];
+        dst[1] = self.channels[1][dst[1] as usize];
+        dst[2] = self.channels[2][dst[2] as usize];
+        dst[3] = self.channels[3][dst[3] as usize];
+    }
 }
 
 pub(crate) fn linear_channel_to_srgb_u8(channel: f32) -> u8 {
