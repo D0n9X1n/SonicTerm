@@ -376,8 +376,8 @@ fn push_quad_instances(out: &mut Vec<Vertex>, quads: &[QuadInstance], sw: f32, s
         if kind == IS_LINE {
             let n = out.len();
             for v in &mut out[n - VERTICES_PER_QUAD..n] {
-                v.hsv = [q.line_a[0], q.line_a[1], q.line_b[0]];
-                v.mix_value = q.line_b[1];
+                v.alt_color = [q.line_a[0], q.line_a[1], q.line_b[0], q.line_b[1]];
+                v.mix_value = q.line_thickness_px;
             }
         }
     }
@@ -569,9 +569,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let aa = 1.0 - smoothstep(-w, w, d);
         color = in.fg_color * aa;
     } else if (in.has_color == IS_LINE) {
-        let a = in.hsv.xy;
-        let b = vec2<f32>(in.hsv.z, in.mix_value);
-        let thickness = in.alt_color.w;
+        let a = in.alt_color.xy;
+        let b = in.alt_color.zw;
+        let thickness = in.mix_value;
         let d = sd_segment(in.tex, a, b) - thickness * 0.5;
         let w = fwidth(d);
         let aa = 1.0 - smoothstep(-w, w, d);
@@ -591,3 +591,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return color;
 }
 "#;
+
+#[cfg(test)]
+#[path = "wezterm_pipeline_tests.rs"]
+mod wezterm_pipeline_tests;

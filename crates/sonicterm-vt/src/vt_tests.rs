@@ -4,7 +4,7 @@ use super::{
     LIVE_MEDIA_CAPTURES, MAX_ESCAPE_SEQUENCE_BYTES, MAX_MEDIA_PAYLOAD_BYTES,
     MAX_PROCESS_CAPTURE_STAGING_BYTES, MIN_CAPTURE_STAGING_BYTES,
 };
-use sonicterm_grid::grid::{CellFlags, Grid};
+use sonicterm_grid::grid::{CellFlags, Color, Grid, UnderlineStyle};
 use std::sync::atomic::Ordering;
 
 /// Serialises every test that brings a media capture into existence.
@@ -99,6 +99,19 @@ fn parser_exposes_typed_osc7_snapshot_without_changing_cwd() {
     assert_eq!(parser.cwd(), Some("/tmp/bad%GG"));
     assert_eq!(parser.osc7_cwd(), None);
     assert_ne!(parser.cwd_revision(), revision);
+}
+
+/// Extended SGR keeps the explicit RGB color attached to a curly underline.
+#[test]
+fn sgr_curly_underline_preserves_explicit_rgb_color() {
+    let mut parser = Parser::new(Grid::new(8, 1));
+
+    parser.advance(b"\x1b[4:3;58;2;0;255;255mX");
+
+    let cell = &parser.grid().row(0)[0];
+    assert!(cell.flags.contains(CellFlags::UNDERLINE));
+    assert_eq!(cell.underline_style(), UnderlineStyle::Curly);
+    assert_eq!(cell.underline_color(), Some(Color::Rgb(0, 255, 255)));
 }
 
 #[test]

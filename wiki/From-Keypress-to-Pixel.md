@@ -399,7 +399,9 @@ are converted as required for the sRGB surface or CPU blend.
 Backgrounds are quads, not glyphs. Adjacent equal non-default backgrounds are
 coalesced. The default background comes from the damage clear. Underline runs
 become single, double, curly, dotted, or dashed quads. An explicit SGR 58 color
-wins; otherwise underline uses foreground color.
+wins; otherwise underline uses foreground color. GPU line endpoints travel in
+geometry parameters separate from HSV color transforms, so a curly underline's
+shape cannot alter its resolved color.
 
 The parser stores blink, hidden, and strikethrough flags. The current terminal
 renderer has no flag-specific draw branch for those three.
@@ -918,6 +920,7 @@ JetBrains Mono、Symbols Nerd Font Mono 和 Noto Color Emoji；仍找不到时�
 
 背景是四边形，不是字形。相邻且相同的非默认背景会合并。默认背景来自损伤清理。下划线段会
 形成单线、双线、波浪、点线或虚线四边形。有 SGR 58 显式颜色时使用它，否则使用前景色。
+GPU 线段端点存放在与 HSV 颜色变换分离的几何参数中，因此波浪下划线的形状不会改变其最终颜色。
 
 解析器会保存 blink、hidden 和 strikethrough 标志。当前终端渲染器没有针对这三个标志的
 专用绘制分支。

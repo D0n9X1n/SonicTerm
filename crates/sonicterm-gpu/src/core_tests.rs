@@ -1621,6 +1621,46 @@ fn surface_size_budget_rejects_multi_gibabyte_frames() {
     assert!(validated_surface_size(MAX_SURFACE_DIMENSION + 1, 1, MAX_SURFACE_DIMENSION).is_none());
 }
 
+/// Curly underline geometry must preserve its resolved color while joining alternating segments.
+#[test]
+fn curly_underline_segments_preserve_resolved_color() {
+    let mut cell = Cell::plain('x', Color::Rgb(0, 255, 255), Color::Default, CellFlags::UNDERLINE);
+    cell.set_underline_style(UnderlineStyle::Curly);
+    let (style, resolved) = underline_key(&cell).expect("visible underline has a resolved color");
+    assert_eq!(resolved, cell.fg, "missing SGR 58 must fall back to foreground");
+    let color = [0.0, 1.0, 1.0, 1.0];
+    let surface = (100.0, 80.0);
+    let mut quads = Vec::new();
+
+    push_underline_quads(
+        &mut quads, style, 10.0, 20.0, 24.0, 12.0, 2.0, surface.0, surface.1, color,
+    );
+
+    assert!(quads.len() >= 2);
+    let mut previous_end: Option<[f32; 2]> = None;
+    let mut previous_slope: Option<f32> = None;
+    for quad in quads {
+        assert_eq!(quad.color, color);
+        assert!(quad.line_thickness_px > 0.0);
+        let (x, y, w, h) =
+            crate::wezterm_pipeline::ndc_rect_to_pixels(quad.rect, surface.0, surface.1)
+                .expect("curly segment has drawable geometry");
+        let center = [x + w * 0.5, y + h * 0.5];
+        let start = [center[0] + quad.line_a[0], center[1] + quad.line_a[1]];
+        let end = [center[0] + quad.line_b[0], center[1] + quad.line_b[1]];
+        if let Some(previous_end) = previous_end {
+            assert!((start[0] - previous_end[0]).abs() < 0.001);
+            assert!((start[1] - previous_end[1]).abs() < 0.001);
+        }
+        let slope = end[1] - start[1];
+        if let Some(previous_slope) = previous_slope {
+            assert!(slope * previous_slope < 0.0, "adjacent curl segments must alternate slope");
+        }
+        previous_end = Some(end);
+        previous_slope = Some(slope);
+    }
+}
+
 #[test]
 fn underline_key_ignores_blank_cells() {
     let mut blank = Cell::plain(' ', Color::Indexed(1), Color::Default, CellFlags::UNDERLINE);
