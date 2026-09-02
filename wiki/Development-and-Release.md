@@ -102,6 +102,14 @@ cargo build --release -p sonicterm-mac
 
 `.github/workflows/ci.yml` runs on pull requests and pushes to `main`.
 
+Never merge or enable auto-merge while a required pull-request job is queued,
+in progress, missing, cancelled, unexpectedly skipped, or failed. The macOS,
+Windows, and Ubuntu jobs must each finish successfully on the exact reviewed
+head commit before merge. Windows success is mandatory because that job is the
+only reliable compiler and runner for Windows-only tests; local, macOS, Ubuntu,
+or review results cannot substitute for it. After every merge, verify `main` CI
+and Wiki publication before starting the next serialized pull request.
+
 ### macOS 14 and Windows latest
 
 Both matrix hosts run:
@@ -369,6 +377,12 @@ cargo build --release -p sonicterm-mac
 ## Pull-request 与 main CI
 
 `.github/workflows/ci.yml` 在 pull request 和推送到 `main` 时运行。
+
+只要任一必需的 pull-request job 仍在排队、运行、缺失、被取消、意外跳过或失败，就绝不能
+合并，也不能启用 auto-merge。macOS、Windows 与 Ubuntu job 必须都在完全相同的已审核 head
+commit 上成功结束后才能合并。Windows 成功是强制条件，因为只有该 job 能可靠编译并运行
+Windows-only 测试；本地、macOS、Ubuntu 或 review 结果都不能替代它。每次合并后，必须先验证
+`main` CI 与 Wiki 发布，再开始下一个串行 pull request。
 
 ### macOS 14 与 Windows latest
 
