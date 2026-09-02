@@ -488,7 +488,7 @@ struct VertexOutput {
     @location(1) fg_color: vec4<f32>,
     @location(2) alt_color: vec4<f32>,
     @location(3) hsv: vec3<f32>,
-    @location(4) has_color: f32,
+    @location(4) @interpolate(flat) has_color: f32,
     @location(5) mix_value: f32,
 };
 
