@@ -26,93 +26,245 @@ fn new_state_starts_hidden() {
     // monotonic clock is younger than the old 3600s offset (the bug
     // CI caught on fresh Windows runners).
     assert_eq!(s.last_active, None);
-    assert!(!is_animating(&s, ScrollbarMode::Auto, false), "fresh state must not animate");
+    assert!(
+        !is_animating(&s, ScrollbarMode::Auto, false, ScrollbarMotion::Animated, now),
+        "fresh state must not animate"
+    );
 }
 
+/// A settled hidden scrollbar must not create an animation redraw loop.
 #[test]
 fn idle_cursor_away_from_edge_stays_hidden() {
-    // The user's bug: scrollbar visible without the cursor near the
-    // right edge. With no recent activity and the cursor parked in the
-    // middle of the pane, alpha must stay 0 and the bar must not animate.
     let now = Instant::now();
     let mut vis = std::collections::HashMap::new();
-    let cursor = (400.0, 300.0); // dead-center, far from right edge
-    let alphas =
-        update_and_collect(&mut vis, &[PANE], cursor, PANE.0, None, ScrollbarMode::Auto, now);
+    let cursor = (400.0, 300.0);
+    let alphas = update_and_collect(
+        &mut vis,
+        &[PANE],
+        cursor,
+        PANE.0,
+        None,
+        ScrollbarMode::Auto,
+        ScrollbarMotion::Animated,
+        now,
+    );
     assert_eq!(alphas.get(&1).copied(), Some(0.0), "center cursor must keep bar hidden");
-    let st = vis.get(&1).unwrap();
-    assert!(!is_animating(st, ScrollbarMode::Auto, false), "settled-hidden must not redraw-storm");
+    let state = vis.get(&1).unwrap();
+    assert!(
+        !is_animating(state, ScrollbarMode::Auto, false, ScrollbarMotion::Animated, now,),
+        "settled-hidden must not redraw-storm"
+    );
 }
 
+/// Accelerated opacity advances monotonically and reaches its visible target.
 #[test]
-fn cursor_near_right_edge_shows_bar() {
+fn animated_scrollbar_fades_in_monotonically() {
     let now = Instant::now();
     let mut vis = std::collections::HashMap::new();
-    // x just inside the right edge (800 - 5 = 795) within EDGE_PROXIMITY_PX.
     let cursor = (795.0, 300.0);
-    // First frame enters the proximity strip → marks active, begins fade-in.
-    update_and_collect(&mut vis, &[PANE], cursor, 1, None, ScrollbarMode::Auto, now);
-    assert!(vis.get(&1).unwrap().mouse_near_right_edge);
-    // Advance ~200ms (> FADE_IN_MS) and the bar reaches full alpha.
-    let later = now.checked_add(Duration::from_millis(200)).unwrap();
-    let alphas = update_and_collect(&mut vis, &[PANE], cursor, 1, None, ScrollbarMode::Auto, later);
-    assert_eq!(alphas.get(&1).copied(), Some(1.0));
+    let first = update_and_collect(
+        &mut vis,
+        &[PANE],
+        cursor,
+        1,
+        None,
+        ScrollbarMode::Auto,
+        ScrollbarMotion::Animated,
+        now,
+    )[&1];
+    let middle = update_and_collect(
+        &mut vis,
+        &[PANE],
+        cursor,
+        1,
+        None,
+        ScrollbarMode::Auto,
+        ScrollbarMotion::Animated,
+        now + Duration::from_millis(75),
+    )[&1];
+    let final_alpha = update_and_collect(
+        &mut vis,
+        &[PANE],
+        cursor,
+        1,
+        None,
+        ScrollbarMode::Auto,
+        ScrollbarMotion::Animated,
+        now + Duration::from_millis(225),
+    )[&1];
+
+    assert!(first < middle && middle < final_alpha);
+    assert_eq!(final_alpha, 1.0);
 }
 
+/// Recent activity holds visibility before the accelerated fade returns to hidden.
 #[test]
 fn recent_scroll_activity_keeps_bar_visible_then_fades() {
-    // Mirrors set_child_pane_view_top/mark_scrollbar_active: a scroll
-    // marks the pane active, so the bar shows even with the cursor away
-    // from the edge — but only for the idle window, then it fades.
     let now = Instant::now();
-    let mut st = ScrollbarVisState::new(now);
-    st.mark_active(now);
-    // Immediately after activity: animating toward visible.
-    assert!(is_animating(&st, ScrollbarMode::Auto, false));
-    let v = tick(
-        &mut st,
+    let mut state = ScrollbarVisState::new(now);
+    state.mark_active(now);
+    assert!(is_animating(&state, ScrollbarMode::Auto, false, ScrollbarMotion::Animated, now,));
+    assert_eq!(
+        tick(
+            &mut state,
+            ScrollbarMode::Auto,
+            false,
+            ScrollbarMotion::Animated,
+            now + Duration::from_millis(200),
+        ),
+        1.0
+    );
+
+    state.last_active = Some(at(10, now));
+    assert_eq!(
+        tick(
+            &mut state,
+            ScrollbarMode::Auto,
+            false,
+            ScrollbarMotion::Animated,
+            now + Duration::from_secs(11),
+        ),
+        0.0
+    );
+    assert!(!is_animating(
+        &state,
         ScrollbarMode::Auto,
         false,
-        now.checked_add(Duration::from_millis(200)).unwrap(),
+        ScrollbarMotion::Animated,
+        now + Duration::from_secs(11),
+    ));
+}
+
+/// Degraded presentation reaches both opacity targets immediately and never animates.
+#[test]
+fn snap_reaches_targets_immediately_without_animation() {
+    let now = Instant::now();
+    let mut state = ScrollbarVisState::new(now);
+    state.mark_active(now);
+    assert_eq!(
+        tick(
+            &mut state,
+            ScrollbarMode::Auto,
+            false,
+            ScrollbarMotion::Snap,
+            now + Duration::from_millis(1),
+        ),
+        1.0
     );
-    assert_eq!(v, 1.0, "recent activity makes the bar fully visible");
-    // Long past the idle window with no further activity: fades to hidden.
-    st.last_active = Some(at(10, now));
-    let faded = tick(
-        &mut st,
+    assert!(!is_animating(
+        &state,
         ScrollbarMode::Auto,
         false,
-        now.checked_add(Duration::from_secs(11)).unwrap(),
-    );
-    assert_eq!(faded, 0.0, "idle past IDLE_HIDE_MS fades the bar out");
-    assert!(
-        !is_animating(&st, ScrollbarMode::Auto, false),
-        "fully hidden + idle must not keep redrawing"
+        ScrollbarMotion::Snap,
+        now + Duration::from_millis(1),
+    ));
+    assert_eq!(
+        tick(
+            &mut state,
+            ScrollbarMode::Auto,
+            false,
+            ScrollbarMotion::Snap,
+            now + Duration::from_millis(IDLE_HIDE_MS),
+        ),
+        0.0
     );
 }
 
+/// Snap mode arms exactly one idle deadline and removes it after expiration.
+#[test]
+fn snap_deadline_expires_once_at_the_idle_boundary() {
+    let now = Instant::now();
+    let deadline = now + Duration::from_millis(IDLE_HIDE_MS);
+    let mut state = ScrollbarVisState::new(now);
+    state.mark_active(now);
+    state.alpha = 1.0;
+    let mut vis = std::collections::HashMap::from([(1, state)]);
+
+    assert_eq!(next_snap_deadline(&vis, ScrollbarMode::Auto, None), Some(deadline));
+    assert!(!expire_due_snaps(
+        &mut vis,
+        ScrollbarMode::Auto,
+        None,
+        deadline - Duration::from_millis(1),
+    ));
+    assert!(expire_due_snaps(&mut vis, ScrollbarMode::Auto, None, deadline));
+    assert_eq!(vis[&1].alpha, 0.0);
+    assert_eq!(next_snap_deadline(&vis, ScrollbarMode::Auto, None), None);
+    assert!(!expire_due_snaps(
+        &mut vis,
+        ScrollbarMode::Auto,
+        None,
+        deadline + Duration::from_millis(1),
+    ));
+}
+
+/// Hover, drag, and non-Auto modes suppress one-shot hide deadlines.
+#[test]
+fn snap_deadline_respects_visibility_overrides_and_modes() {
+    let now = Instant::now();
+    let mut state = ScrollbarVisState::new(now);
+    state.mark_active(now);
+    state.alpha = 1.0;
+    let mut vis = std::collections::HashMap::from([(1, state)]);
+
+    vis.get_mut(&1).unwrap().mouse_near_right_edge = true;
+    assert_eq!(next_snap_deadline(&vis, ScrollbarMode::Auto, None), None);
+    vis.get_mut(&1).unwrap().mouse_near_right_edge = false;
+    assert_eq!(next_snap_deadline(&vis, ScrollbarMode::Auto, Some(1)), None);
+    assert_eq!(next_snap_deadline(&vis, ScrollbarMode::Always, None), None);
+    assert_eq!(next_snap_deadline(&vis, ScrollbarMode::Never, None), None);
+}
+
+/// An attached renderer's resolved policy overrides the headless app fallback.
+#[test]
+fn window_motion_prefers_renderer_policy_when_available() {
+    assert_eq!(window_scrollbar_motion(Some(true), false), ScrollbarMotion::Snap);
+    assert_eq!(window_scrollbar_motion(Some(false), true), ScrollbarMotion::Animated);
+    assert_eq!(window_scrollbar_motion(None, true), ScrollbarMotion::Snap);
+    assert_eq!(window_scrollbar_motion(None, false), ScrollbarMotion::Animated);
+}
+
+/// Always and Never pin opacity without scheduling motion.
 #[test]
 fn always_and_never_short_circuit() {
     let now = Instant::now();
-    let mut st = ScrollbarVisState::new(now);
-    assert_eq!(tick(&mut st, ScrollbarMode::Always, false, now), 1.0);
-    assert!(!is_animating(&st, ScrollbarMode::Always, false), "Always never animates");
-    assert_eq!(tick(&mut st, ScrollbarMode::Never, false, now), 0.0);
-    assert!(!is_animating(&st, ScrollbarMode::Never, false), "Never never animates");
+    let mut state = ScrollbarVisState::new(now);
+    assert_eq!(
+        tick(&mut state, ScrollbarMode::Always, false, ScrollbarMotion::Animated, now,),
+        1.0
+    );
+    assert!(!is_animating(&state, ScrollbarMode::Always, false, ScrollbarMotion::Animated, now,));
+    assert_eq!(tick(&mut state, ScrollbarMode::Never, false, ScrollbarMotion::Animated, now,), 0.0);
+    assert!(!is_animating(&state, ScrollbarMode::Never, false, ScrollbarMotion::Animated, now,));
 }
 
+/// A drag keeps its pane visible independently of cursor position and idle age.
 #[test]
 fn drag_overrides_idle_and_edge() {
-    // A thumb drag keeps the bar visible regardless of cursor position
-    // or idle time — true on both windows (drag_active_on_pane).
     let now = Instant::now();
     let mut vis = std::collections::HashMap::new();
-    let cursor = (10.0, 300.0); // far left, nowhere near the edge
-    let later = now.checked_add(Duration::from_millis(300)).unwrap();
-    update_and_collect(&mut vis, &[PANE], cursor, 1, Some(1), ScrollbarMode::Auto, now);
-    let alphas =
-        update_and_collect(&mut vis, &[PANE], cursor, 1, Some(1), ScrollbarMode::Auto, later);
-    assert_eq!(alphas.get(&1).copied(), Some(1.0), "active drag forces visible");
+    let cursor = (10.0, 300.0);
+    update_and_collect(
+        &mut vis,
+        &[PANE],
+        cursor,
+        1,
+        Some(1),
+        ScrollbarMode::Auto,
+        ScrollbarMotion::Animated,
+        now,
+    );
+    let alphas = update_and_collect(
+        &mut vis,
+        &[PANE],
+        cursor,
+        1,
+        Some(1),
+        ScrollbarMode::Auto,
+        ScrollbarMotion::Animated,
+        now + Duration::from_millis(300),
+    );
+    assert_eq!(alphas.get(&1).copied(), Some(1.0));
 }
 
 #[test]
@@ -165,7 +317,16 @@ fn v120_registry_cleanup_removes_all_owned_entries() {
     for generation in 0..GENERATIONS {
         let id = generation + 1;
         let visible = [(id, 0.0f32, 30.0f32, 800.0f32, 570.0f32)];
-        update_and_collect(&mut vis, &visible, cursor, id, None, ScrollbarMode::Auto, now);
+        update_and_collect(
+            &mut vis,
+            &visible,
+            cursor,
+            id,
+            None,
+            ScrollbarMode::Auto,
+            ScrollbarMotion::Animated,
+            now,
+        );
         high_water = high_water.max(vis.len());
     }
     assert_eq!(
@@ -198,7 +359,16 @@ fn v120_registry_cleanup_removes_all_owned_entries() {
     let front = (1u64, 0.0f32, 30.0f32, 800.0f32, 570.0f32);
     let back = (2u64, 0.0f32, 30.0f32, 800.0f32, 570.0f32);
 
-    update_and_collect(&mut tabbed, &[front], cursor, front.0, None, ScrollbarMode::Auto, now);
+    update_and_collect(
+        &mut tabbed,
+        &[front],
+        cursor,
+        front.0,
+        None,
+        ScrollbarMode::Auto,
+        ScrollbarMotion::Animated,
+        now,
+    );
     let faded_in = now.checked_add(Duration::from_millis(200)).unwrap();
     let alphas = update_and_collect(
         &mut tabbed,
@@ -207,6 +377,7 @@ fn v120_registry_cleanup_removes_all_owned_entries() {
         front.0,
         None,
         ScrollbarMode::Auto,
+        ScrollbarMotion::Animated,
         faded_in,
     );
     assert_eq!(
@@ -216,7 +387,16 @@ fn v120_registry_cleanup_removes_all_owned_entries() {
     );
 
     // Switch to the other tab: pane 1 is alive but not visible.
-    update_and_collect(&mut tabbed, &[back], cursor, back.0, None, ScrollbarMode::Auto, faded_in);
+    update_and_collect(
+        &mut tabbed,
+        &[back],
+        cursor,
+        back.0,
+        None,
+        ScrollbarMode::Auto,
+        ScrollbarMotion::Animated,
+        faded_in,
+    );
     assert_eq!(
         tabbed.keys().copied().collect::<Vec<_>>(),
         vec![back.0],
@@ -237,6 +417,7 @@ fn v120_registry_cleanup_removes_all_owned_entries() {
         front.0,
         None,
         ScrollbarMode::Auto,
+        ScrollbarMotion::Animated,
         returned,
     );
     let resumed = back_alphas.get(&front.0).copied().expect("returning pane gets an alpha");

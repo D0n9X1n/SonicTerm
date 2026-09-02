@@ -188,6 +188,66 @@ fn no_armed_contributor_parks_the_loop() {
     assert_eq!(app.wake_deadline(None), None);
 }
 
+fn arm_snap_scrollbar(app: &mut App, window_id: WindowId, pane_id: u64, active: Instant) {
+    let mut state = crate::app::scrollbar_visibility::ScrollbarVisState::new(active);
+    state.mark_active(active);
+    state.alpha = 1.0;
+    app.windows.get_mut(&window_id).expect("synthetic window").scrollbar_vis.insert(pane_id, state);
+}
+
+/// Degraded main and child scrollbars contribute their earliest one-shot deadline.
+#[test]
+fn snap_scrollbars_join_the_render_wake_minimum() {
+    let now = Instant::now();
+    let mut app = app_with_main_window();
+    app.software_render_degrade = true;
+    app.config.appearance.scrollbar = sonicterm_cfg::config::ScrollbarMode::Auto;
+    let main_id = crate::app::synthetic_main_window_id();
+    let child_id = app.__test_seed_child_window(&["child"]);
+    let child_pane = app.__test_child_active_pane(child_id).expect("child pane");
+    arm_snap_scrollbar(&mut app, main_id, 1, now);
+    arm_snap_scrollbar(&mut app, child_id, child_pane, now - Duration::from_millis(200));
+    let child_deadline = now - Duration::from_millis(200)
+        + Duration::from_millis(crate::app::scrollbar_visibility::IDLE_HIDE_MS);
+
+    assert_eq!(app.wake_deadline(None), Some(child_deadline));
+    assert_eq!(
+        app.wake_deadline(Some(now + Duration::from_millis(10))),
+        Some(now + Duration::from_millis(10)),
+        "an earlier notification must remain ahead of scrollbar expiration"
+    );
+}
+
+/// Expiration mutates only due windows and removes their stale deadline.
+#[test]
+fn snap_expiration_returns_only_affected_windows() {
+    let now = Instant::now();
+    let mut app = app_with_main_window();
+    app.software_render_degrade = true;
+    app.config.appearance.scrollbar = sonicterm_cfg::config::ScrollbarMode::Auto;
+    let main_id = crate::app::synthetic_main_window_id();
+    let due_child = app.__test_seed_child_window(&["due"]);
+    let future_child = app.__test_seed_child_window(&["future"]);
+    let due_pane = app.__test_child_active_pane(due_child).expect("due pane");
+    let future_pane = app.__test_child_active_pane(future_child).expect("future pane");
+    let idle = Duration::from_millis(crate::app::scrollbar_visibility::IDLE_HIDE_MS);
+    arm_snap_scrollbar(&mut app, main_id, 1, now - idle);
+    arm_snap_scrollbar(&mut app, due_child, due_pane, now - idle);
+    arm_snap_scrollbar(&mut app, future_child, future_pane, now);
+
+    let affected = app.expire_due_scrollbar_snaps(now);
+
+    assert_eq!(affected.len(), 2);
+    assert!(affected.contains(&main_id));
+    assert!(affected.contains(&due_child));
+    assert!(!affected.contains(&future_child));
+    assert_eq!(
+        app.wake_deadline(None),
+        Some(now + idle),
+        "only the future child's one-shot deadline may remain"
+    );
+}
+
 /// The Windows OSC 52 repair participates in the event-loop wake fold.
 #[cfg(target_os = "windows")]
 #[test]

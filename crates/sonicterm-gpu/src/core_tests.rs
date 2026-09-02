@@ -1525,6 +1525,51 @@ fn pane_damage_rect_normal_sparse_rows_clip_offscreen_row() {
     assert_eq!(d, sonicterm_render_model::geometry::PixelRect { x: 0, y: 0, w: 600, h: 21 });
 }
 
+/// Effective scrollbar opacity follows the same visibility floor as quad emission.
+#[test]
+fn effective_scrollbar_buckets_match_visible_output() {
+    use sonicterm_render_model::boundary::cfg::config::ScrollbarMode;
+    use sonicterm_render_model::boundary::ui::scrollbar::ALPHA_EMIT_FLOOR;
+
+    assert_eq!(effective_scrollbar_bucket(ScrollbarMode::Never, 10, 24, 1.0), 0);
+    assert_eq!(effective_scrollbar_bucket(ScrollbarMode::Auto, 0, 24, 1.0), 0);
+    assert_eq!(effective_scrollbar_bucket(ScrollbarMode::Auto, 10, 0, 1.0), 0);
+    assert_eq!(effective_scrollbar_bucket(ScrollbarMode::Auto, 10, 24, ALPHA_EMIT_FLOOR), 0);
+    assert_eq!(effective_scrollbar_bucket(ScrollbarMode::Auto, 10, 24, 0.5), 32_768);
+    assert_eq!(effective_scrollbar_bucket(ScrollbarMode::Auto, 10, 24, 2.0), u16::MAX);
+}
+
+/// Pane order cannot perturb the deterministic scrollbar frame identity.
+#[test]
+fn scrollbar_identity_sorts_panes_by_id() {
+    use sonicterm_render_model::boundary::cfg::config::ScrollbarMode;
+
+    let forward =
+        pane_scrollbar_identity(ScrollbarMode::Auto, [(1, 4, 24, 0.25), (2, 8, 24, 0.75)]);
+    let reversed =
+        pane_scrollbar_identity(ScrollbarMode::Auto, [(2, 8, 24, 0.75), (1, 4, 24, 0.25)]);
+
+    assert_eq!(forward, reversed);
+}
+
+/// A visible opacity change must make two otherwise identical frame keys unequal.
+#[test]
+fn scrollbar_bucket_change_invalidates_the_frame_key() {
+    let baseline = FrameKey { pane_scrollbar_alpha: vec![(7, 0)], ..Default::default() };
+    let visible = FrameKey { pane_scrollbar_alpha: vec![(7, u16::MAX)], ..baseline.clone() };
+
+    assert_ne!(baseline, visible);
+}
+
+/// Degraded rendering treats scrollbar changes as a full-frame signal.
+#[test]
+fn scrollbar_change_forces_degraded_full_render() {
+    assert_eq!(
+        decide_render_mode(true, RenderSignals { scrollbar_change: true, ..Default::default() },),
+        RenderMode::Full
+    );
+}
+
 #[test]
 fn full_repaint_forced_on_invalidation() {
     let damage = Some(sonicterm_render_model::geometry::PixelRect { x: 1, y: 2, w: 3, h: 4 });

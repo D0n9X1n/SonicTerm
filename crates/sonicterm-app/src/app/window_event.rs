@@ -521,6 +521,11 @@ impl App {
                 // already-captured cursor pos / scrollbar_drag — no
                 // parser lock needed. Result feeds each PaneRender's
                 // `scrollbar_alpha` below.
+                let scrollbar_now = Instant::now();
+                let scrollbar_motion = crate::app::scrollbar_visibility::window_scrollbar_motion(
+                    self.main_renderer().map(GpuRenderer::is_software_render_degraded),
+                    self.software_render_degrade,
+                );
                 let scrollbar_alpha_map: std::collections::HashMap<u64, f32> = {
                     let mode = self.config.appearance.scrollbar;
                     let drag_pane =
@@ -529,7 +534,6 @@ impl App {
                     let cursor = (cx as f32, cy as f32);
                     let rects: Vec<(u64, f32, f32, f32, f32)> =
                         pane_rects.iter().map(|(id, r)| (*id, r.x, r.y, r.w, r.h)).collect();
-                    let now = Instant::now();
                     if let Some(ws) = self.main_mut() {
                         crate::app::scrollbar_visibility::update_and_collect(
                             &mut ws.scrollbar_vis,
@@ -538,7 +542,8 @@ impl App {
                             active_id,
                             drag_pane,
                             mode,
-                            now,
+                            scrollbar_motion,
+                            scrollbar_now,
                         )
                     } else {
                         // When: main_mut is None, no scrollbar visibility state can be collected.
@@ -560,6 +565,8 @@ impl App {
                                     st,
                                     mode,
                                     drag_pane == Some(*id),
+                                    scrollbar_motion,
+                                    scrollbar_now,
                                 )
                             })
                         })
@@ -568,11 +575,7 @@ impl App {
                 if let Some(t) = timing.as_mut() {
                     t.lap("scrollbar");
                 }
-                if scrollbar_needs_more_frames && !self.software_render_degrade {
-                    // An accelerated scrollbar fade requests its next animation frame.
-                    // in the no-GPU path, skip the fade-driven
-                    // extra frames — the bar snaps instead of animating, but
-                    // we don't burn CPU rasterizing a 300ms fade.
+                if scrollbar_needs_more_frames {
                     if let Some(w) = self.main_window() {
                         w.request_redraw();
                     }

@@ -7,7 +7,7 @@ use sonicterm_gpu::core::{GpuRenderer, RendererSettings, SurfaceAppearance};
 use sonicterm_render_model::{
     boundary::{
         cfg::{
-            config::SoftwareRenderMode,
+            config::{ScrollbarMode, SoftwareRenderMode},
             theme::{Hex, Theme},
         },
         grid::grid::Grid,
@@ -77,7 +77,7 @@ fn run_probe(active: &ActiveEventLoop) -> Result<Capability, String> {
         appearance: SurfaceAppearance {
             backdrop: Default::default(),
             opacity: 1.0,
-            scrollbar: Default::default(),
+            scrollbar: ScrollbarMode::Auto,
             panel_padding: 0.0,
             software_render_mode: SoftwareRenderMode::Force,
         },
@@ -97,7 +97,10 @@ fn run_probe(active: &ActiveEventLoop) -> Result<Capability, String> {
 
     let size = window.inner_size();
     let mut grid = Grid::new(8, 4);
-    grid.enter_alt_screen();
+    grid.scroll_region_up(0, 3, 1);
+    if grid.scrollback_len() == 0 {
+        return Err(String::from("scrollbar fixture did not create primary-screen scrollback"));
+    }
     let mut panes = [PaneRender {
         id: 1,
         rect_px: PixelRect { x: 0, y: 0, w: size.width, h: size.height },
@@ -140,6 +143,39 @@ fn run_probe(active: &ActiveEventLoop) -> Result<Capability, String> {
         ));
     }
 
+    let scrollbar_x = size.width.saturating_sub(5);
+    let scrollbar_y = size.height / 2;
+    let baseline_count = renderer.successful_frame_count();
+    let baseline_cpu = renderer
+        .__test_software_frame_pixel_bgra(scrollbar_x, scrollbar_y)
+        .ok_or_else(|| String::from("baseline software scrollbar pixel unavailable"))?;
+    let baseline_hwnd = read_hwnd_pixel(hwnd, scrollbar_x as i32, scrollbar_y as i32)?;
+    panes[0].scrollbar_alpha = 1.0;
+    render_frame(&mut renderer, &mut panes, &theme, None, &tabs)?;
+    if renderer.successful_frame_count() != baseline_count + 1 {
+        return Err(String::from("alpha-only scrollbar show did not present a new frame"));
+    }
+    let visible_cpu = renderer
+        .__test_software_frame_pixel_bgra(scrollbar_x, scrollbar_y)
+        .ok_or_else(|| String::from("visible software scrollbar pixel unavailable"))?;
+    let visible_hwnd = read_hwnd_pixel(hwnd, scrollbar_x as i32, scrollbar_y as i32)?;
+    if visible_cpu == baseline_cpu || visible_hwnd == baseline_hwnd {
+        return Err(String::from("visible scrollbar did not change CPU and HWND edge pixels"));
+    }
+    panes[0].scrollbar_alpha = 0.0;
+    render_frame(&mut renderer, &mut panes, &theme, None, &tabs)?;
+    if renderer.successful_frame_count() != baseline_count + 2 {
+        return Err(String::from("alpha-only scrollbar hide did not present a new frame"));
+    }
+    let restored_cpu = renderer
+        .__test_software_frame_pixel_bgra(scrollbar_x, scrollbar_y)
+        .ok_or_else(|| String::from("restored software scrollbar pixel unavailable"))?;
+    let restored_hwnd = read_hwnd_pixel(hwnd, scrollbar_x as i32, scrollbar_y as i32)?;
+    if restored_cpu != baseline_cpu || restored_hwnd != baseline_hwnd {
+        return Err(String::from("hidden scrollbar did not restore the exact baseline pixels"));
+    }
+
+    panes[0].grid.enter_alt_screen();
     let (cell_w, cell_h) = renderer.cell_size();
     let sample_x = (cell_w * 1.5).round() as i32;
     let sample_y = (cell_h * 1.5).round() as i32;

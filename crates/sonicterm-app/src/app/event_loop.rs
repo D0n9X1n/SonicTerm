@@ -87,6 +87,54 @@ impl App {
         next
     }
 
+    fn scrollbar_snap_deadline(&self) -> Option<Instant> {
+        self.windows
+            .values()
+            .filter(|window| {
+                matches!(
+                    crate::app::scrollbar_visibility::window_scrollbar_motion(
+                        window.renderer.as_ref().map(GpuRenderer::is_software_render_degraded),
+                        self.software_render_degrade,
+                    ),
+                    crate::app::scrollbar_visibility::ScrollbarMotion::Snap
+                )
+            })
+            .filter_map(|window| {
+                let drag_pane = window.scrollbar_drag.as_ref().map(|drag| drag.pane_id);
+                crate::app::scrollbar_visibility::next_snap_deadline(
+                    &window.scrollbar_vis,
+                    self.config.appearance.scrollbar,
+                    drag_pane,
+                )
+            })
+            .min()
+    }
+
+    fn expire_due_scrollbar_snaps(&mut self, now: Instant) -> Vec<WindowId> {
+        self.windows
+            .iter_mut()
+            .filter(|(_, window)| {
+                matches!(
+                    crate::app::scrollbar_visibility::window_scrollbar_motion(
+                        window.renderer.as_ref().map(GpuRenderer::is_software_render_degraded),
+                        self.software_render_degrade,
+                    ),
+                    crate::app::scrollbar_visibility::ScrollbarMotion::Snap
+                )
+            })
+            .filter_map(|(window_id, window)| {
+                let drag_pane = window.scrollbar_drag.as_ref().map(|drag| drag.pane_id);
+                crate::app::scrollbar_visibility::expire_due_snaps(
+                    &mut window.scrollbar_vis,
+                    self.config.appearance.scrollbar,
+                    drag_pane,
+                    now,
+                )
+                .then_some(*window_id)
+            })
+            .collect()
+    }
+
     pub(super) fn do_about_to_wait(&mut self, el: &ActiveEventLoop) {
         // Deferred-exit drain: `run_action` (keymap dispatcher) sets
         // `pending_exit` when the user's Cmd+W chain has just closed
@@ -160,7 +208,7 @@ impl App {
     // Ordering: cursor_visible loads Relaxed; a stale read only mis-times the next
     // blink wake, which the following do_about_to_wait pass corrects.
     fn wake_deadline(&self, notification_wake: Option<Instant>) -> Option<Instant> {
-        let mut next: Option<Instant> = notification_wake;
+        let mut next = earliest(notification_wake, self.scrollbar_snap_deadline());
         #[cfg(target_os = "windows")]
         if let Some(pending) = self.pending_osc52_reassert.as_ref() {
             next = Some(next.map_or(pending.due, |current| current.min(pending.due)));
@@ -263,8 +311,16 @@ impl App {
                 // here would be a heartbeat redraw this crate's guardrails forbid.
                 return;
             }
+            let expired_scrollbars = self.expire_due_scrollbar_snaps(Instant::now());
             if let Some(w) = self.main_window() {
                 w.request_redraw();
+            }
+            for window_id in expired_scrollbars {
+                if Some(window_id) != self.main_window_id {
+                    if let Some(window) = self.windows.get(&window_id) {
+                        window.request_redraw();
+                    }
+                }
             }
             // also re-request the redraw on every CHILD window
             // that deferred one (vsync gate or lock-contention backoff).

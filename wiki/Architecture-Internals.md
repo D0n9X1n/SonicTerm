@@ -106,8 +106,12 @@ correctness, not only speed.
   scrolling, reverse index, line insertion/deletion, erase, resize, and
   wide-cell repair.
 - Changes to overlays or window chrome promote damage to the full surface.
+  Effective per-pane scrollbar opacity is window chrome: its sorted, quantized
+  identity participates in the frame key, and a bucket change damages the full
+  surface.
 - A degraded wgpu frame with work repaints the full surface. Windows degraded
-  presentation also composes a full CPU surface.
+  presentation also composes a full CPU surface. Degraded scrollbars snap and
+  arm one idle-hide deadline; accelerated scrollbars request bounded fade frames.
 - `RenderMode::Noop` is available only under resolved degradation when no visible
   signal changed. It does not present or clear dirty rows.
 - Windows software glyph presentation stabilizes NDC roundoff at integer and
@@ -397,8 +401,10 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
 - 备用屏幕窗格只要有脏行，就贡献整个经表面裁剪的窗格。没有脏行时不贡献损伤区域。
 - 终端单元格变化会在同一帧标记受影响的行，包括滚动、反向索引、插入或删除行、擦除、
   调整大小和宽字符修复。
-- 界面浮层或窗口装饰变化会把损伤区域扩大到整个表面。
+- 界面浮层或窗口装饰变化会把损伤区域扩大到整个表面。每个窗格的有效滚动条透明度属于窗口
+  装饰：按窗格编号排序并量化后的身份会进入帧键，桶值变化会损伤整个表面。
 - 已降级的 wgpu 帧只要有工作，就重画整个表面。Windows 降级呈现也会合成完整 CPU 表面。
+  降级滚动条直接跳变并只设置一个空闲隐藏截止时间；加速滚动条请求有限的淡入淡出帧。
 - 只有最终降级状态启用且没有可见信号变化时，才能使用 `RenderMode::Noop`。该路径不呈现，
   也不清除脏行。
 - Windows 软件字形呈现会在一对一光栅定位前，稳定 NDC 反算在整数与半像素原点附近的误差。

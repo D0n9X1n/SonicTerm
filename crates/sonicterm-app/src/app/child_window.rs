@@ -197,9 +197,14 @@ impl App {
         // following streaming redraw coalesces instead of over-rendering.
         let was_dirty = self.input_dirty;
         let frame_period = self.frame_period;
-        // snapshot the no-GPU degrade flag before the long-lived
-        // `child` borrow below so the fade-suppression check can read it.
         let software_render_degrade = self.software_render_degrade;
+        let scrollbar_motion = crate::app::scrollbar_visibility::window_scrollbar_motion(
+            self.windows
+                .get(&win_id)
+                .and_then(|window| window.renderer.as_ref())
+                .map(GpuRenderer::is_software_render_degraded),
+            software_render_degrade,
+        );
         let pty_burst_snapshot = self.pty_burst_gen.load(Ordering::Acquire);
         let pty_burst = pty_burst_snapshot != self.last_seen_burst_gen;
         // Scrollbar input is handled HERE, before the long-lived `child` borrow
@@ -651,6 +656,7 @@ impl App {
                     }
                     // Compute the per-pane fade alpha so torn-out windows show
                     // the scrollbar and auto-hide it like the main window.
+                    let scrollbar_now = Instant::now();
                     let scrollbar_alpha_map: std::collections::HashMap<u64, f32> = {
                         let mode = config.appearance.scrollbar;
                         let drag_pane = child.scrollbar_drag.as_ref().map(|s| s.pane_id);
@@ -664,7 +670,8 @@ impl App {
                             active_id,
                             drag_pane,
                             mode,
-                            Instant::now(),
+                            scrollbar_motion,
+                            scrollbar_now,
                         )
                     };
                     let scrollbar_needs_more_frames = {
@@ -675,6 +682,8 @@ impl App {
                                 st,
                                 mode,
                                 drag_pane == Some(*id),
+                                scrollbar_motion,
+                                scrollbar_now,
                             )
                         })
                     };
@@ -913,11 +922,7 @@ impl App {
                     if let Some(t) = timing {
                         t.finish();
                     }
-                    // Keep animating the scrollbar fade to completion (the
-                    // 300ms auto-hide) even when no further input arrives —
-                    // except in the no-GPU path, where the bar snaps instead
-                    // of burning CPU on the fade.
-                    if scrollbar_needs_more_frames && !software_render_degrade {
+                    if scrollbar_needs_more_frames {
                         child.request_redraw();
                     }
                 }
