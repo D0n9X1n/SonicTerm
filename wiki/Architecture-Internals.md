@@ -117,6 +117,10 @@ correctness, not only speed.
 - Windows software glyph presentation stabilizes NDC roundoff at integer and
   half-pixel origins before one-to-one raster placement. The row glyph cache also
   keys the viewport row slot because cached instances carry screen coordinates.
+- Windows software sharp, rounded, and line quads decode retained sRGB
+  destination channels, blend premultiplied source RGBA in linear light, encode
+  RGB once, and source-over alpha as linear UNORM. Antialias coverage scales all
+  four premultiplied source components before blending.
 - A display-scale transition commits one physical inner size through winit's
   event-scoped writer. That size preserves logical geometry where it fits, stays
   above the 30×10 terminal minimum, and is capped by the destination monitor work
@@ -409,6 +413,9 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
   也不清除脏行。
 - Windows 软件字形呈现会在一对一光栅定位前，稳定 NDC 反算在整数与半像素原点附近的误差。
   行字形缓存还会把视口行槽纳入键值，因为缓存实例携带屏幕坐标。
+- Windows 软件锐角、圆角和线段矩形会解码保留帧中的 sRGB 目标通道，在线性光空间混合预乘源
+  RGBA，只对 RGB 编码一次，并把 alpha 作为线性 UNORM 做 source-over。抗锯齿覆盖率会在混合
+  前缩放预乘源颜色的全部四个分量。
 - 显示缩放切换会通过 winit 的事件内 writer 一次提交一个物理 inner size。该尺寸在可容纳时
   保持逻辑几何，不低于 30×10 终端下限，并受目标显示器 work area 限制；renderer surface、
   pane grid/PTY、IME 几何与重绘都在 Windows 应用 `WM_DPICHANGED` 前跟随同一个目标。
