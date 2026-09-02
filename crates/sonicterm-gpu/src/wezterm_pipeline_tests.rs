@@ -58,6 +58,12 @@ fn primitive_kind_uses_flat_interpolation() {
     assert!(SHADER.contains("@location(4) @interpolate(flat) has_color: f32,"));
 }
 
+/// Line antialiasing must keep smoothstep edges ordered when derivatives are zero.
+#[test]
+fn line_antialiasing_has_a_positive_derivative_floor() {
+    assert!(SHADER.contains("let w = max(fwidth(d), 1.0e-4);"));
+}
+
 /// Reconstruct the same padded local geometry used by curly-underline line segments.
 #[cfg(target_os = "windows")]
 fn line_segment(
