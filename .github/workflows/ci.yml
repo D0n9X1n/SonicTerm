@@ -18,6 +18,7 @@ jobs:
   unit-tests:
     name: ${{ matrix.os }} / unit tests
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
     env:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
     strategy:
@@ -26,8 +27,10 @@ jobs:
         os: [macos-14, windows-latest]
     steps:
       - uses: actions/checkout@v7
+        timeout-minutes: 5
 
       - name: Install Rust
+        timeout-minutes: 5
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -35,6 +38,7 @@ jobs:
       - name: Resolve vcpkg commit (for cache key)
         id: vcpkg
         if: runner.os == 'Windows'
+        timeout-minutes: 2
         shell: pwsh
         run: |
           $root = if ($env:VCPKG_INSTALLATION_ROOT) { $env:VCPKG_INSTALLATION_ROOT } else { "C:\vcpkg" }
@@ -44,6 +48,7 @@ jobs:
 
       - name: Cache vcpkg binaries (Cairo)
         if: runner.os == 'Windows'
+        timeout-minutes: 5
         uses: actions/cache@v6
         with:
           path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
@@ -53,20 +58,24 @@ jobs:
 
       - name: Install Cairo for Windows
         if: runner.os == 'Windows'
+        timeout-minutes: 30
         shell: pwsh
         run: .\scripts\setup-windows-cairo.ps1
 
       - name: Cache Cargo
+        timeout-minutes: 10
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: unit-${{ matrix.os }}
 
       - name: Check formatting
+        timeout-minutes: 5
         run: cargo fmt --all --check
 
       # Documented as a gate step but previously enforced only by whoever
       # remembered to run it, so a `-D warnings` violation could merge.
       - name: Clippy
+        timeout-minutes: 15
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       # `ssh` is off by default, so no other step in this workflow compiles it:
@@ -74,45 +83,55 @@ jobs:
       # backend can stop building against a dependency's newer API and every
       # gate still reports green.
       - name: Clippy optional ssh backend
+        timeout-minutes: 10
         run: cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings
 
       # `shell: bash` because the matrix includes Windows, where the default
       # shell is PowerShell and `> /dev/null` would create a file named `null`
       # rather than discarding the output.
       - name: Validate workspace manifests
+        timeout-minutes: 2
         shell: bash
         run: cargo metadata --no-deps --format-version 1 > /dev/null
 
       # CI installs floating `stable`, so nothing here would otherwise notice
       # the declared minimum falling behind what the lockfile needs.
       - name: Check declared rust-version against the lock
+        timeout-minutes: 5
         shell: bash
         run: bash scripts/check-rust-version.sh
 
       - name: Check process exit paths
+        timeout-minutes: 2
         shell: bash
         run: bash scripts/check-no-raw-process-exit.sh
 
       - name: Check window owner registration
+        timeout-minutes: 2
         shell: bash
         run: bash scripts/check-window-owner-registration.sh
 
       - name: Check authored Rust comments
+        timeout-minutes: 5
         shell: bash
         run: bash scripts/check-authored-rust-comments.sh
 
       - name: Check public Rustdoc
+        timeout-minutes: 10
         shell: bash
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
       - name: Check optional ssh Rustdoc
+        timeout-minutes: 5
         shell: bash
         run: RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-io --no-deps --features ssh
 
       - name: Run unit tests
+        timeout-minutes: 25
         run: cargo test --workspace --lib --bins
 
       - name: Run per-crate unit/build gate
+        timeout-minutes: 45
         shell: bash
         run: bash scripts/check-workspace-crates.sh
 
@@ -122,6 +141,7 @@ jobs:
       # whether the Windows software-path verification can be automated rather
       # than needing a person at a keyboard.
       - name: Report host window capability
+        timeout-minutes: 5
         run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture
 
       # `--nocapture` again: this probe exists to report which adapters the
@@ -129,6 +149,7 @@ jobs:
       # Exercising `Auto` is usually assumed to need a real software
       # rasterizer; this is what establishes whether the runner is one.
       - name: Report host adapter classification
+        timeout-minutes: 5
         run: cargo test -p sonicterm-gpu --test ci_adapter_classification_probe -- --nocapture
 
       # `--nocapture` for the same reason as the probe above: this test's
@@ -136,46 +157,57 @@ jobs:
       # and a run that returned early having measured nothing both report
       # `ok`, and the distinction is the whole point.
       - name: Report renderer churn baseline
+        timeout-minutes: 5
         run: cargo test -p sonicterm-gpu --test renderer_churn_baseline -- --nocapture
 
       - name: Verify Windows software presentation capability
         if: runner.os == 'Windows'
+        timeout-minutes: 5
         run: cargo test -p sonicterm-gpu --test windows_software_present_capability -- --nocapture
 
       - name: Verify Windows WARP allocator baseline
         if: runner.os == 'Windows'
+        timeout-minutes: 5
         run: cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture
 
       - name: Verify Windows selection presentation
         if: runner.os == 'Windows'
+        timeout-minutes: 5
         run: cargo test -p sonicterm-app --test windows_software_selection_present -- --nocapture
 
       - name: Run release-note unit test
+        timeout-minutes: 5
         shell: bash
         run: bash scripts/test-release-notes.sh
 
       - name: Test wiki publisher
+        timeout-minutes: 5
         shell: bash
         run: bash scripts/test-wiki-publish.sh
 
       - name: Verify frozen PTY feasibility evidence
+        timeout-minutes: 5
         shell: bash
         run: bash scripts/pty-backend-feasibility.sh --check
 
       - name: Verify resource inventory
+        timeout-minutes: 5
         shell: bash
         run: bash scripts/test-resource-inventory.sh
 
       - name: Run deterministic soak control gate
+        timeout-minutes: 5
         shell: bash
         run: bash scripts/test-soak-harness.sh
 
       - name: Test resource baseline evidence collector
+        timeout-minutes: 5
         shell: bash
         run: bash scripts/test-resource-baseline-evidence.sh
 
       - name: Capture real resource baseline evidence
         id: capture_resource_baseline
+        timeout-minutes: 10
         shell: bash
         run: |
           python_cmd=python3
@@ -188,6 +220,7 @@ jobs:
 
       - name: Upload resource baseline evidence
         if: ${{ !cancelled() && steps.capture_resource_baseline.conclusion != 'skipped' }}
+        timeout-minutes: 5
         uses: actions/upload-artifact@v5
         with:
           name: resource-baseline-evidence-${{ matrix.os }}
@@ -196,16 +229,19 @@ jobs:
 
       - name: Install cargo-llvm-cov
         if: runner.os == 'macOS'
+        timeout-minutes: 10
         run: cargo install cargo-llvm-cov --locked
 
       - name: Run Rust logic coverage gate
         if: runner.os == 'macOS'
+        timeout-minutes: 25
         shell: bash
         run: scripts/rust-logic-coverage.sh
 
   linux:
     name: ubuntu 22.04 / workspace, packages, X11, Wayland
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     container: ubuntu:22.04
     env:
       GIT_CONFIG_COUNT: "1"
@@ -213,6 +249,7 @@ jobs:
       GIT_CONFIG_VALUE_0: ${{ github.workspace }}
     steps:
       - name: Install runner and native dependencies
+        timeout-minutes: 10
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
@@ -245,39 +282,50 @@ jobs:
             python3
 
       - uses: actions/checkout@v7
+        timeout-minutes: 5
 
       - name: Install Rust
+        timeout-minutes: 5
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
 
       - name: Cache Cargo
+        timeout-minutes: 10
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: linux-ubuntu-22.04
 
       - name: Check formatting
+        timeout-minutes: 5
         run: cargo fmt --all --check
 
       - name: Clippy
+        timeout-minutes: 15
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Clippy optional ssh backend
+        timeout-minutes: 10
         run: cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings
 
       - name: Check public Rustdoc
+        timeout-minutes: 10
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
       - name: Check optional ssh Rustdoc
+        timeout-minutes: 5
         run: RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-io --no-deps --features ssh
 
       - name: Run workspace unit tests
+        timeout-minutes: 20
         run: cargo test --workspace --lib --bins
 
       - name: Run per-crate unit/build gate
+        timeout-minutes: 30
         run: bash scripts/check-workspace-crates.sh
 
       - name: Run source and release tooling gates
+        timeout-minutes: 10
         run: |
           bash scripts/check-authored-rust-comments.sh
           bash scripts/check-no-raw-process-exit.sh
@@ -289,10 +337,12 @@ jobs:
           bash scripts/test-wiki-publish.sh
 
       - name: Build Linux release binary
+        timeout-minutes: 30
         run: cargo build --release -p sonicterm-linux
 
       - name: Build and validate Linux packages
         id: packages
+        timeout-minutes: 15
         shell: bash
         run: |
           version="$(cargo metadata --no-deps --format-version 1 | python3 -c '
@@ -325,10 +375,12 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Run packaged X11 and Wayland smokes
+        timeout-minutes: 5
         run: bash scripts/smoke-linux-packages.sh "${{ steps.packages.outputs.tarball }}" "${{ steps.packages.outputs.deb }}"
 
       - name: Upload Linux package smoke logs
         if: ${{ failure() }}
+        timeout-minutes: 5
         uses: actions/upload-artifact@v5
         with:
           name: sonicterm-linux-smoke-logs-${{ github.sha }}
@@ -336,6 +388,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload Linux packages
+        timeout-minutes: 5
         uses: actions/upload-artifact@v5
         with:
           name: sonicterm-linux-packages-${{ github.sha }}

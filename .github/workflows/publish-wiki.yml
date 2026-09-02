@@ -16,10 +16,13 @@ jobs:
   publish:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+        timeout-minutes: 5
 
       - name: Clone wiki repository
+        timeout-minutes: 5
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -29,8 +32,10 @@ jobs:
 
       - name: Build wiki mirror
         id: mirror
+        timeout-minutes: 5
         run: scripts/publish-wiki.sh wiki wiki-repo "$GITHUB_SHA"
 
       - name: Push wiki mirror
         if: steps.mirror.outputs.changed == 'true'
+        timeout-minutes: 5
         run: git -C wiki-repo push origin HEAD:master

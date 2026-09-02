@@ -247,6 +247,12 @@ a reproduction.
   the work ships in. `gh issue create` and `gh pr create` take `--label` and
   `--milestone` directly; `gh issue edit` and `gh pr edit` fix an item that
   was opened without them.
+- **Every workflow job and authored step has an explicit timeout.** Size each
+  threshold above recent cold-cache runtime instead of copying one blanket
+  value. Scripts that capture child-process output must also bound and reap the
+  child process tree so timeout evidence and checksums survive; a workflow
+  timeout is the final guard, not the only one. Keep the timeout-coverage tests
+  green when adding or renaming workflow jobs and steps.
 - **Flowcharts and data-flow diagrams in markdown are `mermaid` fenced blocks.**
 
   Hand-drawn ASCII loses alignment across fonts and cannot be edited without

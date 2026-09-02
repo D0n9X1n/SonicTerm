@@ -17,51 +17,67 @@ jobs:
   validate-release-tag:
     name: Validate release tag and workspace version
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+        timeout-minutes: 5
 
       - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 5
 
       - name: Validate tag against every workspace package
+        timeout-minutes: 5
         run: python3 scripts/prepare-release-assets.py check-version --tag "${{ github.ref_name }}"
 
       - name: Test release asset tooling
+        timeout-minutes: 5
         run: bash scripts/test-release-assets.sh
 
   unit-tests-mac:
     name: macOS / unit tests
     runs-on: macos-14
+    timeout-minutes: 45
     needs: [validate-release-tag]
     steps:
       - uses: actions/checkout@v7
+        timeout-minutes: 5
       - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 5
 
       - uses: Swatinem/rust-cache@v2
+        timeout-minutes: 10
         with:
           shared-key: release-unit-macos-14
       - name: Run unit tests
+        timeout-minutes: 20
         run: cargo test --workspace --lib --bins
 
       - name: Run per-crate unit/build gate
+        timeout-minutes: 30
         shell: bash
         run: bash scripts/check-workspace-crates.sh
 
       - name: Run release-note unit test
+        timeout-minutes: 5
         shell: bash
         run: bash scripts/test-release-notes.sh
 
   unit-tests-windows:
     name: Windows / unit tests
     runs-on: windows-latest
+    timeout-minutes: 120
     needs: [validate-release-tag]
     env:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
     steps:
       - uses: actions/checkout@v7
+        timeout-minutes: 5
       - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 5
 
       - name: Resolve vcpkg commit (for cache key)
         id: vcpkg
+        timeout-minutes: 2
         shell: pwsh
         run: |
           $root = if ($env:VCPKG_INSTALLATION_ROOT) { $env:VCPKG_INSTALLATION_ROOT } else { "C:\vcpkg" }
@@ -70,6 +86,7 @@ jobs:
           "image=$env:ImageVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Cache vcpkg binaries (Cairo)
+        timeout-minutes: 5
         uses: actions/cache@v6
         with:
           path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
@@ -78,35 +95,44 @@ jobs:
             vcpkg-cairo-${{ runner.os }}-
 
       - name: Install Cairo
+        timeout-minutes: 30
         shell: pwsh
         run: .\scripts\setup-windows-cairo.ps1
 
       - uses: Swatinem/rust-cache@v2
+        timeout-minutes: 10
         with:
           shared-key: release-unit-windows
       - name: Run unit tests
+        timeout-minutes: 30
         run: cargo test --workspace --lib --bins
 
       - name: Run per-crate unit/build gate
+        timeout-minutes: 60
         shell: bash
         run: bash scripts/check-workspace-crates.sh
 
       - name: Verify Windows software presentation capability
+        timeout-minutes: 5
         run: cargo test -p sonicterm-gpu --test windows_software_present_capability -- --nocapture
 
       - name: Verify Windows WARP allocator baseline
+        timeout-minutes: 5
         run: cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture
 
       - name: Verify Windows selection presentation
+        timeout-minutes: 5
         run: cargo test -p sonicterm-app --test windows_software_selection_present -- --nocapture
 
       - name: Run release-note unit test
+        timeout-minutes: 5
         shell: bash
         run: bash scripts/test-release-notes.sh
 
   unit-tests-linux:
     name: Linux / unit tests
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     needs: [validate-release-tag]
     container: ubuntu:22.04
     env:
@@ -115,6 +141,7 @@ jobs:
       GIT_CONFIG_VALUE_0: ${{ github.workspace }}
     steps:
       - name: Install runner and native dependencies
+        timeout-minutes: 10
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
@@ -137,20 +164,26 @@ jobs:
             python3
 
       - uses: actions/checkout@v7
+        timeout-minutes: 5
 
       - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 5
 
       - uses: Swatinem/rust-cache@v2
+        timeout-minutes: 10
         with:
           shared-key: release-unit-linux-ubuntu-22.04
 
       - name: Run unit tests
+        timeout-minutes: 20
         run: cargo test --workspace --lib --bins
 
       - name: Run per-crate unit/build gate
+        timeout-minutes: 30
         run: bash scripts/check-workspace-crates.sh
 
       - name: Run Linux release tooling tests
+        timeout-minutes: 5
         run: |
           bash scripts/test-linux-packages.sh
           bash scripts/test-release-assets.sh
@@ -159,28 +192,35 @@ jobs:
   build-mac-x86_64:
     name: Build macOS x86_64 binary
     runs-on: macos-15-intel
+    timeout-minutes: 45
     needs: [unit-tests-mac]
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
     steps:
       - uses: actions/checkout@v7
+        timeout-minutes: 5
 
       - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 5
         with:
           targets: x86_64-apple-darwin
 
       - name: Install native dependencies
+        timeout-minutes: 10
         run: brew install cairo pkg-config
 
       - uses: Swatinem/rust-cache@v2
+        timeout-minutes: 10
         with:
           shared-key: release-mac-x86_64
 
       - name: Build x86_64
+        timeout-minutes: 30
         run: cargo build --release --target x86_64-apple-darwin -p sonicterm-mac
 
       - uses: actions/upload-artifact@v5
+        timeout-minutes: 5
         with:
           name: sonicterm-mac-x86_64
           path: target/x86_64-apple-darwin/release/sonicterm-mac
@@ -188,28 +228,35 @@ jobs:
   build-mac-aarch64:
     name: Build macOS aarch64 binary
     runs-on: macos-14
+    timeout-minutes: 30
     needs: [unit-tests-mac]
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
     steps:
       - uses: actions/checkout@v7
+        timeout-minutes: 5
 
       - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 5
         with:
           targets: aarch64-apple-darwin
 
       - name: Install native dependencies
+        timeout-minutes: 10
         run: brew install cairo pkg-config
 
       - uses: Swatinem/rust-cache@v2
+        timeout-minutes: 10
         with:
           shared-key: release-mac-aarch64
 
       - name: Build aarch64
+        timeout-minutes: 20
         run: cargo build --release --target aarch64-apple-darwin -p sonicterm-mac
 
       - uses: actions/upload-artifact@v5
+        timeout-minutes: 5
         with:
           name: sonicterm-mac-aarch64
           path: target/aarch64-apple-darwin/release/sonicterm-mac
@@ -217,24 +264,29 @@ jobs:
   package-mac:
     name: Package macOS dmg
     runs-on: macos-14
+    timeout-minutes: 30
     needs: [build-mac-x86_64, build-mac-aarch64]
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
     steps:
       - uses: actions/checkout@v7
+        timeout-minutes: 5
 
       - uses: actions/download-artifact@v5
+        timeout-minutes: 5
         with:
           name: sonicterm-mac-x86_64
           path: dist/x86_64
 
       - uses: actions/download-artifact@v5
+        timeout-minutes: 5
         with:
           name: sonicterm-mac-aarch64
           path: dist/aarch64
 
       - name: Verify macOS release binaries
+        timeout-minutes: 5
         run: |
           chmod +x dist/x86_64/sonicterm-mac dist/aarch64/sonicterm-mac
           file dist/x86_64/sonicterm-mac
@@ -243,11 +295,13 @@ jobs:
           test "$(lipo -archs dist/aarch64/sonicterm-mac)" = "arm64"
 
       - name: Build icons
+        timeout-minutes: 10
         run: |
           brew install create-dmg imagemagick
           bash scripts/bake-icons.sh
 
       - name: Build and register dmg assets
+        timeout-minutes: 10
         run: |
           bash scripts/make-macos-dmg.sh dist/aarch64/sonicterm-mac "${{ github.ref_name }}" mac-aarch64
           bash scripts/make-macos-dmg.sh dist/x86_64/sonicterm-mac "${{ github.ref_name }}" mac-x86_64
@@ -267,6 +321,7 @@ jobs:
             --output dist/macos-x86_64-dmg.asset.json
 
       - uses: actions/upload-artifact@v5
+        timeout-minutes: 5
         with:
           name: release-assets-macos
           path: |
@@ -279,19 +334,23 @@ jobs:
   build-windows:
     name: Build Windows msi
     runs-on: windows-latest
+    timeout-minutes: 45
     needs: [unit-tests-windows]
     env:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
     steps:
       - uses: actions/checkout@v7
+        timeout-minutes: 5
 
       - name: Install Rust target
+        timeout-minutes: 5
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
 
       - name: Resolve vcpkg commit (for cache key)
         id: vcpkg
+        timeout-minutes: 2
         shell: pwsh
         run: |
           $root = if ($env:VCPKG_INSTALLATION_ROOT) { $env:VCPKG_INSTALLATION_ROOT } else { "C:\vcpkg" }
@@ -300,6 +359,7 @@ jobs:
           "image=$env:ImageVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Cache vcpkg binaries (Cairo)
+        timeout-minutes: 5
         uses: actions/cache@v6
         with:
           path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
@@ -308,25 +368,31 @@ jobs:
             vcpkg-cairo-${{ runner.os }}-
 
       - name: Install Cairo
+        timeout-minutes: 30
         shell: pwsh
         run: .\scripts\setup-windows-cairo.ps1
 
       - uses: Swatinem/rust-cache@v2
+        timeout-minutes: 10
         with:
           shared-key: release-windows
 
       - name: Install cargo-wix
+        timeout-minutes: 10
         run: cargo install cargo-wix --locked
 
       - name: Install WiX Toolset
+        timeout-minutes: 10
         run: |
           choco install wixtoolset --no-progress -y
           "C:\Program Files (x86)\WiX Toolset v3.14\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Build release binary
+        timeout-minutes: 20
         run: cargo build --release --target x86_64-pc-windows-msvc -p sonicterm-windows
 
       - name: Build and register msi asset
+        timeout-minutes: 10
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
@@ -348,6 +414,7 @@ jobs:
             --output dist\windows-x86_64-msi.asset.json
 
       - uses: actions/upload-artifact@v5
+        timeout-minutes: 5
         with:
           name: release-assets-windows
           path: |
@@ -358,6 +425,7 @@ jobs:
   package-linux:
     name: Package Linux deb and tar.gz
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [unit-tests-linux]
     container: ubuntu:22.04
     env:
@@ -366,6 +434,7 @@ jobs:
       GIT_CONFIG_VALUE_0: ${{ github.workspace }}
     steps:
       - name: Install runner, package, and runtime dependencies
+        timeout-minutes: 10
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
@@ -398,17 +467,22 @@ jobs:
             python3
 
       - uses: actions/checkout@v7
+        timeout-minutes: 5
 
       - uses: dtolnay/rust-toolchain@stable
+        timeout-minutes: 5
 
       - uses: Swatinem/rust-cache@v2
+        timeout-minutes: 10
         with:
           shared-key: release-linux-ubuntu-22.04
 
       - name: Build Linux release binary
+        timeout-minutes: 20
         run: cargo build --release -p sonicterm-linux
 
       - name: Build, validate, and register Linux packages
+        timeout-minutes: 10
         shell: bash
         run: |
           SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)" \
@@ -442,6 +516,7 @@ jobs:
             --output dist/linux-x86_64-deb.asset.json
 
       - name: Run packaged X11 and Wayland smokes
+        timeout-minutes: 5
         run: |
           bash scripts/smoke-linux-packages.sh \
             "dist/SonicTerm-${{ github.ref_name }}-linux-x86_64.tar.gz" \
@@ -449,6 +524,7 @@ jobs:
 
       - name: Upload Linux package smoke logs
         if: ${{ failure() }}
+        timeout-minutes: 5
         uses: actions/upload-artifact@v5
         with:
           name: sonicterm-linux-release-smoke-logs
@@ -456,6 +532,7 @@ jobs:
           if-no-files-found: ignore
 
       - uses: actions/upload-artifact@v5
+        timeout-minutes: 5
         with:
           name: release-assets-linux
           path: |
@@ -468,13 +545,16 @@ jobs:
   publish:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [package-mac, build-windows, package-linux]
     steps:
       - uses: actions/checkout@v7
+        timeout-minutes: 5
         with:
           fetch-depth: 0
 
       - uses: actions/download-artifact@v5
+        timeout-minutes: 5
         with:
           pattern: release-assets-*
           path: dist
@@ -482,6 +562,7 @@ jobs:
 
       - name: Consolidate and validate release assets
         id: assets
+        timeout-minutes: 5
         shell: bash
         run: |
           python3 scripts/prepare-release-assets.py consolidate \
@@ -495,6 +576,7 @@ jobs:
           ls -lh dist
 
       - name: Generate release notes
+        timeout-minutes: 5
         run: |
           bash scripts/release-notes.sh \
             "${{ github.ref_name }}" \
@@ -502,6 +584,7 @@ jobs:
             > RELEASE_NOTES.md
 
       - uses: softprops/action-gh-release@v2
+        timeout-minutes: 10
         with:
           tag_name: ${{ github.ref_name }}
           name: SonicTerm ${{ github.ref_name }}

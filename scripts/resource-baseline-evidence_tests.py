@@ -3,13 +3,18 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -439,6 +444,146 @@ class LiveResultValidationTests(unittest.TestCase):
         self.assertTrue(any("capabilities" in error for error in errors))
 
 
+class ExecutorDeadlineTests(unittest.TestCase):
+    def test_every_collector_command_has_a_bounded_deadline(self):
+        profile = evidence.classify_platform("windows-latest", _windows_facts(26100))
+        specs = evidence.command_specs(profile, "python")
+
+        self.assertEqual(
+            [(spec.name, spec.timeout_seconds) for spec in specs],
+            [
+                ("pty-child-exit", 30),
+                ("pty-thread-cleanup", 30),
+                ("conpty-close-drain", 30),
+                ("soak-live", 90),
+            ],
+        )
+
+    def test_collector_reports_each_active_command(self):
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(output):
+            document = _collect(Path(directory))
+
+        self.assertEqual(document["status"], "pass")
+        text = output.getvalue()
+        for name in ("pty-child-exit", "pty-descendant-cleanup", "soak-live"):
+            self.assertIn(
+                "resource-baseline: start {} (timeout=".format(name), text
+            )
+            self.assertIn(
+                "resource-baseline: finish {} (exit=0, duration=".format(name), text
+            )
+
+    def test_timeout_kills_descendants_and_preserves_partial_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "descendant-survived"
+            child = (
+                "import pathlib,time; time.sleep(3); "
+                "pathlib.Path({!r}).write_text('alive')"
+            ).format(str(marker))
+            code = (
+                "import subprocess,sys,time; "
+                "subprocess.Popen([sys.executable, '-c', {!r}]); "
+                "print('partial', flush=True); time.sleep(60)"
+            ).format(child)
+            spec = evidence.CommandSpec(
+                "timeout-fixture",
+                (sys.executable, "-c", code),
+                timeout_seconds=1,
+            )
+
+            started = time.monotonic()
+            completed = evidence._default_executor(spec, _HERE.parent)
+            elapsed = time.monotonic() - started
+            time.sleep(3)
+
+            self.assertLess(elapsed, 10)
+            self.assertEqual(completed.returncode, evidence.TIMEOUT_RETURN_CODE)
+            self.assertIn(b"partial", completed.stdout)
+            self.assertIn(b"timed out after 1 seconds", completed.stderr)
+            self.assertFalse(marker.exists(), "timed-out command left its descendant running")
+
+    def test_every_workflow_step_has_one_positive_timeout(self):
+        invalid = []
+        workflows = sorted((_HERE.parent / ".github" / "workflows").glob("*.yml"))
+        for path in workflows:
+            text = path.read_text(encoding="utf-8")
+            steps = re.split(r"(?m)^      - ", text)[1:]
+            for step in steps:
+                identity = re.match(r"(?:name: ([^\n]+)|uses: ([^\n]+))", step)
+                if identity is None:
+                    continue
+                label = next(value for value in identity.groups() if value is not None)
+                values = re.findall(r"(?m)^        timeout-minutes: (\S+)$", step)
+                if len(values) != 1 or not values[0].isdigit() or int(values[0]) <= 0:
+                    invalid.append((path.name, label, values))
+
+        self.assertEqual(invalid, [])
+
+    def test_every_workflow_job_has_one_positive_timeout(self):
+        invalid = []
+        workflows = sorted((_HERE.parent / ".github" / "workflows").glob("*.yml"))
+        for path in workflows:
+            text = path.read_text(encoding="utf-8").split("\njobs:\n", 1)[1]
+            parts = re.split(r"(?m)^  ([A-Za-z0-9_-]+):\n", text)[1:]
+            for index in range(0, len(parts), 2):
+                name, job = parts[index : index + 2]
+                values = re.findall(r"(?m)^    timeout-minutes: (\S+)$", job)
+                if len(values) != 1 or not values[0].isdigit() or int(values[0]) <= 0:
+                    invalid.append((path.name, name, values))
+
+        self.assertEqual(invalid, [])
+
+    def test_ci_jobs_keep_outer_timeouts(self):
+        workflow = (_HERE.parent / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("runs-on: ${{ matrix.os }}\n    timeout-minutes: 120", workflow)
+        self.assertIn("runs-on: ubuntu-latest\n    timeout-minutes: 90", workflow)
+
+    def test_slow_ci_stages_keep_cold_cache_headroom(self):
+        workflow = (_HERE.parent / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        expected = {
+            "Install Cairo for Windows": 30,
+            "Run unit tests": 25,
+            "Run per-crate unit/build gate": 45,
+            "Capture real resource baseline evidence": 10,
+            "Run Rust logic coverage gate": 25,
+            "Run workspace unit tests": 20,
+            "Build Linux release binary": 30,
+            "Build and validate Linux packages": 15,
+        }
+        for name, minutes in expected.items():
+            with self.subTest(name=name):
+                step = workflow.split("- name: {}".format(name), 1)[1]
+                step = re.split(r"(?m)^      - ", step, maxsplit=1)[0]
+                self.assertIn("timeout-minutes: {}".format(minutes), step)
+
+    def test_slow_release_stages_keep_cold_cache_headroom(self):
+        workflow = (_HERE.parent / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        expected = {
+            ("unit-tests-mac", "Run per-crate unit/build gate"): 30,
+            ("unit-tests-windows", "Run unit tests"): 30,
+            ("unit-tests-windows", "Run per-crate unit/build gate"): 60,
+            ("unit-tests-linux", "Run per-crate unit/build gate"): 30,
+            ("build-mac-x86_64", "Build x86_64"): 30,
+            ("build-mac-aarch64", "Build aarch64"): 20,
+            ("build-windows", "Build release binary"): 20,
+            ("package-linux", "Build Linux release binary"): 20,
+        }
+        for (job_name, step_name), minutes in expected.items():
+            with self.subTest(job=job_name, step=step_name):
+                job = workflow.split("  {}:\n".format(job_name), 1)[1]
+                job = re.split(r"(?m)^  [A-Za-z0-9_-]+:\n", job, maxsplit=1)[0]
+                step = job.split("- name: {}".format(step_name), 1)[1]
+                step = re.split(r"(?m)^      - ", step, maxsplit=1)[0]
+                self.assertIn("timeout-minutes: {}".format(minutes), step)
+
+
 class EvidenceBundleTests(unittest.TestCase):
     def test_success_bundle_records_truthful_scope_and_integrity_hashes(self):
         soak_result = _live_soak(
@@ -567,6 +712,47 @@ class EvidenceBundleTests(unittest.TestCase):
             self.assertEqual((output / "soak-live.stderr.log").read_bytes(), b"")
             self.assertEqual((output / "soak-live.json").read_bytes(), expected_soak)
             self.assertTrue((output / "evidence.json").is_file())
+            self._assert_checksums_match(output)
+
+    def test_timeout_is_recorded_and_later_evidence_still_emits(self):
+        soak = _live_soak(
+            {
+                "rss_bytes": True,
+                "private_bytes": False,
+                "gpu_estimate_bytes": False,
+                "thread_count": True,
+                "handle_or_fd_count": True,
+                "process_count": False,
+                "ledger_value": False,
+            }
+        )
+        successful = _successful_executor(soak)
+        calls = []
+
+        def execute(spec, cwd):
+            calls.append(spec.name)
+            if spec.name == "pty-child-exit":
+                return subprocess.CompletedProcess(
+                    spec.argv,
+                    evidence.TIMEOUT_RETURN_CODE,
+                    stdout=b"partial\n",
+                    stderr=b"pty-child-exit timed out after 30 seconds\n",
+                )
+            return successful(spec, cwd)
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            document = _collect(output, executor=execute)
+
+            self.assertEqual(document["status"], "fail")
+            self.assertEqual(calls, ["pty-child-exit", "pty-descendant-cleanup", "soak-live"])
+            self.assertTrue(
+                any("pty-child-exit exited with 124" in error for error in document["errors"])
+            )
+            self.assertEqual((output / "pty-child-exit.stdout.log").read_bytes(), b"partial\n")
+            self.assertIn(b"timed out after 30 seconds", (output / "pty-child-exit.stderr.log").read_bytes())
+            self.assertTrue((output / "evidence.json").is_file())
+            self.assertTrue((output / "SHA256SUMS").is_file())
             self._assert_checksums_match(output)
 
     def test_malformed_soak_output_is_preserved_and_fails_closed(self):
