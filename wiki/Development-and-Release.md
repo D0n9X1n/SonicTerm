@@ -128,6 +128,16 @@ presentation capability, WARP allocator, and software-selection presentation
 tests. macOS additionally installs `cargo-llvm-cov` and runs the deterministic
 logic coverage gate.
 
+Every job and authored step in the normal-CI, release, and wiki-publication
+workflows has an explicit timeout sized above recent cold-cache runtime. Fast
+checks, transfers, and native probes use short limits; workspace, per-crate,
+coverage, dependency, native-build, and package stages retain larger
+compile/network margins. The real resource-baseline collector separately bounds
+each focused PTY command at 30 seconds and its live soak at 90 seconds. A timeout
+kills the command's process tree, records exit 124 plus partial stdout/stderr in
+the evidence bundle, and continues writing checksums; the workflow's ten-minute
+limit is the final guard around that collector.
+
 ### Ubuntu 22.04
 
 The Linux container installs Cairo, Fontconfig, X11, Wayland, Mesa
@@ -399,6 +409,12 @@ Windows-only 测试；本地、macOS、Ubuntu 或 review 结果都不能替代�
 Windows 还通过 vcpkg 安装静态 Cairo，并运行 software presentation capability、WARP
 allocator 和 software-selection presentation 测试。macOS 还安装 `cargo-llvm-cov`，运行
 确定性 logic coverage gate。
+
+普通 CI、发布和 Wiki 发布工作流中的每个任务及手写步骤都有显式超时，阈值高于近期冷缓存运行
+时间。快速检查、传输和原生探针使用较短限制；workspace、逐 crate、覆盖率、依赖安装、原生构建
+和打包阶段保留更大的编译与网络余量。真实 resource baseline 采集器还会把每个聚焦 PTY 命令限制
+为 30 秒，把 live soak 限制为 90 秒。超时会终止该命令的整个进程树，在证据包中记录退出码 124
+和部分 stdout/stderr，并继续写入校验和；工作流的十分钟限制是采集器外层的最终保护。
 
 ### Ubuntu 22.04
 

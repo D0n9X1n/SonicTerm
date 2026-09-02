@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -26,17 +27,19 @@ class EvidenceError(ValueError):
 
 
 class CommandSpec:
-    """A named command whose complete output belongs in the evidence bundle."""
+    """A named, bounded command whose complete output belongs in the evidence bundle."""
 
     def __init__(
         self,
         name: str,
         argv: tuple[str, ...],
         expected_test: str | None = None,
+        timeout_seconds: int = 30,
     ) -> None:
         self.name = name
         self.argv = argv
         self.expected_test = expected_test
+        self.timeout_seconds = timeout_seconds
 
 
 def classify_platform(runner_label: str, facts: dict) -> dict:
@@ -108,6 +111,7 @@ def command_specs(profile: dict, python_bin: str) -> list[CommandSpec]:
             "--out",
             "-",
         ),
+        timeout_seconds=90,
     )
     if profile.get("family") == "macos":
         return [
@@ -221,14 +225,73 @@ def _duration_ms(started: float, finished: float) -> int:
     return max(0, int(round((finished - started) * 1000)))
 
 
+TIMEOUT_RETURN_CODE = 124
+
+
+def _terminate_process_tree(process: subprocess.Popen) -> None:
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    try:
+        process.kill()
+    except OSError:
+        pass
+
+
+def _close_pipe(pipe) -> None:
+    if pipe is not None:
+        try:
+            pipe.close()
+        except OSError:
+            pass
+
+
 def _default_executor(spec: CommandSpec, cwd: Path):
-    return subprocess.run(
+    process = subprocess.Popen(
         list(spec.argv),
         cwd=str(cwd),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        check=False,
+        start_new_session=os.name != "nt",
+        creationflags=(
+            subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+        ),
     )
+    try:
+        stdout, stderr = process.communicate(timeout=spec.timeout_seconds)
+        return subprocess.CompletedProcess(spec.argv, process.returncode, stdout, stderr)
+    except subprocess.TimeoutExpired as timeout:
+        _terminate_process_tree(process)
+        try:
+            stdout, stderr = process.communicate(timeout=10)
+        except subprocess.TimeoutExpired as cleanup_timeout:
+            _terminate_process_tree(process)
+            stdout = cleanup_timeout.output or timeout.output or b""
+            stderr = cleanup_timeout.stderr or timeout.stderr or b""
+            _close_pipe(process.stdout)
+            _close_pipe(process.stderr)
+        message = "{} timed out after {} seconds\n".format(
+            spec.name, spec.timeout_seconds
+        ).encode("utf-8")
+        return subprocess.CompletedProcess(
+            spec.argv,
+            TIMEOUT_RETURN_CODE,
+            stdout or b"",
+            (stderr or b"") + message,
+        )
 
 
 def _write_checksums(output_dir: Path) -> None:
@@ -284,6 +347,12 @@ def collect_evidence(
 
     for spec in specs:
         command_started = clock()
+        print(
+            "resource-baseline: start {} (timeout={}s)".format(
+                spec.name, spec.timeout_seconds
+            ),
+            flush=True,
+        )
         try:
             completed = executor(spec, repo_root)
             returncode = int(completed.returncode)
@@ -294,6 +363,14 @@ def collect_evidence(
             stdout = b""
             stderr = "{}: {}\n".format(type(error).__name__, error).encode("utf-8")
         command_finished = clock()
+        print(
+            "resource-baseline: finish {} (exit={}, duration={}ms)".format(
+                spec.name,
+                returncode,
+                _duration_ms(command_started, command_finished),
+            ),
+            flush=True,
+        )
 
         stdout_name = "{}.stdout.log".format(spec.name)
         stderr_name = "{}.stderr.log".format(spec.name)
@@ -423,12 +500,20 @@ def _source_sha(repo_root: Path, environ: dict) -> str:
     try:
         return (
             subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], cwd=str(repo_root), stderr=subprocess.DEVNULL
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(repo_root),
+                stderr=subprocess.DEVNULL,
+                timeout=10,
             )
             .decode("ascii")
             .strip()
         )
-    except (OSError, subprocess.CalledProcessError, UnicodeDecodeError):
+    except (
+        OSError,
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        UnicodeDecodeError,
+    ):
         return ""
 
 
