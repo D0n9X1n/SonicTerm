@@ -52,6 +52,18 @@ fn glyph_vertices_retain_foreground_hsv_contract() {
     assert!(SHADER.contains("hsv *= uniforms.foreground_text_hsb;"));
 }
 
+/// Primitive kind is categorical state and must never be perspective-interpolated.
+#[test]
+fn primitive_kind_uses_flat_interpolation() {
+    assert!(SHADER.contains("@location(4) @interpolate(flat) has_color: f32,"));
+}
+
+/// Line antialiasing must keep smoothstep edges ordered when derivatives are zero.
+#[test]
+fn line_antialiasing_has_a_positive_derivative_floor() {
+    assert!(SHADER.contains("let w = max(fwidth(d), 1.0e-4);"));
+}
+
 /// Reconstruct the same padded local geometry used by curly-underline line segments.
 #[cfg(target_os = "windows")]
 fn line_segment(
@@ -89,14 +101,26 @@ fn warp_line_colors_match_software_across_segment_shapes() {
     let cyan = [0.0, 1.0, 1.0, 1.0];
     let magenta = [1.0, 0.0, 1.0, 1.0];
     let orange = [1.0, 0.215_860_5, 0.0, 1.0];
+    let base_control = QuadInstance::sharp(
+        crate::quad::px_to_ndc(28.0, 0.0, 4.0, 4.0, surface[0], surface[1]),
+        [0.0, 1.0, 0.0, 1.0],
+    );
+    let overlay_control = QuadInstance::sharp(
+        crate::quad::px_to_ndc(28.0, 6.0, 4.0, 4.0, surface[0], surface[1]),
+        [1.0, 1.0, 0.0, 1.0],
+    );
     let lines = [
         line_segment(surface, [2.0, 3.0], [10.0, 3.0], 4.0, cyan),
         line_segment(surface, [2.0, 9.0], [8.0, 15.0], 4.0, magenta),
         line_segment(surface, [14.0, 16.0], [20.0, 10.0], 4.0, orange),
         line_segment(surface, [20.0, 10.0], [26.0, 16.0], 4.0, orange),
     ];
+    let base_quads = [base_control, lines[0]];
+    let overlay_quads = [lines[1], lines[2], lines[3], overlay_control];
     let samples = [
-        ([6_u32, 3_u32], [255, 255, 0, 255]),
+        ([30_u32, 2_u32], [0, 255, 0, 255]),
+        ([30, 8], [0, 255, 255, 255]),
+        ([6, 3], [255, 255, 0, 255]),
         ([4, 11], [255, 0, 255, 255]),
         ([17, 12], [0, 128, 255, 255]),
         ([23, 13], [0, 128, 255, 255]),
@@ -167,10 +191,10 @@ fn warp_line_colors_match_software_across_segment_shapes() {
             upload.bind_group(),
             surface[0],
             surface[1],
-            &lines,
+            &base_quads,
             &[],
             &[],
-            &[],
+            &overlay_quads,
             &[],
         );
     }
@@ -195,7 +219,7 @@ fn warp_line_colors_match_software_across_segment_shapes() {
     let mut software =
         crate::software_windows::WindowsSoftwareFrame::new(WIDTH, HEIGHT, [0.0, 0.0, 0.0, 1.0])
             .expect("valid software frame");
-    software.draw_layers(&atlas, &atlas, &lines, &[], &[], &[], &[]);
+    software.draw_layers(&atlas, &atlas, &base_quads, &[], &[], &overlay_quads, &[]);
 
     for (point, expected) in samples {
         let offset = point[1] as usize * BYTES_PER_ROW as usize + point[0] as usize * 4;

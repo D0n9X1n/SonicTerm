@@ -488,7 +488,7 @@ struct VertexOutput {
     @location(1) fg_color: vec4<f32>,
     @location(2) alt_color: vec4<f32>,
     @location(3) hsv: vec3<f32>,
-    @location(4) has_color: f32,
+    @location(4) @interpolate(flat) has_color: f32,
     @location(5) mix_value: f32,
 };
 
@@ -573,7 +573,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let b = in.alt_color.zw;
         let thickness = in.mix_value;
         let d = sd_segment(in.tex, a, b) - thickness * 0.5;
-        let w = fwidth(d);
+        let w = max(fwidth(d), 1.0e-4);
         let aa = 1.0 - smoothstep(-w, w, d);
         color = in.fg_color * aa;
     } else if (in.has_color == IS_IMAGE) {
