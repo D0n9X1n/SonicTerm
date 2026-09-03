@@ -253,6 +253,13 @@ with an open file descriptor and otherwise uses a fixed `/usr/bin/xdg-open` or
 `/bin/xdg-open` path. The macOS and Linux path-based openers still have the
 normal pathname race after revalidation.
 
+Opening a URI on Windows takes the same shell-free boundary as a validated
+local target: `ShellExecuteExW` receives the URI as one NUL-terminated UTF-16
+string, so no command interpreter parses it. Environment substitution stays disabled, so a
+percent-delimited URI such as `https://example.com/%20space` or one containing
+`%USERNAME%` reaches your browser or mail client exactly as shown on screen
+rather than expanding to an environment value.
+
 Set `terminal.clickable_bare_names = false` to disable contextual names. Set
 `terminal.clickable_local_targets = false` to disable every raw local target.
 Neither setting disables URI or OSC 8 links. For exact defaults and reload
@@ -509,6 +516,11 @@ AppleScript、可执行权限、shebang 和可执行文件 magic 仍被阻止。
 macOS 文件和目录使用 `/usr/bin/open -- <target>`。Linux 优先把已打开的 file descriptor
 交给 desktop portal；否则使用固定的 `/usr/bin/xdg-open` 或 `/bin/xdg-open`。macOS 和
 Linux 的路径 opener 在重新验证之后仍有通常的 pathname race。
+
+Windows 上打开 URI 与打开已验证本地目标使用同一条不经过 shell 的边界：`ShellExecuteExW`
+以单个 NUL 结尾的 UTF-16 字符串接收 URI，不会有任何命令解释器解析它。环境变量替换保持关闭，因此
+`https://example.com/%20space` 这类以百分号分隔的 URI，或包含 `%USERNAME%` 的 URI，会按
+屏幕上显示的原样交给浏览器或邮件客户端，不会展开成环境变量的值。
 
 设置 `terminal.clickable_bare_names = false` 可以关闭上下文名称。设置
 `terminal.clickable_local_targets = false` 可以关闭所有原始本地目标。两者都不影响

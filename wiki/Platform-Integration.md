@@ -53,6 +53,14 @@ at activation time. App bundles, installers, `.command`, and AppleScript remain
 blocked. A portal rejection is not treated as unavailability and does not fall
 back.
 
+On Windows both dispatch paths — a validated local target and a validated URI —
+reach the shell the same way: `ShellExecuteExW` is called directly from a
+worker thread that owns its own COM apartment, so no command interpreter parses
+the target and no argument string is re-tokenized. The URI is passed as one
+NUL-terminated UTF-16 string, and environment substitution stays disabled, so
+percent-delimited text such as `%20` or `%USERNAME%` reaches the handler exactly
+as validated instead of expanding against the process environment.
+
 ## macOS
 
 ### AppKit lifecycle and menu
@@ -253,6 +261,11 @@ flowchart TD
 macOS reveal-only 文件在点击时必须仍不可执行且不含可执行 magic。App bundle、installer、
 `.command` 和 AppleScript 始终被阻止。Portal 明确拒绝不等于 portal 不可用，因此不会触发
 fallback。
+
+Windows 上，已验证的本地目标和已验证的 URI 走同一条调用边界：由拥有独立 COM apartment
+的 worker 线程直接调用 `ShellExecuteExW`，不经过任何命令解释器，也不会对参数字符串重新
+分词。URI 以单个 NUL 结尾的 UTF-16 字符串传入，并且环境变量替换保持关闭，因此 `%20`、`%USERNAME%`
+这类以百分号分隔的文本会按验证后的原样交给 handler，不会按进程环境展开。
 
 ## macOS
 
