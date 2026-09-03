@@ -1570,6 +1570,145 @@ fn scrollbar_bucket_change_invalidates_the_frame_key() {
     assert_ne!(baseline, visible);
 }
 
+/// Changing process privilege must invalidate otherwise-identical retained tab chrome.
+#[test]
+fn process_privilege_change_invalidates_the_frame_key() {
+    let ordinary = FrameKey { process_privileged: false, ..Default::default() };
+    let privileged = FrameKey { process_privileged: true, ..ordinary.clone() };
+
+    assert_ne!(ordinary, privileged);
+}
+
+/// Process elevation warns every tab, while foreground elevation warns only its owning tab.
+#[test]
+fn privilege_badge_combines_process_and_per_tab_foreground_state() {
+    assert!(!tab_requires_privilege_badge(false, false));
+    assert!(tab_requires_privilege_badge(true, false));
+    assert!(tab_requires_privilege_badge(false, true));
+    assert!(tab_requires_privilege_badge(true, true));
+}
+
+/// A foreground elevation-only change participates in the tab hash and invalidates the frame.
+#[test]
+fn foreground_privilege_change_invalidates_tab_chrome() {
+    let mut ordinary = TabBar::new();
+    ordinary.push(sonicterm_render_model::boundary::ui::tabs::Tab::new("#1 shell"));
+    let mut privileged = TabBar::new();
+    privileged.push(sonicterm_render_model::boundary::ui::tabs::Tab::new("#1 shell"));
+    privileged.set_active_foreground_privileged(true);
+
+    assert_ne!(tab_bar_hash(&ordinary, Instant::now()), tab_bar_hash(&privileged, Instant::now()));
+}
+
+/// Privileged title layout reserves a bounded lock slot while ordinary capacity stays unchanged.
+#[test]
+fn privilege_badge_reserves_title_width_without_leaving_the_title_rect() {
+    let rect = TabTitleRect { x: 20.0, y: 4.0, w: 180.0, h: 36.0 };
+    let ordinary = tab_title_capacity(rect, 10.0, false, 1.0);
+    let privileged = tab_title_capacity(rect, 10.0, true, 1.0);
+    let ordinary_placement = tab_title_block_placement(rect, 92.0, false, 1.0);
+    let placement = tab_title_block_placement(rect, 92.0, true, 1.0);
+    let badge = placement.badge_rect.expect("privileged title has a badge");
+
+    assert_eq!(ordinary, 18);
+    assert_eq!(ordinary_placement.badge_rect, None);
+    assert_eq!(ordinary_placement.text_x, 64.0);
+    assert_eq!(ordinary_placement.text_clip, rect);
+    assert!(privileged < ordinary);
+    assert!(badge.x >= rect.x && badge.y >= rect.y);
+    assert!(badge.x + badge.w <= rect.x + rect.w);
+    assert!(badge.y + badge.h <= rect.y + rect.h);
+    assert!(placement.text_x >= badge.x + badge.w);
+    assert!(placement.text_clip.x >= badge.x + badge.w);
+    assert!(placement.text_clip.x + placement.text_clip.w <= rect.x + rect.w);
+}
+
+/// Privileged truncation keeps the stored index and running-process glyph ahead of the body.
+#[test]
+fn privileged_title_text_preserves_existing_identity_and_command_status() {
+    let folder = '\u{f07b}';
+    let stored = format!("#12 {folder} workspace/project");
+
+    let display = tab_title_display_text(&stored, Some("✓"), 14);
+
+    assert_eq!(display, format!("✓ #12 {folder} works…"));
+    assert_eq!(stored, format!("#12 {folder} workspace/project"));
+    assert_eq!(tab_title_display_text("abcdefgh", None, 5), "abcd…");
+    assert_eq!(tab_title_display_text(&stored, Some("✓"), 5), "✓ #1…");
+}
+
+/// Every privileged tab emits one bounded vector lock made from the same quad stream as other chrome.
+#[test]
+fn privilege_badge_emits_one_vector_lock_per_tab() {
+    let mut quads = Vec::new();
+    let first = TabTitleRect { x: 10.0, y: 2.0, w: 18.0, h: 18.0 };
+    let second = TabTitleRect { x: 40.0, y: 2.0, w: 18.0, h: 18.0 };
+    let danger = [0.8, 0.05, 0.02, 1.0];
+
+    emit_privilege_badge_quads(&mut quads, first, danger, 1.0, (200.0, 40.0));
+    emit_privilege_badge_quads(&mut quads, second, danger, 0.5, (200.0, 40.0));
+
+    assert_eq!(quads.len(), PRIVILEGE_BADGE_QUAD_COUNT * 2);
+    assert_eq!(quads[PRIVILEGE_BADGE_QUAD_COUNT].color[3], 0.5);
+    assert_eq!(quads[PRIVILEGE_BADGE_QUAD_COUNT + 1].color[3], 0.5);
+    for part in privilege_lock_rects(first) {
+        assert!(part.x >= first.x && part.y >= first.y);
+        assert!(part.x + part.w <= first.x + first.w);
+        assert!(part.y + part.h <= first.y + first.h);
+    }
+}
+
+/// Black-or-white lock geometry keeps at least WCAG AA contrast against varied danger colors.
+#[test]
+fn privilege_lock_color_contrasts_with_dark_light_and_high_contrast_badges() {
+    for danger in [
+        [0.8, 0.05, 0.02, 1.0],
+        [0.08, 0.01, 0.01, 1.0],
+        [1.0, 0.72, 0.72, 1.0],
+        [1.0, 0.0, 0.0, 1.0],
+    ] {
+        let lock = privilege_lock_color(danger);
+        assert!(linear_contrast_ratio(danger, lock) >= 4.5);
+    }
+}
+
+/// Hover, activity, custom title color, and focus do not enter privilege-badge resolution.
+#[test]
+fn privilege_badge_uses_only_process_state_theme_danger_and_drag_alpha() {
+    // The call stays outside tab-title color resolution so tab presentation cannot recolor the warning.
+    const CORE: &str = include_str!("core.rs");
+    let start = CORE.find("if let Some(badge) = placement.badge_rect").expect("badge branch");
+    let call = &CORE[start..start + 500];
+
+    assert!(call.contains("ui_palette.danger"));
+    assert!(call.contains("badge_alpha"));
+    for excluded in ["active_panel_focused", "hovered", "custom_color"] {
+        assert!(!call.contains(excluded), "badge unexpectedly depends on {excluded}");
+    }
+}
+
+/// The Windows software compositor consumes the same vector badge quads as the GPU path.
+#[cfg(target_os = "windows")]
+#[test]
+fn privilege_badge_quads_rasterize_on_the_windows_software_path() {
+    use sonicterm_text::glyph_atlas::GlyphAtlas;
+
+    let badge = TabTitleRect { x: 10.0, y: 10.0, w: 18.0, h: 18.0 };
+    let mut quads = Vec::new();
+    emit_privilege_badge_quads(&mut quads, badge, [1.0, 0.0, 0.0, 1.0], 1.0, (40.0, 40.0));
+    let glyph_atlas = GlyphAtlas::new(1, 1);
+    let image_atlas = GlyphAtlas::new(1, 1);
+    let mut frame =
+        crate::software_windows::WindowsSoftwareFrame::new(40, 40, [0.0, 0.0, 0.0, 1.0])
+            .expect("valid software frame");
+
+    frame.draw_layers(&glyph_atlas, &image_atlas, &quads, &[], &[], &[], &[]);
+
+    assert_eq!(frame.pixel_bgra_at(12, 20), Some([0, 0, 255, 255]));
+    assert_eq!(frame.pixel_bgra_at(18, 20), Some([0, 0, 0, 255]));
+    assert_eq!(frame.pixel_bgra_at(0, 0), Some([0, 0, 0, 255]));
+}
+
 /// Degraded rendering treats scrollbar changes as a full-frame signal.
 #[test]
 fn scrollbar_change_forces_degraded_full_render() {
@@ -1854,10 +1993,11 @@ fn body_title_and_footer_stacks_share_configuration_and_native_size_identity() {
 
 #[test]
 fn title_size_helper_is_used_only_for_title_stack_and_title_rendering() {
-    // Contract: title sizing cannot leak into body or footer stack construction and rendering.
+    // Protect title sizing from body/footer leaks while keeping vector privilege chrome font-independent.
     const CORE_SRC: &str = include_str!("core.rs");
     assert_eq!(CORE_SRC.matches("tab_title_font_size(").count(), 2);
-    assert!(CORE_SRC.contains("if let Some(stack) = self.tab_title_font_stack.as_ref()"));
+    assert!(CORE_SRC.contains("self.tab_title_font_stack.as_ref(), tab_rasterizer.as_mut()"));
+    assert!(CORE_SRC.contains("} else if show_privilege_badge {"));
     assert!(CORE_SRC.contains("GlyphRasterVariant::TabTitle"));
 }
 

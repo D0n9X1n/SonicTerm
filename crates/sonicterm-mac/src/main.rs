@@ -15,6 +15,23 @@ mod os_drag_mac;
 #[cfg(target_os = "macos")]
 mod tab_drag_os;
 
+#[cfg(any(target_os = "macos", test))]
+fn process_privilege_from_euid(euid: u32) -> sonicterm_app::ProcessPrivilege {
+    if euid == 0 {
+        sonicterm_app::ProcessPrivilege::Privileged
+    } else {
+        sonicterm_app::ProcessPrivilege::Unprivileged
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn detect_process_privilege() -> sonicterm_app::ProcessPrivilege {
+    let euid =
+        // SAFETY: `geteuid` reads process credentials and accepts no pointer or owned resource.
+        unsafe { libc::geteuid() };
+    process_privilege_from_euid(euid)
+}
+
 fn main() -> Result<()> {
     // Install panic hook BEFORE config load so a panic during load
     // still produces a crash dump. Logger init is deferred until
@@ -151,7 +168,13 @@ fn main() -> Result<()> {
         open_documents::install();
         let machine =
             sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default());
+        let process_privilege = detect_process_privilege();
+        tracing::info!(
+            privileged = process_privilege.is_privileged(),
+            "process privilege observed"
+        );
         let mut shell = sonicterm_app::shell::MacShell::new(machine, theme, config, keymap)
+            .with_process_privilege(process_privilege)
             .with_asset_loaders(theme_loader, keymap_loader)
             .with_os_drag_sink(os_drag_mac::MacOsDragSink::arc())
             .with_os_drag_backend(tab_drag_os::MacOsTabDragBackend::boxed())
@@ -218,3 +241,7 @@ fn load_theme(name: &str) -> Theme {
 fn load_keymap(name: &str) -> Keymap {
     Keymap::load_name_or_default(name, &asset_dir())
 }
+
+#[cfg(test)]
+#[path = "main_tests.rs"]
+mod main_tests;

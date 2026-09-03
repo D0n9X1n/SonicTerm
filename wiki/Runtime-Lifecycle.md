@@ -60,11 +60,38 @@ The binaries load theme and keymap assets, create
 `AppStateMachine::new(AppState::default())`, build `MacShell`, `WindowsShell`, or
 `LinuxShell`, and call `run`.
 
+Immediately before shell construction, each native binary records one typed
+`ProcessPrivilege` snapshot for the SonicTerm process. Windows opens the current
+process token with `TOKEN_QUERY`, reads `TOKEN_ELEVATION`, and closes the token
+handle. A failed query is logged and classified as unprivileged rather than
+claiming an elevation that was not observed. macOS and Linux compare `geteuid()`
+with zero. The process snapshot is not inferred from usernames, environment
+variables, shell prompts, or title text.
+
+Separately, the Windows foreground-process probe selects the deepest descendant
+of every tab's active pane, queries that PID's `TOKEN_ELEVATION`, and stores the
+result on the owning tab. One process-table snapshot and ancestry index serve all
+stale visible tabs in a window, including inactive tabs. If UIPI denies access to
+a high-integrity leaf, the same selected ancestry is checked for the actual
+`gsudo.exe` broker. This state shares the existing 500 ms foreground-title cache.
+Accepted PTY input fixes a sample deadline 500 ms later; output activity debounces a
+pre-warning sample until 500 ms of quiet but cannot postpone that input deadline.
+While any per-tab warning remains in an otherwise regular process, fixed 500 ms
+samples continue until the regular shell becomes foreground again. Unchanged
+probe-only wakes do not repaint, and idle or globally elevated sessions add no
+foreground-probe heartbeat. The state changes no title string and invalidates tab
+chrome when only elevation changes. Other platforms use only the startup process
+snapshot.
+
 ### Shell and event-loop construction
 
 Each platform shell wraps one `ShellRunner`. The runner owns the state machine,
-theme, config, keymap, optional asset loaders, native drag hooks, startup
-payload, breadcrumb recorder, and one-shot native-window hooks.
+theme, config, keymap, process-privilege snapshot, optional asset loaders, native
+drag hooks, startup payload, breadcrumb recorder, and one-shot native-window
+hooks. It installs the snapshot on `App` before queuing any startup payload.
+`App` then passes the same value to every main- and child-window render call, so
+new tabs, new windows, and torn-out windows cannot disagree about process
+privilege. The value participates in retained-frame identity.
 
 `ShellRunner::run`:
 
@@ -527,10 +554,30 @@ macOS 和 Linux 会在读取配置前安装 panic 与退出诊断。Windows 先�
 `AppStateMachine::new(AppState::default())`，构建 `MacShell`、`WindowsShell` 或
 `LinuxShell`，再调用 `run`。
 
+每个原生二进制都在构建 shell 前，为 SonicTerm 进程记录一次带类型的
+`ProcessPrivilege` 快照。Windows 以 `TOKEN_QUERY` 打开当前进程 token，读取
+`TOKEN_ELEVATION`，再关闭 token 句柄；查询失败时记录日志并归类为非特权，不会声称未观测到
+的提升状态。macOS 和 Linux 则判断 `geteuid()` 是否为零。进程快照不从用户名、环境变量、
+shell 提示符或标题文本推断。
+
+除此之外，Windows 前台进程探测会选择每个标签页活动窗格最深的后代进程，读取该 PID 的
+`TOKEN_ELEVATION`，并把结果保存在所属标签页。一个窗口内所有缓存过期的可见标签页（包括
+非活动标签页）会共用一次进程表快照和祖先索引。若 UIPI 拒绝访问高完整性叶进程，同一条已选
+祖先路径会检查真实的 `gsudo.exe` broker。该状态复用现有的 500 毫秒前台标题缓存。PTY
+成功接受输入后，会固定安排 500 毫秒后的探测；在尚未显示警告时，输出活动会把探测延后到
+静默 500 毫秒，但不能推迟由输入固定的期限。只要普通权限的 SonicTerm 中仍有按标签页警告，
+就每 500 毫秒进行一次固定探测，直到普通 shell 重新成为前台。仅探测且结果未变化的唤醒不会
+重绘；空闲会话和全局已提升的会话不会增加前台探测心跳。该状态不修改任何标题字符串；即使只
+改变权限也会让所属标签页界面失效重绘。其它平台只使用启动时的进程快照。
+
 ### Shell 与事件循环构建
 
-每个平台 shell 都包装同一个 `ShellRunner`。runner 持有状态机、主题、配置、键位、可选资源
-加载器、原生拖动钩子、启动 payload、面包屑 recorder 和一次性原生窗口钩子。
+每个平台 shell 都包装同一个 `ShellRunner`。runner 持有状态机、主题、配置、键位、进程权限
+快照、可选资源加载器、原生拖动钩子、启动 payload、面包屑 recorder 和一次性原生窗口钩子。
+它会在排队任何启动 payload 前把快照安装到 `App`。随后 `App` 把同一个值传给主窗口和每个
+子窗口的渲染调用，所以新标签页、新窗口和拆出窗口不会对进程权限得出不同结论。Windows 中每个标签页还会把自己的
+前台进程权限状态与该全局值合并；普通 SonicTerm 内通过 `gsudo` 运行的提升命令因此只警告
+所属标签页。该值也参与保留帧身份计算。
 
 `ShellRunner::run` 依次：
 

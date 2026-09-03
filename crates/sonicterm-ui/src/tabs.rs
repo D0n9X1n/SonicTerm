@@ -54,6 +54,8 @@ pub struct Tab {
     pub auto_title: String,
     pub custom_title: Option<String>,
     pub custom_color: Option<String>,
+    /// Whether this tab's current Windows foreground process requires a privilege warning.
+    pub foreground_privileged: bool,
     pub command: CommandStatus,
     /// Path or scheme-like icon hint ("github", "chrome", "bilibili", ...).
     /// The render layer maps this to a glyph/asset.
@@ -71,6 +73,7 @@ impl Tab {
             auto_title: title,
             custom_title: None,
             custom_color: None,
+            foreground_privileged: false,
             command: CommandStatus::default(),
             icon_hint: None,
         }
@@ -171,6 +174,30 @@ impl TabBar {
             return;
         }
         tab.set_custom_title(Some(body));
+    }
+
+    /// Update one tab's foreground-process privilege warning state.
+    ///
+    /// Returns whether the value changed, or `false` when `index` is absent.
+    pub fn set_foreground_privileged(&mut self, index: usize, privileged: bool) -> bool {
+        let Some(tab) = self.tabs.get_mut(index) else {
+            // When: `index` addresses no tab, no foreground state can be updated.
+            return false;
+        };
+        if tab.foreground_privileged == privileged {
+            // When: `tab.foreground_privileged == privileged`, the cached warning is already current.
+            return false;
+        }
+        tab.foreground_privileged = privileged;
+        true
+    }
+
+    /// Update the active tab's foreground-process privilege warning state.
+    ///
+    /// Returns whether the value changed, so callers can distinguish a fresh
+    /// observation from an unchanged cached one without inspecting tab fields.
+    pub fn set_active_foreground_privileged(&mut self, privileged: bool) -> bool {
+        self.set_foreground_privileged(self.active, privileged)
     }
 
     /// Give the active tab an explicit color, replacing any previous one.
@@ -406,6 +433,56 @@ pub fn title_with_replaced_body(template: &str, body: &str) -> String {
         // than an icon and only the index survives alongside body.
         format!("{index} {body}")
     }
+}
+
+/// Shorten a displayed title to at most `max_chars` Unicode scalar values.
+///
+/// Formatted titles preserve their leading `#N` identity and short symbolic
+/// process icon, shortening only the right-hand body whenever those structural
+/// tokens fit alongside an ellipsis.
+#[must_use]
+pub fn truncate_title_body(title: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = title.chars().collect();
+    if chars.len() <= max_chars {
+        // When: `chars.len() <= max_chars`, preserve the complete title without an ellipsis.
+        return title.to_string();
+    }
+    if max_chars == 0 {
+        // When: `max_chars` is zero, no title ink fits beside fixed chrome.
+        return String::new();
+    }
+
+    let prefix_end = title_structural_prefix_end(title).unwrap_or(0);
+    let prefix_chars = title[..prefix_end].chars().count();
+    if prefix_end > 0 && prefix_chars < max_chars {
+        // When: `prefix_end > 0 && prefix_chars < max_chars`, reserve the prefix and shorten its body.
+        let body_capacity = max_chars - prefix_chars;
+        let mut shortened = String::from(&title[..prefix_end]);
+        shortened.extend(title[prefix_end..].chars().take(body_capacity.saturating_sub(1)));
+        shortened.push('…');
+        return shortened;
+    }
+
+    let mut shortened: String = chars.iter().take(max_chars - 1).collect();
+    shortened.push('…');
+    shortened
+}
+
+fn title_structural_prefix_end(title: &str) -> Option<usize> {
+    let rest = title.strip_prefix('#')?;
+    let digits_end = rest.find(|ch: char| !ch.is_ascii_digit()).unwrap_or(rest.len());
+    if digits_end == 0 {
+        // When: `digits_end == 0`, no digit follows `#`, so this is ordinary body text.
+        return None;
+    }
+    let index_end = 1 + digits_end;
+    let after_index = title.get(index_end..)?.strip_prefix(' ')?;
+    let body_start = index_end + 1;
+    let (first, _) = after_index.split_once(' ')?;
+    let has_icon = first.chars().count() <= 2
+        && !first.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '/' || ch == '~');
+    let icon_prefix_bytes = usize::from(has_icon) * (first.len() + 1);
+    Some(body_start + icon_prefix_bytes)
 }
 
 fn title_body(title: &str) -> &str {

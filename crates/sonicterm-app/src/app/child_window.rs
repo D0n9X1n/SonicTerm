@@ -180,6 +180,7 @@ impl App {
     ) {
         let theme = self.theme.clone();
         let config = self.config.clone();
+        let process_privileged = self.process_privilege.is_privileged();
         // Snapshot the app-level overlay attachment before the mutable `child`
         // borrow below pins `self.windows` for the rest of the match. Used only
         // by the `RedrawRequested` arm but cheap enough to compute once.
@@ -496,6 +497,12 @@ impl App {
                 self.pending_redraw_windows.remove(&win_id);
                 child.tabs.clear_expired_command_badges(Instant::now());
                 poll_command_events_for_child_window(child, &config);
+                crate::app::refresh_window_tab_privileges(
+                    &mut child.tabs,
+                    &child.tab_states,
+                    &mut child.panes,
+                    !pty_burst,
+                );
                 if let Some(t) = timing.as_mut() {
                     t.lap("poll");
                 }
@@ -730,6 +737,7 @@ impl App {
                             child.selection.as_ref(),
                             child.copy_mode.as_ref(),
                             &child.tabs,
+                            process_privileged,
                             search,
                             // The app-level command palette renders HERE when it
                             // was opened while this child window was OS

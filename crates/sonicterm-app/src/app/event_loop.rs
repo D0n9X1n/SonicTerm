@@ -21,6 +21,8 @@ use winit::{
     window::{CursorIcon, Window, WindowAttributes, WindowId},
 };
 
+#[cfg(windows)]
+use super::FOREGROUND_PROCESS_TTL;
 use super::{
     mark_all_panes_dirty, runtime_smoke::RuntimeSmokeFailure, window_dpi, with_integrated_titlebar,
     App, UserEvent,
@@ -42,30 +44,101 @@ fn earliest(left: Option<Instant>, right: Option<Instant>) -> Option<Instant> {
 
 /// Whether the wake about to be armed exists only to sample memory.
 ///
-/// The distinction decides whether the resulting `ResumeTimeReached` requests
-/// a redraw. Before the memory deadline existed, every timed wake was armed by
-/// something with a frame to draw — a blink phase, a deferred redraw, a
-/// notification expiring — so redrawing unconditionally on that wake was
-/// correct. It stops being correct the moment a deadline is armed by a
-/// diagnostic: an idle session would then repaint every thirty seconds forever
-/// purely to record that it was idle, which is a heartbeat redraw in all but
-/// name and defeats the crate's own guardrail against one.
+/// The distinction decides whether the resulting `ResumeTimeReached` may return
+/// before frame and foreground-probe work. A memory-only deadline must not
+/// repaint an idle session every retention interval.
 ///
-/// A memory wake is "only" a memory wake when no render contributor is armed,
-/// or when the memory deadline lands strictly first. Ties go to the render
-/// side: if a frame is due at the same instant, the frame still needs drawing.
+/// A memory wake is "only" a memory wake when no non-memory contributor is
+/// armed, or when the memory deadline lands strictly first. Ties go to the
+/// non-memory side so a simultaneous frame or foreground sample is not skipped.
 ///
 /// Pure and free-standing so the decision is testable without a winit event
 /// loop, a window, or a GPU.
-fn wake_is_memory_only(render_wake: Option<Instant>, memory_wake: Option<Instant>) -> bool {
-    match (render_wake, memory_wake) {
+fn wake_is_memory_only(non_memory_wake: Option<Instant>, memory_wake: Option<Instant>) -> bool {
+    match (non_memory_wake, memory_wake) {
         (_, None) => false,
         (None, Some(_)) => true,
-        (Some(render), Some(memory)) => memory < render,
+        (Some(non_memory), Some(memory)) => memory < non_memory,
     }
 }
 
+#[cfg(windows)]
+fn wake_is_foreground_probe_only(
+    frame_wake: Option<Instant>,
+    foreground_wake: Option<Instant>,
+    memory_wake: Option<Instant>,
+) -> bool {
+    foreground_wake.is_some_and(|foreground| {
+        frame_wake.is_none_or(|frame| foreground < frame)
+            && memory_wake.is_none_or(|memory| foreground <= memory)
+    })
+}
+
 impl App {
+    #[cfg(windows)]
+    pub(super) fn arm_foreground_probe_after_input(&mut self, now: Instant) {
+        if self.process_privilege.is_privileged() {
+            // When: `process_privilege.is_privileged()` is true, every tab already carries the global warning.
+            self.foreground_probe_wake = None;
+            return;
+        }
+        self.foreground_probe_wake =
+            Some(super::PendingForegroundProbe { due: now + FOREGROUND_PROCESS_TTL, fixed: true });
+    }
+
+    #[cfg(windows)]
+    fn arm_foreground_probe_after_output(&mut self, now: Instant) {
+        if self.process_privilege.is_privileged() {
+            // When: `process_privilege.is_privileged()` is true, foreground output cannot add another warning state.
+            self.foreground_probe_wake = None;
+            return;
+        }
+        if self.foreground_probe_wake.is_some_and(|wake| wake.fixed) {
+            // When: accepted input already fixed a deadline, output cannot postpone its sample.
+            return;
+        }
+        self.foreground_probe_wake =
+            Some(super::PendingForegroundProbe { due: now + FOREGROUND_PROCESS_TTL, fixed: false });
+    }
+
+    #[cfg(windows)]
+    fn finish_foreground_process_probe(&mut self, now: Instant, warning_active: bool) {
+        self.foreground_probe_wake =
+            (!self.process_privilege.is_privileged() && warning_active).then_some(
+                super::PendingForegroundProbe { due: now + FOREGROUND_PROCESS_TTL, fixed: true },
+            );
+    }
+
+    #[cfg(windows)]
+    fn foreground_probe_is_due(&self, now: Instant) -> bool {
+        self.foreground_probe_wake.is_some_and(|wake| wake.due <= now)
+    }
+
+    #[cfg(windows)]
+    fn refresh_foreground_privileges_if_due(&mut self, now: Instant) -> Vec<WindowId> {
+        if !self.foreground_probe_is_due(now) {
+            // When: `foreground_probe_is_due(now)` is false, leave every foreground cache untouched.
+            return Vec::new();
+        }
+        self.foreground_probe_wake = None;
+        let mut changed_windows = Vec::new();
+        let mut warning_active = false;
+        for (window_id, window) in &mut self.windows {
+            let changed = super::force_refresh_window_tab_privileges(
+                &mut window.tabs,
+                &window.tab_states,
+                &mut window.panes,
+                now,
+            );
+            warning_active |= window.tabs.tabs().iter().any(|tab| tab.foreground_privileged);
+            if changed {
+                changed_windows.push(*window_id);
+            }
+        }
+        self.finish_foreground_process_probe(now, warning_active);
+        changed_windows
+    }
+
     pub(super) fn expire_notifications(&mut self, now: Instant) -> Option<Instant> {
         let mut next: Option<Instant> = None;
         for ws in self.windows.values_mut() {
@@ -160,19 +233,25 @@ impl App {
         // idle. With no contributor armed, idle parks in `Wait` and the app
         // drives no wakes at all.
         //
-        // The memory deadline is folded in separately from the render
-        // contributors, and the two are kept apart deliberately. An idle
-        // session has no render contributor at all — nothing blinking, nothing
-        // deferred — so before the snapshot existed it parked in `Wait`
-        // indefinitely and sampled only when something else happened to wake
-        // it. A session left alone overnight produced one sample. Arming the
-        // memory deadline is what makes the cadence real when nothing else is
-        // running; recording *which* deadline was armed is what stops that
-        // wake from turning into a heartbeat redraw.
-        let render_wake = self.wake_deadline(notification_wake);
+        // Memory and foreground sampling are timed work, not inherently frames.
+        // Their deadline identities stay separate from frame contributors so a
+        // sample that changes nothing cannot become a heartbeat redraw. An idle
+        // session has neither a frame nor foreground-probe contributor; only the
+        // retention cadence wakes it, and that wake remains draw-free.
+        let frame_wake = self.frame_wake_deadline(notification_wake);
+        #[cfg(windows)]
+        let foreground_wake = self.foreground_probe_wake.map(|wake| wake.due);
+        #[cfg(not(windows))]
+        let foreground_wake = None;
+        let non_memory_wake = earliest(frame_wake, foreground_wake);
         let memory_wake = self.memory_sample_deadline();
-        self.wake_is_memory_only = wake_is_memory_only(render_wake, memory_wake);
-        match earliest(render_wake, memory_wake) {
+        self.wake_is_memory_only = wake_is_memory_only(non_memory_wake, memory_wake);
+        #[cfg(windows)]
+        {
+            self.wake_is_foreground_probe_only =
+                wake_is_foreground_probe_only(frame_wake, foreground_wake, memory_wake);
+        }
+        match earliest(non_memory_wake, memory_wake) {
             Some(at) => el.set_control_flow(ControlFlow::WaitUntil(at)),
             None => el.set_control_flow(ControlFlow::Wait),
         }
@@ -194,12 +273,12 @@ impl App {
             .map(|last| last + crate::app::retention::RETENTION_SAMPLE_INTERVAL)
     }
 
-    /// Earliest instant the event loop must wake, given the notification
-    /// expiry already computed by the caller.
+    /// Earliest instant at which a frame-producing event is due.
     ///
-    /// Folds every contributor: notification expiry, the Cmd+Q confirmation
-    /// window, the main window's deferred-redraw frame boundary, each pending
-    /// child window's frame boundary, and the cursor-blink phase boundary.
+    /// Folds notification expiry, the Cmd+Q confirmation window, the main
+    /// window's deferred-redraw frame boundary, each pending child window's
+    /// frame boundary, and the cursor-blink phase boundary. Foreground and
+    /// retention sampling remain separate because they may produce no frame.
     /// `None` means nothing is armed and the loop may park indefinitely.
     ///
     /// Every contributor min-folds. A deadline is a "wake no later than" bound,
@@ -207,7 +286,7 @@ impl App {
     /// folding would push an earlier deadline out past its due instant.
     // Ordering: cursor_visible loads Relaxed; a stale read only mis-times the next
     // blink wake, which the following do_about_to_wait pass corrects.
-    fn wake_deadline(&self, notification_wake: Option<Instant>) -> Option<Instant> {
+    fn frame_wake_deadline(&self, notification_wake: Option<Instant>) -> Option<Instant> {
         let mut next = earliest(notification_wake, self.scrollbar_snap_deadline());
         #[cfg(target_os = "windows")]
         if let Some(pending) = self.pending_osc52_reassert.as_ref() {
@@ -280,20 +359,27 @@ impl App {
         next
     }
 
+    #[cfg(test)]
+    fn wake_deadline(&self, notification_wake: Option<Instant>) -> Option<Instant> {
+        let frame_wake = self.frame_wake_deadline(notification_wake);
+        #[cfg(windows)]
+        let next = earliest(frame_wake, self.foreground_probe_wake.map(|wake| wake.due));
+        #[cfg(not(windows))]
+        let next = frame_wake;
+        next
+    }
+
     pub(super) fn do_new_events(&mut self, _el: &ActiveEventLoop, cause: winit::event::StartCause) {
-        // When our `WaitUntil(..)` timer expires, winit fires
-        // `NewEvents(ResumeTimeReached)` and then nothing else unless
-        // we explicitly ask. Request a redraw so the blink animation
-        // actually advances to the next phase bucket.
-        // This same wakeup also services a vsync-paced redraw deferred
-        // by the RedrawRequested handler — we clear `pending_redraw`
-        // here so the next render call services it and stale flags
-        // can't keep the loop hot.
+        // When `WaitUntil(..)` expires, winit fires
+        // `NewEvents(ResumeTimeReached)` and nothing else. Frame contributors
+        // must request their repaint here; probe-only wakes sample first and
+        // repaint only windows whose foreground state changed.
         if matches!(cause, winit::event::StartCause::ResumeTimeReached { .. }) {
             // When: cause matches ResumeTimeReached; winit sends nothing further on
             // its own, so every deferred repaint must be re-requested here.
+            let now = Instant::now();
             #[cfg(target_os = "windows")]
-            self.reassert_osc52_clipboard_if_due(Instant::now());
+            self.reassert_osc52_clipboard_if_due(now);
 
             // A wake armed solely to sample memory draws nothing.
             //
@@ -311,9 +397,31 @@ impl App {
                 // here would be a heartbeat redraw this crate's guardrails forbid.
                 return;
             }
-            let expired_scrollbars = self.expire_due_scrollbar_snaps(Instant::now());
+            #[cfg(windows)]
+            let foreground_probe_only = std::mem::take(&mut self.wake_is_foreground_probe_only);
+            #[cfg(windows)]
+            let foreground_changed = self.refresh_foreground_privileges_if_due(now);
+            #[cfg(windows)]
+            if foreground_probe_only {
+                // When: `foreground_probe_only` is true, repaint exactly the windows whose observed state changed.
+                for window_id in foreground_changed {
+                    if let Some(window) = self.windows.get(&window_id) {
+                        window.request_redraw();
+                    }
+                }
+                return;
+            }
+            let expired_scrollbars = self.expire_due_scrollbar_snaps(now);
             if let Some(w) = self.main_window() {
                 w.request_redraw();
+            }
+            #[cfg(windows)]
+            for window_id in foreground_changed {
+                if Some(window_id) != self.main_window_id {
+                    if let Some(window) = self.windows.get(&window_id) {
+                        window.request_redraw();
+                    }
+                }
             }
             for window_id in expired_scrollbars {
                 if Some(window_id) != self.main_window_id {
@@ -363,6 +471,8 @@ impl App {
                 let _ = self.handle_os_drag_ended();
             }
             UserEvent::RequestRedraw(window_id) => {
+                #[cfg(windows)]
+                self.arm_foreground_probe_after_output(Instant::now());
                 if let Some(window) = self.windows.get(&window_id) {
                     window.request_redraw();
                 }

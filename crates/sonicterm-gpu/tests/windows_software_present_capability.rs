@@ -228,7 +228,9 @@ fn render_frame(
     tabs: &TabBar,
 ) -> Result<(), String> {
     renderer
-        .render(panes, theme, false, selection, None, tabs, None, None, None, None, None, None)
+        .render(
+            panes, theme, false, selection, None, tabs, false, None, None, None, None, None, None,
+        )
         .map_err(|error| format!("software render failed: {error}"))
 }
 

@@ -15,6 +15,7 @@ use winit::event_loop::{ControlFlow, EventLoop, EventLoopProxy};
 use crate::app::os_drag::OsTabDragBackend;
 use crate::app::{App, KeymapLoader, RuntimeSmokeFailure, ThemeLoader, UserEvent};
 use crate::os_drag::{OsDragSink, TabPayload};
+use crate::ProcessPrivilege;
 use sonicterm_app_core::AppStateMachine;
 use sonicterm_cfg::config::Config;
 use sonicterm_cfg::keymap::Keymap;
@@ -29,6 +30,7 @@ struct ShellRunner {
     keymap_loader: Option<KeymapLoader>,
     os_drag_sink: Option<Arc<dyn OsDragSink>>,
     os_drag_backend: Option<Box<dyn OsTabDragBackend>>,
+    process_privilege: ProcessPrivilege,
     pending: Option<TabPayload>,
     breadcrumb_recorder: Option<sonicterm_logging::breadcrumbs::BreadcrumbRecorder>,
     on_resumed: Option<Box<dyn FnOnce() + Send>>,
@@ -46,6 +48,7 @@ impl ShellRunner {
             keymap_loader: None,
             os_drag_sink: None,
             os_drag_backend: None,
+            process_privilege: ProcessPrivilege::default(),
             pending: None,
             breadcrumb_recorder: None,
             on_resumed: None,
@@ -67,6 +70,7 @@ impl ShellRunner {
             Some(proxy),
             self.machine,
         );
+        app.set_process_privilege(self.process_privilege);
         if let Some(recorder) = self.breadcrumb_recorder {
             app.set_breadcrumb_recorder(recorder);
         }
@@ -151,6 +155,13 @@ impl MacShell {
         Self { runner: ShellRunner::new(machine, theme, config, keymap) }
     }
 
+    /// Install the process privilege observed by the macOS startup boundary.
+    #[must_use]
+    pub fn with_process_privilege(mut self, privilege: ProcessPrivilege) -> Self {
+        self.runner.process_privilege = privilege;
+        self
+    }
+
     /// Install loaders used by live theme and keymap reload.
     #[must_use]
     pub fn with_asset_loaders(
@@ -229,6 +240,13 @@ impl WindowsShell {
         Self { runner: ShellRunner::new(machine, theme, config, keymap) }
     }
 
+    /// Install the process privilege observed by the Windows startup boundary.
+    #[must_use]
+    pub fn with_process_privilege(mut self, privilege: ProcessPrivilege) -> Self {
+        self.runner.process_privilege = privilege;
+        self
+    }
+
     /// Install loaders used by live theme and keymap reload.
     #[must_use]
     pub fn with_asset_loaders(
@@ -300,6 +318,13 @@ impl LinuxShell {
         Self { runner: ShellRunner::new(machine, theme, config, keymap) }
     }
 
+    /// Install the process privilege observed by the Linux startup boundary.
+    #[must_use]
+    pub fn with_process_privilege(mut self, privilege: ProcessPrivilege) -> Self {
+        self.runner.process_privilege = privilege;
+        self
+    }
+
     /// Install loaders used by live theme and keymap reload.
     #[must_use]
     pub fn with_asset_loaders(
@@ -342,3 +367,7 @@ impl LinuxShell {
         self.runner.run_smoke(timeout)
     }
 }
+
+#[cfg(test)]
+#[path = "shell_tests.rs"]
+mod shell_tests;

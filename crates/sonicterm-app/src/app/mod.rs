@@ -1712,6 +1712,120 @@ pub fn invalidate_selection_for_content(
     should_clear
 }
 
+const FOREGROUND_PROCESS_TTL: std::time::Duration = std::time::Duration::from_millis(500);
+
+fn pane_foreground_cache_is_fresh(pane: &PaneState, now: Instant) -> bool {
+    pane.fg_proc_cache
+        .as_ref()
+        .is_some_and(|(sampled, _)| now.duration_since(*sampled) < FOREGROUND_PROCESS_TTL)
+}
+
+fn cached_foreground_privileged(pane: &PaneState) -> bool {
+    pane.fg_proc_cache
+        .as_ref()
+        .and_then(|(_, process)| process.as_ref())
+        .is_some_and(|process| process.privileged)
+}
+
+fn refresh_tab_foreground_privilege(
+    tabs: &mut sonicterm_ui::tabs::TabBar,
+    pane: &mut PaneState,
+    tab_idx: usize,
+    allow_proc_probe: bool,
+) {
+    let now = Instant::now();
+    if !pane_foreground_cache_is_fresh(pane, now) && allow_proc_probe {
+        let probed = pane
+            .pty
+            .as_ref()
+            .and_then(|pty| pty.pid())
+            .and_then(sonicterm_io::proc_info::foreground_process_info);
+        pane.fg_proc_cache = Some((now, probed));
+    }
+    tabs.set_foreground_privileged(tab_idx, cached_foreground_privileged(pane));
+}
+
+fn refresh_window_tab_privileges_at(
+    tabs: &mut sonicterm_ui::tabs::TabBar,
+    tab_states: &[TabState],
+    panes: &mut HashMap<u64, PaneState>,
+    allow_proc_probe: bool,
+    force_proc_probe: bool,
+    now: Instant,
+) -> bool {
+    #[cfg(windows)]
+    {
+        let mut changed = false;
+        let mut stale = Vec::new();
+        for (tab_idx, tab_state) in tab_states.iter().enumerate() {
+            let Some(pane) = panes.get_mut(&tab_state.active_pane) else {
+                // When: the tab's active pane no longer exists, clear any warning retained by its tab.
+                changed |= tabs.set_foreground_privileged(tab_idx, false);
+                continue;
+            };
+            if allow_proc_probe && (force_proc_probe || !pane_foreground_cache_is_fresh(pane, now))
+            {
+                // When: this pane's cache is stale or a deadline forces a sample, include it in the shared snapshot.
+                if let Some(pid) = pane.pty.as_ref().and_then(|pty| pty.pid()) {
+                    stale.push((tab_idx, tab_state.active_pane, pid));
+                } else {
+                    changed |=
+                        pane.fg_proc_cache.as_ref().is_none_or(|(_, process)| process.is_some());
+                    pane.fg_proc_cache = Some((now, None));
+                }
+            }
+            changed |= tabs.set_foreground_privileged(tab_idx, cached_foreground_privileged(pane));
+        }
+
+        let pids = stale.iter().map(|(_, _, pid)| *pid).collect::<Vec<_>>();
+        let observations = sonicterm_io::proc_info::foreground_processes_info(&pids);
+        for ((tab_idx, pane_id, _), observation) in stale.into_iter().zip(observations) {
+            let Some(pane) = panes.get_mut(&pane_id) else {
+                // When: the pane vanished after collection, its tab must not retain the old warning.
+                changed |= tabs.set_foreground_privileged(tab_idx, false);
+                continue;
+            };
+            changed |=
+                pane.fg_proc_cache.as_ref().is_none_or(|(_, process)| process != &observation);
+            pane.fg_proc_cache = Some((now, observation));
+            changed |= tabs.set_foreground_privileged(tab_idx, cached_foreground_privileged(pane));
+        }
+        changed
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (tabs, tab_states, panes, allow_proc_probe, force_proc_probe, now);
+        false
+    }
+}
+
+pub(super) fn refresh_window_tab_privileges(
+    tabs: &mut sonicterm_ui::tabs::TabBar,
+    tab_states: &[TabState],
+    panes: &mut HashMap<u64, PaneState>,
+    allow_proc_probe: bool,
+) -> bool {
+    refresh_window_tab_privileges_at(
+        tabs,
+        tab_states,
+        panes,
+        allow_proc_probe,
+        false,
+        Instant::now(),
+    )
+}
+
+#[cfg(windows)]
+fn force_refresh_window_tab_privileges(
+    tabs: &mut sonicterm_ui::tabs::TabBar,
+    tab_states: &[TabState],
+    panes: &mut HashMap<u64, PaneState>,
+    now: Instant,
+) -> bool {
+    refresh_window_tab_privileges_at(tabs, tab_states, panes, true, true, now)
+}
+
 /// Compute the wezterm-style pretty tab title for the active pane and
 /// (if it differs from the current `TabBar` active title) apply it via
 /// `set_active_title`. Returns the title actually applied, or `None` if
@@ -1730,18 +1844,11 @@ pub fn refresh_active_tab_title(
 ) -> Option<String> {
     let cwd = parser.cwd().map(str::to_string);
     let raw_title = parser.title().map(str::to_string);
-    const TTL: std::time::Duration = std::time::Duration::from_millis(500);
-    let now = Instant::now();
-    let fresh = pane.fg_proc_cache.as_ref().is_some_and(|(t, _)| now.duration_since(*t) < TTL);
-    if !fresh && allow_proc_probe {
-        let probed = pane
-            .pty
-            .as_ref()
-            .and_then(|p| p.pid())
-            .and_then(sonicterm_io::proc_info::foreground_process);
-        pane.fg_proc_cache = Some((now, probed));
-    }
-    let proc_name = pane.fg_proc_cache.as_ref().and_then(|(_, v)| v.clone());
+    refresh_tab_foreground_privilege(tabs, pane, tab_idx, allow_proc_probe);
+    let proc_name = pane
+        .fg_proc_cache
+        .as_ref()
+        .and_then(|(_, process)| process.as_ref().map(|process| process.name.clone()));
     let auto_title = sonicterm_ui::tab_title::format_tab_title(
         tab_idx,
         cwd.as_deref(),
@@ -2002,13 +2109,13 @@ pub struct PaneState {
     /// layer treats this as a hint — the grid itself always exposes the
     /// live visible window.
     pub viewport_top_abs: Option<u64>,
-    /// Cached foreground-process name + the wall-clock instant we last
-    /// probed. The probe walks the whole macOS process table (~600 procs)
-    /// so we MUST NOT re-run it on every render — when the cursor blinks,
-    /// the render path fires ~26Ã—/sec and an uncached probe burned ~17%
-    /// CPU on an idle window. TTL is short enough that `nvim foo` still
-    /// flips the tab title quickly.
-    pub fg_proc_cache: Option<(std::time::Instant, Option<String>)>,
+    /// Cached foreground-process identity/privilege plus the last probe time.
+    ///
+    /// The probe walks the whole process table, so it must not run on every
+    /// render. The 500 ms title-refresh TTL keeps names and Windows elevation
+    /// responsive without reviving the measured idle CPU regression.
+    pub fg_proc_cache:
+        Option<(std::time::Instant, Option<sonicterm_io::proc_info::ForegroundProcess>)>,
     /// Cross-thread queue populated by the VT loop when OSC 133 command
     /// lifecycle markers are parsed for this pane.
     pub command_events: Arc<Mutex<Vec<PaneCommandEvent>>>,
@@ -2138,9 +2245,23 @@ pub(super) struct PendingOsc52Reassert {
     due: Instant,
 }
 
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug)]
+struct PendingForegroundProbe {
+    /// Earliest instant at which the foreground process must be sampled again.
+    due: Instant,
+    /// Whether output activity is forbidden from postponing this deadline.
+    fixed: bool,
+}
+
 #[doc(hidden)]
 pub struct App {
     pub(super) theme: Theme,
+    /// Process privilege observed once by the native binary before window creation.
+    pub(super) process_privilege: crate::ProcessPrivilege,
+    #[cfg(windows)]
+    /// Bounded foreground-process sample armed by accepted input or quiet output.
+    foreground_probe_wake: Option<PendingForegroundProbe>,
     pub(super) config: Config,
     /// Packaged font directories retained for every renderer and live font rebuild.
     pub(super) font_dirs: Vec<PathBuf>,
@@ -2278,6 +2399,9 @@ pub struct App {
     /// draw a frame every thirty seconds forever purely to record that it was
     /// idle, which is a heartbeat redraw under another name.
     pub(super) wake_is_memory_only: bool,
+    #[cfg(windows)]
+    /// Whether the armed timer is solely a foreground-process sample with no frame due.
+    pub(super) wake_is_foreground_probe_only: bool,
     pub(super) command_palette: CommandPalette,
     /// Which window the (single, modal) command palette is attached to.
     /// `None` means it is closed OR attached to the main window; `Some(id)`
@@ -2668,6 +2792,9 @@ impl App {
         let local_hostname = gethostname::gethostname().to_string_lossy().into_owned();
         Self {
             theme,
+            process_privilege: crate::ProcessPrivilege::default(),
+            #[cfg(windows)]
+            foreground_probe_wake: None,
             config,
             font_dirs,
             configured_font_size,
@@ -2692,6 +2819,8 @@ impl App {
             last_memory_totals: None,
             breadcrumb_recorder: None,
             wake_is_memory_only: false,
+            #[cfg(windows)]
+            wake_is_foreground_probe_only: false,
             command_palette,
             palette_attached_window: None,
             os_drag_handoff_started: false,
@@ -2749,6 +2878,17 @@ impl App {
             test_viewport_override: None,
             machine,
         }
+    }
+
+    /// Return the privilege snapshot supplied by the native startup boundary.
+    #[must_use]
+    pub const fn process_privilege(&self) -> crate::ProcessPrivilege {
+        self.process_privilege
+    }
+
+    /// Install the native process-privilege snapshot before window creation.
+    pub(crate) fn set_process_privilege(&mut self, privilege: crate::ProcessPrivilege) {
+        self.process_privilege = privilege;
     }
 
     pub(crate) fn set_breadcrumb_recorder(
@@ -3205,7 +3345,7 @@ impl App {
         }
     }
 
-    fn write_to_pty(&self, bytes: Vec<u8>) {
+    fn write_to_pty(&mut self, bytes: Vec<u8>) {
         let Some(active_id) = self.active_pane_id() else {
             // When: `active_pane_id` resolves nothing, so there is no focused
             // target to receive the bytes and no source to broadcast from.
@@ -3269,7 +3409,7 @@ impl App {
         (None, encode_logical(key, mods, kitty_flags, app_cursor))
     }
 
-    fn write_to_pane(&self, pane_id: u64, bytes: Vec<u8>) {
+    fn write_to_pane(&mut self, pane_id: u64, bytes: Vec<u8>) {
         // The keystroke / broadcast / encoded-input path flows through the
         // winit-agnostic `AppStateMachine`. The reducer translates
         // `AppIntent::PtyWrite` into `AppEffect::PtyWrite { pane, data }`, and
@@ -3279,13 +3419,9 @@ impl App {
             pane: sonicterm_app_core::PaneId(pane_id),
             bytes: bytes::Bytes::from(bytes),
         };
-        // The state machine is owned by `&mut self` in production
-        // code paths; `write_to_pane` is `&self` because broadcast
-        // fan-out borrows immutably. Run the reducer through a
-        // throwaway transient machine — the reducer for PtyWrite is
-        // pure (it does not touch `AppState`), so this is
-        // semantically equivalent to dispatching through `self.machine`
-        // without requiring a structural borrow refactor.
+        // Broadcast fan-out resolves its receiver set before calling this
+        // method. A transient machine keeps the pure PtyWrite reduction local
+        // while `&mut self` arms the accepted-input foreground probe.
         let mut transient =
             sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default());
         for effect in transient.handle(intent) {
@@ -3297,7 +3433,7 @@ impl App {
     ///
     /// Resolves the pane id back to a live [`PtyHandle`] in any terminal
     /// window and forwards the bytes.
-    pub(crate) fn dispatch_pty_write_effect(&self, effect: &sonicterm_app_core::AppEffect) {
+    pub(crate) fn dispatch_pty_write_effect(&mut self, effect: &sonicterm_app_core::AppEffect) {
         if let sonicterm_app_core::AppEffect::PtyWrite { pane, data } = effect {
             // When: the effect is `PtyWrite`, so `pane` and `data` name a live
             // target to resolve before any bytes are enqueued.
@@ -3314,9 +3450,16 @@ impl App {
                 // its bytes were enqueued and they have nowhere to land.
                 return;
             };
-            if let Some(pty) = p.pty.as_ref() {
-                Self::queue_pty_input(self.event_loop_proxy.as_ref(), pty, bytes);
+            let queued = p.pty.as_ref().is_some_and(|pty| {
+                Self::queue_pty_input(self.event_loop_proxy.as_ref(), pty, bytes)
+            });
+            #[cfg(windows)]
+            if queued {
+                // Accepted PTY input can launch a silent command, so sample its process after launch settles.
+                self.arm_foreground_probe_after_input(Instant::now());
             }
+            #[cfg(not(windows))]
+            let _ = queued;
         }
     }
 
@@ -3324,7 +3467,7 @@ impl App {
         proxy: Option<&EventLoopProxy<UserEvent>>,
         pty: &sonicterm_io::pty::PtyHandle,
         bytes: Vec<u8>,
-    ) {
+    ) -> bool {
         if let Err(error) = pty.send_input_nonblocking(bytes) {
             // When: `send_input_nonblocking` refused the bytes, so the writer is
             // gone or saturated and the input is surfaced rather than retried.
@@ -3342,7 +3485,9 @@ impl App {
                 // loop; input is never re-sent, only reported.
                 let _ = proxy.send_event(event);
             }
+            return false;
         }
+        true
     }
 
     /// Generic boundary dispatcher for an Effect batch produced by the
@@ -3761,7 +3906,7 @@ impl App {
         self.dispatch_effects(effects);
     }
 
-    fn broadcast_from(&self, active_id: u64, bytes: Vec<u8>) {
+    fn broadcast_from(&mut self, active_id: u64, bytes: Vec<u8>) {
         let BroadcastState::On { source_pane, .. } = self.broadcast else {
             // When: `broadcast` is not `On`, so there is no fan-out group and the
             // bytes belong to the focused pane alone.
@@ -3858,7 +4003,7 @@ impl App {
 
     /// Test-only: drive the same write + broadcast fan-out as normal input.
     #[doc(hidden)]
-    pub fn __test_write_to_pane_with_broadcast(&self, pane_id: u64, bytes: Vec<u8>) {
+    pub fn __test_write_to_pane_with_broadcast(&mut self, pane_id: u64, bytes: Vec<u8>) {
         self.write_to_pane(pane_id, bytes.clone());
         self.broadcast_from(pane_id, bytes);
     }
@@ -6722,3 +6867,7 @@ mod selection_invalidation_tests;
 #[cfg(test)]
 #[path = "pty_input_tests.rs"]
 mod pty_input_tests;
+
+#[cfg(test)]
+#[path = "privilege_tests.rs"]
+mod privilege_tests;
