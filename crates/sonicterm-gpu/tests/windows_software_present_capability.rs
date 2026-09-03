@@ -31,6 +31,8 @@ use winit::{
 const BACKGROUND_HEX: &str = "#123456";
 const SELECTION_HEX: &str = "#e04020";
 const EXPECTED_COLORREF: u32 = 0x0056_3412;
+// The forced software presenter must source-over the premultiplied 50% selection exactly.
+const EXPECTED_SELECTION_COLORREF: u32 = 0x0042_3AA5;
 
 #[derive(Debug)]
 enum Capability {
@@ -185,8 +187,11 @@ fn run_probe(active: &ActiveEventLoop) -> Result<Capability, String> {
     selection = selection.with_content_state(1, panes[0].grid.content_seq(), true, 0);
     render_frame(&mut renderer, &mut panes, &theme, Some(&selection), &tabs)?;
     let selected = read_hwnd_pixel(hwnd, sample_x, sample_y)?;
-    if selected == observed {
-        return Err(String::from("selection fixture did not change the sampled HWND pixel"));
+    if selected != EXPECTED_SELECTION_COLORREF {
+        return Err(format!(
+            "software selection blended the wrong premultiplied color: expected COLORREF \
+             {EXPECTED_SELECTION_COLORREF:#010x}, observed {selected:#010x}"
+        ));
     }
 
     selection = selection.with_content_state(1, panes[0].grid.content_seq(), true, 0);

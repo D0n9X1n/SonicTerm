@@ -60,6 +60,10 @@ impl QuadInstance {
     /// Sharp-edged rectangle (the legacy default).
     #[must_use]
     pub fn sharp(rect: [f32; 4], color: [f32; 4]) -> Self {
+        debug_assert!(
+            is_premultiplied_linear_rgba(color),
+            "sharp quad color must be finite premultiplied linear RGBA: {color:?}"
+        );
         Self { rect, color, ..Default::default() }
     }
 
@@ -67,6 +71,10 @@ impl QuadInstance {
     /// in physical pixels (must match the NDC `rect` size).
     #[must_use]
     pub fn rounded(rect: [f32; 4], color: [f32; 4], size_px: [f32; 2], radius_px: f32) -> Self {
+        debug_assert!(
+            is_premultiplied_linear_rgba(color),
+            "rounded quad color must be finite premultiplied linear RGBA: {color:?}"
+        );
         Self { rect, color, size_px, radius_px, ..Default::default() }
     }
 
@@ -88,6 +96,10 @@ impl QuadInstance {
         line_b: [f32; 2],
         thickness_px: f32,
     ) -> Self {
+        debug_assert!(
+            is_premultiplied_linear_rgba(color),
+            "line quad color must be finite premultiplied linear RGBA: {color:?}"
+        );
         Self {
             rect,
             color,
@@ -100,17 +112,56 @@ impl QuadInstance {
     }
 }
 
+/// Replace a premultiplied color's opacity while preserving its straight hue.
+#[must_use]
+pub(crate) fn with_premultiplied_alpha(color: [f32; 4], alpha: f32) -> [f32; 4] {
+    let alpha = alpha.clamp(0.0, 1.0);
+    let old_alpha = color[3];
+    if old_alpha <= 0.0 {
+        // When: `old_alpha <= 0.0`, no straight hue can be recovered from the source.
+        return [0.0, 0.0, 0.0, alpha];
+    }
+    let scale = alpha / old_alpha;
+    [color[0] * scale, color[1] * scale, color[2] * scale, alpha]
+}
+
+/// Multiply a premultiplied color's RGBA components by a clamped opacity factor.
+#[must_use]
+pub(crate) fn scale_premultiplied_alpha(color: [f32; 4], factor: f32) -> [f32; 4] {
+    let factor = factor.clamp(0.0, 1.0);
+    [color[0] * factor, color[1] * factor, color[2] * factor, color[3] * factor]
+}
+
+/// Return whether all channels form finite premultiplied linear RGBA.
+#[must_use]
+pub(crate) fn is_premultiplied_linear_rgba(color: [f32; 4]) -> bool {
+    const TOLERANCE: f32 = 1.0e-6;
+    let alpha = color[3];
+    color.into_iter().all(f32::is_finite)
+        && (0.0..=1.0).contains(&alpha)
+        && color[..3].iter().all(|channel| *channel >= -TOLERANCE && *channel <= alpha + TOLERANCE)
+}
+
+/// Assert that every authored quad in one render layer satisfies the blend contract.
+#[cfg(debug_assertions)]
+pub(crate) fn debug_assert_premultiplied_quads(layer: &str, quads: &[QuadInstance]) {
+    for (index, quad) in quads.iter().enumerate() {
+        debug_assert!(
+            is_premultiplied_linear_rgba(quad.color),
+            "{layer} quad {index} must be finite premultiplied linear RGBA: {:?}",
+            quad.color
+        );
+    }
+}
+
 /// Convert a straight-alpha `[r, g, b, a]` color into premultiplied form
 /// (`[r*a, g*a, b*a, a]`).
 ///
 /// [`QuadInstance::color`] is documented as premultiplied and the
 /// pipeline blends with `src=One, dst=OneMinusSrcAlpha` (see
-/// [`premultiplied_alpha_blend`]). Call sites that author colors as
-/// straight-alpha — e.g. the command-palette selected-row highlight
-/// (`[accent.r, accent.g, accent.b, 0.16]`) or the IME pre-edit
-/// background (`[0.10, 0.11, 0.14, 0.95]`) — must wrap them with this
-/// helper before stuffing them into a `QuadInstance`, otherwise the
-/// chrome renders much brighter than intended.
+/// [`premultiplied_alpha_blend`]). Local straight-linear arrays such as the
+/// pane-focus flash must pass through this helper before reaching a
+/// `QuadInstance`; hex colors use the premultiplied converter instead.
 ///
 /// Opaque colors (`a == 1.0`) pass through unchanged — premultiplying
 /// by 1.0 is the identity, so it's safe (and a no-op) to wrap every
@@ -383,7 +434,7 @@ pub struct CloseXParams {
     pub size: f32,
     /// Stroke thickness in physical pixels. Clamped to >= 1.0.
     pub thickness: f32,
-    /// Premultiplied-straight RGBA stroke color.
+    /// Premultiplied linear RGBA stroke color.
     pub color: [f32; 4],
     /// Surface width in physical pixels.
     pub sw: f32,
@@ -433,7 +484,7 @@ pub struct MaskIconParams<'a> {
     pub size: f32,
     /// Minimum emitted cell size in physical pixels.
     pub min_cell: f32,
-    /// Linear RGBA color multiplied by each mask alpha.
+    /// Premultiplied linear RGBA color scaled by each mask alpha.
     pub color: [f32; 4],
     /// Surface width in physical pixels.
     pub sw: f32,
@@ -453,12 +504,15 @@ pub fn push_mask_icon_quads(out: &mut Vec<QuadInstance>, params: MaskIconParams<
                 // When: `alpha` is zero, this mask cell emits no visible quad.
                 continue;
             }
-            let mut c = color;
-            c[3] *= alpha;
+            let covered = scale_premultiplied_alpha(color, alpha);
             out.push(QuadInstance::sharp(
                 px_to_ndc(x + col as f32 * cell, y + row as f32 * cell, cell, cell, sw, sh),
-                c,
+                covered,
             ));
         }
     }
 }
+
+#[cfg(test)]
+#[path = "quad_tests.rs"]
+mod quad_tests;

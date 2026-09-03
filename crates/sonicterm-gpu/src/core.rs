@@ -33,7 +33,7 @@ use winit::{event_loop::ActiveEventLoop, window::Window};
 
 use crate::chrome_text::{self, ChromeAttrs, ChromeClip};
 use crate::color::{
-    chrome_color_to_linear_rgba, dim_toward, hex_to_chrome_color, hex_to_rgba,
+    chrome_color_to_linear_rgba, dim_toward, hex_to_chrome_color, hex_to_premultiplied_rgba,
     hex_to_wgpu_with_alpha, ChromeColor,
 };
 use crate::cursor::{recolor_cursor_glyphs, InactivePaneCursor};
@@ -327,11 +327,11 @@ pub struct RendererSettings<'a> {
 }
 
 fn cursor_color_from_theme(theme: &Theme) -> [f32; 4] {
-    hex_to_rgba(theme.colors.cursor.0.as_str(), 1.0)
+    hex_to_premultiplied_rgba(theme.colors.cursor.0.as_str(), 1.0)
 }
 
 fn cursor_text_color_from_theme(theme: &Theme) -> [f32; 4] {
-    hex_to_rgba(theme.colors.cursor_text.0.as_str(), 1.0)
+    hex_to_premultiplied_rgba(theme.colors.cursor_text.0.as_str(), 1.0)
 }
 
 fn active_cursor_color(base: [f32; 4], _shape: CursorShape, _blink_alpha: f32) -> [f32; 4] {
@@ -518,10 +518,9 @@ fn splitter_color_from_theme(theme: &Theme) -> [f32; 4] {
 /// Resolve a scrollbar tint from the theme foreground at `derived_alpha`.
 /// Theme-customizable explicit scrollbar colors are intentionally not
 /// supported: they would require updating ~50 `Palette { .. }` literals in
-/// tests for no shipped benefit. Returns straight-alpha linear RGBA;
-/// the caller premultiplies before stuffing into a [`QuadInstance`].
+/// tests for no shipped benefit. Returns premultiplied linear RGBA.
 fn scrollbar_tint(fg: &str, derived_alpha: f32) -> [f32; 4] {
-    hex_to_rgba(fg, derived_alpha)
+    hex_to_premultiplied_rgba(fg, derived_alpha)
 }
 
 fn read_only_badge_rect(sw: f32, sh: f32, scale: f32, content_w: f32) -> (f32, f32, f32, f32) {
@@ -699,8 +698,8 @@ pub fn emit_pane_scrollbar(
         return 0;
     };
     let fg_hex = theme.colors.foreground.0.as_str();
-    let track_color = premultiply(scrollbar_tint(fg_hex, 0.10 * alpha));
-    let thumb_color = premultiply(scrollbar_tint(fg_hex, 0.30 * alpha));
+    let track_color = scrollbar_tint(fg_hex, 0.10 * alpha);
+    let thumb_color = scrollbar_tint(fg_hex, 0.30 * alpha);
     quads_overlay.push(QuadInstance::sharp(
         px_to_ndc(
             geom.track_rect.x,
@@ -778,7 +777,9 @@ fn splitter_rects_from_panes(pane_rects: &[(u64, PaneRect)], thickness: f32) -> 
 
 use crate::{
     atlas_upload::{AtlasUpload, AtlasUploadStats},
-    quad::{premultiply, px_to_ndc, QuadInstance},
+    quad::{
+        premultiply, px_to_ndc, scale_premultiplied_alpha, with_premultiplied_alpha, QuadInstance,
+    },
     wezterm_pipeline::WeztermPipeline,
 };
 use sonicterm_render_model::boundary::cfg::config::CursorShape;
@@ -1267,18 +1268,12 @@ pub fn emit_tab_bar_quads(
                 w: (t.bg_rect.w - inset * 2.0).max(0.0),
                 h: ACTIVE_TOP_ACCENT_H * scale,
             };
-            let base =
-                t.custom_color.as_deref().map(|hex| hex_to_rgba(hex, 1.0)).unwrap_or(params.accent);
-            // Every channel scales, not just alpha: the pipeline blends
-            // premultiplied sources, so a color whose RGB is left at full
-            // strength while alpha drops is brighter than its alpha claims
-            // and the bar would not visibly dim.
-            let color = [
-                base[0] * marker_alpha,
-                base[1] * marker_alpha,
-                base[2] * marker_alpha,
-                base[3] * marker_alpha,
-            ];
+            let base = t
+                .custom_color
+                .as_deref()
+                .map(|hex| hex_to_premultiplied_rgba(hex, 1.0))
+                .unwrap_or(params.accent);
+            let color = scale_premultiplied_alpha(base, marker_alpha);
             quads.push(QuadInstance {
                 rect: px_to_ndc(acc.x, acc.y, acc.w, acc.h, sw, sh),
                 color,
@@ -2285,21 +2280,23 @@ impl GpuRenderer {
         let cell_h = line_height;
 
         let bg = hex_to_wgpu_with_alpha(theme.colors.background.0.as_str(), appearance.opacity);
-        let bg_rgba = hex_to_rgba(theme.colors.background.0.as_str(), 1.0);
+        let bg_rgba = hex_to_premultiplied_rgba(theme.colors.background.0.as_str(), 1.0);
         let fg_default = hex_to_chrome_color(theme.colors.foreground.0.as_str());
         let cursor_color = cursor_color_from_theme(theme);
         let cursor_text_color = cursor_text_color_from_theme(theme);
-        let selection_color = hex_to_rgba(theme.colors.selection_bg.0.as_str(), 0.5);
-        let tab_bar_bg = hex_to_rgba(theme.colors.tab.bar_bg.0.as_str(), 1.0);
-        let tab_active_bg = hex_to_rgba(theme.colors.tab.active_bg.0.as_str(), 1.0);
-        let tab_inactive_bg = hex_to_rgba(theme.colors.tab.inactive_bg.0.as_str(), 1.0);
+        let selection_color = hex_to_premultiplied_rgba(theme.colors.selection_bg.0.as_str(), 0.5);
+        let tab_bar_bg = hex_to_premultiplied_rgba(theme.colors.tab.bar_bg.0.as_str(), 1.0);
+        let tab_active_bg = hex_to_premultiplied_rgba(theme.colors.tab.active_bg.0.as_str(), 1.0);
+        let tab_inactive_bg =
+            hex_to_premultiplied_rgba(theme.colors.tab.inactive_bg.0.as_str(), 1.0);
         let tab_active_fg = hex_to_chrome_color(theme.colors.tab.active_fg.0.as_str());
         let tab_inactive_fg = hex_to_chrome_color(theme.colors.tab.inactive_fg.0.as_str());
-        let tab_separator = hex_to_rgba(theme.colors.tab.inactive_fg.0.as_str(), 0.45);
+        let tab_separator =
+            hex_to_premultiplied_rgba(theme.colors.tab.inactive_fg.0.as_str(), 0.45);
         // Hyperlink visuals: theme-aware. Use the theme's cursor color as the
         // accent (every bundled theme designates it). Underline reads as
         // deliberate at high opacity; the tint behind the run is subtle.
-        let hyperlink_underline = hex_to_rgba(theme.colors.cursor.0.as_str(), 0.9);
+        let hyperlink_underline = hex_to_premultiplied_rgba(theme.colors.cursor.0.as_str(), 0.9);
         let splitter_color = splitter_color_from_theme(theme);
         let tint_alpha = match theme.appearance {
             sonicterm_render_model::boundary::cfg::theme::Appearance::Dark => {
@@ -2313,10 +2310,11 @@ impl GpuRenderer {
                 0.10
             }
         };
-        let hyperlink_tint = hex_to_rgba(theme.colors.cursor.0.as_str(), tint_alpha);
-        let search_highlight = hex_to_rgba(theme.colors.bright.yellow.0.as_str(), 0.35);
+        let hyperlink_tint = hex_to_premultiplied_rgba(theme.colors.cursor.0.as_str(), tint_alpha);
+        let search_highlight =
+            hex_to_premultiplied_rgba(theme.colors.bright.yellow.0.as_str(), 0.35);
         let search_fg = hex_to_chrome_color(theme.colors.foreground.0.as_str());
-        let search_bg = hex_to_rgba(theme.colors.tab.bar_bg.0.as_str(), 0.95);
+        let search_bg = hex_to_premultiplied_rgba(theme.colors.tab.bar_bg.0.as_str(), 0.95);
         // Cosmic-text Buffer / Metrics allocations deleted.
         // Chrome strings are shape+raster'd on demand inside `render()`
         // through `chrome_text::layout(...)`; there is no persistent
@@ -3557,7 +3555,7 @@ impl GpuRenderer {
     /// Deprecated close-button color override. The button is no longer
     /// drawn, but accepting the setting keeps older configs harmless.
     pub fn set_tab_close_override(&mut self, color: Option<&str>) -> bool {
-        let parsed = color.map(|c| hex_to_rgba(c, 1.0));
+        let parsed = color.map(|c| hex_to_premultiplied_rgba(c, 1.0));
         if self.tab_close_override != parsed {
             self.tab_close_override = parsed;
             self.last_frame_key = None;
@@ -3792,16 +3790,18 @@ impl GpuRenderer {
         self.bg = hex_to_wgpu_with_alpha(theme.colors.background.0.as_str(), self.bg_opacity);
         self.fg_default = hex_to_chrome_color(theme.colors.foreground.0.as_str());
         self.cursor_color = cursor_color_from_theme(theme);
-        self.bg_rgba = hex_to_rgba(theme.colors.background.0.as_str(), 1.0);
+        self.bg_rgba = hex_to_premultiplied_rgba(theme.colors.background.0.as_str(), 1.0);
         self.cursor_text_color = cursor_text_color_from_theme(theme);
-        self.selection_color = hex_to_rgba(theme.colors.selection_bg.0.as_str(), 0.5);
-        self.tab_bar_bg = hex_to_rgba(theme.colors.tab.bar_bg.0.as_str(), 1.0);
-        self.tab_active_bg = hex_to_rgba(theme.colors.tab.active_bg.0.as_str(), 1.0);
-        self.tab_inactive_bg = hex_to_rgba(theme.colors.tab.inactive_bg.0.as_str(), 1.0);
+        self.selection_color = hex_to_premultiplied_rgba(theme.colors.selection_bg.0.as_str(), 0.5);
+        self.tab_bar_bg = hex_to_premultiplied_rgba(theme.colors.tab.bar_bg.0.as_str(), 1.0);
+        self.tab_active_bg = hex_to_premultiplied_rgba(theme.colors.tab.active_bg.0.as_str(), 1.0);
+        self.tab_inactive_bg =
+            hex_to_premultiplied_rgba(theme.colors.tab.inactive_bg.0.as_str(), 1.0);
         self.tab_active_fg = hex_to_chrome_color(theme.colors.tab.active_fg.0.as_str());
         self.tab_inactive_fg = hex_to_chrome_color(theme.colors.tab.inactive_fg.0.as_str());
-        self.tab_separator = hex_to_rgba(theme.colors.tab.inactive_fg.0.as_str(), 0.45);
-        self.hyperlink_underline = hex_to_rgba(theme.colors.cursor.0.as_str(), 0.9);
+        self.tab_separator =
+            hex_to_premultiplied_rgba(theme.colors.tab.inactive_fg.0.as_str(), 0.45);
+        self.hyperlink_underline = hex_to_premultiplied_rgba(theme.colors.cursor.0.as_str(), 0.9);
         self.splitter_color = splitter_color_from_theme(theme);
         let tint_alpha = match theme.appearance {
             sonicterm_render_model::boundary::cfg::theme::Appearance::Dark => {
@@ -3815,10 +3815,11 @@ impl GpuRenderer {
                 0.10
             }
         };
-        self.hyperlink_tint = hex_to_rgba(theme.colors.cursor.0.as_str(), tint_alpha);
-        self.search_highlight = hex_to_rgba(theme.colors.bright.yellow.0.as_str(), 0.35);
+        self.hyperlink_tint = hex_to_premultiplied_rgba(theme.colors.cursor.0.as_str(), tint_alpha);
+        self.search_highlight =
+            hex_to_premultiplied_rgba(theme.colors.bright.yellow.0.as_str(), 0.35);
         self.search_fg = hex_to_chrome_color(theme.colors.foreground.0.as_str());
-        self.search_bg = hex_to_rgba(theme.colors.tab.bar_bg.0.as_str(), 0.95);
+        self.search_bg = hex_to_premultiplied_rgba(theme.colors.tab.bar_bg.0.as_str(), 0.95);
         self.last_frame_key = None;
         self.style_rev = self.style_rev.wrapping_add(1);
         self.row_glyph_cache.invalidate_all();
@@ -5490,7 +5491,7 @@ impl GpuRenderer {
                         .accent
                 } else {
                     // When: `h.active` is false, render the non-clickable hover hint in the theme's yellow rather than the action accent.
-                    hex_to_rgba(theme.colors.ansi.yellow.0.as_str(), 0.9)
+                    hex_to_premultiplied_rgba(theme.colors.ansi.yellow.0.as_str(), 0.9)
                 };
                 let hovered_grid_cols = hovered_view.grid.cols;
                 let hcache =
@@ -5530,8 +5531,7 @@ impl GpuRenderer {
         // whitespace), draw a thin outlined rectangle so the gap is
         // visible. Helps catch font-fallback misses (emoji etc.).
         for (x, y, w, h, col) in &missing_tofu {
-            let mut rgba = chrome_color_to_linear_rgba(*col);
-            rgba[3] = 0.55;
+            let rgba = with_premultiplied_alpha(chrome_color_to_linear_rgba(*col), 0.55);
             let t = 1.0_f32; // border thickness
                              // Top
             quads.push(QuadInstance {
@@ -5587,7 +5587,7 @@ impl GpuRenderer {
         if !broadcast_receiver_ids.is_empty() {
             // When: `!broadcast_receiver_ids.is_empty()` — at least one pane
             // mirrors input, which needs its red safety border and strip.
-            let warning = hex_to_rgba(theme.colors.bright.red.0.as_str(), 1.0);
+            let warning = hex_to_premultiplied_rgba(theme.colors.bright.red.0.as_str(), 1.0);
             for (id, r) in pane_rects {
                 if !broadcast_receiver_ids.contains(id) {
                     // When: this pane's id is absent from the receiver set — it
@@ -5616,8 +5616,7 @@ impl GpuRenderer {
                     ..Default::default()
                 });
                 let strip_h = (self.font_size * 1.45).max(20.0).min(r.h.max(0.0));
-                let mut strip = warning;
-                strip[3] = 0.92;
+                let strip = with_premultiplied_alpha(warning, 0.92);
                 quads_overlay.push(QuadInstance {
                     rect: px_to_ndc(r.x + t, r.y + t, (r.w - t * 2.0).max(0.0), strip_h, sw, sh),
                     color: strip,
@@ -5687,8 +5686,7 @@ impl GpuRenderer {
                 // so it dims everything in the tab's footprint.
                 if source_tab_idx == Some(t.idx) {
                     let dim = ((1.0 - source_alpha.clamp(0.0, 1.0)) * 0.45).clamp(0.0, 1.0);
-                    let mut overlay = bar_bg;
-                    overlay[3] = dim;
+                    let overlay = with_premultiplied_alpha(bar_bg, dim);
                     quads.push(QuadInstance {
                         rect: px_to_ndc(t.bg_rect.x, t.bg_rect.y, t.bg_rect.w, t.bg_rect.h, sw, sh),
                         color: overlay,
@@ -5792,9 +5790,9 @@ impl GpuRenderer {
             // highlights and status badge belong on this frame.
             let cur_idx = s.current;
             let view_top_abs = Self::resolved_view_top_abs(grid, viewport_top_abs);
-            let match_bg = hex_to_rgba(theme.colors.ansi.yellow.0.as_str(), 1.0);
-            let match_fg = hex_to_rgba(theme.colors.background.0.as_str(), 1.0);
-            let current_bg = hex_to_rgba(theme.colors.bright.green.0.as_str(), 1.0);
+            let match_bg = hex_to_premultiplied_rgba(theme.colors.ansi.yellow.0.as_str(), 1.0);
+            let match_fg = hex_to_premultiplied_rgba(theme.colors.background.0.as_str(), 1.0);
+            let current_bg = hex_to_premultiplied_rgba(theme.colors.bright.green.0.as_str(), 1.0);
             let current_fg = match_fg;
             // Only walk matches whose row intersects the viewport. `matches`
             // is row-sorted, so this is a binary-search-bounded slice — per
@@ -5907,7 +5905,8 @@ impl GpuRenderer {
         // box_height)
         let mut search_ime_anchor: Option<(f32, f32, f32)> = None;
         if let (Some(label), Some(layout)) = (search_label.as_ref(), search_bar_layout) {
-            let search_badge_bg = hex_to_rgba(theme.colors.ansi.yellow.0.as_str(), 1.0);
+            let search_badge_bg =
+                hex_to_premultiplied_rgba(theme.colors.ansi.yellow.0.as_str(), 1.0);
             let search_badge_fg = hex_to_chrome_color(theme.colors.background.0.as_str());
             quads_overlay.push(QuadInstance::rounded(
                 px_to_ndc(
@@ -6035,7 +6034,7 @@ impl GpuRenderer {
         if let Some((badge_x, badge_y, badge_w, badge_h)) = read_only_badge {
             // When: `read_only_badge` is Some — copy mode is read-only, so the
             // badge announces that typing will not reach the shell.
-            let badge_bg = hex_to_rgba(theme.colors.bright.green.0.as_str(), 1.0);
+            let badge_bg = hex_to_premultiplied_rgba(theme.colors.bright.green.0.as_str(), 1.0);
             quads_overlay.push(QuadInstance::rounded(
                 px_to_ndc(badge_x, badge_y, badge_w, badge_h, sw, sh),
                 badge_bg,
@@ -6130,7 +6129,7 @@ impl GpuRenderer {
                 NotificationLevel::Warning => theme.colors.ansi.yellow.0.as_str(),
                 NotificationLevel::Error => theme.colors.bright.red.0.as_str(),
             };
-            let bubble_bg = hex_to_rgba(bg_hex, 1.0);
+            let bubble_bg = hex_to_premultiplied_rgba(bg_hex, 1.0);
             let bubble_fg = hex_to_chrome_color(theme.colors.background.0.as_str());
             quads_overlay.push(QuadInstance::rounded(
                 px_to_ndc(
@@ -6283,7 +6282,7 @@ impl GpuRenderer {
                 if let Some(row) = layout.rows.get(sel) {
                     quads_overlay.push(QuadInstance {
                         rect: px_to_ndc(row.rect.x, row.rect.y, row.rect.w, row.rect.h, sw, sh),
-                        color: premultiply([accent_rgba[0], accent_rgba[1], accent_rgba[2], 0.16]),
+                        color: with_premultiplied_alpha(accent_rgba, 0.16),
                         size_px: [row.rect.w, row.rect.h],
                         radius_px: PALETTE_ROW_RADIUS,
                         ..Default::default()
@@ -6426,7 +6425,7 @@ impl GpuRenderer {
                             sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_PAD_X,
                         );
                     if let Some(hex) = swatch {
-                        let color = hex_to_rgba(hex, 1.0);
+                        let color = hex_to_premultiplied_rgba(hex, 1.0);
                         let line_h = self.chrome_px(2.0).max(1.0);
                         quads_overlay.push(QuadInstance::sharp(
                             px_to_ndc(row.rect.x, row.rect.y, row.rect.w, line_h, sw, sh),
@@ -6826,10 +6825,11 @@ impl GpuRenderer {
                 let (ly0, ly1) = chip.drop_line_y;
                 let lh = (ly1 - ly0).max(2.0 * dpi);
                 // Drop-line accent — theme-driven (was hardcoded ACCENT_BLUE).
-                let mut line_color =
+                let line_color = with_premultiplied_alpha(
                     sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme)
-                        .accent;
-                line_color[3] = 0.95;
+                        .accent,
+                    0.95,
+                );
                 // 3px line centered on lx; both the half-width offset and the
                 // width are logical px scaled by DPI.
                 quads_overlay.push(QuadInstance {
@@ -6843,8 +6843,7 @@ impl GpuRenderer {
             // `chip.ghost_alpha` (spec 0.5). The historical chip
             // rendered at 0.7; the spec ghost is more
             // translucent so the bar underneath stays legible.
-            let mut chip_color = self.tab_active_bg;
-            chip_color[3] = chip.ghost_alpha.clamp(0.0, 1.0);
+            let chip_color = with_premultiplied_alpha(self.tab_active_bg, chip.ghost_alpha);
             quads_overlay.push(QuadInstance {
                 rect: px_to_ndc(x0, y0, w, h, sw, sh),
                 color: chip_color,
@@ -6955,6 +6954,12 @@ impl GpuRenderer {
             // assembly, so glyphs emitted earlier hold UVs into freed space.
             self.reset_glyph_atlas_after_eviction(atlas_epoch_at_frame_start);
             return Ok(());
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            crate::quad::debug_assert_premultiplied_quads("base", &quads);
+            crate::quad::debug_assert_premultiplied_quads("overlay", &quads_overlay);
         }
 
         #[cfg(target_os = "windows")]
@@ -8257,8 +8262,8 @@ fn push_line_segment_px(
 /// Note on color space: the wgpu surface is `Bgra8UnormSrgb`, so the quad
 /// fragment shader's output is sRGB-encoded on write. Inputs MUST therefore
 /// be in linear-light space, otherwise gamma is applied twice and the result
-/// looks washed out (same trap documented in `color.rs::hex_to_rgba`). The
-/// sRGB→linear LUT here is bit-exact with the one feeding `hex_to_rgba`, so
+/// looks washed out (same trap documented in `color.rs::hex_to_premultiplied_rgba`). The
+/// sRGB→linear LUT here is bit-exact with the one feeding `hex_to_premultiplied_rgba`, so
 /// `Color::Indexed(1)` (ANSI red) ends up identical to the theme's `ansi.red`
 /// rendered through the LoadOp clear path.
 #[doc(hidden)]

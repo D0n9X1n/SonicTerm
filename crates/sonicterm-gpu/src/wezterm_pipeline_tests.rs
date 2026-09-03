@@ -238,29 +238,55 @@ fn warp_line_colors_match_software_across_segment_shapes() {
     }
 }
 
-/// WARP and software must encode fully covered half-red sharp, rounded, and line quads equally.
+/// WARP and software encode every named translucent quad producer identically.
 #[cfg(target_os = "windows")]
 #[test]
-fn warp_half_red_quads_match_software_linear_blend() {
-    const WIDTH: u32 = 16;
+fn warp_named_quad_producers_match_software_linear_blend() {
+    const WIDTH: u32 = 32;
     const HEIGHT: u32 = 12;
     const BYTES_PER_ROW: u32 = 256;
     let surface = [WIDTH as f32, HEIGHT as f32];
-    let half_red = [0.5, 0.0, 0.0, 0.5];
+    let background = crate::color::hex_to_premultiplied_rgba("#123456", 1.0);
+    let opaque = crate::color::hex_to_premultiplied_rgba("#e04020", 1.0);
+    let selection = crate::color::hex_to_premultiplied_rgba("#e04020", 0.5);
     let quads = [
         QuadInstance::sharp(
             crate::quad::px_to_ndc(0.0, 0.0, 4.0, 4.0, surface[0], surface[1]),
-            half_red,
+            selection,
         ),
         QuadInstance::rounded(
             crate::quad::px_to_ndc(5.0, 0.0, 6.0, 6.0, surface[0], surface[1]),
-            half_red,
+            selection,
             [6.0, 6.0],
             2.0,
         ),
-        line_segment(surface, [4.0, 9.0], [12.0, 9.0], 4.0, half_red),
+        line_segment(surface, [4.0, 9.0], [12.0, 9.0], 4.0, selection),
+        QuadInstance::sharp(
+            crate::quad::px_to_ndc(13.0, 0.0, 3.0, 4.0, surface[0], surface[1]),
+            crate::color::hex_to_premultiplied_rgba("#e04020", 0.9),
+        ),
+        QuadInstance::sharp(
+            crate::quad::px_to_ndc(17.0, 0.0, 3.0, 4.0, surface[0], surface[1]),
+            crate::quad::with_premultiplied_alpha(opaque, 0.55),
+        ),
+        QuadInstance::sharp(
+            crate::quad::px_to_ndc(21.0, 0.0, 3.0, 4.0, surface[0], surface[1]),
+            crate::quad::with_premultiplied_alpha(opaque, 0.18),
+        ),
+        QuadInstance::sharp(
+            crate::quad::px_to_ndc(25.0, 0.0, 3.0, 4.0, surface[0], surface[1]),
+            crate::quad::with_premultiplied_alpha(opaque, 0.5),
+        ),
     ];
-    let samples = [[1_u32, 1_u32], [8, 3], [8, 9]];
+    let samples = [
+        ("selection sharp", [1_u32, 1_u32], [66, 58, 165, 255]),
+        ("selection rounded", [8, 3], [66, 58, 165, 255]),
+        ("selection line", [8, 9], [66, 58, 165, 255]),
+        ("URL hover", [14, 1], [41, 63, 214, 255]),
+        ("tofu", [18, 1], [63, 59, 172, 255]),
+        ("tab dimming", [22, 1], [79, 54, 104, 255]),
+        ("drag-chip body", [26, 1], [66, 58, 165, 255]),
+    ];
 
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::DX12,
@@ -284,7 +310,7 @@ fn warp_half_red_quads_match_software_linear_blend() {
         pipeline.texture_bind_group_layout(),
     );
     let target = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("half-red quad parity target"),
+        label: Some("named quad producer parity target"),
         size: wgpu::Extent3d { width: WIDTH, height: HEIGHT, depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
@@ -295,7 +321,7 @@ fn warp_half_red_quads_match_software_linear_blend() {
     });
     let view = target.create_view(&Default::default());
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("half-red quad parity readback"),
+        label: Some("named quad producer parity readback"),
         size: u64::from(BYTES_PER_ROW) * u64::from(HEIGHT),
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
@@ -303,13 +329,18 @@ fn warp_half_red_quads_match_software_linear_blend() {
     let mut encoder = device.create_command_encoder(&Default::default());
     {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("half-red quad parity pass"),
+            label: Some("named quad producer parity pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &view,
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: f64::from(background[0]),
+                        g: f64::from(background[1]),
+                        b: f64::from(background[2]),
+                        a: f64::from(background[3]),
+                    }),
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -348,22 +379,25 @@ fn warp_half_red_quads_match_software_linear_blend() {
     queue.submit([encoder.finish()]);
     let slice = readback.slice(..);
     slice.map_async(wgpu::MapMode::Read, |_| {});
-    device.poll(wgpu::PollType::wait_indefinitely()).expect("poll half-red WARP readback");
-    let bytes = slice.get_mapped_range().expect("mapped half-red WARP readback");
-    let mut software =
-        crate::software_windows::WindowsSoftwareFrame::new(WIDTH, HEIGHT, [0.0, 0.0, 0.0, 1.0])
-            .expect("valid software frame");
+    device.poll(wgpu::PollType::wait_indefinitely()).expect("poll named-producer WARP readback");
+    let bytes = slice.get_mapped_range().expect("mapped named-producer WARP readback");
+    let mut software = crate::software_windows::WindowsSoftwareFrame::new(
+        WIDTH,
+        HEIGHT,
+        [background[0], background[1], background[2], background[3]],
+    )
+    .expect("valid software frame");
     software.draw_layers(&atlas, &atlas, &quads, &[], &[], &[], &[]);
 
-    for point in samples {
+    for (name, point, expected) in samples {
         let offset = point[1] as usize * BYTES_PER_ROW as usize + point[0] as usize * 4;
         let gpu = [bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]];
         let cpu = software.pixel_bgra_at(point[0], point[1]).expect("software sample pixel");
-        assert_eq!(cpu, [0, 0, 188, 255]);
+        assert_eq!(cpu, expected, "{name}");
         for channel in 0..4 {
             assert!(
                 gpu[channel].abs_diff(cpu[channel]) <= 1,
-                "half-red sample {point:?} channel {channel} differs: GPU {gpu:?}, software {cpu:?}"
+                "{name} channel {channel} differs: GPU {gpu:?}, software {cpu:?}"
             );
         }
     }

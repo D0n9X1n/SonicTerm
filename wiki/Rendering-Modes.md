@@ -130,12 +130,14 @@ Their GPU mirrors are 1×1 placeholders while the GDI presenter is active.
 Returning to GPU presentation rebuilds full-size GPU atlas textures, resets
 atlas metadata and UV-bearing caches, and forces a full redraw.
 
-Sharp, rounded, and line quads carry premultiplied linear RGBA. The CPU
-compositor decodes retained sRGB destination channels, applies source-over in
-linear light, encodes RGB once, and source-overs alpha as linear UNORM. Rounded
-and line antialias coverage scales all four premultiplied source components
-before blending. Color-glyph and inline-image samples retain their separate
-encoded-atlas path.
+Every sharp, rounded, and line `QuadInstance` carries finite premultiplied
+linear RGBA: alpha stays in `[0,1]`, each RGB channel stays between zero and
+alpha, and changing opacity or antialias/mask coverage scales RGB and alpha
+together. Hex-authored colors decode sRGB before premultiplication. The sRGB
+target performs the final encoding. The CPU compositor decodes retained sRGB
+destination channels, applies the same source-over in linear light, encodes RGB
+once, and source-overs alpha as linear UNORM. Color-glyph and inline-image
+samples retain their separate encoded-atlas path.
 
 Text glyphs use one stabilized destination-pixel origin regardless of whether
 an atlas tile is sampled one-to-one or resampled on either axis. Source sampling
@@ -321,10 +323,12 @@ Windows 上启用降级时，`WindowsSoftwareFrame` 把同一套上游生成的�
 占位符。回到 GPU 呈现时会重建全尺寸 GPU 图集纹理、重置图集元数据与携带 UV 的缓存，
 并强制完整重绘。
 
-锐角、圆角和线段矩形携带预乘线性 RGBA。CPU 合成器会解码保留帧中的 sRGB 目标通道，
-在线性光空间执行 source-over，只对 RGB 编码一次，并把 alpha 作为线性 UNORM 做
-source-over。圆角和线段的抗锯齿覆盖率会在混合前缩放预乘源颜色的全部四个分量。彩色字形
-和内联图像取样仍走各自独立的编码图集路径。
+每个锐角、圆角和线段 `QuadInstance` 都携带有限值的预乘线性 RGBA：alpha 位于
+`[0,1]`，每个 RGB 通道都介于零和 alpha 之间；改变不透明度或抗锯齿/mask 覆盖率时，
+必须同时缩放 RGB 与 alpha。由十六进制生成的颜色先解码 sRGB，再做预乘；最终 sRGB 编码
+由目标纹理完成。CPU 合成器会解码保留帧中的 sRGB 目标通道，在相同的线性光空间执行
+source-over，只对 RGB 编码一次，并把 alpha 作为线性 UNORM 做 source-over。彩色字形和
+内联图像取样仍走各自独立的编码图集路径。
 
 文字字形无论图集图块是按一比一取样，还是任一轴需要重采样，都使用同一套稳定后的目标
 像素原点。源图块仍采用最近点取样并限制在字形自身矩形内；顶部或左侧被裁剪时，会跳过

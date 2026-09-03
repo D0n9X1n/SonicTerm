@@ -170,11 +170,11 @@ pub fn hex_to_wgpu_with_alpha(h: &str, alpha: f32) -> wgpu::Color {
     }
 }
 
-/// Parse a `#rrggbb` hex string + alpha into a `[r, g, b, a]` array in
-/// **linear** RGB space, suitable for the quad pipeline which writes into
-/// the same `Bgra8UnormSrgb` surface as the clear color above.
+/// Parse a `#rrggbb` color and opacity into premultiplied linear RGBA.
 ///
-/// Alpha is passed through unchanged.
+/// The sRGB channels are decoded before multiplication by the clamped alpha,
+/// matching the quad pipeline's `src=One` blend contract. Malformed input is
+/// premultiplied black at the requested clamped opacity.
 ///
 /// Note: the chrome-text path uses a separate [`hex_to_chrome_color`]
 /// helper that returns sRGB-encoded bytes, because the chrome atlas
@@ -183,14 +183,21 @@ pub fn hex_to_wgpu_with_alpha(h: &str, alpha: f32) -> wgpu::Color {
 /// decode on sample, so glyph foreground colors must NOT be
 /// pre-linearized.
 #[doc(hidden)]
-pub fn hex_to_rgba(h: &str, alpha: f32) -> [f32; 4] {
+pub fn hex_to_premultiplied_rgba(h: &str, alpha: f32) -> [f32; 4] {
+    let alpha = alpha.clamp(0.0, 1.0);
     let h = h.trim_start_matches('#');
-    let parse = |i| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(0) as usize;
-    if h.len() == 6 && h.is_ascii() {
+    let parsed = (h.len() == 6 && h.is_ascii()).then(|| {
+        Some([
+            u8::from_str_radix(&h[0..2], 16).ok()?,
+            u8::from_str_radix(&h[2..4], 16).ok()?,
+            u8::from_str_radix(&h[4..6], 16).ok()?,
+        ])
+    });
+    if let Some(Some([r, g, b])) = parsed {
         let t = srgb_u8_to_linear_lut();
-        [t[parse(0)], t[parse(2)], t[parse(4)], alpha]
+        [t[r as usize] * alpha, t[g as usize] * alpha, t[b as usize] * alpha, alpha]
     } else {
-        // When: trimmed `h` is not six ASCII bytes, preserve `alpha` over a black RGB fallback.
+        // When: `parsed` is absent, retain only the clamped opacity over black.
         [0.0, 0.0, 0.0, alpha]
     }
 }
