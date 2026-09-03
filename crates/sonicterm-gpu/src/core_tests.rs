@@ -960,15 +960,16 @@ fn status_marker_fit_is_wired_before_both_terminal_glyph_emissions() {
 #[test]
 fn atlas_sync_and_bind_groups_are_wired_by_role() {
     const SOURCE: &str = include_str!("core.rs");
+    let source = SOURCE.replace("\r\n", "\n");
 
-    assert!(SOURCE.contains(
+    assert!(source.contains(
         "self.image_upload.sync(\n            &self.queue,\n            &mut self.image_atlas,\n            AtlasPixelEncoding::PremultipliedSrgb,\n        )"
     ));
-    assert!(SOURCE.contains(
+    assert!(source.contains(
         "self.glyph_upload.sync(\n            &self.queue,\n            &mut self.glyph_atlas,\n            AtlasPixelEncoding::Coverage,\n        )"
     ));
-    assert!(SOURCE.contains("self.image_upload.color_bind_group()"));
-    assert!(SOURCE.contains("self.glyph_upload.coverage_bind_group()"));
+    assert!(source.contains("self.image_upload.color_bind_group()"));
+    assert!(source.contains("self.glyph_upload.coverage_bind_group()"));
 }
 
 #[test]
