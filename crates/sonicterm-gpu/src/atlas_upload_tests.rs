@@ -303,7 +303,7 @@ fn gpu_scaled_image_clamps_to_its_own_atlas_tile() {
     let output =
         render_image_readback_with_neighbor(1, &[255, 255, 255, 255], 3, Some([0, 0, 255, 255]));
 
-    for pixel in output.chunks_exact(4) {
+    for &pixel in output.as_chunks::<4>().0 {
         assert_eq!(pixel, [255, 255, 255, 255]);
     }
 }
