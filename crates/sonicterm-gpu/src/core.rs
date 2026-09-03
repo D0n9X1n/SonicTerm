@@ -776,7 +776,7 @@ fn splitter_rects_from_panes(pane_rects: &[(u64, PaneRect)], thickness: f32) -> 
 }
 
 use crate::{
-    atlas_upload::{AtlasUpload, AtlasUploadStats},
+    atlas_upload::{AtlasPixelEncoding, AtlasUpload, AtlasUploadStats},
     quad::{
         premultiply, px_to_ndc, scale_premultiplied_alpha, with_premultiplied_alpha, QuadInstance,
     },
@@ -2244,13 +2244,13 @@ impl GpuRenderer {
             glyph_cpu_payload_bytes = atlas_payload_bytes(glyph_atlas.width(), glyph_atlas.height()),
             glyph_gpu_width = glyph_gpu_dimensions.0,
             glyph_gpu_height = glyph_gpu_dimensions.1,
-            glyph_gpu_payload_bytes = atlas_payload_bytes(glyph_gpu_dimensions.0, glyph_gpu_dimensions.1),
+            glyph_gpu_payload_bytes = glyph_upload.payload_bytes(),
             image_cpu_width = image_atlas.width(),
             image_cpu_height = image_atlas.height(),
             image_cpu_payload_bytes = atlas_payload_bytes(image_atlas.width(), image_atlas.height()),
             image_gpu_width = image_gpu_dimensions.0,
             image_gpu_height = image_gpu_dimensions.1,
-            image_gpu_payload_bytes = atlas_payload_bytes(image_gpu_dimensions.0, image_gpu_dimensions.1),
+            image_gpu_payload_bytes = image_upload.payload_bytes(),
             glyph_resident = glyph_atlas.len(),
             image_resident = image_atlas.len(),
             retained_inline_media_bytes = 0,
@@ -3261,10 +3261,10 @@ impl GpuRenderer {
                 software_presenter = uses_software_presenter,
                 glyph_gpu_width = self.glyph_upload.width(),
                 glyph_gpu_height = self.glyph_upload.height(),
-                glyph_gpu_payload_bytes = atlas_payload_bytes(self.glyph_upload.width(), self.glyph_upload.height()),
+                glyph_gpu_payload_bytes = self.glyph_upload.payload_bytes(),
                 image_gpu_width = self.image_upload.width(),
                 image_gpu_height = self.image_upload.height(),
-                image_gpu_payload_bytes = atlas_payload_bytes(self.image_upload.width(), self.image_upload.height()),
+                image_gpu_payload_bytes = self.image_upload.payload_bytes(),
                 glyph_resident = self.glyph_atlas.len(),
                 image_resident = self.image_atlas.len(),
                 payload_estimate = true,
@@ -3429,7 +3429,7 @@ impl GpuRenderer {
             cpu_payload_bytes = atlas_payload_bytes(width, height),
             gpu_width = self.glyph_upload.width(),
             gpu_height = self.glyph_upload.height(),
-            gpu_payload_bytes = atlas_payload_bytes(self.glyph_upload.width(), self.glyph_upload.height()),
+            gpu_payload_bytes = self.glyph_upload.payload_bytes(),
             resident = self.glyph_atlas.len(),
             retained_inline_media_bytes = self.retained_inline_media_bytes,
             retained_pixel_allocation = true,
@@ -3453,7 +3453,7 @@ impl GpuRenderer {
             cpu_payload_bytes = atlas_payload_bytes(width, height),
             gpu_width = self.image_upload.width(),
             gpu_height = self.image_upload.height(),
-            gpu_payload_bytes = atlas_payload_bytes(self.image_upload.width(), self.image_upload.height()),
+            gpu_payload_bytes = self.image_upload.payload_bytes(),
             resident = self.image_atlas.len(),
             retained_inline_media_bytes = self.retained_inline_media_bytes,
             retained_pixel_allocation = true,
@@ -3543,7 +3543,7 @@ impl GpuRenderer {
             cpu_payload_bytes = atlas_payload_bytes(self.image_atlas.width(), self.image_atlas.height()),
             gpu_width = self.image_upload.width(),
             gpu_height = self.image_upload.height(),
-            gpu_payload_bytes = atlas_payload_bytes(self.image_upload.width(), self.image_upload.height()),
+            gpu_payload_bytes = self.image_upload.payload_bytes(),
             resident = self.image_atlas.len(),
             retained_inline_media_bytes,
             payload_estimate = true,
@@ -7006,8 +7006,16 @@ impl GpuRenderer {
         // draw call samples it. Must come AFTER the grid walk above
         // (which is what populated the dirty rects) and BEFORE the
         // WezTerm presentation draw call in the render pass below.
-        let image_upload_stats = self.image_upload.sync(&self.queue, &mut self.image_atlas);
-        let glyph_upload_stats = self.glyph_upload.sync(&self.queue, &mut self.glyph_atlas);
+        let image_upload_stats = self.image_upload.sync(
+            &self.queue,
+            &mut self.image_atlas,
+            AtlasPixelEncoding::PremultipliedSrgb,
+        );
+        let glyph_upload_stats = self.glyph_upload.sync(
+            &self.queue,
+            &mut self.glyph_atlas,
+            AtlasPixelEncoding::Coverage,
+        );
         self.log_atlas_upload_stats("image", image_upload_stats, retained_inline_media_bytes);
         self.log_atlas_upload_stats("glyph", glyph_upload_stats, retained_inline_media_bytes);
         gpu_lap!("glyph_upload");
@@ -7132,8 +7140,8 @@ impl GpuRenderer {
                 &self.device,
                 &self.queue,
                 &mut pass,
-                self.image_upload.bind_group(),
-                self.glyph_upload.bind_group(),
+                self.image_upload.color_bind_group(),
+                self.glyph_upload.coverage_bind_group(),
                 sw,
                 sh,
                 &retained_quads,

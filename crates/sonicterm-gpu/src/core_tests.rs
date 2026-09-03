@@ -622,7 +622,7 @@ fn warp_retained_redraw_clears_overhanging_glyph_ink() {
         &atlas,
         pipeline.texture_bind_group_layout(),
     );
-    upload.sync(&queue, &mut atlas);
+    upload.sync(&queue, &mut atlas, crate::atlas_upload::AtlasPixelEncoding::Coverage);
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("retained overhang test target"),
         size: wgpu::Extent3d { width: WIDTH, height: HEIGHT, depth_or_array_layers: 1 },
@@ -668,8 +668,8 @@ fn warp_retained_redraw_clears_overhanging_glyph_ink() {
             &device,
             &queue,
             &mut pass,
-            upload.bind_group(),
-            upload.bind_group(),
+            upload.coverage_bind_group(),
+            upload.coverage_bind_group(),
             WIDTH as f32,
             HEIGHT as f32,
             &[],
@@ -744,8 +744,8 @@ fn warp_retained_redraw_clears_overhanging_glyph_ink() {
             &device,
             &queue,
             &mut pass,
-            upload.bind_group(),
-            upload.bind_group(),
+            upload.coverage_bind_group(),
+            upload.coverage_bind_group(),
             WIDTH as f32,
             HEIGHT as f32,
             &[clear],
@@ -954,6 +954,21 @@ fn status_marker_fit_is_wired_before_both_terminal_glyph_emissions() {
         assert!(section.contains("lead_cell.extras().is_some()"));
         assert!(fit < push, "marker fitting must precede GlyphInstance creation");
     }
+}
+
+/// Atlas roles keep image color decoding separate from byte-exact glyph coverage.
+#[test]
+fn atlas_sync_and_bind_groups_are_wired_by_role() {
+    const SOURCE: &str = include_str!("core.rs");
+
+    assert!(SOURCE.contains(
+        "self.image_upload.sync(\n            &self.queue,\n            &mut self.image_atlas,\n            AtlasPixelEncoding::PremultipliedSrgb,\n        )"
+    ));
+    assert!(SOURCE.contains(
+        "self.glyph_upload.sync(\n            &self.queue,\n            &mut self.glyph_atlas,\n            AtlasPixelEncoding::Coverage,\n        )"
+    ));
+    assert!(SOURCE.contains("self.image_upload.color_bind_group()"));
+    assert!(SOURCE.contains("self.glyph_upload.coverage_bind_group()"));
 }
 
 #[test]

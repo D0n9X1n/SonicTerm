@@ -1,6 +1,171 @@
 use super::*;
 use sonicterm_text::glyph_atlas::ATLAS_DIM;
 
+fn headless_device() -> (wgpu::Device, wgpu::Queue) {
+    #[cfg(target_os = "windows")]
+    let (descriptor, force_fallback_adapter) = (
+        wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::DX12,
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        },
+        true,
+    );
+    #[cfg(not(target_os = "windows"))]
+    let (descriptor, force_fallback_adapter) =
+        (wgpu::InstanceDescriptor::new_without_display_handle(), false);
+    let instance = wgpu::Instance::new(descriptor);
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::LowPower,
+        compatible_surface: None,
+        force_fallback_adapter,
+        apply_limit_buckets: false,
+    }))
+    .expect("headless test adapter");
+    let software = adapter.get_info().device_type == wgpu::DeviceType::Cpu;
+    pollster::block_on(adapter.request_device(&crate::core::device_descriptor_for(software)))
+        .expect("headless test device")
+}
+
+/// Render one image-atlas strip through the real sRGB view and return its BGRA readback.
+fn render_image_readback(source_width: u32, pixels: &[u8], target_width: u32) -> Vec<u8> {
+    render_image_readback_with_neighbor(source_width, pixels, target_width, None)
+}
+
+fn render_image_readback_with_neighbor(
+    source_width: u32,
+    pixels: &[u8],
+    target_width: u32,
+    neighbor: Option<[u8; 4]>,
+) -> Vec<u8> {
+    const PADDED_BYTES_PER_ROW: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let (device, queue) = headless_device();
+    let mut pipeline = crate::wezterm_pipeline::WeztermPipeline::new(
+        &device,
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+        1,
+    );
+    let atlas_width = source_width + u32::from(neighbor.is_some());
+    let mut atlas = GlyphAtlas::new(atlas_width, 1);
+    let info = atlas
+        .get_or_insert_lazy_without_eviction(
+            sonicterm_types::GlyphKey::new('\u{fffc}', false, false),
+            source_width,
+            1,
+            || sonicterm_text::glyph_atlas::RasterTile {
+                width: source_width,
+                height: 1,
+                offset_x: 0,
+                offset_y: 0,
+                advance: source_width as f32,
+                coverage: pixels.to_vec(),
+                is_color: true,
+                is_subpixel: false,
+            },
+        )
+        .expect("image test tile inserts");
+    if let Some(neighbor) = neighbor {
+        atlas
+            .get_or_insert_lazy_without_eviction(
+                sonicterm_types::GlyphKey::new('N', false, false),
+                1,
+                1,
+                || sonicterm_text::glyph_atlas::RasterTile {
+                    width: 1,
+                    height: 1,
+                    offset_x: 0,
+                    offset_y: 0,
+                    advance: 1.0,
+                    coverage: neighbor.to_vec(),
+                    is_color: true,
+                    is_subpixel: false,
+                },
+            )
+            .expect("neighbor test tile inserts");
+    }
+    let cpu_pixels = atlas.pixels_bgra().to_vec();
+    let mut upload = AtlasUpload::new(&device, &atlas, pipeline.texture_bind_group_layout());
+    upload.sync(&queue, &mut atlas, AtlasPixelEncoding::PremultipliedSrgb);
+    assert_eq!(atlas.pixels_bgra(), cpu_pixels, "GPU upload must not rewrite CPU atlas bytes");
+
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("atlas color readback target"),
+        size: wgpu::Extent3d { width: target_width, height: 1, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Bgra8UnormSrgb,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("atlas color readback"),
+        size: u64::from(PADDED_BYTES_PER_ROW),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let image = sonicterm_text::GlyphInstance {
+        rect: crate::quad::px_to_ndc(0.0, 0.0, target_width as f32, 1.0, target_width as f32, 1.0),
+        uv: info.uv,
+        color: [1.0; 4],
+        flags: [1.0, 0.0, 1.0, 0.0],
+    };
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("atlas color readback pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pipeline.draw_frame(
+            &device,
+            &queue,
+            &mut pass,
+            upload.color_bind_group(),
+            upload.coverage_bind_group(),
+            target_width as f32,
+            1.0,
+            &[],
+            &[image],
+            &[],
+            &[],
+            &[],
+        );
+    }
+    encoder.copy_texture_to_buffer(
+        target.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(PADDED_BYTES_PER_ROW),
+                rows_per_image: Some(1),
+            },
+        },
+        wgpu::Extent3d { width: target_width, height: 1, depth_or_array_layers: 1 },
+    );
+    queue.submit([encoder.finish()]);
+    let slice = readback.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    device.poll(wgpu::PollType::wait_indefinitely()).expect("poll atlas color readback");
+    let mapped = slice.get_mapped_range().expect("mapped atlas color readback");
+    let result = mapped[..target_width as usize * BYTES_PER_PIXEL as usize].to_vec();
+    drop(mapped);
+    readback.unmap();
+    result
+}
+
 #[test]
 fn coalesces_touching_rows_and_columns() {
     let input = [
@@ -29,20 +194,204 @@ fn separate_dirty_regions_remain_separate() {
     assert_eq!(output, input);
 }
 
+/// Coverage uploads preserve every CPU atlas byte while reusing retained staging.
 #[test]
-fn copies_tightly_packed_subrect_and_reuses_capacity() {
+fn coverage_copies_tightly_packed_subrect_and_reuses_capacity() {
     let pixels: Vec<u8> = (0..48).collect();
     let rect = DirtyRect { x: 1, y: 0, w: 2, h: 2 };
     let mut scratch = Vec::new();
 
-    copy_rect_into_scratch(&pixels, 4, rect, &mut scratch);
+    copy_rect_into_scratch(&pixels, 4, rect, AtlasPixelEncoding::Coverage, &mut scratch);
     let capacity = scratch.capacity();
 
     assert_eq!(scratch, [4, 5, 6, 7, 8, 9, 10, 11, 20, 21, 22, 23, 24, 25, 26, 27]);
 
-    copy_rect_into_scratch(&pixels, 4, DirtyRect { x: 0, y: 0, w: 1, h: 1 }, &mut scratch);
+    copy_rect_into_scratch(
+        &pixels,
+        4,
+        DirtyRect { x: 0, y: 0, w: 1, h: 1 },
+        AtlasPixelEncoding::Coverage,
+        &mut scratch,
+    );
     assert_eq!(scratch, [0, 1, 2, 3]);
     assert_eq!(scratch.capacity(), capacity);
+}
+
+/// One atlas allocation supplies unorm coverage and sRGB color views without retaining a second payload.
+#[test]
+fn one_texture_exposes_coverage_and_color_bind_groups() {
+    let (device, _queue) = headless_device();
+    let pipeline = crate::wezterm_pipeline::WeztermPipeline::new(
+        &device,
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+        1,
+    );
+    let upload = AtlasUpload::new_sized(&device, 2, 3, pipeline.texture_bind_group_layout());
+
+    assert_eq!(upload.texture.format(), wgpu::TextureFormat::Bgra8Unorm);
+    assert_eq!(upload.texture.size().width, 2);
+    assert_eq!(upload.texture.size().height, 3);
+    assert_eq!(upload.coverage_view.texture(), upload.color_view.texture());
+    assert_eq!(upload.payload_bytes(), 2 * 3 * u64::from(BYTES_PER_PIXEL));
+    let _coverage = upload.coverage_bind_group();
+    let _color = upload.color_bind_group();
+}
+
+/// View encoding and sampler policy stay orthogonal for image and future color-glyph consumers.
+#[test]
+fn image_color_filtering_does_not_define_the_srgb_view_policy() {
+    let coverage = atlas_sampler_descriptor();
+    let image = image_atlas_sampler_descriptor();
+
+    assert_eq!(coverage.mag_filter, wgpu::FilterMode::Nearest);
+    assert_eq!(coverage.min_filter, wgpu::FilterMode::Nearest);
+    assert_eq!(image.mag_filter, wgpu::FilterMode::Linear);
+    assert_eq!(image.min_filter, wgpu::FilterMode::Linear);
+}
+
+/// The sRGB view can pair with nearest filtering for a future mixed glyph bind group.
+#[test]
+fn color_view_and_nearest_sampler_remain_independently_accessible() {
+    let (device, _queue) = headless_device();
+    let pipeline = crate::wezterm_pipeline::WeztermPipeline::new(
+        &device,
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+        1,
+    );
+    let upload = AtlasUpload::new_sized(&device, 1, 1, pipeline.texture_bind_group_layout());
+
+    let _color_nearest = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("future mixed glyph color-nearest group"),
+        layout: pipeline.texture_bind_group_layout(),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(upload.color_view()),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(upload.nearest_sampler()),
+            },
+        ],
+    });
+    assert_eq!(upload.coverage_view().texture(), upload.color_view().texture());
+}
+
+/// An opaque encoded midtone survives upload, sRGB sampling, blending, and sRGB output unchanged.
+#[test]
+fn gpu_srgb_view_preserves_opaque_midtone() {
+    let output = render_image_readback(1, &[128, 128, 128, 255], 1);
+
+    for (actual, expected) in output.iter().zip([128, 128, 128, 255]) {
+        assert!(actual.abs_diff(expected) <= 1, "actual={actual}, expected={expected}");
+    }
+}
+
+/// A translucent encoded-premultiplied image pixel is linearized before GPU source-over.
+#[test]
+fn gpu_srgb_view_converts_translucent_encoded_premultiplication() {
+    let output = render_image_readback(1, &[64, 64, 64, 128], 1);
+
+    for (actual, expected) in output.iter().zip([92, 92, 92, 128]) {
+        assert!(actual.abs_diff(expected) <= 1, "actual={actual}, expected about {expected}");
+    }
+}
+
+/// Linear filtering must not pull pixels from the next packed image tile.
+#[test]
+fn gpu_scaled_image_clamps_to_its_own_atlas_tile() {
+    let output =
+        render_image_readback_with_neighbor(1, &[255, 255, 255, 255], 3, Some([0, 0, 255, 255]));
+
+    for pixel in output.chunks_exact(4) {
+        assert_eq!(pixel, [255, 255, 255, 255]);
+    }
+}
+
+/// Scaled images interpolate decoded linear samples, not their encoded sRGB byte values.
+#[test]
+fn gpu_scaled_image_filters_in_linear_light() {
+    let output = render_image_readback(2, &[0, 0, 0, 255, 255, 255, 255, 255], 3);
+    let middle = &output[4..8];
+
+    for &actual in &middle[..3] {
+        assert!(actual.abs_diff(188) <= 2, "linear midpoint should encode near 188: {middle:?}");
+    }
+    assert_eq!(middle[3], 255);
+}
+
+/// Color uploads convert encoded premultiplication to linear-light premultiplication for an sRGB view.
+#[test]
+fn premultiplied_srgb_converts_representative_pixels() {
+    let pixels = [128, 128, 128, 255, 64, 64, 64, 128, 16, 32, 64, 128, 77, 88, 99, 0];
+    let mut scratch = Vec::new();
+
+    copy_rect_into_scratch(
+        &pixels,
+        4,
+        DirtyRect { x: 0, y: 0, w: 4, h: 1 },
+        AtlasPixelEncoding::PremultipliedSrgb,
+        &mut scratch,
+    );
+
+    assert_eq!(&scratch[0..4], &[128, 128, 128, 255]);
+    for (actual, expected) in scratch[4..8].iter().zip([92, 92, 92, 128]) {
+        assert!(actual.abs_diff(expected) <= 1, "actual={actual}, expected about {expected}");
+    }
+    for (actual, expected) in scratch[8..12].iter().zip([20, 44, 92, 128]) {
+        assert!(actual.abs_diff(expected) <= 1, "actual={actual}, expected about {expected}");
+    }
+    assert_eq!(&scratch[12..16], &[0, 0, 0, 0]);
+}
+
+/// Both encoding modes reuse one bounded staging allocation rather than retaining converted atlases.
+#[test]
+fn staging_capacity_is_reused_and_bounded_in_both_modes() {
+    let width = 64u32;
+    let height = 8u32;
+    let pixels = vec![128u8; width as usize * height as usize * BYTES_PER_PIXEL as usize];
+    let rect = DirtyRect { x: 0, y: 0, w: width, h: height };
+    let mut scratch = Vec::new();
+
+    copy_rect_into_scratch(
+        &pixels,
+        width,
+        rect,
+        AtlasPixelEncoding::PremultipliedSrgb,
+        &mut scratch,
+    );
+    let capacity = scratch.capacity();
+    copy_rect_into_scratch(&pixels, width, rect, AtlasPixelEncoding::Coverage, &mut scratch);
+
+    let whole_atlas = ATLAS_DIM as usize * ATLAS_DIM as usize * BYTES_PER_PIXEL as usize;
+    assert_eq!(scratch.capacity(), capacity);
+    assert!(scratch.capacity() <= whole_atlas);
+}
+
+/// Growing staging to one full atlas never retains geometric spare capacity above that bound.
+#[test]
+fn full_atlas_staging_growth_stays_at_the_atlas_bound() {
+    let width = ATLAS_DIM;
+    let pixels = vec![0u8; width as usize * ATLAS_DIM as usize * BYTES_PER_PIXEL as usize];
+    let mut scratch = Vec::new();
+
+    copy_rect_into_scratch(
+        &pixels,
+        width,
+        DirtyRect { x: 0, y: 0, w: width, h: ATLAS_DIM * 3 / 4 },
+        AtlasPixelEncoding::Coverage,
+        &mut scratch,
+    );
+    copy_rect_into_scratch(
+        &pixels,
+        width,
+        DirtyRect { x: 0, y: 0, w: width, h: ATLAS_DIM },
+        AtlasPixelEncoding::Coverage,
+        &mut scratch,
+    );
+
+    let whole_atlas = ATLAS_DIM as usize * ATLAS_DIM as usize * BYTES_PER_PIXEL as usize;
+    assert_eq!(scratch.capacity(), whole_atlas);
 }
 
 /// What the retained staging buffer can hold, measured rather than assumed.
@@ -75,6 +424,7 @@ fn retained_staging_is_bounded_by_one_whole_atlas() {
         &pixels,
         width,
         DirtyRect { x: 0, y: 0, w: width, h: height },
+        AtlasPixelEncoding::Coverage,
         &mut scratch,
     );
 
