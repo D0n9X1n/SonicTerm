@@ -16,7 +16,7 @@
 //! ## Design choices
 //!
 //! - One 2048×2048 BGRA8 atlas (~16 MiB) stores monochrome, subpixel, and
-//!   premultiplied color tiles.
+//!   premultiplied sRGB-encoded color tiles.
 //! - A shelf packer handles similarly-sized terminal glyphs; a free-rectangle
 //!   list and deterministic LRU-quartile eviction reclaim space under pressure.
 //! - The `Rasterizer` trait keeps the atlas independent of a concrete font
@@ -57,8 +57,8 @@ pub struct GlyphInfo {
     /// positioning so this is informational for proportional fallback,
     /// not for the main grid path.
     pub advance: f32,
-    /// True when this tile holds premultiplied BGRA color pixels
-    /// (Apple Color Emoji, Segoe UI Emoji, Noto Color Emoji). The
+    /// True when this tile holds premultiplied sRGB-encoded BGRA8 color
+    /// pixels (Apple Color Emoji, Segoe UI Emoji, Noto Color Emoji). The
     /// shader treats color tiles as pre-shaded and skips the
     /// `cov * fg_color` modulation.
     pub is_color: bool,
@@ -83,7 +83,7 @@ pub struct RasterTile {
     pub advance: f32,
     /// When `is_color == false && is_subpixel == false`: `width * height`
     /// bytes of 8-bit coverage, row-major. When `is_color == true`:
-    /// `width * height * 4` bytes of premultiplied BGRA pixels, row-major.
+    /// `width * height * 4` bytes of premultiplied sRGB-encoded BGRA8 pixels, row-major.
     /// When `is_subpixel == true`: `width * height * 4` bytes of BGRA
     /// subpixel coverage, row-major.
     pub coverage: Vec<u8>,
@@ -217,6 +217,15 @@ struct AtlasEntry {
     rect: Option<(u32, u32, u32, u32)>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct AtlasAllocation {
+    x: u32,
+    y: u32,
+    slot_w: u32,
+    slot_h: u32,
+    reused: bool,
+}
+
 /// CPU-side BGRA8 glyph atlas with shelf-packed allocation and LRU eviction.
 pub struct GlyphAtlas {
     width: u32,
@@ -252,6 +261,15 @@ pub struct GlyphAtlas {
     eviction_enabled: bool,
 }
 
+/// Pixel interpretation required when uploading one atlas write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AtlasPixelKind {
+    /// Linear monochrome or subpixel coverage copied without color conversion.
+    Coverage,
+    /// Premultiplied sRGB-encoded color converted for sRGB texture sampling.
+    Color,
+}
+
 /// A rectangle of the atlas that has been written since the last drain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DirtyRect {
@@ -263,6 +281,8 @@ pub struct DirtyRect {
     pub w: u32,
     /// Height in pixels.
     pub h: u32,
+    /// Interpretation of the bytes in this rectangle.
+    pub kind: AtlasPixelKind,
 }
 
 /// Bytes per atlas pixel — BGRA8 = 4. The CPU buffer is `width *
@@ -270,6 +290,13 @@ pub struct DirtyRect {
 /// coverage into all four channels at upload time so a single shader
 /// path can sample either flavor.
 pub const BYTES_PER_PIXEL: u32 = 4;
+
+fn dirty_rects_overlap(left: DirtyRect, right: DirtyRect) -> bool {
+    left.x < right.x.saturating_add(right.w)
+        && right.x < left.x.saturating_add(left.w)
+        && left.y < right.y.saturating_add(right.h)
+        && right.y < left.y.saturating_add(left.h)
+}
 
 impl GlyphAtlas {
     /// New empty atlas backed by a `width × height` BGRA8 buffer.
@@ -499,15 +526,20 @@ impl GlyphAtlas {
             // be placed, so it is refused before build_tile materializes any pixels.
             return None;
         }
-        let (x, y, slot_w, slot_h) = self.alloc_rect(width, height)?;
+        let allocation = self.alloc_rect(width, height)?;
         let tile = build_tile();
         if tile.is_empty() || tile.width != width || tile.height != height {
             // When: tile does not match the reserved width and height the slot would be
             // written at the wrong extent, so the reservation returns to free_rects.
-            self.free_rects.push((x, y, slot_w, slot_h));
+            self.free_rects.push((
+                allocation.x,
+                allocation.y,
+                allocation.slot_w,
+                allocation.slot_h,
+            ));
             return None;
         }
-        Some(self.insert_tile(key, tile, x, y, slot_w, slot_h))
+        Some(self.insert_tile(key, tile, allocation))
     }
 
     fn get_or_insert_impl<R: Rasterizer>(
@@ -586,7 +618,7 @@ impl GlyphAtlas {
         }
         // Allocate: try free-list first (slots reclaimed by prior
         // eviction), then the shelf packer, then evict-and-retry.
-        let (x, y, slot_w, slot_h) = match self.alloc_rect(tile.width, tile.height) {
+        let allocation = match self.alloc_rect(tile.width, tile.height) {
             Some(allocation) => allocation,
             None if allow_eviction && self.eviction_enabled => {
                 self.evict_lru_quartile();
@@ -598,7 +630,7 @@ impl GlyphAtlas {
                 return None;
             }
         };
-        Some(self.insert_tile(key, tile, x, y, slot_w, slot_h))
+        Some(self.insert_tile(key, tile, allocation))
     }
 
     fn make_entry_room(&mut self, allow_eviction: bool) -> bool {
@@ -620,16 +652,14 @@ impl GlyphAtlas {
         &mut self,
         key: GlyphKey,
         tile: RasterTile,
-        x: u32,
-        y: u32,
-        slot_w: u32,
-        slot_h: u32,
+        allocation: AtlasAllocation,
     ) -> GlyphInfo {
+        let AtlasAllocation { x, y, slot_w, slot_h, reused } = allocation;
         // Blit rows into the CPU BGRA buffer. Monochrome tiles arrive
         // as `width*height` alpha bytes — replicate each into the four
         // BGRA channels so the shader can sample a single uniform
         // texture format. Color tiles arrive as `width*height*4` BGRA
-        // bytes already premultiplied; subpixel text tiles arrive as
+        // bytes already premultiplied in sRGB-encoded space; subpixel text tiles arrive as
         // `width*height*4` BGRA coverage. Copy both through verbatim.
         let bpp = BYTES_PER_PIXEL as usize;
         for row in 0..tile.height {
@@ -657,7 +687,14 @@ impl GlyphAtlas {
                 }
             }
         }
-        self.dirty.push(DirtyRect { x, y, w: tile.width, h: tile.height });
+        let kind = if tile.is_color { AtlasPixelKind::Color } else { AtlasPixelKind::Coverage };
+        let dirty = DirtyRect { x, y, w: tile.width, h: tile.height, kind };
+        if reused {
+            // A reclaimed slot can overlap a pending write from its prior owner; retaining
+            // that stale record would let its pixel kind reinterpret the replacement bytes.
+            self.dirty.retain(|pending| !dirty_rects_overlap(*pending, dirty));
+        }
+        self.dirty.push(dirty);
         let info = GlyphInfo {
             uv: [
                 x as f32 / self.width as f32,
@@ -683,10 +720,10 @@ impl GlyphAtlas {
     }
 
     /// Try to allocate `(w, h)` from the free-list first, then the shelf
-    /// packer. Returns the placement plus the complete reserved slot size so
-    /// eviction or rollback can restore a larger reclaimed rectangle intact.
-    /// Caller handles the eviction retry on `None`.
-    fn alloc_rect(&mut self, w: u32, h: u32) -> Option<(u32, u32, u32, u32)> {
+    /// packer. Returns placement, the complete reserved slot size, and whether
+    /// the slot was reclaimed, so insertion can supersede stale dirty metadata
+    /// only when overlap is possible. Caller handles the eviction retry on `None`.
+    fn alloc_rect(&mut self, w: u32, h: u32) -> Option<AtlasAllocation> {
         // First-fit on the free-list: any reclaimed rect at least as
         // large as the request. Reuses the full slot (no splitting),
         // which over-reserves vertically when the new tile is shorter
@@ -698,10 +735,17 @@ impl GlyphAtlas {
             if fw >= w && fh >= h {
                 // When: fw and fh cover the request the reclaimed slot is reused whole, so
                 // an atlas that has cycled through eviction never grows again.
-                return Some(self.free_rects.swap_remove(i));
+                let (x, y, slot_w, slot_h) = self.free_rects.swap_remove(i);
+                return Some(AtlasAllocation { x, y, slot_w, slot_h, reused: true });
             }
         }
-        self.packer.alloc(w, h).map(|(x, y)| (x, y, w, h))
+        self.packer.alloc(w, h).map(|(x, y)| AtlasAllocation {
+            x,
+            y,
+            slot_w: w,
+            slot_h: h,
+            reused: false,
+        })
     }
 
     /// Drop the bottom 25% of entries by `last_used_frame`, returning

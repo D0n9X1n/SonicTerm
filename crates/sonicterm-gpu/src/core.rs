@@ -915,7 +915,7 @@ fn splitter_rects_from_panes(pane_rects: &[(u64, PaneRect)], thickness: f32) -> 
 }
 
 use crate::{
-    atlas_upload::{AtlasPixelEncoding, AtlasUpload, AtlasUploadStats},
+    atlas_upload::{AtlasBindingKind, AtlasUpload, AtlasUploadStats},
     quad::{
         premultiply, px_to_ndc, scale_premultiplied_alpha, with_premultiplied_alpha, QuadInstance,
     },
@@ -2366,13 +2366,15 @@ impl GpuRenderer {
             &device,
             glyph_gpu_dimensions.0,
             glyph_gpu_dimensions.1,
-            present_pipeline.texture_bind_group_layout(),
+            present_pipeline.glyph_bind_group_layout(),
+            AtlasBindingKind::Glyph,
         );
         let image_upload = AtlasUpload::new_sized(
             &device,
             image_gpu_dimensions.0,
             image_gpu_dimensions.1,
-            present_pipeline.texture_bind_group_layout(),
+            present_pipeline.image_bind_group_layout(),
+            AtlasBindingKind::Image,
         );
         tracing::debug!(
             target: "memory",
@@ -3871,7 +3873,8 @@ impl GpuRenderer {
                 &self.device,
                 next.0,
                 next.1,
-                self.present_pipeline.texture_bind_group_layout(),
+                self.present_pipeline.glyph_bind_group_layout(),
+                AtlasBindingKind::Glyph,
             );
         }
     }
@@ -3885,7 +3888,8 @@ impl GpuRenderer {
                 &self.device,
                 next.0,
                 next.1,
-                self.present_pipeline.texture_bind_group_layout(),
+                self.present_pipeline.image_bind_group_layout(),
+                AtlasBindingKind::Image,
             );
         }
     }
@@ -7166,16 +7170,8 @@ impl GpuRenderer {
         // draw call samples it. Must come AFTER the grid walk above
         // (which is what populated the dirty rects) and BEFORE the
         // WezTerm presentation draw call in the render pass below.
-        let image_upload_stats = self.image_upload.sync(
-            &self.queue,
-            &mut self.image_atlas,
-            AtlasPixelEncoding::PremultipliedSrgb,
-        );
-        let glyph_upload_stats = self.glyph_upload.sync(
-            &self.queue,
-            &mut self.glyph_atlas,
-            AtlasPixelEncoding::Coverage,
-        );
+        let image_upload_stats = self.image_upload.sync(&self.queue, &mut self.image_atlas);
+        let glyph_upload_stats = self.glyph_upload.sync(&self.queue, &mut self.glyph_atlas);
         self.log_atlas_upload_stats("image", image_upload_stats, retained_inline_media_bytes);
         self.log_atlas_upload_stats("glyph", glyph_upload_stats, retained_inline_media_bytes);
         gpu_lap!("glyph_upload");
@@ -7300,8 +7296,8 @@ impl GpuRenderer {
                 &self.device,
                 &self.queue,
                 &mut pass,
-                self.image_upload.color_bind_group(),
-                self.glyph_upload.coverage_bind_group(),
+                self.image_upload.image_bind_group(),
+                self.glyph_upload.glyph_bind_group(),
                 sw,
                 sh,
                 &retained_quads,
@@ -8161,10 +8157,9 @@ fn trace_white_glyph(ch: char, rgba: [f32; 4], rect: (f32, f32, f32, f32), site:
 /// atlas's top-left texel, which the shelf packer hands to the first glyph of
 /// the session, so a zero-area sample reads that glyph's corner ink.
 ///
-/// A monochrome sentinel would at least take the cell's foreground. A block
-/// glyph's does not — block tiles carry `is_color: true`, which makes the
-/// renderer paint the texture's own colour, so an opaque corner texel arrives
-/// as pure white whatever the theme says.
+/// Monochrome block glyphs take the cell foreground, but a degenerate UV can
+/// sample opaque coverage from the atlas origin and paint a stray
+/// foreground-colored pixel.
 ///
 /// Returns true when the instance must not be emitted.
 #[must_use]

@@ -50,6 +50,7 @@ impl Rasterizer for MissingRasterizer {
     }
 }
 
+/// Subpixel tiles keep their four linear coverage channels and never enter color conversion.
 #[test]
 fn subpixel_text_coverage_copies_bgra_channels() {
     let mut atlas = GlyphAtlas::new(4, 4);
@@ -71,6 +72,85 @@ fn subpixel_text_coverage_copies_bgra_channels() {
     assert!(info.is_subpixel);
     assert!(!info.is_color);
     assert_eq!(&atlas.pixels_bgra()[0..4], &[10, 20, 30, 40]);
+    assert_eq!(
+        atlas.take_dirty_rects(),
+        [DirtyRect { x: 0, y: 0, w: 1, h: 1, kind: AtlasPixelKind::Coverage }]
+    );
+}
+
+/// Color glyph insertion preserves its premultiplied sRGB bytes and identifies only that write for conversion.
+#[test]
+fn color_tile_preserves_cpu_bytes_and_marks_color_dirty() {
+    let encoded_bgra = [17, 34, 68, 128];
+    let mut atlas = GlyphAtlas::new(1, 1);
+
+    atlas
+        .get_or_insert(
+            GlyphKey::new('😀', false, false),
+            &mut TileRasterizer(RasterTile {
+                width: 1,
+                height: 1,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 1.0,
+                coverage: encoded_bgra.to_vec(),
+                is_color: true,
+                is_subpixel: false,
+            }),
+        )
+        .expect("color tile inserts");
+
+    assert_eq!(atlas.pixels_bgra(), encoded_bgra);
+    assert_eq!(
+        atlas.take_dirty_rects(),
+        [DirtyRect { x: 0, y: 0, w: 1, h: 1, kind: AtlasPixelKind::Color }]
+    );
+}
+
+/// Reusing an undrained atlas slot must discard the stale pixel interpretation in either direction.
+#[test]
+fn replacement_kind_supersedes_stale_overlapping_dirty_record() {
+    fn assert_replacement(first_color: bool, replacement_color: bool) {
+        let mut atlas = GlyphAtlas::new(2, 2);
+        let tile = |side, is_color, value| RasterTile {
+            width: side,
+            height: side,
+            offset_x: 0,
+            offset_y: 0,
+            advance: side as f32,
+            coverage: if is_color {
+                vec![value; (side * side * 4) as usize]
+            } else {
+                vec![value; (side * side) as usize]
+            },
+            is_color,
+            is_subpixel: false,
+        };
+        atlas
+            .get_or_insert(
+                GlyphKey::new('a', false, false),
+                &mut TileRasterizer(tile(2, first_color, 32)),
+            )
+            .expect("first tile fills atlas");
+        atlas
+            .get_or_insert(
+                GlyphKey::new('b', false, false),
+                &mut TileRasterizer(tile(1, replacement_color, 96)),
+            )
+            .expect("smaller replacement reuses evicted slot");
+
+        let expected_kind =
+            if replacement_color { AtlasPixelKind::Color } else { AtlasPixelKind::Coverage };
+        assert_eq!(&atlas.pixels_bgra()[0..4], &[96; 4]);
+        assert_eq!(
+            atlas.take_dirty_rects(),
+            [DirtyRect { x: 0, y: 0, w: 1, h: 1, kind: expected_kind }],
+            "the smaller newest write must remove the larger stale interpretation"
+        );
+    }
+
+    assert_replacement(true, false);
+    assert_replacement(false, true);
 }
 
 #[test]
