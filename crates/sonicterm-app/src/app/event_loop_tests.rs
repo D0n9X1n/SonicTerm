@@ -188,6 +188,105 @@ fn no_armed_contributor_parks_the_loop() {
     assert_eq!(app.wake_deadline(None), None);
 }
 
+#[cfg(windows)]
+#[test]
+fn foreground_probe_output_activity_debounces_until_quiet() {
+    // Protect streaming output from triggering one process-table walk per 500 ms frame.
+    let start = Instant::now();
+    let mut app = app_with_main_window();
+
+    app.arm_foreground_probe_after_output(start);
+    app.arm_foreground_probe_after_output(start + Duration::from_millis(400));
+
+    let wake = app.foreground_probe_wake.expect("output arms a probe wake");
+    assert_eq!(wake.due, start + Duration::from_millis(400) + FOREGROUND_PROCESS_TTL);
+    assert!(!wake.fixed);
+    assert_eq!(app.wake_deadline(None), Some(wake.due));
+}
+
+#[cfg(windows)]
+#[test]
+fn foreground_probe_input_deadline_is_not_postponed_by_output() {
+    // Protect a silent gsudo launch from losing its probe behind a continuing output burst.
+    let start = Instant::now();
+    let mut app = app_with_main_window();
+
+    app.arm_foreground_probe_after_input(start);
+    app.arm_foreground_probe_after_output(start + Duration::from_millis(400));
+
+    let wake = app.foreground_probe_wake.expect("input arms a probe wake");
+    assert_eq!(wake.due, start + FOREGROUND_PROCESS_TTL);
+    assert!(wake.fixed);
+
+    app.arm_foreground_probe_after_input(start + Duration::from_millis(450));
+    assert_eq!(
+        app.foreground_probe_wake.expect("later input rearms the fixed wake").due,
+        start + Duration::from_millis(450) + FOREGROUND_PROCESS_TTL
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn foreground_probe_rearms_only_for_per_tab_warning_in_regular_process() {
+    // Protect clear-on-return polling without reviving idle or globally elevated heartbeat redraws.
+    let now = Instant::now();
+    let mut app = app_with_main_window();
+
+    app.finish_foreground_process_probe(now, true);
+    let wake = app.foreground_probe_wake.expect("foreground warning rearms");
+    assert_eq!(wake.due, now + FOREGROUND_PROCESS_TTL);
+    assert!(wake.fixed, "visible warnings must be checked even during continuing output");
+
+    app.finish_foreground_process_probe(now, false);
+    assert!(app.foreground_probe_wake.is_none());
+
+    app.set_process_privilege(crate::ProcessPrivilege::Privileged);
+    app.finish_foreground_process_probe(now, true);
+    assert!(app.foreground_probe_wake.is_none());
+}
+
+#[cfg(windows)]
+#[test]
+fn due_foreground_probe_forces_shell_return_refresh() {
+    // Protect a silent command return from retaining its per-tab warning after the cache TTL.
+    let start = Instant::now();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let pane_id = app.__test_seed_tab("#1 pwsh");
+    let main_id = app.main_window_id.expect("synthetic main window");
+    let window = app.windows.get_mut(&main_id).expect("synthetic main state");
+    window.panes.get_mut(&pane_id).expect("synthetic pane").fg_proc_cache = Some((
+        start,
+        Some(sonicterm_io::proc_info::ForegroundProcess { name: "gsudo".into(), privileged: true }),
+    ));
+    assert!(window.tabs.set_foreground_privileged(0, true));
+    app.finish_foreground_process_probe(start, true);
+
+    let due = start + FOREGROUND_PROCESS_TTL;
+    let changed = app.refresh_foreground_privileges_if_due(due);
+
+    assert_eq!(changed, vec![main_id]);
+    assert!(!app.windows[&main_id].tabs.tabs()[0].foreground_privileged);
+    assert!(app.foreground_probe_wake.is_none());
+}
+
+#[cfg(windows)]
+#[test]
+fn foreground_probe_only_wake_yields_to_frame_deadlines() {
+    // Protect timer-only samples from repainting unless no frame is already due at that instant.
+    let now = Instant::now();
+    let probe = now + Duration::from_millis(500);
+    let memory = now + Duration::from_secs(30);
+
+    assert!(wake_is_foreground_probe_only(None, Some(probe), Some(memory)));
+    assert!(wake_is_foreground_probe_only(None, Some(probe), Some(probe)));
+    assert!(!wake_is_foreground_probe_only(Some(probe), Some(probe), Some(memory)));
+    assert!(!wake_is_foreground_probe_only(
+        Some(now + Duration::from_millis(100)),
+        Some(probe),
+        Some(memory)
+    ));
+}
+
 fn arm_snap_scrollbar(app: &mut App, window_id: WindowId, pane_id: u64, active: Instant) {
     let mut state = crate::app::scrollbar_visibility::ScrollbarVisState::new(active);
     state.mark_active(active);

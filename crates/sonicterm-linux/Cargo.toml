@@ -22,6 +22,9 @@ sonicterm-logging.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+
 [[bin]]
 name = "sonicterm"
 path = "src/main.rs"

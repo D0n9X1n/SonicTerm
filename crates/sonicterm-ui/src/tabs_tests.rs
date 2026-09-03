@@ -190,3 +190,82 @@ fn title_body_helpers_preserve_icons_and_handle_unformatted_titles() {
     bar.set_active_custom_title("custom");
     assert_eq!(bar.active_title_body().as_deref(), Some("custom"));
 }
+
+#[test]
+fn title_truncation_preserves_the_index_and_process_icon_before_shortening_the_body() {
+    // Protect privilege-badge width reservation from clipping structural tab identity first.
+    let folder = '\u{f07b}';
+    let title = format!("#12 {folder} workspace/project");
+
+    assert_eq!(truncate_title_body(&title, 12), format!("#12 {folder} works…"));
+    assert_eq!(truncate_title_body(&title, title.chars().count()), title);
+    assert_eq!(truncate_title_body("任务完成", 3), "任务…");
+}
+
+#[test]
+fn title_truncation_does_not_mutate_automatic_or_custom_title_state() {
+    // Protect rename state from absorbing renderer-only privilege chrome.
+    let folder = '\u{f07b}';
+    let mut bar = TabBar::new();
+    bar.push(Tab::new(format!("#1 {folder} workspace/project")));
+    bar.set_active_custom_title("renamed project");
+    let before = bar.active().expect("active tab").clone();
+
+    let _ = truncate_title_body(&before.title, 10);
+
+    let after = bar.active().expect("active tab");
+    assert_eq!(after.title, before.title);
+    assert_eq!(after.auto_title, before.auto_title);
+    assert_eq!(after.custom_title, before.custom_title);
+}
+
+#[test]
+fn foreground_privilege_is_independent_tab_state_and_survives_rename_and_detach() {
+    // Protect a gsudo warning from being stored in or erased by editable title text.
+    let mut bar = TabBar::new();
+    let id = bar.push(Tab::new("#1 shell"));
+
+    assert!(bar.set_active_foreground_privileged(true));
+    assert!(bar.active().expect("active tab").foreground_privileged);
+    assert_eq!(bar.active().expect("active tab").title, "#1 shell");
+
+    bar.set_active_custom_title("renamed");
+    assert!(bar.active().expect("active tab").foreground_privileged);
+    assert_eq!(bar.active().expect("active tab").title, "#1 renamed");
+    assert!(!bar.set_active_foreground_privileged(true));
+
+    let detached = bar.detach(id).expect("tab detaches");
+    assert!(detached.foreground_privileged);
+    assert_eq!(detached.custom_title.as_deref(), Some("renamed"));
+}
+
+#[test]
+fn each_tab_keeps_its_own_foreground_privilege_state() {
+    // Protect one gsudo tab from warning every tab in a regular SonicTerm process.
+    let mut bar = TabBar::new();
+    bar.push(Tab::new("#1 regular"));
+    bar.push(Tab::new("#2 gsudo"));
+    assert!(bar.set_active_foreground_privileged(true));
+    bar.activate(0);
+
+    assert!(!bar.tabs()[0].foreground_privileged);
+    assert!(bar.tabs()[1].foreground_privileged);
+}
+
+#[test]
+fn indexed_foreground_privilege_updates_an_inactive_tab_without_moving_focus() {
+    // Protect background gsudo state from being written through the active-tab selector.
+    let mut bar = TabBar::new();
+    let active = bar.push(Tab::new("#1 regular"));
+    bar.push(Tab::new("#2 background"));
+    bar.activate(0);
+
+    assert!(bar.set_foreground_privileged(1, true));
+
+    assert_eq!(bar.active().map(|tab| tab.id), Some(active));
+    assert_eq!(bar.tabs()[0].title, "#1 regular");
+    assert_eq!(bar.tabs()[1].title, "#2 background");
+    assert!(!bar.tabs()[0].foreground_privileged);
+    assert!(bar.tabs()[1].foreground_privileged);
+    assert!(!bar.set_foreground_privileged(1, true));
+}

@@ -16,11 +16,12 @@
 //! 3. BFS from `pty_pid`. Track the deepest leaf (no children); on ties
 //!    by depth, prefer the one with the **most recent** CreateTime — that
 //!    matches what the user just launched.
-//! 4. Resolve the chosen pid's image name via `QueryFullProcessImageNameW`.
+//! 4. Resolve the chosen pid's image name via `QueryFullProcessImageNameW`
+//!    and inspect its token elevation. A batch entry point reuses one process
+//!    snapshot and ancestry index for every visible tab that needs a refresh.
 //!
-//! Returns `(pid, normalized_name)` so the caller has both the numeric id
-//! (for follow-up calls like wait/signal) and a stable lowercase basename
-//! to key the icon lookup off of.
+//! Returns typed process identity and privilege state; the preserved
+//! `(pid, normalized_name)` API remains available to identity-only callers.
 //!
 //! Failures (process gone, ACL denies query, ntdll returns an unexpected
 //! status, etc.) all collapse to `None`; the tab title just falls back to
@@ -34,8 +35,10 @@ use std::mem::MaybeUninit;
 
 use windows::Wdk::System::SystemInformation::NtQuerySystemInformation;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, NTSTATUS, STATUS_INFO_LENGTH_MISMATCH};
+use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
 use windows::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+    OpenProcess, OpenProcessToken, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
+    PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
 use crate::proc_info::normalize_proc_name;
@@ -76,21 +79,188 @@ struct SystemProcessInformation {
 const _: () =
     assert!(std::mem::align_of::<u64>() >= std::mem::align_of::<SystemProcessInformation>());
 
-/// Best-effort `(pid, normalized_name)` of the deepest descendant of
-/// `pty_pid`. Returns `None` if the snapshot can't be taken or no
-/// descendant is found (in which case the caller should fall back to the
-/// shell's own name).
+/// Foreground Windows process identity and privilege presentation state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForegroundProcess {
+    /// Process id selected by the descendant walk.
+    pub pid: u32,
+    /// Normalized executable basename used by tab-title icon matching.
+    pub name: String,
+    /// Whether this foreground process requires the privilege warning.
+    pub privileged: bool,
+}
+
+/// Best-effort foreground process at the deepest descendant of `pty_pid`.
+///
+/// Returns `None` if the snapshot cannot be taken or its selected process name
+/// cannot be resolved. Token-query failure remains an unknown direct state;
+/// `gsudo` itself still requires the warning because its regular client can
+/// broker a high-integrity descendant that UIPI prevents the parent from
+/// querying directly.
+pub fn current_foreground_process(pty_pid: u32) -> Option<ForegroundProcess> {
+    current_foreground_processes(&[pty_pid]).pop().flatten()
+}
+
+/// Best-effort foreground processes for several pty shell pids from one snapshot.
+///
+/// Results retain input order and contain `None` independently when one shell or
+/// selected descendant disappears while the shared snapshot is being resolved.
+pub fn current_foreground_processes(pty_pids: &[u32]) -> Vec<Option<ForegroundProcess>> {
+    if pty_pids.is_empty() {
+        // When: `pty_pids.is_empty()`, avoid taking a system-wide process snapshot.
+        return Vec::new();
+    }
+    let Some(snapshot) = snapshot_processes() else {
+        // When: the shared process snapshot fails, no input pid has an observable descendant.
+        return vec![None; pty_pids.len()];
+    };
+    let index = ProcessIndex::new(&snapshot);
+    pty_pids.iter().map(|pty_pid| foreground_process_from_index(&index, *pty_pid)).collect()
+}
+
+fn foreground_process_from_index(
+    index: &ProcessIndex<'_>,
+    pty_pid: u32,
+) -> Option<ForegroundProcess> {
+    let leaf = index.pick_deepest_leaf(pty_pid)?;
+    let path = index.path_to_root(pty_pid, leaf).unwrap_or_else(|| vec![leaf]);
+    let names: Vec<(u32, String)> = path
+        .iter()
+        .filter_map(|pid| resolve_process_name(*pid).map(|name| (*pid, normalize_proc_name(&name))))
+        .collect();
+    let name = names.first()?.1.clone();
+    let gsudo_ancestor = names.iter().any(|(_, name)| name == "gsudo");
+    let privileged =
+        foreground_process_is_privileged(&name, process_token_is_elevated(leaf), gsudo_ancestor);
+    Some(ForegroundProcess { pid: leaf, name, privileged })
+}
+
+/// Best-effort `(pid, normalized_name)` of the deepest descendant of `pty_pid`.
+///
+/// Preserved for callers that need process identity but not privilege state.
 pub fn current_foreground_pid(pty_pid: u32) -> Option<(u32, String)> {
-    let snapshot = snapshot_processes()?;
-    let leaf = pick_deepest_leaf(&snapshot, pty_pid)?;
-    let name = resolve_process_name(leaf)?;
-    Some((leaf, normalize_proc_name(&name)))
+    let foreground = current_foreground_process(pty_pid)?;
+    Some((foreground.pid, foreground.name))
+}
+
+fn foreground_process_is_privileged(
+    name: &str,
+    token_elevated: Option<bool>,
+    gsudo_ancestor: bool,
+) -> bool {
+    token_elevated == Some(true) || gsudo_ancestor || normalize_proc_name(name) == "gsudo"
+}
+
+const fn token_elevation_value_is_privileged(value: u32) -> bool {
+    value != 0
+}
+
+fn process_token_is_elevated(pid: u32) -> Option<bool> {
+    let process =
+        // SAFETY: `OpenProcess` receives only values and returns an owned query handle closed below.
+        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let mut token = HANDLE::default();
+    let opened =
+        // SAFETY: `process` is live and `token` points to writable storage for one owned handle.
+        unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) };
+    let _ =
+        // SAFETY: `process` is still owned and has not been closed since `OpenProcess` returned it.
+        unsafe { CloseHandle(process) };
+    opened.ok()?;
+
+    let mut elevation = TOKEN_ELEVATION::default();
+    let mut returned = 0;
+    let result =
+        // SAFETY: `token` is live and `elevation` is writable for the declared byte length.
+        unsafe {
+            GetTokenInformation(
+                token,
+                TokenElevation,
+                Some(std::ptr::from_mut(&mut elevation).cast()),
+                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut returned,
+            )
+        };
+    let _ =
+        // SAFETY: `token` is still owned and has not been closed since `OpenProcessToken` returned it.
+        unsafe { CloseHandle(token) };
+    result.ok()?;
+    Some(token_elevation_value_is_privileged(elevation.TokenIsElevated))
 }
 
 struct ProcEntry {
     pid: u32,
     parent: u32,
     create_time: i64,
+}
+
+struct ProcessIndex<'a> {
+    children: HashMap<u32, Vec<u32>>,
+    by_pid: HashMap<u32, &'a ProcEntry>,
+}
+
+impl<'a> ProcessIndex<'a> {
+    fn new(snapshot: &'a [ProcEntry]) -> Self {
+        let mut children = HashMap::with_capacity(snapshot.len());
+        let mut by_pid = HashMap::with_capacity(snapshot.len());
+        for entry in snapshot {
+            children.entry(entry.parent).or_insert_with(Vec::new).push(entry.pid);
+            by_pid.insert(entry.pid, entry);
+        }
+        Self { children, by_pid }
+    }
+
+    fn path_to_root(&self, root: u32, leaf: u32) -> Option<Vec<u32>> {
+        let mut path = Vec::new();
+        let mut current = leaf;
+        for _ in 0..=self.by_pid.len() {
+            path.push(current);
+            if current == root {
+                // When: `current == root`, the selected ancestry reached this pane's PTY shell.
+                return Some(path);
+            }
+            let parent = self.by_pid.get(&current)?.parent;
+            if parent == current || parent == 0 {
+                // When: `parent == current || parent == 0`, this ancestry cannot reach the PTY root.
+                return None;
+            }
+            current = parent;
+        }
+        None
+    }
+
+    fn pick_deepest_leaf(&self, root: u32) -> Option<u32> {
+        let mut chosen = root;
+        let mut chosen_depth = 0usize;
+        let mut chosen_ctime = self.by_pid.get(&root).map(|entry| entry.create_time).unwrap_or(0);
+
+        let mut frontier = vec![(root, 0usize)];
+        while let Some((current, depth)) = frontier.pop() {
+            let children = self.children.get(&current).map(Vec::as_slice).unwrap_or(&[]);
+            if children.is_empty() {
+                let create_time =
+                    self.by_pid.get(&current).map(|entry| entry.create_time).unwrap_or(0);
+                let better = depth > chosen_depth
+                    || (depth == chosen_depth && create_time > chosen_ctime && current != root);
+                if better {
+                    chosen = current;
+                    chosen_depth = depth;
+                    chosen_ctime = create_time;
+                }
+            } else {
+                // When: `children` is nonempty, `current` cannot be the selected leaf.
+                for &child in children {
+                    if child == current || child == 0 {
+                        // When: `child` equal to `current` would cycle; pid 0 is never runnable.
+                        continue;
+                    }
+                    frontier.push((child, depth + 1));
+                }
+            }
+        }
+
+        Some(chosen)
+    }
 }
 
 /// Bound the STATUS_INFO_LENGTH_MISMATCH retry loop so a pathologically
@@ -176,53 +346,14 @@ fn parse_snapshot(buf: &[u64]) -> Vec<ProcEntry> {
     out
 }
 
+#[cfg(test)]
+fn path_to_root(snapshot: &[ProcEntry], root: u32, leaf: u32) -> Option<Vec<u32>> {
+    ProcessIndex::new(snapshot).path_to_root(root, leaf)
+}
+
+#[cfg(test)]
 fn pick_deepest_leaf(snapshot: &[ProcEntry], root: u32) -> Option<u32> {
-    // children[parent] -> Vec<pid>
-    let mut children: HashMap<u32, Vec<u32>> = HashMap::with_capacity(snapshot.len());
-    let mut by_pid: HashMap<u32, &ProcEntry> = HashMap::with_capacity(snapshot.len());
-    for entry in snapshot {
-        children.entry(entry.parent).or_default().push(entry.pid);
-        by_pid.insert(entry.pid, entry);
-    }
-
-    // BFS from `root`, tracking (deepest depth, most-recent create_time at
-    // that depth, chosen pid). Includes `root` itself as a fallback so that
-    // a shell with no children still resolves to its own pid — callers can
-    // then decide whether to bother showing the shell name.
-    let mut chosen = root;
-    let mut chosen_depth: usize = 0;
-    let mut chosen_ctime: i64 = by_pid.get(&root).map(|e| e.create_time).unwrap_or(0);
-
-    let mut frontier: Vec<(u32, usize)> = vec![(root, 0)];
-    while let Some((cur, depth)) = frontier.pop() {
-        let kids = children.get(&cur).map(|v| v.as_slice()).unwrap_or(&[]);
-        if kids.is_empty() {
-            // leaf — candidate
-            let ctime = by_pid.get(&cur).map(|e| e.create_time).unwrap_or(0);
-            let better = depth > chosen_depth
-                || (depth == chosen_depth && ctime > chosen_ctime && cur != root);
-            if better {
-                chosen = cur;
-                chosen_depth = depth;
-                chosen_ctime = ctime;
-            }
-        } else {
-            // When: `kids` is nonempty, `cur` cannot be the leaf chosen as the foreground descendant.
-            for &k in kids {
-                if k == cur || k == 0 {
-                    // When: `k` equal to `cur` would cycle; pid 0 is the idle process, never a runnable descendant.
-                    continue;
-                }
-                frontier.push((k, depth + 1));
-            }
-        }
-    }
-
-    if chosen == root && chosen_depth == 0 {
-        // When: `chosen` never moved off `root`, so report the shell pid rather than no process.
-        return Some(root);
-    }
-    Some(chosen)
+    ProcessIndex::new(snapshot).pick_deepest_leaf(root)
 }
 
 fn resolve_process_name(pid: u32) -> Option<String> {
@@ -256,3 +387,7 @@ fn resolve_process_name(pid: u32) -> Option<String> {
         unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u16, size as usize) };
     Some(String::from_utf16_lossy(slice))
 }
+
+#[cfg(test)]
+#[path = "foreground_proc_tests.rs"]
+mod foreground_proc_tests;

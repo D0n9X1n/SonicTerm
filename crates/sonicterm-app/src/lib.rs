@@ -22,6 +22,24 @@ pub mod window_key_boundary;
 
 pub use app::{KeymapLoader, ThemeLoader};
 
+/// Privilege observed for the SonicTerm process at native startup.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ProcessPrivilege {
+    /// The process was observed without elevated operating-system privilege.
+    #[default]
+    Unprivileged,
+    /// The process was observed with an elevated token or effective user ID zero.
+    Privileged,
+}
+
+impl ProcessPrivilege {
+    /// Whether tab chrome should show the process-level privilege warning.
+    #[must_use]
+    pub const fn is_privileged(self) -> bool {
+        matches!(self, Self::Privileged)
+    }
+}
+
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod lib_tests;

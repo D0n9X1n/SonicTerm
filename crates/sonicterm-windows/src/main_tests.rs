@@ -27,6 +27,21 @@ fn integration_test_target_is_present() {
 }
 
 #[test]
+fn startup_passes_the_native_token_observation_to_the_shell() {
+    // Protect startup from replacing the Win32 token query with title or environment inference.
+    const MAIN: &str = include_str!("main.rs");
+    const PRIVILEGE: &str = include_str!("privilege.rs");
+
+    assert!(MAIN.contains("privilege::detect_process_privilege()"));
+    assert!(MAIN.contains(".with_process_privilege(process_privilege)"));
+    assert!(PRIVILEGE.contains("OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY"));
+    assert!(PRIVILEGE.contains("TokenElevation"));
+    for forbidden in ["Administrator", "$USER", "foreground", "title"] {
+        assert!(!PRIVILEGE.contains(forbidden));
+    }
+}
+
+#[test]
 fn software_presenter_tests_are_declared_by_their_source_module() {
     const SOURCE: &str = include_str!("software_presenter.rs");
 

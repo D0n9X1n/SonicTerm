@@ -46,6 +46,8 @@ mod menubar;
 mod os_drag_win;
 #[cfg(test)]
 mod packaging_manifest;
+#[cfg(target_os = "windows")]
+mod privilege;
 mod startup;
 // Windows-only: it resolves `software_render_mode` for the Win32 backdrop
 // decision, and nothing off-Windows consumes it.
@@ -219,7 +221,16 @@ fn main() -> Result<()> {
             // owns, so the binary never reaches into `App`'s field layout.
             let machine =
                 sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default());
+            let process_privilege = privilege::detect_process_privilege().unwrap_or_else(|error| {
+                tracing::warn!(%error, "process privilege query failed; treating process as unprivileged");
+                sonicterm_app::ProcessPrivilege::Unprivileged
+            });
+            tracing::info!(
+                privileged = process_privilege.is_privileged(),
+                "process privilege observed"
+            );
             let mut shell = sonicterm_app::shell::WindowsShell::new(machine, theme, config, keymap)
+                .with_process_privilege(process_privilege)
                 .with_asset_loaders(theme_loader, keymap_loader)
                 .with_on_window_ready(on_window_ready);
             if ole_available {

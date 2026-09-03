@@ -458,23 +458,32 @@ pub(crate) fn fit_single_cell_status_marker(
     (cell_x + (cell_w - fitted_w) * 0.5, cell_y + (cell_h - fitted_h) * 0.5, fitted_w, fitted_h)
 }
 
+/// Whether global or per-tab privilege requires the independent lock badge.
+fn tab_requires_privilege_badge(process_privileged: bool, foreground_privileged: bool) -> bool {
+    process_privileged || foreground_privileged
+}
+
+fn tab_bar_hash(tabs: &TabBar, now: Instant) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hash = DefaultHasher::new();
+    tabs.active_index().hash(&mut hash);
+    for tab in tabs.tabs() {
+        tab.id.0.hash(&mut hash);
+        tab.title.hash(&mut hash);
+        tab.custom_color.hash(&mut hash);
+        tab.foreground_privileged.hash(&mut hash);
+        command_status_hash(&tab.command, now).hash(&mut hash);
+    }
+    hash.finish()
+}
+
 /// Resolve the title text colour for a single tab, honouring hover.
 ///
-/// Two cases, unified so a custom-coloured tab highlights on hover exactly
-/// like a default-coloured one:
-///
-/// * **No custom colour** — pick `active_fg` when the tab is active *or*
-///   hovered, else `inactive_fg`. This is the historical default-tab
-///   behaviour.
-/// * **Custom colour** — paint the user's colour. It is only dimmed (to
-///   `0.55` alpha, matching the unfocused-panel chrome) when the tab is
-///   neither active, hovered, nor part of a focused panel. Hovering an
-///   inactive custom tab therefore restores it to full strength, giving the
-///   same "lights up under the cursor" affordance as a default tab.
-///
-/// Pure so it is unit-testable without a GPU; the renderer (both the wgpu
-/// path and the Windows software path, which blits the same glyph
-/// instances) feeds the returned colour straight into chrome text layout.
+/// Default tabs use the active foreground when active or hovered. Custom
+/// colours stay full-strength while active, hovered, or panel-focused and
+/// otherwise recede to the standard unfocused alpha.
 fn tab_title_color(
     custom_color: Option<&str>,
     active: bool,
@@ -506,6 +515,136 @@ fn tab_title_color(
                 scale_chrome_text_alpha(color, 0.55)
             }
         }
+    }
+}
+
+const PRIVILEGE_BADGE_SIZE_PX: f32 = 18.0;
+const PRIVILEGE_BADGE_GAP_PX: f32 = 6.0;
+#[cfg(test)]
+const PRIVILEGE_BADGE_QUAD_COUNT: usize = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TabTitleBlockPlacement {
+    badge_rect: Option<TabTitleRect>,
+    text_x: f32,
+    text_clip: TabTitleRect,
+}
+
+fn scaled_privilege_badge_metrics(scale: f32) -> (f32, f32) {
+    let scale = scale.max(0.1);
+    (PRIVILEGE_BADGE_SIZE_PX * scale, PRIVILEGE_BADGE_GAP_PX * scale)
+}
+
+fn tab_title_capacity(rect: TabTitleRect, avg_glyph_w: f32, privileged: bool, scale: f32) -> usize {
+    let reserved = if privileged {
+        let (badge, gap) = scaled_privilege_badge_metrics(scale);
+        badge + gap
+    } else {
+        // When: `privileged` is false, preserve the full historical title width.
+        0.0
+    };
+    (((rect.w - reserved).max(0.0) / avg_glyph_w.max(1.0)).floor() as usize)
+        .max(usize::from(!privileged))
+}
+
+fn tab_title_display_text(title: &str, command_badge: Option<&str>, max_chars: usize) -> String {
+    let Some(badge) = command_badge else {
+        // When: `command_badge` is None, all character capacity belongs to the stored title.
+        return truncate_title_body(title, max_chars);
+    };
+    let badge_chars = badge.chars().count() + 1;
+    if badge_chars >= max_chars {
+        // When: `badge_chars >= max_chars`, keep the leading status rather than partial title text.
+        return truncate_title_body(badge, max_chars);
+    }
+    format!("{badge} {}", truncate_title_body(title, max_chars - badge_chars))
+}
+
+fn tab_title_block_placement(
+    rect: TabTitleRect,
+    measured_text_width: f32,
+    privileged: bool,
+    scale: f32,
+) -> TabTitleBlockPlacement {
+    if !privileged {
+        // When: `!privileged`, center text in the unchanged historical title rectangle.
+        let text_x = rect.x + ((rect.w - measured_text_width) * 0.5).max(0.0);
+        return TabTitleBlockPlacement { badge_rect: None, text_x, text_clip: rect };
+    }
+    let (badge_size, gap) = scaled_privilege_badge_metrics(scale);
+    let badge_size = badge_size.min(rect.h).min(rect.w.max(0.0));
+    let total_width = (badge_size + gap + measured_text_width).min(rect.w.max(0.0));
+    let block_x = rect.x + ((rect.w - total_width) * 0.5).max(0.0);
+    let badge_y = rect.y + ((rect.h - badge_size) * 0.5).max(0.0);
+    let badge_rect = TabTitleRect { x: block_x, y: badge_y, w: badge_size, h: badge_size };
+    let text_x = (badge_rect.x + badge_rect.w + gap).min(rect.x + rect.w);
+    let text_clip =
+        TabTitleRect { x: text_x, y: rect.y, w: (rect.x + rect.w - text_x).max(0.0), h: rect.h };
+    TabTitleBlockPlacement { badge_rect: Some(badge_rect), text_x, text_clip }
+}
+
+fn privilege_lock_color(danger: [f32; 4]) -> [f32; 4] {
+    if danger[0] * 0.2126 + danger[1] * 0.7152 + danger[2] * 0.0722 > 0.179 {
+        [0.0, 0.0, 0.0, danger[3]]
+    } else {
+        // When: danger luminance is at most 0.179, white lock geometry has stronger contrast.
+        [danger[3], danger[3], danger[3], danger[3]]
+    }
+}
+
+#[cfg(test)]
+fn linear_contrast_ratio(a: [f32; 4], b: [f32; 4]) -> f32 {
+    let luminance = |color: [f32; 4]| color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722;
+    let (brighter, darker) = {
+        let a = luminance(a);
+        let b = luminance(b);
+        if a >= b {
+            (a, b)
+        } else {
+            // When: `a < b`, use `b` as the brighter luminance in the contrast ratio.
+            (b, a)
+        }
+    };
+    (brighter + 0.05) / (darker + 0.05)
+}
+
+fn privilege_lock_rects(badge: TabTitleRect) -> [TabTitleRect; 4] {
+    let unit = badge.w.min(badge.h) / 18.0;
+    let x = badge.x;
+    let y = badge.y;
+    [
+        TabTitleRect { x: x + 5.0 * unit, y: y + 3.0 * unit, w: 2.0 * unit, h: 6.0 * unit },
+        TabTitleRect { x: x + 11.0 * unit, y: y + 3.0 * unit, w: 2.0 * unit, h: 6.0 * unit },
+        TabTitleRect { x: x + 7.0 * unit, y: y + 3.0 * unit, w: 4.0 * unit, h: 2.0 * unit },
+        TabTitleRect { x: x + 4.0 * unit, y: y + 8.0 * unit, w: 10.0 * unit, h: 7.0 * unit },
+    ]
+}
+
+fn emit_privilege_badge_quads(
+    quads: &mut Vec<QuadInstance>,
+    badge: TabTitleRect,
+    danger: [f32; 4],
+    alpha: f32,
+    surface: (f32, f32),
+) {
+    let alpha = alpha.clamp(0.0, 1.0);
+    let scale = |mut color: [f32; 4]| {
+        for channel in &mut color {
+            *channel *= alpha;
+        }
+        color
+    };
+    let (sw, sh) = surface;
+    let lock = scale(privilege_lock_color(danger));
+    let danger = scale(danger);
+    quads.push(QuadInstance::rounded(
+        px_to_ndc(badge.x, badge.y, badge.w, badge.h, sw, sh),
+        danger,
+        [badge.w, badge.h],
+        badge.w.min(badge.h) * 0.25,
+    ));
+    for part in privilege_lock_rects(badge) {
+        quads.push(QuadInstance::sharp(px_to_ndc(part.x, part.y, part.w, part.h, sw, sh), lock));
     }
 }
 
@@ -799,10 +938,10 @@ use sonicterm_render_model::boundary::ui::{
     search::SearchState,
     selection::Selection,
     tabbar_view::{
-        tab_bar_height, TabBarLayout, ACTIVE_TOP_ACCENT_H, ACTIVE_TOP_ACCENT_INSET, TAB_BAR_HEIGHT,
-        TAB_GAP, TAB_VERT_INSET,
+        tab_bar_height, Rect as TabTitleRect, TabBarLayout, ACTIVE_TOP_ACCENT_H,
+        ACTIVE_TOP_ACCENT_INSET, TAB_BAR_HEIGHT, TAB_GAP, TAB_VERT_INSET,
     },
-    tabs::TabBar,
+    tabs::{truncate_title_body, TabBar},
 };
 use sonicterm_render_model::geometry::{DamageRect, PixelRect};
 use sonicterm_text::GlyphInstance;
@@ -1652,6 +1791,7 @@ struct FrameKey {
     /// hover onto / off a URL (or to a different URL span) invalidates
     /// the cached frame and re-shapes with / without the accent recolor.
     hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
+    process_privileged: bool,
 }
 
 /// Memoized inline IME preedit overlay glyphs. Reused across
@@ -3990,8 +4130,8 @@ impl GpuRenderer {
         Some((pane.id, row as u16, col))
     }
 
-    // `render` threads 11 distinct slices of borrowed app state through
-    // wgpu submission. A parameter struct would either need 11 separate
+    // `render` threads borrowed app state plus one copyable process flag through
+    // wgpu submission. A parameter struct would still need separate
     // borrow fields (no win over positional args) or force the App layer
     // to construct an interior-mutable wrapper around its own state —
     // both worse than the current shape. Keep the suppression beside this
@@ -4009,6 +4149,7 @@ impl GpuRenderer {
         selection: Option<&Selection>,
         copy_mode: Option<&CopyModeState>,
         tabs: &TabBar,
+        process_privileged: bool,
         search: Option<&SearchState>,
         palette: Option<&mut CommandPalette>,
         ime: Option<&ImeState>,
@@ -4297,22 +4438,9 @@ impl GpuRenderer {
                 h.finish()
             })
             .unwrap_or(0);
-        // Hash the full tab list (titles + ids + order + active index) so
-        // closing/renaming/reordering an INACTIVE tab still invalidates the
-        // frame — without this, the tab bar would render stale.
-        let tab_hash: u64 = {
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-            let mut h = DefaultHasher::new();
-            tabs.active_index().hash(&mut h);
-            for t in tabs.tabs() {
-                t.id.0.hash(&mut h);
-                t.title.hash(&mut h);
-                t.custom_color.hash(&mut h);
-                command_status_hash(&t.command, now).hash(&mut h);
-            }
-            h.finish()
-        };
+        // Include every tab's title, order, activity, color, command status, and
+        // foreground privilege so inactive-tab changes cannot leave stale chrome.
+        let tab_hash = tab_bar_hash(tabs, now);
         let broadcast_receivers_hash: u64 = {
             use std::collections::hash_map::DefaultHasher;
             use std::hash::{Hash, Hasher};
@@ -4425,6 +4553,7 @@ impl GpuRenderer {
                 || prev.broadcast_receivers_hash != broadcast_receivers_hash
                 || prev.inline_media_hash != inline_media_hash
                 || prev.hovered_url_cells != hovered_url_cells
+                || prev.process_privileged != process_privileged
         });
         let mut damage = DamageRect::empty();
         let surface_rect = full_surface_rect(self.config.width, self.config.height);
@@ -4507,6 +4636,7 @@ impl GpuRenderer {
             broadcast_receivers_hash,
             inline_media_hash,
             hovered_url_cells,
+            process_privileged,
         };
         let pane_revs_len = key.pane_revs.len();
         if Some(&key) == self.last_frame_key.as_ref() {
@@ -5711,29 +5841,33 @@ impl GpuRenderer {
             let title_top = bar_y + ((bar_h - tab_raster_px * 1.2) / 2.0).max(0.0);
             let tab_baseline_y = title_top + tab_raster_px * 0.95;
             let native_em = tab_raster_px;
-            if let Some(stack) = self.tab_title_font_stack.as_ref() {
-                // When: `self.tab_title_font_stack` is Some — title text has a native shaper; otherwise only bar quads draw.
-                let mut tab_rasterizer = stack.clone();
-                for t in &layout.tabs {
-                    let Some(tab) = tabs.tabs().get(t.idx) else {
-                        // When: `tabs.tabs().get(t.idx)` is None — the layout
-                        // outlived a closed tab, so there is no title to draw.
-                        continue;
-                    };
-                    let active = layout.active == Some(t.idx);
-                    let active_panel_focused = active && self.window_focused;
-                    let hovered = hover_tab_idx == t.idx as u32;
-                    let mut title = tab.command.clone().badge(now, active).map_or_else(
-                        || tab.title.clone(),
-                        |badge| format!("{badge} {}", tab.title),
-                    );
-                    let max_chars = ((t.title_rect.w / avg_glyph_w).floor() as usize).max(1);
-                    let title_chars: Vec<char> = title.chars().collect();
-                    if title_chars.len() > max_chars {
-                        let keep = max_chars.saturating_sub(1);
-                        title = title_chars.iter().take(keep).collect();
-                        title.push('…');
-                    }
+            let mut tab_rasterizer = self.tab_title_font_stack.clone();
+            for t in &layout.tabs {
+                let Some(tab) = tabs.tabs().get(t.idx) else {
+                    // When: `tabs.tabs().get(t.idx)` is None — the layout
+                    // outlived a closed tab, so there is no title to draw.
+                    continue;
+                };
+                let active = layout.active == Some(t.idx);
+                let active_panel_focused = active && self.window_focused;
+                let hovered = hover_tab_idx == t.idx as u32;
+                let show_privilege_badge =
+                    tab_requires_privilege_badge(process_privileged, tab.foreground_privileged);
+                let max_chars = tab_title_capacity(
+                    t.title_rect,
+                    avg_glyph_w,
+                    show_privilege_badge,
+                    self.scale_factor,
+                );
+                let title = tab_title_display_text(
+                    &tab.title,
+                    tab.command.clone().badge(now, active),
+                    max_chars,
+                );
+                let badge_alpha = if source_tab_idx == Some(t.idx) { source_alpha } else { 1.0 };
+                if let (Some(stack), Some(rasterizer)) =
+                    (self.tab_title_font_stack.as_ref(), tab_rasterizer.as_mut())
+                {
                     let mut color = tab_title_color(
                         tab.custom_color.as_deref(),
                         active,
@@ -5747,7 +5881,7 @@ impl GpuRenderer {
                     }
                     let measure = chrome_text::layout_with_raster_variant(
                         stack,
-                        &mut tab_rasterizer,
+                        rasterizer,
                         &mut self.glyph_atlas,
                         &title,
                         color,
@@ -5759,28 +5893,54 @@ impl GpuRenderer {
                         None,
                         GlyphRasterVariant::TabTitle,
                     );
-                    let origin_x =
-                        t.title_rect.x + ((t.title_rect.w - measure.width_px) * 0.5).max(0.0);
+                    let placement = tab_title_block_placement(
+                        t.title_rect,
+                        measure.width_px,
+                        show_privilege_badge,
+                        self.scale_factor,
+                    );
+                    if let Some(badge) = placement.badge_rect {
+                        emit_privilege_badge_quads(
+                            &mut quads,
+                            badge,
+                            ui_palette.danger,
+                            badge_alpha,
+                            (sw, sh),
+                        );
+                    }
                     let final_layout = chrome_text::layout_with_raster_variant(
                         stack,
-                        &mut tab_rasterizer,
+                        rasterizer,
                         &mut self.glyph_atlas,
                         &title,
                         color,
                         ChromeAttrs::default(),
                         tab_raster_px,
                         native_em,
-                        (origin_x, tab_baseline_y),
+                        (placement.text_x, tab_baseline_y),
                         (sw, sh),
                         Some(ChromeClip {
-                            x: t.title_rect.x,
-                            y: t.title_rect.y,
-                            w: t.title_rect.w,
-                            h: t.title_rect.h,
+                            x: placement.text_clip.x,
+                            y: placement.text_clip.y,
+                            w: placement.text_clip.w,
+                            h: placement.text_clip.h,
                         }),
                         GlyphRasterVariant::TabTitle,
                     );
                     glyph_instances.extend(final_layout.glyphs);
+                } else if show_privilege_badge {
+                    // When: `show_privilege_badge` is true without a title font stack, paint the vector warning alone.
+                    let placement =
+                        tab_title_block_placement(t.title_rect, 0.0, true, self.scale_factor);
+                    if let Some(badge) = placement.badge_rect {
+                        emit_privilege_badge_quads(
+                            &mut quads,
+                            badge,
+                            ui_palette.danger,
+                            badge_alpha,
+                            (sw, sh),
+                        );
+                    }
                 }
             }
         }

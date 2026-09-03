@@ -73,6 +73,34 @@ Foreground-process probing is implemented on macOS and Windows. Linux and other
 platforms without a probe report no process name, so the title uses the working-
 directory folder glyph or the terminal fallback.
 
+When the SonicTerm process itself has elevated operating-system privilege, every
+tab also shows a separate, non-animated lock badge. Windows derives that global
+state from the current process token; macOS and Linux use effective user ID zero.
+A regular Windows SonicTerm also shows the badge only on a tab whose current
+foreground descendant has an elevated token. The existing 500 ms foreground
+process cache refreshes active and inactive tab state from one shared process-table
+snapshot per window; it recognizes the actual `gsudo.exe` broker in the selected
+descendant path when UIPI prevents direct access to its high-integrity child token.
+Accepted input guarantees a sample 500 ms later, and while a per-tab warning is
+visible fixed 500 ms samples clear it after control returns to the regular shell;
+unchanged samples do not repaint and idle tabs do not poll.
+
+The badge is vector chrome built from quads, not a font glyph or title character.
+Its background uses the theme's ANSI danger red and its lock geometry selects
+black or white for linear-light contrast, so active, inactive, hovered,
+custom-colored, light, dark, and high-contrast tabs keep the same warning
+treatment. A dragged source tab applies the normal source alpha to the complete
+badge.
+
+The badge never replaces or recolors the foreground-process icon. It is not stored
+in `Tab.title`, `auto_title`, or `custom_title`, so OSC titles and manual renames
+cannot remove or persist it. Privileged layout reserves the badge width and gap
+before shortening only the title suffix; the `#N` identity and process icon remain
+at the front whenever they fit. Main and torn-out windows paint the same
+process-level state through both GPU and Windows software rendering. This tab
+chrome does not modify executable resources, native window icons, taskbar, Dock,
+application-switcher, or package icons.
+
 These are Private Use Area codepoints supplied by the bundled Rec Mono faces:
 
 | Application | Exact aliases | Bundled glyph identity | Codepoint |
@@ -331,6 +359,25 @@ U+F07B，否则使用终端字形 U+F489。
 
 前台进程探测只在 macOS 和 Windows 实现。Linux 与其它没有探测实现的平台不会返回
 进程名，因此标签页使用工作目录的文件夹字形或终端回退字形。
+
+当 SonicTerm 进程本身拥有提升的操作系统权限时，每个标签页还会显示一个独立且不动画的
+锁形警告标记。Windows 从当前进程 token 读取这个全局状态；macOS 和 Linux 以有效用户 ID
+为零作为判断依据。普通权限的 Windows SonicTerm 中，如果某个标签页当前的前台后代进程
+拥有提升 token，也只在该标签页显示标记。现有的 500 毫秒前台进程缓存会通过每个窗口共用
+的一次进程表快照刷新活动和非活动标签页状态；当 UIPI 阻止直接读取高完整性子进程 token 时，
+它会识别所选后代路径中的真实 `gsudo.exe` broker。成功接受输入后保证在 500 毫秒后探测；
+只要按标签页警告可见，就每 500 毫秒固定探测，并在控制权回到普通 shell 后清除标记。结果未
+变化的探测不会重绘，空闲标签页也不会轮询。
+
+该标记由四边形组成的矢量界面元素绘制，不是字体字形或标题字符。背景使用主题 ANSI danger
+红色，锁形则按线性光对比度选择黑色或白色，因此活动、非活动、悬停、自定义颜色、浅色、
+深色和高对比度标签页都保持同样的警告样式。拖动源标签页时，整个标记采用通常的源透明度。
+
+该标记不会替换或重新着色前台进程图标，也不会写入 `Tab.title`、`auto_title` 或
+`custom_title`，所以 OSC 标题和手动重命名都不能移除或保存它。特权布局会先预留标记宽度
+和间距，再只缩短标题后缀；空间允许时，开头的 `#N` 身份和进程图标始终保留。主窗口与拆出
+窗口通过 GPU 和 Windows 软件渲染路径绘制同一个进程级状态。此标签页界面元素不会修改
+可执行文件资源、原生窗口图标、任务栏、Dock、应用切换器或软件包图标。
 
 以下是内置 Rec Mono 字体提供的私用区码点：
 

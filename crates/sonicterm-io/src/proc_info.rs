@@ -7,31 +7,58 @@
 //! walk to the deepest shell descendant so `nvim foo` reports `nvim`, not the
 //! waiting shell. Other platforms return no foreground-process name.
 
-/// Best-effort foreground process name for the pty whose shell has the
-/// given `pid`. Returns the *basename* (no path, no leading `-`), or `None`
-/// if the platform layer can't determine it.
-///
-/// Conventions to keep callers stable:
-/// - Login shells often appear as `-zsh`; the leading `-` is stripped.
-/// - We walk descendants of `pid` and prefer the deepest one (i.e. what
-///   the shell is currently waiting on) so opening `nvim` reports `"nvim"`,
-///   not `"zsh"`.
-#[cfg(target_os = "macos")]
-pub fn foreground_process(pid: u32) -> Option<String> {
-    macos::foreground_process(pid)
+/// Foreground process identity and privilege presentation state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForegroundProcess {
+    /// Normalized executable basename used by tab-title icon matching.
+    pub name: String,
+    /// Whether this foreground process requires a privilege warning.
+    pub privileged: bool,
 }
 
-/// Best-effort basename of the deepest Windows shell descendant, normalized
-/// for title matching. Falls back to the shell; returns `None` if probing fails.
+/// Best-effort foreground process for the pty whose shell has the given `pid`.
+///
+/// The name is a normalized basename. Windows also reports whether the selected
+/// foreground process requires a privilege warning; other platforms leave that
+/// field false because process-level privilege is captured at native startup.
+#[cfg(target_os = "macos")]
+pub fn foreground_process_info(pid: u32) -> Option<ForegroundProcess> {
+    macos::foreground_process(pid).map(|name| ForegroundProcess { name, privileged: false })
+}
+
+/// Best-effort foreground process for the deepest Windows shell descendant.
 #[cfg(windows)]
-pub fn foreground_process(pid: u32) -> Option<String> {
-    crate::foreground_proc::current_foreground_pid(pid).map(|(_pid, name)| name)
+pub fn foreground_process_info(pid: u32) -> Option<ForegroundProcess> {
+    crate::foreground_proc::current_foreground_process(pid)
+        .map(|process| ForegroundProcess { name: process.name, privileged: process.privileged })
 }
 
 /// Reports no foreground process on platforms without an implementation.
 #[cfg(not(any(target_os = "macos", windows)))]
-pub fn foreground_process(_pid: u32) -> Option<String> {
+pub fn foreground_process_info(_pid: u32) -> Option<ForegroundProcess> {
     None
+}
+
+/// Best-effort foreground processes for several Windows pty shell pids.
+///
+/// One native process-table snapshot serves every input pid. Results preserve
+/// input order and represent per-process races independently with `None`.
+#[cfg(windows)]
+pub fn foreground_processes_info(pids: &[u32]) -> Vec<Option<ForegroundProcess>> {
+    crate::foreground_proc::current_foreground_processes(pids)
+        .into_iter()
+        .map(|process| {
+            process.map(|process| ForegroundProcess {
+                name: process.name,
+                privileged: process.privileged,
+            })
+        })
+        .collect()
+}
+
+/// Best-effort foreground process name for tab-title icon matching.
+pub fn foreground_process(pid: u32) -> Option<String> {
+    foreground_process_info(pid).map(|process| process.name)
 }
 
 /// Normalize a process name reported by the OS into a stable exact-match key.

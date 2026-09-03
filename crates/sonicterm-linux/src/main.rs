@@ -28,6 +28,23 @@ enum StartupMode {
 }
 
 #[cfg(any(target_os = "linux", test))]
+fn process_privilege_from_euid(euid: u32) -> sonicterm_app::ProcessPrivilege {
+    if euid == 0 {
+        sonicterm_app::ProcessPrivilege::Privileged
+    } else {
+        sonicterm_app::ProcessPrivilege::Unprivileged
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn detect_process_privilege() -> sonicterm_app::ProcessPrivilege {
+    let euid =
+        // SAFETY: `geteuid` reads process credentials and accepts no pointer or owned resource.
+        unsafe { libc::geteuid() };
+    process_privilege_from_euid(euid)
+}
+
+#[cfg(any(target_os = "linux", test))]
 fn parse_startup_mode<I, S>(args: I) -> std::result::Result<StartupMode, &'static str>
 where
     I: IntoIterator<Item = S>,
@@ -211,7 +228,10 @@ fn run_linux(mode: StartupMode) -> Result<i32> {
     let keymap_loader: sonicterm_app::KeymapLoader =
         Box::new(|name| Keymap::load_name_or_path(name, &asset_dir()));
     let machine = sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default());
+    let process_privilege = detect_process_privilege();
+    tracing::info!(privileged = process_privilege.is_privileged(), "process privilege observed");
     let mut shell = sonicterm_app::shell::LinuxShell::new(machine, theme, config, keymap)
+        .with_process_privilege(process_privilege)
         .with_asset_loaders(theme_loader, keymap_loader);
     if let Some(recorder) = breadcrumb_recorder.clone() {
         // When: breadcrumb startup succeeded, let the app report runtime state without filesystem IO.

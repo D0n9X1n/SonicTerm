@@ -428,6 +428,7 @@ impl App {
             WindowEvent::RedrawRequested => {
                 // When: `RedrawRequested` arrives, revalidate pointer authorization so PTY, CWD, and viewport changes revoke stale targets.
                 self.refresh_target_hover(win_id);
+                let process_privileged = self.process_privilege.is_privileged();
                 let was_dirty = self.input_dirty;
                 let pty_burst_snapshot = self.pty_burst_gen.load(Ordering::Acquire);
                 let pty_burst = pty_burst_snapshot != self.last_seen_burst_gen;
@@ -475,6 +476,16 @@ impl App {
                     }
                 }
                 self.poll_command_events_for_all_tabs();
+                if let Some(id) = main_id_opt {
+                    if let Some(ws) = self.windows.get_mut(&id) {
+                        crate::app::refresh_window_tab_privileges(
+                            &mut ws.tabs,
+                            &ws.tab_states,
+                            &mut ws.panes,
+                            !pty_burst,
+                        );
+                    }
+                }
                 if let Some(t) = timing.as_mut() {
                     t.lap("poll");
                 }
@@ -945,6 +956,7 @@ impl App {
                             ws_selection_ref,
                             ws_copy_mode_ref,
                             tabs_mref,
+                            process_privileged,
                             search,
                             // Feed the palette only to its attached window;
                             // `None` denotes main, and routing it elsewhere

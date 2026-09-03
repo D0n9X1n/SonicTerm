@@ -16,6 +16,43 @@ fn saturated_input_event_retains_rejected_bytes_for_user_notification() {
     ));
 }
 
+/// Accepted Windows PTY input fixes one foreground-process probe deadline.
+#[cfg(windows)]
+#[test]
+fn accepted_windows_pty_input_arms_foreground_probe() {
+    let pty = sonicterm_io::pty::PtyHandle::spawn_with_args(
+        "cmd.exe",
+        &["/D".into(), "/Q".into()],
+        80,
+        24,
+    )
+    .expect("spawn interactive Windows PTY");
+    let mut app = App::new(
+        sonicterm_cfg::theme::Theme::default(),
+        sonicterm_cfg::config::Config::default(),
+        sonicterm_cfg::keymap::Keymap::default(),
+    );
+    let pane_id = app.__test_seed_tab("cmd");
+    app.main_mut()
+        .expect("synthetic main window")
+        .panes
+        .get_mut(&pane_id)
+        .expect("synthetic pane")
+        .pty = Some(pty);
+    let effect = sonicterm_app_core::AppEffect::PtyWrite {
+        pane: sonicterm_app_core::PaneId(pane_id),
+        data: bytes::Bytes::from_static(b"ver\r"),
+    };
+    let before = std::time::Instant::now();
+
+    app.dispatch_pty_write_effect(&effect);
+
+    let wake = app.foreground_probe_wake.expect("accepted input arms a probe");
+    assert!(wake.fixed);
+    assert!(wake.due >= before + FOREGROUND_PROCESS_TTL);
+    assert!(wake.due <= std::time::Instant::now() + FOREGROUND_PROCESS_TTL);
+}
+
 /// Valid OSC 52 clipboard writes decode exactly before app-thread delivery.
 #[test]
 fn osc52_clipboard_write_decodes_bounded_utf8() {
