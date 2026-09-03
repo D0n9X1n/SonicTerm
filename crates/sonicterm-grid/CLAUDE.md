@@ -21,6 +21,11 @@ cargo test -p sonicterm-grid
 - Dirty tracking should be precise; do not mark the whole grid dirty for
   narrow updates unless unavoidable.
 - Preserve scrollback invariants when changing erase, scroll, or resize.
+- `Line::soft_wrapped_from_previous` is incoming logical-line provenance. Set it
+  only on an actual margin wrap; hard advances, full-row erases, recycled rows,
+  resize, and uncertain row surgery clear affected boundaries conservatively.
+  Preserve a continuation bit when its predecessor is evicted so callers can
+  detect an incomplete chain and fail closed.
 - Scrollback is bounded twice: by the configured row count and by retained
   bytes. Rows carrying hyperlinks, combining marks, or non-default underlines
   cost more than plain text, so the byte budget can bite first. Enforcement

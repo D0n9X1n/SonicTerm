@@ -124,6 +124,61 @@ fn app_cell_lookup_resolves_contextual_relative_paths() {
     ));
 }
 
+/// Real app lookup resolves one trusted relative path from either automatic-wrap fragment.
+#[test]
+fn app_cell_lookup_resolves_soft_wrapped_relative_path_from_each_fragment() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["wrapped"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    app.windows
+        .get(&window)
+        .unwrap()
+        .panes
+        .get(&pane)
+        .unwrap()
+        .parser
+        .lock()
+        .grid_mut()
+        .resize(9, 3);
+    let (output, display, expected) = if cfg!(target_os = "windows") {
+        (
+            b"\x1b]7;file:///C:/work/project\x1b\\src\\long\\path.rs".as_slice(),
+            r"src\long\path.rs",
+            PathBuf::from(r"C:\work\project\src\long\path.rs"),
+        )
+    } else {
+        (
+            b"\x1b]7;file:///work/project\x1b\\src/long/path.rs".as_slice(),
+            "src/long/path.rs",
+            PathBuf::from("/work/project/src/long/path.rs"),
+        )
+    };
+    assert!(app.__test_advance_child_pane_parser(window, pane, output));
+    let expected_spans = [
+        AbsoluteCellSpan { row: 0, start_col: 0, end_col: 9 },
+        AbsoluteCellSpan {
+            row: 1,
+            start_col: 0,
+            end_col: u16::try_from(display.chars().count() - 9).unwrap(),
+        },
+    ];
+
+    for (row, col) in [(0, 2), (1, 2)] {
+        let snapshot = app.cell_target_at(window, pane, row, col).expect("wrapped path target");
+        let ResolvedCellTarget::Path(key) = snapshot.target else {
+            panic!("wrapped relative path must require a filesystem probe")
+        };
+        let candidate = key
+            .candidates
+            .iter()
+            .find(|candidate| candidate.display() == display)
+            .expect("complete wrapped candidate");
+        assert_eq!(candidate.spans.as_slice(), expected_spans);
+        assert_eq!(candidate.resolved_path, expected);
+        assert_eq!(key.rows.len(), 2);
+    }
+}
+
 /// Trusted pane context selects a trimmed source span only while the literal punctuation file is missing.
 #[cfg(target_os = "macos")]
 #[test]
@@ -153,14 +208,14 @@ fn app_probe_prefers_literal_then_trimmed_revealable_path() {
     let trimmed = select_openable_candidate(&key.candidates, classify_local_target)
         .expect("missing literal permits the existing source file");
     assert_eq!(trimmed.candidate.display(), "lua/config/lsp.lua");
-    assert_eq!(trimmed.candidate.end_col, u16::try_from(text.len() - 1).unwrap());
+    assert_eq!(trimmed.candidate.spans[0].end_col, u16::try_from(text.len() - 1).unwrap());
     assert_eq!(trimmed.decision, PathOpenDecision::Revealable(PathKind::File));
 
     std::fs::write(&literal_path, b"punctuation filename").unwrap();
     let literal = select_openable_candidate(&key.candidates, classify_local_target)
         .expect("existing punctuation filename has literal priority");
     assert_eq!(literal.candidate.display(), text);
-    assert_eq!(literal.candidate.end_col, u16::try_from(text.len()).unwrap());
+    assert_eq!(literal.candidate.spans[0].end_col, u16::try_from(text.len()).unwrap());
     assert_eq!(literal.decision, PathOpenDecision::Openable(PathKind::File));
 
     std::fs::remove_dir_all(root).unwrap();
@@ -196,8 +251,10 @@ fn app_cell_lookup_resolves_shell_quoted_spaced_name() {
             ResolvedCellTarget::Path(ref key)
                 if key.candidates.iter().any(|probe| {
                     probe.display() == "ff ff"
-                        && usize::from(probe.start_col) == name_start_col
-                        && usize::from(probe.end_col) == name_start_col + "ff ff".chars().count()
+                        && probe.spans.len() == 1
+                        && usize::from(probe.spans[0].start_col) == name_start_col
+                        && usize::from(probe.spans[0].end_col)
+                            == name_start_col + "ff ff".chars().count()
                         && probe.resolved_path == expected
                 })
         ));
@@ -236,8 +293,9 @@ fn app_cell_lookup_resolves_spaced_contextual_names() {
             ResolvedCellTarget::Path(ref key)
                 if key.candidates.iter().any(|probe| {
                     probe.display() == candidate
-                        && probe.start_col == 0
-                        && usize::from(probe.end_col) == candidate.chars().count()
+                        && probe.spans.len() == 1
+                        && probe.spans[0].start_col == 0
+                        && usize::from(probe.spans[0].end_col) == candidate.chars().count()
                         && probe.resolved_path == expected
                 })
         ));
@@ -309,6 +367,169 @@ fn row_candidates_preserve_complete_spaced_path_span() {
             );
         }
     }
+}
+
+/// A proven automatic wrap reconstructs one complete target with ordered absolute spans.
+#[test]
+fn logical_path_scan_reconstructs_two_wrapped_rows_from_each_fragment() {
+    let mut grid = Grid::new(9, 3);
+    for ch in "src/long/path.rs".chars() {
+        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    }
+    let expected = [
+        AbsoluteCellSpan { row: 0, start_col: 0, end_col: 9 },
+        AbsoluteCellSpan { row: 1, start_col: 0, end_col: 7 },
+    ];
+
+    for pointed in [AbsoluteCell { row: 0, col: 2 }, AbsoluteCell { row: 1, col: 2 }] {
+        let scan = logical_path_scan_at_cell(&grid, 0, pointed, PathStyle::Posix, false)
+            .expect("complete wrapped path");
+        let candidate = scan
+            .candidates
+            .iter()
+            .find(|candidate| {
+                candidate.target == DetectedTarget::PathCandidate("src/long/path.rs".into())
+            })
+            .expect("complete separator-relative candidate");
+        assert_eq!(candidate.spans.as_slice(), expected);
+        assert_eq!(scan.rows.len(), 2);
+    }
+}
+
+/// Identical row fragments separated by a hard linefeed never become one path.
+#[test]
+fn logical_path_scan_never_joins_hard_newlines() {
+    let mut grid = Grid::new(9, 3);
+    for ch in "src/long/".chars() {
+        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    }
+    grid.linefeed();
+    grid.carriage_return();
+    for ch in "path.rs".chars() {
+        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    }
+
+    assert!(logical_path_scan_at_cell(
+        &grid,
+        0,
+        AbsoluteCell { row: 1, col: 2 },
+        PathStyle::Posix,
+        false,
+    )
+    .is_none());
+}
+
+/// The eight-row bound is accepted, while a ninth continuation fails closed.
+#[test]
+fn logical_path_scan_enforces_eight_row_bound() {
+    let mut eight = Grid::new(2, 8);
+    for ch in "a/b/c/d/e/f/g/h".chars() {
+        eight.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    }
+    assert!(logical_path_scan_at_cell(
+        &eight,
+        0,
+        AbsoluteCell { row: 7, col: 0 },
+        PathStyle::Posix,
+        false,
+    )
+    .is_some());
+
+    let mut nine = Grid::new(2, 9);
+    for ch in "a/b/c/d/e/f/g/h/i".chars() {
+        nine.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    }
+    assert!(logical_path_scan_at_cell(
+        &nine,
+        0,
+        AbsoluteCell { row: 8, col: 0 },
+        PathStyle::Posix,
+        false,
+    )
+    .is_none());
+}
+
+/// Offscreen or evicted wrapped predecessors never expose a partial target.
+#[test]
+fn logical_path_scan_rejects_incomplete_visible_or_evicted_chain() {
+    let mut offscreen = Grid::new(4, 3);
+    for ch in "src/path.rs".chars() {
+        offscreen.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    }
+    assert!(logical_path_scan_at_cell(
+        &offscreen,
+        1,
+        AbsoluteCell { row: 1, col: 1 },
+        PathStyle::Posix,
+        false,
+    )
+    .is_none());
+
+    let mut evicted = Grid::new(4, 2);
+    evicted.set_scrollback_limit(1);
+    for ch in "src/long/path.rs".chars() {
+        evicted.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    }
+    assert!(evicted.scrollback_evicted() > 0);
+    assert!(evicted.row_at_abs(0).unwrap().soft_wrapped_from_previous());
+    assert!(logical_path_scan_at_cell(
+        &evicted,
+        0,
+        AbsoluteCell { row: 0, col: 1 },
+        PathStyle::Posix,
+        false,
+    )
+    .is_none());
+}
+
+/// Unsafe identity in any wrapped fragment rejects the complete candidate.
+#[test]
+fn logical_path_scan_rejects_cross_row_combining_and_osc8_cells() {
+    for hyperlink in [false, true] {
+        let mut grid = Grid::new(9, 3);
+        for ch in "src/long/path.rs".chars() {
+            grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+        }
+        let cell = grid.row_mut(1).iter_mut().nth(2).unwrap();
+        if hyperlink {
+            cell.set_hyperlink(Some(HyperlinkId(9)));
+        } else {
+            cell.set_extras(Some("\u{301}".into()));
+        }
+        assert!(logical_path_scan_at_cell(
+            &grid,
+            0,
+            AbsoluteCell { row: 0, col: 2 },
+            PathStyle::Posix,
+            false,
+        )
+        .is_none());
+    }
+}
+
+/// Final-row prose punctuation retains literal-first and fully trimmed candidates across a wrap.
+#[test]
+fn logical_path_scan_keeps_wrapped_prose_punctuation_alternates() {
+    let mut grid = Grid::new(9, 3);
+    for ch in "src/long/path.rs,.".chars() {
+        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    }
+    let scan = logical_path_scan_at_cell(
+        &grid,
+        0,
+        AbsoluteCell { row: 0, col: 2 },
+        PathStyle::Posix,
+        false,
+    )
+    .expect("wrapped punctuation candidates");
+
+    assert!(scan.candidates.iter().any(|candidate| {
+        candidate.target == DetectedTarget::PathCandidate("src/long/path.rs,.".into())
+    }));
+    assert!(scan.candidates.iter().any(|candidate| {
+        candidate.target == DetectedTarget::PathCandidate("src/long/path.rs".into())
+            && candidate.spans.last().is_some_and(|span| span.end_col == 7)
+    }));
 }
 
 /// Hyperlink provenance inside a candidate prevents plain-text path reconstruction.
@@ -730,28 +951,35 @@ fn open_target_adapter_owns_an_open_file() {
     assert!(with_opened_target(&path, |_| Ok(())).is_err());
 }
 
-fn probe_candidate(display: &str, path: &str, start_col: u16) -> PathProbeCandidate {
+fn probe_candidate_at(display: &str, path: &str, start_col: u16, row: u64) -> PathProbeCandidate {
     PathProbeCandidate {
-        start_col,
-        end_col: start_col + u16::try_from(display.chars().count()).unwrap(),
+        spans: smallvec::smallvec![AbsoluteCellSpan {
+            row,
+            start_col,
+            end_col: start_col + u16::try_from(display.chars().count()).unwrap(),
+        }],
         target: DetectedTarget::PathCandidate(display.into()),
         resolved_path: PathBuf::from(path),
     }
 }
 
+fn probe_candidate(display: &str, path: &str, start_col: u16) -> PathProbeCandidate {
+    probe_candidate_at(display, path, start_col, 22)
+}
+
 fn probe_key(path: &str, view_top: u64) -> PathProbeKey {
+    let row = view_top + 2;
     PathProbeKey {
         window_id: winit::window::WindowId::dummy(),
         pane_id: 7,
-        viewport_row: 2,
-        absolute_row: view_top + 2,
+        pointed: AbsoluteCell { row, col: 4 },
         view_top,
-        pointed_col: 4,
-        candidates: vec![probe_candidate("./file", path, 4)],
+        candidates: vec![probe_candidate_at("./file", path, 4, row)],
+        rows: smallvec::smallvec![PathRowIdentity { row, fingerprint: 11 }],
         cwd: Some(Osc7Cwd { authority: String::new(), path: "/work".into() }),
         cwd_revision: 3,
-        row_fingerprint: 11,
         scrollback_evicted: 0,
+        screen_epoch: 0,
         alt_screen: false,
     }
 }
@@ -791,7 +1019,7 @@ fn probe_state_retains_selection_across_irrelevant_candidate_changes() {
     assert!(state.accept(&result, Some(&key)));
 
     let mut moved = key.clone();
-    moved.pointed_col = 8;
+    moved.pointed.col = 8;
     moved.candidates.push(probe_candidate("Folder", "/work/Folder", 7));
     assert!(state.request(moved.clone()).is_none());
     assert!(state.authorized(&moved, true));
@@ -807,13 +1035,13 @@ fn probe_state_reprobes_for_new_competing_candidates() {
         let mut state = PathProbeState::default();
         let selected = probe_candidate("Left Name", "/work/Left Name", 0);
         let mut key = probe_key("/work/Left Name", 20);
-        key.pointed_col = 1;
+        key.pointed.col = 1;
         key.candidates = vec![selected.clone()];
         let result = openable_result(state.request(key.clone()).unwrap());
         assert!(state.accept(&result, Some(&key)));
 
         let mut moved = key.clone();
-        moved.pointed_col = 6;
+        moved.pointed.col = 6;
         moved.candidates = vec![competing.clone(), selected.clone()];
         assert!(state.request(moved.clone()).is_some(), "candidate: {competing:?}");
         assert!(!state.authorized(&moved, true), "candidate: {competing:?}");
@@ -826,12 +1054,12 @@ fn probe_state_rejects_results_after_candidate_set_expands() {
     let mut state = PathProbeState::default();
     let selected = probe_candidate("Left Name", "/work/Left Name", 0);
     let mut key = probe_key("/work/Left Name", 20);
-    key.pointed_col = 1;
+    key.pointed.col = 1;
     key.candidates = vec![selected.clone()];
     let request = state.request(key.clone()).unwrap();
 
     let mut moved = key.clone();
-    moved.pointed_col = 6;
+    moved.pointed.col = 6;
     moved.candidates = vec![probe_candidate("Name Here", "/work/Name Here", 5), selected];
     assert!(!state.accept(&openable_result(request), Some(&moved)));
     assert!(state.request(moved).is_some());
@@ -885,9 +1113,61 @@ fn probe_state_reprobes_after_pointed_row_changes() {
     assert!(state.accept(&result, Some(&key)));
 
     let mut changed = key.clone();
-    changed.row_fingerprint = changed.row_fingerprint.wrapping_add(1);
+    changed.rows[0].fingerprint = changed.rows[0].fingerprint.wrapping_add(1);
     assert!(state.request(changed.clone()).is_some());
     assert!(!state.authorized(&changed, true));
+}
+
+/// Moving between wrapped fragments preserves authorization only while every row identity matches.
+#[test]
+fn wrapped_probe_authorization_tracks_all_rows_and_fragments() {
+    let candidate = PathProbeCandidate {
+        spans: smallvec::smallvec![
+            AbsoluteCellSpan { row: 20, start_col: 4, end_col: 10 },
+            AbsoluteCellSpan { row: 21, start_col: 0, end_col: 7 },
+        ],
+        target: DetectedTarget::PathCandidate("src/long/path.rs".into()),
+        resolved_path: PathBuf::from("/work/src/long/path.rs"),
+    };
+    let mut key = probe_key("/work/src/long/path.rs", 20);
+    key.pointed = AbsoluteCell { row: 20, col: 6 };
+    key.candidates = vec![candidate.clone()];
+    key.rows = smallvec::smallvec![
+        PathRowIdentity { row: 20, fingerprint: 11 },
+        PathRowIdentity { row: 21, fingerprint: 12 },
+    ];
+    let mut state = PathProbeState::default();
+    let result = openable_result(state.request(key.clone()).unwrap());
+    assert!(state.accept(&result, Some(&key)));
+
+    let mut second_fragment = key.clone();
+    second_fragment.pointed = AbsoluteCell { row: 21, col: 2 };
+    assert!(state.request(second_fragment.clone()).is_none());
+    assert!(state.authorized(&second_fragment, true));
+
+    let mut changed_row = second_fragment.clone();
+    changed_row.rows[1].fingerprint = changed_row.rows[1].fingerprint.wrapping_add(1);
+    assert!(state.request(changed_row.clone()).is_some());
+    assert!(!state.authorized(&changed_row, true));
+}
+
+/// Screen incarnation and viewport projection remain part of wrapped authorization identity.
+#[test]
+fn wrapped_probe_rejects_screen_or_viewport_aba() {
+    for mutate in [
+        |key: &mut PathProbeKey| key.screen_epoch = key.screen_epoch.wrapping_add(1),
+        |key: &mut PathProbeKey| key.view_top = key.view_top.saturating_add(1),
+    ] {
+        let mut state = PathProbeState::default();
+        let key = probe_key("/work/file", 20);
+        let result = openable_result(state.request(key.clone()).unwrap());
+        assert!(state.accept(&result, Some(&key)));
+
+        let mut changed = key.clone();
+        mutate(&mut changed);
+        assert!(state.request(changed.clone()).is_some());
+        assert!(!state.authorized(&changed, true));
+    }
 }
 
 /// A viewport round trip with the same visible value still gets a distinct epoch.
@@ -1017,14 +1297,12 @@ fn filesystem_selection_prefers_complete_spaced_entry() {
     std::fs::create_dir(&complete).unwrap();
     let candidates = vec![
         PathProbeCandidate {
-            start_col: 0,
-            end_col: 20,
+            spans: smallvec::smallvec![AbsoluteCellSpan { row: 0, start_col: 0, end_col: 20 }],
             target: DetectedTarget::BareName("OneDrive - Microsoft".into()),
             resolved_path: complete.clone(),
         },
         PathProbeCandidate {
-            start_col: 0,
-            end_col: 8,
+            spans: smallvec::smallvec![AbsoluteCellSpan { row: 0, start_col: 0, end_col: 8 }],
             target: DetectedTarget::BareName("OneDrive".into()),
             resolved_path: short,
         },

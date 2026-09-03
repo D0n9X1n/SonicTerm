@@ -1,6 +1,6 @@
 use super::{
-    CursorView, DragGhost, HoveredUrlCells, OverlayData, PaneViewModel, RenderInputs, SearchView,
-    SelectionView, TabBarSnapshot,
+    CursorView, DragGhost, HoveredUrlCells, HoveredUrlSpan, OverlayData, PaneViewModel,
+    RenderInputs, SearchView, SelectionView, TabBarSnapshot,
 };
 use sonicterm_types::{Cell, CellFlags, Color};
 
@@ -8,27 +8,47 @@ fn cell(ch: char) -> Cell {
     Cell::plain(ch, Color::Default, Color::Default, CellFlags::empty())
 }
 
+/// Multi-row hover containment covers every ordered fragment with half-open columns.
 #[test]
-fn hovered_url_cells_contains_exactly_its_half_open_row_span_regardless_of_active_hint() {
+fn hovered_url_cells_contains_first_middle_and_final_spans() {
     for active in [false, true] {
-        let hovered = HoveredUrlCells { pane_id: 7, row: 3, start_col: 5, end_col: 10, active };
+        let hovered = HoveredUrlCells::new(
+            7,
+            [
+                HoveredUrlSpan { row: 3, start_col: 5, end_col: 10 },
+                HoveredUrlSpan { row: 4, start_col: 0, end_col: 12 },
+                HoveredUrlSpan { row: 5, start_col: 0, end_col: 4 },
+            ],
+            active,
+        )
+        .expect("ordered non-empty spans");
 
-        assert!(hovered.contains(3, 5), "start is inclusive");
-        assert!(hovered.contains(3, 9), "last column before end is included");
-        assert!(!hovered.contains(3, 4), "column before start is excluded");
-        assert!(!hovered.contains(3, 10), "end is exclusive");
-        assert!(!hovered.contains(2, 7), "row above is excluded");
-        assert!(!hovered.contains(4, 7), "row below is excluded");
+        assert!(hovered.contains(3, 5), "first start is inclusive");
+        assert!(hovered.contains(4, 11), "middle end predecessor is included");
+        assert!(hovered.contains(5, 3), "final fragment is included");
+        assert!(!hovered.contains(3, 10), "first end is exclusive");
+        assert!(!hovered.contains(5, 4), "final end is exclusive");
+        assert!(!hovered.contains(2, 7), "row before the chain is excluded");
     }
 }
 
+/// Invalid, duplicate, out-of-order, and ninth fragments fail closed at construction.
 #[test]
-fn hovered_url_cells_empty_or_reversed_span_contains_nothing() {
-    for hovered in [
-        HoveredUrlCells { pane_id: 7, row: 0, start_col: 8, end_col: 8, active: true },
-        HoveredUrlCells { pane_id: 7, row: 0, start_col: 9, end_col: 4, active: true },
+fn hovered_url_cells_rejects_noncanonical_or_overlong_span_sets() {
+    for spans in [
+        vec![HoveredUrlSpan { row: 0, start_col: 8, end_col: 8 }],
+        vec![HoveredUrlSpan { row: 0, start_col: 9, end_col: 4 }],
+        vec![
+            HoveredUrlSpan { row: 1, start_col: 0, end_col: 4 },
+            HoveredUrlSpan { row: 1, start_col: 4, end_col: 8 },
+        ],
+        vec![
+            HoveredUrlSpan { row: 2, start_col: 0, end_col: 4 },
+            HoveredUrlSpan { row: 1, start_col: 0, end_col: 4 },
+        ],
+        (0..9).map(|row| HoveredUrlSpan { row, start_col: 0, end_col: 1 }).collect(),
     ] {
-        assert!(!(0..=u16::MAX).any(|col| hovered.contains(0, col)));
+        assert!(HoveredUrlCells::new(7, spans, true).is_none());
     }
 }
 

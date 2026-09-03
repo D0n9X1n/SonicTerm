@@ -529,12 +529,9 @@ fn child_no_button_motion_respects_each_child_ui_owner() {
     app.windows.get_mut(&window).unwrap().splitter_hover = None;
 
     app.windows.get_mut(&window).unwrap().hovered_url = Some(HoveredUrl {
-        pane_id: pane,
-        row: 6,
-        start_col: 7,
-        end_col: 8,
+        cells: sonicterm_render_model::inputs::HoveredUrlCells::single(pane, 6, 7, 8, true)
+            .unwrap(),
         url: "https://example.com".into(),
-        active: true,
     });
     assert_eq!(
         child_no_button_motion_report(

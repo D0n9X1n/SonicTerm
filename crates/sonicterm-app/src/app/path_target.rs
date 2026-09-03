@@ -8,12 +8,13 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::{Receiver, Sender, TrySendError};
+use smallvec::SmallVec;
 use sonicterm_cfg::url_scan::{
     bare_name_at_char_col_for_style, find_targets_for_style,
     target_candidates_at_char_col_for_style, DetectedTarget, PathStyle, TargetMatch,
 };
 use sonicterm_gpu::core::GpuRenderer;
-use sonicterm_grid::grid::{Cell, CellFlags, Row};
+use sonicterm_grid::grid::{Cell, CellFlags, Grid, Row};
 use sonicterm_vt::vt::Osc7Cwd;
 use winit::window::WindowId;
 
@@ -25,6 +26,18 @@ pub(super) struct RowTarget {
     pub(super) matched: TargetMatch,
     pub(super) start_col: u16,
     pub(super) end_col: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LogicalTargetCandidate {
+    target: DetectedTarget,
+    spans: SmallVec<[AbsoluteCellSpan; 2]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LogicalPathScan {
+    candidates: Vec<LogicalTargetCandidate>,
+    rows: SmallVec<[PathRowIdentity; 2]>,
 }
 
 /// Filesystem kind that may be handed to a platform default application.
@@ -79,11 +92,44 @@ impl ProbeEpoch {
     }
 }
 
+const MAX_WRAPPED_PATH_ROWS: usize = 8;
+
+/// One absolute grid cell under the pointer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AbsoluteCell {
+    pub(crate) row: u64,
+    pub(crate) col: u16,
+}
+
+/// One non-empty candidate fragment in scrollback-absolute coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AbsoluteCellSpan {
+    pub(crate) row: u64,
+    pub(crate) start_col: u16,
+    pub(crate) end_col: u16,
+}
+
+impl AbsoluteCellSpan {
+    fn contains(self, cell: AbsoluteCell) -> bool {
+        self.row == cell.row && cell.col >= self.start_col && cell.col < self.end_col
+    }
+
+    fn len(self) -> usize {
+        usize::from(self.end_col.saturating_sub(self.start_col))
+    }
+}
+
+/// Hash identity of one row participating in a reconstructed logical line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PathRowIdentity {
+    pub(crate) row: u64,
+    pub(crate) fingerprint: u64,
+}
+
 /// One typed filesystem candidate carried to the background probe worker.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PathProbeCandidate {
-    pub(crate) start_col: u16,
-    pub(crate) end_col: u16,
+    pub(crate) spans: SmallVec<[AbsoluteCellSpan; 2]>,
     pub(crate) target: DetectedTarget,
     pub(crate) resolved_path: PathBuf,
 }
@@ -98,8 +144,32 @@ impl PathProbeCandidate {
         }
     }
 
-    fn span_len(&self) -> u16 {
-        self.end_col.saturating_sub(self.start_col)
+    fn span_len(&self) -> usize {
+        self.spans.iter().copied().map(AbsoluteCellSpan::len).sum()
+    }
+
+    fn contains(&self, cell: AbsoluteCell) -> bool {
+        self.spans.iter().copied().any(|span| span.contains(cell))
+    }
+
+    fn visible_cells(
+        &self,
+        pane_id: u64,
+        view_top: u64,
+        active: bool,
+    ) -> Option<sonicterm_render_model::inputs::HoveredUrlCells> {
+        let spans = self.spans.iter().map(|span| {
+            Some(sonicterm_render_model::inputs::HoveredUrlSpan {
+                row: u16::try_from(span.row.checked_sub(view_top)?).ok()?,
+                start_col: span.start_col,
+                end_col: span.end_col,
+            })
+        });
+        sonicterm_render_model::inputs::HoveredUrlCells::new(
+            pane_id,
+            spans.collect::<Option<Vec<_>>>()?,
+            active,
+        )
     }
 }
 
@@ -108,15 +178,14 @@ impl PathProbeCandidate {
 pub struct PathProbeKey {
     pub(crate) window_id: WindowId,
     pub(crate) pane_id: u64,
-    pub(crate) viewport_row: u16,
-    pub(crate) absolute_row: u64,
+    pub(crate) pointed: AbsoluteCell,
     pub(crate) view_top: u64,
-    pub(crate) pointed_col: u16,
     pub(crate) candidates: Vec<PathProbeCandidate>,
+    pub(crate) rows: SmallVec<[PathRowIdentity; 2]>,
     pub(crate) cwd: Option<Osc7Cwd>,
     pub(crate) cwd_revision: u64,
-    pub(crate) row_fingerprint: u64,
     pub(crate) scrollback_evicted: u64,
+    pub(crate) screen_epoch: u64,
     pub(crate) alt_screen: bool,
 }
 
@@ -239,13 +308,12 @@ impl PathProbeState {
 fn same_probe_context(left: &PathProbeKey, right: &PathProbeKey) -> bool {
     left.window_id == right.window_id
         && left.pane_id == right.pane_id
-        && left.viewport_row == right.viewport_row
-        && left.absolute_row == right.absolute_row
         && left.view_top == right.view_top
+        && left.rows == right.rows
         && left.cwd == right.cwd
         && left.cwd_revision == right.cwd_revision
-        && left.row_fingerprint == right.row_fingerprint
         && left.scrollback_evicted == right.scrollback_evicted
+        && left.screen_epoch == right.screen_epoch
         && left.alt_screen == right.alt_screen
 }
 
@@ -257,8 +325,7 @@ fn key_preserves_selection(
     let selected = &selection.candidate;
     // When: destination identity or selected-span ownership changes, discard authorization before any candidate-set work.
     if !same_probe_context(probed, destination)
-        || destination.pointed_col < selected.start_col
-        || destination.pointed_col >= selected.end_col
+        || !selected.contains(destination.pointed)
         || !destination.candidates.contains(selected)
     {
         return false;
@@ -626,10 +693,9 @@ impl PathWorkers {
                     let selection =
                         select_openable_candidate(&request.key.candidates, classify_local_target);
                     if probe_proxy
-                        .send_event(super::UserEvent::PathProbeFinished(PathProbeResult {
-                            request,
-                            selection,
-                        }))
+                        .send_event(super::UserEvent::PathProbeFinished(Box::new(
+                            PathProbeResult { request, selection },
+                        )))
                         .is_err()
                     {
                         // When: `probe_proxy.send_event` fails, the event loop is gone and the worker must terminate.
@@ -962,6 +1028,134 @@ pub(super) fn bare_target_at_row_cell(row: &Row, col: u16, style: PathStyle) -> 
     row_target_at_cell(row, col, style, bare_name_at_char_col_for_style)
 }
 
+const MAX_LOGICAL_PATH_BYTES: usize = 4096;
+
+fn logical_path_scan_at_cell(
+    grid: &Grid,
+    view_top: u64,
+    pointed: AbsoluteCell,
+    style: PathStyle,
+    include_bare_names: bool,
+) -> Option<LogicalPathScan> {
+    let view_end = view_top.checked_add(u64::from(grid.rows))?;
+    if pointed.row < view_top || pointed.row >= view_end || pointed.col >= grid.cols {
+        // When: `pointed` lies outside the visible grid, no complete visible logical line owns it.
+        return None;
+    }
+
+    let mut first_row = pointed.row;
+    let mut row_count = 1usize;
+    while grid.row_at_abs(first_row)?.soft_wrapped_from_previous() {
+        if first_row == 0 || first_row == view_top || row_count == MAX_WRAPPED_PATH_ROWS {
+            // When: `first_row` has no visible predecessor or `row_count` reached the cap, reject the partial chain.
+            return None;
+        }
+        first_row -= 1;
+        row_count += 1;
+    }
+
+    let mut last_row = pointed.row;
+    while let Some(next_row_number) = last_row.checked_add(1) {
+        let Some(next_row) = grid.row_at_abs(next_row_number) else {
+            // When: `grid.row_at_abs(next_row_number)` is absent, the retained logical line ends at `last_row`.
+            break;
+        };
+        if !next_row.soft_wrapped_from_previous() {
+            // When: `next_row` has no incoming soft-wrap bit, its predecessor ended at a hard boundary.
+            break;
+        }
+        if next_row_number >= view_end || row_count == MAX_WRAPPED_PATH_ROWS {
+            // When: `next_row_number` is offscreen or `row_count` reached the cap, reject the partial chain.
+            return None;
+        }
+        last_row = next_row_number;
+        row_count += 1;
+    }
+
+    let mut text = String::new();
+    let mut cells = Vec::new();
+    let mut byte_starts = Vec::new();
+    let mut positions = Vec::new();
+    let mut rows = SmallVec::<[PathRowIdentity; 2]>::new();
+    for absolute_row in first_row..=last_row {
+        let row = grid.row_at_abs(absolute_row)?;
+        rows.push(PathRowIdentity { row: absolute_row, fingerprint: row_fingerprint(row) });
+        for (column, cell) in row.iter().enumerate() {
+            byte_starts.push(text.len());
+            let ch = if cell.flags.contains(CellFlags::WIDE_CONT) {
+                '\u{fdd0}'
+            } else {
+                // When: `cell.flags` lacks `WIDE_CONT`, preserve the row's visible character.
+                cell.ch
+            };
+            text.push(ch);
+            if text.len() > MAX_LOGICAL_PATH_BYTES {
+                // When: flattened logical text exceeds the path-byte cap, stop before allocating or scanning more.
+                return None;
+            }
+            cells.push(cell);
+            positions.push(AbsoluteCell { row: absolute_row, col: u16::try_from(column).ok()? });
+        }
+    }
+    let pointed_index = positions.iter().position(|position| *position == pointed)?;
+
+    let candidates =
+        target_candidates_at_char_col_for_style(&text, pointed_index, style, include_bare_names)
+            .into_iter()
+            .filter_map(|matched| {
+                let start_index = byte_starts.iter().position(|start| *start == matched.start)?;
+                let end_index = byte_starts
+                    .iter()
+                    .position(|start| *start >= matched.end)
+                    .unwrap_or(cells.len());
+                let mut source_end_index = end_index;
+                while source_end_index < cells.len()
+                    && matches!(cells[source_end_index].ch, ',' | ';' | '.' | ':' | '!' | '?')
+                {
+                    source_end_index += 1;
+                }
+                if start_index >= end_index
+                    || pointed_index < start_index
+                    || pointed_index >= end_index
+                    || cells[start_index..source_end_index]
+                        .iter()
+                        .any(|cell| unsafe_path_cell(cell) || cell.hyperlink().is_some())
+                {
+                    // When: the candidate misses ownership or crosses unsafe cell identity, reject its complete logical span.
+                    return None;
+                }
+
+                let mut spans = SmallVec::<[AbsoluteCellSpan; 2]>::new();
+                for position in &positions[start_index..end_index] {
+                    match spans.last_mut() {
+                        Some(span) if span.row == position.row && span.end_col == position.col => {
+                            span.end_col = position.col.checked_add(1)?;
+                        }
+                        Some(span) if span.end_col == grid.cols && position.col == 0 => {
+                            spans.push(AbsoluteCellSpan {
+                                row: position.row,
+                                start_col: 0,
+                                end_col: 1,
+                            });
+                        }
+                        None => spans.push(AbsoluteCellSpan {
+                            row: position.row,
+                            start_col: position.col,
+                            end_col: position.col.checked_add(1)?,
+                        }),
+                        Some(_) => {
+                            // When: `spans.last_mut()` is `Some(_)` without adjacency, reject the discontinuous span map.
+                            return None;
+                        }
+                    }
+                }
+                Some(LogicalTargetCandidate { target: matched.target, spans })
+            })
+            .collect::<Vec<_>>();
+    (!candidates.is_empty()).then_some(LogicalPathScan { candidates, rows })
+}
+
+#[cfg(test)]
 fn row_target_candidates_at_cell(
     row: &Row,
     col: u16,
@@ -1360,15 +1554,15 @@ pub(super) struct CellTargetSnapshot {
 }
 
 impl CellTargetSnapshot {
-    fn hovered(&self, active: bool) -> super::hovered_url::HoveredUrl {
-        super::hovered_url::HoveredUrl {
-            pane_id: self.pane_id,
-            row: self.viewport_row,
-            start_col: self.start_col,
-            end_col: self.end_col,
-            url: self.display.clone(),
+    fn hovered(&self, active: bool) -> Option<super::hovered_url::HoveredUrl> {
+        let cells = sonicterm_render_model::inputs::HoveredUrlCells::single(
+            self.pane_id,
+            self.viewport_row,
+            self.start_col,
+            self.end_col,
             active,
-        }
+        )?;
+        Some(super::hovered_url::HoveredUrl { cells, url: self.display.clone() })
     }
 }
 
@@ -1433,27 +1627,30 @@ impl App {
         }
 
         let cwd = parser.osc7_cwd().cloned();
-        let mut candidates = row_target_candidates_at_cell(row, col, style, clickable_bare_names)
+        let pointed = AbsoluteCell { row: absolute_row, col };
+        let logical =
+            logical_path_scan_at_cell(grid, view_top, pointed, style, clickable_bare_names)?;
+        let mut candidates = logical
+            .candidates
             .into_iter()
-            .filter(|row_target| {
+            .filter(|candidate| {
                 detected_target_enabled(
-                    &row_target.matched.target,
+                    &candidate.target,
                     clickable_local_targets,
                     clickable_bare_names,
                 )
             })
-            .filter_map(|row_target| {
+            .filter_map(|candidate| {
                 let resolved_path = resolve_detected_path(
-                    &row_target.matched.target,
+                    &candidate.target,
                     style,
                     cwd.as_ref(),
                     self.home_dir.as_deref(),
                     &self.local_hostname,
                 )?;
                 Some(PathProbeCandidate {
-                    start_col: row_target.start_col,
-                    end_col: row_target.end_col,
-                    target: row_target.matched.target,
+                    spans: candidate.spans,
+                    target: candidate.target,
                     resolved_path,
                 })
             })
@@ -1462,23 +1659,21 @@ impl App {
             right
                 .span_len()
                 .cmp(&left.span_len())
-                .then_with(|| left.start_col.cmp(&right.start_col))
-                .then_with(|| left.end_col.cmp(&right.end_col))
+                .then_with(|| left.spans.as_slice().cmp(right.spans.as_slice()))
         });
         candidates.dedup();
         let display = candidates.first()?.display().to_string();
         let key = PathProbeKey {
             window_id,
             pane_id,
-            viewport_row,
-            absolute_row,
+            pointed,
             view_top,
-            pointed_col: col,
             candidates,
+            rows: logical.rows,
             cwd,
             cwd_revision: parser.cwd_revision(),
-            row_fingerprint: row_fingerprint(row),
             scrollback_evicted: grid.scrollback_evicted(),
+            screen_epoch: grid.screen_epoch(),
             alt_screen: grid.is_alt(),
         };
         Some(CellTargetSnapshot {
@@ -1525,7 +1720,7 @@ impl App {
                 Some(target @ CellTargetSnapshot { target: ResolvedCellTarget::Uri(_), .. }) => {
                     window.path_probe.invalidate();
                     if !target.explicit_hyperlink {
-                        hovered = Some(target.hovered(modifier_held));
+                        hovered = target.hovered(modifier_held);
                     }
                 }
                 Some(target @ CellTargetSnapshot { target: ResolvedCellTarget::Path(key), .. }) => {
@@ -1533,13 +1728,11 @@ impl App {
                     if let Some(selection) =
                         window.path_probe.authorized_selection(key, modifier_held)
                     {
-                        hovered = Some(super::hovered_url::HoveredUrl {
-                            pane_id: target.pane_id,
-                            row: target.viewport_row,
-                            start_col: selection.candidate.start_col,
-                            end_col: selection.candidate.end_col,
+                        let cells =
+                            selection.candidate.visible_cells(target.pane_id, key.view_top, true);
+                        hovered = cells.map(|cells| super::hovered_url::HoveredUrl {
+                            cells,
                             url: selection.candidate.display().to_string(),
-                            active: true,
                         });
                     }
                 }
@@ -1548,8 +1741,8 @@ impl App {
                 }
             }
             window.hovered_url = hovered;
-            window.hover_link =
-                window.hovered_url.as_ref().is_some_and(|hover| hover.active) || explicit_hyperlink;
+            window.hover_link = window.hovered_url.as_ref().is_some_and(|hover| hover.active())
+                || explicit_hyperlink;
             visual_changed =
                 previous_hover != window.hovered_url || previous_link != window.hover_link;
         }

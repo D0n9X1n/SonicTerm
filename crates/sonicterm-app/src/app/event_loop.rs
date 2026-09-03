@@ -381,7 +381,7 @@ impl App {
                 self.handle_clipboard_write(text);
             }
             UserEvent::PathProbeFinished(result) => {
-                self.handle_path_probe_finished(result);
+                self.handle_path_probe_finished(*result);
             }
             UserEvent::PtyInputRejected { bytes, reason } => {
                 self.show_notification_for_kind(

@@ -119,8 +119,8 @@ fn applying_a_config_clamps_an_out_of_range_weight_scale() {
 fn local_target_switch_reload_revokes_all_window_authorization() {
     use crate::app::hovered_url::HoveredUrl;
     use crate::app::path_target::{
-        PathKind, PathOpenDecision, PathProbeCandidate, PathProbeKey, PathProbeResult,
-        PathProbeSelection,
+        AbsoluteCell, AbsoluteCellSpan, PathKind, PathOpenDecision, PathProbeCandidate,
+        PathProbeKey, PathProbeResult, PathProbeSelection, PathRowIdentity,
     };
     use sonicterm_vt::vt::Osc7Cwd;
 
@@ -131,23 +131,21 @@ fn local_target_switch_reload_revokes_all_window_authorization() {
 
     for window_id in window_ids {
         let candidate = PathProbeCandidate {
-            start_col: 4,
-            end_col: 9,
+            spans: smallvec::smallvec![AbsoluteCellSpan { row: 22, start_col: 4, end_col: 9 }],
             target: sonicterm_cfg::url_scan::DetectedTarget::BareName("entry".into()),
             resolved_path: PathBuf::from("/work/entry"),
         };
         let key = PathProbeKey {
             window_id,
             pane_id: 7,
-            viewport_row: 2,
-            absolute_row: 22,
+            pointed: AbsoluteCell { row: 22, col: 4 },
             view_top: 20,
-            pointed_col: 4,
             candidates: vec![candidate.clone()],
+            rows: smallvec::smallvec![PathRowIdentity { row: 22, fingerprint: 11 }],
             cwd: Some(Osc7Cwd { authority: String::new(), path: "/work".into() }),
             cwd_revision: 3,
-            row_fingerprint: 11,
             scrollback_evicted: 0,
+            screen_epoch: 0,
             alt_screen: false,
         };
         let window = app.windows.get_mut(&window_id).expect("seeded window");
@@ -163,12 +161,9 @@ fn local_target_switch_reload_revokes_all_window_authorization() {
             Some(&key),
         ));
         window.hovered_url = Some(HoveredUrl {
-            pane_id: 7,
-            row: 2,
-            start_col: 4,
-            end_col: 10,
+            cells: sonicterm_render_model::inputs::HoveredUrlCells::single(7, 2, 4, 10, true)
+                .unwrap(),
             url: "entry".into(),
-            active: true,
         });
         window.hover_link = true;
     }
@@ -186,20 +181,22 @@ fn local_target_switch_reload_revokes_all_window_authorization() {
             .decision_for(&PathProbeKey {
                 window_id,
                 pane_id: 7,
-                viewport_row: 2,
-                absolute_row: 22,
+                pointed: AbsoluteCell { row: 22, col: 4 },
                 view_top: 20,
-                pointed_col: 4,
                 candidates: vec![PathProbeCandidate {
-                    start_col: 4,
-                    end_col: 9,
+                    spans: smallvec::smallvec![AbsoluteCellSpan {
+                        row: 22,
+                        start_col: 4,
+                        end_col: 9,
+                    }],
                     target: sonicterm_cfg::url_scan::DetectedTarget::BareName("entry".into()),
                     resolved_path: PathBuf::from("/work/entry"),
                 }],
+                rows: smallvec::smallvec![PathRowIdentity { row: 22, fingerprint: 11 }],
                 cwd: Some(Osc7Cwd { authority: String::new(), path: "/work".into() }),
                 cwd_revision: 3,
-                row_fingerprint: 11,
                 scrollback_evicted: 0,
+                screen_epoch: 0,
                 alt_screen: false,
             })
             .is_none());
