@@ -397,6 +397,90 @@ fn path_spans_obey_wrappers_and_preserve_filename_punctuation() {
     );
 }
 
+/// Focused path lookup preserves legal filename punctuation and offers a shorter prose alternate.
+#[test]
+fn focused_candidates_include_literal_and_prose_trimmed_paths() {
+    for (path, punctuation) in [
+        ("lua/config/plugins/lsp.lua", ','),
+        ("lua/config/autocmds.lua", ';'),
+        ("scripts/smoke.sh", ';'),
+        ("lua/config/theme.lua", '.'),
+    ] {
+        let text = format!("{path}{punctuation}");
+        for col in 0..path.chars().count() {
+            let candidates =
+                target_candidates_at_char_col_for_style(&text, col, PathStyle::Posix, true);
+            let literal = candidates
+                .iter()
+                .position(|matched| text[matched.start..matched.end] == text)
+                .expect("legal punctuation-ending filename remains a literal candidate");
+            let trimmed = candidates
+                .iter()
+                .position(|matched| &text[matched.start..matched.end] == path)
+                .expect("prose punctuation produces a shorter alternate");
+            assert!(literal < trimmed, "literal identity must be probed before its alternate");
+        }
+
+        let punctuation_col = path.chars().count();
+        let candidates =
+            target_candidates_at_char_col_for_style(&text, punctuation_col, PathStyle::Posix, true);
+        assert!(candidates.iter().all(|matched| matched.end == text.len()));
+    }
+}
+
+/// Candidate pressure keeps a punctuation-bearing literal and its fully trimmed fallback together.
+#[test]
+fn candidate_cap_keeps_literal_and_final_fallback_atomic() {
+    let text = "a0 a1 a2 a3 a4 a5 a6 src/main.rs,. z0 z1 z2 z3 z4 z5 z6";
+    let candidates = target_candidates_at_char_col_for_style(
+        text,
+        text.find("main").unwrap(),
+        PathStyle::Posix,
+        true,
+    );
+    let literal = "src/main.rs,.";
+    let trimmed = "src/main.rs";
+    let start = text.find(literal).unwrap();
+
+    assert!(candidates.len() <= MAX_PATH_CANDIDATES_PER_CELL);
+    assert!(candidates.iter().any(|matched| {
+        matched.start == start
+            && &text[matched.start..matched.end] == literal
+            && matched.target == DetectedTarget::PathCandidate(literal.into())
+    }));
+    assert!(candidates.iter().any(|matched| {
+        matched.start == start
+            && &text[matched.start..matched.end] == trimmed
+            && matched.target == DetectedTarget::PathCandidate(trimmed.into())
+    }));
+}
+
+/// A maximum-length punctuation run emits only the literal, one-trim, and full-trim tiers.
+#[test]
+fn long_punctuation_run_keeps_candidate_construction_bounded() {
+    let path = "src/main.rs";
+    let text = format!("{path}{}", ",".repeat(MAX_TARGET_BYTES - path.len()));
+    let candidates = target_candidates_at_char_col_for_style(&text, 2, PathStyle::Posix, true);
+
+    assert_eq!(candidates.len(), 3);
+    assert_eq!(candidates[0].end, text.len());
+    assert_eq!(candidates[1].end, text.len() - 1);
+    assert_eq!(&text[candidates[2].start..candidates[2].end], path);
+}
+
+/// Windows sentence periods can fall back without permitting trailing-dot normalization aliases.
+#[test]
+fn windows_focused_paths_offer_period_trimmed_fallbacks() {
+    let text = r"src\main.rs.";
+    let candidates = target_candidates_at_char_col_for_style(text, 2, PathStyle::Windows, true);
+
+    assert!(candidates.iter().any(|matched| {
+        &text[matched.start..matched.end] == r"src\main.rs"
+            && matched.target == DetectedTarget::PathCandidate(r"src\main.rs".into())
+    }));
+    assert!(candidates.iter().all(|matched| &text[matched.start..matched.end] != text));
+}
+
 /// Character-column lookup stays byte-accurate across a single-cell Unicode prefix and path.
 #[test]
 fn typed_path_lookup_maps_utf8_byte_and_character_columns() {

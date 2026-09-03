@@ -36,17 +36,22 @@ state is under `~/.sonicterm`; packaged assets are resolved by
 ## Native target opening
 
 Path scanning and openability probing are cross-platform app behavior. The
-bounded worker revalidates the target kind immediately before native dispatch
-and blocks executable/launcher, symlink or reparse-point, and special-file
-classes.
+bounded worker revalidates the exact target kind and action immediately before
+native dispatch and blocks executable/launcher, symlink or reparse-point, and
+special-file classes. A punctuation-bearing literal candidate is authoritative
+when it exists; only a missing literal can yield to its shorter prose-trimmed
+candidate.
 
 | Platform | Dispatch boundary |
 | --- | --- |
-| macOS | fixed `/usr/bin/open` command after macOS target revalidation |
+| macOS | ordinary targets use fixed `/usr/bin/open --`; inert source/script files use fixed `/usr/bin/open -R --` to reveal without opening or executing |
 | Windows | `ShellExecuteExW` with `SEE_MASK_NOASYNC` from a dedicated COM apartment |
 | Linux | XDG Desktop Portal `OpenFileRequest` with an already opened `O_NOFOLLOW` file; fixed `/usr/bin/xdg-open` or `/bin/xdg-open` only when the portal is unavailable |
 
-A portal rejection is not treated as unavailability and does not fall back.
+macOS reveal-only files must remain non-executable and free of executable magic
+at activation time. App bundles, installers, `.command`, and AppleScript remain
+blocked. A portal rejection is not treated as unavailability and does not fall
+back.
 
 ## macOS
 
@@ -234,16 +239,20 @@ flowchart TD
 
 ## 原生目标打开
 
-路径扫描和可打开性探测属于跨平台 app。有限队列 worker 会在原生调用前再次核对目标类型，
-并阻止 executable/launcher、符号链接或 reparse point，以及特殊文件。
+路径扫描和可操作性探测属于跨平台 app。有限队列 worker 会在原生调用前再次核对完全相同的
+目标类型和操作，并阻止 executable/launcher、符号链接或 reparse point，以及特殊文件。
+带标点的字面候选只要存在就具有最高优先级；只有字面候选不存在时，才会选择去掉正文标点的
+较短候选。
 
 | 平台 | 调用边界 |
 | --- | --- |
-| macOS | 再次核对 macOS 目标后调用固定的 `/usr/bin/open` |
+| macOS | 普通目标使用固定 `/usr/bin/open --`；普通源文件或脚本使用固定 `/usr/bin/open -R --`，只在 Finder 中显示而不打开或执行 |
 | Windows | 在专用 COM apartment 中调用带 `SEE_MASK_NOASYNC` 的 `ShellExecuteExW` |
 | Linux | 对已用 `O_NOFOLLOW` 打开的文件调用 XDG Desktop Portal `OpenFileRequest`；只有 portal 不可用时才调用固定的 `/usr/bin/xdg-open` 或 `/bin/xdg-open` |
 
-Portal 明确拒绝不等于 portal 不可用，因此不会触发 fallback。
+macOS reveal-only 文件在点击时必须仍不可执行且不含可执行 magic。App bundle、installer、
+`.command` 和 AppleScript 始终被阻止。Portal 明确拒绝不等于 portal 不可用，因此不会触发
+fallback。
 
 ## macOS
 

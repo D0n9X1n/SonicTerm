@@ -124,6 +124,48 @@ fn app_cell_lookup_resolves_contextual_relative_paths() {
     ));
 }
 
+/// Trusted pane context selects a trimmed source span only while the literal punctuation file is missing.
+#[cfg(target_os = "macos")]
+#[test]
+fn app_probe_prefers_literal_then_trimmed_revealable_path() {
+    let root = std::env::temp_dir().join(format!(
+        "sonicterm-prose-path-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    let source_dir = root.join("lua/config");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    let trimmed_path = source_dir.join("lsp.lua");
+    let literal_path = source_dir.join("lsp.lua,");
+    std::fs::write(&trimmed_path, b"return {}").unwrap();
+
+    let text = "lua/config/lsp.lua,";
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["prose"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    let output = format!("\x1b]7;file://{}\x1b\\{text}", root.display());
+    assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+    let snapshot = app.cell_target_at(window, pane, 0, 2).expect("relative path candidate set");
+    let ResolvedCellTarget::Path(key) = snapshot.target else {
+        panic!("relative path must require a filesystem probe")
+    };
+
+    let trimmed = select_openable_candidate(&key.candidates, classify_local_target)
+        .expect("missing literal permits the existing source file");
+    assert_eq!(trimmed.candidate.display(), "lua/config/lsp.lua");
+    assert_eq!(trimmed.candidate.end_col, u16::try_from(text.len() - 1).unwrap());
+    assert_eq!(trimmed.decision, PathOpenDecision::Revealable(PathKind::File));
+
+    std::fs::write(&literal_path, b"punctuation filename").unwrap();
+    let literal = select_openable_candidate(&key.candidates, classify_local_target)
+        .expect("existing punctuation filename has literal priority");
+    assert_eq!(literal.candidate.display(), text);
+    assert_eq!(literal.candidate.end_col, u16::try_from(text.len()).unwrap());
+    assert_eq!(literal.decision, PathOpenDecision::Openable(PathKind::File));
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 /// App lookup resolves a shell-quoted spaced `ll` name from the exact pane CWD.
 #[test]
 fn app_cell_lookup_resolves_shell_quoted_spaced_name() {
@@ -313,6 +355,28 @@ fn combining_extras_reject_the_entire_surrounding_path_token() {
     assert!(target_at_row_cell(&row, 8, PathStyle::Posix).is_none());
 }
 
+/// A prose fallback remains inert when removed punctuation carries combining identity.
+#[test]
+fn trimmed_punctuation_cannot_bypass_combining_cell_rejection() {
+    let mut cells = "src/main.rs,"
+        .chars()
+        .map(|ch| Cell::plain(ch, Color::Default, Color::Default, CellFlags::empty()))
+        .collect::<Vec<_>>();
+    cells.last_mut().unwrap().set_extras(Some("\u{301}".into()));
+    let row = Row::from_flat(cells);
+
+    assert!(row_target_candidates_at_cell(&row, 2, PathStyle::Posix, true).is_empty());
+}
+
+/// A prose fallback remains inert when removed punctuation carries OSC 8 identity.
+#[test]
+fn trimmed_punctuation_cannot_bypass_osc8_cell_rejection() {
+    let mut row = ascii_row("src/main.rs,");
+    row.iter_mut().last().unwrap().set_hyperlink(Some(HyperlinkId(7)));
+
+    assert!(row_target_candidates_at_cell(&row, 2, PathStyle::Posix, true).is_empty());
+}
+
 /// POSIX relative paths resolve only from an accepted local OSC 7 snapshot.
 #[test]
 fn posix_relative_resolution_is_host_aware_and_root_clamped() {
@@ -457,34 +521,54 @@ fn probe_epoch_advances_and_wraps() {
     assert_eq!(ProbeEpoch(u64::MAX).next(), ProbeEpoch::INITIAL);
 }
 
-/// macOS direct-open passes one normalized target after the option terminator.
+/// macOS direct-open and reveal use fixed argv with an explicit option terminator.
 #[test]
-fn macos_open_spec_opens_the_target_itself() {
-    let spec = macos_open_spec("/tmp/file/").expect("valid absolute path");
-    assert_eq!(spec.program, PathBuf::from("/usr/bin/open"));
-    assert_eq!(spec.args, ["--", "/tmp/file"]);
+fn macos_open_specs_keep_targets_out_of_options() {
+    let open = macos_open_spec("/tmp/file/").expect("valid absolute path");
+    assert_eq!(open.program, PathBuf::from("/usr/bin/open"));
+    assert_eq!(open.args, ["--", "/tmp/file"]);
+
+    let reveal = macos_reveal_spec("/tmp/file name").expect("valid absolute path");
+    assert_eq!(reveal.program, PathBuf::from("/usr/bin/open"));
+    assert_eq!(reveal.args, ["-R", "--", "/tmp/file name"]);
     assert_eq!(macos_open_spec("relative/file"), None);
+    assert_eq!(macos_reveal_spec("relative/file"), None);
 }
 
-/// macOS blocks bundles, installers, executable mode, script suffixes, and executable content.
+/// macOS reveals inert source suffixes but continues blocking executable and launcher classes.
 #[test]
-fn macos_open_policy_blocks_launcher_classes() {
+fn macos_policy_separates_revealable_sources_from_launchers() {
     for path in [
         "/tmp/App.app",
         "/tmp/run.command",
         "/tmp/install.pkg",
         "/tmp/image.dmg",
         "/tmp/link.webloc",
+        "/tmp/run.scpt",
+        "/tmp/run.applescript",
+        "/tmp/run.osascript",
+    ] {
+        assert!(
+            macos_file_policy(Path::new(path), b"ordinary", false).is_blocked(),
+            "unexpected actionable launcher {path}"
+        );
+    }
+    for path in [
         "/tmp/run.sh",
         "/tmp/run.py",
         "/tmp/run.rb",
         "/tmp/run.pl",
         "/tmp/run.zsh",
+        "/tmp/run.lua",
+        "/tmp/run.js",
     ] {
-        assert!(
-            macos_file_policy(Path::new(path), b"ordinary", false).is_blocked(),
-            "unexpected openable {path}"
+        assert_eq!(
+            macos_file_policy(Path::new(path), b"ordinary", false),
+            PathOpenDecision::Revealable(PathKind::File),
+            "source suffix must be reveal-only: {path}"
         );
+        assert!(macos_file_policy(Path::new(path), b"#!/bin/sh", false).is_blocked());
+        assert!(macos_file_policy(Path::new(path), b"ordinary", true).is_blocked());
     }
     for prefix in [
         b"#!/bin/sh".as_slice(),
@@ -497,7 +581,7 @@ fn macos_open_policy_blocks_launcher_classes() {
     ] {
         assert!(
             macos_file_policy(Path::new("/tmp/tool"), prefix, false).is_blocked(),
-            "unexpected openable executable prefix {prefix:?}"
+            "unexpected actionable executable prefix {prefix:?}"
         );
     }
     assert!(macos_file_policy(Path::new("/tmp/tool"), b"ordinary", true).is_blocked());
@@ -505,6 +589,29 @@ fn macos_open_policy_blocks_launcher_classes() {
         macos_file_policy(Path::new("/tmp/readme.txt"), b"notes", false),
         PathOpenDecision::Openable(PathKind::File)
     );
+}
+
+/// Activation-time macOS revalidation requires the exact reveal action and kind to remain stable.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_reveal_revalidation_rejects_new_executable_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = std::env::temp_dir().join(format!(
+        "sonicterm-reveal-revalidate-{}-{}-source.lua",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    std::fs::write(&path, b"ordinary").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let decision = PathOpenDecision::Revealable(PathKind::File);
+    let spec =
+        macos_validated_open_spec(&path, decision).expect("stable source remains revealable");
+    assert_eq!(spec.args[0], "-R");
+
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(macos_validated_open_spec(&path, decision).is_err());
+    std::fs::remove_file(path).unwrap();
 }
 
 /// macOS production classification blocks an extensionless executable before LaunchServices.
@@ -825,6 +932,75 @@ fn candidate_selection_prefers_longest_and_fails_closed() {
         }
     })
     .is_none());
+}
+
+/// A punctuation-ending literal wins, and only Missing permits its shorter prose alternate.
+#[test]
+fn candidate_selection_falls_through_only_from_missing_literal() {
+    let candidates = vec![
+        probe_candidate("src/main.rs,", "/work/src/main.rs,", 0),
+        probe_candidate("src/main.rs", "/work/src/main.rs", 0),
+    ];
+    let literal =
+        select_openable_candidate(&candidates, |_| PathOpenDecision::Openable(PathKind::File))
+            .expect("literal punctuation file wins");
+    assert_eq!(literal.candidate.display(), "src/main.rs,");
+
+    let trimmed = select_openable_candidate(&candidates, |path| {
+        if path.ends_with("main.rs,") {
+            PathOpenDecision::Missing
+        } else {
+            PathOpenDecision::Openable(PathKind::File)
+        }
+    })
+    .expect("missing literal permits shorter prose path");
+    assert_eq!(trimmed.candidate.display(), "src/main.rs");
+
+    assert!(select_openable_candidate(&candidates, |path| {
+        if path.ends_with("main.rs,") {
+            PathOpenDecision::Blocked
+        } else {
+            PathOpenDecision::Openable(PathKind::File)
+        }
+    })
+    .is_none());
+}
+
+/// Openable and revealable results in one tier remain ambiguous and fail closed.
+#[test]
+fn actionable_candidate_kinds_share_one_ambiguity_count() {
+    let candidates = vec![
+        probe_candidate("left.lua", "/work/left.lua", 0),
+        probe_candidate("right.rs", "/work/right.rs", 0),
+    ];
+
+    assert!(select_openable_candidate(&candidates, |path| {
+        if path.ends_with("left.lua") {
+            PathOpenDecision::Revealable(PathKind::File)
+        } else {
+            PathOpenDecision::Openable(PathKind::File)
+        }
+    })
+    .is_none());
+}
+
+/// Revealable probe results authorize the same epoch-keyed activation path as openable results.
+#[test]
+fn revealable_selection_is_authorized_without_weakening_freshness() {
+    let mut state = PathProbeState::default();
+    let key = probe_key("/work/source.lua", 20);
+    let request = state.request(key.clone()).expect("new candidate schedules a probe");
+    let result = PathProbeResult {
+        selection: Some(PathProbeSelection {
+            candidate: request.key.candidates[0].clone(),
+            decision: PathOpenDecision::Revealable(PathKind::File),
+        }),
+        request,
+    };
+
+    assert!(state.accept(&result, Some(&key)));
+    assert!(state.authorized(&key, true));
+    assert!(!state.authorized(&key, false));
 }
 
 /// Real filesystem classification selects the complete spaced entry over an existing short prefix.

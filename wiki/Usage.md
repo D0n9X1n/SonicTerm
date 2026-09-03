@@ -221,22 +221,31 @@ never substitutes the process working directory, another pane’s directory, or 
 named user’s home.
 
 The background probe checks at most 37 candidates, and each candidate spans at
-most eight non-space parts. SonicTerm chooses the longest unambiguous openable
-candidate containing the pointed cell. A blocked candidate or equal-length
-ambiguity fails closed instead of falling back to a shorter name. A complete
-standalone single-quoted contextual name, such as `'My Folder'` from `ll`, is
-treated as `My Folder`. Other quoted or escaped names, `ls -F` suffixes (`*`,
-`@`, `=`, `|`), editor `:line:column` suffixes, wrapped paths, and tokens with
-wide or combining cells are not raw clickable targets.
+most eight non-space parts. SonicTerm chooses the longest unambiguous actionable
+candidate containing the pointed cell. For a path ending in prose punctuation
+such as `src/main.rs,`, the legal literal filename is probed first. Only when
+that literal is missing can a shorter candidate without trailing comma,
+semicolon, period, colon, exclamation mark, or question mark win; the underline
+then excludes the prose punctuation. A blocked literal or equal-length
+ambiguity fails closed instead of falling back. A complete standalone
+single-quoted contextual name, such as `'My Folder'` from `ll`, is treated as
+`My Folder`. Other quoted or escaped names, `ls -F` suffixes (`*`, `@`, `=`,
+`|`), editor `:line:column` suffixes, soft-wrapped or hard-wrapped paths, and
+tokens with wide or combining cells are not raw clickable targets.
 
 Only regular files and directories are eligible. Missing, inaccessible,
-symlink/reparse-point, socket, device, executable, launcher, script, shortcut,
-installer, network, UNC, WSL, and remote targets remain ordinary text. Each
-platform revalidates the target immediately before opening it. Windows uses
-`ShellExecuteExW` without a shell. macOS uses `/usr/bin/open -- <target>`.
-Linux prefers the desktop portal with an open file descriptor and otherwise
-uses a fixed `/usr/bin/xdg-open` or `/bin/xdg-open` path. The macOS and Linux
-path-based openers still have the normal pathname race after revalidation.
+symlink/reparse-point, socket, device, executable, launcher, shortcut, installer,
+network, UNC, WSL, and remote targets remain ordinary text. On macOS, an
+ordinary non-executable source or script file is reveal-only: click selects it
+in Finder through fixed `/usr/bin/open -R -- <target>` arguments and never opens
+or executes it. App bundles, installers, `.command`, AppleScript, executable
+mode, shebangs, and executable file magic remain blocked. Every platform
+revalidates the exact target kind and action immediately before dispatch.
+Windows uses `ShellExecuteExW` without a shell. Ordinary macOS files and
+directories use `/usr/bin/open -- <target>`. Linux prefers the desktop portal
+with an open file descriptor and otherwise uses a fixed `/usr/bin/xdg-open` or
+`/bin/xdg-open` path. The macOS and Linux path-based openers still have the
+normal pathname race after revalidation.
 
 Set `terminal.clickable_bare_names = false` to disable contextual names. Set
 `terminal.clickable_local_targets = false` to disable every raw local target.
@@ -473,19 +482,23 @@ Pointer protocol 与 OSC 52 边界见 [终端 IO 与 VT](Terminal-IO-and-VT)。
 SonicTerm 不会改用进程工作目录、其它 pane 的目录或命名用户的 home。
 
 后台 probe 最多检查 37 个候选，每个候选最多跨 8 个非空格部分。SonicTerm 会选择
-包含鼠标 cell 的最长、无歧义且可打开候选。遇到 blocked 候选或同长度歧义时会
-fail closed，不会退回较短名称。`ll` 输出的完整独立单引号上下文名称，例如
+包含鼠标 cell 的最长、无歧义且可操作候选。对于 `src/main.rs,` 这类以正文标点结尾的路径，
+会先探测标点属于文件名的合法字面候选。只有该字面文件不存在时，才会尝试去掉末尾逗号、
+分号、句点、冒号、感叹号或问号的较短候选；此时下划线不包含正文标点。字面候选被阻止或
+同长度候选有歧义时会 fail closed，不会回退。`ll` 输出的完整独立单引号上下文名称，例如
 `'My Folder'`，会按 `My Folder` 处理。其它带引号或转义的名称、`ls -F` 后缀
-（`*`、`@`、`=`、`|`）、editor `:line:column` 后缀、跨行路径，以及含宽字符或
+（`*`、`@`、`=`、`|`）、editor `:line:column` 后缀、自动软换行或硬换行路径，以及含宽字符或
 组合 cell 的 token 都不会成为原始可点击目标。
 
-只有普通文件和目录可以打开。不存在、不可访问、symlink/reparse point、socket、
-device、executable、launcher、script、shortcut、installer、network、UNC、WSL 和
-远端目标都会保持普通文字。每个平台都会在打开前立即重新验证。Windows 使用
-`ShellExecuteExW`，不经过 shell。macOS 使用 `/usr/bin/open -- <target>`。Linux
-优先把已打开的 file descriptor 交给 desktop portal；否则使用固定的
-`/usr/bin/xdg-open` 或 `/bin/xdg-open`。macOS 和 Linux 的路径 opener 在重新验证
-之后仍有通常的 pathname race。
+只有普通文件和目录可以操作。不存在、不可访问、symlink/reparse point、socket、device、
+executable、launcher、shortcut、installer、network、UNC、WSL 和远端目标都会保持普通文字。
+macOS 上，普通且不可执行的源文件或脚本只能在 Finder 中显示：点击会通过固定参数
+`/usr/bin/open -R -- <target>` 选中它，不会打开或执行。App bundle、installer、`.command`、
+AppleScript、可执行权限、shebang 和可执行文件 magic 仍被阻止。每个平台都会在调用前立即
+重新验证完全相同的目标类型与操作。Windows 使用不经过 shell 的 `ShellExecuteExW`；普通
+macOS 文件和目录使用 `/usr/bin/open -- <target>`。Linux 优先把已打开的 file descriptor
+交给 desktop portal；否则使用固定的 `/usr/bin/xdg-open` 或 `/bin/xdg-open`。macOS 和
+Linux 的路径 opener 在重新验证之后仍有通常的 pathname race。
 
 设置 `terminal.clickable_bare_names = false` 可以关闭上下文名称。设置
 `terminal.clickable_local_targets = false` 可以关闭所有原始本地目标。两者都不影响
