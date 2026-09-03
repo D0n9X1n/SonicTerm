@@ -617,12 +617,19 @@ fn warp_retained_redraw_clears_overhanging_glyph_ink() {
     let glyph = atlas
         .get_or_insert(sonicterm_types::GlyphKey::new('T', false, false), &mut SolidTallAtlasGlyph)
         .expect("tall glyph inserts");
-    let mut upload = crate::atlas_upload::AtlasUpload::new(
+    let image_upload = crate::atlas_upload::AtlasUpload::new(
         &device,
         &atlas,
-        pipeline.texture_bind_group_layout(),
+        pipeline.image_bind_group_layout(),
+        crate::atlas_upload::AtlasBindingKind::Image,
     );
-    upload.sync(&queue, &mut atlas, crate::atlas_upload::AtlasPixelEncoding::Coverage);
+    let mut glyph_upload = crate::atlas_upload::AtlasUpload::new(
+        &device,
+        &atlas,
+        pipeline.glyph_bind_group_layout(),
+        crate::atlas_upload::AtlasBindingKind::Glyph,
+    );
+    glyph_upload.sync(&queue, &mut atlas);
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("retained overhang test target"),
         size: wgpu::Extent3d { width: WIDTH, height: HEIGHT, depth_or_array_layers: 1 },
@@ -668,8 +675,8 @@ fn warp_retained_redraw_clears_overhanging_glyph_ink() {
             &device,
             &queue,
             &mut pass,
-            upload.coverage_bind_group(),
-            upload.coverage_bind_group(),
+            image_upload.image_bind_group(),
+            glyph_upload.glyph_bind_group(),
             WIDTH as f32,
             HEIGHT as f32,
             &[],
@@ -744,8 +751,8 @@ fn warp_retained_redraw_clears_overhanging_glyph_ink() {
             &device,
             &queue,
             &mut pass,
-            upload.coverage_bind_group(),
-            upload.coverage_bind_group(),
+            image_upload.image_bind_group(),
+            glyph_upload.glyph_bind_group(),
             WIDTH as f32,
             HEIGHT as f32,
             &[clear],
@@ -956,20 +963,37 @@ fn status_marker_fit_is_wired_before_both_terminal_glyph_emissions() {
     }
 }
 
-/// Atlas roles keep image color decoding separate from byte-exact glyph coverage.
+/// Glyph flags preserve color selection in x and raw subpixel coverage in y.
+#[test]
+fn glyph_flags_keep_color_and_subpixel_axes_independent() {
+    assert_eq!(glyph_flags(false, false), [0.0, 0.0, 0.0, 0.0]);
+    assert_eq!(glyph_flags(true, false), [1.0, 0.0, 0.0, 0.0]);
+    assert_eq!(glyph_flags(false, true), [0.0, 1.0, 0.0, 0.0]);
+}
+
+/// Windows software glyph drawing continues to consume the original CPU atlas bytes directly.
+#[test]
+fn windows_software_presenter_keeps_cpu_glyph_source_byte_compatible() {
+    const SOURCE: &str = include_str!("software_windows.rs");
+
+    assert!(SOURCE.contains("let atlas_pixels = atlas.pixels_bgra();"));
+    assert!(SOURCE.contains("if color_glyph"));
+    assert!(SOURCE.contains("blend_premul_bgra(&mut self.pixels[dst_off..dst_off + 4], sample);"));
+    assert!(!SOURCE.contains("copy_rect_into_scratch"));
+}
+
+/// Atlas roles keep linear-filtered images separate from dual-view nearest glyph sampling.
 #[test]
 fn atlas_sync_and_bind_groups_are_wired_by_role() {
     const SOURCE: &str = include_str!("core.rs");
     let source = SOURCE.replace("\r\n", "\n");
 
-    assert!(source.contains(
-        "self.image_upload.sync(\n            &self.queue,\n            &mut self.image_atlas,\n            AtlasPixelEncoding::PremultipliedSrgb,\n        )"
-    ));
-    assert!(source.contains(
-        "self.glyph_upload.sync(\n            &self.queue,\n            &mut self.glyph_atlas,\n            AtlasPixelEncoding::Coverage,\n        )"
-    ));
-    assert!(source.contains("self.image_upload.color_bind_group()"));
-    assert!(source.contains("self.glyph_upload.coverage_bind_group()"));
+    assert!(source.contains("self.image_upload.sync(&self.queue, &mut self.image_atlas)"));
+    assert!(source.contains("self.glyph_upload.sync(&self.queue, &mut self.glyph_atlas)"));
+    assert!(source.contains("self.image_upload.image_bind_group()"));
+    assert!(source.contains("self.glyph_upload.glyph_bind_group()"));
+    assert!(source.contains("AtlasBindingKind::Image"));
+    assert!(source.contains("AtlasBindingKind::Glyph"));
 }
 
 #[test]

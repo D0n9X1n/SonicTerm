@@ -916,6 +916,42 @@ fn scaled_glyph_uses_nearest_without_bottom_fringe() {
     assert_eq!(frame.pixel_bgra(0, 2), [0, 0, 0, 255]);
 }
 
+/// A one-to-one color glyph over transparent black copies its encoded CPU source bytes exactly.
+#[test]
+fn software_color_glyph_output_is_byte_compatible_with_cpu_atlas() {
+    let source = [17, 34, 68, 128];
+    let mut atlas = GlyphAtlas::new(1, 1);
+    let info = atlas
+        .get_or_insert(
+            GlyphKey::new('😀', false, false),
+            &mut TileRasterizer(RasterTile {
+                width: 1,
+                height: 1,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 1.0,
+                coverage: source.to_vec(),
+                is_color: true,
+                is_subpixel: false,
+            }),
+        )
+        .expect("color glyph inserts");
+    assert_eq!(&atlas.pixels_bgra()[0..4], &source);
+    let mut frame = WindowsSoftwareFrame::new(1, 1, [0.0; 4]).expect("valid transparent frame");
+
+    frame.draw_glyphs(
+        &atlas,
+        &[GlyphInstance {
+            rect: px_to_ndc(0.0, 0.0, 1.0, 1.0, 1.0, 1.0),
+            uv: info.uv,
+            color: [1.0; 4],
+            flags: [1.0, 0.0, 0.0, 0.0],
+        }],
+    );
+
+    assert_eq!(frame.pixel_bgra(0, 0), source);
+}
+
 #[test]
 fn scaled_color_glyph_uses_nearest_sampling() {
     let mut atlas = GlyphAtlas::new(1, 2);

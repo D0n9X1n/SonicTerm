@@ -71,7 +71,8 @@ struct ShaderUniform {
 /// the final draw boundary.
 pub struct WeztermPipeline {
     pipeline: wgpu::RenderPipeline,
-    texture_bind_group_layout: wgpu::BindGroupLayout,
+    image_bind_group_layout: wgpu::BindGroupLayout,
+    glyph_bind_group_layout: wgpu::BindGroupLayout,
     uniform_buf: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
     vertex_buf: wgpu::Buffer,
@@ -103,35 +104,39 @@ impl WeztermPipeline {
                 }],
             });
 
-        let texture_bind_group_layout =
+        let texture_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                multisampled: false,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            },
+            count: None,
+        };
+        let sampler_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        };
+        let image_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("sonic-wezterm-texture-bgl"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            multisampled: false,
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
+                label: Some("sonic-wezterm-image-bgl"),
+                entries: &[texture_entry(0), sampler_entry(1)],
+            });
+        let glyph_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("sonic-wezterm-glyph-bgl"),
+                entries: &[texture_entry(0), sampler_entry(1), texture_entry(2), sampler_entry(3)],
             });
 
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("sonic-wezterm-present-layout"),
             bind_group_layouts: &[
                 Some(&uniform_bind_group_layout),
-                Some(&texture_bind_group_layout),
-                Some(&texture_bind_group_layout),
+                Some(&image_bind_group_layout),
+                Some(&glyph_bind_group_layout),
             ],
             immediate_size: 0,
         });
@@ -201,7 +206,8 @@ impl WeztermPipeline {
 
         Self {
             pipeline,
-            texture_bind_group_layout,
+            image_bind_group_layout,
+            glyph_bind_group_layout,
             uniform_buf,
             uniform_bind_group,
             vertex_buf,
@@ -211,9 +217,14 @@ impl WeztermPipeline {
         }
     }
 
-    /// Bind-group layout consumed by [`crate::atlas_upload::AtlasUpload`].
-    pub fn texture_bind_group_layout(&self) -> &wgpu::BindGroupLayout {
-        &self.texture_bind_group_layout
+    /// Image-atlas layout: one sRGB view and one linear sampler.
+    pub(crate) fn image_bind_group_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.image_bind_group_layout
+    }
+
+    /// Glyph-atlas layout: unorm coverage and sRGB color views with nearest samplers.
+    pub(crate) fn glyph_bind_group_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.glyph_bind_group_layout
     }
 
     /// Upload and draw all layers in final painter order.
@@ -516,8 +527,10 @@ struct ShaderUniform {
 @group(1) @binding(0) var atlas_linear_tex: texture_2d<f32>;
 @group(1) @binding(1) var atlas_linear_sampler: sampler;
 
-@group(2) @binding(0) var atlas_nearest_tex: texture_2d<f32>;
-@group(2) @binding(1) var atlas_nearest_sampler: sampler;
+@group(2) @binding(0) var glyph_coverage_tex: texture_2d<f32>;
+@group(2) @binding(1) var glyph_coverage_sampler: sampler;
+@group(2) @binding(2) var glyph_color_tex: texture_2d<f32>;
+@group(2) @binding(3) var glyph_color_sampler: sampler;
 
 fn rgb2hsv(c: vec3<f32>) -> vec3<f32> {
     let K = vec4<f32>(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
@@ -598,9 +611,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         );
         color = textureSample(atlas_linear_tex, atlas_linear_sampler, sample_uv);
     } else if (in.has_color == IS_COLOR_EMOJI) {
-        color = textureSample(atlas_nearest_tex, atlas_nearest_sampler, in.tex);
+        color = textureSample(glyph_color_tex, glyph_color_sampler, in.tex);
     } else if (in.has_color == IS_GLYPH) {
-        let sample = textureSample(atlas_nearest_tex, atlas_nearest_sampler, in.tex);
+        let sample = textureSample(glyph_coverage_tex, glyph_coverage_sampler, in.tex);
         let cov = sample.a;
         color = vec4<f32>(in.fg_color.rgb * cov, in.fg_color.a * cov);
         hsv *= uniforms.foreground_text_hsb;

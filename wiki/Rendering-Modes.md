@@ -144,13 +144,15 @@ samples retain their separate encoded-atlas path.
 Text glyphs use one stabilized destination-pixel origin regardless of whether
 an atlas tile is sampled one-to-one or resampled on either axis. Source sampling
 remains nearest and clamped to the glyph's own tile; clipping at the top or left
-advances past the hidden source rows or columns. Their monochrome and subpixel
-coverage bytes remain unchanged linear masks. Scaled inline images retain
-fractional positioning and bilinear sampling over the unchanged encoded CPU
-pixels. The GPU upload converts each dirty image rectangle to sRGB-texture bytes
-that decode to premultiplied linear color, and the sRGB view decodes before
-filtering. Bilinear taps clamp to the current packed image tile rather than the
-whole atlas. Both views share one `Bgra8Unorm` allocation.
+advances past the hidden source rows or columns. Dirty metadata keeps monochrome
+and subpixel coverage as unchanged linear masks while converting only color-glyph
+rectangles. One glyph bind group exposes the texture's unorm coverage view and
+sRGB color view with nearest samplers; ordinary and subpixel-tagged instances use
+coverage, while `flags.x` selects color. Scaled inline images retain fractional
+positioning and bilinear sampling over unchanged encoded CPU pixels. Their
+separate group uses an sRGB view and linear sampler; upload conversion produces
+premultiplied linear samples after decode, and bilinear taps clamp to the current
+packed image tile rather than the whole atlas.
 
 ### Retained pixels and damage
 
@@ -340,11 +342,12 @@ source-over，只对 RGB 编码一次，并把 alpha 作为线性 UNORM 做 sour
 
 文字字形无论图集图块是按一比一取样，还是任一轴需要重采样，都使用同一套稳定后的目标
 像素原点。源图块仍采用最近点取样并限制在字形自身矩形内；顶部或左侧被裁剪时，会跳过
-不可见的源行或源列。单色与次像素覆盖率字节保持不变，继续作为线性掩码。缩放后的内联
-图像则继续对未改变的编码 CPU 像素保留分数位置和双线性取样。GPU 上传把每个图像脏矩形
-转换为经过 sRGB 纹理解码后等于预乘线性颜色的字节，sRGB view 会在过滤前解码。双线性
-采样点限制在当前已打包图像的图块内，而不是整个图集；两个 view 共用一个 `Bgra8Unorm`
-分配。
+不可见的源行或源列。脏元数据让单色与次像素覆盖率保持不变，继续作为线性掩码，只转换
+彩色字形矩形。一个字形 bind group 通过最近点 sampler 同时提供纹理的 unorm 覆盖率 view
+和 sRGB 彩色 view；普通及带次像素标记的实例使用覆盖率，`flags.x` 选择彩色。缩放后的
+内联图像继续对未改变的编码 CPU 像素保留分数位置和双线性取样。其独立 group 使用 sRGB
+view 与线性 sampler；上传转换让样本解码后成为预乘线性颜色，双线性采样点限制在当前
+已打包图像的图块内，而不是整个图集。
 
 ### 保留像素与损伤区域
 

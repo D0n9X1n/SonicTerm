@@ -1,5 +1,13 @@
 use super::*;
-use sonicterm_text::glyph_atlas::ATLAS_DIM;
+use sonicterm_text::glyph_atlas::{AtlasPixelKind, ATLAS_DIM};
+
+fn coverage_rect(x: u32, y: u32, w: u32, h: u32) -> DirtyRect {
+    DirtyRect { x, y, w, h, kind: AtlasPixelKind::Coverage }
+}
+
+fn color_rect(x: u32, y: u32, w: u32, h: u32) -> DirtyRect {
+    DirtyRect { x, y, w, h, kind: AtlasPixelKind::Color }
+}
 
 fn headless_device() -> (wgpu::Device, wgpu::Queue) {
     #[cfg(target_os = "windows")]
@@ -83,8 +91,19 @@ fn render_image_readback_with_neighbor(
             .expect("neighbor test tile inserts");
     }
     let cpu_pixels = atlas.pixels_bgra().to_vec();
-    let mut upload = AtlasUpload::new(&device, &atlas, pipeline.texture_bind_group_layout());
-    upload.sync(&queue, &mut atlas, AtlasPixelEncoding::PremultipliedSrgb);
+    let mut image_upload = AtlasUpload::new(
+        &device,
+        &atlas,
+        pipeline.image_bind_group_layout(),
+        AtlasBindingKind::Image,
+    );
+    let glyph_upload = AtlasUpload::new(
+        &device,
+        &atlas,
+        pipeline.glyph_bind_group_layout(),
+        AtlasBindingKind::Glyph,
+    );
+    image_upload.sync(&queue, &mut atlas);
     assert_eq!(atlas.pixels_bgra(), cpu_pixels, "GPU upload must not rewrite CPU atlas bytes");
 
     let target = device.create_texture(&wgpu::TextureDescriptor {
@@ -132,8 +151,8 @@ fn render_image_readback_with_neighbor(
             &device,
             &queue,
             &mut pass,
-            upload.color_bind_group(),
-            upload.coverage_bind_group(),
+            image_upload.image_bind_group(),
+            glyph_upload.glyph_bind_group(),
             target_width as f32,
             1.0,
             &[],
@@ -166,27 +185,209 @@ fn render_image_readback_with_neighbor(
     result
 }
 
+/// Render adjacent synthetic glyph tiles through the real unified pipeline and return BGRA pixels.
+fn render_glyph_readback(tiles: &[sonicterm_text::glyph_atlas::RasterTile]) -> Vec<u8> {
+    const PADDED_BYTES_PER_ROW: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let (device, queue) = headless_device();
+    let mut pipeline = crate::wezterm_pipeline::WeztermPipeline::new(
+        &device,
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+        tiles.len() as u64,
+    );
+    let mut atlas = GlyphAtlas::new(tiles.len() as u32, 1);
+    let mut glyphs = Vec::with_capacity(tiles.len());
+    for (index, tile) in tiles.iter().enumerate() {
+        let info = atlas
+            .get_or_insert(
+                sonicterm_types::GlyphKey::new(
+                    char::from_u32('A' as u32 + index as u32).expect("test glyph key"),
+                    false,
+                    false,
+                ),
+                &mut TestTileRasterizer(tile.clone()),
+            )
+            .expect("glyph test tile inserts");
+        glyphs.push(sonicterm_text::GlyphInstance {
+            rect: crate::quad::px_to_ndc(index as f32, 0.0, 1.0, 1.0, tiles.len() as f32, 1.0),
+            uv: info.uv,
+            color: [1.0; 4],
+            flags: [f32::from(info.is_color), f32::from(info.is_subpixel), 0.0, 0.0],
+        });
+    }
+    let cpu_pixels = atlas.pixels_bgra().to_vec();
+    let image_upload = AtlasUpload::new(
+        &device,
+        &atlas,
+        pipeline.image_bind_group_layout(),
+        AtlasBindingKind::Image,
+    );
+    let mut glyph_upload = AtlasUpload::new(
+        &device,
+        &atlas,
+        pipeline.glyph_bind_group_layout(),
+        AtlasBindingKind::Glyph,
+    );
+    glyph_upload.sync(&queue, &mut atlas);
+    assert_eq!(atlas.pixels_bgra(), cpu_pixels, "GPU upload must preserve CPU glyph bytes");
+
+    let width = tiles.len() as u32;
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("mixed glyph readback target"),
+        size: wgpu::Extent3d { width, height: 1, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Bgra8UnormSrgb,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("mixed glyph readback"),
+        size: u64::from(PADDED_BYTES_PER_ROW),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("mixed glyph readback pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pipeline.draw_frame(
+            &device,
+            &queue,
+            &mut pass,
+            image_upload.image_bind_group(),
+            glyph_upload.glyph_bind_group(),
+            width as f32,
+            1.0,
+            &[],
+            &[],
+            &glyphs,
+            &[],
+            &[],
+        );
+    }
+    encoder.copy_texture_to_buffer(
+        target.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(PADDED_BYTES_PER_ROW),
+                rows_per_image: Some(1),
+            },
+        },
+        wgpu::Extent3d { width, height: 1, depth_or_array_layers: 1 },
+    );
+    queue.submit([encoder.finish()]);
+    let slice = readback.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    device.poll(wgpu::PollType::wait_indefinitely()).expect("poll mixed glyph readback");
+    let mapped = slice.get_mapped_range().expect("mapped mixed glyph readback");
+    let result = mapped[..width as usize * BYTES_PER_PIXEL as usize].to_vec();
+    drop(mapped);
+    readback.unmap();
+    result
+}
+
+struct TestTileRasterizer(sonicterm_text::glyph_atlas::RasterTile);
+
+impl sonicterm_text::glyph_atlas::Rasterizer for TestTileRasterizer {
+    fn rasterize(
+        &mut self,
+        _key: sonicterm_types::GlyphKey,
+    ) -> Option<sonicterm_text::glyph_atlas::RasterTile> {
+        Some(self.0.clone())
+    }
+}
+
+/// Adjacent color and grayscale glyphs must select sRGB color and unorm coverage views respectively.
+#[test]
+fn gpu_mixed_glyphs_select_distinct_texture_views() {
+    let output = render_glyph_readback(&[
+        sonicterm_text::glyph_atlas::RasterTile {
+            width: 1,
+            height: 1,
+            offset_x: 0,
+            offset_y: 0,
+            advance: 1.0,
+            coverage: vec![128, 128, 128, 255],
+            is_color: true,
+            is_subpixel: false,
+        },
+        sonicterm_text::glyph_atlas::RasterTile {
+            width: 1,
+            height: 1,
+            offset_x: 0,
+            offset_y: 0,
+            advance: 1.0,
+            coverage: vec![128],
+            is_color: false,
+            is_subpixel: false,
+        },
+    ]);
+
+    for &actual in &output[0..3] {
+        assert!(actual.abs_diff(128) <= 1, "color glyph must stay encoded gray 128: {output:?}");
+    }
+    assert_eq!(output[3], 255);
+    for &actual in &output[4..7] {
+        assert!(actual.abs_diff(188) <= 2, "coverage glyph must remain linear: {output:?}");
+    }
+    assert!(output[7].abs_diff(128) <= 1);
+}
+
+/// Translucent color glyphs convert encoded premultiplication before sRGB-view sampling.
+#[test]
+fn gpu_translucent_color_glyph_blends_as_premultiplied_linear() {
+    let output = render_glyph_readback(&[sonicterm_text::glyph_atlas::RasterTile {
+        width: 1,
+        height: 1,
+        offset_x: 0,
+        offset_y: 0,
+        advance: 1.0,
+        coverage: vec![64, 64, 64, 128],
+        is_color: true,
+        is_subpixel: false,
+    }]);
+
+    for (actual, expected) in output.iter().zip([92, 92, 92, 128]) {
+        assert!(actual.abs_diff(expected) <= 1, "actual={actual}, expected about {expected}");
+    }
+}
+
 #[test]
 fn coalesces_touching_rows_and_columns() {
     let input = [
-        DirtyRect { x: 0, y: 0, w: 2, h: 1 },
-        DirtyRect { x: 2, y: 0, w: 2, h: 1 },
-        DirtyRect { x: 0, y: 1, w: 4, h: 1 },
-        DirtyRect { x: 7, y: 7, w: 1, h: 1 },
+        coverage_rect(0, 0, 2, 1),
+        coverage_rect(2, 0, 2, 1),
+        coverage_rect(0, 1, 4, 1),
+        coverage_rect(7, 7, 1, 1),
     ];
     let mut output = Vec::new();
 
     coalesce_dirty_rects(&input, &mut output);
 
-    assert_eq!(
-        output,
-        [DirtyRect { x: 0, y: 0, w: 4, h: 2 }, DirtyRect { x: 7, y: 7, w: 1, h: 1 }]
-    );
+    assert_eq!(output, [coverage_rect(0, 0, 4, 2), coverage_rect(7, 7, 1, 1)]);
 }
 
 #[test]
 fn separate_dirty_regions_remain_separate() {
-    let input = [DirtyRect { x: 0, y: 0, w: 1, h: 1 }, DirtyRect { x: 2, y: 0, w: 1, h: 1 }];
+    let input = [coverage_rect(0, 0, 1, 1), coverage_rect(2, 0, 1, 1)];
     let mut output = Vec::new();
 
     coalesce_dirty_rects(&input, &mut output);
@@ -194,27 +395,42 @@ fn separate_dirty_regions_remain_separate() {
     assert_eq!(output, input);
 }
 
+/// Touching writes coalesce within one interpretation but never across coverage and color.
+#[test]
+fn coalescing_keeps_touching_pixel_kinds_separate() {
+    let input = [coverage_rect(0, 0, 1, 1), coverage_rect(1, 0, 1, 1), color_rect(2, 0, 1, 1)];
+    let mut output = Vec::new();
+
+    coalesce_dirty_rects(&input, &mut output);
+
+    assert_eq!(output, [coverage_rect(0, 0, 2, 1), color_rect(2, 0, 1, 1)]);
+}
+
 /// Coverage uploads preserve every CPU atlas byte while reusing retained staging.
 #[test]
 fn coverage_copies_tightly_packed_subrect_and_reuses_capacity() {
     let pixels: Vec<u8> = (0..48).collect();
-    let rect = DirtyRect { x: 1, y: 0, w: 2, h: 2 };
+    let rect = coverage_rect(1, 0, 2, 2);
     let mut scratch = Vec::new();
 
-    copy_rect_into_scratch(&pixels, 4, rect, AtlasPixelEncoding::Coverage, &mut scratch);
+    copy_rect_into_scratch(&pixels, 4, rect, &mut scratch);
     let capacity = scratch.capacity();
 
     assert_eq!(scratch, [4, 5, 6, 7, 8, 9, 10, 11, 20, 21, 22, 23, 24, 25, 26, 27]);
 
-    copy_rect_into_scratch(
-        &pixels,
-        4,
-        DirtyRect { x: 0, y: 0, w: 1, h: 1 },
-        AtlasPixelEncoding::Coverage,
-        &mut scratch,
-    );
+    copy_rect_into_scratch(&pixels, 4, coverage_rect(0, 0, 1, 1), &mut scratch);
     assert_eq!(scratch, [0, 1, 2, 3]);
     assert_eq!(scratch.capacity(), capacity);
+}
+
+/// DirectWrite subpixel coverage remains byte-exact through kind-directed GPU staging.
+#[test]
+fn subpixel_coverage_staging_preserves_bgra_channels() {
+    let mut scratch = Vec::new();
+
+    copy_rect_into_scratch(&[10, 20, 30, 40], 1, coverage_rect(0, 0, 1, 1), &mut scratch);
+
+    assert_eq!(scratch, [10, 20, 30, 40]);
 }
 
 /// One atlas allocation supplies unorm coverage and sRGB color views without retaining a second payload.
@@ -226,18 +442,23 @@ fn one_texture_exposes_coverage_and_color_bind_groups() {
         wgpu::TextureFormat::Bgra8UnormSrgb,
         1,
     );
-    let upload = AtlasUpload::new_sized(&device, 2, 3, pipeline.texture_bind_group_layout());
+    let upload = AtlasUpload::new_sized(
+        &device,
+        2,
+        3,
+        pipeline.glyph_bind_group_layout(),
+        AtlasBindingKind::Glyph,
+    );
 
     assert_eq!(upload.texture.format(), wgpu::TextureFormat::Bgra8Unorm);
     assert_eq!(upload.texture.size().width, 2);
     assert_eq!(upload.texture.size().height, 3);
-    assert_eq!(upload.coverage_view.texture(), upload.color_view.texture());
+    assert_eq!(upload.coverage_view().texture(), upload.color_view().texture());
     assert_eq!(upload.payload_bytes(), 2 * 3 * u64::from(BYTES_PER_PIXEL));
-    let _coverage = upload.coverage_bind_group();
-    let _color = upload.color_bind_group();
+    let _glyph = upload.glyph_bind_group();
 }
 
-/// View encoding and sampler policy stay orthogonal for image and future color-glyph consumers.
+/// View encoding and sampler policy stay orthogonal for image and color-glyph consumers.
 #[test]
 fn image_color_filtering_does_not_define_the_srgb_view_policy() {
     let coverage = atlas_sampler_descriptor();
@@ -249,32 +470,26 @@ fn image_color_filtering_does_not_define_the_srgb_view_policy() {
     assert_eq!(image.min_filter, wgpu::FilterMode::Linear);
 }
 
-/// The sRGB view can pair with nearest filtering for a future mixed glyph bind group.
+/// The completed glyph group exposes both views with nearest filtering from one texture.
 #[test]
-fn color_view_and_nearest_sampler_remain_independently_accessible() {
+fn glyph_bind_group_combines_coverage_and_color_views() {
     let (device, _queue) = headless_device();
     let pipeline = crate::wezterm_pipeline::WeztermPipeline::new(
         &device,
         wgpu::TextureFormat::Bgra8UnormSrgb,
         1,
     );
-    let upload = AtlasUpload::new_sized(&device, 1, 1, pipeline.texture_bind_group_layout());
+    let upload = AtlasUpload::new_sized(
+        &device,
+        1,
+        1,
+        pipeline.glyph_bind_group_layout(),
+        AtlasBindingKind::Glyph,
+    );
 
-    let _color_nearest = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("future mixed glyph color-nearest group"),
-        layout: pipeline.texture_bind_group_layout(),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(upload.color_view()),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Sampler(upload.nearest_sampler()),
-            },
-        ],
-    });
     assert_eq!(upload.coverage_view().texture(), upload.color_view().texture());
+    let _nearest = upload.nearest_sampler();
+    let _glyph = upload.glyph_bind_group();
 }
 
 /// An opaque encoded midtone survives upload, sRGB sampling, blending, and sRGB output unchanged.
@@ -303,8 +518,8 @@ fn gpu_scaled_image_clamps_to_its_own_atlas_tile() {
     let output =
         render_image_readback_with_neighbor(1, &[255, 255, 255, 255], 3, Some([0, 0, 255, 255]));
 
-    for &pixel in output.as_chunks::<4>().0 {
-        assert_eq!(pixel, [255, 255, 255, 255]);
+    for pixel in output.as_chunks::<4>().0 {
+        assert_eq!(*pixel, [255, 255, 255, 255]);
     }
 }
 
@@ -326,13 +541,7 @@ fn premultiplied_srgb_converts_representative_pixels() {
     let pixels = [128, 128, 128, 255, 64, 64, 64, 128, 16, 32, 64, 128, 77, 88, 99, 0];
     let mut scratch = Vec::new();
 
-    copy_rect_into_scratch(
-        &pixels,
-        4,
-        DirtyRect { x: 0, y: 0, w: 4, h: 1 },
-        AtlasPixelEncoding::PremultipliedSrgb,
-        &mut scratch,
-    );
+    copy_rect_into_scratch(&pixels, 4, color_rect(0, 0, 4, 1), &mut scratch);
 
     assert_eq!(&scratch[0..4], &[128, 128, 128, 255]);
     for (actual, expected) in scratch[4..8].iter().zip([92, 92, 92, 128]) {
@@ -350,18 +559,11 @@ fn staging_capacity_is_reused_and_bounded_in_both_modes() {
     let width = 64u32;
     let height = 8u32;
     let pixels = vec![128u8; width as usize * height as usize * BYTES_PER_PIXEL as usize];
-    let rect = DirtyRect { x: 0, y: 0, w: width, h: height };
     let mut scratch = Vec::new();
 
-    copy_rect_into_scratch(
-        &pixels,
-        width,
-        rect,
-        AtlasPixelEncoding::PremultipliedSrgb,
-        &mut scratch,
-    );
+    copy_rect_into_scratch(&pixels, width, color_rect(0, 0, width, height), &mut scratch);
     let capacity = scratch.capacity();
-    copy_rect_into_scratch(&pixels, width, rect, AtlasPixelEncoding::Coverage, &mut scratch);
+    copy_rect_into_scratch(&pixels, width, coverage_rect(0, 0, width, height), &mut scratch);
 
     let whole_atlas = ATLAS_DIM as usize * ATLAS_DIM as usize * BYTES_PER_PIXEL as usize;
     assert_eq!(scratch.capacity(), capacity);
@@ -378,17 +580,10 @@ fn full_atlas_staging_growth_stays_at_the_atlas_bound() {
     copy_rect_into_scratch(
         &pixels,
         width,
-        DirtyRect { x: 0, y: 0, w: width, h: ATLAS_DIM * 3 / 4 },
-        AtlasPixelEncoding::Coverage,
+        coverage_rect(0, 0, width, ATLAS_DIM * 3 / 4),
         &mut scratch,
     );
-    copy_rect_into_scratch(
-        &pixels,
-        width,
-        DirtyRect { x: 0, y: 0, w: width, h: ATLAS_DIM },
-        AtlasPixelEncoding::Coverage,
-        &mut scratch,
-    );
+    copy_rect_into_scratch(&pixels, width, coverage_rect(0, 0, width, ATLAS_DIM), &mut scratch);
 
     let whole_atlas = ATLAS_DIM as usize * ATLAS_DIM as usize * BYTES_PER_PIXEL as usize;
     assert_eq!(scratch.capacity(), whole_atlas);
@@ -420,13 +615,7 @@ fn retained_staging_is_bounded_by_one_whole_atlas() {
     let height = 64u32;
     let pixels = vec![0u8; width as usize * height as usize * BYTES_PER_PIXEL as usize];
     let mut scratch = Vec::new();
-    copy_rect_into_scratch(
-        &pixels,
-        width,
-        DirtyRect { x: 0, y: 0, w: width, h: height },
-        AtlasPixelEncoding::Coverage,
-        &mut scratch,
-    );
+    copy_rect_into_scratch(&pixels, width, coverage_rect(0, 0, width, height), &mut scratch);
 
     let copied = width as usize * height as usize * BYTES_PER_PIXEL as usize;
     assert!(

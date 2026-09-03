@@ -257,12 +257,21 @@ tile can reuse an old rectangle.
 
 The CPU atlas contract distinguishes pixel meaning: monochrome and DirectWrite
 subpixel tiles are linear coverage masks, while self-colored glyph pixels are
-premultiplied sRGB-encoded BGRA8. Glyph synchronization selects coverage mode for
-the whole glyph atlas: every byte is copied unchanged and the draw binds a
-nearest-filtered `Bgra8Unorm` view. Each `Bgra8Unorm` texture allocation also
-exposes a `Bgra8UnormSrgb` view without duplicating the pixel payload; image-atlas
-synchronization and drawing use that color view. On Windows software presentation,
-the full CPU atlas remains live while its GPU texture is a 1×1 placeholder;
+premultiplied sRGB-encoded BGRA8. Every write records a tight dirty rectangle as
+`Coverage` or `Color`; a replacement in an evicted slot supersedes stale
+intersecting records so the newest bytes cannot be interpreted with the prior
+tile's kind. Synchronization coalesces only same-kind rectangles. It copies
+coverage bytes unchanged and converts only color rectangles from encoded
+premultiplication to the storage values that an sRGB view decodes as
+premultiplied linear color. The CPU bytes are never rewritten.
+
+One `Bgra8Unorm` glyph texture exposes both views without duplicating the pixel
+payload. Its bind group pairs the unorm coverage view and sRGB color view with
+nearest samplers. Ordinary glyphs, including subpixel-tagged instances, select
+the coverage view; color-glyph instances select the color view. The instance
+flags remain unchanged: `flags.x` selects self-colored glyphs and `flags.y`
+preserves the DirectWrite subpixel marker. On Windows software presentation, the
+full original CPU atlas remains live while its GPU texture is a 1×1 placeholder;
 returning to GPU presentation rebuilds the matching texture, resets UV-bearing
 caches, and forces a full redraw.
 
@@ -528,11 +537,17 @@ CPU `GlyphAtlas` 是固定的 2048×2048 BGRA8 纹理，按每像素四字节计
 代次和淘汰纪元 会在新图块复用旧矩形之前使缓存 UV 失效。
 
 CPU 图集契约会区分像素含义：单色与 DirectWrite 次像素图块是线性覆盖率掩码，自带颜色的
-字形像素则是预乘、sRGB 编码的 BGRA8。字形同步为整个字形图集选择覆盖率模式：所有字节
-原样复制，绘制时绑定最近点过滤的 `Bgra8Unorm` view。每个 `Bgra8Unorm` 纹理分配还提供
-`Bgra8UnormSrgb` view，但不会复制像素负载；图像图集同步和绘制使用该彩色 view。Windows
-软件呈现会保留完整 CPU 图集，但对应 GPU 纹理缩为 1×1 占位符；回到 GPU 呈现时会重建
-匹配纹理、重置携带 UV 的缓存，并强制完整重绘。
+字形像素则是预乘、sRGB 编码的 BGRA8。每次写入都会把紧密脏矩形记录为 `Coverage` 或
+`Color`；淘汰槽位中的替换写入会取代与它相交的旧记录，避免用旧图块类型解释最新字节。
+同步只合并相同类型的矩形；覆盖率字节原样复制，只有彩色矩形会从编码空间预乘转换为通过
+sRGB view 解码后等于预乘线性颜色的存储值。CPU 字节始终不会被重写。
+
+一个 `Bgra8Unorm` 字形纹理同时提供两个 view，不复制像素负载。其 bind group 把 unorm
+覆盖率 view 和 sRGB 彩色 view 分别配对最近点 sampler。普通字形（包括带次像素标记的实例）
+选择覆盖率 view，彩色字形实例选择彩色 view。实例标志保持不变：`flags.x` 选择自带颜色的
+字形，`flags.y` 保留 DirectWrite 次像素标记。Windows 软件呈现会保留完整的原始 CPU 图集，
+但对应 GPU 纹理缩为 1×1 占位符；回到 GPU 呈现时会重建匹配纹理、重置携带 UV 的缓存，
+并强制完整重绘。
 
 ### 内联图像
 

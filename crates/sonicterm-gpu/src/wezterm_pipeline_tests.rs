@@ -143,10 +143,17 @@ fn warp_line_colors_match_software_across_segment_shapes() {
             .expect("WARP device");
     let mut pipeline = WeztermPipeline::new(&device, wgpu::TextureFormat::Bgra8UnormSrgb, 4);
     let atlas = sonicterm_text::glyph_atlas::GlyphAtlas::new(1, 1);
-    let upload = crate::atlas_upload::AtlasUpload::new(
+    let image_upload = crate::atlas_upload::AtlasUpload::new(
         &device,
         &atlas,
-        pipeline.texture_bind_group_layout(),
+        pipeline.image_bind_group_layout(),
+        crate::atlas_upload::AtlasBindingKind::Image,
+    );
+    let glyph_upload = crate::atlas_upload::AtlasUpload::new(
+        &device,
+        &atlas,
+        pipeline.glyph_bind_group_layout(),
+        crate::atlas_upload::AtlasBindingKind::Glyph,
     );
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("line color parity target"),
@@ -187,8 +194,8 @@ fn warp_line_colors_match_software_across_segment_shapes() {
             &device,
             &queue,
             &mut pass,
-            upload.coverage_bind_group(),
-            upload.coverage_bind_group(),
+            image_upload.image_bind_group(),
+            glyph_upload.glyph_bind_group(),
             surface[0],
             surface[1],
             &base_quads,
@@ -304,10 +311,17 @@ fn warp_named_quad_producers_match_software_linear_blend() {
             .expect("WARP device");
     let mut pipeline = WeztermPipeline::new(&device, wgpu::TextureFormat::Bgra8UnormSrgb, 1);
     let atlas = sonicterm_text::glyph_atlas::GlyphAtlas::new(1, 1);
-    let upload = crate::atlas_upload::AtlasUpload::new(
+    let image_upload = crate::atlas_upload::AtlasUpload::new(
         &device,
         &atlas,
-        pipeline.texture_bind_group_layout(),
+        pipeline.image_bind_group_layout(),
+        crate::atlas_upload::AtlasBindingKind::Image,
+    );
+    let glyph_upload = crate::atlas_upload::AtlasUpload::new(
+        &device,
+        &atlas,
+        pipeline.glyph_bind_group_layout(),
+        crate::atlas_upload::AtlasBindingKind::Glyph,
     );
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("named quad producer parity target"),
@@ -353,8 +367,8 @@ fn warp_named_quad_producers_match_software_linear_blend() {
             &device,
             &queue,
             &mut pass,
-            upload.coverage_bind_group(),
-            upload.coverage_bind_group(),
+            image_upload.image_bind_group(),
+            glyph_upload.glyph_bind_group(),
             surface[0],
             surface[1],
             &quads,
