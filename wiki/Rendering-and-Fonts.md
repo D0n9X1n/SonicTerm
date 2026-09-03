@@ -255,11 +255,16 @@ clear metadata and packing state in place without zeroing the 16 MiB CPU pixel
 allocation. Generation and eviction epochs invalidate cached UVs before a new
 tile can reuse an old rectangle.
 
-`AtlasUpload::sync` drains dirty rectangles and writes only those BGRA regions
-to the GPU texture. A nearest sampler preserves coverage values. On Windows
-software presentation, the full CPU atlas remains live while its GPU texture is
-a 1×1 placeholder; returning to GPU presentation rebuilds the matching texture,
-resets UV-bearing caches, and forces a full redraw.
+The CPU atlas contract distinguishes pixel meaning: monochrome and DirectWrite
+subpixel tiles are linear coverage masks, while self-colored glyph pixels are
+premultiplied sRGB-encoded BGRA8. Glyph synchronization selects coverage mode for
+the whole glyph atlas: every byte is copied unchanged and the draw binds a
+nearest-filtered `Bgra8Unorm` view. Each `Bgra8Unorm` texture allocation also
+exposes a `Bgra8UnormSrgb` view without duplicating the pixel payload; image-atlas
+synchronization and drawing use that color view. On Windows software presentation,
+the full CPU atlas remains live while its GPU texture is a 1×1 placeholder;
+returning to GPU presentation rebuilds the matching texture, resets UV-bearing
+caches, and forces a full redraw.
 
 ### Inline images
 
@@ -268,15 +273,25 @@ Encoded images whose declared width or height exceeds 2,048 pixels, or whose
 pixel product exceeds 2,048², are rejected before decode. Accepted iTerm2/kitty
 images are resized so the rendered width and height are each at most 1,024
 pixels. Sixel decodes directly into a buffer with the same 1,024-pixel side
-limit. The result is premultiplied BGRA8.
+limit. The result is premultiplied sRGB-encoded BGRA8: RGB is encoded and already
+multiplied by the linear alpha channel.
 
 Decoded images remain owned by their pane. Count and byte retention are bounded
 as described in [Memory](Memory). The renderer copies visible images into an
 **independent** image atlas, so media pressure cannot evict text glyphs or reuse
-text UVs. It starts as a 1×1 CPU/GPU placeholder, promotes to a 2048×2048 atlas
-only when renderable media appears, and returns to the placeholder after 240
-frames without renderable media. A full image atlas skips older images rather
-than evicting text.
+text UVs. During dirty-rectangle packing for GPU upload, each nontransparent
+pixel is unpremultiplied in encoded space, clamped, decoded through the sRGB
+transfer function, premultiplied by alpha in linear light, and re-encoded for
+storage; transparent pixels become `[0, 0, 0, 0]`, and alpha is unchanged. The
+CPU bytes are never rewritten, so Windows software presentation keeps consuming
+the original encoding. The one GPU `Bgra8Unorm` texture is sampled through its
+sRGB color view with linear filtering; hardware decoding occurs before bilinear
+filtering, so scaled images interpolate premultiplied linear colors. Sampling
+clamps to the current image tile's texel centers so adjacent packed tiles cannot
+bleed into its edges. It starts as
+a 1×1 CPU/GPU placeholder, promotes to a 2048×2048 atlas only when renderable
+media appears, and returns to the placeholder after 240 frames without renderable
+media. A full image atlas skips older images rather than evicting text.
 
 ### Custom terminal glyphs
 
@@ -512,21 +527,29 @@ CPU `GlyphAtlas` 是固定的 2048×2048 BGRA8 纹理，按每像素四字节计
 却会消失。图集重置会原地清除元数据与打包状态，不会把 16 MiB CPU 像素分配清零。
 代次和淘汰纪元 会在新图块复用旧矩形之前使缓存 UV 失效。
 
-`AtlasUpload::sync` 排空脏矩形，只把这些 BGRA 区域写入 GPU 纹理。最近点采样器
-保留覆盖值。Windows 软件呈现会保留完整 CPU 图集，但对应 GPU 纹理缩为 1×1 占位符；
-回到 GPU 呈现时会重建匹配纹理、重置携带 UV 的缓存，并强制完整重绘。
+CPU 图集契约会区分像素含义：单色与 DirectWrite 次像素图块是线性覆盖率掩码，自带颜色的
+字形像素则是预乘、sRGB 编码的 BGRA8。字形同步为整个字形图集选择覆盖率模式：所有字节
+原样复制，绘制时绑定最近点过滤的 `Bgra8Unorm` view。每个 `Bgra8Unorm` 纹理分配还提供
+`Bgra8UnormSrgb` view，但不会复制像素负载；图像图集同步和绘制使用该彩色 view。Windows
+软件呈现会保留完整 CPU 图集，但对应 GPU 纹理缩为 1×1 占位符；回到 GPU 呈现时会重建
+匹配纹理、重置携带 UV 的缓存，并强制完整重绘。
 
 ### 内联图像
 
 iTerm2 文件图像、kitty graphics 和 Sixel 事件由应用解码。声明宽或高超过 2,048 像素，
 或像素乘积超过 2,048² 的编码图像，会在解码前拒绝。被接受的 iTerm2/kitty 图像会
 缩放到渲染宽高都不超过 1,024 像素。Sixel 直接解码进同样单边上限为 1,024 像素的
-缓冲。结果使用预乘 BGRA8。
+缓冲。结果使用预乘、sRGB 编码的 BGRA8：RGB 已编码，并已乘以线性 alpha 通道。
 
 已解码图像仍由所属窗格拥有；数量和字节上限见[内存](Memory)。渲染器把可见图像复制到
-**独立**图像图集，因此媒体压力不能淘汰文字字形，也不能复用文字 UV。图像图集以 1×1
-CPU/GPU 占位符启动，仅在出现可渲染媒体时提升为 2048×2048；连续 240 帧没有可渲染
-媒体后再降回占位符。图像图集填满时跳过较早图像，不会淘汰文字。
+**独立**图像图集，因此媒体压力不能淘汰文字字形，也不能复用文字 UV。GPU 脏矩形打包时，
+每个非透明像素先在编码空间反预乘并限制范围，再经 sRGB 传递函数解码、在线性光空间乘以
+alpha，最后重新编码后存储；透明像素规范化为 `[0, 0, 0, 0]`，alpha 保持不变。CPU 字节
+不会被重写，因此 Windows 软件呈现仍消费原始编码。GPU 只分配一个 `Bgra8Unorm` 纹理，
+通过其 sRGB 彩色 view 做线性过滤；硬件会先解码再双线性过滤，所以缩放图像在线性预乘颜色
+之间插值。采样点限制在当前图像图块的纹素中心范围内，避免相邻已打包图块渗入边缘。图像
+图集以 1×1 CPU/GPU 占位符启动，仅在出现可渲染媒体时提升为 2048×2048；
+连续 240 帧没有可渲染媒体后再降回占位符。图像图集填满时跳过较早图像，不会淘汰文字。
 
 ### 自定义终端字形
 

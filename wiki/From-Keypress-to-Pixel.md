@@ -461,9 +461,18 @@ inline media.
 ### 13. The selected presenter produces pixels
 
 On the wgpu path, `AtlasUpload::sync` uploads only dirty atlas rectangles. A warm
-`A` tile uploads no new bytes. The renderer acquires the surface, draws into the
-retained offscreen texture inside the damage scissor, blits to the surface,
-submits commands, and calls `queue.present(frame)`.
+`A` tile uploads no new bytes. Glyph synchronization uses coverage mode: the CPU
+BGRA bytes are copied unchanged and sampled through the texture's unorm view, so
+monochrome and subpixel masks stay linear data. Image synchronization treats the
+CPU bytes as premultiplied sRGB-encoded BGRA8. While packing each dirty rectangle,
+it unpremultiplies and clamps encoded RGB, decodes sRGB, premultiplies in linear
+light, re-encodes for the texture, preserves alpha, and canonicalizes zero alpha.
+The CPU atlas remains unchanged. One `Bgra8Unorm` allocation supplies both an
+unorm coverage view and an sRGB color view; image sampling uses the color view,
+clamps bilinear taps to the image's packed tile, and applies hardware sRGB decode
+before filtering. The renderer then acquires the
+surface, draws into the retained offscreen texture inside the damage scissor,
+blits to the surface, submits commands, and calls `queue.present(frame)`.
 
 The layer order is:
 
@@ -471,8 +480,9 @@ The layer order is:
 damage background and base quads → inline images → base glyphs → overlay quads → overlay glyphs
 ```
 
-Ordinary text samples atlas coverage and multiplies it by foreground color.
-Color glyphs and inline images retain their own colors.
+Ordinary text samples unchanged atlas coverage and multiplies it by foreground
+color. Inline images retain their own colors and reach the shader as
+premultiplied linear samples decoded before filtering.
 
 On Windows with `degrade = true`, `WindowsSoftwareFrame` receives the same
 prepared quads, `GlyphInstance` values, CPU glyph atlas, and image atlas. It
@@ -987,7 +997,13 @@ GPU 线段端点存放在与 HSV 颜色变换分离的几何参数中，因此�
 ### 13. 选定的呈现器产生像素
 
 wgpu 路径中，`AtlasUpload::sync` 只上传脏矩形。已经缓存的 `A` 不会产生新的图集上传。
-渲染器取得表面，在损伤裁剪内画入保留式离屏纹理，再复制到表面、提交命令并调用
+字形同步使用覆盖率模式：CPU BGRA 字节原样复制，并通过纹理的 unorm view 取样，因此单色与
+次像素掩码仍是线性数据。图像同步把 CPU 字节解释为预乘、sRGB 编码的 BGRA8；打包每个脏
+矩形时，先反预乘并限制编码 RGB，再解码 sRGB、在线性光空间预乘、为纹理重新编码，保留
+alpha，并规范化零 alpha。CPU 图集保持不变。一个 `Bgra8Unorm` 分配同时提供 unorm 覆盖率
+view 和 sRGB 彩色 view；图像通过彩色 view 取样，把双线性采样点限制在当前图像的已打包
+图块内，并由硬件在过滤前执行 sRGB 解码。随后渲染器取得表面，在损伤裁剪内画入保留式
+离屏纹理，再复制到表面、提交命令并调用
 `queue.present(frame)`。
 
 图层顺序为：
@@ -996,7 +1012,8 @@ wgpu 路径中，`AtlasUpload::sync` 只上传脏矩形。已经缓存的 `A` �
 损伤背景和基础四边形 → 内联图像 → 基础字形 → 浮层四边形 → 浮层字形
 ```
 
-普通文字采样图集覆盖率，并乘以前景色。彩色字形和内联图像保留自身颜色。
+普通文字采样未改变的图集覆盖率，并乘以前景色。内联图像保留自身颜色，以预乘线性样本
+进入着色器，并在过滤前完成解码。
 
 Windows 且 `degrade = true` 时，`WindowsSoftwareFrame` 接收同一批准备好的四边形、
 `GlyphInstance`、CPU 字形图集和图像图集。它清空完整窗口 BGRA 缓冲区，按顺序混合图层，

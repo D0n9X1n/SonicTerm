@@ -25,7 +25,7 @@ pub struct InlineImage {
     pub width: u32,
     /// Image height in pixels.
     pub height: u32,
-    /// Premultiplied BGRA8 pixels, row-major.
+    /// Premultiplied sRGB-encoded BGRA8 pixels, row-major.
     pub bgra: Arc<[u8]>,
 }
 

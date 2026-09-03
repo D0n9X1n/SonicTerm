@@ -126,6 +126,8 @@ valid allocation. A frame-key hit can re-present the existing CPU frame without
 recomposing it.
 
 The CPU glyph and image atlases remain the source sampled by software drawing.
+Inline-image CPU pixels stay premultiplied sRGB-encoded BGRA8 and are not changed
+by GPU synchronization, so the Windows software output remains byte-compatible.
 Their GPU mirrors are 1×1 placeholders while the GDI presenter is active.
 Returning to GPU presentation rebuilds full-size GPU atlas textures, resets
 atlas metadata and UV-bearing caches, and forces a full redraw.
@@ -142,8 +144,13 @@ samples retain their separate encoded-atlas path.
 Text glyphs use one stabilized destination-pixel origin regardless of whether
 an atlas tile is sampled one-to-one or resampled on either axis. Source sampling
 remains nearest and clamped to the glyph's own tile; clipping at the top or left
-advances past the hidden source rows or columns. Scaled inline images retain
-fractional positioning and bilinear sampling.
+advances past the hidden source rows or columns. Their monochrome and subpixel
+coverage bytes remain unchanged linear masks. Scaled inline images retain
+fractional positioning and bilinear sampling over the unchanged encoded CPU
+pixels. The GPU upload converts each dirty image rectangle to sRGB-texture bytes
+that decode to premultiplied linear color, and the sRGB view decodes before
+filtering. Bilinear taps clamp to the current packed image tile rather than the
+whole atlas. Both views share one `Bgra8Unorm` allocation.
 
 ### Retained pixels and damage
 
@@ -319,9 +326,10 @@ Windows 上启用降级时，`WindowsSoftwareFrame` 把同一套上游生成的�
 软件帧任一轴最多 16,384 像素，总量最多 160 MiB。创建或调整尺寸超过任一限制时会失败，
 并保留原有有效分配。帧键命中时可直接再次呈现已有 CPU 帧，无需重新合成。
 
-软件绘制仍从 CPU 字形图集和图像图集取样；GDI 呈现启用时，它们的 GPU 镜像是 1×1
-占位符。回到 GPU 呈现时会重建全尺寸 GPU 图集纹理、重置图集元数据与携带 UV 的缓存，
-并强制完整重绘。
+软件绘制仍从 CPU 字形图集和图像图集取样。内联图像 CPU 像素保持为预乘、sRGB 编码的
+BGRA8，GPU 同步不会修改它们，因此 Windows 软件输出保持字节兼容。GDI 呈现启用时，
+它们的 GPU 镜像是 1×1 占位符。回到 GPU 呈现时会重建全尺寸 GPU 图集纹理、重置图集
+元数据与携带 UV 的缓存，并强制完整重绘。
 
 每个锐角、圆角和线段 `QuadInstance` 都携带有限值的预乘线性 RGBA：alpha 位于
 `[0,1]`，每个 RGB 通道都介于零和 alpha 之间；改变不透明度或抗锯齿/mask 覆盖率时，
@@ -332,7 +340,11 @@ source-over，只对 RGB 编码一次，并把 alpha 作为线性 UNORM 做 sour
 
 文字字形无论图集图块是按一比一取样，还是任一轴需要重采样，都使用同一套稳定后的目标
 像素原点。源图块仍采用最近点取样并限制在字形自身矩形内；顶部或左侧被裁剪时，会跳过
-不可见的源行或源列。缩放后的内联图像则继续保留分数位置和双线性取样。
+不可见的源行或源列。单色与次像素覆盖率字节保持不变，继续作为线性掩码。缩放后的内联
+图像则继续对未改变的编码 CPU 像素保留分数位置和双线性取样。GPU 上传把每个图像脏矩形
+转换为经过 sRGB 纹理解码后等于预乘线性颜色的字节，sRGB view 会在过滤前解码。双线性
+采样点限制在当前已打包图像的图块内，而不是整个图集；两个 view 共用一个 `Bgra8Unorm`
+分配。
 
 ### 保留像素与损伤区域
 

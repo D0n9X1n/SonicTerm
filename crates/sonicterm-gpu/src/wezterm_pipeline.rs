@@ -326,7 +326,14 @@ fn push_glyph_instances(out: &mut Vec<Vertex>, glyphs: &[GlyphInstance], sw: f32
         };
         let [u0, v0, u1, v1] = g.uv;
         let tex = [[u0, v0], [u1, v0], [u0, v1], [u1, v1]];
-        push_rect_vertices(out, x, y, w, h, sw, sh, color, has_color, tex, [[0.0; 4]; 4]);
+        // Image vertices carry tile-local bounds because the sampler only clamps to the whole packed atlas.
+        let params = if has_color == IS_IMAGE {
+            [g.uv; VERTICES_PER_QUAD]
+        } else {
+            // When: has_color is not IS_IMAGE, the vertex does not need tile-local sampling bounds.
+            [[0.0; 4]; VERTICES_PER_QUAD]
+        };
+        push_rect_vertices(out, x, y, w, h, sw, sh, color, has_color, tex, params);
     }
 }
 
@@ -577,7 +584,19 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let aa = 1.0 - smoothstep(-w, w, d);
         color = in.fg_color * aa;
     } else if (in.has_color == IS_IMAGE) {
-        color = textureSample(atlas_linear_tex, atlas_linear_sampler, in.tex);
+        let atlas_size = vec2<f32>(textureDimensions(atlas_linear_tex));
+        let half_texel = 0.5 / atlas_size;
+        let tile_center = (in.alt_color.xy + in.alt_color.zw) * 0.5;
+        let tile_half_extent = max(
+            (in.alt_color.zw - in.alt_color.xy) * 0.5 - half_texel,
+            vec2<f32>(0.0),
+        );
+        let sample_uv = clamp(
+            in.tex,
+            tile_center - tile_half_extent,
+            tile_center + tile_half_extent,
+        );
+        color = textureSample(atlas_linear_tex, atlas_linear_sampler, sample_uv);
     } else if (in.has_color == IS_COLOR_EMOJI) {
         color = textureSample(atlas_nearest_tex, atlas_nearest_sampler, in.tex);
     } else if (in.has_color == IS_GLYPH) {
