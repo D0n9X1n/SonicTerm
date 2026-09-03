@@ -13,20 +13,10 @@ pub struct RenderInputs<'a> {
     pub selection: Option<SelectionView>,
     /// Active in-pane search state when the search overlay is open.
     pub search: Option<SearchView>,
-    /// Pixel rect of a visible "Cmd+hover URL underline" on the focused
-    /// pane this frame, or `None` when no auto-detected URL is being
-    /// hovered while the platform open-URL modifier (Cmd on macOS,
-    /// Ctrl on Windows) is held. Added for the v1.0 Cmd-held URL
-    /// affordance — OSC 8 hyperlinks have their own pre-existing
-    /// hover-underline path and are not represented here.
-    pub hovered_url_underline: Option<UnderlineRect>,
-    /// Viewport cell range of the Cmd-hovered URL to recolor with the
-    /// theme accent. `row` is the viewport row (0 = top visible),
-    /// `start_col` is inclusive, `end_col` is exclusive. `None` when no
-    /// auto-detected URL is being hovered while the open-URL modifier
-    /// (Cmd on macOS, Ctrl on Windows / Linux) is held. Shares the same
-    /// lifetime/gating as [`Self::hovered_url_underline`]; this is the
-    /// glyph-recolor companion to that underline overlay.
+    /// Bounded viewport fragments of the hovered plain-text URL or local path.
+    ///
+    /// The renderer uses the same ordered spans for underline geometry and
+    /// active glyph recoloring. OSC 8 links retain their separate hover path.
     pub hovered_url_cells: Option<HoveredUrlCells>,
     /// drag visual feedback.
     ///
@@ -95,55 +85,90 @@ impl Default for DragGhost {
     }
 }
 
-/// Axis-aligned pixel rectangle for an overlay underline quad.
-/// Coordinates are in logical pixels relative to the focused pane's
-/// origin; the renderer clips against the pane rect before submitting.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct UnderlineRect {
-    /// Left edge in pixels (pane-relative).
-    pub x: f32,
-    /// Top edge of the underline strip in pixels (pane-relative).
-    pub y: f32,
-    /// Width of the underline in pixels (covers all URL chars on the row).
-    pub w: f32,
-    /// Thickness in pixels (2.0 per the v1.0 spec).
-    pub h: f32,
+/// Maximum number of visible row fragments in one hovered target.
+pub const MAX_HOVERED_URL_SPANS: usize = 8;
+
+/// One non-empty half-open hovered-target fragment in viewport coordinates.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct HoveredUrlSpan {
+    /// Viewport row of this fragment.
+    pub row: u16,
+    /// Inclusive first column.
+    pub start_col: u16,
+    /// Exclusive final column.
+    pub end_col: u16,
 }
 
-/// Viewport cell range of a Cmd-hovered auto-detected URL, carried to
-/// the renderer so it can recolor the URL's glyphs with the theme
-/// accent (in addition to the [`UnderlineRect`] hover underline).
+/// Bounded visible cell fragments of one hovered target.
 ///
-/// Coordinates mirror `sonicterm_app`'s `HoveredUrl`: `pane_id` selects
-/// the owning split, `row` is the viewport row, `start_col` is inclusive,
-/// and `end_col` is exclusive.
+/// The fixed array keeps this value allocation-free and `Copy` so it can remain
+/// part of the renderer's retained-frame and row-cache identities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HoveredUrlCells {
     /// Pane whose grid owns this target.
     pub pane_id: u64,
-    /// Viewport row of the URL (0 = top visible row).
-    pub row: u16,
-    /// Inclusive start column of the URL on this row.
-    pub start_col: u16,
-    /// Exclusive end column of the URL on this row.
-    pub end_col: u16,
-    /// True when the platform open-URL modifier (Cmd / Ctrl) is held, so
-    /// the URL is clickable RIGHT NOW. Drives the two-tier hover affordance:
-    /// `true` → theme-accent glyph recolor + accent underline (the existing
-    /// "ready to open" look); `false` → a plain-hover HINT, drawn as a
-    /// yellow underline only (no recolor), telling the user a URL is here and
-    /// holding the modifier will make it clickable.
+    spans: [HoveredUrlSpan; MAX_HOVERED_URL_SPANS],
+    span_count: u8,
+    /// Whether the platform open modifier currently authorizes activation.
     pub active: bool,
 }
 
 impl HoveredUrlCells {
-    /// True when cell `(row, col)` (viewport coordinates) falls inside
-    /// the hovered URL span: same row, and `start_col <= col < end_col`.
-    /// Used by the renderer's per-cell foreground decision to swap in
-    /// the theme accent for the URL's glyphs only.
+    /// Build one canonical ordered, non-empty, bounded fragment set.
+    #[must_use]
+    pub fn new(
+        pane_id: u64,
+        spans: impl IntoIterator<Item = HoveredUrlSpan>,
+        active: bool,
+    ) -> Option<Self> {
+        let mut retained = [HoveredUrlSpan::default(); MAX_HOVERED_URL_SPANS];
+        let mut span_count = 0usize;
+        for span in spans {
+            if span_count == MAX_HOVERED_URL_SPANS
+                || span.end_col <= span.start_col
+                || span_count > 0 && span.row <= retained[span_count - 1].row
+            {
+                // When: `span_count`, `end_col`, `start_col`, `row`, or `retained` violates bounds/order, reject the whole hover target.
+                return None;
+            }
+            retained[span_count] = span;
+            span_count += 1;
+        }
+        if span_count == 0 {
+            // When: `span_count == 0`, no target geometry exists to render.
+            return None;
+        }
+        Some(Self { pane_id, spans: retained, span_count: span_count as u8, active })
+    }
+
+    /// Build one single-row fragment using the same canonical checks.
+    #[must_use]
+    pub fn single(
+        pane_id: u64,
+        row: u16,
+        start_col: u16,
+        end_col: u16,
+        active: bool,
+    ) -> Option<Self> {
+        Self::new(pane_id, [HoveredUrlSpan { row, start_col, end_col }], active)
+    }
+
+    /// Ordered visible fragments retained by this value.
+    #[must_use]
+    pub fn spans(&self) -> &[HoveredUrlSpan] {
+        &self.spans[..usize::from(self.span_count)]
+    }
+
+    /// Fragment intersecting `row`, if one exists.
+    #[must_use]
+    pub fn span_for_row(&self, row: u16) -> Option<HoveredUrlSpan> {
+        self.spans().iter().copied().find(|span| span.row == row)
+    }
+
+    /// Whether viewport cell `(row, col)` belongs to any retained fragment.
     #[must_use]
     pub fn contains(&self, row: u16, col: u16) -> bool {
-        row == self.row && col >= self.start_col && col < self.end_col
+        self.span_for_row(row).is_some_and(|span| col >= span.start_col && col < span.end_col)
     }
 }
 

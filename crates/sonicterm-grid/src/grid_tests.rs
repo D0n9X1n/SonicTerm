@@ -291,6 +291,183 @@ fn pending_wrap_is_cleared_by_cursor_motion() {
     assert_eq!(text(&grid, 1), "    ");
 }
 
+/// Editing a predecessor revokes the successor's no-longer-proven wrap boundary.
+#[test]
+fn predecessor_edit_clears_successor_wrap_provenance() {
+    let mut grid = Grid::new(4, 3);
+    grid.set_soft_wrapped_from_previous(1, true);
+    assert!(grid.row(1).soft_wrapped_from_previous());
+
+    grid.goto(0, 0);
+    grid.put_char('x', Color::Default, Color::Default, CellFlags::empty());
+
+    assert!(!grid.row(1).soft_wrapped_from_previous());
+}
+
+/// Full-row directional erases revoke the erased row's stale incoming wrap provenance.
+#[test]
+fn full_row_directional_erases_clear_incoming_wrap_provenance() {
+    let mut to_end = Grid::new(5, 2);
+    for ch in "/tmp/file".chars() {
+        to_end.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    }
+    assert!(to_end.row(1).soft_wrapped_from_previous());
+    to_end.goto(1, 0);
+    to_end.erase_line_to_end();
+    assert!(!to_end.row(1).soft_wrapped_from_previous());
+
+    let mut to_start = Grid::new(5, 2);
+    for ch in "/tmp/file".chars() {
+        to_start.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    }
+    assert!(to_start.row(1).soft_wrapped_from_previous());
+    to_start.goto(1, 4);
+    to_start.erase_line_to_start();
+    assert!(!to_start.row(1).soft_wrapped_from_previous());
+}
+
+/// Any start-of-row mutation revokes incoming provenance, even when the edit is partial.
+#[test]
+fn start_of_row_mutations_clear_incoming_wrap_provenance() {
+    let mut wide = Grid::new(4, 2);
+    wide.goto(1, 0);
+    wide.put_char('界', Color::Default, Color::Default, CellFlags::empty());
+    wide.set_soft_wrapped_from_previous(1, true);
+    wide.goto(1, 1);
+    wide.put_char('x', Color::Default, Color::Default, CellFlags::empty());
+    assert!(!wide.row(1).soft_wrapped_from_previous());
+
+    let mut insertion = Grid::new(4, 2);
+    insertion.goto(1, 0);
+    insertion.put_char('界', Color::Default, Color::Default, CellFlags::empty());
+    insertion.set_soft_wrapped_from_previous(1, true);
+    insertion.insert_cells(1, 1, 1);
+    assert!(!insertion.row(1).soft_wrapped_from_previous());
+
+    let mut combining = Grid::new(4, 2);
+    combining.goto(1, 0);
+    combining.put_char('a', Color::Default, Color::Default, CellFlags::empty());
+    combining.set_soft_wrapped_from_previous(1, true);
+    combining.put_char('\u{0301}', Color::Default, Color::Default, CellFlags::empty());
+    assert!(!combining.row(1).soft_wrapped_from_previous());
+
+    for operation in [0, 1, 2, 3, 4] {
+        let mut grid = Grid::new(4, 2);
+        grid.set_soft_wrapped_from_previous(1, true);
+        match operation {
+            0 => {
+                grid.goto(1, 0);
+                grid.erase_line_to_start();
+            }
+            1 => grid.erase_cells(1, 0, 1),
+            2 => grid.insert_cells(1, 0, 1),
+            3 => grid.delete_cells(1, 0, 1),
+            _ => {
+                grid.row_mut(1)[0] = Cell::default();
+            }
+        }
+        assert!(!grid.row(1).soft_wrapped_from_previous(), "operation={operation}");
+    }
+}
+
+/// Interior edits preserve incoming provenance while revoking any successor boundary.
+#[test]
+fn interior_edit_preserves_own_wrap_and_clears_successor_wrap() {
+    let mut grid = Grid::new(4, 3);
+    grid.set_soft_wrapped_from_previous(1, true);
+    grid.set_soft_wrapped_from_previous(2, true);
+
+    grid.goto(1, 2);
+    grid.put_char('x', Color::Default, Color::Default, CellFlags::empty());
+
+    assert!(grid.row(1).soft_wrapped_from_previous());
+    assert!(!grid.row(2).soft_wrapped_from_previous());
+}
+
+/// A changed row range revokes the first successor boundary outside that range.
+#[test]
+fn erase_above_clears_successor_wrap_provenance() {
+    let mut grid = Grid::new(4, 4);
+    grid.set_soft_wrapped_from_previous(2, true);
+    grid.goto(1, 1);
+
+    grid.erase_above();
+
+    assert!(!grid.row(2).soft_wrapped_from_previous());
+}
+
+/// Exact alternate-screen save and restore preserves proven rows but changes buffer identity.
+#[test]
+fn alternate_screen_round_trip_preserves_provenance_with_new_epochs() {
+    let mut grid = Grid::new(4, 3);
+    for ch in "abcde".chars() {
+        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    }
+    let primary_epoch = grid.screen_epoch();
+    assert!(grid.row(1).soft_wrapped_from_previous());
+
+    grid.enter_alt_screen();
+    let alternate_epoch = grid.screen_epoch();
+    assert_ne!(alternate_epoch, primary_epoch);
+
+    grid.leave_alt_screen();
+    assert!(grid.row(1).soft_wrapped_from_previous());
+    assert_ne!(grid.screen_epoch(), alternate_epoch);
+}
+
+/// Fixed-position and partial-region scrolling clear every uncertain wrap boundary.
+#[test]
+fn structural_scrolls_clear_uncertain_wrap_provenance() {
+    let mut down = Grid::new(4, 4);
+    down.set_soft_wrapped_from_previous(1, true);
+    down.set_soft_wrapped_from_previous(2, true);
+    down.scroll_down(1);
+    assert!(down.rows_iter().all(|row| !row.soft_wrapped_from_previous()));
+
+    let mut region = Grid::new(4, 5);
+    for row in 1..5 {
+        region.set_soft_wrapped_from_previous(row, true);
+    }
+    region.scroll_region_up(1, 3, 1);
+    assert!(!region.row(1).soft_wrapped_from_previous());
+    assert!(!region.row(2).soft_wrapped_from_previous());
+    assert!(!region.row(3).soft_wrapped_from_previous());
+    assert!(!region.row(4).soft_wrapped_from_previous());
+}
+
+/// Geometry changes invalidate provenance in visible rows and retained history.
+#[test]
+fn resize_clears_all_wrap_provenance_without_growing_line_headers() {
+    let mut grid = Grid::new(4, 2);
+    grid.set_scrollback_limit(8);
+    grid.set_soft_wrapped_from_previous(1, true);
+    grid.scroll_up(1);
+    grid.set_soft_wrapped_from_previous(1, true);
+
+    grid.resize(5, 2);
+
+    assert!(grid.rows_iter().all(|row| !row.soft_wrapped_from_previous()));
+    assert!(grid.scrollback_iter().all(|row| !row.soft_wrapped_from_previous()));
+}
+
+/// Recycled blank rows drop stale provenance while an evicted predecessor remains detectable.
+#[test]
+fn scroll_recycling_resets_blanks_and_preserves_missing_predecessor_evidence() {
+    let mut grid = Grid::new(2, 2);
+    grid.set_scrollback_limit(1);
+    grid.set_soft_wrapped_from_previous(1, true);
+
+    grid.scroll_up(1);
+    assert!(!grid.row(1).soft_wrapped_from_previous());
+
+    grid.set_soft_wrapped_from_previous(1, true);
+    grid.scroll_up(1);
+
+    assert_eq!(grid.scrollback_evicted(), 1);
+    assert!(grid.scrollback_row(0).unwrap().soft_wrapped_from_previous());
+    assert!(!grid.row(1).soft_wrapped_from_previous());
+}
+
 #[test]
 fn custom_fill_is_used_for_scroll_rows() {
     let mut grid = Grid::new(3, 1);

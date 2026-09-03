@@ -1844,7 +1844,7 @@ pub enum UserEvent {
         text: String,
     },
     /// A local-target openability probe completed off the event-loop thread.
-    PathProbeFinished(path_target::PathProbeResult),
+    PathProbeFinished(Box<path_target::PathProbeResult>),
     /// A bounded PTY input enqueue failed. Retains the rejected bytes until
     /// the event-loop thread can show a user-actionable notification.
     PtyInputRejected {

@@ -105,7 +105,22 @@ correctness, not only speed.
 - Changes to terminal cells mark affected rows in the same frame. This includes
   scrolling, reverse index, line insertion/deletion, erase, resize, and
   wide-cell repair.
+- Each `Line` packs an incoming automatic-wrap bit into its existing content
+  sequence word. Only an actual margin wrap sets it. Hard line advances,
+  full-row erases, recycled rows, non-reflow resize, and uncertain region
+  surgery clear affected boundaries. The bit travels into scrollback and enters
+  row equality/hash identity, so an evicted predecessor remains detectable
+  without increasing the row header.
+- Local-target reconstruction joins at most eight visible rows and 4 KiB only
+  across those recorded boundaries. Its authorization key binds every row
+  fingerprint and wrap bit, ordered absolute spans, pointed cell, viewport,
+  screen epoch, scrollback-eviction generation, and exact-pane OSC 7 state.
+  Hard newlines, incomplete chains, unsafe cells, and any identity change fail
+  closed before activation-time native revalidation.
 - Changes to overlays or window chrome promote damage to the full surface.
+  One hovered target carries up to eight ordered viewport fragments in the
+  frame key. Active recoloring salts only each intersecting row cache key;
+  underline geometry emits one clipped quad per fragment.
   Effective per-pane scrollbar opacity is window chrome: its sorted, quantized
   identity participates in the frame key, and a bucket change damages the full
   surface.
@@ -405,8 +420,18 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
 - 备用屏幕窗格只要有脏行，就贡献整个经表面裁剪的窗格。没有脏行时不贡献损伤区域。
 - 终端单元格变化会在同一帧标记受影响的行，包括滚动、反向索引、插入或删除行、擦除、
   调整大小和宽字符修复。
-- 界面浮层或窗口装饰变化会把损伤区域扩大到整个表面。每个窗格的有效滚动条透明度属于窗口
-  装饰：按窗格编号排序并量化后的身份会进入帧键，桶值变化会损伤整个表面。
+- 每个 `Line` 会把“由前一行自动软换行而来”的 bit 打包进现有内容序号 word。只有真实的
+  右边界自动换行会设置它；硬换行、整行擦除、行复用、不做 reflow 的 resize，以及无法证明
+  连续性的区域调整会清除相关边界。该 bit 会随行进入 scrollback，并参与行相等性与 hash，
+  因此前驱被淘汰后仍可检测，同时不会增大行 header。
+- 本地目标只会跨这些已记录边界重建最多 8 个可见行和 4 KiB。授权 key 绑定每个行
+  fingerprint 与 wrap bit、有序绝对 span、鼠标绝对 cell、viewport、screen epoch、scrollback
+  淘汰代次和准确 pane 的 OSC 7 状态。硬换行、不完整链、不安全 cell 或任一身份变化都会在
+  激活时原生重新验证之前 fail closed。
+- 界面浮层或窗口装饰变化会把损伤区域扩大到整个表面。一个 hover 目标最多携带 8 个有序
+  viewport 片段进入帧键。活动变色只给相交行的缓存 key 加 salt；下划线几何为每个片段发射
+  一个经过裁剪的 quad。每个窗格的有效滚动条透明度也属于窗口装饰：按窗格编号排序并量化后
+  的身份会进入帧键，桶值变化会损伤整个表面。
 - 已降级的 wgpu 帧只要有工作，就重画整个表面。Windows 降级呈现也会合成完整 CPU 表面。
   降级滚动条直接跳变并只设置一个空闲隐藏截止时间；加速滚动条请求有限的淡入淡出帧。
 - 只有最终降级状态启用且没有可见信号变化时，才能使用 `RenderMode::Noop`。该路径不呈现，

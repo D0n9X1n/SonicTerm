@@ -58,7 +58,23 @@ fn exact_width_write_sets_pending_wrap_without_immediate_scroll() {
     assert_eq!(parser.grid().cursor.row, 0);
     assert_eq!(parser.grid().cursor.col, 4);
     assert!(parser.grid().pending_wrap());
+    assert!(!parser.grid().row(1).soft_wrapped_from_previous());
     assert_eq!(parser.grid().scrollback_len(), 0);
+}
+
+/// Every explicit downward control creates a hard boundary after an earlier soft wrap.
+#[test]
+fn lf_vt_ff_ind_and_nel_clear_destination_wrap_provenance() {
+    for control in [b"\n".as_slice(), b"\x0b", b"\x0c", b"\x1bD", b"\x1bE"] {
+        let mut parser = parser(4, 4);
+        parser.advance(b"abcdZ");
+        assert!(parser.grid().row(1).soft_wrapped_from_previous());
+
+        parser.advance(control);
+
+        assert_eq!(parser.grid().cursor.row, 2, "control={control:?}");
+        assert!(!parser.grid().row(2).soft_wrapped_from_previous(), "control={control:?}");
+    }
 }
 
 #[test]
@@ -72,6 +88,42 @@ fn next_printable_after_pending_wrap_wraps_once() {
     assert_eq!(parser.grid().cursor.row, 1);
     assert_eq!(parser.grid().cursor.col, 1);
     assert!(!parser.grid().pending_wrap());
+}
+
+/// Automatic wrapping marks only the destination row as continuing its predecessor.
+#[test]
+fn automatic_wrap_records_destination_provenance() {
+    let mut parser = parser(4, 3);
+
+    parser.advance(b"abcdZ");
+
+    assert!(!parser.grid().row(0).soft_wrapped_from_previous());
+    assert!(parser.grid().row(1).soft_wrapped_from_previous());
+    assert!(!parser.grid().row(2).soft_wrapped_from_previous());
+}
+
+/// An explicit line feed creates a hard boundary even when adjacent text resembles one path.
+#[test]
+fn hard_linefeed_does_not_record_wrap_provenance() {
+    let mut parser = parser(4, 3);
+
+    parser.advance(b"abc\ndef");
+
+    assert!(!parser.grid().row(0).soft_wrapped_from_previous());
+    assert!(!parser.grid().row(1).soft_wrapped_from_previous());
+}
+
+/// A wrapped chain keeps provenance when its leading row moves into scrollback.
+#[test]
+fn automatic_wrap_provenance_survives_primary_scrolling() {
+    let mut parser = parser(4, 2);
+
+    parser.advance(b"abcdEFGHZ");
+
+    assert_eq!(parser.grid().scrollback_len(), 1);
+    assert!(!parser.grid().row_at_abs(0).unwrap().soft_wrapped_from_previous());
+    assert!(parser.grid().row_at_abs(1).unwrap().soft_wrapped_from_previous());
+    assert!(parser.grid().row_at_abs(2).unwrap().soft_wrapped_from_previous());
 }
 
 #[test]

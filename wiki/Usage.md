@@ -221,17 +221,23 @@ never substitutes the process working directory, another pane’s directory, or 
 named user’s home.
 
 The background probe checks at most 37 candidates, and each candidate spans at
-most eight non-space parts. SonicTerm chooses the longest unambiguous actionable
-candidate containing the pointed cell. For a path ending in prose punctuation
-such as `src/main.rs,`, the legal literal filename is probed first. Only when
-that literal is missing can a shorter candidate without trailing comma,
-semicolon, period, colon, exclamation mark, or question mark win; the underline
-then excludes the prose punctuation. A blocked literal or equal-length
-ambiguity fails closed instead of falling back. A complete standalone
-single-quoted contextual name, such as `'My Folder'` from `ll`, is treated as
-`My Folder`. Other quoted or escaped names, `ls -F` suffixes (`*`, `@`, `=`,
-`|`), editor `:line:column` suffixes, soft-wrapped or hard-wrapped paths, and
-tokens with wide or combining cells are not raw clickable targets.
+most eight non-space parts. Logical display-line reconstruction is also capped
+at 4 KiB and eight consecutive rows. SonicTerm joins path fragments only across
+recorded automatic margin wraps and only while the complete chain remains
+visible. Every fragment then shares one authorization and underline. A hard
+line break is never joined; a ninth row, an offscreen edge, or an evicted
+predecessor leaves the chain inert.
+
+SonicTerm chooses the longest unambiguous actionable candidate containing the
+pointed cell. For a path ending in prose punctuation such as `src/main.rs,`, the
+legal literal filename is probed first. Only when that literal is missing can a
+shorter candidate without trailing comma, semicolon, period, colon, exclamation
+mark, or question mark win; the underline then excludes the prose punctuation.
+A blocked literal or equal-length ambiguity fails closed instead of falling
+back. A complete standalone single-quoted contextual name, such as `'My Folder'`
+from `ll`, is treated as `My Folder`. Other quoted or escaped names, `ls -F`
+suffixes (`*`, `@`, `=`, `|`), editor `:line:column` suffixes, and targets with
+wide, continuation, combining, or OSC 8-owned cells remain inert.
 
 Only regular files and directories are eligible. Missing, inaccessible,
 symlink/reparse-point, socket, device, executable, launcher, shortcut, installer,
@@ -481,14 +487,18 @@ Pointer protocol 与 OSC 52 边界见 [终端 IO 与 VT](Terminal-IO-and-VT)。
 本机绝对工作目录。OSC 7 缺失、格式错误或来自远端 host 时会 fail closed。
 SonicTerm 不会改用进程工作目录、其它 pane 的目录或命名用户的 home。
 
-后台 probe 最多检查 37 个候选，每个候选最多跨 8 个非空格部分。SonicTerm 会选择
-包含鼠标 cell 的最长、无歧义且可操作候选。对于 `src/main.rs,` 这类以正文标点结尾的路径，
-会先探测标点属于文件名的合法字面候选。只有该字面文件不存在时，才会尝试去掉末尾逗号、
-分号、句点、冒号、感叹号或问号的较短候选；此时下划线不包含正文标点。字面候选被阻止或
-同长度候选有歧义时会 fail closed，不会回退。`ll` 输出的完整独立单引号上下文名称，例如
-`'My Folder'`，会按 `My Folder` 处理。其它带引号或转义的名称、`ls -F` 后缀
-（`*`、`@`、`=`、`|`）、editor `:line:column` 后缀、自动软换行或硬换行路径，以及含宽字符或
-组合 cell 的 token 都不会成为原始可点击目标。
+后台 probe 最多检查 37 个候选，每个候选最多跨 8 个非空格部分。逻辑显示行重建同样有
+4 KiB 和连续 8 行上限。SonicTerm 只跨已记录的终端右边界自动换行连接路径片段，并且要求
+完整链仍在可见 viewport 内；所有片段共享同一授权与下划线。硬换行绝不会连接；第 9 行、
+不可见边界或前驱已从 scrollback 淘汰时，整条链保持不可操作。
+
+SonicTerm 会选择包含鼠标 cell 的最长、无歧义且可操作候选。对于 `src/main.rs,` 这类以正文
+标点结尾的路径，会先探测标点属于文件名的合法字面候选。只有该字面文件不存在时，才会尝试
+去掉末尾逗号、分号、句点、冒号、感叹号或问号的较短候选；此时下划线不包含正文标点。字面
+候选被阻止或同长度候选有歧义时会 fail closed，不会回退。`ll` 输出的完整独立单引号上下文
+名称，例如 `'My Folder'`，会按 `My Folder` 处理。其它带引号或转义的名称、`ls -F` 后缀
+（`*`、`@`、`=`、`|`）、editor `:line:column` 后缀，以及含宽字符、续格、组合字符或已属于
+OSC 8 的 cell 的目标都保持不可操作。
 
 只有普通文件和目录可以操作。不存在、不可访问、symlink/reparse point、socket、device、
 executable、launcher、shortcut、installer、network、UNC、WSL 和远端目标都会保持普通文字。

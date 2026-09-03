@@ -12,7 +12,7 @@ pub use sonicterm_types::{Cell, CellFlags, Color, Pos, UnderlineStyle};
 use sonicterm_types::ResourceAmount;
 
 use crate::hyperlink::HyperlinkId;
-use crate::line::Line;
+use crate::line::{Line, MAX_LINE_CONTENT_SEQ};
 
 /// A row of cells.
 ///
@@ -389,7 +389,7 @@ impl Grid {
 
     #[inline]
     fn next_content_seq(&mut self) -> u64 {
-        self.content_seq = self.content_seq.saturating_add(1);
+        self.content_seq = self.content_seq.saturating_add(1).min(MAX_LINE_CONTENT_SEQ);
         self.content_seq
     }
 
@@ -402,6 +402,70 @@ impl Grid {
         if let Some(line) = self.visible.get_mut(row as usize) {
             line.set_content_seq(seq);
         }
+        let successor = usize::from(row).saturating_add(1);
+        if self.visible.get(successor).is_some_and(Line::soft_wrapped_from_previous) {
+            self.visible[successor].set_soft_wrapped_from_previous(false);
+            self.visible[successor].set_content_seq(seq);
+            self.row_content_seq[successor] = seq;
+            self.mark_row(u16::try_from(successor).unwrap_or(u16::MAX));
+        }
+    }
+
+    fn set_soft_wrapped_from_previous(&mut self, row: u16, wrapped: bool) {
+        let index = usize::from(row);
+        if !self
+            .visible
+            .get_mut(index)
+            .is_some_and(|line| line.set_soft_wrapped_from_previous(wrapped))
+        {
+            // When: `row` is absent or already has `wrapped`, preserve all change identities.
+            return;
+        }
+        let seq = self.next_content_seq();
+        self.visible[index].set_content_seq(seq);
+        self.row_content_seq[index] = seq;
+        self.mark_row(row);
+        self.bump();
+    }
+
+    fn clear_soft_wraps_in_visible_range(&mut self, start: usize, end: usize) {
+        let end = end.min(self.visible.len());
+        if start >= end || !self.visible.range(start..end).any(Line::soft_wrapped_from_previous) {
+            // When: the clamped range is empty or carries no wrap bit, preserve its identities.
+            return;
+        }
+        let seq = self.next_content_seq();
+        for index in start..end {
+            if self.visible[index].set_soft_wrapped_from_previous(false) {
+                self.visible[index].set_content_seq(seq);
+                self.row_content_seq[index] = seq;
+                self.dirty_rows[index] = true;
+            }
+        }
+        self.bump();
+    }
+
+    fn clear_all_soft_wraps(&mut self) {
+        let visible_has_wrap = self.visible.iter().any(Line::soft_wrapped_from_previous);
+        let history_has_wrap = self.scrollback.iter().any(Line::soft_wrapped_from_previous);
+        if !visible_has_wrap && !history_has_wrap {
+            // When: `!visible_has_wrap && !history_has_wrap`, leave wrap and content identities unchanged.
+            return;
+        }
+        let seq = self.next_content_seq();
+        for (index, row) in self.visible.iter_mut().enumerate() {
+            if row.set_soft_wrapped_from_previous(false) {
+                row.set_content_seq(seq);
+                self.row_content_seq[index] = seq;
+                self.dirty_rows[index] = true;
+            }
+        }
+        for row in &mut self.scrollback {
+            if row.set_soft_wrapped_from_previous(false) {
+                row.set_content_seq(seq);
+            }
+        }
+        self.bump();
     }
 
     #[inline]
@@ -588,6 +652,7 @@ impl Grid {
             // When: dimensions are unchanged, preserve storage and revision without reflowing rows.
             return;
         }
+        self.clear_all_soft_wraps();
         self.scrollback_limit = if self.is_alt() {
             0
         } else {
@@ -656,6 +721,7 @@ impl Grid {
     pub fn row_mut(&mut self, r: u16) -> &mut Row {
         self.mark_row(r);
         self.content_changed_row(r);
+        self.visible[r as usize].set_soft_wrapped_from_previous(false);
         self.bump();
         &mut self.visible[r as usize]
     }
@@ -853,16 +919,21 @@ impl Grid {
             };
             s.push(ch);
             lead.set_extras(Some(s.into_boxed_str()));
+            if c == 0 {
+                self.visible[r].set_soft_wrapped_from_previous(false);
+            }
             self.mark_row(self.cursor.row);
             self.content_changed_row(self.cursor.row);
             self.bump();
             return;
         }
+        let mut wrapped_automatically = false;
         if self.pending_wrap {
             self.pending_wrap = false;
             if self.autowrap {
                 self.wrap_linefeed_with(wrap_region, wrap_fill.clone());
                 self.cursor.col = 0;
+                wrapped_automatically = true;
             }
         }
         let mut effective_width = width;
@@ -870,6 +941,7 @@ impl Grid {
             if self.autowrap {
                 self.wrap_linefeed_with(wrap_region, wrap_fill.clone());
                 self.cursor.col = 0;
+                wrapped_automatically = true;
                 if width > self.cols {
                     effective_width = 1;
                 }
@@ -884,7 +956,11 @@ impl Grid {
         clean_flags.remove(CellFlags::WIDE | CellFlags::WIDE_CONT);
         let mut fill = Cell::plain(' ', fg, bg, clean_flags);
         Self::apply_rare_attrs(&mut fill, hyperlink, underline_style, underline_color);
-        self.clear_wide_intersections(r, c, effective_width as usize, fill);
+        let (cleared_start, _) =
+            self.clear_wide_intersections(r, c, effective_width as usize, fill);
+        if cleared_start == 0 && !wrapped_automatically {
+            self.visible[r].set_soft_wrapped_from_previous(false);
+        }
 
         let cell_flags = if effective_width == 2 {
             clean_flags | CellFlags::WIDE
@@ -942,11 +1018,18 @@ impl Grid {
         }
     }
 
-    fn clear_wide_intersections(&mut self, row: usize, start: usize, width: usize, fill: Cell) {
-        let (start, end) = self.wide_expanded_range(row, start, width);
-        for c in start..end {
+    fn clear_wide_intersections(
+        &mut self,
+        row: usize,
+        start: usize,
+        width: usize,
+        fill: Cell,
+    ) -> (usize, usize) {
+        let range = self.wide_expanded_range(row, start, width);
+        for c in range.0..range.1 {
             self.visible[row][c] = fill.clone();
         }
+        range
     }
 
     fn repair_wide_row(&mut self, row: usize, fill: Cell) {
@@ -982,12 +1065,14 @@ impl Grid {
         if let Some((top, bottom)) = region {
             // When: `region` is `Some((top, bottom))`, apply its bottom margin.
             if self.cursor.row == bottom {
-                // When: `self.cursor.row == bottom`, scroll the region instead of the screen.
+                // When: `self.cursor.row == bottom`, scroll the region before marking the new continuation row.
                 self.scroll_region_up_with(top, bottom, 1, fill);
+                self.set_soft_wrapped_from_previous(self.cursor.row, true);
                 return;
             }
         }
         self.linefeed_with(fill);
+        self.set_soft_wrapped_from_previous(self.cursor.row, true);
     }
 
     /// Move the cursor to column 0 of the current row.
@@ -1024,6 +1109,7 @@ impl Grid {
         // renderer may need to redraw the cursor on either).
         self.mark_row(old);
         self.mark_row(self.cursor.row);
+        self.set_soft_wrapped_from_previous(self.cursor.row, false);
         self.bump();
     }
 
@@ -1084,6 +1170,7 @@ impl Grid {
                     *cell = fill.clone();
                 }
                 row.resize(cols, fill.clone());
+                row.set_soft_wrapped_from_previous(false);
                 row.set_content_seq(changed_at);
                 self.visible.push_back(row);
                 self.row_content_seq.push_back(changed_at);
@@ -1113,6 +1200,7 @@ impl Grid {
                     *cell = fill.clone();
                 }
                 recycled.resize(cols, fill.clone());
+                recycled.set_soft_wrapped_from_previous(false);
                 self.scrollback.push_back(row);
                 recycled.set_content_seq(changed_at);
                 self.visible.push_back(recycled);
@@ -1198,8 +1286,10 @@ impl Grid {
                 *cell = fill.clone();
             }
             row.resize(cols, fill.clone());
+            row.set_soft_wrapped_from_previous(false);
             self.visible.push_front(row);
         }
+        self.clear_soft_wraps_in_visible_range(0, rows);
         // Every row's identity shifted at fixed absolute screen positions.
         self.mark_all();
         self.content_changed_all();
@@ -1285,6 +1375,7 @@ impl Grid {
             }
         }
         let bottom = bottom.min(self.rows.saturating_sub(1));
+        self.clear_soft_wraps_in_visible_range(top_i, bot_i.saturating_add(2));
         self.mark_range(top, bottom);
         self.content_changed_range(top, bottom);
         self.bump();
@@ -1339,6 +1430,7 @@ impl Grid {
             }
         }
         let bottom = bottom.min(self.rows.saturating_sub(1));
+        self.clear_soft_wraps_in_visible_range(top_i, bot_i.saturating_add(2));
         self.mark_range(top, bottom);
         self.content_changed_range(top, bottom);
         self.bump();
@@ -1355,9 +1447,13 @@ impl Grid {
         let r = self.cursor.row as usize;
         let start = self.cursor.col as usize;
         let end = self.cols as usize;
-        self.clear_wide_intersections(r, start, end.saturating_sub(start), fill.clone());
-        for c in start..end {
+        let (clear_start, clear_end) =
+            self.wide_expanded_range(r, start, end.saturating_sub(start));
+        for c in clear_start..clear_end {
             self.visible[r][c] = fill.clone();
+        }
+        if clear_start == 0 {
+            self.visible[r].set_soft_wrapped_from_previous(false);
         }
         self.mark_row(r as u16);
         self.content_changed_row(r as u16);
@@ -1374,10 +1470,11 @@ impl Grid {
         self.clear_pending_wrap();
         let r = self.cursor.row as usize;
         let end = (self.cursor.col as usize).min(self.cols as usize - 1) + 1;
-        self.clear_wide_intersections(r, 0, end, fill.clone());
-        for c in 0..end {
+        let (clear_start, clear_end) = self.wide_expanded_range(r, 0, end);
+        for c in clear_start..clear_end {
             self.visible[r][c] = fill.clone();
         }
+        self.visible[r].set_soft_wrapped_from_previous(false);
         self.mark_row(r as u16);
         self.content_changed_row(r as u16);
         self.bump();
@@ -1395,6 +1492,7 @@ impl Grid {
         for cell in &mut self.visible[r] {
             *cell = fill.clone();
         }
+        self.visible[r].set_soft_wrapped_from_previous(false);
         self.mark_row(r as u16);
         self.content_changed_row(r as u16);
         self.bump();
@@ -1415,6 +1513,10 @@ impl Grid {
             for cell in &mut self.visible[r] {
                 *cell = fill.clone();
             }
+            self.visible[r].set_soft_wrapped_from_previous(false);
+        }
+        if self.cursor.col == 0 {
+            self.visible[usize::from(self.cursor.row)].set_soft_wrapped_from_previous(false);
         }
         // Mark cursor.row..rows
         let lo = self.cursor.row;
@@ -1436,7 +1538,9 @@ impl Grid {
             for cell in &mut self.visible[r] {
                 *cell = fill.clone();
             }
+            self.visible[r].set_soft_wrapped_from_previous(false);
         }
+        self.visible[usize::from(self.cursor.row)].set_soft_wrapped_from_previous(false);
         self.erase_line_to_start_with(fill);
         // erase_line_to_start already marked cursor.row; mark 0..cursor.row too.
         let hi = self.cursor.row;
@@ -1457,6 +1561,7 @@ impl Grid {
             for cell in row.iter_mut() {
                 *cell = fill.clone();
             }
+            row.set_soft_wrapped_from_previous(false);
         }
         self.mark_all();
         self.content_changed_all();
@@ -1486,6 +1591,9 @@ impl Grid {
         for c in start..end {
             self.visible[r][c] = fill.clone();
         }
+        if start == 0 {
+            self.visible[r].set_soft_wrapped_from_previous(false);
+        }
         self.mark_row(row);
         self.content_changed_row(row);
         self.bump();
@@ -1509,6 +1617,7 @@ impl Grid {
         let start = col as usize;
         let cols = self.cols as usize;
         let n = n.min(cols - start);
+        let affected_start = self.wide_expanded_range(r, start, n).0;
         // Shift right FIRST, reading from the pristine row: dest =
         // start+n..cols, src = start..cols-n. Do NOT blank [start..start+n]
         // beforehand — those cells are the source for the first `n` shifted
@@ -1527,6 +1636,9 @@ impl Grid {
             self.visible[r][c] = fill.clone();
         }
         self.repair_wide_row(r, fill);
+        if affected_start == 0 {
+            self.visible[r].set_soft_wrapped_from_previous(false);
+        }
         self.mark_row(row);
         self.content_changed_row(row);
         self.bump();
@@ -1558,6 +1670,9 @@ impl Grid {
             self.visible[r][c] = fill.clone();
         }
         self.repair_wide_row(r, fill);
+        if start == 0 {
+            self.visible[r].set_soft_wrapped_from_previous(false);
+        }
         self.mark_row(row);
         self.content_changed_row(row);
         self.bump();
@@ -1574,6 +1689,12 @@ impl Grid {
         self.mark_row(old_row);
         self.mark_row(self.cursor.row);
         self.bump();
+    }
+
+    /// Move through an explicit hard-line control without scrolling the grid.
+    pub fn goto_hard_line(&mut self, row: u16, col: u16) {
+        self.goto(row, col);
+        self.set_soft_wrapped_from_previous(self.cursor.row, false);
     }
 
     /// Number of rows currently stored in the scrollback buffer.

@@ -497,15 +497,20 @@ impl<'a> Iterator for StorageRangeIter<'a> {
 #[derive(Debug, Clone)]
 pub struct Line {
     storage: LineStorage,
-    /// Last content sequence for this row. Keeping the stamp with the row lets
-    /// changed-since-selection identity survive moves between visible storage
-    /// and scrollback.
-    content_seq: u64,
+    /// Last content sequence plus the automatic-wrap provenance bit.
+    ///
+    /// Keeping both with the row lets change and logical-line identity survive
+    /// moves between visible storage and scrollback without enlarging `Line`.
+    content_seq_and_flags: u64,
 }
+
+const SOFT_WRAPPED_FROM_PREVIOUS: u64 = 1 << 63;
+pub(crate) const MAX_LINE_CONTENT_SEQ: u64 = SOFT_WRAPPED_FROM_PREVIOUS - 1;
 
 impl PartialEq for Line {
     fn eq(&self, other: &Self) -> bool {
         self.storage == other.storage
+            && self.soft_wrapped_from_previous() == other.soft_wrapped_from_previous()
     }
 }
 
@@ -514,12 +519,12 @@ impl Eq for Line {}
 impl Line {
     /// Build a flat line of `len` clones of `fill`.
     pub fn flat_filled(len: usize, fill: Cell) -> Self {
-        Self { storage: LineStorage::Flat(vec![fill; len]), content_seq: 0 }
+        Self { storage: LineStorage::Flat(vec![fill; len]), content_seq_and_flags: 0 }
     }
 
     /// Build directly from a `Vec<Cell>` in flat form.
     pub fn from_flat(cells: Vec<Cell>) -> Self {
-        Self { storage: LineStorage::Flat(cells), content_seq: 0 }
+        Self { storage: LineStorage::Flat(cells), content_seq_and_flags: 0 }
     }
 
     /// Build directly from clusters. The caller is responsible for the
@@ -530,15 +535,36 @@ impl Line {
             "adjacent clusters must differ"
         );
         debug_assert!(clusters.iter().all(|c| c.count > 0));
-        Self { storage: LineStorage::Cluster(clusters), content_seq: 0 }
+        Self { storage: LineStorage::Cluster(clusters), content_seq_and_flags: 0 }
     }
 
     pub(crate) fn content_seq(&self) -> u64 {
-        self.content_seq
+        self.content_seq_and_flags & MAX_LINE_CONTENT_SEQ
     }
 
     pub(crate) fn set_content_seq(&mut self, seq: u64) {
-        self.content_seq = seq;
+        let flags = self.content_seq_and_flags & SOFT_WRAPPED_FROM_PREVIOUS;
+        self.content_seq_and_flags = flags | seq.min(MAX_LINE_CONTENT_SEQ);
+    }
+
+    /// Whether automatic terminal wrapping made this row continue its predecessor.
+    #[must_use]
+    pub fn soft_wrapped_from_previous(&self) -> bool {
+        self.content_seq_and_flags & SOFT_WRAPPED_FROM_PREVIOUS != 0
+    }
+
+    pub(crate) fn set_soft_wrapped_from_previous(&mut self, wrapped: bool) -> bool {
+        if self.soft_wrapped_from_previous() == wrapped {
+            // When: the retained wrap bit already equals `wrapped`, preserve the sequence word unchanged.
+            return false;
+        }
+        if wrapped {
+            self.content_seq_and_flags |= SOFT_WRAPPED_FROM_PREVIOUS;
+        } else {
+            // When: `wrapped` is false, clear only the high provenance bit and preserve the content sequence.
+            self.content_seq_and_flags &= MAX_LINE_CONTENT_SEQ;
+        }
+        true
     }
 
     /// Logical cell count.
@@ -1022,6 +1048,7 @@ impl std::hash::Hash for Line {
         // emulate `<[Cell]>::hash`: length prefix + each element, so a
         // Flat line and an equivalent Cluster line hash identically.
         self.len().hash(state);
+        self.soft_wrapped_from_previous().hash(state);
         for cell in self.iter() {
             cell.hash(state);
         }

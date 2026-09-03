@@ -786,6 +786,29 @@ fn decstbm_linefeed_at_bottom_margin_dirties_only_the_region() {
     );
 }
 
+/// IND and NEL below a DECSTBM region clamp at the screen edge without scrolling the full grid.
+#[test]
+fn index_controls_below_scroll_region_do_not_scroll_screen() {
+    for control in [b"\x1bD".as_slice(), b"\x1bE"] {
+        let mut parser = Parser::new(Grid::new(4, 4));
+        parser.advance(b"1111\r\n2222\r\n3333\r\n4444");
+        parser.advance(b"\x1b[2;3r\x1b[4;4H");
+        let before = (0..4)
+            .map(|row| parser.grid().row(row).iter().map(|cell| cell.ch).collect::<String>())
+            .collect::<Vec<_>>();
+        let history = parser.grid().scrollback_len();
+
+        parser.advance(control);
+
+        let after = (0..4)
+            .map(|row| parser.grid().row(row).iter().map(|cell| cell.ch).collect::<String>())
+            .collect::<Vec<_>>();
+        assert_eq!(after, before, "control={control:?}");
+        assert_eq!(parser.grid().scrollback_len(), history, "control={control:?}");
+        assert_eq!(parser.grid().cursor.row, 3, "control={control:?}");
+    }
+}
+
 #[test]
 fn decstbm_reverse_index_at_top_margin_dirties_only_the_region() {
     // RI at the top margin scrolls the region down; rows outside stay clean.

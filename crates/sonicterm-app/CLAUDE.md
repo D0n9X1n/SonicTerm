@@ -52,6 +52,10 @@ cargo build -p sonicterm-app
   resolve only against the exact pane's trustworthy local OSC 7 CWD, after OSC 8,
   URI, and explicit-path precedence; never fall back to process CWD, another pane,
   or HOME. Candidate enumeration and background probes stay explicitly bounded.
+- Wrapped local targets join only recorded automatic wraps, at most eight visible
+  rows and 4 KiB. Authorization binds every row hash/wrap bit, ordered absolute
+  spans, pointed cell, viewport, screen epoch, eviction generation, and pane CWD;
+  hard lines, incomplete chains, unsafe cells, or any identity change fail closed.
 
 ## Cross-references
 - Consumes: `sonicterm-app-core`, `sonicterm-vt`, `sonicterm-grid`,

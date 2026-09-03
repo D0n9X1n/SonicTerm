@@ -2464,10 +2464,10 @@ impl Perform for Performer {
                 if self.grid.cursor.row == bot {
                     self.grid.scroll_region_up(top, bot, 1);
                 } else {
-                    // When: cursor row is not bot, IND advances within the grid without scrolling the active region.
+                    // When: cursor row is not bot, IND advances without scrolling and records a hard boundary.
                     let new_row = (self.grid.cursor.row + 1).min(self.grid.rows.saturating_sub(1));
                     let col = self.grid.cursor.col;
-                    self.grid.goto(new_row, col);
+                    self.grid.goto_hard_line(new_row, col);
                 }
             }
             b'M' => {
@@ -2490,9 +2490,9 @@ impl Perform for Performer {
                     self.grid.scroll_region_up(top, bot, 1);
                     self.grid.goto(self.grid.cursor.row, 0);
                 } else {
-                    // When: cursor row is not bot, NEL advances normally and returns to column zero without scrolling.
+                    // When: cursor row is not bot, NEL advances without scrolling and records a hard boundary at column zero.
                     let new_row = (self.grid.cursor.row + 1).min(self.grid.rows.saturating_sub(1));
-                    self.grid.goto(new_row, 0);
+                    self.grid.goto_hard_line(new_row, 0);
                 }
             }
             _ => {

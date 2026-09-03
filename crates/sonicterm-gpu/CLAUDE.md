@@ -22,6 +22,9 @@ cargo build -p sonicterm-gpu
 - `core.rs` and `text_pipeline.rs` are hot files; keep changes narrow.
 - Preserve per-cell foreground/background, inverse, underline, and 256-color
   semantics when moving data through the renderer.
+- Multi-row hover fragments share one frame-key identity and one underline pass.
+  Active recolor salts only the intersecting row cache key; hint-only fragments
+  reuse ordinary glyph rows, and offscreen or out-of-column spans emit nothing.
 - Drop `wgpu::SurfaceTexture` before reconfiguring the surface after a
   suboptimal frame.
 - The renderer's retained figures are reported per window and summed across

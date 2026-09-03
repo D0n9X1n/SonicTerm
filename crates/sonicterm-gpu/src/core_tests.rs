@@ -1898,20 +1898,102 @@ fn plain_url_hover_does_not_need_accent_palette() {
     use sonicterm_render_model::inputs::HoveredUrlCells;
 
     assert!(!hovered_url_needs_accent(None));
-    assert!(!hovered_url_needs_accent(Some(HoveredUrlCells {
-        pane_id: 7,
-        row: 0,
-        start_col: 1,
-        end_col: 5,
-        active: false,
-    })));
-    assert!(hovered_url_needs_accent(Some(HoveredUrlCells {
-        pane_id: 7,
-        row: 0,
-        start_col: 1,
-        end_col: 5,
-        active: true,
-    })));
+    assert!(!hovered_url_needs_accent(HoveredUrlCells::single(7, 0, 1, 5, false)));
+    assert!(hovered_url_needs_accent(HoveredUrlCells::single(7, 0, 1, 5, true)));
+}
+
+/// Active wrapped fragments perturb only their owning pane and intersecting row cache keys.
+#[test]
+fn wrapped_hover_cache_identity_is_pane_and_row_local() {
+    use sonicterm_render_model::inputs::{HoveredUrlCells, HoveredUrlSpan};
+
+    let hovered = HoveredUrlCells::new(
+        7,
+        [
+            HoveredUrlSpan { row: 2, start_col: 3, end_col: 10 },
+            HoveredUrlSpan { row: 3, start_col: 0, end_col: 4 },
+        ],
+        true,
+    )
+    .unwrap();
+    let baseline = 41;
+    let first = hovered_url_for_pane_row(Some(hovered), 7, 2).unwrap();
+    let second = hovered_url_for_pane_row(Some(hovered), 7, 3).unwrap();
+
+    assert_ne!(hovered_url_row_cache_key(baseline, Some(first), 2), baseline);
+    assert_ne!(hovered_url_row_cache_key(baseline, Some(second), 3), baseline);
+    assert_ne!(
+        hovered_url_row_cache_key(baseline, Some(first), 2),
+        hovered_url_row_cache_key(baseline, Some(second), 3)
+    );
+    assert!(hovered_url_for_pane_row(Some(hovered), 8, 2).is_none());
+    assert!(hovered_url_for_pane_row(Some(hovered), 7, 1).is_none());
+}
+
+/// Wrapped hover fragments project to exact snapped rectangles and reject invisible coverage.
+#[test]
+fn wrapped_hover_fragments_project_exact_underline_rectangles() {
+    use sonicterm_render_model::inputs::HoveredUrlSpan;
+
+    let edges = build_snapped_cell_x(10.0, 7.5, 8);
+    assert_eq!(
+        hovered_url_span_rect(
+            HoveredUrlSpan { row: 1, start_col: 2, end_col: 8 },
+            8,
+            3,
+            10.0,
+            20.0,
+            7.5,
+            16.0,
+            &edges,
+        ),
+        Some((edges[2], 36.0, edges[8] - edges[2], 16.0))
+    );
+    assert_eq!(
+        hovered_url_span_rect(
+            HoveredUrlSpan { row: 3, start_col: 0, end_col: 2 },
+            8,
+            3,
+            10.0,
+            20.0,
+            7.5,
+            16.0,
+            &edges,
+        ),
+        None
+    );
+    assert_eq!(
+        hovered_url_span_rect(
+            HoveredUrlSpan { row: 1, start_col: 8, end_col: 9 },
+            8,
+            3,
+            10.0,
+            20.0,
+            7.5,
+            16.0,
+            &edges,
+        ),
+        None
+    );
+}
+
+/// Hint-only wrapped fragments reuse ordinary glyph rows because they change only overlay geometry.
+#[test]
+fn wrapped_hover_hint_keeps_plain_row_cache_identity() {
+    use sonicterm_render_model::inputs::{HoveredUrlCells, HoveredUrlSpan};
+
+    let hovered = HoveredUrlCells::new(
+        7,
+        [
+            HoveredUrlSpan { row: 2, start_col: 3, end_col: 10 },
+            HoveredUrlSpan { row: 3, start_col: 0, end_col: 4 },
+        ],
+        false,
+    )
+    .unwrap();
+    let row = hovered_url_for_pane_row(Some(hovered), 7, 3).unwrap();
+
+    assert_eq!(hovered_url_row_cache_key(41, Some(row), 3), 41);
 }
 
 /// HarfBuzz placement offsets move the origin without resizing the tile.

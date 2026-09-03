@@ -259,13 +259,26 @@ the cursor in the ordinary case, marks the row dirty, advances the row content
 sequence, and advances the coarse grid revision.
 
 At the right margin, autowrap sets a one-past-edge cursor and `pending_wrap`.
-The next printable character performs the wrap. Without autowrap, the cursor
-stays on the final column. A pending wrap from the preceding character is
-resolved before storing `A`.
+The next printable character performs the wrap. Only that actual transition
+marks the destination `Line` as soft-wrapped from its predecessor; a pending
+wrap alone records nothing persistent. LF, VT, FF, IND, NEL, full-row erase,
+structural region scrolling, row recycling, and non-reflow resize clear
+provenance where continuity cannot be proved. The bit is packed into the row's
+existing content-sequence word, so `Line` does not grow, and it participates in
+row equality and hashing. Without autowrap, the cursor stays on the final
+column.
 
-Dirty means “this row changed.” The dirty bit, content sequence, and grid
-revision are separate bookkeeping signals for repaint work, content identity,
-and coarse frame identity.
+Dirty means “this row changed.” The dirty bit, content sequence, wrap provenance,
+and grid revision are separate bookkeeping signals for repaint work, logical
+line identity, content identity, and coarse frame identity.
+
+Local-target lookup can walk backward and forward across at most eight recorded
+wrap boundaries, flattening at most 4 KiB while retaining a byte-to-absolute-cell
+map. Every row must remain visible. Hard line breaks, an offscreen edge, an
+evicted predecessor, or a ninth continuation fail closed. The asynchronous
+probe key binds the ordered row fingerprints and wrap bits, screen incarnation,
+viewport, exact pane CWD, candidate spans, and pointed absolute cell. Activation
+rebuilds that key before native target revalidation.
 
 Cell representation is a separate concern. Wide characters use `WIDE` and
 `WIDE_CONT` cells. Zero-width characters append to the lead cell's `extras`,
@@ -349,8 +362,12 @@ unchanged row assembly cheap.
 
 `RowGlyphCache` stores `GlyphInstance` values, underline runs, tofu quads, and
 missing-codepoint data. Its key is `(pane id, absolute row, row hash)`. The hash
-covers cells, style revision, cell geometry, scale, and selection overlap. The
-cached atlas epoch rejects UVs from before an eviction.
+covers cells, style revision, cell geometry, scale, and selection overlap. An
+active plain-text target salts only the row-local fragment that recolors, so a
+wrapped target invalidates each participating row without disturbing peer rows.
+Hint-only underlines do not alter glyph cache identity. The ordered visible span
+set remains in `FrameKey`, and underline geometry emits one clipped quad per
+fragment. The cached atlas epoch rejects UVs from before an eviction.
 
 `LineQuadCache` stores coalesced background quads under a parallel key. Its hash
 also covers pane origin and extent because moving or clipping a pane changes
@@ -809,11 +826,20 @@ APC 输入会在 vte 之前被截获。
 把该行标脏，推进行内容序号，并推进粗粒度网格 revision。
 
 到达右边界时，自动换行会把光标放到越过末列一格的位置，并设置 `pending_wrap`。下一个
-可打印字符才真正换行。关闭自动换行时，光标停在最后一列。前一个字符留下的待换行状态会在
-写入 `A` 前处理。
+可打印字符才真正换行。只有实际发生这次转换时，目标 `Line` 才会标记为从前一行自动软换行；
+仅有 pending 状态不会留下持久标记。LF、VT、FF、IND、NEL、整行擦除、结构性区域滚动、
+行复用和不做 reflow 的尺寸变化，都会在无法证明连续性时清除该 provenance。这个 bit 打包在
+现有行内容序号 word 中，因此不会增大 `Line`，同时会参与行相等性和 hash。关闭自动换行时，
+光标停在最后一列。
 
-脏行表示“这一行发生了变化”。脏位、内容序号和网格修订号是三种独立的记账信号，分别用于
-重绘工作、内容身份和粗粒度帧身份。
+脏行表示“这一行发生了变化”。脏位、内容序号、换行 provenance 和网格 revision 是独立记账
+信号，分别用于重绘工作、逻辑行身份、内容身份和粗粒度帧身份。
+
+本地目标查找最多沿已记录的自动换行边界向前后各走到总计 8 行，并在 4 KiB 上限内扁平化，
+同时保留 byte 到绝对 cell 的映射。每一行都必须仍在 viewport 内。硬换行、不可见边界、已淘汰
+的前驱或第 9 个连续行都会 fail closed。异步 probe key 绑定有序行 fingerprint 与 wrap bit、
+screen incarnation、viewport、准确 pane CWD、候选 span 和鼠标指向的绝对 cell。激活前会重建
+该 key，再执行原生目标重新验证。
 
 单元格如何表示字符是另一件事。宽字符使用 `WIDE` 与 `WIDE_CONT` 单元格。零宽字符附加到
 首单元格的 `extras`，上限为 `MAX_CELL_EXTRAS_BYTES = 64`；超过上限的码点会被丢弃。
@@ -883,7 +909,10 @@ PTY 输出最多等待一个显示器帧周期。最终降级状态启用时，�
 
 `RowGlyphCache` 保存 `GlyphInstance`、下划线段、缺字框和缺失码点。键为
 `(pane id, absolute row, row hash)`。哈希覆盖单元格、样式 revision、单元格几何、缩放和
-选区重叠。缓存中的图集代次会拒绝淘汰前生成的 UV。
+选区重叠。活动的普通文字目标只给实际变色的当前行片段加 salt，因此自动换行目标会使每个
+参与行失效，而不会扰动其它行。仅提示的下划线不改变字形缓存身份。有序可见 span 集合仍进入
+`FrameKey`，下划线几何会为每个片段发射一个经过裁剪的 quad。缓存中的图集代次会拒绝淘汰前
+生成的 UV。
 
 `LineQuadCache` 用相似的键保存合并后的背景四边形。它的哈希还覆盖窗格原点和范围，因为
 移动或裁剪窗格会改变四边形几何。

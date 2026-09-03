@@ -1,44 +1,49 @@
 use super::HoveredUrl;
+use sonicterm_render_model::inputs::{HoveredUrlCells, HoveredUrlSpan};
 
-#[test]
-fn to_cells_preserves_range_and_drops_url() {
-    let h = HoveredUrl {
-        pane_id: 7,
-        row: 4,
-        start_col: 6,
-        end_col: 21,
+fn hovered(active: bool) -> HoveredUrl {
+    HoveredUrl {
+        cells: HoveredUrlCells::new(
+            7,
+            [
+                HoveredUrlSpan { row: 4, start_col: 6, end_col: 21 },
+                HoveredUrlSpan { row: 5, start_col: 0, end_col: 3 },
+            ],
+            active,
+        )
+        .unwrap(),
         url: "https://example.com".to_string(),
-        active: true,
-    };
-    let cells = h.to_cells();
-    assert_eq!(cells.pane_id, 7);
-    assert_eq!(cells.row, 4);
-    assert_eq!(cells.start_col, 6);
-    assert_eq!(cells.end_col, 21);
+    }
 }
 
+/// Renderer projection preserves every ordered fragment while dropping target text.
 #[test]
-fn to_cells_then_contains_detects_inside_and_outside() {
-    // URL occupies viewport row 4, columns 6..21.
-    let h = HoveredUrl {
-        pane_id: 7,
-        row: 4,
-        start_col: 6,
-        end_col: 21,
-        url: "https://example.com".to_string(),
-        active: true,
-    };
-    let cells = h.to_cells();
+fn to_cells_preserves_all_fragments_and_drops_url() {
+    let cells = hovered(true).to_cells();
 
-    // A cell inside the span on the correct row is detected.
-    assert!(cells.contains(4, 6), "inclusive start");
-    assert!(cells.contains(4, 20), "last included column (end_col - 1)");
+    assert_eq!(cells.pane_id, 7);
+    assert_eq!(
+        cells.spans(),
+        &[
+            HoveredUrlSpan { row: 4, start_col: 6, end_col: 21 },
+            HoveredUrlSpan { row: 5, start_col: 0, end_col: 3 },
+        ]
+    );
+    assert!(cells.active);
+}
 
-    // Exclusive end and columns outside the span are not.
-    assert!(!cells.contains(4, 21), "exclusive end");
-    assert!(!cells.contains(4, 5), "before the span");
+/// Multi-row containment keeps half-open edges and active state independent.
+#[test]
+fn to_cells_contains_every_fragment_and_preserves_active_state() {
+    for active in [false, true] {
+        let cells = hovered(active).to_cells();
 
-    // The same columns on a different row never match.
-    assert!(!cells.contains(3, 10), "row above");
-    assert!(!cells.contains(5, 10), "row below");
+        assert_eq!(cells.active, active);
+        assert!(cells.contains(4, 6));
+        assert!(cells.contains(4, 20));
+        assert!(cells.contains(5, 2));
+        assert!(!cells.contains(4, 21));
+        assert!(!cells.contains(5, 3));
+        assert!(!cells.contains(3, 10));
+    }
 }

@@ -183,6 +183,28 @@ fn hash_differs_on_different_content() {
     assert_ne!(hash_of(&a), hash_of(&b));
 }
 
+/// Automatic-wrap provenance is logical row identity, while fresh rows start unwrapped.
+#[test]
+fn soft_wrap_provenance_participates_in_equality_and_hash() {
+    let plain = Line::from_flat(vec![ch('a'), ch('b')]);
+    let mut wrapped = plain.clone();
+    assert!(!plain.soft_wrapped_from_previous());
+
+    assert!(wrapped.set_soft_wrapped_from_previous(true));
+
+    assert_ne!(plain, wrapped);
+    assert_ne!(hash_of(&plain), hash_of(&wrapped));
+}
+
+/// Packing provenance into the sequence word keeps the row-container memory contract unchanged.
+#[test]
+fn soft_wrap_provenance_does_not_enlarge_line() {
+    assert_eq!(
+        std::mem::size_of::<Line>(),
+        std::mem::size_of::<LineStorage>() + std::mem::size_of::<u64>()
+    );
+}
+
 // --- smart same-cell no-op vs changed-cell degrade ------------------------
 
 fn clustered_uniform(cell: Cell, len: usize) -> Line {

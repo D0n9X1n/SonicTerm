@@ -91,6 +91,66 @@ fn hovered_url_needs_accent(
     hovered.is_some_and(|h| h.active)
 }
 
+fn hovered_url_for_pane_row(
+    hovered: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
+    pane_id: u64,
+    row: u16,
+) -> Option<sonicterm_render_model::inputs::HoveredUrlCells> {
+    let hovered = hovered.filter(|hovered| hovered.pane_id == pane_id)?;
+    let span = hovered.span_for_row(row)?;
+    sonicterm_render_model::inputs::HoveredUrlCells::new(pane_id, [span], hovered.active)
+}
+
+fn hovered_url_row_cache_key(
+    key: u64,
+    hovered: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
+    row: u16,
+) -> u64 {
+    let Some(hovered) = hovered.filter(|hovered| hovered.active) else {
+        // When: `hovered` is absent or inactive, glyph colors match the ordinary row cache entry.
+        return key;
+    };
+    let Some(span) = hovered.span_for_row(row) else {
+        // When: `hovered` has no `row` fragment, this row's glyph colors are unchanged.
+        return key;
+    };
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    0x55_524C_u64.hash(&mut hasher); // "URL" salt
+    span.start_col.hash(&mut hasher);
+    span.end_col.hash(&mut hasher);
+    hasher.finish()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hovered_url_span_rect(
+    span: sonicterm_render_model::inputs::HoveredUrlSpan,
+    cols: u16,
+    rows: u16,
+    origin_x: f32,
+    origin_y: f32,
+    cell_w: f32,
+    cell_h: f32,
+    snapped_cell_x: &[f32],
+) -> Option<(f32, f32, f32, f32)> {
+    if cols == 0 || span.row >= rows || span.start_col >= cols || span.end_col <= span.start_col {
+        // When: `span` has no visible row or column coverage, emit no underline rectangle.
+        return None;
+    }
+    let start_col = span.start_col as usize;
+    let end_col = span.end_col.min(cols) as usize;
+    let x = snapped_cell_x
+        .get(start_col)
+        .copied()
+        .unwrap_or(origin_x + f32::from(span.start_col) * cell_w);
+    let width = snapped_cell_x
+        .get(end_col)
+        .map(|right| right - x)
+        .unwrap_or_else(|| f32::from(span.end_col.min(cols) - span.start_col) * cell_w);
+    (width > 0.0).then_some((x, origin_y + f32::from(span.row) * cell_h, width, cell_h))
+}
+
 fn cursor_char_slice_at(text: &str, cursor: usize) -> Option<&str> {
     if text.is_empty() || cursor >= text.len() {
         // When: `cursor >= text.len()` — caret past the last char. No char to
@@ -4704,33 +4764,11 @@ impl GpuRenderer {
                         sh,
                         sel_bbox,
                     );
-                    // Fold the Cmd-hover URL span into the cache key for
-                    // the row it sits on. The hover recolor overrides the
-                    // per-cell fg below, so a cached row shaped WITHOUT
-                    // the accent must not be replayed once the same row
-                    // becomes hovered (and vice-versa when the hover
-                    // leaves). Hover changes don't bump the grid revision
-                    // or mark rows dirty, so without this the recolor
-                    // would stick on a stale cache hit. Only the hovered
-                    // row's key is perturbed — peer rows keep replaying.
-                    let key = match pane_hovered_url {
-                        // Only an ACTIVE hover recolors glyphs (resolve_fg), so
-                        // only then must the row key diverge from the plain
-                        // cache. A plain-hover hint draws no recolor (just the
-                        // overlay underline, which isn't row-cached), so it
-                        // safely reuses the non-hover key — and an active→hint
-                        // transition can't replay stale accent glyphs. #URL-hint
-                        Some(h) if h.active && h.row == r => {
-                            use std::hash::{Hash, Hasher};
-                            let mut hsh = std::collections::hash_map::DefaultHasher::new();
-                            key.hash(&mut hsh);
-                            0x55_524C_u64.hash(&mut hsh); // "URL" salt
-                            h.start_col.hash(&mut hsh);
-                            h.end_col.hash(&mut hsh);
-                            hsh.finish()
-                        }
-                        _ => key,
-                    };
+                    // Fold only this row's active hover fragment into its cache
+                    // key. Peer fragments and hint-only underlines remain outside
+                    // the row cache, so unrelated rows keep replaying.
+                    let row_hovered_url = hovered_url_for_pane_row(pane_hovered_url, pv.pane_id, r);
+                    let key = hovered_url_row_cache_key(key, row_hovered_url, r);
                     let atlas_epoch = self.glyph_atlas.evictions();
                     if let Some(cached) =
                         self.row_glyph_cache.get(pane_id, row_abs, key, atlas_epoch)
@@ -4871,7 +4909,7 @@ impl GpuRenderer {
                                     &snapped_cell_x,
                                     self.font_stack.as_ref(),
                                     wt_raster.as_mut(),
-                                    pane_hovered_url,
+                                    row_hovered_url,
                                     hovered_url_accent,
                                     software_presenter,
                                 );
@@ -5441,45 +5479,43 @@ impl GpuRenderer {
         }
 
         // Hover target underline. The pane id travels with the hit so an
-        // inactive split can reveal its own path without painting the active
-        // pane at the same row and columns.
+        // inactive split can reveal its own path without painting another
+        // pane's fragments at the same rows and columns.
         if let Some(h) = hovered_url_cells {
-            if h.end_col > h.start_col {
-                if let Some(hovered_view) = pane_views.iter().find(|view| view.pane_id == h.pane_id)
-                {
-                    // Two-tier hover: `active` (open modifier held) uses the
-                    // theme accent; plain URL hover keeps the yellow hint.
-                    let hov_accent = if h.active {
-                        sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(
-                            theme,
-                        )
+            // When: `hovered_url_cells` contains `h`, render every canonical fragment for its owning pane.
+            if let Some(hovered_view) = pane_views.iter().find(|view| view.pane_id == h.pane_id) {
+                // When: `pane_views` finds `h.pane_id`, project all fragments through that pane's geometry.
+                let hov_accent = if h.active {
+                    sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme)
                         .accent
-                    } else {
-                        // When: `h.active` is false, render the non-clickable hover hint in the theme's yellow rather than the action accent.
-                        hex_to_rgba(theme.colors.ansi.yellow.0.as_str(), 0.9)
+                } else {
+                    // When: `h.active` is false, render the non-clickable hover hint in the theme's yellow rather than the action accent.
+                    hex_to_rgba(theme.colors.ansi.yellow.0.as_str(), 0.9)
+                };
+                let hovered_grid_cols = hovered_view.grid.cols;
+                let hcache =
+                    build_snapped_cell_x(hovered_view.origin_x, self.cell_w, hovered_grid_cols);
+                for span in h.spans() {
+                    let Some((x, y, width, height)) = hovered_url_span_rect(
+                        *span,
+                        hovered_grid_cols,
+                        hovered_view.grid.rows,
+                        hovered_view.origin_x,
+                        hovered_view.origin_y,
+                        self.cell_w,
+                        self.cell_h,
+                        &hcache,
+                    ) else {
+                        // When: `span` has no visible coverage in `hovered_view`, emit no stale geometry.
+                        continue;
                     };
-                    let hovered_grid_cols = hovered_view.grid.cols;
-                    let hcache =
-                        build_snapped_cell_x(hovered_view.origin_x, self.cell_w, hovered_grid_cols);
-                    let last_col = hovered_grid_cols.saturating_sub(1);
-                    let col_a = h.start_col.min(last_col) as usize;
-                    let col_b = h.end_col.min(hovered_grid_cols) as usize;
-                    let hx = hcache
-                        .get(col_a)
-                        .copied()
-                        .unwrap_or(hovered_view.origin_x + f32::from(h.start_col) * self.cell_w);
-                    let hw = hcache
-                        .get(col_b.min(hcache.len().saturating_sub(1)))
-                        .map(|right| right - hx)
-                        .unwrap_or_else(|| f32::from(h.end_col - h.start_col) * self.cell_w);
-                    let hy = hovered_view.origin_y + f32::from(h.row) * self.cell_h;
                     push_underline_quads(
                         &mut quads,
                         UnderlineStyle::Single,
-                        hx,
-                        hy,
-                        hw,
-                        self.cell_h,
+                        x,
+                        y,
+                        width,
+                        height,
                         underline_thickness,
                         sw,
                         sh,
