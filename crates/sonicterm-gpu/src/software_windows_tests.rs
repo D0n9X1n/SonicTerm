@@ -308,30 +308,53 @@ fn grayscale_coverage_is_not_max_channel() {
     assert!(cov > 0.5 && cov < 0.75, "colored fallback should smooth edges: {cov}");
 }
 
-#[test]
-fn subpixel_text_coverage_blends_each_channel() {
+fn render_subpixel_software(
+    mode: sonicterm_render_model::boundary::cfg::config::SubpixelAaMode,
+    background: [f32; 4],
+    foreground: [f32; 4],
+) -> [u8; 4] {
     let mut atlas = GlyphAtlas::new(4, 4);
     let info = atlas
         .get_or_insert(GlyphKey::new('d', false, false), &mut OneSubpixelGlyph)
         .expect("subpixel glyph inserts");
     assert!(info.is_subpixel);
-
-    let mut frame = WindowsSoftwareFrame::new(1, 1, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
-    frame.draw_glyphs(
+    let mut frame = WindowsSoftwareFrame::new(1, 1, background).expect("valid frame");
+    frame.draw_glyphs_with_subpixel_aa(
         &atlas,
         &[GlyphInstance {
             rect: px_to_ndc(0.0, 0.0, 1.0, 1.0, 1.0, 1.0),
             uv: info.uv,
-            color: [1.0, 1.0, 1.0, 1.0],
+            color: foreground,
             flags: [0.0, 1.0, 0.0, 0.0],
         }],
+        mode,
     );
+    frame.pixel_bgra(0, 0)
+}
 
-    let px = frame.pixel_bgra(0, 0);
-    assert!(
-        px[2] > px[1] && px[1] > px[0],
-        "ClearType coverage must stay per-channel, got BGRA={px:?}"
-    );
+/// Off keeps alpha-max grayscale, while RGB/BGR apply opposite red-blue coverage order.
+#[test]
+fn software_subpixel_policy_selects_grayscale_rgb_and_bgr() {
+    use sonicterm_render_model::boundary::cfg::config::SubpixelAaMode::{Bgr, Off, Rgb};
+
+    let foreground = [1.0, 1.0, 1.0, 1.0];
+    let black = [0.0, 0.0, 0.0, 1.0];
+
+    assert_eq!(render_subpixel_software(Off, black, foreground), [255, 255, 255, 255]);
+    assert_eq!(render_subpixel_software(Rgb, black, foreground), [0, 188, 255, 255]);
+    assert_eq!(render_subpixel_software(Bgr, black, foreground), [255, 188, 0, 255]);
+}
+
+/// LCD software blending decodes a colored destination and respects foreground alpha.
+#[test]
+fn software_subpixel_blends_linear_light_with_foreground_alpha() {
+    use sonicterm_render_model::boundary::cfg::config::SubpixelAaMode::Rgb;
+
+    let background = crate::color::hex_to_premultiplied_rgba("#204080", 1.0);
+    let foreground = crate::color::hex_to_premultiplied_rgba("#e0a040", 0.5);
+    let pixel = render_subpixel_software(Rgb, background, foreground);
+
+    assert_eq!(pixel, [128, 100, 166, 255]);
 }
 
 #[test]
@@ -385,13 +408,14 @@ fn software_presenter_samples_replacement_after_in_place_atlas_reset() {
     assert_eq!(frame.pixel_bgra(0, 0), [255, 255, 255, 255]);
 }
 
+/// Direct LCD blending applies logical RGB coverage over an sRGB-encoded BGRA destination.
 #[test]
-fn subpixel_blend_lerps_each_channel_over_colored_background() {
+fn subpixel_blend_uses_linear_destination_channels() {
     let mut dst = [32, 160, 240, 255];
 
-    blend_subpixel_bgra(&mut dst, [0.0, 0.5, 1.0, 1.0], [0.0, 0.0, 0.0], 1.0);
+    blend_subpixel_bgra(&mut dst, [1.0, 0.5, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
 
-    assert_eq!(dst, [32, 80, 0, 255]);
+    assert_eq!(dst, [32, 116, 0, 255]);
 }
 
 #[test]

@@ -47,6 +47,7 @@ fn enabled_at(filter: &str, target: &str) -> bool {
             tracing::enabled!(target: "state_machine.log", tracing::Level::DEBUG)
         }
         "render_timing" => tracing::enabled!(target: "render_timing", tracing::Level::DEBUG),
+        "render_policy" => tracing::enabled!(target: "render_policy", tracing::Level::DEBUG),
         "tear_out_timing" => tracing::enabled!(target: "tear_out_timing", tracing::Level::DEBUG),
         "sonic::glyph_atlas" => {
             tracing::enabled!(target: "sonic::glyph_atlas", tracing::Level::DEBUG)

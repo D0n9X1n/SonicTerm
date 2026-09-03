@@ -708,6 +708,7 @@ impl App {
                 font_size: self.config.font.size,
                 line_height_mult: self.config.font.line_height,
                 font_weight_scale: self.config.font.effective_weight_scale(),
+                subpixel_aa: self.config.font.subpixel_aa,
                 padding: [
                     self.config.window.padding_left,
                     self.config.window.padding_right,

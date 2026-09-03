@@ -11,7 +11,11 @@
 
 use super::*;
 
-use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
+use sonicterm_cfg::{
+    config::{Config, SubpixelAaMode},
+    keymap::Keymap,
+    theme::Theme,
+};
 
 /// A renderer adopted from the warm pool must be brought to every live setting
 /// that can change while it is hidden.
@@ -28,6 +32,7 @@ fn pooled_renderer_adoption_applies_live_font_theme_and_tab_bar() {
     config.font.size = 19.0;
     config.font.line_height = 1.25;
     config.font.weight_scale = 2.75;
+    config.font.subpixel_aa = SubpixelAaMode::Bgr;
     let theme = Theme { name: "Adoption Theme".to_string(), ..Theme::default() };
 
     let warm = live_renderer_settings(&config, &theme, false, ChildRendererOrigin::WarmPool);
@@ -42,12 +47,14 @@ fn pooled_renderer_adoption_applies_live_font_theme_and_tab_bar() {
     );
     assert_eq!(warm.theme.map(|theme| theme.name.as_str()), Some("Adoption Theme"));
     assert_eq!(warm.background, theme.colors.background.0.as_str());
+    assert_eq!(warm.subpixel_aa, SubpixelAaMode::Bgr);
     assert!(!warm.tab_bar_visible);
 
     let fresh = live_renderer_settings(&config, &theme, false, ChildRendererOrigin::Fresh);
     assert_eq!(fresh.font, None, "fresh renderers must not rebuild an identical font atlas");
     assert!(fresh.theme.is_none(), "fresh renderers already received the constructor theme");
     assert_eq!(fresh.background, theme.colors.background.0.as_str());
+    assert_eq!(fresh.subpixel_aa, SubpixelAaMode::Bgr);
     assert!(!fresh.tab_bar_visible);
 
     const SOURCE: &str = include_str!("tear_out.rs");
@@ -59,6 +66,9 @@ fn pooled_renderer_adoption_applies_live_font_theme_and_tab_bar() {
         "the test must stay bounded to configure_child_renderer rather than accepting a call elsewhere",
     );
     let body = &body[..end];
+    let subpixel = body
+        .find("renderer.set_subpixel_aa_mode(live.subpixel_aa)")
+        .expect("every child renderer must receive live LCD presentation policy");
     let universal = body
         .find("renderer.set_tab_bar_visible(")
         .expect("every child renderer must receive live tab-bar visibility");
@@ -79,7 +89,7 @@ fn pooled_renderer_adoption_applies_live_font_theme_and_tab_bar() {
     let resize = body
         .find("renderer.force_rebuild_for_scale(")
         .expect("adoption must still rebuild for the destination display scale");
-    assert!(plan < universal && universal < set_font);
+    assert!(plan < subpixel && subpixel < universal && universal < set_font);
     assert!(plan < background && background < set_font);
     assert!(set_font < set_theme && set_theme < resize);
 

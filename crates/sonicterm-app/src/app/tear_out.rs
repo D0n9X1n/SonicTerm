@@ -77,6 +77,7 @@ struct LiveRendererSettings<'a> {
     font: Option<LiveFontSettings<'a>>,
     theme: Option<&'a Theme>,
     background: &'a str,
+    subpixel_aa: sonicterm_cfg::config::SubpixelAaMode,
     tab_bar_visible: bool,
 }
 
@@ -96,6 +97,7 @@ fn live_renderer_settings<'a>(
         }),
         theme: refresh_cached_state.then_some(theme),
         background: theme.colors.background.0.as_str(),
+        subpixel_aa: config.font.subpixel_aa,
         tab_bar_visible,
     }
 }
@@ -111,6 +113,7 @@ impl App {
             font_size: self.config.font.size,
             line_height_mult: self.config.font.line_height,
             font_weight_scale: self.config.font.effective_weight_scale(),
+            subpixel_aa: self.config.font.subpixel_aa,
             padding: [
                 self.config.window.padding_left,
                 self.config.window.padding_right,
@@ -149,6 +152,7 @@ impl App {
         let live = live_renderer_settings(&self.config, &self.theme, self.tab_bar_visible, origin);
         // RendererSettings does not carry tab-bar visibility, so every fresh or
         // pooled child receives the current app value here.
+        renderer.set_subpixel_aa_mode(live.subpixel_aa);
         renderer.set_tab_bar_visible(live.tab_bar_visible);
         super::install_native_window_background(window, live.background);
         if let Some(font) = live.font {

@@ -1,6 +1,7 @@
 #![cfg(target_os = "windows")]
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use sonicterm_render_model::boundary::cfg::config::SubpixelAaMode;
 use sonicterm_text::{glyph_atlas::GlyphAtlas, GlyphInstance};
 use windows::Win32::{
     Foundation::HWND,
@@ -80,6 +81,7 @@ impl WindowsSoftwareFrame {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub(crate) fn draw_layers(
         &mut self,
         glyph_atlas: &GlyphAtlas,
@@ -90,11 +92,35 @@ impl WindowsSoftwareFrame {
         overlay_quads: &[QuadInstance],
         overlay_glyphs: &[GlyphInstance],
     ) {
+        self.draw_layers_with_subpixel_aa(
+            glyph_atlas,
+            image_atlas,
+            SubpixelAaMode::Off,
+            quads,
+            images,
+            glyphs,
+            overlay_quads,
+            overlay_glyphs,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn draw_layers_with_subpixel_aa(
+        &mut self,
+        glyph_atlas: &GlyphAtlas,
+        image_atlas: &GlyphAtlas,
+        subpixel_aa: SubpixelAaMode,
+        quads: &[QuadInstance],
+        images: &[GlyphInstance],
+        glyphs: &[GlyphInstance],
+        overlay_quads: &[QuadInstance],
+        overlay_glyphs: &[GlyphInstance],
+    ) {
         self.draw_quads(quads);
-        self.draw_glyphs(image_atlas, images);
-        self.draw_glyphs(glyph_atlas, glyphs);
+        self.draw_glyphs_with_subpixel_aa(image_atlas, images, subpixel_aa);
+        self.draw_glyphs_with_subpixel_aa(glyph_atlas, glyphs, subpixel_aa);
         self.draw_quads(overlay_quads);
-        self.draw_glyphs(glyph_atlas, overlay_glyphs);
+        self.draw_glyphs_with_subpixel_aa(glyph_atlas, overlay_glyphs, subpixel_aa);
     }
 
     pub(crate) fn present(&self, window: &Window) -> anyhow::Result<()> {
@@ -149,7 +175,17 @@ impl WindowsSoftwareFrame {
         }
     }
 
+    #[cfg(test)]
     fn draw_glyphs(&mut self, atlas: &GlyphAtlas, glyphs: &[GlyphInstance]) {
+        self.draw_glyphs_with_subpixel_aa(atlas, glyphs, SubpixelAaMode::Off);
+    }
+
+    fn draw_glyphs_with_subpixel_aa(
+        &mut self,
+        atlas: &GlyphAtlas,
+        glyphs: &[GlyphInstance],
+        subpixel_aa: SubpixelAaMode,
+    ) {
         let sw = self.width as f32;
         let sh = self.height as f32;
         for g in glyphs {
@@ -163,7 +199,7 @@ impl WindowsSoftwareFrame {
                 // divides by both to build its atlas sample coordinates.
                 continue;
             }
-            self.blit_glyph(atlas, g, x, y, w, h);
+            self.blit_glyph(atlas, g, (x, y, w, h), subpixel_aa);
         }
     }
 
@@ -334,11 +370,10 @@ impl WindowsSoftwareFrame {
         &mut self,
         atlas: &GlyphAtlas,
         glyph: &GlyphInstance,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
+        rect: (f32, f32, f32, f32),
+        subpixel_aa: SubpixelAaMode,
     ) {
+        let (x, y, w, h) = rect;
         let [u0, v0, u1, v1] = glyph.uv;
         if u1 <= u0 || v1 <= v0 {
             // When: u1 or v1 does not exceed its origin the glyph has no atlas rectangle
@@ -392,8 +427,6 @@ impl WindowsSoftwareFrame {
             return;
         }
         let atlas_pixels = atlas.pixels_bgra();
-        let fg_srgb = premul_linear_rgba_to_straight_srgb(glyph.color);
-        let fg_alpha = glyph.color[3].clamp(0.0, 1.0);
         let color_glyph = glyph.flags[0] >= 0.5;
         let subpixel_glyph = glyph.flags[1] >= 0.5;
         // Inline images set flags[2]; glyphs leave it clear. Only images want
@@ -444,24 +477,31 @@ impl WindowsSoftwareFrame {
                         continue;
                     }
                     blend_premul_bgra(&mut self.pixels[dst_off..dst_off + 4], sample);
-                } else if subpixel_glyph {
-                    // When: subpixel_glyph is set the sample carries per-channel coverage
-                    // rather than one alpha, so R, G and B are weighted separately.
+                } else if subpixel_glyph && subpixel_aa != SubpixelAaMode::Off {
+                    // When: `subpixel_glyph` is set and `subpixel_aa` is not `Off`, sample RGB is per-channel coverage.
                     if sample[3] <= 0.0 {
-                        // When: sample alpha is zero no channel of this texel is covered,
-                        // so every subpixel weight would be zero.
+                        // When: sample alpha is zero no channel of this texel is covered.
                         continue;
                     }
+                    let coverage = if subpixel_aa == SubpixelAaMode::Bgr {
+                        sample
+                    } else {
+                        // When: `subpixel_aa` is not `Bgr`, reorder atlas BGRA bytes into logical RGB coverage.
+                        [sample[2], sample[1], sample[0], sample[3]]
+                    };
                     blend_subpixel_bgra(
                         &mut self.pixels[dst_off..dst_off + 4],
-                        sample,
-                        fg_srgb,
-                        fg_alpha,
+                        coverage,
+                        glyph.color,
                     );
                 } else {
-                    // When: neither color_glyph nor subpixel_glyph is set the atlas holds
-                    // grayscale coverage, so glyph.color is scaled by it and blended.
-                    let cov = grayscale_coverage(sample);
+                    // When: `color_glyph` is false and LCD presentation is inactive, use one scalar coverage value.
+                    let cov = if subpixel_glyph {
+                        sample[3]
+                    } else {
+                        // When: `subpixel_glyph` is clear, the atlas sample contains an ordinary scalar mask.
+                        grayscale_coverage(sample)
+                    };
                     if cov <= 0.0 {
                         // When: cov is zero the texel contributes nothing, so the
                         // premultiplied source would be fully transparent.
@@ -564,20 +604,6 @@ fn linear_rgba_to_bgra(color: [f32; 4]) -> [u8; 4] {
     ]
 }
 
-fn premul_linear_rgba_to_straight_srgb(color: [f32; 4]) -> [f32; 3] {
-    let a = color[3].clamp(0.0, 1.0);
-    if a <= 0.0 {
-        // When: a is zero there is no straight colour to recover, since every channel
-        // below is divided by it to undo premultiplication.
-        return [0.0; 3];
-    }
-    [
-        linear_to_srgb((color[0] / a).clamp(0.0, 1.0)),
-        linear_to_srgb((color[1] / a).clamp(0.0, 1.0)),
-        linear_to_srgb((color[2] / a).clamp(0.0, 1.0)),
-    ]
-}
-
 fn bgra8_to_premul_f32(px: &[u8]) -> [f32; 4] {
     [px[0] as f32 / 255.0, px[1] as f32 / 255.0, px[2] as f32 / 255.0, px[3] as f32 / 255.0]
 }
@@ -664,18 +690,23 @@ fn blend_premul_bgra(dst: &mut [u8], src: [f32; 4]) {
     dst[3] = to_u8(a);
 }
 
-fn blend_subpixel_bgra(dst: &mut [u8], coverage_bgra: [f32; 4], fg_srgb: [f32; 3], fg_alpha: f32) {
-    let fg_alpha = fg_alpha.clamp(0.0, 1.0);
-    let db = dst[0] as f32 / 255.0;
-    let dg = dst[1] as f32 / 255.0;
-    let dr = dst[2] as f32 / 255.0;
-    let wb = (coverage_bgra[0] * fg_alpha).clamp(0.0, 1.0);
-    let wg = (coverage_bgra[1] * fg_alpha).clamp(0.0, 1.0);
-    let wr = (coverage_bgra[2] * fg_alpha).clamp(0.0, 1.0);
-    dst[0] = to_u8(db + (fg_srgb[2] - db) * wb);
-    dst[1] = to_u8(dg + (fg_srgb[1] - dg) * wg);
-    dst[2] = to_u8(dr + (fg_srgb[0] - dr) * wr);
-    dst[3] = 255;
+fn blend_subpixel_bgra(dst: &mut [u8], coverage_rgba: [f32; 4], foreground: [f32; 4]) {
+    let alpha = foreground[3].clamp(0.0, 1.0);
+    let weights = [
+        (coverage_rgba[0] * alpha).clamp(0.0, 1.0),
+        (coverage_rgba[1] * alpha).clamp(0.0, 1.0),
+        (coverage_rgba[2] * alpha).clamp(0.0, 1.0),
+    ];
+    let decode = crate::color::srgb_u8_to_linear_lut();
+    let out_r = foreground[0] * coverage_rgba[0] + decode[dst[2] as usize] * (1.0 - weights[0]);
+    let out_g = foreground[1] * coverage_rgba[1] + decode[dst[1] as usize] * (1.0 - weights[1]);
+    let out_b = foreground[2] * coverage_rgba[2] + decode[dst[0] as usize] * (1.0 - weights[2]);
+    dst[0] = crate::color::linear_channel_to_srgb_u8(out_b);
+    dst[1] = crate::color::linear_channel_to_srgb_u8(out_g);
+    dst[2] = crate::color::linear_channel_to_srgb_u8(out_r);
+    let source_alpha = weights.into_iter().fold(0.0_f32, f32::max);
+    let destination_alpha = dst[3] as f32 / 255.0;
+    dst[3] = to_u8(source_alpha + destination_alpha * (1.0 - source_alpha));
 }
 
 fn linear_to_srgb(v: f32) -> f32 {

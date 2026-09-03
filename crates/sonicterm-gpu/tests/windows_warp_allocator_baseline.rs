@@ -2,7 +2,7 @@
 
 use sonicterm_gpu::core::{
     allocator_snapshot_from, detect_software_rendering, device_descriptor_for,
-    device_memory_policy_from, DeviceMemoryPolicy,
+    device_memory_policy_from, selected_optional_device_features, DeviceMemoryPolicy,
 };
 
 const FOUR_MIB: u64 = 4 * 1024 * 1024;
@@ -70,16 +70,18 @@ fn warp_memory_usage_policy_reduces_allocator_reserve() {
     assert_eq!(info.device_type, wgpu::DeviceType::Cpu, "fallback adapter must be WARP CPU");
     assert!(detect_software_rendering(&info), "WARP adapter must classify as software");
 
-    let (control_device, _control_queue) =
-        pollster::block_on(adapter.request_device(&device_descriptor_for(false)))
-            .expect("open default-policy control device");
+    let optional_features = selected_optional_device_features(adapter.features(), true);
+    let (control_device, _control_queue) = pollster::block_on(
+        adapter.request_device(&device_descriptor_for(false, optional_features)),
+    )
+    .expect("open default-policy control device");
     assert_eq!(
         device_memory_policy_from(false),
         DeviceMemoryPolicy::Performance,
         "control helper input must preserve wgpu's default memory policy"
     );
     let (candidate_device, _candidate_queue) =
-        pollster::block_on(adapter.request_device(&device_descriptor_for(true)))
+        pollster::block_on(adapter.request_device(&device_descriptor_for(true, optional_features)))
             .expect("open production-policy candidate device");
 
     let _control_allocations = representative_allocations(&control_device);

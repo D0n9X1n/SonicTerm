@@ -16,7 +16,7 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use sonicterm_render_model::boundary::cfg::config::{
-    BackdropKind, ScrollbarMode, SoftwareRenderMode,
+    BackdropKind, ScrollbarMode, SoftwareRenderMode, SubpixelAaMode,
 };
 use sonicterm_render_model::boundary::cfg::theme::{Color as ThemeColor, Theme};
 use sonicterm_render_model::boundary::grid::grid::{
@@ -318,6 +318,8 @@ pub struct RendererSettings<'a> {
     pub line_height_mult: f32,
     /// Regular-text coverage scale.
     pub font_weight_scale: f32,
+    /// Requested LCD subpixel coverage order.
+    pub subpixel_aa: SubpixelAaMode,
     /// Window padding in logical pixels: left, right, top, bottom.
     pub padding: [f32; 4],
     /// Surface/backdrop settings.
@@ -737,18 +739,58 @@ pub fn device_memory_policy_from(software_rendering: bool) -> DeviceMemoryPolicy
     }
 }
 
-/// Build the sole wgpu device descriptor used by the renderer.
-///
-/// Starting from wgpu defaults changes only `memory_hints`, keeping policy
-/// selection independent from feature and limit negotiation.
+/// Select optional device features that SonicTerm can use without losing fallback support.
 #[doc(hidden)]
 #[must_use]
-pub fn device_descriptor_for(software_rendering: bool) -> DeviceDescriptor<'static> {
+pub fn selected_optional_device_features(
+    adapter_features: wgpu::Features,
+    windows_host: bool,
+) -> wgpu::Features {
+    if windows_host {
+        adapter_features & wgpu::Features::DUAL_SOURCE_BLENDING
+    } else {
+        // When: `windows_host` is false, LCD presentation stays disabled and requests no feature.
+        wgpu::Features::empty()
+    }
+}
+
+/// Resolve the requested LCD mode against platform, target opacity, and presenter capability.
+#[doc(hidden)]
+#[must_use]
+pub const fn effective_subpixel_aa_mode(
+    requested: SubpixelAaMode,
+    windows_host: bool,
+    opaque_target: bool,
+    software_presenter: bool,
+    dual_source_supported: bool,
+) -> SubpixelAaMode {
+    if !windows_host || !opaque_target {
+        // When: `windows_host` or `opaque_target` is false, LCD coverage cannot reach an opaque Windows target.
+        return SubpixelAaMode::Off;
+    }
+    if software_presenter || dual_source_supported {
+        requested
+    } else {
+        // When: both `software_presenter` and `dual_source_supported` are false, use grayscale destination blending.
+        SubpixelAaMode::Off
+    }
+}
+
+/// Build the sole wgpu device descriptor used by the renderer.
+///
+/// The caller selects only features advertised by the adapter, while memory
+/// policy remains independently derived from software-render classification.
+#[doc(hidden)]
+#[must_use]
+pub fn device_descriptor_for(
+    software_rendering: bool,
+    required_features: wgpu::Features,
+) -> DeviceDescriptor<'static> {
     let memory_hints = match device_memory_policy_from(software_rendering) {
         DeviceMemoryPolicy::MemoryUsage => wgpu::MemoryHints::MemoryUsage,
         DeviceMemoryPolicy::Performance => wgpu::MemoryHints::Performance,
     };
-    DeviceDescriptor { memory_hints, ..DeviceDescriptor::default() }
+    DeviceDescriptor { memory_hints, required_features, ..DeviceDescriptor::default() }
 }
 
 /// Aggregate allocator usage without retaining allocation labels.
@@ -1517,6 +1559,8 @@ pub struct GpuRenderer {
     font_size: f32,
     line_height: f32,
     font_weight_scale: f32,
+    /// Requested LCD coverage order; effective-mode resolution stays separate.
+    subpixel_aa: SubpixelAaMode,
     /// Multiplier applied to the font's natural cell height to derive the
     /// rendered line height (`cell_h = natural_cell_h * line_height_mult`).
     /// Stored so a DPI/scale-factor change can recompute `cell_h` from the
@@ -1792,6 +1836,7 @@ struct FrameKey {
     /// the cached frame and re-shapes with / without the accent recolor.
     hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
     process_privileged: bool,
+    subpixel_aa: SubpixelAaMode,
 }
 
 /// Memoized inline IME preedit overlay glyphs. Reused across
@@ -2210,6 +2255,7 @@ impl GpuRenderer {
             font_size,
             line_height_mult,
             font_weight_scale,
+            subpixel_aa,
             padding,
             appearance,
             role,
@@ -2281,8 +2327,10 @@ impl GpuRenderer {
                      unexpectedly. Common cause: running over RDP without GPU passthrough."
                 );
             }
+            let optional_features =
+                selected_optional_device_features(adapter.features(), cfg!(windows));
             let (device, queue) = adapter
-                .request_device(&device_descriptor_for(software_rendering))
+                .request_device(&device_descriptor_for(software_rendering, optional_features))
                 .await
                 .context("request device")?;
             (adapter, device, queue, software_rendering)
@@ -2467,7 +2515,7 @@ impl GpuRenderer {
         // would charge for instances that never existed and never drop.
         LIVE_RENDERERS.fetch_add(1, Ordering::AcqRel);
 
-        Ok(Self {
+        let renderer = Self {
             instance,
             adapter,
             software_rendering,
@@ -2496,6 +2544,7 @@ impl GpuRenderer {
             font_size,
             line_height,
             font_weight_scale,
+            subpixel_aa,
             line_height_mult: line_height_mult.max(0.0).max(0.01),
             scale_factor: sf,
             cell_w,
@@ -2555,7 +2604,9 @@ impl GpuRenderer {
             style_rev: 0,
             drag_chip: None,
             async_loader: None,
-        })
+        };
+        renderer.log_subpixel_aa_policy();
+        Ok(renderer)
     }
 
     /// Checked resize used by window-event paths that must react to rejection.
@@ -2713,6 +2764,67 @@ impl GpuRenderer {
     /// Whether the tab bar is currently shown.
     pub fn tab_bar_visible(&self) -> bool {
         self.tab_bar_visible
+    }
+
+    /// Update the requested LCD subpixel coverage order without rebuilding fonts or atlases.
+    pub fn set_subpixel_aa_mode(&mut self, mode: SubpixelAaMode) -> bool {
+        if self.subpixel_aa == mode {
+            // When: `subpixel_aa == mode`, the retained frame already reflects this request.
+            return false;
+        }
+        self.subpixel_aa = mode;
+        self.last_frame_key = None;
+        self.log_subpixel_aa_policy();
+        self.window.request_redraw();
+        true
+    }
+
+    /// Requested LCD subpixel coverage order before platform/capability fallback.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn subpixel_aa_mode(&self) -> SubpixelAaMode {
+        self.subpixel_aa
+    }
+
+    /// LCD mode after platform, target-opacity, and presenter capability fallback.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn effective_subpixel_aa_mode(&self) -> SubpixelAaMode {
+        effective_subpixel_aa_mode(
+            self.subpixel_aa,
+            cfg!(windows),
+            self.hardware_alpha_mode == CompositeAlphaMode::Opaque
+                && self.bg_opacity >= 1.0 - f32::EPSILON,
+            self.uses_windows_software_presenter(),
+            self.device.features().contains(wgpu::Features::DUAL_SOURCE_BLENDING),
+        )
+    }
+
+    fn log_subpixel_aa_policy(&self) {
+        let opaque_target = self.hardware_alpha_mode == CompositeAlphaMode::Opaque
+            && self.bg_opacity >= 1.0 - f32::EPSILON;
+        let software_presenter = self.uses_windows_software_presenter();
+        let dual_source_supported =
+            self.device.features().contains(wgpu::Features::DUAL_SOURCE_BLENDING);
+        let effective = effective_subpixel_aa_mode(
+            self.subpixel_aa,
+            cfg!(windows),
+            opaque_target,
+            software_presenter,
+            dual_source_supported,
+        );
+        tracing::info!(
+            target: "render_policy",
+            renderer_role = self.render_timing_label,
+            window_id = ?self.window.id(),
+            requested = ?self.subpixel_aa,
+            ?effective,
+            windows_host = cfg!(windows),
+            opaque_target,
+            software_presenter,
+            dual_source_supported,
+            "renderer LCD subpixel policy"
+        );
     }
 
     /// Update scrollbar visibility policy from live config reload.
@@ -3414,6 +3526,7 @@ impl GpuRenderer {
             );
         }
         self.last_frame_key = None;
+        self.log_subpixel_aa_policy();
         self.window.request_redraw();
     }
 
@@ -3968,6 +4081,7 @@ impl GpuRenderer {
         self.style_rev = self.style_rev.wrapping_add(1);
         self.row_glyph_cache.invalidate_all();
         self.line_quad_cache.invalidate_all();
+        self.log_subpixel_aa_policy();
         tracing::info!("renderer.set_theme: {}", theme.name);
     }
 
@@ -4531,6 +4645,7 @@ impl GpuRenderer {
             .last_frame_key
             .as_ref()
             .is_none_or(|prev| prev.pane_scrollbar_alpha != pane_scrollbar_alpha);
+        let subpixel_aa = self.effective_subpixel_aa_mode();
         let overlay_or_chrome_changed = self.last_frame_key.as_ref().is_none_or(|prev| {
             scrollbar_changed
                 || prev.selection != selection.copied()
@@ -4558,6 +4673,7 @@ impl GpuRenderer {
                 || prev.inline_media_hash != inline_media_hash
                 || prev.hovered_url_cells != hovered_url_cells
                 || prev.process_privileged != process_privileged
+                || prev.subpixel_aa != subpixel_aa
         });
         let mut damage = DamageRect::empty();
         let surface_rect = full_surface_rect(self.config.width, self.config.height);
@@ -4641,6 +4757,7 @@ impl GpuRenderer {
             inline_media_hash,
             hovered_url_cells,
             process_privileged,
+            subpixel_aa,
         };
         let pane_revs_len = key.pane_revs.len();
         if Some(&key) == self.last_frame_key.as_ref() {
@@ -7142,9 +7259,10 @@ impl GpuRenderer {
             }
             let frame = self.software_frame.as_mut().expect("software frame initialized");
             frame.prepare(self.config.width, self.config.height, bg_clear)?;
-            frame.draw_layers(
+            frame.draw_layers_with_subpixel_aa(
                 &self.glyph_atlas,
                 &self.image_atlas,
+                subpixel_aa,
                 &quads,
                 &image_glyph_instances,
                 &glyph_instances,
@@ -7300,6 +7418,7 @@ impl GpuRenderer {
                 self.glyph_upload.glyph_bind_group(),
                 sw,
                 sh,
+                subpixel_aa,
                 &retained_quads,
                 &image_glyph_instances,
                 &glyph_instances,
