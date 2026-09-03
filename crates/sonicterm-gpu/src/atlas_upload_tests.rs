@@ -30,8 +30,11 @@ fn headless_device() -> (wgpu::Device, wgpu::Queue) {
     }))
     .expect("headless test adapter");
     let software = adapter.get_info().device_type == wgpu::DeviceType::Cpu;
-    pollster::block_on(adapter.request_device(&crate::core::device_descriptor_for(software)))
-        .expect("headless test device")
+    pollster::block_on(
+        adapter
+            .request_device(&crate::core::device_descriptor_for(software, wgpu::Features::empty())),
+    )
+    .expect("headless test device")
 }
 
 /// Render one image-atlas strip through the real sRGB view and return its BGRA readback.
@@ -155,6 +158,7 @@ fn render_image_readback_with_neighbor(
             glyph_upload.glyph_bind_group(),
             target_width as f32,
             1.0,
+            sonicterm_render_model::boundary::cfg::config::SubpixelAaMode::Off,
             &[],
             &[image],
             &[],
@@ -274,6 +278,7 @@ fn render_glyph_readback(tiles: &[sonicterm_text::glyph_atlas::RasterTile]) -> V
             glyph_upload.glyph_bind_group(),
             width as f32,
             1.0,
+            sonicterm_render_model::boundary::cfg::config::SubpixelAaMode::Off,
             &[],
             &[],
             &glyphs,

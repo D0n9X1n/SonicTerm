@@ -137,6 +137,12 @@ correctness, not only speed.
   layers immediately before the GPU/software presenter split. Windows software
   quads decode retained sRGB destination channels, blend the same source in
   linear light, encode RGB once, and source-over alpha as linear UNORM.
+- Windows LCD text is eligible only for an opaque configured backdrop, effective
+  opacity `1`, and either the CPU/GDI presenter or a wgpu device with
+  `DUAL_SOURCE_BLENDING`. The effective `off`/`rgb`/`bgr` mode enters the frame
+  key. GPU and CPU presenters apply the foreground transform before coverage,
+  attenuate destination RGB independently in linear light, and use maximum
+  channel weight for alpha. Images and color glyphs have higher branch priority.
 - A display-scale transition commits one physical inner size through winit's
   event-scoped writer. That size preserves logical geometry where it fits, stays
   above the 30×10 terminal minimum, and is capped by the destination monitor work
@@ -217,6 +223,12 @@ On Windows degraded presentation, the full CPU atlases remain available while
 GPU atlas textures become 1 × 1 placeholders. Returning to wgpu presentation
 recreates matching textures, resets atlas state, invalidates UV-bearing caches,
 and forces a full redraw before sampling the new textures.
+
+DirectWrite subpixel tiles remain linear BGRA coverage in both the CPU atlas and
+the GPU unorm coverage view. They must never pass through the color-rectangle
+conversion or the sRGB color view. Alpha remains the maximum RGB coverage so
+ineligible and `off` presentation has a deterministic grayscale value. Changing
+LCD mode is presentation-only and must not rebuild or reinterpret either atlas.
 
 Font discovery, shaping, and rasterization stay separate from renderer policy.
 Generated FFI bindings remain in their wrapper crates. Malformed, missing, or
@@ -443,6 +455,10 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
   RGB 与 alpha；debug build 会在 GPU/软件 presenter 分流前立即校验两层 quad。Windows 软件
   矩形会解码保留帧中的 sRGB 目标通道，在线性光空间混合相同的源颜色，只对 RGB 编码一次，
   并把 alpha 作为线性 UNORM 做 source-over。
+- Windows LCD 文字只有在配置为不透明 backdrop、实际 opacity 为 `1`，并且使用 CPU/GDI
+  presenter 或 wgpu 设备支持 `DUAL_SOURCE_BLENDING` 时才生效。实际 `off`/`rgb`/`bgr` 模式
+  进入帧键。GPU 与 CPU presenter 都在应用覆盖率之前变换前景色，在线性光空间分别衰减目标
+  RGB，并用最大通道权重计算 alpha。图像和彩色字形拥有更高分支优先级。
 - 显示缩放切换会通过 winit 的事件内 writer 一次提交一个物理 inner size。该尺寸在可容纳时
   保持逻辑几何，不低于 30×10 终端下限，并受目标显示器 work area 限制；renderer surface、
   pane grid/PTY、IME 几何与重绘都在 Windows 应用 `WM_DPICHANGED` 前跟随同一个目标。
@@ -504,6 +520,10 @@ CPU 字形图集固定为 2,048 × 2,048 个 BGRA8 像素，约 16 MiB。元数�
 Windows 降级呈现会保留完整 CPU 图集，同时把 GPU 图集纹理缩成 1 × 1 占位符。回到 wgpu
 呈现时，代码重新创建匹配纹理、重置图集状态、使所有携带 UV 的缓存失效，并在采样新纹理前
 强制完整重绘。
+
+DirectWrite 次像素图块在 CPU 图集与 GPU unorm 覆盖率 view 中始终是线性 BGRA 覆盖率。
+它们绝不能经过彩色矩形转换或 sRGB 彩色 view。Alpha 保持为 RGB 覆盖率最大值，因此不满足
+条件以及 `off` 呈现都有确定的灰度值。修改 LCD 模式只影响呈现，不得重建或重新解释任一图集。
 
 字体发现、塑形和光栅化与渲染器策略分离。生成的 FFI 绑定只留在各自包装 crate 内。
 可变字体元数据格式错误、缺失或越界时，代码回退到基础 OS/2 字重和字宽。FreeType 内嵌

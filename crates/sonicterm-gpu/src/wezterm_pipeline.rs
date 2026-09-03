@@ -9,6 +9,7 @@
 use wgpu::util::DeviceExt;
 
 use crate::quad::QuadInstance;
+use sonicterm_render_model::boundary::cfg::config::SubpixelAaMode;
 use sonicterm_text::GlyphInstance;
 
 const VERTICES_PER_QUAD: usize = 4;
@@ -25,6 +26,8 @@ const IS_IMAGE: f32 = 2.0;
 const IS_SOLID_COLOR: f32 = 3.0;
 const IS_ROUNDED_RECT: f32 = 5.0;
 const IS_LINE: f32 = 6.0;
+const IS_SUBPIXEL_RGB: f32 = 7.0;
+const IS_SUBPIXEL_BGR: f32 = 8.0;
 
 #[repr(C)]
 #[derive(Copy, Clone, Default, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -71,6 +74,7 @@ struct ShaderUniform {
 /// the final draw boundary.
 pub struct WeztermPipeline {
     pipeline: wgpu::RenderPipeline,
+    dual_source_pipeline: Option<wgpu::RenderPipeline>,
     image_bind_group_layout: wgpu::BindGroupLayout,
     glyph_bind_group_layout: wgpu::BindGroupLayout,
     uniform_buf: wgpu::Buffer,
@@ -86,8 +90,15 @@ impl WeztermPipeline {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat, initial_quads: u64) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("sonic-wezterm-present-shader"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(shader_source(false).into()),
         });
+        let dual_source_shader =
+            device.features().contains(wgpu::Features::DUAL_SOURCE_BLENDING).then(|| {
+                device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("sonic-wezterm-dual-source-shader"),
+                    source: wgpu::ShaderSource::Wgsl(shader_source(true).into()),
+                })
+            });
 
         let uniform_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -141,38 +152,45 @@ impl WeztermPipeline {
             immediate_size: 0,
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("sonic-wezterm-present-pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Some(Vertex::desc())],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(premultiplied_alpha_blend()),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
+        let create_pipeline = |label, shader: &wgpu::ShaderModule, blend| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[Some(Vertex::desc())],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(blend),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let pipeline =
+            create_pipeline("sonic-wezterm-present-pipeline", &shader, premultiplied_alpha_blend());
+        let dual_source_pipeline = dual_source_shader.as_ref().map(|shader| {
+            create_pipeline("sonic-wezterm-dual-source-pipeline", shader, dual_source_alpha_blend())
         });
 
         let initial_quads = initial_quads.max(1);
@@ -206,6 +224,7 @@ impl WeztermPipeline {
 
         Self {
             pipeline,
+            dual_source_pipeline,
             image_bind_group_layout,
             glyph_bind_group_layout,
             uniform_buf,
@@ -238,6 +257,7 @@ impl WeztermPipeline {
         glyph_atlas_bind_group: &'p wgpu::BindGroup,
         surface_w: f32,
         surface_h: f32,
+        subpixel_aa: SubpixelAaMode,
         quads: &[QuadInstance],
         images: &[GlyphInstance],
         glyphs: &[GlyphInstance],
@@ -254,10 +274,10 @@ impl WeztermPipeline {
 
         let mut vertices = Vec::with_capacity(total_quads * VERTICES_PER_QUAD);
         push_quad_instances(&mut vertices, quads, surface_w, surface_h);
-        push_glyph_instances(&mut vertices, images, surface_w, surface_h);
-        push_glyph_instances(&mut vertices, glyphs, surface_w, surface_h);
+        push_glyph_instances(&mut vertices, images, surface_w, surface_h, subpixel_aa);
+        push_glyph_instances(&mut vertices, glyphs, surface_w, surface_h, subpixel_aa);
         push_quad_instances(&mut vertices, overlay_quads, surface_w, surface_h);
-        push_glyph_instances(&mut vertices, overlay_glyphs, surface_w, surface_h);
+        push_glyph_instances(&mut vertices, overlay_glyphs, surface_w, surface_h, subpixel_aa);
 
         let indices = build_indices(vertices.len() / VERTICES_PER_QUAD);
         self.ensure_capacity(device, vertices.len() as u64, indices.len() as u64);
@@ -272,7 +292,14 @@ impl WeztermPipeline {
         };
         queue.write_buffer(&self.uniform_buf, 0, bytemuck::cast_slice(&[uniform]));
 
-        pass.set_pipeline(&self.pipeline);
+        let pipeline = match subpixel_aa {
+            SubpixelAaMode::Off => &self.pipeline,
+            SubpixelAaMode::Rgb | SubpixelAaMode::Bgr => self
+                .dual_source_pipeline
+                .as_ref()
+                .expect("effective LCD mode requires a dual-source pipeline"),
+        };
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &self.uniform_bind_group, &[]);
         pass.set_bind_group(1, image_atlas_bind_group, &[]);
         pass.set_bind_group(2, glyph_atlas_bind_group, &[]);
@@ -311,7 +338,13 @@ impl WeztermPipeline {
     }
 }
 
-fn push_glyph_instances(out: &mut Vec<Vertex>, glyphs: &[GlyphInstance], sw: f32, sh: f32) {
+fn push_glyph_instances(
+    out: &mut Vec<Vertex>,
+    glyphs: &[GlyphInstance],
+    sw: f32,
+    sh: f32,
+    subpixel_aa: SubpixelAaMode,
+) {
     for g in glyphs {
         let Some((x, y, w, h)) = ndc_rect_to_pixels(g.rect, sw, sh) else {
             // When: ndc_rect_to_pixels returns None the surface has zero extent, so this
@@ -330,6 +363,13 @@ fn push_glyph_instances(out: &mut Vec<Vertex>, glyphs: &[GlyphInstance], sw: f32
             // When: flags[0] marks a colour glyph, so the atlas already holds its RGB and
             // the shader samples it directly instead of tinting coverage with fg_color.
             IS_COLOR_EMOJI
+        } else if g.flags[1] >= 0.5 {
+            // When: `g.flags[1]` marks a subpixel mask, `subpixel_aa` selects its presentation classification.
+            match subpixel_aa {
+                SubpixelAaMode::Off => IS_GLYPH,
+                SubpixelAaMode::Rgb => IS_SUBPIXEL_RGB,
+                SubpixelAaMode::Bgr => IS_SUBPIXEL_BGR,
+            }
         } else {
             // When: no flags bit is set, so the glyph is monochrome: atlas alpha is coverage
             // and the shader scales fg_color by it, then applies foreground_text_hsb.
@@ -489,6 +529,21 @@ fn premultiplied_alpha_blend() -> wgpu::BlendState {
     }
 }
 
+fn dual_source_alpha_blend() -> wgpu::BlendState {
+    wgpu::BlendState {
+        color: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::OneMinusSrc1,
+            operation: wgpu::BlendOperation::Add,
+        },
+        alpha: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::OneMinusSrc1Alpha,
+            operation: wgpu::BlendOperation::Add,
+        },
+    }
+}
+
 const SHADER: &str = r#"
 struct VertexInput {
     @location(0) position: vec2<f32>,
@@ -516,6 +571,8 @@ const IS_IMAGE: f32 = 2.0;
 const IS_SOLID_COLOR: f32 = 3.0;
 const IS_ROUNDED_RECT: f32 = 5.0;
 const IS_LINE: f32 = 6.0;
+const IS_SUBPIXEL_RGB: f32 = 7.0;
+const IS_SUBPIXEL_BGR: f32 = 8.0;
 
 struct ShaderUniform {
     foreground_text_hsb: vec3<f32>,
@@ -572,8 +629,12 @@ fn vs_main(model: VertexInput) -> VertexOutput {
     return out;
 }
 
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+struct ShadeResult {
+    color: vec4<f32>,
+    factor: vec4<f32>,
+};
+
+fn shade(in: VertexOutput) -> ShadeResult {
     var color: vec4<f32>;
     var hsv = in.hsv;
 
@@ -612,6 +673,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         color = textureSample(atlas_linear_tex, atlas_linear_sampler, sample_uv);
     } else if (in.has_color == IS_COLOR_EMOJI) {
         color = textureSample(glyph_color_tex, glyph_color_sampler, in.tex);
+    } else if (in.has_color == IS_SUBPIXEL_RGB || in.has_color == IS_SUBPIXEL_BGR) {
+        let sample = textureSample(glyph_coverage_tex, glyph_coverage_sampler, in.tex);
+        let coverage = select(sample.rgb, sample.bgr, in.has_color == IS_SUBPIXEL_BGR);
+        let transformed_foreground = apply_hsv(in.fg_color, uniforms.foreground_text_hsb);
+        let weights = coverage * transformed_foreground.a;
+        let source_alpha = max(weights.r, max(weights.g, weights.b));
+        color = vec4<f32>(transformed_foreground.rgb * coverage, source_alpha);
+        return ShadeResult(color, vec4<f32>(weights, source_alpha));
     } else if (in.has_color == IS_GLYPH) {
         let sample = textureSample(glyph_coverage_tex, glyph_coverage_sampler, in.tex);
         let cov = sample.a;
@@ -620,9 +689,29 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     color = apply_hsv(color, hsv);
-    return color;
+    return ShadeResult(color, vec4<f32>(color.a));
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    return shade(in).color;
 }
 "#;
+
+fn shader_source(dual_source: bool) -> String {
+    if !dual_source {
+        // When: `dual_source` is false, use the standard fragment wrapper without the optional WGSL extension.
+        return SHADER.to_string();
+    }
+    let body = SHADER
+        .strip_suffix(
+            "\n@fragment\nfn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {\n    return shade(in).color;\n}\n",
+        )
+        .expect("standard shader wrapper remains canonical");
+    format!(
+        "enable dual_source_blending;\n{body}\n\nstruct FragmentOutput {{\n    @location(0) @blend_src(0) color: vec4<f32>,\n    @location(0) @blend_src(1) factor: vec4<f32>,\n}};\n\n@fragment\nfn fs_main(in: VertexOutput) -> FragmentOutput {{\n    let shaded = shade(in);\n    return FragmentOutput(shaded.color, shaded.factor);\n}}\n"
+    )
+}
 
 #[cfg(test)]
 #[path = "wezterm_pipeline_tests.rs"]

@@ -189,6 +189,7 @@ fn make_renderer(
             font_size: config.font.size,
             line_height_mult: config.font.line_height,
             font_weight_scale: config.font.effective_weight_scale(),
+            subpixel_aa: config.font.subpixel_aa,
             padding: [0.0; 4],
             appearance: SurfaceAppearance {
                 backdrop: config.appearance.backdrop,

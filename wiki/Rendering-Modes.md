@@ -87,6 +87,48 @@ it; validation errors propagate. A `SurfaceTexture` is dropped before
 reconfiguration. The next frame therefore cannot treat a blank or replaced
 swapchain as already rendered.
 
+### Windows LCD subpixel policy
+
+`[font].subpixel_aa` accepts `off`, `rgb`, and `bgr`; the default is `off`.
+SonicTerm resolves a non-off request to LCD presentation only when all of these
+conditions hold:
+
+- the host is Windows;
+- the configured backdrop selects an opaque hardware alpha mode;
+- effective terminal background opacity is `1`;
+- the final presenter is Windows CPU/GDI, or the wgpu device supports
+  `DUAL_SOURCE_BLENDING`.
+
+Mica, Acrylic, Tabbed, opacity below `1`, unsupported GPU devices, and
+non-Windows hosts therefore use grayscale deterministically. A software-present
+override does not make a configured transparent backdrop LCD-eligible merely
+because the GDI swapchain itself is forced opaque.
+
+On Windows, device creation requests `DUAL_SOURCE_BLENDING` only when the
+adapter advertises it. No optional LCD feature is requested on other hosts. The
+feature is negotiated when the shared device is created so `off` can change to
+`rgb` or `bgr` live without recreating the device. The effective mode is part of
+the retained frame key; changing the request invalidates and redraws the frame
+without rebuilding fonts or either atlas.
+
+For one subpixel sample, `coverage` is logical RGB coverage (or R/B-swapped for
+`bgr`) and `foreground` is the transformed premultiplied linear foreground:
+
+```text
+weights.rgb = coverage.rgb * foreground.a
+source.rgb = foreground.rgb * coverage.rgb
+source.a = max(weights.r, weights.g, weights.b)
+destination.rgb *= 1 - weights.rgb
+destination.a *= 1 - source.a
+```
+
+The GPU pipeline emits source color and destination attenuation as the two blend
+sources. Its non-LCD branches emit scalar alpha as the second source, preserving
+ordinary source-over for monochrome text, color glyphs, images, and quads. The
+Windows CPU presenter decodes the sRGB BGRA destination, applies the same
+per-channel equation in linear light, then encodes RGB once. `off` uses the
+subpixel tile's stored alpha maximum as grayscale coverage.
+
 ### Software-render degradation
 
 Degradation replaces the monitor period with an exact 25,000 µs period, about
@@ -297,6 +339,41 @@ SonicTerm 绘制到保留式离屏帧纹理。帧键覆盖可见窗格修订号�
 任何未成功呈现的表面获取路径都会清除缓存帧键。`Outdated` 和 `Suboptimal` 会重新配置
 表面，`Lost` 会重新创建，校验错误则向上传递。重新配置前必须先释放
 `SurfaceTexture`。因此下一帧不会把空白或已替换的交换链误认为已经绘制。
+
+### Windows LCD 次像素策略
+
+`[font].subpixel_aa` 可选 `off`、`rgb`、`bgr`，默认值是 `off`。只有以下条件全部满足时，
+SonicTerm 才会把非 off 请求解析为 LCD 呈现：
+
+- 主机是 Windows；
+- 配置的 backdrop 选择不透明硬件 alpha 模式；
+- 终端背景的实际 opacity 为 `1`；
+- 最终 presenter 是 Windows CPU/GDI，或 wgpu 设备支持 `DUAL_SOURCE_BLENDING`。
+
+因此 Mica、Acrylic、Tabbed、opacity 小于 `1`、不支持的 GPU 设备和非 Windows 主机都会
+确定性使用灰度。软件呈现覆盖即使强制 GDI 交换链本身不透明，也不会让配置为透明 backdrop
+的窗口取得 LCD 资格。
+
+Windows 创建设备时只会在 adapter 已公布支持后请求 `DUAL_SOURCE_BLENDING`；其它主机不请求
+任何 LCD 可选 feature。该 feature 在创建共享设备时协商，因此 `off` 可以实时改为 `rgb` 或
+`bgr`，无需重建设备。实际模式进入保留帧键；修改请求只会使帧失效并重绘，不会重建字体或
+任一图集。
+
+对一个次像素样本，`coverage` 是逻辑 RGB 覆盖率（`bgr` 会交换 R/B），`foreground` 是经过
+变换的预乘线性前景色：
+
+```text
+weights.rgb = coverage.rgb * foreground.a
+source.rgb = foreground.rgb * coverage.rgb
+source.a = max(weights.r, weights.g, weights.b)
+destination.rgb *= 1 - weights.rgb
+destination.a *= 1 - source.a
+```
+
+GPU pipeline 把源颜色与目标衰减量分别作为两个 blend source 输出。非 LCD 分支把单一 alpha
+作为第二个 source，因此单色文字、彩色字形、图像和 quad 仍保持普通 source-over。Windows
+CPU presenter 解码 sRGB BGRA 目标，在线性光空间执行同一逐通道公式，再只编码一次 RGB。
+`off` 把次像素图块中保存的 alpha 最大值作为灰度覆盖率。
 
 ### 软件渲染降级
 

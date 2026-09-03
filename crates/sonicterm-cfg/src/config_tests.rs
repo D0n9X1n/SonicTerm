@@ -30,6 +30,36 @@ fn font_weight_scale_rejects_non_finite_and_out_of_range_values() {
     }
 }
 
+/// LCD coverage is opt-in and all three portable configuration values round-trip.
+#[test]
+fn subpixel_aa_defaults_off_and_parses_lowercase_modes() {
+    assert_eq!(Config::default().font.subpixel_aa, SubpixelAaMode::Off);
+
+    for (value, expected) in
+        [("off", SubpixelAaMode::Off), ("rgb", SubpixelAaMode::Rgb), ("bgr", SubpixelAaMode::Bgr)]
+    {
+        let config: Config = toml::from_str(&format!("[font]\nsubpixel_aa = \"{value}\"\n"))
+            .expect("supported subpixel AA mode parses");
+        assert_eq!(config.font.subpixel_aa, expected);
+        assert!(config
+            .to_toml()
+            .expect("serialize config")
+            .contains(&format!("subpixel_aa = \"{value}\"")));
+    }
+}
+
+/// The generated user config states the safe default and the explicit stripe-order choices.
+#[test]
+fn default_template_documents_subpixel_aa_policy() {
+    let template = default_config_template();
+
+    assert!(template.contains("subpixel_aa = \"off\""));
+    assert!(template.contains("\"rgb\""));
+    assert!(template.contains("\"bgr\""));
+    assert!(template.contains("opaque"));
+    assert!(template.contains("Windows"));
+}
+
 #[test]
 fn default_warm_window_pool_keeps_one_spare() {
     let cfg = Config::default();

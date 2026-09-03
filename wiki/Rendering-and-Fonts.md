@@ -275,6 +275,19 @@ full original CPU atlas remains live while its GPU texture is a 1×1 placeholder
 returning to GPU presentation rebuilds the matching texture, resets UV-bearing
 caches, and forces a full redraw.
 
+DirectWrite emits logical red, green, and blue ClearType coverage and stores the
+maximum channel in alpha. The engine changes the byte layout from RGBA to BGRA
+for the CPU atlas but does not perform a color-space conversion. With
+`[font].subpixel_aa = "off"`, both presenters use the stored alpha maximum as one
+grayscale coverage value. `rgb` maps the logical channels to matching display
+channels; `bgr` reverses red and blue. The GPU path samples the unorm coverage
+view and uses dual-source blending for independent destination-channel
+attenuation. The Windows software path reads the original BGRA bytes and applies
+the same operation in linear light. Color glyphs and inline images take
+precedence over the subpixel marker and never enter this branch or the coverage
+view. The mode is presentation state, so changing it invalidates the frame but
+keeps font stacks, raster tiles, and atlases intact.
+
 ### Inline images
 
 iTerm2 file images, kitty graphics, and Sixel events are decoded by the app.
@@ -548,6 +561,14 @@ sRGB view 解码后等于预乘线性颜色的存储值。CPU 字节始终不会
 字形，`flags.y` 保留 DirectWrite 次像素标记。Windows 软件呈现会保留完整的原始 CPU 图集，
 但对应 GPU 纹理缩为 1×1 占位符；回到 GPU 呈现时会重建匹配纹理、重置携带 UV 的缓存，
 并强制完整重绘。
+
+DirectWrite 生成逻辑红、绿、蓝 ClearType 覆盖率，并把三个通道的最大值写入 alpha。引擎只把
+字节布局从 RGBA 改为 CPU 图集使用的 BGRA，不执行色彩空间转换。使用
+`[font].subpixel_aa = "off"` 时，两种 presenter 都把保存的 alpha 最大值当作单一灰度覆盖率；
+`rgb` 把逻辑通道映射到对应显示通道，`bgr` 则交换红、蓝。GPU 路径从 unorm 覆盖率 view
+取样，并用 dual-source blending 分别衰减目标通道。Windows 软件路径读取原始 BGRA 字节，
+在线性光空间执行同一操作。彩色字形与内联图像优先于次像素标记，永远不会进入该分支或覆盖率
+view。模式只属于呈现状态，因此修改模式会使帧失效，但保留字体栈、光栅图块与图集。
 
 ### 内联图像
 

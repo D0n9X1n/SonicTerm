@@ -40,11 +40,18 @@ behavior unless the running build implements them.
 | `size` | `13` | Font size in points. |
 | `line_height` | `1.3` | Line-height multiplier. |
 | `weight_scale` | `1.0` | Regular-text weight for the configured family. Valid values are `0.5..=5.0`; other values become `1.0`. Cell metrics, fallback glyphs, color emoji, and SGR bold do not change. |
+| `subpixel_aa` | `"off"` | LCD coverage order: `off`, `rgb`, or `bgr`. See the eligibility rules below. |
 
 Font changes apply to terminal text and regular application text. Changes to
 `family`, `size`, or `line_height` resize every visible pane and its PTY.
-`weight_scale` keeps the existing metrics. For shaping and fallback details, see
-[Rendering and Fonts](Rendering-and-Fonts).
+`weight_scale` keeps the existing metrics. `subpixel_aa` is effective only on
+Windows when the configured backdrop is `opaque`, effective opacity is `1`, and
+either the Windows software presenter is active or the GPU exposes dual-source
+blending. Every other combination—including Mica, Acrylic, Tabbed, opacity below
+`1`, unsupported GPUs, and non-Windows hosts—uses deterministic grayscale.
+`off` preserves the alpha-max grayscale output; `rgb` maps logical red, green,
+and blue coverage to matching display channels; `bgr` swaps red and blue.
+For shaping and fallback details, see [Rendering and Fonts](Rendering-and-Fonts).
 
 #### `[window]`
 
@@ -148,7 +155,7 @@ A reload always re-reads the selected theme and keymap files, even when their
 names did not change. The following settings apply to existing windows:
 
 - theme, keymap, and locale;
-- font family, size, line height, and weight;
+- font family, size, line height, weight, and LCD subpixel mode;
 - content padding, opacity, scrollbar, and panel padding;
 - cursor shape and blink;
 - scrollback and local-target policy;
@@ -163,7 +170,8 @@ Some settings affect only objects created after the reload:
 
 Changing `backdrop` or `software_render_mode` can involve native window setup.
 Restart SonicTerm when you need the complete native-window change, not only the
-live renderer policy.
+live renderer policy. A live `subpixel_aa` change invalidates and redraws the
+presented frame without rebuilding fonts, raster tiles, or either atlas.
 
 ### Saving current font settings
 
@@ -244,10 +252,16 @@ SonicTerm 允许并保留 TOML 中的未知 key。当前 build 没有实现的�
 | `size` | `13` | 字号，单位为 point。 |
 | `line_height` | `1.3` | 行高倍率。 |
 | `weight_scale` | `1.0` | 只调整所配置字体族的普通文字粗细。有效范围是 `0.5..=5.0`；其它值会变成 `1.0`。Cell metrics、回退字形、彩色 emoji 和 SGR bold 不变。 |
+| `subpixel_aa` | `"off"` | LCD 覆盖率顺序：`off`、`rgb` 或 `bgr`。生效条件见下文。 |
 
 字体设置会同时用于终端文字和普通应用文字。修改 `family`、`size` 或
 `line_height` 时，每个可见 pane 的 grid 与 PTY 都会重新调整大小。只修改
-`weight_scale` 不会改变 metrics。字体 shaping 与 fallback 的详细说明见
+`weight_scale` 不会改变 metrics。`subpixel_aa` 仅在 Windows 上满足以下条件时
+生效：配置的 backdrop 是 `opaque`、实际 opacity 为 `1`，并且 Windows 软件
+presenter 正在使用或 GPU 支持 dual-source blending。其它所有组合都会确定性回退
+到灰度，包括 Mica、Acrylic、Tabbed、opacity 小于 `1`、不支持的 GPU 和非 Windows
+主机。`off` 保留 alpha 最大值灰度输出；`rgb` 把逻辑红、绿、蓝覆盖率映射到对应
+显示通道；`bgr` 交换红、蓝通道。字体 shaping 与 fallback 的详细说明见
 [渲染与字体](Rendering-and-Fonts)。
 
 #### `[window]`
@@ -345,7 +359,7 @@ Scrollback 行数与内存预算会同时限制历史记录。包含丰富属性
 应用到现有窗口：
 
 - 主题、keymap 与 locale；
-- 字体族、字号、行高与字重；
+- 字体族、字号、行高、字重与 LCD 次像素模式；
 - 内容 padding、opacity、滚动条和 panel padding；
 - 光标形状与闪烁；
 - scrollback 与本地目标策略；
@@ -358,7 +372,8 @@ Scrollback 行数与内存预算会同时限制历史记录。包含丰富属性
 - logging 设置需要重启。
 
 修改 `backdrop` 或 `software_render_mode` 可能涉及原生窗口初始化。如果需要完整
-应用原生窗口变化，而不只是更新 renderer 策略，请重启 SonicTerm。
+应用原生窗口变化，而不只是更新 renderer 策略，请重启 SonicTerm。实时修改
+`subpixel_aa` 只会使已呈现帧失效并重绘，不会重建字体、光栅图块或任一图集。
 
 ### 保存当前字体设置
 

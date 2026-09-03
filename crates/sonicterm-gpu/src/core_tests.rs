@@ -14,8 +14,50 @@ fn device_memory_policy_selects_usage_for_software_and_performance_for_hardware(
 /// Inspecting both descriptors prevents device creation from silently reverting to the default.
 #[test]
 fn device_descriptor_uses_the_selected_memory_hint() {
-    assert!(matches!(device_descriptor_for(true).memory_hints, wgpu::MemoryHints::MemoryUsage));
-    assert!(matches!(device_descriptor_for(false).memory_hints, wgpu::MemoryHints::Performance));
+    assert!(matches!(
+        device_descriptor_for(true, wgpu::Features::empty()).memory_hints,
+        wgpu::MemoryHints::MemoryUsage
+    ));
+    assert!(matches!(
+        device_descriptor_for(false, wgpu::Features::empty()).memory_hints,
+        wgpu::MemoryHints::Performance
+    ));
+}
+
+/// Windows requests dual-source blending only when the adapter advertises it.
+#[test]
+fn optional_device_features_select_dual_source_only_on_supported_windows() {
+    let dual = wgpu::Features::DUAL_SOURCE_BLENDING;
+
+    assert_eq!(selected_optional_device_features(dual, true), dual);
+    assert!(selected_optional_device_features(wgpu::Features::empty(), true).is_empty());
+    assert!(selected_optional_device_features(dual, false).is_empty());
+}
+
+/// The descriptor requests exactly the selected optional feature set.
+#[test]
+fn device_descriptor_carries_selected_optional_features() {
+    let dual = wgpu::Features::DUAL_SOURCE_BLENDING;
+
+    assert_eq!(device_descriptor_for(false, dual).required_features, dual);
+    assert_eq!(
+        device_descriptor_for(true, wgpu::Features::empty()).required_features,
+        wgpu::Features::empty()
+    );
+}
+
+/// Effective LCD mode requires Windows, an opaque target, and a viable presenter path.
+#[test]
+fn effective_subpixel_aa_policy_falls_back_deterministically() {
+    use sonicterm_render_model::boundary::cfg::config::SubpixelAaMode::{Bgr, Off, Rgb};
+
+    assert_eq!(effective_subpixel_aa_mode(Rgb, true, true, false, true), Rgb);
+    assert_eq!(effective_subpixel_aa_mode(Bgr, true, true, false, true), Bgr);
+    assert_eq!(effective_subpixel_aa_mode(Rgb, true, true, true, false), Rgb);
+    assert_eq!(effective_subpixel_aa_mode(Off, true, true, false, true), Off);
+    assert_eq!(effective_subpixel_aa_mode(Rgb, false, true, false, true), Off);
+    assert_eq!(effective_subpixel_aa_mode(Rgb, true, false, false, true), Off);
+    assert_eq!(effective_subpixel_aa_mode(Rgb, true, true, false, false), Off);
 }
 
 /// Allocator projection retains totals, counts, and the largest block without labels.
@@ -609,8 +651,10 @@ fn warp_retained_redraw_clears_overhanging_glyph_ink() {
         apply_limit_buckets: false,
     }))
     .expect("Windows WARP fallback adapter");
-    let (device, queue) = pollster::block_on(adapter.request_device(&device_descriptor_for(true)))
-        .expect("WARP device");
+    let (device, queue) = pollster::block_on(
+        adapter.request_device(&device_descriptor_for(true, wgpu::Features::empty())),
+    )
+    .expect("WARP device");
     let mut pipeline =
         crate::wezterm_pipeline::WeztermPipeline::new(&device, wgpu::TextureFormat::Bgra8Unorm, 2);
     let mut atlas = GlyphAtlas::new(1, 30);
@@ -679,6 +723,7 @@ fn warp_retained_redraw_clears_overhanging_glyph_ink() {
             glyph_upload.glyph_bind_group(),
             WIDTH as f32,
             HEIGHT as f32,
+            SubpixelAaMode::Off,
             &[],
             &[],
             &glyphs,
@@ -755,6 +800,7 @@ fn warp_retained_redraw_clears_overhanging_glyph_ink() {
             glyph_upload.glyph_bind_group(),
             WIDTH as f32,
             HEIGHT as f32,
+            SubpixelAaMode::Off,
             &[clear],
             &[],
             &[],
@@ -1608,6 +1654,29 @@ fn scrollbar_bucket_change_invalidates_the_frame_key() {
     let visible = FrameKey { pane_scrollbar_alpha: vec![(7, u16::MAX)], ..baseline.clone() };
 
     assert_ne!(baseline, visible);
+}
+
+/// Changing effective LCD policy invalidates the frame without requiring atlas identity changes.
+#[test]
+fn subpixel_aa_change_invalidates_the_frame_key() {
+    let grayscale = FrameKey { subpixel_aa: SubpixelAaMode::Off, ..Default::default() };
+    let lcd = FrameKey { subpixel_aa: SubpixelAaMode::Rgb, ..grayscale.clone() };
+
+    assert_ne!(grayscale, lcd);
+}
+
+/// Live LCD policy changes invalidate presentation without rebuilding font or atlas state.
+#[test]
+fn subpixel_aa_setter_does_not_rebuild_fonts_or_atlases() {
+    const SOURCE: &str = include_str!("core.rs");
+    let start = SOURCE.find("pub fn set_subpixel_aa_mode").expect("LCD setter");
+    let body = &SOURCE[start..SOURCE[start..].find("\n    /// Requested LCD").unwrap() + start];
+
+    assert!(body.contains("self.last_frame_key = None"));
+    assert!(body.contains("self.window.request_redraw()"));
+    for forbidden in ["set_font(", "reset_glyph_atlas", "rebuild_glyph_upload"] {
+        assert!(!body.contains(forbidden), "LCD setter unexpectedly calls {forbidden}");
+    }
 }
 
 /// Changing process privilege must invalidate otherwise-identical retained tab chrome.

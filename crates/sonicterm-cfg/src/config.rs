@@ -82,6 +82,31 @@ pub struct Config {
     pub extra: toml::Table,
 }
 
+/// LCD subpixel coverage presentation policy.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SubpixelAaMode {
+    /// Preserve grayscale antialiasing.
+    #[default]
+    Off,
+    /// Map atlas red, green, and blue coverage to matching display channels.
+    Rgb,
+    /// Swap red and blue coverage for BGR stripe-order displays.
+    Bgr,
+}
+
+impl SubpixelAaMode {
+    /// Lowercase name used by the TOML schema and diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Rgb => "rgb",
+            Self::Bgr => "bgr",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 /// Font selection and rendering metrics.
@@ -94,6 +119,8 @@ pub struct FontConfig {
     pub line_height: f32,
     /// Coverage multiplier for regular text. `1.0` preserves native weight.
     pub weight_scale: f32,
+    /// LCD subpixel coverage order. Effective only on eligible Windows targets.
+    pub subpixel_aa: SubpixelAaMode,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -415,6 +442,7 @@ impl Default for FontConfig {
             size: 13.0,
             line_height: 1.3,
             weight_scale: 1.0,
+            subpixel_aa: SubpixelAaMode::Off,
         }
     }
 }
@@ -1027,6 +1055,10 @@ line_height = {line_height}
 # the change visible on HiDPI screens where stem cores are already solid.
 # Cell metrics and SGR bold are unaffected. Invalid values fall back to 1.0.
 weight_scale = {weight_scale}
+# LCD coverage order: "off" keeps grayscale AA; "rgb" and "bgr" select the
+# physical stripe order. Effective only on Windows with an opaque final target
+# and a capable GPU or the software presenter; every other case uses grayscale.
+subpixel_aa = "{subpixel_aa}"
 
 [window]
 # Default terminal grid size for NEW windows. These are character cells, not px.
@@ -1156,6 +1188,7 @@ threshold_secs = 10
         font_size = cfg.font.size,
         line_height = cfg.font.line_height,
         weight_scale = cfg.font.weight_scale,
+        subpixel_aa = cfg.font.subpixel_aa.as_str(),
         cols = cfg.window.cols,
         rows = cfg.window.rows,
         padding_left = cfg.window.padding_left,

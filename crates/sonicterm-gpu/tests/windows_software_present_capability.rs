@@ -75,6 +75,7 @@ fn run_probe(active: &ActiveEventLoop) -> Result<Capability, String> {
         font_size: 14.0,
         line_height_mult: 1.2,
         font_weight_scale: 1.0,
+        subpixel_aa: Default::default(),
         padding: [0.0; 4],
         appearance: SurfaceAppearance {
             backdrop: Default::default(),

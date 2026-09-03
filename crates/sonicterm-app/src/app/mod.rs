@@ -2032,7 +2032,10 @@ mod text_edit;
 #[doc(hidden)]
 pub mod update_check;
 mod window_event;
-pub use config_apply::{config_diff_needs_font_apply, renderer_scrollbar_mode_differs};
+pub use config_apply::{
+    config_diff_needs_font_apply, renderer_scrollbar_mode_differs,
+    renderer_subpixel_aa_mode_differs,
+};
 pub use key_encoding::{encode_logical, key_name, key_to_string, key_to_strings, KeyName};
 
 fn init_tracing() {

@@ -114,6 +114,28 @@ fn applying_a_config_clamps_an_out_of_range_weight_scale() {
     assert_eq!(app.config.font.effective_weight_scale(), 1.0, "out-of-range falls back to 1.0");
 }
 
+/// LCD policy changes update renderer presentation without rebuilding font metrics or atlases.
+#[test]
+fn subpixel_aa_change_is_not_a_font_apply() {
+    use sonicterm_cfg::config::SubpixelAaMode;
+
+    let old = Config::default();
+    let mut new = old.clone();
+    new.font.subpixel_aa = SubpixelAaMode::Rgb;
+
+    assert!(!config_diff_needs_font_apply(&old, &new));
+    assert!(renderer_subpixel_aa_mode_differs(&old, &new));
+}
+
+/// Equal LCD policy leaves the dedicated renderer update dormant.
+#[test]
+fn unchanged_subpixel_aa_mode_needs_no_renderer_update() {
+    let old = Config::default();
+    let new = old.clone();
+
+    assert!(!renderer_subpixel_aa_mode_differs(&old, &new));
+}
+
 /// Reloading either local-target kill switch immediately revokes every window's hover state.
 #[test]
 fn local_target_switch_reload_revokes_all_window_authorization() {

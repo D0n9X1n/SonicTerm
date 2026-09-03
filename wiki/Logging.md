@@ -74,7 +74,11 @@ separate render-timing option.
 Startup logs the selected wgpu adapter, device type, and software-adapter
 classification. On RDP, VM, or VDI hosts, look for `software-render degrade
 engaged` and compare it with `[appearance].software_render_mode` on
-[Configuration](Configuration).
+[Configuration](Configuration). At `level = "debug"`, each renderer also writes
+`renderer LCD subpixel policy` at startup and whenever mode, opacity, theme, or
+presenter state changes. Its `requested`, `effective`, `windows_host`,
+`opaque_target`, `software_presenter`, and `dual_source_supported` fields explain
+every LCD-to-grayscale fallback without relying on a screenshot.
 
 ## Memory diagnostics
 
@@ -347,7 +351,10 @@ max_breadcrumb_bytes = 1048576    # 1 MiB
 
 启动日志会记录选中的 wgpu adapter、设备类型和软件 adapter 分类。在 RDP、虚拟机或
 VDI 环境中，请查找 `software-render degrade engaged`，并对照[配置](Configuration)中的
-`[appearance].software_render_mode`。
+`[appearance].software_render_mode`。在 `level = "debug"` 下，每个 renderer 还会在启动以及
+模式、opacity、主题或 presenter 状态变化时写入 `renderer LCD subpixel policy`。其中的
+`requested`、`effective`、`windows_host`、`opaque_target`、`software_presenter` 和
+`dual_source_supported` 字段能解释每次 LCD 到灰度的回退，不必依赖截图推断。
 
 ## 内存诊断
 
