@@ -321,13 +321,19 @@ fn unfocused_window_dims_the_active_panel_marker_rather_than_hiding_it() {
 
     // Premultiplied blending: every channel scales together. Alpha alone
     // would leave the bar brighter than its alpha claims.
-    for channel in 0..4 {
-        assert!(
-            unfocused_accent.color[channel] < focused_accent.color[channel],
-            "channel {channel} must dim: {} vs {}",
-            unfocused_accent.color[channel],
-            focused_accent.color[channel]
-        );
+    assert_eq!(focused_accent.color, [0.226_965_87, 0.376_262_13, 0.313_988_72, 1.0]);
+    assert_eq!(
+        unfocused_accent.color,
+        scale_premultiplied_alpha(focused_accent.color, ACTIVE_PANEL_MARKER_ALPHA_UNFOCUSED)
+    );
+}
+
+/// Quad opacity changes must use helpers that rescale RGB with premultiplied alpha.
+#[test]
+fn authored_quad_sources_do_not_mutate_alpha_channels_directly() {
+    for (name, source) in [("core", include_str!("core.rs")), ("quad", include_str!("quad.rs"))] {
+        assert!(!source.contains("[3] ="), "{name} directly replaces quad alpha");
+        assert!(!source.contains("[3] *="), "{name} directly scales only quad alpha");
     }
 }
 
@@ -1021,7 +1027,10 @@ fn inline_image_atlas_skips_older_images_without_eviction() {
 #[test]
 fn cursor_color_uses_theme_cursor_accent() {
     let theme = Theme::default();
-    assert_eq!(cursor_color_from_theme(&theme), hex_to_rgba(theme.colors.cursor.0.as_str(), 1.0));
+    assert_eq!(
+        cursor_color_from_theme(&theme),
+        hex_to_premultiplied_rgba(theme.colors.cursor.0.as_str(), 1.0)
+    );
     assert_eq!(theme.colors.cursor, theme.colors.tab.active_fg);
 }
 
@@ -1030,7 +1039,7 @@ fn cursor_text_color_uses_theme_cursor_text() {
     let theme = Theme::default();
     assert_eq!(
         cursor_text_color_from_theme(&theme),
-        hex_to_rgba(theme.colors.cursor_text.0.as_str(), 1.0)
+        hex_to_premultiplied_rgba(theme.colors.cursor_text.0.as_str(), 1.0)
     );
     assert_ne!(
         cursor_text_color_from_theme(&theme),

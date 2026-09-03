@@ -82,11 +82,73 @@ fn linear_source_over_lookup_matches_direct_blending() {
     }
 }
 
+/// Malformed Unicode and ASCII hex inputs fall back to black without slicing panics.
 #[test]
 fn malformed_utf8_hex_uses_black_fallback_without_panicking() {
     assert_eq!(hex_to_wgpu_with_alpha("#0é000", 0.5), wgpu::Color::BLACK);
-    assert_eq!(hex_to_rgba("#0é000", 0.5), [0.0, 0.0, 0.0, 0.5]);
+    assert_eq!(hex_to_premultiplied_rgba("#0é000", 0.5), [0.0, 0.0, 0.0, 0.5]);
+    assert_eq!(hex_to_premultiplied_rgba("#zz4020", 0.5), [0.0, 0.0, 0.0, 0.5]);
     assert_eq!(hex_to_chrome_color("#0é000"), ChromeColor::rgb(0, 0, 0));
+}
+
+/// Hex quad colors decode sRGB before multiplying every linear channel by opacity.
+#[test]
+fn hex_quad_color_is_premultiplied_in_linear_light() {
+    let actual = hex_to_premultiplied_rgba("#e04020", 0.5);
+    let expected = [0.372_702_1, 0.025_634_73, 0.007_221_92, 0.5];
+
+    for (actual, expected) in actual.into_iter().zip(expected) {
+        assert!((actual - expected).abs() < 1.0e-7, "actual={actual} expected={expected}");
+    }
+}
+
+/// Hex quad conversion clamps opacity and keeps malformed colors validly premultiplied black.
+#[test]
+fn hex_quad_color_clamps_alpha_and_preserves_black_fallback() {
+    assert_eq!(hex_to_premultiplied_rgba("#ffffff", -1.0), [0.0; 4]);
+    assert_eq!(hex_to_premultiplied_rgba("#ffffff", 2.0), [1.0; 4]);
+    assert_eq!(hex_to_premultiplied_rgba("invalid", 0.25), [0.0, 0.0, 0.0, 0.25]);
+}
+
+/// Representative decoded colors remain valid premultiplied inputs at every common opacity.
+#[test]
+fn hex_quad_colors_satisfy_the_quad_invariant() {
+    for hex in ["#000000", "#123456", "#e04020", "#ffffff"] {
+        for alpha in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            assert!(crate::quad::is_premultiplied_linear_rgba(hex_to_premultiplied_rgba(
+                hex, alpha
+            )));
+        }
+    }
+}
+
+/// Opaque quad conversion and straight-alpha glyph colors retain their established values.
+#[test]
+fn opaque_quads_and_glyph_foregrounds_remain_unchanged() {
+    assert_eq!(
+        hex_to_premultiplied_rgba("#e04020", 1.0),
+        chrome_color_to_linear_rgba(ChromeColor::rgb(0xe0, 0x40, 0x20))
+    );
+    assert_eq!(hex_to_chrome_color("#e04020"), ChromeColor::rgb(0xe0, 0x40, 0x20));
+}
+
+/// Named translucent producers share exact premultiplied source-over output in software.
+#[test]
+fn named_quad_producers_have_exact_software_blend_vectors() {
+    let opaque = hex_to_premultiplied_rgba("#e04020", 1.0);
+    let cases = [
+        ("selection", hex_to_premultiplied_rgba("#e04020", 0.5), [66, 58, 165, 255]),
+        ("url hover", hex_to_premultiplied_rgba("#e04020", 0.9), [41, 63, 214, 255]),
+        ("tofu", crate::quad::with_premultiplied_alpha(opaque, 0.55), [63, 59, 172, 255]),
+        ("tab dimming", crate::quad::with_premultiplied_alpha(opaque, 0.18), [79, 54, 104, 255]),
+        ("drag chip body", crate::quad::with_premultiplied_alpha(opaque, 0.5), [66, 58, 165, 255]),
+    ];
+
+    for (name, source, expected) in cases {
+        let mut background = [0x56, 0x34, 0x12, 0xff];
+        blend_premul_linear_over_srgb_bgra(&mut background, source);
+        assert_eq!(background, expected, "{name}");
+    }
 }
 
 #[test]
