@@ -14,6 +14,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import importlib.util
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -387,6 +388,73 @@ class RepositoryTests(unittest.TestCase):
                 path = _HERE.parent / ".github" / "workflows" / name
                 self.assertTrue(path.exists(), f"{name} does not exist")
                 self.assertIn(f"\n  {job}:\n", path.read_text(encoding="utf-8"))
+
+    def test_main_push_runs_are_unique_and_only_pr_updates_cancel(self):
+        text = (_HERE.parent / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "group: ${{ github.workflow }}-${{ github.event_name }}-"
+            "${{ github.event_name == 'pull_request' && github.ref || github.sha }}",
+            text,
+        )
+        self.assertIn(
+            "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+            text,
+        )
+
+    def test_release_validation_requires_exact_main_ci_and_source_gates(self):
+        text = (_HERE.parent / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        validation = text.split("  validate-release-tag:\n", 1)[1].split(
+            "\n  unit-tests-mac:\n", 1
+        )[0]
+        required = [
+            "actions: read",
+            "fetch-depth: 0",
+            'resolve-commit --revision "$GITHUB_SHA"',
+            'echo "sha=${release_sha}" >> "$GITHUB_OUTPUT"',
+            "RELEASE_SHA: ${{ steps.release-commit.outputs.sha }}",
+            'git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"',
+            'git merge-base --is-ancestor "$RELEASE_SHA" refs/remotes/origin/main',
+            "actions/workflows/ci.yml/runs?branch=main&event=push&status=success&",
+            'head_sha=${RELEASE_SHA}&per_page=100',
+            'check-main-ci --sha "$RELEASE_SHA"',
+            "cargo metadata --no-deps --format-version 1",
+            "cargo fmt --all --check",
+            "cargo clippy --workspace --all-targets -- -D warnings",
+            "cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings",
+            "bash scripts/check-rust-version.sh",
+            "bash scripts/check-workflow-supply-chain.sh",
+            "bash scripts/check-authored-rust-comments.sh",
+            "bash scripts/check-no-raw-process-exit.sh",
+            "bash scripts/check-window-owner-registration.sh",
+            'RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps',
+            'RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-io --no-deps --features ssh',
+        ]
+        for contract in required:
+            with self.subTest(contract=contract):
+                self.assertIn(contract, validation)
+        self.assertIn("timeout-minutes: 135", validation.split("    steps:\n", 1)[0])
+        timed_steps = {
+            "Validate workspace manifests": 2,
+            "Check formatting": 5,
+            "Clippy": 15,
+            "Clippy optional ssh backend": 10,
+            "Run source policy gates": 10,
+            "Check public Rustdoc": 10,
+            "Check optional ssh Rustdoc": 5,
+        }
+        for name, timeout in timed_steps.items():
+            with self.subTest(step=name):
+                block = validation.split(f"      - name: {name}\n", 1)[1]
+                block = block.split("\n      - ", 1)[0]
+                self.assertIn(f"timeout-minutes: {timeout}", block)
+        for job in ("unit-tests-mac", "unit-tests-windows", "unit-tests-linux"):
+            block = text.split(f"  {job}:\n", 1)[1]
+            block = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", block, maxsplit=1)[0]
+            self.assertIn("needs: [validate-release-tag]", block)
 
 
 class CommandLineTests(unittest.TestCase):

@@ -318,8 +318,10 @@ a reproduction.
 ## Release
 
 SonicTerm releases are created by pushing a tag matching
-`v[0-9]+.[0-9]+.[0-9]+*`; the version validator then requires a supported
-semantic version matching every workspace package. The tag workflow builds:
+`v[0-9]+.[0-9]+.[0-9]+*`; validation peels that ref to its commit, then requires
+that exact commit in `main`, a completed successful `CI` push run for it, all
+source-consistency gates, and a supported semantic version matching every
+workspace package. The tag workflow builds:
 
 - macOS Apple Silicon and Intel `.dmg` files
 - Windows x64 `.msi`
