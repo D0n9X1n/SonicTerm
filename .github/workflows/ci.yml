@@ -19,6 +19,7 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: short
   CARGO_INCREMENTAL: 0
+  CARGO_LLVM_COV_VERSION: "0.9.0"
 
 jobs:
   unit-tests:
@@ -187,6 +188,12 @@ jobs:
         timeout-minutes: 5
         run: cargo test -p sonicterm-app --test windows_software_selection_present -- --nocapture
 
+      - name: Test MSI validator
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        shell: pwsh
+        run: .\scripts\validate-windows-msi_tests.ps1
+
       - name: Run release-note unit test
         timeout-minutes: 5
         shell: bash
@@ -242,7 +249,7 @@ jobs:
       - name: Install cargo-llvm-cov
         if: runner.os == 'macOS'
         timeout-minutes: 10
-        run: cargo install cargo-llvm-cov --locked
+        run: cargo install cargo-llvm-cov --version "${{ env.CARGO_LLVM_COV_VERSION }}" --locked
 
       - name: Run Rust logic coverage gate
         if: runner.os == 'macOS'
