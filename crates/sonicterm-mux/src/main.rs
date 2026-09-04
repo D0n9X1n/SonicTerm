@@ -55,6 +55,8 @@ use windows::Win32::{
 #[cfg(unix)]
 const UNIX_SOCKET_MODE: libc::mode_t = 0o600;
 #[cfg(unix)]
+const UNIX_SOCKET_PERMISSION_BITS: u32 = 0o600;
+#[cfg(unix)]
 const UNIX_RUNTIME_DIR_MODE: u32 = 0o700;
 
 #[cfg(target_os = "macos")]
@@ -249,8 +251,10 @@ fn sid_string(bytes: &[u8]) -> Result<String> {
     }
     let authority = bytes[2..8].iter().fold(0u64, |value, byte| (value << 8) | u64::from(*byte));
     let mut sid = format!("S-{revision}-{authority}");
-    for chunk in bytes[8..].chunks_exact(4) {
-        let value = u32::from_le_bytes(chunk.try_into().expect("four-byte SID subauthority"));
+    let (subauthorities, remainder) = bytes[8..].as_chunks::<4>();
+    debug_assert!(remainder.is_empty(), "validated SID length is four-byte aligned");
+    for chunk in subauthorities {
+        let value = u32::from_le_bytes(*chunk);
         sid.push('-');
         sid.push_str(&value.to_string());
     }
@@ -458,7 +462,7 @@ fn bind_unix_listener(path: &Path) -> Result<Listener> {
                 .name(name)
                 .create_sync()
                 .with_context(|| format!("bind mux endpoint {}", path.display()))?;
-            let permissions = std::fs::Permissions::from_mode(UNIX_SOCKET_MODE.into());
+            let permissions = std::fs::Permissions::from_mode(UNIX_SOCKET_PERMISSION_BITS);
             if let Err(error) = std::fs::set_permissions(path, permissions) {
                 drop(listener);
                 return Err(error)
