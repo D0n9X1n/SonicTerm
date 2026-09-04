@@ -478,6 +478,16 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("CI_CACHE_NAMESPACE: ci-v2", release)
         self.assertIn("key: ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-", release)
 
+    def test_linux_core_installs_gpu_runtime_dependencies(self):
+        text = (_HERE.parent / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        core = text.split("  linux-core:\n", 1)[1]
+        core = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", core, maxsplit=1)[0]
+        for dependency in ("mesa-vulkan-drivers", "libvulkan1"):
+            with self.subTest(dependency=dependency):
+                self.assertIn(dependency, core)
+
     def test_workspace_tests_cover_unit_and_integration_targets_once(self):
         script = (_HERE.parent / "scripts" / "check-workspace-crates.sh").read_text(
             encoding="utf-8"

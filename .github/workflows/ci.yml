@@ -531,7 +531,8 @@ jobs:
           apt-get install -y --no-install-recommends \
             ca-certificates curl git build-essential pkg-config python3 \
             libcairo2-dev libfontconfig1-dev libwayland-dev libx11-dev \
-            libxcb1-dev libxkbcommon-dev libxkbcommon-x11-0
+            libxcb1-dev libxkbcommon-dev libxkbcommon-x11-0 \
+            mesa-vulkan-drivers libvulkan1
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 5
