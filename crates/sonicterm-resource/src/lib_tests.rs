@@ -511,6 +511,59 @@ fn committed_transfer_failure_returns_original_charge() {
     drop(error.reservation);
 }
 
+/// A later-class rejection leaves an entire committed batch at its source.
+///
+/// `GridVisible` fits the target while `GridHistory` does not, so a loop of
+/// single-token transfers would partially move this map before discovering the
+/// rejection. The batch must validate every class before moving any of them.
+#[test]
+fn committed_batch_transfer_is_atomic_across_classes() {
+    let governor = governor(100);
+    let root = governor.root_owner();
+    let source_window = governor.create_child(root, OwnerKind::Window, owner_limits(100)).unwrap();
+    let target_window = governor.create_child(root, OwnerKind::Window, owner_limits(100)).unwrap();
+    let source =
+        governor.create_child(source_window, OwnerKind::AppPane, owner_limits(100)).unwrap();
+    let target_limits = OwnerLimits {
+        owner_bytes: 100,
+        class_bytes: enum_map! {
+            ResourceClass::GridHistory => 5,
+            _ => 100,
+        },
+        class_items: enum_map! { _ => Some(100) },
+    };
+    let target = governor.create_child(target_window, OwnerKind::AppPane, target_limits).unwrap();
+    let mut charges = [
+        governor
+            .try_reserve(source, ResourceClass::GridVisible, ResourceAmount { bytes: 8, items: 1 })
+            .unwrap()
+            .commit(ResourceAmount { bytes: 8, items: 1 })
+            .unwrap(),
+        governor
+            .try_reserve(source, ResourceClass::GridHistory, ResourceAmount { bytes: 8, items: 1 })
+            .unwrap()
+            .commit(ResourceAmount { bytes: 8, items: 1 })
+            .unwrap(),
+    ];
+    let before = governor.snapshot(root).unwrap();
+
+    assert!(CommittedReservation::transfer_batch(&mut charges, target).is_err());
+
+    let source_after = governor.snapshot(source).unwrap();
+    let target_after = governor.snapshot(target).unwrap();
+    let root_after = governor.snapshot(root).unwrap();
+    assert_eq!(source_after.owner_amount, ResourceAmount { bytes: 16, items: 2 });
+    assert_eq!(source_after.owner_class_bytes[ResourceClass::GridVisible], 8);
+    assert_eq!(source_after.owner_class_bytes[ResourceClass::GridHistory], 8);
+    assert_eq!(target_after.owner_amount, ResourceAmount::default());
+    assert_eq!(root_after.process_amount, before.process_amount);
+    assert_eq!(root_after.process_class_bytes, before.process_class_bytes);
+
+    governor.begin_close(target).unwrap();
+    governor.finish_close(target).unwrap();
+    drop(charges);
+}
+
 #[test]
 fn concurrent_create_and_close_never_installs_child_after_closing() {
     for _ in 0..64 {

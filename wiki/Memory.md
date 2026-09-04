@@ -75,10 +75,14 @@ close requires zero live children and charges.
 
 A window and its owner are inserted as one operation. Panes are reconciled under
 their actual window on pane creation and every 30 s retention pass. Tab transfer
-reattributes pane ownership to the destination window and closes the old pane
-owner. If window registration fails, the window remains usable but its subtree
-is omitted from hierarchy accounting. If pane registration fails, a later
-reconcile can retry it while the window has an owner.
+creates a pane owner below the destination window, moves every existing committed
+class charge to it as one atomic batch, swaps the pane's owner guard, then closes
+the empty source owner. Process and per-class totals therefore stay unchanged,
+and a contended parser cannot leave the moved pane temporarily uncharged. A
+rejected batch leaves every charge on the source owner and removes the empty
+provisional owner. If window registration fails, the window remains usable but
+its subtree is omitted from hierarchy accounting. If pane registration fails, a
+later reconcile can retry it while the window has an owner.
 
 ### Enforcement and the pane tripwire
 
@@ -306,9 +310,12 @@ flowchart TD
 和新预留，最终关闭要求没有存活子节点和记账额。
 
 窗口插入与其所有者注册是同一个操作。窗格创建时和每次 30 s 保留量扫描时，都会把窗格
-协调到实际窗口下面。标签页转移会把窗格所有权重新归到目标窗口，并关闭旧窗格所有者。
-若窗口注册失败，窗口仍可使用，但整个子树不会出现在层级记账中。若窗格注册失败，只要
-窗口已有所有者，之后的协调扫描仍可重试。
+协调到实际窗口下面。标签页转移会先在目标窗口下创建窗格所有者，把全部现有的已提交分类
+计费作为一个原子批次移给它，再替换窗格的所有者守卫并关闭已清空的源所有者。因此进程总量
+和各分类总量都保持不变，即使解析器锁正被占用，已移动窗格也不会暂时变成未计费状态。批次
+被拒绝时，全部计费仍精确留在源所有者上，并移除空的临时所有者。若窗口注册失败，窗口仍可
+使用，但整个子树不会出现在层级记账中。若窗格注册失败，只要窗口已有所有者，之后的协调
+扫描仍可重试。
 
 ### 限制执行与窗格绊线
 

@@ -73,7 +73,13 @@ failed new charge leaves that class absent and writes a `memory` debug record.
 
 A pane owns one `CommittedReservation` per charged `ResourceClass`. A charge is
 resized in place with `try_grow` or `shrink`; it is not released and recreated
-between samples.
+between samples. Owner reattribution passes the complete charge set to
+`CommittedReservation::transfer_batch`. Every token must share one ledger and
+source owner; the batch preserves classes and validates all source balances,
+target states, and target limits under one ordered lock set before mutation.
+Success changes owner-path accounting and token owner ids without changing
+process or per-class totals. Failure leaves every token and ledger shard at the
+source.
 
 Close order is load-bearing:
 
@@ -410,7 +416,11 @@ Process
 缺失，并写一条 `memory` debug 记录。
 
 窗格为每个已计费的 `ResourceClass` 持有一个 `CommittedReservation`。计费通过
-`try_grow` 或 `shrink` 原地调整，不会在两次采样之间先释放再重新创建。
+`try_grow` 或 `shrink` 原地调整，不会在两次采样之间先释放再重新创建。重新归属所有者时，
+代码把完整计费集合交给 `CommittedReservation::transfer_batch`。每个令牌必须属于同一账本和
+同一源所有者；批次会保留分类，并在修改前用一套有序锁完整验证源余额、目标状态和目标上限。
+成功时只修改所有者路径记账和令牌所有者 id，不改变进程总量或各分类总量；失败时全部令牌和
+账本分片都精确保留在源端。
 
 关闭顺序不能改变：
 

@@ -507,6 +507,155 @@ impl Ledger {
         self.release_failures.fetch_add(1, Ordering::AcqRel);
     }
 
+    // Lock order: affected classes sorted by ResourceClass -> usage sorted by
+    // owner id; target state precedes both, while source state stays unlocked.
+    pub(crate) fn transfer_batch(
+        &self,
+        source_owner: ResourceOwnerId,
+        target_owner: ResourceOwnerId,
+        amounts: &EnumMap<ResourceClass, ResourceAmount>,
+    ) -> Result<(), BudgetError> {
+        let source_path = self.path(source_owner)?;
+        let target_path = self.path(target_owner)?;
+        let _target_states = Self::validate_state_path(&target_path)?;
+        if source_owner == target_owner {
+            // When: `source_owner == target_owner`, target-path validation is the
+            // only effect required and every charge remains correctly attributed.
+            return Ok(());
+        }
+
+        let affected_classes: Vec<_> = amounts
+            .iter()
+            .filter_map(|(class, amount)| (!amount.is_zero()).then_some(class))
+            .collect();
+        let total =
+            affected_classes.iter().try_fold(ResourceAmount::default(), |total, class| {
+                total.checked_add(amounts[*class])
+            })?;
+        let mut records: Vec<_> = source_path.iter().chain(target_path.iter()).cloned().collect();
+        records.sort_by_key(|record| record.id);
+        records.dedup_by_key(|record| record.id);
+        let accounting_records = Self::usage_records(&records);
+        let class_guards: Vec<_> =
+            affected_classes.iter().map(|class| self.classes[*class].lock()).collect();
+        let mut owner_guards: Vec<_> =
+            accounting_records.iter().map(|record| record.usage.lock()).collect();
+        let source_ids: std::collections::HashSet<_> =
+            source_path.iter().map(|record| record.id).collect();
+        let target_ids: std::collections::HashSet<_> =
+            target_path.iter().map(|record| record.id).collect();
+        let invariant_class =
+            affected_classes.first().copied().unwrap_or(ResourceClass::RegistryMetadata);
+
+        for (record, usage) in accounting_records.iter().zip(owner_guards.iter()) {
+            let in_source = source_ids.contains(&record.id);
+            let in_target = target_ids.contains(&record.id);
+            if in_source && !in_target && !total.component_le(usage.amount) {
+                // When: `in_source && !in_target` and `total` exceeds `usage.amount`,
+                // reject before any class or owner shard is changed.
+                return Err(BudgetError::AccountingInvariant {
+                    owner: source_owner,
+                    class: invariant_class,
+                });
+            }
+            if in_target && !in_source {
+                Self::validate_limit(
+                    BudgetScope::Owner(record.id),
+                    BudgetDimension::Bytes,
+                    usage.amount.bytes,
+                    total.bytes,
+                    record.limits.owner_bytes,
+                )?;
+                usage.amount.items.checked_add(total.items).ok_or(BudgetError::Overflow)?;
+            }
+
+            for class in &affected_classes {
+                let amount = amounts[*class];
+                let source_bytes = if in_source { amount.bytes } else { 0 };
+                let source_items = if in_source { amount.items } else { 0 };
+                let target_bytes = if in_target { amount.bytes } else { 0 };
+                let target_items = if in_target { amount.items } else { 0 };
+                let bytes_after_source =
+                    usage.class_bytes[*class].checked_sub(source_bytes).ok_or(
+                        BudgetError::AccountingInvariant { owner: source_owner, class: *class },
+                    )?;
+                let items_after_source =
+                    usage.class_items[*class].checked_sub(source_items).ok_or(
+                        BudgetError::AccountingInvariant { owner: source_owner, class: *class },
+                    )?;
+                if in_target {
+                    // When: `in_target`, validate the class after subtracting any
+                    // shared source-path amount and before mutating either path.
+                    Self::validate_limit(
+                        BudgetScope::OwnerClass { owner: record.id, class: *class },
+                        BudgetDimension::Bytes,
+                        bytes_after_source,
+                        target_bytes,
+                        record.limits.class_bytes[*class],
+                    )?;
+                    let target_item_total = items_after_source
+                        .checked_add(target_items)
+                        .ok_or(BudgetError::Overflow)?;
+                    if let Some(limit) = record.limits.class_items[*class] {
+                        // When: `record.limits.class_items[*class]` is `Some(limit)`,
+                        // enforce that optional item ceiling for this target path.
+                        if target_item_total > limit {
+                            // When: `target_item_total > limit`, reject while all
+                            // guards still protect unchanged shards.
+                            return Err(BudgetError::LimitExceeded {
+                                scope: BudgetScope::OwnerClass { owner: record.id, class: *class },
+                                dimension: BudgetDimension::Items,
+                                current: items_after_source,
+                                requested: target_items,
+                                limit,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        for (class, usage) in affected_classes.iter().zip(class_guards.iter()) {
+            let amount = amounts[*class];
+            if usage.bytes < amount.bytes || usage.items < amount.items {
+                // When: `usage.bytes < amount.bytes` or `usage.items < amount.items`,
+                // reject before owner attribution is modified.
+                return Err(BudgetError::AccountingInvariant {
+                    owner: source_owner,
+                    class: *class,
+                });
+            }
+        }
+
+        for (record, usage) in accounting_records.iter().zip(owner_guards.iter_mut()) {
+            let in_source = source_ids.contains(&record.id);
+            let in_target = target_ids.contains(&record.id);
+            for class in &affected_classes {
+                let amount = amounts[*class];
+                if in_source {
+                    usage.class_bytes[*class] -= amount.bytes;
+                    usage.class_items[*class] -= amount.items;
+                }
+                if in_target {
+                    usage.class_bytes[*class] += amount.bytes;
+                    usage.class_items[*class] += amount.items;
+                }
+            }
+            if in_source && !in_target {
+                usage.amount =
+                    usage.amount.checked_sub(total).expect("prevalidated batch source amount");
+            }
+            if in_target && !in_source {
+                usage.amount =
+                    usage.amount.checked_add(total).expect("prevalidated batch target amount");
+            }
+            if in_source || in_target {
+                usage.epoch = usage.epoch.wrapping_add(1);
+            }
+        }
+        Ok(())
+    }
+
     // Lock order: classes sorted by ResourceClass -> usage sorted by owner id;
     // target state precedes both, while source state stays unlocked for transfer-out.
     pub(crate) fn transfer(
