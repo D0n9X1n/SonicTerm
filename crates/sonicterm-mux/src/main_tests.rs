@@ -245,12 +245,17 @@ mod unix {
         let socket = scratch.path().join("mux.sock");
         let stale = std::os::unix::net::UnixListener::bind(&socket).unwrap();
         drop(stale);
-        let before = fs::symlink_metadata(&socket).unwrap();
+        assert_eq!(
+            std::os::unix::net::UnixStream::connect(&socket).unwrap_err().kind(),
+            std::io::ErrorKind::ConnectionRefused
+        );
 
         let listener = bind_unix_listener(&socket).unwrap();
         let after = fs::symlink_metadata(&socket).unwrap();
 
-        assert_ne!((after.dev(), after.ino()), (before.dev(), before.ino()));
+        assert!(std::os::unix::net::UnixStream::connect(&socket).is_ok());
+        assert!(after.file_type().is_socket());
+        assert_eq!(after.permissions().mode() & 0o777, 0o600);
         drop(listener);
     }
 }

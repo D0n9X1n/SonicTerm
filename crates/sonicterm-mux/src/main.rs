@@ -283,8 +283,9 @@ fn current_windows_user_sid() -> Result<String> {
     let token = TokenHandle(token);
 
     let mut required = 0u32;
-    // SAFETY: the zero-length probe writes only the required byte count while `token` remains live.
-    let _ = unsafe { GetTokenInformation(token.0, TokenUser, None, 0, &mut required) };
+    let _ =
+        // SAFETY: the zero-length probe writes only the required byte count while `token` remains live.
+        unsafe { GetTokenInformation(token.0, TokenUser, None, 0, &mut required) };
     if required < std::mem::size_of::<TOKEN_USER>() as u32 {
         bail!("Windows returned an invalid token-user length");
     }
@@ -300,8 +301,9 @@ fn current_windows_user_sid() -> Result<String> {
             &mut required,
         )?;
     }
-    // SAFETY: successful `TokenUser` output starts with an aligned initialized `TOKEN_USER` value.
-    let token_user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+    let token_user =
+        // SAFETY: successful `TokenUser` output starts with an aligned initialized `TOKEN_USER` value.
+        unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
     let sid = token_user.User.Sid;
     if sid.is_invalid() {
         bail!("Windows returned a null user SID");
@@ -312,8 +314,9 @@ fn current_windows_user_sid() -> Result<String> {
     if length == 0 || length > required as usize {
         bail!("Windows returned an invalid user SID length");
     }
-    // SAFETY: `GetLengthSid` reports the readable byte extent of `sid` inside the live response buffer.
-    let bytes = unsafe { std::slice::from_raw_parts(sid.0.cast::<u8>(), length) };
+    let bytes =
+        // SAFETY: `GetLengthSid` reports the readable byte extent of `sid` inside the live response buffer.
+        unsafe { std::slice::from_raw_parts(sid.0.cast::<u8>(), length) };
     sid_string(bytes)
 }
 
