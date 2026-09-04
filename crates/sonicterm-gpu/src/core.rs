@@ -1242,6 +1242,11 @@ fn atlas_evicted_during_frame(frame_epoch: u64, atlas: &GlyphAtlas) -> bool {
     atlas.evictions() != frame_epoch
 }
 
+#[must_use]
+fn row_cache_atlas_identity(atlas: &GlyphAtlas) -> u64 {
+    atlas.identity()
+}
+
 fn atlas_texture_rebuild_required(current: (u32, u32), next: (u32, u32)) -> bool {
     current != next
 }
@@ -5045,12 +5050,12 @@ impl GpuRenderer {
                     // the row cache, so unrelated rows keep replaying.
                     let row_hovered_url = hovered_url_for_pane_row(pane_hovered_url, pv.pane_id, r);
                     let key = hovered_url_row_cache_key(key, row_hovered_url, r);
-                    let atlas_epoch = self.glyph_atlas.evictions();
+                    let atlas_identity = row_cache_atlas_identity(&self.glyph_atlas);
                     if let Some(cached) =
-                        self.row_glyph_cache.get(pane_id, row_abs, key, atlas_epoch)
+                        self.row_glyph_cache.get(pane_id, row_abs, key, atlas_identity)
                     {
                         // When: `row_glyph_cache.get` is Some — the row hash and
-                        // atlas epoch both match, so shaped glyphs are reusable.
+                        // atlas identity both match, so shaped glyphs are reusable.
                         glyph_instances.extend_from_slice(&cached.glyphs);
                         for run in &cached.underlines {
                             underlines.push((pad, top_inset, grid.cols, r, *run));
@@ -5239,7 +5244,7 @@ impl GpuRenderer {
                         pane_id,
                         row_abs,
                         key,
-                        self.glyph_atlas.evictions(),
+                        row_cache_atlas_identity(&self.glyph_atlas),
                         sonicterm_text::row_glyph_cache::CachedRow {
                             glyphs: row_glyphs,
                             underlines: row_underlines,

@@ -8,7 +8,8 @@ terminal/UI glyphs.
 ## Key files
 - `core.rs` - renderer owner, frame assembly, surface lifecycle.
 - `quad.rs` - cursor, selection, underline, pane border, and UI quads.
-- `text_pipeline.rs` - glyph instance text draws via the shared atlas.
+- `wezterm_pipeline.rs` - production glyph and geometry presentation via the shared atlas.
+- `text_pipeline.rs` - legacy alpha-only compatibility pipeline.
 - `atlas_upload.rs` - glyph atlas uploads.
 - `row_quad_cache.rs` - row background/quad caching.
 - `chrome_text.rs`, `cursor.rs`, `color.rs` - UI text/cursor/color helpers.
@@ -22,6 +23,8 @@ cargo build -p sonicterm-gpu
 - `core.rs` and `text_pipeline.rs` are hot files; keep changes narrow.
 - Preserve per-cell foreground/background, inverse, underline, and 256-color
   semantics when moving data through the renderer.
+- Row glyph cache reads and writes use the atlas content identity; eviction
+  counts remain diagnostic and must not become UV-bearing cache keys.
 - Multi-row hover fragments share one frame-key identity and one underline pass.
   Active recolor salts only the intersecting row cache key; hint-only fragments
   reuse ordinary glyph rows, and offscreen or out-of-column spans emit nothing.

@@ -2,7 +2,7 @@
 //!
 //! Every chrome string — tab titles, search input, palette query/rows/footer,
 //! IME preedit, broadcast banner, drag-chip title — flows through the same
-//! `FontStack` raster path, `GlyphAtlas`, and `TextPipeline` the terminal grid
+//! `FontStack` raster path, `GlyphAtlas`, and `WeztermPipeline` the terminal grid
 //! uses. One font system, one atlas, one render pass: chrome and grid text
 //! cannot drift apart in shaping, hinting, or colour handling, and a glyph
 //! rasterized for either is already warm for the other.
@@ -14,8 +14,8 @@
 //!    style, glyph, and native-raster-role identity. Body, footer, and tab-title
 //!    tiles coexist in one atlas without sharing differently sized bitmaps.
 //! 3. `GlyphInstance` records are pushed into a caller-owned `Vec`;
-//!    the caller hands the vec to the existing
-//!    [`crate::text_pipeline::TextPipeline`] for the draw call.
+//!    the caller hands the vec to the production
+//!    [`crate::wezterm_pipeline::WeztermPipeline`] for the draw call.
 //!
 //! The chrome ride-shares the terminal text pipeline: a separate vec, the
 //! same pipeline, so no extra wgpu binding setup, render pass, or shader.
@@ -42,7 +42,7 @@ mod chrome_text_tests;
 /// Result of laying out a chrome text run into atlas glyph instances.
 ///
 /// `glyphs` is ready to be appended to the caller's `Vec<GlyphInstance>`
-/// before it is handed to [`crate::text_pipeline::TextPipeline::draw`].
+/// before it is handed to [`crate::wezterm_pipeline::WeztermPipeline`].
 /// `width_px` / `height_px` are the raster-px bounding box (origin
 /// inclusive) of the laid-out text — useful for centering / right-align
 /// callers that need to know where the run ended.
@@ -116,7 +116,7 @@ pub struct ChromeAttrs {
 ///   modal (palette, IME). Pass `None` for tab titles / drag chip.
 ///
 /// Returns a [`ChromeTextLayout`] whose `glyphs` are ready for
-/// `text_pipeline.draw(...)`.
+/// [`crate::wezterm_pipeline::WeztermPipeline::draw_frame`].
 #[allow(clippy::too_many_arguments)]
 pub fn layout(
     font_stack: &FontStack,
@@ -441,7 +441,7 @@ fn layout_with_raster_variant_impl(
 
 /// Convert a `(x, y, w, h)` rect in raster pixels (origin top-left,
 /// y-down) into the NDC quad `[x0, y0, w_ndc, h_ndc]` the
-/// [`crate::text_pipeline::TextPipeline`] WGSL expects. Must match
+/// [`crate::wezterm_pipeline::WeztermPipeline`] WGSL expects. Must match
 /// `quad::px_to_ndc` byte-for-byte — the text shader interprets
 /// `rect.y` as the BOTTOM corner of the quad in NDC (smaller NDC y) and
 /// `rect.w` as a positive upward extent, because its UV mix uses
