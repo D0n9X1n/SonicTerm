@@ -592,55 +592,66 @@ impl App {
     }
 
     fn drain_pending_tear_out(&mut self, el: &ActiveEventLoop, req: crate::app::PendingTearOut) {
+        self.drain_pending_tear_out_with_installer(req, |app, transaction, screen_pos, source| {
+            app.install_torn_out_window(el, transaction, screen_pos, source)
+        });
+    }
+
+    /// Run a deferred tear-out with only destination installation injected.
+    pub(super) fn drain_pending_tear_out_with_installer<I>(
+        &mut self,
+        req: crate::app::PendingTearOut,
+        install: I,
+    ) where
+        I: FnOnce(
+            &mut App,
+            super::tear_out::DetachedTab,
+            Option<(i32, i32)>,
+            &'static str,
+        ) -> Option<WindowId>,
+    {
         let source_is_main = Some(req.source_window) == self.main_window_id;
         let source_tab_idx = match self.resolve_tear_out_source_index(&req) {
             Some(idx) => idx,
             None => {
-                // When: resolve_tear_out_source_index cannot find the recorded tab
-                // id; abandon rather than tear out whichever tab inherited the slot.
+                // When: `resolve_tear_out_source_index` returns `None`, abandon
+                // rather than tear out whichever tab inherited the old slot.
                 tracing::warn!(
                     source = ?req.source_window,
                     recorded_idx = req.source_tab_idx,
-                    "drain_pending_tear_out: the dragged tab closed before the drop"
+                    "deferred tear-out source tab closed before the drop"
                 );
                 return;
             }
         };
-        let detached = if source_is_main {
-            self.detach_tab_state(source_tab_idx)
+        let source = if source_is_main {
+            super::tear_out::TearOutSource::Main(req.source_window)
         } else {
-            // When: source_is_main is false; the drag began in a child window, so
-            // detach from that child's tab list rather than the main window's.
-            self.detach_from_child(req.source_window, source_tab_idx)
+            // When: `source_is_main` is false, retain the child identity so
+            // rollback cannot restore this transaction into the main window.
+            super::tear_out::TearOutSource::Child(req.source_window)
         };
-        let Some((tab, state, panes)) = detached else {
-            // When: detached is None; the source tab vanished between resolving its
-            // index and detaching it, so there is nothing to install.
+        let Some(transaction) = self.detach_for_tear_out(source, source_tab_idx) else {
+            // When: the source vanished after identity resolution, no payload
+            // remains to install or restore.
             tracing::warn!(
                 source = ?req.source_window,
                 idx = source_tab_idx,
-                "drain_pending_tear_out: source tab no longer exists"
+                "deferred tear-out source tab no longer exists"
             );
             return;
         };
-        let source = if source_is_main { "main" } else { "child" };
-        if self
-            .install_torn_out_window(el, tab, state, panes, req.drop_screen_pos, source)
-            .is_none()
-        {
-            // When: install_torn_out_window failed after consuming tab, state, and
-            // panes, so those shells are already dropped; only a child gets repaired.
-            tracing::warn!(source = ?req.source_window, "drain_pending_tear_out: install failed");
-            if !source_is_main {
-                self.tear_out_apply_child_source_side(req.source_window, source_tab_idx);
-            }
+        let source_label = if source_is_main { "main" } else { "child" };
+        if install(self, transaction, req.drop_screen_pos, source_label).is_none() {
+            // When: installation failed, the transaction has already restored
+            // its source; success-only source cleanup must not run.
             return;
         }
         if source_is_main {
             self.tear_out_apply_source_side(source_tab_idx);
         } else {
-            // When: source_is_main is false; repair the child the tab left, reaping
-            // it when empty and otherwise activating the removed slot's neighbour.
+            // When: `source_is_main` is false after commit, apply the child
+            // source policy, which reaps only when no tabs remain.
             self.tear_out_apply_child_source_side(req.source_window, source_tab_idx);
         }
         tracing::info!(
