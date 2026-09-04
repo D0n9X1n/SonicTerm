@@ -4,7 +4,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU32, AtomicU64, Ordering},
         Arc,
@@ -1885,8 +1885,8 @@ pub fn refresh_active_tab_title(
 
 /// Loader callback type used by the platform shell to reload a theme by name.
 pub type ThemeLoader = Box<dyn Fn(&str) -> Result<Theme> + Send + 'static>;
-/// Loader callback type used by the platform shell to reload a keymap by name.
-pub type KeymapLoader = Box<dyn Fn(&str) -> Result<Keymap> + Send + 'static>;
+/// Loader callback type used by the platform shell to reload a resolved keymap path.
+pub type KeymapLoader = Box<dyn Fn(&Path) -> Result<Keymap> + Send + 'static>;
 
 /// Custom user events delivered through [`EventLoopProxy`].
 ///

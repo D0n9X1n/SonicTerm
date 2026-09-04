@@ -225,8 +225,7 @@ fn run_linux(mode: StartupMode) -> Result<i32> {
     let keymap = load_keymap(&config.keymap);
     let theme_loader: sonicterm_app::ThemeLoader =
         Box::new(|name| Theme::load_name_or_path(name, &asset_dir()));
-    let keymap_loader: sonicterm_app::KeymapLoader =
-        Box::new(|name| Keymap::load_name_or_path(name, &asset_dir()));
+    let keymap_loader: sonicterm_app::KeymapLoader = Box::new(Keymap::load_strict);
     let machine = sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default());
     let process_privilege = detect_process_privilege();
     tracing::info!(privileged = process_privilege.is_privileged(), "process privilege observed");

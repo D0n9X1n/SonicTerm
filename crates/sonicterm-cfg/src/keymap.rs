@@ -163,39 +163,83 @@ pub struct Meta {
     pub version: String,
 }
 
+/// True when `keymap` is an explicit filesystem path rather than a logical name.
+///
+/// Drive-letter and separator shapes are recognized on every host so a portable
+/// config classifies identically cross-platform. Only a case-insensitive `.toml`
+/// suffix makes an extension a path, keeping names such as `sonicterm-v1.2` logical.
+fn keymap_looks_like_path(keymap: &str) -> bool {
+    let bytes = keymap.as_bytes();
+    Path::new(keymap).is_absolute()
+        || keymap.contains(['/', '\\'])
+        || bytes.get(1) == Some(&b':') && bytes.first().is_some_and(u8::is_ascii_alphabetic)
+        || keymap.to_ascii_lowercase().ends_with(".toml")
+}
+
 impl Keymap {
-    /// Resolve a keymap name or path.
+    /// Resolve a keymap name or path, creating the portable `user` alias if needed.
     ///
     /// Resolution order:
-    /// 1. direct path if `keymap` looks like a path,
-    /// 2. user config dir: `<config-dir>/keymaps/<keymap>.toml`,
-    /// 3. bundled assets: `<asset-dir>/keymaps/<keymap>.toml`.
-    pub fn resolve_path(keymap: &str, asset_dir: &Path) -> PathBuf {
-        let raw = Path::new(keymap);
-        if raw.is_absolute() || raw.extension().is_some() || raw.components().count() > 1 {
-            // When: raw already looks like a path, so it is used verbatim and
-            // neither directory is searched.
-            return raw.to_path_buf();
+    /// 1. `user`: the editable platform-default keymap under the user config dir,
+    /// 2. explicit path: absolute, separator-bearing, drive-qualified, or `.toml`,
+    /// 3. user config dir: `<config-dir>/keymaps/<keymap>.toml`,
+    /// 4. bundled assets: `<asset-dir>/keymaps/<keymap>.toml`.
+    pub fn resolve_path(keymap: &str, asset_dir: &Path) -> Result<PathBuf> {
+        Self::resolve_path_with(keymap, asset_dir, crate::config::default_config_dir().as_deref())
+    }
+
+    fn resolve_path_with(
+        keymap: &str,
+        asset_dir: &Path,
+        user_config_dir: Option<&Path>,
+    ) -> Result<PathBuf> {
+        if keymap == "user" {
+            // When: `keymap == "user"`, resolve the portable alias to this
+            // host's editable platform-default file and create it if absent.
+            let config_dir = user_config_dir
+                .ok_or_else(|| anyhow::anyhow!("no user config directory for keymap alias"))?;
+            let path =
+                config_dir.join("keymaps").join(format!("{}.toml", platform_default_keymap_name()));
+            ensure_user_keymap_file(&path)
+                .with_context(|| format!("seed user keymap alias at {}", path.display()))?;
+            return Ok(path);
         }
-        if let Some(user) = crate::config::default_config_dir()
+
+        let raw = Path::new(keymap);
+        if keymap_looks_like_path(keymap) {
+            // When: `keymap_looks_like_path(keymap)` is true, preserve the
+            // explicit path and its process-CWD anchor when relative.
+            return Ok(raw.to_path_buf());
+        }
+        if let Some(user) = user_config_dir
             .map(|dir| dir.join("keymaps").join(format!("{keymap}.toml")))
             .filter(|path| path.exists())
         {
-            // When: a keymap of this name exists under the user config dir, it
-            // takes precedence over the bundled asset copy.
-            return user;
+            // When: the user keymap exists, it overrides the bundled file with
+            // the same logical name.
+            return Ok(user);
         }
-        asset_dir.join("keymaps").join(format!("{keymap}.toml"))
+        Ok(asset_dir.join("keymaps").join(format!("{keymap}.toml")))
     }
 
     /// Strict load from a keymap name or path using [`Self::resolve_path`].
     pub fn load_name_or_path(keymap: &str, asset_dir: &Path) -> Result<Self> {
-        Self::load_strict(&Self::resolve_path(keymap, asset_dir))
+        let path = Self::resolve_path(keymap, asset_dir)?;
+        Self::load_strict(&path)
     }
 
     /// Infallible name/path loader. Falls back to bundled platform default.
     pub fn load_name_or_default(keymap: &str, asset_dir: &Path) -> Self {
-        Self::load_or_default(&Self::resolve_path(keymap, asset_dir))
+        match Self::load_name_or_path(keymap, asset_dir) {
+            Ok(keymap) => keymap,
+            Err(error) => {
+                tracing::warn!(
+                    target: "sonicterm-cfg",
+                    "keymap {keymap:?} failed: {error:#}; falling back to platform defaults"
+                );
+                Self::default()
+            }
+        }
     }
 
     /// Load a keymap from a TOML file at `path`, resiliently.
