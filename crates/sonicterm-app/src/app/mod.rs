@@ -29,7 +29,7 @@ use winit::{
     application::ApplicationHandler,
     event::{InnerSizeWriter, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoopProxy},
-    keyboard::ModifiersState,
+    keyboard::{ModifiersState, PhysicalKey},
     window::{Window, WindowAttributes, WindowId},
 };
 
@@ -1021,6 +1021,9 @@ pub struct WindowState {
     pub select_anchor: (u64, u16),
     pub copy_mode: Option<CopyModeState>,
     pub modifiers: ModifiersState,
+    /// Physical keys whose press reached the PTY and may therefore emit a
+    /// matching Kitty release event instead of an orphaned release.
+    pub pty_pressed_keys: HashMap<PhysicalKey, u64>,
     // `cursor_visible` lives on `PaneState`, not here: its per-pane Arc travels
     // with the pane through tear-out. Read it via
     // `ws.panes.get(&active_pane).map(|p| p.cursor_visible.load(...))`.
@@ -2173,13 +2176,10 @@ pub struct PaneState {
     /// thread while parsing output, so blocking on it added input latency
     /// whenever output was streaming. Init 0 (legacy encoding).
     pub kitty_flags: Arc<std::sync::atomic::AtomicU8>,
-    /// Per-pane DECCKM (?1, application cursor keys) snapshot, mirrored out
-    /// of the parser by the VT loop so the keypress path reads it lock-free
-    /// (same rationale as `kitty_flags`,). When `true`, arrows /
-    /// Home / End encode with the SS3 introducer (`ESC O x`) instead of CSI
-    /// so terminfo-driven apps (zsh ZLE, readline, vim, less) recognize them
-    /// . Init `false` (normal cursor keys → CSI).
-    pub app_cursor_keys: Arc<std::sync::atomic::AtomicBool>,
+    /// Per-pane packed VT keyboard modes, mirrored out of the parser so the
+    /// input path can honor cursor, keypad, Backspace, Enter, and xterm modes
+    /// without taking the parser lock. Init 0 (all normal modes).
+    pub keyboard_modes: Arc<std::sync::atomic::AtomicU8>,
     /// Decoded inline media images captured from terminal protocols.
     pub inline_images: Arc<Mutex<Vec<sonicterm_render_model::InlineImage>>>,
     /// This pane's share of the process-wide inline-media total.
@@ -2221,7 +2221,7 @@ impl PaneState {
             command_events: Arc::new(Mutex::new(Vec::new())),
             cursor_visible: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             kitty_flags: Arc::new(std::sync::atomic::AtomicU8::new(0)),
-            app_cursor_keys: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            keyboard_modes: Arc::new(std::sync::atomic::AtomicU8::new(0)),
             inline_images: Arc::new(Mutex::new(Vec::new())),
             inline_media_charge: media::new_inline_media_charge(),
         }
@@ -3441,7 +3441,7 @@ impl App {
     /// The production child handler drains `pending_new_window` immediately
     /// after `run_action`; this helper exposes the same post-dispatch state
     /// without requiring a live `ActiveEventLoop`.
-    // Ordering: `kitty_flags` and `app_cursor_keys` both load `Relaxed`; each is a
+    // Ordering: `kitty_flags` and `keyboard_modes` both load `Relaxed`; each is a
     // self-contained pane flag whose read is ordered against no other location.
     #[doc(hidden)]
     pub fn __test_dispatch_key_or_encode_pty_with_drain(
@@ -3473,11 +3473,20 @@ impl App {
             .active_pane()
             .map(|pane| pane.kitty_flags.load(std::sync::atomic::Ordering::Relaxed))
             .unwrap_or(0);
-        let app_cursor = self
+        let keyboard_modes = self
             .active_pane()
-            .map(|pane| pane.app_cursor_keys.load(std::sync::atomic::Ordering::Relaxed))
-            .unwrap_or(false);
-        (None, encode_logical(key, mods, kitty_flags, app_cursor))
+            .map(|pane| pane.keyboard_modes.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0);
+        (
+            None,
+            encode_logical(
+                key,
+                mods,
+                kitty_flags,
+                sonicterm_vt::vt::KeyboardModes::from_bits(keyboard_modes)
+                    .application_cursor_keys(),
+            ),
+        )
     }
 
     fn write_to_pane(&mut self, pane_id: u64, bytes: Vec<u8>) {
@@ -4276,6 +4285,7 @@ impl App {
             select_anchor: (0, 0),
             copy_mode: None,
             modifiers: ModifiersState::empty(),
+            pty_pressed_keys: HashMap::new(),
             last_render: Instant::now(),
             hover_link: false,
             pressed_tab: None,
@@ -6052,6 +6062,7 @@ impl App {
             select_anchor: (0, 0),
             copy_mode: None,
             modifiers: ModifiersState::empty(),
+            pty_pressed_keys: HashMap::new(),
             last_render: Instant::now(),
             hover_link: false,
             pressed_tab: None,

@@ -211,6 +211,33 @@ impl App {
         super::text_edit::core_text_edit_for_key(logical_key, mods)
     }
 
+    fn command_palette_modifiers(&self) -> ModifiersState {
+        match self.palette_attached_window {
+            Some(id) => self.windows.get(&id).map(|ws| ws.modifiers),
+            None => self.main().map(|ws| ws.modifiers),
+        }
+        .unwrap_or_else(ModifiersState::empty)
+    }
+
+    fn command_palette_input_text(
+        &mut self,
+        logical_key: &winit::keyboard::Key,
+        event_text: Option<Option<&str>>,
+    ) {
+        use winit::keyboard::{Key, NamedKey};
+        let text = match event_text {
+            Some(text) => text,
+            None => match logical_key {
+                Key::Character(text) => Some(text.as_str()),
+                Key::Named(NamedKey::Space) => Some(" "),
+                _ => None,
+            },
+        };
+        for ch in text.unwrap_or_default().chars().filter(|ch| !ch.is_control()) {
+            self.command_palette.input_char(ch);
+        }
+    }
+
     fn command_palette_tab_count(&self) -> usize {
         match self.frontmost_kind() {
             FrontmostKind::Child(id) => {
@@ -252,12 +279,22 @@ impl App {
     }
 
     pub(super) fn command_palette_handle_key(&mut self, event: &KeyEvent) -> bool {
-        self.command_palette_handle_logical_key(&event.logical_key)
+        let mods = self.command_palette_modifiers();
+        let text = super::text_edit::printable_event_text(event, mods);
+        self.command_palette_handle_input(&event.logical_key, Some(text))
     }
 
     pub(super) fn command_palette_handle_logical_key(
         &mut self,
         logical_key: &winit::keyboard::Key,
+    ) -> bool {
+        self.command_palette_handle_input(logical_key, None)
+    }
+
+    fn command_palette_handle_input(
+        &mut self,
+        logical_key: &winit::keyboard::Key,
+        event_text: Option<Option<&str>>,
     ) -> bool {
         use winit::keyboard::{Key, NamedKey};
         if !self.command_palette.is_open() {
@@ -339,8 +376,8 @@ impl App {
                     self.request_redraw_for_overlay(self.palette_attached_window);
                     true
                 }
-                Key::Named(NamedKey::Space) => {
-                    self.command_palette.input_char(' ');
+                Key::Named(NamedKey::Space) | Key::Character(_) => {
+                    self.command_palette_input_text(logical_key, event_text);
                     self.update_command_palette_ime_cursor_area();
                     self.request_redraw_for_overlay(self.palette_attached_window);
                     true
@@ -371,16 +408,6 @@ impl App {
                 }
                 Key::Named(NamedKey::Delete) => {
                     self.command_palette.delete_forward();
-                    self.update_command_palette_ime_cursor_area();
-                    self.request_redraw_for_overlay(self.palette_attached_window);
-                    true
-                }
-                Key::Character(s) => {
-                    for ch in s.chars() {
-                        if !ch.is_control() {
-                            self.command_palette.input_char(ch);
-                        }
-                    }
                     self.update_command_palette_ime_cursor_area();
                     self.request_redraw_for_overlay(self.palette_attached_window);
                     true
@@ -443,8 +470,8 @@ impl App {
                     self.request_redraw_for_overlay(self.palette_attached_window);
                     true
                 }
-                Key::Named(NamedKey::Space) => {
-                    self.command_palette.input_char(' ');
+                Key::Named(NamedKey::Space) | Key::Character(_) => {
+                    self.command_palette_input_text(logical_key, event_text);
                     self.update_command_palette_ime_cursor_area();
                     self.request_redraw_for_overlay(self.palette_attached_window);
                     true
@@ -475,16 +502,6 @@ impl App {
                 }
                 Key::Named(NamedKey::Delete) => {
                     self.command_palette.delete_forward();
-                    self.update_command_palette_ime_cursor_area();
-                    self.request_redraw_for_overlay(self.palette_attached_window);
-                    true
-                }
-                Key::Character(s) => {
-                    for ch in s.chars() {
-                        if !ch.is_control() {
-                            self.command_palette.input_char(ch);
-                        }
-                    }
                     self.update_command_palette_ime_cursor_area();
                     self.request_redraw_for_overlay(self.palette_attached_window);
                     true

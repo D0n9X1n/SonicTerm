@@ -22,7 +22,7 @@ fn pane_vt_batch_routes_clipboard_commands_media_and_modes_after_unlock() {
     let mut decoder_unlocked = None;
     let payload = base64::engine::general_purpose::STANDARD.encode("copied");
     let bytes = format!(
-        "\x1b_Gf=100,a=T;image\x1b\\\x1b[?25l\x1b[?1h\x1b[>1u\x1b]52;c;{payload}\x1b\\\x1b]133;B\x1b\\\x1b]133;D;0\x1b\\"
+        "\x1b_Gf=100,a=T;image\x1b\\\x1b[?25l\x1b[?1h\x1b[?67h\x1b=\x1b[20h\x1b[>4;2m\x1b[>1u\x1b]52;c;{payload}\x1b\\\x1b]133;B\x1b\\\x1b]133;D;0\x1b\\"
     );
 
     process_pane_vt_batch_with(
@@ -52,7 +52,13 @@ fn pane_vt_batch_routes_clipboard_commands_media_and_modes_after_unlock() {
     );
     assert!(!handles.cursor_visible.load(Ordering::Relaxed));
     assert_eq!(handles.kitty_flags.load(Ordering::Relaxed), 1);
-    assert!(handles.app_cursor_keys.load(Ordering::Relaxed));
+    let keyboard_modes =
+        sonicterm_vt::vt::KeyboardModes::from_bits(handles.keyboard_modes.load(Ordering::Relaxed));
+    assert!(keyboard_modes.application_cursor_keys());
+    assert!(keyboard_modes.application_keypad());
+    assert!(keyboard_modes.backarrow_key());
+    assert!(keyboard_modes.newline());
+    assert_eq!(keyboard_modes.modify_other_keys(), 2);
     assert_eq!(emitted, [UserEvent::ClipboardWrite { text: "copied".into() }]);
     let commands = handles.command_events.lock();
     assert_eq!(commands.len(), 2);
@@ -77,6 +83,6 @@ fn pane_derived_worker_handles_share_every_store_with_the_pane() {
     assert!(Arc::ptr_eq(&worker.inline_images, &pane.inline_images));
     assert!(Arc::ptr_eq(&worker.cursor_visible, &pane.cursor_visible));
     assert!(Arc::ptr_eq(&worker.kitty_flags, &pane.kitty_flags));
-    assert!(Arc::ptr_eq(&worker.app_cursor_keys, &pane.app_cursor_keys));
+    assert!(Arc::ptr_eq(&worker.keyboard_modes, &pane.keyboard_modes));
     assert!(Arc::ptr_eq(&worker.inline_media_charge, &pane.inline_media_charge));
 }

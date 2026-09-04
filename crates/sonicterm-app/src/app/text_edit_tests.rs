@@ -62,3 +62,49 @@ fn logical_keys_and_modifier_state_use_the_same_exact_mapping() {
         None,
     );
 }
+
+/// App text fields accept produced glyphs but never type ordinary command chords.
+#[test]
+fn printable_text_policy_distinguishes_altgr_from_command_modifiers() {
+    use winit::keyboard::{KeyCode, PhysicalKey};
+
+    let q = Key::Character("@".into());
+    assert_eq!(
+        printable_text_for_parts(
+            &q,
+            PhysicalKey::Code(KeyCode::KeyQ),
+            Some("@"),
+            ModifiersState::CONTROL | ModifiersState::ALT,
+        ),
+        Some("@"),
+    );
+
+    let x = Key::Character("x".into());
+    assert_eq!(
+        printable_text_for_parts(
+            &x,
+            PhysicalKey::Code(KeyCode::KeyX),
+            Some("x"),
+            ModifiersState::CONTROL | ModifiersState::ALT,
+        ),
+        None,
+    );
+    assert_eq!(
+        printable_text_for_parts(
+            &x,
+            PhysicalKey::Code(KeyCode::KeyX),
+            Some("x"),
+            ModifiersState::SUPER,
+        ),
+        None,
+    );
+    assert_eq!(
+        printable_text_for_parts(
+            &Key::Character("å".into()),
+            PhysicalKey::Code(KeyCode::KeyA),
+            Some("å"),
+            ModifiersState::ALT,
+        ),
+        Some("å"),
+    );
+}

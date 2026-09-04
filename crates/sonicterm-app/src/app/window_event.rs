@@ -323,7 +323,7 @@ pub(super) fn is_quit_chord(key_str: &str, bound: Option<&Action>) -> bool {
 }
 
 impl App {
-    // Ordering: pty_burst_gen uses Acquire; cursor_visible, kitty_flags, and app_cursor_keys are independent Relaxed snapshots.
+    // Ordering: pty_burst_gen uses Acquire; cursor_visible, kitty_flags, and keyboard_modes are independent Relaxed snapshots.
     pub(super) fn do_window_event(
         &mut self,
         el: &ActiveEventLoop,
@@ -1165,6 +1165,7 @@ impl App {
                         ws.scrollbar_drag = None;
                         ws.splitter_drag = None;
                         ws.mouse_down = false;
+                        ws.pty_pressed_keys.clear();
                         release
                     })
                 } else {
@@ -2340,7 +2341,37 @@ impl App {
             }
 
             // -- Keyboard --
-            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+            WindowEvent::KeyboardInput { event, .. } => {
+                if event.state == ElementState::Released {
+                    // When: a key release arrives, only a key whose press reached
+                    // the PTY may produce a negotiated Kitty release event.
+                    let press_pane = self
+                        .main_mut()
+                        .and_then(|window| window.pty_pressed_keys.remove(&event.physical_key));
+                    if let Some(press_pane) = press_pane {
+                        let kitty_flags = self
+                            .main()
+                            .and_then(|window| window.panes.get(&press_pane))
+                            .map(|pane| pane.kitty_flags.load(std::sync::atomic::Ordering::Relaxed))
+                            .unwrap_or(0);
+                        let keyboard_modes = self
+                            .main()
+                            .and_then(|window| window.panes.get(&press_pane))
+                            .map(|pane| {
+                                pane.keyboard_modes.load(std::sync::atomic::Ordering::Relaxed)
+                            })
+                            .unwrap_or(0);
+                        if let Some(bytes) = encode_key(
+                            &event,
+                            self.main_modifiers(),
+                            kitty_flags,
+                            sonicterm_vt::vt::KeyboardModes::from_bits(keyboard_modes),
+                        ) {
+                            self.write_to_pane(press_pane, bytes);
+                        }
+                    }
+                    return;
+                }
                 // When: KeyboardInput event.state is Pressed, route the key through active modes.
 
                 // Quit confirmation guard: intercept the Cmd+Q chord before any
@@ -2410,8 +2441,8 @@ impl App {
                     // When: search_active is true, route edits to search and other bindings through dispatch.
                     let mods = self.main_modifiers();
                     let is_search_text_edit =
-                        super::text_edit::search_text_edit_for_key(&event.logical_key, mods)
-                            .is_some();
+                        super::text_edit::search_text_edit_for_event(&event, mods).is_some()
+                            || super::text_edit::printable_event_text(&event, mods).is_some();
                     if !is_search_text_edit {
                         // When: is_search_text_edit is false, resolve non-edit keymap actions first.
                         if let Some(key_str) = key_event_to_string(&event, mods) {
@@ -2489,13 +2520,22 @@ impl App {
                     .active_pane()
                     .map(|pane| pane.kitty_flags.load(std::sync::atomic::Ordering::Relaxed))
                     .unwrap_or(0);
-                let app_cursor = self
+                let keyboard_modes = self
                     .active_pane()
-                    .map(|pane| pane.app_cursor_keys.load(std::sync::atomic::Ordering::Relaxed))
-                    .unwrap_or(false);
-                if let Some(bytes) =
-                    encode_key(&event, self.main_modifiers(), kitty_flags, app_cursor)
-                {
+                    .map(|pane| pane.keyboard_modes.load(std::sync::atomic::Ordering::Relaxed))
+                    .unwrap_or(0);
+                if let Some(bytes) = encode_key(
+                    &event,
+                    self.main_modifiers(),
+                    kitty_flags,
+                    sonicterm_vt::vt::KeyboardModes::from_bits(keyboard_modes),
+                ) {
+                    let active_pane = self.active_pane_id();
+                    if let Some(window) = self.main_mut() {
+                        if let Some(active_pane) = active_pane {
+                            window.pty_pressed_keys.insert(event.physical_key, active_pane);
+                        }
+                    }
                     // Encoded key bytes are sent before clearing transient view state.
                     self.write_to_pty(bytes);
                     // Scroll-to-bottom on Enter (#B12): pressing Enter while

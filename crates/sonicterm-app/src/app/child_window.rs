@@ -171,7 +171,7 @@ impl App {
     // Lock order: each guard drops before the next is taken — `redraw_target` in
     // the close arm, `parser` in the scroll and wheel arms; never nested.
     // Ordering: `pty_burst_gen` Acquire pairs with the VT thread's Release so a
-    // burst is seen; `cursor_visible`, `kitty_flags`, `app_cursor_keys` Relaxed.
+    // burst is seen; `cursor_visible`, `kitty_flags`, `keyboard_modes` Relaxed.
     pub(super) fn handle_child_window_event(
         &mut self,
         el: &ActiveEventLoop,
@@ -1531,7 +1531,37 @@ impl App {
                     }
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+            WindowEvent::KeyboardInput { event, .. } => {
+                if event.state == ElementState::Released {
+                    // When: a release arrives, send it only when this physical
+                    // key's press was previously forwarded to the same terminal.
+                    let press_pane = child.pty_pressed_keys.remove(&event.physical_key);
+                    let mods = child.modifiers;
+                    let (kitty_flags, keyboard_modes) = press_pane
+                        .and_then(|pane_id| child.panes.get(&pane_id))
+                        .map(|pane| {
+                            (
+                                pane.kitty_flags.load(std::sync::atomic::Ordering::Relaxed),
+                                pane.keyboard_modes.load(std::sync::atomic::Ordering::Relaxed),
+                            )
+                        })
+                        .unwrap_or((0, 0));
+                    let encoded = press_pane.map(|_| {
+                        encode_key(
+                            &event,
+                            mods,
+                            kitty_flags,
+                            sonicterm_vt::vt::KeyboardModes::from_bits(keyboard_modes),
+                        )
+                    });
+                    let _ = child;
+                    if let (Some(pane_id), Some(Some(bytes))) = (press_pane, encoded) {
+                        let broadcast_bytes = bytes.clone();
+                        self.write_to_pane(pane_id, bytes);
+                        self.broadcast_from(pane_id, broadcast_bytes);
+                    }
+                    return;
+                }
                 // When: a `KeyboardInput` press arrives, so this child becomes
                 // frontmost and owns the keystroke routing below.
                 self.frontmost_window = Some(win_id);
@@ -1650,8 +1680,8 @@ impl App {
                     let child_mods = child.modifiers;
                     let _ = child;
                     let is_search_text_edit =
-                        super::text_edit::search_text_edit_for_key(&event.logical_key, child_mods)
-                            .is_some();
+                        super::text_edit::search_text_edit_for_event(&event, child_mods).is_some()
+                            || super::text_edit::printable_event_text(&event, child_mods).is_some();
                     if !is_search_text_edit {
                         // When: `is_search_text_edit` is false, so the key is not
                         // field editing and a bound action may claim it.
@@ -1768,15 +1798,21 @@ impl App {
                     .get(&active_id)
                     .map(|pane| pane.kitty_flags.load(std::sync::atomic::Ordering::Relaxed))
                     .unwrap_or(0);
-                let app_cursor = child
+                let keyboard_modes = child
                     .panes
                     .get(&active_id)
-                    .map(|pane| pane.app_cursor_keys.load(std::sync::atomic::Ordering::Relaxed))
-                    .unwrap_or(false);
-                if let Some(bytes) = encode_key(&event, mods, kitty_flags, app_cursor) {
+                    .map(|pane| pane.keyboard_modes.load(std::sync::atomic::Ordering::Relaxed))
+                    .unwrap_or(0);
+                if let Some(bytes) = encode_key(
+                    &event,
+                    mods,
+                    kitty_flags,
+                    sonicterm_vt::vt::KeyboardModes::from_bits(keyboard_modes),
+                ) {
                     // When: `encode_key` produced `bytes`, so this press maps to
                     // terminal input for the active pane and its broadcast peers.
                     let broadcast_bytes = bytes.clone();
+                    child.pty_pressed_keys.insert(event.physical_key, active_id);
                     let _ = child;
                     self.write_to_pane(active_id, bytes);
                     self.broadcast_from(active_id, broadcast_bytes);
@@ -1908,6 +1944,7 @@ impl App {
                 child.scrollbar_drag = None;
                 child.splitter_drag = None;
                 child.mouse_down = false;
+                child.pty_pressed_keys.clear();
             }
             if let Some(r) = child.renderer.as_mut() {
                 r.set_window_focused(focused);
