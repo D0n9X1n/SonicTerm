@@ -22,7 +22,8 @@ pub use reaper::{
     ShutdownReport,
 };
 pub use reservation::{
-    CommitError, CommittedReservation, CommittedTransferError, Reservation, TransferError,
+    CommitError, CommittedBatchTransferError, CommittedReservation, CommittedTransferError,
+    Reservation, TransferError,
 };
 
 /// Shared process-local resource governor with one immutable process root.
