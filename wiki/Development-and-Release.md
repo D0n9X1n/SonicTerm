@@ -40,8 +40,9 @@ Every crate has a local `CLAUDE.md`. Unit tests use the flat sibling pattern
 `main_tests.rs`; `tests/` is reserved for integration tests through public or
 cross-crate behavior. The `sonicterm-ui` and `sonicterm-render-model` crate-root
 suites inventory every direct source module and require either that exact sibling
-declaration or a non-empty explicit exemption. An exemption becomes stale as
-soon as the module gains its own sibling suite.
+declaration or a non-empty explicit exemption. A declared sibling file must
+exist and contain a `#[test]`; source-directory modules fail the flat inventory.
+An exemption becomes stale as soon as the module gains its own sibling suite.
 
 ## Local verification gate
 
@@ -400,7 +401,8 @@ cargo run -p sonicterm-linux     # Linux；可执行文件名为 sonicterm
 Crate root 使用 `lib_tests.rs` 或 `main_tests.rs`；`tests/` 只用于通过 public API 或跨
 crate 行为的 integration test。`sonicterm-ui` 与 `sonicterm-render-model` 的 crate-root
 测试会清点每个直接源码模块，并要求它具有准确的 sibling 声明或一条非空的显式豁免说明。
-模块一旦获得自己的 sibling suite，对应豁免就会立即变为过期并使测试失败。
+已声明的 sibling 文件必须存在且包含 `#[test]`；源码目录模块会使这项扁平清单失败。模块一旦
+获得自己的 sibling suite，对应豁免就会立即变为过期并使测试失败。
 
 ## 本地验证 gate
 

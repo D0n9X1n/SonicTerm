@@ -1,8 +1,6 @@
 //! Coverage for the IME composition state machine. The renderer reads
-//! `preedit()` + `cursor()` to draw the inline composition and advance
-//! the cursor BLOCK to the caret byte offset — the "cursor follows the
-//! insertion point during preedit" fix (#pane-ime). These pin that the
-//! cursor offset is tracked, cleared, and folded correctly.
+//! `preedit()` and `cursor()` to draw inline composition with the cursor
+//! block at the current caret byte offset.
 
 use super::*;
 
@@ -17,6 +15,7 @@ fn enabled_alone_is_not_composing() {
     assert_eq!(ime.cursor(), None);
 }
 
+/// Preedit retains the latest text and byte-range caret for inline rendering.
 #[test]
 fn preedit_tracks_text_and_caret_offset() {
     let mut ime = ImeState::new();
@@ -28,11 +27,9 @@ fn preedit_tracks_text_and_caret_offset() {
     assert!(ime.is_composing());
 }
 
+/// Successive preedit updates move the renderer caret to the latest byte offset.
 #[test]
 fn caret_moves_as_composition_grows() {
-    // The reported bug: cursor block frozen at the START of the preedit.
-    // Each Preedit update carries a new caret offset; the state must
-    // reflect the latest one so the renderer advances the block.
     let mut ime = ImeState::new();
     ime.handle_preedit("ni", Some((2, 2)));
     assert_eq!(ime.cursor().map(|(_, e)| e), Some(2));
@@ -40,6 +37,7 @@ fn caret_moves_as_composition_grows() {
     assert_eq!(ime.cursor().map(|(_, e)| e), Some(4), "caret must follow as more is typed");
 }
 
+/// Empty preedit ends composition and clears its renderer caret.
 #[test]
 fn empty_preedit_ends_composition() {
     let mut ime = ImeState::new();
@@ -52,6 +50,7 @@ fn empty_preedit_ends_composition() {
     assert_eq!(ime.cursor(), None, "caret must clear when composition ends");
 }
 
+/// Commit clears transient composition while preserving one drainable PTY payload.
 #[test]
 fn commit_clears_preedit_and_caret_and_buffers_text() {
     let mut ime = ImeState::new();
@@ -64,6 +63,7 @@ fn commit_clears_preedit_and_caret_and_buffers_text() {
     assert_eq!(ime.take_commits(), "", "drain is one-shot");
 }
 
+/// Cancel drops only transient preedit and keeps an earlier undrained commit.
 #[test]
 fn cancel_drops_preedit_without_committing() {
     let mut ime = ImeState::new();
@@ -77,6 +77,7 @@ fn cancel_drops_preedit_without_committing() {
     assert_eq!(ime.take_commits(), "已提交", "cancel preserves undrained commits");
 }
 
+/// Disabling the IME clears all transient composition state.
 #[test]
 fn disabled_clears_composition_state() {
     let mut ime = ImeState::new();
