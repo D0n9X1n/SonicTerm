@@ -940,10 +940,249 @@ fn scaled_glyph_uses_nearest_without_bottom_fringe() {
     assert_eq!(frame.pixel_bgra(0, 2), [0, 0, 0, 255]);
 }
 
-/// A one-to-one color glyph over transparent black copies its encoded CPU source bytes exactly.
+fn assert_bgra_within_one(actual: &[u8], expected: &[u8], context: &str) {
+    assert_eq!(actual.len(), expected.len(), "{context}: output lengths differ");
+    for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+        assert!(
+            actual.abs_diff(expected) <= 1,
+            "{context}: channel {index} was {actual}, expected {expected}"
+        );
+    }
+}
+
+fn render_software_color_glyph(source: [u8; 4], background: [f32; 4]) -> [u8; 4] {
+    let mut atlas = GlyphAtlas::new(1, 1);
+    let info = atlas
+        .get_or_insert(
+            GlyphKey::new('😀', false, false),
+            &mut TileRasterizer(RasterTile {
+                width: 1,
+                height: 1,
+                offset_x: 0,
+                offset_y: 0,
+                advance: 1.0,
+                coverage: source.to_vec(),
+                is_color: true,
+                is_subpixel: false,
+            }),
+        )
+        .expect("color glyph inserts");
+    let cpu_pixels = atlas.pixels_bgra().to_vec();
+    let mut frame = WindowsSoftwareFrame::new(1, 1, background).expect("valid frame");
+
+    frame.draw_glyphs(
+        &atlas,
+        &[GlyphInstance {
+            rect: px_to_ndc(0.0, 0.0, 1.0, 1.0, 1.0, 1.0),
+            uv: info.uv,
+            color: [1.0; 4],
+            flags: [1.0, 0.0, 0.0, 0.0],
+        }],
+    );
+
+    assert_eq!(atlas.pixels_bgra(), cpu_pixels, "software drawing must not rewrite atlas bytes");
+    frame.pixel_bgra(0, 0)
+}
+
+fn render_software_image(
+    source_width: u32,
+    pixels: &[u8],
+    target_width: u32,
+    neighbor: Option<[u8; 4]>,
+    background: [f32; 4],
+) -> Vec<u8> {
+    let atlas_width = source_width + u32::from(neighbor.is_some());
+    let mut atlas = GlyphAtlas::new(atlas_width, 1);
+    let info = atlas
+        .get_or_insert_lazy_without_eviction(
+            GlyphKey::new('\u{fffc}', false, false),
+            source_width,
+            1,
+            || RasterTile {
+                width: source_width,
+                height: 1,
+                offset_x: 0,
+                offset_y: 0,
+                advance: source_width as f32,
+                coverage: pixels.to_vec(),
+                is_color: true,
+                is_subpixel: false,
+            },
+        )
+        .expect("image tile inserts");
+    if let Some(neighbor) = neighbor {
+        atlas
+            .get_or_insert_lazy_without_eviction(GlyphKey::new('N', false, false), 1, 1, || {
+                RasterTile {
+                    width: 1,
+                    height: 1,
+                    offset_x: 0,
+                    offset_y: 0,
+                    advance: 1.0,
+                    coverage: neighbor.to_vec(),
+                    is_color: true,
+                    is_subpixel: false,
+                }
+            })
+            .expect("neighbor tile inserts");
+    }
+    let cpu_pixels = atlas.pixels_bgra().to_vec();
+    let mut frame =
+        WindowsSoftwareFrame::new(target_width, 1, background).expect("valid image frame");
+
+    frame.draw_glyphs(
+        &atlas,
+        &[GlyphInstance {
+            rect: px_to_ndc(0.0, 0.0, target_width as f32, 1.0, target_width as f32, 1.0),
+            uv: info.uv,
+            color: [1.0; 4],
+            flags: [1.0, 0.0, 1.0, 0.0],
+        }],
+    );
+
+    assert_eq!(atlas.pixels_bgra(), cpu_pixels, "software drawing must not rewrite atlas bytes");
+    (0..target_width).flat_map(|x| frame.pixel_bgra(x, 0)).collect()
+}
+
+/// Every encoded-premultiplied channel and alpha pair must match GPU upload plus sRGB-view decode.
 #[test]
-fn software_color_glyph_output_is_byte_compatible_with_cpu_atlas() {
-    let source = [17, 34, 68, 128];
+fn software_color_channel_lookup_matches_gpu_staging_domain() {
+    let decode = crate::color::srgb_u8_to_linear_lut();
+    for alpha in 0..=u8::MAX {
+        for encoded_premul in 0..=u8::MAX {
+            let expected = if alpha == 0 {
+                0.0
+            } else {
+                let straight_srgb = (encoded_premul as f64 / alpha as f64).clamp(0.0, 1.0);
+                let alpha_linear = alpha as f64 / 255.0;
+                let premul_linear =
+                    crate::color::srgb_channel_to_linear(straight_srgb) * alpha_linear;
+                decode[crate::color::linear_channel_to_srgb_u8(premul_linear as f32) as usize]
+            };
+
+            assert_eq!(
+                premultiplied_srgb_channel_to_linear(encoded_premul, alpha),
+                expected,
+                "encoded_premul={encoded_premul}, alpha={alpha}"
+            );
+        }
+    }
+}
+
+/// Self-colored glyph vectors must match real wgpu output over every representative background.
+#[test]
+fn software_color_glyphs_match_gpu_color_space_and_blending() {
+    let black = [0.0, 0.0, 0.0, 1.0];
+    let white = [1.0, 1.0, 1.0, 1.0];
+    let colored = crate::color::hex_to_premultiplied_rgba("#204080", 1.0);
+    let vectors = [
+        ("opaque gray over black", [128, 128, 128, 255], black),
+        ("opaque color over white", [32, 96, 224, 255], white),
+        ("translucent gray over black", [64, 64, 64, 128], black),
+        ("translucent gray over color", [64, 64, 64, 128], colored),
+        ("translucent color over white", [16, 32, 64, 128], white),
+        ("translucent color over color", [16, 32, 64, 128], colored),
+    ];
+
+    for (name, source, background) in vectors {
+        let tile = RasterTile {
+            width: 1,
+            height: 1,
+            offset_x: 0,
+            offset_y: 0,
+            advance: 1.0,
+            coverage: source.to_vec(),
+            is_color: true,
+            is_subpixel: false,
+        };
+        let gpu = crate::atlas_upload::render_glyph_readback_on(&[tile], background);
+        let software = render_software_color_glyph(source, background);
+
+        assert_bgra_within_one(&software, &gpu, name);
+    }
+}
+
+/// One-to-one translucent image pixels must match real wgpu blending over opaque backgrounds.
+#[test]
+fn software_translucent_images_match_gpu_color_space_and_blending() {
+    let black = [0.0, 0.0, 0.0, 1.0];
+    let white = [1.0, 1.0, 1.0, 1.0];
+    let colored = crate::color::hex_to_premultiplied_rgba("#204080", 1.0);
+    let vectors = [
+        ("translucent gray image over black", [64, 64, 64, 128], black),
+        ("translucent gray image over color", [64, 64, 64, 128], colored),
+        ("translucent color image over white", [16, 32, 64, 128], white),
+        ("translucent color image over color", [16, 32, 64, 128], colored),
+    ];
+
+    for (name, source, background) in vectors {
+        let gpu = crate::atlas_upload::render_image_readback_on(1, &source, 1, None, background);
+        let software = render_software_image(1, &source, 1, None, background);
+
+        assert_bgra_within_one(&software, &gpu, name);
+    }
+}
+
+/// One-to-one opaque images must preserve their encoded CPU source bytes.
+#[test]
+fn software_opaque_image_output_is_byte_compatible_with_cpu_atlas() {
+    let source = [17, 34, 68, 255];
+    let software = render_software_image(1, &source, 1, None, [0.0; 4]);
+
+    assert_eq!(software, source);
+}
+
+/// A two-texel image must use the GPU texel-center rule and filter decoded linear taps.
+#[test]
+fn software_scaled_image_matches_gpu_linear_light_midpoint() {
+    let source = [0, 0, 0, 255, 255, 255, 255, 255];
+    let background = [0.0, 0.0, 0.0, 1.0];
+    let gpu = crate::atlas_upload::render_image_readback_on(2, &source, 3, None, background);
+    let software = render_software_image(2, &source, 3, None, background);
+
+    assert_bgra_within_one(&software, &gpu, "black-white 2-to-3 image");
+    assert_eq!(&software[0..4], &[0, 0, 0, 255]);
+    for &channel in &software[4..7] {
+        assert!(channel.abs_diff(188) <= 1, "linear midpoint must encode near 188: {software:?}");
+    }
+    assert_eq!(&software[8..12], &[255, 255, 255, 255]);
+}
+
+/// Invalid RGB under zero alpha must canonicalize before filtering on both presenters.
+#[test]
+fn software_scaled_image_matches_gpu_zero_alpha_canonicalization() {
+    let source = [255, 255, 255, 255, 200, 0, 0, 0];
+    let background = [0.0, 0.0, 0.0, 1.0];
+    let gpu = crate::atlas_upload::render_image_readback_on(2, &source, 3, None, background);
+    let software = render_software_image(2, &source, 3, None, background);
+
+    assert_bgra_within_one(&software, &gpu, "zero-alpha image tap");
+    assert!(
+        software[4..7].iter().all(|channel| channel.abs_diff(188) <= 1),
+        "zero-alpha RGB must not create a colored fringe: {software:?}"
+    );
+}
+
+/// Bilinear software sampling must share the GPU clamp to the selected packed image tile.
+#[test]
+fn software_scaled_image_matches_gpu_packed_tile_isolation() {
+    let source = [255, 255, 255, 255];
+    let neighbor = [0, 0, 255, 255];
+    let background = [0.0, 0.0, 0.0, 1.0];
+    let gpu =
+        crate::atlas_upload::render_image_readback_on(1, &source, 3, Some(neighbor), background);
+    let software = render_software_image(1, &source, 3, Some(neighbor), background);
+
+    assert_bgra_within_one(&software, &gpu, "packed image tile");
+    for pixel in software.as_chunks::<4>().0 {
+        assert_eq!(*pixel, [255, 255, 255, 255]);
+    }
+}
+
+/// A one-to-one opaque color glyph copies its encoded CPU source bytes exactly.
+#[test]
+fn software_opaque_color_glyph_output_is_byte_compatible_with_cpu_atlas() {
+    let source = [17, 34, 68, 255];
     let mut atlas = GlyphAtlas::new(1, 1);
     let info = atlas
         .get_or_insert(
@@ -1011,6 +1250,7 @@ fn scaled_color_glyph_uses_nearest_sampling() {
     assert_eq!(frame.pixel_bgra(0, 2), [0, 0, 0, 255]);
 }
 
+/// Scaled images preserve bilinear sampling while interpolating decoded linear texels.
 #[test]
 fn scaled_image_keeps_bilinear_sampling() {
     let mut atlas = GlyphAtlas::new(1, 2);
@@ -1042,7 +1282,10 @@ fn scaled_image_keeps_bilinear_sampling() {
     );
 
     let middle = frame.pixel_bgra(0, 1);
-    assert!((120..=135).contains(&middle[0]), "image scaling should interpolate: {middle:?}");
+    assert!(
+        middle[0].abs_diff(188) <= 1,
+        "image scaling should filter in linear light: {middle:?}"
+    );
     assert_eq!(middle[0], middle[1]);
     assert_eq!(middle[1], middle[2]);
 }

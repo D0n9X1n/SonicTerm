@@ -360,6 +360,8 @@ fn copy_rect_into_scratch(pixels: &[u8], atlas_width: u32, rect: DirtyRect, scra
     }
 }
 
+#[cfg(all(test, target_os = "windows"))]
+pub(crate) use atlas_upload_tests::{render_glyph_readback_on, render_image_readback_on};
 #[cfg(test)]
 #[path = "atlas_upload_tests.rs"]
 mod atlas_upload_tests;
