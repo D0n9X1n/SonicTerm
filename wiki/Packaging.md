@@ -93,22 +93,28 @@ warning; Finder's **Open** context-menu action allows the first launch.
 
 ### Requirements and command
 
-Use a Windows x64 host with the MSVC target, vcpkg, `cargo-wix`, and WiX Toolset
-3.14. `scripts/setup-windows-cairo.ps1` looks for `vcpkg.exe` through
-`VCPKG_ROOT`, `VCPKG_INSTALLATION_ROOT`, or `C:\vcpkg` and installs static Cairo
-plus pkgconf.
+Use a Windows x64 host with the MSVC target, vcpkg, `cargo-wix` 0.3.9, and WiX
+Toolset 3.14.1.20250415. CI logic coverage uses `cargo-llvm-cov` 0.9.0.
+`scripts/setup-windows-cairo.ps1` looks for `vcpkg.exe` through `VCPKG_ROOT`,
+`VCPKG_INSTALLATION_ROOT`, or `C:\vcpkg` and installs static Cairo plus pkgconf.
 
 ```powershell
 rustup target add x86_64-pc-windows-msvc
-cargo install cargo-wix --locked
-choco install wixtoolset --no-progress -y
+cargo install cargo-wix --version 0.3.9 --locked
+choco install wixtoolset --version 3.14.1.20250415 --no-progress -y
 
 . .\scripts\setup-windows-cairo.ps1
 cargo build --release --target x86_64-pc-windows-msvc -p sonicterm-windows
+$version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
+    Where-Object name -eq sonicterm-windows | Select-Object -ExpandProperty version
+$numericVersion = ($version -split '[-+]')[0]
 New-Item -ItemType Directory -Force -Path dist | Out-Null
 Push-Location .\crates\sonicterm-windows
-cargo wix --package sonicterm-windows --no-build --nocapture --output ..\..\dist\
+cargo wix --package sonicterm-windows --target x86_64-pc-windows-msvc `
+    --install-version $numericVersion --no-build --nocapture --output ..\..\dist\
 Pop-Location
+$msi = Get-ChildItem .\dist\*.msi -ErrorAction Stop
+.\scripts\validate-windows-msi.ps1 -MsiPath $msi.FullName -ExpectedVersion "v$version"
 ```
 
 Dot-source the Cairo script in the same PowerShell process as the build. It sets
@@ -118,7 +124,17 @@ installed, restart the shell or add its `bin` directory to `PATH`.
 
 An unelevated build may print `LGHT1105: Validation could not run due to system
 policy`. That warning means ICE validation did not run; it does not by itself
-change the MSI contents.
+change the MSI contents. The independent COM validator still checks the MSI
+Property, Component, Feature, FeatureComponents, and SummaryInformation data. It
+requires the numeric SemVer core as ProductVersion, stable UpgradeCode, nonempty
+ProductCode, `x64;1033` template, and the exact ten 64-bit `Binaries` components.
+Prerelease/build suffixes remain part of tag provenance but cannot enter MSI
+ProductVersion.
+
+Tooling updates use a dedicated `tooling` pull request. Change the central
+workflow version, both language halves here, and the consistency test together;
+then run the mutation tests and validate a newly built MSI before merging. Do not
+float a tool first and document the selected version afterwards.
 
 ### Installed layout and registration
 
@@ -322,21 +338,28 @@ SonicTerm.app/Contents/
 
 ### 要求与命令
 
-请使用 Windows x64 主机，并安装 MSVC target、vcpkg、`cargo-wix` 和 WiX Toolset 3.14。
+请使用 Windows x64 主机，并安装 MSVC target、vcpkg、`cargo-wix` 0.3.9 和 WiX
+Toolset 3.14.1.20250415。CI 逻辑覆盖率使用 `cargo-llvm-cov` 0.9.0。
 `scripts/setup-windows-cairo.ps1` 会通过 `VCPKG_ROOT`、
 `VCPKG_INSTALLATION_ROOT` 或 `C:\vcpkg` 查找 `vcpkg.exe`，再安装静态 Cairo 和 pkgconf。
 
 ```powershell
 rustup target add x86_64-pc-windows-msvc
-cargo install cargo-wix --locked
-choco install wixtoolset --no-progress -y
+cargo install cargo-wix --version 0.3.9 --locked
+choco install wixtoolset --version 3.14.1.20250415 --no-progress -y
 
 . .\scripts\setup-windows-cairo.ps1
 cargo build --release --target x86_64-pc-windows-msvc -p sonicterm-windows
+$version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
+    Where-Object name -eq sonicterm-windows | Select-Object -ExpandProperty version
+$numericVersion = ($version -split '[-+]')[0]
 New-Item -ItemType Directory -Force -Path dist | Out-Null
 Push-Location .\crates\sonicterm-windows
-cargo wix --package sonicterm-windows --no-build --nocapture --output ..\..\dist\
+cargo wix --package sonicterm-windows --target x86_64-pc-windows-msvc `
+    --install-version $numericVersion --no-build --nocapture --output ..\..\dist\
 Pop-Location
+$msi = Get-ChildItem .\dist\*.msi -ErrorAction Stop
+.\scripts\validate-windows-msi.ps1 -MsiPath $msi.FullName -ExpectedVersion "v$version"
 ```
 
 必须在执行 build 的同一个 PowerShell 进程中 dot-source Cairo 脚本。它会为当前进程设置
@@ -344,7 +367,15 @@ Pop-Location
 就会丢失。如果刚安装 WiX，请重启 shell 或把其 `bin` 目录加入 `PATH`。
 
 非管理员 shell 可能输出 `LGHT1105: Validation could not run due to system policy`。
-这表示没有执行 ICE validation，本身不改变 MSI 内容。
+这表示没有执行 ICE validation，本身不改变 MSI 内容。独立 COM 验证器仍会检查 MSI 的
+Property、Component、Feature、FeatureComponents 和 SummaryInformation 数据。它要求
+ProductVersion 等于数字 SemVer 核心、UpgradeCode 稳定、ProductCode 非空、template 为
+`x64;1033`，且 `Binaries` 精确引用十个 64 位 component。预发布/构建后缀仍属于 tag
+来源证明，但不能进入 MSI ProductVersion。
+
+工具更新通过独立的 `tooling` pull request 完成。中央 workflow 版本、本文两个语言半区和
+一致性测试必须一起修改；合并前运行 mutation 测试并验证新构建的 MSI。不要先浮动工具，
+再事后记录碰巧选中的版本。
 
 ### 安装布局与注册
 

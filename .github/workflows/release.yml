@@ -15,6 +15,8 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: short
   CARGO_INCREMENTAL: 0
+  CARGO_WIX_VERSION: "0.3.9"
+  WIX_TOOLSET_VERSION: "3.14.1.20250415"
 
 jobs:
   validate-release-tag:
@@ -479,12 +481,12 @@ jobs:
 
       - name: Install cargo-wix
         timeout-minutes: 10
-        run: cargo install cargo-wix --locked
+        run: cargo install cargo-wix --version "${{ env.CARGO_WIX_VERSION }}" --locked
 
       - name: Install WiX Toolset
         timeout-minutes: 10
         run: |
-          choco install wixtoolset --no-progress -y
+          choco install wixtoolset --version "${{ env.WIX_TOOLSET_VERSION }}" --no-progress -y
           "C:\Program Files (x86)\WiX Toolset v3.14\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Build release binary
@@ -492,12 +494,20 @@ jobs:
         run: cargo build --release --target x86_64-pc-windows-msvc -p sonicterm-windows
 
       - name: Build and register msi asset
+        id: build-msi
         timeout-minutes: 10
         shell: pwsh
         run: |
+          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
+            Where-Object name -eq sonicterm-windows |
+            Select-Object -ExpandProperty version
+          $numericVersion = ($version -split '[-+]')[0]
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Push-Location crates\sonicterm-windows
-          cargo wix --package sonicterm-windows --no-build --nocapture --output ..\..\dist\
+          cargo wix --package sonicterm-windows `
+            --target x86_64-pc-windows-msvc `
+            --install-version $numericVersion `
+            --no-build --nocapture --output ..\..\dist\
           Pop-Location
           $packages = @(Get-ChildItem dist -Filter *.msi)
           if ($packages.Count -ne 1) {
@@ -505,6 +515,8 @@ jobs:
           }
           $name = "SonicTerm-${{ github.ref_name }}-windows-x86_64.msi"
           Move-Item -LiteralPath $packages[0].FullName -Destination "dist\$name"
+          "path=dist\$name" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           python scripts\prepare-release-assets.py fragment `
             --tag "${{ github.ref_name }}" `
             --asset "dist\$name" `
@@ -512,6 +524,14 @@ jobs:
             --arch x86_64 `
             --kind msi `
             --output dist\windows-x86_64-msi.asset.json
+
+      - name: Validate MSI metadata
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          .\scripts\validate-windows-msi.ps1 `
+            -MsiPath "${{ steps.build-msi.outputs.path }}" `
+            -ExpectedVersion "v${{ steps.build-msi.outputs.version }}"
 
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         timeout-minutes: 5
