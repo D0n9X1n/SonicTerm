@@ -640,7 +640,7 @@ fn encode_legacy_text(
             return out;
         }
     }
-    let selected = legacy_mods.shift_key().then(|| shifted).flatten().unwrap_or(legacy_primary);
+    let selected = legacy_mods.shift_key().then_some(shifted).flatten().unwrap_or(legacy_primary);
     let mut utf8 = [0; 4];
     out.extend_from_slice(selected.encode_utf8(&mut utf8).as_bytes());
     out
