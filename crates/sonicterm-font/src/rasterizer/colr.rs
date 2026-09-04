@@ -1,6 +1,10 @@
 use crate::color::{SrgbaPixel, SrgbaTuple};
 use cairo::{Context, Extend, LinearGradient, Matrix, Mesh, MeshCorner, Operator, RadialGradient};
 
+#[cfg(test)]
+#[path = "colr_tests.rs"]
+mod colr_tests;
+
 /* The gradient related routines in this file were ported from HarfBuzz, which
  * were in turn ported from BlackRenderer by Black Foundry.
  * Used by permission to relicense to HarfBuzz license,
@@ -84,6 +88,33 @@ pub enum DrawOp {
     ClosePath,
 }
 
+/// Total Bezier patches one sweep gradient may contribute to its mesh.
+///
+/// A hostile color line can ask for billions of patches through extreme angles
+/// or a near-zero tiling span. The budget bounds the work at a level far above
+/// any well-formed gradient, which needs 16 patches for a full turn.
+const MAX_SWEEP_PATCHES: usize = 4096;
+
+/// Bezier splits one angular span may be divided into.
+///
+/// Splits are chosen from the span width, so an out-of-range angle produced by
+/// a malformed offset would otherwise scale the count without limit. Clamping
+/// degrades such a span to a coarse approximation instead of a hang.
+const MAX_SWEEP_SPLITS: usize = 256;
+
+/// Repeats of the stop list a Repeat/Reflect sweep may tile across the turn.
+const MAX_SWEEP_TILES: usize = 1000;
+
+/// Drop stops carrying a non-finite offset and report whether any remain.
+///
+/// A COLRv1 `ColorLine` may legally carry zero stops, and a malformed one may
+/// carry NaN offsets that no ordering can place. Both must degrade to painting
+/// nothing rather than panicking on an empty index or an unwrapped comparison.
+fn prepare_color_stops(color_line: &mut ColorLine) -> bool {
+    color_line.color_stops.retain(|stop| stop.offset.is_finite());
+    !color_line.color_stops.is_empty()
+}
+
 /// Paint a COLRv1 linear gradient over the current clip.
 ///
 /// `(x0, y0)`/`(x1, y1)` are the gradient's start and end anchors and
@@ -91,6 +122,7 @@ pub enum DrawOp {
 /// Cairo accepts. `color_line` is normalized first, so its stops are sorted and
 /// rescaled to 0..=1 and the anchors are re-interpolated across the original
 /// offset span. Stop colours are applied as straight (non-premultiplied) sRGBA.
+/// A color line left with no usable stop paints nothing.
 #[allow(clippy::too_many_arguments)]
 pub fn paint_linear_gradient(
     context: &Context,
@@ -102,7 +134,14 @@ pub fn paint_linear_gradient(
     y2: f64,
     mut color_line: ColorLine,
 ) -> anyhow::Result<()> {
+    if !prepare_color_stops(&mut color_line) {
+        // When: prepare_color_stops leaves color_line with no usable stop, so
+        // there is no gradient to describe and the clip is left untouched.
+        return Ok(());
+    }
+
     let (min_stop, max_stop) = normalize_color_line(&mut color_line);
+
     let anchors = reduce_anchors(ReduceAnchorsIn { x0, y0, x1, y1, x2, y2 });
 
     let xxx0 = anchors.xx0 + min_stop * (anchors.xx1 - anchors.xx0);
@@ -129,7 +168,8 @@ pub fn paint_linear_gradient(
 /// `(x0, y0, r0)` and `(x1, y1, r1)` are the start and end circles. As with the
 /// linear case, `color_line` is normalized first and both centres and radii are
 /// re-interpolated across the original offset span, so the drawn circles match
-/// the range the stops actually cover.
+/// the range the stops actually cover. A color line left with no usable stop
+/// paints nothing.
 #[allow(clippy::too_many_arguments)]
 pub fn paint_radial_gradient(
     context: &Context,
@@ -141,6 +181,12 @@ pub fn paint_radial_gradient(
     r1: f64,
     mut color_line: ColorLine,
 ) -> anyhow::Result<()> {
+    if !prepare_color_stops(&mut color_line) {
+        // When: prepare_color_stops leaves color_line with no usable stop, so
+        // there are no circles to interpolate and the clip is left untouched.
+        return Ok(());
+    }
+
     let (min_stop, max_stop) = normalize_color_line(&mut color_line);
 
     let xx0 = x0 + min_stop * (x1 - x0);
@@ -236,6 +282,13 @@ impl Patch {
     }
 }
 
+/// Approximate the span `a0`..`a1` with Bezier patches around `center`.
+///
+/// `budget` is the mesh's remaining patch allowance, decremented as patches are
+/// emitted; the split count is clamped to `MAX_SWEEP_SPLITS` so a malformed
+/// angle cannot scale the loop without limit. A non-finite span yields no
+/// patches because Cairo cannot represent its coordinates.
+#[allow(clippy::too_many_arguments)]
 fn add_sweep_gradient_patches(
     mesh: &Mesh,
     center: Point,
@@ -244,9 +297,15 @@ fn add_sweep_gradient_patches(
     c0: SrgbaTuple,
     a1: f64,
     c1: SrgbaTuple,
+    budget: &mut usize,
 ) {
+    if !a0.is_finite() || !a1.is_finite() {
+        // When: a0 or a1 is non-finite, Cairo cannot represent the patch coordinates, so the span contributes nothing.
+        return;
+    }
     const MAX_ANGLE: f64 = std::f64::consts::PI / 8.;
-    let num_splits = ((a1 - a0).abs() / MAX_ANGLE).ceil() as usize;
+    let num_splits =
+        (((a1 - a0).abs() / MAX_ANGLE).ceil() as usize).min(MAX_SWEEP_SPLITS).min(*budget);
 
     let mut p0 = Point::from_angle(a0);
     let mut color0 = c0;
@@ -277,14 +336,51 @@ fn add_sweep_gradient_patches(
         };
 
         patch.add_to_mesh(center, mesh);
+        *budget -= 1;
 
         p0 = p1;
         color0 = color1;
     }
 }
 
+/// Find the tile index whose stop list first reaches the visible turn.
+///
+/// The index is derived in constant time so a valid narrow span can begin more
+/// than `MAX_SWEEP_TILES` copies away without being mistaken for unbounded work.
+/// Emission remains separately bounded by the tile and patch budgets. A
+/// degenerate, reversed, non-finite, or unrepresentable span yields no tile.
+fn first_visible_tile(first_angle: f64, last_angle: f64, span: f64) -> Option<isize> {
+    if !span.is_finite() || span <= 0. || !first_angle.is_finite() || !last_angle.is_finite() {
+        // When: the stop span is not finite and forward-moving, so it cannot
+        // define a stable Repeat or Reflect tile sequence.
+        return None;
+    }
+
+    // When: first_angle or last_angle determines which span endpoint must be shifted to the visible turn.
+    let tile = if first_angle >= 0. {
+        -(first_angle / span).ceil()
+    } else if last_angle < 0. {
+        (-last_angle / span).ceil()
+    } else {
+        0.
+    };
+
+    if !tile.is_finite() || tile < isize::MIN as f64 || tile >= isize::MAX as f64 {
+        // When: tile is non-finite or outside isize, the bounded emission loop cannot represent it.
+        return None;
+    }
+
+    Some(tile as isize)
+}
+
 const PI_TIMES_2: f64 = std::f64::consts::PI * 2.;
 
+/// Tile `color_line` into `mesh` as the Bezier approximation of a sweep.
+///
+/// Emits nothing for a color line left with no usable stop, so the first/last
+/// stop reads below cannot index an empty vector. Total emission is capped at
+/// `MAX_SWEEP_PATCHES`, which bounds the work for a hostile color line without
+/// affecting a well-formed one.
 fn apply_sweep_gradient_patches(
     mesh: &Mesh,
     mut color_line: ColorLine,
@@ -293,17 +389,53 @@ fn apply_sweep_gradient_patches(
     mut start_angle: f64,
     mut end_angle: f64,
 ) {
+    if !prepare_color_stops(&mut color_line) {
+        // When: prepare_color_stops leaves color_line with no usable stop, so
+        // the first/last stop reads below would index an empty vector.
+        return;
+    }
+    if !center.x.is_finite()
+        || !center.y.is_finite()
+        || !radius.is_finite()
+        || !start_angle.is_finite()
+        || !end_angle.is_finite()
+    {
+        // When: center, radius, start_angle, or end_angle is non-finite, Cairo cannot represent the sweep coordinates.
+        return;
+    }
+
+    let mut budget = MAX_SWEEP_PATCHES;
+
     if start_angle == end_angle {
         // When: start_angle equals end_angle the sweep has no width, so only
         // Pad's flat fill outside the degenerate sweep can contribute.
         if color_line.extend == Extend::Pad {
             if start_angle > 0. {
                 let c = color_line.color_stops[0].color.into();
-                add_sweep_gradient_patches(mesh, center, radius, 0., c, start_angle, c);
+                add_sweep_gradient_patches(
+                    mesh,
+                    center,
+                    radius,
+                    0.,
+                    c,
+                    start_angle,
+                    c,
+                    &mut budget,
+                );
             }
             if end_angle < PI_TIMES_2 {
-                let c = color_line.color_stops.last().unwrap().color.into();
-                add_sweep_gradient_patches(mesh, center, radius, end_angle, c, PI_TIMES_2, c);
+                let last = color_line.color_stops.len() - 1;
+                let c = color_line.color_stops[last].color.into();
+                add_sweep_gradient_patches(
+                    mesh,
+                    center,
+                    radius,
+                    end_angle,
+                    c,
+                    PI_TIMES_2,
+                    c,
+                    &mut budget,
+                );
             }
         }
         return;
@@ -351,11 +483,29 @@ fn apply_sweep_gradient_patches(
 
             /* everything is below 0 */
             color0 = colors[n_stops - 1];
-            add_sweep_gradient_patches(mesh, center, radius, 0., color0, PI_TIMES_2, color0);
+            add_sweep_gradient_patches(
+                mesh,
+                center,
+                radius,
+                0.,
+                color0,
+                PI_TIMES_2,
+                color0,
+                &mut budget,
+            );
             return;
         }
 
-        add_sweep_gradient_patches(mesh, center, radius, 0., color0, angles[pos], colors[pos]);
+        add_sweep_gradient_patches(
+            mesh,
+            center,
+            radius,
+            0.,
+            color0,
+            angles[pos],
+            colors[pos],
+            &mut budget,
+        );
 
         pos += 1;
         while pos < n_stops {
@@ -368,6 +518,7 @@ fn apply_sweep_gradient_patches(
                     colors[pos - 1],
                     angles[pos],
                     colors[pos],
+                    &mut budget,
                 );
             } else {
                 // When: angles[pos] overshot a full turn, so the span is cut at
@@ -382,6 +533,7 @@ fn apply_sweep_gradient_patches(
                     colors[pos - 1],
                     PI_TIMES_2,
                     color1,
+                    &mut budget,
                 );
                 break;
             }
@@ -399,49 +551,31 @@ fn apply_sweep_gradient_patches(
                 color0,
                 PI_TIMES_2,
                 color0,
+                &mut budget,
             );
         }
     } else {
         // When: color_line extends by Repeat or Reflect, so the stop list is
         // tiled across the turn instead of padded.
         let span = angles[n_stops - 1] - angles[0];
-        let mut k = 0isize;
-        if angles[0] >= 0. {
-            let mut ss = angles[0];
-            while ss > 0. {
-                if span > 0. {
-                    ss -= span;
-                    k -= 1;
-                } else {
-                    // When: span runs backward, so k advances instead of
-                    // retreating to reach the same visible range.
-                    ss += span;
-                    k += 1;
-                }
-            }
-        } else if angles[0] < 0. {
-            // When: angles[0] starts behind zero, so tiles are stepped forward
-            // until the stop list reaches the visible range.
-            let mut ee = angles[n_stops - 1];
-            while ee < 0. {
-                if span > 0. {
-                    ee += span;
-                    k += 1;
-                } else {
-                    // When: span runs backward, so k steps back instead of
-                    // advancing to reach the same point.
-                    ee -= span;
-                    k -= 1;
-                }
-            }
-        }
-
-        debug_assert!(
-            angles[0] + (k as f64) * span <= 0. && 0. < angles[n_stops - 1] + (k as f64) * span
-        );
+        let Some(k) = first_visible_tile(angles[0], angles[n_stops - 1], span) else {
+            // When: no tile index brings the stop list into the visible turn, so
+            // the sweep contributes nothing rather than tiling a zero-width span.
+            return;
+        };
         let span = span.abs();
 
-        for l in k..k.min(1000) {
+        // Tiling runs forward from the first visible tile. The upper bound is
+        // offset from k, because a bound of k.min(..) can never exceed k and so
+        // yields an empty range for every k, emitting no patches at all.
+        let tile_end = k.saturating_add(MAX_SWEEP_TILES as isize);
+
+        for l in k..tile_end {
+            if budget == 0 {
+                // When: the patch budget is spent, so further tiles cannot add
+                // ink and the loop stops instead of scanning to the cap.
+                return;
+            }
             for i in 1..n_stops {
                 let (a0, a1, c0, c1);
 
@@ -470,18 +604,36 @@ fn apply_sweep_gradient_patches(
                 if a0 < 0. {
                     let f = (0. - a0) / (a1 - a0);
                     let color = c0.interpolate(c1, f);
-                    add_sweep_gradient_patches(mesh, center, radius, 0., color, a1, c1);
+                    add_sweep_gradient_patches(
+                        mesh,
+                        center,
+                        radius,
+                        0.,
+                        color,
+                        a1,
+                        c1,
+                        &mut budget,
+                    );
                 } else if a1 >= PI_TIMES_2 {
                     // When: a1 reaches a full turn, so this segment closes the
                     // sweep and no later tile can contribute.
                     let f = (PI_TIMES_2 - a0) / (a1 - a0);
                     let color = c0.interpolate(c1, f);
-                    add_sweep_gradient_patches(mesh, center, radius, a0, c0, PI_TIMES_2, color);
+                    add_sweep_gradient_patches(
+                        mesh,
+                        center,
+                        radius,
+                        a0,
+                        c0,
+                        PI_TIMES_2,
+                        color,
+                        &mut budget,
+                    );
                     return;
                 } else {
                     // When: a0 and a1 both sit inside the visible turn, so the
                     // segment is drawn whole with no clipping.
-                    add_sweep_gradient_patches(mesh, center, radius, a0, c0, a1, c1);
+                    add_sweep_gradient_patches(mesh, center, radius, a0, c0, a1, c1, &mut budget);
                 }
             }
         }
@@ -494,15 +646,22 @@ fn apply_sweep_gradient_patches(
 /// mesh of Bezier patches spanning `start_angle`..`end_angle` around
 /// `(x0, y0)`. The radius is taken from the farthest corner of the current clip
 /// extents, so the mesh always covers the region being painted; the color
-/// line's extend mode decides how angles outside the sweep are filled.
+/// line's extend mode decides how angles outside the sweep are filled. A color
+/// line left with no usable stop paints nothing.
 pub fn paint_sweep_gradient(
     context: &Context,
     x0: f64,
     y0: f64,
     start_angle: f64,
     end_angle: f64,
-    color_line: ColorLine,
+    mut color_line: ColorLine,
 ) -> anyhow::Result<()> {
+    if !prepare_color_stops(&mut color_line) {
+        // When: prepare_color_stops leaves color_line with no usable stop, so
+        // the mesh would be empty and the clip is left untouched.
+        return Ok(());
+    }
+
     let (x1, y1, x2, y2) = context.clip_extents()?;
 
     let max_x = ((x1 - x0) * (x1 - x0)).max((x2 - x0) * (x2 - x0));
@@ -518,16 +677,23 @@ pub fn paint_sweep_gradient(
     Ok(())
 }
 
+/// Sort `color_line`'s stops and rescale their offsets onto 0..=1.
+///
+/// Returns the original smallest and largest offsets so callers can
+/// re-interpolate their anchors across the span the stops actually covered. An
+/// empty color line reports the identity span rather than indexing stop zero,
+/// which keeps the function total for any caller. Offsets are ordered by
+/// `total_cmp`, so a non-finite offset cannot panic an unwrapped comparison.
 fn normalize_color_line(color_line: &mut ColorLine) -> (f64, f64) {
-    let mut smallest = color_line.color_stops[0].offset;
-    let mut largest = smallest;
-
-    color_line.color_stops.sort_by(|a, b| a.offset.partial_cmp(&b.offset).unwrap());
-
-    for stop in &color_line.color_stops[1..] {
-        smallest = smallest.min(stop.offset);
-        largest = largest.max(stop.offset);
+    if color_line.color_stops.is_empty() {
+        // When: color_stops is empty, so there is no offset span to measure and
+        // the identity range leaves any caller's anchors unchanged.
+        return (0., 1.);
     }
+
+    color_line.color_stops.sort_by(|a, b| a.offset.total_cmp(&b.offset));
+    let smallest = color_line.color_stops[0].offset;
+    let largest = color_line.color_stops[color_line.color_stops.len() - 1].offset;
 
     if smallest != largest {
         for stop in &mut color_line.color_stops {

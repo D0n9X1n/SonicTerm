@@ -36,6 +36,7 @@ fn ownership_preserving_errors_are_send() {
     assert_send::<CommitError>();
     assert_send::<TransferError>();
     assert_send::<CommittedTransferError>();
+    assert_send::<CommittedBatchTransferError>();
 }
 
 #[test]

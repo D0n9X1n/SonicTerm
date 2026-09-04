@@ -913,6 +913,16 @@ impl Drop for OwnerGuard {
     }
 }
 
+/// Install a provisional pane owner only after every committed charge moves.
+fn install_transferred_pane_owner(
+    pane: &mut PaneState,
+    provisional: OwnerGuard,
+) -> Result<Option<OwnerGuard>, sonicterm_resource::CommittedBatchTransferError> {
+    let owner = provisional.id();
+    sonicterm_resource::CommittedReservation::transfer_batch(pane.charges.values_mut(), owner)?;
+    Ok(pane.owner.replace(provisional))
+}
+
 /// One validated active-pane transition awaiting its visual feedback frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PaneFocusChange {
@@ -5393,11 +5403,12 @@ impl App {
     /// window it now lives in, so this needs no hook at the move sites: a pane
     /// that never moved has a matching parent and costs one snapshot read.
     ///
-    /// The old owner is closed rather than abandoned. Its charges are dropped
-    /// with it and re-opened against the new owner on the next charging pass,
-    /// which is correct precisely because charges are derived from a
-    /// measurement rather than accumulated — a transferred balance could
-    /// drift, a re-measured one cannot.
+    /// The old owner is closed rather than abandoned. Existing committed
+    /// charges move as one class-preserving batch before the guard changes, so
+    /// parser contention cannot leave the destination owner empty. The fresh
+    /// owner has the same pane limits, so a rejection means an internal ledger
+    /// invariant failed; the owned provisional guard closes before that failure
+    /// stops the move, while every token remains on the old owner.
     pub(super) fn reattribute_pane_owners(&mut self) {
         let window_ids: Vec<WindowId> = self.windows.keys().copied().collect();
         for window_id in window_ids {
@@ -5423,27 +5434,48 @@ impl App {
                 .collect();
 
             for pane_id in misattributed {
-                // Drop the charges before closing: the governor refuses to
-                // finish closing an owner that still holds any.
-                let stale = {
+                let new_owner = match self.governor.create_child(
+                    window_owner,
+                    OwnerKind::AppPane,
+                    pane_owner_limits(),
+                ) {
+                    Ok(owner) => owner,
+                    Err(error) => {
+                        // When: `create_child` returns `Err(error)`, no provisional
+                        // owner exists and source attribution remains unchanged.
+                        tracing::warn!(
+                            target: "memory",
+                            ?error,
+                            pane = pane_id,
+                            "pane owner reattribution could not create its destination owner"
+                        );
+                        continue;
+                    }
+                };
+                let provisional = OwnerGuard::new(self.governor.clone(), new_owner);
+                let transferred = {
                     let Some(pane) =
                         self.windows.get_mut(&window_id).and_then(|w| w.panes.get_mut(&pane_id))
                     else {
-                        // When: `pane_id` vanished after the list was taken, so
-                        // clearing charges would touch a pane already gone.
+                        // When: `pane_id` vanished after the owner was created, the
+                        // empty provisional guard below must close it immediately.
+                        drop(provisional);
                         continue;
                     };
-                    pane.charges.clear();
-                    pane.owner.take()
+                    install_transferred_pane_owner(pane, provisional)
                 };
-                // Dropping the guard closes the old owner and reports a
-                // failure to close. Charges were cleared above, in the same
-                // statement that took it, so `finish_close` can succeed.
-                drop(stale);
+                match transferred {
+                    Ok(stale) => drop(stale),
+                    Err(error) => {
+                        panic!(
+                            "pane {pane_id} owner reattribution violated governor invariants: {error}"
+                        );
+                    }
+                }
             }
         }
-        // Panes left without an owner above are re-registered under the window
-        // they now live in.
+        // Ownerless panes may coexist with moved panes when a populated window
+        // is first registered; adopt them after reattribution finishes.
         self.reconcile_pane_owners();
     }
 
