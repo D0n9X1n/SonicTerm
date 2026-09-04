@@ -325,7 +325,7 @@ rejects duplicate names or tuples, recalculates hashes, and rejects unregistered
 `release-upload-paths.txt`. The release action uploads only the paths in that
 list.
 
-Windows release tests run:
+The Windows CI test shard runs:
 
 ```bash
 cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture
@@ -334,9 +334,10 @@ cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocaptur
 The gate requires WARP and allocator reporting. Production reserved bytes must
 be below 64 MiB. The largest block must be below 128 MiB. The
 `MemoryHints::MemoryUsage` candidate must reserve fewer bytes than the
-`MemoryHints::Performance` control under the same allocations. The workflow
-dependency is `unit-tests-windows → build-windows → publish`, so this gate
-blocks the MSI and publication.
+`MemoryHints::Performance` control under the same allocations. Release requires
+an exact successful `main` CI run for the tag commit before `build-windows`
+starts, so a failed gate blocks the MSI and publication without being rerun at
+tag time.
 
 Linux package verification builds both `.deb` and `.tar.gz` layouts. The runtime
 smoke runs them on X11/Xvfb and Wayland/Weston with Vulkan/lavapipe. It requires
@@ -348,14 +349,14 @@ The workflow does not perform Developer ID signing, notarization, or a packaged
 DMG launch smoke. The Windows workflow does not sign or install-run the MSI.
 Installer signing is therefore not a verified release invariant.
 
-Release validation repeats Cargo metadata, formatting, both Clippy modes,
-workspace and optional-SSH Rustdoc, and the declared-version, workflow,
-authored-comment, process-exit, and window-owner policy checks before any
-platform job starts. Release platform jobs then run workspace unit tests, the
-per-crate unit/build gate, release asset and note tests, Windows presentation and
-allocator tests, and Linux package smokes. Resource baselines, wiki publication
-tests, and coverage remain in normal CI described in
-[Development and Release](Development-and-Release).
+Release validation requires an exact completed successful `main` CI run for the
+tag commit, then validates every workspace package version and the release-asset
+tooling. It does not repeat the source, unit, integration, documentation,
+platform-runtime, allocator, coverage, or normal-CI package gates. The platform
+jobs start directly from that provenance boundary and perform only native
+release builds, package validation, MSI metadata validation, and Linux package
+smokes. Release Rust target builds do not read or write Rust caches; the Windows
+job may restore the vcpkg binary cache published immediately by normal CI.
 
 ### Source and check map
 
@@ -622,7 +623,7 @@ workspace package 一致，并要求普通源码一致性 gate 通过。
 `release-assets.json`、确定性 `SHA256SUMS.txt` 和 `release-upload-paths.txt`。发布 action
 只上传该路径清单中的文件。
 
-Windows 发布测试运行：
+Windows CI tests shard 运行：
 
 ```bash
 cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture
@@ -630,8 +631,8 @@ cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocaptur
 
 该闸门要求 WARP 和分配器报告可用。生产策略预留字节必须低于 64 MiB，最大块必须低于
 128 MiB。在相同分配负载下，`MemoryHints::MemoryUsage` 候选必须比
-`MemoryHints::Performance` 对照预留更少字节。工作流依赖关系为
-`unit-tests-windows → build-windows → publish`，因此失败会阻止 MSI 和发布。
+`MemoryHints::Performance` 对照预留更少字节。Release 要求 tag commit 存在完全相同且成功的
+`main` CI run，之后才启动 `build-windows`，因此失败会阻止 MSI 和发布，且无需在 tag 阶段重跑。
 
 Linux 包验证会构建 `.deb` 与 `.tar.gz` 两种布局。运行冒烟测试在 X11/Xvfb 和
 Wayland/Weston 上使用 Vulkan/lavapipe。测试要求窗口创建、GPU 初始化、`/bin/sh` PTY
@@ -641,11 +642,12 @@ macOS 打包会检查二进制架构和应用的 ad-hoc 签名。工作流没有
 公证或 DMG 打包后启动冒烟测试。Windows 工作流也没有签名 MSI 或安装运行它。因此，
 安装包签名不是当前已验证的发布不变量。
 
-发布验证会在任何平台 job 开始前重复 Cargo metadata、格式、两种 Clippy、workspace 与
-optional-SSH Rustdoc，以及声明版本、工作流、第一方注释、process-exit 和 window-owner
-策略检查。之后各平台发布 job 运行 workspace 单元测试、逐 crate 单元/构建闸门、发布资产与
-说明测试、Windows 呈现和分配器测试，以及 Linux 包冒烟测试。资源基线、Wiki 发布测试和
-覆盖率仍由普通 CI 负责，详见[开发与发布](Development-and-Release)。
+发布验证要求 tag commit 存在完全相同、已完成且成功的 `main` CI run，随后核对每个
+workspace package 版本并验证 release asset 工具。它不会重复源码、unit、integration、文档、
+平台 runtime、allocator、coverage 或普通 CI 的 package gate。各平台 job 从该 provenance
+边界直接开始，只执行原生 release build、package 验证、MSI metadata 验证与 Linux package
+smoke。Release Rust target build 不读写 Rust cache；Windows job 可以恢复由普通 CI 立即发布的
+vcpkg binary cache。
 
 ### 源码与检查索引
 

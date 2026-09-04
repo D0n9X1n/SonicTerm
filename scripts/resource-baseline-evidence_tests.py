@@ -534,51 +534,93 @@ class ExecutorDeadlineTests(unittest.TestCase):
 
         self.assertEqual(invalid, [])
 
+    def test_every_step_timeout_is_reachable_inside_its_job(self):
+        invalid = []
+        workflows = sorted((_HERE.parent / ".github" / "workflows").glob("*.yml"))
+        for path in workflows:
+            text = path.read_text(encoding="utf-8").split("\njobs:\n", 1)[1]
+            parts = re.split(r"(?m)^  ([A-Za-z0-9_-]+):\n", text)[1:]
+            for index in range(0, len(parts), 2):
+                name, job = parts[index : index + 2]
+                job_timeout = int(re.search(r"(?m)^    timeout-minutes: (\d+)$", job).group(1))
+                for step_timeout in re.findall(r"(?m)^        timeout-minutes: (\d+)$", job):
+                    if int(step_timeout) >= job_timeout:
+                        invalid.append((path.name, name, job_timeout, int(step_timeout)))
+
+        self.assertEqual(invalid, [])
+
     def test_ci_jobs_keep_outer_timeouts(self):
         workflow = (_HERE.parent / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
         )
-        self.assertIn("runs-on: ${{ matrix.os }}\n    timeout-minutes: 120", workflow)
-        self.assertIn("runs-on: ubuntu-latest\n    timeout-minutes: 90", workflow)
+        expected = {
+            "macos-core": 45,
+            "macos-coverage": 35,
+            "macos": 5,
+            "windows-native": 50,
+            "windows-checks": 45,
+            "windows-tests": 45,
+            "windows": 5,
+            "linux-core": 45,
+            "linux-packages": 45,
+            "linux": 5,
+        }
+        for name, minutes in expected.items():
+            with self.subTest(job=name):
+                job = workflow.split("  {}:\n".format(name), 1)[1]
+                job = re.split(r"(?m)^  [A-Za-z0-9_-]+:\n", job, maxsplit=1)[0]
+                self.assertIn("timeout-minutes: {}".format(minutes), job.split("    steps:\n", 1)[0])
 
     def test_slow_ci_stages_keep_cold_cache_headroom(self):
         workflow = (_HERE.parent / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
         )
         expected = {
-            "Install Cairo for Windows": 30,
-            "Run unit tests": 25,
-            "Run per-crate unit/build gate": 45,
-            "Capture real resource baseline evidence": 10,
-            "Test MSI validator": 5,
-            "Install cargo-llvm-cov": 10,
-            "Run Rust logic coverage gate": 25,
-            "Run workspace unit tests": 20,
-            "Build Linux release binary": 30,
-            "Build and validate Linux packages": 15,
+            ("macos-core", "Run workspace unit and integration tests"): 35,
+            ("macos-core", "Capture real resource baseline evidence"): 10,
+            ("macos-coverage", "Install cargo-llvm-cov"): 10,
+            ("macos-coverage", "Run Rust logic coverage gate"): 25,
+            ("windows-native", "Install Cairo for Windows"): 30,
+            ("windows-tests", "Run workspace unit and integration tests"): 35,
+            ("windows-tests", "Capture real resource baseline evidence"): 10,
+            ("windows-tests", "Test MSI validator"): 5,
+            ("linux-core", "Run workspace unit and integration tests"): 35,
+            ("linux-packages", "Build Linux release binary"): 30,
+            ("linux-packages", "Build and validate Linux packages"): 15,
         }
-        for name, minutes in expected.items():
-            with self.subTest(name=name):
-                step = workflow.split("- name: {}".format(name), 1)[1]
+        for (job_name, step_name), minutes in expected.items():
+            with self.subTest(job=job_name, step=step_name):
+                job = workflow.split("  {}:\n".format(job_name), 1)[1]
+                job = re.split(r"(?m)^  [A-Za-z0-9_-]+:\n", job, maxsplit=1)[0]
+                step = job.split("- name: {}".format(step_name), 1)[1]
                 step = re.split(r"(?m)^      - ", step, maxsplit=1)[0]
                 self.assertIn("timeout-minutes: {}".format(minutes), step)
+
+        native = workflow.split("  windows-native:\n", 1)[1]
+        native = re.split(r"(?m)^  [A-Za-z0-9_-]+:\n", native, maxsplit=1)[0]
+        job_timeout = int(re.search(r"(?m)^    timeout-minutes: (\d+)$", native).group(1))
+        step_timeouts = [
+            int(value)
+            for value in re.findall(r"(?m)^        timeout-minutes: (\d+)$", native)
+        ]
+        self.assertGreaterEqual(job_timeout, sum(step_timeouts))
 
     def test_slow_release_stages_keep_cold_cache_headroom(self):
         workflow = (_HERE.parent / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
         )
+        validation = workflow.split("  validate-release-tag:\n", 1)[1]
+        validation = re.split(r"(?m)^  [A-Za-z0-9_-]+:\n", validation, maxsplit=1)[0]
+        self.assertIn("timeout-minutes: 35", validation.split("    steps:\n", 1)[0])
+
         expected = {
-            ("unit-tests-mac", "Run per-crate unit/build gate"): 30,
-            ("unit-tests-windows", "Run unit tests"): 30,
-            ("unit-tests-windows", "Run per-crate unit/build gate"): 60,
-            ("unit-tests-linux", "Run per-crate unit/build gate"): 30,
             ("build-mac-x86_64", "Build x86_64"): 30,
-            ("build-mac-aarch64", "Build aarch64"): 20,
+            ("build-mac-aarch64", "Build aarch64"): 30,
             ("build-windows", "Install cargo-wix"): 10,
             ("build-windows", "Install WiX Toolset"): 10,
-            ("build-windows", "Build release binary"): 20,
+            ("build-windows", "Build release binary"): 30,
             ("build-windows", "Validate MSI metadata"): 5,
-            ("package-linux", "Build Linux release binary"): 20,
+            ("package-linux", "Build Linux release binary"): 30,
         }
         for (job_name, step_name), minutes in expected.items():
             with self.subTest(job=job_name, step=step_name):
