@@ -11,7 +11,7 @@ updates:
     # happen via PR when we actually want them.
     allow:
       - dependency-type: "all"
-        update-type: "version-update:semver-patch"
+        update-types: ["version-update:semver-patch"]
     groups:
       patch-updates:
         update-types: ["patch"]
