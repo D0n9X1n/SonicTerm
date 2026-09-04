@@ -1,15 +1,8 @@
-//! Instanced text pipeline for the GPU glyph atlas.
+//! Legacy alpha-only text pipeline retained for source compatibility.
 //!
-//! Consumes one [`crate::text_pipeline::GlyphInstance`] per visible cell and draws a single
-//! triangle-strip per instance, sampling the atlas alpha and modulating
-//! by the per-instance color. This is the half of B3 that replaces the
-//! pre-T9 per-frame text shape + atlas-rebuild on the terminal grid.
-//!
-//! Post-T14 (wezterm-takeover G3): all chrome strings (tab titles,
-//! palette, search bar, IME, drag chip) also flow through this
-//! pipeline via [`crate::chrome_text::layout`] — the same instance
-//! shape, the same atlas, the same draw call. No second pipeline, no
-//! second pass, no glyphon.
+//! No production renderer constructs this type. The live renderer uses
+//! `wezterm_pipeline::WeztermPipeline`, which owns monochrome, LCD subpixel,
+//! and color-glyph presentation. This legacy shader samples scalar alpha only.
 
 use wgpu::{
     BindGroup, BindGroupLayout, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer,
@@ -24,13 +17,9 @@ use wgpu::{
 // `sonicterm_gpu::text_pipeline::GlyphInstance` still resolves.
 pub use sonicterm_text::GlyphInstance;
 
-/// WGSL for the text pass. The vertex shader builds a quad from a
-/// triangle-strip's vertex_index, mapping (0,1,2,3) -> the four
-/// corners of `rect` and corresponding `uv` corners. The fragment
-/// shader samples coverage and outputs premultiplied color so the standard
-/// "src1, 1-srcA" blend produces correct text-on-background. On Windows and
-/// FreeType LCD paths, subpixel glyphs keep RGB coverage instead of being
-/// collapsed to grayscale.
+/// WGSL for the legacy alpha-only text pass. The vertex shader builds a
+/// quad from the triangle-strip index; the fragment shader samples scalar
+/// alpha and emits premultiplied foreground color.
 const SHADER: &str = r#"
 struct InstanceIn {
     @location(0) rect:  vec4<f32>,
@@ -89,9 +78,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// GPU pipeline + instance buffer for the text pass. Created once at
-/// startup; per-frame the caller writes new instances and issues a
-/// single `draw(0..4, 0..N)`.
+/// Legacy alpha-only GPU pipeline and instance buffer.
+///
+/// Retained for source compatibility; production callers use `wezterm_pipeline::WeztermPipeline`
+/// so LCD and color coverage stay intact.
+#[doc(hidden)]
 pub struct TextPipeline {
     pipeline: RenderPipeline,
     /// Bind group layout the caller uses to construct the atlas bind group

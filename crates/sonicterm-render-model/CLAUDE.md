@@ -1,15 +1,15 @@
 # sonicterm-render-model
 
 ## Purpose
-Renderer-agnostic frame model. This crate describes panes, geometry,
-input/render data, and painter commands without depending on wgpu or
-winit.
+Renderer-agnostic frame model. This crate describes panes, geometry, and
+input/render data without depending on wgpu or winit. Its dormant painter
+trait remains only for source compatibility.
 
 ## Key files
 - `pane_render.rs` - pane frame/model assembly.
 - `geometry.rs` - rectangles, sizes, and layout helpers.
 - `inputs.rs` - render input structs from app/grid/UI state.
-- `painter.rs` - small, currently unimplemented drawing-command abstraction.
+- `painter.rs` - legacy, unimplemented drawing-command compatibility trait.
 - `lib.rs` - public exports.
 
 ## Local gate

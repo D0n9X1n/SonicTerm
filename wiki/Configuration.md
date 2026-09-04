@@ -17,8 +17,12 @@ The first launch creates this file and seeds editable examples under
 checks the matching user directory, then the bundled `assets/` directory. A
 path-like value is used directly.
 
-SonicTerm tolerates and preserves unknown TOML keys. Unknown keys do not change
-behavior unless the running build implements them.
+SonicTerm tolerates unknown TOML keys, and its supported runtime persistence
+commands preserve them along with comments and formatting. Unknown keys do not
+change behavior unless the running build implements them. The Rust `Config`
+type's canonical serializer retains top-level unknown keys but omits comments,
+source formatting, and unknown keys nested inside typed tables; it is not a
+format-preserving document editor.
 
 ### Supported keys and defaults
 
@@ -230,7 +234,9 @@ SonicTerm 在所有平台使用同一个配置文件：
 `theme` 和 `keymap` 可以写名称，也可以写 TOML 路径。使用名称时，SonicTerm
 先查找用户目录，再查找内置 `assets/` 目录。看起来像路径的值会直接使用。
 
-SonicTerm 允许并保留 TOML 中的未知 key。当前 build 没有实现的未知 key 不会改变行为。
+SonicTerm 允许 TOML 中的未知 key，受支持的运行时持久化命令会连同注释和格式一起保留它们。
+当前 build 没有实现的未知 key 不会改变行为。Rust `Config` 类型的规范化 serializer 会保留
+顶层未知 key，但会省略注释、源格式和类型化表内部的未知 key；它不是保留格式的文档编辑器。
 
 ### 支持的 key 与默认值
 

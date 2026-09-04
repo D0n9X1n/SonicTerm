@@ -43,9 +43,9 @@
 //! every mouse-move sample, which would mean a full re-shape of the
 //! whole viewport ~60×/sec while dragging.
 //!
-//! Atlas churn is guarded twice: every entry records the atlas eviction
-//! epoch it was built against, and the renderer invalidates the cache when
-//! eviction occurs during frame assembly. Epoch-gated lookups prevent stale
+//! Atlas churn is guarded twice: every entry records the atlas content
+//! identity it was built against, and the renderer invalidates the cache when
+//! eviction occurs during frame assembly. Identity-gated lookups prevent stale
 //! UV reuse even if a future caller misses the wholesale invalidation hook.
 //! Bounding the cache by visible row count keeps the memory cost trivial.
 
@@ -103,7 +103,7 @@ pub struct CachedRow {
 
 #[derive(Clone, Debug)]
 struct CachedRowEntry {
-    atlas_epoch: u64,
+    atlas_identity: u64,
     row: CachedRow,
 }
 
@@ -222,20 +222,20 @@ impl RowGlyphCache {
         self.entries.is_empty()
     }
 
-    /// Look up a cached row by key and atlas eviction epoch. UV-bearing
-    /// entries built before an eviction are rejected because their atlas
-    /// rectangles may now belong to unrelated glyphs.
+    /// Look up a cached row by key and atlas content identity. UV-bearing
+    /// entries built before an eviction or reset are rejected because their
+    /// atlas rectangles may now belong to unrelated glyphs.
     #[inline]
     pub fn get(
         &self,
         pane_id: PaneId,
         abs_row: u64,
         hash: u64,
-        atlas_epoch: u64,
+        atlas_identity: u64,
     ) -> Option<&CachedRow> {
         self.entries
             .get(&(pane_id, abs_row, hash))
-            .filter(|entry| entry.atlas_epoch == atlas_epoch)
+            .filter(|entry| entry.atlas_identity == atlas_identity)
             .map(|entry| &entry.row)
     }
 
@@ -249,13 +249,13 @@ impl RowGlyphCache {
         pane_id: PaneId,
         abs_row: u64,
         hash: u64,
-        atlas_epoch: u64,
+        atlas_identity: u64,
         row: CachedRow,
     ) {
         if self.entries.len() >= self.cap {
             self.entries.clear();
         }
-        self.entries.insert((pane_id, abs_row, hash), CachedRowEntry { atlas_epoch, row });
+        self.entries.insert((pane_id, abs_row, hash), CachedRowEntry { atlas_identity, row });
     }
 }
 

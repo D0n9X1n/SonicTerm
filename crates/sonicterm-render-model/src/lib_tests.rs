@@ -10,6 +10,33 @@ fn exports_geometry_helpers() {
     assert_eq!(snap_to_device_pixels((1.0, 2.0, 3.0, 4.0), 2.0), (1.0, 2.0, 3.0, 4.0));
 }
 
+/// The legacy drawing-command trait remains implementable by compatibility callers.
+#[test]
+fn legacy_painter_contract_remains_implementable() {
+    struct Recorder {
+        quads: usize,
+        text: String,
+    }
+
+    impl crate::painter::Painter for Recorder {
+        fn draw_quad(&mut self, _rect: PixelRect, _color: [f32; 4]) {
+            self.quads += 1;
+        }
+
+        fn draw_text(&mut self, _rect: PixelRect, text: &str, _color: [f32; 4]) {
+            self.text.push_str(text);
+        }
+    }
+
+    let rect = PixelRect { x: 1, y: 2, w: 3, h: 4 };
+    let mut painter = Recorder { quads: 0, text: String::new() };
+    crate::painter::Painter::draw_quad(&mut painter, rect, [0.0; 4]);
+    crate::painter::Painter::draw_text(&mut painter, rect, "legacy", [1.0; 4]);
+
+    assert_eq!(painter.quads, 1);
+    assert_eq!(painter.text, "legacy");
+}
+
 #[test]
 fn damage_rect_clips_and_unions_damage() {
     let bounds = PixelRect { x: 0, y: 0, w: 100, h: 80 };

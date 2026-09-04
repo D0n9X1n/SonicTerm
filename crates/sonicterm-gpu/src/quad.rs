@@ -180,8 +180,8 @@ pub fn premultiply(rgba: [f32; 4]) -> [f32; 4] {
 /// `text_pipeline`). Using `wgpu::BlendState::ALPHA_BLENDING` (straight-alpha
 /// factors `src=SrcAlpha, dst=OneMinusSrcAlpha`) double-multiplies the
 /// alpha, which on transparent Win11 Mica surfaces makes dark tab chrome
-/// blend nearly into the clear backdrop — the invisible-tab-bar bug
-/// tracked.
+/// blend nearly into the clear backdrop. The production glyph pipeline uses
+/// the same premultiplied factors.
 #[must_use]
 pub fn premultiplied_alpha_blend() -> wgpu::BlendState {
     wgpu::BlendState {

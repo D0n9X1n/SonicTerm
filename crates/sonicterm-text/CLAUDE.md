@@ -19,6 +19,8 @@ cargo build -p sonicterm-text
 - Cache keys must account for font identity, size, weight, style, DPI, and
   glyph variants that change output.
 - Avoid atlas allocation or eviction surprises on the hottest draw path.
+- UV-bearing caches use `GlyphAtlas::identity()`, not the resettable eviction
+  counter, and still clear promptly when their owning seam changes.
 - The atlas is a fixed-size texture plus an index. `retained_amount().bytes`
   is the texture capacity and is constant by construction; only `items`
   moves. A test bounding `bytes` compares a constant to itself and would
