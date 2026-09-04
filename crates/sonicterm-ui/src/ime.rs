@@ -63,10 +63,9 @@ impl ImeCursorThrottle {
 /// Pure state machine driven by `winit::event::Ime` events.
 #[derive(Debug, Default, Clone)]
 pub struct ImeState {
-    /// True between an IME `Enabled` event and `Disabled`, OR while a
-    /// non-empty preedit string is in flight. While true, callers should
-    /// suppress regular `KeyboardInput` character forwarding so the
-    /// composition isn't double-typed.
+    /// True only while a non-empty preedit string is in flight. `Enabled`
+    /// alone leaves this false; while true, callers suppress regular
+    /// `KeyboardInput` forwarding so composition text is not typed twice.
     composing: bool,
     /// The current preedit string from the IME. Empty when not composing.
     preedit: String,
