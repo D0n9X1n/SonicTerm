@@ -20,7 +20,7 @@ env:
   RUST_BACKTRACE: short
   CARGO_INCREMENTAL: 0
   CARGO_LLVM_COV_VERSION: "0.9.0"
-  CI_CACHE_NAMESPACE: ci-v2
+  CI_CACHE_NAMESPACE: ci-v3
 
 jobs:
   macos-core:

@@ -164,7 +164,8 @@ limit is the final guard around that collector.
 The stable `ubuntu 22.04 / workspace, packages, X11, Wayland` aggregate requires
 both `linux-core` and `linux-packages`, using the same fail-closed result check as
 the macOS and Windows aggregates. The core shard installs the compile-time Linux
-dependencies and runs format, Clippy, Rustdoc, the one-pass workspace test gate,
+dependencies plus Vulkan/lavapipe for GPU tests and adapter probes, then runs
+format, Clippy, Rustdoc, the one-pass workspace test gate,
 authored-comment, exit, Rust-version, window-owner, workflow supply-chain,
 Linux-package, release-asset, release-note, and wiki-publisher checks.
 
@@ -520,7 +521,8 @@ stdout/stderr，并继续写入校验和；工作流的十分钟限制是采集�
 
 稳定的 `ubuntu 22.04 / workspace, packages, X11, Wayland` 汇总 job 同时依赖 `linux-core`
 与 `linux-packages`，并使用与 macOS、Windows 相同的 fail-closed 结果检查。core shard 安装
-Linux 编译依赖，并运行 format、Clippy、Rustdoc、一次性 workspace 测试、第一方注释、exit、
+Linux 编译依赖，并为 GPU 测试和 adapter probe 安装 Vulkan/lavapipe，随后运行 format、Clippy、
+Rustdoc、一次性 workspace 测试、第一方注释、exit、
 Rust 版本、window-owner、工作流供应链、Linux package、release-asset、release-note 与 Wiki
 publisher gate。
 

@@ -449,7 +449,7 @@ class RepositoryTests(unittest.TestCase):
         text = (_HERE.parent / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
         )
-        self.assertIn("CI_CACHE_NAMESPACE: ci-v2", text)
+        self.assertIn("CI_CACHE_NAMESPACE: ci-v3", text)
         self.assertEqual(text.count("uses: Swatinem/rust-cache@"), 6)
         self.assertEqual(text.count("shared-key: ${{ env.CI_CACHE_NAMESPACE }}-"), 6)
         self.assertEqual(text.count("add-job-id-key: false"), 6)
@@ -475,7 +475,7 @@ class RepositoryTests(unittest.TestCase):
         release = (_HERE.parent / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
         )
-        self.assertIn("CI_CACHE_NAMESPACE: ci-v2", release)
+        self.assertIn("CI_CACHE_NAMESPACE: ci-v3", release)
         self.assertIn("key: ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-", release)
 
     def test_linux_core_installs_gpu_runtime_dependencies(self):
