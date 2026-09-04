@@ -9,11 +9,12 @@ fn enter_encodes_carriage_return() {
 }
 
 #[test]
-fn shift_enter_encodes_escape_carriage_return() {
-    // Legacy (no kitty flags): Shift+Enter falls back to ESC+CR.
+fn shift_enter_retains_legacy_carriage_return() {
+    // Legacy terminals cannot distinguish Shift+Enter, so modifiers must not
+    // invent an escape sequence until an application negotiates one.
     assert_eq!(
         encode_logical(&Key::Named(NamedKey::Enter), ModifiersState::SHIFT, 0, false),
-        Some(b"\x1b\r".to_vec())
+        Some(b"\r".to_vec())
     );
 }
 
@@ -250,7 +251,16 @@ fn event<'a>(
     state: ElementState,
     repeat: bool,
 ) -> KeyEventView<'a> {
-    KeyEventView { physical_key, logical_key, text, location, state, repeat }
+    KeyEventView {
+        logical_key,
+        unmodified_character: key_character(logical_key).map(unshift_ascii),
+        physical_key,
+        text,
+        text_with_all_modifiers: text,
+        location,
+        state,
+        repeat,
+    }
 }
 
 /// Tab variants must remain distinguishable in both legacy and Kitty modes.
@@ -270,6 +280,10 @@ fn backtab_encodes_legacy_and_kitty_forms() {
             false,
         ),
         Some(b"\x1b[9;6u".to_vec()),
+    );
+    assert_eq!(
+        encode_logical(&tab, ModifiersState::SHIFT | ModifiersState::CONTROL, 0, false,),
+        Some(b"\x1b[Z".to_vec()),
     );
 }
 
@@ -427,7 +441,7 @@ fn modify_other_keys_levels_have_distinct_compatibility_behavior() {
     );
     assert_eq!(
         encode_event(a, ctrl, 0, KeyboardModes::new(false, false, false, false, 1)),
-        Some(b"\x1b[27;5;97~".to_vec()),
+        Some(vec![0x01]),
     );
 }
 
@@ -476,7 +490,7 @@ fn normal_keypad_text_preserves_modifiers() {
     );
     assert_eq!(
         encode_event(add, ModifiersState::SUPER, 0, KeyboardModes::default()),
-        Some(b"\x1b[61;9u".to_vec()),
+        Some(b"\x1b[43;9u".to_vec()),
     );
 }
 
@@ -487,6 +501,94 @@ fn extended_function_keys_have_legacy_or_csi_u_encodings() {
     assert_eq!(fk(NamedKey::F24, ModifiersState::empty()), b"\x1b[45~".to_vec());
     assert_eq!(fk(NamedKey::F25, ModifiersState::empty()), b"\x1b[57388u".to_vec());
     assert_eq!(fk(NamedKey::F35, ModifiersState::empty()), b"\x1b[57398u".to_vec());
+}
+
+/// Enhanced Kitty function keys use the canonical non-conflicting forms.
+#[test]
+fn kitty_function_keys_follow_the_protocol_table() {
+    for (key, expected) in [
+        (NamedKey::F1, b"\x1b[P".as_slice()),
+        (NamedKey::F3, b"\x1b[13~".as_slice()),
+        (NamedKey::F13, b"\x1b[57376u".as_slice()),
+        (NamedKey::F24, b"\x1b[57387u".as_slice()),
+        (NamedKey::F35, b"\x1b[57398u".as_slice()),
+    ] {
+        assert_eq!(
+            encode_logical(&Key::Named(key), ModifiersState::empty(), KITTY_DISAMBIGUATE, false,),
+            Some(expected.to_vec()),
+            "{key:?}",
+        );
+    }
+    assert_eq!(fk(NamedKey::F3, ModifiersState::empty()), b"\x1bOR".to_vec());
+}
+
+/// Layout-aware unmodified keys drive Kitty primary codes; PC-101 positions
+/// appear only in the optional base-layout subfield.
+#[test]
+fn kitty_primary_and_alternate_codes_keep_layout_roles_distinct() {
+    let shifted = Key::Character("(".into());
+    let mut german_eight = event(
+        &shifted,
+        PhysicalKey::Code(KeyCode::Digit8),
+        Some("("),
+        KeyLocation::Standard,
+        ElementState::Pressed,
+        false,
+    );
+    german_eight.unmodified_character = Some('8');
+    assert_eq!(
+        encode_event(
+            german_eight,
+            ModifiersState::SHIFT,
+            KITTY_REPORT_ALTERNATES | KITTY_REPORT_ALL | KITTY_REPORT_TEXT,
+            KeyboardModes::default(),
+        ),
+        Some(b"\x1b[56:40;2;40u".to_vec()),
+    );
+
+    let cyrillic = Key::Character("с".into());
+    let mut cyrillic_c = event(
+        &cyrillic,
+        PhysicalKey::Code(KeyCode::KeyC),
+        Some("с"),
+        KeyLocation::Standard,
+        ElementState::Pressed,
+        false,
+    );
+    cyrillic_c.unmodified_character = Some('с');
+    assert_eq!(
+        encode_event(
+            cyrillic_c,
+            ModifiersState::CONTROL,
+            KITTY_DISAMBIGUATE | KITTY_REPORT_ALTERNATES,
+            KeyboardModes::default(),
+        ),
+        Some(b"\x1b[1089::99;5u".to_vec()),
+    );
+}
+
+/// Legacy C0 keys retain the established compatibility table until a client
+/// negotiates Kitty disambiguation or xterm modifyOtherKeys.
+#[test]
+fn legacy_c0_modifier_table_does_not_invent_csi_u_sequences() {
+    for (key, mods, expected) in [
+        (NamedKey::Enter, ModifiersState::CONTROL, b"\r".as_slice()),
+        (NamedKey::Escape, ModifiersState::SHIFT, b"\x1b".as_slice()),
+        (NamedKey::Backspace, ModifiersState::SHIFT, b"\x7f".as_slice()),
+        (NamedKey::Tab, ModifiersState::CONTROL, b"\t".as_slice()),
+        (NamedKey::Tab, ModifiersState::ALT | ModifiersState::SHIFT, b"\x1b\x1b[Z".as_slice()),
+    ] {
+        assert_eq!(encode_logical(&Key::Named(key), mods, 0, false), Some(expected.to_vec()));
+    }
+    assert_eq!(
+        encode_logical(
+            &Key::Named(NamedKey::Space),
+            ModifiersState::CONTROL | ModifiersState::SHIFT,
+            0,
+            false,
+        ),
+        Some(vec![0]),
+    );
 }
 
 /// Kitty event, alternate-key, text, and keypad fields must use protocol-defined forms.
@@ -555,7 +657,7 @@ fn kitty_progressive_flags_encode_complete_event_data() {
             KITTY_REPORT_EVENTS,
             KeyboardModes::default(),
         ),
-        None,
+        Some(b"\x1b[97;1:3u".to_vec()),
     );
 
     let keypad_one_key = Key::Character("1".into());
@@ -625,7 +727,7 @@ fn kitty_progressive_flags_encode_complete_event_data() {
 fn kitty_event_reporting_covers_escape_without_report_all() {
     let escape_key = Key::Named(NamedKey::Escape);
     for (state, repeat, expected) in [
-        (ElementState::Pressed, false, b"\x1b[27u".as_slice()),
+        (ElementState::Pressed, false, b"\x1b".as_slice()),
         (ElementState::Pressed, true, b"\x1b[27;1:2u".as_slice()),
         (ElementState::Released, false, b"\x1b[27;1:3u".as_slice()),
     ] {
@@ -647,6 +749,70 @@ fn kitty_event_reporting_covers_escape_without_report_all() {
             Some(expected.to_vec()),
         );
     }
+}
+
+/// Event reporting leaves an ordinary press as text but distinguishes its
+/// repeat and release with Kitty event-type fields.
+#[test]
+fn kitty_event_reporting_distinguishes_text_key_lifecycle() {
+    let a_key = Key::Character("a".into());
+    for (state, repeat, expected) in [
+        (ElementState::Pressed, false, b"a".as_slice()),
+        (ElementState::Pressed, true, b"\x1b[97;1:2u".as_slice()),
+        (ElementState::Released, false, b"\x1b[97;1:3u".as_slice()),
+    ] {
+        let a = event(
+            &a_key,
+            PhysicalKey::Code(KeyCode::KeyA),
+            (state == ElementState::Pressed).then_some("a"),
+            KeyLocation::Standard,
+            state,
+            repeat,
+        );
+        assert_eq!(
+            encode_event(a, ModifiersState::empty(), KITTY_REPORT_EVENTS, KeyboardModes::default(),),
+            Some(expected.to_vec()),
+        );
+    }
+}
+
+/// Legacy encoding preserves consumed AltGr text but never drops Control from
+/// a non-ASCII command chord that has no C0 representation.
+#[test]
+fn legacy_layout_text_separates_altgr_from_control_chords() {
+    let at_key = Key::Character("@".into());
+    let mut altgr_at = event(
+        &at_key,
+        PhysicalKey::Code(KeyCode::KeyQ),
+        Some("@"),
+        KeyLocation::Standard,
+        ElementState::Pressed,
+        false,
+    );
+    altgr_at.unmodified_character = Some('q');
+    assert_eq!(
+        encode_event(
+            altgr_at,
+            ModifiersState::CONTROL | ModifiersState::ALT,
+            0,
+            KeyboardModes::default(),
+        ),
+        Some(b"@".to_vec()),
+    );
+
+    let cyrillic_key = Key::Character("с".into());
+    let cyrillic_control = event(
+        &cyrillic_key,
+        PhysicalKey::Code(KeyCode::KeyC),
+        None,
+        KeyLocation::Standard,
+        ElementState::Pressed,
+        false,
+    );
+    assert_eq!(
+        encode_event(cyrillic_control, ModifiersState::CONTROL, 0, KeyboardModes::default(),),
+        Some(b"\x1b[1089;5u".to_vec()),
+    );
 }
 
 /// Disambiguation must not turn an unmodified text-producing Space into a key escape.

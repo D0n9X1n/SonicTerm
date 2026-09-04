@@ -3,7 +3,7 @@
 //! dispatch.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU32, AtomicU64, Ordering},
@@ -1021,9 +1021,9 @@ pub struct WindowState {
     pub select_anchor: (u64, u16),
     pub copy_mode: Option<CopyModeState>,
     pub modifiers: ModifiersState,
-    /// Physical keys whose press reached the PTY and may therefore emit a
-    /// matching Kitty release event instead of an orphaned release.
-    pub pty_pressed_keys: HashMap<PhysicalKey, u64>,
+    /// Physical keys whose press reached each listed PTY target and may
+    /// therefore emit matching Kitty repeat/release events to the same set.
+    pub pty_pressed_keys: HashMap<PhysicalKey, BTreeSet<u64>>,
     // `cursor_visible` lives on `PaneState`, not here: its per-pane Arc travels
     // with the pane through tear-out. Read it via
     // `ws.panes.get(&active_pane).map(|p| p.cursor_visible.load(...))`.
@@ -2075,7 +2075,9 @@ pub use config_apply::{
     config_diff_needs_font_apply, renderer_scrollbar_mode_differs,
     renderer_subpixel_aa_mode_differs,
 };
-pub use key_encoding::{encode_logical, key_name, key_to_string, key_to_strings, KeyName};
+pub use key_encoding::{
+    encode_logical, encode_logical_with_modes, key_name, key_to_string, key_to_strings, KeyName,
+};
 
 fn init_tracing() {
     use tracing_subscriber::{fmt, EnvFilter};
@@ -3426,6 +3428,54 @@ impl App {
         self.broadcast_from(active_id, bytes);
     }
 
+    fn terminal_key_targets(&self, source_pane: u64) -> BTreeSet<u64> {
+        let mut targets = BTreeSet::from([source_pane]);
+        if matches!(
+            self.broadcast,
+            BroadcastState::On {
+                source_pane: broadcast_source,
+                ..
+            } if broadcast_source == source_pane
+        ) {
+            // A matching broadcast source includes
+            // every receiver so each can negotiate its own keyboard encoding.
+            targets.extend(self.broadcast_receivers());
+        }
+        targets
+    }
+
+    // Ordering: pane.kitty_flags and pane.keyboard_modes load Ordering::Relaxed;
+    // each is an independent snapshot with no related memory publication.
+    fn encoded_terminal_key_writes(
+        &self,
+        event: &winit::event::KeyEvent,
+        modifiers: ModifiersState,
+        targets: &BTreeSet<u64>,
+    ) -> Vec<(u64, Vec<u8>)> {
+        targets
+            .iter()
+            .filter_map(|pane_id| {
+                let pane = self.pane_by_id(*pane_id)?;
+                let kitty_flags = pane.kitty_flags.load(Ordering::Relaxed);
+                let keyboard_modes = pane.keyboard_modes.load(Ordering::Relaxed);
+                key_encoding::encode_key(
+                    event,
+                    modifiers,
+                    kitty_flags,
+                    sonicterm_vt::vt::KeyboardModes::from_bits(keyboard_modes),
+                )
+                .filter(|bytes| !bytes.is_empty())
+                .map(|bytes| (*pane_id, bytes))
+            })
+            .collect()
+    }
+
+    fn dispatch_terminal_key_writes(&mut self, writes: Vec<(u64, Vec<u8>)>) {
+        for (pane_id, bytes) in writes {
+            self.write_to_pane(pane_id, bytes);
+        }
+    }
+
     /// Test-only mirror of the normal KeyboardInput dispatch order: try every
     /// keymap spelling before encoding bytes for PTY forwarding.
     #[doc(hidden)]
@@ -3479,12 +3529,11 @@ impl App {
             .unwrap_or(0);
         (
             None,
-            encode_logical(
+            encode_logical_with_modes(
                 key,
                 mods,
                 kitty_flags,
-                sonicterm_vt::vt::KeyboardModes::from_bits(keyboard_modes)
-                    .application_cursor_keys(),
+                sonicterm_vt::vt::KeyboardModes::from_bits(keyboard_modes),
             ),
         )
     }

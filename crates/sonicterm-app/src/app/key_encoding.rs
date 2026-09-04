@@ -2,6 +2,7 @@ use sonicterm_vt::vt::KeyboardModes;
 use winit::{
     event::{ElementState, KeyEvent},
     keyboard::{Key, KeyCode, KeyLocation, ModifiersState, NamedKey, PhysicalKey},
+    platform::modifier_supplement::KeyEventExtModifierSupplement,
 };
 
 const KITTY_DISAMBIGUATE: u8 = 1;
@@ -13,8 +14,10 @@ const KITTY_REPORT_TEXT: u8 = 1 << 4;
 #[derive(Clone, Copy)]
 struct KeyEventView<'a> {
     logical_key: &'a Key,
+    unmodified_character: Option<char>,
     physical_key: PhysicalKey,
     text: Option<&'a str>,
+    text_with_all_modifiers: Option<&'a str>,
     location: KeyLocation,
     state: ElementState,
     repeat: bool,
@@ -58,11 +61,14 @@ pub(crate) fn encode_key(
     kitty_flags: u8,
     modes: KeyboardModes,
 ) -> Option<Vec<u8>> {
+    let key_without_modifiers = event.key_without_modifiers();
     encode_event(
         KeyEventView {
             logical_key: &event.logical_key,
+            unmodified_character: key_character(&key_without_modifiers),
             physical_key: event.physical_key,
             text: event.text.as_deref(),
+            text_with_all_modifiers: event.text_with_all_modifiers(),
             location: event.location,
             state: event.state,
             repeat: event.repeat,
@@ -81,22 +87,41 @@ pub fn encode_logical(
     kitty_flags: u8,
     app_cursor: bool,
 ) -> Option<Vec<u8>> {
+    encode_logical_with_modes(
+        key,
+        mods,
+        kitty_flags,
+        KeyboardModes::new(app_cursor, false, false, false, 0),
+    )
+}
+
+/// Encode a synthetic logical key with a complete terminal-mode snapshot.
+#[doc(hidden)]
+pub fn encode_logical_with_modes(
+    key: &Key,
+    mods: ModifiersState,
+    kitty_flags: u8,
+    modes: KeyboardModes,
+) -> Option<Vec<u8>> {
+    let text = match key {
+        Key::Character(text) => Some(text.as_str()),
+        Key::Named(NamedKey::Space) => Some(" "),
+        _ => None,
+    };
     encode_event(
         KeyEventView {
             logical_key: key,
+            unmodified_character: key_character(key),
             physical_key: PhysicalKey::Unidentified(winit::keyboard::NativeKeyCode::Unidentified),
-            text: match key {
-                Key::Character(text) => Some(text.as_str()),
-                Key::Named(NamedKey::Space) => Some(" "),
-                _ => None,
-            },
+            text,
+            text_with_all_modifiers: text,
             location: KeyLocation::Standard,
             state: ElementState::Pressed,
             repeat: false,
         },
         mods,
         kitty_flags,
-        KeyboardModes::new(app_cursor, false, false, false, 0),
+        modes,
     )
 }
 
@@ -108,12 +133,16 @@ fn encode_event(
 ) -> Option<Vec<u8>> {
     let reports_events = kitty_flags & KITTY_REPORT_EVENTS != 0;
     if event.state == ElementState::Released && !reports_events {
+        // When: a Released event has no reports_events support, no terminal
+        // protocol record can represent it.
         return None;
     }
 
     if kitty_flags != 0 {
+        // Nonzero negotiated progressive enhancements select the Kitty encoder.
         encode_kitty(event, mods, kitty_flags, modes)
     } else {
+        // When: kitty_flags is zero, preserve legacy and xterm-compatible input.
         encode_legacy(event, mods, modes)
     }
 }
@@ -124,25 +153,46 @@ fn encode_legacy(
     modes: KeyboardModes,
 ) -> Option<Vec<u8>> {
     if event.state == ElementState::Released {
+        // When: `event.state` is Released, legacy protocols have no matching
+        // release representation, so the PTY receives nothing.
         return None;
     }
 
     let keypad = if modes.application_keypad() {
+        // Application-keypad mode gives physical identity precedence over its
+        // NumLock-dependent logical meaning.
         physical_keypad_key(event.physical_key).or_else(|| keypad_key(event))
     } else {
+        // When: application_keypad is inactive, use the keypad's logical key.
         keypad_key(event)
     };
     if let Some(keypad) = keypad {
+        // When: keypad detection succeeds, give legacy keypad rules first
+        // opportunity to encode the event.
         if let Some(encoded) = encode_legacy_keypad(keypad, event, mods, modes) {
+            // When: encoded keypad bytes exist, keep
+            // DECKPAM or NumLock identity instead of treating it as main-key text.
             return Some(encoded);
+        }
+    }
+
+    if let Some(text) = standalone_text(event, mods) {
+        // When: standalone_text yields text, preserve it unless level-two
+        // modifyOtherKeys explicitly owns an unconsumed Shift chord.
+        let has_command_modifier =
+            mods.intersects(ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SUPER);
+        if modes.modify_other_keys() != 2 || mods.is_empty() || has_command_modifier {
+            // When: modify_other_keys is not level two, mods is empty, or
+            // has_command_modifier was consumed, preserve the OS-produced UTF-8.
+            return Some(text.as_bytes().to_vec());
         }
     }
 
     match event.logical_key {
         Key::Character(text) => Some(encode_legacy_text(
-            text,
+            event.unshifted_character(text),
+            event.shifted_character(),
             event.text.unwrap_or(text),
-            event.physical_key,
             mods,
             modes.modify_other_keys(),
         )),
@@ -162,39 +212,70 @@ fn encode_kitty(
     let report_events = flags & KITTY_REPORT_EVENTS != 0;
 
     if event.state == ElementState::Released && !report_events {
+        // When: the active Kitty flags omit event reporting, releases remain
+        // silent just as they are in legacy terminal input.
         return None;
     }
 
     if let Some(keypad) = keypad_key(event) {
-        if disambiguate || report_events {
+        // When: keypad_key recognizes this event, a negotiated disambiguate
+        // flag may preserve its dedicated functional identity.
+        if disambiguate {
+            // When: disambiguate is active, preserve the keypad's
+            // dedicated functional identity instead of its NumLock meaning.
             return Some(encode_kitty_keypad(keypad, event, mods, flags));
         }
-        return encode_legacy(event, mods, modes);
     }
 
-    match event.logical_key {
+    if !report_all && event.state == ElementState::Pressed && (!report_events || !event.repeat) {
+        // When: report_all is off and this Pressed event is not a reported
+        // repeat, compatible text remains a direct UTF-8 write.
+        if let Some(text) = standalone_text(event, mods) {
+            // When: standalone_text yields safe text, send its exact layout or
+            // composition result instead of manufacturing a key code.
+            return Some(text.as_bytes().to_vec());
+        }
+    }
+
+    let logical_key = if matches!(event.logical_key, Key::Dead(_)) {
+        // A dead key uses its layout-resolved unmodified identity so
+        // report-all can identify the physical composition key.
+        event
+            .unmodified_character
+            .map(|ch| Key::Character(ch.to_string().into()))
+            .unwrap_or_else(|| event.logical_key.clone())
+    } else {
+        // When: matches does not classify event.logical_key as Key::Dead,
+        // retain winit's identity rather than fabricating a composition key.
+        event.logical_key.clone()
+    };
+    match &logical_key {
         Key::Character(text) => {
-            let must_escape = report_all
-                || (disambiguate && (mods.alt_key() || mods.control_key() || mods.super_key()));
-            if !must_escape {
-                if event.state == ElementState::Released {
-                    return None;
-                }
+            // When: logical_key is Character text, encode either its compatible
+            // legacy form or the canonical Unicode key number.
+            let primary = event.unshifted_character(text);
+            let event_type = kitty_event_type(event, report_events);
+            let can_use_legacy = !disambiguate
+                && !report_all
+                && (!report_events || !event.repeat)
+                && legacy_text_modifiers(primary, mods)
+                && event.state == ElementState::Pressed;
+            if can_use_legacy {
+                // When: can_use_legacy is true, preserve the established
+                // C0/Meta representation for this text chord.
                 return Some(encode_legacy_text(
-                    text,
+                    primary,
+                    event.shifted_character(),
                     event.text.unwrap_or(text),
-                    event.physical_key,
                     mods,
-                    modes.modify_other_keys(),
+                    0,
                 ));
             }
-
-            let primary = primary_character(text, event.physical_key);
             Some(encode_csi_u(
-                primary.map(u32::from).unwrap_or(0),
-                alternate_codes(primary, text, event.physical_key, mods, flags),
+                u32::from(primary),
+                alternate_codes(primary, event, mods, flags),
                 mods,
-                kitty_event_type(event, report_events),
+                event_type,
                 associated_text(event, flags),
             ))
         }
@@ -206,13 +287,8 @@ fn encode_kitty(
             kitty_event_type(event, report_events),
             associated_text(event, flags),
         )),
-        _ => {
-            if event.state == ElementState::Released {
-                None
-            } else {
-                encode_legacy(event, mods, modes)
-            }
-        }
+        _ if event.state == ElementState::Released => None,
+        _ => encode_legacy(event, mods, modes),
     }
 }
 
@@ -226,19 +302,9 @@ fn encode_legacy_named(
         NamedKey::Backspace => Some(encode_legacy_backspace(mods, modes)),
         NamedKey::Tab => Some(encode_legacy_tab(mods, modes)),
         NamedKey::Escape => Some(encode_legacy_escape(mods, modes)),
-        NamedKey::Space => Some(if should_modify_other_key(modes.modify_other_keys(), 32, mods) {
-            encode_modify_other_key(32, mods)
-        } else if mods.shift_key() || mods.super_key() {
-            encode_csi_u(32, None, mods, None, None)
-        } else {
-            encode_legacy_text(
-                " ",
-                " ",
-                PhysicalKey::Code(KeyCode::Space),
-                mods,
-                modes.modify_other_keys(),
-            )
-        }),
+        NamedKey::Space => {
+            Some(encode_legacy_text(' ', Some(' '), " ", mods, modes.modify_other_keys()))
+        }
         NamedKey::ArrowUp => Some(encode_functional_legacy(
             FunctionalEncoding::Letter('A'),
             mods,
@@ -333,6 +399,7 @@ fn encode_kitty_named(
 ) -> Option<Vec<u8>> {
     let report_all = flags & KITTY_REPORT_ALL != 0;
     let report_events = flags & KITTY_REPORT_EVENTS != 0;
+    let legacy_mode = flags & (KITTY_DISAMBIGUATE | KITTY_REPORT_EVENTS | KITTY_REPORT_ALL) == 0;
     let event_type = kitty_event_type(event, report_events);
     let text = associated_text(event, flags);
 
@@ -345,65 +412,99 @@ fn encode_kitty_named(
         _ => None,
     };
     if let Some(code) = c0_code {
-        let modified_tab = key == NamedKey::Tab && !mods.is_empty();
-        let modified_special = key == NamedKey::Escape
-            || (key == NamedKey::Space && !mods.is_empty())
-            || modified_tab
-            || (key == NamedKey::Enter && !mods.is_empty())
-            || (key == NamedKey::Backspace && !mods.is_empty());
-        let must_escape = report_all
-            || (disambiguate && modified_special)
-            || (report_events && key == NamedKey::Escape);
-        if must_escape {
-            let primary = (key == NamedKey::Space).then_some(' ');
-            return Some(encode_csi_u(
-                code,
-                alternate_codes(
-                    primary,
-                    event.text.unwrap_or_default(),
-                    event.physical_key,
-                    mods,
-                    flags,
-                ),
-                mods,
-                event_type,
-                text,
-            ));
+        // When: c0_code exists, apply the reset-safe C0 exceptions before
+        // falling back to canonical CSI-u.
+        let reset_key = matches!(key, NamedKey::Enter | NamedKey::Tab | NamedKey::Backspace);
+        if reset_key && !report_all && mods.is_empty() {
+            // When: reset_key is true, report_all is false, and mods is empty,
+            // retain its C0 byte and suppress the unrepresentable release.
+            return (event.state == ElementState::Pressed)
+                .then(|| encode_legacy_named(key, mods, modes))
+                .flatten();
         }
-        if event.state == ElementState::Released {
+        if reset_key && !report_all && event.state == ElementState::Released {
+            // When: reset_key is Released while report_all is false, Kitty
+            // deliberately omits the release so a crashed client leaves usable input.
             return None;
         }
-        return encode_legacy_named(key, mods, modes);
+        if key == NamedKey::Escape
+            && !disambiguate
+            && !report_all
+            && mods.is_empty()
+            && event.state == ElementState::Pressed
+            && !event.repeat
+        {
+            // When: key is plain Escape without disambiguate or report_all,
+            // preserve the legacy ESC byte while repeat/release remain distinguishable.
+            return encode_legacy_named(key, mods, modes);
+        }
+        if legacy_mode {
+            // When: legacy_mode is active, C0 keys keep the
+            // complete legacy modifier table rather than changing protocol.
+            return encode_legacy_named(key, mods, modes);
+        }
+        let primary = (key == NamedKey::Space).then_some(' ');
+        return Some(encode_csi_u(
+            code,
+            primary.and_then(|primary| alternate_codes(primary, event, mods, flags)),
+            mods,
+            event_type,
+            text,
+        ));
     }
 
-    let encoding = if let Some(encoding) = named_functional_encoding(key) {
+    if is_modifier_key(key) && !report_all {
+        // When: key is a modifier and report_all is disabled, Kitty
+        // treats it as state attached to other keys rather than an event.
+        return None;
+    }
+
+    if legacy_mode {
+        // When: legacy_mode is active, prefer terminfo-compatible encodings for
+        // functional keys that have one.
+        if let Some(encoding) = named_functional_encoding(key) {
+            // When: named_functional_encoding yields encoding, preserve xterm
+            // functional encodings and DECCKM selection.
+            return Some(encode_functional_legacy(encoding, mods, modes.application_cursor_keys()));
+        }
+    }
+
+    let encoding = if let Some(encoding) = named_functional_kitty_encoding(key) {
+        // A recognized Kitty functional key uses its
+        // protocol-defined CSI final byte or tilde number.
         encoding
     } else {
-        if is_modifier_key(key) && !report_all {
-            return None;
-        }
+        // When: named_functional_kitty_encoding cannot represent key, require
+        // an enhancement before using its private-use code point.
         if !disambiguate && !report_events {
+            // When: neither disambiguate nor report_events is active, a
+            // Kitty-only PUA identity must remain silent.
             return None;
         }
         FunctionalEncoding::CsiU(kitty_functional_number(key, event.location)?)
     };
-    Some(encode_functional_kitty(encoding, mods, modes.application_cursor_keys(), event_type, text))
+    Some(encode_functional_kitty(encoding, mods, event_type, text))
 }
 
 fn encode_legacy_enter(mods: ModifiersState, modes: KeyboardModes) -> Vec<u8> {
     if should_modify_other_key(modes.modify_other_keys(), 13, mods) {
+        // When: should_modify_other_key claims Return, use xterm's explicit
+        // key-code form rather than collapsing the chord into carriage return.
         return encode_modify_other_key(13, mods);
     }
-    if mods.super_key() || mods.control_key() {
+    if !legacy_c0_modifiers(mods) {
+        // When: legacy_c0_modifiers rejects Return's modifier combination,
+        // use its unambiguous CSI-u representation.
         return encode_csi_u(13, None, mods, None, None);
     }
 
     let mut out = Vec::with_capacity(3);
-    if mods.alt_key() || (mods.shift_key() && !mods.control_key()) {
+    if mods.alt_key() {
         out.push(0x1b);
     }
     out.push(b'\r');
     if modes.newline() {
+        // Newline mode appends LF after Return's carriage return.
         out.push(b'\n');
     }
     out
@@ -411,19 +512,19 @@ fn encode_legacy_enter(mods: ModifiersState, modes: KeyboardModes) -> Vec<u8> {
 
 fn encode_legacy_backspace(mods: ModifiersState, modes: KeyboardModes) -> Vec<u8> {
     let normal = if modes.backarrow_key() { b'\x08' } else { b'\x7f' };
-    let code = if mods.control_key() {
-        if normal == b'\x08' {
-            b'\x7f'
-        } else {
-            b'\x08'
-        }
-    } else {
-        normal
+    let code = match (mods.control_key(), normal) {
+        (true, b'\x08') => b'\x7f',
+        (true, _) => b'\x08',
+        (false, _) => normal,
     };
     if should_modify_other_key(modes.modify_other_keys(), u32::from(code), mods) {
+        // When: should_modify_other_key includes this Backspace variant, retain
+        // its modifiers in xterm's explicit form.
         return encode_modify_other_key(u32::from(code), mods);
     }
-    if mods.super_key() || mods.shift_key() {
+    if !legacy_c0_modifiers(mods) {
+        // When: legacy_c0_modifiers rejects Backspace, avoid
+        // silently discarding them by using CSI-u.
         return encode_csi_u(u32::from(code), None, mods, None, None);
     }
 
@@ -437,65 +538,111 @@ fn encode_legacy_backspace(mods: ModifiersState, modes: KeyboardModes) -> Vec<u8
 
 fn encode_legacy_tab(mods: ModifiersState, modes: KeyboardModes) -> Vec<u8> {
     if should_modify_other_key(modes.modify_other_keys(), 9, mods) {
+        // When: should_modify_other_key claims Tab, emit xterm's
+        // unambiguous key-code form before the BackTab compatibility fallback.
         return encode_modify_other_key(9, mods);
     }
-    match (mods.shift_key(), mods.alt_key(), mods.control_key(), mods.super_key()) {
-        (false, false, false, false) => vec![b'\t'],
-        (true, false, false, false) => b"\x1b[Z".to_vec(),
-        _ => encode_csi_u(9, None, mods, None, None),
+    if !legacy_c0_modifiers(mods) {
+        // When: legacy_c0_modifiers rejects Tab, preserve
+        // them with CSI-u rather than aliasing the chord to Tab or BackTab.
+        return encode_csi_u(9, None, mods, None, None);
     }
+    let mut out = Vec::with_capacity(4);
+    if mods.alt_key() {
+        // Alt prepends the legacy Meta escape byte.
+        out.push(0x1b);
+    }
+    if mods.shift_key() {
+        // Shift turns Tab into the BackTab CSI Z sequence.
+        out.extend_from_slice(b"\x1b[Z");
+    } else {
+        // When: mods omits Shift, Tab remains the horizontal-tab C0 byte.
+        out.push(b'\t');
+    }
+    out
 }
 
 fn encode_legacy_escape(mods: ModifiersState, modes: KeyboardModes) -> Vec<u8> {
     if should_modify_other_key(modes.modify_other_keys(), 27, mods) {
+        // When: should_modify_other_key claims Escape, represent it explicitly
+        // rather than emitting an ambiguous escape introducer.
         return encode_modify_other_key(27, mods);
     }
-    if mods.is_empty() {
-        return vec![0x1b];
+    if !legacy_c0_modifiers(mods) {
+        // When: legacy_c0_modifiers rejects Escape, encode
+        // an explicit key event instead of emitting an ambiguous ESC prefix.
+        return encode_csi_u(27, None, mods, None, None);
     }
-    if mods.alt_key() && !mods.shift_key() && !mods.control_key() && !mods.super_key() {
-        return vec![0x1b, 0x1b];
+    let mut out = Vec::with_capacity(2);
+    if mods.alt_key() {
+        // Alt prepends Meta's ESC before the Escape key.
+        out.push(0x1b);
     }
-    encode_csi_u(27, None, mods, None, None)
+    out.push(0x1b);
+    out
 }
 
 fn encode_legacy_text(
-    logical_text: &str,
+    primary: char,
+    shifted: Option<char>,
     produced_text: &str,
-    physical_key: PhysicalKey,
     mods: ModifiersState,
     modify_other_keys: u8,
 ) -> Vec<u8> {
     if produced_text.is_empty() {
+        // When: produced_text is empty, avoid writing
+        // an empty or fabricated terminal input record.
         return Vec::new();
     }
 
-    let primary = primary_character(logical_text, physical_key);
-    if should_modify_other_key(modify_other_keys, primary.map(u32::from).unwrap_or(0), mods) {
-        if let Some(primary) = primary {
-            return encode_modify_other_key(u32::from(primary), mods);
-        }
-    }
-    if mods.super_key() || (mods.control_key() && mods.shift_key()) {
-        return encode_csi_u(primary.map(u32::from).unwrap_or(0), None, mods, None, None);
+    let modify_text = match modify_other_keys {
+        1 => !legacy_text_modifiers(primary, mods),
+        2 => true,
+        _ => false,
+    };
+    if modify_text && should_modify_other_key(modify_other_keys, u32::from(primary), mods) {
+        // When: modify_text and should_modify_other_key claim this chord, use xterm's
+        // sequence instead of the otherwise compatible legacy representation.
+        return encode_modify_other_key(u32::from(primary), mods);
     }
 
-    let mut out = Vec::with_capacity(produced_text.len() + usize::from(mods.alt_key()));
-    if mods.alt_key() {
+    let mut legacy_primary = primary;
+    let mut legacy_mods = mods;
+    if mods.shift_key() {
+        // Fold layout-produced Shift symbols before
+        // testing whether the remaining modifiers fit the legacy table.
+        if let Some(shifted) = shifted.filter(|shifted| {
+            *shifted != primary && (!mods.control_key() || !primary.is_ascii_alphabetic())
+        }) {
+            // A consumable shifted symbol incorporates Shift into the produced
+            // character instead of retaining it as an independent modifier.
+            legacy_primary = shifted;
+            legacy_mods.remove(ModifiersState::SHIFT);
+        }
+    }
+    if !legacy_text_modifiers(legacy_primary, legacy_mods) {
+        // When: legacy_text_modifiers rejects this key and modifier set,
+        // use CSI-u rather than silently dropping a modifier.
+        return encode_csi_u(u32::from(primary), None, mods, None, None);
+    }
+
+    let mapped_control = legacy_mods.control_key().then(|| ctrl_mapping(legacy_primary)).flatten();
+    let mut out = Vec::with_capacity(produced_text.len() + usize::from(legacy_mods.alt_key()));
+    if legacy_mods.alt_key() {
+        // Alt prefixes compatible legacy text with ESC.
         out.push(0x1b);
     }
-    if mods.control_key() {
-        let mapped = logical_text
-            .chars()
-            .next()
-            .and_then(ctrl_mapping)
-            .or_else(|| primary.and_then(ctrl_mapping));
-        if let Some(mapped) = mapped {
+    if legacy_mods.control_key() {
+        // When: legacy_mods contains Control, prefer its C0/DEL mapping.
+        if let Some(mapped) = mapped_control {
+            // When: mapped_control contains a byte, it fully represents this chord.
             out.push(mapped);
             return out;
         }
     }
-    out.extend_from_slice(produced_text.as_bytes());
+    let selected = legacy_mods.shift_key().then(|| shifted).flatten().unwrap_or(legacy_primary);
+    let mut utf8 = [0; 4];
+    out.extend_from_slice(selected.encode_utf8(&mut utf8).as_bytes());
     out
 }
 
@@ -506,6 +653,7 @@ fn encode_legacy_keypad(
     modes: KeyboardModes,
 ) -> Option<Vec<u8>> {
     if modes.application_keypad() {
+        // When: application_keypad is active, use DECKPAM's SS3 keypad table.
         let final_byte = match key {
             KeypadKey::Digit(n) => char::from(b'p' + n),
             KeypadKey::Decimal | KeypadKey::Delete => 'n',
@@ -528,9 +676,11 @@ fn encode_legacy_keypad(
             KeypadKey::Begin => 'E',
         };
         if mods.is_empty() {
+            // When: mods is empty, emit the unprefixed DECKPAM SS3 sequence.
             return Some(format!("\x1bO{final_byte}").into_bytes());
         }
-        return Some(format!("\x1bO{}{}", modifier_parameter(mods), final_byte).into_bytes());
+        let prefix = if mods.alt_key() { "\x1b\x1bO" } else { "\x1bO" };
+        return Some(format!("{prefix}{final_byte}").into_bytes());
     }
 
     let fallback = match key {
@@ -542,19 +692,23 @@ fn encode_legacy_keypad(
         KeypadKey::Multiply => "*".to_owned(),
         KeypadKey::Subtract => "-".to_owned(),
         KeypadKey::Add => "+".to_owned(),
-        KeypadKey::Enter => return Some(encode_legacy_enter(mods, modes)),
+        KeypadKey::Enter => {
+            // When: key is keypad Enter, reuse Return's C0 and newline-mode rules.
+            return Some(encode_legacy_enter(mods, modes));
+        }
         KeypadKey::Equal => "=".to_owned(),
         KeypadKey::Separator => ",".to_owned(),
-        _ => return None,
+        _ => {
+            // When: key is a navigation keypad variant, let the named-key path
+            // encode its normal-mode meaning.
+            return None;
+        }
     };
-    let logical_text = match event.logical_key {
-        Key::Character(text) => text.as_str(),
-        _ => fallback.as_str(),
-    };
+    let primary = fallback.chars().next().unwrap_or('\0');
     Some(encode_legacy_text(
-        logical_text,
+        primary,
+        event.shifted_character(),
         event.text.unwrap_or(&fallback),
-        event.physical_key,
         mods,
         modes.modify_other_keys(),
     ))
@@ -619,6 +773,20 @@ fn function_key_encoding(n: u8) -> FunctionalEncoding {
     }
 }
 
+fn kitty_function_key_encoding(n: u8) -> FunctionalEncoding {
+    match n {
+        1 => FunctionalEncoding::Letter('P'),
+        2 => FunctionalEncoding::Letter('Q'),
+        3 => FunctionalEncoding::Tilde(13),
+        4 => FunctionalEncoding::Letter('S'),
+        5..=12 => {
+            const TILDE: [u16; 8] = [15, 17, 18, 19, 20, 21, 23, 24];
+            FunctionalEncoding::Tilde(TILDE[usize::from(n - 5)])
+        }
+        _ => FunctionalEncoding::CsiU(57363 + u32::from(n)),
+    }
+}
+
 fn encode_functional_legacy(
     encoding: FunctionalEncoding,
     mods: ModifiersState,
@@ -647,18 +815,12 @@ fn encode_functional_legacy(
 fn encode_functional_kitty(
     encoding: FunctionalEncoding,
     mods: ModifiersState,
-    application_mode: bool,
     event_type: Option<u8>,
     text: Option<Vec<u32>>,
 ) -> Vec<u8> {
     match encoding {
         FunctionalEncoding::Letter(final_byte) if mods.is_empty() && event_type.is_none() => {
-            let prefix = if application_mode || matches!(final_byte, 'P' | 'Q' | 'R' | 'S') {
-                "\x1bO"
-            } else {
-                "\x1b["
-            };
-            format!("{prefix}{final_byte}").into_bytes()
+            format!("\x1b[{final_byte}").into_bytes()
         }
         FunctionalEncoding::Letter(final_byte) => {
             let field = modifier_event_field(mods, event_type);
@@ -723,6 +885,57 @@ fn named_functional_encoding(key: NamedKey) -> Option<FunctionalEncoding> {
         NamedKey::F33 => Some(function_key_encoding(33)),
         NamedKey::F34 => Some(function_key_encoding(34)),
         NamedKey::F35 => Some(function_key_encoding(35)),
+        _ => None,
+    }
+}
+
+fn named_functional_kitty_encoding(key: NamedKey) -> Option<FunctionalEncoding> {
+    match key {
+        NamedKey::ArrowUp => Some(FunctionalEncoding::Letter('A')),
+        NamedKey::ArrowDown => Some(FunctionalEncoding::Letter('B')),
+        NamedKey::ArrowRight => Some(FunctionalEncoding::Letter('C')),
+        NamedKey::ArrowLeft => Some(FunctionalEncoding::Letter('D')),
+        NamedKey::Home => Some(FunctionalEncoding::Letter('H')),
+        NamedKey::End => Some(FunctionalEncoding::Letter('F')),
+        NamedKey::Insert => Some(FunctionalEncoding::Tilde(2)),
+        NamedKey::Delete => Some(FunctionalEncoding::Tilde(3)),
+        NamedKey::PageUp => Some(FunctionalEncoding::Tilde(5)),
+        NamedKey::PageDown => Some(FunctionalEncoding::Tilde(6)),
+        NamedKey::F1 => Some(kitty_function_key_encoding(1)),
+        NamedKey::F2 => Some(kitty_function_key_encoding(2)),
+        NamedKey::F3 => Some(kitty_function_key_encoding(3)),
+        NamedKey::F4 => Some(kitty_function_key_encoding(4)),
+        NamedKey::F5 => Some(kitty_function_key_encoding(5)),
+        NamedKey::F6 => Some(kitty_function_key_encoding(6)),
+        NamedKey::F7 => Some(kitty_function_key_encoding(7)),
+        NamedKey::F8 => Some(kitty_function_key_encoding(8)),
+        NamedKey::F9 => Some(kitty_function_key_encoding(9)),
+        NamedKey::F10 => Some(kitty_function_key_encoding(10)),
+        NamedKey::F11 => Some(kitty_function_key_encoding(11)),
+        NamedKey::F12 => Some(kitty_function_key_encoding(12)),
+        NamedKey::F13 => Some(kitty_function_key_encoding(13)),
+        NamedKey::F14 => Some(kitty_function_key_encoding(14)),
+        NamedKey::F15 => Some(kitty_function_key_encoding(15)),
+        NamedKey::F16 => Some(kitty_function_key_encoding(16)),
+        NamedKey::F17 => Some(kitty_function_key_encoding(17)),
+        NamedKey::F18 => Some(kitty_function_key_encoding(18)),
+        NamedKey::F19 => Some(kitty_function_key_encoding(19)),
+        NamedKey::F20 => Some(kitty_function_key_encoding(20)),
+        NamedKey::F21 => Some(kitty_function_key_encoding(21)),
+        NamedKey::F22 => Some(kitty_function_key_encoding(22)),
+        NamedKey::F23 => Some(kitty_function_key_encoding(23)),
+        NamedKey::F24 => Some(kitty_function_key_encoding(24)),
+        NamedKey::F25 => Some(kitty_function_key_encoding(25)),
+        NamedKey::F26 => Some(kitty_function_key_encoding(26)),
+        NamedKey::F27 => Some(kitty_function_key_encoding(27)),
+        NamedKey::F28 => Some(kitty_function_key_encoding(28)),
+        NamedKey::F29 => Some(kitty_function_key_encoding(29)),
+        NamedKey::F30 => Some(kitty_function_key_encoding(30)),
+        NamedKey::F31 => Some(kitty_function_key_encoding(31)),
+        NamedKey::F32 => Some(kitty_function_key_encoding(32)),
+        NamedKey::F33 => Some(kitty_function_key_encoding(33)),
+        NamedKey::F34 => Some(kitty_function_key_encoding(34)),
+        NamedKey::F35 => Some(kitty_function_key_encoding(35)),
         _ => None,
     }
 }
@@ -813,6 +1026,8 @@ fn modifier_parameter(mods: ModifiersState) -> u16 {
 
 fn kitty_event_type(event: KeyEventView<'_>, report_events: bool) -> Option<u8> {
     if !report_events {
+        // When: report_events is disabled, press and repeat retain their
+        // compatibility form and releases were already filtered.
         return None;
     }
     match event.state {
@@ -826,10 +1041,13 @@ fn associated_text(event: KeyEventView<'_>, flags: u8) -> Option<Vec<u32>> {
     if flags & (KITTY_REPORT_ALL | KITTY_REPORT_TEXT) != (KITTY_REPORT_ALL | KITTY_REPORT_TEXT)
         || event.state == ElementState::Released
     {
+        // When: flags do not contain both report-all and report-text, or the
+        // event is Released, no associated text field is permitted.
         return None;
     }
     let codepoints: Vec<_> = event
-        .text
+        .text_with_all_modifiers
+        .or(event.text)
         .unwrap_or_default()
         .chars()
         .filter(|ch| !ch.is_control())
@@ -839,21 +1057,22 @@ fn associated_text(event: KeyEventView<'_>, flags: u8) -> Option<Vec<u32>> {
 }
 
 fn alternate_codes(
-    primary: Option<char>,
-    text: &str,
-    physical_key: PhysicalKey,
+    primary: char,
+    event: KeyEventView<'_>,
     mods: ModifiersState,
     flags: u8,
 ) -> Option<String> {
     if flags & KITTY_REPORT_ALTERNATES == 0 {
+        // When: flags omit KITTY_REPORT_ALTERNATES, do not add optional
+        // shifted or PC-101 key fields to the canonical key number.
         return None;
     }
     let shifted = mods
         .shift_key()
-        .then(|| text.chars().next())
+        .then(|| event.shifted_character())
         .flatten()
-        .filter(|shifted| Some(*shifted) != primary);
-    let base = physical_ascii(physical_key).filter(|base| Some(*base) != primary);
+        .filter(|shifted| *shifted != primary);
+    let base = physical_ascii(event.physical_key).filter(|base| *base != primary);
 
     match (shifted, base) {
         (Some(shifted), Some(base)) => Some(format!(":{}:{}", u32::from(shifted), u32::from(base))),
@@ -863,8 +1082,126 @@ fn alternate_codes(
     }
 }
 
-fn primary_character(text: &str, physical_key: PhysicalKey) -> Option<char> {
-    text.chars().next().map(unshift_ascii).or_else(|| physical_ascii(physical_key))
+impl KeyEventView<'_> {
+    fn unshifted_character(self, fallback: &str) -> char {
+        self.unmodified_character
+            .or_else(|| fallback.chars().next().map(unshift_ascii))
+            .unwrap_or('\0')
+    }
+
+    fn shifted_character(self) -> Option<char> {
+        key_character(self.logical_key).or_else(|| self.text.and_then(|text| text.chars().next()))
+    }
+}
+
+fn key_character(key: &Key) -> Option<char> {
+    match key {
+        Key::Character(text) => text.chars().next(),
+        Key::Named(NamedKey::Space) => Some(' '),
+        _ => None,
+    }
+}
+
+fn standalone_text<'a>(event: KeyEventView<'a>, mods: ModifiersState) -> Option<&'a str> {
+    if event.state == ElementState::Released {
+        // When: event.state is Released, winit text is not a new text input
+        // event and must not be replayed into the PTY.
+        return None;
+    }
+    let text = event.text_with_all_modifiers.or(event.text)?;
+    if text.is_empty() || text.chars().any(char::is_control) {
+        // When: text is empty or contains a control, it represents a
+        // terminal chord rather than safe standalone UTF-8.
+        return None;
+    }
+    if !mods.intersects(ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SUPER) {
+        // When: mods intersects no terminal command modifier, OS-produced text
+        // is the authoritative layout and composition result.
+        return Some(text);
+    }
+    if mods.super_key() || !mods.alt_key() {
+        // When: mods has Super or lacks Alt, this is a command chord rather
+        // than AltGr/Option-produced text and must retain its modifiers.
+        return None;
+    }
+
+    let produced = text.chars().next()?;
+    let unmodified = event.unmodified_character?;
+    let consumed_modifier = if mods.shift_key() {
+        // Compare both ASCII-unshifted and Unicode
+        // lowercase forms so Shift alone is not mistaken for AltGr.
+        unshift_ascii(produced) != unmodified
+            && produced.to_lowercase().next() != unmodified.to_lowercase().next()
+    } else {
+        // When: mods omits Shift, any produced/unmodified difference came from
+        // AltGr or Option rather than case selection.
+        produced != unmodified
+    };
+    consumed_modifier.then_some(text)
+}
+
+fn legacy_text_modifiers(primary: char, mods: ModifiersState) -> bool {
+    is_legacy_ascii_key(primary)
+        && !mods.super_key()
+        && (mods.is_empty()
+            || mods == ModifiersState::SHIFT
+            || mods == ModifiersState::ALT
+            || mods == ModifiersState::CONTROL
+            || mods == (ModifiersState::SHIFT | ModifiersState::ALT)
+            || mods == (ModifiersState::CONTROL | ModifiersState::ALT)
+            || (primary == ' ' && mods == (ModifiersState::CONTROL | ModifiersState::SHIFT)))
+}
+
+fn legacy_c0_modifiers(mods: ModifiersState) -> bool {
+    [
+        ModifiersState::empty(),
+        ModifiersState::SHIFT,
+        ModifiersState::ALT,
+        ModifiersState::CONTROL,
+        ModifiersState::CONTROL | ModifiersState::SHIFT,
+        ModifiersState::ALT | ModifiersState::SHIFT,
+        ModifiersState::CONTROL | ModifiersState::ALT,
+    ]
+    .contains(&mods)
+}
+
+fn is_legacy_ascii_key(ch: char) -> bool {
+    ch.is_ascii_alphanumeric()
+        || matches!(
+            ch,
+            '`' | '~'
+                | '-'
+                | '_'
+                | '='
+                | '+'
+                | '['
+                | '{'
+                | ']'
+                | '}'
+                | '\\'
+                | '|'
+                | ';'
+                | ':'
+                | '\''
+                | '"'
+                | ','
+                | '<'
+                | '.'
+                | '>'
+                | '/'
+                | '?'
+                | ' '
+                | '!'
+                | '@'
+                | '#'
+                | '$'
+                | '%'
+                | '^'
+                | '&'
+                | '*'
+                | '('
+                | ')'
+        )
 }
 
 pub(super) fn unshift_ascii(ch: char) -> char {
@@ -898,6 +1235,8 @@ pub(super) fn unshift_ascii(ch: char) -> char {
 
 pub(super) fn physical_ascii(key: PhysicalKey) -> Option<char> {
     let PhysicalKey::Code(code) = key else {
+        // When: key is not a PhysicalKey::Code, no stable PC-101 alternate
+        // position is available.
         return None;
     };
     match code {
@@ -964,6 +1303,7 @@ fn ctrl_mapping(ch: char) -> Option<u8> {
         '^' | '~' | '6' => Some(30),
         '_' | '/' | '7' => Some(31),
         '?' | '8' => Some(127),
+        _ if is_legacy_ascii_key(ch) && ch.is_ascii() => Some(ch as u8),
         _ => None,
     }
 }
@@ -975,7 +1315,7 @@ fn encode_modify_other_key(code: u32, mods: ModifiersState) -> Vec<u8> {
 fn should_modify_other_key(level: u8, code: u32, mods: ModifiersState) -> bool {
     !mods.is_empty()
         && match level {
-            1 => !matches!(code, 8 | 27 | 99 | 100 | 127),
+            1 => !matches!(code, 8 | 27 | 127),
             2 => true,
             _ => false,
         }
@@ -983,6 +1323,8 @@ fn should_modify_other_key(level: u8, code: u32, mods: ModifiersState) -> bool {
 
 fn keypad_key(event: KeyEventView<'_>) -> Option<KeypadKey> {
     if event.location == KeyLocation::Numpad {
+        // When: event.location is Numpad, preserve NumLock-off navigation
+        // identities before consulting the physical digit position.
         let navigation = match event.logical_key {
             Key::Named(NamedKey::ArrowLeft) => Some(KeypadKey::Left),
             Key::Named(NamedKey::ArrowRight) => Some(KeypadKey::Right),
@@ -998,13 +1340,19 @@ fn keypad_key(event: KeyEventView<'_>) -> Option<KeypadKey> {
             _ => None,
         };
         if navigation.is_some() {
+            // When: navigation contains a NumLock-off meaning, it determines
+            // the keypad protocol number.
             return navigation;
         }
     }
     if let Some(physical) = physical_keypad_key(event.physical_key) {
+        // When: physical_keypad_key recognizes the position, use its stable
+        // keypad identity across platform logical-key differences.
         return Some(physical);
     }
     if event.location != KeyLocation::Numpad {
+        // When: event.location is not Numpad and no physical keypad key matched,
+        // this event belongs to the main keyboard.
         return None;
     }
     match event.logical_key {
@@ -1062,7 +1410,11 @@ fn physical_keypad_key(physical_key: PhysicalKey) -> Option<KeypadKey> {
 // ---------------------------------------------------------------------------
 
 pub(super) fn key_event_to_string(event: &KeyEvent, mods: ModifiersState) -> Option<String> {
-    key_to_string(&event.logical_key, mods)
+    key_to_string(&event.key_without_modifiers(), mods)
+}
+
+pub(super) fn key_event_to_strings(event: &KeyEvent, mods: ModifiersState) -> Vec<String> {
+    key_to_strings(&event.key_without_modifiers(), mods)
 }
 
 /// Canonical chord string for a key press, such as `ctrl+shift+p`.
@@ -1078,6 +1430,7 @@ pub fn key_to_string(key: &Key, mods: ModifiersState) -> Option<String> {
 #[doc(hidden)]
 pub fn key_to_strings(key: &Key, mods: ModifiersState) -> Vec<String> {
     let Some(mut candidates) = key_candidates(key, mods) else {
+        // When: key_candidates cannot name key, no configured chord can match it.
         return Vec::new();
     };
     candidates.dedup();
@@ -1125,67 +1478,77 @@ fn key_candidates(key: &Key, mods: ModifiersState) -> Option<Vec<KeyName>> {
 #[doc(hidden)]
 pub fn key_name(key: &Key) -> Option<KeyName> {
     Some(match key {
-        Key::Named(named) => KeyName::Static(match named {
-            NamedKey::Enter => "enter",
-            NamedKey::Backspace => "backspace",
-            NamedKey::Tab => "tab",
-            NamedKey::Escape => "escape",
-            NamedKey::Space => "space",
-            NamedKey::ArrowUp => "up",
-            NamedKey::ArrowDown => "down",
-            NamedKey::ArrowRight => "right",
-            NamedKey::ArrowLeft => "left",
-            NamedKey::Home => "home",
-            NamedKey::End => "end",
-            NamedKey::PageUp => "pageup",
-            NamedKey::PageDown => "pagedown",
-            NamedKey::Insert => "insert",
-            NamedKey::Delete => "delete",
-            NamedKey::ContextMenu => "menu",
-            NamedKey::Pause => "pause",
-            NamedKey::PrintScreen => "printscreen",
-            NamedKey::ScrollLock => "scrolllock",
-            NamedKey::NumLock => "numlock",
-            NamedKey::CapsLock => "capslock",
-            NamedKey::F1 => "f1",
-            NamedKey::F2 => "f2",
-            NamedKey::F3 => "f3",
-            NamedKey::F4 => "f4",
-            NamedKey::F5 => "f5",
-            NamedKey::F6 => "f6",
-            NamedKey::F7 => "f7",
-            NamedKey::F8 => "f8",
-            NamedKey::F9 => "f9",
-            NamedKey::F10 => "f10",
-            NamedKey::F11 => "f11",
-            NamedKey::F12 => "f12",
-            NamedKey::F13 => "f13",
-            NamedKey::F14 => "f14",
-            NamedKey::F15 => "f15",
-            NamedKey::F16 => "f16",
-            NamedKey::F17 => "f17",
-            NamedKey::F18 => "f18",
-            NamedKey::F19 => "f19",
-            NamedKey::F20 => "f20",
-            NamedKey::F21 => "f21",
-            NamedKey::F22 => "f22",
-            NamedKey::F23 => "f23",
-            NamedKey::F24 => "f24",
-            NamedKey::F25 => "f25",
-            NamedKey::F26 => "f26",
-            NamedKey::F27 => "f27",
-            NamedKey::F28 => "f28",
-            NamedKey::F29 => "f29",
-            NamedKey::F30 => "f30",
-            NamedKey::F31 => "f31",
-            NamedKey::F32 => "f32",
-            NamedKey::F33 => "f33",
-            NamedKey::F34 => "f34",
-            NamedKey::F35 => "f35",
-            _ => return None,
-        }),
+        Key::Named(named) => {
+            // When: named selects a supported keymap identity, return its
+            // canonical spelling; unsupported variants stop at the fallback arm.
+            KeyName::Static(match named {
+                NamedKey::Enter => "enter",
+                NamedKey::Backspace => "backspace",
+                NamedKey::Tab => "tab",
+                NamedKey::Escape => "escape",
+                NamedKey::Space => "space",
+                NamedKey::ArrowUp => "up",
+                NamedKey::ArrowDown => "down",
+                NamedKey::ArrowRight => "right",
+                NamedKey::ArrowLeft => "left",
+                NamedKey::Home => "home",
+                NamedKey::End => "end",
+                NamedKey::PageUp => "pageup",
+                NamedKey::PageDown => "pagedown",
+                NamedKey::Insert => "insert",
+                NamedKey::Delete => "delete",
+                NamedKey::ContextMenu => "menu",
+                NamedKey::Pause => "pause",
+                NamedKey::PrintScreen => "printscreen",
+                NamedKey::ScrollLock => "scrolllock",
+                NamedKey::NumLock => "numlock",
+                NamedKey::CapsLock => "capslock",
+                NamedKey::F1 => "f1",
+                NamedKey::F2 => "f2",
+                NamedKey::F3 => "f3",
+                NamedKey::F4 => "f4",
+                NamedKey::F5 => "f5",
+                NamedKey::F6 => "f6",
+                NamedKey::F7 => "f7",
+                NamedKey::F8 => "f8",
+                NamedKey::F9 => "f9",
+                NamedKey::F10 => "f10",
+                NamedKey::F11 => "f11",
+                NamedKey::F12 => "f12",
+                NamedKey::F13 => "f13",
+                NamedKey::F14 => "f14",
+                NamedKey::F15 => "f15",
+                NamedKey::F16 => "f16",
+                NamedKey::F17 => "f17",
+                NamedKey::F18 => "f18",
+                NamedKey::F19 => "f19",
+                NamedKey::F20 => "f20",
+                NamedKey::F21 => "f21",
+                NamedKey::F22 => "f22",
+                NamedKey::F23 => "f23",
+                NamedKey::F24 => "f24",
+                NamedKey::F25 => "f25",
+                NamedKey::F26 => "f26",
+                NamedKey::F27 => "f27",
+                NamedKey::F28 => "f28",
+                NamedKey::F29 => "f29",
+                NamedKey::F30 => "f30",
+                NamedKey::F31 => "f31",
+                NamedKey::F32 => "f32",
+                NamedKey::F33 => "f33",
+                NamedKey::F34 => "f34",
+                NamedKey::F35 => "f35",
+                _ => {
+                    // When: named has no canonical keymap spelling, it is not bindable.
+                    return None;
+                }
+            })
+        }
         Key::Character(text) => KeyName::Owned(text.to_string()),
-        _ => return None,
+        _ => {
+            // When: key is neither Named nor Character, it has no stable chord spelling.
+            return None;
+        }
     })
 }
 

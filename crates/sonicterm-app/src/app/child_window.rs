@@ -37,7 +37,7 @@ use winit::{
 use super::scrollbar_input::HitOutcome;
 use super::{
     invalidate_selection_for_content,
-    key_encoding::{encode_key, encode_logical, key_event_to_string, key_name, key_to_strings},
+    key_encoding::{encode_logical, key_event_to_string, key_event_to_strings, key_name},
     mark_all_panes_dirty, next_pane_id, pane_id_at_point, pick_prompt_target,
     poll_command_events_for_child_window, resize_all_panes, shell_quote_posix,
     with_integrated_titlebar, wrap_paste, App, FrontmostKind, PaneState, PointerCell,
@@ -1532,38 +1532,23 @@ impl App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                // When: KeyboardInput supplies event to this child, releases
+                // complete prior routes while presses pass through local owners.
                 if event.state == ElementState::Released {
-                    // When: a release arrives, send it only when this physical
-                    // key's press was previously forwarded to the same terminal.
-                    let press_pane = child.pty_pressed_keys.remove(&event.physical_key);
+                    // When: event.state is Released, send it only when this physical
+                    // key's press was previously forwarded to these terminals.
+                    let targets = child.pty_pressed_keys.remove(&event.physical_key);
                     let mods = child.modifiers;
-                    let (kitty_flags, keyboard_modes) = press_pane
-                        .and_then(|pane_id| child.panes.get(&pane_id))
-                        .map(|pane| {
-                            (
-                                pane.kitty_flags.load(std::sync::atomic::Ordering::Relaxed),
-                                pane.keyboard_modes.load(std::sync::atomic::Ordering::Relaxed),
-                            )
-                        })
-                        .unwrap_or((0, 0));
-                    let encoded = press_pane.map(|_| {
-                        encode_key(
-                            &event,
-                            mods,
-                            kitty_flags,
-                            sonicterm_vt::vt::KeyboardModes::from_bits(keyboard_modes),
-                        )
-                    });
                     let _ = child;
-                    if let (Some(pane_id), Some(Some(bytes))) = (press_pane, encoded) {
-                        let broadcast_bytes = bytes.clone();
-                        self.write_to_pane(pane_id, bytes);
-                        self.broadcast_from(pane_id, broadcast_bytes);
+                    if let Some(targets) = targets {
+                        // Every pane that received the press independently
+                        // encodes its release using its live protocol.
+                        let writes = self.encoded_terminal_key_writes(&event, mods, &targets);
+                        self.dispatch_terminal_key_writes(writes);
                     }
                     return;
                 }
-                // When: a `KeyboardInput` press arrives, so this child becomes
-                // frontmost and owns the keystroke routing below.
+                // A KeyboardInput press makes this child frontmost and routes below.
                 self.frontmost_window = Some(win_id);
                 if let Some(key_str) = key_event_to_string(&event, child.modifiers) {
                     // When: the press maps to a `key_str`, so it can be matched
@@ -1584,7 +1569,7 @@ impl App {
                         // so each key is checked against that list first.
                         let child_mods = child.modifiers;
                         let _ = child;
-                        for key_str in key_to_strings(&event.logical_key, child_mods) {
+                        for key_str in key_event_to_strings(&event, child_mods) {
                             if let Some(action) = self.keymap.lookup(&key_str).cloned() {
                                 // When: `keymap.lookup` bound this `key_str`, so
                                 // the action is tested against the READONLY list.
@@ -1722,7 +1707,7 @@ impl App {
                 let child_mods = child.modifiers;
                 let _ = child;
                 let mut handled = false;
-                for key_str in key_to_strings(&event.logical_key, child_mods) {
+                for key_str in key_event_to_strings(&event, child_mods) {
                     if let Some(action) = self.keymap.lookup(&key_str).cloned() {
                         // When: `keymap.lookup` bound this `key_str`, so the
                         // action is dispatched before any PTY bytes are sent.
@@ -1789,33 +1774,38 @@ impl App {
                         return;
                     }
                 };
-                // Read the active child pane's kitty keyboard flags from the
-                // lock-free per-pane snapshot instead of taking the parser lock
-                // on the keypress path — the VT thread holds that lock while
-                // parsing output. Non-zero flags drive CSI-u key encoding.
-                let kitty_flags = child
-                    .panes
-                    .get(&active_id)
-                    .map(|pane| pane.kitty_flags.load(std::sync::atomic::Ordering::Relaxed))
-                    .unwrap_or(0);
-                let keyboard_modes = child
-                    .panes
-                    .get(&active_id)
-                    .map(|pane| pane.keyboard_modes.load(std::sync::atomic::Ordering::Relaxed))
-                    .unwrap_or(0);
-                if let Some(bytes) = encode_key(
-                    &event,
-                    mods,
-                    kitty_flags,
-                    sonicterm_vt::vt::KeyboardModes::from_bits(keyboard_modes),
-                ) {
-                    // When: `encode_key` produced `bytes`, so this press maps to
-                    // terminal input for the active pane and its broadcast peers.
-                    let broadcast_bytes = bytes.clone();
-                    child.pty_pressed_keys.insert(event.physical_key, active_id);
-                    let _ = child;
-                    self.write_to_pane(active_id, bytes);
-                    self.broadcast_from(active_id, broadcast_bytes);
+                let repeat_targets = if event.repeat {
+                    // When: event.repeat is true, retain only the destination
+                    // set established by its original forwarded press.
+                    let Some(targets) = child.pty_pressed_keys.get(&event.physical_key).cloned()
+                    else {
+                        // When: targets has no forwarded press entry, do not
+                        // reroute it after focus or broadcast state changes.
+                        return;
+                    };
+                    Some(targets)
+                } else {
+                    // When: event.repeat is false, the route is selected after
+                    // releasing the mutable child-window borrow.
+                    None
+                };
+                let _ = child;
+                let targets =
+                    repeat_targets.unwrap_or_else(|| self.terminal_key_targets(active_id));
+                let writes = self.encoded_terminal_key_writes(&event, mods, &targets);
+                let delivered: std::collections::BTreeSet<_> =
+                    writes.iter().map(|(pane_id, _)| *pane_id).collect();
+                if !event.repeat {
+                    // Retain the new press's exact destination set so later
+                    // focus or broadcast changes cannot steal its lifecycle.
+                    if let Some(child) = self.windows.get_mut(&win_id) {
+                        child.pty_pressed_keys.insert(event.physical_key, delivered);
+                    }
+                }
+                if !writes.is_empty() {
+                    // When: writes is not empty, one or more target protocols encoded this key,
+                    // dispatch their independent byte sequences before UI cleanup.
+                    self.dispatch_terminal_key_writes(writes);
                     let Some(child) = self.windows.get_mut(&win_id) else {
                         // When: `windows` lost `win_id` during the write, so
                         // there is no child left to scroll or repaint.

@@ -26,7 +26,7 @@ use winit::{
     window::{CursorIcon, WindowId},
 };
 
-use super::key_encoding::{encode_key, key_event_to_string, key_to_strings};
+use super::key_encoding::{key_event_to_string, key_event_to_strings};
 use super::{
     invalidate_selection_for_content, mark_all_panes_dirty, pane_id_at_point,
     runtime_smoke::{grid_contains_marker, RuntimeSmokeFailure},
@@ -2342,37 +2342,27 @@ impl App {
 
             // -- Keyboard --
             WindowEvent::KeyboardInput { event, .. } => {
+                // When: KeyboardInput supplies event, releases complete prior
+                // PTY routes while presses pass through local input owners.
                 if event.state == ElementState::Released {
-                    // When: a key release arrives, only a key whose press reached
+                    // When: event.state is Released, only a key whose press reached
                     // the PTY may produce a negotiated Kitty release event.
-                    let press_pane = self
+                    let targets = self
                         .main_mut()
                         .and_then(|window| window.pty_pressed_keys.remove(&event.physical_key));
-                    if let Some(press_pane) = press_pane {
-                        let kitty_flags = self
-                            .main()
-                            .and_then(|window| window.panes.get(&press_pane))
-                            .map(|pane| pane.kitty_flags.load(std::sync::atomic::Ordering::Relaxed))
-                            .unwrap_or(0);
-                        let keyboard_modes = self
-                            .main()
-                            .and_then(|window| window.panes.get(&press_pane))
-                            .map(|pane| {
-                                pane.keyboard_modes.load(std::sync::atomic::Ordering::Relaxed)
-                            })
-                            .unwrap_or(0);
-                        if let Some(bytes) = encode_key(
+                    if let Some(targets) = targets {
+                        // The recorded panes encode this release against their
+                        // individual live protocol states.
+                        let writes = self.encoded_terminal_key_writes(
                             &event,
                             self.main_modifiers(),
-                            kitty_flags,
-                            sonicterm_vt::vt::KeyboardModes::from_bits(keyboard_modes),
-                        ) {
-                            self.write_to_pane(press_pane, bytes);
-                        }
+                            &targets,
+                        );
+                        self.dispatch_terminal_key_writes(writes);
                     }
                     return;
                 }
-                // When: KeyboardInput event.state is Pressed, route the key through active modes.
+                // Pressed input now routes through active modes.
 
                 // Quit confirmation guard: intercept the Cmd+Q chord before any
                 // mode routing (palette/search/copy-mode/PTY) so it behaves
@@ -2468,7 +2458,7 @@ impl App {
                 }
                 if self.main().map(|ws| ws.copy_mode.is_some()).unwrap_or(false) {
                     // When: copy_mode is Some, allow only read-only-safe actions before local navigation.
-                    for key_str in key_to_strings(&event.logical_key, self.main_modifiers()) {
+                    for key_str in key_event_to_strings(&event, self.main_modifiers()) {
                         if let Some(action) = self.keymap.lookup(&key_str).cloned() {
                             // When: keymap lookup returns action, test it against the read-only whitelist.
                             if super::keymap_dispatch::read_only_allows_action(&action)
@@ -2489,7 +2479,7 @@ impl App {
                     }
                     return;
                 }
-                for key_str in key_to_strings(&event.logical_key, self.main_modifiers()) {
+                for key_str in key_event_to_strings(&event, self.main_modifiers()) {
                     if let Some(action) = self.keymap.lookup(&key_str).cloned() {
                         // When: keymap lookup returns action, choose passthrough or application dispatch.
                         if super::keymap_dispatch::terminal_input_passthrough_binding(
@@ -2508,36 +2498,40 @@ impl App {
                         }
                     }
                 }
-                // Read the focused pane's kitty keyboard flags from the
-                // lock-free per-pane snapshot (the VT loop mirrors them out of
-                // the parser after each batch). Avoids taking `parser.lock()`
-                // on the keypress path — that lock is held by the VT thread
-                // while parsing output, so blocking on it added input latency
-                // whenever output was streaming. When non-zero,
-                // `encode_key` emits CSI-u forms (e.g. Shift+Enter => CSI
-                // 13;2u) so modern TUIs treat Shift+Enter as "insert newline".
-                let kitty_flags = self
-                    .active_pane()
-                    .map(|pane| pane.kitty_flags.load(std::sync::atomic::Ordering::Relaxed))
-                    .unwrap_or(0);
-                let keyboard_modes = self
-                    .active_pane()
-                    .map(|pane| pane.keyboard_modes.load(std::sync::atomic::Ordering::Relaxed))
-                    .unwrap_or(0);
-                if let Some(bytes) = encode_key(
-                    &event,
-                    self.main_modifiers(),
-                    kitty_flags,
-                    sonicterm_vt::vt::KeyboardModes::from_bits(keyboard_modes),
-                ) {
-                    let active_pane = self.active_pane_id();
-                    if let Some(window) = self.main_mut() {
-                        if let Some(active_pane) = active_pane {
-                            window.pty_pressed_keys.insert(event.physical_key, active_pane);
+                let active_pane = self.active_pane_id();
+                if let Some(active_pane) = active_pane {
+                    // When: active_pane identifies a PTY, route a new press or
+                    // continue the destination set owned by its original press.
+                    let targets = if event.repeat {
+                        // When: event.repeat is true, only its recorded press
+                        // destinations may receive the repeated event.
+                        let Some(targets) = self
+                            .main()
+                            .and_then(|window| window.pty_pressed_keys.get(&event.physical_key))
+                            .cloned()
+                        else {
+                            // When: targets has no forwarded press entry, keep the repeat
+                            // out of a newly focused pane or broadcast group.
+                            return;
+                        };
+                        targets
+                    } else {
+                        // When: event.repeat is false, snapshot the current
+                        // source and broadcast destinations for this press.
+                        self.terminal_key_targets(active_pane)
+                    };
+                    let writes =
+                        self.encoded_terminal_key_writes(&event, self.main_modifiers(), &targets);
+                    let delivered: std::collections::BTreeSet<_> =
+                        writes.iter().map(|(pane_id, _)| *pane_id).collect();
+                    if !event.repeat {
+                        // Record exactly the panes that received the new press
+                        // so its repeats and release cannot migrate.
+                        if let Some(window) = self.main_mut() {
+                            window.pty_pressed_keys.insert(event.physical_key, delivered);
                         }
                     }
-                    // Encoded key bytes are sent before clearing transient view state.
-                    self.write_to_pty(bytes);
+                    self.dispatch_terminal_key_writes(writes);
                     // Scroll-to-bottom on Enter (#B12): pressing Enter while
                     // scrolled up in history should jump back to the live
                     // bottom so the latest input/output is visible. Plain Enter
