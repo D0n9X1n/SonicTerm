@@ -114,17 +114,21 @@ Current protocol support includes:
 OSC 7 keeps the decoded path separate from its authority-bearing, host-aware
 snapshot. Relative local-path authorization uses only the strict snapshot. A
 raw OSC 4 collector, capped at 4 KiB, preserves palette queries that exceed
-vte’s parameter count and suppresses the truncated duplicate callback.
+vte’s parameter count and suppresses the truncated duplicate callback. Parser-owned
+sequence-family state recognizes kitty APC after any completed escape, including
+C1 APC and an `ESC` / `_` split across PTY chunks. A bounded prefix probe moves
+only confirmed iTerm2 `OSC 1337;File=` input out of vte’s private OSC buffer.
 
 An escape sequence may retain at most 1 MiB. After that, the parser discards
 through the sequence terminator instead of treating the payload as printable
-text. One media payload is limited to 16 MiB. In-flight media captures share a
-64 MiB process staging pool, with a 4 MiB floor and 13 simultaneous captures
-guaranteed at that floor. A capture that cannot reserve staging is refused and
-renders nothing. Oversized, cancelled, or truncated media is not partially
-rendered; after cancellation the parser continues swallowing that payload until
-its terminator. Two unchanged 30 s progress samples cancel a stalled capture,
-so the stated stall interval is one minute.
+text. Kitty APC, Sixel DCS, and iTerm2 OSC 1337 instead share one media contract:
+each payload is limited to 16 MiB, and in-flight captures share a 64 MiB process
+staging pool with a 4 MiB floor and 13 simultaneous captures guaranteed at that
+floor. A capture that cannot reserve staging is refused and renders nothing.
+Oversized, cancelled, or truncated media is not partially rendered; after
+cancellation the parser continues swallowing that payload until its terminator.
+Two unchanged 30 s progress samples cancel a stalled capture, so the stated
+stall interval is one minute.
 
 ### Mouse tracking and selection
 
@@ -343,14 +347,16 @@ TERM_PROGRAM_VERSION=<与终端身份匹配的版本>
 
 OSC 7 分开保存解码路径和带权限含义的主机校验快照。相对本地路径授权只使用严格
 快照。原始 OSC 4 收集器上限为 4 KiB，用于保留超过 vte 参数数量上限的调色板查询，
-并抑制被截断的重复回调。
+并抑制被截断的重复回调。解析器自身维护序列族边界，因此 kitty APC 可紧跟任何已完成
+转义序列，并同时支持 C1 APC 与跨 PTY 数据块拆分的 `ESC` / `_`。有界前缀探测只会把
+已确认的 iTerm2 `OSC 1337;File=` 输入从 vte 的私有 OSC 缓冲中接管出来。
 
-单条转义序列最多保留 1 MiB；超过后，解析器会一直丢弃到序列终止符，不会把负载
-当作可打印文本。单个媒体负载上限为 16 MiB。传输中的媒体捕获共用进程级 64 MiB
-暂存池，每个捕获下限为 4 MiB，可保证 13 个并发捕获都获得该下限。无法预留暂存
-空间时会拒绝整个捕获，不显示任何内容。超大、已取消或截断的媒体都不会局部显示；
-取消后，解析器仍会吞掉该负载直到终止符。连续两次 30 s 采样都没有进度时取消捕获，
-因此声明的停滞时间是一分钟。
+单条普通转义序列最多保留 1 MiB；超过后，解析器会一直丢弃到序列终止符，不会把负载
+当作可打印文本。Kitty APC、Sixel DCS 与 iTerm2 OSC 1337 改用同一个媒体契约：单个负载
+上限为 16 MiB；传输中的捕获共用进程级 64 MiB 暂存池，每个捕获下限为 4 MiB，可保证
+13 个并发捕获都获得该下限。无法预留暂存空间时会拒绝整个捕获，不显示任何内容。超大、
+已取消或截断的媒体都不会局部显示；取消后，解析器仍会吞掉该负载直到终止符。连续两次
+30 s 采样都没有进度时取消捕获，因此声明的停滞时间是一分钟。
 
 ### 鼠标跟踪与选区
 

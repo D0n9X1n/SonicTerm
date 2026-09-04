@@ -85,6 +85,14 @@ fn stalled_capture_chunk(payload_len: usize) -> Vec<u8> {
     chunk
 }
 
+/// An unterminated iTerm2 file sequence with exactly `payload_len` data bytes.
+fn stalled_iterm2_capture_chunk(payload_len: usize) -> Vec<u8> {
+    let mut chunk = Vec::with_capacity(payload_len + 32);
+    chunk.extend_from_slice(b"\x1b]1337;File=inline=1:");
+    chunk.resize(chunk.len() + payload_len, b'A');
+    chunk
+}
+
 /// The size of an ordinary encoded image, stated absolutely.
 ///
 /// Deliberately *not* derived from `MIN_CAPTURE_STAGING_BYTES`. A payload
@@ -165,6 +173,76 @@ fn real_heap_stops_below_the_process_ceiling_at_many_panes() {
         truth / (1024 * 1024),
         MAX_PROCESS_CAPTURE_STAGING_BYTES / (1024 * 1024),
         truth.saturating_sub(MAX_PROCESS_CAPTURE_STAGING_BYTES) / (1024 * 1024)
+    );
+
+    drop(parsers);
+}
+
+/// iTerm2 OSC 1337 must obey the same real-heap process ceiling as APC/DCS.
+///
+/// vte's standard OSC buffer is an unbounded `Vec`; parser figures alone would
+/// miss a second private copy. This allocator measurement proves confirmed file
+/// payloads leave vte before growing and stage only through the shared pool.
+#[test]
+fn iterm2_real_heap_stops_below_the_process_ceiling_at_many_panes() {
+    let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    const PANES: usize = 64;
+
+    let chunk = stalled_iterm2_capture_chunk(MAX_MEDIA_PAYLOAD_BYTES);
+    let mut parsers: Vec<Parser> = (0..PANES).map(|_| Parser::new(Grid::new(80, 24))).collect();
+
+    let before = held();
+    for parser in parsers.iter_mut() {
+        parser.advance(&chunk);
+    }
+    let truth = held().saturating_sub(before);
+    let live: usize = parsers.iter().map(Parser::live_capture_count).sum();
+
+    assert_eq!(live, PANES, "precondition: every pane must still hold its capture");
+    assert!(
+        truth <= MAX_PROCESS_CAPTURE_STAGING_BYTES + SLACK_BYTES,
+        "{PANES} iTerm2 panes hold {} MiB of real heap against a {} MiB ceiling",
+        truth / (1024 * 1024),
+        MAX_PROCESS_CAPTURE_STAGING_BYTES / (1024 * 1024)
+    );
+
+    drop(parsers);
+}
+
+/// Maximum iTerm2 metadata must not add heap outside the 64 MiB staging pool.
+///
+/// Thirteen captures consume every floor reservation; one also consumes the
+/// entire growth pool. A heap-backed 1 KiB metadata buffer per capture pushes
+/// this exact arrangement beyond the ceiling, so the tolerance is deliberately
+/// smaller than the aggregate metadata that used to escape the pool.
+#[test]
+fn maximum_iterm2_metadata_adds_no_heap_beyond_the_staging_pool() {
+    let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    const METADATA_BYTES: usize = 1024 - b"File=".len();
+    const TIGHT_SLACK_BYTES: usize = 4 * 1024;
+
+    let mut header = b"\x1b]1337;File=".to_vec();
+    header.extend(std::iter::repeat_n(b'a', METADATA_BYTES));
+    header.push(b':');
+    let floor_payload = vec![b'A'; MIN_CAPTURE_STAGING_BYTES];
+    let full_payload = vec![b'A'; MAX_MEDIA_PAYLOAD_BYTES];
+    let mut parsers: Vec<Parser> =
+        (0..GUARANTEED_CONCURRENT_CAPTURES).map(|_| Parser::new(Grid::new(80, 24))).collect();
+
+    let before = held();
+    for parser in parsers.iter_mut() {
+        parser.advance(&header);
+    }
+    for parser in parsers.iter_mut().take(GUARANTEED_CONCURRENT_CAPTURES - 1) {
+        parser.advance(&floor_payload);
+    }
+    parsers.last_mut().expect("one grown capture").advance(&full_payload);
+    let truth = held().saturating_sub(before);
+
+    assert!(
+        truth <= MAX_PROCESS_CAPTURE_STAGING_BYTES + TIGHT_SLACK_BYTES,
+        "maximum metadata added {} bytes beyond the process staging ceiling",
+        truth.saturating_sub(MAX_PROCESS_CAPTURE_STAGING_BYTES)
     );
 
     drop(parsers);

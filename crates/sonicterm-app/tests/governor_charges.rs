@@ -526,9 +526,17 @@ fn reclaiming_a_stalled_capture_leaves_the_pane_usable() {
     chunk.extend_from_slice(b"\x1b_G");
     chunk.resize(1024 * 1024, b'A');
     app.__test_advance_child_pane_parser(child, pane_id, &chunk);
+    assert_eq!(
+        app.__test_pane_capture_count(child, pane_id),
+        Some(1),
+        "precondition: the capture must open after preceding terminal text"
+    );
 
-    app.__test_sample_pane_retention_now();
-    app.__test_sample_pane_retention_now();
+    // The first sample establishes a baseline; each threshold sample after it
+    // must observe the same progress before reclamation is justified.
+    for _ in 0..=STALL_SAMPLES_BEFORE_CANCEL {
+        app.__test_sample_pane_retention_now();
+    }
 
     // The pane must still print.
     app.__test_advance_child_pane_parser(child, pane_id, b"after the cancel\r\n");

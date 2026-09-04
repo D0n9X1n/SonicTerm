@@ -258,6 +258,9 @@ impl Drop for StagingReservation {
 /// of one per link, while still recovering as soon as content scrolls away.
 const HYPERLINK_RECLAIM_BACKOFF_LINKS: u32 = 256;
 const MAX_RAW_OSC4_BYTES: usize = 4096;
+const MAX_ITERM2_METADATA_BYTES: usize = 1024;
+const ITERM2_OSC_PREFIX: &[u8; 10] = b"1337;File=";
+const OSC4_PREFIX: &[u8; 2] = b"4;";
 /// Public for the same reason as [`MAX_MEDIA_PAYLOAD_BYTES`]: the backstop is
 /// derived from the caps, not parallel to them.
 pub const MAX_ESCAPE_SEQUENCE_BYTES: usize = 1024 * 1024;
@@ -362,6 +365,15 @@ impl MediaCapture {
             return;
         }
 
+        if !self.truncated {
+            tracing::warn!(
+                protocol = ?self.protocol,
+                payload_bytes = self.seen,
+                budget = self.reservation.budget(),
+                cap = MAX_MEDIA_PAYLOAD_BYTES,
+                "media payload exceeded staging limit; refusing whole image"
+            );
+        }
         self.growth_exhausted = true;
         self.truncated = true;
     }
@@ -404,6 +416,22 @@ impl MediaCapture {
             col,
             metadata: self.metadata,
             data: self.data,
+        })
+    }
+
+    fn into_iterm2_event(self, row: u16, col: u16, metadata: &[u8]) -> Option<MediaEvent> {
+        if !self.whole() {
+            // When: whole is false, never allocate event metadata for a refused or truncated iTerm2 payload.
+            return None;
+        }
+        let MediaCapture { protocol, data, reservation, .. } = self;
+        drop(reservation);
+        Some(MediaEvent {
+            protocol,
+            row,
+            col,
+            metadata: String::from_utf8_lossy(metadata).into_owned(),
+            data,
         })
     }
 
@@ -494,6 +522,8 @@ pub struct Parser {
     apc_capture: Option<MediaCapture>,
     pending_esc: bool,
     raw_osc: Option<RawOsc>,
+    iterm2_metadata: [u8; MAX_ITERM2_METADATA_BYTES],
+    iterm2_metadata_len: usize,
     escape_bytes_in_flight: usize,
     discarding_oversized_escape: bool,
     discard_escape_pending_esc: bool,
@@ -511,24 +541,110 @@ pub struct Parser {
     escape_family: EscapeFamily,
 }
 
-/// SonicTerm-side OSC capture for sequences where vte's public callback loses
-/// information before dispatch. vte 0.15 stores the full OSC in a private
-/// buffer, but `Perform::osc_dispatch` exposes only up to MAX_OSC_PARAMS split
-/// params; OSC 4 needs the raw `index;?` stream for 16-colour batch queries.
+/// SonicTerm-side OSC capture for sequences that vte cannot retain under the
+/// protocol's own bound or expose whole through its public callback.
 enum RawOsc {
-    /// We have consumed `ESC ]` and are checking whether the command is `4`.
-    Probe { saw_four: bool },
+    /// Checking a bounded OSC prefix before choosing vte or media ownership.
+    Probe { content: [u8; ITERM2_OSC_PREFIX.len()], content_len: u8 },
     /// Capturing bytes after `OSC 4 ;` until BEL or ST.
     Palette { content: Vec<u8> },
+    /// Streaming an iTerm2 file payload through the process media reservation.
+    Iterm2 { capture: MediaCapture, metadata_done: bool, pending_esc: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EscapeFamily {
     Ground,
     Esc,
+    EscIntermediate,
     Csi,
     Osc,
+    DcsEntry,
+    DcsParam,
+    DcsIntermediate,
+    DcsIgnore,
+    DcsPassthrough,
     String,
+}
+
+impl EscapeFamily {
+    fn from_ground(byte: u8) -> Self {
+        // When: byte is ESC, begin parser-owned escape accounting; every other ground byte remains under vte's ground decoder.
+        if byte == 0x1b {
+            Self::Esc
+        } else {
+            Self::Ground
+        }
+    }
+
+    fn after_byte(self, byte: u8) -> Self {
+        match self {
+            Self::Ground => Self::from_ground(byte),
+            Self::Esc => match byte {
+                b'[' => Self::Csi,
+                b']' => Self::Osc,
+                b'P' => Self::DcsEntry,
+                b'X' | b'^' | b'_' => Self::String,
+                0x1b => Self::Esc,
+                0x18 | 0x1a | 0x30..=0x7e => Self::Ground,
+                0x20..=0x2f => Self::EscIntermediate,
+                _ => Self::Esc,
+            },
+            Self::EscIntermediate => match byte {
+                0x1b => Self::Esc,
+                0x18 | 0x1a | 0x30..=0x7e => Self::Ground,
+                _ => Self::EscIntermediate,
+            },
+            Self::Csi => match byte {
+                0x1b => Self::Esc,
+                0x18 | 0x1a | 0x40..=0x7e => Self::Ground,
+                _ => Self::Csi,
+            },
+            Self::Osc => match byte {
+                0x1b => Self::Esc,
+                0x07 | 0x18 | 0x1a => Self::Ground,
+                _ => Self::Osc,
+            },
+            Self::DcsEntry => match byte {
+                0x1b => Self::Esc,
+                0x18 | 0x1a => Self::Ground,
+                0x20..=0x2f => Self::DcsIntermediate,
+                0x30..=0x3f => Self::DcsParam,
+                0x40..=0x7e => Self::DcsPassthrough,
+                _ => Self::DcsEntry,
+            },
+            Self::DcsParam => match byte {
+                0x1b => Self::Esc,
+                0x18 | 0x1a => Self::Ground,
+                0x20..=0x2f => Self::DcsIntermediate,
+                0x3c..=0x3f => Self::DcsIgnore,
+                0x40..=0x7e => Self::DcsPassthrough,
+                _ => Self::DcsParam,
+            },
+            Self::DcsIntermediate => match byte {
+                0x1b => Self::Esc,
+                0x18 | 0x1a => Self::Ground,
+                0x30..=0x3f => Self::DcsIgnore,
+                0x40..=0x7e => Self::DcsPassthrough,
+                _ => Self::DcsIntermediate,
+            },
+            Self::DcsIgnore => match byte {
+                0x1b => Self::Esc,
+                0x18 | 0x1a => Self::Ground,
+                _ => Self::DcsIgnore,
+            },
+            Self::DcsPassthrough => match byte {
+                0x1b => Self::Esc,
+                0x18 | 0x1a | 0x9c => Self::Ground,
+                _ => Self::DcsPassthrough,
+            },
+            Self::String => match byte {
+                0x1b => Self::Esc,
+                0x18 | 0x1a => Self::Ground,
+                _ => Self::String,
+            },
+        }
+    }
 }
 
 impl Parser {
@@ -541,6 +657,8 @@ impl Parser {
             apc_capture: None,
             pending_esc: false,
             raw_osc: None,
+            iterm2_metadata: [0; MAX_ITERM2_METADATA_BYTES],
+            iterm2_metadata_len: 0,
             escape_bytes_in_flight: 0,
             discarding_oversized_escape: false,
             discard_escape_pending_esc: false,
@@ -558,6 +676,8 @@ impl Parser {
             apc_capture: None,
             pending_esc: false,
             raw_osc: None,
+            iterm2_metadata: [0; MAX_ITERM2_METADATA_BYTES],
+            iterm2_metadata_len: 0,
             escape_bytes_in_flight: 0,
             discarding_oversized_escape: false,
             discard_escape_pending_esc: false,
@@ -638,15 +758,45 @@ impl Parser {
                 i += 1;
                 continue;
             }
-            if self.performer.ground && bytes[i..].starts_with(b"\x1b_") {
-                // When: ground sees the APC introducer in bytes, switch to Kitty capture before printable payload reaches the grid.
-                self.performer.ground = false;
+            if self.consume_raw_osc_byte(bytes[i]) {
+                // When: consume_raw_osc_byte owns bytes[i], bypass vte so its private OSC Vec cannot retain a second copy.
+                i += 1;
+                continue;
+            }
+            if self.escape_family == EscapeFamily::Esc && self.pending_esc && bytes[i] == b'_' {
+                // When: escape_family is Esc, pending_esc is set, and bytes[i] is underscore, reset vte before Kitty takes ownership.
+                self.inner = vte::Parser::new();
+                self.pending_esc = false;
                 self.apc_capture = Some(MediaCapture::new(MediaProtocol::Kitty, String::new()));
+                self.escape_family = EscapeFamily::String;
+                self.performer.fast_path_ready = false;
+                i += 1;
+                continue;
+            }
+            if self.escape_family == EscapeFamily::Ground
+                && self.performer.fast_path_ready
+                && bytes[i..].starts_with(b"\x1b_")
+            {
+                // When: escape_family is Ground and ESC underscore is contiguous, Kitty capture owns the sequence before vte can swallow it.
+                self.apc_capture = Some(MediaCapture::new(MediaProtocol::Kitty, String::new()));
+                self.escape_family = EscapeFamily::String;
+                self.performer.fast_path_ready = false;
                 i += 2;
                 continue;
             }
-            // When: performer ground chooses the safe ASCII bypass; otherwise vte retains the escape until dispatch.
-            if self.performer.ground {
+            if self.escape_family == EscapeFamily::Ground
+                && self.performer.fast_path_ready
+                && bytes[i] == 0x9f
+            {
+                // When: escape_family is Ground and byte is C1 APC, Kitty capture owns the sequence exactly like ESC underscore.
+                self.apc_capture = Some(MediaCapture::new(MediaProtocol::Kitty, String::new()));
+                self.escape_family = EscapeFamily::String;
+                self.performer.fast_path_ready = false;
+                i += 1;
+                continue;
+            }
+            // When: escape_family is Ground and performer permits it, choose the printable ASCII bypass rather than vte.
+            if self.escape_family == EscapeFamily::Ground && self.performer.fast_path_ready {
                 // memchr3 for ESC / BEL / LF — the three commonest break
                 // bytes — gives us a cheap upper bound on the run length.
                 // We then scalar-verify the prefix is entirely printable
@@ -663,122 +813,62 @@ impl Parser {
                 }
                 // When: run_end covers printable ASCII, so direct graphic dispatch preserves the same cells while skipping vte.
                 if run_end > 0 {
-                    // Every byte in [i..i+run_end] is in [0x20, 0x7E], i.e.
-                    // valid one-byte UTF-8 with the same code point as the byte.
                     for &b in &bytes[i..i + run_end] {
                         self.performer.print_graphic(b as char);
                     }
                     i += run_end;
                     continue;
                 }
-                // First byte is non-printable — feed exactly that byte to
-                // vte. vte will either dispatch it (still Ground after) or
-                // start consuming an escape (ground flips false). The
-                // Performer callbacks below update `self.performer.ground`.
-                self.performer.ground = false;
-                self.escape_bytes_in_flight = 1;
-                self.escape_family = match bytes[i] {
-                    0x1b => EscapeFamily::Esc,
-                    0x9b => EscapeFamily::Csi,
-                    0x9d => EscapeFamily::Osc,
-                    0x90 | 0x98 | 0x9e | 0x9f => EscapeFamily::String,
-                    _ => EscapeFamily::Ground,
-                };
-                self.observe_osc4_byte(bytes[i]);
-                self.performer.sequence_dispatched = false;
-                let byte = bytes[i];
-                self.inner.advance(&mut self.performer, &bytes[i..i + 1]);
-                if matches!(byte, 0x18 | 0x1a) {
-                    self.reset_cancelled_escape();
-                }
-                if self.performer.ground || self.performer.sequence_dispatched {
-                    self.escape_bytes_in_flight = 0;
-                    self.escape_family = EscapeFamily::Ground;
-                }
-                // If vte stayed in Ground (execute() or print()), the
-                // callback has already set ground=true. If not, leave it
-                // false so the next iteration feeds bytes through vte until
-                // a dispatch callback flips it back to Ground.
-                i += 1;
-            } else {
-                // Escape in flight — feed bytes through vte one at a time
-                // and let the dispatch callbacks decide when we're back in
-                // Ground. Feeding the remainder en bloc would work too, but
-                // we want to return to fast-path as soon as possible, so
-                // stop the moment ground flips back to true.
-                let start = i;
-                while i < len && !self.performer.ground {
-                    if self.performer.dcs_capture.is_some() && matches!(bytes[i], 0x18 | 0x1a) {
-                        // When: dcs_capture sees CAN or SUB mid-escape, reset vte so cancelled image bytes cannot survive to unhook.
-                        self.inner = vte::Parser::new();
-                        self.reset_cancelled_escape();
-                        i += 1;
-                        break;
-                    }
-                    let started_escape = if self.escape_family == EscapeFamily::Ground {
-                        self.escape_family = match bytes[i] {
-                            0x1b => EscapeFamily::Esc,
-                            0x9b => EscapeFamily::Csi,
-                            0x9d => EscapeFamily::Osc,
-                            0x90 | 0x98 | 0x9e | 0x9f => EscapeFamily::String,
-                            _ => EscapeFamily::Ground,
-                        };
-                        if self.escape_family != EscapeFamily::Ground {
-                            self.escape_bytes_in_flight = 1;
-                            true
-                        } else {
-                            // When: escape_family remains Ground, this byte is a control dispatch rather than a counted escape.
-                            false
-                        }
-                    } else {
-                        // When: escape_family already identifies the sequence, do not restart byte accounting mid-flight.
-                        false
-                    };
-                    if self.escape_family == EscapeFamily::Esc && !started_escape {
-                        self.escape_family = match bytes[i] {
-                            b'[' => EscapeFamily::Csi,
-                            b']' => EscapeFamily::Osc,
-                            b'P' | b'X' | b'^' | b'_' => EscapeFamily::String,
-                            _ => EscapeFamily::Esc,
-                        };
-                    }
-                    let media_capture_has_own_budget = self.performer.dcs_capture.is_some();
-                    if self.escape_family != EscapeFamily::Ground
-                        && !started_escape
-                        && !media_capture_has_own_budget
-                    {
-                        // When: escape_family is active beyond its introducer and media_capture_has_own_budget is false, enforce the generic cap.
-                        self.escape_bytes_in_flight = self.escape_bytes_in_flight.saturating_add(1);
-                        if self.escape_bytes_in_flight > MAX_ESCAPE_SEQUENCE_BYTES {
-                            // When: escape_bytes_in_flight exceeds MAX_ESCAPE_SEQUENCE_BYTES, discard through a terminator instead of retaining more input.
-                            let pending_esc = self.pending_esc;
-                            self.begin_discarding_oversized_escape(pending_esc);
-                            self.consume_discarded_escape_byte(bytes[i]);
-                            i += 1;
-                            break;
-                        }
-                    }
-                    self.observe_osc4_byte(bytes[i]);
-                    self.performer.sequence_dispatched = false;
-                    let byte = bytes[i];
-                    self.inner.advance(&mut self.performer, &bytes[i..i + 1]);
-                    i += 1;
-                    if matches!(byte, 0x18 | 0x1a) {
-                        self.reset_cancelled_escape();
-                    }
-                    if self.performer.ground || self.performer.sequence_dispatched {
-                        self.escape_bytes_in_flight = 0;
-                        self.escape_family = EscapeFamily::Ground;
-                    }
-                }
-                debug_assert!(i > start, "vte must consume at least one byte per iteration");
             }
+            self.feed_vte_byte(bytes[i]);
+            i += 1;
         }
         std::mem::take(&mut self.performer.events)
     }
 
+    fn feed_vte_byte(&mut self, byte: u8) {
+        if self.performer.dcs_capture.is_some() && matches!(byte, 0x18 | 0x1a) {
+            // When: dcs_capture receives CAN or SUB, reset vte before cancelled image bytes can survive to unhook.
+            self.inner = vte::Parser::new();
+            self.reset_cancelled_escape();
+            return;
+        }
+        let started_escape = self.escape_family == EscapeFamily::Ground
+            && EscapeFamily::from_ground(byte) != EscapeFamily::Ground;
+        if started_escape {
+            self.escape_bytes_in_flight = 1;
+        } else if self.escape_family != EscapeFamily::Ground && self.performer.dcs_capture.is_none()
+        {
+            // When: escape_family is non-Ground and dcs_capture is absent, enforce the generic retention cap.
+            self.escape_bytes_in_flight = self.escape_bytes_in_flight.saturating_add(1);
+            if self.escape_bytes_in_flight > MAX_ESCAPE_SEQUENCE_BYTES {
+                // When: escape_bytes_in_flight exceeds MAX_ESCAPE_SEQUENCE_BYTES, discard through the sequence terminator.
+                let pending_esc = self.pending_esc;
+                self.begin_discarding_oversized_escape(pending_esc);
+                self.consume_discarded_escape_byte(byte);
+                return;
+            }
+        }
+        self.observe_osc_byte(byte);
+        let was_fast_path_ready = self.performer.fast_path_ready;
+        self.performer.fast_path_ready = false;
+        let previous_family = self.escape_family;
+        self.inner.advance(&mut self.performer, &[byte]);
+        self.escape_family = previous_family.after_byte(byte);
+        if self.escape_family == EscapeFamily::Ground {
+            self.escape_bytes_in_flight = 0;
+            if previous_family != EscapeFamily::Ground || (was_fast_path_ready && byte < 0xc0) {
+                self.performer.fast_path_ready = true;
+            }
+        }
+        if matches!(byte, 0x18 | 0x1a) {
+            self.reset_cancelled_escape();
+        }
+    }
+
     fn reset_cancelled_escape(&mut self) {
         self.raw_osc = None;
+        self.iterm2_metadata_len = 0;
         self.pending_esc = false;
         self.apc_capture = None;
         self.performer.dcs_capture = None;
@@ -787,8 +877,7 @@ impl Parser {
         self.discard_escape_pending_esc = false;
         self.discard_exits_on_newline = false;
         self.escape_family = EscapeFamily::Ground;
-        self.performer.ground = true;
-        self.performer.sequence_dispatched = true;
+        self.performer.fast_path_ready = true;
     }
 
     fn begin_discarding_oversized_escape(&mut self, pending_esc: bool) {
@@ -802,7 +891,7 @@ impl Parser {
         self.pending_esc = false;
         self.discarding_oversized_escape = true;
         self.discard_escape_pending_esc = pending_esc;
-        self.performer.ground = false;
+        self.performer.fast_path_ready = false;
     }
 
     fn consume_discarded_escape_byte(&mut self, byte: u8) {
@@ -810,15 +899,30 @@ impl Parser {
             EscapeFamily::Osc => {
                 byte == 0x07 || byte == 0x9c || (self.discard_escape_pending_esc && byte == b'\\')
             }
-            EscapeFamily::String => {
+            EscapeFamily::DcsEntry
+            | EscapeFamily::DcsParam
+            | EscapeFamily::DcsIntermediate
+            | EscapeFamily::DcsIgnore
+            | EscapeFamily::DcsPassthrough
+            | EscapeFamily::String => {
                 byte == 0x9c || (self.discard_escape_pending_esc && byte == b'\\')
             }
-            EscapeFamily::Ground | EscapeFamily::Esc | EscapeFamily::Csi => false,
+            EscapeFamily::Ground
+            | EscapeFamily::Esc
+            | EscapeFamily::EscIntermediate
+            | EscapeFamily::Csi => false,
         };
         let final_byte = match self.escape_family {
             EscapeFamily::Csi => (0x40..=0x7e).contains(&byte),
-            EscapeFamily::Esc => (0x30..=0x7e).contains(&byte),
-            EscapeFamily::Ground | EscapeFamily::Osc | EscapeFamily::String => false,
+            EscapeFamily::Esc | EscapeFamily::EscIntermediate => (0x30..=0x7e).contains(&byte),
+            EscapeFamily::Ground
+            | EscapeFamily::Osc
+            | EscapeFamily::DcsEntry
+            | EscapeFamily::DcsParam
+            | EscapeFamily::DcsIntermediate
+            | EscapeFamily::DcsIgnore
+            | EscapeFamily::DcsPassthrough
+            | EscapeFamily::String => false,
         };
         let abandoned_by_newline = self.discard_exits_on_newline && byte == b'\n';
         let terminated =
@@ -829,7 +933,7 @@ impl Parser {
             self.discard_escape_pending_esc = false;
             self.discard_exits_on_newline = false;
             self.escape_bytes_in_flight = 0;
-            self.performer.ground = true;
+            self.performer.fast_path_ready = true;
             self.escape_family = EscapeFamily::Ground;
             // A newline is the user's output, not the transfer's terminator,
             // so it has to reach the grid rather than be eaten as one.
@@ -843,7 +947,7 @@ impl Parser {
 
     fn consume_apc_byte(&mut self, byte: u8) {
         if matches!(byte, 0x18 | 0x1a) {
-            // When: matches recognizes CAN or SUB, cancel APC staging before aborted Kitty data can become media.
+            // When: byte matches CAN or SUB, cancel APC staging before aborted Kitty data can become media.
             self.reset_cancelled_escape();
             return;
         }
@@ -862,62 +966,166 @@ impl Parser {
                 if let Some(event) = capture.into_kitty_event(row, col) {
                     self.performer.events.push(VtEvent::Media(event));
                 }
-                self.performer.ground = true;
+                self.finish_escape();
                 return;
             }
             capture.append_byte(0x1b);
         }
-        if byte == 0x1b {
+        // When: byte selects C1 ST, ESC, or payload handling for this APC byte.
+        if byte == 0x9c {
+            let capture = self.apc_capture.take().expect("capture present");
+            let row = self.performer.grid.cursor.row;
+            let col = self.performer.grid.cursor.col;
+            if let Some(event) = capture.into_kitty_event(row, col) {
+                self.performer.events.push(VtEvent::Media(event));
+            }
+            self.finish_escape();
+        } else if byte == 0x1b {
             capture.pending_esc = true;
         } else {
-            // When: byte is not ESC, it is unambiguously Kitty payload and can be staged immediately.
             capture.append_byte(byte);
         }
     }
 
-    fn observe_osc4_byte(&mut self, byte: u8) {
-        if let Some(mut raw_osc) = self.raw_osc.take() {
-            // When: raw_osc is active, preserve the uncapped OSC 4 stream before vte splits or truncates its parameters.
-            match &mut raw_osc {
-                RawOsc::Probe { saw_four } => match byte {
-                    b'4' if !*saw_four => {
-                        *saw_four = true;
-                        self.raw_osc = Some(raw_osc);
+    fn finish_escape(&mut self) {
+        self.escape_bytes_in_flight = 0;
+        self.iterm2_metadata_len = 0;
+        self.escape_family = EscapeFamily::Ground;
+        self.performer.fast_path_ready = true;
+    }
+
+    fn append_iterm2_metadata_byte(&mut self, capture: &mut MediaCapture, byte: u8) {
+        capture.seen = capture.seen.saturating_add(1);
+        if !capture.admitted() {
+            // When: capture is not admitted, retain no metadata outside the process staging pool.
+            return;
+        }
+        if self.iterm2_metadata_len < self.iterm2_metadata.len() {
+            // When: iterm2_metadata_len remains below the fixed buffer length, retain this metadata byte inline.
+            self.iterm2_metadata[self.iterm2_metadata_len] = byte;
+            self.iterm2_metadata_len += 1;
+            return;
+        }
+        if !capture.truncated {
+            tracing::warn!(
+                protocol = ?capture.protocol,
+                metadata_bytes = capture.seen,
+                cap = MAX_ITERM2_METADATA_BYTES,
+                "media metadata exceeded limit; refusing whole image"
+            );
+        }
+        capture.truncated = true;
+    }
+
+    fn observe_osc_byte(&mut self, byte: u8) {
+        if self.pending_esc {
+            // When: pending_esc is set, inspect byte for the OSC introducer before forwarding later content to raw capture.
+            self.pending_esc = false;
+            if byte == b']' {
+                // When: byte opens OSC after ESC, start the bounded prefix probe alongside vte.
+                self.raw_osc =
+                    Some(RawOsc::Probe { content: [0; ITERM2_OSC_PREFIX.len()], content_len: 0 });
+                return;
+            }
+        }
+        self.pending_esc = byte == 0x1b;
+    }
+
+    fn consume_raw_osc_byte(&mut self, byte: u8) -> bool {
+        let Some(raw_osc) = self.raw_osc.take() else {
+            // When: raw_osc is absent, leave this byte for vte or APC ownership.
+            return false;
+        };
+        // When: raw_osc selects prefix probing, OSC 4 accumulation, or OSC 1337 media staging.
+        match raw_osc {
+            RawOsc::Probe { mut content, mut content_len } => {
+                let index = usize::from(content_len);
+                if index < content.len() {
+                    content[index] = byte;
+                    content_len += 1;
+                }
+                let prefix = &content[..usize::from(content_len)];
+                if !ITERM2_OSC_PREFIX.starts_with(prefix) && !OSC4_PREFIX.starts_with(prefix) {
+                    // When: prefix matches neither OSC 1337 nor OSC 4, return ownership to vte.
+                    return false;
+                }
+                // When: prefix selects OSC 4, complete OSC 1337, or continued bounded probing.
+                if prefix == OSC4_PREFIX {
+                    self.raw_osc = Some(RawOsc::Palette { content: Vec::new() });
+                } else if prefix == ITERM2_OSC_PREFIX {
+                    self.inner = vte::Parser::new();
+                    let mut capture = MediaCapture::new(MediaProtocol::Iterm2File, String::new());
+                    for byte in b"File=" {
+                        self.append_iterm2_metadata_byte(&mut capture, *byte);
                     }
-                    b';' if *saw_four => {
-                        self.raw_osc = Some(RawOsc::Palette { content: Vec::new() })
-                    }
-                    _ => self.pending_esc = byte == 0x1b,
-                },
-                RawOsc::Palette { content } => match byte {
+                    self.raw_osc =
+                        Some(RawOsc::Iterm2 { capture, metadata_done: false, pending_esc: false });
+                    return true;
+                } else {
+                    self.raw_osc = Some(RawOsc::Probe { content, content_len });
+                }
+                false
+            }
+            RawOsc::Palette { mut content } => {
+                match byte {
                     0x07 | 0x1b => {
-                        let content = std::mem::take(content);
                         self.performer.handle_osc4_raw(&content, byte == 0x07);
                         self.performer.suppress_next_osc4 = true;
-                        self.performer.ground = true;
                         self.pending_esc = byte == 0x1b;
                     }
                     _ => {
                         if content.len() < MAX_RAW_OSC4_BYTES {
                             content.push(byte);
-                            self.raw_osc = Some(raw_osc);
+                            self.raw_osc = Some(RawOsc::Palette { content });
                         }
                     }
-                },
+                }
+                false
             }
-            return;
-        }
-
-        if self.pending_esc {
-            // When: pending_esc is set, inspect byte for the OSC introducer before forwarding later content to raw capture.
-            self.pending_esc = false;
-            if byte == b']' {
-                // When: byte opens OSC after ESC, start probing for command 4 so batched palette queries remain intact.
-                self.raw_osc = Some(RawOsc::Probe { saw_four: false });
-                return;
+            RawOsc::Iterm2 { mut capture, mut metadata_done, mut pending_esc } => {
+                if matches!(byte, 0x18 | 0x1a) {
+                    // When: byte matches CAN or SUB, discard the incomplete OSC media transfer and return to ground.
+                    self.finish_escape();
+                    return true;
+                }
+                let terminated = byte == 0x07 || byte == 0x9c || (pending_esc && byte == b'\\');
+                if terminated {
+                    // When: terminated is true, dispatch only a whole OSC 1337 payload with a metadata separator.
+                    if metadata_done {
+                        if let Some(event) = capture.into_iterm2_event(
+                            self.performer.grid.cursor.row,
+                            self.performer.grid.cursor.col,
+                            &self.iterm2_metadata[..self.iterm2_metadata_len],
+                        ) {
+                            self.performer.events.push(VtEvent::Media(event));
+                        }
+                    }
+                    self.finish_escape();
+                    return true;
+                }
+                if pending_esc {
+                    // When: pending_esc did not complete ST, preserve it in the field selected by metadata_done.
+                    if metadata_done {
+                        capture.append_byte(0x1b);
+                    } else {
+                        self.append_iterm2_metadata_byte(&mut capture, 0x1b);
+                    }
+                    pending_esc = false;
+                }
+                // When: byte and metadata_done select terminator state, metadata completion, or payload ownership.
+                if byte == 0x1b {
+                    pending_esc = true;
+                } else if !metadata_done && byte == b':' {
+                    metadata_done = true;
+                } else if metadata_done {
+                    capture.append_byte(byte);
+                } else {
+                    self.append_iterm2_metadata_byte(&mut capture, byte);
+                }
+                self.raw_osc = Some(RawOsc::Iterm2 { capture, metadata_done, pending_esc });
+                true
             }
         }
-        self.pending_esc = byte == 0x1b;
     }
 
     /// Borrow the underlying [`Grid`] — used by the renderer to read cells.
@@ -932,8 +1140,8 @@ impl Parser {
     /// which report their own retention: a pane composes these figures rather
     /// than any one of them restating another.
     ///
-    /// Items count live capture buffers, which is at most one — see
-    /// [`Self::live_capture_count`].
+    /// Items count live APC, DCS, or iTerm2 OSC capture buffers, which is at most
+    /// one per parser — see [`Self::live_capture_count`].
     #[must_use]
     pub fn retained_amount(&self) -> ResourceAmount {
         let capture_bytes = self
@@ -944,6 +1152,7 @@ impl Parser {
             .sum::<usize>();
         let osc_bytes = match &self.raw_osc {
             Some(RawOsc::Palette { content }) => content.capacity(),
+            Some(RawOsc::Iterm2 { capture, .. }) => capture.retained_bytes(),
             Some(RawOsc::Probe { .. }) | None => 0,
         };
         ResourceAmount {
@@ -964,11 +1173,17 @@ impl Parser {
     /// parser cannot decide *when*, and the host cannot reach *what*.
     #[must_use]
     pub fn capture_progress(&self) -> usize {
-        self.apc_capture
+        let direct = self
+            .apc_capture
             .iter()
             .chain(self.performer.dcs_capture.iter())
             .map(|capture| capture.seen)
-            .sum()
+            .sum::<usize>();
+        let osc = match &self.raw_osc {
+            Some(RawOsc::Iterm2 { capture, .. }) => capture.seen,
+            Some(RawOsc::Probe { .. }) | Some(RawOsc::Palette { .. }) | None => 0,
+        };
+        direct.saturating_add(osc)
     }
 
     /// Abandon any capture or raw OSC palette accumulation in flight, releasing
@@ -999,27 +1214,32 @@ impl Parser {
             // When: released and live_capture_count show no capture, keep ground unchanged rather than swallowing ordinary output.
             return 0;
         }
+        let escape_family = if matches!(self.raw_osc, Some(RawOsc::Iterm2 { .. })) {
+            EscapeFamily::Osc
+        } else {
+            EscapeFamily::String
+        };
         self.inner = vte::Parser::new();
         self.reset_cancelled_escape();
-        // Both capture families terminate with ST, so the discard reads as a
-        // string sequence. Set after the reset, which clears these.
-        self.escape_family = EscapeFamily::String;
+        // APC/DCS use string termination while OSC 1337 additionally accepts BEL.
+        self.escape_family = escape_family;
         self.discarding_oversized_escape = true;
         self.discard_exits_on_newline = true;
-        self.performer.ground = false;
+        self.performer.fast_path_ready = false;
         released
     }
 
     /// Number of media captures currently accumulating.
     ///
-    /// Beginning any escape family cancels a capture already in flight, so this
-    /// is at most one. The two capture slots are therefore alternatives rather
-    /// than addends, and a budget covering their sum would guard a state the
-    /// parser cannot reach. That exclusivity is what needs holding, so it is
-    /// exposed for assertion rather than left as an emergent property.
+    /// Beginning another escape family ends or cancels a capture already in
+    /// flight, so APC, DCS, and iTerm2 OSC slots are alternatives rather than
+    /// addends. That exclusivity is what needs holding, so it is exposed for
+    /// assertion rather than left as an emergent property.
     #[must_use]
     pub fn live_capture_count(&self) -> usize {
-        usize::from(self.apc_capture.is_some()) + usize::from(self.performer.dcs_capture.is_some())
+        usize::from(self.apc_capture.is_some())
+            + usize::from(self.performer.dcs_capture.is_some())
+            + usize::from(matches!(self.raw_osc, Some(RawOsc::Iterm2 { .. })))
     }
 
     /// Mutably borrow the [`Grid`] — used by the host on resize, scrollback
@@ -1139,7 +1359,6 @@ struct Performer {
     cwd_revision: u64,
     reply_tx: Option<Sender<Vec<u8>>>,
     reply_queue_full_warned: std::sync::atomic::AtomicBool,
-    sequence_dispatched: bool,
     /// Theme default foreground (sRGB), used to answer OSC 10 `?` queries.
     /// `None` means the parser was never told a theme — query replies are
     /// suppressed in that case so we don't lie to the shell.
@@ -1166,16 +1385,12 @@ struct Performer {
     /// DECSTBM scrolling region bottom margin (visible-row, 0-based,
     /// inclusive).
     scroll_bottom: Option<u16>,
-    /// Tracks whether the underlying vte state machine is in the Ground
-    /// state (no escape sequence currently being consumed). Maintained
-    /// externally: set to `true` after every dispatch callback fires
-    /// (`print` / `execute` / `csi_dispatch` / `osc_dispatch` /
-    /// `esc_dispatch` / `unhook`), set to `false` inside `Parser::advance`
-    /// just before feeding the first byte of a potential escape, and held
-    /// `false` while inside a DCS passthrough (`hook` … `unhook`).
-    /// The ASCII fast-path in `Parser::advance` is only taken when this is
-    /// `true`.
-    ground: bool,
+    /// Whether direct ASCII printing may bypass vte.
+    ///
+    /// [`Parser::escape_family`] owns sequence boundaries. This flag only stays
+    /// false while vte must retain byte-level ownership, including partial UTF-8
+    /// and DCS passthrough.
+    fast_path_ready: bool,
     /// Most-recently-printed graphic character, for CSI `b` (REP).
     /// ECMA-48: REP repeats the GRAPHIC CHARACTER immediately preceding
     /// REP in the data stream. Reset when a control function intervenes.
@@ -1218,7 +1433,6 @@ impl Performer {
             cwd_revision: 0,
             reply_tx,
             reply_queue_full_warned: std::sync::atomic::AtomicBool::new(false),
-            sequence_dispatched: false,
             theme_fg: None,
             theme_bg: None,
             theme_cursor: None,
@@ -1226,7 +1440,7 @@ impl Performer {
             suppress_next_osc4: false,
             scroll_top: None,
             scroll_bottom: None,
-            ground: true,
+            fast_path_ready: true,
             last_printed_char: None,
             dcs_capture: None,
             kitty_kbd_flags: Vec::new(),
@@ -1768,7 +1982,7 @@ fn split_once_byte(bytes: &[u8], needle: u8) -> Option<(&[u8], &[u8])> {
 impl Perform for Performer {
     fn print(&mut self, c: char) {
         self.print_graphic(c);
-        self.ground = true;
+        self.fast_path_ready = true;
     }
 
     fn execute(&mut self, byte: u8) {
@@ -1801,12 +2015,11 @@ impl Perform for Performer {
         // inside an ESC/CSI/OSC/DCS state machine (C0 bytes are dispatched
         // even mid-escape). Resuming the SWAR fast-path here would consume
         // the remainder of the escape sequence as printable text.
-        self.ground = false;
+        self.fast_path_ready = false;
     }
 
     fn csi_dispatch(&mut self, params: &Params, inter: &[u8], _ignore: bool, action: char) {
-        self.ground = false;
-        self.sequence_dispatched = true;
+        self.fast_path_ready = false;
         if action != 'b' {
             self.reset_last_printed_char();
         }
@@ -2146,8 +2359,7 @@ impl Perform for Performer {
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
-        self.ground = false;
-        self.sequence_dispatched = true;
+        self.fast_path_ready = false;
         let code = params
             .first()
             .and_then(|s| std::str::from_utf8(s).ok())
@@ -2393,7 +2605,7 @@ impl Perform for Performer {
 
     fn hook(&mut self, _params: &Params, intermediates: &[u8], ignore: bool, action: char) {
         // Entering DCS passthrough — stay out of the fast-path until unhook.
-        self.ground = false;
+        self.fast_path_ready = false;
         // `q` ends three unrelated DCS sequences, told apart only by their
         // intermediate byte:
         //
@@ -2416,14 +2628,13 @@ impl Perform for Performer {
             .then(|| MediaCapture::new(MediaProtocol::Sixel, String::new()));
     }
     fn put(&mut self, byte: u8) {
-        self.ground = false;
+        self.fast_path_ready = false;
         if let Some(capture) = self.dcs_capture.as_mut() {
             capture.append_byte(byte);
         }
     }
     fn unhook(&mut self) {
-        self.ground = false;
-        self.sequence_dispatched = true;
+        self.fast_path_ready = false;
         if let Some(capture) = self.dcs_capture.take() {
             if let Some(event) = capture.into_event(self.grid.cursor.row, self.grid.cursor.col) {
                 self.events.push(VtEvent::Media(event));
@@ -2431,8 +2642,7 @@ impl Perform for Performer {
         }
     }
     fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, byte: u8) {
-        self.ground = false;
-        self.sequence_dispatched = true;
+        self.fast_path_ready = false;
         self.reset_last_printed_char();
         match byte {
             b'7' => {
