@@ -1,7 +1,8 @@
 use super::{
-    parse_osc7_cwd_snapshot, MediaCapture, MediaProtocol, MouseTracking, Osc7Cwd, Parser, VtEvent,
-    CAPTURE_FLOOR_POOL_BYTES, CAPTURE_GROWTH_POOL_BYTES, GUARANTEED_CONCURRENT_CAPTURES,
-    LIVE_MEDIA_CAPTURES, MAX_ESCAPE_SEQUENCE_BYTES, MAX_MEDIA_PAYLOAD_BYTES,
+    parse_osc7_cwd_snapshot, EscapeFamily, MediaCapture, MediaEvent, MediaProtocol, MouseTracking,
+    Osc7Cwd, Parser, VtEvent, CAPTURE_FLOOR_POOL_BYTES, CAPTURE_FLOOR_RESERVED,
+    CAPTURE_GROWTH_POOL_BYTES, GUARANTEED_CONCURRENT_CAPTURES, LIVE_MEDIA_CAPTURES,
+    MAX_ESCAPE_SEQUENCE_BYTES, MAX_ITERM2_METADATA_BYTES, MAX_MEDIA_PAYLOAD_BYTES,
     MAX_PROCESS_CAPTURE_STAGING_BYTES, MIN_CAPTURE_STAGING_BYTES,
 };
 use sonicterm_grid::grid::{CellFlags, Color, Grid, UnderlineStyle};
@@ -38,6 +39,24 @@ fn serialised_captures() -> std::sync::MutexGuard<'static, ()> {
 
 fn row_text(parser: &Parser, row: u16) -> String {
     parser.grid().row(row).iter().map(|cell| cell.ch).collect()
+}
+
+fn only_media(events: Vec<VtEvent>) -> MediaEvent {
+    let mut media = events.into_iter().filter_map(|event| match event {
+        VtEvent::Media(media) => Some(media),
+        _ => None,
+    });
+    let event = media.next().expect("one media event");
+    assert!(media.next().is_none(), "expected exactly one media event");
+    event
+}
+
+fn iterm2_sequence(payload_bytes: usize) -> Vec<u8> {
+    let mut sequence = Vec::with_capacity(payload_bytes + 32);
+    sequence.extend_from_slice(b"\x1b]1337;File=inline=1:");
+    sequence.resize(sequence.len() + payload_bytes, b'A');
+    sequence.extend_from_slice(b"\x1b\\");
+    sequence
 }
 
 /// OSC 52 surfaces the selection and encoded payload without decoding on the parser thread.
@@ -426,6 +445,346 @@ fn large_sixel_uses_media_budget_not_generic_escape_limit() {
         .expect("large Sixel DCS should remain a media event");
     assert_eq!(media.protocol, MediaProtocol::Sixel);
     assert!(media.data.len() > MAX_ESCAPE_SEQUENCE_BYTES);
+}
+
+/// A completed CSI or OSC is a sequence boundary even when its callback leaves
+/// the performer's fast-path mirror false; the following APC must still be owned.
+#[test]
+fn kitty_apc_dispatches_after_completed_escape_sequences() {
+    let _serialised = serialised_captures();
+    for prefix in [b"\x1b[0m".as_slice(), b"\x1b]0;title\x07".as_slice(), b"\x1b[2;3HX".as_slice()]
+    {
+        let mut parser = Parser::new(Grid::new(80, 24));
+        let mut sequence = prefix.to_vec();
+        sequence.extend_from_slice(b"\x1b_Gf=100;AAAA\x1b\\");
+
+        let media = only_media(parser.advance(&sequence));
+
+        assert_eq!(media.protocol, MediaProtocol::Kitty);
+        assert_eq!(media.metadata, "f=100");
+        assert_eq!(media.data, b"AAAA");
+    }
+
+    let mut parser = Parser::new(Grid::new(80, 24));
+    let events = parser.advance(b"\x1b[0m\x1b]0;title\x07\x1b[2;3H\x1b_Gf=100;AAAA\x1b\\");
+    assert_eq!(only_media(events).protocol, MediaProtocol::Kitty);
+}
+
+/// C1 APC remains recognizable immediately after an ordinary ground control;
+/// the control callback must not leave the fast-path mirror stale.
+#[test]
+fn c1_kitty_apc_dispatches_after_ground_control() {
+    let _serialised = serialised_captures();
+    let mut parser = Parser::new(Grid::new(80, 24));
+
+    let media = only_media(parser.advance(b"\n\x9fGf=100;AAAA\x9c"));
+
+    assert_eq!(media.protocol, MediaProtocol::Kitty);
+    assert_eq!(media.data, b"AAAA");
+}
+
+/// Both APC introducer forms and every PTY chunk boundary must reach the same
+/// Kitty capture, including a split between the two bytes of ESC underscore.
+#[test]
+fn kitty_apc_supports_c1_and_every_buffer_split() {
+    let _serialised = serialised_captures();
+    for sequence in [b"\x1b_Gf=100;AAAA\x1b\\".as_slice(), b"\x9fGf=100;AAAA\x9c".as_slice()] {
+        for split in 0..=sequence.len() {
+            let mut parser = Parser::new(Grid::new(80, 24));
+            let mut events = parser.advance(&sequence[..split]);
+            events.extend(parser.advance(&sequence[split..]));
+
+            let media = only_media(events);
+            assert_eq!(media.protocol, MediaProtocol::Kitty, "split {split}");
+            assert_eq!(media.metadata, "f=100", "split {split}");
+            assert_eq!(media.data, b"AAAA", "split {split}");
+        }
+    }
+}
+
+/// CAN and SUB abort Kitty staging without leaking an event or exposing the
+/// remaining graphics bytes as printable terminal text.
+#[test]
+fn can_and_sub_cancel_kitty_without_emitting_media() {
+    let _serialised = serialised_captures();
+    for cancel in [0x18, 0x1a] {
+        let mut parser = Parser::new(Grid::new(16, 2));
+        let mut sequence = vec![0x1b, b'_', b'G', b'A', b'A', cancel];
+        sequence.extend_from_slice(b"Z");
+        let events = parser.advance(&sequence);
+
+        assert!(events.iter().all(|event| !matches!(event, VtEvent::Media(_))));
+        assert_eq!(parser.live_capture_count(), 0);
+        assert_eq!(parser.grid().row(0)[0].ch, 'Z');
+    }
+}
+
+/// The parser-owned family mirror follows every vte DCS substate so C1 ST is
+/// terminal only after the DCS final byte selects passthrough.
+#[test]
+fn escape_family_tracks_dcs_substates_and_esc_intermediates() {
+    assert_eq!(EscapeFamily::Esc.after_byte(0x20), EscapeFamily::EscIntermediate);
+    assert_eq!(EscapeFamily::EscIntermediate.after_byte(b'P'), EscapeFamily::Ground);
+
+    assert_eq!(EscapeFamily::Esc.after_byte(b'P'), EscapeFamily::DcsEntry);
+    assert_eq!(EscapeFamily::DcsEntry.after_byte(b'1'), EscapeFamily::DcsParam);
+    assert_eq!(EscapeFamily::DcsParam.after_byte(b' '), EscapeFamily::DcsIntermediate);
+    assert_eq!(EscapeFamily::DcsIntermediate.after_byte(b'0'), EscapeFamily::DcsIgnore);
+    assert_eq!(EscapeFamily::DcsIgnore.after_byte(0x9c), EscapeFamily::DcsIgnore);
+    assert_eq!(EscapeFamily::DcsEntry.after_byte(b'q'), EscapeFamily::DcsPassthrough);
+    assert_eq!(EscapeFamily::DcsPassthrough.after_byte(0x9c), EscapeFamily::Ground);
+}
+
+/// C1 ST terminates only DCS passthrough in vte; before the final byte it must
+/// not move the mirror to Ground and let controls bypass vte's DCS state.
+#[test]
+fn c1_st_before_dcs_hook_keeps_parser_and_vte_in_sync() {
+    let mut parser = Parser::new(Grid::new(8, 3));
+
+    parser.advance(b"\x1bP\x9cA\nB");
+
+    assert_eq!(row_text(&parser, 0), "        ");
+    assert_eq!(row_text(&parser, 1), "        ");
+    parser.advance(b"\x1b\\Z");
+    assert_eq!(parser.grid().row(0)[0].ch, 'Z');
+}
+
+/// An iTerm2 payload larger than the generic OSC ceiling but below the media
+/// ceiling must be staged whole and dispatched through the media contract.
+#[test]
+fn iterm2_payload_above_generic_escape_cap_dispatches() {
+    let _serialised = serialised_captures();
+    let payload_bytes = 2 * MAX_ESCAPE_SEQUENCE_BYTES;
+    let mut parser = Parser::new(Grid::new(80, 24));
+
+    let media = only_media(parser.advance(&iterm2_sequence(payload_bytes)));
+
+    assert_eq!(media.protocol, MediaProtocol::Iterm2File);
+    assert_eq!(media.metadata, "File=inline=1");
+    assert_eq!(media.data.len(), payload_bytes);
+}
+
+/// iTerm2 obeys the advertised payload boundary exactly: one lone capture can
+/// dispatch 16 MiB, while the next byte rejects the whole image.
+#[test]
+fn iterm2_payload_uses_exact_media_boundary() {
+    let _serialised = serialised_captures();
+
+    for payload_bytes in
+        [MAX_ESCAPE_SEQUENCE_BYTES, 2 * MAX_ESCAPE_SEQUENCE_BYTES, MAX_MEDIA_PAYLOAD_BYTES]
+    {
+        let mut parser = Parser::new(Grid::new(80, 24));
+        let media = only_media(parser.advance(&iterm2_sequence(payload_bytes)));
+        assert_eq!(media.protocol, MediaProtocol::Iterm2File);
+        assert_eq!(media.data.len(), payload_bytes);
+    }
+
+    let mut parser = Parser::new(Grid::new(80, 24));
+    let events = parser.advance(&iterm2_sequence(MAX_MEDIA_PAYLOAD_BYTES + 1));
+    assert!(events.iter().all(|event| !matches!(event, VtEvent::Media(_))));
+}
+
+/// The streamed OSC path must retain its terminator state across every input
+/// split instead of requiring the whole introducer or ST in one PTY chunk.
+#[test]
+fn iterm2_media_supports_every_buffer_split() {
+    let _serialised = serialised_captures();
+    let sequence = iterm2_sequence(8);
+
+    for split in 0..=sequence.len() {
+        let mut parser = Parser::new(Grid::new(80, 24));
+        let mut events = parser.advance(&sequence[..split]);
+        events.extend(parser.advance(&sequence[split..]));
+
+        let media = only_media(events);
+        assert_eq!(media.protocol, MediaProtocol::Iterm2File, "split {split}");
+        assert_eq!(media.data, b"AAAAAAAA", "split {split}");
+    }
+}
+
+/// Unsupported APC strings remain bounded by media staging and return cleanly
+/// to ground without being misclassified as Kitty graphics.
+#[test]
+fn non_kitty_apc_resynchronizes_without_media() {
+    let _serialised = serialised_captures();
+    let mut parser = Parser::new(Grid::new(16, 2));
+
+    let events = parser.advance(b"\x1b_Xnot-kitty\x1b\\Z");
+
+    assert!(events.iter().all(|event| !matches!(event, VtEvent::Media(_))));
+    assert_eq!(parser.grid().row(0)[0].ch, 'Z');
+    assert_eq!(parser.live_capture_count(), 0);
+}
+
+/// A non-Kitty APC larger than the generic escape cap still uses bounded media
+/// staging, emits no image, and returns to ground after its terminator.
+#[test]
+fn oversized_non_kitty_apc_is_bounded_and_resynchronizes() {
+    let _serialised = serialised_captures();
+    let mut parser = Parser::new(Grid::new(16, 2));
+    let mut sequence = b"\x1b_X".to_vec();
+    sequence.extend(std::iter::repeat_n(b'A', MAX_MEDIA_PAYLOAD_BYTES + 1));
+    sequence.extend_from_slice(b"\x1b\\Z");
+
+    let events = parser.advance(&sequence);
+
+    assert!(events.iter().all(|event| !matches!(event, VtEvent::Media(_))));
+    assert_eq!(parser.grid().row(0)[0].ch, 'Z');
+    assert_eq!(parser.live_capture_count(), 0);
+    assert_eq!(parser.retained_amount().items, 0);
+}
+
+/// A non-media C1 control executes in vte ground and must not leave the parser
+/// treating the following printable text as an escape continuation.
+#[test]
+fn ordinary_c1_control_returns_to_printable_ground() {
+    let mut parser = Parser::new(Grid::new(8, 1));
+
+    parser.advance(b"\x80ABC");
+
+    assert_eq!(row_text(&parser, 0), "ABC     ");
+}
+
+/// C1-looking UTF-8 continuation bytes remain owned by vte while a multibyte
+/// code point is split across PTY chunks; they must not start APC or OSC media.
+#[test]
+fn split_utf8_continuations_are_not_media_introducers() {
+    let _serialised = serialised_captures();
+    for text in ["\u{075d}", "\u{075f}", "\u{201d}", "\u{201f}", "\u{1f61d}", "\u{1f61f}"] {
+        let bytes = text.as_bytes();
+        assert!(matches!(bytes[bytes.len() - 1], 0x9d | 0x9f));
+        let mut parser = Parser::new(Grid::new(8, 1));
+        let mut events = Vec::new();
+
+        for byte in bytes {
+            events.extend(parser.advance(std::slice::from_ref(byte)));
+        }
+
+        assert!(events.iter().all(|event| !matches!(event, VtEvent::Media(_))));
+        assert_eq!(parser.grid().row(0)[0].ch, text.chars().next().unwrap());
+        assert_eq!(parser.live_capture_count(), 0);
+    }
+}
+
+/// iTerm2 metadata may fill its explicit cap, while one byte beyond rejects the
+/// whole transfer rather than retaining unbounded attributes.
+#[test]
+fn iterm2_metadata_uses_exact_bounded_capacity() {
+    let _serialised = serialised_captures();
+    for (metadata_bytes, should_dispatch) in [
+        (MAX_ITERM2_METADATA_BYTES - b"File=".len(), true),
+        (MAX_ITERM2_METADATA_BYTES - b"File=".len() + 1, false),
+    ] {
+        let mut sequence = b"\x1b]1337;File=".to_vec();
+        sequence.extend(std::iter::repeat_n(b'a', metadata_bytes));
+        sequence.extend_from_slice(b":AAAA\x1b\\");
+        let mut parser = Parser::new(Grid::new(16, 2));
+
+        let events = parser.advance(&sequence);
+        let dispatched = events.iter().any(|event| matches!(event, VtEvent::Media(_)));
+
+        assert_eq!(dispatched, should_dispatch, "metadata bytes {metadata_bytes}");
+        assert_eq!(parser.live_capture_count(), 0);
+    }
+}
+
+/// A recognized iTerm2 prefix without the metadata/data separator is malformed;
+/// termination releases staging without surfacing a partial image.
+#[test]
+fn malformed_iterm2_media_is_rejected_and_resynchronizes() {
+    let _serialised = serialised_captures();
+    let mut parser = Parser::new(Grid::new(16, 2));
+
+    let events = parser.advance(b"\x1b]1337;File=inline=1\x1b\\Z");
+
+    assert!(events.iter().all(|event| !matches!(event, VtEvent::Media(_))));
+    assert_eq!(parser.grid().row(0)[0].ch, 'Z');
+    assert_eq!(parser.live_capture_count(), 0);
+}
+
+/// CAN and SUB abort iTerm2 staging without dispatching the bytes accumulated
+/// before cancellation as an image.
+#[test]
+fn can_and_sub_cancel_iterm2_without_emitting_media() {
+    let _serialised = serialised_captures();
+    for cancel in [0x18, 0x1a] {
+        let mut parser = Parser::new(Grid::new(16, 2));
+        let mut sequence = b"\x1b]1337;File=inline=1:AAAA".to_vec();
+        sequence.push(cancel);
+
+        let events = parser.advance(&sequence);
+
+        assert!(events.iter().all(|event| !matches!(event, VtEvent::Media(_))));
+        assert_eq!(parser.live_capture_count(), 0);
+    }
+}
+
+/// iTerm2 staging consumes the same admission slots and reports the same
+/// progress/retention metrics as APC and DCS captures.
+#[test]
+fn iterm2_capture_participates_in_process_staging_accounting() {
+    let _serialised = serialised_captures();
+    let mut parser = Parser::new(Grid::new(80, 24));
+
+    parser.advance(b"\x1b]1337;File=inline=1:AAAA");
+
+    assert_eq!(parser.live_capture_count(), 1);
+    assert_eq!(parser.capture_progress(), b"File=inline=1".len() + 4);
+    assert_eq!(CAPTURE_FLOOR_RESERVED.load(Ordering::Relaxed), MIN_CAPTURE_STAGING_BYTES);
+    assert_eq!(parser.retained_amount().items, 1);
+
+    parser.advance(b"\x1b\\");
+    assert_eq!(parser.live_capture_count(), 0);
+    assert_eq!(parser.retained_amount().items, 0);
+}
+
+/// Host cancellation releases iTerm2 staging, swallows the sender's remaining
+/// base64 tail, and resumes at ST without printing the abandoned transfer.
+#[test]
+fn host_cancelled_iterm2_capture_discards_tail_through_terminator() {
+    let _serialised = serialised_captures();
+    let mut parser = Parser::new(Grid::new(16, 2));
+    parser.advance(b"\x1b]1337;File=inline=1:AAAA");
+    assert_eq!(parser.live_capture_count(), 1);
+
+    assert!(parser.cancel_capture() > 0);
+    parser.advance(b"BBBBCCCC\x1b\\Z");
+
+    assert_eq!(parser.grid().row(0)[0].ch, 'Z');
+    assert_eq!(parser.live_capture_count(), 0);
+}
+
+/// Kitty, Sixel, and iTerm2 all reserve from the same fixed floor pool, so a
+/// mixed workload cannot admit more captures than the documented guarantee.
+#[test]
+fn mixed_media_protocols_share_the_process_staging_pool() {
+    let _serialised = serialised_captures();
+    let mut parsers: Vec<Parser> =
+        (0..GUARANTEED_CONCURRENT_CAPTURES).map(|_| Parser::new(Grid::new(8, 1))).collect();
+
+    for (index, parser) in parsers.iter_mut().enumerate() {
+        match index % 3 {
+            0 => {
+                parser.advance(b"\x1b_GA");
+            }
+            1 => {
+                parser.advance(b"\x1bPq?");
+            }
+            _ => {
+                parser.advance(b"\x1b]1337;File=inline=1:A");
+            }
+        }
+        assert_eq!(parser.live_capture_count(), 1);
+    }
+
+    assert_eq!(
+        CAPTURE_FLOOR_RESERVED.load(Ordering::Relaxed),
+        GUARANTEED_CONCURRENT_CAPTURES * MIN_CAPTURE_STAGING_BYTES
+    );
+    let mut refused = Parser::new(Grid::new(8, 1));
+    refused.advance(b"\x1b]1337;File=inline=1:A");
+    assert_eq!(refused.live_capture_count(), 1);
+    assert_eq!(refused.retained_amount().bytes, 0);
 }
 
 #[test]
