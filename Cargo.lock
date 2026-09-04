@@ -5420,12 +5420,14 @@ dependencies = [
  "bincode",
  "crossbeam-channel",
  "interprocess",
+ "libc",
  "parking_lot",
  "serde",
  "sonicterm-io",
  "thiserror 2.0.20",
  "tracing",
  "tracing-subscriber",
+ "widestring",
  "windows 0.62.2",
 ]
 
