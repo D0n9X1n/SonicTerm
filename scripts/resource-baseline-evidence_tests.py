@@ -550,6 +550,8 @@ class ExecutorDeadlineTests(unittest.TestCase):
             "Run unit tests": 25,
             "Run per-crate unit/build gate": 45,
             "Capture real resource baseline evidence": 10,
+            "Test MSI validator": 5,
+            "Install cargo-llvm-cov": 10,
             "Run Rust logic coverage gate": 25,
             "Run workspace unit tests": 20,
             "Build Linux release binary": 30,
@@ -572,7 +574,10 @@ class ExecutorDeadlineTests(unittest.TestCase):
             ("unit-tests-linux", "Run per-crate unit/build gate"): 30,
             ("build-mac-x86_64", "Build x86_64"): 30,
             ("build-mac-aarch64", "Build aarch64"): 20,
+            ("build-windows", "Install cargo-wix"): 10,
+            ("build-windows", "Install WiX Toolset"): 10,
             ("build-windows", "Build release binary"): 20,
+            ("build-windows", "Validate MSI metadata"): 5,
             ("package-linux", "Build Linux release binary"): 20,
         }
         for (job_name, step_name), minutes in expected.items():
