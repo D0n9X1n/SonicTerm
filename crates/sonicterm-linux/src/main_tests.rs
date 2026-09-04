@@ -121,14 +121,13 @@ fn linux_defaults_use_the_packaged_keymap() {
     assert_eq!(linux_default_config().keymap, "sonicterm-linux");
 }
 
+/// Linux normalizes every unsupported native material to opaque with one warning.
 #[test]
 fn linux_clamps_native_backdrops_to_opaque_with_one_warning() {
-    // Protect X11 and Wayland from unsupported compositor-material requests.
     for requested in [BackdropKind::Mica, BackdropKind::Acrylic, BackdropKind::Tabbed] {
         let mut config = linux_default_config();
         config.appearance.backdrop = requested;
-        let mut warnings = Vec::new();
-        let normalized = normalize_linux_config(config, &mut warnings);
+        let (normalized, warnings) = normalize_linux_config(config);
 
         assert_eq!(normalized.appearance.backdrop, BackdropKind::Opaque);
         assert_eq!(warnings.len(), 1);
@@ -137,14 +136,29 @@ fn linux_clamps_native_backdrops_to_opaque_with_one_warning() {
     }
 }
 
+/// The binary installs Linux policy on the shared shell instead of applying it only at startup.
 #[test]
-fn linux_preserves_an_opaque_backdrop_without_warning() {
-    // Protect the supported default from producing noisy startup diagnostics.
-    let mut warnings = Vec::new();
-    let normalized = normalize_linux_config(linux_default_config(), &mut warnings);
+fn linux_shell_installs_the_shared_config_normalizer() {
+    const SOURCE: &str = include_str!("main.rs");
+    assert!(SOURCE.contains(".with_config_normalizer(Box::new(normalize_linux_config))"));
+    assert!(
+        !SOURCE.contains("normalize_linux_config(config"),
+        "startup-only normalization would let explicit reload bypass Linux policy"
+    );
+}
+
+/// Opaque input and a second normalization pass are warning-free.
+#[test]
+fn linux_normalization_is_idempotent_and_silent_after_the_first_pass() {
+    let mut requested = linux_default_config();
+    requested.appearance.backdrop = BackdropKind::Mica;
+    let (normalized, first_warnings) = normalize_linux_config(requested);
+    let (second, second_warnings) = normalize_linux_config(normalized.clone());
 
     assert_eq!(normalized.appearance.backdrop, BackdropKind::Opaque);
-    assert!(warnings.is_empty());
+    assert_eq!(first_warnings.len(), 1);
+    assert_eq!(second, normalized);
+    assert!(second_warnings.is_empty());
 }
 
 #[test]
