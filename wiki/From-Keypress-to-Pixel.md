@@ -119,9 +119,11 @@ Renderer construction also creates:
 
 ### 2. The key reaches the active input owner
 
-winit sends a pressed `WindowEvent::KeyboardInput`. SonicTerm uses
-`event.logical_key`, so the operating system and active keyboard layout have
-already resolved the character as uppercase `A`.
+winit sends `WindowEvent::KeyboardInput` for presses, repeats, and releases.
+SonicTerm retains the complete event: the physical key, layout-resolved logical
+key, operating-system-produced text, keypad location, event state, and repeat
+marker. For this example the layout has resolved the logical character and text
+as uppercase `A`.
 
 A local input owner may stop the route. The main window checks:
 
@@ -142,10 +144,15 @@ While an IME composition is active, raw key events do not reach the PTY. An
 `Ime::Commit` supplies UTF-8 text after composition. A palette or search field
 can consume that commit. READONLY or copy mode can discard it.
 
+Only a press that survives local routing is recorded as PTY-owned. A later
+Kitty release is routed back to that press's pane, even if focus moved to
+another pane; locally consumed presses cannot create orphan release events.
+
 ### 3. `A` becomes terminal input bytes
 
-`encode_key` calls `encode_logical`. A plain `Key::Character` with no Control or
-Alt modifier uses its UTF-8 bytes unchanged.
+`encode_key` consumes the complete event and the active pane's negotiated
+keyboard snapshot. A plain `Key::Character` with no Control or Alt modifier
+uses the operating-system-produced UTF-8 text unchanged.
 
 | Property | Value |
 | --- | --- |
@@ -154,19 +161,30 @@ Alt modifier uses its UTF-8 bytes unchanged.
 | UTF-8 | `0x41` |
 | Decimal byte | `65` |
 
-Other keys and modifiers follow four distinct rules:
+Other keys and modifiers follow these rules:
 
 - **Control and keymap precedence:** a configured keymap may consume a chord
   before PTY encoding. Otherwise Control is checked before Alt: Control+A
-  becomes `0x01`, and Control+Alt+A still uses the Control branch.
-- **Text modifiers:** without Control, Alt+A prefixes `ESC` to the UTF-8 bytes.
-  Shift and Super/Meta do not change a `Key::Character` in this encoder; they
-  may already have changed the logical character.
-- **Cursor and function keys:** named cursor, Home, and End keys use the active
-  pane's lock-free DECCKM snapshot. Unmodified application-cursor keys use SS3;
-  modified forms use xterm parameterized CSI. Function keys use xterm forms.
-- **kitty Shift+Enter:** with nonzero kitty keyboard flags, Shift+Enter uses
-  `CSI 13 ; 2 u`.
+  becomes `0x01`, and Control+Alt+A adds an `ESC` prefix to that control byte.
+  The legacy aliases cover Space/@/2, `[ /3`, `\ /4`, `] /5`, `^/~/6`,
+  `_/ /7`, and `?/8`.
+- **Text and BackTab:** Alt prefixes `ESC` to legacy text. The OS supplies
+  shifted and layout-specific text. Tab emits HT, while Shift+Tab emits the
+  distinct legacy BackTab sequence `CSI Z`.
+- **Negotiated legacy modes:** the pane snapshot includes DECCKM cursor keys,
+  DECKPAM keypad identity, DECBKM Backspace, ANSI newline mode, and xterm
+  `modifyOtherKeys` levels 1 and 2. Modified cursor and function keys preserve
+  Shift, Alt, Control, and Super in the xterm modifier parameter. Function-key
+  coverage extends through F35.
+- **Kitty protocol:** each main or alternate screen has an independent
+  progressive-enhancement stack. SonicTerm supports disambiguation, event
+  types, alternate keys, all-keys reporting, associated text, functional and
+  keypad identities, and modifier-key identities. Shift+Tab is `CSI 9 ; 2 u`
+  when disambiguated. Repeats and releases carry Kitty event types when
+  requested.
+- **Keypad:** legacy normal mode follows the layout/NumLock result and preserves
+  text modifiers. DECKPAM follows physical keypad identity. Kitty
+  disambiguation uses its dedicated keypad code points.
 
 Plain `A` is unaffected, so this page continues to follow it.
 
@@ -287,10 +305,10 @@ is dropped.
 
 ### 8. The VT worker requests a later redraw
 
-The worker mirrors cursor visibility, kitty keyboard flags, and DECCKM into
-atomics while it holds the parser lock. It collects title, command, and media
-side effects. It then releases the parser lock before it reaches the event-loop
-proxy.
+The worker mirrors cursor visibility, Kitty keyboard flags, and the packed
+DECCKM/DECKPAM/DECBKM/newline/`modifyOtherKeys` snapshot into atomics while it
+holds the parser lock. It collects title, command, and media side effects. It
+then releases the parser lock before it reaches the event-loop proxy.
 
 Redraw requests are coalesced by bytes and time:
 
@@ -727,8 +745,9 @@ macOS 和 Linux 在两种策略下都通过 wgpu 呈现。Windows 只有在 `deg
 
 ### 2. 按键先交给当前输入所有者
 
-winit 发送按下状态的 `WindowEvent::KeyboardInput`。SonicTerm 使用
-`event.logical_key`，因此操作系统和当前键盘布局已经把它解析为大写 `A`。
+winit 会为按下、重复和释放发送 `WindowEvent::KeyboardInput`。SonicTerm 保留完整事件：
+物理按键、由布局解析的逻辑按键、操作系统生成的文本、小键盘位置、事件状态和重复标记。
+在本例中，键盘布局已把逻辑字符和文本解析为大写 `A`。
 
 本地输入所有者可以中止后续路径。主窗口按以下顺序检查：
 
@@ -747,10 +766,13 @@ winit 发送按下状态的 `WindowEvent::KeyboardInput`。SonicTerm 使用
 输入法正在组字时，原始按键不会进入 PTY。`Ime::Commit` 在组字完成后提供 UTF-8 文本。
 命令面板或搜索框可以消费提交文本。READONLY 或复制模式可以丢弃它。
 
+只有通过所有本地路由的按下事件才会记为 PTY 所有。之后的 Kitty 释放事件会返回该按下事件
+原本所在的 pane，即使焦点已经移到其它 pane；本地消费的按下事件不会产生孤立释放事件。
+
 ### 3. `A` 变成终端输入字节
 
-`encode_key` 调用 `encode_logical`。普通 `Key::Character` 在没有 Control 或 Alt 时，
-会原样使用其 UTF-8 字节。
+`encode_key` 使用完整事件和活动 pane 已协商的键盘快照。普通 `Key::Character` 在没有
+Control 或 Alt 时，会原样使用操作系统生成文本的 UTF-8 字节。
 
 | 属性 | 值 |
 | --- | --- |
@@ -759,15 +781,22 @@ winit 发送按下状态的 `WindowEvent::KeyboardInput`。SonicTerm 使用
 | UTF-8 | `0x41` |
 | 十进制字节 | `65` |
 
-其它按键和修饰键遵循四条不同规则：
+其它按键和修饰键遵循以下规则：
 
 - **Control 与键位优先级：** 配置的键位可能在 PTY 编码前接管组合键。否则先判断 Control，
-  再判断 Alt：Control+A 变成 `0x01`，Control+Alt+A 仍走 Control 分支。
-- **文字修饰键：** 没有 Control 时，Alt+A 会在 UTF-8 字节前加 `ESC`。Shift 和
-  Super/Meta 不会在这个编码器里修改 `Key::Character`；它们可能已经改变逻辑字符。
-- **方向键与功能键：** 方向键、Home 和 End 会读取活动窗格的无锁 DECCKM 快照。未加
-  修饰键的应用光标模式使用 SS3；带修饰键时使用 xterm 参数化 CSI。功能键使用 xterm 序列。
-- **kitty Shift+Enter：** kitty 键盘标志非零时，Shift+Enter 使用 `CSI 13 ; 2 u`。
+  再判断 Alt：Control+A 变成 `0x01`，Control+Alt+A 会在该控制字节前加 `ESC`。
+  旧式别名覆盖 Space/@/2、`[ /3`、`\ /4`、`] /5`、`^/~/6`、`_/ /7` 和 `?/8`。
+- **文本与 BackTab：** Alt 会在旧式文本前加 `ESC`；Shift 与布局相关文本由操作系统生成。
+  Tab 发送 HT，Shift+Tab 则发送可区分的旧式 BackTab 序列 `CSI Z`。
+- **协商的旧式模式：** pane 快照包含 DECCKM 光标键、DECKPAM 小键盘身份、DECBKM
+  Backspace、ANSI newline mode，以及 xterm `modifyOtherKeys` level 1 和 2。带修饰键的
+  光标键与功能键会在 xterm 修饰参数中保留 Shift、Alt、Control 和 Super；功能键覆盖到 F35。
+- **Kitty 协议：** 主屏和备用屏各自维护独立的 progressive-enhancement 栈。SonicTerm
+  支持消歧义、事件类型、备用按键、全部按键报告、关联文本、功能键和小键盘身份，以及
+  修饰键自身的身份。启用消歧义时 Shift+Tab 为 `CSI 9 ; 2 u`；程序要求时，重复与释放会
+  带 Kitty 事件类型。
+- **小键盘：** 旧式 normal mode 遵循布局/NumLock 结果并保留文本修饰键；DECKPAM 遵循
+  物理小键盘身份；Kitty 消歧义使用专用的小键盘码点。
 
 普通 `A` 不受影响，因此本页继续跟踪它。
 
@@ -864,8 +893,9 @@ screen incarnation、viewport、准确 pane CWD、候选 span 和鼠标指向的
 
 ### 8. VT 工作线程请求稍后重绘
 
-工作线程在持有解析器锁时，把光标可见性、kitty keyboard flag 和 DECCKM 镜像到原子值，
-并收集标题、命令和媒体副作用。随后先释放解析器锁，再访问事件循环代理。
+工作线程在持有解析器锁时，把光标可见性、Kitty keyboard flag，以及打包后的
+DECCKM/DECKPAM/DECBKM/newline/`modifyOtherKeys` 快照镜像到原子值，并收集标题、命令和
+媒体副作用。随后先释放解析器锁，再访问事件循环代理。
 
 重绘请求按字节和时间合并：
 
