@@ -121,6 +121,9 @@ impl App {
     }
 
     pub(super) fn apply_new_config(&mut self, new_cfg: Config) {
+        let new_cfg = Self::normalize_config(&self.config_normalizer, new_cfg);
+        self.configured_font_size = new_cfg.font.size;
+        self.configured_weight_scale = new_cfg.font.effective_weight_scale();
         // Config is only applied on an explicit user reload, so it must
         // render immediately rather than at the next vsync deadline.
         self.input_dirty = true;
@@ -792,12 +795,8 @@ impl App {
         };
         match Config::load_strict(&path) {
             Ok(cfg) => {
-                // When: load_strict parsed the file at path with no error; adopt cfg
-                // as the session baseline before pushing it into live windows.
-
-                // The reset targets follow the config the session has loaded.
-                self.configured_font_size = cfg.font.size;
-                self.configured_weight_scale = cfg.font.effective_weight_scale();
+                // When: load_strict parsed the file at path with no error; normalize
+                // it before any reset baseline, pool, renderer, or stored state moves.
                 self.apply_new_config(cfg);
             }
             Err(e) => tracing::warn!("reload: config parse failed: {e:#}"),
