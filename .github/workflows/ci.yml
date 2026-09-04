@@ -20,18 +20,13 @@ env:
   RUST_BACKTRACE: short
   CARGO_INCREMENTAL: 0
   CARGO_LLVM_COV_VERSION: "0.9.0"
+  CI_CACHE_NAMESPACE: ci-v3
 
 jobs:
-  unit-tests:
-    name: ${{ matrix.os }} / unit tests
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
-    env:
-      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-14, windows-latest]
+  macos-core:
+    name: macOS core gates
+    runs-on: macos-14
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 5
@@ -43,67 +38,32 @@ jobs:
           toolchain: stable
           components: clippy, rustfmt
 
-      - name: Resolve vcpkg commit (for cache key)
-        id: vcpkg
-        if: runner.os == 'Windows'
-        timeout-minutes: 2
-        shell: pwsh
-        run: |
-          $root = if ($env:VCPKG_INSTALLATION_ROOT) { $env:VCPKG_INSTALLATION_ROOT } else { "C:\vcpkg" }
-          $sha = (git -C $root rev-parse HEAD).Trim()
-          "sha=$sha" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "image=$env:ImageVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-
-      - name: Cache vcpkg binaries (Cairo)
-        if: runner.os == 'Windows'
-        timeout-minutes: 5
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
-          key: vcpkg-cairo-${{ runner.os }}-${{ steps.vcpkg.outputs.image }}-${{ steps.vcpkg.outputs.sha }}-${{ hashFiles('scripts/setup-windows-cairo.ps1') }}
-          restore-keys: |
-            vcpkg-cairo-${{ runner.os }}-
-
-      - name: Install Cairo for Windows
-        if: runner.os == 'Windows'
-        timeout-minutes: 30
-        shell: pwsh
-        run: .\scripts\setup-windows-cairo.ps1
-
-      - name: Cache Cargo
+      - name: Restore Cargo dependencies
         timeout-minutes: 10
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: unit-${{ matrix.os }}
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-macos-14
+          add-job-id-key: false
+          cache-workspace-crates: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Check formatting
         timeout-minutes: 5
         run: cargo fmt --all --check
 
-      # Documented as a gate step but previously enforced only by whoever
-      # remembered to run it, so a `-D warnings` violation could merge.
       - name: Clippy
         timeout-minutes: 15
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # `ssh` is off by default, so no other step in this workflow compiles it:
-      # `--all-targets` does not imply `--all-features`. Without this the
-      # backend can stop building against a dependency's newer API and every
-      # gate still reports green.
       - name: Clippy optional ssh backend
         timeout-minutes: 10
         run: cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings
 
-      # `shell: bash` because the matrix includes Windows, where the default
-      # shell is PowerShell and `> /dev/null` would create a file named `null`
-      # rather than discarding the output.
       - name: Validate workspace manifests
         timeout-minutes: 2
         shell: bash
         run: cargo metadata --no-deps --format-version 1 > /dev/null
 
-      # CI installs floating `stable`, so nothing here would otherwise notice
-      # the declared minimum falling behind what the lockfile needs.
       - name: Check declared rust-version against the lock
         timeout-minutes: 5
         shell: bash
@@ -139,57 +99,344 @@ jobs:
         shell: bash
         run: RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-io --no-deps --features ssh
 
-      - name: Run unit tests
-        timeout-minutes: 25
-        run: cargo test --workspace --lib --bins
-
-      - name: Run per-crate unit/build gate
-        timeout-minutes: 45
+      - name: Run workspace unit and integration tests
+        timeout-minutes: 35
         shell: bash
         run: bash scripts/check-workspace-crates.sh
 
-      # `--nocapture` deliberately: this probe reports through stdout, and a
-      # passing test's stdout is swallowed. Its whole purpose is the printed
-      # verdict — whether this runner can create a window, and therefore
-      # whether the Windows software-path verification can be automated rather
-      # than needing a person at a keyboard.
       - name: Report host window capability
         timeout-minutes: 5
         run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture
 
-      # `--nocapture` again: this probe exists to report which adapters the
-      # runner offers and how the production predicate classifies them.
-      # Exercising `Auto` is usually assumed to need a real software
-      # rasterizer; this is what establishes whether the runner is one.
       - name: Report host adapter classification
         timeout-minutes: 5
         run: cargo test -p sonicterm-gpu --test ci_adapter_classification_probe -- --nocapture
 
-      # `--nocapture` for the same reason as the probe above: this test's
-      # verdict is its stdout. Without it, a run that compared eight cycles
-      # and a run that returned early having measured nothing both report
-      # `ok`, and the distinction is the whole point.
+      - name: Report renderer churn baseline
+        timeout-minutes: 5
+        run: cargo test -p sonicterm-gpu --test renderer_churn_baseline -- --nocapture
+
+      - name: Run release-note unit test
+        timeout-minutes: 5
+        shell: bash
+        run: bash scripts/test-release-notes.sh
+
+      - name: Test wiki publisher
+        timeout-minutes: 5
+        shell: bash
+        run: bash scripts/test-wiki-publish.sh
+
+      - name: Verify frozen PTY feasibility evidence
+        timeout-minutes: 5
+        shell: bash
+        run: bash scripts/pty-backend-feasibility.sh --check
+
+      - name: Verify resource inventory
+        timeout-minutes: 5
+        shell: bash
+        run: bash scripts/test-resource-inventory.sh
+
+      - name: Run deterministic soak control gate
+        timeout-minutes: 5
+        shell: bash
+        run: bash scripts/test-soak-harness.sh
+
+      - name: Test resource baseline evidence collector
+        timeout-minutes: 5
+        shell: bash
+        run: bash scripts/test-resource-baseline-evidence.sh
+
+      - name: Capture real resource baseline evidence
+        id: capture_resource_baseline
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          python3 scripts/resource-baseline-evidence.py \
+            --runner-label macos-14 \
+            --output-dir target/v1.2.0-baseline/evidence-macos-14
+
+      - name: Upload resource baseline evidence
+        if: ${{ !cancelled() && steps.capture_resource_baseline.conclusion != 'skipped' }}
+        timeout-minutes: 5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: resource-baseline-evidence-macos-14
+          path: target/v1.2.0-baseline/evidence-macos-14
+          if-no-files-found: error
+
+  macos-coverage:
+    name: macOS logic coverage
+    runs-on: macos-14
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 5
+
+      - name: Install Rust
+        timeout-minutes: 5
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+
+      - name: Restore Cargo dependencies
+        timeout-minutes: 10
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-macos-14
+          add-job-id-key: false
+          cache-workspace-crates: false
+          save-if: false
+
+      - name: Install cargo-llvm-cov
+        timeout-minutes: 10
+        run: cargo install cargo-llvm-cov --version "${{ env.CARGO_LLVM_COV_VERSION }}" --locked
+
+      - name: Run Rust logic coverage gate
+        timeout-minutes: 25
+        shell: bash
+        run: scripts/rust-logic-coverage.sh
+
+  macos:
+    name: macos-14 / unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [macos-core, macos-coverage]
+    if: always()
+    steps:
+      - name: Verify macOS shards
+        timeout-minutes: 2
+        shell: bash
+        env:
+          CORE: ${{ needs.macos-core.result }}
+          COVERAGE: ${{ needs.macos-coverage.result }}
+        run: |
+          for result in "$CORE" "$COVERAGE"; do
+            test "$result" = "success"
+          done
+
+  windows-native:
+    name: Windows native dependency cache
+    runs-on: windows-latest
+    timeout-minutes: 50
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 5
+
+      - name: Resolve vcpkg commit
+        id: vcpkg
+        timeout-minutes: 2
+        shell: pwsh
+        run: |
+          $root = if ($env:VCPKG_INSTALLATION_ROOT) { $env:VCPKG_INSTALLATION_ROOT } else { "C:\vcpkg" }
+          "sha=$((git -C $root rev-parse HEAD).Trim())" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "image=$env:ImageVersion" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Restore vcpkg binaries (Cairo)
+        id: vcpkg-cache
+        timeout-minutes: 5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-${{ steps.vcpkg.outputs.image }}-${{ steps.vcpkg.outputs.sha }}-${{ hashFiles('scripts/setup-windows-cairo.ps1') }}
+          restore-keys: |
+            ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-
+
+      - name: Install Cairo for Windows
+        timeout-minutes: 30
+        shell: pwsh
+        run: .\scripts\setup-windows-cairo.ps1
+
+      - name: Save vcpkg binaries (Cairo)
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 5
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
+
+  windows-checks:
+    name: Windows static and documentation gates
+    runs-on: windows-latest
+    timeout-minutes: 45
+    needs: [windows-native]
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 5
+
+      - name: Install Rust
+        timeout-minutes: 5
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+
+      - name: Resolve vcpkg commit
+        id: vcpkg
+        timeout-minutes: 2
+        shell: pwsh
+        run: |
+          $root = if ($env:VCPKG_INSTALLATION_ROOT) { $env:VCPKG_INSTALLATION_ROOT } else { "C:\vcpkg" }
+          "sha=$((git -C $root rev-parse HEAD).Trim())" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "image=$env:ImageVersion" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Restore vcpkg binaries (Cairo)
+        timeout-minutes: 5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-${{ steps.vcpkg.outputs.image }}-${{ steps.vcpkg.outputs.sha }}-${{ hashFiles('scripts/setup-windows-cairo.ps1') }}
+          restore-keys: |
+            ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-
+
+      - name: Install Cairo for Windows
+        timeout-minutes: 5
+        shell: pwsh
+        run: .\scripts\setup-windows-cairo.ps1
+
+      - name: Restore Cargo dependencies
+        timeout-minutes: 10
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest
+          add-job-id-key: false
+          cache-workspace-crates: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      - name: Check formatting
+        timeout-minutes: 5
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        timeout-minutes: 15
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Clippy optional ssh backend
+        timeout-minutes: 10
+        run: cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings
+
+      - name: Validate workspace manifests
+        timeout-minutes: 2
+        shell: bash
+        run: cargo metadata --no-deps --format-version 1 > /dev/null
+
+      - name: Check declared rust-version against the lock
+        timeout-minutes: 5
+        shell: bash
+        run: bash scripts/check-rust-version.sh
+
+      - name: Check process exit paths
+        timeout-minutes: 2
+        shell: bash
+        run: bash scripts/check-no-raw-process-exit.sh
+
+      - name: Check window owner registration
+        timeout-minutes: 2
+        shell: bash
+        run: bash scripts/check-window-owner-registration.sh
+
+      - name: Check workflow supply chain
+        timeout-minutes: 2
+        shell: bash
+        run: bash scripts/check-workflow-supply-chain.sh
+
+      - name: Check authored Rust comments
+        timeout-minutes: 5
+        shell: bash
+        run: bash scripts/check-authored-rust-comments.sh
+
+      - name: Check public Rustdoc
+        timeout-minutes: 10
+        shell: bash
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+
+      - name: Check optional ssh Rustdoc
+        timeout-minutes: 5
+        shell: bash
+        run: RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-io --no-deps --features ssh
+
+  windows-tests:
+    name: Windows test and runtime gates
+    runs-on: windows-latest
+    timeout-minutes: 45
+    needs: [windows-native]
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 5
+
+      - name: Install Rust
+        timeout-minutes: 5
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+
+      - name: Resolve vcpkg commit
+        id: vcpkg
+        timeout-minutes: 2
+        shell: pwsh
+        run: |
+          $root = if ($env:VCPKG_INSTALLATION_ROOT) { $env:VCPKG_INSTALLATION_ROOT } else { "C:\vcpkg" }
+          "sha=$((git -C $root rev-parse HEAD).Trim())" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "image=$env:ImageVersion" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Restore vcpkg binaries (Cairo)
+        timeout-minutes: 5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-${{ steps.vcpkg.outputs.image }}-${{ steps.vcpkg.outputs.sha }}-${{ hashFiles('scripts/setup-windows-cairo.ps1') }}
+          restore-keys: |
+            ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-
+
+      - name: Install Cairo for Windows
+        timeout-minutes: 5
+        shell: pwsh
+        run: .\scripts\setup-windows-cairo.ps1
+
+      - name: Restore Cargo dependencies
+        timeout-minutes: 10
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest
+          add-job-id-key: false
+          cache-workspace-crates: false
+          save-if: false
+
+      - name: Run workspace unit and integration tests
+        timeout-minutes: 35
+        shell: bash
+        run: bash scripts/check-workspace-crates.sh
+
+      - name: Report host window capability
+        timeout-minutes: 5
+        run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture
+
+      - name: Report host adapter classification
+        timeout-minutes: 5
+        run: cargo test -p sonicterm-gpu --test ci_adapter_classification_probe -- --nocapture
+
       - name: Report renderer churn baseline
         timeout-minutes: 5
         run: cargo test -p sonicterm-gpu --test renderer_churn_baseline -- --nocapture
 
       - name: Verify Windows software presentation capability
-        if: runner.os == 'Windows'
         timeout-minutes: 5
         run: cargo test -p sonicterm-gpu --test windows_software_present_capability -- --nocapture
 
       - name: Verify Windows WARP allocator baseline
-        if: runner.os == 'Windows'
         timeout-minutes: 5
         run: cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture
 
       - name: Verify Windows selection presentation
-        if: runner.os == 'Windows'
         timeout-minutes: 5
         run: cargo test -p sonicterm-app --test windows_software_selection_present -- --nocapture
 
       - name: Test MSI validator
-        if: runner.os == 'Windows'
         timeout-minutes: 5
         shell: pwsh
         run: .\scripts\validate-windows-msi_tests.ps1
@@ -234,33 +481,41 @@ jobs:
             python_cmd=python
           fi
           "$python_cmd" scripts/resource-baseline-evidence.py \
-            --runner-label "${{ matrix.os }}" \
-            --output-dir "target/v1.2.0-baseline/evidence-${{ matrix.os }}"
+            --runner-label windows-latest \
+            --output-dir target/v1.2.0-baseline/evidence-windows-latest
 
       - name: Upload resource baseline evidence
         if: ${{ !cancelled() && steps.capture_resource_baseline.conclusion != 'skipped' }}
         timeout-minutes: 5
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
-          name: resource-baseline-evidence-${{ matrix.os }}
-          path: target/v1.2.0-baseline/evidence-${{ matrix.os }}
+          name: resource-baseline-evidence-windows-latest
+          path: target/v1.2.0-baseline/evidence-windows-latest
           if-no-files-found: error
 
-      - name: Install cargo-llvm-cov
-        if: runner.os == 'macOS'
-        timeout-minutes: 10
-        run: cargo install cargo-llvm-cov --version "${{ env.CARGO_LLVM_COV_VERSION }}" --locked
-
-      - name: Run Rust logic coverage gate
-        if: runner.os == 'macOS'
-        timeout-minutes: 25
-        shell: bash
-        run: scripts/rust-logic-coverage.sh
-
-  linux:
-    name: ubuntu 22.04 / workspace, packages, X11, Wayland
+  windows:
+    name: windows-latest / unit tests
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 5
+    needs: [windows-native, windows-checks, windows-tests]
+    if: always()
+    steps:
+      - name: Verify Windows shards
+        timeout-minutes: 2
+        shell: bash
+        env:
+          NATIVE: ${{ needs.windows-native.result }}
+          CHECKS: ${{ needs.windows-checks.result }}
+          TESTS: ${{ needs.windows-tests.result }}
+        run: |
+          for result in "$NATIVE" "$CHECKS" "$TESTS"; do
+            test "$result" = "success"
+          done
+
+  linux-core:
+    name: Ubuntu core gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     container: ubuntu:22.04
     env:
       GIT_CONFIG_COUNT: "1"
@@ -274,31 +529,10 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            ca-certificates \
-            curl \
-            git \
-            build-essential \
-            zstd \
-            pkg-config \
-            libcairo2-dev \
-            libfontconfig1-dev \
-            libwayland-dev \
-            libx11-dev \
-            libxcb1-dev \
-            libxkbcommon-dev \
-            libxkbcommon-x11-0 \
-            binutils \
-            dpkg-dev \
-            file \
-            desktop-file-utils \
-            appstream \
-            lintian \
-            mesa-vulkan-drivers \
-            libvulkan1 \
-            xvfb \
-            x11-utils \
-            weston \
-            python3
+            ca-certificates curl git build-essential pkg-config python3 \
+            libcairo2-dev libfontconfig1-dev libwayland-dev libx11-dev \
+            libxcb1-dev libxkbcommon-dev libxkbcommon-x11-0 \
+            mesa-vulkan-drivers libvulkan1
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 5
@@ -310,11 +544,14 @@ jobs:
           toolchain: stable
           components: clippy, rustfmt
 
-      - name: Cache Cargo
+      - name: Restore Cargo dependencies
         timeout-minutes: 10
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: linux-ubuntu-22.04
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-linux-ubuntu-22.04
+          add-job-id-key: false
+          cache-workspace-crates: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Check formatting
         timeout-minutes: 5
@@ -336,12 +573,8 @@ jobs:
         timeout-minutes: 5
         run: RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-io --no-deps --features ssh
 
-      - name: Run workspace unit tests
-        timeout-minutes: 20
-        run: cargo test --workspace --lib --bins
-
-      - name: Run per-crate unit/build gate
-        timeout-minutes: 30
+      - name: Run workspace unit and integration tests
+        timeout-minutes: 35
         run: bash scripts/check-workspace-crates.sh
 
       - name: Run source and release tooling gates
@@ -356,6 +589,47 @@ jobs:
           bash scripts/test-release-assets.sh
           bash scripts/test-release-notes.sh
           bash scripts/test-wiki-publish.sh
+
+  linux-packages:
+    name: Ubuntu package and runtime gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container: ubuntu:22.04
+    env:
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: ${{ github.workspace }}
+    steps:
+      - name: Install runner, package, and runtime dependencies
+        timeout-minutes: 10
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential zstd pkg-config python3 \
+            libcairo2-dev libfontconfig1-dev libwayland-dev libx11-dev \
+            libxcb1-dev libxkbcommon-dev libxkbcommon-x11-0 binutils dpkg-dev \
+            file desktop-file-utils appstream lintian mesa-vulkan-drivers \
+            libvulkan1 xvfb x11-utils weston
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 5
+
+      - name: Install Rust
+        timeout-minutes: 5
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+
+      - name: Restore Cargo dependencies
+        timeout-minutes: 10
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-linux-ubuntu-22.04
+          add-job-id-key: false
+          cache-workspace-crates: false
+          save-if: false
 
       - name: Build Linux release binary
         timeout-minutes: 30
@@ -417,3 +691,21 @@ jobs:
             ${{ steps.packages.outputs.tarball }}
             ${{ steps.packages.outputs.deb }}
           if-no-files-found: error
+
+  linux:
+    name: ubuntu 22.04 / workspace, packages, X11, Wayland
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [linux-core, linux-packages]
+    if: always()
+    steps:
+      - name: Verify Ubuntu shards
+        timeout-minutes: 2
+        shell: bash
+        env:
+          CORE: ${{ needs.linux-core.result }}
+          PACKAGES: ${{ needs.linux-packages.result }}
+        run: |
+          for result in "$CORE" "$PACKAGES"; do
+            test "$result" = "success"
+          done
