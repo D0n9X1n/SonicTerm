@@ -1,4 +1,5 @@
 use super::*;
+use sonicterm_types::{ClassCoverage, PaneSeamTerm};
 
 /// Software adapters select low reserve while hardware keeps the performance policy.
 ///
@@ -2650,6 +2651,8 @@ fn every_reported_part_is_classified_exactly_once() {
     let retention = RendererRetention {
         glyph_atlas: amount(16 * 1024 * 1024, 512),
         image_atlas: amount(8 * 1024 * 1024, 12),
+        row_glyph_cache: amount(2 * 1024 * 1024, 120),
+        row_quad_cache: amount(1024 * 1024, 80),
         software_frame: amount(4 * 1024 * 1024, 1),
     };
 
@@ -2668,6 +2671,74 @@ fn every_reported_part_is_classified_exactly_once() {
         classes.len(),
         "no class may appear twice, or bytes are counted twice"
     );
+}
+
+/// Pane cache eviction is one glyph-then-quad renderer operation.
+#[test]
+fn pane_cache_eviction_order_is_explicit() {
+    const SOURCE: &str = include_str!("core.rs");
+    let start = SOURCE.find("pub fn invalidate_pane_caches").expect("pane cache eviction seam");
+    let body = &SOURCE[start..];
+    let glyph = body.find("self.row_glyph_cache.invalidate_pane(pane_id)").expect("glyph eviction");
+    let quad = body.find("self.line_quad_cache.invalidate_pane(pane_id)").expect("quad eviction");
+    assert!(glyph < quad, "glyph cache must evict before quad cache");
+}
+
+/// Both row-cache parts remain separately classified and uncharged.
+#[test]
+fn row_cache_parts_have_distinct_uncharged_classes() {
+    let classes = RendererRetention::default().seam_classes();
+    for class in [ResourceClass::RowGlyphCache, ResourceClass::RowQuadCache] {
+        assert!(
+            classes.iter().any(|(reported, _)| *reported == class),
+            "{class:?} must remain a named renderer-retention part"
+        );
+        assert!(
+            matches!(class.coverage(), ClassCoverage::UnchargedRetention { .. }),
+            "{class:?} is measured and reported but reaches no governor owner"
+        );
+        assert_eq!(class.pane_seam_term(), PaneSeamTerm::NotChargedInProduction);
+    }
+}
+
+/// The row-cache coverage envelopes contain four maximum viewport working sets.
+///
+/// The table rows are deliberately conservative high-water envelopes, not the
+/// live report. This pins them to the current replay-record layouts and the
+/// grid's maximum visible-cell seam so either changing cannot silently make the
+/// recorded uncharged gap smaller than reachable cache payload.
+#[test]
+fn row_cache_coverage_envelopes_cover_maximum_visible_payloads() {
+    let visible_cells =
+        sonicterm_render_model::boundary::grid::grid::MAX_VISIBLE_GRID_CELLS as usize;
+    let headroom = 4usize;
+    let table_entry = std::mem::size_of::<((u64, u64, u64), (u64, Vec<u8>))>() + 2;
+
+    let glyph_per_cell = std::mem::size_of::<sonicterm_text::GlyphInstance>()
+        + std::mem::size_of::<sonicterm_text::row_glyph_cache::UnderlineRun>()
+        + std::mem::size_of::<(f32, f32, f32, f32, [u8; 4])>()
+        + std::mem::size_of::<char>();
+    let glyph_required = visible_cells
+        .saturating_mul(headroom)
+        .saturating_mul(glyph_per_cell)
+        .saturating_add(usize::from(u16::MAX).saturating_mul(table_entry));
+    let ClassCoverage::UnchargedRetention { per_owner_bytes: glyph_bound } =
+        ResourceClass::RowGlyphCache.coverage()
+    else {
+        panic!("RowGlyphCache must record its uncharged high-water envelope");
+    };
+    assert!(glyph_bound >= glyph_required, "glyph bound {glyph_bound} < {glyph_required}");
+
+    let quad_required = visible_cells
+        .saturating_mul(headroom)
+        .saturating_mul(std::mem::size_of::<crate::quad::QuadInstance>())
+        .saturating_add(usize::from(u16::MAX).saturating_mul(table_entry));
+    let ClassCoverage::UnchargedRetention { per_owner_bytes: quad_bound } =
+        ResourceClass::RowQuadCache.coverage()
+    else {
+        panic!("RowQuadCache must record its uncharged high-water envelope");
+    };
+    assert!(quad_bound >= quad_required, "quad bound {quad_bound} < {quad_required}");
 }
 
 /// The software frame is reported on every platform, zero where absent.

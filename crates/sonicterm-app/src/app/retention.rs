@@ -859,6 +859,14 @@ impl super::App {
                 let _ = recorder.record(BreadcrumbEvent::RetentionSnapshot {
                     session_bytes: u64::try_from(snapshot.session_bytes()).unwrap_or(u64::MAX),
                     renderer_bytes: u64::try_from(snapshot.renderer_bytes()).unwrap_or(u64::MAX),
+                    row_glyph_cache_bytes: u64::try_from(snapshot.row_glyph_cache_bytes())
+                        .unwrap_or(u64::MAX),
+                    row_glyph_cache_items: u64::try_from(snapshot.row_glyph_cache_items())
+                        .unwrap_or(u64::MAX),
+                    row_quad_cache_bytes: u64::try_from(snapshot.row_quad_cache_bytes())
+                        .unwrap_or(u64::MAX),
+                    row_quad_cache_items: u64::try_from(snapshot.row_quad_cache_items())
+                        .unwrap_or(u64::MAX),
                     live_renderers: u32::try_from(snapshot.live_renderers).unwrap_or(u32::MAX),
                     allocator,
                 });

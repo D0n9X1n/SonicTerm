@@ -70,10 +70,18 @@ fn capture(body: impl FnOnce()) -> Vec<CapturedEvent> {
     captured
 }
 
-fn retention(glyph: usize, image: usize, frame: usize) -> RendererRetention {
+fn retention(
+    glyph: usize,
+    image: usize,
+    row_glyph: usize,
+    row_quad: usize,
+    frame: usize,
+) -> RendererRetention {
     RendererRetention {
         glyph_atlas: ResourceAmount { bytes: glyph, items: 7 },
         image_atlas: ResourceAmount { bytes: image, items: 3 },
+        row_glyph_cache: ResourceAmount { bytes: row_glyph, items: 5 },
+        row_quad_cache: ResourceAmount { bytes: row_quad, items: 2 },
         software_frame: ResourceAmount { bytes: frame, items: usize::from(frame > 0) },
     }
 }
@@ -91,7 +99,7 @@ fn the_renderer_figures_reach_the_memory_log_by_name() {
         emit_renderer_retention(
             "WindowId(1)",
             "visible",
-            &retention(16_777_216, 524_288, 33_177_600),
+            &retention(16_777_216, 524_288, 4_096, 2_048, 33_177_600),
         );
     });
 
@@ -105,8 +113,10 @@ fn the_renderer_figures_reach_the_memory_log_by_name() {
     for (field, expected) in [
         ("glyph_atlas_bytes", 16_777_216),
         ("image_atlas_bytes", 524_288),
+        ("row_glyph_cache_bytes", 4_096),
+        ("row_quad_cache_bytes", 2_048),
         ("software_frame_bytes", 33_177_600),
-        ("total_bytes", 16_777_216 + 524_288 + 33_177_600),
+        ("total_bytes", 16_777_216 + 524_288 + 4_096 + 2_048 + 33_177_600),
     ] {
         assert_eq!(
             line.field(field),
@@ -123,12 +133,15 @@ fn the_renderer_figures_reach_the_memory_log_by_name() {
 /// differs between them.
 #[test]
 fn the_atlas_lines_carry_resident_entry_counts() {
-    let events =
-        capture(|| emit_renderer_retention("WindowId(1)", "visible", &retention(4096, 2048, 0)));
+    let events = capture(|| {
+        emit_renderer_retention("WindowId(1)", "visible", &retention(4096, 2048, 1024, 512, 0))
+    });
     let line = events.iter().find(|event| event.message == "renderer retention").expect("emitted");
 
     assert_eq!(line.field("glyph_atlas_items"), Some(7));
     assert_eq!(line.field("image_atlas_items"), Some(3));
+    assert_eq!(line.field("row_glyph_cache_items"), Some(5));
+    assert_eq!(line.field("row_quad_cache_items"), Some(2));
 }
 
 /// The software frame is reported even when it is zero.
@@ -141,7 +154,7 @@ fn the_atlas_lines_carry_resident_entry_counts() {
 #[test]
 fn a_zero_software_frame_is_reported_rather_than_omitted() {
     let events =
-        capture(|| emit_renderer_retention("WindowId(1)", "visible", &retention(4096, 0, 0)));
+        capture(|| emit_renderer_retention("WindowId(1)", "visible", &retention(4096, 0, 0, 0, 0)));
     let line = events.iter().find(|event| event.message == "renderer retention").expect("emitted");
 
     assert_eq!(
@@ -257,7 +270,7 @@ fn both_the_visible_windows_and_the_warm_pool_are_reported() {
 #[test]
 fn the_role_distinguishes_a_warm_renderer_from_a_visible_one() {
     let events = capture(|| {
-        emit_renderer_retention("warm[0]", "warm", &retention(16_777_216, 0, 0));
+        emit_renderer_retention("warm[0]", "warm", &retention(16_777_216, 0, 0, 0, 0));
     });
     let line = events.iter().find(|event| event.message == "renderer retention").expect("emitted");
 
@@ -276,7 +289,11 @@ fn the_role_distinguishes_a_warm_renderer_from_a_visible_one() {
 #[test]
 fn the_window_label_identifies_which_renderer_the_line_is_about() {
     let events = capture(|| {
-        emit_renderer_retention("WindowId(1)", "visible", &retention(16_777_216, 524_288, 0));
+        emit_renderer_retention(
+            "WindowId(1)",
+            "visible",
+            &retention(16_777_216, 524_288, 4096, 2048, 0),
+        );
     });
     let line = events.iter().find(|event| event.message == "renderer retention").expect("emitted");
 
@@ -285,6 +302,42 @@ fn the_window_label_identifies_which_renderer_the_line_is_about() {
         "the line must name the renderer it describes; the wiki recipes parse `window=` \
          and a line without it cannot be attributed to anything"
     );
+}
+
+/// Renderer-owning pane removals route through the cache-eviction chokepoint.
+///
+/// The sole raw `WindowState.panes.remove` belongs inside `remove_pane`; the
+/// GPU-free `TabContainer` primitive is intentionally excluded because it owns
+/// no renderer or cache. This inventory prevents a new close/detach path from
+/// dropping a pane while leaving its row payload retained.
+#[test]
+fn window_pane_removals_use_the_renderer_cache_chokepoint() {
+    let sources = [
+        ("mod.rs", include_str!("mod.rs")),
+        ("child_window.rs", include_str!("child_window.rs")),
+        ("misc.rs", include_str!("misc.rs")),
+        ("spawn_pane.rs", include_str!("spawn_pane.rs")),
+        ("tab_state.rs", include_str!("tab_state.rs")),
+    ];
+    let raw: Vec<_> = sources
+        .iter()
+        .flat_map(|(file, source)| {
+            source
+                .lines()
+                .filter(|line| line.contains(".panes.remove("))
+                .map(move |text| (*file, text.trim()))
+        })
+        .collect();
+
+    assert_eq!(
+        raw,
+        vec![("mod.rs", "let pane = self.panes.remove(&pane_id)?;")],
+        "every renderer-owning pane removal must call WindowState::remove_pane: {raw:?}"
+    );
+    let chokepoint = include_str!("mod.rs");
+    let start = chokepoint.find("fn remove_pane").expect("pane-removal chokepoint");
+    let body = &chokepoint[start..];
+    assert!(body.contains("renderer.invalidate_pane_caches(pane_id)"));
 }
 
 /// Every field this line emits must be documented in both language halves.

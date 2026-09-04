@@ -96,8 +96,10 @@ memory snapshot process_private_committed_bytes=unsupported process_resident_byt
                 grid_visible_bytes=97320960 grid_history_bytes=76841472 grid_alternate_bytes=0
                 parser_bytes=0 hyperlink_bytes=3050880 inline_media_bytes=5238528
                 pty_output_bytes=0 pty_input_bytes=0 panes_total=12 panes_sampled=12 panes_contended=0
-                renderer_total_bytes=35651584 renderer_total_items=1042 renderer_delta=+0
-                live_renderers=2 renderers="visible[WindowId(1)] glyph=16777216/1038 image=2097152/4 software=0/0 total=18874368/1042; warm[0] glyph=16777216/0 image=0/0 software=0/0 total=16777216/0"
+                renderer_total_bytes=36962304 renderer_total_items=1242
+                renderer_row_glyph_cache_bytes=1048576 renderer_row_glyph_cache_items=120
+                renderer_row_quad_cache_bytes=262144 renderer_row_quad_cache_items=80 renderer_delta=+0
+                live_renderers=2 renderers="visible[WindowId(1)] glyph=16777216/1038 image=2097152/4 row_glyph=1048576/120 row_quad=262144/80 software=0/0 total=20185088/1242; warm[0] glyph=16777216/0 image=0/0 row_glyph=0/0 row_quad=0/0 software=0/0 total=16777216/0"
                 allocator_state=measured allocator_source=main allocator_label=WindowId(1)
                 allocator_allocated_bytes=8388608 allocator_reserved_bytes=33554432
                 allocator_allocations=4 allocator_blocks=2 allocator_largest_block_bytes=16777216
@@ -117,8 +119,10 @@ SonicTerm's own seams do not count.
 | `panes_sampled` | panes included in `session_total_bytes` |
 | `panes_contended` | panes skipped because a parser lock was held; non-zero makes the session total partial |
 | `renderer_total_bytes` / `renderer_total_items` | CPU-side storage across visible and warm renderers |
+| `renderer_row_glyph_cache_bytes` / `renderer_row_glyph_cache_items` | per-row glyph-instance and decoration cache storage and cached row count across renderers |
+| `renderer_row_quad_cache_bytes` / `renderer_row_quad_cache_items` | per-row background/decoration quad cache storage and cached row count across renderers |
 | `live_renderers` | process-wide renderer count; a count above the `renderers` entries can expose an unreachable live renderer |
-| `renderers` | per-renderer role and glyph/image/software storage breakdown |
+| `renderers` | per-renderer role and glyph/image/row-cache/software storage breakdown |
 | `allocator_state` | `measured`, `unsupported` for a backend without a report, or `none` before a renderer exists |
 | `allocator_source` / `allocator_label` | renderer class and identifier used for the one shared-device reading |
 | `allocator_allocated_bytes` | bytes assigned to live wgpu allocations |
@@ -172,13 +176,16 @@ moves even though the window id changes.
 Each visible or warm renderer also writes one `renderer retention` line:
 
 ```text
-renderer retention window="WindowId(1)" role="visible" total_bytes=17301504
+renderer retention window="WindowId(1)" role="visible" total_bytes=18612224
                    glyph_atlas_bytes=16777216 glyph_atlas_items=412
                    image_atlas_bytes=524288 image_atlas_items=3
-                   software_frame_bytes=0
+                   row_glyph_cache_bytes=1048576 row_glyph_cache_items=120
+                   row_quad_cache_bytes=262144 row_quad_cache_items=80 software_frame_bytes=0
 renderer retention window="warm[0]" role="warm" total_bytes=16777216
                    glyph_atlas_bytes=16777216 glyph_atlas_items=0
-                   image_atlas_bytes=0 image_atlas_items=0 software_frame_bytes=0
+                   image_atlas_bytes=0 image_atlas_items=0
+                   row_glyph_cache_bytes=0 row_glyph_cache_items=0
+                   row_quad_cache_bytes=0 row_quad_cache_items=0 software_frame_bytes=0
 ```
 
 | Field | What it owns | First response |
@@ -187,6 +194,10 @@ renderer retention window="warm[0]" role="warm" total_bytes=16777216
 | `glyph_atlas_items` | glyph entries in that atlas | use with bytes to distinguish occupancy from capacity |
 | `image_atlas_bytes` | CPU-side inline-image atlas pixels | reduce image use or renderer count |
 | `image_atlas_items` | inline-image atlas entries | use with bytes to identify image occupancy |
+| `row_glyph_cache_bytes` | hash-table backing plus cached glyph, underline, tofu, and missing-character vector capacities | compare with cached rows; pane departure releases that pane's payload while table capacity can remain at its high-water mark |
+| `row_glyph_cache_items` | cached glyph rows | a falling count with flat bytes can mean reusable table capacity remains |
+| `row_quad_cache_bytes` | hash-table backing plus cached background/decoration quad vector capacities | compare with cached rows and pane/window churn |
+| `row_quad_cache_items` | cached quad rows | a falling count confirms row eviction even when table capacity is sticky |
 | `software_frame_bytes` | full-window Windows software-present buffer | reduce window size; zero outside that path |
 
 `role="warm"` means the renderer belongs to the standby pool, not a visible
@@ -245,7 +256,11 @@ cases. Instead it leaves two pre-failure records:
 2. `breadcrumbs/breadcrumbs-<id>.log` is a bounded atomic snapshot with no
    terminal text, commands, environment values, tokens, or credentials. It pins
    the latest version, platform, renderer, counts, full process resource sample,
-   retention, allocator state, and bounded lifecycle transitions. A separate
+   retention, allocator state, and bounded lifecycle transitions. Its
+   `event=retention` record includes `renderer_bytes`,
+   `row_glyph_cache_bytes` / `row_glyph_cache_items`, and
+   `row_quad_cache_bytes` / `row_quad_cache_items`, so the last complete
+   pre-failure snapshot preserves both row-cache size and occupancy. A separate
    fixed-cost `event=resource_history private_committed=... resident=...` sample
    is taken immediately and every 5 seconds, retaining at most 48 samples.
    Virtual address space appears only in the full `event=resource` record.
@@ -372,8 +387,10 @@ memory snapshot process_private_committed_bytes=unsupported process_resident_byt
                 grid_visible_bytes=97320960 grid_history_bytes=76841472 grid_alternate_bytes=0
                 parser_bytes=0 hyperlink_bytes=3050880 inline_media_bytes=5238528
                 pty_output_bytes=0 pty_input_bytes=0 panes_total=12 panes_sampled=12 panes_contended=0
-                renderer_total_bytes=35651584 renderer_total_items=1042 renderer_delta=+0
-                live_renderers=2 renderers="visible[WindowId(1)] glyph=16777216/1038 image=2097152/4 software=0/0 total=18874368/1042; warm[0] glyph=16777216/0 image=0/0 software=0/0 total=16777216/0"
+                renderer_total_bytes=36962304 renderer_total_items=1242
+                renderer_row_glyph_cache_bytes=1048576 renderer_row_glyph_cache_items=120
+                renderer_row_quad_cache_bytes=262144 renderer_row_quad_cache_items=80 renderer_delta=+0
+                live_renderers=2 renderers="visible[WindowId(1)] glyph=16777216/1038 image=2097152/4 row_glyph=1048576/120 row_quad=262144/80 software=0/0 total=20185088/1242; warm[0] glyph=16777216/0 image=0/0 row_glyph=0/0 row_quad=0/0 software=0/0 total=16777216/0"
                 allocator_state=measured allocator_source=main allocator_label=WindowId(1)
                 allocator_allocated_bytes=8388608 allocator_reserved_bytes=33554432
                 allocator_allocations=4 allocator_blocks=2 allocator_largest_block_bytes=16777216
@@ -392,8 +409,10 @@ memory snapshot process_private_committed_bytes=unsupported process_resident_byt
 | `panes_sampled` | 计入 `session_total_bytes` 的窗格 |
 | `panes_contended` | 因解析器锁被占用而跳过的窗格；非零表示会话总量不完整 |
 | `renderer_total_bytes` / `renderer_total_items` | 所有可见与预热渲染器的 CPU 存储 |
+| `renderer_row_glyph_cache_bytes` / `renderer_row_glyph_cache_items` | 所有渲染器的逐行字形实例与装饰缓存存储及缓存行数 |
+| `renderer_row_quad_cache_bytes` / `renderer_row_quad_cache_items` | 所有渲染器的逐行背景/装饰 quad 缓存存储及缓存行数 |
 | `live_renderers` | 进程级渲染器数量；若高于 `renderers` 条目数，可能存在仍存活但无法访问的渲染器 |
-| `renderers` | 各渲染器角色及字形/图像/软件帧存储明细 |
+| `renderers` | 各渲染器角色及字形/图像/行缓存/软件帧存储明细 |
 | `allocator_state` | `measured`、后端不支持报告时的 `unsupported`，或还没有渲染器时的 `none` |
 | `allocator_source` / `allocator_label` | 这次共享设备读取所用的渲染器类别和标识 |
 | `allocator_allocated_bytes` | 分配给存活 wgpu allocation 的字节数 |
@@ -443,13 +462,16 @@ session retention panes=12 total_bytes=182451840 grid_visible_bytes=97320960
 每个可见或预热渲染器还会写一条 `renderer retention`：
 
 ```text
-renderer retention window="WindowId(1)" role="visible" total_bytes=17301504
+renderer retention window="WindowId(1)" role="visible" total_bytes=18612224
                    glyph_atlas_bytes=16777216 glyph_atlas_items=412
                    image_atlas_bytes=524288 image_atlas_items=3
-                   software_frame_bytes=0
+                   row_glyph_cache_bytes=1048576 row_glyph_cache_items=120
+                   row_quad_cache_bytes=262144 row_quad_cache_items=80 software_frame_bytes=0
 renderer retention window="warm[0]" role="warm" total_bytes=16777216
                    glyph_atlas_bytes=16777216 glyph_atlas_items=0
-                   image_atlas_bytes=0 image_atlas_items=0 software_frame_bytes=0
+                   image_atlas_bytes=0 image_atlas_items=0
+                   row_glyph_cache_bytes=0 row_glyph_cache_items=0
+                   row_quad_cache_bytes=0 row_quad_cache_items=0 software_frame_bytes=0
 ```
 
 | 字段 | 归属内容 | 首先处理 |
@@ -458,6 +480,10 @@ renderer retention window="warm[0]" role="warm" total_bytes=16777216
 | `glyph_atlas_items` | 图集中的字形条目数 | 与字节数一起判断实际占用与容量 |
 | `image_atlas_bytes` | CPU 侧内联图像图集像素 | 减少图像或渲染器数量 |
 | `image_atlas_items` | 内联图像图集条目数 | 与字节数一起识别图像占用 |
+| `row_glyph_cache_bytes` | 哈希表后备存储，以及缓存字形、下划线、tofu 与缺失字符向量的容量 | 与缓存行数对照；窗格离开时释放其负载，但表容量可能保持高水位 |
+| `row_glyph_cache_items` | 已缓存的字形行数 | 行数下降而字节不变，可能表示可复用表容量仍保留 |
+| `row_quad_cache_bytes` | 哈希表后备存储，以及缓存背景/装饰 quad 向量的容量 | 与缓存行数及窗格/窗口变化对照 |
+| `row_quad_cache_items` | 已缓存的 quad 行数 | 即使表容量有粘性，行数下降也能确认条目已淘汰 |
 | `software_frame_bytes` | Windows 软件呈现的整窗缓冲 | 缩小窗口；其它路径为零 |
 
 `role="warm"` 表示渲染器位于待命池，不属于可见窗口；关闭窗口不会释放它。
@@ -506,7 +532,10 @@ grep -nE 'dispatch_sync_f_slow|redraw_target|__psynch_cvwait' \
    损坏的标记仍算证据，每个旧标记只在下次启动时报告一次。
 2. `breadcrumbs/breadcrumbs-<id>.log` 是有界的原子快照，不含终端文本、命令、环境值、
    token 或凭据。它固定保留最新版本、平台、渲染器、数量、完整进程资源、保留量、
-   分配器状态和有界生命周期事件。另有固定成本的
+   分配器状态和有界生命周期事件。其中 `event=retention` 记录包含 `renderer_bytes`、
+   `row_glyph_cache_bytes` / `row_glyph_cache_items` 和
+   `row_quad_cache_bytes` / `row_quad_cache_items`，因此最后一份完整故障前快照会同时保留
+   两个行缓存的大小与占用。另有固定成本的
    `event=resource_history private_committed=... resident=...` 采样：启动时立即一次，
    之后每 5 秒一次，最多保留 48 条。虚拟地址空间只出现在完整 `event=resource` 记录中。
 

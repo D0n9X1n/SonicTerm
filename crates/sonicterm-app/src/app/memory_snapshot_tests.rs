@@ -261,6 +261,8 @@ fn populated_snapshot() -> MemorySnapshot {
                 role: "visible",
                 glyph_atlas: ResourceAmount { bytes: 512, items: 5 },
                 image_atlas: ResourceAmount { bytes: 256, items: 2 },
+                row_glyph_cache: ResourceAmount { bytes: 64, items: 4 },
+                row_quad_cache: ResourceAmount { bytes: 32, items: 3 },
                 software_frame: ResourceAmount { bytes: 1_024, items: 1 },
             },
             RendererSummary {
@@ -268,6 +270,8 @@ fn populated_snapshot() -> MemorySnapshot {
                 role: "warm",
                 glyph_atlas: ResourceAmount { bytes: 128, items: 3 },
                 image_atlas: ResourceAmount::default(),
+                row_glyph_cache: ResourceAmount { bytes: 16, items: 2 },
+                row_quad_cache: ResourceAmount { bytes: 8, items: 1 },
                 software_frame: ResourceAmount::default(),
             },
         ],
@@ -347,6 +351,10 @@ fn every_field_is_emitted_even_when_it_holds_nothing() {
         "panes_contended",
         "renderer_total_bytes",
         "renderer_total_items",
+        "renderer_row_glyph_cache_bytes",
+        "renderer_row_glyph_cache_items",
+        "renderer_row_quad_cache_bytes",
+        "renderer_row_quad_cache_items",
         "renderer_delta",
         "live_renderers",
         "renderers",
@@ -430,8 +438,12 @@ fn visible_and_warm_renderers_are_both_reported_with_their_roles() {
     );
     assert!(rendered.contains("glyph=512/5"), "visible glyph atlas bytes/items: {rendered}");
     assert!(rendered.contains("image=256/2"), "visible image atlas bytes/items: {rendered}");
+    assert!(rendered.contains("row_glyph=64/4"), "visible glyph-cache bytes/items: {rendered}");
+    assert!(rendered.contains("row_quad=32/3"), "visible quad-cache bytes/items: {rendered}");
     assert!(rendered.contains("software=1024/1"), "software frame bytes/items: {rendered}");
     assert!(rendered.contains("glyph=128/3"), "warm glyph atlas bytes/items: {rendered}");
+    assert!(rendered.contains("row_glyph=16/2"), "warm glyph-cache bytes/items: {rendered}");
+    assert!(rendered.contains("row_quad=8/1"), "warm quad-cache bytes/items: {rendered}");
 }
 
 /// Renderer breakdown text is stable even when summaries arrive in a different order.
@@ -445,6 +457,8 @@ fn renderer_breakdown_order_is_stable_across_input_order() {
         role,
         glyph_atlas: ResourceAmount::default(),
         image_atlas: ResourceAmount::default(),
+        row_glyph_cache: ResourceAmount::default(),
+        row_quad_cache: ResourceAmount::default(),
         software_frame: ResourceAmount::default(),
     };
     let mut first = empty_snapshot();
@@ -471,10 +485,14 @@ fn renderer_totals_fold_every_renderer() {
     let events = capture(|| emit_memory_snapshot(&populated_snapshot(), None));
     let event = &events[0];
 
-    // 512 + 256 + 1024 (visible) + 128 (warm)
-    assert_eq!(event.number("renderer_total_bytes"), Some(1_920));
-    // 5 + 2 + 1 (visible) + 3 (warm)
-    assert_eq!(event.number("renderer_total_items"), Some(11));
+    // 512 + 256 + 64 + 32 + 1024 (visible) + 128 + 16 + 8 (warm)
+    assert_eq!(event.number("renderer_total_bytes"), Some(2_040));
+    // 5 + 2 + 4 + 3 + 1 (visible) + 3 + 2 + 1 (warm)
+    assert_eq!(event.number("renderer_total_items"), Some(21));
+    assert_eq!(event.number("renderer_row_glyph_cache_bytes"), Some(80));
+    assert_eq!(event.number("renderer_row_glyph_cache_items"), Some(6));
+    assert_eq!(event.number("renderer_row_quad_cache_bytes"), Some(40));
+    assert_eq!(event.number("renderer_row_quad_cache_items"), Some(4));
 }
 
 /// The live-renderer count is read from the renderer crate, not derived.

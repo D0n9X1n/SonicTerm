@@ -34,6 +34,23 @@ impl fmt::Display for ResourceOwnerId {
     }
 }
 
+/// Estimate heap retained by a standard hash table at its reported capacity.
+///
+/// Includes key/value buckets, one control byte per bucket, and the trailing
+/// 16-byte control-group replica used by hashbrown's SwissTable layout.
+#[must_use]
+pub fn retained_hash_table_bytes<K, V>(capacity: usize) -> usize {
+    if capacity == 0 {
+        // When: `capacity == 0`, the table has no entry or control-byte allocation.
+        return 0;
+    }
+    let mut buckets = 1usize;
+    while buckets - buckets / 8 < capacity {
+        buckets = buckets.saturating_mul(2);
+    }
+    buckets.saturating_mul(std::mem::size_of::<(K, V)>()).saturating_add(buckets).saturating_add(16)
+}
+
 /// Resource classes governed by the shared accounting contract.
 ///
 /// Adding a variant widens every `EnumMap` keyed by this type and breaks
@@ -65,6 +82,10 @@ pub enum ResourceClass {
     GlyphRaster,
     /// Glyph-atlas pixels and identity metadata.
     GlyphAtlas,
+    /// Per-row cached glyph instances and decoration metadata.
+    RowGlyphCache,
+    /// Per-row cached background and decoration quads.
+    RowQuadCache,
     /// VT escape and media capture storage.
     ParserCapture,
     /// Transient inline-media decoding storage.
@@ -202,6 +223,16 @@ impl ResourceClass {
             // `sonicterm-windows` fails if the clamp moves without this.
             Self::GlyphAtlas => {
                 ClassCoverage::UnchargedRetention { per_owner_bytes: 2048 * 2048 * 4 }
+            }
+            // Four viewport working sets at the maximum visible-grid cell seam.
+            // Quad output is at most one run per cell. The glyph envelope also
+            // leaves headroom for bounded combining-cluster shaping expansion;
+            // live reports remain exact rather than using either envelope.
+            Self::RowGlyphCache => {
+                ClassCoverage::UnchargedRetention { per_owner_bytes: 512 * 1024 * 1024 }
+            }
+            Self::RowQuadCache => {
+                ClassCoverage::UnchargedRetention { per_owner_bytes: 160 * 1024 * 1024 }
             }
             Self::SoftwareFrame => {
                 ClassCoverage::UnchargedRetention { per_owner_bytes: 160 * 1024 * 1024 }
@@ -348,7 +379,9 @@ impl ResourceClass {
             // for them for the same reason it carries none for the classes
             // below: not because the charge lands elsewhere, but because there
             // is no charge.
-            Self::GlyphAtlas | Self::SoftwareFrame => PaneSeamTerm::NotChargedInProduction,
+            Self::GlyphAtlas | Self::RowGlyphCache | Self::RowQuadCache | Self::SoftwareFrame => {
+                PaneSeamTerm::NotChargedInProduction
+            }
 
             // Charged to the pane that owns the queue, so it appears in that
             // pane's total and the backstop above it must carry its cap.

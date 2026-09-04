@@ -277,6 +277,14 @@ pub enum BreadcrumbEvent {
         session_bytes: u64,
         /// Bytes retained by visible and warm renderers.
         renderer_bytes: u64,
+        /// Row-glyph cache bytes retained by visible and warm renderers.
+        row_glyph_cache_bytes: u64,
+        /// Cached glyph-row entries retained by visible and warm renderers.
+        row_glyph_cache_items: u64,
+        /// Row-quad cache bytes retained by visible and warm renderers.
+        row_quad_cache_bytes: u64,
+        /// Cached quad-row entries retained by visible and warm renderers.
+        row_quad_cache_items: u64,
         /// Number of live renderer instances.
         live_renderers: u32,
         /// Allocator counters when this build can query them.
@@ -328,12 +336,19 @@ impl BreadcrumbEvent {
             Self::RetentionSnapshot {
                 session_bytes,
                 renderer_bytes,
+                row_glyph_cache_bytes,
+                row_glyph_cache_items,
+                row_quad_cache_bytes,
+                row_quad_cache_items,
                 live_renderers,
                 allocator,
             } => {
                 let base = format!(
                     "{prefix}event=retention session_bytes={session_bytes} \
-                     renderer_bytes={renderer_bytes} live_renderers={live_renderers}"
+                     renderer_bytes={renderer_bytes} row_glyph_cache_bytes={row_glyph_cache_bytes} \
+                     row_glyph_cache_items={row_glyph_cache_items} \
+                     row_quad_cache_bytes={row_quad_cache_bytes} \
+                     row_quad_cache_items={row_quad_cache_items} live_renderers={live_renderers}"
                 );
                 match allocator {
                     Some(allocator) => format!(
@@ -696,6 +711,10 @@ fn required_file_bytes(lifecycle_capacity: usize) -> io::Result<u64> {
         BreadcrumbEvent::RetentionSnapshot {
             session_bytes: u64::MAX,
             renderer_bytes: u64::MAX,
+            row_glyph_cache_bytes: u64::MAX,
+            row_glyph_cache_items: u64::MAX,
+            row_quad_cache_bytes: u64::MAX,
+            row_quad_cache_items: u64::MAX,
             live_renderers: u32::MAX,
             allocator: Some(BreadcrumbAllocator {
                 allocated_bytes: u64::MAX,
