@@ -50,7 +50,11 @@ def require_top_level_env(workflow: str, key: str, value: str) -> None:
     if env is None:
         raise AssertionError("workflow has no top-level env block")
     matches = re.findall(rf'(?m)^  {re.escape(key)}: "([^"]+)"$', env.group("body"))
-    all_occurrences = re.findall(rf'(?m)^\s+{re.escape(key)}: "([^"]+)"$', workflow)
+    occurrence_matches = re.findall(
+        rf'(?m)^\s+{re.escape(key)}:\s*(?:"([^"]+)"|([^"\n]+?))\s*$',
+        workflow,
+    )
+    all_occurrences = [quoted or unquoted for quoted, unquoted in occurrence_matches]
     if matches != [value] or all_occurrences != [value]:
         raise AssertionError(
             f"top-level env {key!r} has {matches!r} with all occurrences "
@@ -66,6 +70,24 @@ def main() -> None:
     require_top_level_env(RELEASE, "CARGO_WIX_VERSION", PINS["CARGO_WIX_VERSION"])
     require_top_level_env(RELEASE, "WIX_TOOLSET_VERSION", PINS["WIX_TOOLSET_VERSION"])
     require_top_level_env(CI, "CARGO_LLVM_COV_VERSION", PINS["CARGO_LLVM_COV_VERSION"])
+
+    shadowed_release = RELEASE.replace(
+        "  build-windows:\n",
+        "  build-windows:\n    env:\n      CARGO_WIX_VERSION: 0.3.8\n",
+        1,
+    )
+    if shadowed_release == RELEASE:
+        raise AssertionError("release workflow has no build-windows job for shadow mutation")
+    try:
+        require_top_level_env(
+            shadowed_release,
+            "CARGO_WIX_VERSION",
+            PINS["CARGO_WIX_VERSION"],
+        )
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("unquoted job-local cargo-wix shadow was accepted")
 
     forbid(RELEASE, "cargo install cargo-wix --locked", "release workflow")
     forbid(RELEASE, "choco install wixtoolset --no-progress -y", "release workflow")
