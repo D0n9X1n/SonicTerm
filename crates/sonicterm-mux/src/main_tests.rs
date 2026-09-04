@@ -82,6 +82,23 @@ mod unix {
         fs::symlink_metadata(path).unwrap().uid()
     }
 
+    /// macOS can briefly accept connects on an abandoned listener, so wait for the stale precondition.
+    fn wait_until_socket_is_stale(path: &Path) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            match std::os::unix::net::UnixStream::connect(path) {
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => return,
+                Ok(stream) => drop(stream),
+                Err(error) => panic!("unexpected stale-socket probe error: {error}"),
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "listener teardown did not reach ConnectionRefused"
+            );
+            std::thread::yield_now();
+        }
+    }
+
     /// macOS login identity remains stable when a client starts in another POSIX session.
     #[cfg(target_os = "macos")]
     #[test]
@@ -245,10 +262,7 @@ mod unix {
         let socket = scratch.path().join("mux.sock");
         let stale = std::os::unix::net::UnixListener::bind(&socket).unwrap();
         drop(stale);
-        assert_eq!(
-            std::os::unix::net::UnixStream::connect(&socket).unwrap_err().kind(),
-            std::io::ErrorKind::ConnectionRefused
-        );
+        wait_until_socket_is_stale(&socket);
 
         let listener = bind_unix_listener(&socket).unwrap();
         let after = fs::symlink_metadata(&socket).unwrap();
