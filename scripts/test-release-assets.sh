@@ -4,6 +4,11 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 prepare="$root/scripts/prepare-release-assets.py"
 
+python3 "$root/scripts/test-release-tool-pins.py"
+if command -v pwsh >/dev/null 2>&1; then
+  pwsh -NoLogo -NoProfile -File "$root/scripts/validate-windows-msi_tests.ps1"
+fi
+
 fail() {
   printf 'release asset test: %s\n' "$1" >&2
   exit 1
