@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: publish-wiki
@@ -17,8 +17,13 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # The only job in the repository that writes Git content it did not build:
+    # it pushes the rendered mirror to the wiki's `master`. The grant lives on
+    # the job rather than the workflow so it cannot widen to a future sibling.
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 5
 
       - name: Clone wiki repository

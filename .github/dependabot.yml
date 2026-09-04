@@ -31,8 +31,12 @@ updates:
     directory: "/"
     schedule:
       interval: monthly
-    open-pull-requests-limit: 2
+    open-pull-requests-limit: 4
     labels: ["dependencies", "ci"]
-    allow:
-      - dependency-type: "all"
-        update-type: "version-update:semver-patch"
+    # Deliberately unfiltered, unlike the cargo ecosystem above. Every action
+    # is pinned to a commit SHA, so there is no floating tag absorbing upstream
+    # fixes: a pin that Dependabot may not advance is a pin that rots, and the
+    # security patch it is holding back never arrives. Restricting this to
+    # `semver-patch` would also silently drop minor releases, which is where
+    # these actions ship most of their runtime and Node-version changes.
+    # Dependabot rewrites both the SHA and the trailing `# vX.Y.Z` comment.

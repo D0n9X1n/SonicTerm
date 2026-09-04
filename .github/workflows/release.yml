@@ -5,8 +5,11 @@ on:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+*'
 
+# Read-only for every job that compiles, packages, or runs a third-party
+# action. Only `publish` re-grants write, so a compromised build or packaging
+# dependency holds a token that cannot create or alter a release.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,11 +22,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 5
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         timeout-minutes: 5
+        with:
+          toolchain: stable
 
       - name: Validate tag against every workspace package
         timeout-minutes: 5
@@ -39,12 +44,14 @@ jobs:
     timeout-minutes: 45
     needs: [validate-release-tag]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         timeout-minutes: 5
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         timeout-minutes: 10
         with:
           shared-key: release-unit-macos-14
@@ -70,10 +77,12 @@ jobs:
     env:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         timeout-minutes: 5
+        with:
+          toolchain: stable
 
       - name: Resolve vcpkg commit (for cache key)
         id: vcpkg
@@ -87,7 +96,7 @@ jobs:
 
       - name: Cache vcpkg binaries (Cairo)
         timeout-minutes: 5
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
           key: vcpkg-cairo-${{ runner.os }}-${{ steps.vcpkg.outputs.image }}-${{ steps.vcpkg.outputs.sha }}-${{ hashFiles('scripts/setup-windows-cairo.ps1') }}
@@ -99,7 +108,7 @@ jobs:
         shell: pwsh
         run: .\scripts\setup-windows-cairo.ps1
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         timeout-minutes: 10
         with:
           shared-key: release-unit-windows
@@ -163,13 +172,15 @@ jobs:
             libvulkan1 \
             python3
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 5
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         timeout-minutes: 5
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         timeout-minutes: 10
         with:
           shared-key: release-unit-linux-ubuntu-22.04
@@ -198,19 +209,20 @@ jobs:
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 5
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         timeout-minutes: 5
         with:
+          toolchain: stable
           targets: x86_64-apple-darwin
 
       - name: Install native dependencies
         timeout-minutes: 10
         run: brew install cairo pkg-config
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         timeout-minutes: 10
         with:
           shared-key: release-mac-x86_64
@@ -219,7 +231,7 @@ jobs:
         timeout-minutes: 30
         run: cargo build --release --target x86_64-apple-darwin -p sonicterm-mac
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         timeout-minutes: 5
         with:
           name: sonicterm-mac-x86_64
@@ -234,19 +246,20 @@ jobs:
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 5
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         timeout-minutes: 5
         with:
+          toolchain: stable
           targets: aarch64-apple-darwin
 
       - name: Install native dependencies
         timeout-minutes: 10
         run: brew install cairo pkg-config
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         timeout-minutes: 10
         with:
           shared-key: release-mac-aarch64
@@ -255,7 +268,7 @@ jobs:
         timeout-minutes: 20
         run: cargo build --release --target aarch64-apple-darwin -p sonicterm-mac
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         timeout-minutes: 5
         with:
           name: sonicterm-mac-aarch64
@@ -270,16 +283,16 @@ jobs:
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 5
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         timeout-minutes: 5
         with:
           name: sonicterm-mac-x86_64
           path: dist/x86_64
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         timeout-minutes: 5
         with:
           name: sonicterm-mac-aarch64
@@ -320,7 +333,7 @@ jobs:
             --kind dmg \
             --output dist/macos-x86_64-dmg.asset.json
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         timeout-minutes: 5
         with:
           name: release-assets-macos
@@ -339,13 +352,14 @@ jobs:
     env:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 5
 
       - name: Install Rust target
         timeout-minutes: 5
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
+          toolchain: stable
           targets: x86_64-pc-windows-msvc
 
       - name: Resolve vcpkg commit (for cache key)
@@ -360,7 +374,7 @@ jobs:
 
       - name: Cache vcpkg binaries (Cairo)
         timeout-minutes: 5
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
           key: vcpkg-cairo-${{ runner.os }}-${{ steps.vcpkg.outputs.image }}-${{ steps.vcpkg.outputs.sha }}-${{ hashFiles('scripts/setup-windows-cairo.ps1') }}
@@ -372,7 +386,7 @@ jobs:
         shell: pwsh
         run: .\scripts\setup-windows-cairo.ps1
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         timeout-minutes: 10
         with:
           shared-key: release-windows
@@ -413,7 +427,7 @@ jobs:
             --kind msi `
             --output dist\windows-x86_64-msi.asset.json
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         timeout-minutes: 5
         with:
           name: release-assets-windows
@@ -466,13 +480,15 @@ jobs:
             weston \
             python3
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 5
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         timeout-minutes: 5
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         timeout-minutes: 10
         with:
           shared-key: release-linux-ubuntu-22.04
@@ -525,13 +541,13 @@ jobs:
       - name: Upload Linux package smoke logs
         if: ${{ failure() }}
         timeout-minutes: 5
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           name: sonicterm-linux-release-smoke-logs
           path: sonicterm-*-smoke.log
           if-no-files-found: ignore
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         timeout-minutes: 5
         with:
           name: release-assets-linux
@@ -547,13 +563,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: [package-mac, build-windows, package-linux]
+    # The single write boundary of the release: it uploads the consolidated,
+    # checksum-validated asset set. Every job that produced those bytes ran
+    # with a read-only token, so this is the only step that can publish them.
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 5
         with:
           fetch-depth: 0
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         timeout-minutes: 5
         with:
           pattern: release-assets-*
@@ -583,7 +604,7 @@ jobs:
             dist/release-assets.json \
             > RELEASE_NOTES.md
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         timeout-minutes: 10
         with:
           tag_name: ${{ github.ref_name }}

@@ -100,6 +100,7 @@ bash scripts/check-authored-rust-comments.sh
 bash scripts/check-no-raw-process-exit.sh
 bash scripts/check-rust-version.sh
 bash scripts/check-window-owner-registration.sh
+bash scripts/check-workflow-supply-chain.sh
 bash scripts/check-workspace-crates.sh
 bash scripts/pty-backend-feasibility.sh --check
 bash scripts/test-resource-inventory.sh
