@@ -107,7 +107,11 @@ cargo build --release -p sonicterm-mac
 
 ## Pull-request and main CI
 
-`.github/workflows/ci.yml` runs on pull requests and pushes to `main`.
+`.github/workflows/ci.yml` runs on pull requests and pushes to `main`. Pull-request
+runs share a ref-specific concurrency group and cancel an obsolete run when that
+ref advances. Each `main` push instead has a SHA-specific group and never
+cancels in progress, so a later merge cannot erase the exact-SHA verification
+record for an earlier one.
 
 Never merge or enable auto-merge while a required pull-request job is queued,
 in progress, missing, cancelled, unexpectedly skipped, or failed. The macOS,
@@ -184,7 +188,8 @@ A package smoke cannot pass without a native window, GPU initialization,
 
 Every workflow runs third-party code, so two properties are enforced rather
 than left to convention. `scripts/check-workflow-supply-chain.sh` runs in the
-local gate, on both CI matrix hosts, and in the Ubuntu tooling step.
+local gate, on both CI matrix hosts, in the Ubuntu tooling step, and in release
+validation before platform jobs start.
 
 **Every remote action is pinned to a full 40-character commit SHA**, with a
 trailing `# vX.Y.Z` comment naming the release that SHA is. A tag is a pointer,
@@ -233,10 +238,20 @@ Pushing a tag matching `v<semver>` starts `.github/workflows/release.yml`.
 Owner approval to push the tag is separate from running local packaging.
 Pre-release tags containing `-` are marked prerelease.
 
+Before any platform job starts, validation peels the tag ref to its commit,
+fetches full `origin/main` history, requires that commit to be its ancestor, and
+uses read-only `actions` access to find a completed successful `CI` push run
+whose head is exactly that commit. The
+same job then checks the workspace version and runs Cargo metadata, formatting,
+both Clippy modes, declared Rust-version, workflow supply-chain, authored-comment,
+process-exit, window-owner, workspace Rustdoc, optional-SSH Rustdoc, and release
+asset tooling. A tag on an unreviewed branch, a tag whose main run failed or is
+missing, or a source-gate failure cannot reach package construction.
+
 ```mermaid
 flowchart TD
     tag["vX.Y.Z tag"]
-    validate["validate tag against all 24 workspace packages<br/>test release-asset tooling"]
+    validate["verify exact release commit + successful CI<br/>run source gates + validate all package versions"]
     mtest["macOS unit + per-crate + release-note tests"]
     wtest["Windows unit + per-crate + software/WARP/selection tests"]
     ltest["Ubuntu 22.04 unit + per-crate + Linux/release tooling tests"]
@@ -446,7 +461,9 @@ cargo build --release -p sonicterm-mac
 
 ## Pull-request 与 main CI
 
-`.github/workflows/ci.yml` 在 pull request 和推送到 `main` 时运行。
+`.github/workflows/ci.yml` 在 pull request 和推送到 `main` 时运行。Pull-request run 使用
+按 ref 区分的 concurrency group；ref 前进时会取消已过时的 run。每次 `main` push 则使用按
+SHA 区分的 group，且不会在运行中被取消，因此后续合并不能抹去前一个 merge SHA 的精确验证记录。
 
 只要任一必需的 pull-request job 仍在排队、运行、缺失、被取消、意外跳过或失败，就绝不能
 合并，也不能启用 auto-merge。macOS、Windows 与 Ubuntu job 必须都在完全相同的已审核 head
@@ -509,8 +526,8 @@ package smoke 就不能通过。
 ## 工作流供应链
 
 每个工作流都会运行第三方代码，因此有两条性质由 gate 强制执行，而不是靠约定维持。
-`scripts/check-workflow-supply-chain.sh` 在本地 gate、两个 CI matrix host 和 Ubuntu
-工具步骤中都会运行。
+`scripts/check-workflow-supply-chain.sh` 在本地 gate、两个 CI matrix host、Ubuntu 工具步骤，
+以及任何平台 job 开始前的 release 验证中都会运行。
 
 **每个远程 action 都固定到完整的 40 位提交 SHA**，并带上标明该 SHA 对应发布版本的
 `# vX.Y.Z` 尾注。Tag 是指针而不是版本：持有上游仓库的人可以随时把 `@v2` 重新指向任意
@@ -549,10 +566,18 @@ Dependabot 的 `github-actions` 生态被刻意设为不过滤，这与 `cargo` 
 推送符合 `v<semver>` 的 tag 会启动 `.github/workflows/release.yml`。所有者批准推送 tag
 与本地运行打包是两件事。含 `-` 的 pre-release tag 会自动标为 prerelease。
 
+任何平台 job 开始前，验证步骤会把 tag ref 解引用到对应 commit，获取完整的 `origin/main`
+历史，要求该 commit 是其祖先，并用只读 `actions` 权限查找 head 完全等于该 commit、已完成且
+成功的 `CI` push run。同一 job 随后
+检查 workspace 版本，并运行 Cargo metadata、format、两种 Clippy、声明 Rust 版本、工作流
+供应链、第一方注释、process-exit、window-owner、workspace Rustdoc、optional-SSH Rustdoc
+和 release asset 工具。位于未审核分支的 tag、缺失或失败的 main run，以及源码 gate 失败都
+不能进入 package 构建。
+
 ```mermaid
 flowchart TD
     tag["vX.Y.Z tag"]
-    validate["核对 tag 与全部 24 个 workspace package<br/>测试 release-asset 工具"]
+    validate["验证精确 release commit 与成功 CI<br/>运行源码 gate 并核对全部 package 版本"]
     mtest["macOS unit + 逐 crate + release-note 测试"]
     wtest["Windows unit + 逐 crate + software/WARP/selection 测试"]
     ltest["Ubuntu 22.04 unit + 逐 crate + Linux/release 工具测试"]
