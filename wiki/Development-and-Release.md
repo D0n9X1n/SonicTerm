@@ -139,10 +139,9 @@ and runs the deterministic logic coverage gate.
 Windows first prepares static Cairo through vcpkg. It restores the binary cache,
 builds a cold miss, and saves that result immediately before the two dependent
 shards start. The checks shard runs format, Clippy, source-policy, comment, and
-Rustdoc gates plus the independent host, adapter, churn, selection-presentation,
-and PTY-feasibility probes. The test shard runs the one-pass workspace tests,
-software presentation capability, WARP allocator, remaining tooling tests, and
-real resource-baseline capture.
+Rustdoc gates. The test shard runs the one-pass workspace tests, host probes,
+software presentation capability, WARP allocator, software-selection
+presentation, tooling tests, and real resource-baseline capture.
 
 Each platform's two Rust-consuming shards share one dependency cache key but
 exclude workspace-crate artifacts. Only the core/checks shard may save it, and
@@ -504,10 +503,9 @@ macOS core shard 运行源码策略检查、严格 Rustdoc、一次性 workspace
 `cargo-llvm-cov`，并运行确定性 logic coverage gate。
 
 Windows 先通过 vcpkg 准备静态 Cairo。它先恢复 binary cache，冷 miss 时完成构建，并在两个依赖
-shard 启动前立即保存结果。checks shard 运行 format、Clippy、源码策略、注释与 Rustdoc gate，
-以及可独立执行的 host、adapter、churn、selection-presentation 和 PTY-feasibility probe；tests shard
-运行一次性 workspace 测试、software presentation capability、WARP allocator、其余工具测试与
-真实 resource baseline 采集。
+shard 启动前立即保存结果。checks shard 运行 format、Clippy、源码策略、注释与 Rustdoc gate；
+tests shard 运行一次性 workspace 测试、host probe、software presentation capability、WARP
+allocator、software-selection presentation、工具测试与真实 resource baseline 采集。
 
 每个平台的两个 Rust shard 共用一个依赖 cache key，但不缓存 workspace crate artifact。只有
 core/checks shard 可以保存，且仅限推送到 `main`；同平台 sibling shard 与全部 pull-request run

@@ -449,7 +449,7 @@ class RepositoryTests(unittest.TestCase):
         text = (_HERE.parent / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
         )
-        self.assertIn("CI_CACHE_NAMESPACE: ci-v4", text)
+        self.assertIn("CI_CACHE_NAMESPACE: ci-v3", text)
         self.assertEqual(text.count("uses: Swatinem/rust-cache@"), 6)
         self.assertEqual(text.count("shared-key: ${{ env.CI_CACHE_NAMESPACE }}-"), 6)
         self.assertEqual(text.count("add-job-id-key: false"), 6)
@@ -475,7 +475,7 @@ class RepositoryTests(unittest.TestCase):
         release = (_HERE.parent / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
         )
-        self.assertIn("CI_CACHE_NAMESPACE: ci-v4", release)
+        self.assertIn("CI_CACHE_NAMESPACE: ci-v3", release)
         self.assertIn("key: ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-", release)
 
     def test_linux_core_installs_gpu_runtime_dependencies(self):
@@ -487,29 +487,6 @@ class RepositoryTests(unittest.TestCase):
         for dependency in ("mesa-vulkan-drivers", "libvulkan1"):
             with self.subTest(dependency=dependency):
                 self.assertIn(dependency, core)
-
-    def test_windows_independent_probes_balance_the_two_workers(self):
-        text = (_HERE.parent / ".github" / "workflows" / "ci.yml").read_text(
-            encoding="utf-8"
-        )
-        checks = text.split("  windows-checks:\n", 1)[1]
-        checks = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", checks, maxsplit=1)[0]
-        tests = text.split("  windows-tests:\n", 1)[1]
-        tests = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", tests, maxsplit=1)[0]
-        independent = (
-            "Report host window capability",
-            "Report host adapter classification",
-            "Report renderer churn baseline",
-            "Verify Windows selection presentation",
-            "Verify frozen PTY feasibility evidence",
-        )
-        for step in independent:
-            with self.subTest(step=step):
-                marker = f"- name: {step}"
-                self.assertIn(marker, checks)
-                self.assertNotIn(marker, tests)
-        self.assertNotIn("Run workspace unit and integration tests", checks)
-        self.assertIn("Run workspace unit and integration tests", tests)
 
     def test_workspace_tests_cover_unit_and_integration_targets_once(self):
         script = (_HERE.parent / "scripts" / "check-workspace-crates.sh").read_text(

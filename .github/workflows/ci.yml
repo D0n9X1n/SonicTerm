@@ -20,7 +20,7 @@ env:
   RUST_BACKTRACE: short
   CARGO_INCREMENTAL: 0
   CARGO_LLVM_COV_VERSION: "0.9.0"
-  CI_CACHE_NAMESPACE: ci-v4
+  CI_CACHE_NAMESPACE: ci-v3
 
 jobs:
   macos-core:
@@ -358,27 +358,6 @@ jobs:
         shell: bash
         run: RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-io --no-deps --features ssh
 
-      - name: Report host window capability
-        timeout-minutes: 5
-        run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture
-
-      - name: Report host adapter classification
-        timeout-minutes: 5
-        run: cargo test -p sonicterm-gpu --test ci_adapter_classification_probe -- --nocapture
-
-      - name: Report renderer churn baseline
-        timeout-minutes: 5
-        run: cargo test -p sonicterm-gpu --test renderer_churn_baseline -- --nocapture
-
-      - name: Verify Windows selection presentation
-        timeout-minutes: 5
-        run: cargo test -p sonicterm-app --test windows_software_selection_present -- --nocapture
-
-      - name: Verify frozen PTY feasibility evidence
-        timeout-minutes: 5
-        shell: bash
-        run: bash scripts/pty-backend-feasibility.sh --check
-
   windows-tests:
     name: Windows test and runtime gates
     runs-on: windows-latest
@@ -433,6 +412,18 @@ jobs:
         shell: bash
         run: bash scripts/check-workspace-crates.sh
 
+      - name: Report host window capability
+        timeout-minutes: 5
+        run: cargo test -p sonicterm-gpu --test ci_host_capability_probe -- --nocapture
+
+      - name: Report host adapter classification
+        timeout-minutes: 5
+        run: cargo test -p sonicterm-gpu --test ci_adapter_classification_probe -- --nocapture
+
+      - name: Report renderer churn baseline
+        timeout-minutes: 5
+        run: cargo test -p sonicterm-gpu --test renderer_churn_baseline -- --nocapture
+
       - name: Verify Windows software presentation capability
         timeout-minutes: 5
         run: cargo test -p sonicterm-gpu --test windows_software_present_capability -- --nocapture
@@ -440,6 +431,10 @@ jobs:
       - name: Verify Windows WARP allocator baseline
         timeout-minutes: 5
         run: cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture
+
+      - name: Verify Windows selection presentation
+        timeout-minutes: 5
+        run: cargo test -p sonicterm-app --test windows_software_selection_present -- --nocapture
 
       - name: Test MSI validator
         timeout-minutes: 5
@@ -455,6 +450,11 @@ jobs:
         timeout-minutes: 5
         shell: bash
         run: bash scripts/test-wiki-publish.sh
+
+      - name: Verify frozen PTY feasibility evidence
+        timeout-minutes: 5
+        shell: bash
+        run: bash scripts/pty-backend-feasibility.sh --check
 
       - name: Verify resource inventory
         timeout-minutes: 5
