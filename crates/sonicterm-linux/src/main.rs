@@ -71,8 +71,10 @@ fn linux_default_config() -> Config {
     Config { keymap: "sonicterm-linux".to_string(), ..Config::default() }
 }
 
+/// Resolve Linux-unsupported native materials before config reaches app state.
 #[cfg(any(target_os = "linux", test))]
-fn normalize_linux_config(mut config: Config, warnings: &mut Vec<String>) -> Config {
+fn normalize_linux_config(mut config: Config) -> (Config, Vec<String>) {
+    let mut warnings = Vec::new();
     if config.appearance.backdrop != BackdropKind::Opaque {
         // When: Linux cannot apply the requested native material, clamp before any window is built.
         warnings.push(format!(
@@ -81,7 +83,7 @@ fn normalize_linux_config(mut config: Config, warnings: &mut Vec<String>) -> Con
         ));
         config.appearance.backdrop = BackdropKind::Opaque;
     }
-    config
+    (config, warnings)
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -128,7 +130,7 @@ fn load_config(mode: StartupMode, warnings: &mut Vec<String>) -> Config {
             None => linux_default_config(),
         }
     };
-    normalize_linux_config(config, warnings)
+    config
 }
 
 #[cfg(target_os = "linux")]
@@ -231,7 +233,8 @@ fn run_linux(mode: StartupMode) -> Result<i32> {
     tracing::info!(privileged = process_privilege.is_privileged(), "process privilege observed");
     let mut shell = sonicterm_app::shell::LinuxShell::new(machine, theme, config, keymap)
         .with_process_privilege(process_privilege)
-        .with_asset_loaders(theme_loader, keymap_loader);
+        .with_asset_loaders(theme_loader, keymap_loader)
+        .with_config_normalizer(Box::new(normalize_linux_config));
     if let Some(recorder) = breadcrumb_recorder.clone() {
         // When: breadcrumb startup succeeded, let the app report runtime state without filesystem IO.
         shell = shell.with_breadcrumb_recorder(recorder);

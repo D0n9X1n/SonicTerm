@@ -13,7 +13,10 @@ use anyhow::{Context, Result};
 use winit::event_loop::{ControlFlow, EventLoop, EventLoopProxy};
 
 use crate::app::os_drag::OsTabDragBackend;
-use crate::app::{App, KeymapLoader, RuntimeSmokeFailure, ThemeLoader, UserEvent};
+use crate::app::{
+    identity_config_normalizer, App, ConfigNormalizer, KeymapLoader, RuntimeSmokeFailure,
+    ThemeLoader, UserEvent,
+};
 use crate::os_drag::{OsDragSink, TabPayload};
 use crate::ProcessPrivilege;
 use sonicterm_app_core::AppStateMachine;
@@ -26,6 +29,7 @@ struct ShellRunner {
     theme: Theme,
     config: Config,
     keymap: Keymap,
+    config_normalizer: ConfigNormalizer,
     theme_loader: Option<ThemeLoader>,
     keymap_loader: Option<KeymapLoader>,
     os_drag_sink: Option<Arc<dyn OsDragSink>>,
@@ -44,6 +48,7 @@ impl ShellRunner {
             theme,
             config,
             keymap,
+            config_normalizer: identity_config_normalizer(),
             theme_loader: None,
             keymap_loader: None,
             os_drag_sink: None,
@@ -63,12 +68,17 @@ impl ShellRunner {
     }
 
     fn into_app(self, proxy: EventLoopProxy<UserEvent>) -> App {
-        let mut app = App::new_with_proxy_and_machine(
+        self.into_app_with_proxy(Some(proxy))
+    }
+
+    fn into_app_with_proxy(self, proxy: Option<EventLoopProxy<UserEvent>>) -> App {
+        let mut app = App::new_with_proxy_machine_and_normalizer(
             self.theme,
             self.config,
             self.keymap,
-            Some(proxy),
+            proxy,
             self.machine,
+            self.config_normalizer,
         );
         app.set_process_privilege(self.process_privilege);
         if let Some(recorder) = self.breadcrumb_recorder {
@@ -335,6 +345,19 @@ impl LinuxShell {
         self.runner.theme_loader = Some(theme_loader);
         self.runner.keymap_loader = Some(keymap_loader);
         self
+    }
+
+    /// Install the Linux capability policy used by startup and reload.
+    #[must_use]
+    pub fn with_config_normalizer(mut self, normalizer: ConfigNormalizer) -> Self {
+        self.runner.config_normalizer = normalizer;
+        self
+    }
+
+    /// Build a headless app for startup-policy regression tests.
+    #[cfg(test)]
+    pub(crate) fn into_app_for_test(self) -> App {
+        self.runner.into_app_with_proxy(None)
     }
 
     /// Install the nonblocking postmortem breadcrumb recorder.

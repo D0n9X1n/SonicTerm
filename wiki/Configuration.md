@@ -99,7 +99,7 @@ the byte budget before the row count. See [Memory](Memory).
 
 | Key | Default | Behavior |
 | --- | --- | --- |
-| `backdrop` | `"opaque"` | Accepts `opaque`, `mica`, `acrylic`, or `tabbed`. Windows applies the named DWM material on a best-effort basis. Linux starts as `opaque` and warns if another value was requested. macOS treats non-opaque values as alpha-capable windows; the Windows material names do not select a macOS material. |
+| `backdrop` | `"opaque"` | Accepts `opaque`, `mica`, `acrylic`, or `tabbed`. Windows applies the named DWM material on a best-effort basis. Linux normalizes every startup and explicit reload to `opaque`, warning once when another value is requested. macOS treats non-opaque values as alpha-capable windows; the Windows material names do not select a macOS material. |
 | `opacity` | `1.0` | Terminal background opacity, clamped to `0.0..=1.0`. |
 | `scrollbar` | `"auto"` | Accepts `auto`, `always`, or `never`. `always` is still hidden when there is no history to scroll. |
 | `panel_padding` | `2.0` | Inner padding for floating panels in logical pixels. Negative values act as `0`. |
@@ -171,6 +171,12 @@ Some settings affect only objects created after the reload:
 - `cols`, `rows`, `decorations`, and the native `backdrop` affect new windows;
 - `shell` and `term_program` affect new panes;
 - logging settings require a restart.
+
+Platform capability normalization runs before a startup or reload config becomes
+the session baseline. On Linux, an unsupported backdrop is therefore never stored:
+existing state and every later warm, new, or torn-out window read `opaque` from the
+normalized config. The warning appears once on the pass that changes the value;
+normalizing the already-opaque result is silent.
 
 Changing `backdrop` or `software_render_mode` can involve native window setup.
 Restart SonicTerm when you need the complete native-window change, not only the
@@ -309,7 +315,7 @@ Scrollback 行数与内存预算会同时限制历史记录。包含丰富属性
 
 | Key | 默认值 | 行为 |
 | --- | --- | --- |
-| `backdrop` | `"opaque"` | 可选 `opaque`、`mica`、`acrylic`、`tabbed`。Windows 会尽力应用对应 DWM 材质。Linux 启动时只使用 `opaque`，请求其它值会记录 warning。macOS 只把非 `opaque` 值当作需要 alpha 的窗口；这些 Windows 材质名称不会选择 macOS 材质。 |
+| `backdrop` | `"opaque"` | 可选 `opaque`、`mica`、`acrylic`、`tabbed`。Windows 会尽力应用对应 DWM 材质。Linux 在每次启动和显式重载时都会收敛为 `opaque`，请求其它值时记录一次 warning。macOS 只把非 `opaque` 值当作需要 alpha 的窗口；这些 Windows 材质名称不会选择 macOS 材质。 |
 | `opacity` | `1.0` | 终端背景透明度，会限制在 `0.0..=1.0`。 |
 | `scrollbar` | `"auto"` | 可选 `auto`、`always`、`never`。没有可滚动历史时，`always` 也不会显示。 |
 | `panel_padding` | `2.0` | 浮动面板内部 padding，单位为逻辑像素。负值按 `0` 处理。 |
@@ -376,6 +382,10 @@ Scrollback 行数与内存预算会同时限制历史记录。包含丰富属性
 - `cols`、`rows`、`decorations` 和原生 `backdrop` 只影响新窗口；
 - `shell` 与 `term_program` 只影响新 pane；
 - logging 设置需要重启。
+
+平台能力收敛会在启动或重载配置成为会话基线前执行。因此 Linux 永远不会存储不支持的
+backdrop：现有状态和之后所有预热、新建或拆出窗口都会从已收敛配置读取 `opaque`。warning
+只在该次收敛真正修改值时写一次；再次处理已经为 `opaque` 的结果不会重复 warning。
 
 修改 `backdrop` 或 `software_render_mode` 可能涉及原生窗口初始化。如果需要完整
 应用原生窗口变化，而不只是更新 renderer 策略，请重启 SonicTerm。实时修改

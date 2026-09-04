@@ -165,9 +165,13 @@ grouping, and compositor identity.
 
 Linux has no SonicTerm native menu, desktop-notification bridge,
 foreground-process title adapter, native material backdrop, or cross-process tab
-drag. The binary clamps any configured backdrop to opaque with a warning and
-uses in-app behavior for the supported actions. Shared panes, tabs, windows, and
-in-process tab movement remain available.
+drag. Its shell installs a pure platform normalizer on the shared app runner.
+Startup and every explicit reload pass through that one seam before config is
+stored or applied: Mica, Acrylic, and Tabbed become opaque with one warning;
+already-opaque input is unchanged and silent. Warm, new, and torn-out windows
+therefore consume the same normalized value. macOS and Windows install identity
+behavior and retain their supported backdrop policy. Shared panes, tabs, windows,
+and in-process tab movement remain available.
 
 ### Shell, fonts, and assets
 
@@ -355,8 +359,11 @@ Desktop entry、AppStream component、hicolor icon、Wayland application id 和 
 launcher activation、任务分组和 compositor identity 对齐。
 
 Linux 没有 SonicTerm 原生菜单、桌面通知 bridge、前台进程标题 adapter、原生 material
-backdrop 或跨进程标签页拖放。二进制会带 warning 把 backdrop 收敛为 opaque，并为支持的
-操作使用应用内行为。共享窗格、标签页、窗口和进程内标签页移动仍可使用。
+backdrop 或跨进程标签页拖放。Linux shell 会在共享 app runner 上安装纯平台收敛器。
+启动和每次显式重载都会在配置被存储或应用前经过同一个接缝：Mica、Acrylic 与 Tabbed
+会变为 opaque 并记录一次 warning；已经为 opaque 的输入保持不变且不写 warning。
+预热、新建和拆出窗口因此都会使用同一已收敛值。macOS 与 Windows 安装 identity 行为，
+保留各自支持的 backdrop 策略。共享窗格、标签页、窗口和进程内标签页移动仍可使用。
 
 ### Shell、字体与资源
 
