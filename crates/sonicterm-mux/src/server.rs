@@ -81,6 +81,7 @@ impl SubscriberShared {
         let Some(pane_id) = pauses.iter().find_map(|(pane_id, pause)| {
             (*pause == ReplayPause::MarkerPending).then_some(*pane_id)
         }) else {
+            // When: no MarkerPending pane_id exists, the writer has no control frame to retry.
             return OutputSendResult::Queued;
         };
         match self.tx.try_send(ServerMsg::ResyncRequired { pane_id }) {
@@ -122,11 +123,17 @@ impl SubscriberSink {
 
     fn send_snapshot(&self, pane_id: PaneId, bytes: Vec<u8>) -> Result<()> {
         match self.shared.replay_pauses.lock().get(&pane_id) {
-            None => return Err(anyhow!("pane {pane_id} is not waiting for replay")),
+            None => {
+                // When: None means pane_id was never paused, so a snapshot would duplicate output.
+                return Err(anyhow!("pane {pane_id} is not waiting for replay"));
+            }
             Some(ReplayPause::MarkerPending) => {
+                // When: MarkerPending still awaits capacity, snapshot bytes must not overtake it.
                 return Err(anyhow!("pane {pane_id} recovery marker is not queued"));
             }
-            Some(ReplayPause::Initial | ReplayPause::MarkerQueued) => {}
+            Some(ReplayPause::Initial | ReplayPause::MarkerQueued) => {
+                // When: Initial or MarkerQueued records a visible replay boundary, delivery may begin.
+            }
         }
         let deadline = Instant::now() + SUBSCRIBER_CONTROL_SEND_TIMEOUT;
         let fragments = bytes.len().div_ceil(SUBSCRIBER_OUTPUT_FRAME_BYTES).max(1);
@@ -156,9 +163,12 @@ impl SubscriberSink {
         let mut pauses = self.shared.replay_pauses.lock();
         match pauses.get(&pane_id) {
             Some(ReplayPause::Initial | ReplayPause::MarkerQueued) => {
+                // When: Initial or MarkerQueued already requires replay, do not queue another marker.
                 return OutputSendResult::Lagged;
             }
-            Some(ReplayPause::MarkerPending) => {}
+            Some(ReplayPause::MarkerPending) => {
+                // When: MarkerPending still awaits capacity, retain that recovery state.
+            }
             None => {
                 pauses.insert(pane_id, ReplayPause::MarkerPending);
             }
@@ -180,13 +190,16 @@ impl SubscriberSink {
     pub fn send_output(&self, pane_id: PaneId, bytes: &[u8]) -> OutputSendResult {
         let pause = self.shared.replay_pauses.lock().get(&pane_id).copied();
         if let Some(pause) = pause {
+            // When: pause exists, retry MarkerPending or keep suppressing live bytes.
             return if pause == ReplayPause::MarkerPending {
                 self.mark_lagged(pane_id)
             } else {
+                // When: pause is not MarkerPending, replay must finish before live output resumes.
                 OutputSendResult::Lagged
             };
         }
         for chunk in bytes.chunks(SUBSCRIBER_OUTPUT_FRAME_BYTES) {
+            // When: tx capacity reserves fewer than two slots, mark this chunk boundary lagged.
             if self
                 .shared
                 .tx
@@ -196,9 +209,17 @@ impl SubscriberSink {
                 return self.mark_lagged(pane_id);
             }
             match self.shared.tx.try_send(ServerMsg::Output { pane_id, bytes: chunk.to_vec() }) {
-                Ok(()) => {}
-                Err(TrySendError::Full(_)) => return self.mark_lagged(pane_id),
-                Err(TrySendError::Disconnected(_)) => return OutputSendResult::Disconnected,
+                Ok(()) => {
+                    // When: this chunk queued contiguously, continue with any remaining chunks.
+                }
+                Err(TrySendError::Full(_)) => {
+                    // When: Full wins the send race, convert this first gap into replay.
+                    return self.mark_lagged(pane_id);
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    // When: Disconnected closes the receiver, no recovery marker can be delivered.
+                    return OutputSendResult::Disconnected;
+                }
             }
         }
         OutputSendResult::Queued
@@ -414,6 +435,7 @@ impl ServerState {
             {
                 attached.take()
             } else {
+                // When: requester is stale, preserve the replacement attachment it does not own.
                 None
             }
         };
@@ -422,6 +444,7 @@ impl ServerState {
         }
     }
 
+    // Lock order: sessions -> subscriber clears only pane slots owned by attachment.
     fn clear_attachment(&self, attachment: &Attachment) {
         if let Some(session) = self.sessions.lock().get(&attachment.session_id) {
             for pane in session.panes.values() {
@@ -566,8 +589,7 @@ fn send_reply(sink: &SubscriberSink, message: ServerMsg) -> Result<()> {
     sink.send_control(message)
 }
 
-// Lock order: replay -> subscriber. Holding both makes the snapshot boundary atomic with respect
-// to forward_pane_output, so the first resumed live chunk follows every byte in the snapshot.
+// Lock order: replay -> subscriber keeps snapshot capture atomic with live-output resumption.
 fn send_replay_snapshot(
     replay: &Mutex<VecDeque<u8>>,
     subscriber: &Mutex<Option<SubscriberSink>>,
@@ -583,8 +605,7 @@ fn send_replay_snapshot(
     active.send_snapshot(pane_id, replay.iter().copied().collect())
 }
 
-// Lock order: replay -> subscriber. The pair is shared with send_replay_snapshot so no output can
-// race between snapshot capture and the transition back to contiguous live delivery.
+// Lock order: replay -> subscriber matches send_replay_snapshot across replay completion.
 fn forward_pane_output<T: AsRef<[u8]>>(
     chunk: T,
     replay: &Mutex<VecDeque<u8>>,
@@ -872,6 +893,7 @@ where
                 if let Err(e) = state.replay(pane_id, &sink) {
                     send_reply(&sink, ServerMsg::Error(e.to_string()))
                 } else {
+                    // When: every snapshot fragment queued, replay already resumed live delivery.
                     Ok(())
                 }
             }
