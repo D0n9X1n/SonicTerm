@@ -423,14 +423,27 @@ The hidden warm-window pool reduces tear-out latency:
   at 1.
 
 `about_to_wait` removes excess entries and creates at most one missing warm
-window per pass. Adoption is last-in, first-out. A consumed entry is replaced on
-a later idle pass. Warm windows stay outside `App::windows` and have no resource
-owner until promoted.
+window per pass. Adoption is last-in, first-out. A consumed or failed-adoption
+entry is replaced on a later idle pass. Warm windows stay outside `App::windows`
+and have no resource owner until promoted.
 
-A fresh tear-out detaches the tab before creating its destination window. If
-native window creation, renderer initialization, or child-size validation then
-fails, the moved panes drop and their child processes terminate. There is no
-rollback to the source window.
+New-window tear-out holds the detached tab, tab state, panes, source index, and
+prior active-tab identity in one transaction. Native window creation, renderer
+initialization, and renderer configuration are the three fallible preparation
+stages. Fresh and pooled destinations remain hidden throughout preparation. A
+failure disposes of its partial destination before restoring the source: fresh
+window and renderer objects drop while still unregistered, and a pooled renderer
+that was mutated during failed adoption is retired rather than returned to the
+pool. The transaction is then reinserted at its original source index and the
+prior active tab is restored. Rollback does not resize grids or PTYs, rewrite
+redraw targets, reattribute owners, clear charges, hide the main window, or reap
+a child window.
+
+After preparation succeeds, commit changes pane redraw targets, registers and
+sizes the destination, then reveals it once and requests its first frame.
+Source-side neighbour activation, hiding, or reaping runs only after that commit.
+The reducer records a main tab as leaving its source strip only after the chosen
+merge, OS-handoff, or new-window route reports commitment.
 
 Native drag support differs by platform:
 
@@ -858,11 +871,19 @@ tracing subscriber，只能在下次进程启动时生效。
 - 普通硬件最多 5；
 - 真实软件适配器或最终降级状态启用时，任何非零目标都限制为 1。
 
-`about_to_wait` 会删除多余条目，并且每次最多新建一个缺失窗口。采用后进先出。消耗的条目在
-之后的空闲轮次补充。预热窗口在提升前不进入 `App::windows`，也没有资源所有者。
+`about_to_wait` 会删除多余条目，并且每次最多新建一个缺失窗口。采用后进先出。已消耗或采用
+失败的条目会在之后的空闲轮次补充。预热窗口在提升前不进入 `App::windows`，也没有资源所有者。
 
-新建窗口的拆出路径会先从源窗口移除标签页，再创建目标窗口。如果原生窗口创建、渲染器初始化
-或子窗口尺寸验证随后失败，已经移动的窗格会被析构，其子进程会终止。代码不会回滚到源窗口。
+新窗口拆出会把已移除的标签页、标签页状态、窗格、源下标和原活动标签页身份保存在同一事务中。
+原生窗口创建、渲染器初始化和渲染器配置是三个可能失败的准备阶段。新建和预热目标在整个准备
+期间都保持隐藏。失败时先处置不完整目标，再恢复源：新建窗口和渲染器在尚未注册时析构；预热
+渲染器若已在失败的采用过程中被修改，则直接退役，不会放回池中。随后事务会插回原源下标，并
+恢复先前的活动标签页。回滚不会调整网格或 PTY 尺寸、改写重绘目标、重新归属所有者、清除计费、
+隐藏主窗口或回收子窗口。
+
+准备成功后，提交阶段才会修改窗格重绘目标、注册并调整目标尺寸，然后只显示一次并请求首帧。
+源窗口的邻居激活、隐藏或回收只会在提交后运行。只有所选合并、操作系统交接或新窗口路径确认
+提交后，归约器才会记录主窗口标签页已离开源标签栏。
 
 各平台原生拖动能力不同：
 

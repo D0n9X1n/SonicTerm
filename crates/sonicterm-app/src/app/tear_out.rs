@@ -36,32 +36,188 @@ use super::{
 };
 use crate::app::window_geom;
 
+/// How a child renderer reached destination preparation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ChildRendererOrigin {
+    /// Constructed for this destination.
     Fresh,
+    /// Adopted from the hidden warm-window pool.
     WarmPool,
 }
 
-/// Whether a child window is already on screen by the time its renderer is
-/// adopted, or is still hidden and waiting to be shown.
+/// Window that must receive a detached tab again if destination setup fails.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ChildWindowReveal {
-    /// Created visible, so there is nothing to reveal.
-    AlreadyVisible,
-    /// Created hidden, and shown only once adoption and installation succeed.
-    AfterInstall,
+pub(super) enum TearOutSource {
+    /// The distinguished main terminal window.
+    Main(WindowId),
+    /// A torn-out terminal window.
+    Child(WindowId),
 }
 
-/// A pooled window is created hidden and holds the font, theme, tab-bar, and
-/// scale state it captured while it waited, so it stays hidden until adoption
-/// has replaced that state and its window is installed. A fresh window is
-/// created visible and its renderer was built from the current settings, so it
-/// has nothing stale to hide.
-fn child_window_reveal(origin: ChildRendererOrigin) -> ChildWindowReveal {
-    match origin {
-        ChildRendererOrigin::WarmPool => ChildWindowReveal::AfterInstall,
-        ChildRendererOrigin::Fresh => ChildWindowReveal::AlreadyVisible,
+impl TearOutSource {
+    /// Return the concrete source window identity.
+    fn window_id(self) -> WindowId {
+        match self {
+            Self::Main(id) | Self::Child(id) => id,
+        }
     }
+}
+
+/// Live tab ownership held between source detachment and destination commit.
+pub(super) struct DetachedTab {
+    source: TearOutSource,
+    original_index: usize,
+    prior_active_tab_id: Option<sonicterm_ui::tabs::TabId>,
+    tab: Tab,
+    state: TabState,
+    panes: HashMap<u64, super::PaneState>,
+}
+
+/// Fallible destination-preparation boundary reached by a tear-out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TearOutStage {
+    /// Native window creation.
+    CreateWindow,
+    /// GPU renderer construction.
+    RendererInit,
+    /// Live renderer adoption and initial sizing.
+    RendererConfigure,
+}
+
+/// Required disposition of destination artifacts after preparation fails.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DestinationDisposition {
+    /// No destination artifact exists.
+    Nothing,
+    /// Drop a fresh hidden destination and any renderer it owns.
+    DropFresh,
+    /// Return an unchanged hidden destination to the warm pool.
+    ReturnWarm,
+    /// Drop a warm destination whose renderer has already been mutated.
+    RetireWarm,
+}
+
+/// Select the cleanup owed by an origin and failed preparation stage.
+fn destination_disposition(
+    origin: ChildRendererOrigin,
+    stage: TearOutStage,
+) -> DestinationDisposition {
+    match (origin, stage) {
+        (ChildRendererOrigin::Fresh, TearOutStage::CreateWindow) => DestinationDisposition::Nothing,
+        (ChildRendererOrigin::Fresh, _) => DestinationDisposition::DropFresh,
+        (ChildRendererOrigin::WarmPool, TearOutStage::RendererConfigure) => {
+            DestinationDisposition::RetireWarm
+        }
+        (ChildRendererOrigin::WarmPool, _) => DestinationDisposition::ReturnWarm,
+    }
+}
+
+/// Owned one-shot cleanup for a partially prepared destination.
+pub(super) struct DestinationUnwind {
+    disposition: DestinationDisposition,
+    action: Box<dyn FnOnce(&mut App)>,
+}
+
+impl DestinationUnwind {
+    /// Build cleanup for a failure that created no destination artifact.
+    fn nothing() -> Self {
+        Self { disposition: DestinationDisposition::Nothing, action: Box::new(|_| {}) }
+    }
+
+    /// Own and drop a fresh hidden destination, renderer before window.
+    fn drop_fresh(window: Arc<Window>, renderer: Option<GpuRenderer>) -> Self {
+        Self {
+            disposition: DestinationDisposition::DropFresh,
+            action: Box::new(move |_| {
+                // The renderer owns another window Arc, so it must release that
+                // reference before the final local Arc is dropped.
+                drop(renderer);
+                drop(window);
+            }),
+        }
+    }
+
+    /// Own a warm destination until it is either returned unchanged or retired.
+    fn warm(warm: super::WarmWindow, disposition: DestinationDisposition) -> Self {
+        assert!(
+            matches!(
+                disposition,
+                DestinationDisposition::ReturnWarm | DestinationDisposition::RetireWarm
+            ),
+            "a warm destination supports only return or retirement"
+        );
+        Self {
+            disposition,
+            action: Box::new(move |app| match disposition {
+                DestinationDisposition::ReturnWarm => {
+                    // Adoption has not mutated the hidden renderer, so restore
+                    // the unchanged spare to the pool.
+                    app.warm_window_pool.push(warm);
+                }
+                DestinationDisposition::RetireWarm => {
+                    // Adoption already changed renderer state, so drop the
+                    // hidden entry rather than return a poisoned spare.
+                    drop(warm);
+                }
+                _ => unreachable!("the constructor rejected non-warm dispositions"),
+            }),
+        }
+    }
+
+    /// Run the owned cleanup exactly once and report its disposition.
+    fn run(self, app: &mut App) -> DestinationDisposition {
+        (self.action)(app);
+        self.disposition
+    }
+}
+
+/// Destination preparation failure with every artifact needed for cleanup.
+pub(super) struct DestinationFailure {
+    stage: TearOutStage,
+    detail: Option<String>,
+    unwind: DestinationUnwind,
+}
+
+impl DestinationFailure {
+    /// Bind a failed stage and diagnostic to its required destination cleanup.
+    fn new(
+        origin: ChildRendererOrigin,
+        stage: TearOutStage,
+        detail: String,
+        unwind: DestinationUnwind,
+    ) -> Self {
+        assert_eq!(
+            unwind.disposition,
+            destination_disposition(origin, stage),
+            "destination cleanup must match the failed stage and origin"
+        );
+        Self { stage, detail: Some(detail), unwind }
+    }
+
+    /// Build a test failure whose owned action observes cleanup ordering.
+    #[cfg(test)]
+    fn probe(
+        stage: TearOutStage,
+        disposition: DestinationDisposition,
+        action: Box<dyn FnOnce(&mut App)>,
+    ) -> Self {
+        Self { stage, detail: None, unwind: DestinationUnwind { disposition, action } }
+    }
+}
+
+/// Failure owning both detached source state and partial destination cleanup.
+struct TearOutFailure {
+    stage: TearOutStage,
+    detail: Option<String>,
+    transaction: DetachedTab,
+    unwind: DestinationUnwind,
+}
+
+/// Hidden, fully configured destination ready for an infallible commit.
+struct PreparedDestination {
+    window: Arc<Window>,
+    renderer: GpuRenderer,
+    timing: crate::app::TearOutTiming,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -255,10 +411,7 @@ impl App {
     }
 
     fn take_warm_window(&mut self) -> Option<super::WarmWindow> {
-        self.warm_window_pool.pop().map(|mut warm| {
-            warm.renderer.set_render_timing_label("child");
-            warm
-        })
+        self.warm_window_pool.pop()
     }
 
     pub(super) fn is_warm_window_id(&self, win_id: WindowId) -> bool {
@@ -289,6 +442,90 @@ impl App {
         id: sonicterm_ui::tabs::TabId,
     ) -> Option<usize> {
         self.windows.get(&window)?.tabs.tabs().iter().position(|tab| tab.id == id)
+    }
+
+    /// Detach one tab into a transaction that can be committed or restored.
+    pub(super) fn detach_for_tear_out(
+        &mut self,
+        source: TearOutSource,
+        index: usize,
+    ) -> Option<DetachedTab> {
+        let source_window = source.window_id();
+        let prior_active_tab_id = {
+            let window = self.windows.get(&source_window)?;
+            let source_matches = match source {
+                TearOutSource::Main(id) => self.main_window_id == Some(id),
+                TearOutSource::Child(id) => self.main_window_id != Some(id),
+            };
+            if !source_matches || index >= window.tabs.len() || index >= window.tab_states.len() {
+                // When: the source role or either parallel tab vector rejects the
+                // index, no state may be detached from a different slot or window.
+                return None;
+            }
+            window.tabs.active().map(|tab| tab.id)
+        };
+        let (tab, state, panes) = match source {
+            TearOutSource::Main(_) => self.detach_tab_state(index),
+            TearOutSource::Child(id) => self.detach_from_child(id, index),
+        }?;
+        Some(DetachedTab { source, original_index: index, prior_active_tab_id, tab, state, panes })
+    }
+
+    /// Restore a detached transaction without applying transfer side effects.
+    fn rollback_detached_tab(&mut self, transaction: DetachedTab) {
+        let DetachedTab { source, original_index, prior_active_tab_id, tab, state, panes } =
+            transaction;
+        let window = self.windows.get_mut(&source.window_id()).expect(
+            "a tear-out source cannot disappear during synchronous destination preparation",
+        );
+        let index = original_index.min(window.tabs.len());
+        for (pane_id, pane) in panes {
+            let displaced = window.panes.insert(pane_id, pane);
+            assert!(displaced.is_none(), "a detached pane id must remain absent until rollback");
+        }
+        window.tabs.insert(index, tab);
+        window.tab_states.insert(index, state);
+        let active_index = prior_active_tab_id
+            .and_then(|id| window.tabs.tabs().iter().position(|tab| tab.id == id))
+            .unwrap_or(index);
+        window.tabs.activate(active_index);
+        // Rollback deliberately bypasses the normal attach helpers: resize,
+        // redraw-target replacement, and owner reattribution are transfer effects.
+    }
+
+    /// Prepare and either commit a destination or unwind it before source rollback.
+    fn tear_out_with_destination<F>(
+        &mut self,
+        transaction: DetachedTab,
+        prepare: F,
+    ) -> Option<WindowId>
+    where
+        F: FnOnce(&mut Self) -> Result<PreparedDestination, DestinationFailure>,
+    {
+        match prepare(self) {
+            Ok(destination) => Some(self.commit_torn_out_window(transaction, destination)),
+            Err(DestinationFailure { stage, detail, unwind }) => {
+                // The failure owns both halves so partial native state cannot
+                // outlive source recovery.
+                self.unwind_tear_out_failure(TearOutFailure { stage, detail, transaction, unwind });
+                None
+            }
+        }
+    }
+
+    /// Dispose of partial destination state before restoring its detached source.
+    fn unwind_tear_out_failure(&mut self, failure: TearOutFailure) -> DestinationDisposition {
+        let source = failure.transaction.source;
+        let disposition = failure.unwind.run(self);
+        self.rollback_detached_tab(failure.transaction);
+        tracing::warn!(
+            ?source,
+            stage = ?failure.stage,
+            detail = failure.detail.as_deref().unwrap_or("unavailable"),
+            ?disposition,
+            "tear-out destination failed; source transaction restored"
+        );
+        disposition
     }
 
     pub(super) fn queue_active_tab_tear_out(&mut self, source_window: WindowId) -> bool {
@@ -330,201 +567,225 @@ impl App {
         true
     }
 
+    /// Tear a main-window tab into a new native window.
     pub(super) fn tear_out_tab(&mut self, el: &ActiveEventLoop, index: usize) -> bool {
-        // Notify the reducer of the tear-out cascade. The reducer emits
-        // Render(TabRemoved) on the source window AND a WindowOpen for the
-        // destination, all in one handle() call.
-        let pending_new_window_before_intent = self.pending_new_window;
-        self.dispatch_intent(sonicterm_app_core::AppIntent::TearOutTab {
-            src_window: sonicterm_types::WindowKey::new(0),
-            src_tab: index,
-        });
-        // The reducer emits a WindowOpen effect for observability, but
-        // this production path creates the torn-out window directly via
-        // `install_torn_out_window` below. Do not leave that effect in
-        // `pending_new_window`, or the next event-loop drain can spawn a
-        // second empty window after a successful tear-out.
-        self.pending_new_window = pending_new_window_before_intent;
-        // Cross-window merge is attempted before tear-out: see
-        // [`Self::try_cross_window_merge`] for the gate.
+        self.tear_out_tab_with_installer(index, |app, transaction, screen_pos, source| {
+            app.install_torn_out_window(el, transaction, screen_pos, source)
+        })
+    }
+
+    /// Run the main tear-out route with only destination installation injected.
+    fn tear_out_tab_with_installer<I>(&mut self, index: usize, install: I) -> bool
+    where
+        I: FnOnce(&mut App, DetachedTab, Option<(i32, i32)>, &'static str) -> Option<WindowId>,
+    {
         if self.try_cross_window_merge(index) {
-            // When: the drag target names another window, so the tab was merged into it;
-            // the gesture is resolved and the tear-out path must not run on `index`.
+            // When: `try_cross_window_merge` returns true, account for the tab
+            // leaving only after that route reports completion.
+            self.dispatch_tear_out_intent(index);
             return true;
         }
-        // OS-level cross-process handoff: if a sink is installed and the
-        // cursor has left every SonicTerm-owned window, publish the payload
-        // through NSPasteboard / OLE. The local tab is detached only when the
-        // sink returns an explicit Accepted acknowledgement; current platform
-        // paths return NotAcknowledged and preserve the live PTY. A process
-        // that consumes the payload spawns a fresh tab from cwd/cmd/env/history.
-        //
-        // This must run before the single-tab no-op guard: on Windows,
-        // dropping the only tab on the bare desktop returns
-        // DROPEFFECT_NONE, which the OLE sink promotes into a real
-        // child-process tear-out.
+        // OS handoff must run before local detachment because an acknowledged
+        // receiver becomes the new owner, while an unacknowledged publication
+        // leaves this live session available for in-process tear-out.
         if self.try_os_drag_handoff(index) {
-            // When: `try_os_drag_handoff` published the tab to the OS drag backend or
-            // sink, which owns the gesture from here; the in-process path must not run.
+            // When: `try_os_drag_handoff` returns true, account for departure
+            // only after the handoff reports that the local route must stop.
+            self.dispatch_tear_out_intent(index);
             return true;
         }
-        // Tearing out the only tab in main hides main (the drained-main path) and the
-        // tab becomes its own new top-level window. The PtyHandle MOVES via
-        // `detach_tab_state` — no respawn, no clone, same child PID — so the user's
-        // shell session survives the gesture intact.
-        let Some((tab, state, panes)) = self.detach_tab_state(index) else {
-            // When: `index` names no tab, so `detach_tab_state` moved nothing; return
-            // true to end the gesture rather than build a window with no tab in it.
+        let Some(main_id) = self.main_window_id else {
+            // When: `main_window_id` is `None`, no main tab can be detached or accounted.
             return true;
         };
-
-        if self.install_torn_out_window(el, tab, state, panes, None, "main").is_none() {
-            // When: `install_torn_out_window` failed and dropped the moved panes, killing
-            // their shells; the tab is already detached, so no source-side cleanup runs.
+        let Some(transaction) = self.detach_for_tear_out(TearOutSource::Main(main_id), index)
+        else {
+            // When: `detach_for_tear_out` returns `None`, end the gesture without
+            // changing either live topology or its reducer mirror.
+            return true;
+        };
+        if install(self, transaction, None, "main").is_none() {
+            // When: `install` returns `None`, its owning failure already restored
+            // the source; success-only activation and hiding must not run.
             return true;
         }
-        // Source-side cleanup: hide main if drained, else
-        // activate the LEFT neighbor of the removed slot.
+        self.dispatch_tear_out_intent(index);
         self.tear_out_apply_source_side(index);
         tracing::info!("tab torn out as new window; windows={}", self.windows.len());
         true
     }
 
-    /// factored-out child-window construction so
-    /// both [`Self::tear_out_tab`] (cursor-leaves-windows path) and the
-    /// in-process tear-out drain (`drain_pending_window_creates` →
-    /// `pending_tear_out` enqueued from `DroppedOnEmpty`) build the
-    /// same window the same way. Preserves the live `PtyHandle` move
-    /// (panes' `redraw_target` swapped, PTY resized to child grid).
-    ///
-    /// Returns `Some(window_id)` on success, `None` on failure (panes
-    /// dropped → shells killed via `PtyHandle::Drop`). When
-    /// `screen_pos` is `Some`, positions the new window so its
-    /// top-left lands roughly under the cursor.
-    #[allow(clippy::too_many_lines)]
+    /// Record reducer state only after a main tab has left its source strip.
+    fn dispatch_tear_out_intent(&mut self, index: usize) {
+        let pending_new_window = self.pending_new_window;
+        self.dispatch_intent(sonicterm_app_core::AppIntent::TearOutTab {
+            src_window: sonicterm_types::WindowKey::new(0),
+            src_tab: index,
+        });
+        // The route already created or selected its destination. Preserve the
+        // reducer's WindowOpen observability without spawning a duplicate window.
+        self.pending_new_window = pending_new_window;
+    }
+
+    /// Install a detached transaction through the native preparation boundary.
     pub(super) fn install_torn_out_window(
         &mut self,
         el: &ActiveEventLoop,
-        tab: Tab,
-        state: TabState,
-        panes: HashMap<u64, super::PaneState>,
+        transaction: DetachedTab,
         screen_pos: Option<(i32, i32)>,
         source: &'static str,
     ) -> Option<WindowId> {
+        self.tear_out_with_destination(transaction, |app| {
+            app.prepare_tear_out_destination(el, screen_pos, source)
+        })
+    }
+
+    /// Build and configure a hidden destination without mutating pane state.
+    fn prepare_tear_out_destination(
+        &mut self,
+        el: &ActiveEventLoop,
+        screen_pos: Option<(i32, i32)>,
+        source: &'static str,
+    ) -> Result<PreparedDestination, DestinationFailure> {
         let tear_start = Instant::now();
-        let (window, mut renderer, create_window_ms, renderer_init_ms, renderer_origin) = match self
-            .take_warm_window()
-        {
-            Some(warm) => {
-                let window = warm.window;
-                if let Some((sx, sy)) = screen_pos {
-                    window.set_outer_position(winit::dpi::PhysicalPosition::new(sx, sy));
-                }
-                // Positioned while still hidden. This renderer is the one the
-                // window was pooled with, carrying the font, theme, tab-bar,
-                // and scale state captured at that time, so showing it now
-                // would put a frame of that stale state on screen. The reveal
-                // waits until adoption and installation have both succeeded.
-                (window, warm.renderer, 0.0, 0.0, ChildRendererOrigin::WarmPool)
-            }
-            None => {
-                // When: `take_warm_window` found no pooled window, so this tear-out pays
-                // window creation and renderer init inline before the tab can appear.
-                let mut attrs = super::with_app_icon(super::with_backdrop_transparency(
-                    with_integrated_titlebar(
-                        Window::default_attributes()
-                            .with_title(super::NATIVE_WINDOW_TITLE)
-                            .with_decorations(true)
-                            .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0)),
-                    ),
-                    self.config.appearance.backdrop,
-                    self.config.appearance.software_render_mode,
-                ));
-                if let Some((sx, sy)) = screen_pos {
-                    attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(sx, sy));
-                }
-                let create_start = Instant::now();
-                let window = match el.create_window(attrs) {
-                    Ok(w) => Arc::new(w),
-                    Err(e) => {
-                        // When: `create_window` failed after the tab was already detached;
-                        // returning None drops the moved panes and kills their shells.
-                        tracing::error!("tear-out: create_window failed: {e}; pane state dropped");
-                        return None;
+        let (window, renderer, create_window_ms, renderer_init_ms, resize_ms) =
+            match self.take_warm_window() {
+                Some(mut warm) => {
+                    // When: `take_warm_window` returns `Some`, adopt that hidden
+                    // renderer rather than constructing another destination.
+                    if let Some((sx, sy)) = screen_pos {
+                        warm.window.set_outer_position(winit::dpi::PhysicalPosition::new(sx, sy));
                     }
-                };
-                let create_window_ms = create_start.elapsed().as_secs_f32() * 1000.0;
-                window.set_ime_allowed(true);
-                let shared_gpu = self.main_renderer().map(GpuRenderer::shared_context);
-                let renderer_settings = self.tear_out_renderer_settings("child");
-                let renderer_start = Instant::now();
-                let renderer = match shared_gpu.map_or_else(
-                    || GpuRenderer::new(window.clone(), el, &self.theme, renderer_settings),
-                    |ctx| {
-                        GpuRenderer::new_with_shared_context(
-                            window.clone(),
-                            el,
-                            &self.theme,
-                            renderer_settings,
-                            ctx,
+                    let resize_start = Instant::now();
+                    if !self.configure_child_renderer(
+                        &mut warm.renderer,
+                        &warm.window,
+                        ChildRendererOrigin::WarmPool,
+                    ) {
+                        // When: pooled adoption mutated the renderer but rejected its
+                        // size, retire that hidden entry rather than returning it poisoned.
+                        return Err(DestinationFailure::new(
+                            ChildRendererOrigin::WarmPool,
+                            TearOutStage::RendererConfigure,
+                            "renderer rejected unsafe child size".to_owned(),
+                            DestinationUnwind::warm(warm, DestinationDisposition::RetireWarm),
+                        ));
+                    }
+                    let resize_ms = resize_start.elapsed().as_secs_f32() * 1000.0;
+                    (warm.window, warm.renderer, 0.0, 0.0, resize_ms)
+                }
+                None => {
+                    // When: `take_warm_window` returns `None`, construct a fresh
+                    // destination hidden so every failure remains invisible.
+                    let mut attrs = super::with_app_icon(super::with_backdrop_transparency(
+                        with_integrated_titlebar(
+                            Window::default_attributes()
+                                .with_title(super::NATIVE_WINDOW_TITLE)
+                                .with_decorations(true)
+                                .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0))
+                                .with_visible(false),
+                        ),
+                        self.config.appearance.backdrop,
+                        self.config.appearance.software_render_mode,
+                    ));
+                    if let Some((sx, sy)) = screen_pos {
+                        attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(sx, sy));
+                    }
+                    let create_start = Instant::now();
+                    let window = el.create_window(attrs).map(Arc::new).map_err(|error| {
+                        DestinationFailure::new(
+                            ChildRendererOrigin::Fresh,
+                            TearOutStage::CreateWindow,
+                            error.to_string(),
+                            DestinationUnwind::nothing(),
                         )
-                    },
-                ) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        // When: `GpuRenderer` construction failed for the child window;
-                        // returning None drops the moved panes and kills their shells.
-                        tracing::error!("tear-out: renderer init failed: {e}; pane state dropped");
-                        return None;
+                    })?;
+                    let create_window_ms = create_start.elapsed().as_secs_f32() * 1000.0;
+                    window.set_ime_allowed(true);
+                    let shared_gpu = self.main_renderer().map(GpuRenderer::shared_context);
+                    let renderer_settings = self.tear_out_renderer_settings("child");
+                    let renderer_start = Instant::now();
+                    let mut renderer = shared_gpu
+                        .map_or_else(
+                            || GpuRenderer::new(window.clone(), el, &self.theme, renderer_settings),
+                            |ctx| {
+                                GpuRenderer::new_with_shared_context(
+                                    window.clone(),
+                                    el,
+                                    &self.theme,
+                                    renderer_settings,
+                                    ctx,
+                                )
+                            },
+                        )
+                        .map_err(|error| {
+                            DestinationFailure::new(
+                                ChildRendererOrigin::Fresh,
+                                TearOutStage::RendererInit,
+                                error.to_string(),
+                                DestinationUnwind::drop_fresh(window.clone(), None),
+                            )
+                        })?;
+                    let renderer_init_ms = renderer_start.elapsed().as_secs_f32() * 1000.0;
+                    let resize_start = Instant::now();
+                    if !self.configure_child_renderer(
+                        &mut renderer,
+                        &window,
+                        ChildRendererOrigin::Fresh,
+                    ) {
+                        // When: fresh configuration rejects the hidden destination,
+                        // its renderer and window remain owned by the failure.
+                        return Err(DestinationFailure::new(
+                            ChildRendererOrigin::Fresh,
+                            TearOutStage::RendererConfigure,
+                            "renderer rejected unsafe child size".to_owned(),
+                            DestinationUnwind::drop_fresh(window, Some(renderer)),
+                        ));
                     }
-                };
-                let renderer_init_ms = renderer_start.elapsed().as_secs_f32() * 1000.0;
-                (window, renderer, create_window_ms, renderer_init_ms, ChildRendererOrigin::Fresh)
-            }
-        };
+                    let resize_ms = resize_start.elapsed().as_secs_f32() * 1000.0;
+                    (window, renderer, create_window_ms, renderer_init_ms, resize_ms)
+                }
+            };
+        let mut timing = crate::app::TearOutTiming::new(source, tear_start);
+        timing.create_window_ms = create_window_ms;
+        timing.renderer_init_ms = renderer_init_ms;
+        timing.resize_ms = resize_ms;
+        Ok(PreparedDestination { window, renderer, timing })
+    }
 
-        let resize_start = Instant::now();
-        if !self.configure_child_renderer(&mut renderer, &window, renderer_origin) {
-            // When: `configure_child_renderer` rejected the child size, so the renderer
-            // cannot draw; returning None drops the moved panes and kills their shells.
-            tracing::error!("tear-out: renderer rejected unsafe child size");
-            return None;
-        }
-        let resize_ms = resize_start.elapsed().as_secs_f32() * 1000.0;
-
+    /// Install a fully prepared destination and then reveal it exactly once.
+    fn commit_torn_out_window(
+        &mut self,
+        transaction: DetachedTab,
+        mut destination: PreparedDestination,
+    ) -> WindowId {
         let install_start = Instant::now();
-        let (cols, rows) = renderer.cells();
-        // Swap each migrated pane's VT-thread redraw target so further pty
-        // output triggers the CHILD window's redraw, not the parent. The
-        // PER-PANE grid/PTY sizing is deferred until AFTER the child
-        // WindowState exists (below) so a SPLIT tab sizes every pane to its
-        // own sub-rect via `compute_pane_rects_for`, not the whole window —
-        // sizing every pane to the full `(cols, rows)` here is what makes a
-        // torn-out split overlap (left pane painted across the right).
-        let _ = (cols, rows);
-        let win_id = window.id();
-        for pane in panes.values() {
+        destination.renderer.set_render_timing_label("child");
+        let win_id = destination.window.id();
+        // Each independent redraw-target guard is released before the pane map
+        // moves into the destination window; no two pane locks are nested.
+        for pane in transaction.panes.values() {
             *pane.redraw_target.lock() = Some(win_id);
         }
 
         let mut child_tabs = TabBar::new();
-        let active_pane = state.active_pane;
-        child_tabs.push(tab);
+        let active_pane = transaction.state.active_pane;
+        child_tabs.push(transaction.tab);
         let child = WindowState {
             // Registered when the window is inserted; construction has no
             // governor in scope.
             owner: None,
             role: crate::app::WindowRole::Terminal,
-            window: Some(window.clone()),
-            renderer: Some(renderer),
+            window: Some(destination.window.clone()),
+            renderer: Some(destination.renderer),
             tabs: child_tabs,
             tab_states: vec![TabState {
-                tree: state.tree,
+                tree: transaction.state.tree,
                 active_pane,
-                search: state.search,
-                command: state.command,
+                search: transaction.state.search,
+                command: transaction.state.command,
             }],
-            panes,
+            panes: transaction.panes,
             cursor_pos: (0.0, 0.0),
             mouse_down: false,
             pointer_gesture: None,
@@ -552,13 +813,7 @@ impl App {
             splitter_drag: None,
             splitter_hover: None,
             scrollbar_vis: std::collections::HashMap::new(),
-            pending_tear_out_timing: Some({
-                let mut timing = crate::app::TearOutTiming::new(source, tear_start);
-                timing.create_window_ms = create_window_ms;
-                timing.renderer_init_ms = renderer_init_ms;
-                timing.resize_ms = resize_ms;
-                timing
-            }),
+            pending_tear_out_timing: Some(destination.timing),
             test_drag_chip_marker: None,
             test_renderer_focus_marker: None,
             test_pane_viewport: None,
@@ -576,7 +831,7 @@ impl App {
         // Register the new window's HWND with
         // the OS-drag backend so drops on this child window reach
         // IDropTarget::Drop. No-op on mac (pasteboard model).
-        self.register_window_with_os_drag_backend(win_id, &window);
+        self.register_window_with_os_drag_backend(win_id, &destination.window);
         if let Some(child) = self.windows.get_mut(&win_id) {
             if let Some(timing) = child.pending_tear_out_timing.as_mut() {
                 timing.install_ms = install_start.elapsed().as_secs_f32() * 1000.0;
@@ -591,19 +846,14 @@ impl App {
                 );
             }
         }
-        if child_window_reveal(renderer_origin) == ChildWindowReveal::AfterInstall {
-            // The only reveal on this path. Adoption has replaced the pooled
-            // renderer state, the child window is installed, and its panes are
-            // sized to their own sub-rects, so the first frame the user sees is
-            // the current one. A tear-out that failed adoption returned before
-            // reaching here and left the window hidden, so it never appears.
-            window.set_visible(true);
-        }
-        window.request_redraw();
+        // Both origins were hidden throughout preparation. The destination is
+        // now registered and sized, so its first visible frame is complete.
+        destination.window.set_visible(true);
+        destination.window.request_redraw();
         // A consumed pooled window is not replaced here; the pool refills on
         // the next idle tick rather than on this path.
         self.frontmost_window = Some(win_id);
-        Some(win_id)
+        win_id
     }
 
     /// source-side post-tear-out cleanup, factored
@@ -873,34 +1123,43 @@ impl App {
         false
     }
 
-    /// tear a tab out of an existing child window
-    /// into a brand-new top-level window. Mirrors
-    /// [`Self::tear_out_tab`] (main → new) but with detach_from_child
-    /// as the source. The torn Tab + its PaneState (incl. PtyHandle)
-    /// MOVE — no clone, no respawn.
+    /// Tear a child-window tab into a new native window.
     pub(super) fn tear_out_from_child(
         &mut self,
         el: &ActiveEventLoop,
         src_id: WindowId,
         index: usize,
     ) -> bool {
-        let Some((tab, state, panes)) = self.detach_from_child(src_id, index) else {
-            // When: `index` names no tab in the child at `src_id`, so nothing moved;
-            // return false so the caller knows no window was torn out.
+        self.tear_out_from_child_with_installer(
+            src_id,
+            index,
+            |app, transaction, screen_pos, source| {
+                app.install_torn_out_window(el, transaction, screen_pos, source)
+            },
+        )
+    }
+
+    /// Run the child tear-out route with only destination installation injected.
+    pub(super) fn tear_out_from_child_with_installer<I>(
+        &mut self,
+        src_id: WindowId,
+        index: usize,
+        install: I,
+    ) -> bool
+    where
+        I: FnOnce(&mut App, DetachedTab, Option<(i32, i32)>, &'static str) -> Option<WindowId>,
+    {
+        let Some(transaction) = self.detach_for_tear_out(TearOutSource::Child(src_id), index)
+        else {
+            // When: `detach_for_tear_out` returns `None`, no child gesture state was consumed.
             return false;
         };
-        let Some(win_id) = self.install_torn_out_window(el, tab, state, panes, None, "child")
-        else {
-            // When: `install_torn_out_window` failed and dropped the moved panes, killing
-            // their shells; the tab is already detached, so only source cleanup remains.
-            tracing::warn!("tear-out (child→new): install_torn_out_window failed");
-            self.tear_out_apply_child_source_side(src_id, index);
+        let Some(win_id) = install(self, transaction, None, "child") else {
+            // When: `install` returns `None`, rollback already restored the source;
+            // reaping or neighbour activation would mutate that restored window.
             return true;
         };
         self.frontmost_window = Some(win_id);
-        // Source child: if drained, drop it (PtyHandle::Drop on any
-        // remaining panes — there shouldn't be any since we moved the
-        // only tab's panes). Else activate left neighbor.
         self.tear_out_apply_child_source_side(src_id, index);
         tracing::info!(
             "tab torn out of child {:?} as new window; windows={}",
