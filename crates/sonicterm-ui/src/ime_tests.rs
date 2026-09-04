@@ -6,6 +6,17 @@
 
 use super::*;
 
+/// Enabling an IME does not begin composition until non-empty preedit arrives.
+#[test]
+fn enabled_alone_is_not_composing() {
+    let mut ime = ImeState::new();
+    ime.handle_enabled();
+
+    assert!(!ime.is_composing());
+    assert_eq!(ime.preedit(), "");
+    assert_eq!(ime.cursor(), None);
+}
+
 #[test]
 fn preedit_tracks_text_and_caret_offset() {
     let mut ime = ImeState::new();
