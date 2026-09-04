@@ -8,10 +8,10 @@
 //!   distinguishes sessions from panes, so a client may address them
 //!   separately even though the server never puts two panes in one session.
 //! - Per-pane replay buffer: a ring of the last `REPLAY_CAP` bytes (256 KiB).
-//!   On Attach the server flushes the whole ring before resuming live
-//!   forwarding, which restores the visible screen of a shell prompt. The
-//!   ring stores raw bytes with no VT parsing, so it replays what was
-//!   written rather than a reconstructed scrollback.
+//!   Attach and the first live-stream gap pause output until the client resets
+//!   parser state and requests one `ReplaySnapshot`. Snapshot capture and live
+//!   resume share a lock boundary, so no later bytes cross the gap silently.
+//!   The ring stores raw bytes, not reconstructed scrollback.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -36,87 +36,203 @@ pub const REPLAY_CAP: usize = 256 * 1024;
 
 /// Per-client subscriber channel capacity. Bounded so a runaway or
 /// malicious PTY cannot OOM the server by outpacing a slow / wedged
-/// consumer. Output stops one slot short of capacity so control messages can
-/// still arrive; once saturated, newer output is dropped while the queued
-/// prefix remains. 4096 frames @ ~8 KiB is a soft ceiling of ~32 MiB per
-/// attached pane.
+/// consumer. Output stops two slots short of capacity so one recovery marker
+/// and one terminal control message can still arrive. Once saturated, later
+/// output is suppressed until a replay snapshot restores continuity. Every
+/// byte-bearing output or replay fragment is at most 8 KiB, so all 4096 slots
+/// hold at most 32 MiB of payload per attached client.
 pub const CHANNEL_CAP: usize = 4096;
 
-/// Maximum bytes stored in one queued subscriber output message.
+/// Maximum bytes stored in one queued live-output or replay-fragment payload.
 pub const SUBSCRIBER_OUTPUT_FRAME_BYTES: usize = 8 * 1024;
-const _: () = assert!((CHANNEL_CAP - 1) * SUBSCRIBER_OUTPUT_FRAME_BYTES <= 32 * 1024 * 1024);
+const _: () = assert!(CHANNEL_CAP * SUBSCRIBER_OUTPUT_FRAME_BYTES <= 32 * 1024 * 1024);
 
 const SUBSCRIBER_CONTROL_SEND_TIMEOUT: Duration = Duration::from_millis(100);
 const WRITER_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(100);
 const PANE_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const PANE_EXIT_DRAIN_GRACE: Duration = Duration::from_millis(100);
 
-/// One subscriber's bounded mailbox sender.
+/// Result of attempting to queue one contiguous output payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputSendResult {
+    /// Every output chunk was queued without a gap.
+    Queued,
+    /// Delivery is paused for replay; `ResyncRequired` is queued or pending delivery.
+    Lagged,
+    /// The subscriber channel is disconnected.
+    Disconnected,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReplayPause {
+    Initial,
+    MarkerPending,
+    MarkerQueued,
+}
+
+struct SubscriberShared {
+    tx: Sender<ServerMsg>,
+    replay_pauses: Mutex<HashMap<PaneId, ReplayPause>>,
+}
+
+impl SubscriberShared {
+    fn retry_pending_recovery(&self) -> OutputSendResult {
+        let mut pauses = self.replay_pauses.lock();
+        let Some(pane_id) = pauses.iter().find_map(|(pane_id, pause)| {
+            (*pause == ReplayPause::MarkerPending).then_some(*pane_id)
+        }) else {
+            return OutputSendResult::Queued;
+        };
+        match self.tx.try_send(ServerMsg::ResyncRequired { pane_id }) {
+            Ok(()) => {
+                pauses.insert(pane_id, ReplayPause::MarkerQueued);
+                OutputSendResult::Lagged
+            }
+            Err(TrySendError::Full(_)) => OutputSendResult::Lagged,
+            Err(TrySendError::Disconnected(_)) => {
+                pauses.remove(&pane_id);
+                OutputSendResult::Disconnected
+            }
+        }
+    }
+}
+
+/// One subscriber's bounded mailbox sender and per-pane continuity state.
 #[derive(Clone)]
 pub struct SubscriberSink {
-    tx: Sender<ServerMsg>,
+    shared: Arc<SubscriberShared>,
 }
 
 impl SubscriberSink {
     /// Wrap a paired `tx`/`rx` into a subscriber sink. The receiver argument
     /// is retained for source compatibility; ownership remains with the client.
     pub fn new(tx: Sender<ServerMsg>, _rx: Receiver<ServerMsg>) -> Self {
-        Self { tx }
+        Self {
+            shared: Arc::new(SubscriberShared { tx, replay_pauses: Mutex::new(HashMap::new()) }),
+        }
     }
 
-    /// Try to enqueue `msg`. If the mailbox is full, new PTY output is
-    /// dropped while control responses return an error. Existing queued
-    /// control messages are never evicted.
+    fn same_subscriber(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
+    }
+
+    fn pause_for_replay(&self, pane_id: PaneId) {
+        self.shared.replay_pauses.lock().insert(pane_id, ReplayPause::Initial);
+    }
+
+    fn send_snapshot(&self, pane_id: PaneId, bytes: Vec<u8>) -> Result<()> {
+        match self.shared.replay_pauses.lock().get(&pane_id) {
+            None => return Err(anyhow!("pane {pane_id} is not waiting for replay")),
+            Some(ReplayPause::MarkerPending) => {
+                return Err(anyhow!("pane {pane_id} recovery marker is not queued"));
+            }
+            Some(ReplayPause::Initial | ReplayPause::MarkerQueued) => {}
+        }
+        let deadline = Instant::now() + SUBSCRIBER_CONTROL_SEND_TIMEOUT;
+        let fragments = bytes.len().div_ceil(SUBSCRIBER_OUTPUT_FRAME_BYTES).max(1);
+        for index in 0..fragments {
+            let start = index * SUBSCRIBER_OUTPUT_FRAME_BYTES;
+            let end = bytes.len().min(start + SUBSCRIBER_OUTPUT_FRAME_BYTES);
+            let message = ServerMsg::ReplaySnapshot {
+                pane_id,
+                start: index == 0,
+                complete: index + 1 == fragments,
+                bytes: bytes[start..end].to_vec(),
+            };
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            self.shared.tx.send_timeout(message, remaining).map_err(|error| match error {
+                SendTimeoutError::Timeout(_) => anyhow!(
+                    "subscriber mailbox remained full for {} ms; replay snapshot not queued",
+                    SUBSCRIBER_CONTROL_SEND_TIMEOUT.as_millis()
+                ),
+                SendTimeoutError::Disconnected(_) => anyhow!("subscriber disconnected"),
+            })?;
+        }
+        self.shared.replay_pauses.lock().remove(&pane_id);
+        Ok(())
+    }
+
+    fn mark_lagged(&self, pane_id: PaneId) -> OutputSendResult {
+        let mut pauses = self.shared.replay_pauses.lock();
+        match pauses.get(&pane_id) {
+            Some(ReplayPause::Initial | ReplayPause::MarkerQueued) => {
+                return OutputSendResult::Lagged;
+            }
+            Some(ReplayPause::MarkerPending) => {}
+            None => {
+                pauses.insert(pane_id, ReplayPause::MarkerPending);
+            }
+        }
+        match self.shared.tx.try_send(ServerMsg::ResyncRequired { pane_id }) {
+            Ok(()) => {
+                pauses.insert(pane_id, ReplayPause::MarkerQueued);
+                OutputSendResult::Lagged
+            }
+            Err(TrySendError::Full(_)) => OutputSendResult::Lagged,
+            Err(TrySendError::Disconnected(_)) => {
+                pauses.remove(&pane_id);
+                OutputSendResult::Disconnected
+            }
+        }
+    }
+
+    /// Queue contiguous output or mark the pane lagged on the first dropped chunk.
+    pub fn send_output(&self, pane_id: PaneId, bytes: &[u8]) -> OutputSendResult {
+        let pause = self.shared.replay_pauses.lock().get(&pane_id).copied();
+        if let Some(pause) = pause {
+            return if pause == ReplayPause::MarkerPending {
+                self.mark_lagged(pane_id)
+            } else {
+                OutputSendResult::Lagged
+            };
+        }
+        for chunk in bytes.chunks(SUBSCRIBER_OUTPUT_FRAME_BYTES) {
+            if self
+                .shared
+                .tx
+                .capacity()
+                .is_some_and(|capacity| self.shared.tx.len() >= capacity.saturating_sub(2))
+            {
+                return self.mark_lagged(pane_id);
+            }
+            match self.shared.tx.try_send(ServerMsg::Output { pane_id, bytes: chunk.to_vec() }) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => return self.mark_lagged(pane_id),
+                Err(TrySendError::Disconnected(_)) => return OutputSendResult::Disconnected,
+            }
+        }
+        OutputSendResult::Queued
+    }
+
+    /// Compatibility wrapper for bounded output and non-blocking control messages.
+    #[deprecated(since = "1.2.9", note = "use send_output or send_control")]
     pub fn send_drop_oldest(&self, msg: ServerMsg) -> Result<()> {
-        let ServerMsg::Output { pane_id, bytes } = msg else {
-            // When: msg is a control reply rather than Output, so it is never evicted — it is
-            // either queued or reported to the caller as an error.
-            return match self.tx.try_send(msg) {
+        match msg {
+            ServerMsg::Output { pane_id, bytes } => match self.send_output(pane_id, &bytes) {
+                OutputSendResult::Queued | OutputSendResult::Lagged => Ok(()),
+                OutputSendResult::Disconnected => Err(anyhow!("subscriber disconnected")),
+            },
+            control => match self.shared.tx.try_send(control) {
                 Ok(()) => Ok(()),
                 Err(TrySendError::Full(_)) => {
                     Err(anyhow!("subscriber mailbox full; control message not queued"))
                 }
                 Err(TrySendError::Disconnected(_)) => Err(anyhow!("subscriber disconnected")),
-            };
-        };
-        for chunk in bytes.chunks(SUBSCRIBER_OUTPUT_FRAME_BYTES) {
-            if self
-                .tx
-                .capacity()
-                .is_some_and(|capacity| self.tx.len() >= capacity.saturating_sub(1))
-            {
-                // When: tx has one slot left, so reserve it for a control message and drop this
-                // output chunk instead of filling the mailbox.
-                return Ok(());
-            }
-            match self.tx.try_send(ServerMsg::Output { pane_id, bytes: chunk.to_vec() }) {
-                Ok(()) => {
-                    // When: try_send queued this chunk, so continue with the next one.
-                }
-                Err(TrySendError::Full(_)) => {
-                    // When: TrySendError::Full means the mailbox filled mid-chunk, so keep the
-                    // already-queued prefix and stop rather than reporting an error.
-                    return Ok(());
-                }
-                Err(TrySendError::Disconnected(_)) => {
-                    // When: Disconnected means the client is gone, so surface an error and let
-                    // the caller drop this subscriber.
-                    return Err(anyhow!("subscriber disconnected"));
-                }
-            }
+            },
         }
-        Ok(())
     }
 
     /// Deliver a control message without eviction, waiting only for the
     /// bounded control-delivery deadline.
     pub fn send_control(&self, msg: ServerMsg) -> Result<()> {
-        self.tx.send_timeout(msg, SUBSCRIBER_CONTROL_SEND_TIMEOUT).map_err(|error| match error {
-            SendTimeoutError::Timeout(_) => anyhow!(
-                "subscriber mailbox remained full for {} ms; control message not queued",
-                SUBSCRIBER_CONTROL_SEND_TIMEOUT.as_millis()
-            ),
-            SendTimeoutError::Disconnected(_) => anyhow!("subscriber disconnected"),
+        self.shared.tx.send_timeout(msg, SUBSCRIBER_CONTROL_SEND_TIMEOUT).map_err(|error| {
+            match error {
+                SendTimeoutError::Timeout(_) => anyhow!(
+                    "subscriber mailbox remained full for {} ms; control message not queued",
+                    SUBSCRIBER_CONTROL_SEND_TIMEOUT.as_millis()
+                ),
+                SendTimeoutError::Disconnected(_) => anyhow!("subscriber disconnected"),
+            }
         })
     }
 }
@@ -167,6 +283,11 @@ struct PendingPaneStart {
     start_tx: Sender<()>,
 }
 
+struct Attachment {
+    session_id: SessionId,
+    sink: SubscriberSink,
+}
+
 impl PendingPaneStart {
     fn start(self) -> Result<()> {
         self.start_tx.send(()).map_err(|_| anyhow!("pane reader stopped before startup"))
@@ -179,8 +300,8 @@ pub struct ServerState {
     next_session: AtomicU64,
     next_pane: AtomicU64,
     sessions: Mutex<HashMap<SessionId, Session>>,
-    /// Currently attached session, if any.
-    attached: Mutex<Option<SessionId>>,
+    /// Currently attached session and the subscriber that owns it, if any.
+    attached: Mutex<Option<Attachment>>,
 }
 
 impl ServerState {
@@ -228,51 +349,91 @@ impl ServerState {
         Ok(PendingPaneStart { session_id, pane_id, start_tx })
     }
 
-    /// Subscribe `tx` as the new live consumer for every pane in
-    /// `session_id`. Returns the pane info list to send in AttachOk.
-    /// Also drains each pane's replay buffer to the new subscriber.
-    // Lock order: sessions -> replay -> subscriber -> attached. sessions is held across the whole
-    // walk; replay and subscriber are per-pane and released before attached is taken.
+    /// Subscribe `sink` to `session_id` and pause each pane until replay.
+    ///
+    /// The caller sends `AttachOk`, resets its parser per pane, then requests a
+    /// `ReplaySnapshot`. No live bytes are presented before that handshake.
+    // Lock order: sessions -> attached -> subscriber. Replacing an attachment clears only
+    // subscriber slots still owned by the previous connection before installing the new sink.
     pub fn attach(&self, session_id: SessionId, sink: SubscriberSink) -> Result<Vec<PaneInfo>> {
         let sessions = self.sessions.lock();
-        let session =
-            sessions.get(&session_id).ok_or_else(|| anyhow!("unknown session {session_id}"))?;
-        let mut infos = Vec::new();
-        for pane in session.panes.values() {
-            infos.push(pane.info());
-            // Replay first, then install subscriber, so the live consumer
-            // sees replay-then-live in order.
-            let replay_bytes: Vec<u8> = pane.replay.lock().iter().copied().collect();
-            if !replay_bytes.is_empty() {
-                // When: replay_bytes holds buffered output, so flush it before the sink goes
-                // live; a full mailbox drops replay rather than failing the attach.
-                let _ = sink
-                    .send_drop_oldest(ServerMsg::Output { pane_id: pane.id, bytes: replay_bytes });
+        let infos = sessions
+            .get(&session_id)
+            .ok_or_else(|| anyhow!("unknown session {session_id}"))?
+            .panes
+            .values()
+            .map(Pane::info)
+            .collect::<Vec<_>>();
+        let mut attached = self.attached.lock();
+        if let Some(previous) = attached.take() {
+            if let Some(session) = sessions.get(&previous.session_id) {
+                for pane in session.panes.values() {
+                    let mut subscriber = pane.subscriber.lock();
+                    if subscriber
+                        .as_ref()
+                        .is_some_and(|active| active.same_subscriber(&previous.sink))
+                    {
+                        *subscriber = None;
+                    }
+                }
             }
+        }
+        let session = sessions.get(&session_id).expect("session validated above");
+        for pane in session.panes.values() {
+            sink.pause_for_replay(pane.id);
             *pane.subscriber.lock() = Some(sink.clone());
         }
-        *self.attached.lock() = Some(session_id);
+        *attached = Some(Attachment { session_id, sink });
         Ok(infos)
     }
 
-    /// Drop the current attachment: clear each pane's subscriber slot so live
-    /// output again only accumulates into the replay ring.
-    // Lock order: attached -> sessions -> subscriber. attached is released by take() before
-    // sessions is acquired, so the pair is never held together.
+    /// Queue one bounded replay snapshot and resume contiguous live output.
+    pub fn replay(&self, pane_id: PaneId, requester: &SubscriberSink) -> Result<()> {
+        let sessions = self.sessions.lock();
+        let pane = find_pane(&sessions, pane_id)?;
+        send_replay_snapshot(&pane.replay, &pane.subscriber, pane_id, requester)
+    }
+
+    /// Drop the current attachment regardless of subscriber identity.
     pub fn detach(&self) {
-        let attached = self.attached.lock().take();
-        if let Some(sid) = attached {
-            if let Some(session) = self.sessions.lock().get(&sid) {
-                // A pane reaper can remove the session between the attached and sessions locks,
-                // leaving nothing to clear.
-                for pane in session.panes.values() {
-                    *pane.subscriber.lock() = None;
+        let attachment = self.attached.lock().take();
+        if let Some(attachment) = attachment {
+            self.clear_attachment(&attachment);
+        }
+    }
+
+    fn detach_subscriber(&self, requester: &SubscriberSink) {
+        let attachment = {
+            let mut attached = self.attached.lock();
+            if attached
+                .as_ref()
+                .is_some_and(|attachment| attachment.sink.same_subscriber(requester))
+            {
+                attached.take()
+            } else {
+                None
+            }
+        };
+        if let Some(attachment) = attachment {
+            self.clear_attachment(&attachment);
+        }
+    }
+
+    fn clear_attachment(&self, attachment: &Attachment) {
+        if let Some(session) = self.sessions.lock().get(&attachment.session_id) {
+            for pane in session.panes.values() {
+                let mut subscriber = pane.subscriber.lock();
+                if subscriber
+                    .as_ref()
+                    .is_some_and(|active| active.same_subscriber(&attachment.sink))
+                {
+                    *subscriber = None;
                 }
             }
         }
     }
 
-    /// Wire `tx` as the subscriber for every pane in `session_id` ONLY if
+    /// Wire `sink` as the subscriber for every pane in `session_id` ONLY if
     /// no client is currently attached. Used by the auto-subscribe-on-Spawn
     /// convenience path so a freshly-spawned pane streams its output back
     /// to the spawner without requiring an explicit Attach.
@@ -292,7 +453,7 @@ impl ServerState {
             for pane in session.panes.values() {
                 *pane.subscriber.lock() = Some(sink.clone());
             }
-            *attached = Some(session_id);
+            *attached = Some(Attachment { session_id, sink });
         }
     }
 
@@ -362,7 +523,7 @@ impl ServerState {
         };
         if let Some(session_id) = empty_session {
             let mut attached = self.attached.lock();
-            if *attached == Some(session_id) {
+            if attached.as_ref().is_some_and(|attachment| attachment.session_id == session_id) {
                 // Only clear the attachment that named this session; a client that attached
                 // elsewhere in the meantime keeps its own.
                 *attached = None;
@@ -402,8 +563,25 @@ fn send_reply(sink: &SubscriberSink, message: ServerMsg) -> Result<()> {
     sink.send_control(message)
 }
 
-// Lock order: replay -> subscriber. The replay guard is scoped to the trim block and released
-// before subscriber is cloned, so a slow send never blocks PTY buffering.
+// Lock order: replay -> subscriber. Holding both makes the snapshot boundary atomic with respect
+// to forward_pane_output, so the first resumed live chunk follows every byte in the snapshot.
+fn send_replay_snapshot(
+    replay: &Mutex<VecDeque<u8>>,
+    subscriber: &Mutex<Option<SubscriberSink>>,
+    pane_id: PaneId,
+    requester: &SubscriberSink,
+) -> Result<()> {
+    let replay = replay.lock();
+    let subscriber = subscriber.lock();
+    let active = subscriber
+        .as_ref()
+        .filter(|active| active.same_subscriber(requester))
+        .ok_or_else(|| anyhow!("pane {pane_id} is not attached to this client"))?;
+    active.send_snapshot(pane_id, replay.iter().copied().collect())
+}
+
+// Lock order: replay -> subscriber. The pair is shared with send_replay_snapshot so no output can
+// race between snapshot capture and the transition back to contiguous live delivery.
 fn forward_pane_output<T: AsRef<[u8]>>(
     chunk: T,
     replay: &Mutex<VecDeque<u8>>,
@@ -411,18 +589,16 @@ fn forward_pane_output<T: AsRef<[u8]>>(
     pane_id: PaneId,
 ) {
     let bytes = chunk.as_ref();
-    {
-        let mut replay = replay.lock();
-        replay.extend(bytes.iter().copied());
-        while replay.len() > REPLAY_CAP {
-            replay.pop_front();
-        }
+    let mut replay = replay.lock();
+    replay.extend(bytes.iter().copied());
+    while replay.len() > REPLAY_CAP {
+        replay.pop_front();
     }
-    let subscriber = subscriber.lock().clone();
-    if let Some(sink) = subscriber {
-        // When: a subscriber is installed, so fan this chunk out live; with none attached the
-        // bytes stay in the replay ring until a client attaches.
-        let _ = sink.send_drop_oldest(ServerMsg::Output { pane_id, bytes: bytes.to_vec() });
+    let mut subscriber = subscriber.lock();
+    if let Some(sink) = subscriber.as_ref() {
+        if sink.send_output(pane_id, bytes) == OutputSendResult::Disconnected {
+            *subscriber = None;
+        }
     }
 }
 
@@ -607,6 +783,7 @@ where
     // Writer thread: drains rx -> stream.
     let mut write_half = write_half;
     let rx_writer = rx.clone();
+    let subscriber_shared = Arc::downgrade(&sink.shared);
     let (writer_done_tx, writer_done_rx) = crossbeam_channel::bounded(1);
     let writer_thread = thread::spawn(move || {
         while let Ok(msg) = rx_writer.recv() {
@@ -614,6 +791,9 @@ where
                 // When: write_frame failed, so the transport is broken; stop draining rather
                 // than spin on a socket that will never accept bytes again.
                 break;
+            }
+            if let Some(shared) = subscriber_shared.upgrade() {
+                shared.retry_pending_recovery();
             }
         }
         let _ = writer_done_tx.send(());
@@ -633,7 +813,7 @@ where
                 Err(e) => send_reply(&sink, ServerMsg::Error(e.to_string())),
             },
             ClientMsg::Detach => {
-                state.detach();
+                state.detach_subscriber(&sink);
                 Ok(())
             }
             ClientMsg::Spawn { cmd, cols, rows } => match state.spawn_paused(&cmd, cols, rows) {
@@ -685,6 +865,13 @@ where
                     Ok(())
                 }
             }
+            ClientMsg::Replay { pane_id } => {
+                if let Err(e) = state.replay(pane_id, &sink) {
+                    send_reply(&sink, ServerMsg::Error(e.to_string()))
+                } else {
+                    Ok(())
+                }
+            }
         };
         if let Err(error) = result {
             // When: a reply could not be delivered, so the transport is unusable; record the
@@ -707,9 +894,9 @@ where
     //   3. zero or more `Option<SubscriberSink>` slots inside each
     //      attached pane (installed by `attach` / `subscribe_if_unattached`).
     //
-    // `state.detach()` clears (3). We then explicitly drop (1) and (2)
-    // before the `join` so the channel actually closes.
-    state.detach();
+    // `detach_subscriber` clears only (3) owned by this connection. We then
+    // explicitly drop (1) and (2) before the `join` so the channel closes.
+    state.detach_subscriber(&sink);
     drop(read_half);
     drop(tx);
     drop(sink);

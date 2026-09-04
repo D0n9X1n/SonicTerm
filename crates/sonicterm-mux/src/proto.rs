@@ -15,9 +15,9 @@ pub type PaneId = u64;
 pub enum ClientMsg {
     /// Ask the server to enumerate all live sessions; replied with `Sessions`.
     ListSessions,
-    /// Attach to an existing session by id. The server will reply with
-    /// `AttachOk` and then begin streaming buffered + live output for every
-    /// pane in that session.
+    /// Attach to an existing session by id. After `AttachOk`, reset parser
+    /// state and request `Replay` for every listed pane before expecting live
+    /// output.
     Attach(SessionId),
     /// Detach the current connection from its session — sessions outlive
     /// disconnects so the client can reattach later.
@@ -53,6 +53,14 @@ pub enum ClientMsg {
         /// Target pane.
         pane_id: PaneId,
     },
+    /// Request a bounded replay snapshot after attach or `ResyncRequired`.
+    ///
+    /// The client must reset its parser before applying the snapshot fragments.
+    /// Live output for this pane resumes only after the complete fragment queues.
+    Replay {
+        /// Pane whose raw stream needs resynchronization.
+        pane_id: PaneId,
+    },
 }
 
 /// Messages the server pushes to a client.
@@ -75,8 +83,7 @@ pub enum ServerMsg {
         /// Newly allocated pane id.
         pane_id: PaneId,
     },
-    /// PTY output for a pane — either replay-buffer bytes flushed on attach or
-    /// fresh live bytes from the child process.
+    /// Contiguous live PTY output for a pane.
     Output {
         /// Originating pane.
         pane_id: PaneId,
@@ -90,6 +97,22 @@ pub enum ServerMsg {
     },
     /// Out-of-band protocol error (bad request, internal failure). Free-form text.
     Error(String),
+    /// The live raw stream lost bytes; reset parser state and request replay.
+    ResyncRequired {
+        /// Pane whose stream is paused until replay completes.
+        pane_id: PaneId,
+    },
+    /// One ordered fragment of a bounded raw replay snapshot.
+    ReplaySnapshot {
+        /// Pane whose parser state this snapshot reconstructs.
+        pane_id: PaneId,
+        /// Starts a new logical snapshot and discards any incomplete prior fragments.
+        start: bool,
+        /// Ends the logical snapshot; live output follows only after this fragment.
+        complete: bool,
+        /// At most `SUBSCRIBER_OUTPUT_FRAME_BYTES` snapshot bytes.
+        bytes: Vec<u8>,
+    },
 }
 
 /// Summary returned for each live session in `ServerMsg::Sessions`.
