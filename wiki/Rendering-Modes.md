@@ -168,11 +168,15 @@ valid allocation. A frame-key hit can re-present the existing CPU frame without
 recomposing it.
 
 The CPU glyph and image atlases remain the source sampled by software drawing.
-Inline-image CPU pixels stay premultiplied sRGB-encoded BGRA8 and are not changed
-by GPU synchronization, so the Windows software output remains byte-compatible.
-Their GPU mirrors are 1×1 placeholders while the GDI presenter is active.
-Returning to GPU presentation rebuilds full-size GPU atlas textures, resets
-atlas metadata and UV-bearing caches, and forces a full redraw.
+Self-colored glyph and inline-image pixels stay premultiplied sRGB-encoded BGRA8
+and are not changed by either presenter. Before sampling, the Windows software
+path converts each selected color texel to premultiplied linear RGBA, matching
+the values produced by GPU upload and sRGB-view decode. Zero-alpha texels become
+transparent black; every other texel is unpremultiplied and clamped in encoded
+space, decoded, then premultiplied again. GPU mirrors remain 1×1 placeholders
+while the GDI presenter is active. Returning to GPU presentation rebuilds
+full-size GPU atlas textures, resets atlas metadata and UV-bearing caches, and
+forces a full redraw.
 
 Every sharp, rounded, and line `QuadInstance` carries finite premultiplied
 linear RGBA: alpha stays in `[0,1]`, each RGB channel stays between zero and
@@ -180,8 +184,8 @@ alpha, and changing opacity or antialias/mask coverage scales RGB and alpha
 together. Hex-authored colors decode sRGB before premultiplication. The sRGB
 target performs the final encoding. The CPU compositor decodes retained sRGB
 destination channels, applies the same source-over in linear light, encodes RGB
-once, and source-overs alpha as linear UNORM. Color-glyph and inline-image
-samples retain their separate encoded-atlas path.
+once, and source-overs alpha as linear UNORM. Decoded color-glyph and
+inline-image samples enter this same compositor without foreground tinting.
 
 Text glyphs use one stabilized destination-pixel origin regardless of whether
 an atlas tile is sampled one-to-one or resampled on either axis. Source sampling
@@ -190,11 +194,12 @@ advances past the hidden source rows or columns. Dirty metadata keeps monochrome
 and subpixel coverage as unchanged linear masks while converting only color-glyph
 rectangles. One glyph bind group exposes the texture's unorm coverage view and
 sRGB color view with nearest samplers; ordinary and subpixel-tagged instances use
-coverage, while `flags.x` selects color. Scaled inline images retain fractional
-positioning and bilinear sampling over unchanged encoded CPU pixels. Their
-separate group uses an sRGB view and linear sampler; upload conversion produces
-premultiplied linear samples after decode, and bilinear taps clamp to the current
-packed image tile rather than the whole atlas.
+coverage, while `flags.x` selects color. Both presenters sample color glyphs at
+the nearest texel after decoding. Scaled inline images retain fractional
+positioning and the GPU texel-center convention. The software path decodes every
+tile-clamped tap before bilinear interpolation; the GPU path pairs its sRGB view
+with a linear sampler so hardware performs the same decode-before-filter order.
+Both restrict taps to the current packed image tile rather than the whole atlas.
 
 ### Retained pixels and damage
 
@@ -405,26 +410,29 @@ Windows 上启用降级时，`WindowsSoftwareFrame` 把同一套上游生成的�
 软件帧任一轴最多 16,384 像素，总量最多 160 MiB。创建或调整尺寸超过任一限制时会失败，
 并保留原有有效分配。帧键命中时可直接再次呈现已有 CPU 帧，无需重新合成。
 
-软件绘制仍从 CPU 字形图集和图像图集取样。内联图像 CPU 像素保持为预乘、sRGB 编码的
-BGRA8，GPU 同步不会修改它们，因此 Windows 软件输出保持字节兼容。GDI 呈现启用时，
-它们的 GPU 镜像是 1×1 占位符。回到 GPU 呈现时会重建全尺寸 GPU 图集纹理、重置图集
-元数据与携带 UV 的缓存，并强制完整重绘。
+软件绘制仍从 CPU 字形图集和图像图集取样。自带颜色的字形与内联图像像素保持为预乘、
+sRGB 编码的 BGRA8，两种 presenter 都不会改写这些 CPU 字节。Windows 软件路径会在取样前
+把每个选中的彩色纹素转换为预乘线性 RGBA，与 GPU 上传及 sRGB view 解码得到的值一致。
+零 alpha 纹素会规范化为透明黑色；其余纹素先在编码空间反预乘并限制范围，再解码并重新预乘。
+GDI 呈现启用时，GPU 镜像是 1×1 占位符。回到 GPU 呈现时会重建全尺寸 GPU 图集纹理、重置
+图集元数据与携带 UV 的缓存，并强制完整重绘。
 
 每个锐角、圆角和线段 `QuadInstance` 都携带有限值的预乘线性 RGBA：alpha 位于
 `[0,1]`，每个 RGB 通道都介于零和 alpha 之间；改变不透明度或抗锯齿/mask 覆盖率时，
 必须同时缩放 RGB 与 alpha。由十六进制生成的颜色先解码 sRGB，再做预乘；最终 sRGB 编码
 由目标纹理完成。CPU 合成器会解码保留帧中的 sRGB 目标通道，在相同的线性光空间执行
-source-over，只对 RGB 编码一次，并把 alpha 作为线性 UNORM 做 source-over。彩色字形和
-内联图像取样仍走各自独立的编码图集路径。
+source-over，只对 RGB 编码一次，并把 alpha 作为线性 UNORM 做 source-over。完成解码的
+彩色字形与内联图像样本不受前景色调制，并进入同一套合成器。
 
 文字字形无论图集图块是按一比一取样，还是任一轴需要重采样，都使用同一套稳定后的目标
 像素原点。源图块仍采用最近点取样并限制在字形自身矩形内；顶部或左侧被裁剪时，会跳过
 不可见的源行或源列。脏元数据让单色与次像素覆盖率保持不变，继续作为线性掩码，只转换
 彩色字形矩形。一个字形 bind group 通过最近点 sampler 同时提供纹理的 unorm 覆盖率 view
-和 sRGB 彩色 view；普通及带次像素标记的实例使用覆盖率，`flags.x` 选择彩色。缩放后的
-内联图像继续对未改变的编码 CPU 像素保留分数位置和双线性取样。其独立 group 使用 sRGB
-view 与线性 sampler；上传转换让样本解码后成为预乘线性颜色，双线性采样点限制在当前
-已打包图像的图块内，而不是整个图集。
+和 sRGB 彩色 view；普通及带次像素标记的实例使用覆盖率，`flags.x` 选择彩色。两种
+presenter 都会先解码彩色字形，再对最近纹素取样。缩放后的内联图像保留分数位置与 GPU
+纹素中心约定。软件路径先解码每个限制在图块内的采样点，再做双线性插值；GPU 路径把
+sRGB view 与线性 sampler 配对，由硬件执行相同的先解码后过滤顺序。两者都把采样点限制在
+当前已打包图像的图块内，而不是整个图集。
 
 ### 保留像素与损伤区域
 

@@ -13,7 +13,10 @@ use windows::Win32::{
 use winit::window::Window;
 
 use crate::{
-    color::{blend_premul_linear_over_srgb_bgra, grayscale_coverage, LinearOverSrgbBgraLut},
+    color::{
+        blend_premul_linear_over_srgb_bgra, grayscale_coverage, linear_channel_to_srgb_u8,
+        srgb_channel_to_linear, srgb_u8_to_linear_lut, LinearOverSrgbBgraLut,
+    },
     core::{validated_surface_size, MAX_SURFACE_DIMENSION},
     quad::QuadInstance,
     wezterm_pipeline::ndc_rect_to_pixels,
@@ -427,7 +430,7 @@ impl WindowsSoftwareFrame {
             return;
         }
         let atlas_pixels = atlas.pixels_bgra();
-        let color_glyph = glyph.flags[0] >= 0.5;
+        let self_colored = image || glyph.flags[0] >= 0.5;
         let subpixel_glyph = glyph.flags[1] >= 0.5;
         // Inline images set flags[2]; glyphs leave it clear. Only images want
         // bilinear scaling — a glyph sampled bilinearly reads its atlas
@@ -444,11 +447,22 @@ impl WindowsSoftwareFrame {
                 let sample = if one_to_one {
                     let sx = ax0 + (xx - unclipped_x0) as u32;
                     let sy = ay0 + (yy - unclipped_y0) as u32;
-                    bgra_pixel_at(atlas_pixels, atlas_w, sx.min(atlas_w - 1), sy.min(atlas_h - 1))
+                    let pixel = bgra_pixel_at(
+                        atlas_pixels,
+                        atlas_w,
+                        sx.min(atlas_w - 1),
+                        sy.min(atlas_h - 1),
+                    );
+                    if self_colored {
+                        premultiplied_srgb_bgra_to_linear_rgba(pixel)
+                    } else {
+                        // When: self_colored is false, preserve the coverage mask's linear channel values.
+                        bgra8_to_unorm(pixel)
+                    }
                 } else if image {
                     // When: image is set the source is inline media being scaled, where
                     // bilinear taps smooth the result instead of blocking it up.
-                    sample_atlas_bilinear_in_rect(
+                    sample_color_atlas_bilinear_in_rect(
                         atlas_pixels,
                         atlas_w,
                         atlas_h,
@@ -465,18 +479,27 @@ impl WindowsSoftwareFrame {
                     // merely unlikely.
                     let sx = sx.floor().clamp(ax0 as f32, (ax1 - 1) as f32) as u32;
                     let sy = sy.floor().clamp(ay0 as f32, (ay1 - 1) as f32) as u32;
-                    bgra_pixel_at(atlas_pixels, atlas_w, sx, sy)
+                    let pixel = bgra_pixel_at(atlas_pixels, atlas_w, sx, sy);
+                    if self_colored {
+                        premultiplied_srgb_bgra_to_linear_rgba(pixel)
+                    } else {
+                        // When: self_colored is false, preserve the coverage mask's linear channel values.
+                        bgra8_to_unorm(pixel)
+                    }
                 };
                 let dst_off = row + xx as usize * 4;
-                if color_glyph {
-                    // When: color_glyph is set the atlas already holds premultiplied
-                    // colour, so the sample is blended as-is and glyph.color cannot tint.
+                if self_colored {
+                    // When: self_colored is set, sample is the atlas color decoded to
+                    // premultiplied linear RGBA and glyph.color cannot tint it.
                     if sample[3] <= 0.0 {
                         // When: sample alpha is zero the texel is fully transparent, so
                         // blending would cost work and leave the destination unchanged.
                         continue;
                     }
-                    blend_premul_bgra(&mut self.pixels[dst_off..dst_off + 4], sample);
+                    blend_premul_linear_over_srgb_bgra(
+                        &mut self.pixels[dst_off..dst_off + 4],
+                        sample,
+                    );
                 } else if subpixel_glyph && subpixel_aa != SubpixelAaMode::Off {
                     // When: `subpixel_glyph` is set and `subpixel_aa` is not `Off`, sample RGB is per-channel coverage.
                     if sample[3] <= 0.0 {
@@ -495,7 +518,7 @@ impl WindowsSoftwareFrame {
                         glyph.color,
                     );
                 } else {
-                    // When: `color_glyph` is false and LCD presentation is inactive, use one scalar coverage value.
+                    // When: `self_colored` is false and LCD presentation is inactive, use one scalar coverage value.
                     let cov = if subpixel_glyph {
                         sample[3]
                     } else {
@@ -604,8 +627,44 @@ fn linear_rgba_to_bgra(color: [f32; 4]) -> [u8; 4] {
     ]
 }
 
-fn bgra8_to_premul_f32(px: &[u8]) -> [f32; 4] {
+fn bgra8_to_unorm(px: [u8; 4]) -> [f32; 4] {
     [px[0] as f32 / 255.0, px[1] as f32 / 255.0, px[2] as f32 / 255.0, px[3] as f32 / 255.0]
+}
+
+fn premultiplied_srgb_bgra_to_linear_rgba(px: [u8; 4]) -> [f32; 4] {
+    let alpha = px[3];
+    if alpha == 0 {
+        // When: alpha is zero, match GPU upload by discarding invalid encoded RGB before filtering.
+        return [0.0; 4];
+    }
+
+    [
+        premultiplied_srgb_channel_to_linear(px[2], alpha),
+        premultiplied_srgb_channel_to_linear(px[1], alpha),
+        premultiplied_srgb_channel_to_linear(px[0], alpha),
+        alpha as f32 / 255.0,
+    ]
+}
+
+#[inline]
+fn premultiplied_srgb_channel_to_linear(encoded_premul: u8, alpha: u8) -> f32 {
+    // The fixed 64 KiB table avoids transfer-curve evaluation for every bilinear tap.
+    static STAGED_CHANNELS: std::sync::OnceLock<[u8; 256 * 256]> = std::sync::OnceLock::new();
+    let staged = STAGED_CHANNELS.get_or_init(|| {
+        std::array::from_fn(|index| {
+            let alpha = (index >> 8) as u8;
+            if alpha == 0 {
+                // When: alpha is zero, the staged channel must use canonical transparent black.
+                return 0;
+            }
+            let encoded_premul = index as u8;
+            let straight_srgb = (encoded_premul as f64 / alpha as f64).clamp(0.0, 1.0);
+            let alpha_linear = alpha as f64 / 255.0;
+            let premul_linear = srgb_channel_to_linear(straight_srgb) * alpha_linear;
+            linear_channel_to_srgb_u8(premul_linear as f32)
+        })
+    })[(usize::from(alpha) << 8) | usize::from(encoded_premul)];
+    srgb_u8_to_linear_lut()[staged as usize]
 }
 
 fn stabilize_half_pixel_origin(value: f32) -> f32 {
@@ -622,10 +681,10 @@ fn stabilize_half_pixel_origin(value: f32) -> f32 {
 
 #[cfg(test)]
 fn sample_atlas_bilinear(pixels: &[u8], width: u32, height: u32, x: f32, y: f32) -> [f32; 4] {
-    sample_atlas_bilinear_in_rect(pixels, width, height, x, y, (0, 0, width, height))
+    sample_color_atlas_bilinear_in_rect(pixels, width, height, x, y, (0, 0, width, height))
 }
 
-fn sample_atlas_bilinear_in_rect(
+fn sample_color_atlas_bilinear_in_rect(
     pixels: &[u8],
     width: u32,
     height: u32,
@@ -651,10 +710,10 @@ fn sample_atlas_bilinear_in_rect(
     let y1 = (y0 + 1).min(max_y - 1);
     let fx = x - x0 as f32;
     let fy = y - y0 as f32;
-    let c00 = bgra_pixel_at(pixels, width, x0, y0);
-    let c10 = bgra_pixel_at(pixels, width, x1, y0);
-    let c01 = bgra_pixel_at(pixels, width, x0, y1);
-    let c11 = bgra_pixel_at(pixels, width, x1, y1);
+    let c00 = premultiplied_srgb_bgra_to_linear_rgba(bgra_pixel_at(pixels, width, x0, y0));
+    let c10 = premultiplied_srgb_bgra_to_linear_rgba(bgra_pixel_at(pixels, width, x1, y0));
+    let c01 = premultiplied_srgb_bgra_to_linear_rgba(bgra_pixel_at(pixels, width, x0, y1));
+    let c11 = premultiplied_srgb_bgra_to_linear_rgba(bgra_pixel_at(pixels, width, x1, y1));
     let mut out = [0.0; 4];
     for i in 0..4 {
         let top = c00[i] * (1.0 - fx) + c10[i] * fx;
@@ -664,30 +723,14 @@ fn sample_atlas_bilinear_in_rect(
     out
 }
 
-fn bgra_pixel_at(pixels: &[u8], width: u32, x: u32, y: u32) -> [f32; 4] {
+fn bgra_pixel_at(pixels: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
     let off = ((y * width + x) * 4) as usize;
     if off + 4 > pixels.len() {
         // When: off runs past pixels the coordinate lies outside the atlas upload, so a
         // transparent texel is returned rather than panicking on the slice.
-        return [0.0; 4];
+        return [0; 4];
     }
-    bgra8_to_premul_f32(&pixels[off..off + 4])
-}
-
-fn blend_premul_bgra(dst: &mut [u8], src: [f32; 4]) {
-    let da = dst[3] as f32 / 255.0;
-    let db = dst[0] as f32 / 255.0;
-    let dg = dst[1] as f32 / 255.0;
-    let dr = dst[2] as f32 / 255.0;
-    let inv = 1.0 - src[3].clamp(0.0, 1.0);
-    let b = src[0] + db * inv;
-    let g = src[1] + dg * inv;
-    let r = src[2] + dr * inv;
-    let a = src[3] + da * inv;
-    dst[0] = to_u8(b);
-    dst[1] = to_u8(g);
-    dst[2] = to_u8(r);
-    dst[3] = to_u8(a);
+    [pixels[off], pixels[off + 1], pixels[off + 2], pixels[off + 3]]
 }
 
 fn blend_subpixel_bgra(dst: &mut [u8], coverage_rgba: [f32; 4], foreground: [f32; 4]) {

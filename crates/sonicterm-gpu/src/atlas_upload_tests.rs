@@ -48,6 +48,17 @@ fn render_image_readback_with_neighbor(
     target_width: u32,
     neighbor: Option<[u8; 4]>,
 ) -> Vec<u8> {
+    render_image_readback_on(source_width, pixels, target_width, neighbor, [0.0; 4])
+}
+
+/// Render an image strip over one linear clear color for cross-presenter tests.
+pub(crate) fn render_image_readback_on(
+    source_width: u32,
+    pixels: &[u8],
+    target_width: u32,
+    neighbor: Option<[u8; 4]>,
+    clear: [f32; 4],
+) -> Vec<u8> {
     const PADDED_BYTES_PER_ROW: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
     let (device, queue) = headless_device();
     let mut pipeline = crate::wezterm_pipeline::WeztermPipeline::new(
@@ -141,7 +152,12 @@ fn render_image_readback_with_neighbor(
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: clear[0] as f64,
+                        g: clear[1] as f64,
+                        b: clear[2] as f64,
+                        a: clear[3] as f64,
+                    }),
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -191,6 +207,14 @@ fn render_image_readback_with_neighbor(
 
 /// Render adjacent synthetic glyph tiles through the real unified pipeline and return BGRA pixels.
 fn render_glyph_readback(tiles: &[sonicterm_text::glyph_atlas::RasterTile]) -> Vec<u8> {
+    render_glyph_readback_on(tiles, [0.0; 4])
+}
+
+/// Render color or coverage glyph tiles over one linear clear color for cross-presenter tests.
+pub(crate) fn render_glyph_readback_on(
+    tiles: &[sonicterm_text::glyph_atlas::RasterTile],
+    clear: [f32; 4],
+) -> Vec<u8> {
     const PADDED_BYTES_PER_ROW: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
     let (device, queue) = headless_device();
     let mut pipeline = crate::wezterm_pipeline::WeztermPipeline::new(
@@ -261,7 +285,12 @@ fn render_glyph_readback(tiles: &[sonicterm_text::glyph_atlas::RasterTile]) -> V
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: clear[0] as f64,
+                        g: clear[1] as f64,
+                        b: clear[2] as f64,
+                        a: clear[3] as f64,
+                    }),
                     store: wgpu::StoreOp::Store,
                 },
             })],

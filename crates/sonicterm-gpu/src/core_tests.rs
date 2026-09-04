@@ -1017,14 +1017,14 @@ fn glyph_flags_keep_color_and_subpixel_axes_independent() {
     assert_eq!(glyph_flags(false, true), [0.0, 1.0, 0.0, 0.0]);
 }
 
-/// Windows software glyph drawing continues to consume the original CPU atlas bytes directly.
+/// Windows software color drawing decodes the original CPU atlas without rewriting it.
 #[test]
-fn windows_software_presenter_keeps_cpu_glyph_source_byte_compatible() {
+fn windows_software_presenter_keeps_cpu_color_atlas_storage_unchanged() {
     const SOURCE: &str = include_str!("software_windows.rs");
 
     assert!(SOURCE.contains("let atlas_pixels = atlas.pixels_bgra();"));
-    assert!(SOURCE.contains("if color_glyph"));
-    assert!(SOURCE.contains("blend_premul_bgra(&mut self.pixels[dst_off..dst_off + 4], sample);"));
+    assert!(SOURCE.contains("premultiplied_srgb_bgra_to_linear_rgba"));
+    assert!(SOURCE.contains("blend_premul_linear_over_srgb_bgra("));
     assert!(!SOURCE.contains("copy_rect_into_scratch"));
 }
 

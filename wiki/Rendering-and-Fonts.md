@@ -285,8 +285,11 @@ view and uses dual-source blending for independent destination-channel
 attenuation. The Windows software path reads the original BGRA bytes and applies
 the same operation in linear light. Color glyphs and inline images take
 precedence over the subpixel marker and never enter this branch or the coverage
-view. The mode is presentation state, so changing it invalidates the frame but
-keeps font stacks, raster tiles, and atlases intact.
+view. Both presenters instead convert their premultiplied encoded color texels
+to premultiplied linear RGBA before nearest or bilinear sampling, composite in
+linear light, and encode RGB once at output. The mode is presentation state, so
+changing it invalidates the frame but keeps font stacks, raster tiles, and
+atlases intact.
 
 ### Inline images
 
@@ -305,12 +308,15 @@ text UVs. During dirty-rectangle packing for GPU upload, each nontransparent
 pixel is unpremultiplied in encoded space, clamped, decoded through the sRGB
 transfer function, premultiplied by alpha in linear light, and re-encoded for
 storage; transparent pixels become `[0, 0, 0, 0]`, and alpha is unchanged. The
-CPU bytes are never rewritten, so Windows software presentation keeps consuming
-the original encoding. The one GPU `Bgra8Unorm` texture is sampled through its
-sRGB color view with linear filtering; hardware decoding occurs before bilinear
-filtering, so scaled images interpolate premultiplied linear colors. Sampling
-clamps to the current image tile's texel centers so adjacent packed tiles cannot
-bleed into its edges. It starts as
+CPU bytes are never rewritten. Windows software presentation converts each
+selected texel with the same zero-alpha canonicalization and
+unpremultiply/clamp/decode/repremultiply operation, then filters the resulting
+premultiplied linear taps. The one GPU `Bgra8Unorm` texture is sampled through
+its sRGB color view with linear filtering; hardware decoding likewise occurs
+before bilinear filtering. Both presenters use the same texel-center convention
+and clamp to the current image tile so adjacent packed tiles cannot bleed into
+its edges. They composite in linear light and encode RGB once at output. The
+atlas starts as
 a 1×1 CPU/GPU placeholder, promotes to a 2048×2048 atlas only when renderable
 media appears, and returns to the placeholder after 240 frames without renderable
 media. A full image atlas skips older images rather than evicting text.
@@ -568,7 +574,9 @@ DirectWrite 生成逻辑红、绿、蓝 ClearType 覆盖率，并把三个通道
 `rgb` 把逻辑通道映射到对应显示通道，`bgr` 则交换红、蓝。GPU 路径从 unorm 覆盖率 view
 取样，并用 dual-source blending 分别衰减目标通道。Windows 软件路径读取原始 BGRA 字节，
 在线性光空间执行同一操作。彩色字形与内联图像优先于次像素标记，永远不会进入该分支或覆盖率
-view。模式只属于呈现状态，因此修改模式会使帧失效，但保留字体栈、光栅图块与图集。
+view。两种 presenter 会先把预乘的编码彩色纹素转换为预乘线性 RGBA，再做最近点或双线性
+取样；随后在线性光空间合成，并只在输出时编码一次 RGB。模式只属于呈现状态，因此修改模式
+会使帧失效，但保留字体栈、光栅图块与图集。
 
 ### 内联图像
 
@@ -581,10 +589,12 @@ iTerm2 文件图像、kitty graphics 和 Sixel 事件由应用解码。声明宽
 **独立**图像图集，因此媒体压力不能淘汰文字字形，也不能复用文字 UV。GPU 脏矩形打包时，
 每个非透明像素先在编码空间反预乘并限制范围，再经 sRGB 传递函数解码、在线性光空间乘以
 alpha，最后重新编码后存储；透明像素规范化为 `[0, 0, 0, 0]`，alpha 保持不变。CPU 字节
-不会被重写，因此 Windows 软件呈现仍消费原始编码。GPU 只分配一个 `Bgra8Unorm` 纹理，
-通过其 sRGB 彩色 view 做线性过滤；硬件会先解码再双线性过滤，所以缩放图像在线性预乘颜色
-之间插值。采样点限制在当前图像图块的纹素中心范围内，避免相邻已打包图块渗入边缘。图像
-图集以 1×1 CPU/GPU 占位符启动，仅在出现可渲染媒体时提升为 2048×2048；
+不会被重写。Windows 软件呈现会对每个选中的纹素执行相同的零 alpha 规范化及
+反预乘/限制/解码/重新预乘操作，再对得到的预乘线性采样点做过滤。GPU 只分配一个
+`Bgra8Unorm` 纹理，通过其 sRGB 彩色 view 做线性过滤；硬件同样会先解码再双线性过滤。
+两种 presenter 使用相同的纹素中心约定，并把采样点限制在当前图像图块内，避免相邻已打包
+图块渗入边缘；随后在线性光空间合成，并只在输出时编码一次 RGB。图像图集以 1×1 CPU/GPU
+占位符启动，仅在出现可渲染媒体时提升为 2048×2048；
 连续 240 帧没有可渲染媒体后再降回占位符。图像图集填满时跳过较早图像，不会淘汰文字。
 
 ### 自定义终端字形
