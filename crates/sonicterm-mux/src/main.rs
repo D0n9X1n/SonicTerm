@@ -8,19 +8,28 @@
 //! sonicterm-mux kill <pane_id> --socket <path>  terminate a pane
 //! ```
 
+#[cfg(unix)]
+use std::io;
 #[cfg(windows)]
 use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 #[cfg(windows)]
 use std::os::windows::io::{AsHandle, AsRawHandle};
+#[cfg(unix)]
+use std::path::{Path, PathBuf};
 use std::{env, process::ExitCode, sync::Arc, thread};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 #[cfg(unix)]
-use interprocess::local_socket::GenericFilePath;
+use interprocess::{local_socket::GenericFilePath, os::unix::local_socket::ListenerOptionsExt};
 #[cfg(windows)]
-use interprocess::local_socket::GenericNamespaced;
 use interprocess::{
-    local_socket::{prelude::*, ListenerOptions, Stream},
+    local_socket::GenericNamespaced,
+    os::windows::{local_socket::ListenerOptionsExt, security_descriptor::SecurityDescriptor},
+};
+use interprocess::{
+    local_socket::{prelude::*, Listener, ListenerOptions, Stream},
     TryClone,
 };
 use sonicterm_mux::{
@@ -30,10 +39,23 @@ use sonicterm_mux::{
     ServerState,
 };
 #[cfg(windows)]
+use widestring::U16CString;
+#[cfg(windows)]
 use windows::Win32::{
-    Foundation::HANDLE,
-    System::{Pipes::DisconnectNamedPipe, IO::CancelIoEx},
+    Foundation::{CloseHandle, HANDLE},
+    Security::{GetLengthSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER},
+    System::{
+        Pipes::DisconnectNamedPipe,
+        RemoteDesktop::ProcessIdToSessionId,
+        Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcessToken},
+        IO::CancelIoEx,
+    },
 };
+
+#[cfg(unix)]
+const UNIX_SOCKET_MODE: libc::mode_t = 0o600;
+#[cfg(unix)]
+const UNIX_RUNTIME_DIR_MODE: u32 = 0o700;
 
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -87,25 +109,292 @@ fn extract_socket(args: &[String]) -> Result<String> {
             return iter.next().cloned().ok_or_else(|| anyhow!("--socket requires a value"));
         }
     }
-    // Default per CLAUDE.md example.
-    Ok("/tmp/sonicterm-mux.sock".to_string())
+    default_socket()
+}
+
+#[cfg(unix)]
+fn default_socket() -> Result<String> {
+    let uid =
+        // SAFETY: `geteuid` has no pointer arguments or caller-managed invariants.
+        unsafe { libc::geteuid() };
+    let session =
+        // SAFETY: `getsid(0)` queries the calling process and has no pointer arguments.
+        unsafe { libc::getsid(0) };
+    if session == -1 {
+        return Err(io::Error::last_os_error()).context("resolve current Unix session");
+    }
+    let runtime = env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+    let path =
+        resolve_unix_default_socket(runtime.as_deref(), &env::temp_dir(), uid, session as u32)?;
+    path.into_os_string()
+        .into_string()
+        .map_err(|_| anyhow!("default mux socket path is not valid Unicode"))
+}
+
+#[cfg(windows)]
+fn default_socket() -> Result<String> {
+    Ok(windows_endpoint_name(&current_windows_user_sid()?, current_windows_session_id()?))
+}
+
+#[cfg(any(windows, test))]
+fn windows_endpoint_name(user_sid: &str, session_id: u32) -> String {
+    format!("sonicterm-mux-{}-{session_id}", user_sid.replace('-', "_"))
+}
+
+#[cfg(any(windows, test))]
+fn sid_string(bytes: &[u8]) -> Result<String> {
+    if bytes.len() < 8 {
+        bail!("Windows returned a truncated user SID");
+    }
+    let revision = bytes[0];
+    let subauthority_count = bytes[1] as usize;
+    let expected = 8usize
+        .checked_add(
+            subauthority_count
+                .checked_mul(4)
+                .ok_or_else(|| anyhow!("Windows SID subauthority length overflow"))?,
+        )
+        .ok_or_else(|| anyhow!("Windows SID length overflow"))?;
+    if expected != bytes.len() {
+        bail!("Windows returned a malformed user SID length");
+    }
+    let authority = bytes[2..8].iter().fold(0u64, |value, byte| (value << 8) | u64::from(*byte));
+    let mut sid = format!("S-{revision}-{authority}");
+    for chunk in bytes[8..].chunks_exact(4) {
+        let value = u32::from_le_bytes(chunk.try_into().expect("four-byte SID subauthority"));
+        sid.push('-');
+        sid.push_str(&value.to_string());
+    }
+    Ok(sid)
+}
+
+#[cfg(windows)]
+struct TokenHandle(HANDLE);
+
+#[cfg(windows)]
+// Lifecycle: `TokenHandle` Drop closes the process token handle exactly once.
+impl Drop for TokenHandle {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` remains the owned handle returned by `OpenProcessToken`.
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn current_windows_user_sid() -> Result<String> {
+    let mut token = HANDLE::default();
+    // SAFETY: the pseudo-handle identifies this process and `token` receives one owned query handle.
+    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)? };
+    let token = TokenHandle(token);
+
+    let mut required = 0u32;
+    // SAFETY: the zero-length probe writes only the required byte count while `token` remains live.
+    let _ = unsafe { GetTokenInformation(token.0, TokenUser, None, 0, &mut required) };
+    if required < std::mem::size_of::<TOKEN_USER>() as u32 {
+        bail!("Windows returned an invalid token-user length");
+    }
+    let words = (required as usize).div_ceil(std::mem::size_of::<usize>());
+    let mut buffer = vec![0usize; words];
+    // SAFETY: the aligned buffer is writable for `required` bytes and remains live while its SID is read.
+    unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenUser,
+            Some(buffer.as_mut_ptr().cast()),
+            required,
+            &mut required,
+        )?;
+    }
+    // SAFETY: successful `TokenUser` output starts with an aligned initialized `TOKEN_USER` value.
+    let token_user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+    let sid = token_user.User.Sid;
+    if sid.is_invalid() {
+        bail!("Windows returned a null user SID");
+    }
+    let length =
+        // SAFETY: `sid` points into the live successful `TokenUser` response buffer.
+        unsafe { GetLengthSid(sid) } as usize;
+    if length == 0 || length > required as usize {
+        bail!("Windows returned an invalid user SID length");
+    }
+    // SAFETY: `GetLengthSid` reports the readable byte extent of `sid` inside the live response buffer.
+    let bytes = unsafe { std::slice::from_raw_parts(sid.0.cast::<u8>(), length) };
+    sid_string(bytes)
+}
+
+#[cfg(windows)]
+fn current_windows_session_id() -> Result<u32> {
+    let mut session_id = 0;
+    // SAFETY: the current process id is valid and `session_id` is writable for one `u32`.
+    unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut session_id)? };
+    Ok(session_id)
+}
+
+#[cfg(unix)]
+fn fallback_unix_socket_path(temp_dir: &Path, uid: u32, session_id: u32) -> PathBuf {
+    temp_dir.join(format!("sonicterm-mux-{uid}-{session_id}")).join("sonicterm-mux.sock")
+}
+
+#[cfg(unix)]
+fn private_runtime_directory(path: &Path, uid: u32) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    metadata.file_type().is_dir()
+        && metadata.uid() == uid
+        && metadata.mode() & 0o777 == UNIX_RUNTIME_DIR_MODE
+}
+
+#[cfg(unix)]
+fn resolve_unix_default_socket(
+    xdg_runtime_dir: Option<&Path>,
+    temp_dir: &Path,
+    uid: u32,
+    session_id: u32,
+) -> Result<PathBuf> {
+    if let Some(runtime_dir) = xdg_runtime_dir.filter(|path| private_runtime_directory(path, uid)) {
+        return Ok(runtime_dir.join("sonicterm-mux.sock"));
+    }
+
+    let socket = fallback_unix_socket_path(temp_dir, uid, session_id);
+    let runtime_dir = socket.parent().expect("fallback socket always has a parent");
+    match std::fs::symlink_metadata(runtime_dir) {
+        Ok(_) if !private_runtime_directory(runtime_dir, uid) => {
+            bail!("refusing unsafe mux runtime directory {}", runtime_dir.display());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            std::fs::DirBuilder::new()
+                .mode(UNIX_RUNTIME_DIR_MODE)
+                .create(runtime_dir)
+                .with_context(|| {
+                    format!("create mux runtime directory {}", runtime_dir.display())
+                })?;
+            std::fs::set_permissions(
+                runtime_dir,
+                std::fs::Permissions::from_mode(UNIX_RUNTIME_DIR_MODE),
+            )
+            .with_context(|| format!("restrict mux runtime directory {}", runtime_dir.display()))?;
+            if !private_runtime_directory(runtime_dir, uid) {
+                bail!("mux runtime directory {} is not private", runtime_dir.display());
+            }
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("inspect mux runtime directory {}", runtime_dir.display())
+            });
+        }
+    }
+    Ok(socket)
+}
+
+#[cfg(unix)]
+fn prepare_unix_endpoint(path: &Path, uid: u32) -> Result<()> {
+    let before = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
+    };
+    if !before.file_type().is_socket() {
+        bail!("refusing non-socket mux endpoint {}", path.display());
+    }
+    if before.uid() != uid {
+        bail!("refusing mux endpoint not owned by the current user: {}", path.display());
+    }
+
+    match std::os::unix::net::UnixStream::connect(path) {
+        Ok(_) => bail!("refusing to replace live mux endpoint {}", path.display()),
+        Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("cannot prove mux endpoint {} is stale", path.display()));
+        }
+    }
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("mux endpoint {} has no parent directory", path.display()))?;
+    if !private_runtime_directory(parent, uid) {
+        bail!("refusing stale mux endpoint outside an owned 0700 directory: {}", path.display());
+    }
+    let after = std::fs::symlink_metadata(path)
+        .with_context(|| format!("recheck stale mux endpoint {}", path.display()))?;
+    if !after.file_type().is_socket()
+        || after.uid() != uid
+        || after.dev() != before.dev()
+        || after.ino() != before.ino()
+    {
+        bail!("mux endpoint {} changed during stale validation", path.display());
+    }
+    std::fs::remove_file(path)
+        .with_context(|| format!("remove stale mux endpoint {}", path.display()))
+}
+
+#[cfg(unix)]
+fn bind_unix_listener(path: &Path) -> Result<Listener> {
+    let uid =
+        // SAFETY: `geteuid` has no pointer arguments or caller-managed invariants.
+        unsafe { libc::geteuid() };
+    prepare_unix_endpoint(path, uid)?;
+    let name = path.to_fs_name::<GenericFilePath>()?;
+    match ListenerOptions::new().name(name).mode(UNIX_SOCKET_MODE).create_sync() {
+        Ok(listener) => Ok(listener),
+        Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+            let parent = path.parent().ok_or_else(|| {
+                anyhow!("mux endpoint {} has no parent directory", path.display())
+            })?;
+            if !private_runtime_directory(parent, uid) {
+                bail!(
+                    "platform requires mux endpoint {} to be inside an owned 0700 directory",
+                    path.display()
+                );
+            }
+            let name = path.to_fs_name::<GenericFilePath>()?;
+            let listener = ListenerOptions::new()
+                .name(name)
+                .create_sync()
+                .with_context(|| format!("bind mux endpoint {}", path.display()))?;
+            let permissions = std::fs::Permissions::from_mode(UNIX_SOCKET_MODE.into());
+            if let Err(error) = std::fs::set_permissions(path, permissions) {
+                drop(listener);
+                return Err(error)
+                    .with_context(|| format!("restrict mux endpoint {}", path.display()));
+            }
+            Ok(listener)
+        }
+        Err(error) => Err(error).with_context(|| format!("bind mux endpoint {}", path.display())),
+    }
+}
+
+#[cfg(unix)]
+fn bind_listener(socket: &str) -> Result<Listener> {
+    bind_unix_listener(Path::new(socket))
+}
+
+#[cfg(any(windows, test))]
+fn current_user_pipe_sddl(user_sid: &str) -> String {
+    format!("D:P(A;;GA;;;{user_sid})")
+}
+
+#[cfg(windows)]
+fn current_user_security_descriptor(user_sid: &str) -> Result<SecurityDescriptor> {
+    let sddl = U16CString::from_str(current_user_pipe_sddl(user_sid))
+        .map_err(|error| anyhow!("build current-user pipe DACL: {error}"))?;
+    SecurityDescriptor::deserialize(sddl.as_ucstr()).context("parse current-user pipe DACL")
+}
+
+#[cfg(windows)]
+fn bind_listener(socket: &str) -> Result<Listener> {
+    let name = make_socket_name(socket)?;
+    let user_sid = current_windows_user_sid()?;
+    let descriptor = current_user_security_descriptor(&user_sid)?;
+    Ok(ListenerOptions::new().name(name).security_descriptor(descriptor).create_sync()?)
 }
 
 fn cmd_daemon(socket: &str) -> Result<()> {
-    let _ = std::fs::remove_file(socket);
-    let name = make_socket_name(socket)?;
-    let listener = ListenerOptions::new().name(name).create_sync()?;
-    // Lock the socket down to the current user. World-accessible (0755)
-    // sockets would let any local user attach to our PTYs. On Windows the
-    // named-pipe namespace already gives per-session isolation via the
-    // default DACL; tightening that further would require raw Win32 SDDL
-    // plumbing (TODO before multi-user Windows support).
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(socket, perms).with_context(|| format!("chmod 600 {socket}"))?;
-    }
+    let listener = bind_listener(socket)?;
     let state = ServerState::new();
     tracing::info!(socket, "sonicterm-mux daemon listening");
     for conn in listener.incoming() {
@@ -216,3 +505,7 @@ fn make_socket_name(path: &str) -> Result<interprocess::local_socket::Name<'_>> 
 
 #[allow(dead_code)]
 fn _unused_io() {}
+
+#[cfg(test)]
+#[path = "main_tests.rs"]
+mod main_tests;
