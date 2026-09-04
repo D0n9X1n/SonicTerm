@@ -75,6 +75,10 @@ pub struct RendererSummary {
     pub glyph_atlas: sonicterm_types::ResourceAmount,
     /// CPU-side image atlas.
     pub image_atlas: sonicterm_types::ResourceAmount,
+    /// Cached row glyph instances and decoration metadata.
+    pub row_glyph_cache: sonicterm_types::ResourceAmount,
+    /// Cached row background and decoration quads.
+    pub row_quad_cache: sonicterm_types::ResourceAmount,
     /// Windows software presentation buffer; zero elsewhere.
     pub software_frame: sonicterm_types::ResourceAmount,
 }
@@ -177,13 +181,20 @@ impl RendererSummary {
     /// Sum of this renderer's parts.
     #[must_use]
     pub fn total(&self) -> sonicterm_types::ResourceAmount {
-        [self.glyph_atlas, self.image_atlas, self.software_frame].into_iter().fold(
-            sonicterm_types::ResourceAmount::default(),
-            |acc, part| sonicterm_types::ResourceAmount {
+        [
+            self.glyph_atlas,
+            self.image_atlas,
+            self.row_glyph_cache,
+            self.row_quad_cache,
+            self.software_frame,
+        ]
+        .into_iter()
+        .fold(sonicterm_types::ResourceAmount::default(), |acc, part| {
+            sonicterm_types::ResourceAmount {
                 bytes: acc.bytes.saturating_add(part.bytes),
                 items: acc.items.saturating_add(part.items),
-            },
-        )
+            }
+        })
     }
 
     /// Render as one field of the composed renderer breakdown.
@@ -194,13 +205,17 @@ impl RendererSummary {
     fn render(&self) -> String {
         let total = self.total();
         format!(
-            "{}[{}] glyph={}/{} image={}/{} software={}/{} total={}/{}",
+            "{}[{}] glyph={}/{} image={}/{} row_glyph={}/{} row_quad={}/{} software={}/{} total={}/{}",
             self.role,
             self.label,
             self.glyph_atlas.bytes,
             self.glyph_atlas.items,
             self.image_atlas.bytes,
             self.image_atlas.items,
+            self.row_glyph_cache.bytes,
+            self.row_glyph_cache.items,
+            self.row_quad_cache.bytes,
+            self.row_quad_cache.items,
             self.software_frame.bytes,
             self.software_frame.items,
             total.bytes,
@@ -252,6 +267,38 @@ impl MemorySnapshot {
         self.renderers
             .iter()
             .fold(0usize, |acc, renderer| acc.saturating_add(renderer.total().bytes))
+    }
+
+    /// Row-glyph cache bytes held by every renderer.
+    #[must_use]
+    pub fn row_glyph_cache_bytes(&self) -> usize {
+        self.renderers
+            .iter()
+            .fold(0usize, |acc, renderer| acc.saturating_add(renderer.row_glyph_cache.bytes))
+    }
+
+    /// Row-glyph cache entries held by every renderer.
+    #[must_use]
+    pub fn row_glyph_cache_items(&self) -> usize {
+        self.renderers
+            .iter()
+            .fold(0usize, |acc, renderer| acc.saturating_add(renderer.row_glyph_cache.items))
+    }
+
+    /// Row-quad cache bytes held by every renderer.
+    #[must_use]
+    pub fn row_quad_cache_bytes(&self) -> usize {
+        self.renderers
+            .iter()
+            .fold(0usize, |acc, renderer| acc.saturating_add(renderer.row_quad_cache.bytes))
+    }
+
+    /// Row-quad cache entries held by every renderer.
+    #[must_use]
+    pub fn row_quad_cache_items(&self) -> usize {
+        self.renderers
+            .iter()
+            .fold(0usize, |acc, renderer| acc.saturating_add(renderer.row_quad_cache.items))
     }
 
     /// Items held by every renderer.
@@ -408,6 +455,10 @@ pub fn emit_memory_snapshot(snapshot: &MemorySnapshot, previous: Option<MemoryTo
         // Renderers, visible and warm.
         renderer_total_bytes = renderer_bytes,
         renderer_total_items = snapshot.renderer_items(),
+        renderer_row_glyph_cache_bytes = snapshot.row_glyph_cache_bytes(),
+        renderer_row_glyph_cache_items = snapshot.row_glyph_cache_items(),
+        renderer_row_quad_cache_bytes = snapshot.row_quad_cache_bytes(),
+        renderer_row_quad_cache_items = snapshot.row_quad_cache_items(),
         renderer_delta = %counted_delta(previous.map(|p| p.renderer_bytes), renderer_bytes),
         live_renderers = snapshot.live_renderers,
         renderers = %snapshot.render_renderers(),
@@ -508,6 +559,8 @@ fn summarize(
         role,
         glyph_atlas: retention.glyph_atlas,
         image_atlas: retention.image_atlas,
+        row_glyph_cache: retention.row_glyph_cache,
+        row_quad_cache: retention.row_quad_cache,
         software_frame: retention.software_frame,
     }
 }

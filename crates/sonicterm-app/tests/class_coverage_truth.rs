@@ -138,10 +138,10 @@ fn no_uncharged_class_appears_in_the_production_charge_path() {
 /// The renderer's host-side classes reach no ledger, though they do reach a
 /// report.
 ///
-/// Stated for these two by name rather than left to the sweep above, because
-/// the reason they are absent is structural and not obvious from the table:
-/// `sonicterm-gpu` declares no dependency on `sonicterm-resource`, so the crate
-/// that computes both figures cannot reserve against a governor at all.
+/// Stated by name rather than left to the sweep above, because the reason they
+/// are absent is structural and not obvious from the table: `sonicterm-gpu`
+/// declares no dependency on `sonicterm-resource`, so the crate that computes
+/// these figures cannot reserve against a governor at all.
 ///
 /// They are no longer invisible. The app reads `retained_amounts` and emits a
 /// `renderer retention` line per renderer, live and warm, on the memory
@@ -163,7 +163,12 @@ fn the_renderer_host_side_classes_are_absent_from_the_charge_path() {
     let charged: Vec<ResourceClass> =
         seam_classes(&PaneRetention::default()).into_iter().map(|(class, _)| class).collect();
 
-    for class in [ResourceClass::GlyphAtlas, ResourceClass::SoftwareFrame] {
+    for class in [
+        ResourceClass::GlyphAtlas,
+        ResourceClass::RowGlyphCache,
+        ResourceClass::RowQuadCache,
+        ResourceClass::SoftwareFrame,
+    ] {
         assert!(
             matches!(class.coverage(), ClassCoverage::UnchargedRetention { .. }),
             "{class:?} is computed by the renderer and charged by nothing, so it must be \

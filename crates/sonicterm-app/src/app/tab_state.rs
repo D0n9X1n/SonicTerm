@@ -50,7 +50,7 @@ impl App {
         let leaves: Vec<u64> = state.tree.leaves();
         let mut panes: HashMap<u64, PaneState> = HashMap::new();
         for id in leaves {
-            if let Some(p) = ws.panes.remove(&id) {
+            if let Some(p) = ws.remove_pane(id) {
                 panes.insert(id, p);
             }
         }
@@ -102,7 +102,7 @@ impl App {
         let state = child.tab_states.remove(index);
         let mut panes: HashMap<u64, PaneState> = HashMap::new();
         for id in state.tree.leaves() {
-            if let Some(p) = child.panes.remove(&id) {
+            if let Some(p) = child.remove_pane(id) {
                 panes.insert(id, p);
             }
         }

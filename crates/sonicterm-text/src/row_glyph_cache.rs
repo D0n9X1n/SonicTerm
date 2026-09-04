@@ -58,7 +58,7 @@ use std::borrow::Borrow;
 // specific chrome / shape crate. Conversion to `ChromeColor` happens
 // at the replay site in `sonicterm-gpu::core`.
 pub type TofuColor = [u8; 4];
-use sonicterm_types::{Cell, Color, UnderlineStyle};
+use sonicterm_types::{retained_hash_table_bytes, Cell, Color, ResourceAmount, UnderlineStyle};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -162,6 +162,43 @@ impl RowGlyphCache {
     #[inline]
     pub fn invalidate_pane(&mut self, pane_id: PaneId) {
         self.entries.retain(|(p, _, _), _| *p != pane_id);
+        self.entries.shrink_to_fit();
+    }
+
+    /// Return retained table, entry, and nested row-vector storage.
+    #[must_use]
+    pub fn retained_amount(&self) -> ResourceAmount {
+        let table = retained_hash_table_bytes::<(PaneId, u64, u64), CachedRowEntry>(
+            self.entries.capacity(),
+        );
+        let payload = self.entries.values().fold(0usize, |total, entry| {
+            total
+                .saturating_add(
+                    entry
+                        .row
+                        .glyphs
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<GlyphInstance>()),
+                )
+                .saturating_add(
+                    entry
+                        .row
+                        .underlines
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<UnderlineRun>()),
+                )
+                .saturating_add(entry.row.tofu.capacity().saturating_mul(std::mem::size_of::<(
+                    f32,
+                    f32,
+                    f32,
+                    f32,
+                    TofuColor,
+                )>()))
+                .saturating_add(
+                    entry.row.missing_chars.capacity().saturating_mul(std::mem::size_of::<char>()),
+                )
+        });
+        ResourceAmount { bytes: table.saturating_add(payload), items: self.entries.len() }
     }
 
     /// Drop the cache entry for absolute row `abs_row` in pane

@@ -135,13 +135,23 @@ Renderer memory is separate because it is window-owned rather than pane-owned:
 
 - `glyph_atlas_bytes`: CPU glyph atlas capacity;
 - `image_atlas_bytes`: CPU inline-image atlas capacity;
+- `row_glyph_cache_bytes` / `row_glyph_cache_items`: hash-table backing, cached
+  glyph instances, underline runs, tofu geometry, missing characters, and row count;
+- `row_quad_cache_bytes` / `row_quad_cache_items`: hash-table backing, cached
+  background/decoration quad vectors, and row count;
 - `software_frame_bytes`: Windows CPU/GDI frame, zero elsewhere.
 
 These are host-memory copies. GPU textures and buffers are not included because
-the driver owns them and wgpu does not expose their sizes. Every visible and
-warm renderer is listed. `live_renderers` comes from an independent process-wide
-counter; a count larger than the listed renderer set indicates a live renderer
-that is no longer reachable from window topology.
+the driver owns them and wgpu does not expose their sizes. Row-cache reports use
+allocated table and nested-vector capacity, not live length. Table capacity is
+sticky across ordinary clear/retain operations; when a pane leaves a renderer,
+SonicTerm removes that pane's glyph rows and then quad rows in one event-loop
+operation, preserves peer entries, and requests table compaction. Nested payload
+and item counts fall immediately, while the table allocator may retain its
+current bucket class. Every visible and warm renderer is listed.
+`live_renderers` comes from an independent process-wide counter; a count larger
+than the listed renderer set indicates a live renderer that is no longer
+reachable from window topology.
 
 ### Aggregate snapshot
 
@@ -363,11 +373,19 @@ PANE_COMMITTED_BUDGET_BYTES = 2 × PANE_SEAM_CAP_SUM_BYTES
 
 - `glyph_atlas_bytes`：CPU 字形图集容量；
 - `image_atlas_bytes`：CPU 内联图像图集容量；
+- `row_glyph_cache_bytes` / `row_glyph_cache_items`：哈希表后备存储、缓存字形实例、
+  下划线段、tofu 几何、缺失字符和缓存行数；
+- `row_quad_cache_bytes` / `row_quad_cache_items`：哈希表后备存储、缓存背景/装饰
+  quad 向量和缓存行数；
 - `software_frame_bytes`：Windows CPU/GDI 帧，其它平台为零。
 
 这些都是主机内存副本。GPU 纹理与缓冲不在其中，因为显卡驱动拥有它们，wgpu 也不提供
-大小。报告会列出所有可见和预热渲染器。`live_renderers` 来自独立的进程级计数器；若该
-计数大于可列出的渲染器集合，说明有一个仍存活但已无法从窗口拓扑访问的渲染器。
+大小。行缓存报告按已分配的哈希表与嵌套向量容量计算，而不是按当前长度。普通 clear/retain
+后表容量具有粘性；窗格离开渲染器时，SonicTerm 会在同一个事件循环操作中先删除该窗格的
+字形行，再删除 quad 行，保留其它窗格的条目并请求压紧表。嵌套负载和条目数会立即下降，
+但表分配器可以保留当前 bucket 档位。报告会列出所有可见和预热渲染器。
+`live_renderers` 来自独立的进程级计数器；若该计数大于可列出的渲染器集合，说明有一个
+仍存活但已无法从窗口拓扑访问的渲染器。
 
 ### 聚合快照
 

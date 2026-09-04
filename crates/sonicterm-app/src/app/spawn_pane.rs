@@ -595,7 +595,7 @@ impl App {
                 }
             };
             if let (_, Some(focus)) = inner {
-                ws.panes.remove(&focus);
+                ws.remove_pane(focus);
             }
             inner
         };

@@ -1131,6 +1131,21 @@ impl WindowState {
             .expect("WindowState::renderer_mut() called before do_resumed populated it")
     }
 
+    /// Remove a pane from this renderer owner and release both row-cache parts.
+    ///
+    /// Detach paths use the same seam as permanent close: once a pane leaves this
+    /// window, its NDC glyphs and quads cannot be reused by the destination
+    /// renderer. The renderer performs glyph eviction before quad eviction in one
+    /// event-loop-owned mutable call, so retention snapshots cannot observe only
+    /// half of the removal.
+    pub(crate) fn remove_pane(&mut self, pane_id: u64) -> Option<PaneState> {
+        let pane = self.panes.remove(&pane_id)?;
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.invalidate_pane_caches(pane_id);
+        }
+        Some(pane)
+    }
+
     /// convenience that short-circuits when
     /// `window` is `None`. Most call sites previously did
     /// `ws.window.request_redraw()` unconditionally; after the
@@ -3848,7 +3863,7 @@ impl App {
                 }
                 break;
             }
-            closed = ws.panes.remove(&pane_id).is_some();
+            closed = ws.remove_pane(pane_id).is_some();
         }
 
         if resize_main {
@@ -3894,7 +3909,7 @@ impl App {
                 }
                 break;
             }
-            if ws.panes.remove(&pane_id).is_some() {
+            if ws.remove_pane(pane_id).is_some() {
                 // When: `panes` actually held `pane_id`, so its removal is what
                 // drops the PTY and the surviving splits need re-laying out.
                 if resize_child {
@@ -5155,8 +5170,7 @@ impl App {
         destination: WindowId,
         pane_id: u64,
     ) -> bool {
-        let Some(pane) = self.windows.get_mut(&source).and_then(|w| w.panes.remove(&pane_id))
-        else {
+        let Some(pane) = self.windows.get_mut(&source).and_then(|w| w.remove_pane(pane_id)) else {
             // When: `source` yields no `pane_id`, so nothing was detached and both
             // windows keep the panes they had.
             return false;

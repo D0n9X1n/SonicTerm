@@ -2213,7 +2213,7 @@ impl App {
             let st = child.tab_states.remove(idx);
             for id in st.tree.leaves() {
                 // PaneState::Drop → PtyHandle::Drop kills the shell.
-                child.panes.remove(&id);
+                child.remove_pane(id);
             }
             if let Some(tab_id) = child.tabs.tabs().get(idx).map(|t| t.id) {
                 child.tabs.close(tab_id);
@@ -2261,7 +2261,7 @@ impl App {
             if let Some(search) = st.search.as_mut() {
                 search.invalidate_for_new_grid();
             }
-            child.panes.remove(&focus);
+            child.remove_pane(focus);
             // The surviving sibling's PaneRect just grew to cover the closed
             // pane's area. Push the new layout into its Grid + PtyHandle so the
             // survivor (and TUIs like vim) reflow into the freed space; without
@@ -2435,7 +2435,7 @@ impl App {
             if let Some(search) = st.search.as_mut() {
                 search.invalidate_for_new_grid();
             }
-            child.panes.remove(&focus);
+            child.remove_pane(focus);
             resize_visible_panes_in_child(child);
             if let Some(r) = child.renderer.as_mut() {
                 r.flash_pane_focus(new_focus);

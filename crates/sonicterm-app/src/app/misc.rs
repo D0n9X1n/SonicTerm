@@ -931,7 +931,7 @@ impl App {
             ws.tabs.close(id);
         }
         for id in st.tree.leaves() {
-            ws.panes.remove(&id);
+            ws.remove_pane(id);
         }
     }
     pub(super) fn drain_pending_os_drag_payloads(&mut self) {

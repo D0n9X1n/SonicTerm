@@ -35,10 +35,11 @@ pub use lifecycle::{
 pub use mod_key::ModKey;
 pub use open_script::{OpenScriptRequest, OpenScriptResolveError};
 pub use resource::{
-    AdmissionRejection, BudgetDimension, BudgetError, BudgetScope, ClassCoverage, DeliveryReceipt,
-    DisconnectReason, DropReason, GovernorLimits, OwnerKind, OwnerLimits, OwnerState, OwnerView,
-    PaneSeamTerm, PressureOutcome, ProcessKind, ProcessView, ResizeOperation, ResourceAmount,
-    ResourceClass, ResourceOwnerId, ResourceSnapshot, RetryToken, RetryWakeup,
+    retained_hash_table_bytes, AdmissionRejection, BudgetDimension, BudgetError, BudgetScope,
+    ClassCoverage, DeliveryReceipt, DisconnectReason, DropReason, GovernorLimits, OwnerKind,
+    OwnerLimits, OwnerState, OwnerView, PaneSeamTerm, PressureOutcome, ProcessKind, ProcessView,
+    ResizeOperation, ResourceAmount, ResourceClass, ResourceOwnerId, ResourceSnapshot, RetryToken,
+    RetryWakeup,
 };
 pub use script_draft::{
     classify_shell, format_script_draft, shell_quote_powershell, DraftRejection, ShellDialect,

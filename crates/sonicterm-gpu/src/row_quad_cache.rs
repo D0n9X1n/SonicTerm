@@ -33,7 +33,7 @@
 //!   a separate `quads_overlay` buffer and not part of this cache.
 
 use crate::quad::QuadInstance;
-use sonicterm_types::Cell;
+use sonicterm_types::{retained_hash_table_bytes, Cell, ResourceAmount};
 use std::borrow::Borrow;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
@@ -95,6 +95,21 @@ impl LineQuadCache {
     #[inline]
     pub fn invalidate_pane(&mut self, pane_id: PaneId) {
         self.entries.retain(|(p, _, _), _| *p != pane_id);
+        self.entries.shrink_to_fit();
+    }
+
+    /// Return retained table, entry, and nested quad-vector storage.
+    #[must_use]
+    pub fn retained_amount(&self) -> ResourceAmount {
+        let table = retained_hash_table_bytes::<(PaneId, u64, u64), CachedRowQuads>(
+            self.entries.capacity(),
+        );
+        let payload = self.entries.values().fold(0usize, |total, row| {
+            total.saturating_add(
+                row.quads.capacity().saturating_mul(std::mem::size_of::<QuadInstance>()),
+            )
+        });
+        ResourceAmount { bytes: table.saturating_add(payload), items: self.entries.len() }
     }
 
     /// Drop the cache entry for absolute row `abs_row` in pane

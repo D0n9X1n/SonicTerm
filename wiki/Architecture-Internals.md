@@ -96,8 +96,12 @@ record; it does not retry.
 A failed window-owner registration leaves the window usable but omits that
 window and its panes from hierarchy accounting for the rest of the window's
 life. A failed pane-owner registration leaves the pane usable; periodic
-reconciliation can retry it. Renderer-owned surfaces, glyph atlases, and
-software frames are measured outside this ledger.
+reconciliation can retry it. Renderer-owned surfaces, glyph atlases, row glyph
+and quad caches, and software frames are measured outside this ledger. The row
+cache classes are explicit `UnchargedRetention`: reports carry exact current
+allocation while the coverage table records conservative per-renderer high-water
+envelopes. No report invents GPU memory or presents an uncharged class as a
+governor reservation.
 
 ### Rendering correctness invariants
 
@@ -218,7 +222,13 @@ frame presents successfully. The fixed pixel allocation does not grow.
 row hash. Their capacities are about four times the sum of visible rows across
 all panes. A capacity or geometry-size change clears the affected cache. Dirty
 rows invalidate their absolute-row entries. Font, theme, scale, surface resize,
-and atlas replacement invalidate the corresponding caches.
+and atlas replacement invalidate the corresponding caches. Retention counts the
+hash table's allocated key/entry buckets and every nested vector's capacity.
+Ordinary clearing leaves table capacity reusable, so bounded churn forms a
+high-water envelope rather than a flat byte line. When a pane leaves a renderer,
+one event-loop-owned operation removes its glyph-cache entries first and its
+quad-cache entries second, preserves peer hits, then asks each table to shrink.
+No concurrent retention snapshot can observe only half that ordered eviction.
 
 The inline-image atlas starts as a 1 × 1 CPU/GPU placeholder. It promotes to a
 2,048 × 2,048 atlas when renderable media appears. After 240 rendered frames
@@ -434,8 +444,10 @@ Process
 warning 并保留该记录，不会重试。
 
 窗口所有者注册失败时，窗口仍可使用，但该窗口及其窗格在剩余寿命内都不会进入层级记账。
-窗格所有者注册失败时，窗格仍可使用；周期协调可以再次尝试。渲染器持有的表面、字形图集和
-软件帧不进入这份总账，另行测量。
+窗格所有者注册失败时，窗格仍可使用；周期协调可以再次尝试。渲染器持有的表面、字形图集、
+逐行字形与 quad 缓存及软件帧不进入这份总账，另行测量。两个行缓存类明确标记为
+`UnchargedRetention`：报告给出当前精确分配，覆盖表记录保守的每渲染器高水位包络。
+报告不会虚构 GPU 内存，也不会把未收费类写成 governor 预留。
 
 ### 渲染正确性不变量
 
@@ -523,7 +535,11 @@ CPU 字形图集固定为 2,048 × 2,048 个 BGRA8 像素，约 16 MiB。元数�
 
 `RowGlyphCache` 和 `LineQuadCache` 的键由窗格编号、绝对行号和行哈希组成。两者容量约为
 所有窗格可见行总数的四倍。容量或几何尺寸变化会清空对应缓存。脏行会使其绝对行条目失效。
-字体、主题、缩放、表面尺寸和图集替换会使对应缓存失效。
+字体、主题、缩放、表面尺寸和图集替换会使对应缓存失效。保留量会计算哈希表已分配的
+键/条目 bucket，以及每个嵌套向量的容量。普通清空会保留可复用表容量，因此有界变化形成
+高水位包络，而不是完全平坦的字节线。窗格离开渲染器时，一个由事件循环独占的操作会先删除
+其字形缓存条目，再删除 quad 缓存条目，保留其它窗格的命中，随后请求压紧两个表。并发保留量
+快照无法观察到只完成一半的有序淘汰。
 
 内联图像图集从 1 × 1 的 CPU/GPU 占位符开始。出现可渲染媒体时，它扩展为
 2,048 × 2,048。连续 240 个已渲染帧没有内联媒体后，它回到占位符。文字和图像使用独立

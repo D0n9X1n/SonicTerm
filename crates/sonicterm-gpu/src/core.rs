@@ -2145,15 +2145,19 @@ pub fn live_renderer_count() -> usize {
 
 /// CPU-side storage a renderer holds, split by owning class.
 ///
-/// Deliberately not a single total. The three parts have different lifetimes
-/// and different remedies: atlases grow with the glyph and image set and are
-/// evictable, while a software frame is sized by the window and is not.
+/// Deliberately not a single total. The five parts have different lifetimes
+/// and remedies: atlases grow with content, row caches follow viewport churn,
+/// and a software frame is sized by the window.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RendererRetention {
     /// Rasterized glyph pixels mirrored on the CPU, and resident entries.
     pub glyph_atlas: ResourceAmount,
     /// Decoded inline-image pixels mirrored on the CPU, and resident entries.
     pub image_atlas: ResourceAmount,
+    /// Cached per-row glyph instances and decoration metadata.
+    pub row_glyph_cache: ResourceAmount,
+    /// Cached per-row background and decoration quads.
+    pub row_quad_cache: ResourceAmount,
     /// Windows software presentation buffer. Zero elsewhere.
     pub software_frame: ResourceAmount,
 }
@@ -2175,10 +2179,12 @@ impl RendererRetention {
     /// `Vec`s — so charging both under one class would make the class mean two
     /// things and leave a reader unable to tell which allocation to act on.
     #[must_use]
-    pub fn seam_classes(&self) -> [(ResourceClass, ResourceAmount); 3] {
+    pub fn seam_classes(&self) -> [(ResourceClass, ResourceAmount); 5] {
         [
             (ResourceClass::GlyphAtlas, self.glyph_atlas),
             (ResourceClass::InlineMediaRetained, self.image_atlas),
+            (ResourceClass::RowGlyphCache, self.row_glyph_cache),
+            (ResourceClass::RowQuadCache, self.row_quad_cache),
             (ResourceClass::SoftwareFrame, self.software_frame),
         ]
     }
@@ -2186,13 +2192,18 @@ impl RendererRetention {
     /// Sum of every part.
     #[must_use]
     pub fn total(&self) -> ResourceAmount {
-        [self.glyph_atlas, self.image_atlas, self.software_frame].into_iter().fold(
-            ResourceAmount::default(),
-            |acc, part| ResourceAmount {
-                bytes: acc.bytes.saturating_add(part.bytes),
-                items: acc.items.saturating_add(part.items),
-            },
-        )
+        [
+            self.glyph_atlas,
+            self.image_atlas,
+            self.row_glyph_cache,
+            self.row_quad_cache,
+            self.software_frame,
+        ]
+        .into_iter()
+        .fold(ResourceAmount::default(), |acc, part| ResourceAmount {
+            bytes: acc.bytes.saturating_add(part.bytes),
+            items: acc.items.saturating_add(part.items),
+        })
     }
 }
 
@@ -2957,8 +2968,21 @@ impl GpuRenderer {
         RendererRetention {
             glyph_atlas: self.glyph_atlas.retained_amount(),
             image_atlas: self.image_atlas.retained_amount(),
+            row_glyph_cache: self.row_glyph_cache.retained_amount(),
+            row_quad_cache: self.line_quad_cache.retained_amount(),
             software_frame: self.software_frame_retained_amount(),
         }
+    }
+
+    /// Release one permanently removed pane's cached rows without evicting peers.
+    ///
+    /// Both caches and retention snapshots are event-loop-owned through `&mut
+    /// GpuRenderer`, so the fixed glyph-then-quad order is observed atomically by
+    /// every app caller. Cross-window detach calls this for the source renderer;
+    /// same-renderer reorder keeps its entries because no pane leaves that owner.
+    pub fn invalidate_pane_caches(&mut self, pane_id: u64) {
+        self.row_glyph_cache.invalidate_pane(pane_id);
+        self.line_quad_cache.invalidate_pane(pane_id);
     }
 
     #[cfg(windows)]
