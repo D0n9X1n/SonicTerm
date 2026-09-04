@@ -79,15 +79,15 @@ fn sizing_once_to_total_rows_keeps_both_panes_cached() {
 }
 
 #[test]
-fn atlas_epoch_change_invalidates_cached_rows() {
+fn atlas_identity_change_invalidates_cached_rows() {
     let mut c = RowGlyphCache::new();
     c.resize(1);
     c.insert(0, 0, 1, 7, CachedRow::default());
 
-    assert!(c.get(0, 0, 1, 7).is_some(), "matching atlas epoch should reuse the row");
+    assert!(c.get(0, 0, 1, 7).is_some(), "matching atlas identity should reuse the row");
     assert!(
         c.get(0, 0, 1, 8).is_none(),
-        "an eviction epoch change must reject UVs cached against recycled atlas rectangles"
+        "an atlas identity change must reject UVs cached against replaced rectangles"
     );
 }
 

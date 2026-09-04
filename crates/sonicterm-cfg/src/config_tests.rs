@@ -127,6 +127,25 @@ fn default_config_paths_live_under_dot_sonicterm() {
     assert_eq!(Config::default_path().unwrap(), dir.join("sonicterm.toml"));
 }
 
+/// Canonical typed serialization intentionally omits source-only TOML state.
+#[test]
+fn canonical_toml_is_not_a_format_preserving_persistence_path() {
+    let config: Config = toml::from_str(concat!(
+        "# source comment\n",
+        "future_top = \"source only\"\n",
+        "[font]\n",
+        "size = 13\n",
+        "future_font = true\n",
+    ))
+    .unwrap();
+
+    let canonical = config.to_toml().unwrap();
+    assert!(!canonical.contains("source comment"));
+    assert!(canonical.contains("future_top"));
+    assert!(!canonical.contains("future_font"));
+    assert!(canonical.contains("size = 13"));
+}
+
 #[test]
 fn legacy_glyph_fit_values_parse_without_remaining_active_config() {
     // Contract: old v1/v2 files keep loading after the never-wired switch leaves the schema.

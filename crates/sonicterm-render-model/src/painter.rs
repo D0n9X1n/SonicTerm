@@ -1,8 +1,11 @@
 use crate::geometry::PixelRect;
 
-/// Backend-agnostic drawing command surface for simple rectangle and text emitters.
-/// No production backend currently implements this trait; `GpuRenderer::render`
-/// consumes `PaneRender` and `RenderInputs` directly.
+/// Legacy drawing-command compatibility trait.
+///
+/// No production backend implements this trait. It remains source-compatible for
+/// external callers; new code should use `PaneRender` and `RenderInputs` with the
+/// renderer's concrete frame API.
+#[doc(hidden)]
 pub trait Painter {
     /// Fill an axis-aligned rectangle with a solid linear-sRGB RGBA color —
     /// used for cursor blocks, tab chrome, underlines, selection tint, etc.

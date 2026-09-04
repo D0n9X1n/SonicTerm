@@ -2,13 +2,13 @@
 
 ## Purpose
 Zero-dependency contracts shared across crates: cells, geometry, actions,
-modifier keys, glyph keys, window keys, hyperlink IDs, and trait seams for
-painter/window/clipboard/PTY boundaries.
+modifier keys, glyph keys, window keys, hyperlink IDs, active trait seams for
+window/clipboard/PTY boundaries, and the legacy painter compatibility seam.
 
 ## Key files
 - `cell.rs`, `geom.rs`, `glyph_key.rs`, `hyperlink_id.rs` - value types.
 - `action.rs`, `mod_key.rs`, `window_key.rs` - input/action contracts.
-- `traits/` - painter, window, clipboard, and PTY seams.
+- `traits/` - window, clipboard, and PTY seams plus legacy painter compatibility types.
 - `lib.rs` - crate-level exports.
 
 ## Local gate

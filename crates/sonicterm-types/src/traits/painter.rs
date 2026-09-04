@@ -1,11 +1,11 @@
-//! Painter / FrameSink trait. The renderer-agnostic seam the app loop
-//! hands a frame to. Implementers: `sonicterm-gpu` (wgpu).
+//! Legacy painter compatibility seam.
 //!
-//! Must be **object-safe**.
+//! No production backend implements this trait; the app and GPU renderer use
+//! renderer-specific frame APIs directly. These symbols remain source-compatible
+//! for external callers while new code should use renderer-specific frame APIs.
 
-/// Opaque frame payload — concrete `FrameModel` lives in
-/// `sonicterm-render-model`. Declared as a type-erased associated type
-/// to keep this trait dep-free of render-model.
+/// Legacy type-erased painter contract retained for source compatibility.
+#[doc(hidden)]
 pub trait Painter: Send {
     /// Submit one frame's worth of draw commands. Returning `Err`
     /// signals the surface needs reconfiguration (e.g. wgpu
@@ -18,8 +18,8 @@ pub trait Painter: Send {
     fn resize_surface(&mut self, width_px: u32, height_px: u32);
 }
 
-/// Type-erased frame view. Concrete `FrameModel` in
-/// `sonicterm-render-model` implements this.
+/// Legacy type-erased frame view retained for source compatibility.
+#[doc(hidden)]
 pub trait FrameLike {
     /// Logical grid width in cells.
     fn cols(&self) -> u32;
@@ -27,7 +27,8 @@ pub trait FrameLike {
     fn rows(&self) -> u32;
 }
 
-/// Reasons painting can fail.
+/// Legacy painter failure values retained for source compatibility.
+#[doc(hidden)]
 #[derive(Debug)]
 pub enum PaintError {
     /// Surface reported `Suboptimal` or `Outdated` — caller must
