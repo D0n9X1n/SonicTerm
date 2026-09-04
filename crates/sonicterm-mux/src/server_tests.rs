@@ -147,6 +147,57 @@ fn replay_snapshot_payload_respects_message_frame_ceiling() {
     );
 }
 
+/// A multi-fragment replay keeps live delivery paused until its completion fragment queues.
+#[test]
+fn replay_pause_survives_every_nonfinal_snapshot_fragment() {
+    let (tx, rx) = bounded(1);
+    let sink = SubscriberSink::new(tx, rx.clone());
+    sink.pause_for_replay(1);
+    let sender = sink.clone();
+    let (done_tx, done_rx) = bounded(1);
+    let snapshot = vec![b'x'; SUBSCRIBER_OUTPUT_FRAME_BYTES + 1];
+    let send_thread = std::thread::spawn(move || {
+        done_tx.send(sender.send_snapshot(1, snapshot)).unwrap();
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while rx.is_empty() && Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert_eq!(rx.len(), 1, "the first replay fragment must queue");
+    let observation_deadline = Instant::now() + Duration::from_millis(25);
+    while Instant::now() < observation_deadline {
+        assert!(
+            sink.shared.replay_pauses.lock().contains_key(&1),
+            "the replay pause must survive until the completion fragment queues"
+        );
+        std::thread::yield_now();
+    }
+    assert!(done_rx.try_recv().is_err(), "the completion fragment must still be pending");
+
+    assert!(matches!(
+        rx.recv(),
+        Ok(ServerMsg::ReplaySnapshot {
+            pane_id: 1,
+            start: true,
+            complete: false,
+            bytes,
+        }) if bytes.len() == SUBSCRIBER_OUTPUT_FRAME_BYTES
+    ));
+    done_rx.recv_timeout(Duration::from_secs(1)).expect("snapshot sender finished").unwrap();
+    send_thread.join().unwrap();
+    assert!(matches!(
+        rx.recv(),
+        Ok(ServerMsg::ReplaySnapshot {
+            pane_id: 1,
+            start: false,
+            complete: true,
+            bytes,
+        }) if bytes == vec![b'x']
+    ));
+    assert!(!sink.shared.replay_pauses.lock().contains_key(&1));
+}
+
 /// Full-ring replay fragments reconstruct one atomic snapshot with one completion marker.
 #[test]
 fn replay_snapshot_fragments_reconstruct_the_bounded_ring() {
