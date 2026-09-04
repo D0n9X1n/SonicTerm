@@ -20,7 +20,7 @@ jobs:
   validate-release-tag:
     name: Validate release provenance and source
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 135
     permissions:
       actions: read
       contents: read
@@ -87,20 +87,38 @@ jobs:
         timeout-minutes: 5
         run: python3 scripts/prepare-release-assets.py check-version --tag "${{ github.ref_name }}"
 
-      - name: Run source consistency gates
-        timeout-minutes: 30
+      - name: Validate workspace manifests
+        timeout-minutes: 2
+        run: cargo metadata --no-deps --format-version 1 > /dev/null
+
+      - name: Check formatting
+        timeout-minutes: 5
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        timeout-minutes: 15
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Clippy optional ssh backend
+        timeout-minutes: 10
+        run: cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings
+
+      - name: Run source policy gates
+        timeout-minutes: 10
         run: |
-          cargo metadata --no-deps --format-version 1 > /dev/null
-          cargo fmt --all --check
-          cargo clippy --workspace --all-targets -- -D warnings
-          cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings
           bash scripts/check-rust-version.sh
           bash scripts/check-workflow-supply-chain.sh
           bash scripts/check-authored-rust-comments.sh
           bash scripts/check-no-raw-process-exit.sh
           bash scripts/check-window-owner-registration.sh
-          RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
-          RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-io --no-deps --features ssh
+
+      - name: Check public Rustdoc
+        timeout-minutes: 10
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+
+      - name: Check optional ssh Rustdoc
+        timeout-minutes: 5
+        run: RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-io --no-deps --features ssh
 
       - name: Test release asset tooling
         timeout-minutes: 5

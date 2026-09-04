@@ -436,6 +436,21 @@ class RepositoryTests(unittest.TestCase):
         for contract in required:
             with self.subTest(contract=contract):
                 self.assertIn(contract, validation)
+        self.assertIn("timeout-minutes: 135", validation.split("    steps:\n", 1)[0])
+        timed_steps = {
+            "Validate workspace manifests": 2,
+            "Check formatting": 5,
+            "Clippy": 15,
+            "Clippy optional ssh backend": 10,
+            "Run source policy gates": 10,
+            "Check public Rustdoc": 10,
+            "Check optional ssh Rustdoc": 5,
+        }
+        for name, timeout in timed_steps.items():
+            with self.subTest(step=name):
+                block = validation.split(f"      - name: {name}\n", 1)[1]
+                block = block.split("\n      - ", 1)[0]
+                self.assertIn(f"timeout-minutes: {timeout}", block)
         for job in ("unit-tests-mac", "unit-tests-windows", "unit-tests-linux"):
             block = text.split(f"  {job}:\n", 1)[1]
             block = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", block, maxsplit=1)[0]
