@@ -254,9 +254,11 @@ The PTY reader uses a reusable 64 KiB `BytesMut` allocation. It sends
 reader and lets the operating system apply back-pressure; output is not dropped.
 
 A pane VT worker holds only that pane's parser lock while advancing VT state and
-collecting side effects. It releases the lock before the event-loop proxy or any
-native-window work. Tear-out changes the shared redraw `WindowId`, so the worker
-follows the pane without retaining `Arc<Window>`.
+snapshotting parser-owned modes. It moves the owned VT events out of that guard,
+then handles clipboard and command events, decodes or resizes inline media, and
+updates retained stores after unlocking. Main-born and child-born panes use the
+same host-event processor. Tear-out changes the shared redraw `WindowId`, so the
+worker follows the pane without retaining `Arc<Window>`.
 
 `PtyHandle::drop` always starts with cancellation, synchronous-I/O cancellation
 where supported, and child termination. The remaining order differs by platform.
@@ -543,9 +545,10 @@ DirectWrite 次像素图块在 CPU 图集与 GPU unorm 覆盖率 view 中始终�
 PTY reader 使用可复用的 64 KiB `BytesMut` 分配，并通过 64 槽通道发送
 `PtyOutputChunk` 视图。通道满时 reader 阻塞，让操作系统施加背压；输出不会被丢弃。
 
-每窗格 VT 工作线程只在推进 VT 状态和收集副作用时持有该窗格的解析器锁。它会在访问事件
-循环代理或执行任何原生窗口工作前释放锁。拆出操作只修改共享的重绘 `WindowId`，因此工作
-线程可以跟随窗格，无需持有 `Arc<Window>`。
+每窗格 VT 工作线程只在推进 VT 状态和快照解析器所拥有的模式时持有该窗格的解析器锁。
+它会把自有的 VT 事件移出该锁保护区，然后在解锁后处理剪贴板和命令事件、解码或缩放内联
+媒体，并更新常驻存储。主窗口和子窗口中创建的窗格使用同一个宿主事件处理器。拆出操作只
+修改共享的重绘 `WindowId`，因此工作线程可以跟随窗格，无需持有 `Arc<Window>`。
 
 `PtyHandle::drop` 都先发送取消信号，在平台支持时取消同步 I/O，然后终止子进程。后续顺序
 按平台区分。

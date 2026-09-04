@@ -46,10 +46,13 @@ notification. Parser replies use the same bounded sender and never write while
 a parser or grid lock is held.
 
 The VT worker coalesces output before requesting a frame. A quiet interval of
-3 ms flushes a trailing batch; a batch also flushes after 128 KiB or 8 ms. It
-copies the current `WindowId` under a short guard, releases the guard, and posts
-`UserEvent::RequestRedraw`. Worker threads do not call AppKit, Win32, or winit
-window methods.
+3 ms flushes a trailing batch; a batch also flushes after 128 KiB or 8 ms. Every
+pane constructor uses the same host-event processor. Parser advancement and mode
+snapshots run under the pane's parser lock; clipboard and command dispatch,
+inline-media decode or resize, and retained-store updates run after that lock is
+released. The worker copies the current `WindowId` under a short guard, releases
+the guard, and posts `UserEvent::RequestRedraw`. Worker threads do not call
+AppKit, Win32, or winit window methods.
 
 ### Local PTY contract
 
@@ -283,7 +286,9 @@ flowchart TD
 便于重试或显示通知。解析器回复使用同一个有界发送端；持有解析器或网格锁时绝不写 PTY。
 
 VT 工作线程会先合并输出，再请求一帧。连续 3 ms 没有新数据时刷新尾批次；批次达到
-128 KiB 或等待 8 ms 也会刷新。线程在短暂加锁时复制当前 `WindowId`，释放锁后发送
+128 KiB 或等待 8 ms 也会刷新。所有窗格构造路径都使用同一个宿主事件处理器。推进解析器
+和快照模式时持有该窗格的解析器锁；剪贴板与命令分发、内联媒体解码或缩放以及常驻存储更新
+都在释放该锁后执行。线程在短暂加锁时复制当前 `WindowId`，释放锁后发送
 `UserEvent::RequestRedraw`。工作线程不调用 AppKit、Win32 或 winit 窗口方法。
 
 ### 本地 PTY 契约
