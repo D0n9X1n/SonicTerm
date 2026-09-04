@@ -176,6 +176,46 @@ fn replay_snapshot_fragments_reconstruct_the_bounded_ring() {
     assert_eq!(reconstructed, snapshot);
 }
 
+/// Replay releases daemon-wide session state before waiting on pane-local snapshot locks.
+#[cfg(any(unix, windows))]
+#[test]
+fn replay_does_not_hold_sessions_while_waiting_on_the_subscriber() {
+    #[cfg(unix)]
+    let command = "/bin/sh";
+    #[cfg(windows)]
+    let command = "cmd.exe";
+
+    let state = ServerState::new();
+    let pending = state.spawn_paused(command, 80, 24).expect("spawn paused pane");
+    let pane_id = pending.pane_id;
+    let (tx, rx) = bounded(4);
+    let sink = SubscriberSink::new(tx, rx.clone());
+    state.attach(pending.session_id, sink.clone()).expect("attach");
+    let (replay, subscriber) = {
+        let sessions = state.sessions.lock();
+        let pane = find_pane(&sessions, pane_id).unwrap();
+        (Arc::clone(&pane.replay), Arc::clone(&pane.subscriber))
+    };
+    let subscriber_guard = subscriber.lock();
+    let state_for_replay = Arc::clone(&state);
+    let (started_tx, started_rx) = bounded(1);
+    let replay_thread = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        state_for_replay.replay(pane_id, &sink)
+    });
+    started_rx.recv().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while replay.try_lock().is_some() && Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert!(replay.try_lock().is_none(), "replay never reached the pane-local lock boundary");
+
+    assert!(state.sessions.try_lock().is_some(), "replay retained the global sessions lock");
+
+    drop(subscriber_guard);
+    replay_thread.join().unwrap().unwrap();
+}
+
 /// Attach-time pause suppresses output until the initial snapshot is queued.
 #[test]
 fn initial_replay_pause_blocks_live_output() {

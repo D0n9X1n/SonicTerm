@@ -389,9 +389,12 @@ impl ServerState {
 
     /// Queue one bounded replay snapshot and resume contiguous live output.
     pub fn replay(&self, pane_id: PaneId, requester: &SubscriberSink) -> Result<()> {
-        let sessions = self.sessions.lock();
-        let pane = find_pane(&sessions, pane_id)?;
-        send_replay_snapshot(&pane.replay, &pane.subscriber, pane_id, requester)
+        let (replay, subscriber) = {
+            let sessions = self.sessions.lock();
+            let pane = find_pane(&sessions, pane_id)?;
+            (Arc::clone(&pane.replay), Arc::clone(&pane.subscriber))
+        };
+        send_replay_snapshot(&replay, &subscriber, pane_id, requester)
     }
 
     /// Drop the current attachment regardless of subscriber identity.
