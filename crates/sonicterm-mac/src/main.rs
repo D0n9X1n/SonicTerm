@@ -112,8 +112,7 @@ fn main() -> Result<()> {
     // strict variants so user-visible errors are surfaced after startup.
     let theme_loader: sonicterm_app::ThemeLoader =
         Box::new(|name: &str| Theme::load_name_or_path(name, &asset_dir()));
-    let keymap_loader: sonicterm_app::KeymapLoader =
-        Box::new(|name: &str| Keymap::load_name_or_path(name, &asset_dir()));
+    let keymap_loader: sonicterm_app::KeymapLoader = Box::new(Keymap::load_strict);
     #[cfg(target_os = "macos")]
     {
         // Disable AppKit's native window tab strip for SonicTerm only.

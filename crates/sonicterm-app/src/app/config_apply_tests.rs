@@ -238,7 +238,7 @@ fn a_reload_reapplies_theme_and_keymap_even_when_their_names_are_unchanged() {
 
     let loaded = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let seen = loaded.clone();
-    app.keymap_loader = Some(Box::new(move |_name: &str| {
+    app.keymap_loader = Some(Box::new(move |_path: &std::path::Path| {
         seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(Keymap::default())
     }));
@@ -253,6 +253,34 @@ fn a_reload_reapplies_theme_and_keymap_even_when_their_names_are_unchanged() {
         1,
         "keymap must be re-read even when its name is unchanged"
     );
+}
+
+/// Reload resolves one authoritative dotted-name path and keeps the live map on failure.
+#[test]
+fn failed_dotted_keymap_reload_preserves_live_bindings_and_reports_resolved_path() {
+    let cfg = Config::default();
+    let live = Keymap::default();
+    let live_name = live.meta.name.clone();
+    let live_bindings = live.bindings.len();
+    let mut app = App::new(Theme::default(), cfg, live);
+    let observed = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let seen = observed.clone();
+    app.keymap_loader = Some(Box::new(move |path: &std::path::Path| {
+        *seen.lock().expect("path capture") = Some(path.to_path_buf());
+        anyhow::bail!("deliberate strict-load failure")
+    }));
+
+    let next = Config { keymap: "sonicterm-v1.2".to_string(), ..Config::default() };
+    app.apply_new_config(next);
+
+    let path = observed.lock().expect("path capture").clone().expect("loader called");
+    assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("sonicterm-v1.2.toml"));
+    assert_eq!(
+        path.parent().and_then(std::path::Path::file_name).and_then(|name| name.to_str()),
+        Some("keymaps")
+    );
+    assert_eq!(app.keymap.meta.name, live_name);
+    assert_eq!(app.keymap.bindings.len(), live_bindings);
 }
 
 #[test]

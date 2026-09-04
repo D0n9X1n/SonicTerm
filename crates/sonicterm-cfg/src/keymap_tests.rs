@@ -9,6 +9,94 @@ fn default_keymap_path_lives_under_dot_sonicterm() {
     assert_eq!(path.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()), Some("keymaps"));
 }
 
+/// A dot inside a logical name is not an implicit filesystem extension.
+///
+/// Only an explicit `.toml` suffix selects direct-path handling; versioned names
+/// still search the user and bundled keymap directories.
+#[test]
+fn dotted_logical_name_resolves_through_keymap_directories() {
+    let assets = Path::new("/bundle/assets");
+
+    assert_eq!(
+        Keymap::resolve_path_with("sonicterm-v1.2", assets, None).unwrap(),
+        assets.join("keymaps/sonicterm-v1.2.toml")
+    );
+}
+
+/// Explicit relative and Windows-shaped paths stay direct on every build host.
+///
+/// Testing Windows syntax unconditionally prevents a portable config from being
+/// reclassified merely because the current runner uses POSIX path components.
+#[test]
+fn only_explicit_path_shapes_bypass_named_keymap_lookup() {
+    let assets = Path::new("/bundle/assets");
+    for direct in [
+        "custom.toml",
+        "CUSTOM.TOML",
+        "./custom",
+        "../custom",
+        "folder/custom",
+        r"folder\custom",
+        r"C:\keymaps\custom",
+        r"\\server\share\custom",
+    ] {
+        assert_eq!(
+            Keymap::resolve_path_with(direct, assets, None).unwrap(),
+            PathBuf::from(direct),
+            "{direct:?} must remain an explicit path anchored to process CWD when relative"
+        );
+    }
+    let absolute = std::env::current_dir().unwrap().join("custom-keymap");
+    assert_eq!(
+        Keymap::resolve_path_with(absolute.to_str().unwrap(), assets, None).unwrap(),
+        absolute
+    );
+}
+
+/// Named keymaps prefer the user directory and otherwise use bundled assets.
+#[test]
+fn named_keymap_resolution_prefers_user_over_bundled_assets() {
+    let root =
+        std::env::temp_dir().join(format!("sonicterm-keymap-resolution-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let user = root.join("user");
+    let assets = root.join("assets");
+    let user_keymap = user.join("keymaps/custom.toml");
+    std::fs::create_dir_all(user_keymap.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(assets.join("keymaps")).unwrap();
+    std::fs::write(&user_keymap, "user").unwrap();
+
+    assert_eq!(Keymap::resolve_path_with("custom", &assets, Some(&user)).unwrap(), user_keymap);
+    assert_eq!(
+        Keymap::resolve_path_with("missing", &assets, Some(&user)).unwrap(),
+        assets.join("keymaps/missing.toml")
+    );
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// The portable `user` alias creates and selects the host platform keymap.
+#[test]
+fn user_alias_seeds_and_resolves_the_platform_default_keymap() {
+    let root =
+        std::env::temp_dir().join(format!("sonicterm-keymap-user-alias-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let assets = root.join("assets");
+    let user = root.join("user");
+
+    let resolved = Keymap::resolve_path_with("user", &assets, Some(&user)).unwrap();
+    assert_eq!(
+        resolved,
+        user.join("keymaps").join(format!("{}.toml", platform_default_keymap_name()))
+    );
+    assert_eq!(std::fs::read_to_string(&resolved).unwrap(), Keymap::bundled_default_text());
+    std::fs::write(&resolved, "user edit").unwrap();
+    assert_eq!(Keymap::resolve_path_with("user", &assets, Some(&user)).unwrap(), resolved);
+    assert_eq!(std::fs::read_to_string(&resolved).unwrap(), "user edit");
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn windows_default_leaves_alt_v_for_terminal_apps() {
     if !cfg!(target_os = "windows") {

@@ -453,22 +453,28 @@ impl App {
         // is a separate file whose bindings can change while `[keymap]` still
         // names it.
         {
-            let km_path = Keymap::resolve_path(&new_cfg.keymap, &assets);
-            match self
-                .keymap_loader
-                .as_ref()
-                .map_or_else(|| Keymap::load_strict(&km_path), |loader| loader(&new_cfg.keymap))
-            {
-                Ok(km) => {
-                    tracing::info!(
-                        "reload: keymap -> {} ({} bindings)",
-                        km.meta.name,
-                        km.bindings.len()
-                    );
-                    self.command_palette.set_keymap(&km);
-                    self.keymap = km;
+            match Keymap::resolve_path(&new_cfg.keymap, &assets) {
+                Ok(km_path) => {
+                    let loaded = self
+                        .keymap_loader
+                        .as_ref()
+                        .map_or_else(|| Keymap::load_strict(&km_path), |loader| loader(&km_path));
+                    match loaded {
+                        Ok(km) => {
+                            tracing::info!(
+                                "reload: keymap -> {} ({} bindings)",
+                                km.meta.name,
+                                km.bindings.len()
+                            );
+                            self.command_palette.set_keymap(&km);
+                            self.keymap = km;
+                        }
+                        Err(e) => tracing::warn!("reload: keymap {:?} failed: {e:#}", km_path),
+                    }
                 }
-                Err(e) => tracing::warn!("reload: keymap {:?} failed: {e:#}", km_path),
+                Err(e) => {
+                    tracing::warn!("reload: keymap {:?} resolution failed: {e:#}", new_cfg.keymap)
+                }
             }
         }
 
