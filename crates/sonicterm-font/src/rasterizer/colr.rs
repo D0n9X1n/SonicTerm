@@ -356,11 +356,10 @@ fn first_visible_tile(first_angle: f64, last_angle: f64, span: f64) -> Option<is
         return None;
     }
 
+    // When: first_angle or last_angle determines which span endpoint must be shifted to the visible turn.
     let tile = if first_angle >= 0. {
-        // When: first_angle is at or after zero, shift backward until the first stop reaches the visible turn.
         -(first_angle / span).ceil()
     } else if last_angle < 0. {
-        // When: last_angle remains behind zero, shift forward until the last stop reaches the visible turn.
         (-last_angle / span).ceil()
     } else {
         0.
