@@ -1902,6 +1902,17 @@ pub fn refresh_active_tab_title(
 pub type ThemeLoader = Box<dyn Fn(&str) -> Result<Theme> + Send + 'static>;
 /// Loader callback type used by the platform shell to reload a resolved keymap path.
 pub type KeymapLoader = Box<dyn Fn(&Path) -> Result<Keymap> + Send + 'static>;
+/// Platform policy that resolves unsupported config values and returns diagnostics.
+///
+/// Implementations must be idempotent: normalizing an already-normalized config
+/// returns it unchanged with no diagnostics. App construction and explicit reload
+/// are the only invocation points.
+pub type ConfigNormalizer = Box<dyn Fn(Config) -> (Config, Vec<String>) + Send + 'static>;
+
+/// Preserve every config value for platforms without an additional policy.
+pub(crate) fn identity_config_normalizer() -> ConfigNormalizer {
+    Box::new(|config| (config, Vec::new()))
+}
 
 /// Custom user events delivered through [`EventLoopProxy`].
 ///
@@ -2291,6 +2302,8 @@ pub struct App {
     /// Bounded foreground-process sample armed by accepted input or quiet output.
     foreground_probe_wake: Option<PendingForegroundProbe>,
     pub(super) config: Config,
+    /// Native-platform capability policy applied before config affects app state.
+    pub(crate) config_normalizer: ConfigNormalizer,
     /// Packaged font directories retained for every renderer and live font rebuild.
     pub(super) font_dirs: Vec<PathBuf>,
     /// Font size the loaded config asked for, in logical px. `ResetFontSize`
@@ -2684,6 +2697,15 @@ impl sonicterm_ui::broadcast::BroadcastTab for TabState {
 }
 
 impl App {
+    /// Apply native capability policy and emit each resulting diagnostic once.
+    fn normalize_config(normalizer: &ConfigNormalizer, config: Config) -> Config {
+        let (config, warnings) = normalizer(config);
+        for warning in warnings {
+            tracing::warn!(target: "sonicterm-cfg", "{warning}");
+        }
+        config
+    }
+
     /// Window-pixel rects for every pane in the active tab.
     ///
     /// Derived from the main renderer's logical size, insets, and padding, so
@@ -2784,12 +2806,32 @@ impl App {
     /// state mutation routes through the reducer the shell already owns rather
     /// than a second machine built here.
     pub fn new_with_proxy_and_machine(
-        mut theme: Theme,
+        theme: Theme,
         config: Config,
         keymap: Keymap,
         event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
         machine: sonicterm_app_core::AppStateMachine,
     ) -> Self {
+        Self::new_with_proxy_machine_and_normalizer(
+            theme,
+            config,
+            keymap,
+            event_loop_proxy,
+            machine,
+            identity_config_normalizer(),
+        )
+    }
+
+    /// Build an app after applying the supplied native capability policy.
+    pub(crate) fn new_with_proxy_machine_and_normalizer(
+        mut theme: Theme,
+        config: Config,
+        keymap: Keymap,
+        event_loop_proxy: Option<EventLoopProxy<UserEvent>>,
+        machine: sonicterm_app_core::AppStateMachine,
+        config_normalizer: ConfigNormalizer,
+    ) -> Self {
+        let config = Self::normalize_config(&config_normalizer, config);
         theme.apply_accessibility(&config.accessibility);
         // Seed the process-global tab width cap from config before any tab
         // bar is laid out, so a configured value takes effect on the very
@@ -2824,6 +2866,7 @@ impl App {
             #[cfg(windows)]
             foreground_probe_wake: None,
             config,
+            config_normalizer,
             font_dirs,
             configured_font_size,
             configured_weight_scale,
