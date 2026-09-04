@@ -146,8 +146,7 @@ fn main() -> Result<()> {
     // strict variants so user-visible errors are surfaced after startup.
     let theme_loader: sonicterm_app::ThemeLoader =
         Box::new(|name: &str| Theme::load_name_or_path(name, &asset_dir()));
-    let keymap_loader: sonicterm_app::KeymapLoader =
-        Box::new(|name: &str| Keymap::load_name_or_path(name, &asset_dir()));
+    let keymap_loader: sonicterm_app::KeymapLoader = Box::new(Keymap::load_strict);
     #[cfg(target_os = "windows")]
     {
         use sonicterm_app::menu::{PlatformMenu, Sender};
@@ -309,13 +308,6 @@ fn load_theme(name: &str) -> Theme {
 }
 
 fn load_keymap(name: &str) -> Keymap {
-    if name == "user" {
-        if let Some(path) = sonicterm_cfg::keymap::default_user_keymap_path() {
-            if sonicterm_cfg::keymap::ensure_user_keymap_file(&path).is_ok() {
-                return Keymap::load_or_default(&path);
-            }
-        }
-    }
     Keymap::load_name_or_default(name, &asset_dir())
 }
 

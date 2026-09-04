@@ -13,8 +13,14 @@ Editable copies live in:
 
 The first launch seeds `sonicterm-macos.toml`, `sonicterm-windows.toml`, and
 `sonicterm-linux.toml`. The active file comes from `keymap` in
-`~/.sonicterm/sonicterm.toml`. A name checks the user directory before bundled
-assets. A path is used directly.
+`~/.sonicterm/sonicterm.toml`. A logical name checks the user directory before
+bundled assets; dots are allowed, so `sonicterm-v1.2` remains a name. The portable
+alias `keymap = "user"` selects the editable platform-default file on every OS.
+
+Absolute paths and strings containing `/` or `\` are used directly. So are
+Windows drive/UNC paths and names whose suffix is `.toml` (case-insensitive).
+Relative explicit paths such as `custom.toml`, `./custom`, and `../custom` are
+anchored to SonicTerm's process working directory.
 
 **Edit keymap.toml** opens the platform-default user file. If `keymap` names a
 different file, edit that file directly. Run **Reload Config** after saving.
@@ -239,8 +245,13 @@ SonicTerm 的 keymap 是 TOML 文件。内置文件位于 `assets/keymaps/`。�
 
 首次启动会写入 `sonicterm-macos.toml`、`sonicterm-windows.toml` 和
 `sonicterm-linux.toml`。当前文件由 `~/.sonicterm/sonicterm.toml` 中的
-`keymap` 决定。使用名称时，SonicTerm 先查找用户目录，再查找内置资产。使用路径时
-直接读取该文件。
+`keymap` 决定。逻辑名称会先查找用户目录，再查找内置资产；名称可以包含点，
+所以 `sonicterm-v1.2` 仍按名称处理。可移植别名 `keymap = "user"` 在每个平台上
+都选择该平台可编辑的默认 keymap 文件。
+
+绝对路径以及包含 `/` 或 `\` 的字符串会直接使用；Windows 盘符/UNC 路径和以
+`.toml` 结尾（不区分大小写）的名称也按路径处理。`custom.toml`、`./custom`、
+`../custom` 等相对显式路径以 SonicTerm 进程的工作目录为基准。
 
 **Edit keymap.toml** 打开当前平台的默认用户文件。如果 `keymap` 指向其它文件，
 请直接编辑那个文件。保存后执行 **Reload Config**。SonicTerm 没有 keymap 文件 watcher。
