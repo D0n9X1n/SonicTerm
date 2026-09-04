@@ -850,6 +850,23 @@ fn atlas_eviction_during_frame_requires_retry() {
     );
 }
 
+/// Row-cache UVs must miss after reset even when the eviction counter repeats.
+#[test]
+fn row_cache_uses_nonrepeating_atlas_identity() {
+    let mut atlas = GlyphAtlas::new(1, 1);
+    let mut cache = sonicterm_text::row_glyph_cache::RowGlyphCache::new();
+    cache.resize(1);
+    let stale_identity = row_cache_atlas_identity(&atlas);
+    let stale_evictions = atlas.evictions();
+    cache.insert(7, 11, 13, stale_identity, sonicterm_text::row_glyph_cache::CachedRow::default());
+
+    atlas.reset_in_place();
+
+    assert_eq!(atlas.evictions(), stale_evictions, "the diagnostic counter repeats after reset");
+    assert_ne!(row_cache_atlas_identity(&atlas), stale_identity);
+    assert!(cache.get(7, 11, 13, row_cache_atlas_identity(&atlas)).is_none());
+}
+
 #[test]
 fn same_size_atlas_reset_reuses_gpu_texture() {
     assert!(!atlas_texture_rebuild_required((2048, 2048), (2048, 2048)));
@@ -2363,11 +2380,10 @@ fn shaped_glyph_column_check_rejects_backtracking_columns() {
 /// Every atlas reset must flush the row glyph cache and defeat the frame-skip
 /// guard, in the same function.
 ///
-/// The row cache tags entries with `glyph_atlas.evictions()` alone — the
-/// atlas-local counter, with no allocation-generation component. That filter
-/// cannot tell an old atlas's epoch-0 from a fresh atlas's epoch-0, so a row
-/// entry that outlived a reset could match against tiles it was never built
-/// for and sample whatever now occupies those rectangles.
+/// The row cache's monotonic atlas identity rejects stale UVs even if a future
+/// reset path misses this wholesale clear. The explicit invalidation remains
+/// load-bearing for prompt reclamation and bounds stale entries that can never
+/// match again.
 ///
 /// `last_frame_key` is the second half: it skips presentation when a frame is
 /// byte-identical to the last one. A reset changes what that same frame
@@ -2445,9 +2461,8 @@ fn every_glyph_atlas_reset_invalidates_the_row_cache() {
             invalidated,
             "core.rs:{} resets the glyph atlas without calling \
              `row_glyph_cache.invalidate_all()` in the same function.\n\
-             The row cache keys on the atlas eviction count alone, which resets \
-             with the atlas, so surviving entries can match a fresh atlas and \
-             sample tiles they were not built against.\n\
+             The row cache identity rejects stale UVs, but reset must also \
+             reclaim entries that can never match the new atlas.\n\
              Offending line: {}",
             site + 1,
             lines[site].trim()

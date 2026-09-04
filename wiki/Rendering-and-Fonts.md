@@ -218,10 +218,10 @@ tofu quads under `(pane id, absolute row, row hash)`. `LineQuadCache` stores
 background and decoration quads under the matching row identity. Because cached
 glyph instances already carry projected screen coordinates, their keys include
 pane origin and surface extent as well as cell content, font/style revision, cell
-metrics, display scale, atlas generation, and a selection rectangle only when it
-intersects that row.
+metrics, display scale, atlas content identity, and a selection rectangle only
+when it intersects that row.
 
-Font, theme, scale, pane identity, atlas reset, or UV generation changes
+Font, theme, scale, pane identity, atlas reset, or atlas content-identity changes
 invalidate the affected entries. A font or DPI change rebuilds the body, footer,
 and tab-title font stacks together and invalidates the shared glyph atlas:
 
@@ -255,8 +255,8 @@ Insertion follows these rules:
 Eviction is required for correctness as well as a memory bound: merely refusing
 new entries would keep memory flat while later glyphs disappeared. Atlas resets
 clear metadata and packing state in place without zeroing the 16 MiB CPU pixel
-allocation. Generation and eviction epochs invalidate cached UVs before a new
-tile can reuse an old rectangle.
+allocation. A monotonic content identity changes on every reset or eviction and
+invalidates cached UVs before a new tile can reuse an old rectangle.
 
 The CPU atlas contract distinguishes pixel meaning: monochrome and DirectWrite
 subpixel tiles are linear coverage masks, while self-colored glyph pixels are
@@ -528,9 +528,9 @@ macOS 和其它 Unix 使用 FreeType。FreeType 支持单色、灰度、LCD 次�
 `RowGlyphCache` 按 `(pane id, absolute row, row hash)` 保存字形实例、下划线、缺失字形
 记录和缺字方框。`LineQuadCache` 按相同的行身份保存背景与装饰矩形。由于缓存的字形实例
 已携带投影后的屏幕坐标，其缓存键除单元格内容、字体/样式修订号、单元格度量、显示缩放、
-图集代次及仅在选区与该行相交时加入的选区矩形外，还包含 pane 原点和表面尺寸。
+图集内容身份及仅在选区与该行相交时加入的选区矩形外，还包含 pane 原点和表面尺寸。
 
-字体、主题、缩放、窗格身份、图集重置或 UV 代次变化都会使相关条目失效。字体或 DPI
+字体、主题、缩放、窗格身份、图集重置或内容身份变化都会使相关条目失效。字体或 DPI
 变化会一起重建正文、页脚和标签页标题字体栈，并使共享字形图集失效：
 
 - 终端文字、命令面板查询/结果和普通界面文字使用配置的正文大小；
@@ -557,7 +557,7 @@ CPU `GlyphAtlas` 是固定的 2048×2048 BGRA8 纹理，按每像素四字节计
 
 淘汰不仅用于限制内存，也是正确性要求；若只是拒绝新条目，内存虽然不再增长，后续字形
 却会消失。图集重置会原地清除元数据与打包状态，不会把 16 MiB CPU 像素分配清零。
-代次和淘汰纪元 会在新图块复用旧矩形之前使缓存 UV 失效。
+单调递增的内容身份会在每次重置或淘汰时变化，并在新图块复用旧矩形之前使缓存 UV 失效。
 
 CPU 图集契约会区分像素含义：单色与 DirectWrite 次像素图块是线性覆盖率掩码，自带颜色的
 字形像素则是预乘、sRGB 编码的 BGRA8。每次写入都会把紧密脏矩形记录为 `Coverage` 或

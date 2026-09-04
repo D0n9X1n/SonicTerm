@@ -5,7 +5,7 @@
 //! renderer-model boundary.
 
 use crate::quad::{px_to_ndc, QuadInstance};
-use crate::text_pipeline::GlyphInstance;
+use sonicterm_text::GlyphInstance;
 
 /// One inactive pane's cursor: the cell coordinates inside that pane
 /// plus the pane's rectangle in window pixels. Carried as a flat

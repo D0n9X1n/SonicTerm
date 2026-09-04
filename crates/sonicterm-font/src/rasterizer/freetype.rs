@@ -40,6 +40,25 @@ pub struct FreeTypeRasterizer {
     hb_raster: HarfbuzzRasterizer,
 }
 
+// SAFETY: `slot.bitmap.buffer` must name `source_len` initialized bytes for the lifetime of `slot`.
+unsafe fn glyph_bitmap_data(slot: &FT_GlyphSlotRec_, source_len: usize) -> &[u8] {
+    if slot.bitmap.buffer.is_null() {
+        &[]
+    } else {
+        // When: bitmap.buffer is non-null, borrow its initialized extent while this slot lives.
+        // SAFETY: the caller binds the initialized bitmap extent to this glyph-slot borrow.
+        unsafe { std::slice::from_raw_parts(slot.bitmap.buffer, source_len) }
+    }
+}
+
+fn owned_bgra_image(
+    width: u32,
+    height: u32,
+    data: &[u8],
+) -> Option<image::ImageBuffer<image::Rgba<u8>, Vec<u8>>> {
+    image::ImageBuffer::from_raw(width, height, data.to_vec())
+}
+
 impl FontRasterizer for FreeTypeRasterizer {
     fn rasterize_glyph(
         &self,
@@ -129,7 +148,7 @@ impl FontRasterizer for FreeTypeRasterizer {
         let data =
             // SAFETY: source_len is rows*pitch, the extent FreeType allocated
             // for this bitmap, and the borrowed face keeps the slot alive.
-            unsafe { crate::ftwrap::from_raw_parts(ft_glyph.bitmap.buffer, source_len) };
+            unsafe { glyph_bitmap_data(ft_glyph, source_len) };
 
         let glyph = match mode {
             ftwrap::FT_Pixel_Mode::FT_PIXEL_MODE_LCD => {
@@ -354,7 +373,7 @@ impl FreeTypeRasterizer {
         &self,
         pitch: usize,
         ft_glyph: &FT_GlyphSlotRec_,
-        data: &'static [u8],
+        data: &[u8],
         is_scaled: bool,
     ) -> anyhow::Result<RasterizedGlyph> {
         let width = ft_glyph.bitmap.width as usize;
@@ -376,20 +395,16 @@ impl FreeTypeRasterizer {
             });
         }
 
-        let mut source_image = image::ImageBuffer::<image::Rgba<u8>, &[u8]>::from_raw(
-            width as u32,
-            height as u32,
-            data,
-        )
-        .with_context(|| {
-            format!(
-                "build image from data with \
+        let mut source_image =
+            owned_bgra_image(width as u32, height as u32, data).with_context(|| {
+                format!(
+                    "build image from data with \
                  width={width}, height={height} and pitch={pitch}.\
                  Expected pitch={}. format is {:?}",
-                width * 4,
-                ft_glyph.format
-            )
-        })?;
+                    width * 4,
+                    ft_glyph.format
+                )
+            })?;
 
         // emoji glyphs don't always fill the bitmap size, so we compute
         // the non-transparent bounds
@@ -501,6 +516,10 @@ impl FreeTypeRasterizer {
         rasterize_from_ops(walker.ops, scale_x, -scale_y)
     }
 }
+
+#[cfg(test)]
+#[path = "freetype_tests.rs"]
+mod freetype_tests;
 
 fn rasterize_from_ops(
     ops: Vec<PaintOp>,

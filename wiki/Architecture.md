@@ -137,8 +137,9 @@ inline images. Production `GpuRenderer::render` receives that pane slice plus
 explicit theme, selection, tabs, search, palette, IME, notification, and hovered
 URL arguments.
 
-`RenderInputs` and the `Painter` trait remain public render-model types, but the
-production renderer call does not use them.
+`RenderInputs` remains a public render-model type. The two public `Painter`
+traits are dormant source-compatibility seams with no production implementation;
+production rendering uses `PaneRender` and `WeztermPipeline` directly.
 
 #### Fonts
 
@@ -357,7 +358,8 @@ crate 中身份不变的类型。
 接收状态、滚动条透明度和内联图像。生产路径的 `GpuRenderer::render` 接收这组窗格，
 并通过独立参数接收主题、选区、标签页、搜索、命令面板、输入法、通知和悬停 URL。
 
-`RenderInputs` 和 `Painter` trait 仍是公开的渲染模型类型，但生产渲染调用没有使用它们。
+`RenderInputs` 仍是公开的渲染模型类型。两个公开的 `Painter` trait 都是没有生产实现的休眠
+源码兼容接缝；生产渲染直接使用 `PaneRender` 和 `WeztermPipeline`。
 
 #### 字体
 

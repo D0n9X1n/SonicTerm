@@ -218,6 +218,29 @@ fn shell_meta_in_body_ends_the_match_before_the_meta_char() {
     assert!(!m[0].url.contains('&'));
 }
 
+/// Native compatibility wrappers preserve the explicit native-grammar behavior.
+#[allow(deprecated)]
+#[test]
+fn native_style_wrappers_match_explicit_native_style() {
+    let style = PathStyle::native();
+    let text = if style == PathStyle::Windows {
+        r"open C:\Users\name\file and https://example.com"
+    } else {
+        "open /Users/name/file and https://example.com"
+    };
+
+    assert_eq!(find_targets(text), find_targets_for_style(text, style));
+    for byte_col in 0..=text.len() {
+        assert_eq!(target_at_byte(text, byte_col), target_at_byte_for_style(text, byte_col, style));
+    }
+    for char_col in 0..=text.chars().count() {
+        assert_eq!(
+            target_at_char_col(text, char_col),
+            target_at_char_col_for_style(text, char_col, style),
+        );
+    }
+}
+
 /// Native path scanning covers absolute, dot-relative, and current-home-relative syntax.
 #[test]
 fn finds_supported_native_path_forms() {

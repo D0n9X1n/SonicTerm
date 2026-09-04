@@ -367,7 +367,8 @@ active plain-text target salts only the row-local fragment that recolors, so a
 wrapped target invalidates each participating row without disturbing peer rows.
 Hint-only underlines do not alter glyph cache identity. The ordered visible span
 set remains in `FrameKey`, and underline geometry emits one clipped quad per
-fragment. The cached atlas epoch rejects UVs from before an eviction.
+fragment. The cached atlas content identity rejects UVs from before an eviction
+or reset and never returns to a prior value.
 
 `LineQuadCache` stores coalesced background quads under a parallel key. Its hash
 also covers pane origin and extent because moving or clipping a pane changes
@@ -452,7 +453,7 @@ it again.
 A `GlyphInstance` stores a normalized-device-coordinate (NDC) rectangle, atlas
 UVs, linear-space foreground modulation, and flags for color, subpixel, and
 image-atlas sampling.
-The row cache stores this prepared instance with the atlas epoch.
+The row cache stores this prepared instance with the atlas content identity.
 
 The inline-image atlas is separate. It starts at 1 × 1, promotes to 2,048 × 2,048
 when visible media appears, and demotes after 240 rendered frames without
@@ -928,8 +929,8 @@ PTY 输出最多等待一个显示器帧周期。最终降级状态启用时，�
 `(pane id, absolute row, row hash)`。哈希覆盖单元格、样式 revision、单元格几何、缩放和
 选区重叠。活动的普通文字目标只给实际变色的当前行片段加 salt，因此自动换行目标会使每个
 参与行失效，而不会扰动其它行。仅提示的下划线不改变字形缓存身份。有序可见 span 集合仍进入
-`FrameKey`，下划线几何会为每个片段发射一个经过裁剪的 quad。缓存中的图集代次会拒绝淘汰前
-生成的 UV。
+`FrameKey`，下划线几何会为每个片段发射一个经过裁剪的 quad。缓存中的图集内容身份会拒绝
+淘汰或重置前生成的 UV，且不会回到旧值。
 
 `LineQuadCache` 用相似的键保存合并后的背景四边形。它的哈希还覆盖窗格原点和范围，因为
 移动或裁剪窗格会改变四边形几何。
@@ -996,7 +997,7 @@ GPU 线段端点存放在与 HSV 颜色变换分离的几何参数中，因此�
 成功呈现一帧后再重新启用淘汰。
 
 `GlyphInstance` 保存归一化设备坐标（NDC）矩形、图集 UV、线性空间前景调制色，以及
-彩色、子像素和图像图集采样标志。行缓存会连同图集代次保存这个准备好的实例。
+彩色、子像素和图像图集采样标志。行缓存会连同图集内容身份保存这个准备好的实例。
 
 内联图像使用独立图集。它从 1 × 1 开始，出现可见媒体时扩展到 2,048 × 2,048，连续
 240 个已渲染帧没有内联媒体后再缩回占位符。
