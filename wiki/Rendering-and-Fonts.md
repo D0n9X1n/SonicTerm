@@ -192,7 +192,10 @@ Windows uses DirectWrite by default and falls back to FreeType when DirectWrite
 cannot rasterize a glyph. macOS and other Unix systems use FreeType. FreeType
 supports monochrome, grayscale, LCD subpixel, BGRA color strikes, and
 COLR/SVG handoff. HarfBuzz/COLR paint paths use Cairo-backed drawing for layered
-color glyphs and linear, radial, and sweep gradients.
+color glyphs and linear, radial, and sweep gradients. A gradient whose color
+line carries no usable stop paints nothing, and sweep tiling is bounded, so a
+malformed or extreme color line degrades to a coarse approximation rather than
+unbounded work.
 
 `sonicterm-font::{ftwrap,hbwrap,fcwrap}` owns safe lifetimes around raw handles
 from the generated FreeType, HarfBuzz, and Fontconfig binding crates. Each
@@ -508,7 +511,8 @@ HarfBuzz 把样式片段塑形成字形 id、字符簇、推进量和偏移量�
 Windows 默认使用 DirectWrite；DirectWrite 无法光栅化某字形时回退 FreeType。
 macOS 和其它 Unix 使用 FreeType。FreeType 支持单色、灰度、LCD 次像素、BGRA 彩色
 位图字形，以及 COLR/SVG 交接。HarfBuzz/COLR 绘制路径通过 Cairo 支持分层彩色字形和
-线性、径向、扫描渐变。
+线性、径向、扫描渐变。颜色线没有可用色标时不绘制任何内容；扫描渐变的平铺有上限，
+因此畸形或极端颜色线会退化为粗略近似，而不会产生无界工作量。
 
 `sonicterm-font::{ftwrap,hbwrap,fcwrap}` 为生成的 FreeType、HarfBuzz、Fontconfig
 绑定中的原始句柄管理安全生命周期。每次原生分配都配对正确的销毁函数。内嵌位图字形
