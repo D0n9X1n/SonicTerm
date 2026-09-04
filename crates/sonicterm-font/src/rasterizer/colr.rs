@@ -300,8 +300,7 @@ fn add_sweep_gradient_patches(
     budget: &mut usize,
 ) {
     if !a0.is_finite() || !a1.is_finite() {
-        // When: either sweep endpoint is non-finite, Cairo cannot represent the
-        // patch coordinates, so the span contributes nothing.
+        // When: a0 or a1 is non-finite, Cairo cannot represent the patch coordinates, so the span contributes nothing.
         return;
     }
     const MAX_ANGLE: f64 = std::f64::consts::PI / 8.;
@@ -358,22 +357,17 @@ fn first_visible_tile(first_angle: f64, last_angle: f64, span: f64) -> Option<is
     }
 
     let tile = if first_angle >= 0. {
-        // When: the first stop starts at or after zero, choose the nearest tile
-        // shifted backward until that stop reaches the visible turn.
+        // When: first_angle is at or after zero, shift backward until the first stop reaches the visible turn.
         -(first_angle / span).ceil()
     } else if last_angle < 0. {
-        // When: the last stop remains behind zero, choose the nearest tile
-        // shifted forward until that stop reaches the visible turn.
+        // When: last_angle remains behind zero, shift forward until the last stop reaches the visible turn.
         (-last_angle / span).ceil()
     } else {
-        // When: the unshifted stop span already crosses zero, tile zero is the
-        // first visible copy.
         0.
     };
 
     if !tile.is_finite() || tile < isize::MIN as f64 || tile >= isize::MAX as f64 {
-        // When: the derived tile cannot fit in the integer used by the bounded
-        // emission loop, so the malformed span contributes no mesh.
+        // When: tile is non-finite or outside isize, the bounded emission loop cannot represent it.
         return None;
     }
 
@@ -407,8 +401,7 @@ fn apply_sweep_gradient_patches(
         || !start_angle.is_finite()
         || !end_angle.is_finite()
     {
-        // When: sweep geometry is non-finite, Cairo cannot represent its patch
-        // coordinates, so the gradient contributes no mesh.
+        // When: center, radius, start_angle, or end_angle is non-finite, Cairo cannot represent the sweep coordinates.
         return;
     }
 
