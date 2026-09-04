@@ -403,12 +403,112 @@ class RepositoryTests(unittest.TestCase):
             text,
         )
 
-    def test_release_validation_requires_exact_main_ci_and_source_gates(self):
+    def test_ci_aggregates_fail_closed_over_every_platform_shard(self):
+        text = (_HERE.parent / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        contracts = {
+            "macos": (
+                "macos-14 / unit tests",
+                ("macos-core", "macos-coverage"),
+            ),
+            "windows": (
+                "windows-latest / unit tests",
+                ("windows-native", "windows-checks", "windows-tests"),
+            ),
+            "linux": (
+                "ubuntu 22.04 / workspace, packages, X11, Wayland",
+                ("linux-core", "linux-packages"),
+            ),
+        }
+
+        def assert_contract(job: str, block: str, name: str, shards: tuple[str, ...]):
+            self.assertIn(f"name: {name}", block)
+            self.assertIn(f"needs: [{', '.join(shards)}]", block)
+            self.assertIn("if: always()", block)
+            for shard in shards:
+                self.assertIn(f"${{{{ needs.{shard}.result }}}}", block)
+            self.assertIn('test "$result" = "success"', block)
+
+        for job, (name, shards) in contracts.items():
+            with self.subTest(job=job):
+                block = text.split(f"  {job}:\n", 1)[1]
+                block = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", block, maxsplit=1)[0]
+                assert_contract(job, block, name, shards)
+                with self.assertRaises(AssertionError):
+                    assert_contract(job, block.replace("if: always()", "if: success()"), name, shards)
+                with self.assertRaises(AssertionError):
+                    assert_contract(
+                        job,
+                        block.replace(f"${{{{ needs.{shards[0]}.result }}}}", "missing", 1),
+                        name,
+                        shards,
+                    )
+
+    def test_ci_caches_are_bounded_and_cairo_is_published_immediately(self):
+        text = (_HERE.parent / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("CI_CACHE_NAMESPACE: ci-v3", text)
+        self.assertEqual(text.count("uses: Swatinem/rust-cache@"), 6)
+        self.assertEqual(text.count("shared-key: ${{ env.CI_CACHE_NAMESPACE }}-"), 6)
+        self.assertEqual(text.count("add-job-id-key: false"), 6)
+        self.assertEqual(text.count("cache-workspace-crates: false"), 6)
+        self.assertEqual(
+            text.count(
+                "save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}"
+            ),
+            3,
+        )
+        self.assertEqual(text.count("save-if: false"), 3)
+
+        native = text.split("  windows-native:\n", 1)[1]
+        native = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", native, maxsplit=1)[0]
+        restore = native.index("uses: actions/cache/restore@")
+        install = native.index("- name: Install Cairo for Windows")
+        save = native.index("uses: actions/cache/save@")
+        self.assertLess(restore, install)
+        self.assertLess(install, save)
+        self.assertIn("if: steps.vcpkg-cache.outputs.cache-hit != 'true'", native)
+        self.assertIn("key: ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-", native)
+
+        release = (_HERE.parent / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("CI_CACHE_NAMESPACE: ci-v3", release)
+        self.assertIn("key: ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-", release)
+
+    def test_linux_core_installs_gpu_runtime_dependencies(self):
+        text = (_HERE.parent / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        core = text.split("  linux-core:\n", 1)[1]
+        core = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", core, maxsplit=1)[0]
+        for dependency in ("mesa-vulkan-drivers", "libvulkan1"):
+            with self.subTest(dependency=dependency):
+                self.assertIn(dependency, core)
+
+    def test_workspace_tests_cover_unit_and_integration_targets_once(self):
+        script = (_HERE.parent / "scripts" / "check-workspace-crates.sh").read_text(
+            encoding="utf-8"
+        )
+        command = r"(?m)^cargo test --workspace --lib --bins --tests --no-fail-fast$"
+        self.assertEqual(len(re.findall(command, script)), 1)
+        self.assertNotIn("while IFS=", script)
+
+        workflow = (_HERE.parent / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(workflow.count("bash scripts/check-workspace-crates.sh"), 3)
+        self.assertNotIn("Run per-crate unit/build gate", workflow)
+        self.assertNotIn("cargo test --workspace --lib --bins\n", workflow)
+
+    def test_release_reuses_exact_main_ci_and_runs_packaging_directly(self):
         text = (_HERE.parent / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
         )
         validation = text.split("  validate-release-tag:\n", 1)[1].split(
-            "\n  unit-tests-mac:\n", 1
+            "\n  build-mac-x86_64:\n", 1
         )[0]
         required = [
             "actions: read",
@@ -421,40 +521,28 @@ class RepositoryTests(unittest.TestCase):
             "actions/workflows/ci.yml/runs?branch=main&event=push&status=success&",
             'head_sha=${RELEASE_SHA}&per_page=100',
             'check-main-ci --sha "$RELEASE_SHA"',
-            "cargo metadata --no-deps --format-version 1",
-            "cargo fmt --all --check",
-            "cargo clippy --workspace --all-targets -- -D warnings",
-            "cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings",
-            "bash scripts/check-rust-version.sh",
-            "bash scripts/check-workflow-supply-chain.sh",
-            "bash scripts/check-authored-rust-comments.sh",
-            "bash scripts/check-no-raw-process-exit.sh",
-            "bash scripts/check-window-owner-registration.sh",
-            'RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps',
-            'RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-io --no-deps --features ssh',
+            'check-version --tag "${{ github.ref_name }}"',
         ]
         for contract in required:
             with self.subTest(contract=contract):
                 self.assertIn(contract, validation)
-        self.assertIn("timeout-minutes: 135", validation.split("    steps:\n", 1)[0])
-        timed_steps = {
-            "Validate workspace manifests": 2,
-            "Check formatting": 5,
-            "Clippy": 15,
-            "Clippy optional ssh backend": 10,
-            "Run source policy gates": 10,
-            "Check public Rustdoc": 10,
-            "Check optional ssh Rustdoc": 5,
-        }
-        for name, timeout in timed_steps.items():
-            with self.subTest(step=name):
-                block = validation.split(f"      - name: {name}\n", 1)[1]
-                block = block.split("\n      - ", 1)[0]
-                self.assertIn(f"timeout-minutes: {timeout}", block)
-        for job in ("unit-tests-mac", "unit-tests-windows", "unit-tests-linux"):
+        for removed in (
+            "cargo fmt --all --check",
+            "cargo clippy --workspace",
+            "cargo doc --workspace",
+            "unit-tests-mac:",
+            "unit-tests-windows:",
+            "unit-tests-linux:",
+            "Swatinem/rust-cache@",
+        ):
+            with self.subTest(removed=removed):
+                self.assertNotIn(removed, text)
+        for job in ("build-mac-x86_64", "build-mac-aarch64", "build-windows", "package-linux"):
             block = text.split(f"  {job}:\n", 1)[1]
             block = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", block, maxsplit=1)[0]
             self.assertIn("needs: [validate-release-tag]", block)
+        self.assertIn("uses: actions/cache/restore@", text)
+        self.assertNotIn("uses: actions/cache/save@", text)
 
 
 class CommandLineTests(unittest.TestCase):

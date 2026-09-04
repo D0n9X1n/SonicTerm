@@ -15,6 +15,7 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: short
   CARGO_INCREMENTAL: 0
+  CI_CACHE_NAMESPACE: ci-v3
   CARGO_WIX_VERSION: "0.3.9"
   WIX_TOOLSET_VERSION: "3.14.1.20250415"
 
@@ -22,7 +23,7 @@ jobs:
   validate-release-tag:
     name: Validate release provenance and source
     runs-on: ubuntu-latest
-    timeout-minutes: 135
+    timeout-minutes: 35
     permissions:
       actions: read
       contents: read
@@ -60,239 +61,24 @@ jobs:
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&head_sha=${RELEASE_SHA}&per_page=100" | \
             python3 scripts/prepare-release-assets.py check-main-ci --sha "$RELEASE_SHA"
 
-      - name: Install native dependencies
-        timeout-minutes: 10
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config \
-            libcairo2-dev \
-            libfontconfig1-dev \
-            libwayland-dev \
-            libx11-dev \
-            libxcb1-dev \
-            libxkbcommon-dev \
-            libxkbcommon-x11-0
-
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         timeout-minutes: 5
         with:
           toolchain: stable
-          components: clippy, rustfmt
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        timeout-minutes: 10
-        with:
-          shared-key: release-validation
 
       - name: Validate tag against every workspace package
         timeout-minutes: 5
         run: python3 scripts/prepare-release-assets.py check-version --tag "${{ github.ref_name }}"
 
-      - name: Validate workspace manifests
-        timeout-minutes: 2
-        run: cargo metadata --no-deps --format-version 1 > /dev/null
-
-      - name: Check formatting
-        timeout-minutes: 5
-        run: cargo fmt --all --check
-
-      - name: Clippy
-        timeout-minutes: 15
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Clippy optional ssh backend
-        timeout-minutes: 10
-        run: cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings
-
-      - name: Run source policy gates
-        timeout-minutes: 10
-        run: |
-          bash scripts/check-rust-version.sh
-          bash scripts/check-workflow-supply-chain.sh
-          bash scripts/check-authored-rust-comments.sh
-          bash scripts/check-no-raw-process-exit.sh
-          bash scripts/check-window-owner-registration.sh
-
-      - name: Check public Rustdoc
-        timeout-minutes: 10
-        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
-
-      - name: Check optional ssh Rustdoc
-        timeout-minutes: 5
-        run: RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-io --no-deps --features ssh
-
       - name: Test release asset tooling
         timeout-minutes: 5
         run: bash scripts/test-release-assets.sh
-
-  unit-tests-mac:
-    name: macOS / unit tests
-    runs-on: macos-14
-    timeout-minutes: 45
-    needs: [validate-release-tag]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        timeout-minutes: 5
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
-        timeout-minutes: 5
-        with:
-          toolchain: stable
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        timeout-minutes: 10
-        with:
-          shared-key: release-unit-macos-14
-      - name: Run unit tests
-        timeout-minutes: 20
-        run: cargo test --workspace --lib --bins
-
-      - name: Run per-crate unit/build gate
-        timeout-minutes: 30
-        shell: bash
-        run: bash scripts/check-workspace-crates.sh
-
-      - name: Run release-note unit test
-        timeout-minutes: 5
-        shell: bash
-        run: bash scripts/test-release-notes.sh
-
-  unit-tests-windows:
-    name: Windows / unit tests
-    runs-on: windows-latest
-    timeout-minutes: 120
-    needs: [validate-release-tag]
-    env:
-      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        timeout-minutes: 5
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
-        timeout-minutes: 5
-        with:
-          toolchain: stable
-
-      - name: Resolve vcpkg commit (for cache key)
-        id: vcpkg
-        timeout-minutes: 2
-        shell: pwsh
-        run: |
-          $root = if ($env:VCPKG_INSTALLATION_ROOT) { $env:VCPKG_INSTALLATION_ROOT } else { "C:\vcpkg" }
-          $sha = (git -C $root rev-parse HEAD).Trim()
-          "sha=$sha" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "image=$env:ImageVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-
-      - name: Cache vcpkg binaries (Cairo)
-        timeout-minutes: 5
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
-          key: vcpkg-cairo-${{ runner.os }}-${{ steps.vcpkg.outputs.image }}-${{ steps.vcpkg.outputs.sha }}-${{ hashFiles('scripts/setup-windows-cairo.ps1') }}
-          restore-keys: |
-            vcpkg-cairo-${{ runner.os }}-
-
-      - name: Install Cairo
-        timeout-minutes: 30
-        shell: pwsh
-        run: .\scripts\setup-windows-cairo.ps1
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        timeout-minutes: 10
-        with:
-          shared-key: release-unit-windows
-      - name: Run unit tests
-        timeout-minutes: 30
-        run: cargo test --workspace --lib --bins
-
-      - name: Run per-crate unit/build gate
-        timeout-minutes: 60
-        shell: bash
-        run: bash scripts/check-workspace-crates.sh
-
-      - name: Verify Windows software presentation capability
-        timeout-minutes: 5
-        run: cargo test -p sonicterm-gpu --test windows_software_present_capability -- --nocapture
-
-      - name: Verify Windows WARP allocator baseline
-        timeout-minutes: 5
-        run: cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture
-
-      - name: Verify Windows selection presentation
-        timeout-minutes: 5
-        run: cargo test -p sonicterm-app --test windows_software_selection_present -- --nocapture
-
-      - name: Run release-note unit test
-        timeout-minutes: 5
-        shell: bash
-        run: bash scripts/test-release-notes.sh
-
-  unit-tests-linux:
-    name: Linux / unit tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    needs: [validate-release-tag]
-    container: ubuntu:22.04
-    env:
-      GIT_CONFIG_COUNT: "1"
-      GIT_CONFIG_KEY_0: safe.directory
-      GIT_CONFIG_VALUE_0: ${{ github.workspace }}
-    steps:
-      - name: Install runner and native dependencies
-        timeout-minutes: 10
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            ca-certificates \
-            curl \
-            git \
-            build-essential \
-            zstd \
-            pkg-config \
-            libcairo2-dev \
-            libfontconfig1-dev \
-            libwayland-dev \
-            libx11-dev \
-            libxcb1-dev \
-            libxkbcommon-dev \
-            mesa-vulkan-drivers \
-            libvulkan1 \
-            python3
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        timeout-minutes: 5
-
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
-        timeout-minutes: 5
-        with:
-          toolchain: stable
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        timeout-minutes: 10
-        with:
-          shared-key: release-unit-linux-ubuntu-22.04
-
-      - name: Run unit tests
-        timeout-minutes: 20
-        run: cargo test --workspace --lib --bins
-
-      - name: Run per-crate unit/build gate
-        timeout-minutes: 30
-        run: bash scripts/check-workspace-crates.sh
-
-      - name: Run Linux release tooling tests
-        timeout-minutes: 5
-        run: |
-          bash scripts/test-linux-packages.sh
-          bash scripts/test-release-assets.sh
-          bash scripts/test-release-notes.sh
 
   build-mac-x86_64:
     name: Build macOS x86_64 binary
     runs-on: macos-15-intel
     timeout-minutes: 45
-    needs: [unit-tests-mac]
+    needs: [validate-release-tag]
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
@@ -310,11 +96,6 @@ jobs:
         timeout-minutes: 10
         run: brew install cairo pkg-config
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        timeout-minutes: 10
-        with:
-          shared-key: release-mac-x86_64
-
       - name: Build x86_64
         timeout-minutes: 30
         run: cargo build --release --target x86_64-apple-darwin -p sonicterm-mac
@@ -328,8 +109,8 @@ jobs:
   build-mac-aarch64:
     name: Build macOS aarch64 binary
     runs-on: macos-14
-    timeout-minutes: 30
-    needs: [unit-tests-mac]
+    timeout-minutes: 45
+    needs: [validate-release-tag]
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
@@ -347,13 +128,8 @@ jobs:
         timeout-minutes: 10
         run: brew install cairo pkg-config
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        timeout-minutes: 10
-        with:
-          shared-key: release-mac-aarch64
-
       - name: Build aarch64
-        timeout-minutes: 20
+        timeout-minutes: 30
         run: cargo build --release --target aarch64-apple-darwin -p sonicterm-mac
 
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
@@ -436,7 +212,7 @@ jobs:
     name: Build Windows msi
     runs-on: windows-latest
     timeout-minutes: 45
-    needs: [unit-tests-windows]
+    needs: [validate-release-tag]
     env:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
     steps:
@@ -460,24 +236,19 @@ jobs:
           "sha=$sha" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "image=$env:ImageVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      - name: Cache vcpkg binaries (Cairo)
+      - name: Restore vcpkg binaries (Cairo)
         timeout-minutes: 5
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
-          key: vcpkg-cairo-${{ runner.os }}-${{ steps.vcpkg.outputs.image }}-${{ steps.vcpkg.outputs.sha }}-${{ hashFiles('scripts/setup-windows-cairo.ps1') }}
+          key: ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-${{ steps.vcpkg.outputs.image }}-${{ steps.vcpkg.outputs.sha }}-${{ hashFiles('scripts/setup-windows-cairo.ps1') }}
           restore-keys: |
-            vcpkg-cairo-${{ runner.os }}-
+            ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-
 
       - name: Install Cairo
         timeout-minutes: 30
         shell: pwsh
         run: .\scripts\setup-windows-cairo.ps1
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        timeout-minutes: 10
-        with:
-          shared-key: release-windows
 
       - name: Install cargo-wix
         timeout-minutes: 10
@@ -490,7 +261,7 @@ jobs:
           "C:\Program Files (x86)\WiX Toolset v3.14\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Build release binary
-        timeout-minutes: 20
+        timeout-minutes: 30
         run: cargo build --release --target x86_64-pc-windows-msvc -p sonicterm-windows
 
       - name: Build and register msi asset
@@ -545,8 +316,8 @@ jobs:
   package-linux:
     name: Package Linux deb and tar.gz
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    needs: [unit-tests-linux]
+    timeout-minutes: 45
+    needs: [validate-release-tag]
     container: ubuntu:22.04
     env:
       GIT_CONFIG_COUNT: "1"
@@ -594,13 +365,8 @@ jobs:
         with:
           toolchain: stable
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        timeout-minutes: 10
-        with:
-          shared-key: release-linux-ubuntu-22.04
-
       - name: Build Linux release binary
-        timeout-minutes: 20
+        timeout-minutes: 30
         run: cargo build --release -p sonicterm-linux
 
       - name: Build, validate, and register Linux packages
