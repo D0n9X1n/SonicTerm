@@ -226,9 +226,8 @@ fn maximum_iterm2_metadata_adds_no_heap_beyond_the_staging_pool() {
     header.push(b':');
     let floor_payload = vec![b'A'; MIN_CAPTURE_STAGING_BYTES];
     let full_payload = vec![b'A'; MAX_MEDIA_PAYLOAD_BYTES];
-    let mut parsers: Vec<Parser> = (0..GUARANTEED_CONCURRENT_CAPTURES)
-        .map(|_| Parser::new(Grid::new(80, 24)))
-        .collect();
+    let mut parsers: Vec<Parser> =
+        (0..GUARANTEED_CONCURRENT_CAPTURES).map(|_| Parser::new(Grid::new(80, 24))).collect();
 
     let before = held();
     for parser in parsers.iter_mut() {
