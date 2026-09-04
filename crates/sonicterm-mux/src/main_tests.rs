@@ -136,12 +136,9 @@ mod unix {
         fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
         let uid = owner(&runtime);
 
-        let socket = resolve_unix_default_socket_with(
-            Some(&runtime),
-            scratch.path(),
-            uid,
-            || panic!("trusted XDG path must not query login identity"),
-        )
+        let socket = resolve_unix_default_socket_with(Some(&runtime), scratch.path(), uid, || {
+            panic!("trusted XDG path must not query login identity")
+        })
         .unwrap();
         assert_eq!(socket, runtime.join("sonicterm-mux.sock"));
 
