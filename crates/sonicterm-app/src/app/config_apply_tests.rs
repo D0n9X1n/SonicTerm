@@ -164,23 +164,33 @@ fn reload_normalizes_before_baselines_and_storage() {
     assert_eq!(warning_count.load(AtomicOrdering::SeqCst), 1);
 }
 
-/// Every new-window path reads backdrop from the normalized stored config.
+/// Linux startup and reload store only the backdrop consumed by future windows.
 #[test]
-fn future_window_paths_consume_stored_normalized_backdrop() {
-    for (file, source) in [
-        ("event_loop.rs", include_str!("event_loop.rs")),
-        ("misc.rs", include_str!("misc.rs")),
-        ("tear_out.rs", include_str!("tear_out.rs")),
-    ] {
-        assert!(
-            source.contains("self.config.appearance.backdrop"),
-            "{file} must derive native window attributes from App.config"
-        );
-        assert!(
-            !source.contains("new_cfg.appearance.backdrop"),
-            "{file} bypasses normalized App.config"
-        );
-    }
+fn startup_and_reload_store_the_normalized_backdrop() {
+    use sonicterm_cfg::config::BackdropKind;
+
+    let mut startup = Config::default();
+    startup.appearance.backdrop = BackdropKind::Mica;
+    let mut app = crate::shell::LinuxShell::new(
+        sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default()),
+        Theme::default(),
+        startup,
+        Keymap::default(),
+    )
+    .with_config_normalizer(Box::new(|mut config| {
+        if config.appearance.backdrop != BackdropKind::Opaque {
+            config.appearance.backdrop = BackdropKind::Opaque;
+        }
+        (config, Vec::new())
+    }))
+    .into_app_for_test();
+    assert_eq!(app.config.appearance.backdrop, BackdropKind::Opaque);
+
+    let mut reloaded = Config::default();
+    reloaded.appearance.backdrop = BackdropKind::Acrylic;
+    app.apply_new_config(reloaded);
+
+    assert_eq!(app.config.appearance.backdrop, BackdropKind::Opaque);
 }
 
 /// Normalization is the first reload transform, before warm-pool and baseline changes.

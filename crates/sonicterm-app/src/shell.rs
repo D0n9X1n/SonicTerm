@@ -354,6 +354,12 @@ impl LinuxShell {
         self
     }
 
+    /// Build a headless app for startup-policy regression tests.
+    #[cfg(test)]
+    pub(crate) fn into_app_for_test(self) -> App {
+        self.runner.into_app_with_proxy(None)
+    }
+
     /// Install the nonblocking postmortem breadcrumb recorder.
     #[must_use]
     pub fn with_breadcrumb_recorder(
