@@ -343,6 +343,14 @@ protocol, raw-byte replay ring, and attach/input/resize/kill operations. It is a
 workspace crate, is not consumed by the GUI, and is not included in release
 packages.
 
+Its default endpoint is scoped by user and login session. Unix uses a validated
+owner-only runtime directory; listener mode is applied before bind where the OS
+supports it, while Darwin keeps the endpoint inside that inaccessible directory
+until its final `0600` mode is set. Startup refuses live, foreign-owned, and
+non-socket paths, and removes only an unchanged stale socket owned by the current
+user. Windows names the pipe with the current user SID and terminal-session ID,
+then applies a protected DACL granting access only to that user before pipe creation.
+
 **First-party dependencies:** `sonicterm-io`.
 
 **Read:** `src/{main,proto,frame,server}.rs`.
@@ -676,6 +684,12 @@ ConPTY 仍封装在 `sonicterm-io` 后。
 **职责：** 独立的持久 PTY multiplexer daemon，提供 framed bincode 协议、原始字节
 回放环，以及 attach/input/resize/kill 操作。它属于 workspace，但 GUI 不依赖它，
 发布包也不包含它。
+
+默认端点按用户和登录会话隔离。Unix 使用经验证且仅所有者可访问的运行时目录；操作系统
+支持时会在 bind 前设置 listener mode，而 Darwin 会把端点保留在该不可被其它用户访问的
+目录内，随后立即设置最终的 `0600` mode。启动时会拒绝仍存活、外部用户所有或非 socket
+的路径，只删除当前用户所有且复查后未改变的陈旧 socket。Windows pipe 名称包含当前用户
+SID 与终端会话 ID，并在创建 pipe 前应用只授权该用户的受保护 DACL。
 
 **第一方依赖：** `sonicterm-io`。
 
