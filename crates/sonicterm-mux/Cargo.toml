@@ -30,7 +30,16 @@ serde = { workspace = true }
 parking_lot = { workspace = true }
 crossbeam-channel = { workspace = true }
 bincode = { version = "2", features = ["serde"] }
-interprocess = "2.2"
+interprocess = "2.4"
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows = { workspace = true, features = ["Win32_System_Pipes"] }
+windows = { workspace = true, features = [
+    "Win32_Security",
+    "Win32_System_Pipes",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Threading",
+] }
+widestring = "1.2"
