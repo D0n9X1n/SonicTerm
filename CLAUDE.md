@@ -204,8 +204,11 @@ answer that costs more to retract than it did to reach.
 - **Pin** — a regression test that fails before the change and passes after.
   Without it there is a claim, not a fix.
 
-Three rules carry the same weight as the steps:
+Four rules carry the same weight as the steps:
 
+- **Use the normal color profile for visual tests.** Never launch SonicTerm with
+  `NO_COLOR` or another no-color profile; it invalidates terminal color and visual
+  behavior. Remove inherited no-color overrides before starting the app.
 - **Isolate the diagnostic run.** Point config and logs at scratch directories.
   Override those specific directories, not `HOME` — the shell inside the
   terminal inherits it, so a scratch `HOME` changes the repro itself.
