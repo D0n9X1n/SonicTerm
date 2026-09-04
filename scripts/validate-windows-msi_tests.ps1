@@ -51,42 +51,58 @@ function Assert-ThrowsLike {
     throw "Expected error like '$Pattern', but the action succeeded"
 }
 
-[xml]$wix = Get-Content -LiteralPath "$PSScriptRoot\..\crates\sonicterm-windows\wix\main.wxs" -Raw
-$product = @($wix.SelectNodes("//*[local-name()='Product']"))
-if ($product.Count -ne 1 -or [guid]$product[0].GetAttribute("UpgradeCode") -ne [guid]$ExpectedUpgradeCode) {
-    throw "Validator UpgradeCode drifted from main.wxs"
-}
-$features = @(
-    $wix.SelectNodes("//*[local-name()='Feature']") |
-        Where-Object { $_.GetAttribute("Id") -ceq $ExpectedFeature }
-)
-if ($features.Count -ne 1) {
-    throw "main.wxs must contain exactly one feature '$ExpectedFeature'"
-}
-$expectedSorted = @($ExpectedComponents | Sort-Object)
-$componentNodes = @($wix.SelectNodes("//*[local-name()='Component']"))
-$sourceComponents = @(
-    $componentNodes |
-        ForEach-Object { $_.GetAttribute("Id") } |
-        Sort-Object
-)
-if (Compare-Object $expectedSorted $sourceComponents -CaseSensitive) {
-    throw "main.wxs component set differs from the validator contract"
-}
-$sourceFeatureComponents = @(
-    $features[0].SelectNodes(".//*[local-name()='ComponentRef']") |
-        ForEach-Object { $_.GetAttribute("Id") } |
-        Sort-Object
-)
-if (Compare-Object $expectedSorted $sourceFeatureComponents -CaseSensitive) {
-    throw "main.wxs Binaries references differ from the validator contract"
-}
-foreach ($component in $ExpectedComponents) {
-    $node = $componentNodes | Where-Object { $_.GetAttribute("Id") -ceq $component }
-    if (@($node).Count -ne 1 -or $node.GetAttribute("Win64") -cne "yes") {
-        throw "main.wxs is missing 64-bit component '$component'"
+function Test-WixSourceContract {
+    param([xml]$Wix)
+
+    $product = @($Wix.SelectNodes("//*[local-name()='Product']"))
+    if ($product.Count -ne 1 -or [guid]$product[0].GetAttribute("UpgradeCode") -ne [guid]$ExpectedUpgradeCode) {
+        throw "Validator UpgradeCode drifted from main.wxs"
+    }
+    if ($product[0].GetAttribute("Version") -cne '$(var.Version)') {
+        throw 'main.wxs Product/@Version must bind $(var.Version)'
+    }
+    $features = @(
+        $Wix.SelectNodes("//*[local-name()='Feature']") |
+            Where-Object { $_.GetAttribute("Id") -ceq $ExpectedFeature }
+    )
+    if ($features.Count -ne 1) {
+        throw "main.wxs must contain exactly one feature '$ExpectedFeature'"
+    }
+    $expectedSorted = @($ExpectedComponents | Sort-Object)
+    $componentNodes = @($Wix.SelectNodes("//*[local-name()='Component']"))
+    $sourceComponents = @(
+        $componentNodes |
+            ForEach-Object { $_.GetAttribute("Id") } |
+            Sort-Object
+    )
+    if (Compare-Object $expectedSorted $sourceComponents -CaseSensitive) {
+        throw "main.wxs component set differs from the validator contract"
+    }
+    $sourceFeatureComponents = @(
+        $features[0].SelectNodes(".//*[local-name()='ComponentRef']") |
+            ForEach-Object { $_.GetAttribute("Id") } |
+            Sort-Object
+    )
+    if (Compare-Object $expectedSorted $sourceFeatureComponents -CaseSensitive) {
+        throw "main.wxs Binaries references differ from the validator contract"
+    }
+    foreach ($component in $ExpectedComponents) {
+        $node = $componentNodes | Where-Object { $_.GetAttribute("Id") -ceq $component }
+        if (@($node).Count -ne 1 -or $node.GetAttribute("Win64") -cne "yes") {
+            throw "main.wxs is missing 64-bit component '$component'"
+        }
     }
 }
+
+[xml]$wix = Get-Content -LiteralPath "$PSScriptRoot\..\crates\sonicterm-windows\wix\main.wxs" -Raw
+Test-WixSourceContract $wix
+
+[xml]$hardcodedVersionWix = $wix.OuterXml
+$hardcodedVersionProduct = $hardcodedVersionWix.SelectSingleNode("//*[local-name()='Product']")
+$hardcodedVersionProduct.SetAttribute("Version", "1.2.3")
+Assert-ThrowsLike {
+    Test-WixSourceContract $hardcodedVersionWix
+} "*Product/@Version must bind*"
 
 $valid = New-ValidMetadata
 $result = Test-MsiMetadata `
