@@ -300,9 +300,13 @@ an incomplete native close into success.
 ### Release verification boundary
 
 Root `Cargo.toml` `[workspace.package]` is the version source. The release
-workflow starts for tags matching `v[0-9]+.[0-9]+.[0-9]+*`. It continues only
-when `prepare-release-assets.py check-version` parses the tag as a semantic
-version and finds that version on every workspace package.
+workflow starts for tags matching `v[0-9]+.[0-9]+.[0-9]+*`. It first peels the
+tag ref to its commit, then requires that commit to be in `origin/main` history
+and an exact completed successful `CI` push run to exist for it. It continues
+only when
+`prepare-release-assets.py check-version` parses the tag as a semantic version,
+finds that version on every workspace package, and the normal source-consistency
+gates pass.
 
 The workflow builds five required package tuples:
 
@@ -344,11 +348,14 @@ The workflow does not perform Developer ID signing, notarization, or a packaged
 DMG launch smoke. The Windows workflow does not sign or install-run the MSI.
 Installer signing is therefore not a verified release invariant.
 
-Release jobs run workspace unit tests, the per-crate unit/build gate, release
-asset and note tests, Windows presentation and allocator tests, and Linux package
-smokes. They do not repeat every normal CI check: formatting, Clippy, Rustdoc,
-policy checks, resource baselines, wiki publication tests, and coverage remain in
-normal CI described in [Development and Release](Development-and-Release).
+Release validation repeats Cargo metadata, formatting, both Clippy modes,
+workspace and optional-SSH Rustdoc, and the declared-version, workflow,
+authored-comment, process-exit, and window-owner policy checks before any
+platform job starts. Release platform jobs then run workspace unit tests, the
+per-crate unit/build gate, release asset and note tests, Windows presentation and
+allocator tests, and Linux package smokes. Resource baselines, wiki publication
+tests, and coverage remain in normal CI described in
+[Development and Release](Development-and-Release).
 
 ### Source and check map
 
@@ -595,8 +602,10 @@ Windows 拆除先给 reader 500 ms，再给 writer 500 ms，然后关闭主端�
 ### 发布验证边界
 
 根目录 `Cargo.toml` 的 `[workspace.package]` 是版本来源。发布工作流只由匹配
-`v[0-9]+.[0-9]+.[0-9]+*` 的 tag 启动；随后 `prepare-release-assets.py check-version`
-必须把 tag 解析为语义版本，并确认该版本与每个 workspace package 一致。
+`v[0-9]+.[0-9]+.[0-9]+*` 的 tag 启动。它首先把 tag ref 解引用到对应 commit，要求该
+commit 位于 `origin/main` 历史中，并要求它存在一个完全相同、已完成且成功的 `CI` push run。随后
+`prepare-release-assets.py check-version` 必须把 tag 解析为语义版本，确认该版本与每个
+workspace package 一致，并要求普通源码一致性 gate 通过。
 
 工作流构建五组必需包：
 
@@ -632,10 +641,11 @@ macOS 打包会检查二进制架构和应用的 ad-hoc 签名。工作流没有
 公证或 DMG 打包后启动冒烟测试。Windows 工作流也没有签名 MSI 或安装运行它。因此，
 安装包签名不是当前已验证的发布不变量。
 
-发布任务会运行 workspace 单元测试、逐 crate 单元/构建闸门、发布资产与说明测试、Windows
-呈现和分配器测试，以及 Linux 包冒烟测试。它不会重复普通 CI 的全部检查；格式、Clippy、
-Rustdoc、策略检查、资源基线、Wiki 发布测试和覆盖率仍由普通 CI 负责，详见
-[开发与发布](Development-and-Release)。
+发布验证会在任何平台 job 开始前重复 Cargo metadata、格式、两种 Clippy、workspace 与
+optional-SSH Rustdoc，以及声明版本、工作流、第一方注释、process-exit 和 window-owner
+策略检查。之后各平台发布 job 运行 workspace 单元测试、逐 crate 单元/构建闸门、发布资产与
+说明测试、Windows 呈现和分配器测试，以及 Linux 包冒烟测试。资源基线、Wiki 发布测试和
+覆盖率仍由普通 CI 负责，详见[开发与发布](Development-and-Release)。
 
 ### 源码与检查索引
 

@@ -1,5 +1,28 @@
 use super::*;
 
+/// Help names the shipping binary and makes the secure default discoverable.
+#[test]
+fn usage_names_actual_binary_and_optional_socket() {
+    assert_eq!(usage(), "sonic-mux <daemon|list|kill <pane_id>> [--socket <path>]");
+    assert_eq!(extract_explicit_socket(&[]).unwrap(), None);
+    assert_eq!(
+        extract_explicit_socket(&["--socket".into(), "custom.sock".into()]).unwrap(),
+        Some("custom.sock".into())
+    );
+}
+
+/// Linux audit absence degrades to one stable user-scoped fallback identity.
+#[test]
+fn linux_missing_or_unassigned_audit_session_uses_stable_fallback() {
+    assert_eq!(
+        linux_login_session_id_from(Err(std::io::Error::from(std::io::ErrorKind::NotFound)))
+            .unwrap(),
+        0
+    );
+    assert_eq!(linux_login_session_id_from(Ok(format!("{}\n", u32::MAX))).unwrap(), 0);
+    assert_eq!(linux_login_session_id_from(Ok("41\n".into())).unwrap(), 41);
+}
+
 /// Windows endpoint names and DACLs retain canonical user and session identity.
 #[test]
 fn windows_endpoint_contract_uses_the_current_sid() {
@@ -59,6 +82,51 @@ mod unix {
         fs::symlink_metadata(path).unwrap().uid()
     }
 
+    /// macOS login identity remains stable when a client starts in another POSIX session.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn login_session_identity_survives_a_new_posix_session() {
+        const CHILD: &str = "SONICTERM_MUX_LOGIN_SESSION_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            println!("login-session={}", unix_login_session_id().unwrap());
+            return;
+        }
+
+        use std::os::unix::process::CommandExt;
+        assert_eq!(std::mem::size_of::<AuditInfoAddress>(), 48);
+        let parent = unix_login_session_id().unwrap();
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .arg("--exact")
+            .arg("main_tests::unix::login_session_identity_survives_a_new_posix_session")
+            .arg("--nocapture")
+            .env(CHILD, "1");
+        // SAFETY: the child calls only async-signal-safe `setsid` before immediately executing the test binary.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "child failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let child = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("login-session="))
+            .unwrap()
+            .parse::<u32>()
+            .unwrap();
+
+        assert_eq!(child, parent);
+    }
+
     /// A trusted XDG runtime directory wins, while an exposed one falls back safely.
     #[test]
     fn xdg_runtime_directory_must_be_private() {
@@ -68,7 +136,10 @@ mod unix {
         fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
         let uid = owner(&runtime);
 
-        let socket = resolve_unix_default_socket(Some(&runtime), scratch.path(), uid, 41).unwrap();
+        let socket = resolve_unix_default_socket_with(Some(&runtime), scratch.path(), uid, || {
+            panic!("trusted XDG path must not query login identity")
+        })
+        .unwrap();
         assert_eq!(socket, runtime.join("sonicterm-mux.sock"));
 
         fs::set_permissions(&runtime, fs::Permissions::from_mode(0o755)).unwrap();
@@ -77,9 +148,9 @@ mod unix {
         assert_eq!(fallback, fallback_unix_socket_path(scratch.path(), uid, 41));
     }
 
-    /// Fallback directories are private and vary across both user and session identity.
+    /// Fallback paths vary by identity without creating directories for clients.
     #[test]
-    fn fallback_namespace_is_private_and_identity_scoped() {
+    fn fallback_namespace_is_side_effect_free_and_identity_scoped() {
         let scratch = ScratchDir::new("fallback");
         let current_uid = owner(scratch.path());
         let first = resolve_unix_default_socket(None, scratch.path(), current_uid, 41).unwrap();
@@ -89,6 +160,9 @@ mod unix {
 
         assert_ne!(first, other_session);
         assert_ne!(first, other_user);
+        assert!(!first.parent().unwrap().exists());
+
+        ensure_unix_runtime_directory(&first, current_uid).unwrap();
         assert_eq!(
             fs::metadata(first.parent().unwrap()).unwrap().permissions().mode() & 0o777,
             0o700
@@ -171,12 +245,17 @@ mod unix {
         let socket = scratch.path().join("mux.sock");
         let stale = std::os::unix::net::UnixListener::bind(&socket).unwrap();
         drop(stale);
-        let before = fs::symlink_metadata(&socket).unwrap();
+        assert_eq!(
+            std::os::unix::net::UnixStream::connect(&socket).unwrap_err().kind(),
+            std::io::ErrorKind::ConnectionRefused
+        );
 
         let listener = bind_unix_listener(&socket).unwrap();
         let after = fs::symlink_metadata(&socket).unwrap();
 
-        assert_ne!((after.dev(), after.ino()), (before.dev(), before.ino()));
+        assert!(std::os::unix::net::UnixStream::connect(&socket).is_ok());
+        assert!(after.file_type().is_socket());
+        assert_eq!(after.permissions().mode() & 0o777, 0o600);
         drop(listener);
     }
 }

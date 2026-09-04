@@ -18,21 +18,107 @@ env:
 
 jobs:
   validate-release-tag:
-    name: Validate release tag and workspace version
+    name: Validate release provenance and source
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 135
+    permissions:
+      actions: read
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 5
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release commit
+        id: release-commit
+        timeout-minutes: 2
+        run: |
+          release_sha="$(python3 scripts/prepare-release-assets.py resolve-commit --revision "$GITHUB_SHA")"
+          echo "sha=${release_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify release commit is on main
+        timeout-minutes: 5
+        env:
+          RELEASE_SHA: ${{ steps.release-commit.outputs.sha }}
+        run: |
+          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          git merge-base --is-ancestor "$RELEASE_SHA" refs/remotes/origin/main
+
+      - name: Verify exact successful main CI
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ steps.release-commit.outputs.sha }}
+        run: |
+          curl --fail-with-body --silent --show-error \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&head_sha=${RELEASE_SHA}&per_page=100" | \
+            python3 scripts/prepare-release-assets.py check-main-ci --sha "$RELEASE_SHA"
+
+      - name: Install native dependencies
+        timeout-minutes: 10
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libcairo2-dev \
+            libfontconfig1-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-0
 
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         timeout-minutes: 5
         with:
           toolchain: stable
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        timeout-minutes: 10
+        with:
+          shared-key: release-validation
 
       - name: Validate tag against every workspace package
         timeout-minutes: 5
         run: python3 scripts/prepare-release-assets.py check-version --tag "${{ github.ref_name }}"
+
+      - name: Validate workspace manifests
+        timeout-minutes: 2
+        run: cargo metadata --no-deps --format-version 1 > /dev/null
+
+      - name: Check formatting
+        timeout-minutes: 5
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        timeout-minutes: 15
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Clippy optional ssh backend
+        timeout-minutes: 10
+        run: cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings
+
+      - name: Run source policy gates
+        timeout-minutes: 10
+        run: |
+          bash scripts/check-rust-version.sh
+          bash scripts/check-workflow-supply-chain.sh
+          bash scripts/check-authored-rust-comments.sh
+          bash scripts/check-no-raw-process-exit.sh
+          bash scripts/check-window-owner-registration.sh
+
+      - name: Check public Rustdoc
+        timeout-minutes: 10
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+
+      - name: Check optional ssh Rustdoc
+        timeout-minutes: 5
+        run: RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-io --no-deps --features ssh
 
       - name: Test release asset tooling
         timeout-minutes: 5
