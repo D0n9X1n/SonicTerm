@@ -645,3 +645,7 @@ impl PaneTree {
         best.map(|(_, id)| id)
     }
 }
+
+#[cfg(test)]
+#[path = "pane_tests.rs"]
+mod pane_tests;
