@@ -20,7 +20,7 @@ pub mod tab_drag;
 pub mod tab_thumbnail;
 pub mod window_key_boundary;
 
-pub use app::{KeymapLoader, ThemeLoader};
+pub use app::{ConfigNormalizer, KeymapLoader, ThemeLoader};
 
 /// Privilege observed for the SonicTerm process at native startup.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

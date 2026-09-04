@@ -3,9 +3,24 @@ use crate::app::{App, FrontmostKind};
 use sonicterm_cfg::keymap::Keymap;
 use sonicterm_cfg::theme::Theme;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
+use tracing_subscriber::layer::{Context, SubscriberExt};
+use tracing_subscriber::{Layer, Registry};
 
 static NEXT_TEMP_PATH: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Default)]
+struct WarningCounter(std::sync::Arc<AtomicUsize>);
+
+impl<S: tracing::Subscriber> Layer<S> for WarningCounter {
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+        if event.metadata().target() == "sonicterm-cfg"
+            && *event.metadata().level() == tracing::Level::WARN
+        {
+            self.0.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+    }
+}
 
 fn temp_config_path(case: &str) -> PathBuf {
     let sequence = NEXT_TEMP_PATH.fetch_add(1, AtomicOrdering::Relaxed);
@@ -71,7 +86,6 @@ fn applying_a_config_moves_the_reset_target() {
 
     let mut reloaded = Config::default();
     reloaded.font.size = 18.0;
-    app.configured_font_size = reloaded.font.size;
     app.apply_new_config(reloaded);
     assert_eq!(app.config.font.size, 18.0, "the reloaded size takes effect");
 
@@ -112,6 +126,74 @@ fn applying_a_config_clamps_an_out_of_range_weight_scale() {
     app.apply_new_config(reloaded);
 
     assert_eq!(app.config.font.effective_weight_scale(), 1.0, "out-of-range falls back to 1.0");
+}
+
+/// Reload normalization runs once before reset baselines and stored config move.
+#[test]
+fn reload_normalizes_before_baselines_and_storage() {
+    use sonicterm_cfg::config::BackdropKind;
+
+    let warnings = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = warnings.clone();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.config_normalizer = Box::new(move |mut config| {
+        let mut messages = Vec::new();
+        if config.appearance.backdrop != BackdropKind::Opaque {
+            observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            messages.push("unsupported backdrop".to_string());
+            config.appearance.backdrop = BackdropKind::Opaque;
+            config.font.size = 23.0;
+        }
+        (config, messages)
+    });
+
+    let mut reloaded = Config::default();
+    reloaded.appearance.backdrop = BackdropKind::Mica;
+    reloaded.font.size = 19.0;
+    let warning_events = WarningCounter::default();
+    let warning_count = warning_events.0.clone();
+    tracing::subscriber::with_default(Registry::default().with(warning_events), || {
+        app.apply_new_config(reloaded);
+        app.apply_new_config(app.config.clone());
+    });
+
+    assert_eq!(app.config.appearance.backdrop, BackdropKind::Opaque);
+    assert_eq!(app.config.font.size, 23.0);
+    assert_eq!(app.configured_font_size, 23.0);
+    assert_eq!(warnings.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(warning_count.load(AtomicOrdering::SeqCst), 1);
+}
+
+/// Every new-window path reads backdrop from the normalized stored config.
+#[test]
+fn future_window_paths_consume_stored_normalized_backdrop() {
+    for (file, source) in [
+        ("event_loop.rs", include_str!("event_loop.rs")),
+        ("misc.rs", include_str!("misc.rs")),
+        ("tear_out.rs", include_str!("tear_out.rs")),
+    ] {
+        assert!(
+            source.contains("self.config.appearance.backdrop"),
+            "{file} must derive native window attributes from App.config"
+        );
+        assert!(
+            !source.contains("new_cfg.appearance.backdrop"),
+            "{file} bypasses normalized App.config"
+        );
+    }
+}
+
+/// Normalization is the first reload transform, before warm-pool and baseline changes.
+#[test]
+fn reload_order_normalizes_before_any_config_side_effect() {
+    const SOURCE: &str = include_str!("config_apply.rs");
+    let start = SOURCE.find("fn apply_new_config").expect("config apply entry");
+    let body = &SOURCE[start..];
+    let normalize = body.find("Self::normalize_config").expect("normalization call");
+    let baseline = body.find("self.configured_font_size").expect("font baseline update");
+    let warm = body.find("self.warm_window_pool.clear()").expect("warm-pool clear");
+    let storage = body.find("self.config = new_cfg").expect("config storage");
+    assert!(normalize < baseline && normalize < warm && normalize < storage);
 }
 
 /// LCD policy changes update renderer presentation without rebuilding font metrics or atlases.
@@ -362,7 +444,6 @@ fn applying_a_config_moves_the_weight_reset_target() {
 
     let mut reloaded = Config::default();
     reloaded.font.weight_scale = 3.0;
-    app.configured_weight_scale = reloaded.font.effective_weight_scale();
     app.apply_new_config(reloaded);
 
     app.change_font_weight(0.5);
