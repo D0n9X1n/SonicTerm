@@ -5,7 +5,10 @@
 #![allow(unused_imports)]
 
 use std::collections::HashMap;
-use std::sync::{atomic::Ordering, Arc};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -17,11 +20,12 @@ use sonicterm_cfg::theme::Theme;
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::Grid;
 use sonicterm_io::pty::{PtyChildExitProbe, PtyHandle};
+use sonicterm_render_model::InlineImage;
 use sonicterm_ui::pane::PaneTree;
 use sonicterm_ui::selection::Selection;
 use sonicterm_ui::tabbar_view::{TabBarLayout, TabHit};
 use sonicterm_ui::tabs::{Tab, TabBar};
-use sonicterm_vt::vt::{CommandEvent, Parser, VtEvent};
+use sonicterm_vt::vt::{CommandEvent, MediaEvent, Parser, VtEvent};
 use winit::{
     event::{ElementState, Ime, KeyEvent, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoopProxy},
@@ -143,9 +147,298 @@ pub(super) fn report_pane_exit(
     let _ = proxy.send_event(UserEvent::PaneProcessExited { pane_id, was_clean });
 }
 
+/// Pane-owned state shared with its VT worker.
+#[derive(Clone)]
+pub(super) struct PaneVtHandles {
+    parser: Arc<Mutex<Parser>>,
+    redraw_target: Arc<Mutex<Option<WindowId>>>,
+    command_events: Arc<Mutex<Vec<super::PaneCommandEvent>>>,
+    cursor_visible: Arc<AtomicBool>,
+    kitty_flags: Arc<AtomicU8>,
+    app_cursor_keys: Arc<AtomicBool>,
+    inline_images: Arc<Mutex<Vec<InlineImage>>>,
+    inline_media_charge: super::media::SharedInlineMediaCharge,
+}
+
+impl PaneVtHandles {
+    /// Clone the exact pane-owned handles that its VT worker must update.
+    fn from_pane_state(pane: &PaneState) -> Self {
+        Self {
+            parser: pane.parser.clone(),
+            redraw_target: pane.redraw_target.clone(),
+            command_events: pane.command_events.clone(),
+            cursor_visible: pane.cursor_visible.clone(),
+            kitty_flags: pane.kitty_flags.clone(),
+            app_cursor_keys: pane.app_cursor_keys.clone(),
+            inline_images: pane.inline_images.clone(),
+            inline_media_charge: pane.inline_media_charge.clone(),
+        }
+    }
+}
+
+/// Start the reply and VT workers with handles cloned from their completed pane.
+// Ordering: pty_burst_gen uses Ordering::Release to publish new PTY bytes before redraw dispatch.
+pub(super) fn spawn_pane_workers(
+    pane_id: u64,
+    pane: &PaneState,
+    reply_rx: crossbeam_channel::Receiver<Vec<u8>>,
+    pty_burst_gen: Arc<AtomicU32>,
+    proxy: Option<EventLoopProxy<UserEvent>>,
+    reply_thread_name: &'static str,
+    vt_thread_name: &'static str,
+) {
+    let pty = pane.pty.as_ref().expect("pane worker requires a PTY");
+    let out_rx = pty.out_rx.clone();
+    let exit_probe = pty.child_exit_probe();
+    let in_tx_reply = pty.input_sender();
+    let worker_handles = PaneVtHandles::from_pane_state(pane);
+    let redraw_proxy = proxy.clone();
+
+    std::thread::Builder::new()
+        .name(reply_thread_name.into())
+        .spawn(move || {
+            while let Ok(bytes) = reply_rx.recv() {
+                if let Err(error) = in_tx_reply.send(bytes) {
+                    // When: in_tx_reply.send returns an error, stop only if the PTY writer disconnected.
+                    match error {
+                        sonicterm_io::pty::PtyInputError::WriterDisconnected(_) => {
+                            // When: error is WriterDisconnected, stop the reply-forwarder thread.
+                            break;
+                        }
+                        dropped => {
+                            tracing::debug!(
+                                target: "memory",
+                                ?dropped,
+                                "parser reply dropped; the child is not draining input"
+                            );
+                        }
+                    }
+                }
+            }
+        })
+        .expect("spawn pane VT reply forwarder");
+
+    std::thread::Builder::new()
+        .name(vt_thread_name.into())
+        .spawn(move || {
+            let mut pending = false;
+            let mut pending_since: Option<Instant> = None;
+            let mut pending_bytes: usize = 0;
+            let mut command_started: Option<Instant> = None;
+            let mut redraw_probe = crate::app::invariants::RedrawCoalescerProbe::new();
+            loop {
+                match out_rx.recv_timeout(if pending {
+                    crate::app::PTY_REDRAW_QUIESCENT
+                } else {
+                    PANE_IDLE_WAIT
+                }) {
+                    Ok(bytes) => {
+                        // When: recv_timeout returns Ok(bytes), parse and coalesce the batch.
+                        if !bytes.is_empty() {
+                            let prev = pty_burst_gen.fetch_add(1, Ordering::Release);
+                            crate::app::invariants::debug_assert_burst_gen_monotonic(
+                                prev,
+                                prev.wrapping_add(1),
+                            );
+                            pending_bytes = pending_bytes.saturating_add(bytes.len());
+                            pending_since.get_or_insert_with(Instant::now);
+                        }
+                        process_pane_vt_batch(
+                            &worker_handles,
+                            bytes,
+                            &mut command_started,
+                            redraw_proxy.as_ref(),
+                        );
+                        let pending_for =
+                            pending_since.map(|since| since.elapsed()).unwrap_or(Duration::ZERO);
+                        if crate::app::should_flush_pending_pty_redraw(pending_bytes, pending_for) {
+                            // When: should_flush_pending_pty_redraw accepts pending_bytes and pending_for, dispatch the coalesced frame.
+                            if let Some(proxy) = redraw_proxy.as_ref() {
+                                // When: redraw_proxy is Some(proxy), send the redraw through its current target.
+                                super::redraw_target::dispatch(
+                                    &worker_handles.redraw_target,
+                                    |window_id| {
+                                        let _ =
+                                            proxy.send_event(UserEvent::RequestRedraw(window_id));
+                                    },
+                                );
+                            }
+                            let reason = if pending_bytes >= crate::app::PTY_REDRAW_FLUSH_BYTES {
+                                crate::app::invariants::FlushReason::Buffer
+                            } else {
+                                crate::app::invariants::FlushReason::Interval
+                            };
+                            redraw_probe.note_redraw(crate::app::PTY_REDRAW_QUIESCENT, reason);
+                            pending = false;
+                            pending_since = None;
+                            pending_bytes = 0;
+                        } else {
+                            // When: should_flush_pending_pty_redraw is false, retain the batch for coalescing.
+                            pending = true;
+                        }
+                    }
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                        // When: recv_timeout returns Timeout, flush any trailing pending redraw.
+                        if pending {
+                            // When: pending is true at Timeout, dispatch the coalesced trailing frame.
+                            if let Some(proxy) = redraw_proxy.as_ref() {
+                                // When: redraw_proxy is Some(proxy), send the redraw through its current target.
+                                super::redraw_target::dispatch(
+                                    &worker_handles.redraw_target,
+                                    |window_id| {
+                                        let _ =
+                                            proxy.send_event(UserEvent::RequestRedraw(window_id));
+                                    },
+                                );
+                            }
+                            redraw_probe.note_redraw(
+                                crate::app::PTY_REDRAW_QUIESCENT,
+                                crate::app::invariants::FlushReason::Interval,
+                            );
+                            pending = false;
+                            pending_since = None;
+                            pending_bytes = 0;
+                        }
+                        #[cfg(windows)]
+                        if exit_probe.has_exited().unwrap_or(false) {
+                            // When: exit_probe reports the child exited on Windows, report it and stop polling.
+                            report_pane_exit(redraw_proxy.as_ref(), &exit_probe, pane_id);
+                            break;
+                        }
+                    }
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                        // When: recv_timeout returns Disconnected, flush output and report exit.
+                        if let Some(proxy) = redraw_proxy.as_ref() {
+                            // When: redraw_proxy is Some(proxy), it can receive the final redraw.
+                            if pending {
+                                // When: pending is true at Disconnected, dispatch the shell's final output.
+                                super::redraw_target::dispatch(
+                                    &worker_handles.redraw_target,
+                                    |window_id| {
+                                        let _ =
+                                            proxy.send_event(UserEvent::RequestRedraw(window_id));
+                                    },
+                                );
+                            }
+                        }
+                        report_pane_exit(redraw_proxy.as_ref(), &exit_probe, pane_id);
+                        break;
+                    }
+                }
+            }
+        })
+        .expect("spawn pane VT loop");
+}
+
+/// Parse one PTY output batch and apply its app-owned side effects after unlocking.
+pub(super) fn process_pane_vt_batch<Bytes: AsRef<[u8]>>(
+    handles: &PaneVtHandles,
+    bytes: Bytes,
+    command_started: &mut Option<Instant>,
+    proxy: Option<&EventLoopProxy<UserEvent>>,
+) {
+    process_pane_vt_batch_with(
+        handles,
+        bytes,
+        command_started,
+        super::media::decode_inline_image,
+        |event| {
+            if let Some(proxy) = proxy {
+                // When: proxy exists, deliver the typed host event on the app event loop.
+                let _ = proxy.send_event(event);
+            }
+        },
+        Instant::now,
+    );
+}
+
+// Lock order: inline_images -> inline_media_charge; parser releases before either, and command_events locks after both.
+// Ordering: cursor_visible, kitty_flags, and app_cursor_keys use Ordering::Relaxed; each publishes only its independent parser value.
+fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now>(
+    handles: &PaneVtHandles,
+    bytes: Bytes,
+    command_started: &mut Option<Instant>,
+    mut decode_media: Decode,
+    mut emit_event: Emit,
+    mut now: Now,
+) where
+    Bytes: AsRef<[u8]>,
+    Decode: FnMut(&MediaEvent) -> Option<InlineImage>,
+    Emit: FnMut(UserEvent),
+    Now: FnMut() -> Instant,
+{
+    let events = {
+        let mut parser = handles.parser.lock();
+        let events = parser.advance(bytes.as_ref());
+        handles.kitty_flags.store(parser.kitty_keyboard_flags(), Ordering::Relaxed);
+        handles.app_cursor_keys.store(parser.application_cursor_keys(), Ordering::Relaxed);
+        events
+    };
+    drop(bytes);
+
+    let mut clipboard_requests = Vec::new();
+    let mut command_side_effects = Vec::new();
+    let mut media_events = Vec::new();
+    for event in events {
+        match event {
+            VtEvent::CursorVisibility(visible) => {
+                handles.cursor_visible.store(visible, Ordering::Relaxed);
+            }
+            VtEvent::Clipboard { selection, data } => {
+                clipboard_requests.push((selection, data));
+            }
+            VtEvent::Command(event) => {
+                let at = now();
+                let duration = match event {
+                    CommandEvent::CmdStart => {
+                        *command_started = Some(at);
+                        None
+                    }
+                    CommandEvent::CmdEnd(_) => {
+                        command_started.take().map(|started| at.duration_since(started))
+                    }
+                    CommandEvent::PromptStart => None,
+                };
+                command_side_effects.push(super::PaneCommandEvent { event, at, duration });
+            }
+            VtEvent::Media(media) => media_events.push(media),
+            VtEvent::SetTitle(_) | VtEvent::Bell | VtEvent::Hyperlink { .. } => {
+                // When: event is SetTitle, Bell, or Hyperlink, parser state already owns its effect.
+            }
+        }
+    }
+
+    for (selection, data) in clipboard_requests {
+        if let Some(event) = osc52_clipboard_write_event(selection, &data) {
+            emit_event(event);
+        }
+    }
+
+    let mut decoded_images = Vec::new();
+    for media in media_events {
+        if let Some(image) = decode_media(&media) {
+            decoded_images.push(image);
+            super::media::trim_staged_inline_images(&mut decoded_images);
+        }
+    }
+    if !decoded_images.is_empty() {
+        let evicted = {
+            let mut images = handles.inline_images.lock();
+            images.extend(decoded_images);
+            super::media::trim_inline_images_charged(&mut images, &handles.inline_media_charge)
+        };
+        drop(evicted);
+    }
+
+    if !command_side_effects.is_empty() {
+        super::append_bounded_command_events(
+            &mut handles.command_events.lock(),
+            command_side_effects,
+        );
+    }
+}
+
 impl App {
-    // Lock order: parser -> parser_clone; after parser_clone drops, inline_images_thread and command_events_thread lock separately.
-    // Ordering: pty_burst_gen uses Release; cursor_visible, kitty_flags, and app_cursor_keys use independent Relaxed snapshots.
     pub(super) fn spawn_pane(
         &self,
         pane_id: u64,
@@ -168,28 +461,7 @@ impl App {
             let mut p = parser.lock();
             super::seed_parser_theme_colors(&mut p, &self.theme);
         }
-        // Pre-create the redraw target bound to the current parent window.
-        // Tear-out swaps the WindowId without restarting the pane's VT thread.
-        let redraw_target: Arc<Mutex<Option<WindowId>>> = Arc::new(Mutex::new(self.main_window_id));
-        let command_events: Arc<Mutex<Vec<super::PaneCommandEvent>>> =
-            Arc::new(Mutex::new(Vec::new()));
-        let inline_images: Arc<Mutex<Vec<sonicterm_render_model::InlineImage>>> =
-            Arc::new(Mutex::new(Vec::new()));
-        let inline_media_charge = super::media::new_inline_media_charge();
-        // fix: per-pane cursor_visible Arc lives outside the
-        // pty-spawn match so we can store it on PaneState even if pty
-        // spawn failed (and so a no-pty pane still has a valid Arc).
-        let cursor_visible_pane: Arc<std::sync::atomic::AtomicBool> =
-            Arc::new(std::sync::atomic::AtomicBool::new(true));
-        // Per-pane kitty-keyboard flags snapshot, mirrored out of the parser
-        // by the VT loop so the keypress path reads it lock-free.
-        let kitty_flags_pane: Arc<std::sync::atomic::AtomicU8> =
-            Arc::new(std::sync::atomic::AtomicU8::new(0));
-        // Per-pane DECCKM (application cursor keys) snapshot, mirrored out of
-        // the parser by the VT loop so the keypress path reads it lock-free
-        // .
-        let app_cursor_keys_pane: Arc<std::sync::atomic::AtomicBool> =
-            Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let redraw_target = Arc::new(Mutex::new(self.main_window_id));
         let pty = match PtyHandle::spawn_default_shell(
             cols,
             rows,
@@ -199,7 +471,7 @@ impl App {
             ),
         ) {
             Ok(pty) => {
-                // When: spawn_default_shell returns Ok(pty), initialize its input and VT worker threads.
+                // When: spawn_default_shell returns Ok(pty), stage any launch draft before the worker starts.
                 match launch.draft_for_shell(pty.shell_program_path()) {
                     Ok(Some(draft)) => {
                         Self::queue_pty_input(
@@ -221,385 +493,26 @@ impl App {
                         }
                     }
                 }
-                let parser_clone = parser.clone();
-                let out_rx = pty.out_rx.clone();
-                // Cloned before the loop takes ownership: the probe is what
-                // lets the exit be classified after the output channel has
-                // already gone, which is the only moment the classification
-                // is needed.
-                let exit_probe = pty.child_exit_probe();
-                let in_tx_reply = pty.input_sender();
-                let redraw_target_thread = redraw_target.clone();
-                let redraw_proxy = self.event_loop_proxy.clone();
-                // fix: VT thread captures the same Arc that
-                // PaneState below will own. Pre-fix this read
-                // `self.main().cursor_visible` on WindowState, which
-                // got replaced with a fresh Arc on tear-out — leaving
-                // the VT thread writing into an orphan AtomicBool.
-                let cursor_visible = cursor_visible_pane.clone();
-                let kitty_flags = kitty_flags_pane.clone();
-                let app_cursor_keys = app_cursor_keys_pane.clone();
-                let pty_burst_gen = self.pty_burst_gen.clone();
-                let command_events_thread = command_events.clone();
-                let inline_images_thread = inline_images.clone();
-                // This pane's share of the process-wide inline-media total.
-                // Co-owned with the pane: a shell exiting ends this thread
-                // while the pane stays on screen holding every image, so a
-                // charge released here would undercount live pixels.
-                let inline_media_charge_thread = inline_media_charge.clone();
-                // Forward parser replies (DSR/DA/XTVERSION/focus) to the pty
-                // master. Kept on its own thread so the VT loop never blocks
-                // pushing replies, and so a slow pty doesn't stall parsing.
-                std::thread::Builder::new()
-                    .name("sonicterm-vt-reply".into())
-                    .spawn(move || {
-                        while let Ok(bytes) = reply_rx.recv() {
-                            // Typed send: refuses rather than blocking, and
-                            // applies the same size cap as terminal input. The
-                            // raw sender this used to hold did neither, in a
-                            // thread whose reason for existing is that nothing
-                            // should block here.
-                            if let Err(error) = in_tx_reply.send(bytes) {
-                                // When: in_tx_reply.send returns Err(error), classify a disconnect or dropped reply.
-                                match error {
-                                    sonicterm_io::pty::PtyInputError::WriterDisconnected(_) => {
-                                        // When: error is WriterDisconnected, stop the reply-forwarder thread.
-                                        break;
-                                    }
-                                    // A full queue means the child is not
-                                    // draining. Dropping one reply is correct:
-                                    // DSR/DA answers are idempotent status
-                                    // reports, and blocking here would stall
-                                    // the forwarder behind a stalled child.
-                                    dropped => {
-                                        tracing::debug!(
-                                            target: "memory",
-                                            ?dropped,
-                                            "parser reply dropped; the child is not draining input"
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    })
-                    // PANIC: thread spawn at pane init — see sonicterm-io/pty.rs
-                    // rationale. Unrecoverable OS-level failure.
-                    .expect("spawn vt reply forwarder");
-                std::thread::Builder::new()
-                    .name("sonicterm-vt-loop".into())
-                    .spawn(move || {
-                        let mut pending = false;
-                        let mut pending_since: Option<Instant> = None;
-                        let mut redraw_probe = crate::app::invariants::RedrawCoalescerProbe::new();
-                        let mut pending_bytes: usize = 0;
-                        let mut command_started: Option<Instant> = None;
-                        loop {
-                            // Try to drain quickly; if nothing comes for
-                            // ~min_interval and we have a pending redraw,
-                            // flush it before going back to blocking recv.
-                            match out_rx.recv_timeout(if pending {
-                                crate::app::PTY_REDRAW_QUIESCENT
-                            } else {
-                                PANE_IDLE_WAIT
-                            }) {
-                                Ok(bytes) => {
-                                    // When: recv_timeout returns Ok(bytes), parse and coalesce the batch.
-
-                                    // /: bump generation so the
-                                    // next RedrawRequested bypasses the
-                                    // vsync coalescing gate. Counter (not
-                                    // bool) so a burst arriving during
-                                    // render is not erased on completion.
-                                    if !bytes.is_empty() {
-                                        let prev = pty_burst_gen.fetch_add(1, Ordering::Release);
-                                        crate::app::invariants::debug_assert_burst_gen_monotonic(
-                                            prev,
-                                            prev.wrapping_add(1),
-                                        );
-                                        pending_bytes = pending_bytes.saturating_add(bytes.len());
-                                        pending_since.get_or_insert_with(Instant::now);
-                                    }
-                                    // Collect side-effects under the parser
-                                    // lock, then DROP it before touching winit.
-                                    // On macOS `Window::set_title` marshals to
-                                    // the AppKit main thread synchronously; if
-                                    // we held `parser` across that call and
-                                    // the main thread happened to be sitting
-                                    // in its RedrawRequested handler waiting
-                                    // for `parser.lock()`, both threads would
-                                    // deadlock (VT thread waiting on the
-                                    // AppKit runloop, main thread waiting on
-                                    // parser). This was the v0.6 tear-out
-                                    // hang. Same reasoning for
-                                    // `request_redraw` below — winit promises
-                                    // it's thread-safe, but we keep all winit
-                                    // calls outside the parser critical
-                                    // section as a defence-in-depth rule.
-                                    let mut new_title: Option<String> = None;
-                                    let mut command_side_effects = Vec::new();
-                                    let mut clipboard_requests = Vec::new();
-                                    let mut inline_images = Vec::new();
-                                    {
-                                        let mut p = parser_clone.lock();
-                                        for ev in p.advance(&bytes) {
-                                            match ev {
-                                                VtEvent::SetTitle(t) => {
-                                                    new_title = Some(t);
-                                                }
-                                                VtEvent::CursorVisibility(v) => {
-                                                    cursor_visible.store(
-                                                        v,
-                                                        std::sync::atomic::Ordering::Relaxed,
-                                                    );
-                                                }
-                                                VtEvent::Clipboard { selection, data } => {
-                                                    clipboard_requests.push((selection, data));
-                                                }
-                                                VtEvent::Command(event) => {
-                                                    let now = Instant::now();
-                                                    match event {
-                                                        CommandEvent::CmdStart => {
-                                                            command_started = Some(now);
-                                                            command_side_effects.push(
-                                                                super::PaneCommandEvent {
-                                                                    event,
-                                                                    at: now,
-                                                                    duration: None,
-                                                                },
-                                                            );
-                                                        }
-                                                        CommandEvent::CmdEnd(_) => {
-                                                            let duration = command_started
-                                                                .take()
-                                                                .map(|start| {
-                                                                    now.duration_since(start)
-                                                                });
-                                                            command_side_effects.push(
-                                                                super::PaneCommandEvent {
-                                                                    event,
-                                                                    at: now,
-                                                                    duration,
-                                                                },
-                                                            );
-                                                        }
-                                                        CommandEvent::PromptStart => {
-                                                            command_side_effects.push(
-                                                                super::PaneCommandEvent {
-                                                                    event,
-                                                                    at: now,
-                                                                    duration: None,
-                                                                },
-                                                            );
-                                                        }
-                                                    }
-                                                }
-                                                VtEvent::Media(media) => {
-                                                    if let Some(image) =
-                                                        super::media::decode_inline_image(&media)
-                                                    {
-                                                        inline_images.push(image);
-                                                        super::media::trim_staged_inline_images(
-                                                            &mut inline_images,
-                                                        );
-                                                    }
-                                                }
-                                                _ => {
-                                                    // When: ev is an unhandled VtEvent, it has no app-side effect.
-                                                }
-                                            }
-                                        }
-                                        // Mirror the parser's kitty-keyboard
-                                        // flags while we still hold the lock,
-                                        // so the keypress path can read them
-                                        // without locking.
-                                        kitty_flags.store(
-                                            p.kitty_keyboard_flags(),
-                                            std::sync::atomic::Ordering::Relaxed,
-                                        );
-                                        // Mirror DECCKM (application cursor
-                                        // keys) for the lock-free keypress
-                                        // encode path.
-                                        app_cursor_keys.store(
-                                            p.application_cursor_keys(),
-                                            std::sync::atomic::Ordering::Relaxed,
-                                        );
-                                    }
-                                    if let Some(proxy) = redraw_proxy.as_ref() {
-                                        // When: `redraw_proxy.as_ref()` yields `proxy`, decode and deliver clipboard writes after releasing the parser lock.
-                                        for (selection, data) in clipboard_requests {
-                                            if let Some(event) =
-                                                osc52_clipboard_write_event(selection, &data)
-                                            {
-                                                // When: `osc52_clipboard_write_event` returns `event`, deliver its bounded text to the app thread.
-                                                let _ = proxy.send_event(event);
-                                            }
-                                        }
-                                    }
-                                    if !inline_images.is_empty() {
-                                        // Evicted images are carried out of
-                                        // the critical section and freed after
-                                        // the guard drops: releasing their
-                                        // pixel buffers takes milliseconds,
-                                        // and the render path waits on this
-                                        // same lock.
-                                        let evicted = {
-                                            let mut images = inline_images_thread.lock();
-                                            images.extend(inline_images);
-                                            super::media::trim_inline_images_charged(
-                                                &mut images,
-                                                &inline_media_charge_thread,
-                                            )
-                                        };
-                                        drop(evicted);
-                                    }
-                                    if !command_side_effects.is_empty() {
-                                        super::append_bounded_command_events(
-                                            &mut command_events_thread.lock(),
-                                            command_side_effects,
-                                        );
-                                    }
-                                    let _ = new_title;
-                                    let pending_for = pending_since
-                                        .map(|since| since.elapsed())
-                                        .unwrap_or(Duration::ZERO);
-                                    if crate::app::should_flush_pending_pty_redraw(
-                                        pending_bytes,
-                                        pending_for,
-                                    ) {
-                                        // When: should_flush_pending_pty_redraw accepts pending_bytes and pending_for.
-                                        if let Some(proxy) = redraw_proxy.as_ref() {
-                                            // When: redraw_proxy is Some(proxy), dispatch the coalesced frame.
-                                            super::redraw_target::dispatch(
-                                                &redraw_target_thread,
-                                                |window_id| {
-                                                    let _ = proxy.send_event(
-                                                        UserEvent::RequestRedraw(window_id),
-                                                    );
-                                                },
-                                            );
-                                        }
-                                        let reason = if pending_bytes
-                                            >= crate::app::PTY_REDRAW_FLUSH_BYTES
-                                        {
-                                            crate::app::invariants::FlushReason::Buffer
-                                        } else {
-                                            // A below-threshold buffer was flushed by elapsed interval.
-                                            crate::app::invariants::FlushReason::Interval
-                                        };
-                                        redraw_probe
-                                            .note_redraw(crate::app::PTY_REDRAW_QUIESCENT, reason);
-                                        pending = false;
-                                        pending_since = None;
-                                        pending_bytes = 0;
-                                    } else {
-                                        // When: should_flush_pending_pty_redraw is false, retain the batch for coalescing.
-                                        pending = true;
-                                    }
-                                }
-                                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                                    // When: recv_timeout returns Timeout, flush any trailing pending redraw.
-                                    // Quiescent: flush trailing redraw.
-                                    if pending {
-                                        // When: pending is true at Timeout, dispatch the coalesced trailing frame.
-                                        if let Some(proxy) = redraw_proxy.as_ref() {
-                                            // When: redraw_proxy is Some(proxy), send the redraw through its current target.
-                                            super::redraw_target::dispatch(
-                                                &redraw_target_thread,
-                                                |window_id| {
-                                                    let _ = proxy.send_event(
-                                                        UserEvent::RequestRedraw(window_id),
-                                                    );
-                                                },
-                                            );
-                                        }
-                                        // Quiescent-timeout flush only fires
-                                        // after the channel has been silent
-                                        // for `min_interval`, so the spacing
-                                        // is naturally satisfied — classify
-                                        // as Interval.
-                                        redraw_probe.note_redraw(
-                                            crate::app::PTY_REDRAW_QUIESCENT,
-                                            crate::app::invariants::FlushReason::Interval,
-                                        );
-                                        pending = false;
-                                        pending_since = None;
-                                        pending_bytes = 0;
-                                    }
-                                    // Windows only: the output channel does
-                                    // not disconnect while the pane holds its
-                                    // handle, so this periodic wake is the one
-                                    // place a natural exit can be noticed. On
-                                    // unix the disconnect arm below does it,
-                                    // and this loop never wakes on its own.
-                                    #[cfg(windows)]
-                                    if exit_probe.has_exited().unwrap_or(false) {
-                                        // When: has_exited is true on Windows, report the pane exit and stop polling.
-                                        report_pane_exit(
-                                            redraw_proxy.as_ref(),
-                                            &exit_probe,
-                                            pane_id,
-                                        );
-                                        break;
-                                    }
-                                }
-                                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                                    // When: recv_timeout returns Disconnected, flush output and report exit.
-
-                                    // The reader thread reached EOF on the pty
-                                    // master and dropped its sender: every fd
-                                    // on the slave side is closed, so the
-                                    // child and anything it left holding the
-                                    // terminal are gone.
-                                    //
-                                    // Flush any coalesced output first. The
-                                    // shell's last bytes — a farewell line, or
-                                    // the error that killed it — are still
-                                    // pending here, and on the hold-open path
-                                    // nothing else will ask for that frame.
-                                    if let Some(proxy) = redraw_proxy.as_ref() {
-                                        // When: redraw_proxy is Some(proxy), it can receive the final redraw.
-                                        if pending {
-                                            // When: pending is true at Disconnected, dispatch the shell's final output.
-                                            super::redraw_target::dispatch(
-                                                &redraw_target_thread,
-                                                |window_id| {
-                                                    let _ = proxy.send_event(
-                                                        UserEvent::RequestRedraw(window_id),
-                                                    );
-                                                },
-                                            );
-                                        }
-                                    }
-                                    // Classified on this thread rather than by
-                                    // the handler: the wait for a child to
-                                    // become reapable belongs anywhere but the
-                                    // event loop, and this thread is about to
-                                    // exit regardless.
-                                    report_pane_exit(redraw_proxy.as_ref(), &exit_probe, pane_id);
-                                    break;
-                                }
-                            }
-                        }
-                    })
-                    // PANIC: thread spawn at pane init — see sonicterm-io/pty.rs
-                    // rationale. Unrecoverable OS-level failure.
-                    .expect("spawn vt loop");
                 Some(pty)
             }
             Err(e) => {
-                // A shell spawn failure retains a pane without a PTY.
                 tracing::error!("failed to spawn pty: {e}");
                 None
             }
         };
         let mut state = PaneState::new(parser, pty);
         state.redraw_target = redraw_target;
-        state.command_events = command_events;
-        state.cursor_visible = cursor_visible_pane;
-        state.kitty_flags = kitty_flags_pane;
-        state.app_cursor_keys = app_cursor_keys_pane;
-        state.inline_images = inline_images;
-        state.inline_media_charge = inline_media_charge;
+        if state.pty.is_some() {
+            spawn_pane_workers(
+                pane_id,
+                &state,
+                reply_rx,
+                self.pty_burst_gen.clone(),
+                self.event_loop_proxy.clone(),
+                "sonicterm-vt-reply",
+                "sonicterm-vt-loop",
+            );
+        }
         state
     }
 }
@@ -828,3 +741,7 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "spawn_pane_tests.rs"]
+mod spawn_pane_tests;
