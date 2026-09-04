@@ -55,6 +55,7 @@ bash scripts/check-authored-rust-comments.sh
 bash scripts/check-no-raw-process-exit.sh
 bash scripts/check-rust-version.sh
 bash scripts/check-window-owner-registration.sh
+bash scripts/check-workflow-supply-chain.sh
 bash scripts/check-workspace-crates.sh
 bash scripts/pty-backend-feasibility.sh --check
 bash scripts/test-resource-inventory.sh
@@ -78,6 +79,9 @@ functions and public trait functions, `# Safety` on public unsafe functions, and
 anchored `// When:`, `// SAFETY:`, `// Lock order:`, `// Ordering:`, and
 `// Lifecycle:` contracts. `check-no-raw-process-exit.sh` requires shipping code
 to exit through `sonicterm_logging::exit_with`.
+`check-workflow-supply-chain.sh` enforces the workflow contract described in
+[Workflow supply chain](#workflow-supply-chain); it runs its own parser tests
+first, so a scan that silently stops matching cannot report a green gate.
 
 On Windows, also run the release-blocking deterministic allocator test:
 
@@ -115,7 +119,8 @@ and Wiki publication before starting the next serialized pull request.
 Both matrix hosts run:
 
 - rustfmt, workspace clippy, optional-SSH clippy, Cargo metadata, declared
-  Rust-version verification, process-exit and window-owner checks;
+  Rust-version verification, process-exit, window-owner, and workflow
+  supply-chain checks;
 - authored Rust comments, strict workspace and optional-SSH Rustdoc;
 - workspace unit tests and the per-crate library/binary/integration gate;
 - host-window, adapter-classification, and renderer-churn probes;
@@ -143,8 +148,8 @@ limit is the final guard around that collector.
 The Linux container installs Cairo, Fontconfig, X11, Wayland, Mesa
 Vulkan/lavapipe, Xvfb, Weston, and Debian packaging tools. It runs full format,
 clippy, Rustdoc, workspace unit, per-crate, authored-comment, exit, Rust-version,
-window-owner, Linux package, release-asset, release-note, and wiki-publisher
-gates. It then:
+window-owner, workflow supply-chain, Linux package, release-asset, release-note,
+and wiki-publisher gates. It then:
 
 1. builds `sonicterm-linux` in release mode;
 2. derives one workspace version from Cargo metadata;
@@ -171,6 +176,53 @@ A package smoke cannot pass without a native window, GPU initialization,
 - Native AppKit, Win32, X11/Wayland, font-discovery, PTY, GPU, and installer
   behavior still depends on platform tests, package smokes, release builds, and
   manual use; a symbol-only test cannot prove those boundaries.
+
+## Workflow supply chain
+
+Every workflow runs third-party code, so two properties are enforced rather
+than left to convention. `scripts/check-workflow-supply-chain.sh` runs in the
+local gate, on both CI matrix hosts, and in the Ubuntu tooling step.
+
+**Every remote action is pinned to a full 40-character commit SHA**, with a
+trailing `# vX.Y.Z` comment naming the release that SHA is. A tag is a pointer,
+not a version: `@v2` can be retargeted at any commit by whoever holds the
+upstream repository, so a compromised maintainer account changes what this
+repository executes with no reviewable change landing here. A commit SHA is
+content-addressed and cannot be retargeted. The checker rejects tags, branches,
+abbreviated SHAs — a prefix can gain a second match as a repository grows —
+uppercase SHAs, and tag-pinned `docker://` references. Local `./` actions need
+no pin because the pull request that changes one also reviews it. The same
+action pinned to two different commits is rejected as a half-applied update.
+
+`dtolnay/rust-toolchain` is pinned to its `v1` tag and passes `toolchain: stable`
+explicitly. Its `stable` branch is a rolling ref that is force-pushed, so a SHA
+on it is orphaned by the next push and gives Dependabot no version to advance;
+the `v1` tag declares `toolchain` required with no default, which is why the
+input is now written at every call site.
+
+**`contents: write` exists only on the job that publishes.** Every workflow
+defaults to `contents: read`, and only `release.yml`'s and `publish-wiki.yml`'s
+`publish` jobs re-grant write, at job scope. The token a third-party action
+inherits is the job's, so a workflow-level write grant hands repository write
+access to every action in every job — including the ones that only compile and
+package. The release consequence is concrete: the uploader runs after checksum
+consolidation, so a write-capable token in a build job could publish bytes
+other than the validated set. The permitted jobs and their exact writable scopes are enumerated in
+`WRITE_BOUNDARY` in `scripts/check-workflow-supply-chain.py`; adding one is a
+reviewable edit to that list, not an unnoticed line in a workflow.
+
+The checker accepts directly written block mappings for `jobs`, `steps`,
+`uses`, and `permissions`. It rejects flow mappings, explicit mapping keys,
+anchors, aliases, and merge keys rather than trying to partially interpret
+YAML forms that could hide a mutable action or write grant. Explicit YAML type
+tags are rejected for the same reason. Quoted scalar keys and permission values
+remain supported and are normalized before policy checks.
+
+Dependabot's `github-actions` ecosystem is deliberately unfiltered, unlike the
+`cargo` ecosystem's patch-only policy. A pinned SHA has no floating tag
+absorbing upstream fixes, so a pin Dependabot may not advance is a pin that
+rots and never receives the security patch it is holding back. Dependabot
+rewrites both the SHA and its trailing version comment.
 
 ## Release workflow
 
@@ -345,6 +397,7 @@ bash scripts/check-authored-rust-comments.sh
 bash scripts/check-no-raw-process-exit.sh
 bash scripts/check-rust-version.sh
 bash scripts/check-window-owner-registration.sh
+bash scripts/check-workflow-supply-chain.sh
 bash scripts/check-workspace-crates.sh
 bash scripts/pty-backend-feasibility.sh --check
 bash scripts/test-resource-inventory.sh
@@ -365,7 +418,9 @@ library/binary 和 `--tests`；不能在 workspace unit command 后就停止。
 第一方注释 checker 要求有效公开函数和公开 trait 函数带用途 Rustdoc，公开 unsafe 函数带
 `# Safety`，并检查准确锚定的 `// When:`、`// SAFETY:`、`// Lock order:`、
 `// Ordering:` 和 `// Lifecycle:` 契约。`check-no-raw-process-exit.sh` 要求发布代码通过
-`sonicterm_logging::exit_with` 退出。
+`sonicterm_logging::exit_with` 退出。`check-workflow-supply-chain.sh` 强制执行
+[工作流供应链](#工作流供应链)所述的工作流契约；它会先运行自己的解析器测试，
+因此一次静默停止匹配的扫描不会被当成通过的 gate。
 
 Windows 还要运行会阻断 release 的确定性 allocator 测试：
 
@@ -399,7 +454,7 @@ Windows-only 测试；本地、macOS、Ubuntu 或 review 结果都不能替代�
 两个 matrix host 都运行：
 
 - rustfmt、workspace clippy、optional-SSH clippy、Cargo metadata、声明 Rust 版本校验、
-  process-exit 与 window-owner 检查；
+  process-exit、window-owner 与工作流供应链检查；
 - 第一方 Rust 注释、严格 workspace 与 optional-SSH Rustdoc；
 - workspace unit test 和逐 crate library/binary/integration gate；
 - host-window、adapter 分类和 renderer churn probe；
@@ -420,8 +475,8 @@ allocator 和 software-selection presentation 测试。macOS 还安装 `cargo-ll
 
 Linux container 会安装 Cairo、Fontconfig、X11、Wayland、Mesa Vulkan/lavapipe、Xvfb、
 Weston 和 Debian 打包工具。它运行完整 format、clippy、Rustdoc、workspace unit、逐 crate、
-第一方注释、exit、Rust 版本、window-owner、Linux package、release-asset、release-note 和
-Wiki publisher gate。随后：
+第一方注释、exit、Rust 版本、window-owner、工作流供应链、Linux package、release-asset、
+release-note 和 Wiki publisher gate。随后：
 
 1. 以 release 模式构建 `sonicterm-linux`；
 2. 从 Cargo metadata 推导唯一 workspace 版本；
@@ -445,6 +500,44 @@ package smoke 就不能通过。
   运行 `cargo deny check`。
 - AppKit、Win32、X11/Wayland、字体发现、PTY、GPU 和 installer 的真实行为仍依赖平台测试、
   package smoke、release build 与手工使用；只检查 symbol 不能证明这些边界。
+
+## 工作流供应链
+
+每个工作流都会运行第三方代码，因此有两条性质由 gate 强制执行，而不是靠约定维持。
+`scripts/check-workflow-supply-chain.sh` 在本地 gate、两个 CI matrix host 和 Ubuntu
+工具步骤中都会运行。
+
+**每个远程 action 都固定到完整的 40 位提交 SHA**，并带上标明该 SHA 对应发布版本的
+`# vX.Y.Z` 尾注。Tag 是指针而不是版本：持有上游仓库的人可以随时把 `@v2` 重新指向任意
+提交，因此一个被攻陷的维护者账号可以改变本仓库执行的代码，而这里不会出现任何可审阅的
+变更。提交 SHA 由内容寻址，无法被重新指向。Checker 会拒绝 tag、分支、缩写 SHA（前缀会
+随仓库增长而产生第二个匹配）、大写 SHA，以及用 tag 固定的 `docker://` 引用。本地 `./`
+action 无需固定，因为修改它的 pull request 同时也在审阅它。同一个 action 被固定到两个
+不同提交，会作为「只应用了一半的更新」被拒绝。
+
+`dtolnay/rust-toolchain` 固定到它的 `v1` tag，并显式传入 `toolchain: stable`。它的
+`stable` 分支是会被 force-push 的滚动引用，因此固定其上的 SHA 会在下一次推送后成为孤立
+提交，也不给 Dependabot 任何可推进的版本；而 `v1` tag 把 `toolchain` 声明为必填且无默认
+值，这正是现在每个调用点都写出该输入的原因。
+
+**`contents: write` 只存在于执行发布的那个 job。** 每个工作流都默认 `contents: read`，
+只有 `release.yml` 与 `publish-wiki.yml` 的 `publish` job 在 job 作用域重新授予写权限。
+第三方 action 继承的是所在 job 的 token，因此工作流级别的写授权等于把仓库写权限交给每个
+job 中的每个 action——包括那些只做编译和打包的 job。在 release 上的后果很具体：上传步骤
+在校验和合并之后运行，因此构建 job 中一个具备写权限的 token 可以发布与已验证集合不同的
+字节。被允许的 job 及其准确可写 scope 列在
+`scripts/check-workflow-supply-chain.py` 的 `WRITE_BOUNDARY` 中；新增一个是对该列表的
+可审阅修改，而不是工作流里一行无人注意的改动。
+
+Checker 只接受为 `jobs`、`steps`、`uses` 和 `permissions` 直接写出的 block mapping。
+它会拒绝 flow mapping、显式 mapping key、anchor、alias 和 merge key，而不是尝试局部解释
+可能隐藏可变 action 或写权限的 YAML 形式。出于同样原因，显式 YAML type tag 也会被拒绝。
+带引号的标量 key 和权限值仍受支持，并会在策略检查前规范化。
+
+Dependabot 的 `github-actions` 生态被刻意设为不过滤，这与 `cargo` 生态只允许 patch 的策略
+不同。固定的 SHA 没有浮动 tag 去吸收上游修复，因此一个 Dependabot 无法推进的固定引用就是
+一个会腐坏的固定引用，它压住的安全补丁永远不会到达。Dependabot 会同时改写 SHA 和它的尾注
+版本号。
 
 ## Release workflow
 
