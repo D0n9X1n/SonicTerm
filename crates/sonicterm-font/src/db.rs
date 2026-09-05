@@ -33,7 +33,9 @@ impl FontDatabase {
     }
 
     /// Build a database from fonts found in the configured font directories.
-    /// Built-in fallback bundles are loaded separately by [`Self::with_built_in`].
+    ///
+    /// This includes SonicTerm's tracked St.Helens asset directory when the
+    /// caller configures it; [`Self::with_built_in`] remains empty.
     pub fn with_font_dirs(config: &Config) -> anyhow::Result<Self> {
         let mut font_info = vec![];
         for path in &config.font_dirs {
