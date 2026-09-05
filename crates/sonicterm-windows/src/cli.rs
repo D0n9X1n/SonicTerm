@@ -79,7 +79,7 @@ where
             || unknown_args > 0
             || runtime_smoke_flags != 1)
     {
-        // When: `runtime_smoke` accompanies launch state, `unknown_args`, or duplicate flags, reject it.
+        // Reject hidden smoke mode when launch state, unknown arguments, or duplicate flags accompany it.
         bail!("--runtime-smoke cannot be combined with user launch options")
     }
     Ok(out)

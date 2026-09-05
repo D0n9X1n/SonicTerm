@@ -122,9 +122,12 @@ class WorkflowShapeTests(unittest.TestCase):
         )
         self.assertIn("  macos-smoke:\n", workflow)
         self.assertIn("  windows-smoke:\n", workflow)
-        self.assertIn("needs: [macos-core, macos-coverage, macos-smoke]", workflow)
         self.assertIn(
-            "needs: [windows-native, windows-checks, windows-tests, windows-smoke]",
+            "needs: [macos-core, macos-features, macos-coverage, macos-smoke]",
+            workflow,
+        )
+        self.assertIn(
+            "needs: [windows-native, windows-checks, windows-features, windows-tests, windows-smoke]",
             workflow,
         )
         self.assertIn("Require macOS native runtime smoke", workflow)

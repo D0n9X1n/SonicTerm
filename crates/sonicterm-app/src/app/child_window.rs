@@ -185,7 +185,7 @@ impl App {
     /// keyboard and IME handling against that child's own tabs and panes.
     // Ordering: `pty_burst_gen` Acquire pairs with the VT thread's Release so a
     // burst is seen; `cursor_visible`, `kitty_flags`, `keyboard_modes` Relaxed.
-    // Lock order: `redraw_target` and parser guards are acquired separately and never nested.
+    // Redraw-target and parser guards are acquired separately and never nested.
     pub(super) fn handle_child_window_event(
         &mut self,
         el: &ActiveEventLoop,
@@ -765,7 +765,7 @@ impl App {
                         ) {
                             tracing::warn!("child render error: {e}");
                             if smoke_waiting_for_present {
-                                // When: `smoke_waiting_for_present` is true, retain the presentation failure.
+                                // Retain the presentation failure only while the adopted child proof is pending.
                                 smoke_presented_count = Some(Err(RuntimeSmokeFailure::Present));
                             }
                         } else if smoke_waiting_for_present {

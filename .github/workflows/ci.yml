@@ -704,7 +704,6 @@ jobs:
         with:
           name: sonicterm-windows-smoke-logs-${{ github.sha }}
           path: |
-            ${{ runner.temp }}/sonicterm-windows-gdi.log
             ${{ runner.temp }}/sonicterm-windows-smoke.log
             ${{ runner.temp }}/sonicterm-windows-smoke/logs/**
           if-no-files-found: ignore

@@ -234,6 +234,7 @@ impl App {
             if baseline.is_some_and(|baseline| {
                 warm_count == 1 && warm_reported && live_count == baseline + 2
             }) {
+                // When: `baseline`, `warm_count`, `warm_reported`, and `live_count` prove one reportable spare, adopt it.
                 tracing::info!(
                     warm_count,
                     live_count,
@@ -247,12 +248,13 @@ impl App {
                     self.windows.keys().copied().find(|child| Some(*child) != main_id)
                 });
                 if let Some(child) = child {
+                    // When: `child` exists after tear-out, verify it adopted the exact warm window before presenting.
                     let adopted_live_count = sonicterm_gpu::core::live_renderer_count();
                     if expected_child != Some(child)
                         || !self.warm_window_pool.is_empty()
                         || baseline.is_none_or(|baseline| adopted_live_count != baseline + 2)
                     {
-                        // When: the pool still owns a spare or renderer count changed, production adoption did not consume the reported renderer.
+                        // When: `expected_child`, `warm_window_pool`, or `adopted_live_count` disagrees with `baseline`, adoption failed.
                         if let Some(smoke) = self.runtime_smoke.as_mut() {
                             smoke.fail(RuntimeSmokeFailure::WarmLifecycle);
                         }
@@ -266,15 +268,17 @@ impl App {
                         .map(GpuRenderer::successful_frame_count)
                         .unwrap_or(0);
                     if let Some(smoke) = self.runtime_smoke.as_mut() {
+                        // When: `smoke` remains installed, bind the adopted child and its presentation baseline.
                         let _ = smoke.begin_warm_adoption(child, present_baseline);
                     }
                 } else if let Some(smoke) = self.runtime_smoke.as_mut() {
+                    // When: `child` is absent but `smoke` remains installed, record warm-lifecycle failure.
                     smoke.fail(RuntimeSmokeFailure::WarmLifecycle);
                     el.exit();
                     return;
                 }
             } else if warm_count > 0 {
-                // When: a spare exists but count/reporting invariants disagree, fail rather than loop until timeout.
+                // When: `warm_count` is nonzero but creation/reporting invariants disagree, fail instead of timing out.
                 if let Some(smoke) = self.runtime_smoke.as_mut() {
                     smoke.fail(RuntimeSmokeFailure::WarmLifecycle);
                 }

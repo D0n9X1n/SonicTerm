@@ -87,6 +87,7 @@ fn resolve_runtime_asset_path(
     if scratch.exists() {
         Ok(scratch)
     } else {
+        // When: `scratch.exists()` is false, use bundled assets without consulting user-home state.
         Ok(assets.join(kind).join(format!("{logical}.toml")))
     }
 }
@@ -531,7 +532,9 @@ impl App {
                     self.keymap = km;
                 }
                 Some(Err(e)) => tracing::warn!("reload: keymap {:?} failed: {e:#}", km_path),
-                None => {}
+                None => {
+                    // When: `loaded` is `None` after path resolution failed, preserve the active keymap.
+                }
             }
         }
 

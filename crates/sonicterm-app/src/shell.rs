@@ -155,7 +155,7 @@ impl ShellRunner {
                 let _ = cancel_tx.send(());
                 let _ = watchdog.join();
                 if run_result.is_err() {
-                    // When: `run_result` is an error, classify the event-loop boundary before common teardown.
+                    // Classify an event-loop error before the shared teardown and renderer-baseline check.
                     Err(RuntimeSmokeFailure::EventLoop)
                 } else {
                     // When: `run_result` succeeded, preserve the app's more specific smoke outcome.
