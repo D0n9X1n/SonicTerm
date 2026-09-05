@@ -54,7 +54,6 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-io --no-deps --features ssh
-cargo test --workspace --lib --bins
 bash scripts/check-authored-rust-comments.sh
 bash scripts/check-no-raw-process-exit.sh
 bash scripts/check-rust-version.sh
@@ -73,10 +72,11 @@ scripts/rust-logic-coverage.sh
 ```
 
 The separate SSH clippy and Rustdoc commands are required because
-`--all-targets` does not enable optional features. `cargo test --workspace --lib
---bins` excludes every integration-test binary. `check-workspace-crates.sh`
-derives all members from Cargo metadata and runs each package's library/binary
-and `--tests` surface; do not stop after the workspace unit command.
+`--all-targets` does not enable optional features. `check-workspace-crates.sh`
+runs one fail-complete
+`cargo test --workspace --lib --bins --tests --no-fail-fast` command. It covers
+every workspace library, binary, and integration-test target without repeating
+the unit and binary targets in a serial per-package loop.
 
 The authored-comment checker enforces purpose Rustdoc on effectively public
 functions and public trait functions, `# Safety` on public unsafe functions, and
@@ -124,40 +124,53 @@ and Wiki publication before starting the next serialized pull request.
 
 ### macOS 14 and Windows latest
 
-Both matrix hosts run:
+The stable required checks are fail-closed aggregate jobs: `macos-14 / unit
+tests` requires both `macos-core` and `macos-coverage`, while `windows-latest /
+unit tests` requires `windows-native`, `windows-checks`, and `windows-tests`.
+Each aggregate
+runs with `if: always()` and accepts only explicit `success` results, so a failed,
+cancelled, or skipped shard cannot turn into a successful required check.
 
-- rustfmt, workspace clippy, optional-SSH clippy, Cargo metadata, declared
-  Rust-version verification, process-exit, window-owner, and workflow
-  supply-chain checks;
-- authored Rust comments, strict workspace and optional-SSH Rustdoc;
-- workspace unit tests and the per-crate library/binary/integration gate;
-- host-window, adapter-classification, and renderer-churn probes;
-- release-note, wiki-publisher, PTY feasibility, resource inventory, soak, and
-  resource-baseline tooling tests, followed by a real resource-baseline capture
-  and artifact upload.
+The macOS core shard runs source-policy checks, strict Rustdoc, the one-pass
+workspace test gate, host probes, tooling tests, and real resource-baseline
+capture. Its independent coverage shard installs the pinned `cargo-llvm-cov`
+and runs the deterministic logic coverage gate.
 
-Windows additionally installs static Cairo through vcpkg and runs software
-presentation capability, WARP allocator, and software-selection presentation
-tests. macOS additionally installs `cargo-llvm-cov` and runs the deterministic
-logic coverage gate.
+Windows first prepares static Cairo through vcpkg. It restores the binary cache,
+builds a cold miss, and saves that result immediately before the two dependent
+shards start. The checks shard runs format, Clippy, source-policy, comment, and
+Rustdoc gates. The test shard runs the one-pass workspace tests, host probes,
+software presentation capability, WARP allocator, software-selection
+presentation, tooling tests, and real resource-baseline capture.
+
+Each platform's two Rust-consuming shards share one dependency cache key but
+exclude workspace-crate artifacts. Only the core/checks shard may save it, and
+only on a push to `main`; the sibling shard and every pull-request run are
+restore-only. This bounds cache entries and prevents parallel immutable-key
+writers while still warming later runs.
 
 Every job and authored step in the normal-CI, release, and wiki-publication
 workflows has an explicit timeout sized above recent cold-cache runtime. Fast
-checks, transfers, and native probes use short limits; workspace, per-crate,
-coverage, dependency, native-build, and package stages retain larger
-compile/network margins. The real resource-baseline collector separately bounds
-each focused PTY command at 30 seconds and its live soak at 90 seconds. A timeout
-kills the command's process tree, records exit 124 plus partial stdout/stderr in
-the evidence bundle, and continues writing checksums; the workflow's ten-minute
+checks, transfers, and native probes use short limits; workspace, coverage,
+dependency, native-build, and package stages retain larger compile/network
+margins. The real resource-baseline collector separately bounds each focused PTY
+command at 30 seconds and its live soak at 90 seconds. A timeout kills the
+command's process tree, records exit 124 plus partial stdout/stderr in the
+evidence bundle, and continues writing checksums; the workflow's ten-minute
 limit is the final guard around that collector.
 
 ### Ubuntu 22.04
 
-The Linux container installs Cairo, Fontconfig, X11, Wayland, Mesa
-Vulkan/lavapipe, Xvfb, Weston, and Debian packaging tools. It runs full format,
-clippy, Rustdoc, workspace unit, per-crate, authored-comment, exit, Rust-version,
-window-owner, workflow supply-chain, Linux package, release-asset, release-note,
-and wiki-publisher gates. It then:
+The stable `ubuntu 22.04 / workspace, packages, X11, Wayland` aggregate requires
+both `linux-core` and `linux-packages`, using the same fail-closed result check as
+the macOS and Windows aggregates. The core shard installs the compile-time Linux
+dependencies plus Vulkan/lavapipe for GPU tests and adapter probes, then runs
+format, Clippy, Rustdoc, the one-pass workspace test gate,
+authored-comment, exit, Rust-version, window-owner, workflow supply-chain,
+Linux-package, release-asset, release-note, and wiki-publisher checks.
+
+The independent package/runtime shard installs Mesa Vulkan/lavapipe, Xvfb,
+Weston, and Debian packaging tools, then:
 
 1. builds `sonicterm-linux` in release mode;
 2. derives one workspace version from Cargo metadata;
@@ -167,12 +180,14 @@ and wiki-publisher gates. It then:
 6. uploads the packages, or smoke logs on failure.
 
 A package smoke cannot pass without a native window, GPU initialization,
-`/bin/sh` PTY marker round-trip, and a later native frame presentation.
+`/bin/sh` PTY marker round-trip, and a later native frame presentation. The core
+shard is the sole main-only Linux dependency-cache writer; the package shard is
+restore-only and workspace-crate artifacts remain excluded.
 
 ## Gate blind spots
 
-- `cargo test --workspace --lib --bins` omits integration tests. The per-crate
-  gate is what runs `--tests` for all 24 packages.
+- The one-pass workspace gate includes integration tests for all 24 packages,
+  but it still exercises only targets that can compile and run on its host.
 - `rust-logic-coverage.sh` requires 80% line coverage only for its selected
   deterministic subset. Its ignore regex excludes 11 whole crates, including
   `sonicterm-app` and `sonicterm-gpu`, plus named native/controller files in
@@ -189,8 +204,9 @@ A package smoke cannot pass without a native window, GPU initialization,
 
 Every workflow runs third-party code, so two properties are enforced rather
 than left to convention. `scripts/check-workflow-supply-chain.sh` runs in the
-local gate, on both CI matrix hosts, in the Ubuntu tooling step, and in release
-validation before platform jobs start.
+local gate and in the macOS, Windows, and Ubuntu core/checks CI shards. Release
+accepts only an exact successful `main` CI run containing those checks before
+its platform jobs start.
 
 **Every remote action is pinned to a full 40-character commit SHA**, with a
 trailing `# vX.Y.Z` comment naming the release that SHA is. A tag is a pointer,
@@ -242,45 +258,46 @@ Pre-release tags containing `-` are marked prerelease.
 Before any platform job starts, validation peels the tag ref to its commit,
 fetches full `origin/main` history, requires that commit to be its ancestor, and
 uses read-only `actions` access to find a completed successful `CI` push run
-whose head is exactly that commit. The
-same job then checks the workspace version and runs Cargo metadata, formatting,
-both Clippy modes, declared Rust-version, workflow supply-chain, authored-comment,
-process-exit, window-owner, workspace Rustdoc, optional-SSH Rustdoc, and release
-asset tooling. A tag on an unreviewed branch, a tag whose main run failed or is
-missing, or a source-gate failure cannot reach package construction.
+whose head is exactly that commit. That exact run already includes the full
+source, unit, integration, platform-runtime, allocator, coverage, package, and
+Wiki-tooling gates. The release validator therefore checks only the workspace
+version and release-asset tooling before packaging; it does not rerun the
+platform test graph. A tag on an unreviewed branch, a tag whose main run failed
+or is missing, a version mismatch, or a release-asset contract failure cannot
+reach package construction.
 
 ```mermaid
 flowchart TD
     tag["vX.Y.Z tag"]
-    validate["verify exact release commit + successful CI<br/>run source gates + validate all package versions"]
-    mtest["macOS unit + per-crate + release-note tests"]
-    wtest["Windows unit + per-crate + software/WARP/selection tests"]
-    ltest["Ubuntu 22.04 unit + per-crate + Linux/release tooling tests"]
-    macbuild["build x86_64 and aarch64 binaries"]
+    validate["verify exact release commit + successful main CI<br/>validate all package versions + release tooling"]
+    macx["build macOS x86_64 binary"]
+    maca["build macOS aarch64 binary"]
     dmg["package and register two DMGs"]
-    msi["build and register x64 MSI"]
+    msi["build, validate, and register x64 MSI"]
     linux["build, validate, smoke, and register deb + tar.gz"]
     manifest["consolidate fragments<br/>verify five required tuples and hashes"]
     notes["generate manifest-driven notes"]
     publish["publish exact validated paths"]
 
     tag --> validate
-    validate --> mtest
-    validate --> wtest
-    validate --> ltest
-    mtest --> macbuild --> dmg
-    wtest --> msi
-    ltest --> linux
+    validate --> macx
+    validate --> maca
+    validate --> msi
+    validate --> linux
+    macx --> dmg
+    maca --> dmg
     dmg --> manifest
     msi --> manifest
     linux --> manifest
     manifest --> notes --> publish
 ```
 
-All three platform chains block publication. In particular,
-`unit-tests-windows → build-windows → publish` keeps the WARP allocator gate in
-the MSI path, and `unit-tests-linux → package-linux → publish` requires both
-package layouts to pass both display-system smokes.
+All three packaging chains block publication. Windows Release restores the
+main-published vcpkg binary cache but performs its Rust target build without a
+Release cache write. All Release Rust target builds are cache-independent, so
+tag-specific cache entries cannot displace the bounded CI dependency caches.
+The Linux chain retains both X11 and Wayland smokes before its artifacts can
+reach publication.
 
 ### Published assets
 
@@ -414,7 +431,6 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-io --no-deps --features ssh
-cargo test --workspace --lib --bins
 bash scripts/check-authored-rust-comments.sh
 bash scripts/check-no-raw-process-exit.sh
 bash scripts/check-rust-version.sh
@@ -433,9 +449,10 @@ scripts/rust-logic-coverage.sh
 ```
 
 必须单独运行 SSH clippy 与 Rustdoc，因为 `--all-targets` 不会启用 optional feature。
-`cargo test --workspace --lib --bins` 会排除所有 integration-test binary。
-`check-workspace-crates.sh` 从 Cargo metadata 推导 member，并对每个 package 运行
-library/binary 和 `--tests`；不能在 workspace unit command 后就停止。
+`check-workspace-crates.sh` 只运行一次 fail-complete 的
+`cargo test --workspace --lib --bins --tests --no-fail-fast`。它覆盖全部 workspace
+library、binary 和 integration-test target，且不会再用逐 package 串行循环重复执行 unit 与
+binary target。
 
 第一方注释 checker 要求有效公开函数和公开 trait 函数带用途 Rustdoc，公开 unsafe 函数带
 `# Safety`，并检查准确锚定的 `// When:`、`// SAFETY:`、`// Lock order:`、
@@ -475,32 +492,41 @@ Windows-only 测试；本地、macOS、Ubuntu 或 review 结果都不能替代�
 
 ### macOS 14 与 Windows latest
 
-两个 matrix host 都运行：
+稳定的必需检查是 fail-closed 汇总 job：`macos-14 / unit tests` 同时依赖 `macos-core`
+与 `macos-coverage`，而 `windows-latest / unit tests` 同时依赖 `windows-native`、
+`windows-checks` 与 `windows-tests`。每个汇总 job 都使用 `if: always()`，且只接受显式
+`success`，因此任一 shard
+失败、取消或跳过都不会变成成功的必需检查。
 
-- rustfmt、workspace clippy、optional-SSH clippy、Cargo metadata、声明 Rust 版本校验、
-  process-exit、window-owner 与工作流供应链检查；
-- 第一方 Rust 注释、严格 workspace 与 optional-SSH Rustdoc；
-- workspace unit test 和逐 crate library/binary/integration gate；
-- host-window、adapter 分类和 renderer churn probe；
-- release-note、Wiki publisher、PTY feasibility、resource inventory、soak 和
-  resource-baseline 工具测试，随后采集真实 resource baseline 并上传 artifact。
+macOS core shard 运行源码策略检查、严格 Rustdoc、一次性 workspace 测试 gate、host probe、
+工具测试与真实 resource baseline 采集。独立的 coverage shard 安装固定版本的
+`cargo-llvm-cov`，并运行确定性 logic coverage gate。
 
-Windows 还通过 vcpkg 安装静态 Cairo，并运行 software presentation capability、WARP
-allocator 和 software-selection presentation 测试。macOS 还安装 `cargo-llvm-cov`，运行
-确定性 logic coverage gate。
+Windows 先通过 vcpkg 准备静态 Cairo。它先恢复 binary cache，冷 miss 时完成构建，并在两个依赖
+shard 启动前立即保存结果。checks shard 运行 format、Clippy、源码策略、注释与 Rustdoc gate；
+tests shard 运行一次性 workspace 测试、host probe、software presentation capability、WARP
+allocator、software-selection presentation、工具测试与真实 resource baseline 采集。
+
+每个平台的两个 Rust shard 共用一个依赖 cache key，但不缓存 workspace crate artifact。只有
+core/checks shard 可以保存，且仅限推送到 `main`；同平台 sibling shard 与全部 pull-request run
+均为 restore-only。这样既限制 cache 条目，也避免并行写入不可变 key，同时为后续 run 预热依赖。
 
 普通 CI、发布和 Wiki 发布工作流中的每个任务及手写步骤都有显式超时，阈值高于近期冷缓存运行
-时间。快速检查、传输和原生探针使用较短限制；workspace、逐 crate、覆盖率、依赖安装、原生构建
-和打包阶段保留更大的编译与网络余量。真实 resource baseline 采集器还会把每个聚焦 PTY 命令限制
-为 30 秒，把 live soak 限制为 90 秒。超时会终止该命令的整个进程树，在证据包中记录退出码 124
-和部分 stdout/stderr，并继续写入校验和；工作流的十分钟限制是采集器外层的最终保护。
+时间。快速检查、传输和原生探针使用较短限制；workspace、覆盖率、依赖安装、原生构建和打包阶段
+保留更大的编译与网络余量。真实 resource baseline 采集器还会把每个聚焦 PTY 命令限制为 30 秒，
+把 live soak 限制为 90 秒。超时会终止该命令的整个进程树，在证据包中记录退出码 124 和部分
+stdout/stderr，并继续写入校验和；工作流的十分钟限制是采集器外层的最终保护。
 
 ### Ubuntu 22.04
 
-Linux container 会安装 Cairo、Fontconfig、X11、Wayland、Mesa Vulkan/lavapipe、Xvfb、
-Weston 和 Debian 打包工具。它运行完整 format、clippy、Rustdoc、workspace unit、逐 crate、
-第一方注释、exit、Rust 版本、window-owner、工作流供应链、Linux package、release-asset、
-release-note 和 Wiki publisher gate。随后：
+稳定的 `ubuntu 22.04 / workspace, packages, X11, Wayland` 汇总 job 同时依赖 `linux-core`
+与 `linux-packages`，并使用与 macOS、Windows 相同的 fail-closed 结果检查。core shard 安装
+Linux 编译依赖，并为 GPU 测试和 adapter probe 安装 Vulkan/lavapipe，随后运行 format、Clippy、
+Rustdoc、一次性 workspace 测试、第一方注释、exit、
+Rust 版本、window-owner、工作流供应链、Linux package、release-asset、release-note 与 Wiki
+publisher gate。
+
+独立的 package/runtime shard 安装 Mesa Vulkan/lavapipe、Xvfb、Weston 和 Debian 打包工具，随后：
 
 1. 以 release 模式构建 `sonicterm-linux`；
 2. 从 Cargo metadata 推导唯一 workspace 版本；
@@ -509,13 +535,14 @@ release-note 和 Wiki publisher gate。随后：
 5. 用 Vulkan/lavapipe 在 X11/Xvfb 和 Wayland/Weston 上运行两种 package layout；
 6. 上传 package，失败时上传 smoke log。
 
-没有原生窗口、GPU 初始化、`/bin/sh` PTY marker 往返和之后的原生 frame 呈现，
-package smoke 就不能通过。
+没有原生窗口、GPU 初始化、`/bin/sh` PTY marker 往返和之后的原生 frame 呈现，package smoke
+就不能通过。core shard 是唯一可在 `main` 写入 Linux 依赖 cache 的 job；package shard 只恢复，
+且 workspace crate artifact 始终排除在 cache 外。
 
 ## Gate 盲区
 
-- `cargo test --workspace --lib --bins` 不运行 integration test；逐 crate gate 才会对
-  24 个 package 运行 `--tests`。
+- 一次性 workspace gate 包含全部 24 个 package 的 integration test，但仍只能运行当前 host
+  能够编译与执行的 target。
 - `rust-logic-coverage.sh` 只对选中的确定性代码子集要求 80% line coverage。其 ignore
   regex 完全排除 11 个 crate，包括 `sonicterm-app` 与 `sonicterm-gpu`，还排除其它 crate
   中点名的原生/控制器文件。它只在 macOS CI 运行。Coverage 通过不能证明原生窗口、真实
@@ -528,8 +555,9 @@ package smoke 就不能通过。
 ## 工作流供应链
 
 每个工作流都会运行第三方代码，因此有两条性质由 gate 强制执行，而不是靠约定维持。
-`scripts/check-workflow-supply-chain.sh` 在本地 gate、两个 CI matrix host、Ubuntu 工具步骤，
-以及任何平台 job 开始前的 release 验证中都会运行。
+`scripts/check-workflow-supply-chain.sh` 在本地 gate，以及 macOS、Windows、Ubuntu 的
+core/checks CI shard 中运行。Release 只接受包含这些检查、与 tag commit 完全相同且成功的
+`main` CI run，之后才启动平台 job。
 
 **每个远程 action 都固定到完整的 40 位提交 SHA**，并带上标明该 SHA 对应发布版本的
 `# vX.Y.Z` 尾注。Tag 是指针而不是版本：持有上游仓库的人可以随时把 `@v2` 重新指向任意
@@ -570,43 +598,41 @@ Dependabot 的 `github-actions` 生态被刻意设为不过滤，这与 `cargo` 
 
 任何平台 job 开始前，验证步骤会把 tag ref 解引用到对应 commit，获取完整的 `origin/main`
 历史，要求该 commit 是其祖先，并用只读 `actions` 权限查找 head 完全等于该 commit、已完成且
-成功的 `CI` push run。同一 job 随后
-检查 workspace 版本，并运行 Cargo metadata、format、两种 Clippy、声明 Rust 版本、工作流
-供应链、第一方注释、process-exit、window-owner、workspace Rustdoc、optional-SSH Rustdoc
-和 release asset 工具。位于未审核分支的 tag、缺失或失败的 main run，以及源码 gate 失败都
-不能进入 package 构建。
+成功的 `CI` push run。这个精确 run 已包含全部源码、unit、integration、平台 runtime、allocator、
+coverage、package 与 Wiki 工具 gate。因此 release validator 在打包前只检查 workspace 版本和
+release asset 工具，不会重新运行平台测试图。位于未审核分支的 tag、缺失或失败的 main run、
+版本不一致或 release asset 契约失败都不能进入 package 构建。
 
 ```mermaid
 flowchart TD
     tag["vX.Y.Z tag"]
-    validate["验证精确 release commit 与成功 CI<br/>运行源码 gate 并核对全部 package 版本"]
-    mtest["macOS unit + 逐 crate + release-note 测试"]
-    wtest["Windows unit + 逐 crate + software/WARP/selection 测试"]
-    ltest["Ubuntu 22.04 unit + 逐 crate + Linux/release 工具测试"]
-    macbuild["构建 x86_64 与 aarch64 binary"]
+    validate["验证精确 release commit 与成功 main CI<br/>核对全部 package 版本与 release 工具"]
+    macx["构建 macOS x86_64 binary"]
+    maca["构建 macOS aarch64 binary"]
     dmg["打包并登记两个 DMG"]
-    msi["构建并登记 x64 MSI"]
+    msi["构建、验证并登记 x64 MSI"]
     linux["构建、验证、smoke 并登记 deb + tar.gz"]
     manifest["合并 fragment<br/>验证五个必需 tuple 与 hash"]
     notes["生成 manifest 驱动的 release note"]
     publish["发布精确验证后的路径"]
 
     tag --> validate
-    validate --> mtest
-    validate --> wtest
-    validate --> ltest
-    mtest --> macbuild --> dmg
-    wtest --> msi
-    ltest --> linux
+    validate --> macx
+    validate --> maca
+    validate --> msi
+    validate --> linux
+    macx --> dmg
+    maca --> dmg
     dmg --> manifest
     msi --> manifest
     linux --> manifest
     manifest --> notes --> publish
 ```
 
-三个平台链都会阻断发布。`unit-tests-windows → build-windows → publish` 把 WARP allocator
-gate 留在 MSI 路径中；`unit-tests-linux → package-linux → publish` 要求两种 package layout
-都通过两种 display system smoke。
+三个打包链都会阻断发布。Windows Release 会恢复由 `main` 发布的 vcpkg binary cache，但其
+Rust target 构建不会写入 Release cache。全部 Release Rust target build 均独立于 cache，避免
+tag 专属 cache 条目挤出有界的 CI 依赖 cache。Linux 链会保留 X11 与 Wayland 两种 smoke，只有
+全部通过后其 artifact 才能进入发布。
 
 ### 发布资产
 

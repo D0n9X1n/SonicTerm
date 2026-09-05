@@ -87,7 +87,8 @@ by default and the CI workflows are first-party files worth finding.
 
 ## Local gate
 
-Normal PR/main CI runs workspace unit tests plus a per-crate unit/build gate:
+Normal PR/main CI runs every workspace library, binary, and integration-test
+target once through a fail-complete workspace gate:
 
 ```bash
 cargo fmt --all --check
@@ -95,7 +96,6 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-io --no-deps --features ssh
-cargo test --workspace --lib --bins
 bash scripts/check-authored-rust-comments.sh
 bash scripts/check-no-raw-process-exit.sh
 bash scripts/check-rust-version.sh
@@ -113,11 +113,12 @@ bash scripts/test-wiki-publish.sh
 scripts/rust-logic-coverage.sh
 ```
 
-**Run the list to the end before concluding anything.** `--lib --bins`
-excludes every `tests/` binary, so it can pass while an integration test is
-broken; `check-workspace-crates.sh` is the step that runs `--tests` per crate
-and catches that. A green `cargo test --workspace --lib --bins` on its own
-means the unit tests pass, not that CI will.
+**Run the list to the end before concluding anything.**
+`check-workspace-crates.sh` makes one
+`cargo test --workspace --lib --bins --tests --no-fail-fast` invocation. It
+includes integration-test binaries, avoids running library and binary tests a
+second time, and lets Cargo report failures from every test target before the
+gate exits nonzero.
 
 **Never merge or enable auto-merge while any required pull-request CI job is
 queued, in progress, missing, cancelled, unexpectedly skipped, or failed.** The
@@ -131,8 +132,9 @@ The second clippy line is not a duplicate. `--workspace --all-targets` does
 not imply `--all-features`, and `ssh` is off by default, so the SSH backend is
 compiled by no other command in this list.
 
-Run this additional deterministic allocator gate on Windows only; Windows CI
-and Windows release unit tests run it explicitly:
+Run this additional deterministic allocator gate on Windows only; the Windows
+CI test shard runs it explicitly, and Release accepts only an exact successful
+`main` CI run that includes that shard:
 
 ```bash
 cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture
@@ -143,11 +145,12 @@ unavailable, when production reserved bytes are not below 64 MiB, when the
 largest block is not below 128 MiB, or when production reserved bytes do not
 improve on the old default policy.
 
-The Ubuntu 22.04 CI job runs the full workspace and per-crate gates, builds the
-shipping `sonicterm` Linux binary, produces `.deb` and `.tar.gz` packages, and
-runs both packaged layouts on X11/Xvfb and Wayland/Weston with Vulkan/lavapipe.
-The smoke exits successfully only after window creation, GPU initialization,
-`/bin/sh` PTY marker round-trip, and a subsequent native frame presentation.
+The Ubuntu 22.04 CI aggregate requires both the core-gate shard and the
+independent package/runtime shard. The package shard builds the shipping
+`sonicterm` Linux binary, produces `.deb` and `.tar.gz` packages, and runs both
+layouts on X11/Xvfb and Wayland/Weston with Vulkan/lavapipe. The smoke exits
+successfully only after window creation, GPU initialization, `/bin/sh` PTY
+marker round-trip, and a subsequent native frame presentation.
 
 Two more limits worth knowing before trusting a green run:
 
@@ -162,9 +165,10 @@ Two more limits worth knowing before trusting a green run:
   those are exercised.
 
 For release prep also run the shipping-platform build and, on Windows, the
-release-blocking allocator gate above. The Windows release dependency is
-`unit-tests-windows → build-windows → publish`, so a failed WARP baseline blocks
-the MSI and publication. For example, the macOS build is:
+release-blocking allocator gate above. Release packaging starts only after
+provenance validation finds an exact successful `main` CI run for the tag
+commit, so a failed WARP baseline cannot reach the Windows build or publication.
+For example, the macOS build is:
 
 ```bash
 cargo build --release -p sonicterm-mac
@@ -200,8 +204,11 @@ answer that costs more to retract than it did to reach.
 - **Pin** — a regression test that fails before the change and passes after.
   Without it there is a claim, not a fix.
 
-Three rules carry the same weight as the steps:
+Four rules carry the same weight as the steps:
 
+- **Use the normal color profile for visual tests.** Never launch SonicTerm with
+  `NO_COLOR` or another no-color profile; it invalidates terminal color and visual
+  behavior. Remove inherited no-color overrides before starting the app.
 - **Isolate the diagnostic run.** Point config and logs at scratch directories.
   Override those specific directories, not `HOME` — the shell inside the
   terminal inherits it, so a scratch `HOME` changes the repro itself.
