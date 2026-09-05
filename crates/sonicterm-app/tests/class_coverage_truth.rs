@@ -74,30 +74,18 @@ fn the_pty_input_queue_is_a_charged_class() {
     );
 }
 
-/// The backstop must sit above everything a pane can now be charged.
+/// The backstop leaves headroom above the exact production seam inventory.
 ///
-/// `PANE_COMMITTED_BUDGET_BYTES` is a real enforced limit — it is the
-/// `owner_bytes` a pane owner is held to — and it is derived from the six seam
-/// caps times a headroom multiplier. Charging the PTY input queue adds a term
-/// that derivation never counted, so the headroom that was slack for allocator
-/// overshoot is now partly spent on a real seam.
-///
-/// A backstop below the worst case it backstops stops being a tripwire and
-/// becomes the enforcer, refusing panes that are behaving correctly.
+/// PTY input is already one of the production terms. Comparing the backstop to
+/// that sum directly prevents a test-only formula from spending the intended
+/// allocator headroom by adding the same queue cap twice.
 #[test]
-fn the_backstop_covers_the_seams_plus_the_charged_input_queue() {
+fn the_backstop_covers_the_production_seam_sum() {
     use sonicterm_app::app::{PANE_COMMITTED_BUDGET_BYTES, PANE_SEAM_CAP_SUM_BYTES};
 
-    let pty_input_bound = PTY_INPUT_QUEUE_CAPACITY * MAX_PTY_INPUT_MESSAGE_BYTES;
-    let worst_case = PANE_SEAM_CAP_SUM_BYTES + pty_input_bound;
-
-    assert!(
-        PANE_COMMITTED_BUDGET_BYTES > worst_case,
-        "the backstop is {PANE_COMMITTED_BUDGET_BYTES} bytes and a pane's worst case is \
-         now {worst_case} — {PANE_SEAM_CAP_SUM_BYTES} of seam caps plus {pty_input_bound} \
-         of queued input, which is charged but is not one of the terms the budget is \
-         derived from. A backstop below the worst case refuses panes that are behaving \
-         correctly."
+    const _: () = assert!(
+        PANE_COMMITTED_BUDGET_BYTES > PANE_SEAM_CAP_SUM_BYTES,
+        "the pane backstop must exceed the exact production seam sum, including PTY input once"
     );
 }
 

@@ -4152,8 +4152,8 @@ impl GpuRenderer {
     }
 
     /// Attach point for the legacy async font fallback loader.
-    /// Stub today — sonicterm-font handles fallback synchronously via its
-    /// built-in vendor chain, so the loader is a no-op `()`. Kept as
+    /// Stub today — the font stack resolves configured assets and native
+    /// platform fallbacks synchronously, so the loader is a no-op `()`. Kept as
     /// `Option<()>` so the cross-crate API (`sonicterm-app` calls
     /// `set_async_loader(...)` on renderer construction) survives;
     /// the legacy `SwashRasterizer::set_async_loader` plumb is gone.
@@ -4921,14 +4921,11 @@ impl GpuRenderer {
             // without bundled fonts (FontStack returns None) the grid
             // walk skips per-glyph emission and only paints quads.
             let mut wt_raster = self.font_stack.clone();
-            // The async fallback loader was wired into the
-            // legacy SwashRasterizer. The wezterm path doesn't expose
-            // an equivalent hook; missing glyphs are handled by
-            // sonicterm-font's built-in fallback chain (NotoColorEmoji,
-            // PingFangSC, etc. via the vendored features). We drop the
-            // loader plumb here. If future work re-introduces an async
-            // hook on FontStack rasterization, it would attach in this
-            // same scope.
+            // The async fallback loader was wired into the legacy
+            // SwashRasterizer. The current path resolves missing glyphs through
+            // configured asset directories and native platform discovery, so
+            // it needs no equivalent hook. A future async FontStack hook would
+            // attach in this same scope.
             let _ = self.async_loader;
             // Theme accent for the Cmd-hovered URL recolor. `UiPalette::accent`
             // is a linear-sRGB `[f32;4]` (alpha 1.0), the same space the
@@ -8965,12 +8962,6 @@ pub fn collect_hyperlink_runs(grid: &Grid) -> Vec<(u16, u16, u16)> {
     }
     runs
 }
-
-// `load_bundled_fonts` (cosmic-text bundle loader) is gone.
-// Bundled fonts ship via sonicterm-font's `vendor-jetbrains`,
-// `vendor-noto-emoji`, `vendor-nerd-font-symbols` features (see
-// `sonicterm-text/Cargo.toml`), so the FontStack discovers them
-// automatically without an explicit per-file disk load.
 
 /// Stable fingerprint for command badges, including wall-clock buckets that
 /// change when badge visibility can transition without a tab model mutation.

@@ -21,9 +21,44 @@
 //! the live type computes its size the same way, but that is now an argument
 //! rather than a measurement.
 
+use super::{runtime_exit_code, runtime_smoke_spec};
+
 #[test]
 fn integration_test_target_is_present() {
     assert_eq!(env!("CARGO_PKG_NAME"), "sonicterm-windows");
+}
+
+#[test]
+fn runtime_smoke_uses_scratch_config_and_log_roots_with_cmd_expansion() {
+    // Protect the packaged smoke from mutating HOME and from relying on same-line cmd expansion.
+    let root = std::path::Path::new("C:/ci/native-smoke");
+    let spec = runtime_smoke_spec(root, 41).expect("valid Windows smoke spec");
+    assert_eq!(spec.shell_program(), "cmd.exe");
+    assert_eq!(spec.config_dir(), root.join("config"));
+    assert_eq!(spec.log_dir(), root.join("logs"));
+    assert_eq!(
+        spec.command(),
+        b"set SONICTERM_SMOKE_NONCE=41\r\necho __SONICTERM_SMOKE_%SONICTERM_SMOKE_NONCE%__\r\n"
+    );
+    assert!(!String::from_utf8_lossy(spec.command()).contains(spec.marker()));
+}
+
+#[test]
+fn windows_runtime_smoke_exit_codes_include_warm_cleanup() {
+    // Protect workflow diagnostics from collapsing warm renderer cleanup into a generic failure.
+    use sonicterm_app::app::RuntimeSmokeFailure;
+    assert_eq!(runtime_exit_code(&Ok(())), 0);
+    assert_eq!(runtime_exit_code(&Err(RuntimeSmokeFailure::WarmLifecycle)), 16);
+}
+
+#[test]
+fn windows_runtime_smoke_initializes_only_explicit_log_state() {
+    // Protect the hidden shipping mode from consulting or overwriting user-home config and logs.
+    const MAIN: &str = include_str!("main.rs");
+    assert!(MAIN.contains("sonicterm_logging::init_in(&log_cfg, spec.log_dir())"));
+    assert!(MAIN.contains("shell.run_smoke(spec"));
+    assert!(!MAIN.contains("set_var(\"HOME\""));
+    assert!(!MAIN.contains("set_var(\"USERPROFILE\""));
 }
 
 #[test]

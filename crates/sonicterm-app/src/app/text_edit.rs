@@ -70,24 +70,24 @@ fn printable_text_for_parts<'a>(
         // When: text is empty or contains a control, it is not printable field input.
         return None;
     }
-    if !mods.control_key() {
-        // When: mods omits Control, the OS-produced text is safe to insert.
+    if !mods.intersects(ModifiersState::CONTROL | ModifiersState::ALT) {
+        // When: mods has no Control or Alt command modifier, insert the OS text.
         return Some(text);
     }
-    if !mods.alt_key() {
+    if mods.control_key() && !mods.alt_key() {
         // When: mods contains Control without Alt, preserve the command chord.
         return None;
     }
 
-    // AltGr commonly appears as Ctrl+Alt. Keep its produced glyph when it
-    // differs from the layout-resolved unmodified key, but reject ordinary Ctrl+Alt.
+    // Option and AltGr produce text only when the glyph differs from the
+    // layout-resolved unmodified key; ordinary Alt/Ctrl+Alt remains a chord.
     let produced = text.chars().next().map(super::key_encoding::unshift_ascii);
     let unmodified = match key_without_modifiers {
         Key::Character(text) => text.chars().next(),
         Key::Named(NamedKey::Space) => Some(' '),
         _ => None,
-    };
-    (produced != unmodified).then_some(text)
+    }?;
+    (produced != Some(unmodified)).then_some(text)
 }
 
 pub(super) fn core_text_edit_for_chord(chord: &str) -> Option<TextEdit> {

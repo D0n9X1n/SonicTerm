@@ -233,9 +233,6 @@ wrappers.
 Android and non-macOS Unix builds also use `sonicterm-fontconfig` as
 `fontconfig`.
 
-**Features:** `vendor-jetbrains`, `vendor-nerd-font-symbols`,
-`vendor-noto-emoji`, and `vendor-roboto` compatibility switches.
-
 **Read:** `src/db.rs`, `src/locator/`, `src/shaper/`, `src/rasterizer/`,
 `src/{ftwrap,hbwrap,fcwrap,parser}.rs`.
 
@@ -593,9 +590,6 @@ FreeType/DirectWrite/HarfBuzz 光栅化、COLR 字形和原生 handle 封装。
 **第一方依赖：** 以 `config` 使用 `sonicterm-font-config`，以 `freetype` 使用
 `sonicterm-freetype`，以 `harfbuzz` 使用 `sonicterm-harfbuzz`；Android 和非 macOS
 Unix 构建还以 `fontconfig` 使用 `sonicterm-fontconfig`。
-
-**Features：** `vendor-jetbrains`、`vendor-nerd-font-symbols`、
-`vendor-noto-emoji`、`vendor-roboto` 兼容开关。
 
 **阅读：** `src/db.rs`、`src/locator/`、`src/shaper/`、`src/rasterizer/`、
 `src/{ftwrap,hbwrap,fcwrap,parser}.rs`。

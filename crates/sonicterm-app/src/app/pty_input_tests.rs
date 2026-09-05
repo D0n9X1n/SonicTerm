@@ -16,6 +16,22 @@ fn saturated_input_event_retains_rejected_bytes_for_user_notification() {
     ));
 }
 
+/// Terminal key ownership includes only panes whose PTY accepted the press.
+#[test]
+fn terminal_key_dispatch_excludes_attempted_but_undelivered_panes() {
+    let mut app = App::new(
+        sonicterm_cfg::theme::Theme::default(),
+        sonicterm_cfg::config::Config::default(),
+        sonicterm_cfg::keymap::Keymap::default(),
+    );
+    let pane_id = app.__test_seed_tab("missing-pty");
+
+    let delivered =
+        app.dispatch_terminal_key_writes(vec![(pane_id, b"a".to_vec()), (u64::MAX, b"b".to_vec())]);
+
+    assert!(delivered.is_empty());
+}
+
 /// Accepted Windows PTY input fixes one foreground-process probe deadline.
 #[cfg(windows)]
 #[test]

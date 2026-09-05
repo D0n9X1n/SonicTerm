@@ -99,7 +99,16 @@ fn no_open_script_routes_nothing() {
 #[test]
 fn main_queues_the_request_before_constructing_the_windows_shell() {
     let source = include_str!("main.rs");
-    let queue = source.find("queue_startup_open_script").expect("startup producer call");
-    let shell = source.find("WindowsShell::new").expect("Windows shell construction");
+    let interactive = source
+        .find("startup::queue_startup_open_script(&parsed_cli")
+        .expect("interactive startup producer call");
+    let queue = source[interactive..]
+        .find("queue_startup_open_script")
+        .map(|offset| interactive + offset)
+        .expect("startup producer call");
+    let shell = source[interactive..]
+        .find("WindowsShell::new")
+        .map(|offset| interactive + offset)
+        .expect("interactive Windows shell construction");
     assert!(queue < shell);
 }

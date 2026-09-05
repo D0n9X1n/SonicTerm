@@ -234,10 +234,10 @@ field is active, `Ctrl+<letter>` continues to the PTY.
 
 Printable input comes from the operating system's `KeyEvent.text`, so Unicode
 keyboard layouts and composed Option/AltGr characters are inserted as produced.
-Super and ordinary Control command chords never become field text. A Ctrl+Alt
-event is accepted as likely AltGr only when its produced character differs from
-the unmodified physical US key; the exact Control editing chords above still
-take precedence.
+Super and ordinary Control, Alt, or Ctrl+Alt command chords never become field
+text. An Option/Alt or AltGr event is accepted as composed input only when its
+produced character differs from the layout-resolved unmodified key; the exact
+Control editing chords above still take precedence.
 
 ### Load failures
 
@@ -468,9 +468,9 @@ READONLY 还允许执行切换或激活标签页、切换 pane 焦点、打开�
 `Ctrl+<字母>` 会继续发送给 PTY。
 
 可打印输入来自操作系统的 `KeyEvent.text`，因此 Unicode 键盘布局以及 Option/AltGr
-组合生成的字符会按系统结果插入。Super 和普通 Control 命令组合不会变成文本框内容。
-只有 Ctrl+Alt 生成的字符不同于该物理按键在美式布局下的未修饰字符时，才会把它视为
-可能的 AltGr 输入；上表中明确列出的 Control 编辑组合仍优先执行。
+组合生成的字符会按系统结果插入。Super 以及普通 Control、Alt 或 Ctrl+Alt 命令组合不会
+变成文本框内容。只有 Option/Alt 或 AltGr 生成的字符不同于布局解析出的未修饰按键时，
+才会把它视为组合输入；上表中明确列出的 Control 编辑组合仍优先执行。
 
 ### 加载失败
 

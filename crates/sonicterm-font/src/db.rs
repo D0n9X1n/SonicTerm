@@ -1,7 +1,7 @@
 //! A font-database to keep track of fonts that we've located
 
 use crate::locator::{FontDataSource, FontOrigin};
-use crate::parser::{load_built_in_fonts, parse_and_collect_font_info, ParsedFont};
+use crate::parser::{parse_and_collect_font_info, ParsedFont};
 use crate::rangeset::RangeSet;
 use anyhow::Context;
 use config::{Config, FontAttributes};
@@ -33,7 +33,9 @@ impl FontDatabase {
     }
 
     /// Build a database from fonts found in the configured font directories.
-    /// Built-in fallback bundles are loaded separately by [`Self::with_built_in`].
+    ///
+    /// This includes SonicTerm's tracked St.Helens asset directory when the
+    /// caller configures it; [`Self::with_built_in`] remains empty.
     pub fn with_font_dirs(config: &Config) -> anyhow::Result<Self> {
         let mut font_info = vec![];
         for path in &config.font_dirs {
@@ -72,13 +74,13 @@ impl FontDatabase {
         fonts
     }
 
-    /// Builds a database from the optional compiled-in fallback font bundles.
+    /// Builds the empty compatibility database for compiled-in fallback fonts.
+    ///
+    /// SonicTerm's bundled St.Helens faces load through configured asset
+    /// directories. Other fallback faces come from native platform discovery,
+    /// so this legacy resolver slot intentionally contains no private bundles.
     pub fn with_built_in() -> anyhow::Result<Self> {
-        let mut font_info = vec![];
-        load_built_in_fonts(&mut font_info)?;
-        let mut db = Self::new();
-        db.load_font_info(font_info);
-        Ok(db)
+        Ok(Self::new())
     }
 
     /// Resolves multiple requested attributes and records each successful match.
@@ -159,3 +161,7 @@ impl FontDatabase {
         None
     }
 }
+
+#[cfg(test)]
+#[path = "db_tests.rs"]
+mod db_tests;

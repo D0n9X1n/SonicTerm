@@ -93,9 +93,12 @@ target once through a fail-complete workspace gate:
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings
+# Windows only: use aws-lc-sys's checked-in assembly objects.
+export AWS_LC_SYS_PREBUILT_NASM=1
+cargo clippy -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
-RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-io --no-deps --features ssh
+RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --no-deps
+cargo test -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --lib --bins --tests --no-fail-fast
 bash scripts/check-authored-rust-comments.sh
 bash scripts/check-no-raw-process-exit.sh
 bash scripts/check-rust-version.sh
@@ -128,6 +131,16 @@ its Windows-only tests successfully; green macOS/Ubuntu results, local gates, or
 review approval cannot substitute for that result. After merge, verify `main` CI
 and Wiki publication before starting the next serialized PR.
 
+The optional-feature Clippy, Rustdoc, and test lines are not duplicates.
+`--workspace --all-targets` does not enable optional features. Together they
+compile the app and IO `ssh` branches, `distro-defaults`, and `test-util`; this
+proves those advertised feature surfaces build, lint, document, and test, but
+does not claim the GUI completes a live SSH connection. The font stack has no
+optional vendor features: St.Helens is a normal tracked asset and other fallback
+faces come from native discovery. On Windows, `AWS_LC_SYS_PREBUILT_NASM=1`
+selects aws-lc-sys's checked-in assembly objects, so optional SSH verification
+does not depend on NASM or CMake being installed on the runner.
+
 **Keep every wait off the main agent.** For each lifecycle that must wait or
 monitor — a long local gate, pull-request CI, post-merge `main` CI plus Wiki
 publication, or a release workflow — start one dedicated watcher subagent, not
@@ -158,10 +171,6 @@ remove only clean, unlocked worktrees whose HEAD is merged there, and delete
 only merged local branches that are not attached to a preserved worktree. Never
 force removal or discard dirty, unmerged, or locked worktrees or any stash.
 
-The second clippy line is not a duplicate. `--workspace --all-targets` does
-not imply `--all-features`, and `ssh` is off by default, so the SSH backend is
-compiled by no other command in this list.
-
 Run this additional deterministic allocator gate on Windows only; the Windows
 CI test shard runs it explicitly, and Release accepts only an exact successful
 `main` CI run that includes that shard:
@@ -175,12 +184,24 @@ unavailable, when production reserved bytes are not below 64 MiB, when the
 largest block is not below 128 MiB, or when production reserved bytes do not
 improve on the old default policy.
 
+The macOS and Windows CI aggregates include dedicated native-smoke shards that
+build the shipping release binaries and run them through
+`scripts/native-smoke-runner.py`. Windows also requires the GDI probe to emit the
+unique verdict `capability=EXERCISED`; `HOST_INCAPABLE` remains informational and
+cannot satisfy the required gate. The runner preserves `HOME`, removes inherited
+`NO_COLOR`, captures diagnostics, and kills the full child tree after its
+45-second deadline.
+
 The Ubuntu 22.04 CI aggregate requires both the core-gate shard and the
 independent package/runtime shard. The package shard builds the shipping
 `sonicterm` Linux binary, produces `.deb` and `.tar.gz` packages, and runs both
-layouts on X11/Xvfb and Wayland/Weston with Vulkan/lavapipe. The smoke exits
-successfully only after window creation, GPU initialization, `/bin/sh` PTY
-marker round-trip, and a subsequent native frame presentation.
+layouts on X11/Xvfb and Wayland/Weston with Vulkan/lavapipe. Every platform smoke
+uses separate scratch config and log roots and succeeds only after native window
+and renderer/device creation, a platform-shell PTY marker observed in the live
+grid, a later native presentation, and default warm-renderer creation,
+retention reporting, adoption, child presentation, and release with the live
+renderer count restored to its pre-window baseline. Warm-lifecycle failure is
+stable exit code `16`.
 
 Two more limits worth knowing before trusting a green run:
 

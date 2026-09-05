@@ -144,9 +144,12 @@ While an IME composition is active, raw key events do not reach the PTY. An
 `Ime::Commit` supplies UTF-8 text after composition. A palette or search field
 can consume that commit. READONLY or copy mode can discard it.
 
-Only a press that survives local routing is recorded as PTY-owned. A later
-Kitty release is routed back to that press's pane, even if focus moved to
-another pane; locally consumed presses cannot create orphan release events.
+Only a press that survives local routing and reaches at least one bounded PTY
+input queue is recorded as PTY-owned. Its accepted pane set stays fixed for the
+whole lifecycle: repeats consult it before any palette, search, or keymap owner
+that opened later, and releases return to it even if focus or broadcast state
+changed. A locally consumed or rejected press creates no orphan repeat or
+release event.
 
 ### 3. `A` becomes terminal input bytes
 
@@ -168,21 +171,26 @@ Other keys and modifiers follow these rules:
   becomes `0x01`, and Control+Alt+A adds an `ESC` prefix to that control byte.
   The legacy aliases cover Space/@/2, `[ /3`, `\ /4`, `] /5`, `^/~/6`,
   `_/ /7`, and `?/8`.
-- **Text and BackTab:** Alt prefixes `ESC` to legacy text. The OS supplies
-  shifted and layout-specific text. Tab emits HT. Shift+Tab emits the legacy
-  BackTab sequence `CSI Z` by default and at `modifyOtherKeys` level 1; level 2
-  emits the explicit modified-key form `CSI 27 ; 2 ; 9 ~`.
+- **Text and BackTab:** Alt prefixes `ESC` to default legacy text. The OS supplies
+  shifted and layout-specific text. Tab emits HT. At `modifyOtherKeys` level 1,
+  plain Shift+Tab remains `CSI Z`, while other modified Tab forms and modified
+  Enter use `CSI 27 ; modifier ; code ~`; level 2 also makes Shift+Tab
+  `CSI 27 ; 2 ; 9 ~`. Level 1 keeps its ordinary Shift/Control aliases and
+  Backspace exception; level 2 encodes every supported modified ordinary key.
 - **Negotiated legacy modes:** the pane snapshot includes DECCKM cursor keys,
   DECKPAM keypad identity, DECBKM Backspace, ANSI newline mode, and xterm
   `modifyOtherKeys` levels 1 and 2. Modified cursor and function keys preserve
   Shift, Alt, Control, and Super in the xterm modifier parameter. Function-key
   coverage extends through F35.
-- **Kitty protocol:** each main or alternate screen has an independent
-  progressive-enhancement stack. SonicTerm supports disambiguation, event
-  types, alternate keys, all-keys reporting, associated text, functional and
-  keypad identities, and modifier-key identities. Shift+Tab is `CSI 9 ; 2 u`
-  when disambiguated. Repeats and releases carry Kitty event types when
-  requested.
+- **Kitty protocol:** each main or alternate screen has an independent bounded
+  progressive-enhancement stack. Unsupported set modes do nothing, and stored
+  flags retain the protocol's seven data bits. SonicTerm supports
+  disambiguation, event types, alternate keys, all-keys reporting, associated
+  text, functional and keypad identities, and modifier-key identities.
+  Alternate-key reporting alone enriches only keys already represented as
+  CSI-u; it does not change raw text, DECKPAM, or terminfo encodings. Shift+Tab
+  is `CSI 9 ; 2 u` when disambiguated. Repeats and releases carry Kitty event
+  types when requested.
 - **Keypad:** legacy normal mode follows the layout/NumLock result and preserves
   text modifiers. DECKPAM follows physical keypad identity. Kitty
   disambiguation uses its dedicated keypad code points.
@@ -767,8 +775,10 @@ winit 会为按下、重复和释放发送 `WindowEvent::KeyboardInput`。SonicT
 输入法正在组字时，原始按键不会进入 PTY。`Ime::Commit` 在组字完成后提供 UTF-8 文本。
 命令面板或搜索框可以消费提交文本。READONLY 或复制模式可以丢弃它。
 
-只有通过所有本地路由的按下事件才会记为 PTY 所有。之后的 Kitty 释放事件会返回该按下事件
-原本所在的 pane，即使焦点已经移到其它 pane；本地消费的按下事件不会产生孤立释放事件。
+只有通过所有本地路由、且至少进入一个有界 PTY 输入队列的按下事件才会记为 PTY 所有。
+成功接收的 pane 集合在整个按键生命周期内保持不变：重复事件会在后来打开的命令面板、搜索框
+或 keymap owner 之前查询该集合；即使焦点或广播状态改变，释放事件也会返回该集合。本地消费
+或被队列拒绝的按下事件不会产生孤立的重复或释放事件。
 
 ### 3. `A` 变成终端输入字节
 
@@ -787,16 +797,21 @@ Control 或 Alt 时，会原样使用操作系统生成文本的 UTF-8 字节。
 - **Control 与键位优先级：** 配置的键位可能在 PTY 编码前接管组合键。否则先判断 Control，
   再判断 Alt：Control+A 变成 `0x01`，Control+Alt+A 会在该控制字节前加 `ESC`。
   旧式别名覆盖 Space/@/2、`[ /3`、`\ /4`、`] /5`、`^/~/6`、`_/ /7` 和 `?/8`。
-- **文本与 BackTab：** Alt 会在旧式文本前加 `ESC`；Shift 与布局相关文本由操作系统生成。
-  Tab 发送 HT。Shift+Tab 在默认模式和 `modifyOtherKeys` level 1 下发送旧式 BackTab 序列
-  `CSI Z`；level 2 则发送显式修饰键形式 `CSI 27 ; 2 ; 9 ~`。
+- **文本与 BackTab：** 默认旧式模式会在 Alt 文本前加 `ESC`；Shift 与布局相关文本由
+  操作系统生成。Tab 发送 HT。在 `modifyOtherKeys` level 1 下，只有普通 Shift+Tab 继续发送
+  `CSI Z`；其它带修饰键的 Tab 形式和带修饰键的 Enter 使用
+  `CSI 27 ; modifier ; code ~`。level 2 也把 Shift+Tab 编码为
+  `CSI 27 ; 2 ; 9 ~`。level 1 保留普通 Shift/Control 别名及 Backspace 例外；level 2
+  会编码所有受支持的带修饰普通按键。
 - **协商的旧式模式：** pane 快照包含 DECCKM 光标键、DECKPAM 小键盘身份、DECBKM
   Backspace、ANSI newline mode，以及 xterm `modifyOtherKeys` level 1 和 2。带修饰键的
   光标键与功能键会在 xterm 修饰参数中保留 Shift、Alt、Control 和 Super；功能键覆盖到 F35。
-- **Kitty 协议：** 主屏和备用屏各自维护独立的 progressive-enhancement 栈。SonicTerm
-  支持消歧义、事件类型、备用按键、全部按键报告、关联文本、功能键和小键盘身份，以及
-  修饰键自身的身份。启用消歧义时 Shift+Tab 为 `CSI 9 ; 2 u`；程序要求时，重复与释放会
-  带 Kitty 事件类型。
+- **Kitty 协议：** 主屏和备用屏各自维护独立且有界的 progressive-enhancement 栈。
+  不支持的 set mode 不做任何改变，保存的 flag 保留协议的七个数据位。SonicTerm 支持
+  消歧义、事件类型、备用按键、全部按键报告、关联文本、功能键和小键盘身份，以及修饰键
+  自身的身份。单独启用备用按键报告只会补充原本已经使用 CSI-u 的按键，不会改变原始文本、
+  DECKPAM 或 terminfo 编码。启用消歧义时 Shift+Tab 为 `CSI 9 ; 2 u`；程序要求时，重复与
+  释放会带 Kitty 事件类型。
 - **小键盘：** 旧式 normal mode 遵循布局/NumLock 结果并保留文本修饰键；DECKPAM 遵循
   物理小键盘身份；Kitty 消歧义使用专用的小键盘码点。
 

@@ -91,19 +91,15 @@ its own limit. The GUI governor uses unlimited process and
 per-class limits, and window owners are tracking-only. This avoids maintaining a
 second set of process limits that can drift from the code doing the allocation.
 
-Each `AppPane` owner does have one committed-byte tripwire. It is derived from
-the actual seam constants:
+Each `AppPane` owner does have one committed-byte tripwire. The typed
+`pane_seam_cap_terms()` inventory contains every charged pane class exactly
+once. Because visible, history, and saved-primary cells share one grid bound,
+`GridVisible` carries that cap while `GridHistory` and `GridAlternate` carry
+zero. `ParserCapture` carries both parser caps, and PTY input carries its queue
+cap once:
 
 ```text
-PANE_SEAM_CAP_SUM_BYTES =
-    MAX_GRID_CELLS × size_of::<Cell>()
-  + MAX_RETAINED_INLINE_IMAGE_BYTES
-  + MAX_HYPERLINK_METADATA_BYTES
-  + MAX_MEDIA_PAYLOAD_BYTES
-  + MAX_ESCAPE_SEQUENCE_BYTES
-  + max_queued_output_ring_bytes()
-  + max_pty_queued_input_bytes()
-
+PANE_SEAM_CAP_SUM_BYTES = sum(pane_seam_cap_terms().bytes)
 PANE_COMMITTED_BUDGET_BYTES = 2 × PANE_SEAM_CAP_SUM_BYTES
 ```
 
@@ -332,18 +328,13 @@ flowchart TD
 每个接缝（即网格、解析器或 PTY 队列这样的所有权边界）负责执行自己的上限。GUI 治理器的进程和按类别上限为无限，窗口所有者也只用于
 跟踪。这样不会再维护一套可能与实际分配代码漂移的进程级限制。
 
-每个 `AppPane` 所有者仍有一个已提交字节绊线。它直接由实际接缝常量计算：
+每个 `AppPane` 所有者仍有一个已提交字节绊线。类型化的
+`pane_seam_cap_terms()` 清单让每个实际计费的窗格类别恰好出现一次。可见区、历史区与已保存
+主屏幕共用同一个网格上限，因此由 `GridVisible` 携带该值，`GridHistory` 与
+`GridAlternate` 携带零；`ParserCapture` 同时携带两个解析器上限；PTY 输入的队列上限只计一次：
 
 ```text
-PANE_SEAM_CAP_SUM_BYTES =
-    MAX_GRID_CELLS × size_of::<Cell>()
-  + MAX_RETAINED_INLINE_IMAGE_BYTES
-  + MAX_HYPERLINK_METADATA_BYTES
-  + MAX_MEDIA_PAYLOAD_BYTES
-  + MAX_ESCAPE_SEQUENCE_BYTES
-  + max_queued_output_ring_bytes()
-  + max_pty_queued_input_bytes()
-
+PANE_SEAM_CAP_SUM_BYTES = sum(pane_seam_cap_terms().bytes)
 PANE_COMMITTED_BUDGET_BYTES = 2 × PANE_SEAM_CAP_SUM_BYTES
 ```
 

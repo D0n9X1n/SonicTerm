@@ -87,3 +87,90 @@ fn shell_installs_privilege_before_a_pending_startup_tab() {
 
     assert!(install < pending);
 }
+
+#[test]
+fn runtime_smoke_spec_keeps_platform_command_and_state_paths_explicit() {
+    // Protect platform smokes from substituting a hard-coded Unix shell or user-home state.
+    let spec = RuntimeSmokeSpec::new(
+        "cmd.exe",
+        "__SONICTERM_SMOKE_41__",
+        b"set N=41\r\necho __SONICTERM_SMOKE_%N%__\r\n".to_vec(),
+        std::path::PathBuf::from("C:/scratch/config"),
+        std::path::PathBuf::from("C:/scratch/logs"),
+    )
+    .expect("valid smoke specification");
+
+    assert_eq!(spec.shell_program(), "cmd.exe");
+    assert_eq!(spec.marker(), "__SONICTERM_SMOKE_41__");
+    assert_eq!(spec.config_dir(), std::path::Path::new("C:/scratch/config"));
+    assert_eq!(spec.log_dir(), std::path::Path::new("C:/scratch/logs"));
+    assert!(!String::from_utf8_lossy(spec.command()).contains(spec.marker()));
+}
+
+#[test]
+fn every_platform_shell_exposes_the_same_bounded_smoke_api() {
+    // Protect macOS and Windows from silently losing the shared native-runtime gate.
+    type RunSmoke =
+        fn(MacShell, RuntimeSmokeSpec, Duration) -> std::result::Result<(), RuntimeSmokeFailure>;
+    let mac: RunSmoke = MacShell::run_smoke;
+    let _ = mac;
+
+    let windows: fn(
+        WindowsShell,
+        RuntimeSmokeSpec,
+        Duration,
+    ) -> std::result::Result<(), RuntimeSmokeFailure> = WindowsShell::run_smoke;
+    let linux: fn(
+        LinuxShell,
+        RuntimeSmokeSpec,
+        Duration,
+    ) -> std::result::Result<(), RuntimeSmokeFailure> = LinuxShell::run_smoke;
+    let _ = (windows, linux);
+}
+
+#[test]
+fn runtime_smoke_uses_clean_shell_startup_without_replacing_home() {
+    // Protect main and adopted child PTYs from profile hooks while preserving their real user home.
+    const MAIN: &str = include_str!("app/spawn_pane.rs");
+    const CHILD: &str = include_str!("app/child_window.rs");
+    assert!(MAIN.contains("shell_opts.clean_e2e = self.runtime_smoke.is_some()"));
+    assert!(CHILD.contains("clean_e2e: self.runtime_smoke.is_some()"));
+    assert!(!MAIN.contains("set_var(\"HOME\""));
+    assert!(!CHILD.contains("set_var(\"HOME\""));
+}
+
+#[test]
+fn runtime_smoke_checks_cleanup_after_every_post_app_failure() {
+    // Protect watchdog and event-loop errors from bypassing App drop and renderer-baseline verification.
+    const SOURCE: &str = include_str!("shell.rs");
+    let start = SOURCE.find("fn run_smoke(").expect("shared smoke runner");
+    let body = &SOURCE[start..SOURCE.find("/// macOS shell").expect("runner impl end")];
+    let app = body.find("let mut app =").expect("App construction");
+    let drop_app = body.find("drop(app)").expect("common App drop");
+    let baseline = body[drop_app..]
+        .find("live_renderer_count() != renderer_baseline")
+        .expect("post-drop baseline check");
+    assert!(!body[app..drop_app].contains('?'));
+    assert!(baseline > 0);
+}
+
+#[test]
+fn runtime_smoke_spec_rejects_echoable_markers_and_ambiguous_paths() {
+    // Protect marker proof from terminal echo and state isolation from one shared directory.
+    assert!(RuntimeSmokeSpec::new(
+        "/bin/sh",
+        "complete-marker",
+        b"printf complete-marker".to_vec(),
+        std::path::PathBuf::from("/scratch/config"),
+        std::path::PathBuf::from("/scratch/logs"),
+    )
+    .is_err());
+    assert!(RuntimeSmokeSpec::new(
+        "/bin/sh",
+        "complete-marker",
+        b"printf %s marker".to_vec(),
+        std::path::PathBuf::from("/scratch/state"),
+        std::path::PathBuf::from("/scratch/state"),
+    )
+    .is_err());
+}

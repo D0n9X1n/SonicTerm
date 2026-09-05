@@ -225,6 +225,7 @@ fn keyboard_modes_track_dec_ansi_keypad_and_xterm_state() {
     assert!(modes.newline());
     assert_eq!(modes.modify_other_keys(), 2);
     assert_eq!(super::KeyboardModes::from_bits(modes.bits()), modes);
+    assert_eq!(super::KeyboardModes::from_bits(0b11_0000).modify_other_keys(), 2);
 
     parser.advance(b"\x1b[?1l\x1b[?67l\x1b>\x1b[20l\x1b[>4;0m");
     assert_eq!(parser.keyboard_modes(), super::KeyboardModes::default());
@@ -914,6 +915,18 @@ fn kitty_keyboard_push_sets_flags() {
     assert_eq!(parser.kitty_keyboard_flags(), 1);
 }
 
+/// Kitty flag storage keeps the protocol's seven data bits without integer wraparound.
+#[test]
+fn kitty_keyboard_flags_mask_the_reserved_stack_bit() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+
+    parser.advance(b"\x1b[>255u");
+    assert_eq!(parser.kitty_keyboard_flags(), 0x7f);
+
+    parser.advance(b"\x1b[=128;1u");
+    assert_eq!(parser.kitty_keyboard_flags(), 0);
+}
+
 #[test]
 fn kitty_keyboard_pop_restores_previous_flags() {
     let mut parser = Parser::new(Grid::new(8, 2));
@@ -964,6 +977,12 @@ fn kitty_keyboard_set_replaces_top() {
 
     // CSI = 1 ; 3 u — mode 3 clears the given bits.
     parser.advance(b"\x1b[=1;3u");
+    assert_eq!(parser.kitty_keyboard_flags(), 6);
+
+    // Unsupported application modes leave the active flags unchanged.
+    parser.advance(b"\x1b[=31;9u");
+    assert_eq!(parser.kitty_keyboard_flags(), 6);
+    parser.advance(b"\x1b[=31;0u");
     assert_eq!(parser.kitty_keyboard_flags(), 6);
 }
 

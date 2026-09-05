@@ -61,6 +61,21 @@ fn smoke_failures_retain_their_stable_process_codes() {
     assert_eq!(runtime_exit_code(&Err(RuntimeSmokeFailure::Pty)), 13);
     assert_eq!(runtime_exit_code(&Err(RuntimeSmokeFailure::Marker)), 14);
     assert_eq!(runtime_exit_code(&Err(RuntimeSmokeFailure::Present)), 15);
+    assert_eq!(runtime_exit_code(&Err(RuntimeSmokeFailure::WarmLifecycle)), 16);
+}
+
+#[test]
+fn linux_runtime_smoke_uses_separate_scratch_config_and_logs() {
+    // Protect the packaged smoke from replacing HOME while keeping all writable state isolated.
+    let root = std::path::Path::new("/tmp/native-smoke");
+    let spec = runtime_smoke_spec(root, 41).expect("valid Linux smoke spec");
+    assert_eq!(spec.shell_program(), "/bin/sh");
+    assert_eq!(spec.config_dir(), root.join("config"));
+    assert_eq!(spec.log_dir(), root.join("logs"));
+    assert!(!String::from_utf8_lossy(spec.command()).contains(spec.marker()));
+    const MAIN: &str = include_str!("main.rs");
+    assert!(!MAIN.contains("set_var(\"HOME\""));
+    assert!(!MAIN.contains("set_var(\"USERPROFILE\""));
 }
 
 #[test]

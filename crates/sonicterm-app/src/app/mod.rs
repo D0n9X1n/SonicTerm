@@ -545,50 +545,75 @@ pub const PTY_REDRAW_FLUSH_BYTES: usize = 128 * 1024;
 pub const PTY_REPLY_QUEUE_CAPACITY: usize = 64;
 pub const MAX_PANE_COMMAND_EVENTS: usize = 1024;
 
-/// Sum of every per-pane seam cap, computed from the caps themselves.
+/// One charged pane class and its exact production seam-cap contribution.
 ///
-/// Not a chosen figure. Each term is the constant the owning seam already
-/// enforces and tests, so this cannot drift from what the seams do — changing
-/// a cap changes this automatically, and a test asserts the arithmetic.
+/// The three grid classes share one storage allocation: `GridVisible` carries
+/// that cap, while `GridHistory` and `GridAlternate` carry zero rather than
+/// pretending each region may allocate another full grid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PaneSeamCapTerm {
+    /// Class charged by the pane-retention pass.
+    pub class: ResourceClass,
+    /// Bytes this class contributes to the pane backstop.
+    pub bytes: usize,
+}
+
+/// Return the exact production pane seam inventory by charged class.
 ///
-/// **The rule for what belongs.** A term for exactly the classes a pane owner
-/// can be charged for, because this is compared against that owner's ledger
-/// total. Both directions matter: a missing term puts the backstop below memory
-/// the seams legitimately permit, where it fires during correct operation, and
-/// a term for a class that never charges a pane inflates the backstop with
-/// memory that cannot appear in the figure it guards. Which classes those are
-/// is [`ResourceClass::pane_seam_term`], decided by an exhaustive match that
-/// fails to compile until a new class is classified.
+/// Every class charged by the pane-retention pass appears exactly once. Tests
+/// compare this inventory to that production path, so a new charged class must
+/// state its owning cap contribution before the build can pass.
+#[must_use]
+pub const fn pane_seam_cap_terms() -> [PaneSeamCapTerm; 8] {
+    [
+        PaneSeamCapTerm {
+            class: ResourceClass::GridVisible,
+            bytes: sonicterm_grid::grid::MAX_GRID_CELLS as usize
+                * std::mem::size_of::<sonicterm_types::Cell>(),
+        },
+        PaneSeamCapTerm { class: ResourceClass::GridHistory, bytes: 0 },
+        PaneSeamCapTerm { class: ResourceClass::GridAlternate, bytes: 0 },
+        PaneSeamCapTerm {
+            class: ResourceClass::ParserCapture,
+            bytes: sonicterm_vt::vt::MAX_MEDIA_PAYLOAD_BYTES
+                + sonicterm_vt::vt::MAX_ESCAPE_SEQUENCE_BYTES,
+        },
+        PaneSeamCapTerm {
+            class: ResourceClass::ProtocolMetadata,
+            bytes: sonicterm_grid::hyperlink::MAX_HYPERLINK_METADATA_BYTES,
+        },
+        PaneSeamCapTerm {
+            class: ResourceClass::InlineMediaRetained,
+            bytes: media::MAX_RETAINED_INLINE_IMAGE_BYTES,
+        },
+        PaneSeamCapTerm {
+            class: ResourceClass::PtyOutput,
+            bytes: sonicterm_io::pty::max_queued_output_ring_bytes(),
+        },
+        PaneSeamCapTerm {
+            class: ResourceClass::PtyInput,
+            bytes: sonicterm_io::pty::max_pty_queued_input_bytes(),
+        },
+    ]
+}
+
+const fn pane_seam_cap_sum_bytes() -> usize {
+    let terms = pane_seam_cap_terms();
+    let mut total = 0usize;
+    let mut index = 0usize;
+    while index < terms.len() {
+        total += terms[index].bytes;
+        index += 1;
+    }
+    total
+}
+
+/// Sum of every exact production pane-seam cap contribution.
 ///
-/// | Class | Cap |
-/// | --- | --- |
-/// | `GridVisible` + `GridHistory` + `GridAlternate` | `MAX_GRID_CELLS × size_of::<Cell>()` |
-/// | `InlineMediaRetained` | `MAX_RETAINED_INLINE_IMAGE_BYTES` |
-/// | `ProtocolMetadata` | `MAX_HYPERLINK_METADATA_BYTES` |
-/// | `ParserCapture` | `MAX_MEDIA_PAYLOAD_BYTES` + `MAX_ESCAPE_SEQUENCE_BYTES` |
-/// | `PtyOutput` | `max_queued_output_ring_bytes()` |
-/// | `PtyInput` | `max_pty_queued_input_bytes()` |
-///
-/// The three grid classes share one term because `MAX_GRID_CELLS` bounds them
-/// together rather than each separately. `PtyOutput` carries the structural
-/// ceiling of one reader ring per queue slot, not the single ring a real shell
-/// pins: a backstop has to sit above what the seam permits, not above what it
-/// usually uses. `PtyInput` carries its queue depth times the per-message cap
-/// for the same reason — a paste is admitted at its full size, so the seam
-/// permits far more than a session typically holds.
-///
-/// `CommandEvents` is deliberately absent. Its queue is bounded and its
-/// retention is real, but no production site charges it, so it cannot appear in
-/// the ledger total this is compared against — a term for it would raise the
-/// tripwire without raising what the tripwire can see.
-pub const PANE_SEAM_CAP_SUM_BYTES: usize = (sonicterm_grid::grid::MAX_GRID_CELLS as usize
-    * std::mem::size_of::<sonicterm_types::Cell>())
-    + media::MAX_RETAINED_INLINE_IMAGE_BYTES
-    + sonicterm_grid::hyperlink::MAX_HYPERLINK_METADATA_BYTES
-    + sonicterm_vt::vt::MAX_MEDIA_PAYLOAD_BYTES
-    + sonicterm_vt::vt::MAX_ESCAPE_SEQUENCE_BYTES
-    + sonicterm_io::pty::max_queued_output_ring_bytes()
-    + sonicterm_io::pty::max_pty_queued_input_bytes();
+/// This is derived only from [`pane_seam_cap_terms`]. PTY input is one class in
+/// that inventory, so production and tests cannot add its queue bound through
+/// separate arithmetic.
+pub const PANE_SEAM_CAP_SUM_BYTES: usize = pane_seam_cap_sum_bytes();
 
 /// Headroom multiplier between the seam caps and the governor's backstop.
 ///
@@ -613,11 +638,10 @@ const BACKSTOP_HEADROOM: usize = 2;
 /// it is computed from them, and it cannot silently stop enforcing, because it
 /// was never the thing enforcing.
 ///
-/// What it catches is the failure the seam caps cannot: a seam that has stopped
-/// bounding while still reporting itself as bounded. Today produced two of
-/// those — a retained figure under-reporting by 1.67×, and a charging path that
-/// never ran — and neither would have tripped any per-seam assertion, because
-/// each seam was behaving correctly on its own terms.
+/// What it catches is the cross-seam failure each local cap cannot: retained
+/// bytes that outgrow the cap inventory, whether one seam under-reports them or
+/// its charging path stops running. Local allocation checks cannot expose that
+/// disagreement because each seam can still look correct in isolation.
 pub const PANE_COMMITTED_BUDGET_BYTES: usize = PANE_SEAM_CAP_SUM_BYTES * BACKSTOP_HEADROOM;
 
 /// Owner limits: seam caps enforce, the governor backstops.
@@ -2022,15 +2046,12 @@ fn pty_input_rejected_event(error: sonicterm_io::pty::PtyInputError) -> UserEven
 /// point on, a background font load completion bumps `style_rev` on every live
 /// window and triggers a redraw — the tofu cells flip to real
 /// glyphs without the user having to type anything.
-/// The legacy `AsyncFallbackLoader` (cosmic-text/swash
-/// driven background-load helper) is gone with the rest of the
-/// glyphon plumbing. sonicterm-font handles CJK/emoji/Nerd-font
-/// fallback synchronously via its built-in vendor chain
-/// (`vendor-jetbrains`, `vendor-noto-emoji`, `vendor-nerd-font-symbols`),
-/// so the per-window `set_async_loader(...)` plumbing is now a no-op
-/// `()`. Keeping the function shape and call site survives so the
-/// renderer's `Option<()>` slot stays populated and any future
-/// re-introduction of an async hook lands without breaking callers.
+/// The legacy `AsyncFallbackLoader` (cosmic-text/swash driven background
+/// helper) is gone with the rest of the glyphon plumbing. The font stack now
+/// resolves configured St.Helens assets and native CJK/emoji fallbacks
+/// synchronously, so the per-window `set_async_loader(...)` plumbing is a no-op
+/// `()`. Keeping the function shape and call site leaves the renderer's
+/// `Option<()>` slot populated for a future async hook without breaking callers.
 pub fn build_async_fallback_loader_for_proxy(_proxy: EventLoopProxy<UserEvent>) {}
 
 mod child_window;
@@ -2055,7 +2076,7 @@ mod path_target;
 mod quit_hold;
 mod redraw_target;
 mod runtime_smoke;
-pub use runtime_smoke::RuntimeSmokeFailure;
+pub use runtime_smoke::{RuntimeSmokeFailure, RuntimeSmokeSpec};
 mod render_timing;
 pub mod renderer_retention;
 pub mod retention;
@@ -2525,6 +2546,8 @@ pub struct App {
     pub(in crate::app) path_workers: Option<path_target::PathWorkers>,
     /// Current native home captured once for deterministic `~/` target resolution.
     pub(super) home_dir: Option<PathBuf>,
+    /// Explicit config path used by an isolated runtime smoke; ordinary runs use the user path.
+    pub(super) runtime_config_path: Option<PathBuf>,
     /// Local hostname used to reject foreign-authority OSC 7 snapshots.
     pub(super) local_hostname: String,
     /// Hidden Linux package-smoke state; absent during ordinary application runs.
@@ -2921,6 +2944,7 @@ impl App {
             event_loop_proxy,
             path_workers,
             home_dir,
+            runtime_config_path: None,
             local_hostname,
             runtime_smoke: None,
             // Default to 60 Hz until `resumed` probes the actual
@@ -3470,10 +3494,11 @@ impl App {
             .collect()
     }
 
-    fn dispatch_terminal_key_writes(&mut self, writes: Vec<(u64, Vec<u8>)>) {
-        for (pane_id, bytes) in writes {
-            self.write_to_pane(pane_id, bytes);
-        }
+    fn dispatch_terminal_key_writes(&mut self, writes: Vec<(u64, Vec<u8>)>) -> BTreeSet<u64> {
+        writes
+            .into_iter()
+            .filter_map(|(pane_id, bytes)| self.write_to_pane(pane_id, bytes).then_some(pane_id))
+            .collect()
     }
 
     /// Test-only mirror of the normal KeyboardInput dispatch order: try every
@@ -3538,7 +3563,7 @@ impl App {
         )
     }
 
-    fn write_to_pane(&mut self, pane_id: u64, bytes: Vec<u8>) {
+    fn write_to_pane(&mut self, pane_id: u64, bytes: Vec<u8>) -> bool {
         // The keystroke / broadcast / encoded-input path flows through the
         // winit-agnostic `AppStateMachine`. The reducer translates
         // `AppIntent::PtyWrite` into `AppEffect::PtyWrite { pane, data }`, and
@@ -3553,43 +3578,44 @@ impl App {
         // while `&mut self` arms the accepted-input foreground probe.
         let mut transient =
             sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default());
-        for effect in transient.handle(intent) {
-            self.dispatch_pty_write_effect(&effect);
-        }
+        transient.handle(intent).iter().any(|effect| self.dispatch_pty_write_effect(effect))
     }
 
     /// Boundary handler for [`sonicterm_app_core::AppEffect::PtyWrite`].
     ///
     /// Resolves the pane id back to a live [`PtyHandle`] in any terminal
     /// window and forwards the bytes.
-    pub(crate) fn dispatch_pty_write_effect(&mut self, effect: &sonicterm_app_core::AppEffect) {
-        if let sonicterm_app_core::AppEffect::PtyWrite { pane, data } = effect {
-            // When: the effect is `PtyWrite`, so `pane` and `data` name a live
-            // target to resolve before any bytes are enqueued.
-            let pane_id = pane.0;
-            let bytes = data.to_vec();
-            // Test-only ledger: skipped entirely in production so we don't
-            // lock+clone+push on every PTY write (— unbounded
-            // growth + per-keystroke overhead over a long session).
-            if self.pty_write_log_enabled {
-                self.test_pty_writes.lock().push((pane_id, bytes.clone()));
-            }
-            let Some(p) = self.pane_by_id(pane_id) else {
-                // When: `pane_by_id` resolves nothing, so the pane closed before
-                // its bytes were enqueued and they have nowhere to land.
-                return;
-            };
-            let queued = p.pty.as_ref().is_some_and(|pty| {
-                Self::queue_pty_input(self.event_loop_proxy.as_ref(), pty, bytes)
-            });
-            #[cfg(windows)]
-            if queued {
-                // Accepted PTY input can launch a silent command, so sample its process after launch settles.
-                self.arm_foreground_probe_after_input(Instant::now());
-            }
-            #[cfg(not(windows))]
-            let _ = queued;
+    pub(crate) fn dispatch_pty_write_effect(
+        &mut self,
+        effect: &sonicterm_app_core::AppEffect,
+    ) -> bool {
+        let sonicterm_app_core::AppEffect::PtyWrite { pane, data } = effect else {
+            // When: effect is not PtyWrite, this boundary accepted no terminal input.
+            return false;
+        };
+        let pane_id = pane.0;
+        let bytes = data.to_vec();
+        // Test-only ledger: skipped entirely in production so we don't
+        // lock+clone+push on every PTY write (— unbounded
+        // growth + per-keystroke overhead over a long session).
+        if self.pty_write_log_enabled {
+            self.test_pty_writes.lock().push((pane_id, bytes.clone()));
         }
+        let Some(p) = self.pane_by_id(pane_id) else {
+            // When: `pane_by_id` resolves nothing, so the pane closed before
+            // its bytes were enqueued and they have nowhere to land.
+            return false;
+        };
+        let queued = p
+            .pty
+            .as_ref()
+            .is_some_and(|pty| Self::queue_pty_input(self.event_loop_proxy.as_ref(), pty, bytes));
+        #[cfg(windows)]
+        if queued {
+            // Accepted PTY input can launch a silent command, so sample its process after launch settles.
+            self.arm_foreground_probe_after_input(Instant::now());
+        }
+        queued
     }
 
     fn queue_pty_input(

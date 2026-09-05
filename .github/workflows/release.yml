@@ -77,7 +77,7 @@ jobs:
   build-mac-x86_64:
     name: Build macOS x86_64 binary
     runs-on: macos-15-intel
-    timeout-minutes: 45
+    timeout-minutes: 55
     needs: [validate-release-tag]
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
@@ -100,6 +100,26 @@ jobs:
         timeout-minutes: 30
         run: cargo build --release --target x86_64-apple-darwin -p sonicterm-mac
 
+      - name: Require macOS native runtime smoke
+        timeout-minutes: 3
+        run: |
+          python3 scripts/native-smoke-runner.py \
+            --timeout-seconds 45 \
+            --state-dir "$RUNNER_TEMP/sonicterm-macos-x86_64-smoke" \
+            --log-file "$RUNNER_TEMP/sonicterm-macos-x86_64-smoke.log" \
+            -- target/x86_64-apple-darwin/release/sonicterm-mac --runtime-smoke
+
+      - name: Upload macOS native smoke logs
+        if: ${{ failure() }}
+        timeout-minutes: 5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: sonicterm-macos-x86_64-release-smoke-logs
+          path: |
+            ${{ runner.temp }}/sonicterm-macos-x86_64-smoke.log
+            ${{ runner.temp }}/sonicterm-macos-x86_64-smoke/logs/**
+          if-no-files-found: ignore
+
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         timeout-minutes: 5
         with:
@@ -109,7 +129,7 @@ jobs:
   build-mac-aarch64:
     name: Build macOS aarch64 binary
     runs-on: macos-14
-    timeout-minutes: 45
+    timeout-minutes: 55
     needs: [validate-release-tag]
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
@@ -131,6 +151,26 @@ jobs:
       - name: Build aarch64
         timeout-minutes: 30
         run: cargo build --release --target aarch64-apple-darwin -p sonicterm-mac
+
+      - name: Require macOS native runtime smoke
+        timeout-minutes: 3
+        run: |
+          python3 scripts/native-smoke-runner.py \
+            --timeout-seconds 45 \
+            --state-dir "$RUNNER_TEMP/sonicterm-macos-aarch64-smoke" \
+            --log-file "$RUNNER_TEMP/sonicterm-macos-aarch64-smoke.log" \
+            -- target/aarch64-apple-darwin/release/sonicterm-mac --runtime-smoke
+
+      - name: Upload macOS native smoke logs
+        if: ${{ failure() }}
+        timeout-minutes: 5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: sonicterm-macos-aarch64-release-smoke-logs
+          path: |
+            ${{ runner.temp }}/sonicterm-macos-aarch64-smoke.log
+            ${{ runner.temp }}/sonicterm-macos-aarch64-smoke/logs/**
+          if-no-files-found: ignore
 
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         timeout-minutes: 5
@@ -211,7 +251,7 @@ jobs:
   build-windows:
     name: Build Windows msi
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 55
     needs: [validate-release-tag]
     env:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
@@ -264,6 +304,16 @@ jobs:
         timeout-minutes: 30
         run: cargo build --release --target x86_64-pc-windows-msvc -p sonicterm-windows
 
+      - name: Require Windows native runtime smoke
+        timeout-minutes: 3
+        shell: pwsh
+        run: |
+          python scripts/native-smoke-runner.py `
+            --timeout-seconds 45 `
+            --state-dir "$env:RUNNER_TEMP\sonicterm-release-windows-smoke" `
+            --log-file "$env:RUNNER_TEMP\sonicterm-release-windows-smoke.log" `
+            -- ./target/x86_64-pc-windows-msvc/release/sonicterm-windows.exe --runtime-smoke
+
       - name: Build and register msi asset
         id: build-msi
         timeout-minutes: 10
@@ -303,6 +353,17 @@ jobs:
           .\scripts\validate-windows-msi.ps1 `
             -MsiPath "${{ steps.build-msi.outputs.path }}" `
             -ExpectedVersion "v${{ steps.build-msi.outputs.version }}"
+
+      - name: Upload Windows native smoke logs
+        if: ${{ failure() }}
+        timeout-minutes: 5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: sonicterm-windows-release-smoke-logs
+          path: |
+            ${{ runner.temp }}/sonicterm-release-windows-smoke.log
+            ${{ runner.temp }}/sonicterm-release-windows-smoke/logs/**
+          if-no-files-found: ignore
 
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         timeout-minutes: 5

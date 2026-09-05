@@ -187,11 +187,22 @@ remains available.
 
 ### Runtime smoke boundary
 
-`sonicterm --runtime-smoke` uses isolated state and runs the shared app with a
-30-second proof deadline. Success requires a native window and GPU surface,
-`/bin/sh` in a PTY, a non-literal marker reaching the grid, and a later native
-frame presentation. [Packaging](Packaging) describes how both Linux package
-layouts invoke this boundary on X11 and Wayland.
+All three shipping binaries accept the hidden `--runtime-smoke` mode. The
+platform supplies its real shell command (`/bin/sh` on macOS/Linux, `cmd.exe` on
+Windows), while the shared runner requires a native window, renderer/device, a
+non-literal PTY marker observed in the live grid, and a later native
+presentation. It then uses the production default warm pool to create and report
+one hidden renderer, adopts that exact window through tab tear-out, presents the
+child, closes it, clears any replenished spare, and requires
+`live_renderer_count` to return to the pre-window baseline. Warm-lifecycle
+failure is stable exit code `16`.
+
+Automation passes separate scratch `config/` and `logs/` roots without replacing
+`HOME`. `scripts/native-smoke-runner.py` removes inherited `NO_COLOR`, captures
+stdout/stderr and log artifacts, enforces a 45-second outer deadline, and kills
+the full process tree. [Packaging](Packaging) describes the packaged Linux X11
+and Wayland invocations; PR and release gates also run the built macOS and
+Windows binaries.
 
 ## Platform matrix
 
@@ -376,10 +387,17 @@ Fontconfig discovery 前传给 `FontStack`，并在字体重载时继续保留�
 
 ### 运行时 smoke 边界
 
-`sonicterm --runtime-smoke` 使用隔离状态，并给共享 app 30 秒证明期限。成功必须完成原生
-窗口与 GPU surface 创建、在 PTY 中启动 `/bin/sh`、让非 literal marker 进入 grid，
-并在之后完成一帧原生呈现。[打包](Packaging)说明两种 Linux 包布局如何分别在 X11 与
-Wayland 上调用该边界。
+三个发行二进制都接受隐藏的 `--runtime-smoke` 模式。平台提供真实 shell 命令（macOS/Linux
+使用 `/bin/sh`，Windows 使用 `cmd.exe`）；共享 runner 要求原生窗口、渲染器/设备、在实时
+grid 中观察到非字面 PTY marker，并在之后完成一次原生呈现。随后它使用生产默认预热池创建并
+报告一个隐藏渲染器，通过标签页拆出采用完全相同的窗口，呈现子窗口，再关闭它、清除可能补充的
+备用项，并要求 `live_renderer_count` 回到创建窗口前的基线。预热生命周期失败使用稳定退出码
+`16`。
+
+自动化会传入彼此分开的临时 `config/` 与 `logs/` 根目录，且不会替换 `HOME`。
+`scripts/native-smoke-runner.py` 会移除继承的 `NO_COLOR`、保存 stdout/stderr 与日志工件、
+执行 45 秒外层期限，并终止完整进程树。[打包](Packaging)说明 Linux 包在 X11 与 Wayland
+上的调用；PR 和 release gate 也会运行已构建的 macOS 与 Windows 二进制。
 
 ## 平台矩阵
 

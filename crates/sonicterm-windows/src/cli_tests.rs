@@ -87,6 +87,28 @@ fn refresh_flag_is_parsed_without_changing_unknown_argument_tolerance() {
     assert!(parsed.tearout.is_none());
 }
 
+#[test]
+fn runtime_smoke_is_a_dedicated_startup_mode() {
+    // Protect release automation from silently launching an interactive user session.
+    let parsed = parse_cli_from(["sonicterm-windows", "--runtime-smoke"]).unwrap();
+    assert!(parsed.runtime_smoke);
+    for conflicting in [
+        "--open-script",
+        "--tear-out-payload",
+        "--refresh-shell-associations",
+        "--unknown",
+        "--runtime-smoke",
+    ] {
+        let mut args = vec!["sonicterm-windows", "--runtime-smoke", conflicting];
+        if conflicting == "--open-script" {
+            args.push("script.ps1");
+        } else if conflicting == "--tear-out-payload" {
+            args.push("not-json");
+        }
+        assert!(parse_cli_from(args).is_err());
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn open_script_preserves_non_utf8_os_strings() {

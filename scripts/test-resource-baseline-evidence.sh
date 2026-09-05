@@ -5,6 +5,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COLLECTOR="$ROOT/scripts/resource-baseline-evidence.py"
 TESTS="$ROOT/scripts/resource-baseline-evidence_tests.py"
+SMOKE_RUNNER="$ROOT/scripts/native-smoke-runner.py"
+SMOKE_TESTS="$ROOT/scripts/native-smoke-runner_tests.py"
 
 if command -v python3 >/dev/null 2>&1; then
   PY=python3
@@ -15,8 +17,10 @@ else
   exit 1
 fi
 
-"$PY" -m py_compile "$COLLECTOR" "$TESTS"
+"$PY" -m py_compile "$COLLECTOR" "$TESTS" "$SMOKE_RUNNER" "$SMOKE_TESTS"
 "$PY" "$TESTS"
+"$PY" "$SMOKE_TESTS"
 "$PY" "$COLLECTOR" --help >/dev/null
+"$PY" "$SMOKE_RUNNER" --help >/dev/null
 
-echo "resource baseline evidence tests passed"
+echo "resource baseline evidence and native smoke tests passed"
