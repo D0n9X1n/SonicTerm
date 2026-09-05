@@ -122,6 +122,37 @@ only reliable compiler and runner for Windows-only tests; local, macOS, Ubuntu,
 or review results cannot substitute for it. After every merge, verify `main` CI
 and Wiki publication before starting the next serialized pull request.
 
+Keep every wait off the main agent. For each lifecycle that must wait or monitor
+— a long local gate, pull-request CI, post-merge `main` CI plus Wiki publication,
+or a release workflow — start one dedicated watcher subagent, not one subagent
+per job. Give it an immutable handoff: repository/worktree path, expected commit
+SHA, PR number or run ID, exact required jobs or commands, timeout, and success
+criteria. The watcher owns that lifecycle until terminal `SUCCESS`, `FAILURE`,
+`BLOCKED`, or `STALE`, and reports the expected and observed SHA, run IDs, every
+required result, and actionable failure evidence. It returns immediately when
+the head changes or a required job fails, is cancelled, or is unexpectedly
+skipped; it never follows a replacement run or accepts a green result by branch
+name alone.
+
+While the watcher runs, the main agent advances only a non-overlapping item in a
+separate worktree based on the current default branch; it never edits the tree
+being tested. Watchers do not push, merge, tag, publish, or clean shared state.
+Run at most one full Cargo gate or build on the host at once, never share a
+`CARGO_TARGET_DIR` between concurrent worktrees, and use heavy-gate time for
+research, editing, or lightweight checks. A watcher failure, blocker, or stale
+SHA immediately returns the main agent to the current lifecycle.
+
+Concurrency does not relax publication order: do not merge before the current
+pull request's exact-head checks pass, and do not open the next pull request
+before the current one is merged and its exact merge-SHA `main` CI and Wiki
+publication are verified. Then update the next worktree onto the new
+default-branch tip and rerun affected validation before publication. Once those
+gates pass, fetch and prune the default remote, then clean local state against
+its symbolic default branch. Remove only clean, unlocked worktrees whose HEAD is
+merged there, and delete only merged local branches not attached to a preserved
+worktree. Never force removal or discard dirty, unmerged, or locked worktrees or
+any stash.
+
 ### macOS 14 and Windows latest
 
 The stable required checks are fail-closed aggregate jobs: `macos-14 / unit
@@ -492,6 +523,27 @@ SHA 区分的 group，且不会在运行中被取消，因此后续合并不能�
 commit 上成功结束后才能合并。Windows 成功是强制条件，因为只有该 job 能可靠编译并运行
 Windows-only 测试；本地、macOS、Ubuntu 或 review 结果都不能替代它。每次合并后，必须先验证
 `main` CI 与 Wiki 发布，再开始下一个串行 pull request。
+
+所有等待都必须从主 agent 移出。每个需要等待或监控的生命周期——长时间本地 gate、pull-request
+CI、合并后的 `main` CI 加 Wiki 发布，或 release workflow——启动一个专用 watcher subagent，
+而不是每个 job 启动一个 subagent。交接内容必须不可变并包含 repository/worktree 路径、预期 commit
+SHA、PR 编号或 run ID、准确的必需 job 或命令、timeout 与成功标准。Watcher 负责该生命周期，直到
+`SUCCESS`、`FAILURE`、`BLOCKED` 或 `STALE`，并报告预期与实际 SHA、run ID、每个必需结果和可执行的
+失败证据。若 head 改变，或必需 job 失败、取消、意外跳过，它必须立即返回；绝不能静默跟随替代 run，
+也不能只按 branch 名接受 green 结果。
+
+Watcher 运行期间，主 agent 只在基于当前默认分支的独立 worktree 中推进不重叠的工作项，绝不修改
+正在测试的 worktree。Watcher 不得 push、merge、tag、publish 或清理共享状态。同一主机一次最多运行
+一个完整 Cargo gate 或 build，并且并发 worktree 绝不能共享 `CARGO_TARGET_DIR`；重型 gate 运行期间，
+主 agent 应进行 research、编辑或轻量检查。Watcher 报告 failure、blocker 或 stale SHA 时，主 agent
+必须立即返回当前生命周期处理。
+
+并发不会放宽发布顺序：当前 pull request 的 exact-head 检查通过前不得合并；当前 pull request
+合并且其 exact merge-SHA `main` CI 与 Wiki 发布验证完成前，不得打开下一个 pull request。之后先把
+下一个 worktree 更新到新的默认分支 tip，并重新运行受影响的验证，再发布。这些 gate 通过后，fetch
+并 prune 默认 remote，再按它的 symbolic default branch 清理本地状态。只移除 HEAD 已合并到该分支
+的干净、未锁定 worktree，并且只删除已合并且未被保留 worktree 使用的本地分支。绝不能强制移除或
+丢弃 dirty、未合并、已锁定的 worktree，也不能丢弃任何 stash。
 
 ### macOS 14 与 Windows latest
 
