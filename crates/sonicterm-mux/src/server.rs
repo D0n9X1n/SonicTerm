@@ -880,15 +880,10 @@ where
                     Ok(())
                 }
             }
-            ClientMsg::Kill { pane_id } => {
-                if let Err(e) = state.kill_pane(pane_id) {
-                    send_reply(&sink, ServerMsg::Error(e.to_string()))
-                } else {
-                    // When: kill_pane succeeded, so no reply frame is owed; the pane's reader
-                    // thread sends the Exit frame as it winds down.
-                    Ok(())
-                }
-            }
+            ClientMsg::Kill { pane_id } => match state.kill_pane(pane_id) {
+                Ok(()) => send_reply(&sink, ServerMsg::Killed { pane_id }),
+                Err(e) => send_reply(&sink, ServerMsg::Error(e.to_string())),
+            },
             ClientMsg::Replay { pane_id } => {
                 if let Err(e) = state.replay(pane_id, &sink) {
                     send_reply(&sink, ServerMsg::Error(e.to_string()))

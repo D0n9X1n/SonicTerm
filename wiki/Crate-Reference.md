@@ -339,9 +339,11 @@ metadata.
 ### `sonicterm-mux`
 
 **Role:** standalone persistent-PTY multiplexer daemon with a framed bincode
-protocol, raw-byte replay ring, and attach/input/resize/kill operations. It is a
-workspace crate, is not consumed by the GUI, and is not included in release
-packages.
+protocol, raw-byte replay ring, and attach/input/resize/kill operations. Every
+kill request receives exactly one reply: `Killed` for the matching removed pane
+or `Error`; the CLI waits with a bounded transport read and reports success only
+for the matching acknowledgement. It is a workspace crate, is not consumed by
+the GUI, and is not included in release packages.
 
 Its default endpoint is scoped by user and login session. Unix uses a validated
 owner-only runtime directory; listener mode is applied before bind where the OS
@@ -692,8 +694,10 @@ ConPTY 仍封装在 `sonicterm-io` 后。
 ### `sonicterm-mux`
 
 **职责：** 独立的持久 PTY multiplexer daemon，提供 framed bincode 协议、原始字节
-回放环，以及 attach/input/resize/kill 操作。它属于 workspace，但 GUI 不依赖它，
-发布包也不包含它。
+回放环，以及 attach/input/resize/kill 操作。每个 kill 请求恰好收到一条回复：成功移除
+对应 pane 时返回 `Killed`，失败时返回 `Error`；CLI 使用有界传输读取等待响应，且仅在
+确认消息中的 pane 编号匹配时报告成功。它属于 workspace，但 GUI 不依赖它，发布包也
+不包含它。
 
 默认端点按用户和登录会话隔离。Unix 使用经验证且仅所有者可访问的运行时目录；操作系统
 支持时会在 bind 前设置 listener mode，而 Darwin 会把端点保留在该不可被其它用户访问的
