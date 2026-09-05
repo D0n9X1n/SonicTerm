@@ -1315,7 +1315,7 @@ fn encode_modify_other_key(code: u32, mods: ModifiersState) -> Vec<u8> {
 fn should_modify_other_key(level: u8, code: u32, mods: ModifiersState) -> bool {
     !mods.is_empty()
         && match level {
-            1 => !matches!(code, 8 | 27 | 127),
+            1 => !matches!(code, 8 | 9 | 27 | 127),
             2 => true,
             _ => false,
         }

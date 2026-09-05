@@ -169,8 +169,9 @@ Other keys and modifiers follow these rules:
   The legacy aliases cover Space/@/2, `[ /3`, `\ /4`, `] /5`, `^/~/6`,
   `_/ /7`, and `?/8`.
 - **Text and BackTab:** Alt prefixes `ESC` to legacy text. The OS supplies
-  shifted and layout-specific text. Tab emits HT, while Shift+Tab emits the
-  distinct legacy BackTab sequence `CSI Z`.
+  shifted and layout-specific text. Tab emits HT. Shift+Tab emits the legacy
+  BackTab sequence `CSI Z` by default and at `modifyOtherKeys` level 1; level 2
+  emits the explicit modified-key form `CSI 27 ; 2 ; 9 ~`.
 - **Negotiated legacy modes:** the pane snapshot includes DECCKM cursor keys,
   DECKPAM keypad identity, DECBKM Backspace, ANSI newline mode, and xterm
   `modifyOtherKeys` levels 1 and 2. Modified cursor and function keys preserve
@@ -787,7 +788,8 @@ Control 或 Alt 时，会原样使用操作系统生成文本的 UTF-8 字节。
   再判断 Alt：Control+A 变成 `0x01`，Control+Alt+A 会在该控制字节前加 `ESC`。
   旧式别名覆盖 Space/@/2、`[ /3`、`\ /4`、`] /5`、`^/~/6`、`_/ /7` 和 `?/8`。
 - **文本与 BackTab：** Alt 会在旧式文本前加 `ESC`；Shift 与布局相关文本由操作系统生成。
-  Tab 发送 HT，Shift+Tab 则发送可区分的旧式 BackTab 序列 `CSI Z`。
+  Tab 发送 HT。Shift+Tab 在默认模式和 `modifyOtherKeys` level 1 下发送旧式 BackTab 序列
+  `CSI Z`；level 2 则发送显式修饰键形式 `CSI 27 ; 2 ; 9 ~`。
 - **协商的旧式模式：** pane 快照包含 DECCKM 光标键、DECKPAM 小键盘身份、DECBKM
   Backspace、ANSI newline mode，以及 xterm `modifyOtherKeys` level 1 和 2。带修饰键的
   光标键与功能键会在 xterm 修饰参数中保留 Shift、Alt、Control 和 Super；功能键覆盖到 F35。

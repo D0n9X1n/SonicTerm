@@ -445,6 +445,38 @@ fn modify_other_keys_levels_have_distinct_compatibility_behavior() {
     );
 }
 
+/// modifyOtherKeys level 1 must preserve Tab compatibility while level 2 encodes modifiers.
+#[test]
+fn modify_other_keys_preserves_tab_compatibility_at_level_one() {
+    let tab_key = Key::Named(NamedKey::Tab);
+    let tab = event(
+        &tab_key,
+        PhysicalKey::Code(KeyCode::Tab),
+        Some("\t"),
+        KeyLocation::Standard,
+        ElementState::Pressed,
+        false,
+    );
+
+    for (level, modifiers, expected) in [
+        (0, ModifiersState::empty(), b"\t".as_slice()),
+        (1, ModifiersState::empty(), b"\t".as_slice()),
+        (2, ModifiersState::empty(), b"\t".as_slice()),
+        (0, ModifiersState::SHIFT, b"\x1b[Z".as_slice()),
+        (1, ModifiersState::SHIFT, b"\x1b[Z".as_slice()),
+        (2, ModifiersState::SHIFT, b"\x1b[27;2;9~".as_slice()),
+        (0, ModifiersState::CONTROL, b"\t".as_slice()),
+        (1, ModifiersState::CONTROL, b"\t".as_slice()),
+        (2, ModifiersState::CONTROL, b"\x1b[27;5;9~".as_slice()),
+    ] {
+        assert_eq!(
+            encode_event(tab, modifiers, 0, KeyboardModes::new(false, false, false, false, level),),
+            Some(expected.to_vec()),
+            "modifyOtherKeys={level}, modifiers={modifiers:?}",
+        );
+    }
+}
+
 /// DECKPAM uses the physical keypad key, while normal mode follows NumLock's logical key.
 #[test]
 fn application_keypad_preserves_physical_digit_identity() {
