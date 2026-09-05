@@ -695,7 +695,7 @@ jobs:
             --timeout-seconds 45 `
             --state-dir "$env:RUNNER_TEMP\sonicterm-windows-smoke" `
             --log-file "$env:RUNNER_TEMP\sonicterm-windows-smoke.log" `
-            -- target/release/sonicterm-windows.exe --runtime-smoke
+            -- ./target/release/sonicterm-windows.exe --runtime-smoke
 
       - name: Upload Windows native smoke logs
         if: ${{ failure() }}

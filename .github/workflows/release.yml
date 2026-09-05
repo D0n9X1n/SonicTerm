@@ -312,7 +312,7 @@ jobs:
             --timeout-seconds 45 `
             --state-dir "$env:RUNNER_TEMP\sonicterm-release-windows-smoke" `
             --log-file "$env:RUNNER_TEMP\sonicterm-release-windows-smoke.log" `
-            -- target/x86_64-pc-windows-msvc/release/sonicterm-windows.exe --runtime-smoke
+            -- ./target/x86_64-pc-windows-msvc/release/sonicterm-windows.exe --runtime-smoke
 
       - name: Build and register msi asset
         id: build-msi

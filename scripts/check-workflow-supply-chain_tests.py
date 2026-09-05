@@ -473,6 +473,22 @@ class RepositoryTests(unittest.TestCase):
                         shards,
                     )
 
+    def test_windows_native_smokes_use_explicit_relative_executable_paths(self):
+        # The ./ prefix makes each checkout-relative binary unambiguous to Windows CreateProcess.
+        contracts = (
+            ("ci.yml", "./target/release/sonicterm-windows.exe"),
+            (
+                "release.yml",
+                "./target/x86_64-pc-windows-msvc/release/sonicterm-windows.exe",
+            ),
+        )
+        for workflow_name, executable in contracts:
+            with self.subTest(workflow=workflow_name):
+                text = (
+                    _HERE.parent / ".github" / "workflows" / workflow_name
+                ).read_text(encoding="utf-8")
+                self.assertIn(f"-- {executable} --runtime-smoke", text)
+
     def test_ci_caches_are_bounded_and_cairo_is_published_immediately(self):
         text = (_HERE.parent / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
