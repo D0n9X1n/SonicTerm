@@ -113,6 +113,11 @@ pub enum ServerMsg {
         /// At most `SUBSCRIBER_OUTPUT_FRAME_BYTES` snapshot bytes.
         bytes: Vec<u8>,
     },
+    /// Reply to `Kill` confirming that the named pane was removed and terminated.
+    Killed {
+        /// Pane that was successfully killed.
+        pane_id: PaneId,
+    },
 }
 
 /// Summary returned for each live session in `ServerMsg::Sessions`.

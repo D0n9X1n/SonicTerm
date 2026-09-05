@@ -1,4 +1,5 @@
 use super::*;
+use std::io::{Cursor, Error, ErrorKind};
 
 /// Help names the shipping binary and makes the secure default discoverable.
 #[test]
@@ -272,4 +273,218 @@ mod unix {
         assert_eq!(after.permissions().mode() & 0o777, 0o600);
         drop(listener);
     }
+}
+
+fn framed(message: &ServerMsg) -> Cursor<Vec<u8>> {
+    let mut bytes = Vec::new();
+    write_frame(&mut bytes, message).unwrap();
+    Cursor::new(bytes)
+}
+
+struct TimeoutReader;
+
+impl Read for TimeoutReader {
+    fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+        Err(Error::new(ErrorKind::TimedOut, "test response deadline"))
+    }
+}
+
+struct TimeoutTrackingReader {
+    inner: Cursor<Vec<u8>>,
+    timeout: Option<Duration>,
+}
+
+impl Read for TimeoutTrackingReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.timeout.is_none() {
+            return Err(Error::new(ErrorKind::NotConnected, "response deadline is not armed"));
+        }
+        self.inner.read(buffer)
+    }
+}
+
+impl KillResponseReader for TimeoutTrackingReader {
+    fn set_kill_response_timeout(&mut self, timeout: Duration) -> io::Result<()> {
+        self.timeout = Some(timeout);
+        Ok(())
+    }
+}
+
+#[test]
+fn matching_killed_response_is_the_only_success() {
+    // Protect success output from being emitted before the requested pane identity is acknowledged.
+    let result = read_kill_response(&mut framed(&ServerMsg::Killed { pane_id: 7 }), 7).unwrap();
+
+    assert_eq!(result, "killed pane 7");
+}
+
+#[test]
+fn kill_exchange_writes_the_requested_kill_frame() {
+    // Protect the extracted transport seam from changing MAX_FRAME-compatible request framing.
+    let mut response = Vec::new();
+    write_frame(&mut response, &ServerMsg::Killed { pane_id: 7 }).unwrap();
+    let mut reader = TimeoutTrackingReader { inner: Cursor::new(response), timeout: None };
+    let mut written = Vec::new();
+
+    let result = exchange_kill(&mut reader, &mut written, 7).unwrap();
+
+    assert_eq!(result, "killed pane 7");
+    assert_eq!(reader.timeout, Some(KILL_RESPONSE_TIMEOUT));
+    let request: ClientMsg = read_frame(&mut Cursor::new(written)).unwrap();
+    assert!(matches!(request, ClientMsg::Kill { pane_id: 7 }));
+}
+
+#[test]
+fn server_error_fails_with_kill_context() {
+    // Protect daemon-side failures from being reported as a successful kill by the CLI.
+    let error =
+        read_kill_response(&mut framed(&ServerMsg::Error("unknown pane 7".into())), 7).unwrap_err();
+
+    let message = format!("{error:#}");
+    assert!(message.contains("kill pane 7"));
+    assert!(message.contains("unknown pane 7"));
+}
+
+#[test]
+fn mismatched_killed_response_fails_with_both_pane_ids() {
+    // Protect clients from accepting a valid acknowledgement for a different concurrent request.
+    let error = read_kill_response(&mut framed(&ServerMsg::Killed { pane_id: 8 }), 7).unwrap_err();
+
+    let message = format!("{error:#}");
+    assert!(message.contains("pane 7"));
+    assert!(message.contains("pane 8"));
+}
+
+#[test]
+fn unexpected_response_fails_with_frame_context() {
+    // Protect protocol drift from being silently interpreted as a successful kill.
+    let error = read_kill_response(&mut framed(&ServerMsg::Sessions(Vec::new())), 7).unwrap_err();
+
+    let message = format!("{error:#}");
+    assert!(message.contains("kill pane 7"));
+    assert!(message.contains("unexpected response"));
+    assert!(message.contains("Sessions"));
+}
+
+#[test]
+fn eof_and_malformed_response_fail_with_read_context() {
+    // Protect truncated and invalid frames from losing the operation identity in CLI diagnostics.
+    let eof = read_kill_response(&mut Cursor::new(Vec::new()), 7).unwrap_err();
+    assert!(format!("{eof:#}").contains("kill pane 7: response read failed"));
+
+    let malformed = read_kill_response(&mut Cursor::new(vec![0, 0, 0, 1, 0xff]), 7).unwrap_err();
+    assert!(format!("{malformed:#}").contains("kill pane 7: response read failed"));
+}
+
+#[test]
+fn transport_timeout_fails_with_read_context() {
+    // Protect the bounded transport deadline from being flattened into success or an opaque I/O error.
+    let error = read_kill_response(&mut TimeoutReader, 7).unwrap_err();
+
+    let message = format!("{error:#}");
+    assert!(message.contains("kill pane 7: response read failed"));
+    assert!(message.contains("test response deadline"));
+}
+
+#[test]
+fn kill_exchange_arms_timeout_before_reading_acknowledgement() {
+    // Protect the command path from reading a response before the transport has a finite deadline.
+    let mut bytes = Vec::new();
+    write_frame(&mut bytes, &ServerMsg::Killed { pane_id: 7 }).unwrap();
+    let mut reader = TimeoutTrackingReader { inner: Cursor::new(bytes), timeout: None };
+
+    let result = exchange_kill(&mut reader, io::sink(), 7).unwrap();
+
+    assert_eq!(result, "killed pane 7");
+    assert_eq!(reader.timeout, Some(KILL_RESPONSE_TIMEOUT));
+}
+
+#[test]
+fn readiness_wait_rejects_an_unarmed_deadline() {
+    // Protect Windows reads from polling forever when a caller omitted the kill response deadline.
+    let error = wait_until_readable(None, || Ok(0)).unwrap_err();
+
+    assert_eq!(error.kind(), ErrorKind::NotConnected);
+}
+
+#[test]
+fn readiness_wait_times_out_without_readable_bytes() {
+    // Protect the polling deadline independently of either platform's transport wrapper.
+    let started = Instant::now();
+    let error =
+        wait_until_readable(Some(started + Duration::from_millis(20)), || Ok(0)).unwrap_err();
+
+    assert_eq!(error.kind(), ErrorKind::TimedOut);
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn readiness_wait_returns_when_bytes_arrive() {
+    // Protect the transition from polling to the one blocking read after availability becomes nonzero.
+    let mut polls = 0;
+    wait_until_readable(Some(Instant::now() + Duration::from_secs(1)), || {
+        polls += 1;
+        Ok(usize::from(polls >= 3))
+    })
+    .unwrap();
+
+    assert_eq!(polls, 3);
+}
+
+#[test]
+fn readiness_wait_propagates_transport_errors() {
+    // Protect disconnected-pipe diagnostics from being flattened into a timeout.
+    let error = wait_until_readable(Some(Instant::now() + Duration::from_secs(1)), || {
+        Err(Error::new(ErrorKind::BrokenPipe, "peer closed"))
+    })
+    .unwrap_err();
+
+    assert_eq!(error.kind(), ErrorKind::BrokenPipe);
+}
+
+#[cfg(unix)]
+#[test]
+fn real_transport_read_timeout_bounds_a_silent_peer() {
+    // Protect production Unix behavior with the kernel-backed timeout used by the concrete stream.
+    use std::{os::unix::net::UnixStream, time::Instant};
+
+    let (reader_socket, _silent_peer) = UnixStream::pair().unwrap();
+    let concrete = interprocess::os::unix::uds_local_socket::Stream::from(reader_socket);
+    let mut reader = Stream::UdSocket(concrete);
+    reader.set_kill_response_timeout(Duration::from_millis(20)).unwrap();
+    let started = Instant::now();
+
+    let error = read_kill_response(&mut reader, 7).unwrap_err();
+
+    assert!(started.elapsed() < Duration::from_secs(1), "read deadline was not enforced");
+    assert!(matches!(
+        error.downcast_ref::<io::Error>().map(io::Error::kind),
+        Some(ErrorKind::TimedOut | ErrorKind::WouldBlock)
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn real_named_pipe_timeout_bounds_a_silent_peer() {
+    // Protect the production PeekNamedPipe deadline on the overlapped transport used by Windows.
+    use interprocess::local_socket::{GenericNamespaced, ListenerOptions};
+
+    let name_text = format!("sonicterm-mux-kill-timeout-{}", std::process::id());
+    let name = name_text.as_str().to_ns_name::<GenericNamespaced>().unwrap();
+    let listener = ListenerOptions::new().name(name).create_sync().unwrap();
+    let server = std::thread::spawn(move || {
+        let _silent_peer = listener.accept().unwrap();
+        std::thread::sleep(Duration::from_secs(1));
+    });
+    let stream =
+        Stream::connect(name_text.as_str().to_ns_name::<GenericNamespaced>().unwrap()).unwrap();
+    let mut reader = DeadlineStream { stream, deadline: None };
+    reader.set_kill_response_timeout(Duration::from_millis(20)).unwrap();
+    let started = Instant::now();
+
+    let error = read_kill_response(&mut reader, 7).unwrap_err();
+
+    assert!(started.elapsed() < Duration::from_secs(1), "read deadline was not enforced");
+    assert_eq!(error.downcast_ref::<io::Error>().map(io::Error::kind), Some(ErrorKind::TimedOut));
+    server.join().unwrap();
 }
