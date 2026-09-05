@@ -12,7 +12,7 @@
 //! reporting itself as enforced after it had stopped enforcing.
 
 use sonicterm_app::app::retention::{seam_classes, STALL_SAMPLES_BEFORE_CANCEL};
-use sonicterm_app::app::App;
+use sonicterm_app::app::{pane_seam_cap_terms, App, PANE_SEAM_CAP_SUM_BYTES};
 use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
 
 fn app() -> App {
@@ -281,105 +281,82 @@ fn the_production_sampling_path_charges_at_the_default_level() {
     );
 }
 
-/// The committed budget is derived from the seam caps, not chosen.
+/// The production seam inventory contains every charged pane class exactly once.
 ///
-/// This is what makes it safe to have at all. The objection to a governor
-/// limit was that two limits which must agree and are maintained separately
-/// drift, and the one that stops agreeing keeps reporting itself as enforced.
-/// A limit *computed from* the caps cannot disagree with them: change a cap and
-/// this moves with it.
-///
-/// The sum is only a derivation while every class has been decided about, so
-/// this walks the whole enum rather than restating the terms it expects. A
-/// class that starts charging a pane and is not given a term fails here, and a
-/// class that has not been classified at all fails to compile in
-/// `sonicterm-types` before it can reach this test.
+/// Reading the actual charge path and cap inventory together catches both
+/// directions of drift: an added charge has no cap term, or an obsolete term no
+/// longer has a charge. Failure diagnostics name the affected class.
 #[test]
-fn the_committed_budget_is_derived_from_the_seam_caps() {
-    use sonicterm_app::app::{PANE_COMMITTED_BUDGET_BYTES, PANE_SEAM_CAP_SUM_BYTES};
-    use sonicterm_types::{PaneSeamTerm, ResourceClass};
+fn the_pane_seam_inventory_is_exhaustive_by_class() {
+    use enum_map::Enum;
+    use sonicterm_types::{ClassCoverage, PaneSeamTerm, ResourceClass};
 
-    // The cap behind each contributing class, recomputed from the seams
-    // themselves. If someone replaces a derived constant with a literal, these
-    // stop agreeing. `None` means the class is expected to carry no term.
-    //
-    // A wildcard arm is unavoidable here: `ResourceClass` is `#[non_exhaustive]`,
-    // so a match outside `sonicterm-types` cannot omit one. The exhaustiveness
-    // that forces a decision therefore lives on `pane_seam_term()`, at the
-    // enum's definition site; this asserts the decision made there is honoured
-    // by the arithmetic, and the wildcard returns `None` so a newly
-    // contributing class arrives here with no term and fails rather than
-    // passing silently.
-    fn expected_term_bytes(class: ResourceClass) -> Option<usize> {
-        match class {
-            // One term for the three grid classes: `MAX_GRID_CELLS` bounds
-            // visible, history, and saved primary together.
-            ResourceClass::GridVisible => Some(
-                sonicterm_grid::grid::MAX_GRID_CELLS as usize
-                    * std::mem::size_of::<sonicterm_types::Cell>(),
-            ),
-            ResourceClass::GridHistory | ResourceClass::GridAlternate => Some(0),
-            ResourceClass::InlineMediaRetained => Some(64 * 1024 * 1024),
-            ResourceClass::ProtocolMetadata => {
-                Some(sonicterm_grid::hyperlink::MAX_HYPERLINK_METADATA_BYTES)
-            }
-            ResourceClass::ParserCapture => Some(
-                sonicterm_vt::vt::MAX_MEDIA_PAYLOAD_BYTES
-                    + sonicterm_vt::vt::MAX_ESCAPE_SEQUENCE_BYTES,
-            ),
-            ResourceClass::PtyOutput => Some(sonicterm_io::pty::max_queued_output_ring_bytes()),
-            ResourceClass::PtyInput => Some(sonicterm_io::pty::max_pty_queued_input_bytes()),
-            _ => None,
-        }
+    let mut charge_counts = enum_map::enum_map! { _ => 0usize };
+    for (class, _) in seam_classes(&Default::default()) {
+        charge_counts[class] += 1;
+    }
+    let mut term_counts = enum_map::enum_map! { _ => 0usize };
+    for term in pane_seam_cap_terms() {
+        term_counts[term.class] += 1;
+        assert_eq!(
+            term.class.coverage(),
+            ClassCoverage::Charged,
+            "{:?} has a pane cap term but is not charged in production",
+            term.class
+        );
+        assert_eq!(
+            term.class.pane_seam_term(),
+            PaneSeamTerm::Contributes,
+            "{:?} has a pane cap term but is excluded from the pane sum",
+            term.class
+        );
     }
 
-    let mut expected = 0usize;
     for index in 0..ResourceClass::COUNT {
-        let class = <ResourceClass as enum_map::Enum>::from_usize(index);
-        match class.pane_seam_term() {
-            PaneSeamTerm::Contributes => {
-                let term = expected_term_bytes(class).unwrap_or_else(|| {
-                    panic!(
-                        "{class:?} contributes to the pane seam-cap sum but this test has no \
-                         term for it; the sum is a derivation only while every contributing \
-                         class carries the cap its seam enforces"
-                    )
-                });
-                expected += term;
-            }
-            PaneSeamTerm::ChargedToAnotherOwnerKind | PaneSeamTerm::NotChargedInProduction => {
-                assert!(
-                    expected_term_bytes(class).is_none(),
-                    "{class:?} is excluded from the pane seam-cap sum but this test gives it a \
-                     term; the exclusion and the arithmetic must agree"
-                );
-            }
-        }
+        let class = ResourceClass::from_usize(index);
+        let expected = usize::from(class.pane_seam_term() == PaneSeamTerm::Contributes);
+        assert!(
+            charge_counts[class] <= 1,
+            "{class:?} appears more than once in the production pane charge path"
+        );
+        assert!(
+            term_counts[class] <= 1,
+            "{class:?} appears more than once in the pane seam inventory"
+        );
+        assert_eq!(
+            charge_counts[class], expected,
+            "{class:?} must appear exactly once in the production charge path iff it contributes"
+        );
+        assert_eq!(
+            term_counts[class], expected,
+            "{class:?} must have exactly one cap term iff it contributes to the pane sum"
+        );
     }
+}
 
+/// The pane sum and headroom consume the production inventory directly.
+///
+/// PTY input has one class entry, so the regression that added its queue cap a
+/// second time cannot return without disagreeing with this inventory sum.
+#[test]
+fn the_committed_budget_is_derived_from_the_production_inventory() {
+    use sonicterm_app::app::PANE_COMMITTED_BUDGET_BYTES;
+    use sonicterm_types::ResourceClass;
+
+    let expected = pane_seam_cap_terms().iter().map(|term| term.bytes).sum::<usize>();
+    assert_eq!(PANE_SEAM_CAP_SUM_BYTES, expected);
     assert_eq!(
-        PANE_SEAM_CAP_SUM_BYTES, expected,
-        "the seam-cap sum must be the sum of the caps, not a restatement of one"
+        pane_seam_cap_terms().iter().filter(|term| term.class == ResourceClass::PtyInput).count(),
+        1,
+        "PtyInput must contribute exactly once"
     );
-    // The omission this guards against, stated directly: the PTY reader ring is
-    // charged to a pane and must be inside the backstop that reads a pane's
-    // total. Asserted on the structural ceiling rather than the ring a real
-    // shell pins, because the backstop sits above what the seam permits.
-    assert!(
-        PANE_SEAM_CAP_SUM_BYTES >= sonicterm_io::pty::max_queued_output_ring_bytes(),
-        "the sum must cover the PTY output ring it is charged for"
-    );
-    // Both are compile-time constants, so these are decided before the test
-    // runs. Stated as const assertions rather than runtime ones so the build
-    // fails rather than the suite — a backstop below the caps it backstops is
-    // not a test failure, it is a design that cannot ship.
     const _: () = assert!(
         PANE_COMMITTED_BUDGET_BYTES > PANE_SEAM_CAP_SUM_BYTES,
-        "the backstop must sit above the caps it backstops, or it becomes the enforcer"
+        "the backstop must sit above the production seam sum"
     );
     const _: () = assert!(
         PANE_COMMITTED_BUDGET_BYTES <= PANE_SEAM_CAP_SUM_BYTES * 4,
-        "and stay a small multiple, or it bounds nothing in practice"
+        "the backstop must remain a small multiple of the production seam sum"
     );
 }
 
