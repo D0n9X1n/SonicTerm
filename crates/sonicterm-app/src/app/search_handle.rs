@@ -339,7 +339,7 @@ fn apply_search_key(
     anchor_row: u32,
     anchor_col: u16,
 ) -> (bool, bool, Option<Option<u64>>) {
-    let edit = super::text_edit::search_text_edit_for_key(&event.logical_key, mods);
+    let edit = super::text_edit::search_text_edit_for_event(event, mods);
     let (handled, keep_search) = if let Some(edit) = edit {
         search.apply_text_edit(edit, grid);
         (true, true)
@@ -385,7 +385,11 @@ fn apply_search_key(
                 (true, true)
             }
             Key::Named(NamedKey::Space) => {
-                search.input_char(' ', grid);
+                if let Some(text) = super::text_edit::printable_event_text(event, mods) {
+                    for ch in text.chars() {
+                        search.input_char(ch, grid);
+                    }
+                }
                 (true, true)
             }
             Key::Character(s) => {
@@ -419,7 +423,10 @@ fn apply_search_key(
                     }
                 }
                 if !consumed {
-                    for ch in s.chars() {
+                    for ch in super::text_edit::printable_event_text(event, mods)
+                        .unwrap_or_default()
+                        .chars()
+                    {
                         search.input_char(ch, grid);
                     }
                 }

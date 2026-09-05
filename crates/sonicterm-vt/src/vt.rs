@@ -42,6 +42,88 @@ pub enum MouseTracking {
     AnyMotion,
 }
 
+/// Terminal modes that affect how host keyboard events are encoded for the PTY.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub struct KeyboardModes {
+    application_cursor_keys: bool,
+    application_keypad: bool,
+    backarrow_key: bool,
+    newline: bool,
+    modify_other_keys: u8,
+}
+
+impl KeyboardModes {
+    const APPLICATION_CURSOR_KEYS: u8 = 1 << 0;
+    const APPLICATION_KEYPAD: u8 = 1 << 1;
+    const BACKARROW_KEY: u8 = 1 << 2;
+    const NEWLINE: u8 = 1 << 3;
+    const MODIFY_OTHER_KEYS_SHIFT: u8 = 4;
+    const MODIFY_OTHER_KEYS_MASK: u8 = 0b11 << Self::MODIFY_OTHER_KEYS_SHIFT;
+
+    /// Build an explicit keyboard-mode snapshot for an encoder or test.
+    pub const fn new(
+        application_cursor_keys: bool,
+        application_keypad: bool,
+        backarrow_key: bool,
+        newline: bool,
+        modify_other_keys: u8,
+    ) -> Self {
+        Self {
+            application_cursor_keys,
+            application_keypad,
+            backarrow_key,
+            newline,
+            modify_other_keys: if modify_other_keys > 2 { 2 } else { modify_other_keys },
+        }
+    }
+
+    /// Reconstruct a mode snapshot from its compact cross-thread representation.
+    pub fn from_bits(bits: u8) -> Self {
+        Self {
+            application_cursor_keys: bits & Self::APPLICATION_CURSOR_KEYS != 0,
+            application_keypad: bits & Self::APPLICATION_KEYPAD != 0,
+            backarrow_key: bits & Self::BACKARROW_KEY != 0,
+            newline: bits & Self::NEWLINE != 0,
+            modify_other_keys: (bits & Self::MODIFY_OTHER_KEYS_MASK)
+                >> Self::MODIFY_OTHER_KEYS_SHIFT,
+        }
+    }
+
+    /// Pack the mode snapshot into one byte for lock-free publication.
+    pub fn bits(self) -> u8 {
+        (u8::from(self.application_cursor_keys) * Self::APPLICATION_CURSOR_KEYS)
+            | (u8::from(self.application_keypad) * Self::APPLICATION_KEYPAD)
+            | (u8::from(self.backarrow_key) * Self::BACKARROW_KEY)
+            | (u8::from(self.newline) * Self::NEWLINE)
+            | self.modify_other_keys.min(2) << Self::MODIFY_OTHER_KEYS_SHIFT
+    }
+
+    /// Whether DECCKM application-cursor mode is active.
+    pub fn application_cursor_keys(self) -> bool {
+        self.application_cursor_keys
+    }
+
+    /// Whether DECKPAM application-keypad mode is active.
+    pub fn application_keypad(self) -> bool {
+        self.application_keypad
+    }
+
+    /// Whether DECBKM makes Backspace emit BS instead of DEL.
+    pub fn backarrow_key(self) -> bool {
+        self.backarrow_key
+    }
+
+    /// Whether ANSI newline mode makes Return emit CR LF.
+    pub fn newline(self) -> bool {
+        self.newline
+    }
+
+    /// Active xterm `modifyOtherKeys` level, clamped to `0..=2`.
+    pub fn modify_other_keys(self) -> u8 {
+        self.modify_other_keys
+    }
+}
+
 /// Largest staging buffer a single capture may hold when it is the only one
 /// in flight.
 ///
@@ -1275,6 +1357,11 @@ impl Parser {
         self.performer.app_cursor_keys
     }
 
+    /// Return every active terminal mode that changes keyboard output encoding.
+    pub fn keyboard_modes(&self) -> KeyboardModes {
+        self.performer.keyboard_modes()
+    }
+
     /// Return the current DEC mouse tracking mode selected by the application.
     pub fn mouse_tracking(&self) -> MouseTracking {
         self.performer.mouse_tracking
@@ -1346,6 +1433,14 @@ struct Performer {
     /// synthetic arrow sequences SonicTerm emits for alt-screen wheel scroll)
     /// must use the `ESC O A` form instead of `ESC [ A`.
     app_cursor_keys: bool,
+    /// DECKPAM/DECKPNM application-keypad selection.
+    app_keypad: bool,
+    /// DECBKM ?67 — Backspace selects BS while set and DEL while reset.
+    backarrow_key: bool,
+    /// ANSI mode 20 — Return sends CR LF while set.
+    newline_mode: bool,
+    /// xterm `modifyOtherKeys` level selected by `CSI > 4 ; Ps m`.
+    modify_other_keys: u8,
     /// DECSET ?1000/?1002/?1003 mouse tracking selected by the application.
     mouse_tracking: MouseTracking,
     focus_reporting: bool,
@@ -1396,11 +1491,11 @@ struct Performer {
     /// REP in the data stream. Reset when a control function intervenes.
     last_printed_char: Option<char>,
     dcs_capture: Option<MediaCapture>,
-    /// Kitty keyboard protocol progressive-enhancement flag stack. The active
-    /// flags are the top of stack (`last()`); empty stack == flags 0 == legacy
-    /// encoding. Apps push with `CSI > flags u`, pop with `CSI < number u`,
-    /// set with `CSI = flags ; mode u`, and query with `CSI ? u`.
-    kitty_kbd_flags: Vec<u8>,
+    /// Kitty keyboard flag stacks for the main and alternate screens.
+    ///
+    /// Each screen owns independent progressive-enhancement state, as required
+    /// by the protocol. Empty stack means flags 0 and legacy encoding.
+    kitty_kbd_flags: [Vec<u8>; 2],
 }
 
 /// Maximum depth of the kitty keyboard flag stack. The protocol allows nested
@@ -1425,6 +1520,10 @@ impl Performer {
             bracketed_paste: false,
             mouse_sgr: false,
             app_cursor_keys: false,
+            app_keypad: false,
+            backarrow_key: false,
+            newline_mode: false,
+            modify_other_keys: 0,
             mouse_tracking: MouseTracking::default(),
             focus_reporting: false,
             title: None,
@@ -1443,7 +1542,7 @@ impl Performer {
             fast_path_ready: true,
             last_printed_char: None,
             dcs_capture: None,
-            kitty_kbd_flags: Vec::new(),
+            kitty_kbd_flags: [Vec::new(), Vec::new()],
         }
     }
 
@@ -1525,7 +1624,26 @@ impl Performer {
     /// Active kitty keyboard protocol flags (top of the push/pop stack).
     /// Empty stack reports 0, meaning legacy (non-kitty) key encoding.
     fn kitty_keyboard_flags(&self) -> u8 {
-        *self.kitty_kbd_flags.last().unwrap_or(&0)
+        *self.kitty_kbd_stack().last().unwrap_or(&0)
+    }
+
+    fn kitty_kbd_stack(&self) -> &Vec<u8> {
+        &self.kitty_kbd_flags[usize::from(self.grid.is_alt())]
+    }
+
+    fn kitty_kbd_stack_mut(&mut self) -> &mut Vec<u8> {
+        let index = usize::from(self.grid.is_alt());
+        &mut self.kitty_kbd_flags[index]
+    }
+
+    fn keyboard_modes(&self) -> KeyboardModes {
+        KeyboardModes {
+            application_cursor_keys: self.app_cursor_keys,
+            application_keypad: self.app_keypad,
+            backarrow_key: self.backarrow_key,
+            newline: self.newline_mode,
+            modify_other_keys: self.modify_other_keys,
+        }
     }
 
     fn reset_last_printed_char(&mut self) {
@@ -1580,6 +1698,10 @@ impl Performer {
         self.bracketed_paste = false;
         self.mouse_sgr = false;
         self.app_cursor_keys = false;
+        self.app_keypad = false;
+        self.backarrow_key = false;
+        self.newline_mode = false;
+        self.modify_other_keys = 0;
         self.mouse_tracking = MouseTracking::Off;
         self.focus_reporting = false;
         self.current_hyperlink = None;
@@ -1587,7 +1709,9 @@ impl Performer {
         self.scroll_bottom = None;
         self.last_printed_char = None;
         self.dcs_capture = None;
-        self.kitty_kbd_flags.clear();
+        for stack in &mut self.kitty_kbd_flags {
+            stack.clear();
+        }
         self.grid.set_autowrap(true);
         if self.grid.is_alt() {
             self.grid.leave_alt_screen();
@@ -1714,6 +1838,7 @@ impl Performer {
             match code {
                 1 => self.app_cursor_keys = set,
                 7 => self.grid.set_autowrap(set),
+                67 => self.backarrow_key = set,
                 25 => self.events.push(VtEvent::CursorVisibility(set)),
                 47 => {
                     let before = self.grid.is_alt();
@@ -2068,11 +2193,17 @@ impl Perform for Performer {
                     buf.extend_from_slice(b"\x1b\\");
                     self.reply(&buf);
                 }
-                'u' if self.kitty_kbd_flags.len() < KITTY_KBD_STACK_MAX => {
+                'u' => {
                     // Kitty keyboard protocol push: `CSI > flags u`. Push the
-                    // requested flag set onto the stack. Cap the depth so a
-                    // misbehaving app can't grow it without bound.
-                    self.kitty_kbd_flags.push(p0() as u8);
+                    // requested flag set and evict the oldest entry at the cap.
+                    let stack = self.kitty_kbd_stack_mut();
+                    if stack.len() == KITTY_KBD_STACK_MAX {
+                        stack.remove(0);
+                    }
+                    stack.push(p0() as u8);
+                }
+                'm' if p0() == 4 => {
+                    self.modify_other_keys = (p1() as u8).min(2);
                 }
                 _ => {
                     // When: action is unsupported for >, ignore it without mutating identity or keyboard state.
@@ -2088,8 +2219,9 @@ impl Perform for Performer {
         if inter.first() == Some(&b'<') {
             if action == 'u' {
                 let n = (p0() as usize).max(1);
-                let new_len = self.kitty_kbd_flags.len().saturating_sub(n);
-                self.kitty_kbd_flags.truncate(new_len);
+                let stack = self.kitty_kbd_stack_mut();
+                let new_len = stack.len().saturating_sub(n);
+                stack.truncate(new_len);
             }
             return;
         }
@@ -2111,16 +2243,26 @@ impl Perform for Performer {
                     // mode 1 (default) and anything else: replace.
                     _ => flags,
                 };
-                if let Some(top) = self.kitty_kbd_flags.last_mut() {
+                let stack = self.kitty_kbd_stack_mut();
+                if let Some(top) = stack.last_mut() {
                     *top = next;
-                } else if self.kitty_kbd_flags.len() < KITTY_KBD_STACK_MAX {
-                    // When: kitty_kbd_flags has no top and remains below KITTY_KBD_STACK_MAX, push next as the active flag set.
-                    self.kitty_kbd_flags.push(next);
+                } else {
+                    // When: the active screen has no stack entry, establish its
+                    // first explicit Kitty mode value.
+                    stack.push(next);
                 }
             }
             return;
         }
         match action {
+            'h' | 'l' => {
+                let set = action == 'h';
+                for slice in params.iter() {
+                    if slice.first().copied().unwrap_or(0) == 20 {
+                        self.newline_mode = set;
+                    }
+                }
+            }
             'A' => {
                 let n = p0().max(1);
                 let row = self.grid.cursor.row.saturating_sub(n);
@@ -2665,6 +2807,12 @@ impl Perform for Performer {
                 // before painting. Ignoring it leaves shell scrollback
                 // visually interleaved with the app's first frame.
                 self.reset_terminal();
+            }
+            b'=' => {
+                self.app_keypad = true;
+            }
+            b'>' => {
+                self.app_keypad = false;
             }
             b'D' => {
                 // IND — Index. Move cursor down one line; if at the

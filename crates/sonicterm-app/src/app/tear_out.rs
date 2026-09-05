@@ -797,6 +797,7 @@ impl App {
             select_anchor: (0, 0),
             copy_mode: None,
             modifiers: ModifiersState::empty(),
+            pty_pressed_keys: std::collections::HashMap::new(),
             last_render: Instant::now(),
             hover_link: false,
             pressed_tab: None,

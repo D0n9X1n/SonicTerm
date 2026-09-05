@@ -211,6 +211,25 @@ fn dec_private_mode_1_toggles_application_cursor_keys() {
     assert!(!parser.application_cursor_keys());
 }
 
+/// Every host-visible keyboard mode must survive compact snapshot round-tripping.
+#[test]
+fn keyboard_modes_track_dec_ansi_keypad_and_xterm_state() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+
+    parser.advance(b"\x1b[?1h\x1b[?67h\x1b=\x1b[20h\x1b[>4;2m");
+
+    let modes = parser.keyboard_modes();
+    assert!(modes.application_cursor_keys());
+    assert!(modes.application_keypad());
+    assert!(modes.backarrow_key());
+    assert!(modes.newline());
+    assert_eq!(modes.modify_other_keys(), 2);
+    assert_eq!(super::KeyboardModes::from_bits(modes.bits()), modes);
+
+    parser.advance(b"\x1b[?1l\x1b[?67l\x1b>\x1b[20l\x1b[>4;0m");
+    assert_eq!(parser.keyboard_modes(), super::KeyboardModes::default());
+}
+
 /// Each DECSET tracking code selects its distinct current mouse-reporting mode.
 #[test]
 fn decset_selects_each_mouse_tracking_mode() {
@@ -281,6 +300,17 @@ fn ris_resets_app_cursor_keys_and_mouse_tracking() {
 
     assert!(!parser.application_cursor_keys());
     assert_eq!(parser.mouse_tracking(), MouseTracking::Off);
+}
+
+/// RIS restores all keyboard-affecting terminal modes, not only DECCKM.
+#[test]
+fn ris_resets_every_keyboard_mode() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    parser.advance(b"\x1b[?1h\x1b[?67h\x1b=\x1b[20h\x1b[>4;2m");
+
+    parser.advance(b"\x1bc");
+
+    assert_eq!(parser.keyboard_modes(), super::KeyboardModes::default());
 }
 
 /// SGR report encoding can toggle independently without selecting a tracking mode.
@@ -946,6 +976,36 @@ fn kitty_keyboard_stack_depth_is_capped() {
         parser.advance(b"\x1b[>1u");
     }
     assert_eq!(parser.kitty_keyboard_flags(), 1);
+}
+
+/// A full Kitty stack evicts its oldest entry so the newest push still becomes active.
+#[test]
+fn kitty_keyboard_full_stack_evicts_oldest_entry() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    for flags in 1..=32 {
+        parser.advance(format!("\x1b[>{flags}u").as_bytes());
+    }
+
+    parser.advance(b"\x1b[>99u\x1b[<31u");
+
+    assert_eq!(parser.kitty_keyboard_flags(), 2);
+}
+
+/// Main and alternate screens retain independent Kitty keyboard stacks.
+#[test]
+fn kitty_keyboard_flags_are_screen_local() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    parser.advance(b"\x1b[>1u");
+
+    parser.advance(b"\x1b[?1049h");
+    assert_eq!(parser.kitty_keyboard_flags(), 0);
+    parser.advance(b"\x1b[>2u");
+    assert_eq!(parser.kitty_keyboard_flags(), 2);
+
+    parser.advance(b"\x1b[?1049l");
+    assert_eq!(parser.kitty_keyboard_flags(), 1);
+    parser.advance(b"\x1b[?1049h");
+    assert_eq!(parser.kitty_keyboard_flags(), 2);
 }
 
 #[test]

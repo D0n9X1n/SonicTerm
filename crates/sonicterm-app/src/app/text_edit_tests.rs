@@ -62,3 +62,44 @@ fn logical_keys_and_modifier_state_use_the_same_exact_mapping() {
         None,
     );
 }
+
+/// App text fields accept produced glyphs but never type ordinary command chords.
+#[test]
+fn printable_text_policy_distinguishes_altgr_from_command_modifiers() {
+    let q = Key::Character("@".into());
+    let unmodified_q = Key::Character("q".into());
+    assert_eq!(
+        printable_text_for_parts(
+            &q,
+            &unmodified_q,
+            Some("@"),
+            ModifiersState::CONTROL | ModifiersState::ALT,
+        ),
+        Some("@"),
+    );
+
+    let x = Key::Character("x".into());
+    let unmodified_x = Key::Character("x".into());
+    assert_eq!(
+        printable_text_for_parts(
+            &x,
+            &unmodified_x,
+            Some("x"),
+            ModifiersState::CONTROL | ModifiersState::ALT,
+        ),
+        None,
+    );
+    assert_eq!(
+        printable_text_for_parts(&x, &unmodified_x, Some("x"), ModifiersState::SUPER,),
+        None,
+    );
+    assert_eq!(
+        printable_text_for_parts(
+            &Key::Character("å".into()),
+            &Key::Character("a".into()),
+            Some("å"),
+            ModifiersState::ALT,
+        ),
+        Some("å"),
+    );
+}
