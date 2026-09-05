@@ -185,7 +185,6 @@ impl App {
     /// keyboard and IME handling against that child's own tabs and panes.
     // Ordering: `pty_burst_gen` Acquire pairs with the VT thread's Release so a
     // burst is seen; `cursor_visible`, `kitty_flags`, `keyboard_modes` Relaxed.
-    // Redraw-target and parser guards are acquired separately and never nested.
     pub(super) fn handle_child_window_event(
         &mut self,
         el: &ActiveEventLoop,
