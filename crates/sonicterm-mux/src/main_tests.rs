@@ -470,13 +470,14 @@ fn real_named_pipe_timeout_bounds_a_silent_peer() {
     use interprocess::local_socket::{GenericNamespaced, ListenerOptions};
 
     let name_text = format!("sonicterm-mux-kill-timeout-{}", std::process::id());
-    let name = name_text.to_ns_name::<GenericNamespaced>().unwrap();
+    let name = name_text.as_str().to_ns_name::<GenericNamespaced>().unwrap();
     let listener = ListenerOptions::new().name(name).create_sync().unwrap();
     let server = std::thread::spawn(move || {
         let _silent_peer = listener.accept().unwrap();
         std::thread::sleep(Duration::from_secs(1));
     });
-    let stream = Stream::connect(name_text.to_ns_name::<GenericNamespaced>().unwrap()).unwrap();
+    let stream =
+        Stream::connect(name_text.as_str().to_ns_name::<GenericNamespaced>().unwrap()).unwrap();
     let mut reader = DeadlineStream { stream, deadline: None };
     reader.set_kill_response_timeout(Duration::from_millis(20)).unwrap();
     let started = Instant::now();
