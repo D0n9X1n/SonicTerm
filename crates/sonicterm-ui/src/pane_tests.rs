@@ -90,6 +90,73 @@ fn focus_neighbor_follows_spatial_adjacency() {
     assert_eq!(tree.focus_neighbor(99, Direction::Left), None);
 }
 
+#[test]
+fn successful_split_exits_zoom_for_every_direction_and_tree_depth() {
+    // A newly focused leaf must be visible immediately, including when its parent is nested.
+    let outer = Rect::new(10.0, 20.0, 800.0, 240.0);
+    for nested in [false, true] {
+        for direction in [Direction::Left, Direction::Right, Direction::Up, Direction::Down] {
+            let mut tree = if nested { nested_tree() } else { PaneTree::leaf(1) };
+            let focus = if nested { 3 } else { 1 };
+            let mut expected = tree.clone();
+            assert!(expected.split(focus, direction, 4));
+            assert!(tree.toggle_zoom(focus));
+            assert_eq!(tree.layout(outer), [(focus, outer)]);
+
+            assert!(tree.split(focus, direction, 4));
+
+            assert_eq!(tree.zoomed_pane_id(), None, "nested={nested}, {direction:?}");
+            assert_eq!(tree.leaves(), expected.leaves());
+            assert_eq!(tree.layout(outer), expected.layout(outer));
+            assert_eq!(tree.layout(outer).iter().filter(|(id, _)| *id == 4).count(), 1);
+            assert!(!tree.splitter_rects(outer, 1.0).is_empty());
+        }
+    }
+}
+
+#[test]
+fn refused_split_preserves_zoom_and_geometry() {
+    // An unknown focus must not unzoom or resize the existing tree when insertion is refused.
+    let outer = Rect::new(0.0, 0.0, 800.0, 240.0);
+    for nested in [false, true] {
+        for direction in [Direction::Left, Direction::Right, Direction::Up, Direction::Down] {
+            let mut tree = if nested { nested_tree() } else { PaneTree::leaf(1) };
+            let focus = if nested { 3 } else { 1 };
+            let leaves = tree.leaves();
+            let unzoomed_layout = tree.layout(outer);
+            assert!(tree.toggle_zoom(focus));
+
+            assert!(!tree.split(99, direction, 4));
+
+            assert_eq!(tree.zoomed_pane_id(), Some(focus));
+            assert_eq!(tree.leaves(), leaves);
+            assert_eq!(tree.layout(outer), [(focus, outer)]);
+            assert!(tree.toggle_zoom(focus));
+            assert_eq!(tree.layout(outer), unzoomed_layout);
+        }
+    }
+}
+
+#[test]
+fn split_after_zoom_preserves_subsequent_close_and_resize_layout() {
+    // Collapsing the new split must not restore the zoom that was cleared by successful insertion.
+    let outer = Rect::new(0.0, 0.0, 800.0, 240.0);
+    let mut tree = nested_tree();
+    let mut expected = tree.clone();
+    assert!(tree.toggle_zoom(3));
+    assert!(tree.split(3, Direction::Right, 4));
+    assert!(expected.split(3, Direction::Right, 4));
+    assert!(tree.resize_split(4, Direction::Right, 0.1));
+    assert!(expected.resize_split(4, Direction::Right, 0.1));
+    assert_eq!(tree.layout(outer), expected.layout(outer));
+
+    assert!(tree.close(3));
+    assert!(expected.close(3));
+    assert_eq!(tree.zoomed_pane_id(), None);
+    assert_eq!(tree.leaves(), expected.leaves());
+    assert_eq!(tree.layout(outer), expected.layout(outer));
+}
+
 /// Rectangle membership is half-open so adjacent panes never both own one edge.
 #[test]
 fn rectangle_contains_uses_half_open_edges() {
