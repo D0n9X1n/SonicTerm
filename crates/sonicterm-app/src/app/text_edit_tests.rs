@@ -101,4 +101,19 @@ fn printable_text_policy_distinguishes_altgr_from_command_modifiers() {
         ),
         Some("å"),
     );
+
+    for unmodified in
+        [Key::Dead(Some('^')), Key::Unidentified(winit::keyboard::NativeKey::Unidentified)]
+    {
+        assert_eq!(
+            printable_text_for_parts(
+                &Key::Character("^".into()),
+                &unmodified,
+                Some("^"),
+                ModifiersState::ALT,
+            ),
+            None,
+            "{unmodified:?}",
+        );
+    }
 }

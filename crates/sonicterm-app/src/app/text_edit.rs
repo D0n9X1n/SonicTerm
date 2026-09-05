@@ -86,8 +86,8 @@ fn printable_text_for_parts<'a>(
         Key::Character(text) => text.chars().next(),
         Key::Named(NamedKey::Space) => Some(' '),
         _ => None,
-    };
-    (produced != unmodified).then_some(text)
+    }?;
+    (produced != Some(unmodified)).then_some(text)
 }
 
 pub(super) fn core_text_edit_for_chord(chord: &str) -> Option<TextEdit> {
