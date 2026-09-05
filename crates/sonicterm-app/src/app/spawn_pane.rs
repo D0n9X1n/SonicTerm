@@ -155,7 +155,7 @@ pub(super) struct PaneVtHandles {
     command_events: Arc<Mutex<Vec<super::PaneCommandEvent>>>,
     cursor_visible: Arc<AtomicBool>,
     kitty_flags: Arc<AtomicU8>,
-    app_cursor_keys: Arc<AtomicBool>,
+    keyboard_modes: Arc<AtomicU8>,
     inline_images: Arc<Mutex<Vec<InlineImage>>>,
     inline_media_charge: super::media::SharedInlineMediaCharge,
 }
@@ -169,7 +169,7 @@ impl PaneVtHandles {
             command_events: pane.command_events.clone(),
             cursor_visible: pane.cursor_visible.clone(),
             kitty_flags: pane.kitty_flags.clone(),
-            app_cursor_keys: pane.app_cursor_keys.clone(),
+            keyboard_modes: pane.keyboard_modes.clone(),
             inline_images: pane.inline_images.clone(),
             inline_media_charge: pane.inline_media_charge.clone(),
         }
@@ -353,7 +353,7 @@ pub(super) fn process_pane_vt_batch<Bytes: AsRef<[u8]>>(
 }
 
 // Lock order: inline_images -> inline_media_charge; parser releases before either, and command_events locks after both.
-// Ordering: cursor_visible, kitty_flags, and app_cursor_keys use Ordering::Relaxed; each publishes only its independent parser value.
+// Ordering: cursor_visible, kitty_flags, and keyboard_modes use Ordering::Relaxed; each publishes only its independent parser value.
 fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now>(
     handles: &PaneVtHandles,
     bytes: Bytes,
@@ -371,7 +371,7 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now>(
         let mut parser = handles.parser.lock();
         let events = parser.advance(bytes.as_ref());
         handles.kitty_flags.store(parser.kitty_keyboard_flags(), Ordering::Relaxed);
-        handles.app_cursor_keys.store(parser.application_cursor_keys(), Ordering::Relaxed);
+        handles.keyboard_modes.store(parser.keyboard_modes().bits(), Ordering::Relaxed);
         events
     };
     drop(bytes);
