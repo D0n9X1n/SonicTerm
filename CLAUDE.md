@@ -128,6 +128,36 @@ its Windows-only tests successfully; green macOS/Ubuntu results, local gates, or
 review approval cannot substitute for that result. After merge, verify `main` CI
 and Wiki publication before starting the next serialized PR.
 
+**Keep every wait off the main agent.** For each lifecycle that must wait or
+monitor — a long local gate, pull-request CI, post-merge `main` CI plus Wiki
+publication, or a release workflow — start one dedicated watcher subagent, not
+one subagent per job. Give it an immutable handoff: repository/worktree path,
+expected commit SHA, PR number or run ID, exact required jobs or commands,
+timeout, and success criteria. The watcher owns that lifecycle until terminal
+`SUCCESS`, `FAILURE`, `BLOCKED`, or `STALE`, and reports the expected and observed
+SHA, run IDs, every required result, and actionable failure evidence. It must
+return immediately when the head changes or a required job fails, is cancelled,
+or is unexpectedly skipped; it never follows a replacement run or accepts a
+green result by branch name alone.
+
+While the watcher runs, the main agent advances only a non-overlapping item in a
+separate worktree based on the current default branch; it never edits the tree
+being tested. Watchers do not push, merge, tag, publish, or clean shared state.
+Run at most one full Cargo gate or build on the host at once, never share a
+`CARGO_TARGET_DIR` between concurrent worktrees, and use heavy-gate time for
+research, editing, or lightweight checks. A watcher failure, blocker, or stale
+SHA immediately returns the main agent to the current lifecycle.
+
+Concurrency does not relax publication order: do not merge before the current
+PR's exact-head checks pass, and do not open the next PR before the current PR is
+merged and its exact merge-SHA `main` CI and Wiki publication are verified. Then
+update the next worktree onto the new default-branch tip and rerun affected
+validation before publication. Once those gates pass, fetch and prune the
+default remote, then clean local state against its symbolic default branch:
+remove only clean, unlocked worktrees whose HEAD is merged there, and delete
+only merged local branches that are not attached to a preserved worktree. Never
+force removal or discard dirty, unmerged, or locked worktrees or any stash.
+
 The second clippy line is not a duplicate. `--workspace --all-targets` does
 not imply `--all-features`, and `ssh` is off by default, so the SSH backend is
 compiled by no other command in this list.
