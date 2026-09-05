@@ -523,7 +523,7 @@ jobs:
       GIT_CONFIG_VALUE_0: ${{ github.workspace }}
     steps:
       - name: Install runner and native dependencies
-        timeout-minutes: 10
+        timeout-minutes: 20
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
@@ -601,7 +601,7 @@ jobs:
       GIT_CONFIG_VALUE_0: ${{ github.workspace }}
     steps:
       - name: Install runner, package, and runtime dependencies
-        timeout-minutes: 10
+        timeout-minutes: 20
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |

@@ -169,6 +169,9 @@ format, Clippy, Rustdoc, the one-pass workspace test gate,
 authored-comment, exit, Rust-version, window-owner, workflow supply-chain,
 Linux-package, release-asset, release-note, and wiki-publisher checks.
 
+All three Ubuntu dependency-install steps in CI and Release allow 20 bounded
+minutes so a slow cold Jammy mirror can finish without weakening the CI shards'
+fail-closed result or the release provenance boundary.
 The independent package/runtime shard installs Mesa Vulkan/lavapipe, Xvfb,
 Weston, and Debian packaging tools, then:
 
@@ -526,7 +529,10 @@ Rustdoc、一次性 workspace 测试、第一方注释、exit、
 Rust 版本、window-owner、工作流供应链、Linux package、release-asset、release-note 与 Wiki
 publisher gate。
 
-独立的 package/runtime shard 安装 Mesa Vulkan/lavapipe、Xvfb、Weston 和 Debian 打包工具，随后：
+CI 与 Release 中的三个 Ubuntu 依赖安装步骤都使用有界的 20 分钟上限，使较慢的冷 Jammy
+mirror 能完成，且不会削弱 CI shard 的 fail-closed 结果或 release provenance 边界。独立的
+package/runtime shard 安装 Mesa Vulkan/lavapipe、
+Xvfb、Weston 和 Debian 打包工具，随后：
 
 1. 以 release 模式构建 `sonicterm-linux`；
 2. 从 Cargo metadata 推导唯一 workspace 版本；

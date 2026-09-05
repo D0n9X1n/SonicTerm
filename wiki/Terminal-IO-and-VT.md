@@ -231,11 +231,14 @@ keyboard-interactive authentication are absent. Because the GUI does not create
 an `SshHandle`, this is not a shipping remote-session feature.
 
 `sonicterm-mux` currently implements length-prefixed bincode messages for list,
-spawn, attach, detach, input, resize, and kill. A session has a PTY, a 256 KiB
-raw-byte replay ring, and a bounded subscriber queue that drops its oldest event
-under backpressure. It forwards bytes without server-side VT parsing or
-grid-aware scrollback. No GUI or platform crate depends on it, and release
-workflows do not package it.
+spawn, attach, detach, input, resize, kill, and explicit replay. A session has a
+PTY, a 256 KiB raw-byte replay ring, and a bounded subscriber queue. The first
+output gap requires `ResyncRequired`; later live bytes remain suppressed until the
+client resets its parser and applies one replay snapshot. Snapshot and live-output
+payloads share an 8 KiB per-message ceiling; ordered `start`/`complete` fragments
+reconstruct the snapshot before live delivery resumes. It forwards bytes without
+server-side VT parsing or grid-aware scrollback. No GUI or platform crate depends
+on it, and release workflows do not package it.
 
 ### Code locations
 
@@ -438,9 +441,12 @@ mouse ownership 与 OSC 52 实际配置见 [用法](Usage)。
 认证。GUI 不创建 `SshHandle`，因此这不是已发布的远程会话功能。
 
 `sonicterm-mux` 当前使用带长度前缀的 bincode 消息，支持 `list`、`spawn`、`attach`、
-`detach`、`input`、`resize`、`kill`。每个会话拥有一个 PTY、256 KiB 原始字节回放环和有界
-订阅队列；发生背压时队列丢弃最早事件。它只转发字节，不在服务端解析 VT，也不提供
-网格感知回滚。GUI 和平台 crate 都不依赖它，发布流程也不打包。
+`detach`、`input`、`resize`、`kill` 和显式 replay。每个会话拥有一个 PTY、256 KiB 原始
+字节回放环和有界订阅队列。第一个输出缺口必须产生 `ResyncRequired`；后续实时字节保持暂停，
+直到客户端重置 parser 并应用一个 replay snapshot。Snapshot 与实时输出负载共用每条消息
+8 KiB 的上限；有序的 `start`/`complete` fragment 会先重建 snapshot，再恢复实时传递。
+它只转发字节，不在服务端解析 VT，也不提供网格感知回滚。GUI 和平台 crate 都不依赖它，
+发布流程也不打包。
 
 ### 代码位置
 

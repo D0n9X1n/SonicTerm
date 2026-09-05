@@ -488,6 +488,26 @@ class RepositoryTests(unittest.TestCase):
             with self.subTest(dependency=dependency):
                 self.assertIn(dependency, core)
 
+    def test_ubuntu_dependency_installs_allow_slow_cold_mirrors(self):
+        installs = (
+            ("ci.yml", "linux-core", "Install runner and native dependencies"),
+            ("ci.yml", "linux-packages", "Install runner, package, and runtime dependencies"),
+            ("release.yml", "package-linux", "Install runner, package, and runtime dependencies"),
+        )
+        for workflow_name, job_name, step_name in installs:
+            with self.subTest(workflow=workflow_name, job=job_name):
+                text = (_HERE.parent / ".github" / "workflows" / workflow_name).read_text(
+                    encoding="utf-8"
+                )
+                job = text.split(f"  {job_name}:\n", 1)[1]
+                job = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", job, maxsplit=1)[0]
+                pattern = rf"(?m)^      - name: {re.escape(step_name)}\n        timeout-minutes: (\d+)$"
+                self.assertEqual(
+                    re.findall(pattern, job),
+                    ["20"],
+                    f"{workflow_name}:{job_name} must leave cold Ubuntu mirrors enough bounded install time",
+                )
+
     def test_workspace_tests_cover_unit_and_integration_targets_once(self):
         script = (_HERE.parent / "scripts" / "check-workspace-crates.sh").read_text(
             encoding="utf-8"

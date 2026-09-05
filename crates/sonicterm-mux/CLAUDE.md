@@ -19,8 +19,10 @@ cargo build -p sonicterm-mux
 ## Guardrails
 - The daemon owns long-lived PTYs; clean up on signal, disconnect, and
   explicit shutdown.
-- Reattach must preserve terminal modes and alt-screen state, not only the
-  primary grid.
+- Reattach and stream-gap recovery must pause live bytes until the client resets
+  parser state and applies one bounded replay snapshot; its ordered fragments
+  share the live-output payload ceiling and end with an explicit completion bit.
+  Never resume across a silent raw-stream gap.
 - Avoid user-global socket collisions; namespace IPC paths by user/session.
 
 ## Cross-references

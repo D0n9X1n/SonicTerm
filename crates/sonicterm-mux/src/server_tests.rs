@@ -67,8 +67,8 @@ fn subscriber_sink_preserves_queued_control_when_full() {
     let (tx, rx) = bounded(1);
     let sink = SubscriberSink::new(tx, rx.clone());
 
-    sink.send_drop_oldest(ServerMsg::Exit { pane_id: 1 }).unwrap();
-    assert!(sink.send_drop_oldest(ServerMsg::Exit { pane_id: 2 }).is_err());
+    sink.send_control(ServerMsg::Exit { pane_id: 1 }).unwrap();
+    assert!(sink.send_control(ServerMsg::Exit { pane_id: 2 }).is_err());
 
     match rx.try_recv() {
         Ok(ServerMsg::Exit { pane_id }) => assert_eq!(pane_id, 1),
@@ -77,27 +77,299 @@ fn subscriber_sink_preserves_queued_control_when_full() {
     assert!(rx.try_recv().is_err(), "only one message should remain");
 }
 
+/// Saturation emits one gap marker, suppresses later bytes, and resumes only after replay.
 #[test]
-fn subscriber_sink_drops_new_output_when_full() {
-    let (tx, rx) = bounded(1);
-    let sink = SubscriberSink::new(tx, rx.clone());
-    sink.send_drop_oldest(ServerMsg::Exit { pane_id: 1 }).unwrap();
+fn subscriber_gap_requires_snapshot_before_live_output_resumes() {
+    for split in [vec![0xe2], b"\x1b[".to_vec(), b"\x1b]0;title".to_vec()] {
+        let (tx, rx) = bounded(3);
+        let subscriber = Mutex::new(Some(SubscriberSink::new(tx, rx.clone())));
+        let replay = Mutex::new(VecDeque::new());
 
-    sink.send_drop_oldest(ServerMsg::Output { pane_id: 1, bytes: vec![1, 2, 3] }).unwrap();
+        forward_pane_output(b"prefix".as_slice(), &replay, &subscriber, 1);
+        forward_pane_output(&split, &replay, &subscriber, 1);
+        forward_pane_output(b"post-gap".as_slice(), &replay, &subscriber, 1);
 
-    assert!(matches!(rx.try_recv(), Ok(ServerMsg::Exit { pane_id: 1 })));
+        assert!(matches!(
+            rx.recv(),
+            Ok(ServerMsg::Output { pane_id: 1, bytes }) if bytes == b"prefix"
+        ));
+        assert!(matches!(rx.recv(), Ok(ServerMsg::ResyncRequired { pane_id: 1 })));
+        assert!(rx.try_recv().is_err(), "post-gap output must stay suppressed");
+
+        let requester = subscriber.lock().as_ref().unwrap().clone();
+        send_replay_snapshot(&replay, &subscriber, 1, &requester).unwrap();
+        assert!(matches!(
+            rx.recv(),
+            Ok(ServerMsg::ReplaySnapshot {
+                pane_id: 1,
+                start: true,
+                complete: true,
+                bytes,
+            }) if bytes == [b"prefix".as_slice(), split.as_slice(), b"post-gap"].concat()
+        ));
+
+        forward_pane_output(b"live".as_slice(), &replay, &subscriber, 1);
+        assert!(matches!(
+            rx.recv(),
+            Ok(ServerMsg::Output { pane_id: 1, bytes }) if bytes == b"live"
+        ));
+    }
 }
 
+/// Replay payloads obey the same per-message ceiling as live output.
 #[test]
-fn subscriber_sink_reserves_capacity_for_exit() {
-    let (tx, rx) = bounded(2);
+fn replay_snapshot_payload_respects_message_frame_ceiling() {
+    const TEST_CAPACITY: usize = 4;
+    let (tx, rx) = bounded(TEST_CAPACITY);
     let sink = SubscriberSink::new(tx, rx.clone());
-    sink.send_drop_oldest(ServerMsg::Output { pane_id: 1, bytes: vec![1] }).unwrap();
-    sink.send_drop_oldest(ServerMsg::Output { pane_id: 1, bytes: vec![2] }).unwrap();
 
-    sink.send_drop_oldest(ServerMsg::Exit { pane_id: 1 }).unwrap();
+    for _ in 0..=TEST_CAPACITY {
+        sink.pause_for_replay(1);
+        if sink.send_snapshot(1, vec![b'x'; REPLAY_CAP]).is_err() {
+            break;
+        }
+    }
+
+    let queued = rx.try_iter().collect::<Vec<_>>();
+    let payload_bytes = queued
+        .iter()
+        .map(|message| match message {
+            ServerMsg::ReplaySnapshot { bytes, .. } => {
+                assert!(bytes.len() <= SUBSCRIBER_OUTPUT_FRAME_BYTES);
+                bytes.len()
+            }
+            _ => 0,
+        })
+        .sum::<usize>();
+    assert!(
+        payload_bytes <= TEST_CAPACITY * SUBSCRIBER_OUTPUT_FRAME_BYTES,
+        "queued replay payload {payload_bytes} exceeded the mailbox ceiling"
+    );
+}
+
+/// A multi-fragment replay keeps live delivery paused until its completion fragment queues.
+#[test]
+fn replay_pause_survives_every_nonfinal_snapshot_fragment() {
+    let (tx, rx) = bounded(1);
+    let sink = SubscriberSink::new(tx, rx.clone());
+    sink.pause_for_replay(1);
+    let sender = sink.clone();
+    let (done_tx, done_rx) = bounded(1);
+    let snapshot = vec![b'x'; SUBSCRIBER_OUTPUT_FRAME_BYTES + 1];
+    let send_thread = std::thread::spawn(move || {
+        done_tx.send(sender.send_snapshot(1, snapshot)).unwrap();
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while rx.is_empty() && Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert_eq!(rx.len(), 1, "the first replay fragment must queue");
+    let observation_deadline = Instant::now() + Duration::from_millis(25);
+    while Instant::now() < observation_deadline {
+        assert!(
+            sink.shared.replay_pauses.lock().contains_key(&1),
+            "the replay pause must survive until the completion fragment queues"
+        );
+        std::thread::yield_now();
+    }
+    assert!(done_rx.try_recv().is_err(), "the completion fragment must still be pending");
+
+    assert!(matches!(
+        rx.recv(),
+        Ok(ServerMsg::ReplaySnapshot {
+            pane_id: 1,
+            start: true,
+            complete: false,
+            bytes,
+        }) if bytes.len() == SUBSCRIBER_OUTPUT_FRAME_BYTES
+    ));
+    done_rx.recv_timeout(Duration::from_secs(1)).expect("snapshot sender finished").unwrap();
+    send_thread.join().unwrap();
+    assert!(matches!(
+        rx.recv(),
+        Ok(ServerMsg::ReplaySnapshot {
+            pane_id: 1,
+            start: false,
+            complete: true,
+            bytes,
+        }) if bytes == vec![b'x']
+    ));
+    assert!(!sink.shared.replay_pauses.lock().contains_key(&1));
+}
+
+/// Full-ring replay fragments reconstruct one atomic snapshot with one completion marker.
+#[test]
+fn replay_snapshot_fragments_reconstruct_the_bounded_ring() {
+    let snapshot = (0..REPLAY_CAP).map(|index| index as u8).collect::<Vec<_>>();
+    let fragment_count = REPLAY_CAP.div_ceil(SUBSCRIBER_OUTPUT_FRAME_BYTES);
+    let (tx, rx) = bounded(fragment_count);
+    let sink = SubscriberSink::new(tx, rx.clone());
+    sink.pause_for_replay(1);
+
+    sink.send_snapshot(1, snapshot.clone()).unwrap();
+
+    let fragments = rx.try_iter().collect::<Vec<_>>();
+    assert_eq!(fragments.len(), fragment_count);
+    let mut reconstructed = Vec::new();
+    for (index, message) in fragments.into_iter().enumerate() {
+        match message {
+            ServerMsg::ReplaySnapshot { pane_id, start, complete, bytes } => {
+                assert_eq!(pane_id, 1);
+                assert_eq!(start, index == 0);
+                assert_eq!(complete, index + 1 == fragment_count);
+                assert!(bytes.len() <= SUBSCRIBER_OUTPUT_FRAME_BYTES);
+                reconstructed.extend_from_slice(&bytes);
+            }
+            other => panic!("expected replay fragment, got {other:?}"),
+        }
+    }
+    assert_eq!(reconstructed, snapshot);
+}
+
+/// Replay releases daemon-wide session state before waiting on pane-local snapshot locks.
+#[cfg(any(unix, windows))]
+#[test]
+fn replay_does_not_hold_sessions_while_waiting_on_the_subscriber() {
+    #[cfg(unix)]
+    let command = "/bin/sh";
+    #[cfg(windows)]
+    let command = "cmd.exe";
+
+    let state = ServerState::new();
+    let pending = state.spawn_paused(command, 80, 24).expect("spawn paused pane");
+    let pane_id = pending.pane_id;
+    let (tx, rx) = bounded(4);
+    let sink = SubscriberSink::new(tx, rx.clone());
+    state.attach(pending.session_id, sink.clone()).expect("attach");
+    let (replay, subscriber) = {
+        let sessions = state.sessions.lock();
+        let pane = find_pane(&sessions, pane_id).unwrap();
+        (Arc::clone(&pane.replay), Arc::clone(&pane.subscriber))
+    };
+    let subscriber_guard = subscriber.lock();
+    let state_for_replay = Arc::clone(&state);
+    let (started_tx, started_rx) = bounded(1);
+    let replay_thread = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        state_for_replay.replay(pane_id, &sink)
+    });
+    started_rx.recv().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while replay.try_lock().is_some() && Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert!(replay.try_lock().is_none(), "replay never reached the pane-local lock boundary");
+
+    assert!(state.sessions.try_lock().is_some(), "replay retained the global sessions lock");
+
+    drop(subscriber_guard);
+    replay_thread.join().unwrap().unwrap();
+}
+
+/// Attach-time pause suppresses output until the initial snapshot is queued.
+#[test]
+fn initial_replay_pause_blocks_live_output() {
+    let (tx, rx) = bounded(4);
+    let sink = SubscriberSink::new(tx, rx.clone());
+    sink.pause_for_replay(1);
+
+    assert_eq!(sink.send_output(1, b"before-snapshot"), OutputSendResult::Lagged);
+    assert!(rx.try_recv().is_err());
+    sink.send_snapshot(1, b"snapshot".to_vec()).unwrap();
+    assert!(matches!(
+        rx.recv(),
+        Ok(ServerMsg::ReplaySnapshot {
+            pane_id: 1,
+            start: true,
+            complete: true,
+            bytes,
+        }) if bytes == b"snapshot"
+    ));
+    assert_eq!(sink.send_output(1, b"after-snapshot"), OutputSendResult::Queued);
+}
+
+/// A replaced client cannot resume the active subscriber's paused stream.
+#[test]
+fn replay_rejects_a_replaced_subscriber() {
+    let (old_tx, old_rx) = bounded(4);
+    let old = SubscriberSink::new(old_tx, old_rx);
+    let (new_tx, new_rx) = bounded(4);
+    let new = SubscriberSink::new(new_tx, new_rx.clone());
+    new.pause_for_replay(1);
+    let subscriber = Mutex::new(Some(new));
+    let replay = Mutex::new(VecDeque::from(b"snapshot".to_vec()));
+
+    let error = send_replay_snapshot(&replay, &subscriber, 1, &old).unwrap_err();
+
+    assert!(error.to_string().contains("not attached to this client"));
+    assert!(new_rx.try_recv().is_err());
+}
+
+/// Disconnecting an old client cannot clear a replacement attachment.
+#[test]
+fn stale_subscriber_detach_preserves_the_replacement() {
+    let (old_tx, old_rx) = bounded(4);
+    let old = SubscriberSink::new(old_tx, old_rx);
+    let (new_tx, new_rx) = bounded(4);
+    let new = SubscriberSink::new(new_tx, new_rx);
+    let state = ServerState::new();
+    *state.attached.lock() = Some(Attachment { session_id: 7, sink: new.clone() });
+
+    state.detach_subscriber(&old);
+
+    assert!(state
+        .attached
+        .lock()
+        .as_ref()
+        .is_some_and(|attachment| attachment.sink.same_subscriber(&new)));
+    state.detach_subscriber(&new);
+    assert!(state.attached.lock().is_none());
+}
+
+/// A transiently full mailbox keeps the subscriber paused until recovery can queue.
+#[test]
+fn full_mailbox_retries_resync_without_detaching_the_subscriber() {
+    let (tx, rx) = bounded(3);
+    let subscriber = Mutex::new(Some(SubscriberSink::new(tx, rx.clone())));
+    let replay = Mutex::new(VecDeque::new());
+
+    forward_pane_output(b"prefix".as_slice(), &replay, &subscriber, 1);
+    {
+        let guard = subscriber.lock();
+        let sink = guard.as_ref().unwrap();
+        sink.send_control(ServerMsg::Exit { pane_id: 2 }).unwrap();
+        sink.send_control(ServerMsg::Exit { pane_id: 3 }).unwrap();
+    }
+    forward_pane_output(b"gap".as_slice(), &replay, &subscriber, 1);
+
+    assert!(subscriber.lock().is_some(), "mailbox pressure is not a disconnect");
+    assert!(matches!(rx.recv(), Ok(ServerMsg::Output { bytes, .. }) if bytes == b"prefix"));
+    assert_eq!(
+        subscriber.lock().as_ref().unwrap().shared.retry_pending_recovery(),
+        OutputSendResult::Lagged,
+    );
+
+    forward_pane_output(b"suppressed".as_slice(), &replay, &subscriber, 1);
+
+    assert!(matches!(rx.recv(), Ok(ServerMsg::Exit { pane_id: 2 })));
+    assert!(matches!(rx.recv(), Ok(ServerMsg::Exit { pane_id: 3 })));
+    assert!(matches!(rx.recv(), Ok(ServerMsg::ResyncRequired { pane_id: 1 })));
+    assert!(rx.try_recv().is_err(), "paused output must not follow the recovery marker");
+}
+
+/// Output saturation preserves capacity for both recovery and terminal control.
+#[test]
+fn subscriber_sink_reserves_capacity_for_resync_and_exit() {
+    let (tx, rx) = bounded(3);
+    let sink = SubscriberSink::new(tx, rx.clone());
+    assert_eq!(sink.send_output(1, &[1]), OutputSendResult::Queued);
+    assert_eq!(sink.send_output(1, &[2]), OutputSendResult::Lagged);
+
+    sink.send_control(ServerMsg::Exit { pane_id: 1 }).unwrap();
 
     assert!(matches!(rx.try_recv(), Ok(ServerMsg::Output { bytes, .. }) if bytes == vec![1]));
+    assert!(matches!(rx.try_recv(), Ok(ServerMsg::ResyncRequired { pane_id: 1 })));
     assert!(matches!(rx.try_recv(), Ok(ServerMsg::Exit { pane_id: 1 })));
 }
 
@@ -106,13 +378,14 @@ fn subscriber_output_rechunks_to_the_documented_byte_ceiling() {
     let (tx, rx) = bounded(5);
     let sink = SubscriberSink::new(tx, rx.clone());
 
-    sink.send_drop_oldest(ServerMsg::Output { pane_id: 1, bytes: vec![b'x'; 64 * 1024] }).unwrap();
+    assert_eq!(sink.send_output(1, &vec![b'x'; 64 * 1024]), OutputSendResult::Lagged);
 
     let queued = rx.try_iter().collect::<Vec<_>>();
-    assert_eq!(queued.len(), 4, "one slot must remain reserved for control");
-    assert!(queued.iter().all(|message| {
+    assert_eq!(queued.len(), 4, "two slots are reserved before recovery is queued");
+    assert!(queued[..3].iter().all(|message| {
         matches!(message, ServerMsg::Output { bytes, .. } if bytes.len() <= SUBSCRIBER_OUTPUT_FRAME_BYTES)
     }));
+    assert!(matches!(queued[3], ServerMsg::ResyncRequired { pane_id: 1 }));
     let queued_bytes = queued
         .iter()
         .map(|message| match message {
@@ -120,66 +393,68 @@ fn subscriber_output_rechunks_to_the_documented_byte_ceiling() {
             _ => 0,
         })
         .sum::<usize>();
-    assert!(queued_bytes <= 4 * SUBSCRIBER_OUTPUT_FRAME_BYTES);
+    assert_eq!(queued_bytes, 3 * SUBSCRIBER_OUTPUT_FRAME_BYTES);
 }
 
 #[test]
 fn v120_queue_accounting_covers_messages_and_payload_bytes() {
     // The inventory records "message count and frame ceiling" as tracked
     // separately, with nothing accounting for their product. The product is in
-    // fact bounded, by a compile-time assert over the two constants plus a
-    // runtime path that respects both: output chunks to the frame size and
-    // stops one slot short of capacity.
+    // fact bounded, by a compile-time assert over the two constants plus runtime
+    // paths that keep live output and replay fragments within the frame size.
+    // Live output also stops two slots short of capacity.
     //
-    // Measured at saturation: 4095 messages and 33,546,240 bytes, which is the
-    // asserted ceiling exactly. So what needs proving is not that a bound
-    // exists but that the runtime reaches it without exceeding it, and that
-    // the reserved slot survives the flood.
+    // At saturation 4094 output messages consume 33,538,048 bytes, followed by
+    // one recovery marker; the final slot stays available for terminal control.
     let (tx, rx) = crossbeam_channel::bounded(CHANNEL_CAP);
     let sink = SubscriberSink::new(tx, rx.clone());
 
     let payload = vec![0u8; SUBSCRIBER_OUTPUT_FRAME_BYTES * 64];
     for _ in 0..200 {
-        sink.send_drop_oldest(ServerMsg::Output { pane_id: 1, bytes: payload.clone() })
-            .expect("saturating output drops rather than erroring");
+        assert_ne!(sink.send_output(1, &payload), OutputSendResult::Disconnected);
     }
 
     let queued = rx.len();
     assert_eq!(
         queued,
         CHANNEL_CAP - 1,
-        "output fills to one slot short of capacity, leaving room for control"
+        "output plus recovery marker leave one slot for terminal control"
     );
 
-    // A control message still lands while the queue is saturated with output.
-    // This is the property the reserved slot exists for: a lagging subscriber
-    // loses output, never the ability to be told it is lagging.
+    // A control message still lands after the recovery marker. Raw output loss
+    // never consumes the final slot needed to close or report an error.
     sink.send_control(ServerMsg::Error("lagging".into()))
         .expect("control delivery survives an output flood");
 
     let mut bytes = 0usize;
     let mut messages = 0usize;
+    let mut recovery = 0usize;
     while let Ok(msg) = rx.try_recv() {
         messages += 1;
-        if let ServerMsg::Output { bytes: b, .. } = msg {
-            assert!(
-                b.len() <= SUBSCRIBER_OUTPUT_FRAME_BYTES,
-                "every queued frame respects the per-frame ceiling"
-            );
-            bytes += b.len();
+        match msg {
+            ServerMsg::Output { bytes: chunk, .. } => {
+                assert!(
+                    chunk.len() <= SUBSCRIBER_OUTPUT_FRAME_BYTES,
+                    "every queued frame respects the per-frame ceiling"
+                );
+                bytes += chunk.len();
+            }
+            ServerMsg::ResyncRequired { pane_id: 1 } => recovery += 1,
+            _ => {}
         }
     }
 
-    let ceiling = (CHANNEL_CAP - 1) * SUBSCRIBER_OUTPUT_FRAME_BYTES;
+    let ceiling = (CHANNEL_CAP - 2) * SUBSCRIBER_OUTPUT_FRAME_BYTES;
     assert!(bytes <= ceiling, "queued payload {bytes} exceeded the composed ceiling {ceiling}");
-    assert_eq!(messages, CHANNEL_CAP, "the control message occupied the reserved slot");
+    assert_eq!(recovery, 1, "one recovery marker reports the entire gap");
+    assert_eq!(messages, CHANNEL_CAP, "the terminal control message occupied the final slot");
 }
 
 #[test]
 fn subscriber_control_returns_error_when_mailbox_stays_full() {
     let (tx, rx) = bounded(1);
     let sink = SubscriberSink::new(tx, rx.clone());
-    sink.send_drop_oldest(ServerMsg::Exit { pane_id: 1 }).unwrap();
+    sink.send_control(ServerMsg::Exit { pane_id: 1 }).unwrap();
     let (done_tx, done_rx) = bounded(1);
     let sender = std::thread::spawn(move || {
         done_tx.send(sink.send_control(ServerMsg::Exit { pane_id: 2 })).unwrap();
@@ -198,7 +473,7 @@ fn subscriber_control_returns_error_when_mailbox_stays_full() {
 fn request_reply_uses_the_bounded_control_deadline() {
     let (tx, rx) = bounded(1);
     let sink = SubscriberSink::new(tx, rx.clone());
-    sink.send_drop_oldest(ServerMsg::Exit { pane_id: 1 }).unwrap();
+    sink.send_control(ServerMsg::Exit { pane_id: 1 }).unwrap();
     let (done_tx, done_rx) = bounded(1);
     std::thread::spawn(move || {
         done_tx
@@ -344,7 +619,7 @@ fn v120_blocked_worker_owner_orders_cancel_join_and_drop() {
 fn pane_exit_releases_subscriber_when_control_mailbox_stays_full() {
     let (tx, rx) = bounded(1);
     let sink = SubscriberSink::new(tx, rx.clone());
-    sink.send_drop_oldest(ServerMsg::Exit { pane_id: 1 }).unwrap();
+    sink.send_control(ServerMsg::Exit { pane_id: 1 }).unwrap();
     let subscriber = Mutex::new(Some(sink));
 
     notify_subscriber_exit(&subscriber, 2);
@@ -487,9 +762,14 @@ fn shell_output_flows_through_pty_seam_to_subscriber() {
     // Install a subscriber before driving input so live output is forwarded.
     let (tx, rx) = bounded(CHANNEL_CAP);
     let sink = SubscriberSink::new(tx, rx.clone());
-    let panes = state.attach(sid, sink).expect("attach");
+    let panes = state.attach(sid, sink.clone()).expect("attach");
     assert_eq!(panes.len(), 1);
     assert_eq!(panes[0].id, pane_id);
+    state.replay(pane_id, &sink).expect("initial replay");
+    assert!(matches!(
+        rx.recv_timeout(Duration::from_secs(1)),
+        Ok(ServerMsg::ReplaySnapshot { pane_id: actual, .. }) if actual == pane_id
+    ));
 
     // Drive the shell to emit the marker on its own line, then exit.
     state.input(pane_id, format!("printf '{MARKER}\\n'\n").into_bytes()).expect("input write");

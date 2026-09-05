@@ -351,6 +351,16 @@ non-socket paths, and removes only an unchanged stale socket owned by the curren
 user. Windows names the pipe with the current user SID and terminal-session ID,
 then applies a protected DACL granting access only to that user before pipe creation.
 
+Attach pauses each pane until the client resets its parser and requests a bounded
+`ReplaySnapshot`. One logical snapshot arrives as ordered fragments of at most
+8 KiB; `start` discards an incomplete prior attempt and `complete` ends the
+snapshot. Live output reserves separate recovery and control slots. The first
+dropped chunk requires one `ResyncRequired`; if control traffic filled the
+mailbox, the writer queues it as soon as one message drains. Later bytes remain
+suppressed until the complete snapshot fragment queues under the shared
+snapshot/live lock boundary. An old connection cannot replay a pane after a
+newer subscriber replaces it.
+
 **First-party dependencies:** `sonicterm-io`.
 
 **Read:** `src/{main,proto,frame,server}.rs`.
@@ -690,6 +700,13 @@ ConPTY 仍封装在 `sonicterm-io` 后。
 目录内，随后立即设置最终的 `0600` mode。启动时会拒绝仍存活、外部用户所有或非 socket
 的路径，只删除当前用户所有且复查后未改变的陈旧 socket。Windows pipe 名称包含当前用户
 SID 与终端会话 ID，并在创建 pipe 前应用只授权该用户的受保护 DACL。
+
+Attach 会暂停每个窗格，直到客户端重置 parser 并请求有界的 `ReplaySnapshot`。一个逻辑
+snapshot 会拆成不超过 8 KiB 的有序 fragment；`start` 会丢弃上一次未完成的尝试，`complete`
+会结束该 snapshot。实时输出为恢复标记和普通控制消息分别预留槽位。第一个丢失的 chunk 必须
+产生一条 `ResyncRequired`；若控制消息已填满 mailbox，writer 会在任一消息排出后立即将其
+入队。后续字节保持暂停，直到最后一个 snapshot fragment 在共享的 snapshot/实时输出锁边界内
+入队。新 subscriber 替换旧连接后，旧连接不能再请求该窗格的回放。
 
 **第一方依赖：** `sonicterm-io`。
 

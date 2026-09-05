@@ -22,6 +22,7 @@ fn every_client_message_round_trips() {
         ClientMsg::Spawn { cmd: "/bin/zsh".into(), cols: 120, rows: 40 },
         ClientMsg::Input { pane_id: 7, bytes: vec![0, 1, 255] },
         ClientMsg::Resize { pane_id: 7, cols: 80, rows: 24 },
+        ClientMsg::Replay { pane_id: 7 },
         ClientMsg::Kill { pane_id: 7 },
     ];
     for message in messages {
@@ -37,6 +38,13 @@ fn every_server_message_round_trips() {
         ServerMsg::AttachOk { session_id: 42, panes: vec![pane] },
         ServerMsg::Spawned { session_id: 42, pane_id: 7 },
         ServerMsg::Output { pane_id: 7, bytes: vec![0, 1, 255] },
+        ServerMsg::ResyncRequired { pane_id: 7 },
+        ServerMsg::ReplaySnapshot {
+            pane_id: 7,
+            start: true,
+            complete: true,
+            bytes: vec![0, 1, 255],
+        },
         ServerMsg::Exit { pane_id: 7 },
         ServerMsg::Error("bad request".into()),
     ];
