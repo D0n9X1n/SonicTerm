@@ -517,6 +517,19 @@ impl App {
 
 impl App {
     pub(super) fn split_active(&mut self, dir: Direction) {
+        let Some(ws) = self.main() else {
+            // When: `main` is absent, no destination exists for a new pane or PTY.
+            return;
+        };
+        let Some(tab) = ws.tab_states.get(ws.tabs.active_index()) else {
+            // When: `tab_states` has no active tab, refuse before creating a speculative PTY.
+            return;
+        };
+        if !tab.tree.leaves().contains(&tab.active_pane) || !ws.panes.contains_key(&tab.active_pane)
+        {
+            // When: `active_pane` is not a live leaf, preserve topology without spawning another shell.
+            return;
+        }
         let new_id = next_pane_id();
         let new_pane = self.spawn_pane(new_id, &super::pane_launch::PaneLaunch::default());
         let did_split = {

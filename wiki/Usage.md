@@ -64,6 +64,10 @@ Each pane owns a separate child PTY. A tab can contain a split-pane tree. You ca
 reorder tabs, drag them between SonicTerm windows, or drag a tab away to create
 a window. The live pane and PTY move with the tab; the shell does not restart.
 Closing a split closes its PTY. Closing the final pane closes the tab.
+Splitting a zoomed pane exits zoom, restores the split layout, and focuses the
+new pane in both main and torn-out windows. A refused split leaves zoom and
+focus unchanged; refusal in a live child window never redirects the split to
+the main window.
 
 Broadcast mode mirrors source-pane input to the other panes in the current tab
 or in all tabs. Receiver panes are marked. The source is excluded, so it does
@@ -361,6 +365,8 @@ Linux package 面向 x86_64，并保证最多需要 glibc 2.35 ABI。`.deb` 会�
 每个 pane 都有独立的子 PTY。一个标签页可以包含分屏树。标签页可以排序、在
 SonicTerm 窗口之间拖动，也可以拖出成为新窗口。现有 pane 与 PTY 会一起移动，
 shell 不会重启。关闭分屏会关闭对应 PTY；关闭最后一个 pane 会关闭标签页。
+对已放大的 pane 分屏会退出放大状态、恢复分屏布局并聚焦新 pane；主窗口与拖出的窗口行为一致。
+分屏被拒绝时，放大状态和焦点保持不变；存活子窗口中的拒绝不会把分屏操作转移到主窗口。
 
 广播模式会把源 pane 的输入复制到当前标签页或所有标签页中的其它 pane，并标记
 接收 pane。源 pane 不在接收集合中，因此不会收到两份输入。请谨慎使用，因为每个

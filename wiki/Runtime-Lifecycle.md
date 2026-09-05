@@ -193,10 +193,16 @@ spawn a PTY, starts worker threads on success, inserts one `Tab`, and inserts a
 single-leaf `PaneTree`. It immediately reconciles the new pane's `AppPane`
 owner.
 
-A main-window split creates another `PaneState`, replaces the active tree leaf
-with a horizontal or vertical split, focuses the new leaf, immediately
-reconciles its owner, resizes each visible grid and PTY to its own rectangle,
-flashes focus, and requests redraw.
+Before creating a pane or PTY, both split helpers verify that the active tab's
+focused id is a tree leaf with a live `PaneState`. A refused split preserves the
+tree, zoom, and focus. A live child consumes its split request even when refused,
+so neither action route can fall through to the main window. A main-window split
+then creates another `PaneState`,
+replaces the active tree leaf with a horizontal or vertical split, exits zoom on
+success, and focuses the new visible leaf. It immediately reconciles its owner,
+resizes each visible grid and PTY to its own rectangle, flashes focus, and
+requests redraw. The active pane therefore participates in the next visible
+layout and coherent parser-guard collection.
 
 Child-window tab and split helpers perform the same pane, tree, resize, and
 redraw work. They do not call owner reconciliation at the insertion site. Those
@@ -683,8 +689,12 @@ flowchart TD
 主窗口新标签页会分配窗格编号，创建解析器和网格，尝试启动 PTY，成功时启动工作线程，
 插入一个 `Tab`，并插入单叶 `PaneTree`。随后立即协调新窗格的 `AppPane` 所有者。
 
-主窗口分屏会创建另一个 `PaneState`，把活动树叶替换为横向或纵向分支，聚焦新树叶，立即
-协调其所有者，按各自矩形调整每个可见网格和 PTY，显示焦点闪烁，并请求重绘。
+两个分屏辅助函数都会在创建窗格或 PTY 前，确认活动标签页的焦点编号是具有存活 `PaneState`
+的树叶。拒绝分屏会保留树、放大状态和焦点。存活子窗口即使拒绝分屏，也会消费该请求，
+因此两条 action 路由都不会回退到主窗口。主窗口分屏随后创建另一个 `PaneState`，把活动树叶
+替换为横向或纵向分支，成功时退出放大状态，并聚焦新的可见树叶。它立即协调新窗格的所有者，
+按各自矩形调整每个可见网格和 PTY，显示焦点闪烁，并请求重绘。因此，活动窗格会参与下一次
+可见布局及一致的解析器 guard 收集。
 
 子窗口的新标签页和分屏辅助函数也会创建窗格、修改树、调整尺寸并重绘，但插入位置没有调用
 所有者协调。这些新窗格会暂时没有所有者，直到其它协调过程运行，通常是下一次 30 秒常驻

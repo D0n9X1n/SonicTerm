@@ -630,10 +630,7 @@ impl App {
                     let active_pos = guards
                         .iter()
                         .position(|(id, _, _)| *id == active_id)
-                        // PANIC: safe — `guards` is populated immediately
-                        // above in the same fn from the same `child.panes`
-                        // map keyed by `active_id`, so a guard with this id
-                        // must exist. Render hot path: no Result conversion.
+                        // PANIC: `active_id` must be a live visible leaf; `guards` covers the successfully locked layout.
                         .expect("active pane guard collected above");
                     invalidate_selection_for_content(
                         &mut child.selection,
@@ -2428,16 +2425,21 @@ impl App {
     /// Split the active pane of the given child window in `dir`. Returns
     /// `true` on success.
     pub(super) fn split_active_pane_in_child(&mut self, win_id: WindowId, dir: Direction) -> bool {
-        // Snapshot what we need to spawn a PTY before any mutable borrow
-        // of self.windows is taken — `spawn_pane_state_for_child`
-        // captures clones of (pty_burst_gen, window, cursor_visible) and
-        // we want the borrow checker happy when we re-borrow `child`
-        // below to install the new pane.
         let Some(child) = self.windows.get(&win_id) else {
             // When: `windows` no longer holds `win_id`, so the recorded child is
             // gone and the caller falls back to the main-window default.
             return false;
         };
+        let Some(tab) = child.tab_states.get(child.tabs.active_index()) else {
+            // When: `tab_states` has no active tab, refuse before creating a speculative PTY.
+            return false;
+        };
+        if !tab.tree.leaves().contains(&tab.active_pane)
+            || !child.panes.contains_key(&tab.active_pane)
+        {
+            // When: `active_pane` is not a live leaf, preserve topology without spawning another shell.
+            return false;
+        }
         let new_id = next_pane_id();
         let pane_state =
             if let (Some(renderer), Some(win)) = (child.renderer.as_ref(), child.window.as_ref()) {
@@ -3017,3 +3019,7 @@ fn child_copy_mode_selected_text(
     let out = plain_text_from_grid_range(grid, (start.0, start.1 as u64), (end.0, end.1 as u64));
     (!out.is_empty()).then_some(out)
 }
+
+#[cfg(test)]
+#[path = "child_window_tests.rs"]
+mod child_window_tests;

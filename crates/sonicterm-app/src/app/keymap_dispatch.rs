@@ -486,12 +486,9 @@ impl App {
                     dir: sonicterm_app_core::SplitDir::Right,
                 });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
-                    // When: frontmost_kind is FrontmostKind::Child(id), route the action to that child.
-                    if self.split_active_pane_in_child(id, Direction::Right) {
-                        // When: split_active_pane_in_child succeeds to the Right, the child consumed SplitRight.
-                        return true;
-                    }
-                    self.frontmost_window = None;
+                    // When: `frontmost_kind` resolves a live child, even a refused split must not reach main.
+                    self.split_active_pane_in_child(id, Direction::Right);
+                    return true;
                 }
                 self.split_active(Direction::Right);
             }
@@ -502,12 +499,9 @@ impl App {
                     dir: sonicterm_app_core::SplitDir::Down,
                 });
                 if let FrontmostKind::Child(id) = self.frontmost_kind() {
-                    // When: frontmost_kind is FrontmostKind::Child(id), route the action to that child.
-                    if self.split_active_pane_in_child(id, Direction::Down) {
-                        // When: split_active_pane_in_child succeeds Down, the child consumed SplitDown.
-                        return true;
-                    }
-                    self.frontmost_window = None;
+                    // When: `frontmost_kind` resolves a live child, even a refused split must not reach main.
+                    self.split_active_pane_in_child(id, Direction::Down);
+                    return true;
                 }
                 self.split_active(Direction::Down);
             }
@@ -953,11 +947,9 @@ impl App {
                     dir: sonicterm_app_core::SplitDir::Right,
                 });
                 if let FrontmostKind::Child(id) = source_kind {
-                    // When: source_kind is FrontmostKind::Child(id), route the action to that child.
-                    if self.split_active_pane_in_child(id, Direction::Right) {
-                        // When: split_active_pane_in_child succeeds to the Right, the child consumed SplitRight.
-                        return true;
-                    }
+                    // When: `source_kind` resolves a live child, even a refused split must not reach main.
+                    self.split_active_pane_in_child(id, Direction::Right);
+                    return true;
                 }
                 self.split_active(Direction::Right);
             }
@@ -968,11 +960,9 @@ impl App {
                     dir: sonicterm_app_core::SplitDir::Down,
                 });
                 if let FrontmostKind::Child(id) = source_kind {
-                    // When: source_kind is FrontmostKind::Child(id), route the action to that child.
-                    if self.split_active_pane_in_child(id, Direction::Down) {
-                        // When: split_active_pane_in_child succeeds Down, the child consumed SplitDown.
-                        return true;
-                    }
+                    // When: `source_kind` resolves a live child, even a refused split must not reach main.
+                    self.split_active_pane_in_child(id, Direction::Down);
+                    return true;
                 }
                 self.split_active(Direction::Down);
             }

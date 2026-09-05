@@ -1,7 +1,130 @@
 use super::*;
 
 use sonicterm_grid::grid::Grid;
+use sonicterm_ui::pane::Rect;
 use sonicterm_vt::vt::MediaProtocol;
+
+fn app_with_unavailable_shell() -> App {
+    // A child path below the test executable cannot launch a shell or read user shell profiles.
+    let shell = std::env::current_exe().expect("test executable").join("unavailable-shell");
+    let config = Config {
+        terminal: sonicterm_cfg::config::TerminalConfig {
+            shell: Some(shell.to_string_lossy().into_owned()),
+            ..Default::default()
+        },
+        ..Config::default()
+    };
+    App::new(Theme::default(), config, Keymap::default())
+}
+
+#[test]
+fn main_split_after_zoom_keeps_active_parser_visible_in_every_direction() {
+    // Exercise the real main split path without launching a user shell; native runs cover live PTYs.
+    for nested in [false, true] {
+        for direction in [Direction::Left, Direction::Right, Direction::Up, Direction::Down] {
+            let mut app = app_with_unavailable_shell();
+            app.__test_seed_tab("main");
+            let outer = Rect::new(0.0, 0.0, 800.0, 240.0);
+            assert!(app.__test_set_main_pane_viewport(outer, 10.0, 10.0));
+            app.resize_visible_panes();
+            if nested {
+                app.split_active(Direction::Right);
+            }
+            let window = app.main().expect("main window");
+            let tab = &window.tab_states[window.tabs.active_index()];
+            let previous_active = tab.active_pane;
+            let mut expected = tab.tree.clone();
+            app.toggle_active_pane_zoom();
+            assert_eq!(app.compute_active_pane_rects(), [(previous_active, outer)]);
+            for pane in app.main().expect("main window").panes.values() {
+                pane.parser.lock().grid_mut().clear_dirty();
+            }
+
+            app.split_active(direction);
+
+            let window = app.main().expect("main window");
+            let tab = &window.tab_states[window.tabs.active_index()];
+            let active = tab.active_pane;
+            assert_ne!(active, previous_active);
+            assert!(expected.split(previous_active, direction, active));
+            let rects = app.compute_active_pane_rects();
+            assert_eq!(rects, expected.layout(outer), "nested={nested}, {direction:?}");
+            assert_eq!(tab.tree.zoomed_pane_id(), None);
+            assert_eq!(rects.iter().filter(|(id, _)| *id == active).count(), 1);
+            let guards: Vec<_> = rects
+                .iter()
+                .map(|(id, rect)| {
+                    let pane = window.panes.get(id).expect("visible pane is live");
+                    (*id, pane.parser.try_lock().expect("coherent parser guard"), *rect)
+                })
+                .collect();
+            assert!(guards.iter().any(|(id, _, _)| *id == active));
+            for (id, parser, rect) in &guards {
+                let grid = parser.grid();
+                assert_eq!(
+                    (grid.cols, grid.rows),
+                    ((rect.w / 10.0) as u16, (rect.h / 10.0) as u16)
+                );
+                if *id == active || *id == previous_active {
+                    assert!(grid.dirty_rows().count() > 0, "split participants must redraw");
+                }
+            }
+            assert!(
+                window.panes[&active].pty.is_none(),
+                "shell failure does not refuse a valid split"
+            );
+        }
+    }
+}
+
+#[test]
+fn main_split_refusal_preserves_zoom_focus_and_live_panes() {
+    // Invalid focus and missing live state must leave the pre-existing zoomed topology unchanged.
+    for missing_live_pane in [false, true] {
+        let mut app = app_with_unavailable_shell();
+        let pane = app.__test_seed_tab("main");
+        let outer = Rect::new(0.0, 0.0, 800.0, 240.0);
+        assert!(app.__test_set_main_pane_viewport(outer, 10.0, 10.0));
+        app.toggle_active_pane_zoom();
+        let window = app.main_mut().expect("main window");
+        if missing_live_pane {
+            window.panes.remove(&pane);
+        } else {
+            window.tab_states[0].active_pane = u64::MAX;
+        }
+        let active = window.tab_states[0].active_pane;
+        let mut panes_before: Vec<_> = window.panes.keys().copied().collect();
+        panes_before.sort_unstable();
+        let layout_before = window.tab_states[0].tree.layout(outer);
+
+        app.split_active(Direction::Right);
+
+        let window = app.main().expect("main window");
+        let tab = &window.tab_states[0];
+        let mut panes_after: Vec<_> = window.panes.keys().copied().collect();
+        panes_after.sort_unstable();
+        assert_eq!(panes_after, panes_before);
+        assert_eq!(tab.active_pane, active);
+        assert_eq!(tab.tree.leaves(), [pane]);
+        assert_eq!(tab.tree.zoomed_pane_id(), Some(pane));
+        assert_eq!(tab.tree.layout(outer), layout_before);
+    }
+}
+
+#[test]
+fn main_split_without_window_or_tab_leaves_topology_empty() {
+    // Missing destinations are no-ops rather than installing a pane outside a tab tree.
+    let mut app = app_with_unavailable_shell();
+    app.split_active(Direction::Down);
+    assert!(app.main_window_id.is_none());
+    assert!(app.windows.is_empty());
+
+    app.__test_synthetic_main();
+    app.split_active(Direction::Down);
+    let window = app.main().expect("synthetic main");
+    assert!(window.tab_states.is_empty());
+    assert!(window.panes.is_empty());
+}
 
 fn pane_and_worker_handles() -> (PaneState, PaneVtHandles) {
     let pane = PaneState::new(Arc::new(Mutex::new(Parser::new(Grid::new(80, 24)))), None);
