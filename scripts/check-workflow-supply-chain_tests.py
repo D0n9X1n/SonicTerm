@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import importlib.util
+import json
 from pathlib import Path
 import re
 import subprocess
@@ -84,6 +85,27 @@ def findings_for(document: str, name: str = "ci.yml"):
     """Check one materialized workflow and return its findings."""
     with repository({name: document}) as root:
         return checker.check(root)
+
+
+def optional_feature_packages() -> dict[str, tuple[str, ...]]:
+    """Return every workspace package that declares a non-default feature."""
+    completed = subprocess.run(
+        ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+        cwd=_HERE.parent,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    metadata = json.loads(completed.stdout)
+    workspace = set(metadata["workspace_members"])
+    return {
+        package["name"]: tuple(
+            sorted(feature for feature in package["features"] if feature != "default")
+        )
+        for package in metadata["packages"]
+        if package["id"] in workspace
+        and any(feature != "default" for feature in package["features"])
+    }
 
 
 class CompliantFixtureTests(unittest.TestCase):
@@ -410,15 +432,15 @@ class RepositoryTests(unittest.TestCase):
         contracts = {
             "macos": (
                 "macos-14 / unit tests",
-                ("macos-core", "macos-coverage"),
+                ("macos-core", "macos-features", "macos-coverage"),
             ),
             "windows": (
                 "windows-latest / unit tests",
-                ("windows-native", "windows-checks", "windows-tests"),
+                ("windows-native", "windows-checks", "windows-features", "windows-tests"),
             ),
             "linux": (
                 "ubuntu 22.04 / workspace, packages, X11, Wayland",
-                ("linux-core", "linux-packages"),
+                ("linux-core", "linux-features", "linux-packages"),
             ),
         }
 
@@ -450,17 +472,17 @@ class RepositoryTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("CI_CACHE_NAMESPACE: ci-v3", text)
-        self.assertEqual(text.count("uses: Swatinem/rust-cache@"), 6)
-        self.assertEqual(text.count("shared-key: ${{ env.CI_CACHE_NAMESPACE }}-"), 6)
-        self.assertEqual(text.count("add-job-id-key: false"), 6)
-        self.assertEqual(text.count("cache-workspace-crates: false"), 6)
+        self.assertEqual(text.count("uses: Swatinem/rust-cache@"), 9)
+        self.assertEqual(text.count("shared-key: ${{ env.CI_CACHE_NAMESPACE }}-"), 9)
+        self.assertEqual(text.count("add-job-id-key: false"), 9)
+        self.assertEqual(text.count("cache-workspace-crates: false"), 9)
         self.assertEqual(
             text.count(
                 "save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}"
             ),
             3,
         )
-        self.assertEqual(text.count("save-if: false"), 3)
+        self.assertEqual(text.count("save-if: false"), 6)
 
         native = text.split("  windows-native:\n", 1)[1]
         native = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", native, maxsplit=1)[0]
@@ -491,6 +513,7 @@ class RepositoryTests(unittest.TestCase):
     def test_ubuntu_dependency_installs_allow_slow_cold_mirrors(self):
         installs = (
             ("ci.yml", "linux-core", "Install runner and native dependencies"),
+            ("ci.yml", "linux-features", "Install runner and native dependencies"),
             ("ci.yml", "linux-packages", "Install runner, package, and runtime dependencies"),
             ("release.yml", "package-linux", "Install runner, package, and runtime dependencies"),
         )
@@ -507,6 +530,61 @@ class RepositoryTests(unittest.TestCase):
                     ["20"],
                     f"{workflow_name}:{job_name} must leave cold Ubuntu mirrors enough bounded install time",
                 )
+
+    def test_ci_verifies_every_declared_optional_feature_on_its_minimum_native_matrix(self):
+        # Cargo metadata is the source of truth: adding a feature-bearing package
+        # fails this test until the dedicated restore-only shards select it for
+        # lint, docs, and tests on every host its platform-conditioned code needs.
+        packages = optional_feature_packages()
+        self.assertEqual(
+            packages,
+            {
+                "sonicterm-app": ("ssh",),
+                "sonicterm-font-config": ("distro-defaults",),
+                "sonicterm-io": ("ssh",),
+                "sonicterm-resource": ("test-util",),
+            },
+        )
+        native = "-p sonicterm-app -p sonicterm-io"
+        with_neutral = native + " -p sonicterm-font-config -p sonicterm-resource"
+        selections = {
+            "macos-features": native,
+            "windows-features": native,
+            "linux-features": with_neutral,
+        }
+        workflow = (_HERE.parent / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        for job_name, selected in selections.items():
+            with self.subTest(job=job_name):
+                job = workflow.split(f"  {job_name}:\n", 1)[1]
+                job = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", job, maxsplit=1)[0]
+                self.assertIn("timeout-minutes: 45", job.split("    steps:\n", 1)[0])
+                self.assertIn("cache-workspace-crates: false", job)
+                self.assertIn("save-if: false", job)
+                if job_name == "windows-features":
+                    self.assertIn('AWS_LC_SYS_PREBUILT_NASM: "1"', job)
+                else:
+                    self.assertNotIn("AWS_LC_SYS_PREBUILT_NASM", job)
+                expected = (
+                    "      - name: Verify optional feature surfaces\n"
+                    "        timeout-minutes: 25\n"
+                )
+                self.assertIn(expected, job)
+                commands = (
+                    f"cargo clippy {selected} --all-features --all-targets -- -D warnings",
+                    f'RUSTDOCFLAGS="-D warnings" cargo doc {selected} --all-features --no-deps',
+                    f"cargo test {selected} --all-features --lib --bins --tests --no-fail-fast",
+                )
+                for command in commands:
+                    self.assertEqual(job.count(command), 1)
+
+        for core_job in ("macos-core", "windows-checks", "linux-core"):
+            core = workflow.split(f"  {core_job}:\n", 1)[1]
+            core = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", core, maxsplit=1)[0]
+            self.assertNotIn("optional feature", core.lower())
+            self.assertNotIn("optional ssh", core.lower())
+            self.assertNotIn("--all-features", core)
 
     def test_workspace_tests_cover_unit_and_integration_targets_once(self):
         script = (_HERE.parent / "scripts" / "check-workspace-crates.sh").read_text(

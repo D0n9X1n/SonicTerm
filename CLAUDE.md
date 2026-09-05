@@ -93,9 +93,12 @@ target once through a fail-complete workspace gate:
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings
+# Windows only: use aws-lc-sys's checked-in assembly objects.
+export AWS_LC_SYS_PREBUILT_NASM=1
+cargo clippy -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
-RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-io --no-deps --features ssh
+RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --no-deps
+cargo test -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --lib --bins --tests --no-fail-fast
 bash scripts/check-authored-rust-comments.sh
 bash scripts/check-no-raw-process-exit.sh
 bash scripts/check-rust-version.sh
@@ -128,9 +131,15 @@ its Windows-only tests successfully; green macOS/Ubuntu results, local gates, or
 review approval cannot substitute for that result. After merge, verify `main` CI
 and Wiki publication before starting the next serialized PR.
 
-The second clippy line is not a duplicate. `--workspace --all-targets` does
-not imply `--all-features`, and `ssh` is off by default, so the SSH backend is
-compiled by no other command in this list.
+The optional-feature Clippy, Rustdoc, and test lines are not duplicates.
+`--workspace --all-targets` does not enable optional features. Together they
+compile the app and IO `ssh` branches, `distro-defaults`, and `test-util`; this
+proves those advertised feature surfaces build, lint, document, and test, but
+does not claim the GUI completes a live SSH connection. The font stack has no
+optional vendor features: St.Helens is a normal tracked asset and other fallback
+faces come from native discovery. On Windows, `AWS_LC_SYS_PREBUILT_NASM=1`
+selects aws-lc-sys's checked-in assembly objects, so optional SSH verification
+does not depend on NASM or CMake being installed on the runner.
 
 Run this additional deterministic allocator gate on Windows only; the Windows
 CI test shard runs it explicitly, and Release accepts only an exact successful
