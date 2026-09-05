@@ -408,7 +408,7 @@ fn terminal_keyboard_modes_change_legacy_encoding() {
     );
 }
 
-/// modifyOtherKeys level 1 must retain its compatibility exceptions while level 2 encodes them.
+/// modifyOtherKeys level 1 must retain Shift/Control compatibility but encode Alt.
 #[test]
 fn modify_other_keys_levels_have_distinct_compatibility_behavior() {
     let ctrl = ModifiersState::CONTROL;
@@ -443,6 +443,99 @@ fn modify_other_keys_levels_have_distinct_compatibility_behavior() {
         encode_event(a, ctrl, 0, KeyboardModes::new(false, false, false, false, 1)),
         Some(vec![0x01]),
     );
+    assert_eq!(
+        encode_event(a, ModifiersState::ALT, 0, KeyboardModes::new(false, false, false, false, 1)),
+        Some(b"\x1b[27;3;97~".to_vec()),
+    );
+
+    let semicolon_key = Key::Character(";".into());
+    let semicolon = event(
+        &semicolon_key,
+        PhysicalKey::Code(KeyCode::Semicolon),
+        Some(";"),
+        KeyLocation::Standard,
+        ElementState::Pressed,
+        false,
+    );
+    assert_eq!(
+        encode_event(semicolon, ctrl, 0, KeyboardModes::new(false, false, false, false, 1)),
+        Some(b"\x1b[27;5;59~".to_vec()),
+    );
+
+    let tab_key = Key::Named(NamedKey::Tab);
+    let tab = event(
+        &tab_key,
+        PhysicalKey::Code(KeyCode::Tab),
+        None,
+        KeyLocation::Standard,
+        ElementState::Pressed,
+        false,
+    );
+    let level_one = KeyboardModes::new(false, false, false, false, 1);
+    let level_two = KeyboardModes::new(false, false, false, false, 2);
+    assert_eq!(encode_event(tab, ModifiersState::SHIFT, 0, level_one), Some(b"\x1b[Z".to_vec()),);
+    assert_eq!(
+        encode_event(tab, ModifiersState::ALT, 0, level_one),
+        Some(b"\x1b[27;3;9~".to_vec()),
+    );
+    assert_eq!(
+        encode_event(tab, ModifiersState::CONTROL | ModifiersState::SHIFT, 0, level_one,),
+        Some(b"\x1b[27;6;9~".to_vec()),
+    );
+    assert_eq!(
+        encode_event(tab, ModifiersState::SHIFT, 0, level_two),
+        Some(b"\x1b[27;2;9~".to_vec()),
+    );
+
+    let backspace_key = Key::Named(NamedKey::Backspace);
+    let backspace = event(
+        &backspace_key,
+        PhysicalKey::Code(KeyCode::Backspace),
+        None,
+        KeyLocation::Standard,
+        ElementState::Pressed,
+        false,
+    );
+    assert_eq!(
+        encode_event(backspace, ModifiersState::ALT, 0, level_one),
+        Some(b"\x1b\x7f".to_vec()),
+    );
+    assert_eq!(
+        encode_event(backspace, ModifiersState::ALT, 0, level_two),
+        Some(b"\x1b[27;3;127~".to_vec()),
+    );
+
+    let escape_key = Key::Named(NamedKey::Escape);
+    let escape = event(
+        &escape_key,
+        PhysicalKey::Code(KeyCode::Escape),
+        None,
+        KeyLocation::Standard,
+        ElementState::Pressed,
+        false,
+    );
+    assert_eq!(
+        encode_event(escape, ModifiersState::ALT, 0, level_one),
+        Some(b"\x1b[27;3;27~".to_vec()),
+    );
+    assert_eq!(
+        encode_event(escape, ModifiersState::ALT, 0, level_two),
+        Some(b"\x1b[27;3;27~".to_vec()),
+    );
+
+    let enter_key = Key::Named(NamedKey::Enter);
+    let enter = event(
+        &enter_key,
+        PhysicalKey::Code(KeyCode::Enter),
+        None,
+        KeyLocation::Standard,
+        ElementState::Pressed,
+        false,
+    );
+    assert_eq!(
+        encode_event(enter, ModifiersState::ALT, 0, level_one),
+        Some(b"\x1b[27;3;13~".to_vec()),
+    );
 }
 
 /// modifyOtherKeys level 1 must preserve Tab compatibility while level 2 encodes modifiers.
@@ -466,7 +559,7 @@ fn modify_other_keys_preserves_tab_compatibility_at_level_one() {
         (1, ModifiersState::SHIFT, b"\x1b[Z".as_slice()),
         (2, ModifiersState::SHIFT, b"\x1b[27;2;9~".as_slice()),
         (0, ModifiersState::CONTROL, b"\t".as_slice()),
-        (1, ModifiersState::CONTROL, b"\t".as_slice()),
+        (1, ModifiersState::CONTROL, b"\x1b[27;5;9~".as_slice()),
         (2, ModifiersState::CONTROL, b"\x1b[27;5;9~".as_slice()),
     ] {
         assert_eq!(
@@ -502,6 +595,29 @@ fn application_keypad_preserves_physical_digit_identity() {
         ),
         Some(b"\x1bOr".to_vec()),
     );
+}
+
+/// Form-only or unknown Kitty flags preserve the underlying DECKPAM encoding.
+#[test]
+fn optional_kitty_fields_do_not_enable_kitty_key_encoding() {
+    let one_key = Key::Character("1".into());
+    let numpad_one = event(
+        &one_key,
+        PhysicalKey::Code(KeyCode::Numpad1),
+        Some("1"),
+        KeyLocation::Numpad,
+        ElementState::Pressed,
+        false,
+    );
+    let modes = KeyboardModes::new(false, true, false, false, 0);
+
+    for flags in [KITTY_REPORT_ALTERNATES, KITTY_REPORT_TEXT, 1 << 7] {
+        assert_eq!(
+            encode_event(numpad_one, ModifiersState::empty(), flags, modes),
+            Some(b"\x1bOq".to_vec()),
+            "flags={flags}",
+        );
+    }
 }
 
 /// Text-producing keypad keys must preserve modifiers when DECKPAM is disabled.
@@ -597,6 +713,25 @@ fn kitty_primary_and_alternate_codes_keep_layout_roles_distinct() {
         ),
         Some(b"\x1b[1089::99;5u".to_vec()),
     );
+
+    let shifted_a_key = Key::Character("A".into());
+    let shifted_a = event(
+        &shifted_a_key,
+        PhysicalKey::Code(KeyCode::KeyA),
+        None,
+        KeyLocation::Standard,
+        ElementState::Pressed,
+        false,
+    );
+    assert_eq!(
+        encode_event(
+            shifted_a,
+            ModifiersState::CONTROL | ModifiersState::SHIFT,
+            KITTY_REPORT_ALTERNATES,
+            KeyboardModes::default(),
+        ),
+        Some(b"\x1b[97:65;6u".to_vec()),
+    );
 }
 
 /// Legacy C0 keys retain the established compatibility table until a client
@@ -643,6 +778,25 @@ fn kitty_progressive_flags_encode_complete_event_data() {
             KeyboardModes::default(),
         ),
         Some(b"\x1b[97:65;2;65u".to_vec()),
+    );
+
+    let plain_a_key = Key::Character("a".into());
+    let plain_a = event(
+        &plain_a_key,
+        PhysicalKey::Code(KeyCode::KeyA),
+        Some("a"),
+        KeyLocation::Standard,
+        ElementState::Pressed,
+        false,
+    );
+    assert_eq!(
+        encode_event(
+            plain_a,
+            ModifiersState::empty(),
+            KITTY_REPORT_ALL | KITTY_REPORT_TEXT,
+            KeyboardModes::default(),
+        ),
+        Some(b"\x1b[97;;97u".to_vec()),
     );
 
     let repeated_a_key = Key::Character("a".into());
@@ -708,6 +862,15 @@ fn kitty_progressive_flags_encode_complete_event_data() {
             KITTY_DISAMBIGUATE,
             KeyboardModes::default(),
         ),
+        Some(b"1".to_vec()),
+    );
+    assert_eq!(
+        encode_event(
+            keypad_one,
+            ModifiersState::empty(),
+            KITTY_DISAMBIGUATE | KITTY_REPORT_ALL,
+            KeyboardModes::default(),
+        ),
         Some(b"\x1b[57400u".to_vec()),
     );
 
@@ -754,6 +917,70 @@ fn kitty_progressive_flags_encode_complete_event_data() {
     );
 }
 
+/// Event reporting canonicalizes functional keys but keeps reset-key repeats usable.
+#[test]
+fn kitty_event_reporting_preserves_reset_key_compatibility() {
+    let up_key = Key::Named(NamedKey::ArrowUp);
+    let up = event(
+        &up_key,
+        PhysicalKey::Code(KeyCode::ArrowUp),
+        None,
+        KeyLocation::Standard,
+        ElementState::Pressed,
+        false,
+    );
+    let app_cursor = KeyboardModes::new(true, false, false, false, 0);
+    assert_eq!(
+        encode_event(up, ModifiersState::empty(), KITTY_REPORT_EVENTS, app_cursor),
+        Some(b"\x1b[A".to_vec()),
+    );
+
+    for (named, physical, expected) in [
+        (NamedKey::Enter, KeyCode::Enter, b"\r".as_slice()),
+        (NamedKey::Tab, KeyCode::Tab, b"\t".as_slice()),
+        (NamedKey::Backspace, KeyCode::Backspace, b"\x7f".as_slice()),
+    ] {
+        let key = Key::Named(named);
+        let repeat = event(
+            &key,
+            PhysicalKey::Code(physical),
+            None,
+            KeyLocation::Standard,
+            ElementState::Pressed,
+            true,
+        );
+        assert_eq!(
+            encode_event(
+                repeat,
+                ModifiersState::empty(),
+                KITTY_REPORT_EVENTS,
+                KeyboardModes::default(),
+            ),
+            Some(expected.to_vec()),
+            "{named:?} repeat",
+        );
+
+        let release = event(
+            &key,
+            PhysicalKey::Code(physical),
+            None,
+            KeyLocation::Standard,
+            ElementState::Released,
+            false,
+        );
+        assert_eq!(
+            encode_event(
+                release,
+                ModifiersState::empty(),
+                KITTY_REPORT_EVENTS,
+                KeyboardModes::default(),
+            ),
+            None,
+            "{named:?} release",
+        );
+    }
+}
+
 /// Event reporting alone must make Escape repeats and releases unambiguous.
 #[test]
 fn kitty_event_reporting_covers_escape_without_report_all() {
@@ -783,20 +1010,19 @@ fn kitty_event_reporting_covers_escape_without_report_all() {
     }
 }
 
-/// Event reporting leaves an ordinary press as text but distinguishes its
-/// repeat and release with Kitty event-type fields.
+/// Event reporting keeps text presses/repeats as UTF-8 but identifies releases.
 #[test]
-fn kitty_event_reporting_distinguishes_text_key_lifecycle() {
+fn kitty_event_reporting_preserves_text_compatibility() {
     let a_key = Key::Character("a".into());
-    for (state, repeat, expected) in [
-        (ElementState::Pressed, false, b"a".as_slice()),
-        (ElementState::Pressed, true, b"\x1b[97;1:2u".as_slice()),
-        (ElementState::Released, false, b"\x1b[97;1:3u".as_slice()),
+    for (state, repeat, text, expected) in [
+        (ElementState::Pressed, false, Some("a"), b"a".as_slice()),
+        (ElementState::Pressed, true, Some("a"), b"a".as_slice()),
+        (ElementState::Released, false, None, b"\x1b[97;1:3u".as_slice()),
     ] {
         let a = event(
             &a_key,
             PhysicalKey::Code(KeyCode::KeyA),
-            (state == ElementState::Pressed).then_some("a"),
+            text,
             KeyLocation::Standard,
             state,
             repeat,
@@ -845,6 +1071,21 @@ fn legacy_layout_text_separates_altgr_from_control_chords() {
         encode_event(cyrillic_control, ModifiersState::CONTROL, 0, KeyboardModes::default(),),
         Some(b"\x1b[1089;5u".to_vec()),
     );
+
+    let dead_key = Key::Dead(Some('^'));
+    let dead = event(
+        &dead_key,
+        PhysicalKey::Code(KeyCode::Backquote),
+        Some("^"),
+        KeyLocation::Standard,
+        ElementState::Pressed,
+        false,
+    );
+    assert_eq!(
+        encode_event(dead, ModifiersState::empty(), 0, KeyboardModes::default()),
+        Some(b"^".to_vec()),
+    );
+    assert_eq!(encode_event(dead, ModifiersState::SUPER, 0, KeyboardModes::default()), None,);
 }
 
 /// Disambiguation must not turn an unmodified text-producing Space into a key escape.
@@ -866,6 +1107,14 @@ fn kitty_disambiguation_keeps_plain_space_as_text() {
 fn keymap_names_cover_shifted_punctuation_and_extended_named_keys() {
     assert_eq!(
         key_to_strings(&Key::Character("{".into()), ModifiersState::SHIFT),
+        ["shift+[", "shift+{"],
+    );
+    assert_eq!(
+        key_strings_for_parts(
+            &Key::Character("[".into()),
+            &Key::Character("{".into()),
+            ModifiersState::SHIFT,
+        ),
         ["shift+[", "shift+{"],
     );
     assert_eq!(

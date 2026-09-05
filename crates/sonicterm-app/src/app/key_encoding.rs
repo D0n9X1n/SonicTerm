@@ -138,13 +138,27 @@ fn encode_event(
         return None;
     }
 
-    if kitty_flags != 0 {
-        // Nonzero negotiated progressive enhancements select the Kitty encoder.
+    let kitty_behavior_flags = KITTY_DISAMBIGUATE | KITTY_REPORT_EVENTS | KITTY_REPORT_ALL;
+    if kitty_flags & kitty_behavior_flags != 0 {
+        // When: kitty_flags has a behavior bit, encode the event with Kitty rules.
+        return encode_kitty(event, mods, kitty_flags, modes);
+    }
+
+    let legacy = encode_legacy(event, mods, modes);
+    if kitty_flags & KITTY_REPORT_ALTERNATES != 0
+        && legacy.as_deref().is_some_and(is_csi_u_encoding)
+    {
+        // Alternate reporting rebuilds an existing CSI-u record with optional
+        // shifted and base-layout fields; other legacy encodings stay unchanged.
         encode_kitty(event, mods, kitty_flags, modes)
     } else {
-        // When: kitty_flags is zero, preserve legacy and xterm-compatible input.
-        encode_legacy(event, mods, modes)
+        // When: no behavior flag or augmentable CSI-u record exists, retain legacy bytes.
+        legacy
     }
+}
+
+fn is_csi_u_encoding(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\x1b[") && bytes.ends_with(b"u")
 }
 
 fn encode_legacy(
@@ -197,7 +211,7 @@ fn encode_legacy(
             modes.modify_other_keys(),
         )),
         Key::Named(named) => encode_legacy_named(*named, mods, modes),
-        _ => event.text.filter(|text| !text.is_empty()).map(|text| text.as_bytes().to_vec()),
+        _ => None,
     }
 }
 
@@ -217,23 +231,23 @@ fn encode_kitty(
         return None;
     }
 
-    if let Some(keypad) = keypad_key(event) {
-        // When: keypad_key recognizes this event, a negotiated disambiguate
-        // flag may preserve its dedicated functional identity.
-        if disambiguate {
-            // When: disambiguate is active, preserve the keypad's
-            // dedicated functional identity instead of its NumLock meaning.
-            return Some(encode_kitty_keypad(keypad, event, mods, flags));
-        }
-    }
-
-    if !report_all && event.state == ElementState::Pressed && (!report_events || !event.repeat) {
-        // When: report_all is off and this Pressed event is not a reported
-        // repeat, compatible text remains a direct UTF-8 write.
+    if !report_all && event.state == ElementState::Pressed {
+        // When: report_all is off, every text-producing press or repeat remains
+        // direct UTF-8, including NumLock-on keypad text.
         if let Some(text) = standalone_text(event, mods) {
             // When: standalone_text yields safe text, send its exact layout or
             // composition result instead of manufacturing a key code.
             return Some(text.as_bytes().to_vec());
+        }
+    }
+
+    if let Some(keypad) = keypad_key(event) {
+        // When: keypad_key recognizes this event, a negotiated disambiguate
+        // flag may preserve its dedicated functional identity.
+        if disambiguate {
+            // When: disambiguate is active, preserve a non-text or all-key
+            // keypad identity instead of its NumLock meaning.
+            return Some(encode_kitty_keypad(keypad, event, mods, flags));
         }
     }
 
@@ -415,16 +429,14 @@ fn encode_kitty_named(
         // When: c0_code exists, apply the reset-safe C0 exceptions before
         // falling back to canonical CSI-u.
         let reset_key = matches!(key, NamedKey::Enter | NamedKey::Tab | NamedKey::Backspace);
-        if reset_key && !report_all && mods.is_empty() {
-            // When: reset_key is true, report_all is false, and mods is empty,
-            // retain its C0 byte and suppress the unrepresentable release.
-            return (event.state == ElementState::Pressed)
-                .then(|| encode_legacy_named(key, mods, modes))
-                .flatten();
+        if reset_key && !report_all && mods.is_empty() && event.state == ElementState::Pressed {
+            // When: reset_key is an unmodified press or repeat and report_all is
+            // false, retain its reset-safe C0 byte.
+            return encode_legacy_named(key, mods, modes);
         }
-        if reset_key && !report_all && event.state == ElementState::Released {
-            // When: reset_key is Released while report_all is false, Kitty
-            // deliberately omits the release so a crashed client leaves usable input.
+        if reset_key && !report_all && event.state == ElementState::Released && mods.is_empty() {
+            // When: reset_key is an unmodified release while report_all is false,
+            // Kitty deliberately omits it so a crashed client leaves usable input.
             return None;
         }
         if key == NamedKey::Escape
@@ -595,14 +607,9 @@ fn encode_legacy_text(
         return Vec::new();
     }
 
-    let modify_text = match modify_other_keys {
-        1 => !legacy_text_modifiers(primary, mods),
-        2 => true,
-        _ => false,
-    };
-    if modify_text && should_modify_other_key(modify_other_keys, u32::from(primary), mods) {
-        // When: modify_text and should_modify_other_key claim this chord, use xterm's
-        // sequence instead of the otherwise compatible legacy representation.
+    if should_modify_other_key(modify_other_keys, u32::from(primary), mods) {
+        // When: should_modify_other_key claims this chord, use xterm's sequence
+        // instead of the otherwise compatible legacy representation.
         return encode_modify_other_key(u32::from(primary), mods);
     }
 
@@ -998,7 +1005,9 @@ fn encode_csi_u(
     }
     if !mods.is_empty() || event_type.is_some() || text.is_some() {
         sequence.push(';');
-        sequence.push_str(&modifier_event_field(mods, event_type));
+        if !mods.is_empty() || event_type.is_some() {
+            sequence.push_str(&modifier_event_field(mods, event_type));
+        }
     }
     if let Some(text) = text {
         sequence.push(';');
@@ -1315,7 +1324,16 @@ fn encode_modify_other_key(code: u32, mods: ModifiersState) -> Vec<u8> {
 fn should_modify_other_key(level: u8, code: u32, mods: ModifiersState) -> bool {
     !mods.is_empty()
         && match level {
-            1 => !matches!(code, 8 | 9 | 27 | 127),
+            1 => match code {
+                8 | 127 => false,
+                9 => mods != ModifiersState::SHIFT,
+                13 => true,
+                _ if mods == ModifiersState::SHIFT => false,
+                _ if mods == ModifiersState::CONTROL => char::from_u32(code)
+                    .and_then(ctrl_mapping)
+                    .is_none_or(|mapped| mapped > 31 && mapped != 127),
+                _ => true,
+            },
             2 => true,
             _ => false,
         }
@@ -1410,11 +1428,25 @@ fn physical_keypad_key(physical_key: PhysicalKey) -> Option<KeypadKey> {
 // ---------------------------------------------------------------------------
 
 pub(super) fn key_event_to_string(event: &KeyEvent, mods: ModifiersState) -> Option<String> {
-    key_to_string(&event.key_without_modifiers(), mods)
+    key_event_to_strings(event, mods).into_iter().next()
 }
 
 pub(super) fn key_event_to_strings(event: &KeyEvent, mods: ModifiersState) -> Vec<String> {
-    key_to_strings(&event.key_without_modifiers(), mods)
+    key_strings_for_parts(&event.key_without_modifiers(), &event.logical_key, mods)
+}
+
+fn key_strings_for_parts(
+    key_without_modifiers: &Key,
+    logical_key: &Key,
+    mods: ModifiersState,
+) -> Vec<String> {
+    let mut result = key_to_strings(key_without_modifiers, mods);
+    for candidate in key_to_strings(logical_key, mods) {
+        if !result.contains(&candidate) {
+            result.push(candidate);
+        }
+    }
+    result
 }
 
 /// Canonical chord string for a key press, such as `ctrl+shift+p`.

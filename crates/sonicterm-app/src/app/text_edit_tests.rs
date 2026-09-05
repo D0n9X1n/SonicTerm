@@ -80,19 +80,18 @@ fn printable_text_policy_distinguishes_altgr_from_command_modifiers() {
 
     let x = Key::Character("x".into());
     let unmodified_x = Key::Character("x".into());
-    assert_eq!(
-        printable_text_for_parts(
-            &x,
-            &unmodified_x,
-            Some("x"),
-            ModifiersState::CONTROL | ModifiersState::ALT,
-        ),
-        None,
-    );
-    assert_eq!(
-        printable_text_for_parts(&x, &unmodified_x, Some("x"), ModifiersState::SUPER,),
-        None,
-    );
+    for modifiers in [
+        ModifiersState::ALT,
+        ModifiersState::ALT | ModifiersState::SHIFT,
+        ModifiersState::CONTROL | ModifiersState::ALT,
+        ModifiersState::SUPER,
+    ] {
+        assert_eq!(
+            printable_text_for_parts(&x, &unmodified_x, Some("x"), modifiers),
+            None,
+            "{modifiers:?}",
+        );
+    }
     assert_eq!(
         printable_text_for_parts(
             &Key::Character("å".into()),

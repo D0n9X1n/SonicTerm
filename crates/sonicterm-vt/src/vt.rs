@@ -84,8 +84,9 @@ impl KeyboardModes {
             application_keypad: bits & Self::APPLICATION_KEYPAD != 0,
             backarrow_key: bits & Self::BACKARROW_KEY != 0,
             newline: bits & Self::NEWLINE != 0,
-            modify_other_keys: (bits & Self::MODIFY_OTHER_KEYS_MASK)
-                >> Self::MODIFY_OTHER_KEYS_SHIFT,
+            modify_other_keys: ((bits & Self::MODIFY_OTHER_KEYS_MASK)
+                >> Self::MODIFY_OTHER_KEYS_SHIFT)
+                .min(2),
         }
     }
 
@@ -2200,7 +2201,7 @@ impl Perform for Performer {
                     if stack.len() == KITTY_KBD_STACK_MAX {
                         stack.remove(0);
                     }
-                    stack.push(p0() as u8);
+                    stack.push((p0() & 0x7f) as u8);
                 }
                 'm' if p0() == 4 => {
                     self.modify_other_keys = (p1() as u8).min(2);
@@ -2227,21 +2228,26 @@ impl Perform for Performer {
         }
         // CSI with `=` intermediate — kitty keyboard protocol set.
         // `CSI = flags ; mode u` sets the current (top-of-stack) flags. `mode`
-        // selects all (1)/set-or (2)/reset-and (3); we keep the common cases
-        // and otherwise replace. With an empty stack there is nothing to set,
-        // so push the requested flags as the active set.
+        // selects all (1)/set-or (2)/reset-and (3), with an omitted mode
+        // defaulting to 1. Unsupported modes are ignored. With an empty stack,
+        // an accepted mode pushes the requested flags as the active set.
 
         // When: inter begins with =, consume the keyboard-set namespace before normal CSI action routing.
         if inter.first() == Some(&b'=') {
             if action == 'u' {
-                let flags = p0() as u8;
-                let mode = p1();
+                // When: action is u, apply the accepted Kitty set mode to this screen's stack.
+                let flags = (p0() & 0x7f) as u8;
+                let mode =
+                    params.iter().nth(1).and_then(|slice| slice.first().copied()).unwrap_or(1);
                 let current = self.kitty_keyboard_flags();
                 let next = match mode {
+                    1 => flags,
                     2 => current | flags,
                     3 => current & !flags,
-                    // mode 1 (default) and anything else: replace.
-                    _ => flags,
+                    _ => {
+                        // When: mode is outside 1..=3, leave the active Kitty flags unchanged.
+                        return;
+                    }
                 };
                 let stack = self.kitty_kbd_stack_mut();
                 if let Some(top) = stack.last_mut() {

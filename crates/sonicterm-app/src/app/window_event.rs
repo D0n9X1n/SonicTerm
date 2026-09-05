@@ -5,6 +5,7 @@
 //! block; field access works because all referenced `App` fields are
 //! `pub(super)`.
 
+use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -22,7 +23,7 @@ use sonicterm_vt::vt::MouseTracking;
 use winit::{
     event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::ActiveEventLoop,
-    keyboard::{Key, ModifiersState, NamedKey},
+    keyboard::{Key, ModifiersState, NamedKey, PhysicalKey},
     window::{CursorIcon, WindowId},
 };
 
@@ -104,6 +105,15 @@ pub(super) fn pointer_report_bytes(
             (row.min(223) + 32) as u8,
         ]
     }
+}
+
+/// Return an existing terminal press's destinations only for repeat events.
+pub(super) fn terminal_repeat_targets(
+    pressed_keys: &HashMap<PhysicalKey, BTreeSet<u64>>,
+    physical_key: PhysicalKey,
+    repeat: bool,
+) -> Option<BTreeSet<u64>> {
+    repeat.then(|| pressed_keys.get(&physical_key).cloned()).flatten()
 }
 
 /// Choose and latch the owner of a left-button grid press.
@@ -2362,6 +2372,20 @@ impl App {
                     }
                     return;
                 }
+                if let Some(targets) = self.main().and_then(|window| {
+                    terminal_repeat_targets(
+                        &window.pty_pressed_keys,
+                        event.physical_key,
+                        event.repeat,
+                    )
+                }) {
+                    // When: terminal_repeat_targets returns targets, this repeat keeps
+                    // its original destinations even if local UI opened later.
+                    let writes =
+                        self.encoded_terminal_key_writes(&event, self.main_modifiers(), &targets);
+                    self.dispatch_terminal_key_writes(writes);
+                    return;
+                }
                 // Pressed input now routes through active modes.
 
                 // Quit confirmation guard: intercept the Cmd+Q chord before any
@@ -2500,38 +2524,28 @@ impl App {
                 }
                 let active_pane = self.active_pane_id();
                 if let Some(active_pane) = active_pane {
-                    // When: active_pane identifies a PTY, route a new press or
-                    // continue the destination set owned by its original press.
-                    let targets = if event.repeat {
-                        // When: event.repeat is true, only its recorded press
-                        // destinations may receive the repeated event.
-                        let Some(targets) = self
-                            .main()
-                            .and_then(|window| window.pty_pressed_keys.get(&event.physical_key))
-                            .cloned()
-                        else {
-                            // When: targets has no forwarded press entry, keep the repeat
-                            // out of a newly focused pane or broadcast group.
-                            return;
-                        };
-                        targets
-                    } else {
-                        // When: event.repeat is false, snapshot the current
-                        // source and broadcast destinations for this press.
-                        self.terminal_key_targets(active_pane)
-                    };
+                    // When: active_pane identifies a PTY, snapshot the new press's
+                    // source and broadcast destinations after local routing.
+                    if event.repeat {
+                        // When: an unowned repeat survives local routing, never
+                        // migrate it to the currently focused terminal.
+                        return;
+                    }
+                    let targets = self.terminal_key_targets(active_pane);
                     let writes =
                         self.encoded_terminal_key_writes(&event, self.main_modifiers(), &targets);
-                    let delivered: std::collections::BTreeSet<_> =
-                        writes.iter().map(|(pane_id, _)| *pane_id).collect();
-                    if !event.repeat {
-                        // Record exactly the panes that received the new press
-                        // so its repeats and release cannot migrate.
+                    let delivered = self.dispatch_terminal_key_writes(writes);
+                    // Record only panes whose bounded PTY queue accepted this press.
+                    if !delivered.is_empty() {
+                        // Persist only accepted press owners.
                         if let Some(window) = self.main_mut() {
-                            window.pty_pressed_keys.insert(event.physical_key, delivered);
+                            window.pty_pressed_keys.insert(event.physical_key, delivered.clone());
                         }
                     }
-                    self.dispatch_terminal_key_writes(writes);
+                    if delivered.is_empty() {
+                        // When: delivered is empty, no target accepted the press, so skip terminal-input UI cleanup.
+                        return;
+                    }
                     // Scroll-to-bottom on Enter (#B12): pressing Enter while
                     // scrolled up in history should jump back to the live
                     // bottom so the latest input/output is visible. Plain Enter

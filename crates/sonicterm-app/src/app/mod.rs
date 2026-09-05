@@ -3470,10 +3470,11 @@ impl App {
             .collect()
     }
 
-    fn dispatch_terminal_key_writes(&mut self, writes: Vec<(u64, Vec<u8>)>) {
-        for (pane_id, bytes) in writes {
-            self.write_to_pane(pane_id, bytes);
-        }
+    fn dispatch_terminal_key_writes(&mut self, writes: Vec<(u64, Vec<u8>)>) -> BTreeSet<u64> {
+        writes
+            .into_iter()
+            .filter_map(|(pane_id, bytes)| self.write_to_pane(pane_id, bytes).then_some(pane_id))
+            .collect()
     }
 
     /// Test-only mirror of the normal KeyboardInput dispatch order: try every
@@ -3538,7 +3539,7 @@ impl App {
         )
     }
 
-    fn write_to_pane(&mut self, pane_id: u64, bytes: Vec<u8>) {
+    fn write_to_pane(&mut self, pane_id: u64, bytes: Vec<u8>) -> bool {
         // The keystroke / broadcast / encoded-input path flows through the
         // winit-agnostic `AppStateMachine`. The reducer translates
         // `AppIntent::PtyWrite` into `AppEffect::PtyWrite { pane, data }`, and
@@ -3553,43 +3554,44 @@ impl App {
         // while `&mut self` arms the accepted-input foreground probe.
         let mut transient =
             sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default());
-        for effect in transient.handle(intent) {
-            self.dispatch_pty_write_effect(&effect);
-        }
+        transient.handle(intent).iter().any(|effect| self.dispatch_pty_write_effect(effect))
     }
 
     /// Boundary handler for [`sonicterm_app_core::AppEffect::PtyWrite`].
     ///
     /// Resolves the pane id back to a live [`PtyHandle`] in any terminal
     /// window and forwards the bytes.
-    pub(crate) fn dispatch_pty_write_effect(&mut self, effect: &sonicterm_app_core::AppEffect) {
-        if let sonicterm_app_core::AppEffect::PtyWrite { pane, data } = effect {
-            // When: the effect is `PtyWrite`, so `pane` and `data` name a live
-            // target to resolve before any bytes are enqueued.
-            let pane_id = pane.0;
-            let bytes = data.to_vec();
-            // Test-only ledger: skipped entirely in production so we don't
-            // lock+clone+push on every PTY write (— unbounded
-            // growth + per-keystroke overhead over a long session).
-            if self.pty_write_log_enabled {
-                self.test_pty_writes.lock().push((pane_id, bytes.clone()));
-            }
-            let Some(p) = self.pane_by_id(pane_id) else {
-                // When: `pane_by_id` resolves nothing, so the pane closed before
-                // its bytes were enqueued and they have nowhere to land.
-                return;
-            };
-            let queued = p.pty.as_ref().is_some_and(|pty| {
-                Self::queue_pty_input(self.event_loop_proxy.as_ref(), pty, bytes)
-            });
-            #[cfg(windows)]
-            if queued {
-                // Accepted PTY input can launch a silent command, so sample its process after launch settles.
-                self.arm_foreground_probe_after_input(Instant::now());
-            }
-            #[cfg(not(windows))]
-            let _ = queued;
+    pub(crate) fn dispatch_pty_write_effect(
+        &mut self,
+        effect: &sonicterm_app_core::AppEffect,
+    ) -> bool {
+        let sonicterm_app_core::AppEffect::PtyWrite { pane, data } = effect else {
+            // When: effect is not PtyWrite, this boundary accepted no terminal input.
+            return false;
+        };
+        let pane_id = pane.0;
+        let bytes = data.to_vec();
+        // Test-only ledger: skipped entirely in production so we don't
+        // lock+clone+push on every PTY write (— unbounded
+        // growth + per-keystroke overhead over a long session).
+        if self.pty_write_log_enabled {
+            self.test_pty_writes.lock().push((pane_id, bytes.clone()));
         }
+        let Some(p) = self.pane_by_id(pane_id) else {
+            // When: `pane_by_id` resolves nothing, so the pane closed before
+            // its bytes were enqueued and they have nowhere to land.
+            return false;
+        };
+        let queued = p
+            .pty
+            .as_ref()
+            .is_some_and(|pty| Self::queue_pty_input(self.event_loop_proxy.as_ref(), pty, bytes));
+        #[cfg(windows)]
+        if queued {
+            // Accepted PTY input can launch a silent command, so sample its process after launch settles.
+            self.arm_foreground_probe_after_input(Instant::now());
+        }
+        queued
     }
 
     fn queue_pty_input(

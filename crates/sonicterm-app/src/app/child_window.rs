@@ -1548,6 +1548,19 @@ impl App {
                     }
                     return;
                 }
+                if let Some(targets) = super::window_event::terminal_repeat_targets(
+                    &child.pty_pressed_keys,
+                    event.physical_key,
+                    event.repeat,
+                ) {
+                    // When: terminal_repeat_targets returns targets, this repeat keeps
+                    // its original destinations even if child-local UI opened later.
+                    let mods = child.modifiers;
+                    let _ = child;
+                    let writes = self.encoded_terminal_key_writes(&event, mods, &targets);
+                    self.dispatch_terminal_key_writes(writes);
+                    return;
+                }
                 // A KeyboardInput press makes this child frontmost and routes below.
                 self.frontmost_window = Some(win_id);
                 if let Some(key_str) = key_event_to_string(&event, child.modifiers) {
@@ -1774,38 +1787,22 @@ impl App {
                         return;
                     }
                 };
-                let repeat_targets = if event.repeat {
-                    // When: event.repeat is true, retain only the destination
-                    // set established by its original forwarded press.
-                    let Some(targets) = child.pty_pressed_keys.get(&event.physical_key).cloned()
-                    else {
-                        // When: targets has no forwarded press entry, do not
-                        // reroute it after focus or broadcast state changes.
-                        return;
-                    };
-                    Some(targets)
-                } else {
-                    // When: event.repeat is false, the route is selected after
-                    // releasing the mutable child-window borrow.
-                    None
-                };
+                if event.repeat {
+                    // When: an unowned repeat survives local routing, never
+                    // migrate it to this child's currently focused terminal.
+                    return;
+                }
                 let _ = child;
-                let targets =
-                    repeat_targets.unwrap_or_else(|| self.terminal_key_targets(active_id));
+                let targets = self.terminal_key_targets(active_id);
                 let writes = self.encoded_terminal_key_writes(&event, mods, &targets);
-                let delivered: std::collections::BTreeSet<_> =
-                    writes.iter().map(|(pane_id, _)| *pane_id).collect();
-                if !event.repeat {
-                    // Retain the new press's exact destination set so later
-                    // focus or broadcast changes cannot steal its lifecycle.
+                let delivered = self.dispatch_terminal_key_writes(writes);
+                if !delivered.is_empty() {
+                    // When: delivered is nonempty, retain only panes whose bounded
+                    // PTY queues accepted this press and apply terminal-input cleanup.
                     if let Some(child) = self.windows.get_mut(&win_id) {
                         child.pty_pressed_keys.insert(event.physical_key, delivered);
                     }
-                }
-                if !writes.is_empty() {
-                    // When: writes is not empty, one or more target protocols encoded this key,
-                    // dispatch their independent byte sequences before UI cleanup.
-                    self.dispatch_terminal_key_writes(writes);
+                    // At least one target accepted input, so terminal-input UI cleanup applies.
                     let Some(child) = self.windows.get_mut(&win_id) else {
                         // When: `windows` lost `win_id` during the write, so
                         // there is no child left to scroll or repaint.
