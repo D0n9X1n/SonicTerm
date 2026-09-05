@@ -96,7 +96,6 @@ cargo clippy --workspace --all-targets -- -D warnings
 # Windows only: use aws-lc-sys's checked-in assembly objects.
 export AWS_LC_SYS_PREBUILT_NASM=1
 cargo clippy -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --all-targets -- -D warnings
-python scripts/native-smoke-runner.py --help
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --no-deps
 cargo test -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --lib --bins --tests --no-fail-fast
