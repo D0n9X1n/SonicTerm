@@ -8,6 +8,43 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+#[derive(Clone)]
+struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
+
+impl Write for SharedBuffer {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn run_requests(state: Arc<ServerState>, requests: &[ClientMsg]) -> Vec<ServerMsg> {
+    let mut request_bytes = Vec::new();
+    for request in requests {
+        crate::frame::write_frame(&mut request_bytes, request).unwrap();
+    }
+    let response_bytes = Arc::new(Mutex::new(Vec::new()));
+    handle_connection_with_shutdown(
+        state,
+        Cursor::new(request_bytes),
+        SharedBuffer(response_bytes.clone()),
+        || {},
+    )
+    .unwrap();
+
+    let bytes = response_bytes.lock().clone();
+    let mut responses = Cursor::new(bytes);
+    let mut messages = Vec::new();
+    while responses.position() < responses.get_ref().len() as u64 {
+        messages.push(crate::frame::read_frame(&mut responses).unwrap());
+    }
+    messages
+}
+
 struct BlockingWriteStream {
     read: Cursor<Vec<u8>>,
     block_first_write: bool,
@@ -60,8 +97,29 @@ fn unknown_pane_and_session_ops_error() {
     assert!(state.attach(12345, sink).is_err(), "attach to unknown session must Err");
 }
 
-/// Cross-platform: the bounded subscriber mailbox never evicts control
-/// responses to make room for later messages.
+/// The request loop returns one result for each kill, including repeated kills.
+#[test]
+fn request_loop_acknowledges_first_kill_and_errors_on_repeat() {
+    // Protect the deterministic request/reply contract through framing and the real request loop.
+    #[cfg(unix)]
+    let command = "/bin/sh";
+    #[cfg(windows)]
+    let command = "cmd.exe";
+    let state = ServerState::new();
+    let (_session_id, pane_id) = state.spawn(command, 80, 24).expect("spawn shell");
+
+    let responses =
+        run_requests(state, &[ClientMsg::Kill { pane_id }, ClientMsg::Kill { pane_id }]);
+
+    assert!(
+        matches!(responses.first(), Some(ServerMsg::Killed { pane_id: actual }) if *actual == pane_id)
+    );
+    assert!(
+        matches!(responses.get(1), Some(ServerMsg::Error(message)) if message.contains(&format!("unknown pane {pane_id}")))
+    );
+    assert_eq!(responses.len(), 2, "each kill request must produce exactly one reply");
+}
+
 #[test]
 fn subscriber_sink_preserves_queued_control_when_full() {
     let (tx, rx) = bounded(1);

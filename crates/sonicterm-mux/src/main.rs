@@ -9,16 +9,21 @@
 //! ```
 
 #[cfg(unix)]
-use std::io;
-#[cfg(windows)]
-use std::io::Write;
-#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 #[cfg(windows)]
 use std::os::windows::io::{AsHandle, AsRawHandle};
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
-use std::{env, process::ExitCode, sync::Arc, thread};
+#[cfg(any(test, windows))]
+use std::time::Instant;
+use std::{
+    env,
+    io::{self, Read, Write},
+    process::ExitCode,
+    sync::Arc,
+    thread,
+    time::Duration,
+};
 
 use anyhow::{anyhow, bail, Context, Result};
 #[cfg(unix)]
@@ -45,7 +50,7 @@ use windows::Win32::{
     Foundation::{CloseHandle, HANDLE},
     Security::{GetLengthSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER},
     System::{
-        Pipes::DisconnectNamedPipe,
+        Pipes::{DisconnectNamedPipe, PeekNamedPipe},
         RemoteDesktop::ProcessIdToSessionId,
         Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcessToken},
         IO::CancelIoEx,
@@ -595,11 +600,110 @@ fn cmd_list(socket: &str) -> Result<()> {
     }
 }
 
+const KILL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
+
+trait KillResponseReader: Read {
+    fn set_kill_response_timeout(&mut self, timeout: Duration) -> io::Result<()>;
+}
+
+#[cfg(unix)]
+impl KillResponseReader for Stream {
+    fn set_kill_response_timeout(&mut self, timeout: Duration) -> io::Result<()> {
+        self.set_recv_timeout(Some(timeout))
+    }
+}
+
+#[cfg(any(test, windows))]
+fn wait_until_readable(
+    deadline: Option<Instant>,
+    mut available: impl FnMut() -> io::Result<usize>,
+) -> io::Result<()> {
+    let deadline = deadline.ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotConnected, "mux kill response deadline is not armed")
+    })?;
+    loop {
+        if available()? > 0 {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "mux kill response timed out"));
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[cfg(windows)]
+struct DeadlineStream {
+    stream: Stream,
+    deadline: Option<Instant>,
+}
+
+#[cfg(windows)]
+impl DeadlineStream {
+    fn available(&self) -> io::Result<usize> {
+        let Stream::NamedPipe(named_pipe) = &self.stream;
+        let handle = HANDLE(named_pipe.as_handle().as_raw_handle());
+        let mut available = 0u32;
+        // SAFETY: handle belongs to self.stream for this call and available points to live writable storage.
+        unsafe { PeekNamedPipe(handle, None, 0, None, Some(&mut available), None) }
+            .map_err(io::Error::other)?;
+        Ok(available as usize)
+    }
+}
+
+#[cfg(windows)]
+impl Read for DeadlineStream {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        wait_until_readable(self.deadline, || self.available())?;
+        self.stream.read(buffer)
+    }
+}
+
+#[cfg(windows)]
+impl KillResponseReader for DeadlineStream {
+    fn set_kill_response_timeout(&mut self, timeout: Duration) -> io::Result<()> {
+        self.deadline = Some(Instant::now() + timeout);
+        Ok(())
+    }
+}
+
 fn cmd_kill(socket: &str, pane_id: u64) -> Result<()> {
-    let (mut _r, mut w) = connect(socket)?;
-    write_frame(&mut w, &ClientMsg::Kill { pane_id })?;
-    println!("killed pane {pane_id}");
+    let (r, w) = connect(socket)?;
+    #[cfg(unix)]
+    let mut reader = r;
+    #[cfg(windows)]
+    let mut reader = DeadlineStream { stream: r, deadline: None };
+    let response = exchange_kill(&mut reader, w, pane_id)?;
+    println!("{response}");
     Ok(())
+}
+
+fn exchange_kill<R: KillResponseReader, W: Write>(
+    reader: &mut R,
+    mut writer: W,
+    pane_id: u64,
+) -> Result<String> {
+    reader
+        .set_kill_response_timeout(KILL_RESPONSE_TIMEOUT)
+        .with_context(|| format!("kill pane {pane_id}: failed to set response timeout"))?;
+    write_frame(&mut writer, &ClientMsg::Kill { pane_id })
+        .with_context(|| format!("kill pane {pane_id}: request write failed"))?;
+    read_kill_response(reader, pane_id)
+}
+
+fn read_kill_response<R: Read>(reader: &mut R, pane_id: u64) -> Result<String> {
+    let response: ServerMsg =
+        read_frame(reader).with_context(|| format!("kill pane {pane_id}: response read failed"))?;
+    match response {
+        ServerMsg::Killed { pane_id: acknowledged } if acknowledged == pane_id => {
+            Ok(format!("killed pane {pane_id}"))
+        }
+        ServerMsg::Killed { pane_id: acknowledged } => {
+            Err(anyhow!("kill pane {pane_id}: server acknowledged mismatched pane {acknowledged}"))
+        }
+        ServerMsg::Error(message) => Err(anyhow!("kill pane {pane_id}: server error: {message}")),
+        other => Err(anyhow!("kill pane {pane_id}: unexpected response: {other:?}")),
+    }
 }
 
 fn connect(socket: &str) -> Result<(Stream, Stream)> {
@@ -621,9 +725,6 @@ fn make_socket_name(path: &str) -> Result<interprocess::local_socket::Name<'_>> 
     let trimmed = path.trim_start_matches(['/', '\\']);
     Ok(trimmed.to_ns_name::<GenericNamespaced>()?)
 }
-
-#[allow(dead_code)]
-fn _unused_io() {}
 
 #[cfg(test)]
 #[path = "main_tests.rs"]
