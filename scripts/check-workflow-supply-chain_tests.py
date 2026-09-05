@@ -432,11 +432,17 @@ class RepositoryTests(unittest.TestCase):
         contracts = {
             "macos": (
                 "macos-14 / unit tests",
-                ("macos-core", "macos-features", "macos-coverage"),
+                ("macos-core", "macos-features", "macos-coverage", "macos-smoke"),
             ),
             "windows": (
                 "windows-latest / unit tests",
-                ("windows-native", "windows-checks", "windows-features", "windows-tests"),
+                (
+                    "windows-native",
+                    "windows-checks",
+                    "windows-features",
+                    "windows-tests",
+                    "windows-smoke",
+                ),
             ),
             "linux": (
                 "ubuntu 22.04 / workspace, packages, X11, Wayland",
@@ -472,17 +478,17 @@ class RepositoryTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("CI_CACHE_NAMESPACE: ci-v3", text)
-        self.assertEqual(text.count("uses: Swatinem/rust-cache@"), 9)
-        self.assertEqual(text.count("shared-key: ${{ env.CI_CACHE_NAMESPACE }}-"), 9)
-        self.assertEqual(text.count("add-job-id-key: false"), 9)
-        self.assertEqual(text.count("cache-workspace-crates: false"), 9)
+        self.assertEqual(text.count("uses: Swatinem/rust-cache@"), 11)
+        self.assertEqual(text.count("shared-key: ${{ env.CI_CACHE_NAMESPACE }}-"), 11)
+        self.assertEqual(text.count("add-job-id-key: false"), 11)
+        self.assertEqual(text.count("cache-workspace-crates: false"), 11)
         self.assertEqual(
             text.count(
                 "save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}"
             ),
             3,
         )
-        self.assertEqual(text.count("save-if: false"), 6)
+        self.assertEqual(text.count("save-if: false"), 8)
 
         native = text.split("  windows-native:\n", 1)[1]
         native = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", native, maxsplit=1)[0]

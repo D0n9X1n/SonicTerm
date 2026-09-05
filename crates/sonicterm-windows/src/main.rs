@@ -10,6 +10,113 @@ use sonicterm_cfg::config::Config;
 use sonicterm_cfg::keymap::Keymap;
 use sonicterm_cfg::theme::Theme;
 
+#[cfg(any(target_os = "windows", test))]
+fn runtime_smoke_spec(
+    root: &std::path::Path,
+    nonce: u32,
+) -> std::result::Result<
+    sonicterm_app::app::RuntimeSmokeSpec,
+    sonicterm_app::app::RuntimeSmokeFailure,
+> {
+    let marker = format!("__SONICTERM_SMOKE_{nonce}__");
+    let command = format!(
+        "set SONICTERM_SMOKE_NONCE={nonce}\r\necho __SONICTERM_SMOKE_%SONICTERM_SMOKE_NONCE%__\r\n"
+    )
+    .into_bytes();
+    sonicterm_app::app::RuntimeSmokeSpec::new(
+        "cmd.exe",
+        marker,
+        command,
+        root.join("config"),
+        root.join("logs"),
+    )
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn runtime_exit_code(
+    result: &std::result::Result<(), sonicterm_app::app::RuntimeSmokeFailure>,
+) -> i32 {
+    result.as_ref().map_or_else(|failure| failure.exit_code(), |()| 0)
+}
+
+#[cfg(target_os = "windows")]
+fn runtime_smoke_root() -> std::path::PathBuf {
+    std::env::var_os("SONICTERM_RUNTIME_SMOKE_DIR")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("sonicterm-runtime-smoke-{}", std::process::id()))
+        })
+}
+
+#[cfg(target_os = "windows")]
+fn run_windows_runtime_smoke() -> Result<i32> {
+    let spec = runtime_smoke_spec(&runtime_smoke_root(), std::process::id())?;
+    std::fs::create_dir_all(spec.config_dir())?;
+    std::fs::create_dir_all(spec.log_dir())?;
+    sonicterm_logging::install_panic_hook(spec.log_dir().to_path_buf());
+    let _exit_guard = sonicterm_logging::install_exit_logging(spec.log_dir());
+    let session =
+        sonicterm_logging::session_state::arm(spec.log_dir(), env!("CARGO_PKG_VERSION")).ok();
+    if let Some(session) = session.as_ref() {
+        sonicterm_logging::crash::set_session_id(session.id());
+    }
+    let breadcrumb_writer = session.as_ref().and_then(|session| {
+        sonicterm_logging::breadcrumbs::BreadcrumbWriter::start(
+            spec.log_dir(),
+            session.id(),
+            sonicterm_logging::breadcrumbs::BreadcrumbLimits::default(),
+        )
+        .ok()
+    });
+    let breadcrumb_recorder = breadcrumb_writer.as_ref().map(|writer| writer.recorder());
+    let config = windows_default_config();
+    let log_cfg = config.logging.clone();
+    sonicterm_logging::cleanup_log_files(spec.log_dir(), &log_cfg);
+    let _log_guard = sonicterm_logging::init_in(&log_cfg, spec.log_dir()).ok();
+    let assets = asset_dir();
+    let theme =
+        Theme::load_or_default(&assets.join("themes").join(format!("{}.toml", config.theme)));
+    let keymap =
+        Keymap::load_or_default(&assets.join("keymaps").join(format!("{}.toml", config.keymap)));
+    let backdrop_kind = config.appearance.backdrop;
+    let on_window_ready: Box<dyn FnOnce(raw_window_handle::RawWindowHandle) + Send> =
+        Box::new(move |raw| {
+            if let raw_window_handle::RawWindowHandle::Win32(handle) = raw {
+                let hwnd = windows::Win32::Foundation::HWND(handle.hwnd.get() as *mut _);
+                // SAFETY: winit supplied a live HWND and the callback uses it synchronously.
+                unsafe { backdrop::apply_backdrop(hwnd, backdrop_kind) };
+            }
+        });
+    let machine = sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default());
+    let process_privilege = privilege::detect_process_privilege().unwrap_or_else(|error| {
+        tracing::warn!(%error, "process privilege query failed; treating process as unprivileged");
+        sonicterm_app::ProcessPrivilege::Unprivileged
+    });
+    let mut shell = sonicterm_app::shell::WindowsShell::new(machine, theme, config, keymap)
+        .with_process_privilege(process_privilege)
+        .with_on_window_ready(on_window_ready);
+    if let Some(recorder) = breadcrumb_recorder.clone() {
+        shell = shell.with_breadcrumb_recorder(recorder);
+    }
+    let outcome = shell.run_smoke(spec, std::time::Duration::from_secs(30));
+    if let Some(recorder) = &breadcrumb_recorder {
+        let _ = recorder.record(sonicterm_logging::breadcrumbs::BreadcrumbEvent::Lifecycle(
+            sonicterm_logging::breadcrumbs::LifecycleEvent::CleanShutdown,
+        ));
+    }
+    if let Some(writer) = breadcrumb_writer {
+        let _ = writer.shutdown();
+    }
+    if let Some(session) = session {
+        let _ = session.mark_clean();
+    }
+    if let Err(error) = &outcome {
+        tracing::error!(code = error.exit_code(), %error, "Windows runtime smoke failed");
+    }
+    Ok(runtime_exit_code(&outcome))
+}
+
 #[cfg(target_os = "windows")]
 fn set_process_dpi_awareness() {
     use windows::Win32::UI::HiDpi::{
@@ -56,14 +163,19 @@ mod software_presenter;
 #[cfg(target_os = "windows")]
 mod tab_drag_os;
 
-fn main() -> Result<()> {
+fn main() -> Result<std::process::ExitCode> {
     set_process_dpi_awareness();
     #[cfg(target_os = "windows")]
     let parsed_cli = cli::parse_cli_from_env()?;
     #[cfg(target_os = "windows")]
+    if parsed_cli.runtime_smoke {
+        let code = u8::try_from(run_windows_runtime_smoke()?)?;
+        return Ok(std::process::ExitCode::from(code));
+    }
+    #[cfg(target_os = "windows")]
     if parsed_cli.refresh_shell_associations {
         refresh_shell_associations();
-        return Ok(());
+        return Ok(std::process::ExitCode::SUCCESS);
     }
     #[cfg(target_os = "windows")]
     startup::queue_startup_open_script(&parsed_cli, || std::env::current_dir().ok())?;
@@ -271,7 +383,8 @@ fn main() -> Result<()> {
                 let _ = session.mark_clean();
             }
         }
-        result
+        result?;
+        Ok(std::process::ExitCode::SUCCESS)
     }
     #[cfg(not(target_os = "windows"))]
     {

@@ -15,9 +15,12 @@ memory diagnostics, crash evidence, and bug-report data.
 
 `tracing-appender` uses daily names such as `sonicterm.log.YYYY-MM-DD`; the file
 with the newest modification time is active. Size rotation may add a Unix-time
-suffix. On Windows, `~` means the current user's profile directory. Linux runtime
-smokes use an isolated directory from `SONICTERM_RUNTIME_SMOKE_DIR` instead of
-the user log tree.
+suffix. On Windows, `~` means the current user's profile directory. Native
+runtime smokes on macOS, Windows, and Linux use the explicit `logs/` child of
+`SONICTERM_RUNTIME_SMOKE_DIR` instead of the user log tree; their separate
+`config/` child is used for config/reload state, and `HOME` is preserved. The
+outer runner removes inherited `NO_COLOR` and retains failed stdout/stderr plus
+SonicTerm logs for CI artifacts.
 
 ## Configuration and retention
 
@@ -315,8 +318,10 @@ sensitive command data.
 
 `tracing-appender` 按天生成 `sonicterm.log.YYYY-MM-DD` 之类的文件；修改时间最新的
 文件正在使用。按大小轮转时还可能增加 Unix 时间后缀。在 Windows 上，`~` 表示当前
-用户的配置文件目录。Linux 运行时 smoke 使用 `SONICTERM_RUNTIME_SMOKE_DIR` 指定的
-隔离目录，不写入用户日志树。
+用户的配置文件目录。macOS、Windows 与 Linux 原生运行时 smoke 使用
+`SONICTERM_RUNTIME_SMOKE_DIR` 下显式的 `logs/` 子目录，不写入用户日志树；分开的
+`config/` 子目录承载配置与重载状态，并保留原有 `HOME`。外层 runner 会移除继承的
+`NO_COLOR`，并保存失败输出和日志证据。
 
 ## 配置与保留策略
 

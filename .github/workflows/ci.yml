@@ -219,11 +219,62 @@ jobs:
         shell: bash
         run: scripts/rust-logic-coverage.sh
 
+  macos-smoke:
+    name: macOS native runtime smoke
+    runs-on: macos-14
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 5
+
+      - name: Install Rust
+        timeout-minutes: 5
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+
+      - name: Restore Cargo dependencies
+        timeout-minutes: 10
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-macos-14
+          add-job-id-key: false
+          cache-workspace-crates: false
+          save-if: false
+
+      - name: Install native dependencies
+        timeout-minutes: 10
+        run: brew install cairo pkg-config
+
+      - name: Build macOS release binary for runtime smoke
+        timeout-minutes: 25
+        run: cargo build --release -p sonicterm-mac
+
+      - name: Require macOS native runtime smoke
+        timeout-minutes: 3
+        run: |
+          python3 scripts/native-smoke-runner.py \
+            --timeout-seconds 45 \
+            --state-dir "$RUNNER_TEMP/sonicterm-macos-smoke" \
+            --log-file "$RUNNER_TEMP/sonicterm-macos-smoke.log" \
+            -- target/release/sonicterm-mac --runtime-smoke
+
+      - name: Upload macOS native smoke logs
+        if: ${{ failure() }}
+        timeout-minutes: 5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: sonicterm-macos-smoke-logs-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/sonicterm-macos-smoke.log
+            ${{ runner.temp }}/sonicterm-macos-smoke/logs/**
+          if-no-files-found: ignore
+
   macos:
     name: macos-14 / unit tests
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [macos-core, macos-features, macos-coverage]
+    needs: [macos-core, macos-features, macos-coverage, macos-smoke]
     if: always()
     steps:
       - name: Verify macOS shards
@@ -233,8 +284,9 @@ jobs:
           CORE: ${{ needs.macos-core.result }}
           FEATURES: ${{ needs.macos-features.result }}
           COVERAGE: ${{ needs.macos-coverage.result }}
+          SMOKE: ${{ needs.macos-smoke.result }}
         run: |
-          for result in "$CORE" "$FEATURES" "$COVERAGE"; do
+          for result in "$CORE" "$FEATURES" "$COVERAGE" "$SMOKE"; do
             test "$result" = "success"
           done
 
@@ -498,9 +550,24 @@ jobs:
         timeout-minutes: 5
         run: cargo test -p sonicterm-gpu --test renderer_churn_baseline -- --nocapture
 
-      - name: Verify Windows software presentation capability
+      - name: Require Windows GDI capability=EXERCISED
         timeout-minutes: 5
-        run: cargo test -p sonicterm-gpu --test windows_software_present_capability -- --nocapture
+        shell: pwsh
+        run: |
+          python scripts/native-smoke-runner.py `
+            --timeout-seconds 120 `
+            --log-file "$env:RUNNER_TEMP\sonicterm-windows-gdi.log" `
+            --require-capability EXERCISED `
+            -- cargo test -p sonicterm-gpu --test windows_software_present_capability -- --nocapture
+
+      - name: Upload Windows GDI probe log
+        if: ${{ failure() }}
+        timeout-minutes: 5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: sonicterm-windows-gdi-log-${{ github.sha }}
+          path: ${{ runner.temp }}/sonicterm-windows-gdi.log
+          if-no-files-found: ignore
 
       - name: Verify Windows WARP allocator baseline
         timeout-minutes: 5
@@ -567,11 +634,86 @@ jobs:
           path: target/v1.2.0-baseline/evidence-windows-latest
           if-no-files-found: error
 
+  windows-smoke:
+    name: Windows native runtime smoke
+    runs-on: windows-latest
+    timeout-minutes: 55
+    needs: [windows-native]
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-binary-cache
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 5
+
+      - name: Install Rust
+        timeout-minutes: 5
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+
+      - name: Resolve vcpkg commit
+        id: vcpkg
+        timeout-minutes: 2
+        shell: pwsh
+        run: |
+          $root = if ($env:VCPKG_INSTALLATION_ROOT) { $env:VCPKG_INSTALLATION_ROOT } else { "C:\vcpkg" }
+          "sha=$((git -C $root rev-parse HEAD).Trim())" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "image=$env:ImageVersion" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Restore vcpkg binaries (Cairo)
+        timeout-minutes: 5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-${{ steps.vcpkg.outputs.image }}-${{ steps.vcpkg.outputs.sha }}-${{ hashFiles('scripts/setup-windows-cairo.ps1') }}
+          restore-keys: |
+            ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-
+
+      - name: Install Cairo for Windows
+        timeout-minutes: 5
+        shell: pwsh
+        run: .\scripts\setup-windows-cairo.ps1
+
+      - name: Restore Cargo dependencies
+        timeout-minutes: 10
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-windows-latest
+          add-job-id-key: false
+          cache-workspace-crates: false
+          save-if: false
+
+      - name: Build Windows release binary for runtime smoke
+        timeout-minutes: 25
+        run: cargo build --release -p sonicterm-windows
+
+      - name: Require Windows native runtime smoke
+        timeout-minutes: 3
+        shell: pwsh
+        run: |
+          python scripts/native-smoke-runner.py `
+            --timeout-seconds 45 `
+            --state-dir "$env:RUNNER_TEMP\sonicterm-windows-smoke" `
+            --log-file "$env:RUNNER_TEMP\sonicterm-windows-smoke.log" `
+            -- target/release/sonicterm-windows.exe --runtime-smoke
+
+      - name: Upload Windows native smoke logs
+        if: ${{ failure() }}
+        timeout-minutes: 5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: sonicterm-windows-smoke-logs-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/sonicterm-windows-gdi.log
+            ${{ runner.temp }}/sonicterm-windows-smoke.log
+            ${{ runner.temp }}/sonicterm-windows-smoke/logs/**
+          if-no-files-found: ignore
+
   windows:
     name: windows-latest / unit tests
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [windows-native, windows-checks, windows-features, windows-tests]
+    needs: [windows-native, windows-checks, windows-features, windows-tests, windows-smoke]
     if: always()
     steps:
       - name: Verify Windows shards
@@ -582,8 +724,9 @@ jobs:
           CHECKS: ${{ needs.windows-checks.result }}
           FEATURES: ${{ needs.windows-features.result }}
           TESTS: ${{ needs.windows-tests.result }}
+          SMOKE: ${{ needs.windows-smoke.result }}
         run: |
-          for result in "$NATIVE" "$CHECKS" "$FEATURES" "$TESTS"; do
+          for result in "$NATIVE" "$CHECKS" "$FEATURES" "$TESTS" "$SMOKE"; do
             test "$result" = "success"
           done
 

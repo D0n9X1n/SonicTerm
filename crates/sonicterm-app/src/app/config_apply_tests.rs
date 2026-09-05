@@ -22,6 +22,77 @@ impl<S: tracing::Subscriber> Layer<S> for WarningCounter {
     }
 }
 
+#[test]
+fn runtime_asset_resolution_stays_inside_scratch_or_bundled_roots() {
+    // Protect runtime-smoke reload from consulting user-home theme and keymap directories.
+    let root = temp_config_path("runtime-assets");
+    let config = root.join("config").join("sonicterm.toml");
+    let assets = root.join("assets");
+    std::fs::create_dir_all(config.parent().unwrap().join("themes")).unwrap();
+    std::fs::create_dir_all(config.parent().unwrap().join("keymaps")).unwrap();
+    std::fs::create_dir_all(assets.join("themes")).unwrap();
+    std::fs::create_dir_all(assets.join("keymaps")).unwrap();
+    let scratch_theme = config.parent().unwrap().join("themes/custom.toml");
+    std::fs::write(&scratch_theme, "fixture").unwrap();
+    let scratch_user_theme = config.parent().unwrap().join("themes/user.toml");
+    std::fs::write(&scratch_user_theme, "fixture").unwrap();
+    let scratch_user = config
+        .parent()
+        .unwrap()
+        .join("keymaps")
+        .join(format!("{}.toml", sonicterm_cfg::keymap::platform_default_keymap_name()));
+    std::fs::write(&scratch_user, "fixture").unwrap();
+
+    assert_eq!(
+        resolve_runtime_asset_path("custom", "themes", Some(&config), &assets, "wezterm").unwrap(),
+        scratch_theme
+    );
+    assert_eq!(
+        resolve_runtime_asset_path("user", "themes", Some(&config), &assets, "wezterm").unwrap(),
+        scratch_user_theme
+    );
+    assert_eq!(
+        resolve_runtime_asset_path("missing", "themes", Some(&config), &assets, "wezterm").unwrap(),
+        assets.join("themes/missing.toml")
+    );
+    assert_eq!(
+        resolve_runtime_asset_path(
+            "user",
+            "keymaps",
+            Some(&config),
+            &assets,
+            sonicterm_cfg::keymap::platform_default_keymap_name(),
+        )
+        .unwrap(),
+        scratch_user
+    );
+    assert_eq!(
+        resolve_runtime_asset_path(
+            "C:/explicit/map.toml",
+            "keymaps",
+            Some(&config),
+            &assets,
+            "sonicterm",
+        )
+        .unwrap(),
+        PathBuf::from("C:/explicit/map.toml")
+    );
+    remove_test_path(&root);
+}
+
+#[test]
+fn normal_asset_resolution_keeps_existing_bundled_behavior() {
+    // Protect ordinary reload from inheriting scratch-only resolution policy.
+    let root = temp_config_path("normal-assets");
+    let assets = root.join("assets");
+    std::fs::create_dir_all(assets.join("themes")).unwrap();
+    assert_eq!(
+        resolve_runtime_asset_path("wezterm", "themes", None, &assets, "wezterm").unwrap(),
+        Theme::resolve_path("wezterm", &assets)
+    );
+    remove_test_path(&root);
+}
+
 fn temp_config_path(case: &str) -> PathBuf {
     let sequence = NEXT_TEMP_PATH.fetch_add(1, AtomicOrdering::Relaxed);
     std::env::temp_dir()

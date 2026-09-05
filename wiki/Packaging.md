@@ -89,6 +89,12 @@ signature. It does not use an Apple Developer ID and does not notarize. A
 downloaded package can therefore show the standard unidentified-developer
 warning; Finder's **Open** context-menu action allows the first launch.
 
+CI and Release run each architecture's just-built `sonicterm-mac
+--runtime-smoke` before its binary can enter DMG packaging. The bounded wrapper
+uses separate scratch config/log roots, preserves `HOME`, removes inherited
+`NO_COLOR`, and requires native window, renderer/device, live-grid PTY marker,
+later presentation, and the complete default warm-renderer lifecycle.
+
 ## Windows package
 
 ### Requirements and command
@@ -130,6 +136,13 @@ requires the numeric SemVer core as ProductVersion, stable UpgradeCode, nonempty
 ProductCode, `x64;1033` template, and the exact ten 64-bit `Binaries` components.
 Prerelease/build suffixes remain part of tag provenance but cannot enter MSI
 ProductVersion.
+
+CI and Release run the just-built `sonicterm-windows.exe --runtime-smoke` before
+the MSI artifact can advance. Normal CI separately requires the GDI capability
+probe's unique `EXERCISED` verdict; `HOST_INCAPABLE` is informational only. The
+runtime smoke uses real ConPTY/`cmd.exe`, separate scratch config/log roots, and
+the same window, renderer, marker, presentation, and warm-renderer lifecycle
+contract as macOS and Linux.
 
 Tooling updates use a dedicated `tooling` pull request. Change the central
 workflow version, both language halves here, and the consistency test together;
@@ -236,10 +249,12 @@ in CI.
 `scripts/smoke-linux-packages.sh` requires root in an ephemeral Linux container.
 It extracts the tarball, installs the Debian package, forces Vulkan through Mesa
 lavapipe, and runs both layouts first on X11/Xvfb and then on headless
-Wayland/Weston. Each `--runtime-smoke` must create a native window and GPU
-surface, start `/bin/sh` in a PTY, receive a marker in the grid, and present a
-later native frame. The script refuses to replace an existing SonicTerm Debian
-installation.
+Wayland/Weston. Each layout is launched through `native-smoke-runner.py`, so its
+45-second bound kills the complete process group, removes inherited `NO_COLOR`,
+and preserves failure logs. `--runtime-smoke` must create a native window and
+renderer/device, observe a `/bin/sh` marker in the live grid, present a later
+frame, and complete the default warm-renderer lifecycle. The script refuses to
+replace an existing SonicTerm Debian installation.
 
 ## Release handoff
 
@@ -334,6 +349,11 @@ SonicTerm.app/Contents/
 做 notarize。下载的安装包可能显示标准的“无法验证开发者”提示；首次启动可使用 Finder
 右键菜单中的**打开**。
 
+CI 与 Release 会在二进制进入 DMG 打包前，对每个架构刚构建的
+`sonicterm-mac --runtime-smoke` 运行必需原生 smoke。有界 wrapper 使用分开的临时
+config/log 根目录，保留 `HOME`，移除继承的 `NO_COLOR`，并要求原生窗口、渲染器/设备、
+实时 grid 中的 PTY marker、之后的呈现和完整默认预热渲染器生命周期。
+
 ## Windows 安装包
 
 ### 要求与命令
@@ -372,6 +392,12 @@ Property、Component、Feature、FeatureComponents 和 SummaryInformation 数据
 ProductVersion 等于数字 SemVer 核心、UpgradeCode 稳定、ProductCode 非空、template 为
 `x64;1033`，且 `Binaries` 精确引用十个 64 位 component。预发布/构建后缀仍属于 tag
 来源证明，但不能进入 MSI ProductVersion。
+
+CI 与 Release 会在 MSI artifact 继续流转前运行刚构建的
+`sonicterm-windows.exe --runtime-smoke`。普通 CI 另行要求 GDI capability 探针给出唯一
+`EXERCISED` verdict；`HOST_INCAPABLE` 只提供信息，不能通过 gate。运行 smoke 使用真实
+ConPTY/`cmd.exe`、分开的临时 config/log 根目录，以及与 macOS/Linux 相同的窗口、渲染器、
+marker、呈现和预热渲染器生命周期契约。
 
 工具更新通过独立的 `tooling` pull request 完成。中央 workflow 版本、本文两个语言半区和
 一致性测试必须一起修改；合并前运行 mutation 测试并验证新构建的 MSI。不要先浮动工具，
@@ -470,9 +496,10 @@ CI 另行验证 desktop entry、AppStream metadata 和 Debian dependency field�
 
 `scripts/smoke-linux-packages.sh` 要求在临时 Linux container 中以 root 运行。它解压 tarball、
 安装 Debian package、强制 Vulkan 使用 Mesa lavapipe，然后先在 X11/Xvfb、再在 headless
-Wayland/Weston 上运行两种布局。每个 `--runtime-smoke` 必须创建原生窗口和 GPU surface、
-在 PTY 中启动 `/bin/sh`、让 marker 进入 grid，并呈现之后的一帧。脚本会拒绝替换已有的
-SonicTerm Debian 安装。
+Wayland/Weston 上运行两种布局。每种布局都通过 `native-smoke-runner.py` 启动，因此 45 秒
+期限会终止完整进程组、移除继承的 `NO_COLOR` 并保存失败日志。`--runtime-smoke` 必须创建
+原生窗口与渲染器/设备，在实时 grid 中观察到 `/bin/sh` marker，呈现之后的一帧，并完成默认
+预热渲染器生命周期。脚本会拒绝替换已有的 SonicTerm Debian 安装。
 
 ## 发布交接
 

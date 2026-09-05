@@ -161,9 +161,10 @@ The three shipping binaries share `ShellRunner` through `MacShell`,
   AppKit window hooks.
 - Windows owns per-monitor-v2 DPI setup, `muda` menus, DWM backdrop work, OLE
   drag/drop, and GDI software presentation hooks.
-- Linux owns X11/Wayland application identity, package assets, font preflight,
-  and the package runtime smoke. Native menus, desktop notifications, material
-  backdrops, and cross-process tab drag are absent there.
+- Linux owns X11/Wayland application identity, package assets, and font preflight.
+  All platform binaries expose the shared native runtime smoke; Linux package
+  layouts additionally run it on X11 and Wayland. Native menus, desktop
+  notifications, material backdrops, and cross-process tab drag are absent there.
 
 All reusable keyboard, terminal, pane, and renderer behavior stays in shared
 crates.
@@ -376,8 +377,9 @@ macOS 使用 CoreText 发现字体，Windows 使用 GDI，Linux 使用 Fontconfi
 
 - macOS 负责 AppKit 菜单、关闭原生标签页、剪贴板拖动交接和 AppKit 窗口钩子。
 - Windows 负责 per-monitor-v2 DPI、`muda` 菜单、DWM 背景效果、OLE 拖放和 GDI 软件呈现钩子。
-- Linux 负责 X11/Wayland 应用标识、包内资源、字体预检和包运行冒烟测试。该平台没有原生
-  菜单、桌面通知、材质背景和跨进程标签页拖动。
+- Linux 负责 X11/Wayland 应用标识、包内资源和字体预检。所有平台二进制都暴露共享原生运行
+  smoke；Linux 包布局还会在 X11 与 Wayland 上运行它。该平台没有原生菜单、桌面通知、材质
+  背景和跨进程标签页拖动。
 
 可复用的键盘、终端、窗格和渲染行为都留在共享 crate 中。
 

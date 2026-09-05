@@ -14,6 +14,7 @@ pub struct ParsedCli {
     pub tearout: Option<TabPayload>,
     pub open_script: Option<PathBuf>,
     pub refresh_shell_associations: bool,
+    pub runtime_smoke: bool,
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -39,6 +40,8 @@ where
     let mut args = args.into_iter().map(Into::into);
     let _program = args.next();
     let mut out = ParsedCli::default();
+    let mut unknown_args = 0usize;
+    let mut runtime_smoke_flags = 0usize;
     while let Some(arg) = args.next() {
         if arg == OsStr::new("--tear-out-payload") {
             let Some(json) = args.next() else {
@@ -57,12 +60,27 @@ where
         } else if arg == OsStr::new("--refresh-shell-associations") {
             // When: `arg` selects association refresh after both payload options were rejected; no path value is consumed.
             out.refresh_shell_associations = true;
+        } else if arg == OsStr::new("--runtime-smoke") {
+            // When: `arg` equals `--runtime-smoke`, count the one permitted hidden-mode flag.
+            runtime_smoke_flags = runtime_smoke_flags.saturating_add(1);
+            out.runtime_smoke = true;
         } else {
-            // When: `arg` is not SonicTerm-owned, tolerate launch-shim metadata instead of breaking startup.
+            // When: `arg` is not SonicTerm-owned, ordinary startup tolerates launch-shim metadata.
+            unknown_args = unknown_args.saturating_add(1);
         }
     }
     if out.open_script.is_some() && out.tearout.is_some() {
         bail!("--open-script cannot be combined with --tear-out-payload")
+    }
+    if out.runtime_smoke
+        && (out.open_script.is_some()
+            || out.tearout.is_some()
+            || out.refresh_shell_associations
+            || unknown_args > 0
+            || runtime_smoke_flags != 1)
+    {
+        // When: `runtime_smoke` accompanies launch state, `unknown_args`, or duplicate flags, reject it.
+        bail!("--runtime-smoke cannot be combined with user launch options")
     }
     Ok(out)
 }

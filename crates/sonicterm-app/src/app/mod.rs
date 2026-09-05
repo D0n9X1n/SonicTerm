@@ -2076,7 +2076,7 @@ mod path_target;
 mod quit_hold;
 mod redraw_target;
 mod runtime_smoke;
-pub use runtime_smoke::RuntimeSmokeFailure;
+pub use runtime_smoke::{RuntimeSmokeFailure, RuntimeSmokeSpec};
 mod render_timing;
 pub mod renderer_retention;
 pub mod retention;
@@ -2546,6 +2546,8 @@ pub struct App {
     pub(in crate::app) path_workers: Option<path_target::PathWorkers>,
     /// Current native home captured once for deterministic `~/` target resolution.
     pub(super) home_dir: Option<PathBuf>,
+    /// Explicit config path used by an isolated runtime smoke; ordinary runs use the user path.
+    pub(super) runtime_config_path: Option<PathBuf>,
     /// Local hostname used to reject foreign-authority OSC 7 snapshots.
     pub(super) local_hostname: String,
     /// Hidden Linux package-smoke state; absent during ordinary application runs.
@@ -2942,6 +2944,7 @@ impl App {
             event_loop_proxy,
             path_workers,
             home_dir,
+            runtime_config_path: None,
             local_hostname,
             runtime_smoke: None,
             // Default to 60 Hz until `resumed` probes the actual

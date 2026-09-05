@@ -96,6 +96,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 # Windows only: use aws-lc-sys's checked-in assembly objects.
 export AWS_LC_SYS_PREBUILT_NASM=1
 cargo clippy -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --all-targets -- -D warnings
+python scripts/native-smoke-runner.py --help
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --no-deps
 cargo test -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --lib --bins --tests --no-fail-fast
@@ -154,12 +155,24 @@ unavailable, when production reserved bytes are not below 64 MiB, when the
 largest block is not below 128 MiB, or when production reserved bytes do not
 improve on the old default policy.
 
+The macOS and Windows CI aggregates include dedicated native-smoke shards that
+build the shipping release binaries and run them through
+`scripts/native-smoke-runner.py`. Windows also requires the GDI probe to emit the
+unique verdict `capability=EXERCISED`; `HOST_INCAPABLE` remains informational and
+cannot satisfy the required gate. The runner preserves `HOME`, removes inherited
+`NO_COLOR`, captures diagnostics, and kills the full child tree after its
+45-second deadline.
+
 The Ubuntu 22.04 CI aggregate requires both the core-gate shard and the
 independent package/runtime shard. The package shard builds the shipping
 `sonicterm` Linux binary, produces `.deb` and `.tar.gz` packages, and runs both
-layouts on X11/Xvfb and Wayland/Weston with Vulkan/lavapipe. The smoke exits
-successfully only after window creation, GPU initialization, `/bin/sh` PTY
-marker round-trip, and a subsequent native frame presentation.
+layouts on X11/Xvfb and Wayland/Weston with Vulkan/lavapipe. Every platform smoke
+uses separate scratch config and log roots and succeeds only after native window
+and renderer/device creation, a platform-shell PTY marker observed in the live
+grid, a later native presentation, and default warm-renderer creation,
+retention reporting, adoption, child presentation, and release with the live
+renderer count restored to its pre-window baseline. Warm-lifecycle failure is
+stable exit code `16`.
 
 Two more limits worth knowing before trusting a green run:
 

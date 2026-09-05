@@ -462,14 +462,12 @@ impl App {
             super::seed_parser_theme_colors(&mut p, &self.theme);
         }
         let redraw_target = Arc::new(Mutex::new(self.main_window_id));
-        let pty = match PtyHandle::spawn_default_shell(
-            cols,
-            rows,
-            launch.shell_spawn_opts(
-                self.config.terminal.term_program.clone(),
-                self.config.terminal.shell.clone(),
-            ),
-        ) {
+        let mut shell_opts = launch.shell_spawn_opts(
+            self.config.terminal.term_program.clone(),
+            self.config.terminal.shell.clone(),
+        );
+        shell_opts.clean_e2e = self.runtime_smoke.is_some();
+        let pty = match PtyHandle::spawn_default_shell(cols, rows, shell_opts) {
             Ok(pty) => {
                 // When: spawn_default_shell returns Ok(pty), stage any launch draft before the worker starts.
                 match launch.draft_for_shell(pty.shell_program_path()) {

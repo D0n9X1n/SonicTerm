@@ -1131,6 +1131,7 @@ impl PtyHandle {
         for a in args {
             builder.arg(a);
         }
+        apply_clean_e2e_environment(&mut builder, opts.clean_e2e);
         let home = std::env::var("HOME").ok();
         apply_child_cwd(&mut builder, opts.cwd.as_deref(), home.as_deref());
         apply_child_pty_env(&mut builder, &opts.term_program);
@@ -1359,6 +1360,14 @@ fn spawn_writer_thread(
         // thread-spawn failure at PTY init is unrecoverable.
         .expect("spawn pty writer");
     PtyIoThread { handle: Some(handle), done }
+}
+
+fn apply_clean_e2e_environment(builder: &mut CommandBuilder, clean_e2e: bool) {
+    if clean_e2e {
+        // Suppress shell hooks without replacing HOME or unrelated environment.
+        builder.env_remove("ENV");
+        builder.env_remove("BASH_ENV");
+    }
 }
 
 fn default_shell() -> String {
@@ -1779,6 +1788,7 @@ pub(crate) fn clean_e2e_args(shell_path: &str) -> Vec<String> {
         "pwsh.exe" | "powershell.exe" | "pwsh" | "powershell" => {
             vec!["-NoLogo".to_string(), "-NoProfile".to_string()]
         }
+        "cmd.exe" | "cmd" => vec!["/D".to_string()],
         "bash" | "bash.exe" => {
             vec!["--norc".to_string(), "--noprofile".to_string()]
         }

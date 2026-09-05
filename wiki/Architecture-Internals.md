@@ -341,14 +341,18 @@ starts, so a failed gate blocks the MSI and publication without being rerun at
 tag time.
 
 Linux package verification builds both `.deb` and `.tar.gz` layouts. The runtime
-smoke runs them on X11/Xvfb and Wayland/Weston with Vulkan/lavapipe. It requires
-window creation, GPU initialization, a `/bin/sh` PTY marker round trip, and a
-later native presentation.
+smoke runs them on X11/Xvfb and Wayland/Weston with Vulkan/lavapipe. Like the
+macOS and Windows binary smokes, it requires native window and renderer/device
+creation, a platform-shell PTY marker observed in the live grid, a later native
+presentation, and default warm-renderer create/report/adopt/release with the
+process renderer count restored.
 
 macOS packaging verifies binary architecture and the app's ad-hoc signature.
-The workflow does not perform Developer ID signing, notarization, or a packaged
-DMG launch smoke. The Windows workflow does not sign or install-run the MSI.
-Installer signing is therefore not a verified release invariant.
+Each just-built macOS architecture and the just-built Windows executable must
+pass the shared native runtime smoke before packaging can advance. The workflow
+does not perform Developer ID signing, notarization, a packaged DMG launch, MSI
+signing, or MSI install-run. Installer signing and post-install launch are
+therefore not verified release invariants.
 
 Release validation requires an exact completed successful `main` CI run for the
 tag commit, then validates every workspace package version and the release-asset
@@ -637,12 +641,14 @@ cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocaptur
 `main` CI run，之后才启动 `build-windows`，因此失败会阻止 MSI 和发布，且无需在 tag 阶段重跑。
 
 Linux 包验证会构建 `.deb` 与 `.tar.gz` 两种布局。运行冒烟测试在 X11/Xvfb 和
-Wayland/Weston 上使用 Vulkan/lavapipe。测试要求窗口创建、GPU 初始化、`/bin/sh` PTY
-标记往返，以及之后一次原生呈现。
+Wayland/Weston 上使用 Vulkan/lavapipe。与 macOS 和 Windows 二进制 smoke 相同，它要求
+原生窗口与渲染器/设备、实时 grid 中观察到的平台 shell PTY marker、之后的原生呈现，以及
+默认预热渲染器的创建/报告/采用/释放并恢复进程渲染器计数。
 
-macOS 打包会检查二进制架构和应用的 ad-hoc 签名。工作流没有执行 Developer ID 签名、
-公证或 DMG 打包后启动冒烟测试。Windows 工作流也没有签名 MSI 或安装运行它。因此，
-安装包签名不是当前已验证的发布不变量。
+macOS 打包会检查二进制架构和应用的 ad-hoc 签名。每个刚构建的 macOS 架构以及刚构建的
+Windows 可执行文件都必须先通过共享原生运行 smoke，打包才能继续。工作流不会执行 Developer
+ID 签名、公证、打包后 DMG 启动、MSI 签名或 MSI 安装后运行。因此，安装器签名和安装后启动
+不是当前已验证的发布不变量。
 
 发布验证要求 tag commit 存在完全相同、已完成且成功的 `main` CI run，随后核对每个
 workspace package 版本并验证 release asset 工具。它不会重复源码、unit、integration、文档、

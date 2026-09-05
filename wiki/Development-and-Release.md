@@ -54,6 +54,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 # Windows only: use aws-lc-sys's checked-in assembly objects.
 export AWS_LC_SYS_PREBUILT_NASM=1
 cargo clippy -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --all-targets -- -D warnings
+python scripts/native-smoke-runner.py --help
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --no-deps
 cargo test -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --lib --bins --tests --no-fail-fast
@@ -135,26 +136,32 @@ and Wiki publication before starting the next serialized pull request.
 ### macOS 14 and Windows latest
 
 The stable required checks are fail-closed aggregate jobs: `macos-14 / unit
-tests` requires `macos-core`, `macos-features`, and `macos-coverage`, while
-`windows-latest / unit tests` requires `windows-native`, `windows-checks`,
-`windows-features`, and `windows-tests`. Each aggregate runs with `if: always()`
-and accepts only explicit `success` results, so a failed, cancelled, or skipped
-shard cannot turn into a successful required check.
+tests` requires `macos-core`, `macos-features`, `macos-coverage`, and
+`macos-smoke`, while `windows-latest / unit tests` requires `windows-native`,
+`windows-checks`, `windows-features`, `windows-tests`, and `windows-smoke`.
+Each aggregate runs with `if: always()` and accepts only explicit `success`
+results, so a failed, cancelled, or skipped shard cannot turn into a successful
+required check.
 
 The macOS core shard runs source-policy checks, strict Rustdoc, the one-pass
 workspace test gate, host probes, tooling tests, and real resource-baseline
 capture. Its feature shard runs Clippy, Rustdoc, and tests for all app and IO
 features on native macOS. Its independent coverage shard installs the pinned
-`cargo-llvm-cov` and runs the deterministic logic coverage gate.
+`cargo-llvm-cov` and runs the deterministic logic coverage gate. The restore-only
+`macos-smoke` shard builds the shipping release binary and requires its bounded
+native smoke.
 
 Windows first prepares static Cairo through vcpkg. It restores the binary cache,
-builds a cold miss, and saves that result immediately before the three dependent
+builds a cold miss, and saves that result immediately before the four dependent
 shards start. The checks shard runs format, Clippy, source-policy, comment, and
-Rustdoc gates. The feature shard runs all-feature app and IO Clippy, Rustdoc,
-and tests on native Windows. The test shard runs the one-pass workspace
-tests, host probes, software presentation capability, WARP allocator,
+Rustdoc gates. The feature shard runs all-feature app and IO Clippy, Rustdoc, and
+tests on native Windows. The test shard runs the one-pass workspace tests, host
+probes, fail-closed GDI presentation verification, WARP allocator,
 software-selection presentation, tooling tests, and real resource-baseline
-capture.
+capture. The GDI wrapper accepts only one `capability=EXERCISED` verdict;
+`HOST_INCAPABLE` remains informational and cannot satisfy the gate. The
+restore-only `windows-smoke` shard builds the shipping release binary and
+requires its bounded native smoke.
 
 Each platform's Rust-consuming shards share one dependency cache key and exclude
 workspace-crate artifacts. Only the core/checks shard may save it, and only on a
@@ -198,10 +205,14 @@ Weston, and Debian packaging tools, then:
 5. runs both package layouts on X11/Xvfb and Wayland/Weston with Vulkan/lavapipe;
 6. uploads the packages, or smoke logs on failure.
 
-A package smoke cannot pass without a native window, GPU initialization,
-`/bin/sh` PTY marker round-trip, and a later native frame presentation. The core
-shard is the sole main-only Linux dependency-cache writer; the package shard is
-restore-only and workspace-crate artifacts remain excluded.
+A platform smoke cannot pass without a native window, renderer/device, a
+platform-shell PTY marker observed in the live grid, a later native frame
+presentation, and the default warm renderer's create/report/adopt/child-present/
+release lifecycle with the process renderer count restored. Every invocation
+uses separate scratch config/log roots and the process-tree-reaping wrapper; a
+warm-lifecycle failure exits `16`. The core shard is the sole main-only Linux
+dependency-cache writer; the package shard is restore-only and workspace-crate
+artifacts remain excluded.
 
 ## Gate blind spots
 
@@ -311,12 +322,15 @@ flowchart TD
     manifest --> notes --> publish
 ```
 
-All three packaging chains block publication. Windows Release restores the
-main-published vcpkg binary cache but performs its Rust target build without a
-Release cache write. All Release Rust target builds are cache-independent, so
-tag-specific cache entries cannot displace the bounded CI dependency caches.
-The Linux chain retains both X11 and Wayland smokes before its artifacts can
-reach publication.
+All three packaging chains block publication. Each macOS architecture and the
+Windows release job run the exact built shipping binary's native smoke before
+its artifact can advance; Windows does not rerun the GDI test because the release
+provenance boundary already requires the exact successful `main` CI result that
+proved `EXERCISED`. Windows Release restores the main-published vcpkg binary
+cache but performs its Rust target build without a Release cache write. All
+Release Rust target builds are cache-independent, so tag-specific cache entries
+cannot displace the bounded CI dependency caches. The Linux chain retains both
+X11 and Wayland package smokes before its artifacts can reach publication.
 
 ### Published assets
 
@@ -450,6 +464,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 # Windows only: use aws-lc-sys's checked-in assembly objects.
 export AWS_LC_SYS_PREBUILT_NASM=1
 cargo clippy -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --all-targets -- -D warnings
+python scripts/native-smoke-runner.py --help
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --no-deps
 cargo test -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --lib --bins --tests --no-fail-fast
@@ -520,21 +535,25 @@ Windows-only 测试；本地、macOS、Ubuntu 或 review 结果都不能替代�
 ### macOS 14 与 Windows latest
 
 稳定的必需检查是 fail-closed 汇总 job：`macos-14 / unit tests` 同时依赖 `macos-core`、
-`macos-features` 与 `macos-coverage`，而 `windows-latest / unit tests` 同时依赖
-`windows-native`、`windows-checks`、`windows-features` 与 `windows-tests`。每个汇总 job
+`macos-features`、`macos-coverage` 与 `macos-smoke`，而 `windows-latest / unit tests`
+同时依赖 `windows-native`、`windows-checks`、`windows-features`、`windows-tests` 与
+`windows-smoke`。每个汇总 job
 都使用 `if: always()`，且只接受显式 `success`，因此任一 shard 失败、取消或跳过都不会变成
 成功的必需检查。
 
 macOS core shard 运行源码策略检查、严格 Rustdoc、一次性 workspace 测试 gate、host probe、
 工具测试与真实 resource baseline 采集。feature shard 在原生 macOS 上对应用与 IO 的全部
 feature 运行 Clippy、Rustdoc 与测试。独立的 coverage shard 安装固定版本的
-`cargo-llvm-cov`，并运行确定性 logic coverage gate。
+`cargo-llvm-cov`，并运行确定性 logic coverage gate。只恢复缓存的 `macos-smoke` shard 会构建
+发布用 release 二进制，并要求其有界原生 smoke 成功。
 
-Windows 先通过 vcpkg 准备静态 Cairo。它先恢复 binary cache，冷 miss 时完成构建，并在三个依赖
+Windows 先通过 vcpkg 准备静态 Cairo。它先恢复 binary cache，冷 miss 时完成构建，并在四个依赖
 shard 启动前立即保存结果。checks shard 运行 format、Clippy、源码策略、注释与 Rustdoc gate；
 feature shard 在原生 Windows 上对应用与 IO 的全部 feature 运行 Clippy、Rustdoc 与测试；
-tests shard 运行一次性 workspace 测试、host probe、software presentation capability、WARP
-allocator、software-selection presentation、工具测试与真实 resource baseline 采集。
+tests shard 运行一次性 workspace 测试、host probe、fail-closed GDI 呈现验证、WARP allocator、
+software-selection presentation、工具测试与真实 resource baseline 采集。GDI wrapper 只接受
+唯一的 `capability=EXERCISED` verdict；`HOST_INCAPABLE` 仍是信息性结果，不能满足必需 gate。
+只恢复缓存的 `windows-smoke` shard 会构建发布用 release 二进制，并要求其有界原生 smoke 成功。
 
 每个平台所有使用 Rust 的 shard 共用一个依赖 cache key，且不缓存 workspace crate artifact。
 只有 core/checks shard 可以保存，且仅限推送到 `main`；coverage、feature、test、package 与全部
@@ -569,9 +588,11 @@ Xvfb、Weston 和 Debian 打包工具，随后：
 5. 用 Vulkan/lavapipe 在 X11/Xvfb 和 Wayland/Weston 上运行两种 package layout；
 6. 上传 package，失败时上传 smoke log。
 
-没有原生窗口、GPU 初始化、`/bin/sh` PTY marker 往返和之后的原生 frame 呈现，package smoke
-就不能通过。core shard 是唯一可在 `main` 写入 Linux 依赖 cache 的 job；package shard 只恢复，
-且 workspace crate artifact 始终排除在 cache 外。
+任何平台 smoke 若没有原生窗口、渲染器/设备、实时 grid 中观察到的平台 shell PTY marker、
+之后的原生 frame 呈现，以及默认预热渲染器的创建/报告/采用/子窗口呈现/释放并恢复进程渲染器
+计数，就不能通过。每次调用都使用分开的临时 config/log 根目录和可回收完整进程树的 wrapper；
+预热生命周期失败使用退出码 `16`。core shard 是唯一可在 `main` 写入 Linux 依赖 cache 的 job；
+package shard 只恢复，且 workspace crate artifact 始终排除在 cache 外。
 
 ## Gate 盲区
 
@@ -663,10 +684,12 @@ flowchart TD
     manifest --> notes --> publish
 ```
 
-三个打包链都会阻断发布。Windows Release 会恢复由 `main` 发布的 vcpkg binary cache，但其
-Rust target 构建不会写入 Release cache。全部 Release Rust target build 均独立于 cache，避免
-tag 专属 cache 条目挤出有界的 CI 依赖 cache。Linux 链会保留 X11 与 Wayland 两种 smoke，只有
-全部通过后其 artifact 才能进入发布。
+三个打包链都会阻断发布。两个 macOS 架构和 Windows release job 都会在 artifact 继续流转前，
+运行刚构建的发行二进制原生 smoke；Windows 不会重复运行 GDI 测试，因为 release 来源验证已要求
+完全相同 commit 的成功 `main` CI 结果，其中已经证明 `EXERCISED`。Windows Release 会恢复由
+`main` 发布的 vcpkg binary cache，但其 Rust target 构建不会写入 Release cache。全部 Release
+Rust target build 均独立于 cache，避免 tag 专属 cache 条目挤出有界的 CI 依赖 cache。Linux 链
+会保留 X11 与 Wayland 两种 package smoke，只有全部通过后其 artifact 才能进入发布。
 
 ### 发布资产
 

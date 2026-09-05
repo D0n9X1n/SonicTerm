@@ -557,11 +557,13 @@ class ExecutorDeadlineTests(unittest.TestCase):
             "macos-core": 45,
             "macos-features": 45,
             "macos-coverage": 35,
+            "macos-smoke": 55,
             "macos": 5,
             "windows-native": 50,
             "windows-checks": 45,
             "windows-features": 45,
             "windows-tests": 45,
+            "windows-smoke": 55,
             "windows": 5,
             "linux-core": 45,
             "linux-features": 45,
@@ -615,6 +617,12 @@ class ExecutorDeadlineTests(unittest.TestCase):
         validation = workflow.split("  validate-release-tag:\n", 1)[1]
         validation = re.split(r"(?m)^  [A-Za-z0-9_-]+:\n", validation, maxsplit=1)[0]
         self.assertIn("timeout-minutes: 35", validation.split("    steps:\n", 1)[0])
+
+        for name in ("build-mac-x86_64", "build-mac-aarch64", "build-windows"):
+            with self.subTest(job=name):
+                job = workflow.split("  {}:\n".format(name), 1)[1]
+                job = re.split(r"(?m)^  [A-Za-z0-9_-]+:\n", job, maxsplit=1)[0]
+                self.assertIn("timeout-minutes: 55", job.split("    steps:\n", 1)[0])
 
         expected = {
             ("build-mac-x86_64", "Build x86_64"): 30,

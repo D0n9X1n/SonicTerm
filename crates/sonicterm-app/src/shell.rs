@@ -15,7 +15,7 @@ use winit::event_loop::{ControlFlow, EventLoop, EventLoopProxy};
 use crate::app::os_drag::OsTabDragBackend;
 use crate::app::{
     identity_config_normalizer, App, ConfigNormalizer, KeymapLoader, RuntimeSmokeFailure,
-    ThemeLoader, UserEvent,
+    RuntimeSmokeSpec, ThemeLoader, UserEvent,
 };
 use crate::os_drag::{OsDragSink, TabPayload};
 use crate::ProcessPrivilege;
@@ -118,10 +118,14 @@ impl ShellRunner {
         Ok(())
     }
 
-    fn run_smoke(mut self, timeout: Duration) -> Result<(), RuntimeSmokeFailure> {
-        self.config.terminal.shell = Some("/bin/sh".to_string());
-        self.config.window.warm_window_pool = 0;
+    fn run_smoke(
+        mut self,
+        spec: RuntimeSmokeSpec,
+        timeout: Duration,
+    ) -> Result<(), RuntimeSmokeFailure> {
+        self.config.terminal.shell = Some(spec.shell_program().to_string());
         crate::app::init_tracing_public();
+        let renderer_baseline = sonicterm_gpu::core::live_renderer_count();
         let event_loop = EventLoop::<UserEvent>::with_user_event()
             .build()
             .map_err(|_| RuntimeSmokeFailure::EventLoop)?;
@@ -129,7 +133,7 @@ impl ShellRunner {
         let proxy = event_loop.create_proxy();
         Self::install_bridges(&proxy);
         let mut app = self.into_app(proxy.clone());
-        app.install_runtime_smoke(std::process::id());
+        app.install_runtime_smoke(&spec, renderer_baseline);
 
         let (cancel_tx, cancel_rx) = std::sync::mpsc::sync_channel(1);
         let watchdog = std::thread::Builder::new()
@@ -142,14 +146,30 @@ impl ShellRunner {
                     // When: `matches!(cancel_rx.recv_timeout(timeout), Err(RecvTimeoutError::Timeout))` is true, classify the active boundary.
                     let _ = proxy.send_event(UserEvent::RuntimeSmokeTimeout);
                 }
-            })
-            .map_err(|_| RuntimeSmokeFailure::EventLoop)?;
+            });
 
-        let run_result = event_loop.run_app(&mut app);
-        let _ = cancel_tx.send(());
-        let _ = watchdog.join();
-        run_result.map_err(|_| RuntimeSmokeFailure::EventLoop)?;
-        app.runtime_smoke_result()
+        let result = match watchdog {
+            Ok(watchdog) => {
+                // When: `watchdog` started, run the event loop and join the bounded monitor before teardown.
+                let run_result = event_loop.run_app(&mut app);
+                let _ = cancel_tx.send(());
+                let _ = watchdog.join();
+                if run_result.is_err() {
+                    // When: `run_result` is an error, classify the event-loop boundary before common teardown.
+                    Err(RuntimeSmokeFailure::EventLoop)
+                } else {
+                    // When: `run_result` succeeded, preserve the app's more specific smoke outcome.
+                    app.runtime_smoke_result()
+                }
+            }
+            Err(_) => Err(RuntimeSmokeFailure::EventLoop),
+        };
+        drop(app);
+        if sonicterm_gpu::core::live_renderer_count() != renderer_baseline {
+            // When: `live_renderer_count()` differs from `renderer_baseline`, App teardown leaked a renderer.
+            return Err(RuntimeSmokeFailure::WarmLifecycle);
+        }
+        result
     }
 }
 
@@ -236,6 +256,15 @@ impl MacShell {
     pub fn run(self) -> Result<()> {
         self.runner.run()
     }
+
+    /// Run the bounded macOS smoke through window, renderer, PTY, presentation, and warm lifecycle.
+    pub fn run_smoke(
+        self,
+        spec: RuntimeSmokeSpec,
+        timeout: Duration,
+    ) -> Result<(), RuntimeSmokeFailure> {
+        self.runner.run_smoke(spec, timeout)
+    }
 }
 
 /// Windows shell around the shared application runner.
@@ -314,6 +343,15 @@ impl WindowsShell {
     pub fn run(self) -> Result<()> {
         self.runner.run()
     }
+
+    /// Run the bounded Windows smoke through window, renderer, PTY, presentation, and warm lifecycle.
+    pub fn run_smoke(
+        self,
+        spec: RuntimeSmokeSpec,
+        timeout: Duration,
+    ) -> Result<(), RuntimeSmokeFailure> {
+        self.runner.run_smoke(spec, timeout)
+    }
 }
 
 /// Linux shell around the shared application runner.
@@ -385,9 +423,13 @@ impl LinuxShell {
         self.runner.run()
     }
 
-    /// Run the bounded Linux package smoke through display, GPU, PTY, grid, and presentation.
-    pub fn run_smoke(self, timeout: Duration) -> Result<(), RuntimeSmokeFailure> {
-        self.runner.run_smoke(timeout)
+    /// Run the bounded Linux package smoke through window, renderer, PTY, presentation, and warm lifecycle.
+    pub fn run_smoke(
+        self,
+        spec: RuntimeSmokeSpec,
+        timeout: Duration,
+    ) -> Result<(), RuntimeSmokeFailure> {
+        self.runner.run_smoke(spec, timeout)
     }
 }
 

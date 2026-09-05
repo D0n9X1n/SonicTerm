@@ -112,6 +112,25 @@ fn runtime_state_dir(mode: StartupMode) -> Option<std::path::PathBuf> {
     )
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn runtime_smoke_spec(
+    root: &std::path::Path,
+    nonce: u32,
+) -> std::result::Result<
+    sonicterm_app::app::RuntimeSmokeSpec,
+    sonicterm_app::app::RuntimeSmokeFailure,
+> {
+    let marker = format!("__SONICTERM_SMOKE_{nonce}__");
+    let command = format!("printf '__SONICTERM_SMOKE_%s__\\n' '{nonce}'\n").into_bytes();
+    sonicterm_app::app::RuntimeSmokeSpec::new(
+        "/bin/sh",
+        marker,
+        command,
+        root.join("config"),
+        root.join("logs"),
+    )
+}
+
 #[cfg(target_os = "linux")]
 fn load_config(mode: StartupMode, warnings: &mut Vec<String>) -> Config {
     let config = if mode == StartupMode::RuntimeSmoke {
@@ -167,7 +186,17 @@ fn preflight_linux_fonts(config: &Config) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn run_linux(mode: StartupMode) -> Result<i32> {
-    let log_dir = runtime_state_dir(mode).unwrap_or_else(sonicterm_logging::log_dir);
+    let smoke_spec = runtime_state_dir(mode)
+        .map(|root| runtime_smoke_spec(&root, std::process::id()))
+        .transpose()?;
+    let log_dir = smoke_spec
+        .as_ref()
+        .map(|spec| spec.log_dir().to_path_buf())
+        .unwrap_or_else(sonicterm_logging::log_dir);
+    if let Some(spec) = smoke_spec.as_ref() {
+        std::fs::create_dir_all(spec.config_dir())?;
+        std::fs::create_dir_all(spec.log_dir())?;
+    }
     sonicterm_logging::install_panic_hook(log_dir.clone());
     let _exit_guard = sonicterm_logging::install_exit_logging(&log_dir);
     let session = sonicterm_logging::session_state::arm(&log_dir, env!("CARGO_PKG_VERSION")).ok();
@@ -223,18 +252,29 @@ fn run_linux(mode: StartupMode) -> Result<i32> {
     tracing::info!(
         "Linux native menu, desktop notifications, and cross-process tab drag are unavailable; using in-app fallbacks"
     );
-    let theme = load_theme(&config.theme);
-    let keymap = load_keymap(&config.keymap);
-    let theme_loader: sonicterm_app::ThemeLoader =
-        Box::new(|name| Theme::load_name_or_path(name, &asset_dir()));
-    let keymap_loader: sonicterm_app::KeymapLoader = Box::new(Keymap::load_strict);
+    let (theme, keymap) = if mode == StartupMode::RuntimeSmoke {
+        let assets = asset_dir();
+        (
+            Theme::load_or_default(&assets.join("themes").join(format!("{}.toml", config.theme))),
+            Keymap::load_or_default(
+                &assets.join("keymaps").join(format!("{}.toml", config.keymap)),
+            ),
+        )
+    } else {
+        (load_theme(&config.theme), load_keymap(&config.keymap))
+    };
     let machine = sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default());
     let process_privilege = detect_process_privilege();
     tracing::info!(privileged = process_privilege.is_privileged(), "process privilege observed");
     let mut shell = sonicterm_app::shell::LinuxShell::new(machine, theme, config, keymap)
         .with_process_privilege(process_privilege)
-        .with_asset_loaders(theme_loader, keymap_loader)
         .with_config_normalizer(Box::new(normalize_linux_config));
+    if mode == StartupMode::Interactive {
+        let theme_loader: sonicterm_app::ThemeLoader =
+            Box::new(|name| Theme::load_name_or_path(name, &asset_dir()));
+        let keymap_loader: sonicterm_app::KeymapLoader = Box::new(Keymap::load_strict);
+        shell = shell.with_asset_loaders(theme_loader, keymap_loader);
+    }
     if let Some(recorder) = breadcrumb_recorder.clone() {
         // When: breadcrumb startup succeeded, let the app report runtime state without filesystem IO.
         shell = shell.with_breadcrumb_recorder(recorder);
@@ -242,7 +282,8 @@ fn run_linux(mode: StartupMode) -> Result<i32> {
     let (interactive_outcome, smoke_outcome) = match mode {
         StartupMode::Interactive => (Some(shell.run()), None),
         StartupMode::RuntimeSmoke => {
-            (None, Some(shell.run_smoke(std::time::Duration::from_secs(30))))
+            let spec = smoke_spec.expect("runtime mode constructs a smoke specification");
+            (None, Some(shell.run_smoke(spec, std::time::Duration::from_secs(30))))
         }
     };
     let clean_shutdown = smoke_outcome.is_some()

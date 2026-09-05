@@ -367,6 +367,37 @@ fn clean_e2e_keeps_profile_suppression() {
     assert_eq!(shell_startup_args("/bin/zsh", opts), vec!["-f"]);
 }
 
+#[test]
+fn clean_e2e_disables_cmd_autorun() {
+    // Protect Windows smoke from registry AutoRun commands while preserving ordinary cmd startup.
+    let opts = ShellSpawnOpts { clean_e2e: true, ..ShellSpawnOpts::default() };
+    assert_eq!(shell_startup_args("cmd.exe", opts), vec!["/D"]);
+    assert!(shell_startup_args("cmd.exe", ShellSpawnOpts::default()).is_empty());
+}
+
+#[test]
+fn clean_e2e_removes_only_shell_hook_environment() {
+    // Protect deterministic POSIX smoke startup without replacing HOME or unrelated environment.
+    let mut builder = CommandBuilder::new("/bin/sh");
+    builder.env("ENV", "/tmp/env-hook");
+    builder.env("BASH_ENV", "/tmp/bash-hook");
+    builder.env("HOME", "/home/preserved");
+    apply_clean_e2e_environment(&mut builder, true);
+    assert!(builder.get_env("ENV").is_none());
+    assert!(builder.get_env("BASH_ENV").is_none());
+    assert_eq!(builder.get_env("HOME").and_then(|value| value.to_str()), Some("/home/preserved"));
+
+    let mut ordinary = CommandBuilder::new("/bin/sh");
+    ordinary.env("ENV", "/tmp/env-hook");
+    ordinary.env("BASH_ENV", "/tmp/bash-hook");
+    apply_clean_e2e_environment(&mut ordinary, false);
+    assert_eq!(ordinary.get_env("ENV").and_then(|value| value.to_str()), Some("/tmp/env-hook"));
+    assert_eq!(
+        ordinary.get_env("BASH_ENV").and_then(|value| value.to_str()),
+        Some("/tmp/bash-hook")
+    );
+}
+
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn production_non_macos_shell_startup_stays_unchanged() {

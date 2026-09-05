@@ -41,7 +41,7 @@ use super::{
     mark_all_panes_dirty, next_pane_id, pane_id_at_point, pick_prompt_target,
     poll_command_events_for_child_window, resize_all_panes, shell_quote_posix,
     with_integrated_titlebar, wrap_paste, App, FrontmostKind, PaneState, PointerCell,
-    PointerGestureOwner, TabState, UserEvent, WindowState,
+    PointerGestureOwner, RuntimeSmokeFailure, TabState, UserEvent, WindowState,
 };
 
 const SEARCH_BADGE_ICON: &str = "";
@@ -165,13 +165,27 @@ pub fn child_window_dpi_changed_handles_no_renderer(child: &mut WindowState, dpi
 }
 
 impl App {
+    /// Release a child through the same pane, owner, registry, renderer, and PTY boundary.
+    pub(super) fn close_child_window(&mut self, win_id: WindowId) -> bool {
+        let Some(mut removed) = self.windows.remove(&win_id) else {
+            // When: `windows.remove(&win_id)` is `None`, no child resources remain to release.
+            return false;
+        };
+        for pane in removed.panes.values() {
+            *pane.redraw_target.lock() = None;
+        }
+        self.release_owners_of(&mut removed);
+        self.release_child_window_registries(win_id);
+        drop(removed);
+        true
+    }
+
     /// Route one winit `WindowEvent` for the child window `win_id`: scrollbar,
     /// splitter and URL input first, then render, resize, focus, mouse,
     /// keyboard and IME handling against that child's own tabs and panes.
-    // Lock order: each guard drops before the next is taken — `redraw_target` in
-    // the close arm, `parser` in the scroll and wheel arms; never nested.
     // Ordering: `pty_burst_gen` Acquire pairs with the VT thread's Release so a
     // burst is seen; `cursor_visible`, `kitty_flags`, `keyboard_modes` Relaxed.
+    // Lock order: `redraw_target` and parser guards are acquired separately and never nested.
     pub(super) fn handle_child_window_event(
         &mut self,
         el: &ActiveEventLoop,
@@ -425,22 +439,9 @@ impl App {
         };
         match event {
             WindowEvent::CloseRequested => {
-                // Clear redraw targets so the VT thread stops trying
-                // to redraw a dropped window (it will then notice the
-                // pty channel close on Drop and exit). Dropping the
-                // WindowState drops PaneState → PtyHandle → kills the
-                // child shells.
-                if let Some(mut removed) = self.windows.remove(&win_id) {
-                    for pane in removed.panes.values() {
-                        *pane.redraw_target.lock() = None;
-                    }
-                    // Close the governor owners before the state drops. Taken
-                    // from the removed window rather than looked up, because
-                    // it is already out of the map by this point.
-                    self.release_owners_of(&mut removed);
-                    self.release_child_window_registries(win_id);
-                    drop(removed);
-                }
+                // When: `event` is `CloseRequested`, release this child's complete native and PTY state.
+                let _ = child;
+                self.close_child_window(win_id);
                 // If this was the last child AND the main window had
                 // been previously drained/hidden, nothing is alive
                 // anymore — exit the loop.
@@ -728,6 +729,11 @@ impl App {
                     // survives tear-out of this child.
                     let cursor_visible_now =
                         pane.cursor_visible.load(std::sync::atomic::Ordering::Relaxed);
+                    let smoke_waiting_for_present = self
+                        .runtime_smoke
+                        .as_ref()
+                        .is_some_and(|smoke| smoke.is_waiting_for_adopted_present(win_id));
+                    let mut smoke_presented_count = None;
                     if let Some(r) = child.renderer.as_mut() {
                         r.set_render_timing_label("child");
                         if let Err(e) = r.render(
@@ -758,10 +764,62 @@ impl App {
                             child.hovered_url.as_ref().map(|h| h.to_cells()),
                         ) {
                             tracing::warn!("child render error: {e}");
+                            if smoke_waiting_for_present {
+                                // When: `smoke_waiting_for_present` is true, retain the presentation failure.
+                                smoke_presented_count = Some(Err(RuntimeSmokeFailure::Present));
+                            }
+                        } else if smoke_waiting_for_present {
+                            // When: rendering succeeded while `smoke_waiting_for_present` is true, retain its frame count.
+                            smoke_presented_count = Some(Ok(r.successful_frame_count()));
                         }
                     }
                     if let Some(t) = timing.as_mut() {
                         t.lap("render");
+                    }
+                    if let Some(presented) = smoke_presented_count {
+                        // When: `smoke_presented_count` contains `presented`, classify the adopted child frame.
+                        let count = match presented {
+                            Ok(count) => count,
+                            Err(failure) => {
+                                // When: `presented` is `Err(failure)`, retain it and stop the smoke.
+                                if let Some(smoke) = self.runtime_smoke.as_mut() {
+                                    smoke.fail(failure);
+                                }
+                                el.exit();
+                                return;
+                            }
+                        };
+                        let presented = self
+                            .runtime_smoke
+                            .as_mut()
+                            .is_some_and(|smoke| smoke.observe_adopted_present(win_id, count));
+                        if presented {
+                            // When: `presented` is true, release the adopted child after dropping every frame borrow.
+                            // Teardown workers may need the parser lock held by this frame.
+
+                            drop(panes_slice);
+                            drop(guards);
+                            drop(parser_arcs);
+                            let _ = pane;
+                            let _ = child;
+                            let released = self.close_child_window(win_id);
+                            self.warm_window_pool.clear();
+                            let complete = self
+                                .runtime_smoke
+                                .as_mut()
+                                .is_some_and(|smoke| smoke.finish_warm_release(win_id, released));
+                            tracing::info!(
+                                released,
+                                "runtime smoke warm renderer adopted and child released"
+                            );
+                            if !complete {
+                                tracing::error!(
+                                    "runtime smoke could not prove adopted child release"
+                                );
+                            }
+                            el.exit();
+                            return;
+                        }
                     }
                     let first_render_at = Instant::now();
                     if let Some(tear) = child.pending_tear_out_timing.take() {
@@ -2101,15 +2159,13 @@ impl App {
             super::seed_parser_theme_colors(&mut p, &self.theme);
         }
         let redraw_target = Arc::new(Mutex::new(Some(child_window.id())));
-        let pty = match PtyHandle::spawn_default_shell(
-            cols,
-            rows,
-            sonicterm_io::pty::ShellSpawnOpts {
-                term_program: self.config.terminal.term_program.clone(),
-                shell: self.config.terminal.shell.clone(),
-                ..sonicterm_io::pty::ShellSpawnOpts::default()
-            },
-        ) {
+        let shell_opts = sonicterm_io::pty::ShellSpawnOpts {
+            clean_e2e: self.runtime_smoke.is_some(),
+            term_program: self.config.terminal.term_program.clone(),
+            shell: self.config.terminal.shell.clone(),
+            ..sonicterm_io::pty::ShellSpawnOpts::default()
+        };
+        let pty = match PtyHandle::spawn_default_shell(cols, rows, shell_opts) {
             Ok(pty) => Some(pty),
             Err(e) => {
                 tracing::error!("failed to spawn pty for child pane: {e}");

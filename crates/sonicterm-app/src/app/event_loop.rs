@@ -224,6 +224,64 @@ impl App {
         }
         self.expire_quit_confirmation();
         self.warm_window_pool_maintain(el);
+        if self.runtime_smoke.as_ref().is_some_and(|smoke| smoke.should_maintain_warm_pool()) {
+            // When: `runtime_smoke` requests warm-pool maintenance, prove the default spare before adoption.
+            let baseline = self.runtime_smoke.as_ref().map(|smoke| smoke.renderer_baseline());
+            let snapshot = self.build_memory_snapshot();
+            let warm_reported = snapshot.renderers.iter().any(|renderer| renderer.role == "warm");
+            let warm_count = self.warm_window_pool.len();
+            let live_count = sonicterm_gpu::core::live_renderer_count();
+            if baseline.is_some_and(|baseline| {
+                warm_count == 1 && warm_reported && live_count == baseline + 2
+            }) {
+                tracing::info!(
+                    warm_count,
+                    live_count,
+                    "runtime smoke warm renderer created and reported"
+                );
+                let expected_child = self.warm_window_pool.last().map(|warm| warm.window.id());
+                let main_id = self.main_window_id;
+                let child = main_id.and_then(|id| {
+                    let index = self.windows.get(&id)?.tabs.active_index();
+                    self.tear_out_tab(el, index);
+                    self.windows.keys().copied().find(|child| Some(*child) != main_id)
+                });
+                if let Some(child) = child {
+                    let adopted_live_count = sonicterm_gpu::core::live_renderer_count();
+                    if expected_child != Some(child)
+                        || !self.warm_window_pool.is_empty()
+                        || baseline.is_none_or(|baseline| adopted_live_count != baseline + 2)
+                    {
+                        // When: the pool still owns a spare or renderer count changed, production adoption did not consume the reported renderer.
+                        if let Some(smoke) = self.runtime_smoke.as_mut() {
+                            smoke.fail(RuntimeSmokeFailure::WarmLifecycle);
+                        }
+                        el.exit();
+                        return;
+                    }
+                    let present_baseline = self
+                        .windows
+                        .get(&child)
+                        .and_then(|window| window.renderer.as_ref())
+                        .map(GpuRenderer::successful_frame_count)
+                        .unwrap_or(0);
+                    if let Some(smoke) = self.runtime_smoke.as_mut() {
+                        let _ = smoke.begin_warm_adoption(child, present_baseline);
+                    }
+                } else if let Some(smoke) = self.runtime_smoke.as_mut() {
+                    smoke.fail(RuntimeSmokeFailure::WarmLifecycle);
+                    el.exit();
+                    return;
+                }
+            } else if warm_count > 0 {
+                // When: a spare exists but count/reporting invariants disagree, fail rather than loop until timeout.
+                if let Some(smoke) = self.runtime_smoke.as_mut() {
+                    smoke.fail(RuntimeSmokeFailure::WarmLifecycle);
+                }
+                el.exit();
+                return;
+            }
+        }
         self.sample_pane_retention(Instant::now());
         let notification_wake = self.expire_notifications(Instant::now());
         // Reset the control flow on every pass rather than leaving the previous
@@ -894,8 +952,9 @@ impl App {
             let active_pane = self
                 .main_active_pane_id()
                 .and_then(|pane_id| self.main().and_then(|window| window.panes.get(&pane_id)));
+            let expected_shell = self.config.terminal.shell.as_deref();
             let smoke_failure = match (active_pane.and_then(|pane| pane.pty.as_ref()), command) {
-                (Some(pty), Some(command)) if pty.shell_program_path() == "/bin/sh" => {
+                (Some(pty), Some(command)) if expected_shell == Some(pty.shell_program_path()) => {
                     pty.send_input_nonblocking(command).err().map(|error| {
                         tracing::error!(%error, "runtime smoke could not queue its shell marker");
                         RuntimeSmokeFailure::Marker

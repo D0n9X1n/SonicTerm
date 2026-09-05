@@ -1086,19 +1086,17 @@ impl App {
                     }
                 }
                 if let Some(presented) = smoke_presented_count {
-                    // When: `smoke_presented_count` contains `presented`, classify this marker-bearing frame.
+                    // When: `smoke_presented_count` contains `presented`, classify the marker-bearing frame.
                     match presented {
                         Ok(count) => {
-                            // When: `presented` is `Ok(count)`, compare it with the frozen baseline.
-                            let complete = self
+                            // Compare the successful presentation count with the frozen baseline.
+                            let advanced = self
                                 .runtime_smoke
                                 .as_mut()
-                                .and_then(|smoke| smoke.observe_presented_frame(count))
-                                .is_some_and(|result| result.is_ok());
-                            if complete {
-                                // When: `complete` is true, the marker-bearing frame reached native presentation.
-                                el.exit();
-                                return;
+                                .is_some_and(|smoke| smoke.observe_presented_frame(count));
+                            if advanced {
+                                // The marker-bearing main frame has now reached native presentation.
+                                tracing::info!("runtime smoke main presentation exercised");
                             }
                         }
                         Err(failure) => {

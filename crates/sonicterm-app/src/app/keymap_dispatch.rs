@@ -270,7 +270,7 @@ impl App {
 
     /// Resolve the production config path, save, and route its notification.
     pub(super) fn save_current_settings_for_kind(&mut self, kind: FrontmostKind) {
-        let path = match Self::current_settings_path() {
+        let path = match self.current_settings_path() {
             Ok(path) => path,
             Err(error) => {
                 // When: current_settings_path cannot resolve the user's config

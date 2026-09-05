@@ -53,8 +53,9 @@ Platform startup adds these steps:
   installed after an HWND exists. Native tab drag registration uses the same
   UI thread.
 - Linux forces unsupported material backdrops to opaque and preflights all four
-  packaged Rec Mono font faces. `--runtime-smoke` uses an isolated state
-  directory and a 30-second watchdog.
+  packaged Rec Mono font faces. On every platform, `--runtime-smoke` uses
+  separate scratch config/log roots, a 30-second in-app proof deadline, and a
+  45-second process-tree watchdog.
 
 The binaries load theme and keymap assets, create
 `AppStateMachine::new(AppState::default())`, build `MacShell`, `WindowsShell`, or
@@ -131,7 +132,7 @@ background, and reads the monitor refresh period.
 
 Normal startup treats native window or renderer creation failure as fatal and
 panics because there is no terminal window in which to report the failure.
-Linux runtime smoke records `Display` or `Gpu` failure and exits instead.
+Native runtime smoke records `Display` or `Gpu` failure and exits instead.
 
 `GpuRenderer::new` creates or selects the shared wgpu context and builds the
 window-specific surface, retained frame, atlases, caches, and font stacks. The
@@ -498,8 +499,9 @@ If startup or runtime returns an error, the clean marker remains absent. Panic,
 exit, session-state, and breadcrumb records let the next launch classify the
 previous session.
 
-Linux runtime smoke maps each failed boundary to a stable nonzero exit code. An
-orderly smoke result also flushes breadcrumbs and marks its session clean.
+Every native runtime smoke maps each failed boundary to a stable nonzero exit
+code; warm creation/reporting/adoption/release is code `16`. An orderly smoke
+result also flushes breadcrumbs and marks its session clean.
 
 ### Source map
 
@@ -560,8 +562,9 @@ macOS 和 Linux 会在读取配置前安装 panic 与退出诊断。Windows 先�
   菜单；每个原生窗口出现后调用 `setTabbingMode: 2`。
 - Windows 在界面线程初始化 OLE。HWND 出现后才安装 DWM 背景和 `muda` 菜单。原生标签页
   拖动注册也在同一界面线程完成。
-- Linux 把不支持的材质背景改为不透明，并预检四个包内 Rec Mono 字体文件。
-  `--runtime-smoke` 使用隔离状态目录和 30 秒看门狗。
+- Linux 把不支持的材质背景改为不透明，并预检四个包内 Rec Mono 字体文件。所有平台的
+  `--runtime-smoke` 都使用分开的临时 config/log 根目录、30 秒应用内证明期限和 45 秒完整
+  进程树看门狗。
 
 三个二进制随后读取主题和键位，创建
 `AppStateMachine::new(AppState::default())`，构建 `MacShell`、`WindowsShell` 或
@@ -626,7 +629,7 @@ shell 提示符或标题文本推断。
 开启输入法，设置原生背景，并读取显示器刷新周期。
 
 普通启动中，原生窗口或渲染器创建失败会 panic。此时没有终端窗口可以显示错误，因此该失败
-不可继续。Linux 运行冒烟测试则记录 `Display` 或 `Gpu` 失败后退出。
+不可继续。原生运行冒烟测试则记录 `Display` 或 `Gpu` 失败后退出。
 
 `GpuRenderer::new` 创建或选择共享 wgpu 上下文，再建立窗口专用表面、保留帧、图集、缓存和
 字体栈。适配器确定后，应用才解析软件渲染降级状态并更新帧节奏。
@@ -923,8 +926,8 @@ macOS 的 Cmd+Q 使用两次按键确认。第一次非重复按键显示
 启动或运行过程返回错误时，不会写入干净标记。panic、退出、会话状态和面包屑记录让下一次
 启动能够判断上一会话的情况。
 
-Linux 运行冒烟测试会把每个失败边界映射为稳定的非零退出码。有序冒烟结果同样会刷新面包屑
-并把会话标为干净。
+每个平台的原生运行冒烟测试都会把失败边界映射为稳定的非零退出码；预热创建/报告/采用/释放
+失败使用退出码 `16`。有序冒烟结果同样会刷新面包屑并把会话标为干净。
 
 ### 源码索引
 
