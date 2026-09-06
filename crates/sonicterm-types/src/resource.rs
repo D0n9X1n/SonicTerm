@@ -290,7 +290,7 @@ impl ResourceClass {
             // SSH is `--features ssh`, off in shipped builds.
             Self::RemoteInput | Self::RemoteOutput => ClassCoverage::FeatureGated,
 
-            // `sonicterm-mux` is server scaffolding with no live subscribers.
+            // No subsystem in the workspace charges this class.
             Self::MuxSubscriber => ClassCoverage::SubsystemAbsent,
             // The reaper exists in `sonicterm-resource` and is not referenced
             // from `sonicterm-app`.
@@ -406,7 +406,7 @@ impl ResourceClass {
             // Compiled out of shipped builds.
             Self::RemoteInput | Self::RemoteOutput => PaneSeamTerm::NotChargedInProduction,
 
-            // No subsystem charges these: mux has no live subscribers, the
+            // No subsystem charges these: no subscriber owner exists, the
             // reaper is unreferenced from the app, owner records are the
             // ledger's own storage, font faces await a shared owner, and GPU
             // surface memory has no size the driver exposes.

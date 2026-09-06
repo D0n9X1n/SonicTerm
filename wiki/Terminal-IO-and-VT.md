@@ -13,8 +13,7 @@ resource totals are in [Memory](Memory).
 The local PTY, parser, grid, keyboard, paste, mouse-tracking, selection, and copy
 paths are cross-platform application behavior. The optional SSH transport exists
 behind the `sonicterm-io/ssh` feature, but no shipping GUI call site connects an
-`SshHandle`. `sonicterm-mux` is a standalone workspace binary that is not used
-by the GUI and is not packaged.
+`SshHandle`.
 
 ### Byte and thread flow
 
@@ -230,16 +229,6 @@ without persistence or comparison; ssh-agent, password, and
 keyboard-interactive authentication are absent. Because the GUI does not create
 an `SshHandle`, this is not a shipping remote-session feature.
 
-`sonicterm-mux` currently implements length-prefixed bincode messages for list,
-spawn, attach, detach, input, resize, kill, and explicit replay. A session has a
-PTY, a 256 KiB raw-byte replay ring, and a bounded subscriber queue. The first
-output gap requires `ResyncRequired`; later live bytes remain suppressed until the
-client resets its parser and applies one replay snapshot. Snapshot and live-output
-payloads share an 8 KiB per-message ceiling; ordered `start`/`complete` fragments
-reconstruct the snapshot before live delivery resumes. It forwards bytes without
-server-side VT parsing or grid-aware scrollback. No GUI or platform crate depends
-on it, and release workflows do not package it.
-
 ### Code locations
 
 | Topic | Primary paths |
@@ -251,7 +240,6 @@ on it, and release workflows do not package it.
 | VT parser and modes | `crates/sonicterm-vt/src/vt.rs` |
 | Grid and line storage | `crates/sonicterm-grid/src/{grid,line,hyperlink}.rs` |
 | Selection and copy | `crates/sonicterm-ui/src/selection.rs`, `crates/sonicterm-app/src/app/misc.rs` |
-| Mux protocol | `crates/sonicterm-mux/src/{proto,frame,server,main}.rs` |
 
 ## 中文
 
@@ -264,7 +252,7 @@ SonicTerm 的终端核心在子进程与有界单元格网格之间传递字节�
 
 本地 PTY、解析器、网格、键盘、粘贴、鼠标追踪、选择与复制路径属于跨平台应用行为。
 可选 SSH 传输位于 `sonicterm-io/ssh` 功能之后，但发布版 GUI 没有创建 `SshHandle`
-的调用点。`sonicterm-mux` 是工作区中的独立二进制，GUI 不使用，发布包也不包含。
+的调用点。
 
 ### 字节与线程流
 
@@ -440,14 +428,6 @@ mouse ownership 与 OSC 52 实际配置见 [用法](Usage)。
 主机密钥会被直接接受，不保存也不在后续连接中比较；没有 ssh-agent、密码或键盘交互
 认证。GUI 不创建 `SshHandle`，因此这不是已发布的远程会话功能。
 
-`sonicterm-mux` 当前使用带长度前缀的 bincode 消息，支持 `list`、`spawn`、`attach`、
-`detach`、`input`、`resize`、`kill` 和显式 replay。每个会话拥有一个 PTY、256 KiB 原始
-字节回放环和有界订阅队列。第一个输出缺口必须产生 `ResyncRequired`；后续实时字节保持暂停，
-直到客户端重置 parser 并应用一个 replay snapshot。Snapshot 与实时输出负载共用每条消息
-8 KiB 的上限；有序的 `start`/`complete` fragment 会先重建 snapshot，再恢复实时传递。
-它只转发字节，不在服务端解析 VT，也不提供网格感知回滚。GUI 和平台 crate 都不依赖它，
-发布流程也不打包。
-
 ### 代码位置
 
 | 主题 | 主要路径 |
@@ -459,4 +439,3 @@ mouse ownership 与 OSC 52 实际配置见 [用法](Usage)。
 | VT 解析器与模式 | `crates/sonicterm-vt/src/vt.rs` |
 | 网格与行存储 | `crates/sonicterm-grid/src/{grid,line,hyperlink}.rs` |
 | 选区与复制 | `crates/sonicterm-ui/src/selection.rs`、`crates/sonicterm-app/src/app/misc.rs` |
-| Mux 协议 | `crates/sonicterm-mux/src/{proto,frame,server,main}.rs` |

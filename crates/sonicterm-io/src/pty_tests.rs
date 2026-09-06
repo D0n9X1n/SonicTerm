@@ -1083,15 +1083,13 @@ fn the_typed_send_enforces_the_message_cap_the_raw_channel_ignores() {
 /// No first-party caller may hold the raw sender.
 ///
 /// Asserted by scanning the sources rather than by types, because the property
-/// is *absence* — a compiler check would only catch a caller that exists. Three
-/// sites held the raw channel before this: two reply forwarders and the mux
-/// input path, and only one of the three applied the cap.
+/// is *absence* — a compiler check would only catch a caller that exists, and
+/// the contract here is that no caller does.
 #[test]
 fn no_first_party_caller_reaches_the_raw_input_channel() {
     const SOURCES: &[(&str, &str)] = &[
         ("spawn_pane.rs", include_str!("../../sonicterm-app/src/app/spawn_pane.rs")),
         ("child_window.rs", include_str!("../../sonicterm-app/src/app/child_window.rs")),
-        ("mux server.rs", include_str!("../../sonicterm-mux/src/server.rs")),
         ("app misc.rs", include_str!("../../sonicterm-app/src/app/misc.rs")),
     ];
 
@@ -1111,22 +1109,6 @@ fn no_first_party_caller_reaches_the_raw_input_channel() {
              `send_input_nonblocking`, which apply the cap and refuse rather than block"
         );
     }
-}
-
-/// The cap lives in one place.
-///
-/// The mux path previously checked the size by hand and then sent on the raw
-/// channel — correct, but a copy of the rule that had to stay in agreement
-/// with the original. Two copies of a limit is the drift shape this milestone
-/// exists to remove.
-#[test]
-fn the_message_cap_is_not_reimplemented_by_callers() {
-    const MUX: &str = include_str!("../../sonicterm-mux/src/server.rs");
-    assert!(
-        !MUX.contains("pty_input_message_allowed"),
-        "the mux input path must not restate the size check; `PtyInputSender::send` \
-         applies it, and a second copy is a second thing to keep in agreement"
-    );
 }
 
 struct ControlledInputWriter {

@@ -951,14 +951,13 @@ impl PtyHandle {
 
     /// An owned input sender for a caller that cannot borrow the handle.
     ///
-    /// Two callers need this: the thread forwarding parser replies (DSR, DA,
-    /// XTVERSION, focus) generated on the VT thread, and the mux server, which
-    /// resolves a pane under a lock and must send after releasing it.
+    /// The thread forwarding parser replies (DSR, DA, XTVERSION, focus)
+    /// generated on the VT thread needs this: it has no handle to borrow.
     ///
-    /// Returns [`PtyInputSender`] rather than the raw channel. The reply
-    /// forwarder previously cloned the `Sender` and called `send`, which
-    /// skipped the size cap and blocked when the queue filled — in a thread
-    /// whose reason for existing is that nothing should block there.
+    /// Returns [`PtyInputSender`] rather than the raw channel, so the caller
+    /// gets the per-message size cap and a queue-full refusal instead of a
+    /// block — in a thread whose reason for existing is that nothing should
+    /// block there.
     #[must_use]
     pub fn input_sender(&self) -> PtyInputSender {
         PtyInputSender {

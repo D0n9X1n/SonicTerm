@@ -40,11 +40,6 @@ The arrows show runtime flow, not every Cargo edge. `sonicterm-app` owns the
 live topology. `sonicterm-app-core` owns a separate backend-free state machine.
 `sonicterm-gpu` receives terminal and UI types through the render-model boundary.
 
-`sonicterm-mux` is a separate `sonic-mux` daemon and library. It owns persistent
-PTY sessions, length-prefixed protocol frames, and a 256 KiB per-pane replay
-ring. The GUI does not start or attach to it. Its only first-party crate
-dependency is `sonicterm-io`.
-
 ### Crate boundaries
 
 | Boundary | Owns | Excludes |
@@ -215,7 +210,6 @@ The exact safety conditions are in
 | rendering | render model, engine, text, types, and block glyphs feed `sonicterm-gpu` |
 | app | app core, terminal, UI, rendering, logging, and resource crates feed `sonicterm-app` |
 | platform | `sonicterm-app` feeds `sonicterm-mac`, `sonicterm-windows`, and `sonicterm-linux` |
-| mux | `sonicterm-io` feeds the separate `sonicterm-mux` daemon; no GUI edge exists |
 
 ### Source map
 
@@ -231,7 +225,6 @@ The exact safety conditions are in
 | Font adapter | `crates/sonicterm-engine/src/fontstack.rs` |
 | Resource governor and app charging | `crates/sonicterm-resource/src/`, `crates/sonicterm-app/src/app/retention.rs` |
 | Platform entry points | `crates/sonicterm-{mac,windows,linux}/src/main.rs` |
-| Mux daemon | `crates/sonicterm-mux/src/{main,server,proto,frame}.rs` |
 
 ## 中文
 
@@ -271,10 +264,6 @@ flowchart TD
 箭头表示运行时数据流，不是全部 Cargo 依赖。实时拓扑由 `sonicterm-app` 持有。
 `sonicterm-app-core` 持有另一套不依赖后端的状态机。`sonicterm-gpu` 通过渲染模型边界
 接收终端和界面类型。
-
-`sonicterm-mux` 是独立的 `sonic-mux` 守护进程和库。它持有持久 PTY 会话、
-带长度前缀的协议帧，以及每窗格 256 KiB 的回放环形缓冲区。图形界面不会启动或连接它。
-它在第一方 crate 中只依赖 `sonicterm-io`。
 
 ### Crate 边界
 
@@ -419,7 +408,6 @@ macOS 使用 CoreText 发现字体，Windows 使用 GDI，Linux 使用 Fontconfi
 | 渲染 | 渲染模型、字体引擎、文本、公共类型和块字符输入 `sonicterm-gpu` |
 | 应用 | 应用核心、终端、界面、渲染、日志和资源 crate 输入 `sonicterm-app` |
 | 平台 | `sonicterm-app` 输入 `sonicterm-mac`、`sonicterm-windows` 和 `sonicterm-linux` |
-| 多路复用 | `sonicterm-io` 输入独立的 `sonicterm-mux` 守护进程；图形界面没有这条依赖边 |
 
 ### 源码索引
 
@@ -435,4 +423,3 @@ macOS 使用 CoreText 发现字体，Windows 使用 GDI，Linux 使用 Fontconfi
 | 字体适配器 | `crates/sonicterm-engine/src/fontstack.rs` |
 | 资源总账与应用计费 | `crates/sonicterm-resource/src/`、`crates/sonicterm-app/src/app/retention.rs` |
 | 平台入口 | `crates/sonicterm-{mac,windows,linux}/src/main.rs` |
-| 多路复用守护进程 | `crates/sonicterm-mux/src/{main,server,proto,frame}.rs` |

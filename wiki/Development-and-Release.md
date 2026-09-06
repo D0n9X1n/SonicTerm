@@ -13,7 +13,7 @@ one-way GitHub Wiki mirror. Crate responsibilities belong on
 
 ```text
 Cargo.toml     workspace members, shared package metadata, dependencies, profiles, lints
-crates/        24 first-party Rust crates
+crates/        23 first-party Rust crates
 assets/        fonts, themes, keymaps, icons, localization, screenshots
 wiki/          canonical bilingual documentation
 scripts/       flat first-party shell and PowerShell automation
@@ -246,7 +246,7 @@ artifacts remain excluded.
 
 ## Gate blind spots
 
-- The one-pass workspace gate includes integration tests for all 24 packages,
+- The one-pass workspace gate includes integration tests for all 23 packages,
   but it still exercises only targets that can compile and run on its host.
 - `rust-logic-coverage.sh` requires 80% line coverage only for its selected
   deterministic subset. Its ignore regex excludes 11 whole crates, including
@@ -455,7 +455,7 @@ links; workflow success alone does not prove rendering and navigation.
 
 ```text
 Cargo.toml     workspace member、共享 package metadata、依赖、profile、lint
-crates/        24 个第一方 Rust crate
+crates/        23 个第一方 Rust crate
 assets/        字体、主题、键位、图标、本地化、截图
 wiki/          规范双语文档
 scripts/       扁平的第一方 shell 与 PowerShell 自动化
@@ -646,7 +646,7 @@ package shard 只恢复，且 workspace crate artifact 始终排除在 cache 外
 
 ## Gate 盲区
 
-- 一次性 workspace gate 包含全部 24 个 package 的 integration test，但仍只能运行当前 host
+- 一次性 workspace gate 包含全部 23 个 package 的 integration test，但仍只能运行当前 host
   能够编译与执行的 target。
 - `rust-logic-coverage.sh` 只对选中的确定性代码子集要求 80% line coverage。其 ignore
   regex 完全排除 11 个 crate，包括 `sonicterm-app` 与 `sonicterm-gpu`，还排除其它 crate

@@ -5,14 +5,14 @@ set -euo pipefail
 # audit. Native window/GPU/PTY paths, generated FFI, platform font discovery,
 # and large renderer-facing controllers use their build, integration, and
 # release-smoke substitutes. Exact crate roots keep app-core and font-config in
-# the measured surface while the audited cfg/grid/render/type/UI/font/mux
+# the measured surface while the audited cfg/grid/render/type/UI/font
 # helpers remain visible.
 # Separators are written [/\\] so the pattern matches both the POSIX paths
 # llvm-cov reports on macOS and Linux and the backslash paths it reports on
 # Windows. A one-sided pattern silently matches nothing on the other platform,
 # which leaves the excluded native paths in the measured surface instead of
 # filtering them out.
-IGNORE_REGEX='crates[/\\](sonicterm-(app|gpu|mac|windows|logging|io|engine|block-glyph|harfbuzz|fontconfig|vt)[/\\]|sonicterm-cfg[/\\]src[/\\](config|keymap|lib)\.rs|sonicterm-render-model[/\\]src[/\\](lib|painter|pane_render)\.rs|sonicterm-font[/\\]src[/\\](db|fcwrap|ftwrap|hbwrap|lib)\.rs|sonicterm-font[/\\]src[/\\](locator|rasterizer|shaper)[/\\]|sonicterm-freetype[/\\](src[/\\](lib|types)\.rs|build\.rs)|sonicterm-mux[/\\]src[/\\](lib|main|server)\.rs|sonicterm-text[/\\]src[/\\](lib|glyph_atlas|row_glyph_cache)\.rs|sonicterm-types[/\\]src[/\\](action|geom|glyph_key|hyperlink_id|lib|window_key)\.rs|sonicterm-types[/\\]src[/\\]traits[/\\]|sonicterm-ui[/\\]src[/\\](broadcast|command_palette|cursor|i18n|ime|overlays|pane|scrollbar|search|selection|ui_tokens)\.rs|[/\\]build\.rs$)'
+IGNORE_REGEX='crates[/\\](sonicterm-(app|gpu|mac|windows|logging|io|engine|block-glyph|harfbuzz|fontconfig|vt)[/\\]|sonicterm-cfg[/\\]src[/\\](config|keymap|lib)\.rs|sonicterm-render-model[/\\]src[/\\](lib|painter|pane_render)\.rs|sonicterm-font[/\\]src[/\\](db|fcwrap|ftwrap|hbwrap|lib)\.rs|sonicterm-font[/\\]src[/\\](locator|rasterizer|shaper)[/\\]|sonicterm-freetype[/\\](src[/\\](lib|types)\.rs|build\.rs)|sonicterm-text[/\\]src[/\\](lib|glyph_atlas|row_glyph_cache)\.rs|sonicterm-types[/\\]src[/\\](action|geom|glyph_key|hyperlink_id|lib|window_key)\.rs|sonicterm-types[/\\]src[/\\]traits[/\\]|sonicterm-ui[/\\]src[/\\](broadcast|command_palette|cursor|i18n|ime|overlays|pane|scrollbar|search|selection|ui_tokens)\.rs|[/\\]build\.rs$)'
 
 # Cached Cargo/llvm-cov artifacts can retain profile mappings from earlier
 # source revisions and under-report the current tree. Build coverage in a

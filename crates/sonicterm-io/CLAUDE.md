@@ -35,5 +35,5 @@ building against a dependency's newer API while every other gate stays green.
   user's executable passwd shell, then `/bin/sh`; explicit config still wins.
 
 ## Cross-references
-- Consumed by: `sonicterm-app`, `sonicterm-mux`. Platform binaries reach it
-  through `sonicterm-app`.
+- Consumed by: `sonicterm-app`. Platform binaries reach it through
+  `sonicterm-app`.
