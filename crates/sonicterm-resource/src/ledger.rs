@@ -103,12 +103,8 @@ impl Ledger {
                     | OwnerKind::SharedRaster
                     | OwnerKind::SharedAtlas
                     | OwnerKind::Window
-                    // Retained model rule with no current producer: no
-                    // workspace code creates a connection owner today. It
-                    // stays because a client owns the connection it opens —
-                    // without the edge, retained remote input and output would
-                    // have no owner to close with and would leak its queues
-                    // into the process root.
+                    // Retained model rule with no current producer: a client
+                    // owns the connection it opens.
                     | OwnerKind::MuxConnection
             ) | (ProcessKind::Gui, OwnerKind::Window, OwnerKind::AppPane)
                 | (ProcessKind::Gui, OwnerKind::AppPane, OwnerKind::LocalPty)

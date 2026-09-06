@@ -702,10 +702,10 @@ fn a_rolled_back_tear_out_keeps_the_same_live_shell_usable() {
     assert_pty_marker(&pty, baseline_command, b"SONICTERM_BASELINE_OK");
     let resize_calls = Arc::new(AtomicUsize::new(0));
     let counter = resize_calls.clone();
-    let resize = std::mem::replace(&mut pty.resize, Box::new(|_, _| {}));
+    let resize = std::mem::replace(&mut pty.resize, Box::new(|_, _| Ok(())));
     pty.resize = Box::new(move |cols, rows| {
         counter.fetch_add(1, Ordering::Relaxed);
-        resize(cols, rows);
+        resize(cols, rows)
     });
 
     let mut app = app_with_reducer_counts(1, 1);

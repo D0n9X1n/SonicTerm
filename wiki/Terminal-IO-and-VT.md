@@ -56,9 +56,31 @@ AppKit, Win32, or winit window methods.
 ### Local PTY contract
 
 `PtyHandle` owns the child, PTY master, reader and writer threads, bounded
-channels, selected shell path, and a resize callback. The callback packs
-`(cols, rows)` into one atomic value and suppresses identical requests, avoiding
-unnecessary SIGWINCH or ConPTY reflow.
+channels, selected shell path, and a resize callback.
+
+The callback returns `anyhow::Result<()>`. It holds the native call and the last
+applied `(cols, rows)` behind one lock, so native resizes are serialized and the
+cache records the last successful native call:
+
+- A zero column or row count is refused as an `InvalidInput` error before the
+  native call runs and before the cache changes.
+- A request equal to the last *applied* size is skipped, avoiding an unnecessary
+  SIGWINCH or ConPTY reflow.
+- Only a successful native call caches the size. A failed request is therefore
+  not deduplicated away: the next identical request reaches the native call
+  again, and the last successful size stays cached.
+- The first request always reaches the native call. The cache starts empty
+  rather than seeded from the spawn dimensions, so nothing can match it.
+
+The GUI resizes the grid first and does not roll it back when the native call
+fails: the pane keeps the geometry the user asked for, and only the child's view
+of it lags. `sonicterm-app` reports the failure through `PaneState::resize_pty`,
+which warns once per failing run — the first failure is logged with the pane id,
+requested columns and rows, and the error, and further failures stay silent
+until a resize succeeds and clears the latch. Warning suppression never
+suppresses a resize attempt: an invalid size and a successful duplicate are the
+only requests that do not reach the native call, and the IO boundary decides
+both, not the warning latch.
 
 If `[terminal].shell` is absent:
 
@@ -289,8 +311,25 @@ VT 工作线程会先合并输出，再请求一帧。连续 3 ms 没有新数�
 ### 本地 PTY 契约
 
 `PtyHandle` 拥有子进程、PTY 主端、读写线程、有界通道、已选 shell 路径和尺寸调整
-回调。回调把 `(cols, rows)` 打包到一个原子值中，并忽略相同请求，避免多余的
-SIGWINCH 或 ConPTY 重排。
+回调。
+
+回调返回 `anyhow::Result<()>`。它把原生调用和最后一次成功应用的 `(cols, rows)`
+放在同一把锁后面，因此原生尺寸调整是串行的，缓存记录的是最后一次成功的原生调用：
+
+- 列数或行数为零时，在原生调用之前、也在缓存变化之前，以 `InvalidInput` 错误
+  拒绝该请求。
+- 与最后一次*已应用*尺寸相同的请求会被跳过，避免多余的 SIGWINCH 或 ConPTY 重排。
+- 只有原生调用成功才会缓存该尺寸。因此失败的请求不会被当作重复请求去重：下一次
+  相同的请求会再次到达原生调用，而最后一次成功的尺寸仍保留在缓存中。
+- 第一次请求一定会到达原生调用。缓存初始为空，不会用 spawn 时的尺寸预填，因此
+  没有任何值能与它匹配。
+
+GUI 先调整网格，且在原生调用失败时不回滚：窗格保留用户请求的几何尺寸，只有子进程
+看到的尺寸会滞后。`sonicterm-app` 通过 `PaneState::resize_pty` 报告失败，每一轮
+连续失败只告警一次——第一次失败会记录窗格 id、请求的列数与行数以及错误，后续失败
+保持静默，直到一次成功的尺寸调整清除该闩锁。告警抑制绝不会抑制一次尺寸调整尝试：
+只有无效尺寸和成功的重复请求不会到达原生调用，而这两者都由 IO 边界决定，与告警
+闩锁无关。
 
 未配置 `[terminal].shell` 时：
 

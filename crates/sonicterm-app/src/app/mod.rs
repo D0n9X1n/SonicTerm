@@ -1654,11 +1654,9 @@ pub fn seed_parser_theme_colors(parser: &mut sonicterm_vt::vt::Parser, theme: &T
 /// surface or a real shell.
 #[doc(hidden)]
 pub fn resize_all_panes(panes: &HashMap<u64, PaneState>, cols: u16, rows: u16) {
-    for pane in panes.values() {
+    for (pane_id, pane) in panes {
         pane.parser.lock().grid_mut().resize(cols, rows);
-        if let Some(pty) = pane.pty.as_ref() {
-            (pty.resize)(cols, rows);
-        }
+        pane.resize_pty(*pane_id, cols, rows);
     }
 }
 
@@ -1705,9 +1703,7 @@ pub fn resize_panes_to_rects(
             (content_h / cell_h).floor() as u64,
         );
         pane.parser.lock().grid_mut().resize(cols, rows);
-        if let Some(pty) = pane.pty.as_ref() {
-            (pty.resize)(cols, rows);
-        }
+        pane.resize_pty(*id, cols, rows);
     }
 }
 
@@ -2204,6 +2200,8 @@ pub struct PaneState {
     /// `2 × RETENTION_SAMPLE_INTERVAL` the cancellation reports.
     pub(crate) capture_stall_samples: u8,
     pub pty: Option<PtyHandle>,
+    /// Whether a resize failure has been reported since the last success.
+    pub(crate) resize_warned: std::sync::atomic::AtomicBool,
     pub redraw_target: Arc<Mutex<Option<WindowId>>>,
     /// Absolute row (scrollback-relative) that should appear at the top of
     /// the visible viewport. `None` = "follow the live tail" (default).
@@ -2275,6 +2273,7 @@ impl PaneState {
             last_capture_progress: None,
             capture_stall_samples: 0,
             pty,
+            resize_warned: std::sync::atomic::AtomicBool::new(false),
             redraw_target: Arc::new(Mutex::new(None)),
             viewport_top_abs: None,
             fg_proc_cache: None,
@@ -2284,6 +2283,27 @@ impl PaneState {
             keyboard_modes: Arc::new(std::sync::atomic::AtomicU8::new(0)),
             inline_images: Arc::new(Mutex::new(Vec::new())),
             inline_media_charge: media::new_inline_media_charge(),
+        }
+    }
+
+    /// Resize this pane's PTY, reporting the first failure of a failing run.
+    ///
+    /// The grid is already resized and stays committed when the native call
+    /// fails; there is no rollback and no automatic retry.
+    // Ordering: `resize_warned` uses `Relaxed`; it gates one log line and guards no other state.
+    fn resize_pty(&self, pane_id: u64, cols: u16, rows: u16) {
+        let Some(pty) = self.pty.as_ref() else {
+            // When: `self.pty` is `None`, this pane has no native geometry to resize.
+            return;
+        };
+        let Err(error) = (pty.resize)(cols, rows) else {
+            // When: the resize applied, clear the latch so a later failure reports again.
+            self.resize_warned.store(false, std::sync::atomic::Ordering::Relaxed);
+            return;
+        };
+        // Report only the first failure of a run; a later success clears the latch.
+        if !self.resize_warned.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!(pane_id, cols, rows, %error, "pty resize failed");
         }
     }
 }
@@ -7141,3 +7161,7 @@ mod pty_input_tests;
 #[cfg(test)]
 #[path = "privilege_tests.rs"]
 mod privilege_tests;
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod mod_tests;

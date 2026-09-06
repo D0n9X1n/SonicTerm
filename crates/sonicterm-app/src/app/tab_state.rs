@@ -69,9 +69,7 @@ impl App {
         if let Some(ws) = self.main_mut() {
             for (id, pane) in panes {
                 pane.parser.lock().grid_mut().resize(cols, rows);
-                if let Some(pty) = pane.pty.as_ref() {
-                    (pty.resize)(cols, rows);
-                }
+                pane.resize_pty(id, cols, rows);
                 *pane.redraw_target.lock() = main_window;
                 ws.panes.insert(id, pane);
             }
@@ -129,9 +127,7 @@ impl App {
         let (cols, rows) = renderer.cells();
         for (id, pane) in panes {
             pane.parser.lock().grid_mut().resize(cols, rows);
-            if let Some(pty) = pane.pty.as_ref() {
-                (pty.resize)(cols, rows);
-            }
+            pane.resize_pty(id, cols, rows);
             *pane.redraw_target.lock() = Some(dst_id);
             child.panes.insert(id, pane);
         }
