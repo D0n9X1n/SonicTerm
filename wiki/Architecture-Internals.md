@@ -263,8 +263,11 @@ any nonzero target at one. A live config reload clears the pool; later
 Terminal input enqueue is non-blocking. `PtyHandle::send_input_nonblocking`
 uses `try_send` on a four-message channel. A message over 16 MiB, a full queue,
 or a disconnected writer returns `PtyInputError` with the original bytes. The
-app posts `UserEvent::PtyInputRejected`, logs the reason, and shows an error
-notification. It does not replay the bytes automatically.
+app drops the payload and posts metadata-only `UserEvent::PtyInputRejected`,
+logs the pane, current window, typed source, and concurrent queue/writer
+observations, and notifies that pane's window if it still exists. It does not
+replay the bytes automatically. Queue occupancy excludes the active native
+write/flush, whose phase, size, elapsed time, and progress are observed separately.
 
 The PTY reader uses a reusable 64 KiB `BytesMut` allocation. It sends
 `PtyOutputChunk` views through a 64-slot channel. A full channel blocks the
@@ -579,8 +582,10 @@ sRGB 彩色 view。Alpha 保持为 RGB 覆盖率最大值，因此不满足
 
 终端输入采用非阻塞入队。`PtyHandle::send_input_nonblocking` 对四条消息的通道调用
 `try_send`。消息超过 16 MiB、队列已满或 writer 已断开时，会返回保留原始字节的
-`PtyInputError`。应用发送 `UserEvent::PtyInputRejected`，记录原因并显示错误通知。
-它不会自动重放这些字节。
+`PtyInputError`。应用丢弃负载后，发送只含元数据的 `UserEvent::PtyInputRejected`，
+记录窗格、当前窗口、类型化来源及并发队列/writer 观察值；窗格仍存在时在其窗口显示通知。
+它不会自动重放这些字节。队列占用不包含正在进行的原生写入或 flush；其阶段、大小、
+持续时间和进度会单独观察。
 
 PTY reader 使用可复用的 64 KiB `BytesMut` 分配，并通过 64 槽通道发送
 `PtyOutputChunk` 视图。通道满时 reader 阻塞，让操作系统施加背压；输出不会被丢弃。

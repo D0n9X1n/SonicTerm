@@ -31,7 +31,8 @@ use super::key_encoding::{key_event_to_string, key_event_to_strings};
 use super::{
     invalidate_selection_for_content, mark_all_panes_dirty, pane_id_at_point,
     runtime_smoke::{grid_contains_marker, RuntimeSmokeFailure},
-    App, FrontmostKind, PointerCell, PointerGesture, PointerGestureOwner, TabState, WindowState,
+    App, FrontmostKind, PointerCell, PointerGesture, PointerGestureOwner, PtyInputSource, TabState,
+    WindowState,
 };
 
 const SPLITTER_HIT_THICKNESS: f32 = 8.0;
@@ -1184,7 +1185,7 @@ impl App {
                 if let Some((pane_id, bytes)) = pointer_release
                     .and_then(|route| pointer_route_bytes(route, PointerReportKind::LeftRelease))
                 {
-                    self.write_to_pane(pane_id, bytes);
+                    self.write_to_pane(pane_id, bytes, PtyInputSource::PointerButton);
                 }
                 // Propagate window focus to the renderer so the text cursor
                 // disappears when the window is inactive.
@@ -1198,7 +1199,10 @@ impl App {
                 }
                 // Forward focus in/out to the active pane if it asked for
                 // focus reporting via DECSET ?1004 (CSI ?1004h).
-                if let Some(pane) = self.active_pane() {
+                if let Some((pane_id, pane)) = self
+                    .active_pane_id()
+                    .and_then(|pane_id| self.pane_by_id(pane_id).map(|pane| (pane_id, pane)))
+                {
                     let enabled = pane.parser.lock().focus_reporting_enabled();
                     if enabled {
                         // DEC focus reporting forwards the transition to the active PTY.
@@ -1213,6 +1217,8 @@ impl App {
                             Self::queue_pty_input(
                                 self.event_loop_proxy.as_ref(),
                                 pty,
+                                pane_id,
+                                PtyInputSource::FocusReport,
                                 seq.to_vec(),
                             );
                         }
@@ -1505,7 +1511,11 @@ impl App {
                                 if let Some((pane_id, bytes)) =
                                     pointer_route_bytes(report, PointerReportKind::HeldLeftMotion)
                                 {
-                                    self.write_to_pane(pane_id, bytes);
+                                    self.write_to_pane(
+                                        pane_id,
+                                        bytes,
+                                        PtyInputSource::PointerMotion,
+                                    );
                                 }
                                 return;
                             }
@@ -1715,7 +1725,11 @@ impl App {
                                 if let Some((pane_id, bytes)) =
                                     pointer_route_bytes(route, PointerReportKind::NoButtonMotion)
                                 {
-                                    self.write_to_pane(pane_id, bytes);
+                                    self.write_to_pane(
+                                        pane_id,
+                                        bytes,
+                                        PtyInputSource::PointerMotion,
+                                    );
                                 }
                             }
                         }
@@ -1796,6 +1810,8 @@ impl App {
                                     Self::queue_pty_input(
                                         self.event_loop_proxy.as_ref(),
                                         pty,
+                                        pane_id,
+                                        PtyInputSource::Wheel,
                                         payload,
                                     );
                                 }
@@ -1825,6 +1841,8 @@ impl App {
                                     Self::queue_pty_input(
                                         self.event_loop_proxy.as_ref(),
                                         pty,
+                                        pane_id,
+                                        PtyInputSource::Wheel,
                                         payload,
                                     );
                                 }
@@ -2074,7 +2092,11 @@ impl App {
                                     });
                                     if let Some(bytes) = terminal_press {
                                         // When: `terminal_press` contains bytes, the window latched terminal ownership before the unguarded enqueue.
-                                        self.write_to_pane(cell.pane_id, bytes);
+                                        self.write_to_pane(
+                                            cell.pane_id,
+                                            bytes,
+                                            PtyInputSource::PointerButton,
+                                        );
                                         if let Some(change) = pane_focus_change {
                                             if let Some(window) = self.main_mut() {
                                                 window.finish_pane_focus_change(change);
@@ -2178,7 +2200,7 @@ impl App {
                             if let Some((pane_id, bytes)) =
                                 pointer_route_bytes(route, PointerReportKind::LeftRelease)
                             {
-                                self.write_to_pane(pane_id, bytes);
+                                self.write_to_pane(pane_id, bytes, PtyInputSource::PointerButton);
                             }
                         }
                         if terminal_owned {
@@ -2336,7 +2358,7 @@ impl App {
                         // drop them explicitly instead of forwarding to PTY.
                     } else {
                         // With no search or copy mode, committed text goes to the PTY.
-                        self.write_to_pty(committed.into_bytes());
+                        self.write_to_pty(committed.into_bytes(), PtyInputSource::Ime);
                     }
                 }
                 if let Some(w) = self.main_window() {

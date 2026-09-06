@@ -465,8 +465,8 @@ impl App {
             );
             return;
         }
-        self.write_to_pane(pane_id, bytes.clone());
-        self.broadcast_from(pane_id, bytes);
+        self.write_to_pane(pane_id, bytes.clone(), super::PtyInputSource::Paste);
+        self.broadcast_from(pane_id, bytes, super::PtyInputSource::Paste);
     }
 
     pub(super) fn paste_file_paths_for_kind<I>(&mut self, kind: FrontmostKind, paths: I)
@@ -507,8 +507,8 @@ impl App {
             );
             return;
         }
-        self.write_to_pane(pane_id, bytes.clone());
-        self.broadcast_from(pane_id, bytes);
+        self.write_to_pane(pane_id, bytes.clone(), super::PtyInputSource::FileDrop);
+        self.broadcast_from(pane_id, bytes, super::PtyInputSource::FileDrop);
     }
     pub(super) fn scroll_to_prompt(&mut self, forward: bool) {
         let updated = {

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::{
     io::{Read, Write},
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
     thread,
@@ -53,6 +53,94 @@ const PTY_IO_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
 const CONPTY_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 static ACTIVE_PTY_IO_THREADS: AtomicUsize = AtomicUsize::new(0);
 
+/// Concurrent observations of a bounded input queue and its single native writer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PtyInputDiagnostics {
+    /// Messages observed waiting, excluding the writer's current message.
+    pub queued_messages: usize,
+    /// Observed queued payload bytes, sampled separately from message count.
+    pub queued_bytes: usize,
+    /// Configured message-slot limit.
+    pub queue_capacity: usize,
+    /// Native writer phase observed independently of the queue.
+    pub writer_phase: PtyWriterPhase,
+    /// Payload bytes held by the writer outside the channel.
+    pub in_flight_bytes: usize,
+    /// Successful native writes whose flush attempt has returned since startup.
+    pub completed_messages: u64,
+    /// Elapsed milliseconds for the observed write or flush, if active.
+    pub in_flight_millis: Option<u64>,
+}
+
+/// Native input-writer activity, not a verdict on child-process health.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PtyWriterPhase {
+    /// Waiting to receive input or cancellation.
+    Idle = 0,
+    /// Inside the native write operation.
+    Writing = 1,
+    /// Inside the native flush operation.
+    Flushing = 2,
+    /// Writer has exited and cannot accept more work.
+    Stopped = 3,
+}
+
+#[derive(Debug)]
+struct PtyWriterProgress {
+    epoch: Instant,
+    operation: AtomicU64,
+    in_flight_bytes: AtomicUsize,
+    completed_messages: AtomicU64,
+}
+
+impl PtyWriterProgress {
+    fn new() -> Self {
+        Self {
+            epoch: Instant::now(),
+            operation: AtomicU64::new(0),
+            in_flight_bytes: AtomicUsize::new(0),
+            completed_messages: AtomicU64::new(0),
+        }
+    }
+
+    // Ordering: `operation`, `in_flight_bytes`, and `completed_messages` use `Relaxed` for independent observations.
+    fn observe(&self, queued_messages: usize, queued_bytes: usize) -> PtyInputDiagnostics {
+        let operation = self.operation.load(Ordering::Relaxed);
+        let phase = operation & 3;
+        let writer_phase = match phase {
+            1 => PtyWriterPhase::Writing,
+            2 => PtyWriterPhase::Flushing,
+            3 => PtyWriterPhase::Stopped,
+            _ => PtyWriterPhase::Idle,
+        };
+        let in_flight_millis = if phase == 1 || phase == 2 {
+            Some(self.elapsed_millis().saturating_sub(operation >> 2))
+        } else {
+            // When: `phase` is idle or stopped, no active operation has a meaningful elapsed time.
+            None
+        };
+        PtyInputDiagnostics {
+            queued_messages,
+            queued_bytes,
+            queue_capacity: PTY_INPUT_QUEUE_CAPACITY,
+            writer_phase,
+            in_flight_bytes: self.in_flight_bytes.load(Ordering::Relaxed),
+            completed_messages: self.completed_messages.load(Ordering::Relaxed),
+            in_flight_millis,
+        }
+    }
+
+    fn elapsed_millis(&self) -> u64 {
+        self.epoch.elapsed().as_millis().min(u128::from(u64::MAX >> 2)) as u64
+    }
+
+    // Ordering: `operation` uses `Relaxed` to pack phase and its timestamp without publishing payload data.
+    fn begin(&self, phase: PtyWriterPhase) {
+        self.operation.store((self.elapsed_millis() << 2) | phase as u64, Ordering::Relaxed);
+    }
+}
+
 /// Owned, cloneable sender for a child process's input channel.
 ///
 /// Wraps the bounded channel so a caller holding one cannot reach the raw
@@ -63,6 +151,7 @@ static ACTIVE_PTY_IO_THREADS: AtomicUsize = AtomicUsize::new(0);
 pub struct PtyInputSender {
     tx: Sender<Outgoing>,
     queued_bytes: Arc<AtomicUsize>,
+    writer_progress: Arc<PtyWriterProgress>,
 }
 
 impl PtyInputSender {
@@ -75,6 +164,13 @@ impl PtyInputSender {
     /// caller can retry or report rather than losing them silently.
     pub fn send(&self, bytes: Vec<u8>) -> Result<(), PtyInputError> {
         try_queue_pty_input(&self.tx, &self.queued_bytes, bytes)
+    }
+
+    /// Sample queue occupancy and writer activity without blocking or inspecting input bytes.
+    // Ordering: `queued_bytes` uses `Relaxed` for an observation independent of channel length and writer progress.
+    #[must_use]
+    pub fn diagnostics(&self) -> PtyInputDiagnostics {
+        self.writer_progress.observe(self.tx.len(), self.queued_bytes.load(Ordering::Relaxed))
     }
 }
 
@@ -742,6 +838,7 @@ pub struct PtyHandle {
     /// it out, both inside this crate — there is no consumer that could forget
     /// to account for one.
     queued_input_bytes: Arc<AtomicUsize>,
+    writer_progress: Arc<PtyWriterProgress>,
     /// Closure that resizes the pty to `(cols, rows)`.
     pub resize: Box<dyn Fn(u16, u16) + Send + Sync>,
     reader_cancel: Sender<()>,
@@ -864,7 +961,17 @@ impl PtyHandle {
     /// whose reason for existing is that nothing should block there.
     #[must_use]
     pub fn input_sender(&self) -> PtyInputSender {
-        PtyInputSender { tx: self.in_tx.clone(), queued_bytes: self.queued_input_bytes.clone() }
+        PtyInputSender {
+            tx: self.in_tx.clone(),
+            queued_bytes: self.queued_input_bytes.clone(),
+            writer_progress: self.writer_progress.clone(),
+        }
+    }
+
+    /// Sample queue occupancy and native writer progress; fields are concurrent observations, not one transaction.
+    #[must_use]
+    pub fn input_diagnostics(&self) -> PtyInputDiagnostics {
+        self.writer_progress.observe(self.in_tx.len(), self.queued_input_bytes())
     }
 }
 
@@ -1161,8 +1268,14 @@ impl PtyHandle {
             spawn_reader_thread(reader, out_tx, reader_cancel_rx, output_meter.clone());
         // Writer thread: in_rx -> pty.
         let queued_input_bytes = Arc::new(AtomicUsize::new(0));
-        let writer_thread =
-            spawn_writer_thread(writer, in_rx, writer_cancel_rx, queued_input_bytes.clone());
+        let writer_progress = Arc::new(PtyWriterProgress::new());
+        let writer_thread = spawn_writer_thread(
+            writer,
+            in_rx,
+            writer_cancel_rx,
+            queued_input_bytes.clone(),
+            writer_progress.clone(),
+        );
 
         let resize_master = master.clone();
         // Dedup no-op resizes. Callers (e.g. tab switch via
@@ -1195,6 +1308,7 @@ impl PtyHandle {
             out_rx,
             in_tx,
             queued_input_bytes,
+            writer_progress,
             resize,
             reader_cancel,
             writer_cancel,
@@ -1315,12 +1429,13 @@ fn spawn_reader_thread(
     PtyIoThread { handle: Some(handle), done }
 }
 
-// Ordering: `queued_bytes` uses `Relaxed`; channel transfer defines ownership, and the atomic reports queue accounting only.
+// Ordering: `queued_bytes`, `in_flight_bytes`, `completed_messages`, and `operation` use `Relaxed`; only the channel transfers ownership.
 fn spawn_writer_thread(
     mut writer: Box<dyn Write + Send>,
     rx: Receiver<Outgoing>,
     cancel: Receiver<()>,
     queued_bytes: Arc<AtomicUsize>,
+    progress: Arc<PtyWriterProgress>,
 ) -> PtyIoThread {
     let (done_tx, done) = crossbeam_channel::bounded(1);
     let handle = thread::Builder::new()
@@ -1341,6 +1456,8 @@ fn spawn_writer_thread(
                 // a message is counted once when it enters the channel and
                 // uncounted once when it leaves, so this cannot underflow.
                 queued_bytes.fetch_sub(bytes.len(), Ordering::Relaxed);
+                progress.in_flight_bytes.store(bytes.len(), Ordering::Relaxed);
+                progress.begin(PtyWriterPhase::Writing);
                 if let Err(e) = writer.write_all(&bytes) {
                     // When: `write_all` fails, report it unless cancellation intentionally interrupted I/O.
                     if cancel.try_recv().is_err() {
@@ -1348,8 +1465,14 @@ fn spawn_writer_thread(
                     }
                     break;
                 }
+                progress.begin(PtyWriterPhase::Flushing);
                 let _ = writer.flush();
+                progress.completed_messages.fetch_add(1, Ordering::Relaxed);
+                progress.in_flight_bytes.store(0, Ordering::Relaxed);
+                progress.operation.store(0, Ordering::Relaxed);
             }
+            progress.in_flight_bytes.store(0, Ordering::Relaxed);
+            progress.operation.store(3, Ordering::Relaxed);
             // Nothing will drain the queue again. Anything still in it is
             // released when the channel drops, so the figure must not keep
             // reporting it as held.

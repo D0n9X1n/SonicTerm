@@ -1,19 +1,179 @@
 use super::*;
 use crate::app::spawn_pane::{osc52_clipboard_write_event, MAX_OSC52_CLIPBOARD_BYTES};
 use base64::Engine;
-use sonicterm_io::pty::PtyInputError;
+use sonicterm_io::pty::{PtyInputDiagnostics, PtyInputError, PtyWriterPhase};
+
+fn input_observation() -> PtyInputDiagnostics {
+    PtyInputDiagnostics {
+        queued_messages: 4,
+        queued_bytes: 48,
+        queue_capacity: 4,
+        writer_phase: PtyWriterPhase::Writing,
+        in_flight_bytes: 12,
+        completed_messages: 8,
+        in_flight_millis: Some(30),
+    }
+}
 
 #[test]
-fn saturated_input_event_retains_rejected_bytes_for_user_notification() {
-    let rejected = b"retry me".to_vec();
+fn rejection_event_debug_does_not_expose_terminal_input() {
+    // Rejection diagnostics must not carry user text into derived event debugging.
+    let private_input = b"private-shell-input".to_vec();
+    let event = pty_input_rejected_event(
+        7,
+        PtyInputSource::Paste,
+        PtyInputError::QueueFull(private_input.clone()),
+        input_observation(),
+    );
+    let diagnostic = format!("{event:?}");
+    assert!(!diagnostic.contains("private-shell-input"));
+    assert!(!diagnostic.contains(&format!("{private_input:?}")));
+}
 
-    let event = pty_input_rejected_event(PtyInputError::QueueFull(rejected.clone()));
+#[test]
+fn rejection_event_preserves_identity_and_observations_without_payload() {
+    // Identical bytes from different producers retain their typed origin and affected pane.
+    for source in [
+        PtyInputSource::Keyboard,
+        PtyInputSource::Paste,
+        PtyInputSource::FileDrop,
+        PtyInputSource::Ime,
+        PtyInputSource::PointerButton,
+        PtyInputSource::PointerMotion,
+        PtyInputSource::Wheel,
+        PtyInputSource::FocusReport,
+        PtyInputSource::TerminalReply,
+        PtyInputSource::ScriptDraft,
+        PtyInputSource::StateMachine,
+    ] {
+        let event = pty_input_rejected_event(
+            7,
+            source,
+            PtyInputError::QueueFull(b"same bytes".to_vec()),
+            input_observation(),
+        );
+        assert!(
+            matches!(event, UserEvent::PtyInputRejected { pane_id: 7, source: actual, rejected_bytes: 10, reason, diagnostics }
+            if actual == source && reason.contains("queue is full") && diagnostics == input_observation())
+        );
+    }
+}
 
-    assert!(matches!(
-        event,
-        UserEvent::PtyInputRejected { bytes, reason }
-            if bytes == rejected && reason.contains("queue is full")
-    ));
+#[derive(Clone, Default)]
+struct InputDiagnosticLog(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for InputDiagnosticLog {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn capture_input_warning(action: impl FnOnce()) -> String {
+    let log = InputDiagnosticLog::default();
+    let writer = log.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(move || writer.clone())
+        .finish();
+    tracing::subscriber::with_default(subscriber, action);
+    let output = log.0.lock().clone();
+    String::from_utf8(output).unwrap()
+}
+
+#[test]
+fn rejected_input_remains_observable_when_event_delivery_fails() {
+    // A closed event loop must not swallow the final overload evidence or reveal its rejected payload.
+    let private_input = b"private-shell-input".to_vec();
+    let log = capture_input_warning(|| {
+        App::deliver_pty_input_rejection(
+            Some(Err),
+            pty_input_rejected_event(
+                7,
+                PtyInputSource::TerminalReply,
+                PtyInputError::QueueFull(private_input.clone()),
+                input_observation(),
+            ),
+        );
+    });
+    for field in [
+        "pane_id=7",
+        "source=TerminalReply",
+        "rejected_bytes=19",
+        "writer_phase=Writing",
+        "queued_messages=4",
+        "observation=\"concurrent\"",
+    ] {
+        assert!(log.contains(field), "missing {field} in rejection warning: {log}");
+    }
+    assert!(!log.contains("private-shell-input"));
+    assert!(!log.contains(&format!("{private_input:?}")));
+    assert_eq!(log.matches("terminal input was not queued").count(), 1);
+}
+
+#[test]
+fn delivered_rejections_are_logged_once_by_the_event_loop() {
+    // Successful delivery leaves logging and current-window attribution to the event-loop handler.
+    let mut delivered = None;
+    let log = capture_input_warning(|| {
+        App::deliver_pty_input_rejection(
+            Some(|event| {
+                delivered = Some(event);
+                Ok(())
+            }),
+            pty_input_rejected_event(
+                7,
+                PtyInputSource::Keyboard,
+                PtyInputError::QueueFull(vec![b'x']),
+                input_observation(),
+            ),
+        );
+    });
+    assert!(log.is_empty());
+    assert!(matches!(delivered, Some(UserEvent::PtyInputRejected { pane_id: 7, .. })));
+}
+
+#[test]
+fn rejection_notification_follows_the_pane_not_the_frontmost_window() {
+    // A queued rejection follows a transferred pane and never appears on a surviving unrelated window.
+    let mut app = App::new(Default::default(), Default::default(), Default::default());
+    app.__test_seed_tab("main");
+    let child = app.__test_seed_child_window(&["child"]);
+    let pane_id = app.__test_child_active_pane(child).unwrap();
+    app.__test_set_frontmost_window(app.__test_main_window_id());
+    app.handle_pty_input_rejected(
+        pane_id,
+        PtyInputSource::Wheel,
+        12,
+        "queue full".into(),
+        input_observation(),
+    );
+    assert!(app.__test_child_notification_message(child).unwrap().contains("Wheel"));
+    assert!(app.__test_main_notification_message().is_none());
+    assert!(app.transfer_tab(Some(child), 0, None, 1).is_ok());
+    app.handle_pty_input_rejected(
+        pane_id,
+        PtyInputSource::PointerMotion,
+        12,
+        "queue full".into(),
+        input_observation(),
+    );
+    assert!(app.__test_main_notification_message().unwrap().contains("PointerMotion"));
+    app.main_mut().unwrap().notification = None;
+    app.handle_pty_input_rejected(
+        u64::MAX,
+        PtyInputSource::Keyboard,
+        1,
+        "disconnected".into(),
+        input_observation(),
+    );
+    assert!(app.__test_main_notification_message().is_none());
 }
 
 /// Terminal key ownership includes only panes whose PTY accepted the press.
@@ -61,7 +221,7 @@ fn accepted_windows_pty_input_arms_foreground_probe() {
     };
     let before = std::time::Instant::now();
 
-    app.dispatch_pty_write_effect(&effect);
+    app.dispatch_pty_write_effect(&effect, PtyInputSource::Keyboard);
 
     let wake = app.foreground_probe_wake.expect("accepted input arms a probe");
     assert!(wake.fixed);

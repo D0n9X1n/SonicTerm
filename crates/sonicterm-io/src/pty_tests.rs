@@ -1128,3 +1128,316 @@ fn the_message_cap_is_not_reimplemented_by_callers() {
          applies it, and a second copy is a second thing to keep in agreement"
     );
 }
+
+struct ControlledInputWriter {
+    entered: Sender<PtyWriterPhase>,
+    permit: Receiver<bool>,
+    written: Arc<Mutex<Vec<Vec<u8>>>>,
+    block_flush: bool,
+}
+
+impl Write for ControlledInputWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if !self.block_flush {
+            self.entered.send(PtyWriterPhase::Writing).unwrap();
+            if !self.permit.recv_timeout(Duration::from_secs(2)).unwrap_or(false) {
+                return Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+            }
+        }
+        self.written.lock().push(bytes.to_vec());
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.block_flush {
+            self.entered.send(PtyWriterPhase::Flushing).unwrap();
+            if !self.permit.recv_timeout(Duration::from_secs(2)).unwrap_or(false) {
+                return Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn diagnostic_input_channel() -> (PtyInputSender, Receiver<Vec<u8>>) {
+    let (tx, rx) = pty_input_channel();
+    (
+        PtyInputSender {
+            tx,
+            queued_bytes: Arc::new(AtomicUsize::new(0)),
+            writer_progress: Arc::new(PtyWriterProgress::new()),
+        },
+        rx,
+    )
+}
+
+fn observe_until(
+    sender: &PtyInputSender,
+    ready: impl Fn(&PtyInputDiagnostics) -> bool,
+) -> PtyInputDiagnostics {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let diagnostics = sender.diagnostics();
+        if ready(&diagnostics) {
+            return diagnostics;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "writer progress did not reach the expected state: {diagnostics:?}"
+        );
+        thread::yield_now();
+    }
+}
+
+#[test]
+fn healthy_writer_drains_a_prequeued_small_message_burst_in_order() {
+    // A burst fills four slots before scheduling even when the eventual writer is completely healthy.
+    #[cfg(windows)]
+    let _live_pty_guard = lock_live_pty_test();
+    let (sender, rx) = diagnostic_input_channel();
+    let messages = [
+        b"key".to_vec(),
+        b"\x1b[<0;12;8M".to_vec(),
+        b"\x1b[<64;12;8M".to_vec(),
+        b"\x1b[<0;12;8m".to_vec(),
+    ];
+    for bytes in &messages {
+        sender.send(bytes.clone()).unwrap();
+    }
+    let rejected = b"\x1b[<35;12;8M".to_vec();
+    assert!(
+        matches!(sender.send(rejected.clone()), Err(PtyInputError::QueueFull(bytes)) if bytes == rejected)
+    );
+    let burst = sender.diagnostics();
+    assert_eq!(burst.queued_messages, PTY_INPUT_QUEUE_CAPACITY);
+    assert_eq!(burst.queued_bytes, messages.iter().map(Vec::len).sum());
+    assert_eq!(burst.writer_phase, PtyWriterPhase::Idle);
+    assert_eq!(burst.in_flight_bytes, 0);
+    assert_eq!(burst.completed_messages, 0);
+
+    let (entered_tx, entered_rx) = crossbeam_channel::bounded(1);
+    let (permit_tx, permit_rx) = crossbeam_channel::bounded(1);
+    let written = Arc::new(Mutex::new(Vec::new()));
+    let (cancel_tx, cancel_rx) = crossbeam_channel::bounded(1);
+    let mut writer = spawn_writer_thread(
+        Box::new(ControlledInputWriter {
+            entered: entered_tx,
+            permit: permit_rx,
+            written: written.clone(),
+            block_flush: false,
+        }),
+        rx,
+        cancel_rx,
+        sender.queued_bytes.clone(),
+        sender.writer_progress.clone(),
+    );
+    for _ in &messages {
+        assert_eq!(
+            entered_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            PtyWriterPhase::Writing
+        );
+        permit_tx.send(true).unwrap();
+    }
+    let drained = observe_until(&sender, |d| {
+        d.completed_messages == 4 && d.writer_phase == PtyWriterPhase::Idle
+    });
+    assert_eq!(drained.queued_messages, 0);
+    assert_eq!(drained.queued_bytes, 0);
+    assert_eq!(drained.in_flight_bytes, 0);
+    assert_eq!(*written.lock(), messages);
+    cancel_tx.send(()).unwrap();
+    writer.finish("controlled healthy input writer");
+    assert_eq!(sender.diagnostics().writer_phase, PtyWriterPhase::Stopped);
+}
+
+#[test]
+fn slow_writer_recovers_without_replaying_rejected_input() {
+    // Releasing a slow writer drains accepted keys, button edges, and wheel reports in FIFO order without replay.
+    #[cfg(windows)]
+    let _live_pty_guard = lock_live_pty_test();
+    let (sender, rx) = diagnostic_input_channel();
+    let (entered_tx, entered_rx) = crossbeam_channel::bounded(1);
+    let (permit_tx, permit_rx) = crossbeam_channel::bounded(1);
+    let written = Arc::new(Mutex::new(Vec::new()));
+    let (cancel_tx, cancel_rx) = crossbeam_channel::bounded(1);
+    let mut writer = spawn_writer_thread(
+        Box::new(ControlledInputWriter {
+            entered: entered_tx,
+            permit: permit_rx,
+            written: written.clone(),
+            block_flush: false,
+        }),
+        rx,
+        cancel_rx,
+        sender.queued_bytes.clone(),
+        sender.writer_progress.clone(),
+    );
+    let first = b"key".to_vec();
+    sender.send(first.clone()).unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(2)).unwrap(), PtyWriterPhase::Writing);
+    let waiting = [
+        b"\x1b[<0;12;8M".to_vec(),
+        b"\x1b[<64;12;8M".to_vec(),
+        b"\x1b[<64;12;8M".to_vec(),
+        b"\x1b[<0;12;8m".to_vec(),
+    ];
+    for bytes in &waiting {
+        sender.send(bytes.clone()).unwrap();
+    }
+    assert!(matches!(sender.send(b"rejected".to_vec()), Err(PtyInputError::QueueFull(_))));
+    let full = sender.diagnostics();
+    assert_eq!(full.writer_phase, PtyWriterPhase::Writing);
+    assert_eq!(full.completed_messages, 0);
+    assert_eq!(full.in_flight_bytes, first.len());
+    assert_eq!(full.queued_messages, PTY_INPUT_QUEUE_CAPACITY);
+    permit_tx.send(true).unwrap();
+    for completed in 1..=waiting.len() {
+        assert_eq!(
+            entered_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            PtyWriterPhase::Writing
+        );
+        assert_eq!(sender.diagnostics().completed_messages, completed as u64);
+        permit_tx.send(true).unwrap();
+    }
+    let drained = observe_until(&sender, |d| {
+        d.completed_messages == 5 && d.writer_phase == PtyWriterPhase::Idle
+    });
+    assert_eq!(drained.queued_messages, 0);
+    assert_eq!(drained.queued_bytes, 0);
+    assert_eq!(drained.in_flight_bytes, 0);
+    let expected = std::iter::once(first).chain(waiting).collect::<Vec<_>>();
+    assert_eq!(*written.lock(), expected);
+    cancel_tx.send(()).unwrap();
+    writer.finish("controlled slow input writer");
+    assert_eq!(sender.diagnostics().writer_phase, PtyWriterPhase::Stopped);
+}
+
+#[test]
+fn stalled_native_writer_is_distinct_from_queue_pressure_and_cancels_boundedly() {
+    // A held native write is observable with zero queued bytes, then four later messages saturate the channel.
+    #[cfg(windows)]
+    let _live_pty_guard = lock_live_pty_test();
+    let (sender, rx) = diagnostic_input_channel();
+    let (entered_tx, entered_rx) = crossbeam_channel::bounded(1);
+    let (permit_tx, permit_rx) = crossbeam_channel::bounded(1);
+    let written = Arc::new(Mutex::new(Vec::new()));
+    let (cancel_tx, cancel_rx) = crossbeam_channel::bounded(1);
+    let mut writer = spawn_writer_thread(
+        Box::new(ControlledInputWriter {
+            entered: entered_tx,
+            permit: permit_rx,
+            written: written.clone(),
+            block_flush: false,
+        }),
+        rx,
+        cancel_rx,
+        sender.queued_bytes.clone(),
+        sender.writer_progress.clone(),
+    );
+    sender.send(vec![b'a'; 12]).unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(2)).unwrap(), PtyWriterPhase::Writing);
+    let stalled = sender.diagnostics();
+    assert_eq!(stalled.writer_phase, PtyWriterPhase::Writing);
+    assert_eq!(stalled.queued_bytes, 0);
+    assert_eq!(stalled.queued_messages, 0);
+    assert_eq!(stalled.in_flight_bytes, 12);
+    assert_eq!(stalled.completed_messages, 0);
+    assert!(stalled.in_flight_millis.is_some());
+    for len in [11, 12, 13, 24] {
+        sender.send(vec![b'b'; len]).unwrap();
+    }
+    let full = sender.diagnostics();
+    let began = Instant::now();
+    for _ in 0..1000 {
+        assert!(matches!(sender.send(vec![b'c'; 12]), Err(PtyInputError::QueueFull(_))));
+    }
+    assert!(
+        began.elapsed() < Duration::from_secs(1),
+        "refused input must not wait for the native writer"
+    );
+    assert_eq!(full.queued_messages, 4);
+    assert_eq!(full.queued_bytes, 60);
+    assert_eq!(sender.diagnostics().queued_bytes, 60);
+    assert_eq!(sender.diagnostics().in_flight_bytes, 12);
+    assert_eq!(sender.diagnostics().completed_messages, 0);
+    cancel_tx.send(()).unwrap();
+    permit_tx.send(false).unwrap();
+    writer.finish("controlled stalled input writer");
+    assert_eq!(sender.diagnostics().writer_phase, PtyWriterPhase::Stopped);
+    assert_eq!(sender.diagnostics().in_flight_bytes, 0);
+    assert_eq!(sender.diagnostics().queued_bytes, 0);
+    assert!(written.lock().is_empty());
+    assert!(matches!(sender.send(vec![b'd']), Err(PtyInputError::WriterDisconnected(_))));
+}
+
+#[test]
+fn blocked_flush_remains_in_flight_until_the_native_call_returns() {
+    // A flush can stall after write_all succeeded; queued bytes alone must not label the writer idle.
+    #[cfg(windows)]
+    let _live_pty_guard = lock_live_pty_test();
+    let (sender, rx) = diagnostic_input_channel();
+    let (entered_tx, entered_rx) = crossbeam_channel::bounded(1);
+    let (permit_tx, permit_rx) = crossbeam_channel::bounded(1);
+    let written = Arc::new(Mutex::new(Vec::new()));
+    let (cancel_tx, cancel_rx) = crossbeam_channel::bounded(1);
+    let mut writer = spawn_writer_thread(
+        Box::new(ControlledInputWriter {
+            entered: entered_tx,
+            permit: permit_rx,
+            written: written.clone(),
+            block_flush: true,
+        }),
+        rx,
+        cancel_rx,
+        sender.queued_bytes.clone(),
+        sender.writer_progress.clone(),
+    );
+    sender.send(vec![b'x'; 13]).unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(2)).unwrap(), PtyWriterPhase::Flushing);
+    let flushing = sender.diagnostics();
+    assert_eq!(flushing.writer_phase, PtyWriterPhase::Flushing);
+    assert_eq!(flushing.queued_bytes, 0);
+    assert_eq!(flushing.in_flight_bytes, 13);
+    assert_eq!(flushing.completed_messages, 0);
+    assert!(flushing.in_flight_millis.is_some());
+    let waiting = [b"key".to_vec(), b"button".to_vec(), b"wheel".to_vec(), b"release".to_vec()];
+    for bytes in &waiting {
+        sender.send(bytes.clone()).unwrap();
+    }
+    assert!(matches!(sender.send(vec![b'y']), Err(PtyInputError::QueueFull(_))));
+    let saturated = sender.diagnostics();
+    assert_eq!(saturated.writer_phase, PtyWriterPhase::Flushing);
+    assert_eq!(saturated.queued_messages, PTY_INPUT_QUEUE_CAPACITY);
+    assert_eq!(saturated.queued_bytes, waiting.iter().map(Vec::len).sum());
+    permit_tx.send(true).unwrap();
+    for _ in &waiting {
+        assert_eq!(
+            entered_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            PtyWriterPhase::Flushing
+        );
+        permit_tx.send(true).unwrap();
+    }
+    let drained = observe_until(&sender, |d| {
+        d.completed_messages == 5 && d.writer_phase == PtyWriterPhase::Idle
+    });
+    assert_eq!(drained.queued_bytes, 0);
+    assert_eq!(drained.queued_messages, 0);
+    assert_eq!(drained.in_flight_bytes, 0);
+    let expected = std::iter::once(vec![b'x'; 13]).chain(waiting).collect::<Vec<_>>();
+    assert_eq!(*written.lock(), expected);
+    cancel_tx.send(()).unwrap();
+    writer.finish("controlled flushing input writer");
+    assert_eq!(sender.diagnostics().writer_phase, PtyWriterPhase::Stopped);
+}
+
+#[test]
+fn diagnostics_do_not_weaken_the_per_message_limit() {
+    // Oversized refusals never charge the queue or advance writer progress, and retain the original bytes at the IO boundary.
+    let (sender, _rx) = diagnostic_input_channel();
+    let before = sender.diagnostics();
+    let bytes = vec![b'x'; MAX_PTY_INPUT_MESSAGE_BYTES + 1];
+    assert!(
+        matches!(sender.send(bytes), Err(PtyInputError::MessageTooLarge(bytes)) if bytes.len() == MAX_PTY_INPUT_MESSAGE_BYTES + 1)
+    );
+    assert_eq!(sender.diagnostics(), before);
+}

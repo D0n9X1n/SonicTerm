@@ -208,8 +208,7 @@ impl From<TabAction> for TabHit {
     }
 }
 
-/// Minimum vertical drag distance below the bottom of the tab bar to
-/// promote a tab press into a tear-out gesture. Matches Firefox/Chrome.
+/// Minimum outside distance from either vertical tab-bar edge, in raster pixels.
 pub const TEAR_OUT_THRESHOLD_PX: f32 = 40.0;
 
 /// Result of evaluating a mouse-drag against the tab bar.
@@ -221,25 +220,17 @@ pub struct TearOut {
     pub drop_position: (f32, f32),
 }
 
-/// Pure helper: was the press-then-move gesture a tear-out?
-///
-/// A tear-out fires when the cursor leaves the tab bar vertically by
-/// at least [`TEAR_OUT_THRESHOLD_PX`] pixels while the mouse button is
-/// still held. The caller owns the "is the mouse still down?" check —
-/// this function is mode-free so it can be unit-tested without winit.
-pub fn detect_tear_out(press_tab_index: usize, current_pos: (f32, f32)) -> Option<TearOut> {
-    let (cx, cy) = current_pos;
-    // The tab bar lives at y in [0, TAB_BAR_HEIGHT). A tear-out fires
-    // once the cursor moves at least THRESHOLD pixels below the bottom
-    // of the bar, regardless of horizontal position (so the user can
-    // drag straight down OR off to the side).
-    if cy >= TAB_BAR_HEIGHT + TEAR_OUT_THRESHOLD_PX {
-        Some(TearOut { tab_index: press_tab_index, drop_position: (cx, cy) })
-    } else {
-        // When: cy stays within the bar plus its threshold, so the gesture is
-        // still an ordinary press rather than a tear-out.
-        None
-    }
+/// Detect an inclusive vertical departure from the live bar; callers gate drag-start and button ownership.
+pub fn detect_tear_out(
+    press_tab_index: usize,
+    current_pos: (f32, f32),
+    bar: &TabBarLayout,
+) -> Option<TearOut> {
+    let (_, cy) = current_pos;
+    let (top, bottom) = bar.bar_y_range();
+    let outside_distance = (top - cy).max(cy - bottom).max(0.0);
+    (outside_distance >= TEAR_OUT_THRESHOLD_PX)
+        .then_some(TearOut { tab_index: press_tab_index, drop_position: current_pos })
 }
 
 /// Computed layout for the entire bar — bar background and every tab.
