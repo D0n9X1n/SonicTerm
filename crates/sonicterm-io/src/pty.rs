@@ -839,8 +839,8 @@ pub struct PtyHandle {
     /// to account for one.
     queued_input_bytes: Arc<AtomicUsize>,
     writer_progress: Arc<PtyWriterProgress>,
-    /// Closure that resizes the pty to `(cols, rows)`.
-    pub resize: Box<dyn Fn(u16, u16) + Send + Sync>,
+    /// Closure that resizes the pty to `(cols, rows)`, reporting native failure.
+    pub resize: Box<dyn Fn(u16, u16) -> Result<()> + Send + Sync>,
     reader_cancel: Sender<()>,
     writer_cancel: Sender<()>,
     reader_thread: PtyIoThread,
@@ -949,16 +949,7 @@ impl PtyHandle {
         self.queued_input_bytes.load(Ordering::Relaxed)
     }
 
-    /// An owned input sender for a caller that cannot borrow the handle.
-    ///
-    /// Two callers need this: the thread forwarding parser replies (DSR, DA,
-    /// XTVERSION, focus) generated on the VT thread, and the mux server, which
-    /// resolves a pane under a lock and must send after releasing it.
-    ///
-    /// Returns [`PtyInputSender`] rather than the raw channel. The reply
-    /// forwarder previously cloned the `Sender` and called `send`, which
-    /// skipped the size cap and blocked when the queue filled — in a thread
-    /// whose reason for existing is that nothing should block there.
+    /// An owned, size-capped input sender for a caller that cannot borrow the handle.
     #[must_use]
     pub fn input_sender(&self) -> PtyInputSender {
         PtyInputSender {
@@ -978,11 +969,44 @@ impl PtyHandle {
 // Lifecycle: dropping `PtyHandle` invokes `run_pty_teardown` for bounded I/O cancellation, child cleanup, and master close.
 impl Drop for PtyHandle {
     fn drop(&mut self) {
-        let resize = std::mem::replace(&mut self.resize, Box::new(|_, _| {}));
+        let resize = std::mem::replace(&mut self.resize, Box::new(|_, _| Ok(())));
         let mut teardown =
             PtyHandleTeardown { handle: self, resize: Some(resize), termination_failed: false };
         run_pty_teardown(&mut teardown);
     }
+}
+
+/// Native resize plus the last size it accepted, under one lock.
+struct ResizeState {
+    apply: Box<dyn FnMut(u16, u16) -> Result<()> + Send>,
+    last_applied: Option<(u16, u16)>,
+}
+
+/// Build the pty resize callback over the native `apply`, skipping repeat sizes.
+///
+/// The returned callback holds the `ResizeState` lock across `apply`, so native
+/// resizes are serialized and the stored size cannot disagree with the pty.
+fn resize_callback(
+    apply: Box<dyn FnMut(u16, u16) -> Result<()> + Send>,
+) -> Box<dyn Fn(u16, u16) -> Result<()> + Send + Sync> {
+    let state = Mutex::new(ResizeState { apply, last_applied: None });
+    Box::new(move |cols, rows| {
+        if cols == 0 || rows == 0 {
+            // When: `cols` or `rows` is zero, refuse before `apply` and before `last_applied` moves.
+            return Err(anyhow::Error::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("refusing pty resize to {cols}x{rows}"),
+            )));
+        }
+        let mut state = state.lock();
+        if state.last_applied == Some((cols, rows)) {
+            // When: the request equals `last_applied`, skip a native reflow that would change nothing.
+            return Ok(());
+        }
+        (state.apply)(cols, rows)?;
+        state.last_applied = Some((cols, rows));
+        Ok(())
+    })
 }
 
 trait PtyTeardownOps {
@@ -1013,7 +1037,7 @@ fn run_pty_teardown(teardown: &mut impl PtyTeardownOps) {
 
 struct PtyHandleTeardown<'a> {
     handle: &'a mut PtyHandle,
-    resize: Option<Box<dyn Fn(u16, u16) + Send + Sync>>,
+    resize: Option<Box<dyn Fn(u16, u16) -> Result<()> + Send + Sync>>,
     termination_failed: bool,
 }
 
@@ -1222,7 +1246,6 @@ impl PtyHandle {
     }
 
     /// Internal: spawn `cmd` with `args` and explicit environment options.
-    // Ordering: `last_resize` uses `Relaxed`; it only deduplicates callback-local sizes and guards no other state.
     #[doc(hidden)]
     pub fn spawn_with_args_and_opts(
         cmd: &str,
@@ -1278,31 +1301,12 @@ impl PtyHandle {
         );
 
         let resize_master = master.clone();
-        // Dedup no-op resizes. Callers (e.g. tab switch via
-        // `resize_visible_panes`) invoke this on every activation even
-        // when geometry is unchanged; on Windows each call is a ConPTY
-        // `ResizePseudoConsole` that forces a console reflow + shell
-        // repaint (SIGWINCH on Unix), which shows up as tab-switch lag.
-        // Pack (cols, rows) into one u32 and skip when it matches the
-        // last applied size. Seeded to u32::MAX so the first real resize
-        // always applies.
-        let last_resize = Arc::new(std::sync::atomic::AtomicU32::new(u32::MAX));
-        let resize = Box::new(move |cols: u16, rows: u16| {
-            let packed = (u32::from(cols) << 16) | u32::from(rows);
-            if last_resize.swap(packed, std::sync::atomic::Ordering::Relaxed) == packed {
-                // When: `last_resize` already equals `packed`, suppress a native reflow with unchanged geometry.
-                return;
-            }
-            // The public callback currently returns `()`, so this error cannot
-            // reach the caller. Keep the limitation explicit until the resize
-            // seam can report failures without changing every app call site.
-            let _ = resize_master.lock().resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            });
-        });
+        // Callers re-apply geometry on every tab activation, and each native
+        // call is a ConPTY reflow or SIGWINCH, so unchanged sizes are skipped.
+        let resize = resize_callback(Box::new(move |cols: u16, rows: u16| {
+            resize_master.lock().resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
+            Ok(())
+        }));
 
         Ok(Self {
             out_rx,

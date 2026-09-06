@@ -90,11 +90,9 @@ pub fn resize_renderer_and_panes_if_present(
         return false;
     }
     let (cols, rows) = r.cells();
-    for pane in panes.values() {
+    for (pane_id, pane) in panes {
         pane.parser.lock().grid_mut().resize(cols, rows);
-        if let Some(pty) = pane.pty.as_ref() {
-            (pty.resize)(cols, rows);
-        }
+        pane.resize_pty(*pane_id, cols, rows);
     }
     true
 }

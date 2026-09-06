@@ -2,7 +2,7 @@
 
 ## English
 
-This is the canonical map of the 24 Rust crates in the Cargo workspace. The root
+This is the canonical map of the 23 Rust crates in the Cargo workspace. The root
 `Cargo.toml` supplies their version, edition, Rust version, authors, license, and
 repository metadata. `sonicterm-app` is the default workspace member. The
 shipping binaries are `sonicterm-mac`, `sonicterm-windows`, and
@@ -30,7 +30,6 @@ flowchart BT
     core["sonicterm-app-core"]
     app["sonicterm-app"]
     platforms["mac · windows · linux"]
-    mux["sonicterm-mux<br/>standalone"]
 
     resource --> types
     grid --> types
@@ -67,7 +66,6 @@ flowchart BT
     app --> logging
     platforms --> app
     platforms --> core
-    mux --> io
 ```
 
 The diagram shows the main architecture edges. Each entry below gives the exact
@@ -297,7 +295,7 @@ live SSH connection.
 `src/app/{event_loop,window_event,spawn_pane,keymap_dispatch,path_target,tear_out}.rs`,
 `src/shell.rs`.
 
-## Platform and standalone crates
+## Platform crates
 
 ### `sonicterm-mac`
 
@@ -333,44 +331,13 @@ metadata.
 
 **Read:** `src/main.rs`, `resources/`.
 
-### `sonicterm-mux`
-
-**Role:** standalone persistent-PTY multiplexer daemon with a framed bincode
-protocol, raw-byte replay ring, and attach/input/resize/kill operations. Every
-kill request receives exactly one reply: `Killed` for the matching removed pane
-or `Error`; the CLI waits with a bounded transport read and reports success only
-for the matching acknowledgement. It is a workspace crate, is not consumed by
-the GUI, and is not included in release packages.
-
-Its default endpoint is scoped by user and login session. Unix uses a validated
-owner-only runtime directory; listener mode is applied before bind where the OS
-supports it, while Darwin keeps the endpoint inside that inaccessible directory
-until its final `0600` mode is set. Startup refuses live, foreign-owned, and
-non-socket paths, and removes only an unchanged stale socket owned by the current
-user. Windows names the pipe with the current user SID and terminal-session ID,
-then applies a protected DACL granting access only to that user before pipe creation.
-
-Attach pauses each pane until the client resets its parser and requests a bounded
-`ReplaySnapshot`. One logical snapshot arrives as ordered fragments of at most
-8 KiB; `start` discards an incomplete prior attempt and `complete` ends the
-snapshot. Live output reserves separate recovery and control slots. The first
-dropped chunk requires one `ResyncRequired`; if control traffic filled the
-mailbox, the writer queues it as soon as one message drains. Later bytes remain
-suppressed until the complete snapshot fragment queues under the shared
-snapshot/live lock boundary. An old connection cannot replay a pane after a
-newer subscriber replaces it.
-
-**First-party dependencies:** `sonicterm-io`.
-
-**Read:** `src/{main,proto,frame,server}.rs`.
-
 Every crate has a local `CLAUDE.md` with its guardrails and local gate. Package
 layouts belong on [Packaging](Packaging); CI and release behavior belong on
 [Development and Release](Development-and-Release).
 
 ## 中文
 
-本页是 Cargo workspace 中 24 个 Rust crate 的规范映射。根 `Cargo.toml`
+本页是 Cargo workspace 中 23 个 Rust crate 的规范映射。根 `Cargo.toml`
 统一提供版本、edition、Rust 版本、作者、许可证和仓库信息。默认 workspace member
 是 `sonicterm-app`。发布的二进制 crate 是 `sonicterm-mac`、
 `sonicterm-windows` 和 `sonicterm-linux`；Linux 可执行文件名为 `sonicterm`。
@@ -397,7 +364,6 @@ flowchart BT
     core["sonicterm-app-core"]
     app["sonicterm-app"]
     platforms["mac · windows · linux"]
-    mux["sonicterm-mux<br/>独立运行"]
 
     resource --> types
     grid --> types
@@ -434,7 +400,6 @@ flowchart BT
     app --> logging
     platforms --> app
     platforms --> core
-    mux --> io
 ```
 
 图中只画主要架构依赖。下方每个条目列出准确的第一方 Cargo 依赖。
@@ -650,7 +615,7 @@ effect 顺序和状态机。实时窗口/标签页/窗格结构仍由 `sonicterm
 `src/app/{event_loop,window_event,spawn_pane,keymap_dispatch,path_target,tear_out}.rs`、
 `src/shell.rs`。
 
-## 平台与独立 crate
+## 平台 crate
 
 ### `sonicterm-mac`
 
@@ -684,31 +649,6 @@ ConPTY 仍封装在 `sonicterm-io` 后。
 `sonicterm-engine`、`sonicterm-logging`。
 
 **阅读：** `src/main.rs`、`resources/`。
-
-### `sonicterm-mux`
-
-**职责：** 独立的持久 PTY multiplexer daemon，提供 framed bincode 协议、原始字节
-回放环，以及 attach/input/resize/kill 操作。每个 kill 请求恰好收到一条回复：成功移除
-对应 pane 时返回 `Killed`，失败时返回 `Error`；CLI 使用有界传输读取等待响应，且仅在
-确认消息中的 pane 编号匹配时报告成功。它属于 workspace，但 GUI 不依赖它，发布包也
-不包含它。
-
-默认端点按用户和登录会话隔离。Unix 使用经验证且仅所有者可访问的运行时目录；操作系统
-支持时会在 bind 前设置 listener mode，而 Darwin 会把端点保留在该不可被其它用户访问的
-目录内，随后立即设置最终的 `0600` mode。启动时会拒绝仍存活、外部用户所有或非 socket
-的路径，只删除当前用户所有且复查后未改变的陈旧 socket。Windows pipe 名称包含当前用户
-SID 与终端会话 ID，并在创建 pipe 前应用只授权该用户的受保护 DACL。
-
-Attach 会暂停每个窗格，直到客户端重置 parser 并请求有界的 `ReplaySnapshot`。一个逻辑
-snapshot 会拆成不超过 8 KiB 的有序 fragment；`start` 会丢弃上一次未完成的尝试，`complete`
-会结束该 snapshot。实时输出为恢复标记和普通控制消息分别预留槽位。第一个丢失的 chunk 必须
-产生一条 `ResyncRequired`；若控制消息已填满 mailbox，writer 会在任一消息排出后立即将其
-入队。后续字节保持暂停，直到最后一个 snapshot fragment 在共享的 snapshot/实时输出锁边界内
-入队。新 subscriber 替换旧连接后，旧连接不能再请求该窗格的回放。
-
-**第一方依赖：** `sonicterm-io`。
-
-**阅读：** `src/{main,proto,frame,server}.rs`。
 
 每个 crate 都有本地 `CLAUDE.md`，记录约束和本地 gate。安装包布局见[打包](Packaging)；
 CI 与发布行为见[开发与发布](Development-and-Release)。

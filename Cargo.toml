@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/sonicterm-types", "crates/sonicterm-resource", "crates/sonicterm-vt", "crates/sonicterm-grid", "crates/sonicterm-cfg", "crates/sonicterm-io", "crates/sonicterm-text", "crates/sonicterm-ui", "crates/sonicterm-render-model", "crates/sonicterm-gpu", "crates/sonicterm-app-core", "crates/sonicterm-app", "crates/sonicterm-mac", "crates/sonicterm-windows", "crates/sonicterm-linux", "crates/sonicterm-mux", "crates/sonicterm-logging", "crates/sonicterm-engine", "crates/sonicterm-block-glyph", "crates/sonicterm-font", "crates/sonicterm-font-config", "crates/sonicterm-freetype", "crates/sonicterm-harfbuzz", "crates/sonicterm-fontconfig"]
+members = ["crates/sonicterm-types", "crates/sonicterm-resource", "crates/sonicterm-vt", "crates/sonicterm-grid", "crates/sonicterm-cfg", "crates/sonicterm-io", "crates/sonicterm-text", "crates/sonicterm-ui", "crates/sonicterm-render-model", "crates/sonicterm-gpu", "crates/sonicterm-app-core", "crates/sonicterm-app", "crates/sonicterm-mac", "crates/sonicterm-windows", "crates/sonicterm-linux", "crates/sonicterm-logging", "crates/sonicterm-engine", "crates/sonicterm-block-glyph", "crates/sonicterm-font", "crates/sonicterm-font-config", "crates/sonicterm-freetype", "crates/sonicterm-harfbuzz", "crates/sonicterm-fontconfig"]
 default-members = ["crates/sonicterm-app"]
 
 [workspace.package]

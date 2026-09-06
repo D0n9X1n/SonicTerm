@@ -103,10 +103,8 @@ impl Ledger {
                     | OwnerKind::SharedRaster
                     | OwnerKind::SharedAtlas
                     | OwnerKind::Window
-                    // The GUI is the client side of a mux link, so it owns the
-                    // connection it opened. Without this the remote input and
-                    // output it retains has no owner to close with, and a
-                    // dropped link would leak its queues into the process root.
+                    // Retained model rule with no current producer: a client
+                    // owns the connection it opens.
                     | OwnerKind::MuxConnection
             ) | (ProcessKind::Gui, OwnerKind::Window, OwnerKind::AppPane)
                 | (ProcessKind::Gui, OwnerKind::AppPane, OwnerKind::LocalPty)

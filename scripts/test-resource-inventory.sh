@@ -81,9 +81,9 @@ for filename in ("resource-inventory.json", "resource-inventory.md"):
     assert manifest.get(filename) == actual, (filename, manifest.get(filename), actual)
 
 document = json.loads((output / "resource-inventory.json").read_text(encoding="utf-8"))
-assert document["row_count"] == 7
+assert document["row_count"] == 5
 assert len(document["schema"]) == 12
-assert len(document["rows"]) == 7
+assert len(document["rows"]) == 5
 PY
 
 printf '\n' >> "$OUTPUT/resource-inventory.md"

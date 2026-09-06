@@ -113,6 +113,32 @@ unchanged. Overload remains observable; no input is automatically replayed,
 coalesced, or admitted by enlarging the queue. Interpret repeated observations
 of the same pane and progress counter rather than a single `QueueFull` warning.
 
+## PTY resize failure diagnostics
+
+The default `warn` level reports a PTY resize the native layer refused, as one
+`pty resize failed` event.
+
+| Field | Meaning |
+| --- | --- |
+| `pane_id` | Stable pane identity of the pane whose PTY refused the resize |
+| `cols`, `rows` | Requested geometry, not the geometry the pty currently holds |
+| `error` | The failure rendered by `Display`. A native refusal shows the platform text; a zero axis shows `refusing pty resize to <cols>x<rows>` |
+
+The event carries no terminal content: only the pane id, the requested columns
+and rows, and the error.
+
+One failing pane logs once per failing run, not once per request. Resizes are
+driven by tab activation and window drags, so a pane whose PTY refuses every
+request would otherwise emit at input rate down a synchronous path. The first
+failure is reported and later failures stay silent until a resize succeeds,
+which clears the latch so the next distinct failure is reported again.
+
+Suppression applies to the warning only, and never suppresses a resize attempt.
+An invalid size and a successful duplicate are the only requests that do not
+reach the native call, and the IO boundary decides both. The grid keeps the
+geometry the user asked for — there is no rollback, no retry timer, and no
+heartbeat line while failures continue.
+
 ## Render and performance diagnostics
 
 Set `level = "debug"`, restart, and reproduce the problem. The
@@ -445,6 +471,27 @@ max_breadcrumb_bytes = 1048576    # 1 MiB
 队列容量、单消息上限、FIFO 交付和取消行为不变。过载仍可观察；不会自动重放、合并输入，
 也不会扩大队列来接纳它。应比较同一窗格的连续观察值和进度计数，而不是凭一条 `QueueFull`
 warning 下结论。
+
+## PTY 尺寸调整失败诊断
+
+默认 `warn` 级别会把原生层拒绝的 PTY 尺寸调整记为一条 `pty resize failed` 事件。
+
+| 字段 | 含义 |
+| --- | --- |
+| `pane_id` | PTY 拒绝该次尺寸调整的窗格标识 |
+| `cols`、`rows` | 请求的几何尺寸，而不是 pty 当前持有的尺寸 |
+| `error` | 由 `Display` 渲染的失败信息。原生拒绝显示平台文本；某一维为零时显示 `refusing pty resize to <cols>x<rows>` |
+
+事件不携带终端内容：只有窗格 id、请求的列数与行数以及错误。
+
+同一个失败中的窗格在每一轮连续失败中只记录一次，而不是每次请求都记录。尺寸调整由
+标签页激活和窗口拖拽驱动，因此若某个窗格的 PTY 拒绝每一次请求，否则就会以输入频率
+沿同步路径持续输出。第一次失败会被报告，后续失败保持静默，直到一次成功的尺寸调整
+清除该闩锁，使下一次不同的失败重新被报告。
+
+抑制只作用于告警，绝不会抑制一次尺寸调整尝试。只有无效尺寸和成功的重复请求不会到达
+原生调用，而这两者都由 IO 边界决定。网格保留用户请求的几何尺寸——没有回滚、没有重试
+定时器，失败持续期间也没有心跳行。
 
 ## 渲染与性能诊断
 

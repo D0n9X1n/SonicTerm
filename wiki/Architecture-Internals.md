@@ -269,6 +269,25 @@ observations, and notifies that pane's window if it still exists. It does not
 replay the bytes automatically. Queue occupancy excludes the active native
 write/flush, whose phase, size, elapsed time, and progress are observed separately.
 
+PTY resize is fallible and its cache is success-only. The callback holds the
+native call and the last applied `(cols, rows)` behind one lock, so native
+resizes are serialized and the cache records the last successful native call. A
+zero axis is refused as an `InvalidInput` error before the native call and
+before the cache changes; a request equal to the last *applied* size is skipped;
+only a successful native call caches a size. A failed request is therefore not
+deduplicated away — the next identical request reaches the native call again —
+and the last successful size stays cached. The first request always reaches the
+native call, because the cache starts empty rather than seeded from the spawn
+dimensions.
+
+The grid is resized first and is never rolled back when the native call fails:
+the pane keeps the requested geometry and only the child's view of it lags.
+`PaneState::resize_pty` reports the failure once per failing run — first failure
+logged with pane id, requested columns and rows, and error, then silence until a
+success clears the latch. The latch gates the log line only. Warning suppression
+never suppresses a resize attempt; an invalid size and a successful duplicate
+are decided at the IO boundary, not by the latch.
+
 The PTY reader uses a reusable 64 KiB `BytesMut` allocation. It sends
 `PtyOutputChunk` views through a 64-slot channel. A full channel blocks the
 reader and lets the operating system apply back-pressure; output is not dropped.
@@ -586,6 +605,20 @@ sRGB 彩色 view。Alpha 保持为 RGB 覆盖率最大值，因此不满足
 记录窗格、当前窗口、类型化来源及并发队列/writer 观察值；窗格仍存在时在其窗口显示通知。
 它不会自动重放这些字节。队列占用不包含正在进行的原生写入或 flush；其阶段、大小、
 持续时间和进度会单独观察。
+
+PTY 尺寸调整是可失败的，且只在成功时缓存。回调把原生调用和最后一次成功应用的
+`(cols, rows)` 放在同一把锁后面，因此原生尺寸调整是串行的，缓存记录的是最后一次成功
+的原生调用。某一维为零时，在原生调用之前、也在缓存变化之前以 `InvalidInput` 错误
+拒绝；与最后一次*已应用*尺寸相同的请求会被跳过；只有原生调用成功才会缓存尺寸。因此
+失败的请求不会被当作重复请求去重——下一次相同的请求会再次到达原生调用——而最后一次
+成功的尺寸仍保留在缓存中。第一次请求一定会到达原生调用，因为缓存初始为空，不会用
+spawn 时的尺寸预填。
+
+网格先被调整，且在原生调用失败时绝不回滚：窗格保留请求的几何尺寸，只有子进程看到的
+尺寸会滞后。`PaneState::resize_pty` 在每一轮连续失败中只报告一次——第一次失败会记录
+窗格 id、请求的列数与行数以及错误，随后保持静默，直到一次成功清除该闩锁。闩锁只控制
+日志行。告警抑制绝不会抑制一次尺寸调整尝试；无效尺寸和成功的重复请求由 IO 边界决定，
+与闩锁无关。
 
 PTY reader 使用可复用的 64 KiB `BytesMut` 分配，并通过 64 槽通道发送
 `PtyOutputChunk` 视图。通道满时 reader 阻塞，让操作系统施加背压；输出不会被丢弃。

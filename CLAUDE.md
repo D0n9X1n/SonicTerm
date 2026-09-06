@@ -82,7 +82,6 @@ by default and the CI workflows are first-party files worth finding.
 | `sonicterm-mac` | macOS binary/glue. |
 | `sonicterm-windows` | Windows binary/glue. |
 | `sonicterm-linux` | Linux binary/glue and package metadata. |
-| `sonicterm-mux` | Future mux daemon. |
 | `sonicterm-logging` | Logs, panic hook, exit tracing. |
 
 ## Local gate
@@ -206,7 +205,7 @@ stable exit code `16`.
 Two more limits worth knowing before trusting a green run:
 
 - `rust-logic-coverage.sh` measures a deterministic-logic subset and skips 11
-  of the 24 crates outright, including `sonicterm-app` and `sonicterm-gpu`. A
+  of the 23 crates outright, including `sonicterm-app` and `sonicterm-gpu`. A
   passing coverage figure says nothing about code in those crates. It is also
   macOS-only in CI.
 - Tests behind `#![cfg(target_os = "windows")]` compile to nothing on macOS,
