@@ -1143,7 +1143,11 @@ impl App {
                             // bounded effect path resolves and enqueues the PTY write.
                             let _ = child;
                             if let Some((pane_id, bytes)) = report {
-                                self.write_to_pane(pane_id, bytes);
+                                self.write_to_pane(
+                                    pane_id,
+                                    bytes,
+                                    super::PtyInputSource::PointerMotion,
+                                );
                             }
                             return;
                         }
@@ -1302,7 +1306,13 @@ impl App {
                                 super::window_event::wheel_report_bytes(sgr, up, col1, row1, count);
                             if let Some(pane) = child.panes.get(&pane_id) {
                                 if let Some(pty) = pane.pty.as_ref() {
-                                    Self::queue_pty_input(pty_event_proxy.as_ref(), pty, payload);
+                                    Self::queue_pty_input(
+                                        pty_event_proxy.as_ref(),
+                                        pty,
+                                        pane_id,
+                                        super::PtyInputSource::Wheel,
+                                        payload,
+                                    );
                                 }
                             }
                         } else if is_alt {
@@ -1322,7 +1332,13 @@ impl App {
                             }
                             if let Some(pane) = child.panes.get(&pane_id) {
                                 if let Some(pty) = pane.pty.as_ref() {
-                                    Self::queue_pty_input(pty_event_proxy.as_ref(), pty, payload);
+                                    Self::queue_pty_input(
+                                        pty_event_proxy.as_ref(),
+                                        pty,
+                                        pane_id,
+                                        super::PtyInputSource::Wheel,
+                                        payload,
+                                    );
                                 }
                             }
                         } else {
@@ -1422,7 +1438,11 @@ impl App {
                                         child.finish_pane_focus_change(change);
                                     }
                                     let _ = child;
-                                    self.write_to_pane(pane_id, bytes);
+                                    self.write_to_pane(
+                                        pane_id,
+                                        bytes,
+                                        super::PtyInputSource::PointerButton,
+                                    );
                                     return;
                                 }
                             }
@@ -1503,7 +1523,11 @@ impl App {
                             child.request_redraw();
                             let _ = child;
                             if let Some((pane_id, bytes)) = release_report {
-                                self.write_to_pane(pane_id, bytes);
+                                self.write_to_pane(
+                                    pane_id,
+                                    bytes,
+                                    super::PtyInputSource::PointerButton,
+                                );
                             }
                             return;
                         }
@@ -1934,8 +1958,12 @@ impl App {
                             child.tab_states.get(tab_idx).map(|st| st.active_pane)
                         {
                             let bytes = committed.into_bytes();
-                            self.write_to_pane(active_id, bytes.clone());
-                            self.broadcast_from(active_id, bytes);
+                            self.write_to_pane(
+                                active_id,
+                                bytes.clone(),
+                                super::PtyInputSource::Ime,
+                            );
+                            self.broadcast_from(active_id, bytes, super::PtyInputSource::Ime);
                         }
                     }
                 }
@@ -2011,10 +2039,10 @@ impl App {
         // The child borrow ended before either bounded pane write; pointer
         // release targets the press pane while DEC focus targets the active pane.
         if let Some((pane_id, bytes)) = pointer_release {
-            self.write_to_pane(pane_id, bytes);
+            self.write_to_pane(pane_id, bytes, super::PtyInputSource::PointerButton);
         }
         if let Some((pane_id, bytes)) = focus_report {
-            self.write_to_pane(pane_id, bytes);
+            self.write_to_pane(pane_id, bytes, super::PtyInputSource::FocusReport);
         }
     }
 

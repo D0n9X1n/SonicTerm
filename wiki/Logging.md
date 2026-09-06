@@ -66,6 +66,53 @@ the configured filters. Very hot font-shaper dumps are `trace`; no configured
 level admits them. Use a targeted `RUST_LOG` directive only when investigating
 that path.
 
+## PTY input rejection diagnostics
+
+The default `warn` level reports input that was refused, including terminal
+parser replies. The producer assigns `source`: `Keyboard`, `Paste`, `FileDrop`,
+`Ime`, `PointerButton`, `PointerMotion`, `Wheel`, `FocusReport`, `TerminalReply`,
+`ScriptDraft`, or `StateMachine`. Sources are never guessed from payload bytes.
+
+| Field | Meaning |
+| --- | --- |
+| `pane_id` | Stable pane identity supplied at the producer |
+| `window_id` | The pane's current window when the event loop handles the rejection; absent after pane closure or when the event loop is unavailable |
+| `source`, `rejected_bytes`, `reason` | Input category, refused byte length, and payload-free reason |
+| `observation="concurrent"` | Queue and writer fields are independent observations, not one rejection-time transaction |
+| `queued_messages`, `queued_bytes`, `queue_capacity` | Waiting message count, payload byte count, and four-slot limit; excludes the active native write |
+| `writer_phase` | `Idle`, `Writing`, `Flushing`, or `Stopped`; a boundary observation, not a child-health verdict |
+| `in_flight_bytes`, `in_flight_millis` | Active message size and time spent in the observed write or flush; time is absent when idle/stopped |
+| `completed_messages` | Successful `write_all` calls whose best-effort flush attempt returned |
+
+The event carries no rejected payload. Its debug representation, warnings, and
+notification never include typed text, commands, paths, or clipboard content.
+Notification follows the pane's current window after tab transfers; a closed
+pane produces a warning but no notification on an unrelated window. When the
+proxy is absent or event delivery fails, the producer logs the same metadata
+without a current-window identity.
+
+Each pane's parser-reply worker posts at most one rejection notification during
+its lifetime. Further refused replies are counted in fixed-size metadata and
+logged at most once per second, with a final flush when the worker stops. The
+summary fields `rejected_messages`, `rejected_bytes`, `queue_full`,
+`message_too_large`, and `writer_disconnected` count additional refusals since
+the previous summary; they exclude the first, individually reported rejection.
+Idle workers with no pending summary do not wake periodically. This bounds
+background diagnostic traffic without hiding loss or retaining reply payloads.
+
+Four small messages can fill the channel before a healthy writer is scheduled.
+Controlled tests use the production admission and writer loop to demonstrate
+that burst draining preserves order. Separate blocked-write and blocked-flush
+fixtures demonstrate zero queued bytes with one in-flight message, followed by
+four additional queued messages and explicit refusal of the next message.
+These fixtures distinguish mechanisms; they do not retrospectively identify
+which producer or native condition caused an older un-attributed warning.
+
+Queue capacity, per-message limits, FIFO delivery, and cancellation are
+unchanged. Overload remains observable; no input is automatically replayed,
+coalesced, or admitted by enlarging the queue. Interpret repeated observations
+of the same pane and progress counter rather than a single `QueueFull` warning.
+
 ## Render and performance diagnostics
 
 Set `level = "debug"`, restart, and reproduce the problem. The
@@ -362,6 +409,42 @@ max_breadcrumb_bytes = 1048576    # 1 MiB
 配置过滤器始终把 `wgpu`、`naga`、`sonicterm-vt` 和 `sonicterm-grid` 保持在 warning
 级别。字体塑形热路径的海量输出位于 `trace`，任何配置级别都不会启用；只有专门排查该
 路径时才使用精确的 `RUST_LOG` 指令。
+
+## PTY 输入拒绝诊断
+
+默认 `warn` 级别会报告被拒绝的输入，包括终端解析器回复。生产者直接指定 `source`：
+`Keyboard`、`Paste`、`FileDrop`、`Ime`、`PointerButton`、`PointerMotion`、`Wheel`、
+`FocusReport`、`TerminalReply`、`ScriptDraft` 或 `StateMachine`；不会从负载字节猜测来源。
+
+| 字段 | 含义 |
+| --- | --- |
+| `pane_id` | 生产者提供的稳定窗格标识 |
+| `window_id` | 事件循环处理拒绝时窗格所属的当前窗口；窗格关闭或事件循环不可用时为空 |
+| `source`、`rejected_bytes`、`reason` | 输入类别、被拒绝的字节数及不含负载的原因 |
+| `observation="concurrent"` | 队列与 writer 字段为独立并发观察值，不是拒绝瞬间的同一事务快照 |
+| `queued_messages`、`queued_bytes`、`queue_capacity` | 等待的消息数、负载字节数和四槽上限；不包含正在进行的原生写入 |
+| `writer_phase` | `Idle`、`Writing`、`Flushing` 或 `Stopped`；表示执行边界，不是子进程健康结论 |
+| `in_flight_bytes`、`in_flight_millis` | 当前消息大小及已观察写入或 flush 的持续时间；空闲或停止时无时间值 |
+| `completed_messages` | `write_all` 成功且尽力而为的 flush 尝试已返回的消息数 |
+
+事件不携带被拒绝的负载。其 debug 表示、warning 和通知均不包含输入文本、命令、路径或剪贴板内容。
+标签页转移后，通知跟随窗格的当前窗口；已关闭的窗格只记录 warning，不在无关窗口显示通知。
+代理缺失或事件投递失败时，生产者直接记录同样的元数据，但不附带无法确认的当前窗口标识。
+
+每个窗格的解析器回复 worker 在其整个生命周期内最多发送一次拒绝通知。后续被拒绝的回复
+使用固定大小的元数据计数，每秒最多记录一次，并在 worker 停止时输出最后一批。
+汇总字段 `rejected_messages`、`rejected_bytes`、`queue_full`、`message_too_large` 和
+`writer_disconnected` 统计自上次汇总以来额外发生的拒绝，不包含首次单独报告的拒绝。
+没有待汇总数据的空闲 worker 不会周期唤醒；这样既限制后台诊断流量，也不隐藏输入丢失或保留回复负载。
+
+健康 writer 尚未被调度时，四条小消息就能填满通道。受控测试使用生产环境的入队与 writer 循环，
+证明突发排空仍保持顺序。另设阻塞写入和阻塞 flush 的夹具，证明排队字节为零时仍可能有一条
+在途消息；再加入四条等待消息后，下一条消息会被显式拒绝。这些夹具区分机制，不会倒推出
+以前缺少归属信息的 warning 究竟由哪个生产者或原生条件引起。
+
+队列容量、单消息上限、FIFO 交付和取消行为不变。过载仍可观察；不会自动重放、合并输入，
+也不会扩大队列来接纳它。应比较同一窗格的连续观察值和进度计数，而不是凭一条 `QueueFull`
+warning 下结论。
 
 ## 渲染与性能诊断
 

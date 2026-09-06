@@ -221,9 +221,11 @@ transient `AppStateMachine` because its broadcast caller has only `&self`.
 - message limit: 16 MiB;
 - rejection cases: `MessageTooLarge`, `QueueFull`, `WriterDisconnected`.
 
-Every `PtyInputError` retains the rejected `Vec<u8>`. The app posts
-`UserEvent::PtyInputRejected`, logs the reason, and displays an error
-notification with the byte count. It does not retry automatically because the
+Every `PtyInputError` retains the rejected `Vec<u8>` at the IO boundary. The app
+drops those bytes before posting metadata-only `UserEvent::PtyInputRejected`.
+It logs pane identity, the current window, producer-assigned input category,
+byte count, reason, and concurrent queue/writer observations, then notifies the
+pane's window if it still exists. It does not retry automatically because the
 child's input state may change before a later replay.
 
 The dedicated `sonic-pty-writer` thread removes the owned byte vector, calls
@@ -838,8 +840,9 @@ AppIntent::PtyWrite → AppEffect::PtyWrite → PaneState → PtyHandle
 - 每条消息最多 16 MiB；
 - 拒绝类型为 `MessageTooLarge`、`QueueFull`、`WriterDisconnected`。
 
-每个 `PtyInputError` 都保留被拒绝的 `Vec<u8>`。应用发送
-`UserEvent::PtyInputRejected`，记录原因，并显示带字节数的错误通知。它不会自动重试，
+每个 `PtyInputError` 在 IO 边界保留被拒绝的 `Vec<u8>`。应用先丢弃这些字节，再发送
+只含元数据的 `UserEvent::PtyInputRejected`。它记录窗格标识、当前窗口、生产者指定的输入类别、
+字节数、原因及并发队列/writer 观察值；窗格仍存在时在其窗口显示通知。它不会自动重试，
 因为稍后重放时，子程序的输入状态可能已经改变。
 
 专用 `sonic-pty-writer` 线程取出字节向量，调用 `write_all`，然后尝试一次不保证成功的

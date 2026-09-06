@@ -411,6 +411,18 @@ file, live settings, and baselines unchanged and shows an Error notification.
 
 ### Tab movement and tear-out
 
+Mouse-down activates the pressed tab. Mouse-up may reorder, merge, or tear out
+only when the cursor is at least 5 raster pixels from its press position.
+Below that threshold it remains a click, even if another window's tab bar
+overlaps the release point or the cursor slips just outside the source bar.
+Main and child windows share this decision; keyboard tab navigation bypasses it.
+
+For a genuine drag, a foreign tab bar takes precedence over source-bar reorder
+or cancellation. Otherwise, in-process tear-out requires an inclusive 40-raster-
+pixel vertical gap from the live bar's top or bottom edge. Horizontal exit alone
+is insufficient. The shared detector uses the actual bar offset and font/scale-
+derived height; this rule does not change native OS drag-handoff policy.
+
 In-process reorder, merge, and tear-out move live `Tab`, `TabState`, and
 `PaneState` values. `PtyHandle` is not cloned or respawned. Each successfully
 attached pane gets the destination `WindowId` in its shared redraw target.
@@ -869,6 +881,14 @@ tracing subscriber，只能在下次进程启动时生效。
 实时设置和基线都保持不变，并显示 Error 通知。
 
 ### 标签页移动与拆出
+
+鼠标按下时会激活所点的标签页；松开时，只有光标距离按下位置至少 5 个栅格像素，才允许重排、
+合并或拆出。低于该阈值时仍然是单击，即使另一窗口的标签栏与松开位置重叠，或光标轻微滑出
+源标签栏，也不会移动标签页。主窗口与子窗口共用这一判断；键盘切换标签页不经过该路径。
+
+真实拖动时，外部标签栏优先于源标签栏的重排或取消。否则，进程内拆出要求光标到实时标签栏
+上边缘或下边缘的垂直外部距离至少为 40 个栅格像素（含边界）；仅横向离开不足以拆出。
+共享检测器使用实际标签栏偏移以及随字体和缩放派生的高度；该规则不改变原生操作系统拖动交接策略。
 
 进程内重排、合并和拆出会移动存活的 `Tab`、`TabState` 和 `PaneState`。`PtyHandle` 不会复制
 或重启。窗格成功附加后，共享重绘目标会改成目标 `WindowId`。

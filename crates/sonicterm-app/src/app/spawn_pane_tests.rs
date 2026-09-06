@@ -4,6 +4,90 @@ use sonicterm_grid::grid::Grid;
 use sonicterm_ui::pane::Rect;
 use sonicterm_vt::vt::MediaProtocol;
 
+#[test]
+fn repeated_reply_rejections_emit_one_event_and_preserve_totals() {
+    // A stalled writer cannot amplify a fixed reply burst into an unbounded number of UI events.
+    let (tx, rx) = crossbeam_channel::unbounded();
+    for _ in 0..1000 {
+        tx.send(vec![b'x'; 12]).unwrap();
+    }
+    drop(tx);
+    let mut events = 0;
+    let mut summaries = Vec::new();
+    forward_pty_replies(
+        rx,
+        |bytes| Err(sonicterm_io::pty::PtyInputError::QueueFull(bytes)),
+        |_| events += 1,
+        |totals| summaries.push(totals),
+    );
+    assert_eq!(events, 1);
+    assert_eq!(summaries.iter().map(|s| s.messages).sum::<u64>(), 999);
+    assert_eq!(summaries.iter().map(|s| s.bytes).sum::<u64>(), 999 * 12);
+    assert_eq!(summaries.iter().map(|s| s.queue_full).sum::<u64>(), 999);
+    assert!(summaries.iter().all(|s| s.too_large == 0 && s.disconnected == 0));
+}
+
+#[test]
+fn reply_forwarding_keeps_successes_and_rejection_reasons_distinct() {
+    // Recovery preserves accepted reply order, while later refusal causes remain counted without another UI event.
+    use sonicterm_io::pty::PtyInputError;
+    let (tx, rx) = crossbeam_channel::unbounded();
+    for marker in 0..6 {
+        tx.send(vec![marker]).unwrap();
+    }
+    drop(tx);
+    let mut accepted = Vec::new();
+    let mut events = 0;
+    let mut summaries = Vec::new();
+    forward_pty_replies(
+        rx,
+        |bytes| match bytes[0] {
+            0 => Err(PtyInputError::QueueFull(bytes)),
+            2 => Err(PtyInputError::MessageTooLarge(bytes)),
+            4 => Err(PtyInputError::WriterDisconnected(bytes)),
+            _ => {
+                accepted.push(bytes);
+                Ok(())
+            }
+        },
+        |_| events += 1,
+        |totals| summaries.push(totals),
+    );
+    assert_eq!(accepted, [vec![1], vec![3]]);
+    assert_eq!(events, 1);
+    assert_eq!(summaries.iter().map(|s| s.messages).sum::<u64>(), 2);
+    assert_eq!(summaries.iter().map(|s| s.bytes).sum::<u64>(), 2);
+    assert_eq!(summaries.iter().map(|s| s.too_large).sum::<u64>(), 1);
+    assert_eq!(summaries.iter().map(|s| s.disconnected).sum::<u64>(), 1);
+}
+
+#[test]
+fn reply_rejection_summary_flushes_while_the_parser_is_idle() {
+    // Pending counts must reach the log even when no later reply or channel close wakes the worker.
+    let (tx, rx) = crossbeam_channel::bounded(2);
+    let (event_tx, event_rx) = crossbeam_channel::bounded(1);
+    let (summary_tx, summary_rx) = crossbeam_channel::bounded(1);
+    let worker = std::thread::spawn(move || {
+        forward_pty_replies(
+            rx,
+            |bytes| Err(sonicterm_io::pty::PtyInputError::QueueFull(bytes)),
+            |_| event_tx.send(()).unwrap(),
+            |totals| summary_tx.send(totals).unwrap(),
+        );
+    });
+    tx.send(vec![b'x'; 12]).unwrap();
+    tx.send(vec![b'x'; 13]).unwrap();
+    event_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let summary = summary_rx.recv_timeout(Duration::from_secs(3));
+    drop(tx);
+    worker.join().unwrap();
+    assert_eq!(
+        summary.unwrap(),
+        ReplyRejectionTotals { messages: 1, bytes: 13, queue_full: 1, ..Default::default() }
+    );
+    assert!(event_rx.try_recv().is_err());
+}
+
 fn app_with_unavailable_shell() -> App {
     // A child path below the test executable cannot launch a shell or read user shell profiles.
     let shell = std::env::current_exe().expect("test executable").join("unavailable-shell");

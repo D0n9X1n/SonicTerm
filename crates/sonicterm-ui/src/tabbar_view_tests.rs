@@ -162,9 +162,11 @@ fn drop_slots_switch_at_midpoints_and_insertion_positions_clamp() {
 
 #[test]
 fn tear_out_and_inset_helpers_cover_their_threshold_branches() {
-    assert_eq!(detect_tear_out(3, (12.0, 79.999)), None);
+    // The detector uses the provided bar bounds while inset helpers retain their layout contracts.
+    let layout = TabBarLayout::compute(&tab_bar(&["one"]), 400.0);
+    assert_eq!(detect_tear_out(3, (12.0, 79.999), &layout), None);
     assert_eq!(
-        detect_tear_out(3, (12.0, TAB_BAR_HEIGHT + TEAR_OUT_THRESHOLD_PX)),
+        detect_tear_out(3, (12.0, TAB_BAR_HEIGHT + TEAR_OUT_THRESHOLD_PX), &layout),
         Some(TearOut {
             tab_index: 3,
             drop_position: (12.0, TAB_BAR_HEIGHT + TEAR_OUT_THRESHOLD_PX),
