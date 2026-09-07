@@ -113,6 +113,76 @@ fn arm_pending_redraw_composing(app: &mut App, last_render: Instant) {
 }
 
 #[test]
+fn contended_redraw_after_idle_arms_a_future_deadline_without_faking_a_frame() {
+    // A failed collection after idle needs a future retry, not the expired successful-frame deadline.
+    let mut app = app_with_main_window();
+    let now = Instant::now();
+    let previous = now - Duration::from_secs(1);
+    app.main_mut().unwrap().last_render = previous;
+
+    app.defer_redraw_on_lock_contention(true);
+
+    assert!(app.wake_deadline(None).unwrap() > now);
+    assert_eq!(app.main().unwrap().last_render, previous);
+    assert!(app.pending_redraw);
+    assert!(app.input_dirty);
+}
+
+#[test]
+fn contention_retry_is_nonstarving_per_window_across_frame_policies() {
+    // Repeated input cannot bypass or postpone a due collection; coherent collection releases only the contention floor.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    for software in [false, true] {
+        for composing in [false, true] {
+            for is_main in [false, true] {
+                let mut app = app_with_main_window();
+                let id = if is_main {
+                    app.main_window_id.unwrap()
+                } else {
+                    app.__test_seed_child_window(&["child"])
+                };
+                let now = Instant::now();
+                let previous = now - Duration::from_secs(1);
+                app.software_render_degrade = software;
+                let window = app.windows.get_mut(&id).unwrap();
+                window.last_render = previous;
+                if composing {
+                    window.ime.handle_preedit("中", None);
+                }
+                let period =
+                    crate::app::effective_frame_period(software, composing, app.frame_period);
+                app.defer_window_lock_contention(id, true, now);
+                let due = now + period;
+                assert_eq!(app.windows[&id].retry_not_before, Some(due));
+                assert_eq!(app.wake_deadline(None), Some(due));
+                for offset in [1, 2, 3] {
+                    let event_at = now + period * offset / 4;
+                    assert!(app.windows[&id].contention_blocks_redraw(event_at, period));
+                    app.defer_window_lock_contention(id, false, event_at);
+                    assert_eq!(app.windows[&id].retry_not_before, Some(due));
+                }
+                assert!(!app.windows[&id].contention_blocks_redraw(due, period));
+                app.defer_window_lock_contention(id, false, due);
+                assert_eq!(app.windows[&id].retry_not_before, Some(due + period));
+                assert_eq!(app.windows[&id].last_render, previous);
+                app.windows.get_mut(&id).unwrap().coherent_frame_collected();
+                assert_eq!(app.windows[&id].retry_not_before, None);
+                assert!(!app.windows[&id].contention_blocks_redraw(due, period));
+                if is_main {
+                    app.pending_redraw = false;
+                } else {
+                    app.pending_redraw_windows.remove(&id);
+                }
+                assert_eq!(app.wake_deadline(None), None);
+                app.defer_window_lock_contention(id, false, due);
+                app.windows.remove(&id);
+                assert_eq!(app.wake_deadline(None), None);
+            }
+        }
+    }
+}
+
+#[test]
 fn quit_confirmation_deadline_survives_a_pending_main_window_redraw() {
     // A Cmd+Q confirmation armed just under its full window ago: it expires
     // shortly, well before the next frame boundary.

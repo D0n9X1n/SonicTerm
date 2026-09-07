@@ -793,6 +793,7 @@ impl App {
             modifiers: ModifiersState::empty(),
             pty_pressed_keys: std::collections::HashMap::new(),
             last_render: Instant::now(),
+            retry_not_before: None,
             hover_link: false,
             pressed_tab: None,
             drag_session: None,

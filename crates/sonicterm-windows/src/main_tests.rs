@@ -138,6 +138,7 @@ fn windows_only_rustdoc_avoids_links_to_generated_or_deleted_items() {
 
 #[test]
 fn ole_drag_paths_reject_missing_initialization_and_empty_payloads() {
+    // Platform guards and unresolved drop classification must remain wired into the production OLE path.
     const OLE: &str = include_str!("os_drag_win.rs");
     const TAB_DRAG: &str = include_str!("tab_drag_os.rs");
 
@@ -145,8 +146,13 @@ fn ole_drag_paths_reject_missing_initialization_and_empty_payloads() {
     assert!(OLE.contains("if payload_json.is_empty()"));
     assert!(OLE.contains("if len == 0"));
     assert!(TAB_DRAG.contains("let outcome ="));
-    assert!(TAB_DRAG.contains("if outcome.hr != windows::Win32::Foundation::DRAGDROP_S_DROP"));
-    assert!(TAB_DRAG.contains("DragOutcome::Cancelled"));
+    assert!(TAB_DRAG.contains("unresolved_drag_outcome(outcome.hr, outcome.effect,"));
+    let classifier = TAB_DRAG.split("fn unresolved_drag_outcome(").nth(1).unwrap();
+    let classifier = classifier.split("impl OsTabDragBackend").next().unwrap();
+    assert!(classifier.contains("if hr != windows::Win32::Foundation::DRAGDROP_S_DROP"));
+    assert!(classifier.contains("effect == windows::Win32::System::Ole::DROPEFFECT_MOVE.0"));
+    assert!(classifier.contains("return DragOutcome::Cancelled;"));
+    assert!(!classifier.contains("DroppedOnBar"));
     assert!(!TAB_DRAG.contains("let effect ="));
     assert!(TAB_DRAG.contains("if registered"));
 }
