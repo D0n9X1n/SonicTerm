@@ -606,6 +606,8 @@ fn cold_script_requests_replace_the_blank_tab_and_late_requests_append() {
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 
+    // Keep spawned pane charges isolated from process-wide budget assertions in sibling tests.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let _guard = crate::open_script_bridge::TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -651,6 +653,8 @@ fn cold_script_requests_replace_the_blank_tab_and_late_requests_append() {
 fn startup_without_script_requests_keeps_the_normal_blank_tab() {
     use std::os::unix::fs::PermissionsExt;
 
+    // Keep spawned pane charges isolated from process-wide budget assertions in sibling tests.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let _guard = crate::open_script_bridge::TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -685,6 +689,8 @@ fn open_script_wake_before_window_readiness_keeps_requests_for_initial_tabs() {
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 
+    // Keep spawned pane charges isolated from process-wide budget assertions in sibling tests.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let _guard = crate::open_script_bridge::TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -725,6 +731,8 @@ fn late_script_open_reveals_a_drained_main_window() {
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 
+    // Keep spawned pane charges isolated from process-wide budget assertions in sibling tests.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let _guard = crate::open_script_bridge::TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
