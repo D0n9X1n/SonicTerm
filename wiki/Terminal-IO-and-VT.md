@@ -132,6 +132,19 @@ Current protocol support includes:
 - DSR, DA, XTVERSION, palette, and kitty keyboard replies;
 - iTerm2, kitty, and Sixel media events.
 
+`CSI 3 J` erases only the active primary screen's saved history. It preserves
+live cells, cursor, rendition, margins, and the configured future history limit.
+Empty history and an active alternate screen are no-ops; alternate-screen ED3
+never touches the saved primary. ED0/1/2 keep their visible-screen erase ranges.
+
+Cursor-position DSR (`CSI 6 n`) reports a physical column in `1..=cols`, even
+when the insertion cursor carries the delayed-wrap sentinel. Repeated queries
+do not consume that wrap. LF, VT, FF, IND, and NEL share a margin-aware hard
+advance: scroll at the active region's bottom, otherwise advance within physical
+bounds without scrolling protected rows. LF/VT/FF use the current erase fill;
+IND/NEL use default fill, and only NEL returns to column zero. Hard advances
+cancel delayed wrap and clear the destination's automatic-wrap provenance.
+
 OSC 7 keeps the decoded path separate from its authority-bearing, host-aware
 snapshot. Relative local-path authorization uses only the strict snapshot. A
 raw OSC 4 collector, capped at 4 KiB, preserves palette queries that exceed
@@ -212,7 +225,12 @@ documented in [Usage](Usage).
 
 A `Grid` owns visible rows, bounded scrollback, cursor/default-cell state, dirty
 rows, content sequence numbers, an optional boxed saved primary screen, and up
-to 256 OSC 133 prompt regions in scrollback-absolute coordinates.
+to 256 OSC 133 prompt regions per screen in scrollback-absolute coordinates.
+Primary prompts stay with the saved primary while alternate mode is active, so
+alternate prompt navigation cannot reuse hidden primary markers. Any history
+prefix removal drops prompts whose starts were removed and rebases survivors.
+Nonempty ED3 advances the eviction counter by the exact number removed and
+repaints all visible rows without changing their content stamps.
 
 The exact geometry bounds are:
 
@@ -235,6 +253,10 @@ mutations expand or repair around them so half a glyph cannot remain. Combining
 characters attach to the previous lead cell. `Line` stores arbitrary rows as
 `Flat(Vec<Cell>)` and materially smaller repetitive rows as run-length
 `Cluster(Vec<Cluster>)`; both representations iterate and hash identically.
+A column shrink checks only the new rightmost cell and replaces a clipped
+`WIDE` lead with the resize fill in either storage form. Complete pairs remain
+intact across visible, history, and saved-primary rows. This is not reflow:
+regrowth cannot resurrect clipped text or invent its continuation.
 
 Every content mutation advances the grid revision, marks affected rows, and
 stamps changed content. Cursor-only and presentation-only changes do not advance
@@ -375,6 +397,16 @@ TERM_PROGRAM_VERSION=<与终端身份匹配的版本>
 - DSR、DA、XTVERSION、调色板和 kitty 键盘回复；
 - iTerm2、kitty 与 Sixel 媒体事件。
 
+`CSI 3 J` 只擦除当前主屏幕的已保存历史，保留可见单元格、光标、样式、滚动边距和
+后续历史容量配置。历史为空或备用屏幕处于活动状态时不做任何修改；备用屏幕中的 ED3
+绝不触碰已保存主屏幕。ED0/1/2 保持各自的可见屏幕擦除范围。
+
+光标位置 DSR（`CSI 6 n`）始终报告 `1..=cols` 内的物理列，即使插入光标持有延迟
+换行哨兵值。重复查询不会消耗待处理换行。LF、VT、FF、IND 和 NEL 共用遵守边距的
+硬换行决策：在活动区域底边滚动该区域，否则只在物理边界内向下移动，不滚动受保护行。
+LF/VT/FF 使用当前擦除填充，IND/NEL 使用默认填充，只有 NEL 回到第零列。硬换行会
+取消延迟换行，并清除目标行的自动换行来源标记。
+
 OSC 7 分开保存解码路径和带权限含义的主机校验快照。相对本地路径授权只使用严格
 快照。原始 OSC 4 收集器上限为 4 KiB，用于保留超过 vte 参数数量上限的调色板查询，
 并抑制被截断的重复回调。解析器自身维护序列族边界，因此 kitty APC 可紧跟任何已完成
@@ -437,7 +469,10 @@ mouse ownership 与 OSC 52 实际配置见 [用法](Usage)。
 ### 网格存储与不变量
 
 `Grid` 拥有可见行、有界回滚、光标与默认单元格状态、脏行、内容序列号、可选的盒装
-已保存主屏幕，以及最多 256 个使用回滚绝对坐标的 OSC 133 提示符区域。
+已保存主屏幕，以及每个屏幕最多 256 个使用回滚绝对坐标的 OSC 133 提示符区域。
+备用模式下，主屏幕提示符随主屏幕保存，因此备用屏幕的提示符导航不会复用隐藏的主屏幕
+标记。所有历史前缀删除都会丢弃起点已删除的提示符，并重定位仍存活的坐标。非空 ED3
+按实际删除行数推进淘汰计数，重绘所有可见行，但不改变它们的内容序号。
 
 精确几何上限为：
 
@@ -454,7 +489,9 @@ mouse ownership 与 OSC 52 实际配置见 [用法](Usage)。
 双宽字符使用带 `WIDE` 的首单元格和带 `WIDE_CONT` 的续单元格。范围修改会围绕它们
 扩展或修复，不能留下半个字形。组合字符附着到前一个首单元格。`Line` 用
 `Flat(Vec<Cell>)` 保存任意行，用显著更小的游程 `Cluster(Vec<Cluster>)` 保存重复行；
-两种表示的迭代和哈希结果相同。
+两种表示的迭代和哈希结果相同。缩小列数时只检查新的最右单元格，在任一存储形式中将
+失去续格的 `WIDE` 首格替换为尺寸调整填充。可见行、历史和已保存主屏幕中的完整字符对
+保持不变。这不是 reflow：重新扩大行宽不会恢复被裁剪文本，也不会凭空补回续格。
 
 每次内容修改都会推进网格修订计数、标记受影响行并记录内容序列。仅移动光标或改变
 呈现状态不会推进内容序列。主屏幕全屏滚动会让行身份随文本进入历史；备用屏幕、无历史

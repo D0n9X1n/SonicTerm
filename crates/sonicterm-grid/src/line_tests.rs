@@ -57,6 +57,68 @@ fn flat_and_cluster(runs: &[(Cell, usize)]) -> (Line, Line) {
     (Line::from_flat(flat_cells), Line::from_clusters(clusters))
 }
 
+#[test]
+fn resize_clipped_wide_tail_uses_fill_without_flattening_or_resurrection() {
+    // Shrinking through a wide pair removes the orphan in either storage form without reflow.
+    let lead = Cell::plain('中', Color::Default, Color::Default, CellFlags::WIDE);
+    let continuation = Cell::plain(' ', Color::Default, Color::Default, CellFlags::WIDE_CONT);
+    let fill = Cell::plain(' ', Color::Default, Color::Indexed(3), CellFlags::empty());
+    let (flat, clustered) =
+        flat_and_cluster(&[(ch('a'), 1), (ch('b'), 1), (lead, 1), (continuation, 1)]);
+    for mut line in [flat, clustered] {
+        let was_clustered = line.is_clustered();
+        line.resize(3, fill.clone());
+        assert_eq!(line.get(2), Some(&fill));
+        assert_eq!(line.is_clustered(), was_clustered);
+        line.resize(4, fill.clone());
+        assert_eq!(line.get(2), Some(&fill));
+        assert_eq!(line.get(3), Some(&fill));
+        line.resize(4, blank());
+        assert_eq!(line.get(2), Some(&fill));
+    }
+}
+
+#[test]
+fn resize_preserves_complete_wide_pairs_and_compact_blank_rows() {
+    // Intact pairs survive adjacent changes; single-column clipping and zero-length shrink remain valid.
+    let lead = Cell::plain('中', Color::Default, Color::Default, CellFlags::WIDE);
+    let continuation = Cell::plain(' ', Color::Default, Color::Default, CellFlags::WIDE_CONT);
+    let (flat, clustered) =
+        flat_and_cluster(&[(lead.clone(), 1), (continuation.clone(), 1), (blank(), 2)]);
+    for mut line in [flat, clustered] {
+        line.resize(3, blank());
+        line.resize(2, blank());
+        assert_eq!(line.get(0), Some(&lead));
+        assert_eq!(line.get(1), Some(&continuation));
+        line.resize(1, blank());
+        assert_eq!(line.get(0), Some(&blank()));
+        line.resize(2, blank());
+        assert_eq!(line.get(0), Some(&blank()));
+        line.resize(0, blank());
+        assert!(line.is_empty());
+    }
+    let mut blanks = Line::from_clusters(vec![Cluster { cell: blank(), count: 4000 }]);
+    blanks.resize(3999, blank());
+    assert!(blanks.is_clustered());
+    assert!(blanks.approx_capacity_byte_size() < 1000);
+}
+
+#[test]
+fn clipped_wide_repair_coalesces_fill_and_preserves_neighbor_attributes() {
+    // Only the clipped edge loses its metadata; equal fill coalesces rather than splitting compact runs.
+    let fill = ch_bold(' ');
+    let lead = rich('中');
+    let continuation = Cell::plain(' ', Color::Default, Color::Default, CellFlags::WIDE_CONT);
+    let mut line = Line::from_clusters(vec![
+        Cluster { cell: fill.clone(), count: 8 },
+        Cluster { cell: lead, count: 1 },
+        Cluster { cell: continuation, count: 1 },
+    ]);
+    line.resize(9, fill.clone());
+    assert_eq!(line.storage(), &LineStorage::Cluster(vec![Cluster { cell: fill, count: 9 }]));
+    assert_eq!(line.fat_attribute_bytes(), 0);
+}
+
 // --- cluster/flat range iteration + random access parity ------------------
 
 #[test]

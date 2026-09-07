@@ -83,6 +83,58 @@ fn run_invalidation(app: &mut App, window: WindowId, pane_id: u64) -> bool {
 }
 
 #[test]
+fn ed3_rebases_live_selections_and_rejects_historical_anchors_in_both_windows() {
+    // ED3 changes history identity and the resolved viewport, not the surviving selected cells.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    for select_history in [true, false] {
+        let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
+        let main = app.__test_main_window_id().expect("synthetic main window");
+        for (window, pane_id) in [(main, main_pane), (child, child_pane)] {
+            {
+                let pane = app.windows.get_mut(&window).unwrap().panes.get_mut(&pane_id).unwrap();
+                pane.viewport_top_abs = Some(1);
+                let mut parser = pane.parser.lock();
+                parser.grid_mut().resize(4, 2);
+                parser.advance(b"old0\r\nold1\r\nkeep\r\nlive");
+                assert_eq!(parser.grid().scrollback_len(), 2);
+                assert_eq!(
+                    GpuRenderer::resolved_view_top_abs(parser.grid(), pane.viewport_top_abs),
+                    1
+                );
+            }
+            let absolute_row = if select_history { 0 } else { 2 };
+            install_primary_selection(&mut app, window, pane_id, absolute_row);
+            app.windows.get_mut(&window).unwrap().select_anchor = (absolute_row, 1);
+            {
+                let pane = app.windows.get(&window).unwrap().panes.get(&pane_id).unwrap();
+                let mut parser = pane.parser.lock();
+                let sequence = parser.grid().content_seq();
+                let revision = parser.grid().revision();
+                parser.grid_mut().clear_dirty();
+                parser.advance(b"\x1b[3J");
+                assert_eq!(
+                    GpuRenderer::resolved_view_top_abs(parser.grid(), pane.viewport_top_abs),
+                    0
+                );
+                assert_eq!(parser.grid().content_seq(), sequence);
+                assert_ne!(parser.grid().revision(), revision);
+                assert_eq!(parser.grid().dirty_count(), 2);
+            }
+            assert_eq!(run_invalidation(&mut app, window, pane_id), select_history);
+            let state = app.windows.get(&window).unwrap();
+            if select_history {
+                assert!(state.selection.is_none());
+            } else {
+                let selection = state.selection.as_ref().unwrap();
+                assert_eq!(selection.start, (0, 0));
+                assert_eq!(selection.end, (0, 3));
+                assert_eq!(state.select_anchor, (0, 1));
+            }
+        }
+    }
+}
+
+#[test]
 fn main_and_child_clear_when_selected_alt_content_changes() {
     let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (mut app, main_pane, child, child_pane) = app_with_main_and_child();
