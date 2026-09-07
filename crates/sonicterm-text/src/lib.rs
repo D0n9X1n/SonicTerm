@@ -60,8 +60,7 @@ pub struct GlyphInstance {
     /// attribute slots simple. `flags.x` is the is-color toggle
     /// (>= 0.5 → color glyph). `flags.y` is the subpixel text coverage
     /// toggle (>= 0.5 → RGB coverage instead of alpha-only coverage).
-    /// `flags.z` selects the dedicated inline-image atlas. The remaining
-    /// component is reserved.
+    /// The remaining components are reserved; inline images use a separate draw record.
     pub flags: [f32; 4],
 }
 

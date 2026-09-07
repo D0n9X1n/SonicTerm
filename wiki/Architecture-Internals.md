@@ -120,6 +120,17 @@ correctness, not only speed.
   include pane padding and are clipped to the pane and surface.
 - A dirty alternate-screen pane contributes its complete surface-clipped pane.
   A clean alternate-screen pane contributes no damage.
+- Full-surface replacement clears the retained attachment once; partial damage
+  uses a non-blending background reset under its scissor. Reset and content share
+  one buffer upload and separate draw ranges, preserving content source-over and
+  LCD blending while erasing prior ink without alpha accumulation.
+- Projected background-cache validity includes the viewport row slot. Each
+  `(pane id, absolute row)` owns one projection, replaced when its hash changes;
+  dirty invalidation remains absolute and pane-local with the same capacity cap.
+- Inline-image visibility intersects the original destination, pane content, and
+  surface for both atlas residency and emission. Visible UVs preserve the source
+  transform; separate original tile bounds clamp GPU and CPU bilinear taps. Images
+  retain fractional pixel coordinates without changing text glyph alignment.
 - Changes to terminal cells mark affected rows in the same frame. This includes
   scrolling, reverse index, line insertion/deletion, erase, resize, and
   wide-cell repair.
@@ -527,6 +538,14 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
 
 - 主屏幕窗格贡献所有脏行条带的并集。条带包含窗格内边距，并裁剪到窗格和表面。
 - 备用屏幕窗格只要有脏行，就贡献整个经表面裁剪的窗格。没有脏行时不贡献损伤区域。
+- 替换完整表面时只清除一次保留 attachment；局部损伤在裁剪范围内使用无混合背景重置。
+  重置与内容共享一次缓冲上传并使用不同绘制区间，保留内容的 source-over 与 LCD 混合，
+  同时擦除旧墨迹而不累积 alpha。
+- 投影背景缓存的有效性包含视口行位置。每个 `(pane id, absolute row)` 只持有一个投影，
+  哈希变化时替换旧值；脏行失效仍按绝对行且限制在所属窗格，容量上限不变。
+- 内联图像可见性对原始目标、窗格内容和表面求交，同一结果控制图集驻留与绘制。可见 UV
+  保留源变换，独立的原始图块边界限制 GPU 与 CPU 双线性采样点。图像保留分数像素坐标，
+  不改变文字字形的对齐。
 - 终端单元格变化会在同一帧标记受影响的行，包括滚动、反向索引、插入或删除行、擦除、
   调整大小和宽字符修复。
 - 擦除非空主屏幕历史会推进修订计数和精确淘汰计数，并将所有可见行标记为呈现脏行，

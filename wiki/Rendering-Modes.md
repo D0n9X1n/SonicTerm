@@ -205,11 +205,13 @@ and subpixel coverage as unchanged linear masks while converting only color-glyp
 rectangles. One glyph bind group exposes the texture's unorm coverage view and
 sRGB color view with nearest samplers; ordinary and subpixel-tagged instances use
 coverage, while `flags.x` selects color. Both presenters sample color glyphs at
-the nearest texel after decoding. Scaled inline images retain fractional
-positioning and the GPU texel-center convention. The software path decodes every
-tile-clamped tap before bilinear interpolation; the GPU path pairs its sRGB view
-with a linear sampler so hardware performs the same decode-before-filter order.
-Both restrict taps to the current packed image tile rather than the whole atlas.
+the nearest texel after decoding. Inline images retain fractional destination
+coordinates, including native-size axes, and use continuous pixel-center UV
+interpolation on both presenters. The software path decodes every tile-clamped
+tap before bilinear interpolation; the GPU path pairs its sRGB view with a linear
+sampler for the same decode-before-filter order. Pane and surface clipping adjust
+only visible geometry and UVs; separate original tile bounds constrain taps without
+turning a clip edge into an atlas boundary or allocating cropped pixels.
 
 ### Retained pixels and damage
 
@@ -239,8 +241,14 @@ pane has any dirty row, the complete surface-clipped pane is damaged. This cover
 TUI scrolling, insert/delete line, reverse index, erase, and other fixed-position
 updates where a narrow row set can otherwise leave stale pixels.
 
-The offscreen frame is cleared on first use and loaded on retained frames. The
-GPU draw order is:
+The offscreen frame uses one attachment clear on first use or full-surface
+replacement, without a second background reset draw. Partial damage loads the
+retained frame, then replaces the damaged pixels with the premultiplied background
+through a non-blending reset under the damage scissor. Reset and content share one
+buffer upload with separate draw ranges; ordinary content retains source-over
+and LCD text retains dual-source blending. Transparent resets erase old ink
+without accumulating alpha or changing pixels outside damage, and do not need a
+later redraw to finish. After the reset, GPU content draws in this order:
 
 ```text
 base quads -> inline images -> base glyphs -> overlay quads -> overlay glyphs
@@ -446,10 +454,11 @@ source-over，只对 RGB 编码一次，并把 alpha 作为线性 UNORM 做 sour
 不可见的源行或源列。脏元数据让单色与次像素覆盖率保持不变，继续作为线性掩码，只转换
 彩色字形矩形。一个字形 bind group 通过最近点 sampler 同时提供纹理的 unorm 覆盖率 view
 和 sRGB 彩色 view；普通及带次像素标记的实例使用覆盖率，`flags.x` 选择彩色。两种
-presenter 都会先解码彩色字形，再对最近纹素取样。缩放后的内联图像保留分数位置与 GPU
-纹素中心约定。软件路径先解码每个限制在图块内的采样点，再做双线性插值；GPU 路径把
-sRGB view 与线性 sampler 配对，由硬件执行相同的先解码后过滤顺序。两者都把采样点限制在
-当前已打包图像的图块内，而不是整个图集。
+presenter 都会先解码彩色字形，再对最近纹素取样。内联图像保留分数目标坐标，包括原始尺寸的
+坐标轴，并在两种 presenter 上使用连续的像素中心 UV 插值。软件路径先解码每个限制在图块内的
+采样点，再做双线性插值；GPU 路径把 sRGB view 与线性 sampler 配对，采用相同的先解码后过滤
+顺序。窗格与表面裁剪只改变可见几何和 UV；独立的原始图块边界约束采样点，不把裁剪边缘变成
+图集边界，也不分配裁剪后的像素副本。
 
 ### 保留像素与损伤区域
 
@@ -476,7 +485,11 @@ flowchart TD
 备用屏幕窗格只要有一行标脏，就损伤完整的表面裁剪窗格。这覆盖 TUI 滚动、插入/删除行、
 反向索引、擦除等固定位置更新，避免窄行集合留下旧像素。
 
-离屏帧第一次使用时清除，保留帧中继续加载。GPU 绘制顺序为：
+离屏帧在首次使用或替换完整表面时，只执行一次 attachment clear，不再绘制第二个背景重置矩形。
+局部损伤会加载保留帧，再在损伤裁剪范围内通过无混合的重置绘制，用预乘背景直接替换旧像素。
+重置与内容共享一次缓冲上传，使用不同绘制区间；普通内容仍使用 source-over，LCD 文字仍使用
+dual-source blending。透明重置不会累积 alpha，也不会改变损伤范围外的像素，不依赖后续重绘来
+完成擦除。重置后，GPU 内容按以下顺序绘制：
 
 ```text
 基础矩形 -> 内联图像 -> 基础字形 -> 浮层矩形 -> 浮层字形

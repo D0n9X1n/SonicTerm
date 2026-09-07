@@ -984,3 +984,7 @@ impl App {
         self.main_tabs().map(|t| t.len().saturating_sub(1)).unwrap_or(0)
     }
 }
+
+#[cfg(test)]
+#[path = "misc_tests.rs"]
+mod misc_tests;
