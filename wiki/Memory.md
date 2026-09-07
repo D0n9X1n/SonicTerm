@@ -49,6 +49,14 @@ scrollback plus the visible screen.” `[terminal].scrollback` sets a row limit;
 cell count and retained bytes can bind first when rows carry hyperlinks,
 combining marks, or non-default underline metadata.
 
+`CSI 3 J` releases active primary history and excess history-container capacity
+without lowering either configured history limit. It resets the budget-check
+cadence only for that explicit erasure; ordinary FIFO row reuse retains the
+512-scroll cadence. History-prefix removal updates exact eviction identity and
+prompt coordinates, including prompts stored with the saved primary. Shrinking
+columns repairs only a clipped wide lead at each new row edge, preserving
+compact runs and existing capacity hysteresis rather than flattening history.
+
 ### Ownership model
 
 `sonicterm-resource` provides the process-local resource governor: an owner
@@ -293,6 +301,12 @@ SonicTerm 在真正拥有内存的子系统边界实施限制，再按窗格、�
 网格约 24 MiB 的数值同样是一个共享上限，不是“回滚 24 MiB 再加可见屏幕”。
 `[terminal].scrollback` 设置行数上限；带超链接、组合字符或非默认下划线元数据的行更大，
 因此单元格数量或保留字节可能先达到上限。
+
+`CSI 3 J` 会释放活动主屏幕历史和多余的历史容器容量，不降低用户请求的历史上限或
+实际配置上限。只有这次显式擦除会重置预算检查计数；普通 FIFO 行复用仍保持每 512 次
+滚动的检查节奏。历史前缀删除会更新精确淘汰身份和提示符坐标，包括随主屏幕保存的提示符。
+缩小列数只修复每行新右边界被截断的宽字符首格，保留紧凑游程和现有容量滞后策略，
+不会为检查边界而展开整段历史。
 
 ### 所有权模型
 

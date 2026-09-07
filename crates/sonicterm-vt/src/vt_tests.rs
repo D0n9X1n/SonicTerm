@@ -41,6 +41,208 @@ fn row_text(parser: &Parser, row: u16) -> String {
     parser.grid().row(row).iter().map(|cell| cell.ch).collect()
 }
 
+#[test]
+fn ed3_removes_history_without_erasing_live_rows_or_cursor() {
+    // Saved-history erasure must preserve live content, cursor state, and future history capacity.
+    let mut parser = Parser::new(Grid::new(4, 2));
+    parser.grid_mut().set_scrollback_limit(17);
+    parser.advance(b"old\r\nkeep\r\nlive");
+    assert_eq!(parser.grid().scrollback_len(), 1);
+    let cursor = parser.grid().cursor;
+    let sequence = parser.grid().content_seq();
+    let revision = parser.grid().revision();
+    let evicted = parser.grid().scrollback_evicted();
+    parser.grid_mut().clear_dirty();
+
+    parser.advance(b"\x1b[3J");
+
+    assert_eq!(parser.grid().scrollback_len(), 0);
+    assert_eq!(row_text(&parser, 0), "keep");
+    assert_eq!(row_text(&parser, 1), "live");
+    assert_eq!(parser.grid().cursor, cursor);
+    assert_eq!(parser.grid().content_seq(), sequence);
+    assert_eq!(parser.grid().visible_rows_changed_since(sequence).count(), 0);
+    assert_ne!(parser.grid().revision(), revision);
+    assert_eq!(parser.grid().dirty_count(), 2);
+    assert_eq!(parser.grid().scrollback_evicted(), evicted + 1);
+    parser.advance(b"\r\nnext");
+    assert_eq!(parser.grid().scrollback_len(), 1);
+}
+
+#[test]
+fn ed3_on_empty_primary_or_alternate_is_a_true_noop() {
+    // Alternate ED3 cannot erase either its live cells or the hidden primary history.
+    let mut parser = Parser::new(Grid::new(4, 2));
+    parser.advance(b"live");
+    parser.grid_mut().clear_dirty();
+    let revision = parser.grid().revision();
+    parser.advance(b"\x1b[3J");
+    assert_eq!(row_text(&parser, 0), "live");
+    assert_eq!(parser.grid().revision(), revision);
+    assert_eq!(parser.grid().dirty_count(), 0);
+    parser.advance(b"\r\nkeep\r\ntail");
+    let history = parser.grid().scrollback_len();
+    parser.advance(b"\x1b[?1049hALT");
+    parser.grid_mut().clear_dirty();
+    let alternate_revision = parser.grid().revision();
+    parser.advance(b"\x1b[3J");
+    assert_eq!(row_text(&parser, 0), "ALT ");
+    assert_eq!(parser.grid().revision(), alternate_revision);
+    assert_eq!(parser.grid().dirty_count(), 0);
+    parser.advance(b"\x1b[?1049l");
+    assert_eq!(parser.grid().scrollback_len(), history);
+    assert_eq!(row_text(&parser, 0), "keep");
+    assert_eq!(row_text(&parser, 1), "tail");
+}
+
+#[test]
+fn ed3_preserves_rendition_margins_and_history_limit() {
+    // Erasing history is not a terminal reset, a visible erase, or a temporary history-limit change.
+    let mut parser = Parser::new(Grid::new(4, 3));
+    parser.grid_mut().set_scrollback_limit(7);
+    parser.advance(b"old\r\nkeep\r\nlive\r\ntail\x1b[2;3r\x1b[31;44m\x1b[3;2H");
+    assert_eq!(parser.grid().scrollback_len(), 1);
+    parser.advance(b"\x1b[3JX\n");
+    assert_eq!(parser.grid().scrollback_len(), 0);
+    assert_eq!(row_text(&parser, 0), "keep");
+    assert_eq!(row_text(&parser, 1), "tXil");
+    assert_eq!(parser.grid().row(1)[1].fg, Color::Indexed(1));
+    assert_eq!(parser.grid().row(1)[1].bg, Color::Indexed(4));
+    assert_eq!(parser.grid().row(2)[0].bg, Color::Indexed(4));
+    parser.advance(b"\x1b[r\x1b[3;1H");
+    for _ in 0..9 {
+        parser.advance(b"\r\nnext");
+    }
+    assert_eq!(parser.grid().scrollback_len(), 7);
+}
+
+#[test]
+fn visible_erase_modes_preserve_saved_history() {
+    // ED0/1/2 retain their inclusive visible ranges and BCE without consuming history as ED3 does.
+    for (mode, rows) in [
+        (0, ["aaaa", "b   ", "    "]),
+        (1, ["    ", "  bb", "cccc"]),
+        (2, ["    ", "    ", "    "]),
+    ] {
+        let mut parser = Parser::new(Grid::new(4, 3));
+        parser.advance(b"old\r\naaaa\r\nbbbb\r\ncccc\x1b[2;2H\x1b[44m");
+        let cursor = parser.grid().cursor;
+        let evicted = parser.grid().scrollback_evicted();
+        parser.advance(format!("\x1b[{mode}J").as_bytes());
+        for (row, expected) in rows.iter().enumerate() {
+            assert_eq!(row_text(&parser, row as u16), *expected);
+        }
+        assert_eq!(parser.grid().row(1)[1].bg, Color::Indexed(4));
+        assert_eq!(parser.grid().scrollback_len(), 1);
+        assert_eq!(parser.grid().scrollback_row(0).unwrap()[0].ch, 'o');
+        assert_eq!(parser.grid().scrollback_evicted(), evicted);
+        assert_eq!(parser.grid().cursor, cursor);
+    }
+}
+
+#[test]
+fn dsr_reports_physical_column_without_consuming_delayed_wrap() {
+    // Querying an insertion sentinel is observational; a following graphic still wraps.
+    for (width, text) in [(4, "abc"), (4, "abcd"), (4, "ab中"), (1, "x")] {
+        let (tx, rx) = crossbeam_channel::bounded(4);
+        let mut parser = Parser::new_with_reply(Grid::new(width, 2), tx);
+        parser.advance(text.as_bytes());
+        let pending = parser.grid().pending_wrap();
+        let cursor = parser.grid().cursor;
+        for _ in 0..2 {
+            parser.advance(b"\x1b[6n");
+            assert_eq!(rx.try_recv().unwrap(), format!("\x1b[1;{width}R").into_bytes());
+            assert_eq!(parser.grid().cursor, cursor);
+            assert_eq!(parser.grid().pending_wrap(), pending);
+        }
+        parser.advance(b"Z");
+        assert_eq!(parser.grid().cursor.row, u16::from(pending));
+        if pending {
+            assert_eq!(parser.grid().row(1)[0].ch, 'Z');
+        }
+    }
+}
+
+#[test]
+fn dsr_observes_autowrap_off_and_normal_cursor_motion() {
+    // Physical position replies remain bounded after clipped output and ordinary cursor movement.
+    for width in [1, 4] {
+        let (tx, rx) = crossbeam_channel::bounded(4);
+        let mut parser = Parser::new_with_reply(Grid::new(width, 2), tx);
+        parser.advance(b"\x1b[?7labcdef\x1b[6n");
+        assert_eq!(rx.try_recv().unwrap(), format!("\x1b[1;{width}R").into_bytes());
+        assert!(!parser.grid().pending_wrap());
+        parser.advance(b"\x1b[2;1H\x1b[6n");
+        assert_eq!(rx.try_recv().unwrap(), b"\x1b[2;1R");
+        parser.advance(b"\x1b[999G\x1b[6n");
+        assert_eq!(rx.try_recv().unwrap(), format!("\x1b[2;{width}R").into_bytes());
+    }
+}
+
+#[test]
+fn hard_advances_cancel_pending_wrap_at_physical_columns() {
+    // A hard advance consumes delayed wrap without making the following graphic advance a second row.
+    for control in [b"\n".as_slice(), b"\x0b", b"\x0c", b"\x1bD", b"\x1bE"] {
+        for start_row in [0, 1] {
+            let mut parser = Parser::new(Grid::new(4, 2));
+            parser.advance(format!("\x1b[{};1Habcd", start_row + 1).as_bytes());
+            assert!(parser.grid().pending_wrap());
+            parser.advance(control);
+            let col = if control == b"\x1bE" { 0 } else { 3 };
+            assert!(!parser.grid().pending_wrap());
+            assert_eq!(parser.grid().cursor.col, col, "control={control:?} row={start_row}");
+            assert!(!parser.grid().row(1).soft_wrapped_from_previous());
+            parser.advance(b"Z");
+            assert_eq!(parser.grid().scrollback_len(), start_row);
+            assert_eq!(parser.grid().row(1)[col as usize].ch, 'Z');
+        }
+    }
+}
+
+#[test]
+fn hard_advances_respect_restricted_margins_and_physical_bottom() {
+    // All five controls scroll only at the region bottom and clamp below it without adding history.
+    for control in [b"\n".as_slice(), b"\x0b", b"\x0c", b"\x1bD", b"\x1bE"] {
+        for row in 0..5 {
+            let mut parser = Parser::new(Grid::new(4, 5));
+            parser.advance(b"\x1b[1;1HAaaa\x1b[2;1HBbbb\x1b[3;1HCccc\x1b[4;1HDddd\x1b[5;1HEeee");
+            parser.advance(b"\x1b[2;4r");
+            parser.advance(format!("\x1b[{};2H", row + 1).as_bytes());
+            parser.advance(control);
+            let expected_rows = if row == 3 {
+                ["Aaaa", "Cccc", "Dddd", "    ", "Eeee"]
+            } else {
+                ["Aaaa", "Bbbb", "Cccc", "Dddd", "Eeee"]
+            };
+            for (index, expected) in expected_rows.iter().enumerate() {
+                assert_eq!(
+                    row_text(&parser, index as u16),
+                    *expected,
+                    "control={control:?} row={row}"
+                );
+            }
+            assert_eq!(parser.grid().scrollback_len(), 0, "control={control:?} row={row}");
+            assert_eq!(parser.grid().cursor.row, if row == 3 { 3 } else { (row + 1).min(4) });
+            assert_eq!(parser.grid().cursor.col, if control == b"\x1bE" { 0 } else { 1 });
+        }
+    }
+}
+
+#[test]
+fn hard_advance_fullscreen_fill_and_column_policies_stay_distinct() {
+    // LF/VT/FF use BCE while IND/NEL retain default fill; only NEL performs carriage return.
+    for control in [b"\n".as_slice(), b"\x0b", b"\x0c", b"\x1bD", b"\x1bE"] {
+        let mut parser = Parser::new(Grid::new(4, 2));
+        parser.advance(b"top\x1b[2;2H\x1b[41m");
+        parser.advance(control);
+        assert_eq!(parser.grid().scrollback_len(), 1);
+        assert_eq!(parser.grid().cursor.row, 1);
+        assert_eq!(parser.grid().cursor.col, if control == b"\x1bE" { 0 } else { 1 });
+        let background = if control.len() == 1 { Color::Indexed(1) } else { Color::Default };
+        assert_eq!(parser.grid().row(1)[0].bg, background);
+    }
+}
+
 fn only_media(events: Vec<VtEvent>) -> MediaEvent {
     let mut media = events.into_iter().filter_map(|event| match event {
         VtEvent::Media(media) => Some(media),

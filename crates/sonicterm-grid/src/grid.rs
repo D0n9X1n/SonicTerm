@@ -571,7 +571,7 @@ impl Grid {
             scrollback_evicted: 0,
             rows_since_budget_check: 0,
             dirty_rows: vec![true; rows as usize],
-            prompts: VecDeque::new(),
+            prompts: std::mem::take(&mut self.prompts),
             autowrap: self.autowrap,
             pending_wrap: false,
         };
@@ -600,6 +600,7 @@ impl Grid {
         let content_seq = self.content_seq.max(saved.content_seq);
         self.visible = saved.visible;
         self.scrollback = saved.scrollback;
+        self.prompts = saved.prompts;
         self.row_content_seq = saved.row_content_seq;
         self.content_seq = content_seq;
         self.scrollback_requested_limit = saved.scrollback_requested_limit;
@@ -607,8 +608,7 @@ impl Grid {
             bounded_scrollback_rows(self.cols, self.rows, self.scrollback_requested_limit);
         if self.scrollback.len() > self.scrollback_limit {
             let excess = self.scrollback.len() - self.scrollback_limit;
-            self.scrollback.drain(0..excess);
-            self.scrollback_evicted = self.scrollback_evicted.saturating_add(excess as u64);
+            drop(self.drain_scrollback_prefix(excess));
         }
         compact_scrollback_capacity(&mut self.scrollback);
         self.cursor = saved.cursor;
@@ -661,8 +661,7 @@ impl Grid {
         };
         if self.scrollback.len() > self.scrollback_limit {
             let excess = self.scrollback.len() - self.scrollback_limit;
-            self.scrollback.drain(0..excess);
-            self.scrollback_evicted = self.scrollback_evicted.saturating_add(excess as u64);
+            drop(self.drain_scrollback_prefix(excess));
         }
         compact_scrollback_capacity(&mut self.scrollback);
         // Drop rows that will not survive before widening columns. Otherwise
@@ -1191,8 +1190,7 @@ impl Grid {
                 // `else` branch grow it one row per scroll.
                 // PANIC: safe — `len >= limit >= 1` here (limit == 0 handled
                 // above), and a non-empty VecDeque always yields `Some`.
-                let mut recycled = self.scrollback.pop_front().unwrap();
-                self.scrollback_evicted = self.scrollback_evicted.saturating_add(1);
+                let mut recycled = self.drain_scrollback_prefix(1).next().unwrap();
                 // Recycled may itself have been compressed when it was
                 // ejected — force back to Flat before we mutate cells.
                 recycled.ensure_flat();
@@ -1697,6 +1695,39 @@ impl Grid {
         self.set_soft_wrapped_from_previous(self.cursor.row, false);
     }
 
+    /// Erase primary history without changing live cells, cursor state, or configured limits.
+    pub fn clear_scrollback(&mut self) {
+        if self.is_alt() || self.scrollback.is_empty() {
+            // When: `self.is_alt()` or `self.scrollback.is_empty()`, preserve both screens and every change identity.
+            return;
+        }
+        drop(self.drain_scrollback_prefix(self.scrollback.len()));
+        self.rows_since_budget_check = 0;
+        compact_scrollback_capacity(&mut self.scrollback);
+        // Historical viewports resolve to live rows, so repaint without changing their content stamps.
+        self.mark_all();
+        self.bump();
+    }
+
+    fn drain_scrollback_prefix(
+        &mut self,
+        count: usize,
+    ) -> std::collections::vec_deque::Drain<'_, Line> {
+        let removed = count as u64;
+        self.scrollback_evicted = self.scrollback_evicted.saturating_add(removed);
+        self.prompts.retain_mut(|prompt| {
+            if prompt.start_row < removed {
+                // When: the prompt start was evicted, its remaining output cannot identify that prompt.
+                return false;
+            }
+            prompt.start_row -= removed;
+            prompt.end_row = prompt.end_row.map(|row| row.saturating_sub(removed));
+            true
+        });
+        // Returning the drain lets the scroll path reuse an evicted row without allocating a replacement.
+        self.scrollback.drain(..count)
+    }
+
     /// Number of rows currently stored in the scrollback buffer.
     pub fn scrollback_len(&self) -> usize {
         self.scrollback.len()
@@ -1833,8 +1864,7 @@ impl Grid {
         };
         if self.scrollback.len() > self.scrollback_limit {
             let excess = self.scrollback.len() - self.scrollback_limit;
-            self.scrollback.drain(0..excess);
-            self.scrollback_evicted = self.scrollback_evicted.saturating_add(excess as u64);
+            drop(self.drain_scrollback_prefix(excess));
         }
         compact_scrollback_capacity(&mut self.scrollback);
         if let Some(primary) = self.alt_screen.as_mut() {
@@ -1859,9 +1889,7 @@ impl Grid {
                 primary.scrollback_limit.min(history_rows).min(primary.scrollback_requested_limit);
             if primary.scrollback.len() > primary.scrollback_limit {
                 let excess = primary.scrollback.len() - primary.scrollback_limit;
-                primary.scrollback.drain(0..excess);
-                primary.scrollback_evicted =
-                    primary.scrollback_evicted.saturating_add(excess as u64);
+                drop(primary.drain_scrollback_prefix(excess));
             }
             compact_scrollback_capacity(&mut primary.scrollback);
             std::mem::take(&mut primary.scrollback_evicted)
@@ -2152,9 +2180,8 @@ impl Grid {
 
         const TRIM_BLOCK_ROWS: usize = 64;
         while !self.scrollback.is_empty() && self.retained_amount().bytes > budget_bytes {
-            let drop = TRIM_BLOCK_ROWS.min(self.scrollback.len());
-            self.scrollback.drain(0..drop);
-            self.scrollback_evicted = self.scrollback_evicted.saturating_add(drop as u64);
+            let removed = TRIM_BLOCK_ROWS.min(self.scrollback.len());
+            drop(self.drain_scrollback_prefix(removed));
         }
         compact_scrollback_capacity(&mut self.scrollback);
     }
