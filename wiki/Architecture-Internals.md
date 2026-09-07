@@ -271,7 +271,18 @@ Font discovery, shaping, and rasterization stay separate from renderer policy.
 Generated FFI bindings remain in their wrapper crates. Malformed, missing, or
 out-of-range variable-font metadata falls back to base OS/2 weight and width.
 FreeType embedded bitmap strikes are checked against the 2,048-pixel and 16 MiB
-glyph allocation limits before pixel decoding.
+glyph allocation limits before pixel decoding. BGRA crop bounds are half-open:
+all nontransparent ink survives, and removing `(crop_x, crop_y)` changes bearings
+to `bitmap_left + crop_x` and `bitmap_top - crop_y`. Fully transparent nonempty
+rasters retain their dimensions, metrics, and valid blank atlas representation.
+
+Crash history intersects the selected filter with a DEBUG ceiling and an
+explicit payload-exclusion predicate, including original log-facade targets.
+Owned variable retention is bounded by 50 records, 4 KiB per record including a
+256-byte target limit, and 64 KiB in aggregate. Formatting stops within those
+bounds; panic payload and summary each have a separate 4 KiB limit. Fixed record
+metadata is count-bounded. Backtraces and allocations inside arbitrary producer
+formatters are outside these guarantees; this is not generic secret sanitization.
 
 The hidden warm-window pool defaults to one. Zero disables it. Normal hardware
 accepts at most five. An actual software adapter or resolved degradation caps
@@ -624,7 +635,16 @@ sRGB 彩色 view。Alpha 保持为 RGB 覆盖率最大值，因此不满足
 
 字体发现、塑形和光栅化与渲染器策略分离。生成的 FFI 绑定只留在各自包装 crate 内。
 可变字体元数据格式错误、缺失或越界时，代码回退到基础 OS/2 字重和字宽。FreeType 内嵌
-位图字形会在解码像素前先检查 2,048 像素和 16 MiB 的字形分配上限。
+位图字形会在解码像素前先检查 2,048 像素和 16 MiB 的字形分配上限。BGRA 裁剪边界采用
+半开区间，保留全部非透明像素；移除 `(crop_x, crop_y)` 边距后，bearing 分别变为
+`bitmap_left + crop_x` 与 `bitmap_top - crop_y`。全透明但非空的光栅保留尺寸、度量及
+有效空白图集表示。
+
+崩溃历史采用所选 filter、DEBUG 上限与显式负载排除规则的交集，并检查 log facade 的原始
+目标。自有可变保留量受 50 条记录、每条 4 KiB（其中 target 最多 256 字节）及合计
+64 KiB 限制。格式化在这些边界内停止；panic 负载与摘要各有独立的 4 KiB 上限。
+固定元数据另受记录条数限制。Backtrace 与任意生产端 formatter 内的分配不在这些保证内；
+这不是通用敏感信息清洗。
 
 隐藏预热窗口池默认为 1。设为 0 会关闭它。普通硬件路径最多接受 5。真实软件适配器或最终
 降级状态启用时，任何非零目标都限制为 1。实时配置重载会清空池；后续

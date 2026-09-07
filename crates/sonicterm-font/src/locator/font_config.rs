@@ -164,7 +164,7 @@ impl FontLocator for FontConfigFontLocator {
         &self,
         codepoints: &[char],
     ) -> anyhow::Result<Vec<ParsedFont>> {
-        log::trace!("locate_fallback_for_codepoints: {:?}", codepoints);
+        log::trace!(target: "sonicterm_font::payload", "locate_fallback_for_codepoints: {:?}", codepoints);
         let mut fonts: Vec<ParsedFont> = vec![];
 
         // A font-config query for a charset containing both
@@ -247,7 +247,7 @@ impl FontLocator for FontConfigFontLocator {
                         }
 
                         if let Ok(file) = pat.get_file().context("pat.get_file") {
-                            log::trace!("{file:?} has {num} codepoints from {codepoints:?}");
+                            log::trace!(target: "sonicterm_font::payload", "{file:?} has {num} codepoints from {codepoints:?}");
                             let handle = FontDataHandle {
                                 source: FontDataSource::OnDisk(file.into()),
                                 index: pat.get_integer("index")?.try_into()?,

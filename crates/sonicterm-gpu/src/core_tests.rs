@@ -1,6 +1,169 @@
 use super::*;
 use sonicterm_types::{ClassCoverage, PaneSeamTerm};
 
+#[derive(Clone, Default)]
+struct GlyphLogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for GlyphLogCapture {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for GlyphLogCapture {
+    type Writer = Self;
+    fn make_writer(&'a self) -> Self {
+        self.clone()
+    }
+}
+
+// Real ASCII and shaped emission keeps white masks/color sentinels ordinary and cache geometry unchanged.
+#[test]
+fn ordinary_white_and_color_glyph_emission_does_not_warn() {
+    use sonicterm_text::glyph_atlas::{RasterTile, Rasterizer};
+    use tracing_subscriber::{layer::SubscriberExt, Layer};
+    struct Tile(bool);
+    impl Rasterizer for Tile {
+        fn rasterize(&mut self, _: sonicterm_types::GlyphKey) -> Option<RasterTile> {
+            Some(RasterTile {
+                width: 2,
+                height: 3,
+                offset_x: 1,
+                offset_y: -2,
+                advance: 2.0,
+                coverage: if self.0 { [8, 16, 32, 64].repeat(6) } else { vec![255; 6] },
+                is_color: self.0,
+                is_subpixel: false,
+            })
+        }
+    }
+    let captured = GlyphLogCapture::default();
+    let subscriber = tracing_subscriber::registry().with(
+        tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(captured.clone())
+            .with_filter(tracing_subscriber::EnvFilter::new("sonic=warn")),
+    );
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::warn!(target: "sonic::render::glyph", "glyph-positive-control");
+        let mut stack = sonicterm_engine::FontStack::try_new_with_font_dirs_for_test(
+            &[("Rec Mono St.Helens", false)],
+            vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")],
+            14.0,
+            72,
+            1.0,
+        )
+        .unwrap();
+        let shaper = stack.clone();
+        for ch in ['A', '='] {
+            for is_color in [false, true] {
+                for foreground in [Color::Rgb(255, 255, 255), Color::Rgb(20, 40, 60)] {
+                    let mut atlas = GlyphAtlas::new(32, 32);
+                    let cell = Cell::plain(ch, foreground, Color::Default, CellFlags::empty());
+                    let style = RunStyle::from_cell(&cell);
+                    let key = if ch == 'A' {
+                        sonicterm_types::GlyphKey::new(ch, false, false)
+                    } else {
+                        let glyph = shaper.shape_text(&ch.to_string()).unwrap().remove(0);
+                        sonicterm_types::GlyphKey::shaped(
+                            ch,
+                            glyph.font_idx as u8,
+                            glyph.glyph_pos,
+                            false,
+                            false,
+                        )
+                    };
+                    let info = atlas.get_or_insert(key, &mut Tile(is_color)).unwrap();
+                    let pixels = atlas.pixels().to_vec();
+                    let mut glyphs = Vec::new();
+                    let mut tofu = Vec::new();
+                    let mut missing = Vec::new();
+                    GpuRenderer::flush_shape_run(
+                        &mut atlas,
+                        "Rec Mono St.Helens",
+                        14.0,
+                        &mut glyphs,
+                        &mut tofu,
+                        &mut missing,
+                        0,
+                        0,
+                        style,
+                        &[(0, cell)],
+                        &Theme::default(),
+                        ChromeColor::rgb(255, 255, 255),
+                        10.0,
+                        20.0,
+                        0.0,
+                        0.0,
+                        100.0,
+                        100.0,
+                        15.0,
+                        &[0.0, 10.0],
+                        Some(&shaper),
+                        Some(&mut stack),
+                        None,
+                        [0.0; 4],
+                        false,
+                    );
+                    assert_eq!(glyphs.len(), 1);
+                    assert!(tofu.is_empty() && missing.is_empty());
+                    assert_eq!(glyphs[0].rect, px_to_ndc(1.0, 13.0, 2.0, 3.0, 100.0, 100.0));
+                    assert_eq!(glyphs[0].uv, info.uv);
+                    assert_eq!(glyphs[0].flags, glyph_flags(is_color, false));
+                    let expected_color = if is_color {
+                        [1.0; 4]
+                    } else {
+                        chrome_color_to_linear_rgba(color_to_chrome(
+                            foreground,
+                            &Theme::default(),
+                            ChromeColor::rgb(255, 255, 255),
+                        ))
+                    };
+                    assert_eq!(glyphs[0].color, expected_color);
+                    assert_eq!(atlas.pixels(), pixels);
+                    assert_eq!(atlas.hits(), 1);
+                }
+            }
+        }
+    });
+    let output = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    assert!(output.contains("glyph-positive-control"));
+    assert!(!output.contains("emitting a glyph in pure white"), "{output}");
+}
+
+// Genuine atlas pressure still emits its production warning, while unchanged media stays quiet.
+#[test]
+fn atlas_pressure_warning_remains_observable() {
+    use tracing_subscriber::{layer::SubscriberExt, Layer};
+    let captured = GlyphLogCapture::default();
+    let subscriber = tracing_subscriber::registry().with(
+        tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(captured.clone())
+            .with_filter(tracing_subscriber::EnvFilter::new("sonic=warn")),
+    );
+    tracing::subscriber::with_default(subscriber, || {
+        let atlas = GlyphAtlas::new(1, 1);
+        report_inline_image_pressure(true, 1, &atlas);
+        report_inline_image_pressure(false, 1, &atlas);
+        report_inline_image_pressure(true, 0, &atlas);
+    });
+    let output = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    assert_eq!(
+        output
+            .matches("inline image atlas full; skipped older images without evicting text glyphs")
+            .count(),
+        1
+    );
+    assert!(output.contains("skipped=1"));
+}
+
 /// Software adapters select low reserve while hardware keeps the performance policy.
 ///
 /// Exercising both classification values pins the policy seam before descriptor construction.

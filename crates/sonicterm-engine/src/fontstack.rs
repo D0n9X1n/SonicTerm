@@ -323,6 +323,17 @@ impl Rasterizer for FontStack {
         };
 
         let rg = font.rasterize_glyph(glyph_pos, font_idx).ok()?;
+        self.rasterized_glyph_to_tile(rg, key, font.is_configured_family(font_idx))
+    }
+}
+
+impl FontStack {
+    fn rasterized_glyph_to_tile(
+        &self,
+        rg: sonicterm_font::RasterizedGlyph,
+        key: GlyphKey,
+        configured_family: bool,
+    ) -> Option<RasterTile> {
         if rg.data.is_empty() || rg.width == 0 || rg.height == 0 {
             // When: empty raster data or dimensions cannot form a valid atlas tile.
             return None;
@@ -365,7 +376,7 @@ impl Rasterizer for FontStack {
         let mut tile_h = rg.height;
         let mut offset_x = rg.bearing_x.get() as i32;
         let mut offset_y = -rg.bearing_y.get() as i32;
-        if weight_scale_applies(is_color, key.weight_bold, font.is_configured_family(font_idx)) {
+        if weight_scale_applies(is_color, key.weight_bold, configured_family) {
             apply_regular_weight_scale(&mut coverage, self.regular_weight_scale, is_subpixel);
             // The coverage remap alone cannot thicken a stem whose core is
             // already fully opaque, which is the common case at HiDPI. Growing

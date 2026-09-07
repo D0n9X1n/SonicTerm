@@ -237,7 +237,7 @@ impl FontLocator for CoreTextFontLocator {
         });
         matches.dedup();
 
-        log::trace!("fallback candidates for {codepoints:?} is {matches:#?}");
+        log::trace!(target: "sonicterm_font::payload", "fallback candidates for {codepoints:?} is {matches:#?}");
 
         Ok(matches.into_iter().map(|(_len, handle)| handle).collect())
     }
