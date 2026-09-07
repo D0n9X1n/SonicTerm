@@ -59,6 +59,8 @@ pub mod wezterm_pipeline;
 /// atlas glyphs, and cursor state in the WezTerm-style presentation pipeline.
 pub mod core;
 
+mod frame_plan;
+
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod lib_tests;

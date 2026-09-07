@@ -159,14 +159,15 @@ correctness, not only speed.
   One hovered target carries up to eight ordered viewport fragments in the
   frame key. Active recoloring salts only each intersecting row cache key;
   underline geometry emits one clipped quad per fragment.
-  Effective per-pane scrollbar opacity is window chrome: its sorted, quantized
-  identity participates in the frame key, and a bucket change damages the full
+  Effective per-pane scrollbar opacity is window chrome: its quantized
+  pane identity participates in the frame key, and a bucket change damages the full
   surface.
 - A degraded wgpu frame with work repaints the full surface. Windows degraded
   presentation also composes a full CPU surface. Degraded scrollbars snap and
   arm one idle-hide deadline; accelerated scrollbars request bounded fade frames.
-- `RenderMode::Noop` is available only under resolved degradation when no visible
-  signal changed. It does not present or clear dirty rows.
+- `FramePlan` reports `RenderMode::Noop` for an unchanged key on either presenter,
+  or a changed degraded key with no visible work. It does not rebuild or clear
+  dirty rows; an unchanged Windows CPU frame may still be reblitted.
 - Windows software glyph presentation stabilizes NDC roundoff at integer and
   half-pixel origins before one-to-one raster placement. The row glyph cache also
   keys the viewport row slot because cached instances carry screen coordinates.
@@ -192,7 +193,15 @@ worker. It uses `try_lock` for every active-tab parser and for required
 inline-image stores. If any lock is unavailable, it drops all collected guards,
 records a pending redraw, and does not call `GpuRenderer::render`.
 
-Dirty rows clear only in `finish_successful_frame`:
+One `FramePlan` composes the key, mode, damage, clips, and viewport slots from
+captured metadata. Copy-mode identity covers every field and quick-select hint
+without cloning its owned text. The plan retains visible-pane and dirty-row
+metadata, never hidden history or cell rows. Existing parser guards remain held
+through stateful assembly and presentation; no PTY write can interleave on those
+grids during that borrow.
+
+Dirty rows clear only in `finish_successful_frame`, and only when the pane id and
+current grid revision exactly match that plan's captured expectation:
 
 - on Windows CPU presentation, after `SetDIBitsToDevice` returns success;
 - on wgpu presentation, after command submission and `queue.present(frame)` are
@@ -563,12 +572,12 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
   激活时原生重新验证之前 fail closed。
 - 界面浮层或窗口装饰变化会把损伤区域扩大到整个表面。一个 hover 目标最多携带 8 个有序
   viewport 片段进入帧键。活动变色只给相交行的缓存 key 加 salt；下划线几何为每个片段发射
-  一个经过裁剪的 quad。每个窗格的有效滚动条透明度也属于窗口装饰：按窗格编号排序并量化后
-  的身份会进入帧键，桶值变化会损伤整个表面。
+  一个经过裁剪的 quad。每个窗格的有效滚动条透明度也属于窗口装饰：量化后的窗格身份进入帧键，
+  桶值变化会损伤整个表面。
 - 已降级的 wgpu 帧只要有工作，就重画整个表面。Windows 降级呈现也会合成完整 CPU 表面。
   降级滚动条直接跳变并只设置一个空闲隐藏截止时间；加速滚动条请求有限的淡入淡出帧。
-- 只有最终降级状态启用且没有可见信号变化时，才能使用 `RenderMode::Noop`。该路径不呈现，
-  也不清除脏行。
+- 任一呈现器的帧键未变，或降级帧键变化但没有可见工作时，`FramePlan` 返回 `RenderMode::Noop`。
+  该路径不重新组装或清除脏行；未变化的 Windows CPU 帧仍可再次 blit。
 - Windows 软件字形呈现会在一对一光栅定位前，稳定 NDC 反算在整数与半像素原点附近的误差。
   行字形缓存还会把视口行槽纳入键值，因为缓存实例携带屏幕坐标。
 - 每个由项目生成的 quad 颜色都是有限值的预乘线性 RGBA。不透明度和覆盖率变化必须同时缩放
@@ -587,7 +596,13 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
 存储使用 `try_lock`。任一锁不可用时，代码释放已经取得的所有保护对象，记录待重绘状态，
 并且不调用 `GpuRenderer::render`。
 
-脏行只在 `finish_successful_frame` 中清除：
+一个 `FramePlan` 从捕获的元数据组合帧键、模式、损伤、裁剪和视口行槽。复制模式身份覆盖每个
+字段和快速选择提示，但不克隆其文本。计划只保留可见窗格和脏行元数据，不持有隐藏历史或
+单元格行。现有解析器保护对象仍覆盖有状态组装和呈现；在这些借用期间，PTY 写入无法交错
+修改同一网格。
+
+脏行只在 `finish_successful_frame` 中清除，并且窗格编号和当前网格修订号必须与计划捕获的
+预期值完全匹配：
 
 - Windows CPU 呈现要等 `SetDIBitsToDevice` 成功返回；
 - wgpu 呈现要等命令提交并调用 `queue.present(frame)`。
