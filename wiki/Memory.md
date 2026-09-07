@@ -29,6 +29,14 @@ are in [Logging](Logging).
 | Image atlas | 1×1 placeholder; 2048×2048 BGRA8 only while media is active | skip older images when full; release to placeholder after 240 media-free frames |
 | Windows software frame | axis ≤ 16,384; total ≤ 160 MiB | reject construction or resize and preserve the old valid allocation |
 | Pane command events | 1,024 events | drop the oldest and shrink retained vector capacity |
+| Crash event history | 50 records; 4 KiB owned variable payload per record including a target up to 256 bytes; 64 KiB aggregate variable retention | format within the bound and evict oldest records for both count and bytes |
+| Panic text | 4 KiB each for the dump payload and rendered summary | truncate at UTF-8 boundaries, including the marker within the bound |
+
+Crash-history payloads retain exact-sized owned strings rather than spare
+string capacity. Fixed record metadata is separately bounded by record count;
+backtraces, the chained panic hook, and allocations inside arbitrary producer
+formatters are outside the variable-retention bound. Admission and payload
+exclusions are described on [Logging](Logging).
 
 The inline-media figure is deliberately stated as a process **target**, not an
 absolute 256 MiB ceiling. Every pane must keep its newest image, and one decoded
@@ -286,6 +294,12 @@ SonicTerm 在真正拥有内存的子系统边界实施限制，再按窗格、�
 | 图像图集 | 默认 1×1 占位符；仅媒体活跃时使用 2048×2048 BGRA8 | 填满时跳过较早图像；连续 240 个无媒体帧后释放为占位符 |
 | Windows 软件帧 | 任一轴 ≤ 16,384；总量 ≤ 160 MiB | 拒绝创建或调整尺寸，并保留旧的有效分配 |
 | 窗格命令事件 | 1,024 个事件 | 丢弃最早事件并缩小向量容量 |
+| 崩溃事件历史 | 50 条记录；每条自有可变负载最多 4 KiB，其中 target 最多 256 字节；可变保留量合计最多 64 KiB | 格式化时限制大小，并按条数和字节上限淘汰最早记录 |
+| Panic 文本 | dump 负载和格式化摘要各最多 4 KiB | 在 UTF-8 边界截断，标记也计入上限 |
+
+崩溃历史负载保留精确长度的自有字符串，不额外保留字符串空闲容量。固定记录元数据另受记录
+数量限制；backtrace、串联 panic hook，以及任意生产端 formatter 内的分配都不在可变保留量
+上限内。接纳与负载排除规则见[日志](Logging)。
 
 内联媒体的 256 MiB 被准确称为进程**目标**，不是绝对上限。每个窗格都必须保留最新
 图像，而单张已解码图像最多 4 MiB。因此受压时可陈述的总上限为：

@@ -306,11 +306,31 @@ retaining at least its newest image.
 
 The panic hook runs on every thread and writes a session-tagged
 `crashes/crash-<timestamp>.log` containing version, panic payload, source
-location, forced backtrace, and the latest 50 tracing events. Normal shutdown
+location, forced backtrace, and up to 50 admitted tracing events. Normal shutdown
 writes `sonic_exit` warning lines. On Unix, SIGSEGV, SIGBUS, SIGILL, SIGABRT, and
 SIGFPE append a fixed `FATAL: SIG…` line through an async-signal-safe path, then
 re-raise the signal for OS diagnostics. Windows relies on WER or LocalDumps when
 the system is configured to create them.
+
+Crash history uses the selected `RUST_LOG`/configured filter without widening
+it, plus a DEBUG ceiling and an explicit persistence predicate. TRACE is never
+retained there, even when an output sink opts in. Font shaping text and
+collections use `sonicterm_font::payload`, which is excluded from crash history
+at every level; normal warning/error targets retain safe stage/count diagnostics.
+Routine white-text and untinted-color-glyph emission is not a warning.
+
+Each record owns at most 4 KiB of variable payload, including at most 256 bytes
+of target. The ring also enforces a 64 KiB aggregate variable-capacity bound and
+the 50-record limit, evicting oldest records. Formatting uses bounded storage
+and UTF-8-safe truncation; `[truncated]` fits inside each cap. Fixed metadata is
+bounded separately by record count. Panic payload text and the rendered summary
+each have an independent 4 KiB bound, read from borrowed panic data.
+
+Backtrace capture/output and a chained panic hook are separate surfaces. These
+limits cover recorder-controlled formatting/retention, not allocations inside
+arbitrary producer `Debug` implementations or a guarantee that arbitrary logs
+contain no secrets. Payload TRACE remains opt-in normal-sink evidence; structured
+breadcrumbs keep their separate metadata-only contract.
 
 A hang may produce no panic artifact. On macOS, sample before force-quitting:
 
@@ -646,10 +666,24 @@ grep 'memory::reclaimed' ~/.sonicterm/logs/sonicterm.log*
 ## 崩溃、卡死与退出证据
 
 Panic hook 对所有线程生效，会写入带会话标识的 `crashes/crash-<timestamp>.log`，
-包含版本、panic 内容、源码位置、强制 backtrace 和最近 50 条 tracing 事件。正常关闭会
+包含版本、panic 内容、源码位置、强制 backtrace 和最多 50 条获准的 tracing 事件。正常关闭会
 写入 `sonic_exit` warning。Unix 上的 SIGSEGV、SIGBUS、SIGILL、SIGABRT 和 SIGFPE
 会先通过信号安全路径向日志追加固定 `FATAL: SIG…` 行，再重新触发信号，让操作系统生成
 诊断。Windows 在系统已配置时使用 WER 或 LocalDumps。
+
+崩溃历史不会扩展所选 `RUST_LOG`/配置 filter，而是再与 DEBUG 上限及显式持久化规则取
+交集。即使输出 sink 显式启用了 TRACE，历史也不保留 TRACE。字体塑形文本与集合使用
+`sonicterm_font::payload`，在任何级别都被排除；普通 warning/error 目标保留安全的阶段和
+数量诊断。正常白色文字与不染色彩色字形的发射不会产生 warning。
+
+每条记录的自有可变负载最多 4 KiB，其中 target 最多 256 字节。环形历史还实施合计
+64 KiB 可变容量和 50 条记录上限，淘汰最早记录。格式化使用有界存储并在 UTF-8 边界截断，
+`[truncated]` 也计入上限。固定元数据另受记录数量限制。Panic 负载文本与格式化摘要各自
+最多 4 KiB，从借用的 panic 数据读取。
+
+Backtrace 捕获/输出和串联的 panic hook 属于独立范围。这些上限约束 recorder 可控制的
+格式化/保留，不限制任意生产端 `Debug` 实现内部的分配，也不保证任意日志都不含敏感信息。
+负载 TRACE 仍可作为显式启用的普通 sink 证据；结构化 breadcrumbs 保持独立的仅元数据契约。
 
 卡死不一定产生 panic 工件。macOS 上应在强制退出前采样：
 

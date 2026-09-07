@@ -5305,16 +5305,11 @@ impl GpuRenderer {
             sw,
             sh,
         );
-        if inline_media_changed && skipped_inline_images > 0 {
-            tracing::warn!(
-                target: "sonic::glyph_atlas",
-                skipped = skipped_inline_images,
-                resident = self.image_atlas.len(),
-                width = self.image_atlas.width(),
-                height = self.image_atlas.height(),
-                "inline image atlas full; skipped older images without evicting text glyphs"
-            );
-        }
+        report_inline_image_pressure(
+            inline_media_changed,
+            skipped_inline_images,
+            &self.image_atlas,
+        );
 
         // build the active pane's shared device-pixel-snapped
         // column-edge cache once per frame, hoisted above every overlay
@@ -7739,7 +7734,6 @@ impl GpuRenderer {
                     // foreground and any hover recolor apply to it.
                     resolve_fg(*col, color)
                 };
-                trace_white_glyph(cell.ch, rgba, (gx, gy, gw, gh), "ascii");
                 if glyph_draw_is_degenerate(&info) {
                     // When: `glyph_draw_is_degenerate` — the tile has area but
                     // its UVs or metrics cannot produce a visible draw.
@@ -8144,7 +8138,6 @@ impl GpuRenderer {
                 };
                 let (gx, gy, gw, gh) =
                     sonicterm_render_model::geometry::snap_to_device_pixels((gx, gy, gw, gh), 1.0);
-                trace_white_glyph(lead_cell.ch, rgba, (gx, gy, gw, gh), "shaped_run");
                 if glyph_draw_is_degenerate(&info) {
                     // When: `glyph_draw_is_degenerate` — the tile has area but
                     // its UVs or metrics cannot produce a visible draw.
@@ -8228,7 +8221,6 @@ impl GpuRenderer {
             };
             let (gx, gy, gw, gh) =
                 sonicterm_render_model::geometry::snap_to_device_pixels((gx, gy, gw, gh), 1.0);
-            trace_white_glyph(lead_cell.ch, rgba, (gx, gy, gw, gh), "ligature");
             if glyph_draw_is_degenerate(&info) {
                 // When: `glyph_draw_is_degenerate` — the tile has area but its
                 // UVs or metrics cannot produce a visible draw.
@@ -8265,33 +8257,6 @@ impl Drop for GpuRenderer {
         // churn, and stay above it when a renderer survives.
         LIVE_RENDERERS.fetch_sub(1, Ordering::AcqRel);
     }
-}
-
-/// Report a glyph about to be drawn in pure white.
-///
-/// `[1.0, 1.0, 1.0, 1.0]` is emitted on exactly one branch — the colour-glyph
-/// path, which deliberately skips the per-cell foreground. Stray pure-white
-/// pixels have been reported against a theme whose text is `(190, 183, 150)`,
-/// so a glyph carrying this colour is the only draw that could produce them.
-///
-/// Logging every one makes the question answerable from a capture: if the
-/// pixels appear and this fired, the codepoint and rect name the glyph; if
-/// they appear and this never fired, no glyph draw is responsible and the
-/// whole glyph path is excluded.
-fn trace_white_glyph(ch: char, rgba: [f32; 4], rect: (f32, f32, f32, f32), site: &'static str) {
-    if rgba != [1.0, 1.0, 1.0, 1.0] {
-        // When: `rgba` is not pure white — the glyph cannot be the source of
-        // the stray white pixels this probe exists to identify.
-        return;
-    }
-    tracing::warn!(
-        target: "sonic::render::glyph",
-        ch = ?ch,
-        codepoint = format!("U+{:04X}", ch as u32),
-        rect = ?rect,
-        site,
-        "emitting a glyph in pure white"
-    );
 }
 
 /// Would drawing this glyph sample the atlas outside its own tile?
@@ -8369,6 +8334,20 @@ struct InlineImagePlacement<'a> {
     origin_x: f32,
     origin_y: f32,
     painter_order: usize,
+}
+
+fn report_inline_image_pressure(changed: bool, skipped: usize, atlas: &GlyphAtlas) {
+    if changed && skipped > 0 {
+        // Explain omitted images only after a media change, without repeating an idle warning.
+        tracing::warn!(
+            target: "sonic::glyph_atlas",
+            skipped,
+            resident = atlas.len(),
+            width = atlas.width(),
+            height = atlas.height(),
+            "inline image atlas full; skipped older images without evicting text glyphs"
+        );
+    }
 }
 
 fn emit_inline_image_instances(

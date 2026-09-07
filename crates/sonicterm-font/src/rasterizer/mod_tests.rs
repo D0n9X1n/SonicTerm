@@ -1,5 +1,30 @@
 use super::*;
 
+// Half-open ink bounds preserve opaque bitmaps, single pixels, and each final row/column.
+#[test]
+fn crop_preserves_complete_ink_extents() {
+    for (width, height) in [(3, 3), (1, 3), (3, 1), (1, 1)] {
+        let mut image = ImageBuffer::from_pixel(width, height, Rgba([10, 20, 30, 255]));
+        let cropped = crop_to_non_transparent(&mut image).to_image();
+        assert_eq!(cropped.dimensions(), (width, height));
+        assert!(cropped.pixels().all(|pixel| *pixel == Rgba([10, 20, 30, 255])));
+    }
+    let mut image = ImageBuffer::from_pixel(5, 7, Rgba([0, 0, 0, 0]));
+    image.put_pixel(4, 6, Rgba([10, 20, 30, 255]));
+    let cropped = crop_to_non_transparent(&mut image).to_image();
+    assert_eq!(cropped.dimensions(), (1, 1));
+    assert_eq!(cropped.get_pixel(0, 0), &Rgba([10, 20, 30, 255]));
+}
+
+// A transparent bitmap is a valid blank raster, not the zero-size missing-glyph sentinel.
+#[test]
+fn transparent_crop_preserves_blank_dimensions_and_pixels() {
+    let mut image = ImageBuffer::from_pixel(5, 7, Rgba([0, 0, 0, 0]));
+    let cropped = crop_to_non_transparent(&mut image).to_image();
+    assert_eq!(cropped.dimensions(), (5, 7));
+    assert_eq!(cropped.as_raw(), image.as_raw());
+}
+
 #[test]
 fn glyph_rgba_size_accepts_atlas_limit() {
     assert_eq!(
