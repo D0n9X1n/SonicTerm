@@ -112,7 +112,7 @@ jobs:
       - name: Upload macOS native smoke logs
         if: ${{ failure() }}
         timeout-minutes: 5
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sonicterm-macos-x86_64-release-smoke-logs
           path: |
@@ -120,7 +120,7 @@ jobs:
             ${{ runner.temp }}/sonicterm-macos-x86_64-smoke/logs/**
           if-no-files-found: ignore
 
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         timeout-minutes: 5
         with:
           name: sonicterm-mac-x86_64
@@ -164,7 +164,7 @@ jobs:
       - name: Upload macOS native smoke logs
         if: ${{ failure() }}
         timeout-minutes: 5
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sonicterm-macos-aarch64-release-smoke-logs
           path: |
@@ -172,7 +172,7 @@ jobs:
             ${{ runner.temp }}/sonicterm-macos-aarch64-smoke/logs/**
           if-no-files-found: ignore
 
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         timeout-minutes: 5
         with:
           name: sonicterm-mac-aarch64
@@ -237,7 +237,7 @@ jobs:
             --kind dmg \
             --output dist/macos-x86_64-dmg.asset.json
 
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         timeout-minutes: 5
         with:
           name: release-assets-macos
@@ -357,7 +357,7 @@ jobs:
       - name: Upload Windows native smoke logs
         if: ${{ failure() }}
         timeout-minutes: 5
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sonicterm-windows-release-smoke-logs
           path: |
@@ -365,7 +365,7 @@ jobs:
             ${{ runner.temp }}/sonicterm-release-windows-smoke/logs/**
           if-no-files-found: ignore
 
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         timeout-minutes: 5
         with:
           name: release-assets-windows
@@ -474,13 +474,13 @@ jobs:
       - name: Upload Linux package smoke logs
         if: ${{ failure() }}
         timeout-minutes: 5
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sonicterm-linux-release-smoke-logs
           path: sonicterm-*-smoke.log
           if-no-files-found: ignore
 
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         timeout-minutes: 5
         with:
           name: release-assets-linux

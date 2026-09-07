@@ -149,7 +149,7 @@ jobs:
       - name: Upload resource baseline evidence
         if: ${{ !cancelled() && steps.capture_resource_baseline.conclusion != 'skipped' }}
         timeout-minutes: 5
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: resource-baseline-evidence-macos-14
           path: target/v1.2.0-baseline/evidence-macos-14
@@ -262,7 +262,7 @@ jobs:
       - name: Upload macOS native smoke logs
         if: ${{ failure() }}
         timeout-minutes: 5
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sonicterm-macos-smoke-logs-${{ github.sha }}
           path: |
@@ -563,7 +563,7 @@ jobs:
       - name: Upload Windows GDI probe log
         if: ${{ failure() }}
         timeout-minutes: 5
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sonicterm-windows-gdi-log-${{ github.sha }}
           path: ${{ runner.temp }}/sonicterm-windows-gdi.log
@@ -628,7 +628,7 @@ jobs:
       - name: Upload resource baseline evidence
         if: ${{ !cancelled() && steps.capture_resource_baseline.conclusion != 'skipped' }}
         timeout-minutes: 5
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: resource-baseline-evidence-windows-latest
           path: target/v1.2.0-baseline/evidence-windows-latest
@@ -700,7 +700,7 @@ jobs:
       - name: Upload Windows native smoke logs
         if: ${{ failure() }}
         timeout-minutes: 5
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sonicterm-windows-smoke-logs-${{ github.sha }}
           path: |
@@ -932,7 +932,7 @@ jobs:
       - name: Upload Linux package smoke logs
         if: ${{ failure() }}
         timeout-minutes: 5
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sonicterm-linux-smoke-logs-${{ github.sha }}
           path: sonicterm-*-smoke.log
@@ -940,7 +940,7 @@ jobs:
 
       - name: Upload Linux packages
         timeout-minutes: 5
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sonicterm-linux-packages-${{ github.sha }}
           path: |
