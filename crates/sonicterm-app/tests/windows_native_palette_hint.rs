@@ -259,6 +259,9 @@ fn run_probe(active: &ActiveEventLoop) -> Result<NativeKeys, String> {
     let mut config = Config::default();
     config.appearance.software_render_mode = SoftwareRenderMode::Force;
     config.locale = "en".into();
+    // Native text assertions require the shipped face, not a font installed only on the developer's machine.
+    let font_dirs =
+        [std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")];
     let keymap = Keymap {
         meta: Meta { name: "native-hint".into(), version: "1.0".into() },
         bindings: vec![
@@ -272,7 +275,7 @@ fn run_probe(active: &ActiveEventLoop) -> Result<NativeKeys, String> {
         &theme,
         RendererSettings {
             font_family: &config.font.family,
-            font_dirs: &[],
+            font_dirs: &font_dirs,
             font_size: config.font.size,
             line_height_mult: config.font.line_height,
             font_weight_scale: config.font.effective_weight_scale(),
@@ -734,7 +737,7 @@ fn run_probe(active: &ActiveEventLoop) -> Result<NativeKeys, String> {
         &Theme::default(),
         RendererSettings {
             font_family: &config.font.family,
-            font_dirs: &[],
+            font_dirs: &font_dirs,
             font_size: config.font.size,
             line_height_mult: config.font.line_height,
             font_weight_scale: config.font.effective_weight_scale(),
