@@ -78,24 +78,29 @@ Each `TabState` owns a `PaneTree`, its active pane id, search state, and command
 status. Each `PaneState` owns its parser, optional `PtyHandle`, redraw target,
 terminal-mode atomics, inline images, and resource charges.
 
-`AppStateMachine` owns backend-free `AppState`. `handle` reduces one `AppIntent`
-and returns a stable class-sorted batch of `AppEffect`. This state is
-authoritative for values held in `AppState`. Live winit windows, `PaneTree`
-objects, parser locks, and PTY handles remain authoritative in `App` and
-`WindowState`.
+`AppStateMachine` owns backend-free `AppState`. Its `handle` method reduces one
+`AppIntent` into a stable class-sorted effect batch. In the GUI, all of that
+state is observational: no reducer counter, focus value, or overlay flag decides
+live topology. `App::observe_intent` keeps those compatibility observations but
+discards their effects. `App` and `WindowState` remain authoritative for live
+windows, tabs, pane trees, parser locks, renderers, and PTYs.
 
-The boundary dispatcher performs some effects directly. Other effects record a
-state-machine decision while a native app path performs the operation. For
-example, `PtyWrite`, `PtyClose`, clipboard writes, URL opening, redraw requests,
-and quit requests have operational handlers. `ChildSpawn`, several window
-operations, timers, and menu updates are currently record or bridge signals.
+`App::dispatch_intent` separately handles supported explicit-target work.
+Operational window effects resolve a monotonic `WindowKey` against a live window;
+missing, removed, and zero keys never select main or frontmost. Native input
+resolves its source window's active pane and writes through the bounded PTY queue
+without a transient state machine. Record-only effects cannot claim native
+completion. The full state/intent/effect inventory is in
+[Runtime Lifecycle](Runtime-Lifecycle).
 
 ### Boundary contracts
 
 #### Intent and effect
 
-`App::dispatch_intent` calls `AppStateMachine::handle`, then
-`App::dispatch_effects`. Effect classes keep this stable order:
+`AppStateMachine::handle` preserves the backend-free reducer/effect contract.
+`App::observe_intent` records compatibility transitions without executing their
+batch; supported operational intents and explicit effects cross the live app
+boundary separately. Reducer effect classes keep this stable order:
 
 1. `PtyWrite`;
 2. `Render`;
@@ -185,13 +190,13 @@ and release rules.
   whole frame.
 - A tab transfer moves each live `PaneState` and `PtyHandle`. It changes the
   shared redraw `WindowId`; it does not clone or restart the shell.
-- Dropping `PtyHandle` starts bounded process and I/O teardown. The typed
-  `transfer_tab` path checks source bounds and destination-window existence
-  before detaching. Direct drag-merge can still lose a pane if its existing
-  destination disappears after detachment. New-window tear-out instead owns the
-  detached tab as a transaction: destination setup failure restores the source
-  index, active-tab identity, panes, and live `PtyHandle` without resizing or
-  reattributing them.
+- Dropping `PtyHandle` starts bounded process and I/O teardown. Existing-window
+  transfers validate destination readiness and retain detached custody until
+  attachment commits. Direct drag-merge uses this same boundary. Destination
+  setup, topology, or charge-admission refusal restores source order, focus,
+  tree/zoom, live PTYs, sizes, and charges. New-window tear-out prepares hidden
+  native artifacts and transfers accounting before revealing the destination;
+  source hiding or reaping happens only after commitment.
 - Terminal mutations mark damage in the same frame. Cache invalidation follows
   font, scale, theme, surface, atlas, and topology changes.
 
@@ -303,20 +308,23 @@ crate 中身份不变的类型。
 `PaneState` 持有解析器、可选 `PtyHandle`、重绘目标、终端模式原子值、内联图像和
 资源计费令牌。
 
-`AppStateMachine` 持有不依赖后端的 `AppState`。`handle` 归约一个 `AppIntent`，
-返回按类别稳定排序的一批 `AppEffect`。`AppState` 中的值以这套状态为准。
-实时 winit 窗口、`PaneTree`、解析器锁和 PTY 句柄仍以 `App` 与 `WindowState` 为准。
+`AppStateMachine` 持有不依赖后端的 `AppState`；其 `handle` 方法把一个 `AppIntent`
+归约为按类别稳定排序的一批效果。在 GUI 中，这些状态全部只供观察：归约器计数、焦点值或
+浮层标志都不决定实时拓扑。`App::observe_intent` 保留兼容观察记录，但丢弃其效果。
+实时窗口、标签页、窗格树、解析器锁、渲染器与 PTY 始终以 `App` 和 `WindowState` 为准。
 
-边界派发器会直接执行一部分效果。另一些效果只记录状态机决定，实际操作由原生应用路径
-完成。例如，`PtyWrite`、`PtyClose`、写剪贴板、打开 URL、请求重绘和退出请求都有实际
-处理器。`ChildSpawn`、若干窗口操作、计时器和菜单更新目前只形成记录或桥接信号。
+`App::dispatch_intent` 单独处理受支持的显式目标工作。可执行的窗口效果把单调分配的
+`WindowKey` 解析为存活窗口；缺失、已移除或零 key 都不会选择主窗口或最前窗口。原生输入
+解析源窗口的活动窗格，直接通过有界 PTY 队列写入，不再构建临时状态机。只记录的效果不能
+声称原生操作已完成。完整的状态、意图与效果清单见[运行时生命周期](Runtime-Lifecycle)。
 
 ### 边界契约
 
 #### 意图与效果
 
-`App::dispatch_intent` 调用 `AppStateMachine::handle`，随后调用
-`App::dispatch_effects`。效果类别保持以下稳定顺序：
+`AppStateMachine::handle` 保留不依赖后端的归约器与效果契约。`App::observe_intent`
+记录兼容状态变化，但不执行其效果批次；受支持的可执行意图与显式效果单独跨越实时应用边界。
+归约器效果类别保持以下稳定顺序：
 
 1. `PtyWrite`；
 2. `Render`；
@@ -388,10 +396,10 @@ macOS 使用 CoreText 发现字体，Windows 使用 GDI，Linux 使用 Fontconfi
 - 渲染路径不会阻塞等待解析器。任一必需锁不可用时，整帧都会推迟。
 - 转移标签页会移动每个存活的 `PaneState` 和 `PtyHandle`。代码只修改共享重绘
   `WindowId`，不会复制或重启 shell。
-- 析构 `PtyHandle` 会开始有时限的进程与 I/O 清理。类型化 `transfer_tab` 路径会在移除前
-  检查源下标和目标窗口是否存在。直接拖动合并在移除后若现有目标消失，仍可能丢失窗格。
-  新窗口拆出则把已移除标签页作为事务持有；目标设置失败时会恢复源下标、活动标签页身份、
-  窗格和存活的 `PtyHandle`，且不会调整尺寸或重新归属所有者。
+- 析构 `PtyHandle` 会开始有时限的进程与 I/O 清理。现有窗口转移会验证目标就绪状态，并在
+  附加提交前持续持有已移除状态；直接拖动合并也使用同一边界。目标设置、拓扑或计费准入
+  被拒绝时，完整恢复源顺序、焦点、树/放大状态、存活 PTY、尺寸和计费。新窗口拆出先准备
+  隐藏的原生产物，并在显示目标前转移记账；只有提交后才隐藏或回收源窗口。
 - 终端修改在同一帧标记损伤区域。字体、缩放、主题、表面、图集和拓扑变化会使对应缓存失效。
 
 完整安全条件见 [架构内部机制](Architecture-Internals)。

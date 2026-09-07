@@ -10,6 +10,19 @@ use std::sync::{
     Arc,
 };
 
+pub(crate) struct ChargeTransfer {
+    pub(crate) source: ResourceOwnerId,
+    pub(crate) target: ResourceOwnerId,
+    pub(crate) class: ResourceClass,
+    pub(crate) amount: ResourceAmount,
+}
+
+struct OwnerTransferPlan {
+    record: Arc<OwnerRecord>,
+    removed: EnumMap<ResourceClass, ResourceAmount>,
+    added: EnumMap<ResourceClass, ResourceAmount>,
+}
+
 pub(crate) struct ClassUsage {
     pub(crate) bytes: usize,
     pub(crate) items: usize,
@@ -132,6 +145,7 @@ impl Ledger {
     ) -> Result<ResourceOwnerId, BudgetError> {
         let id = self.allocate_owner_id()?;
         let parent = self.registry.get(parent_id)?;
+        debug_assert!(parent.id < id, "immutable owner parents precede child lock identities");
         if !self.child_kind_allowed(parent.kind, kind) {
             // When: an unlisted parent-child pair has no valid accounting and
             // close path, so reject it before child counts or registry state move.
@@ -440,6 +454,133 @@ impl Ledger {
         Ok(())
     }
 
+    // Lock order: validate_state_path -> classes[class] -> record.usage; immutable parents have smaller owner ids.
+    // Ordering: process_bytes CAS uses AcqRel/Acquire before shard writes; net shrink uses AcqRel after validation.
+    pub(crate) fn resize(
+        &self,
+        owner: ResourceOwnerId,
+        class: ResourceClass,
+        current: ResourceAmount,
+        actual: ResourceAmount,
+    ) -> Result<(), BudgetError> {
+        if current == actual {
+            // When: `current == actual`, no admission or accounting change is needed, including during close.
+            return Ok(());
+        }
+        let path = self.path(owner)?;
+        let _states = if actual.component_le(current) {
+            Vec::new()
+        } else {
+            // When: any `actual` axis grows, keep every ancestor open until the resize commits.
+            Self::validate_state_path(&path)?
+        };
+        let accounting_path = Self::usage_records(&path);
+        let mut class_usage = self.classes[class].lock();
+        let mut owner_usage: Vec<_> =
+            accounting_path.iter().map(|record| record.usage.lock()).collect();
+        let invariant = || BudgetError::AccountingInvariant { owner, class };
+        let class_base = ResourceAmount { bytes: class_usage.bytes, items: class_usage.items }
+            .checked_sub(current)
+            .map_err(|_| invariant())?;
+        let class_next = ResourceAmount {
+            bytes: Self::validate_limit(
+                BudgetScope::ProcessClass(class),
+                BudgetDimension::Bytes,
+                class_base.bytes,
+                actual.bytes,
+                self.limits.class_bytes[class],
+            )?,
+            items: Self::validate_limit(
+                BudgetScope::ProcessClass(class),
+                BudgetDimension::Items,
+                class_base.items,
+                actual.items,
+                self.limits.class_items[class].unwrap_or(usize::MAX),
+            )?,
+        };
+        let mut owner_next = Vec::with_capacity(owner_usage.len());
+        for (record, usage) in accounting_path.iter().zip(&owner_usage) {
+            let base = usage.amount.checked_sub(current).map_err(|_| invariant())?;
+            let class_base =
+                ResourceAmount { bytes: usage.class_bytes[class], items: usage.class_items[class] }
+                    .checked_sub(current)
+                    .map_err(|_| invariant())?;
+            let amount = ResourceAmount {
+                bytes: Self::validate_limit(
+                    BudgetScope::Owner(record.id),
+                    BudgetDimension::Bytes,
+                    base.bytes,
+                    actual.bytes,
+                    record.limits.owner_bytes,
+                )?,
+                items: base.items.checked_add(actual.items).ok_or(BudgetError::Overflow)?,
+            };
+            let class_amount = ResourceAmount {
+                bytes: Self::validate_limit(
+                    BudgetScope::OwnerClass { owner: record.id, class },
+                    BudgetDimension::Bytes,
+                    class_base.bytes,
+                    actual.bytes,
+                    record.limits.class_bytes[class],
+                )?,
+                items: Self::validate_limit(
+                    BudgetScope::OwnerClass { owner: record.id, class },
+                    BudgetDimension::Items,
+                    class_base.items,
+                    actual.items,
+                    record.limits.class_items[class].unwrap_or(usize::MAX),
+                )?,
+            };
+            owner_next.push((amount, class_amount));
+        }
+        if actual.bytes > current.bytes {
+            // When: `actual.bytes` grows, process admission is the last fallible step before any shard changes.
+            let growth = actual.bytes - current.bytes;
+            let mut process = self.process_bytes.load(Ordering::Acquire);
+            loop {
+                if process < current.bytes {
+                    // When: `process` cannot cover this token, refuse before publishing a corrupt process total.
+                    return Err(invariant());
+                }
+                let candidate = Self::validate_limit(
+                    BudgetScope::Process,
+                    BudgetDimension::Bytes,
+                    process,
+                    growth,
+                    self.limits.process_bytes,
+                )?;
+                match self.process_bytes.compare_exchange_weak(
+                    process,
+                    candidate,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => {
+                        // When: compare_exchange_weak returns Ok, growth is admitted and only infallible shard writes remain.
+                        break;
+                    }
+                    Err(observed) => process = observed,
+                }
+            }
+        } else if self.process_bytes.load(Ordering::Acquire) < current.bytes {
+            // When: process accounting cannot cover `current.bytes`, retain every old balance rather than underflow.
+            return Err(invariant());
+        }
+        class_usage.bytes = class_next.bytes;
+        class_usage.items = class_next.items;
+        class_usage.epoch = class_usage.epoch.wrapping_add(1);
+        for (usage, (amount, class_amount)) in owner_usage.iter_mut().zip(owner_next) {
+            usage.amount = amount;
+            usage.class_bytes[class] = class_amount.bytes;
+            usage.class_items[class] = class_amount.items;
+            usage.epoch = usage.epoch.wrapping_add(1);
+        }
+        if actual.bytes < current.bytes {
+            self.process_bytes.fetch_sub(current.bytes - actual.bytes, Ordering::AcqRel);
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate_open(&self, owner: ResourceOwnerId) -> Result<(), BudgetError> {
         let path = self.path(owner)?;
         let _states = Self::validate_state_path(&path)?;
@@ -503,6 +644,112 @@ impl Ledger {
     // prevents concurrent diagnostic increments from being lost.
     pub(crate) fn record_release_failure(&self) {
         self.release_failures.fetch_add(1, Ordering::AcqRel);
+    }
+
+    // Lock order: target states by owner id -> classes by enum -> usage by owner id; immutable parents always have smaller ids.
+    pub(crate) fn transfer_many(&self, transfers: &[ChargeTransfer]) -> Result<(), BudgetError> {
+        let mut plans = std::collections::BTreeMap::<ResourceOwnerId, OwnerTransferPlan>::new();
+        let mut targets = std::collections::BTreeMap::<ResourceOwnerId, Arc<OwnerRecord>>::new();
+        let mut class_totals: EnumMap<ResourceClass, ResourceAmount> = EnumMap::default();
+        for transfer in transfers {
+            let source_path = self.path(transfer.source)?;
+            let target_path = self.path(transfer.target)?;
+            for record in &target_path {
+                targets.insert(record.id, record.clone());
+            }
+            if transfer.source == transfer.target {
+                // When: source and target match, only open-target validation is owed; attribution stays unchanged.
+                continue;
+            }
+            class_totals[transfer.class] =
+                class_totals[transfer.class].checked_add(transfer.amount)?;
+            for (path, adding) in [(&source_path, false), (&target_path, true)] {
+                for record in Self::usage_records(path) {
+                    let plan = plans.entry(record.id).or_insert_with(|| OwnerTransferPlan {
+                        record: record.clone(),
+                        removed: EnumMap::default(),
+                        added: EnumMap::default(),
+                    });
+                    let amounts = if adding { &mut plan.added } else { &mut plan.removed };
+                    amounts[transfer.class] =
+                        amounts[transfer.class].checked_add(transfer.amount)?;
+                }
+            }
+        }
+        let targets: Vec<_> = targets.into_values().collect();
+        let _states = Self::validate_state_path(&targets)?;
+        let plans: Vec<_> = plans.into_values().collect();
+        let classes: Vec<_> = class_totals
+            .iter()
+            .filter_map(|(class, amount)| (!amount.is_zero()).then_some(class))
+            .collect();
+        let class_guards: Vec<_> =
+            classes.iter().map(|class| self.classes[*class].lock()).collect();
+        let mut usages: Vec<_> = plans.iter().map(|plan| plan.record.usage.lock()).collect();
+        for (class, usage) in classes.iter().zip(&class_guards) {
+            if usage.bytes < class_totals[*class].bytes || usage.items < class_totals[*class].items
+            {
+                // When: process class balances cannot cover all moved tokens, reject before any owner changes.
+                return Err(BudgetError::AccountingInvariant { owner: self.root, class: *class });
+            }
+        }
+        let mut candidates = Vec::with_capacity(plans.len());
+        for (plan, usage) in plans.iter().zip(&usages) {
+            let mut candidate = (**usage).clone();
+            let mut removed = ResourceAmount::default();
+            let mut added = ResourceAmount::default();
+            for class in &classes {
+                let take = plan.removed[*class];
+                let give = plan.added[*class];
+                removed = removed.checked_add(take)?;
+                added = added.checked_add(give)?;
+                let base = ResourceAmount {
+                    bytes: usage.class_bytes[*class],
+                    items: usage.class_items[*class],
+                }
+                .checked_sub(take)
+                .map_err(|_| BudgetError::AccountingInvariant {
+                    owner: plan.record.id,
+                    class: *class,
+                })?;
+                candidate.class_bytes[*class] = Self::validate_limit(
+                    BudgetScope::OwnerClass { owner: plan.record.id, class: *class },
+                    BudgetDimension::Bytes,
+                    base.bytes,
+                    give.bytes,
+                    plan.record.limits.class_bytes[*class],
+                )?;
+                candidate.class_items[*class] = Self::validate_limit(
+                    BudgetScope::OwnerClass { owner: plan.record.id, class: *class },
+                    BudgetDimension::Items,
+                    base.items,
+                    give.items,
+                    plan.record.limits.class_items[*class].unwrap_or(usize::MAX),
+                )?;
+            }
+            let base = usage.amount.checked_sub(removed).map_err(|_| {
+                BudgetError::AccountingInvariant {
+                    owner: plan.record.id,
+                    class: ResourceClass::RegistryMetadata,
+                }
+            })?;
+            candidate.amount = ResourceAmount {
+                bytes: Self::validate_limit(
+                    BudgetScope::Owner(plan.record.id),
+                    BudgetDimension::Bytes,
+                    base.bytes,
+                    added.bytes,
+                    plan.record.limits.owner_bytes,
+                )?,
+                items: base.items.checked_add(added.items).ok_or(BudgetError::Overflow)?,
+            };
+            candidate.epoch = candidate.epoch.wrapping_add(1);
+            candidates.push(candidate);
+        }
+        for (usage, candidate) in usages.iter_mut().zip(candidates) {
+            **usage = candidate;
+        }
+        Ok(())
     }
 
     // Lock order: affected classes sorted by ResourceClass -> usage sorted by

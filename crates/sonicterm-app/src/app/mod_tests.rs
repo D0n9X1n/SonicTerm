@@ -404,7 +404,7 @@ fn attaching_a_split_tab_uses_only_final_destination_pane_sizes() {
         let tab = sonicterm_ui::tabs::Tab::new("incoming");
         let expected = state.tree.layout(sonicterm_ui::pane::Rect::new(0.0, 40.0, 1200.0, 600.0));
 
-        app.attach_tab_state(1, tab, state, panes);
+        app.attach_tab_state(1, tab, state, panes).unwrap();
 
         let main = app.main().unwrap();
         assert_eq!(main.tabs.active_index(), 1);
@@ -419,6 +419,102 @@ fn attaching_a_split_tab_uses_only_final_destination_pane_sizes() {
         actual.sort_unstable();
         expected_calls.sort_unstable();
         assert_eq!(actual, expected_calls);
+    }
+}
+
+#[test]
+fn composed_topology_changes_preserve_geometry_owners_and_input_identity() {
+    // Main and child operation chains must settle the same derived state before a later transfer uses it.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let outer = sonicterm_ui::pane::Rect::new(0.0, 40.0, 1200.0, 600.0);
+    let assert_window = |app: &App, id: WindowId| {
+        let window = &app.windows[&id];
+        assert_eq!(window.tabs.len(), window.tab_states.len());
+        let mut leaves: Vec<_> =
+            window.tab_states.iter().flat_map(|tab| tab.tree.leaves()).collect();
+        leaves.sort_unstable();
+        let mut live: Vec<_> = window.panes.keys().copied().collect();
+        live.sort_unstable();
+        assert_eq!(leaves, live);
+        for tab in &window.tab_states {
+            assert!(tab.tree.leaves().contains(&tab.active_pane));
+            assert!(tab.tree.zoomed_pane_id().is_none_or(|pane| pane == tab.active_pane));
+        }
+        let active = &window.tab_states[window.tabs.active_index()];
+        let visible = active.tree.layout(outer);
+        assert!(visible.iter().any(|(pane, _)| *pane == active.active_pane));
+        for (pane, rect) in visible {
+            let parser = window.panes[&pane].parser.lock();
+            assert_eq!(
+                (parser.grid().cols, parser.grid().rows),
+                ((rect.w / 10.0).floor() as u16, (rect.h / 20.0).floor() as u16)
+            );
+            assert!(parser.grid().dirty_rows().count() > 0);
+        }
+        let parent = window.owner.as_ref().unwrap().id();
+        for pane in window.panes.values() {
+            let owner = pane.owner.as_ref().expect("completion registers new panes").id();
+            assert_eq!(app.governor.snapshot(owner).unwrap().parent, Some(parent));
+        }
+    };
+    for child_source in [false, true] {
+        let mut config = Config::default();
+        config.terminal.shell = Some(
+            std::env::current_exe()
+                .unwrap()
+                .join("unavailable-shell")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let mut app = App::new(Theme::default(), config, Keymap::default());
+        app.__test_seed_tab("first");
+        app.__test_seed_tab("second");
+        let main = app.main_window_id.unwrap();
+        let child = app.__test_seed_child_window(&["first", "second"]);
+        app.__test_set_main_pane_viewport(outer, 10.0, 20.0);
+        app.__test_set_child_pane_viewport(child, outer, 10.0, 20.0);
+        app.resize_visible_panes();
+        super::child_window::resize_visible_panes_in_child(app.windows.get_mut(&child).unwrap());
+        let (source, target) = if child_source { (child, main) } else { (main, child) };
+        let tab = app.windows[&source].tabs.active().unwrap().id;
+        let area = sonicterm_ui::ime::ImeCursorArea {
+            pane_id: app.windows[&source].tab_states[0].active_pane,
+            position: (10, 40),
+            size: (10, 20),
+        };
+        for action in [
+            Action::SplitRight,
+            Action::SplitDown,
+            Action::FocusPane(Direction::Up),
+            Action::TogglePaneZoom,
+            Action::SplitRight,
+            Action::ClosePane,
+            Action::NextTab,
+            Action::PrevTab,
+        ] {
+            let window = app.windows.get_mut(&source).unwrap();
+            window.ime_cursor_throttle.should_update(area);
+            assert!(!window.ime_cursor_throttle.should_update(area));
+            assert!(app.run_action_for_window(&action, source));
+            assert!(app.windows.get_mut(&source).unwrap().ime_cursor_throttle.should_update(area));
+            assert_window(&app, source);
+            assert_window(&app, target);
+        }
+        let index = app.tab_index_of_id(source, tab).unwrap();
+        assert!(app.windows.get_mut(&source).unwrap().reorder_tab(index, 1 - index));
+        assert_eq!(app.windows[&source].tabs.active().unwrap().id, tab);
+        assert_window(&app, source);
+        app.__test_charge_pane_owners();
+        let before = app.governor.snapshot(app.governor.root_owner()).unwrap().process_amount;
+        let index = app.tab_index_of_id(source, tab).unwrap();
+        app.transfer_tab(Some(source), index, Some(target), 1).unwrap();
+        assert_eq!(app.windows[&target].tabs.active().unwrap().id, tab);
+        assert_window(&app, source);
+        assert_window(&app, target);
+        assert_eq!(
+            app.governor.snapshot(app.governor.root_owner()).unwrap().process_amount,
+            before
+        );
     }
 }
 

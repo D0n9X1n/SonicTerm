@@ -156,6 +156,12 @@ fn rejection_notification_follows_the_pane_not_the_frontmost_window() {
     );
     assert!(app.__test_child_notification_message(child).unwrap().contains("Wheel"));
     assert!(app.__test_main_notification_message().is_none());
+    // Headless transfer must supply real destination geometry instead of bypassing readiness admission.
+    app.__test_set_main_pane_viewport(
+        sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 480.0),
+        10.0,
+        20.0,
+    );
     assert!(app.transfer_tab(Some(child), 0, None, 1).is_ok());
     app.handle_pty_input_rejected(
         pane_id,

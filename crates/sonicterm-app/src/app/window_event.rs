@@ -397,30 +397,10 @@ impl App {
                 }
             }
             WindowEvent::CloseRequested => {
-                // Notify the reducer of the close request. It mutates
-                // `AppState::{live_window_count, focused_window}` and
-                // emits `WindowClose` [+ `Quit` if last]. The
-                // boundary's existing macOS-style "hide instead of
-                // exit" policy below is the source of truth for what
-                // the platform actually does; the reducer's Effects
-                // are observability-only in this slice (the
-                // `dispatch_effects` arms for `WindowClose` /
-                // `WindowOpen` / `WindowResize` are trace-stubs per
-                // §9). The `Quit` cascade does flip `pending_exit` —
-                // suppress that here so we don't override the
-                // "hide-on-last-close" policy. Real Quit cascading
-                // moves to the reducer in 2c-misc.
-                let intent = sonicterm_app_core::AppIntent::WindowCloseRequested {
-                    window: sonicterm_types::WindowKey::new(0),
-                };
-                for effect in self.machine.handle(intent) {
-                    if !matches!(
-                        effect,
-                        sonicterm_app_core::AppEffect::Quit
-                            | sonicterm_app_core::AppEffect::WindowClose { .. }
-                    ) {
-                        self.dispatch_effects(smallvec::smallvec![effect]);
-                    }
+                if let Some(window) = self.window_key(win_id) {
+                    self.observe_intent(sonicterm_app_core::AppIntent::WindowCloseRequested {
+                        window,
+                    });
                 }
                 // If child windows still own tabs, hide the main
                 // window instead of exiting the app — the children
@@ -1140,7 +1120,7 @@ impl App {
                     // When: focused is false, publish the blurred reducer transition.
                     sonicterm_app_core::AppIntent::WindowBlurred { window: wk }
                 };
-                self.dispatch_intent(intent);
+                self.observe_intent(intent);
                 if focused {
                     // Focus entering main makes it the destination for subsequent global actions.
                     // record the main window as
@@ -1289,7 +1269,7 @@ impl App {
                         _ => (0u16, 0u16),
                     }
                 };
-                self.dispatch_intent(sonicterm_app_core::AppIntent::WindowResized {
+                self.observe_intent(sonicterm_app_core::AppIntent::WindowResized {
                     window: sonicterm_types::WindowKey::new(0),
                     cols: cols_u16,
                     rows: rows_u16,
@@ -1386,7 +1366,7 @@ impl App {
                 // Notify the reducer so last_mouse_pos tracks the cursor; its
                 // identity check implicitly coalesces sub-pixel jitter
                 // bursts into a single Render(Hover) per frame.
-                self.dispatch_intent(sonicterm_app_core::AppIntent::MouseMove {
+                self.observe_intent(sonicterm_app_core::AppIntent::MouseMove {
                     window: sonicterm_types::WindowKey::new(0),
                     pos: sonicterm_app_core::LogicalPos { x: lx as f64, y: ly as f64 },
                 });
@@ -1886,7 +1866,7 @@ impl App {
                         {
                             let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
                             let (lx, ly) = (cp.0 as f32, cp.1 as f32);
-                            self.dispatch_intent(sonicterm_app_core::AppIntent::MouseButton {
+                            self.observe_intent(sonicterm_app_core::AppIntent::MouseButton {
                                 window: sonicterm_types::WindowKey::new(0),
                                 pressed: true,
                                 button: sonicterm_app_core::MouseButton::Left,
@@ -2198,7 +2178,7 @@ impl App {
                         {
                             let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
                             let (lx, ly) = (cp.0 as f32, cp.1 as f32);
-                            self.dispatch_intent(sonicterm_app_core::AppIntent::MouseButton {
+                            self.observe_intent(sonicterm_app_core::AppIntent::MouseButton {
                                 window: sonicterm_types::WindowKey::new(0),
                                 pressed: false,
                                 button: sonicterm_app_core::MouseButton::Left,

@@ -799,37 +799,12 @@ impl App {
     }
 
     pub(super) fn resize_visible_panes(&mut self) {
-        let rects = self.compute_active_pane_rects();
-        let (cw, ch) = match self.test_viewport_override {
-            // The test-only viewport override lets tests exercise
-            // close_active_pane's resize wiring
-            // without a live wgpu renderer. Production stays `None` and
-            // falls through to the renderer-derived metrics below.
-            Some((_, cw, ch)) => (cw, ch),
-            None => {
-                // When: test_viewport_override is None, derive pane metrics from main_renderer.
-                match self.main_renderer() {
-                    Some(r) => r.cell_size(),
-                    None => {
-                        // When: test_viewport_override and main_renderer are None, pane metrics are unavailable.
-                        return;
-                    }
-                }
-            }
-        };
-        if let Some(panes) = self.main_panes() {
-            let inset = self
-                .main_renderer()
-                .map(|r| {
-                    [
-                        r.padding_left_px(),
-                        r.padding_right_px(),
-                        r.padding_top_px(),
-                        r.padding_bottom_px(),
-                    ]
-                })
-                .unwrap_or([0.0; 4]);
-            crate::app::resize_panes_to_rects(panes, &rects, cw, ch, inset);
+        let viewport = self.test_viewport_override;
+        if let Some(window) = self.main_mut() {
+            window.complete_topology_change(
+                super::TopologyChange { resize_visible: true, focus_feedback: None },
+                viewport,
+            );
         }
     }
 }

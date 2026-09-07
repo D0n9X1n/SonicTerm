@@ -213,15 +213,19 @@ when the focused pane is still the pane that armed broadcast.
 `BroadcastScope::AllTabs` selects peers across tabs and windows. The source is
 excluded from the receiver set.
 
-Each destination crosses this boundary:
+Each destination crosses this live boundary:
 
-```text
-AppIntent::PtyWrite → AppEffect::PtyWrite → PaneState → PtyHandle
+```mermaid
+flowchart LR
+    source["stable PaneId + bytes"] --> write["App::write_to_pane"]
+    write --> pane["live PaneState / PtyHandle"] --> queue["bounded input queue"]
 ```
 
-The state-machine reducer for this write is pure. `write_to_pane` uses a
-transient `AppStateMachine` because its broadcast caller has only `&self`.
-`dispatch_pty_write_effect` resolves the pane id back to the live `PtyHandle`.
+There is no transient state machine on the native input or broadcast path.
+Explicit `AppIntent::PtyWrite` and `AppEffect::PtyWrite` enter the same bounded
+write boundary with their named pane id. Window-targeted compatibility input
+resolves that live window's active pane, never a zero sentinel or guessed
+frontmost window. A missing target cannot redirect bytes to another terminal.
 
 `PtyHandle::send_input_nonblocking` uses `try_send`:
 
@@ -841,14 +845,17 @@ Control 或 Alt 时，会原样使用操作系统生成文本的 UTF-8 字节。
 `BroadcastScope::Tab` 选择同一标签页的其它窗格。`BroadcastScope::AllTabs` 选择跨标签页和
 窗口的其它窗格。接收集合会排除源窗格。
 
-每个目标都经过以下边界：
+每个目标都经过以下实时边界：
 
-```text
-AppIntent::PtyWrite → AppEffect::PtyWrite → PaneState → PtyHandle
+```mermaid
+flowchart LR
+    source["稳定 PaneId 与字节"] --> write["App::write_to_pane"]
+    write --> pane["存活 PaneState / PtyHandle"] --> queue["有界输入队列"]
 ```
 
-这次写入的状态机归约是纯操作。`write_to_pane` 的广播调用者只有 `&self`，因此它使用一套
-临时 `AppStateMachine`。`dispatch_pty_write_effect` 再把窗格编号解析为存活的 `PtyHandle`。
+原生输入和广播路径不再构建临时状态机。显式的 `AppIntent::PtyWrite` 与
+`AppEffect::PtyWrite` 按指定窗格 id 进入同一个有界写入边界。以窗口为目标的兼容输入会解析
+该存活窗口的活动窗格，不使用零哨兵，也不猜测最前窗口。目标缺失时，不会把字节转给另一终端。
 
 `PtyHandle::send_input_nonblocking` 使用 `try_send`：
 

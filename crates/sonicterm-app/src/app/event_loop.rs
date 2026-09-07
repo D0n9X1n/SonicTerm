@@ -946,6 +946,7 @@ impl App {
         // the authoritative source for `main_window_id`.
         if let Some(prev) = self.main_window_id.take() {
             self.windows.remove(&prev);
+            self.window_keys.remove(prev);
         }
         self.main_window_id = Some(main_id);
         let shadow = super::WindowState {

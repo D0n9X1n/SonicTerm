@@ -2048,35 +2048,13 @@ impl App {
         src_id: WindowId,
         src_idx: usize,
         target: crate::tab_drag::DropTarget<WindowId>,
-    ) {
-        let Some((tab, state, panes)) = self.detach_from_child(src_id, src_idx) else {
-            // When: `detach_from_child` found no tab at `src_idx`, so the drag
-            // source vanished mid-drop and there is nothing to re-attach.
-            return;
-        };
-        let main_id = self.main_window().map(|w| w.id());
-        let attached = if Some(target.window) == main_id {
-            self.attach_tab_state(target.slot, tab, state, panes);
-            // Receiving a tab back into main un-hides the window if it
-            // had been drained.
-            if self.main_is_hidden() {
-                self.show_main_window();
+    ) -> bool {
+        match self.transfer_tab(Some(src_id), src_idx, Some(target.window), target.slot) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(?error, "drag-merge refused; source tab retained");
+                false
             }
-            true
-        } else {
-            // When: `target.window` is not `main_id`, so the tab lands in a
-            // sibling child window, which may itself have closed mid-drop.
-            self.attach_to_child(target.window, target.slot, tab, state, panes)
-        };
-        if !attached {
-            tracing::warn!(
-                "drag-merge: destination {:?} disappeared mid-drop; panes dropped",
-                target.window
-            );
-        }
-        self.reap_empty_child(src_id);
-        if let Some(w) = self.main_window() {
-            w.request_redraw();
         }
     }
     // Ordering: `reap_call_count` is Relaxed — a test-observable tally with no
@@ -2111,25 +2089,13 @@ impl App {
         &mut self,
         src_idx: usize,
         target: crate::tab_drag::DropTarget<WindowId>,
-    ) {
-        let Some((tab, state, panes)) = self.detach_tab_state(src_idx) else {
-            // When: `detach_tab_state` found no tab at `src_idx`, so the main
-            // window's drag source vanished and there is nothing to move.
-            return;
-        };
-        if !self.attach_to_child(target.window, target.slot, tab, state, panes) {
-            tracing::warn!(
-                "drag-merge: destination child {:?} disappeared mid-drop; panes dropped",
-                target.window
-            );
-        }
-        // If main has been drained but child windows are still alive,
-        // hide the main window without exiting the app.
-        if self.main_tabs().map(|t| t.is_empty()).unwrap_or(true) && self.child_window_count() > 0 {
-            self.hide_main_window();
-        }
-        if let Some(w) = self.main_window() {
-            w.request_redraw();
+    ) -> bool {
+        match self.transfer_tab(None, src_idx, Some(target.window), target.slot) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(?error, "drag-merge refused; source tab retained");
+                false
+            }
         }
     }
     pub(super) fn hide_main_window(&mut self) {
@@ -2250,7 +2216,7 @@ impl App {
         child.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
         let last = child.tabs.len().saturating_sub(1);
         child.tabs.activate(last);
-        child.request_redraw();
+        resize_visible_panes_in_child(child);
         true
     }
 
@@ -2319,7 +2285,7 @@ impl App {
             if let Some(tab_id) = child.tabs.tabs().get(idx).map(|t| t.id) {
                 child.tabs.close(tab_id);
             }
-            child.request_redraw();
+            resize_visible_panes_in_child(child);
             child.tabs.is_empty()
         };
         if drained {
@@ -2801,32 +2767,17 @@ const CHILD_SPLITTER_HIT_THICKNESS: f32 = 8.0;
 /// child case so split/close/zoom on a torn-out window propagate to the
 /// PTY winsize the same way.
 pub(super) fn resize_visible_panes_in_child(child: &mut WindowState) {
-    let rects = App::compute_pane_rects_for(child);
-    // Test-only metrics override (mirrors main `test_viewport_override`): a
-    // headless child has `renderer: None`, so fall back to the seam so the
-    // child split-resize wiring is unit-testable.
-    if let Some((_, cw, ch)) = child.test_pane_viewport {
-        // When: `test_pane_viewport` supplies `cw`/`ch`, so a headless child
-        // sizes panes from those metrics with no renderer padding to apply.
-        crate::app::resize_panes_to_rects(&child.panes, &rects, cw, ch, [0.0, 0.0, 0.0, 0.0]);
-        return;
-    }
-    let Some(r) = child.renderer.as_ref() else {
-        // When: no `renderer` and no test override, so cell metrics are unknown
-        // and any resize would push a wrong winsize to the PTY.
-        return;
-    };
-    let (cw, ch) = r.cell_size();
-    let inset =
-        [r.padding_left_px(), r.padding_right_px(), r.padding_top_px(), r.padding_bottom_px()];
-    crate::app::resize_panes_to_rects(&child.panes, &rects, cw, ch, inset);
+    child.complete_topology_change(
+        super::TopologyChange { resize_visible: true, focus_feedback: None },
+        None,
+    );
 }
 
 /// Scroll a pane's scrollback view in a child window by `delta_lines`
 /// (negative = back into history). Child-scoped mirror of `App::scroll_pane`.
 /// Returns early on the alt screen: the `MouseWheel` arm translates alt-screen
 /// wheel input into key or mouse reports before ever calling this.
-fn scroll_child_pane(child: &mut WindowState, pane_id: u64, delta_lines: i32) {
+pub(super) fn scroll_child_pane(child: &mut WindowState, pane_id: u64, delta_lines: i32) {
     if delta_lines == 0 {
         // When: `delta_lines` rounded to zero, so a sub-line wheel tick moves
         // the view nowhere and nothing needs marking dirty.
