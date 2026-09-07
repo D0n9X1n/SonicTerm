@@ -198,7 +198,9 @@ pub fn init_in(cfg: &LoggingConfig, dir: &Path) -> io::Result<LoggingGuard> {
         // console — file still gets DEBUG.
         .add_directive("warn".parse().expect("WARN parses"));
 
-    let ring = crash::ring_layer();
+    let ring_filter =
+        EnvFilter::try_new(&filter_src).unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
+    let ring = crash::ring_layer().with_filter(crash::persistence_filter(ring_filter));
 
     let file_layer = tracing_subscriber::fmt::layer()
         .with_ansi(false)

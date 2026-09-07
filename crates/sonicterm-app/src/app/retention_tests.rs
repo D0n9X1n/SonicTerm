@@ -13,6 +13,58 @@ fn pane_with(cols: u16, rows: u16) -> PaneState {
     PaneState::new(Arc::new(Mutex::new(Parser::new(Grid::new(cols, rows)))), None)
 }
 
+#[test]
+fn measured_inline_media_mixed_transitions_update_existing_charges() {
+    // One larger image and several smaller images move bytes/items in opposite directions through real retention.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = App::new(Default::default(), Default::default(), Default::default());
+    let pane_id = app.__test_seed_tab("media");
+    let window = app.main_window_id.unwrap();
+    app.reconcile_pane_owners();
+    let owner = app.windows[&window].panes[&pane_id].owner.as_ref().unwrap().id();
+    let mut previous = None;
+    for sizes in [&[4096][..], &[512, 512, 512][..], &[8192][..]] {
+        {
+            let pane = &app.windows[&window].panes[&pane_id];
+            let mut images = pane.inline_images.lock();
+            *images = sizes
+                .iter()
+                .enumerate()
+                .map(|(index, size)| sonicterm_render_model::InlineImage {
+                    id: index as u64,
+                    row: 0,
+                    col: 0,
+                    width: (*size / 4) as u32,
+                    height: 1,
+                    bgra: Arc::from(vec![0; *size]),
+                })
+                .collect();
+        }
+        let measured = measure_pane(&app.windows[&window].panes[&pane_id]).unwrap();
+        if let Some(old) = previous {
+            assert!(!measured.inline_media.component_le(old));
+            assert!(!old.component_le(measured.inline_media));
+        }
+        app.__test_charge_pane_owners();
+        app.__test_charge_pane_owners();
+        let pane = &app.windows[&window].panes[&pane_id];
+        assert_eq!(
+            pane.charges[&ResourceClass::InlineMediaRetained].committed_amount(),
+            measured.inline_media
+        );
+        let snapshot = app.governor.snapshot(owner).unwrap();
+        assert_eq!(
+            snapshot.owner_class_bytes[ResourceClass::InlineMediaRetained],
+            measured.inline_media.bytes
+        );
+        assert_eq!(
+            snapshot.owner_class_items[ResourceClass::InlineMediaRetained],
+            measured.inline_media.items
+        );
+        previous = Some(measured.inline_media);
+    }
+}
+
 /// A pane reports every seam it holds, and the total is their sum.
 ///
 /// The seams are disjoint by construction — each meters only what it owns — so
@@ -604,6 +656,153 @@ fn charging_runs_on_the_sampling_interval_rather_than_every_wake() {
         "the pass must run once the interval elapses: rate-limiting it must delay the figure, \
          never stop maintaining it. {charged_after_interval} !> {charged_at_start}"
     );
+}
+
+/// Pane migration preserves every committed class without consulting a busy parser.
+///
+/// The route sequence covers main-to-child, child-to-child, and child-to-main while
+/// process and window snapshots prove attribution moves without passing through zero.
+#[test]
+fn pane_owner_moves_transfer_existing_charges_across_every_window_direction() {
+    let mut app = App::new(
+        sonicterm_cfg::theme::Theme::default(),
+        sonicterm_cfg::config::Config::default(),
+        sonicterm_cfg::keymap::Keymap::default(),
+    );
+    let pane_id = app.__test_seed_tab("charged");
+    let main = app.__test_main_window_id().expect("the synthetic main window exists");
+    let first_child = app.__test_seed_child_window(&[]);
+    let second_child = app.__test_seed_child_window(&[]);
+
+    let parser = app
+        .windows
+        .get(&main)
+        .and_then(|window| window.panes.get(&pane_id))
+        .expect("the seeded pane exists")
+        .parser
+        .clone();
+    {
+        let mut parser = parser.lock();
+        parser.grid_mut().set_scrollback_limit(256);
+        for line in 0..128 {
+            parser.advance(format!("charged line {line}\r\n").as_bytes());
+        }
+        parser.advance(b"\x1b]8;;https://example.com/charged\x07x\x1b]8;;\x07");
+    }
+    app.__test_force_retention_sample();
+
+    let expected = app.__test_pane_charges(main, pane_id).expect("the pane is charged");
+    assert!(
+        expected.len() >= 2,
+        "the fixture must charge several classes so a partial transfer is observable"
+    );
+    let process_before = app.__test_governor_snapshot_root().process_amount;
+    let _parser_guard = parser.lock();
+
+    for (source, destination) in
+        [(main, first_child), (first_child, second_child), (second_child, main)]
+    {
+        let old_owner = app.__test_pane_owner(source, pane_id).expect("source pane owner");
+        let destination_window_owner =
+            app.__test_window_owner(destination).expect("destination window owner");
+
+        assert!(app.__test_move_pane_between_windows(source, destination, pane_id));
+
+        let new_owner =
+            app.__test_pane_owner(destination, pane_id).expect("destination pane owner");
+        assert_ne!(new_owner, old_owner, "a moved pane needs a destination child owner");
+        assert!(!app.__test_owner_is_open(old_owner), "the emptied source owner must close");
+        assert_eq!(app.__test_pane_charges(destination, pane_id), Some(expected.clone()));
+        let new_owner_snapshot = app.__test_owner_snapshot(new_owner).expect("new owner snapshot");
+        assert_eq!(new_owner_snapshot.parent, Some(destination_window_owner));
+        for (class, amount) in &expected {
+            assert_eq!(new_owner_snapshot.owner_class_bytes[*class], amount.bytes);
+            assert_eq!(new_owner_snapshot.owner_class_items[*class], amount.items);
+        }
+        assert_eq!(
+            app.__test_owner_snapshot(
+                app.__test_window_owner(source).expect("source window owner")
+            )
+            .expect("source window snapshot")
+            .owner_amount,
+            ResourceAmount::default(),
+            "the source window must stop carrying the moved pane immediately"
+        );
+        assert_eq!(
+            app.__test_governor_snapshot_root().process_amount,
+            process_before,
+            "owner movement must not change process totals"
+        );
+    }
+}
+
+/// A rejected owner move removes its provisional owner without splitting charges.
+///
+/// The target admits `GridVisible` but rejects the later `GridHistory` class, so
+/// this exercises whole-batch validation rather than a first-token failure.
+#[test]
+fn rejected_pane_owner_transfer_preserves_source_and_destination_window() {
+    let mut app = App::new(
+        sonicterm_cfg::theme::Theme::default(),
+        sonicterm_cfg::config::Config::default(),
+        sonicterm_cfg::keymap::Keymap::default(),
+    );
+    let pane_id = app.__test_seed_tab("charged");
+    let main = app.__test_main_window_id().expect("the synthetic main window exists");
+    let destination = app.__test_seed_child_window(&[]);
+    {
+        let pane = app
+            .windows
+            .get(&main)
+            .and_then(|window| window.panes.get(&pane_id))
+            .expect("the seeded pane exists");
+        let mut parser = pane.parser.lock();
+        parser.grid_mut().set_scrollback_limit(256);
+        for line in 0..128 {
+            parser.advance(format!("charged line {line}\r\n").as_bytes());
+        }
+    }
+    app.__test_force_retention_sample();
+
+    let source_owner = app.__test_pane_owner(main, pane_id).expect("source pane owner");
+    let source_charges = app.__test_pane_charges(main, pane_id).expect("source charges");
+    assert!(source_charges.contains_key(&ResourceClass::GridVisible));
+    assert!(source_charges.contains_key(&ResourceClass::GridHistory));
+    let destination_window_owner =
+        app.__test_window_owner(destination).expect("destination window owner");
+    let process_before = app.__test_governor_snapshot_root().process_amount;
+    let restrictive = sonicterm_types::OwnerLimits {
+        owner_bytes: usize::MAX,
+        class_bytes: enum_map::enum_map! {
+            ResourceClass::GridHistory => 0,
+            _ => usize::MAX,
+        },
+        class_items: enum_map::enum_map! { _ => None },
+    };
+    let provisional_id = app
+        .governor
+        .create_child(destination_window_owner, sonicterm_types::OwnerKind::AppPane, restrictive)
+        .expect("create restrictive provisional owner");
+    let provisional = crate::app::OwnerGuard::new(app.governor.clone(), provisional_id);
+
+    let result = {
+        let pane = app
+            .windows
+            .get_mut(&main)
+            .and_then(|window| window.panes.get_mut(&pane_id))
+            .expect("source pane");
+        crate::app::install_transferred_pane_owner(pane, provisional)
+    };
+
+    assert!(result.is_err(), "the GridHistory target limit must reject the batch");
+    assert_eq!(app.__test_pane_owner(main, pane_id), Some(source_owner));
+    assert_eq!(app.__test_pane_charges(main, pane_id), Some(source_charges));
+    assert!(!app.__test_owner_is_open(provisional_id), "the empty provisional owner must close");
+    assert!(
+        app.__test_owner_is_open(destination_window_owner),
+        "a pane-owner rejection must not close its existing destination window"
+    );
+    assert_eq!(app.__test_governor_snapshot_root().process_amount, process_before);
 }
 
 /// A slow transfer survives the wakes that arrive inside one interval.

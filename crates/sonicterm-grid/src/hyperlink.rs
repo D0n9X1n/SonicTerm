@@ -11,38 +11,8 @@ use std::collections::{HashMap, HashSet};
 pub use sonicterm_types::HyperlinkId;
 // Rejection vocabulary is shared, not redefined here: a caller that matches on
 // it must be able to use the same variants across every admission point.
+use sonicterm_types::retained_hash_table_bytes;
 pub use sonicterm_types::AdmissionRejection;
-
-/// Buckets a hashbrown table allocates to hold `capacity` entries.
-///
-/// The table grows to a power of two and keeps one eighth of it free, so a map
-/// reporting capacity for 16,384 entries has 28,672 buckets behind it.
-fn buckets_for(capacity: usize) -> usize {
-    if capacity == 0 {
-        // When: `capacity == 0`, no hash table buckets are allocated.
-        return 0;
-    }
-    let mut buckets = 1usize;
-    while buckets - buckets / 8 < capacity {
-        buckets = buckets.saturating_mul(2);
-    }
-    buckets
-}
-
-/// Heap one hashbrown table holds: the `(K, V)` array, one control byte per
-/// bucket, and the trailing group replica.
-///
-/// `capacity * size_of::<(K, V)>()` alone understates it. That was the first
-/// correction made to this figure, and it was itself an undercount — by
-/// 524,320 bytes at 16,384 links, the same shape as the defect it was fixing.
-fn table_bytes_for<K, V>(capacity: usize) -> usize {
-    let buckets = buckets_for(capacity);
-    if buckets == 0 {
-        // When: `buckets == 0`, the table retains no entry or control-byte allocation.
-        return 0;
-    }
-    buckets.saturating_mul(std::mem::size_of::<(K, V)>()).saturating_add(buckets).saturating_add(16)
-}
 
 /// Maximum distinct OSC 8 links retained by one parser/grid.
 pub const MAX_HYPERLINKS: usize = 16 * 1024;
@@ -175,8 +145,10 @@ impl HyperlinkRegistry {
     /// the pointer addressed and not the table the pointer lived in. Capacity
     /// rather than length, because capacity is what the allocator is holding.
     fn table_bytes(&self) -> usize {
-        table_bytes_for::<(Option<String>, String), HyperlinkId>(self.by_key.capacity())
-            .saturating_add(table_bytes_for::<HyperlinkId, Hyperlink>(self.by_id.capacity()))
+        retained_hash_table_bytes::<(Option<String>, String), HyperlinkId>(self.by_key.capacity())
+            .saturating_add(retained_hash_table_bytes::<HyperlinkId, Hyperlink>(
+                self.by_id.capacity(),
+            ))
     }
 
     /// Drop every entry whose id is not in `live`, returning the number freed.

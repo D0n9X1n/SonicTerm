@@ -4,6 +4,11 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 prepare="$root/scripts/prepare-release-assets.py"
 
+python3 "$root/scripts/test-release-tool-pins.py"
+if command -v pwsh >/dev/null 2>&1; then
+  pwsh -NoLogo -NoProfile -File "$root/scripts/validate-windows-msi_tests.ps1"
+fi
+
 fail() {
   printf 'release asset test: %s\n' "$1" >&2
   exit 1
@@ -12,24 +17,24 @@ fail() {
 [[ -x "$prepare" ]] || fail "prepare-release-assets.py is missing or not executable"
 
 release_workflow="$root/.github/workflows/release.yml"
-linux_unit_job="$(python3 - "$release_workflow" <<'PY'
+linux_package_job="$(python3 - "$release_workflow" <<'PY'
 import pathlib
 import re
 import sys
 
 text = pathlib.Path(sys.argv[1]).read_text()
 matched = re.search(
-    r"(?ms)^  unit-tests-linux:\n.*?(?=^  [a-z][a-z0-9_-]*:\n|\Z)",
+    r"(?ms)^  package-linux:\n.*?(?=^  [a-z][a-z0-9_-]*:\n|\Z)",
     text,
 )
 if matched is None:
-    raise SystemExit("release workflow has no unit-tests-linux job")
+    raise SystemExit("release workflow has no package-linux job")
 print(matched.group(0), end="")
 PY
 )"
 for runtime_dependency in mesa-vulkan-drivers libvulkan1; do
-  grep -Fq -- "$runtime_dependency" <<<"$linux_unit_job" || \
-    fail "release Linux unit job is missing $runtime_dependency for adapter enumeration"
+  grep -Fq -- "$runtime_dependency" <<<"$linux_package_job" || \
+    fail "release Linux package job is missing $runtime_dependency for adapter enumeration"
 done
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/sonic-release-assets.XXXXXX")"
@@ -96,11 +101,52 @@ grep -Fq 'unregistered release-like files' "$tmp/unregistered.out" || \
   fail "unregistered asset failure was not actionable"
 rm "$dist/SonicTerm-v9.8.7-unregistered.deb"
 
-"$prepare" check-version --tag v1.2.8 --repo-root "$root" >/dev/null
+"$prepare" check-version --tag v1.3.0 --repo-root "$root" >/dev/null
 if "$prepare" check-version --tag v9.8.7 --repo-root "$root" >"$tmp/version.out" 2>&1; then
   fail "mismatched tag/workspace version was accepted"
 fi
 grep -Fq 'expects workspace version 9.8.7' "$tmp/version.out" || \
   fail "version mismatch failure was not actionable"
+
+fixture_repo="$tmp/repository"
+git init -q "$fixture_repo"
+printf 'release commit\n' > "$fixture_repo/source"
+git -C "$fixture_repo" add source
+git -C "$fixture_repo" -c user.name=fixture -c user.email=fixture@example.invalid \
+  commit -q -m fixture
+fixture_commit="$(git -C "$fixture_repo" rev-parse HEAD)"
+git -C "$fixture_repo" -c user.name=fixture -c user.email=fixture@example.invalid \
+  tag -a v9.8.7 -m fixture
+fixture_tag_object="$(git -C "$fixture_repo" rev-parse v9.8.7)"
+[[ "$fixture_tag_object" != "$fixture_commit" ]] || \
+  fail "annotated-tag fixture did not create a distinct tag object"
+resolved_commit="$(
+  "$prepare" resolve-commit --revision "$fixture_tag_object" --repo-root "$fixture_repo"
+)"
+[[ "$resolved_commit" == "$fixture_commit" ]] || \
+  fail "annotated tag object did not resolve to its release commit"
+
+ci_sha='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+successful_ci='{"workflow_runs":[{"id":42,"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","head_branch":"main","event":"push","status":"completed","conclusion":"success","html_url":"https://example.invalid/actions/runs/42"}]}'
+printf '%s\n' "$successful_ci" | \
+  "$prepare" check-main-ci --sha "$ci_sha" >"$tmp/main-ci.out"
+grep -Fq "$ci_sha" "$tmp/main-ci.out" || \
+  fail "successful main CI evidence did not name the exact SHA"
+
+for invalid_ci in \
+  '{"workflow_runs":[{"id":43,"head_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","head_branch":"main","event":"push","status":"completed","conclusion":"success"}]}' \
+  '{"workflow_runs":[{"id":44,"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","head_branch":"main","event":"push","status":"completed","conclusion":"failure"}]}' \
+  '{"workflow_runs":[{"id":45,"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","head_branch":"main","event":"pull_request","status":"completed","conclusion":"success"}]}' \
+  '{"workflow_runs":[{"id":46,"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","head_branch":"feature","event":"push","status":"completed","conclusion":"success"}]}'
+do
+  if printf '%s\n' "$invalid_ci" | \
+    "$prepare" check-main-ci --sha "$ci_sha" >"$tmp/main-ci-invalid.out" 2>&1
+  then
+    fail "non-matching CI evidence was accepted for the release SHA"
+  fi
+  grep -Fq "no completed successful main push CI run for $ci_sha" \
+    "$tmp/main-ci-invalid.out" || \
+    fail "invalid main CI evidence failure was not actionable"
+done
 
 printf 'release asset test: ok\n'

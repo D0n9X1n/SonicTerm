@@ -15,8 +15,6 @@ use crate::rasterizer::{
 };
 use crate::units::PixelLength;
 
-const TEXT_COVERAGE_EXPONENT: f32 = 1.20;
-
 pub struct DirectWriteRasterizer {
     face: FontFace,
     fallback: FreeTypeRasterizer,
@@ -117,13 +115,7 @@ impl DirectWriteRasterizer {
         for (src, dst) in
             texture.as_chunks::<3>().0.iter().zip(data.as_chunks_mut::<4>().0.iter_mut())
         {
-            let r = enhance_text_coverage(src[0]);
-            let g = enhance_text_coverage(src[1]);
-            let b = enhance_text_coverage(src[2]);
-            dst[0] = r;
-            dst[1] = g;
-            dst[2] = b;
-            dst[3] = r.max(g).max(b);
+            *dst = directwrite_coverage_pixel(*src);
         }
 
         Ok(RasterizedGlyph {
@@ -150,13 +142,8 @@ impl FontRasterizer for DirectWriteRasterizer {
     }
 }
 
-fn enhance_text_coverage(coverage: u8) -> u8 {
-    if coverage == 0 || coverage == u8::MAX {
-        // When: `coverage` is an endpoint, the contrast curve cannot change the byte.
-        return coverage;
-    }
-    let c = coverage as f32 / 255.0;
-    ((1.0 - (1.0 - c).powf(TEXT_COVERAGE_EXPONENT)) * 255.0).round().clamp(0.0, 255.0) as u8
+fn directwrite_coverage_pixel([red, green, blue]: [u8; 3]) -> [u8; 4] {
+    [red, green, blue, red.max(green).max(blue)]
 }
 
 #[cfg(test)]

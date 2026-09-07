@@ -2,6 +2,8 @@
 # Exercise portable and Debian packages on X11 and Wayland with lavapipe.
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 usage() {
   printf 'usage: %s <tar.gz> <deb>\n' "$0" >&2
   exit 2
@@ -17,7 +19,7 @@ deb="$2"
   exit 1
 }
 
-for command in dpkg dpkg-query tar timeout Xvfb xdpyinfo weston; do
+for command in dpkg dpkg-query python3 tar Xvfb xdpyinfo weston; do
   command -v "$command" >/dev/null 2>&1 || {
     printf 'required smoke tool is missing: %s\n' "$command" >&2
     exit 1
@@ -87,8 +89,11 @@ run_smoke() {
   mkdir -p "$state_dir"
 
   set +e
-  SONICTERM_RUNTIME_SMOKE_DIR="$state_dir" timeout --signal=TERM 45s \
-    "$binary" --runtime-smoke >"$log" 2>&1
+  python3 "$ROOT/scripts/native-smoke-runner.py" \
+    --timeout-seconds 45 \
+    --state-dir "$state_dir" \
+    --log-file "$log" \
+    -- "$binary" --runtime-smoke
   local status=$?
   set -e
   if [[ $status -ne 0 ]]; then

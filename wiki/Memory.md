@@ -29,6 +29,14 @@ are in [Logging](Logging).
 | Image atlas | 1×1 placeholder; 2048×2048 BGRA8 only while media is active | skip older images when full; release to placeholder after 240 media-free frames |
 | Windows software frame | axis ≤ 16,384; total ≤ 160 MiB | reject construction or resize and preserve the old valid allocation |
 | Pane command events | 1,024 events | drop the oldest and shrink retained vector capacity |
+| Crash event history | 50 records; 4 KiB owned variable payload per record including a target up to 256 bytes; 64 KiB aggregate variable retention | format within the bound and evict oldest records for both count and bytes |
+| Panic text | 4 KiB each for the dump payload and rendered summary | truncate at UTF-8 boundaries, including the marker within the bound |
+
+Crash-history payloads retain exact-sized owned strings rather than spare
+string capacity. Fixed record metadata is separately bounded by record count;
+backtraces, the chained panic hook, and allocations inside arbitrary producer
+formatters are outside the variable-retention bound. Admission and payload
+exclusions are described on [Logging](Logging).
 
 The inline-media figure is deliberately stated as a process **target**, not an
 absolute 256 MiB ceiling. Every pane must keep its newest image, and one decoded
@@ -48,6 +56,14 @@ The grid’s approximate 24 MiB figure is also one shared bound, not “24 MiB o
 scrollback plus the visible screen.” `[terminal].scrollback` sets a row limit;
 cell count and retained bytes can bind first when rows carry hyperlinks,
 combining marks, or non-default underline metadata.
+
+`CSI 3 J` releases active primary history and excess history-container capacity
+without lowering either configured history limit. It resets the budget-check
+cadence only for that explicit erasure; ordinary FIFO row reuse retains the
+512-scroll cadence. History-prefix removal updates exact eviction identity and
+prompt coordinates, including prompts stored with the saved primary. Shrinking
+columns repairs only a clipped wide lead at each new row edge, preserving
+compact runs and existing capacity hysteresis rather than flattening history.
 
 ### Ownership model
 
@@ -73,12 +89,19 @@ on `ProcessKind` and are checked at creation. An owner moves from `Open` to
 `Closing` to `Closed`; closing stops new children and reservations, and final
 close requires zero live children and charges.
 
-A window and its owner are inserted as one operation. Panes are reconciled under
-their actual window on pane creation and every 30 s retention pass. Tab transfer
-reattributes pane ownership to the destination window and closes the old pane
-owner. If window registration fails, the window remains usable but its subtree
-is omitted from hierarchy accounting. If pane registration fails, a later
-reconcile can retry it while the window has an owner.
+A window and its owner are inserted as one operation. Shared topology completion
+registers ownerless panes in main and child windows; every 30 s retention pass
+also reconciles them. Tab transfer prepares destination pane owners, moves all
+existing charges for every moved pane in one atomic `transfer_many` operation,
+then swaps guards and closes the empty source owners. Process and per-class
+totals stay unchanged, even with contended parsers. A refusal removes provisional
+owners and restores the entire source tab, including its original charges and
+live PTYs, before any source window can be reaped.
+
+If window registration fails, that window remains usable outside hierarchy
+accounting. Only panes without nonzero charges can enter that unregistered
+state; an already charged tab cannot silently lose its accounting on transfer.
+Failed pane registration can be retried while the window has an owner.
 
 ### Enforcement and the pane tripwire
 
@@ -87,27 +110,27 @@ its own limit. The GUI governor uses unlimited process and
 per-class limits, and window owners are tracking-only. This avoids maintaining a
 second set of process limits that can drift from the code doing the allocation.
 
-Each `AppPane` owner does have one committed-byte tripwire. It is derived from
-the actual seam constants:
+Each `AppPane` owner does have one committed-byte tripwire. The typed
+`pane_seam_cap_terms()` inventory contains every charged pane class exactly
+once. Because visible, history, and saved-primary cells share one grid bound,
+`GridVisible` carries that cap while `GridHistory` and `GridAlternate` carry
+zero. `ParserCapture` carries both parser caps, and PTY input carries its queue
+cap once:
 
 ```text
-PANE_SEAM_CAP_SUM_BYTES =
-    MAX_GRID_CELLS × size_of::<Cell>()
-  + MAX_RETAINED_INLINE_IMAGE_BYTES
-  + MAX_HYPERLINK_METADATA_BYTES
-  + MAX_MEDIA_PAYLOAD_BYTES
-  + MAX_ESCAPE_SEQUENCE_BYTES
-  + max_queued_output_ring_bytes()
-  + max_pty_queued_input_bytes()
-
+PANE_SEAM_CAP_SUM_BYTES = sum(pane_seam_cap_terms().bytes)
 PANE_COMMITTED_BUDGET_BYTES = 2 × PANE_SEAM_CAP_SUM_BYTES
 ```
 
 The factor of 2 leaves room for allocator capacity, amortized overshoot, and the
 newest-image residual. It is a backstop for a seam that stopped bounding or
-under-reported its retention, not a second normal allocation policy. Pane
-charges are remeasured and moved to committed reservations every retention pass;
-they are not accumulated from historical events.
+under-reported its retention, not a second normal allocation policy. Each
+retention pass settles existing charges through failure-atomic `try_resize`,
+including mixed bytes/items changes. Admission checks the final replacement
+amount, not an intermediate peak. Any growing axis requires open ancestors;
+reductions can settle during close. A refused sample keeps the old charge, so
+accounting may lag retained memory until another successful sample. Snapshots
+are observational, not a globally linearizable total.
 
 ### What is counted
 
@@ -131,13 +154,23 @@ Renderer memory is separate because it is window-owned rather than pane-owned:
 
 - `glyph_atlas_bytes`: CPU glyph atlas capacity;
 - `image_atlas_bytes`: CPU inline-image atlas capacity;
+- `row_glyph_cache_bytes` / `row_glyph_cache_items`: hash-table backing, cached
+  glyph instances, underline runs, tofu geometry, missing characters, and row count;
+- `row_quad_cache_bytes` / `row_quad_cache_items`: hash-table backing, cached
+  background/decoration quad vectors, and row count;
 - `software_frame_bytes`: Windows CPU/GDI frame, zero elsewhere.
 
 These are host-memory copies. GPU textures and buffers are not included because
-the driver owns them and wgpu does not expose their sizes. Every visible and
-warm renderer is listed. `live_renderers` comes from an independent process-wide
-counter; a count larger than the listed renderer set indicates a live renderer
-that is no longer reachable from window topology.
+the driver owns them and wgpu does not expose their sizes. Row-cache reports use
+allocated table and nested-vector capacity, not live length. Table capacity is
+sticky across ordinary clear/retain operations; when a pane leaves a renderer,
+SonicTerm removes that pane's glyph rows and then quad rows in one event-loop
+operation, preserves peer entries, and requests table compaction. Nested payload
+and item counts fall immediately, while the table allocator may retain its
+current bucket class. Every visible and warm renderer is listed.
+`live_renderers` comes from an independent process-wide counter; a count larger
+than the listed renderer set indicates a live renderer that is no longer
+reachable from window topology.
 
 ### Aggregate snapshot
 
@@ -268,6 +301,12 @@ SonicTerm 在真正拥有内存的子系统边界实施限制，再按窗格、�
 | 图像图集 | 默认 1×1 占位符；仅媒体活跃时使用 2048×2048 BGRA8 | 填满时跳过较早图像；连续 240 个无媒体帧后释放为占位符 |
 | Windows 软件帧 | 任一轴 ≤ 16,384；总量 ≤ 160 MiB | 拒绝创建或调整尺寸，并保留旧的有效分配 |
 | 窗格命令事件 | 1,024 个事件 | 丢弃最早事件并缩小向量容量 |
+| 崩溃事件历史 | 50 条记录；每条自有可变负载最多 4 KiB，其中 target 最多 256 字节；可变保留量合计最多 64 KiB | 格式化时限制大小，并按条数和字节上限淘汰最早记录 |
+| Panic 文本 | dump 负载和格式化摘要各最多 4 KiB | 在 UTF-8 边界截断，标记也计入上限 |
+
+崩溃历史负载保留精确长度的自有字符串，不额外保留字符串空闲容量。固定记录元数据另受记录
+数量限制；backtrace、串联 panic hook，以及任意生产端 formatter 内的分配都不在可变保留量
+上限内。接纳与负载排除规则见[日志](Logging)。
 
 内联媒体的 256 MiB 被准确称为进程**目标**，不是绝对上限。每个窗格都必须保留最新
 图像，而单张已解码图像最多 4 MiB。因此受压时可陈述的总上限为：
@@ -283,6 +322,12 @@ SonicTerm 在真正拥有内存的子系统边界实施限制，再按窗格、�
 网格约 24 MiB 的数值同样是一个共享上限，不是“回滚 24 MiB 再加可见屏幕”。
 `[terminal].scrollback` 设置行数上限；带超链接、组合字符或非默认下划线元数据的行更大，
 因此单元格数量或保留字节可能先达到上限。
+
+`CSI 3 J` 会释放活动主屏幕历史和多余的历史容器容量，不降低用户请求的历史上限或
+实际配置上限。只有这次显式擦除会重置预算检查计数；普通 FIFO 行复用仍保持每 512 次
+滚动的检查节奏。历史前缀删除会更新精确淘汰身份和提示符坐标，包括随主屏幕保存的提示符。
+缩小列数只修复每行新右边界被截断的宽字符首格，保留紧凑游程和现有容量滞后策略，
+不会为检查边界而展开整段历史。
 
 ### 所有权模型
 
@@ -305,34 +350,35 @@ flowchart TD
 所有者状态从 `Open` 变为 `Closing`，再变为 `Closed`；进入 `Closing` 后不再接纳新子节点
 和新预留，最终关闭要求没有存活子节点和记账额。
 
-窗口插入与其所有者注册是同一个操作。窗格创建时和每次 30 s 保留量扫描时，都会把窗格
-协调到实际窗口下面。标签页转移会把窗格所有权重新归到目标窗口，并关闭旧窗格所有者。
-若窗口注册失败，窗口仍可使用，但整个子树不会出现在层级记账中。若窗格注册失败，只要
-窗口已有所有者，之后的协调扫描仍可重试。
+窗口插入与其所有者注册是同一个操作。共享拓扑完成步骤会注册主窗口和子窗口中的无所有者
+窗格，每次 30 s 保留量扫描也会协调它们。标签页转移先准备目标窗格所有者，通过一次原子的
+`transfer_many` 移动所有转移窗格的全部现有计费，再替换守卫并关闭已清空的源所有者。即使
+解析器锁被占用，进程和分类总量也不变。拒绝时释放临时所有者，完整恢复源标签页、原有计费和
+存活 PTY，之后才可能执行源窗口回收。
+
+窗口注册失败时，该窗口仍可在层级记账之外使用。只有没有非零计费的窗格才能进入这种未注册
+状态；已计费标签页不能在转移时悄悄丢失记账。只要窗口具有所有者，失败的窗格注册仍可重试。
 
 ### 限制执行与窗格绊线
 
 每个接缝（即网格、解析器或 PTY 队列这样的所有权边界）负责执行自己的上限。GUI 治理器的进程和按类别上限为无限，窗口所有者也只用于
 跟踪。这样不会再维护一套可能与实际分配代码漂移的进程级限制。
 
-每个 `AppPane` 所有者仍有一个已提交字节绊线。它直接由实际接缝常量计算：
+每个 `AppPane` 所有者仍有一个已提交字节绊线。类型化的
+`pane_seam_cap_terms()` 清单让每个实际计费的窗格类别恰好出现一次。可见区、历史区与已保存
+主屏幕共用同一个网格上限，因此由 `GridVisible` 携带该值，`GridHistory` 与
+`GridAlternate` 携带零；`ParserCapture` 同时携带两个解析器上限；PTY 输入的队列上限只计一次：
 
 ```text
-PANE_SEAM_CAP_SUM_BYTES =
-    MAX_GRID_CELLS × size_of::<Cell>()
-  + MAX_RETAINED_INLINE_IMAGE_BYTES
-  + MAX_HYPERLINK_METADATA_BYTES
-  + MAX_MEDIA_PAYLOAD_BYTES
-  + MAX_ESCAPE_SEQUENCE_BYTES
-  + max_queued_output_ring_bytes()
-  + max_pty_queued_input_bytes()
-
+PANE_SEAM_CAP_SUM_BYTES = sum(pane_seam_cap_terms().bytes)
 PANE_COMMITTED_BUDGET_BYTES = 2 × PANE_SEAM_CAP_SUM_BYTES
 ```
 
 系数 2 为分配器容量、摊销过冲和最新图像余量留出空间。它用于发现某个接缝已经停止
-设限或少报保留量，不是正常分配的第二套策略。每次保留量扫描都会重新测量窗格记账额，
-并移动到已提交预留；不会从历史事件不断累加。
+设限或少报保留量，不是正常分配的第二套策略。每次保留量扫描通过失败原子的 `try_resize`
+结算已有计费，包括字节和条目反向变化的情况。准入检查最终替换量，而不是中间峰值。
+任一维增长都要求祖先开放；纯减少可在关闭期间结算。拒绝采样时保留旧计费，因此总账可能
+落后于实际保留量，直到后续采样成功。快照只供观察，不是全局线性化的总量。
 
 ### 记账内容
 
@@ -356,11 +402,19 @@ PANE_COMMITTED_BUDGET_BYTES = 2 × PANE_SEAM_CAP_SUM_BYTES
 
 - `glyph_atlas_bytes`：CPU 字形图集容量；
 - `image_atlas_bytes`：CPU 内联图像图集容量；
+- `row_glyph_cache_bytes` / `row_glyph_cache_items`：哈希表后备存储、缓存字形实例、
+  下划线段、tofu 几何、缺失字符和缓存行数；
+- `row_quad_cache_bytes` / `row_quad_cache_items`：哈希表后备存储、缓存背景/装饰
+  quad 向量和缓存行数；
 - `software_frame_bytes`：Windows CPU/GDI 帧，其它平台为零。
 
 这些都是主机内存副本。GPU 纹理与缓冲不在其中，因为显卡驱动拥有它们，wgpu 也不提供
-大小。报告会列出所有可见和预热渲染器。`live_renderers` 来自独立的进程级计数器；若该
-计数大于可列出的渲染器集合，说明有一个仍存活但已无法从窗口拓扑访问的渲染器。
+大小。行缓存报告按已分配的哈希表与嵌套向量容量计算，而不是按当前长度。普通 clear/retain
+后表容量具有粘性；窗格离开渲染器时，SonicTerm 会在同一个事件循环操作中先删除该窗格的
+字形行，再删除 quad 行，保留其它窗格的条目并请求压紧表。嵌套负载和条目数会立即下降，
+但表分配器可以保留当前 bucket 档位。报告会列出所有可见和预热渲染器。
+`live_renderers` 来自独立的进程级计数器；若该计数大于可列出的渲染器集合，说明有一个
+仍存活但已无法从窗口拓扑访问的渲染器。
 
 ### 聚合快照
 

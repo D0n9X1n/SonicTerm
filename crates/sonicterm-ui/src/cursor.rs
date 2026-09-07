@@ -86,3 +86,7 @@ pub fn phase_bucket(elapsed: Duration, enabled: bool) -> u8 {
 pub fn redraw_interval() -> Duration {
     Duration::from_millis(BLINK_PERIOD_MS / PHASE_BUCKETS as u64)
 }
+
+#[cfg(test)]
+#[path = "cursor_tests.rs"]
+mod cursor_tests;

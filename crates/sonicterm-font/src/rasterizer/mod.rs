@@ -134,6 +134,7 @@ pub(crate) fn swap_red_and_blue<Container: std::ops::Deref<Target = [u8]> + std:
     }
 }
 
+/// Crop to half-open ink bounds, preserving full dimensions when the image is blank.
 pub(crate) fn crop_to_non_transparent<Container>(
     image: &mut image::ImageBuffer<Rgba<u8>, Container>,
 ) -> image::SubImage<&mut ImageBuffer<Rgba<u8>, Container>>
@@ -181,8 +182,8 @@ where
 
     let first_col = first_col.unwrap_or(0) as u32;
     let first_line = first_line.unwrap_or(0) as u32;
-    let last_col = last_col.unwrap_or(width as usize) as u32;
-    let last_line = last_line.unwrap_or(height as usize) as u32;
+    let last_col = last_col.map_or(width, |x| x as u32 + 1);
+    let last_line = last_line.map_or(height, |y| y as u32 + 1);
 
     image::imageops::crop(
         image,

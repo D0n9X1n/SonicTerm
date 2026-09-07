@@ -13,7 +13,10 @@ use anyhow::{Context, Result};
 use winit::event_loop::{ControlFlow, EventLoop, EventLoopProxy};
 
 use crate::app::os_drag::OsTabDragBackend;
-use crate::app::{App, KeymapLoader, RuntimeSmokeFailure, ThemeLoader, UserEvent};
+use crate::app::{
+    identity_config_normalizer, App, ConfigNormalizer, KeymapLoader, RuntimeSmokeFailure,
+    RuntimeSmokeSpec, ThemeLoader, UserEvent,
+};
 use crate::os_drag::{OsDragSink, TabPayload};
 use crate::ProcessPrivilege;
 use sonicterm_app_core::AppStateMachine;
@@ -26,6 +29,7 @@ struct ShellRunner {
     theme: Theme,
     config: Config,
     keymap: Keymap,
+    config_normalizer: ConfigNormalizer,
     theme_loader: Option<ThemeLoader>,
     keymap_loader: Option<KeymapLoader>,
     os_drag_sink: Option<Arc<dyn OsDragSink>>,
@@ -44,6 +48,7 @@ impl ShellRunner {
             theme,
             config,
             keymap,
+            config_normalizer: identity_config_normalizer(),
             theme_loader: None,
             keymap_loader: None,
             os_drag_sink: None,
@@ -63,12 +68,17 @@ impl ShellRunner {
     }
 
     fn into_app(self, proxy: EventLoopProxy<UserEvent>) -> App {
-        let mut app = App::new_with_proxy_and_machine(
+        self.into_app_with_proxy(Some(proxy))
+    }
+
+    fn into_app_with_proxy(self, proxy: Option<EventLoopProxy<UserEvent>>) -> App {
+        let mut app = App::new_with_proxy_machine_and_normalizer(
             self.theme,
             self.config,
             self.keymap,
-            Some(proxy),
+            proxy,
             self.machine,
+            self.config_normalizer,
         );
         app.set_process_privilege(self.process_privilege);
         if let Some(recorder) = self.breadcrumb_recorder {
@@ -108,10 +118,14 @@ impl ShellRunner {
         Ok(())
     }
 
-    fn run_smoke(mut self, timeout: Duration) -> Result<(), RuntimeSmokeFailure> {
-        self.config.terminal.shell = Some("/bin/sh".to_string());
-        self.config.window.warm_window_pool = 0;
+    fn run_smoke(
+        mut self,
+        spec: RuntimeSmokeSpec,
+        timeout: Duration,
+    ) -> Result<(), RuntimeSmokeFailure> {
+        self.config.terminal.shell = Some(spec.shell_program().to_string());
         crate::app::init_tracing_public();
+        let renderer_baseline = sonicterm_gpu::core::live_renderer_count();
         let event_loop = EventLoop::<UserEvent>::with_user_event()
             .build()
             .map_err(|_| RuntimeSmokeFailure::EventLoop)?;
@@ -119,7 +133,7 @@ impl ShellRunner {
         let proxy = event_loop.create_proxy();
         Self::install_bridges(&proxy);
         let mut app = self.into_app(proxy.clone());
-        app.install_runtime_smoke(std::process::id());
+        app.install_runtime_smoke(&spec, renderer_baseline);
 
         let (cancel_tx, cancel_rx) = std::sync::mpsc::sync_channel(1);
         let watchdog = std::thread::Builder::new()
@@ -132,14 +146,30 @@ impl ShellRunner {
                     // When: `matches!(cancel_rx.recv_timeout(timeout), Err(RecvTimeoutError::Timeout))` is true, classify the active boundary.
                     let _ = proxy.send_event(UserEvent::RuntimeSmokeTimeout);
                 }
-            })
-            .map_err(|_| RuntimeSmokeFailure::EventLoop)?;
+            });
 
-        let run_result = event_loop.run_app(&mut app);
-        let _ = cancel_tx.send(());
-        let _ = watchdog.join();
-        run_result.map_err(|_| RuntimeSmokeFailure::EventLoop)?;
-        app.runtime_smoke_result()
+        let result = match watchdog {
+            Ok(watchdog) => {
+                // When: `watchdog` started, run the event loop and join the bounded monitor before teardown.
+                let run_result = event_loop.run_app(&mut app);
+                let _ = cancel_tx.send(());
+                let _ = watchdog.join();
+                if run_result.is_err() {
+                    // Classify an event-loop error before the shared teardown and renderer-baseline check.
+                    Err(RuntimeSmokeFailure::EventLoop)
+                } else {
+                    // When: `run_result` succeeded, preserve the app's more specific smoke outcome.
+                    app.runtime_smoke_result()
+                }
+            }
+            Err(_) => Err(RuntimeSmokeFailure::EventLoop),
+        };
+        drop(app);
+        if sonicterm_gpu::core::live_renderer_count() != renderer_baseline {
+            // When: `live_renderer_count()` differs from `renderer_baseline`, App teardown leaked a renderer.
+            return Err(RuntimeSmokeFailure::WarmLifecycle);
+        }
+        result
     }
 }
 
@@ -226,6 +256,15 @@ impl MacShell {
     pub fn run(self) -> Result<()> {
         self.runner.run()
     }
+
+    /// Run the bounded macOS smoke through window, renderer, PTY, presentation, and warm lifecycle.
+    pub fn run_smoke(
+        self,
+        spec: RuntimeSmokeSpec,
+        timeout: Duration,
+    ) -> Result<(), RuntimeSmokeFailure> {
+        self.runner.run_smoke(spec, timeout)
+    }
 }
 
 /// Windows shell around the shared application runner.
@@ -304,6 +343,15 @@ impl WindowsShell {
     pub fn run(self) -> Result<()> {
         self.runner.run()
     }
+
+    /// Run the bounded Windows smoke through window, renderer, PTY, presentation, and warm lifecycle.
+    pub fn run_smoke(
+        self,
+        spec: RuntimeSmokeSpec,
+        timeout: Duration,
+    ) -> Result<(), RuntimeSmokeFailure> {
+        self.runner.run_smoke(spec, timeout)
+    }
 }
 
 /// Linux shell around the shared application runner.
@@ -337,6 +385,19 @@ impl LinuxShell {
         self
     }
 
+    /// Install the Linux capability policy used by startup and reload.
+    #[must_use]
+    pub fn with_config_normalizer(mut self, normalizer: ConfigNormalizer) -> Self {
+        self.runner.config_normalizer = normalizer;
+        self
+    }
+
+    /// Build a headless app for startup-policy regression tests.
+    #[cfg(test)]
+    pub(crate) fn into_app_for_test(self) -> App {
+        self.runner.into_app_with_proxy(None)
+    }
+
     /// Install the nonblocking postmortem breadcrumb recorder.
     #[must_use]
     pub fn with_breadcrumb_recorder(
@@ -362,9 +423,13 @@ impl LinuxShell {
         self.runner.run()
     }
 
-    /// Run the bounded Linux package smoke through display, GPU, PTY, grid, and presentation.
-    pub fn run_smoke(self, timeout: Duration) -> Result<(), RuntimeSmokeFailure> {
-        self.runner.run_smoke(timeout)
+    /// Run the bounded Linux package smoke through window, renderer, PTY, presentation, and warm lifecycle.
+    pub fn run_smoke(
+        self,
+        spec: RuntimeSmokeSpec,
+        timeout: Duration,
+    ) -> Result<(), RuntimeSmokeFailure> {
+        self.runner.run_smoke(spec, timeout)
     }
 }
 

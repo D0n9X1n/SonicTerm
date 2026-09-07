@@ -1,11 +1,9 @@
 //! What a renderer retains on the CPU, reported per window.
 //!
-//! The renderer computes three real, measured host-side figures —
-//! `GpuRenderer::retained_amounts` reads the capacity of the glyph atlas, the
-//! image atlas, and (on Windows) the software presentation frame. Those figures
-//! were computed and read by nothing: the crate that owns them cannot depend on
-//! the governor, so the numbers stopped at the crate boundary and no report
-//! carried them.
+//! The renderer computes five real, measured host-side figures — glyph and
+//! image atlases, row glyph and quad caches, and (on Windows) the software
+//! presentation frame. The crate that owns them cannot depend on the governor,
+//! so the app reads and reports them without turning them into reservations.
 //!
 //! On the Windows software path the frame buffer is the largest single
 //! host-side buffer in the process, and it was invisible in exactly the report
@@ -37,7 +35,7 @@
 //! Reached only from the sampling path, behind both the `memory` debug-level
 //! gate and the thirty-second interval. A default session pays nothing: the
 //! level check short-circuits before this is reached. An investigating session
-//! pays three capacity reads per window every thirty seconds.
+//! pays five capacity reads per window every thirty seconds.
 //!
 //! Nothing here may move onto the per-wake path. `retained_amounts` is cheap
 //! today, but the sampling path is also what governs idle CPU, and an
@@ -53,11 +51,10 @@ use sonicterm_gpu::core::RendererRetention;
 /// procedures that read them, and iterating classes would additionally reuse
 /// the inline-media class name for atlas memory that is not a pane's media.
 ///
-/// `items` accompany the atlas byte figures because an atlas grows by resident
-/// entries: bytes alone say an atlas is large, while the entry count
-/// distinguishes a large glyph set from a small one held in an oversized
-/// allocation. The software frame carries no useful entry count — it is one
-/// buffer sized by the window — so only its bytes are reported.
+/// `items` accompany atlas and row-cache bytes because occupancy distinguishes
+/// live content from reusable capacity. The software frame carries no useful
+/// entry count — it is one buffer sized by the window — so only its bytes are
+/// reported.
 ///
 /// `role` distinguishes a renderer the user can see from one held ready in the
 /// warm pool. Both hold a full-size glyph atlas, but the remedy differs and a
@@ -74,6 +71,10 @@ pub fn emit_renderer_retention(label: &str, role: &str, retention: &RendererRete
         glyph_atlas_items = retention.glyph_atlas.items,
         image_atlas_bytes = retention.image_atlas.bytes,
         image_atlas_items = retention.image_atlas.items,
+        row_glyph_cache_bytes = retention.row_glyph_cache.bytes,
+        row_glyph_cache_items = retention.row_glyph_cache.items,
+        row_quad_cache_bytes = retention.row_quad_cache.bytes,
+        row_quad_cache_items = retention.row_quad_cache.items,
         software_frame_bytes = retention.software_frame.bytes,
         "renderer retention"
     );

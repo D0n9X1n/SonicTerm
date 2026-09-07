@@ -10,23 +10,21 @@
 //! overlay from them. The only consumer today is `app::App`, which feeds the
 //! drained commits straight into the active pane's PTY.
 
-/// Throttle for `Window::set_ime_cursor_area` calls.
-///
-/// macOS' InputMethodKit logs `error messaging the mach port for
-/// IMKCFRunLoopWakeUpReliable` whenever the host hammers the IME cursor
-/// area faster than the IMK runloop can drain its wake messages. The
-/// terminal renders every frame the cursor blinks or new bytes arrive,
-/// but the IME candidate window only needs to know the cell position
-/// when it actually changes. Track the last reported (row, col) and
-/// gate the winit call on a real move.
-///
-/// Render-agnostic — used by `app::App` to decide whether to call
-/// `set_ime_cursor_area`. Kept here (next to the rest of the IME state)
-/// so the unit test lives beside the state machine without dragging in
-/// a winit dependency.
+/// Physical terminal caret identity used to coalesce native IME notifications.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImeCursorArea {
+    /// Stable pane receiving terminal input.
+    pub pane_id: u64,
+    /// Window-relative physical pixel position.
+    pub position: (i32, i32),
+    /// Physical pixel extent of the caret cell.
+    pub size: (u32, u32),
+}
+
+/// Coalesce identical native IME anchors without hiding focus or physical geometry changes.
 #[derive(Debug, Default, Clone)]
 pub struct ImeCursorThrottle {
-    last: Option<(u16, u16)>,
+    last: Option<ImeCursorArea>,
 }
 
 impl ImeCursorThrottle {
@@ -38,23 +36,17 @@ impl ImeCursorThrottle {
         Self { last: None }
     }
 
-    /// Returns `true` if the (row, col) differs from the last accepted
-    /// position. Records the new position on `true`. Callers must only
-    /// invoke the underlying winit `set_ime_cursor_area` when this
-    /// returns `true`.
-    pub fn should_update(&mut self, row: u16, col: u16) -> bool {
-        if self.last == Some((row, col)) {
-            // When: `last` already matches this cell, suppress a duplicate native IME cursor update.
+    /// Record a changed pane or physical rectangle and report whether the native setter should run.
+    pub fn should_update(&mut self, area: ImeCursorArea) -> bool {
+        if self.last == Some(area) {
+            // When: `last` matches the same pane and physical rectangle, suppress duplicate native IME traffic.
             return false;
         }
-        self.last = Some((row, col));
+        self.last = Some(area);
         true
     }
 
-    /// Clear the recorded position so the next call always fires. Used
-    /// when the surface geometry changes (resize / DPI / font size) and
-    /// the IME needs to re-learn the cell position even though the
-    /// (row, col) integer pair is unchanged.
+    /// Forget the last terminal anchor after native focus or an overlay changes the text-input owner.
     pub fn reset(&mut self) {
         self.last = None;
     }
@@ -63,10 +55,9 @@ impl ImeCursorThrottle {
 /// Pure state machine driven by `winit::event::Ime` events.
 #[derive(Debug, Default, Clone)]
 pub struct ImeState {
-    /// True between an IME `Enabled` event and `Disabled`, OR while a
-    /// non-empty preedit string is in flight. While true, callers should
-    /// suppress regular `KeyboardInput` character forwarding so the
-    /// composition isn't double-typed.
+    /// True only while a non-empty preedit string is in flight. `Enabled`
+    /// alone leaves this false; while true, callers suppress regular
+    /// `KeyboardInput` forwarding so composition text is not typed twice.
     composing: bool,
     /// The current preedit string from the IME. Empty when not composing.
     preedit: String,

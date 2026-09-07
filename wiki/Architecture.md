@@ -40,11 +40,6 @@ The arrows show runtime flow, not every Cargo edge. `sonicterm-app` owns the
 live topology. `sonicterm-app-core` owns a separate backend-free state machine.
 `sonicterm-gpu` receives terminal and UI types through the render-model boundary.
 
-`sonicterm-mux` is a separate `sonic-mux` daemon and library. It owns persistent
-PTY sessions, length-prefixed protocol frames, and a 256 KiB per-pane replay
-ring. The GUI does not start or attach to it. Its only first-party crate
-dependency is `sonicterm-io`.
-
 ### Crate boundaries
 
 | Boundary | Owns | Excludes |
@@ -83,24 +78,29 @@ Each `TabState` owns a `PaneTree`, its active pane id, search state, and command
 status. Each `PaneState` owns its parser, optional `PtyHandle`, redraw target,
 terminal-mode atomics, inline images, and resource charges.
 
-`AppStateMachine` owns backend-free `AppState`. `handle` reduces one `AppIntent`
-and returns a stable class-sorted batch of `AppEffect`. This state is
-authoritative for values held in `AppState`. Live winit windows, `PaneTree`
-objects, parser locks, and PTY handles remain authoritative in `App` and
-`WindowState`.
+`AppStateMachine` owns backend-free `AppState`. Its `handle` method reduces one
+`AppIntent` into a stable class-sorted effect batch. In the GUI, all of that
+state is observational: no reducer counter, focus value, or overlay flag decides
+live topology. `App::observe_intent` keeps those compatibility observations but
+discards their effects. `App` and `WindowState` remain authoritative for live
+windows, tabs, pane trees, parser locks, renderers, and PTYs.
 
-The boundary dispatcher performs some effects directly. Other effects record a
-state-machine decision while a native app path performs the operation. For
-example, `PtyWrite`, `PtyClose`, clipboard writes, URL opening, redraw requests,
-and quit requests have operational handlers. `ChildSpawn`, several window
-operations, timers, and menu updates are currently record or bridge signals.
+`App::dispatch_intent` separately handles supported explicit-target work.
+Operational window effects resolve a monotonic `WindowKey` against a live window;
+missing, removed, and zero keys never select main or frontmost. Native input
+resolves its source window's active pane and writes through the bounded PTY queue
+without a transient state machine. Record-only effects cannot claim native
+completion. The full state/intent/effect inventory is in
+[Runtime Lifecycle](Runtime-Lifecycle).
 
 ### Boundary contracts
 
 #### Intent and effect
 
-`App::dispatch_intent` calls `AppStateMachine::handle`, then
-`App::dispatch_effects`. Effect classes keep this stable order:
+`AppStateMachine::handle` preserves the backend-free reducer/effect contract.
+`App::observe_intent` records compatibility transitions without executing their
+batch; supported operational intents and explicit effects cross the live app
+boundary separately. Reducer effect classes keep this stable order:
 
 1. `PtyWrite`;
 2. `Render`;
@@ -137,8 +137,9 @@ inline images. Production `GpuRenderer::render` receives that pane slice plus
 explicit theme, selection, tabs, search, palette, IME, notification, and hovered
 URL arguments.
 
-`RenderInputs` and the `Painter` trait remain public render-model types, but the
-production renderer call does not use them.
+`RenderInputs` remains a public render-model type. The two public `Painter`
+traits are dormant source-compatibility seams with no production implementation;
+production rendering uses `PaneRender` and `WeztermPipeline` directly.
 
 #### Fonts
 
@@ -160,9 +161,10 @@ The three shipping binaries share `ShellRunner` through `MacShell`,
   AppKit window hooks.
 - Windows owns per-monitor-v2 DPI setup, `muda` menus, DWM backdrop work, OLE
   drag/drop, and GDI software presentation hooks.
-- Linux owns X11/Wayland application identity, package assets, font preflight,
-  and the package runtime smoke. Native menus, desktop notifications, material
-  backdrops, and cross-process tab drag are absent there.
+- Linux owns X11/Wayland application identity, package assets, and font preflight.
+  All platform binaries expose the shared native runtime smoke; Linux package
+  layouts additionally run it on X11 and Wayland. Native menus, desktop
+  notifications, material backdrops, and cross-process tab drag are absent there.
 
 All reusable keyboard, terminal, pane, and renderer behavior stays in shared
 crates.
@@ -188,13 +190,13 @@ and release rules.
   whole frame.
 - A tab transfer moves each live `PaneState` and `PtyHandle`. It changes the
   shared redraw `WindowId`; it does not clone or restart the shell.
-- Dropping `PtyHandle` starts bounded process and I/O teardown. The typed
-  `transfer_tab` path checks source bounds and destination-window existence
-  before detaching. Direct drag-merge can still lose a pane if its existing
-  destination disappears after detachment. New-window tear-out instead owns the
-  detached tab as a transaction: destination setup failure restores the source
-  index, active-tab identity, panes, and live `PtyHandle` without resizing or
-  reattributing them.
+- Dropping `PtyHandle` starts bounded process and I/O teardown. Existing-window
+  transfers validate destination readiness and retain detached custody until
+  attachment commits. Direct drag-merge uses this same boundary. Destination
+  setup, topology, or charge-admission refusal restores source order, focus,
+  tree/zoom, live PTYs, sizes, and charges. New-window tear-out prepares hidden
+  native artifacts and transfers accounting before revealing the destination;
+  source hiding or reaping happens only after commitment.
 - Terminal mutations mark damage in the same frame. Cache invalidation follows
   font, scale, theme, surface, atlas, and topology changes.
 
@@ -213,7 +215,6 @@ The exact safety conditions are in
 | rendering | render model, engine, text, types, and block glyphs feed `sonicterm-gpu` |
 | app | app core, terminal, UI, rendering, logging, and resource crates feed `sonicterm-app` |
 | platform | `sonicterm-app` feeds `sonicterm-mac`, `sonicterm-windows`, and `sonicterm-linux` |
-| mux | `sonicterm-io` feeds the separate `sonicterm-mux` daemon; no GUI edge exists |
 
 ### Source map
 
@@ -229,7 +230,6 @@ The exact safety conditions are in
 | Font adapter | `crates/sonicterm-engine/src/fontstack.rs` |
 | Resource governor and app charging | `crates/sonicterm-resource/src/`, `crates/sonicterm-app/src/app/retention.rs` |
 | Platform entry points | `crates/sonicterm-{mac,windows,linux}/src/main.rs` |
-| Mux daemon | `crates/sonicterm-mux/src/{main,server,proto,frame}.rs` |
 
 ## 中文
 
@@ -270,10 +270,6 @@ flowchart TD
 `sonicterm-app-core` 持有另一套不依赖后端的状态机。`sonicterm-gpu` 通过渲染模型边界
 接收终端和界面类型。
 
-`sonicterm-mux` 是独立的 `sonic-mux` 守护进程和库。它持有持久 PTY 会话、
-带长度前缀的协议帧，以及每窗格 256 KiB 的回放环形缓冲区。图形界面不会启动或连接它。
-它在第一方 crate 中只依赖 `sonicterm-io`。
-
 ### Crate 边界
 
 | 边界 | 负责 | 不负责 |
@@ -312,20 +308,23 @@ crate 中身份不变的类型。
 `PaneState` 持有解析器、可选 `PtyHandle`、重绘目标、终端模式原子值、内联图像和
 资源计费令牌。
 
-`AppStateMachine` 持有不依赖后端的 `AppState`。`handle` 归约一个 `AppIntent`，
-返回按类别稳定排序的一批 `AppEffect`。`AppState` 中的值以这套状态为准。
-实时 winit 窗口、`PaneTree`、解析器锁和 PTY 句柄仍以 `App` 与 `WindowState` 为准。
+`AppStateMachine` 持有不依赖后端的 `AppState`；其 `handle` 方法把一个 `AppIntent`
+归约为按类别稳定排序的一批效果。在 GUI 中，这些状态全部只供观察：归约器计数、焦点值或
+浮层标志都不决定实时拓扑。`App::observe_intent` 保留兼容观察记录，但丢弃其效果。
+实时窗口、标签页、窗格树、解析器锁、渲染器与 PTY 始终以 `App` 和 `WindowState` 为准。
 
-边界派发器会直接执行一部分效果。另一些效果只记录状态机决定，实际操作由原生应用路径
-完成。例如，`PtyWrite`、`PtyClose`、写剪贴板、打开 URL、请求重绘和退出请求都有实际
-处理器。`ChildSpawn`、若干窗口操作、计时器和菜单更新目前只形成记录或桥接信号。
+`App::dispatch_intent` 单独处理受支持的显式目标工作。可执行的窗口效果把单调分配的
+`WindowKey` 解析为存活窗口；缺失、已移除或零 key 都不会选择主窗口或最前窗口。原生输入
+解析源窗口的活动窗格，直接通过有界 PTY 队列写入，不再构建临时状态机。只记录的效果不能
+声称原生操作已完成。完整的状态、意图与效果清单见[运行时生命周期](Runtime-Lifecycle)。
 
 ### 边界契约
 
 #### 意图与效果
 
-`App::dispatch_intent` 调用 `AppStateMachine::handle`，随后调用
-`App::dispatch_effects`。效果类别保持以下稳定顺序：
+`AppStateMachine::handle` 保留不依赖后端的归约器与效果契约。`App::observe_intent`
+记录兼容状态变化，但不执行其效果批次；受支持的可执行意图与显式效果单独跨越实时应用边界。
+归约器效果类别保持以下稳定顺序：
 
 1. `PtyWrite`；
 2. `Render`；
@@ -357,7 +356,8 @@ crate 中身份不变的类型。
 接收状态、滚动条透明度和内联图像。生产路径的 `GpuRenderer::render` 接收这组窗格，
 并通过独立参数接收主题、选区、标签页、搜索、命令面板、输入法、通知和悬停 URL。
 
-`RenderInputs` 和 `Painter` trait 仍是公开的渲染模型类型，但生产渲染调用没有使用它们。
+`RenderInputs` 仍是公开的渲染模型类型。两个公开的 `Painter` trait 都是没有生产实现的休眠
+源码兼容接缝；生产渲染直接使用 `PaneRender` 和 `WeztermPipeline`。
 
 #### 字体
 
@@ -374,8 +374,9 @@ macOS 使用 CoreText 发现字体，Windows 使用 GDI，Linux 使用 Fontconfi
 
 - macOS 负责 AppKit 菜单、关闭原生标签页、剪贴板拖动交接和 AppKit 窗口钩子。
 - Windows 负责 per-monitor-v2 DPI、`muda` 菜单、DWM 背景效果、OLE 拖放和 GDI 软件呈现钩子。
-- Linux 负责 X11/Wayland 应用标识、包内资源、字体预检和包运行冒烟测试。该平台没有原生
-  菜单、桌面通知、材质背景和跨进程标签页拖动。
+- Linux 负责 X11/Wayland 应用标识、包内资源和字体预检。所有平台二进制都暴露共享原生运行
+  smoke；Linux 包布局还会在 X11 与 Wayland 上运行它。该平台没有原生菜单、桌面通知、材质
+  背景和跨进程标签页拖动。
 
 可复用的键盘、终端、窗格和渲染行为都留在共享 crate 中。
 
@@ -395,10 +396,10 @@ macOS 使用 CoreText 发现字体，Windows 使用 GDI，Linux 使用 Fontconfi
 - 渲染路径不会阻塞等待解析器。任一必需锁不可用时，整帧都会推迟。
 - 转移标签页会移动每个存活的 `PaneState` 和 `PtyHandle`。代码只修改共享重绘
   `WindowId`，不会复制或重启 shell。
-- 析构 `PtyHandle` 会开始有时限的进程与 I/O 清理。类型化 `transfer_tab` 路径会在移除前
-  检查源下标和目标窗口是否存在。直接拖动合并在移除后若现有目标消失，仍可能丢失窗格。
-  新窗口拆出则把已移除标签页作为事务持有；目标设置失败时会恢复源下标、活动标签页身份、
-  窗格和存活的 `PtyHandle`，且不会调整尺寸或重新归属所有者。
+- 析构 `PtyHandle` 会开始有时限的进程与 I/O 清理。现有窗口转移会验证目标就绪状态，并在
+  附加提交前持续持有已移除状态；直接拖动合并也使用同一边界。目标设置、拓扑或计费准入
+  被拒绝时，完整恢复源顺序、焦点、树/放大状态、存活 PTY、尺寸和计费。新窗口拆出先准备
+  隐藏的原生产物，并在显示目标前转移记账；只有提交后才隐藏或回收源窗口。
 - 终端修改在同一帧标记损伤区域。字体、缩放、主题、表面、图集和拓扑变化会使对应缓存失效。
 
 完整安全条件见 [架构内部机制](Architecture-Internals)。
@@ -415,7 +416,6 @@ macOS 使用 CoreText 发现字体，Windows 使用 GDI，Linux 使用 Fontconfi
 | 渲染 | 渲染模型、字体引擎、文本、公共类型和块字符输入 `sonicterm-gpu` |
 | 应用 | 应用核心、终端、界面、渲染、日志和资源 crate 输入 `sonicterm-app` |
 | 平台 | `sonicterm-app` 输入 `sonicterm-mac`、`sonicterm-windows` 和 `sonicterm-linux` |
-| 多路复用 | `sonicterm-io` 输入独立的 `sonicterm-mux` 守护进程；图形界面没有这条依赖边 |
 
 ### 源码索引
 
@@ -431,4 +431,3 @@ macOS 使用 CoreText 发现字体，Windows 使用 GDI，Linux 使用 Fontconfi
 | 字体适配器 | `crates/sonicterm-engine/src/fontstack.rs` |
 | 资源总账与应用计费 | `crates/sonicterm-resource/src/`、`crates/sonicterm-app/src/app/retention.rs` |
 | 平台入口 | `crates/sonicterm-{mac,windows,linux}/src/main.rs` |
-| 多路复用守护进程 | `crates/sonicterm-mux/src/{main,server,proto,frame}.rs` |

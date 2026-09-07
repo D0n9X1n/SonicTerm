@@ -2,7 +2,7 @@
 
 ## English
 
-This is the canonical map of the 24 Rust crates in the Cargo workspace. The root
+This is the canonical map of the 23 Rust crates in the Cargo workspace. The root
 `Cargo.toml` supplies their version, edition, Rust version, authors, license, and
 repository metadata. `sonicterm-app` is the default workspace member. The
 shipping binaries are `sonicterm-mac`, `sonicterm-windows`, and
@@ -30,7 +30,6 @@ flowchart BT
     core["sonicterm-app-core"]
     app["sonicterm-app"]
     platforms["mac · windows · linux"]
-    mux["sonicterm-mux<br/>standalone"]
 
     resource --> types
     grid --> types
@@ -67,7 +66,6 @@ flowchart BT
     app --> logging
     platforms --> app
     platforms --> core
-    mux --> io
 ```
 
 The diagram shows the main architecture edges. Each entry below gives the exact
@@ -233,9 +231,6 @@ wrappers.
 Android and non-macOS Unix builds also use `sonicterm-fontconfig` as
 `fontconfig`.
 
-**Features:** `vendor-jetbrains`, `vendor-nerd-font-symbols`,
-`vendor-noto-emoji`, and `vendor-roboto` compatibility switches.
-
 **Read:** `src/db.rs`, `src/locator/`, `src/shaper/`, `src/rasterizer/`,
 `src/{ftwrap,hbwrap,fcwrap,parser}.rs`.
 
@@ -300,7 +295,7 @@ live SSH connection.
 `src/app/{event_loop,window_event,spawn_pane,keymap_dispatch,path_target,tear_out}.rs`,
 `src/shell.rs`.
 
-## Platform and standalone crates
+## Platform crates
 
 ### `sonicterm-mac`
 
@@ -336,24 +331,13 @@ metadata.
 
 **Read:** `src/main.rs`, `resources/`.
 
-### `sonicterm-mux`
-
-**Role:** standalone persistent-PTY multiplexer daemon with a framed bincode
-protocol, raw-byte replay ring, and attach/input/resize/kill operations. It is a
-workspace crate, is not consumed by the GUI, and is not included in release
-packages.
-
-**First-party dependencies:** `sonicterm-io`.
-
-**Read:** `src/{main,proto,frame,server}.rs`.
-
 Every crate has a local `CLAUDE.md` with its guardrails and local gate. Package
 layouts belong on [Packaging](Packaging); CI and release behavior belong on
 [Development and Release](Development-and-Release).
 
 ## 中文
 
-本页是 Cargo workspace 中 24 个 Rust crate 的规范映射。根 `Cargo.toml`
+本页是 Cargo workspace 中 23 个 Rust crate 的规范映射。根 `Cargo.toml`
 统一提供版本、edition、Rust 版本、作者、许可证和仓库信息。默认 workspace member
 是 `sonicterm-app`。发布的二进制 crate 是 `sonicterm-mac`、
 `sonicterm-windows` 和 `sonicterm-linux`；Linux 可执行文件名为 `sonicterm`。
@@ -380,7 +364,6 @@ flowchart BT
     core["sonicterm-app-core"]
     app["sonicterm-app"]
     platforms["mac · windows · linux"]
-    mux["sonicterm-mux<br/>独立运行"]
 
     resource --> types
     grid --> types
@@ -417,7 +400,6 @@ flowchart BT
     app --> logging
     platforms --> app
     platforms --> core
-    mux --> io
 ```
 
 图中只画主要架构依赖。下方每个条目列出准确的第一方 Cargo 依赖。
@@ -574,9 +556,6 @@ FreeType/DirectWrite/HarfBuzz 光栅化、COLR 字形和原生 handle 封装。
 `sonicterm-freetype`，以 `harfbuzz` 使用 `sonicterm-harfbuzz`；Android 和非 macOS
 Unix 构建还以 `fontconfig` 使用 `sonicterm-fontconfig`。
 
-**Features：** `vendor-jetbrains`、`vendor-nerd-font-symbols`、
-`vendor-noto-emoji`、`vendor-roboto` 兼容开关。
-
 **阅读：** `src/db.rs`、`src/locator/`、`src/shaper/`、`src/rasterizer/`、
 `src/{ftwrap,hbwrap,fcwrap,parser}.rs`。
 
@@ -636,7 +615,7 @@ effect 顺序和状态机。实时窗口/标签页/窗格结构仍由 `sonicterm
 `src/app/{event_loop,window_event,spawn_pane,keymap_dispatch,path_target,tear_out}.rs`、
 `src/shell.rs`。
 
-## 平台与独立 crate
+## 平台 crate
 
 ### `sonicterm-mac`
 
@@ -670,16 +649,6 @@ ConPTY 仍封装在 `sonicterm-io` 后。
 `sonicterm-engine`、`sonicterm-logging`。
 
 **阅读：** `src/main.rs`、`resources/`。
-
-### `sonicterm-mux`
-
-**职责：** 独立的持久 PTY multiplexer daemon，提供 framed bincode 协议、原始字节
-回放环，以及 attach/input/resize/kill 操作。它属于 workspace，但 GUI 不依赖它，
-发布包也不包含它。
-
-**第一方依赖：** `sonicterm-io`。
-
-**阅读：** `src/{main,proto,frame,server}.rs`。
 
 每个 crate 都有本地 `CLAUDE.md`，记录约束和本地 gate。安装包布局见[打包](Packaging)；
 CI 与发布行为见[开发与发布](Development-and-Release)。

@@ -11,6 +11,7 @@ fn failure_codes_are_distinct_and_stable() {
     assert_eq!(RuntimeSmokeFailure::Pty.exit_code(), 13);
     assert_eq!(RuntimeSmokeFailure::Marker.exit_code(), 14);
     assert_eq!(RuntimeSmokeFailure::Present.exit_code(), 15);
+    assert_eq!(RuntimeSmokeFailure::WarmLifecycle.exit_code(), 16);
 }
 
 #[test]
@@ -36,13 +37,32 @@ fn marker_detection_reads_the_live_grid() {
 }
 
 #[test]
-fn success_requires_a_presentation_after_marker_observation() {
-    // Protect against treating parsed-but-never-presented output as a runnable terminal.
+fn success_requires_main_and_adopted_presentations_with_warm_release() {
+    // Protect against treating parsed output or an unpresented adopted renderer as a complete smoke.
     let mut state = RuntimeSmokeState::new(7);
     state.begin_marker_wait();
     state.begin_present_wait(3);
-    assert_eq!(state.observe_presented_frame(3), None);
-    assert_eq!(state.observe_presented_frame(4), Some(Ok(())));
+    assert!(!state.observe_presented_frame(3));
+    assert!(state.observe_presented_frame(4));
+    assert!(state.should_maintain_warm_pool());
+    assert_eq!(state.renderer_baseline(), sonicterm_gpu::core::live_renderer_count());
+
+    // The dummy id remains an opaque identity; this test never resolves it as a native window.
+    let child = winit::window::WindowId::dummy();
+    assert!(state.begin_warm_adoption(child, 0));
+    assert!(!state.observe_adopted_present(child, 0));
+    assert!(state.observe_adopted_present(child, 1));
+    assert!(!state.finish_warm_release(child, false));
+    assert_eq!(state.outcome(), Some(Err(RuntimeSmokeFailure::WarmLifecycle)));
+
+    let mut successful = RuntimeSmokeState::new(8);
+    successful.begin_marker_wait();
+    successful.begin_present_wait(0);
+    assert!(successful.observe_presented_frame(1));
+    assert!(successful.begin_warm_adoption(child, 0));
+    assert!(successful.observe_adopted_present(child, 1));
+    assert!(successful.finish_warm_release(child, true));
+    assert_eq!(successful.outcome(), Some(Ok(())));
 }
 
 #[test]
@@ -58,4 +78,6 @@ fn timeout_maps_to_the_boundary_currently_under_test() {
     assert_eq!(state.timeout_failure(), RuntimeSmokeFailure::Marker);
     state.begin_present_wait(0);
     assert_eq!(state.timeout_failure(), RuntimeSmokeFailure::Present);
+    assert!(state.observe_presented_frame(1));
+    assert_eq!(state.timeout_failure(), RuntimeSmokeFailure::WarmLifecycle);
 }

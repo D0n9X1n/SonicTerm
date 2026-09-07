@@ -26,3 +26,25 @@ fn exports_color_conversion_helpers() {
     assert_eq!(rgba[2], 0.0);
     assert_eq!(rgba[3], 1.0);
 }
+
+/// The legacy alpha-only pipeline retains its source-compatible callable API.
+#[test]
+fn legacy_text_pipeline_api_remains_callable() {
+    use crate::text_pipeline::{GlyphInstance, TextPipeline};
+    use wgpu::{BindGroup, Device, Queue, RenderPass, TextureFormat};
+
+    fn draw<'pass>(
+        pipeline: &'pass mut TextPipeline,
+        device: &Device,
+        queue: &Queue,
+        pass: &mut RenderPass<'pass>,
+        bind_group: &'pass BindGroup,
+        instances: &[GlyphInstance],
+    ) {
+        pipeline.draw(device, queue, pass, bind_group, instances);
+    }
+
+    let _: fn(&Device, TextureFormat, u64) -> TextPipeline = TextPipeline::new;
+    let _: fn(&TextPipeline) -> u64 = TextPipeline::capacity;
+    let _ = draw;
+}

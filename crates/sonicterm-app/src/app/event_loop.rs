@@ -224,6 +224,68 @@ impl App {
         }
         self.expire_quit_confirmation();
         self.warm_window_pool_maintain(el);
+        if self.runtime_smoke.as_ref().is_some_and(|smoke| smoke.should_maintain_warm_pool()) {
+            // When: `runtime_smoke` requests warm-pool maintenance, prove the default spare before adoption.
+            let baseline = self.runtime_smoke.as_ref().map(|smoke| smoke.renderer_baseline());
+            let snapshot = self.build_memory_snapshot();
+            let warm_reported = snapshot.renderers.iter().any(|renderer| renderer.role == "warm");
+            let warm_count = self.warm_window_pool.len();
+            let live_count = sonicterm_gpu::core::live_renderer_count();
+            if baseline.is_some_and(|baseline| {
+                warm_count == 1 && warm_reported && live_count == baseline + 2
+            }) {
+                // When: `baseline`, `warm_count`, `warm_reported`, and `live_count` prove one reportable spare, adopt it.
+                tracing::info!(
+                    warm_count,
+                    live_count,
+                    "runtime smoke warm renderer created and reported"
+                );
+                let expected_child = self.warm_window_pool.last().map(|warm| warm.window.id());
+                let main_id = self.main_window_id;
+                let child = main_id.and_then(|id| {
+                    let index = self.windows.get(&id)?.tabs.active_index();
+                    self.tear_out_tab(el, index);
+                    self.windows.keys().copied().find(|child| Some(*child) != main_id)
+                });
+                if let Some(child) = child {
+                    // When: `child` exists after tear-out, verify it adopted the exact warm window before presenting.
+                    let adopted_live_count = sonicterm_gpu::core::live_renderer_count();
+                    if expected_child != Some(child)
+                        || !self.warm_window_pool.is_empty()
+                        || baseline.is_none_or(|baseline| adopted_live_count != baseline + 2)
+                    {
+                        // When: `expected_child`, `warm_window_pool`, or `adopted_live_count` disagrees with `baseline`, adoption failed.
+                        if let Some(smoke) = self.runtime_smoke.as_mut() {
+                            smoke.fail(RuntimeSmokeFailure::WarmLifecycle);
+                        }
+                        el.exit();
+                        return;
+                    }
+                    let present_baseline = self
+                        .windows
+                        .get(&child)
+                        .and_then(|window| window.renderer.as_ref())
+                        .map(GpuRenderer::successful_frame_count)
+                        .unwrap_or(0);
+                    if let Some(smoke) = self.runtime_smoke.as_mut() {
+                        // When: `smoke` remains installed, bind the adopted child and its presentation baseline.
+                        let _ = smoke.begin_warm_adoption(child, present_baseline);
+                    }
+                } else if let Some(smoke) = self.runtime_smoke.as_mut() {
+                    // When: `child` is absent but `smoke` remains installed, record warm-lifecycle failure.
+                    smoke.fail(RuntimeSmokeFailure::WarmLifecycle);
+                    el.exit();
+                    return;
+                }
+            } else if warm_count > 0 {
+                // When: `warm_count` is nonzero but creation/reporting invariants disagree, fail instead of timing out.
+                if let Some(smoke) = self.runtime_smoke.as_mut() {
+                    smoke.fail(RuntimeSmokeFailure::WarmLifecycle);
+                }
+                el.exit();
+                return;
+            }
+        }
         self.sample_pane_retention(Instant::now());
         let notification_wake = self.expire_notifications(Instant::now());
         // Reset the control flow on every pass rather than leaving the previous
@@ -301,14 +363,14 @@ impl App {
         // boundary: typing latency must still feel instant, and the frame
         // boundary is the tightest budget that preserves vsync alignment.
         if self.pending_redraw {
-            if let Some(last_render) = self.main().map(|ws| ws.last_render) {
+            if let Some(window) = self.main() {
                 let composing = self.main().map(|ws| ws.ime.is_composing()).unwrap_or(false);
                 let period = crate::app::effective_frame_period(
                     self.software_render_degrade,
                     composing,
                     self.frame_period,
                 );
-                let at = last_render + period;
+                let at = window.redraw_not_before(period);
                 next = Some(next.map_or(at, |cur| cur.min(at)));
             }
         }
@@ -325,7 +387,7 @@ impl App {
                     ws.ime.is_composing(),
                     self.frame_period,
                 );
-                let at = ws.last_render + period;
+                let at = ws.redraw_not_before(period);
                 next = Some(next.map_or(at, |cur| cur.min(at)));
             }
         }
@@ -493,14 +555,19 @@ impl App {
             UserEvent::PathProbeFinished(result) => {
                 self.handle_path_probe_finished(*result);
             }
-            UserEvent::PtyInputRejected { bytes, reason } => {
-                self.show_notification_for_kind(
-                    self.frontmost_kind(),
-                    sonicterm_ui::overlays::NotificationLevel::Error,
-                    format!(
-                        "Terminal input was not sent ({reason}; {} bytes). Retry after the terminal responds.",
-                        bytes.len()
-                    ),
+            UserEvent::PtyInputRejected {
+                pane_id,
+                source,
+                rejected_bytes,
+                reason,
+                diagnostics,
+            } => {
+                self.handle_pty_input_rejected(
+                    pane_id,
+                    source,
+                    rejected_bytes,
+                    reason,
+                    diagnostics,
                 );
             }
             UserEvent::RuntimeSmokeTimeout => {
@@ -522,6 +589,50 @@ impl App {
         // its new window before cross-window drag-residue cleanup
         // runs. Ordering is the entire point — do not move above.
         self.drain_pending_os_teardown();
+    }
+
+    /// Log payload-free rejection evidence and notify only the pane's current live window.
+    pub(super) fn handle_pty_input_rejected(
+        &mut self,
+        pane_id: u64,
+        source: super::PtyInputSource,
+        rejected_bytes: usize,
+        reason: String,
+        diagnostics: sonicterm_io::pty::PtyInputDiagnostics,
+    ) {
+        let window_id =
+            self.windows.iter().find_map(|(id, ws)| ws.panes.contains_key(&pane_id).then_some(*id));
+        tracing::warn!(
+            pane_id,
+            ?window_id,
+            ?source,
+            rejected_bytes,
+            %reason,
+            observation = "concurrent",
+            queued_messages = diagnostics.queued_messages,
+            queued_bytes = diagnostics.queued_bytes,
+            queue_capacity = diagnostics.queue_capacity,
+            writer_phase = ?diagnostics.writer_phase,
+            in_flight_bytes = diagnostics.in_flight_bytes,
+            in_flight_millis = ?diagnostics.in_flight_millis,
+            completed_messages = diagnostics.completed_messages,
+            "terminal input was not queued because the PTY writer is unavailable or saturated"
+        );
+        let Some(window_id) = window_id else {
+            // When: `window_id` is absent, retain the diagnostic without alarming an unrelated frontmost terminal.
+            return;
+        };
+        let kind = if Some(window_id) == self.main_window_id {
+            super::FrontmostKind::Main
+        } else {
+            // When: `window_id` differs from `main_window_id`, route the notification to that child rather than the frontmost window.
+            super::FrontmostKind::Child(window_id)
+        };
+        self.show_notification_for_kind(
+            kind,
+            sonicterm_ui::overlays::NotificationLevel::Error,
+            format!("Terminal input was not sent (pane {pane_id}; {source:?}; {reason}; {rejected_bytes} bytes)."),
+        );
     }
 
     pub(super) fn handle_clipboard_write(&mut self, text: String) {
@@ -835,6 +946,7 @@ impl App {
         // the authoritative source for `main_window_id`.
         if let Some(prev) = self.main_window_id.take() {
             self.windows.remove(&prev);
+            self.window_keys.remove(prev);
         }
         self.main_window_id = Some(main_id);
         let shadow = super::WindowState {
@@ -858,7 +970,9 @@ impl App {
             select_anchor: (0, 0),
             copy_mode: None,
             modifiers: ModifiersState::empty(),
+            pty_pressed_keys: std::collections::HashMap::new(),
             last_render: std::time::Instant::now(),
+            retry_not_before: None,
             hover_link: false,
             pressed_tab: None,
             drag_session: None,
@@ -893,8 +1007,9 @@ impl App {
             let active_pane = self
                 .main_active_pane_id()
                 .and_then(|pane_id| self.main().and_then(|window| window.panes.get(&pane_id)));
+            let expected_shell = self.config.terminal.shell.as_deref();
             let smoke_failure = match (active_pane.and_then(|pane| pane.pty.as_ref()), command) {
-                (Some(pty), Some(command)) if pty.shell_program_path() == "/bin/sh" => {
+                (Some(pty), Some(command)) if expected_shell == Some(pty.shell_program_path()) => {
                     pty.send_input_nonblocking(command).err().map(|error| {
                         tracing::error!(%error, "runtime smoke could not queue its shell marker");
                         RuntimeSmokeFailure::Marker

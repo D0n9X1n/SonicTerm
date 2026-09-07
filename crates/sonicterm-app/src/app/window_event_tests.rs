@@ -1,8 +1,8 @@
 use super::{
     begin_pointer_gesture, cancel_pointer_gesture, is_quit_chord, native_scrollbar_owns_pointer,
     no_button_motion_report, pointer_report_bytes, route_pressed_pointer_motion,
-    take_focus_loss_pointer_release, take_pointer_release, wheel_report_bytes, PointerCell,
-    PointerGestureOwner, PointerMotionRoute, PointerReportKind,
+    take_focus_loss_pointer_release, take_pointer_release, terminal_repeat_targets,
+    wheel_report_bytes, PointerCell, PointerGestureOwner, PointerMotionRoute, PointerReportKind,
 };
 use crate::app::{child_window::child_no_button_motion_report, hovered_url::HoveredUrl, App};
 use sonicterm_cfg::{
@@ -12,7 +12,7 @@ use sonicterm_cfg::{
 };
 use sonicterm_ui::{pane::SplitAxis, selection::Selection};
 use sonicterm_vt::vt::MouseTracking;
-use winit::keyboard::ModifiersState;
+use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 
 fn pointer_cell(pane_id: u64, row: u16, col: u16) -> PointerCell {
     PointerCell { pane_id, row, col }
@@ -498,6 +498,34 @@ fn main_and_child_focus_loss_share_release_helper() {
     let child_source = include_str!("child_window.rs");
     assert!(main_source.contains("take_focus_loss_pointer_release("));
     assert!(child_source.contains("take_focus_loss_pointer_release("));
+}
+
+/// A repeated key keeps its terminal owner even if local UI opens after the press.
+#[test]
+fn terminal_repeat_owner_is_resolved_before_local_input_owners() {
+    let key = PhysicalKey::Code(KeyCode::KeyA);
+    let panes = std::collections::BTreeSet::from([7, 11]);
+    let mut pressed = std::collections::HashMap::from([(key, panes.clone())]);
+
+    assert_eq!(terminal_repeat_targets(&pressed, key, true), Some(panes));
+    assert_eq!(terminal_repeat_targets(&pressed, key, false), None);
+    assert_eq!(pressed.remove(&key), Some(std::collections::BTreeSet::from([7, 11])));
+
+    let main_source = include_str!("window_event.rs");
+    let child_source = include_str!("child_window.rs");
+    for (source, palette_marker) in [
+        (main_source, "if self.command_palette.is_open()"),
+        (child_source, "let palette_here = self.palette_attached_window"),
+    ] {
+        let keyboard = source
+            .find("WindowEvent::KeyboardInput { event, .. } =>")
+            .expect("keyboard routing branch");
+        let keyboard_route = &source[keyboard..];
+        let repeat =
+            keyboard_route.find("terminal_repeat_targets(").expect("repeat ownership lookup");
+        let palette = keyboard_route.find(palette_marker).expect("palette routing");
+        assert!(repeat < palette, "terminal repeat lookup must precede local UI routing");
+    }
 }
 
 #[test]

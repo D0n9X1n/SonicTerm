@@ -1,7 +1,8 @@
 use super::{
-    parse_osc7_cwd_snapshot, MediaCapture, MediaProtocol, MouseTracking, Osc7Cwd, Parser, VtEvent,
-    CAPTURE_FLOOR_POOL_BYTES, CAPTURE_GROWTH_POOL_BYTES, GUARANTEED_CONCURRENT_CAPTURES,
-    LIVE_MEDIA_CAPTURES, MAX_ESCAPE_SEQUENCE_BYTES, MAX_MEDIA_PAYLOAD_BYTES,
+    parse_osc7_cwd_snapshot, EscapeFamily, MediaCapture, MediaEvent, MediaProtocol, MouseTracking,
+    Osc7Cwd, Parser, VtEvent, CAPTURE_FLOOR_POOL_BYTES, CAPTURE_FLOOR_RESERVED,
+    CAPTURE_GROWTH_POOL_BYTES, GUARANTEED_CONCURRENT_CAPTURES, LIVE_MEDIA_CAPTURES,
+    MAX_ESCAPE_SEQUENCE_BYTES, MAX_ITERM2_METADATA_BYTES, MAX_MEDIA_PAYLOAD_BYTES,
     MAX_PROCESS_CAPTURE_STAGING_BYTES, MIN_CAPTURE_STAGING_BYTES,
 };
 use sonicterm_grid::grid::{CellFlags, Color, Grid, UnderlineStyle};
@@ -38,6 +39,226 @@ fn serialised_captures() -> std::sync::MutexGuard<'static, ()> {
 
 fn row_text(parser: &Parser, row: u16) -> String {
     parser.grid().row(row).iter().map(|cell| cell.ch).collect()
+}
+
+#[test]
+fn ed3_removes_history_without_erasing_live_rows_or_cursor() {
+    // Saved-history erasure must preserve live content, cursor state, and future history capacity.
+    let mut parser = Parser::new(Grid::new(4, 2));
+    parser.grid_mut().set_scrollback_limit(17);
+    parser.advance(b"old\r\nkeep\r\nlive");
+    assert_eq!(parser.grid().scrollback_len(), 1);
+    let cursor = parser.grid().cursor;
+    let sequence = parser.grid().content_seq();
+    let revision = parser.grid().revision();
+    let evicted = parser.grid().scrollback_evicted();
+    parser.grid_mut().clear_dirty();
+
+    parser.advance(b"\x1b[3J");
+
+    assert_eq!(parser.grid().scrollback_len(), 0);
+    assert_eq!(row_text(&parser, 0), "keep");
+    assert_eq!(row_text(&parser, 1), "live");
+    assert_eq!(parser.grid().cursor, cursor);
+    assert_eq!(parser.grid().content_seq(), sequence);
+    assert_eq!(parser.grid().visible_rows_changed_since(sequence).count(), 0);
+    assert_ne!(parser.grid().revision(), revision);
+    assert_eq!(parser.grid().dirty_count(), 2);
+    assert_eq!(parser.grid().scrollback_evicted(), evicted + 1);
+    parser.advance(b"\r\nnext");
+    assert_eq!(parser.grid().scrollback_len(), 1);
+}
+
+#[test]
+fn ed3_on_empty_primary_or_alternate_is_a_true_noop() {
+    // Alternate ED3 cannot erase either its live cells or the hidden primary history.
+    let mut parser = Parser::new(Grid::new(4, 2));
+    parser.advance(b"live");
+    parser.grid_mut().clear_dirty();
+    let revision = parser.grid().revision();
+    parser.advance(b"\x1b[3J");
+    assert_eq!(row_text(&parser, 0), "live");
+    assert_eq!(parser.grid().revision(), revision);
+    assert_eq!(parser.grid().dirty_count(), 0);
+    parser.advance(b"\r\nkeep\r\ntail");
+    let history = parser.grid().scrollback_len();
+    parser.advance(b"\x1b[?1049hALT");
+    parser.grid_mut().clear_dirty();
+    let alternate_revision = parser.grid().revision();
+    parser.advance(b"\x1b[3J");
+    assert_eq!(row_text(&parser, 0), "ALT ");
+    assert_eq!(parser.grid().revision(), alternate_revision);
+    assert_eq!(parser.grid().dirty_count(), 0);
+    parser.advance(b"\x1b[?1049l");
+    assert_eq!(parser.grid().scrollback_len(), history);
+    assert_eq!(row_text(&parser, 0), "keep");
+    assert_eq!(row_text(&parser, 1), "tail");
+}
+
+#[test]
+fn ed3_preserves_rendition_margins_and_history_limit() {
+    // Erasing history is not a terminal reset, a visible erase, or a temporary history-limit change.
+    let mut parser = Parser::new(Grid::new(4, 3));
+    parser.grid_mut().set_scrollback_limit(7);
+    parser.advance(b"old\r\nkeep\r\nlive\r\ntail\x1b[2;3r\x1b[31;44m\x1b[3;2H");
+    assert_eq!(parser.grid().scrollback_len(), 1);
+    parser.advance(b"\x1b[3JX\n");
+    assert_eq!(parser.grid().scrollback_len(), 0);
+    assert_eq!(row_text(&parser, 0), "keep");
+    assert_eq!(row_text(&parser, 1), "tXil");
+    assert_eq!(parser.grid().row(1)[1].fg, Color::Indexed(1));
+    assert_eq!(parser.grid().row(1)[1].bg, Color::Indexed(4));
+    assert_eq!(parser.grid().row(2)[0].bg, Color::Indexed(4));
+    parser.advance(b"\x1b[r\x1b[3;1H");
+    for _ in 0..9 {
+        parser.advance(b"\r\nnext");
+    }
+    assert_eq!(parser.grid().scrollback_len(), 7);
+}
+
+#[test]
+fn visible_erase_modes_preserve_saved_history() {
+    // ED0/1/2 retain their inclusive visible ranges and BCE without consuming history as ED3 does.
+    for (mode, rows) in [
+        (0, ["aaaa", "b   ", "    "]),
+        (1, ["    ", "  bb", "cccc"]),
+        (2, ["    ", "    ", "    "]),
+    ] {
+        let mut parser = Parser::new(Grid::new(4, 3));
+        parser.advance(b"old\r\naaaa\r\nbbbb\r\ncccc\x1b[2;2H\x1b[44m");
+        let cursor = parser.grid().cursor;
+        let evicted = parser.grid().scrollback_evicted();
+        parser.advance(format!("\x1b[{mode}J").as_bytes());
+        for (row, expected) in rows.iter().enumerate() {
+            assert_eq!(row_text(&parser, row as u16), *expected);
+        }
+        assert_eq!(parser.grid().row(1)[1].bg, Color::Indexed(4));
+        assert_eq!(parser.grid().scrollback_len(), 1);
+        assert_eq!(parser.grid().scrollback_row(0).unwrap()[0].ch, 'o');
+        assert_eq!(parser.grid().scrollback_evicted(), evicted);
+        assert_eq!(parser.grid().cursor, cursor);
+    }
+}
+
+#[test]
+fn dsr_reports_physical_column_without_consuming_delayed_wrap() {
+    // Querying an insertion sentinel is observational; a following graphic still wraps.
+    for (width, text) in [(4, "abc"), (4, "abcd"), (4, "ab中"), (1, "x")] {
+        let (tx, rx) = crossbeam_channel::bounded(4);
+        let mut parser = Parser::new_with_reply(Grid::new(width, 2), tx);
+        parser.advance(text.as_bytes());
+        let pending = parser.grid().pending_wrap();
+        let cursor = parser.grid().cursor;
+        for _ in 0..2 {
+            parser.advance(b"\x1b[6n");
+            assert_eq!(rx.try_recv().unwrap(), format!("\x1b[1;{width}R").into_bytes());
+            assert_eq!(parser.grid().cursor, cursor);
+            assert_eq!(parser.grid().pending_wrap(), pending);
+        }
+        parser.advance(b"Z");
+        assert_eq!(parser.grid().cursor.row, u16::from(pending));
+        if pending {
+            assert_eq!(parser.grid().row(1)[0].ch, 'Z');
+        }
+    }
+}
+
+#[test]
+fn dsr_observes_autowrap_off_and_normal_cursor_motion() {
+    // Physical position replies remain bounded after clipped output and ordinary cursor movement.
+    for width in [1, 4] {
+        let (tx, rx) = crossbeam_channel::bounded(4);
+        let mut parser = Parser::new_with_reply(Grid::new(width, 2), tx);
+        parser.advance(b"\x1b[?7labcdef\x1b[6n");
+        assert_eq!(rx.try_recv().unwrap(), format!("\x1b[1;{width}R").into_bytes());
+        assert!(!parser.grid().pending_wrap());
+        parser.advance(b"\x1b[2;1H\x1b[6n");
+        assert_eq!(rx.try_recv().unwrap(), b"\x1b[2;1R");
+        parser.advance(b"\x1b[999G\x1b[6n");
+        assert_eq!(rx.try_recv().unwrap(), format!("\x1b[2;{width}R").into_bytes());
+    }
+}
+
+#[test]
+fn hard_advances_cancel_pending_wrap_at_physical_columns() {
+    // A hard advance consumes delayed wrap without making the following graphic advance a second row.
+    for control in [b"\n".as_slice(), b"\x0b", b"\x0c", b"\x1bD", b"\x1bE"] {
+        for start_row in [0, 1] {
+            let mut parser = Parser::new(Grid::new(4, 2));
+            parser.advance(format!("\x1b[{};1Habcd", start_row + 1).as_bytes());
+            assert!(parser.grid().pending_wrap());
+            parser.advance(control);
+            let col = if control == b"\x1bE" { 0 } else { 3 };
+            assert!(!parser.grid().pending_wrap());
+            assert_eq!(parser.grid().cursor.col, col, "control={control:?} row={start_row}");
+            assert!(!parser.grid().row(1).soft_wrapped_from_previous());
+            parser.advance(b"Z");
+            assert_eq!(parser.grid().scrollback_len(), start_row);
+            assert_eq!(parser.grid().row(1)[col as usize].ch, 'Z');
+        }
+    }
+}
+
+#[test]
+fn hard_advances_respect_restricted_margins_and_physical_bottom() {
+    // All five controls scroll only at the region bottom and clamp below it without adding history.
+    for control in [b"\n".as_slice(), b"\x0b", b"\x0c", b"\x1bD", b"\x1bE"] {
+        for row in 0..5 {
+            let mut parser = Parser::new(Grid::new(4, 5));
+            parser.advance(b"\x1b[1;1HAaaa\x1b[2;1HBbbb\x1b[3;1HCccc\x1b[4;1HDddd\x1b[5;1HEeee");
+            parser.advance(b"\x1b[2;4r");
+            parser.advance(format!("\x1b[{};2H", row + 1).as_bytes());
+            parser.advance(control);
+            let expected_rows = if row == 3 {
+                ["Aaaa", "Cccc", "Dddd", "    ", "Eeee"]
+            } else {
+                ["Aaaa", "Bbbb", "Cccc", "Dddd", "Eeee"]
+            };
+            for (index, expected) in expected_rows.iter().enumerate() {
+                assert_eq!(
+                    row_text(&parser, index as u16),
+                    *expected,
+                    "control={control:?} row={row}"
+                );
+            }
+            assert_eq!(parser.grid().scrollback_len(), 0, "control={control:?} row={row}");
+            assert_eq!(parser.grid().cursor.row, if row == 3 { 3 } else { (row + 1).min(4) });
+            assert_eq!(parser.grid().cursor.col, if control == b"\x1bE" { 0 } else { 1 });
+        }
+    }
+}
+
+#[test]
+fn hard_advance_fullscreen_fill_and_column_policies_stay_distinct() {
+    // LF/VT/FF use BCE while IND/NEL retain default fill; only NEL performs carriage return.
+    for control in [b"\n".as_slice(), b"\x0b", b"\x0c", b"\x1bD", b"\x1bE"] {
+        let mut parser = Parser::new(Grid::new(4, 2));
+        parser.advance(b"top\x1b[2;2H\x1b[41m");
+        parser.advance(control);
+        assert_eq!(parser.grid().scrollback_len(), 1);
+        assert_eq!(parser.grid().cursor.row, 1);
+        assert_eq!(parser.grid().cursor.col, if control == b"\x1bE" { 0 } else { 1 });
+        let background = if control.len() == 1 { Color::Indexed(1) } else { Color::Default };
+        assert_eq!(parser.grid().row(1)[0].bg, background);
+    }
+}
+
+fn only_media(events: Vec<VtEvent>) -> MediaEvent {
+    let mut media = events.into_iter().filter_map(|event| match event {
+        VtEvent::Media(media) => Some(media),
+        _ => None,
+    });
+    let event = media.next().expect("one media event");
+    assert!(media.next().is_none(), "expected exactly one media event");
+    event
+}
+
+fn iterm2_sequence(payload_bytes: usize) -> Vec<u8> {
+    let mut sequence = Vec::with_capacity(payload_bytes + 32);
+    sequence.extend_from_slice(b"\x1b]1337;File=inline=1:");
+    sequence.resize(sequence.len() + payload_bytes, b'A');
+    sequence.extend_from_slice(b"\x1b\\");
+    sequence
 }
 
 /// OSC 52 surfaces the selection and encoded payload without decoding on the parser thread.
@@ -192,6 +413,26 @@ fn dec_private_mode_1_toggles_application_cursor_keys() {
     assert!(!parser.application_cursor_keys());
 }
 
+/// Every host-visible keyboard mode must survive compact snapshot round-tripping.
+#[test]
+fn keyboard_modes_track_dec_ansi_keypad_and_xterm_state() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+
+    parser.advance(b"\x1b[?1h\x1b[?67h\x1b=\x1b[20h\x1b[>4;2m");
+
+    let modes = parser.keyboard_modes();
+    assert!(modes.application_cursor_keys());
+    assert!(modes.application_keypad());
+    assert!(modes.backarrow_key());
+    assert!(modes.newline());
+    assert_eq!(modes.modify_other_keys(), 2);
+    assert_eq!(super::KeyboardModes::from_bits(modes.bits()), modes);
+    assert_eq!(super::KeyboardModes::from_bits(0b11_0000).modify_other_keys(), 2);
+
+    parser.advance(b"\x1b[?1l\x1b[?67l\x1b>\x1b[20l\x1b[>4;0m");
+    assert_eq!(parser.keyboard_modes(), super::KeyboardModes::default());
+}
+
 /// Each DECSET tracking code selects its distinct current mouse-reporting mode.
 #[test]
 fn decset_selects_each_mouse_tracking_mode() {
@@ -262,6 +503,17 @@ fn ris_resets_app_cursor_keys_and_mouse_tracking() {
 
     assert!(!parser.application_cursor_keys());
     assert_eq!(parser.mouse_tracking(), MouseTracking::Off);
+}
+
+/// RIS restores all keyboard-affecting terminal modes, not only DECCKM.
+#[test]
+fn ris_resets_every_keyboard_mode() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    parser.advance(b"\x1b[?1h\x1b[?67h\x1b=\x1b[20h\x1b[>4;2m");
+
+    parser.advance(b"\x1bc");
+
+    assert_eq!(parser.keyboard_modes(), super::KeyboardModes::default());
 }
 
 /// SGR report encoding can toggle independently without selecting a tracking mode.
@@ -428,6 +680,346 @@ fn large_sixel_uses_media_budget_not_generic_escape_limit() {
     assert!(media.data.len() > MAX_ESCAPE_SEQUENCE_BYTES);
 }
 
+/// A completed CSI or OSC is a sequence boundary even when its callback leaves
+/// the performer's fast-path mirror false; the following APC must still be owned.
+#[test]
+fn kitty_apc_dispatches_after_completed_escape_sequences() {
+    let _serialised = serialised_captures();
+    for prefix in [b"\x1b[0m".as_slice(), b"\x1b]0;title\x07".as_slice(), b"\x1b[2;3HX".as_slice()]
+    {
+        let mut parser = Parser::new(Grid::new(80, 24));
+        let mut sequence = prefix.to_vec();
+        sequence.extend_from_slice(b"\x1b_Gf=100;AAAA\x1b\\");
+
+        let media = only_media(parser.advance(&sequence));
+
+        assert_eq!(media.protocol, MediaProtocol::Kitty);
+        assert_eq!(media.metadata, "f=100");
+        assert_eq!(media.data, b"AAAA");
+    }
+
+    let mut parser = Parser::new(Grid::new(80, 24));
+    let events = parser.advance(b"\x1b[0m\x1b]0;title\x07\x1b[2;3H\x1b_Gf=100;AAAA\x1b\\");
+    assert_eq!(only_media(events).protocol, MediaProtocol::Kitty);
+}
+
+/// C1 APC remains recognizable immediately after an ordinary ground control;
+/// the control callback must not leave the fast-path mirror stale.
+#[test]
+fn c1_kitty_apc_dispatches_after_ground_control() {
+    let _serialised = serialised_captures();
+    let mut parser = Parser::new(Grid::new(80, 24));
+
+    let media = only_media(parser.advance(b"\n\x9fGf=100;AAAA\x9c"));
+
+    assert_eq!(media.protocol, MediaProtocol::Kitty);
+    assert_eq!(media.data, b"AAAA");
+}
+
+/// Both APC introducer forms and every PTY chunk boundary must reach the same
+/// Kitty capture, including a split between the two bytes of ESC underscore.
+#[test]
+fn kitty_apc_supports_c1_and_every_buffer_split() {
+    let _serialised = serialised_captures();
+    for sequence in [b"\x1b_Gf=100;AAAA\x1b\\".as_slice(), b"\x9fGf=100;AAAA\x9c".as_slice()] {
+        for split in 0..=sequence.len() {
+            let mut parser = Parser::new(Grid::new(80, 24));
+            let mut events = parser.advance(&sequence[..split]);
+            events.extend(parser.advance(&sequence[split..]));
+
+            let media = only_media(events);
+            assert_eq!(media.protocol, MediaProtocol::Kitty, "split {split}");
+            assert_eq!(media.metadata, "f=100", "split {split}");
+            assert_eq!(media.data, b"AAAA", "split {split}");
+        }
+    }
+}
+
+/// CAN and SUB abort Kitty staging without leaking an event or exposing the
+/// remaining graphics bytes as printable terminal text.
+#[test]
+fn can_and_sub_cancel_kitty_without_emitting_media() {
+    let _serialised = serialised_captures();
+    for cancel in [0x18, 0x1a] {
+        let mut parser = Parser::new(Grid::new(16, 2));
+        let mut sequence = vec![0x1b, b'_', b'G', b'A', b'A', cancel];
+        sequence.extend_from_slice(b"Z");
+        let events = parser.advance(&sequence);
+
+        assert!(events.iter().all(|event| !matches!(event, VtEvent::Media(_))));
+        assert_eq!(parser.live_capture_count(), 0);
+        assert_eq!(parser.grid().row(0)[0].ch, 'Z');
+    }
+}
+
+/// The parser-owned family mirror follows every vte DCS substate so C1 ST is
+/// terminal only after the DCS final byte selects passthrough.
+#[test]
+fn escape_family_tracks_dcs_substates_and_esc_intermediates() {
+    assert_eq!(EscapeFamily::Esc.after_byte(0x20), EscapeFamily::EscIntermediate);
+    assert_eq!(EscapeFamily::EscIntermediate.after_byte(b'P'), EscapeFamily::Ground);
+
+    assert_eq!(EscapeFamily::Esc.after_byte(b'P'), EscapeFamily::DcsEntry);
+    assert_eq!(EscapeFamily::DcsEntry.after_byte(b'1'), EscapeFamily::DcsParam);
+    assert_eq!(EscapeFamily::DcsParam.after_byte(b' '), EscapeFamily::DcsIntermediate);
+    assert_eq!(EscapeFamily::DcsIntermediate.after_byte(b'0'), EscapeFamily::DcsIgnore);
+    assert_eq!(EscapeFamily::DcsIgnore.after_byte(0x9c), EscapeFamily::DcsIgnore);
+    assert_eq!(EscapeFamily::DcsEntry.after_byte(b'q'), EscapeFamily::DcsPassthrough);
+    assert_eq!(EscapeFamily::DcsPassthrough.after_byte(0x9c), EscapeFamily::Ground);
+}
+
+/// C1 ST terminates only DCS passthrough in vte; before the final byte it must
+/// not move the mirror to Ground and let controls bypass vte's DCS state.
+#[test]
+fn c1_st_before_dcs_hook_keeps_parser_and_vte_in_sync() {
+    let mut parser = Parser::new(Grid::new(8, 3));
+
+    parser.advance(b"\x1bP\x9cA\nB");
+
+    assert_eq!(row_text(&parser, 0), "        ");
+    assert_eq!(row_text(&parser, 1), "        ");
+    parser.advance(b"\x1b\\Z");
+    assert_eq!(parser.grid().row(0)[0].ch, 'Z');
+}
+
+/// An iTerm2 payload larger than the generic OSC ceiling but below the media
+/// ceiling must be staged whole and dispatched through the media contract.
+#[test]
+fn iterm2_payload_above_generic_escape_cap_dispatches() {
+    let _serialised = serialised_captures();
+    let payload_bytes = 2 * MAX_ESCAPE_SEQUENCE_BYTES;
+    let mut parser = Parser::new(Grid::new(80, 24));
+
+    let media = only_media(parser.advance(&iterm2_sequence(payload_bytes)));
+
+    assert_eq!(media.protocol, MediaProtocol::Iterm2File);
+    assert_eq!(media.metadata, "File=inline=1");
+    assert_eq!(media.data.len(), payload_bytes);
+}
+
+/// iTerm2 obeys the advertised payload boundary exactly: one lone capture can
+/// dispatch 16 MiB, while the next byte rejects the whole image.
+#[test]
+fn iterm2_payload_uses_exact_media_boundary() {
+    let _serialised = serialised_captures();
+
+    for payload_bytes in
+        [MAX_ESCAPE_SEQUENCE_BYTES, 2 * MAX_ESCAPE_SEQUENCE_BYTES, MAX_MEDIA_PAYLOAD_BYTES]
+    {
+        let mut parser = Parser::new(Grid::new(80, 24));
+        let media = only_media(parser.advance(&iterm2_sequence(payload_bytes)));
+        assert_eq!(media.protocol, MediaProtocol::Iterm2File);
+        assert_eq!(media.data.len(), payload_bytes);
+    }
+
+    let mut parser = Parser::new(Grid::new(80, 24));
+    let events = parser.advance(&iterm2_sequence(MAX_MEDIA_PAYLOAD_BYTES + 1));
+    assert!(events.iter().all(|event| !matches!(event, VtEvent::Media(_))));
+}
+
+/// The streamed OSC path must retain its terminator state across every input
+/// split instead of requiring the whole introducer or ST in one PTY chunk.
+#[test]
+fn iterm2_media_supports_every_buffer_split() {
+    let _serialised = serialised_captures();
+    let sequence = iterm2_sequence(8);
+
+    for split in 0..=sequence.len() {
+        let mut parser = Parser::new(Grid::new(80, 24));
+        let mut events = parser.advance(&sequence[..split]);
+        events.extend(parser.advance(&sequence[split..]));
+
+        let media = only_media(events);
+        assert_eq!(media.protocol, MediaProtocol::Iterm2File, "split {split}");
+        assert_eq!(media.data, b"AAAAAAAA", "split {split}");
+    }
+}
+
+/// Unsupported APC strings remain bounded by media staging and return cleanly
+/// to ground without being misclassified as Kitty graphics.
+#[test]
+fn non_kitty_apc_resynchronizes_without_media() {
+    let _serialised = serialised_captures();
+    let mut parser = Parser::new(Grid::new(16, 2));
+
+    let events = parser.advance(b"\x1b_Xnot-kitty\x1b\\Z");
+
+    assert!(events.iter().all(|event| !matches!(event, VtEvent::Media(_))));
+    assert_eq!(parser.grid().row(0)[0].ch, 'Z');
+    assert_eq!(parser.live_capture_count(), 0);
+}
+
+/// A non-Kitty APC larger than the generic escape cap still uses bounded media
+/// staging, emits no image, and returns to ground after its terminator.
+#[test]
+fn oversized_non_kitty_apc_is_bounded_and_resynchronizes() {
+    let _serialised = serialised_captures();
+    let mut parser = Parser::new(Grid::new(16, 2));
+    let mut sequence = b"\x1b_X".to_vec();
+    sequence.extend(std::iter::repeat_n(b'A', MAX_MEDIA_PAYLOAD_BYTES + 1));
+    sequence.extend_from_slice(b"\x1b\\Z");
+
+    let events = parser.advance(&sequence);
+
+    assert!(events.iter().all(|event| !matches!(event, VtEvent::Media(_))));
+    assert_eq!(parser.grid().row(0)[0].ch, 'Z');
+    assert_eq!(parser.live_capture_count(), 0);
+    assert_eq!(parser.retained_amount().items, 0);
+}
+
+/// A non-media C1 control executes in vte ground and must not leave the parser
+/// treating the following printable text as an escape continuation.
+#[test]
+fn ordinary_c1_control_returns_to_printable_ground() {
+    let mut parser = Parser::new(Grid::new(8, 1));
+
+    parser.advance(b"\x80ABC");
+
+    assert_eq!(row_text(&parser, 0), "ABC     ");
+}
+
+/// C1-looking UTF-8 continuation bytes remain owned by vte while a multibyte
+/// code point is split across PTY chunks; they must not start APC or OSC media.
+#[test]
+fn split_utf8_continuations_are_not_media_introducers() {
+    let _serialised = serialised_captures();
+    for text in ["\u{075d}", "\u{075f}", "\u{201d}", "\u{201f}", "\u{1f61d}", "\u{1f61f}"] {
+        let bytes = text.as_bytes();
+        assert!(matches!(bytes[bytes.len() - 1], 0x9d | 0x9f));
+        let mut parser = Parser::new(Grid::new(8, 1));
+        let mut events = Vec::new();
+
+        for byte in bytes {
+            events.extend(parser.advance(std::slice::from_ref(byte)));
+        }
+
+        assert!(events.iter().all(|event| !matches!(event, VtEvent::Media(_))));
+        assert_eq!(parser.grid().row(0)[0].ch, text.chars().next().unwrap());
+        assert_eq!(parser.live_capture_count(), 0);
+    }
+}
+
+/// iTerm2 metadata may fill its explicit cap, while one byte beyond rejects the
+/// whole transfer rather than retaining unbounded attributes.
+#[test]
+fn iterm2_metadata_uses_exact_bounded_capacity() {
+    let _serialised = serialised_captures();
+    for (metadata_bytes, should_dispatch) in [
+        (MAX_ITERM2_METADATA_BYTES - b"File=".len(), true),
+        (MAX_ITERM2_METADATA_BYTES - b"File=".len() + 1, false),
+    ] {
+        let mut sequence = b"\x1b]1337;File=".to_vec();
+        sequence.extend(std::iter::repeat_n(b'a', metadata_bytes));
+        sequence.extend_from_slice(b":AAAA\x1b\\");
+        let mut parser = Parser::new(Grid::new(16, 2));
+
+        let events = parser.advance(&sequence);
+        let dispatched = events.iter().any(|event| matches!(event, VtEvent::Media(_)));
+
+        assert_eq!(dispatched, should_dispatch, "metadata bytes {metadata_bytes}");
+        assert_eq!(parser.live_capture_count(), 0);
+    }
+}
+
+/// A recognized iTerm2 prefix without the metadata/data separator is malformed;
+/// termination releases staging without surfacing a partial image.
+#[test]
+fn malformed_iterm2_media_is_rejected_and_resynchronizes() {
+    let _serialised = serialised_captures();
+    let mut parser = Parser::new(Grid::new(16, 2));
+
+    let events = parser.advance(b"\x1b]1337;File=inline=1\x1b\\Z");
+
+    assert!(events.iter().all(|event| !matches!(event, VtEvent::Media(_))));
+    assert_eq!(parser.grid().row(0)[0].ch, 'Z');
+    assert_eq!(parser.live_capture_count(), 0);
+}
+
+/// CAN and SUB abort iTerm2 staging without dispatching the bytes accumulated
+/// before cancellation as an image.
+#[test]
+fn can_and_sub_cancel_iterm2_without_emitting_media() {
+    let _serialised = serialised_captures();
+    for cancel in [0x18, 0x1a] {
+        let mut parser = Parser::new(Grid::new(16, 2));
+        let mut sequence = b"\x1b]1337;File=inline=1:AAAA".to_vec();
+        sequence.push(cancel);
+
+        let events = parser.advance(&sequence);
+
+        assert!(events.iter().all(|event| !matches!(event, VtEvent::Media(_))));
+        assert_eq!(parser.live_capture_count(), 0);
+    }
+}
+
+/// iTerm2 staging consumes the same admission slots and reports the same
+/// progress/retention metrics as APC and DCS captures.
+#[test]
+fn iterm2_capture_participates_in_process_staging_accounting() {
+    let _serialised = serialised_captures();
+    let mut parser = Parser::new(Grid::new(80, 24));
+
+    parser.advance(b"\x1b]1337;File=inline=1:AAAA");
+
+    assert_eq!(parser.live_capture_count(), 1);
+    assert_eq!(parser.capture_progress(), b"File=inline=1".len() + 4);
+    assert_eq!(CAPTURE_FLOOR_RESERVED.load(Ordering::Relaxed), MIN_CAPTURE_STAGING_BYTES);
+    assert_eq!(parser.retained_amount().items, 1);
+
+    parser.advance(b"\x1b\\");
+    assert_eq!(parser.live_capture_count(), 0);
+    assert_eq!(parser.retained_amount().items, 0);
+}
+
+/// Host cancellation releases iTerm2 staging, swallows the sender's remaining
+/// base64 tail, and resumes at ST without printing the abandoned transfer.
+#[test]
+fn host_cancelled_iterm2_capture_discards_tail_through_terminator() {
+    let _serialised = serialised_captures();
+    let mut parser = Parser::new(Grid::new(16, 2));
+    parser.advance(b"\x1b]1337;File=inline=1:AAAA");
+    assert_eq!(parser.live_capture_count(), 1);
+
+    assert!(parser.cancel_capture() > 0);
+    parser.advance(b"BBBBCCCC\x1b\\Z");
+
+    assert_eq!(parser.grid().row(0)[0].ch, 'Z');
+    assert_eq!(parser.live_capture_count(), 0);
+}
+
+/// Kitty, Sixel, and iTerm2 all reserve from the same fixed floor pool, so a
+/// mixed workload cannot admit more captures than the documented guarantee.
+#[test]
+fn mixed_media_protocols_share_the_process_staging_pool() {
+    let _serialised = serialised_captures();
+    let mut parsers: Vec<Parser> =
+        (0..GUARANTEED_CONCURRENT_CAPTURES).map(|_| Parser::new(Grid::new(8, 1))).collect();
+
+    for (index, parser) in parsers.iter_mut().enumerate() {
+        match index % 3 {
+            0 => {
+                parser.advance(b"\x1b_GA");
+            }
+            1 => {
+                parser.advance(b"\x1bPq?");
+            }
+            _ => {
+                parser.advance(b"\x1b]1337;File=inline=1:A");
+            }
+        }
+        assert_eq!(parser.live_capture_count(), 1);
+    }
+
+    assert_eq!(
+        CAPTURE_FLOOR_RESERVED.load(Ordering::Relaxed),
+        GUARANTEED_CONCURRENT_CAPTURES * MIN_CAPTURE_STAGING_BYTES
+    );
+    let mut refused = Parser::new(Grid::new(8, 1));
+    refused.advance(b"\x1b]1337;File=inline=1:A");
+    assert_eq!(refused.live_capture_count(), 1);
+    assert_eq!(refused.retained_amount().bytes, 0);
+}
+
 #[test]
 fn v120_parser_media_capture_shares_one_budget() {
     let _serialised = serialised_captures();
@@ -525,6 +1117,18 @@ fn kitty_keyboard_push_sets_flags() {
     assert_eq!(parser.kitty_keyboard_flags(), 1);
 }
 
+/// Kitty flag storage keeps the protocol's seven data bits without integer wraparound.
+#[test]
+fn kitty_keyboard_flags_mask_the_reserved_stack_bit() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+
+    parser.advance(b"\x1b[>255u");
+    assert_eq!(parser.kitty_keyboard_flags(), 0x7f);
+
+    parser.advance(b"\x1b[=128;1u");
+    assert_eq!(parser.kitty_keyboard_flags(), 0);
+}
+
 #[test]
 fn kitty_keyboard_pop_restores_previous_flags() {
     let mut parser = Parser::new(Grid::new(8, 2));
@@ -576,6 +1180,12 @@ fn kitty_keyboard_set_replaces_top() {
     // CSI = 1 ; 3 u — mode 3 clears the given bits.
     parser.advance(b"\x1b[=1;3u");
     assert_eq!(parser.kitty_keyboard_flags(), 6);
+
+    // Unsupported application modes leave the active flags unchanged.
+    parser.advance(b"\x1b[=31;9u");
+    assert_eq!(parser.kitty_keyboard_flags(), 6);
+    parser.advance(b"\x1b[=31;0u");
+    assert_eq!(parser.kitty_keyboard_flags(), 6);
 }
 
 #[test]
@@ -587,6 +1197,36 @@ fn kitty_keyboard_stack_depth_is_capped() {
         parser.advance(b"\x1b[>1u");
     }
     assert_eq!(parser.kitty_keyboard_flags(), 1);
+}
+
+/// A full Kitty stack evicts its oldest entry so the newest push still becomes active.
+#[test]
+fn kitty_keyboard_full_stack_evicts_oldest_entry() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    for flags in 1..=32 {
+        parser.advance(format!("\x1b[>{flags}u").as_bytes());
+    }
+
+    parser.advance(b"\x1b[>99u\x1b[<31u");
+
+    assert_eq!(parser.kitty_keyboard_flags(), 2);
+}
+
+/// Main and alternate screens retain independent Kitty keyboard stacks.
+#[test]
+fn kitty_keyboard_flags_are_screen_local() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    parser.advance(b"\x1b[>1u");
+
+    parser.advance(b"\x1b[?1049h");
+    assert_eq!(parser.kitty_keyboard_flags(), 0);
+    parser.advance(b"\x1b[>2u");
+    assert_eq!(parser.kitty_keyboard_flags(), 2);
+
+    parser.advance(b"\x1b[?1049l");
+    assert_eq!(parser.kitty_keyboard_flags(), 1);
+    parser.advance(b"\x1b[?1049h");
+    assert_eq!(parser.kitty_keyboard_flags(), 2);
 }
 
 #[test]

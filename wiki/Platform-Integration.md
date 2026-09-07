@@ -33,6 +33,11 @@ session marker and breadcrumb writer, load config, initialize logging from
 state is under `~/.sonicterm`; packaged assets are resolved by
 `sonicterm-cfg::assets`.
 
+Terminal IME geometry is shared app behavior: each window sends the active
+pane's physical cursor rectangle, including its origin and content padding once.
+Deduplication uses pane identity, physical position, and physical size rather
+than only row/column. Palette and search fields retain their own anchors.
+
 ## Native target opening
 
 Path scanning and openability probing are cross-platform app behavior. The
@@ -140,7 +145,21 @@ The Windows backend initializes OLE on the UI thread and implements COM
 `com.sonic-terminal.tab.v1` clipboard format (`CF_SONIC_TAB`) and uses
 `DoDragDrop` and `RegisterDragDrop`. Every destination HWND is registered through
 the shared tab-drag backend, including torn-out child windows. OLE lifetime and
-drag operations stay on the window thread.
+drag operations stay on the window thread. The app retains stable source
+`WindowId`/`TabId` bookkeeping throughout the gesture; a serialized or press-time
+index is not source authority. An OLE `MOVE` result without a resolved destination
+cancels locally rather than inventing a main-window/self target.
+
+### System font fallback
+
+The DirectWrite/GDI bridge passes complete UTF-16 to the analysis source.
+Mapping positions, remaining text, and locale lengths use UTF-16 code units,
+not Rust scalar counts. A zero, out-of-range, or split-surrogate mapping span
+fails the whole native fallback request, including any candidates accumulated
+before the failure. The caller reports the failure and continues its remaining
+configured locators. A successful request returns an ordered, deduplicated
+candidate-font list, not per-character assignments; already-loaded faces and
+BMP behavior keep their existing path.
 
 ### PTY and software presentation
 
@@ -165,9 +184,13 @@ grouping, and compositor identity.
 
 Linux has no SonicTerm native menu, desktop-notification bridge,
 foreground-process title adapter, native material backdrop, or cross-process tab
-drag. The binary clamps any configured backdrop to opaque with a warning and
-uses in-app behavior for the supported actions. Shared panes, tabs, windows, and
-in-process tab movement remain available.
+drag. Its shell installs a pure platform normalizer on the shared app runner.
+Startup and every explicit reload pass through that one seam before config is
+stored or applied: Mica, Acrylic, and Tabbed become opaque with one warning;
+already-opaque input is unchanged and silent. Warm, new, and torn-out windows
+therefore consume the same normalized value. macOS and Windows install identity
+behavior and retain their supported backdrop policy. Shared panes, tabs, windows,
+and in-process tab movement remain available.
 
 ### Shell, fonts, and assets
 
@@ -183,11 +206,22 @@ remains available.
 
 ### Runtime smoke boundary
 
-`sonicterm --runtime-smoke` uses isolated state and runs the shared app with a
-30-second proof deadline. Success requires a native window and GPU surface,
-`/bin/sh` in a PTY, a non-literal marker reaching the grid, and a later native
-frame presentation. [Packaging](Packaging) describes how both Linux package
-layouts invoke this boundary on X11 and Wayland.
+All three shipping binaries accept the hidden `--runtime-smoke` mode. The
+platform supplies its real shell command (`/bin/sh` on macOS/Linux, `cmd.exe` on
+Windows), while the shared runner requires a native window, renderer/device, a
+non-literal PTY marker observed in the live grid, and a later native
+presentation. It then uses the production default warm pool to create and report
+one hidden renderer, adopts that exact window through tab tear-out, presents the
+child, closes it, clears any replenished spare, and requires
+`live_renderer_count` to return to the pre-window baseline. Warm-lifecycle
+failure is stable exit code `16`.
+
+Automation passes separate scratch `config/` and `logs/` roots without replacing
+`HOME`. `scripts/native-smoke-runner.py` removes inherited `NO_COLOR`, captures
+stdout/stderr and log artifacts, enforces a 45-second outer deadline, and kills
+the full process tree. [Packaging](Packaging) describes the packaged Linux X11
+and Wayland invocations; PR and release gates also run the built macOS and
+Windows binaries.
 
 ## Platform matrix
 
@@ -244,6 +278,10 @@ flowchart TD
 读取配置，用 `[logging]` 初始化日志，报告旧会话，加载主题与键位资源，创建
 `AppStateMachine`，构建平台 shell，再运行共享 winit app。用户状态位于
 `~/.sonicterm`；打包资源统一由 `sonicterm-cfg::assets` 查找。
+
+终端输入法几何属于共享 app：每个窗口发送活动窗格的物理光标矩形，只加一次窗格原点和
+内容内边距。去重键包含窗格身份、物理位置和物理尺寸，不仅是行列。命令面板和搜索框保留
+各自的输入锚点。
 
 ## 原生目标打开
 
@@ -334,6 +372,16 @@ Windows 后端在 UI 线程初始化 OLE，并实现 COM `IDataObject`、`IDropS
 `IDropTarget`。它注册私有 `com.sonic-terminal.tab.v1` clipboard format
 （`CF_SONIC_TAB`），使用 `DoDragDrop` 和 `RegisterDragDrop`。所有目标 HWND 都通过共享
 标签页拖放后端注册，包括拖出的子窗口。OLE 生命周期和拖放操作始终留在窗口线程。
+app 在整个手势中保留稳定源 `WindowId`/`TabId`；序列化下标或按下时的下标不作为源身份权威。
+OLE 返回 `MOVE` 却没有解析出的目标时，会取消本地移动，而不会虚构主窗口或自身目标。
+
+### 系统字体回退
+
+DirectWrite/GDI 桥向 analysis source 传入完整 UTF-16。映射位置、剩余文本及 locale 长度
+都按 UTF-16 代码单元计算，不按 Rust 字符数量计算。返回零长度、越界或拆分代理项对的映射
+范围时，整个原生回退请求失败，包含此前已积累的候选。调用方报告失败并继续其余已配置的
+字体查找源。成功请求返回按顺序去重的候选字体列表，不是逐字符分配；已加载字体和 BMP
+行为保留原有路径。
 
 ### PTY 与软件呈现
 
@@ -355,8 +403,11 @@ Desktop entry、AppStream component、hicolor icon、Wayland application id 和 
 launcher activation、任务分组和 compositor identity 对齐。
 
 Linux 没有 SonicTerm 原生菜单、桌面通知 bridge、前台进程标题 adapter、原生 material
-backdrop 或跨进程标签页拖放。二进制会带 warning 把 backdrop 收敛为 opaque，并为支持的
-操作使用应用内行为。共享窗格、标签页、窗口和进程内标签页移动仍可使用。
+backdrop 或跨进程标签页拖放。Linux shell 会在共享 app runner 上安装纯平台收敛器。
+启动和每次显式重载都会在配置被存储或应用前经过同一个接缝：Mica、Acrylic 与 Tabbed
+会变为 opaque 并记录一次 warning；已经为 opaque 的输入保持不变且不写 warning。
+预热、新建和拆出窗口因此都会使用同一已收敛值。macOS 与 Windows 安装 identity 行为，
+保留各自支持的 backdrop 策略。共享窗格、标签页、窗口和进程内标签页移动仍可使用。
 
 ### Shell、字体与资源
 
@@ -369,10 +420,17 @@ Fontconfig discovery 前传给 `FontStack`，并在字体重载时继续保留�
 
 ### 运行时 smoke 边界
 
-`sonicterm --runtime-smoke` 使用隔离状态，并给共享 app 30 秒证明期限。成功必须完成原生
-窗口与 GPU surface 创建、在 PTY 中启动 `/bin/sh`、让非 literal marker 进入 grid，
-并在之后完成一帧原生呈现。[打包](Packaging)说明两种 Linux 包布局如何分别在 X11 与
-Wayland 上调用该边界。
+三个发行二进制都接受隐藏的 `--runtime-smoke` 模式。平台提供真实 shell 命令（macOS/Linux
+使用 `/bin/sh`，Windows 使用 `cmd.exe`）；共享 runner 要求原生窗口、渲染器/设备、在实时
+grid 中观察到非字面 PTY marker，并在之后完成一次原生呈现。随后它使用生产默认预热池创建并
+报告一个隐藏渲染器，通过标签页拆出采用完全相同的窗口，呈现子窗口，再关闭它、清除可能补充的
+备用项，并要求 `live_renderer_count` 回到创建窗口前的基线。预热生命周期失败使用稳定退出码
+`16`。
+
+自动化会传入彼此分开的临时 `config/` 与 `logs/` 根目录，且不会替换 `HOME`。
+`scripts/native-smoke-runner.py` 会移除继承的 `NO_COLOR`、保存 stdout/stderr 与日志工件、
+执行 45 秒外层期限，并终止完整进程树。[打包](Packaging)说明 Linux 包在 X11 与 Wayland
+上的调用；PR 和 release gate 也会运行已构建的 macOS 与 Windows 二进制。
 
 ## 平台矩阵
 

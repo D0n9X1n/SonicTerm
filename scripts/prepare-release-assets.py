@@ -13,6 +13,7 @@ from pathlib import Path
 
 SCHEMA_VERSION = 1
 HASH_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
+COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
 TAG_PATTERN = re.compile(r"v?([0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.+-]+)?)\Z")
 RELEASE_SUFFIXES = (".dmg", ".msi", ".deb", ".tar.gz")
 REQUIRED = {
@@ -76,6 +77,47 @@ def check_version(args: argparse.Namespace) -> None:
         details = ", ".join(f"{name}={versions[name]}" for name in mismatched)
         fail(f"tag {args.tag} expects workspace version {expected}; mismatches: {details}")
     print(f"release tag {args.tag} matches {len(versions)} workspace packages")
+
+
+def resolve_commit(args: argparse.Namespace) -> None:
+    root = Path(args.repo_root).resolve()
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "--verify", f"{args.revision}^{{commit}}"],
+            cwd=root,
+            text=True,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        fail(f"cannot resolve {args.revision!r} to a commit: {error}")
+    if not COMMIT_PATTERN.fullmatch(commit):
+        fail(f"resolved commit has invalid SHA {commit!r}")
+    print(commit)
+
+
+def check_main_ci(args: argparse.Namespace) -> None:
+    if not COMMIT_PATTERN.fullmatch(args.sha):
+        fail(f"invalid commit SHA {args.sha!r}")
+    try:
+        payload = json.load(sys.stdin)
+    except (OSError, json.JSONDecodeError) as error:
+        fail(f"cannot read CI run response: {error}")
+    runs = payload.get("workflow_runs") if isinstance(payload, dict) else None
+    if not isinstance(runs, list):
+        fail("CI run response has no workflow_runs array")
+    matching = [
+        run
+        for run in runs
+        if isinstance(run, dict)
+        and run.get("head_sha") == args.sha
+        and run.get("head_branch") == "main"
+        and run.get("event") == "push"
+        and run.get("status") == "completed"
+        and run.get("conclusion") == "success"
+    ]
+    if not matching:
+        fail(f"no completed successful main push CI run for {args.sha}")
+    run = matching[0]
+    print(f"release commit {args.sha} passed main CI run {run.get('id', 'unknown')}")
 
 
 def validate_flat_name(value: object, field: str) -> str:
@@ -198,6 +240,15 @@ def parser() -> argparse.ArgumentParser:
     version.add_argument("--tag", required=True)
     version.add_argument("--repo-root", default=".")
     version.set_defaults(handler=check_version)
+
+    commit = commands.add_parser("resolve-commit")
+    commit.add_argument("--revision", required=True)
+    commit.add_argument("--repo-root", default=".")
+    commit.set_defaults(handler=resolve_commit)
+
+    main_ci = commands.add_parser("check-main-ci")
+    main_ci.add_argument("--sha", required=True)
+    main_ci.set_defaults(handler=check_main_ci)
 
     fragment = commands.add_parser("fragment")
     fragment.add_argument("--tag", required=True)

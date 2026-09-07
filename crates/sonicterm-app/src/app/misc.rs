@@ -291,9 +291,13 @@ impl App {
     }
 
     pub(super) fn enter_quick_select(&mut self) {
-        let Some(pane) = self.active_pane() else {
-            // When: active_pane resolves to nothing; quick-select needs a live grid
-            // to build its label set, so the overlay is not entered.
+        self.enter_quick_select_for_kind(self.frontmost_kind());
+    }
+
+    pub(super) fn enter_quick_select_for_kind(&mut self, kind: FrontmostKind) {
+        let Some(pane) = self.active_pane_id_for_kind(kind).and_then(|id| self.pane_by_id(id))
+        else {
+            // When: active_pane_id_for_kind or pane_by_id has no live grid, quick-select cannot construct its labels.
             return;
         };
         let state = {
@@ -304,9 +308,14 @@ impl App {
             state.quick_select = Some(sonicterm_ui::copy_mode::QuickSelectState::from_grid(grid));
             state
         };
-        self.copy_mode_set(Some(state));
-        if let Some(panes) = self.main_panes() {
-            mark_all_panes_dirty(panes);
+        let window_id = match kind {
+            FrontmostKind::Child(id) => Some(id),
+            _ => self.main_window_id,
+        };
+        if let Some(window) = window_id.and_then(|id| self.windows.get_mut(&id)) {
+            window.copy_mode = Some(state);
+            mark_all_panes_dirty(&window.panes);
+            window.request_redraw();
         }
     }
 
@@ -465,8 +474,8 @@ impl App {
             );
             return;
         }
-        self.write_to_pane(pane_id, bytes.clone());
-        self.broadcast_from(pane_id, bytes);
+        self.write_to_pane(pane_id, bytes.clone(), super::PtyInputSource::Paste);
+        self.broadcast_from(pane_id, bytes, super::PtyInputSource::Paste);
     }
 
     pub(super) fn paste_file_paths_for_kind<I>(&mut self, kind: FrontmostKind, paths: I)
@@ -507,8 +516,8 @@ impl App {
             );
             return;
         }
-        self.write_to_pane(pane_id, bytes.clone());
-        self.broadcast_from(pane_id, bytes);
+        self.write_to_pane(pane_id, bytes.clone(), super::PtyInputSource::FileDrop);
+        self.broadcast_from(pane_id, bytes, super::PtyInputSource::FileDrop);
     }
     pub(super) fn scroll_to_prompt(&mut self, forward: bool) {
         let updated = {
@@ -791,7 +800,9 @@ impl App {
             select_anchor: (0, 0),
             copy_mode: None,
             modifiers: ModifiersState::empty(),
+            pty_pressed_keys: std::collections::HashMap::new(),
             last_render: Instant::now(),
+            retry_not_before: None,
             hover_link: false,
             pressed_tab: None,
             drag_session: None,
@@ -910,9 +921,7 @@ impl App {
             ws.tabs.push(Tab::new(title));
             ws.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
         }
-        // Own the new pane now: until it has one, its memory is attributed to
-        // nothing and the next 30-second sample is a long time to be blind.
-        self.reconcile_pane_owners();
+        self.resize_visible_panes();
     }
     pub(super) fn close_tab_at(&mut self, index: usize) {
         let Some(ws) = self.main_mut() else {
@@ -931,8 +940,9 @@ impl App {
             ws.tabs.close(id);
         }
         for id in st.tree.leaves() {
-            ws.panes.remove(&id);
+            ws.remove_pane(id);
         }
+        self.resize_visible_panes();
     }
     pub(super) fn drain_pending_os_drag_payloads(&mut self) {
         if self.main_mut().is_none() || self.pending_os_drag_payloads.is_empty() {
@@ -974,3 +984,7 @@ impl App {
         self.main_tabs().map(|t| t.len().saturating_sub(1)).unwrap_or(0)
     }
 }
+
+#[cfg(test)]
+#[path = "misc_tests.rs"]
+mod misc_tests;

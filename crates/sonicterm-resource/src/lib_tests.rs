@@ -31,6 +31,262 @@ fn app_pane(governor: &ResourceGovernor, bytes: usize) -> ResourceOwnerId {
 }
 
 #[test]
+fn mixed_resize_uses_final_limits_and_settles_every_accounting_level() {
+    // Opposing byte/item changes use final totals, not a transient component-wise maximum or a release gap.
+    let governor = governor(100);
+    let root = governor.root_owner();
+    let window = governor.create_child(root, OwnerKind::Window, owner_limits(100)).unwrap();
+    let pane = governor.create_child(window, OwnerKind::AppPane, owner_limits(100)).unwrap();
+    let class = ResourceClass::InlineMediaRetained;
+    let initial = ResourceAmount { bytes: 100, items: 1 };
+    let mut held = governor.try_reserve(pane, class, initial).unwrap().commit(initial).unwrap();
+    for actual in [
+        ResourceAmount { bytes: 60, items: 100 },
+        ResourceAmount { bytes: 60, items: 100 },
+        initial,
+        initial,
+        ResourceAmount { bytes: 80, items: 50 },
+    ] {
+        held.try_resize(actual).unwrap();
+        assert_eq!(held.committed_amount(), actual);
+        for owner in [pane, window, root] {
+            let snapshot = governor.snapshot(owner).unwrap();
+            assert_eq!(snapshot.owner_amount, actual);
+            assert_eq!(snapshot.owner_class_bytes[class], actual.bytes);
+            assert_eq!(snapshot.owner_class_items[class], actual.items);
+            assert_eq!(snapshot.process_amount, actual);
+            assert_eq!(snapshot.release_failures, 0);
+        }
+    }
+    drop(held);
+    assert_eq!(governor.snapshot(root).unwrap().process_amount, ResourceAmount::default());
+}
+
+#[test]
+fn mixed_resize_refusals_leave_tokens_balances_and_epochs_unchanged() {
+    // Both budget axes and Closing admission reject without partially shrinking the other axis.
+    let governor = governor(100);
+    let pane = app_pane(&governor, 100);
+    let class = ResourceClass::InlineMediaRetained;
+    let initial = ResourceAmount { bytes: 80, items: 10 };
+    let mut held = governor.try_reserve(pane, class, initial).unwrap().commit(initial).unwrap();
+    for actual in [ResourceAmount { bytes: 101, items: 1 }, ResourceAmount { bytes: 1, items: 101 }]
+    {
+        let before = governor.snapshot(pane).unwrap();
+        assert!(held.try_resize(actual).is_err());
+        let after = governor.snapshot(pane).unwrap();
+        assert_eq!(held.committed_amount(), initial);
+        assert_eq!(after.owner_amount, before.owner_amount);
+        assert_eq!(after.process_amount, before.process_amount);
+        assert_eq!(after.owner_class_bytes, before.owner_class_bytes);
+        assert_eq!(after.owner_class_items, before.owner_class_items);
+        assert_eq!(after.class_epochs, before.class_epochs);
+        assert_eq!(after.owner_epoch, before.owner_epoch);
+    }
+    governor.begin_close(pane).unwrap();
+    assert!(held.try_resize(ResourceAmount { bytes: 40, items: 11 }).is_err());
+    assert_eq!(held.committed_amount(), initial);
+    held.try_resize(ResourceAmount { bytes: 40, items: 5 }).unwrap();
+    let before = governor.snapshot(pane).unwrap();
+    held.try_resize(held.committed_amount()).unwrap();
+    assert_eq!(governor.snapshot(pane).unwrap().owner_epoch, before.owner_epoch);
+    drop(held);
+    governor.finish_close(pane).unwrap();
+}
+
+#[test]
+fn mixed_resize_process_limit_and_overflow_leave_old_accounting_intact() {
+    // Last-step process admission and checked item overflow cannot commit an earlier byte shrink.
+    let mut global = limits(1000);
+    global.process_bytes = 100;
+    let governor = ResourceGovernor::new(ProcessKind::Gui, global).unwrap();
+    let pane = app_pane(&governor, 1000);
+    let class = ResourceClass::InlineMediaRetained;
+    let old = ResourceAmount { bytes: 60, items: 10 };
+    let mut held = governor.try_reserve(pane, class, old).unwrap().commit(old).unwrap();
+    let peer = governor
+        .try_reserve(pane, ResourceClass::GridVisible, ResourceAmount { bytes: 40, items: 1 })
+        .unwrap();
+    let before = governor.snapshot(pane).unwrap();
+    assert!(matches!(
+        held.try_resize(ResourceAmount { bytes: 61, items: 1 }),
+        Err(BudgetError::LimitExceeded { scope: sonicterm_types::BudgetScope::Process, .. })
+    ));
+    assert_eq!(held.committed_amount(), old);
+    let after = governor.snapshot(pane).unwrap();
+    assert_eq!(after.owner_amount, before.owner_amount);
+    assert_eq!(after.owner_epoch, before.owner_epoch);
+    assert_eq!(after.class_epochs, before.class_epochs);
+    drop(peer);
+    held.try_resize(ResourceAmount { bytes: 100, items: 1 }).unwrap();
+    drop(held);
+    assert_eq!(governor.snapshot(pane).unwrap().process_amount, ResourceAmount::default());
+
+    let governor = ResourceGovernor::new(
+        ProcessKind::Gui,
+        GovernorLimits {
+            process_bytes: usize::MAX,
+            class_bytes: enum_map! { _ => usize::MAX },
+            class_items: enum_map! { _ => None },
+        },
+    )
+    .unwrap();
+    let pane = governor
+        .create_child(
+            governor.root_owner(),
+            OwnerKind::Window,
+            OwnerLimits {
+                owner_bytes: usize::MAX,
+                class_bytes: enum_map! { _ => usize::MAX },
+                class_items: enum_map! { _ => None },
+            },
+        )
+        .unwrap();
+    let old = ResourceAmount { bytes: 10, items: usize::MAX - 1 };
+    let mut held = governor.try_reserve(pane, class, old).unwrap().commit(old).unwrap();
+    let peer = governor.try_reserve(pane, class, ResourceAmount { bytes: 1, items: 1 }).unwrap();
+    let before = governor.snapshot(pane).unwrap();
+    assert_eq!(
+        held.try_resize(ResourceAmount { bytes: 1, items: usize::MAX }),
+        Err(BudgetError::Overflow)
+    );
+    let after = governor.snapshot(pane).unwrap();
+    assert_eq!(held.committed_amount(), old);
+    assert_eq!(after.owner_amount, before.owner_amount);
+    assert_eq!(after.owner_epoch, before.owner_epoch);
+    assert_eq!(after.class_epochs, before.class_epochs);
+    drop(peer);
+    drop(held);
+    assert_eq!(governor.snapshot(pane).unwrap().process_amount, ResourceAmount::default());
+}
+
+#[test]
+fn mixed_resize_concurrent_reserve_transfer_and_drop_settle_to_zero() {
+    // Opposite owner paths and concurrent class activity keep the canonical lock order and exact final release.
+    let governor = governor(100_000);
+    let first = app_pane(&governor, 100_000);
+    let second = app_pane(&governor, 100_000);
+    let barrier = Arc::new(Barrier::new(5));
+    let workers: Vec<_> = (0..4)
+        .map(|index| {
+            let governor = governor.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let class = if index % 2 == 0 {
+                    ResourceClass::InlineMediaRetained
+                } else {
+                    ResourceClass::PtyOutput
+                };
+                let mut owner = if index < 2 { first } else { second };
+                let initial = ResourceAmount { bytes: 64, items: 1 };
+                let mut held =
+                    governor.try_reserve(owner, class, initial).unwrap().commit(initial).unwrap();
+                barrier.wait();
+                for _ in 0..200 {
+                    held.try_resize(ResourceAmount { bytes: 32, items: 3 }).unwrap();
+                    let transient = governor
+                        .try_reserve(owner, class, ResourceAmount { bytes: 8, items: 1 })
+                        .unwrap();
+                    let next = if owner == first { second } else { first };
+                    held = held.transfer(next, class).unwrap();
+                    owner = next;
+                    held.try_resize(initial).unwrap();
+                    drop(transient);
+                }
+                drop(held);
+            })
+        })
+        .collect();
+    barrier.wait();
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    for owner in [first, second, governor.root_owner()] {
+        let snapshot = governor.snapshot(owner).unwrap();
+        assert_eq!(snapshot.owner_amount, ResourceAmount::default());
+        assert_eq!(snapshot.process_amount, ResourceAmount::default());
+        assert_eq!(snapshot.release_failures, 0);
+    }
+}
+
+#[test]
+fn multi_owner_transfer_refuses_the_entire_batch_before_any_reattribution() {
+    // A refusal in the second target cannot leave the first pane attributed away from its restored tab.
+    let governor = governor(1000);
+    let first = app_pane(&governor, 1000);
+    let second = app_pane(&governor, 1000);
+    let destination = governor
+        .create_child(governor.root_owner(), OwnerKind::Window, owner_limits(1000))
+        .unwrap();
+    let good = governor.create_child(destination, OwnerKind::AppPane, owner_limits(1000)).unwrap();
+    let small = governor.create_child(destination, OwnerKind::AppPane, owner_limits(1)).unwrap();
+    let amount = ResourceAmount { bytes: 20, items: 2 };
+    let mut a = governor
+        .try_reserve(first, ResourceClass::GridVisible, amount)
+        .unwrap()
+        .commit(amount)
+        .unwrap();
+    let mut b = governor
+        .try_reserve(second, ResourceClass::InlineMediaRetained, amount)
+        .unwrap()
+        .commit(amount)
+        .unwrap();
+    let root_before = governor.snapshot(governor.root_owner()).unwrap();
+    assert!(CommittedReservation::transfer_many([(&mut a, good), (&mut b, small)]).is_err());
+    assert_eq!(governor.snapshot(first).unwrap().owner_amount, amount);
+    assert_eq!(governor.snapshot(second).unwrap().owner_amount, amount);
+    assert_eq!(governor.snapshot(destination).unwrap().owner_amount, ResourceAmount::default());
+    assert_eq!(
+        governor.snapshot(governor.root_owner()).unwrap().class_epochs,
+        root_before.class_epochs
+    );
+    let other = governor.create_child(destination, OwnerKind::AppPane, owner_limits(1000)).unwrap();
+    CommittedReservation::transfer_many([(&mut a, good), (&mut b, other)]).unwrap();
+    assert_eq!(governor.snapshot(first).unwrap().owner_amount, ResourceAmount::default());
+    assert_eq!(governor.snapshot(second).unwrap().owner_amount, ResourceAmount::default());
+    assert_eq!(
+        governor.snapshot(destination).unwrap().owner_amount,
+        ResourceAmount { bytes: 40, items: 4 }
+    );
+    assert_eq!(
+        governor.snapshot(governor.root_owner()).unwrap().process_amount,
+        root_before.process_amount
+    );
+    drop(a);
+    drop(b);
+    assert_eq!(governor.snapshot(destination).unwrap().owner_amount, ResourceAmount::default());
+}
+
+#[test]
+fn multi_owner_transfer_accepts_final_limit_swaps_without_transient_growth() {
+    // Opposite moves can exchange full-budget owners because only final balances govern admission.
+    let governor = governor(100);
+    let first = app_pane(&governor, 50);
+    let second = app_pane(&governor, 50);
+    let amount = ResourceAmount { bytes: 50, items: 1 };
+    let mut a = governor
+        .try_reserve(first, ResourceClass::GridVisible, amount)
+        .unwrap()
+        .commit(amount)
+        .unwrap();
+    let mut b = governor
+        .try_reserve(second, ResourceClass::GridVisible, amount)
+        .unwrap()
+        .commit(amount)
+        .unwrap();
+    CommittedReservation::transfer_many([(&mut a, second), (&mut b, first)]).unwrap();
+    assert_eq!(governor.snapshot(first).unwrap().owner_amount, amount);
+    assert_eq!(governor.snapshot(second).unwrap().owner_amount, amount);
+    drop(a);
+    assert_eq!(governor.snapshot(second).unwrap().owner_amount, ResourceAmount::default());
+    drop(b);
+    assert_eq!(
+        governor.snapshot(governor.root_owner()).unwrap().process_amount,
+        ResourceAmount::default()
+    );
+}
+
+#[test]
 fn invalid_owner_hierarchy_is_rejected() {
     let gui = governor(100);
     assert!(matches!(
@@ -509,6 +765,59 @@ fn committed_transfer_failure_returns_original_charge() {
     assert_eq!(governor.snapshot(source).unwrap().owner_amount.bytes, 8);
     assert_eq!(governor.snapshot(target).unwrap().owner_amount.bytes, 0);
     drop(error.reservation);
+}
+
+/// A later-class rejection leaves an entire committed batch at its source.
+///
+/// `GridVisible` fits the target while `GridHistory` does not, so a loop of
+/// single-token transfers would partially move this map before discovering the
+/// rejection. The batch must validate every class before moving any of them.
+#[test]
+fn committed_batch_transfer_is_atomic_across_classes() {
+    let governor = governor(100);
+    let root = governor.root_owner();
+    let source_window = governor.create_child(root, OwnerKind::Window, owner_limits(100)).unwrap();
+    let target_window = governor.create_child(root, OwnerKind::Window, owner_limits(100)).unwrap();
+    let source =
+        governor.create_child(source_window, OwnerKind::AppPane, owner_limits(100)).unwrap();
+    let target_limits = OwnerLimits {
+        owner_bytes: 100,
+        class_bytes: enum_map! {
+            ResourceClass::GridHistory => 5,
+            _ => 100,
+        },
+        class_items: enum_map! { _ => Some(100) },
+    };
+    let target = governor.create_child(target_window, OwnerKind::AppPane, target_limits).unwrap();
+    let mut charges = [
+        governor
+            .try_reserve(source, ResourceClass::GridVisible, ResourceAmount { bytes: 8, items: 1 })
+            .unwrap()
+            .commit(ResourceAmount { bytes: 8, items: 1 })
+            .unwrap(),
+        governor
+            .try_reserve(source, ResourceClass::GridHistory, ResourceAmount { bytes: 8, items: 1 })
+            .unwrap()
+            .commit(ResourceAmount { bytes: 8, items: 1 })
+            .unwrap(),
+    ];
+    let before = governor.snapshot(root).unwrap();
+
+    assert!(CommittedReservation::transfer_batch(&mut charges, target).is_err());
+
+    let source_after = governor.snapshot(source).unwrap();
+    let target_after = governor.snapshot(target).unwrap();
+    let root_after = governor.snapshot(root).unwrap();
+    assert_eq!(source_after.owner_amount, ResourceAmount { bytes: 16, items: 2 });
+    assert_eq!(source_after.owner_class_bytes[ResourceClass::GridVisible], 8);
+    assert_eq!(source_after.owner_class_bytes[ResourceClass::GridHistory], 8);
+    assert_eq!(target_after.owner_amount, ResourceAmount::default());
+    assert_eq!(root_after.process_amount, before.process_amount);
+    assert_eq!(root_after.process_class_bytes, before.process_class_bytes);
+
+    governor.begin_close(target).unwrap();
+    governor.finish_close(target).unwrap();
+    drop(charges);
 }
 
 #[test]

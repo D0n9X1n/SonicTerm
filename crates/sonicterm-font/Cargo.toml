@@ -13,12 +13,6 @@ description = "SonicTerm Terminal — absorbed WezTerm font stack, shaping, fall
 [lints]
 workspace = true
 
-[features]
-vendor-jetbrains = []
-vendor-roboto = []
-vendor-noto-emoji = []
-vendor-nerd-font-symbols = []
-
 [dependencies]
 anyhow.workspace = true
 cairo-rs = { version = "0.22", default-features = false }
@@ -51,3 +45,7 @@ cocoa = "=0.26.1"
 core-foundation = "=0.10.1"
 core-text = "=22.0.0"
 objc = "0.2"
+
+[dev-dependencies]
+sonicterm-logging.workspace = true
+tracing.workspace = true

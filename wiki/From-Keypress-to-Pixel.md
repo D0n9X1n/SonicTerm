@@ -119,9 +119,11 @@ Renderer construction also creates:
 
 ### 2. The key reaches the active input owner
 
-winit sends a pressed `WindowEvent::KeyboardInput`. SonicTerm uses
-`event.logical_key`, so the operating system and active keyboard layout have
-already resolved the character as uppercase `A`.
+winit sends `WindowEvent::KeyboardInput` for presses, repeats, and releases.
+SonicTerm retains the complete event: the physical key, layout-resolved logical
+key, operating-system-produced text, keypad location, event state, and repeat
+marker. For this example the layout has resolved the logical character and text
+as uppercase `A`.
 
 A local input owner may stop the route. The main window checks:
 
@@ -142,10 +144,26 @@ While an IME composition is active, raw key events do not reach the PTY. An
 `Ime::Commit` supplies UTF-8 text after composition. A palette or search field
 can consume that commit. READONLY or copy mode can discard it.
 
+The terminal IME anchor uses the active pane's physical origin, content padding,
+and cursor cell with live physical cell metrics. It adds each offset once,
+without another DPI multiplication. Each window coalesces identical
+`(pane id, physical position, physical size)` updates; equal-cell focus changes,
+zoom, transfer, font/padding changes, and resize still update the native anchor.
+Palette and search retain their separate field anchors and reset the terminal
+anchor cache before returning input ownership.
+
+Only a press that survives local routing and reaches at least one bounded PTY
+input queue is recorded as PTY-owned. Its accepted pane set stays fixed for the
+whole lifecycle: repeats consult it before any palette, search, or keymap owner
+that opened later, and releases return to it even if focus or broadcast state
+changed. A locally consumed or rejected press creates no orphan repeat or
+release event.
+
 ### 3. `A` becomes terminal input bytes
 
-`encode_key` calls `encode_logical`. A plain `Key::Character` with no Control or
-Alt modifier uses its UTF-8 bytes unchanged.
+`encode_key` consumes the complete event and the active pane's negotiated
+keyboard snapshot. A plain `Key::Character` with no Control or Alt modifier
+uses the operating-system-produced UTF-8 text unchanged.
 
 | Property | Value |
 | --- | --- |
@@ -154,19 +172,36 @@ Alt modifier uses its UTF-8 bytes unchanged.
 | UTF-8 | `0x41` |
 | Decimal byte | `65` |
 
-Other keys and modifiers follow four distinct rules:
+Other keys and modifiers follow these rules:
 
 - **Control and keymap precedence:** a configured keymap may consume a chord
   before PTY encoding. Otherwise Control is checked before Alt: Control+A
-  becomes `0x01`, and Control+Alt+A still uses the Control branch.
-- **Text modifiers:** without Control, Alt+A prefixes `ESC` to the UTF-8 bytes.
-  Shift and Super/Meta do not change a `Key::Character` in this encoder; they
-  may already have changed the logical character.
-- **Cursor and function keys:** named cursor, Home, and End keys use the active
-  pane's lock-free DECCKM snapshot. Unmodified application-cursor keys use SS3;
-  modified forms use xterm parameterized CSI. Function keys use xterm forms.
-- **kitty Shift+Enter:** with nonzero kitty keyboard flags, Shift+Enter uses
-  `CSI 13 ; 2 u`.
+  becomes `0x01`, and Control+Alt+A adds an `ESC` prefix to that control byte.
+  The legacy aliases cover Space/@/2, `[ /3`, `\ /4`, `] /5`, `^/~/6`,
+  `_/ /7`, and `?/8`.
+- **Text and BackTab:** Alt prefixes `ESC` to default legacy text. The OS supplies
+  shifted and layout-specific text. Tab emits HT. At `modifyOtherKeys` level 1,
+  plain Shift+Tab remains `CSI Z`, while other modified Tab forms and modified
+  Enter use `CSI 27 ; modifier ; code ~`; level 2 also makes Shift+Tab
+  `CSI 27 ; 2 ; 9 ~`. Level 1 keeps its ordinary Shift/Control aliases and
+  Backspace exception; level 2 encodes every supported modified ordinary key.
+- **Negotiated legacy modes:** the pane snapshot includes DECCKM cursor keys,
+  DECKPAM keypad identity, DECBKM Backspace, ANSI newline mode, and xterm
+  `modifyOtherKeys` levels 1 and 2. Modified cursor and function keys preserve
+  Shift, Alt, Control, and Super in the xterm modifier parameter. Function-key
+  coverage extends through F35.
+- **Kitty protocol:** each main or alternate screen has an independent bounded
+  progressive-enhancement stack. Unsupported set modes do nothing, and stored
+  flags retain the protocol's seven data bits. SonicTerm supports
+  disambiguation, event types, alternate keys, all-keys reporting, associated
+  text, functional and keypad identities, and modifier-key identities.
+  Alternate-key reporting alone enriches only keys already represented as
+  CSI-u; it does not change raw text, DECKPAM, or terminfo encodings. Shift+Tab
+  is `CSI 9 ; 2 u` when disambiguated. Repeats and releases carry Kitty event
+  types when requested.
+- **Keypad:** legacy normal mode follows the layout/NumLock result and preserves
+  text modifiers. DECKPAM follows physical keypad identity. Kitty
+  disambiguation uses its dedicated keypad code points.
 
 Plain `A` is unaffected, so this page continues to follow it.
 
@@ -178,15 +213,19 @@ when the focused pane is still the pane that armed broadcast.
 `BroadcastScope::AllTabs` selects peers across tabs and windows. The source is
 excluded from the receiver set.
 
-Each destination crosses this boundary:
+Each destination crosses this live boundary:
 
-```text
-AppIntent::PtyWrite → AppEffect::PtyWrite → PaneState → PtyHandle
+```mermaid
+flowchart LR
+    source["stable PaneId + bytes"] --> write["App::write_to_pane"]
+    write --> pane["live PaneState / PtyHandle"] --> queue["bounded input queue"]
 ```
 
-The state-machine reducer for this write is pure. `write_to_pane` uses a
-transient `AppStateMachine` because its broadcast caller has only `&self`.
-`dispatch_pty_write_effect` resolves the pane id back to the live `PtyHandle`.
+There is no transient state machine on the native input or broadcast path.
+Explicit `AppIntent::PtyWrite` and `AppEffect::PtyWrite` enter the same bounded
+write boundary with their named pane id. Window-targeted compatibility input
+resolves that live window's active pane, never a zero sentinel or guessed
+frontmost window. A missing target cannot redirect bytes to another terminal.
 
 `PtyHandle::send_input_nonblocking` uses `try_send`:
 
@@ -194,9 +233,11 @@ transient `AppStateMachine` because its broadcast caller has only `&self`.
 - message limit: 16 MiB;
 - rejection cases: `MessageTooLarge`, `QueueFull`, `WriterDisconnected`.
 
-Every `PtyInputError` retains the rejected `Vec<u8>`. The app posts
-`UserEvent::PtyInputRejected`, logs the reason, and displays an error
-notification with the byte count. It does not retry automatically because the
+Every `PtyInputError` retains the rejected `Vec<u8>` at the IO boundary. The app
+drops those bytes before posting metadata-only `UserEvent::PtyInputRejected`.
+It logs pane identity, the current window, producer-assigned input category,
+byte count, reason, and concurrent queue/writer observations, then notifies the
+pane's window if it still exists. It does not retry automatically because the
 child's input state may change before a later replay.
 
 The dedicated `sonic-pty-writer` thread removes the owned byte vector, calls
@@ -287,10 +328,10 @@ is dropped.
 
 ### 8. The VT worker requests a later redraw
 
-The worker mirrors cursor visibility, kitty keyboard flags, and DECCKM into
-atomics while it holds the parser lock. It collects title, command, and media
-side effects. It then releases the parser lock before it reaches the event-loop
-proxy.
+The worker mirrors cursor visibility, Kitty keyboard flags, and the packed
+DECCKM/DECKPAM/DECBKM/newline/`modifyOtherKeys` snapshot into atomics while it
+holds the parser lock. It collects title, command, and media side effects. It
+then releases the parser lock before it reaches the event-loop proxy.
 
 Redraw requests are coalesced by bytes and time:
 
@@ -304,7 +345,10 @@ short redraw-target lock. It releases that lock and sends
 and calls `request_redraw()`. A stale id is ignored.
 
 This indirection lets a pane move between windows. Transfer changes the shared
-`WindowId`; the existing worker and child process continue unchanged.
+`WindowId`; the existing worker and child process continue unchanged. The
+receiving tab is activated before its visible grids and PTYs are resized to the
+destination pane rectangles, without a whole-window intermediate size.
+Zoom-hidden siblings keep their prior size until they become visible.
 
 A second pacing gate may defer streaming output to the next frame boundary.
 Hardware keeps pure input redraws immediate. PTY output is bounded by the
@@ -367,7 +411,8 @@ active plain-text target salts only the row-local fragment that recolors, so a
 wrapped target invalidates each participating row without disturbing peer rows.
 Hint-only underlines do not alter glyph cache identity. The ordered visible span
 set remains in `FrameKey`, and underline geometry emits one clipped quad per
-fragment. The cached atlas epoch rejects UVs from before an eviction.
+fragment. The cached atlas content identity rejects UVs from before an eviction
+or reset and never returns to a prior value.
 
 `LineQuadCache` stores coalesced background quads under a parallel key. Its hash
 also covers pane origin and extent because moving or clipping a pane changes
@@ -452,7 +497,7 @@ it again.
 A `GlyphInstance` stores a normalized-device-coordinate (NDC) rectangle, atlas
 UVs, linear-space foreground modulation, and flags for color, subpixel, and
 image-atlas sampling.
-The row cache stores this prepared instance with the atlas epoch.
+The row cache stores this prepared instance with the atlas content identity.
 
 The inline-image atlas is separate. It starts at 1 × 1, promotes to 2,048 × 2,048
 when visible media appears, and demotes after 240 rendered frames without
@@ -726,8 +771,9 @@ macOS 和 Linux 在两种策略下都通过 wgpu 呈现。Windows 只有在 `deg
 
 ### 2. 按键先交给当前输入所有者
 
-winit 发送按下状态的 `WindowEvent::KeyboardInput`。SonicTerm 使用
-`event.logical_key`，因此操作系统和当前键盘布局已经把它解析为大写 `A`。
+winit 会为按下、重复和释放发送 `WindowEvent::KeyboardInput`。SonicTerm 保留完整事件：
+物理按键、由布局解析的逻辑按键、操作系统生成的文本、小键盘位置、事件状态和重复标记。
+在本例中，键盘布局已把逻辑字符和文本解析为大写 `A`。
 
 本地输入所有者可以中止后续路径。主窗口按以下顺序检查：
 
@@ -746,10 +792,20 @@ winit 发送按下状态的 `WindowEvent::KeyboardInput`。SonicTerm 使用
 输入法正在组字时，原始按键不会进入 PTY。`Ime::Commit` 在组字完成后提供 UTF-8 文本。
 命令面板或搜索框可以消费提交文本。READONLY 或复制模式可以丢弃它。
 
+终端输入法锚点由活动窗格的物理原点、内容内边距和光标单元格结合实时物理字格度量计算。
+每个偏移只加一次，不再次乘 DPI。各窗口按 `(窗格 id、物理位置、物理尺寸)` 合并重复更新，
+但相同单元格下的焦点切换、缩放、转移、字体/内边距变化和尺寸变化仍会更新原生锚点。
+命令面板和搜索框保留各自的输入字段锚点，并在归还输入所有权前重置终端锚点缓存。
+
+只有通过所有本地路由、且至少进入一个有界 PTY 输入队列的按下事件才会记为 PTY 所有。
+成功接收的 pane 集合在整个按键生命周期内保持不变：重复事件会在后来打开的命令面板、搜索框
+或 keymap owner 之前查询该集合；即使焦点或广播状态改变，释放事件也会返回该集合。本地消费
+或被队列拒绝的按下事件不会产生孤立的重复或释放事件。
+
 ### 3. `A` 变成终端输入字节
 
-`encode_key` 调用 `encode_logical`。普通 `Key::Character` 在没有 Control 或 Alt 时，
-会原样使用其 UTF-8 字节。
+`encode_key` 使用完整事件和活动 pane 已协商的键盘快照。普通 `Key::Character` 在没有
+Control 或 Alt 时，会原样使用操作系统生成文本的 UTF-8 字节。
 
 | 属性 | 值 |
 | --- | --- |
@@ -758,15 +814,28 @@ winit 发送按下状态的 `WindowEvent::KeyboardInput`。SonicTerm 使用
 | UTF-8 | `0x41` |
 | 十进制字节 | `65` |
 
-其它按键和修饰键遵循四条不同规则：
+其它按键和修饰键遵循以下规则：
 
 - **Control 与键位优先级：** 配置的键位可能在 PTY 编码前接管组合键。否则先判断 Control，
-  再判断 Alt：Control+A 变成 `0x01`，Control+Alt+A 仍走 Control 分支。
-- **文字修饰键：** 没有 Control 时，Alt+A 会在 UTF-8 字节前加 `ESC`。Shift 和
-  Super/Meta 不会在这个编码器里修改 `Key::Character`；它们可能已经改变逻辑字符。
-- **方向键与功能键：** 方向键、Home 和 End 会读取活动窗格的无锁 DECCKM 快照。未加
-  修饰键的应用光标模式使用 SS3；带修饰键时使用 xterm 参数化 CSI。功能键使用 xterm 序列。
-- **kitty Shift+Enter：** kitty 键盘标志非零时，Shift+Enter 使用 `CSI 13 ; 2 u`。
+  再判断 Alt：Control+A 变成 `0x01`，Control+Alt+A 会在该控制字节前加 `ESC`。
+  旧式别名覆盖 Space/@/2、`[ /3`、`\ /4`、`] /5`、`^/~/6`、`_/ /7` 和 `?/8`。
+- **文本与 BackTab：** 默认旧式模式会在 Alt 文本前加 `ESC`；Shift 与布局相关文本由
+  操作系统生成。Tab 发送 HT。在 `modifyOtherKeys` level 1 下，只有普通 Shift+Tab 继续发送
+  `CSI Z`；其它带修饰键的 Tab 形式和带修饰键的 Enter 使用
+  `CSI 27 ; modifier ; code ~`。level 2 也把 Shift+Tab 编码为
+  `CSI 27 ; 2 ; 9 ~`。level 1 保留普通 Shift/Control 别名及 Backspace 例外；level 2
+  会编码所有受支持的带修饰普通按键。
+- **协商的旧式模式：** pane 快照包含 DECCKM 光标键、DECKPAM 小键盘身份、DECBKM
+  Backspace、ANSI newline mode，以及 xterm `modifyOtherKeys` level 1 和 2。带修饰键的
+  光标键与功能键会在 xterm 修饰参数中保留 Shift、Alt、Control 和 Super；功能键覆盖到 F35。
+- **Kitty 协议：** 主屏和备用屏各自维护独立且有界的 progressive-enhancement 栈。
+  不支持的 set mode 不做任何改变，保存的 flag 保留协议的七个数据位。SonicTerm 支持
+  消歧义、事件类型、备用按键、全部按键报告、关联文本、功能键和小键盘身份，以及修饰键
+  自身的身份。单独启用备用按键报告只会补充原本已经使用 CSI-u 的按键，不会改变原始文本、
+  DECKPAM 或 terminfo 编码。启用消歧义时 Shift+Tab 为 `CSI 9 ; 2 u`；程序要求时，重复与
+  释放会带 Kitty 事件类型。
+- **小键盘：** 旧式 normal mode 遵循布局/NumLock 结果并保留文本修饰键；DECKPAM 遵循
+  物理小键盘身份；Kitty 消歧义使用专用的小键盘码点。
 
 普通 `A` 不受影响，因此本页继续跟踪它。
 
@@ -776,14 +845,17 @@ winit 发送按下状态的 `WindowEvent::KeyboardInput`。SonicTerm 使用
 `BroadcastScope::Tab` 选择同一标签页的其它窗格。`BroadcastScope::AllTabs` 选择跨标签页和
 窗口的其它窗格。接收集合会排除源窗格。
 
-每个目标都经过以下边界：
+每个目标都经过以下实时边界：
 
-```text
-AppIntent::PtyWrite → AppEffect::PtyWrite → PaneState → PtyHandle
+```mermaid
+flowchart LR
+    source["稳定 PaneId 与字节"] --> write["App::write_to_pane"]
+    write --> pane["存活 PaneState / PtyHandle"] --> queue["有界输入队列"]
 ```
 
-这次写入的状态机归约是纯操作。`write_to_pane` 的广播调用者只有 `&self`，因此它使用一套
-临时 `AppStateMachine`。`dispatch_pty_write_effect` 再把窗格编号解析为存活的 `PtyHandle`。
+原生输入和广播路径不再构建临时状态机。显式的 `AppIntent::PtyWrite` 与
+`AppEffect::PtyWrite` 按指定窗格 id 进入同一个有界写入边界。以窗口为目标的兼容输入会解析
+该存活窗口的活动窗格，不使用零哨兵，也不猜测最前窗口。目标缺失时，不会把字节转给另一终端。
 
 `PtyHandle::send_input_nonblocking` 使用 `try_send`：
 
@@ -791,8 +863,9 @@ AppIntent::PtyWrite → AppEffect::PtyWrite → PaneState → PtyHandle
 - 每条消息最多 16 MiB；
 - 拒绝类型为 `MessageTooLarge`、`QueueFull`、`WriterDisconnected`。
 
-每个 `PtyInputError` 都保留被拒绝的 `Vec<u8>`。应用发送
-`UserEvent::PtyInputRejected`，记录原因，并显示带字节数的错误通知。它不会自动重试，
+每个 `PtyInputError` 在 IO 边界保留被拒绝的 `Vec<u8>`。应用先丢弃这些字节，再发送
+只含元数据的 `UserEvent::PtyInputRejected`。它记录窗格标识、当前窗口、生产者指定的输入类别、
+字节数、原因及并发队列/writer 观察值；窗格仍存在时在其窗口显示通知。它不会自动重试，
 因为稍后重放时，子程序的输入状态可能已经改变。
 
 专用 `sonic-pty-writer` 线程取出字节向量，调用 `write_all`，然后尝试一次不保证成功的
@@ -863,8 +936,9 @@ screen incarnation、viewport、准确 pane CWD、候选 span 和鼠标指向的
 
 ### 8. VT 工作线程请求稍后重绘
 
-工作线程在持有解析器锁时，把光标可见性、kitty keyboard flag 和 DECCKM 镜像到原子值，
-并收集标题、命令和媒体副作用。随后先释放解析器锁，再访问事件循环代理。
+工作线程在持有解析器锁时，把光标可见性、Kitty keyboard flag，以及打包后的
+DECCKM/DECKPAM/DECBKM/newline/`modifyOtherKeys` 快照镜像到原子值，并收集标题、命令和
+媒体副作用。随后先释放解析器锁，再访问事件循环代理。
 
 重绘请求按字节和时间合并：
 
@@ -877,7 +951,8 @@ screen incarnation、viewport、准确 pane CWD、候选 span 和鼠标指向的
 过期编号会被忽略。
 
 这层间接关系让窗格可以跨窗口移动。转移只修改共享 `WindowId`；现有工作线程和子进程
-保持不变。
+保持不变。接收的标签页先激活，再按目标窗格矩形调整可见网格和 PTY，不经过整窗尺寸的
+中间状态。缩放隐藏的兄弟窗格在再次可见之前保留原尺寸。
 
 第二层帧节奏控制可能把持续输出推迟到下一个帧边界。硬件路径让纯输入重绘立即发生。
 PTY 输出最多等待一个显示器帧周期。最终降级状态启用时，纯输入重绘也会合并到软件帧周期。
@@ -928,8 +1003,8 @@ PTY 输出最多等待一个显示器帧周期。最终降级状态启用时，�
 `(pane id, absolute row, row hash)`。哈希覆盖单元格、样式 revision、单元格几何、缩放和
 选区重叠。活动的普通文字目标只给实际变色的当前行片段加 salt，因此自动换行目标会使每个
 参与行失效，而不会扰动其它行。仅提示的下划线不改变字形缓存身份。有序可见 span 集合仍进入
-`FrameKey`，下划线几何会为每个片段发射一个经过裁剪的 quad。缓存中的图集代次会拒绝淘汰前
-生成的 UV。
+`FrameKey`，下划线几何会为每个片段发射一个经过裁剪的 quad。缓存中的图集内容身份会拒绝
+淘汰或重置前生成的 UV，且不会回到旧值。
 
 `LineQuadCache` 用相似的键保存合并后的背景四边形。它的哈希还覆盖窗格原点和范围，因为
 移动或裁剪窗格会改变四边形几何。
@@ -996,7 +1071,7 @@ GPU 线段端点存放在与 HSV 颜色变换分离的几何参数中，因此�
 成功呈现一帧后再重新启用淘汰。
 
 `GlyphInstance` 保存归一化设备坐标（NDC）矩形、图集 UV、线性空间前景调制色，以及
-彩色、子像素和图像图集采样标志。行缓存会连同图集代次保存这个准备好的实例。
+彩色、子像素和图像图集采样标志。行缓存会连同图集内容身份保存这个准备好的实例。
 
 内联图像使用独立图集。它从 1 × 1 开始，出现可见媒体时扩展到 2,048 × 2,048，连续
 240 个已渲染帧没有内联媒体后再缩回占位符。

@@ -42,6 +42,89 @@ pub enum MouseTracking {
     AnyMotion,
 }
 
+/// Terminal modes that affect how host keyboard events are encoded for the PTY.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub struct KeyboardModes {
+    application_cursor_keys: bool,
+    application_keypad: bool,
+    backarrow_key: bool,
+    newline: bool,
+    modify_other_keys: u8,
+}
+
+impl KeyboardModes {
+    const APPLICATION_CURSOR_KEYS: u8 = 1 << 0;
+    const APPLICATION_KEYPAD: u8 = 1 << 1;
+    const BACKARROW_KEY: u8 = 1 << 2;
+    const NEWLINE: u8 = 1 << 3;
+    const MODIFY_OTHER_KEYS_SHIFT: u8 = 4;
+    const MODIFY_OTHER_KEYS_MASK: u8 = 0b11 << Self::MODIFY_OTHER_KEYS_SHIFT;
+
+    /// Build an explicit keyboard-mode snapshot for an encoder or test.
+    pub const fn new(
+        application_cursor_keys: bool,
+        application_keypad: bool,
+        backarrow_key: bool,
+        newline: bool,
+        modify_other_keys: u8,
+    ) -> Self {
+        Self {
+            application_cursor_keys,
+            application_keypad,
+            backarrow_key,
+            newline,
+            modify_other_keys: if modify_other_keys > 2 { 2 } else { modify_other_keys },
+        }
+    }
+
+    /// Reconstruct a mode snapshot from its compact cross-thread representation.
+    pub fn from_bits(bits: u8) -> Self {
+        Self {
+            application_cursor_keys: bits & Self::APPLICATION_CURSOR_KEYS != 0,
+            application_keypad: bits & Self::APPLICATION_KEYPAD != 0,
+            backarrow_key: bits & Self::BACKARROW_KEY != 0,
+            newline: bits & Self::NEWLINE != 0,
+            modify_other_keys: ((bits & Self::MODIFY_OTHER_KEYS_MASK)
+                >> Self::MODIFY_OTHER_KEYS_SHIFT)
+                .min(2),
+        }
+    }
+
+    /// Pack the mode snapshot into one byte for lock-free publication.
+    pub fn bits(self) -> u8 {
+        (u8::from(self.application_cursor_keys) * Self::APPLICATION_CURSOR_KEYS)
+            | (u8::from(self.application_keypad) * Self::APPLICATION_KEYPAD)
+            | (u8::from(self.backarrow_key) * Self::BACKARROW_KEY)
+            | (u8::from(self.newline) * Self::NEWLINE)
+            | self.modify_other_keys.min(2) << Self::MODIFY_OTHER_KEYS_SHIFT
+    }
+
+    /// Whether DECCKM application-cursor mode is active.
+    pub fn application_cursor_keys(self) -> bool {
+        self.application_cursor_keys
+    }
+
+    /// Whether DECKPAM application-keypad mode is active.
+    pub fn application_keypad(self) -> bool {
+        self.application_keypad
+    }
+
+    /// Whether DECBKM makes Backspace emit BS instead of DEL.
+    pub fn backarrow_key(self) -> bool {
+        self.backarrow_key
+    }
+
+    /// Whether ANSI newline mode makes Return emit CR LF.
+    pub fn newline(self) -> bool {
+        self.newline
+    }
+
+    /// Active xterm `modifyOtherKeys` level, clamped to `0..=2`.
+    pub fn modify_other_keys(self) -> u8 {
+        self.modify_other_keys
+    }
+}
+
 /// Largest staging buffer a single capture may hold when it is the only one
 /// in flight.
 ///
@@ -258,6 +341,9 @@ impl Drop for StagingReservation {
 /// of one per link, while still recovering as soon as content scrolls away.
 const HYPERLINK_RECLAIM_BACKOFF_LINKS: u32 = 256;
 const MAX_RAW_OSC4_BYTES: usize = 4096;
+const MAX_ITERM2_METADATA_BYTES: usize = 1024;
+const ITERM2_OSC_PREFIX: &[u8; 10] = b"1337;File=";
+const OSC4_PREFIX: &[u8; 2] = b"4;";
 /// Public for the same reason as [`MAX_MEDIA_PAYLOAD_BYTES`]: the backstop is
 /// derived from the caps, not parallel to them.
 pub const MAX_ESCAPE_SEQUENCE_BYTES: usize = 1024 * 1024;
@@ -362,6 +448,15 @@ impl MediaCapture {
             return;
         }
 
+        if !self.truncated {
+            tracing::warn!(
+                protocol = ?self.protocol,
+                payload_bytes = self.seen,
+                budget = self.reservation.budget(),
+                cap = MAX_MEDIA_PAYLOAD_BYTES,
+                "media payload exceeded staging limit; refusing whole image"
+            );
+        }
         self.growth_exhausted = true;
         self.truncated = true;
     }
@@ -404,6 +499,22 @@ impl MediaCapture {
             col,
             metadata: self.metadata,
             data: self.data,
+        })
+    }
+
+    fn into_iterm2_event(self, row: u16, col: u16, metadata: &[u8]) -> Option<MediaEvent> {
+        if !self.whole() {
+            // When: whole is false, never allocate event metadata for a refused or truncated iTerm2 payload.
+            return None;
+        }
+        let MediaCapture { protocol, data, reservation, .. } = self;
+        drop(reservation);
+        Some(MediaEvent {
+            protocol,
+            row,
+            col,
+            metadata: String::from_utf8_lossy(metadata).into_owned(),
+            data,
         })
     }
 
@@ -494,6 +605,8 @@ pub struct Parser {
     apc_capture: Option<MediaCapture>,
     pending_esc: bool,
     raw_osc: Option<RawOsc>,
+    iterm2_metadata: [u8; MAX_ITERM2_METADATA_BYTES],
+    iterm2_metadata_len: usize,
     escape_bytes_in_flight: usize,
     discarding_oversized_escape: bool,
     discard_escape_pending_esc: bool,
@@ -511,24 +624,110 @@ pub struct Parser {
     escape_family: EscapeFamily,
 }
 
-/// SonicTerm-side OSC capture for sequences where vte's public callback loses
-/// information before dispatch. vte 0.15 stores the full OSC in a private
-/// buffer, but `Perform::osc_dispatch` exposes only up to MAX_OSC_PARAMS split
-/// params; OSC 4 needs the raw `index;?` stream for 16-colour batch queries.
+/// SonicTerm-side OSC capture for sequences that vte cannot retain under the
+/// protocol's own bound or expose whole through its public callback.
 enum RawOsc {
-    /// We have consumed `ESC ]` and are checking whether the command is `4`.
-    Probe { saw_four: bool },
+    /// Checking a bounded OSC prefix before choosing vte or media ownership.
+    Probe { content: [u8; ITERM2_OSC_PREFIX.len()], content_len: u8 },
     /// Capturing bytes after `OSC 4 ;` until BEL or ST.
     Palette { content: Vec<u8> },
+    /// Streaming an iTerm2 file payload through the process media reservation.
+    Iterm2 { capture: MediaCapture, metadata_done: bool, pending_esc: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EscapeFamily {
     Ground,
     Esc,
+    EscIntermediate,
     Csi,
     Osc,
+    DcsEntry,
+    DcsParam,
+    DcsIntermediate,
+    DcsIgnore,
+    DcsPassthrough,
     String,
+}
+
+impl EscapeFamily {
+    fn from_ground(byte: u8) -> Self {
+        // When: byte is ESC, begin parser-owned escape accounting; every other ground byte remains under vte's ground decoder.
+        if byte == 0x1b {
+            Self::Esc
+        } else {
+            Self::Ground
+        }
+    }
+
+    fn after_byte(self, byte: u8) -> Self {
+        match self {
+            Self::Ground => Self::from_ground(byte),
+            Self::Esc => match byte {
+                b'[' => Self::Csi,
+                b']' => Self::Osc,
+                b'P' => Self::DcsEntry,
+                b'X' | b'^' | b'_' => Self::String,
+                0x1b => Self::Esc,
+                0x18 | 0x1a | 0x30..=0x7e => Self::Ground,
+                0x20..=0x2f => Self::EscIntermediate,
+                _ => Self::Esc,
+            },
+            Self::EscIntermediate => match byte {
+                0x1b => Self::Esc,
+                0x18 | 0x1a | 0x30..=0x7e => Self::Ground,
+                _ => Self::EscIntermediate,
+            },
+            Self::Csi => match byte {
+                0x1b => Self::Esc,
+                0x18 | 0x1a | 0x40..=0x7e => Self::Ground,
+                _ => Self::Csi,
+            },
+            Self::Osc => match byte {
+                0x1b => Self::Esc,
+                0x07 | 0x18 | 0x1a => Self::Ground,
+                _ => Self::Osc,
+            },
+            Self::DcsEntry => match byte {
+                0x1b => Self::Esc,
+                0x18 | 0x1a => Self::Ground,
+                0x20..=0x2f => Self::DcsIntermediate,
+                0x30..=0x3f => Self::DcsParam,
+                0x40..=0x7e => Self::DcsPassthrough,
+                _ => Self::DcsEntry,
+            },
+            Self::DcsParam => match byte {
+                0x1b => Self::Esc,
+                0x18 | 0x1a => Self::Ground,
+                0x20..=0x2f => Self::DcsIntermediate,
+                0x3c..=0x3f => Self::DcsIgnore,
+                0x40..=0x7e => Self::DcsPassthrough,
+                _ => Self::DcsParam,
+            },
+            Self::DcsIntermediate => match byte {
+                0x1b => Self::Esc,
+                0x18 | 0x1a => Self::Ground,
+                0x30..=0x3f => Self::DcsIgnore,
+                0x40..=0x7e => Self::DcsPassthrough,
+                _ => Self::DcsIntermediate,
+            },
+            Self::DcsIgnore => match byte {
+                0x1b => Self::Esc,
+                0x18 | 0x1a => Self::Ground,
+                _ => Self::DcsIgnore,
+            },
+            Self::DcsPassthrough => match byte {
+                0x1b => Self::Esc,
+                0x18 | 0x1a | 0x9c => Self::Ground,
+                _ => Self::DcsPassthrough,
+            },
+            Self::String => match byte {
+                0x1b => Self::Esc,
+                0x18 | 0x1a => Self::Ground,
+                _ => Self::String,
+            },
+        }
+    }
 }
 
 impl Parser {
@@ -541,6 +740,8 @@ impl Parser {
             apc_capture: None,
             pending_esc: false,
             raw_osc: None,
+            iterm2_metadata: [0; MAX_ITERM2_METADATA_BYTES],
+            iterm2_metadata_len: 0,
             escape_bytes_in_flight: 0,
             discarding_oversized_escape: false,
             discard_escape_pending_esc: false,
@@ -558,6 +759,8 @@ impl Parser {
             apc_capture: None,
             pending_esc: false,
             raw_osc: None,
+            iterm2_metadata: [0; MAX_ITERM2_METADATA_BYTES],
+            iterm2_metadata_len: 0,
             escape_bytes_in_flight: 0,
             discarding_oversized_escape: false,
             discard_escape_pending_esc: false,
@@ -638,15 +841,45 @@ impl Parser {
                 i += 1;
                 continue;
             }
-            if self.performer.ground && bytes[i..].starts_with(b"\x1b_") {
-                // When: ground sees the APC introducer in bytes, switch to Kitty capture before printable payload reaches the grid.
-                self.performer.ground = false;
+            if self.consume_raw_osc_byte(bytes[i]) {
+                // When: consume_raw_osc_byte owns bytes[i], bypass vte so its private OSC Vec cannot retain a second copy.
+                i += 1;
+                continue;
+            }
+            if self.escape_family == EscapeFamily::Esc && self.pending_esc && bytes[i] == b'_' {
+                // When: escape_family is Esc, pending_esc is set, and bytes[i] is underscore, reset vte before Kitty takes ownership.
+                self.inner = vte::Parser::new();
+                self.pending_esc = false;
                 self.apc_capture = Some(MediaCapture::new(MediaProtocol::Kitty, String::new()));
+                self.escape_family = EscapeFamily::String;
+                self.performer.fast_path_ready = false;
+                i += 1;
+                continue;
+            }
+            if self.escape_family == EscapeFamily::Ground
+                && self.performer.fast_path_ready
+                && bytes[i..].starts_with(b"\x1b_")
+            {
+                // When: escape_family is Ground and ESC underscore is contiguous, Kitty capture owns the sequence before vte can swallow it.
+                self.apc_capture = Some(MediaCapture::new(MediaProtocol::Kitty, String::new()));
+                self.escape_family = EscapeFamily::String;
+                self.performer.fast_path_ready = false;
                 i += 2;
                 continue;
             }
-            // When: performer ground chooses the safe ASCII bypass; otherwise vte retains the escape until dispatch.
-            if self.performer.ground {
+            if self.escape_family == EscapeFamily::Ground
+                && self.performer.fast_path_ready
+                && bytes[i] == 0x9f
+            {
+                // When: escape_family is Ground and byte is C1 APC, Kitty capture owns the sequence exactly like ESC underscore.
+                self.apc_capture = Some(MediaCapture::new(MediaProtocol::Kitty, String::new()));
+                self.escape_family = EscapeFamily::String;
+                self.performer.fast_path_ready = false;
+                i += 1;
+                continue;
+            }
+            // When: escape_family is Ground and performer permits it, choose the printable ASCII bypass rather than vte.
+            if self.escape_family == EscapeFamily::Ground && self.performer.fast_path_ready {
                 // memchr3 for ESC / BEL / LF — the three commonest break
                 // bytes — gives us a cheap upper bound on the run length.
                 // We then scalar-verify the prefix is entirely printable
@@ -663,122 +896,62 @@ impl Parser {
                 }
                 // When: run_end covers printable ASCII, so direct graphic dispatch preserves the same cells while skipping vte.
                 if run_end > 0 {
-                    // Every byte in [i..i+run_end] is in [0x20, 0x7E], i.e.
-                    // valid one-byte UTF-8 with the same code point as the byte.
                     for &b in &bytes[i..i + run_end] {
                         self.performer.print_graphic(b as char);
                     }
                     i += run_end;
                     continue;
                 }
-                // First byte is non-printable — feed exactly that byte to
-                // vte. vte will either dispatch it (still Ground after) or
-                // start consuming an escape (ground flips false). The
-                // Performer callbacks below update `self.performer.ground`.
-                self.performer.ground = false;
-                self.escape_bytes_in_flight = 1;
-                self.escape_family = match bytes[i] {
-                    0x1b => EscapeFamily::Esc,
-                    0x9b => EscapeFamily::Csi,
-                    0x9d => EscapeFamily::Osc,
-                    0x90 | 0x98 | 0x9e | 0x9f => EscapeFamily::String,
-                    _ => EscapeFamily::Ground,
-                };
-                self.observe_osc4_byte(bytes[i]);
-                self.performer.sequence_dispatched = false;
-                let byte = bytes[i];
-                self.inner.advance(&mut self.performer, &bytes[i..i + 1]);
-                if matches!(byte, 0x18 | 0x1a) {
-                    self.reset_cancelled_escape();
-                }
-                if self.performer.ground || self.performer.sequence_dispatched {
-                    self.escape_bytes_in_flight = 0;
-                    self.escape_family = EscapeFamily::Ground;
-                }
-                // If vte stayed in Ground (execute() or print()), the
-                // callback has already set ground=true. If not, leave it
-                // false so the next iteration feeds bytes through vte until
-                // a dispatch callback flips it back to Ground.
-                i += 1;
-            } else {
-                // Escape in flight — feed bytes through vte one at a time
-                // and let the dispatch callbacks decide when we're back in
-                // Ground. Feeding the remainder en bloc would work too, but
-                // we want to return to fast-path as soon as possible, so
-                // stop the moment ground flips back to true.
-                let start = i;
-                while i < len && !self.performer.ground {
-                    if self.performer.dcs_capture.is_some() && matches!(bytes[i], 0x18 | 0x1a) {
-                        // When: dcs_capture sees CAN or SUB mid-escape, reset vte so cancelled image bytes cannot survive to unhook.
-                        self.inner = vte::Parser::new();
-                        self.reset_cancelled_escape();
-                        i += 1;
-                        break;
-                    }
-                    let started_escape = if self.escape_family == EscapeFamily::Ground {
-                        self.escape_family = match bytes[i] {
-                            0x1b => EscapeFamily::Esc,
-                            0x9b => EscapeFamily::Csi,
-                            0x9d => EscapeFamily::Osc,
-                            0x90 | 0x98 | 0x9e | 0x9f => EscapeFamily::String,
-                            _ => EscapeFamily::Ground,
-                        };
-                        if self.escape_family != EscapeFamily::Ground {
-                            self.escape_bytes_in_flight = 1;
-                            true
-                        } else {
-                            // When: escape_family remains Ground, this byte is a control dispatch rather than a counted escape.
-                            false
-                        }
-                    } else {
-                        // When: escape_family already identifies the sequence, do not restart byte accounting mid-flight.
-                        false
-                    };
-                    if self.escape_family == EscapeFamily::Esc && !started_escape {
-                        self.escape_family = match bytes[i] {
-                            b'[' => EscapeFamily::Csi,
-                            b']' => EscapeFamily::Osc,
-                            b'P' | b'X' | b'^' | b'_' => EscapeFamily::String,
-                            _ => EscapeFamily::Esc,
-                        };
-                    }
-                    let media_capture_has_own_budget = self.performer.dcs_capture.is_some();
-                    if self.escape_family != EscapeFamily::Ground
-                        && !started_escape
-                        && !media_capture_has_own_budget
-                    {
-                        // When: escape_family is active beyond its introducer and media_capture_has_own_budget is false, enforce the generic cap.
-                        self.escape_bytes_in_flight = self.escape_bytes_in_flight.saturating_add(1);
-                        if self.escape_bytes_in_flight > MAX_ESCAPE_SEQUENCE_BYTES {
-                            // When: escape_bytes_in_flight exceeds MAX_ESCAPE_SEQUENCE_BYTES, discard through a terminator instead of retaining more input.
-                            let pending_esc = self.pending_esc;
-                            self.begin_discarding_oversized_escape(pending_esc);
-                            self.consume_discarded_escape_byte(bytes[i]);
-                            i += 1;
-                            break;
-                        }
-                    }
-                    self.observe_osc4_byte(bytes[i]);
-                    self.performer.sequence_dispatched = false;
-                    let byte = bytes[i];
-                    self.inner.advance(&mut self.performer, &bytes[i..i + 1]);
-                    i += 1;
-                    if matches!(byte, 0x18 | 0x1a) {
-                        self.reset_cancelled_escape();
-                    }
-                    if self.performer.ground || self.performer.sequence_dispatched {
-                        self.escape_bytes_in_flight = 0;
-                        self.escape_family = EscapeFamily::Ground;
-                    }
-                }
-                debug_assert!(i > start, "vte must consume at least one byte per iteration");
             }
+            self.feed_vte_byte(bytes[i]);
+            i += 1;
         }
         std::mem::take(&mut self.performer.events)
     }
 
+    fn feed_vte_byte(&mut self, byte: u8) {
+        if self.performer.dcs_capture.is_some() && matches!(byte, 0x18 | 0x1a) {
+            // When: dcs_capture receives CAN or SUB, reset vte before cancelled image bytes can survive to unhook.
+            self.inner = vte::Parser::new();
+            self.reset_cancelled_escape();
+            return;
+        }
+        let started_escape = self.escape_family == EscapeFamily::Ground
+            && EscapeFamily::from_ground(byte) != EscapeFamily::Ground;
+        if started_escape {
+            self.escape_bytes_in_flight = 1;
+        } else if self.escape_family != EscapeFamily::Ground && self.performer.dcs_capture.is_none()
+        {
+            // When: escape_family is non-Ground and dcs_capture is absent, enforce the generic retention cap.
+            self.escape_bytes_in_flight = self.escape_bytes_in_flight.saturating_add(1);
+            if self.escape_bytes_in_flight > MAX_ESCAPE_SEQUENCE_BYTES {
+                // When: escape_bytes_in_flight exceeds MAX_ESCAPE_SEQUENCE_BYTES, discard through the sequence terminator.
+                let pending_esc = self.pending_esc;
+                self.begin_discarding_oversized_escape(pending_esc);
+                self.consume_discarded_escape_byte(byte);
+                return;
+            }
+        }
+        self.observe_osc_byte(byte);
+        let was_fast_path_ready = self.performer.fast_path_ready;
+        self.performer.fast_path_ready = false;
+        let previous_family = self.escape_family;
+        self.inner.advance(&mut self.performer, &[byte]);
+        self.escape_family = previous_family.after_byte(byte);
+        if self.escape_family == EscapeFamily::Ground {
+            self.escape_bytes_in_flight = 0;
+            if previous_family != EscapeFamily::Ground || (was_fast_path_ready && byte < 0xc0) {
+                self.performer.fast_path_ready = true;
+            }
+        }
+        if matches!(byte, 0x18 | 0x1a) {
+            self.reset_cancelled_escape();
+        }
+    }
+
     fn reset_cancelled_escape(&mut self) {
         self.raw_osc = None;
+        self.iterm2_metadata_len = 0;
         self.pending_esc = false;
         self.apc_capture = None;
         self.performer.dcs_capture = None;
@@ -787,8 +960,7 @@ impl Parser {
         self.discard_escape_pending_esc = false;
         self.discard_exits_on_newline = false;
         self.escape_family = EscapeFamily::Ground;
-        self.performer.ground = true;
-        self.performer.sequence_dispatched = true;
+        self.performer.fast_path_ready = true;
     }
 
     fn begin_discarding_oversized_escape(&mut self, pending_esc: bool) {
@@ -802,7 +974,7 @@ impl Parser {
         self.pending_esc = false;
         self.discarding_oversized_escape = true;
         self.discard_escape_pending_esc = pending_esc;
-        self.performer.ground = false;
+        self.performer.fast_path_ready = false;
     }
 
     fn consume_discarded_escape_byte(&mut self, byte: u8) {
@@ -810,15 +982,30 @@ impl Parser {
             EscapeFamily::Osc => {
                 byte == 0x07 || byte == 0x9c || (self.discard_escape_pending_esc && byte == b'\\')
             }
-            EscapeFamily::String => {
+            EscapeFamily::DcsEntry
+            | EscapeFamily::DcsParam
+            | EscapeFamily::DcsIntermediate
+            | EscapeFamily::DcsIgnore
+            | EscapeFamily::DcsPassthrough
+            | EscapeFamily::String => {
                 byte == 0x9c || (self.discard_escape_pending_esc && byte == b'\\')
             }
-            EscapeFamily::Ground | EscapeFamily::Esc | EscapeFamily::Csi => false,
+            EscapeFamily::Ground
+            | EscapeFamily::Esc
+            | EscapeFamily::EscIntermediate
+            | EscapeFamily::Csi => false,
         };
         let final_byte = match self.escape_family {
             EscapeFamily::Csi => (0x40..=0x7e).contains(&byte),
-            EscapeFamily::Esc => (0x30..=0x7e).contains(&byte),
-            EscapeFamily::Ground | EscapeFamily::Osc | EscapeFamily::String => false,
+            EscapeFamily::Esc | EscapeFamily::EscIntermediate => (0x30..=0x7e).contains(&byte),
+            EscapeFamily::Ground
+            | EscapeFamily::Osc
+            | EscapeFamily::DcsEntry
+            | EscapeFamily::DcsParam
+            | EscapeFamily::DcsIntermediate
+            | EscapeFamily::DcsIgnore
+            | EscapeFamily::DcsPassthrough
+            | EscapeFamily::String => false,
         };
         let abandoned_by_newline = self.discard_exits_on_newline && byte == b'\n';
         let terminated =
@@ -829,7 +1016,7 @@ impl Parser {
             self.discard_escape_pending_esc = false;
             self.discard_exits_on_newline = false;
             self.escape_bytes_in_flight = 0;
-            self.performer.ground = true;
+            self.performer.fast_path_ready = true;
             self.escape_family = EscapeFamily::Ground;
             // A newline is the user's output, not the transfer's terminator,
             // so it has to reach the grid rather than be eaten as one.
@@ -843,7 +1030,7 @@ impl Parser {
 
     fn consume_apc_byte(&mut self, byte: u8) {
         if matches!(byte, 0x18 | 0x1a) {
-            // When: matches recognizes CAN or SUB, cancel APC staging before aborted Kitty data can become media.
+            // When: byte matches CAN or SUB, cancel APC staging before aborted Kitty data can become media.
             self.reset_cancelled_escape();
             return;
         }
@@ -862,62 +1049,166 @@ impl Parser {
                 if let Some(event) = capture.into_kitty_event(row, col) {
                     self.performer.events.push(VtEvent::Media(event));
                 }
-                self.performer.ground = true;
+                self.finish_escape();
                 return;
             }
             capture.append_byte(0x1b);
         }
-        if byte == 0x1b {
+        // When: byte selects C1 ST, ESC, or payload handling for this APC byte.
+        if byte == 0x9c {
+            let capture = self.apc_capture.take().expect("capture present");
+            let row = self.performer.grid.cursor.row;
+            let col = self.performer.grid.cursor.col;
+            if let Some(event) = capture.into_kitty_event(row, col) {
+                self.performer.events.push(VtEvent::Media(event));
+            }
+            self.finish_escape();
+        } else if byte == 0x1b {
             capture.pending_esc = true;
         } else {
-            // When: byte is not ESC, it is unambiguously Kitty payload and can be staged immediately.
             capture.append_byte(byte);
         }
     }
 
-    fn observe_osc4_byte(&mut self, byte: u8) {
-        if let Some(mut raw_osc) = self.raw_osc.take() {
-            // When: raw_osc is active, preserve the uncapped OSC 4 stream before vte splits or truncates its parameters.
-            match &mut raw_osc {
-                RawOsc::Probe { saw_four } => match byte {
-                    b'4' if !*saw_four => {
-                        *saw_four = true;
-                        self.raw_osc = Some(raw_osc);
+    fn finish_escape(&mut self) {
+        self.escape_bytes_in_flight = 0;
+        self.iterm2_metadata_len = 0;
+        self.escape_family = EscapeFamily::Ground;
+        self.performer.fast_path_ready = true;
+    }
+
+    fn append_iterm2_metadata_byte(&mut self, capture: &mut MediaCapture, byte: u8) {
+        capture.seen = capture.seen.saturating_add(1);
+        if !capture.admitted() {
+            // When: capture is not admitted, retain no metadata outside the process staging pool.
+            return;
+        }
+        if self.iterm2_metadata_len < self.iterm2_metadata.len() {
+            // When: iterm2_metadata_len remains below the fixed buffer length, retain this metadata byte inline.
+            self.iterm2_metadata[self.iterm2_metadata_len] = byte;
+            self.iterm2_metadata_len += 1;
+            return;
+        }
+        if !capture.truncated {
+            tracing::warn!(
+                protocol = ?capture.protocol,
+                metadata_bytes = capture.seen,
+                cap = MAX_ITERM2_METADATA_BYTES,
+                "media metadata exceeded limit; refusing whole image"
+            );
+        }
+        capture.truncated = true;
+    }
+
+    fn observe_osc_byte(&mut self, byte: u8) {
+        if self.pending_esc {
+            // When: pending_esc is set, inspect byte for the OSC introducer before forwarding later content to raw capture.
+            self.pending_esc = false;
+            if byte == b']' {
+                // When: byte opens OSC after ESC, start the bounded prefix probe alongside vte.
+                self.raw_osc =
+                    Some(RawOsc::Probe { content: [0; ITERM2_OSC_PREFIX.len()], content_len: 0 });
+                return;
+            }
+        }
+        self.pending_esc = byte == 0x1b;
+    }
+
+    fn consume_raw_osc_byte(&mut self, byte: u8) -> bool {
+        let Some(raw_osc) = self.raw_osc.take() else {
+            // When: raw_osc is absent, leave this byte for vte or APC ownership.
+            return false;
+        };
+        // When: raw_osc selects prefix probing, OSC 4 accumulation, or OSC 1337 media staging.
+        match raw_osc {
+            RawOsc::Probe { mut content, mut content_len } => {
+                let index = usize::from(content_len);
+                if index < content.len() {
+                    content[index] = byte;
+                    content_len += 1;
+                }
+                let prefix = &content[..usize::from(content_len)];
+                if !ITERM2_OSC_PREFIX.starts_with(prefix) && !OSC4_PREFIX.starts_with(prefix) {
+                    // When: prefix matches neither OSC 1337 nor OSC 4, return ownership to vte.
+                    return false;
+                }
+                // When: prefix selects OSC 4, complete OSC 1337, or continued bounded probing.
+                if prefix == OSC4_PREFIX {
+                    self.raw_osc = Some(RawOsc::Palette { content: Vec::new() });
+                } else if prefix == ITERM2_OSC_PREFIX {
+                    self.inner = vte::Parser::new();
+                    let mut capture = MediaCapture::new(MediaProtocol::Iterm2File, String::new());
+                    for byte in b"File=" {
+                        self.append_iterm2_metadata_byte(&mut capture, *byte);
                     }
-                    b';' if *saw_four => {
-                        self.raw_osc = Some(RawOsc::Palette { content: Vec::new() })
-                    }
-                    _ => self.pending_esc = byte == 0x1b,
-                },
-                RawOsc::Palette { content } => match byte {
+                    self.raw_osc =
+                        Some(RawOsc::Iterm2 { capture, metadata_done: false, pending_esc: false });
+                    return true;
+                } else {
+                    self.raw_osc = Some(RawOsc::Probe { content, content_len });
+                }
+                false
+            }
+            RawOsc::Palette { mut content } => {
+                match byte {
                     0x07 | 0x1b => {
-                        let content = std::mem::take(content);
                         self.performer.handle_osc4_raw(&content, byte == 0x07);
                         self.performer.suppress_next_osc4 = true;
-                        self.performer.ground = true;
                         self.pending_esc = byte == 0x1b;
                     }
                     _ => {
                         if content.len() < MAX_RAW_OSC4_BYTES {
                             content.push(byte);
-                            self.raw_osc = Some(raw_osc);
+                            self.raw_osc = Some(RawOsc::Palette { content });
                         }
                     }
-                },
+                }
+                false
             }
-            return;
-        }
-
-        if self.pending_esc {
-            // When: pending_esc is set, inspect byte for the OSC introducer before forwarding later content to raw capture.
-            self.pending_esc = false;
-            if byte == b']' {
-                // When: byte opens OSC after ESC, start probing for command 4 so batched palette queries remain intact.
-                self.raw_osc = Some(RawOsc::Probe { saw_four: false });
-                return;
+            RawOsc::Iterm2 { mut capture, mut metadata_done, mut pending_esc } => {
+                if matches!(byte, 0x18 | 0x1a) {
+                    // When: byte matches CAN or SUB, discard the incomplete OSC media transfer and return to ground.
+                    self.finish_escape();
+                    return true;
+                }
+                let terminated = byte == 0x07 || byte == 0x9c || (pending_esc && byte == b'\\');
+                if terminated {
+                    // When: terminated is true, dispatch only a whole OSC 1337 payload with a metadata separator.
+                    if metadata_done {
+                        if let Some(event) = capture.into_iterm2_event(
+                            self.performer.grid.cursor.row,
+                            self.performer.grid.cursor.col,
+                            &self.iterm2_metadata[..self.iterm2_metadata_len],
+                        ) {
+                            self.performer.events.push(VtEvent::Media(event));
+                        }
+                    }
+                    self.finish_escape();
+                    return true;
+                }
+                if pending_esc {
+                    // When: pending_esc did not complete ST, preserve it in the field selected by metadata_done.
+                    if metadata_done {
+                        capture.append_byte(0x1b);
+                    } else {
+                        self.append_iterm2_metadata_byte(&mut capture, 0x1b);
+                    }
+                    pending_esc = false;
+                }
+                // When: byte and metadata_done select terminator state, metadata completion, or payload ownership.
+                if byte == 0x1b {
+                    pending_esc = true;
+                } else if !metadata_done && byte == b':' {
+                    metadata_done = true;
+                } else if metadata_done {
+                    capture.append_byte(byte);
+                } else {
+                    self.append_iterm2_metadata_byte(&mut capture, byte);
+                }
+                self.raw_osc = Some(RawOsc::Iterm2 { capture, metadata_done, pending_esc });
+                true
             }
         }
-        self.pending_esc = byte == 0x1b;
     }
 
     /// Borrow the underlying [`Grid`] — used by the renderer to read cells.
@@ -932,8 +1223,8 @@ impl Parser {
     /// which report their own retention: a pane composes these figures rather
     /// than any one of them restating another.
     ///
-    /// Items count live capture buffers, which is at most one — see
-    /// [`Self::live_capture_count`].
+    /// Items count live APC, DCS, or iTerm2 OSC capture buffers, which is at most
+    /// one per parser — see [`Self::live_capture_count`].
     #[must_use]
     pub fn retained_amount(&self) -> ResourceAmount {
         let capture_bytes = self
@@ -944,6 +1235,7 @@ impl Parser {
             .sum::<usize>();
         let osc_bytes = match &self.raw_osc {
             Some(RawOsc::Palette { content }) => content.capacity(),
+            Some(RawOsc::Iterm2 { capture, .. }) => capture.retained_bytes(),
             Some(RawOsc::Probe { .. }) | None => 0,
         };
         ResourceAmount {
@@ -964,11 +1256,17 @@ impl Parser {
     /// parser cannot decide *when*, and the host cannot reach *what*.
     #[must_use]
     pub fn capture_progress(&self) -> usize {
-        self.apc_capture
+        let direct = self
+            .apc_capture
             .iter()
             .chain(self.performer.dcs_capture.iter())
             .map(|capture| capture.seen)
-            .sum()
+            .sum::<usize>();
+        let osc = match &self.raw_osc {
+            Some(RawOsc::Iterm2 { capture, .. }) => capture.seen,
+            Some(RawOsc::Probe { .. }) | Some(RawOsc::Palette { .. }) | None => 0,
+        };
+        direct.saturating_add(osc)
     }
 
     /// Abandon any capture or raw OSC palette accumulation in flight, releasing
@@ -999,27 +1297,32 @@ impl Parser {
             // When: released and live_capture_count show no capture, keep ground unchanged rather than swallowing ordinary output.
             return 0;
         }
+        let escape_family = if matches!(self.raw_osc, Some(RawOsc::Iterm2 { .. })) {
+            EscapeFamily::Osc
+        } else {
+            EscapeFamily::String
+        };
         self.inner = vte::Parser::new();
         self.reset_cancelled_escape();
-        // Both capture families terminate with ST, so the discard reads as a
-        // string sequence. Set after the reset, which clears these.
-        self.escape_family = EscapeFamily::String;
+        // APC/DCS use string termination while OSC 1337 additionally accepts BEL.
+        self.escape_family = escape_family;
         self.discarding_oversized_escape = true;
         self.discard_exits_on_newline = true;
-        self.performer.ground = false;
+        self.performer.fast_path_ready = false;
         released
     }
 
     /// Number of media captures currently accumulating.
     ///
-    /// Beginning any escape family cancels a capture already in flight, so this
-    /// is at most one. The two capture slots are therefore alternatives rather
-    /// than addends, and a budget covering their sum would guard a state the
-    /// parser cannot reach. That exclusivity is what needs holding, so it is
-    /// exposed for assertion rather than left as an emergent property.
+    /// Beginning another escape family ends or cancels a capture already in
+    /// flight, so APC, DCS, and iTerm2 OSC slots are alternatives rather than
+    /// addends. That exclusivity is what needs holding, so it is exposed for
+    /// assertion rather than left as an emergent property.
     #[must_use]
     pub fn live_capture_count(&self) -> usize {
-        usize::from(self.apc_capture.is_some()) + usize::from(self.performer.dcs_capture.is_some())
+        usize::from(self.apc_capture.is_some())
+            + usize::from(self.performer.dcs_capture.is_some())
+            + usize::from(matches!(self.raw_osc, Some(RawOsc::Iterm2 { .. })))
     }
 
     /// Mutably borrow the [`Grid`] — used by the host on resize, scrollback
@@ -1053,6 +1356,11 @@ impl Parser {
     /// emits for alt-screen wheel scroll — use the `ESC O A` form.
     pub fn application_cursor_keys(&self) -> bool {
         self.performer.app_cursor_keys
+    }
+
+    /// Return every active terminal mode that changes keyboard output encoding.
+    pub fn keyboard_modes(&self) -> KeyboardModes {
+        self.performer.keyboard_modes()
     }
 
     /// Return the current DEC mouse tracking mode selected by the application.
@@ -1126,6 +1434,14 @@ struct Performer {
     /// synthetic arrow sequences SonicTerm emits for alt-screen wheel scroll)
     /// must use the `ESC O A` form instead of `ESC [ A`.
     app_cursor_keys: bool,
+    /// DECKPAM/DECKPNM application-keypad selection.
+    app_keypad: bool,
+    /// DECBKM ?67 — Backspace selects BS while set and DEL while reset.
+    backarrow_key: bool,
+    /// ANSI mode 20 — Return sends CR LF while set.
+    newline_mode: bool,
+    /// xterm `modifyOtherKeys` level selected by `CSI > 4 ; Ps m`.
+    modify_other_keys: u8,
     /// DECSET ?1000/?1002/?1003 mouse tracking selected by the application.
     mouse_tracking: MouseTracking,
     focus_reporting: bool,
@@ -1139,7 +1455,6 @@ struct Performer {
     cwd_revision: u64,
     reply_tx: Option<Sender<Vec<u8>>>,
     reply_queue_full_warned: std::sync::atomic::AtomicBool,
-    sequence_dispatched: bool,
     /// Theme default foreground (sRGB), used to answer OSC 10 `?` queries.
     /// `None` means the parser was never told a theme — query replies are
     /// suppressed in that case so we don't lie to the shell.
@@ -1166,26 +1481,22 @@ struct Performer {
     /// DECSTBM scrolling region bottom margin (visible-row, 0-based,
     /// inclusive).
     scroll_bottom: Option<u16>,
-    /// Tracks whether the underlying vte state machine is in the Ground
-    /// state (no escape sequence currently being consumed). Maintained
-    /// externally: set to `true` after every dispatch callback fires
-    /// (`print` / `execute` / `csi_dispatch` / `osc_dispatch` /
-    /// `esc_dispatch` / `unhook`), set to `false` inside `Parser::advance`
-    /// just before feeding the first byte of a potential escape, and held
-    /// `false` while inside a DCS passthrough (`hook` … `unhook`).
-    /// The ASCII fast-path in `Parser::advance` is only taken when this is
-    /// `true`.
-    ground: bool,
+    /// Whether direct ASCII printing may bypass vte.
+    ///
+    /// [`Parser::escape_family`] owns sequence boundaries. This flag only stays
+    /// false while vte must retain byte-level ownership, including partial UTF-8
+    /// and DCS passthrough.
+    fast_path_ready: bool,
     /// Most-recently-printed graphic character, for CSI `b` (REP).
     /// ECMA-48: REP repeats the GRAPHIC CHARACTER immediately preceding
     /// REP in the data stream. Reset when a control function intervenes.
     last_printed_char: Option<char>,
     dcs_capture: Option<MediaCapture>,
-    /// Kitty keyboard protocol progressive-enhancement flag stack. The active
-    /// flags are the top of stack (`last()`); empty stack == flags 0 == legacy
-    /// encoding. Apps push with `CSI > flags u`, pop with `CSI < number u`,
-    /// set with `CSI = flags ; mode u`, and query with `CSI ? u`.
-    kitty_kbd_flags: Vec<u8>,
+    /// Kitty keyboard flag stacks for the main and alternate screens.
+    ///
+    /// Each screen owns independent progressive-enhancement state, as required
+    /// by the protocol. Empty stack means flags 0 and legacy encoding.
+    kitty_kbd_flags: [Vec<u8>; 2],
 }
 
 /// Maximum depth of the kitty keyboard flag stack. The protocol allows nested
@@ -1210,6 +1521,10 @@ impl Performer {
             bracketed_paste: false,
             mouse_sgr: false,
             app_cursor_keys: false,
+            app_keypad: false,
+            backarrow_key: false,
+            newline_mode: false,
+            modify_other_keys: 0,
             mouse_tracking: MouseTracking::default(),
             focus_reporting: false,
             title: None,
@@ -1218,7 +1533,6 @@ impl Performer {
             cwd_revision: 0,
             reply_tx,
             reply_queue_full_warned: std::sync::atomic::AtomicBool::new(false),
-            sequence_dispatched: false,
             theme_fg: None,
             theme_bg: None,
             theme_cursor: None,
@@ -1226,10 +1540,10 @@ impl Performer {
             suppress_next_osc4: false,
             scroll_top: None,
             scroll_bottom: None,
-            ground: true,
+            fast_path_ready: true,
             last_printed_char: None,
             dcs_capture: None,
-            kitty_kbd_flags: Vec::new(),
+            kitty_kbd_flags: [Vec::new(), Vec::new()],
         }
     }
 
@@ -1242,6 +1556,25 @@ impl Performer {
         let top = self.scroll_top.unwrap_or(0);
         let bot = self.scroll_bottom.unwrap_or(rows.saturating_sub(1));
         (top, bot)
+    }
+
+    fn physical_cursor_col(&self) -> u16 {
+        self.grid.cursor.col.min(self.grid.cols.saturating_sub(1))
+    }
+
+    fn advance_hard_line(&mut self, fill: Cell, carriage_return: bool) {
+        let (top, bottom) = self.effective_scroll_region();
+        let col = self.physical_cursor_col();
+        let col = if carriage_return { 0 } else { col };
+        let mut row = self.grid.cursor.row;
+        if row == bottom {
+            // The control's fill applies only to the newly exposed row inside the active region.
+            self.grid.scroll_region_up_with(top, bottom, 1, fill);
+        } else {
+            // When: `row != bottom`, physical bounds protect rows below the scroll region.
+            row = row.saturating_add(1).min(self.grid.rows.saturating_sub(1));
+        }
+        self.grid.goto_hard_line(row, col);
     }
 
     // Ordering: reply_queue_full_warned uses Relaxed because it suppresses duplicate warnings without publishing reply bytes.
@@ -1311,7 +1644,26 @@ impl Performer {
     /// Active kitty keyboard protocol flags (top of the push/pop stack).
     /// Empty stack reports 0, meaning legacy (non-kitty) key encoding.
     fn kitty_keyboard_flags(&self) -> u8 {
-        *self.kitty_kbd_flags.last().unwrap_or(&0)
+        *self.kitty_kbd_stack().last().unwrap_or(&0)
+    }
+
+    fn kitty_kbd_stack(&self) -> &Vec<u8> {
+        &self.kitty_kbd_flags[usize::from(self.grid.is_alt())]
+    }
+
+    fn kitty_kbd_stack_mut(&mut self) -> &mut Vec<u8> {
+        let index = usize::from(self.grid.is_alt());
+        &mut self.kitty_kbd_flags[index]
+    }
+
+    fn keyboard_modes(&self) -> KeyboardModes {
+        KeyboardModes {
+            application_cursor_keys: self.app_cursor_keys,
+            application_keypad: self.app_keypad,
+            backarrow_key: self.backarrow_key,
+            newline: self.newline_mode,
+            modify_other_keys: self.modify_other_keys,
+        }
     }
 
     fn reset_last_printed_char(&mut self) {
@@ -1366,6 +1718,10 @@ impl Performer {
         self.bracketed_paste = false;
         self.mouse_sgr = false;
         self.app_cursor_keys = false;
+        self.app_keypad = false;
+        self.backarrow_key = false;
+        self.newline_mode = false;
+        self.modify_other_keys = 0;
         self.mouse_tracking = MouseTracking::Off;
         self.focus_reporting = false;
         self.current_hyperlink = None;
@@ -1373,7 +1729,9 @@ impl Performer {
         self.scroll_bottom = None;
         self.last_printed_char = None;
         self.dcs_capture = None;
-        self.kitty_kbd_flags.clear();
+        for stack in &mut self.kitty_kbd_flags {
+            stack.clear();
+        }
         self.grid.set_autowrap(true);
         if self.grid.is_alt() {
             self.grid.leave_alt_screen();
@@ -1500,6 +1858,7 @@ impl Performer {
             match code {
                 1 => self.app_cursor_keys = set,
                 7 => self.grid.set_autowrap(set),
+                67 => self.backarrow_key = set,
                 25 => self.events.push(VtEvent::CursorVisibility(set)),
                 47 => {
                     let before = self.grid.is_alt();
@@ -1768,7 +2127,7 @@ fn split_once_byte(bytes: &[u8], needle: u8) -> Option<(&[u8], &[u8])> {
 impl Perform for Performer {
     fn print(&mut self, c: char) {
         self.print_graphic(c);
-        self.ground = true;
+        self.fast_path_ready = true;
     }
 
     fn execute(&mut self, byte: u8) {
@@ -1777,21 +2136,7 @@ impl Perform for Performer {
             0x07 => self.events.push(VtEvent::Bell),
             0x08 => self.grid.backspace(),
             0x09 => self.grid.tab(),
-            0x0A..=0x0C => {
-                // LF/VT/FF — like IND, must scroll the active region
-                // (not the whole grid) when at the bottom margin so
-                // DECSTBM works for shells/apps that use LF rather
-                // than IND.
-                let (top, bot) = self.effective_scroll_region();
-                if self.grid.cursor.row == bot
-                    && (self.scroll_top.is_some() || self.scroll_bottom.is_some())
-                {
-                    self.grid.scroll_region_up_with(top, bot, 1, self.erase_fill_cell());
-                } else {
-                    // When: cursor row is not bot or no margin is active, linefeed without scrolling the DECSTBM region.
-                    self.grid.linefeed_with(self.erase_fill_cell());
-                }
-            }
+            0x0A..=0x0C => self.advance_hard_line(self.erase_fill_cell(), false),
             0x0D => self.grid.carriage_return(),
             _ => {
                 // When: byte is an unhandled C0 control, leave cells unchanged while keeping the parser outside ground.
@@ -1801,12 +2146,11 @@ impl Perform for Performer {
         // inside an ESC/CSI/OSC/DCS state machine (C0 bytes are dispatched
         // even mid-escape). Resuming the SWAR fast-path here would consume
         // the remainder of the escape sequence as printable text.
-        self.ground = false;
+        self.fast_path_ready = false;
     }
 
     fn csi_dispatch(&mut self, params: &Params, inter: &[u8], _ignore: bool, action: char) {
-        self.ground = false;
-        self.sequence_dispatched = true;
+        self.fast_path_ready = false;
         if action != 'b' {
             self.reset_last_printed_char();
         }
@@ -1855,11 +2199,17 @@ impl Perform for Performer {
                     buf.extend_from_slice(b"\x1b\\");
                     self.reply(&buf);
                 }
-                'u' if self.kitty_kbd_flags.len() < KITTY_KBD_STACK_MAX => {
+                'u' => {
                     // Kitty keyboard protocol push: `CSI > flags u`. Push the
-                    // requested flag set onto the stack. Cap the depth so a
-                    // misbehaving app can't grow it without bound.
-                    self.kitty_kbd_flags.push(p0() as u8);
+                    // requested flag set and evict the oldest entry at the cap.
+                    let stack = self.kitty_kbd_stack_mut();
+                    if stack.len() == KITTY_KBD_STACK_MAX {
+                        stack.remove(0);
+                    }
+                    stack.push((p0() & 0x7f) as u8);
+                }
+                'm' if p0() == 4 => {
+                    self.modify_other_keys = (p1() as u8).min(2);
                 }
                 _ => {
                     // When: action is unsupported for >, ignore it without mutating identity or keyboard state.
@@ -1875,39 +2225,55 @@ impl Perform for Performer {
         if inter.first() == Some(&b'<') {
             if action == 'u' {
                 let n = (p0() as usize).max(1);
-                let new_len = self.kitty_kbd_flags.len().saturating_sub(n);
-                self.kitty_kbd_flags.truncate(new_len);
+                let stack = self.kitty_kbd_stack_mut();
+                let new_len = stack.len().saturating_sub(n);
+                stack.truncate(new_len);
             }
             return;
         }
         // CSI with `=` intermediate — kitty keyboard protocol set.
         // `CSI = flags ; mode u` sets the current (top-of-stack) flags. `mode`
-        // selects all (1)/set-or (2)/reset-and (3); we keep the common cases
-        // and otherwise replace. With an empty stack there is nothing to set,
-        // so push the requested flags as the active set.
+        // selects all (1)/set-or (2)/reset-and (3), with an omitted mode
+        // defaulting to 1. Unsupported modes are ignored. With an empty stack,
+        // an accepted mode pushes the requested flags as the active set.
 
         // When: inter begins with =, consume the keyboard-set namespace before normal CSI action routing.
         if inter.first() == Some(&b'=') {
             if action == 'u' {
-                let flags = p0() as u8;
-                let mode = p1();
+                // When: action is u, apply the accepted Kitty set mode to this screen's stack.
+                let flags = (p0() & 0x7f) as u8;
+                let mode =
+                    params.iter().nth(1).and_then(|slice| slice.first().copied()).unwrap_or(1);
                 let current = self.kitty_keyboard_flags();
                 let next = match mode {
+                    1 => flags,
                     2 => current | flags,
                     3 => current & !flags,
-                    // mode 1 (default) and anything else: replace.
-                    _ => flags,
+                    _ => {
+                        // When: mode is outside 1..=3, leave the active Kitty flags unchanged.
+                        return;
+                    }
                 };
-                if let Some(top) = self.kitty_kbd_flags.last_mut() {
+                let stack = self.kitty_kbd_stack_mut();
+                if let Some(top) = stack.last_mut() {
                     *top = next;
-                } else if self.kitty_kbd_flags.len() < KITTY_KBD_STACK_MAX {
-                    // When: kitty_kbd_flags has no top and remains below KITTY_KBD_STACK_MAX, push next as the active flag set.
-                    self.kitty_kbd_flags.push(next);
+                } else {
+                    // When: the active screen has no stack entry, establish its
+                    // first explicit Kitty mode value.
+                    stack.push(next);
                 }
             }
             return;
         }
         match action {
+            'h' | 'l' => {
+                let set = action == 'h';
+                for slice in params.iter() {
+                    if slice.first().copied().unwrap_or(0) == 20 {
+                        self.newline_mode = set;
+                    }
+                }
+            }
             'A' => {
                 let n = p0().max(1);
                 let row = self.grid.cursor.row.saturating_sub(n);
@@ -1960,7 +2326,9 @@ impl Perform for Performer {
                         cols.saturating_sub(1)
                     ),
                     1 => format!("(0,0)..({r},{c}) inclusive"),
-                    2 | 3 => "entire screen".to_string(),
+                    2 => "entire screen".to_string(),
+                    3 if self.grid.is_alt() => "<alternate screen, no-op>".to_string(),
+                    3 => "saved history only".to_string(),
                     _ => "<unknown mode, no-op>".to_string(),
                 };
                 tracing::debug!(
@@ -1970,7 +2338,8 @@ impl Perform for Performer {
                 match mode {
                     0 => self.grid.erase_below_with(self.erase_fill_cell()),
                     1 => self.grid.erase_above_with(self.erase_fill_cell()),
-                    2 | 3 => self.grid.erase_screen_with(self.erase_fill_cell()),
+                    2 => self.grid.erase_screen_with(self.erase_fill_cell()),
+                    3 => self.grid.clear_scrollback(),
                     _ => {
                         // When: mode is not a defined ED operation, preserve every cell instead of erasing an unintended region.
                     }
@@ -2074,7 +2443,7 @@ impl Perform for Performer {
                     5 => self.reply(b"\x1b[0n"),
                     6 => {
                         let row = self.grid.cursor.row.saturating_add(1);
-                        let col = self.grid.cursor.col.saturating_add(1);
+                        let col = self.physical_cursor_col().saturating_add(1);
                         self.reply(format!("\x1b[{row};{col}R").as_bytes());
                     }
                     _ => {}
@@ -2146,8 +2515,7 @@ impl Perform for Performer {
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
-        self.ground = false;
-        self.sequence_dispatched = true;
+        self.fast_path_ready = false;
         let code = params
             .first()
             .and_then(|s| std::str::from_utf8(s).ok())
@@ -2393,7 +2761,7 @@ impl Perform for Performer {
 
     fn hook(&mut self, _params: &Params, intermediates: &[u8], ignore: bool, action: char) {
         // Entering DCS passthrough — stay out of the fast-path until unhook.
-        self.ground = false;
+        self.fast_path_ready = false;
         // `q` ends three unrelated DCS sequences, told apart only by their
         // intermediate byte:
         //
@@ -2416,14 +2784,13 @@ impl Perform for Performer {
             .then(|| MediaCapture::new(MediaProtocol::Sixel, String::new()));
     }
     fn put(&mut self, byte: u8) {
-        self.ground = false;
+        self.fast_path_ready = false;
         if let Some(capture) = self.dcs_capture.as_mut() {
             capture.append_byte(byte);
         }
     }
     fn unhook(&mut self) {
-        self.ground = false;
-        self.sequence_dispatched = true;
+        self.fast_path_ready = false;
         if let Some(capture) = self.dcs_capture.take() {
             if let Some(event) = capture.into_event(self.grid.cursor.row, self.grid.cursor.col) {
                 self.events.push(VtEvent::Media(event));
@@ -2431,8 +2798,7 @@ impl Perform for Performer {
         }
     }
     fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, byte: u8) {
-        self.ground = false;
-        self.sequence_dispatched = true;
+        self.fast_path_ready = false;
         self.reset_last_printed_char();
         match byte {
             b'7' => {
@@ -2456,20 +2822,13 @@ impl Perform for Performer {
                 // visually interleaved with the app's first frame.
                 self.reset_terminal();
             }
-            b'D' => {
-                // IND — Index. Move cursor down one line; if at the
-                // bottom margin of the scroll region, scroll the
-                // region up. Must respect DECSTBM.
-                let (top, bot) = self.effective_scroll_region();
-                if self.grid.cursor.row == bot {
-                    self.grid.scroll_region_up(top, bot, 1);
-                } else {
-                    // When: cursor row is not bot, IND advances without scrolling and records a hard boundary.
-                    let new_row = (self.grid.cursor.row + 1).min(self.grid.rows.saturating_sub(1));
-                    let col = self.grid.cursor.col;
-                    self.grid.goto_hard_line(new_row, col);
-                }
+            b'=' => {
+                self.app_keypad = true;
             }
+            b'>' => {
+                self.app_keypad = false;
+            }
+            b'D' => self.advance_hard_line(Cell::default(), false),
             b'M' => {
                 // RI — Reverse Index. Move cursor up; if at top
                 // margin, scroll the region down.
@@ -2483,18 +2842,7 @@ impl Perform for Performer {
                     self.grid.goto(new_row, col);
                 }
             }
-            b'E' => {
-                // NEL — Next Line. Like IND, but also moves cursor to col 0.
-                let (top, bot) = self.effective_scroll_region();
-                if self.grid.cursor.row == bot {
-                    self.grid.scroll_region_up(top, bot, 1);
-                    self.grid.goto(self.grid.cursor.row, 0);
-                } else {
-                    // When: cursor row is not bot, NEL advances without scrolling and records a hard boundary at column zero.
-                    let new_row = (self.grid.cursor.row + 1).min(self.grid.rows.saturating_sub(1));
-                    self.grid.goto_hard_line(new_row, 0);
-                }
-            }
+            b'E' => self.advance_hard_line(Cell::default(), true),
             _ => {
                 // When: byte is not a supported ESC final, leave cursor and screen state unchanged.
             }
