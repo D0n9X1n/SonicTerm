@@ -13,7 +13,10 @@ drag/tear-out, and the platform shell abstractions.
 - `src/app/event_loop.rs` - window creation and window-ready hooks.
 - `src/app/spawn_pane.rs` - PTY thread pump and redraw coalescing.
 - `src/app/path_target.rs` - contextual target resolution, openability probes, and direct-open workers.
-- `src/app/tab_transfer.rs`, `tear_out.rs`, `child_window.rs` - tab movement.
+- `src/app/tab_transfer.rs` - pure GPU-free `TabContainer` transfer/reorder helper for tab movement tests.
+- `src/app/tab_state.rs` - production `App` tab-state attach/detach helpers for main and child windows.
+- `src/app/tear_out.rs` - native tear-out drag and child-window lifecycle.
+- `src/app/child_window.rs` - child-window event routing, resizing, and PTY/VT wiring.
 - `src/app/config_apply.rs` - explicit reload of `~/.sonicterm/sonicterm.toml`.
 - `src/shell.rs` - shared shell runner with thin macOS, Windows, and Linux builders.
 
