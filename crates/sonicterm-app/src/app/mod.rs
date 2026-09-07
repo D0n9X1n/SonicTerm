@@ -5272,6 +5272,12 @@ impl App {
         self.pending_redraw
     }
 
+    /// Test seam: observe a window's frame timestamp independently of its contention deadline.
+    #[doc(hidden)]
+    pub fn __test_window_last_render(&self, id: WindowId) -> Option<Instant> {
+        self.windows.get(&id).map(|window| window.last_render)
+    }
+
     /// Test seam: backdate a window's last-render instant.
     ///
     /// Frame pacing measures elapsed time since the last render, so moving

@@ -123,6 +123,15 @@ correctness, not only speed.
 - Changes to terminal cells mark affected rows in the same frame. This includes
   scrolling, reverse index, line insertion/deletion, erase, resize, and
   wide-cell repair.
+- Nonempty primary-history erasure advances the revision and exact eviction
+  counter and marks all visible rows presentation-dirty, without changing their
+  content stamps. Empty history and alternate-screen ED3 change neither screen.
+  Every history-prefix removal drops prompts whose starts were removed and
+  rebases surviving coordinates; saved-primary prompts stay with their rows.
+- Cursor-position replies clamp the insertion sentinel to a physical column
+  without consuming delayed wrap. Hard LF/VT/FF/IND/NEL advancement scrolls only
+  at the effective bottom margin and otherwise clamps to physical bounds. Fill
+  and carriage-return policies remain explicit per control.
 - Each `Line` packs an incoming automatic-wrap bit into its existing content
   sequence word. Only an actual margin wrap sets it. Hard line advances,
   full-row erases, recycled rows, non-reflow resize, and uncertain region
@@ -188,7 +197,10 @@ clears dirty rows.
 Grid geometry accounts for retained row allocations, not only visible
 `cols × rows`. A material column shrink compacts rows. Adjacent resize changes
 keep reusable capacity to avoid repeated allocation. Reducing the scrollback
-limit releases excess `VecDeque` capacity.
+limit releases excess `VecDeque` capacity. Column shrink checks only each new
+right edge for a clipped `WIDE` lead and replaces it with the resize fill;
+complete pairs and compact storage survive. The same `Line` operation covers
+visible, history, and saved-primary rows without reflow or later resurrection.
 
 Clipboard serialization keeps isolated or incomplete right-edge box drawing.
 It removes only a coherent multi-row side that ends in a lower-right frame
@@ -506,6 +518,11 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
 - 备用屏幕窗格只要有脏行，就贡献整个经表面裁剪的窗格。没有脏行时不贡献损伤区域。
 - 终端单元格变化会在同一帧标记受影响的行，包括滚动、反向索引、插入或删除行、擦除、
   调整大小和宽字符修复。
+- 擦除非空主屏幕历史会推进修订计数和精确淘汰计数，并将所有可见行标记为呈现脏行，
+  但不改变它们的内容序号。历史为空或备用屏幕中的 ED3 不修改任一屏幕。所有历史前缀
+  删除都会丢弃起点已删除的提示符，并重定位存活坐标；已保存主屏幕的提示符随所属行保存。
+- 光标位置回复把插入哨兵值钳制到物理列，不消耗延迟换行。LF/VT/FF/IND/NEL 硬换行只在
+  有效底边滚动，否则钳制在物理边界内；每种控制的填充和回车策略保持显式区分。
 - 每个 `Line` 会把“由前一行自动软换行而来”的 bit 打包进现有内容序号 word。只有真实的
   右边界自动换行会设置它；硬换行、整行擦除、行复用、不做 reflow 的 resize，以及无法证明
   连续性的区域调整会清除相关边界。该 bit 会随行进入 scrollback，并参与行相等性与 hash，
@@ -551,7 +568,9 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
 
 网格几何记账包含保留的行分配，不只计算可见的 `cols × rows`。列数大幅减少时会压紧行。
 相邻尺寸变化会保留可复用容量，避免反复分配。降低回滚历史上限会释放多余的
-`VecDeque` 容量。
+`VecDeque` 容量。缩小列数时仅检查每行的新右边界，把失去续格的 `WIDE` 首格替换为
+尺寸调整填充；完整字符对和紧凑存储保持不变。同一个 `Line` 操作覆盖可见行、历史和
+已保存主屏幕，不执行 reflow，也不会在以后恢复被裁剪文本。
 
 复制到剪贴板时会保留孤立或不完整的右边框线。只有连贯的多行侧边框，并且最终以右下角
 框线字符收尾时，才会删除该边框。在 Windows 上，成功的 OSC 52 写入最多只会延迟重写一次，

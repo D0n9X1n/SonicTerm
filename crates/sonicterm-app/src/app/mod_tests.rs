@@ -112,6 +112,77 @@ fn native_drag_cancels_when_the_pressed_tab_has_closed() {
 }
 
 #[test]
+fn native_bar_drop_and_cancel_preserve_captured_identity_after_topology_changes() {
+    // Native completion cannot move a neighbor after close/reorder; cancellation leaves the post-mutation topology intact.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    for source_is_main in [true, false] {
+        for mutation in 0..4 {
+            for cancelled in [false, true] {
+                let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+                app.__test_seed_tab("A");
+                app.__test_seed_tab("B");
+                app.__test_seed_tab("C");
+                let main = app.main_window_id.unwrap();
+                let source = if source_is_main {
+                    main
+                } else {
+                    app.__test_seed_child_window(&["A", "B", "C"])
+                };
+                let target = app.__test_seed_child_window(&["destination"]);
+                app.__test_set_child_pane_viewport(
+                    target,
+                    sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 240.0),
+                    10.0,
+                    10.0,
+                );
+                let pressed = app.tab_id_at(source, 1).unwrap();
+                let pane = app.windows[&source].tab_states[1].active_pane;
+                app.__test_set_os_drag_source(Some((source, 1)));
+                match mutation {
+                    0 => drop(app.detach_from_child(source, 0)),
+                    1 => drop(app.detach_from_child(source, 1)),
+                    2 => {
+                        assert!(app.windows.get_mut(&source).unwrap().reorder_tab(1, 2));
+                    }
+                    _ => {
+                        app.windows.remove(&source);
+                    }
+                }
+                let before: Vec<_> = app.windows.get(&source).map_or_else(Vec::new, |window| {
+                    (0..window.tabs.len()).map(|i| window.tabs.tabs()[i].id).collect()
+                });
+                let outcome = if cancelled {
+                    os_drag::DragOutcome::Cancelled
+                } else {
+                    os_drag::DragOutcome::DroppedOnBar {
+                        target_window: Some(target),
+                        target_slot: 0,
+                    }
+                };
+                app.os_drag_pending.set_ended(outcome);
+
+                assert_eq!(app.handle_os_drag_ended(), Some(outcome));
+                assert!(app.handle_os_drag_ended().is_none());
+                assert!(app.os_drag_source.is_none());
+                assert!(app.pending_tear_out.is_none());
+                let transferred = !cancelled && matches!(mutation, 0 | 2);
+                assert_eq!(app.windows[&target].tabs.len(), if transferred { 2 } else { 1 });
+                assert_eq!(app.windows[&target].panes.contains_key(&pane), transferred);
+                if transferred {
+                    assert_eq!(app.tab_id_at(target, 0), Some(pressed));
+                }
+                let expected: Vec<_> =
+                    before.into_iter().filter(|id| !transferred || *id != pressed).collect();
+                let after: Vec<_> = app.windows.get(&source).map_or_else(Vec::new, |window| {
+                    (0..window.tabs.len()).map(|i| window.tabs.tabs()[i].id).collect()
+                });
+                assert_eq!(after, expected);
+            }
+        }
+    }
+}
+
+#[test]
 fn local_drag_routes_resolve_identity_after_close_reorder_or_source_loss() {
     // All local release routes use the captured window/tab even after a close or reorder changes vector slots.
     let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
