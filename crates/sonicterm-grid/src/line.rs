@@ -26,7 +26,7 @@
 //! `Vec<Cell>` directly. The data structure, its invariants, and its tests
 //! stand on their own so the call-site refactor can be done separately.
 
-use sonicterm_types::cell::{Cell, FatAttributes};
+use sonicterm_types::cell::{Cell, CellFlags, FatAttributes};
 
 const MIN_EXACT_HALF_COMPACTION_ITEMS: usize = 1024;
 
@@ -872,19 +872,7 @@ impl Line {
         self.as_vec_mut().as_mut_slice()
     }
 
-    /// Resize to `new_len`, padding with `fill` when growing.
-    ///
-    /// Cluster-preserving resize. When the line is in Cluster
-    /// form, this avoids degrading to Flat in the common cases:
-    ///
-    /// * **Shrink** — truncate the cluster's run-len; if the resulting
-    ///   length is 0, clear to empty Flat.
-    /// * **Grow, fill matches trailing cluster** — bump the trailing
-    ///   cluster's count. Stays Cluster.
-    /// * **Grow, fill differs from trailing cluster** — append a new
-    ///   cluster covering the padding. Stays Cluster (multi-cluster).
-    ///
-    /// Flat storage uses the underlying `Vec::resize` path unchanged.
+    /// Resize without reflow, using `fill` for padding or a clipped wide lead while preserving clusters.
     pub fn resize(&mut self, new_len: usize, fill: Cell) {
         let cur = self.len();
         if new_len == cur {
@@ -892,12 +880,36 @@ impl Line {
             return;
         }
         if new_len < cur {
-            // When: `new_len < cur`, delegate the shrink to cluster-aware truncation.
-            // Shrink: delegate to truncate which is cluster-aware.
+            // When: `new_len < cur`, truncation may remove the continuation of the new trailing cell.
             self.truncate(new_len);
+            match &mut self.storage {
+                LineStorage::Flat(cells) => {
+                    if let Some(edge) =
+                        cells.last_mut().filter(|cell| cell.flags.contains(CellFlags::WIDE))
+                    {
+                        *edge = fill;
+                    }
+                }
+                LineStorage::Cluster(clusters) => {
+                    // When: storage is `Cluster`, repair only the final column so unaffected runs stay compressed.
+                    let Some(edge) =
+                        clusters.last_mut().filter(|run| run.cell.flags.contains(CellFlags::WIDE))
+                    else {
+                        // When: the last run has no WIDE lead, the truncated boundary needs no repair or materialization.
+                        return;
+                    };
+                    edge.count -= 1;
+                    if edge.count == 0 {
+                        clusters.pop();
+                    }
+                    match clusters.last_mut() {
+                        Some(last) if last.cell == fill => last.count += 1,
+                        _ => clusters.push(Cluster { cell: fill, count: 1 }),
+                    }
+                }
+            }
             return;
         }
-        // Grow.
         match &mut self.storage {
             LineStorage::Flat(v) => v.resize(new_len, fill),
             LineStorage::Cluster(cs) => {
