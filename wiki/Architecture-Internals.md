@@ -71,15 +71,23 @@ backstop. Retention is measured before it is charged, so a failed charge does
 not undo memory already retained. A failed growth keeps the previous charge. A
 failed new charge leaves that class absent and writes a `memory` debug record.
 
-A pane owns one `CommittedReservation` per charged `ResourceClass`. A charge is
-resized in place with `try_grow` or `shrink`; it is not released and recreated
-between samples. Owner reattribution passes the complete charge set to
-`CommittedReservation::transfer_batch`. Every token must share one ledger and
-source owner; the batch preserves classes and validates all source balances,
-target states, and target limits under one ordered lock set before mutation.
-Success changes owner-path accounting and token owner ids without changing
-process or per-class totals. Failure leaves every token and ledger shard at the
-source.
+A pane owns one `CommittedReservation` per charged `ResourceClass`. Retention
+uses `try_resize` in place, including samples where bytes grow while items shrink
+or vice versa. Final admission is `current total - old charge + new charge`, not
+a component-wise maximum or release/re-reserve cycle. Any growing axis requires
+open ancestors; reductions can settle while closing. State locks precede class
+locks and ascending owner-usage locks; process-byte growth uses the existing CAS
+as the final fallible step. Refusal leaves the token and all balances unchanged.
+Snapshots remain observational rather than one linearizable global reading.
+
+One-pane reconciliation uses `CommittedReservation::transfer_batch`; tab
+attachment uses `transfer_many` for every moved pane's charges and individual
+target owner in one same-ledger transaction. Both preserve classes and validate
+source balances, target states, and final owner limits before changing any
+shard. Immutable parent ids precede children, so both follow the same ordered
+state/class/owner locks. Success changes owner-path balances and token owner ids
+without changing process or per-class totals. Refusal preserves all source
+tokens; provisional empty owners drop before source custody is restored.
 
 Close order is load-bearing:
 
@@ -460,12 +468,18 @@ Process
 计费失败不会撤销已经保留的内存。增长失败时保留原计费值。新类别计费失败时，该类别保持
 缺失，并写一条 `memory` debug 记录。
 
-窗格为每个已计费的 `ResourceClass` 持有一个 `CommittedReservation`。计费通过
-`try_grow` 或 `shrink` 原地调整，不会在两次采样之间先释放再重新创建。重新归属所有者时，
-代码把完整计费集合交给 `CommittedReservation::transfer_batch`。每个令牌必须属于同一账本和
-同一源所有者；批次会保留分类，并在修改前用一套有序锁完整验证源余额、目标状态和目标上限。
-成功时只修改所有者路径记账和令牌所有者 id，不改变进程总量或各分类总量；失败时全部令牌和
-账本分片都精确保留在源端。
+窗格为每个已计费的 `ResourceClass` 持有一个 `CommittedReservation`。常驻内存采样通过
+`try_resize` 原地调整，也支持字节增长而条目减少或相反的混合变化。最终准入按
+`当前总量 - 旧计费 + 新计费` 计算，不使用逐维最大值，也不先释放再预留。任一维增长都要求
+祖先仍开放；纯减少允许在关闭过程中结算。先获取状态锁，再获取类别锁和按所有者 id 升序的
+用量锁；进程字节增长通过已有 CAS 完成最后一个可失败步骤。拒绝时令牌和所有余额都不变。
+快照仍是观察性读数，而不是一次全局线性化读取。
+
+单窗格协调使用 `CommittedReservation::transfer_batch`；标签页附加使用 `transfer_many`，
+把每个移动窗格的计费及其各自目标所有者纳入同一账本事务。两者都保留分类，并在修改任何分片前
+验证源余额、目标状态及最终所有者上限。不可变父节点的 id 总小于子节点，因此两者遵循同一套
+状态、类别和所有者锁顺序。成功只修改所有者路径余额和令牌 owner id，不改变进程或分类总量；
+拒绝时保留全部源令牌，并在恢复源托管状态前释放空的临时所有者。
 
 关闭顺序不能改变：
 

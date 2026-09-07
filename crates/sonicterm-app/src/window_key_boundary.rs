@@ -60,13 +60,18 @@ pub fn winit_from_mod_key(m: ModKey) -> ModifiersState {
 ///
 /// Each new `WindowId` gets the next sequential `u64`. Lookups for an
 /// already-seen `WindowId` return the previously-assigned key. The
-/// registry is intentionally tiny (no removal) — platform shells track
-/// the inverse mapping (`HashMap<WindowKey, Arc<Window>>`) separately so
-/// that closing a window does not invalidate the key.
-#[derive(Debug, Default)]
+/// registry removes closed-window mappings without reusing their keys; callers
+/// resolve the surviving id against their live window map before executing work.
+#[derive(Debug)]
 pub struct WindowKeyRegistry {
     next: u64,
     map: HashMap<WindowId, WindowKey>,
+}
+
+impl Default for WindowKeyRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl WindowKeyRegistry {
@@ -95,7 +100,17 @@ impl WindowKeyRegistry {
         self.map.get(&id).copied()
     }
 
-    /// Number of distinct `winit::WindowId`s seen.
+    /// Resolve one assigned key without guessing a current or main window.
+    pub fn resolve(&self, key: WindowKey) -> Option<WindowId> {
+        self.map.iter().find_map(|(id, assigned)| (*assigned == key).then_some(*id))
+    }
+
+    /// Remove a closed window's mapping without reusing its assigned key.
+    pub fn remove(&mut self, id: WindowId) {
+        self.map.remove(&id);
+    }
+
+    /// Number of distinct `winit::WindowId`s currently registered.
     pub fn len(&self) -> usize {
         self.map.len()
     }

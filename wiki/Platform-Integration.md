@@ -33,6 +33,11 @@ session marker and breadcrumb writer, load config, initialize logging from
 state is under `~/.sonicterm`; packaged assets are resolved by
 `sonicterm-cfg::assets`.
 
+Terminal IME geometry is shared app behavior: each window sends the active
+pane's physical cursor rectangle, including its origin and content padding once.
+Deduplication uses pane identity, physical position, and physical size rather
+than only row/column. Palette and search fields retain their own anchors.
+
 ## Native target opening
 
 Path scanning and openability probing are cross-platform app behavior. The
@@ -140,7 +145,10 @@ The Windows backend initializes OLE on the UI thread and implements COM
 `com.sonic-terminal.tab.v1` clipboard format (`CF_SONIC_TAB`) and uses
 `DoDragDrop` and `RegisterDragDrop`. Every destination HWND is registered through
 the shared tab-drag backend, including torn-out child windows. OLE lifetime and
-drag operations stay on the window thread.
+drag operations stay on the window thread. The app retains stable source
+`WindowId`/`TabId` bookkeeping throughout the gesture; a serialized or press-time
+index is not source authority. An OLE `MOVE` result without a resolved destination
+cancels locally rather than inventing a main-window/self target.
 
 ### PTY and software presentation
 
@@ -260,6 +268,10 @@ flowchart TD
 `AppStateMachine`，构建平台 shell，再运行共享 winit app。用户状态位于
 `~/.sonicterm`；打包资源统一由 `sonicterm-cfg::assets` 查找。
 
+终端输入法几何属于共享 app：每个窗口发送活动窗格的物理光标矩形，只加一次窗格原点和
+内容内边距。去重键包含窗格身份、物理位置和物理尺寸，不仅是行列。命令面板和搜索框保留
+各自的输入锚点。
+
 ## 原生目标打开
 
 路径扫描和可操作性探测属于跨平台 app。有限队列 worker 会在原生调用前再次核对完全相同的
@@ -349,6 +361,8 @@ Windows 后端在 UI 线程初始化 OLE，并实现 COM `IDataObject`、`IDropS
 `IDropTarget`。它注册私有 `com.sonic-terminal.tab.v1` clipboard format
 （`CF_SONIC_TAB`），使用 `DoDragDrop` 和 `RegisterDragDrop`。所有目标 HWND 都通过共享
 标签页拖放后端注册，包括拖出的子窗口。OLE 生命周期和拖放操作始终留在窗口线程。
+app 在整个手势中保留稳定源 `WindowId`/`TabId`；序列化下标或按下时的下标不作为源身份权威。
+OLE 返回 `MOVE` 却没有解析出的目标时，会取消本地移动，而不会虚构主窗口或自身目标。
 
 ### PTY 与软件呈现
 

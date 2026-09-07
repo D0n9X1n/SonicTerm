@@ -299,6 +299,78 @@ fn app_with_reducer_counts(tab_count: u32, live_window_count: u32) -> App {
     )
 }
 
+#[test]
+fn existing_window_transfer_refusal_preserves_the_complete_source() {
+    // Destination readiness and charge admission are checked before any source-owned state can be lost.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    for refusal in 0..3 {
+        let mut app = app_with_tabs(&["A", "B", "C"]);
+        let source = app.main_window_id.unwrap();
+        let pane_id = app.windows[&source].tab_states[1].active_pane;
+        app.main_tabs_mut().unwrap().activate(1);
+        prepare_non_vacuous_source(&mut app, source, pane_id);
+        let target = app.__test_seed_child_window(&["destination"]);
+        if refusal != 0 {
+            app.__test_set_child_pane_viewport(
+                target,
+                sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 240.0),
+                10.0,
+                10.0,
+            );
+        }
+        if refusal == 1 {
+            let window = app.windows.get_mut(&target).unwrap();
+            for pane in window.panes.values_mut() {
+                pane.charges.clear();
+                drop(pane.owner.take());
+            }
+            drop(window.owner.take());
+        } else if refusal == 2 {
+            app.governor.begin_close(app.windows[&target].owner.as_ref().unwrap().id()).unwrap();
+        }
+        let before = source_snapshot(&app, source);
+        let parser = app.windows[&source].panes[&pane_id].parser.clone();
+
+        assert!(app.transfer_tab(None, 1, Some(target), 0).is_err());
+
+        assert_eq!(source_snapshot(&app, source), before, "refusal={refusal}");
+        assert!(Arc::ptr_eq(&app.windows[&source].panes[&pane_id].parser, &parser));
+        assert_eq!(app.windows[&target].tabs.len(), 1);
+    }
+}
+
+#[test]
+fn refused_charged_transfer_cannot_reap_the_source_window() {
+    // A charged final tab stays attached if the destination has no accounting owner.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = app_with_tabs(&["destination"]);
+    let target = app.main_window_id.unwrap();
+    app.__test_set_main_pane_viewport(
+        sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 240.0),
+        10.0,
+        10.0,
+    );
+    let source = app.__test_seed_child_window(&["source"]);
+    let pane_id = app.windows[&source].tab_states[0].active_pane;
+    prepare_non_vacuous_source(&mut app, source, pane_id);
+    let source_owner = app.windows[&source].owner.as_ref().unwrap().id();
+    let window = app.windows.get_mut(&target).unwrap();
+    for pane in window.panes.values_mut() {
+        pane.charges.clear();
+        drop(pane.owner.take());
+    }
+    drop(window.owner.take());
+    let before = source_snapshot(&app, source);
+
+    assert!(app.transfer_tab(Some(source), 0, None, 0).is_err());
+
+    assert_eq!(source_snapshot(&app, source), before);
+    assert_eq!(
+        app.governor.snapshot(source_owner).unwrap().owner_state,
+        sonicterm_types::OwnerState::Open
+    );
+}
+
 #[derive(Clone, Copy)]
 enum FailureRoute {
     Main,
