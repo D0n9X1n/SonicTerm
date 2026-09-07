@@ -15,24 +15,117 @@ use std::sync::OnceLock;
 
 use parking_lot::Mutex;
 use tracing::field::{Field, Visit};
-use tracing::{Event, Subscriber};
-use tracing_subscriber::layer::Context;
-use tracing_subscriber::Layer;
+use tracing::{Event, Metadata, Subscriber};
+use tracing_log::NormalizeEvent;
+use tracing_subscriber::filter::{FilterExt, LevelFilter};
+use tracing_subscriber::layer::{Context, Filter};
+use tracing_subscriber::{EnvFilter, Layer};
 
-/// Maximum number of tracing events retained for the crash dump.
-/// Was 200 pre-v0.8.1; lowered to 50 to claw back ~30 MB of steady-state
-/// RSS that the larger ring kept allocated for the lifetime of the
-/// process. 50 events is still enough context for the post-mortem of
-/// nearly every observed SonicTerm panic.
+/// Maximum number of admitted events retained for a crash dump.
 pub const RING_CAPACITY: usize = 50;
+const RECORD_BYTES: usize = 4096;
+const TARGET_BYTES: usize = 256;
+const RING_BYTES: usize = 64 * 1024;
+const PANIC_BYTES: usize = 4096;
+const TRUNCATED: &str = "[truncated]";
+
+/// Intersect user-selected admission with the crash recorder's level and content policy.
+pub(crate) fn persistence_filter<S>(selected: EnvFilter) -> impl Filter<S> {
+    selected.and(LevelFilter::DEBUG).and(PersistencePolicy)
+}
+
+fn persistent_target(target: &str) -> bool {
+    target != "sonicterm_font::payload" && !target.starts_with("sonicterm_font::payload::")
+}
+
+struct PersistencePolicy;
+
+impl<S> Filter<S> for PersistencePolicy {
+    fn enabled(&self, metadata: &Metadata<'_>, _: &Context<'_, S>) -> bool {
+        metadata.is_span() || persistent_target(metadata.target())
+    }
+
+    fn event_enabled(&self, event: &Event<'_>, _: &Context<'_, S>) -> bool {
+        let normalized = event.normalized_metadata();
+        persistent_target(normalized.as_ref().unwrap_or_else(|| event.metadata()).target())
+    }
+
+    fn max_level_hint(&self) -> Option<LevelFilter> {
+        Some(LevelFilter::TRACE)
+    }
+}
+
+struct BoundedText<const N: usize> {
+    bytes: [u8; N],
+    len: usize,
+    limit: usize,
+    truncated: bool,
+}
+
+impl<const N: usize> BoundedText<N> {
+    fn new(limit: usize) -> Self {
+        Self { bytes: [0; N], len: 0, limit: limit.min(N), truncated: false }
+    }
+
+    fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.bytes[..self.len]).expect("formatter preserves UTF-8")
+    }
+
+    fn into_boxed_str(self) -> Box<str> {
+        self.as_str().into()
+    }
+
+    fn from_args(limit: usize, args: std::fmt::Arguments<'_>) -> Self {
+        let mut text = Self::new(limit);
+        let _ = std::fmt::write(&mut text, args);
+        text
+    }
+}
+
+impl<const N: usize> std::fmt::Write for BoundedText<N> {
+    fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        if self.truncated {
+            // When: self.truncated marks an exhausted cap, stop cooperative producer formatting.
+            return Err(std::fmt::Error);
+        }
+        if value.len() <= self.limit - self.len {
+            // When: value fits the remaining limit, append without truncation or another allocation.
+            self.bytes[self.len..self.len + value.len()].copy_from_slice(value.as_bytes());
+            self.len += value.len();
+            return Ok(());
+        }
+        let prefix_limit = self.limit.saturating_sub(TRUNCATED.len());
+        if self.len > prefix_limit {
+            // Prior fragments filled marker space; trim their suffix at a UTF-8 boundary.
+            let mut end = prefix_limit;
+            while !self.as_str().is_char_boundary(end) {
+                end -= 1;
+            }
+            self.len = end;
+        } else {
+            // When: self.len fits prefix_limit, preserve its prefix and copy only bounded UTF-8 from value.
+            let mut end = prefix_limit - self.len;
+            while !value.is_char_boundary(end) {
+                end -= 1;
+            }
+            self.bytes[self.len..self.len + end].copy_from_slice(&value.as_bytes()[..end]);
+            self.len += end;
+        }
+        let marker = &TRUNCATED.as_bytes()[..TRUNCATED.len().min(self.limit - self.len)];
+        self.bytes[self.len..self.len + marker.len()].copy_from_slice(marker);
+        self.len += marker.len();
+        self.truncated = true;
+        Err(std::fmt::Error)
+    }
+}
 
 /// Captured rendering of a single tracing event.
 #[derive(Debug, Clone)]
 struct Captured {
     ts: chrono::DateTime<chrono::Utc>,
     level: tracing::Level,
-    target: String,
-    message: String,
+    target: Box<str>,
+    message: Box<str>,
 }
 
 static RING: OnceLock<Mutex<Vec<Captured>>> = OnceLock::new();
@@ -57,47 +150,79 @@ where
     S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
 {
     fn on_event(&self, event: &Event<'_>, _: Context<'_, S>) {
-        let mut v = MessageVisitor::default();
-        event.record(&mut v);
-        let meta = event.metadata();
-        let entry = Captured {
+        let normalized = event.normalized_metadata();
+        let meta = normalized.as_ref().unwrap_or_else(|| event.metadata());
+        let target =
+            BoundedText::<TARGET_BYTES>::from_args(TARGET_BYTES, format_args!("{}", meta.target()))
+                .into_boxed_str();
+        let mut visitor = MessageVisitor { message: BoundedText::new(RECORD_BYTES - target.len()) };
+        event.record(&mut visitor);
+        push_captured(Captured {
             ts: chrono::Utc::now(),
             level: *meta.level(),
-            target: meta.target().to_string(),
-            message: v.message.unwrap_or_else(|| format!("{:?}", meta.fields())),
-        };
-        let mut lock = ring().lock();
-        if lock.len() == RING_CAPACITY {
-            lock.remove(0);
-        }
-        lock.push(entry);
+            target,
+            message: visitor.message.into_boxed_str(),
+        });
     }
 }
 
-#[derive(Default)]
+fn push_captured(entry: Captured) {
+    let mut history = ring().lock();
+    let incoming = entry.target.len() + entry.message.len();
+    let mut retained: usize =
+        history.iter().map(|event| event.target.len() + event.message.len()).sum();
+    while history.len() >= RING_CAPACITY || retained + incoming > RING_BYTES {
+        // Release exact-sized payloads before admitting the entry that exceeds a ring bound.
+        let oldest = history.remove(0);
+        retained -= oldest.target.len() + oldest.message.len();
+    }
+    history.push(entry);
+}
+
 struct MessageVisitor {
-    message: Option<String>,
+    message: BoundedText<RECORD_BYTES>,
 }
 
 impl Visit for MessageVisitor {
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "message" {
-            self.message = Some(format!("{value:?}"));
-        } else if self.message.is_none() {
-            // When: no message field was recorded yet, retain the first debug field as crash context.
-            self.message = Some(format!("{}={value:?}", field.name()));
+        if self.message.truncated || field.name().starts_with("log.") {
+            // When: message.truncated or log. fields apply, skip further payload formatting.
+            return;
+        }
+        if self.message.len != 0 {
+            // When: message already contains text, separate fields without allocating another string.
+            let _ = self.message.write_char(' ');
+        }
+        if field.name() != "message" {
+            // When: field is structured metadata, retain its name alongside the bounded value.
+            let _ = write!(self.message, "{}=", field.name());
+        }
+        if !self.message.truncated {
+            // When: the field prefix did not truncate message, its Debug callback still fits the budget.
+            let _ = write!(self.message, "{value:?}");
         }
     }
 
     fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == "message" {
-            self.message = Some(value.to_string());
-        } else if self.message.is_none() {
-            // When: no message field was recorded yet, retain the first string field as crash context.
-            self.message = Some(format!("{}={value}", field.name()));
+        if self.message.truncated || field.name().starts_with("log.") {
+            // When: the budget is exhausted or a transport field is visited, retain no further payload.
+            return;
         }
+        if self.message.len != 0 {
+            // When: message already contains text, separate fields without allocating another string.
+            let _ = self.message.write_char(' ');
+        }
+        if field.name() != "message" {
+            // When: field is structured metadata, retain its name alongside the bounded value.
+            let _ = write!(self.message, "{}=", field.name());
+        }
+        let _ = self.message.write_str(value);
     }
 }
+
+#[cfg(test)]
+#[path = "crash_tests.rs"]
+mod crash_tests;
 
 static PANIC_DIR: OnceLock<PathBuf> = OnceLock::new();
 
@@ -186,29 +311,31 @@ pub fn install_panic_hook(log_dir: PathBuf) {
     }));
 }
 
-#[allow(deprecated)]
-fn summarize(info: &std::panic::PanicInfo<'_>) -> String {
-    let thread = std::thread::current();
-    let thread_name = thread.name().unwrap_or("<unnamed>");
-    let location = info
-        .location()
-        .map(|l| format!("{}:{}", l.file(), l.line()))
-        .unwrap_or_else(|| "<unknown>".to_string());
-    let payload = info
-        .payload()
-        .downcast_ref::<&'static str>()
+fn panic_payload<'a>(info: &'a std::panic::PanicHookInfo<'_>) -> &'a str {
+    info.payload()
+        .downcast_ref::<&str>()
         .copied()
-        .map(str::to_string)
-        .or_else(|| info.payload().downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "<non-string payload>".to_string());
-    format!("panic on thread '{thread_name}' at {location}: {payload}")
+        .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("<non-string panic payload>")
 }
 
-// MSRV is 1.80; `PanicHookInfo` only landed in 1.81, so `PanicInfo`
-// stays here under an explicit allow. Bump and rename together when
-// MSRV crosses 1.81.
-#[allow(deprecated)]
-fn write_dump(info: &std::panic::PanicInfo<'_>) -> std::io::Result<()> {
+fn summarize(info: &std::panic::PanicHookInfo<'_>) -> Box<str> {
+    let thread = std::thread::current();
+    let thread_name = thread.name().unwrap_or("<unnamed>");
+    let mut text = BoundedText::<PANIC_BYTES>::new(PANIC_BYTES);
+    let _ = write!(text, "panic on thread '{thread_name}' at ");
+    if let Some(location) = info.location() {
+        // When: info has a source location, format it directly inside the summary cap.
+        let _ = write!(text, "{}:{}", location.file(), location.line());
+    } else {
+        // When: the panic has no source location, record absence rather than an inferred caller.
+        let _ = text.write_str("<unknown>");
+    }
+    let _ = write!(text, ": {}", panic_payload(info));
+    text.into_boxed_str()
+}
+
+fn write_dump(info: &std::panic::PanicHookInfo<'_>) -> std::io::Result<()> {
     let dir = PANIC_DIR.get().cloned().unwrap_or_else(crate::path::crash_dir);
     let crashes = if dir.file_name().is_some_and(|n| n == "crashes") {
         dir
@@ -221,17 +348,8 @@ fn write_dump(info: &std::panic::PanicInfo<'_>) -> std::io::Result<()> {
     let path = crashes.join(format!("crash-{stamp}.log"));
     let mut f = std::fs::File::create(&path)?;
 
-    let location = info
-        .location()
-        .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
-        .unwrap_or_else(|| "<unknown>".to_string());
-    let payload = info
-        .payload()
-        .downcast_ref::<&'static str>()
-        .copied()
-        .map(str::to_string)
-        .or_else(|| info.payload().downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "<non-string panic payload>".to_string());
+    let payload =
+        BoundedText::<PANIC_BYTES>::from_args(PANIC_BYTES, format_args!("{}", panic_payload(info)));
 
     let thread = std::thread::current();
     let thread_name = thread.name().unwrap_or("<unnamed>");
@@ -241,8 +359,13 @@ fn write_dump(info: &std::panic::PanicInfo<'_>) -> std::io::Result<()> {
     writeln!(f, "session:   {}", session_id())?;
     writeln!(f, "classification: panic")?;
     writeln!(f, "thread:    {thread_name} ({:?})", thread.id())?;
-    writeln!(f, "location:  {location}")?;
-    writeln!(f, "message:   {payload}")?;
+    if let Some(location) = info.location() {
+        writeln!(f, "location:  {}:{}:{}", location.file(), location.line(), location.column())?;
+    } else {
+        // When: no panic source location exists, preserve the explicit absence marker.
+        writeln!(f, "location:  <unknown>")?;
+    }
+    writeln!(f, "message:   {}", payload.as_str())?;
     writeln!(f)?;
     writeln!(f, "== backtrace ==")?;
     writeln!(f, "{}", std::backtrace::Backtrace::force_capture())?;
@@ -250,10 +373,7 @@ fn write_dump(info: &std::panic::PanicInfo<'_>) -> std::io::Result<()> {
     writeln!(f, "== last {} tracing events ==", RING_CAPACITY)?;
     let lock = ring().lock();
     for c in lock.iter() {
-        let mut line = String::new();
-        let _ =
-            write!(&mut line, "{} {:>5} {} {}", c.ts.to_rfc3339(), c.level, c.target, c.message);
-        writeln!(f, "{line}")?;
+        writeln!(f, "{} {:>5} {} {}", c.ts.to_rfc3339(), c.level, c.target, c.message)?;
     }
     f.flush()?;
     Ok(())
@@ -264,17 +384,14 @@ fn write_dump(info: &std::panic::PanicInfo<'_>) -> std::io::Result<()> {
 /// going through the tracing dispatcher. Used by integration tests so
 /// they can deterministically assert ring contents.
 pub fn __test_push(level: tracing::Level, target: &str, message: &str) {
-    let entry = Captured {
-        ts: chrono::Utc::now(),
-        level,
-        target: target.to_string(),
-        message: message.to_string(),
-    };
-    let mut lock = ring().lock();
-    if lock.len() == RING_CAPACITY {
-        lock.remove(0);
-    }
-    lock.push(entry);
+    let target = BoundedText::<TARGET_BYTES>::from_args(TARGET_BYTES, format_args!("{target}"))
+        .into_boxed_str();
+    let message = BoundedText::<RECORD_BYTES>::from_args(
+        RECORD_BYTES - target.len(),
+        format_args!("{message}"),
+    )
+    .into_boxed_str();
+    push_captured(Captured { ts: chrono::Utc::now(), level, target, message });
 }
 
 #[doc(hidden)]
@@ -293,7 +410,8 @@ pub fn __test_write_dump(dir: &Path, message: &str) -> std::io::Result<PathBuf> 
     writeln!(f, "session:   {}", session_id())?;
     writeln!(f, "classification: panic")?;
     writeln!(f, "location:  <test>")?;
-    writeln!(f, "message:   {message}")?;
+    let message = BoundedText::<PANIC_BYTES>::from_args(PANIC_BYTES, format_args!("{message}"));
+    writeln!(f, "message:   {}", message.as_str())?;
     writeln!(f)?;
     writeln!(f, "== last {} tracing events ==", RING_CAPACITY)?;
     let lock = ring().lock();

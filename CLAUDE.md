@@ -82,20 +82,22 @@ by default and the CI workflows are first-party files worth finding.
 | `sonicterm-mac` | macOS binary/glue. |
 | `sonicterm-windows` | Windows binary/glue. |
 | `sonicterm-linux` | Linux binary/glue and package metadata. |
-| `sonicterm-mux` | Future mux daemon. |
 | `sonicterm-logging` | Logs, panic hook, exit tracing. |
 
 ## Local gate
 
-Normal PR/main CI runs workspace unit tests plus a per-crate unit/build gate:
+Normal PR/main CI runs every workspace library, binary, and integration-test
+target once through a fail-complete workspace gate:
 
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo clippy -p sonicterm-io --features ssh --all-targets -- -D warnings
+# Windows only: use aws-lc-sys's checked-in assembly objects.
+export AWS_LC_SYS_PREBUILT_NASM=1
+cargo clippy -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
-RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-io --no-deps --features ssh
-cargo test --workspace --lib --bins
+RUSTDOCFLAGS="-D warnings" cargo doc -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --no-deps
+cargo test -p sonicterm-app -p sonicterm-io -p sonicterm-font-config -p sonicterm-resource --all-features --lib --bins --tests --no-fail-fast
 bash scripts/check-authored-rust-comments.sh
 bash scripts/check-no-raw-process-exit.sh
 bash scripts/check-rust-version.sh
@@ -113,26 +115,67 @@ bash scripts/test-wiki-publish.sh
 scripts/rust-logic-coverage.sh
 ```
 
-**Run the list to the end before concluding anything.** `--lib --bins`
-excludes every `tests/` binary, so it can pass while an integration test is
-broken; `check-workspace-crates.sh` is the step that runs `--tests` per crate
-and catches that. A green `cargo test --workspace --lib --bins` on its own
-means the unit tests pass, not that CI will.
+**Run the list to the end before concluding anything.**
+`check-workspace-crates.sh` makes one
+`cargo test --workspace --lib --bins --tests --no-fail-fast` invocation. It
+includes integration-test binaries, avoids running library and binary tests a
+second time, and lets Cargo report failures from every test target before the
+gate exits nonzero.
 
 **Never merge or enable auto-merge while any required pull-request CI job is
 queued, in progress, missing, cancelled, unexpectedly skipped, or failed.** The
 macOS, Windows, and Ubuntu jobs must each finish with `SUCCESS` on the exact
 reviewed head commit before merge. In particular, Windows must compile and run
 its Windows-only tests successfully; green macOS/Ubuntu results, local gates, or
-review approval cannot substitute for that result. After merge, verify `main` CI
-and Wiki publication before starting the next serialized PR.
+review approval cannot substitute for that result. After merge, verify Wiki
+publication before starting the next serialized PR. Successful exact-head PR CI
+is the CI gate for PR work; `main` CI is a release-provenance gate only and does
+not block the next PR.
 
-The second clippy line is not a duplicate. `--workspace --all-targets` does
-not imply `--all-features`, and `ssh` is off by default, so the SSH backend is
-compiled by no other command in this list.
+The optional-feature Clippy, Rustdoc, and test lines are not duplicates.
+`--workspace --all-targets` does not enable optional features. Together they
+compile the app and IO `ssh` branches, `distro-defaults`, and `test-util`; this
+proves those advertised feature surfaces build, lint, document, and test, but
+does not claim the GUI completes a live SSH connection. The font stack has no
+optional vendor features: St.Helens is a normal tracked asset and other fallback
+faces come from native discovery. On Windows, `AWS_LC_SYS_PREBUILT_NASM=1`
+selects aws-lc-sys's checked-in assembly objects, so optional SSH verification
+does not depend on NASM or CMake being installed on the runner.
 
-Run this additional deterministic allocator gate on Windows only; Windows CI
-and Windows release unit tests run it explicitly:
+**Keep every wait off the main agent.** For each lifecycle that must wait or
+monitor — a long local gate, pull-request CI, post-merge Wiki publication,
+release-provenance `main` CI, or a release workflow — start one dedicated watcher subagent, not
+one subagent per job. Give it an immutable handoff: repository/worktree path,
+expected commit SHA, PR number or run ID, exact required jobs or commands,
+timeout, and success criteria. The watcher owns that lifecycle until terminal
+`SUCCESS`, `FAILURE`, `BLOCKED`, or `STALE`, and reports the expected and observed
+SHA, run IDs, every required result, and actionable failure evidence. It must
+return immediately when the head changes or a required job fails, is cancelled,
+or is unexpectedly skipped; it never follows a replacement run or accepts a
+green result by branch name alone.
+
+While the watcher runs, the main agent advances only a non-overlapping item in a
+separate worktree based on the current default branch; it never edits the tree
+being tested. Watchers do not push, merge, tag, publish, or clean shared state.
+Run at most one full Cargo gate or build on the host at once, never share a
+`CARGO_TARGET_DIR` between concurrent worktrees, and use heavy-gate time for
+research, editing, or lightweight checks. A watcher failure, blocker, or stale
+SHA immediately returns the main agent to the current lifecycle.
+
+Concurrency does not relax publication order: do not merge before the current
+PR's exact-head checks pass, and do not open the next PR before the current PR is
+merged and its exact merge-SHA Wiki publication is verified. Do not wait for
+`main` CI to advance PR work; require it when validating a release commit. Then
+update the next worktree onto the new default-branch tip and rerun affected
+validation before publication. Once those gates pass, fetch and prune the
+default remote, then clean local state against its symbolic default branch:
+remove only clean, unlocked worktrees whose HEAD is merged there, and delete
+only merged local branches that are not attached to a preserved worktree. Never
+force removal or discard dirty, unmerged, or locked worktrees or any stash.
+
+Run this additional deterministic allocator gate on Windows only; the Windows
+CI test shard runs it explicitly, and Release accepts only an exact successful
+`main` CI run that includes that shard:
 
 ```bash
 cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture
@@ -143,16 +186,29 @@ unavailable, when production reserved bytes are not below 64 MiB, when the
 largest block is not below 128 MiB, or when production reserved bytes do not
 improve on the old default policy.
 
-The Ubuntu 22.04 CI job runs the full workspace and per-crate gates, builds the
-shipping `sonicterm` Linux binary, produces `.deb` and `.tar.gz` packages, and
-runs both packaged layouts on X11/Xvfb and Wayland/Weston with Vulkan/lavapipe.
-The smoke exits successfully only after window creation, GPU initialization,
-`/bin/sh` PTY marker round-trip, and a subsequent native frame presentation.
+The macOS and Windows CI aggregates include dedicated native-smoke shards that
+build the shipping release binaries and run them through
+`scripts/native-smoke-runner.py`. Windows also requires the GDI probe to emit the
+unique verdict `capability=EXERCISED`; `HOST_INCAPABLE` remains informational and
+cannot satisfy the required gate. The runner preserves `HOME`, removes inherited
+`NO_COLOR`, captures diagnostics, and kills the full child tree after its
+45-second deadline.
+
+The Ubuntu 22.04 CI aggregate requires both the core-gate shard and the
+independent package/runtime shard. The package shard builds the shipping
+`sonicterm` Linux binary, produces `.deb` and `.tar.gz` packages, and runs both
+layouts on X11/Xvfb and Wayland/Weston with Vulkan/lavapipe. Every platform smoke
+uses separate scratch config and log roots and succeeds only after native window
+and renderer/device creation, a platform-shell PTY marker observed in the live
+grid, a later native presentation, and default warm-renderer creation,
+retention reporting, adoption, child presentation, and release with the live
+renderer count restored to its pre-window baseline. Warm-lifecycle failure is
+stable exit code `16`.
 
 Two more limits worth knowing before trusting a green run:
 
 - `rust-logic-coverage.sh` measures a deterministic-logic subset and skips 11
-  of the 24 crates outright, including `sonicterm-app` and `sonicterm-gpu`. A
+  of the 23 crates outright, including `sonicterm-app` and `sonicterm-gpu`. A
   passing coverage figure says nothing about code in those crates. It is also
   macOS-only in CI.
 - Tests behind `#![cfg(target_os = "windows")]` compile to nothing on macOS,
@@ -162,9 +218,10 @@ Two more limits worth knowing before trusting a green run:
   those are exercised.
 
 For release prep also run the shipping-platform build and, on Windows, the
-release-blocking allocator gate above. The Windows release dependency is
-`unit-tests-windows → build-windows → publish`, so a failed WARP baseline blocks
-the MSI and publication. For example, the macOS build is:
+release-blocking allocator gate above. Release packaging starts only after
+provenance validation finds an exact successful `main` CI run for the tag
+commit, so a failed WARP baseline cannot reach the Windows build or publication.
+For example, the macOS build is:
 
 ```bash
 cargo build --release -p sonicterm-mac
@@ -200,8 +257,11 @@ answer that costs more to retract than it did to reach.
 - **Pin** — a regression test that fails before the change and passes after.
   Without it there is a claim, not a fix.
 
-Three rules carry the same weight as the steps:
+Four rules carry the same weight as the steps:
 
+- **Use the normal color profile for visual tests.** Never launch SonicTerm with
+  `NO_COLOR` or another no-color profile; it invalidates terminal color and visual
+  behavior. Remove inherited no-color overrides before starting the app.
 - **Isolate the diagnostic run.** Point config and logs at scratch directories.
   Override those specific directories, not `HOME` — the shell inside the
   terminal inherits it, so a scratch `HOME` changes the repro itself.
@@ -318,8 +378,10 @@ a reproduction.
 ## Release
 
 SonicTerm releases are created by pushing a tag matching
-`v[0-9]+.[0-9]+.[0-9]+*`; the version validator then requires a supported
-semantic version matching every workspace package. The tag workflow builds:
+`v[0-9]+.[0-9]+.[0-9]+*`; validation peels that ref to its commit, then requires
+that exact commit in `main`, a completed successful `CI` push run for it, all
+source-consistency gates, and a supported semantic version matching every
+workspace package. The tag workflow builds:
 
 - macOS Apple Silicon and Intel `.dmg` files
 - Windows x64 `.msi`

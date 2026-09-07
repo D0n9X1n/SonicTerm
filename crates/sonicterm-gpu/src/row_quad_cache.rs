@@ -1,12 +1,9 @@
 //! Per-row quad cache for background / underline / hyperlink tint
 //! quads.
 //!
-//! Mirrors the shape of `sonicterm_text::row_glyph_cache::RowGlyphCache`
-//! but caches the `QuadInstance` slice each row emits for
-//! its background fill instead of the glyph instances. Both layers
-//! cache for the same reason: dense-cell streams (cat large file,
-//! tail -f, htop) re-emit the same per-row geometry every frame even
-//! though the row content hasn't changed since the last redraw.
+//! Caches projected `QuadInstance` output for same-slot row repaints.
+//! A row that moves within the viewport must be projected again even
+//! when its absolute identity and cell content have not changed.
 //!
 //! The cache owns `QuadInstance` output, so it stays on the GPU side of the
 //! renderer-model boundary rather than leaking GPU records into shared types.
@@ -33,7 +30,7 @@
 //!   a separate `quads_overlay` buffer and not part of this cache.
 
 use crate::quad::QuadInstance;
-use sonicterm_types::Cell;
+use sonicterm_types::{retained_hash_table_bytes, Cell, ResourceAmount};
 use std::borrow::Borrow;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
@@ -53,13 +50,10 @@ pub struct CachedRowQuads {
     pub quads: Vec<QuadInstance>,
 }
 
-/// Per-row quad cache. Keys are `(pane_id, abs_row, hash)` — a row's
-/// cached output is only valid for the same pane AND same absolute row
-/// AND same content / styling / geometry / selection-overlap.
+/// One projected row per `(pane_id, abs_row)`, validated by its content and viewport hash.
 #[derive(Default, Debug)]
 pub struct LineQuadCache {
-    /// (pane_id, abs_row, hash) -> cached quads.
-    entries: HashMap<(PaneId, u64, u64), CachedRowQuads>,
+    entries: HashMap<(PaneId, u64), (u64, CachedRowQuads)>,
     /// Soft cap so long sessions with heavy scrollback don't grow
     /// without bound. Sized to `rows * CACHE_HEADROOM_FACTOR` like
     /// `RowGlyphCache`.
@@ -94,7 +88,22 @@ impl LineQuadCache {
     /// Drop every cache entry belonging to a specific pane.
     #[inline]
     pub fn invalidate_pane(&mut self, pane_id: PaneId) {
-        self.entries.retain(|(p, _, _), _| *p != pane_id);
+        self.entries.retain(|(p, _), _| *p != pane_id);
+        self.entries.shrink_to_fit();
+    }
+
+    /// Return retained table, entry, and nested quad-vector storage.
+    #[must_use]
+    pub fn retained_amount(&self) -> ResourceAmount {
+        let table = retained_hash_table_bytes::<(PaneId, u64), (u64, CachedRowQuads)>(
+            self.entries.capacity(),
+        );
+        let payload = self.entries.values().fold(0usize, |total, (_, row)| {
+            total.saturating_add(
+                row.quads.capacity().saturating_mul(std::mem::size_of::<QuadInstance>()),
+            )
+        });
+        ResourceAmount { bytes: table.saturating_add(payload), items: self.entries.len() }
     }
 
     /// Drop the cache entry for absolute row `abs_row` in pane
@@ -102,7 +111,7 @@ impl LineQuadCache {
     /// renderer using `grid.dirty_rows()`.
     #[inline]
     pub fn invalidate_row_abs(&mut self, pane_id: PaneId, abs_row: u64) {
-        self.entries.retain(|(p, r, _), _| !(*p == pane_id && *r == abs_row));
+        self.entries.remove(&(pane_id, abs_row));
     }
 
     /// Number of cached rows. Useful for tests and tracing.
@@ -123,24 +132,32 @@ impl LineQuadCache {
     #[inline]
     #[must_use]
     pub fn get(&self, pane_id: PaneId, abs_row: u64, hash: u64) -> Option<&CachedRowQuads> {
-        self.entries.get(&(pane_id, abs_row, hash))
+        self.entries
+            .get(&(pane_id, abs_row))
+            .filter(|(stored_hash, _)| *stored_hash == hash)
+            .map(|(_, cached)| cached)
     }
 
-    /// Insert (or replace) a cached row's quads. If the cache is at
-    /// capacity, clears wholesale (same strategy as RowGlyphCache).
+    /// Replace a row's projection, clearing capacity only when admitting a new absolute row.
     pub fn insert(&mut self, pane_id: PaneId, abs_row: u64, hash: u64, cached: CachedRowQuads) {
+        let key = (pane_id, abs_row);
+        if let Some(entry) = self.entries.get_mut(&key) {
+            // When: `key` already exists, replace its projection without charging another slot or evicting peers.
+            *entry = (hash, cached);
+            return;
+        }
         if self.entries.len() >= self.cap {
             self.entries.clear();
         }
-        self.entries.insert((pane_id, abs_row, hash), cached);
+        self.entries.insert(key, (hash, cached));
     }
 }
 
 /// Compute the cache key for a row's quad output.
 ///
 /// Inputs folded in:
-/// * `view_top_abs + r` — absolute row position (so scrollback reuse
-///   hits naturally when the viewport moves).
+/// * `view_top_abs + r` — absolute content identity.
+/// * `r` — viewport row slot, because cached quads retain projected coordinates.
 /// * row cell contents (Cell already derives Hash; bg is derived from
 ///   the cell's color attribute so hashing the cell covers it).
 /// * `style_rev` — opaque counter bumped on theme / palette change.
@@ -206,6 +223,7 @@ where
     let mut h = DefaultHasher::new();
     let row_abs = view_top_abs + r as u64;
     row_abs.hash(&mut h);
+    r.hash(&mut h);
     for cell in row_cells {
         cell.borrow().hash(&mut h);
     }
@@ -236,8 +254,6 @@ where
     }
     h.finish()
 }
-
-// Unit tests live in `crates/sonicterm-shared/tests/line_quad_cache_hit_miss.rs`.
 
 #[cfg(test)]
 #[path = "row_quad_cache_tests.rs"]

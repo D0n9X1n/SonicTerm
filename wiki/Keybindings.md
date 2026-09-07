@@ -13,8 +13,14 @@ Editable copies live in:
 
 The first launch seeds `sonicterm-macos.toml`, `sonicterm-windows.toml`, and
 `sonicterm-linux.toml`. The active file comes from `keymap` in
-`~/.sonicterm/sonicterm.toml`. A name checks the user directory before bundled
-assets. A path is used directly.
+`~/.sonicterm/sonicterm.toml`. A logical name checks the user directory before
+bundled assets; dots are allowed, so `sonicterm-v1.2` remains a name. The portable
+alias `keymap = "user"` selects the editable platform-default file on every OS.
+
+Absolute paths and strings containing `/` or `\` are used directly. So are
+Windows drive/UNC paths and names whose suffix is `.toml` (case-insensitive).
+Relative explicit paths such as `custom.toml`, `./custom`, and `../custom` are
+anchored to SonicTerm's process working directory.
 
 **Edit keymap.toml** opens the platform-default user file. If `keymap` names a
 different file, edit that file directly. Run **Reload Config** after saving.
@@ -96,6 +102,14 @@ super+ctrl+alt+shift+key
 | `ctrl` | Control |
 | `alt` | Option on macOS; Alt on Windows and Linux |
 | `shift` | Shift |
+
+Named keys use `enter`, `backspace`, `tab`, `escape`, `space`, `up`, `down`,
+`left`, `right`, `home`, `end`, `pageup`, `pagedown`, `insert`, `delete`,
+`menu`, `pause`, `printscreen`, `scrolllock`, `numlock`, `capslock`, and
+`f1` through `f35`. Printable keys use their character. Shifted ASCII
+punctuation also matches its unshifted spelling, so an event reported as `{`,
+`}`, or `+` can satisfy `shift+[`, `shift+]`, or `shift+=` respectively. The
+literal shifted spelling remains an alias.
 
 Chord lookup is case-insensitive. If the same chord appears more than once, the
 first matching binding wins. Keys with no binding go to the terminal. One
@@ -218,6 +232,13 @@ input:
 Adding Shift, Alt, or Super makes a different chord. When no SonicTerm text
 field is active, `Ctrl+<letter>` continues to the PTY.
 
+Printable input comes from the operating system's `KeyEvent.text`, so Unicode
+keyboard layouts and composed Option/AltGr characters are inserted as produced.
+Super and ordinary Control, Alt, or Ctrl+Alt command chords never become field
+text. An Option/Alt or AltGr event is accepted as composed input only when its
+produced character differs from the layout-resolved unmodified key; the exact
+Control editing chords above still take precedence.
+
 ### Load failures
 
 At startup, invalid TOML or a missing `[meta]` table falls back to the bundled
@@ -239,8 +260,13 @@ SonicTerm 的 keymap 是 TOML 文件。内置文件位于 `assets/keymaps/`。�
 
 首次启动会写入 `sonicterm-macos.toml`、`sonicterm-windows.toml` 和
 `sonicterm-linux.toml`。当前文件由 `~/.sonicterm/sonicterm.toml` 中的
-`keymap` 决定。使用名称时，SonicTerm 先查找用户目录，再查找内置资产。使用路径时
-直接读取该文件。
+`keymap` 决定。逻辑名称会先查找用户目录，再查找内置资产；名称可以包含点，
+所以 `sonicterm-v1.2` 仍按名称处理。可移植别名 `keymap = "user"` 在每个平台上
+都选择该平台可编辑的默认 keymap 文件。
+
+绝对路径以及包含 `/` 或 `\` 的字符串会直接使用；Windows 盘符/UNC 路径和以
+`.toml` 结尾（不区分大小写）的名称也按路径处理。`custom.toml`、`./custom`、
+`../custom` 等相对显式路径以 SonicTerm 进程的工作目录为基准。
 
 **Edit keymap.toml** 打开当前平台的默认用户文件。如果 `keymap` 指向其它文件，
 请直接编辑那个文件。保存后执行 **Reload Config**。SonicTerm 没有 keymap 文件 watcher。
@@ -321,6 +347,13 @@ super+ctrl+alt+shift+key
 | `ctrl` | Control |
 | `alt` | macOS 上的 Option；Windows 和 Linux 上的 Alt |
 | `shift` | Shift |
+
+命名按键使用 `enter`、`backspace`、`tab`、`escape`、`space`、`up`、`down`、
+`left`、`right`、`home`、`end`、`pageup`、`pagedown`、`insert`、`delete`、
+`menu`、`pause`、`printscreen`、`scrolllock`、`numlock`、`capslock`，以及
+`f1` 到 `f35`。可打印按键使用其字符。带 Shift 的 ASCII 标点也会匹配未移位写法，
+因此系统报告为 `{`、`}` 或 `+` 的事件可分别匹配 `shift+[`、`shift+]` 或
+`shift+=`；移位后的字面写法仍可作为别名。
 
 快捷键匹配不区分大小写。同一组合键出现多次时，第一个匹配的 binding 生效。
 没有 binding 的按键会发送给终端。Windows 有一个保留例外：即使把 `alt+v`
@@ -433,6 +466,11 @@ READONLY 还允许执行切换或激活标签页、切换 pane 焦点、打开�
 
 额外按下 Shift、Alt 或 Super 会形成不同组合键。没有 SonicTerm 文本框接管输入时，
 `Ctrl+<字母>` 会继续发送给 PTY。
+
+可打印输入来自操作系统的 `KeyEvent.text`，因此 Unicode 键盘布局以及 Option/AltGr
+组合生成的字符会按系统结果插入。Super 以及普通 Control、Alt 或 Ctrl+Alt 命令组合不会
+变成文本框内容。只有 Option/Alt 或 AltGr 生成的字符不同于布局解析出的未修饰按键时，
+才会把它视为组合输入；上表中明确列出的 Control 编辑组合仍优先执行。
 
 ### 加载失败
 

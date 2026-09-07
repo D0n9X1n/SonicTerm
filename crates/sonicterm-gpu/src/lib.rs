@@ -5,8 +5,9 @@
 //!
 //!   * [`quad`] — the WGSL quad pipeline + `QuadInstance` (cursor, selection,
 //!     rounded-rect chrome, panel backgrounds, underlines).
-//!   * [`text_pipeline`] — the instanced text pipeline that consumes
-//!     `sonicterm_text::GlyphInstance` and samples the GPU glyph atlas.
+//!   * [`wezterm_pipeline`] — the production presentation pipeline that consumes
+//!     `sonicterm_text::GlyphInstance` and preserves atlas coverage modes.
+//!   * [`text_pipeline`] — a legacy alpha-only compatibility pipeline.
 //!   * [`atlas_upload`] — wgpu-side wrapper around `sonicterm_text::glyph_atlas`
 //!     that owns the texture/view/sampler/bind-group and syncs dirty tiles.
 //!   * [`chrome_text`] — WezTerm-driven helper that batches chrome strings
@@ -28,8 +29,8 @@
 /// view, sampler, and bind group; syncs dirty tiles to the GPU.
 pub mod atlas_upload;
 /// Wezterm-driven chrome text helper. Replaces
-/// the 11 glyphon `TextRenderer` chrome sites and feeds the existing
-/// [`text_pipeline`] buffer — no second atlas, no second pass.
+/// the 11 glyphon `TextRenderer` chrome sites and feeds the production
+/// [`wezterm_pipeline`] buffer — no second atlas, no second pass.
 pub mod chrome_text;
 /// Color / sRGB conversion helpers that produce `wgpu::Color` and linear RGBA
 /// arrays from chrome-text colors and `#rrggbb` strings. They consume
@@ -48,8 +49,7 @@ pub mod quad;
 pub mod row_quad_cache;
 #[cfg(target_os = "windows")]
 pub(crate) mod software_windows;
-/// Instanced text pipeline consuming `sonicterm_text::GlyphInstance` and
-/// sampling the GPU glyph atlas.
+/// Legacy alpha-only text pipeline retained for source compatibility.
 pub mod text_pipeline;
 /// WezTerm-style final presentation pipeline. This is the single wgpu draw
 /// path for atlas glyphs and colored geometry.

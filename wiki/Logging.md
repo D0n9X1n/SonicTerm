@@ -15,9 +15,12 @@ memory diagnostics, crash evidence, and bug-report data.
 
 `tracing-appender` uses daily names such as `sonicterm.log.YYYY-MM-DD`; the file
 with the newest modification time is active. Size rotation may add a Unix-time
-suffix. On Windows, `~` means the current user's profile directory. Linux runtime
-smokes use an isolated directory from `SONICTERM_RUNTIME_SMOKE_DIR` instead of
-the user log tree.
+suffix. On Windows, `~` means the current user's profile directory. Native
+runtime smokes on macOS, Windows, and Linux use the explicit `logs/` child of
+`SONICTERM_RUNTIME_SMOKE_DIR` instead of the user log tree; their separate
+`config/` child is used for config/reload state, and `HOME` is preserved. The
+outer runner removes inherited `NO_COLOR` and retains failed stdout/stderr plus
+SonicTerm logs for CI artifacts.
 
 ## Configuration and retention
 
@@ -63,6 +66,79 @@ the configured filters. Very hot font-shaper dumps are `trace`; no configured
 level admits them. Use a targeted `RUST_LOG` directive only when investigating
 that path.
 
+## PTY input rejection diagnostics
+
+The default `warn` level reports input that was refused, including terminal
+parser replies. The producer assigns `source`: `Keyboard`, `Paste`, `FileDrop`,
+`Ime`, `PointerButton`, `PointerMotion`, `Wheel`, `FocusReport`, `TerminalReply`,
+`ScriptDraft`, or `StateMachine`. Sources are never guessed from payload bytes.
+
+| Field | Meaning |
+| --- | --- |
+| `pane_id` | Stable pane identity supplied at the producer |
+| `window_id` | The pane's current window when the event loop handles the rejection; absent after pane closure or when the event loop is unavailable |
+| `source`, `rejected_bytes`, `reason` | Input category, refused byte length, and payload-free reason |
+| `observation="concurrent"` | Queue and writer fields are independent observations, not one rejection-time transaction |
+| `queued_messages`, `queued_bytes`, `queue_capacity` | Waiting message count, payload byte count, and four-slot limit; excludes the active native write |
+| `writer_phase` | `Idle`, `Writing`, `Flushing`, or `Stopped`; a boundary observation, not a child-health verdict |
+| `in_flight_bytes`, `in_flight_millis` | Active message size and time spent in the observed write or flush; time is absent when idle/stopped |
+| `completed_messages` | Successful `write_all` calls whose best-effort flush attempt returned |
+
+The event carries no rejected payload. Its debug representation, warnings, and
+notification never include typed text, commands, paths, or clipboard content.
+Notification follows the pane's current window after tab transfers; a closed
+pane produces a warning but no notification on an unrelated window. When the
+proxy is absent or event delivery fails, the producer logs the same metadata
+without a current-window identity.
+
+Each pane's parser-reply worker posts at most one rejection notification during
+its lifetime. Further refused replies are counted in fixed-size metadata and
+logged at most once per second, with a final flush when the worker stops. The
+summary fields `rejected_messages`, `rejected_bytes`, `queue_full`,
+`message_too_large`, and `writer_disconnected` count additional refusals since
+the previous summary; they exclude the first, individually reported rejection.
+Idle workers with no pending summary do not wake periodically. This bounds
+background diagnostic traffic without hiding loss or retaining reply payloads.
+
+Four small messages can fill the channel before a healthy writer is scheduled.
+Controlled tests use the production admission and writer loop to demonstrate
+that burst draining preserves order. Separate blocked-write and blocked-flush
+fixtures demonstrate zero queued bytes with one in-flight message, followed by
+four additional queued messages and explicit refusal of the next message.
+These fixtures distinguish mechanisms; they do not retrospectively identify
+which producer or native condition caused an older un-attributed warning.
+
+Queue capacity, per-message limits, FIFO delivery, and cancellation are
+unchanged. Overload remains observable; no input is automatically replayed,
+coalesced, or admitted by enlarging the queue. Interpret repeated observations
+of the same pane and progress counter rather than a single `QueueFull` warning.
+
+## PTY resize failure diagnostics
+
+The default `warn` level reports a PTY resize the native layer refused, as one
+`pty resize failed` event.
+
+| Field | Meaning |
+| --- | --- |
+| `pane_id` | Stable pane identity of the pane whose PTY refused the resize |
+| `cols`, `rows` | Requested geometry, not the geometry the pty currently holds |
+| `error` | The failure rendered by `Display`. A native refusal shows the platform text; a zero axis shows `refusing pty resize to <cols>x<rows>` |
+
+The event carries no terminal content: only the pane id, the requested columns
+and rows, and the error.
+
+One failing pane logs once per failing run, not once per request. Resizes are
+driven by tab activation and window drags, so a pane whose PTY refuses every
+request would otherwise emit at input rate down a synchronous path. The first
+failure is reported and later failures stay silent until a resize succeeds,
+which clears the latch so the next distinct failure is reported again.
+
+Suppression applies to the warning only, and never suppresses a resize attempt.
+An invalid size and a successful duplicate are the only requests that do not
+reach the native call, and the IO boundary decides both. The grid keeps the
+geometry the user asked for — there is no rollback, no retry timer, and no
+heartbeat line while failures continue.
+
 ## Render and performance diagnostics
 
 Set `level = "debug"`, restart, and reproduce the problem. The
@@ -96,8 +172,10 @@ memory snapshot process_private_committed_bytes=unsupported process_resident_byt
                 grid_visible_bytes=97320960 grid_history_bytes=76841472 grid_alternate_bytes=0
                 parser_bytes=0 hyperlink_bytes=3050880 inline_media_bytes=5238528
                 pty_output_bytes=0 pty_input_bytes=0 panes_total=12 panes_sampled=12 panes_contended=0
-                renderer_total_bytes=35651584 renderer_total_items=1042 renderer_delta=+0
-                live_renderers=2 renderers="visible[WindowId(1)] glyph=16777216/1038 image=2097152/4 software=0/0 total=18874368/1042; warm[0] glyph=16777216/0 image=0/0 software=0/0 total=16777216/0"
+                renderer_total_bytes=36962304 renderer_total_items=1242
+                renderer_row_glyph_cache_bytes=1048576 renderer_row_glyph_cache_items=120
+                renderer_row_quad_cache_bytes=262144 renderer_row_quad_cache_items=80 renderer_delta=+0
+                live_renderers=2 renderers="visible[WindowId(1)] glyph=16777216/1038 image=2097152/4 row_glyph=1048576/120 row_quad=262144/80 software=0/0 total=20185088/1242; warm[0] glyph=16777216/0 image=0/0 row_glyph=0/0 row_quad=0/0 software=0/0 total=16777216/0"
                 allocator_state=measured allocator_source=main allocator_label=WindowId(1)
                 allocator_allocated_bytes=8388608 allocator_reserved_bytes=33554432
                 allocator_allocations=4 allocator_blocks=2 allocator_largest_block_bytes=16777216
@@ -117,8 +195,10 @@ SonicTerm's own seams do not count.
 | `panes_sampled` | panes included in `session_total_bytes` |
 | `panes_contended` | panes skipped because a parser lock was held; non-zero makes the session total partial |
 | `renderer_total_bytes` / `renderer_total_items` | CPU-side storage across visible and warm renderers |
+| `renderer_row_glyph_cache_bytes` / `renderer_row_glyph_cache_items` | per-row glyph-instance and decoration cache storage and cached row count across renderers |
+| `renderer_row_quad_cache_bytes` / `renderer_row_quad_cache_items` | per-row background/decoration quad cache storage and cached row count across renderers |
 | `live_renderers` | process-wide renderer count; a count above the `renderers` entries can expose an unreachable live renderer |
-| `renderers` | per-renderer role and glyph/image/software storage breakdown |
+| `renderers` | per-renderer role and glyph/image/row-cache/software storage breakdown |
 | `allocator_state` | `measured`, `unsupported` for a backend without a report, or `none` before a renderer exists |
 | `allocator_source` / `allocator_label` | renderer class and identifier used for the one shared-device reading |
 | `allocator_allocated_bytes` | bytes assigned to live wgpu allocations |
@@ -172,13 +252,16 @@ moves even though the window id changes.
 Each visible or warm renderer also writes one `renderer retention` line:
 
 ```text
-renderer retention window="WindowId(1)" role="visible" total_bytes=17301504
+renderer retention window="WindowId(1)" role="visible" total_bytes=18612224
                    glyph_atlas_bytes=16777216 glyph_atlas_items=412
                    image_atlas_bytes=524288 image_atlas_items=3
-                   software_frame_bytes=0
+                   row_glyph_cache_bytes=1048576 row_glyph_cache_items=120
+                   row_quad_cache_bytes=262144 row_quad_cache_items=80 software_frame_bytes=0
 renderer retention window="warm[0]" role="warm" total_bytes=16777216
                    glyph_atlas_bytes=16777216 glyph_atlas_items=0
-                   image_atlas_bytes=0 image_atlas_items=0 software_frame_bytes=0
+                   image_atlas_bytes=0 image_atlas_items=0
+                   row_glyph_cache_bytes=0 row_glyph_cache_items=0
+                   row_quad_cache_bytes=0 row_quad_cache_items=0 software_frame_bytes=0
 ```
 
 | Field | What it owns | First response |
@@ -187,6 +270,10 @@ renderer retention window="warm[0]" role="warm" total_bytes=16777216
 | `glyph_atlas_items` | glyph entries in that atlas | use with bytes to distinguish occupancy from capacity |
 | `image_atlas_bytes` | CPU-side inline-image atlas pixels | reduce image use or renderer count |
 | `image_atlas_items` | inline-image atlas entries | use with bytes to identify image occupancy |
+| `row_glyph_cache_bytes` | hash-table backing plus cached glyph, underline, tofu, and missing-character vector capacities | compare with cached rows; pane departure releases that pane's payload while table capacity can remain at its high-water mark |
+| `row_glyph_cache_items` | cached glyph rows | a falling count with flat bytes can mean reusable table capacity remains |
+| `row_quad_cache_bytes` | hash-table backing plus cached background/decoration quad vector capacities | compare with cached rows and pane/window churn |
+| `row_quad_cache_items` | cached quad rows | a falling count confirms row eviction even when table capacity is sticky |
 | `software_frame_bytes` | full-window Windows software-present buffer | reduce window size; zero outside that path |
 
 `role="warm"` means the renderer belongs to the standby pool, not a visible
@@ -219,11 +306,31 @@ retaining at least its newest image.
 
 The panic hook runs on every thread and writes a session-tagged
 `crashes/crash-<timestamp>.log` containing version, panic payload, source
-location, forced backtrace, and the latest 50 tracing events. Normal shutdown
+location, forced backtrace, and up to 50 admitted tracing events. Normal shutdown
 writes `sonic_exit` warning lines. On Unix, SIGSEGV, SIGBUS, SIGILL, SIGABRT, and
 SIGFPE append a fixed `FATAL: SIG…` line through an async-signal-safe path, then
 re-raise the signal for OS diagnostics. Windows relies on WER or LocalDumps when
 the system is configured to create them.
+
+Crash history uses the selected `RUST_LOG`/configured filter without widening
+it, plus a DEBUG ceiling and an explicit persistence predicate. TRACE is never
+retained there, even when an output sink opts in. Font shaping text and
+collections use `sonicterm_font::payload`, which is excluded from crash history
+at every level; normal warning/error targets retain safe stage/count diagnostics.
+Routine white-text and untinted-color-glyph emission is not a warning.
+
+Each record owns at most 4 KiB of variable payload, including at most 256 bytes
+of target. The ring also enforces a 64 KiB aggregate variable-capacity bound and
+the 50-record limit, evicting oldest records. Formatting uses bounded storage
+and UTF-8-safe truncation; `[truncated]` fits inside each cap. Fixed metadata is
+bounded separately by record count. Panic payload text and the rendered summary
+each have an independent 4 KiB bound, read from borrowed panic data.
+
+Backtrace capture/output and a chained panic hook are separate surfaces. These
+limits cover recorder-controlled formatting/retention, not allocations inside
+arbitrary producer `Debug` implementations or a guarantee that arbitrary logs
+contain no secrets. Payload TRACE remains opt-in normal-sink evidence; structured
+breadcrumbs keep their separate metadata-only contract.
 
 A hang may produce no panic artifact. On macOS, sample before force-quitting:
 
@@ -245,7 +352,11 @@ cases. Instead it leaves two pre-failure records:
 2. `breadcrumbs/breadcrumbs-<id>.log` is a bounded atomic snapshot with no
    terminal text, commands, environment values, tokens, or credentials. It pins
    the latest version, platform, renderer, counts, full process resource sample,
-   retention, allocator state, and bounded lifecycle transitions. A separate
+   retention, allocator state, and bounded lifecycle transitions. Its
+   `event=retention` record includes `renderer_bytes`,
+   `row_glyph_cache_bytes` / `row_glyph_cache_items`, and
+   `row_quad_cache_bytes` / `row_quad_cache_items`, so the last complete
+   pre-failure snapshot preserves both row-cache size and occupancy. A separate
    fixed-cost `event=resource_history private_committed=... resident=...` sample
    is taken immediately and every 5 seconds, retaining at most 48 samples.
    Virtual address space appears only in the full `event=resource` record.
@@ -300,8 +411,10 @@ sensitive command data.
 
 `tracing-appender` 按天生成 `sonicterm.log.YYYY-MM-DD` 之类的文件；修改时间最新的
 文件正在使用。按大小轮转时还可能增加 Unix 时间后缀。在 Windows 上，`~` 表示当前
-用户的配置文件目录。Linux 运行时 smoke 使用 `SONICTERM_RUNTIME_SMOKE_DIR` 指定的
-隔离目录，不写入用户日志树。
+用户的配置文件目录。macOS、Windows 与 Linux 原生运行时 smoke 使用
+`SONICTERM_RUNTIME_SMOKE_DIR` 下显式的 `logs/` 子目录，不写入用户日志树；分开的
+`config/` 子目录承载配置与重载状态，并保留原有 `HOME`。外层 runner 会移除继承的
+`NO_COLOR`，并保存失败输出和日志证据。
 
 ## 配置与保留策略
 
@@ -343,6 +456,63 @@ max_breadcrumb_bytes = 1048576    # 1 MiB
 级别。字体塑形热路径的海量输出位于 `trace`，任何配置级别都不会启用；只有专门排查该
 路径时才使用精确的 `RUST_LOG` 指令。
 
+## PTY 输入拒绝诊断
+
+默认 `warn` 级别会报告被拒绝的输入，包括终端解析器回复。生产者直接指定 `source`：
+`Keyboard`、`Paste`、`FileDrop`、`Ime`、`PointerButton`、`PointerMotion`、`Wheel`、
+`FocusReport`、`TerminalReply`、`ScriptDraft` 或 `StateMachine`；不会从负载字节猜测来源。
+
+| 字段 | 含义 |
+| --- | --- |
+| `pane_id` | 生产者提供的稳定窗格标识 |
+| `window_id` | 事件循环处理拒绝时窗格所属的当前窗口；窗格关闭或事件循环不可用时为空 |
+| `source`、`rejected_bytes`、`reason` | 输入类别、被拒绝的字节数及不含负载的原因 |
+| `observation="concurrent"` | 队列与 writer 字段为独立并发观察值，不是拒绝瞬间的同一事务快照 |
+| `queued_messages`、`queued_bytes`、`queue_capacity` | 等待的消息数、负载字节数和四槽上限；不包含正在进行的原生写入 |
+| `writer_phase` | `Idle`、`Writing`、`Flushing` 或 `Stopped`；表示执行边界，不是子进程健康结论 |
+| `in_flight_bytes`、`in_flight_millis` | 当前消息大小及已观察写入或 flush 的持续时间；空闲或停止时无时间值 |
+| `completed_messages` | `write_all` 成功且尽力而为的 flush 尝试已返回的消息数 |
+
+事件不携带被拒绝的负载。其 debug 表示、warning 和通知均不包含输入文本、命令、路径或剪贴板内容。
+标签页转移后，通知跟随窗格的当前窗口；已关闭的窗格只记录 warning，不在无关窗口显示通知。
+代理缺失或事件投递失败时，生产者直接记录同样的元数据，但不附带无法确认的当前窗口标识。
+
+每个窗格的解析器回复 worker 在其整个生命周期内最多发送一次拒绝通知。后续被拒绝的回复
+使用固定大小的元数据计数，每秒最多记录一次，并在 worker 停止时输出最后一批。
+汇总字段 `rejected_messages`、`rejected_bytes`、`queue_full`、`message_too_large` 和
+`writer_disconnected` 统计自上次汇总以来额外发生的拒绝，不包含首次单独报告的拒绝。
+没有待汇总数据的空闲 worker 不会周期唤醒；这样既限制后台诊断流量，也不隐藏输入丢失或保留回复负载。
+
+健康 writer 尚未被调度时，四条小消息就能填满通道。受控测试使用生产环境的入队与 writer 循环，
+证明突发排空仍保持顺序。另设阻塞写入和阻塞 flush 的夹具，证明排队字节为零时仍可能有一条
+在途消息；再加入四条等待消息后，下一条消息会被显式拒绝。这些夹具区分机制，不会倒推出
+以前缺少归属信息的 warning 究竟由哪个生产者或原生条件引起。
+
+队列容量、单消息上限、FIFO 交付和取消行为不变。过载仍可观察；不会自动重放、合并输入，
+也不会扩大队列来接纳它。应比较同一窗格的连续观察值和进度计数，而不是凭一条 `QueueFull`
+warning 下结论。
+
+## PTY 尺寸调整失败诊断
+
+默认 `warn` 级别会把原生层拒绝的 PTY 尺寸调整记为一条 `pty resize failed` 事件。
+
+| 字段 | 含义 |
+| --- | --- |
+| `pane_id` | PTY 拒绝该次尺寸调整的窗格标识 |
+| `cols`、`rows` | 请求的几何尺寸，而不是 pty 当前持有的尺寸 |
+| `error` | 由 `Display` 渲染的失败信息。原生拒绝显示平台文本；某一维为零时显示 `refusing pty resize to <cols>x<rows>` |
+
+事件不携带终端内容：只有窗格 id、请求的列数与行数以及错误。
+
+同一个失败中的窗格在每一轮连续失败中只记录一次，而不是每次请求都记录。尺寸调整由
+标签页激活和窗口拖拽驱动，因此若某个窗格的 PTY 拒绝每一次请求，否则就会以输入频率
+沿同步路径持续输出。第一次失败会被报告，后续失败保持静默，直到一次成功的尺寸调整
+清除该闩锁，使下一次不同的失败重新被报告。
+
+抑制只作用于告警，绝不会抑制一次尺寸调整尝试。只有无效尺寸和成功的重复请求不会到达
+原生调用，而这两者都由 IO 边界决定。网格保留用户请求的几何尺寸——没有回滚、没有重试
+定时器，失败持续期间也没有心跳行。
+
 ## 渲染与性能诊断
 
 把 `level` 设为 `debug`，重启后复现问题。`render_timing` target 会记录网格遍历、
@@ -372,8 +542,10 @@ memory snapshot process_private_committed_bytes=unsupported process_resident_byt
                 grid_visible_bytes=97320960 grid_history_bytes=76841472 grid_alternate_bytes=0
                 parser_bytes=0 hyperlink_bytes=3050880 inline_media_bytes=5238528
                 pty_output_bytes=0 pty_input_bytes=0 panes_total=12 panes_sampled=12 panes_contended=0
-                renderer_total_bytes=35651584 renderer_total_items=1042 renderer_delta=+0
-                live_renderers=2 renderers="visible[WindowId(1)] glyph=16777216/1038 image=2097152/4 software=0/0 total=18874368/1042; warm[0] glyph=16777216/0 image=0/0 software=0/0 total=16777216/0"
+                renderer_total_bytes=36962304 renderer_total_items=1242
+                renderer_row_glyph_cache_bytes=1048576 renderer_row_glyph_cache_items=120
+                renderer_row_quad_cache_bytes=262144 renderer_row_quad_cache_items=80 renderer_delta=+0
+                live_renderers=2 renderers="visible[WindowId(1)] glyph=16777216/1038 image=2097152/4 row_glyph=1048576/120 row_quad=262144/80 software=0/0 total=20185088/1242; warm[0] glyph=16777216/0 image=0/0 row_glyph=0/0 row_quad=0/0 software=0/0 total=16777216/0"
                 allocator_state=measured allocator_source=main allocator_label=WindowId(1)
                 allocator_allocated_bytes=8388608 allocator_reserved_bytes=33554432
                 allocator_allocations=4 allocator_blocks=2 allocator_largest_block_bytes=16777216
@@ -392,8 +564,10 @@ memory snapshot process_private_committed_bytes=unsupported process_resident_byt
 | `panes_sampled` | 计入 `session_total_bytes` 的窗格 |
 | `panes_contended` | 因解析器锁被占用而跳过的窗格；非零表示会话总量不完整 |
 | `renderer_total_bytes` / `renderer_total_items` | 所有可见与预热渲染器的 CPU 存储 |
+| `renderer_row_glyph_cache_bytes` / `renderer_row_glyph_cache_items` | 所有渲染器的逐行字形实例与装饰缓存存储及缓存行数 |
+| `renderer_row_quad_cache_bytes` / `renderer_row_quad_cache_items` | 所有渲染器的逐行背景/装饰 quad 缓存存储及缓存行数 |
 | `live_renderers` | 进程级渲染器数量；若高于 `renderers` 条目数，可能存在仍存活但无法访问的渲染器 |
-| `renderers` | 各渲染器角色及字形/图像/软件帧存储明细 |
+| `renderers` | 各渲染器角色及字形/图像/行缓存/软件帧存储明细 |
 | `allocator_state` | `measured`、后端不支持报告时的 `unsupported`，或还没有渲染器时的 `none` |
 | `allocator_source` / `allocator_label` | 这次共享设备读取所用的渲染器类别和标识 |
 | `allocator_allocated_bytes` | 分配给存活 wgpu allocation 的字节数 |
@@ -443,13 +617,16 @@ session retention panes=12 total_bytes=182451840 grid_visible_bytes=97320960
 每个可见或预热渲染器还会写一条 `renderer retention`：
 
 ```text
-renderer retention window="WindowId(1)" role="visible" total_bytes=17301504
+renderer retention window="WindowId(1)" role="visible" total_bytes=18612224
                    glyph_atlas_bytes=16777216 glyph_atlas_items=412
                    image_atlas_bytes=524288 image_atlas_items=3
-                   software_frame_bytes=0
+                   row_glyph_cache_bytes=1048576 row_glyph_cache_items=120
+                   row_quad_cache_bytes=262144 row_quad_cache_items=80 software_frame_bytes=0
 renderer retention window="warm[0]" role="warm" total_bytes=16777216
                    glyph_atlas_bytes=16777216 glyph_atlas_items=0
-                   image_atlas_bytes=0 image_atlas_items=0 software_frame_bytes=0
+                   image_atlas_bytes=0 image_atlas_items=0
+                   row_glyph_cache_bytes=0 row_glyph_cache_items=0
+                   row_quad_cache_bytes=0 row_quad_cache_items=0 software_frame_bytes=0
 ```
 
 | 字段 | 归属内容 | 首先处理 |
@@ -458,6 +635,10 @@ renderer retention window="warm[0]" role="warm" total_bytes=16777216
 | `glyph_atlas_items` | 图集中的字形条目数 | 与字节数一起判断实际占用与容量 |
 | `image_atlas_bytes` | CPU 侧内联图像图集像素 | 减少图像或渲染器数量 |
 | `image_atlas_items` | 内联图像图集条目数 | 与字节数一起识别图像占用 |
+| `row_glyph_cache_bytes` | 哈希表后备存储，以及缓存字形、下划线、tofu 与缺失字符向量的容量 | 与缓存行数对照；窗格离开时释放其负载，但表容量可能保持高水位 |
+| `row_glyph_cache_items` | 已缓存的字形行数 | 行数下降而字节不变，可能表示可复用表容量仍保留 |
+| `row_quad_cache_bytes` | 哈希表后备存储，以及缓存背景/装饰 quad 向量的容量 | 与缓存行数及窗格/窗口变化对照 |
+| `row_quad_cache_items` | 已缓存的 quad 行数 | 即使表容量有粘性，行数下降也能确认条目已淘汰 |
 | `software_frame_bytes` | Windows 软件呈现的整窗缓冲 | 缩小窗口；其它路径为零 |
 
 `role="warm"` 表示渲染器位于待命池，不属于可见窗口；关闭窗口不会释放它。
@@ -485,10 +666,24 @@ grep 'memory::reclaimed' ~/.sonicterm/logs/sonicterm.log*
 ## 崩溃、卡死与退出证据
 
 Panic hook 对所有线程生效，会写入带会话标识的 `crashes/crash-<timestamp>.log`，
-包含版本、panic 内容、源码位置、强制 backtrace 和最近 50 条 tracing 事件。正常关闭会
+包含版本、panic 内容、源码位置、强制 backtrace 和最多 50 条获准的 tracing 事件。正常关闭会
 写入 `sonic_exit` warning。Unix 上的 SIGSEGV、SIGBUS、SIGILL、SIGABRT 和 SIGFPE
 会先通过信号安全路径向日志追加固定 `FATAL: SIG…` 行，再重新触发信号，让操作系统生成
 诊断。Windows 在系统已配置时使用 WER 或 LocalDumps。
+
+崩溃历史不会扩展所选 `RUST_LOG`/配置 filter，而是再与 DEBUG 上限及显式持久化规则取
+交集。即使输出 sink 显式启用了 TRACE，历史也不保留 TRACE。字体塑形文本与集合使用
+`sonicterm_font::payload`，在任何级别都被排除；普通 warning/error 目标保留安全的阶段和
+数量诊断。正常白色文字与不染色彩色字形的发射不会产生 warning。
+
+每条记录的自有可变负载最多 4 KiB，其中 target 最多 256 字节。环形历史还实施合计
+64 KiB 可变容量和 50 条记录上限，淘汰最早记录。格式化使用有界存储并在 UTF-8 边界截断，
+`[truncated]` 也计入上限。固定元数据另受记录数量限制。Panic 负载文本与格式化摘要各自
+最多 4 KiB，从借用的 panic 数据读取。
+
+Backtrace 捕获/输出和串联的 panic hook 属于独立范围。这些上限约束 recorder 可控制的
+格式化/保留，不限制任意生产端 `Debug` 实现内部的分配，也不保证任意日志都不含敏感信息。
+负载 TRACE 仍可作为显式启用的普通 sink 证据；结构化 breadcrumbs 保持独立的仅元数据契约。
 
 卡死不一定产生 panic 工件。macOS 上应在强制退出前采样：
 
@@ -506,7 +701,10 @@ grep -nE 'dispatch_sync_f_slow|redraw_target|__psynch_cvwait' \
    损坏的标记仍算证据，每个旧标记只在下次启动时报告一次。
 2. `breadcrumbs/breadcrumbs-<id>.log` 是有界的原子快照，不含终端文本、命令、环境值、
    token 或凭据。它固定保留最新版本、平台、渲染器、数量、完整进程资源、保留量、
-   分配器状态和有界生命周期事件。另有固定成本的
+   分配器状态和有界生命周期事件。其中 `event=retention` 记录包含 `renderer_bytes`、
+   `row_glyph_cache_bytes` / `row_glyph_cache_items` 和
+   `row_quad_cache_bytes` / `row_quad_cache_items`，因此最后一份完整故障前快照会同时保留
+   两个行缓存的大小与占用。另有固定成本的
    `event=resource_history private_committed=... resident=...` 采样：启动时立即一次，
    之后每 5 秒一次，最多保留 48 条。虚拟地址空间只出现在完整 `event=resource` 记录中。
 

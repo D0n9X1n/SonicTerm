@@ -186,19 +186,42 @@ Combining marks and variation selectors stay with their shaped cluster. Wide
 characters and multi-cell ligatures retain their natural advances and offsets.
 Fallback replacement glyphs keep the original cluster coordinates.
 
+Windows system fallback encodes complete UTF-16 and counts mapping positions,
+remaining lengths, and locale spans in code units. Supplementary characters stay
+as surrogate pairs. Zero, out-of-range, or split-surrogate mapping progress
+fails the entire native fallback request without returning partial candidates;
+the caller reports failure and continues its remaining configured locators.
+Successful requests return candidates deduplicated in first-encounter order.
+
+Raw shaping text and collections use the explicit `sonicterm_font::payload`
+TRACE target. Opt-in sinks can record them; crash history cannot. Safe fallback
+errors retain stage and size/count diagnostics rather than the affected text.
+White foreground and untinted color glyphs are normal rendering and produce no
+routine per-glyph warning. Genuine atlas and presentation diagnostics remain.
+
 ### Rasterization
 
 Windows uses DirectWrite by default and falls back to FreeType when DirectWrite
 cannot rasterize a glyph. macOS and other Unix systems use FreeType. FreeType
 supports monochrome, grayscale, LCD subpixel, BGRA color strikes, and
 COLR/SVG handoff. HarfBuzz/COLR paint paths use Cairo-backed drawing for layered
-color glyphs and linear, radial, and sweep gradients.
+color glyphs and linear, radial, and sweep gradients. A gradient whose color
+line carries no usable stop paints nothing, and sweep tiling is bounded, so a
+malformed or extreme color line degrades to a coarse approximation rather than
+unbounded work.
 
 `sonicterm-font::{ftwrap,hbwrap,fcwrap}` owns safe lifetimes around raw handles
 from the generated FreeType, HarfBuzz, and Fontconfig binding crates. Each
 native allocation is paired with its matching destroy function. Embedded bitmap
 strikes are loaded metrics-first and checked against the glyph allocation budget
 before their pixels are decoded.
+
+BGRA color bitmaps crop to half-open nontransparent bounds, preserving the final
+ink row and column. Crop origin translates bearings by `+crop_x` and `-crop_y`,
+not by a size ratio. Owned channel conversion, premultiplication, color/scaled
+flags, and allocation caps are unchanged. A fully transparent nonempty bitmap
+keeps its original dimensions and bearings and remains a valid blank glyph
+through FontStack and atlas insertion, not a missing-glyph sentinel.
 
 Standalone status circles `⏺` (U+23FA), `◯` (U+25EF), and `●` (U+25CF) receive
 one targeted fit when the shaped cluster occupies one non-wide cell and has no
@@ -211,14 +234,18 @@ rectangle is used by GPU and Windows software presentation.
 ### Row and shape caches
 
 `RowGlyphCache` stores glyph instances, underlines, missing-glyph records, and
-tofu quads under `(pane id, absolute row, row hash)`. `LineQuadCache` stores
-background and decoration quads under the matching row identity. Because cached
-glyph instances already carry projected screen coordinates, their keys include
+tofu quads under `(pane id, absolute row, row hash)`. `LineQuadCache` stores one
+background/decoration projection per `(pane id, absolute row)`, with a validity
+hash that includes its viewport row slot. A slot change reprojects that row and
+replaces its prior value instead of consuming another cache entry. Same-slot
+repaints can hit; absolute dirty-row invalidation remains pane-local, and the
+existing capacity bound and new-row eviction policy remain unchanged. Because
+cached glyph instances already carry projected screen coordinates, their keys include
 pane origin and surface extent as well as cell content, font/style revision, cell
-metrics, display scale, atlas generation, and a selection rectangle only when it
-intersects that row.
+metrics, display scale, atlas content identity, and a selection rectangle only
+when it intersects that row.
 
-Font, theme, scale, pane identity, atlas reset, or UV generation changes
+Font, theme, scale, pane identity, atlas reset, or atlas content-identity changes
 invalidate the affected entries. A font or DPI change rebuilds the body, footer,
 and tab-title font stacks together and invalidates the shared glyph atlas:
 
@@ -252,8 +279,8 @@ Insertion follows these rules:
 Eviction is required for correctness as well as a memory bound: merely refusing
 new entries would keep memory flat while later glyphs disappeared. Atlas resets
 clear metadata and packing state in place without zeroing the 16 MiB CPU pixel
-allocation. Generation and eviction epochs invalidate cached UVs before a new
-tile can reuse an old rectangle.
+allocation. A monotonic content identity changes on every reset or eviction and
+invalidates cached UVs before a new tile can reuse an old rectangle.
 
 The CPU atlas contract distinguishes pixel meaning: monochrome and DirectWrite
 subpixel tiles are linear coverage masks, while self-colored glyph pixels are
@@ -275,9 +302,11 @@ full original CPU atlas remains live while its GPU texture is a 1×1 placeholder
 returning to GPU presentation rebuilds the matching texture, resets UV-bearing
 caches, and forces a full redraw.
 
-DirectWrite emits logical red, green, and blue ClearType coverage and stores the
-maximum channel in alpha. The engine changes the byte layout from RGBA to BGRA
-for the CPU atlas but does not perform a color-space conversion. With
+DirectWrite emits logical red, green, and blue ClearType coverage. SonicTerm
+preserves those native coverage bytes without a hidden contrast curve; the
+explicit `weight_scale` control is the only regular-text coverage adjustment.
+The maximum channel is stored in alpha. The engine changes the byte layout from
+RGBA to BGRA for the CPU atlas but does not perform a color-space conversion. With
 `[font].subpixel_aa = "off"`, both presenters use the stored alpha maximum as one
 grayscale coverage value. `rgb` maps the logical channels to matching display
 channels; `bgr` reverses red and blue. The GPU path samples the unorm coverage
@@ -304,7 +333,19 @@ multiplied by the linear alpha channel.
 Decoded images remain owned by their pane. Count and byte retention are bounded
 as described in [Memory](Memory). The renderer copies visible images into an
 **independent** image atlas, so media pressure cannot evict text glyphs or reuse
-text UVs. During dirty-rectangle packing for GPU upload, each nontransparent
+text UVs. Image visibility is the intersection of its destination, its owning
+pane's actual content rectangle after padding, and the surface. Image clipping
+does not use the cell-layout minimum: a padding-exhausted pane has an empty image
+clip, even if its grid still has one cell. The same visibility check controls
+atlas residency and emission; fully clipped or undecoded images neither promote
+the atlas nor allocate tiles. Clipping preserves original position and scale,
+and carries visible destination/UVs separately from the original packed tile's
+sample bounds. Both presenters interpolate at pixel centers, including fractional
+native-size placement, and clamp taps to the original tile rather than the pane
+cut. No cropped decoded-image copy is allocated; painter order and atlas limits
+are unchanged.
+
+During dirty-rectangle packing for GPU upload, each nontransparent
 pixel is unpremultiplied in encoded space, clamped, decoded through the sRGB
 transfer function, premultiplied by alpha in linear light, and re-encoded for
 storage; transparent pixels become `[0, 0, 0, 0]`, and alpha is unchanged. The
@@ -503,16 +544,32 @@ HarfBuzz 把样式片段塑形成字形 id、字符簇、推进量和偏移量�
 组合标记和变体选择符留在所属字符簇中。宽字符和多单元格连字保持自然推进量与偏移量。
 替代回退字形会保留原字符簇坐标。
 
+Windows 系统回退会完整编码 UTF-16；映射位置、剩余长度及 locale 范围都按代码单元计数。
+补充平面字符始终保留为代理项对。映射返回零长度、越界或拆分代理项对时，整个原生回退请求
+失败，不返回部分候选；调用方报告失败并继续其余已配置的字体查找源。成功请求返回的候选
+按首次出现的顺序去重。
+
+原始塑形文本和集合使用显式 `sonicterm_font::payload` TRACE 目标。显式启用的输出 sink
+可以记录它们，崩溃历史不会。安全回退错误只保留阶段和大小/数量诊断，不保留受影响文本。
+白色前景和不染色的彩色字形是正常渲染，不产生常规逐字形 warning。真正的图集和呈现诊断
+仍然保留。
+
 ### 光栅化
 
 Windows 默认使用 DirectWrite；DirectWrite 无法光栅化某字形时回退 FreeType。
 macOS 和其它 Unix 使用 FreeType。FreeType 支持单色、灰度、LCD 次像素、BGRA 彩色
 位图字形，以及 COLR/SVG 交接。HarfBuzz/COLR 绘制路径通过 Cairo 支持分层彩色字形和
-线性、径向、扫描渐变。
+线性、径向、扫描渐变。颜色线没有可用色标时不绘制任何内容；扫描渐变的平铺有上限，
+因此畸形或极端颜色线会退化为粗略近似，而不会产生无界工作量。
 
 `sonicterm-font::{ftwrap,hbwrap,fcwrap}` 为生成的 FreeType、HarfBuzz、Fontconfig
 绑定中的原始句柄管理安全生命周期。每次原生分配都配对正确的销毁函数。内嵌位图字形
 先只加载度量，并在解码像素前检查字形分配预算。
+
+BGRA 彩色位图按非透明区域的半开边界裁剪，保留最后一行和一列墨迹。裁剪原点使 bearing
+分别平移 `+crop_x` 与 `-crop_y`，而非按尺寸比缩放。自有通道转换、预乘、color/scaled
+标志和分配上限保持不变。全透明但非空的位图保留原尺寸与 bearing，在 FontStack 转换和
+图集插入后仍是有效空白字形，不会变成缺失字形哨兵。
 
 独立状态圆圈 `⏺`（U+23FA）、`◯`（U+25EF）、`●`（U+25CF）只在塑形后的字符簇
 占一个非宽单元格，且没有组合字符或变体选择符时进行定向适配。图块按统一比例缩放到
@@ -522,11 +579,13 @@ macOS 和其它 Unix 使用 FreeType。FreeType 支持单色、灰度、LCD 次�
 ### 行缓存与塑形缓存
 
 `RowGlyphCache` 按 `(pane id, absolute row, row hash)` 保存字形实例、下划线、缺失字形
-记录和缺字方框。`LineQuadCache` 按相同的行身份保存背景与装饰矩形。由于缓存的字形实例
-已携带投影后的屏幕坐标，其缓存键除单元格内容、字体/样式修订号、单元格度量、显示缩放、
-图集代次及仅在选区与该行相交时加入的选区矩形外，还包含 pane 原点和表面尺寸。
+记录和缺字方框。`LineQuadCache` 为每个 `(pane id, absolute row)` 保存一个背景/装饰投影，
+有效性哈希包含视口行位置。位置变化会重新投影该行并替换旧值，不会额外占用缓存条目；同一位置
+重绘仍可命中。绝对脏行失效仍限制在对应窗格，容量上限及新行淘汰策略保持不变。由于缓存的字形
+实例已携带投影后的屏幕坐标，其缓存键除单元格内容、字体/样式修订号、单元格度量、显示缩放、
+图集内容身份及仅在选区与该行相交时加入的选区矩形外，还包含 pane 原点和表面尺寸。
 
-字体、主题、缩放、窗格身份、图集重置或 UV 代次变化都会使相关条目失效。字体或 DPI
+字体、主题、缩放、窗格身份、图集重置或内容身份变化都会使相关条目失效。字体或 DPI
 变化会一起重建正文、页脚和标签页标题字体栈，并使共享字形图集失效：
 
 - 终端文字、命令面板查询/结果和普通界面文字使用配置的正文大小；
@@ -553,7 +612,7 @@ CPU `GlyphAtlas` 是固定的 2048×2048 BGRA8 纹理，按每像素四字节计
 
 淘汰不仅用于限制内存，也是正确性要求；若只是拒绝新条目，内存虽然不再增长，后续字形
 却会消失。图集重置会原地清除元数据与打包状态，不会把 16 MiB CPU 像素分配清零。
-代次和淘汰纪元 会在新图块复用旧矩形之前使缓存 UV 失效。
+单调递增的内容身份会在每次重置或淘汰时变化，并在新图块复用旧矩形之前使缓存 UV 失效。
 
 CPU 图集契约会区分像素含义：单色与 DirectWrite 次像素图块是线性覆盖率掩码，自带颜色的
 字形像素则是预乘、sRGB 编码的 BGRA8。每次写入都会把紧密脏矩形记录为 `Coverage` 或
@@ -568,8 +627,9 @@ sRGB view 解码后等于预乘线性颜色的存储值。CPU 字节始终不会
 但对应 GPU 纹理缩为 1×1 占位符；回到 GPU 呈现时会重建匹配纹理、重置携带 UV 的缓存，
 并强制完整重绘。
 
-DirectWrite 生成逻辑红、绿、蓝 ClearType 覆盖率，并把三个通道的最大值写入 alpha。引擎只把
-字节布局从 RGBA 改为 CPU 图集使用的 BGRA，不执行色彩空间转换。使用
+DirectWrite 生成逻辑红、绿、蓝 ClearType 覆盖率。SonicTerm 会原样保留这些原生覆盖率字节，
+不再应用隐藏的对比度曲线；显式 `weight_scale` 是普通文字唯一的覆盖率调节。三个通道的最大值
+写入 alpha。引擎只把字节布局从 RGBA 改为 CPU 图集使用的 BGRA，不执行色彩空间转换。使用
 `[font].subpixel_aa = "off"` 时，两种 presenter 都把保存的 alpha 最大值当作单一灰度覆盖率；
 `rgb` 把逻辑通道映射到对应显示通道，`bgr` 则交换红、蓝。GPU 路径从 unorm 覆盖率 view
 取样，并用 dual-source blending 分别衰减目标通道。Windows 软件路径读取原始 BGRA 字节，
@@ -586,7 +646,15 @@ iTerm2 文件图像、kitty graphics 和 Sixel 事件由应用解码。声明宽
 缓冲。结果使用预乘、sRGB 编码的 BGRA8：RGB 已编码，并已乘以线性 alpha 通道。
 
 已解码图像仍由所属窗格拥有；数量和字节上限见[内存](Memory)。渲染器把可见图像复制到
-**独立**图像图集，因此媒体压力不能淘汰文字字形，也不能复用文字 UV。GPU 脏矩形打包时，
+**独立**图像图集，因此媒体压力不能淘汰文字字形，也不能复用文字 UV。图像可见范围是目标矩形、
+所属窗格扣除内边距后的实际内容矩形与表面的交集。图像裁剪不使用单元格布局最小值：内边距耗尽
+窗格空间时，图像裁剪范围为空，即使网格仍保留一个单元格。同一可见性检查控制图集驻留和绘制；
+完全裁剪或尚未解码的图像
+既不提升图集，也不分配图块。裁剪保留原始位置和缩放，并将可见目标/UV 与原始已打包图块的
+采样边界分开保存。两种 presenter 都在像素中心插值，包括原始尺寸下的分数位置，并把采样点
+限制在原始图块内，而不是窗格裁剪边缘。不分配裁剪后的解码像素副本，绘制顺序与图集上限不变。
+
+GPU 脏矩形打包时，
 每个非透明像素先在编码空间反预乘并限制范围，再经 sRGB 传递函数解码、在线性光空间乘以
 alpha，最后重新编码后存储；透明像素规范化为 `[0, 0, 0, 0]`，alpha 保持不变。CPU 字节
 不会被重写。Windows 软件呈现会对每个选中的纹素执行相同的零 alpha 规范化及

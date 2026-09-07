@@ -98,7 +98,7 @@ impl Tab {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct TabBar {
     tabs: Vec<Tab>,
     active: usize,

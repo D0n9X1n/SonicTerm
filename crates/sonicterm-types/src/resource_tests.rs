@@ -2,7 +2,7 @@ use super::*;
 use enum_map::enum_map;
 use std::time::{Duration, Instant};
 
-const ALL_CLASSES: [ResourceClass; 22] = [
+const ALL_CLASSES: [ResourceClass; 24] = [
     ResourceClass::GridVisible,
     ResourceClass::GridHistory,
     ResourceClass::GridAlternate,
@@ -12,6 +12,8 @@ const ALL_CLASSES: [ResourceClass; 22] = [
     ResourceClass::FontFace,
     ResourceClass::GlyphRaster,
     ResourceClass::GlyphAtlas,
+    ResourceClass::RowGlyphCache,
+    ResourceClass::RowQuadCache,
     ResourceClass::ParserCapture,
     ResourceClass::InlineMediaDecode,
     ResourceClass::InlineMediaRetained,
@@ -232,6 +234,14 @@ fn public_contract_types_are_send_sync_and_copy_where_expected() {
 }
 
 // ---------------------------------------------------------------------------
+/// Hash-table retention includes bucket payloads, controls, and the trailing group.
+#[test]
+fn retained_hash_table_bytes_matches_swiss_table_layout() {
+    assert_eq!(retained_hash_table_bytes::<u64, u64>(0), 0);
+    assert_eq!(retained_hash_table_bytes::<u64, u64>(7), 8 * 16 + 8 + 16);
+    assert_eq!(retained_hash_table_bytes::<u64, u64>(8), 16 * 16 + 16 + 16);
+}
+
 // Class coverage
 //
 // A class with no charge site looks identical, from outside, to a class

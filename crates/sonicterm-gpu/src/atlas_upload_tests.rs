@@ -59,13 +59,6 @@ pub(crate) fn render_image_readback_on(
     neighbor: Option<[u8; 4]>,
     clear: [f32; 4],
 ) -> Vec<u8> {
-    const PADDED_BYTES_PER_ROW: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-    let (device, queue) = headless_device();
-    let mut pipeline = crate::wezterm_pipeline::WeztermPipeline::new(
-        &device,
-        wgpu::TextureFormat::Bgra8UnormSrgb,
-        1,
-    );
     let atlas_width = source_width + u32::from(neighbor.is_some());
     let mut atlas = GlyphAtlas::new(atlas_width, 1);
     let info = atlas
@@ -104,25 +97,49 @@ pub(crate) fn render_image_readback_on(
             )
             .expect("neighbor test tile inserts");
     }
+    let image = crate::wezterm_pipeline::ImageInstance {
+        rect_px: [0.0, 0.0, target_width as f32, 1.0],
+        uv: info.uv,
+        sample_uv: info.uv,
+    };
+    render_image_instances_readback(&mut atlas, &[image], target_width, 1, clear)
+}
+
+/// Read real image-atlas pixels for arbitrary destination geometry without altering CPU atlas storage.
+pub(crate) fn render_image_instances_readback(
+    atlas: &mut GlyphAtlas,
+    images: &[crate::wezterm_pipeline::ImageInstance],
+    width: u32,
+    height: u32,
+    clear: [f32; 4],
+) -> Vec<u8> {
+    let stride = (width * BYTES_PER_PIXEL).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+        * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let (device, queue) = headless_device();
+    let mut pipeline = crate::wezterm_pipeline::WeztermPipeline::new(
+        &device,
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+        images.len() as u64,
+    );
     let cpu_pixels = atlas.pixels_bgra().to_vec();
     let mut image_upload = AtlasUpload::new(
         &device,
-        &atlas,
+        atlas,
         pipeline.image_bind_group_layout(),
         AtlasBindingKind::Image,
     );
     let glyph_upload = AtlasUpload::new(
         &device,
-        &atlas,
+        atlas,
         pipeline.glyph_bind_group_layout(),
         AtlasBindingKind::Glyph,
     );
-    image_upload.sync(&queue, &mut atlas);
+    image_upload.sync(&queue, atlas);
     assert_eq!(atlas.pixels_bgra(), cpu_pixels, "GPU upload must not rewrite CPU atlas bytes");
 
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("atlas color readback target"),
-        size: wgpu::Extent3d { width: target_width, height: 1, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -133,16 +150,10 @@ pub(crate) fn render_image_readback_on(
     let view = target.create_view(&wgpu::TextureViewDescriptor::default());
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("atlas color readback"),
-        size: u64::from(PADDED_BYTES_PER_ROW),
+        size: u64::from(stride) * u64::from(height),
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
-    let image = sonicterm_text::GlyphInstance {
-        rect: crate::quad::px_to_ndc(0.0, 0.0, target_width as f32, 1.0, target_width as f32, 1.0),
-        uv: info.uv,
-        color: [1.0; 4],
-        flags: [1.0, 0.0, 1.0, 0.0],
-    };
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
     {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -172,11 +183,12 @@ pub(crate) fn render_image_readback_on(
             &mut pass,
             image_upload.image_bind_group(),
             glyph_upload.glyph_bind_group(),
-            target_width as f32,
-            1.0,
+            width as f32,
+            height as f32,
             sonicterm_render_model::boundary::cfg::config::SubpixelAaMode::Off,
+            None,
             &[],
-            &[image],
+            images,
             &[],
             &[],
             &[],
@@ -188,18 +200,22 @@ pub(crate) fn render_image_readback_on(
             buffer: &readback,
             layout: wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(PADDED_BYTES_PER_ROW),
-                rows_per_image: Some(1),
+                bytes_per_row: Some(stride),
+                rows_per_image: Some(height),
             },
         },
-        wgpu::Extent3d { width: target_width, height: 1, depth_or_array_layers: 1 },
+        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
     );
     queue.submit([encoder.finish()]);
     let slice = readback.slice(..);
     slice.map_async(wgpu::MapMode::Read, |_| {});
     device.poll(wgpu::PollType::wait_indefinitely()).expect("poll atlas color readback");
     let mapped = slice.get_mapped_range().expect("mapped atlas color readback");
-    let result = mapped[..target_width as usize * BYTES_PER_PIXEL as usize].to_vec();
+    let mut result = Vec::with_capacity((width * height * BYTES_PER_PIXEL) as usize);
+    for y in 0..height as usize {
+        let start = y * stride as usize;
+        result.extend_from_slice(&mapped[start..start + (width * BYTES_PER_PIXEL) as usize]);
+    }
     drop(mapped);
     readback.unmap();
     result
@@ -308,6 +324,7 @@ pub(crate) fn render_glyph_readback_on(
             width as f32,
             1.0,
             sonicterm_render_model::boundary::cfg::config::SubpixelAaMode::Off,
+            None,
             &[],
             &[],
             &glyphs,

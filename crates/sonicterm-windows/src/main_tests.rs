@@ -21,9 +21,44 @@
 //! the live type computes its size the same way, but that is now an argument
 //! rather than a measurement.
 
+use super::{runtime_exit_code, runtime_smoke_spec};
+
 #[test]
 fn integration_test_target_is_present() {
     assert_eq!(env!("CARGO_PKG_NAME"), "sonicterm-windows");
+}
+
+#[test]
+fn runtime_smoke_uses_scratch_config_and_log_roots_with_cmd_expansion() {
+    // Protect the packaged smoke from mutating HOME and from relying on same-line cmd expansion.
+    let root = std::path::Path::new("C:/ci/native-smoke");
+    let spec = runtime_smoke_spec(root, 41).expect("valid Windows smoke spec");
+    assert_eq!(spec.shell_program(), "cmd.exe");
+    assert_eq!(spec.config_dir(), root.join("config"));
+    assert_eq!(spec.log_dir(), root.join("logs"));
+    assert_eq!(
+        spec.command(),
+        b"set SONICTERM_SMOKE_NONCE=41\r\necho __SONICTERM_SMOKE_%SONICTERM_SMOKE_NONCE%__\r\n"
+    );
+    assert!(!String::from_utf8_lossy(spec.command()).contains(spec.marker()));
+}
+
+#[test]
+fn windows_runtime_smoke_exit_codes_include_warm_cleanup() {
+    // Protect workflow diagnostics from collapsing warm renderer cleanup into a generic failure.
+    use sonicterm_app::app::RuntimeSmokeFailure;
+    assert_eq!(runtime_exit_code(&Ok(())), 0);
+    assert_eq!(runtime_exit_code(&Err(RuntimeSmokeFailure::WarmLifecycle)), 16);
+}
+
+#[test]
+fn windows_runtime_smoke_initializes_only_explicit_log_state() {
+    // Protect the hidden shipping mode from consulting or overwriting user-home config and logs.
+    const MAIN: &str = include_str!("main.rs");
+    assert!(MAIN.contains("sonicterm_logging::init_in(&log_cfg, spec.log_dir())"));
+    assert!(MAIN.contains("shell.run_smoke(spec"));
+    assert!(!MAIN.contains("set_var(\"HOME\""));
+    assert!(!MAIN.contains("set_var(\"USERPROFILE\""));
 }
 
 #[test]
@@ -103,6 +138,7 @@ fn windows_only_rustdoc_avoids_links_to_generated_or_deleted_items() {
 
 #[test]
 fn ole_drag_paths_reject_missing_initialization_and_empty_payloads() {
+    // Platform guards and unresolved drop classification must remain wired into the production OLE path.
     const OLE: &str = include_str!("os_drag_win.rs");
     const TAB_DRAG: &str = include_str!("tab_drag_os.rs");
 
@@ -110,8 +146,13 @@ fn ole_drag_paths_reject_missing_initialization_and_empty_payloads() {
     assert!(OLE.contains("if payload_json.is_empty()"));
     assert!(OLE.contains("if len == 0"));
     assert!(TAB_DRAG.contains("let outcome ="));
-    assert!(TAB_DRAG.contains("if outcome.hr != windows::Win32::Foundation::DRAGDROP_S_DROP"));
-    assert!(TAB_DRAG.contains("DragOutcome::Cancelled"));
+    assert!(TAB_DRAG.contains("unresolved_drag_outcome(outcome.hr, outcome.effect,"));
+    let classifier = TAB_DRAG.split("fn unresolved_drag_outcome(").nth(1).unwrap();
+    let classifier = classifier.split("impl OsTabDragBackend").next().unwrap();
+    assert!(classifier.contains("if hr != windows::Win32::Foundation::DRAGDROP_S_DROP"));
+    assert!(classifier.contains("effect == windows::Win32::System::Ole::DROPEFFECT_MOVE.0"));
+    assert!(classifier.contains("return DragOutcome::Cancelled;"));
+    assert!(!classifier.contains("DroppedOnBar"));
     assert!(!TAB_DRAG.contains("let effect ="));
     assert!(TAB_DRAG.contains("if registered"));
 }

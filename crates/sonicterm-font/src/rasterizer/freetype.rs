@@ -40,6 +40,25 @@ pub struct FreeTypeRasterizer {
     hb_raster: HarfbuzzRasterizer,
 }
 
+// SAFETY: `slot.bitmap.buffer` must name `source_len` initialized bytes for the lifetime of `slot`.
+unsafe fn glyph_bitmap_data(slot: &FT_GlyphSlotRec_, source_len: usize) -> &[u8] {
+    if slot.bitmap.buffer.is_null() {
+        &[]
+    } else {
+        // When: bitmap.buffer is non-null, borrow its initialized extent while this slot lives.
+        // SAFETY: the caller binds the initialized bitmap extent to this glyph-slot borrow.
+        unsafe { std::slice::from_raw_parts(slot.bitmap.buffer, source_len) }
+    }
+}
+
+fn owned_bgra_image(
+    width: u32,
+    height: u32,
+    data: &[u8],
+) -> Option<image::ImageBuffer<image::Rgba<u8>, Vec<u8>>> {
+    image::ImageBuffer::from_raw(width, height, data.to_vec())
+}
+
 impl FontRasterizer for FreeTypeRasterizer {
     fn rasterize_glyph(
         &self,
@@ -129,7 +148,7 @@ impl FontRasterizer for FreeTypeRasterizer {
         let data =
             // SAFETY: source_len is rows*pitch, the extent FreeType allocated
             // for this bitmap, and the borrowed face keeps the slot alive.
-            unsafe { crate::ftwrap::from_raw_parts(ft_glyph.bitmap.buffer, source_len) };
+            unsafe { glyph_bitmap_data(ft_glyph, source_len) };
 
         let glyph = match mode {
             ftwrap::FT_Pixel_Mode::FT_PIXEL_MODE_LCD => {
@@ -139,7 +158,7 @@ impl FontRasterizer for FreeTypeRasterizer {
                 self.rasterize_lcd_v(pitch, ft_glyph, data, is_scaled)
             }
             ftwrap::FT_Pixel_Mode::FT_PIXEL_MODE_BGRA => {
-                self.rasterize_bgra(pitch, ft_glyph, data, is_scaled)?
+                Self::rasterize_bgra(pitch, ft_glyph, data, is_scaled, self.has_color)?
             }
             ftwrap::FT_Pixel_Mode::FT_PIXEL_MODE_GRAY => {
                 self.rasterize_gray(pitch, ft_glyph, data, is_scaled)
@@ -351,11 +370,11 @@ impl FreeTypeRasterizer {
     }
 
     fn rasterize_bgra(
-        &self,
         pitch: usize,
         ft_glyph: &FT_GlyphSlotRec_,
-        data: &'static [u8],
+        data: &[u8],
         is_scaled: bool,
+        has_color: bool,
     ) -> anyhow::Result<RasterizedGlyph> {
         let width = ft_glyph.bitmap.width as usize;
         let height = ft_glyph.bitmap.rows as usize;
@@ -376,25 +395,21 @@ impl FreeTypeRasterizer {
             });
         }
 
-        let mut source_image = image::ImageBuffer::<image::Rgba<u8>, &[u8]>::from_raw(
-            width as u32,
-            height as u32,
-            data,
-        )
-        .with_context(|| {
-            format!(
-                "build image from data with \
+        let mut source_image =
+            owned_bgra_image(width as u32, height as u32, data).with_context(|| {
+                format!(
+                    "build image from data with \
                  width={width}, height={height} and pitch={pitch}.\
                  Expected pitch={}. format is {:?}",
-                width * 4,
-                ft_glyph.format
-            )
-        })?;
+                    width * 4,
+                    ft_glyph.format
+                )
+            })?;
 
-        // emoji glyphs don't always fill the bitmap size, so we compute
-        // the non-transparent bounds
-
-        let mut cropped = crate::rasterizer::crop_to_non_transparent(&mut source_image).to_image();
+        // Removed margins move the bitmap origin; they do not scale baseline bearings.
+        let crop = crate::rasterizer::crop_to_non_transparent(&mut source_image);
+        let (crop_x, crop_y) = crop.offsets();
+        let mut cropped = crop.to_image();
         crate::rasterizer::swap_red_and_blue(&mut cropped);
 
         let dest_width = cropped.width() as usize;
@@ -404,13 +419,9 @@ impl FreeTypeRasterizer {
             data: cropped.into_vec(),
             height: dest_height,
             width: dest_width,
-            bearing_x: PixelLength::new(
-                f64::from(ft_glyph.bitmap_left) * (dest_width as f64 / width as f64),
-            ),
-            bearing_y: PixelLength::new(
-                f64::from(ft_glyph.bitmap_top) * (dest_height as f64 / height as f64),
-            ),
-            has_color: self.has_color,
+            bearing_x: PixelLength::new(f64::from(ft_glyph.bitmap_left) + f64::from(crop_x)),
+            bearing_y: PixelLength::new(f64::from(ft_glyph.bitmap_top) - f64::from(crop_y)),
+            has_color,
             is_scaled,
         })
     }
@@ -501,6 +512,10 @@ impl FreeTypeRasterizer {
         rasterize_from_ops(walker.ops, scale_x, -scale_y)
     }
 }
+
+#[cfg(test)]
+#[path = "freetype_tests.rs"]
+mod freetype_tests;
 
 fn rasterize_from_ops(
     ops: Vec<PaintOp>,

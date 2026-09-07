@@ -5,6 +5,7 @@
 //! block; field access works because all referenced `App` fields are
 //! `pub(super)`.
 
+use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -22,15 +23,16 @@ use sonicterm_vt::vt::MouseTracking;
 use winit::{
     event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::ActiveEventLoop,
-    keyboard::{Key, ModifiersState, NamedKey},
+    keyboard::{Key, ModifiersState, NamedKey, PhysicalKey},
     window::{CursorIcon, WindowId},
 };
 
-use super::key_encoding::{encode_key, key_event_to_string, key_to_strings};
+use super::key_encoding::{key_event_to_string, key_event_to_strings};
 use super::{
     invalidate_selection_for_content, mark_all_panes_dirty, pane_id_at_point,
     runtime_smoke::{grid_contains_marker, RuntimeSmokeFailure},
-    App, FrontmostKind, PointerCell, PointerGesture, PointerGestureOwner, TabState, WindowState,
+    App, FrontmostKind, PointerCell, PointerGesture, PointerGestureOwner, PtyInputSource, TabState,
+    WindowState,
 };
 
 const SPLITTER_HIT_THICKNESS: f32 = 8.0;
@@ -104,6 +106,15 @@ pub(super) fn pointer_report_bytes(
             (row.min(223) + 32) as u8,
         ]
     }
+}
+
+/// Return an existing terminal press's destinations only for repeat events.
+pub(super) fn terminal_repeat_targets(
+    pressed_keys: &HashMap<PhysicalKey, BTreeSet<u64>>,
+    physical_key: PhysicalKey,
+    repeat: bool,
+) -> Option<BTreeSet<u64>> {
+    repeat.then(|| pressed_keys.get(&physical_key).cloned()).flatten()
 }
 
 /// Choose and latch the owner of a left-button grid press.
@@ -323,7 +334,7 @@ pub(super) fn is_quit_chord(key_str: &str, bound: Option<&Action>) -> bool {
 }
 
 impl App {
-    // Ordering: pty_burst_gen uses Acquire; cursor_visible, kitty_flags, and app_cursor_keys are independent Relaxed snapshots.
+    // Ordering: pty_burst_gen uses Acquire; cursor_visible, kitty_flags, and keyboard_modes are independent Relaxed snapshots.
     pub(super) fn do_window_event(
         &mut self,
         el: &ActiveEventLoop,
@@ -386,30 +397,10 @@ impl App {
                 }
             }
             WindowEvent::CloseRequested => {
-                // Notify the reducer of the close request. It mutates
-                // `AppState::{live_window_count, focused_window}` and
-                // emits `WindowClose` [+ `Quit` if last]. The
-                // boundary's existing macOS-style "hide instead of
-                // exit" policy below is the source of truth for what
-                // the platform actually does; the reducer's Effects
-                // are observability-only in this slice (the
-                // `dispatch_effects` arms for `WindowClose` /
-                // `WindowOpen` / `WindowResize` are trace-stubs per
-                // §9). The `Quit` cascade does flip `pending_exit` —
-                // suppress that here so we don't override the
-                // "hide-on-last-close" policy. Real Quit cascading
-                // moves to the reducer in 2c-misc.
-                let intent = sonicterm_app_core::AppIntent::WindowCloseRequested {
-                    window: sonicterm_types::WindowKey::new(0),
-                };
-                for effect in self.machine.handle(intent) {
-                    if !matches!(
-                        effect,
-                        sonicterm_app_core::AppEffect::Quit
-                            | sonicterm_app_core::AppEffect::WindowClose { .. }
-                    ) {
-                        self.dispatch_effects(smallvec::smallvec![effect]);
-                    }
+                if let Some(window) = self.window_key(win_id) {
+                    self.observe_intent(sonicterm_app_core::AppIntent::WindowCloseRequested {
+                        window,
+                    });
                 }
                 // If child windows still own tabs, hide the main
                 // window instead of exiting the app — the children
@@ -456,7 +447,9 @@ impl App {
                     composing,
                     self.frame_period,
                 );
-                if crate::app::should_defer_streaming_redraw(
+                if self.main().is_some_and(|window| {
+                    window.contention_blocks_redraw(Instant::now(), frame_period)
+                }) || crate::app::should_defer_streaming_redraw(
                     was_dirty,
                     pty_burst,
                     self.software_render_degrade,
@@ -696,6 +689,9 @@ impl App {
                     return;
                 }
 
+                if let Some(window) = self.main_mut() {
+                    window.coherent_frame_collected();
+                }
                 let marker_observed = self.runtime_smoke.as_ref().is_some_and(|smoke| {
                     smoke.is_waiting_for_marker()
                         && guards.iter().any(|(_, parser, _)| {
@@ -877,7 +873,7 @@ impl App {
                     tab_states_opt,
                 ) {
                     // When: renderer_opt, pane, tabs_mref, and tab_states_mref are Some, render one coherent frame.
-                    let cursor_rc = {
+                    let (cursor_rc, cursor_pane_rect) = {
                         // Fix 1: the active pane's parser guard is
                         // already in `guards` from the global try_lock pass
                         // above; locking it again here would AB-BA deadlock
@@ -886,11 +882,7 @@ impl App {
                         let active_pos = guards
                             .iter()
                             .position(|(id, _, _)| *id == active_id)
-                            // PANIC: safe — `guards` was populated immediately
-                            // above from `tab.panes` keyed by `active_id`, so
-                            // a guard with this id is present. Render hot
-                            // path: do NOT convert to Result (CLAUDE.md §4 —
-                            // this fn must never block or crash the terminal).
+                            // PANIC: `active_id` must be a live visible leaf; `guards` covers the successfully locked layout.
                             .expect("active pane guard collected above");
                         // Wezterm-style tab title: `#N icon parent/leaf`.
                         // Pull cwd from OSC 7, the foreground process from
@@ -991,7 +983,7 @@ impl App {
                             *lr = Instant::now();
                         }
                         let g = guards[active_pos].1.grid_mut();
-                        (g.cursor.row, g.cursor.col)
+                        ((g.cursor.row, g.cursor.col), guards[active_pos].2)
                     };
                     // refresh the OS-drag tab bar
                     // snapshot so cross-window drop hit-tests see the
@@ -1006,6 +998,12 @@ impl App {
                     // pinned to the top-left corner of the screen as
                     // happens when the area is never set.
                     if let Some(w) = main_window_for_ime {
+                        let mut ws_ime_throttle_ref = ws_ime_throttle_ref;
+                        if main_palette_ime_area.is_some() || search_ime_label.is_some() {
+                            if let Some(throttle) = ws_ime_throttle_ref.as_deref_mut() {
+                                throttle.reset();
+                            }
+                        }
                         if let Some((pos, size)) = main_palette_ime_area {
                             // The main-hosted palette anchors the candidate window to its caret.
                             w.set_ime_cursor_area(pos, size);
@@ -1060,35 +1058,29 @@ impl App {
                             w.set_ime_cursor_area(pos, size);
                         } else if let Some(throttle) = ws_ime_throttle_ref {
                             // When: ws_ime_throttle_ref is Some(throttle), use terminal cell IME geometry.
-                            // Terminal input updates its cell-based candidate anchor through the throttle.
-                            if throttle.should_update(cursor_rc.0, cursor_rc.1) {
-                                // A changed cursor cell publishes its physical rectangle to the OS IME.
-                                let x = r.padding_left_px() + f32::from(cursor_rc.1) * r.cell_w;
-                                let y = r.top_inset() + f32::from(cursor_rc.0) * r.cell_h;
-                                let pos = winit::dpi::PhysicalPosition::new(x as i32, y as i32);
-                                let size = winit::dpi::PhysicalSize::new(
-                                    r.cell_w.ceil() as u32,
-                                    r.cell_h.ceil() as u32,
-                                );
-                                w.set_ime_cursor_area(pos, size);
-                            }
+                            super::update_terminal_ime_cursor_area(
+                                throttle,
+                                (active_id, cursor_pane_rect),
+                                cursor_rc,
+                                (r.cell_w, r.cell_h),
+                                (r.padding_left_px(), r.padding_top_px()),
+                                |pos, size| w.set_ime_cursor_area(pos, size),
+                            );
                         }
                     }
                 }
                 if let Some(presented) = smoke_presented_count {
-                    // When: `smoke_presented_count` contains `presented`, classify this marker-bearing frame.
+                    // When: `smoke_presented_count` contains `presented`, classify the marker-bearing frame.
                     match presented {
                         Ok(count) => {
-                            // When: `presented` is `Ok(count)`, compare it with the frozen baseline.
-                            let complete = self
+                            // Compare the successful presentation count with the frozen baseline.
+                            let advanced = self
                                 .runtime_smoke
                                 .as_mut()
-                                .and_then(|smoke| smoke.observe_presented_frame(count))
-                                .is_some_and(|result| result.is_ok());
-                            if complete {
-                                // When: `complete` is true, the marker-bearing frame reached native presentation.
-                                el.exit();
-                                return;
+                                .is_some_and(|smoke| smoke.observe_presented_frame(count));
+                            if advanced {
+                                // The marker-bearing main frame has now reached native presentation.
+                                tracing::info!("runtime smoke main presentation exercised");
                             }
                         }
                         Err(failure) => {
@@ -1128,7 +1120,7 @@ impl App {
                     // When: focused is false, publish the blurred reducer transition.
                     sonicterm_app_core::AppIntent::WindowBlurred { window: wk }
                 };
-                self.dispatch_intent(intent);
+                self.observe_intent(intent);
                 if focused {
                     // Focus entering main makes it the destination for subsequent global actions.
                     // record the main window as
@@ -1165,6 +1157,7 @@ impl App {
                         ws.scrollbar_drag = None;
                         ws.splitter_drag = None;
                         ws.mouse_down = false;
+                        ws.pty_pressed_keys.clear();
                         release
                     })
                 } else {
@@ -1179,7 +1172,7 @@ impl App {
                 if let Some((pane_id, bytes)) = pointer_release
                     .and_then(|route| pointer_route_bytes(route, PointerReportKind::LeftRelease))
                 {
-                    self.write_to_pane(pane_id, bytes);
+                    self.write_to_pane(pane_id, bytes, PtyInputSource::PointerButton);
                 }
                 // Propagate window focus to the renderer so the text cursor
                 // disappears when the window is inactive.
@@ -1193,7 +1186,10 @@ impl App {
                 }
                 // Forward focus in/out to the active pane if it asked for
                 // focus reporting via DECSET ?1004 (CSI ?1004h).
-                if let Some(pane) = self.active_pane() {
+                if let Some((pane_id, pane)) = self
+                    .active_pane_id()
+                    .and_then(|pane_id| self.pane_by_id(pane_id).map(|pane| (pane_id, pane)))
+                {
                     let enabled = pane.parser.lock().focus_reporting_enabled();
                     if enabled {
                         // DEC focus reporting forwards the transition to the active PTY.
@@ -1208,6 +1204,8 @@ impl App {
                             Self::queue_pty_input(
                                 self.event_loop_proxy.as_ref(),
                                 pty,
+                                pane_id,
+                                PtyInputSource::FocusReport,
                                 seq.to_vec(),
                             );
                         }
@@ -1271,7 +1269,7 @@ impl App {
                         _ => (0u16, 0u16),
                     }
                 };
-                self.dispatch_intent(sonicterm_app_core::AppIntent::WindowResized {
+                self.observe_intent(sonicterm_app_core::AppIntent::WindowResized {
                     window: sonicterm_types::WindowKey::new(0),
                     cols: cols_u16,
                     rows: rows_u16,
@@ -1368,7 +1366,7 @@ impl App {
                 // Notify the reducer so last_mouse_pos tracks the cursor; its
                 // identity check implicitly coalesces sub-pixel jitter
                 // bursts into a single Render(Hover) per frame.
-                self.dispatch_intent(sonicterm_app_core::AppIntent::MouseMove {
+                self.observe_intent(sonicterm_app_core::AppIntent::MouseMove {
                     window: sonicterm_types::WindowKey::new(0),
                     pos: sonicterm_app_core::LogicalPos { x: lx as f64, y: ly as f64 },
                 });
@@ -1398,10 +1396,19 @@ impl App {
                 let drag_snapshot = self.main_mut().and_then(|ws| {
                     ws.drag_session.as_mut().map(|s| {
                         s.current_pos = (lx, ly);
-                        (s.press_tab_index, *s)
+                        *s
                     })
                 });
-                if let Some((press_idx, session_snapshot)) = drag_snapshot {
+                let resolved_drag = drag_snapshot.and_then(|session| {
+                    self.tab_index_of_id(session.source_window, session.source_tab)
+                        .map(|index| (index, session))
+                });
+                if drag_snapshot.is_some() && resolved_drag.is_none() {
+                    // When: `resolved_drag` cannot find the captured tab, cancel the existing gesture before any pointer fallthrough.
+                    self.cancel_drag_session();
+                    return;
+                }
+                if let Some((press_idx, session_snapshot)) = resolved_drag {
                     let title = self
                         .main_tabs()
                         .and_then(|t| t.tabs().get(press_idx).map(|tab| tab.title.clone()))
@@ -1422,8 +1429,12 @@ impl App {
                     )
                     .with_top_offset(top_off)
                     .with_visible(visible);
-                    let chip =
-                        crate::tab_drag::build_drag_chip_overlay(&session_snapshot, &layout, title);
+                    let chip = crate::tab_drag::build_drag_chip_overlay(
+                        &session_snapshot,
+                        &layout,
+                        press_idx,
+                        title,
+                    );
                     if let Some(r) = self.main_renderer_mut() {
                         r.set_drag_chip(chip);
                     }
@@ -1459,7 +1470,7 @@ impl App {
                             ws.drag_session
                                 .as_ref()
                                 .filter(|s| crate::tab_drag::drag_moved_enough(s))
-                                .map(|s| s.press_tab_index)
+                                .and_then(|s| self.tab_index_of_id(s.source_window, s.source_tab))
                         });
                         if let Some(idx) = started_idx {
                             // When: started_idx is Some, transfer this tab gesture to the OS backend once.
@@ -1500,7 +1511,11 @@ impl App {
                                 if let Some((pane_id, bytes)) =
                                     pointer_route_bytes(report, PointerReportKind::HeldLeftMotion)
                                 {
-                                    self.write_to_pane(pane_id, bytes);
+                                    self.write_to_pane(
+                                        pane_id,
+                                        bytes,
+                                        PtyInputSource::PointerMotion,
+                                    );
                                 }
                                 return;
                             }
@@ -1710,7 +1725,11 @@ impl App {
                                 if let Some((pane_id, bytes)) =
                                     pointer_route_bytes(route, PointerReportKind::NoButtonMotion)
                                 {
-                                    self.write_to_pane(pane_id, bytes);
+                                    self.write_to_pane(
+                                        pane_id,
+                                        bytes,
+                                        PtyInputSource::PointerMotion,
+                                    );
                                 }
                             }
                         }
@@ -1791,6 +1810,8 @@ impl App {
                                     Self::queue_pty_input(
                                         self.event_loop_proxy.as_ref(),
                                         pty,
+                                        pane_id,
+                                        PtyInputSource::Wheel,
                                         payload,
                                     );
                                 }
@@ -1820,6 +1841,8 @@ impl App {
                                     Self::queue_pty_input(
                                         self.event_loop_proxy.as_ref(),
                                         pty,
+                                        pane_id,
+                                        PtyInputSource::Wheel,
                                         payload,
                                     );
                                 }
@@ -1843,7 +1866,7 @@ impl App {
                         {
                             let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
                             let (lx, ly) = (cp.0 as f32, cp.1 as f32);
-                            self.dispatch_intent(sonicterm_app_core::AppIntent::MouseButton {
+                            self.observe_intent(sonicterm_app_core::AppIntent::MouseButton {
                                 window: sonicterm_types::WindowKey::new(0),
                                 pressed: true,
                                 button: sonicterm_app_core::MouseButton::Left,
@@ -1895,8 +1918,13 @@ impl App {
                                     // tear-out gesture.
                                     if let Some(ws) = self.main_mut() {
                                         ws.pressed_tab = Some(i);
-                                        ws.drag_session =
-                                            Some(crate::tab_drag::DragSession::new(i, (px, py)));
+                                        ws.drag_session = ws.tabs.tabs().get(i).map(|tab| {
+                                            crate::tab_drag::DragSession::new(
+                                                win_id,
+                                                tab.id,
+                                                (px, py),
+                                            )
+                                        });
                                     }
                                 }
                                 Some(sonicterm_ui::tabbar_view::TabHit::Close(i)) => {
@@ -2069,7 +2097,11 @@ impl App {
                                     });
                                     if let Some(bytes) = terminal_press {
                                         // When: `terminal_press` contains bytes, the window latched terminal ownership before the unguarded enqueue.
-                                        self.write_to_pane(cell.pane_id, bytes);
+                                        self.write_to_pane(
+                                            cell.pane_id,
+                                            bytes,
+                                            PtyInputSource::PointerButton,
+                                        );
                                         if let Some(change) = pane_focus_change {
                                             if let Some(window) = self.main_mut() {
                                                 window.finish_pane_focus_change(change);
@@ -2146,7 +2178,7 @@ impl App {
                         {
                             let cp = self.main().map(|ws| ws.cursor_pos).unwrap_or((0.0, 0.0));
                             let (lx, ly) = (cp.0 as f32, cp.1 as f32);
-                            self.dispatch_intent(sonicterm_app_core::AppIntent::MouseButton {
+                            self.observe_intent(sonicterm_app_core::AppIntent::MouseButton {
                                 window: sonicterm_types::WindowKey::new(0),
                                 pressed: false,
                                 button: sonicterm_app_core::MouseButton::Left,
@@ -2173,7 +2205,7 @@ impl App {
                             if let Some((pane_id, bytes)) =
                                 pointer_route_bytes(route, PointerReportKind::LeftRelease)
                             {
-                                self.write_to_pane(pane_id, bytes);
+                                self.write_to_pane(pane_id, bytes, PtyInputSource::PointerButton);
                             }
                         }
                         if terminal_owned {
@@ -2207,7 +2239,14 @@ impl App {
                         if let Some(r) = self.main_renderer_mut() {
                             r.set_drag_chip(None);
                         }
-                        if let (Some(s), Some(idx)) = (session, pressed) {
+                        if let (Some(s), Some(_)) = (session, pressed) {
+                            // When: both `session` and `pressed` survived, resolve the captured tab before computing release semantics.
+                            let Some(idx) = self.tab_index_of_id(s.source_window, s.source_tab)
+                            else {
+                                // When: `s.source_tab` no longer exists in `source_window`, the release must not move another tab.
+                                self.cancel_drag_session();
+                                return;
+                            };
                             let window_width = self
                                 .main_window()
                                 .map(|w| w.inner_size().width as f32)
@@ -2223,46 +2262,10 @@ impl App {
                             .with_top_offset(
                                 self.main_renderer().map(|r| r.tab_bar_y_offset()).unwrap_or(0.0),
                             );
-                            let action = crate::tab_drag::compute_action(&s, foreign, &layout);
-                            match action {
-                                crate::tab_drag::DragAction::ReturnToOriginalBar => {
-                                    // When: DragAction::ReturnToOriginalBar preserves the original position.
-
-                                    // Source-bar release preserves the original tab position.
-                                    // No-op — moving back over the source
-                                    // bar before releasing cancels the drag.
-                                }
-                                crate::tab_drag::DragAction::ReorderTab { from, to } => {
-                                    // Source-bar release at a new slot reorders model and state together.
-                                    // — must move Tab +
-                                    // TabState in lock-step, otherwise the
-                                    // title moves but `tab_states[i]`
-                                    // (active pane + PaneTree leaf-ids)
-                                    // stays bound to the old slot →
-                                    // title-N points at the OTHER tab's
-                                    // PTY. Also clamps `to` for the
-                                    // drag-past-last case (`TabBar::reorder`
-                                    // silently no-ops when `to == len`,
-                                    // which looked like the tab vanished).
-                                    // Logic lives on `WindowState::reorder_tab`
-                                    // so the regression tests in
-                                    // `tests/reorder_main_window_pane_follows_title.rs`
-                                    // exercise the same path production runs.
-                                    if let Some(id) = self.main_window_id {
-                                        if let Some(ws) = self.windows.get_mut(&id) {
-                                            ws.reorder_tab(from, to);
-                                        }
-                                    }
-                                }
-                                crate::tab_drag::DragAction::MergeIntoWindow(target) => {
-                                    // Another-window release transfers the tab into that target.
-                                    self.merge_main_into_child(idx, target);
-                                }
-                                crate::tab_drag::DragAction::TearOutToNewWindow { .. } => {
-                                    // A release without an existing bar moves the tab into a new window.
-                                    self.tear_out_tab(el, idx);
-                                }
-                            }
+                            let action = crate::tab_drag::compute_action(&s, foreign, &layout, idx);
+                            self.finish_tab_drag(s, action, |app, _, index| {
+                                app.tear_out_tab(el, index);
+                            });
                             if let Some(w) = self.main_window() {
                                 w.request_redraw();
                             }
@@ -2331,7 +2334,7 @@ impl App {
                         // drop them explicitly instead of forwarding to PTY.
                     } else {
                         // With no search or copy mode, committed text goes to the PTY.
-                        self.write_to_pty(committed.into_bytes());
+                        self.write_to_pty(committed.into_bytes(), PtyInputSource::Ime);
                     }
                 }
                 if let Some(w) = self.main_window() {
@@ -2340,8 +2343,42 @@ impl App {
             }
 
             // -- Keyboard --
-            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                // When: KeyboardInput event.state is Pressed, route the key through active modes.
+            WindowEvent::KeyboardInput { event, .. } => {
+                // When: KeyboardInput supplies event, releases complete prior
+                // PTY routes while presses pass through local input owners.
+                if event.state == ElementState::Released {
+                    // When: event.state is Released, only a key whose press reached
+                    // the PTY may produce a negotiated Kitty release event.
+                    let targets = self
+                        .main_mut()
+                        .and_then(|window| window.pty_pressed_keys.remove(&event.physical_key));
+                    if let Some(targets) = targets {
+                        // The recorded panes encode this release against their
+                        // individual live protocol states.
+                        let writes = self.encoded_terminal_key_writes(
+                            &event,
+                            self.main_modifiers(),
+                            &targets,
+                        );
+                        self.dispatch_terminal_key_writes(writes);
+                    }
+                    return;
+                }
+                if let Some(targets) = self.main().and_then(|window| {
+                    terminal_repeat_targets(
+                        &window.pty_pressed_keys,
+                        event.physical_key,
+                        event.repeat,
+                    )
+                }) {
+                    // When: terminal_repeat_targets returns targets, this repeat keeps
+                    // its original destinations even if local UI opened later.
+                    let writes =
+                        self.encoded_terminal_key_writes(&event, self.main_modifiers(), &targets);
+                    self.dispatch_terminal_key_writes(writes);
+                    return;
+                }
+                // Pressed input now routes through active modes.
 
                 // Quit confirmation guard: intercept the Cmd+Q chord before any
                 // mode routing (palette/search/copy-mode/PTY) so it behaves
@@ -2410,8 +2447,8 @@ impl App {
                     // When: search_active is true, route edits to search and other bindings through dispatch.
                     let mods = self.main_modifiers();
                     let is_search_text_edit =
-                        super::text_edit::search_text_edit_for_key(&event.logical_key, mods)
-                            .is_some();
+                        super::text_edit::search_text_edit_for_event(&event, mods).is_some()
+                            || super::text_edit::printable_event_text(&event, mods).is_some();
                     if !is_search_text_edit {
                         // When: is_search_text_edit is false, resolve non-edit keymap actions first.
                         if let Some(key_str) = key_event_to_string(&event, mods) {
@@ -2437,7 +2474,7 @@ impl App {
                 }
                 if self.main().map(|ws| ws.copy_mode.is_some()).unwrap_or(false) {
                     // When: copy_mode is Some, allow only read-only-safe actions before local navigation.
-                    for key_str in key_to_strings(&event.logical_key, self.main_modifiers()) {
+                    for key_str in key_event_to_strings(&event, self.main_modifiers()) {
                         if let Some(action) = self.keymap.lookup(&key_str).cloned() {
                             // When: keymap lookup returns action, test it against the read-only whitelist.
                             if super::keymap_dispatch::read_only_allows_action(&action)
@@ -2458,7 +2495,7 @@ impl App {
                     }
                     return;
                 }
-                for key_str in key_to_strings(&event.logical_key, self.main_modifiers()) {
+                for key_str in key_event_to_strings(&event, self.main_modifiers()) {
                     if let Some(action) = self.keymap.lookup(&key_str).cloned() {
                         // When: keymap lookup returns action, choose passthrough or application dispatch.
                         if super::keymap_dispatch::terminal_input_passthrough_binding(
@@ -2477,27 +2514,30 @@ impl App {
                         }
                     }
                 }
-                // Read the focused pane's kitty keyboard flags from the
-                // lock-free per-pane snapshot (the VT loop mirrors them out of
-                // the parser after each batch). Avoids taking `parser.lock()`
-                // on the keypress path — that lock is held by the VT thread
-                // while parsing output, so blocking on it added input latency
-                // whenever output was streaming. When non-zero,
-                // `encode_key` emits CSI-u forms (e.g. Shift+Enter => CSI
-                // 13;2u) so modern TUIs treat Shift+Enter as "insert newline".
-                let kitty_flags = self
-                    .active_pane()
-                    .map(|pane| pane.kitty_flags.load(std::sync::atomic::Ordering::Relaxed))
-                    .unwrap_or(0);
-                let app_cursor = self
-                    .active_pane()
-                    .map(|pane| pane.app_cursor_keys.load(std::sync::atomic::Ordering::Relaxed))
-                    .unwrap_or(false);
-                if let Some(bytes) =
-                    encode_key(&event, self.main_modifiers(), kitty_flags, app_cursor)
-                {
-                    // Encoded key bytes are sent before clearing transient view state.
-                    self.write_to_pty(bytes);
+                let active_pane = self.active_pane_id();
+                if let Some(active_pane) = active_pane {
+                    // When: active_pane identifies a PTY, snapshot the new press's
+                    // source and broadcast destinations after local routing.
+                    if event.repeat {
+                        // When: an unowned repeat survives local routing, never
+                        // migrate it to the currently focused terminal.
+                        return;
+                    }
+                    let targets = self.terminal_key_targets(active_pane);
+                    let writes =
+                        self.encoded_terminal_key_writes(&event, self.main_modifiers(), &targets);
+                    let delivered = self.dispatch_terminal_key_writes(writes);
+                    // Record only panes whose bounded PTY queue accepted this press.
+                    if !delivered.is_empty() {
+                        // Persist only accepted press owners.
+                        if let Some(window) = self.main_mut() {
+                            window.pty_pressed_keys.insert(event.physical_key, delivered.clone());
+                        }
+                    }
+                    if delivered.is_empty() {
+                        // When: delivered is empty, no target accepted the press, so skip terminal-input UI cleanup.
+                        return;
+                    }
                     // Scroll-to-bottom on Enter (#B12): pressing Enter while
                     // scrolled up in history should jump back to the live
                     // bottom so the latest input/output is visible. Plain Enter

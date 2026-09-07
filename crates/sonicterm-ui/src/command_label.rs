@@ -358,3 +358,7 @@ pub fn pretty_keys(raw: &str) -> String {
         .collect::<Vec<_>>()
         .join("")
 }
+
+#[cfg(test)]
+#[path = "command_label_tests.rs"]
+mod command_label_tests;

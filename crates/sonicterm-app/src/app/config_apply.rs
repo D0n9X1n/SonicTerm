@@ -55,6 +55,43 @@ impl Drop for TestCurrentSettingsPathGuard {
     }
 }
 
+fn resolve_runtime_asset_path(
+    value: &str,
+    kind: &str,
+    config_path: Option<&Path>,
+    assets: &Path,
+    platform_default: &str,
+) -> anyhow::Result<PathBuf> {
+    if config_path.is_none() {
+        // When: `config_path` is absent, preserve the ordinary user-aware resolver behavior.
+        return match kind {
+            "themes" => Ok(Theme::resolve_path(value, assets)),
+            "keymaps" => Keymap::resolve_path(value, assets),
+            _ => anyhow::bail!("unsupported runtime asset kind: {kind}"),
+        };
+    }
+    let raw = Path::new(value);
+    let path_like = raw.is_absolute()
+        || raw.components().count() > 1
+        || value.to_ascii_lowercase().ends_with(".toml");
+    if path_like {
+        // When: `path_like` is true, preserve the explicit path without scratch rewriting.
+        return Ok(raw.to_path_buf());
+    }
+    let logical = if kind == "keymaps" && value == "user" { platform_default } else { value };
+    let scratch = config_path
+        .and_then(Path::parent)
+        .unwrap_or_else(|| Path::new("."))
+        .join(kind)
+        .join(format!("{logical}.toml"));
+    if scratch.exists() {
+        Ok(scratch)
+    } else {
+        // When: `scratch.exists()` is false, use bundled assets without consulting user-home state.
+        Ok(assets.join(kind).join(format!("{logical}.toml")))
+    }
+}
+
 fn propagate_theme_to_pane_parsers(panes: &HashMap<u64, PaneState>, theme: &Theme) {
     for pane in panes.values() {
         // Config live-reload runs on the app thread, not the render hot path,
@@ -121,6 +158,9 @@ impl App {
     }
 
     pub(super) fn apply_new_config(&mut self, new_cfg: Config) {
+        let new_cfg = Self::normalize_config(&self.config_normalizer, new_cfg);
+        self.configured_font_size = new_cfg.font.size;
+        self.configured_weight_scale = new_cfg.font.effective_weight_scale();
         // Config is only applied on an explicit user reload, so it must
         // render immediately rather than at the next vsync deadline.
         self.input_dirty = true;
@@ -132,7 +172,14 @@ impl App {
         // names the same theme. Comparing names would make an explicit reload
         // silently skip an edited theme file.
         {
-            let theme_path = Theme::resolve_path(&new_cfg.theme, &assets);
+            let theme_path = resolve_runtime_asset_path(
+                &new_cfg.theme,
+                "themes",
+                self.runtime_config_path.as_deref(),
+                &assets,
+                "wezterm",
+            )
+            .expect("theme asset kind is fixed");
             match Theme::load_strict(&theme_path) {
                 Ok(mut t) => {
                     // When: load_strict parsed theme_path, so adopt t and re-seed every
@@ -453,13 +500,29 @@ impl App {
         // is a separate file whose bindings can change while `[keymap]` still
         // names it.
         {
-            let km_path = Keymap::resolve_path(&new_cfg.keymap, &assets);
-            match self
-                .keymap_loader
-                .as_ref()
-                .map_or_else(|| Keymap::load_strict(&km_path), |loader| loader(&new_cfg.keymap))
-            {
-                Ok(km) => {
+            let km_path = match resolve_runtime_asset_path(
+                &new_cfg.keymap,
+                "keymaps",
+                self.runtime_config_path.as_deref(),
+                &assets,
+                sonicterm_cfg::keymap::platform_default_keymap_name(),
+            ) {
+                Ok(path) => Some(path),
+                Err(error) => {
+                    tracing::warn!(
+                        "reload: keymap {:?} resolution failed: {error:#}",
+                        new_cfg.keymap
+                    );
+                    None
+                }
+            };
+            let loaded = km_path.as_ref().map(|km_path| {
+                self.keymap_loader
+                    .as_ref()
+                    .map_or_else(|| Keymap::load_strict(km_path), |loader| loader(km_path))
+            });
+            match loaded {
+                Some(Ok(km)) => {
                     tracing::info!(
                         "reload: keymap -> {} ({} bindings)",
                         km.meta.name,
@@ -468,7 +531,10 @@ impl App {
                     self.command_palette.set_keymap(&km);
                     self.keymap = km;
                 }
-                Err(e) => tracing::warn!("reload: keymap {:?} failed: {e:#}", km_path),
+                Some(Err(e)) => tracing::warn!("reload: keymap {:?} failed: {e:#}", km_path),
+                None => {
+                    // When: `loaded` is `None` after path resolution failed, preserve the active keymap.
+                }
             }
         }
 
@@ -693,15 +759,17 @@ impl App {
     }
 
     /// Resolve SonicTerm's standard user-config path for saving current settings.
-    pub(super) fn current_settings_path() -> anyhow::Result<PathBuf> {
+    pub(super) fn current_settings_path(&self) -> anyhow::Result<PathBuf> {
         #[cfg(test)]
         if let Some(path) = TEST_CURRENT_SETTINGS_PATH.with(|slot| slot.borrow().clone()) {
             // When: a test installs an explicit path, dispatch exercises the real
             // save action without mutating process-global HOME or user files.
             return Ok(path);
         }
-        Config::default_path()
-            .context("resolve the default SonicTerm config path for saving current settings")
+        self.runtime_config_path
+            .clone()
+            .or_else(Config::default_path)
+            .context("resolve the active SonicTerm config path for saving current settings")
     }
 
     #[cfg(test)]
@@ -779,19 +847,14 @@ impl App {
     /// after startup — there is no background watcher, so an edit takes effect
     /// when the user asks for it and not before.
     pub(super) fn force_reload_config(&mut self) {
-        let Some(path) = sonicterm_cfg::config::Config::default_path() else {
-            // When: default_path found no home directory, so no sonicterm.toml
-            // exists to re-read; keep the running config rather than clearing it.
+        let Some(path) = self.runtime_config_path.clone().or_else(Config::default_path) else {
+            // When: neither a smoke path nor the user path exists, keep the running config.
             return;
         };
         match Config::load_strict(&path) {
             Ok(cfg) => {
-                // When: load_strict parsed the file at path with no error; adopt cfg
-                // as the session baseline before pushing it into live windows.
-
-                // The reset targets follow the config the session has loaded.
-                self.configured_font_size = cfg.font.size;
-                self.configured_weight_scale = cfg.font.effective_weight_scale();
+                // When: load_strict parsed the file at path with no error; normalize
+                // it before any reset baseline, pool, renderer, or stored state moves.
                 self.apply_new_config(cfg);
             }
             Err(e) => tracing::warn!("reload: config parse failed: {e:#}"),

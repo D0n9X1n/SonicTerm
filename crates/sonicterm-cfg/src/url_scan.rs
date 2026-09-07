@@ -187,6 +187,10 @@ pub fn url_at_char_col(text: &str, col: usize) -> Option<UrlMatch> {
 }
 
 /// Return every URI or raw native-path candidate in `text` for this platform.
+///
+/// Retained for source compatibility. Production callers should select a
+/// [`PathStyle`] explicitly so behavior does not depend on the build host.
+#[deprecated(since = "1.2.9", note = "use find_targets_for_style with an explicit PathStyle")]
 #[must_use]
 pub fn find_targets(text: &str) -> Vec<TargetMatch> {
     find_targets_for_style(text, PathStyle::native())
@@ -260,6 +264,10 @@ pub fn find_targets_for_style(text: &str, style: PathStyle) -> Vec<TargetMatch> 
 }
 
 /// Return the typed target covering byte offset `byte_col` for this platform.
+///
+/// Retained for source compatibility. Production callers should select a
+/// [`PathStyle`] explicitly so behavior does not depend on the build host.
+#[deprecated(since = "1.2.9", note = "use target_at_byte_for_style with an explicit PathStyle")]
 #[must_use]
 pub fn target_at_byte(text: &str, byte_col: usize) -> Option<TargetMatch> {
     target_at_byte_for_style(text, byte_col, PathStyle::native())
@@ -278,6 +286,10 @@ pub fn target_at_byte_for_style(
 }
 
 /// Return the typed target covering character column `col` for this platform.
+///
+/// Retained for source compatibility. Production callers should select a
+/// [`PathStyle`] explicitly so behavior does not depend on the build host.
+#[deprecated(since = "1.2.9", note = "use target_at_char_col_for_style with an explicit PathStyle")]
 #[must_use]
 pub fn target_at_char_col(text: &str, col: usize) -> Option<TargetMatch> {
     target_at_char_col_for_style(text, col, PathStyle::native())

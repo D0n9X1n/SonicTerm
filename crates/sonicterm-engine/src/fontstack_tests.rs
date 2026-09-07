@@ -1,6 +1,47 @@
 use super::*;
 use std::path::Path;
 
+// Nonempty transparent rasters stay valid through production conversion and atlas insertion, not missing/tofu.
+#[test]
+fn blank_color_raster_survives_fontstack_and_atlas() {
+    struct Prepared(Option<RasterTile>);
+    impl Rasterizer for Prepared {
+        fn rasterize(&mut self, _: GlyphKey) -> Option<RasterTile> {
+            self.0.take()
+        }
+    }
+    let stack = FontStack::try_new_with_font_dirs_for_test(
+        &[(DEFAULT_FONT_FAMILY, false)],
+        vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")],
+        14.0,
+        72,
+        1.0,
+    )
+    .unwrap();
+    let key = GlyphKey::new('A', false, false);
+    let glyph = sonicterm_font::RasterizedGlyph {
+        data: vec![0; 3 * 2 * 4],
+        width: 3,
+        height: 2,
+        bearing_x: sonicterm_font::units::PixelLength::new(-3.0),
+        bearing_y: sonicterm_font::units::PixelLength::new(9.0),
+        has_color: true,
+        is_scaled: true,
+    };
+    let tile = stack.rasterized_glyph_to_tile(glyph, key, true).expect("blank is valid");
+    assert_eq!((tile.width, tile.height), (3, 2));
+    assert_eq!((tile.offset_x, tile.offset_y), (-3, -9));
+    assert!(tile.is_color && !tile.is_empty());
+    assert!(tile.coverage.iter().all(|byte| *byte == 0));
+    let mut atlas = sonicterm_text::glyph_atlas::GlyphAtlas::new(16, 16);
+    let info = atlas.get_or_insert(key, &mut Prepared(Some(tile))).unwrap();
+    assert_eq!(info.px_size, [3, 2]);
+    assert_eq!(info.px_offset, [-3, -9]);
+    assert!(info.is_color && info.uv[2] > info.uv[0] && info.uv[3] > info.uv[1]);
+    assert!(atlas.pixels().iter().all(|byte| *byte == 0));
+    assert_eq!(atlas.get(key), Some(info));
+}
+
 #[test]
 fn regular_weight_scale_preserves_identity_and_extremes() {
     let original = vec![0, 1, 64, 128, 254, 255];

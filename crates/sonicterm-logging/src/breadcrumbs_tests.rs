@@ -279,6 +279,10 @@ fn long_sampling_run_keeps_mandatory_records_and_only_newest_history() {
         BreadcrumbEvent::RetentionSnapshot {
             session_bytes: 400,
             renderer_bytes: 500,
+            row_glyph_cache_bytes: 600,
+            row_glyph_cache_items: 6,
+            row_quad_cache_bytes: 700,
+            row_quad_cache_items: 7,
             live_renderers: 2,
             allocator: None,
         },
@@ -484,6 +488,10 @@ fn writer_persists_allowlisted_events_on_its_background_thread() {
         recorder.record(BreadcrumbEvent::RetentionSnapshot {
             session_bytes: 33,
             renderer_bytes: 44,
+            row_glyph_cache_bytes: 45,
+            row_glyph_cache_items: 5,
+            row_quad_cache_bytes: 46,
+            row_quad_cache_items: 6,
             live_renderers: 2,
             allocator: Some(BreadcrumbAllocator {
                 allocated_bytes: 55,
@@ -507,12 +515,34 @@ fn writer_persists_allowlisted_events_on_its_background_thread() {
         "event=renderer identity=wgpu mode=gpu adapter=hardware",
         "event=counts windows=2 panes=3",
         "event=resource private_committed=11 resident=22 virtual=unsupported",
-        "event=retention session_bytes=33 renderer_bytes=44 live_renderers=2 allocator_allocated_bytes=55 allocator_reserved_bytes=66 allocator_allocations=77 allocator_blocks=88 allocator_largest_block_bytes=99",
+        "event=retention session_bytes=33 renderer_bytes=44 row_glyph_cache_bytes=45 row_glyph_cache_items=5 row_quad_cache_bytes=46 row_quad_cache_items=6 live_renderers=2 allocator_allocated_bytes=55 allocator_reserved_bytes=66 allocator_allocations=77 allocator_blocks=88 allocator_largest_block_bytes=99",
     ] {
         assert!(written.contains(expected), "missing {expected:?} in {written:?}");
     }
 
     fs::remove_dir_all(dir).expect("remove scratch directory");
+}
+
+/// Breadcrumb retention fields stay documented in both language halves.
+#[test]
+fn row_cache_breadcrumb_fields_are_documented_bilingually() {
+    const WIKI: &str = include_str!("../../../wiki/Logging.md");
+    let (english, chinese) = WIKI.split_once("## 中文").expect("bilingual logging page");
+    for (language, half) in [("English", english), ("中文", chinese)] {
+        for expected in [
+            "| `renderer_row_glyph_cache_bytes` / `renderer_row_glyph_cache_items` |",
+            "| `renderer_row_quad_cache_bytes` / `renderer_row_quad_cache_items` |",
+            "| `row_glyph_cache_bytes` |",
+            "| `row_glyph_cache_items` |",
+            "| `row_quad_cache_bytes` |",
+            "| `row_quad_cache_items` |",
+            "`event=retention`",
+            "`row_glyph_cache_bytes` / `row_glyph_cache_items`",
+            "`row_quad_cache_bytes` / `row_quad_cache_items`",
+        ] {
+            assert!(half.contains(expected), "{language} docs omit {expected}");
+        }
+    }
 }
 
 /// Maximum allocator values render every field without truncation or overflow.
@@ -523,6 +553,10 @@ fn retention_snapshot_renders_all_maximum_allocator_fields() {
     let rendered = BreadcrumbEvent::RetentionSnapshot {
         session_bytes: u64::MAX,
         renderer_bytes: u64::MAX,
+        row_glyph_cache_bytes: u64::MAX,
+        row_glyph_cache_items: u64::MAX,
+        row_quad_cache_bytes: u64::MAX,
+        row_quad_cache_items: u64::MAX,
         live_renderers: u32::MAX,
         allocator: Some(BreadcrumbAllocator {
             allocated_bytes: u64::MAX,
@@ -552,6 +586,10 @@ fn retention_snapshot_renders_explicitly_unsupported_allocator() {
     let rendered = BreadcrumbEvent::RetentionSnapshot {
         session_bytes: 1,
         renderer_bytes: 2,
+        row_glyph_cache_bytes: 4,
+        row_glyph_cache_items: 6,
+        row_quad_cache_bytes: 5,
+        row_quad_cache_items: 7,
         live_renderers: 3,
         allocator: None,
     }

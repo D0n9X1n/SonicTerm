@@ -177,6 +177,14 @@ impl CommittedReservation {
         Ok(())
     }
 
+    /// Replace bytes/items at final limits; growth requires open ancestors and refusal preserves every balance.
+    pub fn try_resize(&mut self, actual: ResourceAmount) -> Result<(), BudgetError> {
+        let charge = self.charge();
+        charge.ledger.resize(charge.owner, charge.class, charge.amount, actual)?;
+        self.charge.as_mut().expect("live committed charge").amount = actual;
+        Ok(())
+    }
+
     /// Split an independent committed charge from this token.
     pub fn split(&mut self, amount: ResourceAmount) -> Result<CommittedReservation, BudgetError> {
         let current = self.charge().amount;
@@ -191,6 +199,80 @@ impl CommittedReservation {
                 amount,
             }),
         })
+    }
+
+    /// Atomically transfer same-ledger, same-owner charges while preserving classes.
+    pub fn transfer_batch<'a>(
+        reservations: impl IntoIterator<Item = &'a mut CommittedReservation>,
+        owner: ResourceOwnerId,
+    ) -> Result<(), CommittedBatchTransferError> {
+        let reservations: Vec<_> = reservations.into_iter().collect();
+        let Some(first) = reservations.first() else {
+            // When: `reservations.first()` is `None`, there is no attribution to
+            // validate or move.
+            return Ok(());
+        };
+        let ledger = first.charge().ledger.clone();
+        let source = first.charge().owner;
+        let mut amounts: enum_map::EnumMap<ResourceClass, ResourceAmount> =
+            enum_map::EnumMap::default();
+        for reservation in &reservations {
+            let charge = reservation.charge();
+            if !Arc::ptr_eq(&ledger, &charge.ledger) {
+                // When: a token belongs to another governor, no single ledger can
+                // commit the batch atomically.
+                return Err(CommittedBatchTransferError::MixedLedger);
+            }
+            if charge.owner != source {
+                // When: source owners differ, moving one aggregate would subtract
+                // the wrong owner path for at least one token.
+                return Err(CommittedBatchTransferError::MixedSource {
+                    expected: source,
+                    actual: charge.owner,
+                });
+            }
+            amounts[charge.class] = amounts[charge.class]
+                .checked_add(charge.amount)
+                .map_err(CommittedBatchTransferError::Budget)?;
+        }
+        ledger
+            .transfer_batch(source, owner, &amounts)
+            .map_err(CommittedBatchTransferError::Budget)?;
+        for reservation in reservations {
+            reservation.charge.as_mut().expect("live committed charge").owner = owner;
+        }
+        Ok(())
+    }
+
+    /// Atomically reattribute a same-ledger set of committed charges to their individual target owners.
+    pub fn transfer_many<'a>(
+        transfers: impl IntoIterator<Item = (&'a mut CommittedReservation, ResourceOwnerId)>,
+    ) -> Result<(), CommittedBatchTransferError> {
+        let transfers: Vec<_> = transfers.into_iter().collect();
+        let Some((first, _)) = transfers.first() else {
+            // When: `transfers` is empty, there are no live charges to validate or reattribute.
+            return Ok(());
+        };
+        let ledger = first.charge().ledger.clone();
+        let mut moves = Vec::with_capacity(transfers.len());
+        for (reservation, target) in &transfers {
+            let charge = reservation.charge();
+            if !Arc::ptr_eq(&ledger, &charge.ledger) {
+                // When: a reservation belongs to another ledger, no atomic operation can own every affected balance.
+                return Err(CommittedBatchTransferError::MixedLedger);
+            }
+            moves.push(crate::ledger::ChargeTransfer {
+                source: charge.owner,
+                target: *target,
+                class: charge.class,
+                amount: charge.amount,
+            });
+        }
+        ledger.transfer_many(&moves).map_err(CommittedBatchTransferError::Budget)?;
+        for (reservation, target) in transfers {
+            reservation.charge.as_mut().expect("live committed charge").owner = target;
+        }
+        Ok(())
     }
 
     /// Atomically transfer this committed charge to another owner and class.
@@ -262,6 +344,31 @@ pub struct CommittedTransferError {
     /// Rejection reason.
     pub error: BudgetError,
 }
+
+/// Rejection reason for an atomic committed-reservation batch transfer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum CommittedBatchTransferError {
+    /// At least one token belongs to a different governor ledger.
+    MixedLedger,
+    /// At least one token belongs to a different source owner.
+    MixedSource {
+        /// Source owner established by the first token.
+        expected: ResourceOwnerId,
+        /// Different source owner found later in the batch.
+        actual: ResourceOwnerId,
+    },
+    /// The shared ledger rejected the complete transfer before mutation.
+    Budget(BudgetError),
+}
+
+impl fmt::Display for CommittedBatchTransferError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl std::error::Error for CommittedBatchTransferError {}
 
 #[cfg(test)]
 #[path = "reservation_tests.rs"]

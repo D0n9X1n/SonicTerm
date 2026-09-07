@@ -633,14 +633,26 @@ impl Config {
         atomic_replace_if_unchanged(&destination, &bytes, rendered.as_bytes(), before_commit)
     }
 
-    /// Serialize to a TOML string.
+    /// Serialize the typed config to canonical TOML.
+    ///
+    /// Source comments, ordering, decoration, and unknown keys nested inside
+    /// typed tables are not represented and are therefore omitted. Top-level
+    /// unknown keys in `extra` remain serializable. Use the format-preserving
+    /// persistence methods for edits to an existing user document.
     pub fn to_toml(&self) -> Result<String> {
         Ok(toml::to_string_pretty(self)?)
     }
 
-    /// Replace this config at `path`, creating parent directories if needed.
-    /// Writes a same-directory temporary file then renames it, so readers see
-    /// either complete process-written contents; this does not claim power-loss durability.
+    /// Rewrite `path` from the typed config, creating parent directories if needed.
+    ///
+    /// This intentionally writes canonical TOML and does not preserve source
+    /// comments, ordering, decoration, or unknown keys nested inside typed
+    /// tables. The same-directory temporary rename prevents partial
+    /// process-written contents but does not claim power-loss durability.
+    #[deprecated(
+        since = "1.2.9",
+        note = "rewrites the document and drops source-only TOML; use a format-preserving persistence method"
+    )]
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {

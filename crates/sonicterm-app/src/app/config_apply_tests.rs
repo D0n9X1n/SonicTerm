@@ -3,9 +3,95 @@ use crate::app::{App, FrontmostKind};
 use sonicterm_cfg::keymap::Keymap;
 use sonicterm_cfg::theme::Theme;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
+use tracing_subscriber::layer::{Context, SubscriberExt};
+use tracing_subscriber::{Layer, Registry};
 
 static NEXT_TEMP_PATH: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Default)]
+struct WarningCounter(std::sync::Arc<AtomicUsize>);
+
+impl<S: tracing::Subscriber> Layer<S> for WarningCounter {
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+        if event.metadata().target() == "sonicterm-cfg"
+            && *event.metadata().level() == tracing::Level::WARN
+        {
+            self.0.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+    }
+}
+
+#[test]
+fn runtime_asset_resolution_stays_inside_scratch_or_bundled_roots() {
+    // Protect runtime-smoke reload from consulting user-home theme and keymap directories.
+    let root = temp_config_path("runtime-assets");
+    let config = root.join("config").join("sonicterm.toml");
+    let assets = root.join("assets");
+    std::fs::create_dir_all(config.parent().unwrap().join("themes")).unwrap();
+    std::fs::create_dir_all(config.parent().unwrap().join("keymaps")).unwrap();
+    std::fs::create_dir_all(assets.join("themes")).unwrap();
+    std::fs::create_dir_all(assets.join("keymaps")).unwrap();
+    let scratch_theme = config.parent().unwrap().join("themes/custom.toml");
+    std::fs::write(&scratch_theme, "fixture").unwrap();
+    let scratch_user_theme = config.parent().unwrap().join("themes/user.toml");
+    std::fs::write(&scratch_user_theme, "fixture").unwrap();
+    let scratch_user = config
+        .parent()
+        .unwrap()
+        .join("keymaps")
+        .join(format!("{}.toml", sonicterm_cfg::keymap::platform_default_keymap_name()));
+    std::fs::write(&scratch_user, "fixture").unwrap();
+
+    assert_eq!(
+        resolve_runtime_asset_path("custom", "themes", Some(&config), &assets, "wezterm").unwrap(),
+        scratch_theme
+    );
+    assert_eq!(
+        resolve_runtime_asset_path("user", "themes", Some(&config), &assets, "wezterm").unwrap(),
+        scratch_user_theme
+    );
+    assert_eq!(
+        resolve_runtime_asset_path("missing", "themes", Some(&config), &assets, "wezterm").unwrap(),
+        assets.join("themes/missing.toml")
+    );
+    assert_eq!(
+        resolve_runtime_asset_path(
+            "user",
+            "keymaps",
+            Some(&config),
+            &assets,
+            sonicterm_cfg::keymap::platform_default_keymap_name(),
+        )
+        .unwrap(),
+        scratch_user
+    );
+    assert_eq!(
+        resolve_runtime_asset_path(
+            "C:/explicit/map.toml",
+            "keymaps",
+            Some(&config),
+            &assets,
+            "sonicterm",
+        )
+        .unwrap(),
+        PathBuf::from("C:/explicit/map.toml")
+    );
+    remove_test_path(&root);
+}
+
+#[test]
+fn normal_asset_resolution_keeps_existing_bundled_behavior() {
+    // Protect ordinary reload from inheriting scratch-only resolution policy.
+    let root = temp_config_path("normal-assets");
+    let assets = root.join("assets");
+    std::fs::create_dir_all(assets.join("themes")).unwrap();
+    assert_eq!(
+        resolve_runtime_asset_path("wezterm", "themes", None, &assets, "wezterm").unwrap(),
+        Theme::resolve_path("wezterm", &assets)
+    );
+    remove_test_path(&root);
+}
 
 fn temp_config_path(case: &str) -> PathBuf {
     let sequence = NEXT_TEMP_PATH.fetch_add(1, AtomicOrdering::Relaxed);
@@ -71,7 +157,6 @@ fn applying_a_config_moves_the_reset_target() {
 
     let mut reloaded = Config::default();
     reloaded.font.size = 18.0;
-    app.configured_font_size = reloaded.font.size;
     app.apply_new_config(reloaded);
     assert_eq!(app.config.font.size, 18.0, "the reloaded size takes effect");
 
@@ -112,6 +197,84 @@ fn applying_a_config_clamps_an_out_of_range_weight_scale() {
     app.apply_new_config(reloaded);
 
     assert_eq!(app.config.font.effective_weight_scale(), 1.0, "out-of-range falls back to 1.0");
+}
+
+/// Reload normalization runs once before reset baselines and stored config move.
+#[test]
+fn reload_normalizes_before_baselines_and_storage() {
+    use sonicterm_cfg::config::BackdropKind;
+
+    let warnings = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = warnings.clone();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.config_normalizer = Box::new(move |mut config| {
+        let mut messages = Vec::new();
+        if config.appearance.backdrop != BackdropKind::Opaque {
+            observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            messages.push("unsupported backdrop".to_string());
+            config.appearance.backdrop = BackdropKind::Opaque;
+            config.font.size = 23.0;
+        }
+        (config, messages)
+    });
+
+    let mut reloaded = Config::default();
+    reloaded.appearance.backdrop = BackdropKind::Mica;
+    reloaded.font.size = 19.0;
+    let warning_events = WarningCounter::default();
+    let warning_count = warning_events.0.clone();
+    tracing::subscriber::with_default(Registry::default().with(warning_events), || {
+        app.apply_new_config(reloaded);
+        app.apply_new_config(app.config.clone());
+    });
+
+    assert_eq!(app.config.appearance.backdrop, BackdropKind::Opaque);
+    assert_eq!(app.config.font.size, 23.0);
+    assert_eq!(app.configured_font_size, 23.0);
+    assert_eq!(warnings.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(warning_count.load(AtomicOrdering::SeqCst), 1);
+}
+
+/// Linux startup and reload store only the backdrop consumed by future windows.
+#[test]
+fn startup_and_reload_store_the_normalized_backdrop() {
+    use sonicterm_cfg::config::BackdropKind;
+
+    let mut startup = Config::default();
+    startup.appearance.backdrop = BackdropKind::Mica;
+    let mut app = crate::shell::LinuxShell::new(
+        sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default()),
+        Theme::default(),
+        startup,
+        Keymap::default(),
+    )
+    .with_config_normalizer(Box::new(|mut config| {
+        if config.appearance.backdrop != BackdropKind::Opaque {
+            config.appearance.backdrop = BackdropKind::Opaque;
+        }
+        (config, Vec::new())
+    }))
+    .into_app_for_test();
+    assert_eq!(app.config.appearance.backdrop, BackdropKind::Opaque);
+
+    let mut reloaded = Config::default();
+    reloaded.appearance.backdrop = BackdropKind::Acrylic;
+    app.apply_new_config(reloaded);
+
+    assert_eq!(app.config.appearance.backdrop, BackdropKind::Opaque);
+}
+
+/// Normalization is the first reload transform, before warm-pool and baseline changes.
+#[test]
+fn reload_order_normalizes_before_any_config_side_effect() {
+    const SOURCE: &str = include_str!("config_apply.rs");
+    let start = SOURCE.find("fn apply_new_config").expect("config apply entry");
+    let body = &SOURCE[start..];
+    let normalize = body.find("Self::normalize_config").expect("normalization call");
+    let baseline = body.find("self.configured_font_size").expect("font baseline update");
+    let warm = body.find("self.warm_window_pool.clear()").expect("warm-pool clear");
+    let storage = body.find("self.config = new_cfg").expect("config storage");
+    assert!(normalize < baseline && normalize < warm && normalize < storage);
 }
 
 /// LCD policy changes update renderer presentation without rebuilding font metrics or atlases.
@@ -238,7 +401,7 @@ fn a_reload_reapplies_theme_and_keymap_even_when_their_names_are_unchanged() {
 
     let loaded = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let seen = loaded.clone();
-    app.keymap_loader = Some(Box::new(move |_name: &str| {
+    app.keymap_loader = Some(Box::new(move |_path: &std::path::Path| {
         seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(Keymap::default())
     }));
@@ -253,6 +416,34 @@ fn a_reload_reapplies_theme_and_keymap_even_when_their_names_are_unchanged() {
         1,
         "keymap must be re-read even when its name is unchanged"
     );
+}
+
+/// Reload resolves one authoritative dotted-name path and keeps the live map on failure.
+#[test]
+fn failed_dotted_keymap_reload_preserves_live_bindings_and_reports_resolved_path() {
+    let cfg = Config::default();
+    let live = Keymap::default();
+    let live_name = live.meta.name.clone();
+    let live_bindings = live.bindings.len();
+    let mut app = App::new(Theme::default(), cfg, live);
+    let observed = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let seen = observed.clone();
+    app.keymap_loader = Some(Box::new(move |path: &std::path::Path| {
+        *seen.lock().expect("path capture") = Some(path.to_path_buf());
+        anyhow::bail!("deliberate strict-load failure")
+    }));
+
+    let next = Config { keymap: "sonicterm-v1.2".to_string(), ..Config::default() };
+    app.apply_new_config(next);
+
+    let path = observed.lock().expect("path capture").clone().expect("loader called");
+    assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("sonicterm-v1.2.toml"));
+    assert_eq!(
+        path.parent().and_then(std::path::Path::file_name).and_then(|name| name.to_str()),
+        Some("keymaps")
+    );
+    assert_eq!(app.keymap.meta.name, live_name);
+    assert_eq!(app.keymap.bindings.len(), live_bindings);
 }
 
 #[test]
@@ -334,7 +525,6 @@ fn applying_a_config_moves_the_weight_reset_target() {
 
     let mut reloaded = Config::default();
     reloaded.font.weight_scale = 3.0;
-    app.configured_weight_scale = reloaded.font.effective_weight_scale();
     app.apply_new_config(reloaded);
 
     app.change_font_weight(0.5);

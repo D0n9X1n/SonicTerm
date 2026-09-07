@@ -227,6 +227,60 @@ fn handle_from_descriptor(
     None
 }
 
+fn map_fallback_candidates(
+    codepoints: &[char],
+    mut map: impl FnMut(&dwrote::TextAnalysisSource<'_>, u32, u32) -> (usize, Option<FontAttributes>),
+) -> anyhow::Result<Vec<FontAttributes>> {
+    let mut text = Vec::new();
+    for ch in codepoints {
+        text.extend_from_slice(ch.encode_utf16(&mut [0; 2]));
+    }
+    let text_len = u32::try_from(text.len())?;
+    struct Source {
+        len: u32,
+    }
+    impl dwrote::TextAnalysisSourceMethods for Source {
+        fn get_locale_name<'a>(&'a self, position: u32) -> (Cow<'a, str>, u32) {
+            (Cow::Borrowed(""), self.len.saturating_sub(position))
+        }
+        fn get_paragraph_reading_direction(&self) -> u32 {
+            DWRITE_READING_DIRECTION_LEFT_TO_RIGHT
+        }
+    }
+    let source = dwrote::TextAnalysisSource::from_text(
+        Box::new(Source { len: text_len }),
+        Cow::Borrowed(&text),
+    );
+    let mut candidates = Vec::new();
+    let mut resolved = HashSet::new();
+    let mut start = 0usize;
+    while start < text.len() {
+        let remaining = text.len() - start;
+        let (mapped_length, candidate) = map(&source, start as u32, remaining as u32);
+        anyhow::ensure!(
+            mapped_length > 0 && mapped_length <= remaining,
+            "invalid DirectWrite fallback span: start={start}, remaining={remaining}, mapped={mapped_length}"
+        );
+        let end = start + mapped_length;
+        anyhow::ensure!(
+            end == text.len() || !(0xdc00..=0xdfff).contains(&text[end]),
+            "DirectWrite fallback span splits a surrogate pair at code-unit {end}"
+        );
+        if let Some(candidate) = candidate {
+            if resolved.insert(candidate.clone()) {
+                // Keep first-encounter order while deduplicating native candidates.
+                candidates.push(candidate);
+            }
+        }
+        start = end;
+    }
+    Ok(candidates)
+}
+
+#[cfg(test)]
+#[path = "gdi_tests.rs"]
+mod gdi_tests;
+
 impl FontLocator for GdiFontLocator {
     fn load_fonts(
         &self,
@@ -289,100 +343,54 @@ impl FontLocator for GdiFontLocator {
         &self,
         codepoints: &[char],
     ) -> anyhow::Result<Vec<ParsedFont>> {
-        let text: Vec<u16> =
-            codepoints.iter().map(|&c| c as u16).chain(std::iter::once(0)).collect();
-
         let collection = dwrote::FontCollection::system();
-        struct Source {
-            locale: String,
-            len: u32,
-        }
-        impl dwrote::TextAnalysisSourceMethods for Source {
-            fn get_locale_name<'a>(&'a self, _: u32) -> (Cow<'a, str>, u32) {
-                (Cow::Borrowed(&self.locale), self.len)
-            }
-            fn get_paragraph_reading_direction(&self) -> u32 {
-                DWRITE_READING_DIRECTION_LEFT_TO_RIGHT
-            }
-        }
-
-        let source = dwrote::TextAnalysisSource::from_text(
-            Box::new(Source { locale: "".to_string(), len: codepoints.len() as u32 }),
-            Cow::Borrowed(&text),
-        );
-
-        let mut handles = vec![];
-        let mut resolved = HashSet::new();
-
-        if let Some(fallback) = dwrote::FontFallback::get_system_fallback() {
-            // When: the system fallback object is available, map successive text segments.
-            let mut start = 0usize;
-            let mut len = codepoints.len();
-            loop {
-                let result = fallback.map_characters(
-                    &source,
-                    start as u32,
-                    len as u32,
-                    &collection,
-                    None,
-                    FontWeight::Regular,
-                    FontStyle::Normal,
-                    FontStretch::Normal,
-                );
-
-                if let Some(font) = result.mapped_font {
-                    log::trace!(
-                        "DirectWrite Suggested fallback: {} {}",
-                        font.family_name(),
-                        font.face_name()
-                    );
-
-                    let attr = FontAttributes {
-                        weight: WTFontWeight::from_opentype_weight(font.weight().to_u32() as _),
-                        stretch: WTFontStretch::from_opentype_stretch(font.stretch().to_u32() as _),
-                        style: WTFontStyle::Normal,
-                        family: font.family_name(),
-                        is_fallback: true,
-                        is_synthetic: true,
-                        harfbuzz_features: None,
-                        freetype_load_target: None,
-                        freetype_render_target: None,
-                        freetype_load_flags: None,
-                        scale: None,
-                        assume_emoji_presentation: None,
-                    };
-
-                    if !resolved.contains(&attr) {
-                        resolved.insert(attr.clone());
-
-                        let descriptor = attributes_to_descriptor(&attr);
-                        if let Some(handle) = handle_from_descriptor(
-                            &attr,
-                            &collection,
-                            &descriptor,
-                            16, /* pixel_size: irrelevant really as we kinda want a scalable font for fallback */
-                        ) {
-                            handles.push(handle);
-                        }
-                    }
-                }
-                if result.mapped_length > 0 {
-                    start += result.mapped_length
-                } else {
-                    // When: `result.mapped_length > 0` is false, mapping made no progress.
-                    break;
-                }
-                if start == codepoints.len() {
-                    // When: `start == codepoints.len()`, every requested codepoint was mapped.
-                    break;
-                }
-                len = codepoints.len() - start;
-            }
-        } else {
-            // When: `get_system_fallback()` is `None`, DirectWrite fallback is unavailable.
+        let Some(fallback) = dwrote::FontFallback::get_system_fallback() else {
+            // When: DirectWrite has no fallback service, retain the existing empty-candidate result.
             log::error!("Unable to get system fallback from dwrote");
+            return Ok(Vec::new());
+        };
+        let candidates = map_fallback_candidates(codepoints, |source, start, len| {
+            let result = fallback.map_characters(
+                source,
+                start,
+                len,
+                &collection,
+                None,
+                FontWeight::Regular,
+                FontStyle::Normal,
+                FontStretch::Normal,
+            );
+            let candidate = result.mapped_font.map(|font| {
+                log::trace!(
+                    "DirectWrite Suggested fallback: {} {}",
+                    font.family_name(),
+                    font.face_name()
+                );
+                FontAttributes {
+                    weight: WTFontWeight::from_opentype_weight(font.weight().to_u32() as _),
+                    stretch: WTFontStretch::from_opentype_stretch(font.stretch().to_u32() as _),
+                    style: WTFontStyle::Normal,
+                    family: font.family_name(),
+                    is_fallback: true,
+                    is_synthetic: true,
+                    harfbuzz_features: None,
+                    freetype_load_target: None,
+                    freetype_render_target: None,
+                    freetype_load_flags: None,
+                    scale: None,
+                    assume_emoji_presentation: None,
+                }
+            });
+            (result.mapped_length, candidate)
+        })?;
+        let mut handles = Vec::new();
+        for attr in candidates {
+            let descriptor = attributes_to_descriptor(&attr);
+            if let Some(handle) = handle_from_descriptor(&attr, &collection, &descriptor, 16) {
+                // Readable candidates retain their first-encounter order.
+                handles.push(handle);
+            }
         }
-
         Ok(handles)
     }
 

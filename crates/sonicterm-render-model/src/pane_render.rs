@@ -8,8 +8,8 @@
 use crate::geometry::PixelRect;
 use std::sync::Arc;
 
-/// Identifier for a pane within a tab. Matches `sonicterm_mux::proto::PaneId`
-/// (kept as `u64` locally to avoid a cross-crate dep).
+/// Identifier for a pane within a tab. Kept as a bare `u64` so the render
+/// model stays free of a cross-crate dependency for an id it only carries.
 pub type PaneId = u64;
 
 /// Decoded inline image ready for the GPU atlas.

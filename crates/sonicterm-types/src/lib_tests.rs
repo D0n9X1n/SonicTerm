@@ -40,3 +40,43 @@ fn glyph_raster_variant_separates_otherwise_identical_atlas_keys() {
 
     assert_eq!(keys.len(), 3);
 }
+
+/// The legacy type-erased painter seam remains implementable by compatibility callers.
+#[test]
+fn legacy_painter_contract_remains_implementable() {
+    struct Frame;
+
+    impl crate::traits::painter::FrameLike for Frame {
+        fn cols(&self) -> u32 {
+            80
+        }
+
+        fn rows(&self) -> u32 {
+            24
+        }
+    }
+
+    struct Recorder {
+        size: (u32, u32),
+    }
+
+    impl crate::traits::painter::Painter for Recorder {
+        fn paint_frame(
+            &mut self,
+            frame: &dyn crate::traits::painter::FrameLike,
+        ) -> Result<(), crate::traits::painter::PaintError> {
+            self.size = (frame.cols(), frame.rows());
+            Ok(())
+        }
+
+        fn resize_surface(&mut self, width_px: u32, height_px: u32) {
+            self.size = (width_px, height_px);
+        }
+    }
+
+    let mut painter = Recorder { size: (0, 0) };
+    crate::traits::painter::Painter::paint_frame(&mut painter, &Frame).unwrap();
+    assert_eq!(painter.size, (80, 24));
+    crate::traits::painter::Painter::resize_surface(&mut painter, 1280, 720);
+    assert_eq!(painter.size, (1280, 720));
+}

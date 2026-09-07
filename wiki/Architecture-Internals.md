@@ -71,9 +71,23 @@ backstop. Retention is measured before it is charged, so a failed charge does
 not undo memory already retained. A failed growth keeps the previous charge. A
 failed new charge leaves that class absent and writes a `memory` debug record.
 
-A pane owns one `CommittedReservation` per charged `ResourceClass`. A charge is
-resized in place with `try_grow` or `shrink`; it is not released and recreated
-between samples.
+A pane owns one `CommittedReservation` per charged `ResourceClass`. Retention
+uses `try_resize` in place, including samples where bytes grow while items shrink
+or vice versa. Final admission is `current total - old charge + new charge`, not
+a component-wise maximum or release/re-reserve cycle. Any growing axis requires
+open ancestors; reductions can settle while closing. State locks precede class
+locks and ascending owner-usage locks; process-byte growth uses the existing CAS
+as the final fallible step. Refusal leaves the token and all balances unchanged.
+Snapshots remain observational rather than one linearizable global reading.
+
+One-pane reconciliation uses `CommittedReservation::transfer_batch`; tab
+attachment uses `transfer_many` for every moved pane's charges and individual
+target owner in one same-ledger transaction. Both preserve classes and validate
+source balances, target states, and final owner limits before changing any
+shard. Immutable parent ids precede children, so both follow the same ordered
+state/class/owner locks. Success changes owner-path balances and token owner ids
+without changing process or per-class totals. Refusal preserves all source
+tokens; provisional empty owners drop before source custody is restored.
 
 Close order is load-bearing:
 
@@ -90,8 +104,12 @@ record; it does not retry.
 A failed window-owner registration leaves the window usable but omits that
 window and its panes from hierarchy accounting for the rest of the window's
 life. A failed pane-owner registration leaves the pane usable; periodic
-reconciliation can retry it. Renderer-owned surfaces, glyph atlases, and
-software frames are measured outside this ledger.
+reconciliation can retry it. Renderer-owned surfaces, glyph atlases, row glyph
+and quad caches, and software frames are measured outside this ledger. The row
+cache classes are explicit `UnchargedRetention`: reports carry exact current
+allocation while the coverage table records conservative per-renderer high-water
+envelopes. No report invents GPU memory or presents an uncharged class as a
+governor reservation.
 
 ### Rendering correctness invariants
 
@@ -102,9 +120,29 @@ correctness, not only speed.
   include pane padding and are clipped to the pane and surface.
 - A dirty alternate-screen pane contributes its complete surface-clipped pane.
   A clean alternate-screen pane contributes no damage.
+- Full-surface replacement clears the retained attachment once; partial damage
+  uses a non-blending background reset under its scissor. Reset and content share
+  one buffer upload and separate draw ranges, preserving content source-over and
+  LCD blending while erasing prior ink without alpha accumulation.
+- Projected background-cache validity includes the viewport row slot. Each
+  `(pane id, absolute row)` owns one projection, replaced when its hash changes;
+  dirty invalidation remains absolute and pane-local with the same capacity cap.
+- Inline-image visibility intersects the original destination, pane content, and
+  surface for both atlas residency and emission. Visible UVs preserve the source
+  transform; separate original tile bounds clamp GPU and CPU bilinear taps. Images
+  retain fractional pixel coordinates without changing text glyph alignment.
 - Changes to terminal cells mark affected rows in the same frame. This includes
   scrolling, reverse index, line insertion/deletion, erase, resize, and
   wide-cell repair.
+- Nonempty primary-history erasure advances the revision and exact eviction
+  counter and marks all visible rows presentation-dirty, without changing their
+  content stamps. Empty history and alternate-screen ED3 change neither screen.
+  Every history-prefix removal drops prompts whose starts were removed and
+  rebases surviving coordinates; saved-primary prompts stay with their rows.
+- Cursor-position replies clamp the insertion sentinel to a physical column
+  without consuming delayed wrap. Hard LF/VT/FF/IND/NEL advancement scrolls only
+  at the effective bottom margin and otherwise clamps to physical bounds. Fill
+  and carriage-return policies remain explicit per control.
 - Each `Line` packs an incoming automatic-wrap bit into its existing content
   sequence word. Only an actual margin wrap sets it. Hard line advances,
   full-row erases, recycled rows, non-reflow resize, and uncertain region
@@ -170,7 +208,10 @@ clears dirty rows.
 Grid geometry accounts for retained row allocations, not only visible
 `cols × rows`. A material column shrink compacts rows. Adjacent resize changes
 keep reusable capacity to avoid repeated allocation. Reducing the scrollback
-limit releases excess `VecDeque` capacity.
+limit releases excess `VecDeque` capacity. Column shrink checks only each new
+right edge for a clipped `WIDE` lead and replaces it with the resize fill;
+complete pairs and compact storage survive. The same `Line` operation covers
+visible, history, and saved-primary rows without reflow or later resurrection.
 
 Clipboard serialization keeps isolated or incomplete right-edge box drawing.
 It removes only a coherent multi-row side that ends in a lower-right frame
@@ -212,7 +253,13 @@ frame presents successfully. The fixed pixel allocation does not grow.
 row hash. Their capacities are about four times the sum of visible rows across
 all panes. A capacity or geometry-size change clears the affected cache. Dirty
 rows invalidate their absolute-row entries. Font, theme, scale, surface resize,
-and atlas replacement invalidate the corresponding caches.
+and atlas replacement invalidate the corresponding caches. Retention counts the
+hash table's allocated key/entry buckets and every nested vector's capacity.
+Ordinary clearing leaves table capacity reusable, so bounded churn forms a
+high-water envelope rather than a flat byte line. When a pane leaves a renderer,
+one event-loop-owned operation removes its glyph-cache entries first and its
+quad-cache entries second, preserves peer hits, then asks each table to shrink.
+No concurrent retention snapshot can observe only half that ordered eviction.
 
 The inline-image atlas starts as a 1 × 1 CPU/GPU placeholder. It promotes to a
 2,048 × 2,048 atlas when renderable media appears. After 240 rendered frames
@@ -224,8 +271,9 @@ GPU atlas textures become 1 × 1 placeholders. Returning to wgpu presentation
 recreates matching textures, resets atlas state, invalidates UV-bearing caches,
 and forces a full redraw before sampling the new textures.
 
-DirectWrite subpixel tiles remain linear BGRA coverage in both the CPU atlas and
-the GPU unorm coverage view. They must never pass through the color-rectangle
+DirectWrite subpixel tiles remain native linear BGRA coverage in both the CPU
+atlas and the GPU unorm coverage view; no hidden contrast curve precedes the
+explicit `weight_scale` control. They must never pass through the color-rectangle
 conversion or the sRGB color view. Alpha remains the maximum RGB coverage so
 ineligible and `off` presentation has a deterministic grayscale value. Changing
 LCD mode is presentation-only and must not rebuild or reinterpret either atlas.
@@ -234,7 +282,18 @@ Font discovery, shaping, and rasterization stay separate from renderer policy.
 Generated FFI bindings remain in their wrapper crates. Malformed, missing, or
 out-of-range variable-font metadata falls back to base OS/2 weight and width.
 FreeType embedded bitmap strikes are checked against the 2,048-pixel and 16 MiB
-glyph allocation limits before pixel decoding.
+glyph allocation limits before pixel decoding. BGRA crop bounds are half-open:
+all nontransparent ink survives, and removing `(crop_x, crop_y)` changes bearings
+to `bitmap_left + crop_x` and `bitmap_top - crop_y`. Fully transparent nonempty
+rasters retain their dimensions, metrics, and valid blank atlas representation.
+
+Crash history intersects the selected filter with a DEBUG ceiling and an
+explicit payload-exclusion predicate, including original log-facade targets.
+Owned variable retention is bounded by 50 records, 4 KiB per record including a
+256-byte target limit, and 64 KiB in aggregate. Formatting stops within those
+bounds; panic payload and summary each have a separate 4 KiB limit. Fixed record
+metadata is count-bounded. Backtraces and allocations inside arbitrary producer
+formatters are outside these guarantees; this is not generic secret sanitization.
 
 The hidden warm-window pool defaults to one. Zero disables it. Normal hardware
 accepts at most five. An actual software adapter or resolved degradation caps
@@ -246,8 +305,30 @@ any nonzero target at one. A live config reload clears the pool; later
 Terminal input enqueue is non-blocking. `PtyHandle::send_input_nonblocking`
 uses `try_send` on a four-message channel. A message over 16 MiB, a full queue,
 or a disconnected writer returns `PtyInputError` with the original bytes. The
-app posts `UserEvent::PtyInputRejected`, logs the reason, and shows an error
-notification. It does not replay the bytes automatically.
+app drops the payload and posts metadata-only `UserEvent::PtyInputRejected`,
+logs the pane, current window, typed source, and concurrent queue/writer
+observations, and notifies that pane's window if it still exists. It does not
+replay the bytes automatically. Queue occupancy excludes the active native
+write/flush, whose phase, size, elapsed time, and progress are observed separately.
+
+PTY resize is fallible and its cache is success-only. The callback holds the
+native call and the last applied `(cols, rows)` behind one lock, so native
+resizes are serialized and the cache records the last successful native call. A
+zero axis is refused as an `InvalidInput` error before the native call and
+before the cache changes; a request equal to the last *applied* size is skipped;
+only a successful native call caches a size. A failed request is therefore not
+deduplicated away — the next identical request reaches the native call again —
+and the last successful size stays cached. The first request always reaches the
+native call, because the cache starts empty rather than seeded from the spawn
+dimensions.
+
+The grid is resized first and is never rolled back when the native call fails:
+the pane keeps the requested geometry and only the child's view of it lags.
+`PaneState::resize_pty` reports the failure once per failing run — first failure
+logged with pane id, requested columns and rows, and error, then silence until a
+success clears the latch. The latch gates the log line only. Warning suppression
+never suppresses a resize attempt; an invalid size and a successful duplicate
+are decided at the IO boundary, not by the latch.
 
 The PTY reader uses a reusable 64 KiB `BytesMut` allocation. It sends
 `PtyOutputChunk` views through a 64-slot channel. A full channel blocks the
@@ -284,9 +365,13 @@ an incomplete native close into success.
 ### Release verification boundary
 
 Root `Cargo.toml` `[workspace.package]` is the version source. The release
-workflow starts for tags matching `v[0-9]+.[0-9]+.[0-9]+*`. It continues only
-when `prepare-release-assets.py check-version` parses the tag as a semantic
-version and finds that version on every workspace package.
+workflow starts for tags matching `v[0-9]+.[0-9]+.[0-9]+*`. It first peels the
+tag ref to its commit, then requires that commit to be in `origin/main` history
+and an exact completed successful `CI` push run to exist for it. It continues
+only when
+`prepare-release-assets.py check-version` parses the tag as a semantic version,
+finds that version on every workspace package, and the normal source-consistency
+gates pass.
 
 The workflow builds five required package tuples:
 
@@ -305,7 +390,7 @@ rejects duplicate names or tuples, recalculates hashes, and rejects unregistered
 `release-upload-paths.txt`. The release action uploads only the paths in that
 list.
 
-Windows release tests run:
+The Windows CI test shard runs:
 
 ```bash
 cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture
@@ -314,25 +399,33 @@ cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocaptur
 The gate requires WARP and allocator reporting. Production reserved bytes must
 be below 64 MiB. The largest block must be below 128 MiB. The
 `MemoryHints::MemoryUsage` candidate must reserve fewer bytes than the
-`MemoryHints::Performance` control under the same allocations. The workflow
-dependency is `unit-tests-windows → build-windows → publish`, so this gate
-blocks the MSI and publication.
+`MemoryHints::Performance` control under the same allocations. Release requires
+an exact successful `main` CI run for the tag commit before `build-windows`
+starts, so a failed gate blocks the MSI and publication without being rerun at
+tag time.
 
 Linux package verification builds both `.deb` and `.tar.gz` layouts. The runtime
-smoke runs them on X11/Xvfb and Wayland/Weston with Vulkan/lavapipe. It requires
-window creation, GPU initialization, a `/bin/sh` PTY marker round trip, and a
-later native presentation.
+smoke runs them on X11/Xvfb and Wayland/Weston with Vulkan/lavapipe. Like the
+macOS and Windows binary smokes, it requires native window and renderer/device
+creation, a platform-shell PTY marker observed in the live grid, a later native
+presentation, and default warm-renderer create/report/adopt/release with the
+process renderer count restored.
 
 macOS packaging verifies binary architecture and the app's ad-hoc signature.
-The workflow does not perform Developer ID signing, notarization, or a packaged
-DMG launch smoke. The Windows workflow does not sign or install-run the MSI.
-Installer signing is therefore not a verified release invariant.
+Each just-built macOS architecture and the just-built Windows executable must
+pass the shared native runtime smoke before packaging can advance. The workflow
+does not perform Developer ID signing, notarization, a packaged DMG launch, MSI
+signing, or MSI install-run. Installer signing and post-install launch are
+therefore not verified release invariants.
 
-Release jobs run workspace unit tests, the per-crate unit/build gate, release
-asset and note tests, Windows presentation and allocator tests, and Linux package
-smokes. They do not repeat every normal CI check: formatting, Clippy, Rustdoc,
-policy checks, resource baselines, wiki publication tests, and coverage remain in
-normal CI described in [Development and Release](Development-and-Release).
+Release validation requires an exact completed successful `main` CI run for the
+tag commit, then validates every workspace package version and the release-asset
+tooling. It does not repeat the source, unit, integration, documentation,
+platform-runtime, allocator, coverage, or normal-CI package gates. The platform
+jobs start directly from that provenance boundary and perform only native
+release builds, package validation, MSI metadata validation, and Linux package
+smokes. Release Rust target builds do not read or write Rust caches; the Windows
+job may restore the vcpkg binary cache published immediately by normal CI.
 
 ### Source and check map
 
@@ -409,8 +502,18 @@ Process
 计费失败不会撤销已经保留的内存。增长失败时保留原计费值。新类别计费失败时，该类别保持
 缺失，并写一条 `memory` debug 记录。
 
-窗格为每个已计费的 `ResourceClass` 持有一个 `CommittedReservation`。计费通过
-`try_grow` 或 `shrink` 原地调整，不会在两次采样之间先释放再重新创建。
+窗格为每个已计费的 `ResourceClass` 持有一个 `CommittedReservation`。常驻内存采样通过
+`try_resize` 原地调整，也支持字节增长而条目减少或相反的混合变化。最终准入按
+`当前总量 - 旧计费 + 新计费` 计算，不使用逐维最大值，也不先释放再预留。任一维增长都要求
+祖先仍开放；纯减少允许在关闭过程中结算。先获取状态锁，再获取类别锁和按所有者 id 升序的
+用量锁；进程字节增长通过已有 CAS 完成最后一个可失败步骤。拒绝时令牌和所有余额都不变。
+快照仍是观察性读数，而不是一次全局线性化读取。
+
+单窗格协调使用 `CommittedReservation::transfer_batch`；标签页附加使用 `transfer_many`，
+把每个移动窗格的计费及其各自目标所有者纳入同一账本事务。两者都保留分类，并在修改任何分片前
+验证源余额、目标状态及最终所有者上限。不可变父节点的 id 总小于子节点，因此两者遵循同一套
+状态、类别和所有者锁顺序。成功只修改所有者路径余额和令牌 owner id，不改变进程或分类总量；
+拒绝时保留全部源令牌，并在恢复源托管状态前释放空的临时所有者。
 
 关闭顺序不能改变：
 
@@ -424,8 +527,10 @@ Process
 warning 并保留该记录，不会重试。
 
 窗口所有者注册失败时，窗口仍可使用，但该窗口及其窗格在剩余寿命内都不会进入层级记账。
-窗格所有者注册失败时，窗格仍可使用；周期协调可以再次尝试。渲染器持有的表面、字形图集和
-软件帧不进入这份总账，另行测量。
+窗格所有者注册失败时，窗格仍可使用；周期协调可以再次尝试。渲染器持有的表面、字形图集、
+逐行字形与 quad 缓存及软件帧不进入这份总账，另行测量。两个行缓存类明确标记为
+`UnchargedRetention`：报告给出当前精确分配，覆盖表记录保守的每渲染器高水位包络。
+报告不会虚构 GPU 内存，也不会把未收费类写成 governor 预留。
 
 ### 渲染正确性不变量
 
@@ -433,8 +538,21 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
 
 - 主屏幕窗格贡献所有脏行条带的并集。条带包含窗格内边距，并裁剪到窗格和表面。
 - 备用屏幕窗格只要有脏行，就贡献整个经表面裁剪的窗格。没有脏行时不贡献损伤区域。
+- 替换完整表面时只清除一次保留 attachment；局部损伤在裁剪范围内使用无混合背景重置。
+  重置与内容共享一次缓冲上传并使用不同绘制区间，保留内容的 source-over 与 LCD 混合，
+  同时擦除旧墨迹而不累积 alpha。
+- 投影背景缓存的有效性包含视口行位置。每个 `(pane id, absolute row)` 只持有一个投影，
+  哈希变化时替换旧值；脏行失效仍按绝对行且限制在所属窗格，容量上限不变。
+- 内联图像可见性对原始目标、窗格内容和表面求交，同一结果控制图集驻留与绘制。可见 UV
+  保留源变换，独立的原始图块边界限制 GPU 与 CPU 双线性采样点。图像保留分数像素坐标，
+  不改变文字字形的对齐。
 - 终端单元格变化会在同一帧标记受影响的行，包括滚动、反向索引、插入或删除行、擦除、
   调整大小和宽字符修复。
+- 擦除非空主屏幕历史会推进修订计数和精确淘汰计数，并将所有可见行标记为呈现脏行，
+  但不改变它们的内容序号。历史为空或备用屏幕中的 ED3 不修改任一屏幕。所有历史前缀
+  删除都会丢弃起点已删除的提示符，并重定位存活坐标；已保存主屏幕的提示符随所属行保存。
+- 光标位置回复把插入哨兵值钳制到物理列，不消耗延迟换行。LF/VT/FF/IND/NEL 硬换行只在
+  有效底边滚动，否则钳制在物理边界内；每种控制的填充和回车策略保持显式区分。
 - 每个 `Line` 会把“由前一行自动软换行而来”的 bit 打包进现有内容序号 word。只有真实的
   右边界自动换行会设置它；硬换行、整行擦除、行复用、不做 reflow 的 resize，以及无法证明
   连续性的区域调整会清除相关边界。该 bit 会随行进入 scrollback，并参与行相等性与 hash，
@@ -480,7 +598,9 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
 
 网格几何记账包含保留的行分配，不只计算可见的 `cols × rows`。列数大幅减少时会压紧行。
 相邻尺寸变化会保留可复用容量，避免反复分配。降低回滚历史上限会释放多余的
-`VecDeque` 容量。
+`VecDeque` 容量。缩小列数时仅检查每行的新右边界，把失去续格的 `WIDE` 首格替换为
+尺寸调整填充；完整字符对和紧凑存储保持不变。同一个 `Line` 操作覆盖可见行、历史和
+已保存主屏幕，不执行 reflow，也不会在以后恢复被裁剪文本。
 
 复制到剪贴板时会保留孤立或不完整的右边框线。只有连贯的多行侧边框，并且最终以右下角
 框线字符收尾时，才会删除该边框。在 Windows 上，成功的 OSC 52 写入最多只会延迟重写一次，
@@ -513,7 +633,11 @@ CPU 字形图集固定为 2,048 × 2,048 个 BGRA8 像素，约 16 MiB。元数�
 
 `RowGlyphCache` 和 `LineQuadCache` 的键由窗格编号、绝对行号和行哈希组成。两者容量约为
 所有窗格可见行总数的四倍。容量或几何尺寸变化会清空对应缓存。脏行会使其绝对行条目失效。
-字体、主题、缩放、表面尺寸和图集替换会使对应缓存失效。
+字体、主题、缩放、表面尺寸和图集替换会使对应缓存失效。保留量会计算哈希表已分配的
+键/条目 bucket，以及每个嵌套向量的容量。普通清空会保留可复用表容量，因此有界变化形成
+高水位包络，而不是完全平坦的字节线。窗格离开渲染器时，一个由事件循环独占的操作会先删除
+其字形缓存条目，再删除 quad 缓存条目，保留其它窗格的命中，随后请求压紧两个表。并发保留量
+快照无法观察到只完成一半的有序淘汰。
 
 内联图像图集从 1 × 1 的 CPU/GPU 占位符开始。出现可渲染媒体时，它扩展为
 2,048 × 2,048。连续 240 个已渲染帧没有内联媒体后，它回到占位符。文字和图像使用独立
@@ -523,13 +647,23 @@ Windows 降级呈现会保留完整 CPU 图集，同时把 GPU 图集纹理缩�
 呈现时，代码重新创建匹配纹理、重置图集状态、使所有携带 UV 的缓存失效，并在采样新纹理前
 强制完整重绘。
 
-DirectWrite 次像素图块在 CPU 图集与 GPU unorm 覆盖率 view 中始终是线性 BGRA 覆盖率。
-它们绝不能经过彩色矩形转换或 sRGB 彩色 view。Alpha 保持为 RGB 覆盖率最大值，因此不满足
+DirectWrite 次像素图块在 CPU 图集与 GPU unorm 覆盖率 view 中始终保留原生线性 BGRA
+覆盖率；显式 `weight_scale` 控制之前不再存在隐藏的对比度曲线。它们绝不能经过彩色矩形转换或
+sRGB 彩色 view。Alpha 保持为 RGB 覆盖率最大值，因此不满足
 条件以及 `off` 呈现都有确定的灰度值。修改 LCD 模式只影响呈现，不得重建或重新解释任一图集。
 
 字体发现、塑形和光栅化与渲染器策略分离。生成的 FFI 绑定只留在各自包装 crate 内。
 可变字体元数据格式错误、缺失或越界时，代码回退到基础 OS/2 字重和字宽。FreeType 内嵌
-位图字形会在解码像素前先检查 2,048 像素和 16 MiB 的字形分配上限。
+位图字形会在解码像素前先检查 2,048 像素和 16 MiB 的字形分配上限。BGRA 裁剪边界采用
+半开区间，保留全部非透明像素；移除 `(crop_x, crop_y)` 边距后，bearing 分别变为
+`bitmap_left + crop_x` 与 `bitmap_top - crop_y`。全透明但非空的光栅保留尺寸、度量及
+有效空白图集表示。
+
+崩溃历史采用所选 filter、DEBUG 上限与显式负载排除规则的交集，并检查 log facade 的原始
+目标。自有可变保留量受 50 条记录、每条 4 KiB（其中 target 最多 256 字节）及合计
+64 KiB 限制。格式化在这些边界内停止；panic 负载与摘要各有独立的 4 KiB 上限。
+固定元数据另受记录条数限制。Backtrace 与任意生产端 formatter 内的分配不在这些保证内；
+这不是通用敏感信息清洗。
 
 隐藏预热窗口池默认为 1。设为 0 会关闭它。普通硬件路径最多接受 5。真实软件适配器或最终
 降级状态启用时，任何非零目标都限制为 1。实时配置重载会清空池；后续
@@ -539,8 +673,24 @@ DirectWrite 次像素图块在 CPU 图集与 GPU unorm 覆盖率 view 中始终�
 
 终端输入采用非阻塞入队。`PtyHandle::send_input_nonblocking` 对四条消息的通道调用
 `try_send`。消息超过 16 MiB、队列已满或 writer 已断开时，会返回保留原始字节的
-`PtyInputError`。应用发送 `UserEvent::PtyInputRejected`，记录原因并显示错误通知。
-它不会自动重放这些字节。
+`PtyInputError`。应用丢弃负载后，发送只含元数据的 `UserEvent::PtyInputRejected`，
+记录窗格、当前窗口、类型化来源及并发队列/writer 观察值；窗格仍存在时在其窗口显示通知。
+它不会自动重放这些字节。队列占用不包含正在进行的原生写入或 flush；其阶段、大小、
+持续时间和进度会单独观察。
+
+PTY 尺寸调整是可失败的，且只在成功时缓存。回调把原生调用和最后一次成功应用的
+`(cols, rows)` 放在同一把锁后面，因此原生尺寸调整是串行的，缓存记录的是最后一次成功
+的原生调用。某一维为零时，在原生调用之前、也在缓存变化之前以 `InvalidInput` 错误
+拒绝；与最后一次*已应用*尺寸相同的请求会被跳过；只有原生调用成功才会缓存尺寸。因此
+失败的请求不会被当作重复请求去重——下一次相同的请求会再次到达原生调用——而最后一次
+成功的尺寸仍保留在缓存中。第一次请求一定会到达原生调用，因为缓存初始为空，不会用
+spawn 时的尺寸预填。
+
+网格先被调整，且在原生调用失败时绝不回滚：窗格保留请求的几何尺寸，只有子进程看到的
+尺寸会滞后。`PaneState::resize_pty` 在每一轮连续失败中只报告一次——第一次失败会记录
+窗格 id、请求的列数与行数以及错误，随后保持静默，直到一次成功清除该闩锁。闩锁只控制
+日志行。告警抑制绝不会抑制一次尺寸调整尝试；无效尺寸和成功的重复请求由 IO 边界决定，
+与闩锁无关。
 
 PTY reader 使用可复用的 64 KiB `BytesMut` 分配，并通过 64 槽通道发送
 `PtyOutputChunk` 视图。通道满时 reader 阻塞，让操作系统施加背压；输出不会被丢弃。
@@ -569,8 +719,10 @@ Windows 拆除先给 reader 500 ms，再给 writer 500 ms，然后关闭主端�
 ### 发布验证边界
 
 根目录 `Cargo.toml` 的 `[workspace.package]` 是版本来源。发布工作流只由匹配
-`v[0-9]+.[0-9]+.[0-9]+*` 的 tag 启动；随后 `prepare-release-assets.py check-version`
-必须把 tag 解析为语义版本，并确认该版本与每个 workspace package 一致。
+`v[0-9]+.[0-9]+.[0-9]+*` 的 tag 启动。它首先把 tag ref 解引用到对应 commit，要求该
+commit 位于 `origin/main` 历史中，并要求它存在一个完全相同、已完成且成功的 `CI` push run。随后
+`prepare-release-assets.py check-version` 必须把 tag 解析为语义版本，确认该版本与每个
+workspace package 一致，并要求普通源码一致性 gate 通过。
 
 工作流构建五组必需包：
 
@@ -587,7 +739,7 @@ Windows 拆除先给 reader 500 ms，再给 writer 500 ms，然后关闭主端�
 `release-assets.json`、确定性 `SHA256SUMS.txt` 和 `release-upload-paths.txt`。发布 action
 只上传该路径清单中的文件。
 
-Windows 发布测试运行：
+Windows CI tests shard 运行：
 
 ```bash
 cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocapture
@@ -595,21 +747,25 @@ cargo test -p sonicterm-gpu --test windows_warp_allocator_baseline -- --nocaptur
 
 该闸门要求 WARP 和分配器报告可用。生产策略预留字节必须低于 64 MiB，最大块必须低于
 128 MiB。在相同分配负载下，`MemoryHints::MemoryUsage` 候选必须比
-`MemoryHints::Performance` 对照预留更少字节。工作流依赖关系为
-`unit-tests-windows → build-windows → publish`，因此失败会阻止 MSI 和发布。
+`MemoryHints::Performance` 对照预留更少字节。Release 要求 tag commit 存在完全相同且成功的
+`main` CI run，之后才启动 `build-windows`，因此失败会阻止 MSI 和发布，且无需在 tag 阶段重跑。
 
 Linux 包验证会构建 `.deb` 与 `.tar.gz` 两种布局。运行冒烟测试在 X11/Xvfb 和
-Wayland/Weston 上使用 Vulkan/lavapipe。测试要求窗口创建、GPU 初始化、`/bin/sh` PTY
-标记往返，以及之后一次原生呈现。
+Wayland/Weston 上使用 Vulkan/lavapipe。与 macOS 和 Windows 二进制 smoke 相同，它要求
+原生窗口与渲染器/设备、实时 grid 中观察到的平台 shell PTY marker、之后的原生呈现，以及
+默认预热渲染器的创建/报告/采用/释放并恢复进程渲染器计数。
 
-macOS 打包会检查二进制架构和应用的 ad-hoc 签名。工作流没有执行 Developer ID 签名、
-公证或 DMG 打包后启动冒烟测试。Windows 工作流也没有签名 MSI 或安装运行它。因此，
-安装包签名不是当前已验证的发布不变量。
+macOS 打包会检查二进制架构和应用的 ad-hoc 签名。每个刚构建的 macOS 架构以及刚构建的
+Windows 可执行文件都必须先通过共享原生运行 smoke，打包才能继续。工作流不会执行 Developer
+ID 签名、公证、打包后 DMG 启动、MSI 签名或 MSI 安装后运行。因此，安装器签名和安装后启动
+不是当前已验证的发布不变量。
 
-发布任务会运行 workspace 单元测试、逐 crate 单元/构建闸门、发布资产与说明测试、Windows
-呈现和分配器测试，以及 Linux 包冒烟测试。它不会重复普通 CI 的全部检查；格式、Clippy、
-Rustdoc、策略检查、资源基线、Wiki 发布测试和覆盖率仍由普通 CI 负责，详见
-[开发与发布](Development-and-Release)。
+发布验证要求 tag commit 存在完全相同、已完成且成功的 `main` CI run，随后核对每个
+workspace package 版本并验证 release asset 工具。它不会重复源码、unit、integration、文档、
+平台 runtime、allocator、coverage 或普通 CI 的 package gate。各平台 job 从该 provenance
+边界直接开始，只执行原生 release build、package 验证、MSI metadata 验证与 Linux package
+smoke。Release Rust target build 不读写 Rust cache；Windows job 可以恢复由普通 CI 立即发布的
+vcpkg binary cache。
 
 ### 源码与检查索引
 
