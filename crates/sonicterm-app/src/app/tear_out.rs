@@ -73,6 +73,36 @@ pub(super) struct DetachedTab {
     panes: HashMap<u64, super::PaneState>,
 }
 
+impl DetachedTab {
+    pub(super) fn attach(
+        self,
+        app: &mut App,
+        target: WindowId,
+        index: usize,
+    ) -> Result<(), super::TransferError> {
+        let Self { source, original_index, prior_active_tab_id, tab, state, panes } = self;
+        let attached = if app.main_window_id == Some(target) {
+            app.attach_tab_state(index, tab, state, panes)
+        } else {
+            // When: target is not main_window_id, use the child admission boundary with the same custody guarantee.
+            app.attach_to_child(target, index, tab, state, panes)
+        };
+        if let Err(failure) = attached {
+            // When: attached is Err(failure), restore exact source order/focus without resize or owner effects.
+            app.rollback_detached_tab(Self {
+                source,
+                original_index,
+                prior_active_tab_id,
+                tab: failure.tab,
+                state: failure.state,
+                panes: failure.panes,
+            });
+            return Err(failure.error);
+        }
+        Ok(())
+    }
+}
+
 /// Fallible destination-preparation boundary reached by a tear-out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TearOutStage {
@@ -213,7 +243,7 @@ struct TearOutFailure {
     unwind: DestinationUnwind,
 }
 
-/// Hidden, fully configured destination ready for an infallible commit.
+/// Hidden, fully configured destination awaiting accounting admission and live installation.
 struct PreparedDestination {
     window: Arc<Window>,
     renderer: GpuRenderer,
@@ -462,6 +492,13 @@ impl App {
                 // index, no state may be detached from a different slot or window.
                 return None;
             }
+            let tab = &window.tab_states[index];
+            if !tab.tree.leaves().contains(&tab.active_pane)
+                || tab.tree.zoomed_pane_id().is_some_and(|id| id != tab.active_pane)
+            {
+                // When: the source tab's active/visible identity is invalid, refuse before any custody is detached.
+                return None;
+            }
             window.tabs.active().map(|tab| tab.id)
         };
         let (tab, state, panes) = match source {
@@ -472,7 +509,7 @@ impl App {
     }
 
     /// Restore a detached transaction without applying transfer side effects.
-    fn rollback_detached_tab(&mut self, transaction: DetachedTab) {
+    pub(super) fn rollback_detached_tab(&mut self, transaction: DetachedTab) {
         let DetachedTab { source, original_index, prior_active_tab_id, tab, state, panes } =
             transaction;
         let window = self.windows.get_mut(&source.window_id()).expect(
@@ -503,7 +540,7 @@ impl App {
         F: FnOnce(&mut Self) -> Result<PreparedDestination, DestinationFailure>,
     {
         match prepare(self) {
-            Ok(destination) => Some(self.commit_torn_out_window(transaction, destination)),
+            Ok(destination) => self.commit_torn_out_window(transaction, destination),
             Err(DestinationFailure { stage, detail, unwind }) => {
                 // The failure owns both halves so partial native state cannot
                 // outlive source recovery.
@@ -579,10 +616,15 @@ impl App {
     where
         I: FnOnce(&mut App, DetachedTab, Option<(i32, i32)>, &'static str) -> Option<WindowId>,
     {
-        if self.try_cross_window_merge(index) {
-            // When: `try_cross_window_merge` returns true, account for the tab
-            // leaving only after that route reports completion.
-            self.dispatch_tear_out_intent(index);
+        let has_target = self
+            .main()
+            .and_then(|window| window.drag_target)
+            .is_some_and(|target| Some(target.window) != self.main_window_id);
+        if has_target {
+            // When: has_target selects a merge, refusal restores source custody instead of falling through to another move.
+            if self.try_cross_window_merge(index) {
+                self.dispatch_tear_out_intent(index);
+            }
             return true;
         }
         // OS handoff must run before local detachment because an acknowledged
@@ -617,14 +659,12 @@ impl App {
 
     /// Record reducer state only after a main tab has left its source strip.
     fn dispatch_tear_out_intent(&mut self, index: usize) {
-        let pending_new_window = self.pending_new_window;
-        self.dispatch_intent(sonicterm_app_core::AppIntent::TearOutTab {
-            src_window: sonicterm_types::WindowKey::new(0),
-            src_tab: index,
-        });
-        // The route already created or selected its destination. Preserve the
-        // reducer's WindowOpen observability without spawning a duplicate window.
-        self.pending_new_window = pending_new_window;
+        if let Some(src_window) = self.main_window_id.and_then(|id| self.window_key(id)) {
+            self.observe_intent(sonicterm_app_core::AppIntent::TearOutTab {
+                src_window,
+                src_tab: index,
+            });
+        }
     }
 
     /// Install a detached transaction through the native preparation boundary.
@@ -756,35 +796,49 @@ impl App {
     /// Install a fully prepared destination and then reveal it exactly once.
     fn commit_torn_out_window(
         &mut self,
-        transaction: DetachedTab,
+        mut transaction: DetachedTab,
         mut destination: PreparedDestination,
-    ) -> WindowId {
+    ) -> Option<WindowId> {
         let install_start = Instant::now();
         destination.renderer.set_render_timing_label("child");
         let win_id = destination.window.id();
+        let owner = self
+            .governor
+            .create_child(
+                self.governor.root_owner(),
+                super::OwnerKind::Window,
+                super::tracking_only_owner_limits(),
+            )
+            .map(|id| super::OwnerGuard::new(self.governor.clone(), id))
+            .ok();
+        let mut child_tabs = TabBar::new();
+        child_tabs.push(transaction.tab.clone());
+        let mut tab_states = Vec::with_capacity(1);
+        self.windows.reserve(1);
+        if let Err(error) = self
+            .transfer_pane_owners(&mut transaction.panes, owner.as_ref().map(super::OwnerGuard::id))
+        {
+            // When: transfer_pane_owners returns Err, retire hidden destination artifacts before restoring source custody.
+            drop(destination);
+            drop(owner);
+            self.rollback_detached_tab(transaction);
+            tracing::warn!(?error, "tear-out accounting refused; source transaction restored");
+            return None;
+        }
+        tab_states.push(transaction.state);
         // Each independent redraw-target guard is released before the pane map
         // moves into the destination window; no two pane locks are nested.
         for pane in transaction.panes.values() {
             *pane.redraw_target.lock() = Some(win_id);
         }
 
-        let mut child_tabs = TabBar::new();
-        let active_pane = transaction.state.active_pane;
-        child_tabs.push(transaction.tab);
         let child = WindowState {
-            // Registered when the window is inserted; construction has no
-            // governor in scope.
-            owner: None,
+            owner,
             role: crate::app::WindowRole::Terminal,
             window: Some(destination.window.clone()),
             renderer: Some(destination.renderer),
             tabs: child_tabs,
-            tab_states: vec![TabState {
-                tree: transaction.state.tree,
-                active_pane,
-                search: transaction.state.search,
-                command: transaction.state.command,
-            }],
+            tab_states,
             panes: transaction.panes,
             cursor_pos: (0.0, 0.0),
             mouse_down: false,
@@ -799,6 +853,7 @@ impl App {
             modifiers: ModifiersState::empty(),
             pty_pressed_keys: std::collections::HashMap::new(),
             last_render: Instant::now(),
+            retry_not_before: None,
             hover_link: false,
             pressed_tab: None,
             drag_session: None,
@@ -854,7 +909,7 @@ impl App {
         // A consumed pooled window is not replaced here; the pool refills on
         // the next idle tick rather than on this path.
         self.frontmost_window = Some(win_id);
-        win_id
+        Some(win_id)
     }
 
     /// source-side post-tear-out cleanup, factored
@@ -882,6 +937,7 @@ impl App {
             let target = removed_idx.saturating_sub(1).min(t.len().saturating_sub(1));
             t.activate(target);
         }
+        self.resize_visible_panes();
     }
 }
 
@@ -982,6 +1038,13 @@ impl App {
             // SonicTerm window; keep the gesture in-process instead of publishing to OS.
             return false;
         }
+        let Some((source_window, source_tab)) = self
+            .main_window_id
+            .and_then(|window| self.tab_id_at(window, index).map(|tab| (window, tab)))
+        else {
+            // When: the requested source tab no longer exists, no OS handoff may adopt its former slot.
+            return false;
+        };
         let Some(payload) = self.build_payload_for_tab(index) else {
             // When: `build_payload_for_tab` found no tab at `index`, so there is nothing
             // to publish to the OS; return false and let the in-process path decide.
@@ -1035,9 +1098,10 @@ impl App {
         let ack = sink.begin_drag(&payload);
         match ack {
             crate::os_drag::DragAck::Accepted => {
-                // When: the sink reports `Accepted`, so a destination adopted the payload;
-                // the moved panes are dropped here, ending the local shell via PtyHandle.
-                let _ = self.detach_tab_state(index);
+                // An acknowledged destination owns the payload; dropping source custody terminates its local PTYs.
+                if let Some(index) = self.tab_index_of_id(source_window, source_tab) {
+                    drop(self.detach_from_child(source_window, index));
+                }
                 tracing::info!(
                     tab = %payload.tab_title,
                     "OS drag: destination acknowledged; local tab dropped"
@@ -1100,7 +1164,7 @@ impl App {
         false
     }
     pub fn try_cross_window_merge(&mut self, index: usize) -> bool {
-        let main_id = self.main_window().map(|w| w.id());
+        let main_id = self.main_window_id;
         let Some(target) =
             self.main().and_then(|ws| ws.drag_target).filter(|t| Some(t.window) != main_id)
         else {
@@ -1113,8 +1177,7 @@ impl App {
             ws.pressed_tab = None;
             ws.mouse_down = false;
         }
-        self.merge_main_into_child(index, target);
-        true
+        self.merge_main_into_child(index, target)
     }
     pub fn tear_out_would_be_noop(&self) -> bool {
         // Tear-out is always productive — a single-tab tear creates a new
@@ -1186,7 +1249,7 @@ impl App {
         if let Some(c) = self.windows.get_mut(&src_id) {
             let target = removed_idx.saturating_sub(1).min(c.tabs.len().saturating_sub(1));
             c.tabs.activate(target);
-            c.request_redraw();
+            super::child_window::resize_visible_panes_in_child(c);
         }
     }
 }

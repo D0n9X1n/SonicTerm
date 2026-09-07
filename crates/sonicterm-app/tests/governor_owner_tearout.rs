@@ -32,6 +32,12 @@ fn a_torn_out_pane_is_parented_to_the_window_it_lands_in() {
     let mut app = app();
     let source = app.__test_seed_child_window(&["only"]);
     let main = app.__test_main_window_id().expect("synthetic main window");
+    // Supply headless destination metrics so the production readiness check remains active.
+    app.__test_set_main_pane_viewport(
+        sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 480.0),
+        10.0,
+        20.0,
+    );
 
     let main_owner = app.__test_window_owner(main).expect("main window owner");
     let moved_pane = *app
@@ -62,6 +68,12 @@ fn a_window_emptied_by_a_tear_out_closes_its_owner() {
     let mut app = app();
     let source = app.__test_seed_child_window(&["only"]);
     let source_owner = app.__test_window_owner(source).expect("source window owner");
+    // Supply headless destination metrics so the production readiness check remains active.
+    app.__test_set_main_pane_viewport(
+        sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 480.0),
+        10.0,
+        20.0,
+    );
 
     app.transfer_tab(Some(source), 0, None, 0).expect("transfer succeeds");
 

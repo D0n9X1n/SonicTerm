@@ -234,9 +234,13 @@ rectangle is used by GPU and Windows software presentation.
 ### Row and shape caches
 
 `RowGlyphCache` stores glyph instances, underlines, missing-glyph records, and
-tofu quads under `(pane id, absolute row, row hash)`. `LineQuadCache` stores
-background and decoration quads under the matching row identity. Because cached
-glyph instances already carry projected screen coordinates, their keys include
+tofu quads under `(pane id, absolute row, row hash)`. `LineQuadCache` stores one
+background/decoration projection per `(pane id, absolute row)`, with a validity
+hash that includes its viewport row slot. A slot change reprojects that row and
+replaces its prior value instead of consuming another cache entry. Same-slot
+repaints can hit; absolute dirty-row invalidation remains pane-local, and the
+existing capacity bound and new-row eviction policy remain unchanged. Because
+cached glyph instances already carry projected screen coordinates, their keys include
 pane origin and surface extent as well as cell content, font/style revision, cell
 metrics, display scale, atlas content identity, and a selection rectangle only
 when it intersects that row.
@@ -329,7 +333,19 @@ multiplied by the linear alpha channel.
 Decoded images remain owned by their pane. Count and byte retention are bounded
 as described in [Memory](Memory). The renderer copies visible images into an
 **independent** image atlas, so media pressure cannot evict text glyphs or reuse
-text UVs. During dirty-rectangle packing for GPU upload, each nontransparent
+text UVs. Image visibility is the intersection of its destination, its owning
+pane's actual content rectangle after padding, and the surface. Image clipping
+does not use the cell-layout minimum: a padding-exhausted pane has an empty image
+clip, even if its grid still has one cell. The same visibility check controls
+atlas residency and emission; fully clipped or undecoded images neither promote
+the atlas nor allocate tiles. Clipping preserves original position and scale,
+and carries visible destination/UVs separately from the original packed tile's
+sample bounds. Both presenters interpolate at pixel centers, including fractional
+native-size placement, and clamp taps to the original tile rather than the pane
+cut. No cropped decoded-image copy is allocated; painter order and atlas limits
+are unchanged.
+
+During dirty-rectangle packing for GPU upload, each nontransparent
 pixel is unpremultiplied in encoded space, clamped, decoded through the sRGB
 transfer function, premultiplied by alpha in linear light, and re-encoded for
 storage; transparent pixels become `[0, 0, 0, 0]`, and alpha is unchanged. The
@@ -563,8 +579,10 @@ BGRA 彩色位图按非透明区域的半开边界裁剪，保留最后一行和
 ### 行缓存与塑形缓存
 
 `RowGlyphCache` 按 `(pane id, absolute row, row hash)` 保存字形实例、下划线、缺失字形
-记录和缺字方框。`LineQuadCache` 按相同的行身份保存背景与装饰矩形。由于缓存的字形实例
-已携带投影后的屏幕坐标，其缓存键除单元格内容、字体/样式修订号、单元格度量、显示缩放、
+记录和缺字方框。`LineQuadCache` 为每个 `(pane id, absolute row)` 保存一个背景/装饰投影，
+有效性哈希包含视口行位置。位置变化会重新投影该行并替换旧值，不会额外占用缓存条目；同一位置
+重绘仍可命中。绝对脏行失效仍限制在对应窗格，容量上限及新行淘汰策略保持不变。由于缓存的字形
+实例已携带投影后的屏幕坐标，其缓存键除单元格内容、字体/样式修订号、单元格度量、显示缩放、
 图集内容身份及仅在选区与该行相交时加入的选区矩形外，还包含 pane 原点和表面尺寸。
 
 字体、主题、缩放、窗格身份、图集重置或内容身份变化都会使相关条目失效。字体或 DPI
@@ -628,7 +646,15 @@ iTerm2 文件图像、kitty graphics 和 Sixel 事件由应用解码。声明宽
 缓冲。结果使用预乘、sRGB 编码的 BGRA8：RGB 已编码，并已乘以线性 alpha 通道。
 
 已解码图像仍由所属窗格拥有；数量和字节上限见[内存](Memory)。渲染器把可见图像复制到
-**独立**图像图集，因此媒体压力不能淘汰文字字形，也不能复用文字 UV。GPU 脏矩形打包时，
+**独立**图像图集，因此媒体压力不能淘汰文字字形，也不能复用文字 UV。图像可见范围是目标矩形、
+所属窗格扣除内边距后的实际内容矩形与表面的交集。图像裁剪不使用单元格布局最小值：内边距耗尽
+窗格空间时，图像裁剪范围为空，即使网格仍保留一个单元格。同一可见性检查控制图集驻留和绘制；
+完全裁剪或尚未解码的图像
+既不提升图集，也不分配图块。裁剪保留原始位置和缩放，并将可见目标/UV 与原始已打包图块的
+采样边界分开保存。两种 presenter 都在像素中心插值，包括原始尺寸下的分数位置，并把采样点
+限制在原始图块内，而不是窗格裁剪边缘。不分配裁剪后的解码像素副本，绘制顺序与图集上限不变。
+
+GPU 脏矩形打包时，
 每个非透明像素先在编码空间反预乘并限制范围，再经 sRGB 传递函数解码、在线性光空间乘以
 alpha，最后重新编码后存储；透明像素规范化为 `[0, 0, 0, 0]`，alpha 保持不变。CPU 字节
 不会被重写。Windows 软件呈现会对每个选中的纹素执行相同的零 alpha 规范化及

@@ -69,11 +69,23 @@ struct ShaderUniform {
     projection: [[f32; 4]; 4],
 }
 
+/// One clipped image draw with its original packed-atlas sampling boundary.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ImageInstance {
+    /// Visible `[x, y, width, height]` in physical surface pixels.
+    pub rect_px: [f32; 4],
+    /// Visible normalized UV endpoints, interpolated across `rect_px`.
+    pub uv: [f32; 4],
+    /// Original packed tile UV endpoints, independent of destination clipping.
+    pub sample_uv: [f32; 4],
+}
+
 /// Single final presentation pipeline for all atlas glyphs and colored
 /// geometry. Replaces the separate SonicTerm text/quad render pipelines at
 /// the final draw boundary.
 pub struct WeztermPipeline {
     pipeline: wgpu::RenderPipeline,
+    reset_pipeline: wgpu::RenderPipeline,
     dual_source_pipeline: Option<wgpu::RenderPipeline>,
     image_bind_group_layout: wgpu::BindGroupLayout,
     glyph_bind_group_layout: wgpu::BindGroupLayout,
@@ -189,6 +201,8 @@ impl WeztermPipeline {
         };
         let pipeline =
             create_pipeline("sonic-wezterm-present-pipeline", &shader, premultiplied_alpha_blend());
+        let reset_pipeline =
+            create_pipeline("sonic-retained-reset-pipeline", &shader, wgpu::BlendState::REPLACE);
         let dual_source_pipeline = dual_source_shader.as_ref().map(|shader| {
             create_pipeline("sonic-wezterm-dual-source-pipeline", shader, dual_source_alpha_blend())
         });
@@ -224,6 +238,7 @@ impl WeztermPipeline {
 
         Self {
             pipeline,
+            reset_pipeline,
             dual_source_pipeline,
             image_bind_group_layout,
             glyph_bind_group_layout,
@@ -246,7 +261,7 @@ impl WeztermPipeline {
         &self.glyph_bind_group_layout
     }
 
-    /// Upload and draw all layers in final painter order.
+    /// Upload one batch, replace optional damage pixels, then blend layers in final painter order.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_frame<'p>(
         &'p mut self,
@@ -258,14 +273,19 @@ impl WeztermPipeline {
         surface_w: f32,
         surface_h: f32,
         subpixel_aa: SubpixelAaMode,
+        reset: Option<QuadInstance>,
         quads: &[QuadInstance],
-        images: &[GlyphInstance],
+        images: &[ImageInstance],
         glyphs: &[GlyphInstance],
         overlay_quads: &[QuadInstance],
         overlay_glyphs: &[GlyphInstance],
     ) {
-        let total_quads =
-            quads.len() + images.len() + glyphs.len() + overlay_quads.len() + overlay_glyphs.len();
+        let total_quads = usize::from(reset.is_some())
+            + quads.len()
+            + images.len()
+            + glyphs.len()
+            + overlay_quads.len()
+            + overlay_glyphs.len();
         if total_quads == 0 {
             // When: total_quads is zero there is no geometry to upload, so returning
             // early avoids writing empty buffers and issuing a zero-index draw.
@@ -273,8 +293,10 @@ impl WeztermPipeline {
         }
 
         let mut vertices = Vec::with_capacity(total_quads * VERTICES_PER_QUAD);
+        push_quad_instances(&mut vertices, reset.as_slice(), surface_w, surface_h);
+        let reset_indices = (vertices.len() / VERTICES_PER_QUAD * INDICES_PER_QUAD) as u32;
         push_quad_instances(&mut vertices, quads, surface_w, surface_h);
-        push_glyph_instances(&mut vertices, images, surface_w, surface_h, subpixel_aa);
+        push_image_instances(&mut vertices, images, surface_w, surface_h);
         push_glyph_instances(&mut vertices, glyphs, surface_w, surface_h, subpixel_aa);
         push_quad_instances(&mut vertices, overlay_quads, surface_w, surface_h);
         push_glyph_instances(&mut vertices, overlay_glyphs, surface_w, surface_h, subpixel_aa);
@@ -299,13 +321,18 @@ impl WeztermPipeline {
                 .as_ref()
                 .expect("effective LCD mode requires a dual-source pipeline"),
         };
-        pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &self.uniform_bind_group, &[]);
         pass.set_bind_group(1, image_atlas_bind_group, &[]);
         pass.set_bind_group(2, glyph_atlas_bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
         pass.set_index_buffer(self.index_buf.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
+        if reset_indices > 0 {
+            // Retained ink must be erased independently of content alpha and LCD mode.
+            pass.set_pipeline(&self.reset_pipeline);
+            pass.draw_indexed(0..reset_indices, 0, 0..1);
+        }
+        pass.set_pipeline(pipeline);
+        pass.draw_indexed(reset_indices..indices.len() as u32, 0, 0..1);
     }
 
     fn ensure_capacity(&mut self, device: &wgpu::Device, vertices: u64, indices: u64) {
@@ -338,6 +365,31 @@ impl WeztermPipeline {
     }
 }
 
+fn push_image_instances(out: &mut Vec<Vertex>, images: &[ImageInstance], sw: f32, sh: f32) {
+    for image in images {
+        let [x, y, w, h] = image.rect_px;
+        if w <= 0.0 || h <= 0.0 {
+            // When: `w` or `h` is empty, no image fragments can be produced.
+            continue;
+        }
+        let [u0, v0, u1, v1] = image.uv;
+        let tex = [[u0, v0], [u1, v0], [u0, v1], [u1, v1]];
+        push_rect_vertices(
+            out,
+            x,
+            y,
+            w,
+            h,
+            sw,
+            sh,
+            [1.0; 4],
+            IS_IMAGE,
+            tex,
+            [image.sample_uv; VERTICES_PER_QUAD],
+        );
+    }
+}
+
 fn push_glyph_instances(
     out: &mut Vec<Vertex>,
     glyphs: &[GlyphInstance],
@@ -357,11 +409,7 @@ fn push_glyph_instances(
             continue;
         }
         let color = g.color;
-        let has_color = if g.flags[2] >= 0.5 {
-            IS_IMAGE
-        } else if g.flags[0] >= 0.5 {
-            // When: flags[0] marks a colour glyph, so the atlas already holds its RGB and
-            // the shader samples it directly instead of tinting coverage with fg_color.
+        let has_color = if g.flags[0] >= 0.5 {
             IS_COLOR_EMOJI
         } else if g.flags[1] >= 0.5 {
             // When: `g.flags[1]` marks a subpixel mask, `subpixel_aa` selects its presentation classification.
@@ -377,14 +425,19 @@ fn push_glyph_instances(
         };
         let [u0, v0, u1, v1] = g.uv;
         let tex = [[u0, v0], [u1, v0], [u0, v1], [u1, v1]];
-        // Image vertices carry tile-local bounds because the sampler only clamps to the whole packed atlas.
-        let params = if has_color == IS_IMAGE {
-            [g.uv; VERTICES_PER_QUAD]
-        } else {
-            // When: has_color is not IS_IMAGE, the vertex does not need tile-local sampling bounds.
-            [[0.0; 4]; VERTICES_PER_QUAD]
-        };
-        push_rect_vertices(out, x, y, w, h, sw, sh, color, has_color, tex, params);
+        push_rect_vertices(
+            out,
+            x,
+            y,
+            w,
+            h,
+            sw,
+            sh,
+            color,
+            has_color,
+            tex,
+            [[0.0; 4]; VERTICES_PER_QUAD],
+        );
     }
 }
 

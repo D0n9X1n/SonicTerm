@@ -71,15 +71,23 @@ backstop. Retention is measured before it is charged, so a failed charge does
 not undo memory already retained. A failed growth keeps the previous charge. A
 failed new charge leaves that class absent and writes a `memory` debug record.
 
-A pane owns one `CommittedReservation` per charged `ResourceClass`. A charge is
-resized in place with `try_grow` or `shrink`; it is not released and recreated
-between samples. Owner reattribution passes the complete charge set to
-`CommittedReservation::transfer_batch`. Every token must share one ledger and
-source owner; the batch preserves classes and validates all source balances,
-target states, and target limits under one ordered lock set before mutation.
-Success changes owner-path accounting and token owner ids without changing
-process or per-class totals. Failure leaves every token and ledger shard at the
-source.
+A pane owns one `CommittedReservation` per charged `ResourceClass`. Retention
+uses `try_resize` in place, including samples where bytes grow while items shrink
+or vice versa. Final admission is `current total - old charge + new charge`, not
+a component-wise maximum or release/re-reserve cycle. Any growing axis requires
+open ancestors; reductions can settle while closing. State locks precede class
+locks and ascending owner-usage locks; process-byte growth uses the existing CAS
+as the final fallible step. Refusal leaves the token and all balances unchanged.
+Snapshots remain observational rather than one linearizable global reading.
+
+One-pane reconciliation uses `CommittedReservation::transfer_batch`; tab
+attachment uses `transfer_many` for every moved pane's charges and individual
+target owner in one same-ledger transaction. Both preserve classes and validate
+source balances, target states, and final owner limits before changing any
+shard. Immutable parent ids precede children, so both follow the same ordered
+state/class/owner locks. Success changes owner-path balances and token owner ids
+without changing process or per-class totals. Refusal preserves all source
+tokens; provisional empty owners drop before source custody is restored.
 
 Close order is load-bearing:
 
@@ -112,6 +120,17 @@ correctness, not only speed.
   include pane padding and are clipped to the pane and surface.
 - A dirty alternate-screen pane contributes its complete surface-clipped pane.
   A clean alternate-screen pane contributes no damage.
+- Full-surface replacement clears the retained attachment once; partial damage
+  uses a non-blending background reset under its scissor. Reset and content share
+  one buffer upload and separate draw ranges, preserving content source-over and
+  LCD blending while erasing prior ink without alpha accumulation.
+- Projected background-cache validity includes the viewport row slot. Each
+  `(pane id, absolute row)` owns one projection, replaced when its hash changes;
+  dirty invalidation remains absolute and pane-local with the same capacity cap.
+- Inline-image visibility intersects the original destination, pane content, and
+  surface for both atlas residency and emission. Visible UVs preserve the source
+  transform; separate original tile bounds clamp GPU and CPU bilinear taps. Images
+  retain fractional pixel coordinates without changing text glyph alignment.
 - Changes to terminal cells mark affected rows in the same frame. This includes
   scrolling, reverse index, line insertion/deletion, erase, resize, and
   wide-cell repair.
@@ -483,12 +502,18 @@ Process
 计费失败不会撤销已经保留的内存。增长失败时保留原计费值。新类别计费失败时，该类别保持
 缺失，并写一条 `memory` debug 记录。
 
-窗格为每个已计费的 `ResourceClass` 持有一个 `CommittedReservation`。计费通过
-`try_grow` 或 `shrink` 原地调整，不会在两次采样之间先释放再重新创建。重新归属所有者时，
-代码把完整计费集合交给 `CommittedReservation::transfer_batch`。每个令牌必须属于同一账本和
-同一源所有者；批次会保留分类，并在修改前用一套有序锁完整验证源余额、目标状态和目标上限。
-成功时只修改所有者路径记账和令牌所有者 id，不改变进程总量或各分类总量；失败时全部令牌和
-账本分片都精确保留在源端。
+窗格为每个已计费的 `ResourceClass` 持有一个 `CommittedReservation`。常驻内存采样通过
+`try_resize` 原地调整，也支持字节增长而条目减少或相反的混合变化。最终准入按
+`当前总量 - 旧计费 + 新计费` 计算，不使用逐维最大值，也不先释放再预留。任一维增长都要求
+祖先仍开放；纯减少允许在关闭过程中结算。先获取状态锁，再获取类别锁和按所有者 id 升序的
+用量锁；进程字节增长通过已有 CAS 完成最后一个可失败步骤。拒绝时令牌和所有余额都不变。
+快照仍是观察性读数，而不是一次全局线性化读取。
+
+单窗格协调使用 `CommittedReservation::transfer_batch`；标签页附加使用 `transfer_many`，
+把每个移动窗格的计费及其各自目标所有者纳入同一账本事务。两者都保留分类，并在修改任何分片前
+验证源余额、目标状态及最终所有者上限。不可变父节点的 id 总小于子节点，因此两者遵循同一套
+状态、类别和所有者锁顺序。成功只修改所有者路径余额和令牌 owner id，不改变进程或分类总量；
+拒绝时保留全部源令牌，并在恢复源托管状态前释放空的临时所有者。
 
 关闭顺序不能改变：
 
@@ -513,6 +538,14 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
 
 - 主屏幕窗格贡献所有脏行条带的并集。条带包含窗格内边距，并裁剪到窗格和表面。
 - 备用屏幕窗格只要有脏行，就贡献整个经表面裁剪的窗格。没有脏行时不贡献损伤区域。
+- 替换完整表面时只清除一次保留 attachment；局部损伤在裁剪范围内使用无混合背景重置。
+  重置与内容共享一次缓冲上传并使用不同绘制区间，保留内容的 source-over 与 LCD 混合，
+  同时擦除旧墨迹而不累积 alpha。
+- 投影背景缓存的有效性包含视口行位置。每个 `(pane id, absolute row)` 只持有一个投影，
+  哈希变化时替换旧值；脏行失效仍按绝对行且限制在所属窗格，容量上限不变。
+- 内联图像可见性对原始目标、窗格内容和表面求交，同一结果控制图集驻留与绘制。可见 UV
+  保留源变换，独立的原始图块边界限制 GPU 与 CPU 双线性采样点。图像保留分数像素坐标，
+  不改变文字字形的对齐。
 - 终端单元格变化会在同一帧标记受影响的行，包括滚动、反向索引、插入或删除行、擦除、
   调整大小和宽字符修复。
 - 擦除非空主屏幕历史会推进修订计数和精确淘汰计数，并将所有可见行标记为呈现脏行，

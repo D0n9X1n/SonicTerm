@@ -79,7 +79,17 @@ fn subpixel_vertex_kind_respects_mode_and_primitive_precedence() {
     assert_eq!(kind(instance([0.0, 1.0, 0.0, 0.0]), Rgb), IS_SUBPIXEL_RGB);
     assert_eq!(kind(instance([0.0, 1.0, 0.0, 0.0]), Bgr), IS_SUBPIXEL_BGR);
     assert_eq!(kind(instance([1.0, 1.0, 0.0, 0.0]), Rgb), IS_COLOR_EMOJI);
-    assert_eq!(kind(instance([0.0, 1.0, 1.0, 0.0]), Rgb), IS_IMAGE);
+    let image = ImageInstance {
+        rect_px: [1.0, 2.0, 4.0, 6.0],
+        uv: [0.25, 0.25, 0.5, 0.75],
+        sample_uv: [0.0, 0.0, 1.0, 1.0],
+    };
+    let mut vertices = Vec::new();
+    push_image_instances(&mut vertices, &[image], 16.0, 12.0);
+    assert!(vertices.iter().all(|vertex| vertex.has_color == IS_IMAGE));
+    assert!(vertices.iter().all(|vertex| vertex.alt_color == image.sample_uv));
+    assert_eq!(vertices[0].tex, [0.25, 0.25]);
+    assert_eq!(vertices[3].tex, [0.5, 0.75]);
 }
 
 /// The dual-source shader carries independent source color and destination attenuation factors.
@@ -215,6 +225,7 @@ fn render_warp_glyph(
             1.0,
             1.0,
             mode,
+            None,
             &[],
             &[],
             &[glyph],
@@ -522,6 +533,7 @@ fn warp_line_colors_match_software_across_segment_shapes() {
             surface[0],
             surface[1],
             SubpixelAaMode::Off,
+            None,
             &base_quads,
             &[],
             &[],
@@ -697,6 +709,7 @@ fn warp_named_quad_producers_match_software_linear_blend() {
             surface[0],
             surface[1],
             SubpixelAaMode::Off,
+            None,
             &quads,
             &[],
             &[],

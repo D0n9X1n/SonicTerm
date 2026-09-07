@@ -177,6 +177,14 @@ impl CommittedReservation {
         Ok(())
     }
 
+    /// Replace bytes/items at final limits; growth requires open ancestors and refusal preserves every balance.
+    pub fn try_resize(&mut self, actual: ResourceAmount) -> Result<(), BudgetError> {
+        let charge = self.charge();
+        charge.ledger.resize(charge.owner, charge.class, charge.amount, actual)?;
+        self.charge.as_mut().expect("live committed charge").amount = actual;
+        Ok(())
+    }
+
     /// Split an independent committed charge from this token.
     pub fn split(&mut self, amount: ResourceAmount) -> Result<CommittedReservation, BudgetError> {
         let current = self.charge().amount;
@@ -232,6 +240,37 @@ impl CommittedReservation {
             .map_err(CommittedBatchTransferError::Budget)?;
         for reservation in reservations {
             reservation.charge.as_mut().expect("live committed charge").owner = owner;
+        }
+        Ok(())
+    }
+
+    /// Atomically reattribute a same-ledger set of committed charges to their individual target owners.
+    pub fn transfer_many<'a>(
+        transfers: impl IntoIterator<Item = (&'a mut CommittedReservation, ResourceOwnerId)>,
+    ) -> Result<(), CommittedBatchTransferError> {
+        let transfers: Vec<_> = transfers.into_iter().collect();
+        let Some((first, _)) = transfers.first() else {
+            // When: `transfers` is empty, there are no live charges to validate or reattribute.
+            return Ok(());
+        };
+        let ledger = first.charge().ledger.clone();
+        let mut moves = Vec::with_capacity(transfers.len());
+        for (reservation, target) in &transfers {
+            let charge = reservation.charge();
+            if !Arc::ptr_eq(&ledger, &charge.ledger) {
+                // When: a reservation belongs to another ledger, no atomic operation can own every affected balance.
+                return Err(CommittedBatchTransferError::MixedLedger);
+            }
+            moves.push(crate::ledger::ChargeTransfer {
+                source: charge.owner,
+                target: *target,
+                class: charge.class,
+                amount: charge.amount,
+            });
+        }
+        ledger.transfer_many(&moves).map_err(CommittedBatchTransferError::Budget)?;
+        for (reservation, target) in transfers {
+            reservation.charge.as_mut().expect("live committed charge").owner = target;
         }
         Ok(())
     }

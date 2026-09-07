@@ -204,10 +204,15 @@ resizes each visible grid and PTY to its own rectangle, flashes focus, and
 requests redraw. The active pane therefore participates in the next visible
 layout and coherent parser-guard collection.
 
-Child-window tab and split helpers perform the same pane, tree, resize, and
-redraw work. They do not call owner reconciliation at the insertion site. Those
-new panes remain ownerless until another reconciliation pass, normally the next
-30-second retention sample or another operation that invokes reconciliation.
+Main and child operations share `WindowState::complete_topology_change`.
+Each operation chooses its focus, zoom, and tab placement; completion validates
+the parallel tab collections and active/visible pane identity, derives visible
+grid/PTY geometry, registers ownerless panes, resets the IME anchor cache,
+invalidates hover, removes stale selection/scrollbar state, marks damage, and
+requests redraw. Split, close, focus, tab navigation/reorder, merge, attach, and
+tear-out reach this common boundary. Departing panes release both renderer row
+caches through `remove_pane`; rollback preserves the source graph rather than
+running success-only resize or focus effects.
 
 If PTY spawn fails, the pane remains in the topology with `pty: None`. It has a
 parser and grid but no reader, writer, VT worker, or child process.
@@ -281,12 +286,17 @@ Reclamation and charging are independent of log level. `measure_pane` uses
 `try_lock` for the parser and inline-image store. A contended pane is skipped and
 keeps its previous charge.
 
-Moving a pane between windows carries its old owner guard. Re-attribution finds
-that parent mismatch, clears the old charges, closes the old owner, and creates
-a new owner below the destination window. The new owner is recharged from a new
-measurement during the next charge pass. An eager transfer outside a due sample
-can therefore show zero ledger usage for that pane until the next 30-second
-pass.
+Retention updates each existing charge through failure-atomic `try_resize`.
+Mixed byte/item changes settle against final replacement totals; refusal keeps
+the old token and balances. A skipped or refused sample can lag real memory,
+but there is no deliberate release/re-reserve accounting gap.
+
+Window transfers prepare destination pane owners and move every tab charge via
+one `transfer_many` transaction before swapping guards or reaping the source.
+Process and class totals remain unchanged, without remeasuring locked parsers.
+Refusal drops provisional owners and restores source custody with its original
+charges. An unregistered destination accepts only panes without nonzero charges.
+Periodic single-pane parent repair retains atomic `transfer_batch` semantics.
 
 Renderer surfaces, glyph atlases, image atlases, and software frames are
 reported separately. They are not charged to this governor.
@@ -304,34 +314,62 @@ not retry.
 ### Input and effect state changes
 
 Keyboard ownership and terminal-byte encoding are summarized in
-[From Keypress to Pixel](From-Keypress-to-Pixel). The key lifecycle is:
-local owner → keymap → `encode_key` → PTY intent/effect → bounded input queue.
-
-`App::dispatch_intent` routes one `AppIntent` through
-`AppStateMachine::handle`. The reducer updates `AppState` and returns a stable
-class-sorted effect batch. `App::dispatch_effects` then crosses application
-boundaries.
+[From Keypress to Pixel](From-Keypress-to-Pixel). Native input reaches
+`write_to_pane` after local routing and encoding, without a transient reducer.
+The pane's bounded queue and rejection diagnostics are the only admission path.
 
 ```mermaid
 flowchart TD
-    source["input or lifecycle code"]
-    intent["AppIntent"]
-    machine["AppStateMachine::handle"]
-    state["update backend-free AppState"]
-    effects["stable class-sorted AppEffect batch"]
-    dispatch["App::dispatch_effects"]
-    boundary["PTY, redraw, clipboard, URL, window, menu, log"]
-    live["App / WindowState live mutation when required"]
+    source["native input or lifecycle code"]
+    live["App / WindowState authoritative mutation"]
+    observe["observe_intent"]
+    machine["AppStateMachine::handle<br/>observational AppState; discard effects"]
+    explicit["supported explicit-target intent / effect"]
+    resolve["resolve stable live window / pane"]
+    boundary["bounded PTY, redraw, or side-channel operation"]
 
-    source --> intent --> machine --> state --> effects --> dispatch --> boundary
-    source --> live
-    dispatch --> live
+    source --> live --> boundary
+    source --> observe --> machine
+    explicit --> resolve --> boundary
 ```
 
-The two state domains are explicit. `AppState` is authoritative for values the
-reducer owns. `App` and `WindowState` are authoritative for live winit windows,
-`PaneTree`, parsers, renderers, and PTYs. Some effects perform work directly.
-Others record a reducer decision while the native path performs the mutation.
+All `AppState` fields are compatibility observations in the GUI, not decision
+inputs for its live topology. The backend-free reducer remains independently
+usable and keeps its stable effect ordering and bounded follow-on queue.
+
+| Observational `AppState` fields | Authoritative live state |
+| --- | --- |
+| `cols`, `rows`, `last_window_pos` | each native window/renderer and pane grid geometry |
+| `focused_window`, `live_window_count` | `App::windows`, `main_window_id`, native focus, and empty-window policy |
+| `tab_count`, `active_tab_idx` | each window's `TabBar` and parallel `TabState` vector |
+| `pane_count`, `focused_pane_idx`, `pane_zoomed` | active `TabState` and its `PaneTree` |
+| `last_mouse_pos`, `mouse_left_down`, `selection_active` | window pointer gesture, cursor, and selection state |
+| `search_open`, `palette_open` | tab search and the app palette's attached window |
+| `fg_proc_name`, `broadcast_scope` | live pane process observations and `App::broadcast` |
+
+The operational boundary is separate from those observations:
+
+| Intent or explicit effect | GUI behavior |
+| --- | --- |
+| `PtyWrite` intent/effect | exact pane's bounded input queue |
+| `PtyExit`; `PtyClose`, `ChildExitPropagate` effects | close the identified pane through live topology; report exit metadata |
+| `PtyBurst`, `ForegroundProcChanged` intents | request the named live pane's current window redraw |
+| `RedrawRequested`, pressed `Key`, IME start/preedit/end, hover, scroll, and wheel intents | redraw only the named live window; native handlers own encoding and content changes |
+| `ImeCommit`, `Paste` intents | resolve the named live window's active pane and queue supplied text; native routes own overlay policy and paste wrapping |
+| `ClickUrl`; `OpenURL`, nonempty `ClipboardSet`, `Notification` effects | native side channels, with URL validation; empty clipboard sentinel is inert |
+| `Exit` intent; `Quit` effect | explicit application exit request |
+| `Render`, `RenderDirtyRect`, `WindowResize` effects | named-window redraw only; no claim of native resize completion |
+| `WindowOpen` effect | queue creation for the event loop; not a completed window |
+| `ChildSpawn`, `OsDragStart/End`, `ClipboardRequest`, `WindowClose/Move/SetTitle`, `TimerSchedule/Cancel`, `MenubarUpdate` effects | record-only; native app/platform paths own the work |
+| `LogEvent` effect | forward structured diagnostics |
+| all other intents | `observe_intent` updates only compatibility state and discards the reducer batch |
+
+Window keys start at one, are monotonic, and are removed on closure without
+reuse. Missing, removed, and zero keys do not mean main or frontmost. Native
+window-close and tab/pane actions run their existing live paths and only observe
+the reducer; a stale `live_window_count` cannot close windows or trigger quit.
+Source-less menu actions may select the current window, but an explicitly named
+missing source never falls through to a different terminal.
 
 ### Redraw and wait lifecycle
 
@@ -359,8 +397,13 @@ loop. A memory-only wake performs retention work without creating a heartbeat
 redraw.
 
 Frame collection uses non-blocking parser and image locks. One unavailable lock
-defers the complete frame and arms another deadline. Successful guards remain
-alive through `GpuRenderer::render`.
+defers the complete frame and sets that window's `retry_not_before` to the failed
+attempt time plus its effective frame period. This floor is separate from the
+last-frame timestamp and is combined with normal pacing. Input or redraw events
+before it cannot bypass or extend it. A due failed attempt rearms from that
+attempt; coherent collection clears it before renderer-specific retries, and
+window removal discards it. Successful guards remain alive through
+`GpuRenderer::render`; no blocking lock or unconditional heartbeat is added.
 
 ### Config reload and save
 
@@ -416,6 +459,11 @@ only when the cursor is at least 5 raster pixels from its press position.
 Below that threshold it remains a click, even if another window's tab bar
 overlaps the release point or the cursor slips just outside the source bar.
 Main and child windows share this decision; keyboard tab navigation bypasses it.
+The gesture captures `WindowId` and `TabId` at press time, and native handoff
+retains the same stable identity. Reorder, merge, tear-out, and completion resolve
+its current index immediately before mutation. Closing or reordering an earlier
+tab cannot change the source; closing the captured tab or window cancels the
+move. A drag chip uses the captured tab's current title and index.
 
 For a genuine drag, a foreign tab bar takes precedence over source-bar reorder
 or cancellation. Otherwise, in-process tear-out requires an inclusive 40-raster-
@@ -426,12 +474,19 @@ derived height; this rule does not change native OS drag-handoff policy.
 In-process reorder, merge, and tear-out move live `Tab`, `TabState`, and
 `PaneState` values. `PtyHandle` is not cloned or respawned. Each successfully
 attached pane gets the destination `WindowId` in its shared redraw target.
+Attachment inserts and activates the tab before computing the destination's live
+pane rectangles. Each visible grid and PTY receives only its final pane size,
+never an intermediate whole-window resize. Zoom-hidden siblings keep their prior
+valid sizes until unzoom resizes them to split rectangles before presentation.
 
-`transfer_tab` checks source bounds and destination-window existence before it
-detaches. That check does not prove a child destination has a renderer. If
-`attach_to_child` then refuses, the detached panes drop and their children
-terminate. Direct `merge_child_into_target` and `merge_main_into_child` also
-detach before attachment and have the same loss-on-failure behavior.
+`transfer_tab` validates source identity and destination readiness before
+detaching. Direct `merge_child_into_target` and `merge_main_into_child` use the
+same transaction. Attachment verifies pane custody, active/zoom identity, and
+destination identity collisions before committing accounting. Refusal returns
+`TabAttachmentError` with every live object; the transaction restores source
+position and prior active-tab identity without resizing, changing redraw targets,
+or releasing charges. Source hiding/reaping and destination focus occur only
+after successful attachment.
 
 The hidden warm-window pool reduces tear-out latency:
 
@@ -458,11 +513,13 @@ prior active tab is restored. Rollback does not resize grids or PTYs, rewrite
 redraw targets, reattribute owners, clear charges, hide the main window, or reap
 a child window.
 
-After preparation succeeds, commit changes pane redraw targets, registers and
-sizes the destination, then reveals it once and requests its first frame.
-Source-side neighbour activation, hiding, or reaping runs only after that commit.
-The reducer records a main tab as leaving its source strip only after the chosen
-merge, OS-handoff, or new-window route reports commitment.
+After native preparation succeeds, accounting admission remains fallible. The
+app prepares destination owners and transfers all pane charges before changing
+redraw targets, registering the live window, or sizing its panes. An accounting
+refusal drops the hidden artifacts and restores the source transaction. Success
+reveals the destination once and requests its first frame; only then may source
+neighbour activation, hiding, or reaping run. Reducer departure observations are
+record-only and cannot execute a second native operation.
 
 Native drag support differs by platform:
 
@@ -708,9 +765,12 @@ flowchart TD
 按各自矩形调整每个可见网格和 PTY，显示焦点闪烁，并请求重绘。因此，活动窗格会参与下一次
 可见布局及一致的解析器 guard 收集。
 
-子窗口的新标签页和分屏辅助函数也会创建窗格、修改树、调整尺寸并重绘，但插入位置没有调用
-所有者协调。这些新窗格会暂时没有所有者，直到其它协调过程运行，通常是下一次 30 秒常驻
-内存采样，或者另一个会触发协调的操作。
+主窗口和子窗口操作共用 `WindowState::complete_topology_change`。每个操作明确选择焦点、
+放大状态和标签页位置；完成步骤验证并行标签页集合及活动/可见窗格身份，推导可见网格与 PTY
+几何，注册无所有者窗格，重置输入法锚点缓存，使 hover 失效，移除过期选区/滚动条状态，标记
+损伤并请求重绘。分屏、关闭、焦点切换、标签页导航/重排、合并、附加和拆出都经过该共同边界。
+离开的窗格通过 `remove_pane` 释放渲染器的两种行缓存；回滚则保留源图，不执行只属于成功路径
+的尺寸调整或焦点效果。
 
 PTY 启动失败时，窗格仍留在拓扑中，`pty: None`。它有解析器和网格，但没有 reader、writer、
 VT 工作线程或子进程。
@@ -773,9 +833,14 @@ Process
 回收和计费不受日志级别控制。`measure_pane` 对解析器和内联图像存储使用 `try_lock`。
 锁竞争的窗格会被跳过，并保留上次计费值。
 
-窗格跨窗口移动时会带着原所有者保护对象。重新归属过程发现父级不匹配后，会清空旧计费，
-关闭旧所有者，并在目标窗口下创建新所有者。下一轮计费使用新测量值为它重新计费。因此，
-若即时转移发生在采样到期之外，该窗格在下一次 30 秒计费前可能显示为总账零占用。
+常驻内存通过失败原子的 `try_resize` 更新已有计费。字节与条目混合变化按最终替换总量结算；
+拒绝时保留旧令牌和余额。跳过或拒绝的采样可能落后于实际内存，但不会故意制造释放再预留的
+记账空档。
+
+跨窗口转移先准备目标窗格所有者，通过一次 `transfer_many` 事务移动标签页的全部计费，
+然后才替换守卫或回收源窗口。无需重新测量被锁定的解析器，进程和类别总量始终不变。
+拒绝时释放临时所有者，并连同原有计费恢复源托管状态。未注册目标只接受没有非零计费的窗格。
+周期性单窗格父级修复仍使用原子的 `transfer_batch`。
 
 渲染器表面、字形图集、图像图集和软件帧单独报告，不计入这份总账。
 
@@ -790,31 +855,58 @@ Process
 
 ### 输入与效果状态变化
 
-键盘所有权和终端字节编码见 [从按键到像素](From-Keypress-to-Pixel)。按键生命周期可以概括为：
-本地输入所有者 → 键位 → `encode_key` → PTY 意图/效果 → 有界输入队列。
-
-`App::dispatch_intent` 把一个 `AppIntent` 交给 `AppStateMachine::handle`。归约器更新
-`AppState`，并返回按类别稳定排序的一批效果。`App::dispatch_effects` 随后跨越应用边界。
+键盘所有权和终端字节编码见[从按键到像素](From-Keypress-to-Pixel)。原生输入在本地路由与
+编码后直接进入 `write_to_pane`，不构建临时归约器。窗格的有界队列和拒绝诊断是唯一准入路径。
 
 ```mermaid
 flowchart TD
-    source["输入或生命周期代码"]
-    intent["AppIntent"]
-    machine["AppStateMachine::handle"]
-    state["更新不依赖后端的 AppState"]
-    effects["按类别稳定排序的 AppEffect"]
-    dispatch["App::dispatch_effects"]
-    boundary["PTY、重绘、剪贴板、URL、窗口、菜单、日志"]
-    live["需要时修改 App / WindowState 实时状态"]
+    source["原生输入或生命周期代码"]
+    live["App / WindowState 权威状态修改"]
+    observe["observe_intent"]
+    machine["AppStateMachine::handle<br/>观察性 AppState；丢弃效果"]
+    explicit["受支持的显式目标意图 / 效果"]
+    resolve["解析稳定的存活窗口 / 窗格"]
+    boundary["有界 PTY、重绘或旁路操作"]
 
-    source --> intent --> machine --> state --> effects --> dispatch --> boundary
-    source --> live
-    dispatch --> live
+    source --> live --> boundary
+    source --> observe --> machine
+    explicit --> resolve --> boundary
 ```
 
-两套状态的范围明确分开。归约器持有的值以 `AppState` 为准。实时 winit 窗口、`PaneTree`、
-解析器、渲染器和 PTY 以 `App` 与 `WindowState` 为准。一部分效果直接执行工作，另一部分只
-记录归约器决定，实际修改由原生路径完成。
+在 GUI 中，所有 `AppState` 字段都只是兼容观察记录，不参与实时拓扑决策。不依赖后端的
+归约器仍可独立使用，并保留稳定效果排序和有界后续队列。
+
+| 观察性的 `AppState` 字段 | 权威实时状态 |
+| --- | --- |
+| `cols`、`rows`、`last_window_pos` | 各原生窗口/渲染器及窗格网格几何 |
+| `focused_window`、`live_window_count` | `App::windows`、`main_window_id`、原生焦点和空窗口策略 |
+| `tab_count`、`active_tab_idx` | 各窗口的 `TabBar` 与并行 `TabState` 向量 |
+| `pane_count`、`focused_pane_idx`、`pane_zoomed` | 活动 `TabState` 及其 `PaneTree` |
+| `last_mouse_pos`、`mouse_left_down`、`selection_active` | 窗口指针手势、光标与选区状态 |
+| `search_open`、`palette_open` | 标签页搜索与应用命令面板的附着窗口 |
+| `fg_proc_name`、`broadcast_scope` | 存活窗格进程观察与 `App::broadcast` |
+
+可执行边界与这些观察记录分开：
+
+| 意图或显式效果 | GUI 行为 |
+| --- | --- |
+| `PtyWrite` 意图/效果 | 指定窗格的有界输入队列 |
+| `PtyExit`；`PtyClose`、`ChildExitPropagate` 效果 | 通过实时拓扑关闭指定窗格，并报告退出元数据 |
+| `PtyBurst`、`ForegroundProcChanged` 意图 | 请求指定存活窗格当前窗口的重绘 |
+| `RedrawRequested`、按下的 `Key`、IME 开始/预编辑/结束、hover、滚动和滚轮意图 | 只重绘指定存活窗口；编码与内容变化由原生处理器负责 |
+| `ImeCommit`、`Paste` 意图 | 解析指定存活窗口的活动窗格并排队所给文本；原生路径负责浮层策略与粘贴包装 |
+| `ClickUrl`；`OpenURL`、非空 `ClipboardSet`、`Notification` 效果 | 原生旁路操作，URL 经过校验；空剪贴板哨兵不执行操作 |
+| `Exit` 意图；`Quit` 效果 | 显式应用退出请求 |
+| `Render`、`RenderDirtyRect`、`WindowResize` 效果 | 只请求指定窗口重绘，不声称已完成原生尺寸调整 |
+| `WindowOpen` 效果 | 将创建请求排给事件循环，不表示窗口已经创建 |
+| `ChildSpawn`、`OsDragStart/End`、`ClipboardRequest`、`WindowClose/Move/SetTitle`、`TimerSchedule/Cancel`、`MenubarUpdate` 效果 | 只记录，实际工作由原生应用/平台路径执行 |
+| `LogEvent` 效果 | 转发结构化诊断 |
+| 其它所有意图 | `observe_intent` 只更新兼容状态，并丢弃归约器效果批次 |
+
+窗口 key 从一开始单调分配，关闭时删除且不复用。缺失、已移除和零 key 都不表示主窗口或
+最前窗口。原生窗口关闭及标签页/窗格 action 执行已有实时路径，归约器只作观察；过期的
+`live_window_count` 不能关闭窗口或触发退出。无来源的菜单 action 可以选择当前窗口，但显式
+指定且已缺失的来源绝不回退到另一终端。
 
 ### 重绘与等待生命周期
 
@@ -837,8 +929,11 @@ flowchart TD
 最早期限优先。没有期限时使用 `ControlFlow::Wait` 停住循环。只由内存期限触发的唤醒会执行
 常驻内存工作，不会制造心跳重绘。
 
-帧收集对解析器和图像使用非阻塞锁。任一锁不可用时会推迟完整帧并设置下一次期限。成功取得的
-保护对象一直存活到 `GpuRenderer::render` 返回。
+帧收集对解析器和图像使用非阻塞锁。任一锁不可用时会推迟完整帧，并将该窗口的
+`retry_not_before` 设置为失败尝试时刻加有效帧周期。这个下限独立于上一帧时间戳，并与普通
+帧节奏合并。期限前的输入或重绘事件既不能绕过它，也不能延后它；到期尝试再次失败时，才从
+该次尝试重新计时。成功收集完整帧后，会在渲染器自身的重试逻辑之前清除该状态；移除窗口时
+一并丢弃。成功取得的保护对象一直存活到 `GpuRenderer::render` 返回，不增加阻塞锁或无条件心跳。
 
 ### 配置重载与保存
 
@@ -885,6 +980,9 @@ tracing subscriber，只能在下次进程启动时生效。
 鼠标按下时会激活所点的标签页；松开时，只有光标距离按下位置至少 5 个栅格像素，才允许重排、
 合并或拆出。低于该阈值时仍然是单击，即使另一窗口的标签栏与松开位置重叠，或光标轻微滑出
 源标签栏，也不会移动标签页。主窗口与子窗口共用这一判断；键盘切换标签页不经过该路径。
+手势在按下时捕获 `WindowId` 和 `TabId`，原生交接保留同一稳定身份。重排、合并、拆出和
+完成处理都在修改前解析当前下标。关闭或重排前面的标签页不会改变源；若被捕获的标签页或
+窗口已关闭，则取消移动。拖动浮片使用该标签页当前的标题和下标。
 
 真实拖动时，外部标签栏优先于源标签栏的重排或取消。否则，进程内拆出要求光标到实时标签栏
 上边缘或下边缘的垂直外部距离至少为 40 个栅格像素（含边界）；仅横向离开不足以拆出。
@@ -892,10 +990,15 @@ tracing subscriber，只能在下次进程启动时生效。
 
 进程内重排、合并和拆出会移动存活的 `Tab`、`TabState` 和 `PaneState`。`PtyHandle` 不会复制
 或重启。窗格成功附加后，共享重绘目标会改成目标 `WindowId`。
+附加时先插入并激活标签页，再计算目标窗口的实时窗格矩形。每个可见网格和 PTY 只接收最终
+窗格尺寸，不会经过整窗尺寸的中间调整。缩放隐藏的兄弟窗格保留原先有效尺寸，取消缩放时
+会在呈现之前按拆分矩形调整。
 
-`transfer_tab` 会在移除前检查源下标和目标窗口是否存在，但这不能证明子窗口目标拥有渲染器。
-若 `attach_to_child` 随后拒绝附加，已移除的窗格会被析构，其子进程也会终止。
-`merge_child_into_target` 与 `merge_main_into_child` 同样先移除、后附加，失败时也会丢失窗格。
+`transfer_tab` 在移除前验证源身份与目标就绪状态。`merge_child_into_target` 和
+`merge_main_into_child` 也使用同一事务。附加会在提交计费之前验证窗格托管、活动/放大身份
+以及目标身份冲突。拒绝时通过 `TabAttachmentError` 返回全部存活对象；事务恢复源位置和
+原活动标签页身份，不调整尺寸、不改写重绘目标，也不释放计费。只有附加成功后才隐藏/回收
+源窗口并聚焦目标。
 
 隐藏预热窗口池用于降低拆出延迟：
 
@@ -914,9 +1017,10 @@ tracing subscriber，只能在下次进程启动时生效。
 恢复先前的活动标签页。回滚不会调整网格或 PTY 尺寸、改写重绘目标、重新归属所有者、清除计费、
 隐藏主窗口或回收子窗口。
 
-准备成功后，提交阶段才会修改窗格重绘目标、注册并调整目标尺寸，然后只显示一次并请求首帧。
-源窗口的邻居激活、隐藏或回收只会在提交后运行。只有所选合并、操作系统交接或新窗口路径确认
-提交后，归约器才会记录主窗口标签页已离开源标签栏。
+原生准备成功后，计费准入仍可能失败。应用先准备目标所有者并转移全部窗格计费，然后才修改
+重绘目标、注册存活窗口或调整窗格尺寸。计费拒绝时释放隐藏产物并恢复源事务；成功后只显示
+目标一次并请求首帧，之后才允许源窗口邻居激活、隐藏或回收。归约器的离开观察只作记录，
+不能再次执行原生操作。
 
 各平台原生拖动能力不同：
 
