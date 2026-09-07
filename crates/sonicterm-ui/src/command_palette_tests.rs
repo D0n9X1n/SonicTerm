@@ -1,5 +1,296 @@
 use super::*;
+use crate::i18n::test_translator as translator;
 use sonicterm_cfg::keymap::{ActionWrapper, Binding, Keymap, Meta};
+use PaletteEntry::Command;
+
+/// Pointer highlighting validates display indices without bypassing disabled commands or other picker modes.
+#[test]
+fn pointer_selection_is_bounded_and_preserves_command_availability() {
+    let mut palette = CommandPalette::new();
+    palette.open();
+    palette.set_query("Copy to Clipboard");
+    assert!(palette.select_visible_index(0));
+    assert_eq!(palette.highlighted(), Some(&Command(Action::CopyToClipboard)));
+    assert!(palette.current().is_none());
+    assert!(!palette.select_visible_index(usize::MAX));
+    assert_eq!(palette.selected(), 0);
+    palette.set_query("");
+    palette.set_visible_rows(2);
+    let last = palette.len() - 1;
+    assert!(palette.select_visible_index(last));
+    assert_eq!(palette.scroll_offset(), last - 1);
+    palette.start_rename_tab("literal title");
+    assert!(!palette.select_visible_index(0));
+    assert_eq!(palette.query(), "literal title");
+    palette.start_tab_color_picker(
+        "title",
+        vec![TabColorChoice { name: "default".into(), hex: None }],
+    );
+    assert!(!palette.select_visible_index(0));
+    assert_eq!(palette.selected(), 0);
+}
+
+/// Entry identity distinguishes action parameters and tab IDs while ignoring tab presentation changes.
+#[test]
+fn pointer_entry_identity_ignores_only_tab_presentation() {
+    let mut tabs = TabBar::new();
+    let id = tabs.push(crate::tabs::Tab::new("original"));
+    let other = tabs.push(crate::tabs::Tab::new("original"));
+    let entry = PaletteEntry::Tab { id, title: "original".into(), position: 0 };
+    assert!(entry.same_identity(&PaletteEntry::Tab { id, title: "renamed".into(), position: 1 }));
+    assert!(!entry.same_identity(&PaletteEntry::Tab {
+        id: other,
+        title: "original".into(),
+        position: 0
+    }));
+    assert!(!entry.same_identity(&Command(Action::ActivateTab(0))));
+    assert!(!Command(Action::ActivateTab(0)).same_identity(&Command(Action::ActivateTab(1))));
+}
+
+/// The overflow selector exposes every live tab in order and never includes commands or a closed target.
+#[test]
+fn tab_selector_keeps_only_live_targets_reachable_by_arrows() {
+    let mut tabs = TabBar::new();
+    for index in 0..24 {
+        tabs.push(crate::tabs::Tab::new(format!("terminal {index}")));
+    }
+    let mut palette = CommandPalette::new();
+    palette.set_tabs(&tabs, &translator("en"));
+    palette.set_context(CommandContext {
+        window_available: true,
+        tab_count: tabs.len(),
+        ..CommandContext::default()
+    });
+    palette.open_tabs();
+    palette.set_visible_rows(3);
+    assert_eq!(palette.len(), tabs.len());
+    for tab in tabs.tabs() {
+        assert!(matches!(palette.current(), Some(PaletteEntry::Tab { id, .. }) if *id == tab.id));
+        assert!(palette.selected() >= palette.scroll_offset());
+        assert!(palette.selected() < palette.scroll_offset() + 3);
+        palette.move_selection_down();
+    }
+    assert_eq!(palette.selected(), 0);
+    palette.set_query("new window");
+    assert!(palette.is_empty());
+    palette.set_query("terminal 23");
+    let target = tabs.tabs()[23].id;
+    let position = palette
+        .visible()
+        .iter()
+        .position(|entry| matches!(entry, PaletteEntry::Tab { id, .. } if *id == target))
+        .unwrap();
+    assert!(palette.select_visible_index(position));
+    assert!(matches!(palette.current(), Some(PaletteEntry::Tab { id, .. }) if *id == target));
+    tabs.close(target);
+    palette.set_tabs(&tabs, &translator("en"));
+    assert!(palette.current().is_none());
+    palette.close();
+    palette.open();
+    palette.set_query("new window");
+    assert_eq!(palette.current(), Some(&Command(Action::NewWindow)));
+}
+
+/// Go to Tab rows use runtime identity across duplicate titles, reorder, rename, and replacement.
+#[test]
+fn go_to_tab_tracks_identity_instead_of_title_or_position() {
+    use crate::tabs::{Tab, TabBar};
+    let mut tabs = TabBar::new();
+    let first = tabs.push(Tab::new("duplicate"));
+    let second = tabs.push(Tab::new("duplicate"));
+    let mut palette = CommandPalette::new();
+    palette.set_context(CommandContext {
+        window_available: true,
+        tab_count: 2,
+        ..CommandContext::default()
+    });
+    palette.set_tabs(&tabs, &translator("en"));
+    palette.open();
+    palette.set_query("Go to Tab");
+    palette.set_visible_rows(1);
+    assert_eq!(
+        palette.visible().iter().filter(|entry| matches!(entry, PaletteEntry::Tab { .. })).count(),
+        2
+    );
+    assert!(
+        matches!(palette.current(), Some(PaletteEntry::Tab { id, position: 0, .. }) if *id == first)
+    );
+    palette.move_selection_down();
+    assert!(matches!(palette.current(), Some(PaletteEntry::Tab { id, .. }) if *id == second));
+    let hash = palette.presentation_hash();
+    palette.set_tabs(&tabs, &translator("en"));
+    assert_eq!(palette.presentation_hash(), hash);
+    tabs.reorder(1, 0);
+    tabs.set_title(second, "renamed");
+    palette.set_tabs(&tabs, &translator("en"));
+    assert!(
+        matches!(palette.current(), Some(PaletteEntry::Tab { id, position: 0, title }) if *id == second && title == "renamed")
+    );
+    tabs.close(second);
+    let replacement = tabs.push(Tab::new("renamed"));
+    palette.set_tabs(&tabs, &translator("en"));
+    assert!(
+        palette.current().is_none(),
+        "a replacement cannot inherit selection from a closed tab"
+    );
+    palette.set_context(CommandContext {
+        window_available: true,
+        tab_count: 2,
+        read_only: true,
+        ..CommandContext::default()
+    });
+    assert!(palette.current().is_none(), "later refresh cannot select an unchosen replacement");
+    palette.move_selection_down();
+    assert!(palette.current().is_some());
+    palette.set_query("renamed");
+    assert!(matches!(palette.current(), Some(PaletteEntry::Tab { id, .. }) if *id == replacement));
+    assert_eq!(palette.shortcut_hint_for_visible_index(palette.selected()), None);
+}
+
+/// Same-title replacement invalidates retained frame identity even when rendered strings are identical.
+#[test]
+fn go_to_tab_same_title_replacement_changes_identity_and_keeps_refresh_coherent() {
+    let mut tabs = TabBar::new();
+    let original = tabs.push(crate::tabs::Tab::new("same"));
+    let i18n = translator("en");
+    let mut palette = CommandPalette::new();
+    palette.set_context(CommandContext {
+        window_available: true,
+        tab_count: 1,
+        ..CommandContext::default()
+    });
+    palette.set_tabs(&tabs, &i18n);
+    palette.open();
+    palette.set_query("Go to Tab");
+    let old_hash = palette.presentation_hash();
+    let old_label = palette.label_for_visible_index(palette.selected()).unwrap().to_string();
+    tabs.close(original);
+    let replacement = tabs.push(crate::tabs::Tab::new("same"));
+    palette.set_tabs(&tabs, &i18n);
+    assert_ne!(palette.presentation_hash(), old_hash);
+    assert!(palette.current().is_none());
+    palette.set_keymap(&Keymap::default(), &i18n);
+    palette.set_locale(&translator("ja"));
+    assert!(palette.current().is_none());
+    palette.set_locale(&i18n);
+    palette.move_selection_up();
+    assert!(palette.current().is_some());
+    palette.set_query("Go to Tab");
+    assert_eq!(palette.label_for_visible_index(0), Some(old_label.as_str()));
+    assert!(matches!(palette.current(), Some(PaletteEntry::Tab { id, .. }) if *id == replacement));
+    palette.start_rename_tab("unchanged");
+    tabs.set_title(replacement, "changed");
+    palette.set_tabs(&tabs, &i18n);
+    assert_eq!(palette.query(), "unchanged");
+    palette.open();
+    palette.set_query("changed");
+    assert!(matches!(palette.current(), Some(PaletteEntry::Tab { id, .. }) if *id == replacement));
+}
+
+/// Disabled rows stay searchable and highlighted while only live context can make them executable.
+#[test]
+fn disabled_commands_preserve_identity_and_never_become_current() {
+    let mut palette = CommandPalette::new();
+    palette.open();
+    palette.set_query("Copy to Clipboard");
+    assert_eq!(palette.highlighted(), Some(&Command(Action::CopyToClipboard)));
+    assert_eq!(palette.current(), None);
+    assert_eq!(
+        palette.disabled_reason_for_visible_index(palette.selected()),
+        Some(DisabledReason::NoWindow)
+    );
+    let mut context = CommandContext {
+        window_available: true,
+        tab_count: 2,
+        pane_available: true,
+        ..CommandContext::default()
+    };
+    palette.move_cursor_left();
+    let caret = palette.cursor();
+    let before = palette.presentation_hash();
+    palette.set_context(context);
+    assert_ne!(palette.presentation_hash(), before);
+    assert_eq!(
+        palette.disabled_reason_for_visible_index(palette.selected()),
+        Some(DisabledReason::NoSelection)
+    );
+    let unchanged = palette.presentation_hash();
+    palette.set_context(context);
+    assert_eq!(palette.presentation_hash(), unchanged);
+    context.selection_available = true;
+    palette.set_context(context);
+    assert_eq!(palette.current(), Some(&Command(Action::CopyToClipboard)));
+    context.selection_available = false;
+    palette.set_context(context);
+    assert_eq!(palette.highlighted(), Some(&Command(Action::CopyToClipboard)));
+    assert_eq!(palette.current(), None);
+    assert_eq!(palette.query(), "Copy to Clipboard");
+    assert_eq!(palette.cursor(), caret);
+    palette.set_locale(&translator("ja"));
+    assert_eq!(palette.highlighted(), Some(&Command(Action::CopyToClipboard)));
+    assert_eq!(palette.current(), None);
+}
+
+/// Empty results are grouped stably without changing canonical fuzzy-score ties or command reachability.
+#[test]
+fn categories_group_empty_query_and_keep_search_order() {
+    let mut expected = palette_actions();
+    expected.sort_by_key(|action| crate::command_label::descriptor(action).category);
+    let mut palette = CommandPalette::new();
+    assert_eq!(
+        palette.visible().into_iter().cloned().collect::<Vec<_>>(),
+        expected.into_iter().map(Command).collect::<Vec<_>>()
+    );
+    let pattern = Pattern::parse("create", CaseMatching::Ignore, Normalization::Smart);
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let mut scratch = Vec::new();
+    let canonical = palette_actions();
+    let mut scored: Vec<_> = canonical
+        .iter()
+        .enumerate()
+        .filter_map(|(index, action)| {
+            let label = search_haystack(action);
+            let score = pattern.score(Utf32Str::new(&label, &mut scratch), &mut matcher)?;
+            Some((index, score))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let expected: Vec<_> =
+        scored.iter().map(|(index, _)| Command(canonical[*index].clone())).collect();
+    palette.set_query("create");
+    assert_eq!(palette.visible().into_iter().cloned().collect::<Vec<_>>(), expected);
+    assert_eq!(
+        palette.visible().get(..2),
+        Some([&Command(Action::NewTab), &Command(Action::NewWindow)].as_slice())
+    );
+}
+
+/// Context refresh cannot replace color-choice indices or reset a noncommand selection.
+#[test]
+fn context_refresh_keeps_color_picker_indices_and_selection() {
+    let mut palette = CommandPalette::new();
+    palette.start_tab_color_picker(
+        "title",
+        vec![
+            TabColorChoice { name: "one".into(), hex: None },
+            TabColorChoice { name: "two".into(), hex: Some("#123456".into()) },
+        ],
+    );
+    palette.move_selection_down();
+    palette.set_context(CommandContext {
+        window_available: true,
+        tab_count: 4,
+        pane_available: true,
+        ..CommandContext::default()
+    });
+    assert_eq!(palette.len(), 2);
+    assert_eq!(palette.selected(), 1);
+    assert_eq!(palette.selected_tab_color().unwrap().name, "two");
+    assert!(palette.current().is_none());
+    assert!(palette.highlighted().is_none());
+    palette.move_selection_down();
+    assert_eq!(palette.selected(), 0);
+}
 
 #[test]
 fn palette_defaults_do_not_expose_placeholder_parameter_actions() {
@@ -18,15 +309,15 @@ fn palette_defaults_do_not_expose_placeholder_parameter_actions() {
 #[test]
 fn move_tab_to_new_window_is_searchable_and_unbound_by_default() {
     let mut palette = CommandPalette::new();
-    palette.set_keymap(&Keymap::default());
+    palette.set_keymap(&Keymap::default(), &translator("en"));
     palette.set_query("detach");
 
     let visible = palette.visible();
     let index = visible
         .iter()
-        .position(|action| matches!(action, Action::MoveTabToNewWindow))
+        .position(|action| matches!(action, Command(Action::MoveTabToNewWindow)))
         .expect("detach should find Move Tab to New Window");
-    assert_eq!(crate::command_label::label(visible[index]), "Move Tab to New Window");
+    assert_eq!(palette.label_for_visible_index(index), Some("Move Tab to New Window"));
     assert_eq!(palette.shortcut_hint_for_visible_index(index), None);
 }
 
@@ -40,11 +331,11 @@ fn save_current_settings_is_present_exhaustively_labeled_and_unbound_by_default(
     assert_eq!(action_display_name(&Action::SaveCurrentSettings), "SaveCurrentSettings");
 
     let mut palette = CommandPalette::new();
-    palette.set_keymap(&Keymap::default());
+    palette.set_keymap(&Keymap::default(), &translator("en"));
     let index = palette
         .visible()
         .iter()
-        .position(|action| matches!(action, Action::SaveCurrentSettings))
+        .position(|action| matches!(action, Command(Action::SaveCurrentSettings)))
         .expect("Save Current Settings should be in the default palette");
     assert_eq!(palette.shortcut_hint_for_visible_index(index), None);
 }
@@ -54,15 +345,19 @@ fn save_current_settings_is_searchable_by_expected_terms() {
     // Contract: common persistence and font-setting terms all discover the save action.
     for query in ["save", "persist", "save font", "current settings"] {
         let mut palette = CommandPalette::new();
-        palette.set_keymap(&Keymap::default());
+        palette.set_keymap(&Keymap::default(), &translator("en"));
         palette.set_query(query);
         assert!(
-            palette.visible().iter().any(|action| matches!(action, Action::SaveCurrentSettings)),
+            palette
+                .visible()
+                .iter()
+                .any(|action| matches!(action, Command(Action::SaveCurrentSettings))),
             "{query:?} should find Save Current Settings"
         );
     }
 }
 
+/// Concrete user-bound actions expose the native hint while unsupported placeholder actions stay hidden.
 #[test]
 fn palette_imports_concrete_keymap_theme_actions_and_shortcuts() {
     let keymap = Keymap {
@@ -79,18 +374,93 @@ fn palette_imports_concrete_keymap_theme_actions_and_shortcuts() {
         ],
     };
     let mut palette = CommandPalette::new();
-    palette.set_keymap(&keymap);
+    palette.set_keymap(&keymap, &translator("en"));
     let visible = palette.visible();
     let theme_idx = visible
         .iter()
-        .position(|a| matches!(a, Action::ApplyTheme(name) if name == "wezterm"))
+        .position(|a| matches!(a, Command(Action::ApplyTheme(name)) if name == "wezterm"))
         .expect("concrete keymap theme action should be visible");
-    assert_eq!(palette.shortcut_hint_for_visible_index(theme_idx), Some("⌘⇧Y"));
-    assert!(!visible.iter().any(|a| matches!(a, Action::OpenSshPane(_))));
+    let expected = if cfg!(target_os = "macos") {
+        "⌘⇧Y"
+    } else if cfg!(target_os = "windows") {
+        "Win+Shift+Y"
+    } else {
+        "Super+Shift+Y"
+    };
+    assert_eq!(palette.shortcut_hint_for_visible_index(theme_idx), Some(expected));
+    assert!(!visible.iter().any(|a| matches!(a, Command(Action::OpenSshPane(_)))));
+}
+
+/// Cached phrases preserve catalog word order and insert literal values without rescanning them.
+#[test]
+fn palette_text_slots_preserve_order_and_literal_marker_values() {
+    let literal = format!("user {{name}} {TEXT_SLOT} 中文");
+    for (before, after) in [("prefix ", ""), ("", " suffix"), ("prefix ", " suffix")] {
+        let slot = TextSlot::new(format!("{before}{TEXT_SLOT}{after}"));
+        assert_eq!(slot.render(&literal), format!("{before}{literal}{after}"));
+    }
+    for locale in crate::i18n::SHIPPED_LOCALES {
+        let i18n = translator(locale);
+        for kind in ["one", "other"] {
+            let rendered = i18n
+                .try_t_args(
+                    "palette-command-footer",
+                    Some(&[("count", TEXT_SLOT), ("count-kind", kind)]),
+                )
+                .unwrap();
+            assert_eq!(rendered.matches(TEXT_SLOT).count(), 1);
+        }
+        let title = i18n.try_t_args("palette-color-title", Some(&[("title", TEXT_SLOT)])).unwrap();
+        assert_eq!(title.matches(TEXT_SLOT).count(), 1);
+        assert!(!title.contains('▏'), "the caret is owned by layout, not translations");
+        let text = PaletteText::new(Some(&i18n));
+        assert_eq!(text.color_title(&literal).matches(TEXT_SLOT).count(), 1);
+        assert!(text.color_title(&literal).ends_with('▏'));
+    }
+}
+
+/// Search and display follow the first live binding while existing semantic aliases remain searchable.
+#[test]
+fn palette_searches_the_first_live_native_shortcut_hint() {
+    let action = Action::ApplyTheme("custom-user-theme".into());
+    let keymap = Keymap {
+        meta: Meta { name: "live-shortcut".into(), version: "1.0".into() },
+        bindings: vec![
+            Binding { keys: "ctrl+alt+y".into(), action: ActionWrapper(action.clone()) },
+            Binding { keys: "super+shift+x".into(), action: ActionWrapper(action.clone()) },
+        ],
+    };
+    let expected = if cfg!(target_os = "macos") { "⌃⌥Y" } else { "Ctrl+Alt+Y" };
+    let mut palette = CommandPalette::new();
+    palette.set_keymap(&keymap, &translator("en"));
+    palette.set_query(expected);
+    let visible = palette.visible();
+    let index = visible
+        .iter()
+        .position(|candidate| **candidate == Command(action.clone()))
+        .expect("the live shortcut must find its concrete action");
+    assert_eq!(palette.shortcut_hint_for_visible_index(index), Some(expected));
+    assert_eq!(palette.current(), Some(&Command(action.clone())));
+    palette.open();
+    palette.set_query(expected);
+    let layout = crate::overlays::PaletteLayout::compute(&mut palette, 1200.0, 800.0, 0.0, 1.0)
+        .expect("open palette produces the renderer's display model");
+    let row = layout
+        .row_labels
+        .iter()
+        .position(|label| label == "Apply Theme: custom-user-theme")
+        .expect("the live action remains in the displayed rows");
+    assert_eq!(layout.row_shortcuts[row].as_deref(), Some(expected));
+    palette.set_query("cmd+q");
+    assert!(palette
+        .visible()
+        .iter()
+        .any(|candidate| matches!(candidate, Command(Action::QuitApp))));
 }
 
 #[test]
-fn palette_hides_activate_tab_entries_beyond_current_tab_count() {
+fn palette_disables_activate_tab_entries_beyond_current_tab_count() {
+    // Missing tab targets remain searchable with a reason, but are never executable.
     let keymap = Keymap {
         meta: Meta { name: "test".into(), version: "1.0".into() },
         bindings: vec![
@@ -100,12 +470,24 @@ fn palette_hides_activate_tab_entries_beyond_current_tab_count() {
         ],
     };
     let mut palette = CommandPalette::new();
-    palette.set_keymap(&keymap);
-    palette.set_tab_count(2);
+    palette.set_keymap(&keymap, &translator("en"));
+    palette.set_context(CommandContext {
+        window_available: true,
+        tab_count: 2,
+        ..CommandContext::default()
+    });
     let visible = palette.visible();
-    assert!(visible.iter().any(|a| matches!(a, Action::ActivateTab(0))));
-    assert!(visible.iter().any(|a| matches!(a, Action::ActivateTab(1))));
-    assert!(!visible.iter().any(|a| matches!(a, Action::ActivateTab(2))));
+    assert!(visible.iter().any(|a| matches!(a, Command(Action::ActivateTab(0)))));
+    assert!(visible.iter().any(|a| matches!(a, Command(Action::ActivateTab(1)))));
+    let missing =
+        visible.iter().position(|a| matches!(a, Command(Action::ActivateTab(2)))).unwrap();
+    assert_eq!(
+        palette.disabled_reason_for_visible_index(missing),
+        Some(DisabledReason::MissingTab)
+    );
+    palette.set_query("Activate Tab 3");
+    assert_eq!(palette.highlighted(), Some(&Command(Action::ActivateTab(2))));
+    assert!(palette.current().is_none());
 }
 
 #[test]
@@ -204,15 +586,15 @@ fn font_weight_commands_are_searchable_by_bolder_and_thinner() {
         ("thinner", Action::DecreaseFontWeight, "Decrease Font Weight (Thinner)"),
     ] {
         let mut palette = CommandPalette::new();
-        palette.set_keymap(&Keymap::default());
+        palette.set_keymap(&Keymap::default(), &translator("en"));
         palette.set_query(query);
 
         let visible = palette.visible();
         let index = visible
             .iter()
-            .position(|action| **action == expected)
+            .position(|action| **action == Command(expected.clone()))
             .unwrap_or_else(|| panic!("{query:?} should find {label}"));
-        assert_eq!(crate::command_label::label(visible[index]), label);
+        assert_eq!(palette.label_for_visible_index(index), Some(label));
     }
 }
 
@@ -230,10 +612,10 @@ fn font_weight_commands_are_searchable_by_synonyms() {
         ("thinner font", Action::DecreaseFontWeight),
     ] {
         let mut palette = CommandPalette::new();
-        palette.set_keymap(&Keymap::default());
+        palette.set_keymap(&Keymap::default(), &translator("en"));
         palette.set_query(query);
         assert!(
-            palette.visible().iter().any(|action| **action == expected),
+            palette.visible().iter().any(|action| **action == Command(expected.clone())),
             "{query:?} should surface {expected:?}"
         );
     }
@@ -242,12 +624,12 @@ fn font_weight_commands_are_searchable_by_synonyms() {
 #[test]
 fn reset_font_weight_is_in_the_palette() {
     let mut palette = CommandPalette::new();
-    palette.set_keymap(&Keymap::default());
+    palette.set_keymap(&Keymap::default(), &translator("en"));
     palette.set_query("reset font weight");
     let visible = palette.visible();
     let index = visible
         .iter()
-        .position(|action| matches!(action, Action::ResetFontWeight))
+        .position(|action| matches!(action, Command(Action::ResetFontWeight)))
         .expect("reset font weight should be searchable");
-    assert_eq!(crate::command_label::label(visible[index]), "Reset Font Weight to Config");
+    assert_eq!(palette.label_for_visible_index(index), Some("Reset Font Weight to Config"));
 }

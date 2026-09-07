@@ -18,7 +18,6 @@
 //! Coordinate system: physical pixels, origin top-left (the same system
 //! [`crate::tabbar_view`] uses).
 
-use crate::command_label::label as action_label;
 use crate::command_palette::{CommandPalette, CommandPaletteMode};
 use crate::ime::ImeState;
 use crate::search::SearchState;
@@ -67,6 +66,9 @@ pub const PALETTE_QUERY_ICON_X: f32 = 16.0;
 
 /// Row height inside the action list.
 pub const PALETTE_ROW_HEIGHT: f32 = 28.0;
+
+/// Additional logical height for a command row's category and availability line.
+pub const PALETTE_DETAIL_HEIGHT: f32 = 16.0;
 
 /// Vertical gap between consecutive rows.
 pub const PALETTE_ROW_GAP: f32 = 2.0;
@@ -151,6 +153,10 @@ pub struct PaletteLayout {
     pub row_labels: Vec<String>,
     /// Display shortcut hints for each row in `rows`, parallel order.
     pub row_shortcuts: Vec<Option<String>>,
+    /// Localized category and disabled reason for command rows.
+    pub row_details: Vec<Option<String>>,
+    /// Whether a command row is unavailable for execution.
+    pub row_disabled: Vec<bool>,
     /// Optional color swatches for each row in `rows`, parallel order.
     pub row_swatches: Vec<Option<String>>,
     /// When the filter produced zero matches, the layout still emits a
@@ -245,7 +251,12 @@ impl PaletteLayout {
         };
 
         // Action list region (everything between the query row and the footer).
-        let row_height = PALETTE_ROW_HEIGHT * s;
+        let detail_height = if palette.mode() == CommandPaletteMode::Commands {
+            PALETTE_DETAIL_HEIGHT
+        } else {
+            0.0
+        };
+        let row_height = (PALETTE_ROW_HEIGHT + detail_height) * s;
         let row_gap = PALETTE_ROW_GAP * s;
         let list_top = query_row.y + query_row.h + panel_padding;
         let list_bottom = footer.y - panel_padding;
@@ -277,6 +288,8 @@ impl PaletteLayout {
         let mut rows = Vec::with_capacity(window_end.saturating_sub(window_start));
         let mut row_labels = Vec::with_capacity(rows.capacity());
         let mut row_shortcuts = Vec::with_capacity(rows.capacity());
+        let mut row_details = Vec::with_capacity(rows.capacity());
+        let mut row_disabled = Vec::with_capacity(rows.capacity());
         let mut row_swatches = Vec::with_capacity(rows.capacity());
         for (i, item_index) in (window_start..window_end).enumerate() {
             let r = Rect {
@@ -286,6 +299,8 @@ impl PaletteLayout {
                 h: row_height,
             };
             rows.push(PaletteRow { item_index, rect: r });
+            row_details.push(palette.detail_for_visible_index(item_index));
+            row_disabled.push(palette.disabled_reason_for_visible_index(item_index).is_some());
             match palette.mode() {
                 CommandPaletteMode::TabColor => {
                     if let Some(choice) = color_choices.get(item_index) {
@@ -301,14 +316,13 @@ impl PaletteLayout {
                     }
                 }
                 _ => {
-                    if let Some(a) = visible.get(item_index) {
-                        row_labels.push(action_label(a));
+                    if let Some(label) = palette.label_for_visible_index(item_index) {
+                        row_labels.push(label.to_string());
                         row_shortcuts.push(
                             palette.shortcut_hint_for_visible_index(item_index).map(str::to_string),
                         );
                     } else {
-                        // When: visible has no action at item_index, so the row
-                        // renders empty and keeps the list aligned.
+                        // When: item_index has no command label, leave a blank row to preserve alignment.
                         row_labels.push(String::new());
                         row_shortcuts.push(None);
                     }
@@ -324,7 +338,7 @@ impl PaletteLayout {
             None
         };
         let query_label = if palette.mode() == CommandPaletteMode::TabColor {
-            format!("Color for {}▏", palette.tab_color_title())
+            palette.text().color_title(palette.tab_color_title())
         } else {
             // When: mode is any palette other than TabColor, so the row shows
             // the typed query with its caret rather than a tab title.
@@ -333,10 +347,11 @@ impl PaletteLayout {
         let query_placeholder =
             if palette.query().is_empty() && palette.mode() != CommandPaletteMode::TabColor {
                 Some(match palette.mode() {
-                    CommandPaletteMode::Commands => {
-                        String::from("Search commands, settings, shortcuts…")
+                    CommandPaletteMode::Commands if palette.tabs_only() => {
+                        palette.text().tabs_placeholder.clone()
                     }
-                    CommandPaletteMode::RenameTab => String::from("New tab title…"),
+                    CommandPaletteMode::Commands => palette.text().search_placeholder.clone(),
+                    CommandPaletteMode::RenameTab => palette.text().rename_placeholder.clone(),
                     CommandPaletteMode::TabColor => String::new(),
                 })
             } else {
@@ -347,17 +362,25 @@ impl PaletteLayout {
 
         let empty_label = if palette.mode() == CommandPaletteMode::RenameTab {
             None
-        } else if total == 0 && !palette.query().is_empty() {
-            // When: total counts no match while palette query holds text, so
-            // the list explains the miss instead of rendering empty.
-            Some(NO_MATCHES.to_string())
+        } else if total == 0 && (palette.tabs_only() || !palette.query().is_empty()) {
+            // When: `total` is zero, explain an empty tabs-only inventory or an unmatched command query.
+            Some(if palette.tabs_only() {
+                palette.text().tabs_empty.clone()
+            } else {
+                // When: `tabs_only` is false, describe a command-query miss rather than a missing tab inventory.
+                palette.text().no_matches.clone()
+            })
         } else {
-            // When: total counts at least one match, or the query is still
-            // empty, so the list speaks for itself.
+            // When: `total` is nonzero or the command query is empty, no empty-state explanation is needed.
             None
         };
         let empty_hint = if empty_label.is_some() {
-            Some(String::from("Try settings, split, font, shortcut"))
+            Some(if palette.tabs_only() {
+                palette.text().tabs_hint.clone()
+            } else {
+                // When: `tabs_only` is false, offer command-search guidance without implying tab-only results.
+                palette.text().empty_hint.clone()
+            })
         } else {
             // When: empty_label is absent, so there is no empty state for a
             // hint to elaborate on.
@@ -365,13 +388,12 @@ impl PaletteLayout {
         };
 
         let footer_label = match palette.mode() {
-            CommandPaletteMode::Commands => format!(
-                "{} command{} · ↑↓ navigate · ↵ run · esc close",
-                total,
-                if total == 1 { "" } else { "s" }
-            ),
-            CommandPaletteMode::RenameTab => "↵ rename · esc cancel".to_string(),
-            CommandPaletteMode::TabColor => "↑↓ choose color · ↵ apply · esc cancel".to_string(),
+            CommandPaletteMode::Commands if palette.tabs_only() => {
+                palette.text().tabs_footer.clone()
+            }
+            CommandPaletteMode::Commands => palette.text().command_footer(total),
+            CommandPaletteMode::RenameTab => palette.text().rename_footer.clone(),
+            CommandPaletteMode::TabColor => palette.text().color_footer.clone(),
         };
 
         Some(PaletteLayout {
@@ -386,6 +408,8 @@ impl PaletteLayout {
             query_placeholder,
             row_labels,
             row_shortcuts,
+            row_details,
+            row_disabled,
             row_swatches,
             empty_label,
             empty_hint,
@@ -394,11 +418,6 @@ impl PaletteLayout {
         })
     }
 }
-
-/// Placeholder shown in the action list when the current query filters
-/// every action out. Exposed for tests + so the renderer doesn't have to
-/// duplicate the string.
-pub const NO_MATCHES: &str = "No commands found";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NotificationLevel {

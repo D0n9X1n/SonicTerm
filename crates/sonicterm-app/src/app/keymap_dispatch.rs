@@ -39,17 +39,7 @@ use super::{
 const NOTIFICATION_AUTO_CLOSE_DURATION: Duration = Duration::from_secs(5);
 
 pub(super) fn read_only_allows_action(action: &Action) -> bool {
-    matches!(
-        action,
-        Action::NextTab
-            | Action::PrevTab
-            | Action::ActivateTab(_)
-            | Action::ActivateLastTab
-            | Action::FocusPane(_)
-            | Action::OpenSearch
-            | Action::CheckForUpdates
-            | Action::SaveCurrentSettings
-    )
+    sonicterm_ui::command_label::descriptor(action).read_only_allowed
 }
 
 pub(super) fn terminal_input_passthrough_binding(key_str: &str, action: &Action) -> bool {

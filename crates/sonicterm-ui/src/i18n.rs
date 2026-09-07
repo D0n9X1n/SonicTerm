@@ -81,6 +81,11 @@ impl I18n {
     /// Translate with positional `{ $name }` arguments. The arg slice is
     /// `(name, value)` tuples; values are forwarded as Fluent strings.
     pub fn t_args(&self, key: &str, args: Option<&[(&str, &str)]>) -> String {
+        self.try_t_args(key, args).unwrap_or_else(|| key.to_string())
+    }
+
+    /// Look up active or English text without using the message key as display content.
+    pub(crate) fn try_t_args(&self, key: &str, args: Option<&[(&str, &str)]>) -> Option<String> {
         let fluent_args = args.map(|pairs| {
             let mut a = FluentArgs::new();
             for (k, v) in pairs {
@@ -90,13 +95,9 @@ impl I18n {
         });
         if let Some(s) = format_in(&self.active_bundle, key, fluent_args.as_ref()) {
             // When: the active bundle contains `key`, return its localized rendering without fallback.
-            return s;
+            return Some(s);
         }
-        if let Some(s) = format_in(&self.fallback, key, fluent_args.as_ref()) {
-            // When: active lookup missed but English `fallback` contains `key`, return the fallback translation.
-            return s;
-        }
-        key.to_string()
+        format_in(&self.fallback, key, fluent_args.as_ref())
     }
 }
 
@@ -180,6 +181,9 @@ fn negotiate(requested: &str) -> String {
         negotiate_languages(&[req], &available, Some(&default), NegotiationStrategy::Filtering);
     supported.first().map(|id| id.to_string()).unwrap_or_else(|| "en".to_string())
 }
+
+#[cfg(test)]
+pub(crate) use i18n_tests::translator as test_translator;
 
 #[cfg(test)]
 #[path = "i18n_tests.rs"]

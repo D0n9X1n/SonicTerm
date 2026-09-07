@@ -574,7 +574,6 @@ fn unfocused_window_dims_the_active_panel_marker_rather_than_hiding_it() {
             &mut quads,
             &layout,
             &TabBarQuadParams {
-                tab_count: tabs.tabs().len(),
                 accent: [1.0, 0.0, 0.0, 1.0],
                 separator: [0.5, 0.5, 0.5, 1.0],
                 border: [0.0, 0.0, 0.0, 1.0],
@@ -666,7 +665,6 @@ fn a_fully_transparent_marker_alpha_emits_no_accent_quad() {
         &mut quads,
         &layout,
         &TabBarQuadParams {
-            tab_count: tabs.tabs().len(),
             accent: [1.0, 0.0, 0.0, 1.0],
             separator: [0.5, 0.5, 0.5, 1.0],
             border: [0.0, 0.0, 0.0, 1.0],
@@ -697,7 +695,6 @@ fn custom_tab_color_emits_focused_panel_marker_once() {
         &mut quads,
         &layout,
         &TabBarQuadParams {
-            tab_count: tabs.tabs().len(),
             accent: [1.0, 0.0, 0.0, 1.0],
             separator: [0.5, 0.5, 0.5, 1.0],
             border: [0.0, 0.0, 0.0, 1.0],

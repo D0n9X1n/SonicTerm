@@ -169,7 +169,7 @@ pub fn compute_action<W: Copy>(
         // outcome is a within-bar reorder or a cancel, never a tear-out.
 
         // `drop_slot` returns insertion slots; preserve no-op drops on the source tab.
-        let n = source_bar.tabwidgets().len();
+        let n = source_bar.total_tabs;
         if n > 0 {
             // When: `n` is nonzero, the confirmed drag has a populated source
             // bar whose insertion slot can resolve to a tab index.

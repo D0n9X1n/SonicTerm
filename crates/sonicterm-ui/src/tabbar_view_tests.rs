@@ -13,6 +13,100 @@ fn assert_close(actual: f32, expected: f32) {
     assert!((actual - expected).abs() < 0.001, "expected {expected}, got {actual}");
 }
 
+/// A crowded strip keeps a readable segment containing the active tab instead of shrinking every title.
+#[test]
+fn overflow_retains_readable_active_segment() {
+    let mut bar = TabBar::new();
+    for index in 0..16 {
+        bar.push(Tab::new(format!("terminal {index}")));
+    }
+    for active in [0, 8, 15] {
+        bar.activate(active);
+        let layout = TabBarLayout::compute(&bar, 600.0);
+        let active_rect = layout.active_indicator_rect().expect("active tab stays visible");
+        let minimum = TAB_BAR_HEIGHT * 2.0 + TAB_INNER_PAD * 2.0;
+        assert!(
+            active_rect.w >= minimum,
+            "active tab width {} is below the readable width {minimum}",
+            active_rect.w
+        );
+        assert!(layout.tabs.len() < bar.len());
+        assert!(layout.tabs.iter().all(|tab| tab.bg_rect.w >= minimum));
+        assert!(layout.tabs.iter().any(|tab| tab.idx == active));
+    }
+}
+
+/// Sparse widgets keep absolute hit and drop indices while hidden insertion gaps remain absent.
+#[test]
+fn overflow_hit_and_insertion_indices_match_the_visible_segment() {
+    let mut bar = TabBar::new();
+    for index in 0..10 {
+        bar.push(Tab::new(format!("tab {index}")));
+    }
+    for active in [0, 5, 9] {
+        bar.activate(active);
+        let layout = TabBarLayout::compute(&bar, 360.0);
+        let control = layout.overflow.expect("crowded strip has an overflow control");
+        assert_eq!(layout.total_tabs, 10);
+        assert_eq!(
+            layout.hit(control.x + control.w * 0.5, control.y + control.h * 0.5),
+            Some(TabHit::Overflow)
+        );
+        for (position, widget) in layout.tabs.iter().enumerate() {
+            let x = widget.bg_rect.x + widget.bg_rect.w * 0.25;
+            assert_eq!(layout.hit(x, layout.bar.y + 1.0), Some(TabHit::Activate(widget.idx)));
+            assert_eq!(layout.drop_slot(x, 1.0), widget.idx);
+            let line = layout.insertion_x(widget.idx).unwrap();
+            if position > 0 {
+                let previous = &layout.tabs[position - 1];
+                assert!(
+                    line >= previous.bg_rect.x + previous.bg_rect.w && line <= widget.bg_rect.x
+                );
+            }
+        }
+        let last = layout.tabs.last().unwrap();
+        let end_slot = last.idx + 1;
+        assert_eq!(layout.drop_slot(last.bg_rect.x + last.bg_rect.w, 1.0), end_slot);
+        assert_eq!(layout.drop_slot(control.x, 1.0), bar.len());
+        assert!(layout.insertion_x(end_slot).unwrap() >= last.bg_rect.x + last.bg_rect.w);
+        for slot in 0..=bar.len() {
+            if !layout.tabs.iter().any(|widget| widget.idx == slot)
+                && slot != end_slot
+                && slot != bar.len()
+            {
+                assert_eq!(layout.insertion_x(slot), None);
+            }
+        }
+        let preview = TabBarLayout::compute_with_insertion_slot(&bar, 360.0, 40.0, Some(active));
+        assert!(preview.tabs.iter().all(|widget| widget.bg_rect.x + widget.bg_rect.w <= control.x));
+        assert_eq!(layout.clone().with_top_offset(23.0).overflow.unwrap().y, control.y + 23.0);
+        assert_eq!(layout.with_visible(false).hit(control.x + 1.0, 1.0), None);
+    }
+}
+
+/// Narrow windows retain active/control hit zones without off-surface geometry across font and DPI scales.
+#[test]
+fn overflow_narrow_geometry_and_scale_keep_active_tab_reachable() {
+    let mut bar = tab_bar(&["first", "middle", "last"]);
+    for height in [36.0, 40.0, 60.0, 80.0] {
+        for width in [0.0, 1.0, 24.0, 80.0, 160.0] {
+            for active in 0..bar.len() {
+                bar.activate(active);
+                let layout = TabBarLayout::compute_with_height(&bar, width, height);
+                let active = layout.active_indicator_rect().unwrap();
+                let overflow = layout.overflow.unwrap();
+                assert!(active.x >= 0.0 && active.x + active.w <= overflow.x);
+                assert!(overflow.x >= 0.0 && overflow.x + overflow.w <= width);
+                if width > 0.0 {
+                    assert!(active.w > 0.0 && overflow.w > 0.0);
+                }
+            }
+        }
+    }
+    assert!(TabBarLayout::compute(&TabBar::new(), 24.0).overflow.is_none());
+    assert!(TabBarLayout::compute(&tab_bar(&["one"]), 24.0).overflow.is_none());
+}
+
 #[test]
 fn rectangles_and_widgets_use_half_open_hit_boundaries() {
     let rect = Rect { x: 10.0, y: 20.0, w: 30.0, h: 40.0 };
@@ -50,6 +144,7 @@ fn layout_hit_uses_the_full_bar_height_but_excludes_gaps_and_hidden_bars() {
     assert!(!hidden.point_over_bar(first_x, hidden.bar.y + 1.0));
 }
 
+/// Scaled chrome can trigger overflow while preserving the active tab's title, color, and absolute index.
 #[test]
 fn compute_at_y_scales_tab_geometry_and_preserves_tab_state() {
     let mut bar = tab_bar(&["one", "two"]);
@@ -61,14 +156,15 @@ fn compute_at_y_scales_tab_geometry_and_preserves_tab_state() {
     assert_eq!(layout.active, Some(1));
     assert_close(layout.tabs[0].bg_rect.x, 0.0);
     assert_close(layout.tabs[0].bg_rect.y, 14.0);
-    assert_close(layout.tabs[0].bg_rect.w, 100.0);
+    assert_eq!(layout.tabs.len(), 1);
+    assert_eq!(layout.tabs[0].idx, 1);
+    assert_close(layout.tabs[0].bg_rect.w, 312.0);
     assert_close(layout.tabs[0].bg_rect.h, 72.0);
     assert_close(layout.tabs[0].title_rect.x, 20.0);
-    assert_close(layout.tabs[0].title_rect.w, 60.0);
-    assert_close(layout.tabs[1].bg_rect.x, 108.0);
-    assert_eq!(layout.tabs[1].title, "two");
-    assert_eq!(layout.tabs[1].custom_color.as_deref(), Some("#fabd2f"));
-    assert!(layout.tabs[1].active);
+    assert_close(layout.tabs[0].title_rect.w, 272.0);
+    assert_eq!(layout.tabs[0].title, "two");
+    assert_eq!(layout.tabs[0].custom_color.as_deref(), Some("#fabd2f"));
+    assert!(layout.tabs[0].active);
 }
 
 #[test]
@@ -151,7 +247,7 @@ fn drop_slots_switch_at_midpoints_and_insertion_positions_clamp() {
         (layout.tabs[0].bg_rect.x + layout.tabs[0].bg_rect.w + layout.tabs[1].bg_rect.x) * 0.5;
     assert_eq!(layout.insertion_x(1), Some(middle));
     assert_eq!(
-        layout.insertion_x(usize::MAX),
+        layout.insertion_x(layout.total_tabs),
         Some(last.bg_rect.x + last.bg_rect.w + TAB_GAP * 0.5)
     );
 

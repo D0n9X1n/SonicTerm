@@ -463,6 +463,8 @@ fn tab_bar_hash(tabs: &TabBar, now: Instant) -> u64 {
     use std::hash::{Hash, Hasher};
 
     let mut hash = DefaultHasher::new();
+    // Tab geometry also depends on the process-wide width policy, even when every title is unchanged.
+    sonicterm_render_model::boundary::ui::tabbar_view::max_tab_width().to_bits().hash(&mut hash);
     tabs.active_index().hash(&mut hash);
     for tab in tabs.tabs() {
         tab.id.0.hash(&mut hash);
@@ -1307,8 +1309,6 @@ pub const ACTIVE_PANEL_MARKER_ALPHA_UNFOCUSED: f32 = 0.4;
 
 /// Style and sizing inputs for tab-bar quad emission.
 pub struct TabBarQuadParams {
-    /// Number of tabs in the bar.
-    pub tab_count: usize,
     /// Active tab accent color.
     pub accent: [f32; 4],
     /// Inactive tab separator color.
@@ -1346,7 +1346,7 @@ pub fn emit_tab_bar_quads(
         color: params.border,
         ..Default::default()
     });
-    for t in &layout.tabs {
+    for (position, t) in layout.tabs.iter().enumerate() {
         let is_active = layout.active == Some(t.idx);
         let marker_alpha = params.active_panel_marker_alpha.clamp(0.0, 1.0);
         if is_active && marker_alpha > 0.0 {
@@ -1370,7 +1370,7 @@ pub fn emit_tab_bar_quads(
                 ..Default::default()
             });
         }
-        if t.idx + 1 < params.tab_count {
+        if position + 1 < layout.tabs.len() {
             // Geometric scale = bar.h / default-logical-bar-h. Mirrors
             // the per-bar-height scale `TabBarLayout::compute_at_y`
             // uses to grow TAB_GAP / padding with bar height — keeps
@@ -1386,6 +1386,29 @@ pub fn emit_tab_bar_quads(
                 ..Default::default()
             });
         }
+    }
+    if let Some(control) = layout.overflow.filter(|control| control.w > 0.0) {
+        let size = (control.w.min(control.h) * 0.35).max(0.0);
+        let x = control.x + (control.w - size) * 0.5;
+        let y = control.y + (control.h - size) * 0.5;
+        let rect = px_to_ndc(x, y, size, size, sw, sh);
+        let stroke = (size * 0.12).max(1.0).min(size * 0.5);
+        quads.push(QuadInstance::line(
+            rect,
+            params.accent,
+            [size, size],
+            [-size * 0.3, -size * 0.15],
+            [0.0, size * 0.15],
+            stroke,
+        ));
+        quads.push(QuadInstance::line(
+            rect,
+            params.accent,
+            [size, size],
+            [0.0, size * 0.15],
+            [size * 0.3, -size * 0.15],
+            stroke,
+        ));
     }
 }
 
@@ -4234,6 +4257,7 @@ impl GpuRenderer {
                 p.selected().hash(&mut h);
                 p.len().hash(&mut h);
                 p.scroll_offset().hash(&mut h);
+                p.presentation_hash().hash(&mut h);
                 h.finish()
             })
             .unwrap_or(0);
@@ -5580,7 +5604,6 @@ impl GpuRenderer {
                 &mut quads,
                 &layout,
                 &TabBarQuadParams {
-                    tab_count: tabs.tabs().len(),
                     accent: accent_blue,
                     separator,
                     border: bar_bg,
@@ -6361,6 +6384,12 @@ impl GpuRenderer {
                         continue;
                     };
                     let shortcut = layout.row_shortcuts.get(i).and_then(|hint| hint.as_deref());
+                    let detail = layout.row_details.get(i).and_then(|text| text.as_deref());
+                    let disabled = layout.row_disabled.get(i).copied().unwrap_or(false);
+                    let mut label_color = self.search_fg;
+                    if disabled {
+                        label_color.a = 150;
+                    }
                     let swatch = layout.row_swatches.get(i).and_then(|v| v.as_deref());
                     let shortcut_font_size = palette_font_size;
                     let shortcut_w = shortcut
@@ -6393,7 +6422,16 @@ impl GpuRenderer {
                     // with the scaled `row.rect.y` / `palette_font_size` pushed
                     // the baseline off-centre at fractional DPI (the query row
                     // already centres correctly via `query_row.h`). #palette
-                    let baseline_y = row.rect.y + (row.rect.h + palette_font_size * 0.8) * 0.5;
+                    let detail_h = if detail.is_some() {
+                        self.chrome_px(
+                            sonicterm_render_model::boundary::ui::overlays::PALETTE_DETAIL_HEIGHT,
+                        )
+                    } else {
+                        // When: `detail` is absent, color-picker rows keep their single-line geometry.
+                        0.0
+                    };
+                    let label_h = row.rect.h - detail_h;
+                    let baseline_y = row.rect.y + (label_h + palette_font_size * 0.8) * 0.5;
                     let label_bounds_w = match shortcut_w {
                         Some(w) => (row.rect.w
                             - w
@@ -6409,11 +6447,11 @@ impl GpuRenderer {
                         palette_native_em,
                         &mut palette_rasterizer,
                         label,
-                        self.search_fg,
+                        label_color,
                         ChromeAttrs::default(),
                         origin_x,
                         baseline_y,
-                        [row.rect.x, row.rect.y, label_bounds_w, row.rect.h],
+                        [row.rect.x, row.rect.y, label_bounds_w, label_h],
                         sw,
                         sh,
                         &mut overlay_glyph_instances,
@@ -6426,7 +6464,7 @@ impl GpuRenderer {
                             )
                             - width;
                         let mut hint_color = self.search_fg;
-                        hint_color.a = 180;
+                        hint_color.a = if disabled { 120 } else { 180 };
                         emit_overlay_text_glyphs(
                             &mut self.glyph_atlas,
                             stack,
@@ -6439,6 +6477,27 @@ impl GpuRenderer {
                             hint_origin_x,
                             baseline_y,
                             [row.rect.x, row.rect.y, row.rect.w, row.rect.h],
+                            sw,
+                            sh,
+                            &mut overlay_glyph_instances,
+                            None,
+                        );
+                    }
+                    if let Some(detail) = detail {
+                        let mut detail_color = self.search_fg;
+                        detail_color.a = 170;
+                        emit_overlay_text_glyphs(
+                            &mut self.glyph_atlas,
+                            stack,
+                            palette_font_size,
+                            palette_native_em,
+                            &mut palette_rasterizer,
+                            detail,
+                            detail_color,
+                            ChromeAttrs::default(),
+                            origin_x,
+                            row.rect.y + label_h + (detail_h + palette_font_size * 0.8) * 0.5,
+                            [row.rect.x, row.rect.y + label_h, row.rect.w, detail_h],
                             sw,
                             sh,
                             &mut overlay_glyph_instances,

@@ -15,7 +15,7 @@ use sonicterm_cfg::theme::Theme;
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::Grid;
 use sonicterm_io::pty::PtyHandle;
-use sonicterm_ui::command_palette::TabColorChoice;
+use sonicterm_ui::command_palette::{CommandPaletteMode, PaletteEntry, TabColorChoice};
 use sonicterm_ui::overlays::{
     command_palette_query_caret_prefix, PaletteLayout, PALETTE_ROW_PAD_X,
 };
@@ -26,7 +26,7 @@ use sonicterm_ui::tabbar_view::{TabBarLayout, TabHit};
 use sonicterm_ui::tabs::{Tab, TabBar};
 use sonicterm_vt::vt::{Parser, VtEvent};
 use winit::{
-    event::{ElementState, Ime, KeyEvent, MouseButton, WindowEvent},
+    event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoopProxy},
     keyboard::{Key, ModifiersState, NamedKey},
     window::{CursorIcon, Window, WindowAttributes, WindowId},
@@ -38,6 +38,22 @@ use super::{
     with_integrated_titlebar, wrap_paste, App, FrontmostKind, PaneState, TabState, UserEvent,
     WindowState,
 };
+
+pub(super) struct PalettePointerCapture {
+    window_id: WindowId,
+    target: PalettePointerTarget,
+}
+
+pub(super) enum PalettePointerTarget {
+    Entry(PaletteEntry),
+    Outside,
+}
+
+enum PalettePointerHit {
+    Row { index: usize, entry: PaletteEntry },
+    Outside,
+    Inside,
+}
 
 fn estimate_palette_text_width(text: &str, font_size: f32) -> f32 {
     text.chars().map(|ch| if ch.is_ascii() { 0.58 } else { 1.0 }).sum::<f32>() * font_size
@@ -74,7 +90,252 @@ pub fn theme_tab_color_choices(theme: &Theme) -> Vec<TabColorChoice> {
     choices
 }
 
+/// Derive window-local command facts; an optional grid is the caller's already-held active-pane view.
+pub(super) fn command_palette_context(
+    window: &WindowState,
+    active_grid: Option<&Grid>,
+) -> sonicterm_ui::command_label::CommandContext {
+    use sonicterm_ui::command_label::CommandContext;
+    if window.hidden {
+        // When: `window` is hidden, it cannot lend command targets to an attached palette.
+        return CommandContext::default();
+    }
+    let tab = window.tab_states.get(window.tabs.active_index());
+    let active_pane = tab.map(|tab| tab.active_pane).filter(|id| window.panes.contains_key(id));
+    let selection_available = active_pane.is_some_and(|pane_id| {
+        let valid = |grid: &Grid| {
+            window.selection.is_some_and(|mut selection| {
+                !selection.is_empty()
+                    && !sonicterm_ui::selection::revalidate_selection(&mut selection, pane_id, grid)
+            })
+        };
+        match active_grid {
+            Some(grid) => valid(grid),
+            None => window
+                .panes
+                .get(&pane_id)
+                .and_then(|pane| pane.parser.try_lock())
+                .is_some_and(|parser| valid(parser.grid())),
+        }
+    });
+    let focus_available =
+        [Direction::Left, Direction::Right, Direction::Up, Direction::Down].map(|direction| {
+            tab.and_then(|tab| tab.tree.focus_neighbor(tab.active_pane, direction))
+                .is_some_and(|id| active_pane.is_some() && window.panes.contains_key(&id))
+        });
+    CommandContext {
+        window_available: true,
+        tab_count: window.tabs.len(),
+        pane_available: active_pane.is_some(),
+        selection_available,
+        read_only: window.copy_mode.as_ref().is_some_and(|state| state.is_read_only()),
+        focus_available,
+    }
+}
+
 impl App {
+    fn command_palette_pointer_hit(&mut self, window_id: WindowId) -> Option<PalettePointerHit> {
+        let window = self.windows.get(&window_id)?;
+        let renderer = window.renderer.as_ref()?;
+        let (width, height) = renderer.logical_size();
+        let (x, y) = (window.cursor_pos.0 as f32, window.cursor_pos.1 as f32);
+        let layout = PaletteLayout::compute(
+            &mut self.command_palette,
+            width,
+            height,
+            self.config.appearance.panel_padding,
+            renderer.scale_factor(),
+        )?;
+        if !layout.border.contains(x, y) {
+            // When: `layout.border` excludes the pointer, reserve an outside dismissal rather than a terminal click.
+            return Some(PalettePointerHit::Outside);
+        }
+        if let Some(row) = layout.rows.iter().find(|row| row.rect.contains(x, y)) {
+            // When: `row.rect` contains the pointer, retain its displayed identity before refreshing live targets.
+            let entry = self.command_palette.visible().get(row.item_index).copied()?.clone();
+            return Some(PalettePointerHit::Row { index: row.item_index, entry });
+        }
+        Some(PalettePointerHit::Inside)
+    }
+
+    fn release_command_palette_pointer(
+        &mut self,
+        window_id: WindowId,
+        hit: Option<PalettePointerHit>,
+    ) {
+        let Some(capture) = self.palette_pointer_capture.take() else {
+            // When: `palette_pointer_capture` is empty, swallow the opener's release without choosing a row.
+            return;
+        };
+        if capture.window_id != window_id
+            || self.palette_attached_window.or(self.main_window_id) != Some(window_id)
+            || !self.command_palette.is_open()
+            || self.command_palette.mode() != CommandPaletteMode::Commands
+            || self.palette_ime_is_composing()
+        {
+            // When: `capture` no longer belongs to this open command input, cancel rather than execute across context changes.
+            return;
+        }
+        match (capture.target, hit) {
+            (PalettePointerTarget::Outside, Some(PalettePointerHit::Outside)) => {
+                self.command_palette.close();
+                self.palette_attached_window = None;
+                self.request_redraw_for_overlay(Some(window_id));
+            }
+            (PalettePointerTarget::Entry(pressed), Some(PalettePointerHit::Row { entry, .. }))
+                if pressed.same_identity(&entry) =>
+            {
+                // Revalidate live context before delegating the displayed identity to the Enter route.
+                self.refresh_command_palette_context();
+                if self.command_palette.current().is_some_and(|entry| pressed.same_identity(entry))
+                {
+                    self.command_palette_handle_logical_key(&Key::Named(NamedKey::Enter));
+                }
+                self.request_redraw_for_overlay(Some(window_id));
+            }
+            _ => {
+                // When: `hit` no longer names `capture.target`, leave the modal open without dispatch.
+            }
+        }
+    }
+
+    /// Consume attached-modal pointer input without stealing a previously latched terminal or chrome gesture.
+    pub(super) fn command_palette_handle_pointer_event(
+        &mut self,
+        window_id: WindowId,
+        event: &WindowEvent,
+    ) -> bool {
+        if !self.command_palette.is_open() {
+            // When: `command_palette` is closed, revoke any capture and leave terminal event ownership unchanged.
+            self.palette_pointer_capture = None;
+            return false;
+        }
+        if self.palette_attached_window.or(self.main_window_id) != Some(window_id) {
+            // When: `window_id` differs from the palette host, leave that window's pointer input independent.
+            return false;
+        }
+        if matches!(
+            event,
+            WindowEvent::Focused(false)
+                | WindowEvent::KeyboardInput { .. }
+                | WindowEvent::Ime(_)
+                | WindowEvent::Resized(_)
+                | WindowEvent::ScaleFactorChanged { .. }
+                | WindowEvent::CloseRequested
+                | WindowEvent::Destroyed
+        ) {
+            // When: `matches!` identifies input or lifecycle changes, revoke the click while preserving normal event handling.
+            self.palette_pointer_capture = None;
+            return false;
+        }
+        let Some(window) = self.windows.get_mut(&window_id).filter(|window| !window.hidden) else {
+            // When: `window_id` has no visible host, its stale capture cannot borrow another window's context.
+            self.palette_pointer_capture = None;
+            return false;
+        };
+        if window.mouse_down
+            || window.pointer_gesture.is_some()
+            || window.pressed_tab.is_some()
+            || window.drag_session.is_some()
+            || window.scrollbar_drag.is_some()
+            || window.splitter_drag.is_some()
+        {
+            // When: `window` already owns a held gesture, its original handler must receive motion and the paired release.
+            self.palette_pointer_capture = None;
+            return false;
+        }
+        match event {
+            WindowEvent::CursorMoved { position, .. } => {
+                window.cursor_pos = (position.x, position.y);
+                window.invalidate_path_hover();
+                if let Some(native) = window.window.as_ref() {
+                    native.set_cursor(CursorIcon::Default);
+                }
+                true
+            }
+            WindowEvent::CursorLeft { .. } => {
+                window.cursor_pos = (-1.0, -1.0);
+                window.invalidate_path_hover();
+                self.palette_pointer_capture = None;
+                true
+            }
+            WindowEvent::CursorEntered { .. } => true,
+            WindowEvent::MouseInput { state, button, .. } => {
+                // When: `MouseInput` belongs to the modal, never forward either half of the click to a terminal.
+                if self.command_palette.mode() != CommandPaletteMode::Commands
+                    || self.palette_ime_is_composing()
+                    || *button != MouseButton::Left
+                {
+                    // When: `button`, mode, or composition forbids activation, consume input without retaining a click.
+                    self.palette_pointer_capture = None;
+                    return true;
+                }
+                let hit = self.command_palette_pointer_hit(window_id);
+                match state {
+                    ElementState::Pressed => {
+                        self.palette_pointer_capture = match hit {
+                            Some(PalettePointerHit::Row { index, entry }) => {
+                                // Capture the displayed identity before any live target refresh can move this row.
+                                self.command_palette.select_visible_index(index);
+                                Some(PalettePointerCapture {
+                                    window_id,
+                                    target: PalettePointerTarget::Entry(entry),
+                                })
+                            }
+                            Some(PalettePointerHit::Outside) => Some(PalettePointerCapture {
+                                window_id,
+                                target: PalettePointerTarget::Outside,
+                            }),
+                            _ => None,
+                        };
+                        self.request_redraw_for_overlay(Some(window_id));
+                    }
+                    ElementState::Released => self.release_command_palette_pointer(window_id, hit),
+                }
+                true
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                // When: `MouseWheel` belongs to the modal, cancel held clicks and keep all deltas away from the PTY.
+                self.palette_pointer_capture = None;
+                if self.command_palette.mode() != CommandPaletteMode::Commands
+                    || self.palette_ime_is_composing()
+                {
+                    // When: `command_palette` is editing a title/color or composing, wheel input cannot change its selection.
+                    return true;
+                }
+                let vertical = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => f64::from(*y),
+                    MouseScrollDelta::PixelDelta(position) => position.y,
+                };
+                if vertical.is_finite() && vertical != 0.0 {
+                    // When: `vertical` is finite and nonzero, move at most one row without looping over event magnitudes.
+                    self.refresh_command_palette_context();
+                    let _ = self.command_palette_pointer_hit(window_id);
+                    let last = self.command_palette.len().saturating_sub(1);
+                    let selected = self.command_palette.selected();
+                    let next = if selected >= self.command_palette.len() {
+                        if vertical > 0.0 {
+                            last
+                        } else {
+                            // When: `vertical` moves forward from no selection, begin at the first row.
+                            0
+                        }
+                    } else if vertical > 0.0 {
+                        // When: `vertical` moves backward, clamp to the first row rather than wrapping.
+                        selected.saturating_sub(1)
+                    } else {
+                        // When: `vertical` moves forward from a row, clamp to the last row rather than wrapping.
+                        (selected + 1).min(last)
+                    };
+                    self.command_palette.select_visible_index(next);
+                    self.request_redraw_for_overlay(Some(window_id));
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn palette_ime_preedit(&self) -> &str {
         match self.palette_attached_window {
             Some(id) => self.windows.get(&id).map(|ws| ws.ime.preedit()).unwrap_or(""),
@@ -238,19 +499,24 @@ impl App {
         }
     }
 
-    fn command_palette_tab_count(&self) -> usize {
-        match self.frontmost_kind() {
-            FrontmostKind::Child(id) => {
-                self.windows.get(&id).map(|child| child.tabs.len()).unwrap_or(1)
+    pub(super) fn refresh_command_palette_context(&mut self) {
+        use sonicterm_ui::command_label::CommandContext;
+        let window_id = if self.command_palette.is_open() {
+            self.palette_attached_window.or(self.main_window_id)
+        } else {
+            // When: `command_palette` is closed, the next open follows the existing frontmost policy.
+            match self.frontmost_kind() {
+                FrontmostKind::Child(id) => Some(id),
+                _ => self.main_window_id,
             }
-            _ => self.main_tabs().map(|tabs| tabs.len()).unwrap_or(1),
-        }
-        .max(1)
-    }
-
-    fn refresh_command_palette_context(&mut self) {
-        let tab_count = self.command_palette_tab_count();
-        self.command_palette.set_tab_count(tab_count);
+        };
+        let window = window_id.and_then(|id| self.windows.get(&id)).filter(|window| !window.hidden);
+        let context = window
+            .map_or_else(CommandContext::default, |window| command_palette_context(window, None));
+        self.command_palette.set_context(context);
+        let empty = TabBar::new();
+        self.command_palette
+            .set_tabs(window.map(|window| &window.tabs).unwrap_or(&empty), &self.i18n);
     }
 
     pub(super) fn command_palette_handle_ime(&mut self, ime_event: &winit::event::Ime) -> bool {
@@ -259,6 +525,8 @@ impl App {
             // terminal; returning false lets window_event run its commit path.
             return false;
         }
+        self.palette_pointer_capture = None;
+        self.refresh_command_palette_context();
         self.update_palette_ime_state(ime_event);
         match ime_event {
             winit::event::Ime::Commit(text) => {
@@ -302,6 +570,7 @@ impl App {
             // both callers gate on their own checks and discard this false.
             return false;
         }
+        self.palette_pointer_capture = None;
         self.refresh_command_palette_context();
         if self.palette_ime_is_composing() {
             // When: palette_ime_is_composing is true the IME owns the keystroke;
@@ -426,9 +695,39 @@ impl App {
                 Key::Named(NamedKey::Enter) => {
                     // When: Enter arrives in list mode it runs the highlighted
                     // entry; RenameTab and UpdateTabColor re-enter sub-modes.
-                    let action = self.command_palette.current().cloned();
+                    let Some(action) = self.command_palette.current().cloned() else {
+                        // When: `current` is absent, keep a disabled or empty result visible without dispatch.
+                        self.request_redraw_for_overlay(self.palette_attached_window);
+                        return true;
+                    };
                     let source_window = self.palette_attached_window.or(self.main_window_id);
-                    if matches!(action, Some(sonicterm_cfg::keymap::Action::RenameTab)) {
+                    let action = match action {
+                        sonicterm_ui::command_palette::PaletteEntry::Command(action) => action,
+                        sonicterm_ui::command_palette::PaletteEntry::Tab { id, .. } => {
+                            // When: `Tab` supplies `id`, resolve it in the captured source before closing the palette.
+                            let target = source_window.and_then(|window_id| {
+                                let window =
+                                    self.windows.get(&window_id).filter(|window| !window.hidden)?;
+                                window
+                                    .tabs
+                                    .tabs()
+                                    .iter()
+                                    .position(|tab| tab.id == id)
+                                    .map(|index| (window_id, index))
+                            });
+                            let Some((window_id, index)) = target else {
+                                // When: `target` vanished, never substitute another tab or window at the old position.
+                                self.request_redraw_for_overlay(self.palette_attached_window);
+                                return true;
+                            };
+                            self.command_palette.close();
+                            self.palette_attached_window = None;
+                            self.run_action_for_window(&Action::ActivateTab(index), window_id);
+                            self.request_redraw_for_overlay(Some(window_id));
+                            return true;
+                        }
+                    };
+                    if matches!(action, sonicterm_cfg::keymap::Action::RenameTab) {
                         // When: matches finds RenameTab the palette stays open as
                         // a rename editor seeded with the active tab title.
                         let body = self.active_tab_title_body().unwrap_or_default();
@@ -437,7 +736,7 @@ impl App {
                         self.request_redraw_for_overlay(self.palette_attached_window);
                         return true;
                     }
-                    if matches!(action, Some(sonicterm_cfg::keymap::Action::UpdateTabColor)) {
+                    if matches!(action, sonicterm_cfg::keymap::Action::UpdateTabColor) {
                         // When: matches finds UpdateTabColor the palette switches
                         // to the tab color picker instead of closing.
                         self.start_update_tab_color();
@@ -445,14 +744,11 @@ impl App {
                     }
                     self.command_palette.close();
                     self.palette_attached_window = None;
-                    if let Some(a) = action {
-                        if let Some(source_window) = source_window {
-                            self.run_action_for_window(&a, source_window);
-                        } else {
-                            // When: source_window is None no originating window
-                            // was recorded; run_action picks the frontmost itself.
-                            self.run_action(&a);
-                        }
+                    if let Some(source_window) = source_window {
+                        self.run_action_for_window(&action, source_window);
+                    } else {
+                        // When: `source_window` is absent, only target-free commands reach the existing dispatcher.
+                        self.run_action(&action);
                     }
                     true
                 }
@@ -510,7 +806,23 @@ impl App {
             }
         }
     }
+    /// Open live-tab navigation for the explicit window without changing action routing ownership.
+    pub(super) fn open_tab_selector(&mut self, window_id: WindowId) {
+        if self.windows.get(&window_id).is_none_or(|window| window.hidden) {
+            // When: `window_id` is missing or hidden, do not populate a selector from another window.
+            return;
+        }
+        self.palette_pointer_capture = None;
+        self.palette_attached_window =
+            (Some(window_id) != self.main_window_id).then_some(window_id);
+        self.command_palette.open_tabs();
+        self.refresh_command_palette_context();
+        self.update_command_palette_ime_cursor_area();
+        self.request_redraw_for_overlay(self.palette_attached_window);
+    }
+
     pub(super) fn toggle_command_palette(&mut self) {
+        self.palette_pointer_capture = None;
         self.refresh_command_palette_context();
         let now_open = self.command_palette.toggle();
         // Notify the reducer of the toggle. The reducer flips `palette_open`
@@ -548,6 +860,7 @@ impl App {
     }
 
     pub(super) fn start_rename_active_tab(&mut self) {
+        self.palette_pointer_capture = None;
         let body = self.active_tab_title_body().unwrap_or_default();
         self.command_palette.start_rename_tab(body);
         self.palette_attached_window = match self.frontmost_kind() {
@@ -589,6 +902,7 @@ impl App {
     }
 
     pub(super) fn start_update_tab_color(&mut self) {
+        self.palette_pointer_capture = None;
         let title = self.active_tab_title_body().unwrap_or_else(|| "current tab".to_string());
         let choices = theme_tab_color_choices(&self.theme);
         self.command_palette.start_tab_color_picker(title, choices);

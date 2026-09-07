@@ -10,8 +10,8 @@
 //! Filtering is a VSCode-style fuzzy match using
 //! [`nucleo_matcher`]: each candidate label gets a score, results are
 //! sorted descending by score, and ties fall back to the canonical
-//! order returned by [`all_actions`]. Empty query matches everything
-//! in canonical order. Subsequence matching is the underlying ranker,
+//! order returned by [`all_actions`]. Empty query groups commands by category
+//! with their relative canonical order preserved. Subsequence matching is the underlying ranker,
 //! so substring runs score above scattered matches.
 
 use nucleo_matcher::{
@@ -20,8 +20,17 @@ use nucleo_matcher::{
 };
 use sonicterm_cfg::keymap::{Action, Direction, Keymap, ScrollAction};
 
-use crate::command_label::{keybinding_hint, search_haystack, ALL_VARIANT_KINDS};
+use crate::command_label::{
+    descriptor, disabled_reason, keybinding_hint, label, localized_label,
+    localized_search_haystack, search_haystack, CommandCategory, CommandContext, DisabledReason,
+    ALL_VARIANT_KINDS,
+};
+use crate::i18n::I18n;
+use crate::tabs::{TabBar, TabId};
 use crate::text_edit::{apply_edit, TextEdit};
+use std::hash::{Hash, Hasher};
+
+const NO_SELECTION: usize = usize::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandPaletteMode {
@@ -36,23 +45,210 @@ pub struct TabColorChoice {
     pub hex: Option<String>,
 }
 
+/// A palette command or a live tab target whose identity is independent of its display position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaletteEntry {
+    /// An existing keymap action executed by App.
+    Command(Action),
+    /// A tab in the attached terminal window.
+    Tab {
+        /// Process-unique runtime identity, revalidated before activation.
+        id: TabId,
+        /// Current literal title.
+        title: String,
+        /// Zero-based current position, used only for the display label.
+        position: usize,
+    },
+}
+
+impl PaletteEntry {
+    /// Compare executable identity without treating tab titles or positions as targets.
+    pub fn same_identity(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Command(left), Self::Command(right)) => left == right,
+            (Self::Tab { id: left, .. }, Self::Tab { id: right, .. }) => left == right,
+            _ => false,
+        }
+    }
+
+    fn category(&self) -> CommandCategory {
+        match self {
+            Self::Command(action) => descriptor(action).category,
+            Self::Tab { .. } => CommandCategory::Tabs,
+        }
+    }
+
+    fn disabled_reason(&self, context: &CommandContext) -> Option<DisabledReason> {
+        match self {
+            Self::Command(action) => disabled_reason(action, context),
+            Self::Tab { .. } if !context.window_available => Some(DisabledReason::NoWindow),
+            Self::Tab { .. } if context.tab_count == 0 => Some(DisabledReason::NoTab),
+            Self::Tab { .. } => None,
+        }
+    }
+
+    fn presentation(&self, i18n: Option<&I18n>, hint: Option<String>) -> CommandPresentation {
+        let (label, mut search) = match self {
+            Self::Command(action) => i18n.map_or_else(
+                || (label(action), search_haystack(action)),
+                |i18n| (localized_label(action, i18n), localized_search_haystack(action, i18n)),
+            ),
+            Self::Tab { title, position, .. } => {
+                let number = (position + 1).to_string();
+                let english = format!("Go to Tab {number}: {title}");
+                let label = i18n
+                    .and_then(|i18n| {
+                        i18n.try_t_args(
+                            "palette-go-to-tab",
+                            Some(&[("number", &number), ("title", title)]),
+                        )
+                    })
+                    .unwrap_or_else(|| english.clone());
+                let search = if label == english {
+                    format!("{english} switch tab")
+                } else {
+                    // When: `label` is translated, English Go to Tab queries must still discover the target.
+                    format!("{label} {english} switch tab")
+                };
+                (label, search)
+            }
+        };
+        if let Some(hint) = &hint {
+            search.push(' ');
+            search.push_str(hint);
+        }
+        CommandPresentation { label, search, hint }
+    }
+}
+
+#[derive(Debug, Clone, Hash)]
+struct CommandPresentation {
+    label: String,
+    search: String,
+    hint: Option<String>,
+}
+
+// Resolve Fluent once; insert literal values into cached phrase slots during layout.
+const TEXT_SLOT: &str = "\u{fdd0}";
+
+#[derive(Debug, Clone, Hash)]
+struct TextSlot {
+    before: String,
+    after: String,
+}
+
+impl TextSlot {
+    fn new(message: String) -> Self {
+        let (before, after) = message
+            .split_once(TEXT_SLOT)
+            .expect("embedded palette phrase retains its argument slot");
+        Self { before: before.to_string(), after: after.to_string() }
+    }
+
+    fn render(&self, value: &str) -> String {
+        format!("{}{value}{}", self.before, self.after)
+    }
+}
+
+#[derive(Debug, Clone, Hash)]
+pub(crate) struct PaletteText {
+    pub(crate) search_placeholder: String,
+    pub(crate) tabs_placeholder: String,
+    pub(crate) tabs_empty: String,
+    pub(crate) tabs_hint: String,
+    pub(crate) tabs_footer: String,
+    pub(crate) rename_placeholder: String,
+    pub(crate) no_matches: String,
+    pub(crate) empty_hint: String,
+    pub(crate) rename_footer: String,
+    pub(crate) color_footer: String,
+    command_footer_one: TextSlot,
+    command_footer_other: TextSlot,
+    color_title: TextSlot,
+    categories: [String; 7],
+    disabled_reasons: [String; 7],
+}
+
+impl PaletteText {
+    fn new(i18n: Option<&I18n>) -> Self {
+        let text = |key, fallback: &str| {
+            i18n.and_then(|i18n| i18n.try_t_args(key, None)).unwrap_or_else(|| fallback.to_string())
+        };
+        let footer = |kind, noun| {
+            let args = [("count", TEXT_SLOT), ("count-kind", kind)];
+            TextSlot::new(
+                i18n.and_then(|i18n| i18n.try_t_args("palette-command-footer", Some(&args)))
+                    .unwrap_or_else(|| {
+                        format!("{TEXT_SLOT} {noun} · ↑↓ navigate · ↵ run · esc close")
+                    }),
+            )
+        };
+        let color_title = TextSlot::new(
+            i18n.and_then(|i18n| {
+                i18n.try_t_args("palette-color-title", Some(&[("title", TEXT_SLOT)]))
+            })
+            .unwrap_or_else(|| format!("Color for {TEXT_SLOT}")),
+        );
+        Self {
+            search_placeholder: text(
+                "palette-search-placeholder",
+                "Search commands, settings, shortcuts…",
+            ),
+            tabs_placeholder: text("palette-tabs-placeholder", "Search tabs…"),
+            tabs_empty: text("palette-tabs-empty", "No tabs found"),
+            tabs_hint: text("palette-tabs-hint", "Search a tab title or position"),
+            tabs_footer: text(
+                "palette-tabs-footer",
+                "All tabs · ↑↓ navigate · ↵ switch · esc close",
+            ),
+            rename_placeholder: text("palette-rename-placeholder", "New tab title…"),
+            no_matches: text("palette-no-matches", "No commands found"),
+            empty_hint: text("palette-empty-hint", "Try settings, split, font, shortcut"),
+            rename_footer: text("palette-rename-footer", "↵ rename · esc cancel"),
+            color_footer: text("palette-color-footer", "↑↓ choose color · ↵ apply · esc cancel"),
+            command_footer_one: footer("one", "command"),
+            command_footer_other: footer("other", "commands"),
+            color_title,
+            categories: CommandCategory::ALL.map(|category| {
+                let (key, fallback) = category.message();
+                text(key, fallback)
+            }),
+            disabled_reasons: DisabledReason::ALL.map(|reason| {
+                let (key, fallback) = reason.message();
+                text(key, fallback)
+            }),
+        }
+    }
+
+    /// Format the current result count through the locale's cached whole phrase.
+    pub(crate) fn command_footer(&self, count: usize) -> String {
+        let phrase = if count == 1 { &self.command_footer_one } else { &self.command_footer_other };
+        phrase.render(&count.to_string())
+    }
+
+    /// Preserve literal tab titles inside the locale's phrase and append the UI caret.
+    pub(crate) fn color_title(&self, title: &str) -> String {
+        format!("{}▏", self.color_title.render(title))
+    }
+}
+
 /// State for the command palette overlay. Owned by `App`.
 #[derive(Debug, Clone)]
 pub struct CommandPalette {
     open: bool,
     mode: CommandPaletteMode,
+    tabs_only: bool,
     query: String,
     cursor: usize,
-    /// Full universe of actions, in canonical order.
-    all: Vec<Action>,
-    /// First keybinding hint for each action in `all`, parallel order.
-    shortcut_hints: Vec<Option<String>>,
-    /// Filtered view — indices into `all` matched by the current query,
-    /// or all indices when the query is empty. Order is descending
-    /// fuzzy-score, with canonical-order tiebreak.
+    /// Canonical commands followed by the attached window's live tab targets.
+    all: Vec<PaletteEntry>,
+    presentation: Vec<CommandPresentation>,
+    text: PaletteText,
+    presentation_hash: u64,
+    /// Command indices into `all`, or color-choice indices in TabColor mode.
     items: Vec<usize>,
     selected: usize,
-    tab_count: usize,
+    context: CommandContext,
     /// First visible item index in the rendered viewport. Maintained by
     /// [`Self::ensure_selected_in_view`] so that arrow-key navigation
     /// keeps the highlighted row inside the modal even when the
@@ -75,19 +271,30 @@ impl Default for CommandPalette {
 impl CommandPalette {
     /// Build a closed palette holding the canonical action list.
     pub fn new() -> Self {
-        let all = palette_actions();
-        let shortcut_hints = vec![None; all.len()];
-        let items = (0..all.len()).collect();
+        let all: Vec<_> = palette_actions().into_iter().map(PaletteEntry::Command).collect();
+        let presentation: Vec<_> = all.iter().map(|entry| entry.presentation(None, None)).collect();
+        let text = PaletteText::new(None);
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        presentation.hash(&mut hash);
+        text.hash(&mut hash);
+        let context = CommandContext::default();
+        context.hash(&mut hash);
+        let presentation_hash = hash.finish();
+        let mut items: Vec<_> = (0..all.len()).collect();
+        items.sort_by_key(|&index| all[index].category());
         Self {
             open: false,
             mode: CommandPaletteMode::Commands,
+            tabs_only: false,
             query: String::new(),
             cursor: 0,
             all,
-            shortcut_hints,
+            presentation,
+            text,
+            presentation_hash,
             items,
             selected: 0,
-            tab_count: usize::MAX,
+            context,
             scroll_offset: 0,
             visible_rows: 0,
             tab_color_title: String::new(),
@@ -120,9 +327,8 @@ impl CommandPalette {
         self.selected
     }
 
-    /// Visible action list (filtered). Display order is what the renderer
-    /// should show.
-    pub fn visible(&self) -> Vec<&Action> {
+    /// Filtered command and tab entries in display order.
+    pub fn visible(&self) -> Vec<&PaletteEntry> {
         if self.mode != CommandPaletteMode::Commands {
             // When: `mode` is not `Commands`, the overlay lists tab names or colours, not actions.
             return Vec::new();
@@ -130,10 +336,61 @@ impl CommandPalette {
         self.items.iter().filter_map(|&i| self.all.get(i)).collect()
     }
 
+    /// Localized command label in the filtered display order.
+    pub fn label_for_visible_index(&self, visible_index: usize) -> Option<&str> {
+        self.presentation_for_visible_index(visible_index).map(|entry| entry.label.as_str())
+    }
+
+    /// Disabled reason for a command row, while keeping it available for search and inspection.
+    pub fn disabled_reason_for_visible_index(
+        &self,
+        visible_index: usize,
+    ) -> Option<DisabledReason> {
+        if self.mode != CommandPaletteMode::Commands {
+            // When: `mode` uses title or color state, no command requirement applies to the row.
+            return None;
+        }
+        self.all.get(*self.items.get(visible_index)?)?.disabled_reason(&self.context)
+    }
+
+    /// Localized category and availability text for a command row.
+    pub fn detail_for_visible_index(&self, visible_index: usize) -> Option<String> {
+        if self.mode != CommandPaletteMode::Commands {
+            // When: `mode` is not Commands, command category details do not describe these rows.
+            return None;
+        }
+        let entry = self.all.get(*self.items.get(visible_index)?)?;
+        let category = &self.text.categories[entry.category() as usize];
+        Some(match entry.disabled_reason(&self.context) {
+            Some(reason) => format!("{category} · {}", self.text.disabled_reasons[reason as usize]),
+            None => category.clone(),
+        })
+    }
+
     /// Keybinding hint for a row of [`Self::visible`], in the same display order.
     pub fn shortcut_hint_for_visible_index(&self, visible_index: usize) -> Option<&str> {
-        let all_index = *self.items.get(visible_index)?;
-        self.shortcut_hints.get(all_index)?.as_deref()
+        self.presentation_for_visible_index(visible_index)?.hint.as_deref()
+    }
+
+    fn presentation_for_visible_index(&self, visible_index: usize) -> Option<&CommandPresentation> {
+        if self.mode != CommandPaletteMode::Commands {
+            // When: `mode` is not Commands, `items` does not index command presentation records.
+            return None;
+        }
+        self.presentation.get(*self.items.get(visible_index)?)
+    }
+
+    /// Cached command-text identity for retained-frame invalidation without per-frame translation.
+    pub fn presentation_hash(&self) -> u64 {
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        self.presentation_hash.hash(&mut hash);
+        self.tabs_only.hash(&mut hash);
+        hash.finish()
+    }
+
+    /// Cached locale text shared by all palette layout modes.
+    pub(crate) fn text(&self) -> &PaletteText {
+        &self.text
     }
 
     /// Number of rows in the filtered view.
@@ -150,6 +407,7 @@ impl CommandPalette {
     pub fn open(&mut self) {
         self.open = true;
         self.mode = CommandPaletteMode::Commands;
+        self.tabs_only = false;
         self.query.clear();
         self.cursor = 0;
         self.selected = 0;
@@ -157,10 +415,23 @@ impl CommandPalette {
         self.refilter();
     }
 
+    /// Open the same palette restricted to live tabs in its attached window.
+    pub fn open_tabs(&mut self) {
+        self.open();
+        self.tabs_only = true;
+        self.refilter();
+    }
+
+    /// Whether the command input is showing only live tab targets.
+    pub fn tabs_only(&self) -> bool {
+        self.tabs_only
+    }
+
     /// Close the palette and clear the query so the next open starts clean.
     pub fn close(&mut self) {
         self.open = false;
         self.mode = CommandPaletteMode::Commands;
+        self.tabs_only = false;
         self.query.clear();
         self.cursor = 0;
         self.selected = 0;
@@ -190,38 +461,119 @@ impl CommandPalette {
         }
     }
 
-    /// Rebuild the action list and shortcut hints from the user's keymap.
-    ///
-    /// Bound actions the canonical list omits are appended, so a user-defined
-    /// binding becomes reachable from the palette.
-    pub fn set_keymap(&mut self, keymap: &Keymap) {
-        self.all = palette_actions();
+    /// Rebuild command bindings and localized text while retaining the current tab-target inventory.
+    pub fn set_keymap(&mut self, keymap: &Keymap, i18n: &I18n) {
+        let selected = self.highlighted().cloned();
+        let targets: Vec<_> =
+            self.all.drain(..).filter(|entry| matches!(entry, PaletteEntry::Tab { .. })).collect();
+        self.all = palette_actions().into_iter().map(PaletteEntry::Command).collect();
         for binding in &keymap.bindings {
             let action = &binding.action.0;
-            if palette_accepts_keymap_action(action) && !self.all.contains(action) {
-                self.all.push(action.clone());
+            if palette_accepts_keymap_action(action)
+                && !self.all.iter().any(
+                    |entry| matches!(entry, PaletteEntry::Command(existing) if existing == action),
+                )
+            {
+                self.all.push(PaletteEntry::Command(action.clone()));
             }
         }
-        self.shortcut_hints =
-            self.all.iter().map(|action| keybinding_hint(keymap, action)).collect();
-        self.items = (0..self.all.len()).collect();
-        self.selected = self.selected.min(self.items.len().saturating_sub(1));
-        self.refilter();
+        self.all.extend(targets);
+        self.presentation = self
+            .all
+            .iter()
+            .map(|entry| {
+                let hint = match entry {
+                    PaletteEntry::Command(action) => keybinding_hint(keymap, action),
+                    PaletteEntry::Tab { .. } => None,
+                };
+                entry.presentation(Some(i18n), hint)
+            })
+            .collect();
+        self.text = PaletteText::new(Some(i18n));
+        self.refresh_identity();
+        self.refilter_preserving_entry(selected);
     }
 
-    /// Record how many tabs exist so `ActivateTab` rows past the end stay hidden.
-    pub fn set_tab_count(&mut self, tab_count: usize) {
-        let tab_count = tab_count.max(1);
-        if self.tab_count == tab_count {
-            // When: `tab_count` is unchanged, re-filtering would discard the selection for nothing.
+    /// Refresh translated text without changing literal targets, input, or noncommand picker selection.
+    pub fn set_locale(&mut self, i18n: &I18n) {
+        let selected = self.highlighted().cloned();
+        for (entry, presentation) in self.all.iter().zip(&mut self.presentation) {
+            *presentation = entry.presentation(Some(i18n), presentation.hint.take());
+        }
+        self.text = PaletteText::new(Some(i18n));
+        self.refresh_identity();
+        self.refilter_preserving_entry(selected);
+    }
+
+    /// Refresh only the attached window's live tab targets, preserving selection by TabId.
+    pub fn set_tabs(&mut self, tabs: &TabBar, i18n: &I18n) {
+        let command_count = self
+            .all
+            .iter()
+            .position(|entry| matches!(entry, PaletteEntry::Tab { .. }))
+            .unwrap_or(self.all.len());
+        let unchanged = self.all.len() - command_count == tabs.len()
+            && self.all[command_count..].iter().zip(tabs.tabs()).enumerate().all(|(position, (entry, tab))| {
+                matches!(entry, PaletteEntry::Tab { id, title, position: previous } if *id == tab.id && title == &tab.title && *previous == position)
+            });
+        if unchanged {
+            // When: tab identity, title, and position are unchanged, retain cached strings and selection.
             return;
         }
-        self.tab_count = tab_count;
-        self.selected = 0;
-        self.scroll_offset = 0;
-        if self.mode == CommandPaletteMode::Commands {
-            self.refilter();
+        let selected = self.highlighted().cloned();
+        self.all.truncate(command_count);
+        self.presentation.truncate(command_count);
+        for (position, tab) in tabs.tabs().iter().enumerate() {
+            let entry = PaletteEntry::Tab { id: tab.id, title: tab.title.clone(), position };
+            self.presentation.push(entry.presentation(Some(i18n), None));
+            self.all.push(entry);
         }
+        self.refresh_identity();
+        self.refilter_preserving_entry(selected);
+    }
+
+    fn refresh_identity(&mut self) {
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        self.presentation.hash(&mut hash);
+        self.text.hash(&mut hash);
+        self.context.hash(&mut hash);
+        for entry in &self.all {
+            if let PaletteEntry::Tab { id, .. } = entry {
+                id.hash(&mut hash);
+            }
+        }
+        self.presentation_hash = hash.finish();
+    }
+
+    fn refilter_preserving_entry(&mut self, selected: Option<PaletteEntry>) {
+        if self.mode != CommandPaletteMode::Commands {
+            // When: `mode` uses title or color state, refresh text but preserve its separate `items` indices.
+            return;
+        }
+        let scroll = self.scroll_offset;
+        let keep_absence =
+            self.selected == NO_SELECTION || matches!(selected, Some(PaletteEntry::Tab { .. }));
+        self.refilter();
+        self.selected = selected
+            .as_ref()
+            .and_then(|entry| {
+                self.items.iter().position(|&index| self.all[index].same_identity(entry))
+            })
+            .unwrap_or(if keep_absence { NO_SELECTION } else { 0 });
+        self.scroll_offset = if self.items.is_empty() { 0 } else { scroll };
+        self.ensure_selected_in_view();
+    }
+
+    /// Replace attached-window facts without changing the highlighted action or translating text.
+    pub fn set_context(&mut self, context: CommandContext) {
+        if self.context == context {
+            // When: `context` is unchanged, retain the existing selection and presentation identity.
+            return;
+        }
+        let selected = self.highlighted().cloned();
+        self.context = context;
+        self.refresh_identity();
+        self.refilter_preserving_entry(selected);
     }
 
     /// Insert a typed character at the cursor and re-filter.
@@ -321,6 +673,17 @@ impl CommandPalette {
         self.apply_text_edit(TextEdit::DeleteForward);
     }
 
+    /// Highlight a filtered command row without executing it or permitting an unavailable command.
+    pub fn select_visible_index(&mut self, index: usize) -> bool {
+        if self.mode != CommandPaletteMode::Commands || index >= self.items.len() {
+            // When: `index` is absent or `mode` is not Commands, preserve the existing picker selection.
+            return false;
+        }
+        self.selected = index;
+        self.ensure_selected_in_view();
+        true
+    }
+
     /// Highlight the next row, wrapping to the top past the last one.
     pub fn move_selection_down(&mut self) {
         if self.items.is_empty() {
@@ -329,7 +692,12 @@ impl CommandPalette {
             self.scroll_offset = 0;
             return;
         }
-        self.selected = (self.selected + 1) % self.items.len();
+        self.selected = if self.selected == NO_SELECTION {
+            0
+        } else {
+            // When: `selected` names a real item, advance and wrap without overflowing the absence sentinel.
+            (self.selected + 1) % self.items.len()
+        };
         self.ensure_selected_in_view();
     }
 
@@ -341,7 +709,7 @@ impl CommandPalette {
             self.scroll_offset = 0;
             return;
         }
-        self.selected = if self.selected == 0 {
+        self.selected = if self.selected == 0 || self.selected == NO_SELECTION {
             self.items.len() - 1
         } else {
             // When: `selected` is nonzero, stepping back stays inside the list without wrapping.
@@ -379,6 +747,12 @@ impl CommandPalette {
             // When: `visible_rows` is zero or `items` is empty, no window constrains the selection.
             return;
         }
+        if self.selected == NO_SELECTION {
+            // When: the selected tab disappeared, clamp the viewport without choosing another entry.
+            self.scroll_offset =
+                self.scroll_offset.min(self.items.len().saturating_sub(self.visible_rows));
+            return;
+        }
         if self.selected < self.scroll_offset {
             self.scroll_offset = self.selected;
         } else if self.selected >= self.scroll_offset + self.visible_rows {
@@ -393,22 +767,29 @@ impl CommandPalette {
         }
     }
 
-    /// The currently highlighted action, if any.
-    pub fn current(&self) -> Option<&Action> {
-        if self.mode == CommandPaletteMode::RenameTab {
-            // When: `mode` is `RenameTab`, the field holds a tab title, so no action is selected.
+    /// The highlighted entry, including a disabled row whose identity must survive refresh.
+    pub fn highlighted(&self) -> Option<&PaletteEntry> {
+        if self.mode != CommandPaletteMode::Commands {
+            // When: `mode` collects a title or color, `items` cannot select a command entry.
             return None;
         }
         self.items.get(self.selected).and_then(|&i| self.all.get(i))
     }
 
-    /// Fuzzy-match `query` against the human label of each candidate
-    /// action; sort hits descending by nucleo score with canonical-
-    /// order tiebreak. Empty query is canonical order, full universe.
+    /// The highlighted entry only when its attached-window requirements permit execution.
+    pub fn current(&self) -> Option<&PaletteEntry> {
+        self.highlighted().filter(|entry| entry.disabled_reason(&self.context).is_none())
+    }
+
+    /// Rank query matches with canonical ties; group the complete empty-query list by category.
     fn refilter(&mut self) {
         if self.query.is_empty() {
-            self.items =
-                (0..self.all.len()).filter(|&i| self.action_available(&self.all[i])).collect();
+            self.items = (0..self.all.len())
+                .filter(|&index| {
+                    !self.tabs_only || matches!(self.all[index], PaletteEntry::Tab { .. })
+                })
+                .collect();
+            self.items.sort_by_key(|&index| self.all[index].category());
         } else {
             // When: `query` is non-empty, every candidate is scored and ranked instead of listed.
             let mut matcher = Matcher::new(Config::DEFAULT);
@@ -418,29 +799,20 @@ impl CommandPalette {
                 .all
                 .iter()
                 .enumerate()
-                .filter(|(_, a)| self.action_available(a))
-                .filter_map(|(i, a)| {
+                .filter(|(_, entry)| !self.tabs_only || matches!(entry, PaletteEntry::Tab { .. }))
+                .filter_map(|(i, _)| {
                     scratch.clear();
-                    let mut label = search_haystack(a);
-                    if let Some(Some(hint)) = self.shortcut_hints.get(i) {
-                        label.push(' ');
-                        label.push_str(hint);
-                    }
-                    let haystack = Utf32Str::new(&label, &mut scratch);
+                    let haystack = Utf32Str::new(&self.presentation[i].search, &mut scratch);
                     pattern.score(haystack, &mut matcher).map(|s| (i, s))
                 })
                 .collect();
             scored.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
             self.items = scored.into_iter().map(|(i, _)| i).collect();
         }
-        if self.selected >= self.items.len() {
+        if self.selected != NO_SELECTION && self.selected >= self.items.len() {
             self.selected = 0;
         }
         self.ensure_selected_in_view();
-    }
-
-    fn action_available(&self, action: &Action) -> bool {
-        !matches!(action, Action::ActivateTab(i) if *i >= self.tab_count)
     }
 }
 

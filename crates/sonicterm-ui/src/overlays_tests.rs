@@ -1,5 +1,23 @@
 use super::*;
 
+/// An empty tabs-only selector explains its state even before the user types a query.
+#[test]
+fn empty_tab_selector_uses_localized_empty_chrome_without_query() {
+    for locale in ["en", "zh-CN", "ja"] {
+        let mut palette = CommandPalette::new();
+        palette.set_locale(&crate::i18n::test_translator(locale));
+        palette.open_tabs();
+        let layout = PaletteLayout::compute(&mut palette, 900.0, 600.0, 0.0, 1.0).unwrap();
+        assert!(layout.rows.is_empty());
+        assert_eq!(layout.empty_label.as_deref(), Some(palette.text().tabs_empty.as_str()));
+        assert_eq!(
+            layout.query_placeholder.as_deref(),
+            Some(palette.text().tabs_placeholder.as_str())
+        );
+        assert_eq!(layout.footer_label, palette.text().tabs_footer);
+    }
+}
+
 #[test]
 fn search_bar_uses_300_to_600_width_window() {
     let small = SearchBarLayout::compute(1000.0, 800.0, 10.0, 1.0);
@@ -147,6 +165,7 @@ fn command_palette_uses_compact_spacing_tokens() {
     }
 }
 
+/// Command details fit within each row while query and footer geometry stay unchanged.
 #[test]
 fn command_palette_layout_is_dense_but_keeps_text_centered() {
     let mut palette = CommandPalette::new();
@@ -157,10 +176,13 @@ fn command_palette_layout_is_dense_but_keeps_text_centered() {
 
     assert_eq!(layout.border.h, PALETTE_HEIGHT);
     assert_eq!(layout.query_row.h, PALETTE_QUERY_HEIGHT);
-    assert!(layout.rows.len() >= 10, "compact layout should fit a useful command list");
+    assert!(layout.rows.len() >= 6, "command details must leave a useful visible list");
     for row in &layout.rows {
-        assert_eq!(row.rect.h, PALETTE_ROW_HEIGHT);
+        assert_eq!(row.rect.h, PALETTE_ROW_HEIGHT + PALETTE_DETAIL_HEIGHT);
+        assert!(row.rect.y + row.rect.h <= layout.footer.y);
     }
+    assert_eq!(layout.row_details.len(), layout.rows.len());
+    assert!(layout.row_details.iter().all(Option::is_some));
     assert_eq!(layout.footer.h, PALETTE_FOOTER_HEIGHT);
     assert_eq!(
         layout.query_icon.y,

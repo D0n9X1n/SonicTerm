@@ -515,6 +515,48 @@ fn changing_weight_leaves_font_size_untouched() {
     assert_eq!(app.configured_font_size, 16.0, "weight must not move the size reset target");
 }
 
+/// Startup, direct locale changes, and config reloads refresh the same palette catalog without rerouting it.
+#[test]
+fn palette_locale_consumers_preserve_attached_window_and_command() {
+    use sonicterm_ui::command_label::localized_label;
+    let config = Config { locale: "ja".into(), ..Config::default() };
+    let mut app = App::new(Theme::default(), config, Keymap::default());
+    assert_eq!(
+        app.command_palette.label_for_visible_index(0),
+        Some(localized_label(&Action::NewTab, &app.i18n).as_str())
+    );
+    app.__test_synthetic_main();
+    let child = app.__test_seed_child_window(&["child"]);
+    app.__test_set_frontmost_window(Some(child));
+    assert!(app.run_action(&Action::OpenCommandPalette));
+    app.__test_set_palette_query("hide");
+    let selected = app.command_palette.current().cloned();
+    let Some(sonicterm_ui::command_palette::PaletteEntry::Command(action)) = &selected else {
+        panic!("hide query selects a command");
+    };
+    app.command_palette.move_cursor_left();
+    let cursor = app.command_palette.cursor();
+    app.set_locale("zh-CN");
+    assert_eq!(app.command_palette.current(), selected.as_ref());
+    assert_eq!(app.__test_palette_attached_window(), Some(child));
+    assert_eq!(app.command_palette.cursor(), cursor);
+    assert_eq!(
+        app.command_palette.label_for_visible_index(app.command_palette.selected()),
+        Some(localized_label(action, &app.i18n).as_str())
+    );
+    let mut reloaded = app.config.clone();
+    reloaded.locale = "en".into();
+    app.apply_new_config(reloaded);
+    assert_eq!(app.command_palette.current(), selected.as_ref());
+    assert_eq!(app.command_palette.query(), "hide");
+    assert_eq!(app.command_palette.cursor(), cursor);
+    assert_eq!(app.__test_palette_attached_window(), Some(child));
+    assert_eq!(
+        app.command_palette.label_for_visible_index(app.command_palette.selected()),
+        Some(localized_label(action, &app.i18n).as_str())
+    );
+}
+
 /// An explicit reload moves the weight reset target, the same rule the font
 /// size baseline follows.
 #[test]
