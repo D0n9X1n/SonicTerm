@@ -75,11 +75,18 @@ backend offers it and otherwise uses `Fifo`. Opaque backdrops use
 SonicTerm renders into a retained offscreen frame texture. A frame key covers
 visible pane revisions, geometry, selection, tabs, overlays, hover, inline
 media, font/style state, and other image-affecting inputs. Effective scrollbar
-opacity is stored as sorted `(pane id, u16 alpha)` pairs: `Never`, panes without
+opacity is quantized in each keyed pane record: `Never`, panes without
 scrollback, and opacity at or below the shared emit floor all map to zero.
 Hardware rendering still performs the full renderer assembly when a changed
 frame is requested; unchanged frame keys return without rebuilding or
 submitting a new frame.
+
+The private production `FramePlan` owns that key together with final mode,
+damage, pane full/content clips, resolved viewport rows, and expected revisions.
+It receives metadata without grids or GPU objects; cell shaping and atlas
+mutation remain in `GpuRenderer`. The same planner drives deterministic tests
+and both presenters. Pane padding may leave an empty image-content clip even
+though the existing cell layout retains its one-cell floor.
 
 Surface-acquisition paths that do not successfully present clear the cached
 frame key. `Outdated` and `Suboptimal` reconfigure the surface; `Lost` recreates
@@ -354,10 +361,15 @@ flowchart TD
 `CompositeAlphaMode::PreMultiplied`。期望最大帧延迟为 2。
 
 SonicTerm 绘制到保留式离屏帧纹理。帧键覆盖可见窗格修订号、几何、选区、标签页、
-浮层、悬停、内联媒体、字体/样式状态以及其它影响画面的输入。滚动条有效透明度保存为按窗格
-编号排序的 `(pane id, u16 alpha)`；`Never`、没有回滚历史的窗格，以及不高于共享发射阈值
+浮层、悬停、内联媒体、字体/样式状态以及其它影响画面的输入。滚动条有效透明度在每个带身份的
+窗格记录中量化保存；`Never`、没有回滚历史的窗格，以及不高于共享发射阈值
 的透明度都映射为零。硬件路径收到有变化的帧请求时仍执行完整渲染器组装；帧键完全相同时
 直接返回，不重建也不提交新帧。
+
+私有生产 `FramePlan` 同时拥有该帧键、最终模式、损伤区域、窗格完整/内容裁剪、已解析视口行和
+预期修订号。它接收不含网格或 GPU 对象的元数据；单元格塑形和图集修改仍由 `GpuRenderer`
+负责。同一规划器驱动确定性测试和两个呈现器。窗格内边距可能使图像内容裁剪为空，即使现有
+单元格布局仍保留一格的最小尺寸。
 
 任何未成功呈现的表面获取路径都会清除缓存帧键。`Outdated` 和 `Suboptimal` 会重新配置
 表面，`Lost` 会重新创建，校验错误则向上传递。重新配置前必须先释放

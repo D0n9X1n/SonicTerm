@@ -137,6 +137,15 @@ inline images. Production `GpuRenderer::render` receives that pane slice plus
 explicit theme, selection, tabs, search, palette, IME, notification, and hovered
 URL arguments.
 
+Inside `sonicterm-gpu`, one owned `FramePlan` composes frame identity, render mode,
+retained damage, full/content pane clips, viewport row slots, and expected grid
+revisions from immutable metadata. Production assembly consumes that plan rather
+than recomputing those decisions. It holds no grid, copied cells, mutable UI
+controller, font stack, or native/GPU handle. Its vectors follow visible panes
+and dirty rows; retained text identity is a digest, not another payload copy.
+The renderer keeps only the compact key after presentation. Parser guards and
+borrowed grids still span the complete stateful atlas/renderer operation.
+
 `RenderInputs` remains a public render-model type. The two public `Painter`
 traits are dormant source-compatibility seams with no production implementation;
 production rendering uses `PaneRender` and `WeztermPipeline` directly.
@@ -355,6 +364,12 @@ crate 中身份不变的类型。
 `PaneRender` 包含稳定窗格编号、可变网格视图、像素矩形、视口、焦点、光标样式、广播
 接收状态、滚动条透明度和内联图像。生产路径的 `GpuRenderer::render` 接收这组窗格，
 并通过独立参数接收主题、选区、标签页、搜索、命令面板、输入法、通知和悬停 URL。
+
+`sonicterm-gpu` 内部通过一个拥有自身数据的 `FramePlan`，从不可变元数据组合帧身份、渲染模式、
+保留损伤区域、完整/内容窗格裁剪、视口行槽和预期网格修订号。生产组装使用该计划，不重新计算
+这些决策。计划不持有网格、复制的单元格、可变 UI controller、字体栈或原生/GPU 句柄。
+向量规模随可见窗格和脏行变化；保留的文本身份是摘要，不是另一份载荷。呈现后渲染器只保留
+紧凑帧键。解析器保护对象和借用网格仍覆盖整个有状态的图集/渲染器操作。
 
 `RenderInputs` 仍是公开的渲染模型类型。两个公开的 `Painter` trait 都是没有生产实现的休眠
 源码兼容接缝；生产渲染直接使用 `PaneRender` 和 `WeztermPipeline`。

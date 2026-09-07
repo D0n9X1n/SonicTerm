@@ -230,6 +230,21 @@ fn run_probe(active: &ActiveEventLoop) -> Result<(), String> {
         if hwnd_pixel(&window, sample_x, sample_y)? != baseline_hwnd {
             failures.push(format!("{label}: peer HWND sample changed"));
         }
+        // Repeated frames must retain the same fast path; timing uses this exact renderer before and after planning changes.
+        let presented = renderer.successful_frame_count();
+        let started = std::time::Instant::now();
+        for _ in 0..64 {
+            render(&mut renderer, &mut panes, &theme)?;
+        }
+        println!(
+            "unchanged_frame_probe case={label} calls=64 elapsed_ns={}",
+            started.elapsed().as_nanos()
+        );
+        assert_eq!(
+            renderer.successful_frame_count(),
+            presented,
+            "unchanged frames must not rebuild"
+        );
     }
     if failures.is_empty() {
         Ok(())

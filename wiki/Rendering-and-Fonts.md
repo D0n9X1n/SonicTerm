@@ -30,9 +30,11 @@ adds tabs, search, command palette, selection, IME, hovered target,
 notifications, and drag state. `sonicterm-gpu` reaches grid, config, and UI type
 identities only through that boundary.
 
-The renderer uses non-blocking `try_lock` for every visible pane parser. If any
-pane is busy, it defers the frame instead of presenting a mixture of old and new
-pane state.
+The app uses non-blocking `try_lock` for every visible pane parser. If any pane
+is busy, it defers the frame instead of presenting a mixture of old and new pane
+state. The renderer's metadata-only `FramePlan` fixes clips and viewport row
+slots before shaping; execution keeps the borrowed grids and parser guards,
+and CPU atlas/cache mutation remains stateful.
 
 ### Font discovery and matching
 
@@ -411,8 +413,9 @@ flowchart LR
 `RenderInputs` 再加入标签页、搜索、命令面板、选区、输入法、悬停目标、通知和拖动状态。
 `sonicterm-gpu` 只通过该边界访问网格、配置和界面类型。
 
-渲染器使用非阻塞 `try_lock` 获取所有可见窗格的解析器。只要有一个窗格正忙，就推迟
-整帧，而不是显示新旧状态混杂的窗格。
+应用使用非阻塞 `try_lock` 获取所有可见窗格的解析器。只要有一个窗格正忙，就推迟
+整帧，而不是显示新旧状态混杂的窗格。渲染器仅含元数据的 `FramePlan` 在塑形前确定裁剪和
+视口行槽；执行仍保留借用网格和解析器保护对象，CPU 图集/缓存修改仍然有状态。
 
 ### 字体发现与匹配
 

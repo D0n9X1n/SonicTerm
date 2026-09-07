@@ -1,6 +1,111 @@
 use super::*;
 use sonicterm_types::{ClassCoverage, PaneSeamTerm};
 
+fn revision_plan(id: u64, revision: u64) -> FramePlan {
+    FramePlan::build(
+        FrameFacts {
+            window: WindowIdentity { width: 80, height: 40, ..Default::default() },
+            cell_w: 10.0,
+            cell_h: 20.0,
+            padding: [0.0; 4],
+            vertical_ink_pad: 0.0,
+            scrollbar_mode: ScrollbarMode::Never,
+            degraded: false,
+        },
+        [PaneMetadata {
+            id,
+            revision,
+            rect: PixelRect { x: 0, y: 0, w: 80, h: 40 },
+            cols: 8,
+            rows: 2,
+            scrollback_len: 0,
+            viewport_top_abs: None,
+            is_active: true,
+            is_alt: false,
+            scrollbar_alpha: 0.0,
+            dirty_rows: vec![0, 1],
+        }],
+        None,
+    )
+}
+
+/// Only a presented plan's exact revision can clear dirt; a subsequent mutation or replacement stays dirty.
+#[test]
+fn planned_acknowledgement_rejects_newer_grid_and_replacement() {
+    use sonicterm_render_model::{CursorStyle, PaneRender};
+    let mut grid = Grid::new(8, 2);
+    let plan = revision_plan(7, grid.revision());
+    grid.put_char('X', Color::Default, Color::Default, CellFlags::empty());
+    let mut panes = [PaneRender {
+        id: 7,
+        rect_px: PixelRect { x: 0, y: 0, w: 80, h: 40 },
+        grid: &mut grid,
+        viewport_top_abs: None,
+        is_active: true,
+        cursor_style: CursorStyle::default(),
+        is_broadcast_receiver: false,
+        scrollbar_alpha: 0.0,
+        inline_images: Vec::new(),
+    }];
+    acknowledge_presented_plan(&plan, &mut panes);
+    assert!(panes[0].grid.dirty_count() > 0);
+    let current = revision_plan(7, panes[0].grid.revision());
+    panes[0].id = 8;
+    acknowledge_presented_plan(&current, &mut panes);
+    assert!(panes[0].grid.dirty_count() > 0);
+    panes[0].id = 7;
+    acknowledge_presented_plan(&current, &mut panes);
+    assert_eq!(panes[0].grid.dirty_count(), 0);
+    panes[0].grid.mark_all_dirty();
+    let mut noop = revision_plan(7, panes[0].grid.revision());
+    noop.mode = RenderMode::Noop;
+    acknowledge_presented_plan(&noop, &mut panes);
+    assert!(panes[0].grid.dirty_count() > 0, "unpresented plans cannot acknowledge dirt");
+}
+
+/// Production retry exits precede plan acknowledgement and both presenters finish only after their success boundary.
+#[test]
+fn production_frame_decisions_use_one_plan_and_preserve_retry_boundaries() {
+    let source = include_str!("core.rs").replace("\r\n", "\n");
+    let start = source.find("    pub fn render(").unwrap();
+    let end = source[start..].find("    fn finish_successful_frame(").unwrap() + start;
+    let render = &source[start..end];
+    assert_eq!(render.matches("FramePlan::build(").count(), 1);
+    for redundant in [
+        "Self::resolved_view_top_abs(",
+        "pane_damage_rect_with_ink_pad(",
+        "decide_render_mode(",
+        "copy_mode.cloned()",
+    ] {
+        assert!(!render.contains(redundant), "production recomputes {redundant}");
+    }
+    assert!(render.contains("plan.damage"));
+    assert!(render.contains("pv.planned.content_clip"));
+    assert!(render.contains("pv.planned.rows()"));
+    let software = render
+        .find("frame.present(&self.window)?;\n            gpu_lap!(\"software_present\");")
+        .unwrap();
+    let software_finish =
+        render[software..].find("self.finish_successful_frame(plan,").unwrap() + software;
+    let submit = render.find("self.queue.submit(").unwrap();
+    let present = render.find("self.queue.present(frame);").unwrap();
+    let finish = render[present..].find("self.finish_successful_frame(plan,").unwrap() + present;
+    assert!(
+        software < software_finish
+            && software_finish < submit
+            && submit < present
+            && present < finish
+    );
+    for state in ["Timeout", "Outdated", "Suboptimal", "Lost", "Validation"] {
+        let branch = render.find(&format!("wgpu::CurrentSurfaceTexture::{state}")).unwrap();
+        assert!(branch < present);
+        let rest = &render[branch..];
+        let next = rest.find("return ").unwrap();
+        assert!(!rest[..next].contains("acknowledge_presented_plan"));
+        assert!(!rest[..next].contains("finish_successful_frame"));
+    }
+}
+
 #[derive(Clone, Default)]
 struct GlyphLogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
@@ -2375,8 +2480,9 @@ fn scrollbar_identity_sorts_panes_by_id() {
 /// A visible opacity change must make two otherwise identical frame keys unequal.
 #[test]
 fn scrollbar_bucket_change_invalidates_the_frame_key() {
-    let baseline = FrameKey { pane_scrollbar_alpha: vec![(7, 0)], ..Default::default() };
-    let visible = FrameKey { pane_scrollbar_alpha: vec![(7, u16::MAX)], ..baseline.clone() };
+    let baseline = revision_plan(7, 1).key;
+    let mut visible = baseline.clone();
+    visible.panes[0].scrollbar_bucket = u16::MAX;
 
     assert_ne!(baseline, visible);
 }
@@ -2384,8 +2490,9 @@ fn scrollbar_bucket_change_invalidates_the_frame_key() {
 /// Changing effective LCD policy invalidates the frame without requiring atlas identity changes.
 #[test]
 fn subpixel_aa_change_invalidates_the_frame_key() {
-    let grayscale = FrameKey { subpixel_aa: SubpixelAaMode::Off, ..Default::default() };
-    let lcd = FrameKey { subpixel_aa: SubpixelAaMode::Rgb, ..grayscale.clone() };
+    let grayscale = revision_plan(7, 1).key;
+    let mut lcd = grayscale.clone();
+    lcd.window.subpixel_aa = SubpixelAaMode::Rgb;
 
     assert_ne!(grayscale, lcd);
 }
@@ -2407,8 +2514,9 @@ fn subpixel_aa_setter_does_not_rebuild_fonts_or_atlases() {
 /// Changing process privilege must invalidate otherwise-identical retained tab chrome.
 #[test]
 fn process_privilege_change_invalidates_the_frame_key() {
-    let ordinary = FrameKey { process_privileged: false, ..Default::default() };
-    let privileged = FrameKey { process_privileged: true, ..ordinary.clone() };
+    let ordinary = revision_plan(7, 1).key;
+    let mut privileged = ordinary.clone();
+    privileged.window.process_privileged = true;
 
     assert_ne!(ordinary, privileged);
 }

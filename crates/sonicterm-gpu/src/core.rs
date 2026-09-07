@@ -15,8 +15,10 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+#[cfg(test)]
+use sonicterm_render_model::boundary::cfg::config::ScrollbarMode;
 use sonicterm_render_model::boundary::cfg::config::{
-    BackdropKind, ScrollbarMode, SoftwareRenderMode, SubpixelAaMode,
+    BackdropKind, SoftwareRenderMode, SubpixelAaMode,
 };
 use sonicterm_render_model::boundary::cfg::theme::{Color as ThemeColor, Theme};
 use sonicterm_render_model::boundary::grid::grid::{
@@ -43,35 +45,26 @@ use sonicterm_render_model::boundary::ui::tab_spans::tab_title_font_size;
 const PANE_FOCUS_FLASH_DURATION: Duration = Duration::from_millis(360);
 const PANE_FOCUS_FLASH_BUCKET: Duration = Duration::from_millis(16);
 
-fn effective_scrollbar_bucket(
-    mode: ScrollbarMode,
-    scrollback_len: usize,
-    viewport_rows: u16,
-    alpha: f32,
-) -> u16 {
-    if matches!(mode, ScrollbarMode::Never)
-        || scrollback_len == 0
-        || viewport_rows == 0
-        || alpha <= sonicterm_render_model::boundary::ui::scrollbar::ALPHA_EMIT_FLOOR
-    {
-        // When: no scrollbar pixels can be emitted, all equivalent states share bucket zero.
-        return 0;
-    }
-    (alpha.clamp(0.0, 1.0) * f32::from(u16::MAX)).round() as u16
-}
+#[cfg(test)]
+use crate::frame_plan::{
+    decide_render_mode, dirty_rows_damage_rect_with_ink_pad, effective_scrollbar_bucket,
+    pane_damage_rect_with_ink_pad, pane_scrollbar_identity, RenderSignals,
+};
+use crate::frame_plan::{
+    CopyModeIdentity, FrameFacts, FrameKey, FramePlan, PaneMetadata, PlannedPane, RenderMode,
+    WindowIdentity,
+};
 
-fn pane_scrollbar_identity<I>(mode: ScrollbarMode, panes: I) -> Vec<(u64, u16)>
-where
-    I: IntoIterator<Item = (u64, usize, u16, f32)>,
-{
-    let mut identity: Vec<_> = panes
-        .into_iter()
-        .map(|(pane_id, scrollback_len, viewport_rows, alpha)| {
-            (pane_id, effective_scrollbar_bucket(mode, scrollback_len, viewport_rows, alpha))
-        })
-        .collect();
-    identity.sort_unstable_by_key(|(pane_id, _)| *pane_id);
-    identity
+// Presentation completes while parser guards still hold; exact identity also rejects separately replayed stale metadata.
+fn acknowledge_presented_plan(
+    plan: &FramePlan,
+    panes: &mut [sonicterm_render_model::PaneRender<'_>],
+) {
+    for (index, pane) in panes.iter_mut().enumerate() {
+        if plan.acknowledges(index, pane.id, pane.grid.revision()) {
+            pane.grid.clear_dirty();
+        }
+    }
 }
 
 fn pane_focus_flash_sample(elapsed: Duration) -> Option<(u8, f32)> {
@@ -985,7 +978,7 @@ use sonicterm_render_model::boundary::ui::{
     },
     tabs::{truncate_title_body, TabBar},
 };
-use sonicterm_render_model::geometry::{DamageRect, PixelRect};
+use sonicterm_render_model::geometry::PixelRect;
 use sonicterm_text::GlyphInstance;
 use sonicterm_text::{
     glyph_atlas::GlyphAtlas,
@@ -1024,69 +1017,6 @@ where
     dirty_rows_damage_rect_with_ink_pad(
         dirty_rows, pane_rect, origin_x, origin_y, cols, cell_w, cell_h, 0.0, surface_w, surface_h,
     )
-}
-
-#[must_use]
-#[allow(clippy::too_many_arguments)]
-fn dirty_rows_damage_rect_with_ink_pad<I>(
-    dirty_rows: I,
-    pane_rect: PixelRect,
-    origin_x: f32,
-    origin_y: f32,
-    cols: u16,
-    cell_w: f32,
-    cell_h: f32,
-    vertical_ink_pad: f32,
-    surface_w: u32,
-    surface_h: u32,
-) -> Option<PixelRect>
-where
-    I: IntoIterator<Item = usize>,
-{
-    if cols == 0 || cell_w <= 0.0 || cell_h <= 0.0 || surface_w == 0 || surface_h == 0 {
-        // When: `cols` is 0, a cell metric is non-positive, or the surface is
-        // degenerate — a rect from these would name pixels that do not exist.
-        return None;
-    }
-    let bounds = PixelRect { x: 0, y: 0, w: surface_w, h: surface_h };
-    let pane_bounds = pane_rect.intersect(bounds)?;
-    let mut damage = DamageRect::empty();
-    // Span from the floored left edge to the CEILED right edge, for the same
-    // reason the row height below spans to the ceiled top of the next row.
-    // `x` floors, which moves the strip left by the fractional part of
-    // `origin_x`; a width taken from the cell count alone never gets that
-    // fraction back, so the strip ends short of where the pane actually
-    // reaches. A glyph that painted into that last column is then never
-    // repainted when its cell is cleared, and survives as a stray mark on an
-    // otherwise empty row.
-    let left = origin_x.floor() as i32;
-    let right = (origin_x + cols as f32 * cell_w).ceil() as i32;
-    // Widen each row strip to the pane's own edges where the pane reaches
-    // further than the cell grid. The difference is the padding band, and
-    // glyph ink can land in it: a negative left side bearing at column 0
-    // paints left of its cell. A strip that stops at the content edge never
-    // repaints those columns, so such a pixel survives every later frame.
-    let left = left.min(pane_bounds.x);
-    let right = right.max(pane_bounds.x + pane_bounds.w as i32);
-    let row_w = (right - left).max(1) as u32;
-    for row in dirty_rows {
-        let x = left;
-        // Span each dirty row from its floored top edge to the CEILED top edge
-        // of the NEXT row. With a fractional `cell_h` (common at fractional
-        // DPI), a fixed `ceil(cell_h)` height starting at `floor(top)` can fall
-        // one physical pixel short of where the next row begins, leaving the
-        // boundary pixel un-repainted. A full-cell glyph/inverse block (e.g.
-        // zsh's reverse-video PROMPT_EOL_MARK `%`) paints into that pixel, so
-        // when the cell is later cleared but only this row is dirty, the bottom
-        // 1px of the old block survives as a stray underline-like mark.
-        // Covering through the next row's top edge closes the rounding seam.
-        let ink_pad = vertical_ink_pad.max(0.0);
-        let top = (origin_y + row as f32 * cell_h - ink_pad).floor() as i32;
-        let next_top = (origin_y + (row as f32 + 1.0) * cell_h + ink_pad).ceil() as i32;
-        let row_h = (next_top - top).max(1) as u32;
-        damage.add_clipped(PixelRect { x, y: top, w: row_w, h: row_h }, pane_bounds);
-    }
-    damage.rect()
 }
 
 /// Decide a pane's per-frame damage rectangle, given whether the pane is
@@ -1136,105 +1066,6 @@ where
         is_alt, dirty_rows, pane_rect, origin_x, origin_y, cols, cell_w, cell_h, 0.0, surface_w,
         surface_h,
     )
-}
-
-#[must_use]
-#[allow(clippy::too_many_arguments)]
-fn pane_damage_rect_with_ink_pad<I>(
-    is_alt: bool,
-    dirty_rows: I,
-    pane_rect: PixelRect,
-    origin_x: f32,
-    origin_y: f32,
-    cols: u16,
-    cell_w: f32,
-    cell_h: f32,
-    vertical_ink_pad: f32,
-    surface_w: u32,
-    surface_h: u32,
-) -> Option<PixelRect>
-where
-    I: IntoIterator<Item = usize>,
-{
-    if is_alt {
-        // When: `is_alt` — the app scrolls and moves content, so a row it did
-        // not re-emit can still be stale. Repaint the pane, not the row union.
-        let has_dirty = dirty_rows.into_iter().next().is_some();
-        return if has_dirty {
-            pane_rect.intersect(PixelRect { x: 0, y: 0, w: surface_w, h: surface_h })
-        } else {
-            // When: `has_dirty` is false — the app marked nothing, so the
-            // surface still holds pixels it considers current.
-            None
-        };
-    }
-    dirty_rows_damage_rect_with_ink_pad(
-        dirty_rows,
-        pane_rect,
-        origin_x,
-        origin_y,
-        cols,
-        cell_w,
-        cell_h,
-        vertical_ink_pad,
-        surface_w,
-        surface_h,
-    )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RenderMode {
-    Full,
-    Noop,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct RenderSignals {
-    pub first_frame: bool,
-    pub resize: bool,
-    pub dpi_or_scale_change: bool,
-    pub font_or_atlas_rebuild: bool,
-    pub theme_or_config_reload: bool,
-    pub surface_reconfigure: bool,
-    pub occlusion_restore: bool,
-    pub viewport_scroll: bool,
-    pub selection_change: bool,
-    pub tab_switch: bool,
-    pub pane_topology_change: bool,
-    pub scrollbar_change: bool,
-    pub overlay_active_or_toggled: bool,
-    pub degrade_state_changed: bool,
-    pub dirty_damage: Option<PixelRect>,
-}
-
-#[must_use]
-pub(crate) fn decide_render_mode(degrade: bool, signals: RenderSignals) -> RenderMode {
-    if !degrade {
-        // When: `!degrade` — a real GPU presents. Frame-skipping exists to
-        // spare a CPU rasterizer; on hardware it costs more than it saves.
-        return RenderMode::Full;
-    }
-    let force_full = signals.first_frame
-        || signals.resize
-        || signals.dpi_or_scale_change
-        || signals.font_or_atlas_rebuild
-        || signals.theme_or_config_reload
-        || signals.surface_reconfigure
-        || signals.occlusion_restore
-        || signals.viewport_scroll
-        || signals.selection_change
-        || signals.tab_switch
-        || signals.pane_topology_change
-        || signals.scrollbar_change
-        || signals.overlay_active_or_toggled
-        || signals.degrade_state_changed;
-    if force_full || signals.dirty_damage.is_some() {
-        RenderMode::Full
-    } else {
-        // When: neither `force_full` nor `dirty_damage` — nothing visible
-        // differs, so the CPU rasterizer skips the pass entirely.
-        RenderMode::Noop
-    }
 }
 
 #[must_use]
@@ -1849,72 +1680,6 @@ pub struct GpuRenderer {
     // `async_loader` getter API survive future plumbing without a
     // cross-crate breaking change.
     async_loader: Option<()>,
-}
-
-/// A compact fingerprint of every input that can affect the rendered
-/// frame. If two consecutive frames produce an equal key the second one
-/// is a no-op for the user, so the renderer skips text shaping, quad
-/// rebuild and GPU submission entirely.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct FrameKey {
-    grid_revision: u64,
-    /// Per-pane grid revisions. Part B step 5: split panes each own a Grid,
-    /// so a write to an inactive pane (e.g. background `tail -f`) must
-    /// invalidate the cached frame even though `grid_revision` (active pane)
-    /// is unchanged.
-    pane_revs: Vec<(u64, u64, Option<u64>)>,
-    /// Sorted per-pane opacity buckets for scrollbar pixels that can be emitted.
-    pane_scrollbar_alpha: Vec<(u64, u16)>,
-    selection: Option<Selection>,
-    copy_mode: Option<CopyModeState>,
-    quick_select_hint_count: u32,
-    cursor_visible: bool,
-    tab: u64,
-    pane: u64,
-    search_hash: u64,
-    palette_hash: u64,
-    ime_hash: u64,
-    notification_hash: u64,
-    width: u32,
-    height: u32,
-    tab_hash: u64,
-    pane_rect_hash: u64,
-    viewport_top_abs: Option<u64>,
-    /// Cursor shape variant index — different shapes paint different
-    /// pixels even for the same grid + same blink phase, so this MUST
-    /// participate in the key.
-    cursor_shape: u8,
-    /// Whether the cursor is blinking. Folded into the key so flipping
-    /// the setting invalidates the cached frame immediately.
-    cursor_blink: bool,
-    /// Quantised blink phase. `0` when blinking is disabled (see
-    /// [`crate::cursor::phase_bucket`]).
-    cursor_phase: u8,
-    /// Whether the window has keyboard focus — toggles active cursor
-    /// visibility.
-    window_focused: bool,
-    /// Quantized pane-focus flash phase. Folded into the key so the
-    /// bounded flash can animate without reviving the old infinite
-    /// heartbeat redraw loop.
-    pane_focus_flash_bucket: u8,
-    /// Index of the tab the cursor is currently over, or `u32::MAX`
-    /// when the cursor is not over any tab. Moving between tabs must
-    /// invalidate the cached frame for hover chrome.
-    hover_tab: u32,
-    /// Deprecated close-button hover bit. Always zero now that close
-    /// buttons are no longer drawn; kept to avoid reshaping FrameKey.
-    hover_close: u8,
-    /// Deprecated close-button override bit. Kept so older config reload
-    /// paths can still invalidate safely.
-    close_override: u8,
-    broadcast_receivers_hash: u64,
-    inline_media_hash: u64,
-    /// Cmd-hovered URL cell range. Folded into the key so moving the
-    /// hover onto / off a URL (or to a different URL span) invalidates
-    /// the cached frame and re-shapes with / without the accent recolor.
-    hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
-    process_privileged: bool,
-    subpixel_aa: SubpixelAaMode,
 }
 
 /// Memoized inline IME preedit overlay glyphs. Reused across
@@ -4410,186 +4175,25 @@ impl GpuRenderer {
             };
         }
         let now = Instant::now();
-        // Part B step 7: record per-pane origins for the integration test
-        // hook. Populated unconditionally on every render() call so the
-        // test can assert that all panes' origins reach the renderer with
-        // the expected x/y in physical pixels.
-        let content_inset_l = self.padding_left_px();
-        let content_inset_r = self.padding_right_px();
-        let content_inset_t = self.padding_top_px();
-        let content_inset_b = self.padding_bottom_px();
-        let content_rect = |p: &sonicterm_render_model::PaneRender<'_>| {
-            let x = p.rect_px.x as f32 + content_inset_l;
-            let y = p.rect_px.y as f32 + content_inset_t;
-            let w = (p.rect_px.w as f32 - content_inset_l - content_inset_r).max(self.cell_w);
-            let h = (p.rect_px.h as f32 - content_inset_t - content_inset_b).max(self.cell_h);
-            (x, y, w, h)
-        };
-        self.last_emit_origins = panes
-            .iter()
-            .map(|p| {
-                let (x, y, _, _) = content_rect(p);
-                (p.id, [x, y])
-            })
-            .collect();
-        // per-pane raster-px layout snapshot for the pane-aware
-        // hit-test in `pixel_to_cell`. PaneRender::rect_px is raster
-        // px (winit physical-px is the same coordinate system post-G1a),
-        // so the snapshot reads directly from `rect_px` with no scale
-        // projection.
-        let cell_w_log = self.cell_w;
-        let cell_h_log = self.cell_h;
-        self.last_pane_layout = panes
-            .iter()
-            .map(|p| {
-                let (x, y, w, h) = content_rect(p);
-                PaneLayoutSnapshot {
-                    id: p.id,
-                    origin_x_logical: x,
-                    origin_y_logical: y,
-                    w_logical: w,
-                    h_logical: h,
-                    cell_w_logical: cell_w_log,
-                    cell_h_logical: cell_h_log,
-                    cols: p.grid.cols,
-                    rows: p.grid.rows,
-                }
-            })
-            .collect();
-        let active_idx = panes.iter().position(|p| p.is_active).unwrap_or(0);
-        let active_pane: u64 = panes[active_idx].id;
-        // Derive the legacy `pane_rects` vector from the slice so downstream
-        // code (cache key, focus-ring quad, etc.) continues to work
-        // unchanged. PaneRender::rect_px is already in physical px adjusted
-        // for top_inset — same units as the old PaneRect.
-        let pane_rects: Vec<(u64, PaneRect)> = panes
-            .iter()
-            .map(|p| {
-                (
-                    p.id,
-                    PaneRect {
-                        x: p.rect_px.x as f32,
-                        y: p.rect_px.y as f32,
-                        w: p.rect_px.w as f32,
-                        h: p.rect_px.h as f32,
-                    },
-                )
-            })
-            .collect();
-        let pane_rects = pane_rects.as_slice();
         let broadcast_receiver_ids: Vec<u64> =
-            panes.iter().filter(|p| p.is_broadcast_receiver).map(|p| p.id).collect();
-        // Collect immutable per-pane views for ALL panes so the cell-emission
-        // body below can iterate per-pane. The grid is borrowed shared
-        // (`&Grid`) — every read in the loop (`scrollback_len`, `dirty_rows`,
-        // `row_at_abs`, `rows`, `cursor`, `prompts`) is immutable, so neither
-        // `&mut Grid` nor raw pointers are needed. Taking `&mut Grid` per pane
-        // would overlap borrows across panes sharing one grid.
-        struct PaneView<'g> {
-            grid: &'g Grid,
-            pane_id: u64,
-            origin_x: f32,
-            origin_y: f32,
-            // Pane rect width/height in pixels — the source of truth for
-            // pane geometry. Do NOT recompute as `grid.cols * cell_w`
-            // for clipping bounds: when the pane has just been resized
-            // but the grid hasn't yet been resynced (resize is debounced
-            // through the PTY) the derived value is smaller than the
-            // real pane rect and overlay quads at the trailing edge get
-            // clipped away, allowing terminal content to bleed through.
-            rect_w: f32,
-            rect_h: f32,
-            /// The pane's FULL rect, padding included, in pixels.
-            ///
-            /// Distinct from `origin_*`/`rect_*` above, which are the content
-            /// rect and drive cell layout. Damage must use this one: a glyph
-            /// with a negative left side bearing at column 0 paints left of
-            /// its cell and into the padding band, and a damage rect built
-            /// from the content rect never covers those columns again. The
-            /// pixel then survives every later frame, including a full
-            /// alt-screen pane repaint.
-            full_rect: PixelRect,
-            is_active: bool,
-            viewport_top_abs: Option<u64>,
-            scrollbar_alpha: f32,
-            inline_images: &'g [sonicterm_render_model::InlineImage],
-        }
-        let pane_views: Vec<PaneView<'_>> = panes
+            panes.iter().filter(|pane| pane.is_broadcast_receiver).map(|pane| pane.id).collect();
+        let retained_inline_media_bytes = panes
             .iter()
-            .map(|p| PaneView {
-                grid: &*p.grid,
-                pane_id: p.id,
-                origin_x: content_rect(p).0,
-                origin_y: content_rect(p).1,
-                rect_w: content_rect(p).2,
-                rect_h: content_rect(p).3,
-                full_rect: p.rect_px,
-                is_active: p.is_active,
-                viewport_top_abs: p.viewport_top_abs,
-                scrollbar_alpha: p.scrollbar_alpha,
-                inline_images: &p.inline_images,
-            })
-            .collect();
-        // Pre-compute pane revisions for FrameKey from the safe borrows.
-        let pane_revs_vec: Vec<(u64, u64, Option<u64>)> = pane_views
-            .iter()
-            .map(|pv| (pv.pane_id, pv.grid.revision(), pv.viewport_top_abs))
-            .collect();
-        let pane_scrollbar_alpha = pane_scrollbar_identity(
-            self.scrollbar_mode,
-            pane_views.iter().map(|pane| {
-                (pane.pane_id, pane.grid.scrollback_len(), pane.grid.rows, pane.scrollbar_alpha)
-            }),
-        );
-        let retained_inline_media_bytes = pane_views
-            .iter()
-            .flat_map(|view| view.inline_images)
+            .flat_map(|pane| &pane.inline_images)
             .fold(0usize, |total, image| total.saturating_add(image.bgra.len()));
         self.retained_inline_media_bytes = retained_inline_media_bytes;
         let inline_media_hash = {
-            use std::collections::hash_map::DefaultHasher;
             use std::hash::{Hash, Hasher};
-            let mut h = DefaultHasher::new();
-            for pv in &pane_views {
-                pv.pane_id.hash(&mut h);
-                pv.inline_images.len().hash(&mut h);
-                for img in pv.inline_images {
-                    img.id.hash(&mut h);
-                    img.row.hash(&mut h);
-                    img.col.hash(&mut h);
-                    img.width.hash(&mut h);
-                    img.height.hash(&mut h);
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            for pane in panes.iter() {
+                pane.id.hash(&mut hash);
+                pane.inline_images.len().hash(&mut hash);
+                for image in &pane.inline_images {
+                    (image.id, image.row, image.col, image.width, image.height).hash(&mut hash);
                 }
             }
-            h.finish()
+            hash.finish()
         };
-        // Active pane's origin. Selection / cursor / overlays anchor to
-        // this — they apply only to the focused pane (Part B step 4 /
-        // Fix 3). Lifting these out as plain `f32` makes the overlay
-        // sites below borrow-free.
-        let active_view_idx = pane_views.iter().position(|p| p.is_active).unwrap_or(0);
-        let active_origin_x: f32 = pane_views[active_view_idx].origin_x;
-        let active_origin_y: f32 = pane_views[active_view_idx].origin_y;
-        // Active pane rect (px) — used to clip every overlay quad anchored
-        // to the active pane (selection, cursor, hyperlink hover, search
-        // matches, IME preedit) so a quad that would otherwise extend past
-        // the pane edge never bleeds into a neighbouring split pane.
-        // See (selection clipping) — same overflow class for the
-        // other overlay families is handled here.
-        let active_pane_x: f32 = active_origin_x;
-        let active_pane_y: f32 = active_origin_y;
-        // Use the pane's own rect_px width/height (the source of truth
-        // for pane geometry) rather than `grid.cols * cell_w`. After a
-        // pane resize the grid resync is debounced through the PTY;
-        // during that window the derived extent is *smaller* than the
-        // real pane rect, which would clip overlays inside the trailing
-        // edge and allow terminal content to bleed through.
-        let active_pane_w: f32 = pane_views[active_view_idx].rect_w;
-        let active_pane_h: f32 = pane_views[active_view_idx].rect_h;
-        // Active grid borrow — shared, used by overlays that read the
-        // active pane's cursor/scrollback/prompts. Disjoint from the
-        // per-pane loop (which uses its own per-iteration borrow).
-        let grid: &Grid = pane_views[active_view_idx].grid;
 
         // Advance the atlas frame counter so LRU eviction can
         // distinguish glyphs touched this frame from cold ones. Cheap
@@ -4668,25 +4272,9 @@ impl GpuRenderer {
             broadcast_receiver_ids.hash(&mut h);
             h.finish()
         };
-        // Hash pane rects so split geometry changes invalidate the frame
-        // even when the active pane id is unchanged.
-        let pane_rect_hash: u64 = {
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-            let mut h = DefaultHasher::new();
-            for (id, r) in pane_rects {
-                id.hash(&mut h);
-                (r.x.to_bits(), r.y.to_bits(), r.w.to_bits(), r.h.to_bits()).hash(&mut h);
-            }
-            h.finish()
-        };
         let blink_elapsed = self.blink_epoch.elapsed();
         let blink_alpha = ui_cursor::blink_alpha(blink_elapsed, self.cursor_blink);
-        // `phase_bucket` is intentionally NOT folded into the FrameKey
-        // (see the `cursor_phase: 0` comment below). The alpha is
-        // still computed every render so a real redraw event picks up
-        // the current blink pulse.
-        let _ = ui_cursor::phase_bucket(blink_elapsed, self.cursor_blink);
+        // Blink phase stays outside the key so idle frames do not trigger full text assembly.
         // Compute hover state against the tab bar layout. Done before
         // the FrameKey is built so the cache invalidates as the cursor
         // moves between tabs.
@@ -4743,128 +4331,119 @@ impl GpuRenderer {
             || ime.is_some_and(|i| i.is_composing() || !i.preedit().is_empty())
             || self.drag_chip.is_some()
             || self.pane_focus_flash.is_some();
-        let scrollbar_changed = self
-            .last_frame_key
-            .as_ref()
-            .is_none_or(|prev| prev.pane_scrollbar_alpha != pane_scrollbar_alpha);
         let subpixel_aa = self.effective_subpixel_aa_mode();
-        let overlay_or_chrome_changed = self.last_frame_key.as_ref().is_none_or(|prev| {
-            scrollbar_changed
-                || prev.selection != selection.copied()
-                || prev.copy_mode != copy_mode.cloned()
-                || prev.quick_select_hint_count != quick_select_hint_count
-                || prev.cursor_visible != cursor_visible
-                || prev.tab != tabs.active().map(|t| t.id.0).unwrap_or(0)
-                || prev.pane != active_pane
-                || prev.search_hash != search_hash
-                || prev.palette_hash != palette_hash
-                || prev.ime_hash != ime_hash
-                || prev.notification_hash != notification_hash
-                || prev.width != self.config.width
-                || prev.height != self.config.height
-                || prev.tab_hash != tab_hash
-                || prev.pane_rect_hash != pane_rect_hash
-                || prev.viewport_top_abs != viewport_top_abs
-                || prev.cursor_shape != self.cursor_shape as u8
-                || prev.cursor_blink != self.cursor_blink
-                || prev.window_focused != self.window_focused
-                || prev.pane_focus_flash_bucket != pane_focus_flash_bucket
-                || prev.hover_tab != hover_tab_idx
-                || prev.close_override != u8::from(self.tab_close_override.is_some())
-                || prev.broadcast_receivers_hash != broadcast_receivers_hash
-                || prev.inline_media_hash != inline_media_hash
-                || prev.hovered_url_cells != hovered_url_cells
-                || prev.process_privileged != process_privileged
-                || prev.subpixel_aa != subpixel_aa
-        });
-        let mut damage = DamageRect::empty();
-        let surface_rect = full_surface_rect(self.config.width, self.config.height);
-        let vertical_ink_pad = terminal_vertical_ink_pad(
-            self.cell_h,
-            self.font_stack.as_ref().and_then(|stack| stack.cell_metrics_raster_px().ok()),
-        );
-        if overlay_or_chrome_changed {
-            damage.add_clipped(surface_rect, surface_rect);
-        } else {
-            // When: `!overlay_or_chrome_changed` — only grid content can have
-            // changed, so damage narrows to the panes that reported it.
-            for pv in &pane_views {
-                // The pane's full rect, not the content rect. Glyph ink can
-                // land in the padding band — a negative left side bearing at
-                // column 0 reaches left of its cell — and a damage rect that
-                // stops at the content edge never repaints those columns
-                // again, so such a pixel survives every later frame.
-                //
-                // The dirty-row geometry below still uses the content origin,
-                // because that is where the cell grid actually starts. Only
-                // the bounding rectangle widens.
-                let pane_rect = pv.full_rect;
-                if let Some(rect) = pane_damage_rect_with_ink_pad(
-                    pv.grid.is_alt(),
-                    pv.grid.dirty_rows(),
-                    pane_rect,
-                    pv.origin_x,
-                    pv.origin_y,
-                    pv.grid.cols,
-                    self.cell_w,
-                    self.cell_h,
-                    vertical_ink_pad,
-                    self.config.width,
-                    self.config.height,
-                ) {
-                    damage.add_clipped(rect, surface_rect);
-                }
+        let renderer_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            self.font_family.hash(&mut hash);
+            self.font_size.to_bits().hash(&mut hash);
+            self.scale_factor.to_bits().hash(&mut hash);
+            self.font_weight_scale.to_bits().hash(&mut hash);
+            self.line_height_mult.to_bits().hash(&mut hash);
+            self.tab_bar_visible.hash(&mut hash);
+            self.titlebar_inset.to_bits().hash(&mut hash);
+            self.panel_padding.to_bits().hash(&mut hash);
+            if let Some(chip) = &self.drag_chip {
+                chip.title.hash(&mut hash);
+                chip.top_left.0.to_bits().hash(&mut hash);
+                chip.top_left.1.to_bits().hash(&mut hash);
+                chip.scale.to_bits().hash(&mut hash);
+                chip.drop_line_x.map(f32::to_bits).hash(&mut hash);
+                chip.drop_line_y.0.to_bits().hash(&mut hash);
+                chip.drop_line_y.1.to_bits().hash(&mut hash);
+                chip.insertion_slot.hash(&mut hash);
+                chip.source_tab_idx.hash(&mut hash);
+                chip.source_alpha.to_bits().hash(&mut hash);
+                chip.ghost_alpha.to_bits().hash(&mut hash);
             }
-        }
-        let dirty_damage = damage.rect();
-        let damaged_rows: usize = pane_views.iter().map(|pv| pv.grid.dirty_rows().count()).sum();
-
-        let key = FrameKey {
-            grid_revision: grid.revision(),
-            pane_revs: pane_revs_vec,
-            pane_scrollbar_alpha,
-            selection: selection.copied(),
-            copy_mode: copy_mode.cloned(),
-            quick_select_hint_count,
-            cursor_visible,
-            tab: tabs.active().map(|t| t.id.0).unwrap_or(0),
-            pane: active_pane,
-            search_hash,
-            palette_hash,
-            ime_hash,
-            notification_hash,
-            width: self.config.width,
-            height: self.config.height,
-            tab_hash,
-            pane_rect_hash,
-            viewport_top_abs,
-            cursor_shape: self.cursor_shape as u8,
-            cursor_blink: self.cursor_blink,
-            // NOTE: `cursor_phase` is deliberately NOT folded into the
-            // FrameKey. Including it cracked the cache on every blink
-            // bucket boundary, forcing a full grid re-shape ~26×/sec
-            // and wedging idle CPU. The
-            // cursor still re-evaluates its alpha on every real
-            // render; between real renders the cursor sits at
-            // whatever alpha it last drew at — a frozen but
-            // always-visible cursor is better than a CPU-melting
-            // blinking one.
-            cursor_phase: 0,
-            window_focused: self.window_focused,
-            pane_focus_flash_bucket,
-            hover_tab: hover_tab_idx,
-            hover_close: 0,
-            close_override: u8::from(self.tab_close_override.is_some()),
-            broadcast_receivers_hash,
-            inline_media_hash,
-            hovered_url_cells,
-            process_privileged,
-            subpixel_aa,
+            hash.finish()
         };
-        let pane_revs_len = key.pane_revs.len();
-        if Some(&key) == self.last_frame_key.as_ref() {
-            // When: `key` equals `last_frame_key` — every input that can affect
-            // the image is unchanged, so the presented frame is still correct.
+        let plan = FramePlan::build(
+            FrameFacts {
+                window: WindowIdentity {
+                    selection: selection.copied(),
+                    copy_mode: copy_mode.map(CopyModeIdentity::from),
+                    quick_select_hint_count,
+                    cursor_visible,
+                    tab: tabs.active().map_or(0, |tab| tab.id.0),
+                    search_hash,
+                    palette_hash,
+                    ime_hash,
+                    notification_hash,
+                    width: self.config.width,
+                    height: self.config.height,
+                    tab_hash,
+                    viewport_top_abs,
+                    cursor_shape: self.cursor_shape as u8,
+                    cursor_blink: self.cursor_blink,
+                    window_focused: self.window_focused,
+                    pane_focus_flash_bucket,
+                    hover_tab: hover_tab_idx,
+                    close_override: u8::from(self.tab_close_override.is_some()),
+                    broadcast_receivers_hash,
+                    inline_media_hash,
+                    hovered_url_cells,
+                    process_privileged,
+                    subpixel_aa,
+                    background: [
+                        self.bg.r.to_bits(),
+                        self.bg.g.to_bits(),
+                        self.bg.b.to_bits(),
+                        self.bg.a.to_bits(),
+                    ],
+                    style_rev: self.style_rev,
+                    renderer_hash,
+                    overlay_active,
+                },
+                cell_w: self.cell_w,
+                cell_h: self.cell_h,
+                padding: [
+                    self.padding_left_px(),
+                    self.padding_right_px(),
+                    self.padding_top_px(),
+                    self.padding_bottom_px(),
+                ],
+                vertical_ink_pad: terminal_vertical_ink_pad(
+                    self.cell_h,
+                    self.font_stack.as_ref().and_then(|stack| stack.cell_metrics_raster_px().ok()),
+                ),
+                scrollbar_mode: self.scrollbar_mode,
+                degraded: self.software_render_degrade,
+            },
+            panes.iter().map(|pane| PaneMetadata {
+                id: pane.id,
+                revision: pane.grid.revision(),
+                rect: pane.rect_px,
+                cols: pane.grid.cols,
+                rows: pane.grid.rows,
+                scrollback_len: pane.grid.scrollback_len() as u64,
+                viewport_top_abs: pane.viewport_top_abs,
+                is_active: pane.is_active,
+                is_alt: pane.grid.is_alt(),
+                scrollbar_alpha: pane.scrollbar_alpha,
+                dirty_rows: pane.grid.dirty_rows().collect(),
+            }),
+            self.last_frame_key.as_ref(),
+        );
+        self.last_emit_origins =
+            plan.panes.iter().map(|pane| (pane.id, [pane.layout.x, pane.layout.y])).collect();
+        self.last_pane_layout = plan
+            .panes
+            .iter()
+            .map(|pane| PaneLayoutSnapshot {
+                id: pane.id,
+                origin_x_logical: pane.layout.x,
+                origin_y_logical: pane.layout.y,
+                w_logical: pane.layout.w,
+                h_logical: pane.layout.h,
+                cell_w_logical: self.cell_w,
+                cell_h_logical: self.cell_h,
+                cols: pane.cols,
+                rows: pane.row_count,
+            })
+            .collect();
+        if plan.unchanged {
+            // When: `plan.unchanged` holds, retain the no-assembly fast path and the Windows cached-frame reblit.
             self.skipped_frames = self.skipped_frames.wrapping_add(1);
             tracing::trace!(skipped = self.skipped_frames, "renderer: skipped unchanged frame");
             #[cfg(target_os = "windows")]
@@ -4876,54 +4455,61 @@ impl GpuRenderer {
             if pane_focus_flash_bucket != 0 {
                 self.window.request_redraw();
             }
-            // Blink redraws are now scheduled in the app event loop via
-            // `next_blink_redraw_at()` + `ControlFlow::WaitUntil(..)`,
-            // so we deliberately do NOT call `request_redraw()` here.
-            // The earlier heartbeat reintroduced the project landmine
-            // around feedback loops: two ticks in the same phase bucket
-            // would re-arm at 0ms and peg the redraw queue.
             return Ok(());
         }
-        let prev_key = self.last_frame_key.as_ref();
-        let inline_media_changed =
-            prev_key.is_none_or(|prev| prev.inline_media_hash != inline_media_hash);
-        let render_mode = decide_render_mode(
-            self.software_render_degrade,
-            RenderSignals {
-                first_frame: prev_key.is_none(),
-                resize: prev_key.is_some_and(|prev| {
-                    prev.width != self.config.width || prev.height != self.config.height
-                }),
-                dpi_or_scale_change: false,
-                font_or_atlas_rebuild: false,
-                theme_or_config_reload: false,
-                surface_reconfigure: false,
-                occlusion_restore: false,
-                viewport_scroll: prev_key
-                    .is_some_and(|prev| prev.viewport_top_abs != viewport_top_abs),
-                selection_change: prev_key.is_some_and(|prev| prev.selection != selection.copied()),
-                tab_switch: prev_key.is_some_and(|prev| {
-                    prev.tab != tabs.active().map(|t| t.id.0).unwrap_or(0)
-                        || prev.tab_hash != tab_hash
-                }),
-                pane_topology_change: prev_key.is_some_and(|prev| {
-                    prev.pane != active_pane
-                        || prev.pane_rect_hash != pane_rect_hash
-                        || prev.pane_revs.len() != pane_revs_len
-                }),
-                scrollbar_change: scrollbar_changed,
-                overlay_active_or_toggled: overlay_active || overlay_or_chrome_changed,
-                degrade_state_changed: false,
-                dirty_damage,
-            },
-        );
-        if matches!(render_mode, RenderMode::Noop) {
-            // When: `matches!(render_mode, RenderMode::Noop)` — nothing visible
-            // changed. The key is stored so the next frame compares against it.
-            self.last_frame_key = Some(key);
+        if plan.mode == RenderMode::Noop {
+            // When: `plan.mode` is Noop, remember its identity without acknowledging unpresented grid dirt.
+            self.last_frame_key = Some(plan.key);
             return Ok(());
         }
-        let emit_full_rows = matches!(render_mode, RenderMode::Full);
+        let inline_media_changed = self.last_frame_key.as_ref().is_none_or(|previous| {
+            previous.window.inline_media_hash != plan.key.window.inline_media_hash
+        });
+        let render_mode = plan.mode;
+        let emit_full_rows = render_mode == RenderMode::Full;
+        let pane_rects: Vec<_> = plan
+            .panes
+            .iter()
+            .map(|pane| {
+                let rect = pane.full_rect;
+                (pane.id, PaneRect::new(rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32))
+            })
+            .collect();
+        let pane_rects = pane_rects.as_slice();
+        struct PaneView<'a> {
+            grid: &'a Grid,
+            planned: &'a PlannedPane,
+            pane_id: u64,
+            origin_x: f32,
+            origin_y: f32,
+            rect_w: f32,
+            rect_h: f32,
+            scrollbar_alpha: f32,
+            inline_images: &'a [sonicterm_render_model::InlineImage],
+        }
+        let pane_views: Vec<_> = panes
+            .iter()
+            .zip(&plan.panes)
+            .map(|(pane, planned)| PaneView {
+                grid: &*pane.grid,
+                planned,
+                pane_id: planned.id,
+                origin_x: planned.layout.x,
+                origin_y: planned.layout.y,
+                rect_w: planned.layout.w,
+                rect_h: planned.layout.h,
+                scrollbar_alpha: planned.scrollbar_alpha,
+                inline_images: &pane.inline_images,
+            })
+            .collect();
+        let active = &plan.panes[plan.active_index];
+        let active_origin_x = active.layout.x;
+        let active_origin_y = active.layout.y;
+        let active_pane_x = active_origin_x;
+        let active_pane_y = active_origin_y;
+        let active_pane_w = active.layout.w;
+        let active_pane_h = active.layout.h;
+        let grid = pane_views[plan.active_index].grid;
         gpu_lap!("frame_key");
         // Note: do NOT cache key here. If prepare()/get_current_texture()
         // fails on a transient surface state we'd cache a key for a frame
@@ -5032,7 +4618,7 @@ impl GpuRenderer {
             // cache's total-visible-rows sizing below.
             let total_glyph_rows: u16 = pane_views.iter().map(|pv| pv.grid.rows).sum();
             self.row_glyph_cache.resize(total_glyph_rows.max(1));
-            for pv in &pane_views {
+            for pv in pane_views.iter().filter(|pane| pane.planned.full_clip.is_some()) {
                 let grid: &Grid = pv.grid;
                 let pane_id: sonicterm_text::row_glyph_cache::PaneId = pv.pane_id;
                 let pad = pv.origin_x;
@@ -5042,7 +4628,7 @@ impl GpuRenderer {
                 // past the visible bottom), this is the live-buffer top, i.e.
                 // `scrollback_len()`. Otherwise it's the explicit absolute
                 // index requested by the scroll action (e.g. a prompt row).
-                let view_top_abs = Self::resolved_view_top_abs(grid, pv.viewport_top_abs);
+                let view_top_abs = pv.planned.view_top_abs;
                 // Drop cache entries for every row the VT thread mutated
                 // since the last frame. `grid.dirty_rows()` already covers
                 // theme/font/resize/scroll/focus/selection changes via the
@@ -5051,7 +4637,7 @@ impl GpuRenderer {
                 // wholesale above. Translating dirty row indices to
                 // absolute rows uses the current view top — the same key
                 // we'll look up by below.
-                for r in grid.dirty_rows() {
+                for &r in &pv.planned.dirty_rows {
                     self.row_glyph_cache.invalidate_row_abs(pane_id, view_top_abs + r as u64);
                 }
                 // Normalise selection once outside the loop so we hash a
@@ -5078,13 +4664,11 @@ impl GpuRenderer {
                 // from inheriting another pane's target accent.
                 let pane_hovered_url =
                     hovered_url_cells.filter(|hovered| hovered.pane_id == pv.pane_id);
-                for r in 0..grid.rows {
-                    if !emit_full_rows && !grid.dirty_rows().any(|dirty| dirty == r as usize) {
-                        // When: `!emit_full_rows` and `r` is absent from
-                        // `dirty_rows` — the row's pixels are already correct.
+                for (r, row_abs) in pv.planned.rows() {
+                    if !emit_full_rows && !pv.planned.dirty_rows.contains(&(r as usize)) {
+                        // When: `r` is outside planned dirt and full emission is disabled, retain its previous pixels.
                         continue;
                     }
-                    let row_abs = view_top_abs + r as u64;
                     let Some(row) = grid.row_at_abs(row_abs) else {
                         // When: `grid.row_at_abs(row_abs)` is None — that
                         // absolute row is outside the scrollback still held.
@@ -5341,13 +4925,7 @@ impl GpuRenderer {
                 image,
                 origin_x: pv.origin_x,
                 origin_y: pv.origin_y,
-                // Cell layout has a one-cell floor; image clips must use the actual padded pane extent.
-                content_clip: PaneRect::new(
-                    pv.origin_x,
-                    pv.origin_y,
-                    (pv.full_rect.w as f32 - content_inset_l - content_inset_r).max(0.0),
-                    (pv.full_rect.h as f32 - content_inset_t - content_inset_b).max(0.0),
-                ),
+                content_clip: pv.planned.content_clip,
                 painter_order,
             })
             .collect();
@@ -5417,22 +4995,20 @@ impl GpuRenderer {
         });
         let total_visible_rows: u16 = pane_views.iter().map(|pv| pv.grid.rows).sum();
         self.line_quad_cache.resize(total_visible_rows.max(1));
-        for pv in &pane_views {
+        for pv in pane_views.iter().filter(|pane| pane.planned.full_clip.is_some()) {
             let pv_grid: &Grid = pv.grid;
             let pane_id: crate::row_quad_cache::PaneId = pv.pane_id;
             let pane_rect = PaneRect { x: pv.origin_x, y: pv.origin_y, w: pv.rect_w, h: pv.rect_h };
-            let view_top_abs_bg = Self::resolved_view_top_abs(pv_grid, pv.viewport_top_abs);
+            let view_top_abs_bg = pv.planned.view_top_abs;
             // Mirror RowGlyphCache's dirty-row invalidation: drop entries
             // for every row the VT thread mutated since the last frame.
-            for r in pv_grid.dirty_rows() {
+            for &r in &pv.planned.dirty_rows {
                 self.line_quad_cache.invalidate_row_abs(pane_id, view_top_abs_bg + r as u64);
             }
             let pad_bg = pane_rect.x;
             let top_inset_bg = pane_rect.y;
-            let max_cols =
-                ((pane_rect.w / cell_w).floor() as i32).clamp(0, i32::from(pv_grid.cols)) as u16;
-            let max_rows =
-                ((pane_rect.h / cell_h).floor() as i32).clamp(0, i32::from(pv_grid.rows)) as u16;
+            let max_cols = pv.planned.background_cols;
+            let max_rows = pv.planned.background_rows;
             if max_cols == 0 || max_rows == 0 {
                 // When: `max_cols == 0 || max_rows == 0` — the pane rect is
                 // thinner than one cell, so no background quad would fit.
@@ -5443,13 +5019,11 @@ impl GpuRenderer {
             // active pane's cache because each split-pane has its own
             // pad and the snapped column edges differ.
             let snapped_cell_x_bg = build_snapped_cell_x(pad_bg, cell_w, pv_grid.cols);
-            for r in 0..max_rows {
-                if !emit_full_rows && !pv_grid.dirty_rows().any(|dirty| dirty == r as usize) {
-                    // When: `!emit_full_rows` and `r` is absent from
-                    // `dirty_rows` — this row's background is already correct.
+            for (r, row_abs) in pv.planned.rows().take(max_rows as usize) {
+                if !emit_full_rows && !pv.planned.dirty_rows.contains(&(r as usize)) {
+                    // When: `r` is outside planned dirt and full emission is disabled, retain its previous background.
                     continue;
                 }
-                let row_abs = view_top_abs_bg + r as u64;
                 let Some(row_cells) = pv_grid.row_at_abs(row_abs) else {
                     // When: `pv_grid.row_at_abs(row_abs)` is None — the row is
                     // outside the scrollback this pane still retains.
@@ -5522,12 +5096,11 @@ impl GpuRenderer {
         // Per-pane scrollbar emit. Runs after row backgrounds and before
         // selection, cursor, and modal overlays. Auto opacity comes from the
         // app state machine; geometry remains shared with hit-testing.
-        for pv in &pane_views {
+        for pv in pane_views.iter().filter(|pane| pane.planned.full_clip.is_some()) {
             let pane_rect = PaneRect { x: pv.origin_x, y: pv.origin_y, w: pv.rect_w, h: pv.rect_h };
-            let pv_grid: &Grid = pv.grid;
-            let viewport_rows = pv_grid.rows;
-            let total_rows = pv_grid.scrollback_len() as u64 + viewport_rows as u64;
-            let view_top = Self::resolved_view_top_abs(pv_grid, pv.viewport_top_abs);
+            let viewport_rows = pv.planned.row_count;
+            let total_rows = pv.planned.scrollback_len + u64::from(viewport_rows);
+            let view_top = pv.planned.view_top_abs;
             emit_pane_scrollbar(
                 &mut quads_overlay,
                 pane_rect,
@@ -5562,7 +5135,7 @@ impl GpuRenderer {
                 // pane's view top so `selection_quad_rects` can map them back
                 // to viewport rows (so the highlight follows the TEXT when
                 // scrolled).
-                let sel_view_top_abs = Self::resolved_view_top_abs(grid, viewport_top_abs);
+                let sel_view_top_abs = plan.active_view_top_abs;
                 for rect in selection_quad_rects(
                     sel,
                     sel_view_top_abs,
@@ -5601,7 +5174,7 @@ impl GpuRenderer {
                     &active_snapped_cell_x,
                 );
             }
-            let view_top_abs = Self::resolved_view_top_abs(grid, viewport_top_abs);
+            let view_top_abs = plan.active_view_top_abs;
             if let Some((cx, cy)) = Self::emit_copy_mode_quads(
                 copy_mode,
                 grid,
@@ -5634,7 +5207,7 @@ impl GpuRenderer {
             // live region — its absolute row is `scrollback_len + cursor.row`,
             // which sits below the bottom of a scrolled-back view.
             let live_top = grid.scrollback_len() as u64;
-            let view_top = viewport_top_abs.map(|v| v.min(live_top)).unwrap_or(live_top);
+            let view_top = plan.active_view_top_abs;
             if view_top == live_top {
                 // read both cursor cell left edge AND width from the
                 // shared snapped-edge cache so the cursor (block / bar /
@@ -6161,7 +5734,7 @@ impl GpuRenderer {
             // When: `search` is Some — a search session is live, so its match
             // highlights and status badge belong on this frame.
             let cur_idx = s.current;
-            let view_top_abs = Self::resolved_view_top_abs(grid, viewport_top_abs);
+            let view_top_abs = plan.active_view_top_abs;
             let match_bg = hex_to_premultiplied_rgba(theme.colors.ansi.yellow.0.as_str(), 1.0);
             let match_fg = hex_to_premultiplied_rgba(theme.colors.background.0.as_str(), 1.0);
             let current_bg = hex_to_premultiplied_rgba(theme.colors.bright.green.0.as_str(), 1.0);
@@ -7364,14 +6937,7 @@ impl GpuRenderer {
             self.image_atlas.clear_dirty_rects();
             frame.present(&self.window)?;
             gpu_lap!("software_present");
-            self.finish_successful_frame(
-                key,
-                missing_chars_this_frame,
-                panes,
-                render_mode,
-                damaged_rows,
-                gpu_timing,
-            );
+            self.finish_successful_frame(plan, missing_chars_this_frame, panes, gpu_timing);
             return Ok(());
         }
 
@@ -7443,16 +7009,8 @@ impl GpuRenderer {
         let view = frame.texture.create_view(&TextureViewDescriptor::default());
         let mut encoder =
             self.device.create_command_encoder(&CommandEncoderDescriptor { label: Some("sonic") });
-        let first_retained_frame = self.last_frame_key.is_none();
-        let software_full_repaint =
-            self.software_render_degrade && matches!(render_mode, RenderMode::Full);
-        let damage_rect = if first_retained_frame || software_full_repaint {
-            surface_rect
-        } else {
-            // When: neither `first_retained_frame` nor `software_full_repaint`
-            // — the retained texture is valid, so only damage is redrawn.
-            damage.rect().unwrap_or(surface_rect)
-        };
+        let first_retained_frame = plan.first_frame;
+        let damage_rect = plan.damage;
         draw_retained_frame(
             &mut self.present_pipeline,
             &self.device,
@@ -7479,26 +7037,20 @@ impl GpuRenderer {
         gpu_lap!("queue_submit");
         self.queue.present(frame);
         gpu_lap!("present");
-        self.finish_successful_frame(
-            key,
-            missing_chars_this_frame,
-            panes,
-            render_mode,
-            damaged_rows,
-            gpu_timing,
-        );
+        self.finish_successful_frame(plan, missing_chars_this_frame, panes, gpu_timing);
         Ok(())
     }
 
     fn finish_successful_frame(
         &mut self,
-        key: FrameKey,
+        plan: FramePlan,
         missing_chars_this_frame: Vec<char>,
         panes: &mut [sonicterm_render_model::PaneRender<'_>],
-        render_mode: RenderMode,
-        damaged_rows: usize,
         gpu_timing: Option<(Instant, Instant, Vec<(&'static str, f32)>)>,
     ) {
+        let render_mode = plan.mode;
+        let damaged_rows = plan.damaged_rows;
+        acknowledge_presented_plan(&plan, panes);
         self.successful_frame_count = self.successful_frame_count.saturating_add(1);
         if std::mem::take(&mut self.glyph_atlas_retry_without_eviction) {
             self.glyph_atlas.set_eviction_enabled(true);
@@ -7512,12 +7064,9 @@ impl GpuRenderer {
             );
         }
         self.last_missing_chars = missing_chars_this_frame;
-        self.last_frame_key = Some(key);
+        self.last_frame_key = Some(plan.key);
         if self.pane_focus_flash.is_some() {
             self.window.request_redraw();
-        }
-        for p in panes.iter_mut() {
-            p.grid.clear_dirty();
         }
         if let Some((start, last, mut parts)) = gpu_timing {
             let now = Instant::now();
