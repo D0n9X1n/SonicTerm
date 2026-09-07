@@ -144,6 +144,14 @@ While an IME composition is active, raw key events do not reach the PTY. An
 `Ime::Commit` supplies UTF-8 text after composition. A palette or search field
 can consume that commit. READONLY or copy mode can discard it.
 
+The terminal IME anchor uses the active pane's physical origin, content padding,
+and cursor cell with live physical cell metrics. It adds each offset once,
+without another DPI multiplication. Each window coalesces identical
+`(pane id, physical position, physical size)` updates; equal-cell focus changes,
+zoom, transfer, font/padding changes, and resize still update the native anchor.
+Palette and search retain their separate field anchors and reset the terminal
+anchor cache before returning input ownership.
+
 Only a press that survives local routing and reaches at least one bounded PTY
 input queue is recorded as PTY-owned. Its accepted pane set stays fixed for the
 whole lifecycle: repeats consult it before any palette, search, or keymap owner
@@ -333,7 +341,10 @@ short redraw-target lock. It releases that lock and sends
 and calls `request_redraw()`. A stale id is ignored.
 
 This indirection lets a pane move between windows. Transfer changes the shared
-`WindowId`; the existing worker and child process continue unchanged.
+`WindowId`; the existing worker and child process continue unchanged. The
+receiving tab is activated before its visible grids and PTYs are resized to the
+destination pane rectangles, without a whole-window intermediate size.
+Zoom-hidden siblings keep their prior size until they become visible.
 
 A second pacing gate may defer streaming output to the next frame boundary.
 Hardware keeps pure input redraws immediate. PTY output is bounded by the
@@ -777,6 +788,11 @@ winit 会为按下、重复和释放发送 `WindowEvent::KeyboardInput`。SonicT
 输入法正在组字时，原始按键不会进入 PTY。`Ime::Commit` 在组字完成后提供 UTF-8 文本。
 命令面板或搜索框可以消费提交文本。READONLY 或复制模式可以丢弃它。
 
+终端输入法锚点由活动窗格的物理原点、内容内边距和光标单元格结合实时物理字格度量计算。
+每个偏移只加一次，不再次乘 DPI。各窗口按 `(窗格 id、物理位置、物理尺寸)` 合并重复更新，
+但相同单元格下的焦点切换、缩放、转移、字体/内边距变化和尺寸变化仍会更新原生锚点。
+命令面板和搜索框保留各自的输入字段锚点，并在归还输入所有权前重置终端锚点缓存。
+
 只有通过所有本地路由、且至少进入一个有界 PTY 输入队列的按下事件才会记为 PTY 所有。
 成功接收的 pane 集合在整个按键生命周期内保持不变：重复事件会在后来打开的命令面板、搜索框
 或 keymap owner 之前查询该集合；即使焦点或广播状态改变，释放事件也会返回该集合。本地消费
@@ -928,7 +944,8 @@ DECCKM/DECKPAM/DECBKM/newline/`modifyOtherKeys` 快照镜像到原子值，并�
 过期编号会被忽略。
 
 这层间接关系让窗格可以跨窗口移动。转移只修改共享 `WindowId`；现有工作线程和子进程
-保持不变。
+保持不变。接收的标签页先激活，再按目标窗格矩形调整可见网格和 PTY，不经过整窗尺寸的
+中间状态。缩放隐藏的兄弟窗格在再次可见之前保留原尺寸。
 
 第二层帧节奏控制可能把持续输出推迟到下一个帧边界。硬件路径让纯输入重绘立即发生。
 PTY 输出最多等待一个显示器帧周期。最终降级状态启用时，纯输入重绘也会合并到软件帧周期。

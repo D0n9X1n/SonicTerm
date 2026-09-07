@@ -359,8 +359,13 @@ loop. A memory-only wake performs retention work without creating a heartbeat
 redraw.
 
 Frame collection uses non-blocking parser and image locks. One unavailable lock
-defers the complete frame and arms another deadline. Successful guards remain
-alive through `GpuRenderer::render`.
+defers the complete frame and sets that window's `retry_not_before` to the failed
+attempt time plus its effective frame period. This floor is separate from the
+last-frame timestamp and is combined with normal pacing. Input or redraw events
+before it cannot bypass or extend it. A due failed attempt rearms from that
+attempt; coherent collection clears it before renderer-specific retries, and
+window removal discards it. Successful guards remain alive through
+`GpuRenderer::render`; no blocking lock or unconditional heartbeat is added.
 
 ### Config reload and save
 
@@ -416,6 +421,11 @@ only when the cursor is at least 5 raster pixels from its press position.
 Below that threshold it remains a click, even if another window's tab bar
 overlaps the release point or the cursor slips just outside the source bar.
 Main and child windows share this decision; keyboard tab navigation bypasses it.
+The gesture captures `WindowId` and `TabId` at press time, and native handoff
+retains the same stable identity. Reorder, merge, tear-out, and completion resolve
+its current index immediately before mutation. Closing or reordering an earlier
+tab cannot change the source; closing the captured tab or window cancels the
+move. A drag chip uses the captured tab's current title and index.
 
 For a genuine drag, a foreign tab bar takes precedence over source-bar reorder
 or cancellation. Otherwise, in-process tear-out requires an inclusive 40-raster-
@@ -426,6 +436,10 @@ derived height; this rule does not change native OS drag-handoff policy.
 In-process reorder, merge, and tear-out move live `Tab`, `TabState`, and
 `PaneState` values. `PtyHandle` is not cloned or respawned. Each successfully
 attached pane gets the destination `WindowId` in its shared redraw target.
+Attachment inserts and activates the tab before computing the destination's live
+pane rectangles. Each visible grid and PTY receives only its final pane size,
+never an intermediate whole-window resize. Zoom-hidden siblings keep their prior
+valid sizes until unzoom resizes them to split rectangles before presentation.
 
 `transfer_tab` checks source bounds and destination-window existence before it
 detaches. That check does not prove a child destination has a renderer. If
@@ -837,8 +851,11 @@ flowchart TD
 最早期限优先。没有期限时使用 `ControlFlow::Wait` 停住循环。只由内存期限触发的唤醒会执行
 常驻内存工作，不会制造心跳重绘。
 
-帧收集对解析器和图像使用非阻塞锁。任一锁不可用时会推迟完整帧并设置下一次期限。成功取得的
-保护对象一直存活到 `GpuRenderer::render` 返回。
+帧收集对解析器和图像使用非阻塞锁。任一锁不可用时会推迟完整帧，并将该窗口的
+`retry_not_before` 设置为失败尝试时刻加有效帧周期。这个下限独立于上一帧时间戳，并与普通
+帧节奏合并。期限前的输入或重绘事件既不能绕过它，也不能延后它；到期尝试再次失败时，才从
+该次尝试重新计时。成功收集完整帧后，会在渲染器自身的重试逻辑之前清除该状态；移除窗口时
+一并丢弃。成功取得的保护对象一直存活到 `GpuRenderer::render` 返回，不增加阻塞锁或无条件心跳。
 
 ### 配置重载与保存
 
@@ -885,6 +902,9 @@ tracing subscriber，只能在下次进程启动时生效。
 鼠标按下时会激活所点的标签页；松开时，只有光标距离按下位置至少 5 个栅格像素，才允许重排、
 合并或拆出。低于该阈值时仍然是单击，即使另一窗口的标签栏与松开位置重叠，或光标轻微滑出
 源标签栏，也不会移动标签页。主窗口与子窗口共用这一判断；键盘切换标签页不经过该路径。
+手势在按下时捕获 `WindowId` 和 `TabId`，原生交接保留同一稳定身份。重排、合并、拆出和
+完成处理都在修改前解析当前下标。关闭或重排前面的标签页不会改变源；若被捕获的标签页或
+窗口已关闭，则取消移动。拖动浮片使用该标签页当前的标题和下标。
 
 真实拖动时，外部标签栏优先于源标签栏的重排或取消。否则，进程内拆出要求光标到实时标签栏
 上边缘或下边缘的垂直外部距离至少为 40 个栅格像素（含边界）；仅横向离开不足以拆出。
@@ -892,6 +912,9 @@ tracing subscriber，只能在下次进程启动时生效。
 
 进程内重排、合并和拆出会移动存活的 `Tab`、`TabState` 和 `PaneState`。`PtyHandle` 不会复制
 或重启。窗格成功附加后，共享重绘目标会改成目标 `WindowId`。
+附加时先插入并激活标签页，再计算目标窗口的实时窗格矩形。每个可见网格和 PTY 只接收最终
+窗格尺寸，不会经过整窗尺寸的中间调整。缩放隐藏的兄弟窗格保留原先有效尺寸，取消缩放时
+会在呈现之前按拆分矩形调整。
 
 `transfer_tab` 会在移除前检查源下标和目标窗口是否存在，但这不能证明子窗口目标拥有渲染器。
 若 `attach_to_child` 随后拒绝附加，已移除的窗格会被析构，其子进程也会终止。

@@ -56,7 +56,7 @@ impl App {
         }
         Some((tab, state, panes))
     }
-    // Lock order: for each pane, acquire `parser` before `redraw_target`; each guard is released before insertion.
+    // Release each redraw-target guard before the geometry helper locks any inserted parser.
     pub fn attach_tab_state(
         &mut self,
         index: usize,
@@ -64,12 +64,9 @@ impl App {
         state: TabState,
         panes: HashMap<u64, PaneState>,
     ) {
-        let (cols, rows) = self.main_renderer().map(|r| r.cells()).unwrap_or((80, 24));
         let main_window = self.main_window_id;
         if let Some(ws) = self.main_mut() {
             for (id, pane) in panes {
-                pane.parser.lock().grid_mut().resize(cols, rows);
-                pane.resize_pty(id, cols, rows);
                 *pane.redraw_target.lock() = main_window;
                 ws.panes.insert(id, pane);
             }
@@ -77,6 +74,7 @@ impl App {
             ws.tabs.insert(idx, tab);
             ws.tab_states.insert(idx, state);
         }
+        self.resize_visible_panes();
         // Re-parent the arriving panes now rather than on the next sampling
         // pass. A pane's owner was created below the window it left, and the
         // source window is reaped in this same call when the move drained it —
@@ -107,7 +105,7 @@ impl App {
         child.tabs.close(tab.id);
         Some((tab, state, panes))
     }
-    // Lock order: for each pane, acquire `parser` before `redraw_target`; each guard is released before insertion.
+    // Release each redraw-target guard before the geometry helper locks any inserted parser.
     pub fn attach_to_child(
         &mut self,
         dst_id: WindowId,
@@ -120,20 +118,18 @@ impl App {
             // When: `dst_id` has no child window, attachment has no valid destination.
             return false;
         };
-        let Some(renderer) = child.renderer.as_ref() else {
-            // When: destination `child` has no `renderer`, pane geometry cannot be resized safely.
+        if child.renderer.is_none() && child.test_pane_viewport.is_none() {
+            // When: `child` has no live or test geometry, attachment cannot derive valid pane dimensions.
             return false;
-        };
-        let (cols, rows) = renderer.cells();
+        }
         for (id, pane) in panes {
-            pane.parser.lock().grid_mut().resize(cols, rows);
-            pane.resize_pty(id, cols, rows);
             *pane.redraw_target.lock() = Some(dst_id);
             child.panes.insert(id, pane);
         }
         let idx = index.min(child.tabs.len());
         child.tabs.insert(idx, tab);
         child.tab_states.insert(idx, state);
+        super::child_window::resize_visible_panes_in_child(child);
         child.request_redraw();
         // Re-parent the arriving panes now, for the reason given in
         // [`Self::attach_tab_state`]: the source window is reaped in this same

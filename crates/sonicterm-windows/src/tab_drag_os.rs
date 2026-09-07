@@ -2,7 +2,7 @@
 //!
 //! Wires `begin_session` straight into the existing OLE `DoDragDrop`
 //! loop in [`crate::os_drag_win`]. Same-process drag uses the in-memory
-//! `(src_window, src_tab_idx)` bookkeeping the App already keeps in
+//! `(src_window, stable_tab_id)` bookkeeping the App keeps in
 //! `os_drag_source`; the OLE payload only needs to carry an opaque
 //! identifier the IDropTarget on a peer SonicTerm HWND can use to recognise
 //! "this is one of ours, accept it". We reuse the existing
@@ -91,6 +91,20 @@ fn build_payload_json(source_window: WindowId, source_tab_idx: usize) -> String 
     format!(r#"{{"src_window_id":"{:?}","src_tab_idx":{}}}"#, source_window, source_tab_idx)
 }
 
+fn unresolved_drag_outcome(
+    hr: windows::core::HRESULT,
+    effect: u32,
+    cursor_position: impl FnOnce() -> (i32, i32),
+) -> DragOutcome {
+    if hr != windows::Win32::Foundation::DRAGDROP_S_DROP
+        || effect == windows::Win32::System::Ole::DROPEFFECT_MOVE.0
+    {
+        // When: `hr` cancels or `effect` is MOVE without a destination, preserve the captured source tab.
+        return DragOutcome::Cancelled;
+    }
+    DragOutcome::DroppedOnEmpty { drop_screen_pos: cursor_position() }
+}
+
 impl OsTabDragBackend for WinOsTabDragBackend {
     fn handles_full_gesture(&self) -> bool {
         // `begin_session` runs `DoDragDrop` synchronously, so the caller in
@@ -162,46 +176,14 @@ impl OsTabDragBackend for WinOsTabDragBackend {
             // posted (target window and slot from the cursor hit-test); do not overwrite it.
             return;
         }
-        // When: only `DRAGDROP_S_DROP` completed a native drop; every other HRESULT retains the
-        // source tab, while a completed drop is classified by its final effect.
-        let outcome = if outcome.hr != windows::Win32::Foundation::DRAGDROP_S_DROP {
-            DragOutcome::Cancelled
-        } else {
-            match outcome.effect {
-                e if e == windows::Win32::System::Ole::DROPEFFECT_MOVE.0 => {
-                    // Drop accepted by a SonicTerm IDropTarget but the
-                    // destination side did not post a richer outcome —
-                    // dispatcher will route via transfer_tab with default
-                    // main-window/self target. The destination IDropTarget
-                    // in os_drag_win already pushes a TabPayload via
-                    // `os_drag_bridge::push_tab_payload`, so the
-                    // user-visible result is "tab appears at destination".
-                    DragOutcome::DroppedOnBar { target_window: None, target_slot: source_tab_idx }
-                }
-                _ => {
-                    // When: `outcome.effect` is not DROPEFFECT_MOVE after a completed drop, no OLE
-                    // target accepted the tab, so tear out at the release point.
-
-                    // GetCursorPos reports screen coordinates, letting the App spawn the torn-out
-                    // window in-process at that location rather than paying a child-process
-                    // cold start. `DragOutcome::DroppedOnEmpty` is routed by
-                    // `App::handle_os_drag_ended` into a typed `PendingTearOut` drain.
-                    let mut pt = windows::Win32::Foundation::POINT { x: 0, y: 0 };
-                    // SAFETY: pt is a stack POINT that outlives the call, and GetCursorPos only
-                    // writes through that pointer. A failure (rare; closed session) leaves pt
-                    // zero-initialised, which the tear-out path accepts as a fallback position.
-                    unsafe {
-                        let _ = windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pt);
-                    }
-                    tracing::info!(
-                        x = pt.x,
-                        y = pt.y,
-                        "WinOsTabDragBackend: DROPEFFECT_NONE → DroppedOnEmpty (in-process tear-out)"
-                    );
-                    DragOutcome::DroppedOnEmpty { drop_screen_pos: (pt.x, pt.y) }
-                }
+        let outcome = unresolved_drag_outcome(outcome.hr, outcome.effect, || {
+            let mut pt = windows::Win32::Foundation::POINT { x: 0, y: 0 };
+            // SAFETY: `pt` remains live for GetCursorPos, which only writes its screen coordinates.
+            unsafe {
+                let _ = windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pt);
             }
-        };
+            (pt.x, pt.y)
+        });
 
         handle.post_drag_ended(outcome);
     }

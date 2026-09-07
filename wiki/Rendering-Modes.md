@@ -154,6 +154,16 @@ The hidden warm-renderer pool defaults to one. A configured value of `0`
 disables it. Hardware honors targets through 5; degradation caps every nonzero
 target at 1.
 
+### Lock-contention retry
+
+Each window keeps `retry_not_before` separate from its last-frame timestamp.
+A failed due parser/image collection sets that deadline to the attempt time plus
+the effective frame period. The retry is a floor over normal pacing, including
+degraded IME pacing. Earlier input or redraw events cannot bypass or postpone
+it. A due failure rearms it; coherent collection clears it before atlas/surface
+retry policy runs. Closing the window discards it. No unconditional redraw
+heartbeat or blocking parser/image lock is introduced.
+
 ### Windows CPU presentation
 
 When degradation is active on Windows, `WindowsSoftwareFrame` composes the same
@@ -399,6 +409,13 @@ CPU presenter 解码 sRGB BGRA 目标，在线性光空间执行同一逐通道�
 
 隐藏预热渲染器池默认保留一个。配置为 `0` 表示关闭。硬件最多接受目标值 5；降级时
 任何非零目标都会限制为 1。
+
+### 锁争用重试
+
+每个窗口将 `retry_not_before` 与上一帧时间戳分开保存。到期的解析器/图像收集失败时，
+期限设为尝试时刻加有效帧周期，并作为普通帧节奏（包括降级输入法周期）的下限。更早的输入
+或重绘事件既不能绕过它，也不能推迟它。到期再次失败才重新计时；成功收集完整帧后，会在
+图集/表面重试策略之前清除该状态。关闭窗口时一并丢弃，不引入无条件重绘心跳或阻塞锁。
 
 ### Windows CPU 呈现
 

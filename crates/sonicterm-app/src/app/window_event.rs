@@ -467,7 +467,9 @@ impl App {
                     composing,
                     self.frame_period,
                 );
-                if crate::app::should_defer_streaming_redraw(
+                if self.main().is_some_and(|window| {
+                    window.contention_blocks_redraw(Instant::now(), frame_period)
+                }) || crate::app::should_defer_streaming_redraw(
                     was_dirty,
                     pty_burst,
                     self.software_render_degrade,
@@ -707,6 +709,9 @@ impl App {
                     return;
                 }
 
+                if let Some(window) = self.main_mut() {
+                    window.coherent_frame_collected();
+                }
                 let marker_observed = self.runtime_smoke.as_ref().is_some_and(|smoke| {
                     smoke.is_waiting_for_marker()
                         && guards.iter().any(|(_, parser, _)| {
@@ -888,7 +893,7 @@ impl App {
                     tab_states_opt,
                 ) {
                     // When: renderer_opt, pane, tabs_mref, and tab_states_mref are Some, render one coherent frame.
-                    let cursor_rc = {
+                    let (cursor_rc, cursor_pane_rect) = {
                         // Fix 1: the active pane's parser guard is
                         // already in `guards` from the global try_lock pass
                         // above; locking it again here would AB-BA deadlock
@@ -998,7 +1003,7 @@ impl App {
                             *lr = Instant::now();
                         }
                         let g = guards[active_pos].1.grid_mut();
-                        (g.cursor.row, g.cursor.col)
+                        ((g.cursor.row, g.cursor.col), guards[active_pos].2)
                     };
                     // refresh the OS-drag tab bar
                     // snapshot so cross-window drop hit-tests see the
@@ -1013,6 +1018,12 @@ impl App {
                     // pinned to the top-left corner of the screen as
                     // happens when the area is never set.
                     if let Some(w) = main_window_for_ime {
+                        let mut ws_ime_throttle_ref = ws_ime_throttle_ref;
+                        if main_palette_ime_area.is_some() || search_ime_label.is_some() {
+                            if let Some(throttle) = ws_ime_throttle_ref.as_deref_mut() {
+                                throttle.reset();
+                            }
+                        }
                         if let Some((pos, size)) = main_palette_ime_area {
                             // The main-hosted palette anchors the candidate window to its caret.
                             w.set_ime_cursor_area(pos, size);
@@ -1067,18 +1078,14 @@ impl App {
                             w.set_ime_cursor_area(pos, size);
                         } else if let Some(throttle) = ws_ime_throttle_ref {
                             // When: ws_ime_throttle_ref is Some(throttle), use terminal cell IME geometry.
-                            // Terminal input updates its cell-based candidate anchor through the throttle.
-                            if throttle.should_update(cursor_rc.0, cursor_rc.1) {
-                                // A changed cursor cell publishes its physical rectangle to the OS IME.
-                                let x = r.padding_left_px() + f32::from(cursor_rc.1) * r.cell_w;
-                                let y = r.top_inset() + f32::from(cursor_rc.0) * r.cell_h;
-                                let pos = winit::dpi::PhysicalPosition::new(x as i32, y as i32);
-                                let size = winit::dpi::PhysicalSize::new(
-                                    r.cell_w.ceil() as u32,
-                                    r.cell_h.ceil() as u32,
-                                );
-                                w.set_ime_cursor_area(pos, size);
-                            }
+                            super::update_terminal_ime_cursor_area(
+                                throttle,
+                                (active_id, cursor_pane_rect),
+                                cursor_rc,
+                                (r.cell_w, r.cell_h),
+                                (r.padding_left_px(), r.padding_top_px()),
+                                |pos, size| w.set_ime_cursor_area(pos, size),
+                            );
                         }
                     }
                 }
@@ -1409,10 +1416,19 @@ impl App {
                 let drag_snapshot = self.main_mut().and_then(|ws| {
                     ws.drag_session.as_mut().map(|s| {
                         s.current_pos = (lx, ly);
-                        (s.press_tab_index, *s)
+                        *s
                     })
                 });
-                if let Some((press_idx, session_snapshot)) = drag_snapshot {
+                let resolved_drag = drag_snapshot.and_then(|session| {
+                    self.tab_index_of_id(session.source_window, session.source_tab)
+                        .map(|index| (index, session))
+                });
+                if drag_snapshot.is_some() && resolved_drag.is_none() {
+                    // When: `resolved_drag` cannot find the captured tab, cancel the existing gesture before any pointer fallthrough.
+                    self.cancel_drag_session();
+                    return;
+                }
+                if let Some((press_idx, session_snapshot)) = resolved_drag {
                     let title = self
                         .main_tabs()
                         .and_then(|t| t.tabs().get(press_idx).map(|tab| tab.title.clone()))
@@ -1433,8 +1449,12 @@ impl App {
                     )
                     .with_top_offset(top_off)
                     .with_visible(visible);
-                    let chip =
-                        crate::tab_drag::build_drag_chip_overlay(&session_snapshot, &layout, title);
+                    let chip = crate::tab_drag::build_drag_chip_overlay(
+                        &session_snapshot,
+                        &layout,
+                        press_idx,
+                        title,
+                    );
                     if let Some(r) = self.main_renderer_mut() {
                         r.set_drag_chip(chip);
                     }
@@ -1470,7 +1490,7 @@ impl App {
                             ws.drag_session
                                 .as_ref()
                                 .filter(|s| crate::tab_drag::drag_moved_enough(s))
-                                .map(|s| s.press_tab_index)
+                                .and_then(|s| self.tab_index_of_id(s.source_window, s.source_tab))
                         });
                         if let Some(idx) = started_idx {
                             // When: started_idx is Some, transfer this tab gesture to the OS backend once.
@@ -1918,8 +1938,13 @@ impl App {
                                     // tear-out gesture.
                                     if let Some(ws) = self.main_mut() {
                                         ws.pressed_tab = Some(i);
-                                        ws.drag_session =
-                                            Some(crate::tab_drag::DragSession::new(i, (px, py)));
+                                        ws.drag_session = ws.tabs.tabs().get(i).map(|tab| {
+                                            crate::tab_drag::DragSession::new(
+                                                win_id,
+                                                tab.id,
+                                                (px, py),
+                                            )
+                                        });
                                     }
                                 }
                                 Some(sonicterm_ui::tabbar_view::TabHit::Close(i)) => {
@@ -2234,7 +2259,14 @@ impl App {
                         if let Some(r) = self.main_renderer_mut() {
                             r.set_drag_chip(None);
                         }
-                        if let (Some(s), Some(idx)) = (session, pressed) {
+                        if let (Some(s), Some(_)) = (session, pressed) {
+                            // When: both `session` and `pressed` survived, resolve the captured tab before computing release semantics.
+                            let Some(idx) = self.tab_index_of_id(s.source_window, s.source_tab)
+                            else {
+                                // When: `s.source_tab` no longer exists in `source_window`, the release must not move another tab.
+                                self.cancel_drag_session();
+                                return;
+                            };
                             let window_width = self
                                 .main_window()
                                 .map(|w| w.inner_size().width as f32)
@@ -2250,46 +2282,10 @@ impl App {
                             .with_top_offset(
                                 self.main_renderer().map(|r| r.tab_bar_y_offset()).unwrap_or(0.0),
                             );
-                            let action = crate::tab_drag::compute_action(&s, foreign, &layout);
-                            match action {
-                                crate::tab_drag::DragAction::ReturnToOriginalBar => {
-                                    // When: DragAction::ReturnToOriginalBar preserves the original position.
-
-                                    // Source-bar release preserves the original tab position.
-                                    // No-op — moving back over the source
-                                    // bar before releasing cancels the drag.
-                                }
-                                crate::tab_drag::DragAction::ReorderTab { from, to } => {
-                                    // Source-bar release at a new slot reorders model and state together.
-                                    // — must move Tab +
-                                    // TabState in lock-step, otherwise the
-                                    // title moves but `tab_states[i]`
-                                    // (active pane + PaneTree leaf-ids)
-                                    // stays bound to the old slot →
-                                    // title-N points at the OTHER tab's
-                                    // PTY. Also clamps `to` for the
-                                    // drag-past-last case (`TabBar::reorder`
-                                    // silently no-ops when `to == len`,
-                                    // which looked like the tab vanished).
-                                    // Logic lives on `WindowState::reorder_tab`
-                                    // so the regression tests in
-                                    // `tests/reorder_main_window_pane_follows_title.rs`
-                                    // exercise the same path production runs.
-                                    if let Some(id) = self.main_window_id {
-                                        if let Some(ws) = self.windows.get_mut(&id) {
-                                            ws.reorder_tab(from, to);
-                                        }
-                                    }
-                                }
-                                crate::tab_drag::DragAction::MergeIntoWindow(target) => {
-                                    // Another-window release transfers the tab into that target.
-                                    self.merge_main_into_child(idx, target);
-                                }
-                                crate::tab_drag::DragAction::TearOutToNewWindow { .. } => {
-                                    // A release without an existing bar moves the tab into a new window.
-                                    self.tear_out_tab(el, idx);
-                                }
-                            }
+                            let action = crate::tab_drag::compute_action(&s, foreign, &layout, idx);
+                            self.finish_tab_drag(s, action, |app, _, index| {
+                                app.tear_out_tab(el, index);
+                            });
                             if let Some(w) = self.main_window() {
                                 w.request_redraw();
                             }

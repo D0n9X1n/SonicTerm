@@ -1052,6 +1052,8 @@ pub struct WindowState {
     // with the pane through tear-out. Read it via
     // `ws.panes.get(&active_pane).map(|p| p.cursor_visible.load(...))`.
     pub last_render: Instant,
+    /// Earliest collection retry after lock contention, independent of completed-frame pacing.
+    pub(crate) retry_not_before: Option<Instant>,
     /// pointer-cursor-is-link latch. Mirrors
     /// `App.hover_link` (now deleted). Per-window so a torn-out child can
     /// flip its own cursor independently of the main window.
@@ -1061,7 +1063,7 @@ pub struct WindowState {
     /// drag-from-child merging.
     pub pressed_tab: Option<usize>,
     /// Live drag session for a held-tab gesture in this child window.
-    pub drag_session: Option<crate::tab_drag::DragSession>,
+    pub drag_session: Option<crate::tab_drag::DragSession<WindowId>>,
     /// Pending cross-window drop target chosen during a drag in the
     /// child's bar; consumed on mouse-up.
     pub drag_target: Option<crate::tab_drag::DropTarget<WindowId>>,
@@ -1138,6 +1140,25 @@ pub struct WindowState {
 }
 
 impl WindowState {
+    fn arm_contention_retry(&mut self, now: Instant, period: Duration) {
+        if self.retry_not_before.is_none_or(|deadline| deadline <= now) {
+            self.retry_not_before = Some(now + period);
+        }
+    }
+
+    fn redraw_not_before(&self, period: Duration) -> Instant {
+        let paced = self.last_render + period;
+        self.retry_not_before.map_or(paced, |retry| paced.max(retry))
+    }
+
+    fn contention_blocks_redraw(&self, now: Instant, period: Duration) -> bool {
+        self.retry_not_before.is_some() && now < self.redraw_not_before(period)
+    }
+
+    fn coherent_frame_collected(&mut self) {
+        self.retry_not_before = None;
+    }
+
     /// Borrow the renderer. Panics if the renderer field is `None`
     /// (pre-`do_resumed` for the main entry; never for child entries —
     /// every child construction site initializes it to `Some(_)`).
@@ -1704,6 +1725,28 @@ pub fn resize_panes_to_rects(
         );
         pane.parser.lock().grid_mut().resize(cols, rows);
         pane.resize_pty(*id, cols, rows);
+    }
+}
+
+fn update_terminal_ime_cursor_area(
+    throttle: &mut sonicterm_ui::ime::ImeCursorThrottle,
+    pane: (u64, sonicterm_ui::pane::Rect),
+    cursor: (u16, u16),
+    cell_size: (f32, f32),
+    padding: (f32, f32),
+    publish: impl FnOnce(winit::dpi::PhysicalPosition<i32>, winit::dpi::PhysicalSize<u32>),
+) {
+    // Pane layout and metrics are physical already; scaling or adding the window top inset again would double the offset.
+    let area = sonicterm_ui::ime::ImeCursorArea {
+        pane_id: pane.0,
+        position: (
+            (pane.1.x + padding.0 + f32::from(cursor.1) * cell_size.0) as i32,
+            (pane.1.y + padding.1 + f32::from(cursor.0) * cell_size.1) as i32,
+        ),
+        size: (cell_size.0.ceil() as u32, cell_size.1.ceil() as u32),
+    };
+    if throttle.should_update(area) {
+        publish(area.position.into(), area.size.into());
     }
 }
 
@@ -2703,11 +2746,8 @@ pub struct App {
     /// to resolve the raw screen-coordinate drop into a real
     /// `(WindowId, slot)` pair before posting a `DroppedOnBar` outcome.
     pub(super) os_drag_bars: Arc<os_drag::TabBarRegistry>,
-    /// tracks the source-side bookkeeping while an OS drag
-    /// is in flight. `Some((source_window, source_tab_idx))` from
-    /// `begin_session` until `UserEvent::DragEnded` is drained; back
-    /// to `None` once the dispatcher routes the outcome.
-    pub(super) os_drag_source: Option<(WindowId, usize)>,
+    /// Captured window and tab identity until the native drag outcome is consumed.
+    pub(super) os_drag_source: Option<(WindowId, sonicterm_ui::tabs::TabId)>,
     /// View → Toggle Tab Bar state. When `false`, the menubar Toggle
     /// Tab Bar action has hidden the tab bar chrome. Defaults to
     /// `true`. Exposed via [`Self::tab_bar_visible`] so the renderer
@@ -3249,41 +3289,39 @@ impl App {
         }
     }
 
-    /// Called from the `RedrawRequested` handler when the active pane's
-    /// parser lock is contended (held by the VT thread mid-parse).
-    /// Marks `pending_redraw` so `about_to_wait` schedules a
-    /// `WaitUntil` at the next vsync boundary, and preserves the
-    /// `input_dirty` flag captured at the start of the handler so the
-    /// rescheduled redraw still bypasses the vsync coalescing gate.
-    ///
-    /// Without this, a single contended `try_lock` during the
-    /// input→output transition of a multi-round prompt (e.g.
-    /// `gh auth login`'s device-code flow,) would silently
-    /// drop the redraw request — the parsed bytes sat in the grid
-    /// unrendered until an unrelated event (Ctrl+C, mouse move) woke
-    /// the loop and triggered a fresh `RedrawRequested`.
+    /// Preserve pending input and arm a future main-window collection retry without changing frame timestamps.
     #[doc(hidden)]
     pub fn defer_redraw_on_lock_contention(&mut self, was_dirty: bool) {
-        self.pending_redraw = true;
-        self.input_dirty = was_dirty;
+        if let Some(id) = self.main_window_id {
+            self.defer_window_lock_contention(id, was_dirty, Instant::now());
+        }
     }
 
-    /// Child-window analogue of [`Self::defer_redraw_on_lock_contention`]
-    /// plus the vsync coalescing gate. Records `win_id` in
-    /// [`Self::pending_redraw_windows`] so `about_to_wait` schedules a
-    /// `WaitUntil` at that child's next frame boundary and
-    /// `new_events` re-requests the redraw there — instead of the child
-    /// busy-spinning a bare `request_redraw()` that re-contends the very
-    /// parser lock the VT thread needs to drain a burst (
-    /// `ls -al` was smooth in main but laggy in a torn-out child because
-    /// the child render path had neither the gate nor this backoff).
-    /// Preserves the `input_dirty` flag captured at the top of the
-    /// handler so a deferred input-driven redraw still bypasses the gate
-    /// when it re-fires.
+    fn defer_window_lock_contention(&mut self, id: WindowId, was_dirty: bool, now: Instant) {
+        let Some(window) = self.windows.get_mut(&id) else {
+            // When: `id` no longer names a window, no retry state may keep the event loop awake.
+            return;
+        };
+        let period = effective_frame_period(
+            self.software_render_degrade,
+            window.ime.is_composing(),
+            self.frame_period,
+        );
+        window.arm_contention_retry(now, period);
+        if self.main_window_id == Some(id) {
+            self.pending_redraw = true;
+        } else {
+            // When: `id` is not `main_window_id`, retain the retry in the child's independent wake set.
+            self.pending_redraw_windows.insert(id);
+        }
+        self.input_dirty |= was_dirty;
+    }
+
+    /// Preserve a child redraw delayed by pacing without extending an existing contention deadline.
     #[doc(hidden)]
     pub fn defer_child_redraw(&mut self, win_id: WindowId, was_dirty: bool) {
         self.pending_redraw_windows.insert(win_id);
-        self.input_dirty = was_dirty;
+        self.input_dirty |= was_dirty;
     }
 
     /// Test-only: `true` if `win_id` has a deferred redraw queued in
@@ -4474,6 +4512,7 @@ impl App {
             modifiers: ModifiersState::empty(),
             pty_pressed_keys: HashMap::new(),
             last_render: Instant::now(),
+            retry_not_before: None,
             hover_link: false,
             pressed_tab: None,
             drag_session: None,
@@ -4595,7 +4634,11 @@ impl App {
         ws.pressed_tab = pressed_tab;
         ws.mouse_down = mouse_down;
         if with_drag_session {
-            ws.drag_session = Some(crate::tab_drag::DragSession::new(0, (0.0, 0.0)));
+            ws.drag_session = ws
+                .tabs
+                .tabs()
+                .get(pressed_tab.unwrap_or(0))
+                .map(|tab| crate::tab_drag::DragSession::new(id, tab.id, (0.0, 0.0)));
         }
         true
     }
@@ -5098,6 +5141,12 @@ impl App {
     #[doc(hidden)]
     pub fn __test_main_redraw_deferred(&self) -> bool {
         self.pending_redraw
+    }
+
+    /// Test seam: observe a window's frame timestamp independently of its contention deadline.
+    #[doc(hidden)]
+    pub fn __test_window_last_render(&self, id: WindowId) -> Option<Instant> {
+        self.windows.get(&id).map(|window| window.last_render)
     }
 
     /// Test seam: backdate a window's last-render instant.
@@ -6251,6 +6300,7 @@ impl App {
             modifiers: ModifiersState::empty(),
             pty_pressed_keys: HashMap::new(),
             last_render: Instant::now(),
+            retry_not_before: None,
             hover_link: false,
             pressed_tab: None,
             drag_session: None,
@@ -6471,7 +6521,8 @@ impl App {
     /// `begin_os_tab_drag`.
     #[doc(hidden)]
     pub fn __test_set_os_drag_source(&mut self, source: Option<(WindowId, usize)>) {
-        self.os_drag_source = source;
+        self.os_drag_source = source
+            .and_then(|(window, index)| self.tab_id_at(window, index).map(|tab| (window, tab)));
     }
 
     /// build an [`os_drag::AppHandle`] tied to the App's
@@ -6587,14 +6638,50 @@ impl App {
         self.publish_os_drag_bar_snapshot(snap);
     }
 
+    fn finish_tab_drag(
+        &mut self,
+        session: crate::tab_drag::DragSession<WindowId>,
+        action: crate::tab_drag::DragAction<WindowId>,
+        tear_out: impl FnOnce(&mut Self, WindowId, usize),
+    ) -> bool {
+        let Some(index) = self.tab_index_of_id(session.source_window, session.source_tab) else {
+            // When: `session.source_tab` is absent from `source_window`, cancel rather than moving its former slot's occupant.
+            self.cancel_drag_session();
+            return false;
+        };
+        match action {
+            crate::tab_drag::DragAction::ReturnToOriginalBar => {
+                // When: `ReturnToOriginalBar` keeps the captured tab in place, no topology mutation is owed.
+            }
+            crate::tab_drag::DragAction::ReorderTab { to } => {
+                if let Some(window) = self.windows.get_mut(&session.source_window) {
+                    window.reorder_tab(index, to);
+                }
+            }
+            crate::tab_drag::DragAction::MergeIntoWindow(target) => {
+                if self.main_window_id == Some(session.source_window) {
+                    self.merge_main_into_child(index, target);
+                } else {
+                    // When: `source_window` differs from `main_window_id`, use the child source's existing transfer policy.
+                    self.merge_child_into_target(session.source_window, index, target);
+                }
+            }
+            crate::tab_drag::DragAction::TearOutToNewWindow { .. } => {
+                tear_out(self, session.source_window, index);
+            }
+        }
+        if let Some(window) = self.windows.get(&session.source_window) {
+            window.request_redraw();
+        }
+        true
+    }
+
     /// begin an OS-level tab drag session via the installed
     /// backend. Returns `true` when the backend was invoked, `false`
     /// when no backend is installed or no event-loop proxy exists (in
     /// which case the caller falls back to the existing tear_out path).
     ///
-    /// Records `(source_window, source_tab_idx)` so the
-    /// `UserEvent::DragEnded` dispatcher knows where the gesture
-    /// originated when routing the outcome.
+    /// Captures the stable tab id before the native backend can process queued topology changes.
     pub fn begin_os_tab_drag(
         &mut self,
         source_window: WindowId,
@@ -6602,6 +6689,10 @@ impl App {
         payload_json: String,
         drag_image_png: Vec<u8>,
     ) -> bool {
+        let Some(source_tab) = self.tab_id_at(source_window, source_tab_idx) else {
+            // When: `source_tab_idx` no longer names a live tab, refuse before the native backend takes the gesture.
+            return false;
+        };
         let Some(handle) = self.os_drag_app_handle() else {
             // When: no `os_drag_app_handle` can be built, so the platform has no
             // drag context and recording a source would strand it.
@@ -6612,8 +6703,8 @@ impl App {
             // session and the source must not be recorded.
             return false;
         };
+        self.os_drag_source = Some((source_window, source_tab));
         backend.begin_session(handle, source_window, source_tab_idx, payload_json, drag_image_png);
-        self.os_drag_source = Some((source_window, source_tab_idx));
         true
     }
 
@@ -6685,12 +6776,14 @@ impl App {
     /// outcome that was processed for tests to assert on.
     pub fn handle_os_drag_ended(&mut self) -> Option<os_drag::DragOutcome> {
         let outcome = self.os_drag_pending.take_ended()?;
-        let source = self.os_drag_source.take();
+        let source = self.os_drag_source.take().and_then(|(window, tab)| {
+            self.tab_index_of_id(window, tab).map(|index| (window, index, tab))
+        });
         match outcome {
             os_drag::DragOutcome::DroppedOnBar { target_window, target_slot } => {
                 // When: the drop landed on a bar, so `target_window` and
                 // `target_slot` name where the dragged tab should be inserted.
-                let Some((src_win, src_idx)) = source else {
+                let Some((src_win, src_idx, _)) = source else {
                     // When: no `source` was recorded, so there is no tab to move
                     // and the stale drag state is cancelled instead.
                     tracing::warn!(
@@ -6705,15 +6798,8 @@ impl App {
                 // source side, but the *target* may legitimately be the
                 // main window. Detect that by comparing against the
                 // App's `window` field.
-                let src_opt = self
-                    .main_window()
-                    .map(|w| w.id())
-                    .filter(|&id| id == src_win)
-                    .map_or(Some(src_win), |_| None);
-                let tgt_opt = match target_window {
-                    Some(id) if self.main_window().map(|w| w.id() == id).unwrap_or(false) => None,
-                    other => other,
-                };
+                let src_opt = (self.main_window_id != Some(src_win)).then_some(src_win);
+                let tgt_opt = target_window.filter(|id| Some(*id) != self.main_window_id);
                 if let Err(e) = self.transfer_tab(src_opt, src_idx, tgt_opt, target_slot) {
                     tracing::warn!(?e, "os_drag_session: transfer_tab refused — cancelling");
                     self.cancel_drag_session();
@@ -6734,12 +6820,11 @@ impl App {
                 // `drain_pending_window_creates` slot, which now
                 // builds the child window directly from the reusable
                 // helper extracted from `tear_out.rs`.
-                if let Some((src_win, src_idx)) = source {
-                    let source_tab_id = self.tab_id_at(src_win, src_idx);
+                if let Some((src_win, src_idx, source_tab)) = source {
                     self.pending_tear_out = Some(PendingTearOut {
                         source_window: src_win,
                         source_tab_idx: src_idx,
-                        source_tab_id,
+                        source_tab_id: Some(source_tab),
                         drop_screen_pos: Some(drop_screen_pos),
                     });
                 } else {

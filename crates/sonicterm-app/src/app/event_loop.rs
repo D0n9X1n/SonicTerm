@@ -363,14 +363,14 @@ impl App {
         // boundary: typing latency must still feel instant, and the frame
         // boundary is the tightest budget that preserves vsync alignment.
         if self.pending_redraw {
-            if let Some(last_render) = self.main().map(|ws| ws.last_render) {
+            if let Some(window) = self.main() {
                 let composing = self.main().map(|ws| ws.ime.is_composing()).unwrap_or(false);
                 let period = crate::app::effective_frame_period(
                     self.software_render_degrade,
                     composing,
                     self.frame_period,
                 );
-                let at = last_render + period;
+                let at = window.redraw_not_before(period);
                 next = Some(next.map_or(at, |cur| cur.min(at)));
             }
         }
@@ -387,7 +387,7 @@ impl App {
                     ws.ime.is_composing(),
                     self.frame_period,
                 );
-                let at = ws.last_render + period;
+                let at = ws.redraw_not_before(period);
                 next = Some(next.map_or(at, |cur| cur.min(at)));
             }
         }
@@ -971,6 +971,7 @@ impl App {
             modifiers: ModifiersState::empty(),
             pty_pressed_keys: std::collections::HashMap::new(),
             last_render: std::time::Instant::now(),
+            retry_not_before: None,
             hover_link: false,
             pressed_tab: None,
             drag_session: None,

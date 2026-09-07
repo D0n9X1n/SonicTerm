@@ -4,6 +4,24 @@
 
 use super::*;
 
+#[test]
+fn cursor_throttle_keys_pane_position_and_size_independently() {
+    // Same-cell focus, resize, and overlay-return updates must not disappear behind native call coalescing.
+    let mut throttle = ImeCursorThrottle::new();
+    let area = ImeCursorArea { pane_id: 1, position: (20, 40), size: (10, 20) };
+    assert!(throttle.should_update(area));
+    assert!(!throttle.should_update(area));
+    let focused = ImeCursorArea { pane_id: 2, ..area };
+    assert!(throttle.should_update(focused));
+    let moved = ImeCursorArea { position: (420, 40), ..focused };
+    assert!(throttle.should_update(moved));
+    let resized = ImeCursorArea { size: (12, 24), ..moved };
+    assert!(throttle.should_update(resized));
+    assert!(!throttle.should_update(resized));
+    throttle.reset();
+    assert!(throttle.should_update(resized));
+}
+
 /// Enabling an IME does not begin composition until non-empty preedit arrives.
 #[test]
 fn enabled_alone_is_not_composing() {

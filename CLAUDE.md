@@ -127,8 +127,10 @@ queued, in progress, missing, cancelled, unexpectedly skipped, or failed.** The
 macOS, Windows, and Ubuntu jobs must each finish with `SUCCESS` on the exact
 reviewed head commit before merge. In particular, Windows must compile and run
 its Windows-only tests successfully; green macOS/Ubuntu results, local gates, or
-review approval cannot substitute for that result. After merge, verify `main` CI
-and Wiki publication before starting the next serialized PR.
+review approval cannot substitute for that result. After merge, verify Wiki
+publication before starting the next serialized PR. Successful exact-head PR CI
+is the CI gate for PR work; `main` CI is a release-provenance gate only and does
+not block the next PR.
 
 The optional-feature Clippy, Rustdoc, and test lines are not duplicates.
 `--workspace --all-targets` does not enable optional features. Together they
@@ -141,8 +143,8 @@ selects aws-lc-sys's checked-in assembly objects, so optional SSH verification
 does not depend on NASM or CMake being installed on the runner.
 
 **Keep every wait off the main agent.** For each lifecycle that must wait or
-monitor — a long local gate, pull-request CI, post-merge `main` CI plus Wiki
-publication, or a release workflow — start one dedicated watcher subagent, not
+monitor — a long local gate, pull-request CI, post-merge Wiki publication,
+release-provenance `main` CI, or a release workflow — start one dedicated watcher subagent, not
 one subagent per job. Give it an immutable handoff: repository/worktree path,
 expected commit SHA, PR number or run ID, exact required jobs or commands,
 timeout, and success criteria. The watcher owns that lifecycle until terminal
@@ -162,7 +164,8 @@ SHA immediately returns the main agent to the current lifecycle.
 
 Concurrency does not relax publication order: do not merge before the current
 PR's exact-head checks pass, and do not open the next PR before the current PR is
-merged and its exact merge-SHA `main` CI and Wiki publication are verified. Then
+merged and its exact merge-SHA Wiki publication is verified. Do not wait for
+`main` CI to advance PR work; require it when validating a release commit. Then
 update the next worktree onto the new default-branch tip and rerun affected
 validation before publication. Once those gates pass, fetch and prune the
 default remote, then clean local state against its symbolic default branch:
