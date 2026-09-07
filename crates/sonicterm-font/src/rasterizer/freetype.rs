@@ -158,7 +158,7 @@ impl FontRasterizer for FreeTypeRasterizer {
                 self.rasterize_lcd_v(pitch, ft_glyph, data, is_scaled)
             }
             ftwrap::FT_Pixel_Mode::FT_PIXEL_MODE_BGRA => {
-                self.rasterize_bgra(pitch, ft_glyph, data, is_scaled)?
+                Self::rasterize_bgra(pitch, ft_glyph, data, is_scaled, self.has_color)?
             }
             ftwrap::FT_Pixel_Mode::FT_PIXEL_MODE_GRAY => {
                 self.rasterize_gray(pitch, ft_glyph, data, is_scaled)
@@ -370,11 +370,11 @@ impl FreeTypeRasterizer {
     }
 
     fn rasterize_bgra(
-        &self,
         pitch: usize,
         ft_glyph: &FT_GlyphSlotRec_,
         data: &[u8],
         is_scaled: bool,
+        has_color: bool,
     ) -> anyhow::Result<RasterizedGlyph> {
         let width = ft_glyph.bitmap.width as usize;
         let height = ft_glyph.bitmap.rows as usize;
@@ -406,10 +406,10 @@ impl FreeTypeRasterizer {
                 )
             })?;
 
-        // emoji glyphs don't always fill the bitmap size, so we compute
-        // the non-transparent bounds
-
-        let mut cropped = crate::rasterizer::crop_to_non_transparent(&mut source_image).to_image();
+        // Removed margins move the bitmap origin; they do not scale baseline bearings.
+        let crop = crate::rasterizer::crop_to_non_transparent(&mut source_image);
+        let (crop_x, crop_y) = crop.offsets();
+        let mut cropped = crop.to_image();
         crate::rasterizer::swap_red_and_blue(&mut cropped);
 
         let dest_width = cropped.width() as usize;
@@ -419,13 +419,9 @@ impl FreeTypeRasterizer {
             data: cropped.into_vec(),
             height: dest_height,
             width: dest_width,
-            bearing_x: PixelLength::new(
-                f64::from(ft_glyph.bitmap_left) * (dest_width as f64 / width as f64),
-            ),
-            bearing_y: PixelLength::new(
-                f64::from(ft_glyph.bitmap_top) * (dest_height as f64 / height as f64),
-            ),
-            has_color: self.has_color,
+            bearing_x: PixelLength::new(f64::from(ft_glyph.bitmap_left) + f64::from(crop_x)),
+            bearing_y: PixelLength::new(f64::from(ft_glyph.bitmap_top) - f64::from(crop_y)),
+            has_color,
             is_scaled,
         })
     }

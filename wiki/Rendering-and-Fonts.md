@@ -186,6 +186,19 @@ Combining marks and variation selectors stay with their shaped cluster. Wide
 characters and multi-cell ligatures retain their natural advances and offsets.
 Fallback replacement glyphs keep the original cluster coordinates.
 
+Windows system fallback encodes complete UTF-16 and counts mapping positions,
+remaining lengths, and locale spans in code units. Supplementary characters stay
+as surrogate pairs. Zero, out-of-range, or split-surrogate mapping progress
+fails the entire native fallback request without returning partial candidates;
+the caller reports failure and continues its remaining configured locators.
+Successful requests return candidates deduplicated in first-encounter order.
+
+Raw shaping text and collections use the explicit `sonicterm_font::payload`
+TRACE target. Opt-in sinks can record them; crash history cannot. Safe fallback
+errors retain stage and size/count diagnostics rather than the affected text.
+White foreground and untinted color glyphs are normal rendering and produce no
+routine per-glyph warning. Genuine atlas and presentation diagnostics remain.
+
 ### Rasterization
 
 Windows uses DirectWrite by default and falls back to FreeType when DirectWrite
@@ -202,6 +215,13 @@ from the generated FreeType, HarfBuzz, and Fontconfig binding crates. Each
 native allocation is paired with its matching destroy function. Embedded bitmap
 strikes are loaded metrics-first and checked against the glyph allocation budget
 before their pixels are decoded.
+
+BGRA color bitmaps crop to half-open nontransparent bounds, preserving the final
+ink row and column. Crop origin translates bearings by `+crop_x` and `-crop_y`,
+not by a size ratio. Owned channel conversion, premultiplication, color/scaled
+flags, and allocation caps are unchanged. A fully transparent nonempty bitmap
+keeps its original dimensions and bearings and remains a valid blank glyph
+through FontStack and atlas insertion, not a missing-glyph sentinel.
 
 Standalone status circles `⏺` (U+23FA), `◯` (U+25EF), and `●` (U+25CF) receive
 one targeted fit when the shaped cluster occupies one non-wide cell and has no
@@ -508,6 +528,16 @@ HarfBuzz 把样式片段塑形成字形 id、字符簇、推进量和偏移量�
 组合标记和变体选择符留在所属字符簇中。宽字符和多单元格连字保持自然推进量与偏移量。
 替代回退字形会保留原字符簇坐标。
 
+Windows 系统回退会完整编码 UTF-16；映射位置、剩余长度及 locale 范围都按代码单元计数。
+补充平面字符始终保留为代理项对。映射返回零长度、越界或拆分代理项对时，整个原生回退请求
+失败，不返回部分候选；调用方报告失败并继续其余已配置的字体查找源。成功请求返回的候选
+按首次出现的顺序去重。
+
+原始塑形文本和集合使用显式 `sonicterm_font::payload` TRACE 目标。显式启用的输出 sink
+可以记录它们，崩溃历史不会。安全回退错误只保留阶段和大小/数量诊断，不保留受影响文本。
+白色前景和不染色的彩色字形是正常渲染，不产生常规逐字形 warning。真正的图集和呈现诊断
+仍然保留。
+
 ### 光栅化
 
 Windows 默认使用 DirectWrite；DirectWrite 无法光栅化某字形时回退 FreeType。
@@ -519,6 +549,11 @@ macOS 和其它 Unix 使用 FreeType。FreeType 支持单色、灰度、LCD 次�
 `sonicterm-font::{ftwrap,hbwrap,fcwrap}` 为生成的 FreeType、HarfBuzz、Fontconfig
 绑定中的原始句柄管理安全生命周期。每次原生分配都配对正确的销毁函数。内嵌位图字形
 先只加载度量，并在解码像素前检查字形分配预算。
+
+BGRA 彩色位图按非透明区域的半开边界裁剪，保留最后一行和一列墨迹。裁剪原点使 bearing
+分别平移 `+crop_x` 与 `-crop_y`，而非按尺寸比缩放。自有通道转换、预乘、color/scaled
+标志和分配上限保持不变。全透明但非空的位图保留原尺寸与 bearing，在 FontStack 转换和
+图集插入后仍是有效空白字形，不会变成缺失字形哨兵。
 
 独立状态圆圈 `⏺`（U+23FA）、`◯`（U+25EF）、`●`（U+25CF）只在塑形后的字符簇
 占一个非宽单元格，且没有组合字符或变体选择符时进行定向适配。图块按统一比例缩放到

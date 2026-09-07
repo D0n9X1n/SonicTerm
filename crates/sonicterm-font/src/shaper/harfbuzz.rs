@@ -196,7 +196,7 @@ impl HarfbuzzShaper {
                     // When: `opt_pair.is_none()` is true, load and cache the
                     // requested fallback before returning its mutable borrow.
                     let handle = &self.handles[font_idx];
-                    log::trace!("shaper wants {} {:?}", font_idx, handle);
+                    log::trace!(target: "sonicterm_font::payload","shaper wants {} {:?}", font_idx, handle);
                     let face = self.lib.face_from_locator(&handle.handle)?;
 
                     let font = if USE_OT_FACE {
@@ -295,7 +295,7 @@ impl HarfbuzzShaper {
                         if pair.presentation != p {
                             // When: pair.presentation disagrees with p, so this
                             // font would render the wrong form.
-                            log::trace!(
+                            log::trace!(target: "sonicterm_font::payload",
                                 "wanted presentation is {p:?} != font \
                                      presentation {:?} so skip \
                                      font_idx={font_idx}",
@@ -339,7 +339,7 @@ impl HarfbuzzShaper {
                     let mut font = pair.font.borrow_mut();
                     shaped_any = pair.shaped_any;
                     font.shape(&mut buf, pair.features.as_slice());
-                    log::trace!(
+                    log::trace!(target: "sonicterm_font::payload",
                         "shaped font_idx={} {:?} presentation={presentation:?} as: {}",
                         font_idx,
                         &s[range.start..range.end],
@@ -434,7 +434,7 @@ impl HarfbuzzShaper {
         // `trace`, not `debug`: this pretty-prints the whole resolver once per
         // shape call. No configured log level admits trace, so a user
         // following the memory-investigation procedure does not pay for it.
-        log::trace!("cluster_resolver: {cluster_resolver:#?}");
+        log::trace!(target: "sonicterm_font::payload","cluster_resolver: {cluster_resolver:#?}");
 
         let info_iter = hb_infos.iter().zip(positions.iter()).peekable();
         for (info, pos) in info_iter {
@@ -462,7 +462,7 @@ impl HarfbuzzShaper {
             };
             // `trace`, not `debug`: this fires once per shaped glyph. At debug
             // it produced 82 million lines and 2.3 GB from an idle session.
-            log::trace!("hb info.cluster {} -> {info:?}", info.cluster);
+            log::trace!(target: "sonicterm_font::payload","hb info.cluster {} -> {info:?}", info.cluster);
 
             if info.codepoint == 0 && !no_more_fallbacks {
                 cluster_info.incomplete = true;
@@ -528,7 +528,7 @@ impl HarfbuzzShaper {
         }
         //  log::error!("do_shape: font_idx={} {:?} {:#?}", font_idx, &s[range.clone()], info_clusters);
         // `trace`, not `debug`: pretty-prints a `Vec<Vec<Info>>` per shape call.
-        log::trace!("font_idx={font_idx} info_clusters: {:#?}", info_clusters);
+        log::trace!(target: "sonicterm_font::payload","font_idx={font_idx} info_clusters: {:#?}", info_clusters);
 
         let mut direct_clusters = 0;
 
@@ -566,7 +566,13 @@ impl HarfbuzzShaper {
                 ) {
                     Ok(shape) => shape,
                     Err(e) => {
-                        error!("{:?} for {:?}", e, substr);
+                        error!(
+                            "font fallback shaping failed: font_idx={} bytes={} error={}",
+                            font_idx + 1,
+                            substr.len(),
+                            crate::fallback_error_identity(&e)
+                        );
+                        log::trace!(target: "sonicterm_font::payload", "{e:?} for {substr:?}");
                         let replacement = make_question_string(substr);
                         let mut glyphs = self.do_shape(
                             0,
@@ -628,7 +634,7 @@ impl HarfbuzzShaper {
                     // shape it just now, then we're probably a fallback font from
                     // the system and unlikely to be useful to keep around, so we
                     // unload it.
-                    log::trace!(
+                    log::trace!(target: "sonicterm_font::payload",
                         "Shaper didn't resolve glyphs from {:?}, so unload it",
                         self.handles[font_idx]
                     );
@@ -661,7 +667,7 @@ impl FontShaper for HarfbuzzShaper {
     ) -> anyhow::Result<Vec<GlyphInfo>> {
         let range = range.unwrap_or(0..text.len());
 
-        log::trace!("shape {range:?} `{}` with presentation={presentation:?}", text.escape_debug());
+        log::trace!(target: "sonicterm_font::payload","shape {range:?} `{}` with presentation={presentation:?}", text.escape_debug());
         let start = std::time::Instant::now();
         let result = self.do_shape(
             0,
@@ -741,7 +747,7 @@ impl FontShaper for HarfbuzzShaper {
 
         self.metrics.borrow_mut().insert(key, metrics);
 
-        log::trace!("metrics_for_idx={}, size={}, dpi={} -> {:?}", font_idx, size, dpi, metrics);
+        log::trace!(target: "sonicterm_font::payload","metrics_for_idx={}, size={}, dpi={} -> {:?}", font_idx, size, dpi, metrics);
 
         Ok(metrics)
     }
@@ -759,7 +765,7 @@ impl FontShaper for HarfbuzzShaper {
         // by too much we'll skip to the next slot.
         let theoretical_height = size * dpi as f64 / 72.0;
         let mut metrics_idx = 0;
-        log::trace!(
+        log::trace!(target: "sonicterm_font::payload",
             "compute metrics across these handles for size={}, dpi={},
              theoretical pixel height {}: {:?}",
             size,
@@ -776,7 +782,7 @@ impl FontShaper for HarfbuzzShaper {
             if factor < 2.0 {
                 // When: factor is within tolerance, so this face's cell height
                 // is close enough to the theoretical one to stop searching.
-                log::trace!(
+                log::trace!(target: "sonicterm_font::payload",
                     "idx {} cell_height is {}, which is {} away from theoretical
                      height (factor {}). Seems good enough",
                     metrics_idx,
@@ -786,7 +792,7 @@ impl FontShaper for HarfbuzzShaper {
                 );
                 break;
             }
-            log::trace!(
+            log::trace!(target: "sonicterm_font::payload",
                 "skip idx {} because diff={} factor={} theoretical_height={} cell_height={}",
                 metrics_idx,
                 diff,
