@@ -13,7 +13,7 @@ one-way GitHub Wiki mirror. Crate responsibilities belong on
 
 ```text
 Cargo.toml     workspace members, shared package metadata, dependencies, profiles, lints
-crates/        24 first-party Rust crates
+crates/        23 first-party Rust crates
 assets/        fonts, themes, keymaps, icons, localization, screenshots
 wiki/          canonical bilingual documentation
 scripts/       flat first-party shell and PowerShell automation
@@ -129,12 +129,14 @@ in progress, missing, cancelled, unexpectedly skipped, or failed. The macOS,
 Windows, and Ubuntu jobs must each finish successfully on the exact reviewed
 head commit before merge. Windows success is mandatory because that job is the
 only reliable compiler and runner for Windows-only tests; local, macOS, Ubuntu,
-or review results cannot substitute for it. After every merge, verify `main` CI
-and Wiki publication before starting the next serialized pull request.
+or review results cannot substitute for it. After every merge, verify Wiki
+publication before starting the next serialized pull request. Successful
+exact-head PR CI is the CI gate for PR work; `main` CI is a release-provenance
+gate only and does not block the next PR.
 
 Keep every wait off the main agent. For each lifecycle that must wait or monitor
-— a long local gate, pull-request CI, post-merge `main` CI plus Wiki publication,
-or a release workflow — start one dedicated watcher subagent, not one subagent
+— a long local gate, pull-request CI, post-merge Wiki publication,
+release-provenance `main` CI, or a release workflow — start one dedicated watcher subagent, not one subagent
 per job. Give it an immutable handoff: repository/worktree path, expected commit
 SHA, PR number or run ID, exact required jobs or commands, timeout, and success
 criteria. The watcher owns that lifecycle until terminal `SUCCESS`, `FAILURE`,
@@ -154,8 +156,9 @@ SHA immediately returns the main agent to the current lifecycle.
 
 Concurrency does not relax publication order: do not merge before the current
 pull request's exact-head checks pass, and do not open the next pull request
-before the current one is merged and its exact merge-SHA `main` CI and Wiki
-publication are verified. Then update the next worktree onto the new
+before the current one is merged and its exact merge-SHA Wiki publication is
+verified. Do not wait for `main` CI to advance PR work; require it when validating
+a release commit. Then update the next worktree onto the new
 default-branch tip and rerun affected validation before publication. Once those
 gates pass, fetch and prune the default remote, then clean local state against
 its symbolic default branch. Remove only clean, unlocked worktrees whose HEAD is
@@ -246,7 +249,7 @@ artifacts remain excluded.
 
 ## Gate blind spots
 
-- The one-pass workspace gate includes integration tests for all 24 packages,
+- The one-pass workspace gate includes integration tests for all 23 packages,
   but it still exercises only targets that can compile and run on its host.
 - `rust-logic-coverage.sh` requires 80% line coverage only for its selected
   deterministic subset. Its ignore regex excludes 11 whole crates, including
@@ -455,7 +458,7 @@ links; workflow success alone does not prove rendering and navigation.
 
 ```text
 Cargo.toml     workspace member、共享 package metadata、依赖、profile、lint
-crates/        24 个第一方 Rust crate
+crates/        23 个第一方 Rust crate
 assets/        字体、主题、键位、图标、本地化、截图
 wiki/          规范双语文档
 scripts/       扁平的第一方 shell 与 PowerShell 自动化
@@ -559,10 +562,11 @@ SHA 区分的 group，且不会在运行中被取消，因此后续合并不能�
 合并，也不能启用 auto-merge。macOS、Windows 与 Ubuntu job 必须都在完全相同的已审核 head
 commit 上成功结束后才能合并。Windows 成功是强制条件，因为只有该 job 能可靠编译并运行
 Windows-only 测试；本地、macOS、Ubuntu 或 review 结果都不能替代它。每次合并后，必须先验证
-`main` CI 与 Wiki 发布，再开始下一个串行 pull request。
+Wiki 发布，再开始下一个串行 pull request。成功的 exact-head PR CI 是 PR 工作的 CI 门槛；
+`main` CI 仅作为 release 来源验证门槛，不阻塞下一个 PR。
 
 所有等待都必须从主 agent 移出。每个需要等待或监控的生命周期——长时间本地 gate、pull-request
-CI、合并后的 `main` CI 加 Wiki 发布，或 release workflow——启动一个专用 watcher subagent，
+CI、合并后的 Wiki 发布、release 来源验证所需的 `main` CI，或 release workflow——启动一个专用 watcher subagent，
 而不是每个 job 启动一个 subagent。交接内容必须不可变并包含 repository/worktree 路径、预期 commit
 SHA、PR 编号或 run ID、准确的必需 job 或命令、timeout 与成功标准。Watcher 负责该生命周期，直到
 `SUCCESS`、`FAILURE`、`BLOCKED` 或 `STALE`，并报告预期与实际 SHA、run ID、每个必需结果和可执行的
@@ -576,7 +580,8 @@ Watcher 运行期间，主 agent 只在基于当前默认分支的独立 worktre
 必须立即返回当前生命周期处理。
 
 并发不会放宽发布顺序：当前 pull request 的 exact-head 检查通过前不得合并；当前 pull request
-合并且其 exact merge-SHA `main` CI 与 Wiki 发布验证完成前，不得打开下一个 pull request。之后先把
+合并且其 exact merge-SHA Wiki 发布验证完成前，不得打开下一个 pull request。推进 PR 工作不等待
+`main` CI；验证 release commit 时才要求它成功。之后先把
 下一个 worktree 更新到新的默认分支 tip，并重新运行受影响的验证，再发布。这些 gate 通过后，fetch
 并 prune 默认 remote，再按它的 symbolic default branch 清理本地状态。只移除 HEAD 已合并到该分支
 的干净、未锁定 worktree，并且只删除已合并且未被保留 worktree 使用的本地分支。绝不能强制移除或
@@ -646,7 +651,7 @@ package shard 只恢复，且 workspace crate artifact 始终排除在 cache 外
 
 ## Gate 盲区
 
-- 一次性 workspace gate 包含全部 24 个 package 的 integration test，但仍只能运行当前 host
+- 一次性 workspace gate 包含全部 23 个 package 的 integration test，但仍只能运行当前 host
   能够编译与执行的 target。
 - `rust-logic-coverage.sh` 只对选中的确定性代码子集要求 80% line coverage。其 ignore
   regex 完全排除 11 个 crate，包括 `sonicterm-app` 与 `sonicterm-gpu`，还排除其它 crate

@@ -176,6 +176,75 @@ impl PaneVtHandles {
     }
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ReplyRejectionTotals {
+    messages: u64,
+    bytes: u64,
+    queue_full: u64,
+    too_large: u64,
+    disconnected: u64,
+}
+
+fn forward_pty_replies(
+    reply_rx: crossbeam_channel::Receiver<Vec<u8>>,
+    mut send: impl FnMut(Vec<u8>) -> Result<(), sonicterm_io::pty::PtyInputError>,
+    mut report_first: impl FnMut(sonicterm_io::pty::PtyInputError),
+    mut summarize: impl FnMut(ReplyRejectionTotals),
+) {
+    use crossbeam_channel::RecvTimeoutError;
+    use sonicterm_io::pty::PtyInputError;
+
+    let mut reported = false;
+    let mut pending = ReplyRejectionTotals::default();
+    let mut deadline = None;
+    loop {
+        if deadline.is_some_and(|due| Instant::now() >= due) {
+            summarize(std::mem::take(&mut pending));
+            deadline = None;
+        }
+        let received = match deadline {
+            Some(due) => reply_rx.recv_deadline(due),
+            None => reply_rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        };
+        let bytes = match received {
+            Ok(bytes) => bytes,
+            Err(RecvTimeoutError::Timeout) => {
+                // When: `received` times out, flush the pending summary before waiting for more replies.
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                // When: `received` disconnects, the parser is gone and no further replies can arrive.
+                break;
+            }
+        };
+        if let Err(error) = send(bytes) {
+            // When: `send` refuses a reply, retain metadata counts instead of retaining payloads or flooding UI events.
+            let disconnected = matches!(error, PtyInputError::WriterDisconnected(_));
+            if reported {
+                match &error {
+                    PtyInputError::QueueFull(_) => pending.queue_full += 1,
+                    PtyInputError::MessageTooLarge(_) => pending.too_large += 1,
+                    PtyInputError::WriterDisconnected(_) => pending.disconnected += 1,
+                }
+                pending.messages += 1;
+                pending.bytes += error.into_bytes().len() as u64;
+                deadline.get_or_insert_with(|| Instant::now() + Duration::from_secs(1));
+            } else {
+                // When: `reported` is false, surface the first rejection immediately and bound this worker to one UI event.
+                reported = true;
+                report_first(error);
+            }
+            if disconnected {
+                // When: `disconnected` is true, stop forwarding because the native writer cannot recover.
+                break;
+            }
+        }
+    }
+    if pending.messages != 0 {
+        summarize(pending);
+    }
+}
+
 /// Start the reply and VT workers with handles cloned from their completed pane.
 // Ordering: pty_burst_gen uses Ordering::Release to publish new PTY bytes before redraw dispatch.
 pub(super) fn spawn_pane_workers(
@@ -197,24 +266,34 @@ pub(super) fn spawn_pane_workers(
     std::thread::Builder::new()
         .name(reply_thread_name.into())
         .spawn(move || {
-            while let Ok(bytes) = reply_rx.recv() {
-                if let Err(error) = in_tx_reply.send(bytes) {
-                    // When: in_tx_reply.send returns an error, stop only if the PTY writer disconnected.
-                    match error {
-                        sonicterm_io::pty::PtyInputError::WriterDisconnected(_) => {
-                            // When: error is WriterDisconnected, stop the reply-forwarder thread.
-                            break;
-                        }
-                        dropped => {
-                            tracing::debug!(
-                                target: "memory",
-                                ?dropped,
-                                "parser reply dropped; the child is not draining input"
-                            );
-                        }
-                    }
-                }
-            }
+            forward_pty_replies(
+                reply_rx,
+                |bytes| in_tx_reply.send(bytes),
+                |error| {
+                    App::report_pty_input_rejection(
+                        proxy.as_ref(),
+                        pane_id,
+                        super::PtyInputSource::TerminalReply,
+                        error,
+                        in_tx_reply.diagnostics(),
+                    );
+                },
+                |totals| {
+                    let diagnostics = in_tx_reply.diagnostics();
+                    tracing::warn!(
+                        pane_id,
+                        source = ?super::PtyInputSource::TerminalReply,
+                        rejected_messages = totals.messages,
+                        rejected_bytes = totals.bytes,
+                        queue_full = totals.queue_full,
+                        message_too_large = totals.too_large,
+                        writer_disconnected = totals.disconnected,
+                        observation = "concurrent",
+                        ?diagnostics,
+                        "additional terminal replies were not queued"
+                    );
+                },
+            );
         })
         .expect("spawn pane VT reply forwarder");
 
@@ -475,6 +554,8 @@ impl App {
                         Self::queue_pty_input(
                             self.event_loop_proxy.as_ref(),
                             &pty,
+                            pane_id,
+                            super::PtyInputSource::ScriptDraft,
                             draft.into_bytes(),
                         );
                     }
@@ -517,6 +598,19 @@ impl App {
 
 impl App {
     pub(super) fn split_active(&mut self, dir: Direction) {
+        let Some(ws) = self.main() else {
+            // When: `main` is absent, no destination exists for a new pane or PTY.
+            return;
+        };
+        let Some(tab) = ws.tab_states.get(ws.tabs.active_index()) else {
+            // When: `tab_states` has no active tab, refuse before creating a speculative PTY.
+            return;
+        };
+        if !tab.tree.leaves().contains(&tab.active_pane) || !ws.panes.contains_key(&tab.active_pane)
+        {
+            // When: `active_pane` is not a live leaf, preserve topology without spawning another shell.
+            return;
+        }
         let new_id = next_pane_id();
         let new_pane = self.spawn_pane(new_id, &super::pane_launch::PaneLaunch::default());
         let did_split = {
@@ -705,37 +799,12 @@ impl App {
     }
 
     pub(super) fn resize_visible_panes(&mut self) {
-        let rects = self.compute_active_pane_rects();
-        let (cw, ch) = match self.test_viewport_override {
-            // The test-only viewport override lets tests exercise
-            // close_active_pane's resize wiring
-            // without a live wgpu renderer. Production stays `None` and
-            // falls through to the renderer-derived metrics below.
-            Some((_, cw, ch)) => (cw, ch),
-            None => {
-                // When: test_viewport_override is None, derive pane metrics from main_renderer.
-                match self.main_renderer() {
-                    Some(r) => r.cell_size(),
-                    None => {
-                        // When: test_viewport_override and main_renderer are None, pane metrics are unavailable.
-                        return;
-                    }
-                }
-            }
-        };
-        if let Some(panes) = self.main_panes() {
-            let inset = self
-                .main_renderer()
-                .map(|r| {
-                    [
-                        r.padding_left_px(),
-                        r.padding_right_px(),
-                        r.padding_top_px(),
-                        r.padding_bottom_px(),
-                    ]
-                })
-                .unwrap_or([0.0; 4]);
-            crate::app::resize_panes_to_rects(panes, &rects, cw, ch, inset);
+        let viewport = self.test_viewport_override;
+        if let Some(window) = self.main_mut() {
+            window.complete_topology_change(
+                super::TopologyChange { resize_visible: true, focus_feedback: None },
+                viewport,
+            );
         }
     }
 }

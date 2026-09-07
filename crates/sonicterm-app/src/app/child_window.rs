@@ -90,11 +90,9 @@ pub fn resize_renderer_and_panes_if_present(
         return false;
     }
     let (cols, rows) = r.cells();
-    for pane in panes.values() {
+    for (pane_id, pane) in panes {
         pane.parser.lock().grid_mut().resize(cols, rows);
-        if let Some(pty) = pane.pty.as_ref() {
-            (pty.resize)(cols, rows);
-        }
+        pane.resize_pty(*pane_id, cols, rows);
     }
     true
 }
@@ -472,13 +470,15 @@ impl App {
                     child.ime.is_composing(),
                     frame_period,
                 );
-                if crate::app::should_defer_streaming_redraw(
-                    was_dirty,
-                    pty_burst,
-                    software_render_degrade,
-                    child.last_render.elapsed(),
-                    child_frame_period,
-                ) {
+                if child.contention_blocks_redraw(Instant::now(), child_frame_period)
+                    || crate::app::should_defer_streaming_redraw(
+                        was_dirty,
+                        pty_burst,
+                        software_render_degrade,
+                        child.last_render.elapsed(),
+                        child_frame_period,
+                    )
+                {
                     // When: `should_defer_streaming_redraw` says this frame lands
                     // inside the vsync window, so it waits for the next boundary.
 
@@ -585,7 +585,7 @@ impl App {
                     // the coalescing gate.
                     let _ = child;
                     let _ = palette_for_render;
-                    self.defer_child_redraw(win_id, was_dirty);
+                    self.defer_window_lock_contention(win_id, was_dirty, Instant::now());
                     return;
                 }
                 // `try_lock`, never a blocking `lock`: the VT worker holds
@@ -616,9 +616,10 @@ impl App {
                     // would render stale media; defer the whole frame instead.
                     drop(inline_images_by_pane);
                     drop(guards);
-                    self.defer_child_redraw(win_id, was_dirty);
+                    self.defer_window_lock_contention(win_id, was_dirty, Instant::now());
                     return;
                 }
+                child.coherent_frame_collected();
                 let viewport_tops: std::collections::HashMap<u64, Option<u64>> =
                     child.panes.iter().map(|(id, pane)| (*id, pane.viewport_top_abs)).collect();
                 if let Some(t) = timing.as_mut() {
@@ -630,10 +631,7 @@ impl App {
                     let active_pos = guards
                         .iter()
                         .position(|(id, _, _)| *id == active_id)
-                        // PANIC: safe — `guards` is populated immediately
-                        // above in the same fn from the same `child.panes`
-                        // map keyed by `active_id`, so a guard with this id
-                        // must exist. Render hot path: no Result conversion.
+                        // PANIC: `active_id` must be a live visible leaf; `guards` covers the successfully locked layout.
                         .expect("active pane guard collected above");
                     invalidate_selection_for_content(
                         &mut child.selection,
@@ -864,6 +862,7 @@ impl App {
                             (child.window.as_ref(), child.renderer.as_ref())
                         {
                             if palette_here && self.command_palette.is_open() {
+                                child.ime_cursor_throttle.reset();
                                 let mut palette = self.command_palette.clone();
                                 let size = win.inner_size();
                                 let scale = r.scale_factor();
@@ -896,6 +895,7 @@ impl App {
                             } else if let Some(search) = search {
                                 // When: a `search` box is open, so the candidate
                                 // window anchors to its caret, not the grid cursor.
+                                child.ime_cursor_throttle.reset();
                                 let preedit = child.ime.preedit();
                                 let search_label = search_bar_label(search, preedit);
                                 let search_prefix = search_query_caret_prefix(search, preedit);
@@ -936,17 +936,16 @@ impl App {
                                     layout.border.h.ceil() as u32,
                                 );
                                 win.set_ime_cursor_area(pos, size);
-                            } else if child.ime_cursor_throttle.should_update(cur_row, cur_col) {
-                                // When: `ime_cursor_throttle.should_update` allows
-                                // it, so the OS learns the new terminal cell.
-                                let x = r.padding_left_px() + f32::from(cur_col) * r.cell_w;
-                                let y = r.top_inset() + f32::from(cur_row) * r.cell_h;
-                                let pos = winit::dpi::PhysicalPosition::new(x as i32, y as i32);
-                                let size = winit::dpi::PhysicalSize::new(
-                                    r.cell_w.ceil() as u32,
-                                    r.cell_h.ceil() as u32,
+                            } else {
+                                // When: neither `palette_here` nor `search` owns input, publish the active terminal pane's IME anchor.
+                                super::update_terminal_ime_cursor_area(
+                                    &mut child.ime_cursor_throttle,
+                                    (active_id, guards[active_pos].2),
+                                    (cur_row, cur_col),
+                                    (r.cell_w, r.cell_h),
+                                    (r.padding_left_px(), r.padding_top_px()),
+                                    |pos, size| win.set_ime_cursor_area(pos, size),
                                 );
-                                win.set_ime_cursor_area(pos, size);
                             }
                         }
                     }
@@ -1146,7 +1145,11 @@ impl App {
                             // bounded effect path resolves and enqueues the PTY write.
                             let _ = child;
                             if let Some((pane_id, bytes)) = report {
-                                self.write_to_pane(pane_id, bytes);
+                                self.write_to_pane(
+                                    pane_id,
+                                    bytes,
+                                    super::PtyInputSource::PointerMotion,
+                                );
                             }
                             return;
                         }
@@ -1166,13 +1169,21 @@ impl App {
                     }
                 }
                 if let Some(s) = child.drag_session.as_mut() {
+                    // When: `drag_session` is present, its captured identity owns motion until release or cancellation.
                     s.current_pos = (lx, ly);
-                    let title = child
+                    let Some((source_index, tab)) = child
                         .tabs
                         .tabs()
-                        .get(s.press_tab_index)
-                        .map(|t| t.title.clone())
-                        .unwrap_or_default();
+                        .iter()
+                        .enumerate()
+                        .find(|(_, tab)| tab.id == s.source_tab)
+                    else {
+                        // When: the captured tab closed, clear the drag rather than displaying or moving its successor.
+                        let _ = child;
+                        self.cancel_drag_session();
+                        return;
+                    };
+                    let title = tab.title.clone();
                     let session_snapshot = *s;
                     let bar_width = r.width() as f32;
                     let layout = TabBarLayout::compute_with_height(
@@ -1182,8 +1193,12 @@ impl App {
                     )
                     .with_top_offset(r.tab_bar_y_offset())
                     .with_visible(r.tab_bar_visible());
-                    let chip =
-                        crate::tab_drag::build_drag_chip_overlay(&session_snapshot, &layout, title);
+                    let chip = crate::tab_drag::build_drag_chip_overlay(
+                        &session_snapshot,
+                        &layout,
+                        source_index,
+                        title,
+                    );
                     r.set_drag_chip(chip);
                 }
                 // Cross-window drag-merge from child: when a tab in the
@@ -1305,7 +1320,13 @@ impl App {
                                 super::window_event::wheel_report_bytes(sgr, up, col1, row1, count);
                             if let Some(pane) = child.panes.get(&pane_id) {
                                 if let Some(pty) = pane.pty.as_ref() {
-                                    Self::queue_pty_input(pty_event_proxy.as_ref(), pty, payload);
+                                    Self::queue_pty_input(
+                                        pty_event_proxy.as_ref(),
+                                        pty,
+                                        pane_id,
+                                        super::PtyInputSource::Wheel,
+                                        payload,
+                                    );
                                 }
                             }
                         } else if is_alt {
@@ -1325,7 +1346,13 @@ impl App {
                             }
                             if let Some(pane) = child.panes.get(&pane_id) {
                                 if let Some(pty) = pane.pty.as_ref() {
-                                    Self::queue_pty_input(pty_event_proxy.as_ref(), pty, payload);
+                                    Self::queue_pty_input(
+                                        pty_event_proxy.as_ref(),
+                                        pty,
+                                        pane_id,
+                                        super::PtyInputSource::Wheel,
+                                        payload,
+                                    );
                                 }
                             }
                         } else {
@@ -1367,8 +1394,9 @@ impl App {
                                     resize_visible_panes_in_child(child);
                                     child.pressed_tab = Some(i);
                                     child.mouse_down = true;
-                                    child.drag_session =
-                                        Some(crate::tab_drag::DragSession::new(i, (px, py)));
+                                    child.drag_session = child.tabs.tabs().get(i).map(|tab| {
+                                        crate::tab_drag::DragSession::new(win_id, tab.id, (px, py))
+                                    });
                                 }
                                 TabHit::Close(idx) => {
                                     // When: `TabHit::Close` at `idx`, so the × was
@@ -1425,7 +1453,11 @@ impl App {
                                         child.finish_pane_focus_change(change);
                                     }
                                     let _ = child;
-                                    self.write_to_pane(pane_id, bytes);
+                                    self.write_to_pane(
+                                        pane_id,
+                                        bytes,
+                                        super::PtyInputSource::PointerButton,
+                                    );
                                     return;
                                 }
                             }
@@ -1506,7 +1538,11 @@ impl App {
                             child.request_redraw();
                             let _ = child;
                             if let Some((pane_id, bytes)) = release_report {
-                                self.write_to_pane(pane_id, bytes);
+                                self.write_to_pane(
+                                    pane_id,
+                                    bytes,
+                                    super::PtyInputSource::PointerButton,
+                                );
                             }
                             return;
                         }
@@ -1536,9 +1572,16 @@ impl App {
                                 child.request_redraw();
                             }
                         }
-                        if let (Some(s), Some(src_idx)) = (session, pressed) {
-                            // When: both a drag `session` and a `pressed` tab index
-                            // survived, so this release ends a real tab drag.
+                        if let (Some(s), Some(_)) = (session, pressed) {
+                            // When: `session` survived, resolve its stable tab before any release mutation.
+                            let Some(src_idx) =
+                                child.tabs.tabs().iter().position(|tab| tab.id == s.source_tab)
+                            else {
+                                // When: the captured tab has closed, cancel without substituting its former neighbor.
+                                let _ = child;
+                                self.cancel_drag_session();
+                                return;
+                            };
                             let Some(r) = child.renderer.as_ref() else {
                                 // When: this child has no `renderer`, so no tab-bar
                                 // layout exists to resolve the drop against.
@@ -1551,39 +1594,14 @@ impl App {
                                 r.tab_bar_logical_height(),
                             )
                             .with_top_offset(r.tab_bar_y_offset());
-                            let action = crate::tab_drag::compute_action(&s, foreign, &layout);
+                            let action =
+                                crate::tab_drag::compute_action(&s, foreign, &layout, src_idx);
                             // Release the child borrow before re-entering
                             // &mut self via the merge / tear path.
                             let _ = child;
-                            match action {
-                                crate::tab_drag::DragAction::ReturnToOriginalBar => {
-                                    // When: `ReturnToOriginalBar` — the tab was
-                                    // dropped where it started, so nothing moves.
-                                }
-                                crate::tab_drag::DragAction::ReorderTab { from, to } => {
-                                    // Re-borrow via self.windows because the
-                                    // `let _ = child;` above released the
-                                    // long-lived mut borrow.
-                                    if let Some(c) = self.windows.get_mut(&win_id) {
-                                        c.tabs.reorder(from, to);
-                                        if from < c.tab_states.len() && to < c.tab_states.len() {
-                                            let st = c.tab_states.remove(from);
-                                            c.tab_states.insert(to, st);
-                                        }
-                                        c.request_redraw();
-                                    }
-                                }
-                                crate::tab_drag::DragAction::MergeIntoWindow(target) => {
-                                    self.merge_child_into_target(win_id, src_idx, target);
-                                }
-                                crate::tab_drag::DragAction::TearOutToNewWindow { .. } => {
-                                    // Tear out from a child window into a new
-                                    // top-level window. The Tab + PaneState (incl.
-                                    // PtyHandle) move rather than clone, so the
-                                    // shell keeps running as the same child PID.
-                                    self.tear_out_from_child(el, win_id, src_idx);
-                                }
-                            }
+                            self.finish_tab_drag(s, action, |app, source, index| {
+                                app.tear_out_from_child(el, source, index);
+                            });
                         }
                     }
                 }
@@ -1937,8 +1955,12 @@ impl App {
                             child.tab_states.get(tab_idx).map(|st| st.active_pane)
                         {
                             let bytes = committed.into_bytes();
-                            self.write_to_pane(active_id, bytes.clone());
-                            self.broadcast_from(active_id, bytes);
+                            self.write_to_pane(
+                                active_id,
+                                bytes.clone(),
+                                super::PtyInputSource::Ime,
+                            );
+                            self.broadcast_from(active_id, bytes, super::PtyInputSource::Ime);
                         }
                     }
                 }
@@ -2014,10 +2036,10 @@ impl App {
         // The child borrow ended before either bounded pane write; pointer
         // release targets the press pane while DEC focus targets the active pane.
         if let Some((pane_id, bytes)) = pointer_release {
-            self.write_to_pane(pane_id, bytes);
+            self.write_to_pane(pane_id, bytes, super::PtyInputSource::PointerButton);
         }
         if let Some((pane_id, bytes)) = focus_report {
-            self.write_to_pane(pane_id, bytes);
+            self.write_to_pane(pane_id, bytes, super::PtyInputSource::FocusReport);
         }
     }
 
@@ -2026,35 +2048,13 @@ impl App {
         src_id: WindowId,
         src_idx: usize,
         target: crate::tab_drag::DropTarget<WindowId>,
-    ) {
-        let Some((tab, state, panes)) = self.detach_from_child(src_id, src_idx) else {
-            // When: `detach_from_child` found no tab at `src_idx`, so the drag
-            // source vanished mid-drop and there is nothing to re-attach.
-            return;
-        };
-        let main_id = self.main_window().map(|w| w.id());
-        let attached = if Some(target.window) == main_id {
-            self.attach_tab_state(target.slot, tab, state, panes);
-            // Receiving a tab back into main un-hides the window if it
-            // had been drained.
-            if self.main_is_hidden() {
-                self.show_main_window();
+    ) -> bool {
+        match self.transfer_tab(Some(src_id), src_idx, Some(target.window), target.slot) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(?error, "drag-merge refused; source tab retained");
+                false
             }
-            true
-        } else {
-            // When: `target.window` is not `main_id`, so the tab lands in a
-            // sibling child window, which may itself have closed mid-drop.
-            self.attach_to_child(target.window, target.slot, tab, state, panes)
-        };
-        if !attached {
-            tracing::warn!(
-                "drag-merge: destination {:?} disappeared mid-drop; panes dropped",
-                target.window
-            );
-        }
-        self.reap_empty_child(src_id);
-        if let Some(w) = self.main_window() {
-            w.request_redraw();
         }
     }
     // Ordering: `reap_call_count` is Relaxed — a test-observable tally with no
@@ -2089,25 +2089,13 @@ impl App {
         &mut self,
         src_idx: usize,
         target: crate::tab_drag::DropTarget<WindowId>,
-    ) {
-        let Some((tab, state, panes)) = self.detach_tab_state(src_idx) else {
-            // When: `detach_tab_state` found no tab at `src_idx`, so the main
-            // window's drag source vanished and there is nothing to move.
-            return;
-        };
-        if !self.attach_to_child(target.window, target.slot, tab, state, panes) {
-            tracing::warn!(
-                "drag-merge: destination child {:?} disappeared mid-drop; panes dropped",
-                target.window
-            );
-        }
-        // If main has been drained but child windows are still alive,
-        // hide the main window without exiting the app.
-        if self.main_tabs().map(|t| t.is_empty()).unwrap_or(true) && self.child_window_count() > 0 {
-            self.hide_main_window();
-        }
-        if let Some(w) = self.main_window() {
-            w.request_redraw();
+    ) -> bool {
+        match self.transfer_tab(None, src_idx, Some(target.window), target.slot) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(?error, "drag-merge refused; source tab retained");
+                false
+            }
         }
     }
     pub(super) fn hide_main_window(&mut self) {
@@ -2228,7 +2216,7 @@ impl App {
         child.tab_states.push(TabState::new(PaneTree::leaf(pane_id), pane_id));
         let last = child.tabs.len().saturating_sub(1);
         child.tabs.activate(last);
-        child.request_redraw();
+        resize_visible_panes_in_child(child);
         true
     }
 
@@ -2297,7 +2285,7 @@ impl App {
             if let Some(tab_id) = child.tabs.tabs().get(idx).map(|t| t.id) {
                 child.tabs.close(tab_id);
             }
-            child.request_redraw();
+            resize_visible_panes_in_child(child);
             child.tabs.is_empty()
         };
         if drained {
@@ -2428,16 +2416,21 @@ impl App {
     /// Split the active pane of the given child window in `dir`. Returns
     /// `true` on success.
     pub(super) fn split_active_pane_in_child(&mut self, win_id: WindowId, dir: Direction) -> bool {
-        // Snapshot what we need to spawn a PTY before any mutable borrow
-        // of self.windows is taken — `spawn_pane_state_for_child`
-        // captures clones of (pty_burst_gen, window, cursor_visible) and
-        // we want the borrow checker happy when we re-borrow `child`
-        // below to install the new pane.
         let Some(child) = self.windows.get(&win_id) else {
             // When: `windows` no longer holds `win_id`, so the recorded child is
             // gone and the caller falls back to the main-window default.
             return false;
         };
+        let Some(tab) = child.tab_states.get(child.tabs.active_index()) else {
+            // When: `tab_states` has no active tab, refuse before creating a speculative PTY.
+            return false;
+        };
+        if !tab.tree.leaves().contains(&tab.active_pane)
+            || !child.panes.contains_key(&tab.active_pane)
+        {
+            // When: `active_pane` is not a live leaf, preserve topology without spawning another shell.
+            return false;
+        }
         let new_id = next_pane_id();
         let pane_state =
             if let (Some(renderer), Some(win)) = (child.renderer.as_ref(), child.window.as_ref()) {
@@ -2774,32 +2767,17 @@ const CHILD_SPLITTER_HIT_THICKNESS: f32 = 8.0;
 /// child case so split/close/zoom on a torn-out window propagate to the
 /// PTY winsize the same way.
 pub(super) fn resize_visible_panes_in_child(child: &mut WindowState) {
-    let rects = App::compute_pane_rects_for(child);
-    // Test-only metrics override (mirrors main `test_viewport_override`): a
-    // headless child has `renderer: None`, so fall back to the seam so the
-    // child split-resize wiring is unit-testable.
-    if let Some((_, cw, ch)) = child.test_pane_viewport {
-        // When: `test_pane_viewport` supplies `cw`/`ch`, so a headless child
-        // sizes panes from those metrics with no renderer padding to apply.
-        crate::app::resize_panes_to_rects(&child.panes, &rects, cw, ch, [0.0, 0.0, 0.0, 0.0]);
-        return;
-    }
-    let Some(r) = child.renderer.as_ref() else {
-        // When: no `renderer` and no test override, so cell metrics are unknown
-        // and any resize would push a wrong winsize to the PTY.
-        return;
-    };
-    let (cw, ch) = r.cell_size();
-    let inset =
-        [r.padding_left_px(), r.padding_right_px(), r.padding_top_px(), r.padding_bottom_px()];
-    crate::app::resize_panes_to_rects(&child.panes, &rects, cw, ch, inset);
+    child.complete_topology_change(
+        super::TopologyChange { resize_visible: true, focus_feedback: None },
+        None,
+    );
 }
 
 /// Scroll a pane's scrollback view in a child window by `delta_lines`
 /// (negative = back into history). Child-scoped mirror of `App::scroll_pane`.
 /// Returns early on the alt screen: the `MouseWheel` arm translates alt-screen
 /// wheel input into key or mouse reports before ever calling this.
-fn scroll_child_pane(child: &mut WindowState, pane_id: u64, delta_lines: i32) {
+pub(super) fn scroll_child_pane(child: &mut WindowState, pane_id: u64, delta_lines: i32) {
     if delta_lines == 0 {
         // When: `delta_lines` rounded to zero, so a sub-line wheel tick moves
         // the view nowhere and nothing needs marking dirty.
@@ -3017,3 +2995,7 @@ fn child_copy_mode_selected_text(
     let out = plain_text_from_grid_range(grid, (start.0, start.1 as u64), (end.0, end.1 as u64));
     (!out.is_empty()).then_some(out)
 }
+
+#[cfg(test)]
+#[path = "child_window_tests.rs"]
+mod child_window_tests;

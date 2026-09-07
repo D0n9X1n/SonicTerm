@@ -186,6 +186,19 @@ Combining marks and variation selectors stay with their shaped cluster. Wide
 characters and multi-cell ligatures retain their natural advances and offsets.
 Fallback replacement glyphs keep the original cluster coordinates.
 
+Windows system fallback encodes complete UTF-16 and counts mapping positions,
+remaining lengths, and locale spans in code units. Supplementary characters stay
+as surrogate pairs. Zero, out-of-range, or split-surrogate mapping progress
+fails the entire native fallback request without returning partial candidates;
+the caller reports failure and continues its remaining configured locators.
+Successful requests return candidates deduplicated in first-encounter order.
+
+Raw shaping text and collections use the explicit `sonicterm_font::payload`
+TRACE target. Opt-in sinks can record them; crash history cannot. Safe fallback
+errors retain stage and size/count diagnostics rather than the affected text.
+White foreground and untinted color glyphs are normal rendering and produce no
+routine per-glyph warning. Genuine atlas and presentation diagnostics remain.
+
 ### Rasterization
 
 Windows uses DirectWrite by default and falls back to FreeType when DirectWrite
@@ -203,6 +216,13 @@ native allocation is paired with its matching destroy function. Embedded bitmap
 strikes are loaded metrics-first and checked against the glyph allocation budget
 before their pixels are decoded.
 
+BGRA color bitmaps crop to half-open nontransparent bounds, preserving the final
+ink row and column. Crop origin translates bearings by `+crop_x` and `-crop_y`,
+not by a size ratio. Owned channel conversion, premultiplication, color/scaled
+flags, and allocation caps are unchanged. A fully transparent nonempty bitmap
+keeps its original dimensions and bearings and remains a valid blank glyph
+through FontStack and atlas insertion, not a missing-glyph sentinel.
+
 Standalone status circles `⏺` (U+23FA), `◯` (U+25EF), and `●` (U+25CF) receive
 one targeted fit when the shaped cluster occupies one non-wide cell and has no
 combining or variation-selector extras. The tile scales uniformly to the largest
@@ -214,9 +234,13 @@ rectangle is used by GPU and Windows software presentation.
 ### Row and shape caches
 
 `RowGlyphCache` stores glyph instances, underlines, missing-glyph records, and
-tofu quads under `(pane id, absolute row, row hash)`. `LineQuadCache` stores
-background and decoration quads under the matching row identity. Because cached
-glyph instances already carry projected screen coordinates, their keys include
+tofu quads under `(pane id, absolute row, row hash)`. `LineQuadCache` stores one
+background/decoration projection per `(pane id, absolute row)`, with a validity
+hash that includes its viewport row slot. A slot change reprojects that row and
+replaces its prior value instead of consuming another cache entry. Same-slot
+repaints can hit; absolute dirty-row invalidation remains pane-local, and the
+existing capacity bound and new-row eviction policy remain unchanged. Because
+cached glyph instances already carry projected screen coordinates, their keys include
 pane origin and surface extent as well as cell content, font/style revision, cell
 metrics, display scale, atlas content identity, and a selection rectangle only
 when it intersects that row.
@@ -309,7 +333,19 @@ multiplied by the linear alpha channel.
 Decoded images remain owned by their pane. Count and byte retention are bounded
 as described in [Memory](Memory). The renderer copies visible images into an
 **independent** image atlas, so media pressure cannot evict text glyphs or reuse
-text UVs. During dirty-rectangle packing for GPU upload, each nontransparent
+text UVs. Image visibility is the intersection of its destination, its owning
+pane's actual content rectangle after padding, and the surface. Image clipping
+does not use the cell-layout minimum: a padding-exhausted pane has an empty image
+clip, even if its grid still has one cell. The same visibility check controls
+atlas residency and emission; fully clipped or undecoded images neither promote
+the atlas nor allocate tiles. Clipping preserves original position and scale,
+and carries visible destination/UVs separately from the original packed tile's
+sample bounds. Both presenters interpolate at pixel centers, including fractional
+native-size placement, and clamp taps to the original tile rather than the pane
+cut. No cropped decoded-image copy is allocated; painter order and atlas limits
+are unchanged.
+
+During dirty-rectangle packing for GPU upload, each nontransparent
 pixel is unpremultiplied in encoded space, clamped, decoded through the sRGB
 transfer function, premultiplied by alpha in linear light, and re-encoded for
 storage; transparent pixels become `[0, 0, 0, 0]`, and alpha is unchanged. The
@@ -508,6 +544,16 @@ HarfBuzz 把样式片段塑形成字形 id、字符簇、推进量和偏移量�
 组合标记和变体选择符留在所属字符簇中。宽字符和多单元格连字保持自然推进量与偏移量。
 替代回退字形会保留原字符簇坐标。
 
+Windows 系统回退会完整编码 UTF-16；映射位置、剩余长度及 locale 范围都按代码单元计数。
+补充平面字符始终保留为代理项对。映射返回零长度、越界或拆分代理项对时，整个原生回退请求
+失败，不返回部分候选；调用方报告失败并继续其余已配置的字体查找源。成功请求返回的候选
+按首次出现的顺序去重。
+
+原始塑形文本和集合使用显式 `sonicterm_font::payload` TRACE 目标。显式启用的输出 sink
+可以记录它们，崩溃历史不会。安全回退错误只保留阶段和大小/数量诊断，不保留受影响文本。
+白色前景和不染色的彩色字形是正常渲染，不产生常规逐字形 warning。真正的图集和呈现诊断
+仍然保留。
+
 ### 光栅化
 
 Windows 默认使用 DirectWrite；DirectWrite 无法光栅化某字形时回退 FreeType。
@@ -520,6 +566,11 @@ macOS 和其它 Unix 使用 FreeType。FreeType 支持单色、灰度、LCD 次�
 绑定中的原始句柄管理安全生命周期。每次原生分配都配对正确的销毁函数。内嵌位图字形
 先只加载度量，并在解码像素前检查字形分配预算。
 
+BGRA 彩色位图按非透明区域的半开边界裁剪，保留最后一行和一列墨迹。裁剪原点使 bearing
+分别平移 `+crop_x` 与 `-crop_y`，而非按尺寸比缩放。自有通道转换、预乘、color/scaled
+标志和分配上限保持不变。全透明但非空的位图保留原尺寸与 bearing，在 FontStack 转换和
+图集插入后仍是有效空白字形，不会变成缺失字形哨兵。
+
 独立状态圆圈 `⏺`（U+23FA）、`◯`（U+25EF）、`●`（U+25CF）只在塑形后的字符簇
 占一个非宽单元格，且没有组合字符或变体选择符时进行定向适配。图块按统一比例缩放到
 单元格内保持纵横比的最大矩形，并沿两个轴居中。普通文字、复合字符簇、宽字形、自定义
@@ -528,8 +579,10 @@ macOS 和其它 Unix 使用 FreeType。FreeType 支持单色、灰度、LCD 次�
 ### 行缓存与塑形缓存
 
 `RowGlyphCache` 按 `(pane id, absolute row, row hash)` 保存字形实例、下划线、缺失字形
-记录和缺字方框。`LineQuadCache` 按相同的行身份保存背景与装饰矩形。由于缓存的字形实例
-已携带投影后的屏幕坐标，其缓存键除单元格内容、字体/样式修订号、单元格度量、显示缩放、
+记录和缺字方框。`LineQuadCache` 为每个 `(pane id, absolute row)` 保存一个背景/装饰投影，
+有效性哈希包含视口行位置。位置变化会重新投影该行并替换旧值，不会额外占用缓存条目；同一位置
+重绘仍可命中。绝对脏行失效仍限制在对应窗格，容量上限及新行淘汰策略保持不变。由于缓存的字形
+实例已携带投影后的屏幕坐标，其缓存键除单元格内容、字体/样式修订号、单元格度量、显示缩放、
 图集内容身份及仅在选区与该行相交时加入的选区矩形外，还包含 pane 原点和表面尺寸。
 
 字体、主题、缩放、窗格身份、图集重置或内容身份变化都会使相关条目失效。字体或 DPI
@@ -593,7 +646,15 @@ iTerm2 文件图像、kitty graphics 和 Sixel 事件由应用解码。声明宽
 缓冲。结果使用预乘、sRGB 编码的 BGRA8：RGB 已编码，并已乘以线性 alpha 通道。
 
 已解码图像仍由所属窗格拥有；数量和字节上限见[内存](Memory)。渲染器把可见图像复制到
-**独立**图像图集，因此媒体压力不能淘汰文字字形，也不能复用文字 UV。GPU 脏矩形打包时，
+**独立**图像图集，因此媒体压力不能淘汰文字字形，也不能复用文字 UV。图像可见范围是目标矩形、
+所属窗格扣除内边距后的实际内容矩形与表面的交集。图像裁剪不使用单元格布局最小值：内边距耗尽
+窗格空间时，图像裁剪范围为空，即使网格仍保留一个单元格。同一可见性检查控制图集驻留和绘制；
+完全裁剪或尚未解码的图像
+既不提升图集，也不分配图块。裁剪保留原始位置和缩放，并将可见目标/UV 与原始已打包图块的
+采样边界分开保存。两种 presenter 都在像素中心插值，包括原始尺寸下的分数位置，并把采样点
+限制在原始图块内，而不是窗格裁剪边缘。不分配裁剪后的解码像素副本，绘制顺序与图集上限不变。
+
+GPU 脏矩形打包时，
 每个非透明像素先在编码空间反预乘并限制范围，再经 sRGB 传递函数解码、在线性光空间乘以
 alpha，最后重新编码后存储；透明像素规范化为 `[0, 0, 0, 0]`，alpha 保持不变。CPU 字节
 不会被重写。Windows 软件呈现会对每个选中的纹素执行相同的零 alpha 规范化及

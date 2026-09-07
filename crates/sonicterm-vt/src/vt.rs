@@ -1558,6 +1558,25 @@ impl Performer {
         (top, bot)
     }
 
+    fn physical_cursor_col(&self) -> u16 {
+        self.grid.cursor.col.min(self.grid.cols.saturating_sub(1))
+    }
+
+    fn advance_hard_line(&mut self, fill: Cell, carriage_return: bool) {
+        let (top, bottom) = self.effective_scroll_region();
+        let col = self.physical_cursor_col();
+        let col = if carriage_return { 0 } else { col };
+        let mut row = self.grid.cursor.row;
+        if row == bottom {
+            // The control's fill applies only to the newly exposed row inside the active region.
+            self.grid.scroll_region_up_with(top, bottom, 1, fill);
+        } else {
+            // When: `row != bottom`, physical bounds protect rows below the scroll region.
+            row = row.saturating_add(1).min(self.grid.rows.saturating_sub(1));
+        }
+        self.grid.goto_hard_line(row, col);
+    }
+
     // Ordering: reply_queue_full_warned uses Relaxed because it suppresses duplicate warnings without publishing reply bytes.
     fn reply(&self, bytes: &[u8]) {
         if let Some(tx) = &self.reply_tx {
@@ -2117,21 +2136,7 @@ impl Perform for Performer {
             0x07 => self.events.push(VtEvent::Bell),
             0x08 => self.grid.backspace(),
             0x09 => self.grid.tab(),
-            0x0A..=0x0C => {
-                // LF/VT/FF — like IND, must scroll the active region
-                // (not the whole grid) when at the bottom margin so
-                // DECSTBM works for shells/apps that use LF rather
-                // than IND.
-                let (top, bot) = self.effective_scroll_region();
-                if self.grid.cursor.row == bot
-                    && (self.scroll_top.is_some() || self.scroll_bottom.is_some())
-                {
-                    self.grid.scroll_region_up_with(top, bot, 1, self.erase_fill_cell());
-                } else {
-                    // When: cursor row is not bot or no margin is active, linefeed without scrolling the DECSTBM region.
-                    self.grid.linefeed_with(self.erase_fill_cell());
-                }
-            }
+            0x0A..=0x0C => self.advance_hard_line(self.erase_fill_cell(), false),
             0x0D => self.grid.carriage_return(),
             _ => {
                 // When: byte is an unhandled C0 control, leave cells unchanged while keeping the parser outside ground.
@@ -2321,7 +2326,9 @@ impl Perform for Performer {
                         cols.saturating_sub(1)
                     ),
                     1 => format!("(0,0)..({r},{c}) inclusive"),
-                    2 | 3 => "entire screen".to_string(),
+                    2 => "entire screen".to_string(),
+                    3 if self.grid.is_alt() => "<alternate screen, no-op>".to_string(),
+                    3 => "saved history only".to_string(),
                     _ => "<unknown mode, no-op>".to_string(),
                 };
                 tracing::debug!(
@@ -2331,7 +2338,8 @@ impl Perform for Performer {
                 match mode {
                     0 => self.grid.erase_below_with(self.erase_fill_cell()),
                     1 => self.grid.erase_above_with(self.erase_fill_cell()),
-                    2 | 3 => self.grid.erase_screen_with(self.erase_fill_cell()),
+                    2 => self.grid.erase_screen_with(self.erase_fill_cell()),
+                    3 => self.grid.clear_scrollback(),
                     _ => {
                         // When: mode is not a defined ED operation, preserve every cell instead of erasing an unintended region.
                     }
@@ -2435,7 +2443,7 @@ impl Perform for Performer {
                     5 => self.reply(b"\x1b[0n"),
                     6 => {
                         let row = self.grid.cursor.row.saturating_add(1);
-                        let col = self.grid.cursor.col.saturating_add(1);
+                        let col = self.physical_cursor_col().saturating_add(1);
                         self.reply(format!("\x1b[{row};{col}R").as_bytes());
                     }
                     _ => {}
@@ -2820,20 +2828,7 @@ impl Perform for Performer {
             b'>' => {
                 self.app_keypad = false;
             }
-            b'D' => {
-                // IND — Index. Move cursor down one line; if at the
-                // bottom margin of the scroll region, scroll the
-                // region up. Must respect DECSTBM.
-                let (top, bot) = self.effective_scroll_region();
-                if self.grid.cursor.row == bot {
-                    self.grid.scroll_region_up(top, bot, 1);
-                } else {
-                    // When: cursor row is not bot, IND advances without scrolling and records a hard boundary.
-                    let new_row = (self.grid.cursor.row + 1).min(self.grid.rows.saturating_sub(1));
-                    let col = self.grid.cursor.col;
-                    self.grid.goto_hard_line(new_row, col);
-                }
-            }
+            b'D' => self.advance_hard_line(Cell::default(), false),
             b'M' => {
                 // RI — Reverse Index. Move cursor up; if at top
                 // margin, scroll the region down.
@@ -2847,18 +2842,7 @@ impl Perform for Performer {
                     self.grid.goto(new_row, col);
                 }
             }
-            b'E' => {
-                // NEL — Next Line. Like IND, but also moves cursor to col 0.
-                let (top, bot) = self.effective_scroll_region();
-                if self.grid.cursor.row == bot {
-                    self.grid.scroll_region_up(top, bot, 1);
-                    self.grid.goto(self.grid.cursor.row, 0);
-                } else {
-                    // When: cursor row is not bot, NEL advances without scrolling and records a hard boundary at column zero.
-                    let new_row = (self.grid.cursor.row + 1).min(self.grid.rows.saturating_sub(1));
-                    self.grid.goto_hard_line(new_row, 0);
-                }
-            }
+            b'E' => self.advance_hard_line(Cell::default(), true),
             _ => {
                 // When: byte is not a supported ESC final, leave cursor and screen state unchanged.
             }

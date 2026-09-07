@@ -26,14 +26,17 @@ building against a dependency's newer API while every other gate stays green.
 - `PtyHandle::Drop` must clean up child PTYs/conhosts; orphan processes are
   release blockers.
 - Never hold parser/grid locks while writing to the PTY.
-- PTY/ConPTY resize can fail. The current callback cannot return that error;
-  make failures observable before adding more resize paths, and do not silently
-  discard errors in new code.
+- PTY/ConPTY resize can fail, and the callback returns `anyhow::Result<()>` so
+  the caller sees it. A zero column or row count is refused as an `InvalidInput`
+  error before the native call. Only a successful native call caches the applied
+  size, so a failed request is not deduplicated away: the next identical request
+  reaches the native call again. Nothing retries automatically. Do not discard
+  the error in new code, and do not cache a size the native call rejected.
 - Keep platform-specific details behind this crate so app/UI code stays
   cross-platform.
 - Unix automatic shell selection is executable `$SHELL`, then the current
   user's executable passwd shell, then `/bin/sh`; explicit config still wins.
 
 ## Cross-references
-- Consumed by: `sonicterm-app`, `sonicterm-mux`. Platform binaries reach it
-  through `sonicterm-app`.
+- Consumed by: `sonicterm-app`. Platform binaries reach it through
+  `sonicterm-app`.

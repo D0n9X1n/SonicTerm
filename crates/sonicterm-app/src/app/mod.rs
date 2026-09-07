@@ -1052,6 +1052,8 @@ pub struct WindowState {
     // with the pane through tear-out. Read it via
     // `ws.panes.get(&active_pane).map(|p| p.cursor_visible.load(...))`.
     pub last_render: Instant,
+    /// Earliest collection retry after lock contention, independent of completed-frame pacing.
+    pub(crate) retry_not_before: Option<Instant>,
     /// pointer-cursor-is-link latch. Mirrors
     /// `App.hover_link` (now deleted). Per-window so a torn-out child can
     /// flip its own cursor independently of the main window.
@@ -1061,7 +1063,7 @@ pub struct WindowState {
     /// drag-from-child merging.
     pub pressed_tab: Option<usize>,
     /// Live drag session for a held-tab gesture in this child window.
-    pub drag_session: Option<crate::tab_drag::DragSession>,
+    pub drag_session: Option<crate::tab_drag::DragSession<WindowId>>,
     /// Pending cross-window drop target chosen during a drag in the
     /// child's bar; consumed on mouse-up.
     pub drag_target: Option<crate::tab_drag::DropTarget<WindowId>>,
@@ -1137,7 +1139,126 @@ pub struct WindowState {
     pub test_pane_viewport: Option<(sonicterm_ui::pane::Rect, f32, f32)>,
 }
 
+#[derive(Clone, Copy)]
+struct TopologyChange {
+    resize_visible: bool,
+    focus_feedback: Option<u64>,
+}
+
 impl WindowState {
+    fn reconcile_pane_owners(&mut self) {
+        let Some(parent) = self.owner.as_ref() else {
+            // When: the window has no owner, preserve its explicit unregistered accounting state.
+            return;
+        };
+        let governor = parent.governor.clone();
+        let parent = parent.id();
+        for (pane_id, pane) in &mut self.panes {
+            if pane.owner.is_some() {
+                // When: the pane already owns a registration, completion must not replace its existing charges.
+                continue;
+            }
+            match governor.create_child(parent, OwnerKind::AppPane, pane_owner_limits()) {
+                Ok(owner) => pane.owner = Some(OwnerGuard::new(governor.clone(), owner)),
+                Err(error) => {
+                    tracing::warn!(target: "memory", ?error, pane_id, "pane owner registration refused; pane remains unregistered")
+                }
+            }
+        }
+    }
+
+    fn complete_topology_change(
+        &mut self,
+        change: TopologyChange,
+        viewport: Option<(sonicterm_ui::pane::Rect, f32, f32)>,
+    ) -> bool {
+        if self.tabs.len() != self.tab_states.len() {
+            // When: tabs and tab_states lengths disagree, refuse completion rather than presenting mismatched titles and panes.
+            return false;
+        }
+        if let Some(tab) = self.tab_states.get(self.tabs.active_index()) {
+            // When: active_index resolves to a tab, its focus and visible leaves must agree before any completion effects.
+            let leaves = tab.tree.leaves();
+            if !leaves.contains(&tab.active_pane)
+                || !leaves.iter().all(|id| self.panes.contains_key(id))
+                || tab.tree.zoomed_pane_id().is_some_and(|id| id != tab.active_pane)
+                || change.focus_feedback.is_some_and(|id| id != tab.active_pane)
+            {
+                // When: leaves, active_pane, zoomed_pane_id or focus_feedback disagree, refuse rather than inventing a replacement.
+                return false;
+            }
+            if change.resize_visible {
+                let metrics = viewport
+                    .or(self.test_pane_viewport)
+                    .map(|(outer, cw, ch)| (outer, cw, ch, [0.0; 4]))
+                    .or_else(|| {
+                        self.renderer.as_ref().map(|renderer| {
+                            let (width, height) = renderer.logical_size();
+                            let top = (renderer.top_inset() - renderer.padding_top_px()).max(0.0);
+                            let outer = sonicterm_ui::pane::Rect::new(
+                                0.0,
+                                top,
+                                width.max(0.0),
+                                (height - top - renderer.bottom_inset()).max(0.0),
+                            );
+                            let (cw, ch) = renderer.cell_size();
+                            (
+                                outer,
+                                cw,
+                                ch,
+                                [
+                                    renderer.padding_left_px(),
+                                    renderer.padding_right_px(),
+                                    renderer.padding_top_px(),
+                                    renderer.padding_bottom_px(),
+                                ],
+                            )
+                        })
+                    });
+                if let Some((outer, cw, ch, inset)) = metrics {
+                    resize_panes_to_rects(&self.panes, &tab.tree.layout(outer), cw, ch, inset);
+                }
+            }
+        }
+        self.reconcile_pane_owners();
+        self.ime_cursor_throttle.reset();
+        self.invalidate_path_hover();
+        self.scrollbar_vis.retain(|id, _| self.panes.contains_key(id));
+        if self
+            .selection
+            .as_ref()
+            .and_then(|selection| selection.pane_id)
+            .is_some_and(|id| !self.panes.contains_key(&id))
+        {
+            self.selection = None;
+        }
+        mark_all_panes_dirty(&self.panes);
+        if let (Some(renderer), Some(pane)) = (self.renderer.as_mut(), change.focus_feedback) {
+            renderer.flash_pane_focus(pane);
+        }
+        self.request_redraw();
+        true
+    }
+
+    fn arm_contention_retry(&mut self, now: Instant, period: Duration) {
+        if self.retry_not_before.is_none_or(|deadline| deadline <= now) {
+            self.retry_not_before = Some(now + period);
+        }
+    }
+
+    fn redraw_not_before(&self, period: Duration) -> Instant {
+        let paced = self.last_render + period;
+        self.retry_not_before.map_or(paced, |retry| paced.max(retry))
+    }
+
+    fn contention_blocks_redraw(&self, now: Instant, period: Duration) -> bool {
+        self.retry_not_before.is_some() && now < self.redraw_not_before(period)
+    }
+
+    fn coherent_frame_collected(&mut self) {
+        self.retry_not_before = None;
+    }
+
     /// Borrow the renderer. Panics if the renderer field is `None`
     /// (pre-`do_resumed` for the main entry; never for child entries —
     /// every child construction site initializes it to `Some(_)`).
@@ -1188,7 +1309,11 @@ impl WindowState {
     fn begin_pane_focus_change(&mut self, pane_id: u64) -> Option<PaneFocusChange> {
         let tab_idx = self.tabs.active_index();
         let tab = self.tab_states.get_mut(tab_idx)?;
-        if tab.active_pane == pane_id || !tab.tree.leaves().contains(&pane_id) {
+        if tab.active_pane == pane_id
+            || !tab.tree.leaves().contains(&pane_id)
+            || !self.panes.contains_key(&pane_id)
+            || tab.tree.zoomed_pane_id().is_some_and(|zoomed| zoomed != pane_id)
+        {
             // When: the target is already active or belongs to another tab, no
             // focus transition occurred and existing feedback must not restart.
             return None;
@@ -1206,11 +1331,10 @@ impl WindowState {
 
     /// Present one validated pane-focus transition after related input work.
     fn finish_pane_focus_change(&mut self, change: PaneFocusChange) {
-        mark_all_panes_dirty(&self.panes);
-        if let Some(renderer) = self.renderer.as_mut() {
-            renderer.flash_pane_focus(change.pane_id);
-        }
-        self.request_redraw();
+        self.complete_topology_change(
+            TopologyChange { resize_visible: false, focus_feedback: Some(change.pane_id) },
+            None,
+        );
     }
 
     /// Revoke any path authorization and remove pointer-owned target visuals.
@@ -1463,7 +1587,7 @@ impl WindowState {
     /// Returns `true` if any mutation happened.
     pub fn reorder_tab(&mut self, from: usize, to: usize) -> bool {
         let len = self.tabs.len();
-        if from >= len || len == 0 {
+        if from >= len || len == 0 || self.tab_states.len() != len {
             // When: `from` names no live tab, so there is nothing to move and the
             // caller must not be told the order changed.
             return false;
@@ -1476,10 +1600,12 @@ impl WindowState {
             return false;
         }
         self.tabs.reorder(from, to);
-        if from < self.tab_states.len() && to < self.tab_states.len() {
-            let st = self.tab_states.remove(from);
-            self.tab_states.insert(to, st);
-        }
+        let state = self.tab_states.remove(from);
+        self.tab_states.insert(to, state);
+        self.complete_topology_change(
+            TopologyChange { resize_visible: false, focus_feedback: None },
+            None,
+        );
         true
     }
 }
@@ -1654,11 +1780,9 @@ pub fn seed_parser_theme_colors(parser: &mut sonicterm_vt::vt::Parser, theme: &T
 /// surface or a real shell.
 #[doc(hidden)]
 pub fn resize_all_panes(panes: &HashMap<u64, PaneState>, cols: u16, rows: u16) {
-    for pane in panes.values() {
+    for (pane_id, pane) in panes {
         pane.parser.lock().grid_mut().resize(cols, rows);
-        if let Some(pty) = pane.pty.as_ref() {
-            (pty.resize)(cols, rows);
-        }
+        pane.resize_pty(*pane_id, cols, rows);
     }
 }
 
@@ -1705,9 +1829,29 @@ pub fn resize_panes_to_rects(
             (content_h / cell_h).floor() as u64,
         );
         pane.parser.lock().grid_mut().resize(cols, rows);
-        if let Some(pty) = pane.pty.as_ref() {
-            (pty.resize)(cols, rows);
-        }
+        pane.resize_pty(*id, cols, rows);
+    }
+}
+
+fn update_terminal_ime_cursor_area(
+    throttle: &mut sonicterm_ui::ime::ImeCursorThrottle,
+    pane: (u64, sonicterm_ui::pane::Rect),
+    cursor: (u16, u16),
+    cell_size: (f32, f32),
+    padding: (f32, f32),
+    publish: impl FnOnce(winit::dpi::PhysicalPosition<i32>, winit::dpi::PhysicalSize<u32>),
+) {
+    // Pane layout and metrics are physical already; scaling or adding the window top inset again would double the offset.
+    let area = sonicterm_ui::ime::ImeCursorArea {
+        pane_id: pane.0,
+        position: (
+            (pane.1.x + padding.0 + f32::from(cursor.1) * cell_size.0) as i32,
+            (pane.1.y + padding.1 + f32::from(cursor.0) * cell_size.1) as i32,
+        ),
+        size: (cell_size.0.ceil() as u32, cell_size.1.ceil() as u32),
+    };
+    if throttle.should_update(area) {
+        publish(area.position.into(), area.size.into());
     }
 }
 
@@ -1941,6 +2085,33 @@ pub(crate) fn identity_config_normalizer() -> ConfigNormalizer {
     Box::new(|config| (config, Vec::new()))
 }
 
+/// Producer-assigned input category retained without inspecting terminal bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PtyInputSource {
+    /// Encoded physical or logical key event.
+    Keyboard,
+    /// Clipboard text, including bracketed-paste framing.
+    Paste,
+    /// Quoted paths dropped onto a terminal.
+    FileDrop,
+    /// Committed input-method text.
+    Ime,
+    /// Terminal mouse-button press or release.
+    PointerButton,
+    /// Terminal pointer movement, with or without a held button.
+    PointerMotion,
+    /// Mouse-wheel reports or translated arrow sequences.
+    Wheel,
+    /// Terminal focus-in or focus-out notification.
+    FocusReport,
+    /// Reply generated by the terminal parser.
+    TerminalReply,
+    /// Initial shell draft for an opened script.
+    ScriptDraft,
+    /// Input supplied directly through the backend-free intent API.
+    StateMachine,
+}
+
 /// Custom user events delivered through [`EventLoopProxy`].
 ///
 /// Config is read at startup and thereafter only when the user explicitly
@@ -2015,22 +2186,32 @@ pub enum UserEvent {
     },
     /// A local-target openability probe completed off the event-loop thread.
     PathProbeFinished(Box<path_target::PathProbeResult>),
-    /// A bounded PTY input enqueue failed. Retains the rejected bytes until
-    /// the event-loop thread can show a user-actionable notification.
+    /// Payload-free metadata for terminal input that could not be queued.
     PtyInputRejected {
-        /// Original terminal input that was not sent.
-        bytes: Vec<u8>,
-        /// Human-readable rejection reason.
+        /// Stable identity of the pane whose input was rejected.
+        pane_id: u64,
+        /// Producer-assigned input category.
+        source: PtyInputSource,
+        /// Length of the rejected input; its bytes are not retained.
+        rejected_bytes: usize,
+        /// Human-readable rejection reason without payload contents.
         reason: String,
+        /// Concurrent queue and writer observations, not a transactional snapshot.
+        diagnostics: sonicterm_io::pty::PtyInputDiagnostics,
     },
     /// The bounded Linux package-smoke watchdog expired.
     RuntimeSmokeTimeout,
 }
 
-fn pty_input_rejected_event(error: sonicterm_io::pty::PtyInputError) -> UserEvent {
+fn pty_input_rejected_event(
+    pane_id: u64,
+    source: PtyInputSource,
+    error: sonicterm_io::pty::PtyInputError,
+    diagnostics: sonicterm_io::pty::PtyInputDiagnostics,
+) -> UserEvent {
     let reason = error.to_string();
-    let bytes = error.into_bytes();
-    UserEvent::PtyInputRejected { bytes, reason }
+    let rejected_bytes = error.into_bytes().len();
+    UserEvent::PtyInputRejected { pane_id, source, rejected_bytes, reason, diagnostics }
 }
 
 /// Build an async fallback loader whose notifier fires
@@ -2167,6 +2348,8 @@ pub struct PaneState {
     /// `2 × RETENTION_SAMPLE_INTERVAL` the cancellation reports.
     pub(crate) capture_stall_samples: u8,
     pub pty: Option<PtyHandle>,
+    /// Whether a resize failure has been reported since the last success.
+    pub(crate) resize_warned: std::sync::atomic::AtomicBool,
     pub redraw_target: Arc<Mutex<Option<WindowId>>>,
     /// Absolute row (scrollback-relative) that should appear at the top of
     /// the visible viewport. `None` = "follow the live tail" (default).
@@ -2238,6 +2421,7 @@ impl PaneState {
             last_capture_progress: None,
             capture_stall_samples: 0,
             pty,
+            resize_warned: std::sync::atomic::AtomicBool::new(false),
             redraw_target: Arc::new(Mutex::new(None)),
             viewport_top_abs: None,
             fg_proc_cache: None,
@@ -2247,6 +2431,27 @@ impl PaneState {
             keyboard_modes: Arc::new(std::sync::atomic::AtomicU8::new(0)),
             inline_images: Arc::new(Mutex::new(Vec::new())),
             inline_media_charge: media::new_inline_media_charge(),
+        }
+    }
+
+    /// Resize this pane's PTY, reporting the first failure of a failing run.
+    ///
+    /// The grid is already resized and stays committed when the native call
+    /// fails; there is no rollback and no automatic retry.
+    // Ordering: `resize_warned` uses `Relaxed`; it gates one log line and guards no other state.
+    fn resize_pty(&self, pane_id: u64, cols: u16, rows: u16) {
+        let Some(pty) = self.pty.as_ref() else {
+            // When: `self.pty` is `None`, this pane has no native geometry to resize.
+            return;
+        };
+        let Err(error) = (pty.resize)(cols, rows) else {
+            // When: the resize applied, clear the latch so a later failure reports again.
+            self.resize_warned.store(false, std::sync::atomic::Ordering::Relaxed);
+            return;
+        };
+        // Report only the first failure of a run; a later success clears the latch.
+        if !self.resize_warned.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!(pane_id, cols, rows, %error, "pty resize failed");
         }
     }
 }
@@ -2646,11 +2851,8 @@ pub struct App {
     /// to resolve the raw screen-coordinate drop into a real
     /// `(WindowId, slot)` pair before posting a `DroppedOnBar` outcome.
     pub(super) os_drag_bars: Arc<os_drag::TabBarRegistry>,
-    /// tracks the source-side bookkeeping while an OS drag
-    /// is in flight. `Some((source_window, source_tab_idx))` from
-    /// `begin_session` until `UserEvent::DragEnded` is drained; back
-    /// to `None` once the dispatcher routes the outcome.
-    pub(super) os_drag_source: Option<(WindowId, usize)>,
+    /// Captured window and tab identity until the native drag outcome is consumed.
+    pub(super) os_drag_source: Option<(WindowId, sonicterm_ui::tabs::TabId)>,
     /// View → Toggle Tab Bar state. When `false`, the menubar Toggle
     /// Tab Bar action has hidden the tab bar chrome. Defaults to
     /// `true`. Exposed via [`Self::tab_bar_visible`] so the renderer
@@ -2705,14 +2907,9 @@ pub struct App {
     /// don't touch it.
     #[doc(hidden)]
     pub test_viewport_override: Option<(sonicterm_ui::pane::Rect, f32, f32)>,
-    /// Winit-agnostic state machine. Routed Intents
-    /// (PTY write, scroll, hyperlink open, …) flow through here and
-    /// the platform shell's [`Self::dispatch_effects`] translates the
-    /// resulting [`AppEffect`] batch into concrete calls against the
-    /// existing renderer / clipboard / PTY plumbing. Non-leaf paths
-    /// (tab/pane/window lifecycle) continue to take the legacy direct
-    /// route rather than passing through the reducer.
+    /// Compatibility reducer observations; live topology decisions and native effect targets belong to App.
     pub(crate) machine: sonicterm_app_core::AppStateMachine,
+    window_keys: crate::window_key_boundary::WindowKeyRegistry,
 }
 
 impl sonicterm_ui::broadcast::BroadcastTab for TabState {
@@ -2974,6 +3171,7 @@ impl App {
             reap_call_count: std::sync::atomic::AtomicUsize::new(0),
             test_viewport_override: None,
             machine,
+            window_keys: crate::window_key_boundary::WindowKeyRegistry::new(),
         }
     }
 
@@ -3192,41 +3390,39 @@ impl App {
         }
     }
 
-    /// Called from the `RedrawRequested` handler when the active pane's
-    /// parser lock is contended (held by the VT thread mid-parse).
-    /// Marks `pending_redraw` so `about_to_wait` schedules a
-    /// `WaitUntil` at the next vsync boundary, and preserves the
-    /// `input_dirty` flag captured at the start of the handler so the
-    /// rescheduled redraw still bypasses the vsync coalescing gate.
-    ///
-    /// Without this, a single contended `try_lock` during the
-    /// input→output transition of a multi-round prompt (e.g.
-    /// `gh auth login`'s device-code flow,) would silently
-    /// drop the redraw request — the parsed bytes sat in the grid
-    /// unrendered until an unrelated event (Ctrl+C, mouse move) woke
-    /// the loop and triggered a fresh `RedrawRequested`.
+    /// Preserve pending input and arm a future main-window collection retry without changing frame timestamps.
     #[doc(hidden)]
     pub fn defer_redraw_on_lock_contention(&mut self, was_dirty: bool) {
-        self.pending_redraw = true;
-        self.input_dirty = was_dirty;
+        if let Some(id) = self.main_window_id {
+            self.defer_window_lock_contention(id, was_dirty, Instant::now());
+        }
     }
 
-    /// Child-window analogue of [`Self::defer_redraw_on_lock_contention`]
-    /// plus the vsync coalescing gate. Records `win_id` in
-    /// [`Self::pending_redraw_windows`] so `about_to_wait` schedules a
-    /// `WaitUntil` at that child's next frame boundary and
-    /// `new_events` re-requests the redraw there — instead of the child
-    /// busy-spinning a bare `request_redraw()` that re-contends the very
-    /// parser lock the VT thread needs to drain a burst (
-    /// `ls -al` was smooth in main but laggy in a torn-out child because
-    /// the child render path had neither the gate nor this backoff).
-    /// Preserves the `input_dirty` flag captured at the top of the
-    /// handler so a deferred input-driven redraw still bypasses the gate
-    /// when it re-fires.
+    fn defer_window_lock_contention(&mut self, id: WindowId, was_dirty: bool, now: Instant) {
+        let Some(window) = self.windows.get_mut(&id) else {
+            // When: `id` no longer names a window, no retry state may keep the event loop awake.
+            return;
+        };
+        let period = effective_frame_period(
+            self.software_render_degrade,
+            window.ime.is_composing(),
+            self.frame_period,
+        );
+        window.arm_contention_retry(now, period);
+        if self.main_window_id == Some(id) {
+            self.pending_redraw = true;
+        } else {
+            // When: `id` is not `main_window_id`, retain the retry in the child's independent wake set.
+            self.pending_redraw_windows.insert(id);
+        }
+        self.input_dirty |= was_dirty;
+    }
+
+    /// Preserve a child redraw delayed by pacing without extending an existing contention deadline.
     #[doc(hidden)]
     pub fn defer_child_redraw(&mut self, win_id: WindowId, was_dirty: bool) {
         self.pending_redraw_windows.insert(win_id);
-        self.input_dirty = was_dirty;
+        self.input_dirty |= was_dirty;
     }
 
     /// Test-only: `true` if `win_id` has a deferred redraw queued in
@@ -3442,14 +3638,14 @@ impl App {
         }
     }
 
-    fn write_to_pty(&mut self, bytes: Vec<u8>) {
+    fn write_to_pty(&mut self, bytes: Vec<u8>, source: PtyInputSource) {
         let Some(active_id) = self.active_pane_id() else {
             // When: `active_pane_id` resolves nothing, so there is no focused
             // target to receive the bytes and no source to broadcast from.
             return;
         };
-        self.write_to_pane(active_id, bytes.clone());
-        self.broadcast_from(active_id, bytes);
+        self.write_to_pane(active_id, bytes.clone(), source);
+        self.broadcast_from(active_id, bytes, source);
     }
 
     fn terminal_key_targets(&self, source_pane: u64) -> BTreeSet<u64> {
@@ -3497,7 +3693,9 @@ impl App {
     fn dispatch_terminal_key_writes(&mut self, writes: Vec<(u64, Vec<u8>)>) -> BTreeSet<u64> {
         writes
             .into_iter()
-            .filter_map(|(pane_id, bytes)| self.write_to_pane(pane_id, bytes).then_some(pane_id))
+            .filter_map(|(pane_id, bytes)| {
+                self.write_to_pane(pane_id, bytes, PtyInputSource::Keyboard).then_some(pane_id)
+            })
             .collect()
     }
 
@@ -3563,38 +3761,7 @@ impl App {
         )
     }
 
-    fn write_to_pane(&mut self, pane_id: u64, bytes: Vec<u8>) -> bool {
-        // The keystroke / broadcast / encoded-input path flows through the
-        // winit-agnostic `AppStateMachine`. The reducer translates
-        // `AppIntent::PtyWrite` into `AppEffect::PtyWrite { pane, data }`, and
-        // `dispatch_pty_write_effect` is the boundary method that performs the
-        // actual bounded PTY input enqueue.
-        let intent = sonicterm_app_core::AppIntent::PtyWrite {
-            pane: sonicterm_app_core::PaneId(pane_id),
-            bytes: bytes::Bytes::from(bytes),
-        };
-        // Broadcast fan-out resolves its receiver set before calling this
-        // method. A transient machine keeps the pure PtyWrite reduction local
-        // while `&mut self` arms the accepted-input foreground probe.
-        let mut transient =
-            sonicterm_app_core::AppStateMachine::new(sonicterm_app_core::AppState::default());
-        transient.handle(intent).iter().any(|effect| self.dispatch_pty_write_effect(effect))
-    }
-
-    /// Boundary handler for [`sonicterm_app_core::AppEffect::PtyWrite`].
-    ///
-    /// Resolves the pane id back to a live [`PtyHandle`] in any terminal
-    /// window and forwards the bytes.
-    pub(crate) fn dispatch_pty_write_effect(
-        &mut self,
-        effect: &sonicterm_app_core::AppEffect,
-    ) -> bool {
-        let sonicterm_app_core::AppEffect::PtyWrite { pane, data } = effect else {
-            // When: effect is not PtyWrite, this boundary accepted no terminal input.
-            return false;
-        };
-        let pane_id = pane.0;
-        let bytes = data.to_vec();
+    fn write_to_pane(&mut self, pane_id: u64, bytes: Vec<u8>, source: PtyInputSource) -> bool {
         // Test-only ledger: skipped entirely in production so we don't
         // lock+clone+push on every PTY write (— unbounded
         // growth + per-keystroke overhead over a long session).
@@ -3606,10 +3773,9 @@ impl App {
             // its bytes were enqueued and they have nowhere to land.
             return false;
         };
-        let queued = p
-            .pty
-            .as_ref()
-            .is_some_and(|pty| Self::queue_pty_input(self.event_loop_proxy.as_ref(), pty, bytes));
+        let queued = p.pty.as_ref().is_some_and(|pty| {
+            Self::queue_pty_input(self.event_loop_proxy.as_ref(), pty, pane_id, source, bytes)
+        });
         #[cfg(windows)]
         if queued {
             // Accepted PTY input can launch a silent command, so sample its process after launch settles.
@@ -3618,39 +3784,100 @@ impl App {
         queued
     }
 
+    /// Deliver an explicitly targeted PTY effect through the same bounded queue as native input.
+    pub(crate) fn dispatch_pty_write_effect(
+        &mut self,
+        effect: &sonicterm_app_core::AppEffect,
+        source: PtyInputSource,
+    ) -> bool {
+        let sonicterm_app_core::AppEffect::PtyWrite { pane, data } = effect else {
+            // When: the effect is not a PTY write, this boundary cannot accept its work.
+            return false;
+        };
+        self.write_to_pane(pane.0, data.to_vec(), source)
+    }
+
     fn queue_pty_input(
         proxy: Option<&EventLoopProxy<UserEvent>>,
         pty: &sonicterm_io::pty::PtyHandle,
+        pane_id: u64,
+        source: PtyInputSource,
         bytes: Vec<u8>,
     ) -> bool {
         if let Err(error) = pty.send_input_nonblocking(bytes) {
-            // When: `send_input_nonblocking` refused the bytes, so the writer is
-            // gone or saturated and the input is surfaced rather than retried.
-            let event = pty_input_rejected_event(error);
-            let UserEvent::PtyInputRejected { bytes, reason } = &event else {
-                unreachable!("PTY rejection helper must build a rejection event");
-            };
-            tracing::warn!(
-                rejected_bytes = bytes.len(),
-                %reason,
-                "terminal input was not queued because the PTY writer is unavailable or saturated"
+            // When: `send_input_nonblocking` refuses input, report metadata rather than retaining or replaying the payload.
+            Self::report_pty_input_rejection(
+                proxy,
+                pane_id,
+                source,
+                error,
+                pty.input_diagnostics(),
             );
-            if let Some(proxy) = proxy {
-                // When: a `proxy` exists, so the rejection can reach the event
-                // loop; input is never re-sent, only reported.
-                let _ = proxy.send_event(event);
-            }
             return false;
         }
         true
     }
 
-    /// Generic boundary dispatcher for an Effect batch produced by the
-    /// state machine. The leaf classes (PTY,
-    /// clipboard set, OpenURL, Quit, Render-reasons that map to a
-    /// redraw request) are handled here. Non-leaf classes (WindowOpen,
-    /// ChildSpawn, MenubarUpdate, …) fall through to a tracing debug
-    /// rather than being dispatched.
+    fn report_pty_input_rejection(
+        proxy: Option<&EventLoopProxy<UserEvent>>,
+        pane_id: u64,
+        source: PtyInputSource,
+        error: sonicterm_io::pty::PtyInputError,
+        diagnostics: sonicterm_io::pty::PtyInputDiagnostics,
+    ) {
+        let event = pty_input_rejected_event(pane_id, source, error, diagnostics);
+        Self::deliver_pty_input_rejection(
+            proxy.map(|proxy| |event| proxy.send_event(event).map_err(|closed| closed.0)),
+            event,
+        );
+    }
+
+    fn deliver_pty_input_rejection(
+        send_event: Option<impl FnOnce(UserEvent) -> Result<(), UserEvent>>,
+        event: UserEvent,
+    ) {
+        let event = match send_event {
+            Some(send_event) => {
+                // When: `send_event` exists, defer logging only after the event loop accepts ownership.
+                match send_event(event) {
+                    Ok(()) => {
+                        // When: `send_event` succeeds, the event loop owns logging and current-window attribution.
+                        return;
+                    }
+                    Err(event) => event,
+                }
+            }
+            None => event,
+        };
+        if let UserEvent::PtyInputRejected {
+            pane_id,
+            source,
+            rejected_bytes,
+            reason,
+            diagnostics,
+        } = event
+        {
+            // Delivery failure preserves overload evidence without payload or stale window attribution.
+            tracing::warn!(
+                pane_id,
+                window_id = ?None::<WindowId>,
+                ?source,
+                rejected_bytes,
+                %reason,
+                observation = "concurrent",
+                queued_messages = diagnostics.queued_messages,
+                queued_bytes = diagnostics.queued_bytes,
+                queue_capacity = diagnostics.queue_capacity,
+                writer_phase = ?diagnostics.writer_phase,
+                in_flight_bytes = diagnostics.in_flight_bytes,
+                in_flight_millis = ?diagnostics.in_flight_millis,
+                completed_messages = diagnostics.completed_messages,
+                "terminal input was not queued"
+            );
+        }
+    }
+
+    /// Execute explicit effects at live boundaries; observational variants only emit diagnostics.
     pub(crate) fn dispatch_effects(
         &mut self,
         effects: smallvec::SmallVec<[sonicterm_app_core::AppEffect; 4]>,
@@ -3659,7 +3886,7 @@ impl App {
         for effect in effects {
             match effect {
                 AppEffect::PtyWrite { .. } => {
-                    self.dispatch_pty_write_effect(&effect);
+                    self.dispatch_pty_write_effect(&effect, PtyInputSource::StateMachine);
                 }
                 AppEffect::ClipboardSet { text } => {
                     // When: the effect is `ClipboardSet`, so nonempty `text` is
@@ -3687,11 +3914,8 @@ impl App {
                 AppEffect::Quit => {
                     self.pending_exit = true;
                 }
-                AppEffect::Render { .. } | AppEffect::RenderDirtyRect { .. } => {
-                    if let Some(w) = self.main_window() {
-                        w.request_redraw();
-                        self.redraw_request_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    }
+                AppEffect::Render { window, .. } | AppEffect::RenderDirtyRect { window, .. } => {
+                    self.request_effect_redraw(window);
                 }
                 // ── PTY class ─────────────────────────────────────────
                 //
@@ -3710,7 +3934,7 @@ impl App {
                 // the per-pane status. Surface a structured log so the
                 // session-restore layer (post-v1.0) can correlate.
                 AppEffect::ChildExitPropagate { pane, status } => {
-                    tracing::info!(target: "state_machine", pane = pane.0, status, "child exit propagated");
+                    tracing::info!(target: "state_machine", pane = pane.0, status, "child exit observed");
                 }
                 // ChildSpawn: record-only at the boundary. Production
                 // pane spawning flows through `App::spawn_pane` /
@@ -3734,16 +3958,13 @@ impl App {
                         "dispatch_effects: OsDragStart (platform path owns the actual drag)"
                     );
                 }
-                // OsDragEnd: settle the pending-drag table so the
-                // tear-out boundary can finalize. The os_drag layer's
-                // PendingDragOutcome already tracks the outcome
-                // bilaterally; we surface a log here.
+                // Native drag owns settlement; this observation must not commit the transfer a second time.
                 AppEffect::OsDragEnd { src_window, committed } => {
                     tracing::debug!(
                         target: "state_machine",
                         window = src_window.0,
                         committed,
-                        "dispatch_effects: OsDragEnd"
+                        "dispatch_effects: OsDragEnd (observation-only)"
                     );
                 }
                 // ── Clipboard / notification side channels ───────────
@@ -3752,17 +3973,8 @@ impl App {
                 // read happens through `clipboard.get_text()` at the
                 // boundary's paste path; here we surface the request.
                 AppEffect::ClipboardRequest { window, bracketed } => {
-                    if let Some(cb) = self.clipboard.as_mut() {
-                        if let Ok(text) = cb.get_text() {
-                            tracing::debug!(
-                                target: "state_machine",
-                                window = window.0,
-                                bracketed,
-                                len = text.len(),
-                                "dispatch_effects: ClipboardRequest fulfilled"
-                            );
-                        }
-                    }
+                    tracing::debug!(target: "state_machine", window = window.0, bracketed,
+                        "dispatch_effects: ClipboardRequest (observation-only; native paste owns clipboard reads)");
                 }
                 // Notification: route through the existing
                 // `notify_command_done` path (test capture friendly).
@@ -3789,11 +4001,7 @@ impl App {
                         "dispatch_effects: WindowOpen queued (drained by event_loop)"
                     );
                 }
-                // WindowClose: best-effort. Without a WindowKey→WindowId
-                // map (lifted in 2d), close the main window or, if it's
-                // a child, the matching entry. We at minimum surface a
-                // log and set pending_exit when it's the last live
-                // window per the reducer's contract.
+                // WindowClose is observational; only live native topology decides close and last-window exit.
                 AppEffect::WindowClose { window } => {
                     tracing::debug!(
                         target: "state_machine",
@@ -3813,9 +4021,7 @@ impl App {
                         h = size.height,
                         "dispatch_effects: WindowResize (observability)"
                     );
-                    if let Some(w) = self.main_window() {
-                        w.request_redraw();
-                    }
+                    self.request_effect_redraw(window);
                 }
                 // WindowMove: record-only; OS already moved the window.
                 AppEffect::WindowMove { window, pos } => {
@@ -3827,14 +4033,13 @@ impl App {
                         "dispatch_effects: WindowMove (record-only)"
                     );
                 }
-                // WindowSetTitle updates internal tab chrome only; the native
-                // OS window title intentionally stays the static "SonicTerm".
+                // WindowSetTitle is observational; native titles remain static and live tab state owns chrome.
                 AppEffect::WindowSetTitle { window, title } => {
                     tracing::debug!(
                         target: "state_machine",
                         window = window.0,
                         %title,
-                        "dispatch_effects: WindowSetTitle"
+                        "dispatch_effects: WindowSetTitle (observation-only)"
                     );
                 }
                 // TimerSchedule / TimerCancel: the boundary's redraw
@@ -4052,16 +4257,90 @@ impl App {
         false
     }
 
-    /// Drive a single [`AppIntent`] through the state machine and
-    /// dispatch the resulting Effects through the boundary layer.
-    /// Wires the winit-flavoured shell
-    /// into the winit-agnostic reducer.
-    pub fn dispatch_intent(&mut self, intent: sonicterm_app_core::AppIntent) {
-        let effects = self.machine.handle(intent);
-        self.dispatch_effects(effects);
+    /// Resolve a live window to its stable backend-free key; absent windows have no key.
+    pub fn window_key(&self, id: WindowId) -> Option<sonicterm_types::WindowKey> {
+        self.windows.contains_key(&id).then(|| self.window_keys.get(id)).flatten()
     }
 
-    fn broadcast_from(&mut self, active_id: u64, bytes: Vec<u8>) {
+    fn request_effect_redraw(&self, key: sonicterm_types::WindowKey) -> bool {
+        let Some(window) = self.window_keys.resolve(key).and_then(|id| self.windows.get(&id))
+        else {
+            // When: `key` names no live window, never redirect operational work to main or frontmost.
+            return false;
+        };
+        window.request_redraw();
+        self.redraw_request_count.fetch_add(1, Ordering::SeqCst);
+        true
+    }
+
+    fn observe_intent(&mut self, intent: sonicterm_app_core::AppIntent) {
+        // Compatibility reducer state is observational; its synthetic effects never mutate live topology.
+        let _ = self.machine.handle(intent);
+    }
+
+    /// Execute supported explicit-target work; retain lifecycle reports as non-operational compatibility observations.
+    pub fn dispatch_intent(&mut self, intent: sonicterm_app_core::AppIntent) {
+        use sonicterm_app_core::{AppEffect, AppIntent};
+        match intent {
+            AppIntent::PtyWrite { pane, bytes } => {
+                self.write_to_pane(pane.0, bytes.to_vec(), PtyInputSource::StateMachine);
+            }
+            AppIntent::PtyExit { pane, status } => {
+                self.dispatch_effects(smallvec::smallvec![
+                    AppEffect::ChildExitPropagate { pane, status },
+                    AppEffect::PtyClose { pane }
+                ]);
+            }
+            AppIntent::PtyBurst { pane, .. } | AppIntent::ForegroundProcChanged { pane, .. } => {
+                if let Some(id) = self
+                    .windows
+                    .iter()
+                    .find_map(|(id, window)| window.panes.contains_key(&pane.0).then_some(*id))
+                {
+                    if let Some(key) = self.window_key(id) {
+                        self.request_effect_redraw(key);
+                    }
+                }
+            }
+            AppIntent::RedrawRequested { window } => {
+                self.request_effect_redraw(window);
+            }
+            AppIntent::Key { window, pressed: true, .. }
+            | AppIntent::ImeStart { window }
+            | AppIntent::ImeEnd { window }
+            | AppIntent::ImePreedit { window, .. }
+            | AppIntent::HoverUrl { window, .. }
+            | AppIntent::ScrollUp { window, .. }
+            | AppIntent::ScrollDown { window, .. }
+            | AppIntent::ScrollPageUp { window }
+            | AppIntent::ScrollPageDown { window }
+            | AppIntent::ScrollToTop { window }
+            | AppIntent::ScrollToBottom { window }
+            | AppIntent::ScrollToCursor { window }
+            | AppIntent::MouseWheel { window, .. } => {
+                self.request_effect_redraw(window);
+            }
+            AppIntent::ImeCommit { window, text } | AppIntent::Paste { window, text, .. } => {
+                if let Some(id) = self.window_keys.resolve(window) {
+                    let pane = self
+                        .windows
+                        .get(&id)
+                        .and_then(|state| state.tab_states.get(state.tabs.active_index()))
+                        .map(|tab| tab.active_pane);
+                    if let Some(pane) = pane {
+                        self.write_to_pane(pane, text.into_bytes(), PtyInputSource::StateMachine);
+                    }
+                }
+            }
+            AppIntent::ClickUrl { url, .. } => {
+                self.dispatch_effects(smallvec::smallvec![AppEffect::OpenURL { url }])
+            }
+            AppIntent::Exit => self.pending_exit = true,
+            other => self.observe_intent(other),
+        }
+    }
+
+    fn broadcast_from(&mut self, active_id: u64, bytes: Vec<u8>, source: PtyInputSource) {
         let BroadcastState::On { source_pane, .. } = self.broadcast else {
             // When: `broadcast` is not `On`, so there is no fan-out group and the
             // bytes belong to the focused pane alone.
@@ -4074,7 +4353,7 @@ impl App {
         }
         let receivers = self.broadcast_receivers();
         for pane_id in receivers {
-            self.write_to_pane(pane_id, bytes.clone());
+            self.write_to_pane(pane_id, bytes.clone(), source);
         }
     }
 
@@ -4159,8 +4438,8 @@ impl App {
     /// Test-only: drive the same write + broadcast fan-out as normal input.
     #[doc(hidden)]
     pub fn __test_write_to_pane_with_broadcast(&mut self, pane_id: u64, bytes: Vec<u8>) {
-        self.write_to_pane(pane_id, bytes.clone());
-        self.broadcast_from(pane_id, bytes);
+        self.write_to_pane(pane_id, bytes.clone(), PtyInputSource::Keyboard);
+        self.broadcast_from(pane_id, bytes, PtyInputSource::Keyboard);
     }
 
     /// Test-only: child render pane ids with the broadcast receiver flag that
@@ -4362,6 +4641,7 @@ impl App {
             modifiers: ModifiersState::empty(),
             pty_pressed_keys: HashMap::new(),
             last_render: Instant::now(),
+            retry_not_before: None,
             hover_link: false,
             pressed_tab: None,
             drag_session: None,
@@ -4483,7 +4763,11 @@ impl App {
         ws.pressed_tab = pressed_tab;
         ws.mouse_down = mouse_down;
         if with_drag_session {
-            ws.drag_session = Some(crate::tab_drag::DragSession::new(0, (0.0, 0.0)));
+            ws.drag_session = ws
+                .tabs
+                .tabs()
+                .get(pressed_tab.unwrap_or(0))
+                .map(|tab| crate::tab_drag::DragSession::new(id, tab.id, (0.0, 0.0)));
         }
         true
     }
@@ -4988,6 +5272,12 @@ impl App {
         self.pending_redraw
     }
 
+    /// Test seam: observe a window's frame timestamp independently of its contention deadline.
+    #[doc(hidden)]
+    pub fn __test_window_last_render(&self, id: WindowId) -> Option<Instant> {
+        self.windows.get(&id).map(|window| window.last_render)
+    }
+
     /// Test seam: backdate a window's last-render instant.
     ///
     /// Frame pacing measures elapsed time since the last render, so moving
@@ -5214,8 +5504,12 @@ impl App {
     /// Panes already in `window` are adopted by this call. A window populated
     /// after insertion instead reconciles when those panes arrive.
     pub(super) fn insert_window_registered(&mut self, id: WindowId, window: WindowState) {
+        let owner_prepared = window.owner.is_some();
+        self.window_keys.intern(id);
         self.windows.insert(id, window);
-        self.register_window_owner(id);
+        if !owner_prepared {
+            self.register_window_owner(id);
+        }
     }
 
     /// Register a window in the governor hierarchy and record its owner.
@@ -5479,55 +5773,8 @@ impl App {
     /// Runs from the periodic retention sampler rather than per frame, so its
     /// cost is bounded by that interval regardless of how often panes move.
     pub(super) fn reconcile_pane_owners(&mut self) {
-        let window_ids: Vec<WindowId> = self.windows.keys().copied().collect();
-        for window_id in window_ids {
-            let Some(window) = self.windows.get(&window_id) else {
-                // When: `window_id` no longer resolves, so its pane set is gone
-                // and there is nothing left to reconcile owners against.
-                continue;
-            };
-            let Some(window_owner) = window.owner.as_ref().map(OwnerGuard::id) else {
-                // When: this `window` holds no owner, so `create_child` has no
-                // parent to hang pane owners from.
-                continue;
-            };
-
-            let unowned: Vec<u64> = window
-                .panes
-                .iter()
-                .filter(|(_, pane)| pane.owner.is_none())
-                .map(|(id, _)| *id)
-                .collect();
-
-            for pane_id in unowned {
-                match self.governor.create_child(
-                    window_owner,
-                    OwnerKind::AppPane,
-                    pane_owner_limits(),
-                ) {
-                    Ok(owner) => {
-                        // When: the governor granted `owner`, so it must reach a
-                        // pane or be closed; an unheld owner leaks its record.
-                        if let Some(pane) =
-                            self.windows.get_mut(&window_id).and_then(|w| w.panes.get_mut(&pane_id))
-                        {
-                            pane.owner = Some(OwnerGuard::new(self.governor.clone(), owner));
-                        } else {
-                            // When: `panes` no longer resolves `pane_id`, so the
-                            // owner would leak unless it is closed here.
-                            let _ = self.governor.begin_close(owner);
-                            let _ = self.governor.finish_close(owner);
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "memory",
-                            ?error,
-                            "pane owner registration failed; hierarchy accounting omits this pane"
-                        );
-                    }
-                }
-            }
+        for window in self.windows.values_mut() {
+            window.reconcile_pane_owners();
         }
     }
 
@@ -6139,6 +6386,7 @@ impl App {
             modifiers: ModifiersState::empty(),
             pty_pressed_keys: HashMap::new(),
             last_render: Instant::now(),
+            retry_not_before: None,
             hover_link: false,
             pressed_tab: None,
             drag_session: None,
@@ -6359,7 +6607,8 @@ impl App {
     /// `begin_os_tab_drag`.
     #[doc(hidden)]
     pub fn __test_set_os_drag_source(&mut self, source: Option<(WindowId, usize)>) {
-        self.os_drag_source = source;
+        self.os_drag_source = source
+            .and_then(|(window, index)| self.tab_id_at(window, index).map(|tab| (window, tab)));
     }
 
     /// build an [`os_drag::AppHandle`] tied to the App's
@@ -6475,14 +6724,55 @@ impl App {
         self.publish_os_drag_bar_snapshot(snap);
     }
 
+    fn finish_tab_drag(
+        &mut self,
+        session: crate::tab_drag::DragSession<WindowId>,
+        action: crate::tab_drag::DragAction<WindowId>,
+        tear_out: impl FnOnce(&mut Self, WindowId, usize),
+    ) -> bool {
+        let Some(index) = self.tab_index_of_id(session.source_window, session.source_tab) else {
+            // When: `session.source_tab` is absent from `source_window`, cancel rather than moving its former slot's occupant.
+            self.cancel_drag_session();
+            return false;
+        };
+        match action {
+            crate::tab_drag::DragAction::ReturnToOriginalBar => {
+                // When: `ReturnToOriginalBar` keeps the captured tab in place, no topology mutation is owed.
+            }
+            crate::tab_drag::DragAction::ReorderTab { to } => {
+                if let Some(window) = self.windows.get_mut(&session.source_window) {
+                    window.reorder_tab(index, to);
+                }
+            }
+            crate::tab_drag::DragAction::MergeIntoWindow(target) => {
+                // When: MergeIntoWindow selects target, preserve the transfer refusal instead of reporting a completed drag.
+                let moved = if self.main_window_id == Some(session.source_window) {
+                    self.merge_main_into_child(index, target)
+                } else {
+                    // When: session.source_window is not main_window_id, keep child-specific source close policy.
+                    self.merge_child_into_target(session.source_window, index, target)
+                };
+                if !moved {
+                    // When: moved is false, source custody is restored and the gesture must report no movement.
+                    return false;
+                }
+            }
+            crate::tab_drag::DragAction::TearOutToNewWindow { .. } => {
+                tear_out(self, session.source_window, index);
+            }
+        }
+        if let Some(window) = self.windows.get(&session.source_window) {
+            window.request_redraw();
+        }
+        true
+    }
+
     /// begin an OS-level tab drag session via the installed
     /// backend. Returns `true` when the backend was invoked, `false`
     /// when no backend is installed or no event-loop proxy exists (in
     /// which case the caller falls back to the existing tear_out path).
     ///
-    /// Records `(source_window, source_tab_idx)` so the
-    /// `UserEvent::DragEnded` dispatcher knows where the gesture
-    /// originated when routing the outcome.
+    /// Captures the stable tab id before the native backend can process queued topology changes.
     pub fn begin_os_tab_drag(
         &mut self,
         source_window: WindowId,
@@ -6490,6 +6780,10 @@ impl App {
         payload_json: String,
         drag_image_png: Vec<u8>,
     ) -> bool {
+        let Some(source_tab) = self.tab_id_at(source_window, source_tab_idx) else {
+            // When: `source_tab_idx` no longer names a live tab, refuse before the native backend takes the gesture.
+            return false;
+        };
         let Some(handle) = self.os_drag_app_handle() else {
             // When: no `os_drag_app_handle` can be built, so the platform has no
             // drag context and recording a source would strand it.
@@ -6500,8 +6794,8 @@ impl App {
             // session and the source must not be recorded.
             return false;
         };
+        self.os_drag_source = Some((source_window, source_tab));
         backend.begin_session(handle, source_window, source_tab_idx, payload_json, drag_image_png);
-        self.os_drag_source = Some((source_window, source_tab_idx));
         true
     }
 
@@ -6546,6 +6840,7 @@ impl App {
 
     pub(super) fn release_child_window_registries(&mut self, window_id: WindowId) {
         self.pending_redraw_windows.remove(&window_id);
+        self.window_keys.remove(window_id);
         self.os_drag_bars.remove(Some(window_id));
         if let Some(backend) = self.os_drag_backend.as_mut() {
             backend.unregister_window(window_id);
@@ -6573,12 +6868,14 @@ impl App {
     /// outcome that was processed for tests to assert on.
     pub fn handle_os_drag_ended(&mut self) -> Option<os_drag::DragOutcome> {
         let outcome = self.os_drag_pending.take_ended()?;
-        let source = self.os_drag_source.take();
+        let source = self.os_drag_source.take().and_then(|(window, tab)| {
+            self.tab_index_of_id(window, tab).map(|index| (window, index, tab))
+        });
         match outcome {
             os_drag::DragOutcome::DroppedOnBar { target_window, target_slot } => {
                 // When: the drop landed on a bar, so `target_window` and
                 // `target_slot` name where the dragged tab should be inserted.
-                let Some((src_win, src_idx)) = source else {
+                let Some((src_win, src_idx, _)) = source else {
                     // When: no `source` was recorded, so there is no tab to move
                     // and the stale drag state is cancelled instead.
                     tracing::warn!(
@@ -6593,15 +6890,8 @@ impl App {
                 // source side, but the *target* may legitimately be the
                 // main window. Detect that by comparing against the
                 // App's `window` field.
-                let src_opt = self
-                    .main_window()
-                    .map(|w| w.id())
-                    .filter(|&id| id == src_win)
-                    .map_or(Some(src_win), |_| None);
-                let tgt_opt = match target_window {
-                    Some(id) if self.main_window().map(|w| w.id() == id).unwrap_or(false) => None,
-                    other => other,
-                };
+                let src_opt = (self.main_window_id != Some(src_win)).then_some(src_win);
+                let tgt_opt = target_window.filter(|id| Some(*id) != self.main_window_id);
                 if let Err(e) = self.transfer_tab(src_opt, src_idx, tgt_opt, target_slot) {
                     tracing::warn!(?e, "os_drag_session: transfer_tab refused — cancelling");
                     self.cancel_drag_session();
@@ -6622,12 +6912,11 @@ impl App {
                 // `drain_pending_window_creates` slot, which now
                 // builds the child window directly from the reusable
                 // helper extracted from `tear_out.rs`.
-                if let Some((src_win, src_idx)) = source {
-                    let source_tab_id = self.tab_id_at(src_win, src_idx);
+                if let Some((src_win, src_idx, source_tab)) = source {
                     self.pending_tear_out = Some(PendingTearOut {
                         source_window: src_win,
                         source_tab_idx: src_idx,
-                        source_tab_id,
+                        source_tab_id: Some(source_tab),
                         drop_screen_pos: Some(drop_screen_pos),
                     });
                 } else {
@@ -6831,22 +7120,7 @@ impl App {
         had
     }
 
-    /// pure cross-window transfer API. Operates
-    /// on the App's MAIN window only (`source` / `target` are both
-    /// `None` ⇒ main↔main reorder). Tests exercise the pure-container
-    /// form in `crate::app::tab_transfer` directly; the App wrapper
-    /// here delegates to the existing detach/attach pairs so the four
-    /// real-window flavors (main↔main, main↔child, child↔main,
-    /// child↔child) all funnel through one entry point.
-    ///
-    /// Returns `Ok(())` when the transfer happened, or a
-    /// [`TransferError`] describing the validation failure. The
-    /// pre-validation step is deliberate: a `bool` API that detaches
-    /// first silently drops the detached tab —
-    /// killing its child shell via `PtyHandle::Drop` — when the target
-    /// window vanishes between gesture-start and drop. Source state is
-    /// left untouched until *both* endpoints have been proven
-    /// reachable.
+    /// Move a live tab transactionally; `None` selects main, and any refusal retains the original source state.
     #[doc(hidden)]
     pub fn transfer_tab(
         &mut self,
@@ -6855,104 +7129,55 @@ impl App {
         target: Option<WindowId>,
         target_idx: usize,
     ) -> Result<(), TransferError> {
-        // 0) pre-validate BOTH endpoints before mutating any window.
-        //    Detaching and then
-        //    failing to attach drops the `PaneState`, which kills the
-        //    child shell via `PtyHandle::Drop`.
-        match source {
-            None => {
-                // When: `source` is `None`, so the main window is the origin and
-                // its bounds are proven before anything detaches.
-                let main = self.main().ok_or(TransferError::SourceMissing)?;
-                if source_idx >= main.tab_states.len() || source_idx >= main.tabs.len() {
-                    // When: `source_idx` exceeds either `main` collection, so
-                    // refusing now avoids detaching a tab that does not exist.
-                    return Err(TransferError::SourceIndexOutOfBounds);
-                }
-            }
-            Some(id) => {
-                // When: `source` names a child, so that window is the origin and
-                // its bounds are proven before anything detaches.
-                let src = self.windows.get(&id).ok_or(TransferError::SourceMissing)?;
-                if source_idx >= src.tab_states.len() || source_idx >= src.tabs.len() {
-                    // When: `source_idx` exceeds either `src` collection, so
-                    // refusing now avoids detaching a tab that does not exist.
-                    return Err(TransferError::SourceIndexOutOfBounds);
-                }
-            }
+        let source = source.or(self.main_window_id).ok_or(TransferError::SourceMissing)?;
+        let target = target.or(self.main_window_id).ok_or(TransferError::TargetMissing)?;
+        if !self.windows.contains_key(&source) {
+            // When: the explicit source disappeared, report its absence before any destination preparation.
+            return Err(TransferError::SourceMissing);
         }
-        if let Some(id) = target {
-            // When: `target` names a child, so its existence is proven before the
-            // source tab is detached and could be dropped.
-            if !self.windows.contains_key(&id) {
-                // When: `windows` lacks `id`, so refusing now leaves the source
-                // tab attached rather than destroying it mid-move.
-                return Err(TransferError::TargetMissing);
+        self.validate_transfer_destination(target)?;
+        if source == target {
+            // When: source equals target, reorder in place without detaching or reattributing its panes.
+            let window = self.windows.get_mut(&source).ok_or(TransferError::SourceMissing)?;
+            if source_idx >= window.tabs.len() || source_idx >= window.tab_states.len() {
+                // When: source_idx exceeds tabs or tab_states, reject before reorder can change a different live tab.
+                return Err(TransferError::SourceIndexOutOfBounds);
             }
+            window.reorder_tab(source_idx, target_idx);
+            return Ok(());
         }
-
-        // 1) detach from source — guaranteed to succeed after step 0.
-        let detached = match source {
-            None => self.detach_tab_state(source_idx),
-            Some(id) => self.detach_from_child(id, source_idx),
+        let origin = if self.main_window_id == Some(source) {
+            tear_out::TearOutSource::Main(source)
+        } else {
+            // When: source is not main_window_id, rollback must restore the child rather than the main strip.
+            tear_out::TearOutSource::Child(source)
         };
-        let Some((tab, state, panes)) = detached else {
-            // When: `detached` yielded no tab despite validation, so refusing is
-            // the only move that cannot drop a live shell.
-
-            // Shouldn't happen — step 0 validated. Defensive bail.
-            return Err(TransferError::SourceIndexOutOfBounds);
-        };
-
-        // 2) attach to target — also guaranteed reachable after step 0.
-        match target {
-            None => self.attach_tab_state(target_idx, tab, state, panes),
-            Some(id) => {
-                // When: `target` names a child, so the detached tab is handed to
-                // that window's attach path.
-                if !self.attach_to_child(id, target_idx, tab, state, panes) {
-                    // When: `attach_to_child` refused after preflight and already
-                    // owns the moved values, so the tab cannot return to source.
-                    return Err(TransferError::TargetMissing);
-                }
-            }
+        let transaction = self
+            .detach_for_tear_out(origin, source_idx)
+            .ok_or(TransferError::SourceIndexOutOfBounds)?;
+        transaction.attach(self, target, target_idx)?;
+        self.frontmost_window = Some(target);
+        if let Some(window) = self.windows.get(&target).and_then(|state| state.window.as_ref()) {
+            window.focus_window();
+            window.request_redraw();
         }
-
-        // 3) focus target window + bookkeeping
-        match target {
-            None => {
-                if let Some(w) = self.main_window().cloned() {
-                    self.frontmost_window = Some(w.id());
-                    w.request_redraw();
-                }
-            }
-            Some(id) => {
-                self.frontmost_window = Some(id);
-                if let Some(ws) = self.windows.get(&id) {
-                    if let Some(w) = ws.window.as_ref() {
-                        w.focus_window();
-                        w.request_redraw();
-                    }
-                }
-            }
+        if Some(target) == self.main_window_id && self.main_is_hidden() {
+            self.show_main_window();
         }
-
-        // 4) source-empty → close source window
-        let source_empty = match source {
-            None => self.main_tabs().map(|t| t.is_empty()).unwrap_or(true),
-            Some(id) => self.windows.get(&id).map(|w| w.tabs.is_empty()).unwrap_or(true),
-        };
+        let source_empty = self.windows.get(&source).is_some_and(|window| window.tabs.is_empty());
         if source_empty {
-            if let Some(id) = source {
-                // child window — route through the unified empty-window
-                // cleanup contract so straggler redraw targets get nulled
-                // and the "child reaped" trace fires; a raw
-                // `windows.remove` skips both bits of bookkeeping.
-                self.reap_empty_child(id);
+            if Some(source) == self.main_window_id {
+                self.hide_main_window();
             } else {
-                // When: the emptied `source` is the main window, so its own
-                // last-tab-closed handling hides it rather than reaping it.
+                // When: source is not main_window_id, transferred charges are committed and the empty child owner can now close.
+                self.reap_empty_child(source);
             }
+        } else if Some(source) == self.main_window_id {
+            // When: the nonempty source is main_window_id, complete its newly active pane layout.
+            self.resize_visible_panes();
+        } else if let Some(window) = self.windows.get_mut(&source) {
+            // When: a nonempty child source remains live, complete its neighbour layout without replacing focus.
+            child_window::resize_visible_panes_in_child(window);
         }
         Ok(())
     }
@@ -6971,6 +7196,12 @@ pub enum TransferError {
     TargetMissing,
     /// `source_idx` is beyond the source window's tab vector.
     SourceIndexOutOfBounds,
+    /// The destination has no usable presentation geometry yet.
+    TargetNotReady,
+    /// Active/visible relationships or pane custody are inconsistent.
+    InvalidTopology,
+    /// Existing charges cannot move to a valid destination owner.
+    AccountingRefused,
 }
 
 impl ApplicationHandler<UserEvent> for App {
@@ -7049,3 +7280,7 @@ mod pty_input_tests;
 #[cfg(test)]
 #[path = "privilege_tests.rs"]
 mod privilege_tests;
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod mod_tests;

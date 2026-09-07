@@ -13,8 +13,7 @@ resource totals are in [Memory](Memory).
 The local PTY, parser, grid, keyboard, paste, mouse-tracking, selection, and copy
 paths are cross-platform application behavior. The optional SSH transport exists
 behind the `sonicterm-io/ssh` feature, but no shipping GUI call site connects an
-`SshHandle`. `sonicterm-mux` is a standalone workspace binary that is not used
-by the GUI and is not packaged.
+`SshHandle`.
 
 ### Byte and thread flow
 
@@ -57,9 +56,31 @@ AppKit, Win32, or winit window methods.
 ### Local PTY contract
 
 `PtyHandle` owns the child, PTY master, reader and writer threads, bounded
-channels, selected shell path, and a resize callback. The callback packs
-`(cols, rows)` into one atomic value and suppresses identical requests, avoiding
-unnecessary SIGWINCH or ConPTY reflow.
+channels, selected shell path, and a resize callback.
+
+The callback returns `anyhow::Result<()>`. It holds the native call and the last
+applied `(cols, rows)` behind one lock, so native resizes are serialized and the
+cache records the last successful native call:
+
+- A zero column or row count is refused as an `InvalidInput` error before the
+  native call runs and before the cache changes.
+- A request equal to the last *applied* size is skipped, avoiding an unnecessary
+  SIGWINCH or ConPTY reflow.
+- Only a successful native call caches the size. A failed request is therefore
+  not deduplicated away: the next identical request reaches the native call
+  again, and the last successful size stays cached.
+- The first request always reaches the native call. The cache starts empty
+  rather than seeded from the spawn dimensions, so nothing can match it.
+
+The GUI resizes the grid first and does not roll it back when the native call
+fails: the pane keeps the geometry the user asked for, and only the child's view
+of it lags. `sonicterm-app` reports the failure through `PaneState::resize_pty`,
+which warns once per failing run — the first failure is logged with the pane id,
+requested columns and rows, and the error, and further failures stay silent
+until a resize succeeds and clears the latch. Warning suppression never
+suppresses a resize attempt: an invalid size and a successful duplicate are the
+only requests that do not reach the native call, and the IO boundary decides
+both, not the warning latch.
 
 If `[terminal].shell` is absent:
 
@@ -110,6 +131,19 @@ Current protocol support includes:
   clipboard events, OSC 4/10/11/12 color queries, and OSC 133 prompt markers;
 - DSR, DA, XTVERSION, palette, and kitty keyboard replies;
 - iTerm2, kitty, and Sixel media events.
+
+`CSI 3 J` erases only the active primary screen's saved history. It preserves
+live cells, cursor, rendition, margins, and the configured future history limit.
+Empty history and an active alternate screen are no-ops; alternate-screen ED3
+never touches the saved primary. ED0/1/2 keep their visible-screen erase ranges.
+
+Cursor-position DSR (`CSI 6 n`) reports a physical column in `1..=cols`, even
+when the insertion cursor carries the delayed-wrap sentinel. Repeated queries
+do not consume that wrap. LF, VT, FF, IND, and NEL share a margin-aware hard
+advance: scroll at the active region's bottom, otherwise advance within physical
+bounds without scrolling protected rows. LF/VT/FF use the current erase fill;
+IND/NEL use default fill, and only NEL returns to column zero. Hard advances
+cancel delayed wrap and clear the destination's automatic-wrap provenance.
 
 OSC 7 keeps the decoded path separate from its authority-bearing, host-aware
 snapshot. Relative local-path authorization uses only the strict snapshot. A
@@ -191,7 +225,12 @@ documented in [Usage](Usage).
 
 A `Grid` owns visible rows, bounded scrollback, cursor/default-cell state, dirty
 rows, content sequence numbers, an optional boxed saved primary screen, and up
-to 256 OSC 133 prompt regions in scrollback-absolute coordinates.
+to 256 OSC 133 prompt regions per screen in scrollback-absolute coordinates.
+Primary prompts stay with the saved primary while alternate mode is active, so
+alternate prompt navigation cannot reuse hidden primary markers. Any history
+prefix removal drops prompts whose starts were removed and rebases survivors.
+Nonempty ED3 advances the eviction counter by the exact number removed and
+repaints all visible rows without changing their content stamps.
 
 The exact geometry bounds are:
 
@@ -214,6 +253,10 @@ mutations expand or repair around them so half a glyph cannot remain. Combining
 characters attach to the previous lead cell. `Line` stores arbitrary rows as
 `Flat(Vec<Cell>)` and materially smaller repetitive rows as run-length
 `Cluster(Vec<Cluster>)`; both representations iterate and hash identically.
+A column shrink checks only the new rightmost cell and replaces a clipped
+`WIDE` lead with the resize fill in either storage form. Complete pairs remain
+intact across visible, history, and saved-primary rows. This is not reflow:
+regrowth cannot resurrect clipped text or invent its continuation.
 
 Every content mutation advances the grid revision, marks affected rows, and
 stamps changed content. Cursor-only and presentation-only changes do not advance
@@ -230,16 +273,6 @@ without persistence or comparison; ssh-agent, password, and
 keyboard-interactive authentication are absent. Because the GUI does not create
 an `SshHandle`, this is not a shipping remote-session feature.
 
-`sonicterm-mux` currently implements length-prefixed bincode messages for list,
-spawn, attach, detach, input, resize, kill, and explicit replay. A session has a
-PTY, a 256 KiB raw-byte replay ring, and a bounded subscriber queue. The first
-output gap requires `ResyncRequired`; later live bytes remain suppressed until the
-client resets its parser and applies one replay snapshot. Snapshot and live-output
-payloads share an 8 KiB per-message ceiling; ordered `start`/`complete` fragments
-reconstruct the snapshot before live delivery resumes. It forwards bytes without
-server-side VT parsing or grid-aware scrollback. No GUI or platform crate depends
-on it, and release workflows do not package it.
-
 ### Code locations
 
 | Topic | Primary paths |
@@ -251,7 +284,6 @@ on it, and release workflows do not package it.
 | VT parser and modes | `crates/sonicterm-vt/src/vt.rs` |
 | Grid and line storage | `crates/sonicterm-grid/src/{grid,line,hyperlink}.rs` |
 | Selection and copy | `crates/sonicterm-ui/src/selection.rs`, `crates/sonicterm-app/src/app/misc.rs` |
-| Mux protocol | `crates/sonicterm-mux/src/{proto,frame,server,main}.rs` |
 
 ## 中文
 
@@ -264,7 +296,7 @@ SonicTerm 的终端核心在子进程与有界单元格网格之间传递字节�
 
 本地 PTY、解析器、网格、键盘、粘贴、鼠标追踪、选择与复制路径属于跨平台应用行为。
 可选 SSH 传输位于 `sonicterm-io/ssh` 功能之后，但发布版 GUI 没有创建 `SshHandle`
-的调用点。`sonicterm-mux` 是工作区中的独立二进制，GUI 不使用，发布包也不包含。
+的调用点。
 
 ### 字节与线程流
 
@@ -301,8 +333,25 @@ VT 工作线程会先合并输出，再请求一帧。连续 3 ms 没有新数�
 ### 本地 PTY 契约
 
 `PtyHandle` 拥有子进程、PTY 主端、读写线程、有界通道、已选 shell 路径和尺寸调整
-回调。回调把 `(cols, rows)` 打包到一个原子值中，并忽略相同请求，避免多余的
-SIGWINCH 或 ConPTY 重排。
+回调。
+
+回调返回 `anyhow::Result<()>`。它把原生调用和最后一次成功应用的 `(cols, rows)`
+放在同一把锁后面，因此原生尺寸调整是串行的，缓存记录的是最后一次成功的原生调用：
+
+- 列数或行数为零时，在原生调用之前、也在缓存变化之前，以 `InvalidInput` 错误
+  拒绝该请求。
+- 与最后一次*已应用*尺寸相同的请求会被跳过，避免多余的 SIGWINCH 或 ConPTY 重排。
+- 只有原生调用成功才会缓存该尺寸。因此失败的请求不会被当作重复请求去重：下一次
+  相同的请求会再次到达原生调用，而最后一次成功的尺寸仍保留在缓存中。
+- 第一次请求一定会到达原生调用。缓存初始为空，不会用 spawn 时的尺寸预填，因此
+  没有任何值能与它匹配。
+
+GUI 先调整网格，且在原生调用失败时不回滚：窗格保留用户请求的几何尺寸，只有子进程
+看到的尺寸会滞后。`sonicterm-app` 通过 `PaneState::resize_pty` 报告失败，每一轮
+连续失败只告警一次——第一次失败会记录窗格 id、请求的列数与行数以及错误，后续失败
+保持静默，直到一次成功的尺寸调整清除该闩锁。告警抑制绝不会抑制一次尺寸调整尝试：
+只有无效尺寸和成功的重复请求不会到达原生调用，而这两者都由 IO 边界决定，与告警
+闩锁无关。
 
 未配置 `[terminal].shell` 时：
 
@@ -347,6 +396,16 @@ TERM_PROGRAM_VERSION=<与终端身份匹配的版本>
   OSC 4/10/11/12 颜色查询、OSC 133 提示符标记；
 - DSR、DA、XTVERSION、调色板和 kitty 键盘回复；
 - iTerm2、kitty 与 Sixel 媒体事件。
+
+`CSI 3 J` 只擦除当前主屏幕的已保存历史，保留可见单元格、光标、样式、滚动边距和
+后续历史容量配置。历史为空或备用屏幕处于活动状态时不做任何修改；备用屏幕中的 ED3
+绝不触碰已保存主屏幕。ED0/1/2 保持各自的可见屏幕擦除范围。
+
+光标位置 DSR（`CSI 6 n`）始终报告 `1..=cols` 内的物理列，即使插入光标持有延迟
+换行哨兵值。重复查询不会消耗待处理换行。LF、VT、FF、IND 和 NEL 共用遵守边距的
+硬换行决策：在活动区域底边滚动该区域，否则只在物理边界内向下移动，不滚动受保护行。
+LF/VT/FF 使用当前擦除填充，IND/NEL 使用默认填充，只有 NEL 回到第零列。硬换行会
+取消延迟换行，并清除目标行的自动换行来源标记。
 
 OSC 7 分开保存解码路径和带权限含义的主机校验快照。相对本地路径授权只使用严格
 快照。原始 OSC 4 收集器上限为 4 KiB，用于保留超过 vte 参数数量上限的调色板查询，
@@ -410,7 +469,10 @@ mouse ownership 与 OSC 52 实际配置见 [用法](Usage)。
 ### 网格存储与不变量
 
 `Grid` 拥有可见行、有界回滚、光标与默认单元格状态、脏行、内容序列号、可选的盒装
-已保存主屏幕，以及最多 256 个使用回滚绝对坐标的 OSC 133 提示符区域。
+已保存主屏幕，以及每个屏幕最多 256 个使用回滚绝对坐标的 OSC 133 提示符区域。
+备用模式下，主屏幕提示符随主屏幕保存，因此备用屏幕的提示符导航不会复用隐藏的主屏幕
+标记。所有历史前缀删除都会丢弃起点已删除的提示符，并重定位仍存活的坐标。非空 ED3
+按实际删除行数推进淘汰计数，重绘所有可见行，但不改变它们的内容序号。
 
 精确几何上限为：
 
@@ -427,7 +489,9 @@ mouse ownership 与 OSC 52 实际配置见 [用法](Usage)。
 双宽字符使用带 `WIDE` 的首单元格和带 `WIDE_CONT` 的续单元格。范围修改会围绕它们
 扩展或修复，不能留下半个字形。组合字符附着到前一个首单元格。`Line` 用
 `Flat(Vec<Cell>)` 保存任意行，用显著更小的游程 `Cluster(Vec<Cluster>)` 保存重复行；
-两种表示的迭代和哈希结果相同。
+两种表示的迭代和哈希结果相同。缩小列数时只检查新的最右单元格，在任一存储形式中将
+失去续格的 `WIDE` 首格替换为尺寸调整填充。可见行、历史和已保存主屏幕中的完整字符对
+保持不变。这不是 reflow：重新扩大行宽不会恢复被裁剪文本，也不会凭空补回续格。
 
 每次内容修改都会推进网格修订计数、标记受影响行并记录内容序列。仅移动光标或改变
 呈现状态不会推进内容序列。主屏幕全屏滚动会让行身份随文本进入历史；备用屏幕、无历史
@@ -440,14 +504,6 @@ mouse ownership 与 OSC 52 实际配置见 [用法](Usage)。
 主机密钥会被直接接受，不保存也不在后续连接中比较；没有 ssh-agent、密码或键盘交互
 认证。GUI 不创建 `SshHandle`，因此这不是已发布的远程会话功能。
 
-`sonicterm-mux` 当前使用带长度前缀的 bincode 消息，支持 `list`、`spawn`、`attach`、
-`detach`、`input`、`resize`、`kill` 和显式 replay。每个会话拥有一个 PTY、256 KiB 原始
-字节回放环和有界订阅队列。第一个输出缺口必须产生 `ResyncRequired`；后续实时字节保持暂停，
-直到客户端重置 parser 并应用一个 replay snapshot。Snapshot 与实时输出负载共用每条消息
-8 KiB 的上限；有序的 `start`/`complete` fragment 会先重建 snapshot，再恢复实时传递。
-它只转发字节，不在服务端解析 VT，也不提供网格感知回滚。GUI 和平台 crate 都不依赖它，
-发布流程也不打包。
-
 ### 代码位置
 
 | 主题 | 主要路径 |
@@ -459,4 +515,3 @@ mouse ownership 与 OSC 52 实际配置见 [用法](Usage)。
 | VT 解析器与模式 | `crates/sonicterm-vt/src/vt.rs` |
 | 网格与行存储 | `crates/sonicterm-grid/src/{grid,line,hyperlink}.rs` |
 | 选区与复制 | `crates/sonicterm-ui/src/selection.rs`、`crates/sonicterm-app/src/app/misc.rs` |
-| Mux 协议 | `crates/sonicterm-mux/src/{proto,frame,server,main}.rs` |

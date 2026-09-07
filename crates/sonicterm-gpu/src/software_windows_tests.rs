@@ -1030,18 +1030,59 @@ fn render_software_image(
     let mut frame =
         WindowsSoftwareFrame::new(target_width, 1, background).expect("valid image frame");
 
-    frame.draw_glyphs(
+    frame.draw_images(
         &atlas,
-        &[GlyphInstance {
-            rect: px_to_ndc(0.0, 0.0, target_width as f32, 1.0, target_width as f32, 1.0),
+        &[ImageInstance {
+            rect_px: [0.0, 0.0, target_width as f32, 1.0],
             uv: info.uv,
-            color: [1.0; 4],
-            flags: [1.0, 0.0, 1.0, 0.0],
+            sample_uv: info.uv,
         }],
     );
 
     assert_eq!(atlas.pixels_bgra(), cpu_pixels, "software drawing must not rewrite atlas bytes");
     (0..target_width).flat_map(|x| frame.pixel_bgra(x, 0)).collect()
+}
+
+/// Native-size images at fractional origins must sample the same texels as the real GPU image path.
+#[test]
+fn fractional_native_image_position_matches_gpu_sampling() {
+    let source = [0, 0, 0, 255, 255, 255, 255, 255, 32, 64, 128, 255];
+    let mut failures = Vec::new();
+    for x in [0.0, 0.25, 0.5, 0.75] {
+        let mut atlas = GlyphAtlas::new(4, 1);
+        let info = atlas
+            .get_or_insert_lazy_without_eviction(
+                GlyphKey::new('\u{fffc}', false, false),
+                3,
+                1,
+                || RasterTile {
+                    width: 3,
+                    height: 1,
+                    offset_x: 0,
+                    offset_y: 0,
+                    advance: 3.0,
+                    coverage: source.to_vec(),
+                    is_color: true,
+                    is_subpixel: false,
+                },
+            )
+            .unwrap();
+        let image = ImageInstance { rect_px: [x, 0.0, 3.0, 1.0], uv: info.uv, sample_uv: info.uv };
+        let gpu = crate::atlas_upload::render_image_instances_readback(
+            &mut atlas,
+            &[image],
+            5,
+            1,
+            [0.0, 0.0, 0.0, 1.0],
+        );
+        let mut frame = WindowsSoftwareFrame::new(5, 1, [0.0, 0.0, 0.0, 1.0]).unwrap();
+        frame.draw_images(&atlas, &[image]);
+        let cpu: Vec<u8> = (0..5).flat_map(|column| frame.pixel_bgra(column, 0)).collect();
+        if cpu.iter().zip(&gpu).any(|(a, b)| a.abs_diff(*b) > 1) {
+            failures.push((x, cpu, gpu));
+        }
+    }
+    assert!(failures.is_empty(), "fractional image parity mismatch: {failures:?}");
 }
 
 /// Every encoded-premultiplied channel and alpha pair must match GPU upload plus sRGB-view decode.
@@ -1271,14 +1312,9 @@ fn scaled_image_keeps_bilinear_sampling() {
         .expect("image tile inserts");
     let mut frame = WindowsSoftwareFrame::new(1, 3, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
 
-    frame.draw_glyphs(
+    frame.draw_images(
         &atlas,
-        &[GlyphInstance {
-            rect: px_to_ndc(0.0, 0.0, 1.0, 3.0, 1.0, 3.0),
-            uv: info.uv,
-            color: [1.0; 4],
-            flags: [1.0, 0.0, 1.0, 0.0],
-        }],
+        &[ImageInstance { rect_px: [0.0, 0.0, 1.0, 3.0], uv: info.uv, sample_uv: info.uv }],
     );
 
     let middle = frame.pixel_bgra(0, 1);
@@ -1290,9 +1326,9 @@ fn scaled_image_keeps_bilinear_sampling() {
     assert_eq!(middle[1], middle[2]);
 }
 
-/// Horizontal-only image scaling keeps its native vertical pixel origin.
+/// Image geometry retains fractional native-axis origins while text keeps its independent pixel alignment.
 #[test]
-fn horizontally_scaled_image_keeps_native_vertical_origin() {
+fn horizontally_scaled_image_keeps_fractional_vertical_origin() {
     let mut atlas = GlyphAtlas::new(2, 1);
     let info = atlas
         .get_or_insert(
@@ -1311,18 +1347,21 @@ fn horizontally_scaled_image_keeps_native_vertical_origin() {
         .expect("image tile inserts");
     let mut frame = WindowsSoftwareFrame::new(4, 4, [0.0, 0.0, 0.0, 1.0]).expect("valid frame");
 
-    frame.draw_glyphs(
-        &atlas,
-        &[GlyphInstance {
-            rect: px_to_ndc(0.0, 1.5, 4.0, 1.0, 4.0, 4.0),
-            uv: info.uv,
-            color: [1.0; 4],
-            flags: [1.0, 0.0, 1.0, 0.0],
-        }],
+    let image = ImageInstance { rect_px: [0.0, 1.5, 4.0, 1.0], uv: info.uv, sample_uv: info.uv };
+    let gpu = crate::atlas_upload::render_image_instances_readback(
+        &mut atlas,
+        &[image],
+        4,
+        4,
+        [0.0, 0.0, 0.0, 1.0],
     );
-
-    assert_eq!(frame.pixel_bgra(0, 2), [255, 255, 255, 255]);
-    assert_eq!(frame.pixel_bgra(0, 1), [0, 0, 0, 255]);
+    frame.draw_images(&atlas, &[image]);
+    for y in 0..4 {
+        let offset = y as usize * 4 * 4;
+        assert_eq!(frame.pixel_bgra(0, y).as_slice(), &gpu[offset..offset + 4]);
+    }
+    assert_eq!(frame.pixel_bgra(0, 1), [255, 255, 255, 255]);
+    assert_eq!(frame.pixel_bgra(0, 2), [0, 0, 0, 255]);
 }
 
 #[test]

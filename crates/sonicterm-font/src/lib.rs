@@ -425,51 +425,61 @@ fn select_fallback_fonts(
     });
 }
 
+/// Classify fallback failure without formatting errors that may contain the input run.
+pub(crate) fn fallback_error_identity(error: &anyhow::Error) -> &'static str {
+    if let Some(error) = error.root_cause().downcast_ref::<std::io::Error>() {
+        match error.kind() {
+            std::io::ErrorKind::NotFound => "not-found",
+            std::io::ErrorKind::PermissionDenied => "permission-denied",
+            std::io::ErrorKind::InvalidData => "invalid-data",
+            _ => "io",
+        }
+    } else {
+        // When: the source is not a typed I/O error, do not persist its potentially payload-bearing message.
+        "font"
+    }
+}
+
 impl FallbackResolveInfo {
     // Lock order: `pending` is released before `LAST_WARNING`; they are never nested.
     fn process(self) {
-        let fallback_str = self.no_glyphs.iter().collect::<String>();
+        let requested_count = self.no_glyphs.len();
         let mut extra_handles = vec![];
 
-        log::trace!("Looking for {} in fallback fonts", fallback_str.escape_unicode());
+        log::trace!(target: "sonicterm_font::payload", "Looking for {:?} in fallback fonts", self.no_glyphs);
 
         match self.locator.locate_fallback_for_codepoints(&self.no_glyphs) {
             Ok(ref mut handles) => extra_handles.append(handles),
-            Err(err) => log::error!(
-                "Error: {:#} while resolving fallback for {} from font-locator",
-                err,
-                fallback_str.escape_unicode()
-            ),
+            Err(err) => {
+                log::error!("font fallback resolution failed: stage=font-locator requested={requested_count} error={}", fallback_error_identity(&err));
+                log::trace!(target: "sonicterm_font::payload", "fallback error: {err:#}");
+            }
         }
 
         if self.config.search_font_dirs_for_fallback {
             match self.font_dirs.locate_fallback_for_codepoints(&self.no_glyphs) {
                 Ok(ref mut handles) => extra_handles.append(handles),
-                Err(err) => log::error!(
-                    "Error: {:#} while resolving fallback for {} from font_dirs",
-                    err,
-                    fallback_str.escape_unicode()
-                ),
+                Err(err) => {
+                    log::error!("font fallback resolution failed: stage=font_dirs requested={requested_count} error={}", fallback_error_identity(&err));
+                    log::trace!(target: "sonicterm_font::payload", "fallback error: {err:#}");
+                }
             }
         }
 
         match self.built_in.locate_fallback_for_codepoints(&self.no_glyphs) {
             Ok(ref mut handles) => extra_handles.append(handles),
-            Err(err) => log::error!(
-                "Error: {:#} while resolving fallback for {} for built-in fonts",
-                err,
-                fallback_str.escape_unicode()
-            ),
+            Err(err) => {
+                log::error!("font fallback resolution failed: stage=built-in requested={requested_count} error={}", fallback_error_identity(&err));
+                log::trace!(target: "sonicterm_font::payload", "fallback error: {err:#}");
+            }
         }
 
         let mut wanted = RangeSet::new();
         for c in self.no_glyphs {
             wanted.add(c as u32);
         }
-        log::trace!(
-            "Fallback fonts that match {} before sorting are: {:#?}",
-            fallback_str.escape_unicode(),
-            extra_handles
+        log::trace!(target: "sonicterm_font::payload",
+            "Fallback fonts for {wanted:?} before sorting are: {extra_handles:#?}"
         );
 
         select_fallback_fonts(
@@ -477,10 +487,8 @@ impl FallbackResolveInfo {
             &mut wanted,
             self.config.sort_fallback_fonts_by_coverage,
         );
-        log::trace!(
-            "Fallback fonts that match {} after selection are: {:#?}",
-            fallback_str.escape_unicode(),
-            extra_handles
+        log::trace!(target: "sonicterm_font::payload",
+            "Fallback selection for requested={requested_count}: {extra_handles:#?}"
         );
 
         if !extra_handles.is_empty() {
@@ -490,11 +498,7 @@ impl FallbackResolveInfo {
         }
 
         if !wanted.is_empty() {
-            // There were some glyphs we couldn't resolve!
-            let fallback_str = wanted
-                .iter_values()
-                .map(|c| std::char::from_u32(c).unwrap_or(' '))
-                .collect::<String>();
+            log::trace!(target: "sonicterm_font::payload", "unresolved font codepoints: {wanted:?}");
 
             let current_gen = self.config.generation();
             let show_warning = self.config.warn_about_missing_glyphs
@@ -511,21 +515,18 @@ impl FallbackResolveInfo {
                 LAST_WARNING.lock().unwrap().replace((Instant::now(), self.config.generation()));
                 let url = "https://wezterm.org/config/fonts.html";
                 log::warn!(
-                    "No fonts contain glyphs for these codepoints: {}.\n\
+                    "No fonts contain glyphs for {} unresolved codepoints.\n\
                      Placeholder glyphs are being displayed instead.\n\
                      You may wish to install additional fonts, or adjust your\n\
                      configuration so that it can find them.\n\
                      {} has more information about configuring fonts.\n\
                      Set warn_about_missing_glyphs=false to suppress this message.",
-                    fallback_str.escape_unicode(),
+                    wanted.len(),
                     url,
                 );
             } else {
                 // When: `show_warning` is false, emit only debug diagnostics.
-                log::debug!(
-                    "No fonts contain glyphs for these codepoints: {}",
-                    fallback_str.escape_unicode()
-                );
+                log::debug!("No fonts contain glyphs for {} unresolved codepoints", wanted.len());
             }
         }
     }

@@ -373,10 +373,7 @@ pub fn seam_classes(retention: &PaneRetention) -> [(ResourceClass, ResourceAmoun
 /// made the inline-media charge undercount when it was released before the
 /// pixels were freed.
 ///
-/// A charge that cannot grow is left at its current size rather than dropped.
-/// Under an unlimited governor that cannot happen; if limits are ever
-/// introduced, reporting a stale-but-live figure beats reporting nothing while
-/// the pane still holds the memory.
+/// A refused resize keeps the old live charge, so accounting may lag measured retention until a later sample.
 pub fn charge_pane_retention(
     governor: &sonicterm_resource::ResourceGovernor,
     owner: sonicterm_types::ResourceOwnerId,
@@ -408,14 +405,7 @@ pub fn charge_classes(
     for (class, amount) in classes {
         match charges.entry(class) {
             std::collections::hash_map::Entry::Occupied(mut held) => {
-                let current = held.get().committed_amount();
-                let outcome = if amount.component_le(current) {
-                    held.get_mut().shrink(amount)
-                } else {
-                    // When: amount exceeds current on some component; try_grow can
-                    // be refused, and the held charge survives that refusal intact.
-                    held.get_mut().try_grow(amount)
-                };
+                let outcome = held.get_mut().try_resize(amount);
                 if let Err(error) = outcome {
                     tracing::debug!(
                         target: "memory",

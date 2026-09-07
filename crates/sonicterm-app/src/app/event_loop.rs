@@ -363,14 +363,14 @@ impl App {
         // boundary: typing latency must still feel instant, and the frame
         // boundary is the tightest budget that preserves vsync alignment.
         if self.pending_redraw {
-            if let Some(last_render) = self.main().map(|ws| ws.last_render) {
+            if let Some(window) = self.main() {
                 let composing = self.main().map(|ws| ws.ime.is_composing()).unwrap_or(false);
                 let period = crate::app::effective_frame_period(
                     self.software_render_degrade,
                     composing,
                     self.frame_period,
                 );
-                let at = last_render + period;
+                let at = window.redraw_not_before(period);
                 next = Some(next.map_or(at, |cur| cur.min(at)));
             }
         }
@@ -387,7 +387,7 @@ impl App {
                     ws.ime.is_composing(),
                     self.frame_period,
                 );
-                let at = ws.last_render + period;
+                let at = ws.redraw_not_before(period);
                 next = Some(next.map_or(at, |cur| cur.min(at)));
             }
         }
@@ -555,14 +555,19 @@ impl App {
             UserEvent::PathProbeFinished(result) => {
                 self.handle_path_probe_finished(*result);
             }
-            UserEvent::PtyInputRejected { bytes, reason } => {
-                self.show_notification_for_kind(
-                    self.frontmost_kind(),
-                    sonicterm_ui::overlays::NotificationLevel::Error,
-                    format!(
-                        "Terminal input was not sent ({reason}; {} bytes). Retry after the terminal responds.",
-                        bytes.len()
-                    ),
+            UserEvent::PtyInputRejected {
+                pane_id,
+                source,
+                rejected_bytes,
+                reason,
+                diagnostics,
+            } => {
+                self.handle_pty_input_rejected(
+                    pane_id,
+                    source,
+                    rejected_bytes,
+                    reason,
+                    diagnostics,
                 );
             }
             UserEvent::RuntimeSmokeTimeout => {
@@ -584,6 +589,50 @@ impl App {
         // its new window before cross-window drag-residue cleanup
         // runs. Ordering is the entire point — do not move above.
         self.drain_pending_os_teardown();
+    }
+
+    /// Log payload-free rejection evidence and notify only the pane's current live window.
+    pub(super) fn handle_pty_input_rejected(
+        &mut self,
+        pane_id: u64,
+        source: super::PtyInputSource,
+        rejected_bytes: usize,
+        reason: String,
+        diagnostics: sonicterm_io::pty::PtyInputDiagnostics,
+    ) {
+        let window_id =
+            self.windows.iter().find_map(|(id, ws)| ws.panes.contains_key(&pane_id).then_some(*id));
+        tracing::warn!(
+            pane_id,
+            ?window_id,
+            ?source,
+            rejected_bytes,
+            %reason,
+            observation = "concurrent",
+            queued_messages = diagnostics.queued_messages,
+            queued_bytes = diagnostics.queued_bytes,
+            queue_capacity = diagnostics.queue_capacity,
+            writer_phase = ?diagnostics.writer_phase,
+            in_flight_bytes = diagnostics.in_flight_bytes,
+            in_flight_millis = ?diagnostics.in_flight_millis,
+            completed_messages = diagnostics.completed_messages,
+            "terminal input was not queued because the PTY writer is unavailable or saturated"
+        );
+        let Some(window_id) = window_id else {
+            // When: `window_id` is absent, retain the diagnostic without alarming an unrelated frontmost terminal.
+            return;
+        };
+        let kind = if Some(window_id) == self.main_window_id {
+            super::FrontmostKind::Main
+        } else {
+            // When: `window_id` differs from `main_window_id`, route the notification to that child rather than the frontmost window.
+            super::FrontmostKind::Child(window_id)
+        };
+        self.show_notification_for_kind(
+            kind,
+            sonicterm_ui::overlays::NotificationLevel::Error,
+            format!("Terminal input was not sent (pane {pane_id}; {source:?}; {reason}; {rejected_bytes} bytes)."),
+        );
     }
 
     pub(super) fn handle_clipboard_write(&mut self, text: String) {
@@ -897,6 +946,7 @@ impl App {
         // the authoritative source for `main_window_id`.
         if let Some(prev) = self.main_window_id.take() {
             self.windows.remove(&prev);
+            self.window_keys.remove(prev);
         }
         self.main_window_id = Some(main_id);
         let shadow = super::WindowState {
@@ -922,6 +972,7 @@ impl App {
             modifiers: ModifiersState::empty(),
             pty_pressed_keys: std::collections::HashMap::new(),
             last_render: std::time::Instant::now(),
+            retry_not_before: None,
             hover_link: false,
             pressed_tab: None,
             drag_session: None,

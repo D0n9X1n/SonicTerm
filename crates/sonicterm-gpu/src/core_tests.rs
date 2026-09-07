@@ -1,6 +1,169 @@
 use super::*;
 use sonicterm_types::{ClassCoverage, PaneSeamTerm};
 
+#[derive(Clone, Default)]
+struct GlyphLogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for GlyphLogCapture {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for GlyphLogCapture {
+    type Writer = Self;
+    fn make_writer(&'a self) -> Self {
+        self.clone()
+    }
+}
+
+// Real ASCII and shaped emission keeps white masks/color sentinels ordinary and cache geometry unchanged.
+#[test]
+fn ordinary_white_and_color_glyph_emission_does_not_warn() {
+    use sonicterm_text::glyph_atlas::{RasterTile, Rasterizer};
+    use tracing_subscriber::{layer::SubscriberExt, Layer};
+    struct Tile(bool);
+    impl Rasterizer for Tile {
+        fn rasterize(&mut self, _: sonicterm_types::GlyphKey) -> Option<RasterTile> {
+            Some(RasterTile {
+                width: 2,
+                height: 3,
+                offset_x: 1,
+                offset_y: -2,
+                advance: 2.0,
+                coverage: if self.0 { [8, 16, 32, 64].repeat(6) } else { vec![255; 6] },
+                is_color: self.0,
+                is_subpixel: false,
+            })
+        }
+    }
+    let captured = GlyphLogCapture::default();
+    let subscriber = tracing_subscriber::registry().with(
+        tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(captured.clone())
+            .with_filter(tracing_subscriber::EnvFilter::new("sonic=warn")),
+    );
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::warn!(target: "sonic::render::glyph", "glyph-positive-control");
+        let mut stack = sonicterm_engine::FontStack::try_new_with_font_dirs_for_test(
+            &[("Rec Mono St.Helens", false)],
+            vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")],
+            14.0,
+            72,
+            1.0,
+        )
+        .unwrap();
+        let shaper = stack.clone();
+        for ch in ['A', '='] {
+            for is_color in [false, true] {
+                for foreground in [Color::Rgb(255, 255, 255), Color::Rgb(20, 40, 60)] {
+                    let mut atlas = GlyphAtlas::new(32, 32);
+                    let cell = Cell::plain(ch, foreground, Color::Default, CellFlags::empty());
+                    let style = RunStyle::from_cell(&cell);
+                    let key = if ch == 'A' {
+                        sonicterm_types::GlyphKey::new(ch, false, false)
+                    } else {
+                        let glyph = shaper.shape_text(&ch.to_string()).unwrap().remove(0);
+                        sonicterm_types::GlyphKey::shaped(
+                            ch,
+                            glyph.font_idx as u8,
+                            glyph.glyph_pos,
+                            false,
+                            false,
+                        )
+                    };
+                    let info = atlas.get_or_insert(key, &mut Tile(is_color)).unwrap();
+                    let pixels = atlas.pixels().to_vec();
+                    let mut glyphs = Vec::new();
+                    let mut tofu = Vec::new();
+                    let mut missing = Vec::new();
+                    GpuRenderer::flush_shape_run(
+                        &mut atlas,
+                        "Rec Mono St.Helens",
+                        14.0,
+                        &mut glyphs,
+                        &mut tofu,
+                        &mut missing,
+                        0,
+                        0,
+                        style,
+                        &[(0, cell)],
+                        &Theme::default(),
+                        ChromeColor::rgb(255, 255, 255),
+                        10.0,
+                        20.0,
+                        0.0,
+                        0.0,
+                        100.0,
+                        100.0,
+                        15.0,
+                        &[0.0, 10.0],
+                        Some(&shaper),
+                        Some(&mut stack),
+                        None,
+                        [0.0; 4],
+                        false,
+                    );
+                    assert_eq!(glyphs.len(), 1);
+                    assert!(tofu.is_empty() && missing.is_empty());
+                    assert_eq!(glyphs[0].rect, px_to_ndc(1.0, 13.0, 2.0, 3.0, 100.0, 100.0));
+                    assert_eq!(glyphs[0].uv, info.uv);
+                    assert_eq!(glyphs[0].flags, glyph_flags(is_color, false));
+                    let expected_color = if is_color {
+                        [1.0; 4]
+                    } else {
+                        chrome_color_to_linear_rgba(color_to_chrome(
+                            foreground,
+                            &Theme::default(),
+                            ChromeColor::rgb(255, 255, 255),
+                        ))
+                    };
+                    assert_eq!(glyphs[0].color, expected_color);
+                    assert_eq!(atlas.pixels(), pixels);
+                    assert_eq!(atlas.hits(), 1);
+                }
+            }
+        }
+    });
+    let output = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    assert!(output.contains("glyph-positive-control"));
+    assert!(!output.contains("emitting a glyph in pure white"), "{output}");
+}
+
+// Genuine atlas pressure still emits its production warning, while unchanged media stays quiet.
+#[test]
+fn atlas_pressure_warning_remains_observable() {
+    use tracing_subscriber::{layer::SubscriberExt, Layer};
+    let captured = GlyphLogCapture::default();
+    let subscriber = tracing_subscriber::registry().with(
+        tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(captured.clone())
+            .with_filter(tracing_subscriber::EnvFilter::new("sonic=warn")),
+    );
+    tracing::subscriber::with_default(subscriber, || {
+        let atlas = GlyphAtlas::new(1, 1);
+        report_inline_image_pressure(true, 1, &atlas);
+        report_inline_image_pressure(false, 1, &atlas);
+        report_inline_image_pressure(true, 0, &atlas);
+    });
+    let output = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+    assert_eq!(
+        output
+            .matches("inline image atlas full; skipped older images without evicting text glyphs")
+            .count(),
+        1
+    );
+    assert!(output.contains("skipped=1"));
+}
+
 /// Software adapters select low reserve while hardware keeps the performance policy.
 ///
 /// Exercising both classification values pins the policy seam before descriptor construction.
@@ -725,6 +888,7 @@ fn warp_retained_redraw_clears_overhanging_glyph_ink() {
             WIDTH as f32,
             HEIGHT as f32,
             SubpixelAaMode::Off,
+            None,
             &[],
             &[],
             &glyphs,
@@ -802,7 +966,8 @@ fn warp_retained_redraw_clears_overhanging_glyph_ink() {
             WIDTH as f32,
             HEIGHT as f32,
             SubpixelAaMode::Off,
-            &[clear],
+            Some(clear),
+            &[],
             &[],
             &[],
             &[],
@@ -828,6 +993,240 @@ fn warp_retained_redraw_clears_overhanging_glyph_ink() {
     let bytes = slice.get_mapped_range().expect("mapped WARP readback");
 
     assert_eq!(&bytes[35 * BYTES_PER_ROW as usize..35 * BYTES_PER_ROW as usize + 3], &[0, 0, 0]);
+}
+
+struct RetainedPixelFixture {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    pipeline: WeztermPipeline,
+    image_upload: crate::atlas_upload::AtlasUpload,
+    glyph_upload: crate::atlas_upload::AtlasUpload,
+    target: wgpu::Texture,
+    view: wgpu::TextureView,
+    dual_source: bool,
+}
+
+impl RetainedPixelFixture {
+    fn new() -> Self {
+        #[cfg(target_os = "windows")]
+        let (backends, fallback) = (wgpu::Backends::DX12, true);
+        #[cfg(not(target_os = "windows"))]
+        let (backends, fallback) = (wgpu::Backends::all(), false);
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends,
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: None,
+            force_fallback_adapter: fallback,
+            apply_limit_buckets: false,
+        }))
+        .expect("retained-pixel adapter");
+        let features = selected_optional_device_features(adapter.features(), cfg!(windows));
+        let dual_source = features.contains(wgpu::Features::DUAL_SOURCE_BLENDING);
+        let (device, queue) = pollster::block_on(adapter.request_device(&device_descriptor_for(
+            adapter.get_info().device_type == wgpu::DeviceType::Cpu,
+            features,
+        )))
+        .expect("retained-pixel device");
+        let pipeline = WeztermPipeline::new(&device, wgpu::TextureFormat::Bgra8UnormSrgb, 3);
+        let atlas = GlyphAtlas::new(1, 1);
+        let image_upload = crate::atlas_upload::AtlasUpload::new(
+            &device,
+            &atlas,
+            pipeline.image_bind_group_layout(),
+            crate::atlas_upload::AtlasBindingKind::Image,
+        );
+        let glyph_upload = crate::atlas_upload::AtlasUpload::new(
+            &device,
+            &atlas,
+            pipeline.glyph_bind_group_layout(),
+            crate::atlas_upload::AtlasBindingKind::Glyph,
+        );
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("retained reset pixel fixture"),
+            size: wgpu::Extent3d { width: 4, height: 2, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Bgra8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&Default::default());
+        Self { device, queue, pipeline, image_upload, glyph_upload, target, view, dual_source }
+    }
+
+    fn draw(
+        &mut self,
+        first: bool,
+        damage: PixelRect,
+        background: wgpu::Color,
+        mode: SubpixelAaMode,
+        quads: &[QuadInstance],
+    ) {
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        draw_retained_frame(
+            &mut self.pipeline,
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &self.view,
+            self.image_upload.image_bind_group(),
+            self.glyph_upload.glyph_bind_group(),
+            4.0,
+            2.0,
+            first,
+            damage,
+            background,
+            mode,
+            quads,
+            &[],
+            &[],
+            &[],
+            &[],
+        );
+        self.queue.submit([encoder.finish()]);
+    }
+
+    fn pixels(&self) -> Vec<[u8; 4]> {
+        const STRIDE: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("retained reset readback"),
+            size: u64::from(STRIDE) * 2,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            self.target.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(STRIDE),
+                    rows_per_image: Some(2),
+                },
+            },
+            wgpu::Extent3d { width: 4, height: 2, depth_or_array_layers: 1 },
+        );
+        self.queue.submit([encoder.finish()]);
+        let slice = readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        self.device.poll(wgpu::PollType::wait_indefinitely()).expect("retained readback poll");
+        let mapped = slice.get_mapped_range().expect("retained mapped pixels");
+        let mut pixels = Vec::new();
+        for y in 0..2 {
+            for x in 0..4 {
+                let offset = y * STRIDE as usize + x * 4;
+                pixels.push(mapped[offset..offset + 4].try_into().unwrap());
+            }
+        }
+        drop(mapped);
+        readback.unmap();
+        pixels
+    }
+}
+
+fn reset_background(opacity: f32) -> wgpu::Color {
+    wgpu::Color {
+        r: f64::from(0.125 * opacity),
+        g: f64::from(0.25 * opacity),
+        b: f64::from(0.5 * opacity),
+        a: f64::from(opacity),
+    }
+}
+
+fn clear_bgra(background: wgpu::Color) -> [u8; 4] {
+    [
+        crate::color::linear_channel_to_srgb_u8(background.b as f32),
+        crate::color::linear_channel_to_srgb_u8(background.g as f32),
+        crate::color::linear_channel_to_srgb_u8(background.r as f32),
+        (background.a * 255.0).round() as u8,
+    ]
+}
+
+fn pixels_close(actual: [u8; 4], expected: [u8; 4]) -> bool {
+    actual.into_iter().zip(expected).all(|(a, b)| a.abs_diff(b) <= 1)
+}
+
+/// The first retained frame writes background alpha once at every supported opacity.
+#[test]
+fn retained_first_frame_does_not_blend_a_second_background_reset() {
+    let mut fixture = RetainedPixelFixture::new();
+    let mut failures = Vec::new();
+    for opacity in [0.0, 0.5, 1.0] {
+        let background = reset_background(opacity);
+        fixture.draw(true, full_surface_rect(4, 2), background, SubpixelAaMode::Off, &[]);
+        let actual = fixture.pixels()[0];
+        let expected = clear_bgra(background);
+        if !pixels_close(actual, expected) {
+            failures.push((opacity, actual, expected));
+        }
+    }
+    assert!(failures.is_empty(), "first-frame background mismatch: {failures:?}");
+}
+
+/// Partial resets erase old ink once, preserve peer pixels, and cannot rely on later redraws to decay.
+#[test]
+fn retained_partial_resets_replace_pixels_and_remain_idempotent() {
+    let mut fixture = RetainedPixelFixture::new();
+    let damage = PixelRect { x: 0, y: 0, w: 2, h: 2 };
+    let ink = [QuadInstance::sharp(px_to_ndc(0.0, 0.0, 2.0, 2.0, 4.0, 2.0), [1.0, 0.0, 0.0, 1.0])];
+    let mut modes = vec![SubpixelAaMode::Off];
+    if fixture.dual_source {
+        modes.extend([SubpixelAaMode::Rgb, SubpixelAaMode::Bgr]);
+    }
+    let mut failures = Vec::new();
+    for mode in modes {
+        for opacity in [0.0, 0.5, 1.0] {
+            fixture.draw(true, full_surface_rect(4, 2), wgpu::Color::GREEN, mode, &ink);
+            let baseline = fixture.pixels();
+            assert_eq!(baseline[0], [0, 0, 255, 255], "old ink must be present");
+            let background = reset_background(opacity);
+            fixture.draw(false, damage, background, mode, &[]);
+            let first = fixture.pixels();
+            let idle = fixture.pixels();
+            fixture.draw(false, damage, background, mode, &[]);
+            let repeated = fixture.pixels();
+            let expected = clear_bgra(background);
+            if !pixels_close(first[0], expected) || !pixels_close(repeated[0], expected) {
+                failures.push((mode, opacity, first[0], repeated[0], expected));
+            }
+            assert_eq!(first[3], baseline[3], "outside damage must remain untouched");
+            assert_eq!(repeated[3], baseline[3]);
+            assert_eq!(idle, first, "an idle frame submits no correcting draw");
+        }
+    }
+    println!("replacement_reset=EXERCISED dual_source={}", fixture.dual_source);
+    assert!(failures.is_empty(), "retained reset mismatch: {failures:?}");
+}
+
+/// A later full invalidation clears once while ordinary translucent content still source-overs.
+#[test]
+fn retained_full_clear_preserves_content_blending_and_replaces_prior_frame() {
+    let mut fixture = RetainedPixelFixture::new();
+    let full = full_surface_rect(4, 2);
+    fixture.draw(true, full, wgpu::Color::RED, SubpixelAaMode::Off, &[]);
+    let background = reset_background(0.5);
+    let source = [0.0, 0.25, 0.0, 0.5];
+    let content = [QuadInstance::sharp(px_to_ndc(0.0, 0.0, 1.0, 1.0, 4.0, 2.0), source)];
+
+    fixture.draw(false, full, background, SubpixelAaMode::Off, &content);
+
+    let pixels = fixture.pixels();
+    assert!(pixels_close(pixels[3], clear_bgra(background)), "full clear must discard prior red");
+    let expected = wgpu::Color {
+        r: background.r * 0.5,
+        g: f64::from(source[1]) + background.g * 0.5,
+        b: background.b * 0.5,
+        a: 0.5 + background.a * 0.5,
+    };
+    assert!(
+        pixels_close(pixels[0], clear_bgra(expected)),
+        "content must retain source-over blending"
+    );
 }
 
 #[test]
@@ -1104,8 +1503,20 @@ fn inline_image_atlas_skips_older_images_without_eviction() {
     let mut atlas = GlyphAtlas::new(1, 1);
     let mut instances = Vec::new();
     let placements = [
-        InlineImagePlacement { image: &older, origin_x: 0.0, origin_y: 0.0, painter_order: 0 },
-        InlineImagePlacement { image: &newer, origin_x: 0.0, origin_y: 0.0, painter_order: 1 },
+        InlineImagePlacement {
+            image: &older,
+            origin_x: 0.0,
+            origin_y: 0.0,
+            content_clip: PaneRect::new(0.0, 0.0, 10.0, 10.0),
+            painter_order: 0,
+        },
+        InlineImagePlacement {
+            image: &newer,
+            origin_x: 0.0,
+            origin_y: 0.0,
+            content_clip: PaneRect::new(0.0, 0.0, 10.0, 10.0),
+            painter_order: 1,
+        },
     ];
 
     let skipped =
@@ -1125,7 +1536,303 @@ fn inline_image_atlas_skips_older_images_without_eviction() {
     assert!(atlas.get(newer_key).is_some(), "newest image should win bounded capacity");
     assert!(atlas.get(older_key).is_none(), "older image should be skipped once full");
     assert_eq!(instances.len(), 1);
-    assert_eq!(instances[0].flags[2], 1.0, "image instances select the image atlas");
+    assert_eq!(instances[0].sample_uv, instances[0].uv, "uncut images retain their complete tile");
+}
+
+fn striped_inline_image(width: u32, height: u32) -> sonicterm_render_model::InlineImage {
+    let mut pixels = Vec::new();
+    for y in 0..height {
+        for x in 0..width {
+            pixels.extend_from_slice(&[((x * 13) % 256) as u8, ((y * 71) % 256) as u8, 180, 255]);
+        }
+    }
+    sonicterm_render_model::InlineImage {
+        id: 71,
+        row: 0,
+        col: 0,
+        width,
+        height,
+        bgra: std::sync::Arc::from(pixels),
+    }
+}
+
+/// Image pixels beyond a pane's right edge must not overwrite its peer on either presenter.
+#[test]
+fn inline_image_clips_512_pixels_to_400_pixel_pane() {
+    let image = striped_inline_image(512, 2);
+    let mut atlas = GlyphAtlas::new(512, 2);
+    let mut instances = Vec::new();
+    let placement = InlineImagePlacement {
+        image: &image,
+        origin_x: 0.0,
+        origin_y: 0.0,
+        content_clip: PaneRect::new(0.0, 0.0, 400.0, 2.0),
+        painter_order: 0,
+    };
+    assert_eq!(
+        emit_inline_image_instances(&mut atlas, &mut instances, &[placement], 1.0, 1.0, 520.0, 2.0),
+        0
+    );
+    assert_eq!(instances.len(), 1);
+    let sentinel = [0.0, 1.0, 0.0, 1.0];
+    let gpu = crate::atlas_upload::render_image_instances_readback(
+        &mut atlas, &instances, 520, 2, sentinel,
+    );
+    #[cfg(target_os = "windows")]
+    let cpu = {
+        let mut frame =
+            crate::software_windows::WindowsSoftwareFrame::new(520, 2, sentinel).unwrap();
+        frame.draw_layers(&atlas, &atlas, &[], &instances, &[], &[], &[]);
+        (0..2)
+            .flat_map(|y| (0..520).map(move |x| (x, y)))
+            .flat_map(|(x, y)| frame.pixel_bgra_at(x, y).unwrap())
+            .collect::<Vec<u8>>()
+    };
+    for x in 0..400 {
+        let offset = x * 4;
+        assert_eq!(&gpu[offset..offset + 4], &image.bgra[offset..offset + 4]);
+    }
+    for x in 400..520 {
+        let offset = x * 4;
+        assert_eq!(&gpu[offset..offset + 4], &[0, 255, 0, 255], "GPU peer pixel {x}");
+        #[cfg(target_os = "windows")]
+        assert_eq!(&cpu[offset..offset + 4], &[0, 255, 0, 255], "CPU peer pixel {x}");
+    }
+}
+
+/// Fully pane-clipped or undecoded images must not promote residency, pack tiles, or emit geometry.
+#[test]
+fn inline_image_visibility_matches_empty_emission_and_residency() {
+    let image = striped_inline_image(8, 2);
+    let mut atlas = GlyphAtlas::new(16, 4);
+    let before = atlas.retained_amount();
+    let placement = InlineImagePlacement {
+        image: &image,
+        origin_x: 20.0,
+        origin_y: 0.0,
+        content_clip: PaneRect::new(0.0, 0.0, 10.0, 4.0),
+        painter_order: 0,
+    };
+    let mut instances = Vec::new();
+    let visible = placement.visible_rect(1.0, 1.0, 40.0, 4.0).is_some();
+    assert!(!visible, "on-surface pixels outside their pane are not renderable media");
+    assert!(!image_atlas_promotion_required(&GlyphAtlas::new(1, 1), visible));
+    assert_eq!(
+        emit_inline_image_instances(&mut atlas, &mut instances, &[placement], 1.0, 1.0, 40.0, 4.0),
+        0
+    );
+    assert!(instances.is_empty());
+    assert!(atlas.is_empty());
+    assert_eq!(atlas.retained_amount(), before);
+    let empty =
+        sonicterm_render_model::InlineImage { bgra: std::sync::Arc::from([]), ..image.clone() };
+    let undecoded = InlineImagePlacement { image: &empty, origin_x: 0.0, ..placement };
+    assert!(undecoded.visible_rect(1.0, 1.0, 40.0, 4.0).is_none());
+}
+
+/// Each pane and surface edge clips destination geometry without changing the source-image scale.
+#[test]
+fn inline_image_visible_rect_intersects_all_edges() {
+    let image = striped_inline_image(10, 8);
+    let cases = [
+        (PaneRect::new(3.25, 2.0, 8.0, 8.0), PaneRect::new(3.25, 2.0, 6.75, 6.0)),
+        (PaneRect::new(0.0, 0.0, 7.5, 6.25), PaneRect::new(0.0, 0.0, 7.5, 6.25)),
+        (PaneRect::new(-3.0, -2.0, 20.0, 20.0), PaneRect::new(0.0, 0.0, 10.0, 8.0)),
+        (PaneRect::new(1.25, 0.75, 6.5, 4.5), PaneRect::new(1.25, 0.75, 6.5, 4.5)),
+    ];
+    for (content_clip, expected) in cases {
+        let placement = InlineImagePlacement {
+            image: &image,
+            origin_x: 0.0,
+            origin_y: 0.0,
+            content_clip,
+            painter_order: 0,
+        };
+        assert_eq!(placement.visible_rect(1.0, 1.0, 20.0, 20.0), Some(expected));
+    }
+    let surface = InlineImagePlacement {
+        image: &image,
+        origin_x: -2.25,
+        origin_y: -1.5,
+        content_clip: PaneRect::new(-4.0, -3.0, 30.0, 30.0),
+        painter_order: 0,
+    };
+    assert_eq!(surface.visible_rect(1.0, 1.0, 6.0, 5.0), Some(PaneRect::new(0.0, 0.0, 6.0, 5.0)));
+}
+
+fn packed_image_fixture(
+    image: &sonicterm_render_model::InlineImage,
+    origin: [f32; 2],
+    content_clip: PaneRect,
+) -> (GlyphAtlas, Vec<ImageInstance>) {
+    let mut atlas = GlyphAtlas::new(image.width + 2, image.height + 2);
+    let mut pack_neighbor = |ch, width, height| {
+        atlas
+            .get_or_insert_lazy_without_eviction(
+                sonicterm_types::GlyphKey::new(ch, false, false),
+                width,
+                height,
+                || sonicterm_text::glyph_atlas::RasterTile {
+                    width,
+                    height,
+                    offset_x: 0,
+                    offset_y: 0,
+                    advance: width as f32,
+                    coverage: [0, 0, 255, 255].repeat((width * height) as usize),
+                    is_color: true,
+                    is_subpixel: false,
+                },
+            )
+            .unwrap();
+    };
+    pack_neighbor('T', image.width + 2, 1);
+    pack_neighbor('L', 1, image.height);
+    let placement = InlineImagePlacement {
+        image,
+        origin_x: origin[0],
+        origin_y: origin[1],
+        content_clip,
+        painter_order: 0,
+    };
+    let mut instances = Vec::new();
+    assert_eq!(
+        emit_inline_image_instances(&mut atlas, &mut instances, &[placement], 1.0, 1.0, 16.0, 12.0),
+        0
+    );
+    for (ch, width, height) in [('R', 1, image.height), ('B', image.width + 2, 1)] {
+        atlas
+            .get_or_insert_lazy_without_eviction(
+                sonicterm_types::GlyphKey::new(ch, false, false),
+                width,
+                height,
+                || sonicterm_text::glyph_atlas::RasterTile {
+                    width,
+                    height,
+                    offset_x: 0,
+                    offset_y: 0,
+                    advance: width as f32,
+                    coverage: [0, 0, 255, 255].repeat((width * height) as usize),
+                    is_color: true,
+                    is_subpixel: false,
+                },
+            )
+            .unwrap();
+    }
+    (atlas, instances)
+}
+
+/// Fractional pane cuts keep the unclipped image's interpolation and cannot redefine packed-tile edges.
+#[test]
+fn inline_image_fractional_clips_preserve_original_tile_sampling() {
+    let image = striped_inline_image(8, 6);
+    let surface = PaneRect::new(0.0, 0.0, 16.0, 12.0);
+    let cases = [
+        ([2.25, 1.75], PaneRect::new(4.375, 0.0, 11.625, 12.0)),
+        ([2.25, 1.75], PaneRect::new(0.0, 0.0, 7.625, 12.0)),
+        ([2.25, 1.75], PaneRect::new(0.0, 3.375, 16.0, 8.625)),
+        ([2.25, 1.75], PaneRect::new(0.0, 0.0, 16.0, 5.625)),
+        ([2.25, 1.75], PaneRect::new(4.375, 3.375, 3.25, 2.25)),
+        ([-2.25, -1.75], PaneRect::new(0.375, 0.375, 4.25, 3.25)),
+    ];
+    let sentinel = [0.0, 1.0, 0.0, 1.0];
+    for (origin, clip) in cases {
+        let (mut full_atlas, full_instances) = packed_image_fixture(&image, origin, surface);
+        let baseline = crate::atlas_upload::render_image_instances_readback(
+            &mut full_atlas,
+            &full_instances,
+            16,
+            12,
+            sentinel,
+        );
+        let (mut atlas, instances) = packed_image_fixture(&image, origin, clip);
+        assert_eq!(instances.len(), 1);
+        let instance = instances[0];
+        assert_ne!(instance.uv, instance.sample_uv);
+        assert!(instance.sample_uv[0] > 0.0 && instance.sample_uv[1] > 0.0);
+        assert!(instance.sample_uv[2] < 1.0 && instance.sample_uv[3] < 1.0);
+        assert_eq!(instance.sample_uv, full_instances[0].sample_uv);
+        let gpu = crate::atlas_upload::render_image_instances_readback(
+            &mut atlas, &instances, 16, 12, sentinel,
+        );
+        #[cfg(target_os = "windows")]
+        let cpu = {
+            let mut frame =
+                crate::software_windows::WindowsSoftwareFrame::new(16, 12, sentinel).unwrap();
+            frame.draw_layers(&atlas, &atlas, &[], &instances, &[], &[], &[]);
+            (0..12)
+                .flat_map(|y| (0..16).map(move |x| (x, y)))
+                .flat_map(|(x, y)| frame.pixel_bgra_at(x, y).unwrap())
+                .collect::<Vec<u8>>()
+        };
+        let [left, top, width, height] = instance.rect_px;
+        let mut visible_samples = 0;
+        for y in 0..12 {
+            for x in 0..16 {
+                let offset = (y * 16 + x) * 4;
+                let point = [x as f32 + 0.5, y as f32 + 0.5];
+                let visible = point[0] >= left
+                    && point[0] < left + width
+                    && point[1] >= top
+                    && point[1] < top + height;
+                let expected: [u8; 4] = if visible {
+                    visible_samples += 1;
+                    baseline[offset..offset + 4].try_into().unwrap()
+                } else {
+                    [0, 255, 0, 255]
+                };
+                let actual = gpu[offset..offset + 4].try_into().unwrap();
+                assert!(
+                    pixels_close(actual, expected),
+                    "clip={clip:?} pixel=({x},{y}) GPU={actual:?} expected={expected:?}"
+                );
+                #[cfg(target_os = "windows")]
+                {
+                    let actual = cpu[offset..offset + 4].try_into().unwrap();
+                    assert!(
+                        pixels_close(actual, expected),
+                        "clip={clip:?} pixel=({x},{y}) CPU={actual:?} expected={expected:?}"
+                    );
+                }
+            }
+        }
+        assert!(visible_samples > 0);
+    }
+}
+
+/// Newest-first atlas packing must not change overlapping images' original painter order.
+#[test]
+fn inline_image_clipping_preserves_painter_order() {
+    let older = striped_inline_image(4, 2);
+    let newer = sonicterm_render_model::InlineImage { id: older.id + 1, ..older.clone() };
+    let clip = PaneRect::new(1.25, 0.0, 2.5, 2.0);
+    let placements = [
+        InlineImagePlacement {
+            image: &older,
+            origin_x: 0.0,
+            origin_y: 0.0,
+            content_clip: clip,
+            painter_order: 0,
+        },
+        InlineImagePlacement {
+            image: &newer,
+            origin_x: 0.0,
+            origin_y: 0.0,
+            content_clip: clip,
+            painter_order: 1,
+        },
+    ];
+    let mut atlas = GlyphAtlas::new(8, 2);
+    let mut instances = Vec::new();
+    assert_eq!(
+        emit_inline_image_instances(&mut atlas, &mut instances, &placements, 1.0, 1.0, 8.0, 2.0),
+        0
+    );
+    assert_eq!(instances.len(), 2);
+    assert_eq!(instances[0].rect_px, instances[1].rect_px);
+    assert!(
+        instances[0].sample_uv[0] > instances[1].sample_uv[0],
+        "newer tile packs first but paints last"
+    );
 }
 
 #[test]

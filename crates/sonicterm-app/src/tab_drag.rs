@@ -21,7 +21,8 @@
 // inspect only the current process's `windows` map and remain the authoritative
 // same-process reorder/merge geometry.
 
-use sonicterm_ui::tabbar_view::{TabBarLayout, TAB_BAR_HEIGHT, TEAR_OUT_THRESHOLD_PX};
+use sonicterm_ui::tabbar_view::{detect_tear_out, TabBarLayout};
+use sonicterm_ui::tabs::TabId;
 
 /// What a tab drag will do on mouse-release, given the current cursor
 /// position. Computed each frame from the `DragSession`, but only
@@ -29,17 +30,11 @@ use sonicterm_ui::tabbar_view::{TabBarLayout, TAB_BAR_HEIGHT, TEAR_OUT_THRESHOLD
 /// behavior: moving the cursor back onto the original bar cancels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DragAction<W> {
-    /// Cursor is back over the source window's tab bar — release is a
-    /// no-op (or, optionally, a within-bar reorder; we leave that to a
-    /// dedicated future path).
+    /// Keep the pressed tab in its source window. A sub-threshold click or a
+    /// cancelled drag must not move the tab that mouse-down already activated.
     ReturnToOriginalBar,
-    /// Cursor is over the SOURCE window's tab bar but at a different
-    /// horizontal slot than the press. Release reorders the tab from
-    /// `from` to `to` within the source `TabBar`. Indices are in the
-    /// pre-reorder coordinate space (i.e. `to` is the destination slot
-    /// in the original tab vector); `TabBar::reorder` handles the
-    /// remove-then-insert shift.
-    ReorderTab { from: usize, to: usize },
+    /// Place the captured tab at `to`; the caller resolves its current source index at mutation.
+    ReorderTab { to: usize },
     /// Cursor is over another SonicTerm window's tab bar — release merges
     /// the dragged tab into that window at the indicated slot.
     MergeIntoWindow(DropTarget<W>),
@@ -51,21 +46,21 @@ pub enum DragAction<W> {
 
 /// State carried while the user is holding-and-dragging a tab.
 #[derive(Debug, Clone, Copy)]
-pub struct DragSession {
-    /// Index of the tab in the SOURCE bar at the moment of press.
-    pub press_tab_index: usize,
+pub struct DragSession<W> {
+    /// Window that owned the pressed tab when the gesture began.
+    pub source_window: W,
+    /// Stable identity of the pressed tab, independent of later vector positions.
+    pub source_tab: TabId,
     /// Source-local cursor position at the moment of press.
     pub press_pos: (f32, f32),
     /// Most-recent source-local cursor position.
     pub current_pos: (f32, f32),
 }
 
-impl DragSession {
-    /// Open a drag session anchored at the pressed tab. `current_pos` starts
-    /// equal to `press_pos`, so the session begins below
-    /// [`DRAG_START_THRESHOLD_PX`] and publishes no chip until the cursor moves.
-    pub fn new(press_tab_index: usize, press_pos: (f32, f32)) -> Self {
-        Self { press_tab_index, press_pos, current_pos: press_pos }
+impl<W> DragSession<W> {
+    /// Capture the source identity with zero initial movement, keeping click jitter below the drag threshold.
+    pub fn new(source_window: W, source_tab: TabId, press_pos: (f32, f32)) -> Self {
+        Self { source_window, source_tab, press_pos, current_pos: press_pos }
     }
 }
 
@@ -79,7 +74,7 @@ pub const DRAG_START_THRESHOLD_PX: f32 = 5.0;
 /// [`DRAG_START_THRESHOLD_PX`] from its press point. Pure — the app
 /// uses this each cursor-move to decide whether to publish a
 /// `DragChipOverlay` to the renderer.
-pub fn drag_moved_enough(session: &DragSession) -> bool {
+pub fn drag_moved_enough<W>(session: &DragSession<W>) -> bool {
     let dx = session.current_pos.0 - session.press_pos.0;
     let dy = session.current_pos.1 - session.press_pos.1;
     (dx * dx + dy * dy).sqrt() >= DRAG_START_THRESHOLD_PX
@@ -96,9 +91,10 @@ pub fn drag_moved_enough(session: &DragSession) -> bool {
 /// the cursor and `scale = 1.0`. Once the cursor leaves the bar
 /// vertically (tear-out armed), the drop line is cleared and `scale`
 /// eases out to `1.02` to telegraph the tear gesture.
-pub fn build_drag_chip_overlay(
-    session: &DragSession,
+pub fn build_drag_chip_overlay<W>(
+    session: &DragSession<W>,
     source_bar: &TabBarLayout,
+    source_index: usize,
     title: String,
 ) -> Option<sonicterm_ui::drag_chip::DragChipOverlay> {
     if !drag_moved_enough(session) {
@@ -132,7 +128,7 @@ pub fn build_drag_chip_overlay(
         // flags the source tab for alpha-0.3 painting so the dragged tab visibly
         // lifts off, and insertion_slot opens an 8 px gap in the destination bar
         // at the drop slot while the cursor is over one.
-        source_tab_idx: Some(session.press_tab_index),
+        source_tab_idx: Some(source_index),
         source_alpha: 0.3,
         insertion_slot: if over_bar {
             Some(source_bar.drop_slot(cx, cy))
@@ -148,13 +144,20 @@ pub fn build_drag_chip_overlay(
 /// Pure helper: decide what `mouse-up` should do given the live
 /// session, the optional foreign drop target, and the source bar.
 ///
-/// Ordering: foreign target wins; else over-source-bar = cancel; else
-/// past tear threshold = tear; else = cancel (hysteresis).
+/// A sub-threshold press remains a click, even over another window's bar.
+/// Once movement qualifies, a foreign target wins; otherwise the source bar
+/// reorders or cancels, and movement past the tear threshold tears out.
 pub fn compute_action<W: Copy>(
-    session: &DragSession,
+    session: &DragSession<W>,
     foreign_target: Option<DropTarget<W>>,
     source_bar: &TabBarLayout,
+    source_index: usize,
 ) -> DragAction<W> {
+    if !drag_moved_enough(session) {
+        // When: `session` is below the drag threshold, an overlapping foreign
+        // bar or small edge slip must not turn this click into a transfer.
+        return DragAction::ReturnToOriginalBar;
+    }
     if let Some(t) = foreign_target {
         // When: foreign_target resolved, a drop over another window's bar wins
         // over every source-local outcome.
@@ -165,37 +168,25 @@ pub fn compute_action<W: Copy>(
         // When: point_over_bar holds the release landed on the source bar, so the
         // outcome is a within-bar reorder or a cancel, never a tear-out.
 
-        // `drop_slot` returns a value in `[0, n]` (insertion-slot semantics),
-        // converted below to a tab-vec index in `[0, n-1]`. ReorderTab is gated
-        // on that index differing from the source — dropping a tab onto itself
-        // is the "drop on yourself" no-op that browsers also treat as a cancel.
-        //
-        // A press-then-release with sub-threshold cursor movement is a CLICK,
-        // not a drag, and must never reorder. The right half of any tab — which
-        // includes the title-to-`×` gap on tab 0 — resolves to the next tab's
-        // slot, so without the movement gate a stationary click would swap two
-        // tabs while appearing to do nothing: the active tab simply takes the
-        // on-screen position the other one vacated.
+        // `drop_slot` returns insertion slots; preserve no-op drops on the source tab.
         let n = source_bar.tabwidgets().len();
-        if n > 0 && drag_moved_enough(session) {
-            // When: n is non-zero and drag_moved_enough passes, the release is a
-            // real drag over a populated bar, so a destination slot is resolved.
+        if n > 0 {
+            // When: `n` is nonzero, the confirmed drag has a populated source
+            // bar whose insertion slot can resolve to a tab index.
             let raw_slot = source_bar.drop_slot(cx, cy);
             // Clamp insertion-slot semantics: `raw_slot == n` means
             // "after the last tab", which is the last index.
             let to = raw_slot.min(n - 1);
-            if to != session.press_tab_index {
-                // When: to differs from press_tab_index the tab genuinely moves,
-                // so a reorder is emitted rather than a cancel.
-                return DragAction::ReorderTab { from: session.press_tab_index, to };
+            if to != source_index {
+                // When: `to` differs from the current `source_index`, the captured tab has a real destination change.
+                return DragAction::ReorderTab { to };
             }
         }
         return DragAction::ReturnToOriginalBar;
     }
-    if cy >= TAB_BAR_HEIGHT + TEAR_OUT_THRESHOLD_PX {
-        // When: cy has cleared TAB_BAR_HEIGHT plus TEAR_OUT_THRESHOLD_PX the
-        // pointer is far enough below the bar to commit to a new window.
-        return DragAction::TearOutToNewWindow { drop_local: (cx, cy) };
+    if let Some(tear) = detect_tear_out(source_index, (cx, cy), source_bar) {
+        // When: `tear` clears the live bar's vertical gap, horizontal exit alone cannot detach the tab.
+        return DragAction::TearOutToNewWindow { drop_local: tear.drop_position };
     }
     DragAction::ReturnToOriginalBar
 }
@@ -297,3 +288,7 @@ pub fn find_drop_target_skipping_unrendered<W: Copy>(
             .filter_map(|(id, geom, layout)| layout.map(|layout| (id, geom, layout))),
     )
 }
+
+#[cfg(test)]
+#[path = "tab_drag_tests.rs"]
+mod tab_drag_tests;

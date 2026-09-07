@@ -11,7 +11,7 @@
 
 ## Scope
 - [ ] contracts / app-core (`sonicterm-types`, `sonicterm-app-core`)
-- [ ] terminal / IO (`sonicterm-vt`, `sonicterm-grid`, `sonicterm-io`, `sonicterm-mux`)
+- [ ] terminal / IO (`sonicterm-vt`, `sonicterm-grid`, `sonicterm-io`)
 - [ ] config / UI (`sonicterm-cfg`, `sonicterm-ui`)
 - [ ] text / fonts (`sonicterm-text`, `sonicterm-font*`, `sonicterm-engine`)
 - [ ] rendering (`sonicterm-render-model`, `sonicterm-block-glyph`, `sonicterm-gpu`)

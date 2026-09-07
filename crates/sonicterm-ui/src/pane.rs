@@ -140,9 +140,7 @@ impl PaneTree {
         PaneTree::Leaf { id, zoomed_pane_id: None }
     }
 
-    /// Return the pane currently zoomed to fill the tab, if any.
-    ///
-    /// Both variants carry the flag so it survives a split or collapse.
+    /// Return the pane currently zoomed to fill the tab; successful splitting clears zoom.
     pub fn zoomed_pane_id(&self) -> Option<PaneId> {
         match self {
             PaneTree::Leaf { zoomed_pane_id, .. } | PaneTree::Split { zoomed_pane_id, .. } => {
@@ -187,15 +185,19 @@ impl PaneTree {
         }
     }
 
-    /// Split the focused leaf in `dir`, returning the id of the new pane.
+    /// Split the focused leaf and exit zoom on success; return false without mutation for missing focus.
     pub fn split(&mut self, focus: PaneId, dir: Direction, new_id: PaneId) -> bool {
         let axis = match dir {
             Direction::Left | Direction::Right => SplitAxis::Vertical,
             Direction::Up | Direction::Down => SplitAxis::Horizontal,
         };
         let put_new_first = matches!(dir, Direction::Left | Direction::Up);
-        let zoomed = self.zoomed_pane_id();
-        self.split_recursive(focus, axis, put_new_first, new_id, zoomed)
+        let split = self.split_recursive(focus, axis, put_new_first, new_id);
+        if split {
+            // Clear root zoom so layout includes the newly focused pane after a successful split.
+            self.set_zoomed_pane_id(None);
+        }
+        split
     }
 
     fn split_recursive(
@@ -204,7 +206,6 @@ impl PaneTree {
         axis: SplitAxis,
         new_first: bool,
         new_id: PaneId,
-        zoomed_pane_id: Option<PaneId>,
     ) -> bool {
         match self {
             PaneTree::Leaf { id, .. } if *id == focus => {
@@ -221,14 +222,14 @@ impl PaneTree {
                     ratio: 0.5,
                     first: Box::new(first),
                     second: Box::new(second),
-                    zoomed_pane_id,
+                    zoomed_pane_id: None,
                 };
                 true
             }
             PaneTree::Leaf { .. } => false,
             PaneTree::Split { first, second, .. } => {
-                first.split_recursive(focus, axis, new_first, new_id, zoomed_pane_id)
-                    || second.split_recursive(focus, axis, new_first, new_id, zoomed_pane_id)
+                first.split_recursive(focus, axis, new_first, new_id)
+                    || second.split_recursive(focus, axis, new_first, new_id)
             }
         }
     }

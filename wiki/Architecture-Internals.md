@@ -71,15 +71,23 @@ backstop. Retention is measured before it is charged, so a failed charge does
 not undo memory already retained. A failed growth keeps the previous charge. A
 failed new charge leaves that class absent and writes a `memory` debug record.
 
-A pane owns one `CommittedReservation` per charged `ResourceClass`. A charge is
-resized in place with `try_grow` or `shrink`; it is not released and recreated
-between samples. Owner reattribution passes the complete charge set to
-`CommittedReservation::transfer_batch`. Every token must share one ledger and
-source owner; the batch preserves classes and validates all source balances,
-target states, and target limits under one ordered lock set before mutation.
-Success changes owner-path accounting and token owner ids without changing
-process or per-class totals. Failure leaves every token and ledger shard at the
-source.
+A pane owns one `CommittedReservation` per charged `ResourceClass`. Retention
+uses `try_resize` in place, including samples where bytes grow while items shrink
+or vice versa. Final admission is `current total - old charge + new charge`, not
+a component-wise maximum or release/re-reserve cycle. Any growing axis requires
+open ancestors; reductions can settle while closing. State locks precede class
+locks and ascending owner-usage locks; process-byte growth uses the existing CAS
+as the final fallible step. Refusal leaves the token and all balances unchanged.
+Snapshots remain observational rather than one linearizable global reading.
+
+One-pane reconciliation uses `CommittedReservation::transfer_batch`; tab
+attachment uses `transfer_many` for every moved pane's charges and individual
+target owner in one same-ledger transaction. Both preserve classes and validate
+source balances, target states, and final owner limits before changing any
+shard. Immutable parent ids precede children, so both follow the same ordered
+state/class/owner locks. Success changes owner-path balances and token owner ids
+without changing process or per-class totals. Refusal preserves all source
+tokens; provisional empty owners drop before source custody is restored.
 
 Close order is load-bearing:
 
@@ -112,9 +120,29 @@ correctness, not only speed.
   include pane padding and are clipped to the pane and surface.
 - A dirty alternate-screen pane contributes its complete surface-clipped pane.
   A clean alternate-screen pane contributes no damage.
+- Full-surface replacement clears the retained attachment once; partial damage
+  uses a non-blending background reset under its scissor. Reset and content share
+  one buffer upload and separate draw ranges, preserving content source-over and
+  LCD blending while erasing prior ink without alpha accumulation.
+- Projected background-cache validity includes the viewport row slot. Each
+  `(pane id, absolute row)` owns one projection, replaced when its hash changes;
+  dirty invalidation remains absolute and pane-local with the same capacity cap.
+- Inline-image visibility intersects the original destination, pane content, and
+  surface for both atlas residency and emission. Visible UVs preserve the source
+  transform; separate original tile bounds clamp GPU and CPU bilinear taps. Images
+  retain fractional pixel coordinates without changing text glyph alignment.
 - Changes to terminal cells mark affected rows in the same frame. This includes
   scrolling, reverse index, line insertion/deletion, erase, resize, and
   wide-cell repair.
+- Nonempty primary-history erasure advances the revision and exact eviction
+  counter and marks all visible rows presentation-dirty, without changing their
+  content stamps. Empty history and alternate-screen ED3 change neither screen.
+  Every history-prefix removal drops prompts whose starts were removed and
+  rebases surviving coordinates; saved-primary prompts stay with their rows.
+- Cursor-position replies clamp the insertion sentinel to a physical column
+  without consuming delayed wrap. Hard LF/VT/FF/IND/NEL advancement scrolls only
+  at the effective bottom margin and otherwise clamps to physical bounds. Fill
+  and carriage-return policies remain explicit per control.
 - Each `Line` packs an incoming automatic-wrap bit into its existing content
   sequence word. Only an actual margin wrap sets it. Hard line advances,
   full-row erases, recycled rows, non-reflow resize, and uncertain region
@@ -180,7 +208,10 @@ clears dirty rows.
 Grid geometry accounts for retained row allocations, not only visible
 `cols × rows`. A material column shrink compacts rows. Adjacent resize changes
 keep reusable capacity to avoid repeated allocation. Reducing the scrollback
-limit releases excess `VecDeque` capacity.
+limit releases excess `VecDeque` capacity. Column shrink checks only each new
+right edge for a clipped `WIDE` lead and replaces it with the resize fill;
+complete pairs and compact storage survive. The same `Line` operation covers
+visible, history, and saved-primary rows without reflow or later resurrection.
 
 Clipboard serialization keeps isolated or incomplete right-edge box drawing.
 It removes only a coherent multi-row side that ends in a lower-right frame
@@ -251,7 +282,18 @@ Font discovery, shaping, and rasterization stay separate from renderer policy.
 Generated FFI bindings remain in their wrapper crates. Malformed, missing, or
 out-of-range variable-font metadata falls back to base OS/2 weight and width.
 FreeType embedded bitmap strikes are checked against the 2,048-pixel and 16 MiB
-glyph allocation limits before pixel decoding.
+glyph allocation limits before pixel decoding. BGRA crop bounds are half-open:
+all nontransparent ink survives, and removing `(crop_x, crop_y)` changes bearings
+to `bitmap_left + crop_x` and `bitmap_top - crop_y`. Fully transparent nonempty
+rasters retain their dimensions, metrics, and valid blank atlas representation.
+
+Crash history intersects the selected filter with a DEBUG ceiling and an
+explicit payload-exclusion predicate, including original log-facade targets.
+Owned variable retention is bounded by 50 records, 4 KiB per record including a
+256-byte target limit, and 64 KiB in aggregate. Formatting stops within those
+bounds; panic payload and summary each have a separate 4 KiB limit. Fixed record
+metadata is count-bounded. Backtraces and allocations inside arbitrary producer
+formatters are outside these guarantees; this is not generic secret sanitization.
 
 The hidden warm-window pool defaults to one. Zero disables it. Normal hardware
 accepts at most five. An actual software adapter or resolved degradation caps
@@ -263,8 +305,30 @@ any nonzero target at one. A live config reload clears the pool; later
 Terminal input enqueue is non-blocking. `PtyHandle::send_input_nonblocking`
 uses `try_send` on a four-message channel. A message over 16 MiB, a full queue,
 or a disconnected writer returns `PtyInputError` with the original bytes. The
-app posts `UserEvent::PtyInputRejected`, logs the reason, and shows an error
-notification. It does not replay the bytes automatically.
+app drops the payload and posts metadata-only `UserEvent::PtyInputRejected`,
+logs the pane, current window, typed source, and concurrent queue/writer
+observations, and notifies that pane's window if it still exists. It does not
+replay the bytes automatically. Queue occupancy excludes the active native
+write/flush, whose phase, size, elapsed time, and progress are observed separately.
+
+PTY resize is fallible and its cache is success-only. The callback holds the
+native call and the last applied `(cols, rows)` behind one lock, so native
+resizes are serialized and the cache records the last successful native call. A
+zero axis is refused as an `InvalidInput` error before the native call and
+before the cache changes; a request equal to the last *applied* size is skipped;
+only a successful native call caches a size. A failed request is therefore not
+deduplicated away — the next identical request reaches the native call again —
+and the last successful size stays cached. The first request always reaches the
+native call, because the cache starts empty rather than seeded from the spawn
+dimensions.
+
+The grid is resized first and is never rolled back when the native call fails:
+the pane keeps the requested geometry and only the child's view of it lags.
+`PaneState::resize_pty` reports the failure once per failing run — first failure
+logged with pane id, requested columns and rows, and error, then silence until a
+success clears the latch. The latch gates the log line only. Warning suppression
+never suppresses a resize attempt; an invalid size and a successful duplicate
+are decided at the IO boundary, not by the latch.
 
 The PTY reader uses a reusable 64 KiB `BytesMut` allocation. It sends
 `PtyOutputChunk` views through a 64-slot channel. A full channel blocks the
@@ -438,12 +502,18 @@ Process
 计费失败不会撤销已经保留的内存。增长失败时保留原计费值。新类别计费失败时，该类别保持
 缺失，并写一条 `memory` debug 记录。
 
-窗格为每个已计费的 `ResourceClass` 持有一个 `CommittedReservation`。计费通过
-`try_grow` 或 `shrink` 原地调整，不会在两次采样之间先释放再重新创建。重新归属所有者时，
-代码把完整计费集合交给 `CommittedReservation::transfer_batch`。每个令牌必须属于同一账本和
-同一源所有者；批次会保留分类，并在修改前用一套有序锁完整验证源余额、目标状态和目标上限。
-成功时只修改所有者路径记账和令牌所有者 id，不改变进程总量或各分类总量；失败时全部令牌和
-账本分片都精确保留在源端。
+窗格为每个已计费的 `ResourceClass` 持有一个 `CommittedReservation`。常驻内存采样通过
+`try_resize` 原地调整，也支持字节增长而条目减少或相反的混合变化。最终准入按
+`当前总量 - 旧计费 + 新计费` 计算，不使用逐维最大值，也不先释放再预留。任一维增长都要求
+祖先仍开放；纯减少允许在关闭过程中结算。先获取状态锁，再获取类别锁和按所有者 id 升序的
+用量锁；进程字节增长通过已有 CAS 完成最后一个可失败步骤。拒绝时令牌和所有余额都不变。
+快照仍是观察性读数，而不是一次全局线性化读取。
+
+单窗格协调使用 `CommittedReservation::transfer_batch`；标签页附加使用 `transfer_many`，
+把每个移动窗格的计费及其各自目标所有者纳入同一账本事务。两者都保留分类，并在修改任何分片前
+验证源余额、目标状态及最终所有者上限。不可变父节点的 id 总小于子节点，因此两者遵循同一套
+状态、类别和所有者锁顺序。成功只修改所有者路径余额和令牌 owner id，不改变进程或分类总量；
+拒绝时保留全部源令牌，并在恢复源托管状态前释放空的临时所有者。
 
 关闭顺序不能改变：
 
@@ -468,8 +538,21 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
 
 - 主屏幕窗格贡献所有脏行条带的并集。条带包含窗格内边距，并裁剪到窗格和表面。
 - 备用屏幕窗格只要有脏行，就贡献整个经表面裁剪的窗格。没有脏行时不贡献损伤区域。
+- 替换完整表面时只清除一次保留 attachment；局部损伤在裁剪范围内使用无混合背景重置。
+  重置与内容共享一次缓冲上传并使用不同绘制区间，保留内容的 source-over 与 LCD 混合，
+  同时擦除旧墨迹而不累积 alpha。
+- 投影背景缓存的有效性包含视口行位置。每个 `(pane id, absolute row)` 只持有一个投影，
+  哈希变化时替换旧值；脏行失效仍按绝对行且限制在所属窗格，容量上限不变。
+- 内联图像可见性对原始目标、窗格内容和表面求交，同一结果控制图集驻留与绘制。可见 UV
+  保留源变换，独立的原始图块边界限制 GPU 与 CPU 双线性采样点。图像保留分数像素坐标，
+  不改变文字字形的对齐。
 - 终端单元格变化会在同一帧标记受影响的行，包括滚动、反向索引、插入或删除行、擦除、
   调整大小和宽字符修复。
+- 擦除非空主屏幕历史会推进修订计数和精确淘汰计数，并将所有可见行标记为呈现脏行，
+  但不改变它们的内容序号。历史为空或备用屏幕中的 ED3 不修改任一屏幕。所有历史前缀
+  删除都会丢弃起点已删除的提示符，并重定位存活坐标；已保存主屏幕的提示符随所属行保存。
+- 光标位置回复把插入哨兵值钳制到物理列，不消耗延迟换行。LF/VT/FF/IND/NEL 硬换行只在
+  有效底边滚动，否则钳制在物理边界内；每种控制的填充和回车策略保持显式区分。
 - 每个 `Line` 会把“由前一行自动软换行而来”的 bit 打包进现有内容序号 word。只有真实的
   右边界自动换行会设置它；硬换行、整行擦除、行复用、不做 reflow 的 resize，以及无法证明
   连续性的区域调整会清除相关边界。该 bit 会随行进入 scrollback，并参与行相等性与 hash，
@@ -515,7 +598,9 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
 
 网格几何记账包含保留的行分配，不只计算可见的 `cols × rows`。列数大幅减少时会压紧行。
 相邻尺寸变化会保留可复用容量，避免反复分配。降低回滚历史上限会释放多余的
-`VecDeque` 容量。
+`VecDeque` 容量。缩小列数时仅检查每行的新右边界，把失去续格的 `WIDE` 首格替换为
+尺寸调整填充；完整字符对和紧凑存储保持不变。同一个 `Line` 操作覆盖可见行、历史和
+已保存主屏幕，不执行 reflow，也不会在以后恢复被裁剪文本。
 
 复制到剪贴板时会保留孤立或不完整的右边框线。只有连贯的多行侧边框，并且最终以右下角
 框线字符收尾时，才会删除该边框。在 Windows 上，成功的 OSC 52 写入最多只会延迟重写一次，
@@ -569,7 +654,16 @@ sRGB 彩色 view。Alpha 保持为 RGB 覆盖率最大值，因此不满足
 
 字体发现、塑形和光栅化与渲染器策略分离。生成的 FFI 绑定只留在各自包装 crate 内。
 可变字体元数据格式错误、缺失或越界时，代码回退到基础 OS/2 字重和字宽。FreeType 内嵌
-位图字形会在解码像素前先检查 2,048 像素和 16 MiB 的字形分配上限。
+位图字形会在解码像素前先检查 2,048 像素和 16 MiB 的字形分配上限。BGRA 裁剪边界采用
+半开区间，保留全部非透明像素；移除 `(crop_x, crop_y)` 边距后，bearing 分别变为
+`bitmap_left + crop_x` 与 `bitmap_top - crop_y`。全透明但非空的光栅保留尺寸、度量及
+有效空白图集表示。
+
+崩溃历史采用所选 filter、DEBUG 上限与显式负载排除规则的交集，并检查 log facade 的原始
+目标。自有可变保留量受 50 条记录、每条 4 KiB（其中 target 最多 256 字节）及合计
+64 KiB 限制。格式化在这些边界内停止；panic 负载与摘要各有独立的 4 KiB 上限。
+固定元数据另受记录条数限制。Backtrace 与任意生产端 formatter 内的分配不在这些保证内；
+这不是通用敏感信息清洗。
 
 隐藏预热窗口池默认为 1。设为 0 会关闭它。普通硬件路径最多接受 5。真实软件适配器或最终
 降级状态启用时，任何非零目标都限制为 1。实时配置重载会清空池；后续
@@ -579,8 +673,24 @@ sRGB 彩色 view。Alpha 保持为 RGB 覆盖率最大值，因此不满足
 
 终端输入采用非阻塞入队。`PtyHandle::send_input_nonblocking` 对四条消息的通道调用
 `try_send`。消息超过 16 MiB、队列已满或 writer 已断开时，会返回保留原始字节的
-`PtyInputError`。应用发送 `UserEvent::PtyInputRejected`，记录原因并显示错误通知。
-它不会自动重放这些字节。
+`PtyInputError`。应用丢弃负载后，发送只含元数据的 `UserEvent::PtyInputRejected`，
+记录窗格、当前窗口、类型化来源及并发队列/writer 观察值；窗格仍存在时在其窗口显示通知。
+它不会自动重放这些字节。队列占用不包含正在进行的原生写入或 flush；其阶段、大小、
+持续时间和进度会单独观察。
+
+PTY 尺寸调整是可失败的，且只在成功时缓存。回调把原生调用和最后一次成功应用的
+`(cols, rows)` 放在同一把锁后面，因此原生尺寸调整是串行的，缓存记录的是最后一次成功
+的原生调用。某一维为零时，在原生调用之前、也在缓存变化之前以 `InvalidInput` 错误
+拒绝；与最后一次*已应用*尺寸相同的请求会被跳过；只有原生调用成功才会缓存尺寸。因此
+失败的请求不会被当作重复请求去重——下一次相同的请求会再次到达原生调用——而最后一次
+成功的尺寸仍保留在缓存中。第一次请求一定会到达原生调用，因为缓存初始为空，不会用
+spawn 时的尺寸预填。
+
+网格先被调整，且在原生调用失败时绝不回滚：窗格保留请求的几何尺寸，只有子进程看到的
+尺寸会滞后。`PaneState::resize_pty` 在每一轮连续失败中只报告一次——第一次失败会记录
+窗格 id、请求的列数与行数以及错误，随后保持静默，直到一次成功清除该闩锁。闩锁只控制
+日志行。告警抑制绝不会抑制一次尺寸调整尝试；无效尺寸和成功的重复请求由 IO 边界决定，
+与闩锁无关。
 
 PTY reader 使用可复用的 64 KiB `BytesMut` 分配，并通过 64 槽通道发送
 `PtyOutputChunk` 视图。通道满时 reader 阻塞，让操作系统施加背压；输出不会被丢弃。
