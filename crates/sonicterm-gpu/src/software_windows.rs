@@ -19,7 +19,7 @@ use crate::{
     },
     core::{validated_surface_size, MAX_SURFACE_DIMENSION},
     quad::QuadInstance,
-    wezterm_pipeline::ndc_rect_to_pixels,
+    wezterm_pipeline::{ndc_rect_to_pixels, ImageInstance},
 };
 
 /// Conservative bounded area that amortizes one constant-source blend table.
@@ -90,7 +90,7 @@ impl WindowsSoftwareFrame {
         glyph_atlas: &GlyphAtlas,
         image_atlas: &GlyphAtlas,
         quads: &[QuadInstance],
-        images: &[GlyphInstance],
+        images: &[ImageInstance],
         glyphs: &[GlyphInstance],
         overlay_quads: &[QuadInstance],
         overlay_glyphs: &[GlyphInstance],
@@ -114,13 +114,13 @@ impl WindowsSoftwareFrame {
         image_atlas: &GlyphAtlas,
         subpixel_aa: SubpixelAaMode,
         quads: &[QuadInstance],
-        images: &[GlyphInstance],
+        images: &[ImageInstance],
         glyphs: &[GlyphInstance],
         overlay_quads: &[QuadInstance],
         overlay_glyphs: &[GlyphInstance],
     ) {
         self.draw_quads(quads);
-        self.draw_glyphs_with_subpixel_aa(image_atlas, images, subpixel_aa);
+        self.draw_images(image_atlas, images);
         self.draw_glyphs_with_subpixel_aa(glyph_atlas, glyphs, subpixel_aa);
         self.draw_quads(overlay_quads);
         self.draw_glyphs_with_subpixel_aa(glyph_atlas, overlay_glyphs, subpixel_aa);
@@ -181,6 +181,49 @@ impl WindowsSoftwareFrame {
     #[cfg(test)]
     fn draw_glyphs(&mut self, atlas: &GlyphAtlas, glyphs: &[GlyphInstance]) {
         self.draw_glyphs_with_subpixel_aa(atlas, glyphs, SubpixelAaMode::Off);
+    }
+
+    fn draw_images(&mut self, atlas: &GlyphAtlas, images: &[ImageInstance]) {
+        let aw = atlas.width();
+        let ah = atlas.height();
+        for image in images {
+            let [x, y, w, h] = image.rect_px;
+            if w <= 0.0 || h <= 0.0 {
+                // When: `w` or `h` is empty, interpolation has no drawable destination span.
+                continue;
+            }
+            let x0 = (x - 0.5).ceil().max(0.0) as u32;
+            let y0 = (y - 0.5).ceil().max(0.0) as u32;
+            let x1 = (x + w - 0.5).ceil().clamp(0.0, self.width as f32) as u32;
+            let y1 = (y + h - 0.5).ceil().clamp(0.0, self.height as f32) as u32;
+            let [u0, v0, u1, v1] = image.uv;
+            let [su0, sv0, su1, sv1] = image.sample_uv;
+            let bounds = (
+                (su0 * aw as f32).round() as u32,
+                (sv0 * ah as f32).round() as u32,
+                (su1 * aw as f32).round() as u32,
+                (sv1 * ah as f32).round() as u32,
+            );
+            for yy in y0..y1 {
+                let v = v0 + (v1 - v0) * ((yy as f32 + 0.5 - y) / h);
+                for xx in x0..x1 {
+                    let u = u0 + (u1 - u0) * ((xx as f32 + 0.5 - x) / w);
+                    let sample = sample_color_atlas_bilinear_in_rect(
+                        atlas.pixels_bgra(),
+                        aw,
+                        ah,
+                        u * aw as f32,
+                        v * ah as f32,
+                        bounds,
+                    );
+                    let offset = (yy as usize * self.width as usize + xx as usize) * 4;
+                    blend_premul_linear_over_srgb_bgra(
+                        &mut self.pixels[offset..offset + 4],
+                        sample,
+                    );
+                }
+            }
+        }
     }
 
     fn draw_glyphs_with_subpixel_aa(
@@ -401,21 +444,8 @@ impl WindowsSoftwareFrame {
         let one_to_one_x = (w - src_w).abs() < 0.01;
         let one_to_one_y = (h - src_h).abs() < 0.01;
         let one_to_one = one_to_one_x && one_to_one_y;
-        // Images retain fractional placement only on axes that are resampled. Every text axis uses
-        // one stabilized destination origin regardless of the source tile dimensions.
-        let image = glyph.flags[2] >= 0.5;
-        let draw_x = if image && !one_to_one_x {
-            x
-        } else {
-            // When: `image && !one_to_one_x` is false, X uses pixel-aligned nearest sampling.
-            stabilize_half_pixel_origin(x).round()
-        };
-        let draw_y = if image && !one_to_one_y {
-            y
-        } else {
-            // When: `image && !one_to_one_y` is false, Y uses pixel-aligned nearest sampling.
-            stabilize_half_pixel_origin(y).round()
-        };
+        let draw_x = stabilize_half_pixel_origin(x).round();
+        let draw_y = stabilize_half_pixel_origin(y).round();
         // Keep the unclipped bounds: native sampling must advance past source texels hidden above
         // or left of the frame rather than restarting from the tile's first row or column.
         let unclipped_x0 = (draw_x - 0.5).ceil() as i32;
@@ -430,11 +460,8 @@ impl WindowsSoftwareFrame {
             return;
         }
         let atlas_pixels = atlas.pixels_bgra();
-        let self_colored = image || glyph.flags[0] >= 0.5;
+        let self_colored = glyph.flags[0] >= 0.5;
         let subpixel_glyph = glyph.flags[1] >= 0.5;
-        // Inline images set flags[2]; glyphs leave it clear. Only images want
-        // bilinear scaling — a glyph sampled bilinearly reads its atlas
-        // neighbours and blends them into its own edges.
         for yy in y0..y1 {
             let ty = ((yy as f32 + 0.5 - draw_y) / h).clamp(0.0, 0.999_999);
             let sy = ay0 as f32 + src_h * ty;
@@ -459,20 +486,8 @@ impl WindowsSoftwareFrame {
                         // When: self_colored is false, preserve the coverage mask's linear channel values.
                         bgra8_to_unorm(pixel)
                     }
-                } else if image {
-                    // When: image is set the source is inline media being scaled, where
-                    // bilinear taps smooth the result instead of blocking it up.
-                    sample_color_atlas_bilinear_in_rect(
-                        atlas_pixels,
-                        atlas_w,
-                        atlas_h,
-                        sx,
-                        sy,
-                        (ax0, ay0, ax1, ay1),
-                    )
                 } else {
-                    // When: neither one_to_one nor image holds the glyph is scaled text,
-                    // which takes nearest sampling so no neighbour bleeds into its edges.
+                    // When: `one_to_one` is false, scaled text still uses nearest sampling within its own tile.
 
                     // Nearest, clamped to this glyph's own tile. The clamp is
                     // what makes neighbour bleed impossible rather than
