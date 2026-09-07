@@ -142,6 +142,17 @@ The Windows backend initializes OLE on the UI thread and implements COM
 the shared tab-drag backend, including torn-out child windows. OLE lifetime and
 drag operations stay on the window thread.
 
+### System font fallback
+
+The DirectWrite/GDI bridge passes complete UTF-16 to the analysis source.
+Mapping positions, remaining text, and locale lengths use UTF-16 code units,
+not Rust scalar counts. A zero, out-of-range, or split-surrogate mapping span
+fails the whole native fallback request, including any candidates accumulated
+before the failure. The caller reports the failure and continues its remaining
+configured locators. A successful request returns an ordered, deduplicated
+candidate-font list, not per-character assignments; already-loaded faces and
+BMP behavior keep their existing path.
+
 ### PTY and software presentation
 
 The Windows binary owns GUI glue, not terminal parsing or ConPTY. Local process
@@ -349,6 +360,14 @@ Windows 后端在 UI 线程初始化 OLE，并实现 COM `IDataObject`、`IDropS
 `IDropTarget`。它注册私有 `com.sonic-terminal.tab.v1` clipboard format
 （`CF_SONIC_TAB`），使用 `DoDragDrop` 和 `RegisterDragDrop`。所有目标 HWND 都通过共享
 标签页拖放后端注册，包括拖出的子窗口。OLE 生命周期和拖放操作始终留在窗口线程。
+
+### 系统字体回退
+
+DirectWrite/GDI 桥向 analysis source 传入完整 UTF-16。映射位置、剩余文本及 locale 长度
+都按 UTF-16 代码单元计算，不按 Rust 字符数量计算。返回零长度、越界或拆分代理项对的映射
+范围时，整个原生回退请求失败，包含此前已积累的候选。调用方报告失败并继续其余已配置的
+字体查找源。成功请求返回按顺序去重的候选字体列表，不是逐字符分配；已加载字体和 BMP
+行为保留原有路径。
 
 ### PTY 与软件呈现
 
