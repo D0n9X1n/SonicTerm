@@ -23,7 +23,7 @@ fn bgra_crop_translates_bearings_and_preserves_premultiplied_ink() {
     let raster = bgra_fixture(7, 6, image.as_raw());
     assert_eq!((raster.bearing_x.get(), raster.bearing_y.get()), (-1.0, 8.0));
     assert_eq!((raster.width, raster.height), (3, 2));
-    assert!(raster.data.chunks_exact(4).all(|pixel| pixel == [32, 16, 8, 64]));
+    assert!(raster.data.as_chunks::<4>().0.iter().all(|pixel| *pixel == [32, 16, 8, 64]));
     assert!(raster.has_color && raster.is_scaled);
 }
 
