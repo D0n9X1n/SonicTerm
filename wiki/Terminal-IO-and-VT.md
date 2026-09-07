@@ -41,8 +41,20 @@ shell workloads pin one 64 KiB ring.
 Terminal input is non-blocking. Its channel holds four `Vec<u8>` messages, each
 at most 16 MiB. Oversize, full-queue, and disconnected-writer failures return a
 typed `PtyInputError` that retains the rejected bytes for retry or a visible
-notification. Parser replies use the same bounded sender and never write while
-a parser or grid lock is held.
+notification. Production parsing yields after a reply-producing dispatch. The VT
+worker releases parser and side-effect locks, then waits for capacity in the same
+FIFO input queue before parsing the remaining output. Saturation does not discard
+replies or impose a drop deadline. One dispatch's replies are concatenated in byte
+order; the 4 KiB raw OSC 4 bound limits that staging to less than 32 KiB. There is
+no separate production reply channel or reply-forwarder thread.
+
+A stalled writer can backpressure the bounded output pipeline; a child must read
+its terminal input to make progress. Pane teardown and writer exit cancel capacity
+waits. Closed writers and native write failures remain observable; enqueue success
+does not guarantee consumption by the child. Keyboard and other UI sends remain
+non-blocking and retain their explicit refusal behavior. The standalone parser's
+channel-based `advance` API still uses non-blocking reply delivery; production uses
+`advance_with_replies` and resumes its returned unconsumed suffix.
 
 The VT worker coalesces output before requesting a frame. A quiet interval of
 3 ms flushes a trailing batch; a batch also flushes after 128 KiB or 8 ms. Every
@@ -322,7 +334,15 @@ flowchart TD
 
 终端输入不阻塞。通道最多保存四条 `Vec<u8>` 消息，每条最多 16 MiB。消息过大、
 队列已满或写入端断开时，会返回带类型的 `PtyInputError`，其中仍保留被拒绝的字节，
-便于重试或显示通知。解析器回复使用同一个有界发送端；持有解析器或网格锁时绝不写 PTY。
+便于重试或显示通知。生产解析器在一次产生回复的分派后让出执行；VT worker 释放解析器与
+副作用相关的锁，再等待同一个 FIFO 输入队列出现容量，然后继续解析剩余输出。队列饱和不会
+丢弃回复，也没有超时丢弃期限。同次分派的回复按字节顺序拼接；原始 OSC 4 的 4 KiB 上限使
+该暂存小于 32 KiB。生产路径不再使用独立回复通道或回复转发线程。
+
+停滞的 writer 会向有界输出管线传递背压；子进程必须读取终端输入才能继续推进。窗格销毁和
+writer 退出会取消容量等待。writer 关闭与原生写入失败仍可观察；入队成功不保证子进程已消费。
+键盘等 UI 输入仍为非阻塞，并保留显式拒绝行为。独立解析器的通道式 `advance` API 仍使用
+非阻塞回复交付；生产路径使用 `advance_with_replies`，根据返回的消费长度继续处理剩余字节。
 
 VT 工作线程会先合并输出，再请求一帧。连续 3 ms 没有新数据时刷新尾批次；批次达到
 128 KiB 或等待 8 ms 也会刷新。所有窗格构造路径都使用同一个宿主事件处理器。推进解析器

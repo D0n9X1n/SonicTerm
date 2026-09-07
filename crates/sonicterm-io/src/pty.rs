@@ -4,9 +4,9 @@
 //! directly. `PtyHandle` owns the slave-side child and the master read/write
 //! pair, all decoupled by channels for use from the render thread.
 
-use std::path::{Path, PathBuf};
 use std::{
     io::{Read, Write},
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
@@ -88,6 +88,8 @@ pub enum PtyWriterPhase {
 
 #[derive(Debug)]
 struct PtyWriterProgress {
+    stopping: std::sync::atomic::AtomicBool,
+    closing: std::sync::atomic::AtomicBool,
     epoch: Instant,
     operation: AtomicU64,
     in_flight_bytes: AtomicUsize,
@@ -97,6 +99,8 @@ struct PtyWriterProgress {
 impl PtyWriterProgress {
     fn new() -> Self {
         Self {
+            stopping: std::sync::atomic::AtomicBool::new(false),
+            closing: std::sync::atomic::AtomicBool::new(false),
             epoch: Instant::now(),
             operation: AtomicU64::new(0),
             in_flight_bytes: AtomicUsize::new(0),
@@ -144,9 +148,8 @@ impl PtyWriterProgress {
 /// Owned, cloneable sender for a child process's input channel.
 ///
 /// Wraps the bounded channel so a caller holding one cannot reach the raw
-/// `Sender`. Every path through this type applies the same size cap and
-/// non-blocking discipline as [`PtyHandle::send_input_nonblocking`], which is
-/// the property that makes the raw field private.
+/// `Sender`. All paths enforce the same size cap; `send` is non-blocking,
+/// while `send_wait` applies cancellable backpressure only on worker threads.
 #[derive(Clone, Debug)]
 pub struct PtyInputSender {
     tx: Sender<Outgoing>,
@@ -164,6 +167,41 @@ impl PtyInputSender {
     /// caller can retry or report rather than losing them silently.
     pub fn send(&self, bytes: Vec<u8>) -> Result<(), PtyInputError> {
         try_queue_pty_input(&self.tx, &self.queued_bytes, bytes)
+    }
+
+    /// Wait for input capacity on a worker without parser/grid locks; teardown cancels waiting and returns the retained bytes.
+    pub fn send_wait(&self, bytes: Vec<u8>) -> Result<(), PtyInputError> {
+        self.send_wait_with(bytes, || thread::sleep(Duration::from_millis(1)))
+    }
+
+    // Ordering: stopping Acquire observes teardown's preceding closing flag; channel ownership transfers payloads.
+    fn send_wait_with(
+        &self,
+        mut bytes: Vec<u8>,
+        mut wait: impl FnMut(),
+    ) -> Result<(), PtyInputError> {
+        loop {
+            if self.writer_progress.stopping.load(Ordering::Acquire) {
+                // When: stopping is set, release the retained payload instead of waiting on an undrainable queue.
+                return Err(PtyInputError::WriterDisconnected(bytes));
+            }
+            match self.send(bytes) {
+                Err(PtyInputError::QueueFull(retained)) => {
+                    // Keep the retained bytes ahead of later replies until capacity returns.
+                    bytes = retained;
+                    wait();
+                }
+                result => {
+                    // When: send completes or refuses permanently, return its result without retrying.
+                    return result;
+                }
+            }
+        }
+    }
+
+    /// Whether the owning pane has begun intentional PTY teardown rather than a native writer failure.
+    pub fn is_closing(&self) -> bool {
+        self.writer_progress.closing.load(Ordering::SeqCst)
     }
 
     /// Sample queue occupancy and writer activity without blocking or inspecting input bytes.
@@ -774,6 +812,7 @@ impl PtyIoThread {
     #[cfg(windows)]
     fn cancel_synchronous_io(&self) {
         use std::os::windows::io::AsRawHandle;
+
         use windows::Win32::{Foundation::HANDLE, System::IO::CancelSynchronousIo};
 
         let Some(handle) = self.handle.as_ref() else {
@@ -1042,7 +1081,10 @@ struct PtyHandleTeardown<'a> {
 }
 
 impl PtyTeardownOps for PtyHandleTeardown<'_> {
+    // Ordering: closing SeqCst precedes stopping Release so capacity waiters observe intentional teardown.
     fn signal_cancel(&mut self) {
+        self.handle.writer_progress.closing.store(true, Ordering::SeqCst);
+        self.handle.writer_progress.stopping.store(true, Ordering::Release);
         let _ = self.handle.reader_cancel.try_send(());
         let _ = self.handle.writer_cancel.try_send(());
     }
@@ -1433,7 +1475,7 @@ fn spawn_reader_thread(
     PtyIoThread { handle: Some(handle), done }
 }
 
-// Ordering: `queued_bytes`, `in_flight_bytes`, `completed_messages`, and `operation` use `Relaxed`; only the channel transfers ownership.
+// Ordering: queued_bytes, in_flight_bytes, completed_messages, operation, stopping use Relaxed; the channel transfers ownership.
 fn spawn_writer_thread(
     mut writer: Box<dyn Write + Send>,
     rx: Receiver<Outgoing>,
@@ -1475,6 +1517,7 @@ fn spawn_writer_thread(
                 progress.in_flight_bytes.store(0, Ordering::Relaxed);
                 progress.operation.store(0, Ordering::Relaxed);
             }
+            progress.stopping.store(true, Ordering::Relaxed);
             progress.in_flight_bytes.store(0, Ordering::Relaxed);
             progress.operation.store(3, Ordering::Relaxed);
             // Nothing will drain the queue again. Anything still in it is

@@ -1,3 +1,7 @@
+use std::sync::atomic::Ordering;
+
+use sonicterm_grid::grid::{CellFlags, Color, Grid, UnderlineStyle};
+
 use super::{
     parse_osc7_cwd_snapshot, EscapeFamily, MediaCapture, MediaEvent, MediaProtocol, MouseTracking,
     Osc7Cwd, Parser, VtEvent, CAPTURE_FLOOR_POOL_BYTES, CAPTURE_FLOOR_RESERVED,
@@ -5,8 +9,6 @@ use super::{
     MAX_ESCAPE_SEQUENCE_BYTES, MAX_ITERM2_METADATA_BYTES, MAX_MEDIA_PAYLOAD_BYTES,
     MAX_PROCESS_CAPTURE_STAGING_BYTES, MIN_CAPTURE_STAGING_BYTES,
 };
-use sonicterm_grid::grid::{CellFlags, Color, Grid, UnderlineStyle};
-use std::sync::atomic::Ordering;
 
 /// Serialises every test that brings a media capture into existence.
 ///
@@ -540,6 +542,46 @@ fn full_reply_queue_drops_excess_without_blocking_parser() {
 
     assert_eq!(rx.len(), 1);
     assert_eq!(rx.try_recv().expect("first reply retained"), b"\x1b[0n");
+}
+
+#[test]
+fn captured_replies_resume_at_every_input_split_without_replaying_bytes() {
+    // Yielding must preserve escape/UTF-8 state, ordered replies, and the printable suffix across every split.
+    let input = "hello\x1b[3;7H\x1b[6n\x1b[5n世界!".as_bytes();
+    for split in 0..=input.len() {
+        let mut parser = Parser::new(Grid::new(80, 24));
+        let mut replies = Vec::new();
+        for chunk in [&input[..split], &input[split..]] {
+            let mut offset = 0;
+            while offset < chunk.len() {
+                let (consumed, _, bytes) = parser.advance_with_replies(&chunk[offset..]);
+                assert!(consumed > 0);
+                offset += consumed;
+                replies.extend(bytes);
+            }
+        }
+        assert_eq!(replies, b"\x1b[3;7R\x1b[0n", "split={split}");
+        assert_eq!(parser.grid().row(2)[6].ch, '世');
+        assert_eq!(parser.grid().row(2)[10].ch, '!');
+    }
+}
+
+#[test]
+fn captured_palette_dispatch_exceeds_old_queue_without_loss() {
+    // One capped OSC 4 dispatch may generate more replies than both old channels; stage it before yielding.
+    let mut parser = Parser::new(Grid::new(80, 24));
+    parser.set_theme_palette_color(0, 1, 2, 3);
+    let pairs = "0;?;".repeat(1024);
+    let input = format!("\x1b]4;{}\x07X", pairs.trim_end_matches(';'));
+    let (consumed, _, replies) = parser.advance_with_replies(input.as_bytes());
+    let expected = b"\x1b]4;0;rgb:0101/0202/0303\x07".repeat(1024);
+    assert_eq!(replies, expected);
+    assert!(replies.len() < 32 * 1024);
+    assert_eq!(&input.as_bytes()[consumed..], b"X");
+    let (consumed, _, replies) = parser.advance_with_replies(b"X");
+    assert_eq!(consumed, 1);
+    assert!(replies.is_empty());
+    assert_eq!(parser.grid().row(0)[0].ch, 'X');
 }
 
 #[test]
