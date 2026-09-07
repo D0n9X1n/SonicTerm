@@ -961,7 +961,7 @@ use crate::{
     quad::{
         premultiply, px_to_ndc, scale_premultiplied_alpha, with_premultiplied_alpha, QuadInstance,
     },
-    wezterm_pipeline::WeztermPipeline,
+    wezterm_pipeline::{ImageInstance, WeztermPipeline},
 };
 use sonicterm_render_model::boundary::cfg::config::CursorShape;
 use sonicterm_render_model::boundary::ui::{
@@ -1364,6 +1364,79 @@ pub(crate) fn validated_surface_size(
 
 fn search_text_scroll(prefix_width: f32, cursor_width: f32, visible_width: f32) -> f32 {
     (prefix_width + cursor_width - visible_width).max(0.0)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_retained_frame(
+    pipeline: &mut WeztermPipeline,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    encoder: &mut wgpu::CommandEncoder,
+    view: &TextureView,
+    image_atlas: &wgpu::BindGroup,
+    glyph_atlas: &wgpu::BindGroup,
+    sw: f32,
+    sh: f32,
+    first: bool,
+    damage: PixelRect,
+    background: wgpu::Color,
+    subpixel_aa: SubpixelAaMode,
+    quads: &[QuadInstance],
+    images: &[ImageInstance],
+    glyphs: &[GlyphInstance],
+    overlay_quads: &[QuadInstance],
+    overlay_glyphs: &[GlyphInstance],
+) {
+    let full = first || damage == full_surface_rect(sw as u32, sh as u32);
+    let reset = (!full).then(|| {
+        QuadInstance::sharp(
+            px_to_ndc(damage.x as f32, damage.y as f32, damage.w as f32, damage.h as f32, sw, sh),
+            [background.r as f32, background.g as f32, background.b as f32, background.a as f32],
+        )
+    });
+    let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+        label: Some("sonic-retained-pass"),
+        color_attachments: &[Some(RenderPassColorAttachment {
+            view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: Operations {
+                load: if full {
+                    LoadOp::Clear(background)
+                } else {
+                    // When: `full` is false, replace only the damaged pixels and retain the rest of the attachment.
+                    LoadOp::Load
+                },
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    pass.set_scissor_rect(
+        damage.x.max(0) as u32,
+        damage.y.max(0) as u32,
+        damage.w.max(1),
+        damage.h.max(1),
+    );
+    pipeline.draw_frame(
+        device,
+        queue,
+        &mut pass,
+        image_atlas,
+        glyph_atlas,
+        sw,
+        sh,
+        subpixel_aa,
+        reset,
+        quads,
+        images,
+        glyphs,
+        overlay_quads,
+        overlay_glyphs,
+    );
 }
 
 fn create_frame_texture(
@@ -5262,28 +5335,25 @@ impl GpuRenderer {
 
         let inline_image_placements: Vec<InlineImagePlacement<'_>> = pane_views
             .iter()
-            .flat_map(|pv| {
-                pv.inline_images.iter().map(move |image| (image, pv.origin_x, pv.origin_y))
-            })
+            .flat_map(|pv| pv.inline_images.iter().map(move |image| (image, pv)))
             .enumerate()
-            .map(|(painter_order, (image, origin_x, origin_y))| InlineImagePlacement {
+            .map(|(painter_order, (image, pv))| InlineImagePlacement {
                 image,
-                origin_x,
-                origin_y,
+                origin_x: pv.origin_x,
+                origin_y: pv.origin_y,
+                // Cell layout has a one-cell floor; image clips must use the actual padded pane extent.
+                content_clip: PaneRect::new(
+                    pv.origin_x,
+                    pv.origin_y,
+                    (pv.full_rect.w as f32 - content_inset_l - content_inset_r).max(0.0),
+                    (pv.full_rect.h as f32 - content_inset_t - content_inset_b).max(0.0),
+                ),
                 painter_order,
             })
             .collect();
-        let has_renderable_inline_media = inline_image_placements.iter().any(|placement| {
-            let image = placement.image;
-            if image.width == 0 || image.height == 0 || image.bgra.is_empty() {
-                // When: any dimension is 0 or `bgra` is empty — a failed or
-                // pending decode, which has no pixels to place.
-                return false;
-            }
-            let x = placement.origin_x + image.col as f32 * cell_w;
-            let y = placement.origin_y + image.row as f32 * cell_h;
-            x < sw && y < sh && x + image.width as f32 > 0.0 && y + image.height as f32 > 0.0
-        });
+        let has_renderable_inline_media = inline_image_placements
+            .iter()
+            .any(|placement| placement.visible_rect(cell_w, cell_h, sw, sh).is_some());
         self.demote_image_atlas_if_idle(has_renderable_inline_media);
         let image_atlas_promoted = self.promote_image_atlas_if_needed(
             has_renderable_inline_media,
@@ -5331,7 +5401,7 @@ impl GpuRenderer {
         // helper run-length coalesces adjacent same-bg cells into a single
         // wide quad (an 80-col `\033[41m` fill becomes 1 quad, not 80).
         // Cells whose bg resolves to the theme default are skipped: the
-        // surface `LoadOp::Clear(self.bg)` already covers that area.
+        // attachment clear or partial replacement reset already covers that area.
         // Part B step 3: emit bg quads for EVERY pane using each pane's
         // own origin, not just the active pane.
         //
@@ -7383,70 +7453,26 @@ impl GpuRenderer {
             // — the retained texture is valid, so only damage is redrawn.
             damage.rect().unwrap_or(surface_rect)
         };
-        let bg_clear = [self.bg.r as f32, self.bg.g as f32, self.bg.b as f32, self.bg.a as f32];
-        let mut retained_quads = Vec::with_capacity(quads.len() + 1);
-        retained_quads.push(QuadInstance::sharp(
-            px_to_ndc(
-                damage_rect.x as f32,
-                damage_rect.y as f32,
-                damage_rect.w as f32,
-                damage_rect.h as f32,
-                sw,
-                sh,
-            ),
-            bg_clear,
-        ));
-        retained_quads.extend_from_slice(&quads);
-        {
-            let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
-                label: Some("sonic-retained-pass"),
-                color_attachments: &[Some(RenderPassColorAttachment {
-                    view: &self.frame_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: Operations {
-                        load: if first_retained_frame {
-                            LoadOp::Clear(self.bg)
-                        } else {
-                            // When: `!first_retained_frame` — the texture holds
-                            // the last frame, and clearing would discard it.
-                            LoadOp::Load
-                        },
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_scissor_rect(
-                damage_rect.x.max(0) as u32,
-                damage_rect.y.max(0) as u32,
-                damage_rect.w.max(1),
-                damage_rect.h.max(1),
-            );
-            // WezTerm-style final presentation: every glyph and colored
-            // geometry primitive flows through one vertex/shader/indexed-draw
-            // path. The ordering preserves the previous painter stack:
-            // base quads -> inline images -> base glyphs -> overlay quads
-            // -> overlay glyphs.
-            self.present_pipeline.draw_frame(
-                &self.device,
-                &self.queue,
-                &mut pass,
-                self.image_upload.image_bind_group(),
-                self.glyph_upload.glyph_bind_group(),
-                sw,
-                sh,
-                subpixel_aa,
-                &retained_quads,
-                &image_glyph_instances,
-                &glyph_instances,
-                &quads_overlay,
-                &overlay_glyph_instances,
-            );
-        }
+        draw_retained_frame(
+            &mut self.present_pipeline,
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &self.frame_view,
+            self.image_upload.image_bind_group(),
+            self.glyph_upload.glyph_bind_group(),
+            sw,
+            sh,
+            first_retained_frame,
+            damage_rect,
+            self.bg,
+            subpixel_aa,
+            &quads,
+            &image_glyph_instances,
+            &glyph_instances,
+            &quads_overlay,
+            &overlay_glyph_instances,
+        );
         self.frame_blitter.copy(&self.device, &mut encoder, &self.frame_view, &view);
         gpu_lap!("render_pass");
         self.queue.submit(Some(encoder.finish()));
@@ -8333,6 +8359,7 @@ struct InlineImagePlacement<'a> {
     image: &'a sonicterm_render_model::InlineImage,
     origin_x: f32,
     origin_y: f32,
+    content_clip: PaneRect,
     painter_order: usize,
 }
 
@@ -8350,9 +8377,31 @@ fn report_inline_image_pressure(changed: bool, skipped: usize, atlas: &GlyphAtla
     }
 }
 
+impl InlineImagePlacement<'_> {
+    fn visible_rect(&self, cell_w: f32, cell_h: f32, sw: f32, sh: f32) -> Option<PaneRect> {
+        let image = self.image;
+        if image.width == 0 || image.height == 0 || image.bgra.is_empty() {
+            // When: `image` has no decoded pixels, neither residency nor emission can use its rectangle.
+            return None;
+        }
+        let x = self.origin_x + image.col as f32 * cell_w;
+        let y = self.origin_y + image.row as f32 * cell_h;
+        let left = x.max(self.content_clip.x).max(0.0);
+        let top = y.max(self.content_clip.y).max(0.0);
+        let right = (x + image.width as f32).min(self.content_clip.x + self.content_clip.w).min(sw);
+        let bottom =
+            (y + image.height as f32).min(self.content_clip.y + self.content_clip.h).min(sh);
+        if right <= left || bottom <= top {
+            // When: `right <= left` or `bottom <= top`, the clipped image is empty and needs no atlas allocation.
+            return None;
+        }
+        Some(PaneRect::new(left, top, right - left, bottom - top))
+    }
+}
+
 fn emit_inline_image_instances(
     image_atlas: &mut GlyphAtlas,
-    out: &mut Vec<GlyphInstance>,
+    out: &mut Vec<ImageInstance>,
     placements: &[InlineImagePlacement<'_>],
     cell_w: f32,
     cell_h: f32,
@@ -8367,18 +8416,12 @@ fn emit_inline_image_instances(
     // cannot hold the entire history, regardless of which pane owns them.
     for placement in allocation_order {
         let image = placement.image;
-        if image.width == 0 || image.height == 0 || image.bgra.is_empty() {
-            // When: a dimension is 0 or `bgra` is empty — a failed or pending
-            // decode, which has no pixels to pack into the atlas.
+        let Some(visible) = placement.visible_rect(cell_w, cell_h, sw, sh) else {
+            // When: `visible_rect` is absent, this image cannot contribute pixels or need an atlas tile.
             continue;
-        }
+        };
         let x = placement.origin_x + image.col as f32 * cell_w;
         let y = placement.origin_y + image.row as f32 * cell_h;
-        if x >= sw || y >= sh || x + image.width as f32 <= 0.0 || y + image.height as f32 <= 0.0 {
-            // When: `x >= sw || y >= sh` or the rect ends at or before the
-            // origin — wholly off-surface, so no draw could sample it.
-            continue;
-        }
         let key = sonicterm_types::glyph_key::GlyphKey {
             ch: '\u{fffc}',
             font_slot: 0xFE,
@@ -8406,13 +8449,20 @@ fn emit_inline_image_instances(
             skipped += 1;
             continue;
         };
+        let [u0, v0, u1, v1] = info.uv;
+        let du = (u1 - u0) / image.width as f32;
+        let dv = (v1 - v0) / image.height as f32;
         emitted.push((
             placement.painter_order,
-            GlyphInstance {
-                rect: px_to_ndc(x, y, info.px_size[0] as f32, info.px_size[1] as f32, sw, sh),
-                uv: info.uv,
-                color: [1.0, 1.0, 1.0, 1.0],
-                flags: [1.0, 0.0, 1.0, 0.0],
+            ImageInstance {
+                rect_px: [visible.x, visible.y, visible.w, visible.h],
+                uv: [
+                    u0 + (visible.x - x) * du,
+                    v0 + (visible.y - y) * dv,
+                    u0 + (visible.x + visible.w - x) * du,
+                    v0 + (visible.y + visible.h - y) * dv,
+                ],
+                sample_uv: info.uv,
             },
         ));
     }
@@ -8543,8 +8593,8 @@ fn push_line_segment_px(
 /// clear color (`theme.colors.background`).
 ///
 /// Returning `None` for the default-bg case lets the per-row emit loop skip
-/// pushing a no-op quad over every blank cell — the `LoadOp::Clear(self.bg)`
-/// already covers that area.
+/// pushing a quad over every blank cell — the attachment clear or partial
+/// replacement reset already supplies the configured background.
 ///
 /// Note on color space: the wgpu surface is `Bgra8UnormSrgb`, so the quad
 /// fragment shader's output is sRGB-encoded on write. Inputs MUST therefore
@@ -8562,7 +8612,7 @@ pub fn cell_bg_rgba(cell: &Cell, theme: &Theme) -> Option<[f32; 4]> {
         // When: INVERSE is clear, so the cell keeps its own bg and the glyph keeps fg; swapping them here too would cancel out reverse-video runs.
         match cell.bg {
             Color::Default => {
-                // When: Color::Default defers to the surface LoadOp::Clear that already covers this cell, so blank regions cost zero quad instances.
+                // When: `Color::Default` is used, the attachment clear or replacement reset supplies this cell's background.
                 return None;
             }
             bg => color_to_chrome(bg, theme, ChromeColor::rgb(0, 0, 0)),
@@ -8575,8 +8625,7 @@ pub fn cell_bg_rgba(cell: &Cell, theme: &Theme) -> Option<[f32; 4]> {
 /// Walk the visible rows of `grid`, emit one `QuadInstance` per maximal run
 /// of horizontally-adjacent cells that share the same non-default background
 /// color. Cells whose `bg` resolves to the theme default are skipped — the
-/// surface `LoadOp::Clear(theme.background)` already covers them, so emitting
-/// a quad there would be wasted bandwidth.
+/// attachment clear or partial replacement reset already covers them.
 ///
 /// Run-length coalescing is essential: a single `\033[41m` color-fill of an
 /// 80-column row would otherwise produce 80 quads where 1 suffices. The
@@ -8821,7 +8870,7 @@ pub fn emit_cell_bg_quads_for_row(
                     run_color = bg;
                 }
                 (None, None) => {
-                    // When: neither run_color nor bg is set, the cell is default-bg with no run open; LoadOp::Clear already covers it.
+                    // When: `run_color` and `bg` are absent, the attachment clear or replacement reset already covers this cell.
                 }
             }
             col = col.saturating_add(1);
