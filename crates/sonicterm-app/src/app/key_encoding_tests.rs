@@ -917,6 +917,75 @@ fn kitty_progressive_flags_encode_complete_event_data() {
     );
 }
 
+/// Cocoa function-key text must not replace escape sequences or become Kitty associated text.
+#[test]
+fn cocoa_named_keys_ignore_native_function_text() {
+    for (named, physical, native_text) in [
+        (NamedKey::ArrowUp, KeyCode::ArrowUp, "\u{f700}"),
+        (NamedKey::ArrowDown, KeyCode::ArrowDown, "\u{f701}"),
+        (NamedKey::ArrowLeft, KeyCode::ArrowLeft, "\u{f702}"),
+        (NamedKey::ArrowRight, KeyCode::ArrowRight, "\u{f703}"),
+        (NamedKey::F1, KeyCode::F1, "\u{f704}"),
+        (NamedKey::Home, KeyCode::Home, "\u{f729}"),
+        (NamedKey::End, KeyCode::End, "\u{f72b}"),
+        (NamedKey::PageUp, KeyCode::PageUp, "\u{f72c}"),
+        (NamedKey::PageDown, KeyCode::PageDown, "\u{f72d}"),
+        (NamedKey::Delete, KeyCode::Delete, "\u{f728}"),
+    ] {
+        let key = Key::Named(named);
+        for flags in 0..32 {
+            for app_cursor in [false, true] {
+                for mods in
+                    [ModifiersState::empty(), ModifiersState::SHIFT, ModifiersState::CONTROL]
+                {
+                    for (state, repeat) in [
+                        (ElementState::Pressed, false),
+                        (ElementState::Pressed, true),
+                        (ElementState::Released, false),
+                    ] {
+                        let plain = event(
+                            &key,
+                            PhysicalKey::Code(physical),
+                            None,
+                            KeyLocation::Standard,
+                            state,
+                            repeat,
+                        );
+                        let mut cocoa = plain;
+                        cocoa.text = Some(native_text);
+                        cocoa.text_with_all_modifiers = Some(native_text);
+                        let modes = KeyboardModes::new(app_cursor, false, false, false, 0);
+                        assert_eq!(
+                            encode_event(cocoa, mods, flags, modes),
+                            encode_event(plain, mods, flags, modes),
+                            "{named:?} flags={flags} app_cursor={app_cursor} mods={mods:?} state={state:?} repeat={repeat}",
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Genuine private-use character input remains text; only named function-key payloads are excluded.
+#[test]
+fn private_use_character_input_remains_text() {
+    let key = Key::Character("\u{f700}".into());
+    let input = event(
+        &key,
+        PhysicalKey::Code(KeyCode::KeyA),
+        Some("\u{f700}"),
+        KeyLocation::Standard,
+        ElementState::Pressed,
+        false,
+    );
+    assert_eq!(
+        encode_event(input, ModifiersState::empty(), 0, KeyboardModes::default()),
+        Some("\u{f700}".as_bytes().to_vec())
+    );
+    assert_eq!(associated_text(input, KITTY_REPORT_ALL | KITTY_REPORT_TEXT), Some(vec![0xf700]));
+}
+
 /// Event reporting canonicalizes functional keys but keeps reset-key repeats usable.
 #[test]
 fn kitty_event_reporting_preserves_reset_key_compatibility() {
