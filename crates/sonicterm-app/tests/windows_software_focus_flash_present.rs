@@ -240,8 +240,20 @@ fn pointer_button(
 }
 
 fn render_window(app: &mut App, active: &ActiveEventLoop, window_id: WindowId) {
-    assert!(app.__test_set_window_last_render(window_id, Instant::now() - Duration::from_secs(1)));
-    ApplicationHandler::window_event(app, active, window_id, WindowEvent::RedrawRequested);
+    // A synthetic redraw can defer on live PTY locks; retry dispatch, not the flash or pixel assertions.
+    let started = Instant::now();
+    loop {
+        assert!(app.__test_set_window_last_render(window_id, started - Duration::from_secs(1)));
+        ApplicationHandler::window_event(app, active, window_id, WindowEvent::RedrawRequested);
+        if app.__test_window_last_render(window_id).is_some_and(|rendered| rendered >= started) {
+            return;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "window {window_id:?}: redraw never reached the renderer"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn cpu_pixel(app: &App, window_id: WindowId, x: u32, y: u32) -> Result<[u8; 4], String> {

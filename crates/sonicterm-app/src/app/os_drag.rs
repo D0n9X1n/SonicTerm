@@ -219,10 +219,8 @@ pub struct TabBarSnapshot {
     /// `window_rect` but outside `bar_rect` resolves to "in window but
     /// not on bar" — see [`TabBarRegistry::resolve_screen_pos`].
     pub bar_rect: (i32, i32, i32, i32),
-    /// Left edges of visible tabs in screen X, parallel to `tab_indices`.
-    pub tab_lefts: Vec<i32>,
-    /// Right edges of visible tabs in screen X, parallel to `tab_indices`.
-    pub tab_rights: Vec<i32>,
+    /// Integer screen thresholds matching the live layout's fractional midpoint comparisons.
+    pub tab_midpoints: Vec<i32>,
     /// Absolute indices of the visible tabs, not their positions in this snapshot.
     pub tab_indices: Vec<usize>,
     /// Total tabs used by overflow's append-to-end drop target.
@@ -275,38 +273,31 @@ impl TabBarSnapshot {
             ox + (bar.x + bar.w).round() as i32,
             oy + (bar.y + bar.h).round() as i32,
         );
-        let mut tab_lefts = Vec::with_capacity(layout.tabs.len());
-        let mut tab_rights = Vec::with_capacity(layout.tabs.len());
         let mut tab_indices = Vec::with_capacity(layout.tabs.len());
+        let mut tab_midpoints = Vec::with_capacity(layout.tabs.len());
         for t in &layout.tabs {
-            tab_lefts.push(ox + t.bg_rect.x.round() as i32);
-            tab_rights.push(ox + (t.bg_rect.x + t.bg_rect.w).round() as i32);
             tab_indices.push(t.idx);
+            tab_midpoints.push(ox + (t.bg_rect.x + t.bg_rect.w * 0.5).ceil() as i32);
         }
         Self {
             window,
             window_rect,
             bar_rect,
-            tab_lefts,
-            tab_rights,
+            tab_midpoints,
             tab_indices,
             total_tabs: layout.total_tabs,
-            overflow_append_from: layout.overflow.map(|control| ox + control.x.round() as i32),
+            overflow_append_from: layout.overflow.map(|control| ox + control.x.ceil() as i32),
         }
     }
 
     /// Resolve the same absolute visible-gap or overflow-append slot as TabBarLayout in screen coordinates.
     pub fn drop_slot(&self, sx: i32) -> usize {
-        debug_assert_eq!(self.tab_lefts.len(), self.tab_rights.len());
-        debug_assert_eq!(self.tab_lefts.len(), self.tab_indices.len());
         if self.overflow_append_from.is_some_and(|start| sx >= start) {
             // When: `sx` reaches overflow, preserve append-to-end independently of the visible segment.
             return self.total_tabs;
         }
-        for ((&left, &right), &index) in
-            self.tab_lefts.iter().zip(&self.tab_rights).zip(&self.tab_indices)
-        {
-            let midpoint = (left + right) / 2;
+        debug_assert_eq!(self.tab_midpoints.len(), self.tab_indices.len());
+        for (&midpoint, &index) in self.tab_midpoints.iter().zip(&self.tab_indices) {
             if sx < midpoint {
                 // When: `sx` precedes a visible midpoint, insert before its absolute `index`.
                 return index;

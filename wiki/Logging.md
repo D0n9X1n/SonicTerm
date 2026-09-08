@@ -82,7 +82,7 @@ parser replies. The producer assigns `source`: `Keyboard`, `Paste`, `FileDrop`,
 | `queued_messages`, `queued_bytes`, `queue_capacity` | Waiting message count, payload byte count, and four-slot limit; excludes the active native write |
 | `writer_phase` | `Idle`, `Writing`, `Flushing`, or `Stopped`; a boundary observation, not a child-health verdict |
 | `in_flight_bytes`, `in_flight_millis` | Active message size and time spent in the observed write or flush; time is absent when idle/stopped |
-| `completed_messages` | Successful `write_all` calls whose best-effort flush attempt returned |
+| `completed_messages` | Native writes whose `write_all` and `flush` both succeeded |
 
 The event carries no rejected payload. Its debug representation, warnings, and
 notification never include typed text, commands, paths, or clipboard content.
@@ -91,13 +91,14 @@ pane produces a warning but no notification on an unrelated window. When the
 proxy is absent or event delivery fails, the producer logs the same metadata
 without a current-window identity.
 
-Production terminal replies wait for writer capacity on the VT worker after
-releasing parser and side-effect locks. Queue saturation neither drops those
-replies nor emits a rejection warning. The parser pauses at each reply-producing
-dispatch, keeping staging bounded instead of overflowing a second reply channel.
-A permanent delivery failure is reported once and stops that worker; normal
-teardown cancels waiting. Native write failures remain independently logged.
-See [Terminal IO and VT](Terminal-IO-and-VT) for the delivery limits.
+Production terminal replies enter a separate FIFO with 64 KiB RAM and private
+temporary-file spill, outside parser and side-effect locks. UI queue saturation
+does not discard replies, trigger rejection warnings, or stop output processing.
+Storage/native failure is latched and reported once as `terminal reply delivery
+failed` with pane identity and byte count; output, redraw, and exit observation
+continue. Native writer/spool read errors are independently logged. Intentional
+teardown releases spill storage without a rejection notice. See
+[Terminal IO and VT](Terminal-IO-and-VT) for storage and delivery limits.
 
 Four small messages can fill the channel before a healthy writer is scheduled.
 Controlled tests use the production admission and writer loop to demonstrate
@@ -108,7 +109,7 @@ These fixtures distinguish mechanisms; they do not retrospectively identify
 which producer or native condition caused an older un-attributed warning.
 
 Queue capacity and per-message limits are unchanged. UI input still refuses
-rather than blocking; only worker-owned terminal replies wait through saturation.
+rather than blocking; worker-owned replies use the spill FIFO instead.
 Interpret repeated observations of the same pane and progress counter rather than
 a single `QueueFull` warning.
 
@@ -470,24 +471,24 @@ max_breadcrumb_bytes = 1048576    # 1 MiB
 | `queued_messages`、`queued_bytes`、`queue_capacity` | 等待的消息数、负载字节数和四槽上限；不包含正在进行的原生写入 |
 | `writer_phase` | `Idle`、`Writing`、`Flushing` 或 `Stopped`；表示执行边界，不是子进程健康结论 |
 | `in_flight_bytes`、`in_flight_millis` | 当前消息大小及已观察写入或 flush 的持续时间；空闲或停止时无时间值 |
-| `completed_messages` | `write_all` 成功且尽力而为的 flush 尝试已返回的消息数 |
+| `completed_messages` | `write_all` 与 `flush` 均成功的原生写入数 |
 
 事件不携带被拒绝的负载。其 debug 表示、warning 和通知均不包含输入文本、命令、路径或剪贴板内容。
 标签页转移后，通知跟随窗格的当前窗口；已关闭的窗格只记录 warning，不在无关窗口显示通知。
 代理缺失或事件投递失败时，生产者直接记录同样的元数据，但不附带无法确认的当前窗口标识。
 
-生产路径中的终端回复由 VT worker 在释放解析器与副作用相关的锁之后等待 writer 容量。
-队列饱和既不会丢弃这些回复，也不会产生拒绝 warning。解析器在每次产生回复的分派后暂停，
-使暂存有界，而不是溢出第二个回复通道。永久交付失败只报告一次并停止该 worker；正常销毁
-会取消等待。原生写入失败仍独立记录。交付限制见 [终端 IO 与 VT](Terminal-IO-and-VT)。
+生产终端回复在解析器与副作用锁外进入独立 FIFO，使用 64 KiB 内存和私有临时文件溢出存储。
+UI 队列饱和不会丢弃回复、产生拒绝 warning 或停止输出处理。存储或原生失败会锁存，并以
+`terminal reply delivery failed` 报告一次，包含窗格标识与字节数；输出、重绘和退出观察继续。
+原生 writer 与暂存读取错误独立记录。正常销毁会释放暂存文件，不产生拒绝通知。
+存储与交付限制见 [终端 IO 与 VT](Terminal-IO-and-VT)。
 
 健康 writer 尚未被调度时，四条小消息就能填满通道。受控测试使用生产环境的入队与 writer 循环，
 证明突发排空仍保持顺序。另设阻塞写入和阻塞 flush 的夹具，证明排队字节为零时仍可能有一条
 在途消息；再加入四条等待消息后，下一条消息会被显式拒绝。这些夹具区分机制，不会倒推出
 以前缺少归属信息的 warning 究竟由哪个生产者或原生条件引起。
 
-队列容量和单消息上限不变。UI 输入仍采用拒绝而非阻塞；只有 worker 持有的终端回复会等待
-饱和消退。应比较同一窗格的连续观察值和进度计数，而不是凭一条 `QueueFull` warning 下结论。
+队列容量和单消息上限不变。UI 输入仍采用拒绝而非阻塞；worker 持有的终端回复改用溢出 FIFO。应比较同一窗格的连续观察值和进度计数，而不是凭一条 `QueueFull` warning 下结论。
 
 ## PTY 尺寸调整失败诊断
 

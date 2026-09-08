@@ -2330,7 +2330,7 @@ impl App {
             // -- IME (CJK / multi-key input methods) --
             WindowEvent::Ime(ime_event) => {
                 // When: WindowEvent::Ime supplies ime_event, route it to the active text-input owner.
-                if self.command_palette_handle_ime(&ime_event) {
+                if self.command_palette_handle_ime_in_window(win_id, &ime_event) {
                     // When: command_palette_handle_ime consumes ime_event, stop terminal IME routing.
                     return;
                 }
@@ -2433,8 +2433,8 @@ impl App {
                         return;
                     }
                 }
-                if self.command_palette.is_open() {
-                    // When: command_palette is open, consume keys in palette state.
+                if self.command_palette_owns_input(win_id) {
+                    // When: command_palette_owns_input matches win_id, consume keys in that window's palette.
 
                     // Let the toggle binding (super+shift+P) still close
                     // the palette; everything else routes into palette

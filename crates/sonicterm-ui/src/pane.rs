@@ -610,11 +610,26 @@ impl PaneTree {
     pub fn focus_neighbor(&self, focus: PaneId, dir: Direction) -> Option<PaneId> {
         // Unit reference frame — direction-independent of window size.
         let panes = self.layout(Rect::new(0.0, 0.0, 1.0, 1.0));
+        Self::focus_neighbor_in_layout(&panes, focus, dir)
+    }
+
+    /// Resolve left, right, up, and down neighbours from one normalized pane layout.
+    pub fn focus_neighbors(&self, focus: PaneId) -> [Option<PaneId>; 4] {
+        let panes = self.layout(Rect::new(0.0, 0.0, 1.0, 1.0));
+        [Direction::Left, Direction::Right, Direction::Up, Direction::Down]
+            .map(|direction| Self::focus_neighbor_in_layout(&panes, focus, direction))
+    }
+
+    fn focus_neighbor_in_layout(
+        panes: &[(PaneId, Rect)],
+        focus: PaneId,
+        dir: Direction,
+    ) -> Option<PaneId> {
         let me = panes.iter().find(|(id, _)| *id == focus)?.1;
         let (mx, my) = me.center();
 
         let mut best: Option<(f32, PaneId)> = None;
-        for (id, r) in &panes {
+        for (id, r) in panes {
             if *id == focus {
                 // When: `id` equals `focus`, the origin pane cannot be its own neighbour.
                 continue;

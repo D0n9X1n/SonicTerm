@@ -194,7 +194,8 @@ pub(super) fn spawn_pane_workers(
     let pty = pane.pty.as_ref().expect("pane worker requires a PTY");
     let out_rx = pty.out_rx.clone();
     let exit_probe = pty.child_exit_probe();
-    let in_tx_reply = pty.input_sender();
+    let input_state = pty.input_sender();
+    let in_tx_reply = pty.reply_sender();
     let worker_handles = PaneVtHandles::from_pane_state(pane);
     let redraw_proxy = proxy.clone();
 
@@ -205,6 +206,7 @@ pub(super) fn spawn_pane_workers(
             let mut pending_since: Option<Instant> = None;
             let mut pending_bytes: usize = 0;
             let mut command_started: Option<Instant> = None;
+            let mut replies_failed = false;
             let mut redraw_probe = crate::app::invariants::RedrawCoalescerProbe::new();
             loop {
                 match out_rx.recv_timeout(if pending {
@@ -223,25 +225,26 @@ pub(super) fn spawn_pane_workers(
                             pending_bytes = pending_bytes.saturating_add(bytes.len());
                             pending_since.get_or_insert_with(Instant::now);
                         }
-                        if let Err(error) = process_pane_vt_batch(
+                        process_pane_vt_batch(
                             &worker_handles,
                             bytes,
                             &mut command_started,
                             redraw_proxy.as_ref(),
-                            &in_tx_reply,
-                        ) {
-                            // When: process_pane_vt_batch fails, stop before consuming output beyond the undelivered reply.
-                            if !in_tx_reply.is_closing() {
-                                App::report_pty_input_rejection(
-                                    proxy.as_ref(),
-                                    pane_id,
-                                    super::PtyInputSource::TerminalReply,
-                                    error,
-                                    in_tx_reply.diagnostics(),
-                                );
-                            }
-                            break;
-                        }
+                            |reply| {
+                                if replies_failed {
+                                    // When: replies_failed is latched, keep consuming output and observing exit without repeated errors.
+                                    return;
+                                }
+                                let rejected_bytes = reply.len();
+                                if let Err(error) = in_tx_reply.send(reply) {
+                                    // Report storage/native failure once without abandoning output or exit observation.
+                                    replies_failed = true;
+                                    if !input_state.is_closing() {
+                                        tracing::warn!(pane_id, rejected_bytes, %error, "terminal reply delivery failed");
+                                    }
+                                }
+                            },
+                        );
                         let pending_for =
                             pending_since.map(|since| since.elapsed()).unwrap_or(Duration::ZERO);
                         if crate::app::should_flush_pending_pty_redraw(pending_bytes, pending_for) {
@@ -329,8 +332,8 @@ pub(super) fn process_pane_vt_batch<Bytes: AsRef<[u8]>>(
     bytes: Bytes,
     command_started: &mut Option<Instant>,
     proxy: Option<&EventLoopProxy<UserEvent>>,
-    input: &sonicterm_io::pty::PtyInputSender,
-) -> Result<(), sonicterm_io::pty::PtyInputError> {
+    send_reply: impl FnMut(Vec<u8>),
+) {
     process_pane_vt_batch_with(
         handles,
         bytes,
@@ -343,7 +346,7 @@ pub(super) fn process_pane_vt_batch<Bytes: AsRef<[u8]>>(
             }
         },
         Instant::now,
-        |bytes| input.send_wait(bytes),
+        send_reply,
     )
 }
 
@@ -357,15 +360,15 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
     mut emit_event: Emit,
     mut now: Now,
     mut send_reply: Send,
-) -> Result<(), sonicterm_io::pty::PtyInputError>
-where
+) where
     Bytes: AsRef<[u8]>,
     Decode: FnMut(&MediaEvent) -> Option<InlineImage>,
     Emit: FnMut(UserEvent),
     Now: FnMut() -> Instant,
-    Send: FnMut(Vec<u8>) -> Result<(), sonicterm_io::pty::PtyInputError>,
+    Send: FnMut(Vec<u8>),
 {
     let mut remaining = bytes.as_ref();
+    let mut reply_batch = Vec::new();
     loop {
         let (consumed, events, replies) = {
             let mut parser = handles.parser.lock();
@@ -436,16 +439,19 @@ where
                 command_side_effects,
             );
         }
-        if !replies.is_empty() {
-            // Delivery may wait; all pane locks are released and the unread output suffix remains owned.
-            send_reply(replies)?;
+        if reply_batch.len() + replies.len() > 32 * 1024 {
+            // Flush before appending a complete dispatch that would exceed the batch bound; never split a reply.
+            send_reply(std::mem::take(&mut reply_batch));
         }
+        reply_batch.extend(replies);
         if remaining.is_empty() {
-            // When: remaining is empty, every input byte and staged reply has been processed.
+            // When: remaining is empty, publish trailing replies without waiting for more child output.
+            if !reply_batch.is_empty() {
+                send_reply(reply_batch);
+            }
             break;
         }
     }
-    Ok(())
 }
 
 impl App {

@@ -408,7 +408,9 @@ impl App {
                 }
                 self.refresh_hovered_url_in_child(win_id);
             }
-            WindowEvent::Ime(ime_event) if self.command_palette_handle_ime(ime_event) => {
+            WindowEvent::Ime(ime_event)
+                if self.command_palette_handle_ime_in_window(win_id, ime_event) =>
+            {
                 // When: `command_palette_handle_ime` consumed the event, so the
                 // palette owns this composition and the child must not see it.
                 return;
