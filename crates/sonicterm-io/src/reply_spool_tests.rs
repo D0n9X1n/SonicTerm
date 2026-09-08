@@ -45,7 +45,7 @@ fn tiny_replies_keep_complete_boundaries_in_ram_and_spill() {
     let mut received = 0;
     while let Some(bytes) = reader.pop().unwrap() {
         assert_eq!(bytes.len() % 6, 0);
-        assert!(bytes.chunks_exact(6).all(|reply| reply == b"\x1b[1;1R"));
+        assert!(bytes.as_chunks::<6>().0.iter().all(|reply| reply == b"\x1b[1;1R"));
         received += bytes.len() / 6;
     }
     assert_eq!(received, count);
