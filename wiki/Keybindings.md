@@ -294,6 +294,12 @@ text. An Option/Alt or AltGr event is accepted as composed input only when its
 produced character differs from the layout-resolved unmodified key; the exact
 Control editing chords above still take precedence.
 
+Named non-text keys, including arrows and function keys, retain their terminal
+protocol encoding even when macOS attaches private-use characters to the native
+event. Those characters are neither inserted into app text fields nor reported
+as Kitty associated text. Space, composed text, and genuine private-use character
+input remain text.
+
 ### Load failures
 
 At startup, invalid TOML or a missing `[meta]` table falls back to the bundled
@@ -563,6 +569,10 @@ READONLY 还允许执行切换或激活标签页、切换 pane 焦点、打开�
 组合生成的字符会按系统结果插入。Super 以及普通 Control、Alt 或 Ctrl+Alt 命令组合不会
 变成文本框内容。只有 Option/Alt 或 AltGr 生成的字符不同于布局解析出的未修饰按键时，
 才会把它视为组合输入；上表中明确列出的 Control 编辑组合仍优先执行。
+
+方向键、功能键等具名非文本按键始终保留终端协议编码，即使 macOS 在原生事件中
+附带了私用区字符。这些字符既不会插入应用文本框，也不会作为 Kitty 关联文本上报。
+空格、组合输入以及真正的私用区字符输入仍按文本处理。
 
 ### 加载失败
 

@@ -64,6 +64,10 @@ fn printable_text_for_parts<'a>(
         // rather than inserting its logical character.
         return None;
     }
+    if matches!(logical_key, Key::Named(named) if *named != NamedKey::Space) {
+        // When: matches! identifies a named non-Space key, keep Cocoa function text out of editable fields.
+        return None;
+    }
     let text =
         event_text.or_else(|| matches!(logical_key, Key::Named(NamedKey::Space)).then_some(" "))?;
     if text.is_empty() || text.chars().any(char::is_control) {

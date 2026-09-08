@@ -1054,6 +1054,10 @@ fn associated_text(event: KeyEventView<'_>, flags: u8) -> Option<Vec<u32>> {
         // event is Released, no associated text field is permitted.
         return None;
     }
+    if matches!(event.logical_key, Key::Named(named) if *named != NamedKey::Space) {
+        // When: matches! identifies a named non-Space key, Cocoa function text has no Kitty associated text.
+        return None;
+    }
     let codepoints: Vec<_> = event
         .text_with_all_modifiers
         .or(event.text)
@@ -1115,6 +1119,10 @@ fn standalone_text<'a>(event: KeyEventView<'a>, mods: ModifiersState) -> Option<
     if event.state == ElementState::Released {
         // When: event.state is Released, winit text is not a new text input
         // event and must not be replayed into the PTY.
+        return None;
+    }
+    if matches!(event.logical_key, Key::Named(named) if *named != NamedKey::Space) {
+        // When: matches! identifies a named non-Space key, preserve terminal key encoding over Cocoa function text.
         return None;
     }
     let text = event.text_with_all_modifiers.or(event.text)?;

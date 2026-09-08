@@ -63,6 +63,26 @@ fn logical_keys_and_modifier_state_use_the_same_exact_mapping() {
     );
 }
 
+/// Named Cocoa function keys are commands, while Space and genuine private-use characters remain text.
+#[test]
+fn cocoa_function_keys_are_not_field_text() {
+    for (named, text) in [
+        (NamedKey::ArrowUp, "\u{f700}"),
+        (NamedKey::ArrowDown, "\u{f701}"),
+        (NamedKey::F1, "\u{f704}"),
+    ] {
+        let key = Key::Named(named);
+        assert_eq!(printable_text_for_parts(&key, &key, Some(text), ModifiersState::empty()), None);
+    }
+    for key in [Key::Named(NamedKey::Space), Key::Character("\u{f700}".into())] {
+        let text = if matches!(key, Key::Named(_)) { " " } else { "\u{f700}" };
+        assert_eq!(
+            printable_text_for_parts(&key, &key, Some(text), ModifiersState::empty()),
+            Some(text)
+        );
+    }
+}
+
 /// App text fields accept produced glyphs but never type ordinary command chords.
 #[test]
 fn printable_text_policy_distinguishes_altgr_from_command_modifiers() {
