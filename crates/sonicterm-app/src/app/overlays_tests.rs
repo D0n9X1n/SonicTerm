@@ -5,6 +5,80 @@ use sonicterm_cfg::theme::Theme;
 use sonicterm_ui::command_palette::PaletteEntry;
 use winit::keyboard::{Key, NamedKey};
 
+#[test]
+fn reopening_tab_selector_in_another_window_selects_its_first_tab() {
+    // A fresh selector must discard the previous window's selected TabId, in both directions.
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    let main = app.main_window_id.unwrap();
+    let child = app.__test_seed_child_window(&["child", "peer"]);
+    for window in [main, child, main, child] {
+        app.open_tab_selector(window);
+        let expected = app.windows[&window].tabs.tabs()[0].id;
+        assert!(
+            matches!(app.command_palette.current(), Some(PaletteEntry::Tab { id, .. }) if *id == expected)
+        );
+        app.command_palette.close();
+    }
+}
+
+#[test]
+fn palette_input_is_owned_by_its_attached_window_only() {
+    // Focus changes must not let main, child, or sibling IME edits mutate another window's palette.
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    let main = app.main_window_id.unwrap();
+    let child = app.__test_seed_child_window(&["child"]);
+    let sibling = app.__test_seed_child_window(&["sibling"]);
+    for owner in [main, child, sibling] {
+        app.open_tab_selector(owner);
+        for source in [main, child, sibling] {
+            assert_eq!(app.command_palette_owns_input(source), source == owner);
+            let before = app.command_palette.query().to_string();
+            let consumed = app.command_palette_handle_ime_in_window(
+                source,
+                &winit::event::Ime::Commit("x".into()),
+            );
+            assert_eq!(consumed, source == owner);
+            if source != owner {
+                assert_eq!(app.command_palette.query(), before);
+            }
+        }
+        app.command_palette.close();
+    }
+}
+
+#[test]
+fn palette_rename_and_color_keep_their_source_after_focus_changes() {
+    // Editor entry and completion must keep the palette's window rather than following new focus.
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    let main = app.main_window_id.unwrap();
+    let child = app.__test_seed_child_window(&["child"]);
+    app.__test_set_frontmost_window(Some(child));
+    app.run_action(&Action::OpenCommandPalette);
+    app.__test_set_palette_query("Rename Tab");
+    app.__test_set_frontmost_window(Some(main));
+    app.__test_command_palette_handle_key(&Key::Named(NamedKey::Enter));
+    assert_eq!(app.command_palette.query(), "child");
+    app.command_palette.set_query("renamed");
+    app.__test_command_palette_handle_key(&Key::Named(NamedKey::Enter));
+    assert_eq!(app.windows[&child].tabs.active_title_body().as_deref(), Some("renamed"));
+    assert_eq!(app.windows[&main].tabs.active_title_body().as_deref(), Some("main"));
+    app.__test_set_frontmost_window(Some(child));
+    app.run_action(&Action::OpenCommandPalette);
+    app.__test_set_palette_query("Update Tab Color");
+    app.__test_set_frontmost_window(Some(main));
+    app.__test_command_palette_handle_key(&Key::Named(NamedKey::Enter));
+    assert_eq!(app.palette_attached_window, Some(child));
+    app.__test_command_palette_handle_key(&Key::Named(NamedKey::ArrowDown));
+    let color = app.command_palette.selected_tab_color().unwrap().hex.clone();
+    assert!(color.is_some());
+    app.__test_command_palette_handle_key(&Key::Named(NamedKey::Enter));
+    assert_eq!(app.windows[&child].tabs.active_custom_color(), color.as_deref());
+    assert_eq!(app.windows[&main].tabs.active_custom_color(), None);
+}
+
 fn pointer_target(app: &App, index: usize) -> super::PalettePointerHit {
     super::PalettePointerHit::Row { index, entry: app.command_palette.visible()[index].clone() }
 }

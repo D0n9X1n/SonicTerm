@@ -27,8 +27,10 @@ flowchart TD
     grid --> redraw["typed redraw event"]
     redraw --> app["winit app and renderer"]
 
-    input["keyboard, paste, mouse, terminal reply"] --> queue["bounded Sender&lt;Vec&lt;u8&gt;&gt;"]
-    queue --> writer["sonic-pty-writer"]
+    input["keyboard, paste, mouse"] --> queue["bounded Sender&lt;Vec&lt;u8&gt;&gt;"]
+    worker --> spool["reply FIFO: bounded RAM + private file"]
+    spool --> writer["sonic-pty-writer"]
+    queue --> writer
     writer --> child
 ```
 
@@ -41,20 +43,27 @@ shell workloads pin one 64 KiB ring.
 Terminal input is non-blocking. Its channel holds four `Vec<u8>` messages, each
 at most 16 MiB. Oversize, full-queue, and disconnected-writer failures return a
 typed `PtyInputError` that retains the rejected bytes for retry or a visible
-notification. Production parsing yields after a reply-producing dispatch. The VT
-worker releases parser and side-effect locks, then waits for capacity in the same
-FIFO input queue before parsing the remaining output. Saturation does not discard
-replies or impose a drop deadline. One dispatch's replies are concatenated in byte
-order; the 4 KiB raw OSC 4 bound limits that staging to less than 32 KiB. There is
-no separate production reply channel or reply-forwarder thread.
+notification. Production parsing yields after a reply-producing dispatch. Outside
+parser and side-effect locks, the VT worker submits replies to a separate FIFO:
+64 KiB of RAM followed by a private, automatically deleted temporary spill file.
+One dispatch stages less than 32 KiB, bounded by the 4 KiB raw OSC 4 input limit.
+Complete dispatches are batched up to 32 KiB and flushed at each output-batch end;
+small replies do not require a file write per query. Admission may perform synchronous file I/O but never waits for native input
+capacity, so a finite output-before-input query burst can continue draining.
 
-A stalled writer can backpressure the bounded output pipeline; a child must read
-its terminal input to make progress. Pane teardown and writer exit cancel capacity
-waits. Closed writers and native write failures remain observable; enqueue success
-does not guarantee consumption by the child. Keyboard and other UI sends remain
-non-blocking and retain their explicit refusal behavior. The standalone parser's
-channel-based `advance` API still uses non-blocking reply delivery; production uses
-`advance_with_replies` and resumes its returned unconsumed suffix.
+The existing native writer selects between UI input and complete reply submissions
+fitting a 32 KiB turn; length framing prevents keyboard bytes from splitting a reply.
+Ready UI input gets a turn after each reply turn. Each stream preserves its own
+byte order; no ordering between the two producers is promised. Spill disk
+usage is not capped, and consumed file prefixes remain until the spill drains.
+Drain and writer exit remove the file. Pane teardown rejects admissions immediately;
+the native writer owns final cleanup and waits for any in-flight storage operation
+off the event-loop thread. Storage exhaustion, spool
+read/write failures, and native write/flush errors are explicit failures—not
+lossless-delivery guarantees. A reply failure does not stop output parsing, redraw
+coalescing, or child-exit observation. UI sends retain their non-blocking refusal
+behavior. The standalone parser's channel-based `advance` API remains non-blocking;
+production uses `advance_with_replies` and consumes its returned suffix.
 
 The VT worker coalesces output before requesting a frame. A quiet interval of
 3 ms flushes a trailing batch; a batch also flushes after 128 KiB or 8 ms. Every
@@ -322,8 +331,10 @@ flowchart TD
     grid --> redraw["类型化重绘事件"]
     redraw --> app["winit 应用与渲染器"]
 
-    input["键盘、粘贴、鼠标、终端回复"] --> queue["有界 Sender&lt;Vec&lt;u8&gt;&gt;"]
-    queue --> writer["sonic-pty-writer"]
+    input["键盘、粘贴、鼠标"] --> queue["有界 Sender&lt;Vec&lt;u8&gt;&gt;"]
+    worker --> spool["回复 FIFO：有界内存与私有文件"]
+    spool --> writer["sonic-pty-writer"]
+    queue --> writer
     writer --> child
 ```
 
@@ -334,15 +345,20 @@ flowchart TD
 
 终端输入不阻塞。通道最多保存四条 `Vec<u8>` 消息，每条最多 16 MiB。消息过大、
 队列已满或写入端断开时，会返回带类型的 `PtyInputError`，其中仍保留被拒绝的字节，
-便于重试或显示通知。生产解析器在一次产生回复的分派后让出执行；VT worker 释放解析器与
-副作用相关的锁，再等待同一个 FIFO 输入队列出现容量，然后继续解析剩余输出。队列饱和不会
-丢弃回复，也没有超时丢弃期限。同次分派的回复按字节顺序拼接；原始 OSC 4 的 4 KiB 上限使
-该暂存小于 32 KiB。生产路径不再使用独立回复通道或回复转发线程。
+便于重试或显示通知。生产解析器在产生回复的分派后让出执行。VT worker 在解析器与副作用锁外，
+把回复提交到独立 FIFO：先使用 64 KiB 内存，溢出后写入私有、自动删除的临时文件。一次分派
+暂存小于 32 KiB，由原始 OSC 4 输入的 4 KiB 上限约束。完整分派按最多 32 KiB 合并，并在每个
+输出批次结束时刷新；小回复无需每次查询都写文件。提交可能执行同步文件 IO，但不等待
+原生输入容量，因此先输出有限查询突发、再读取回复的子进程仍能推进。
 
-停滞的 writer 会向有界输出管线传递背压；子进程必须读取终端输入才能继续推进。窗格销毁和
-writer 退出会取消容量等待。writer 关闭与原生写入失败仍可观察；入队成功不保证子进程已消费。
-键盘等 UI 输入仍为非阻塞，并保留显式拒绝行为。独立解析器的通道式 `advance` API 仍使用
-非阻塞回复交付；生产路径使用 `advance_with_replies`，根据返回的消费长度继续处理剩余字节。
+现有原生 writer 在 UI 输入与总计最多 32 KiB 的完整回复提交之间选择；长度帧保证键盘字节
+不会插入回复内部。每轮回复之后，已就绪的 UI 输入优先获得一次写入机会。两条流各自保持
+字节顺序，但不承诺不同生产者之间的顺序。溢出文件不设磁盘用量上限，已消费前缀保留到排空。
+排空和 writer 退出会删除文件；窗格销毁立即拒绝新提交。原生 writer 负责最终清理，在事件循环
+线程之外等待正在进行的存储操作返回。
+磁盘耗尽、暂存读写失败及原生 write/flush 错误均显式报告，不保证这些故障下无损交付。
+回复失败不会停止输出解析、重绘合并或子进程退出观察。UI 输入保留非阻塞拒绝行为。
+独立解析器的通道式 `advance` API 仍为非阻塞；生产路径使用 `advance_with_replies` 并继续消费剩余字节。
 
 VT 工作线程会先合并输出，再请求一帧。连续 3 ms 没有新数据时刷新尾批次；批次达到
 128 KiB 或等待 8 ms 也会刷新。所有窗格构造路径都使用同一个宿主事件处理器。推进解析器

@@ -147,6 +147,29 @@ fn go_to_tab_tracks_identity_instead_of_title_or_position() {
     assert_eq!(palette.shortcut_hint_for_visible_index(palette.selected()), None);
 }
 
+#[test]
+fn changing_one_tab_title_retains_other_presentations() {
+    // Unchanged tab entries keep their owned label/search allocations during a peer's title refresh.
+    let mut tabs = TabBar::new();
+    let first = tabs.push(crate::tabs::Tab::new("first"));
+    let second = tabs.push(crate::tabs::Tab::new("second"));
+    let i18n = translator("en");
+    let mut palette = CommandPalette::new();
+    palette.set_tabs(&tabs, &i18n);
+    let index = palette
+        .all
+        .iter()
+        .position(|entry| matches!(entry, PaletteEntry::Tab { id, .. } if *id == first))
+        .unwrap();
+    let label = palette.presentation[index].label.as_ptr();
+    let search = palette.presentation[index].search.as_ptr();
+    tabs.set_title(second, "renamed");
+    palette.set_tabs(&tabs, &i18n);
+    assert_eq!(palette.presentation[index].label.as_ptr(), label);
+    assert_eq!(palette.presentation[index].search.as_ptr(), search);
+    assert!(palette.presentation[index + 1].label.contains("renamed"));
+}
+
 /// Same-title replacement invalidates retained frame identity even when rendered strings are identical.
 #[test]
 fn go_to_tab_same_title_replacement_changes_identity_and_keeps_refresh_coherent() {

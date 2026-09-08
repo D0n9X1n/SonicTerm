@@ -1415,52 +1415,6 @@ fn diagnostic_input_channel() -> (PtyInputSender, Receiver<Vec<u8>>) {
 }
 
 #[test]
-fn waiting_reply_retains_bytes_through_saturation_without_a_drop_deadline() {
-    // A worker holds one payload through prolonged saturation, then appends it after all earlier messages.
-    let (sender, rx) = diagnostic_input_channel();
-    let mut expected = Vec::new();
-    for marker in 0..PTY_INPUT_QUEUE_CAPACITY {
-        let bytes = vec![marker as u8];
-        sender.send(bytes.clone()).unwrap();
-        expected.push(bytes);
-    }
-    let reply = b"\x1b[1;1R".to_vec();
-    let mut waits = 0;
-    let mut observed = Vec::new();
-    sender
-        .send_wait_with(reply.clone(), || {
-            waits += 1;
-            assert_eq!(sender.diagnostics().queued_messages, PTY_INPUT_QUEUE_CAPACITY);
-            assert_eq!(sender.diagnostics().queued_bytes, PTY_INPUT_QUEUE_CAPACITY);
-            if waits == 1000 {
-                let bytes = rx.recv().unwrap();
-                sender.queued_bytes.fetch_sub(bytes.len(), Ordering::Relaxed);
-                observed.push(bytes);
-            }
-        })
-        .unwrap();
-    observed.extend(rx.try_iter());
-    expected.push(reply);
-    assert_eq!(waits, 1000);
-    assert_eq!(observed, expected);
-}
-
-#[test]
-fn waiting_reply_cancels_on_teardown_with_payload_intact() {
-    // Teardown cancellation must end a saturated wait even while the native receiver remains alive.
-    let (sender, _rx) = diagnostic_input_channel();
-    for _ in 0..PTY_INPUT_QUEUE_CAPACITY {
-        sender.send(vec![b'x']).unwrap();
-    }
-    let reply = b"\x1b[1;1R".to_vec();
-    let result = sender.send_wait_with(reply.clone(), || {
-        sender.writer_progress.stopping.store(true, Ordering::Relaxed);
-    });
-    assert!(matches!(result, Err(PtyInputError::WriterDisconnected(bytes)) if bytes == reply));
-    assert_eq!(sender.diagnostics().queued_bytes, PTY_INPUT_QUEUE_CAPACITY);
-}
-
-#[test]
 fn intentional_teardown_cancels_sender_without_a_writer_failure_classification() {
     // Dropping the real PTY must publish intentional closure before a retained sender can report rejection.
     #[cfg(windows)]
@@ -1472,28 +1426,11 @@ fn intentional_teardown_cancels_sender_without_a_writer_failure_classification()
     )
     .unwrap();
     let sender = pty.input_sender();
+    let replies = pty.reply_sender();
     assert!(!sender.is_closing());
     drop(pty);
     assert!(sender.is_closing());
-    assert!(
-        matches!(sender.send_wait(vec![1]), Err(PtyInputError::WriterDisconnected(bytes)) if bytes == [1])
-    );
-}
-
-#[test]
-fn waiting_reply_reports_oversize_and_disconnection_without_waiting() {
-    // Permanent failures cannot be repaired by waiting for queue capacity.
-    let (sender, rx) = diagnostic_input_channel();
-    assert!(matches!(
-        sender
-            .send_wait_with(vec![0; MAX_PTY_INPUT_MESSAGE_BYTES + 1], || panic!("unexpected wait")),
-        Err(PtyInputError::MessageTooLarge(_))
-    ));
-    drop(rx);
-    assert!(
-        matches!(sender.send_wait_with(vec![1], || panic!("unexpected wait")), Err(PtyInputError::WriterDisconnected(bytes)) if bytes == [1])
-    );
-    assert_eq!(sender.diagnostics().queued_bytes, 0);
+    assert_eq!(replies.send(vec![1]).unwrap_err().kind(), std::io::ErrorKind::BrokenPipe);
 }
 
 fn observe_until(
@@ -1555,6 +1492,7 @@ fn healthy_writer_drains_a_prequeued_small_message_burst_in_order() {
         cancel_rx,
         sender.queued_bytes.clone(),
         sender.writer_progress.clone(),
+        reply_spool().1,
     );
     for _ in &messages {
         assert_eq!(
@@ -1596,6 +1534,7 @@ fn slow_writer_recovers_without_replaying_rejected_input() {
         cancel_rx,
         sender.queued_bytes.clone(),
         sender.writer_progress.clone(),
+        reply_spool().1,
     );
     let first = b"key".to_vec();
     sender.send(first.clone()).unwrap();
@@ -1658,6 +1597,7 @@ fn stalled_native_writer_is_distinct_from_queue_pressure_and_cancels_boundedly()
         cancel_rx,
         sender.queued_bytes.clone(),
         sender.writer_progress.clone(),
+        reply_spool().1,
     );
     sender.send(vec![b'a'; 12]).unwrap();
     assert_eq!(entered_rx.recv_timeout(Duration::from_secs(2)).unwrap(), PtyWriterPhase::Writing);
@@ -1716,6 +1656,7 @@ fn blocked_flush_remains_in_flight_until_the_native_call_returns() {
         cancel_rx,
         sender.queued_bytes.clone(),
         sender.writer_progress.clone(),
+        reply_spool().1,
     );
     sender.send(vec![b'x'; 13]).unwrap();
     assert_eq!(entered_rx.recv_timeout(Duration::from_secs(2)).unwrap(), PtyWriterPhase::Flushing);
@@ -1753,6 +1694,169 @@ fn blocked_flush_remains_in_flight_until_the_native_call_returns() {
     cancel_tx.send(()).unwrap();
     writer.finish("controlled flushing input writer");
     assert_eq!(sender.diagnostics().writer_phase, PtyWriterPhase::Stopped);
+}
+
+#[test]
+fn reply_spill_and_ui_input_keep_independent_fifo_with_fair_turns() {
+    // Hold native I/O while both queues fill; replies must admit without consuming UI slots or byte charges.
+    #[cfg(windows)]
+    let _live_pty_guard = lock_live_pty_test();
+    let (sender, rx) = diagnostic_input_channel();
+    let (replies, reply_reader) = reply_spool();
+    let (entered_tx, entered_rx) = crossbeam_channel::bounded(1);
+    let (permit_tx, permit_rx) = crossbeam_channel::bounded(1);
+    let written = Arc::new(Mutex::new(Vec::new()));
+    let (cancel_tx, cancel_rx) = crossbeam_channel::bounded(1);
+    let mut writer = spawn_writer_thread(
+        Box::new(ControlledInputWriter {
+            entered: entered_tx,
+            permit: permit_rx,
+            written: written.clone(),
+            block_flush: false,
+        }),
+        rx,
+        cancel_rx,
+        sender.queued_bytes.clone(),
+        sender.writer_progress.clone(),
+        reply_reader,
+    );
+    sender.send(vec![0]).unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    for marker in 1..=PTY_INPUT_QUEUE_CAPACITY {
+        sender.send(vec![marker as u8]).unwrap();
+    }
+    for marker in 10..16 {
+        replies.send(vec![marker; 32 * 1024]).unwrap();
+    }
+    assert_eq!(sender.diagnostics().queued_bytes, PTY_INPUT_QUEUE_CAPACITY);
+    assert_eq!(sender.diagnostics().queued_messages, PTY_INPUT_QUEUE_CAPACITY);
+    permit_tx.send(true).unwrap();
+    for _ in 0..10 {
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        permit_tx.send(true).unwrap();
+    }
+    observe_until(&sender, |d| {
+        d.completed_messages == 11 && d.writer_phase == PtyWriterPhase::Idle
+    });
+    let writes = written.lock();
+    let ui: Vec<_> = writes.iter().filter(|bytes| bytes.len() == 1).map(|bytes| bytes[0]).collect();
+    assert_eq!(ui, vec![0, 1, 2, 3, 4]);
+    let reply: Vec<_> =
+        writes.iter().filter(|bytes| bytes.len() > 1).map(|bytes| bytes[0]).collect();
+    assert_eq!(reply, vec![10, 11, 12, 13, 14, 15]);
+    for (index, pair) in writes.windows(2).enumerate() {
+        if pair[0].len() > 1 && pair[1].len() > 1 {
+            let previous_ui = writes[..index].iter().filter(|bytes| bytes.len() == 1).count();
+            assert_eq!(previous_ui, 5, "ready UI input must get the turn after a reply chunk");
+        }
+    }
+    drop(writes);
+    assert_eq!(sender.diagnostics().queued_bytes, 0);
+    cancel_tx.send(()).unwrap();
+    writer.finish("reply and UI writer");
+    assert_eq!(replies.send(vec![1]).unwrap_err().kind(), std::io::ErrorKind::BrokenPipe);
+}
+
+#[test]
+fn native_writer_failure_closes_reply_spill_with_live_sender() {
+    // A native failure must discard pending spill and remain observable, not accept work into an abandoned spool.
+    #[cfg(windows)]
+    let _live_pty_guard = lock_live_pty_test();
+    let (sender, rx) = diagnostic_input_channel();
+    let (replies, reply_reader) = reply_spool();
+    let (entered_tx, entered_rx) = crossbeam_channel::bounded(1);
+    let (permit_tx, permit_rx) = crossbeam_channel::bounded(1);
+    let (_cancel_tx, cancel_rx) = crossbeam_channel::bounded(1);
+    let mut writer = spawn_writer_thread(
+        Box::new(ControlledInputWriter {
+            entered: entered_tx,
+            permit: permit_rx,
+            written: Arc::new(Mutex::new(Vec::new())),
+            block_flush: false,
+        }),
+        rx,
+        cancel_rx,
+        sender.queued_bytes.clone(),
+        sender.writer_progress.clone(),
+        reply_reader,
+    );
+    sender.send(vec![0]).unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    for _ in 0..4 {
+        replies.send(vec![b'r'; 32 * 1024]).unwrap();
+    }
+    permit_tx.send(false).unwrap();
+    writer.finish("failed reply writer");
+    assert_eq!(sender.diagnostics().writer_phase, PtyWriterPhase::Stopped);
+    assert_eq!(replies.send(vec![1]).unwrap_err().kind(), std::io::ErrorKind::BrokenPipe);
+    assert!(!sender.is_closing());
+}
+
+#[test]
+fn reply_storage_failure_keeps_native_ui_input_available() {
+    // A failed spool must not prevent keyboard input from interrupting the child.
+    #[cfg(windows)]
+    let _live_pty_guard = lock_live_pty_test();
+    let (sender, rx) = diagnostic_input_channel();
+    let (replies, reader) = reply_spool();
+    reader.fail(std::io::Error::new(std::io::ErrorKind::StorageFull, "injected full disk"));
+    assert!(replies.send(vec![1]).is_err());
+    let (entered_tx, entered_rx) = crossbeam_channel::bounded(1);
+    let (permit_tx, permit_rx) = crossbeam_channel::bounded(1);
+    let (cancel_tx, cancel_rx) = crossbeam_channel::bounded(1);
+    let written = Arc::new(Mutex::new(Vec::new()));
+    let mut writer = spawn_writer_thread(
+        Box::new(ControlledInputWriter {
+            entered: entered_tx,
+            permit: permit_rx,
+            written: written.clone(),
+            block_flush: false,
+        }),
+        rx,
+        cancel_rx,
+        sender.queued_bytes.clone(),
+        sender.writer_progress.clone(),
+        reader,
+    );
+    sender.send(vec![3]).unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    permit_tx.send(true).unwrap();
+    observe_until(&sender, |d| d.completed_messages == 1);
+    assert_eq!(*written.lock(), [vec![3]]);
+    cancel_tx.send(()).unwrap();
+    writer.finish("spool-failure UI writer");
+}
+
+#[test]
+fn flush_failure_remains_observable_without_counting_completion() {
+    // A successful write followed by a failed flush must latch the native error, not a completed message.
+    #[cfg(windows)]
+    let _live_pty_guard = lock_live_pty_test();
+    let (sender, rx) = diagnostic_input_channel();
+    let (replies, reader) = reply_spool();
+    let (entered_tx, entered_rx) = crossbeam_channel::bounded(1);
+    let (permit_tx, permit_rx) = crossbeam_channel::bounded(1);
+    let (_cancel_tx, cancel_rx) = crossbeam_channel::bounded(1);
+    let mut writer = spawn_writer_thread(
+        Box::new(ControlledInputWriter {
+            entered: entered_tx,
+            permit: permit_rx,
+            written: Arc::new(Mutex::new(Vec::new())),
+            block_flush: true,
+        }),
+        rx,
+        cancel_rx,
+        sender.queued_bytes.clone(),
+        sender.writer_progress.clone(),
+        reader,
+    );
+    sender.send(vec![1]).unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(2)).unwrap(), PtyWriterPhase::Flushing);
+    permit_tx.send(false).unwrap();
+    writer.finish("failed-flush writer");
+    assert_eq!(sender.diagnostics().completed_messages, 0);
+    assert!(replies.send(vec![2]).is_err());
+    assert!(!sender.is_closing());
 }
 
 #[test]

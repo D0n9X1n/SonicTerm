@@ -119,9 +119,8 @@ pub(super) fn command_palette_context(
         }
     });
     let focus_available =
-        [Direction::Left, Direction::Right, Direction::Up, Direction::Down].map(|direction| {
-            tab.and_then(|tab| tab.tree.focus_neighbor(tab.active_pane, direction))
-                .is_some_and(|id| active_pane.is_some() && window.panes.contains_key(&id))
+        tab.map_or([None; 4], |tab| tab.tree.focus_neighbors(tab.active_pane)).map(|neighbor| {
+            neighbor.is_some_and(|id| active_pane.is_some() && window.panes.contains_key(&id))
         });
     CommandContext {
         window_available: true,
@@ -519,6 +518,20 @@ impl App {
             .set_tabs(window.map(|window| &window.tabs).unwrap_or(&empty), &self.i18n);
     }
 
+    /// Match native input to the window that owns the visible palette.
+    pub(super) fn command_palette_owns_input(&self, window_id: WindowId) -> bool {
+        self.command_palette.is_open()
+            && self.palette_attached_window.or(self.main_window_id) == Some(window_id)
+    }
+
+    pub(super) fn command_palette_handle_ime_in_window(
+        &mut self,
+        window_id: WindowId,
+        ime_event: &winit::event::Ime,
+    ) -> bool {
+        self.command_palette_owns_input(window_id) && self.command_palette_handle_ime(ime_event)
+    }
+
     pub(super) fn command_palette_handle_ime(&mut self, ime_event: &winit::event::Ime) -> bool {
         if !self.command_palette.is_open() {
             // When: command_palette is closed the IME event belongs to the
@@ -624,8 +637,7 @@ impl App {
         } else if self.command_palette.mode()
             == sonicterm_ui::command_palette::CommandPaletteMode::RenameTab
         {
-            // When: mode is RenameTab the query holds the tab title, so Enter
-            // commits it via rename_active_tab_body instead of running an action.
+            // When: mode is RenameTab, Enter commits the title to the attached window rather than dispatching a command.
             match logical_key {
                 Key::Named(NamedKey::Escape) => {
                     self.command_palette.close();
@@ -634,9 +646,13 @@ impl App {
                 }
                 Key::Named(NamedKey::Enter) => {
                     let title = self.command_palette.query().trim().to_string();
+                    let source = self.palette_attached_window.or(self.main_window_id);
                     self.command_palette.close();
                     self.palette_attached_window = None;
-                    self.rename_active_tab_body(title);
+                    if let Some(window) = source.and_then(|id| self.windows.get_mut(&id)) {
+                        window.tabs.set_active_custom_title(title);
+                        window.request_redraw();
+                    }
                     true
                 }
                 Key::Named(NamedKey::Backspace) => {
@@ -730,7 +746,10 @@ impl App {
                     if matches!(action, sonicterm_cfg::keymap::Action::RenameTab) {
                         // When: matches finds RenameTab the palette stays open as
                         // a rename editor seeded with the active tab title.
-                        let body = self.active_tab_title_body().unwrap_or_default();
+                        let body = source_window
+                            .and_then(|id| self.windows.get(&id))
+                            .and_then(|window| window.tabs.active_title_body())
+                            .unwrap_or_default();
                         self.command_palette.start_rename_tab(body);
                         self.update_command_palette_ime_cursor_area();
                         self.request_redraw_for_overlay(self.palette_attached_window);
@@ -739,7 +758,13 @@ impl App {
                     if matches!(action, sonicterm_cfg::keymap::Action::UpdateTabColor) {
                         // When: matches finds UpdateTabColor the palette switches
                         // to the tab color picker instead of closing.
-                        self.start_update_tab_color();
+                        let title = source_window
+                            .and_then(|id| self.windows.get(&id))
+                            .and_then(|window| window.tabs.active_title_body())
+                            .unwrap_or_default();
+                        let choices = theme_tab_color_choices(&self.theme);
+                        self.command_palette.start_tab_color_picker(title, choices);
+                        self.request_redraw_for_overlay(self.palette_attached_window);
                         return true;
                     }
                     self.command_palette.close();
@@ -815,6 +840,8 @@ impl App {
         self.palette_pointer_capture = None;
         self.palette_attached_window =
             (Some(window_id) != self.main_window_id).then_some(window_id);
+        // Seed the requested window before opening selects a row from the cached tab inventory.
+        self.command_palette.set_tabs(&self.windows[&window_id].tabs, &self.i18n);
         self.command_palette.open_tabs();
         self.refresh_command_palette_context();
         self.update_command_palette_ime_cursor_area();
@@ -880,27 +907,6 @@ impl App {
         }
     }
 
-    pub(super) fn rename_active_tab_body(&mut self, body: String) {
-        match self.frontmost_kind() {
-            FrontmostKind::Child(id) => {
-                if let Some(ws) = self.windows.get_mut(&id) {
-                    ws.tabs.set_active_custom_title(body);
-                    if let Some(w) = ws.window.as_ref() {
-                        w.request_redraw();
-                    }
-                }
-            }
-            _ => {
-                if let Some(tabs) = self.main_tabs_mut() {
-                    tabs.set_active_custom_title(body);
-                }
-                if let Some(w) = self.main_window() {
-                    w.request_redraw();
-                }
-            }
-        }
-    }
-
     pub(super) fn start_update_tab_color(&mut self) {
         self.palette_pointer_capture = None;
         let title = self.active_tab_title_body().unwrap_or_else(|| "current tab".to_string());
@@ -919,33 +925,15 @@ impl App {
             // picker is empty or the selection is stale; leave the color as is.
             return;
         };
-        match self.frontmost_kind() {
-            FrontmostKind::Child(id) => {
-                if let Some(ws) = self.windows.get_mut(&id) {
-                    if let Some(hex) = choice.hex {
-                        ws.tabs.set_active_custom_color(hex);
-                    } else {
-                        // When: choice carries no hex the picked entry is Reset
-                        // to Default; clear the child tab's color override.
-                        ws.tabs.clear_active_custom_color();
-                    }
-                    ws.request_redraw();
-                }
+        let source = self.palette_attached_window.or(self.main_window_id);
+        if let Some(window) = source.and_then(|id| self.windows.get_mut(&id)) {
+            if let Some(hex) = choice.hex {
+                window.tabs.set_active_custom_color(hex);
+            } else {
+                // When: choice has no hex, restore the attached window's active tab to its theme color.
+                window.tabs.clear_active_custom_color();
             }
-            _ => {
-                if let Some(tabs) = self.main_tabs_mut() {
-                    if let Some(hex) = choice.hex {
-                        tabs.set_active_custom_color(hex);
-                    } else {
-                        // When: choice carries no hex the picked entry is Reset
-                        // to Default; clear the override so the theme color wins.
-                        tabs.clear_active_custom_color();
-                    }
-                }
-                if let Some(w) = self.main_window() {
-                    w.request_redraw();
-                }
-            }
+            window.request_redraw();
         }
     }
     pub(crate) fn draw_command_palette_overlay(&self) {

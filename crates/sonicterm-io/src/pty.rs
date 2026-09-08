@@ -21,6 +21,9 @@ use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, Child, CommandBuilder, PtySize};
 
+pub use crate::reply_spool::PtyReplySender;
+use crate::reply_spool::{reply_spool, ReplyReader};
+
 /// Outgoing message: bytes to write to the pty master (typed by user).
 type Outgoing = Vec<u8>;
 /// Incoming message: bytes read from the pty master (program output).
@@ -66,7 +69,7 @@ pub struct PtyInputDiagnostics {
     pub writer_phase: PtyWriterPhase,
     /// Payload bytes held by the writer outside the channel.
     pub in_flight_bytes: usize,
-    /// Successful native writes whose flush attempt has returned since startup.
+    /// Native writes whose write_all and flush both succeeded since startup.
     pub completed_messages: u64,
     /// Elapsed milliseconds for the observed write or flush, if active.
     pub in_flight_millis: Option<u64>,
@@ -88,7 +91,6 @@ pub enum PtyWriterPhase {
 
 #[derive(Debug)]
 struct PtyWriterProgress {
-    stopping: std::sync::atomic::AtomicBool,
     closing: std::sync::atomic::AtomicBool,
     epoch: Instant,
     operation: AtomicU64,
@@ -99,7 +101,6 @@ struct PtyWriterProgress {
 impl PtyWriterProgress {
     fn new() -> Self {
         Self {
-            stopping: std::sync::atomic::AtomicBool::new(false),
             closing: std::sync::atomic::AtomicBool::new(false),
             epoch: Instant::now(),
             operation: AtomicU64::new(0),
@@ -148,8 +149,8 @@ impl PtyWriterProgress {
 /// Owned, cloneable sender for a child process's input channel.
 ///
 /// Wraps the bounded channel so a caller holding one cannot reach the raw
-/// `Sender`. All paths enforce the same size cap; `send` is non-blocking,
-/// while `send_wait` applies cancellable backpressure only on worker threads.
+/// `Sender`. All paths enforce the same size cap and refuse rather than block.
+/// Parser replies use the separate [`PtyReplySender`] spool.
 #[derive(Clone, Debug)]
 pub struct PtyInputSender {
     tx: Sender<Outgoing>,
@@ -167,36 +168,6 @@ impl PtyInputSender {
     /// caller can retry or report rather than losing them silently.
     pub fn send(&self, bytes: Vec<u8>) -> Result<(), PtyInputError> {
         try_queue_pty_input(&self.tx, &self.queued_bytes, bytes)
-    }
-
-    /// Wait for input capacity on a worker without parser/grid locks; teardown cancels waiting and returns the retained bytes.
-    pub fn send_wait(&self, bytes: Vec<u8>) -> Result<(), PtyInputError> {
-        self.send_wait_with(bytes, || thread::sleep(Duration::from_millis(1)))
-    }
-
-    // Ordering: stopping Acquire observes teardown's preceding closing flag; channel ownership transfers payloads.
-    fn send_wait_with(
-        &self,
-        mut bytes: Vec<u8>,
-        mut wait: impl FnMut(),
-    ) -> Result<(), PtyInputError> {
-        loop {
-            if self.writer_progress.stopping.load(Ordering::Acquire) {
-                // When: stopping is set, release the retained payload instead of waiting on an undrainable queue.
-                return Err(PtyInputError::WriterDisconnected(bytes));
-            }
-            match self.send(bytes) {
-                Err(PtyInputError::QueueFull(retained)) => {
-                    // Keep the retained bytes ahead of later replies until capacity returns.
-                    bytes = retained;
-                    wait();
-                }
-                result => {
-                    // When: send completes or refuses permanently, return its result without retrying.
-                    return result;
-                }
-            }
-        }
     }
 
     /// Whether the owning pane has begun intentional PTY teardown rather than a native writer failure.
@@ -878,6 +849,7 @@ pub struct PtyHandle {
     /// to account for one.
     queued_input_bytes: Arc<AtomicUsize>,
     writer_progress: Arc<PtyWriterProgress>,
+    replies: PtyReplySender,
     /// Closure that resizes the pty to `(cols, rows)`, reporting native failure.
     pub resize: Box<dyn Fn(u16, u16) -> Result<()> + Send + Sync>,
     reader_cancel: Sender<()>,
@@ -998,6 +970,12 @@ impl PtyHandle {
         }
     }
 
+    /// Clone the dedicated reply spool sender, independent of UI input capacity.
+    #[must_use]
+    pub fn reply_sender(&self) -> PtyReplySender {
+        self.replies.clone()
+    }
+
     /// Sample queue occupancy and native writer progress; fields are concurrent observations, not one transaction.
     #[must_use]
     pub fn input_diagnostics(&self) -> PtyInputDiagnostics {
@@ -1081,10 +1059,10 @@ struct PtyHandleTeardown<'a> {
 }
 
 impl PtyTeardownOps for PtyHandleTeardown<'_> {
-    // Ordering: closing SeqCst precedes stopping Release so capacity waiters observe intentional teardown.
     fn signal_cancel(&mut self) {
+        // Publish intentional closure before rejecting retained reply senders.
         self.handle.writer_progress.closing.store(true, Ordering::SeqCst);
-        self.handle.writer_progress.stopping.store(true, Ordering::Release);
+        self.handle.replies.close();
         let _ = self.handle.reader_cancel.try_send(());
         let _ = self.handle.writer_cancel.try_send(());
     }
@@ -1334,12 +1312,14 @@ impl PtyHandle {
         // Writer thread: in_rx -> pty.
         let queued_input_bytes = Arc::new(AtomicUsize::new(0));
         let writer_progress = Arc::new(PtyWriterProgress::new());
+        let (replies, reply_reader) = reply_spool();
         let writer_thread = spawn_writer_thread(
             writer,
             in_rx,
             writer_cancel_rx,
             queued_input_bytes.clone(),
             writer_progress.clone(),
+            reply_reader,
         );
 
         let resize_master = master.clone();
@@ -1355,6 +1335,7 @@ impl PtyHandle {
             in_tx,
             queued_input_bytes,
             writer_progress,
+            replies,
             resize,
             reader_cancel,
             writer_cancel,
@@ -1475,33 +1456,60 @@ fn spawn_reader_thread(
     PtyIoThread { handle: Some(handle), done }
 }
 
-// Ordering: queued_bytes, in_flight_bytes, completed_messages, operation, stopping use Relaxed; the channel transfers ownership.
+// Ordering: queued_bytes, in_flight_bytes, completed_messages, operation use Relaxed; the channel transfers ownership.
 fn spawn_writer_thread(
     mut writer: Box<dyn Write + Send>,
     rx: Receiver<Outgoing>,
     cancel: Receiver<()>,
     queued_bytes: Arc<AtomicUsize>,
     progress: Arc<PtyWriterProgress>,
+    replies: ReplyReader,
 ) -> PtyIoThread {
     let (done_tx, done) = crossbeam_channel::bounded(1);
     let handle = thread::Builder::new()
         .name("sonic-pty-writer".into())
         .spawn(move || {
             let _active = ActivePtyIoThread::enter();
+            let mut last_was_reply = false;
+            let mut reply_wake = replies.wake.clone();
             loop {
-                let bytes = crossbeam_channel::select! {
-                    recv(cancel) -> _ => break,
-                    recv(rx) -> result => match result {
-                        Ok(bytes) => bytes,
-                        Err(_) => break,
-                    },
+                let cancelled =
+                    !matches!(cancel.try_recv(), Err(crossbeam_channel::TryRecvError::Empty));
+                if cancelled {
+                    // When: cancelled is true, stop before beginning another native write.
+                    break;
+                }
+                // A ready UI message gets the next turn after each reply chunk.
+                // Otherwise select fairly between UI input and the reply wake hint.
+                let ui_turn = last_was_reply.then(|| rx.try_recv().ok()).flatten();
+                let (bytes, is_reply) = if let Some(bytes) = ui_turn {
+                    (bytes, false)
+                } else {
+                    // When: ui_turn is absent, park until cancellation or either input source becomes ready.
+                    crossbeam_channel::select! {
+                        recv(cancel) -> _ => break,
+                        recv(rx) -> result => match result {
+                            Ok(bytes) => (bytes, false),
+                            Err(_) => break,
+                        },
+                        recv(reply_wake) -> _ => match replies.pop() {
+                            Ok(Some(bytes)) => (bytes, true),
+                            Ok(None) => continue,
+                            Err(error) => {
+                                if !progress.closing.load(Ordering::SeqCst) {
+                                    tracing::warn!(%error, "PTY reply spool read failed");
+                                }
+                                reply_wake = crossbeam_channel::never();
+                                continue;
+                            },
+                        },
+                    }
                 };
-                // Out of the queue and owned by this thread, so it is no
-                // longer queued memory whether or not the write succeeds.
-                // Exactly paired with the increment in `try_queue_pty_input`:
-                // a message is counted once when it enters the channel and
-                // uncounted once when it leaves, so this cannot underflow.
-                queued_bytes.fetch_sub(bytes.len(), Ordering::Relaxed);
+                last_was_reply = is_reply;
+                if !is_reply {
+                    // Only UI admissions charged queued_bytes; replies own separate storage.
+                    queued_bytes.fetch_sub(bytes.len(), Ordering::Relaxed);
+                }
                 progress.in_flight_bytes.store(bytes.len(), Ordering::Relaxed);
                 progress.begin(PtyWriterPhase::Writing);
                 if let Err(e) = writer.write_all(&bytes) {
@@ -1509,15 +1517,24 @@ fn spawn_writer_thread(
                     if cancel.try_recv().is_err() {
                         tracing::warn!("pty write error: {e}");
                     }
+                    replies.fail(e);
                     break;
                 }
                 progress.begin(PtyWriterPhase::Flushing);
-                let _ = writer.flush();
+                if let Err(error) = writer.flush() {
+                    // When: flush fails, preserve the actual native failure rather than reporting a completed write.
+                    if cancel.try_recv().is_err() {
+                        tracing::warn!(%error, "pty flush error");
+                    }
+                    replies.fail(error);
+                    break;
+                }
                 progress.completed_messages.fetch_add(1, Ordering::Relaxed);
                 progress.in_flight_bytes.store(0, Ordering::Relaxed);
                 progress.operation.store(0, Ordering::Relaxed);
             }
-            progress.stopping.store(true, Ordering::Relaxed);
+            // Reader lifetime, not surviving producer clones, owns pending spill storage.
+            drop(replies);
             progress.in_flight_bytes.store(0, Ordering::Relaxed);
             progress.operation.store(3, Ordering::Relaxed);
             // Nothing will drain the queue again. Anything still in it is

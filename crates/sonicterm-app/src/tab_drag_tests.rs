@@ -61,6 +61,23 @@ fn overflow_local_drag_and_native_registry_keep_absolute_slots() {
     }
 }
 
+#[test]
+fn native_drop_midpoints_match_live_layout_at_every_integer_pixel() {
+    // Fractional-width overflow tabs must use identical insertion thresholds in native screen and local coordinates.
+    use crate::app::os_drag::TabBarSnapshot;
+    let mut tabs = TabBar::new();
+    for index in 0..18 {
+        tabs.push(Tab::new(format!("tab {index}")));
+    }
+    tabs.activate(17);
+    let layout = TabBarLayout::compute_at_y(&tabs, 898.0, 40.0, 0.0);
+    let origin = (-740, 25);
+    let snapshot = TabBarSnapshot::from_layout(None, origin, (898, 600), &layout);
+    for x in 0..898 {
+        assert_eq!(snapshot.drop_slot(origin.0 + x), layout.drop_slot(x as f32, 20.0), "x={x}");
+    }
+}
+
 fn source_layout() -> TabBarLayout {
     let mut tabs = TabBar::new();
     tabs.push(Tab::new("first"));

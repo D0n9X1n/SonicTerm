@@ -1,5 +1,21 @@
 use super::*;
 
+#[test]
+fn shared_neighbor_layout_matches_individual_direction_queries() {
+    // Reusing one layout must preserve all directional ranking, absent-focus, and zoom behavior.
+    let mut tree = nested_tree();
+    for zoom in [false, true] {
+        if zoom {
+            tree.toggle_zoom(1);
+        }
+        for focus in [1, 2, 3, 99] {
+            let expected = [Direction::Left, Direction::Right, Direction::Up, Direction::Down]
+                .map(|direction| tree.focus_neighbor(focus, direction));
+            assert_eq!(tree.focus_neighbors(focus), expected);
+        }
+    }
+}
+
 fn nested_tree() -> PaneTree {
     let mut tree = PaneTree::leaf(1);
     assert!(tree.split(1, Direction::Right, 2));

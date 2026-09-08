@@ -521,13 +521,26 @@ impl CommandPalette {
             return;
         }
         let selected = self.highlighted().cloned();
-        self.all.truncate(command_count);
-        self.presentation.truncate(command_count);
         for (position, tab) in tabs.tabs().iter().enumerate() {
+            let index = command_count + position;
+            if matches!(self.all.get(index), Some(PaletteEntry::Tab { id, title, position: previous }) if *id == tab.id && title == &tab.title && *previous == position)
+            {
+                // When: the existing tab entry matches, retain its translated presentation and allocated strings.
+                continue;
+            }
             let entry = PaletteEntry::Tab { id: tab.id, title: tab.title.clone(), position };
-            self.presentation.push(entry.presentation(Some(i18n), None));
-            self.all.push(entry);
+            let presentation = entry.presentation(Some(i18n), None);
+            if index < self.all.len() {
+                self.all[index] = entry;
+                self.presentation[index] = presentation;
+            } else {
+                // When: index extends the inventory, append one new tab and its matching presentation.
+                self.all.push(entry);
+                self.presentation.push(presentation);
+            }
         }
+        self.all.truncate(command_count + tabs.len());
+        self.presentation.truncate(command_count + tabs.len());
         self.refresh_identity();
         self.refilter_preserving_entry(selected);
     }

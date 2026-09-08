@@ -19,6 +19,7 @@ fn reply_bursts_preserve_every_byte_and_release_parser_before_delivery() {
     }
     input.extend_from_slice(b"done");
     let mut delivered = Vec::new();
+    let mut submissions = 0;
     process_pane_vt_batch_with(
         &handles,
         &input,
@@ -30,17 +31,18 @@ fn reply_bursts_preserve_every_byte_and_release_parser_before_delivery() {
             assert!(handles.parser.try_lock().is_some());
             assert!(handles.inline_images.try_lock().is_some());
             assert!(handles.command_events.try_lock().is_some());
+            submissions += 1;
+            assert!(bytes.len() <= 32 * 1024);
             delivered.extend(bytes);
-            Ok(())
         },
-    )
-    .unwrap();
+    );
     assert_eq!(delivered, expected);
+    assert_eq!(submissions, 1, "small replies share one bounded submission per output batch");
 }
 
 #[test]
-fn saturated_reply_delivery_leaves_parser_available_and_resumes_the_suffix() {
-    // A capacity wait must leave the parser available for rendering and resizing without consuming future output.
+fn reply_spool_admission_leaves_parser_available_with_visible_output_applied() {
+    // A storage operation must leave rendering and resizing access to the already-updated grid.
     let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (_pane, handles) = pane_and_worker_handles();
     let parser = handles.parser.clone();
@@ -57,38 +59,37 @@ fn saturated_reply_delivery_leaves_parser_available_and_resumes_the_suffix() {
             |bytes| {
                 entered_tx.send(bytes).unwrap();
                 resume_rx.recv_timeout(Duration::from_secs(3)).unwrap();
-                Ok(())
             },
-        )
-        .unwrap();
+        );
     });
     let reply = entered_rx.recv_timeout(Duration::from_secs(3));
     let available = parser.try_lock().map(|guard| guard.grid().cursor.col);
     resume_tx.send(()).unwrap();
     worker.join().unwrap();
     assert_eq!(reply.unwrap(), b"\x1b[1;1R");
-    assert_eq!(available, Some(0));
+    assert_eq!(available, Some(1));
     assert_eq!(parser.lock().grid().row(0)[0].ch, 'X');
 }
 
 #[test]
-fn reply_delivery_failure_preserves_bytes_and_stops_before_output_suffix() {
-    // A closed writer must not silently consume the remainder or report a successful delivery.
+fn reply_delivery_failure_does_not_abandon_visible_output() {
+    // Input failure must not end the sole output/exit observer or discard already-buffered visible output.
     let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
     let (_pane, handles) = pane_and_worker_handles();
-    let result = process_pane_vt_batch_with(
+    let mut failed_reply = None;
+    process_pane_vt_batch_with(
         &handles,
         b"\x1b[6nX",
         &mut None,
         |_| None,
         |_| {},
         Instant::now,
-        |bytes| Err(sonicterm_io::pty::PtyInputError::WriterDisconnected(bytes)),
+        |bytes| {
+            failed_reply = Some(bytes);
+        },
     );
-    assert!(
-        matches!(result, Err(sonicterm_io::pty::PtyInputError::WriterDisconnected(bytes)) if bytes == b"\x1b[1;1R")
-    );
-    assert_eq!(handles.parser.lock().grid().cursor.col, 0);
+    assert_eq!(failed_reply.unwrap(), b"\x1b[1;1R");
+    assert_eq!(handles.parser.lock().grid().row(0)[0].ch, 'X');
 }
 
 fn app_with_unavailable_shell() -> App {
@@ -253,9 +254,8 @@ fn pane_vt_batch_routes_clipboard_commands_media_and_modes_after_unlock() {
         },
         |event| emitted.push(event),
         || ticks.next().expect("one timestamp per command marker"),
-        |_| Ok(()),
-    )
-    .unwrap();
+        |_| {},
+    );
 
     assert_eq!(
         decoder_unlocked,
