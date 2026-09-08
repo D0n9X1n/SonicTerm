@@ -513,10 +513,9 @@ fn terminal_repeat_owner_is_resolved_before_local_input_owners() {
 
     let main_source = include_str!("window_event.rs");
     let child_source = include_str!("child_window.rs");
-    for (source, palette_marker) in [
-        (main_source, "if self.command_palette.is_open()"),
-        (child_source, "let palette_here = self.palette_attached_window"),
-    ] {
+    for (source, palette_marker) in
+        [(main_source, "if self.command_palette.is_open()"), (child_source, "if palette_here {")]
+    {
         let keyboard = source
             .find("WindowEvent::KeyboardInput { event, .. } =>")
             .expect("keyboard routing branch");

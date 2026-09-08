@@ -378,6 +378,20 @@ impl App {
                 window.invalidate_path_hover();
             }
         }
+        if self.command_palette_handle_pointer_event(win_id, &event) {
+            // When: `command_palette_handle_pointer_event` consumes input, keep both window handlers from receiving it.
+            if matches!(
+                event,
+                WindowEvent::MouseInput {
+                    state: ElementState::Released,
+                    button: MouseButton::Left,
+                    ..
+                }
+            ) {
+                self.drain_pending_window_creates(el);
+            }
+            return;
+        }
         // Tear-out child windows: route to the dedicated handler so
         // each child renders/handles input on its own surface.
         // the main window also lives in `self.windows`
@@ -768,6 +782,16 @@ impl App {
                             active_id,
                             guards[active_pos].1.grid(),
                         );
+                        if self.command_palette.is_open() && self.palette_attached_window.is_none()
+                        {
+                            self.command_palette.set_context(
+                                super::overlays::command_palette_context(
+                                    ws,
+                                    Some(guards[active_pos].1.grid()),
+                                ),
+                            );
+                            self.command_palette.set_tabs(&ws.tabs, &self.i18n);
+                        }
                     }
                 }
                 #[allow(clippy::type_complexity)]
@@ -1929,6 +1953,16 @@ impl App {
                                 }
                                 Some(sonicterm_ui::tabbar_view::TabHit::Close(i)) => {
                                     self.close_tab_at(i)
+                                }
+                                Some(sonicterm_ui::tabbar_view::TabHit::Overflow) => {
+                                    // When: `Overflow` is clicked, open the selector without starting a main-window tab drag.
+                                    if let Some(window) = self.windows.get_mut(&win_id) {
+                                        window.mouse_down = false;
+                                        window.pressed_tab = None;
+                                        window.drag_session = None;
+                                    }
+                                    self.open_tab_selector(win_id);
+                                    return;
                                 }
                                 None => unreachable!("tab_action.is_some() checked above"),
                             }

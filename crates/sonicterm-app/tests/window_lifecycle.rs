@@ -105,6 +105,9 @@ fn child_reap_purges_drag_snapshot_and_backend_registration() {
         bar_rect: (0, 0, 100, 20),
         tab_lefts: vec![0],
         tab_rights: vec![100],
+        tab_indices: vec![0],
+        total_tabs: 1,
+        overflow_append_from: None,
     });
     let unregister_calls = Arc::new(AtomicUsize::new(0));
     app.__test_set_os_drag_backend(Box::new(UnregisterTrackingBackend {
@@ -132,6 +135,9 @@ fn failed_child_tear_out_source_cleanup_releases_empty_window() {
         bar_rect: (0, 0, 100, 20),
         tab_lefts: Vec::new(),
         tab_rights: Vec::new(),
+        tab_indices: Vec::new(),
+        total_tabs: 0,
+        overflow_append_from: None,
     });
     let unregister_calls = Arc::new(AtomicUsize::new(0));
     app.__test_set_os_drag_backend(Box::new(UnregisterTrackingBackend {

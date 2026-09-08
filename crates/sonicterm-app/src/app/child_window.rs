@@ -427,7 +427,7 @@ impl App {
         // `child` borrows `self.windows` below. Disjoint fields — safe. Computed
         // AFTER the scrollbar pre-match (which needs an unborrowed `self`).
         let broadcast_receivers = self.broadcast_receivers();
-        let palette_for_render: Option<&mut CommandPalette> = if palette_here {
+        let mut palette_for_render: Option<&mut CommandPalette> = if palette_here {
             Some(&mut self.command_palette)
         } else {
             // When: `palette_here` is false, so the palette belongs to another
@@ -630,6 +630,21 @@ impl App {
                     child.panes.iter().map(|(id, pane)| (*id, pane.viewport_top_abs)).collect();
                 if let Some(t) = timing.as_mut() {
                     t.lap("inline_images");
+                }
+                if let Some(palette) =
+                    palette_for_render.as_deref_mut().filter(|palette| palette.is_open())
+                {
+                    let active_grid = guards
+                        .iter()
+                        .find(|(id, _, _)| *id == active_id)
+                        .map(|(_, parser, _)| parser.grid());
+                    if let Some(grid) = active_grid {
+                        palette.set_context(super::overlays::command_palette_context(
+                            child,
+                            Some(grid),
+                        ));
+                        palette.set_tabs(&child.tabs, &self.i18n);
+                    }
                 }
                 if let Some(pane) = child.panes.get_mut(&active_id) {
                     // When: `panes` still holds `active_id`, so the frame has an
@@ -1404,6 +1419,15 @@ impl App {
                                         crate::tab_drag::DragSession::new(win_id, tab.id, (px, py))
                                     });
                                 }
+                                TabHit::Overflow => {
+                                    // When: `Overflow` is clicked, open the selector without starting a child tab drag.
+                                    child.mouse_down = false;
+                                    child.pressed_tab = None;
+                                    child.drag_session = None;
+                                    let _ = child;
+                                    self.open_tab_selector(win_id);
+                                    return;
+                                }
                                 TabHit::Close(idx) => {
                                     // When: `TabHit::Close` at `idx`, so the × was
                                     // clicked and that tab closes immediately.
@@ -1655,6 +1679,39 @@ impl App {
                         return;
                     }
                 }
+                // The attached modal owns input before copy-mode navigation, including a selector opened by pointer in READONLY.
+                let palette_here =
+                    self.command_palette.is_open() && self.palette_attached_window == Some(win_id);
+                if palette_here {
+                    // When: `palette_here` — the palette overlay owns this
+                    // child's keystrokes until it closes.
+                    let child_mods = child.modifiers;
+                    let _ = child;
+                    if let Some(key_str) = key_event_to_string(&event, child_mods) {
+                        // When: the press maps to a `key_str`, so it can be
+                        // checked for the palette's own toggle binding.
+                        if let Some(action) = self.keymap.lookup(&key_str).cloned() {
+                            // When: `keymap.lookup` bound this `key_str`, so a
+                            // toggle can close the palette rather than filter it.
+                            if matches!(action, Action::OpenCommandPalette) {
+                                // When: `matches` the palette toggle, so the
+                                // action runs instead of editing the query.
+                                self.run_action_for_window(&action, win_id);
+                                self.drain_pending_window_creates(el);
+                                if let Some(c) = self.windows.get(&win_id) {
+                                    c.request_redraw();
+                                }
+                                return;
+                            }
+                        }
+                    }
+                    self.command_palette_handle_key(&event);
+                    self.drain_pending_window_creates(el);
+                    if let Some(c) = self.windows.get(&win_id) {
+                        c.request_redraw();
+                    }
+                    return;
+                }
                 if child.copy_mode.is_some() {
                     // When: `copy_mode` is active, so keys navigate the scrollback
                     // instead of reaching the PTY.
@@ -1692,42 +1749,6 @@ impl App {
                         // straight to the copy-mode key handler.
                         child_copy_mode_handle_key(child, &event);
                         child.request_redraw();
-                    }
-                    return;
-                }
-                // When the command palette is attached to THIS child window,
-                // route the keystroke into the overlay handler exactly like the
-                // main window does. Without this branch a key pressed while the
-                // palette is open would reach the PTY instead of filtering the
-                // palette query.
-                let palette_here = self.palette_attached_window == Some(win_id);
-                if palette_here {
-                    // When: `palette_here` — the palette overlay owns this
-                    // child's keystrokes until it closes.
-                    let child_mods = child.modifiers;
-                    let _ = child;
-                    if let Some(key_str) = key_event_to_string(&event, child_mods) {
-                        // When: the press maps to a `key_str`, so it can be
-                        // checked for the palette's own toggle binding.
-                        if let Some(action) = self.keymap.lookup(&key_str).cloned() {
-                            // When: `keymap.lookup` bound this `key_str`, so a
-                            // toggle can close the palette rather than filter it.
-                            if matches!(action, Action::OpenCommandPalette) {
-                                // When: `matches` the palette toggle, so the
-                                // action runs instead of editing the query.
-                                self.run_action_for_window(&action, win_id);
-                                self.drain_pending_window_creates(el);
-                                if let Some(c) = self.windows.get(&win_id) {
-                                    c.request_redraw();
-                                }
-                                return;
-                            }
-                        }
-                    }
-                    self.command_palette_handle_key(&event);
-                    self.drain_pending_window_creates(el);
-                    if let Some(c) = self.windows.get(&win_id) {
-                        c.request_redraw();
                     }
                     return;
                 }

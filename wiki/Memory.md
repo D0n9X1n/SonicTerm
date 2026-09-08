@@ -172,6 +172,11 @@ current bucket class. Every visible and warm renderer is listed.
 than the listed renderer set indicates a live renderer that is no longer
 reachable from window topology.
 
+These fields are not a whole-renderer heap census. Frame-key metadata,
+transient frame plans and draw vectors, and other unlisted host allocations
+are outside `renderer_total_bytes`; the OS process reading includes memory
+beyond the charged classes.
+
 ### Aggregate snapshot
 
 Set the log level to `info` for one `memory snapshot` at most every 30 s:
@@ -180,6 +185,12 @@ Set the log level to `info` for one `memory snapshot` at most every 30 s:
 [logging]
 level = "info"
 ```
+
+This is a sequential diagnostic sample, not a linearizable point-in-time
+snapshot. Each pane's parser, inline media, and PTY queues are read separately;
+panes, renderers, the shared allocator, and OS memory are then sampled in turn.
+Even `panes_contended=0` does not make those readings simultaneous or turn
+sampled charges into allocation-time admission limits.
 
 The line combines:
 
@@ -416,6 +427,9 @@ PANE_COMMITTED_BUDGET_BYTES = 2 × PANE_SEAM_CAP_SUM_BYTES
 `live_renderers` 来自独立的进程级计数器；若该计数大于可列出的渲染器集合，说明有一个
 仍存活但已无法从窗口拓扑访问的渲染器。
 
+这些字段不是渲染器整个堆的清单。帧键元数据、临时帧计划与绘制向量以及其它未列出的
+主机分配不计入 `renderer_total_bytes`；操作系统进程读数还包含已计费分类以外的内存。
+
 ### 聚合快照
 
 把日志级别设为 `info`，最多每 30 s 得到一条 `memory snapshot`：
@@ -424,6 +438,10 @@ PANE_COMMITTED_BUDGET_BYTES = 2 × PANE_SEAM_CAP_SUM_BYTES
 [logging]
 level = "info"
 ```
+
+这是顺序执行的诊断采样，不是可线性化的单一时刻快照。每个窗格的解析器、内联媒体和
+PTY 队列分别读取；各窗格、渲染器、共享分配器及操作系统内存也依次采样。
+即使 `panes_contended=0`，这些读数也不是同时取得的，采样计费更不是分配时的准入上限。
 
 该行合并：
 

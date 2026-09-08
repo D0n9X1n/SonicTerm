@@ -34,7 +34,7 @@ format-preserving document editor.
 | `keymap` | `"sonicterm-macos"`, `"sonicterm-windows"`, or `"sonicterm-linux"` | Selects the platform keymap. See [Keybindings](Keybindings). |
 | `locale` | `""` | Selects `en`, `zh-CN`, or `ja`. Empty uses `SONIC_LOCALE`, then the OS locale, then `en`. |
 | `quit_on_last_window_close` | `true` | On macOS, `false` keeps the process available from the Dock after the last window closes. Other platforms always exit with no windows. |
-| `tab_max_width` | `240` | Maximum width of one tab in logical pixels. A non-finite or non-positive value is ignored. Crowded tabs still share the available width. |
+| `tab_max_width` | `240` | Preferred maximum width of one tab in logical pixels. Non-finite or non-positive values are ignored. The font/scale-derived readable minimum takes precedence over a smaller maximum; crowded strips show an active-tab segment and an overflow selector. Extremely narrow windows relax the minimum to retain both hit zones. Width-policy changes invalidate retained tab chrome even when terminal content is idle. |
 
 #### `[font]`
 
@@ -254,7 +254,7 @@ SonicTerm 允许 TOML 中的未知 key，受支持的运行时持久化命令会
 | `keymap` | `"sonicterm-macos"`、`"sonicterm-windows"` 或 `"sonicterm-linux"` | 选择当前平台的 keymap。参见 [快捷键](Keybindings)。 |
 | `locale` | `""` | 选择 `en`、`zh-CN` 或 `ja`。空值依次使用 `SONIC_LOCALE`、系统 locale、`en`。 |
 | `quit_on_last_window_close` | `true` | macOS 中设为 `false` 后，最后一个窗口关闭时进程仍留在 Dock。其它平台没有窗口时一定退出。 |
-| `tab_max_width` | `240` | 单个标签页的最大逻辑像素宽度。非有限值或非正值会被忽略。标签太多时仍会平均分配宽度。 |
+| `tab_max_width` | `240` | 单个标签页的首选最大逻辑像素宽度。非有限值或非正值会被忽略。由字体/缩放推导的可读最小宽度优先于更小的最大值；拥挤时显示包含活动标签页的区段和溢出选择器。极窄窗口会放宽最小宽度以保留两个点击区域。即使终端内容空闲，宽度策略变化也会使保留的标签界面失效并重绘。 |
 
 #### `[font]`
 

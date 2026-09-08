@@ -2,6 +2,65 @@ use super::*;
 use sonicterm_ui::tabbar_view::{Point, TabAction, TabHit, TAB_BAR_HEIGHT, TEAR_OUT_THRESHOLD_PX};
 use sonicterm_ui::tabs::{Tab, TabBar};
 
+/// Sparse overflow widgets keep source reorder and native registry drops in absolute tab coordinates.
+#[test]
+fn overflow_local_drag_and_native_registry_keep_absolute_slots() {
+    use crate::app::os_drag::{TabBarRegistry, TabBarSnapshot};
+    let mut tabs = TabBar::new();
+    for index in 0..16 {
+        tabs.push(Tab::new(format!("tab {index}")));
+    }
+    for active in [0, 8, 15] {
+        tabs.activate(active);
+        let layout = TabBarLayout::compute_at_y(&tabs, 600.0, 40.0, 560.0);
+        let control = layout.overflow.unwrap();
+        let registry = TabBarRegistry::new();
+        let origin = (-740, 25);
+        let snapshot = TabBarSnapshot::from_layout(None, origin, (600, 600), &layout);
+        assert_eq!(snapshot.tab_indices, layout.tabs.iter().map(|tab| tab.idx).collect::<Vec<_>>());
+        registry.publish(snapshot);
+        for widget in &layout.tabs {
+            for fraction in [0.25, 0.75] {
+                let x = (widget.bg_rect.x + widget.bg_rect.w * fraction).round() as i32;
+                let local_slot = layout.drop_slot(x as f32, 580.0);
+                assert_eq!(
+                    registry.resolve_screen_pos(origin.0 + x, origin.1 + 580),
+                    Some((None, local_slot))
+                );
+                let target = find_drop_target(
+                    (origin.0 + x, origin.1 + 580),
+                    [(42_u64, WindowGeom::new(origin, (600, 600)), layout.clone())],
+                )
+                .unwrap();
+                assert_eq!(target.slot, local_slot);
+            }
+        }
+        let source = layout.tabs.iter().find(|tab| tab.idx == active).unwrap().bg_rect;
+        let mut session =
+            DragSession::new(42_u64, tabs.tabs()[active].id, (source.x + source.w * 0.5, 580.0));
+        session.current_pos = (control.x + control.w * 0.5, 580.0);
+        let expected = if active == tabs.len() - 1 {
+            DragAction::ReturnToOriginalBar
+        } else {
+            DragAction::ReorderTab { to: tabs.len() - 1 }
+        };
+        assert_eq!(compute_action::<u64>(&session, None, &layout, active), expected);
+        assert_eq!(
+            registry.resolve_screen_pos(origin.0 + session.current_pos.0 as i32, origin.1 + 580),
+            Some((None, tabs.len()))
+        );
+        let last = layout.tabs.last().unwrap();
+        session.current_pos = (last.bg_rect.x + last.bg_rect.w, 580.0);
+        let to = (last.idx + 1).min(tabs.len() - 1);
+        let expected = if active == to {
+            DragAction::ReturnToOriginalBar
+        } else {
+            DragAction::ReorderTab { to }
+        };
+        assert_eq!(compute_action::<u64>(&session, None, &layout, active), expected);
+    }
+}
+
 fn source_layout() -> TabBarLayout {
     let mut tabs = TabBar::new();
     tabs.push(Tab::new("first"));

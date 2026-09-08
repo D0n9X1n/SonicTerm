@@ -69,7 +69,46 @@ flowchart BT
 ```
 
 The diagram shows the main architecture edges. Each entry below gives the exact
-first-party Cargo dependencies.
+first-party Cargo dependencies. Unless an entry says otherwise, these are normal
+Cargo dependencies, not build or test dependencies. `sonicterm-logging` additionally
+uses `sonicterm-resource` with `test-util` as a dev dependency.
+`sonicterm-font`'s `fontconfig` alias is target-gated to Android and non-macOS Unix;
+`config`, `freetype`, and `harfbuzz` are library aliases, not extra crates.
+The workspace has no first-party build-dependency edge. External build tools and
+native link requirements still belong to the FFI and platform crates.
+
+## State and public-interface contracts
+
+The role descriptions below define responsibility. This table names the mutable
+state owner and the concrete interface at each boundary; it is not a certification
+of every unsafe call or an assertion that compatibility traits drive production.
+Paths are relative to the named crate unless another crate is named explicitly.
+
+| Crate | Mutable state and lifecycle owner | Public interface and named boundary exceptions |
+| --- | --- | --- |
+| `sonicterm-types` | Values belong to their callers; no window, PTY, or renderer lifecycle. | `Cell`, `GlyphKey`, `ResourceAmount`, `WindowKey`, and backend-free traits in `src/traits/`; the `Painter` trait is a dormant compatibility seam. |
+| `sonicterm-resource` | `ResourceGovernor` shares `Arc<Ledger>`; reservation tokens own charges, and `ReaperSupervisor` owns admitted cleanup tasks. It does not own the charged payloads. | `try_reserve`, `Reservation`, `CommittedReservation`, `snapshot`, and `ReaperSupervisor`; snapshots are observational and GUI process/window limits remain tracking-only. |
+| `sonicterm-grid` | Each `Grid` owns visible/history/saved-primary rows, revisions, and dirty bits; `HyperlinkRegistry` separately owns link metadata. The production parser owns the grid. | `Grid::resize`, `revision`, `retained_amount_by_region`, row access, and `Line`; no native handles, PTY transport, or presentation. |
+| `sonicterm-vt` | `Parser` owns its `Grid`, parser state, capture buffers, and reply/event state; a pane worker advances it under the pane's parser lock. | `Parser::advance`, `grid`, `grid_mut`, and `VtEvent` in `src/vt.rs`; callbacks produce data, not native-window calls. |
+| `sonicterm-io` | `PtyHandle` owns child-process and bounded input/output transport state, cancellation, and reader/writer lifetimes. Drop starts bounded teardown. | `spawn_default_shell`, `send_input_nonblocking`, `PtyInputSender`, `resize`, `out_rx`, and optional `SshHandle`; GUI callers do not own native PTY internals. |
+| `sonicterm-cfg` | Callers own loaded `Config`, `Theme`, and `Keymap` values and decide when to replace them. | TOML/asset/URI APIs in `src/{config,theme,keymap,assets,url_scan,url_open}.rs`; `LoggingConfig` is re-exported from logging, and filesystem targets do not enter the URI opener. |
+| `sonicterm-logging` | Process subscriber, panic/exit hooks, ring, and artifact workers are logging-owned; the binary retains `LoggingGuard` to keep the appender alive. | `init`, `init_in`, `LoggingConfig`, `install_panic_hook`, and breadcrumb/session APIs; initialization is process-wide, not one subscriber per window. See [Logging](Logging) for persistence scope. |
+| `sonicterm-ui` | `App` and `WindowState` hold UI controllers; `CommandPalette` owns its cached text and filtered selection, `TabBar` owns tab identities, and tab-width policy is a process scalar. | `CommandPalette`, `PaletteLayout`, `TabBarLayout`, `PaneTree`, `Selection`, and `I18n`; these compute state/layout without owning native windows or executing actions. |
+| `sonicterm-render-model` | Caller-owned frame records borrow live grid state; `InlineImage` shares decoded bytes with `Arc`. No renderer or native lifecycle is owned here. | `PaneRender<'a>`, `PixelRect`, and `HoveredUrlCells`; production retains parser guards through rendering. `boundary::{grid,cfg,ui}` re-exports concrete types unchanged; `RenderInputs` and the dormant `Painter` do not replace the production entrypoint. |
+| `sonicterm-text` | CPU `GlyphAtlas` and `RowGlyphCache` own pixels, metadata, and cached instances; their containing renderer controls lifetime and invalidation. | `Rasterizer`, `RasterTile`, `GlyphInstance`, `ShapedGlyph`, and atlas/cache methods; native discovery/shaping/raster objects live in font/engine, not this crate. |
+| `sonicterm-font-config` | `ConfigHandle` shares immutable `Arc<Config>` snapshots; a process mutex stores the current handle and generations distinguish replacements. | `configuration`, `use_this_configuration`, `TextStyle`, font attributes, and rasterizer policy; library alias `config` is distinct from `sonicterm-cfg`, and owns no native face. |
+| `sonicterm-fontconfig` | Raw Fontconfig ABI exposes native objects; matching wrappers in `sonicterm-font::fcwrap` own references and destruction. | `Fc*` types/functions in `src/lib.rs`; system linking is build-time and the font consumer is target-gated, not a Windows/macOS discovery path. |
+| `sonicterm-freetype` | Generated ABI owns no Rust wrapper lifecycle; `sonicterm-font::ftwrap` owns library/face lifetimes and keeps backing sources alive. | `FT_*` bindings and fixed-point helpers; `build.rs` compiles embedded native sources, while callers of raw ABI retain its unsafe obligations. |
+| `sonicterm-harfbuzz` | Generated ABI exposes native references; `sonicterm-font::hbwrap` manages buffers, blobs, font references, and their release callbacks. | `hb_*` bindings; the `freetype` dependency aliases `sonicterm-freetype`, and native amalgamation/link setup stays in `build.rs`. |
+| `sonicterm-font` | `FontConfiguration` shares thread-confined `Rc` state; `LoadedFont` owns `RefCell` shaping/raster/fallback caches and native wrappers own handle lifetimes. | `FontConfiguration`, `LoadedFont`, locator/shaper/rasterizer traits, `FontMetrics`, and `RasterizedGlyph`; raw `ftwrap` re-exports remain an explicit low-level surface, not a blanket safe-API claim. |
+| `sonicterm-engine` | `FontStack` shares `Rc<FontConfiguration>` and owns per-stack size/weight/metric state; the renderer retains the stack. | `FontStack`, `CellMetricsPx`, shaping and atlas-tile conversion; direct grid/text dependencies carry CPU data, not another terminal state owner. |
+| `sonicterm-block-glyph` | Callers own returned CPU bitmap tiles; block geometry uses transient raster state, not a shared renderer or font-face owner. | `BlockKey`, `SizedBlockKey`, `block_sprite_with_cell_metrics`, and `glue::BlockRasterTile`; no first-party dependency, with preserved WezTerm attribution. |
+| `sonicterm-gpu` | `GpuRenderer` owns per-window surfaces, retained frame, pipelines, atlases, caches, software frame, and font stacks. `GpuSharedContext` shares wgpu-refcounted device/queue handles, not a second device. | `GpuRenderer::new`, `new_with_shared_context`, `render`, `try_resize`, `retained_amounts`, and `live_renderer_count`; UI/grid types cross render-model. The retained report describes this instance, while the live count tracks lifecycle. CPU success is observable; wgpu success here is submit/present invocation. |
+| `sonicterm-app-core` | `AppStateMachine` owns backend-free transition/effect values, not live `WindowState`, parser locks, or PTYs. | `AppState`, `AppIntent`, `AppEffect`, `handle`, and effect ordering; production topology remains in App rather than being inferred from this model. |
+| `sonicterm-app` | `App` owns live `WindowState` objects, warm renderers, routing, and resource coordination. Each window owns tabs/panes; each pane owns parser/PTY/image state. | `App`, `WindowState`, `PaneState`, `run_action_for_window`, and platform `Shell` wrappers; `try_lock` guards and borrowed grids survive through stateful rendering. Native workers do not resolve UI windows. |
+| `sonicterm-mac` | Binary startup retains logging/session guards, installs AppKit hooks, and hands event-loop ownership to `MacShell`. | `src/main.rs` and menu/open-document/drag modules; AppKit calls remain on the main thread, terminal behavior stays in shared app/IO crates. |
+| `sonicterm-windows` | Binary startup retains logging/session guards, installs Win32 menu/backdrop/OLE hooks, and runs `WindowsShell`. | `src/main.rs`, CLI and native GUI modules, and WiX assets; PTY/ConPTY process ownership remains in `sonicterm-io`. |
+| `sonicterm-linux` | Binary startup owns Linux capability normalization and packaged-font preflight, retains logging/session guards, then runs `LinuxShell`. | `src/main.rs` and package resources; the direct engine dependency serves font preflight, while X11/Wayland windows and terminal state remain app-owned. |
 
 ## Contracts and terminal core
 
@@ -156,7 +195,37 @@ notifications, and localization.
 **First-party dependencies:** `sonicterm-cfg`, `sonicterm-grid`,
 `sonicterm-text`, `sonicterm-types`.
 
-**Read:** `src/{tabs,pane,command_palette,search,selection,copy_mode,ime,overlays,i18n}.rs`.
+`command_label::descriptor` owns static action-variant identity, category,
+localization key, English search aliases, target requirement, and the shared
+READONLY allowance. `CommandContext` contains only window-local availability
+facts supplied by App; `disabled_reason` evaluates them without native handles,
+terminal payloads, or execution. The localized label helpers use
+English templates or the existing English label when a translation is absent,
+while preserving literal action arguments. This catalog does not authorize or
+route actions; live window/pane context and execution remain app-owned.
+`CommandPalette` owns cached labels, search strings, and first-binding hints;
+keymap refresh builds them together with the current `I18n`. Locale refresh
+rebuilds text in every mode while only Commands refilters action indices.
+`PaletteLayout` consumes these cached labels. Their precomputed identity enters
+the renderer frame key so locale-only changes repaint without per-frame
+translation or changing action execution. Cached chrome text follows the same
+identity; whole Fluent count/title phrases are split around one internal value
+slot at refresh, preserving catalog word order without interpreting user titles.
+The layout appends its caret separately from translated text. Command rows
+include localized category/disabled details; `highlighted` preserves row
+identity while `current` returns only executable entries. `PaletteEntry`
+distinguishes existing commands from live tab targets. Tab targets use `TabId`,
+not title or position, and disappear without selecting a replacement; App
+resolves their current index in the same attached window before activation. App refreshes context
+before input and from the already-held active grid during rendering. It uses
+`try_lock` for input-time selection validation and never re-locks a render guard.
+Overflow layouts retain absolute tab indices in a visible active-tab segment;
+local and native drop snapshots resolve those same indices. The same palette can
+filter to live tabs only. App retains at most one modal pointer capture, checks
+entry identity and availability on release, and leaves previously latched terminal
+or chrome gestures with their original handler.
+
+**Read:** `src/{tabs,pane,command_palette,command_label,search,selection,copy_mode,ime,overlays,i18n}.rs`.
 
 ### `sonicterm-render-model`
 
@@ -265,7 +334,12 @@ and Windows CPU presentation data.
 **First-party dependencies:** `sonicterm-block-glyph`, `sonicterm-engine`,
 `sonicterm-render-model`, `sonicterm-text`, `sonicterm-types`.
 
-**Read:** `src/{core,atlas_upload,row_quad_cache,chrome_text,cursor,color,software_windows}.rs`.
+The private `FramePlan` composes frame identity, mode, damage, pane clips,
+viewport slots, and expected revisions from metadata. Production consumes it
+while retaining borrowed grids, parser guards, and stateful atlas/cache work;
+it is not a snapshot or threaded renderer boundary.
+
+**Read:** `src/{core,frame_plan,atlas_upload,row_quad_cache,chrome_text,cursor,color,software_windows}.rs`.
 
 ### `sonicterm-app-core`
 
@@ -402,7 +476,42 @@ flowchart BT
     platforms --> core
 ```
 
-图中只画主要架构依赖。下方每个条目列出准确的第一方 Cargo 依赖。
+图中只画主要架构依赖。下方每个条目列出准确的第一方 Cargo 依赖。除非条目另有说明，
+这些都是普通 Cargo 依赖，而不是构建或测试依赖。`sonicterm-logging` 还以 dev dependency
+使用启用 `test-util` 的 `sonicterm-resource`。`sonicterm-font` 的 `fontconfig` 别名仅在
+Android 和非 macOS Unix 目标启用；`config`、`freetype`、`harfbuzz` 是库别名，不是额外 crate。
+工作区没有第一方 build-dependency 边。外部构建工具和原生链接要求仍由 FFI 与平台 crate 管理。
+
+## 状态与公开接口契约
+
+下方职责说明定义责任范围。本表列出各边界的可变状态所有者与具体接口；它不是对所有 unsafe
+调用的认证，也不表示兼容 trait 驱动生产路径。除非明确写出其他 crate，路径相对于该行 crate。
+
+| Crate | 可变状态与生命周期所有者 | 公开接口与明确的边界例外 |
+| --- | --- | --- |
+| `sonicterm-types` | 值由调用方持有；不拥有窗口、PTY 或渲染器生命周期。 | `Cell`、`GlyphKey`、`ResourceAmount`、`WindowKey` 和 `src/traits/` 中与后端无关的 trait；`Painter` 是未启用的兼容边界。 |
+| `sonicterm-resource` | `ResourceGovernor` 共享 `Arc<Ledger>`；reservation token 拥有记账量，`ReaperSupervisor` 拥有已接纳的清理任务。它不拥有被记账的载荷。 | `try_reserve`、`Reservation`、`CommittedReservation`、`snapshot` 和 `ReaperSupervisor`；快照是观察结果，GUI 进程/窗口限制仍仅用于跟踪。 |
+| `sonicterm-grid` | 每个 `Grid` 拥有可见/历史/保存的主屏行、版本和脏位；`HyperlinkRegistry` 单独拥有链接元数据。生产解析器拥有网格。 | `Grid::resize`、`revision`、`retained_amount_by_region`、行访问和 `Line`；不包含原生句柄、PTY 传输或呈现。 |
+| `sonicterm-vt` | `Parser` 拥有 `Grid`、解析状态、捕获缓冲和回复/事件状态；窗格 worker 在该窗格的解析器锁下推进它。 | `src/vt.rs` 中的 `Parser::advance`、`grid`、`grid_mut` 和 `VtEvent`；回调产生数据，不调用原生窗口。 |
+| `sonicterm-io` | `PtyHandle` 拥有子进程、有界输入/输出传输状态、取消以及 reader/writer 生命周期。Drop 启动有界清理。 | `spawn_default_shell`、`send_input_nonblocking`、`PtyInputSender`、`resize`、`out_rx` 和可选 `SshHandle`；GUI 调用方不拥有原生 PTY 内部状态。 |
+| `sonicterm-cfg` | 调用方拥有加载后的 `Config`、`Theme` 和 `Keymap` 值，并决定何时替换。 | `src/{config,theme,keymap,assets,url_scan,url_open}.rs` 中的 TOML/资源/URI API；`LoggingConfig` 从 logging 重导出，文件系统目标不进入 URI 打开器。 |
+| `sonicterm-logging` | 进程 subscriber、panic/exit hook、ring 和工件 worker 由 logging 管理；二进制保留 `LoggingGuard` 维持 appender 生命周期。 | `init`、`init_in`、`LoggingConfig`、`install_panic_hook` 和 breadcrumb/session API；按进程初始化，不是每个窗口一个 subscriber。持久化范围见[日志](Logging)。 |
+| `sonicterm-ui` | `App` 和 `WindowState` 持有 UI controller；`CommandPalette` 拥有缓存文本与过滤选择，`TabBar` 拥有标签页身份，标签宽度策略是进程级标量。 | `CommandPalette`、`PaletteLayout`、`TabBarLayout`、`PaneTree`、`Selection` 和 `I18n`；仅计算状态/布局，不拥有原生窗口或执行动作。 |
+| `sonicterm-render-model` | 调用方拥有的帧记录借用实时网格；`InlineImage` 通过 `Arc` 共享解码字节。此处不拥有渲染器或原生生命周期。 | `PaneRender<'a>`、`PixelRect` 和 `HoveredUrlCells`；生产渲染全程保留解析器 guard。`boundary::{grid,cfg,ui}` 原样重导出具体类型；`RenderInputs` 和未启用的 `Painter` 不替代生产入口。 |
+| `sonicterm-text` | CPU `GlyphAtlas` 和 `RowGlyphCache` 拥有像素、元数据及缓存实例；包含它们的渲染器控制生命周期与失效。 | `Rasterizer`、`RasterTile`、`GlyphInstance`、`ShapedGlyph` 和图集/缓存方法；原生发现/塑形/栅格对象位于 font/engine，而非本 crate。 |
+| `sonicterm-font-config` | `ConfigHandle` 共享不可变 `Arc<Config>` 快照；进程 mutex 保存当前 handle，generation 区分替换。 | `configuration`、`use_this_configuration`、`TextStyle`、字体属性与栅格策略；库别名 `config` 与 `sonicterm-cfg` 不同，且不拥有原生 face。 |
+| `sonicterm-fontconfig` | 原始 Fontconfig ABI 暴露原生对象；`sonicterm-font::fcwrap` 中的匹配封装拥有引用并负责销毁。 | `src/lib.rs` 中的 `Fc*` 类型/函数；系统链接发生在构建期，字体消费者按目标启用，不是 Windows/macOS 发现路径。 |
+| `sonicterm-freetype` | 生成 ABI 不拥有 Rust 封装生命周期；`sonicterm-font::ftwrap` 拥有 library/face 生命周期并保留后备来源。 | `FT_*` 绑定和定点辅助函数；`build.rs` 编译内嵌原生源码，原始 ABI 调用方仍承担 unsafe 义务。 |
+| `sonicterm-harfbuzz` | 生成 ABI 暴露原生引用；`sonicterm-font::hbwrap` 管理 buffer、blob、font 引用及释放回调。 | `hb_*` 绑定；`freetype` 依赖是 `sonicterm-freetype` 的别名，原生 amalgamation/链接设置保留在 `build.rs`。 |
+| `sonicterm-font` | `FontConfiguration` 共享线程内 `Rc` 状态；`LoadedFont` 拥有 `RefCell` 塑形/栅格/回退缓存，原生封装拥有句柄生命周期。 | `FontConfiguration`、`LoadedFont`、locator/shaper/rasterizer trait、`FontMetrics` 和 `RasterizedGlyph`；原始 `ftwrap` 重导出仍是明确的底层接口，不表示所有 API 都安全。 |
+| `sonicterm-engine` | `FontStack` 共享 `Rc<FontConfiguration>`，拥有每个 stack 的字号/字重/度量状态；渲染器保留 stack。 | `FontStack`、`CellMetricsPx`、塑形与图集 tile 转换；直接 grid/text 依赖传递 CPU 数据，不形成另一个终端状态所有者。 |
+| `sonicterm-block-glyph` | 调用方拥有返回的 CPU bitmap tile；块几何使用临时栅格状态，不拥有共享渲染器或 font face。 | `BlockKey`、`SizedBlockKey`、`block_sprite_with_cell_metrics` 和 `glue::BlockRasterTile`；没有第一方依赖，保留 WezTerm 署名。 |
+| `sonicterm-gpu` | `GpuRenderer` 拥有每窗口 surface、保留帧、pipeline、图集、缓存、软件帧和字体 stack。`GpuSharedContext` 共享 wgpu 引用计数 device/queue 句柄，不创建第二个 device。 | `GpuRenderer::new`、`new_with_shared_context`、`render`、`try_resize`、`retained_amounts` 和 `live_renderer_count`；UI/grid 类型经 render-model。保留量描述当前实例，live count 跟踪生命周期。CPU 成功可观察；此处 wgpu 成功仅指 submit/present 调用。 |
+| `sonicterm-app-core` | `AppStateMachine` 拥有不依赖后端的状态转换/effect 值，不拥有实时 `WindowState`、解析器锁或 PTY。 | `AppState`、`AppIntent`、`AppEffect`、`handle` 与 effect 顺序；生产拓扑仍在 App 中，而非从该模型推断。 |
+| `sonicterm-app` | `App` 拥有实时 `WindowState`、预热渲染器、路由和资源协调。每个窗口拥有标签页/窗格；每个窗格拥有 parser/PTY/image 状态。 | `App`、`WindowState`、`PaneState`、`run_action_for_window` 和平台 `Shell` 封装；`try_lock` guard 与借用网格在有状态渲染全程存活。原生 worker 不解析 UI 窗口身份。 |
+| `sonicterm-mac` | 二进制启动保留 logging/session guard，安装 AppKit hook，并将事件循环交给 `MacShell`。 | `src/main.rs` 和 menu/open-document/drag 模块；AppKit 调用留在主线程，终端行为留在共享 app/IO crate。 |
+| `sonicterm-windows` | 二进制启动保留 logging/session guard，安装 Win32 menu/backdrop/OLE hook，并运行 `WindowsShell`。 | `src/main.rs`、CLI 和原生 GUI 模块，以及 WiX 资源；PTY/ConPTY 进程所有权保留在 `sonicterm-io`。 |
+| `sonicterm-linux` | 二进制启动拥有 Linux 能力归一化与打包字体预检，保留 logging/session guard，然后运行 `LinuxShell`。 | `src/main.rs` 与包资源；直接 engine 依赖用于字体预检，X11/Wayland 窗口和终端状态仍由 app 拥有。 |
 
 ## 契约与终端核心
 
@@ -485,7 +594,24 @@ flowchart BT
 **第一方依赖：** `sonicterm-cfg`、`sonicterm-grid`、`sonicterm-text`、
 `sonicterm-types`。
 
-**阅读：** `src/{tabs,pane,command_palette,search,selection,copy_mode,ime,overlays,i18n}.rs`。
+`command_label::descriptor` 拥有静态动作变体身份、分类、本地化键、英文搜索别名、目标要求和共享
+READONLY 许可。`CommandContext` 只包含 App 提供的窗口内可用性事实；`disabled_reason` 不持有
+原生句柄或终端载荷，也不执行动作。本地化标签辅助函数在缺少翻译时使用英文模板或现有英文标签，并保留动作参数的字面值。
+该目录不授权或路由动作；实时窗口/窗格上下文和执行仍由应用拥有。
+`CommandPalette` 拥有缓存标签、搜索字符串和首个绑定提示；keymap 刷新会用当前 `I18n`
+一起构建这些数据。语言刷新在所有模式下重建文本，但只有 Commands 模式重新过滤动作索引。
+`PaletteLayout` 使用这些缓存标签。文本的预计算身份进入渲染器帧键，使仅语言变化也能重绘，
+无需逐帧翻译，也不改变动作执行。缓存界面文本使用同一身份；完整 Fluent 数量/标题短语在刷新时
+按单个内部值占位符拆分，保留语言目录的词序，并且不解释用户标题。布局在翻译文本之外单独追加光标。
+命令行包含本地化分类/禁用原因；`highlighted` 保留行身份，`current` 仅返回可执行条目。
+`PaletteEntry` 区分现有命令和实时标签页目标。目标使用 `TabId` 而非标题或位置；目标消失后不选择替代项，
+App 在激活前于同一附着窗口中解析当前索引。App 在输入前刷新上下文，渲染期间使用已经持有的活动网格。输入时通过 `try_lock` 验证选区，
+不会重新获取渲染 guard 已持有的锁。
+溢出布局在包含活动标签页的可见区段中保留完整列表索引；本地和原生拖放快照解析同样的索引。
+同一面板可仅过滤实时标签页。App 最多保留一次模态指针按下记录，在释放时验证条目身份和可用性，
+已经锁定的终端或界面手势继续由原有处理器负责。
+
+**阅读：** `src/{tabs,pane,command_palette,command_label,search,selection,copy_mode,ime,overlays,i18n}.rs`。
 
 ### `sonicterm-render-model`
 
@@ -588,7 +714,11 @@ Unix 构建还以 `fontconfig` 使用 `sonicterm-fontconfig`。
 **第一方依赖：** `sonicterm-block-glyph`、`sonicterm-engine`、
 `sonicterm-render-model`、`sonicterm-text`、`sonicterm-types`。
 
-**阅读：** `src/{core,atlas_upload,row_quad_cache,chrome_text,cursor,color,software_windows}.rs`。
+私有 `FramePlan` 从元数据组合帧标识、模式、损伤、窗格裁剪、视口槽位和预期修订号。
+生产路径使用这些决策，同时保留借用网格、解析器守卫及有状态的图集/缓存操作；
+它不是快照，也不是多线程渲染器边界。
+
+**阅读：** `src/{core,frame_plan,atlas_upload,row_quad_cache,chrome_text,cursor,color,software_windows}.rs`。
 
 ### `sonicterm-app-core`
 

@@ -194,6 +194,8 @@ pub type TabRect = TabWidget;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabHit {
     Activate(usize),
+    /// Open the attached window's complete live-tab selector.
+    Overflow,
     /// Legacy variant kept for API compatibility; tab close buttons are no
     /// longer emitted or hit-tested.
     Close(usize),
@@ -233,12 +235,16 @@ pub fn detect_tear_out(
         .then_some(TearOut { tab_index: press_tab_index, drop_position: current_pos })
 }
 
-/// Computed layout for the entire bar — bar background and every tab.
+/// Computed bar background, visible tab segment with absolute indices, and optional overflow control.
 #[derive(Debug, Clone)]
 pub struct TabBarLayout {
     pub bar: Rect,
     pub tabs: Vec<TabWidget>,
     pub active: Option<usize>,
+    /// Total live tabs, including those outside the visible segment.
+    pub total_tabs: usize,
+    /// Fixed control that opens the complete live-tab selector when tabs overflow.
+    pub overflow: Option<Rect>,
     /// When `false`, the tab bar is hidden and [`Self::hit`] /
     /// [`Self::point_over_bar`] always return as if the cursor missed
     /// the bar — so a hidden bar never silently captures clicks.
@@ -288,6 +294,16 @@ impl TabBarLayout {
                 t.bg.x += dx;
                 t.close.x += dx;
             }
+            if let Some(overflow) = layout.overflow {
+                t.bg_rect.x = t.bg_rect.x.min(overflow.x);
+                t.bg_rect.w = t.bg_rect.w.min((overflow.x - t.bg_rect.x).max(0.0));
+                t.title_rect.x = t.title_rect.x.min(t.bg_rect.x + t.bg_rect.w);
+                t.title_rect.w =
+                    t.title_rect.w.min((t.bg_rect.x + t.bg_rect.w - t.title_rect.x).max(0.0));
+                t.close_x_rect.x = t.bg_rect.x + t.bg_rect.w;
+                t.bg = t.bg_rect;
+                t.close = t.close_x_rect;
+            }
         }
         layout
     }
@@ -316,11 +332,16 @@ impl TabBarLayout {
         let bar_rect = Rect { x: 0.0, y: bar_y, w: window_width.max(0.0), h: bar_h };
 
         let n = bar.len();
-        let mut tabs: Vec<TabWidget> = Vec::with_capacity(n);
         if n == 0 {
-            // When: n is zero, the bar holds no tabs, so only the background
-            // rect is reported and there is no active index.
-            return Self { bar: bar_rect, tabs, active: None, visible: true };
+            // When: n is zero, the bar holds no tabs, so only the background is present.
+            return Self {
+                bar: bar_rect,
+                tabs: Vec::new(),
+                active: None,
+                total_tabs: 0,
+                overflow: None,
+                visible: true,
+            };
         }
 
         // Per-bar-height geometric scale factor. At the default
@@ -330,35 +351,44 @@ impl TabBarLayout {
         // chrome (gaps and paddings) grows in lockstep with
         // the bar itself. Same story for non-default font sizes.
         let scale = bar_h / 40.0;
-        let tab_gap = TAB_GAP * scale;
-        let bar_left_pad = BAR_LEFT_PAD * scale;
+        let mut tab_gap = TAB_GAP * scale;
+        let bar_left_pad = (BAR_LEFT_PAD * scale).min(bar_rect.w * 0.25);
         let inner_pad = TAB_INNER_PAD * scale;
         let end_drop = TAB_END_DROP_ZONE_PX * scale;
-
-        // Region available for tabs is from `bar_left_pad` to the right
-        // edge of the bar, minus another `bar_left_pad` of breathing
-        // room, and minus `end_drop` so there is always an empty slice
-        // on the right that a dragged tab can be dropped into to mean
-        // "append at the end". The bar background itself
-        // (`bar_rect.w`) still spans the full window width.
-        let tabs_region = (window_width - bar_left_pad - bar_left_pad - end_drop).max(0.0);
+        let minimum = bar_h * 2.0 + inner_pad * 2.0;
+        let maximum = (max_tab_width() * scale).max(minimum);
+        let tabs_region = (bar_rect.w - bar_left_pad * 2.0 - end_drop).max(0.0);
         let total_gaps = tab_gap * (n as f32 - 1.0).max(0.0);
-        let raw = ((tabs_region - total_gaps) / n as f32).max(1.0);
-        // Tabs share the available width equally, capped at the configured
-        // maximum so a wide window with a few tabs shows long titles instead
-        // of staying pinned to a narrow width. When the equal share falls
-        // below the cap (many tabs / narrow window) the cap is inactive and
-        // tabs simply shrink to fit without overflowing the bar's right edge.
-        let per_tab = raw.min(max_tab_width() * scale);
+        let raw = ((tabs_region - total_gaps) / n as f32).max(0.0);
+        let crowded = n > 1 && raw < minimum;
+        let (first, count, per_tab, overflow) = if crowded {
+            let control_w = bar_h.min(bar_rect.w * 0.5);
+            let control = Rect { x: bar_rect.w - control_w, y: bar_y, w: control_w, h: bar_h };
+            tab_gap = tab_gap.min(control.x * 0.1);
+            let available = (control.x - bar_left_pad - tab_gap).max(0.0);
+            let count =
+                (((available + tab_gap) / (minimum + tab_gap)).floor() as usize).max(1).min(n - 1);
+            let first = bar.active_index().saturating_sub(count / 2).min(n - count);
+            let width = ((available - tab_gap * count.saturating_sub(1) as f32) / count as f32)
+                .max(0.0)
+                .min(maximum);
+            (first, count, width, Some(control))
+        } else {
+            // When: `crowded` is false, keep every tab visible and retain the ordinary end-drop region.
+            let available = if n == 1 && raw < minimum { bar_rect.w } else { raw };
+            (0, n, available.min(maximum), None)
+        };
+        let mut tabs: Vec<TabWidget> = Vec::with_capacity(count);
 
         let bg_y = bar_y + TAB_VERT_INSET * scale;
         let bg_h = (bar_h - 2.0 * TAB_VERT_INSET * scale).max(1.0);
         let mut x = bar_left_pad;
-        for index in 0..n {
+        for index in first..first + count {
             let bg = Rect { x, y: bg_y, w: per_tab, h: bg_h };
             let close = Rect { x: bg.x + bg.w, y: bg.y + bg.h * 0.5, w: 0.0, h: 0.0 };
-            let title_x = bg.x + inner_pad;
-            let title_right = bg.x + bg.w - inner_pad;
+            let title_pad = inner_pad.min(bg.w * 0.5);
+            let title_x = bg.x + title_pad;
+            let title_right = bg.x + bg.w - title_pad;
             let title = Rect { x: title_x, y: bg.y, w: (title_right - title_x).max(0.0), h: bg.h };
             let tab = &bar.tabs()[index];
             tabs.push(TabWidget {
@@ -377,7 +407,14 @@ impl TabBarLayout {
             x += per_tab + tab_gap;
         }
 
-        Self { bar: bar_rect, tabs, active: Some(bar.active_index()), visible: true }
+        Self {
+            bar: bar_rect,
+            tabs,
+            active: Some(bar.active_index()),
+            total_tabs: n,
+            overflow,
+            visible: true,
+        }
     }
 
     /// Rect (in the same coordinate space as `self.tabs`) at which the
@@ -418,7 +455,7 @@ impl TabBarLayout {
 
     fn active_widget(&self) -> Option<&TabWidget> {
         let idx = self.active?;
-        self.tabwidgets().get(idx)
+        self.tabwidgets().iter().find(|tab| tab.idx == idx)
     }
 
     /// Builder-style helper to mark the layout as hidden. A hidden
@@ -449,6 +486,9 @@ impl TabBarLayout {
             return self;
         }
         self.bar.y += dy;
+        if let Some(overflow) = &mut self.overflow {
+            overflow.y += dy;
+        }
         for t in &mut self.tabs {
             t.bg_rect.y += dy;
             t.close_x_rect.y += dy;
@@ -481,6 +521,10 @@ impl TabBarLayout {
             // terminal area rather than to any tab.
             return None;
         }
+        if self.overflow.is_some_and(|control| control.contains(px, py)) {
+            // When: `overflow` owns the pointer, open the selector rather than choosing a hidden tab index.
+            return Some(TabHit::Overflow);
+        }
         self.tabwidgets()
             .iter()
             .find(|tab| px >= tab.bg_rect.x && px < tab.bg_rect.x + tab.bg_rect.w)
@@ -501,68 +545,48 @@ impl TabBarLayout {
         self.visible && self.bar.contains(px, py)
     }
 
-    /// Compute the insertion slot for a tab dropped at `(px, py)`. The
-    /// slot is an index in `[0, n]` where `n == self.tabs.len()`:
-    ///   * left of tab `i`'s horizontal midpoint → slot `i`
-    ///   * right of the last tab's midpoint (or in the empty bar) → `n`
-    ///
-    /// The vertical coordinate is ignored beyond a coarse "is roughly
-    /// over the bar" check — for cross-window merge we already gated on
-    /// `point_over_bar` before getting here, and the bar is thin enough
-    /// that any vertical position inside it should map to the obvious
-    /// horizontal slot.
+    /// Resolve an absolute tab slot: visible gaps insert locally; a drop on overflow appends globally.
     pub fn drop_slot(&self, px: f32, _py: f32) -> usize {
-        if self.tabs.is_empty() {
-            // When: tabs is empty, the only slot a drop can name is the first
-            // position in an otherwise bare bar.
-            return 0;
+        if self.overflow.is_some_and(|control| px >= control.x) {
+            // When: `overflow` owns a tab drop, preserve the global append affordance.
+            return self.total_tabs;
         }
-        for t in &self.tabs {
-            let midx = t.bg_rect.x + t.bg_rect.w * 0.5;
-            if px < midx {
-                // When: px lands left of this tab's midpoint midx, so the drop
-                // belongs in the slot ahead of it.
-                return t.idx;
+        for tab in &self.tabs {
+            let midpoint = tab.bg_rect.x + tab.bg_rect.w * 0.5;
+            if px < midpoint {
+                // When: `px` precedes this visible midpoint, insert before its absolute tab index.
+                return tab.idx;
             }
         }
-        self.tabs.len()
+        self.tabs.last().map_or(0, |tab| (tab.idx + 1).min(self.total_tabs))
     }
 
-    /// X coordinate in logical/physical pixels at which the drop-line
-    /// indicator should be drawn for an insertion slot in `[0, n]`.
-    ///
-    ///   * slot `0`            → just left of the first tab
-    ///   * slot `i` (mid)      → in the gap before tab `i`
-    ///   * slot `n` (== len)   → just right of the last tab
-    ///
-    /// Returns `None` when the bar is empty or hidden — there's no
-    /// meaningful insertion gap to render.
+    /// Locate a visible absolute insertion gap or overflow's global-append marker; hidden gaps return None.
     pub fn insertion_x(&self, slot: usize) -> Option<f32> {
         if !self.visible || self.tabs.is_empty() {
-            // When: visible is false or tabs is empty, no rendered gap exists
-            // for a drop line to mark.
+            // When: `visible` is false or `tabs` is empty, no displayed insertion gap exists.
             return None;
         }
-        let n = self.tabs.len();
-        let slot = slot.min(n);
-        if slot == 0 {
-            // When: slot names the head of the bar, so the line sits just
-            // inside the bar's left padding.
-            return Some(self.tabs[0].bg_rect.x - TAB_GAP * 0.5);
+        if slot == self.total_tabs {
+            // When: `slot` names the global end, prefer the overflow affordance over a hidden trailing gap.
+            if let Some(control) = self.overflow {
+                // When: the global slot belongs to `overflow`, distinguish it from the visible trailing gap.
+                return Some((control.x + control.w - 1.0).max(control.x));
+            }
         }
-        if slot == n {
-            // When: slot equals n, the drop appends past the last tab, so the
-            // line sits just beyond its right edge.
-            let last = &self.tabs[n - 1];
+        let last = self.tabs.last()?;
+        if slot == last.idx + 1 {
+            // When: `slot` follows the last visible tab, draw exactly the gap the drop resolves to.
             return Some(last.bg_rect.x + last.bg_rect.w + TAB_GAP * 0.5);
         }
-        // Between tab `slot - 1` and tab `slot`: halfway between
-        // their adjacent edges, which is what the rendered gap is.
-        let prev = &self.tabs[slot - 1];
-        let next = &self.tabs[slot];
-        let right = prev.bg_rect.x + prev.bg_rect.w;
-        let left = next.bg_rect.x;
-        Some((right + left) * 0.5)
+        let position = self.tabs.iter().position(|tab| tab.idx == slot)?;
+        let next = &self.tabs[position];
+        if position == 0 {
+            // When: `position` is the leading visible widget, its absolute slot has no visible predecessor.
+            return Some(next.bg_rect.x - TAB_GAP * 0.5);
+        }
+        let previous = &self.tabs[position - 1];
+        Some((previous.bg_rect.x + previous.bg_rect.w + next.bg_rect.x) * 0.5)
     }
 
     /// Vertical span `(top, bottom)` of the bar's background rect in

@@ -72,6 +72,61 @@ does not confirm the quit. The prompt expires after 5 seconds. The native
 Windows deliberately does not bind `Alt+V`; that chord continues to the PTY.
 Use `Ctrl+Shift+V` for paste. Linux binds both `Alt+V` and `Ctrl+Shift+V`.
 
+Command-palette hints come from the first matching binding in the live keymap.
+macOS displays modifier glyphs such as `⌘⇧P`; Windows uses names such as
+`Win+Shift+P`, and Linux uses `Super+Shift+P`. Control and Alt use `Ctrl` and
+`Alt` on Windows/Linux. Literal `+` keys remain visible, for example `Alt++`.
+This changes hint text only, not key matching or existing search aliases.
+
+Command labels, placeholders, empty-state text, rename/color-picker prompts,
+and footer hints follow the active English, Chinese, or Japanese locale. Search
+matches localized labels, English labels and aliases, and live shortcut hints.
+Missing translations fall back to English. Locale or keymap reload preserves
+the query, caret, and selected command when it still matches; rename text and
+color-picker selection remain unchanged. Concrete bound actions retain their
+literal arguments.
+
+With an empty query, commands appear in a fixed category order, preserving their
+relative order inside each category. A typed query retains fuzzy-score ranking.
+Each command row shows its category and, when disabled, its reason. Unavailable
+commands remain searchable; Enter on one keeps the palette open without
+executing it. Context follows the palette's attached window, not another
+window's tab count. Missing tabs, panes, selection, focus neighbors, and READONLY
+restrictions are reported. Copy requires a nonempty selection whose cells still
+match; a busy parser temporarily leaves Copy disabled rather than blocking the
+UI. Same-value repaints preserve valid selections.
+
+**Go to Tab** rows search the live tabs in the palette's attached window by
+title or displayed position. They keep the runtime tab identity across reorder
+and rename, and App revalidates that identity before activation. A closed target
+or one that no longer matches the query leaves no row selected; Enter does
+nothing until you move the selection or edit the query. A replacement with the
+same title or position does not inherit the old selection. Targets remain
+available in READONLY mode and do not search other windows.
+
+When tabs no longer fit at the font/scale-derived readable width, the strip
+shows a segment containing the active tab and a right-edge overflow control.
+Click the control to open **All tabs** in the same window. Search a title or
+position, use arrows and Enter, or click a row to switch. Existing next/previous
+and numbered shortcuts still work; switching reveals the chosen tab. Very
+narrow windows retain the active tab and the overflow control with smaller hit
+zones. An empty selector explains that no tabs are available. A selector opened
+by pointer in READONLY owns its keyboard input in both main and child windows;
+Escape closes it without leaving READONLY.
+
+Palette rows activate only when press and release identify the same entry and
+its live context still permits execution. Reordering or closing a tab cannot
+retarget a held click to a replacement. Clicking outside dismisses on release;
+query-field clicks do not execute. Wheel input moves selection without wrapping
+at either end and never reaches the terminal while the modal owns the pointer.
+IME composition suppresses row activation. A terminal, tab, scrollbar, or divider
+gesture that began before the palette opened keeps its paired release.
+
+Tab drops use the visible tabs' absolute positions, not positions within the
+segment. Dropping in the trailing visible gap inserts there; dropping a dragged
+tab on the overflow control appends to the complete tab list. Ordinary clicks
+on that control open the selector instead of starting a tab drag.
+
 ### TOML syntax
 
 A keymap needs a `[meta]` table and zero or more `[[binding]]` tables:
@@ -316,6 +371,43 @@ macOS 中，第一次按 `Cmd+Q` 会显示 **Press ⌘Q one more time to quit**�
 
 Windows 特意不绑定 `Alt+V`；该组合键会继续发送给 PTY。请使用
 `Ctrl+Shift+V` 粘贴。Linux 同时绑定 `Alt+V` 和 `Ctrl+Shift+V`。
+
+命令面板提示来自当前 keymap 中第一个匹配的绑定。macOS 显示 `⌘⇧P` 等修饰键符号；
+Windows 使用 `Win+Shift+P` 等名称，Linux 使用 `Super+Shift+P`。Windows/Linux 上的
+Control 和 Alt 显示为 `Ctrl`、`Alt`。字面 `+` 按键会保留，例如 `Alt++`。
+这只改变提示文本，不改变按键匹配或现有搜索别名。
+
+命令标签、占位符、空结果文本、重命名/颜色选择提示和底部提示随当前英文、中文或日文语言设置显示。
+搜索匹配本地化标签、英文标签与别名，
+以及当前快捷键提示。缺少翻译时回退到英文。语言或 keymap 重载会保留查询、光标，
+以及仍然匹配的已选命令；重命名文本和颜色选择保持不变。具体绑定动作保留参数的字面值。
+
+查询为空时，命令按固定分类顺序排列，并保留各分类内的相对顺序。输入查询后仍按模糊匹配分数排序。
+每行显示分类，不可用时显示原因。不可用命令仍可搜索；在该行按 Enter 不会执行动作，也不会关闭面板。
+上下文来自面板附着的窗口，而不是其他窗口的标签页数量。缺少标签页、窗格、选区、方向相邻窗格，
+以及 READONLY 限制都会显示原因。复制要求非空选区且所选单元格仍然匹配；解析器忙时暂时禁用复制，
+而不阻塞 UI。同值重绘保留有效选区。
+
+**Go to Tab** 行按标题或显示位置搜索面板附着窗口中的实时标签页。重排或重命名后仍保留运行时
+标签页身份，App 会在激活前再次验证。目标关闭或不再匹配查询时不选择任何行；移动选择或编辑查询前，
+Enter 不执行动作。同名或同位置的替代标签页不会继承旧选择。目标在 READONLY 模式下仍可用，
+不会搜索其他窗口。
+
+当标签页无法按字体/缩放推导的可读宽度全部放入栏中时，标签栏显示包含活动标签页的区段，
+并在右侧显示溢出控件。点击控件会在同一窗口打开 **所有标签页**。搜索标题或位置，
+使用方向键和 Enter，或点击行进行切换。现有的上一个/下一个和编号快捷键仍然有效；
+切换后所选标签页会显示在栏中。极窄窗口以较小的点击区域保留活动标签页和溢出控件。
+选择器为空时会说明没有可用标签页。在 READONLY 中通过指针打开选择器后，主窗口和子窗口都
+由选择器接收键盘输入；Escape 关闭选择器但不退出 READONLY。
+
+只有按下和释放都指向同一条目且实时上下文仍允许执行时，面板行才会激活。
+重排或关闭标签页不会把按住的点击重定向到替代标签页。点击外部在释放时关闭面板；
+点击查询区域不会执行动作。滚轮移动选择，在两端不循环；模态面板拥有指针时不会把滚轮事件
+发送到终端。IME 组合输入期间不激活行。面板打开前已开始的终端、标签页、滚动条或分隔线
+手势继续接收其配对释放事件。
+
+标签页拖放使用可见标签在完整列表中的位置，而不是区段内位置。拖到可见区段末尾空隙会在该处插入；
+拖到溢出控件会追加到完整标签列表末尾。普通点击该控件打开选择器，不开始标签拖动。
 
 ### TOML 格式
 

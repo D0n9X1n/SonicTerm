@@ -204,11 +204,7 @@ pub trait OsTabDragBackend: Send {
 /// calling back into `App` state. The macOS pasteboard-only backend does not
 /// consume this registry today.
 ///
-/// Tabs are described by their horizontal extents only (`tab_lefts` +
-/// `tab_rights`) — the vertical coordinate is covered by `bar_rect`'s
-/// `top` / `bottom`. Slot resolution mirrors
-/// [`sonicterm_ui::tabbar_view::TabBarLayout::drop_slot`] exactly: left of
-/// tab `i`'s midpoint → slot `i`; right of the last midpoint → `n`.
+/// Visible tabs carry screen extents and absolute indices; slot resolution mirrors the live layout.
 #[derive(Debug, Clone)]
 pub struct TabBarSnapshot {
     /// Identifies the destination window. `None` means "the App's main
@@ -223,11 +219,16 @@ pub struct TabBarSnapshot {
     /// `window_rect` but outside `bar_rect` resolves to "in window but
     /// not on bar" — see [`TabBarRegistry::resolve_screen_pos`].
     pub bar_rect: (i32, i32, i32, i32),
-    /// Left edge of each tab in screen X, in tab order. Length == number
-    /// of tabs. Empty if the bar has no tabs (resolves to slot 0).
+    /// Left edges of visible tabs in screen X, parallel to `tab_indices`.
     pub tab_lefts: Vec<i32>,
-    /// Right edge of each tab in screen X. Same length as `tab_lefts`.
+    /// Right edges of visible tabs in screen X, parallel to `tab_indices`.
     pub tab_rights: Vec<i32>,
+    /// Absolute indices of the visible tabs, not their positions in this snapshot.
+    pub tab_indices: Vec<usize>,
+    /// Total tabs used by overflow's append-to-end drop target.
+    pub total_tabs: usize,
+    /// Screen X where the overflow control begins, if present.
+    pub overflow_append_from: Option<i32>,
 }
 
 impl TabBarSnapshot {
@@ -276,28 +277,42 @@ impl TabBarSnapshot {
         );
         let mut tab_lefts = Vec::with_capacity(layout.tabs.len());
         let mut tab_rights = Vec::with_capacity(layout.tabs.len());
+        let mut tab_indices = Vec::with_capacity(layout.tabs.len());
         for t in &layout.tabs {
             tab_lefts.push(ox + t.bg_rect.x.round() as i32);
             tab_rights.push(ox + (t.bg_rect.x + t.bg_rect.w).round() as i32);
+            tab_indices.push(t.idx);
         }
-        Self { window, window_rect, bar_rect, tab_lefts, tab_rights }
+        Self {
+            window,
+            window_rect,
+            bar_rect,
+            tab_lefts,
+            tab_rights,
+            tab_indices,
+            total_tabs: layout.total_tabs,
+            overflow_append_from: layout.overflow.map(|control| ox + control.x.round() as i32),
+        }
     }
 
-    /// Compute the insertion slot for a tab dropped at screen X `sx`.
-    /// Mirrors `TabBarLayout::drop_slot`: returns the index of the
-    /// first tab whose horizontal midpoint is to the right of `sx`, or
-    /// `tab_lefts.len()` if `sx` is past the last midpoint. Empty bar
-    /// → slot 0.
+    /// Resolve the same absolute visible-gap or overflow-append slot as TabBarLayout in screen coordinates.
     pub fn drop_slot(&self, sx: i32) -> usize {
         debug_assert_eq!(self.tab_lefts.len(), self.tab_rights.len());
-        for (i, (&l, &r)) in self.tab_lefts.iter().zip(self.tab_rights.iter()).enumerate() {
-            let midx = (l + r) / 2;
-            if sx < midx {
-                // When: `sx` lies left of this tab midpoint, insert before this tab.
-                return i;
+        debug_assert_eq!(self.tab_lefts.len(), self.tab_indices.len());
+        if self.overflow_append_from.is_some_and(|start| sx >= start) {
+            // When: `sx` reaches overflow, preserve append-to-end independently of the visible segment.
+            return self.total_tabs;
+        }
+        for ((&left, &right), &index) in
+            self.tab_lefts.iter().zip(&self.tab_rights).zip(&self.tab_indices)
+        {
+            let midpoint = (left + right) / 2;
+            if sx < midpoint {
+                // When: `sx` precedes a visible midpoint, insert before its absolute `index`.
+                return index;
             }
         }
-        self.tab_lefts.len()
+        self.tab_indices.last().map_or(0, |index| (index + 1).min(self.total_tabs))
     }
 }
 
@@ -343,8 +358,7 @@ impl TabBarRegistry {
     /// Translate a screen-coordinate drop into a `(window, slot)` pair.
     /// Returns:
     ///   * `Some((window, slot))` if `(sx, sy)` falls inside any
-    ///     window's tab bar — `slot` is the insertion index in `[0,
-    ///     n]`.
+    ///     window's tab bar — `slot` is an absolute visible-gap index or overflow's global append slot.
     ///   * `None` if no window contains the point, OR a window contains
     ///     the point but the point isn't on its bar — in the latter case
     ///     the caller (Windows IDropTarget::Drop) treats it as
