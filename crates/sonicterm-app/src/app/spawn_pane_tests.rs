@@ -1,91 +1,94 @@
-use super::*;
-
 use sonicterm_grid::grid::Grid;
 use sonicterm_ui::pane::Rect;
 use sonicterm_vt::vt::MediaProtocol;
 
-#[test]
-fn repeated_reply_rejections_emit_one_event_and_preserve_totals() {
-    // A stalled writer cannot amplify a fixed reply burst into an unbounded number of UI events.
-    let (tx, rx) = crossbeam_channel::unbounded();
-    for _ in 0..1000 {
-        tx.send(vec![b'x'; 12]).unwrap();
-    }
-    drop(tx);
-    let mut events = 0;
-    let mut summaries = Vec::new();
-    forward_pty_replies(
-        rx,
-        |bytes| Err(sonicterm_io::pty::PtyInputError::QueueFull(bytes)),
-        |_| events += 1,
-        |totals| summaries.push(totals),
-    );
-    assert_eq!(events, 1);
-    assert_eq!(summaries.iter().map(|s| s.messages).sum::<u64>(), 999);
-    assert_eq!(summaries.iter().map(|s| s.bytes).sum::<u64>(), 999 * 12);
-    assert_eq!(summaries.iter().map(|s| s.queue_full).sum::<u64>(), 999);
-    assert!(summaries.iter().all(|s| s.too_large == 0 && s.disconnected == 0));
-}
+use super::*;
 
 #[test]
-fn reply_forwarding_keeps_successes_and_rejection_reasons_distinct() {
-    // Recovery preserves accepted reply order, while later refusal causes remain counted without another UI event.
-    use sonicterm_io::pty::PtyInputError;
-    let (tx, rx) = crossbeam_channel::unbounded();
-    for marker in 0..6 {
-        tx.send(vec![marker]).unwrap();
+fn reply_bursts_preserve_every_byte_and_release_parser_before_delivery() {
+    // More queries than either old queue could hold must arrive in order without holding pane locks.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let (_pane, handles) = pane_and_worker_handles();
+    let mut expected = Vec::new();
+    let mut input = Vec::new();
+    for row in 1..=24 {
+        for col in 1..=80 {
+            input.extend_from_slice(format!("\x1b[{row};{col}H\x1b[6n").as_bytes());
+            expected.extend_from_slice(format!("\x1b[{row};{col}R").as_bytes());
+        }
     }
-    drop(tx);
-    let mut accepted = Vec::new();
-    let mut events = 0;
-    let mut summaries = Vec::new();
-    forward_pty_replies(
-        rx,
-        |bytes| match bytes[0] {
-            0 => Err(PtyInputError::QueueFull(bytes)),
-            2 => Err(PtyInputError::MessageTooLarge(bytes)),
-            4 => Err(PtyInputError::WriterDisconnected(bytes)),
-            _ => {
-                accepted.push(bytes);
-                Ok(())
-            }
+    input.extend_from_slice(b"done");
+    let mut delivered = Vec::new();
+    process_pane_vt_batch_with(
+        &handles,
+        &input,
+        &mut None,
+        |_| None,
+        |_| {},
+        Instant::now,
+        |bytes| {
+            assert!(handles.parser.try_lock().is_some());
+            assert!(handles.inline_images.try_lock().is_some());
+            assert!(handles.command_events.try_lock().is_some());
+            delivered.extend(bytes);
+            Ok(())
         },
-        |_| events += 1,
-        |totals| summaries.push(totals),
-    );
-    assert_eq!(accepted, [vec![1], vec![3]]);
-    assert_eq!(events, 1);
-    assert_eq!(summaries.iter().map(|s| s.messages).sum::<u64>(), 2);
-    assert_eq!(summaries.iter().map(|s| s.bytes).sum::<u64>(), 2);
-    assert_eq!(summaries.iter().map(|s| s.too_large).sum::<u64>(), 1);
-    assert_eq!(summaries.iter().map(|s| s.disconnected).sum::<u64>(), 1);
+    )
+    .unwrap();
+    assert_eq!(delivered, expected);
 }
 
 #[test]
-fn reply_rejection_summary_flushes_while_the_parser_is_idle() {
-    // Pending counts must reach the log even when no later reply or channel close wakes the worker.
-    let (tx, rx) = crossbeam_channel::bounded(2);
-    let (event_tx, event_rx) = crossbeam_channel::bounded(1);
-    let (summary_tx, summary_rx) = crossbeam_channel::bounded(1);
+fn saturated_reply_delivery_leaves_parser_available_and_resumes_the_suffix() {
+    // A capacity wait must leave the parser available for rendering and resizing without consuming future output.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let (_pane, handles) = pane_and_worker_handles();
+    let parser = handles.parser.clone();
+    let (entered_tx, entered_rx) = crossbeam_channel::bounded(1);
+    let (resume_tx, resume_rx) = crossbeam_channel::bounded(1);
     let worker = std::thread::spawn(move || {
-        forward_pty_replies(
-            rx,
-            |bytes| Err(sonicterm_io::pty::PtyInputError::QueueFull(bytes)),
-            |_| event_tx.send(()).unwrap(),
-            |totals| summary_tx.send(totals).unwrap(),
-        );
+        process_pane_vt_batch_with(
+            &handles,
+            b"\x1b[6nX",
+            &mut None,
+            |_| None,
+            |_| {},
+            Instant::now,
+            |bytes| {
+                entered_tx.send(bytes).unwrap();
+                resume_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+                Ok(())
+            },
+        )
+        .unwrap();
     });
-    tx.send(vec![b'x'; 12]).unwrap();
-    tx.send(vec![b'x'; 13]).unwrap();
-    event_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-    let summary = summary_rx.recv_timeout(Duration::from_secs(3));
-    drop(tx);
+    let reply = entered_rx.recv_timeout(Duration::from_secs(3));
+    let available = parser.try_lock().map(|guard| guard.grid().cursor.col);
+    resume_tx.send(()).unwrap();
     worker.join().unwrap();
-    assert_eq!(
-        summary.unwrap(),
-        ReplyRejectionTotals { messages: 1, bytes: 13, queue_full: 1, ..Default::default() }
+    assert_eq!(reply.unwrap(), b"\x1b[1;1R");
+    assert_eq!(available, Some(0));
+    assert_eq!(parser.lock().grid().row(0)[0].ch, 'X');
+}
+
+#[test]
+fn reply_delivery_failure_preserves_bytes_and_stops_before_output_suffix() {
+    // A closed writer must not silently consume the remainder or report a successful delivery.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let (_pane, handles) = pane_and_worker_handles();
+    let result = process_pane_vt_batch_with(
+        &handles,
+        b"\x1b[6nX",
+        &mut None,
+        |_| None,
+        |_| {},
+        Instant::now,
+        |bytes| Err(sonicterm_io::pty::PtyInputError::WriterDisconnected(bytes)),
     );
-    assert!(event_rx.try_recv().is_err());
+    assert!(
+        matches!(result, Err(sonicterm_io::pty::PtyInputError::WriterDisconnected(bytes)) if bytes == b"\x1b[1;1R")
+    );
+    assert_eq!(handles.parser.lock().grid().cursor.col, 0);
 }
 
 fn app_with_unavailable_shell() -> App {
@@ -250,7 +253,9 @@ fn pane_vt_batch_routes_clipboard_commands_media_and_modes_after_unlock() {
         },
         |event| emitted.push(event),
         || ticks.next().expect("one timestamp per command marker"),
-    );
+        |_| Ok(()),
+    )
+    .unwrap();
 
     assert_eq!(
         decoder_unlocked,

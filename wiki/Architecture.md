@@ -193,7 +193,7 @@ and release rules.
 ### Ownership and concurrency rules
 
 - Only the winit event-loop thread creates, resolves, or presents native windows.
-- PTY reader, writer, VT, reply, path-probe, and cleanup workers stay outside the
+- PTY reader, writer, VT, path-probe, and cleanup workers stay outside the
   event loop.
 - Rendering never blocks on a parser. One unavailable required lock defers the
   whole frame.
@@ -407,7 +407,7 @@ macOS 使用 CoreText 发现字体，Windows 使用 GDI，Linux 使用 Fontconfi
 ### 所有权与并发规则
 
 - 只有 winit 事件循环线程可以创建、查找或呈现原生窗口。
-- PTY 读写、VT、回复、路径探测和清理工作线程都在事件循环之外运行。
+- PTY 读写、VT、路径探测和清理工作线程都在事件循环之外运行。
 - 渲染路径不会阻塞等待解析器。任一必需锁不可用时，整帧都会推迟。
 - 转移标签页会移动每个存活的 `PaneState` 和 `PtyHandle`。代码只修改共享重绘
   `WindowId`，不会复制或重启 shell。

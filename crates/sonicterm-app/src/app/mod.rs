@@ -15,9 +15,11 @@ use std::{
 use anyhow::Result;
 use arboard::Clipboard;
 use parking_lot::Mutex;
-use sonicterm_cfg::config::{BackdropKind, Config, SoftwareRenderMode};
-use sonicterm_cfg::keymap::{Action, BroadcastScope, Keymap};
-use sonicterm_cfg::theme::Theme;
+use sonicterm_cfg::{
+    config::{BackdropKind, Config, SoftwareRenderMode},
+    keymap::{Action, BroadcastScope, Keymap},
+    theme::Theme,
+};
 use sonicterm_grid::grid::Grid;
 use sonicterm_io::pty::PtyHandle;
 use sonicterm_resource::ResourceGovernor;
@@ -107,8 +109,7 @@ static WINDOW_BG_BRUSHES: std::sync::OnceLock<std::sync::Mutex<HashMap<u32, isiz
 
 #[cfg(target_os = "windows")]
 fn native_background_brush(rgb: (u8, u8, u8)) -> Option<isize> {
-    use windows::Win32::Foundation::COLORREF;
-    use windows::Win32::Graphics::Gdi::CreateSolidBrush;
+    use windows::Win32::{Foundation::COLORREF, Graphics::Gdi::CreateSolidBrush};
 
     // COLORREF is 0x00BBGGRR. Brushes stay alive for the process lifetime:
     // window classes can retain their handles after this call returns, so
@@ -213,15 +214,17 @@ pub fn with_backdrop_transparency(
 }
 
 use sonicterm_gpu::core::GpuRenderer;
-use sonicterm_ui::broadcast::BroadcastState;
-use sonicterm_ui::command_palette::CommandPalette;
-use sonicterm_ui::copy_mode::CopyModeState;
-use sonicterm_ui::ime::ImeState;
-use sonicterm_ui::overlays::{NotificationBubble, NotificationLevel};
-use sonicterm_ui::pane::PaneTree;
-use sonicterm_ui::search::SearchState;
-use sonicterm_ui::selection::{SelectMode, Selection};
-use sonicterm_ui::tabs::{CommandStatus, Tab, TabBar};
+use sonicterm_ui::{
+    broadcast::BroadcastState,
+    command_palette::CommandPalette,
+    copy_mode::CopyModeState,
+    ime::ImeState,
+    overlays::{NotificationBubble, NotificationLevel},
+    pane::PaneTree,
+    search::SearchState,
+    selection::{SelectMode, Selection},
+    tabs::{CommandStatus, Tab, TabBar},
+};
 
 /// Classification of a window tracked in the app's role-tagged window map.
 ///
@@ -542,7 +545,6 @@ pub fn should_defer_streaming_redraw(
 pub const PTY_REDRAW_QUIESCENT: Duration = Duration::from_millis(3);
 pub const PTY_REDRAW_MAX_LATENCY: Duration = Duration::from_millis(8);
 pub const PTY_REDRAW_FLUSH_BYTES: usize = 128 * 1024;
-pub const PTY_REPLY_QUEUE_CAPACITY: usize = 64;
 pub const MAX_PANE_COMMAND_EVENTS: usize = 1024;
 
 /// One charged pane class and its exact production seam-cap contribution.

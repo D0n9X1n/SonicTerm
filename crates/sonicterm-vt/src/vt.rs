@@ -14,16 +14,19 @@
 //!
 //! Out of scope: media texture decoding/rendering and most mouse tracking.
 
-use std::collections::HashSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{
+    collections::HashSet,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use crossbeam_channel::Sender;
-use vte::{Params, Perform};
-
-use sonicterm_grid::grid::{Cell, CellFlags, Color, Grid, Pos, UnderlineStyle};
-use sonicterm_grid::hyperlink::{HyperlinkId, HyperlinkRegistry, MAX_HYPERLINK_CLIENT_ID_BYTES};
+use sonicterm_grid::{
+    grid::{Cell, CellFlags, Color, Grid, Pos, UnderlineStyle},
+    hyperlink::{HyperlinkId, HyperlinkRegistry, MAX_HYPERLINK_CLIENT_ID_BYTES},
+};
 // Governor accounting type, consumed rather than republished.
 use sonicterm_types::ResourceAmount;
+use vte::{Params, Perform};
 
 /// Version string reported in answer to CSI > q (XTVERSION).
 pub const SONIC_VERSION: &str = "SonicTerm 0.7";
@@ -819,9 +822,31 @@ impl Parser {
     /// bypasses vte's byte-at-a-time state machine for the common case while
     /// keeping behaviour identical to feeding the whole slice through vte.
     pub fn advance(&mut self, bytes: &[u8]) -> Vec<VtEvent> {
+        self.advance_prefix(bytes).1
+    }
+
+    /// Consume through the next reply-producing byte; deliver returned replies outside parser locks before resuming the suffix.
+    pub fn advance_with_replies(&mut self, bytes: &[u8]) -> (usize, Vec<VtEvent>, Vec<u8>) {
+        *self.performer.captured_replies.get_mut() = Some(Vec::new());
+        let (consumed, events) = self.advance_prefix(bytes);
+        let replies = self.performer.captured_replies.get_mut().take().unwrap();
+        (consumed, events, replies)
+    }
+
+    fn advance_prefix(&mut self, bytes: &[u8]) -> (usize, Vec<VtEvent>) {
         let mut i = 0;
         let len = bytes.len();
         while i < len {
+            if self
+                .performer
+                .captured_replies
+                .borrow()
+                .as_ref()
+                .is_some_and(|bytes| !bytes.is_empty())
+            {
+                // When: captured_replies is nonempty, yield before another byte can grow staging or overtake delivery.
+                break;
+            }
             if self.discarding_oversized_escape {
                 // When: discarding_oversized_escape owns this byte, so feeding vte could print a cancelled payload into the grid.
                 self.consume_discarded_escape_byte(bytes[i]);
@@ -906,7 +931,7 @@ impl Parser {
             self.feed_vte_byte(bytes[i]);
             i += 1;
         }
-        std::mem::take(&mut self.performer.events)
+        (i, std::mem::take(&mut self.performer.events))
     }
 
     fn feed_vte_byte(&mut self, byte: u8) {
@@ -1454,6 +1479,7 @@ struct Performer {
     /// Monotonic identity of OSC 7 updates, including same-value ABA changes.
     cwd_revision: u64,
     reply_tx: Option<Sender<Vec<u8>>>,
+    captured_replies: std::cell::RefCell<Option<Vec<u8>>>,
     reply_queue_full_warned: std::sync::atomic::AtomicBool,
     /// Theme default foreground (sRGB), used to answer OSC 10 `?` queries.
     /// `None` means the parser was never told a theme — query replies are
@@ -1532,6 +1558,7 @@ impl Performer {
             osc7_cwd: None,
             cwd_revision: 0,
             reply_tx,
+            captured_replies: std::cell::RefCell::new(None),
             reply_queue_full_warned: std::sync::atomic::AtomicBool::new(false),
             theme_fg: None,
             theme_bg: None,
@@ -1579,6 +1606,11 @@ impl Performer {
 
     // Ordering: reply_queue_full_warned uses Relaxed because it suppresses duplicate warnings without publishing reply bytes.
     fn reply(&self, bytes: &[u8]) {
+        if let Some(captured) = self.captured_replies.borrow_mut().as_mut() {
+            // When: captured_replies is enabled, stage one dispatch before yielding; OSC 4 input is capped at 4096 bytes.
+            captured.extend_from_slice(bytes);
+            return;
+        }
         if let Some(tx) = &self.reply_tx {
             match tx.try_send(bytes.to_vec()) {
                 Ok(()) => {

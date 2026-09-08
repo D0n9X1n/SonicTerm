@@ -1,7 +1,8 @@
-use super::*;
 #[cfg(windows)]
 use crossbeam_channel::bounded;
 use portable_pty::{ChildKiller, ExitStatus};
+
+use super::*;
 
 #[cfg(windows)]
 static LIVE_PTY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1022,8 +1023,7 @@ fn dropping_live_windows_pty_terminates_native_io_threads() {
 /// that stopped draining stalled the forwarder indefinitely.
 #[test]
 fn the_typed_send_refuses_a_full_queue_where_the_raw_channel_blocks() {
-    use std::sync::mpsc;
-    use std::time::Duration;
+    use std::{sync::mpsc, time::Duration};
 
     let (tx, _rx) = crossbeam_channel::bounded::<Vec<u8>>(PTY_INPUT_QUEUE_CAPACITY);
     for _ in 0..PTY_INPUT_QUEUE_CAPACITY {
@@ -1412,6 +1412,88 @@ fn diagnostic_input_channel() -> (PtyInputSender, Receiver<Vec<u8>>) {
         },
         rx,
     )
+}
+
+#[test]
+fn waiting_reply_retains_bytes_through_saturation_without_a_drop_deadline() {
+    // A worker holds one payload through prolonged saturation, then appends it after all earlier messages.
+    let (sender, rx) = diagnostic_input_channel();
+    let mut expected = Vec::new();
+    for marker in 0..PTY_INPUT_QUEUE_CAPACITY {
+        let bytes = vec![marker as u8];
+        sender.send(bytes.clone()).unwrap();
+        expected.push(bytes);
+    }
+    let reply = b"\x1b[1;1R".to_vec();
+    let mut waits = 0;
+    let mut observed = Vec::new();
+    sender
+        .send_wait_with(reply.clone(), || {
+            waits += 1;
+            assert_eq!(sender.diagnostics().queued_messages, PTY_INPUT_QUEUE_CAPACITY);
+            assert_eq!(sender.diagnostics().queued_bytes, PTY_INPUT_QUEUE_CAPACITY);
+            if waits == 1000 {
+                let bytes = rx.recv().unwrap();
+                sender.queued_bytes.fetch_sub(bytes.len(), Ordering::Relaxed);
+                observed.push(bytes);
+            }
+        })
+        .unwrap();
+    observed.extend(rx.try_iter());
+    expected.push(reply);
+    assert_eq!(waits, 1000);
+    assert_eq!(observed, expected);
+}
+
+#[test]
+fn waiting_reply_cancels_on_teardown_with_payload_intact() {
+    // Teardown cancellation must end a saturated wait even while the native receiver remains alive.
+    let (sender, _rx) = diagnostic_input_channel();
+    for _ in 0..PTY_INPUT_QUEUE_CAPACITY {
+        sender.send(vec![b'x']).unwrap();
+    }
+    let reply = b"\x1b[1;1R".to_vec();
+    let result = sender.send_wait_with(reply.clone(), || {
+        sender.writer_progress.stopping.store(true, Ordering::Relaxed);
+    });
+    assert!(matches!(result, Err(PtyInputError::WriterDisconnected(bytes)) if bytes == reply));
+    assert_eq!(sender.diagnostics().queued_bytes, PTY_INPUT_QUEUE_CAPACITY);
+}
+
+#[test]
+fn intentional_teardown_cancels_sender_without_a_writer_failure_classification() {
+    // Dropping the real PTY must publish intentional closure before a retained sender can report rejection.
+    #[cfg(windows)]
+    let _live_pty_guard = lock_live_pty_test();
+    let pty = PtyHandle::spawn_default_shell(
+        80,
+        24,
+        ShellSpawnOpts { clean_e2e: true, ..Default::default() },
+    )
+    .unwrap();
+    let sender = pty.input_sender();
+    assert!(!sender.is_closing());
+    drop(pty);
+    assert!(sender.is_closing());
+    assert!(
+        matches!(sender.send_wait(vec![1]), Err(PtyInputError::WriterDisconnected(bytes)) if bytes == [1])
+    );
+}
+
+#[test]
+fn waiting_reply_reports_oversize_and_disconnection_without_waiting() {
+    // Permanent failures cannot be repaired by waiting for queue capacity.
+    let (sender, rx) = diagnostic_input_channel();
+    assert!(matches!(
+        sender
+            .send_wait_with(vec![0; MAX_PTY_INPUT_MESSAGE_BYTES + 1], || panic!("unexpected wait")),
+        Err(PtyInputError::MessageTooLarge(_))
+    ));
+    drop(rx);
+    assert!(
+        matches!(sender.send_wait_with(vec![1], || panic!("unexpected wait")), Err(PtyInputError::WriterDisconnected(bytes)) if bytes == [1])
+    );
+    assert_eq!(sender.diagnostics().queued_bytes, 0);
 }
 
 fn observe_until(

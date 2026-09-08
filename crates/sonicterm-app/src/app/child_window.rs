@@ -4,28 +4,34 @@
 
 #![allow(unused_imports)]
 
-use std::collections::HashMap;
-use std::sync::{atomic::Ordering, Arc};
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    sync::{atomic::Ordering, Arc},
+    time::{Duration, Instant},
+};
 
 use anyhow::Context;
 use parking_lot::Mutex;
-use sonicterm_cfg::config::Config;
-use sonicterm_cfg::keymap::{Action, Direction, Keymap, ScrollAction};
-use sonicterm_cfg::theme::Theme;
+use sonicterm_cfg::{
+    config::Config,
+    keymap::{Action, Direction, Keymap, ScrollAction},
+    theme::Theme,
+};
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::Grid;
 use sonicterm_io::pty::PtyHandle;
-use sonicterm_ui::command_palette::CommandPalette;
-use sonicterm_ui::overlays::{
-    command_palette_query_caret_prefix, search_bar_label, search_query_caret_prefix, PaletteLayout,
-    SearchBarLayout, PALETTE_ROW_PAD_X, SEARCH_BAR_ICON_GAP, SEARCH_BAR_PAD_LEFT,
-    SEARCH_BAR_PAD_RIGHT,
+use sonicterm_ui::{
+    command_palette::CommandPalette,
+    overlays::{
+        command_palette_query_caret_prefix, search_bar_label, search_query_caret_prefix,
+        PaletteLayout, SearchBarLayout, PALETTE_ROW_PAD_X, SEARCH_BAR_ICON_GAP,
+        SEARCH_BAR_PAD_LEFT, SEARCH_BAR_PAD_RIGHT,
+    },
+    pane::PaneTree,
+    selection::{plain_text_from_grid_range, SelectMode, Selection},
+    tabbar_view::{TabBarLayout, TabHit},
+    tabs::{Tab, TabBar},
 };
-use sonicterm_ui::pane::PaneTree;
-use sonicterm_ui::selection::{plain_text_from_grid_range, SelectMode, Selection};
-use sonicterm_ui::tabbar_view::{TabBarLayout, TabHit};
-use sonicterm_ui::tabs::{Tab, TabBar};
 use sonicterm_vt::vt::Parser;
 use winit::{
     event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
@@ -34,14 +40,14 @@ use winit::{
     window::{CursorIcon, Window, WindowAttributes, WindowId},
 };
 
-use super::scrollbar_input::HitOutcome;
 use super::{
     invalidate_selection_for_content,
     key_encoding::{encode_logical, key_event_to_string, key_event_to_strings, key_name},
     mark_all_panes_dirty, next_pane_id, pane_id_at_point, pick_prompt_target,
-    poll_command_events_for_child_window, resize_all_panes, shell_quote_posix,
-    with_integrated_titlebar, wrap_paste, App, FrontmostKind, PaneState, PointerCell,
-    PointerGestureOwner, RuntimeSmokeFailure, TabState, UserEvent, WindowState,
+    poll_command_events_for_child_window, resize_all_panes,
+    scrollbar_input::HitOutcome,
+    shell_quote_posix, with_integrated_titlebar, wrap_paste, App, FrontmostKind, PaneState,
+    PointerCell, PointerGestureOwner, RuntimeSmokeFailure, TabState, UserEvent, WindowState,
 };
 
 const SEARCH_BADGE_ICON: &str = "";
@@ -2118,7 +2124,7 @@ impl App {
 
     /// Build a fresh `PaneState` bound to the given child window's
     /// `(cols, rows, Arc<Window>)` snapshot, spawning the pane's PTY, its VT
-    /// loop and its reply-forwarder thread. Shared by `spawn_tab_in_child` and
+    /// loop with reply backpressure. Shared by `spawn_tab_in_child` and
     /// `split_active_pane_in_child` so both get identical thread wiring.
     ///
     /// The VT worker derives every shared handle from the completed `PaneState`,
@@ -2133,13 +2139,11 @@ impl App {
     ) -> PaneState {
         use sonicterm_grid::grid::Grid;
         use sonicterm_vt::vt::Parser;
-        let (reply_tx, reply_rx) =
-            crossbeam_channel::bounded::<Vec<u8>>(crate::app::PTY_REPLY_QUEUE_CAPACITY);
         // Honour the user's configured scrollback depth; child
         // windows must match the main window, not the Grid's 10k default.
         let mut grid = Grid::new(cols, rows);
         grid.set_scrollback_limit(self.config.terminal.scrollback);
-        let parser = Arc::new(Mutex::new(Parser::new_with_reply(grid, reply_tx)));
+        let parser = Arc::new(Mutex::new(Parser::new(grid)));
         // Seed theme defaults for OSC 10/11/12 + OSC 4 palette.
         {
             let mut p = parser.lock();
@@ -2165,10 +2169,8 @@ impl App {
             super::spawn_pane::spawn_pane_workers(
                 pane_id,
                 &pane_state,
-                reply_rx,
                 self.pty_burst_gen.clone(),
                 self.event_loop_proxy.clone(),
-                "sonicterm-vt-reply-child",
                 "sonicterm-vt-loop-child",
             );
         }

@@ -91,14 +91,13 @@ pane produces a warning but no notification on an unrelated window. When the
 proxy is absent or event delivery fails, the producer logs the same metadata
 without a current-window identity.
 
-Each pane's parser-reply worker posts at most one rejection notification during
-its lifetime. Further refused replies are counted in fixed-size metadata and
-logged at most once per second, with a final flush when the worker stops. The
-summary fields `rejected_messages`, `rejected_bytes`, `queue_full`,
-`message_too_large`, and `writer_disconnected` count additional refusals since
-the previous summary; they exclude the first, individually reported rejection.
-Idle workers with no pending summary do not wake periodically. This bounds
-background diagnostic traffic without hiding loss or retaining reply payloads.
+Production terminal replies wait for writer capacity on the VT worker after
+releasing parser and side-effect locks. Queue saturation neither drops those
+replies nor emits a rejection warning. The parser pauses at each reply-producing
+dispatch, keeping staging bounded instead of overflowing a second reply channel.
+A permanent delivery failure is reported once and stops that worker; normal
+teardown cancels waiting. Native write failures remain independently logged.
+See [Terminal IO and VT](Terminal-IO-and-VT) for the delivery limits.
 
 Four small messages can fill the channel before a healthy writer is scheduled.
 Controlled tests use the production admission and writer loop to demonstrate
@@ -108,10 +107,10 @@ four additional queued messages and explicit refusal of the next message.
 These fixtures distinguish mechanisms; they do not retrospectively identify
 which producer or native condition caused an older un-attributed warning.
 
-Queue capacity, per-message limits, FIFO delivery, and cancellation are
-unchanged. Overload remains observable; no input is automatically replayed,
-coalesced, or admitted by enlarging the queue. Interpret repeated observations
-of the same pane and progress counter rather than a single `QueueFull` warning.
+Queue capacity and per-message limits are unchanged. UI input still refuses
+rather than blocking; only worker-owned terminal replies wait through saturation.
+Interpret repeated observations of the same pane and progress counter rather than
+a single `QueueFull` warning.
 
 ## PTY resize failure diagnostics
 
@@ -477,20 +476,18 @@ max_breadcrumb_bytes = 1048576    # 1 MiB
 标签页转移后，通知跟随窗格的当前窗口；已关闭的窗格只记录 warning，不在无关窗口显示通知。
 代理缺失或事件投递失败时，生产者直接记录同样的元数据，但不附带无法确认的当前窗口标识。
 
-每个窗格的解析器回复 worker 在其整个生命周期内最多发送一次拒绝通知。后续被拒绝的回复
-使用固定大小的元数据计数，每秒最多记录一次，并在 worker 停止时输出最后一批。
-汇总字段 `rejected_messages`、`rejected_bytes`、`queue_full`、`message_too_large` 和
-`writer_disconnected` 统计自上次汇总以来额外发生的拒绝，不包含首次单独报告的拒绝。
-没有待汇总数据的空闲 worker 不会周期唤醒；这样既限制后台诊断流量，也不隐藏输入丢失或保留回复负载。
+生产路径中的终端回复由 VT worker 在释放解析器与副作用相关的锁之后等待 writer 容量。
+队列饱和既不会丢弃这些回复，也不会产生拒绝 warning。解析器在每次产生回复的分派后暂停，
+使暂存有界，而不是溢出第二个回复通道。永久交付失败只报告一次并停止该 worker；正常销毁
+会取消等待。原生写入失败仍独立记录。交付限制见 [终端 IO 与 VT](Terminal-IO-and-VT)。
 
 健康 writer 尚未被调度时，四条小消息就能填满通道。受控测试使用生产环境的入队与 writer 循环，
 证明突发排空仍保持顺序。另设阻塞写入和阻塞 flush 的夹具，证明排队字节为零时仍可能有一条
 在途消息；再加入四条等待消息后，下一条消息会被显式拒绝。这些夹具区分机制，不会倒推出
 以前缺少归属信息的 warning 究竟由哪个生产者或原生条件引起。
 
-队列容量、单消息上限、FIFO 交付和取消行为不变。过载仍可观察；不会自动重放、合并输入，
-也不会扩大队列来接纳它。应比较同一窗格的连续观察值和进度计数，而不是凭一条 `QueueFull`
-warning 下结论。
+队列容量和单消息上限不变。UI 输入仍采用拒绝而非阻塞；只有 worker 持有的终端回复会等待
+饱和消退。应比较同一窗格的连续观察值和进度计数，而不是凭一条 `QueueFull` warning 下结论。
 
 ## PTY 尺寸调整失败诊断
 

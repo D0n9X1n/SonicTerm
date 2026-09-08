@@ -4,27 +4,33 @@
 
 #![allow(unused_imports)]
 
-use std::collections::HashMap;
-use std::sync::{
-    atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering},
-    Arc,
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant},
 };
-use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use base64::Engine;
 use parking_lot::Mutex;
-use sonicterm_cfg::config::Config;
-use sonicterm_cfg::keymap::{Action, Direction, Keymap, ScrollAction};
-use sonicterm_cfg::theme::Theme;
+use sonicterm_cfg::{
+    config::Config,
+    keymap::{Action, Direction, Keymap, ScrollAction},
+    theme::Theme,
+};
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::Grid;
 use sonicterm_io::pty::{PtyChildExitProbe, PtyHandle};
 use sonicterm_render_model::InlineImage;
-use sonicterm_ui::pane::PaneTree;
-use sonicterm_ui::selection::Selection;
-use sonicterm_ui::tabbar_view::{TabBarLayout, TabHit};
-use sonicterm_ui::tabs::{Tab, TabBar};
+use sonicterm_ui::{
+    pane::PaneTree,
+    selection::Selection,
+    tabbar_view::{TabBarLayout, TabHit},
+    tabs::{Tab, TabBar},
+};
 use sonicterm_vt::vt::{CommandEvent, MediaEvent, Parser, VtEvent};
 use winit::{
     event::{ElementState, Ime, KeyEvent, MouseButton, WindowEvent},
@@ -176,84 +182,13 @@ impl PaneVtHandles {
     }
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
-struct ReplyRejectionTotals {
-    messages: u64,
-    bytes: u64,
-    queue_full: u64,
-    too_large: u64,
-    disconnected: u64,
-}
-
-fn forward_pty_replies(
-    reply_rx: crossbeam_channel::Receiver<Vec<u8>>,
-    mut send: impl FnMut(Vec<u8>) -> Result<(), sonicterm_io::pty::PtyInputError>,
-    mut report_first: impl FnMut(sonicterm_io::pty::PtyInputError),
-    mut summarize: impl FnMut(ReplyRejectionTotals),
-) {
-    use crossbeam_channel::RecvTimeoutError;
-    use sonicterm_io::pty::PtyInputError;
-
-    let mut reported = false;
-    let mut pending = ReplyRejectionTotals::default();
-    let mut deadline = None;
-    loop {
-        if deadline.is_some_and(|due| Instant::now() >= due) {
-            summarize(std::mem::take(&mut pending));
-            deadline = None;
-        }
-        let received = match deadline {
-            Some(due) => reply_rx.recv_deadline(due),
-            None => reply_rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
-        };
-        let bytes = match received {
-            Ok(bytes) => bytes,
-            Err(RecvTimeoutError::Timeout) => {
-                // When: `received` times out, flush the pending summary before waiting for more replies.
-                continue;
-            }
-            Err(RecvTimeoutError::Disconnected) => {
-                // When: `received` disconnects, the parser is gone and no further replies can arrive.
-                break;
-            }
-        };
-        if let Err(error) = send(bytes) {
-            // When: `send` refuses a reply, retain metadata counts instead of retaining payloads or flooding UI events.
-            let disconnected = matches!(error, PtyInputError::WriterDisconnected(_));
-            if reported {
-                match &error {
-                    PtyInputError::QueueFull(_) => pending.queue_full += 1,
-                    PtyInputError::MessageTooLarge(_) => pending.too_large += 1,
-                    PtyInputError::WriterDisconnected(_) => pending.disconnected += 1,
-                }
-                pending.messages += 1;
-                pending.bytes += error.into_bytes().len() as u64;
-                deadline.get_or_insert_with(|| Instant::now() + Duration::from_secs(1));
-            } else {
-                // When: `reported` is false, surface the first rejection immediately and bound this worker to one UI event.
-                reported = true;
-                report_first(error);
-            }
-            if disconnected {
-                // When: `disconnected` is true, stop forwarding because the native writer cannot recover.
-                break;
-            }
-        }
-    }
-    if pending.messages != 0 {
-        summarize(pending);
-    }
-}
-
-/// Start the reply and VT workers with handles cloned from their completed pane.
+/// Start the VT worker with handles cloned from its completed pane.
 // Ordering: pty_burst_gen uses Ordering::Release to publish new PTY bytes before redraw dispatch.
 pub(super) fn spawn_pane_workers(
     pane_id: u64,
     pane: &PaneState,
-    reply_rx: crossbeam_channel::Receiver<Vec<u8>>,
     pty_burst_gen: Arc<AtomicU32>,
     proxy: Option<EventLoopProxy<UserEvent>>,
-    reply_thread_name: &'static str,
     vt_thread_name: &'static str,
 ) {
     let pty = pane.pty.as_ref().expect("pane worker requires a PTY");
@@ -262,40 +197,6 @@ pub(super) fn spawn_pane_workers(
     let in_tx_reply = pty.input_sender();
     let worker_handles = PaneVtHandles::from_pane_state(pane);
     let redraw_proxy = proxy.clone();
-
-    std::thread::Builder::new()
-        .name(reply_thread_name.into())
-        .spawn(move || {
-            forward_pty_replies(
-                reply_rx,
-                |bytes| in_tx_reply.send(bytes),
-                |error| {
-                    App::report_pty_input_rejection(
-                        proxy.as_ref(),
-                        pane_id,
-                        super::PtyInputSource::TerminalReply,
-                        error,
-                        in_tx_reply.diagnostics(),
-                    );
-                },
-                |totals| {
-                    let diagnostics = in_tx_reply.diagnostics();
-                    tracing::warn!(
-                        pane_id,
-                        source = ?super::PtyInputSource::TerminalReply,
-                        rejected_messages = totals.messages,
-                        rejected_bytes = totals.bytes,
-                        queue_full = totals.queue_full,
-                        message_too_large = totals.too_large,
-                        writer_disconnected = totals.disconnected,
-                        observation = "concurrent",
-                        ?diagnostics,
-                        "additional terminal replies were not queued"
-                    );
-                },
-            );
-        })
-        .expect("spawn pane VT reply forwarder");
 
     std::thread::Builder::new()
         .name(vt_thread_name.into())
@@ -322,12 +223,25 @@ pub(super) fn spawn_pane_workers(
                             pending_bytes = pending_bytes.saturating_add(bytes.len());
                             pending_since.get_or_insert_with(Instant::now);
                         }
-                        process_pane_vt_batch(
+                        if let Err(error) = process_pane_vt_batch(
                             &worker_handles,
                             bytes,
                             &mut command_started,
                             redraw_proxy.as_ref(),
-                        );
+                            &in_tx_reply,
+                        ) {
+                            // When: process_pane_vt_batch fails, stop before consuming output beyond the undelivered reply.
+                            if !in_tx_reply.is_closing() {
+                                App::report_pty_input_rejection(
+                                    proxy.as_ref(),
+                                    pane_id,
+                                    super::PtyInputSource::TerminalReply,
+                                    error,
+                                    in_tx_reply.diagnostics(),
+                                );
+                            }
+                            break;
+                        }
                         let pending_for =
                             pending_since.map(|since| since.elapsed()).unwrap_or(Duration::ZERO);
                         if crate::app::should_flush_pending_pty_redraw(pending_bytes, pending_for) {
@@ -415,7 +329,8 @@ pub(super) fn process_pane_vt_batch<Bytes: AsRef<[u8]>>(
     bytes: Bytes,
     command_started: &mut Option<Instant>,
     proxy: Option<&EventLoopProxy<UserEvent>>,
-) {
+    input: &sonicterm_io::pty::PtyInputSender,
+) -> Result<(), sonicterm_io::pty::PtyInputError> {
     process_pane_vt_batch_with(
         handles,
         bytes,
@@ -428,93 +343,109 @@ pub(super) fn process_pane_vt_batch<Bytes: AsRef<[u8]>>(
             }
         },
         Instant::now,
-    );
+        |bytes| input.send_wait(bytes),
+    )
 }
 
 // Lock order: inline_images -> inline_media_charge; parser releases before either, and command_events locks after both.
 // Ordering: cursor_visible, kitty_flags, and keyboard_modes use Ordering::Relaxed; each publishes only its independent parser value.
-fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now>(
+fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
     handles: &PaneVtHandles,
     bytes: Bytes,
     command_started: &mut Option<Instant>,
     mut decode_media: Decode,
     mut emit_event: Emit,
     mut now: Now,
-) where
+    mut send_reply: Send,
+) -> Result<(), sonicterm_io::pty::PtyInputError>
+where
     Bytes: AsRef<[u8]>,
     Decode: FnMut(&MediaEvent) -> Option<InlineImage>,
     Emit: FnMut(UserEvent),
     Now: FnMut() -> Instant,
+    Send: FnMut(Vec<u8>) -> Result<(), sonicterm_io::pty::PtyInputError>,
 {
-    let events = {
-        let mut parser = handles.parser.lock();
-        let events = parser.advance(bytes.as_ref());
-        handles.kitty_flags.store(parser.kitty_keyboard_flags(), Ordering::Relaxed);
-        handles.keyboard_modes.store(parser.keyboard_modes().bits(), Ordering::Relaxed);
-        events
-    };
-    drop(bytes);
-
-    let mut clipboard_requests = Vec::new();
-    let mut command_side_effects = Vec::new();
-    let mut media_events = Vec::new();
-    for event in events {
-        match event {
-            VtEvent::CursorVisibility(visible) => {
-                handles.cursor_visible.store(visible, Ordering::Relaxed);
-            }
-            VtEvent::Clipboard { selection, data } => {
-                clipboard_requests.push((selection, data));
-            }
-            VtEvent::Command(event) => {
-                let at = now();
-                let duration = match event {
-                    CommandEvent::CmdStart => {
-                        *command_started = Some(at);
-                        None
-                    }
-                    CommandEvent::CmdEnd(_) => {
-                        command_started.take().map(|started| at.duration_since(started))
-                    }
-                    CommandEvent::PromptStart => None,
-                };
-                command_side_effects.push(super::PaneCommandEvent { event, at, duration });
-            }
-            VtEvent::Media(media) => media_events.push(media),
-            VtEvent::SetTitle(_) | VtEvent::Bell | VtEvent::Hyperlink { .. } => {
-                // When: event is SetTitle, Bell, or Hyperlink, parser state already owns its effect.
-            }
-        }
-    }
-
-    for (selection, data) in clipboard_requests {
-        if let Some(event) = osc52_clipboard_write_event(selection, &data) {
-            emit_event(event);
-        }
-    }
-
-    let mut decoded_images = Vec::new();
-    for media in media_events {
-        if let Some(image) = decode_media(&media) {
-            decoded_images.push(image);
-            super::media::trim_staged_inline_images(&mut decoded_images);
-        }
-    }
-    if !decoded_images.is_empty() {
-        let evicted = {
-            let mut images = handles.inline_images.lock();
-            images.extend(decoded_images);
-            super::media::trim_inline_images_charged(&mut images, &handles.inline_media_charge)
+    let mut remaining = bytes.as_ref();
+    loop {
+        let (consumed, events, replies) = {
+            let mut parser = handles.parser.lock();
+            let result = parser.advance_with_replies(remaining);
+            handles.kitty_flags.store(parser.kitty_keyboard_flags(), Ordering::Relaxed);
+            handles.keyboard_modes.store(parser.keyboard_modes().bits(), Ordering::Relaxed);
+            result
         };
-        drop(evicted);
-    }
+        remaining = &remaining[consumed..];
 
-    if !command_side_effects.is_empty() {
-        super::append_bounded_command_events(
-            &mut handles.command_events.lock(),
-            command_side_effects,
-        );
+        let mut clipboard_requests = Vec::new();
+        let mut command_side_effects = Vec::new();
+        let mut media_events = Vec::new();
+        for event in events {
+            match event {
+                VtEvent::CursorVisibility(visible) => {
+                    handles.cursor_visible.store(visible, Ordering::Relaxed);
+                }
+                VtEvent::Clipboard { selection, data } => {
+                    clipboard_requests.push((selection, data));
+                }
+                VtEvent::Command(event) => {
+                    let at = now();
+                    let duration = match event {
+                        CommandEvent::CmdStart => {
+                            *command_started = Some(at);
+                            None
+                        }
+                        CommandEvent::CmdEnd(_) => {
+                            command_started.take().map(|started| at.duration_since(started))
+                        }
+                        CommandEvent::PromptStart => None,
+                    };
+                    command_side_effects.push(super::PaneCommandEvent { event, at, duration });
+                }
+                VtEvent::Media(media) => media_events.push(media),
+                VtEvent::SetTitle(_) | VtEvent::Bell | VtEvent::Hyperlink { .. } => {
+                    // When: event is SetTitle, Bell, or Hyperlink, parser state already owns its effect.
+                }
+            }
+        }
+
+        for (selection, data) in clipboard_requests {
+            if let Some(event) = osc52_clipboard_write_event(selection, &data) {
+                emit_event(event);
+            }
+        }
+
+        let mut decoded_images = Vec::new();
+        for media in media_events {
+            if let Some(image) = decode_media(&media) {
+                decoded_images.push(image);
+                super::media::trim_staged_inline_images(&mut decoded_images);
+            }
+        }
+        if !decoded_images.is_empty() {
+            let evicted = {
+                let mut images = handles.inline_images.lock();
+                images.extend(decoded_images);
+                super::media::trim_inline_images_charged(&mut images, &handles.inline_media_charge)
+            };
+            drop(evicted);
+        }
+
+        if !command_side_effects.is_empty() {
+            super::append_bounded_command_events(
+                &mut handles.command_events.lock(),
+                command_side_effects,
+            );
+        }
+        if !replies.is_empty() {
+            // Delivery may wait; all pane locks are released and the unread output suffix remains owned.
+            send_reply(replies)?;
+        }
+        if remaining.is_empty() {
+            // When: remaining is empty, every input byte and staged reply has been processed.
+            break;
+        }
     }
+    Ok(())
 }
 
 impl App {
@@ -524,13 +455,11 @@ impl App {
         launch: &super::pane_launch::PaneLaunch,
     ) -> PaneState {
         let (cols, rows) = self.main_renderer().map(|r| r.cells()).unwrap_or((80, 24));
-        let (reply_tx, reply_rx) =
-            crossbeam_channel::bounded::<Vec<u8>>(super::PTY_REPLY_QUEUE_CAPACITY);
         // Honour the user's configured scrollback depth instead of the
         // Grid's built-in 10k default.
         let mut grid = Grid::new(cols, rows);
         grid.set_scrollback_limit(self.config.terminal.scrollback);
-        let parser = Arc::new(Mutex::new(Parser::new_with_reply(grid, reply_tx)));
+        let parser = Arc::new(Mutex::new(Parser::new(grid)));
         // Seed theme defaults so OSC 10/11/12 `?` queries get a truthful
         // reply — without this nvim guesses (27,29,30) for bg and the
         // neo-tree icon cells visibly differ from SonicTerm's clear surface
@@ -585,10 +514,8 @@ impl App {
             spawn_pane_workers(
                 pane_id,
                 &state,
-                reply_rx,
                 self.pty_burst_gen.clone(),
                 self.event_loop_proxy.clone(),
-                "sonicterm-vt-reply",
                 "sonicterm-vt-loop",
             );
         }
