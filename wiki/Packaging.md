@@ -2,11 +2,10 @@
 
 ## English
 
-This page owns local packaging commands and installed/portable layouts. Running
-these commands writes under `dist/`; it does not publish a release. The complete
-tag, CI, asset-validation, and publication flow belongs on
-[Development and Release](Development-and-Release). Native behavior inside each
-package belongs on [Platform Integration](Platform-Integration).
+Choose your host platform below to build a package under `dist/`. These commands
+do not publish it. Release approval and publication are separate steps in
+[Development and Release](Development-and-Release); native behavior is described
+in [Platform Integration](Platform-Integration).
 
 ## Version and output boundary
 
@@ -258,20 +257,15 @@ replace an existing SonicTerm Debian installation.
 
 ## Release handoff
 
-A pushed tag matching `v[0-9]+.[0-9]+.[0-9]+*` starts the release workflow.
-Its version validator then requires a supported semantic-version tag matching
-all workspace packages. The workflow builds two macOS DMGs, one Windows MSI,
-and the Linux Debian and tar packages. Package jobs register typed
-asset fragments; publication accepts only the validated asset set and also
-uploads `release-assets.json` and `SHA256SUMS.txt`. See
-[Development and Release](Development-and-Release) for the blocking graph and
-verification steps.
+Local packages are not published automatically. The tag-driven release validates
+all workspace versions and typed package fragments before uploading the five
+packages, `release-assets.json`, and `SHA256SUMS.txt`. Exact tag rules and release
+steps are in [Development and Release](Development-and-Release).
 
 ## 中文
 
-本页负责本地打包命令和安装/便携布局。运行这些命令只会在 `dist/` 下生成文件，不会发布
-release。完整的 tag、CI、资产校验与发布流程见[开发与发布](Development-and-Release)；
-各安装包中的原生行为见[平台集成](Platform-Integration)。
+按主机平台选择下方命令，在 `dist/` 生成本地包，不会自动发布。发布授权与流程见
+[开发与发布](Development-and-Release)，包内原生行为见[平台集成](Platform-Integration)。
 
 ## 版本与输出边界
 
@@ -503,9 +497,6 @@ Wayland/Weston 上运行两种布局。每种布局都通过 `native-smoke-runne
 
 ## 发布交接
 
-推送匹配 `v[0-9]+.[0-9]+.[0-9]+*` 的 tag 会启动 release workflow。版本校验器随后要求
-tag 是受支持的语义版本，并与所有 workspace package 一致。工作流会构建两个 macOS DMG、
-一个 Windows MSI，以及 Linux Debian 与 tar 包。各 package job 会登记类型化 asset
-fragment；发布只接受通过校验的资产集，并一同上传 `release-assets.json` 和
-`SHA256SUMS.txt`。阻断关系和验证步骤见
+本地包不会自动发布。Tag 驱动的 release 先验证全部 workspace 版本与类型化包片段，
+再上传五个包、`release-assets.json` 和 `SHA256SUMS.txt`。准确 tag 规则与发布步骤见
 [开发与发布](Development-and-Release)。

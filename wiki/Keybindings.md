@@ -105,13 +105,11 @@ restrictions are reported. Copy requires a nonempty selection whose cells still
 match; a busy parser temporarily leaves Copy disabled rather than blocking the
 UI. Same-value repaints preserve valid selections.
 
-**Go to Tab** rows search the live tabs in the palette's attached window by
-title or displayed position. They keep the runtime tab identity across reorder
-and rename, and App revalidates that identity before activation. A closed target
-or one that no longer matches the query leaves no row selected; Enter does
-nothing until you move the selection or edit the query. A replacement with the
-same title or position does not inherit the old selection. Targets remain
-available in READONLY mode and do not search other windows.
+**Go to Tab** searches live tabs in the attached window by title or displayed
+position, including in READONLY. Selection follows tab identity across reorder
+and rename, and is revalidated before activation. A closed or no-longer-matching
+target leaves no selection; Enter does nothing until you move or edit the query.
+A replacement at the same title/position never inherits selection.
 
 When tabs no longer fit at the font/scale-derived readable width, the strip
 shows a segment containing the active tab and a right-edge overflow control.
@@ -420,10 +418,9 @@ Control 和 Alt 显示为 `Ctrl`、`Alt`。字面 `+` 按键会保留，例如 `
 以及 READONLY 限制都会显示原因。复制要求非空选区且所选单元格仍然匹配；解析器忙时暂时禁用复制，
 而不阻塞 UI。同值重绘保留有效选区。
 
-**Go to Tab** 行按标题或显示位置搜索面板附着窗口中的实时标签页。重排或重命名后仍保留运行时
-标签页身份，App 会在激活前再次验证。目标关闭或不再匹配查询时不选择任何行；移动选择或编辑查询前，
-Enter 不执行动作。同名或同位置的替代标签页不会继承旧选择。目标在 READONLY 模式下仍可用，
-不会搜索其他窗口。
+**Go to Tab** 按标题或显示位置搜索附着窗口的实时标签页，READONLY 下也可用。选择跟随
+标签页身份跨越重排和重命名，激活前再次验证。目标关闭或不再匹配时清空选择；移动选择或修改
+查询前，Enter 不执行动作。同名/同位置的替代项不会继承选择。
 
 当标签页无法按字体/缩放推导的可读宽度全部放入栏中时，标签栏显示包含活动标签页的区段，
 并在右侧显示溢出控件。点击控件会在同一窗口打开 **所有标签页**。搜索标题或位置，

@@ -2,12 +2,10 @@
 
 ## English
 
-This page owns contributor gates, pull-request CI, release publication, and the
-one-way GitHub Wiki mirror. Crate responsibilities belong on
-[Crate Reference](Crate-Reference), local package commands and layouts on
-[Packaging](Packaging), native boundaries on
-[Platform Integration](Platform-Integration), and diagnostic fields on
-[Logging](Logging).
+Before a PR, run the full local gate below. Before merging, require exact-head
+platform CI; after merging, verify Wiki publication. Release tags need separate
+approval and exact successful `main` CI. Local package commands are in
+[Packaging](Packaging), and crate responsibilities in [Crate Reference](Crate-Reference).
 
 ## Repository and toolchain
 
@@ -269,22 +267,16 @@ artifacts remain excluded.
 
 ## Workflow supply chain
 
-Every workflow runs third-party code, so two properties are enforced rather
-than left to convention. `scripts/check-workflow-supply-chain.sh` runs in the
-local gate and in the macOS, Windows, and Ubuntu core/checks CI shards. Release
-accepts only an exact successful `main` CI run containing those checks before
-its platform jobs start.
+`scripts/check-workflow-supply-chain.sh` enforces action pins and token scope
+locally and in macOS, Windows, and Ubuntu core/checks shards. Release requires
+an exact successful `main` CI run containing these checks before platform jobs.
 
-**Every remote action is pinned to a full 40-character commit SHA**, with a
-trailing `# vX.Y.Z` comment naming the release that SHA is. A tag is a pointer,
-not a version: `@v2` can be retargeted at any commit by whoever holds the
-upstream repository, so a compromised maintainer account changes what this
-repository executes with no reviewable change landing here. A commit SHA is
-content-addressed and cannot be retargeted. The checker rejects tags, branches,
-abbreviated SHAs — a prefix can gain a second match as a repository grows —
-uppercase SHAs, and tag-pinned `docker://` references. Local `./` actions need
-no pin because the pull request that changes one also reviews it. The same
-action pinned to two different commits is rejected as a half-applied update.
+**Pin every remote action to a full lowercase 40-character commit SHA**, followed
+by its release comment `# vX.Y.Z`. Unlike tags or branches, that identity cannot
+be retargeted without a reviewed change here. The checker rejects tags, branches,
+abbreviated or uppercase SHAs, tag-pinned `docker://` references, and two different
+pins for the same action. Local `./` actions need no pin: their code is reviewed
+in the same PR.
 
 `dtolnay/rust-toolchain` is pinned to its `v1` tag and passes `toolchain: stable`
 explicitly. Its `stable` branch is a rolling ref that is force-pushed, so a SHA
@@ -454,9 +446,9 @@ links; workflow success alone does not prove rendering and navigation.
 
 ## 中文
 
-本页负责贡献者 gate、pull-request CI、release 发布和 GitHub Wiki 单向镜像。Crate 职责见
-[Crate 参考](Crate-Reference)，本地打包命令与布局见[打包](Packaging)，原生边界见
-[平台集成](Platform-Integration)，诊断字段见[日志](Logging)。
+提交 PR 前运行下方完整本地 gate；合并前要求准确 head 的各平台 CI 成功，合并后验证
+Wiki 发布。Release tag 另需授权和精确成功的 `main` CI。本地打包见[打包](Packaging)，
+crate 职责见[Crate 参考](Crate-Reference)。
 
 ## 仓库与工具链
 
@@ -671,18 +663,14 @@ package shard 只恢复，且 workspace crate artifact 始终排除在 cache 外
 
 ## 工作流供应链
 
-每个工作流都会运行第三方代码，因此有两条性质由 gate 强制执行，而不是靠约定维持。
-`scripts/check-workflow-supply-chain.sh` 在本地 gate，以及 macOS、Windows、Ubuntu 的
-core/checks CI shard 中运行。Release 只接受包含这些检查、与 tag commit 完全相同且成功的
+`scripts/check-workflow-supply-chain.sh` 在本地及 macOS、Windows、Ubuntu core/checks
+shard 强制检查 action 固定版本与 token 权限。Release 要求包含这些检查的精确成功
 `main` CI run，之后才启动平台 job。
 
-**每个远程 action 都固定到完整的 40 位提交 SHA**，并带上标明该 SHA 对应发布版本的
-`# vX.Y.Z` 尾注。Tag 是指针而不是版本：持有上游仓库的人可以随时把 `@v2` 重新指向任意
-提交，因此一个被攻陷的维护者账号可以改变本仓库执行的代码，而这里不会出现任何可审阅的
-变更。提交 SHA 由内容寻址，无法被重新指向。Checker 会拒绝 tag、分支、缩写 SHA（前缀会
-随仓库增长而产生第二个匹配）、大写 SHA，以及用 tag 固定的 `docker://` 引用。本地 `./`
-action 无需固定，因为修改它的 pull request 同时也在审阅它。同一个 action 被固定到两个
-不同提交，会作为「只应用了一半的更新」被拒绝。
+**远程 action 固定到完整小写 40 位提交 SHA**，并附发布版本 `# vX.Y.Z`。不同于 tag 或
+分支，这个身份不能在本仓库没有可审阅变更时被重新指向。Checker 拒绝 tag、分支、缩写或
+大写 SHA、tag 固定的 `docker://`，以及同一 action 的两个不同固定值。本地 `./` action
+无需固定，因为代码在同一 PR 中审阅。
 
 `dtolnay/rust-toolchain` 固定到它的 `v1` tag，并显式传入 `toolchain: stable`。它的
 `stable` 分支是会被 force-push 的滚动引用，因此固定其上的 SHA 会在下一次推送后成为孤立

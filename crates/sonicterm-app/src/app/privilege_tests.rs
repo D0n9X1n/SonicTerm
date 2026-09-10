@@ -1,5 +1,35 @@
 use super::*;
 
+/// Real OSC title refresh preserves multiplexer titles, manual overrides, and ordinary-shell CWD precedence.
+#[test]
+fn shell_integration_title_refresh_preserves_mux_and_manual_titles() {
+    let parser = Arc::new(Mutex::new(Parser::new(Grid::new(80, 24))));
+    parser.lock().advance(b"\x1b]7;file://localhost/work/project\x07\x1b]2;mux;active title\x07");
+    let mut pane = PaneState::new(parser.clone(), None);
+    let mut tabs = sonicterm_ui::tabs::TabBar::new();
+    tabs.push(sonicterm_ui::tabs::Tab::new("shell"));
+    let now = Instant::now();
+    pane.fg_proc_cache = Some((
+        now,
+        Some(sonicterm_io::proc_info::ForegroundProcess { name: "rmux".into(), privileged: false }),
+    ));
+    refresh_active_tab_title(&mut tabs, &mut pane, &parser.lock(), 0, false);
+    assert!(tabs.active().unwrap().title.contains("mux;active title"));
+    tabs.set_active_custom_title("manual");
+    parser.lock().advance(b"\x1b]2;mux;changed title\x07");
+    refresh_active_tab_title(&mut tabs, &mut pane, &parser.lock(), 0, false);
+    assert!(tabs.active().unwrap().title.contains("manual"));
+    assert!(!tabs.active().unwrap().title.contains("changed"));
+    tabs.set_active_custom_title("");
+    pane.fg_proc_cache = Some((
+        now,
+        Some(sonicterm_io::proc_info::ForegroundProcess { name: "zsh".into(), privileged: false }),
+    ));
+    refresh_active_tab_title(&mut tabs, &mut pane, &parser.lock(), 0, false);
+    assert!(tabs.active().unwrap().title.contains("project"));
+    assert!(!tabs.active().unwrap().title.contains("changed"));
+}
+
 #[test]
 fn app_accepts_one_process_privilege_snapshot() {
     // Protect every window from deriving privilege independently after startup.

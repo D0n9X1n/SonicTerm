@@ -2,11 +2,9 @@
 
 ## English
 
-SonicTerm owns its text pipeline from font discovery through atlas upload. This
-page covers font selection, shaping, rasterization, row caches, and the separate
-glyph and inline-image atlases. Renderer selection, damage, presentation, and
-frame pacing belong to [Rendering Modes](Rendering-Modes). Host-memory bounds
-belong to [Memory](Memory).
+Follow styled cells through fonts, atlases, GPU/CPU drawing, and retained-frame
+damage. For adapter selection and pacing, see [Rendering Modes](Rendering-Modes);
+for allocation limits and accounting, see [Memory](Memory).
 
 ### Pipeline and ownership
 
@@ -25,10 +23,10 @@ flowchart LR
 
 `sonicterm-render-model` is the renderer-independent boundary. For each visible
 pane, the app supplies a `PaneRender` with grid, pane rectangle, viewport,
-cursor, focus, scrollbar, broadcast, and inline-image state. `RenderInputs`
-adds tabs, search, command palette, selection, IME, hovered target,
-notifications, and drag state. `sonicterm-gpu` reaches grid, config, and UI type
-identities only through that boundary.
+cursor, focus, scrollbar, broadcast, and inline-image state. Production passes
+UI state as explicit arguments; `RenderInputs` remains a public compatibility
+type, not the production entrypoint. `sonicterm-gpu` reaches grid, config, and UI
+types only through that boundary.
 
 The app uses non-blocking `try_lock` for every visible pane parser. If any pane
 is busy, it defers the frame instead of presenting a mixture of old and new pane
@@ -51,8 +49,9 @@ Platform discovery stays behind `FontLocator`:
 - other Unix systems use Fontconfig and restrict candidates to monospaced,
   dual-width, or character-cell faces.
 
-The fallback chain includes common monospaced faces, symbol fonts, and color
-emoji. If no loaded face covers a codepoint, a background resolver finds a
+After the configured primary family, the code-owned fallback list tries
+JetBrains Mono, Symbols Nerd Font Mono, and Noto Color Emoji. If no loaded face
+covers a codepoint, a background resolver finds a
 platform font and appends it to that `FontStack`. Automatic resolution ranks a
 font containing an OpenType `MATH` table after text fonts. It does not exclude
 that font: it may still supply a codepoint no text font covers. A family named
@@ -63,6 +62,10 @@ font reloads. This is required for Linux packages, which carry all four bundled
 Rec Mono faces without installing them system-wide.
 
 ### Tab-title process icons
+
+Manual titles win. Otherwise a nonempty raw OSC title wins for foreground `rmux`,
+`tmux`, or `screen` even when CWD is present; other processes retain CWD-first
+automatic titles. The icon lookup below uses only the executable identity.
 
 When the OS supplies a foreground executable, `normalize_proc_name` takes its
 basename across `/` and `\\`, removes one login-shell `-` prefix and one
@@ -201,6 +204,22 @@ errors retain stage and size/count diagnostics rather than the affected text.
 White foreground and untinted color glyphs are normal rendering and produce no
 routine per-glyph warning. Genuine atlas and presentation diagnostics remain.
 
+Bold and italic select a face. Foreground color does not split shaping runs.
+After shaping, the renderer resolves theme defaults, 256-color indices, and
+24-bit RGB. Inverse swaps foreground and background. Dim blends foreground 45%
+toward the effective background in stored sRGB-encoded space before draw values
+are converted as required for the sRGB surface or CPU blend.
+
+Backgrounds are quads, not glyphs. Adjacent equal non-default backgrounds are
+coalesced. The default background comes from the damage clear. Underline runs
+become single, double, curly, dotted, or dashed quads. An explicit SGR 58 color
+wins; otherwise underline uses foreground color. GPU line endpoints travel in
+geometry parameters separate from HSV color transforms, so a curly underline's
+shape cannot alter its resolved color.
+
+The parser stores blink, hidden, and strikethrough flags. The current terminal
+renderer has no flag-specific draw branch for those three.
+
 ### Rasterization
 
 Windows uses DirectWrite by default and falls back to FreeType when DirectWrite
@@ -259,6 +278,20 @@ and tab-title font stacks together and invalidates the shared glyph atlas:
 All three stacks use the same family, DPI, and weight scale. Native raster-role
 tags keep their atlas entries distinct, so a footer or tab title does not scale
 a cached body bitmap.
+
+Both row caches hold about four times total visible rows; capacity/geometry
+changes clear the affected cache. Dirty rows invalidate absolute entries.
+`remove_pane` evicts that pane's glyph then quad rows, preserving peers and
+requesting table compaction. Current allocation includes table and nested-vector
+capacity, not merely live lengths.
+
+Font changes rebuild stacks, reset glyph metadata, and invalidate both row caches
+and `FrameKey`. DPI changes also rebuild matching atlas uploads. Theme changes
+advance style revision and mark all pane rows dirty. Accepted surface resize
+replaces the retained texture and invalidates both row caches/key before grid/PTY
+resize. Topology fields change the next key; topology alone does not clear rows.
+Per-frame cursor, selection, search, quick-select, IME, palette, and notification
+overlays are assembled separately.
 
 ### Glyph atlas
 
@@ -322,6 +355,54 @@ linear light, and encode RGB once at output. The mode is presentation state, so
 changing it invalidates the frame but keeps font stacks, raster tiles, and
 atlases intact.
 
+Software glyphs use one stabilized destination-pixel origin for one-to-one and
+resampled axes. Nearest sampling stays inside the glyph tile; top/left clipping
+advances past hidden source rows/columns. Sharp, rounded, and line quads all use
+finite premultiplied linear RGBA (`0 ≤ RGB ≤ alpha ≤ 1`); opacity or mask
+coverage scales RGB and alpha together.
+
+### Windows LCD subpixel policy
+
+`[font].subpixel_aa` accepts `off`, `rgb`, and `bgr`; the default is `off`.
+SonicTerm resolves a non-off request to LCD presentation only when all of these
+conditions hold:
+
+- the host is Windows;
+- the configured backdrop selects an opaque hardware alpha mode;
+- effective terminal background opacity is `1`;
+- the final presenter is Windows CPU/GDI, or the wgpu device supports
+  `DUAL_SOURCE_BLENDING`.
+
+Mica, Acrylic, Tabbed, opacity below `1`, unsupported GPU devices, and
+non-Windows hosts therefore use grayscale deterministically. A software-present
+override does not make a configured transparent backdrop LCD-eligible merely
+because the GDI swapchain itself is forced opaque.
+
+On Windows, device creation requests `DUAL_SOURCE_BLENDING` only when the
+adapter advertises it. No optional LCD feature is requested on other hosts. The
+feature is negotiated when the shared device is created so `off` can change to
+`rgb` or `bgr` live without recreating the device. The effective mode is part of
+the retained frame key; changing the request invalidates and redraws the frame
+without rebuilding fonts or either atlas.
+
+For one subpixel sample, `coverage` is logical RGB coverage (or R/B-swapped for
+`bgr`) and `foreground` is the transformed premultiplied linear foreground:
+
+```text
+weights.rgb = coverage.rgb * foreground.a
+source.rgb = foreground.rgb * coverage.rgb
+source.a = max(weights.r, weights.g, weights.b)
+destination.rgb *= 1 - weights.rgb
+destination.a *= 1 - source.a
+```
+
+The GPU pipeline emits source color and destination attenuation as the two blend
+sources. Its non-LCD branches emit scalar alpha as the second source, preserving
+ordinary source-over for monochrome text, color glyphs, images, and quads. The
+Windows CPU presenter decodes the sRGB BGRA destination, applies the same
+per-channel equation in linear light, then encodes RGB once. `off` uses the
+subpixel tile's stored alpha maximum as grayscale coverage.
+
 ### Inline images
 
 iTerm2 file images, kitty graphics, and Sixel events are decoded by the app.
@@ -364,6 +445,60 @@ a 1×1 CPU/GPU placeholder, promotes to a 2048×2048 atlas only when renderable
 media appears, and returns to the placeholder after 240 frames without renderable
 media. A full image atlas skips older images rather than evicting text.
 
+### Retained pixels and damage
+
+Both presenters bound frames to 16,384 pixels per side and 160 MiB of BGRA;
+wgpu also applies `max_texture_dimension_2d`. Invalid initial geometry fails
+construction. A rejected `try_resize` returns `false` and retains the usable
+surface; `WindowsSoftwareFrame::new`/`prepare` reject invalid CPU frames before
+allocation. A `GlyphInstance` stores an NDC rectangle, UVs, linear foreground
+modulation, and color/subpixel/image-atlas flags.
+
+Damage is a correctness boundary, not only an optimization. Every VT/grid
+mutation must mark the affected rows in the same update.
+
+```mermaid
+flowchart TD
+    change["visible state changed"] --> screen{"screen buffer"}
+    screen -- primary --> rows["union dirty viewport rows"]
+    screen -- alternate --> dirty{"any dirty row?"}
+    dirty -- yes --> pane["complete surface-clipped pane"]
+    dirty -- no --> none["no terminal damage"]
+    rows --> union["union with UI and overlay damage"]
+    pane --> union
+    none --> union
+    union --> retained["redraw retained frame inside damage scissor"]
+    retained --> present["blit and present"]
+```
+
+A primary-screen pane can repaint the union of dirty viewport rows. Row bounds
+use floor/ceil rules at fractional DPI so adjacent rows leave no seam, then
+expand vertically by one native font-cell height so glyph bearings, positioned
+marks, and compressed line spacing cannot leave ink outside the retained-frame
+scissor. The expansion remains pane- and surface-clipped. If an alternate-screen
+pane has any dirty row, the complete surface-clipped pane is damaged. This covers
+TUI scrolling, insert/delete line, reverse index, erase, and other fixed-position
+updates where a narrow row set can otherwise leave stale pixels.
+
+The offscreen frame uses one attachment clear on first use or full-surface
+replacement, without a second background reset draw. Partial damage loads the
+retained frame, then replaces the damaged pixels with the premultiplied background
+through a non-blending reset under the damage scissor. Reset and content share one
+buffer upload with separate draw ranges; ordinary content retains source-over
+and LCD text retains dual-source blending. Transparent resets erase old ink
+without accumulating alpha or changing pixels outside damage, and do not need a
+later redraw to finish. After the reset, GPU content draws in this order:
+
+```text
+base quads -> inline images -> base glyphs -> overlay quads -> overlay glyphs
+```
+
+A scissor limits redraw to the damage rectangle. The renderer’s
+`wgpu::util::TextureBlitter` copies the retained frame to the swapchain before
+submit and present. The surface format is fixed to
+`TextureFormat::Bgra8UnormSrgb`; colors are converted to linear values before
+shader use so the sRGB target performs the only gamma encoding.
+
 ### Custom terminal glyphs
 
 Box drawing, block elements, Powerline, Braille, sextants, octants, progress
@@ -389,9 +524,8 @@ The adapted WezTerm implementation is attributed in
 
 ## 中文
 
-SonicTerm 自主管理从字体发现到图集上传的完整文字流水线。本页负责字体选择、塑形、
-光栅化、行缓存，以及彼此独立的字形图集和内联图像图集。渲染器选择、损伤区域、呈现和
-帧节奏见[渲染模式](Rendering-Modes)，主机内存上限见[内存](Memory)。
+本页沿带样式的单元格介绍字体、图集、GPU/CPU 绘制与保留帧损伤。
+适配器选择和帧节奏见[渲染模式](Rendering-Modes)，分配上限与记账见[内存](Memory)。
 
 ### 流水线与所有权
 
@@ -410,7 +544,7 @@ flowchart LR
 
 `sonicterm-render-model` 是与渲染器无关的边界。应用为每个可见窗格提供一个
 `PaneRender`，其中包含网格、窗格矩形、视口、光标、焦点、滚动条、广播状态和内联图像。
-`RenderInputs` 再加入标签页、搜索、命令面板、选区、输入法、悬停目标、通知和拖动状态。
+生产路径用独立参数传递 UI 状态；`RenderInputs` 仍是公开兼容类型，不是生产入口。
 `sonicterm-gpu` 只通过该边界访问网格、配置和界面类型。
 
 应用使用非阻塞 `try_lock` 获取所有可见窗格的解析器。只要有一个窗格正忙，就推迟
@@ -429,8 +563,8 @@ flowchart LR
 - Windows 使用 DirectWrite/GDI 描述信息并提取原始字体；
 - 其它 Unix 系统使用 Fontconfig，并把候选限制为等宽、双宽或字符单元字体。
 
-回退链包含常见等宽字体、符号字体和彩色表情。已加载字体都不覆盖某码点时，后台解析器
-会查找平台字体并追加到该 `FontStack`。自动解析会把带 OpenType `MATH` 表的字体排在
+配置主字体之后，代码内置回退列表依次尝试 JetBrains Mono、Symbols Nerd Font Mono 和
+Noto Color Emoji。已加载字体都不覆盖某码点时，后台解析器查找平台字体并追加到该 `FontStack`。自动解析会把带 OpenType `MATH` 表的字体排在
 文本字体之后，但不会排除它；没有文本字体覆盖时，数学字体仍可提供该码点。在 `[font]`
 中显式指定的字体族始终优先，不受 `MATH` 表影响。
 
@@ -438,6 +572,9 @@ flowchart LR
 Rec Mono face 安装到系统，因此必须保留这些目录。
 
 ### 标签页进程图标
+
+手动标题优先；否则，前台为 `rmux`、`tmux` 或 `screen` 时，即使存在 CWD 也优先使用
+非空原始 OSC 标题。其它进程保持 CWD 优先的自动标题。下表的图标查找只使用可执行文件身份。
 
 操作系统提供前台可执行文件后，`normalize_proc_name` 会按 `/` 和 `\\` 取文件名，去掉
 一个登录 shell 的 `-` 前缀和一个不区分大小写的 `.exe` 后缀，再转为小写。界面随后只做
@@ -557,6 +694,17 @@ Windows 系统回退会完整编码 UTF-16；映射位置、剩余长度及 loca
 白色前景和不染色的彩色字形是正常渲染，不产生常规逐字形 warning。真正的图集和呈现诊断
 仍然保留。
 
+粗体和斜体负责选择字形。前景色不会切分塑形文字段。塑形后，渲染器解析主题默认色、256 色
+索引和 24 位 RGB。反色会交换前景与背景。dim 会在保存的 sRGB 编码空间内，把前景向有效
+背景混合 45%，随后再按 sRGB 表面或 CPU 混合的需要转换绘制值。
+
+背景是四边形，不是字形。相邻且相同的非默认背景会合并。默认背景来自损伤清理。下划线段会
+形成单线、双线、波浪、点线或虚线四边形。有 SGR 58 显式颜色时使用它，否则使用前景色。
+GPU 线段端点存放在与 HSV 颜色变换分离的几何参数中，因此波浪下划线的形状不会改变其最终颜色。
+
+解析器会保存 blink、hidden 和 strikethrough 标志。当前终端渲染器没有针对这三个标志的
+专用绘制分支。
+
 ### 光栅化
 
 Windows 默认使用 DirectWrite；DirectWrite 无法光栅化某字形时回退 FreeType。
@@ -597,6 +745,15 @@ BGRA 彩色位图按非透明区域的半开边界裁剪，保留最后一行和
 
 三个字体栈使用相同的字体族、DPI 和字重比例。原生光栅角色标签会分开图集条目，因此
 页脚或标签页标题不会缩放已缓存的正文位图。
+
+两种行缓存容量约为可见总行数的四倍；容量/几何变化清空对应缓存，脏行按绝对行使条目
+失效。`remove_pane` 先淘汰该窗格字形行，再淘汰 quad 行，保留其它窗格并请求表压缩。
+当前分配统计表与嵌套向量容量，不只统计有效长度。
+
+字体变化重建字体栈、重置字形元数据，并使两种行缓存与 `FrameKey` 失效；DPI 变化还重建
+匹配的图集上传资源。主题变化推进样式修订号并标脏全部窗格行。接受表面 resize 后，先替换
+保留纹理、使两种缓存和帧键失效，再调整 grid/PTY。拓扑字段改变下一帧键，但拓扑本身
+不清空行缓存。光标、选区、搜索、快速选择、IME、面板和通知等逐帧浮层独立组装。
 
 ### 字形图集
 
@@ -641,6 +798,45 @@ view。两种 presenter 会先把预乘的编码彩色纹素转换为预乘线�
 取样；随后在线性光空间合成，并只在输出时编码一次 RGB。模式只属于呈现状态，因此修改模式
 会使帧失效，但保留字体栈、光栅图块与图集。
 
+软件字形的一比一和重采样轴使用同一稳定目标像素原点。最近点采样不越出字形图块；
+顶部/左侧裁剪会跳过隐藏的源行/列。锐角、圆角和线段 quad 都使用有限预乘线性 RGBA
+（`0 ≤ RGB ≤ alpha ≤ 1`）；不透明度或 mask 覆盖率同时缩放 RGB 与 alpha。
+
+### Windows LCD 次像素策略
+
+`[font].subpixel_aa` 可选 `off`、`rgb`、`bgr`，默认值是 `off`。只有以下条件全部满足时，
+SonicTerm 才会把非 off 请求解析为 LCD 呈现：
+
+- 主机是 Windows；
+- 配置的 backdrop 选择不透明硬件 alpha 模式；
+- 终端背景的实际 opacity 为 `1`；
+- 最终 presenter 是 Windows CPU/GDI，或 wgpu 设备支持 `DUAL_SOURCE_BLENDING`。
+
+因此 Mica、Acrylic、Tabbed、opacity 小于 `1`、不支持的 GPU 设备和非 Windows 主机都会
+确定性使用灰度。软件呈现覆盖即使强制 GDI 交换链本身不透明，也不会让配置为透明 backdrop
+的窗口取得 LCD 资格。
+
+Windows 创建设备时只会在 adapter 已公布支持后请求 `DUAL_SOURCE_BLENDING`；其它主机不请求
+任何 LCD 可选 feature。该 feature 在创建共享设备时协商，因此 `off` 可以实时改为 `rgb` 或
+`bgr`，无需重建设备。实际模式进入保留帧键；修改请求只会使帧失效并重绘，不会重建字体或
+任一图集。
+
+对一个次像素样本，`coverage` 是逻辑 RGB 覆盖率（`bgr` 会交换 R/B），`foreground` 是经过
+变换的预乘线性前景色：
+
+```text
+weights.rgb = coverage.rgb * foreground.a
+source.rgb = foreground.rgb * coverage.rgb
+source.a = max(weights.r, weights.g, weights.b)
+destination.rgb *= 1 - weights.rgb
+destination.a *= 1 - source.a
+```
+
+GPU pipeline 把源颜色与目标衰减量分别作为两个 blend source 输出。非 LCD 分支把单一 alpha
+作为第二个 source，因此单色文字、彩色字形、图像和 quad 仍保持普通 source-over。Windows
+CPU presenter 解码 sRGB BGRA 目标，在线性光空间执行同一逐通道公式，再只编码一次 RGB。
+`off` 把次像素图块中保存的 alpha 最大值作为灰度覆盖率。
+
 ### 内联图像
 
 iTerm2 文件图像、kitty graphics 和 Sixel 事件由应用解码。声明宽或高超过 2,048 像素，
@@ -667,6 +863,50 @@ alpha，最后重新编码后存储；透明像素规范化为 `[0, 0, 0, 0]`，
 图块渗入边缘；随后在线性光空间合成，并只在输出时编码一次 RGB。图像图集以 1×1 CPU/GPU
 占位符启动，仅在出现可渲染媒体时提升为 2048×2048；
 连续 240 帧没有可渲染媒体后再降回占位符。图像图集填满时跳过较早图像，不会淘汰文字。
+
+### 保留像素与损伤区域
+
+两种呈现器都限制每边 16,384 像素、BGRA 总量 160 MiB；wgpu 还遵守
+`max_texture_dimension_2d`。初始几何无效时构建失败；`try_resize` 拒绝时返回 `false`
+并保留可用表面。`WindowsSoftwareFrame::new`/`prepare` 在分配前拒绝无效 CPU 帧。
+`GlyphInstance` 保存 NDC 矩形、UV、线性前景调制色和彩色/次像素/图像图集标志。
+
+损伤区域是正确性边界，不只是性能优化。每次 VT/网格修改都必须在同一轮更新中标记受
+影响的行。
+
+```mermaid
+flowchart TD
+    change["可见状态变化"] --> screen{"屏幕缓冲区"}
+    screen -- 主屏幕 --> rows["合并视口脏行"]
+    screen -- 备用屏幕 --> dirty{"有任一脏行？"}
+    dirty -- 是 --> pane["完整表面裁剪窗格"]
+    dirty -- 否 --> none["无终端损伤"]
+    rows --> union["与界面及浮层损伤合并"]
+    pane --> union
+    none --> union
+    union --> retained["在损伤裁剪内重绘保留帧"]
+    retained --> present["复制并呈现"]
+```
+
+主屏幕窗格可以只重绘视口脏行的并集。分数 DPI 下的行边界使用 floor/ceil，避免相邻行
+之间出现缝隙；随后在垂直方向各扩展一个原生字体单元高度，使字形 bearing、定位标记和
+压缩行距不会把墨迹留在保留帧裁剪范围之外。扩展后的区域仍限制在 pane 和表面边界内。
+备用屏幕窗格只要有一行标脏，就损伤完整的表面裁剪窗格。这覆盖 TUI 滚动、插入/删除行、
+反向索引、擦除等固定位置更新，避免窄行集合留下旧像素。
+
+离屏帧在首次使用或替换完整表面时，只执行一次 attachment clear，不再绘制第二个背景重置矩形。
+局部损伤会加载保留帧，再在损伤裁剪范围内通过无混合的重置绘制，用预乘背景直接替换旧像素。
+重置与内容共享一次缓冲上传，使用不同绘制区间；普通内容仍使用 source-over，LCD 文字仍使用
+dual-source blending。透明重置不会累积 alpha，也不会改变损伤范围外的像素，不依赖后续重绘来
+完成擦除。重置后，GPU 内容按以下顺序绘制：
+
+```text
+基础矩形 -> 内联图像 -> 基础字形 -> 浮层矩形 -> 浮层字形
+```
+
+裁剪矩形把重绘限制在损伤区域内。渲染器的 `wgpu::util::TextureBlitter` 在提交和
+呈现前把保留帧复制到交换链。表面格式固定为 `TextureFormat::Bgra8UnormSrgb`；颜色在
+进入着色器前转为线性值，让 sRGB 目标只执行一次伽马编码。
 
 ### 自定义终端字形
 

@@ -447,6 +447,26 @@ fn cwd_takes_precedence_and_is_reduced_to_two_components() {
     assert_eq!(title, "#3 \u{e62b} alice/project");
 }
 
+// Multiplexer titles identify the selected session/window even when its shell reports a CWD.
+#[test]
+fn multiplexer_titles_take_precedence_over_cwd() {
+    for process in ["rmux", "RMUX", "tmux", "screen"] {
+        let title = format_tab_title(
+            0,
+            Some("/work/project"),
+            Some(process),
+            Some("  session · build;logs  "),
+        );
+        assert!(title.ends_with("session · build;logs"));
+        assert!(format_tab_title(0, Some("/work/project"), Some(process), Some(" "))
+            .ends_with("work/project"));
+    }
+    for process in ["zsh", "rmux-helper", "/bin/rmux"] {
+        assert!(format_tab_title(0, Some("/work/project"), Some(process), Some("session"))
+            .ends_with("work/project"));
+    }
+}
+
 #[test]
 fn cwd_reduction_handles_root_single_and_repeated_separators() {
     assert_eq!(cwd_two_components("/"), "/");

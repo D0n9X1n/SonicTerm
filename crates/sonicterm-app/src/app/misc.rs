@@ -771,7 +771,14 @@ impl App {
 
         let (cols, rows) = renderer.cells();
         let pane_id = super::next_pane_id();
-        let pane_state = self.spawn_pane_state_for_child(pane_id, cols, rows, window.clone());
+        // New windows start from shell defaults rather than inheriting another window's directory.
+        let pane_state = self.spawn_pane_state_for_child(
+            pane_id,
+            cols,
+            rows,
+            window.clone(),
+            &super::pane_launch::PaneLaunch::default(),
+        );
         let mut panes = HashMap::new();
         panes.insert(pane_id, pane_state);
 
@@ -906,7 +913,8 @@ impl App {
         }
     }
     pub(super) fn new_tab(&mut self, title: impl Into<String>) {
-        self.new_tab_with_launch(title, super::pane_launch::PaneLaunch::default());
+        let launch = super::pane_launch::PaneLaunch::from_window(self.main(), &self.local_hostname);
+        self.new_tab_with_launch(title, launch);
     }
 
     pub(super) fn new_tab_with_launch(

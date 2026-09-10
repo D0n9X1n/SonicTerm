@@ -8,9 +8,8 @@
 //! - `{parent}/{leaf}` — the last two path components of the pane's cwd.
 //!   A single-component path (e.g. `/tmp`) shows as just that component.
 //!
-//! The OSC 0/2 "raw" window title is used as a last-resort body when no cwd
-//! is available — handy for commands like `ssh user@host` which set the
-//! title themselves but never report a cwd.
+//! OSC 0/2 titles take priority for rmux/tmux/screen sessions; other processes
+//! use them only when no CWD is available. User title overrides live in the tab state.
 
 /// Wezterm's "fancy mode" vertical separator drawn between tabs.
 /// U+2502 BOX DRAWINGS LIGHT VERTICAL, followed by a single space of
@@ -49,9 +48,16 @@ pub fn format_tab_title(
     let n = index + 1;
     let icon = icon_for_process(process, cwd.is_some());
 
-    let body = if let Some(c) = cwd {
+    let raw_title = raw_title.map(str::trim).filter(|s| !s.is_empty());
+    let multiplexer = process.is_some_and(|name| {
+        ["rmux", "tmux", "screen"].iter().any(|mux| name.eq_ignore_ascii_case(mux))
+    });
+    let body = if let Some(title) = raw_title.filter(|_| multiplexer) {
+        title.to_string()
+    } else if let Some(c) = cwd {
+        // When: cwd is available without a multiplexer title, preserve the ordinary shell's directory label.
         cwd_two_components(c)
-    } else if let Some(t) = raw_title.map(str::trim).filter(|s| !s.is_empty()) {
+    } else if let Some(t) = raw_title {
         // When: `cwd` is absent but `raw_title` has text, the OSC title names the session.
         t.to_string()
     } else {

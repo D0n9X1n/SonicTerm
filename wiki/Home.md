@@ -3,72 +3,70 @@
 ## English
 
 SonicTerm is a native, GPU-accelerated terminal for macOS, Windows, and Linux.
-This wiki contains both the user guide and a source-backed explanation of how
-the project works internally.
-
-Memory is a first-class concern: every subsystem that can grow has a ceiling,
-the ones that matter are process-wide rather than per-pane, and anything
-SonicTerm discards that you could see is reported in the log at the default
-level. [Memory](Memory) covers what is bounded and how to read it.
+**Start with [Usage](Usage)** to install it and learn everyday actions.
 
 ### User guide
 
-- [Usage](Usage) — installation, panes, tabs, rmux/tmux integration, READONLY mode, and common actions
-- [Configuration](Configuration) — `~/.sonicterm/sonicterm.toml` and reload behavior
-- [Keybindings](Keybindings) — bundled keymaps, binding syntax, and actions
-- [Themes](Themes) — bundled palettes and custom theme authoring
-- [Logging](Logging) — logs, crash dumps, performance diagnostics, and bug reports
-- [Memory](Memory) — what SonicTerm bounds, what it discards, and how to read it from the log
+- [Usage](Usage) — install, open tabs, split panes, select text, and use rmux/tmux
+- [Configuration](Configuration) — change defaults in `~/.sonicterm/sonicterm.toml`, reload, and save
+- [Keybindings](Keybindings) — find a shortcut or write a binding
+- [Themes](Themes) — choose or create a color palette
+- [Logging](Logging) — find logs, investigate a problem, and prepare a bug report
+- [Memory](Memory) — understand resource limits and retained-memory reports
 
 ### How SonicTerm works
 
-- [Architecture](Architecture) — system boundaries, ownership, dependencies, and invariants
-- [Runtime Lifecycle](Runtime-Lifecycle) — startup, event dispatch, windows, tabs, panes, and shutdown
-- [Terminal IO and VT](Terminal-IO-and-VT) — PTYs, optional SSH, VT parsing, grids, and scrollback
-- [From Keypress to Pixel](From-Keypress-to-Pixel) — how one typed `A` travels through the child program, grid, font stack, and renderer
-- [Rendering and Fonts](Rendering-and-Fonts) — damage, glyph shaping, atlases, wgpu, and software rendering
-- [Rendering Modes](Rendering-Modes) — renderer selection and frame pacing
-- [Platform Integration](Platform-Integration) — AppKit/macOS, Win32/Windows, and X11/Wayland Linux boundaries
-- [Crate Reference](Crate-Reference) — all 23 workspace crates and their relationships
-- [Development and Release](Development-and-Release) — tests, CI, packaging, and the semantic-version tag release pipeline
+Read [Architecture](Architecture) for the map, then
+[From Keypress to Pixel](From-Keypress-to-Pixel) for one `A`'s round trip.
+Use the references below for a particular subsystem.
 
-This wiki is the canonical documentation surface: architecture and invariants
-in [Architecture](Architecture) and
-[Architecture Internals](Architecture-Internals), the crate map in
-[Crate Reference](Crate-Reference), diagnostics in [Logging](Logging), and
-build procedures in [Packaging](Packaging).
+- [Architecture](Architecture) — system shape and crate boundaries
+- [From Keypress to Pixel](From-Keypress-to-Pixel) — input, child output, grid, glyph, and pixel
+- [Runtime Lifecycle](Runtime-Lifecycle) — startup, ownership changes, tab transfers, and shutdown
+- [Terminal IO and VT](Terminal-IO-and-VT) — PTYs, parser protocols, shell integration, and grid rules
+- [Rendering Modes](Rendering-Modes) — adapter selection and frame pacing
+- [Rendering and Fonts](Rendering-and-Fonts) — typography, atlases, GPU/CPU drawing, and damage
+- [Platform Integration](Platform-Integration) — AppKit, Win32, X11, and Wayland boundaries
+- [Architecture Internals](Architecture-Internals) — correctness, accounting, and lifetime invariants
+- [Crate Reference](Crate-Reference) — all 23 crates, their interfaces, and dependencies
+
+### Build and contribute
+
+- [Packaging](Packaging) — build local packages and inspect their layouts
+- [Development and Release](Development-and-Release) — exact gates, PR workflow, releases, and Wiki publication
+- [Home](Home) — return to this index
 
 ## 中文
 
-SonicTerm 是一个面向 macOS、Windows 和 Linux 的原生 GPU 加速终端。本 Wiki
-同时包含用户手册，以及基于源码整理的项目内部工作原理说明。
-
-内存是首要关注点：每个可能增长的子系统都有上限，其中最关键的是进程级而非按
-面板计的限制，并且 SonicTerm 丢弃的任何可见内容都会在默认日志级别下记录。
-[内存 / Memory](Memory) 说明了限制范围以及如何查看。
+SonicTerm 是面向 macOS、Windows 和 Linux 的原生 GPU 加速终端。
+**先读[用法](Usage)**，完成安装并熟悉日常操作。
 
 ### 用户手册
 
-- [用法 / Usage](Usage) — 安装、窗格、标签页、rmux/tmux 集成、READONLY 模式和常用操作
-- [配置 / Configuration](Configuration) — `~/.sonicterm/sonicterm.toml` 与配置重载
-- [快捷键 / Keybindings](Keybindings) — 内置键位映射、绑定语法和 action
-- [主题 / Themes](Themes) — 内置配色和自定义主题
-- [日志 / Logging](Logging) — 日志、崩溃转储、性能诊断和问题报告
-- [内存 / Memory](Memory) — SonicTerm 限制什么、丢弃什么，以及如何从日志中查看
+- [用法](Usage) — 安装、新建标签页、分屏、选取文字和使用 rmux/tmux
+- [配置](Configuration) — 修改 `~/.sonicterm/sonicterm.toml`、重载与保存
+- [快捷键](Keybindings) — 查找快捷键或编写绑定
+- [主题](Themes) — 选择或创建配色
+- [日志](Logging) — 查找日志、排查问题和准备缺陷报告
+- [内存](Memory) — 理解资源上限与常驻内存报告
 
 ### SonicTerm 如何工作
 
-- [架构 / Architecture](Architecture) — 系统边界、状态所有权、依赖关系和不变量
-- [运行时生命周期 / Runtime Lifecycle](Runtime-Lifecycle) — 启动、事件派发、窗口、标签页、窗格与退出
-- [终端 IO 与 VT / Terminal IO and VT](Terminal-IO-and-VT) — PTY、可选 SSH、VT 解析、网格与回滚缓冲
-- [从按键到像素 / From Keypress to Pixel](From-Keypress-to-Pixel) — 一个输入的 `A` 如何经过子程序、网格、字体栈与渲染器
-- [渲染与字体 / Rendering and Fonts](Rendering-and-Fonts) — 损坏区域、字形塑形、图集、wgpu 与软件渲染
-- [渲染模式 / Rendering Modes](Rendering-Modes) — 渲染器选择与帧调度
-- [平台集成 / Platform Integration](Platform-Integration) — AppKit/macOS、Win32/Windows 与 X11/Wayland Linux 边界
-- [Crate 参考 / Crate Reference](Crate-Reference) — 工作区全部 23 个 crate 及其关系
-- [开发与发布 / Development and Release](Development-and-Release) — 测试、CI、打包与语义版本 tag 发布流水线
+先用[架构](Architecture)了解全貌，再读[从按键到像素](From-Keypress-to-Pixel)，
+跟随一个 `A` 完成往返。需要深入某个子系统时查阅下列参考。
 
-本 Wiki 即规范文档面：架构与不变量见 [Architecture](Architecture) 与
-[Architecture Internals](Architecture-Internals)，crate 映射见
-[Crate Reference](Crate-Reference)，诊断见 [Logging](Logging)，
-构建步骤见 [Packaging](Packaging)。
+- [架构](Architecture) — 系统结构与 crate 边界
+- [从按键到像素](From-Keypress-to-Pixel) — 输入、子进程输出、网格、字形与像素
+- [运行时生命周期](Runtime-Lifecycle) — 启动、所有权变化、标签页转移与退出
+- [终端 IO 与 VT](Terminal-IO-and-VT) — PTY、解析器协议、shell 集成与网格规则
+- [渲染模式](Rendering-Modes) — 适配器选择与帧节奏
+- [渲染与字体](Rendering-and-Fonts) — 字体、图集、GPU/CPU 绘制与损伤区域
+- [平台集成](Platform-Integration) — AppKit、Win32、X11 与 Wayland 边界
+- [架构内部机制](Architecture-Internals) — 正确性、记账与生命周期不变量
+- [Crate 参考](Crate-Reference) — 全部 23 个 crate、接口与依赖
+
+### 构建与贡献
+
+- [打包](Packaging) — 本地生成安装包并查看布局
+- [开发与发布](Development-and-Release) — 完整 gate、PR 流程、release 与 Wiki 发布
+- [首页](Home) — 返回本索引

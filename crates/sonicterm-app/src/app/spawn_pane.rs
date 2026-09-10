@@ -400,7 +400,7 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
                         CommandEvent::CmdEnd(_) => {
                             command_started.take().map(|started| at.duration_since(started))
                         }
-                        CommandEvent::PromptStart => None,
+                        CommandEvent::PromptStart | CommandEvent::PromptEnd => None,
                     };
                     command_side_effects.push(super::PaneCommandEvent { event, at, duration });
                 }
@@ -455,11 +455,14 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
 }
 
 impl App {
+    // Lock order: test_pane_launches releases before parser; neither guard survives PTY or worker creation.
     pub(super) fn spawn_pane(
         &self,
         pane_id: u64,
         launch: &super::pane_launch::PaneLaunch,
     ) -> PaneState {
+        #[cfg(test)]
+        self.test_pane_launches.borrow_mut().push((pane_id, launch.clone()));
         let (cols, rows) = self.main_renderer().map(|r| r.cells()).unwrap_or((80, 24));
         // Honour the user's configured scrollback depth instead of the
         // Grid's built-in 10k default.
@@ -544,8 +547,9 @@ impl App {
             // When: `active_pane` is not a live leaf, preserve topology without spawning another shell.
             return;
         }
+        let launch = super::pane_launch::PaneLaunch::from_window(Some(ws), &self.local_hostname);
         let new_id = next_pane_id();
-        let new_pane = self.spawn_pane(new_id, &super::pane_launch::PaneLaunch::default());
+        let new_pane = self.spawn_pane(new_id, &launch);
         let did_split = {
             let Some(ws) = self.main_mut() else {
                 // When: main_mut returns None, there is no active window to split.

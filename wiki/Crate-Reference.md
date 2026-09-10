@@ -79,10 +79,9 @@ native link requirements still belong to the FFI and platform crates.
 
 ## State and public-interface contracts
 
-The role descriptions below define responsibility. This table names the mutable
-state owner and the concrete interface at each boundary; it is not a certification
-of every unsafe call or an assertion that compatibility traits drive production.
-Paths are relative to the named crate unless another crate is named explicitly.
+Use this table for state owners and public interfaces; use the entries below
+for exact dependencies and source paths. Paths are crate-relative unless stated.
+Compatibility traits need not drive production, and this is not an unsafe-call audit.
 
 | Crate | Mutable state and lifecycle owner | Public interface and named boundary exceptions |
 | --- | --- | --- |
@@ -195,35 +194,26 @@ notifications, and localization.
 **First-party dependencies:** `sonicterm-cfg`, `sonicterm-grid`,
 `sonicterm-text`, `sonicterm-types`.
 
-`command_label::descriptor` owns static action-variant identity, category,
-localization key, English search aliases, target requirement, and the shared
-READONLY allowance. `CommandContext` contains only window-local availability
-facts supplied by App; `disabled_reason` evaluates them without native handles,
-terminal payloads, or execution. The localized label helpers use
-English templates or the existing English label when a translation is absent,
-while preserving literal action arguments. This catalog does not authorize or
-route actions; live window/pane context and execution remain app-owned.
-`CommandPalette` owns cached labels, search strings, and first-binding hints;
-keymap refresh builds them together with the current `I18n`. Locale refresh
-rebuilds text in every mode while only Commands refilters action indices.
-`PaletteLayout` consumes these cached labels. Their precomputed identity enters
-the renderer frame key so locale-only changes repaint without per-frame
-translation or changing action execution. Cached chrome text follows the same
-identity; whole Fluent count/title phrases are split around one internal value
-slot at refresh, preserving catalog word order without interpreting user titles.
-The layout appends its caret separately from translated text. Command rows
-include localized category/disabled details; `highlighted` preserves row
-identity while `current` returns only executable entries. `PaletteEntry`
-distinguishes existing commands from live tab targets. Tab targets use `TabId`,
-not title or position, and disappear without selecting a replacement; App
-resolves their current index in the same attached window before activation. App refreshes context
-before input and from the already-held active grid during rendering. It uses
-`try_lock` for input-time selection validation and never re-locks a render guard.
-Overflow layouts retain absolute tab indices in a visible active-tab segment;
-local and native drop snapshots resolve those same indices. The same palette can
-filter to live tabs only. App retains at most one modal pointer capture, checks
-entry identity and availability on release, and leaves previously latched terminal
-or chrome gestures with their original handler.
+The palette separates metadata, presentation, and execution:
+
+- `command_label::descriptor` defines variant identity, category, localization key,
+  English aliases, target requirements, and READONLY allowance. App supplies
+  window-local `CommandContext`; `disabled_reason` has no native handles, terminal
+  payload, or execution authority. English fallback preserves literal arguments.
+- `CommandPalette` caches labels, search text, first-binding hints, and chrome
+  with `I18n` at refresh. Locale refresh rebuilds every mode's text; only Commands
+  refilters indices. `PaletteLayout` uses cached identity in the frame key, without
+  per-frame translation. Fluent count/title phrases split around one internal
+  value slot to preserve word order; titles are not interpreted, and the caret
+  is appended separately.
+- `highlighted` preserves row identity; `current` excludes disabled entries.
+  `PaletteEntry` distinguishes commands from `TabId` targets. App resolves a live
+  target's current index in the attached window; closure never selects a replacement.
+- App refreshes context before input and from the already-held rendering grid.
+  Input selection validation uses `try_lock`, never re-locking a render guard.
+  Overflow and native/local drop snapshots keep absolute indices. Tab-only mode
+  uses the same palette; one modal pointer capture revalidates identity/availability
+  on release without stealing an earlier terminal or chrome gesture.
 
 **Read:** `src/{tabs,pane,command_palette,command_label,search,selection,copy_mode,ime,overlays,i18n}.rs`.
 
@@ -484,8 +474,8 @@ Android 和非 macOS Unix 目标启用；`config`、`freetype`、`harfbuzz` 是�
 
 ## 状态与公开接口契约
 
-下方职责说明定义责任范围。本表列出各边界的可变状态所有者与具体接口；它不是对所有 unsafe
-调用的认证，也不表示兼容 trait 驱动生产路径。除非明确写出其他 crate，路径相对于该行 crate。
+本表用于查找状态所有者与公开接口；下方条目列出准确依赖和源码。未特别注明的路径相对于
+所属 crate。兼容 trait 不一定驱动生产；本表也不是 unsafe 调用审计。
 
 | Crate | 可变状态与生命周期所有者 | 公开接口与明确的边界例外 |
 | --- | --- | --- |
@@ -594,22 +584,19 @@ Android 和非 macOS Unix 目标启用；`config`、`freetype`、`harfbuzz` 是�
 **第一方依赖：** `sonicterm-cfg`、`sonicterm-grid`、`sonicterm-text`、
 `sonicterm-types`。
 
-`command_label::descriptor` 拥有静态动作变体身份、分类、本地化键、英文搜索别名、目标要求和共享
-READONLY 许可。`CommandContext` 只包含 App 提供的窗口内可用性事实；`disabled_reason` 不持有
-原生句柄或终端载荷，也不执行动作。本地化标签辅助函数在缺少翻译时使用英文模板或现有英文标签，并保留动作参数的字面值。
-该目录不授权或路由动作；实时窗口/窗格上下文和执行仍由应用拥有。
-`CommandPalette` 拥有缓存标签、搜索字符串和首个绑定提示；keymap 刷新会用当前 `I18n`
-一起构建这些数据。语言刷新在所有模式下重建文本，但只有 Commands 模式重新过滤动作索引。
-`PaletteLayout` 使用这些缓存标签。文本的预计算身份进入渲染器帧键，使仅语言变化也能重绘，
-无需逐帧翻译，也不改变动作执行。缓存界面文本使用同一身份；完整 Fluent 数量/标题短语在刷新时
-按单个内部值占位符拆分，保留语言目录的词序，并且不解释用户标题。布局在翻译文本之外单独追加光标。
-命令行包含本地化分类/禁用原因；`highlighted` 保留行身份，`current` 仅返回可执行条目。
-`PaletteEntry` 区分现有命令和实时标签页目标。目标使用 `TabId` 而非标题或位置；目标消失后不选择替代项，
-App 在激活前于同一附着窗口中解析当前索引。App 在输入前刷新上下文，渲染期间使用已经持有的活动网格。输入时通过 `try_lock` 验证选区，
-不会重新获取渲染 guard 已持有的锁。
-溢出布局在包含活动标签页的可见区段中保留完整列表索引；本地和原生拖放快照解析同样的索引。
-同一面板可仅过滤实时标签页。App 最多保留一次模态指针按下记录，在释放时验证条目身份和可用性，
-已经锁定的终端或界面手势继续由原有处理器负责。
+命令面板分开管理元数据、显示与执行：
+
+- `command_label::descriptor` 定义变体身份、分类、本地化键、英文别名、目标要求与
+  READONLY 许可。App 提供窗口内 `CommandContext`；`disabled_reason` 没有原生句柄、
+  终端载荷或执行权限。英文后备保留动作参数字面值。
+- `CommandPalette` 在刷新时用 `I18n` 缓存标签、搜索文字、首个绑定提示和界面文字。
+  语言刷新重建所有模式文字，仅 Commands 重新过滤索引。`PaletteLayout` 把缓存身份用于帧键，
+  不逐帧翻译。Fluent 数量/标题短语按一个内部值槽拆分以保留词序；不解释标题，光标单独追加。
+- `highlighted` 保留行身份，`current` 排除禁用项。`PaletteEntry` 区分命令和 `TabId`
+  目标。App 在附着窗口解析存活目标的当前下标；关闭目标不会选择替代项。
+- App 在输入前刷新上下文，渲染时使用已持有网格。输入选区验证采用 `try_lock`，不会重复获取
+  render guard。溢出与原生/本地拖放快照保留绝对索引；仅标签页模式复用面板。唯一模态指针
+  记录在释放时验证身份/可用性，不抢占先开始的终端或界面手势。
 
 **阅读：** `src/{tabs,pane,command_palette,command_label,search,selection,copy_mode,ime,overlays,i18n}.rs`。
 

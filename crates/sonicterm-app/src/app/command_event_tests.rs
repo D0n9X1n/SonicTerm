@@ -1,5 +1,28 @@
 use super::*;
 
+/// Prompt completion remains observational; only execution transitions the tab to Running.
+#[test]
+fn prompt_end_preserves_idle_and_completed_tab_status() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let pane = app.__test_seed_tab("shell");
+    let at = Instant::now();
+    app.__test_push_pane_command_event(pane, CommandEvent::PromptEnd, at, None);
+    app.poll_command_events_for_all_tabs();
+    assert!(matches!(app.main().unwrap().tab_states[0].command, CommandStatus::Idle));
+    app.__test_push_pane_command_event(pane, CommandEvent::CmdStart, at, None);
+    app.poll_command_events_for_all_tabs();
+    assert!(
+        matches!(app.main().unwrap().tab_states[0].command, CommandStatus::Running(started) if started == at)
+    );
+    app.__test_push_pane_command_event(pane, CommandEvent::CmdEnd(Some(0)), at, None);
+    app.__test_push_pane_command_event(pane, CommandEvent::PromptEnd, at, None);
+    app.poll_command_events_for_all_tabs();
+    assert!(matches!(
+        app.main().unwrap().tab_states[0].command,
+        CommandStatus::Done { exit: Some(0), .. }
+    ));
+}
+
 #[test]
 fn command_event_queue_retains_only_newest_entries() {
     let mut queue = Vec::new();

@@ -2149,12 +2149,14 @@ impl App {
     /// The VT worker derives every shared handle from the completed `PaneState`,
     /// so command, media, cursor, and keyboard state cannot diverge from what the
     /// child window reads.
+    // Lock order: parser releases before test_pane_launches; neither guard survives PTY or worker creation.
     pub(super) fn spawn_pane_state_for_child(
         &self,
         pane_id: u64,
         cols: u16,
         rows: u16,
         child_window: Arc<Window>,
+        launch: &super::pane_launch::PaneLaunch,
     ) -> PaneState {
         use sonicterm_grid::grid::Grid;
         use sonicterm_vt::vt::Parser;
@@ -2169,11 +2171,14 @@ impl App {
             super::seed_parser_theme_colors(&mut p, &self.theme);
         }
         let redraw_target = Arc::new(Mutex::new(Some(child_window.id())));
+        #[cfg(test)]
+        self.test_pane_launches.borrow_mut().push((pane_id, launch.clone()));
         let shell_opts = sonicterm_io::pty::ShellSpawnOpts {
             clean_e2e: self.runtime_smoke.is_some(),
-            term_program: self.config.terminal.term_program.clone(),
-            shell: self.config.terminal.shell.clone(),
-            ..sonicterm_io::pty::ShellSpawnOpts::default()
+            ..launch.shell_spawn_opts(
+                self.config.terminal.term_program.clone(),
+                self.config.terminal.shell.clone(),
+            )
         };
         let pty = match PtyHandle::spawn_default_shell(cols, rows, shell_opts) {
             Ok(pty) => Some(pty),
@@ -2205,6 +2210,10 @@ impl App {
         // Snapshot everything we need from the child up-front so the
         // mutable borrow ends before we spawn the VT thread (which
         // captures clones), then re-borrow to install the new tab.
+        let launch = super::pane_launch::PaneLaunch::from_window(
+            self.windows.get(&win_id),
+            &self.local_hostname,
+        );
         let (cols, rows, child_window) = {
             let Some(child) = self.windows.get_mut(&win_id) else {
                 // When: `windows` no longer holds `win_id`, so the recorded child
@@ -2225,7 +2234,8 @@ impl App {
             (c, r, win.clone())
         };
         let pane_id = next_pane_id();
-        let pane_state = self.spawn_pane_state_for_child(pane_id, cols, rows, child_window.clone());
+        let pane_state =
+            self.spawn_pane_state_for_child(pane_id, cols, rows, child_window.clone(), &launch);
         let Some(child) = self.windows.get_mut(&win_id) else {
             // When: `windows` lost `win_id` while the pane was spawning, so the
             // freshly built `pane_state` is dropped with its PTY.
@@ -2452,11 +2462,12 @@ impl App {
             // When: `active_pane` is not a live leaf, preserve topology without spawning another shell.
             return false;
         }
+        let launch = super::pane_launch::PaneLaunch::from_window(Some(child), &self.local_hostname);
         let new_id = next_pane_id();
         let pane_state =
             if let (Some(renderer), Some(win)) = (child.renderer.as_ref(), child.window.as_ref()) {
                 let (cols, rows) = renderer.cells();
-                self.spawn_pane_state_for_child(new_id, cols, rows, win.clone())
+                self.spawn_pane_state_for_child(new_id, cols, rows, win.clone(), &launch)
             } else if child.renderer.is_none() && child.window.is_none() {
                 // When: both `renderer` and `window` are absent — a headless
                 // test child still needs pane ownership without a live PTY.

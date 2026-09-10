@@ -214,6 +214,77 @@ fn main_split_without_window_or_tab_leaves_topology_empty() {
     assert!(window.panes.is_empty());
 }
 
+/// Both main spawn routes must pass the active pane's OSC 7 directory to the PTY boundary.
+#[test]
+fn main_tab_and_split_inherit_exact_active_pane_cwd() {
+    for split in [false, true] {
+        let mut app = app_with_unavailable_shell();
+        let pane = app.__test_seed_tab("source");
+        app.__test_seed_tab("unrelated tab");
+        app.main_mut().unwrap().tabs.activate(0);
+        let child = app.__test_seed_child_window(&["unrelated window"]);
+        app.frontmost_window = Some(child);
+        let native = if cfg!(windows) { "/C:/work/source" } else { "/work/source" };
+        app.__test_advance_pane_parser(
+            pane,
+            format!("\x1b]7;file://localhost{native}\x07").as_bytes(),
+        );
+        if split {
+            app.split_active(Direction::Right);
+        } else {
+            app.new_tab("new");
+        }
+        let expected = if cfg!(windows) { r"C:\work\source" } else { "/work/source" };
+        let launches = app.test_pane_launches.borrow();
+        assert_eq!(launches.len(), 1);
+        assert_eq!(launches[0].1.cwd, Some(std::path::PathBuf::from(expected)));
+    }
+}
+
+/// Finishing a prompt must not start execution timing while the user edits the command.
+#[test]
+fn prompt_end_does_not_start_command_timer() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let (_pane, handles) = pane_and_worker_handles();
+    let mut started = None;
+    process_pane_vt_batch_with(
+        &handles,
+        b"\x1b]133;B\x07",
+        &mut started,
+        |_| None,
+        |_| {},
+        Instant::now,
+        |_| {},
+    );
+    assert_eq!(started, None);
+}
+
+/// Execution duration starts at C, not B, and B/D without execution has no duration.
+#[test]
+fn command_duration_excludes_prompt_editing_time() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let (_pane, handles) = pane_and_worker_handles();
+    let base = Instant::now();
+    let mut times =
+        [0, 60, 63, 64, 70].into_iter().map(|seconds| base + Duration::from_secs(seconds));
+    let mut started = None;
+    process_pane_vt_batch_with(
+        &handles,
+        b"\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07\x1b]133;B\x07\x1b]133;D;0\x07",
+        &mut started,
+        |_| None,
+        |_| {},
+        || times.next().unwrap(),
+        |_| {},
+    );
+    let events = handles.command_events.lock();
+    assert_eq!(events[0].event, CommandEvent::PromptEnd);
+    assert_eq!(events[1].event, CommandEvent::CmdStart);
+    assert_eq!(events[2].duration, Some(Duration::from_secs(3)));
+    assert_eq!(events[4].duration, None);
+    assert_eq!(started, None);
+}
+
 fn pane_and_worker_handles() -> (PaneState, PaneVtHandles) {
     let pane = PaneState::new(Arc::new(Mutex::new(Parser::new(Grid::new(80, 24)))), None);
     let worker = PaneVtHandles::from_pane_state(&pane);
@@ -233,7 +304,7 @@ fn pane_vt_batch_routes_clipboard_commands_media_and_modes_after_unlock() {
     let mut decoder_unlocked = None;
     let payload = base64::engine::general_purpose::STANDARD.encode("copied");
     let bytes = format!(
-        "\x1b_Gf=100,a=T;image\x1b\\\x1b[?25l\x1b[?1h\x1b[?67h\x1b=\x1b[20h\x1b[>4;2m\x1b[>1u\x1b]52;c;{payload}\x1b\\\x1b]133;B\x1b\\\x1b]133;D;0\x1b\\"
+        "\x1b_Gf=100,a=T;image\x1b\\\x1b[?25l\x1b[?1h\x1b[?67h\x1b=\x1b[20h\x1b[>4;2m\x1b[>1u\x1b]52;c;{payload}\x1b\\\x1b]133;C\x1b\\\x1b]133;D;0\x1b\\"
     );
 
     process_pane_vt_batch_with(

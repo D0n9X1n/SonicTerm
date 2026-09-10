@@ -40,43 +40,13 @@ flowchart LR
 
 ### 1. Window setup prepares the path
 
-The first native window and renderer are created in `App::do_resumed`.
-SonicTerm enables IME input, records the monitor period, and creates a wgpu
-surface.
+`App::do_resumed` creates the first native window and renderer, enables IME,
+and records the monitor period. Later windows share the first adapter/device/queue
+through `GpuSharedContext`, but own their surfaces and drawing state.
 
-The first renderer requests a high-performance adapter compatible with that
-surface. `force_fallback_adapter` is false. wgpu may still return a CPU adapter
-when hardware is unavailable. Later windows reuse the first adapter, device,
-and queue through `GpuSharedContext`; each window has its own surface and
-renderer state.
-
-A software adapter is detected when its device type is `Cpu`, or its name
-identifies Microsoft Basic Render Driver, llvmpipe, SwiftShader, or a software
-adapter. Adapter detection selects the device memory hint:
-
-- software adapter: `MemoryHints::MemoryUsage`;
-- hardware adapter: `MemoryHints::Performance`.
-
-`[appearance].software_render_mode` then resolves presentation policy:
-
-| Actual adapter | `auto` | `force` | `off` |
-| --- | --- | --- | --- |
-| Hardware | normal | degraded | normal |
-| CPU/software | degraded | degraded | normal |
-
-“Degraded” is a policy, not an adapter type. `force` degrades a hardware
-adapter. `off` keeps the normal wgpu path even on WARP or another CPU adapter.
-The device memory hint still follows the real adapter.
-
-Every visible terminal window requires a usable wgpu surface, adapter, device,
-and queue. There is no adapter-free renderer. Windows CPU/GDI presentation is a
-branch inside an initialized `GpuRenderer`; it cannot recover from failed wgpu
-startup.
-
-These are the same setup objects described throughout this page: the renderer
-owns one window's drawing state; each window owns a wgpu surface; the first
-renderer obtains the shared adapter, device, and queue. Exact identifiers and
-API names remain in code style below.
+Every presenter requires successful wgpu initialization: Windows CPU/GDI is not
+an adapter-free recovery path. Adapter classification and `auto`/`force`/`off`
+policy are separate; see [Rendering Modes](Rendering-Modes) for their exact rules.
 
 ```mermaid
 flowchart TD
@@ -94,28 +64,9 @@ flowchart TD
     platform -- "all other cases" --> gpu["wgpu surface"]
 ```
 
-The renderer configures a BGRA8 sRGB surface. Normal presentation uses Mailbox
-when supported and FIFO otherwise. It permits configured transparency and asks
-for at most two frames of surface latency. Degraded presentation uses FIFO,
-opaque alpha, and one frame of latency.
-
-Normal frame pacing follows the monitor period. Degraded pacing uses 25 ms,
-about 40 fps. While IME composition is active, it uses 83.333 ms, about 12 fps.
-Degraded mode also removes fade-driven extra frames.
-
-On macOS and Linux, both policy states still present through wgpu. On Windows,
-`degrade = true` selects `WindowsSoftwareFrame` and GDI
-`SetDIBitsToDevice`. Windows with WARP and `software_render_mode = "off"` uses
-the normal wgpu texture and present path on the CPU adapter.
-
-Renderer construction also creates:
-
-- a retained offscreen frame texture;
-- a fixed 2,048 × 2,048 CPU glyph atlas;
-- matching GPU glyph storage, except for the Windows degraded 1 × 1 placeholder;
-- a 1 × 1 inline-image atlas placeholder;
-- font stacks at the window DPI;
-- row glyph and background-quad caches.
+The renderer prepares a retained frame, body/footer/title font stacks, separate
+glyph and image atlases, and row caches. Surface and pacing policy are detailed
+in [Rendering Modes](Rendering-Modes); allocations are listed in [Memory](Memory).
 
 ### 2. The key reaches the active input owner
 
@@ -172,40 +123,7 @@ uses the operating-system-produced UTF-8 text unchanged.
 | UTF-8 | `0x41` |
 | Decimal byte | `65` |
 
-Other keys and modifiers follow these rules:
-
-- **Control and keymap precedence:** a configured keymap may consume a chord
-  before PTY encoding. Otherwise Control is checked before Alt: Control+A
-  becomes `0x01`, and Control+Alt+A adds an `ESC` prefix to that control byte.
-  The legacy aliases cover Space/@/2, `[ /3`, `\ /4`, `] /5`, `^/~/6`,
-  `_/ /7`, and `?/8`.
-- **Text and BackTab:** Alt prefixes `ESC` to default legacy text. The OS supplies
-  shifted and layout-specific text. Tab emits HT. At `modifyOtherKeys` level 1,
-  plain Shift+Tab remains `CSI Z`, while other modified Tab forms and modified
-  Enter use `CSI 27 ; modifier ; code ~`; level 2 also makes Shift+Tab
-  `CSI 27 ; 2 ; 9 ~`. Level 1 keeps its ordinary Shift/Control aliases and
-  Backspace exception; level 2 encodes every supported modified ordinary key.
-- **Negotiated legacy modes:** the pane snapshot includes DECCKM cursor keys,
-  DECKPAM keypad identity, DECBKM Backspace, ANSI newline mode, and xterm
-  `modifyOtherKeys` levels 1 and 2. Modified cursor and function keys preserve
-  Shift, Alt, Control, and Super in the xterm modifier parameter. Function-key
-  coverage extends through F35.
-- **Kitty protocol:** each main or alternate screen has an independent bounded
-  progressive-enhancement stack. Unsupported set modes do nothing, and stored
-  flags retain the protocol's seven data bits. SonicTerm supports
-  disambiguation, event types, alternate keys, all-keys reporting, associated
-  text, functional and keypad identities, and modifier-key identities.
-  Alternate-key reporting alone enriches only keys already represented as
-  CSI-u; it does not change raw text, DECKPAM, or terminfo encodings. Shift+Tab
-  is `CSI 9 ; 2 u` when disambiguated. Repeats and releases carry Kitty event
-  types when requested.
-- **Keypad:** legacy normal mode follows the layout/NumLock result and preserves
-  text modifiers. OS-resolved numeric keypad characters stay digit text even
-  under DECKPAM; non-text events retain physical keypad identity. This uses
-  logical numeric intent rather than measuring NumLock directly. Kitty
-  disambiguation uses its dedicated keypad code points.
-
-Plain `A` is unaffected, so this page continues to follow it.
+Modified, keypad, and negotiated Kitty encodings follow the [keyboard protocol reference](Terminal-IO-and-VT). This example remains UTF-8 `0x41`.
 
 ### 4. The bytes enter one or more PTYs
 
@@ -384,52 +302,12 @@ hovered-URL data to `GpuRenderer::render`. It does not construct one aggregate
 
 ### 10. Damage and row caches select work
 
-The renderer compares a `FrameKey` with the last successful frame. The key
-covers grid revisions and visible UI state, including sorted per-pane scrollbar
-alpha quantized to `u16`. States that emit no scrollbar pixels—`Never`, no
-scrollback, or alpha at the shared floor—share bucket zero. An identical key can
-skip frame assembly. On Windows degraded presentation, an identical key can
-re-present the existing CPU buffer.
-
-When only grid content changed:
-
-- a primary-screen pane contributes clipped dirty-row strips;
-- a dirty alternate-screen pane contributes its full clipped pane;
-- a clean pane contributes no damage.
-
-Overlay, chrome, scrollbar-alpha, resize, tab, selection, viewport, or topology
-changes can promote damage to the full surface. A degraded wgpu frame with work
-always uses full-surface damage. Windows degraded presentation also clears and
-composes a full CPU frame.
-
-The hardware policy uses `RenderMode::Full`, so it may visit every visible row.
-Retained pixels are still limited by the damage scissor. Row caches make
-unchanged row assembly cheap.
-
-`RowGlyphCache` stores `GlyphInstance` values, underline runs, tofu quads, and
-missing-codepoint data. Its key is `(pane id, absolute row, row hash)`. The hash
-covers cells, style revision, cell geometry, scale, and selection overlap. An
-active plain-text target salts only the row-local fragment that recolors, so a
-wrapped target invalidates each participating row without disturbing peer rows.
-Hint-only underlines do not alter glyph cache identity. The ordered visible span
-set remains in `FrameKey`, and underline geometry emits one clipped quad per
-fragment. The cached atlas content identity rejects UVs from before an eviction
-or reset and never returns to a prior value.
-
-`LineQuadCache` stores coalesced background quads under a parallel key. Its hash
-also covers pane origin and extent because moving or clipping a pane changes
-quad geometry.
-
-Their capacity, invalidation, and current use are separate facts:
-
-- **Capacity:** both caches hold about four times the total visible rows across
-  all panes. A size change or capacity hit clears the affected cache.
-- **Invalidation:** font, theme, scale, surface-size, and atlas changes clear the
-  appropriate caches. Dirty rows invalidate absolute-row entries.
-- **Current status:** both cache types define pane-local invalidation methods,
-  but the current renderer has no production caller for them. Frame-specific
-  cursor, selection, search, quick-select, IME, palette, and notification
-  overlays are assembled separately.
+A changed `FrameKey` triggers work. Primary-screen changes damage dirty-row
+strips; an alternate-screen change damages its complete pane. UI changes can
+require the full surface. Row caches reuse unchanged glyphs and backgrounds.
+An identical key skips assembly; Windows degraded presentation may reblit its
+existing CPU frame. Exact keys, capacity, pane eviction, and damage rules live in
+[Rendering and Fonts](Rendering-and-Fonts).
 
 ### 11. Text becomes glyph instances
 
@@ -443,34 +321,9 @@ The shortcut is not a second font system. An atlas miss still calls
 ligature-capable runs call `FontStack::shape_text_with_style`, which uses
 HarfBuzz and maps shaped clusters back to terminal columns.
 
-The font stack looks for the first face that can draw each glyph. It tries the
-configured primary family, then the code-owned fallback list—JetBrains Mono,
-Symbols Nerd Font Mono, and Noto Color Emoji—and finally platform-discovered
-faces for unresolved clusters.
-
-Font discovery and normal rasterization differ by platform:
-
-| Platform | Discovery | Default rasterizer |
-| --- | --- | --- |
-| macOS | CoreText | FreeType |
-| Windows | GDI | DirectWrite, with FreeType fallback |
-| Linux | Fontconfig | FreeType |
-
-Bold and italic select a face. Foreground color does not split shaping runs.
-After shaping, the renderer resolves theme defaults, 256-color indices, and
-24-bit RGB. Inverse swaps foreground and background. Dim blends foreground 45%
-toward the effective background in stored sRGB-encoded space before draw values
-are converted as required for the sRGB surface or CPU blend.
-
-Backgrounds are quads, not glyphs. Adjacent equal non-default backgrounds are
-coalesced. The default background comes from the damage clear. Underline runs
-become single, double, curly, dotted, or dashed quads. An explicit SGR 58 color
-wins; otherwise underline uses foreground color. GPU line endpoints travel in
-geometry parameters separate from HSV color transforms, so a curly underline's
-shape cannot alter its resolved color.
-
-The parser stores blink, hidden, and strikethrough flags. The current terminal
-renderer has no flag-specific draw branch for those three.
+The font stack tries the configured family, configured fallbacks, then native
+discovery. Matching, platform rasterizers, color, and decorations are detailed
+in [Rendering and Fonts](Rendering-and-Fonts).
 
 ### 12. Rasterization fills the glyph atlas
 
@@ -478,82 +331,23 @@ Rasterization returns a bitmap and placement metrics: width, height, bearing,
 advance, and whether the data is monochrome, subpixel, or self-colored. This is
 a reusable tile, not a screen pixel.
 
-`GlyphAtlas::get_or_insert` uses a fixed 2,048 × 2,048 BGRA8 CPU allocation,
-about 16 MiB. Metadata is capped at 16,384 entries.
-
-- A hit reuses the tile and refreshes its last-used frame.
-- A miss rasterizes, tries a reclaimed rectangle, then uses the shelf packer.
-- Monochrome coverage is copied into BGRA channels. Color and subpixel BGRA data
-  keep their supplied channel data.
-- A space uses a zero-area entry.
-- Failed or impossible rasterization uses a zero-area sentinel to avoid retrying
-  every frame.
-- Under pressure, the atlas evicts the coldest quarter deterministically.
-
-An eviction during frame assembly can invalidate instances emitted earlier in
-that frame. The renderer detects the changed epoch, resets the atlas in place,
-invalidates `RowGlyphCache`, abandons the frame, and requests another one. The
-next frame retries with eviction disabled. One successful presentation enables
-it again.
-
-A `GlyphInstance` stores a normalized-device-coordinate (NDC) rectangle, atlas
-UVs, linear-space foreground modulation, and flags for color, subpixel, and
-image-atlas sampling.
-The row cache stores this prepared instance with the atlas content identity.
-
-The inline-image atlas is separate. It starts at 1 × 1, promotes to 2,048 × 2,048
-when visible media appears, and demotes after 240 rendered frames without
-inline media.
+`GlyphAtlas::get_or_insert` reuses a cached tile or allocates a rasterized one.
+`GlyphInstance` records its screen rectangle, atlas UVs, foreground, and sampling
+flags. If atlas eviction invalidates earlier instances in this frame, the
+renderer abandons it and retries without clearing dirty rows. The next frame
+disables eviction until one presentation succeeds. Atlas storage and fallback
+sentinels are documented in [Rendering and Fonts](Rendering-and-Fonts).
 
 ### 13. The selected presenter produces pixels
 
-On the wgpu path, `AtlasUpload::sync` uploads only dirty atlas rectangles. A warm
-`A` tile uploads no new bytes. Glyph dirty metadata distinguishes linear
-`Coverage` from premultiplied sRGB-encoded `Color`; overlapping stale records are
-superseded when eviction reuses a slot, and only same-kind rectangles coalesce.
-Coverage bytes, including DirectWrite subpixel channels, copy unchanged. Color
-glyph rectangles and image rectangles are packed by unpremultiplying and
-clamping encoded RGB, decoding sRGB, premultiplying in linear light, re-encoding
-for the texture, preserving alpha, and canonicalizing zero alpha. CPU atlas bytes
-remain unchanged.
+On wgpu, `AtlasUpload::sync` uploads dirty rectangles; a cached `A` needs no
+upload. Drawing updates the retained offscreen frame inside its damage scissor,
+blits it to the surface, submits commands, and calls `queue.present(frame)`.
 
-The glyph texture's single bind group exposes its unorm coverage view and sRGB
-color view with nearest samplers. `GlyphInstance.flags.x` selects the color view;
-ordinary glyphs and instances marked in `flags.y` for subpixel coverage use the
-unorm view. The separate image group retains an sRGB view with linear sampling,
-clamps bilinear taps to the image's packed tile, and applies hardware sRGB decode
-before filtering. The renderer then acquires the surface, draws into the retained
-offscreen texture inside the damage scissor, blits to the surface, submits
-commands, and calls `queue.present(frame)`.
-
-The layer order is:
-
-```text
-damage background and base quads → inline images → base glyphs → overlay quads → overlay glyphs
-```
-
-Ordinary and subpixel-tagged text sample unchanged atlas coverage and multiply
-its alpha by foreground color; the subpixel flag remains available as raw
-instance metadata. Color glyphs sample the nearest sRGB view and retain their own
-colors. Inline images retain their own colors and reach the shader as
-premultiplied linear samples decoded before filtering.
-
-On Windows with `degrade = true`, `WindowsSoftwareFrame` receives the same
-prepared quads, `GlyphInstance` values, CPU glyph atlas, and image atlas. It
-clears one full-window BGRA buffer, blends the layers, and calls
-`SetDIBitsToDevice` for the HWND. GPU glyph and image textures remain 1 × 1
-placeholders because this presenter does not sample them.
-
-Both presenters apply these frame limits:
-
-- maximum side: 16,384 pixels;
-- maximum BGRA bytes: 160 MiB;
-- wgpu also clamps the side to the device's `max_texture_dimension_2d`.
-
-An invalid initial size makes renderer construction fail. A rejected later
-`try_resize` returns `false` and keeps the previous usable surface.
-`WindowsSoftwareFrame::new` and `prepare` reject an invalid CPU frame before
-allocation.
+On Windows with degradation enabled, the same prepared instances are composed
+into a full CPU BGRA frame and presented with `SetDIBitsToDevice`. CPU atlas bytes
+remain unchanged; the GPU mirrors are placeholders. Color conversion, layer order,
+sampling, and size limits are specified in [Rendering and Fonts](Rendering-and-Fonts).
 
 ### 14. Success clears the dirty row
 
@@ -563,7 +357,7 @@ Windows CPU presentation calls `finish_successful_frame` only after
 later compositor failure.
 
 `finish_successful_frame` stores the new `FrameKey`, increments the successful
-frame count, and clears every rendered pane's dirty rows.
+frame count, and clears dirty rows only when pane identity and grid revision still match the frame plan.
 
 Before a wgpu draw:
 
@@ -581,61 +375,19 @@ the newly presented pixels. The echoed `A` is now visible.
 
 ### Cache invalidation triggers
 
-These changes invalidate different rendering state:
-
-- **Font settings:** changing the family, size, line height, or weight rebuilds
-  the font stacks, resets glyph-atlas metadata, and invalidates both row caches
-  and the `FrameKey`.
-- **DPI:** a DPI change retargets font scaling, rebuilds matching atlas upload
-  resources, invalidates both row caches and the `FrameKey`, then requests a
-  redraw.
-- **Theme:** a theme change updates renderer colors, advances the style
-  revision, invalidates both row caches and the `FrameKey`, and marks every
-  pane row dirty.
-- **Surface size:** an accepted surface resize replaces the retained-frame
-  texture and invalidates both row caches and the `FrameKey` before pane grids
-  and PTYs are resized.
-- **Pane topology:** a different pane layout changes the topology fields in the
-  next `FrameKey`; it does not by itself clear the row caches.
+Font, DPI, theme, surface, and pane-layout changes invalidate the affected
+frame/cache identity. See [Rendering and Fonts](Rendering-and-Fonts) for the
+exact operations; [Architecture Internals](Architecture-Internals) defines when
+dirty rows may be acknowledged.
 
 ### What happens when the pane closes
 
-Dropping a `PtyHandle` first signals the reader and writer to cancel, cancels
-pending synchronous I/O where the platform supports it, and terminates the
-child. The remaining bounded sequence differs by platform.
-
-**Unix PTY**
-
-Before teardown, `waitid(P_PID, ..., WEXITED | WNOHANG | WNOWAIT)` can observe a
-natural exit without releasing the session id. Teardown then:
-
-1. kills the original process group and repeatedly kills active members of the
-   same session;
-2. closes the PTY master;
-3. waits up to 500 ms for the reader, then independently up to 500 ms for the
-   writer; a timeout warns and detaches that thread;
-4. if termination failed, retries it for a separate 500 ms; if cleanup still
-   cannot be proved, leaves the leader unreaped so its id cannot be reused
-   unsafely;
-5. otherwise, gives child exit and reaping a separate 500 ms before warning and
-   returning.
-
-**Windows ConPTY**
-
-Teardown then:
-
-1. waits up to 500 ms for the reader, then independently up to 500 ms for the
-   writer; a timeout warns and detaches that thread;
-2. starts `sonic-conpty-drain` to drain a cloned reader and
-   `sonic-conpty-close` to close the master;
-3. waits up to 2 seconds for close; a timeout warns and detaches both helpers;
-4. after a successful close, waits up to another 2 seconds for the drainer to
-   observe EOF; a drain timeout silently detaches it;
-5. gives child exit and reaping a separate 500 ms before warning and returning.
-
-Failure to start either ConPTY helper warns and reports an incomplete close.
-These bounds keep `Drop` from blocking the UI indefinitely; an incomplete
-native close is not reported as success.
+Dropping `PtyHandle` cancels I/O and terminates the child, then performs bounded
+platform-specific close and reaping. Incomplete cleanup is not success. See
+[Runtime Lifecycle](Runtime-Lifecycle) for close order and
+[Architecture Internals](Architecture-Internals) for Unix/ConPTY deadlines.
+Validation and release evidence are described in
+[Development and Release](Development-and-Release), not inferred from this journey.
 
 ### Why `A` may not appear
 
@@ -704,37 +456,11 @@ flowchart LR
 
 ### 1. 窗口初始化准备整条路径
 
-第一个原生窗口和渲染器由 `App::do_resumed` 创建。SonicTerm 开启输入法事件，记录显示器
-帧周期，并创建 wgpu 表面。
+`App::do_resumed` 创建首个原生窗口和渲染器，启用输入法并记录显示器周期。
+后续窗口通过 `GpuSharedContext` 共享第一套适配器/设备/队列，但各自拥有表面与绘制状态。
 
-第一个渲染器请求与该表面兼容的高性能适配器。`force_fallback_adapter` 为 false。
-硬件不可用时，wgpu 仍可能返回 CPU 适配器。后续窗口通过 `GpuSharedContext` 复用第一套
-适配器、设备和队列；每个窗口仍有自己的表面和渲染器状态。
-
-设备类型为 `Cpu`，或者名称包含 `Microsoft Basic Render Driver`、`llvmpipe`、
-`SwiftShader` 或“软件适配器”时，SonicTerm 把它认作软件适配器。设备内存策略跟随这个
-检测结果：
-
-- 软件适配器：`MemoryHints::MemoryUsage`；
-- 硬件适配器：`MemoryHints::Performance`。
-
-随后由 `[appearance].software_render_mode` 决定呈现策略：
-
-| 实际适配器 | `auto` | `force` | `off` |
-| --- | --- | --- | --- |
-| 硬件 | 正常 | 降级 | 正常 |
-| CPU/软件 | 降级 | 降级 | 正常 |
-
-“降级”表示最终策略，不表示适配器种类。`force` 会让硬件适配器进入降级策略。`off` 会让
-WARP 或其它 CPU 适配器继续使用普通 wgpu 路径。设备内存策略仍按真实适配器选择。
-
-每个可见终端窗口都需要可用的 wgpu 表面、适配器、设备和队列。SonicTerm 没有完全不需要
-适配器的渲染器。Windows CPU/GDI 呈现只是已经初始化的 `GpuRenderer` 内部的一条分支，
-不能挽救 wgpu 启动失败。
-
-本页后文沿用这些初始化对象：渲染器保存一个窗口的绘制状态，每个窗口拥有自己的 wgpu 表面，
-第一个渲染器取得后续窗口共享的适配器、设备和队列。精确的标识符和 API 名称仍用代码样式
-保留。
+所有呈现器都要求 wgpu 初始化成功；Windows CPU/GDI 不是无需适配器的恢复路径。
+适配器分类与 `auto`/`force`/`off` 策略相互独立，准确规则见[渲染模式](Rendering-Modes)。
 
 ```mermaid
 flowchart TD
@@ -752,24 +478,8 @@ flowchart TD
     platform -- "其它情况" --> gpu["wgpu 表面"]
 ```
 
-渲染器使用 BGRA8 sRGB 表面。正常呈现优先使用 Mailbox，不支持时使用 FIFO；允许配置的
-透明效果，并请求最多两帧表面延迟。降级呈现使用 FIFO、不透明 alpha 和一帧延迟。
-
-正常帧节奏跟随显示器。降级时周期为 25 ms，约 40 fps。输入法组字期间为 83.333 ms，
-约 12 fps。降级策略还会停止仅由淡出动画触发的额外帧。
-
-macOS 和 Linux 在两种策略下都通过 wgpu 呈现。Windows 只有在 `degrade = true` 时使用
-`WindowsSoftwareFrame` 和 GDI `SetDIBitsToDevice`。Windows 使用 WARP 且
-`software_render_mode = "off"` 时，仍在 CPU 适配器上走普通 wgpu 纹理与呈现路径。
-
-渲染器初始化还会创建：
-
-- 保留上一帧的离屏纹理；
-- 固定 2,048 × 2,048 的 CPU 字形图集；
-- 匹配的 GPU 字形存储；Windows 降级时改用 1 × 1 占位符；
-- 1 × 1 的内联图像图集占位符；
-- 按窗口 DPI 建立的字体栈；
-- 行字形缓存和背景四边形缓存。
+渲染器准备保留帧、正文/页脚/标题字体栈、独立字形/图像图集及行缓存。
+表面与帧节奏策略见[渲染模式](Rendering-Modes)，分配清单见[内存](Memory)。
 
 ### 2. 按键先交给当前输入所有者
 
@@ -816,31 +526,7 @@ Control 或 Alt 时，会原样使用操作系统生成文本的 UTF-8 字节。
 | UTF-8 | `0x41` |
 | 十进制字节 | `65` |
 
-其它按键和修饰键遵循以下规则：
-
-- **Control 与键位优先级：** 配置的键位可能在 PTY 编码前接管组合键。否则先判断 Control，
-  再判断 Alt：Control+A 变成 `0x01`，Control+Alt+A 会在该控制字节前加 `ESC`。
-  旧式别名覆盖 Space/@/2、`[ /3`、`\ /4`、`] /5`、`^/~/6`、`_/ /7` 和 `?/8`。
-- **文本与 BackTab：** 默认旧式模式会在 Alt 文本前加 `ESC`；Shift 与布局相关文本由
-  操作系统生成。Tab 发送 HT。在 `modifyOtherKeys` level 1 下，只有普通 Shift+Tab 继续发送
-  `CSI Z`；其它带修饰键的 Tab 形式和带修饰键的 Enter 使用
-  `CSI 27 ; modifier ; code ~`。level 2 也把 Shift+Tab 编码为
-  `CSI 27 ; 2 ; 9 ~`。level 1 保留普通 Shift/Control 别名及 Backspace 例外；level 2
-  会编码所有受支持的带修饰普通按键。
-- **协商的旧式模式：** pane 快照包含 DECCKM 光标键、DECKPAM 小键盘身份、DECBKM
-  Backspace、ANSI newline mode，以及 xterm `modifyOtherKeys` level 1 和 2。带修饰键的
-  光标键与功能键会在 xterm 修饰参数中保留 Shift、Alt、Control 和 Super；功能键覆盖到 F35。
-- **Kitty 协议：** 主屏和备用屏各自维护独立且有界的 progressive-enhancement 栈。
-  不支持的 set mode 不做任何改变，保存的 flag 保留协议的七个数据位。SonicTerm 支持
-  消歧义、事件类型、备用按键、全部按键报告、关联文本、功能键和小键盘身份，以及修饰键
-  自身的身份。单独启用备用按键报告只会补充原本已经使用 CSI-u 的按键，不会改变原始文本、
-  DECKPAM 或 terminfo 编码。启用消歧义时 Shift+Tab 为 `CSI 9 ; 2 u`；程序要求时，重复与
-  释放会带 Kitty 事件类型。
-- **小键盘：** 旧式 normal mode 遵循布局/NumLock 结果并保留文本修饰键；操作系统解析为数字
-  字符的小键盘键在 DECKPAM 下仍发送数字文本，非文本事件保留物理小键盘身份。这使用逻辑
-  数字意图，而非直接测量 NumLock。Kitty 消歧义使用专用的小键盘码点。
-
-普通 `A` 不受影响，因此本页继续跟踪它。
+修饰键、小键盘和已协商 Kitty 编码见[键盘协议参考](Terminal-IO-and-VT)。本例仍为 UTF-8 `0x41`。
 
 ### 4. 字节进入一个或多个 PTY
 
@@ -984,42 +670,10 @@ PTY 输出最多等待一个显示器帧周期。最终降级状态启用时，�
 
 ### 10. 损伤区域和行缓存选择工作量
 
-渲染器把 `FrameKey` 与上一帧成功画面比较。该键覆盖网格 revision 和可见界面状态，
-包括按窗格编号排序并量化为 `u16` 的滚动条透明度。不会发射滚动条像素的状态——`Never`、
-没有回滚历史或透明度处于共享阈值——统一使用零桶。完全相同的键可以跳过组帧。Windows
-降级呈现还可以在键相同时重新呈现已有 CPU 缓冲区。
-
-只有网格内容变化时：
-
-- 主屏幕窗格贡献经过裁剪的脏行条带；
-- 有脏行的备用屏幕窗格贡献完整裁剪窗格；
-- 干净窗格不贡献损伤区域。
-
-浮层、窗口装饰、滚动条透明度、尺寸、标签页、选区、视口或拓扑变化可以把损伤扩大到
-整个表面。有实际工作的降级 wgpu 帧总是使用完整表面。Windows 降级呈现也会清空并合成
-完整 CPU 帧。
-
-硬件策略使用 `RenderMode::Full`，因此可能访问每个可见行。真正改变保留像素的区域仍由
-损伤裁剪决定。行缓存让未改变行的组装成本保持较低。
-
-`RowGlyphCache` 保存 `GlyphInstance`、下划线段、缺字框和缺失码点。键为
-`(pane id, absolute row, row hash)`。哈希覆盖单元格、样式 revision、单元格几何、缩放和
-选区重叠。活动的普通文字目标只给实际变色的当前行片段加 salt，因此自动换行目标会使每个
-参与行失效，而不会扰动其它行。仅提示的下划线不改变字形缓存身份。有序可见 span 集合仍进入
-`FrameKey`，下划线几何会为每个片段发射一个经过裁剪的 quad。缓存中的图集内容身份会拒绝
-淘汰或重置前生成的 UV，且不会回到旧值。
-
-`LineQuadCache` 用相似的键保存合并后的背景四边形。它的哈希还覆盖窗格原点和范围，因为
-移动或裁剪窗格会改变四边形几何。
-
-容量、失效条件和当前使用状态是三件不同的事：
-
-- **容量：** 两种缓存的容量都约为所有窗格可见行总数的四倍。尺寸变化或达到容量时，
-  对应缓存会整体清空。
-- **失效条件：** 字体、主题、缩放比例、表面尺寸或图集变化会清除相应缓存；脏行会使
-  绝对行条目失效。
-- **当前状态：** 两种缓存都提供仅使单个窗格失效的方法，但当前渲染器的生产路径没有调用
-  这些方法。光标、选区、搜索、快速选择、输入法、命令面板和通知等逐帧浮层另行组装。
+`FrameKey` 改变后才需要新工作。主屏幕修改损伤脏行条带；备用屏幕修改损伤整个窗格，
+UI 修改可能要求完整表面。行缓存复用未变化的字形和背景。相同键跳过组帧；Windows 降级
+呈现可再次 blit 已有 CPU 帧。准确的缓存键、容量、窗格淘汰和损伤规则见
+[渲染与字体](Rendering-and-Fonts)。
 
 ### 11. 文字变成字形实例
 
@@ -1031,91 +685,27 @@ PTY 输出最多等待一个显示器帧周期。最终降级状态启用时，�
 文字、回退字体和可能形成连字的文字段会调用 `FontStack::shape_text_with_style`，由 HarfBuzz
 塑形，再把字形簇映射回终端列。
 
-字体栈会为每个字形寻找第一个能绘制它的字体。它先尝试配置的主字体，再依次尝试代码内置的
-JetBrains Mono、Symbols Nerd Font Mono 和 Noto Color Emoji；仍找不到时，最后使用平台发现的
-备用字体来处理尚未解析的字形簇。
-
-各平台的字体发现和普通光栅化如下：
-
-| 平台 | 字体发现 | 默认光栅器 |
-| --- | --- | --- |
-| macOS | CoreText | FreeType |
-| Windows | GDI | DirectWrite，失败时回退 FreeType |
-| Linux | Fontconfig | FreeType |
-
-粗体和斜体负责选择字形。前景色不会切分塑形文字段。塑形后，渲染器解析主题默认色、256 色
-索引和 24 位 RGB。反色会交换前景与背景。dim 会在保存的 sRGB 编码空间内，把前景向有效
-背景混合 45%，随后再按 sRGB 表面或 CPU 混合的需要转换绘制值。
-
-背景是四边形，不是字形。相邻且相同的非默认背景会合并。默认背景来自损伤清理。下划线段会
-形成单线、双线、波浪、点线或虚线四边形。有 SGR 58 显式颜色时使用它，否则使用前景色。
-GPU 线段端点存放在与 HSV 颜色变换分离的几何参数中，因此波浪下划线的形状不会改变其最终颜色。
-
-解析器会保存 blink、hidden 和 strikethrough 标志。当前终端渲染器没有针对这三个标志的
-专用绘制分支。
+字体栈依次尝试配置字体、回退字体和原生发现。匹配、平台光栅器、颜色和装饰细节见
+[渲染与字体](Rendering-and-Fonts)。
 
 ### 12. 光栅化填充字形图集
 
 光栅化返回位图和摆放度量，包括宽度、高度、bearing、advance，以及数据属于单色、子像素还是
 自带颜色。这是一块可复用的小图，不是屏幕像素。
 
-`GlyphAtlas::get_or_insert` 使用固定 2,048 × 2,048 BGRA8 CPU 分配，约 16 MiB。
-元数据最多 16,384 条。
-
-- 命中时复用图块，并刷新最后使用帧；
-- 未命中时先光栅化，再尝试回收矩形，最后使用分层打包器；
-- 单色覆盖率会复制到 BGRA 通道；彩色和子像素 BGRA 保留原通道数据；
-- 空格使用零面积条目；
-- 光栅化失败或尺寸不可能放入时使用零面积哨兵，避免每帧重试；
-- 遇到压力时，图集按确定规则淘汰最冷的四分之一。
-
-组帧期间发生淘汰时，之前发出的字形实例可能已经失效。渲染器检测到代次变化后，会就地重置
-图集，使 `RowGlyphCache` 失效，放弃当前帧并请求下一帧。下一帧关闭淘汰后重试。
-成功呈现一帧后再重新启用淘汰。
-
-`GlyphInstance` 保存归一化设备坐标（NDC）矩形、图集 UV、线性空间前景调制色，以及
-彩色、子像素和图像图集采样标志。行缓存会连同图集内容身份保存这个准备好的实例。
-
-内联图像使用独立图集。它从 1 × 1 开始，出现可见媒体时扩展到 2,048 × 2,048，连续
-240 个已渲染帧没有内联媒体后再缩回占位符。
+`GlyphAtlas::get_or_insert` 复用缓存图块，或分配新光栅图块。`GlyphInstance` 保存屏幕
+矩形、图集 UV、前景色和采样标志。若图集淘汰使当前帧已有实例失效，渲染器会放弃该帧并
+保留脏行重试；下一帧关闭淘汰，直到成功呈现一帧。图集存储和后备哨兵见
+[渲染与字体](Rendering-and-Fonts)。
 
 ### 13. 选定的呈现器产生像素
 
-wgpu 路径中，`AtlasUpload::sync` 只上传脏矩形。已经缓存的 `A` 不会产生新的图集上传。
-字形脏元数据会区分线性 `Coverage` 与预乘、sRGB 编码的 `Color`；淘汰复用槽位时会取代
-相交的旧记录，并且只合并相同类型的矩形。覆盖率字节（包括 DirectWrite 次像素通道）原样
-复制。彩色字形矩形与图像矩形在打包时先反预乘并限制编码 RGB，再解码 sRGB、在线性光空间
-预乘、为纹理重新编码，保留 alpha，并规范化零 alpha。CPU 图集字节保持不变。
+wgpu 路径通过 `AtlasUpload::sync` 上传脏矩形；已缓存的 `A` 无需上传。绘制在损伤裁剪
+内更新保留离屏帧，然后复制到表面、提交命令并调用 `queue.present(frame)`。
 
-字形纹理的单个 bind group 通过最近点 sampler 同时提供 unorm 覆盖率 view 与 sRGB 彩色
-view。`GlyphInstance.flags.x` 选择彩色 view；普通字形以及由 `flags.y` 标记的次像素覆盖率
-实例使用 unorm view。独立的图像 group 保留 sRGB view 与线性采样，把双线性采样点限制在
-当前图像的已打包图块内，并由硬件在过滤前执行 sRGB 解码。随后渲染器取得表面，在损伤
-裁剪内画入保留式离屏纹理，再复制到表面、提交命令并调用 `queue.present(frame)`。
-
-图层顺序为：
-
-```text
-损伤背景和基础四边形 → 内联图像 → 基础字形 → 浮层四边形 → 浮层字形
-```
-
-普通文字与带次像素标记的文字采样未改变的图集覆盖率，并用其 alpha 乘以前景色；次像素
-标志仍以原始实例元数据保留。彩色字形通过最近点 sRGB view 取样，保留自身颜色。内联图像
-也保留自身颜色，以预乘线性样本进入着色器，并在过滤前完成解码。
-
-Windows 且 `degrade = true` 时，`WindowsSoftwareFrame` 接收同一批准备好的四边形、
-`GlyphInstance`、CPU 字形图集和图像图集。它清空完整窗口 BGRA 缓冲区，按顺序混合图层，
-再对 HWND 调用 `SetDIBitsToDevice`。GPU 字形和图像纹理保持 1 × 1 占位符，因为这条路径
-不会采样它们。
-
-两种呈现器都使用以下帧限制：
-
-- 单边最多 16,384 像素；
-- BGRA 总字节最多 160 MiB；
-- wgpu 还会把单边限制在设备的 `max_texture_dimension_2d` 内。
-
-初始尺寸无效时，渲染器构建失败。之后 `try_resize` 拒绝尺寸时返回 `false`，继续使用之前的
-可用表面。`WindowsSoftwareFrame::new` 和 `prepare` 会在分配前拒绝无效 CPU 帧。
+Windows 降级路径将同一批准备好的实例合成到完整 CPU BGRA 帧，以 `SetDIBitsToDevice`
+呈现。CPU 图集字节不变，GPU 镜像保持占位符。颜色转换、图层顺序、采样与尺寸限制见
+[渲染与字体](Rendering-and-Fonts)。
 
 ### 14. 成功后清除脏行
 
@@ -1123,7 +713,7 @@ Windows CPU 呈现只有在 `SetDIBitsToDevice` 成功后才调用 `finish_succe
 wgpu 在提交命令并调用 `queue.present(frame)` 后调用它。wgpu present 本身没有可表示后续
 合成器失败的返回值。
 
-`finish_successful_frame` 保存新的 `FrameKey`，增加成功帧计数，并清除每个已渲染窗格的脏行。
+`finish_successful_frame` 保存新的 `FrameKey`，增加成功帧计数，并且只在窗格身份与网格修订号仍匹配帧计划时清除脏行。
 
 wgpu 绘制前：
 
@@ -1140,48 +730,15 @@ wgpu 绘制前：
 
 ### 缓存失效触发条件
 
-以下变化会使不同的渲染状态失效：
-
-- **字体设置：** 改变字体家族、字号、行高或字重会重建字体栈、重置字形图集元数据，
-  并使两种行缓存和 `FrameKey` 失效。
-- **DPI：** DPI 变化会重新设定字体缩放，重建匹配的图集上传资源，使两种行缓存和
-  `FrameKey` 失效，然后请求重绘。
-- **主题：** 主题变化会更新渲染器颜色、推进样式修订号，使两种行缓存和 `FrameKey` 失效，
-  并把每个窗格的所有行标为脏行。
-- **表面尺寸：** 接受新的表面尺寸后，会替换保留帧纹理，使两种行缓存和 `FrameKey` 失效，
-  然后调整窗格网格和 PTY 的大小。
-- **窗格拓扑：** 不同的窗格布局会改变下一份 `FrameKey` 中的拓扑字段；它本身不会清空
-  行缓存。
+字体、DPI、主题、表面和窗格布局变化会使相关帧/缓存身份失效。准确操作见
+[渲染与字体](Rendering-and-Fonts)；脏行确认条件见[架构内部机制](Architecture-Internals)。
 
 ### 窗格关闭时会发生什么
 
-释放 `PtyHandle` 时，代码会先通知读取与写入线程取消操作，在平台支持时取消仍在等待的同步
-I/O，然后终止子进程。之后的有界顺序因平台而异。
-
-**Unix PTY**
-
-清理前，`waitid(P_PID, ..., WEXITED | WNOHANG | WNOWAIT)` 可以观察自然退出而不释放会话编号。
-随后按顺序清理：
-
-1. 杀死原进程组，并反复杀死同一会话中仍存活的成员；
-2. 关闭 PTY 主端；
-3. 最多等待读取线程 500 ms，再独立等待写入线程最多 500 ms；超时会记录警告并分离该线程；
-4. 若终止失败，另用 500 ms 重试；如果仍无法证明清理完成，就保留未回收的主进程，避免其
-   编号被不安全地复用；
-5. 否则，再用独立的 500 ms 等待子进程退出并回收；到期后记录警告并返回。
-
-**Windows ConPTY**
-
-随后按顺序清理：
-
-1. 最多等待读取线程 500 ms，再独立等待写入线程最多 500 ms；超时会记录警告并分离该线程；
-2. 启动 `sonic-conpty-drain` 通过克隆的 reader 排空输出，并启动 `sonic-conpty-close` 关闭主端；
-3. 最多等待关闭操作 2 秒；超时会记录警告并分离两个辅助线程；
-4. 关闭成功后，再最多等待 2 秒，让排空线程观察 EOF；排空超时会静默分离该线程；
-5. 再用独立的 500 ms 等待子进程退出并回收；到期后记录警告并返回。
-
-任一 ConPTY 辅助线程启动失败时，代码会记录警告并报告关闭未完成。这些时限保证 `Drop`
-不会无限阻塞界面；原生关闭未完成时，代码不会谎报成功。
+释放 `PtyHandle` 会取消 I/O、终止子进程，再执行有时限的平台关闭与回收。未完成清理
+不等于成功。关闭顺序见[运行时生命周期](Runtime-Lifecycle)，Unix/ConPTY 期限见
+[架构内部机制](Architecture-Internals)。验证与发布证据见[开发与发布](Development-and-Release)，
+不能仅凭这条旅程推断。
 
 ### `A` 可能不出现的原因
 

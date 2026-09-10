@@ -14,6 +14,11 @@ Text shaping, rasterization, and atlas ownership are described in
 
 ### Adapter classification and selection
 
+The first renderer requests a surface-compatible high-performance adapter with
+`force_fallback_adapter = false`; wgpu may still return a CPU adapter. Later
+windows reuse its adapter/device/queue through `GpuSharedContext`. Each window
+owns its surface and rendering state; no presenter can bypass failed wgpu startup.
+
 Software classification is a pure function over `wgpu::AdapterInfo`. It returns
 true when `device_type == Cpu`, or when the lowercased adapter name contains one
 of:
@@ -96,45 +101,7 @@ swapchain as already rendered.
 
 ### Windows LCD subpixel policy
 
-`[font].subpixel_aa` accepts `off`, `rgb`, and `bgr`; the default is `off`.
-SonicTerm resolves a non-off request to LCD presentation only when all of these
-conditions hold:
-
-- the host is Windows;
-- the configured backdrop selects an opaque hardware alpha mode;
-- effective terminal background opacity is `1`;
-- the final presenter is Windows CPU/GDI, or the wgpu device supports
-  `DUAL_SOURCE_BLENDING`.
-
-Mica, Acrylic, Tabbed, opacity below `1`, unsupported GPU devices, and
-non-Windows hosts therefore use grayscale deterministically. A software-present
-override does not make a configured transparent backdrop LCD-eligible merely
-because the GDI swapchain itself is forced opaque.
-
-On Windows, device creation requests `DUAL_SOURCE_BLENDING` only when the
-adapter advertises it. No optional LCD feature is requested on other hosts. The
-feature is negotiated when the shared device is created so `off` can change to
-`rgb` or `bgr` live without recreating the device. The effective mode is part of
-the retained frame key; changing the request invalidates and redraws the frame
-without rebuilding fonts or either atlas.
-
-For one subpixel sample, `coverage` is logical RGB coverage (or R/B-swapped for
-`bgr`) and `foreground` is the transformed premultiplied linear foreground:
-
-```text
-weights.rgb = coverage.rgb * foreground.a
-source.rgb = foreground.rgb * coverage.rgb
-source.a = max(weights.r, weights.g, weights.b)
-destination.rgb *= 1 - weights.rgb
-destination.a *= 1 - source.a
-```
-
-The GPU pipeline emits source color and destination attenuation as the two blend
-sources. Its non-LCD branches emit scalar alpha as the second source, preserving
-ordinary source-over for monochrome text, color glyphs, images, and quads. The
-Windows CPU presenter decodes the sRGB BGRA destination, applies the same
-per-channel equation in linear light, then encodes RGB once. `off` uses the
-subpixel tile's stored alpha maximum as grayscale coverage.
+LCD eligibility and blending are documented in [Rendering and Fonts](Rendering-and-Fonts).
 
 ### Software-render degradation
 
@@ -184,88 +151,14 @@ Construction or resize beyond either limit fails without replacing the existing
 valid allocation. A frame-key hit can re-present the existing CPU frame without
 recomposing it.
 
-The CPU glyph and image atlases remain the source sampled by software drawing.
-Self-colored glyph and inline-image pixels stay premultiplied sRGB-encoded BGRA8
-and are not changed by either presenter. Before sampling, the Windows software
-path converts each selected color texel to premultiplied linear RGBA, matching
-the values produced by GPU upload and sRGB-view decode. Zero-alpha texels become
-transparent black; every other texel is unpremultiplied and clamped in encoded
-space, decoded, then premultiplied again. GPU mirrors remain 1×1 placeholders
-while the GDI presenter is active. Returning to GPU presentation rebuilds
-full-size GPU atlas textures, resets atlas metadata and UV-bearing caches, and
-forces a full redraw.
-
-Every sharp, rounded, and line `QuadInstance` carries finite premultiplied
-linear RGBA: alpha stays in `[0,1]`, each RGB channel stays between zero and
-alpha, and changing opacity or antialias/mask coverage scales RGB and alpha
-together. Hex-authored colors decode sRGB before premultiplication. The sRGB
-target performs the final encoding. The CPU compositor decodes retained sRGB
-destination channels, applies the same source-over in linear light, encodes RGB
-once, and source-overs alpha as linear UNORM. Decoded color-glyph and
-inline-image samples enter this same compositor without foreground tinting.
-
-Text glyphs use one stabilized destination-pixel origin regardless of whether
-an atlas tile is sampled one-to-one or resampled on either axis. Source sampling
-remains nearest and clamped to the glyph's own tile; clipping at the top or left
-advances past the hidden source rows or columns. Dirty metadata keeps monochrome
-and subpixel coverage as unchanged linear masks while converting only color-glyph
-rectangles. One glyph bind group exposes the texture's unorm coverage view and
-sRGB color view with nearest samplers; ordinary and subpixel-tagged instances use
-coverage, while `flags.x` selects color. Both presenters sample color glyphs at
-the nearest texel after decoding. Inline images retain fractional destination
-coordinates, including native-size axes, and use continuous pixel-center UV
-interpolation on both presenters. The software path decodes every tile-clamped
-tap before bilinear interpolation; the GPU path pairs its sRGB view with a linear
-sampler for the same decode-before-filter order. Pane and surface clipping adjust
-only visible geometry and UVs; separate original tile bounds constrain taps without
-turning a clip edge into an atlas boundary or allocating cropped pixels.
+CPU atlases supply software drawing; GPU mirrors remain 1×1 placeholders.
+Returning to GPU rebuilds full textures, resets UV-bearing caches, and forces
+a full redraw. Pixel conversion and sampling are shared with GPU drawing and
+are specified in [Rendering and Fonts](Rendering-and-Fonts).
 
 ### Retained pixels and damage
 
-Damage is a correctness boundary, not only an optimization. Every VT/grid
-mutation must mark the affected rows in the same update.
-
-```mermaid
-flowchart TD
-    change["visible state changed"] --> screen{"screen buffer"}
-    screen -- primary --> rows["union dirty viewport rows"]
-    screen -- alternate --> dirty{"any dirty row?"}
-    dirty -- yes --> pane["complete surface-clipped pane"]
-    dirty -- no --> none["no terminal damage"]
-    rows --> union["union with UI and overlay damage"]
-    pane --> union
-    none --> union
-    union --> retained["redraw retained frame inside damage scissor"]
-    retained --> present["blit and present"]
-```
-
-A primary-screen pane can repaint the union of dirty viewport rows. Row bounds
-use floor/ceil rules at fractional DPI so adjacent rows leave no seam, then
-expand vertically by one native font-cell height so glyph bearings, positioned
-marks, and compressed line spacing cannot leave ink outside the retained-frame
-scissor. The expansion remains pane- and surface-clipped. If an alternate-screen
-pane has any dirty row, the complete surface-clipped pane is damaged. This covers
-TUI scrolling, insert/delete line, reverse index, erase, and other fixed-position
-updates where a narrow row set can otherwise leave stale pixels.
-
-The offscreen frame uses one attachment clear on first use or full-surface
-replacement, without a second background reset draw. Partial damage loads the
-retained frame, then replaces the damaged pixels with the premultiplied background
-through a non-blending reset under the damage scissor. Reset and content share one
-buffer upload with separate draw ranges; ordinary content retains source-over
-and LCD text retains dual-source blending. Transparent resets erase old ink
-without accumulating alpha or changing pixels outside damage, and do not need a
-later redraw to finish. After the reset, GPU content draws in this order:
-
-```text
-base quads -> inline images -> base glyphs -> overlay quads -> overlay glyphs
-```
-
-A scissor limits redraw to the damage rectangle. The renderer’s
-`wgpu::util::TextureBlitter` copies the retained frame to the swapchain before
-submit and present. The surface format is fixed to
-`TextureFormat::Bgra8UnormSrgb`; colors are converted to linear values before
-shader use so the sRGB target performs the only gamma encoding.
+Damage and draw order are documented in [Rendering and Fonts](Rendering-and-Fonts).
 
 ### Diagnostics
 
@@ -306,6 +199,10 @@ Windows 上，降级还会把最终绘制切换为 CPU BGRA 帧，并通过 GDI 
 [配置](Configuration)，主机端保留内存见[内存](Memory)。
 
 ### 适配器分类与选择
+
+首个渲染器请求兼容表面的高性能适配器，`force_fallback_adapter = false`；wgpu 仍可能
+返回 CPU 适配器。后续窗口通过 `GpuSharedContext` 复用其适配器/设备/队列，但各自拥有
+表面和绘制状态。任何呈现器都不能绕过 wgpu 启动失败。
 
 软件分类是只依赖 `wgpu::AdapterInfo` 的纯函数。`device_type == Cpu` 时返回 true；
 否则把适配器名称转成小写，并检查是否包含：
@@ -377,38 +274,7 @@ SonicTerm 绘制到保留式离屏帧纹理。帧键覆盖可见窗格修订号�
 
 ### Windows LCD 次像素策略
 
-`[font].subpixel_aa` 可选 `off`、`rgb`、`bgr`，默认值是 `off`。只有以下条件全部满足时，
-SonicTerm 才会把非 off 请求解析为 LCD 呈现：
-
-- 主机是 Windows；
-- 配置的 backdrop 选择不透明硬件 alpha 模式；
-- 终端背景的实际 opacity 为 `1`；
-- 最终 presenter 是 Windows CPU/GDI，或 wgpu 设备支持 `DUAL_SOURCE_BLENDING`。
-
-因此 Mica、Acrylic、Tabbed、opacity 小于 `1`、不支持的 GPU 设备和非 Windows 主机都会
-确定性使用灰度。软件呈现覆盖即使强制 GDI 交换链本身不透明，也不会让配置为透明 backdrop
-的窗口取得 LCD 资格。
-
-Windows 创建设备时只会在 adapter 已公布支持后请求 `DUAL_SOURCE_BLENDING`；其它主机不请求
-任何 LCD 可选 feature。该 feature 在创建共享设备时协商，因此 `off` 可以实时改为 `rgb` 或
-`bgr`，无需重建设备。实际模式进入保留帧键；修改请求只会使帧失效并重绘，不会重建字体或
-任一图集。
-
-对一个次像素样本，`coverage` 是逻辑 RGB 覆盖率（`bgr` 会交换 R/B），`foreground` 是经过
-变换的预乘线性前景色：
-
-```text
-weights.rgb = coverage.rgb * foreground.a
-source.rgb = foreground.rgb * coverage.rgb
-source.a = max(weights.r, weights.g, weights.b)
-destination.rgb *= 1 - weights.rgb
-destination.a *= 1 - source.a
-```
-
-GPU pipeline 把源颜色与目标衰减量分别作为两个 blend source 输出。非 LCD 分支把单一 alpha
-作为第二个 source，因此单色文字、彩色字形、图像和 quad 仍保持普通 source-over。Windows
-CPU presenter 解码 sRGB BGRA 目标，在线性光空间执行同一逐通道公式，再只编码一次 RGB。
-`off` 把次像素图块中保存的 alpha 最大值作为灰度覆盖率。
+LCD 生效条件与混合公式见[渲染与字体](Rendering-and-Fonts)。
 
 ### 软件渲染降级
 
@@ -447,69 +313,13 @@ Windows 上启用降级时，`WindowsSoftwareFrame` 把同一套上游生成的�
 软件帧任一轴最多 16,384 像素，总量最多 160 MiB。创建或调整尺寸超过任一限制时会失败，
 并保留原有有效分配。帧键命中时可直接再次呈现已有 CPU 帧，无需重新合成。
 
-软件绘制仍从 CPU 字形图集和图像图集取样。自带颜色的字形与内联图像像素保持为预乘、
-sRGB 编码的 BGRA8，两种 presenter 都不会改写这些 CPU 字节。Windows 软件路径会在取样前
-把每个选中的彩色纹素转换为预乘线性 RGBA，与 GPU 上传及 sRGB view 解码得到的值一致。
-零 alpha 纹素会规范化为透明黑色；其余纹素先在编码空间反预乘并限制范围，再解码并重新预乘。
-GDI 呈现启用时，GPU 镜像是 1×1 占位符。回到 GPU 呈现时会重建全尺寸 GPU 图集纹理、重置
-图集元数据与携带 UV 的缓存，并强制完整重绘。
-
-每个锐角、圆角和线段 `QuadInstance` 都携带有限值的预乘线性 RGBA：alpha 位于
-`[0,1]`，每个 RGB 通道都介于零和 alpha 之间；改变不透明度或抗锯齿/mask 覆盖率时，
-必须同时缩放 RGB 与 alpha。由十六进制生成的颜色先解码 sRGB，再做预乘；最终 sRGB 编码
-由目标纹理完成。CPU 合成器会解码保留帧中的 sRGB 目标通道，在相同的线性光空间执行
-source-over，只对 RGB 编码一次，并把 alpha 作为线性 UNORM 做 source-over。完成解码的
-彩色字形与内联图像样本不受前景色调制，并进入同一套合成器。
-
-文字字形无论图集图块是按一比一取样，还是任一轴需要重采样，都使用同一套稳定后的目标
-像素原点。源图块仍采用最近点取样并限制在字形自身矩形内；顶部或左侧被裁剪时，会跳过
-不可见的源行或源列。脏元数据让单色与次像素覆盖率保持不变，继续作为线性掩码，只转换
-彩色字形矩形。一个字形 bind group 通过最近点 sampler 同时提供纹理的 unorm 覆盖率 view
-和 sRGB 彩色 view；普通及带次像素标记的实例使用覆盖率，`flags.x` 选择彩色。两种
-presenter 都会先解码彩色字形，再对最近纹素取样。内联图像保留分数目标坐标，包括原始尺寸的
-坐标轴，并在两种 presenter 上使用连续的像素中心 UV 插值。软件路径先解码每个限制在图块内的
-采样点，再做双线性插值；GPU 路径把 sRGB view 与线性 sampler 配对，采用相同的先解码后过滤
-顺序。窗格与表面裁剪只改变可见几何和 UV；独立的原始图块边界约束采样点，不把裁剪边缘变成
-图集边界，也不分配裁剪后的像素副本。
+软件绘制使用 CPU 图集，GPU 镜像保持 1×1 占位符。返回 GPU 时重建完整纹理、重置
+携带 UV 的缓存并强制完整重绘。像素转换和采样与 GPU 绘制一致，详见
+[渲染与字体](Rendering-and-Fonts)。
 
 ### 保留像素与损伤区域
 
-损伤区域是正确性边界，不只是性能优化。每次 VT/网格修改都必须在同一轮更新中标记受
-影响的行。
-
-```mermaid
-flowchart TD
-    change["可见状态变化"] --> screen{"屏幕缓冲区"}
-    screen -- 主屏幕 --> rows["合并视口脏行"]
-    screen -- 备用屏幕 --> dirty{"有任一脏行？"}
-    dirty -- 是 --> pane["完整表面裁剪窗格"]
-    dirty -- 否 --> none["无终端损伤"]
-    rows --> union["与界面及浮层损伤合并"]
-    pane --> union
-    none --> union
-    union --> retained["在损伤裁剪内重绘保留帧"]
-    retained --> present["复制并呈现"]
-```
-
-主屏幕窗格可以只重绘视口脏行的并集。分数 DPI 下的行边界使用 floor/ceil，避免相邻行
-之间出现缝隙；随后在垂直方向各扩展一个原生字体单元高度，使字形 bearing、定位标记和
-压缩行距不会把墨迹留在保留帧裁剪范围之外。扩展后的区域仍限制在 pane 和表面边界内。
-备用屏幕窗格只要有一行标脏，就损伤完整的表面裁剪窗格。这覆盖 TUI 滚动、插入/删除行、
-反向索引、擦除等固定位置更新，避免窄行集合留下旧像素。
-
-离屏帧在首次使用或替换完整表面时，只执行一次 attachment clear，不再绘制第二个背景重置矩形。
-局部损伤会加载保留帧，再在损伤裁剪范围内通过无混合的重置绘制，用预乘背景直接替换旧像素。
-重置与内容共享一次缓冲上传，使用不同绘制区间；普通内容仍使用 source-over，LCD 文字仍使用
-dual-source blending。透明重置不会累积 alpha，也不会改变损伤范围外的像素，不依赖后续重绘来
-完成擦除。重置后，GPU 内容按以下顺序绘制：
-
-```text
-基础矩形 -> 内联图像 -> 基础字形 -> 浮层矩形 -> 浮层字形
-```
-
-裁剪矩形把重绘限制在损伤区域内。渲染器的 `wgpu::util::TextureBlitter` 在提交和
-呈现前把保留帧复制到交换链。表面格式固定为 `TextureFormat::Bgra8UnormSrgb`；颜色在
-进入着色器前转为线性值，让 sRGB 目标只执行一次伽马编码。
+损伤区域与绘制顺序见[渲染与字体](Rendering-and-Fonts)。
 
 ### 诊断
 

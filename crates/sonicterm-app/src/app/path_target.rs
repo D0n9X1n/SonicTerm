@@ -1379,6 +1379,32 @@ fn unsafe_path_cell(cell: &&Cell) -> bool {
         || cell.extras().is_some_and(|extras| !extras.is_empty())
 }
 
+/// Resolve a bounded local OSC 7 snapshot to a native absolute launch directory without filesystem I/O.
+pub(super) fn local_launch_cwd(
+    cwd: &Osc7Cwd,
+    style: PathStyle,
+    local_hostname: &str,
+) -> Option<PathBuf> {
+    if cwd.path.len() > 4096
+        || cwd.path.chars().any(char::is_control)
+        || !authority_is_local(&cwd.authority, local_hostname)
+    {
+        // When: cwd is oversized, controlled, or remote, it must not redirect a new local shell.
+        return None;
+    }
+    match style {
+        PathStyle::Posix => normalize_posix_cwd(&cwd.path).map(PathBuf::from),
+        PathStyle::Windows => {
+            // When: style is Windows, normalize OSC 7 drive paths without treating a relative drive designator as absolute.
+            if cwd.path.len() == 2 && cwd.path.as_bytes()[1] == b':' {
+                // When: cwd.path is a bare drive designator, do not promote it to that drive's root.
+                return None;
+            }
+            normalize_windows_cwd(&cwd.path).map(PathBuf::from)
+        }
+    }
+}
+
 fn authority_is_local(authority: &str, local_hostname: &str) -> bool {
     authority.is_empty()
         || authority.eq_ignore_ascii_case("localhost")

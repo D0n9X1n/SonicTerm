@@ -134,10 +134,9 @@ Search uses `colors.ansi.yellow` for every match and
 `colors.bright.green` for the current match. Both use `background` for the text
 on top of the highlight.
 
-The current renderer does not read `selection_fg`, `colors.tab.hover_bg`,
-`colors.tab.hover_fg`, or `colors.tab.close_button_fg`. Keep them in custom
-files because the current theme schema still requires all except `hover_fg`.
-Their values currently have no visual effect.
+Keep `selection_fg`, `colors.tab.hover_bg`, `colors.tab.hover_fg`, and
+`colors.tab.close_button_fg` in custom files: the schema requires all except
+`hover_fg`, although none currently affects rendering.
 
 `accessibility.high_contrast = true` is applied after theme loading. It replaces
 only `foreground` with `#ffffff` and `background` with `#000000`; the ANSI,
@@ -284,9 +283,8 @@ tint 强度等 UI 颜色。窗口透明度和原生材质属于 `sonicterm.toml`
 搜索的所有命中使用 `colors.ansi.yellow`，当前命中使用
 `colors.bright.green`。两者上方的文字都使用 `background`。
 
-当前 renderer 不读取 `selection_fg`、`colors.tab.hover_bg`、
-`colors.tab.hover_fg` 或 `colors.tab.close_button_fg`。自定义主题仍应保留这些
-字段，因为当前 schema 除 `hover_fg` 外仍要求它们存在。它们目前没有视觉效果。
+自定义主题应保留 `selection_fg`、`colors.tab.hover_bg`、`colors.tab.hover_fg` 和
+`colors.tab.close_button_fg`：除 `hover_fg` 外都为 schema 必需字段，尽管目前均不影响渲染。
 
 主题加载后还会应用 `accessibility.high_contrast = true`。该设置只把
 `foreground` 改为 `#ffffff`、把 `background` 改为 `#000000`；ANSI、光标、

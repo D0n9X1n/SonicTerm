@@ -344,6 +344,7 @@ impl Drop for StagingReservation {
 /// of one per link, while still recovering as soon as content scrolls away.
 const HYPERLINK_RECLAIM_BACKOFF_LINKS: u32 = 256;
 const MAX_RAW_OSC4_BYTES: usize = 4096;
+const MAX_SEMANTIC_OSC_BYTES: usize = 16 * 1024;
 const MAX_ITERM2_METADATA_BYTES: usize = 1024;
 const ITERM2_OSC_PREFIX: &[u8; 10] = b"1337;File=";
 const OSC4_PREFIX: &[u8; 2] = b"4;";
@@ -585,7 +586,9 @@ pub struct MediaEvent {
 pub enum CommandEvent {
     /// Prompt started (`OSC 133 ; A`).
     PromptStart,
-    /// Command started (`OSC 133 ; B` or `OSC 133 ; C`).
+    /// Prompt ended and editable input began (`OSC 133 ; B`).
+    PromptEnd,
+    /// Command execution started (`OSC 133 ; C`).
     CmdStart,
     /// Command ended, optionally with an exit code (`OSC 133 ; D ; <code>`).
     CmdEnd(Option<u8>),
@@ -632,6 +635,8 @@ pub struct Parser {
 enum RawOsc {
     /// Checking a bounded OSC prefix before choosing vte or media ownership.
     Probe { content: [u8; ITERM2_OSC_PREFIX.len()], content_len: u8 },
+    /// Complete title, CWD, or hyperlink payload, independent of vte's parameter count.
+    Semantic { code: u8, content: Vec<u8>, pending_esc: bool },
     /// Capturing bytes after `OSC 4 ;` until BEL or ST.
     Palette { content: Vec<u8> },
     /// Streaming an iTerm2 file payload through the process media reservation.
@@ -1160,8 +1165,22 @@ impl Parser {
                     content_len += 1;
                 }
                 let prefix = &content[..usize::from(content_len)];
-                if !ITERM2_OSC_PREFIX.starts_with(prefix) && !OSC4_PREFIX.starts_with(prefix) {
-                    // When: prefix matches neither OSC 1337 nor OSC 4, return ownership to vte.
+                if matches!(prefix, b"0;" | b"2;" | b"7;" | b"8;") {
+                    // When: prefix matches 0, 2, 7, or 8, own its payload before vte can split or truncate it.
+                    self.inner = vte::Parser::new();
+                    self.pending_esc = false;
+                    self.raw_osc = Some(RawOsc::Semantic {
+                        code: prefix[0] - b'0',
+                        content: Vec::new(),
+                        pending_esc: false,
+                    });
+                    return true;
+                }
+                if !ITERM2_OSC_PREFIX.starts_with(prefix)
+                    && !OSC4_PREFIX.starts_with(prefix)
+                    && ![b"0;", b"2;", b"7;", b"8;"].iter().any(|value| value.starts_with(prefix))
+                {
+                    // When: prefix matches no owned OSC family, return ownership to vte.
                     return false;
                 }
                 // When: prefix selects OSC 4, complete OSC 1337, or continued bounded probing.
@@ -1180,6 +1199,48 @@ impl Parser {
                     self.raw_osc = Some(RawOsc::Probe { content, content_len });
                 }
                 false
+            }
+            RawOsc::Semantic { code, mut content, mut pending_esc } => {
+                if matches!(byte, 0x18 | 0x1a) {
+                    // When: byte matches 0x18 or 0x1a, discard semantic state before returning to ground.
+                    self.performer.invalidate_semantic_osc(code);
+                    self.finish_escape();
+                    return true;
+                }
+                if pending_esc {
+                    // When: pending_esc is set, only backslash completes ST; other escapes retain normal parser ownership.
+                    if byte == b'\\' {
+                        // When: byte completes ST, apply only the complete semantic payload.
+                        self.performer.handle_semantic_osc(code, &content);
+                        self.finish_escape();
+                        return true;
+                    }
+                    self.performer.invalidate_semantic_osc(code);
+                    self.finish_escape();
+                    self.feed_vte_byte(0x1b);
+                    return false;
+                }
+                if byte == 0x07 {
+                    // When: byte is BEL, dispatch the complete bounded semantic payload.
+                    self.performer.handle_semantic_osc(code, &content);
+                    self.finish_escape();
+                    return true;
+                }
+                if byte == 0x1b {
+                    pending_esc = true;
+                } else if content.len() == MAX_SEMANTIC_OSC_BYTES {
+                    // When: content reaches MAX_SEMANTIC_OSC_BYTES, refuse the whole update and swallow its remaining payload.
+                    self.performer.invalidate_semantic_osc(code);
+                    self.discarding_oversized_escape = true;
+                    self.escape_family = EscapeFamily::Osc;
+                    self.discard_escape_pending_esc = false;
+                    return true;
+                } else {
+                    // When: byte is payload and content remains below its cap, retain it for whole-message validation.
+                    content.push(byte);
+                }
+                self.raw_osc = Some(RawOsc::Semantic { code, content, pending_esc });
+                true
             }
             RawOsc::Palette { mut content } => {
                 match byte {
@@ -1266,7 +1327,9 @@ impl Parser {
             .map(MediaCapture::retained_bytes)
             .sum::<usize>();
         let osc_bytes = match &self.raw_osc {
-            Some(RawOsc::Palette { content }) => content.capacity(),
+            Some(RawOsc::Palette { content }) | Some(RawOsc::Semantic { content, .. }) => {
+                content.capacity()
+            }
             Some(RawOsc::Iterm2 { capture, .. }) => capture.retained_bytes(),
             Some(RawOsc::Probe { .. }) | None => 0,
         };
@@ -1296,7 +1359,10 @@ impl Parser {
             .sum::<usize>();
         let osc = match &self.raw_osc {
             Some(RawOsc::Iterm2 { capture, .. }) => capture.seen,
-            Some(RawOsc::Probe { .. }) | Some(RawOsc::Palette { .. }) | None => 0,
+            Some(RawOsc::Probe { .. })
+            | Some(RawOsc::Palette { .. })
+            | Some(RawOsc::Semantic { .. })
+            | None => 0,
         };
         direct.saturating_add(osc)
     }
@@ -1325,21 +1391,30 @@ impl Parser {
     /// OSC palette accumulation is retaining bytes.
     pub fn cancel_capture(&mut self) -> usize {
         let released = self.retained_amount().bytes;
-        if released == 0 && self.live_capture_count() == 0 {
+        let semantic = match self.raw_osc.as_ref() {
+            Some(RawOsc::Semantic { code, pending_esc, .. }) => Some((*code, *pending_esc)),
+            _ => None,
+        };
+        if released == 0 && self.live_capture_count() == 0 && semantic.is_none() {
             // When: released and live_capture_count show no capture, keep ground unchanged rather than swallowing ordinary output.
             return 0;
         }
-        let escape_family = if matches!(self.raw_osc, Some(RawOsc::Iterm2 { .. })) {
-            EscapeFamily::Osc
-        } else {
-            EscapeFamily::String
-        };
+        let escape_family =
+            if matches!(self.raw_osc, Some(RawOsc::Iterm2 { .. } | RawOsc::Semantic { .. })) {
+                EscapeFamily::Osc
+            } else {
+                EscapeFamily::String
+            };
+        if let Some((code, _)) = semantic {
+            self.performer.invalidate_semantic_osc(code);
+        }
         self.inner = vte::Parser::new();
         self.reset_cancelled_escape();
-        // APC/DCS use string termination while OSC 1337 additionally accepts BEL.
+        // OSC payloads also accept BEL, unlike APC/DCS strings.
         self.escape_family = escape_family;
         self.discarding_oversized_escape = true;
-        self.discard_exits_on_newline = true;
+        self.discard_escape_pending_esc = semantic.is_some_and(|(_, pending)| pending);
+        self.discard_exits_on_newline = semantic.is_none();
         self.performer.fast_path_ready = false;
         released
     }
@@ -1755,6 +1830,51 @@ impl Performer {
             fill,
         );
         self.last_printed_char = Some(ch);
+    }
+
+    fn invalidate_semantic_osc(&mut self, code: u8) {
+        // When: code selects CWD or hyperlink state, revoke it; other codes preserve the prior display title.
+        match code {
+            7 => {
+                self.cwd_revision = self.cwd_revision.wrapping_add(1);
+                self.osc7_cwd = None;
+            }
+            8 => {
+                self.current_hyperlink = None;
+                self.events.push(VtEvent::Hyperlink { id: None, uri: String::new() });
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_semantic_osc(&mut self, code: u8, content: &[u8]) {
+        let Ok(text) = std::str::from_utf8(content) else {
+            // When: content is invalid UTF-8, reject the update rather than replacing bytes in a path or URI.
+            self.invalidate_semantic_osc(code);
+            return;
+        };
+        if text.chars().any(char::is_control) {
+            // When: text contains control characters, do not authorize a hidden path or link target.
+            self.invalidate_semantic_osc(code);
+            return;
+        }
+        match code {
+            0 => self.osc_dispatch(&[b"0", content], false),
+            2 => self.osc_dispatch(&[b"2", content], false),
+            7 => self.osc_dispatch(&[b"7", content], false),
+            8 => {
+                // When: code is OSC 8, separate link parameters from the full URI without splitting the URI again.
+                let Some((parameters, uri)) = text.split_once(';') else {
+                    // When: text lacks the URI separator, end any preceding hyperlink.
+                    self.invalidate_semantic_osc(code);
+                    return;
+                };
+                self.osc_dispatch(&[b"8", parameters.as_bytes(), uri.as_bytes()], false);
+            }
+            _ => {
+                // When: code is outside the owned OSC families, leave terminal state unchanged.
+            }
+        }
     }
 
     fn clear_decrqss(&mut self) {
@@ -2722,7 +2842,11 @@ impl Perform for Performer {
                 let id = params.get(1).and_then(|s| std::str::from_utf8(s).ok());
                 let uri = params.get(2).and_then(|s| std::str::from_utf8(s).ok());
                 if let Some(uri) = uri {
-                    let id_norm = id.filter(|s| !s.is_empty());
+                    let id_norm = id
+                        .and_then(|parameters| {
+                            parameters.split(':').find_map(|part| part.strip_prefix("id="))
+                        })
+                        .filter(|value| !value.is_empty());
                     if uri.is_empty() {
                         self.current_hyperlink = None;
                         self.events.push(VtEvent::Hyperlink {
@@ -2902,7 +3026,7 @@ impl Perform for Performer {
                 // OSC 133 ; <kind> [; <args>] ST — FinalTerm/WezTerm shell
                 // integration. Kinds:
                 //   A → prompt start
-                //   B → command-line edit start / command start in SonicTerm
+                //   B → prompt end / editable input start
                 //   C → command output start
                 //   D [; exit_code] → command finished
                 let kind = params.get(1).and_then(|s| s.first().copied());
@@ -2911,7 +3035,10 @@ impl Perform for Performer {
                         self.grid.record_prompt_start();
                         self.events.push(VtEvent::Command(CommandEvent::PromptStart));
                     }
-                    Some(b'B') | Some(b'C') => {
+                    Some(b'B') => {
+                        self.events.push(VtEvent::Command(CommandEvent::PromptEnd));
+                    }
+                    Some(b'C') => {
                         self.events.push(VtEvent::Command(CommandEvent::CmdStart));
                     }
                     Some(b'D') => {

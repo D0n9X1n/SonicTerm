@@ -2677,6 +2677,9 @@ pub struct App {
     /// which pane an action targeted without constructing a process-backed PTY.
     #[doc(hidden)]
     pub(super) test_pty_writes: Arc<Mutex<Vec<(u64, Vec<u8>)>>>,
+    /// Unit-test observation of actual PTY spawn inputs; absent from production builds.
+    #[cfg(test)]
+    test_pane_launches: std::cell::RefCell<Vec<(u64, pane_launch::PaneLaunch)>>,
     /// Whether the PTY write ledger above is actually recorded. `false` in
     /// production so `dispatch_pty_write_effect` does no lock/clone/push per
     /// write (the ledger would otherwise grow unbounded for the whole
@@ -3202,6 +3205,8 @@ impl App {
             test_clipboard_text: None,
             test_clipboard_write_failure: false,
             test_pty_writes: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(test)]
+            test_pane_launches: std::cell::RefCell::new(Vec::new()),
             // No event-loop proxy ⇒ headless/test construction ⇒ record PTY
             // writes for assertions. Production always passes `Some(proxy)`,
             // so the ledger stays disabled and adds no per-write cost.
@@ -3407,9 +3412,8 @@ pub fn poll_command_events_for_tab_state(
                     CommandStatus::Done { exit, until: ev.at + Duration::from_secs(3) };
                 maybe_notify_long_command(config, ev.duration, exit);
             }
-            CommandEvent::PromptStart => {
-                // When: `PromptStart` marks the shell drawing its prompt, not a
-                // command boundary, so the tab's running/done status stands.
+            CommandEvent::PromptStart | CommandEvent::PromptEnd => {
+                // When: PromptStart or PromptEnd arrives, no command execution begins; preserve the running/done status.
             }
         }
     }
