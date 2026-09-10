@@ -324,6 +324,136 @@ fn parser_exposes_typed_osc7_snapshot_without_changing_cwd() {
     assert_ne!(parser.cwd_revision(), revision);
 }
 
+// Full OSC payloads survive separators, Unicode, both terminators, and every PTY chunk boundary.
+#[test]
+fn osc_semantic_payloads_preserve_full_text() {
+    let title = format!("work · {}终端", "part;".repeat(20));
+    let path = format!("/tmp/{}项目", "dir;".repeat(20));
+    let uri = format!("https://example.com/{}路径", "part;".repeat(20));
+    for terminator in ["\x07", "\x1b\\"] {
+        let input = format!(
+            "\x1b]2;{title}{terminator}\x1b]7;file://localhost{path}{terminator}\x1b]8;foo=bar:id=link;{uri}{terminator}X\x1b]8;;{terminator}Y"
+        );
+        for split in 0..=input.len() {
+            let mut parser = Parser::new(Grid::new(8, 2));
+            parser.advance(&input.as_bytes()[..split]);
+            parser.advance(&input.as_bytes()[split..]);
+            assert_eq!(parser.title(), Some(title.as_str()));
+            assert_eq!(parser.osc7_cwd().unwrap().path, path);
+            let link = parser.grid().row(0)[0].hyperlink().unwrap();
+            let link = parser.hyperlinks().lookup(link).unwrap();
+            assert_eq!(link.uri, uri);
+            assert_eq!(link.id.as_deref(), Some("link"));
+            assert!(parser.grid().row(0)[1].hyperlink().is_none());
+            assert_eq!(parser.retained_amount().bytes, 0);
+        }
+    }
+}
+
+// A malformed hyperlink must not silently reuse the preceding link's target.
+#[test]
+fn osc_invalid_links_close_previous_link() {
+    for invalid in [b"8;id=bad;\xff".as_slice(), b"8;missing-uri", b"8;;bad\nuri"] {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        parser.advance(b"\x1b]8;id=old;https://example.com\x07X");
+        parser.advance(&[b"\x1b]".as_slice(), invalid, b"\x07Y"].concat());
+        assert!(parser.grid().row(0)[0].hyperlink().is_some());
+        assert!(parser.grid().row(0)[1].hyperlink().is_none());
+    }
+}
+
+// Whole-payload capture stays bounded and never dispatches cancelled or interrupted updates.
+#[test]
+fn osc_semantic_capture_is_bounded_and_recovers() {
+    let cap = super::MAX_SEMANTIC_OSC_BYTES;
+    for code in [0, 2, 7, 8] {
+        for cancel in [b"\x18".as_slice(), b"\x1a", b"\x1b[0m"] {
+            let mut parser = Parser::new(Grid::new(8, 2));
+            parser.advance(format!("\x1b]{code};pending").as_bytes());
+            parser.advance(cancel);
+            parser.advance(b"X");
+            assert_eq!(parser.grid().row(0)[0].ch, 'X');
+            assert_eq!(parser.title(), None);
+            assert_eq!(parser.osc7_cwd(), None);
+            assert_eq!(parser.retained_amount().bytes, 0);
+        }
+        let mut parser = Parser::new(Grid::new(8, 2));
+        parser.advance(format!("\x1b]{code};").as_bytes());
+        parser.advance(&vec![b'a'; cap]);
+        assert!(parser.retained_amount().bytes <= cap);
+        parser.advance(b"b");
+        assert!(parser.discarding_oversized_escape);
+        assert_eq!(parser.retained_amount().bytes, 0);
+        parser.advance(b"\x1b\\X");
+        assert_eq!(parser.grid().row(0)[0].ch, 'X');
+        assert_eq!(parser.title(), None);
+    }
+}
+
+// Host cancellation clears inherited trust and keeps swallowing until the OSC terminator.
+#[test]
+fn osc_semantic_host_cancellation_clears_prior_link_and_cwd() {
+    for pending in [b"\x1b]7;file:///pending".as_slice(), b"\x1b]8;;https://pending"] {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        parser.advance(b"\x1b]7;file:///tmp\x07\x1b]8;;https://example.com\x07");
+        parser.advance(pending);
+        assert!(parser.cancel_capture() > 0);
+        parser.advance(b"remaining\x07X");
+        assert_eq!(parser.grid().row(0)[0].ch, 'X');
+        if pending[2] == b'7' {
+            assert!(parser.osc7_cwd().is_none());
+        } else {
+            assert!(parser.current_hyperlink().is_none());
+        }
+    }
+}
+
+// An OSC takeover cancels an incomplete DCS query even when every byte arrives separately.
+#[test]
+fn osc_semantic_takeover_does_not_complete_decrqss() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    let mut reply = Vec::new();
+    for byte in b"\x1bP$qm\x1b]0;session;window\x1b\\" {
+        reply.extend(parser.advance_with_replies(&[*byte]).2);
+    }
+    assert!(reply.is_empty());
+    assert_eq!(parser.title(), Some("session;window"));
+}
+
+// Hyperlink identity uses id= only; unrecognized parameters cannot split the same group.
+#[test]
+fn osc_hyperlink_ids_ignore_unknown_parameters() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    parser.advance(b"\x1b]8;foo=a:id=same;https://example.com/a;b\x07X");
+    parser.advance(b"\x1b]8;id=same:bar=b;https://example.com/a;b\x07Y");
+    let row = parser.grid().row(0);
+    assert_eq!(row[0].hyperlink(), row[1].hyperlink());
+    parser.advance(b"\x1b]8;unknown=x;https://example.com\x07Z");
+    let id = parser.grid().row(0)[2].hyperlink().unwrap();
+    assert!(parser.hyperlinks().lookup(id).unwrap().id.is_none());
+}
+
+// Prompt input is not command execution, and one A-to-D cycle owns one grid region.
+#[test]
+fn osc133_prompt_input_does_not_start_command() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    let events = parser.advance(b"\x1b]133;A\x07\x1b]133;B\x07");
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, VtEvent::Command(super::CommandEvent::CmdStart))));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, VtEvent::Command(super::CommandEvent::PromptEnd))));
+    assert_eq!(parser.grid().prompts_len(), 1);
+    assert!(parser.grid().prompts().next().unwrap().end_row.is_none());
+    let events = parser.advance(b"\x1b]133;C\x07\x1b]133;D;3\x07");
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, VtEvent::Command(super::CommandEvent::CmdStart))));
+    assert_eq!(parser.grid().prompts_len(), 1);
+    assert_eq!(parser.grid().prompts().next().unwrap().exit_code, Some(3));
+}
+
 /// Neovim's exact startup probe must learn the active curl without printing or changing it.
 #[test]
 fn decrqss_neovim_startup_probe_reports_curly_sgr() {

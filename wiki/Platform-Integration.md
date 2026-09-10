@@ -2,9 +2,9 @@
 
 ## English
 
-This page owns SonicTerm's native platform boundaries. Package commands and file
-layouts belong on [Packaging](Packaging); CI and release behavior belong on
-[Development and Release](Development-and-Release).
+Find what differs on macOS, Windows, and Linux below. The platform matrix gives
+a quick comparison. Build packages with [Packaging](Packaging); verification and
+release steps are in [Development and Release](Development-and-Release).
 
 ## Shared and native ownership
 
@@ -26,12 +26,9 @@ main-thread object, platform ABI, desktop identity, or installer metadata.
 Terminal parsing is in `sonicterm-vt`; local PTY/ConPTY transport is behind
 `sonicterm-io::PtyHandle`; rendering is in `sonicterm-gpu`.
 
-All three binaries install panic and exit evidence before config loading, arm a
-session marker and breadcrumb writer, load config, initialize logging from
-`[logging]`, report prior sessions, load theme and keymap assets, create an
-`AppStateMachine`, build the platform shell, and run the shared winit app. User
-state is under `~/.sonicterm`; packaged assets are resolved by
-`sonicterm-cfg::assets`.
+The binaries share diagnostic, config, logging, asset, state-machine, and shell
+startup; the ordered sequence is in [Runtime Lifecycle](Runtime-Lifecycle).
+User state is under `~/.sonicterm`; `sonicterm-cfg::assets` resolves packaged assets.
 
 Terminal IME geometry is shared app behavior: each window sends the active
 pane's physical cursor rectangle, including its origin and content padding once.
@@ -252,8 +249,8 @@ Windows binaries.
 
 ## 中文
 
-本页负责说明 SonicTerm 的原生平台边界。打包命令和文件布局见[打包](Packaging)；
-CI 与发布行为见[开发与发布](Development-and-Release)。
+本页说明 macOS、Windows 与 Linux 的差异，平台矩阵可供快速对照。构建包见
+[打包](Packaging)，验证与发布步骤见[开发与发布](Development-and-Release)。
 
 ## 共享职责与原生职责
 
@@ -274,10 +271,9 @@ flowchart TD
 终端解析位于 `sonicterm-vt`；本地 PTY/ConPTY 封装在
 `sonicterm-io::PtyHandle` 后；渲染位于 `sonicterm-gpu`。
 
-三个二进制都会在读取配置前安装 panic 与退出证据，创建会话标记和诊断记录 worker，
-读取配置，用 `[logging]` 初始化日志，报告旧会话，加载主题与键位资源，创建
-`AppStateMachine`，构建平台 shell，再运行共享 winit app。用户状态位于
-`~/.sonicterm`；打包资源统一由 `sonicterm-cfg::assets` 查找。
+三个二进制共用诊断、配置、日志、资源、状态机和 shell 启动流程；准确顺序见
+[运行时生命周期](Runtime-Lifecycle)。用户状态位于 `~/.sonicterm`；打包资源由
+`sonicterm-cfg::assets` 查找。
 
 终端输入法几何属于共享 app：每个窗口发送活动窗格的物理光标矩形，只加一次窗格原点和
 内容内边距。去重键包含窗格身份、物理位置和物理尺寸，不仅是行列。命令面板和搜索框保留

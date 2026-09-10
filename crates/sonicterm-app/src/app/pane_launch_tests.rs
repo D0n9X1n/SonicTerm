@@ -6,6 +6,98 @@ fn request(file: &str) -> OpenScriptRequest {
     OpenScriptRequest::resolve(PathBuf::from(file), root).unwrap()
 }
 
+/// Only local, bounded native absolute directories may replace ordinary shell defaults.
+#[test]
+fn inherited_cwd_validates_local_authority_and_native_paths() {
+    for authority in ["", "localhost", "MY-HOST"] {
+        for (style, path, expected) in [
+            (PathStyle::Posix, "/", "/"),
+            (PathStyle::Posix, "/work/a b;c", "/work/a b;c"),
+            (PathStyle::Windows, "/C:/", "C:\\"),
+            (PathStyle::Windows, "/c:/work/a b;c", r"C:\work\a b;c"),
+        ] {
+            let cwd = Osc7Cwd { authority: authority.into(), path: path.into() };
+            let launch = PaneLaunch::default().inherit_cwd(Some(&cwd), style, "my-host");
+            assert_eq!(launch.cwd, Some(PathBuf::from(expected)));
+        }
+    }
+    for (style, authority, path) in [
+        (PathStyle::Posix, "remote", "/work"),
+        (PathStyle::Posix, "localhost", "relative"),
+        (PathStyle::Posix, "", r"C:\work"),
+        (PathStyle::Windows, "", "/work"),
+        (PathStyle::Windows, "", "C:"),
+        (PathStyle::Windows, "", r"\\server\share"),
+        (PathStyle::Posix, "", "//server/share"),
+        (PathStyle::Posix, "", "/work\nunsafe"),
+    ] {
+        let cwd = Osc7Cwd { authority: authority.into(), path: path.into() };
+        assert_eq!(PaneLaunch::default().inherit_cwd(Some(&cwd), style, "my-host").cwd, None);
+    }
+    let huge = Osc7Cwd { authority: String::new(), path: format!("/{}", "x".repeat(4096)) };
+    assert_eq!(PaneLaunch::default().inherit_cwd(Some(&huge), PathStyle::Posix, "host").cwd, None);
+}
+
+/// Explicit launch directories and script parents outrank a source pane's OSC 7.
+#[test]
+fn inherited_cwd_never_overrides_explicit_or_script_launch() {
+    let inherited = Osc7Cwd { authority: String::new(), path: "/different".into() };
+    let script = PaneLaunch::for_script(request("scripts/build.sh"));
+    let explicit = PaneLaunch { cwd: Some(PathBuf::from("/explicit")), script: None };
+    for launch in [script, explicit] {
+        assert_eq!(launch.clone().inherit_cwd(Some(&inherited), PathStyle::Posix, "host"), launch);
+    }
+}
+
+/// Window snapshots stay pane-local and fail closed on parser contention or invalid OSC 7.
+#[test]
+fn source_window_selects_only_its_active_pane_and_never_waits() {
+    use crate::app::App;
+    use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme};
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let main = app.__test_seed_tab("main");
+    let child = app.__test_seed_child_window(&["child", "other"]);
+    let prefix = if cfg!(windows) { "/C:" } else { "" };
+    app.__test_advance_pane_parser(
+        main,
+        format!("\x1b]7;file://localhost{prefix}/main\x07").as_bytes(),
+    );
+    let pane_ids: Vec<_> =
+        app.windows[&child].tab_states.iter().map(|tab| tab.active_pane).collect();
+    for (pane, name) in pane_ids.iter().zip(["child", "other"]) {
+        app.__test_advance_child_pane_parser(
+            child,
+            *pane,
+            format!("\x1b]7;file://localhost{prefix}/{name}\x07").as_bytes(),
+        );
+    }
+    app.windows.get_mut(&child).unwrap().tabs.activate(0);
+    let expected = if cfg!(windows) { r"C:\child" } else { "/child" };
+    let selected = PaneLaunch::from_window(app.windows.get(&child), "host");
+    assert_eq!(selected.cwd, Some(PathBuf::from(expected)));
+    assert_ne!(selected.cwd, PaneLaunch::from_window(app.main(), "host").cwd);
+    // Same-tab splits must use active_pane, not the first tree leaf or another tab.
+    let window = app.windows.get_mut(&child).unwrap();
+    let inactive = window.tab_states.remove(1).active_pane;
+    let tab = &mut window.tab_states[0];
+    assert!(tab.tree.split(tab.active_pane, sonicterm_cfg::keymap::Direction::Right, inactive));
+    tab.active_pane = inactive;
+    let other = if cfg!(windows) { r"C:\other" } else { "/other" };
+    assert_eq!(
+        PaneLaunch::from_window(app.windows.get(&child), "host").cwd,
+        Some(PathBuf::from(other))
+    );
+    app.windows.get_mut(&child).unwrap().tab_states[0].active_pane = pane_ids[0];
+    let parser = app.windows[&child].panes[&pane_ids[0]].parser.clone();
+    let guard = parser.lock();
+    assert_eq!(PaneLaunch::from_window(app.windows.get(&child), "host").cwd, None);
+    drop(guard);
+    parser.lock().advance(b"\x1b]7;file://remote/tmp\x07");
+    assert_eq!(PaneLaunch::from_window(app.windows.get(&child), "host").cwd, None);
+    parser.lock().advance(b"\x1b]7;file://localhost/bad%xx\x07");
+    assert_eq!(PaneLaunch::from_window(app.windows.get(&child), "host").cwd, None);
+}
+
 #[test]
 fn default_launch_preserves_the_existing_shell_defaults() {
     let launch = PaneLaunch::default();

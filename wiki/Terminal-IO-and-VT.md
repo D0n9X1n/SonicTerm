@@ -2,11 +2,10 @@
 
 ## English
 
-SonicTerm’s terminal core moves bytes between a child process and a bounded
-cell grid. This page owns the local PTY (pseudo-terminal) lifecycle, VT
-terminal-control protocols, grid rules, and terminal input routing. Rendering is covered by
-[Rendering and Fonts](Rendering-and-Fonts) and [Rendering Modes](Rendering-Modes);
-resource totals are in [Memory](Memory).
+A PTY (pseudo-terminal) carries bytes between SonicTerm and a child program.
+The parser turns returned bytes into grid cells and terminal events. This page
+explains that path and supported protocols; drawing is in
+[Rendering and Fonts](Rendering-and-Fonts), limits in [Memory](Memory).
 
 ### Scope
 
@@ -177,13 +176,30 @@ bounds without scrolling protected rows. LF/VT/FF use the current erase fill;
 IND/NEL use default fill, and only NEL returns to column zero. Hard advances
 cancel delayed wrap and clear the destination's automatic-wrap provenance.
 
-OSC 7 keeps the decoded path separate from its authority-bearing, host-aware
-snapshot. Relative local-path authorization uses only the strict snapshot. A
-raw OSC 4 collector, capped at 4 KiB, preserves palette queries that exceed
-vte’s parameter count and suppresses the truncated duplicate callback. Parser-owned
-sequence-family state recognizes kitty APC after any completed escape, including
-C1 APC and an `ESC` / `_` split across PTY chunks. A bounded prefix probe moves
-only confirmed iTerm2 `OSC 1337;File=` input out of vte’s private OSC buffer.
+OSC handling has a bounded shell-integration scope, not full WezTerm parity.
+OSC 0/2/7/8 use a raw collector capped at 16 KiB for the whole payload, avoiding
+vte's 16-parameter truncation. Input must be valid UTF-8 without control characters
+and end with BEL or a complete `ESC \`. Cancellation or rejection clears link/CWD
+trust but preserves the prior displayed title. OSC 8 still limits each retained
+URI to 8 KiB and client id to 1 KiB.
+
+
+- **OSC 7:** decoded path and authority stay separate. Local CWD use requires an
+  empty authority, `localhost`, or the exact local hostname, a native absolute
+  path, and at most 4,096 decoded UTF-8 bytes. Ordinary tabs and splits in main
+  and child windows may inherit the source pane's validated CWD. An explicit CWD
+  wins; new windows do not inherit it. Missing, invalid, or foreign-host reports
+  never authorize local relative paths or substitute another pane's directory.
+- **OSC 8:** preserve the full URI, including semicolons. Only `id=` is extracted
+  from the parameter field; other parameters are not treated as the client id.
+- **OSC 133:** `B` emits `PromptEnd` and does not start command timing; `C` marks
+  execution start. `A`/`D` retain their existing prompt-region behavior.
+
+The raw OSC 4 collector retains queries beyond vte's parameter count, up to
+4 KiB, and suppresses the truncated duplicate callback. Parser-owned sequence
+state recognizes kitty APC after completed escapes, including C1 APC and chunk-split
+`ESC` / `_`. A bounded prefix probe takes only confirmed `OSC 1337;File=` media
+out of vte's private OSC buffer.
 
 An escape sequence may retain at most 1 MiB. After that, the parser discards
 through the sequence terminator instead of treating the payload as printable
@@ -195,6 +211,41 @@ Oversized, cancelled, or truncated media is not partially rendered; after
 cancellation the parser continues swallowing that payload until its terminator.
 Two unchanged 30 s progress samples cancel a stalled capture, so the stated
 stall interval is one minute.
+
+### Keyboard protocol reference
+
+Other keys and modifiers follow these rules:
+
+- **Control and keymap precedence:** a configured keymap may consume a chord
+  before PTY encoding. Otherwise Control is checked before Alt: Control+A
+  becomes `0x01`, and Control+Alt+A adds an `ESC` prefix to that control byte.
+  The legacy aliases cover Space/@/2, `[ /3`, `\ /4`, `] /5`, `^/~/6`,
+  `_/ /7`, and `?/8`.
+- **Text and BackTab:** Alt prefixes `ESC` to default legacy text. The OS supplies
+  shifted and layout-specific text. Tab emits HT. At `modifyOtherKeys` level 1,
+  plain Shift+Tab remains `CSI Z`, while other modified Tab forms and modified
+  Enter use `CSI 27 ; modifier ; code ~`; level 2 also makes Shift+Tab
+  `CSI 27 ; 2 ; 9 ~`. Level 1 keeps its ordinary Shift/Control aliases and
+  Backspace exception; level 2 encodes every supported modified ordinary key.
+- **Negotiated legacy modes:** the pane snapshot includes DECCKM cursor keys,
+  DECKPAM keypad identity, DECBKM Backspace, ANSI newline mode, and xterm
+  `modifyOtherKeys` levels 1 and 2. Modified cursor and function keys preserve
+  Shift, Alt, Control, and Super in the xterm modifier parameter. Function-key
+  coverage extends through F35.
+- **Kitty protocol:** each main or alternate screen has an independent bounded
+  progressive-enhancement stack. Unsupported set modes do nothing, and stored
+  flags retain the protocol's seven data bits. SonicTerm supports
+  disambiguation, event types, alternate keys, all-keys reporting, associated
+  text, functional and keypad identities, and modifier-key identities.
+  Alternate-key reporting alone enriches only keys already represented as
+  CSI-u; it does not change raw text, DECKPAM, or terminfo encodings. Shift+Tab
+  is `CSI 9 ; 2 u` when disambiguated. Repeats and releases carry Kitty event
+  types when requested.
+- **Keypad:** legacy normal mode follows the layout/NumLock result and preserves
+  text modifiers. OS-resolved numeric keypad characters stay digit text even
+  under DECKPAM; non-text events retain physical keypad identity. This uses
+  logical numeric intent rather than measuring NumLock directly. Kitty
+  disambiguation uses its dedicated keypad code points.
 
 ### Mouse tracking and selection
 
@@ -319,10 +370,9 @@ an `SshHandle`, this is not a shipping remote-session feature.
 
 ## 中文
 
-SonicTerm 的终端核心在子进程与有界单元格网格之间传递字节。本页负责本地 PTY
-生命周期、VT 协议、网格规则和终端输入路由。渲染见
-[渲染与字体](Rendering-and-Fonts)和[渲染模式](Rendering-Modes)，资源总量见
-[内存](Memory)。
+PTY（伪终端）在 SonicTerm 与子程序之间传递字节，解析器把返回字节变成网格单元格与
+终端事件。本页说明这条路径和支持的协议；绘制见[渲染与字体](Rendering-and-Fonts)，
+资源上限见[内存](Memory)。
 
 ### 范围
 
@@ -461,11 +511,23 @@ DECRQSS `DCS $ q m ST` 通过终端回复队列报告当前 SGR 样式。回复�
 LF/VT/FF 使用当前擦除填充，IND/NEL 使用默认填充，只有 NEL 回到第零列。硬换行会
 取消延迟换行，并清除目标行的自动换行来源标记。
 
-OSC 7 分开保存解码路径和带权限含义的主机校验快照。相对本地路径授权只使用严格
-快照。原始 OSC 4 收集器上限为 4 KiB，用于保留超过 vte 参数数量上限的调色板查询，
-并抑制被截断的重复回调。解析器自身维护序列族边界，因此 kitty APC 可紧跟任何已完成
-转义序列，并同时支持 C1 APC 与跨 PTY 数据块拆分的 `ESC` / `_`。有界前缀探测只会把
-已确认的 iTerm2 `OSC 1337;File=` 输入从 vte 的私有 OSC 缓冲中接管出来。
+OSC 的 shell 集成仅限以下范围，不表示完整 WezTerm 对等能力。OSC 0/2/7/8 使用整个
+负载最多 16 KiB 的原始收集器，避免 vte 的 16 参数截断。输入必须为无控制字符的有效 UTF-8，
+并以 BEL 或完整 `ESC \` 终止。取消或拒绝会清除链接/CWD 信任，但保留此前显示标题。
+OSC 8 驻留 URI 仍限 8 KiB、客户端 id 限 1 KiB。
+
+
+- **OSC 7：** 分开保存解码路径与 authority。本地 CWD 只接受空 authority、`localhost`
+  或准确本机主机名，路径必须是原生绝对路径，且解码后 UTF-8 不超过 4,096 字节。
+  主窗口和子窗口中的普通新标签页与分屏可继承源窗格已验证的 CWD。显式 CWD 优先；
+  新窗口不继承。缺失、无效或远端报告不会授权本地相对路径，也不会改用其它窗格的目录。
+- **OSC 8：** 保留包含分号的完整 URI；仅从参数字段提取 `id=`，其它参数不充当客户端 id。
+- **OSC 133：** `B` 产生 `PromptEnd`，不启动命令计时；`C` 标记开始执行。
+  `A`/`D` 保持已有提示符区域行为。
+
+原始 OSC 4 收集器保留超出 vte 参数数量的查询，上限 4 KiB，并抑制截断的重复回调。
+解析器自有序列状态允许 kitty APC 紧跟已完成转义，支持 C1 APC 和跨块 `ESC` / `_`。
+有界前缀探测只把已确认的 `OSC 1337;File=` 媒体从 vte 私有 OSC 缓冲接管出来。
 
 单条普通转义序列最多保留 1 MiB；超过后，解析器会一直丢弃到序列终止符，不会把负载
 当作可打印文本。Kitty APC、Sixel DCS 与 iTerm2 OSC 1337 改用同一个媒体契约：单个负载
@@ -473,6 +535,32 @@ OSC 7 分开保存解码路径和带权限含义的主机校验快照。相对�
 13 个并发捕获都获得该下限。无法预留暂存空间时会拒绝整个捕获，不显示任何内容。超大、
 已取消或截断的媒体都不会局部显示；取消后，解析器仍会吞掉该负载直到终止符。连续两次
 30 s 采样都没有进度时取消捕获，因此声明的停滞时间是一分钟。
+
+### 键盘协议参考
+
+其它按键和修饰键遵循以下规则：
+
+- **Control 与键位优先级：** 配置的键位可能在 PTY 编码前接管组合键。否则先判断 Control，
+  再判断 Alt：Control+A 变成 `0x01`，Control+Alt+A 会在该控制字节前加 `ESC`。
+  旧式别名覆盖 Space/@/2、`[ /3`、`\ /4`、`] /5`、`^/~/6`、`_/ /7` 和 `?/8`。
+- **文本与 BackTab：** 默认旧式模式会在 Alt 文本前加 `ESC`；Shift 与布局相关文本由
+  操作系统生成。Tab 发送 HT。在 `modifyOtherKeys` level 1 下，只有普通 Shift+Tab 继续发送
+  `CSI Z`；其它带修饰键的 Tab 形式和带修饰键的 Enter 使用
+  `CSI 27 ; modifier ; code ~`。level 2 也把 Shift+Tab 编码为
+  `CSI 27 ; 2 ; 9 ~`。level 1 保留普通 Shift/Control 别名及 Backspace 例外；level 2
+  会编码所有受支持的带修饰普通按键。
+- **协商的旧式模式：** pane 快照包含 DECCKM 光标键、DECKPAM 小键盘身份、DECBKM
+  Backspace、ANSI newline mode，以及 xterm `modifyOtherKeys` level 1 和 2。带修饰键的
+  光标键与功能键会在 xterm 修饰参数中保留 Shift、Alt、Control 和 Super；功能键覆盖到 F35。
+- **Kitty 协议：** 主屏和备用屏各自维护独立且有界的 progressive-enhancement 栈。
+  不支持的 set mode 不做任何改变，保存的 flag 保留协议的七个数据位。SonicTerm 支持
+  消歧义、事件类型、备用按键、全部按键报告、关联文本、功能键和小键盘身份，以及修饰键
+  自身的身份。单独启用备用按键报告只会补充原本已经使用 CSI-u 的按键，不会改变原始文本、
+  DECKPAM 或 terminfo 编码。启用消歧义时 Shift+Tab 为 `CSI 9 ; 2 u`；程序要求时，重复与
+  释放会带 Kitty 事件类型。
+- **小键盘：** 旧式 normal mode 遵循布局/NumLock 结果并保留文本修饰键；操作系统解析为数字
+  字符的小键盘键在 DECKPAM 下仍发送数字文本，非文本事件保留物理小键盘身份。这使用逻辑
+  数字意图，而非直接测量 NumLock。Kitty 消歧义使用专用的小键盘码点。
 
 ### 鼠标跟踪与选区
 

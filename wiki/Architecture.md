@@ -2,11 +2,11 @@
 
 ## English
 
-This page owns SonicTerm's system shape and crate boundaries. See
-[Architecture Internals](Architecture-Internals) for load-bearing invariants,
-[From Keypress to Pixel](From-Keypress-to-Pixel) for the end-to-end data path,
-and [Runtime Lifecycle](Runtime-Lifecycle) for object lifetimes and state changes.
-The exact crate inventory is in [Crate Reference](Crate-Reference).
+Start here for the system map. Follow one input in
+[From Keypress to Pixel](From-Keypress-to-Pixel), then use
+[Runtime Lifecycle](Runtime-Lifecycle) for state changes,
+[Architecture Internals](Architecture-Internals) for correctness rules, and
+[Crate Reference](Crate-Reference) for exact dependencies.
 
 ### System shape
 
@@ -78,41 +78,22 @@ Each `TabState` owns a `PaneTree`, its active pane id, search state, and command
 status. Each `PaneState` owns its parser, optional `PtyHandle`, redraw target,
 terminal-mode atomics, inline images, and resource charges.
 
-`AppStateMachine` owns backend-free `AppState`. Its `handle` method reduces one
-`AppIntent` into a stable class-sorted effect batch. In the GUI, all of that
-state is observational: no reducer counter, focus value, or overlay flag decides
-live topology. `App::observe_intent` keeps those compatibility observations but
-discards their effects. `App` and `WindowState` remain authoritative for live
-windows, tabs, pane trees, parser locks, renderers, and PTYs.
-
-`App::dispatch_intent` separately handles supported explicit-target work.
-Operational window effects resolve a monotonic `WindowKey` against a live window;
-missing, removed, and zero keys never select main or frontmost. Native input
-resolves its source window's active pane and writes through the bounded PTY queue
-without a transient state machine. Record-only effects cannot claim native
-completion. The full state/intent/effect inventory is in
-[Runtime Lifecycle](Runtime-Lifecycle).
+`AppStateMachine` holds backend-free compatibility observations, not live GUI
+topology. `App::observe_intent` updates them and discards their effects;
+`App::dispatch_intent` handles supported explicit-target work separately.
+Missing, removed, or zero window keys never select main or frontmost. Native
+input goes to its source window's active pane through the bounded PTY queue.
+See [Runtime Lifecycle](Runtime-Lifecycle) for the state/intent/effect inventory
+and the distinction between record-only effects and native completion.
 
 ### Boundary contracts
 
 #### Intent and effect
 
-`AppStateMachine::handle` preserves the backend-free reducer/effect contract.
-`App::observe_intent` records compatibility transitions without executing their
-batch; supported operational intents and explicit effects cross the live app
-boundary separately. Reducer effect classes keep this stable order:
-
-1. `PtyWrite`;
-2. `Render`;
-3. `OsDrag`;
-4. `Clipboard`;
-5. `WindowOp`;
-6. `MenubarUpdate`;
-7. `Log`.
-
-The private follow-on queue is bounded by `MAX_CASCADE_DEPTH = 16`.
-`drain_pending` has no production enqueue source and therefore returns an empty
-batch in normal runs.
+The backend-free reducer keeps stable effect ordering. GUI observations do not
+execute its batch; explicit-target operations cross the live app separately.
+The exact order, cascade bound, and dormant queue are recorded in
+[Runtime Lifecycle](Runtime-Lifecycle).
 
 #### Terminal
 
@@ -131,24 +112,13 @@ The event-loop thread acquires every required parser and inline-image lock with
 guards alive through `GpuRenderer::render`. A failed lock defers the entire
 frame.
 
-`PaneRender` carries a stable pane id, mutable grid view, pixel rectangle,
-viewport, focus, cursor style, broadcast-receiver state, scrollbar alpha, and
-inline images. Production `GpuRenderer::render` receives that pane slice plus
-explicit theme, selection, tabs, search, palette, IME, notification, and hovered
-URL arguments.
-
-Inside `sonicterm-gpu`, one owned `FramePlan` composes frame identity, render mode,
-retained damage, full/content pane clips, viewport row slots, and expected grid
-revisions from immutable metadata. Production assembly consumes that plan rather
-than recomputing those decisions. It holds no grid, copied cells, mutable UI
-controller, font stack, or native/GPU handle. Its vectors follow visible panes
-and dirty rows; retained text identity is a digest, not another payload copy.
-The renderer keeps only the compact key after presentation. Parser guards and
-borrowed grids still span the complete stateful atlas/renderer operation.
-
-`RenderInputs` remains a public render-model type. The two public `Painter`
-traits are dormant source-compatibility seams with no production implementation;
-production rendering uses `PaneRender` and `WeztermPipeline` directly.
+`GpuRenderer::render` receives visible `PaneRender` records plus explicit UI
+arguments. A metadata-only `FramePlan` selects identity, mode, damage, clips,
+viewport slots, and expected revisions; it is not a copied-grid or threaded
+renderer boundary. Production uses `PaneRender` and `WeztermPipeline`, not the
+public compatibility `RenderInputs`/`Painter` seams. See
+[Rendering and Fonts](Rendering-and-Fonts) for frame assembly and
+[Architecture Internals](Architecture-Internals) for guard and revision rules.
 
 #### Fonts
 
@@ -242,11 +212,9 @@ The exact safety conditions are in
 
 ## 中文
 
-本页只说明 SonicTerm 的整体结构和 crate 边界。关键不变量见
-[架构内部机制](Architecture-Internals)，端到端数据路径见
-[从按键到像素](From-Keypress-to-Pixel)，对象寿命和状态变化见
-[运行时生命周期](Runtime-Lifecycle)。完整 crate 清单见
-[Crate 参考](Crate-Reference)。
+先用本页了解系统全貌，再读[从按键到像素](From-Keypress-to-Pixel)跟随一次输入。
+状态变化见[运行时生命周期](Runtime-Lifecycle)，正确性规则见
+[架构内部机制](Architecture-Internals)，准确依赖见[Crate 参考](Crate-Reference)。
 
 ### 系统结构
 
@@ -317,34 +285,18 @@ crate 中身份不变的类型。
 `PaneState` 持有解析器、可选 `PtyHandle`、重绘目标、终端模式原子值、内联图像和
 资源计费令牌。
 
-`AppStateMachine` 持有不依赖后端的 `AppState`；其 `handle` 方法把一个 `AppIntent`
-归约为按类别稳定排序的一批效果。在 GUI 中，这些状态全部只供观察：归约器计数、焦点值或
-浮层标志都不决定实时拓扑。`App::observe_intent` 保留兼容观察记录，但丢弃其效果。
-实时窗口、标签页、窗格树、解析器锁、渲染器与 PTY 始终以 `App` 和 `WindowState` 为准。
-
-`App::dispatch_intent` 单独处理受支持的显式目标工作。可执行的窗口效果把单调分配的
-`WindowKey` 解析为存活窗口；缺失、已移除或零 key 都不会选择主窗口或最前窗口。原生输入
-解析源窗口的活动窗格，直接通过有界 PTY 队列写入，不再构建临时状态机。只记录的效果不能
-声称原生操作已完成。完整的状态、意图与效果清单见[运行时生命周期](Runtime-Lifecycle)。
+`AppStateMachine` 保存不依赖后端的兼容观察值，不决定实时 GUI 拓扑。
+`App::observe_intent` 更新观察值并丢弃效果；`App::dispatch_intent` 单独处理受支持的
+显式目标工作。缺失、已移除或零窗口 key 不会选择主窗口或最前窗口。原生输入通过有界 PTY
+队列发送给源窗口的活动窗格。完整状态/意图/效果清单，以及记录效果与原生完成的区别，见
+[运行时生命周期](Runtime-Lifecycle)。
 
 ### 边界契约
 
 #### 意图与效果
 
-`AppStateMachine::handle` 保留不依赖后端的归约器与效果契约。`App::observe_intent`
-记录兼容状态变化，但不执行其效果批次；受支持的可执行意图与显式效果单独跨越实时应用边界。
-归约器效果类别保持以下稳定顺序：
-
-1. `PtyWrite`；
-2. `Render`；
-3. `OsDrag`；
-4. `Clipboard`；
-5. `WindowOp`；
-6. `MenubarUpdate`；
-7. `Log`。
-
-私有后续队列受 `MAX_CASCADE_DEPTH = 16` 限制。生产路径没有向该队列写入的入口，
-因此正常运行时 `drain_pending` 返回空批次。
+不依赖后端的归约器保持稳定效果顺序。GUI 观察值不会执行其效果批次；显式目标操作
+单独进入实时应用。准确顺序、级联上限与未启用队列见[运行时生命周期](Runtime-Lifecycle)。
 
 #### 终端
 
@@ -361,18 +313,11 @@ crate 中身份不变的类型。
 窗格构建一个 `PaneRender`，并让解析器保护对象一直存活到 `GpuRenderer::render` 返回。
 任一锁获取失败都会推迟整帧。
 
-`PaneRender` 包含稳定窗格编号、可变网格视图、像素矩形、视口、焦点、光标样式、广播
-接收状态、滚动条透明度和内联图像。生产路径的 `GpuRenderer::render` 接收这组窗格，
-并通过独立参数接收主题、选区、标签页、搜索、命令面板、输入法、通知和悬停 URL。
-
-`sonicterm-gpu` 内部通过一个拥有自身数据的 `FramePlan`，从不可变元数据组合帧身份、渲染模式、
-保留损伤区域、完整/内容窗格裁剪、视口行槽和预期网格修订号。生产组装使用该计划，不重新计算
-这些决策。计划不持有网格、复制的单元格、可变 UI controller、字体栈或原生/GPU 句柄。
-向量规模随可见窗格和脏行变化；保留的文本身份是摘要，不是另一份载荷。呈现后渲染器只保留
-紧凑帧键。解析器保护对象和借用网格仍覆盖整个有状态的图集/渲染器操作。
-
-`RenderInputs` 仍是公开的渲染模型类型。两个公开的 `Painter` trait 都是没有生产实现的休眠
-源码兼容接缝；生产渲染直接使用 `PaneRender` 和 `WeztermPipeline`。
+`GpuRenderer::render` 接收可见窗格的 `PaneRender` 及独立 UI 参数。仅含元数据的
+`FramePlan` 选择帧身份、模式、损伤、裁剪、视口槽和预期修订号；它不是网格快照或多线程
+渲染边界。生产使用 `PaneRender` 和 `WeztermPipeline`，而不是公开的兼容
+`RenderInputs`/`Painter` 接缝。组帧见[渲染与字体](Rendering-and-Fonts)，锁守卫和
+修订号规则见[架构内部机制](Architecture-Internals)。
 
 #### 字体
 

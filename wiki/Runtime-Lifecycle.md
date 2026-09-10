@@ -2,10 +2,10 @@
 
 ## English
 
-This page owns runtime ownership and state changes, from process startup to
-process exit. See [Architecture](Architecture) for crate boundaries,
-[From Keypress to Pixel](From-Keypress-to-Pixel) for the byte-to-frame path, and
-[Architecture Internals](Architecture-Internals) for load-bearing checks.
+Follow startup, tab and pane changes, then shutdown. Each section names the
+object responsible and the order of work. The system map is in
+[Architecture](Architecture); correctness checks are in
+[Architecture Internals](Architecture-Internals).
 
 ### Process startup
 
@@ -188,6 +188,13 @@ pool, native drag backends, and event-loop scheduling flags.
 
 ### Creating tabs and splits
 
+Ordinary new tabs and splits in main and child windows use the source pane's
+validated local OSC 7 CWD when no explicit CWD is supplied. Only empty authority,
+`localhost`, or the exact local hostname with a native absolute path of at most
+4,096 decoded UTF-8 bytes qualifies. Explicit CWD wins; new windows do not inherit
+pane CWD. OSC 133 `B` ends the prompt without starting timing; `C` starts execution,
+and `A`/`D` retain their existing regions. See [Terminal IO and VT](Terminal-IO-and-VT).
+
 A main-window tab allocates a pane id, creates parser/grid state, attempts to
 spawn a PTY, starts worker threads on success, inserts one `Tab`, and inserts a
 single-leaf `PaneTree`. It immediately reconciles the new pane's `AppPane`
@@ -286,20 +293,12 @@ Reclamation and charging are independent of log level. `measure_pane` uses
 `try_lock` for the parser and inline-image store. A contended pane is skipped and
 keeps its previous charge.
 
-Retention updates each existing charge through failure-atomic `try_resize`.
-Mixed byte/item changes settle against final replacement totals; refusal keeps
-the old token and balances. A skipped or refused sample can lag real memory,
-but there is no deliberate release/re-reserve accounting gap.
-
-Window transfers prepare destination pane owners and move every tab charge via
-one `transfer_many` transaction before swapping guards or reaping the source.
-Process and class totals remain unchanged, without remeasuring locked parsers.
-Refusal drops provisional owners and restores source custody with its original
-charges. An unregistered destination accepts only panes without nonzero charges.
-Periodic single-pane parent repair retains atomic `transfer_batch` semantics.
-
-Renderer surfaces, glyph atlases, image atlases, and software frames are
-reported separately. They are not charged to this governor.
+Charges resize in place; skipped or refused samples keep the prior charge and
+may lag memory. Transfers move all charges atomically before guard replacement
+or source reaping; refusal restores source custody. Unregistered destinations
+accept no nonzero charge. Renderer storage is measured outside the governor.
+See [Memory](Memory) for `try_resize`, `transfer_many`, and `transfer_batch`
+accounting rules.
 
 Release order is leaf-first:
 
@@ -333,9 +332,11 @@ flowchart TD
     explicit --> resolve --> boundary
 ```
 
-All `AppState` fields are compatibility observations in the GUI, not decision
-inputs for its live topology. The backend-free reducer remains independently
-usable and keeps its stable effect ordering and bounded follow-on queue.
+GUI `AppState` fields are compatibility observations, not live-topology decisions.
+The independently usable reducer orders effects as `PtyWrite`, `Render`, `OsDrag`,
+`Clipboard`, `WindowOp`, `MenubarUpdate`, then `Log`. Its private follow-on queue
+is bounded by `MAX_CASCADE_DEPTH = 16`; no production path enqueues there, so
+`drain_pending` normally returns an empty batch.
 
 | Observational `AppState` fields | Authoritative live state |
 | --- | --- |
@@ -596,9 +597,8 @@ result also flushes breadcrumbs and marks its session clean.
 
 ## 中文
 
-本页只说明运行时所有权和状态变化，范围从进程启动到进程退出。crate 边界见
-[架构](Architecture)，字节到画面的路径见 [从按键到像素](From-Keypress-to-Pixel)，
-关键验证条件见 [架构内部机制](Architecture-Internals)。
+按启动、标签页/窗格变化、退出的顺序阅读；每节说明负责对象与执行顺序。
+系统全貌见[架构](Architecture)，正确性检查见[架构内部机制](Architecture-Internals)。
 
 ### 进程启动
 
@@ -755,6 +755,11 @@ flowchart TD
 
 ### 创建标签页与分屏
 
+主窗口和子窗口中的普通新标签页与分屏，在未指定显式 CWD 时使用源窗格已验证的本地
+OSC 7 CWD。只接受空 authority、`localhost` 或准确本机主机名；原生绝对路径解码后
+UTF-8 最多 4,096 字节。显式 CWD 优先；新窗口不继承窗格 CWD。OSC 133 `B` 结束提示符
+但不启动计时，`C` 开始执行，`A`/`D` 保留原区域行为。详见[终端 IO 与 VT](Terminal-IO-and-VT)。
+
 主窗口新标签页会分配窗格编号，创建解析器和网格，尝试启动 PTY，成功时启动工作线程，
 插入一个 `Tab`，并插入单叶 `PaneTree`。随后立即协调新窗格的 `AppPane` 所有者。
 
@@ -833,16 +838,9 @@ Process
 回收和计费不受日志级别控制。`measure_pane` 对解析器和内联图像存储使用 `try_lock`。
 锁竞争的窗格会被跳过，并保留上次计费值。
 
-常驻内存通过失败原子的 `try_resize` 更新已有计费。字节与条目混合变化按最终替换总量结算；
-拒绝时保留旧令牌和余额。跳过或拒绝的采样可能落后于实际内存，但不会故意制造释放再预留的
-记账空档。
-
-跨窗口转移先准备目标窗格所有者，通过一次 `transfer_many` 事务移动标签页的全部计费，
-然后才替换守卫或回收源窗口。无需重新测量被锁定的解析器，进程和类别总量始终不变。
-拒绝时释放临时所有者，并连同原有计费恢复源托管状态。未注册目标只接受没有非零计费的窗格。
-周期性单窗格父级修复仍使用原子的 `transfer_batch`。
-
-渲染器表面、字形图集、图像图集和软件帧单独报告，不计入这份总账。
+计费原地调整；跳过或被拒绝的采样保留旧值，可能落后于实际内存。转移先原子移动全部计费，
+再替换守卫或回收源；拒绝则恢复源托管状态。未注册目标不接受非零计费。渲染器存储在总账外
+单独测量。`try_resize`、`transfer_many` 和 `transfer_batch` 的记账规则见[内存](Memory)。
 
 释放顺序从叶子开始：
 
@@ -873,8 +871,10 @@ flowchart TD
     explicit --> resolve --> boundary
 ```
 
-在 GUI 中，所有 `AppState` 字段都只是兼容观察记录，不参与实时拓扑决策。不依赖后端的
-归约器仍可独立使用，并保留稳定效果排序和有界后续队列。
+GUI 的 `AppState` 字段只是兼容观察值，不决定实时拓扑。可独立使用的归约器按
+`PtyWrite`、`Render`、`OsDrag`、`Clipboard`、`WindowOp`、`MenubarUpdate`、`Log`
+排序。私有后续队列受 `MAX_CASCADE_DEPTH = 16` 限制；生产没有入队路径，因此
+`drain_pending` 通常返回空批次。
 
 | 观察性的 `AppState` 字段 | 权威实时状态 |
 | --- | --- |

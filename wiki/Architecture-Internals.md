@@ -2,16 +2,14 @@
 
 ## English
 
-This page owns the checks and invariants that keep the architecture honest. See
-[Architecture](Architecture) for system shape, [Runtime Lifecycle](Runtime-Lifecycle)
-for ownership changes, and [Memory](Memory) for the full resource inventory.
+These are the rules that tests must protect: accurate memory reports, complete
+frames, safe native lifetimes, and verified release assets. Read
+[Architecture](Architecture) first; resource limits are in [Memory](Memory).
 
 ### Heap-truth accounting
 
-A retained-memory report is tested against live heap, not against the formula
-that produced the report. The relevant integration tests install a counting
-`#[global_allocator]` and observe allocation, deallocation, and reallocation.
-They check three properties:
+Integration tests compare retention reports with live heap using a counting
+`#[global_allocator]` for allocation, deallocation, and reallocation. They check:
 
 - the reported value does not materially understate live heap;
 - the reported value does not materially overstate live heap;
@@ -456,14 +454,13 @@ job may restore the vcpkg binary cache published immediately by normal CI.
 
 ## 中文
 
-本页集中说明验证架构真实性的检查和关键不变量。系统结构见
-[架构](Architecture)，所有权变化见 [运行时生命周期](Runtime-Lifecycle)，完整资源清单见
-[内存](Memory)。
+本页列出测试必须保护的规则：准确记账、完整画面、安全的原生对象寿命，以及经过验证的
+发布资产。建议先读[架构](Architecture)；资源上限见[内存](Memory)。
 
 ### 以真实堆内存验证记账
 
-常驻内存报告必须与实际存活的堆内存比较，不能只验证生成报告的公式。对应的集成测试会安装
-计数型 `#[global_allocator]`，记录分配、释放和重新分配。测试同时检查三件事：
+集成测试通过计数型 `#[global_allocator]` 记录分配、释放和重新分配，把保留量报告与
+实际存活堆内存比较，检查三项：
 
 - 报告值不能明显低于实际存活堆内存；
 - 报告值不能明显高于实际存活堆内存；

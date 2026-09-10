@@ -131,12 +131,22 @@ formats; it is not substituted for a missing shell report. After changing
 `terminal-features`, reload the configuration and detach/reattach so the outer
 client capabilities are resolved again, then render a fresh prompt.
 
-This relay lets SonicTerm resolve `src/main.rs`, `./file`, and bare names against
+This relay enables exact-pane relative paths and CWD inheritance for ordinary new
+tabs and splits in main and child windows. Inheritance accepts only an empty host,
+`localhost`, or the exact local hostname and a native absolute path of at most
+4,096 decoded UTF-8 bytes. Explicit CWD wins; new windows do not inherit it.
+It also lets SonicTerm resolve `src/main.rs`, `./file`, and bare names against
 the exact pane. On Windows and Linux, hold `Ctrl` while pointing at the text; an
 eligible target becomes underlined and can be clicked. SonicTerm still fails
 closed when OSC 7 is absent, malformed, or names a foreign host: it never guesses
 from process CWD, rmux status metadata, another pane, or a named user's home.
 Absolute paths do not require OSC 7.
+
+For foreground `rmux`, `tmux`, or `screen`, a nonempty raw OSC title is preferred
+even when CWD is known; manual tab titles still win. Other processes retain normal
+CWD-first automatic titles. OSC 8 preserves URI semicolons; OSC 133 `B` ends the
+prompt without timing, `C` starts execution, and `A`/`D` keep their region behavior.
+This is bounded shell integration, not full WezTerm parity.
 
 The outer terminal, multiplexer, and nested TUI form three independent input and
 clipboard layers. The layer that owns the initial mouse press owns the complete
@@ -159,13 +169,11 @@ bind -n MouseDown1Pane { select-pane -t=; send -M }
 bind -n MouseDrag1Pane { if -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' { send -M } { copy-mode -M } }
 ```
 
-The equivalent tmux defaults select the pane, forward mouse reports when the
-inner program requests them, and enter copy mode otherwise. These semantics are
-important for TUIs with virtual transcripts, such as Copilot CLI: only the
-nested app can reveal additional transcript rows while a drag reaches an edge.
-If every `MouseDrag1Pane` is rebound to `copy-mode -M`, the wheel and drag belong
-to the multiplexer and can scroll into multiplexer history outside the app's live
-alternate screen.
+These bindings select the pane and forward mouse reports to a requesting TUI;
+otherwise they enter copy mode. Only a nested TUI can reveal more of its virtual
+transcript during edge dragging. Unconditionally binding `MouseDrag1Pane` to
+`copy-mode -M` instead gives wheel/drag to the multiplexer and can scroll outside
+the app's live alternate screen.
 
 There are two clipboard paths:
 
@@ -421,10 +429,17 @@ format 使用的进程检查元数据；shell 没有报告时，rmux 不会用�
 `terminal-features` 后，请重新加载配置并 detach/reattach，让外层 client 重新解析能力，
 然后显示一次新 prompt。
 
-完成转发后，SonicTerm 才能相对于准确 pane 解析 `src/main.rs`、`./file` 和 bare name。
+转发使相对路径使用准确窗格，并让主/子窗口的普通新标签页和分屏继承其 CWD。继承只接受
+空主机、`localhost` 或准确本机主机名；原生绝对路径解码后 UTF-8 不超过 4,096 字节。
+显式 CWD 优先，新窗口不继承。SonicTerm 可据此解析 `src/main.rs`、`./file` 和 bare name。
 Windows 与 Linux 上，指向文字时按住 `Ctrl`；可打开目标会显示下划线，随后可以点击。
 OSC 7 缺失、格式错误或声明远端 host 时，SonicTerm 仍会 fail closed：它不会从进程 CWD、
 rmux status 元数据、其它 pane 或命名用户 home 猜测目录。绝对路径不依赖 OSC 7。
+
+前台为 `rmux`、`tmux` 或 `screen` 时，即使已知 CWD，也优先显示非空原始 OSC 标题；
+手动标题仍优先。其它进程保持普通的 CWD 优先自动标题。OSC 8 保留 URI 分号；OSC 133
+`B` 结束提示符但不计时，`C` 开始执行，`A`/`D` 保持区域行为。这是有限范围的 shell 集成，
+不表示完整 WezTerm 对等能力。
 
 外层终端、multiplexer 和内层 TUI 是三个独立的输入与剪贴板层。第一次按下鼠标时
 取得所有权的层，会一直持有完整 gesture 直到松开：
@@ -446,11 +461,9 @@ bind -n MouseDown1Pane { select-pane -t=; send -M }
 bind -n MouseDrag1Pane { if -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' { send -M } { copy-mode -M } }
 ```
 
-tmux 的等效默认规则会先选择 pane；内层程序请求 mouse report 时转发，否则进入 copy
-mode。对于 Copilot CLI 等具有虚拟会话记录的 TUI，这一点不能改变：drag 到边缘时，
-只有内层程序知道如何显示更多会话行。若把所有 `MouseDrag1Pane` 都改绑到
-`copy-mode -M`，drag 与 wheel 会归 multiplexer，并可能滚入应用 live alternate
-screen 之外的 multiplexer history。
+这些绑定先选择 pane；内层 TUI 请求鼠标报告时转发，否则进入复制模式。只有内层 TUI 能在
+边缘拖动时显示更多虚拟会话记录。无条件把 `MouseDrag1Pane` 绑定为 `copy-mode -M` 会让
+multiplexer 接管滚轮与拖动，并可能滚入应用 live alternate screen 外的历史。
 
 剪贴板有两条路径：
 

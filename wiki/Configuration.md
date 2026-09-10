@@ -17,12 +17,9 @@ The first launch creates this file and seeds editable examples under
 checks the matching user directory, then the bundled `assets/` directory. A
 path-like value is used directly.
 
-SonicTerm tolerates unknown TOML keys, and its supported runtime persistence
-commands preserve them along with comments and formatting. Unknown keys do not
-change behavior unless the running build implements them. The Rust `Config`
-type's canonical serializer retains top-level unknown keys but omits comments,
-source formatting, and unknown keys nested inside typed tables; it is not a
-format-preserving document editor.
+Unknown TOML keys are inert unless implemented. Runtime saves preserve them,
+comments, and formatting. The Rust `Config` serializer is different: it retains
+top-level unknown keys but loses comments, formatting, and nested unknown keys.
 
 ### Supported keys and defaults
 
@@ -194,10 +191,9 @@ size = 13
 weight_scale = 1.0
 ```
 
-The saved values are the current session font size and effective
-`weight_scale`. The command preserves comments, ordering, line endings, and all
-other known or unknown keys. It does not save the session theme or any other
-runtime state, and it does not reload because both values are already active.
+Save writes the live font size and effective `weight_scale`, preserving comments,
+order, line endings, and every other key. It saves no theme or other runtime
+state and does not reload values that are already active.
 
 If the file is missing, SonicTerm creates the starter file first. A
 process-local lock and the persistent `sonicterm.toml.save.lock` sidecar prevent
@@ -240,9 +236,8 @@ SonicTerm 在所有平台使用同一个配置文件：
 `theme` 和 `keymap` 可以写名称，也可以写 TOML 路径。使用名称时，SonicTerm
 先查找用户目录，再查找内置 `assets/` 目录。看起来像路径的值会直接使用。
 
-SonicTerm 允许 TOML 中的未知 key，受支持的运行时持久化命令会连同注释和格式一起保留它们。
-当前 build 没有实现的未知 key 不会改变行为。Rust `Config` 类型的规范化 serializer 会保留
-顶层未知 key，但会省略注释、源格式和类型化表内部的未知 key；它不是保留格式的文档编辑器。
+未实现的 TOML key 不影响行为。运行时保存会保留它们、注释和格式；Rust `Config`
+serializer 则只保留顶层未知 key，不保留注释、格式或嵌套未知 key。
 
 ### 支持的 key 与默认值
 
@@ -401,9 +396,8 @@ size = 13
 weight_scale = 1.0
 ```
 
-写入的是当前会话字号和当前有效的 `weight_scale`。该命令会保留注释、顺序、
-换行格式，以及其它所有已知或未知 key。它不会保存当前会话主题或其它运行状态。
-这两个值已经生效，因此保存后不会重载。
+保存写入当前字号和有效 `weight_scale`，保留注释、顺序、换行及其它所有 key。
+它不保存主题或其它运行状态，也不重载已经生效的数值。
 
 如果文件不存在，SonicTerm 会先创建初始文件。进程内锁和持久的
 `sonicterm.toml.save.lock` sidecar 会阻止两个 SonicTerm 同时保存。替换文件前，

@@ -2,12 +2,10 @@
 
 ## English
 
-SonicTerm bounds memory at the subsystem that owns it, then reports retained
-host memory by pane, renderer, and process. This page owns resource limits,
-ownership, and accounting. Protocol details are in
-[Terminal IO and VT](Terminal-IO-and-VT); atlas behavior is in
-[Rendering and Fonts](Rendering-and-Fonts); log storage and postmortem evidence
-are in [Logging](Logging).
+Use the table below to find a memory limit and what happens when it is reached.
+For a growing process, compare consecutive samples using [Logging](Logging).
+This page explains what those figures count; protocol and atlas details are in
+[Terminal IO and VT](Terminal-IO-and-VT) and [Rendering and Fonts](Rendering-and-Fonts).
 
 ### Resource limits
 
@@ -18,6 +16,7 @@ are in [Logging](Logging).
 | Cell combining extras | 64 UTF-8 bytes per cell | additional zero-width data is not retained |
 | OSC 8 registry | 16,384 links, 8 KiB per URI, 1 KiB per client id, 8 MiB combined metadata | reclaim entries no retained cell references, then admit; otherwise refuse the new link |
 | Escape sequence | 1 MiB | discard through its terminator |
+| OSC 0/2/7/8 raw collector | 16 KiB whole payload | reject oversized input; report retained capacity, without incrementing media-capture count |
 | Media payload | 16 MiB per transfer | refuse rather than truncate or partially render |
 | Media capture staging | 64 MiB process-wide; 4 MiB floor; 13 concurrent floor reservations guaranteed | refuse an unstaged capture; cancel after two unchanged 30 s progress samples |
 | Decoded inline images | 64 MiB and 128 images per pane; 256 MiB process target divided across live panes; 4 MiB minimum and newest image retained | discard oldest images; a process under pressure may retain at most one 4 MiB newest-image residual per live pane beyond the target until the idle-pane pass converges |
@@ -68,10 +67,9 @@ compact runs and existing capacity hysteresis rather than flattening history.
 
 ### Ownership model
 
-`sonicterm-resource` provides the process-local resource governor: an owner
-hierarchy, accounting ledger, and RAII reservation tokens. RAII ties cleanup to
-an object's lifetime: a reservation owns its charge and releases it on drop. The governor answers how much is held, by
-which owner, in which `ResourceClass`; it does not own the memory.
+`sonicterm-resource` tracks each owner's charges by `ResourceClass`, not the
+payload memory. Its process-local governor holds the owner tree and ledger;
+RAII reservation tokens release their charges when dropped.
 
 Production GUI topology is:
 
@@ -289,9 +287,9 @@ aggregate understates the session.
 
 ## 中文
 
-SonicTerm 在真正拥有内存的子系统边界实施限制，再按窗格、渲染器和进程报告保留的
-主机内存。本页负责资源上限、所有权与记账。协议细节见[终端 IO 与 VT](Terminal-IO-and-VT)，
-图集行为见[渲染与字体](Rendering-and-Fonts)，日志存储与故障后证据见[日志](Logging)。
+下表说明每项内存上限及达到上限后的处理。排查进程增长时，按[日志](Logging)比较连续
+采样。本页解释各读数统计什么；协议和图集细节见[终端 IO 与 VT](Terminal-IO-and-VT)
+与[渲染与字体](Rendering-and-Fonts)。
 
 ### 资源上限
 
@@ -302,6 +300,7 @@ SonicTerm 在真正拥有内存的子系统边界实施限制，再按窗格、�
 | 单元格组合附加内容 | 每个单元格 64 个 UTF-8 字节 | 不再保留额外零宽数据 |
 | OSC 8 注册表 | 16,384 个链接；每个 URI 8 KiB；每个客户端 id 1 KiB；合计元数据 8 MiB | 回收已无保留单元格引用的条目后接纳；仍无空间则拒绝新链接 |
 | 转义序列 | 1 MiB | 一直丢弃到终止符 |
+| OSC 0/2/7/8 原始收集器 | 整个负载 16 KiB | 拒绝超长输入；报告保留容量，不增加媒体捕获计数 |
 | 媒体负载 | 每个传输 16 MiB | 拒绝，不截断也不局部显示 |
 | 媒体捕获暂存 | 进程共 64 MiB；下限 4 MiB；保证 13 个并发下限预留 | 无法暂存时拒绝；连续两次 30 s 采样无进度后取消 |
 | 已解码内联图像 | 每窗格 64 MiB 且最多 128 张；256 MiB 进程目标按存活窗格平分；最小 4 MiB 且保留最新一张 | 删除最老图像；在空闲窗格扫描收敛前，受压进程最多可在目标之外为每个存活窗格保留一份 4 MiB 最新图像余量 |
@@ -344,9 +343,8 @@ SonicTerm 在真正拥有内存的子系统边界实施限制，再按窗格、�
 
 ### 所有权模型
 
-`sonicterm-resource` 提供进程内资源治理器：所有者层级、记账账本和 RAII 预留令牌。
-RAII 表示把清理绑定到对象生命周期；预留令牌拥有自己的记账额，释放时自动归还。治理器回答“哪个所有者以哪个
-`ResourceClass` 持有多少”，但不拥有内存本身。
+`sonicterm-resource` 按所有者与 `ResourceClass` 跟踪计费，不持有载荷内存。
+进程内治理器保存所有者树和账本；RAII 预留令牌在析构时释放计费。
 
 生产 GUI 拓扑为：
 

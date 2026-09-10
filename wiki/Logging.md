@@ -2,8 +2,9 @@
 
 ## English
 
-This page is the canonical guide to SonicTerm logs, retention, performance and
-memory diagnostics, crash evidence, and bug-report data.
+Start with the newest log below. Use `debug` for frame timing, `info` for memory
+snapshots, and the bug-report checklist at the end. Crash and hang evidence has
+its own section; a missing crash dump does not mean a clean exit.
 
 ## Paths
 
@@ -137,17 +138,11 @@ The default `warn` level reports a PTY resize the native layer refused, as one
 The event carries no terminal content: only the pane id, the requested columns
 and rows, and the error.
 
-One failing pane logs once per failing run, not once per request. Resizes are
-driven by tab activation and window drags, so a pane whose PTY refuses every
-request would otherwise emit at input rate down a synchronous path. The first
-failure is reported and later failures stay silent until a resize succeeds,
-which clears the latch so the next distinct failure is reported again.
-
-Suppression applies to the warning only, and never suppresses a resize attempt.
-An invalid size and a successful duplicate are the only requests that do not
-reach the native call, and the IO boundary decides both. The grid keeps the
-geometry the user asked for — there is no rollback, no retry timer, and no
-heartbeat line while failures continue.
+Each pane logs only the first resize failure until a success resets its warning
+latch; this avoids input-rate logs during tab activation or window drags.
+Attempts still run: only invalid sizes and successful duplicates are skipped by
+the IO boundary. The grid keeps the requested geometry. There is no rollback,
+retry timer, or failure heartbeat.
 
 ## Render and performance diagnostics
 
@@ -409,7 +404,8 @@ sensitive command data.
 
 ## 中文
 
-本页是 SonicTerm 日志、保留策略、性能与内存诊断、崩溃证据和缺陷报告材料的规范说明。
+先找下方路径中最新的日志。帧耗时用 `debug`，内存快照用 `info`；提交问题前查看末尾
+清单。崩溃与卡死证据另有专节；没有崩溃转储不代表正常退出。
 
 ## 路径
 
@@ -519,14 +515,9 @@ UI 队列饱和不会丢弃回复、产生拒绝 warning 或停止输出处理�
 
 事件不携带终端内容：只有窗格 id、请求的列数与行数以及错误。
 
-同一个失败中的窗格在每一轮连续失败中只记录一次，而不是每次请求都记录。尺寸调整由
-标签页激活和窗口拖拽驱动，因此若某个窗格的 PTY 拒绝每一次请求，否则就会以输入频率
-沿同步路径持续输出。第一次失败会被报告，后续失败保持静默，直到一次成功的尺寸调整
-清除该闩锁，使下一次不同的失败重新被报告。
-
-抑制只作用于告警，绝不会抑制一次尺寸调整尝试。只有无效尺寸和成功的重复请求不会到达
-原生调用，而这两者都由 IO 边界决定。网格保留用户请求的几何尺寸——没有回滚、没有重试
-定时器，失败持续期间也没有心跳行。
+每个窗格仅记录首次 resize 失败，直到成功重置告警闩锁，避免切换标签页或拖动窗口时按输入
+频率写日志。尝试仍会执行：IO 边界只跳过无效尺寸和成功的重复请求。网格保留请求尺寸，
+没有回滚、重试定时器或失败心跳。
 
 ## 渲染与性能诊断
 
