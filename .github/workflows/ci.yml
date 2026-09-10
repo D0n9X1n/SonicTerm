@@ -369,7 +369,7 @@ jobs:
             ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-
 
       - name: Install Cairo for Windows
-        timeout-minutes: 5
+        timeout-minutes: 12
         shell: pwsh
         run: .\scripts\setup-windows-cairo.ps1
 
@@ -463,7 +463,7 @@ jobs:
             ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-
 
       - name: Install Cairo for Windows
-        timeout-minutes: 5
+        timeout-minutes: 12
         shell: pwsh
         run: .\scripts\setup-windows-cairo.ps1
 
@@ -520,7 +520,7 @@ jobs:
             ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-
 
       - name: Install Cairo for Windows
-        timeout-minutes: 5
+        timeout-minutes: 12
         shell: pwsh
         run: .\scripts\setup-windows-cairo.ps1
 
@@ -670,7 +670,7 @@ jobs:
             ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-${{ runner.os }}-
 
       - name: Install Cairo for Windows
-        timeout-minutes: 5
+        timeout-minutes: 12
         shell: pwsh
         run: .\scripts\setup-windows-cairo.ps1
 

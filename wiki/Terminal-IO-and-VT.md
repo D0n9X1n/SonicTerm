@@ -150,8 +150,19 @@ Current protocol support includes:
   focus reporting, and kitty keyboard flag set/push/pop/query;
 - OSC 0/2 titles, host-aware OSC 7 working directory, OSC 8 hyperlinks, OSC 52
   clipboard events, OSC 4/10/11/12 color queries, and OSC 133 prompt markers;
-- DSR, DA, XTVERSION, palette, and kitty keyboard replies;
+- DSR, DA, XTVERSION, DECRQSS SGR, palette, and kitty keyboard replies;
 - iTerm2, kitty, and Sixel media events.
+
+DECRQSS `DCS $ q m ST` reports the current SGR rendition through the terminal
+reply queue. The response preserves extended underline subparameters, including
+`4:3` for undercurl, and indexed/RGB foreground, background, and underline colors.
+This lets Neovim discover extended underlines when terminfo lacks `Smulx`;
+ordinary underline remains distinct. Extended colors accept semicolon parameters
+and colon subparameters, including Neovim's `58:2::r:g:b`, without consuming the
+following SGR attribute. Invalid colon color components leave the current color
+unchanged. The fixed-size request recognizer is separate
+from Sixel capture. Unsupported complete selectors return a failure reply;
+cancelled, interrupted, and oversized requests produce no status reply.
 
 `CSI 3 J` erases only the active primary screen's saved history. It preserves
 live cells, cursor, rendition, margins, and the configured future history limit.
@@ -430,8 +441,15 @@ TERM_PROGRAM_VERSION=<与终端身份匹配的版本>
   set/push/pop/query；
 - OSC 0/2 标题、带主机校验的 OSC 7 工作目录、OSC 8 超链接、OSC 52 剪贴板事件、
   OSC 4/10/11/12 颜色查询、OSC 133 提示符标记；
-- DSR、DA、XTVERSION、调色板和 kitty 键盘回复；
+- DSR、DA、XTVERSION、DECRQSS SGR、调色板和 kitty 键盘回复；
 - iTerm2、kitty 与 Sixel 媒体事件。
+
+DECRQSS `DCS $ q m ST` 通过终端回复队列报告当前 SGR 样式。回复保留扩展下划线子参数，
+包括波浪下划线的 `4:3`，以及前景、背景和下划线的索引色/RGB 颜色。
+这使 Neovim 能在 terminfo 缺少 `Smulx` 时发现扩展下划线能力；普通下划线仍保持独立。
+扩展颜色接受分号参数和冒号子参数，包括 Neovim 的 `58:2::r:g:b`，且不会吞掉后续 SGR 属性。
+无效的冒号颜色分量不会改变当前颜色。固定大小的请求识别状态与 Sixel 捕获分离。不支持但完整的选择器返回失败回复；
+已取消、中断或超长的请求不产生状态回复。
 
 `CSI 3 J` 只擦除当前主屏幕的已保存历史，保留可见单元格、光标、样式、滚动边距和
 后续历史容量配置。历史为空或备用屏幕处于活动状态时不做任何修改；备用屏幕中的 ED3

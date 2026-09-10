@@ -175,6 +175,18 @@ fn palette_footer_font_size(body_font_size: f32) -> f32 {
     (body_font_size - 1.0).max(1.0)
 }
 
+// Returns label baseline, subtitle top, and subtitle baseline in row-relative raster pixels.
+fn palette_detail_positions(
+    row_height: f32,
+    label_size: f32,
+    detail_size: f32,
+    gap: f32,
+) -> (f32, f32, f32) {
+    let top = ((row_height - label_size - gap - detail_size) * 0.5).max(0.0);
+    let detail_top = (top + label_size + gap).min((row_height - detail_size).max(0.0));
+    (top + label_size * 0.8, detail_top, detail_top + detail_size * 0.8)
+}
+
 const PALETTE_FOOTER_INSET_X: f32 = 18.0;
 const READ_ONLY_BADGE_ICON: &str = "";
 const READ_ONLY_BADGE_LABEL: &str = "READONLY";
@@ -6416,22 +6428,27 @@ impl GpuRenderer {
                         ));
                         origin_x += size + self.chrome_px(8.0);
                     }
-                    // Vertically centre the label in the row. Use the row's
-                    // ACTUAL (DPI-scaled) height `row.rect.h`, NOT the unscaled
-                    // PALETTE_ROW_HEIGHT constant — mixing a logical-px height
-                    // with the scaled `row.rect.y` / `palette_font_size` pushed
-                    // the baseline off-centre at fractional DPI (the query row
-                    // already centres correctly via `query_row.h`). #palette
-                    let detail_h = if detail.is_some() {
-                        self.chrome_px(
-                            sonicterm_render_model::boundary::ui::overlays::PALETTE_DETAIL_HEIGHT,
-                        )
+                    // Center the combined text block in raster pixels so both outer margins scale together.
+                    let detail_font_size = self.raster_px(palette_footer_font_size(self.font_size));
+                    let (label_baseline, detail_top, detail_baseline) = palette_detail_positions(
+                        row.rect.h,
+                        palette_font_size,
+                        detail_font_size,
+                        self.chrome_px(4.0),
+                    );
+                    let baseline_y = row.rect.y
+                        + if detail.is_some() {
+                            label_baseline
+                        } else {
+                            // When: detail is absent, retain the single-line row baseline.
+                            (row.rect.h + palette_font_size * 0.8) * 0.5
+                        };
+                    let label_clip_h = if detail.is_some() {
+                        detail_top.min(row.rect.h)
                     } else {
-                        // When: `detail` is absent, color-picker rows keep their single-line geometry.
-                        0.0
+                        // When: detail is absent, the label owns the full row clip.
+                        row.rect.h
                     };
-                    let label_h = row.rect.h - detail_h;
-                    let baseline_y = row.rect.y + (label_h + palette_font_size * 0.8) * 0.5;
                     let label_bounds_w = match shortcut_w {
                         Some(w) => (row.rect.w
                             - w
@@ -6451,7 +6468,7 @@ impl GpuRenderer {
                         ChromeAttrs::default(),
                         origin_x,
                         baseline_y,
-                        [row.rect.x, row.rect.y, label_bounds_w, label_h],
+                        [row.rect.x, row.rect.y, label_bounds_w, label_clip_h],
                         sw,
                         sh,
                         &mut overlay_glyph_instances,
@@ -6487,8 +6504,6 @@ impl GpuRenderer {
                         (detail, self.palette_footer_font_stack.as_ref())
                     {
                         // Details share the footer's smaller native strike and atlas identity.
-                        let detail_font_size =
-                            self.raster_px(palette_footer_font_size(self.font_size));
                         let mut detail_rasterizer = detail_stack.clone();
                         let mut detail_color = self.search_fg;
                         detail_color.a = if disabled { 120 } else { 165 };
@@ -6507,16 +6522,13 @@ impl GpuRenderer {
                             ChromeAttrs::default(),
                             detail_font_size,
                             detail_font_size,
-                            (
-                                origin_x,
-                                row.rect.y + label_h + (detail_h + detail_font_size * 0.8) * 0.5,
-                            ),
+                            (origin_x, row.rect.y + detail_baseline),
                             (sw, sh),
                             Some(ChromeClip {
                                 x: origin_x,
-                                y: row.rect.y + label_h,
+                                y: row.rect.y + detail_top,
                                 w: detail_width,
-                                h: detail_h,
+                                h: (row.rect.h - detail_top).max(0.0),
                             }),
                             GlyphRasterVariant::PaletteFooter,
                         );

@@ -155,14 +155,14 @@ fn command_palette_query_label_places_preedit_at_caret() {
 // Row and footer insets leave breathing room without growing the modal beyond its viewport cap.
 #[test]
 fn command_palette_uses_padded_spacing_tokens() {
-    assert_eq!(PALETTE_ROW_HEIGHT, 32.0);
-    assert_eq!(PALETTE_DETAIL_HEIGHT, 20.0);
-    assert_eq!(PALETTE_ROW_GAP, 4.0);
-    assert_eq!(PALETTE_ROW_PAD_X, 18.0);
+    assert_eq!(PALETTE_ROW_HEIGHT, 25.0);
+    assert_eq!(PALETTE_DETAIL_HEIGHT, 16.0);
+    assert_eq!(PALETTE_ROW_GAP, 8.0);
+    assert_eq!(PALETTE_ROW_PAD_X, 12.0);
     assert_eq!(PALETTE_FOOTER_HEIGHT, 42.0);
 }
 
-// Shared scaled geometry keeps pointer targets inside the list after row and footer padding grows.
+// Scaled rows preserve an eight-pixel highlight gap and keep pointer targets above the footer.
 #[test]
 fn command_palette_padded_rows_stay_above_footer_at_each_scale() {
     for scale in [1.0, 1.5, 2.0] {
@@ -174,8 +174,11 @@ fn command_palette_padded_rows_stay_above_footer_at_each_scale() {
                     .expect("open palette has layout");
             assert_eq!(layout.footer.h, 42.0 * scale);
             for row in &layout.rows {
-                assert_eq!(row.rect.h, 52.0 * scale);
+                assert_eq!(row.rect.h, 41.0 * scale);
                 assert!(row.rect.y + row.rect.h <= layout.footer.y);
+            }
+            for rows in layout.rows.windows(2) {
+                assert_eq!(rows[1].rect.y - (rows[0].rect.y + rows[0].rect.h), 8.0 * scale);
             }
         }
     }

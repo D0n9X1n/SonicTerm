@@ -324,6 +324,220 @@ fn parser_exposes_typed_osc7_snapshot_without_changing_cwd() {
     assert_ne!(parser.cwd_revision(), revision);
 }
 
+/// Neovim's exact startup probe must learn the active curl without printing or changing it.
+#[test]
+fn decrqss_neovim_startup_probe_reports_curly_sgr() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    let (consumed, events, reply) = parser.advance_with_replies(b"\x1b[0m\x1b[4:3m\x1bP$qm\x1b\\");
+    assert_eq!(consumed, 17);
+    assert!(events.is_empty());
+    assert_eq!(reply, b"\x1bP1$r0;4:3m\x1b\\");
+    assert_eq!(parser.grid().cursor.col, 0);
+    assert_eq!(parser.performer.underline_style, UnderlineStyle::Curly);
+}
+
+/// Neovim emits colon-form RGB underline color separately from its curly-style SGR.
+#[test]
+fn sgr_neovim_colon_underline_color_reaches_grid() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    parser.advance(b"\x1b[4:3m\x1b[58:2::255:0:0mW");
+    let cell = &parser.grid().row(0)[0];
+    assert_eq!(cell.ch, 'W');
+    assert_eq!(cell.underline_style(), UnderlineStyle::Curly);
+    assert_eq!(cell.underline_color(), Some(Color::Rgb(255, 0, 0)));
+}
+
+/// RGB and palette colon layouts apply independently to foreground, background, and underline.
+#[test]
+fn sgr_colon_colors_accept_supported_layouts() {
+    for (suffix, expected) in [
+        ("5:201", Color::Indexed(201)),
+        ("2:255:0:17", Color::Rgb(255, 0, 17)),
+        ("2::255:0:17", Color::Rgb(255, 0, 17)),
+        ("2:0:255:0:17", Color::Rgb(255, 0, 17)),
+    ] {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        parser.advance(format!("\x1b[38:{suffix};48:{suffix};58:{suffix};4:3;1mX").as_bytes());
+        let cell = &parser.grid().row(0)[0];
+        assert_eq!(cell.fg, expected);
+        assert_eq!(cell.bg, expected);
+        assert_eq!(cell.underline_color(), Some(expected));
+        assert_eq!(cell.underline_style(), UnderlineStyle::Curly);
+        assert!(cell.flags.contains(CellFlags::BOLD));
+    }
+}
+
+/// Rejected colon colors preserve prior semicolon colors and leave subsequent SGR parameters intact.
+#[test]
+fn sgr_invalid_colon_colors_preserve_state_without_swallowing_following_sgr() {
+    for suffix in [
+        "5:256",
+        "5:1:2",
+        "5",
+        "2:1:2",
+        "2:1:2:3:4:5",
+        "2:1:2:3:4",
+        "2:256:0:0",
+        "2:0:256:0",
+        "2:0:0:256",
+        "2:0:256:0:0",
+        "2:0:0:256:0",
+        "2:0:0:0:256",
+        "9:1:2:3",
+    ] {
+        for code in [38, 48, 58] {
+            let mut parser = Parser::new(Grid::new(8, 2));
+            parser.advance(b"\x1b[38;2;1;2;3;48;5;19;58;2;4;5;6m");
+            parser.advance(format!("\x1b[{code}:{suffix};1;4:3mX").as_bytes());
+            let cell = &parser.grid().row(0)[0];
+            assert_eq!(cell.fg, Color::Rgb(1, 2, 3), "code={code} suffix={suffix}");
+            assert_eq!(cell.bg, Color::Indexed(19), "code={code} suffix={suffix}");
+            assert_eq!(
+                cell.underline_color(),
+                Some(Color::Rgb(4, 5, 6)),
+                "code={code} suffix={suffix}"
+            );
+            assert!(cell.flags.contains(CellFlags::BOLD));
+            assert_eq!(cell.underline_style(), UnderlineStyle::Curly);
+        }
+    }
+}
+
+/// Every active underline style and supported color survives an SGR query and replay.
+#[test]
+fn decrqss_roundtrips_all_supported_rendition_fields() {
+    for style in 0..=5 {
+        for color in ["", ";38;5;201;48;5;17;58;5;99", ";38;2;1;2;3;48;2;4;5;6;58;2;7;8;9"] {
+            let mut parser = Parser::new(Grid::new(8, 2));
+            parser.advance(format!("\x1b[1;2;3;4:{style};5;7;8;9{color}m").as_bytes());
+            let flags = parser.performer.flags;
+            let cursor = parser.grid().cursor;
+            let (_, events, reply) = parser.advance_with_replies(b"\x1bP$qm\x1b\\");
+            assert!(events.is_empty());
+            assert!(reply.starts_with(b"\x1bP1$r0"));
+            assert!(reply.ends_with(b"m\x1b\\"));
+            assert_eq!(parser.performer.flags, flags);
+            assert_eq!(parser.grid().cursor, cursor);
+            assert_eq!(parser.retained_amount().bytes, 0);
+            let sgr = &reply[5..reply.len() - 2];
+            let mut replay = Parser::new(Grid::new(8, 2));
+            replay.advance(b"\x1b[31;42;4:5;58;5;111m");
+            replay.advance(&[b"\x1b[".as_slice(), sgr].concat());
+            assert_eq!(replay.performer.fg, parser.performer.fg);
+            assert_eq!(replay.performer.bg, parser.performer.bg);
+            assert_eq!(replay.performer.flags, flags);
+            assert_eq!(replay.performer.underline_style, parser.performer.underline_style);
+            assert_eq!(replay.performer.underline_color, parser.performer.underline_color);
+        }
+    }
+}
+
+/// An unfinished ESC cannot answer a query; every chunk boundary preserves the final ST.
+#[test]
+fn decrqss_waits_for_complete_terminator_at_every_split() {
+    for suffix in [b"\x1b\\".as_slice(), b"\x9c"] {
+        let input = [b"\x1b[4:3m\x1bP$qm".as_slice(), suffix].concat();
+        for split in 0..input.len() {
+            let mut parser = Parser::new(Grid::new(8, 2));
+            let (_, _, first) = parser.advance_with_replies(&input[..split]);
+            assert!(first.is_empty(), "split={split}");
+            let (_, _, last) = parser.advance_with_replies(&input[split..]);
+            assert_eq!(last, b"\x1bP1$r0;4:3m\x1b\\");
+        }
+        let mut parser = Parser::new(Grid::new(8, 2));
+        for (index, byte) in input.iter().enumerate() {
+            let (_, _, reply) = parser.advance_with_replies(&[*byte]);
+            assert_eq!(reply.is_empty(), index + 1 != input.len());
+        }
+    }
+}
+
+/// Invalid selectors and parameterized requests receive failure, never a fabricated SGR state.
+#[test]
+fn decrqss_rejects_unknown_selectors_and_headers() {
+    for input in [
+        b"\x1bP$q\x1b\\".as_slice(),
+        b"\x1bP$qx\x1b\\",
+        b"\x1bP$qmm\x1b\\",
+        b"\x1bP$qm \x1b\\",
+        b"\x1bP$qm\x7f\x1b\\",
+        b"\x1bP$qm\xff\x1b\\",
+        b"\x1bP1$qm\x1b\\",
+        b"\x1bP0;0$qm\x1b\\",
+        b"\x1bP0:0$qm\x1b\\",
+    ] {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        let (_, _, reply) = parser.advance_with_replies(input);
+        assert_eq!(reply, b"\x1bP0$r\x1b\\", "input={input:?}");
+    }
+    for input in [b"\x1bP$+qm\x1b\\".as_slice(), b"\x1bP$qm\x1b[0m", b"\x1bP$$$$qm\x1b\\"] {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        let (_, _, reply) = parser.advance_with_replies(input);
+        assert!(reply.is_empty());
+    }
+    let mut parser = Parser::new(Grid::new(8, 2));
+    let (_, _, reply) = parser.advance_with_replies(b"\x1bP0$qm\x1b\\");
+    assert_eq!(reply, b"\x1bP1$r0m\x1b\\");
+}
+
+/// Cancellation and unrelated escapes must clear queries before any later terminator arrives.
+#[test]
+fn decrqss_cancellation_and_interruption_recover_without_reply() {
+    let _guard = serialised_captures();
+    for interruption in [
+        b"\x18".as_slice(),
+        b"\x1a",
+        b"\x1b\x18",
+        b"\x1b\x1a",
+        b"\x1b\x1b\\",
+        b"\x1b[0m",
+        b"\x1b]2;title\x07",
+        b"\x1b_unknown\x1b\\",
+        b"\x1bc",
+    ] {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        parser.advance(b"\x1b[4:3m\x1bP$qm");
+        for byte in interruption {
+            let (_, _, reply) = parser.advance_with_replies(&[*byte]);
+            assert!(reply.is_empty(), "interruption={interruption:?}");
+        }
+        let (_, _, reply) = parser.advance_with_replies(b"\x1b\\");
+        assert!(reply.is_empty());
+        assert!(parser.performer.decrqss.is_none());
+        assert!(!parser.performer.decrqss_awaiting_backslash);
+        let (_, _, reply) = parser.advance_with_replies(b"\x1b[0m\x1bP$qm\x1b\\");
+        assert_eq!(reply, b"\x1bP1$r0m\x1b\\");
+        parser.advance(b"X");
+        assert_eq!(parser.grid().row(0)[0].ch, 'X');
+    }
+}
+
+/// Oversized requests keep constant query storage and are discarded through ST without reply.
+#[test]
+fn decrqss_oversized_request_discards_and_recovers() {
+    let mut parser = Parser::new(Grid::new(8, 2));
+    parser.advance(b"\x1bP$q");
+    parser.advance(&vec![b'm'; MAX_ESCAPE_SEQUENCE_BYTES + 1]);
+    assert!(parser.performer.decrqss.is_none());
+    assert_eq!(parser.retained_amount().bytes, 0);
+    let (_, _, reply) = parser.advance_with_replies(b"\x1b\\");
+    assert!(reply.is_empty());
+    let (_, _, reply) = parser.advance_with_replies(b"\x1bP$qm\x1b\\");
+    assert_eq!(reply, b"\x1bP1$r0m\x1b\\");
+}
+
+/// SGR reset and RIS report defaults rather than cached style or color from a previous query.
+#[test]
+fn decrqss_reset_reports_default_rendition() {
+    for reset in [b"\x1b[0m".as_slice(), b"\x1bc"] {
+        let mut parser = Parser::new(Grid::new(8, 2));
+        parser.advance(b"\x1b[1;4:3;31;42;58;5;201m");
+        parser.advance(reset);
+        let (_, _, reply) = parser.advance_with_replies(b"\x1bP$qm\x1b\\");
+        assert_eq!(reply, b"\x1bP1$r0m\x1b\\");
+    }
+}
+
 /// Extended SGR keeps the explicit RGB color attached to a curly underline.
 #[test]
 fn sgr_curly_underline_preserves_explicit_rgb_color() {
