@@ -186,7 +186,11 @@ native smoke.
 
 Windows first prepares static Cairo through vcpkg. It restores the binary cache,
 builds a cold miss, and saves that result immediately before the four dependent
-shards start. The checks shard runs format, Clippy, source-policy, comment, and
+shards start. Consumers allow 12 minutes for Cairo installation: a restored
+fallback archive may contain no compatible packages after a hosted-image or
+vcpkg revision change, so dependency setup must still accommodate a cold build.
+The producer retains its 30-minute limit, and consumer job limits are unchanged.
+The checks shard runs format, Clippy, source-policy, comment, and
 Rustdoc gates. The feature shard runs all-feature app and IO Clippy, Rustdoc, and
 tests on native Windows. The test shard runs the one-pass workspace tests, host
 probes, fail-closed GDI presentation verification, WARP allocator,
@@ -603,7 +607,10 @@ feature 运行 Clippy、Rustdoc 与测试。独立的 coverage shard 安装固�
 发布用 release 二进制，并要求其有界原生 smoke 成功。
 
 Windows 先通过 vcpkg 准备静态 Cairo。它先恢复 binary cache，冷 miss 时完成构建，并在四个依赖
-shard 启动前立即保存结果。checks shard 运行 format、Clippy、源码策略、注释与 Rustdoc gate；
+shard 启动前立即保存结果。消费方为 Cairo 安装保留 12 分钟：托管镜像或 vcpkg 版本变化后，
+恢复的回退归档可能不含任何 ABI 兼容的包，因此依赖安装仍须允许冷构建。
+生产方保留 30 分钟安装限制，消费方任务的总超时不变。
+checks shard 运行 format、Clippy、源码策略、注释与 Rustdoc gate；
 feature shard 在原生 Windows 上对应用与 IO 的全部 feature 运行 Clippy、Rustdoc 与测试；
 tests shard 运行一次性 workspace 测试、host probe、fail-closed GDI 呈现验证、WARP allocator、
 software-selection presentation、工具测试与真实 resource baseline 采集。GDI wrapper 只接受

@@ -866,6 +866,10 @@ impl Parser {
                 i += 1;
                 continue;
             }
+            if self.performer.decrqss_awaiting_backslash && bytes[i] != b'\\' {
+                // Abandon the pending query before an unrelated OSC/APC can bypass vte.
+                self.performer.clear_decrqss();
+            }
             if self.consume_raw_osc_byte(bytes[i]) {
                 // When: consume_raw_osc_byte owns bytes[i], bypass vte so its private OSC Vec cannot retain a second copy.
                 i += 1;
@@ -957,6 +961,7 @@ impl Parser {
                 return;
             }
         }
+        self.performer.observe_decrqss_terminator(byte);
         self.observe_osc_byte(byte);
         let was_fast_path_ready = self.performer.fast_path_ready;
         self.performer.fast_path_ready = false;
@@ -980,6 +985,7 @@ impl Parser {
         self.pending_esc = false;
         self.apc_capture = None;
         self.performer.dcs_capture = None;
+        self.performer.clear_decrqss();
         self.escape_bytes_in_flight = 0;
         self.discarding_oversized_escape = false;
         self.discard_escape_pending_esc = false;
@@ -996,6 +1002,7 @@ impl Parser {
         self.inner = vte::Parser::new();
         self.raw_osc = None;
         self.performer.dcs_capture = None;
+        self.performer.clear_decrqss();
         self.pending_esc = false;
         self.discarding_oversized_escape = true;
         self.discard_escape_pending_esc = pending_esc;
@@ -1426,6 +1433,14 @@ impl Parser {
     }
 }
 
+/// Constant-size classification of the only supported DECRQSS selector.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DecrqssRequest {
+    Empty,
+    Sgr,
+    Unsupported,
+}
+
 struct Performer {
     grid: Grid,
     fg: Color,
@@ -1518,6 +1533,10 @@ struct Performer {
     /// REP in the data stream. Reset when a control function intervenes.
     last_printed_char: Option<char>,
     dcs_capture: Option<MediaCapture>,
+    /// Query selectors never retain terminal-controlled payload bytes.
+    decrqss: Option<DecrqssRequest>,
+    /// vte unhooks at ESC, before the following byte proves an ST terminator.
+    decrqss_awaiting_backslash: bool,
     /// Kitty keyboard flag stacks for the main and alternate screens.
     ///
     /// Each screen owns independent progressive-enhancement state, as required
@@ -1570,6 +1589,8 @@ impl Performer {
             fast_path_ready: true,
             last_printed_char: None,
             dcs_capture: None,
+            decrqss: None,
+            decrqss_awaiting_backslash: false,
             kitty_kbd_flags: [Vec::new(), Vec::new()],
         }
     }
@@ -1736,6 +1757,109 @@ impl Performer {
         self.last_printed_char = Some(ch);
     }
 
+    fn clear_decrqss(&mut self) {
+        self.decrqss = None;
+        self.decrqss_awaiting_backslash = false;
+    }
+
+    fn observe_decrqss_terminator(&mut self, byte: u8) {
+        let Some(request) = self.decrqss else {
+            // When: decrqss is absent, ordinary escape and media handling retain byte ownership.
+            return;
+        };
+        let complete = if self.decrqss_awaiting_backslash {
+            self.clear_decrqss();
+            byte == b'\\'
+        } else {
+            // When: decrqss_awaiting_backslash is false, distinguish payload from cancellation or the start of ST.
+            match byte {
+                0x9c => {
+                    self.clear_decrqss();
+                    true
+                }
+                0x1b => {
+                    self.decrqss_awaiting_backslash = true;
+                    false
+                }
+                0x18 | 0x1a => {
+                    self.clear_decrqss();
+                    false
+                }
+                0x7f..=0xff => {
+                    // Ignored vte payload bytes must still invalidate the selector.
+                    self.decrqss = Some(DecrqssRequest::Unsupported);
+                    false
+                }
+                _ => false,
+            }
+        };
+        if complete {
+            // When: complete is true, request selects a truthful Sgr reply or an unsupported-selector response.
+            if request == DecrqssRequest::Sgr {
+                // Serialize the current rendition rather than an assumed probe result.
+                self.reply_current_sgr();
+            } else {
+                // Unsupported selectors must not invent a status string.
+                self.reply(b"\x1bP0$r\x1b\\");
+            }
+        }
+    }
+
+    fn reply_current_sgr(&self) {
+        use std::fmt::Write as _;
+
+        // Fixed rendition fields bound this reply independently of request length.
+        let mut reply = String::from("\x1bP1$r0");
+        for (flag, code) in [(CellFlags::BOLD, 1), (CellFlags::DIM, 2), (CellFlags::ITALIC, 3)] {
+            if self.flags.contains(flag) {
+                // When: flags contains this rendition bit, include its SGR code after the reset prefix.
+                let _ = write!(reply, ";{code}");
+            }
+        }
+        if self.flags.contains(CellFlags::UNDERLINE) {
+            // When: UNDERLINE is active, preserve its exact style in the colon-form SGR selector.
+            let style = match self.underline_style {
+                UnderlineStyle::Single => 1,
+                UnderlineStyle::Double => 2,
+                UnderlineStyle::Curly => 3,
+                UnderlineStyle::Dotted => 4,
+                UnderlineStyle::Dashed => 5,
+            };
+            let _ = write!(reply, ";4:{style}");
+        }
+        for (flag, code) in [
+            (CellFlags::BLINK, 5),
+            (CellFlags::INVERSE, 7),
+            (CellFlags::HIDDEN, 8),
+            (CellFlags::STRIKETHROUGH, 9),
+        ] {
+            if self.flags.contains(flag) {
+                // When: flags contains this rendition bit, include its SGR code after the reset prefix.
+                let _ = write!(reply, ";{code}");
+            }
+        }
+        for (code, color) in
+            [(38, self.fg), (48, self.bg), (58, self.underline_color.unwrap_or(Color::Default))]
+        {
+            // String formatting is infallible; default colors are already represented by SGR 0.
+            match color {
+                Color::Default => {
+                    // When: color is Default, the leading SGR reset already selects it.
+                }
+                Color::Indexed(index) => {
+                    // When: color is Indexed, report its palette index rather than resolving it to RGB.
+                    let _ = write!(reply, ";{code};5;{index}");
+                }
+                Color::Rgb(r, g, b) => {
+                    // When: color is Rgb, preserve all three truecolor components.
+                    let _ = write!(reply, ";{code};2;{r};{g};{b}");
+                }
+            }
+        }
+        reply.push_str("m\x1b\\");
+        self.reply(reply.as_bytes());
+    }
+
     fn reset_attrs(&mut self) {
         self.fg = Color::Default;
         self.bg = Color::Default;
@@ -1761,6 +1885,7 @@ impl Performer {
         self.scroll_bottom = None;
         self.last_printed_char = None;
         self.dcs_capture = None;
+        self.clear_decrqss();
         for stack in &mut self.kitty_kbd_flags {
             stack.clear();
         }
@@ -1864,17 +1989,20 @@ impl Performer {
                 90..=97 => self.fg = Color::Indexed((p - 90 + 8) as u8),
                 100..=107 => self.bg = Color::Indexed((p - 100 + 8) as u8),
                 38 => {
-                    if let Some(c) = parse_ext_color(&mut iter) {
+                    if let Some(c) = parse_ext_color(slice, &mut iter) {
                         self.fg = c;
                     }
                 }
                 48 => {
-                    if let Some(c) = parse_ext_color(&mut iter) {
+                    if let Some(c) = parse_ext_color(slice, &mut iter) {
                         self.bg = c;
                     }
                 }
                 58 => {
-                    self.underline_color = parse_ext_color(&mut iter);
+                    if let Some(color) = parse_ext_color(slice, &mut iter) {
+                        // Malformed colors preserve the prior underline color, matching foreground and background.
+                        self.underline_color = Some(color);
+                    }
                 }
                 59 => self.underline_color = None,
                 _ => {} // unknown — silently ignore for forward compat
@@ -2096,7 +2224,20 @@ fn hex_nibble(b: u8) -> Option<u8> {
     }
 }
 
-fn parse_ext_color(iter: &mut vte::ParamsIter<'_>) -> Option<Color> {
+fn parse_ext_color(slice: &[u16], iter: &mut vte::ParamsIter<'_>) -> Option<Color> {
+    if slice.len() > 1 {
+        // When: slice contains colon subparameters, parse it alone so malformed colors cannot consume the next SGR.
+        return match slice {
+            [_, 5, index] => Some(Color::Indexed(u8::try_from(*index).ok()?)),
+            [_, 2, r, g, b] | [_, 2, 0, r, g, b] => Some(Color::Rgb(
+                u8::try_from(*r).ok()?,
+                u8::try_from(*g).ok()?,
+                u8::try_from(*b).ok()?,
+            )),
+            _ => None,
+        };
+    }
+    // Semicolon parameters retain their existing consumption and conversion behavior.
     let mode = iter.next()?.first().copied()?;
     match mode {
         5 => Some(Color::Indexed(iter.next()?.first().copied()? as u8)),
@@ -2791,9 +2932,21 @@ impl Perform for Performer {
         }
     }
 
-    fn hook(&mut self, _params: &Params, intermediates: &[u8], ignore: bool, action: char) {
+    fn hook(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
         // Entering DCS passthrough — stay out of the fast-path until unhook.
         self.fast_path_ready = false;
+        self.clear_decrqss();
+        if action == 'q' && intermediates == b"$" && !ignore {
+            // Classify status selectors independently of media capture.
+            let mut header = params.iter();
+            let default_params =
+                header.next().is_none_or(|value| value == [0]) && header.next().is_none();
+            self.decrqss = Some(if default_params {
+                DecrqssRequest::Empty
+            } else {
+                DecrqssRequest::Unsupported
+            });
+        }
         // `q` ends three unrelated DCS sequences, told apart only by their
         // intermediate byte:
         //
@@ -2817,6 +2970,13 @@ impl Perform for Performer {
     }
     fn put(&mut self, byte: u8) {
         self.fast_path_ready = false;
+        if let Some(request) = self.decrqss.as_mut() {
+            // Only exactly one m selects the SGR response; other payloads stay unsupported.
+            *request = match (*request, byte) {
+                (DecrqssRequest::Empty, b'm') => DecrqssRequest::Sgr,
+                _ => DecrqssRequest::Unsupported,
+            };
+        }
         if let Some(capture) = self.dcs_capture.as_mut() {
             capture.append_byte(byte);
         }

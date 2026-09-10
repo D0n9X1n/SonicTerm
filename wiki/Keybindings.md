@@ -86,8 +86,10 @@ the query, caret, and selected command when it still matches; rename text and
 color-picker selection remain unchanged. Concrete bound actions retain their
 literal arguments.
 
-Command rows use a 32-logical-pixel label band, a 20-pixel detail band, a
-4-pixel row gap, and 18-pixel horizontal text insets. The footer is 42 pixels
+Command rows allocate 25 logical pixels plus 16 pixels for details, with an
+8-pixel row gap and 12-pixel horizontal text insets. Label and subtitle form a
+vertically centered block with a 4-pixel internal gap. At the 13/12-pixel font
+sizes, this leaves equal 6-pixel top and bottom em-box margins. The footer is 42 pixels
 high with symmetric 18-pixel insets; the preferred panel height is 440 pixels,
 still limited by the viewport. Category/availability subtitles and the footer
 use the existing native font one point smaller than the command label. Subtitles,
@@ -405,7 +407,9 @@ Control 和 Alt 显示为 `Ctrl`、`Alt`。字面 `+` 按键会保留，例如 `
 以及当前快捷键提示。缺少翻译时回退到英文。语言或 keymap 重载会保留查询、光标，
 以及仍然匹配的已选命令；重命名文本和颜色选择保持不变。具体绑定动作保留参数的字面值。
 
-命令行使用 32 逻辑像素的标签区域、20 像素的详情区域、4 像素行间距和 18 像素水平文字内边距。
+命令行分配 25 逻辑像素，带详情时再增加 16 像素，行间距为 8 像素，水平文字内边距为 12 像素。
+标签与副标题组成垂直居中的文字块，内部间距为 4 像素。使用 13/12 像素字号时，
+文字 em 框上下各保留相等的 6 像素边距。
 页脚高 42 像素，左右内边距均为 18 像素；面板首选高度为 440 像素，仍受视口限制。
 分类/不可用原因副标题与页脚复用比命令标签小一号的原生字体。副标题、快捷键提示和页脚文字
 采用较淡颜色；命令标签字号不变。

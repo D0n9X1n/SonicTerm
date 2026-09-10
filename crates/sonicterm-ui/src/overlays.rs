@@ -65,16 +65,16 @@ pub const PALETTE_QUERY_ICON_SIZE: f32 = 16.0;
 pub const PALETTE_QUERY_ICON_X: f32 = 16.0;
 
 /// Row height inside the action list.
-pub const PALETTE_ROW_HEIGHT: f32 = 32.0;
+pub const PALETTE_ROW_HEIGHT: f32 = 25.0;
 
 /// Additional logical height for a command row's category and availability line.
-pub const PALETTE_DETAIL_HEIGHT: f32 = 20.0;
+pub const PALETTE_DETAIL_HEIGHT: f32 = 16.0;
 
 /// Vertical gap between consecutive rows.
-pub const PALETTE_ROW_GAP: f32 = 4.0;
+pub const PALETTE_ROW_GAP: f32 = 8.0;
 
 /// Horizontal padding inside each row.
-pub const PALETTE_ROW_PAD_X: f32 = 18.0;
+pub const PALETTE_ROW_PAD_X: f32 = 12.0;
 
 /// Minimum gap between the command label and shortcut hint columns.
 pub const PALETTE_ROW_COLUMN_GAP: f32 = 28.0;

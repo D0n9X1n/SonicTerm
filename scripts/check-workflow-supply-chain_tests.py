@@ -522,6 +522,27 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("CI_CACHE_NAMESPACE: ci-v3", release)
         self.assertIn("key: ${{ env.CI_CACHE_NAMESPACE }}-vcpkg-cairo-", release)
 
+    def test_windows_cairo_consumers_allow_cold_install_after_image_rollover(self):
+        # Hosted image rollovers can invalidate every package in a successfully restored fallback cache.
+        text = (_HERE.parent / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        for job_name in (
+            "windows-native", "windows-checks", "windows-features",
+            "windows-tests", "windows-smoke",
+        ):
+            with self.subTest(job=job_name):
+                job = text.split(f"  {job_name}:\n", 1)[1]
+                job = re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", job, maxsplit=1)[0]
+                self.assertEqual(
+                    re.findall(
+                        r"(?m)^      - name: Install Cairo for Windows\n        timeout-minutes: (\d+)$",
+                        job,
+                    ),
+                    ["30" if job_name == "windows-native" else "12"],
+                    "A restored archive is not proof that vcpkg can reuse its package ABIs",
+                )
+
     def test_linux_core_installs_gpu_runtime_dependencies(self):
         text = (_HERE.parent / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"

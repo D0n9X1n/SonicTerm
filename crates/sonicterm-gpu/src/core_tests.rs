@@ -2839,6 +2839,42 @@ fn palette_cursor_uses_placeholder_only_for_an_empty_query() {
     assert_eq!(palette_cursor_char("", 0, None), None);
 }
 
+// Two-line command text shares equal outer margins instead of pushing details against the highlight.
+#[test]
+fn palette_detail_block_has_balanced_padding() {
+    for scale in [1.0, 1.5, 2.0] {
+        let height = (sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_HEIGHT
+            + sonicterm_render_model::boundary::ui::overlays::PALETTE_DETAIL_HEIGHT)
+            * scale;
+        let label = 13.0 * scale;
+        let detail = 12.0 * scale;
+        let gap = 4.0 * scale;
+        let (label_baseline, detail_top, detail_baseline) =
+            palette_detail_positions(height, label, detail, gap);
+        let top = label_baseline - label * 0.8;
+        let bottom = height - (detail_baseline + detail * 0.2);
+        assert!((top - bottom).abs() < 0.001);
+        assert!((detail_top - (top + label) - gap).abs() < 0.001);
+        assert!((bottom - 7.5 * 0.8 * scale).abs() < 0.001);
+    }
+}
+
+// Oversized fonts retain a visible subtitle clip inside the fixed-height row.
+#[test]
+fn palette_detail_large_fonts_keep_a_visible_clip() {
+    for scale in [1.0, 1.5, 2.0] {
+        for size in [22.0, 34.0] {
+            let height = 38.0 * scale;
+            let detail_size = (size - 1.0) * scale;
+            let (_, detail_top, baseline) =
+                palette_detail_positions(height, size * scale, detail_size, 4.0 * scale);
+            assert!(detail_top >= 0.0);
+            assert!(height - detail_top >= detail_size - 0.001);
+            assert!(baseline < height);
+        }
+    }
+}
+
 #[test]
 fn palette_footer_is_one_logical_pixel_smaller_and_native_at_windows_scales() {
     // Contract: footer text stays one logical pixel smaller and rasterizes at native scale.
