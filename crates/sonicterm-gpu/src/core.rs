@@ -175,7 +175,7 @@ fn palette_footer_font_size(body_font_size: f32) -> f32 {
     (body_font_size - 1.0).max(1.0)
 }
 
-const PALETTE_FOOTER_INSET_X: f32 = 12.0;
+const PALETTE_FOOTER_INSET_X: f32 = 18.0;
 const READ_ONLY_BADGE_ICON: &str = "";
 const READ_ONLY_BADGE_LABEL: &str = "READONLY";
 const SEARCH_BADGE_ICON: &str = "";
@@ -6464,7 +6464,7 @@ impl GpuRenderer {
                             )
                             - width;
                         let mut hint_color = self.search_fg;
-                        hint_color.a = if disabled { 120 } else { 180 };
+                        hint_color.a = if disabled { 120 } else { 165 };
                         emit_overlay_text_glyphs(
                             &mut self.glyph_atlas,
                             stack,
@@ -6483,26 +6483,44 @@ impl GpuRenderer {
                             None,
                         );
                     }
-                    if let Some(detail) = detail {
+                    if let (Some(detail), Some(detail_stack)) =
+                        (detail, self.palette_footer_font_stack.as_ref())
+                    {
+                        // Details share the footer's smaller native strike and atlas identity.
+                        let detail_font_size =
+                            self.raster_px(palette_footer_font_size(self.font_size));
+                        let mut detail_rasterizer = detail_stack.clone();
                         let mut detail_color = self.search_fg;
-                        detail_color.a = 170;
-                        emit_overlay_text_glyphs(
+                        detail_color.a = if disabled { 120 } else { 165 };
+                        let detail_width = (row.rect.x + row.rect.w
+                            - origin_x
+                            - self.chrome_px(
+                                sonicterm_render_model::boundary::ui::overlays::PALETTE_ROW_PAD_X,
+                            ))
+                        .max(0.0);
+                        let detail_layout = chrome_text::layout_with_raster_variant(
+                            detail_stack,
+                            &mut detail_rasterizer,
                             &mut self.glyph_atlas,
-                            stack,
-                            palette_font_size,
-                            palette_native_em,
-                            &mut palette_rasterizer,
                             detail,
                             detail_color,
                             ChromeAttrs::default(),
-                            origin_x,
-                            row.rect.y + label_h + (detail_h + palette_font_size * 0.8) * 0.5,
-                            [row.rect.x, row.rect.y + label_h, row.rect.w, detail_h],
-                            sw,
-                            sh,
-                            &mut overlay_glyph_instances,
-                            None,
+                            detail_font_size,
+                            detail_font_size,
+                            (
+                                origin_x,
+                                row.rect.y + label_h + (detail_h + detail_font_size * 0.8) * 0.5,
+                            ),
+                            (sw, sh),
+                            Some(ChromeClip {
+                                x: origin_x,
+                                y: row.rect.y + label_h,
+                                w: detail_width,
+                                h: detail_h,
+                            }),
+                            GlyphRasterVariant::PaletteFooter,
                         );
+                        overlay_glyph_instances.extend(detail_layout.glyphs);
                     }
                 }
                 // Empty-state placeholder + hint.
@@ -6570,21 +6588,25 @@ impl GpuRenderer {
                     let footer_origin_x = layout.footer.x + self.chrome_px(PALETTE_FOOTER_INSET_X);
                     let footer_baseline_y =
                         layout.footer.y + (layout.footer.h + footer_font_size * 0.8) * 0.5;
+                    let mut footer_color = self.search_fg;
+                    footer_color.a = 165;
+                    let footer_width =
+                        (layout.footer.w - self.chrome_px(PALETTE_FOOTER_INSET_X) * 2.0).max(0.0);
                     let footer_layout = chrome_text::layout_with_raster_variant(
                         footer_stack,
                         &mut footer_rasterizer,
                         &mut self.glyph_atlas,
                         &layout.footer_label,
-                        self.search_fg,
+                        footer_color,
                         ChromeAttrs::default(),
                         footer_font_size,
                         footer_native_em,
                         (footer_origin_x, footer_baseline_y),
                         (sw, sh),
                         Some(ChromeClip {
-                            x: layout.footer.x,
+                            x: footer_origin_x,
                             y: layout.footer.y,
-                            w: layout.footer.w,
+                            w: footer_width,
                             h: layout.footer.h,
                         }),
                         GlyphRasterVariant::PaletteFooter,

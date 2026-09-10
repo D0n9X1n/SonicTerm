@@ -1217,22 +1217,8 @@ impl App {
                     let enabled = pane.parser.lock().focus_reporting_enabled();
                     if enabled {
                         // DEC focus reporting forwards the transition to the active PTY.
-                        if let Some(pty) = pane.pty.as_ref() {
-                            let seq: &[u8] = if focused {
-                                // Focus-in emits the DEC focus-in sequence.
-                                b"\x1b[I"
-                            } else {
-                                // Focus-out emits the DEC focus-out sequence.
-                                b"\x1b[O"
-                            };
-                            Self::queue_pty_input(
-                                self.event_loop_proxy.as_ref(),
-                                pty,
-                                pane_id,
-                                PtyInputSource::FocusReport,
-                                seq.to_vec(),
-                            );
-                        }
+                        let seq: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
+                        self.write_to_pane(pane_id, seq.to_vec(), PtyInputSource::FocusReport);
                     }
                 }
                 if let Some(w) = self.main_window().cloned() {
@@ -1829,17 +1815,7 @@ impl App {
                                 cell.map(|(r, c)| (c as u32 + 1, r as u32 + 1)).unwrap_or((1, 1));
                             let count = delta_lines.unsigned_abs() as usize;
                             let payload = wheel_report_bytes(sgr, up, col1, row1, count);
-                            if let Some(pane) = self.main().and_then(|ws| ws.panes.get(&pane_id)) {
-                                if let Some(pty) = pane.pty.as_ref() {
-                                    Self::queue_pty_input(
-                                        self.event_loop_proxy.as_ref(),
-                                        pty,
-                                        pane_id,
-                                        PtyInputSource::Wheel,
-                                        payload,
-                                    );
-                                }
-                            }
+                            self.write_to_pane(pane_id, payload, PtyInputSource::Wheel);
                         } else if is_alt {
                             // When: is_alt is true with tracking Off, translate wheel motion to arrows.
 
@@ -1860,17 +1836,7 @@ impl App {
                             for _ in 0..count {
                                 payload.extend_from_slice(seq);
                             }
-                            if let Some(pane) = self.main().and_then(|ws| ws.panes.get(&pane_id)) {
-                                if let Some(pty) = pane.pty.as_ref() {
-                                    Self::queue_pty_input(
-                                        self.event_loop_proxy.as_ref(),
-                                        pty,
-                                        pane_id,
-                                        PtyInputSource::Wheel,
-                                        payload,
-                                    );
-                                }
-                            }
+                            self.write_to_pane(pane_id, payload, PtyInputSource::Wheel);
                         } else {
                             // When: is_alt is false, move SonicTerm's primary-screen scrollback viewport.
                             self.scroll_pane(pane_id, delta_lines);

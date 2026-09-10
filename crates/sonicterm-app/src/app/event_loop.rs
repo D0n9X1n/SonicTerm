@@ -313,7 +313,11 @@ impl App {
             self.wake_is_foreground_probe_only =
                 wake_is_foreground_probe_only(frame_wake, foreground_wake, memory_wake);
         }
-        match earliest(non_memory_wake, memory_wake) {
+        let other_wake = earliest(non_memory_wake, memory_wake);
+        let motion_wake = self.flush_pointer_motion(Instant::now());
+        self.wake_is_pointer_motion_only =
+            motion_wake.is_some_and(|motion| other_wake.is_none_or(|other| motion < other));
+        match earliest(other_wake, motion_wake) {
             Some(at) => el.set_control_flow(ControlFlow::WaitUntil(at)),
             None => el.set_control_flow(ControlFlow::Wait),
         }
@@ -440,6 +444,15 @@ impl App {
             // When: cause matches ResumeTimeReached; winit sends nothing further on
             // its own, so every deferred repaint must be re-requested here.
             let now = Instant::now();
+            if std::mem::take(&mut self.wake_is_pointer_motion_only) {
+                // When: wake_is_pointer_motion_only is set, about_to_wait drains the slot without repainting.
+                self.wake_is_memory_only = false;
+                #[cfg(windows)]
+                {
+                    self.wake_is_foreground_probe_only = false;
+                }
+                return;
+            }
             #[cfg(target_os = "windows")]
             self.reassert_osc52_clipboard_if_due(now);
 

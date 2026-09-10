@@ -31,7 +31,7 @@ use crate::tabbar_view::Rect;
 pub const PALETTE_WIDTH: f32 = 520.0;
 
 /// Ideal modal height in physical pixels.
-pub const PALETTE_HEIGHT: f32 = 400.0;
+pub const PALETTE_HEIGHT: f32 = 440.0;
 
 /// Hard upper bound on the modal width — the layout never grows past this
 /// even on very wide windows. The viewport-relative clamp is
@@ -65,22 +65,22 @@ pub const PALETTE_QUERY_ICON_SIZE: f32 = 16.0;
 pub const PALETTE_QUERY_ICON_X: f32 = 16.0;
 
 /// Row height inside the action list.
-pub const PALETTE_ROW_HEIGHT: f32 = 28.0;
+pub const PALETTE_ROW_HEIGHT: f32 = 32.0;
 
 /// Additional logical height for a command row's category and availability line.
-pub const PALETTE_DETAIL_HEIGHT: f32 = 16.0;
+pub const PALETTE_DETAIL_HEIGHT: f32 = 20.0;
 
 /// Vertical gap between consecutive rows.
-pub const PALETTE_ROW_GAP: f32 = 2.0;
+pub const PALETTE_ROW_GAP: f32 = 4.0;
 
 /// Horizontal padding inside each row.
-pub const PALETTE_ROW_PAD_X: f32 = 14.0;
+pub const PALETTE_ROW_PAD_X: f32 = 18.0;
 
 /// Minimum gap between the command label and shortcut hint columns.
 pub const PALETTE_ROW_COLUMN_GAP: f32 = 28.0;
 
 /// Footer height (count + nav hint strip at the bottom of the modal).
-pub const PALETTE_FOOTER_HEIGHT: f32 = 30.0;
+pub const PALETTE_FOOTER_HEIGHT: f32 = 42.0;
 
 /// Default inset between the modal edge and the inner content (rows, query,
 /// footer). Users can override this via `appearance.panel_padding`.

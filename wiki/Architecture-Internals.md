@@ -317,7 +317,12 @@ or a disconnected writer returns `PtyInputError` with the original bytes. The
 app drops the payload and posts metadata-only `UserEvent::PtyInputRejected`,
 logs the pane, current window, typed source, and concurrent queue/writer
 observations, and notifies that pane's window if it still exists. It does not
-replay the bytes automatically. Queue occupancy excludes the active native
+replay refused discrete bytes automatically. Before admission, pointer motion
+coalesces in a fixed 64-byte pane slot; queue saturation retains its latest
+position for a non-rendering retry. Following discrete input combines the pending
+position into one admission when it fits; otherwise it supersedes that position.
+Changed mouse profiles invalidate the pending slot; unavailable profiles defer
+motion-only retries, while discrete input supersedes unvalidated motion. Queue occupancy excludes the active native
 write/flush, whose phase, size, elapsed time, and progress are observed separately.
 
 PTY resize is fallible and its cache is success-only. The callback holds the
@@ -690,7 +695,10 @@ sRGB 彩色 view。Alpha 保持为 RGB 覆盖率最大值，因此不满足
 `try_send`。消息超过 16 MiB、队列已满或 writer 已断开时，会返回保留原始字节的
 `PtyInputError`。应用丢弃负载后，发送只含元数据的 `UserEvent::PtyInputRejected`，
 记录窗格、当前窗口、类型化来源及并发队列/writer 观察值；窗格仍存在时在其窗口显示通知。
-它不会自动重放这些字节。队列占用不包含正在进行的原生写入或 flush；其阶段、大小、
+它不会自动重放被拒绝的离散输入。入队前，指针移动在窗格固定 64 字节槽内合并；队列满时保留
+最新位置，通过不重绘的唤醒重试。后续离散输入在总长度允许时合并该位置为一次准入，否则取代
+该位置。鼠标模式变化会使待发槽失效；模式暂不可用时延迟仅移动的重试，离散输入则取代
+尚未验证的移动。队列占用不包含正在进行的原生写入或 flush；其阶段、大小、
 持续时间和进度会单独观察。
 
 PTY 尺寸调整是可失败的，且只在成功时缓存。回调把原生调用和最后一次成功应用的

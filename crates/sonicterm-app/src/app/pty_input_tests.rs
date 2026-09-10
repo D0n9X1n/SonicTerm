@@ -3,6 +3,134 @@ use crate::app::spawn_pane::{osc52_clipboard_write_event, MAX_OSC52_CLIPBOARD_BY
 use base64::Engine;
 use sonicterm_io::pty::{PtyInputDiagnostics, PtyInputError, PtyWriterPhase};
 
+// A burst retains only its final position and retries it without requiring another native event.
+#[test]
+fn pointer_motion_coalesces_and_retries_full_queue() {
+    let mut motion = PendingPointerMotion::default();
+    for col in 1..100 {
+        motion.replace(format!("\x1b[<35;{col};1M").as_bytes());
+    }
+    motion.flush(|bytes| Err(PtyInputError::QueueFull(bytes))).unwrap();
+    assert_ne!(motion.len, 0);
+    let mut delivered = Vec::new();
+    motion
+        .flush(|bytes| {
+            delivered.push(bytes);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(delivered, [b"\x1b[<35;99;1M".to_vec()]);
+    assert_eq!(motion.len, 0);
+    motion.flush(|_| panic!("an empty slot must not enqueue")).unwrap();
+}
+
+// Discrete input shares one queue admission with preceding motion and cannot be overtaken by later motion.
+#[test]
+fn pointer_motion_orders_discrete_input_in_one_admission() {
+    let mut motion = PendingPointerMotion::default();
+    motion.replace(b"old");
+    motion.replace(b"latest");
+    let mut delivered = Vec::new();
+    motion
+        .send_ordered(b"click".to_vec(), |bytes| {
+            delivered.push(bytes);
+            Ok(())
+        })
+        .unwrap();
+    motion.replace(b"next");
+    motion
+        .send_ordered(b"key".to_vec(), |bytes| {
+            delivered.push(bytes);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(delivered, [b"latestclick".to_vec(), b"nextkey".to_vec()]);
+    assert_eq!(motion.len, 0);
+}
+
+// Refused discrete input keeps its attribution and cannot leave stale motion to replay after the error.
+#[test]
+fn pointer_motion_discrete_rejection_returns_only_discrete_bytes() {
+    let mut motion = PendingPointerMotion::default();
+    motion.replace(b"motion");
+    let error = motion
+        .send_ordered(b"key".to_vec(), |bytes| Err(PtyInputError::QueueFull(bytes)))
+        .unwrap_err();
+    assert!(matches!(error, PtyInputError::QueueFull(bytes) if bytes == b"key"));
+    assert_eq!(motion.len, 0);
+}
+
+// Each pane owns independent fixed storage; a disconnected writer consumes its slot only once.
+#[test]
+fn pointer_motion_isolated_slots_clear_on_disconnect() {
+    let mut first = PendingPointerMotion::default();
+    let mut second = PendingPointerMotion::default();
+    first.replace(b"first");
+    second.replace(b"second");
+    assert!(matches!(
+        first.flush(|bytes| Err(PtyInputError::WriterDisconnected(bytes))),
+        Err(PtyInputError::WriterDisconnected(_))
+    ));
+    assert_eq!(first.len, 0);
+    assert_eq!(second.take(), b"second");
+}
+
+// A shell or encoding transition invalidates deferred bytes before retry or a following key.
+#[test]
+fn pointer_motion_profile_change_discards_stale_report() {
+    let mut motion = PendingPointerMotion::default();
+    let active = Some((MouseTracking::AnyMotion, true, true));
+    motion.validate_profile(active);
+    motion.replace(b"motion");
+    motion.validate_profile(active);
+    assert_eq!(motion.len, 6);
+    for changed in [
+        Some((MouseTracking::Off, true, true)),
+        Some((MouseTracking::AnyMotion, false, true)),
+        Some((MouseTracking::AnyMotion, true, false)),
+    ] {
+        motion.validate_profile(active);
+        motion.replace(b"motion");
+        motion.validate_profile(changed);
+        assert_eq!(motion.len, 0);
+    }
+}
+
+// Parser contention leaves the latest position intact until its known profile can be validated again.
+#[test]
+fn pointer_motion_unknown_profile_retains_pending_position() {
+    let mut motion = PendingPointerMotion::default();
+    let active = Some((MouseTracking::AnyMotion, true, true));
+    motion.validate_profile(active);
+    motion.replace(b"latest");
+    motion.validate_profile(None);
+    assert_eq!(motion.profile, active);
+    assert_eq!(motion.len, 6);
+    motion.validate_profile(active);
+    assert_eq!(motion.take(), b"latest");
+}
+
+// Real app admission retains motion across parser contention and drains it after the lock is released.
+#[cfg(unix)]
+#[test]
+fn pointer_motion_app_retries_after_parser_contention() {
+    let pty = PtyHandle::spawn_with_args("/bin/sh", &["-s".into()], 80, 24).expect("PTY fixture");
+    let mut app = App::new(Default::default(), Default::default(), Default::default());
+    let pane_id = app.__test_seed_tab("motion");
+    let pane = app.main_mut().unwrap().panes.get_mut(&pane_id).unwrap();
+    pane.pty = Some(pty);
+    let parser = pane.parser.clone();
+    parser.lock().advance(b"\x1b[?1003h\x1b[?1006h");
+    let guard = parser.lock();
+    assert!(app.write_to_pane(pane_id, b"\x1b[<35;1;1M".to_vec(), PtyInputSource::PointerMotion));
+    let now = Instant::now();
+    assert_eq!(app.flush_pointer_motion(now), Some(now + Duration::from_millis(10)));
+    assert_ne!(app.pane_by_id(pane_id).unwrap().pending_pointer_motion.len, 0);
+    drop(guard);
+    assert_eq!(app.flush_pointer_motion(Instant::now()), None);
+    assert_eq!(app.pane_by_id(pane_id).unwrap().pending_pointer_motion.len, 0);
+}
+
 fn input_observation() -> PtyInputDiagnostics {
     PtyInputDiagnostics {
         queued_messages: 4,

@@ -1,5 +1,47 @@
 use super::*;
 
+// Numeric OS key meaning survives ZLE's application-keypad request without bypassing modifier encoding.
+#[test]
+fn application_keypad_keeps_os_numeric_digits_as_text() {
+    let modes = KeyboardModes::new(false, true, false, false, 0);
+    for (number, physical) in [
+        KeyCode::Numpad0,
+        KeyCode::Numpad1,
+        KeyCode::Numpad2,
+        KeyCode::Numpad3,
+        KeyCode::Numpad4,
+        KeyCode::Numpad5,
+        KeyCode::Numpad6,
+        KeyCode::Numpad7,
+        KeyCode::Numpad8,
+        KeyCode::Numpad9,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let text = number.to_string();
+        let logical = Key::Character(text.clone().into());
+        let key = event(
+            &logical,
+            PhysicalKey::Code(physical),
+            Some(&text),
+            KeyLocation::Numpad,
+            ElementState::Pressed,
+            false,
+        );
+        for flags in [0, KITTY_REPORT_ALTERNATES, KITTY_REPORT_TEXT] {
+            assert_eq!(
+                encode_event(key, ModifiersState::empty(), flags, modes),
+                Some(text.as_bytes().to_vec())
+            );
+        }
+        assert_eq!(
+            encode_event(key, ModifiersState::ALT, 0, modes),
+            Some(format!("\x1b{text}").into_bytes())
+        );
+    }
+}
+
 #[test]
 fn enter_encodes_carriage_return() {
     assert_eq!(
@@ -385,7 +427,7 @@ fn terminal_keyboard_modes_change_legacy_encoding() {
             0,
             KeyboardModes::new(false, true, false, false, 0),
         ),
-        Some(b"\x1bOq".to_vec()),
+        Some(b"1".to_vec()),
     );
 
     let letter_key = Key::Character("a".into());
@@ -597,7 +639,7 @@ fn application_keypad_preserves_physical_digit_identity() {
     );
 }
 
-/// Form-only or unknown Kitty flags preserve the underlying DECKPAM encoding.
+// Form-only and unknown Kitty flags preserve OS-resolved numeric keypad text.
 #[test]
 fn optional_kitty_fields_do_not_enable_kitty_key_encoding() {
     let one_key = Key::Character("1".into());
@@ -614,7 +656,7 @@ fn optional_kitty_fields_do_not_enable_kitty_key_encoding() {
     for flags in [KITTY_REPORT_ALTERNATES, KITTY_REPORT_TEXT, 1 << 7] {
         assert_eq!(
             encode_event(numpad_one, ModifiersState::empty(), flags, modes),
-            Some(b"\x1bOq".to_vec()),
+            Some(b"1".to_vec()),
             "flags={flags}",
         );
     }

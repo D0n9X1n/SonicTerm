@@ -1341,16 +1341,14 @@ impl App {
                             let count = delta_lines.unsigned_abs() as usize;
                             let payload =
                                 super::window_event::wheel_report_bytes(sgr, up, col1, row1, count);
-                            if let Some(pane) = child.panes.get(&pane_id) {
-                                if let Some(pty) = pane.pty.as_ref() {
-                                    Self::queue_pty_input(
-                                        pty_event_proxy.as_ref(),
-                                        pty,
-                                        pane_id,
-                                        super::PtyInputSource::Wheel,
-                                        payload,
-                                    );
-                                }
+                            if let Some(pane) = child.panes.get_mut(&pane_id) {
+                                Self::queue_pane_input(
+                                    pty_event_proxy.as_ref(),
+                                    pane,
+                                    pane_id,
+                                    super::PtyInputSource::Wheel,
+                                    payload,
+                                );
                             }
                         } else if is_alt {
                             // When: `is_alt` without tracking, so the wheel
@@ -1367,16 +1365,14 @@ impl App {
                             for _ in 0..count {
                                 payload.extend_from_slice(seq);
                             }
-                            if let Some(pane) = child.panes.get(&pane_id) {
-                                if let Some(pty) = pane.pty.as_ref() {
-                                    Self::queue_pty_input(
-                                        pty_event_proxy.as_ref(),
-                                        pty,
-                                        pane_id,
-                                        super::PtyInputSource::Wheel,
-                                        payload,
-                                    );
-                                }
+                            if let Some(pane) = child.panes.get_mut(&pane_id) {
+                                Self::queue_pane_input(
+                                    pty_event_proxy.as_ref(),
+                                    pane,
+                                    pane_id,
+                                    super::PtyInputSource::Wheel,
+                                    payload,
+                                );
                             }
                         } else {
                             // When: `is_alt` is false, so the pane has real

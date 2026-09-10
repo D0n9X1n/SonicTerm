@@ -2087,6 +2087,100 @@ pub(crate) fn identity_config_normalizer() -> ConfigNormalizer {
     Box::new(|config| (config, Vec::new()))
 }
 
+#[derive(Debug)]
+struct PendingPointerMotion {
+    bytes: [u8; 64],
+    len: usize,
+    profile: Option<(MouseTracking, bool, bool)>,
+}
+
+impl Default for PendingPointerMotion {
+    fn default() -> Self {
+        Self { bytes: [0; 64], len: 0, profile: None }
+    }
+}
+
+impl PendingPointerMotion {
+    fn validate_profile(&mut self, profile: Option<(MouseTracking, bool, bool)>) {
+        let Some(current) = profile else {
+            // When: profile is unavailable, retain the position until a later retry can validate it.
+            return;
+        };
+        if self.profile.is_some_and(|previous| previous != current)
+            || matches!(current.0, MouseTracking::Off | MouseTracking::Button)
+        {
+            // A changed or disabled tracking mode cannot receive a deferred position.
+            self.len = 0;
+        }
+        self.profile = Some(current);
+    }
+
+    fn replace(&mut self, bytes: &[u8]) {
+        // SGR reports contain at most three u32 fields; both supported encodings fit this fixed slot.
+        assert!(bytes.len() <= self.bytes.len());
+        self.bytes[..bytes.len()].copy_from_slice(bytes);
+        self.len = bytes.len();
+    }
+
+    fn take(&mut self) -> Vec<u8> {
+        let bytes = self.bytes[..self.len].to_vec();
+        self.len = 0;
+        bytes
+    }
+
+    fn flush(
+        &mut self,
+        send: impl FnOnce(Vec<u8>) -> Result<(), sonicterm_io::pty::PtyInputError>,
+    ) -> Result<(), sonicterm_io::pty::PtyInputError> {
+        use sonicterm_io::pty::PtyInputError;
+        if self.len == 0 {
+            // When: self.len is zero, do not consume a writer queue slot.
+            return Ok(());
+        }
+        match send(self.take()) {
+            Err(PtyInputError::QueueFull(bytes)) => {
+                // QueueFull retains the latest position for a later non-rendering wake.
+                self.replace(&bytes);
+                Ok(())
+            }
+            result => result,
+        }
+    }
+
+    fn send_ordered(
+        &mut self,
+        bytes: Vec<u8>,
+        send: impl FnOnce(Vec<u8>) -> Result<(), sonicterm_io::pty::PtyInputError>,
+    ) -> Result<(), sonicterm_io::pty::PtyInputError> {
+        use sonicterm_io::pty::{pty_input_message_allowed, PtyInputError};
+        let prefix_len = self.len;
+        let pending = self.take();
+        if prefix_len == 0 || !pty_input_message_allowed(prefix_len.saturating_add(bytes.len())) {
+            // When: prefix_len is zero or the combined length exceeds the cap, give discrete input the queue slot.
+            return send(bytes);
+        }
+        let mut combined = Vec::with_capacity(prefix_len + bytes.len());
+        combined.extend_from_slice(&pending);
+        combined.extend_from_slice(&bytes);
+        send(combined).map_err(|error| {
+            // Rejection attribution covers only discrete input; stale motion cannot replay after it.
+            let strip = |mut rejected: Vec<u8>| {
+                rejected.drain(..prefix_len);
+                rejected
+            };
+            match error {
+                PtyInputError::QueueFull(bytes) => PtyInputError::QueueFull(strip(bytes)),
+                PtyInputError::WriterDisconnected(bytes) => {
+                    PtyInputError::WriterDisconnected(strip(bytes))
+                }
+                PtyInputError::MessageTooLarge(bytes) => {
+                    PtyInputError::MessageTooLarge(strip(bytes))
+                }
+            }
+        })
+    }
+}
+
 /// Producer-assigned input category retained without inspecting terminal bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PtyInputSource {
@@ -2350,6 +2444,8 @@ pub struct PaneState {
     /// `2 × RETENTION_SAMPLE_INTERVAL` the cancellation reports.
     pub(crate) capture_stall_samples: u8,
     pub pty: Option<PtyHandle>,
+    /// Latest unsent mouse position; fixed storage follows the pane across window transfers.
+    pending_pointer_motion: PendingPointerMotion,
     /// Whether a resize failure has been reported since the last success.
     pub(crate) resize_warned: std::sync::atomic::AtomicBool,
     pub redraw_target: Arc<Mutex<Option<WindowId>>>,
@@ -2423,6 +2519,7 @@ impl PaneState {
             last_capture_progress: None,
             capture_stall_samples: 0,
             pty,
+            pending_pointer_motion: PendingPointerMotion::default(),
             resize_warned: std::sync::atomic::AtomicBool::new(false),
             redraw_target: Arc::new(Mutex::new(None)),
             viewport_top_abs: None,
@@ -2670,6 +2767,8 @@ pub struct App {
     /// draw a frame every thirty seconds forever purely to record that it was
     /// idle, which is a heartbeat redraw under another name.
     pub(super) wake_is_memory_only: bool,
+    /// A pending mouse report can retry without creating a redraw heartbeat.
+    pub(super) wake_is_pointer_motion_only: bool,
     #[cfg(windows)]
     /// Whether the armed timer is solely a foreground-process sample with no frame due.
     pub(super) wake_is_foreground_probe_only: bool,
@@ -3116,6 +3215,7 @@ impl App {
             last_memory_totals: None,
             breadcrumb_recorder: None,
             wake_is_memory_only: false,
+            wake_is_pointer_motion_only: false,
             #[cfg(windows)]
             wake_is_foreground_probe_only: false,
             command_palette,
@@ -3779,17 +3879,16 @@ impl App {
         if self.pty_write_log_enabled {
             self.test_pty_writes.lock().push((pane_id, bytes.clone()));
         }
-        let Some(p) = self.pane_by_id(pane_id) else {
-            // When: `pane_by_id` resolves nothing, so the pane closed before
-            // its bytes were enqueued and they have nowhere to land.
+        let Some(p) = self.windows.values_mut().find_map(|window| window.panes.get_mut(&pane_id))
+        else {
+            // When: find_map cannot resolve pane_id, its input has no live destination.
             return false;
         };
-        let queued = p.pty.as_ref().is_some_and(|pty| {
-            Self::queue_pty_input(self.event_loop_proxy.as_ref(), pty, pane_id, source, bytes)
-        });
+        let queued =
+            Self::queue_pane_input(self.event_loop_proxy.as_ref(), p, pane_id, source, bytes);
         #[cfg(windows)]
-        if queued {
-            // Accepted PTY input can launch a silent command, so sample its process after launch settles.
+        if queued && source != PtyInputSource::PointerMotion {
+            // Accepted discrete input can launch a silent command; coalesced motion must not schedule process probes.
             self.arm_foreground_probe_after_input(Instant::now());
         }
         queued
@@ -3806,6 +3905,102 @@ impl App {
             return false;
         };
         self.write_to_pane(pane.0, data.to_vec(), source)
+    }
+
+    fn queue_pane_input(
+        proxy: Option<&EventLoopProxy<UserEvent>>,
+        pane: &mut PaneState,
+        pane_id: u64,
+        source: PtyInputSource,
+        bytes: Vec<u8>,
+    ) -> bool {
+        let profile =
+            if source == PtyInputSource::PointerMotion || pane.pending_pointer_motion.len != 0 {
+                // Profile checks never block discrete input behind parser output.
+                pane.parser.try_lock().map(|parser| {
+                    (parser.mouse_tracking(), parser.mouse_sgr_enabled(), parser.grid().is_alt())
+                })
+            } else {
+                // When: source is discrete and no motion is pending, the parser is irrelevant to admission.
+                None
+            };
+        pane.pending_pointer_motion.validate_profile(profile);
+        let Some(pty) = pane.pty.as_ref() else {
+            // When: a pane has no writer, input cannot acquire delivery ownership.
+            return false;
+        };
+        if source == PtyInputSource::PointerMotion {
+            // When: source is PointerMotion, coalesce the turn's positions in fixed pane-owned storage.
+            if profile.is_some_and(|current| {
+                matches!(current.0, MouseTracking::Off | MouseTracking::Button)
+            }) {
+                // When: profile disables motion, do not retain a stale native report.
+                return false;
+            }
+            pane.pending_pointer_motion.replace(&bytes);
+            return true;
+        }
+        if profile.is_none() {
+            // An unknown profile at a discrete barrier supersedes motion rather than delaying the key or replaying stale bytes.
+            pane.pending_pointer_motion.len = 0;
+        }
+        match pane
+            .pending_pointer_motion
+            .send_ordered(bytes, |bytes| pty.send_input_nonblocking(bytes))
+        {
+            Ok(()) => true,
+            Err(error) => {
+                // Refused discrete input preserves attribution without retaining its payload.
+                Self::report_pty_input_rejection(
+                    proxy,
+                    pane_id,
+                    source,
+                    error,
+                    pty.input_diagnostics(),
+                );
+                false
+            }
+        }
+    }
+
+    fn flush_pointer_motion(&mut self, now: Instant) -> Option<Instant> {
+        let mut pending = false;
+        for window in self.windows.values_mut() {
+            for (&pane_id, pane) in &mut window.panes {
+                if pane.pending_pointer_motion.len == 0 {
+                    // When: pending_pointer_motion.len is zero, idle panes need no parser or writer work.
+                    continue;
+                }
+                let profile = pane.parser.try_lock().map(|parser| {
+                    (parser.mouse_tracking(), parser.mouse_sgr_enabled(), parser.grid().is_alt())
+                });
+                pane.pending_pointer_motion.validate_profile(profile);
+                let Some(pty) = pane.pty.as_ref() else {
+                    // When: a pane loses its PTY, discard its unsendable position without arming a timer.
+                    pane.pending_pointer_motion.len = 0;
+                    continue;
+                };
+                if profile.is_none() {
+                    // When: profile is unavailable, retry without dropping the latest position or writing unvalidated bytes.
+                    pending = true;
+                    continue;
+                }
+                if let Err(error) =
+                    pane.pending_pointer_motion.flush(|bytes| pty.send_input_nonblocking(bytes))
+                {
+                    // A disconnected writer reports once; the consumed slot prevents repeated warnings.
+                    Self::report_pty_input_rejection(
+                        self.event_loop_proxy.as_ref(),
+                        pane_id,
+                        PtyInputSource::PointerMotion,
+                        error,
+                        pty.input_diagnostics(),
+                    );
+                }
+                pending |= pane.pending_pointer_motion.len != 0;
+            }
+        }
+        pending.then_some(now + Duration::from_millis(10))
     }
 
     fn queue_pty_input(

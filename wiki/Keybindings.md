@@ -86,6 +86,13 @@ the query, caret, and selected command when it still matches; rename text and
 color-picker selection remain unchanged. Concrete bound actions retain their
 literal arguments.
 
+Command rows use a 32-logical-pixel label band, a 20-pixel detail band, a
+4-pixel row gap, and 18-pixel horizontal text insets. The footer is 42 pixels
+high with symmetric 18-pixel insets; the preferred panel height is 440 pixels,
+still limited by the viewport. Category/availability subtitles and the footer
+use the existing native font one point smaller than the command label. Subtitles,
+shortcut hints, and footer text are dimmed; command label size stays unchanged.
+
 With an empty query, commands appear in a fixed category order, preserving their
 relative order inside each category. A typed query retains fuzzy-score ranking.
 Each command row shows its category and, when disabled, its reason. Unavailable
@@ -300,6 +307,16 @@ event. Those characters are neither inserted into app text fields nor reported
 as Kitty associated text. Space, composed text, and genuine private-use character
 input remain text.
 
+### Numeric keypad
+
+In legacy mode, physical keypad digits that the operating system resolves as
+numeric character keys retain ordinary digit text, even after `ESC =` enables
+application-keypad mode. This keeps digits usable with shell line editors that
+enable `smkx`. Existing modifier encoding still applies. OS logical text is the
+numeric-intent signal, not a direct NumLock-state measurement. Non-text keypad
+navigation, operators, and Enter retain their existing application-keypad rules;
+negotiated Kitty behavior is unchanged.
+
 ### Load failures
 
 At startup, invalid TOML or a missing `[meta]` table falls back to the bundled
@@ -387,6 +404,11 @@ Control 和 Alt 显示为 `Ctrl`、`Alt`。字面 `+` 按键会保留，例如 `
 搜索匹配本地化标签、英文标签与别名，
 以及当前快捷键提示。缺少翻译时回退到英文。语言或 keymap 重载会保留查询、光标，
 以及仍然匹配的已选命令；重命名文本和颜色选择保持不变。具体绑定动作保留参数的字面值。
+
+命令行使用 32 逻辑像素的标签区域、20 像素的详情区域、4 像素行间距和 18 像素水平文字内边距。
+页脚高 42 像素，左右内边距均为 18 像素；面板首选高度为 440 像素，仍受视口限制。
+分类/不可用原因副标题与页脚复用比命令标签小一号的原生字体。副标题、快捷键提示和页脚文字
+采用较淡颜色；命令标签字号不变。
 
 查询为空时，命令按固定分类顺序排列，并保留各分类内的相对顺序。输入查询后仍按模糊匹配分数排序。
 每行显示分类，不可用时显示原因。不可用命令仍可搜索；在该行按 Enter 不会执行动作，也不会关闭面板。
@@ -573,6 +595,13 @@ READONLY 还允许执行切换或激活标签页、切换 pane 焦点、打开�
 方向键、功能键等具名非文本按键始终保留终端协议编码，即使 macOS 在原生事件中
 附带了私用区字符。这些字符既不会插入应用文本框，也不会作为 Kitty 关联文本上报。
 空格、组合输入以及真正的私用区字符输入仍按文本处理。
+
+### 数字小键盘
+
+在传统模式下，操作系统解析为数字字符的物理小键盘数字键保持普通数字文本，即使 `ESC =`
+已启用应用小键盘模式。这样，在启用 `smkx` 的 shell 行编辑器中仍可输入数字。现有修饰键
+编码继续生效。数字意图来自操作系统逻辑文本，并非直接测量 NumLock 状态。非文本小键盘
+导航、运算符与 Enter 保持既有应用小键盘规则；已协商的 Kitty 行为不变。
 
 ### 加载失败
 
