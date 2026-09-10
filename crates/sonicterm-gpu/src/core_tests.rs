@@ -2969,7 +2969,7 @@ fn longest_palette_footer_fits_supported_panel_width_with_natural_spacing() {
         }
     }
 
-    let available = supported_width - PALETTE_FOOTER_INSET_X;
+    let available = supported_width - PALETTE_FOOTER_INSET_X * 2.0;
     for body_font_size in [13.0_f64, 14.5, 18.0] {
         let footer_font_size = f64::from(palette_footer_font_size(body_font_size as f32));
         let stack = crate::lib_tests::tracked_font_stack(footer_font_size);

@@ -172,6 +172,24 @@ fn encode_legacy(
         return None;
     }
 
+    let numeric_keypad = matches!(
+        physical_keypad_key(event.physical_key),
+        Some(KeypadKey::Digit(_))
+    ) && matches!(event.logical_key, Key::Character(text) if text.len() == 1 && text.as_bytes()[0].is_ascii_digit());
+    if numeric_keypad {
+        // When: numeric_keypad is true, preserve OS numeric intent despite DECKPAM.
+        if let Key::Character(text) = event.logical_key {
+            // When: logical_key is Character, retain the existing text and modifier encoding rules.
+            return Some(encode_legacy_text(
+                event.unshifted_character(text),
+                event.shifted_character(),
+                event.text.filter(|text| !text.is_empty()).unwrap_or(text),
+                mods,
+                modes.modify_other_keys(),
+            ));
+        }
+    }
+
     let keypad = if modes.application_keypad() {
         // Application-keypad mode gives physical identity precedence over its
         // NumLock-dependent logical meaning.

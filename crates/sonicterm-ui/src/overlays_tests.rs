@@ -152,22 +152,38 @@ fn command_palette_query_label_places_preedit_at_caret() {
     assert_eq!(tail, "ao");
 }
 
+// Row and footer insets leave breathing room without growing the modal beyond its viewport cap.
 #[test]
-fn command_palette_uses_compact_spacing_tokens() {
-    const {
-        assert!(PALETTE_HEIGHT <= 400.0);
-        assert!(PALETTE_MAX_HEIGHT <= 460.0);
-        assert!(PALETTE_QUERY_HEIGHT <= 42.0);
-        assert!(PALETTE_QUERY_PAD_Y <= 6.0);
-        assert!(PALETTE_ROW_HEIGHT <= 28.0);
-        assert!(PALETTE_ROW_GAP <= 2.0);
-        assert!(PALETTE_FOOTER_HEIGHT <= 30.0);
+fn command_palette_uses_padded_spacing_tokens() {
+    assert_eq!(PALETTE_ROW_HEIGHT, 32.0);
+    assert_eq!(PALETTE_DETAIL_HEIGHT, 20.0);
+    assert_eq!(PALETTE_ROW_GAP, 4.0);
+    assert_eq!(PALETTE_ROW_PAD_X, 18.0);
+    assert_eq!(PALETTE_FOOTER_HEIGHT, 42.0);
+}
+
+// Shared scaled geometry keeps pointer targets inside the list after row and footer padding grows.
+#[test]
+fn command_palette_padded_rows_stay_above_footer_at_each_scale() {
+    for scale in [1.0, 1.5, 2.0] {
+        for height in [420.0, 1000.0] {
+            let mut palette = CommandPalette::new();
+            palette.open();
+            let layout =
+                PaletteLayout::compute(&mut palette, 1200.0, height, PALETTE_INNER_PAD, scale)
+                    .expect("open palette has layout");
+            assert_eq!(layout.footer.h, 42.0 * scale);
+            for row in &layout.rows {
+                assert_eq!(row.rect.h, 52.0 * scale);
+                assert!(row.rect.y + row.rect.h <= layout.footer.y);
+            }
+        }
     }
 }
 
-/// Command details fit within each row while query and footer geometry stay unchanged.
+// Padded command details retain six visible rows and center the query icon on a roomy viewport.
 #[test]
-fn command_palette_layout_is_dense_but_keeps_text_centered() {
+fn command_palette_layout_keeps_six_padded_rows_visible() {
     let mut palette = CommandPalette::new();
     palette.open();
     palette.input_char('r');

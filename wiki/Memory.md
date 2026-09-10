@@ -23,7 +23,7 @@ are in [Logging](Logging).
 | Decoded inline images | 64 MiB and 128 images per pane; 256 MiB process target divided across live panes; 4 MiB minimum and newest image retained | discard oldest images; a process under pressure may retain at most one 4 MiB newest-image residual per live pane beyond the target until the idle-pane pass converges |
 | Encoded image dimensions | declared width/height ≤ 2,048 and pixels ≤ 2,048² | reject before decode |
 | Rendered image dimensions | width/height ≤ 1,024; BGRA8 ≤ 4 MiB | resize iTerm2/kitty images; Sixel decodes into the bounded buffer |
-| PTY input | four queued UI messages, 16 MiB each; reply FIFO uses 64 KiB RAM including framing, ≤32 KiB writer output, ≤32 KiB + 4 B read scratch, ≤32 KiB app reply-batch payload, and <32 KiB parser-dispatch payload (growable vectors may retain spare capacity) | UI refuses with bytes intact; replies spill to private temporary storage without waiting for native input capacity |
+| PTY input | one fixed 64-byte pending pointer-motion slot per pane; four queued UI messages, 16 MiB each; reply FIFO uses 64 KiB RAM including framing, ≤32 KiB writer output, ≤32 KiB + 4 B read scratch, ≤32 KiB app reply-batch payload, and <32 KiB parser-dispatch payload (growable vectors may retain spare capacity) | UI refuses with bytes intact; replies spill to private temporary storage without waiting for native input capacity |
 | Reply spill disk | no fixed disk quota; consumed prefixes remain until the FIFO file drains | delete on drain, writer exit, or pane teardown; storage errors explicitly fail reply delivery while output/exit observation continues |
 | PTY output | 64 queued chunks plus one blocked sender chunk, each backed by a 64 KiB reader ring; structural worst case 4.0625 MiB | block the reader and apply OS backpressure |
 | Glyph atlas | one 2048×2048 BGRA8 CPU atlas per renderer, 16 MiB and 16,384 entries | evict the coldest quarter and retry |
@@ -307,7 +307,7 @@ SonicTerm 在真正拥有内存的子系统边界实施限制，再按窗格、�
 | 已解码内联图像 | 每窗格 64 MiB 且最多 128 张；256 MiB 进程目标按存活窗格平分；最小 4 MiB 且保留最新一张 | 删除最老图像；在空闲窗格扫描收敛前，受压进程最多可在目标之外为每个存活窗格保留一份 4 MiB 最新图像余量 |
 | 编码图像尺寸 | 声明宽高 ≤ 2,048，像素数 ≤ 2,048² | 解码前拒绝 |
 | 渲染图像尺寸 | 宽高 ≤ 1,024；BGRA8 ≤ 4 MiB | 缩放 iTerm2/kitty 图像；Sixel 解码进有界缓冲 |
-| PTY 输入 | UI 队列四条，每条 16 MiB；回复 FIFO 使用含帧头的 64 KiB 内存、≤32 KiB writer 输出、≤32 KiB + 4 B 读取暂存、≤32 KiB 应用回复批次载荷及 <32 KiB 解析器分派载荷（可增长向量可能保留空闲容量） | UI 拒绝时保留原字节；回复溢出到私有临时存储，不等待原生输入容量 |
+| PTY 输入 | 每窗格另有固定 64 字节待发指针移动槽；UI 队列四条，每条 16 MiB；回复 FIFO 使用含帧头的 64 KiB 内存、≤32 KiB writer 输出、≤32 KiB + 4 B 读取暂存、≤32 KiB 应用回复批次载荷及 <32 KiB 解析器分派载荷（可增长向量可能保留空闲容量） | UI 拒绝时保留原字节；回复溢出到私有临时存储，不等待原生输入容量 |
 | 回复溢出磁盘 | 不设固定磁盘配额；已消费前缀保留到 FIFO 文件排空 | 排空、writer 退出或窗格销毁时删除；存储错误显式终止回复交付，但输出与退出观察继续 |
 | PTY 输出 | 64 个排队数据块，加一个阻塞中的发送数据块；每个由 64 KiB 读取环形缓冲支持；结构最坏值为 4.0625 MiB | 阻塞读取线程，由操作系统施加背压 |
 | 字形图集 | 每渲染器一个 2048×2048 BGRA8 CPU 图集，16 MiB、16,384 个条目 | 淘汰最冷的四分之一并重试 |

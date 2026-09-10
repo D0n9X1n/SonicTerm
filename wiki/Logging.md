@@ -108,7 +108,17 @@ four additional queued messages and explicit refusal of the next message.
 These fixtures distinguish mechanisms; they do not retrospectively identify
 which producer or native condition caused an older un-attributed warning.
 
-Queue capacity and per-message limits are unchanged. UI input still refuses
+Queue capacity and per-message limits are unchanged. Each pane coalesces native
+pointer motion into one fixed 64-byte slot before queue admission. A full queue
+keeps the latest position pending and retries after 10 ms without requesting a
+frame; a later position replaces it. Discrete input bundles preceding pending
+motion into the same queue message when it fits, preserving byte order without
+using an extra slot. A cap-sized or refused discrete message supersedes pending
+motion rather than replaying it afterward. Disconnected motion is reported once
+and cleared. A changed mouse-tracking/encoding/screen profile invalidates deferred
+motion. A busy parser defers motion-only retries until its profile can be checked;
+a following discrete input supersedes unvalidated motion rather than delaying the
+key or replaying stale bytes. Pane teardown releases its slot. Other UI input still refuses
 rather than blocking; worker-owned replies use the spill FIFO instead.
 Interpret repeated observations of the same pane and progress counter rather than
 a single `QueueFull` warning.
@@ -488,7 +498,14 @@ UI 队列饱和不会丢弃回复、产生拒绝 warning 或停止输出处理�
 在途消息；再加入四条等待消息后，下一条消息会被显式拒绝。这些夹具区分机制，不会倒推出
 以前缺少归属信息的 warning 究竟由哪个生产者或原生条件引起。
 
-队列容量和单消息上限不变。UI 输入仍采用拒绝而非阻塞；worker 持有的终端回复改用溢出 FIFO。应比较同一窗格的连续观察值和进度计数，而不是凭一条 `QueueFull` warning 下结论。
+队列容量和单消息上限不变。每个窗格先把原生指针移动合并到一个固定 64 字节槽，再尝试入队。
+队列满时保留最新位置，10 ms 后重试但不请求重绘；新位置替换旧位置。离散输入在总长度允许时
+把之前待发移动合并为同一队列消息，保持字节顺序且不多占槽。达到单消息上限或被拒绝的离散
+输入会取代待发移动，不会在其后重放。writer 断开时只报告一次并清空移动槽；鼠标跟踪/编码/屏幕
+模式变化会丢弃待发移动。解析器忙时延迟仅移动的重试，直到可验证其模式；若有后续离散输入，
+则取代尚未验证的移动，不延迟按键或重放过期字节；窗格销毁释放槽。
+其他 UI 输入仍采用拒绝而非阻塞；worker 持有的终端回复使用溢出 FIFO。应比较同一窗格的连续
+观察值和进度计数，而不是凭一条 `QueueFull` warning 下结论。
 
 ## PTY 尺寸调整失败诊断
 

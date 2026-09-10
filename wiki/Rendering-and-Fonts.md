@@ -253,7 +253,7 @@ and tab-title font stacks together and invalidates the shared glyph atlas:
 
 - terminal text, command-palette query/results, and ordinary chrome use the
   configured body size;
-- command-palette footer text uses `max(body - 1, 1)`;
+- command-palette footer and category/availability subtitles use `max(body - 1, 1)`;
 - tab titles use `body + 1`.
 
 All three stacks use the same family, DPI, and weight scale. Native raster-role
@@ -592,7 +592,7 @@ BGRA 彩色位图按非透明区域的半开边界裁剪，保留最后一行和
 变化会一起重建正文、页脚和标签页标题字体栈，并使共享字形图集失效：
 
 - 终端文字、命令面板查询/结果和普通界面文字使用配置的正文大小；
-- 命令面板页脚使用 `max(正文 - 1, 1)`；
+- 命令面板页脚与分类/不可用原因副标题使用 `max(正文 - 1, 1)`；
 - 标签页标题使用 `正文 + 1`。
 
 三个字体栈使用相同的字体族、DPI 和字重比例。原生光栅角色标签会分开图集条目，因此

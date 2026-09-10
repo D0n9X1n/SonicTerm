@@ -200,7 +200,9 @@ Other keys and modifiers follow these rules:
   is `CSI 9 ; 2 u` when disambiguated. Repeats and releases carry Kitty event
   types when requested.
 - **Keypad:** legacy normal mode follows the layout/NumLock result and preserves
-  text modifiers. DECKPAM follows physical keypad identity. Kitty
+  text modifiers. OS-resolved numeric keypad characters stay digit text even
+  under DECKPAM; non-text events retain physical keypad identity. This uses
+  logical numeric intent rather than measuring NumLock directly. Kitty
   disambiguation uses its dedicated keypad code points.
 
 Plain `A` is unaffected, so this page continues to follow it.
@@ -834,8 +836,9 @@ Control 或 Alt 时，会原样使用操作系统生成文本的 UTF-8 字节。
   自身的身份。单独启用备用按键报告只会补充原本已经使用 CSI-u 的按键，不会改变原始文本、
   DECKPAM 或 terminfo 编码。启用消歧义时 Shift+Tab 为 `CSI 9 ; 2 u`；程序要求时，重复与
   释放会带 Kitty 事件类型。
-- **小键盘：** 旧式 normal mode 遵循布局/NumLock 结果并保留文本修饰键；DECKPAM 遵循
-  物理小键盘身份；Kitty 消歧义使用专用的小键盘码点。
+- **小键盘：** 旧式 normal mode 遵循布局/NumLock 结果并保留文本修饰键；操作系统解析为数字
+  字符的小键盘键在 DECKPAM 下仍发送数字文本，非文本事件保留物理小键盘身份。这使用逻辑
+  数字意图，而非直接测量 NumLock。Kitty 消歧义使用专用的小键盘码点。
 
 普通 `A` 不受影响，因此本页继续跟踪它。
 
