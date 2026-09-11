@@ -782,6 +782,8 @@ impl App {
                             // accent-when-Cmd underline and glyph recolor as the
                             // main window.
                             child.hovered_url.as_ref().map(|h| h.to_cells()),
+                            child.link_preview.as_ref(),
+                            &self.i18n.t("link-preview-unavailable"),
                         ) {
                             tracing::warn!("child render error: {e}");
                             if smoke_waiting_for_present {
@@ -1047,11 +1049,8 @@ impl App {
                 // must be dropped: URL, scrollbar and tab-bar alike.
 
                 // Drop path authorization and all target visuals when the pointer leaves.
-                child.path_probe.invalidate();
-                if child.hovered_url.take().is_some() || child.hover_link {
-                    child.hover_link = false;
-                    child.request_redraw();
-                }
+                child.cursor_pos = (-1.0, -1.0);
+                child.invalidate_path_hover();
                 if crate::app::scrollbar_visibility::clear_hover_states(&mut child.scrollbar_vis) {
                     child.request_redraw();
                 }

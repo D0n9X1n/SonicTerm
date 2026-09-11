@@ -23,6 +23,96 @@ use crate::ime::ImeState;
 use crate::search::SearchState;
 use crate::tabbar_view::Rect;
 
+/// Escape nonprinting controls and directional formatting while retaining the visible URI spelling.
+pub fn link_preview_text(uri: &str) -> String {
+    use std::fmt::Write;
+    let mut text = String::new();
+    for ch in uri.chars() {
+        if ch.is_control()
+            || matches!(ch, '\u{061c}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}')
+        {
+            // When: ch is nonprinting or directional, literal escaping prevents hidden destination reordering.
+            let _ = write!(text, "\\u{{{:x}}}", ch as u32);
+        } else {
+            // When: ch has no control semantics, preserve its original Unicode spelling.
+            text.push(ch);
+        }
+    }
+    text
+}
+
+/// Bounded, non-interactive text bubble beside a physical-pixel pointer anchor.
+#[derive(Debug, PartialEq)]
+pub struct LinkPreviewLayout {
+    /// Opaque chrome bounds within the window.
+    pub border: Rect,
+    /// Measured display lines, with an explicit ellipsis on overflow.
+    pub lines: Vec<String>,
+    /// Physical-pixel content inset.
+    pub padding: f32,
+    /// Physical-pixel distance between baselines.
+    pub line_height: f32,
+}
+
+impl LinkPreviewLayout {
+    /// Fit measured lines beside the pointer, flipping above it when the lower edge has no room.
+    pub fn compute(
+        text: &str,
+        pointer: (f32, f32),
+        window: (f32, f32),
+        line_height: f32,
+        scale: f32,
+        mut measure: impl FnMut(&str) -> f32,
+    ) -> Option<Self> {
+        let padding = 8.0 * scale;
+        let gap = 16.0 * scale;
+        let max_width = (window.0 - 2.0 * padding).min(640.0 * scale);
+        let content_width = max_width - 2.0 * padding;
+        let max_lines = (((window.1 - 4.0 * padding) / line_height).floor() as usize).min(6);
+        if text.is_empty() || content_width < measure("…") || max_lines == 0 {
+            // When: text is empty or content_width/max_lines cannot hold an overflow marker, suppress the bubble.
+            return None;
+        }
+        let mut lines = Vec::new();
+        let mut chars = text.chars().peekable();
+        while chars.peek().is_some() && lines.len() < max_lines {
+            let mut line = String::new();
+            while let Some(&ch) = chars.peek() {
+                let prior = line.len();
+                line.push(ch);
+                if measure(&line) > content_width {
+                    // When: line exceeds content_width, leave this character for the next display row.
+                    line.truncate(prior);
+                    break;
+                }
+                chars.next();
+            }
+            if line.is_empty() || (lines.len() + 1 == max_lines && chars.peek().is_some()) {
+                // When: the next glyph or remaining lines cannot fit, mark omitted content explicitly.
+                while measure(&format!("{line}…")) > content_width && !line.is_empty() {
+                    line.pop();
+                }
+                line.push('…');
+                lines.push(line);
+                break;
+            }
+            lines.push(line);
+        }
+        let width = lines.iter().map(|line| measure(line)).fold(0.0_f32, f32::max) + 2.0 * padding;
+        let height = lines.len() as f32 * line_height + 2.0 * padding;
+        let x = (pointer.0 + gap).min(window.0 - width - padding).max(padding);
+        let below = pointer.1 + gap;
+        let y = if below + height <= window.1 - padding {
+            below
+        } else {
+            // When: below plus height crosses the window margin, flip above pointer to keep the link exposed.
+            pointer.1 - gap - height
+        };
+        let y = y.clamp(padding, (window.1 - height - padding).max(padding));
+        Some(Self { border: Rect { x, y, w: width, h: height }, lines, padding, line_height })
+    }
+}
+
 // Overlay design tokens live here as named constants so the renderer and the
 // integration tests reference the same values by name and stay
 // self-documenting.

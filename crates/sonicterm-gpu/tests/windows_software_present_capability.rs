@@ -231,6 +231,7 @@ fn render_frame(
     renderer
         .render(
             panes, theme, false, selection, None, tabs, false, None, None, None, None, None, None,
+            None, "",
         )
         .map_err(|error| format!("software render failed: {error}"))
 }

@@ -89,7 +89,7 @@ fn length_cap_boundary_is_4096_bytes() {
 fn rejects_shell_metacharacters_and_quotes() {
     // Retained defense in depth: no dispatch path re-tokenizes the URI, but
     // each of these embedded in an otherwise-valid https URL is still refused.
-    for meta in ['&', '|', '^', '<', '>', '"', '\'', '`'] {
+    for meta in ['|', '^', '<', '>', '"', '\'', '`'] {
         let url = format!("https://example.com/{meta}evil");
         let err = validate(&url).expect_err("metacharacter must be rejected");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "char {meta:?} should fail");
@@ -140,13 +140,36 @@ fn accepts_printable_ascii_and_percent_encoding() {
     }
 }
 
+/// Query separators survive validation and modifier-click dispatch without becoming encoded query data.
+#[test]
+fn query_separators_reach_click_dispatch_unchanged() {
+    for uri in [
+        "https://dev.azure.com/example/project/_git/repo?path=%2Fsrc%2Ffile.cs&line=1&lineEnd=10&_a=contents",
+        "https://example.com/search?q=rust&sort=recent#results",
+        "mailto:user@example.com?subject=Hello&body=World",
+    ] {
+        assert!(validate(uri).is_ok(), "query separators must be accepted: {uri}");
+        let mut received = None;
+        let result = dispatch_modifier_click(true, Some(uri.to_owned()), |target| {
+            validate(target)?;
+            received = Some(target.to_owned());
+            Ok(())
+        });
+        assert_eq!(received.as_deref(), Some(uri));
+        assert_eq!(result.as_deref(), Some(uri));
+        assert!(dispatch_modifier_click(false, Some(uri.to_owned()), |_| {
+            panic!("a modifier-free click must not open a URI")
+        }).is_none());
+    }
+}
+
 // ---- open() never dispatches for invalid input -------------------------
 
 #[test]
 fn open_returns_invalid_input_without_dispatching_for_bad_urls() {
     // These all fail validation, so `open` returns before any platform
     // dispatch — exercising the guard path without touching an OS handler.
-    for bad in ["", "javascript:alert(1)", "https://a.com/\n", "https://a.com/&x"] {
+    for bad in ["", "javascript:alert(1)", "https://a.com/\n", "https://a.com/|x"] {
         let err = open(bad).expect_err("invalid url must not dispatch");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
@@ -159,7 +182,7 @@ fn open_returns_invalid_input_without_dispatching_for_bad_urls() {
 #[cfg(not(target_os = "windows"))]
 #[test]
 fn build_command_targets_platform_handler_with_url_as_arg() {
-    let url = "https://example.com/safe";
+    let url = "https://example.com/search?q=rust&sort=recent#results";
     let cmd = build_command(url);
     let program = cmd.get_program().to_string_lossy().into_owned();
     let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
@@ -312,7 +335,9 @@ fn shell_execute_target_preserves_uri_text_exactly() {
         "https://example.com/\u{00e9}\u{4e2d}\u{6587}?q=1#frag",
         "file:///C:/Users/name/notes.txt",
         "mailto:user@example.com?subject=hi",
+        "https://dev.azure.com/example/project/_git/repo?path=%2Fsrc%2Ffile.cs&line=1&lineEnd=10&_a=contents",
     ] {
+        assert!(validate(uri).is_ok());
         // Decoded inside the closure, where the owned target buffer is alive.
         let units = with_shell_execute_info(uri, |info| {
             // SAFETY: lpFile points at the owned NUL-terminated target buffer,

@@ -39,6 +39,30 @@ fn serialised_captures() -> std::sync::MutexGuard<'static, ()> {
     POOLS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Erasure retains colors but cannot turn cleared cells into visible underline runs.
+#[test]
+fn erase_fill_drops_underline_without_resetting_printed_rendition() {
+    for erase in ["\x1b[0K", "\x1b[2J", "\x1b[2X", "\x1b[2@", "\x1b[2P"] {
+        let mut parser = Parser::new(Grid::new(8, 3));
+        parser.advance(b"\x1b[31;44;4:3;58:5:2m");
+        parser.advance(erase.as_bytes());
+        for cell in parser.grid().row(0).iter() {
+            assert!(!cell.flags.contains(CellFlags::UNDERLINE), "{erase:?}");
+        }
+        let fill_col = if erase == "\x1b[2P" { 7 } else { 0 };
+        assert_eq!(parser.grid().row(0)[fill_col].bg, Color::Indexed(4), "{erase:?}");
+        parser.advance(b"A B");
+        let space = &parser.grid().row(0)[1];
+        assert!(space.flags.contains(CellFlags::UNDERLINE));
+        assert_eq!(space.underline_style(), UnderlineStyle::Curly);
+        assert_eq!(space.underline_color(), Some(Color::Indexed(2)));
+    }
+    let mut parser = Parser::new(Grid::new(8, 2));
+    parser.advance(b"\x1b[44;4m\x1b[2;1H\n");
+    assert!(parser.grid().row(1).iter().all(|cell| !cell.flags.contains(CellFlags::UNDERLINE)));
+    assert_eq!(parser.grid().row(1)[0].bg, Color::Indexed(4));
+}
+
 fn row_text(parser: &Parser, row: u16) -> String {
     parser.grid().row(row).iter().map(|cell| cell.ch).collect()
 }

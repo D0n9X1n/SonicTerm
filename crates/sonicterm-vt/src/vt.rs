@@ -1798,19 +1798,16 @@ impl Performer {
         self.last_printed_char = None;
     }
 
-    /// Blank cell with the current SGR rendition. This is the Sonic Grid
+    /// Blank cell with current colors but no underline. This is the Sonic Grid
     /// equivalent of WezTerm/xterm background-color erase (BCE): ED/EL/ECH,
     /// inserted blanks, deleted-cell fill, and scroll-fill rows inherit the
     /// app's active colors instead of falling back to the terminal theme.
     fn erase_fill_cell(&self) -> Cell {
         let mut flags = self.flags;
-        flags.remove(CellFlags::WIDE | CellFlags::WIDE_CONT);
+        // Erased blanks retain colors, not underline ink; explicitly printed spaces keep their SGR rendition.
+        flags.remove(CellFlags::WIDE | CellFlags::WIDE_CONT | CellFlags::UNDERLINE);
         let mut cell = Cell::plain(' ', self.fg, self.bg, flags);
         cell.set_hyperlink(self.current_hyperlink);
-        if flags.contains(CellFlags::UNDERLINE) {
-            cell.set_underline_style(self.underline_style);
-            cell.set_underline_color(self.underline_color);
-        }
         cell
     }
 

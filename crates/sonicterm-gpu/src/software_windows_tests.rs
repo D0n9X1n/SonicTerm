@@ -3,6 +3,46 @@ use crate::{core::fit_single_cell_status_marker, quad::px_to_ndc};
 use sonicterm_text::glyph_atlas::{RasterTile, Rasterizer};
 use sonicterm_types::GlyphKey;
 
+/// Destination bubble geometry uses the overlay layer and disappears on the next clean composition.
+#[test]
+fn link_preview_overlay_covers_terminal_and_clears() {
+    let atlas = GlyphAtlas::new(1, 1);
+    let mut frame = WindowsSoftwareFrame::new(20, 20, [0.0, 0.0, 0.0, 1.0]).unwrap();
+    let terminal = QuadInstance {
+        rect: px_to_ndc(0.0, 0.0, 20.0, 20.0, 20.0, 20.0),
+        color: [1.0, 0.0, 0.0, 1.0],
+        ..Default::default()
+    };
+    let preview = QuadInstance {
+        rect: px_to_ndc(4.0, 4.0, 10.0, 10.0, 20.0, 20.0),
+        color: [0.0, 1.0, 0.0, 1.0],
+        ..Default::default()
+    };
+    frame.draw_layers_with_subpixel_aa(
+        &atlas,
+        &atlas,
+        SubpixelAaMode::Off,
+        &[terminal],
+        &[],
+        &[],
+        &[preview],
+        &[],
+    );
+    assert_eq!(frame.pixel_bgra(6, 6), [0, 255, 0, 255]);
+    frame.prepare(20, 20, [0.0, 0.0, 0.0, 1.0]).unwrap();
+    frame.draw_layers_with_subpixel_aa(
+        &atlas,
+        &atlas,
+        SubpixelAaMode::Off,
+        &[terminal],
+        &[],
+        &[],
+        &[],
+        &[],
+    );
+    assert_eq!(frame.pixel_bgra(6, 6), [0, 0, 255, 255]);
+}
+
 struct OneSubpixelGlyph;
 
 impl Rasterizer for OneSubpixelGlyph {

@@ -2793,10 +2793,13 @@ fn curly_underline_segments_preserve_resolved_color() {
     }
 }
 
+/// Styled whitespace continues the decoration; unstyled whitespace remains a deliberate break.
 #[test]
-fn underline_key_ignores_blank_cells() {
+fn underline_key_preserves_styled_spaces() {
     let mut blank = Cell::plain(' ', Color::Indexed(1), Color::Default, CellFlags::UNDERLINE);
     blank.set_underline_style(UnderlineStyle::Dashed);
+    assert_eq!(underline_key(&blank), Some((UnderlineStyle::Dashed, Color::Indexed(1))));
+    blank.flags.remove(CellFlags::UNDERLINE);
     assert_eq!(underline_key(&blank), None);
 
     let underlined = Cell::plain('x', Color::Indexed(1), Color::Default, CellFlags::UNDERLINE);

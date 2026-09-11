@@ -1,3 +1,4 @@
+link-preview-unavailable = このリンクは開けません
 menu-file-new-tab = 新しいタブ
 menu-edit-copy = コピー
 menu-edit-paste = 貼り付け

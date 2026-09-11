@@ -4181,6 +4181,8 @@ impl GpuRenderer {
         // recolored with the theme accent (companion to the existing
         // hover underline). Same lifetime/gating as the underline.
         hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
+        link_preview: Option<&sonicterm_render_model::inputs::LinkPreview>,
+        link_unavailable_label: &str,
     ) -> Result<()> {
         // Part B step 2: signature now takes &mut [PaneRender]. Behavior is
         // unchanged inside the body — we extract the active pane's grid into
@@ -4364,6 +4366,7 @@ impl GpuRenderer {
         let overlay_active = search.is_some()
             || palette.as_deref().is_some_and(CommandPalette::is_open)
             || notification.is_some()
+            || link_preview.is_some()
             || ime.is_some_and(|i| i.is_composing() || !i.preedit().is_empty())
             || self.drag_chip.is_some()
             || self.pane_focus_flash.is_some();
@@ -4379,6 +4382,13 @@ impl GpuRenderer {
             self.tab_bar_visible.hash(&mut hash);
             self.titlebar_inset.to_bits().hash(&mut hash);
             self.panel_padding.to_bits().hash(&mut hash);
+            if let Some(preview) = link_preview {
+                preview.uri.hash(&mut hash);
+                preview.pointer.0.to_bits().hash(&mut hash);
+                preview.pointer.1.to_bits().hash(&mut hash);
+                preview.available.hash(&mut hash);
+                link_unavailable_label.hash(&mut hash);
+            }
             if let Some(chip) = &self.drag_chip {
                 chip.title.hash(&mut hash);
                 chip.top_left.0.to_bits().hash(&mut hash);
@@ -6167,6 +6177,65 @@ impl GpuRenderer {
                     &mut overlay_glyph_instances,
                     None,
                 );
+            }
+        }
+
+        if let (Some(preview), Some(stack)) = (link_preview, self.font_stack.as_ref()) {
+            use sonicterm_render_model::boundary::ui::overlays::{
+                link_preview_text, LinkPreviewLayout,
+            };
+            let text = link_preview_text(&preview.uri);
+            let text = if preview.available {
+                text
+            } else {
+                // When: preview is unavailable under URI policy, disclose the restriction without altering its target.
+                format!("{link_unavailable_label}: {text}")
+            };
+            let font_size = self.raster_px(self.font_size.max(1.0));
+            let layout = LinkPreviewLayout::compute(
+                &text,
+                preview.pointer,
+                (sw, sh),
+                font_size * 1.4,
+                self.scale_factor,
+                |value| {
+                    conservative_badge_text_width(
+                        estimate_badge_text_width(value, font_size),
+                        stack.measure_text_width(value).ok(),
+                    )
+                },
+            );
+            if let Some(layout) = layout {
+                let chrome =
+                    sonicterm_render_model::boundary::ui::ui_tokens::UiPalette::from_theme(theme);
+                let rect = layout.border;
+                quads_overlay.push(QuadInstance::rounded(
+                    px_to_ndc(rect.x, rect.y, rect.w, rect.h, sw, sh),
+                    chrome.bg_surface,
+                    [rect.w, rect.h],
+                    self.chrome_px(4.0),
+                ));
+                let color = hex_to_chrome_color(theme.colors.foreground.0.as_str());
+                let mut raster = stack.clone();
+                for (index, line) in layout.lines.iter().enumerate() {
+                    emit_overlay_text_glyphs(
+                        &mut self.glyph_atlas,
+                        stack,
+                        font_size,
+                        font_size,
+                        &mut raster,
+                        line,
+                        color,
+                        ChromeAttrs::default(),
+                        rect.x + layout.padding,
+                        rect.y + layout.padding + font_size + index as f32 * layout.line_height,
+                        [rect.x, rect.y, rect.w, rect.h],
+                        sw,
+                        sh,
+                        &mut overlay_glyph_instances,
+                        None,
+                    );
+                }
             }
         }
 
@@ -8118,7 +8187,8 @@ fn fold_u64_to_u32(value: u64) -> u32 {
 }
 
 fn underline_key(cell: &Cell) -> Option<(UnderlineStyle, Color)> {
-    (cell.flags.contains(CellFlags::UNDERLINE) && !cell.ch.is_whitespace())
+    cell.flags
+        .contains(CellFlags::UNDERLINE)
         .then(|| (cell.underline_style(), cell.underline_color().unwrap_or(cell.fg)))
 }
 

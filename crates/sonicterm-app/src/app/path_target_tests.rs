@@ -3,6 +3,144 @@ use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme, url_scan::Dete
 use sonicterm_grid::grid::{Cell, CellFlags, Color, Row};
 use sonicterm_types::HyperlinkId;
 
+/// A labeled OSC 8 destination is previewed without normalizing or rewriting its stored URI.
+#[test]
+fn hyperlink_preview_preserves_targets_for_all_labels() {
+    for (label, uri, expected) in [
+        ("Docs", "https://example.com/docs", true),
+        ("https://example.com/", "https://example.com/", true),
+        ("example.com", "https://example.com/", true),
+        ("https://trusted.test/", "https://other.test/", true),
+        ("File", "file:///C:/notes.txt", true),
+        ("Editor", "vscode://file/C:/notes.txt", true),
+        ("https://EXAMPLE.com/%2f", "https://EXAMPLE.com/%2f", true),
+        ("https://例子.test/e\u{301}", "https://例子.test/e\u{301}", true),
+        ("Code", "https://example.com/repo?path=%2Ffile.cs&line=1&lineEnd=10", true),
+    ] {
+        let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+        let window = app.__test_seed_child_window(&["preview"]);
+        let pane = app.__test_child_pane_ids(window).unwrap()[0];
+        let output = format!("\x1b]8;;{uri}\x1b\\{label}\x1b]8;;\x1b\\");
+        assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+        app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+            winit::keyboard::ModifiersState::SUPER
+        } else {
+            winit::keyboard::ModifiersState::CONTROL
+        };
+        let target = app.cell_target_at(window, pane, 0, 1).unwrap();
+        assert!(matches!(&target.target, ResolvedCellTarget::Uri(value) if value == uri));
+        assert_eq!(target.preview(true, (20.0, 30.0)).is_some(), expected, "{label}");
+        assert!(target.preview(false, (20.0, 30.0)).is_none());
+    }
+}
+
+/// Every wrapped fragment and repeated occurrence exposes the stored destination.
+#[test]
+fn hyperlink_preview_covers_wrapped_and_repeated_occurrences() {
+    let uri = "https://example.com/";
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["wrapped"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(12, 8);
+    let output = format!("\x1b]8;id=same;{uri}\x1b\\{uri}\x1b]8;;\x1b\\\r\n\x1b]8;id=same;{uri}\x1b\\Docs\x1b]8;;\x1b\\");
+    assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+    app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+        winit::keyboard::ModifiersState::SUPER
+    } else {
+        winit::keyboard::ModifiersState::CONTROL
+    };
+    for (row, col) in [(0, 1), (1, 2)] {
+        assert!(app
+            .cell_target_at(window, pane, row, col)
+            .unwrap()
+            .preview(true, (0.0, 0.0))
+            .is_some());
+    }
+    assert!(app.cell_target_at(window, pane, 2, 1).unwrap().preview(true, (0.0, 0.0)).is_some());
+}
+
+/// Auto-detected URLs expose the complete query without requiring an OSC 8 label.
+#[test]
+fn hyperlink_preview_includes_unlabeled_urls() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["plain"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    let uri = "https://example.com/?a=1&b=2";
+    assert!(app.__test_advance_child_pane_parser(window, pane, uri.as_bytes()));
+    let target = app.cell_target_at(window, pane, 0, 2).unwrap();
+    let preview = target.preview(true, (0.0, 0.0)).unwrap();
+    assert_eq!(preview.uri, uri);
+    assert!(preview.available);
+    assert!(target.preview(false, (0.0, 0.0)).is_none());
+}
+
+/// Preview remains informative for rejected targets and incomplete labels without granting activation.
+#[test]
+fn hyperlink_preview_preserves_unknown_and_unavailable_targets() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["bounded"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(4, 12);
+    let uri = "vscode://file/C:/very/long/notes.txt";
+    let output = format!("\x1b]8;;{uri}\x1b\\{uri}\x1b]8;;\x1b\\");
+    assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+    app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+        winit::keyboard::ModifiersState::SUPER
+    } else {
+        winit::keyboard::ModifiersState::CONTROL
+    };
+    let target = app.cell_target_at(window, pane, 0, 1).unwrap();
+    let preview = target.preview(true, (15.0, 20.0)).unwrap();
+    assert_eq!(preview.uri, uri);
+    assert!(!preview.available);
+    assert_eq!(preview.pointer, (15.0, 20.0));
+    app.windows.get_mut(&window).unwrap().modifiers = winit::keyboard::ModifiersState::empty();
+    assert!(!app.activate_target_at(window, pane, 0, 1));
+}
+
+/// Re-reading the pointed cell observes replacements, and both invalidation paths revoke previews.
+#[test]
+fn hyperlink_preview_replacement_and_invalidation_are_window_local() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let first = app.__test_seed_child_window(&["first"]);
+    let second = app.__test_seed_child_window(&["second"]);
+    let pane = app.__test_child_pane_ids(first).unwrap()[0];
+    for uri in ["https://first.test/", "https://second.test/"] {
+        let output = format!("\r\x1b]8;;{uri}\x1b\\Docs\x1b]8;;\x1b\\");
+        assert!(app.__test_advance_child_pane_parser(first, pane, output.as_bytes()));
+        let preview =
+            app.cell_target_at(first, pane, 0, 1).unwrap().preview(true, (1.0, 1.0)).unwrap();
+        assert_eq!(preview.uri, uri);
+        app.windows.get_mut(&first).unwrap().link_preview = Some(preview.clone());
+        app.windows.get_mut(&second).unwrap().link_preview = Some(preview);
+    }
+    app.clear_target_hover(first);
+    assert!(app.windows[&first].link_preview.is_none());
+    assert!(app.windows[&second].link_preview.is_some());
+    app.windows.get_mut(&second).unwrap().invalidate_path_hover();
+    assert!(app.windows[&second].link_preview.is_none());
+    assert!(app.__test_advance_child_pane_parser(first, pane, b"\r\x1b[2Kplain"));
+    assert!(app.cell_target_at(first, pane, 0, 1).is_none());
+}
+
+/// A reclaimed registry ID cannot expose a fabricated destination.
+#[test]
+fn hyperlink_preview_missing_registry_entry_is_inert() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["missing"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    app.windows[&window].panes[&pane]
+        .parser
+        .lock()
+        .grid_mut()
+        .row_mut(0)
+        .iter_mut()
+        .next()
+        .unwrap()
+        .set_hyperlink(Some(HyperlinkId(u64::MAX)));
+    assert!(app.cell_target_at(window, pane, 0, 0).is_none());
+}
+
 fn ascii_row(text: &str) -> Row {
     Row::from_flat(
         text.chars()

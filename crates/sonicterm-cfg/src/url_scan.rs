@@ -894,13 +894,11 @@ fn is_windows_separator(ch: char) -> bool {
 
 #[inline]
 fn is_url_body_char(c: char) -> bool {
-    // RFC 3986 unreserved + sub-delims + a couple of reserved we
-    // commonly see embedded in URLs in the wild, MINUS shell-meta
-    // and quote chars that `validate()` rejects.
+    // Keep query separators inside the target while excluding characters validate() rejects.
     matches!(c,
         'a'..='z' | 'A'..='Z' | '0'..='9' |
         '-' | '_' | '.' | '~' |
-        '!' | '$' | '*' | '+' | ',' | ';' | '=' |
+        '!' | '$' | '&' | '*' | '+' | ',' | ';' | '=' |
         ':' | '/' | '?' | '#' | '[' | ']' | '@' |
         '%' | '(' | ')'
     )

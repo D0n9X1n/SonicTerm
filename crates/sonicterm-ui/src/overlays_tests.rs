@@ -1,5 +1,50 @@
 use super::*;
 
+/// Preview wrapping preserves the target prefix and marks overflow instead of hiding it silently.
+#[test]
+fn link_preview_layout_wraps_and_marks_overflow() {
+    let target = format!("https://example.com/{}", "a".repeat(1000));
+    let layout =
+        LinkPreviewLayout::compute(&target, (390.0, 190.0), (400.0, 200.0), 20.0, 1.0, |s| {
+            s.chars().count() as f32 * 10.0
+        })
+        .unwrap();
+    assert!(layout.lines[0].starts_with("https://example.com/"));
+    assert!(layout.lines.last().unwrap().ends_with('…'));
+    assert!(layout.border.x >= 0.0 && layout.border.y >= 0.0);
+    assert!(layout.border.x + layout.border.w <= 400.0);
+    assert!(layout.border.y + layout.border.h <= 200.0);
+    assert!(!layout.border.contains(390.0, 190.0));
+}
+
+/// Control and bidi formatting are shown literally without changing ordinary Unicode target text.
+#[test]
+fn link_preview_text_escapes_invisible_formatting() {
+    assert_eq!(
+        link_preview_text("https://例子.test/\u{202e}a\n"),
+        "https://例子.test/\\u{202e}a\\u{a}"
+    );
+    assert_eq!(link_preview_text("file:///C:/notes.txt"), "file:///C:/notes.txt");
+}
+
+/// A short destination stays complete, and degenerate windows produce no clipped fake URL.
+#[test]
+fn link_preview_layout_fits_short_and_small_windows() {
+    let layout = LinkPreviewLayout::compute(
+        "https://example.com/",
+        (5.0, 5.0),
+        (800.0, 600.0),
+        20.0,
+        2.0,
+        |s| s.len() as f32 * 10.0,
+    )
+    .unwrap();
+    assert_eq!(layout.lines, ["https://example.com/"]);
+    assert!(
+        LinkPreviewLayout::compute("url", (0.0, 0.0), (1.0, 1.0), 20.0, 1.0, |_| 10.0).is_none()
+    );
+}
+
 /// An empty tabs-only selector explains its state even before the user types a query.
 #[test]
 fn empty_tab_selector_uses_localized_empty_chrome_without_query() {
