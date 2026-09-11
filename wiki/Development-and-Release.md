@@ -249,6 +249,12 @@ warm-lifecycle failure exits `16`. The core shard is the sole main-only Linux
 dependency-cache writer; the package shard is restore-only and workspace-crate
 artifacts remain excluded.
 
+macOS and Windows smoke also read back native numbered titles and exercise
+Unicode rename/reset on startup and warm-adopted windows. Mismatches fail at the
+display boundary (exit `11`). Linux still requires external X11 property or
+Wayland compositor-visible evidence: winit's X11 getter is unimplemented and its
+Wayland getter is only cached state. These checks do not verify OS switcher labels.
+
 ## Gate blind spots
 
 - The one-pass workspace gate includes integration tests for all 23 packages,
@@ -647,6 +653,11 @@ Xvfb、Weston 和 Debian 打包工具，随后：
 计数，就不能通过。每次调用都使用分开的临时 config/log 根目录和可回收完整进程树的 wrapper；
 预热生命周期失败使用退出码 `16`。core shard 是唯一可在 `main` 写入 Linux 依赖 cache 的 job；
 package shard 只恢复，且 workspace crate artifact 始终排除在 cache 外。
+
+macOS 与 Windows smoke 还会读取原生编号标题，并在启动窗口及预热采用窗口上执行
+Unicode 重命名与重置。读回不匹配会在 display 边界失败（退出码 `11`）。Linux 仍需
+外部 X11 属性或 Wayland 合成器可见证据：winit 的 X11 getter 未实现，Wayland getter
+只返回缓存。这些检查不验证操作系统切换器标签。
 
 ## Gate 盲区
 

@@ -294,7 +294,11 @@ fn palette_locale_refresh_in_other_modes_preserves_rows_but_refreshes_commands()
             action: ActionWrapper(action.clone()),
         }],
     };
-    for mode in [CommandPaletteMode::RenameTab, CommandPaletteMode::TabColor] {
+    for mode in [
+        CommandPaletteMode::RenameTab,
+        CommandPaletteMode::RenameWindow,
+        CommandPaletteMode::TabColor,
+    ] {
         let mut palette = CommandPalette::new();
         palette.set_context(CommandContext {
             window_available: true,
@@ -318,6 +322,10 @@ fn palette_locale_refresh_in_other_modes_preserves_rows_but_refreshes_commands()
                 );
                 palette.set_visible_rows(1);
                 palette.move_selection_up();
+            }
+            CommandPaletteMode::RenameWindow => {
+                palette.start_rename_window("title 中文");
+                palette.move_cursor_left();
             }
             CommandPaletteMode::Commands => unreachable!(),
         }

@@ -261,6 +261,16 @@ impl App {
                         el.exit();
                         return;
                     }
+                    let native = self.windows.get(&child).and_then(|state| state.window.clone());
+                    if native
+                        .as_ref()
+                        .is_none_or(|native| !self.smoke_check_native_title(native, "#2 SonicTerm"))
+                        || !self.smoke_exercise_window_name(child)
+                    {
+                        // When: native child title or its rename/reset fails, do not credit warm adoption.
+                        el.exit();
+                        return;
+                    }
                     let present_baseline = self
                         .windows
                         .get(&child)
@@ -759,6 +769,7 @@ impl App {
             with_integrated_titlebar(
                 Window::default_attributes()
                     .with_title(super::NATIVE_WINDOW_TITLE)
+                    .with_visible(false)
                     .with_decorations(true)
                     .with_inner_size(winit::dpi::LogicalSize::new(
                         f32::from(cols) * 9.0
@@ -958,6 +969,7 @@ impl App {
         // (`App::__test_synthetic_main`); production `do_resumed` is
         // the authoritative source for `main_window_id`.
         if let Some(prev) = self.main_window_id.take() {
+            self.cancel_window_rename(prev);
             self.windows.remove(&prev);
             self.window_keys.remove(prev);
         }
@@ -967,6 +979,7 @@ impl App {
             // governor in scope.
             owner: None,
             role: super::WindowRole::Terminal,
+            custom_window_name: String::new(),
             window: Some(window.clone()),
             renderer: Some(renderer),
             tabs: sonicterm_ui::tabs::TabBar::new(),
@@ -1015,6 +1028,15 @@ impl App {
             smoke.begin_pty();
         }
         self.seed_initial_tabs();
+        if self.runtime_smoke.is_some()
+            && (!self.smoke_check_native_title(&window, "#1 SonicTerm")
+                || !self.smoke_exercise_window_name(main_id))
+        {
+            // When: runtime_smoke cannot verify admission, rename, and reset before reveal, fail the display boundary.
+            el.exit();
+            return;
+        }
+        window.set_visible(true);
         if self.runtime_smoke.is_some() {
             // When: `self.runtime_smoke.is_some()` is true, verify and exercise the smoke PTY.
             let command = self.runtime_smoke.as_ref().map(|smoke| smoke.command().to_vec());

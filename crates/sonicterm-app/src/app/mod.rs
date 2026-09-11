@@ -248,9 +248,13 @@ pub struct SplitterDragState {
     pub last_pos: (f32, f32),
 }
 
-/// Native OS window title. Keep static; terminal/tab titles render inside
-/// SonicTerm's own tab bar.
+/// Default native title; terminal output never supplies OS titles.
 pub const NATIVE_WINDOW_TITLE: &str = "SonicTerm";
+
+fn compose_window_title(key: sonicterm_types::WindowKey, name: &str) -> String {
+    let title = if name.is_empty() { NATIVE_WINDOW_TITLE } else { name };
+    format!("#{} {title}", key.raw())
+}
 
 /// Linux desktop entry, AppStream component, and Wayland application ID.
 pub const LINUX_DESKTOP_ID: &str = "com.d0n9x1n.SonicTerm";
@@ -981,6 +985,8 @@ pub(super) struct PointerGesture {
 }
 
 pub struct WindowState {
+    /// Session-local user name; terminal-generated titles never write this field.
+    pub(crate) custom_window_name: String,
     /// Window classification — see [`WindowRole`].
     pub role: WindowRole,
     /// promoted from `Arc<Window>` to
@@ -2787,6 +2793,8 @@ pub struct App {
     /// without it, Cmd+Shift+P typed in a torn-out child opened the palette
     /// on the original main window.
     pub(super) palette_attached_window: Option<WindowId>,
+    /// Stable editor target, including main; an absent key never falls back to another window.
+    pub(super) window_rename_target: Option<sonicterm_types::WindowKey>,
     /// One modal press retains its source and target until release or an intervening input change.
     palette_pointer_capture: Option<overlays::PalettePointerCapture>,
     /// Set the moment a held-tab drag
@@ -3229,6 +3237,7 @@ impl App {
             wake_is_foreground_probe_only: false,
             command_palette,
             palette_attached_window: None,
+            window_rename_target: None,
             palette_pointer_capture: None,
             os_drag_handoff_started: false,
             governor: ResourceGovernor::new(
@@ -4247,7 +4256,7 @@ impl App {
                         "dispatch_effects: WindowMove (record-only)"
                     );
                 }
-                // WindowSetTitle is observational; native titles remain static and live tab state owns chrome.
+                // WindowSetTitle is observational; only explicit window naming may change native titles.
                 AppEffect::WindowSetTitle { window, title } => {
                     tracing::debug!(
                         target: "state_machine",
@@ -4837,6 +4846,7 @@ impl App {
             // Registered when the window is inserted.
             owner: None,
             role: WindowRole::Terminal,
+            custom_window_name: String::new(),
             window: None,
             renderer: None,
             tabs,
@@ -5721,7 +5731,10 @@ impl App {
     /// after insertion instead reconciles when those panes arrive.
     pub(super) fn insert_window_registered(&mut self, id: WindowId, window: WindowState) {
         let owner_prepared = window.owner.is_some();
-        self.window_keys.intern(id);
+        let key = self.window_keys.intern(id);
+        if let Some(native) = &window.window {
+            native.set_title(&compose_window_title(key, &window.custom_window_name));
+        }
         self.windows.insert(id, window);
         if !owner_prepared {
             self.register_window_owner(id);
@@ -6584,6 +6597,7 @@ impl App {
             // Registered when the window is inserted.
             owner: None,
             role: WindowRole::Terminal,
+            custom_window_name: String::new(),
             window: None,
             renderer: None,
             tabs: TabBar::new(),
@@ -7056,6 +7070,7 @@ impl App {
     }
 
     pub(super) fn release_child_window_registries(&mut self, window_id: WindowId) {
+        self.cancel_window_rename(window_id);
         self.pending_redraw_windows.remove(&window_id);
         self.window_keys.remove(window_id);
         self.os_drag_bars.remove(Some(window_id));

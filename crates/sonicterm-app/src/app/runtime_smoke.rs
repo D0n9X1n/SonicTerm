@@ -318,6 +318,54 @@ impl super::App {
         self.runtime_smoke = Some(RuntimeSmokeState::from_spec(spec, renderer_baseline));
     }
 
+    pub(super) fn smoke_check_native_title(
+        &mut self,
+        window: &winit::window::Window,
+        expected: &str,
+    ) -> bool {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            let observed = window.title();
+            let matches = observed == expected;
+            tracing::warn!(?observed, ?expected, matches, "runtime smoke native title readback");
+            if !matches {
+                // Native readback disproves the title write even if the model is correct.
+                if let Some(smoke) = self.runtime_smoke.as_mut() {
+                    smoke.fail(RuntimeSmokeFailure::Display);
+                }
+            }
+            matches
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (window, expected);
+            // X11 winit title() is unimplemented; Wayland caches locally, so neither proves compositor state.
+            tracing::warn!(
+                "runtime smoke native title readback unsupported; desktop evidence required"
+            );
+            true
+        }
+    }
+
+    pub(super) fn smoke_exercise_window_name(&mut self, id: winit::window::WindowId) -> bool {
+        use winit::keyboard::{Key, NamedKey};
+        let Some(native) = self.windows.get(&id).and_then(|state| state.window.clone()) else {
+            // When: id lacks a native handle, model-only assertions cannot establish this smoke contract.
+            return false;
+        };
+        for name in ["Work 工作", ""] {
+            self.start_rename_window(id);
+            self.command_palette.set_query(name);
+            self.command_palette_handle_logical_key(&Key::Named(NamedKey::Enter));
+            let expected = super::compose_window_title(self.window_keys.get(id).unwrap(), name);
+            if !self.smoke_check_native_title(&native, &expected) {
+                // When: smoke_check_native_title fails after a real editor commit, stop before claiming presentation success.
+                return false;
+            }
+        }
+        true
+    }
+
     pub(crate) fn runtime_smoke_result(&self) -> Result<(), RuntimeSmokeFailure> {
         let Some(smoke) = self.runtime_smoke.as_ref() else {
             // When: no smoke was installed, a caller cannot claim runtime-smoke completion.

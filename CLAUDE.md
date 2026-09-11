@@ -192,7 +192,10 @@ build the shipping release binaries and run them through
 unique verdict `capability=EXERCISED`; `HOST_INCAPABLE` remains informational and
 cannot satisfy the required gate. The runner preserves `HOME`, removes inherited
 `NO_COLOR`, captures diagnostics, and kills the full child tree after its
-45-second deadline.
+45-second deadline. The macOS and Windows smokes also read back native numbered,
+renamed, and reset titles for startup and warm-adopted windows; mismatches fail
+at the display boundary (exit `11`). Linux requires separate desktop evidence:
+winit's X11 title getter is unimplemented and its Wayland getter is only a cache.
 
 The Ubuntu 22.04 CI aggregate requires both the core-gate shard and the
 independent package/runtime shard. The package shard builds the shipping

@@ -143,6 +143,8 @@ pub enum Action {
     UpdateTabColor,
 
     // Window
+    /// Edit the originating window's custom native title without changing terminal state.
+    RenameWindow,
     /// Open a new top-level window.
     NewWindow,
     /// Move the active tab into a new top-level window.

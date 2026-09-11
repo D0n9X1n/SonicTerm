@@ -835,6 +835,7 @@ impl App {
         let child = WindowState {
             owner,
             role: crate::app::WindowRole::Terminal,
+            custom_window_name: String::new(),
             window: Some(destination.window.clone()),
             renderer: Some(destination.renderer),
             tabs: child_tabs,

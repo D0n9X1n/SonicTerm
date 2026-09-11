@@ -707,6 +707,15 @@ impl App {
             Action::ApplyTheme(name) => self.apply_theme_by_name(name),
             Action::ToggleTabBar => self.toggle_tab_bar(),
             Action::RenameTab => self.start_rename_active_tab(),
+            Action::RenameWindow => {
+                let target = match self.frontmost_kind() {
+                    FrontmostKind::Child(id) => Some(id),
+                    _ => self.main_window_id,
+                };
+                if let Some(id) = target {
+                    self.start_rename_window(id);
+                }
+            }
             Action::UpdateTabColor => self.start_update_tab_color(),
             Action::NewWindow => {
                 // NewWindow queues a fresh top-level terminal window.

@@ -61,6 +61,7 @@ pub const ALL_VARIANT_KINDS: &[&str] = &[
     "ApplyTheme",
     "ToggleTabBar",
     "RenameTab",
+    "RenameWindow",
     "UpdateTabColor",
     "NewWindow",
     "MoveTabToNewWindow",
@@ -420,6 +421,9 @@ pub fn descriptor(action: &Action) -> CommandDescriptor {
             "command-tab-color",
             &["tab", "color", "colour", "accent", "theme"],
         ),
+        Action::RenameWindow => {
+            ("RenameWindow", Window, "command-rename-window", &["title", "name", "label", "edit"])
+        }
         Action::NewWindow => ("NewWindow", Window, "command-new-window", &["create", "open"]),
         Action::MoveTabToNewWindow => (
             "MoveTabToNewWindow",
@@ -494,8 +498,8 @@ pub fn descriptor(action: &Action) -> CommandDescriptor {
         | Action::DecreaseFontWeight
         | Action::ResetFontWeight
         | Action::ToggleTabBar
-        | Action::ToggleFullscreen
-        | Action::OpenCommandPalette => (Requirement::Window, false),
+        | Action::ToggleFullscreen => (Requirement::Window, false),
+        Action::OpenCommandPalette | Action::RenameWindow => (Requirement::Window, true),
         Action::CloseTab
         | Action::CloseActivePaneOrTab
         | Action::RenameTab
@@ -575,6 +579,7 @@ pub fn label(a: &Action) -> String {
         Action::ApplyTheme(name) => format!("Apply Theme: {name}"),
         Action::ToggleTabBar => "Toggle Tab Bar".into(),
         Action::RenameTab => "Rename Active Tab".into(),
+        Action::RenameWindow => "Rename Window".into(),
         Action::UpdateTabColor => "Update Tab Color".into(),
         Action::NewWindow => "New Window".into(),
         Action::MoveTabToNewWindow => "Move Tab to New Window".into(),

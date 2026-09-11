@@ -3,6 +3,45 @@ use crate::i18n::test_translator as translator;
 use sonicterm_cfg::keymap::{ActionWrapper, Binding, Keymap, Meta};
 use PaletteEntry::Command;
 
+#[test]
+fn window_name_validation_preserves_unicode_and_rejects_malformed_names() {
+    // Limits count trimmed scalars, while controls and Unicode line separators are rejected before trimming.
+    assert_eq!(validate_window_name("  工作 e\u{301}  "), Ok("工作 e\u{301}"));
+    assert_eq!(validate_window_name("   "), Ok(""));
+    let limit = "界".repeat(128);
+    assert_eq!(validate_window_name(&limit), Ok(limit.as_str()));
+    assert_eq!(validate_window_name(&"界".repeat(129)), Err(WindowNameError::TooLong));
+    for invalid in ["Work\n", "\tWork", "a\0b", "a\u{7f}b", "a\u{2028}b", "a\u{2029}b"] {
+        assert_eq!(validate_window_name(invalid), Err(WindowNameError::ControlCharacter));
+    }
+}
+
+#[test]
+fn window_rename_rejects_whole_input_and_keeps_feedback_until_corrected() {
+    // A malformed IME/paste chunk must never silently become a different saved name.
+    let mut palette = CommandPalette::new();
+    palette.start_rename_window("Work");
+    palette.input_window_name("\nprivate");
+    assert_eq!(palette.query(), "Work");
+    assert_eq!(palette.window_name_error(), Some(WindowNameError::ControlCharacter));
+    palette.input_window_name("");
+    assert_eq!(palette.window_name_error(), Some(WindowNameError::ControlCharacter));
+    palette.input_window_name(" space");
+    assert_eq!(palette.query(), "Work space");
+    assert_eq!(palette.window_name_error(), None);
+    palette.set_query("界".repeat(128));
+    palette.input_window_name("x");
+    assert_eq!(palette.query().chars().count(), 128);
+    assert_eq!(palette.window_name_error(), Some(WindowNameError::TooLong));
+    palette.backspace();
+    assert_eq!(palette.window_name_error(), None);
+    assert_eq!(palette.mode(), CommandPaletteMode::RenameWindow);
+    assert!(palette.visible().is_empty());
+    palette.close();
+    palette.open();
+    assert_eq!(palette.window_name_error(), None);
+}
+
 /// Pointer highlighting validates display indices without bypassing disabled commands or other picker modes.
 #[test]
 fn pointer_selection_is_bounded_and_preserves_command_availability() {
