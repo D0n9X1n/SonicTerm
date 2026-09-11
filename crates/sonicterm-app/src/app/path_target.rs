@@ -55,6 +55,8 @@ pub(crate) enum PathOpenDecision {
     /// Reveal in the native file manager without opening or executing the target.
     #[cfg(any(target_os = "macos", test))]
     Revealable(PathKind),
+    /// Reveal a validated source reference without invoking its file association.
+    SourceReveal,
     /// Existing target whose identity or content is not safe to dispatch.
     Blocked,
     /// Target did not exist when probed.
@@ -64,7 +66,7 @@ pub(crate) enum PathOpenDecision {
 impl PathOpenDecision {
     fn is_actionable(self) -> bool {
         match self {
-            Self::Openable(_) => true,
+            Self::Openable(_) | Self::SourceReveal => true,
             #[cfg(any(target_os = "macos", test))]
             Self::Revealable(_) => {
                 // When: `self` is `Revealable`, permit the same epoch-keyed click path without opening the target.
@@ -140,6 +142,7 @@ impl PathProbeCandidate {
             DetectedTarget::PathCandidate(candidate) | DetectedTarget::BareName(candidate) => {
                 candidate
             }
+            DetectedTarget::SourceReference(reference) => &reference.display,
             DetectedTarget::Uri(_) => unreachable!(),
         }
     }
@@ -621,6 +624,158 @@ fn linux_file_policy(path: &Path, prefix: &[u8]) -> PathOpenDecision {
     }
 }
 
+fn classify_source_reference(path: &Path) -> PathOpenDecision {
+    use std::io::Read;
+
+    const SOURCE_EXTENSIONS: &[&str] = &[
+        "sh", "bash", "zsh", "fish", "py", "rb", "pl", "php", "lua", "tcl", "js", "jsx", "ts",
+        "tsx", "rs", "c", "h", "cc", "cpp", "hpp", "cs", "go", "java", "kt", "swift", "m", "mm",
+        "ps1", "md", "txt", "toml", "json", "yaml", "yml", "xml", "html", "css", "scss", "sql",
+        "conf", "ini",
+    ];
+    let source_name = path.file_name().and_then(|name| name.to_str());
+    let extension = path.extension().and_then(|value| value.to_str()).unwrap_or_default();
+    for ancestor in path.ancestors() {
+        let metadata = match std::fs::symlink_metadata(ancestor) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                // When: error reports NotFound, the source or its containing path no longer exists.
+                return PathOpenDecision::Missing;
+            }
+            Err(_) => {
+                // When: ancestor metadata is unreadable, source identity cannot be authorized.
+                return PathOpenDecision::Blocked;
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            // When: metadata.file_type() is a symlink, source navigation must not authorize redirected identity.
+            return PathOpenDecision::Blocked;
+        }
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if metadata.file_attributes() & 0x400 != 0 {
+                // When: metadata marks a reparse point, reject redirected source or parent identity.
+                return PathOpenDecision::Blocked;
+            }
+        }
+        if ancestor == path && !metadata.is_file() {
+            // When: the source path is not a regular file, do not open devices, directories, or pipes.
+            return PathOpenDecision::Blocked;
+        }
+    }
+    if !SOURCE_EXTENSIONS.iter().any(|value| extension.eq_ignore_ascii_case(value))
+        && !matches!(source_name, Some("Makefile" | "Dockerfile" | "Rakefile" | "Gemfile"))
+    {
+        // When: extension and source_name are outside the source allow-list, never reinterpret launcher content as source.
+        return PathOpenDecision::Blocked;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(0x00200000);
+    }
+    let Ok(mut file) = options.open(path) else {
+        // When: no-follow source open fails, do not infer that earlier path metadata is still current.
+        return PathOpenDecision::Blocked;
+    };
+    let Ok(metadata) = file.metadata() else {
+        // When: file.metadata fails, the opened descriptor cannot authorize source navigation.
+        return PathOpenDecision::Blocked;
+    };
+    if !metadata.is_file() {
+        // When: metadata no longer describes a regular file, reject a replacement special entry.
+        return PathOpenDecision::Blocked;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x400 != 0 {
+            // When: descriptor metadata marks a reparse point, block redirected source identity.
+            return PathOpenDecision::Blocked;
+        }
+    }
+    let mut prefix = [0u8; 4096];
+    let Ok(length) = file.read(&mut prefix) else {
+        // When: file.read cannot inspect the prefix, do not trust a source-looking extension alone.
+        return PathOpenDecision::Blocked;
+    };
+    let prefix = &prefix[..length];
+    if prefix.contains(&0)
+        || [
+            b"\x7fELF".as_slice(),
+            b"MZ",
+            b"\xfe\xed\xfa",
+            b"\xcf\xfa\xed",
+            b"\xce\xfa\xed",
+            b"\xca\xfe\xba\xbe",
+        ]
+        .iter()
+        .any(|magic| prefix.starts_with(magic))
+    {
+        // When: prefix has binary content or executable magic, the source suffix cannot authorize reveal.
+        return PathOpenDecision::Blocked;
+    }
+    PathOpenDecision::SourceReveal
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SourceRevealPlan {
+    #[cfg(target_os = "macos")]
+    Finder(CommandSpec),
+    #[cfg(not(target_os = "macos"))]
+    Directory(PathBuf),
+}
+
+fn source_reveal_plan(path: &Path) -> io::Result<SourceRevealPlan> {
+    if classify_source_reference(path) != PathOpenDecision::SourceReveal {
+        // When: classify_source_reference no longer returns SourceReveal, never dispatch stale source authorization.
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "changed or blocked source reference",
+        ));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        path.to_str()
+            .and_then(macos_reveal_spec)
+            .map(SourceRevealPlan::Finder)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid source path"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        path.parent()
+            .map(|parent| SourceRevealPlan::Directory(parent.to_path_buf()))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "source has no parent"))
+    }
+}
+
+fn open_path(path: &Path, expected_decision: PathOpenDecision) -> io::Result<()> {
+    if expected_decision != PathOpenDecision::SourceReveal {
+        // When: expected_decision is not SourceReveal, retain the stricter ordinary opener contract.
+        return open_native_path(path, expected_decision);
+    }
+    match source_reveal_plan(path)? {
+        #[cfg(target_os = "macos")]
+        SourceRevealPlan::Finder(spec) => {
+            // When: the plan is Finder, only the fixed reveal command receives the source filename.
+            run_command(spec)
+        }
+        #[cfg(not(target_os = "macos"))]
+        SourceRevealPlan::Directory(parent) => {
+            // When: the plan is Directory, only its parent reaches a file association, never the executable source.
+            open_native_path(&parent, PathOpenDecision::Openable(PathKind::Directory))
+        }
+    }
+}
+
 fn select_openable_candidate(
     candidates: &[PathProbeCandidate],
     mut classify: impl FnMut(&Path) -> PathOpenDecision,
@@ -632,8 +787,14 @@ fn select_openable_candidate(
         let mut blocked = false;
         while index < candidates.len() && candidates[index].span_len() == span_len {
             let candidate = &candidates[index];
-            match classify(&candidate.resolved_path) {
-                decision @ PathOpenDecision::Openable(_) => {
+            let decision = if matches!(candidate.target, DetectedTarget::SourceReference(_)) {
+                classify_source_reference(&candidate.resolved_path)
+            } else {
+                // When: matches! rejects SourceReference provenance, keep generic opener classification unchanged.
+                classify(&candidate.resolved_path)
+            };
+            match decision {
+                decision @ (PathOpenDecision::Openable(_) | PathOpenDecision::SourceReveal) => {
                     actionable.push(PathProbeSelection { candidate: candidate.clone(), decision });
                 }
                 #[cfg(any(target_os = "macos", test))]
@@ -787,18 +948,20 @@ fn macos_validated_open_spec(
     match expected_decision {
         PathOpenDecision::Openable(_) => macos_open_spec(text),
         PathOpenDecision::Revealable(_) => macos_reveal_spec(text),
-        PathOpenDecision::Blocked | PathOpenDecision::Missing => None,
+        PathOpenDecision::SourceReveal | PathOpenDecision::Blocked | PathOpenDecision::Missing => {
+            None
+        }
     }
     .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid macOS path"))
 }
 
 #[cfg(target_os = "macos")]
-fn open_path(path: &Path, expected_decision: PathOpenDecision) -> io::Result<()> {
+fn open_native_path(path: &Path, expected_decision: PathOpenDecision) -> io::Result<()> {
     run_command(macos_validated_open_spec(path, expected_decision)?)
 }
 
 #[cfg(target_os = "windows")]
-fn open_path(path: &Path, expected_decision: PathOpenDecision) -> io::Result<()> {
+fn open_native_path(path: &Path, expected_decision: PathOpenDecision) -> io::Result<()> {
     let PathOpenDecision::Openable(expected_kind) = expected_decision else {
         // When: `expected_decision` is not `Openable`, Windows has no reveal-only dispatch contract.
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "unsupported Windows action"));
@@ -897,7 +1060,7 @@ fn linux_portal_unavailable(error: &ashpd::Error) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn open_path(path: &Path, expected_decision: PathOpenDecision) -> io::Result<()> {
+fn open_native_path(path: &Path, expected_decision: PathOpenDecision) -> io::Result<()> {
     use ashpd::desktop::open_uri::OpenFileRequest;
 
     let PathOpenDecision::Openable(expected_kind) = expected_decision else {
@@ -974,7 +1137,7 @@ fn linux_xdg_open_spec(path: &Path) -> Option<CommandSpec> {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-fn open_path(_path: &Path, _expected_decision: PathOpenDecision) -> io::Result<()> {
+fn open_native_path(_path: &Path, _expected_decision: PathOpenDecision) -> io::Result<()> {
     Err(io::Error::new(io::ErrorKind::Unsupported, "path open is unsupported"))
 }
 
@@ -1282,6 +1445,15 @@ pub(super) fn resolve_detected_path(
 ) -> Option<PathBuf> {
     match target {
         DetectedTarget::Uri(_) => None,
+        DetectedTarget::SourceReference(reference) => {
+            let path = if reference.explicit_path {
+                DetectedTarget::PathCandidate(reference.path.clone())
+            } else {
+                // When: reference.explicit_path is false, retain the bare filename's CWD-only provenance.
+                DetectedTarget::BareName(reference.path.clone())
+            };
+            resolve_detected_path(&path, style, cwd, home, local_hostname)
+        }
         DetectedTarget::PathCandidate(candidate) => {
             resolve_path_candidate(candidate, style, cwd, home, local_hostname)
         }
@@ -1557,9 +1729,83 @@ fn detected_target_enabled(
 ) -> bool {
     match target {
         DetectedTarget::Uri(_) => true,
+        DetectedTarget::SourceReference(reference) => {
+            clickable_local_targets && (reference.explicit_path || clickable_bare_names)
+        }
         DetectedTarget::PathCandidate(_) => clickable_local_targets,
         DetectedTarget::BareName(_) => clickable_local_targets && clickable_bare_names,
     }
+}
+
+fn hyperlink_hover_cells(
+    grid: &Grid,
+    pane_id: u64,
+    view_top: u64,
+    pointed_row: u16,
+    col: u16,
+    hyperlink_id: sonicterm_types::HyperlinkId,
+) -> Option<sonicterm_render_model::inputs::HoveredUrlCells> {
+    use sonicterm_render_model::inputs::{HoveredUrlCells, HoveredUrlSpan, MAX_HOVERED_URL_SPANS};
+
+    let fragment = |row_number: u16, column: u16| {
+        let row = grid.row_at_abs(view_top.checked_add(u64::from(row_number))?)?;
+        let cells = row.iter().collect::<Vec<_>>();
+        let column = usize::from(column);
+        if cells.get(column)?.hyperlink() != Some(hyperlink_id) {
+            // When: the pointed column has another hyperlink identity, it cannot continue this occurrence.
+            return None;
+        }
+        let mut start = column;
+        let mut end = column + 1;
+        while start > 0 && cells[start - 1].hyperlink() == Some(hyperlink_id) {
+            start -= 1;
+        }
+        while end < cells.len() && cells[end].hyperlink() == Some(hyperlink_id) {
+            end += 1;
+        }
+        Some((
+            HoveredUrlSpan {
+                row: row_number,
+                start_col: u16::try_from(start).ok()?,
+                end_col: u16::try_from(end).ok()?,
+            },
+            row.soft_wrapped_from_previous(),
+        ))
+    };
+    if pointed_row >= grid.rows {
+        // When: pointed_row is outside the viewport, never project retained scrollback as visible geometry.
+        return None;
+    }
+    let (pointed, mut incoming_wrap) = fragment(pointed_row, col)?;
+    let mut spans = Vec::with_capacity(MAX_HOVERED_URL_SPANS);
+    spans.push(pointed);
+    // Start at the pointer so clipping an overlong occurrence cannot discard its pointed fragment.
+    while spans.len() < MAX_HOVERED_URL_SPANS {
+        let first = spans[0];
+        if first.row == 0 || first.start_col != 0 || !incoming_wrap {
+            // When: first reaches a viewport edge, gap, or missing incoming_wrap, the occurrence cannot extend backward.
+            break;
+        }
+        let Some((previous, wrap)) = fragment(first.row - 1, grid.cols.checked_sub(1)?) else {
+            // When: fragment finds no matching predecessor, an equal URI elsewhere cannot extend this occurrence.
+            break;
+        };
+        spans.insert(0, previous);
+        incoming_wrap = wrap;
+    }
+    while spans.len() < MAX_HOVERED_URL_SPANS {
+        let last = *spans.last()?;
+        if last.end_col != grid.cols || last.row + 1 >= grid.rows {
+            // When: last ends before the margin or reaches grid.rows, no visible continuation belongs to this occurrence.
+            break;
+        }
+        let Some((next, true)) = fragment(last.row + 1, 0) else {
+            // When: the next fragment lacks an incoming wrap, an equal ID is a separate occurrence.
+            break;
+        };
+        spans.push(next);
+    }
+    HoveredUrlCells::new(pane_id, spans, false)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1571,9 +1817,7 @@ pub(super) enum ResolvedCellTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct CellTargetSnapshot {
     pub(super) pane_id: u64,
-    pub(super) viewport_row: u16,
-    pub(super) start_col: u16,
-    pub(super) end_col: u16,
+    pub(super) hover_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
     pub(super) display: String,
     pub(super) explicit_hyperlink: bool,
     pub(super) target: ResolvedCellTarget,
@@ -1601,13 +1845,8 @@ impl CellTargetSnapshot {
     }
 
     fn hovered(&self, active: bool) -> Option<super::hovered_url::HoveredUrl> {
-        let cells = sonicterm_render_model::inputs::HoveredUrlCells::single(
-            self.pane_id,
-            self.viewport_row,
-            self.start_col,
-            self.end_col,
-            active,
-        )?;
+        let mut cells = self.hover_cells?;
+        cells.active = active;
         Some(super::hovered_url::HoveredUrl { cells, url: self.display.clone() })
     }
 }
@@ -1633,9 +1872,14 @@ impl App {
             let uri = parser.hyperlinks().lookup(hyperlink_id)?.uri.clone();
             return Some(CellTargetSnapshot {
                 pane_id,
-                viewport_row,
-                start_col: col,
-                end_col: col.saturating_add(1),
+                hover_cells: hyperlink_hover_cells(
+                    grid,
+                    pane_id,
+                    view_top,
+                    viewport_row,
+                    col,
+                    hyperlink_id,
+                ),
                 display: uri.clone(),
                 explicit_hyperlink: true,
                 target: ResolvedCellTarget::Uri(uri),
@@ -1659,9 +1903,13 @@ impl App {
             // When: `legacy_target` is an allow-listed URI, preserve its precedence over every filesystem candidate.
             return Some(CellTargetSnapshot {
                 pane_id,
-                viewport_row,
-                start_col,
-                end_col,
+                hover_cells: sonicterm_render_model::inputs::HoveredUrlCells::single(
+                    pane_id,
+                    viewport_row,
+                    start_col,
+                    end_col,
+                    false,
+                ),
                 display: uri.clone(),
                 explicit_hyperlink: false,
                 target: ResolvedCellTarget::Uri(uri),
@@ -1724,9 +1972,7 @@ impl App {
         };
         Some(CellTargetSnapshot {
             pane_id,
-            viewport_row,
-            start_col: col,
-            end_col: col.saturating_add(1),
+            hover_cells: None,
             display,
             explicit_hyperlink: false,
             target: ResolvedCellTarget::Path(key),
@@ -1753,6 +1999,10 @@ impl App {
 
     pub(super) fn refresh_target_hover(&mut self, window_id: WindowId) {
         let target = self.pointer_target(window_id);
+        self.apply_target_hover(window_id, target);
+    }
+
+    fn apply_target_hover(&mut self, window_id: WindowId, target: Option<CellTargetSnapshot>) {
         let modifier_held = self.open_modifier_held(window_id);
         let preview_allowed = self.frontmost_window == Some(window_id)
             && !(self.command_palette.is_open()
@@ -1765,32 +2015,48 @@ impl App {
         if let Some(window) = self.windows.get_mut(&window_id) {
             let previous_hover = window.hovered_url.clone();
             let previous_link = window.hover_link;
-            let preview = target.as_ref().and_then(|target| {
-                target.preview(
-                    modifier_held
-                        && preview_allowed
-                        && !window.hidden
-                        && !window.mouse_down
-                        && window.splitter_drag.is_none()
-                        && window.scrollbar_drag.is_none()
-                        && window.drag_session.is_none(),
-                    (window.cursor_pos.0 as f32, window.cursor_pos.1 as f32),
-                )
-            });
-            let preview_changed = window.link_preview != preview;
-            window.link_preview = preview;
+            let show_preview = modifier_held
+                && preview_allowed
+                && !window.hidden
+                && !window.mouse_down
+                && window.splitter_drag.is_none()
+                && window.scrollbar_drag.is_none()
+                && window.drag_session.is_none();
+            let pointer = (window.cursor_pos.0 as f32, window.cursor_pos.1 as f32);
+            let mut preview =
+                target.as_ref().and_then(|target| target.preview(show_preview, pointer));
             match target.as_ref() {
                 Some(target @ CellTargetSnapshot { target: ResolvedCellTarget::Uri(_), .. }) => {
                     window.path_probe.invalidate();
-                    if !target.explicit_hyperlink {
-                        hovered = target.hovered(modifier_held);
-                    }
+                    hovered = target.hovered(modifier_held);
                 }
                 Some(target @ CellTargetSnapshot { target: ResolvedCellTarget::Path(key), .. }) => {
                     probe_request = window.path_probe.request(key.clone());
                     if let Some(selection) =
                         window.path_probe.authorized_selection(key, modifier_held)
                     {
+                        if show_preview {
+                            let mut destination =
+                                selection.candidate.resolved_path.to_string_lossy().into_owned();
+                            if let DetectedTarget::SourceReference(reference) =
+                                &selection.candidate.target
+                            {
+                                destination.push_str(&format!(" · {}", reference.display));
+                            }
+                            let action =
+                                if matches!(selection.decision, PathOpenDecision::Openable(_)) {
+                                    self.i18n.t("path-preview-open")
+                                } else {
+                                    // When: matches! excludes Openable, the authorized action reveals without executing.
+                                    self.i18n.t("path-preview-reveal")
+                                };
+                            destination.push_str(&format!(" · {action}"));
+                            preview = Some(sonicterm_render_model::inputs::LinkPreview {
+                                uri: destination,
+                                pointer,
+                                available: true,
+                            });
+                        }
                         let cells =
                             selection.candidate.visible_cells(target.pane_id, key.view_top, true);
                         hovered = cells.map(|cells| super::hovered_url::HoveredUrl {
@@ -1803,6 +2069,8 @@ impl App {
                     window.path_probe.invalidate();
                 }
             }
+            let preview_changed = window.link_preview != preview;
+            window.link_preview = preview;
             window.hovered_url = hovered;
             window.hover_link = window.hovered_url.as_ref().is_some_and(|hover| hover.active())
                 || explicit_hyperlink;

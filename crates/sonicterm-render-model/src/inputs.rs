@@ -1,13 +1,13 @@
 use sonicterm_types::Cell;
 
-/// One window's unmodified URI destination, revealed without authorizing navigation.
+/// One window's destination preview, displayed without granting navigation authority.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LinkPreview {
-    /// Original stored URI; display escaping must not replace the activation target.
+    /// Original URI or resolved local-path display; never used as an activation target.
     pub uri: String,
     /// Pointer anchor in physical window pixels.
     pub pointer: (f32, f32),
-    /// Whether the existing URI opener accepts this target.
+    /// Whether URI validation or the current local probe permits the indicated action.
     pub available: bool,
 }
 

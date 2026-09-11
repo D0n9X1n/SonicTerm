@@ -1,4 +1,6 @@
 link-preview-unavailable = Cannot open this link
+path-preview-open = Open
+path-preview-reveal = Reveal only; never execute
 menu-file-new-tab = New Tab
 menu-edit-copy = Copy
 menu-edit-paste = Paste

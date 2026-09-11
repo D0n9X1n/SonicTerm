@@ -1,4 +1,6 @@
 link-preview-unavailable = このリンクは開けません
+path-preview-open = 開く
+path-preview-reveal = 場所を表示するだけで実行しません
 menu-file-new-tab = 新しいタブ
 menu-edit-copy = コピー
 menu-edit-paste = 貼り付け

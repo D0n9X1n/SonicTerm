@@ -844,12 +844,7 @@ impl App {
                         // on `ws`; split-borrow disjointly too.
                         let sel_ref = ws.selection.as_ref();
                         let cm_ref = ws.copy_mode.as_ref();
-                        // Map the per-window Cmd-hovered URL (set only
-                        // while the open-URL modifier is held; cleared on
-                        // release / pointer drift) into the Copy
-                        // `HoveredUrlCells` the renderer recolors with the
-                        // theme accent. Immutable read, disjoint from the
-                        // mut borrows of ws.{renderer,tabs,...}.
+                        // Shared URI and OSC 8 fragments retain hint/accent state independently of glyph-row dirt.
                         let hovered_url_cells = ws.hovered_url.as_ref().map(|h| h.to_cells());
                         let notification_ref = ws.notification.as_ref();
                         let viewport_tops = ws
@@ -1656,11 +1651,7 @@ impl App {
                 } else {
                     // When: mouse_down is false, update SonicTerm hover owners before terminal motion.
 
-                    // Hover-without-button: recompute the OSC8/auto-URL
-                    // hover state. Auto-detected URLs are gated on the
-                    // platform open-URL modifier (Cmd / Ctrl) per the
-                    // v1.0 Cmd-held-hover affordance; OSC 8 keeps its
-                    // unconditional pointer affordance.
+                    // Splitters own the pointer ahead of terminal target hints and modifier-authorized actions.
                     let splitter_hover = self.refresh_splitter_hover(lx, ly);
                     if !splitter_hover {
                         self.refresh_hovered_url();
