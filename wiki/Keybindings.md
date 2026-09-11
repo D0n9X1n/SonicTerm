@@ -134,6 +134,19 @@ segment. Dropping in the trailing visible gap inserts there; dropping a dragged
 tab on the overflow control appends to the complete tab list. Ordinary clicks
 on that control open the selector instead of starting a tab drag.
 
+### Rename Window
+
+`rename_window` opens **Rename Window** in the current window; it has no default
+shortcut. Edit only the custom name, then Enter trims and saves, blank resets,
+and Escape cancels. The title is `#N SonicTerm` or `#N Name`.
+Unicode/IME and the configured paste shortcut are supported; controls, line breaks,
+and names longer than 128 trimmed Unicode scalar values show rejection feedback.
+The editor remains bound to its original window and sends nothing to PTYs or
+broadcast targets, including in READONLY. Numbers are process-local, never reused,
+and not persisted; window names do not follow tabs or terminal output. OS lists
+may hide or truncate titles; macOS Cmd+Tab remains application-level. See
+[Usage](Usage) for lifecycle and platform display details.
+
 ### TOML syntax
 
 A keymap needs a `[meta]` table and zero or more `[[binding]]` tables:
@@ -189,7 +202,7 @@ Actions without arguments use a string. The active action names are:
 | Clipboard and navigation | `copy_to_clipboard`, `paste_from_clipboard`, `enter_copy_mode`, `enter_quick_select` |
 | Font | `increase_font_size`, `decrease_font_size`, `reset_font_size`, `increase_font_weight`, `decrease_font_weight`, `reset_font_weight`, `save_current_settings` |
 | UI | `toggle_tab_bar`, `rename_tab`, `update_tab_color`, `open_search`, `open_command_palette` |
-| Window and app | `new_window`, `move_tab_to_new_window`, `toggle_fullscreen`, `quit_app` |
+| Window and app | `new_window`, `rename_window`, `move_tab_to_new_window`, `toggle_fullscreen`, `quit_app` |
 | Files and maintenance | `edit_config_file`, `open_keymap_file`, `reload_config`, `check_for_updates` |
 | Shell navigation | `scroll_to_prev_prompt`, `scroll_to_next_prompt` |
 
@@ -268,7 +281,7 @@ input and does not create a selection. These local controls remain active:
 | `Escape` | Exit READONLY mode |
 
 READONLY also permits keymap actions that switch or activate tabs, focus panes,
-open search, check for updates, or save current font settings. All other bound
+open search or the command palette, rename windows, check for updates, or save current font settings. All other bound
 actions are consumed without running and without reaching the PTY. Search text
 is still editable.
 
@@ -278,7 +291,7 @@ cancel.
 
 ### App text fields
 
-Search, command-palette filtering, and tab renaming support the same single-line
+Search, command-palette filtering, and tab/window renaming support the same single-line
 editing controls. These exact chords work only while an app text field owns
 input:
 
@@ -438,6 +451,16 @@ Control 和 Alt 显示为 `Ctrl`、`Alt`。字面 `+` 按键会保留，例如 `
 标签页拖放使用可见标签在完整列表中的位置，而不是区段内位置。拖到可见区段末尾空隙会在该处插入；
 拖到溢出控件会追加到完整标签列表末尾。普通点击该控件打开选择器，不开始标签拖动。
 
+### 重命名窗口
+
+`rename_window` 在当前窗口打开**重命名窗口**，没有默认快捷键。只编辑自定义名称；
+Enter 去除首尾空白并保存，留空重置，Escape 取消。标题为 `#N SonicTerm` 或
+`#N Name`。支持 Unicode、输入法及已配置的粘贴快捷键；控制字符、
+换行及去除首尾空白后超过 128 个 Unicode 标量值的名称会显示拒绝原因。编辑器始终
+绑定原窗口，包括 READONLY 模式下也不会向 PTY 或广播目标发送内容。编号在进程内
+唯一、永不复用且不持久保存；名称不随标签页或终端输出改变。系统列表可能隐藏或截断
+标题；macOS Cmd+Tab 仍按应用切换。生命周期及各平台显示限制见[用法](Usage)。
+
 ### TOML 格式
 
 Keymap 必须有 `[meta]`，并可以包含任意数量的 `[[binding]]`：
@@ -491,7 +514,7 @@ super+ctrl+alt+shift+key
 | 剪贴板与导航 | `copy_to_clipboard`、`paste_from_clipboard`、`enter_copy_mode`、`enter_quick_select` |
 | 字体 | `increase_font_size`、`decrease_font_size`、`reset_font_size`、`increase_font_weight`、`decrease_font_weight`、`reset_font_weight`、`save_current_settings` |
 | UI | `toggle_tab_bar`、`rename_tab`、`update_tab_color`、`open_search`、`open_command_palette` |
-| 窗口与应用 | `new_window`、`move_tab_to_new_window`、`toggle_fullscreen`、`quit_app` |
+| 窗口与应用 | `new_window`、`rename_window`、`move_tab_to_new_window`、`toggle_fullscreen`、`quit_app` |
 | 文件与维护 | `edit_config_file`、`open_keymap_file`、`reload_config`、`check_for_updates` |
 | Shell 导航 | `scroll_to_prev_prompt`、`scroll_to_next_prompt` |
 
@@ -564,7 +587,7 @@ cell 已经变化，SonicTerm 会清除过期选区，并保持剪贴板不变�
 | `g` / `G` | 移到顶部 / 底部 |
 | `Escape` | 退出 READONLY 模式 |
 
-READONLY 还允许执行切换或激活标签页、切换 pane 焦点、打开搜索、检查更新、保存
+READONLY 还允许执行切换或激活标签页、切换 pane 焦点、打开搜索或命令面板、重命名窗口、检查更新、保存
 当前字体设置的 keymap action。其它已绑定 action 会被直接拦截，不执行，也不会发送
 给 PTY。搜索框仍可编辑。
 
@@ -573,7 +596,7 @@ READONLY 还允许执行切换或激活标签页、切换 pane 焦点、打开�
 
 ### 应用文本框
 
-搜索、命令面板筛选和标签页重命名使用同一套单行编辑控制。只有应用文本框接管输入时，
+搜索、命令面板筛选及标签页/窗口重命名使用同一套单行编辑控制。只有应用文本框接管输入时，
 以下精确组合键才生效：
 
 | 按键 | 行为 |

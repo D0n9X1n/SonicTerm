@@ -434,23 +434,28 @@ impl PaletteLayout {
             // the typed query with its caret rather than a tab title.
             command_palette_query_label(palette, "")
         };
-        let query_placeholder =
-            if palette.query().is_empty() && palette.mode() != CommandPaletteMode::TabColor {
-                Some(match palette.mode() {
-                    CommandPaletteMode::Commands if palette.tabs_only() => {
-                        palette.text().tabs_placeholder.clone()
-                    }
-                    CommandPaletteMode::Commands => palette.text().search_placeholder.clone(),
-                    CommandPaletteMode::RenameTab => palette.text().rename_placeholder.clone(),
-                    CommandPaletteMode::TabColor => String::new(),
-                })
-            } else {
-                // When: palette query already holds text, or mode is TabColor,
-                // so a placeholder would cover what the user typed.
-                None
-            };
+        let query_placeholder = if palette.query().is_empty()
+            && palette.mode() != CommandPaletteMode::TabColor
+        {
+            Some(match palette.mode() {
+                CommandPaletteMode::Commands if palette.tabs_only() => {
+                    palette.text().tabs_placeholder.clone()
+                }
+                CommandPaletteMode::Commands => palette.text().search_placeholder.clone(),
+                CommandPaletteMode::RenameTab => palette.text().rename_placeholder.clone(),
+                CommandPaletteMode::RenameWindow => palette.text().window_name_placeholder.clone(),
+                CommandPaletteMode::TabColor => String::new(),
+            })
+        } else {
+            // When: palette query already holds text, or mode is TabColor,
+            // so a placeholder would cover what the user typed.
+            None
+        };
 
-        let empty_label = if palette.mode() == CommandPaletteMode::RenameTab {
+        let empty_label = if matches!(
+            palette.mode(),
+            CommandPaletteMode::RenameTab | CommandPaletteMode::RenameWindow
+        ) {
             None
         } else if total == 0 && (palette.tabs_only() || !palette.query().is_empty()) {
             // When: `total` is zero, explain an empty tabs-only inventory or an unmatched command query.
@@ -483,6 +488,15 @@ impl PaletteLayout {
             }
             CommandPaletteMode::Commands => palette.text().command_footer(total),
             CommandPaletteMode::RenameTab => palette.text().rename_footer.clone(),
+            CommandPaletteMode::RenameWindow => match palette.window_name_error() {
+                Some(crate::command_palette::WindowNameError::ControlCharacter) => {
+                    palette.text().window_name_controls.clone()
+                }
+                Some(crate::command_palette::WindowNameError::TooLong) => {
+                    palette.text().window_name_too_long.clone()
+                }
+                None => palette.text().window_name_footer.clone(),
+            },
             CommandPaletteMode::TabColor => palette.text().color_footer.clone(),
         };
 

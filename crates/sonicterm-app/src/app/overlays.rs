@@ -493,8 +493,13 @@ impl App {
                 _ => None,
             },
         };
-        for ch in text.unwrap_or_default().chars().filter(|ch| !ch.is_control()) {
-            self.command_palette.input_char(ch);
+        if self.command_palette.mode() == CommandPaletteMode::RenameWindow {
+            self.command_palette.input_window_name(text.unwrap_or_default());
+        } else {
+            // When: another palette mode owns input, retain its existing printable-character policy.
+            for ch in text.unwrap_or_default().chars().filter(|ch| !ch.is_control()) {
+                self.command_palette.input_char(ch);
+            }
         }
     }
 
@@ -543,8 +548,13 @@ impl App {
         self.update_palette_ime_state(ime_event);
         match ime_event {
             winit::event::Ime::Commit(text) => {
-                for ch in text.chars() {
-                    self.command_palette.input_char(ch);
+                if self.command_palette.mode() == CommandPaletteMode::RenameWindow {
+                    self.command_palette.input_window_name(text);
+                } else {
+                    // When: another palette mode owns IME, retain its existing text insertion behavior.
+                    for ch in text.chars() {
+                        self.command_palette.input_char(ch);
+                    }
                 }
                 self.update_command_palette_ime_cursor_area();
                 self.request_redraw_for_overlay(self.palette_attached_window);
@@ -561,6 +571,15 @@ impl App {
 
     pub(super) fn command_palette_handle_key(&mut self, event: &KeyEvent) -> bool {
         let mods = self.command_palette_modifiers();
+        if self.command_palette.mode() == CommandPaletteMode::RenameWindow
+            && !self.palette_ime_is_composing()
+            && key_event_to_string(event, mods).and_then(|key| self.keymap.lookup(&key))
+                == Some(&Action::PasteFromClipboard)
+        {
+            // When: RenameWindow receives PasteFromClipboard, keep the payload local even in READONLY.
+            self.paste_window_name();
+            return true;
+        }
         let text = super::text_edit::printable_event_text(event, mods);
         self.command_palette_handle_input(&event.logical_key, Some(text))
     }
@@ -634,17 +653,27 @@ impl App {
             self.update_command_palette_ime_cursor_area();
             self.request_redraw_for_overlay(self.palette_attached_window);
             true
-        } else if self.command_palette.mode()
-            == sonicterm_ui::command_palette::CommandPaletteMode::RenameTab
-        {
-            // When: mode is RenameTab, Enter commits the title to the attached window rather than dispatching a command.
+        } else if matches!(
+            self.command_palette.mode(),
+            CommandPaletteMode::RenameTab | CommandPaletteMode::RenameWindow
+        ) {
+            // When: matches! selects RenameTab or RenameWindow, consume keys locally instead of dispatching terminal commands.
             match logical_key {
                 Key::Named(NamedKey::Escape) => {
+                    let source = self.palette_attached_window.or(self.main_window_id);
                     self.command_palette.close();
+                    self.window_rename_target = None;
                     self.palette_attached_window = None;
+                    self.request_redraw_for_overlay(source);
                     true
                 }
                 Key::Named(NamedKey::Enter) => {
+                    // When: Enter ends a name edit, window names use stable targets rather than active-tab state.
+                    if self.command_palette.mode() == CommandPaletteMode::RenameWindow {
+                        // When: RenameWindow owns the editor, validation must finish before changing the native title.
+                        self.submit_window_name();
+                        return true;
+                    }
                     let title = self.command_palette.query().trim().to_string();
                     let source = self.palette_attached_window.or(self.main_window_id);
                     self.command_palette.close();
@@ -743,6 +772,13 @@ impl App {
                             return true;
                         }
                     };
+                    if action == Action::RenameWindow {
+                        // When: action is RenameWindow, capture source_window before another focus event can redirect it.
+                        if let Some(id) = source_window {
+                            self.start_rename_window(id);
+                        }
+                        return true;
+                    }
                     if matches!(action, sonicterm_cfg::keymap::Action::RenameTab) {
                         // When: matches finds RenameTab the palette stays open as
                         // a rename editor seeded with the active tab title.
@@ -884,6 +920,79 @@ impl App {
         // wakes the event loop. Targets the attached window when set
         // so child windows get a redraw too, not just main.
         self.request_redraw_for_overlay(self.palette_attached_window);
+    }
+
+    fn paste_window_name(&mut self) {
+        let text = self
+            .test_clipboard_text
+            .clone()
+            .or_else(|| self.clipboard.as_mut().and_then(|clipboard| clipboard.get_text().ok()));
+        if let Some(text) = text {
+            self.command_palette.input_window_name(&text);
+            self.update_command_palette_ime_cursor_area();
+            self.request_redraw_for_overlay(self.palette_attached_window);
+        }
+    }
+
+    pub(super) fn native_window_title(&self, id: WindowId) -> Option<String> {
+        let key = self.window_keys.get(id)?;
+        let window = self.windows.get(&id)?;
+        Some(super::compose_window_title(key, &window.custom_window_name))
+    }
+
+    pub(super) fn start_rename_window(&mut self, id: WindowId) {
+        let Some(window) = self.windows.get(&id).filter(|window| !window.hidden) else {
+            // When: id is absent or hidden, never borrow a different window's identity.
+            return;
+        };
+        let Some(key) = self.window_keys.get(id) else {
+            // When: id has not been admitted, a helper cannot become a rename target.
+            return;
+        };
+        self.command_palette.start_rename_window(window.custom_window_name.clone());
+        self.window_rename_target = Some(key);
+        self.palette_attached_window = (Some(id) != self.main_window_id).then_some(id);
+        self.palette_pointer_capture = None;
+        self.update_command_palette_ime_cursor_area();
+        self.request_redraw_for_overlay(Some(id));
+    }
+
+    pub(super) fn cancel_window_rename(&mut self, id: WindowId) {
+        if self.command_palette.mode() == CommandPaletteMode::RenameWindow
+            && self.window_rename_target.and_then(|key| self.window_keys.resolve(key)) == Some(id)
+        {
+            self.command_palette.close();
+            self.window_rename_target = None;
+            self.palette_attached_window = None;
+            self.palette_pointer_capture = None;
+        }
+    }
+
+    fn submit_window_name(&mut self) {
+        let target = self
+            .window_rename_target
+            .and_then(|key| self.window_keys.resolve(key))
+            .filter(|id| self.windows.contains_key(id));
+        let Some(id) = target else {
+            // When: target no longer resolves, cancel without selecting the current main window.
+            self.command_palette.close();
+            self.window_rename_target = None;
+            self.palette_attached_window = None;
+            return;
+        };
+        let Some(name) = self.command_palette.window_name_submission() else {
+            // When: window_name_submission rejects input, retain the old title and paint the localized rejection.
+            self.request_redraw_for_overlay(Some(id));
+            return;
+        };
+        self.windows.get_mut(&id).unwrap().custom_window_name = name;
+        if let Some(native) = &self.windows[&id].window {
+            native.set_title(&self.native_window_title(id).unwrap());
+        }
+        self.command_palette.close();
+        self.window_rename_target = None;
+        self.palette_attached_window = None;
+        self.request_redraw_for_overlay(Some(id));
     }
 
     pub(super) fn start_rename_active_tab(&mut self) {

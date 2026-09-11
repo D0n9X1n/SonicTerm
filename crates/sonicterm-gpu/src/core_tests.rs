@@ -2990,13 +2990,17 @@ fn longest_palette_footer_fits_supported_panel_width_with_natural_spacing() {
     let _font_lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK.lock().expect("font fixture lock");
     let mut longest = String::new();
     let mut supported_width = 0.0_f32;
-    for mode in
-        [CommandPaletteMode::Commands, CommandPaletteMode::RenameTab, CommandPaletteMode::TabColor]
-    {
+    for mode in [
+        CommandPaletteMode::Commands,
+        CommandPaletteMode::RenameTab,
+        CommandPaletteMode::RenameWindow,
+        CommandPaletteMode::TabColor,
+    ] {
         let mut palette = CommandPalette::new();
         match mode {
             CommandPaletteMode::Commands => palette.open(),
             CommandPaletteMode::RenameTab => palette.start_rename_tab("tab"),
+            CommandPaletteMode::RenameWindow => palette.start_rename_window("window"),
             CommandPaletteMode::TabColor => palette.start_tab_color_picker("tab", Vec::new()),
         }
         let layout = PaletteLayout::compute(&mut palette, 4000.0, 2400.0, 0.0, 1.0)

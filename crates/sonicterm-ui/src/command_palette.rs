@@ -32,10 +32,34 @@ use std::hash::{Hash, Hasher};
 
 const NO_SELECTION: usize = usize::MAX;
 
+/// Rejection reason for a custom native window name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WindowNameError {
+    /// Native titles must remain single-line and contain no control characters.
+    ControlCharacter,
+    /// The trimmed name exceeds 128 Unicode scalar values.
+    TooLong,
+}
+
+/// Validate raw input before trimming so line breaks cannot silently become a different title.
+pub fn validate_window_name(name: &str) -> Result<&str, WindowNameError> {
+    if name.chars().any(|ch| ch.is_control() || matches!(ch, '\u{2028}' | '\u{2029}')) {
+        // When: name contains controls or line separators, reject even those removed by trim.
+        return Err(WindowNameError::ControlCharacter);
+    }
+    let name = name.trim();
+    if name.chars().count() > 128 {
+        // When: trimmed name exceeds 128 scalars, reject rather than truncate a user's chosen identity.
+        return Err(WindowNameError::TooLong);
+    }
+    Ok(name)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandPaletteMode {
     Commands,
     RenameTab,
+    RenameWindow,
     TabColor,
 }
 
@@ -158,6 +182,10 @@ pub(crate) struct PaletteText {
     pub(crate) tabs_hint: String,
     pub(crate) tabs_footer: String,
     pub(crate) rename_placeholder: String,
+    pub(crate) window_name_placeholder: String,
+    pub(crate) window_name_footer: String,
+    pub(crate) window_name_controls: String,
+    pub(crate) window_name_too_long: String,
     pub(crate) no_matches: String,
     pub(crate) empty_hint: String,
     pub(crate) rename_footer: String,
@@ -202,6 +230,22 @@ impl PaletteText {
                 "All tabs · ↑↓ navigate · ↵ switch · esc close",
             ),
             rename_placeholder: text("palette-rename-placeholder", "New tab title…"),
+            window_name_placeholder: text(
+                "palette-window-name-placeholder",
+                "Window name (blank resets)…",
+            ),
+            window_name_footer: text(
+                "palette-window-name-footer",
+                "↵ save · blank resets · esc cancel",
+            ),
+            window_name_controls: text(
+                "palette-window-name-controls",
+                "Names cannot contain controls or line breaks",
+            ),
+            window_name_too_long: text(
+                "palette-window-name-too-long",
+                "Names must be 128 characters or fewer",
+            ),
             no_matches: text("palette-no-matches", "No commands found"),
             empty_hint: text("palette-empty-hint", "Try settings, split, font, shortcut"),
             rename_footer: text("palette-rename-footer", "↵ rename · esc cancel"),
@@ -260,6 +304,7 @@ pub struct CommandPalette {
     visible_rows: usize,
     tab_color_title: String,
     tab_color_choices: Vec<TabColorChoice>,
+    window_name_error: Option<WindowNameError>,
 }
 
 impl Default for CommandPalette {
@@ -299,6 +344,7 @@ impl CommandPalette {
             visible_rows: 0,
             tab_color_title: String::new(),
             tab_color_choices: Vec::new(),
+            window_name_error: None,
         }
     }
 
@@ -385,6 +431,7 @@ impl CommandPalette {
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         self.presentation_hash.hash(&mut hash);
         self.tabs_only.hash(&mut hash);
+        self.window_name_error.hash(&mut hash);
         hash.finish()
     }
 
@@ -408,6 +455,7 @@ impl CommandPalette {
         self.open = true;
         self.mode = CommandPaletteMode::Commands;
         self.tabs_only = false;
+        self.window_name_error = None;
         self.query.clear();
         self.cursor = 0;
         self.selected = 0;
@@ -432,6 +480,7 @@ impl CommandPalette {
         self.open = false;
         self.mode = CommandPaletteMode::Commands;
         self.tabs_only = false;
+        self.window_name_error = None;
         self.query.clear();
         self.cursor = 0;
         self.selected = 0;
@@ -453,6 +502,7 @@ impl CommandPalette {
     /// Replace the query wholesale and re-filter, putting the cursor at the end.
     pub fn set_query(&mut self, q: impl Into<String>) {
         self.query = q.into();
+        self.window_name_error = None;
         self.cursor = self.query.len();
         self.selected = 0;
         self.scroll_offset = 0;
@@ -605,6 +655,7 @@ impl CommandPalette {
         let outcome = apply_edit(&mut self.query, self.cursor, edit);
         self.cursor = outcome.cursor;
         if outcome.changed {
+            self.window_name_error = None;
             self.selected = 0;
             self.scroll_offset = 0;
             if self.mode == CommandPaletteMode::Commands {
@@ -627,6 +678,51 @@ impl CommandPalette {
         self.items.clear();
         self.selected = 0;
         self.scroll_offset = 0;
+    }
+
+    /// Open the window-name editor with only the existing custom-name portion.
+    pub fn start_rename_window(&mut self, name: impl Into<String>) {
+        self.start_rename_tab(name);
+        self.mode = CommandPaletteMode::RenameWindow;
+        self.window_name_error = None;
+    }
+
+    /// Insert a whole text event atomically, preserving the query when validation rejects it.
+    pub fn input_window_name(&mut self, text: &str) {
+        if text.is_empty() {
+            // When: text is empty, a swallowed command chord must not clear rejected-input feedback.
+            return;
+        }
+        let mut candidate = self.query.clone();
+        candidate.insert_str(self.cursor, text);
+        match validate_window_name(&candidate) {
+            Ok(_) => {
+                self.query = candidate;
+                self.cursor += text.len();
+                self.window_name_error = None;
+            }
+            Err(error) => self.window_name_error = Some(error),
+        }
+    }
+
+    /// Current rejection feedback, retained until a successful text edit or cancellation.
+    pub fn window_name_error(&self) -> Option<WindowNameError> {
+        self.window_name_error
+    }
+
+    /// Validate the editor's complete value without dismissing its existing rejection feedback.
+    pub fn window_name_submission(&mut self) -> Option<String> {
+        if self.window_name_error.is_some() {
+            // When: window_name_error records rejected input, require correction before saving the remaining query.
+            return None;
+        }
+        match validate_window_name(&self.query) {
+            Ok(name) => Some(name.to_string()),
+            Err(error) => {
+                self.window_name_error = Some(error);
+                None
+            }
+        }
     }
 
     /// Switch to tab-colour mode, listing `choices` for the named tab.
@@ -885,6 +981,7 @@ pub fn action_display_name(a: &Action) -> String {
         Action::ApplyTheme(name) => format!("ApplyTheme({name})"),
         Action::ToggleTabBar => "ToggleTabBar".into(),
         Action::RenameTab => "RenameTab".into(),
+        Action::RenameWindow => "RenameWindow".into(),
         Action::UpdateTabColor => "UpdateTabColor".into(),
     }
 }
@@ -978,6 +1075,7 @@ pub fn palette_actions() -> Vec<Action> {
         Action::RenameTab,
         Action::UpdateTabColor,
         // Window
+        Action::RenameWindow,
         Action::NewWindow,
         Action::MoveTabToNewWindow,
         Action::ToggleFullscreen,

@@ -80,6 +80,8 @@ fn command_context_requirements_and_readonly_policy_are_explicit() {
                 | Action::OpenSearch
                 | Action::CheckForUpdates
                 | Action::SaveCurrentSettings
+                | Action::OpenCommandPalette
+                | Action::RenameWindow
         );
         assert_eq!(descriptor(&action).read_only_allowed, expected, "{action:?}");
         assert_eq!(

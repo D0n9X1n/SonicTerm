@@ -77,6 +77,32 @@ gets the same bytes.
 For the complete default map, action names, and customization syntax, see
 [Keybindings](Keybindings).
 
+### Window names and numbers
+
+Terminal windows receive process-local numbers starting at 1: `#1 SonicTerm`.
+Use **Rename Window** in the command palette to set a custom name, for example
+`#2 Work`. Edit only the name: Enter trims surrounding whitespace
+and saves, blank input resets the numbered default, and Escape cancels. Names
+support Unicode and IME, with at most 128 Unicode scalar values after trimming;
+control characters, line breaks, and overlong input are rejected with feedback.
+The configured paste shortcut inserts into this editor, never into the shell.
+
+Numbers are never reused or reassigned within a process. New windows and torn-out
+tabs get fresh numbers and blank names; moving tabs into an existing window or
+hiding/restoring a retained window preserves its identity. Warm helper windows
+remain unnumbered until adopted. Names and numbers are not saved across restarts;
+separate processes may each start at 1. Tab names, shell commands, OSC titles,
+working directories, focus changes, and config reload do not rename windows.
+The editor targets the window where it opened and cancels when that window closes.
+Rename Window and the command palette remain available in READONLY mode; terminal
+input and unsafe commands remain blocked.
+
+Titles appear in applicable OS window lists, previews, and switchers. Windows
+uses taskbar previews and Alt+Tab; macOS uses window lists, Dock window menus,
+and Mission Control, not application-level Cmd+Tab. Linux display depends on the
+X11/Wayland desktop. The OS may hide or truncate labels; app grouping, icons,
+application IDs, and the Dock application label are unchanged.
+
 ### Select and copy text
 
 Drag to select cells. Double-click to select a word. Triple-click to select a
@@ -101,7 +127,7 @@ oversized writes are ignored.
 READONLY mode blocks terminal input while you inspect history. Arrow keys or
 `h/j/k/l` move its reading cursor; `w/b`, `0/$`, and `g` / `G` move by word, line, and buffer. Press `Escape` to exit. READONLY does not create a text
 selection. Search, tab switching, pane focus, update checks, and saving current
-font settings remain available. See [Keybindings](Keybindings) for the exact
+font settings, the command palette, and window renaming remain available. See [Keybindings](Keybindings) for the exact
 controls and whitelist.
 
 ### rmux and tmux integration
@@ -400,6 +426,26 @@ shell 不会重启。关闭分屏会关闭对应 PTY；关闭最后一个 pane �
 
 完整默认快捷键、action 名称和自定义格式见 [快捷键](Keybindings)。
 
+### 窗口名称与编号
+
+终端窗口在进程内从 1 开始编号，例如 `#1 SonicTerm`。在命令面板中选择
+**重命名窗口**，可设置为 `#2 Work`。只需编辑自定义名称：Enter 去除
+首尾空白并保存，留空恢复默认编号标题，Escape 取消。支持 Unicode 和输入法；去除
+首尾空白后最多 128 个 Unicode 标量值。控制字符、换行及超长输入会被拒绝并显示原因。
+已配置的粘贴快捷键只向编辑框插入文字，不会发送给 shell。
+
+同一进程内编号永不复用或重新分配。新建窗口与拆出的标签页获得新编号和空名称；
+把标签页移入现有窗口，或隐藏后恢复保留的窗口，都不会改变窗口身份。预热辅助窗口
+在被采用前不编号。名称与编号不跨重启保存；不同进程都可能从 1 开始。标签页名称、
+shell 命令、OSC 标题、工作目录、焦点变化及配置重载均不会重命名窗口。编辑器始终
+针对打开它的窗口，窗口关闭时取消。READONLY 模式下仍可使用命令面板和重命名窗口，
+终端输入及不安全操作仍被阻止。
+
+原生标题用于适用的系统窗口列表、预览及切换器。Windows 包括任务栏预览和 Alt+Tab；
+macOS 包括窗口列表、Dock 窗口菜单及 Mission Control，不包括应用级 Cmd+Tab。
+Linux 取决于 X11/Wayland 桌面。系统可能隐藏或截断标题；应用分组、图标、应用 ID
+及 Dock 应用名称保持不变。
+
 ### 选择与复制文字
 
 拖动可以按 cell 选择。双击选择单词，三击选择整行。双击或三击后继续拖动时，会按
@@ -420,7 +466,7 @@ SonicTerm 会在复制前清除它。终端程序也可通过 OSC 52 的 `c` tar
 READONLY 模式会在查看历史记录时阻止终端输入。方向键或 `h/j/k/l` 移动阅读光标；
 `w/b`、`0/$`、`g` / `G` 分别按单词、行和 buffer 移动。按 `Escape`
 退出。READONLY 不创建文字选区。搜索、切换标签页、切换 pane 焦点、检查更新和保存
-当前字体设置仍可使用。完整控制与允许列表见 [快捷键](Keybindings)。
+当前字体设置、命令面板及重命名窗口仍可使用。完整控制与允许列表见 [快捷键](Keybindings)。
 
 ### rmux 与 tmux 集成
 

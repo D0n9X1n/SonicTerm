@@ -701,6 +701,7 @@ impl App {
             with_integrated_titlebar(
                 Window::default_attributes()
                     .with_title(super::NATIVE_WINDOW_TITLE)
+                    .with_visible(false)
                     .with_decorations(true)
                     .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0)),
             ),
@@ -791,6 +792,7 @@ impl App {
             // governor in scope.
             owner: None,
             role: crate::app::WindowRole::Terminal,
+            custom_window_name: String::new(),
             window: Some(window.clone()),
             renderer: Some(renderer),
             tabs,
@@ -833,6 +835,7 @@ impl App {
         };
         self.insert_window_registered(win_id, child);
         self.register_window_with_os_drag_backend(win_id, &window);
+        window.set_visible(true);
         window.request_redraw();
         // Eagerly mark frontmost so the next Cmd+T / Cmd+W routes
         // here before the OS Focus event arrives — mirrors the

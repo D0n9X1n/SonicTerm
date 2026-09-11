@@ -155,6 +155,24 @@ action = "move_tab_to_new_window"
 }
 
 #[test]
+fn rename_window_action_parses_for_user_bindings() {
+    // Window naming is bindable without adding or changing a bundled shortcut.
+    let source = r#"
+[meta]
+name = "test"
+version = "1"
+
+[[binding]]
+keys = "alt+shift+n"
+action = "rename_window"
+"#;
+    let parsed: Result<Keymap, _> = toml::from_str(source);
+    assert!(parsed.is_ok(), "rename_window must deserialize: {parsed:?}");
+    let keymap = parsed.unwrap();
+    assert_eq!(format!("{:?}", keymap.lookup("alt+shift+n").unwrap()), "RenameWindow");
+}
+
+#[test]
 fn save_current_settings_action_parses_for_user_bindings() {
     // Contract: users can bind the save action even though bundled keymaps leave it unbound.
     let source = r#"
