@@ -1,5 +1,16 @@
 use sonicterm_types::Cell;
 
+/// One window's unmodified URI destination, revealed without authorizing navigation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkPreview {
+    /// Original stored URI; display escaping must not replace the activation target.
+    pub uri: String,
+    /// Pointer anchor in physical window pixels.
+    pub pointer: (f32, f32),
+    /// Whether the existing URI opener accepts this target.
+    pub available: bool,
+}
+
 /// Top-level read-only data for one frame.
 #[derive(Default)]
 pub struct RenderInputs<'a> {

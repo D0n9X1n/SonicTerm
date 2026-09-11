@@ -1,3 +1,4 @@
+link-preview-unavailable = 无法打开此链接
 menu-file-new-tab = 新建标签页
 menu-edit-copy = 复制
 menu-edit-paste = 粘贴

@@ -1580,6 +1580,26 @@ pub(super) struct CellTargetSnapshot {
 }
 
 impl CellTargetSnapshot {
+    fn preview(
+        &self,
+        modifier_held: bool,
+        pointer: (f32, f32),
+    ) -> Option<sonicterm_render_model::inputs::LinkPreview> {
+        let ResolvedCellTarget::Uri(uri) = &self.target else {
+            // When: target is a path probe rather than Uri, keep filesystem authorization separate from URI previews.
+            return None;
+        };
+        if !modifier_held {
+            // When: modifier_held is false, leave ordinary terminal hover free of destination overlays.
+            return None;
+        }
+        Some(sonicterm_render_model::inputs::LinkPreview {
+            uri: uri.clone(),
+            pointer,
+            available: sonicterm_cfg::url_open::validate(uri).is_ok(),
+        })
+    }
+
     fn hovered(&self, active: bool) -> Option<super::hovered_url::HoveredUrl> {
         let cells = sonicterm_render_model::inputs::HoveredUrlCells::single(
             self.pane_id,
@@ -1734,6 +1754,9 @@ impl App {
     pub(super) fn refresh_target_hover(&mut self, window_id: WindowId) {
         let target = self.pointer_target(window_id);
         let modifier_held = self.open_modifier_held(window_id);
+        let preview_allowed = self.frontmost_window == Some(window_id)
+            && !(self.command_palette.is_open()
+                && self.palette_attached_window.or(self.main_window_id) == Some(window_id));
         let mut probe_request = None;
         let mut hovered = None;
         let explicit_hyperlink = target.as_ref().is_some_and(|target| target.explicit_hyperlink);
@@ -1742,6 +1765,20 @@ impl App {
         if let Some(window) = self.windows.get_mut(&window_id) {
             let previous_hover = window.hovered_url.clone();
             let previous_link = window.hover_link;
+            let preview = target.as_ref().and_then(|target| {
+                target.preview(
+                    modifier_held
+                        && preview_allowed
+                        && !window.hidden
+                        && !window.mouse_down
+                        && window.splitter_drag.is_none()
+                        && window.scrollbar_drag.is_none()
+                        && window.drag_session.is_none(),
+                    (window.cursor_pos.0 as f32, window.cursor_pos.1 as f32),
+                )
+            });
+            let preview_changed = window.link_preview != preview;
+            window.link_preview = preview;
             match target.as_ref() {
                 Some(target @ CellTargetSnapshot { target: ResolvedCellTarget::Uri(_), .. }) => {
                     window.path_probe.invalidate();
@@ -1769,8 +1806,9 @@ impl App {
             window.hovered_url = hovered;
             window.hover_link = window.hovered_url.as_ref().is_some_and(|hover| hover.active())
                 || explicit_hyperlink;
-            visual_changed =
-                previous_hover != window.hovered_url || previous_link != window.hover_link;
+            visual_changed = previous_hover != window.hovered_url
+                || previous_link != window.hover_link
+                || preview_changed;
         }
 
         if let Some(request) = probe_request {
@@ -1802,7 +1840,8 @@ impl App {
         let probe_changed = window.path_probe.invalidate();
         let hover_changed = window.hovered_url.take().is_some();
         let link_changed = window.hover_link;
-        let changed = probe_changed | hover_changed | link_changed;
+        let changed =
+            probe_changed | hover_changed | link_changed | window.link_preview.take().is_some();
         window.hover_link = false;
         if changed {
             if let Some(native) = window.window.as_ref() {

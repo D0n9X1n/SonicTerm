@@ -84,6 +84,8 @@ fn render(
             None,
             None,
             None,
+            None,
+            "",
         )
         .map_err(|error| error.to_string())
 }

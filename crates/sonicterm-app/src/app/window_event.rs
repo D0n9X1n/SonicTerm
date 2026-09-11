@@ -809,6 +809,7 @@ impl App {
                     ws_viewport_tops,
                     ws_hovered_url_cells,
                     ws_notification_ref,
+                    ws_link_preview_ref,
                 ): (
                     Option<&mut GpuRenderer>,
                     Option<&mut sonicterm_ui::tabs::TabBar>,
@@ -823,6 +824,7 @@ impl App {
                     std::collections::HashMap<u64, Option<u64>>,
                     Option<sonicterm_render_model::inputs::HoveredUrlCells>,
                     Option<&sonicterm_ui::overlays::NotificationBubble>,
+                    Option<&sonicterm_render_model::inputs::LinkPreview>,
                 ) = match ws_opt {
                     Some(ws) => {
                         // Split the available WindowState render inputs into disjoint borrows.
@@ -869,6 +871,7 @@ impl App {
                             viewport_tops,
                             hovered_url_cells,
                             notification_ref,
+                            ws.link_preview.as_ref(),
                         )
                     }
                     None => {
@@ -885,6 +888,7 @@ impl App {
                             None,
                             None,
                             std::collections::HashMap::new(),
+                            None,
                             None,
                             None,
                         )
@@ -984,6 +988,8 @@ impl App {
                             pane.viewport_top_abs,
                             ws_notification_ref,
                             ws_hovered_url_cells,
+                            ws_link_preview_ref,
+                            &self.i18n.t("link-preview-unavailable"),
                         ) {
                             tracing::warn!("render error: {e}");
                             if smoke_waiting_for_present {
@@ -1349,6 +1355,7 @@ impl App {
                 }
                 if let Some(ws) = self.main_mut() {
                     ws.splitter_hover = None;
+                    ws.cursor_pos = (-1.0, -1.0);
                 }
                 if let Some(window_id) = self.main_window_id {
                     self.clear_target_hover(window_id);

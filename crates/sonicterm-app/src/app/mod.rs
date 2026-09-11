@@ -1083,6 +1083,8 @@ pub struct WindowState {
     pub ime_cursor_throttle: sonicterm_ui::ime::ImeCursorThrottle,
     /// Per-window hovered URL or validated local-path span.
     pub hovered_url: Option<hovered_url::HoveredUrl>,
+    /// Modifier-gated destination of the pointed URI.
+    pub link_preview: Option<sonicterm_render_model::inputs::LinkPreview>,
     /// Epoch-guarded openability decision for the local target under this pointer.
     pub(in crate::app) path_probe: path_target::PathProbeState,
     pub notification: Option<NotificationBubble>,
@@ -1341,8 +1343,10 @@ impl WindowState {
 
     /// Revoke any path authorization and remove pointer-owned target visuals.
     fn invalidate_path_hover(&mut self) {
-        let changed =
-            self.path_probe.invalidate() | self.hovered_url.take().is_some() | self.hover_link;
+        let changed = self.path_probe.invalidate()
+            | self.hovered_url.take().is_some()
+            | self.link_preview.take().is_some()
+            | self.hover_link;
         self.hover_link = false;
         if changed {
             if let Some(window) = self.window.as_ref() {
@@ -4860,6 +4864,7 @@ impl App {
             ime: ImeState::new(),
             ime_cursor_throttle: sonicterm_ui::ime::ImeCursorThrottle::new(),
             hovered_url: None,
+            link_preview: None,
             path_probe: path_target::PathProbeState::default(),
             notification: None,
             hidden: false,
@@ -6606,6 +6611,7 @@ impl App {
             ime: ImeState::new(),
             ime_cursor_throttle: sonicterm_ui::ime::ImeCursorThrottle::new(),
             hovered_url: None,
+            link_preview: None,
             path_probe: path_target::PathProbeState::default(),
             notification: None,
             hidden: false,

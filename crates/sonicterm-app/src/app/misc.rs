@@ -818,6 +818,7 @@ impl App {
             ime: ImeState::new(),
             ime_cursor_throttle: sonicterm_ui::ime::ImeCursorThrottle::new(),
             hovered_url: None,
+            link_preview: None,
             path_probe: super::path_target::PathProbeState::default(),
             notification: None,
             hidden: false,

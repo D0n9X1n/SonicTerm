@@ -22,9 +22,9 @@
 //!
 //! - Only `http://`, `https://`, `mailto:`, and `file://` schemes are
 //!   permitted.
-//! - The URI must not contain a shell metacharacter
-//!   (`& | ^ < > " ' \` CR LF NUL + other control chars`).
-//! - Capped at 4096 chars.
+//! - Raw controls and `| ^ < > " ' \`` are rejected; `&` query separators are
+//!   preserved because dispatch never interprets the URI as a shell command.
+//! - Capped at 4096 bytes.
 //!
 //! The URI text itself is preserved when encoded as UTF-16. Percent-encoded
 //! triplets, `%`-delimited runs that resemble environment references, and
@@ -121,7 +121,7 @@ pub fn validate(url: &str) -> io::Result<()> {
     }
     for ch in url.chars() {
         match ch {
-            '&' | '|' | '^' | '<' | '>' | '"' | '\'' | '`' | '\r' | '\n' | '\0' => {
+            '|' | '^' | '<' | '>' | '"' | '\'' | '`' | '\r' | '\n' | '\0' => {
                 // When: ch is a shell metacharacter, refused as defense in
                 // depth even though no dispatch path re-tokenizes the URI.
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "forbidden character"));
@@ -279,8 +279,7 @@ pub fn build_command(url: &str) -> Command {
 ///   macOS, Ctrl on Windows/Linux) accompany the click?
 /// - `uri_at_cell`: the URI under the cursor cell, if any (OSC 8
 ///   hyperlink OR plain-text URL detected by `url_scan`).
-/// - `open_fn`: how to actually open a validated URI. Production
-///   passes `url_open::open`; tests pass a capturing closure.
+/// - `open_fn`: callback responsible for validation and dispatch.
 ///
 /// Returns `Some(uri)` when the opener was invoked (so the caller
 /// knows to swallow the click and skip selection start), `None`

@@ -217,6 +217,24 @@ filesystem detection. Unrelated terminal output and same-value repaints do not
 blink an unchanged target; changing the pointed row, target, CWD, viewport, or
 openability identity revokes authorization and requires a fresh probe.
 
+Holding the same modifier over any URL shows its destination beside the pointer,
+including labeled OSC 8 links, links whose label already equals the destination,
+and auto-detected plain-text URLs. Click while holding the modifier to open it.
+Query separators such as `&` are preserved unchanged, so links with multiple query
+parameters (including repository file and line links) can be opened. Scheme,
+length, control-character, and other forbidden-character checks still apply.
+
+Terminal underline styling continues across explicitly printed spaces that carry
+the same underline style and color. Unstyled cells remain gaps; clearing cells
+does not paint new underline ink even when underline mode is active.
+
+The preview does not fetch a website or authorize navigation. It shows file URIs
+too, marks targets rejected by existing URI validation as unavailable, and escapes
+control and directional formatting characters for display. Long destinations wrap,
+with an explicit ellipsis if they cannot fit. Release the modifier or leave the
+link to hide it; focus, modal, pane, viewport, and content changes refresh or clear
+it. GPU and Windows software rendering use the same preview overlay.
+
 Raw local targets include:
 
 - native absolute paths such as `/usr/local/etc`, `C:/Users/name`, and
@@ -500,6 +518,19 @@ Pointer protocol 与 OSC 52 边界见 [终端 IO 与 VT](Terminal-IO-and-VT)。
 `mailto:`、`file://` URI 优先于原始文件系统检测。无关终端输出和同值重绘不会让
 未变化的目标闪烁；pointed row、target、CWD、viewport 或可打开 identity 改变时，
 授权会被撤销并重新 probe。
+
+在任意 URL 上按住同一修饰键，都会在指针旁预览目标，包括带标签的 OSC 8 链接、
+标签与目标完全相同的链接，以及自动检测的纯文本 URL。按住修饰键并单击即可打开。
+`&` 等查询分隔符原样保留，因此含多个查询参数的链接（包括仓库文件和行号链接）
+可以打开。协议、长度、控制字符以及其他禁用字符的检查仍然有效。
+
+终端下划线会跨越显式输出且具有相同下划线样式与颜色的空格。未设置下划线的单元格
+仍会形成间隔；即使下划线模式处于开启状态，清除单元格也不会产生新的下划线。
+
+预览不会访问网站，也不会授予打开权限。它也显示 file URI，将现有 URI 验证拒绝的
+目标标为不可打开，并将控制字符和方向格式字符转义后显示。长目标自动换行，无法完整
+容纳时明确显示省略号。松开修饰键或离开链接即隐藏；焦点、模态界面、pane、viewport
+和内容变化会刷新或清除预览。GPU 与 Windows 软件渲染使用相同的预览覆盖层。
 
 原始本地目标包括：
 

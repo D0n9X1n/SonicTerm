@@ -8,6 +8,18 @@
 use super::*;
 use crate::url_open::validate;
 
+/// Every query cell resolves to the same complete URI, including separators and later parameters.
+#[test]
+fn query_separators_remain_inside_click_target() {
+    let uri = "https://dev.azure.com/example/project/_git/repo?path=%2Fsrc%2Ffile.cs&line=1&lineEnd=10&_a=contents";
+    for col in 0..uri.len() {
+        let found = url_at_byte(uri, col).unwrap();
+        assert_eq!(found.url, uri);
+        assert_eq!(found.end, uri.len());
+        assert!(validate(&found.url).is_ok());
+    }
+}
+
 // ---- scheme recognition ------------------------------------------------
 
 #[test]
@@ -208,14 +220,13 @@ fn overlong_url_is_dropped_because_it_fails_validate() {
 
 #[test]
 fn shell_meta_in_body_ends_the_match_before_the_meta_char() {
-    // `&` is not a body char, so the match stops before it and the
-    // returned slice is metacharacter-free (and validate-clean).
-    let text = "http://a.com/p?x=1&y=2";
+    // A pipe remains outside the URL body and cannot enter the handler target.
+    let text = "http://a.com/p?x=1|other";
     let m = find_urls(text);
     assert_eq!(m.len(), 1);
     assert_eq!(m[0].url, "http://a.com/p?x=1");
     assert!(validate(&m[0].url).is_ok());
-    assert!(!m[0].url.contains('&'));
+    assert!(!m[0].url.contains('|'));
 }
 
 /// Native compatibility wrappers preserve the explicit native-grammar behavior.

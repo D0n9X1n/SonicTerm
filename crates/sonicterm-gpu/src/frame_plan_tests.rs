@@ -12,6 +12,29 @@ fn facts(degraded: bool) -> FrameFacts {
     }
 }
 
+/// Preview appearance, movement, replacement, and dismissal repaint covered pixels in both presenters.
+#[test]
+fn link_preview_changes_repaint_full_surface() {
+    for degraded in [false, true] {
+        let baseline = FramePlan::build(facts(degraded), [pane(7, 1)], None);
+        let mut shown_facts = facts(degraded);
+        shown_facts.window.renderer_hash = 11;
+        shown_facts.window.overlay_active = true;
+        let shown = FramePlan::build(shown_facts.clone(), [pane(7, 1)], Some(&baseline.key));
+        assert_eq!(shown.mode, RenderMode::Full);
+        assert_eq!(shown.damage, baseline.damage);
+        let same = FramePlan::build(shown_facts.clone(), [pane(7, 1)], Some(&shown.key));
+        assert!(same.unchanged);
+        shown_facts.window.renderer_hash = 12;
+        let moved = FramePlan::build(shown_facts, [pane(7, 1)], Some(&shown.key));
+        assert_eq!(moved.mode, RenderMode::Full);
+        assert_eq!(moved.damage, baseline.damage);
+        let hidden = FramePlan::build(facts(degraded), [pane(7, 1)], Some(&moved.key));
+        assert_eq!(hidden.mode, RenderMode::Full);
+        assert_eq!(hidden.damage, baseline.damage);
+    }
+}
+
 fn pane(id: u64, revision: u64) -> PaneMetadata {
     PaneMetadata {
         id,

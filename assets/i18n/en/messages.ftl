@@ -1,3 +1,4 @@
+link-preview-unavailable = Cannot open this link
 menu-file-new-tab = New Tab
 menu-edit-copy = Copy
 menu-edit-paste = Paste
