@@ -141,6 +141,213 @@ fn hyperlink_preview_missing_registry_entry_is_inert() {
     assert!(app.cell_target_at(window, pane, 0, 0).is_none());
 }
 
+/// Identical displayed URLs need identical hover coverage regardless of OSC 8 provenance.
+#[test]
+fn hyperlink_hover_matches_plain_url_coverage() {
+    let uri = "https://example.com/";
+    for explicit in [false, true] {
+        let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+        let window = app.__test_seed_child_window(&["hover"]);
+        let pane = app.__test_child_pane_ids(window).unwrap()[0];
+        let output = if explicit {
+            format!("\x1b]8;;{uri}\x1b\\{uri}\x1b]8;;\x1b\\")
+        } else {
+            uri.to_string()
+        };
+        assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+        let target = app.cell_target_at(window, pane, 0, 3).unwrap();
+        for active in [false, true] {
+            let hover = target.hovered(active).unwrap();
+            eprintln!(
+                "explicit={explicit} active={active} pane={pane} spans={:?}",
+                hover.cells.spans()
+            );
+            assert_eq!(hover.cells.active, active);
+            assert_eq!(
+                hover.cells.spans(),
+                &[sonicterm_render_model::inputs::HoveredUrlSpan {
+                    row: 0,
+                    start_col: 0,
+                    end_col: uri.len() as u16,
+                }]
+            );
+        }
+    }
+}
+
+/// The production hover-state transform must forward explicit links to renderer inputs.
+#[test]
+fn hyperlink_hover_reaches_window_render_state() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["hover"]);
+    let other = app.__test_seed_child_window(&["other"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    assert!(app.__test_advance_child_pane_parser(
+        window,
+        pane,
+        b"\x1b]8;;https://example.com/\x1b\\Docs\x1b]8;;\x1b\\"
+    ));
+    for active in [false, true, false] {
+        app.windows.get_mut(&window).unwrap().modifiers = if !active {
+            winit::keyboard::ModifiersState::empty()
+        } else if cfg!(target_os = "macos") {
+            winit::keyboard::ModifiersState::SUPER
+        } else {
+            winit::keyboard::ModifiersState::CONTROL
+        };
+        let target = app.cell_target_at(window, pane, 0, 1);
+        app.apply_target_hover(window, target);
+        let hover = app.windows[&window].hovered_url.as_ref().expect("OSC 8 renderer input");
+        assert_eq!(hover.cells.active, active);
+        assert!(app.windows[&other].hovered_url.is_none());
+    }
+    app.apply_target_hover(window, None);
+    assert!(app.windows[&window].hovered_url.is_none());
+    assert!(!app.windows[&window].hover_link);
+}
+
+/// Parenthesized plain and OSC 8 URLs reach the same window hover renderer without underlining wrappers.
+#[test]
+fn parenthesized_url_hover_reaches_render_state() {
+    for explicit in [false, true] {
+        let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+        let window = app.__test_seed_child_window(&["parentheses"]);
+        let pane = app.__test_child_pane_ids(window).unwrap()[0];
+        let uri = "https://leetcode.com/";
+        let output = if explicit {
+            format!("LeetCode (\x1b]8;;{uri}\x1b\\{uri}\x1b]8;;\x1b\\)")
+        } else {
+            format!("LeetCode ({uri})")
+        };
+        assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+        let target = app.cell_target_at(window, pane, 0, 15);
+        app.apply_target_hover(window, target);
+        let cells = app.windows[&window].hovered_url.as_ref().unwrap().cells;
+        assert_eq!(
+            (cells.spans()[0].start_col, cells.spans()[0].end_col),
+            (10, 10 + uri.len() as u16)
+        );
+    }
+}
+
+/// Soft wraps join one label, but hard lines and same-row gaps separate equal hyperlink IDs.
+#[test]
+fn hyperlink_hover_preserves_occurrence_and_wide_cell_geometry() {
+    use sonicterm_render_model::inputs::HoveredUrlSpan;
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["wrapped"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(6, 10);
+    let open = "\x1b]8;id=same;https://example.com/\x1b\\";
+    let close = "\x1b]8;;\x1b\\";
+    let output = format!("{open}ab界cdef{close}\r\n{open}xy{close} {open}zz{close}");
+    assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+    for (row, col) in [(0, 2), (0, 3), (1, 1)] {
+        let cells =
+            app.cell_target_at(window, pane, row, col).unwrap().hovered(true).unwrap().cells;
+        assert_eq!(
+            cells.spans(),
+            &[
+                HoveredUrlSpan { row: 0, start_col: 0, end_col: 6 },
+                HoveredUrlSpan { row: 1, start_col: 0, end_col: 2 },
+            ]
+        );
+    }
+    for (col, start, end) in [(0, 0, 2), (4, 3, 5)] {
+        let cells = app.cell_target_at(window, pane, 2, col).unwrap().hovered(true).unwrap().cells;
+        assert_eq!(cells.spans(), &[HoveredUrlSpan { row: 2, start_col: start, end_col: end }]);
+    }
+    let target = app.cell_target_at(window, pane, 0, 3);
+    app.apply_target_hover(window, target);
+    app.clear_target_hover(window);
+    assert!(app.windows[&window].hovered_url.is_none());
+}
+
+/// Long visible labels retain the pointed row within the fixed renderer fragment budget.
+#[test]
+fn hyperlink_hover_bounds_long_labels_without_losing_pointer() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["long"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(4, 16);
+    let output = format!("\x1b]8;;https://example.com/\x1b\\{}\x1b]8;;\x1b\\", "x".repeat(52));
+    assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+    for row in 0..13 {
+        let cells = app.cell_target_at(window, pane, row, 2).unwrap().hovered(false).unwrap().cells;
+        assert!(cells.contains(row, 2));
+        assert!(cells.spans().len() <= 8);
+    }
+}
+
+/// Source locations resolve the filename against pane CWD, keeping the complete displayed reference.
+#[test]
+fn source_reference_resolves_and_underlines_full_location() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["source"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    let cwd =
+        if cfg!(target_os = "windows") { "file:///C:/workspace" } else { "file:///workspace" };
+    let text = "install.sh:889–919";
+    let output = format!("\x1b]7;{cwd}\x1b\\{text}");
+    assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+    for col in 0..text.chars().count() as u16 {
+        let target = app.cell_target_at(window, pane, 0, col).unwrap();
+        let ResolvedCellTarget::Path(key) = target.target else {
+            panic!("source path provenance");
+        };
+        let candidate = key
+            .candidates
+            .iter()
+            .find(|candidate| matches!(candidate.target, DetectedTarget::SourceReference(_)))
+            .unwrap();
+        assert_eq!(candidate.resolved_path.file_name().unwrap(), "install.sh");
+        assert_eq!(candidate.display(), text);
+        assert_eq!(
+            candidate.visible_cells(pane, key.view_top, true).unwrap().spans()[0].end_col,
+            text.chars().count() as u16
+        );
+    }
+}
+
+/// Executable text sources get only source-specific reveal authorization; generic opening stays blocked.
+#[cfg(unix)]
+#[test]
+fn source_reference_reveal_never_authorizes_script_execution() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+        "sonicterm-source-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    let source = root.join("install.sh");
+    std::fs::write(&source, b"#!/bin/sh\nprintf safe\\n").unwrap();
+    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(classify_source_reference(&source), PathOpenDecision::SourceReveal);
+    assert_eq!(classify_local_target(&source), PathOpenDecision::Blocked);
+    #[cfg(target_os = "macos")]
+    assert_eq!(
+        source_reveal_plan(&source).unwrap(),
+        SourceRevealPlan::Finder(CommandSpec {
+            program: PathBuf::from("/usr/bin/open"),
+            args: vec!["-R".into(), "--".into(), source.to_str().unwrap().into()],
+        })
+    );
+    #[cfg(not(target_os = "macos"))]
+    assert_eq!(source_reveal_plan(&source).unwrap(), SourceRevealPlan::Directory(root.clone()));
+    assert_eq!(classify_source_reference(&root.join("See Makefile")), PathOpenDecision::Missing);
+    let link = root.join("link.sh");
+    std::os::unix::fs::symlink(&source, &link).unwrap();
+    assert_eq!(classify_source_reference(&link), PathOpenDecision::Blocked);
+    std::fs::write(&source, b"\x7fELF\0binary").unwrap();
+    assert_eq!(classify_source_reference(&source), PathOpenDecision::Blocked);
+    assert!(open_path(&source, PathOpenDecision::SourceReveal).is_err());
+    assert_eq!(classify_source_reference(&root.join("missing.sh")), PathOpenDecision::Missing);
+    std::fs::remove_file(link).unwrap();
+    std::fs::remove_file(source).unwrap();
+    std::fs::remove_dir(root).unwrap();
+}
+
 fn ascii_row(text: &str) -> Row {
     Row::from_flat(
         text.chars()
@@ -498,7 +705,7 @@ fn row_candidates_preserve_complete_spaced_path_span() {
                         && match &candidate.matched.target {
                             DetectedTarget::PathCandidate(value)
                             | DetectedTarget::BareName(value) => value == text,
-                            DetectedTarget::Uri(_) => false,
+                            DetectedTarget::Uri(_) | DetectedTarget::SourceReference(_) => false,
                         }
                 }),
                 "missing full row span at {col} in {text:?}: {candidates:?}"
@@ -1130,6 +1337,43 @@ fn openable_result(request: PathProbeRequest) -> PathProbeResult {
         }),
         request,
     }
+}
+
+/// Local previews wait for the exact probe and disappear on modifier release or invalidation.
+#[test]
+fn local_path_preview_requires_current_authorization() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["preview"]);
+    app.frontmost_window = Some(window);
+    app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+        winit::keyboard::ModifiersState::SUPER
+    } else {
+        winit::keyboard::ModifiersState::CONTROL
+    };
+    let mut key = probe_key("/work/source.rs", 0);
+    key.window_id = window;
+    let target = CellTargetSnapshot {
+        pane_id: key.pane_id,
+        hover_cells: None,
+        display: "./file".into(),
+        explicit_hyperlink: false,
+        target: ResolvedCellTarget::Path(key.clone()),
+    };
+    let request = app.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
+    app.apply_target_hover(window, Some(target.clone()));
+    assert!(app.windows[&window].link_preview.is_none());
+    let mut result = openable_result(request);
+    result.selection.as_mut().unwrap().decision = PathOpenDecision::SourceReveal;
+    assert!(app.windows.get_mut(&window).unwrap().path_probe.accept(&result, Some(&key)));
+    app.apply_target_hover(window, Some(target.clone()));
+    let preview = app.windows[&window].link_preview.as_ref().expect("validated path preview");
+    assert!(preview.uri.contains("/work/source.rs"));
+    assert!(preview.available);
+    app.windows.get_mut(&window).unwrap().modifiers = winit::keyboard::ModifiersState::empty();
+    app.apply_target_hover(window, Some(target));
+    assert!(app.windows[&window].link_preview.is_none());
+    app.clear_target_hover(window);
+    assert!(app.windows[&window].link_preview.is_none());
 }
 
 /// A result authorizes a click only when epoch, key, and live modifier all match.

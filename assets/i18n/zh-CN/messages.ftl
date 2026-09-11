@@ -1,4 +1,6 @@
 link-preview-unavailable = 无法打开此链接
+path-preview-open = 打开
+path-preview-reveal = 仅显示位置，不执行
 menu-file-new-tab = 新建标签页
 menu-edit-copy = 复制
 menu-edit-paste = 粘贴

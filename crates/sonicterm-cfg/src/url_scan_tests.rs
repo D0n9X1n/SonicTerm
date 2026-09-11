@@ -20,6 +20,18 @@ fn query_separators_remain_inside_click_target() {
     }
 }
 
+/// Prose wrappers do not turn a URL scheme into an embedded identifier.
+#[test]
+fn parenthesized_urls_have_the_same_target_as_plain_urls() {
+    let uri = "https://leetcode.com/";
+    for (text, start) in [(uri.to_string(), 0), (format!("LeetCode ({uri})"), 10)] {
+        let found = url_at_byte(&text, start + 8).expect("URL inside prose wrapper");
+        assert_eq!(found.url, uri);
+        assert_eq!((found.start, found.end), (start, start + uri.len()));
+    }
+    assert!(find_urls("xhttps://leetcode.com/").is_empty());
+}
+
 // ---- scheme recognition ------------------------------------------------
 
 #[test]
@@ -99,11 +111,14 @@ fn trims_run_of_trailing_punctuation() {
 }
 
 #[test]
-fn under_matches_url_wrapped_in_parens() {
-    // Documents the intentional narrowness: a leading `(` is a body
-    // char, so `(http://a.com)` is treated as mid-token and skipped
-    // rather than mis-detected. Safe under-match, never an over-match.
-    assert!(find_urls("(http://a.com)").is_empty());
+fn matches_url_wrapped_in_prose() {
+    // Opening wrappers delimit URLs without becoming part of their destination.
+    for text in ["(http://a.com)", "[http://a.com]"] {
+        let found = find_urls(text);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].url, "http://a.com");
+        assert_eq!((found[0].start, found[0].end), (1, 13));
+    }
 }
 
 // ---- multiple URLs -----------------------------------------------------
@@ -702,7 +717,9 @@ fn whole_row_scanning_does_not_join_spaced_path_tokens() {
             DetectedTarget::PathCandidate(candidate) => {
                 !candidate.starts_with(' ') && matched.start != 1
             }
-            DetectedTarget::Uri(_) | DetectedTarget::BareName(_) => true,
+            DetectedTarget::Uri(_)
+            | DetectedTarget::BareName(_)
+            | DetectedTarget::SourceReference(_) => true,
         }));
         if let Some(expected_start) = expected_start {
             assert!(matches.iter().any(|matched| {
@@ -848,6 +865,125 @@ fn spaced_candidate_enumeration_is_bounded() {
 fn contextual_bare_lookup_preserves_uri_precedence() {
     for text in ["https://example.com", "mailto:user@example.com", "file:///tmp/a"] {
         assert!(bare_name_at_char_col_for_style(text, 0, PathStyle::Posix).is_none());
+    }
+}
+
+/// Return the full-span source reference offered for `col`, if the scanner produced one.
+fn source_reference_at(
+    text: &str,
+    col: usize,
+    style: PathStyle,
+    include_bare_names: bool,
+) -> Option<SourceReference> {
+    target_candidates_at_char_col_for_style(text, col, style, include_bare_names)
+        .into_iter()
+        .find_map(|matched| match matched.target {
+            DetectedTarget::SourceReference(reference)
+                if matched.start == 0 && matched.end == text.len() =>
+            {
+                Some(reference)
+            }
+            _ => None,
+        })
+}
+
+/// Every pointed cell of a source reference resolves to the same typed location and full span.
+#[test]
+fn source_reference_suffix_is_typed_at_every_column() {
+    // `end_line` carries ranges, `column` carries `:line:column`; the two never both apply.
+    for (style, text, path, line, column, end_line) in [
+        (PathStyle::Posix, "src/main.rs:12", "src/main.rs", 12, None, None),
+        (PathStyle::Posix, "src/main.rs:12:4", "src/main.rs", 12, Some(4), None),
+        (PathStyle::Posix, "src/main.rs:12-20", "src/main.rs", 12, None, Some(20)),
+        // An en dash is the range separator terminals produce when rendering prose output.
+        (PathStyle::Posix, "src/main.rs:12\u{2013}20", "src/main.rs", 12, None, Some(20)),
+        // A degenerate range still ascends and stays a valid single-line span.
+        (PathStyle::Posix, "/tmp/a.rs:7-7", "/tmp/a.rs", 7, None, Some(7)),
+        // Leading zeros are ordinary decimal syntax rather than a malformed suffix.
+        (PathStyle::Posix, "./a.rs:012", "./a.rs", 12, None, None),
+        (PathStyle::Windows, r"C:\work\main.rs:12", r"C:\work\main.rs", 12, None, None),
+        (PathStyle::Windows, r"C:\work\main.rs:12:4", r"C:\work\main.rs", 12, Some(4), None),
+    ] {
+        for col in 0..text.chars().count() {
+            let reference = source_reference_at(text, col, style, true)
+                .unwrap_or_else(|| panic!("missing source reference at column {col} in {text:?}"));
+            assert_eq!(reference.path, path);
+            assert_eq!(reference.display, text, "display keeps the whole pointed span");
+            assert_eq!(reference.line, line);
+            assert_eq!(reference.column, column);
+            assert_eq!(reference.end_line, end_line);
+            assert!(reference.explicit_path);
+        }
+    }
+}
+
+/// A numeric-looking but invalid suffix stays inert instead of decaying to a literal filename.
+#[test]
+fn malformed_source_suffix_never_falls_back_to_literal_path() {
+    for text in [
+        // Zero, descending ranges, `u32` overflow, and an unparsable extra segment.
+        "src/main.rs:0",
+        "src/main.rs:12:0",
+        "src/main.rs:0:12",
+        "src/main.rs:20-12",
+        "src/main.rs:20\u{2013}12",
+        "src/main.rs:99999999999999",
+        "src/main.rs:12:99999999999999",
+        "src/main.rs:12-",
+        "src/main.rs:12-20-30",
+        "src/main.rs:1x",
+        "src/main.rs:12:abc",
+    ] {
+        for col in 0..text.chars().count() {
+            assert!(
+                target_candidates_at_char_col_for_style(text, col, PathStyle::Posix, true)
+                    .is_empty(),
+                "malformed suffix produced a candidate at column {col} in {text:?}"
+            );
+        }
+    }
+}
+
+/// Contextual source references obey the same bare-name switch as contextual paths.
+#[test]
+fn bare_source_reference_requires_bare_names_enabled() {
+    let text = "main.rs:12";
+    let reference = source_reference_at(text, 0, PathStyle::Posix, true).expect("bare reference");
+    assert_eq!(reference.path, "main.rs");
+    assert_eq!(reference.line, 12);
+    assert!(!reference.explicit_path, "a bare component is not explicit path syntax");
+    // With bare names disabled the same text has no filesystem provenance at all.
+    assert!(target_candidates_at_char_col_for_style(text, 0, PathStyle::Posix, false).is_empty());
+}
+
+/// Drive letters and alternate-data-stream syntax are not read as location metadata.
+#[test]
+fn windows_drive_and_stream_colons_are_not_source_metadata() {
+    // A lone drive letter keeps its existing reading rather than becoming file `C` line 12.
+    for style in [PathStyle::Posix, PathStyle::Windows] {
+        assert!(source_reference_at("C:12", 0, style, true).is_none());
+    }
+    // A drive-rooted path without a suffix stays an ordinary explicit path candidate.
+    let matches =
+        target_candidates_at_char_col_for_style(r"C:\work\main.rs", 0, PathStyle::Windows, true);
+    assert!(matches
+        .iter()
+        .any(|matched| matched.target == DetectedTarget::PathCandidate(r"C:\work\main.rs".into())));
+    // `file.txt:12` is read as a location; Windows stream syntax shares the grammar.
+    let reference = source_reference_at("file.txt:12", 0, PathStyle::Windows, true).unwrap();
+    assert_eq!((reference.path.as_str(), reference.line), ("file.txt", 12));
+}
+
+/// URI provenance still wins over source-reference parsing on the same cell.
+#[test]
+fn uri_precedence_outranks_source_reference_parsing() {
+    let text = "https://example.com/a.rs:12";
+    for col in 0..text.chars().count() {
+        let matches = target_candidates_at_char_col_for_style(text, col, PathStyle::Posix, true);
+        assert!(
+            matches.iter().all(|matched| matches!(matched.target, DetectedTarget::Uri(_))),
+            "non-URI provenance at column {col} in {text:?}: {matches:?}"
+        );
     }
 }
 

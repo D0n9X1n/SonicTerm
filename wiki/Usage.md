@@ -243,6 +243,20 @@ filesystem detection. Unrelated terminal output and same-value repaints do not
 blink an unchanged target; changing the pointed row, target, CWD, viewport, or
 openability identity revokes authorization and requires a fresh probe.
 
+Plain hover underlines both detected URLs and OSC 8 labels with the theme's yellow
+hint; the open modifier switches to the action accent. OSC 8 coverage follows the
+contiguous label across automatic wraps, including wide cells, but never crosses
+hard line breaks or gaps into another occurrence. At most eight visible fragments
+are painted, always retaining the pointed fragment of an overlong label.
+URLs inside prose parentheses or square brackets are detected without including
+the surrounding wrappers in the destination or underline.
+
+Modifier-hover also previews the resolved absolute local path after its current
+background probe succeeds. Source references retain their displayed line/column
+metadata beside that path. The preview labels ordinary opening versus reveal-only
+actions; pending, missing, blocked, and stale candidates show no actionable path
+preview. It uses the same placement, escaping, wrapping, and dismissal as URL previews.
+
 Holding the same modifier over any URL shows its destination beside the pointer,
 including labeled OSC 8 links, links whose label already equals the destination,
 and auto-detected plain-text URLs. Click while holding the modifier to open it.
@@ -292,8 +306,19 @@ mark, or question mark win; the underline then excludes the prose punctuation.
 A blocked literal or equal-length ambiguity fails closed instead of falling
 back. A complete standalone single-quoted contextual name, such as `'My Folder'`
 from `ll`, is treated as `My Folder`. Other quoted or escaped names, `ls -F`
-suffixes (`*`, `@`, `=`, `|`), editor `:line:column` suffixes, and targets with
-wide, continuation, combining, or OSC 8-owned cells remain inert.
+suffixes (`*`, `@`, `=`, `|`), and raw paths containing wide, continuation,
+combining, or OSC 8-owned cells remain inert.
+
+Source references such as `install.sh:889–919`, `src/main.rs:12`, and
+`src/main.rs:12:4` retain the full underline but resolve only the filename.
+Line and column values must be positive; ranges accept `-` or `–` and must not
+run backwards. Relative source names still require the exact pane's trusted CWD.
+Validated regular text sources use a separate reveal-only action: macOS selects
+the file in Finder, while Windows and Linux open its containing directory.
+This also permits executable text scripts without launching them. It does not
+jump to a line or invoke an editor. Missing files, redirected paths, binary
+content, and names outside the source-file allow-list remain blocked; ordinary
+file-opening restrictions below are unchanged.
 
 Only regular files and directories are eligible. Missing, inaccessible,
 symlink/reparse-point, socket, device, executable, launcher, shortcut, installer,
@@ -565,6 +590,15 @@ Pointer protocol 与 OSC 52 边界见 [终端 IO 与 VT](Terminal-IO-and-VT)。
 未变化的目标闪烁；pointed row、target、CWD、viewport 或可打开 identity 改变时，
 授权会被撤销并重新 probe。
 
+普通悬停会以主题黄色提示为检测到的 URL 和 OSC 8 标签添加下划线；按住打开修饰键后改用
+操作强调色。OSC 8 覆盖范围沿连续标签跨越自动换行，包括宽字符，但不会跨硬换行或间隔
+连接另一次出现的链接。最多绘制八个可见片段；标签过长时仍保留指针所在片段。
+正文圆括号或方括号中的 URL 也会被检测到，外层括号不会进入目标地址或下划线范围。
+
+按住修饰键悬停时，本地路径在当前后台验证成功后也会预览解析后的绝对路径。源文件引用会在
+路径旁保留显示的行号或列号信息。预览区分普通打开与仅显示位置的操作；待验证、不存在、被阻止
+或过期的候选不会显示可操作的路径预览。位置、转义、换行和隐藏规则与 URL 预览相同。
+
 在任意 URL 上按住同一修饰键，都会在指针旁预览目标，包括带标签的 OSC 8 链接、
 标签与目标完全相同的链接，以及自动检测的纯文本 URL。按住修饰键并单击即可打开。
 `&` 等查询分隔符原样保留，因此含多个查询参数的链接（包括仓库文件和行号链接）
@@ -600,8 +634,15 @@ SonicTerm 会选择包含鼠标 cell 的最长、无歧义且可操作候选。�
 去掉末尾逗号、分号、句点、冒号、感叹号或问号的较短候选；此时下划线不包含正文标点。字面
 候选被阻止或同长度候选有歧义时会 fail closed，不会回退。`ll` 输出的完整独立单引号上下文
 名称，例如 `'My Folder'`，会按 `My Folder` 处理。其它带引号或转义的名称、`ls -F` 后缀
-（`*`、`@`、`=`、`|`）、editor `:line:column` 后缀，以及含宽字符、续格、组合字符或已属于
-OSC 8 的 cell 的目标都保持不可操作。
+（`*`、`@`、`=`、`|`），以及含宽字符、续格、组合字符或已属于 OSC 8 的 cell 的原始路径
+都保持不可操作。
+
+`install.sh:889–919`、`src/main.rs:12` 和 `src/main.rs:12:4` 等源文件引用保留完整下划线，
+但只解析文件名。行号与列号必须为正数；范围接受 `-` 或 `–`，且终点不能早于起点。
+相对源文件名仍要求准确 pane 的可信 CWD。验证后的普通文本源文件使用独立的仅显示操作：
+macOS 在 Finder 中选中文件，Windows 和 Linux 打开其所在目录。带可执行权限的文本脚本
+也可安全显示，但绝不会被启动。此操作不会跳转到指定行或调用编辑器。文件缺失、路径重定向、
+二进制内容以及不在源文件允许列表中的名称仍会被阻止；下述普通文件打开限制不变。
 
 只有普通文件和目录可以操作。不存在、不可访问、symlink/reparse point、socket、device、
 executable、launcher、shortcut、installer、network、UNC、WSL 和远端目标都会保持普通文字。

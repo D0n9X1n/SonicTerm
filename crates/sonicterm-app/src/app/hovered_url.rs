@@ -6,7 +6,7 @@
 //! - One hover carries up to eight ordered viewport-row fragments so an
 //!   automatically wrapped local path can underline and recolor as one target.
 //! - Plain hover uses the yellow hint; modifier-held hover uses the action accent.
-//! - OSC 8 hyperlinks keep their separate renderer-owned hover path.
+//! - OSC 8 labels share the fragment renderer, joining only contiguous automatic wraps.
 //!
 //! Sibling tests in `hovered_url_tests.rs` exercise the renderer projection
 //! without a live winit or wgpu context; URL scan/open policy is covered in
