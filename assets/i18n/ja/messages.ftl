@@ -1,6 +1,14 @@
-link-preview-unavailable = このリンクは開けません
-path-preview-open = 開く
-path-preview-reveal = 場所を表示するだけで実行しません
+path-error-copy-again = このメッセージの表示中に同じリンクをもう一度クリックすると、パスをコピーします。
+path-error-title = 対象を開けません
+path-error-missing = ファイルまたはフォルダーが見つかりません
+path-error-blocked = パスにアクセスできないか、安全ポリシーで禁止されています
+path-error-ambiguous = 複数のパスが一致します。完全なパスを使用してください
+path-error-pending = 対象を確認中です。しばらくしてから再試行してください
+path-error-disabled = ローカル対象の操作は無効です
+path-error-busy = ファイルマネージャーの要求が混雑しています。再試行してください
+path-error-worker = ファイルマネージャーのワーカーを利用できません
+path-error-copied = パスまたは元の対象をクリップボードにコピーしました
+path-error-copy-failed = パスをクリップボードにコピーできませんでした
 menu-file-new-tab = 新しいタブ
 menu-edit-copy = コピー
 menu-edit-paste = 貼り付け

@@ -135,19 +135,10 @@ impl App {
     }
 
     pub(super) fn dismiss_notification_at(&mut self, kind: FrontmostKind, x: f32, y: f32) -> bool {
-        let Some((message, scale, font_size, window_w, window_h, read_only, search_open)) =
-            self.notification_hit_inputs(kind)
-        else {
-            // When: notification_hit_inputs returns None, no visible close control can be hit.
+        let Some(layout) = self.notification_hit_layout(kind) else {
+            // When: notification_hit_layout returns None, no visible close control can be hit.
             return false;
         };
-        let content_w =
-            message.chars().map(|ch| if ch.is_ascii() { 0.58 } else { 1.0 }).sum::<f32>()
-                * font_size;
-        let row = u8::from(read_only) + u8::from(search_open);
-        let layout = sonicterm_ui::overlays::NotificationBubbleLayout::compute(
-            window_w, window_h, content_w, row, scale,
-        );
         let inside = x >= layout.close.x
             && x < layout.close.x + layout.close.w
             && y >= layout.close.y
@@ -179,10 +170,10 @@ impl App {
         true
     }
 
-    fn notification_hit_inputs(
+    fn notification_hit_layout(
         &self,
         kind: FrontmostKind,
-    ) -> Option<(String, f32, f32, f32, f32, bool, bool)> {
+    ) -> Option<sonicterm_ui::overlays::NotificationBubbleLayout> {
         match kind {
             FrontmostKind::Child(id) => {
                 let child = self.windows.get(&id)?;
@@ -194,15 +185,15 @@ impl App {
                 let search_open =
                     child.tab_states.get(tab_idx).is_some_and(|tab| tab.search.is_some());
                 let read_only = child.copy_mode.as_ref().is_some_and(|mode| mode.is_read_only());
-                Some((
-                    message,
-                    renderer.scale_factor(),
-                    renderer.font_size() * renderer.scale_factor(),
-                    size.width as f32,
-                    size.height as f32,
-                    read_only,
-                    search_open,
-                ))
+                Some(
+                    renderer
+                        .notification_layout(
+                            &message,
+                            (size.width as f32, size.height as f32),
+                            u8::from(read_only) + u8::from(search_open),
+                        )
+                        .geometry,
+                )
             }
             FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {
                 let ws = self.main()?;
@@ -214,15 +205,15 @@ impl App {
                 let search_open =
                     ws.tab_states.get(tab_idx).is_some_and(|tab| tab.search.is_some());
                 let read_only = ws.copy_mode.as_ref().is_some_and(|mode| mode.is_read_only());
-                Some((
-                    message,
-                    renderer.scale_factor(),
-                    renderer.font_size() * renderer.scale_factor(),
-                    size.width as f32,
-                    size.height as f32,
-                    read_only,
-                    search_open,
-                ))
+                Some(
+                    renderer
+                        .notification_layout(
+                            &message,
+                            (size.width as f32, size.height as f32),
+                            u8::from(read_only) + u8::from(search_open),
+                        )
+                        .geometry,
+                )
             }
         }
     }

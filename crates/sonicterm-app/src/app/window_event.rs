@@ -984,7 +984,6 @@ impl App {
                             ws_notification_ref,
                             ws_hovered_url_cells,
                             ws_link_preview_ref,
-                            &self.i18n.t("link-preview-unavailable"),
                         ) {
                             tracing::warn!("render error: {e}");
                             if smoke_waiting_for_present {

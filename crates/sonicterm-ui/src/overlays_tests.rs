@@ -1,5 +1,71 @@
 use super::*;
 
+/// Short notifications fit their longest line and retain only padding plus the close control.
+#[test]
+fn notification_text_shrinks_to_longest_line() {
+    let layout = NotificationBubbleLayout::compute_text(
+        1000.0,
+        600.0,
+        "Copied\nError",
+        16.0,
+        0,
+        1.0,
+        |text| text.len() as f32 * 11.25,
+    );
+    assert_eq!(layout.geometry.border.w, 68.0 + 2.0 * layout.padding + SEARCH_BAR_HEIGHT);
+    assert_eq!(layout.geometry.border.x + layout.geometry.border.w, 1000.0 - SEARCH_BAR_MARGIN);
+    assert_eq!(layout.lines, ["Copied", "Error"]);
+}
+
+/// Wrapping preserves explicit lines and long words, including the leading clipboard confirmation.
+#[test]
+fn notification_text_wraps_without_losing_copy_confirmation() {
+    let message =
+        format!("Filepath copied to clipboard.\nCannot open target: {}", "long-path/".repeat(12));
+    let layout =
+        NotificationBubbleLayout::compute_text(640.0, 480.0, &message, 16.0, 0, 1.0, |text| {
+            text.len() as f32 * 16.0
+        });
+    assert!(layout.lines.len() > 2);
+    assert_eq!(layout.lines.concat(), message.replace('\n', ""));
+    assert!(layout.geometry.border.h > SEARCH_BAR_HEIGHT);
+    assert!(layout.geometry.border.y + layout.geometry.border.h <= 480.0);
+    assert!(layout.lines[0].starts_with("Filepath copied"));
+}
+
+/// Wrapping never splits combining sequences or wide graphemes, and preserves explicit blank lines.
+#[test]
+fn notification_text_preserves_unicode_and_newlines() {
+    let message = "文件已复制\n\ne\u{301}文件e\u{301}文件e\u{301}文件";
+    let layout =
+        NotificationBubbleLayout::compute_text(300.0, 500.0, message, 20.0, 0, 1.0, |text| {
+            text.width() as f32 * 20.0
+        });
+    assert_eq!(layout.lines.concat(), message.replace('\n', ""));
+    assert!(layout.lines.iter().any(String::is_empty));
+    assert!(layout.lines.iter().all(|line| !line.starts_with('\u{301}')));
+    use unicode_width::UnicodeWidthStr;
+    let available = layout.geometry.close.x - layout.geometry.border.x - 2.0 * layout.padding;
+    assert!(layout.lines.iter().all(|line| line.width() as f32 * 20.0 <= available));
+}
+
+/// Small-window overflow is explicit rather than silently clipping text or losing the close control.
+#[test]
+fn notification_text_marks_overflow_in_small_windows() {
+    let layout = NotificationBubbleLayout::compute_text(
+        300.0,
+        150.0,
+        &"text".repeat(500),
+        16.0,
+        2,
+        1.0,
+        |text| text.chars().count() as f32 * 16.0,
+    );
+    assert!(layout.lines.last().unwrap().ends_with('…'));
+    assert!(layout.geometry.border.y + layout.geometry.border.h <= 150.0);
+    assert!(layout.geometry.close.w > 0.0);
+}
+
 /// Preview wrapping preserves the target prefix and marks overflow instead of hiding it silently.
 #[test]
 fn link_preview_layout_wraps_and_marks_overflow() {

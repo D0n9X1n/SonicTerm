@@ -2,6 +2,51 @@ use sonicterm_text::glyph_atlas::GlyphAtlas;
 
 use super::*;
 
+/// Notification chrome reuses regular weighted raster tiles and preserves their LCD coverage flags.
+#[test]
+fn notification_reuses_regular_weighted_glyphs() {
+    use sonicterm_text::glyph_atlas::Rasterizer;
+    let _lock = crate::lib_tests::TRACKED_FONT_STACK_LOCK.lock().unwrap();
+    let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+    for weight in [0.75, 1.0, 1.5] {
+        let stack = FontStack::try_new_with_font_dirs_for_test(
+            &[("Rec Mono St.Helens", false)],
+            vec![assets.clone()],
+            14.0,
+            96,
+            weight,
+        )
+        .unwrap();
+        let mut atlas = GlyphAtlas::new(512, 512);
+        let mut raster = stack.clone();
+        for ch in "policy".chars() {
+            let shaped = stack.shape_text(&ch.to_string()).unwrap();
+            let glyph = shaped.iter().find(|g| g.glyph_pos != 0).unwrap();
+            let key = GlyphKey::shaped(ch, glyph.font_idx as u8, glyph.glyph_pos, false, false);
+            let tile = raster.rasterize(key).unwrap();
+            let regular = atlas.get_or_insert(key, &mut raster).unwrap();
+            let before = atlas.len();
+            let chrome = layout(
+                &stack,
+                &mut raster,
+                &mut atlas,
+                &ch.to_string(),
+                ChromeColor::WHITE,
+                ChromeAttrs::default(),
+                14.0,
+                14.0,
+                (20.0, 30.0),
+                (800.0, 100.0),
+                None,
+            );
+            let instance = chrome.glyphs.first().unwrap();
+            assert_eq!(atlas.len(), before, "notification must reuse the regular glyph tile");
+            assert_eq!(instance.uv, regular.uv);
+            assert_eq!(instance.flags, crate::core::glyph_flags(tile.is_color, tile.is_subpixel));
+        }
+    }
+}
+
 /// Chrome glyph placement combines raster and HarfBuzz offsets before snapping.
 #[test]
 fn positioned_origin_applies_both_offset_sources() {

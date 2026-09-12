@@ -29,6 +29,8 @@ sonicterm-grid.workspace = true
 # transit type — it stays in scope for downstream test fixtures.
 sonicterm-text.workspace = true
 regex.workspace = true
+unicode-width.workspace = true
+unicode-segmentation.workspace = true
 nucleo-matcher = "0.3"
 anyhow.workspace = true
 serde.workspace = true

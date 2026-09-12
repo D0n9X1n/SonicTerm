@@ -47,9 +47,17 @@ cargo build -p sonicterm-app
 - Every terminal window enforces the shared 30-column by 10-row native inner-size
   floor from live renderer geometry and refreshes it after metric/DPI changes.
 - Local-target hover never performs filesystem I/O on the event-loop thread.
-  Clickability requires a current epoch-keyed typed open-or-reveal result. Native
-  dispatch stays bounded, revalidates the exact action and target kind, and blocks
-  executable/launcher, symlink/reparse-point, and special-file classes.
+  Clickability requires a current epoch-keyed typed navigation-or-reveal result.
+  All platforms navigate directories and select files in their containing folder;
+  local OSC 8 destinations must use the same probes, never the URI opener.
+  Unverified bare names neither preview nor trigger failure notifications or clipboard writes.
+  Explicit filepath failures show the path and reason on modifier-click without copying;
+  a second modifier-click on the same failed path while its error is visible copies and
+  reports the actual clipboard result. Only current validated targets dispatch native actions.
+  File type, executable mode, and content never prevent reveal-only selection. macOS package
+  directories are selected rather than launched. Hover never copies; native failures return
+  only to the originating window/pane. Native dispatch revalidates identity and kind,
+  retaining symlink/reparse-point, locality, and special-file protections.
 - Contextual terminal candidates, including names containing ordinary spaces,
   resolve only against the exact pane's trustworthy local OSC 7 CWD, after OSC 8,
   URI, and explicit-path precedence; never fall back to process CWD, another pane,

@@ -251,11 +251,11 @@ are painted, always retaining the pointed fragment of an overlong label.
 URLs inside prose parentheses or square brackets are detected without including
 the surrounding wrappers in the destination or underline.
 
-Modifier-hover also previews the resolved absolute local path after its current
-background probe succeeds. Source references retain their displayed line/column
-metadata beside that path. The preview labels ordinary opening versus reveal-only
-actions; pending, missing, blocked, and stale candidates show no actionable path
-preview. It uses the same placement, escaping, wrapping, and dismissal as URL previews.
+Modifier-hover shows a local destination only after its current filesystem probe
+validates it. Pending, missing, ambiguous, or rejected local targets have no preview,
+so directory-listing columns are never shown as unverified paths. It adds no action labels or
+error messages, and does not change the clipboard or authorize navigation. It uses
+the same placement, escaping, wrapping, and dismissal as URL previews.
 
 Holding the same modifier over any URL shows its destination beside the pointer,
 including labeled OSC 8 links, links whose label already equals the destination,
@@ -268,9 +268,9 @@ Terminal underline styling continues across explicitly printed spaces that carry
 the same underline style and color. Unstyled cells remain gaps; clearing cells
 does not paint new underline ink even when underline mode is active.
 
-The preview does not fetch a website or authorize navigation. It shows file URIs
-too, marks targets rejected by existing URI validation as unavailable, and escapes
-control and directional formatting characters for display. Long destinations wrap,
+The preview does not fetch a website or authorize navigation. Local file URIs
+require the same path validation; control and directional formatting characters are escaped for display.
+Failures are explained in click-triggered error notifications, not in the preview. Long destinations wrap,
 with an explicit ellipsis if they cannot fit. Release the modifier or leave the
 link to hide it; focus, modal, pane, viewport, and content changes refresh or clear
 it. GPU and Windows software rendering use the same preview overlay.
@@ -313,26 +313,63 @@ Source references such as `install.sh:889–919`, `src/main.rs:12`, and
 `src/main.rs:12:4` retain the full underline but resolve only the filename.
 Line and column values must be positive; ranges accept `-` or `–` and must not
 run backwards. Relative source names still require the exact pane's trusted CWD.
-Validated regular text sources use a separate reveal-only action: macOS selects
-the file in Finder, while Windows and Linux open its containing directory.
-This also permits executable text scripts without launching them. It does not
-jump to a line or invoke an editor. Missing files, redirected paths, binary
-content, and names outside the source-file allow-list remain blocked; ordinary
-file-opening restrictions below are unchanged.
+Windows, macOS, and Linux select the referenced file in its containing folder.
+Line metadata does not launch an editor or restrict the file's type or contents.
 
-Only regular files and directories are eligible. Missing, inaccessible,
-symlink/reparse-point, socket, device, executable, launcher, shortcut, installer,
-network, UNC, WSL, and remote targets remain ordinary text. On macOS, an
-ordinary non-executable source or script file is reveal-only: click selects it
-in Finder through fixed `/usr/bin/open -R -- <target>` arguments and never opens
-or executes it. App bundles, installers, `.command`, AppleScript, executable
-mode, shebangs, and executable file magic remain blocked. Every platform
-revalidates the exact target kind and action immediately before dispatch.
-Windows uses `ShellExecuteExW` without a shell. Ordinary macOS files and
-directories use `/usr/bin/open -- <target>`. Linux prefers the desktop portal
-with an open file descriptor and otherwise uses a fixed `/usr/bin/xdg-open` or
-`/bin/xdg-open` path. The macOS and Linux path-based openers still have the
-normal pathname race after revalidation.
+### Local target behavior
+
+Use Ctrl+click on Windows/Linux or Cmd+click on macOS.
+
+| Target or state | Expected behavior |
+| --- | --- |
+| Existing ordinary directory | Navigate into the directory in the file manager. |
+| Existing regular file, including scripts, executables, installers, and shortcut files | Open its containing folder and select the file itself. Never execute it, follow a shortcut, or invoke its associated application. |
+| macOS application/package directory | Select the package in Finder without launching it. |
+| Existing bare filename in a listing or prose | Resolve against the exact pane's trusted local working directory; underline and select only the validated filename, including spaces. |
+| Unverified bare name or ordinary text | No preview, file action, error notification, or clipboard write. Listing metadata is not a filepath. |
+| Explicit filepath that is missing, pending validation, or ambiguous | Show the filepath and the missing/pending/unclear reason on modifier-click. Do not navigate or copy on the first click. |
+| Explicit rejected filepath | Show its filepath and rejection reason; never bypass identity or locality checks. |
+| First file-manager action failure | Show the attempted filepath, reason, and second-click copy instruction. Leave the clipboard unchanged. |
+| Second modifier-click on the same failed filepath while its error is visible | Copy that filepath instead of retrying, and report copy success or failure. |
+| Dismissed, expired, or replaced error | A subsequent click starts a new attempt rather than confirming the previous error. |
+| HTTP/HTTPS or mail URL | Keep URL preview and browser/mail navigation. |
+
+Explicit filepaths include native absolute paths, `./`/`../`/`~/` paths,
+relative paths containing separators, source-location references, and local file-URI
+or native-path OSC 8 destinations. Bare names become filepath targets only after
+filesystem validation. File extensions, executable permissions, and file contents
+do not prevent selection. Symlinks, reparse points, special devices, and unsupported
+remote/network paths remain protected. Every platform revalidates target identity
+and kind immediately before dispatch.
+All platforms navigate directories and reveal files with the file selected,
+without invoking the file's application. Windows selects files through
+`SHOpenFolderAndSelectItems`; Finder uses `/usr/bin/open -R -- <target>`; Linux
+uses `org.freedesktop.FileManager1.ShowItems`. Unavailable or rejected selection
+is reported in the requesting window without falling back to file opening or
+parent-only navigation. Only a validated local target invokes a native file action.
+Explicit filepath failures receive click-triggered feedback; guessed bare-name spans do not.
+The first failed action shows the attempted filepath, reason, and an instruction to
+click the same link again while the error is visible. It does not change the clipboard.
+The second modifier-click on that same failed filepath copies it instead of retrying
+navigation, then reports copy success or failure. Dismissed, expired, or replaced
+notifications and clicks on another target do not confirm a previous failure.
+Short notifications fit their longest shaped line. Notifications preserve newlines
+and wrap Unicode graphemes; content exceeding the viewport is marked with an ellipsis.
+Hover never copies. Native file-manager errors return only while the initiating
+pane still belongs to its window. A click without the modifier keeps normal selection.
+Directory navigation retains each platform's ordinary directory opener. Path-based
+file-manager requests still have the normal pathname race after revalidation.
+
+OSC 8 destinations with native absolute paths (including Windows `C://…`),
+Windows drive-rooted `file:c://…` links, and local `file://` URIs enter the same
+filesystem authorization path. Local `#3`, `#L3`, and ascending `#L3-L7` fragments
+are source-line metadata, not filename content; selection uses the file alone.
+This convention also applies to native absolute OSC 8 destinations. For a literal
+filename ending in `#3` or `#L3`, use a file URI with `%23` for the hash. Plain-text
+native filename scanning retains its existing literal-hash behavior. File URI escapes
+are decoded once; native-path percent characters remain literal. Remote authorities,
+UNC/device paths and malformed destinations are rejected without using the displayed
+label as a substitute. HTTP/HTTPS and mail links retain their existing behavior.
 
 Opening a URI on Windows takes the same shell-free boundary as a validated
 local target: `ShellExecuteExW` receives the URI as one NUL-terminated UTF-16
@@ -343,7 +380,8 @@ rather than expanding to an environment value.
 
 Set `terminal.clickable_bare_names = false` to disable contextual names. Set
 `terminal.clickable_local_targets = false` to disable every raw local target.
-Neither setting disables URI or OSC 8 links. For exact defaults and reload
+The local-target setting also applies to local file URIs and native-path OSC 8 links;
+web/mail URI links remain enabled. For exact defaults and reload
 behavior, see [Configuration](Configuration).
 
 ### Open script files as drafts
@@ -595,9 +633,10 @@ Pointer protocol 与 OSC 52 边界见 [终端 IO 与 VT](Terminal-IO-and-VT)。
 连接另一次出现的链接。最多绘制八个可见片段；标签过长时仍保留指针所在片段。
 正文圆括号或方括号中的 URL 也会被检测到，外层括号不会进入目标地址或下划线范围。
 
-按住修饰键悬停时，本地路径在当前后台验证成功后也会预览解析后的绝对路径。源文件引用会在
-路径旁保留显示的行号或列号信息。预览区分普通打开与仅显示位置的操作；待验证、不存在、被阻止
-或过期的候选不会显示可操作的路径预览。位置、转义、换行和隐藏规则与 URL 预览相同。
+按住修饰键悬停时，本地目标只有通过当前文件系统探测验证后才显示预览。
+待验证、不存在、有歧义或被拒绝的本地目标不显示预览，避免把目录列表字段显示为未经验证的路径。
+预览不添加操作标签或错误信息，不更改剪贴板，也不授予打开权限。位置、转义、换行和隐藏
+规则与 URL 预览相同。
 
 在任意 URL 上按住同一修饰键，都会在指针旁预览目标，包括带标签的 OSC 8 链接、
 标签与目标完全相同的链接，以及自动检测的纯文本 URL。按住修饰键并单击即可打开。
@@ -607,8 +646,8 @@ Pointer protocol 与 OSC 52 边界见 [终端 IO 与 VT](Terminal-IO-and-VT)。
 终端下划线会跨越显式输出且具有相同下划线样式与颜色的空格。未设置下划线的单元格
 仍会形成间隔；即使下划线模式处于开启状态，清除单元格也不会产生新的下划线。
 
-预览不会访问网站，也不会授予打开权限。它也显示 file URI，将现有 URI 验证拒绝的
-目标标为不可打开，并将控制字符和方向格式字符转义后显示。长目标自动换行，无法完整
+预览不会访问网站，也不会授予打开权限。本地 file URI 同样需要路径验证；控制字符和方向格式字符
+会转义后显示。失败原因在单击后的错误通知中说明，不会添加到预览。长目标自动换行，无法完整
 容纳时明确显示省略号。松开修饰键或离开链接即隐藏；焦点、模态界面、pane、viewport
 和内容变化会刷新或清除预览。GPU 与 Windows 软件渲染使用相同的预览覆盖层。
 
@@ -639,20 +678,51 @@ SonicTerm 会选择包含鼠标 cell 的最长、无歧义且可操作候选。�
 
 `install.sh:889–919`、`src/main.rs:12` 和 `src/main.rs:12:4` 等源文件引用保留完整下划线，
 但只解析文件名。行号与列号必须为正数；范围接受 `-` 或 `–`，且终点不能早于起点。
-相对源文件名仍要求准确 pane 的可信 CWD。验证后的普通文本源文件使用独立的仅显示操作：
-macOS 在 Finder 中选中文件，Windows 和 Linux 打开其所在目录。带可执行权限的文本脚本
-也可安全显示，但绝不会被启动。此操作不会跳转到指定行或调用编辑器。文件缺失、路径重定向、
-二进制内容以及不在源文件允许列表中的名称仍会被阻止；下述普通文件打开限制不变。
+相对源文件名仍要求准确 pane 的可信 CWD。Windows、macOS 和 Linux 都在所在文件夹中
+选中引用的文件。行号不启动编辑器，也不限制文件类型或内容。
 
-只有普通文件和目录可以操作。不存在、不可访问、symlink/reparse point、socket、device、
-executable、launcher、shortcut、installer、network、UNC、WSL 和远端目标都会保持普通文字。
-macOS 上，普通且不可执行的源文件或脚本只能在 Finder 中显示：点击会通过固定参数
-`/usr/bin/open -R -- <target>` 选中它，不会打开或执行。App bundle、installer、`.command`、
-AppleScript、可执行权限、shebang 和可执行文件 magic 仍被阻止。每个平台都会在调用前立即
-重新验证完全相同的目标类型与操作。Windows 使用不经过 shell 的 `ShellExecuteExW`；普通
-macOS 文件和目录使用 `/usr/bin/open -- <target>`。Linux 优先把已打开的 file descriptor
-交给 desktop portal；否则使用固定的 `/usr/bin/xdg-open` 或 `/bin/xdg-open`。macOS 和
-Linux 的路径 opener 在重新验证之后仍有通常的 pathname race。
+### 本地目标行为
+
+Windows/Linux 使用 Ctrl+单击，macOS 使用 Cmd+单击。
+
+| 目标或状态 | 预期行为 |
+| --- | --- |
+| 存在的普通目录 | 在文件管理器中进入该目录。 |
+| 存在的普通文件，包括脚本、可执行文件、安装包和快捷方式文件 | 打开所在文件夹并选中文件本身；不执行、不跟随快捷方式、不调用关联应用。 |
+| macOS 应用或软件包目录 | 在 Finder 中选中软件包，不启动它。 |
+| 列表或文字中存在的裸文件名 | 根据准确窗格的可信本地工作目录解析；仅给验证后的文件名加下划线并选择，保留文件名中的空格。 |
+| 未验证的裸名称或普通文字 | 无预览、文件操作、错误通知或剪贴板写入；列表元数据不是文件路径。 |
+| 不存在、待验证或有歧义的显式文件路径 | 按修饰键单击后显示路径及缺失、待验证或不明确的原因；第一次不导航、不复制。 |
+| 被拒绝的显式路径 | 显示路径和拒绝原因，不绕过身份或本地性检查。 |
+| 文件管理器操作第一次失败 | 显示尝试的路径、原因和再次单击复制的提示，保留剪贴板。 |
+| 错误仍显示时再次按修饰键单击同一失败路径 | 复制该路径而非重试，并报告复制成功或失败。 |
+| 错误已关闭、过期或被替换 | 后续单击开始新尝试，而非确认之前的错误。 |
+| HTTP/HTTPS 或邮件 URL | 保持 URL 预览和浏览器或邮件导航行为。 |
+
+显式路径包括本机绝对路径、`./`、`../`、`~/` 路径、带分隔符的相对路径、源位置引用，
+以及本地 file URI 或本机路径 OSC 8 目标。裸名称只有通过文件系统验证后才成为文件路径目标。
+文件扩展名、执行权限和文件内容不会阻止选中文件。符号链接、重解析点、特殊设备和不支持的
+远端或网络路径仍受保护。各平台在调用前重新验证目标身份和类型。
+所有平台都进入目录，或打开文件所在文件夹并选中文件，
+不调用文件关联的应用。Windows 使用 `SHOpenFolderAndSelectItems`，Finder 使用
+`/usr/bin/open -R -- <target>`，Linux 使用 `org.freedesktop.FileManager1.ShowItems`。
+选择功能不可用或被拒绝时会在发起请求的窗口报告失败，不会回退到打开文件或仅打开父目录。
+只有已验证的本地目标才调用原生文件操作。显式路径失败会显示单击触发的反馈；裸名称猜测不会。
+操作第一次失败时，通知显示尝试的文件路径、原因，以及再次单击同一链接以复制的提示，
+不会更改剪贴板。错误仍显示时，再次按住修饰键单击同一失败路径才复制，不重试打开，
+随后报告复制成功或失败。通知关闭、过期、被替换或单击其他目标后，不确认之前的失败。
+短通知按实际整形后的最长行收缩，保留换行并按 Unicode 字素换行；超过窗口空间的内容
+明确以省略号标记。悬停不复制。原生错误只返回原始窗格仍属于的发起窗口。
+不按修饰键的单击保留正常选择行为。目录仍使用各平台
+现有的目录打开方式。基于路径的文件管理器请求在重新验证后仍存在通常的 pathname race。
+
+OSC 8 中的本机绝对路径（包括 Windows `C://…`）、Windows 驱动器绝对路径 `file:c://…`
+和本地 `file://` URI 使用相同的文件系统授权流程。本地 `#3`、`#L3` 和升序 `#L3-L7`
+片段属于源文件行号信息，不属于文件名；选择操作仅使用文件路径。本机绝对路径 OSC 8
+目标也遵循此约定。若文件名确实以 `#3` 或 `#L3` 结尾，请使用以 `%23` 表示井号的 file URI。
+纯文本本机路径扫描仍保留原有的字面井号行为。file URI 转义只解码一次；本机路径中的百分号保持字面含义。远端 authority、
+UNC/设备路径以及格式错误的目标会被拒绝，不会以显示标签替代。HTTP/HTTPS 和邮件链接
+保持原有行为。
 
 Windows 上打开 URI 与打开已验证本地目标使用同一条不经过 shell 的边界：`ShellExecuteExW`
 以单个 NUL 结尾的 UTF-16 字符串接收 URI，不会有任何命令解释器解析它。环境变量替换保持关闭，因此
@@ -660,8 +730,8 @@ Windows 上打开 URI 与打开已验证本地目标使用同一条不经过 she
 屏幕上显示的原样交给浏览器或邮件客户端，不会展开成环境变量的值。
 
 设置 `terminal.clickable_bare_names = false` 可以关闭上下文名称。设置
-`terminal.clickable_local_targets = false` 可以关闭所有原始本地目标。两者都不影响
-URI 或 OSC 8 link。准确默认值和重载行为见 [配置](Configuration)。
+`terminal.clickable_local_targets = false` 可以关闭所有原始本地目标，也包括本地 file URI
+和本机路径 OSC 8 链接；网页和邮件 URI 链接不受影响。准确默认值和重载行为见 [配置](Configuration)。
 
 ### 以草稿方式打开脚本
 

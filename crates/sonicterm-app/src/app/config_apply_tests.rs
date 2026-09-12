@@ -329,6 +329,7 @@ fn local_target_switch_reload_revokes_all_window_authorization() {
             rows: smallvec::smallvec![PathRowIdentity { row: 22, fingerprint: 11 }],
             cwd: Some(Osc7Cwd { authority: String::new(), path: "/work".into() }),
             cwd_revision: 3,
+            link_destination: None,
             scrollback_evicted: 0,
             screen_epoch: 0,
             alt_screen: false,
@@ -337,6 +338,7 @@ fn local_target_switch_reload_revokes_all_window_authorization() {
         let request = window.path_probe.request(key.clone()).expect("new target probe");
         assert!(window.path_probe.accept(
             &PathProbeResult {
+                failure: None,
                 request,
                 selection: Some(PathProbeSelection {
                     candidate,
@@ -380,6 +382,7 @@ fn local_target_switch_reload_revokes_all_window_authorization() {
                 rows: smallvec::smallvec![PathRowIdentity { row: 22, fingerprint: 11 }],
                 cwd: Some(Osc7Cwd { authority: String::new(), path: "/work".into() }),
                 cwd_revision: 3,
+                link_destination: None,
                 scrollback_evicted: 0,
                 screen_epoch: 0,
                 alt_screen: false,

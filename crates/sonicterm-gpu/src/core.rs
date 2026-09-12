@@ -3329,6 +3329,30 @@ impl GpuRenderer {
         )
     }
 
+    /// Lay out notification text with the same native shaping used to paint its glyphs.
+    pub fn notification_layout(
+        &self,
+        message: &str,
+        window: (f32, f32),
+        row: u8,
+    ) -> sonicterm_render_model::boundary::ui::overlays::NotificationTextLayout {
+        let font_size = self.raster_px(self.font_size.max(1.0));
+        NotificationBubbleLayout::compute_text(
+            window.0,
+            window.1,
+            message,
+            font_size,
+            row,
+            self.scale_factor,
+            |text| {
+                self.font_stack
+                    .as_ref()
+                    .and_then(|stack| stack.measure_text_width(text).ok())
+                    .unwrap_or_else(|| estimate_badge_text_width(text, font_size))
+            },
+        )
+    }
+
     /// Return current allocator totals when the selected backend exposes them.
     ///
     /// `None` means allocator reporting is unavailable; it does not represent
@@ -4182,7 +4206,6 @@ impl GpuRenderer {
         // hover underline). Same lifetime/gating as the underline.
         hovered_url_cells: Option<sonicterm_render_model::inputs::HoveredUrlCells>,
         link_preview: Option<&sonicterm_render_model::inputs::LinkPreview>,
-        link_unavailable_label: &str,
     ) -> Result<()> {
         // Part B step 2: signature now takes &mut [PaneRender]. Behavior is
         // unchanged inside the body — we extract the active pane's grid into
@@ -4387,7 +4410,6 @@ impl GpuRenderer {
                 preview.pointer.0.to_bits().hash(&mut hash);
                 preview.pointer.1.to_bits().hash(&mut hash);
                 preview.available.hash(&mut hash);
-                link_unavailable_label.hash(&mut hash);
             }
             if let Some(chip) = &self.drag_chip {
                 chip.title.hash(&mut hash);
@@ -6110,10 +6132,9 @@ impl GpuRenderer {
 
         if let Some(bubble) = notification {
             let notification_font_size = self.raster_px(self.font_size.max(1.0));
-            let content_w = estimate_badge_text_width(&bubble.message, notification_font_size);
             let row = u8::from(read_only_badge.is_some()) + u8::from(search_bar_layout.is_some());
-            let layout =
-                NotificationBubbleLayout::compute(sw, sh, content_w, row, self.scale_factor);
+            let text_layout = self.notification_layout(&bubble.message, (sw, sh), row);
+            let layout = text_layout.geometry;
             let bg_hex = match bubble.level {
                 NotificationLevel::Info => theme.colors.bright.green.0.as_str(),
                 NotificationLevel::Warning => theme.colors.ansi.yellow.0.as_str(),
@@ -6136,27 +6157,29 @@ impl GpuRenderer {
             ));
             if let Some(stack) = self.font_stack.as_ref() {
                 let mut wt = stack.clone();
-                let text_x = layout.border.x + self.chrome_px(SEARCH_BAR_PAD_LEFT);
+                let text_x = layout.border.x + text_layout.padding;
+                // Glyph ink may extend beyond its shaped advance into the trailing padding.
                 let text_clip_w = (layout.close.x - text_x).max(0.0);
-                let baseline =
-                    layout.border.y + (layout.border.h + notification_font_size * 0.8) * 0.5;
-                emit_overlay_text_glyphs(
-                    &mut self.glyph_atlas,
-                    stack,
-                    notification_font_size,
-                    notification_font_size,
-                    &mut wt,
-                    &bubble.message,
-                    bubble_fg,
-                    ChromeAttrs::default(),
-                    text_x,
-                    baseline,
-                    [text_x, layout.border.y, text_clip_w, layout.border.h],
-                    sw,
-                    sh,
-                    &mut overlay_glyph_instances,
-                    None,
-                );
+                let baseline = layout.border.y + text_layout.padding + notification_font_size;
+                for (index, line) in text_layout.lines.iter().enumerate() {
+                    emit_overlay_text_glyphs(
+                        &mut self.glyph_atlas,
+                        stack,
+                        notification_font_size,
+                        notification_font_size,
+                        &mut wt,
+                        line,
+                        bubble_fg,
+                        ChromeAttrs::default(),
+                        text_x,
+                        baseline + index as f32 * text_layout.line_height,
+                        [text_x, layout.border.y, text_clip_w, layout.border.h],
+                        sw,
+                        sh,
+                        &mut overlay_glyph_instances,
+                        None,
+                    );
+                }
                 let close_w =
                     estimate_badge_text_width(NOTIFICATION_CLOSE_ICON, notification_font_size);
                 let close_x = layout.close.x + (layout.close.w - close_w) * 0.5;
@@ -6185,12 +6208,6 @@ impl GpuRenderer {
                 link_preview_text, LinkPreviewLayout,
             };
             let text = link_preview_text(&preview.uri);
-            let text = if preview.available {
-                text
-            } else {
-                // When: preview is unavailable under URI policy, disclose the restriction without altering its target.
-                format!("{link_unavailable_label}: {text}")
-            };
             let font_size = self.raster_px(self.font_size.max(1.0));
             let layout = LinkPreviewLayout::compute(
                 &text,

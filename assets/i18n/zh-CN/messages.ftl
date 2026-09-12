@@ -1,6 +1,14 @@
-link-preview-unavailable = 无法打开此链接
-path-preview-open = 打开
-path-preview-reveal = 仅显示位置，不执行
+path-error-copy-again = 此消息显示期间再次单击同一链接，可复制其路径。
+path-error-title = 无法打开目标
+path-error-missing = 找不到文件或文件夹
+path-error-blocked = 路径不可访问或被安全策略阻止
+path-error-ambiguous = 存在多个匹配路径，请使用完整路径
+path-error-pending = 正在验证目标，请稍后重试
+path-error-disabled = 已禁用本地目标处理
+path-error-busy = 文件管理器请求队列已满，请稍后重试
+path-error-worker = 文件管理器工作线程不可用
+path-error-copied = 路径或原始目标已复制到剪贴板
+path-error-copy-failed = 无法将路径复制到剪贴板
 menu-file-new-tab = 新建标签页
 menu-edit-copy = 复制
 menu-edit-paste = 粘贴
