@@ -372,6 +372,37 @@ fn render_subpixel_software(
     frame.pixel_bgra(0, 0)
 }
 
+/// Terminal and notification layers use identical AA and blending on identical colored backgrounds.
+#[test]
+fn notification_and_terminal_antialias_pixels_match() {
+    let mut atlas = GlyphAtlas::new(4, 4);
+    let info =
+        atlas.get_or_insert(GlyphKey::new('d', false, false), &mut OneSubpixelGlyph).unwrap();
+    let glyph = GlyphInstance {
+        rect: px_to_ndc(0.0, 0.0, 1.0, 1.0, 1.0, 1.0),
+        uv: info.uv,
+        color: crate::color::hex_to_premultiplied_rgba("#202020", 1.0),
+        flags: [0.0, 1.0, 0.0, 0.0],
+    };
+    let background = crate::color::hex_to_premultiplied_rgba("#ff453a", 1.0);
+    for mode in [SubpixelAaMode::Off, SubpixelAaMode::Rgb, SubpixelAaMode::Bgr] {
+        let mut terminal = WindowsSoftwareFrame::new(1, 1, background).unwrap();
+        terminal.draw_layers_with_subpixel_aa(&atlas, &atlas, mode, &[], &[], &[glyph], &[], &[]);
+        let mut notification = WindowsSoftwareFrame::new(1, 1, background).unwrap();
+        notification.draw_layers_with_subpixel_aa(
+            &atlas,
+            &atlas,
+            mode,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[glyph],
+        );
+        assert_eq!(terminal.pixel_bgra(0, 0), notification.pixel_bgra(0, 0), "{mode:?}");
+    }
+}
+
 /// Off keeps alpha-max grayscale, while RGB/BGR apply opposite red-blue coverage order.
 #[test]
 fn software_subpixel_policy_selects_grayscale_rgb_and_bgr() {

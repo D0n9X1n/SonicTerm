@@ -1,6 +1,14 @@
-link-preview-unavailable = Cannot open this link
-path-preview-open = Open
-path-preview-reveal = Reveal only; never execute
+path-error-copy-again = Click the same link again while this message is visible to copy its path.
+path-error-title = Cannot open target
+path-error-missing = File or folder not found
+path-error-blocked = Path is inaccessible or blocked by safety policy
+path-error-ambiguous = More than one matching path; use a full path
+path-error-pending = Target validation is pending; try again shortly
+path-error-disabled = Local target handling is disabled
+path-error-busy = File manager request queue is full; try again shortly
+path-error-worker = File manager worker is unavailable
+path-error-copied = Filepath or original target copied to clipboard.
+path-error-copy-failed = Could not copy the path to your clipboard
 menu-file-new-tab = New Tab
 menu-edit-copy = Copy
 menu-edit-paste = Paste

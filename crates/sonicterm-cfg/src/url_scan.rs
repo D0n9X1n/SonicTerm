@@ -635,6 +635,151 @@ fn parse_source_reference(
     })
 }
 
+/// Classify an exact local link destination; malformed local syntax must never fall back to a URI opener.
+pub fn local_link_target(
+    destination: &str,
+    style: PathStyle,
+) -> Result<Option<DetectedTarget>, &'static str> {
+    let is_file = destination.get(..5).is_some_and(|prefix| prefix.eq_ignore_ascii_case("file:"));
+    let bytes = destination.as_bytes();
+    let drive = style == PathStyle::Windows
+        && bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && is_windows_separator(bytes[2] as char);
+    let posix = style == PathStyle::Posix && destination.starts_with('/');
+    if !is_file && !drive && !posix {
+        // When: is_file, drive and posix are false, leave nonlocal schemes to URI policy.
+        return Ok(None);
+    }
+    if destination.len() > MAX_TARGET_BYTES || destination.chars().any(char::is_control) {
+        // When: destination is oversized or controlled, reject before decoding or allocating probe state.
+        return Err("invalid local destination");
+    }
+    if let Some((path, fragment)) = destination.rsplit_once('#') {
+        // When: destination includes a fragment, distinguish line metadata from literal native filename content.
+        let location = fragment.strip_prefix('L').unwrap_or(fragment);
+        if location.starts_with(|ch: char| ch.is_ascii_digit()) {
+            // When: fragment denotes a line location, separate it before file URI decoding and filesystem resolution.
+            if path.contains('#') {
+                // When: path contains another fragment delimiter, reject ambiguous nested locations without recursion.
+                return Err("ambiguous local line fragment");
+            }
+            let (line, end_line) = if let Some((start, end)) = location.split_once('-') {
+                // When: location contains a range, validate both endpoints before creating source metadata.
+                let start = parse_positive(start).ok_or("invalid line fragment")?;
+                let end = parse_positive(end.strip_prefix('L').unwrap_or(end))
+                    .ok_or("invalid line fragment")?;
+                if end < start {
+                    // When: end precedes start, do not turn a malformed range into a filename.
+                    return Err("invalid line range");
+                }
+                (start, Some(end))
+            } else {
+                // When: location contains no range delimiter, require one positive line number.
+                (parse_positive(location).ok_or("invalid line fragment")?, None)
+            };
+            let Some(DetectedTarget::PathCandidate(path)) = local_link_target(path, style)? else {
+                // When: the base is not one literal local path, refuse conflicting location forms.
+                return Err("invalid line fragment path");
+            };
+            return Ok(Some(DetectedTarget::SourceReference(SourceReference {
+                path,
+                display: destination.to_owned(),
+                line,
+                column: None,
+                end_line,
+                explicit_path: true,
+            })));
+        }
+    }
+    if !is_file {
+        // When: is_file is false, percent characters are literal filename content.
+        if destination == "/" || (drive && destination[2..].chars().all(is_windows_separator)) {
+            // When: destination or drive denotes only a root, retain directory navigation without a named component.
+            return Ok(Some(DetectedTarget::PathCandidate(destination.to_owned())));
+        }
+        return detected_path_target(destination, style, false)
+            .map(Some)
+            .ok_or("invalid native destination");
+    }
+    let body = &destination[5..];
+    let encoded = if let Some(authority_path) = body.strip_prefix("//") {
+        // When: body starts with an authority delimiter, require a local authority before decoding the path.
+        let (authority, path) = authority_path.split_once('/').ok_or("file URI has no path")?;
+        if !authority.is_empty() && !authority.eq_ignore_ascii_case("localhost") {
+            // When: authority is not explicitly local, never reinterpret a remote share as a local path.
+            return Err("nonlocal file URI");
+        }
+        path
+    } else {
+        // When: body has no authority prefix, accept only an explicit Windows drive-rooted file: path.
+        let bytes = body.as_bytes();
+        if style != PathStyle::Windows
+            || bytes.len() < 3
+            || !bytes[0].is_ascii_alphabetic()
+            || bytes[1] != b':'
+            || bytes[2] != b'/'
+        {
+            // When: style or bytes do not specify a Windows drive root, reject relative file: destinations.
+            return Err("file URI requires an absolute local path");
+        }
+        body
+    };
+    if encoded.contains(['?', '#', '\\']) {
+        // When: encoded contains ambiguous URI delimiters, require percent-encoded filename bytes instead.
+        return Err("ambiguous file URI path");
+    }
+    let mut decoded = Vec::with_capacity(encoded.len());
+    let mut bytes = encoded.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte == b'%' {
+            // When: byte is percent, consume exactly one encoded byte without recursive decoding.
+            let high = bytes.next().and_then(|b| (b as char).to_digit(16));
+            let low = bytes.next().and_then(|b| (b as char).to_digit(16));
+            let (Some(high), Some(low)) = (high, low) else {
+                // When: high or low is missing, reject incomplete or nonhex percent encoding before any probe.
+                return Err("invalid percent encoding");
+            };
+            let byte = (high * 16 + low) as u8;
+            if matches!(byte, b'/' | b'\\') {
+                // When: matches! identifies slash or backslash in byte, reject encoded path structure before normalization.
+                return Err("encoded file URI separator");
+            }
+            decoded.push(byte);
+        } else {
+            // When: byte is not percent, preserve the original UTF-8 byte.
+            decoded.push(byte);
+        }
+    }
+    let decoded = String::from_utf8(decoded).map_err(|_| "file URI is not UTF-8")?;
+    if decoded.split('/').any(|component| matches!(component, "." | "..")) {
+        // When: decoded has dot components, reject URI traversal instead of hiding it through lexical normalization.
+        return Err("file URI traversal");
+    }
+    let path = match style {
+        PathStyle::Posix => format!("/{decoded}"),
+        PathStyle::Windows => decoded,
+    };
+    let absolute = match style {
+        PathStyle::Posix => path.starts_with('/') && !path.starts_with("//"),
+        PathStyle::Windows => {
+            let bytes = path.as_bytes();
+            bytes.len() >= 3
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':'
+                && bytes[2] == b'/'
+        }
+    };
+    let root = path == "/"
+        || (style == PathStyle::Windows && absolute && path[2..].bytes().all(|byte| byte == b'/'));
+    if !absolute || !(root || validate_path_candidate(&path, style)) {
+        // When: decoded path violates native absolute grammar, block aliases, controls and stream syntax before probing.
+        return Err("invalid file URI path");
+    }
+    Ok(Some(DetectedTarget::PathCandidate(path)))
+}
+
 fn detected_path_target(
     candidate: &str,
     style: PathStyle,

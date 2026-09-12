@@ -8,6 +8,150 @@
 use super::*;
 use crate::url_open::validate;
 
+/// Spaced scans preserve the literal filename candidate for filesystem disambiguation.
+#[test]
+fn spaced_candidates_retain_literal_filename() {
+    for name in ["test-local-link-actions.ps1", "my local script.ps1"] {
+        for prefix in
+            ["-a---  9/11/2026  3:42 PM           3984 ", " 9/11/2026  3:42 PM           3984 "]
+        {
+            let row = format!("{prefix}{name}");
+            let col = row.find("script").unwrap_or_else(|| row.find("actions").unwrap());
+            let candidates =
+                target_candidates_at_char_col_for_style(&row, col, PathStyle::Windows, true);
+            assert!(!candidates.is_empty());
+            assert!(
+                candidates.iter().any(|candidate| &row[candidate.start..candidate.end] == name),
+                "{candidates:?}"
+            );
+        }
+    }
+}
+
+/// Local line fragments identify source locations without becoming part of the filename.
+#[test]
+fn local_line_fragments_preserve_file_identity() {
+    for uri in [
+        "C:/work/CLAUDE.md#L3",
+        "C:/work/CLAUDE.md#3",
+        "file:c://work/CLAUDE.md#L3",
+        "file:///C:/work/CLAUDE.md#3",
+    ] {
+        let target = local_link_target(uri, PathStyle::Windows).unwrap().unwrap();
+        assert!(
+            matches!(target, DetectedTarget::SourceReference(reference)
+            if reference.path.ends_with("/CLAUDE.md") && reference.line == 3),
+            "{uri}"
+        );
+    }
+    for uri in
+        ["file:c://work/main.rs#L0", "file:///C:/work/main.rs#Lbad", "file:c://work/main.rs#L9-L3"]
+    {
+        assert!(local_link_target(uri, PathStyle::Windows).is_err(), "{uri}");
+    }
+    assert_eq!(
+        local_link_target("file:///C:/work/a%23L3.txt", PathStyle::Windows),
+        Ok(Some(DetectedTarget::PathCandidate("C:/work/a#L3.txt".into())))
+    );
+    assert_eq!(local_link_target("https://example.com/a#L3", PathStyle::Windows), Ok(None));
+    assert_eq!(
+        local_link_target("C:/work/a#Lemon.txt", PathStyle::Windows),
+        Ok(Some(DetectedTarget::PathCandidate("C:/work/a#Lemon.txt".into())))
+    );
+    assert_eq!(
+        local_link_target("file:///C:/work/notes%233", PathStyle::Windows),
+        Ok(Some(DetectedTarget::PathCandidate("C:/work/notes#3".into())))
+    );
+    assert!(find_targets_for_style("C:/work/notes#3", PathStyle::Windows)
+        .iter()
+        .any(|target| target.target == DetectedTarget::PathCandidate("C:/work/notes#3".into())));
+}
+
+/// Drive-rooted file: links use file-URI decoding, never browser dispatch or drive-relative resolution.
+#[test]
+fn file_colon_drive_links_are_local_on_windows() {
+    for (uri, path) in [
+        ("file:c://work/a%20b.txt", "c://work/a b.txt"),
+        ("FILE:C:/work/a%2520b.txt", "C:/work/a%20b.txt"),
+        ("file:c://", "c://"),
+    ] {
+        assert_eq!(
+            local_link_target(uri, PathStyle::Windows),
+            Ok(Some(DetectedTarget::PathCandidate(path.into())))
+        );
+        assert!(local_link_target(uri, PathStyle::Posix).is_err());
+    }
+    for uri in [
+        "file:c:relative.txt",
+        "file:notes.txt",
+        "file://server/share/file.txt",
+        "file:c://work/%2e%2e/other.txt",
+        "file:c://work/a%2fb.txt",
+        "file:c://work/a%00b.txt",
+        "file:c://work/a%3astream",
+        "file:c://work/a%2",
+    ] {
+        assert!(local_link_target(uri, PathStyle::Windows).is_err(), "{uri}");
+    }
+}
+
+/// Encoded path structure cannot redirect a displayed file URI into another directory.
+#[test]
+fn file_uri_rejects_encoded_separators_and_traversal() {
+    for uri in [
+        "file:///tmp/%2E%2E%2Fetc/passwd",
+        "file:///tmp/%2e%2e/file",
+        "file:///tmp/a%5cb",
+        "file:///tmp/../file",
+    ] {
+        assert!(local_link_target(uri, PathStyle::Posix).is_err(), "{uri}");
+    }
+    assert!(local_link_target("file:///C:/Users/%2E%2E/Windows", PathStyle::Windows).is_err());
+    assert_eq!(
+        local_link_target("file:///", PathStyle::Posix),
+        Ok(Some(DetectedTarget::PathCandidate("/".into())))
+    );
+    assert_eq!(
+        local_link_target("file:///C:/", PathStyle::Windows),
+        Ok(Some(DetectedTarget::PathCandidate("C:/".into())))
+    );
+}
+
+/// Explicit link destinations are classified whole, never through prose trimming or label fallback.
+#[test]
+fn local_link_destinations_preserve_native_paths_and_decode_file_uris_once() {
+    for (input, expected) in [
+        ("C://work/main.rs", "C://work/main.rs"),
+        (r"C:\work\a%20b.txt", r"C:\work\a%20b.txt"),
+        ("file:///C:/work/a%20b.txt", "C:/work/a b.txt"),
+        ("file://localhost/C:/work/a%2520b.txt", "C:/work/a%20b.txt"),
+    ] {
+        assert_eq!(
+            local_link_target(input, PathStyle::Windows),
+            Ok(Some(DetectedTarget::PathCandidate(expected.into())))
+        );
+    }
+    assert!(matches!(local_link_target("C://work/main.rs:7", PathStyle::Windows),
+        Ok(Some(DetectedTarget::SourceReference(reference))) if reference.path == "C://work/main.rs" && reference.line == 7));
+    assert_eq!(
+        local_link_target("file:///tmp/a%20b.txt", PathStyle::Posix),
+        Ok(Some(DetectedTarget::PathCandidate("/tmp/a b.txt".into())))
+    );
+    for target in [
+        "file://server/share/a",
+        "file:///C:/bad%00.txt",
+        "file:///C:/bad%2",
+        "file:///C:/x%3Astream",
+        "C://work/a.exe:bad:2",
+    ] {
+        assert!(local_link_target(target, PathStyle::Windows).is_err(), "{target}");
+    }
+    for target in ["https://example.com/?a=1&b=2", "vscode://file/C:/a.rs", "C:notes.txt"] {
+        assert_eq!(local_link_target(target, PathStyle::Windows), Ok(None));
+    }
+    assert_eq!(local_link_target("C://work/main.rs", PathStyle::Posix), Ok(None));
+}
+
 /// Every query cell resolves to the same complete URI, including separators and later parameters.
 #[test]
 fn query_separators_remain_inside_click_target() {

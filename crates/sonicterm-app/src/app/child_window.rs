@@ -783,7 +783,6 @@ impl App {
                             // main window.
                             child.hovered_url.as_ref().map(|h| h.to_cells()),
                             child.link_preview.as_ref(),
-                            &self.i18n.t("link-preview-unavailable"),
                         ) {
                             tracing::warn!("child render error: {e}");
                             if smoke_waiting_for_present {

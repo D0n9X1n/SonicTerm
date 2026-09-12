@@ -578,6 +578,9 @@ impl App {
             UserEvent::PathProbeFinished(result) => {
                 self.handle_path_probe_finished(*result);
             }
+            UserEvent::PathOpenFailed { window_id, pane_id, reason, target } => {
+                self.report_failed_target(window_id, pane_id, &reason, &target);
+            }
             UserEvent::PtyInputRejected {
                 pane_id,
                 source,

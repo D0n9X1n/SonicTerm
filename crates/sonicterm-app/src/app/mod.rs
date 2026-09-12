@@ -2292,6 +2292,17 @@ pub enum UserEvent {
     },
     /// A local-target openability probe completed off the event-loop thread.
     PathProbeFinished(Box<path_target::PathProbeResult>),
+    /// Native local-target failure returned to the window that initiated it.
+    PathOpenFailed {
+        /// Original window, never replaced by the currently focused window.
+        window_id: WindowId,
+        /// Original pane; closed panes discard late failures.
+        pane_id: u64,
+        /// Native failure explanation shown as escaped text.
+        reason: String,
+        /// Attempted local path copied only when its failed-click response is delivered.
+        target: String,
+    },
     /// Payload-free metadata for terminal input that could not be queued.
     PtyInputRejected {
         /// Stable identity of the pane whose input was rejected.

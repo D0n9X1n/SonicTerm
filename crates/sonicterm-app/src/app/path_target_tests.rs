@@ -3,6 +3,404 @@ use sonicterm_cfg::{config::Config, keymap::Keymap, theme::Theme, url_scan::Dete
 use sonicterm_grid::grid::{Cell, CellFlags, Color, Row};
 use sonicterm_types::HyperlinkId;
 
+// macOS temp roots include a symlink; resolve the fixture root, never the target under test.
+fn native_test_root() -> PathBuf {
+    #[cfg(unix)]
+    {
+        std::env::temp_dir().canonicalize().unwrap()
+    }
+    #[cfg(not(unix))]
+    {
+        std::env::temp_dir()
+    }
+}
+
+/// Failed-click recovery copies only the target and reports real clipboard success or failure.
+#[test]
+fn failed_click_copies_target_without_error_text() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["copy failure"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    app.test_clipboard_text = Some("previous".into());
+    app.report_failed_target(window, pane, "file not found", "C:\\work\\main.rs");
+    assert_eq!(app.test_clipboard_text.as_deref(), Some("previous"));
+    let message = &app.windows[&window].notification.as_ref().unwrap().message;
+    assert!(message.contains("C:\\work\\main.rs"));
+    assert!(message.contains(&app.i18n.t("path-error-copy-again")));
+    assert!(app.copy_confirmed_failure(window, pane, "C:\\work\\main.rs"));
+    assert_eq!(app.test_clipboard_text.as_deref(), Some("C:\\work\\main.rs"));
+    assert!(app.windows[&window]
+        .notification
+        .as_ref()
+        .unwrap()
+        .message
+        .contains(&app.i18n.t("path-error-copied")));
+    let message = &app.windows[&window].notification.as_ref().unwrap().message;
+    assert_eq!(message.lines().next(), Some(app.i18n.t("path-error-copied").as_str()));
+    assert!(message.lines().nth(2).unwrap().contains("file not found"));
+    app.test_clipboard_write_failure = true;
+    app.report_failed_target(window, pane, "blocked", "another path");
+    assert!(app.copy_confirmed_failure(window, pane, "another path"));
+    assert_eq!(app.test_clipboard_text.as_deref(), Some("C:\\work\\main.rs"));
+    assert!(app.windows[&window]
+        .notification
+        .as_ref()
+        .unwrap()
+        .message
+        .contains(&app.i18n.t("path-error-copy-failed")));
+    app.test_clipboard_write_failure = false;
+    app.report_failed_target(window, u64::MAX, "late error", "stale path");
+    assert_eq!(app.test_clipboard_text.as_deref(), Some("C:\\work\\main.rs"));
+}
+
+/// Only current actionable paths notify; retrying the same visible failure copies without opening again.
+#[test]
+fn local_click_requires_authorization_and_copy_confirmation() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["click"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    app.frontmost_window = Some(window);
+    app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+        winit::keyboard::ModifiersState::SUPER
+    } else {
+        winit::keyboard::ModifiersState::CONTROL
+    };
+    app.test_clipboard_text = Some("previous".into());
+    let path = if cfg!(windows) { "C:/work/file.txt" } else { "/work/file.txt" };
+    let output = format!("\x1b]8;;{path}\x1b\\file\x1b]8;;\x1b\\");
+    assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+    let target = app.cell_target_at(window, pane, 0, 1).unwrap();
+    let ResolvedCellTarget::Path(key) = target.target else { panic!("local target") };
+    assert!(app.activate_target_at(window, pane, 0, 1));
+    assert!(app.windows[&window].notification.as_ref().unwrap().message.contains(path));
+    app.windows.get_mut(&window).unwrap().notification = None;
+    assert_eq!(app.test_clipboard_text.as_deref(), Some("previous"));
+    let request = app.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
+    let missing = PathProbeResult {
+        request: request.clone(),
+        selection: None,
+        failure: Some("path-error-missing"),
+    };
+    assert!(app.windows.get_mut(&window).unwrap().path_probe.accept(&missing, Some(&key)));
+    assert!(app.activate_target_at(window, pane, 0, 1));
+    assert!(app.windows[&window].notification.as_ref().unwrap().message.contains(path));
+    app.windows.get_mut(&window).unwrap().notification = None;
+    let openable = openable_result(request);
+    assert!(app.windows.get_mut(&window).unwrap().path_probe.accept(&openable, Some(&key)));
+    let resolved = key.candidates[0].resolved_path.to_string_lossy().into_owned();
+    assert!(app.activate_target_at(window, pane, 0, 1));
+    assert_eq!(app.test_clipboard_text.as_deref(), Some("previous"));
+    assert!(app.windows[&window].notification.as_ref().unwrap().message.contains(&resolved));
+    assert!(app.activate_target_at(window, pane, 0, 1));
+    assert_eq!(app.test_clipboard_text.as_deref(), Some(resolved.as_str()));
+    app.report_failed_target(window, pane, "failed", &resolved);
+    app.windows.get_mut(&window).unwrap().notification = None;
+    assert!(!app.copy_confirmed_failure(window, pane, &resolved));
+    app.report_failed_target(window, pane, "failed", &resolved);
+    assert!(!app.copy_confirmed_failure(window, pane, "different"));
+    assert!(!app.copy_confirmed_failure(window, pane, &resolved));
+}
+
+/// Unverified bare-name guesses stay inert even when the scanner enumerates listing metadata.
+#[test]
+fn unverified_plain_text_click_has_no_side_effects() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["plain"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    app.test_clipboard_text = Some("previous".into());
+    app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+        winit::keyboard::ModifiersState::SUPER
+    } else {
+        winit::keyboard::ModifiersState::CONTROL
+    };
+    let cwd = if cfg!(windows) { "file:///C:/work" } else { "file:///work" };
+    let row = "-a---           9/11/2026  4:04 PM           4230 missing-script.ps1";
+    let text = format!("\x1b]7;{cwd}\x1b\\{row}");
+    assert!(app.__test_advance_child_pane_parser(window, pane, text.as_bytes()));
+    let col = row.find("script").unwrap() as u16;
+    let target = app.cell_target_at(window, pane, 0, col).unwrap();
+    assert!(target.explicit_path_text().is_none());
+    let ResolvedCellTarget::Path(key) = target.target else { panic!("bare candidates") };
+    assert!(!app.activate_target_at(window, pane, 0, col));
+    for reason in ["path-error-missing", "path-error-ambiguous", "path-error-blocked"] {
+        app.windows.get_mut(&window).unwrap().path_probe.invalidate();
+        let request =
+            app.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
+        let result = PathProbeResult { request, selection: None, failure: Some(reason) };
+        assert!(app.windows.get_mut(&window).unwrap().path_probe.accept(&result, Some(&key)));
+        assert!(!app.activate_target_at(window, pane, 0, col));
+        assert!(app.windows[&window].notification.is_none());
+        assert_eq!(app.test_clipboard_text.as_deref(), Some("previous"));
+    }
+}
+
+/// A source location permits feedback, but unverified prose around its bare filename does not.
+#[test]
+fn source_location_feedback_excludes_unverified_prose() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["source location"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    let cwd = if cfg!(windows) { "file:///C:/work" } else { "file:///work" };
+    let explicit = if cfg!(windows) {
+        "C:/work/Test Folder/missing.rs"
+    } else {
+        "/work/Test Folder/missing.rs"
+    };
+    for row in [explicit.to_owned(), format!("{explicit}:7")] {
+        let text = format!("\x1b]7;{cwd}\x1b\\\r\x1b[2K{row}");
+        assert!(app.__test_advance_child_pane_parser(window, pane, text.as_bytes()));
+        let col = row.find("missing").unwrap() as u16;
+        let target = app.cell_target_at(window, pane, 0, col).unwrap();
+        assert_eq!(target.explicit_path_text().as_deref(), Some(row.as_str()));
+    }
+    for row in ["missing.ps1:42", "some words missing.ps1:42"] {
+        let text = format!("\x1b]7;{cwd}\x1b\\\r\x1b[2K{row}");
+        assert!(app.__test_advance_child_pane_parser(window, pane, text.as_bytes()));
+        let col = row.find("missing").unwrap() as u16;
+        let target = app.cell_target_at(window, pane, 0, col).unwrap();
+        assert_eq!(target.explicit_path_text().as_deref(), Some("missing.ps1:42"));
+        if row.starts_with("some") {
+            let prose = app.cell_target_at(window, pane, 0, 1).unwrap();
+            assert!(prose.explicit_path_text().is_none());
+        }
+    }
+}
+
+/// Failure feedback stays on the requesting window, escapes controls, and drops closed-pane responses.
+#[test]
+fn target_failure_notification_is_window_local() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let first = app.__test_seed_child_window(&["first"]);
+    let second = app.__test_seed_child_window(&["second"]);
+    let pane = app.__test_child_pane_ids(first).unwrap()[0];
+    app.frontmost_window = Some(second);
+    app.test_clipboard_text = Some("previous".into());
+    app.report_failed_target(first, pane, "file manager unavailable\n", "/test/file");
+    let message = &app.windows[&first].notification.as_ref().unwrap().message;
+    assert!(message.contains("file manager unavailable\\u{a}"));
+    assert!(app.windows[&second].notification.is_none());
+    app.report_failed_target(second, pane, "late failure", "/stale/file");
+    assert!(app.windows[&second].notification.is_none());
+}
+
+/// Probe rejection retains distinct missing, blocked, and ambiguous explanations without changing authorization.
+#[test]
+fn probe_failure_reasons_remain_distinct() {
+    let candidates = vec![probe_candidate_at("file", "/work/file", 0, 0)];
+    assert_eq!(
+        probe_candidates(&candidates, |_| PathOpenDecision::Missing),
+        Err("path-error-missing")
+    );
+    assert_eq!(
+        probe_candidates(&candidates, |_| PathOpenDecision::Blocked),
+        Err("path-error-blocked")
+    );
+    let mut other = candidates[0].clone();
+    other.resolved_path = PathBuf::from("/work/other");
+    assert_eq!(
+        probe_candidates(&[candidates[0].clone(), other], |_| PathOpenDecision::Openable(
+            PathKind::File
+        )),
+        Err("path-error-ambiguous")
+    );
+}
+
+/// A local OSC 8 destination probes its actual file, never its unrelated visible label or a URI handler.
+#[test]
+fn local_hyperlink_routes_through_fresh_path_authorization() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["local"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    let destination = if cfg!(windows) { "C://work/main.rs:7" } else { "/tmp/main.rs:7" };
+    let output = format!("\x1b]8;;{destination}\x1b\\not-the-path\x1b]8;;\x1b\\");
+    assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+    let target = app.cell_target_at(window, pane, 0, 1).unwrap();
+    let ResolvedCellTarget::Path(key) = &target.target else {
+        panic!("local destination must be probed")
+    };
+    assert_eq!(key.link_destination.as_deref(), Some(destination));
+    assert_eq!(key.candidates[0].resolved_path.file_name().unwrap(), "main.rs");
+    assert!(matches!(key.candidates[0].target, DetectedTarget::SourceReference(_)));
+    assert_eq!(target.display, destination);
+    let mut changed = key.clone();
+    changed.link_destination = Some(format!("{destination}0"));
+    assert!(!same_probe_context(key, &changed));
+}
+
+/// File manager URI encoding preserves filenames without interpreting fragments, query syntax, or percent escapes.
+#[test]
+fn file_manager_uri_encodes_path_bytes() {
+    assert_eq!(
+        local_file_uri(Path::new("/tmp/a b#c&d%.txt")).unwrap(),
+        "file:///tmp/a%20b%23c%26d%25.txt"
+    );
+    assert!(local_file_uri(Path::new("relative.txt")).is_err());
+    assert!(local_file_uri(Path::new("//server/file.txt")).is_err());
+}
+
+/// Filesystem disambiguation selects real names from arbitrary surrounding text, not the longest guess.
+#[test]
+fn spaced_listing_probe_selects_only_existing_file() {
+    use sonicterm_cfg::url_scan::{target_candidates_at_char_col_for_style, PathStyle};
+    for prefix in ["PM           3984 ", "metadata words ", "owner 123 "] {
+        for name in ["test-local-link-actions.ps1", "my local script.txt"] {
+            let row = format!("{prefix}{name}");
+            let matches = target_candidates_at_char_col_for_style(
+                &row,
+                row.len() - 2,
+                PathStyle::Windows,
+                true,
+            );
+            let candidates = matches
+                .iter()
+                .map(|item| {
+                    let display = &row[item.start..item.end];
+                    probe_candidate_at(display, &format!("/work/{display}"), item.start as u16, 0)
+                })
+                .collect::<Vec<_>>();
+            let expected = PathBuf::from(format!("/work/{name}"));
+            let selected = probe_candidates(&candidates, |path| {
+                if path == expected {
+                    PathOpenDecision::Openable(PathKind::File)
+                } else {
+                    PathOpenDecision::Missing
+                }
+            })
+            .unwrap();
+            assert_eq!(selected.candidate.resolved_path, expected);
+            assert_eq!(selected.candidate.display(), name);
+            assert_eq!(
+                probe_candidates(&candidates, |_| PathOpenDecision::Missing),
+                Err("path-error-missing")
+            );
+        }
+    }
+}
+
+/// File URI links cannot bypass local-target settings or use their visible label as a substitute.
+#[test]
+fn local_file_links_respect_policy_and_preserve_decoding() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["file uri"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    let uri = if cfg!(windows) { "file:///C:/work/a%20b.txt" } else { "file:///tmp/a%20b.txt" };
+    let output = format!("\x1b]8;;{uri}\x1b\\main.rs:7\x1b]8;;\x1b\\");
+    assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+    let target = app.cell_target_at(window, pane, 0, 1).unwrap();
+    let ResolvedCellTarget::Path(key) = target.target else {
+        panic!("file URI cannot bypass probes")
+    };
+    assert_eq!(key.candidates[0].resolved_path.file_name().unwrap(), "a b.txt");
+    app.config.terminal.clickable_local_targets = false;
+    assert!(matches!(
+        app.cell_target_at(window, pane, 0, 1).unwrap().target,
+        ResolvedCellTarget::Rejected("path-error-disabled")
+    ));
+    app.config.terminal.clickable_local_targets = true;
+    let invalid = b"\r\x1b]8;;file://remote/work/file.txt\x1b\\main.rs:7\x1b]8;;\x1b\\";
+    assert!(app.__test_advance_child_pane_parser(window, pane, invalid));
+    assert!(matches!(
+        app.cell_target_at(window, pane, 0, 1).unwrap().target,
+        ResolvedCellTarget::Rejected("nonlocal file URI")
+    ));
+}
+
+/// Wrapped local links bind every visible fragment to one destination and preserve hover coverage.
+#[test]
+fn local_link_wrap_keeps_complete_hover_span() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["wrapped local"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(10, 4);
+    let uri = if cfg!(windows) { "C://work/main.rs:7" } else { "/tmp/main.rs:7" };
+    let output = format!("\x1b]8;;{uri}\x1b\\abcdefghijklmnop\x1b]8;;\x1b\\");
+    assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+    let target = app.cell_target_at(window, pane, 1, 2).unwrap();
+    assert_eq!(target.hover_cells.as_ref().unwrap().spans().len(), 2);
+    let ResolvedCellTarget::Path(key) = target.target else { panic!("local probe required") };
+    assert_eq!(key.rows.len(), 2);
+    assert_eq!(key.candidates[0].spans.len(), 2);
+}
+
+/// An offscreen label cannot revoke the independently stored destination of its visible cell.
+#[test]
+fn local_link_without_complete_highlight_still_has_a_probe() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["clipped local"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(4, 12);
+    let uri = if cfg!(windows) { "C://work/main.rs:7" } else { "/tmp/main.rs:7" };
+    let output = format!("\x1b]8;;{uri}\x1b\\{}\x1b]8;;\x1b\\", "x".repeat(44));
+    assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+    let target = app.cell_target_at(window, pane, 5, 1).unwrap();
+    assert!(matches!(target.target, ResolvedCellTarget::Path(_)));
+}
+
+/// Parent redirection cannot authorize a file just because the final component is regular.
+#[cfg(unix)]
+#[test]
+fn reveal_rejects_symlinked_parent() {
+    let root = native_test_root().join(format!(
+        "sonicterm-parent-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    let real = root.join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    std::fs::write(real.join("notes.txt"), b"notes").unwrap();
+    std::os::unix::fs::symlink(&real, root.join("alias")).unwrap();
+    assert_eq!(classify_local_target(&root.join("alias/notes.txt")), PathOpenDecision::Blocked);
+    assert!(validate_reveal_target(
+        &root.join("alias/notes.txt"),
+        PathOpenDecision::Openable(PathKind::File)
+    )
+    .is_err());
+    std::fs::remove_file(root.join("alias")).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Filesystem roots use navigation rather than being rejected for having no filename.
+#[test]
+fn local_root_destinations_navigate() {
+    let root = if cfg!(windows) { "C:/" } else { "/" };
+    let target =
+        sonicterm_cfg::url_scan::local_link_target(root, PathStyle::native()).unwrap().unwrap();
+    let resolved =
+        resolve_detected_path(&target, PathStyle::native(), None, None, "localhost").unwrap();
+    assert_eq!(classify_local_target(&resolved), PathOpenDecision::Openable(PathKind::Directory));
+}
+
+/// Native manual probe uses production validation/dispatch; Explorer selection is inspected by the caller.
+#[cfg(target_os = "windows")]
+#[test]
+#[ignore = "opens Explorer for an explicitly supplied native test fixture"]
+fn reveal_file_in_explorer_native_probe() {
+    let path =
+        PathBuf::from(std::env::var_os("SONICTERM_REVEAL_PROBE_FILE").expect("explicit fixture"));
+    let decision = classify_local_target(&path);
+    assert_eq!(decision, PathOpenDecision::Openable(PathKind::File));
+    open_path(&path, decision).expect("native Explorer selection request");
+}
+
+/// All platforms choose the same action, independent of which policy admitted the file.
+#[test]
+fn local_file_actions_reveal_and_directory_actions_navigate() {
+    assert_eq!(
+        local_target_action(PathOpenDecision::Openable(PathKind::File)),
+        Some(LocalTargetAction::Reveal)
+    );
+    assert_eq!(
+        local_target_action(PathOpenDecision::SourceReveal),
+        Some(LocalTargetAction::Reveal)
+    );
+    assert_eq!(
+        local_target_action(PathOpenDecision::Openable(PathKind::Directory)),
+        Some(LocalTargetAction::Navigate)
+    );
+    assert_eq!(local_target_action(PathOpenDecision::Blocked), None);
+    assert_eq!(local_target_action(PathOpenDecision::Missing), None);
+}
+
 /// A labeled OSC 8 destination is previewed without normalizing or rewriting its stored URI.
 #[test]
 fn hyperlink_preview_preserves_targets_for_all_labels() {
@@ -11,7 +409,6 @@ fn hyperlink_preview_preserves_targets_for_all_labels() {
         ("https://example.com/", "https://example.com/", true),
         ("example.com", "https://example.com/", true),
         ("https://trusted.test/", "https://other.test/", true),
-        ("File", "file:///C:/notes.txt", true),
         ("Editor", "vscode://file/C:/notes.txt", true),
         ("https://EXAMPLE.com/%2f", "https://EXAMPLE.com/%2f", true),
         ("https://例子.test/e\u{301}", "https://例子.test/e\u{301}", true),
@@ -314,7 +711,7 @@ fn source_reference_resolves_and_underlines_full_location() {
 #[test]
 fn source_reference_reveal_never_authorizes_script_execution() {
     use std::os::unix::fs::PermissionsExt;
-    let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+    let root = native_test_root().join(format!(
         "sonicterm-source-{}-{}",
         std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
@@ -324,24 +721,19 @@ fn source_reference_reveal_never_authorizes_script_execution() {
     std::fs::write(&source, b"#!/bin/sh\nprintf safe\\n").unwrap();
     std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(classify_source_reference(&source), PathOpenDecision::SourceReveal);
-    assert_eq!(classify_local_target(&source), PathOpenDecision::Blocked);
-    #[cfg(target_os = "macos")]
+    assert_eq!(classify_local_target(&source), PathOpenDecision::Openable(PathKind::File));
+    assert!(validate_reveal_target(&source, PathOpenDecision::SourceReveal).is_ok());
     assert_eq!(
-        source_reveal_plan(&source).unwrap(),
-        SourceRevealPlan::Finder(CommandSpec {
-            program: PathBuf::from("/usr/bin/open"),
-            args: vec!["-R".into(), "--".into(), source.to_str().unwrap().into()],
-        })
+        local_target_action(PathOpenDecision::SourceReveal),
+        Some(LocalTargetAction::Reveal)
     );
-    #[cfg(not(target_os = "macos"))]
-    assert_eq!(source_reveal_plan(&source).unwrap(), SourceRevealPlan::Directory(root.clone()));
     assert_eq!(classify_source_reference(&root.join("See Makefile")), PathOpenDecision::Missing);
     let link = root.join("link.sh");
     std::os::unix::fs::symlink(&source, &link).unwrap();
     assert_eq!(classify_source_reference(&link), PathOpenDecision::Blocked);
     std::fs::write(&source, b"\x7fELF\0binary").unwrap();
-    assert_eq!(classify_source_reference(&source), PathOpenDecision::Blocked);
-    assert!(open_path(&source, PathOpenDecision::SourceReveal).is_err());
+    assert_eq!(classify_source_reference(&source), PathOpenDecision::SourceReveal);
+    assert!(validate_reveal_target(&source, PathOpenDecision::SourceReveal).is_ok());
     assert_eq!(classify_source_reference(&root.join("missing.sh")), PathOpenDecision::Missing);
     std::fs::remove_file(link).unwrap();
     std::fs::remove_file(source).unwrap();
@@ -528,7 +920,7 @@ fn app_cell_lookup_resolves_soft_wrapped_relative_path_from_each_fragment() {
 #[cfg(target_os = "macos")]
 #[test]
 fn app_probe_prefers_literal_then_trimmed_revealable_path() {
-    let root = std::env::temp_dir().join(format!(
+    let root = native_test_root().join(format!(
         "sonicterm-prose-path-{}-{}",
         std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
@@ -554,7 +946,8 @@ fn app_probe_prefers_literal_then_trimmed_revealable_path() {
         .expect("missing literal permits the existing source file");
     assert_eq!(trimmed.candidate.display(), "lua/config/lsp.lua");
     assert_eq!(trimmed.candidate.spans[0].end_col, u16::try_from(text.len() - 1).unwrap());
-    assert_eq!(trimmed.decision, PathOpenDecision::Revealable(PathKind::File));
+    assert_eq!(trimmed.decision, PathOpenDecision::Openable(PathKind::File));
+    assert_eq!(local_target_action(trimmed.decision), Some(LocalTargetAction::Reveal));
 
     std::fs::write(&literal_path, b"punctuation filename").unwrap();
     let literal = select_openable_candidate(&key.candidates, classify_local_target)
@@ -1103,7 +1496,7 @@ fn macos_open_specs_keep_targets_out_of_options() {
 
 /// macOS reveals inert source suffixes but continues blocking executable and launcher classes.
 #[test]
-fn macos_policy_separates_revealable_sources_from_launchers() {
+fn macos_directory_policy_selects_packages_without_launching() {
     for path in [
         "/tmp/App.app",
         "/tmp/run.command",
@@ -1114,79 +1507,47 @@ fn macos_policy_separates_revealable_sources_from_launchers() {
         "/tmp/run.applescript",
         "/tmp/run.osascript",
     ] {
-        assert!(
-            macos_file_policy(Path::new(path), b"ordinary", false).is_blocked(),
-            "unexpected actionable launcher {path}"
-        );
-    }
-    for path in [
-        "/tmp/run.sh",
-        "/tmp/run.py",
-        "/tmp/run.rb",
-        "/tmp/run.pl",
-        "/tmp/run.zsh",
-        "/tmp/run.lua",
-        "/tmp/run.js",
-    ] {
         assert_eq!(
-            macos_file_policy(Path::new(path), b"ordinary", false),
-            PathOpenDecision::Revealable(PathKind::File),
-            "source suffix must be reveal-only: {path}"
-        );
-        assert!(macos_file_policy(Path::new(path), b"#!/bin/sh", false).is_blocked());
-        assert!(macos_file_policy(Path::new(path), b"ordinary", true).is_blocked());
-    }
-    for prefix in [
-        b"#!/bin/sh".as_slice(),
-        b"\x7fELF\x02\x01\x01\0".as_slice(),
-        b"MZ\x90\0\0\0\0\0".as_slice(),
-        b"\xcf\xfa\xed\xfe\0\0\0\0".as_slice(),
-        b"\xfe\xed\xfa\xcf\0\0\0\0".as_slice(),
-        b"\xca\xfe\xba\xbe\0\0\0\0".as_slice(),
-        b"\xbe\xba\xfe\xca\0\0\0\0".as_slice(),
-    ] {
-        assert!(
-            macos_file_policy(Path::new("/tmp/tool"), prefix, false).is_blocked(),
-            "unexpected actionable executable prefix {prefix:?}"
+            macos_directory_policy(Path::new(path)),
+            PathOpenDecision::Revealable(PathKind::Directory)
         );
     }
-    assert!(macos_file_policy(Path::new("/tmp/tool"), b"ordinary", true).is_blocked());
     assert_eq!(
-        macos_file_policy(Path::new("/tmp/readme.txt"), b"notes", false),
-        PathOpenDecision::Openable(PathKind::File)
+        macos_directory_policy(Path::new("/tmp/folder")),
+        PathOpenDecision::Openable(PathKind::Directory)
     );
 }
 
 /// Activation-time macOS revalidation requires the exact reveal action and kind to remain stable.
 #[cfg(target_os = "macos")]
 #[test]
-fn macos_reveal_revalidation_rejects_new_executable_mode() {
+fn macos_reveal_revalidation_preserves_selection_after_mode_change() {
     use std::os::unix::fs::PermissionsExt;
 
-    let path = std::env::temp_dir().join(format!(
+    let path = native_test_root().join(format!(
         "sonicterm-reveal-revalidate-{}-{}-source.lua",
         std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
     ));
     std::fs::write(&path, b"ordinary").unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-    let decision = PathOpenDecision::Revealable(PathKind::File);
+    let decision = PathOpenDecision::Openable(PathKind::File);
     let spec =
         macos_validated_open_spec(&path, decision).expect("stable source remains revealable");
     assert_eq!(spec.args[0], "-R");
 
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    assert!(macos_validated_open_spec(&path, decision).is_err());
+    assert_eq!(macos_validated_open_spec(&path, decision).unwrap().args[0], "-R");
     std::fs::remove_file(path).unwrap();
 }
 
-/// macOS production classification blocks an extensionless executable before LaunchServices.
+/// macOS executable mode never changes file selection into execution.
 #[cfg(target_os = "macos")]
 #[test]
-fn macos_classification_rejects_executable_mode() {
+fn macos_classification_reveals_executable_file() {
     use std::os::unix::fs::PermissionsExt;
 
-    let path = std::env::temp_dir().join(format!(
+    let path = native_test_root().join(format!(
         "sonicterm-macos-executable-{}-{}",
         std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
@@ -1194,41 +1555,52 @@ fn macos_classification_rejects_executable_mode() {
     std::fs::write(&path, b"ordinary").unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    assert_eq!(classify_macos_target(&path), PathOpenDecision::Blocked);
+    assert_eq!(classify_macos_target(&path), PathOpenDecision::Openable(PathKind::File));
     std::fs::remove_file(path).unwrap();
 }
 
-/// Windows launcher, PATHEXT, ADS, and trailing-dot names are blocked before ShellExecuteExW.
+/// Reveal eligibility depends on filesystem identity, not executable suffix, content, or mode.
 #[test]
-fn windows_open_policy_blocks_launcher_classes() {
-    for path in [
-        r"C:\tmp\run.exe",
-        r"C:\tmp\run.ps1",
-        r"C:\tmp\link.lnk",
-        r"C:\tmp\file.txt:payload",
-        r"C:\tmp\name. ",
+fn regular_files_are_revealable_regardless_of_type() {
+    let root = native_test_root().join(format!("sonicterm-reveal-types-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    for (name, contents) in [
+        ("script.ps1", b"Write-Output test".as_slice()),
+        ("run.exe", b"MZ\0binary".as_slice()),
+        ("run.cmd", b"@exit".as_slice()),
+        ("install.msi", b"binary\0".as_slice()),
+        ("link.lnk", b"inert shortcut fixture".as_slice()),
+        ("tool.desktop", b"[Desktop Entry]".as_slice()),
+        ("tool", b"#!/bin/sh\nexit".as_slice()),
+        ("my script.ps1", b"text".as_slice()),
     ] {
-        assert!(
-            windows_path_policy(Path::new(path), Some(".EXE;.COM;.BAT;.CMD")).is_blocked(),
-            "unexpected openable {path}"
+        let path = root.join(name);
+        std::fs::write(&path, contents).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let decision = classify_local_target(&path);
+        assert_eq!(
+            local_target_action(decision),
+            Some(LocalTargetAction::Reveal),
+            "{name}: {decision:?}"
         );
+        validate_reveal_target(&path, decision).unwrap();
+        assert_eq!(classify_source_reference(&path), PathOpenDecision::SourceReveal);
     }
-    assert_eq!(
-        windows_path_policy(Path::new(r"C:\tmp\readme.txt"), Some(".EXE;.COM;.BAT;.CMD")),
-        PathOpenDecision::Openable(PathKind::File)
-    );
+    std::fs::remove_dir_all(root).unwrap();
 }
 
-/// Linux blocks desktop launchers and executable content without relying on unreliable mode bits.
+/// Windows reveal keeps ADS and trailing-dot ambiguity blocked without filtering file types.
 #[test]
-fn linux_open_policy_sniffs_unsafe_content() {
-    assert!(linux_file_policy(Path::new("/tmp/tool.desktop"), b"[Desktop Entry]").is_blocked());
-    assert!(linux_file_policy(Path::new("/tmp/tool.AppImage"), b"ordinary").is_blocked());
-    assert!(linux_file_policy(Path::new("/tmp/tool"), b"\x7fELF").is_blocked());
-    assert!(linux_file_policy(Path::new("/tmp/tool"), b"#!/bin/sh").is_blocked());
-    assert!(linux_file_policy(Path::new("/tmp/tool"), b"MZ\0\0").is_blocked());
+fn windows_open_policy_blocks_launcher_classes() {
+    for path in [r"C:\tmp\file.txt:payload", r"C:\tmp\name. "] {
+        assert!(windows_path_policy(Path::new(path)).is_blocked(), "unexpected openable {path}");
+    }
     assert_eq!(
-        linux_file_policy(Path::new("/tmp/readme.txt"), b"notes"),
+        windows_path_policy(Path::new(r"C:\tmp\readme.txt")),
         PathOpenDecision::Openable(PathKind::File)
     );
 }
@@ -1251,8 +1623,9 @@ fn filesystem_classification_rejects_identity_indirection_and_special_entries() 
     use std::os::unix::fs::symlink;
     use std::os::unix::net::UnixListener;
 
-    let root = std::env::temp_dir().join(format!(
-        "sonicterm-path-kinds-{}-{}",
+    // Darwin's long per-user temp root can exceed sockaddr_un.sun_path before the socket name.
+    let root = Path::new("/tmp").canonicalize().unwrap().join(format!(
+        "st-kind-{}-{}",
         std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
     ));
@@ -1281,7 +1654,7 @@ fn filesystem_classification_rejects_identity_indirection_and_special_entries() 
 fn open_target_adapter_owns_an_open_file() {
     use std::io::Write;
 
-    let path = std::env::temp_dir().join(format!(
+    let path = native_test_root().join(format!(
         "sonicterm-path-open-{}-{}",
         std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
@@ -1323,6 +1696,7 @@ fn probe_key(path: &str, view_top: u64) -> PathProbeKey {
         rows: smallvec::smallvec![PathRowIdentity { row, fingerprint: 11 }],
         cwd: Some(Osc7Cwd { authority: String::new(), path: "/work".into() }),
         cwd_revision: 3,
+        link_destination: None,
         scrollback_evicted: 0,
         screen_epoch: 0,
         alt_screen: false,
@@ -1331,6 +1705,7 @@ fn probe_key(path: &str, view_top: u64) -> PathProbeKey {
 
 fn openable_result(request: PathProbeRequest) -> PathProbeResult {
     PathProbeResult {
+        failure: None,
         selection: Some(PathProbeSelection {
             candidate: request.key.candidates[0].clone(),
             decision: PathOpenDecision::Openable(PathKind::File),
@@ -1361,7 +1736,10 @@ fn local_path_preview_requires_current_authorization() {
     };
     let request = app.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
     app.apply_target_hover(window, Some(target.clone()));
-    assert!(app.windows[&window].link_preview.is_none());
+    assert!(
+        app.windows[&window].link_preview.is_none(),
+        "unverified candidates are not destinations"
+    );
     let mut result = openable_result(request);
     result.selection.as_mut().unwrap().decision = PathOpenDecision::SourceReveal;
     assert!(app.windows.get_mut(&window).unwrap().path_probe.accept(&result, Some(&key)));
@@ -1374,6 +1752,69 @@ fn local_path_preview_requires_current_authorization() {
     assert!(app.windows[&window].link_preview.is_none());
     app.clear_target_hover(window);
     assert!(app.windows[&window].link_preview.is_none());
+}
+
+/// Listing guesses, missing paths, and rejected local links never become preview destinations.
+#[test]
+fn unresolved_local_path_preview_is_hidden() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["preview"]);
+    app.frontmost_window = Some(window);
+    app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+        winit::keyboard::ModifiersState::SUPER
+    } else {
+        winit::keyboard::ModifiersState::CONTROL
+    };
+    for failure in ["path-error-missing", "path-error-blocked", "path-error-ambiguous"] {
+        app.windows.get_mut(&window).unwrap().path_probe.invalidate();
+        let mut key = probe_key("/work/setup-windows-cairo.ps1", 0);
+        key.window_id = window;
+        let request =
+            app.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
+        let result = PathProbeResult { request, selection: None, failure: Some(failure) };
+        assert!(app.windows.get_mut(&window).unwrap().path_probe.accept(&result, Some(&key)));
+        app.apply_target_hover(
+            window,
+            Some(CellTargetSnapshot {
+                pane_id: key.pane_id,
+                hover_cells: None,
+                display: "AM     3595 setup-windows-cairo.ps1".into(),
+                explicit_hyperlink: false,
+                target: ResolvedCellTarget::Path(key),
+            }),
+        );
+        assert!(app.windows[&window].link_preview.is_none(), "{failure}");
+    }
+    app.apply_target_hover(
+        window,
+        Some(CellTargetSnapshot {
+            pane_id: 0,
+            hover_cells: None,
+            display: "file://remote/missing".into(),
+            explicit_hyperlink: true,
+            target: ResolvedCellTarget::Rejected("path-error-blocked"),
+        }),
+    );
+    assert!(app.windows[&window].link_preview.is_none());
+}
+
+/// Failure reasons cannot survive a new target, stale result, or explicit invalidation.
+#[test]
+fn probe_failure_is_bound_to_current_identity() {
+    let mut state = PathProbeState::default();
+    let key = probe_key("/work/missing", 0);
+    let request = state.request(key.clone()).unwrap();
+    let result = PathProbeResult { request, selection: None, failure: Some("path-error-missing") };
+    assert!(state.accept(&result, Some(&key)));
+    assert_eq!(state.failure_for(&key), Some("path-error-missing"));
+    assert!(!state.authorized(&key, true));
+    let next = probe_key("/work/other", 0);
+    state.request(next.clone()).unwrap();
+    assert_eq!(state.failure_for(&next), None);
+    assert!(!state.accept(&result, Some(&next)));
+    assert_eq!(state.failure_for(&next), None);
+    state.invalidate();
+    assert_eq!(state.failure_for(&key), None);
 }
 
 /// A result authorizes a click only when epoch, key, and live modifier all match.
@@ -1564,7 +2005,8 @@ fn probe_epoch_rejects_viewport_round_trip_results() {
     state.invalidate();
     let current = state.request(key.clone()).expect("scroll-back request");
 
-    assert!(!state.accept(&PathProbeResult { request: old, selection: None }, Some(&key)));
+    assert!(!state
+        .accept(&PathProbeResult { failure: None, request: old, selection: None }, Some(&key)));
     assert_eq!(state.decision_for(&key), None);
     assert!(state.accept(&openable_result(current), Some(&key)));
 }
@@ -1653,6 +2095,7 @@ fn revealable_selection_is_authorized_without_weakening_freshness() {
     let key = probe_key("/work/source.lua", 20);
     let request = state.request(key.clone()).expect("new candidate schedules a probe");
     let result = PathProbeResult {
+        failure: None,
         selection: Some(PathProbeSelection {
             candidate: request.key.candidates[0].clone(),
             decision: PathOpenDecision::Revealable(PathKind::File),
@@ -1668,7 +2111,7 @@ fn revealable_selection_is_authorized_without_weakening_freshness() {
 /// Real filesystem classification selects the complete spaced entry over an existing short prefix.
 #[test]
 fn filesystem_selection_prefers_complete_spaced_entry() {
-    let root = std::env::temp_dir().join(format!(
+    let root = native_test_root().join(format!(
         "sonicterm-spaced-selection-{}-{}",
         std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
@@ -1712,7 +2155,7 @@ fn equal_length_openable_candidates_are_ambiguous() {
 /// Filesystem probes authorize an openable entry and revoke the same entry once missing.
 #[test]
 fn filesystem_openability_controls_path_authorization() {
-    let path = std::env::temp_dir().join(format!(
+    let path = native_test_root().join(format!(
         "sonicterm-path-probe-{}-{}",
         std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
@@ -1723,6 +2166,7 @@ fn filesystem_openability_controls_path_authorization() {
     let key = probe_key(path.to_str().unwrap(), 20);
     let request = state.request(key.clone()).unwrap();
     let existing = PathProbeResult {
+        failure: None,
         selection: select_openable_candidate(&request.key.candidates, classify_local_target),
         request,
     };
@@ -1733,6 +2177,7 @@ fn filesystem_openability_controls_path_authorization() {
     state.invalidate();
     let request = state.request(key.clone()).unwrap();
     let missing = PathProbeResult {
+        failure: None,
         selection: select_openable_candidate(&request.key.candidates, classify_local_target),
         request,
     };

@@ -544,7 +544,95 @@ pub struct NotificationBubbleLayout {
     pub close: Rect,
 }
 
+/// Wrapped notification content and the geometry shared by painting and dismissal.
+#[derive(Debug, PartialEq)]
+pub struct NotificationTextLayout {
+    pub geometry: NotificationBubbleLayout,
+    pub lines: Vec<String>,
+    pub line_height: f32,
+    pub padding: f32,
+}
+
 impl NotificationBubbleLayout {
+    /// Wrap explicit lines and long tokens within the available notification stack area.
+    pub fn compute_text(
+        window_w: f32,
+        window_h: f32,
+        message: &str,
+        font_size: f32,
+        row: u8,
+        scale: f32,
+        measure: impl Fn(&str) -> f32,
+    ) -> NotificationTextLayout {
+        let s = scale.max(0.01);
+        let padding = 8.0 * s;
+        let close_w = SEARCH_BAR_HEIGHT * s;
+        let line_height = (font_size * 1.4).max(1.0);
+        let margin = SEARCH_BAR_MARGIN.min(window_w.max(0.0) * 0.5);
+        let width = (window_w - 2.0 * margin).max(0.0).min(720.0 * s);
+        let text_width = (width - close_w - 2.0 * padding).max(0.0);
+        let y = (SEARCH_BAR_MARGIN
+            + f32::from(row.min(3)) * (SEARCH_BAR_HEIGHT + SEARCH_BAR_MARGIN) * s)
+            .min((window_h - line_height - 2.0 * padding).max(0.0));
+        let max_lines =
+            ((window_h - y - padding - 2.0 * padding) / line_height).floor().max(1.0) as usize;
+        use unicode_segmentation::UnicodeSegmentation;
+        let mut graphemes = message.graphemes(true).peekable();
+        let mut lines = Vec::new();
+        while graphemes.peek().is_some() && lines.len() < max_lines {
+            let mut line = String::new();
+            while let Some(&grapheme) = graphemes.peek() {
+                if matches!(grapheme, "\n" | "\r\n") {
+                    // When: matches! identifies newline or CRLF in grapheme, preserve the explicit line boundary.
+                    graphemes.next();
+                    break;
+                }
+                let previous_len = line.len();
+                line.push_str(grapheme);
+                if measure(&line) > text_width {
+                    // When: the shaped line exceeds text_width, keep the entire grapheme on the next line.
+                    line.truncate(previous_len);
+                    break;
+                }
+                graphemes.next();
+            }
+            if (line.is_empty() && graphemes.peek().is_some_and(|g| measure(g) > text_width))
+                || (lines.len() + 1 == max_lines && graphemes.peek().is_some())
+            {
+                // When: a grapheme or remaining lines cannot fit, mark the omitted content explicitly.
+                while measure(&format!("{line}…")) > text_width {
+                    let Some((index, _)) = line.grapheme_indices(true).next_back() else {
+                        // When: line has no remaining grapheme, only the overflow marker can be emitted.
+                        break;
+                    };
+                    line.truncate(index);
+                }
+                line.push('…');
+                lines.push(line);
+                break;
+            }
+            lines.push(line);
+        }
+        let content_width = lines.iter().map(|line| measure(line)).fold(0.0, f32::max).ceil();
+        let width = width.min(content_width + 2.0 * padding + close_w);
+        let line_count = lines.len().max(1);
+        let height = (line_count as f32 * line_height + 2.0 * padding).min((window_h - y).max(0.0));
+        let border = Rect { x: (window_w - margin - width).max(0.0), y, w: width, h: height };
+        let bg = Rect {
+            x: border.x + 1.0,
+            y: border.y + 1.0,
+            w: (width - 2.0).max(0.0),
+            h: (height - 2.0).max(0.0),
+        };
+        let close = Rect {
+            x: border.x + (width - close_w).max(0.0),
+            y,
+            w: close_w.min(width),
+            h: close_w.min(height),
+        };
+        NotificationTextLayout { geometry: Self { bg, border, close }, lines, line_height, padding }
+    }
+
     /// Place a notification bubble on `row` of the bottom-right stack,
     /// reserving a square close button at its right edge.
     #[must_use]

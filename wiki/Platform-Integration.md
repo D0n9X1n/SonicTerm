@@ -39,23 +39,22 @@ than only row/column. Palette and search fields retain their own anchors.
 
 Path scanning and openability probing are cross-platform app behavior. The
 bounded worker revalidates the exact target kind and action immediately before
-native dispatch and blocks executable/launcher, symlink or reparse-point, and
-special-file classes. A punctuation-bearing literal candidate is authoritative
+native dispatch and blocks symlink or reparse-point and special-file identities.
+Regular files are selected regardless of executable suffix, mode, or contents. A punctuation-bearing literal candidate is authoritative
 when it exists; only a missing literal can yield to its shorter prose-trimmed
 candidate.
 
 | Platform | Dispatch boundary |
 | --- | --- |
-| macOS | ordinary targets use fixed `/usr/bin/open --`; inert source/script files use fixed `/usr/bin/open -R --` to reveal without opening or executing |
-| Windows | `ShellExecuteExW` with `SEE_MASK_NOASYNC` from a dedicated COM apartment |
-| Linux | XDG Desktop Portal `OpenFileRequest` with an already opened `O_NOFOLLOW` file; fixed `/usr/bin/xdg-open` or `/bin/xdg-open` only when the portal is unavailable |
+| macOS | directories use fixed `/usr/bin/open --`; files use `/usr/bin/open -R --` to select without opening |
+| Windows | directories use `ShellExecuteExW`; files use `SHOpenFolderAndSelectItems`, from a dedicated COM apartment |
+| Linux | directories use the desktop portal, with fixed `xdg-open` fallback only when unavailable; files use `org.freedesktop.FileManager1.ShowItems` without a file-opening fallback |
 
-macOS reveal-only files must remain non-executable and free of executable magic
-at activation time. App bundles, installers, `.command`, and AppleScript remain
-blocked. A portal rejection is not treated as unavailability and does not fall
-back.
+File selection never invokes the file's associated application or executes its contents.
+macOS application/package directories use Finder selection rather than launch.
+A portal rejection is not treated as unavailability and does not fall back.
 
-On Windows both dispatch paths — a validated local target and a validated URI —
+On Windows directory navigation and non-file URI dispatch
 reach the shell the same way: `ShellExecuteExW` is called directly from a
 worker thread that owns its own COM apartment, so no command interpreter parses
 the target and no argument string is re-tokenized. The URI is passed as one
@@ -282,21 +281,21 @@ flowchart TD
 ## 原生目标打开
 
 路径扫描和可操作性探测属于跨平台 app。有限队列 worker 会在原生调用前再次核对完全相同的
-目标类型和操作，并阻止 executable/launcher、符号链接或 reparse point，以及特殊文件。
+目标类型和操作，并阻止符号链接、reparse point 和特殊文件身份。
+普通文件无论扩展名、执行权限或内容如何，都只被选中。
 带标点的字面候选只要存在就具有最高优先级；只有字面候选不存在时，才会选择去掉正文标点的
 较短候选。
 
 | 平台 | 调用边界 |
 | --- | --- |
-| macOS | 普通目标使用固定 `/usr/bin/open --`；普通源文件或脚本使用固定 `/usr/bin/open -R --`，只在 Finder 中显示而不打开或执行 |
-| Windows | 在专用 COM apartment 中调用带 `SEE_MASK_NOASYNC` 的 `ShellExecuteExW` |
-| Linux | 对已用 `O_NOFOLLOW` 打开的文件调用 XDG Desktop Portal `OpenFileRequest`；只有 portal 不可用时才调用固定的 `/usr/bin/xdg-open` 或 `/bin/xdg-open` |
+| macOS | 目录使用固定 `/usr/bin/open --`；文件使用 `/usr/bin/open -R --` 选中而不打开 |
+| Windows | 目录使用 `ShellExecuteExW`；文件使用 `SHOpenFolderAndSelectItems`，均在专用 COM apartment 中执行 |
+| Linux | 目录使用 desktop portal，仅不可用时回退到固定 `xdg-open`；文件使用 `org.freedesktop.FileManager1.ShowItems`，不回退到打开文件 |
 
-macOS reveal-only 文件在点击时必须仍不可执行且不含可执行 magic。App bundle、installer、
-`.command` 和 AppleScript 始终被阻止。Portal 明确拒绝不等于 portal 不可用，因此不会触发
-fallback。
+选中文件不会调用其关联应用或执行内容。macOS 应用或软件包目录使用 Finder 选择，而不启动。
+Portal 明确拒绝不等于 portal 不可用，因此不会触发 fallback。
 
-Windows 上，已验证的本地目标和已验证的 URI 走同一条调用边界：由拥有独立 COM apartment
+Windows 上，目录导航和非文件 URI 走同一条调用边界：由拥有独立 COM apartment
 的 worker 线程直接调用 `ShellExecuteExW`，不经过任何命令解释器，也不会对参数字符串重新
 分词。URI 以单个 NUL 结尾的 UTF-16 字符串传入，并且环境变量替换保持关闭，因此 `%20`、`%USERNAME%`
 这类以百分号分隔的文本会按验证后的原样交给 handler，不会按进程环境展开。

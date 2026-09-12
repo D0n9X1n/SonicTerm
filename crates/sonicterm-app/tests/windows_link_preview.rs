@@ -14,7 +14,7 @@ use std::{
 use winit::{
     application::ApplicationHandler,
     dpi::{PhysicalPosition, PhysicalSize},
-    event::{DeviceId, WindowEvent},
+    event::{DeviceId, ElementState, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::ModifiersState,
     platform::windows::EventLoopBuilderExtWindows,
@@ -97,6 +97,18 @@ fn exercise(active: &ActiveEventLoop, main: bool) {
     renderer.set_tab_bar_visible(false);
     renderer.set_cursor_blink(false);
     let (cw, ch) = renderer.cell_size();
+    // Real fallback shaping must fit the entire policy message, not a terminal-cell estimate.
+    let message = "Filepath or original target copied to clipboard.\nCannot open target: Path is inaccessible or blocked by safety policy";
+    let layout = renderer.notification_layout(message, (640.0, 360.0), 0);
+    assert_eq!(layout.lines.concat(), message.replace('\n', ""));
+    assert!(layout.lines.last().unwrap().ends_with("policy"));
+    for line in &layout.lines {
+        let single = renderer.notification_layout(line, (4000.0, 360.0), 0);
+        assert!(
+            single.geometry.border.w <= layout.geometry.border.w + 1.0,
+            "shaped notification line exceeds painted text area: {line}"
+        );
+    }
     let mut app = App::new(theme, config, Keymap::default());
     app.__test_set_software_render_degrade(true);
     let (id, pane) = if main {
@@ -211,6 +223,78 @@ fn exercise(active: &ActiveEventLoop, main: bool) {
     ));
     render(&mut app, active, id);
     assert_eq!(space_pixels(&app), gap, "erase under active SGR must not leave underline ink");
+
+    // Explicit rejected file links explain their filepath without copying on the first click.
+    app.__test_set_memory_clipboard("untouched before click");
+    put(&mut app, "file://remote-host/share/main.rs", "main.rs:7");
+    ApplicationHandler::window_event(
+        &mut app,
+        active,
+        id,
+        WindowEvent::CursorMoved {
+            device_id: DeviceId::dummy(),
+            position: PhysicalPosition::new((cw * 1.5) as f64, (ch * 0.5) as f64),
+        },
+    );
+    render(&mut app, active, id);
+    ApplicationHandler::window_event(
+        &mut app,
+        active,
+        id,
+        WindowEvent::MouseInput {
+            device_id: DeviceId::dummy(),
+            state: ElementState::Pressed,
+            button: MouseButton::Left,
+        },
+    );
+    ApplicationHandler::window_event(
+        &mut app,
+        active,
+        id,
+        WindowEvent::MouseInput {
+            device_id: DeviceId::dummy(),
+            state: ElementState::Released,
+            button: MouseButton::Left,
+        },
+    );
+    let message = if main {
+        app.__test_main_notification_message()
+    } else {
+        app.__test_child_notification_message(id)
+    };
+    assert!(message.unwrap().contains("file://remote-host/share/main.rs"));
+    assert_eq!(app.__test_memory_clipboard().as_deref(), Some("untouched before click"));
+    app.__test_show_notification_until(
+        sonicterm_app::app::FrontmostKind::Child(id),
+        sonicterm_ui::overlays::NotificationLevel::Error,
+        "Click again to copy\nC:/work/file.txt\nCannot open target: file manager unavailable",
+        None,
+    );
+    ApplicationHandler::window_event(
+        &mut app,
+        active,
+        id,
+        WindowEvent::ModifiersChanged(ModifiersState::empty().into()),
+    );
+    ApplicationHandler::window_event(
+        &mut app,
+        active,
+        id,
+        WindowEvent::CursorLeft { device_id: DeviceId::dummy() },
+    );
+    render(&mut app, active, id);
+    // Keep terminal, cursor and hover identical; expiry removes only the error notification.
+    let frame = |app: &App| {
+        (0..360)
+            .flat_map(|y| (0..640).map(move |x| (x, y)))
+            .map(|(x, y)| app.__test_window_software_frame_pixel_bgra(id, x, y).unwrap())
+            .collect::<Vec<_>>()
+    };
+    let visible_error = frame(&app);
+    app.__test_expire_notifications(Instant::now() + Duration::from_secs(3600));
+    assert!(app.__test_child_notification_message(id).is_none());
+    render(&mut app, active, id);
+    assert!(frame(&app) != visible_error, "notification expiry must remove visible error pixels");
 }
 
 /// Real main and child App event paths present and erase the tooltip through the Windows CPU renderer.
