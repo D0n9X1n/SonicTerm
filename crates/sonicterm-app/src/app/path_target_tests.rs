@@ -914,7 +914,8 @@ fn app_probe_prefers_literal_then_trimmed_revealable_path() {
         .expect("missing literal permits the existing source file");
     assert_eq!(trimmed.candidate.display(), "lua/config/lsp.lua");
     assert_eq!(trimmed.candidate.spans[0].end_col, u16::try_from(text.len() - 1).unwrap());
-    assert_eq!(trimmed.decision, PathOpenDecision::Revealable(PathKind::File));
+    assert_eq!(trimmed.decision, PathOpenDecision::Openable(PathKind::File));
+    assert_eq!(local_target_action(trimmed.decision), Some(LocalTargetAction::Reveal));
 
     std::fs::write(&literal_path, b"punctuation filename").unwrap();
     let literal = select_openable_candidate(&key.candidates, classify_local_target)
@@ -1590,8 +1591,9 @@ fn filesystem_classification_rejects_identity_indirection_and_special_entries() 
     use std::os::unix::fs::symlink;
     use std::os::unix::net::UnixListener;
 
-    let root = native_test_root().join(format!(
-        "sonicterm-path-kinds-{}-{}",
+    // Darwin's long per-user temp root can exceed sockaddr_un.sun_path before the socket name.
+    let root = Path::new("/tmp").canonicalize().unwrap().join(format!(
+        "st-kind-{}-{}",
         std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
     ));

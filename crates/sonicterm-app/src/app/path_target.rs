@@ -76,7 +76,7 @@ impl PathOpenDecision {
         }
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows", test))]
+    #[cfg(any(target_os = "windows", test))]
     fn is_blocked(self) -> bool {
         self == Self::Blocked
     }
