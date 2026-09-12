@@ -1828,11 +1828,13 @@ impl CellTargetSnapshot {
             ResolvedCellTarget::Path(key) => key.link_destination.clone().or_else(|| {
                 key.candidates
                     .iter()
-                    .find(|candidate| {
-                        matches!(
-                            candidate.target,
-                            DetectedTarget::PathCandidate(_) | DetectedTarget::SourceReference(_)
-                        )
+                    .find(|candidate| match &candidate.target {
+                        DetectedTarget::PathCandidate(_) => true,
+                        DetectedTarget::SourceReference(reference) => {
+                            reference.explicit_path
+                                || !reference.path.chars().any(char::is_whitespace)
+                        }
+                        _ => false,
                     })
                     .map(|candidate| candidate.display().to_owned())
             }),

@@ -134,6 +134,38 @@ fn unverified_plain_text_click_has_no_side_effects() {
     }
 }
 
+/// A source location permits feedback, but unverified prose around its bare filename does not.
+#[test]
+fn source_location_feedback_excludes_unverified_prose() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["source location"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    let cwd = if cfg!(windows) { "file:///C:/work" } else { "file:///work" };
+    let explicit = if cfg!(windows) {
+        "C:/work/Test Folder/missing.rs"
+    } else {
+        "/work/Test Folder/missing.rs"
+    };
+    for row in [explicit.to_owned(), format!("{explicit}:7")] {
+        let text = format!("\x1b]7;{cwd}\x1b\\\r\x1b[2K{row}");
+        assert!(app.__test_advance_child_pane_parser(window, pane, text.as_bytes()));
+        let col = row.find("missing").unwrap() as u16;
+        let target = app.cell_target_at(window, pane, 0, col).unwrap();
+        assert_eq!(target.explicit_path_text().as_deref(), Some(row.as_str()));
+    }
+    for row in ["missing.ps1:42", "some words missing.ps1:42"] {
+        let text = format!("\x1b]7;{cwd}\x1b\\\r\x1b[2K{row}");
+        assert!(app.__test_advance_child_pane_parser(window, pane, text.as_bytes()));
+        let col = row.find("missing").unwrap() as u16;
+        let target = app.cell_target_at(window, pane, 0, col).unwrap();
+        assert_eq!(target.explicit_path_text().as_deref(), Some("missing.ps1:42"));
+        if row.starts_with("some") {
+            let prose = app.cell_target_at(window, pane, 0, 1).unwrap();
+            assert!(prose.explicit_path_text().is_none());
+        }
+    }
+}
+
 /// Failure feedback stays on the requesting window, escapes controls, and drops closed-pane responses.
 #[test]
 fn target_failure_notification_is_window_local() {

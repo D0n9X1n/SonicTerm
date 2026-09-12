@@ -336,7 +336,10 @@ Use Ctrl+click on Windows/Linux or Cmd+click on macOS.
 
 Explicit filepaths include native absolute paths, `./`/`../`/`~/` paths,
 relative paths containing separators, source-location references, and local file-URI
-or native-path OSC 8 destinations. Bare names become filepath targets only after
+or native-path OSC 8 destinations. Explicit paths retain spaces in their filenames.
+For unverified source references with a bare filename, failure feedback excludes
+surrounding prose; spaced bare filenames require filesystem validation or an
+explicit path/OSC 8 destination. Bare names become filepath targets only after
 filesystem validation. File extensions, executable permissions, and file contents
 do not prevent selection. Symlinks, reparse points, special devices, and unsupported
 remote/network paths remain protected. Every platform revalidates target identity
@@ -700,7 +703,9 @@ Windows/Linux 使用 Ctrl+单击，macOS 使用 Cmd+单击。
 | HTTP/HTTPS 或邮件 URL | 保持 URL 预览和浏览器或邮件导航行为。 |
 
 显式路径包括本机绝对路径、`./`、`../`、`~/` 路径、带分隔符的相对路径、源位置引用，
-以及本地 file URI 或本机路径 OSC 8 目标。裸名称只有通过文件系统验证后才成为文件路径目标。
+以及本地 file URI 或本机路径 OSC 8 目标。显式路径保留文件名中的空格。对于未经验证、
+以裸文件名为基础的源位置引用，失败提示排除周围正文；含空格裸文件名需要文件系统验证，
+或通过显式路径/OSC 8 目标指定。裸名称只有通过文件系统验证后才成为文件路径目标。
 文件扩展名、执行权限和文件内容不会阻止选中文件。符号链接、重解析点、特殊设备和不支持的
 远端或网络路径仍受保护。各平台在调用前重新验证目标身份和类型。
 所有平台都进入目录，或打开文件所在文件夹并选中文件，
