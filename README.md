@@ -49,6 +49,19 @@ Powerline glyphs, emoji, CJK, and terminal apps that draw their own UI.
 
 ![SonicTerm split panes running AI CLIs](assets/screenshots/split-panes-ai-cli.png)
 
+### File references in terminal messages
+
+Hold Cmd on macOS or Ctrl on Windows/Linux to preview a detected local file,
+then click to reveal it in its folder—not execute it or launch an editor.
+Relative references use the current pane's trusted shell working directory.
+See [local targets](wiki/Usage.md#open-urls-and-local-targets).
+
+![Static capture of an underlined source reference and its resolved filename preview, with the private directory prefix redacted](assets/screenshots/file-detection.png)
+
+*Static crop of a user-provided capture; the private directory prefix is redacted.
+The line range stays in the reference, not the filename. Click/reveal behavior
+was verified separately in the native app.*
+
 ### READONLY mode for safe navigation
 
 READONLY mode blocks terminal input while keeping search, tab switching, and
@@ -91,6 +104,11 @@ back when the context belongs with the original session again.
 - **Real pane workflow** — split panes, close/resize behavior, per-pane PTYs,
   pane focus, READ ONLY mode for safe scrollback navigation, quick-select URL
   hints, and search.
+- **File references in terminal messages** — hold Cmd on macOS or Ctrl on
+  Windows/Linux to preview a detected local path, then click to reveal the file
+  in its folder. Source references keep line numbers out of the filename;
+  relative paths use that pane's trusted shell working directory. See
+  [local targets](wiki/Usage.md#open-urls-and-local-targets).
 - **Command palette first** — commands are searchable and display shortcuts from
   your current keymap config.
 - **Config is just files** — `~/.sonicterm/sonicterm.toml`, plus editable

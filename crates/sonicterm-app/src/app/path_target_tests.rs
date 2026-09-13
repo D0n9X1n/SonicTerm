@@ -166,6 +166,119 @@ fn source_location_feedback_excludes_unverified_prose() {
     }
 }
 
+/// Plain and wrapped text resolve the same real file, preserving pane-local spans and copy boundaries.
+#[test]
+fn tool_and_prose_paths_resolve_real_files_in_each_window() {
+    let _guard = super::super::media::MEDIA_COUNTER_LOCK.lock();
+    let root = native_test_root().join(format!(
+        "sonicterm-path-text-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    let paths = [
+        "crates/sonicterm-app/src/app/mod_tests.rs",
+        ".github/scripts/validate_release.py",
+        "tests/test_release_validation.py",
+        "fixtures/foo and bar.py",
+        "fixtures/and",
+    ];
+    for path in paths {
+        let file = root.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, "harmless fixture").unwrap();
+    }
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main path boundaries");
+    let main = app.main_window_id.unwrap();
+    let child = app.__test_seed_child_window(&["path boundaries"]);
+    let cwd = local_file_uri(&root).unwrap();
+    for window in [main, child] {
+        let pane = *app.windows[&window].panes.keys().next().unwrap();
+        app.windows[&window].panes[&pane].parser.lock().resize(120, 24);
+        app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+            winit::keyboard::ModifiersState::SUPER
+        } else {
+            winit::keyboard::ModifiersState::CONTROL
+        };
+        for (row, path) in [
+            (paths[0].to_owned(), paths[0]),
+            (format!("⏺ Update({})", paths[0]), paths[0]),
+            (format!("Read({})", paths[0]), paths[0]),
+            (format!("Write({})", paths[0]), paths[0]),
+            (format!("{} and focused {}. Require stable", paths[1], paths[2]), paths[1]),
+            (format!("{} and focused {}. Require stable", paths[1], paths[2]), paths[2]),
+            (paths[3].to_owned(), paths[3]),
+            (paths[4].to_owned(), paths[4]),
+        ] {
+            let output = format!("\x1b[2J\x1b[H\x1b]7;{cwd}\x1b\\{row}");
+            assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+            let start_byte = row.find(path).unwrap();
+            let start_col = row[..start_byte].chars().count() as u16;
+            for col in start_col..start_col + path.len() as u16 {
+                let target = app.cell_target_at(window, pane, 0, col).unwrap();
+                let ResolvedCellTarget::Path(key) = target.target else {
+                    panic!("filesystem target")
+                };
+                let selection = probe_candidates(&key.candidates, classify_local_target).unwrap();
+                assert_eq!(selection.candidate.resolved_path, root.join(path), "{row}: {col}");
+                assert_eq!(
+                    selection.candidate.spans.as_slice(),
+                    &[AbsoluteCellSpan {
+                        row: 0,
+                        start_col,
+                        end_col: start_col + path.len() as u16,
+                    }]
+                );
+                assert_eq!(
+                    local_target_action(selection.decision),
+                    Some(LocalTargetAction::Reveal)
+                );
+            }
+        }
+        let missing = "crates/sonicterm-app/src/app/missing.rs";
+        let output = format!("\x1b[2J\x1b[HUpdate({missing})");
+        assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+        app.test_clipboard_text = Some("preserved".into());
+        let target = app.cell_target_at(window, pane, 0, 10).unwrap();
+        assert_eq!(target.explicit_path_text().as_deref(), Some(missing));
+        let ResolvedCellTarget::Path(key) = target.target else { panic!("filesystem target") };
+        let request =
+            app.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
+        let result =
+            PathProbeResult { request, selection: None, failure: Some("path-error-missing") };
+        assert!(app.windows.get_mut(&window).unwrap().path_probe.accept(&result, Some(&key)));
+        assert!(app.activate_target_at(window, pane, 0, 10));
+        assert_eq!(app.test_clipboard_text.as_deref(), Some("preserved"));
+        assert!(app.activate_target_at(window, pane, 0, 10));
+        assert_eq!(app.test_clipboard_text.as_deref(), Some(missing));
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Missing-path feedback follows the pointed filename, not adjacent prose or a neighboring file.
+#[test]
+fn prose_path_feedback_excludes_neighboring_words() {
+    let _guard = super::super::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["prose paths"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    let cwd = if cfg!(windows) { "file:///C:/work" } else { "file:///work" };
+    let row = ".github/scripts/validate_release.py and focused tests/test_release_validation.py. Require stable";
+    let text = format!("\x1b]7;{cwd}\x1b\\{row}");
+    app.windows[&window].panes[&pane].parser.lock().resize(120, 24);
+    assert!(app.__test_advance_child_pane_parser(window, pane, text.as_bytes()));
+    for path in [".github/scripts/validate_release.py", "tests/test_release_validation.py"] {
+        let col = row.find(path).unwrap() as u16 + 1;
+        let target = app.cell_target_at(window, pane, 0, col).unwrap();
+        assert_eq!(target.explicit_path_text().as_deref(), Some(path), "col={col}");
+    }
+    for word in ["and", "focused", "Require", "stable"] {
+        let col = row.find(word).unwrap() as u16;
+        let target = app.cell_target_at(window, pane, 0, col);
+        assert!(target.and_then(|target| target.explicit_path_text()).is_none(), "{word}");
+    }
+}
+
 /// Failure feedback stays on the requesting window, escapes controls, and drops closed-pane responses.
 #[test]
 fn target_failure_notification_is_window_local() {

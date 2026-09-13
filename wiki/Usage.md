@@ -314,6 +314,18 @@ from `ll`, is treated as `My Folder`. Other quoted or escaped names, `ls -F`
 suffixes (`*`, `@`, `=`, `|`), and raw paths containing wide, continuation,
 combining, or OSC 8-owned cells remain inert.
 
+Terminal messages can contain actionable file references, including a balanced
+identifier-style tool heading such as `Update(src/main.rs)` or `Read(./notes.txt)`.
+The detected inner path excludes the heading and its enclosing parentheses.
+In prose such as `src/main.rs and focused tests/main.rs. Require stable`, point
+at either filename to resolve it independently. `and` is not a reserved word:
+existing filenames containing spaces or parentheses still use literal filesystem
+disambiguation. Missing contextual paths use the pointed filename for feedback,
+not an unverified multiword prose guess. Unverified rooted spaced paths retain
+spaces only when the final component has an extension and no earlier filename-like
+word makes their extent ambiguous; other multiword guesses require validation.
+Validated files always retain their complete path.
+
 Source references such as `install.sh:889–919`, `src/main.rs:12`, and
 `src/main.rs:12:4` retain the full underline but resolve only the filename.
 Line and column values must be positive; ranges accept `-` or `–` and must not
@@ -686,6 +698,14 @@ SonicTerm 会选择包含鼠标 cell 的最长、无歧义且可操作候选。�
 名称，例如 `'My Folder'`，会按 `My Folder` 处理。其它带引号或转义的名称、`ls -F` 后缀
 （`*`、`@`、`=`、`|`），以及含宽字符、续格、组合字符或已属于 OSC 8 的 cell 的原始路径
 都保持不可操作。
+
+终端消息中的文件引用可以直接操作，包括 `Update(src/main.rs)` 或 `Read(./notes.txt)`
+这类括号完整、名称为标识符的工具标题。内部路径不包含工具名称和外层圆括号。
+在 `src/main.rs and focused tests/main.rs. Require stable` 这类正文中，分别指向两个
+文件名即可独立解析。`and` 不是保留词：真实文件名中的空格与圆括号仍通过字面文件系统
+候选消除歧义。缺失的上下文路径使用指向的文件名反馈，不使用未经验证的多词正文猜测。
+未经验证的带根路径仅在最后一个组成部分具有扩展名、且前面的类文件名词不会使范围
+产生歧义时保留空格；其它多词猜测需要验证。验证通过的文件始终保留完整路径。
 
 `install.sh:889–919`、`src/main.rs:12` 和 `src/main.rs:12:4` 等源文件引用保留完整下划线，
 但只解析文件名。行号与列号必须为正数；范围接受 `-` 或 `–`，且终点不能早于起点。

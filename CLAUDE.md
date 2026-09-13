@@ -389,7 +389,22 @@ workspace package. The tag workflow builds:
 - macOS Apple Silicon and Intel `.dmg` files
 - Windows x64 `.msi`
 - Linux x86_64 `.deb` and `.tar.gz`
-- a validated asset manifest, checksums, and release notes from commits since the previous tag
+- a validated asset manifest, checksums, and release notes from commits since the previous reachable tag
+
+Release notes also list deduplicated resolved issues proven by GitHub closure
+metadata and exact base-exclusive/head-inclusive ancestry, including merge
+commits. Milestones, current closed state, and mentions alone are not proof.
+Canonical Git revert markers cancel reverted contributions; unknown metadata,
+ambiguous provenance, and collector caps fail generation rather than imply an
+empty result. The publish job alone grants issue/PR read access alongside its
+existing contents write access and passes its short-lived token as `GH_TOKEN`.
+Before tagging, preview the exact reviewed merge commit without creating a tag:
+`python3 scripts/release-issues.py --repo D0n9X1n/SonicTerm --head <merge-sha> --base <previous-tag>`.
+The shell generator rejects shallow history and fails when predecessor lookup
+fails; only explicit `RELEASE_FIRST=1` permits no-base notes, and it conflicts
+with any set `PREVIOUS_TAG`. The full rule, bounds, and limitations are on
+`wiki/Development-and-Release.md`; `bash scripts/test-release-notes.sh` includes
+offline real-history/fake-API tests.
 
 ## Wiki
 

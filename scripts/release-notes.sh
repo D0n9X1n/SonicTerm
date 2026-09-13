@@ -13,10 +13,27 @@ if [[ ! -f "$MANIFEST" ]]; then
   exit 2
 fi
 
-PREVIOUS_TAG="${PREVIOUS_TAG:-}"
-if [[ -z "$PREVIOUS_TAG" ]]; then
-  PREVIOUS_TAG="$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ "$(git rev-parse --is-shallow-repository)" != false ]]; then
+  echo "release notes require complete history; shallow repositories are not supported" >&2
+  exit 2
 fi
+HEAD_COMMIT="$(git rev-parse --verify --end-of-options "${TAG}^{commit}")"
+if [[ "${RELEASE_FIRST:-0}" == 1 && "${PREVIOUS_TAG+x}" == x ]]; then
+  echo "RELEASE_FIRST=1 conflicts with PREVIOUS_TAG" >&2
+  exit 2
+fi
+PREVIOUS_TAG="${PREVIOUS_TAG:-}"
+if [[ "${RELEASE_FIRST:-0}" != 1 && -z "$PREVIOUS_TAG" ]]; then
+  if ! PREVIOUS_TAG="$(git describe --tags --abbrev=0 "${HEAD_COMMIT}^")"; then
+    echo "release predecessor lookup failed; fetch complete tags or explicitly set RELEASE_FIRST=1 for the first release" >&2
+    exit 2
+  fi
+fi
+# Complete all metadata lookups before emitting notes; an API error is not an empty release.
+ISSUES="$(python3 "$ROOT/release-issues.py" \
+  --repo "${GITHUB_REPOSITORY:-D0n9X1n/SonicTerm}" \
+  --head "$HEAD_COMMIT" --base "$PREVIOUS_TAG")"
 
 echo "# SonicTerm ${TAG}"
 echo
@@ -45,15 +62,17 @@ echo "- Integrity metadata: \`release-assets.json\` and \`SHA256SUMS.txt\`."
 echo "- Release packages are unsigned for ${TAG}; macOS may require right-click → Open."
 echo
 
+printf '%s\n\n' "$ISSUES"
+
 if [[ -n "$PREVIOUS_TAG" ]]; then
   echo "## Changes since ${PREVIOUS_TAG}"
   echo
-  git log --no-merges --pretty=format:'- %s (%h)' "${PREVIOUS_TAG}..${TAG}"
+  git log --no-merges --pretty=format:'- %s (%h)' "${PREVIOUS_TAG}..${HEAD_COMMIT}"
   echo
 else
   echo "## Changes"
   echo
-  git log --no-merges --pretty=format:'- %s (%h)' "${TAG}" | head -200
+  git log --no-merges --max-count=200 --pretty=format:'- %s (%h)' "$HEAD_COMMIT"
   echo
 fi
 

@@ -466,6 +466,64 @@ pub fn target_candidates_at_char_col_for_style(
     candidates
 }
 
+/// Select conservative failure text from candidates already restricted to the pointed cell.
+#[must_use]
+pub fn explicit_path_feedback<'a>(
+    candidates: impl Iterator<Item = &'a DetectedTarget>,
+    style: PathStyle,
+) -> Option<&'a str> {
+    let mut selected: Option<(&str, bool)> = None;
+    for candidate in candidates {
+        let (path, display, source) = match candidate {
+            DetectedTarget::PathCandidate(path) => (path.as_str(), path.as_str(), false),
+            DetectedTarget::SourceReference(reference) => {
+                (reference.path.as_str(), reference.display.as_str(), true)
+            }
+            _ => {
+                // When: `candidate` is a URI or unverified bare name, filesystem failure text is not authorized.
+                continue;
+            }
+        };
+        let rooted = path.starts_with('/')
+            || path.starts_with("~/")
+            || path.starts_with("~\\")
+            || style == PathStyle::Windows && path.as_bytes().get(1) == Some(&b':');
+        let spaced = path.chars().any(char::is_whitespace);
+        let crosses_file_word = path.split_whitespace().rev().skip(1).any(|word| {
+            word.rsplit(['/', '\\']).next().is_some_and(|name| {
+                name.rsplit_once('.')
+                    .is_some_and(|(stem, extension)| !stem.is_empty() && !extension.is_empty())
+            })
+        });
+        let ends_in_filename = path.rsplit(['/', '\\']).next().is_some_and(|name| {
+            name.rsplit_once('.').is_some_and(|(stem, extension)| {
+                !stem.is_empty() && !extension.is_empty() && !extension.contains(' ')
+            })
+        });
+        if spaced && (!rooted || crosses_file_word || !ends_in_filename) {
+            // When: `spaced` lacks `rooted`/`ends_in_filename` evidence or `crosses_file_word`, defer to validation.
+            continue;
+        }
+        if !source && !has_path_prefix(path, style) {
+            // When: `path` has neither a source suffix nor explicit path syntax, unverified feedback stays inert.
+            continue;
+        }
+        if selected.is_none_or(|(previous, was_rooted)| {
+            rooted && !was_rooted
+                || rooted == was_rooted
+                    && if rooted {
+                        display.len() > previous.len()
+                    } else {
+                        // When: `rooted` is false, prefer the narrow filename rather than unverified contextual prose.
+                        display.len() < previous.len()
+                    }
+        }) {
+            selected = Some((display, rooted));
+        }
+    }
+    selected.map(|(display, _)| display)
+}
+
 fn focused_candidate_group(
     text: &str,
     clicked_byte: usize,
@@ -1006,6 +1064,41 @@ fn trim_outer_path_wrapper(
     mut end: usize,
     style: PathStyle,
 ) -> (usize, usize) {
+    if let Some(open) = text[start..end].find('(') {
+        // When: `open` exists, only an identifier-call boundary may expose an inner path.
+        let name = &text[start..start + open];
+        let identifier = !name.is_empty()
+            && name.bytes().enumerate().all(|(index, byte)| {
+                byte == b'_' || byte.is_ascii_alphabetic() || index > 0 && byte.is_ascii_digit()
+            });
+        if identifier && text[..end].ends_with(')') {
+            // When: `identifier` and the final closer agree, nested filename parentheses must still balance.
+            let inner_start = start + open + 1;
+            let inner_end = end - 1;
+            let inner = &text[inner_start..inner_end];
+            let mut depth = 0usize;
+            let balanced = inner.chars().all(|ch| match ch {
+                '(' => {
+                    depth += 1;
+                    true
+                }
+                ')' => {
+                    // When: `ch` closes parentheses, reject an unmatched closer rather than stripping literal text.
+                    if depth == 0 {
+                        // When: `depth` is zero, this closer cannot belong to the candidate's inner path.
+                        return false;
+                    }
+                    depth -= 1;
+                    true
+                }
+                _ => true,
+            }) && depth == 0;
+            if balanced && has_path_prefix(inner, style) {
+                // When: `balanced` inner text has explicit path syntax, discard only the call's outer wrapper.
+                return (inner_start, inner_end);
+            }
+        }
+    }
     let Some(first) = text[start..end].chars().next() else {
         // When: `text[start..end].chars().next()` is absent, there is no wrapper pair to remove.
         return (start, end);
