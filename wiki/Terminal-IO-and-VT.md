@@ -176,6 +176,13 @@ bounds without scrolling protected rows. LF/VT/FF use the current erase fill;
 IND/NEL use default fill, and only NEL returns to column zero. Hard advances
 cancel delayed wrap and clear the destination's automatic-wrap provenance.
 
+Hosts resize through `Parser::resize`, which reuses grid bounds and resets
+scrolling margins when the effective row or column count changes. This includes
+margins set by bare `CSI r`. Duplicate-size requests preserve a valid partial
+region. Resize does not home the cursor or reset rendition, keyboard protocols,
+existing history, or an incomplete escape sequence; primary-screen scrolling
+still adds history, while proper subregions and the alternate screen do not.
+
 OSC handling has a bounded shell-integration scope, not full WezTerm parity.
 OSC 0/2/7/8 use a raw collector capped at 16 KiB for the whole payload, avoiding
 vte's 16-parameter truncation. Input must be valid UTF-8 without control characters
@@ -226,7 +233,11 @@ Other keys and modifiers follow these rules:
   plain Shift+Tab remains `CSI Z`, while other modified Tab forms and modified
   Enter use `CSI 27 ; modifier ; code ~`; level 2 also makes Shift+Tab
   `CSI 27 ; 2 ; 9 ~`. Level 1 keeps its ordinary Shift/Control aliases and
-  Backspace exception; level 2 encodes every supported modified ordinary key.
+  Backspace exception. MOK reports the layout-selected character, not Kitty's
+  unshifted key identity. At level 2, US Shift+3 remains `#`, while Shift+a and
+  Shift+Space report `CSI 27 ; 2 ; 65 ~` and `CSI 27 ; 2 ; 32 ~`. Shifted `{`, `|`,
+  and `~` also retain modified-key reporting. Ctrl+Shift+3 reports character35
+  at levels 1 and 2. Composed multi-codepoint text remains intact.
 - **Negotiated legacy modes:** the pane snapshot includes DECCKM cursor keys,
   DECKPAM keypad identity, DECBKM Backspace, ANSI newline mode, and xterm
   `modifyOtherKeys` levels 1 and 2. Modified cursor and function keys preserve
@@ -241,11 +252,12 @@ Other keys and modifiers follow these rules:
   CSI-u; it does not change raw text, DECKPAM, or terminfo encodings. Shift+Tab
   is `CSI 9 ; 2 u` when disambiguated. Repeats and releases carry Kitty event
   types when requested.
-- **Keypad:** legacy normal mode follows the layout/NumLock result and preserves
-  text modifiers. OS-resolved numeric keypad characters stay digit text even
-  under DECKPAM; non-text events retain physical keypad identity. This uses
-  logical numeric intent rather than measuring NumLock directly. Kitty
-  disambiguation uses its dedicated keypad code points.
+- **Keypad:** default `keypad_mode = "auto"` preserves negotiated DECKPAM
+  identities for operators/Enter/navigation, with the existing OS-resolved digit
+  text exception. Opt-in `numeric` overrides only legacy DECKPAM in the encoder's
+  copied snapshot: normal text/Return rules apply, including modifiers and
+  newline mode, and navigation uses its logical key. Stored terminal modes and
+  Kitty encoding are unchanged; this preference does not measure hardware NumLock.
 
 ### Mouse tracking and selection
 
@@ -511,6 +523,11 @@ DECRQSS `DCS $ q m ST` 通过终端回复队列报告当前 SGR 样式。回复�
 LF/VT/FF 使用当前擦除填充，IND/NEL 使用默认填充，只有 NEL 回到第零列。硬换行会
 取消延迟换行，并清除目标行的自动换行来源标记。
 
+宿主通过 `Parser::resize` 调整尺寸：沿用网格上限，实际行数或列数变化时重置滚动边距，
+包括通过无参数 `CSI r` 设置的边距。相同尺寸的请求保留有效局部区域。尺寸调整不会把
+光标移到起点，也不重置样式、键盘协议、现有历史或未完成的转义序列；主屏滚动仍增加
+历史，而有效局部区域和备用屏幕的滚动不增加历史。
+
 OSC 的 shell 集成仅限以下范围，不表示完整 WezTerm 对等能力。OSC 0/2/7/8 使用整个
 负载最多 16 KiB 的原始收集器，避免 vte 的 16 参数截断。输入必须为无控制字符的有效 UTF-8，
 并以 BEL 或完整 `ESC \` 终止。取消或拒绝会清除链接/CWD 信任，但保留此前显示标题。
@@ -547,8 +564,11 @@ OSC 8 驻留 URI 仍限 8 KiB、客户端 id 限 1 KiB。
   操作系统生成。Tab 发送 HT。在 `modifyOtherKeys` level 1 下，只有普通 Shift+Tab 继续发送
   `CSI Z`；其它带修饰键的 Tab 形式和带修饰键的 Enter 使用
   `CSI 27 ; modifier ; code ~`。level 2 也把 Shift+Tab 编码为
-  `CSI 27 ; 2 ; 9 ~`。level 1 保留普通 Shift/Control 别名及 Backspace 例外；level 2
-  会编码所有受支持的带修饰普通按键。
+  `CSI 27 ; 2 ; 9 ~`。level 1 保留普通 Shift/Control 别名及 Backspace 例外。
+  MOK 报告布局选出的字符，而非 Kitty 的未加 Shift 按键身份。level 2 下，美式布局
+  Shift+3 仍发送 `#`；Shift+a 和 Shift+Space 分别发送 `CSI 27 ; 2 ; 65 ~` 与
+  `CSI 27 ; 2 ; 32 ~`。带 Shift 的 `{`、`|`、`~` 也保留修饰键报告。Ctrl+Shift+3
+  在 level 1 和 2 报告字符35。多码点组合文本保持完整。
 - **协商的旧式模式：** pane 快照包含 DECCKM 光标键、DECKPAM 小键盘身份、DECBKM
   Backspace、ANSI newline mode，以及 xterm `modifyOtherKeys` level 1 和 2。带修饰键的
   光标键与功能键会在 xterm 修饰参数中保留 Shift、Alt、Control 和 Super；功能键覆盖到 F35。
@@ -558,9 +578,10 @@ OSC 8 驻留 URI 仍限 8 KiB、客户端 id 限 1 KiB。
   自身的身份。单独启用备用按键报告只会补充原本已经使用 CSI-u 的按键，不会改变原始文本、
   DECKPAM 或 terminfo 编码。启用消歧义时 Shift+Tab 为 `CSI 9 ; 2 u`；程序要求时，重复与
   释放会带 Kitty 事件类型。
-- **小键盘：** 旧式 normal mode 遵循布局/NumLock 结果并保留文本修饰键；操作系统解析为数字
-  字符的小键盘键在 DECKPAM 下仍发送数字文本，非文本事件保留物理小键盘身份。这使用逻辑
-  数字意图，而非直接测量 NumLock。Kitty 消歧义使用专用的小键盘码点。
+- **小键盘：** 默认 `keypad_mode = "auto"` 保留运算符、Enter、导航的协商 DECKPAM
+  身份，以及既有的操作系统数字文本例外。显式选择 `numeric` 仅在编码器的快照副本中
+  覆盖旧式 DECKPAM：使用包含修饰键和 newline mode 的普通文本/Return 规则，导航采用
+  逻辑按键。已保存的终端模式和 Kitty 编码不变；该偏好并不测量硬件 NumLock。
 
 ### 鼠标跟踪与选区
 

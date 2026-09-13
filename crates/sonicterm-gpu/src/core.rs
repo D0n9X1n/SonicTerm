@@ -4235,8 +4235,8 @@ impl GpuRenderer {
             };
         }
         let now = Instant::now();
-        let broadcast_receiver_ids: Vec<u64> =
-            panes.iter().filter(|pane| pane.is_broadcast_receiver).map(|pane| pane.id).collect();
+        let broadcast_participant_ids: Vec<u64> =
+            panes.iter().filter(|pane| pane.is_broadcast_participant).map(|pane| pane.id).collect();
         let retained_inline_media_bytes = panes
             .iter()
             .flat_map(|pane| &pane.inline_images)
@@ -4326,11 +4326,11 @@ impl GpuRenderer {
         // Include every tab's title, order, activity, color, command status, and
         // foreground privilege so inactive-tab changes cannot leave stale chrome.
         let tab_hash = tab_bar_hash(tabs, now);
-        let broadcast_receivers_hash: u64 = {
+        let broadcast_participants_hash: u64 = {
             use std::collections::hash_map::DefaultHasher;
             use std::hash::{Hash, Hasher};
             let mut h = DefaultHasher::new();
-            broadcast_receiver_ids.hash(&mut h);
+            broadcast_participant_ids.hash(&mut h);
             h.finish()
         };
         let blink_elapsed = self.blink_epoch.elapsed();
@@ -4448,7 +4448,7 @@ impl GpuRenderer {
                     pane_focus_flash_bucket,
                     hover_tab: hover_tab_idx,
                     close_override: u8::from(self.tab_close_override.is_some()),
-                    broadcast_receivers_hash,
+                    broadcast_participants_hash,
                     inline_media_hash,
                     hovered_url_cells,
                     process_privileged,
@@ -5564,49 +5564,15 @@ impl GpuRenderer {
             }
         }
 
-        // Broadcast receivers keep unmistakable red safety chrome so users do
-        // not accidentally leave mirrored input enabled. This is intentionally
-        // independent of the subtle split-pane seam styling above.
-        if !broadcast_receiver_ids.is_empty() {
-            // When: `!broadcast_receiver_ids.is_empty()` — at least one pane
-            // mirrors input, which needs its red safety border and strip.
-            let warning = hex_to_premultiplied_rgba(theme.colors.bright.red.0.as_str(), 1.0);
-            for (id, r) in pane_rects {
-                if !broadcast_receiver_ids.contains(id) {
-                    // When: this pane's id is absent from the receiver set — it
-                    // does not mirror input, so it takes no warning chrome.
-                    continue;
-                }
-                let t = 2.0_f32;
-                quads.push(QuadInstance {
-                    rect: px_to_ndc(r.x, r.y, r.w, t, sw, sh),
-                    color: warning,
-                    ..Default::default()
-                });
-                quads.push(QuadInstance {
-                    rect: px_to_ndc(r.x, r.y + r.h - t, r.w, t, sw, sh),
-                    color: warning,
-                    ..Default::default()
-                });
-                quads.push(QuadInstance {
-                    rect: px_to_ndc(r.x, r.y, t, r.h, sw, sh),
-                    color: warning,
-                    ..Default::default()
-                });
-                quads.push(QuadInstance {
-                    rect: px_to_ndc(r.x + r.w - t, r.y, t, r.h, sw, sh),
-                    color: warning,
-                    ..Default::default()
-                });
-                let strip_h = (self.font_size * 1.45).max(20.0).min(r.h.max(0.0));
-                let strip = with_premultiplied_alpha(warning, 0.92);
-                quads_overlay.push(QuadInstance {
-                    rect: px_to_ndc(r.x + t, r.y + t, (r.w - t * 2.0).max(0.0), strip_h, sw, sh),
-                    color: strip,
-                    ..Default::default()
-                });
-            }
-        }
+        // Safety edges sit above terminal ink, images, and the scrollbar, but below modal chrome.
+        emit_broadcast_borders(
+            &mut quads_overlay,
+            pane_rects,
+            &broadcast_participant_ids,
+            hex_to_premultiplied_rgba(theme.colors.bright.red.0.as_str(), 1.0),
+            sw,
+            sh,
+        );
         // -------- Tab bar ---------------------------------------------------
         // The insertion gap below opens 8 px at the current drop slot when a
         // drag is active over this bar.
@@ -6871,44 +6837,6 @@ impl GpuRenderer {
         // Drag-chip overlay: translucent ~120×24 quad that follows the
         // cursor while a tab is held. Drawn AFTER ime/search so it
         // sits on top of everything.
-        let broadcast_label_rects: Vec<PaneRect> = pane_rects
-            .iter()
-            .filter(|(id, _)| broadcast_receiver_ids.contains(id))
-            .map(|(_, r)| *r)
-            .collect();
-        if !broadcast_label_rects.is_empty() {
-            // Broadcast warning label → chrome_text, one call per
-            // pane rect (each rect gets its own ⚠ BROADCAST string).
-            if let Some(stack) = self.font_stack.as_ref() {
-                let native_em = stack
-                    .cell_metrics_raster_px()
-                    .ok()
-                    .map(|m| m.cell_h as f32)
-                    .unwrap_or(self.cell_h);
-                let mut wt = stack.clone();
-                let warn_color = hex_to_chrome_color(theme.colors.bright.yellow.0.as_str());
-                for rect in broadcast_label_rects.iter() {
-                    emit_overlay_text_glyphs(
-                        &mut self.glyph_atlas,
-                        stack,
-                        self.font_size * 0.85,
-                        native_em,
-                        &mut wt,
-                        "⚠ BROADCAST",
-                        warn_color,
-                        ChromeAttrs::default(),
-                        rect.x + 10.0,
-                        rect.y + 4.0 + self.font_size * 0.85 * 0.8,
-                        [rect.x, rect.y, rect.w, (self.font_size * 1.45).max(20.0)],
-                        sw,
-                        sh,
-                        &mut overlay_glyph_instances,
-                        None,
-                    );
-                }
-            }
-        }
-
         if let Some(chip) = self.drag_chip.clone() {
             const CHIP_W: f32 = 120.0;
             const CHIP_H: f32 = 24.0;
@@ -7024,8 +6952,7 @@ impl GpuRenderer {
         // `text_renderer.prepare` are gone. Every chrome string already
         // landed in `glyph_instances` (pre-overlay: search status bar,
         // tab titles) or `overlay_glyph_instances` (modal chrome:
-        // palette, IME preedit, broadcast banner, drag-
-        // chip title, quick-select hints) via `chrome_text::layout`
+        // palette, IME preedit, drag-chip title, quick-select hints) via `chrome_text::layout`
         // earlier in this function. The atlas upload + per-pass draw
         // calls below carry those instances to the GPU.
 
@@ -8197,6 +8124,35 @@ fn emit_inline_image_instances(
     emitted.sort_unstable_by_key(|(painter_order, _)| *painter_order);
     out.extend(emitted.into_iter().map(|(_, instance)| instance));
     skipped
+}
+
+fn emit_broadcast_borders(
+    quads_overlay: &mut Vec<QuadInstance>,
+    pane_rects: &[(u64, PaneRect)],
+    participants: &[u64],
+    warning: [f32; 4],
+    sw: f32,
+    sh: f32,
+) {
+    for (id, r) in pane_rects {
+        if !participants.contains(id) || r.w <= 0.0 || r.h <= 0.0 {
+            // When: id is not a participant or r has no area, no safety edge belongs in this pane.
+            continue;
+        }
+        // Physical-pixel edges stay thin regardless of font size and cannot overlap on tiny panes.
+        let t = 2.0_f32.min(r.w / 2.0).min(r.h / 2.0);
+        for rect in [
+            PaneRect::new(r.x, r.y, r.w, t),
+            PaneRect::new(r.x, r.y + r.h - t, r.w, t),
+            PaneRect::new(r.x, r.y + t, t, r.h - 2.0 * t),
+            PaneRect::new(r.x + r.w - t, r.y + t, t, r.h - 2.0 * t),
+        ] {
+            quads_overlay.push(QuadInstance::sharp(
+                px_to_ndc(rect.x, rect.y, rect.w, rect.h, sw, sh),
+                warning,
+            ));
+        }
+    }
 }
 
 fn fold_u64_to_u32(value: u64) -> u32 {

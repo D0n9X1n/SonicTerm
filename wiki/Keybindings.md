@@ -322,13 +322,26 @@ input remain text.
 
 ### Numeric keypad
 
-In legacy mode, physical keypad digits that the operating system resolves as
-numeric character keys retain ordinary digit text, even after `ESC =` enables
-application-keypad mode. This keeps digits usable with shell line editors that
-enable `smkx`. Existing modifier encoding still applies. OS logical text is the
-numeric-intent signal, not a direct NumLock-state measurement. Non-text keypad
-navigation, operators, and Enter retain their existing application-keypad rules;
-negotiated Kitty behavior is unchanged.
+With the default `[terminal].keypad_mode = "auto"`, physical keypad digits that
+the operating system resolves as numeric character keys retain ordinary digit
+text, even after `ESC =` enables application-keypad mode. Operators, Enter, and
+non-text keypad navigation retain their negotiated application-keypad mappings.
+OS logical digit text is not a direct measurement of hardware NumLock.
+
+If a shell enables application-keypad mode but does not accept its operator or
+Enter sequences, select ordinary numeric input explicitly and reload the config:
+
+```toml
+[terminal]
+keypad_mode = "numeric"
+```
+
+This overrides DECKPAM only for legacy input: operators use normal text rules,
+keypad Enter uses Return's modifier/newline rules, and navigation follows the OS
+logical key. Digits remain unchanged. Applications that need distinct legacy
+keypad mappings should keep `auto`. The preference applies across main/child
+windows and broadcast destinations without changing the terminal's stored modes.
+Negotiated Kitty encoding is unchanged.
 
 ### Load failures
 
@@ -622,10 +635,22 @@ READONLY 还允许执行切换或激活标签页、切换 pane 焦点、打开�
 
 ### 数字小键盘
 
-在传统模式下，操作系统解析为数字字符的物理小键盘数字键保持普通数字文本，即使 `ESC =`
-已启用应用小键盘模式。这样，在启用 `smkx` 的 shell 行编辑器中仍可输入数字。现有修饰键
-编码继续生效。数字意图来自操作系统逻辑文本，并非直接测量 NumLock 状态。非文本小键盘
-导航、运算符与 Enter 保持既有应用小键盘规则；已协商的 Kitty 行为不变。
+默认 `[terminal].keypad_mode = "auto"` 时，操作系统解析为数字字符的物理小键盘数字键
+保持普通数字文本，即使 `ESC =` 已启用应用小键盘模式。运算符、Enter 和非文本小键盘
+导航保留协商的应用小键盘映射。操作系统逻辑数字文本不等于直接测量硬件 NumLock。
+
+如果 shell 启用了应用小键盘模式，却不接受其运算符或 Enter 序列，可显式选择普通数字
+输入并重载配置：
+
+```toml
+[terminal]
+keypad_mode = "numeric"
+```
+
+此设置仅覆盖旧式输入的 DECKPAM：运算符使用普通文本规则，小键盘 Enter 使用 Return
+的修饰键/newline 规则，导航遵循操作系统逻辑按键。数字键不变。依赖独立旧式小键盘映射
+的程序应保留 `auto`。设置适用于主窗口、子窗口和广播目标，不改变终端已保存的模式。
+已协商的 Kitty 编码保持不变。
 
 ### 加载失败
 

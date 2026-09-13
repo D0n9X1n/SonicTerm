@@ -233,7 +233,7 @@ fn window_identity_mutations_require_full_repaint() {
         |w| w.pane_focus_flash_bucket = 1,
         |w| w.hover_tab = 1,
         |w| w.close_override = 1,
-        |w| w.broadcast_receivers_hash = 1,
+        |w| w.broadcast_participants_hash = 1,
         |w| w.inline_media_hash = 1,
         |w| w.hovered_url_cells = HoveredUrlCells::single(7, 0, 0, 1, true),
         |w| w.process_privileged = true,
@@ -255,6 +255,18 @@ fn window_identity_mutations_require_full_repaint() {
         assert_eq!(changed.damage.w, expected.width);
         assert_eq!(changed.damage.h, expected.height);
     }
+}
+
+#[test]
+fn broadcast_toggle_off_repaints_unchanged_terminal_content() {
+    // Removing safety chrome requires full damage even when every grid revision stays unchanged.
+    let mut armed = facts(false);
+    armed.window.broadcast_participants_hash = 42;
+    let baseline = FramePlan::build(armed, [pane(7, 1)], None);
+    let disabled = FramePlan::build(facts(false), [pane(7, 1)], Some(&baseline.key));
+    assert!(!disabled.unchanged);
+    assert_eq!(disabled.mode, RenderMode::Full);
+    assert_eq!(disabled.damage, baseline.damage);
 }
 
 /// Viewport-only changes on an inactive pane still repaint even when the active pane and grid revisions are unchanged.

@@ -1,3 +1,4 @@
+use sonicterm_cfg::config::KeypadMode;
 use sonicterm_vt::vt::KeyboardModes;
 use winit::{
     event::{ElementState, KeyEvent},
@@ -60,9 +61,10 @@ pub(crate) fn encode_key(
     mods: ModifiersState,
     kitty_flags: u8,
     modes: KeyboardModes,
+    keypad_mode: KeypadMode,
 ) -> Option<Vec<u8>> {
     let key_without_modifiers = event.key_without_modifiers();
-    encode_event(
+    encode_event_with_keypad_mode(
         KeyEventView {
             logical_key: &event.logical_key,
             unmodified_character: key_character(&key_without_modifiers),
@@ -76,7 +78,28 @@ pub(crate) fn encode_key(
         mods,
         kitty_flags,
         modes,
+        keypad_mode,
     )
+}
+
+fn encode_event_with_keypad_mode(
+    event: KeyEventView<'_>,
+    mods: ModifiersState,
+    kitty_flags: u8,
+    modes: KeyboardModes,
+    keypad_mode: KeypadMode,
+) -> Option<Vec<u8>> {
+    let modes = match keypad_mode {
+        KeypadMode::Auto => modes,
+        KeypadMode::Numeric => KeyboardModes::new(
+            modes.application_cursor_keys(),
+            false,
+            modes.backarrow_key(),
+            modes.newline(),
+            modes.modify_other_keys(),
+        ),
+    };
+    encode_event(event, mods, kitty_flags, modes)
 }
 
 /// Backwards-compatible logical-key entry point retained for focused unit tests.
@@ -213,9 +236,12 @@ fn encode_legacy(
         // modifyOtherKeys explicitly owns an unconsumed Shift chord.
         let has_command_modifier =
             mods.intersects(ModifiersState::ALT | ModifiersState::CONTROL | ModifiersState::SUPER);
-        if modes.modify_other_keys() != 2 || mods.is_empty() || has_command_modifier {
-            // When: modify_other_keys is not level two, mods is empty, or
-            // has_command_modifier was consumed, preserve the OS-produced UTF-8.
+        if modes.modify_other_keys() != 2
+            || mods.is_empty()
+            || has_command_modifier
+            || text.chars().nth(1).is_some()
+        {
+            // When: MOK does not own the chord or text spans multiple codepoints, preserve the produced UTF-8.
             return Some(text.as_bytes().to_vec());
         }
     }
@@ -625,10 +651,25 @@ fn encode_legacy_text(
         return Vec::new();
     }
 
-    if should_modify_other_key(modify_other_keys, u32::from(primary), mods) {
-        // When: should_modify_other_key claims this chord, use xterm's sequence
-        // instead of the otherwise compatible legacy representation.
-        return encode_modify_other_key(u32::from(primary), mods);
+    let mok_character = mods.shift_key().then_some(shifted).flatten().unwrap_or(primary);
+    if modify_other_keys == 1
+        && mods == (ModifiersState::CONTROL | ModifiersState::SHIFT)
+        && ('@'..='\u{7f}').contains(&mok_character)
+    {
+        // When: modify_other_keys is one and mods combines Shift+Control, keep mok_character's ASCII control alias.
+        return vec![(mok_character as u8) & 0x1f];
+    }
+    let shifted_text = modify_other_keys == 2
+        && mods == ModifiersState::SHIFT
+        && primary != ' '
+        && !('@'..='\u{7f}').contains(&primary);
+    if shifted_text {
+        // When: shifted_text consumes Shift, preserve UTF-8 without falling into ASCII-only legacy chord encoding.
+        return produced_text.as_bytes().to_vec();
+    }
+    if should_modify_other_key(modify_other_keys, u32::from(mok_character), mods) {
+        // When: should_modify_other_key claims the chord, report its layout character instead of Kitty's base.
+        return encode_modify_other_key(u32::from(mok_character), mods);
     }
 
     let mut legacy_primary = primary;

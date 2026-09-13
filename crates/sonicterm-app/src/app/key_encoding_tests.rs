@@ -43,6 +43,343 @@ fn application_keypad_keeps_os_numeric_digits_as_text() {
 }
 
 #[test]
+fn numeric_keypad_preference_is_opt_in_and_preserves_auto_bytes() {
+    // Numeric preference overrides only DECKPAM; auto retains deliberate application-keypad mappings.
+    for (physical, text, application) in [
+        (KeyCode::NumpadDivide, "/", "\x1bOo"),
+        (KeyCode::NumpadMultiply, "*", "\x1bOj"),
+        (KeyCode::NumpadSubtract, "-", "\x1bOm"),
+        (KeyCode::NumpadAdd, "+", "\x1bOk"),
+        (KeyCode::NumpadDecimal, ".", "\x1bOn"),
+        (KeyCode::NumpadEqual, "=", "\x1bOX"),
+        (KeyCode::NumpadComma, ",", "\x1bOl"),
+        (KeyCode::Numpad3, "3", "3"),
+    ] {
+        let logical = Key::Character(text.into());
+        let mut key = event(
+            &logical,
+            PhysicalKey::Code(physical),
+            Some(text),
+            KeyLocation::Numpad,
+            ElementState::Pressed,
+            false,
+        );
+        key.unmodified_character = text.chars().next();
+        for app_keypad in [false, true] {
+            let modes = KeyboardModes::new(false, app_keypad, false, false, 0);
+            for flags in [0, KITTY_REPORT_ALTERNATES, KITTY_REPORT_TEXT] {
+                let auto = if app_keypad { application } else { text };
+                assert_eq!(
+                    encode_event_with_keypad_mode(
+                        key,
+                        ModifiersState::empty(),
+                        flags,
+                        modes,
+                        KeypadMode::Auto
+                    ),
+                    Some(auto.as_bytes().to_vec())
+                );
+                assert_eq!(
+                    encode_event_with_keypad_mode(
+                        key,
+                        ModifiersState::empty(),
+                        flags,
+                        modes,
+                        KeypadMode::Numeric
+                    ),
+                    Some(text.as_bytes().to_vec()),
+                    "physical={physical:?}, flags={flags}"
+                );
+            }
+            for state in [ElementState::Pressed, ElementState::Released] {
+                key.state = state;
+                key.repeat = state == ElementState::Pressed;
+                for flags in [
+                    KITTY_DISAMBIGUATE,
+                    KITTY_REPORT_EVENTS,
+                    KITTY_REPORT_ALL,
+                    KITTY_REPORT_ALL | KITTY_REPORT_EVENTS | KITTY_REPORT_TEXT,
+                ] {
+                    assert_eq!(
+                        encode_event_with_keypad_mode(
+                            key,
+                            ModifiersState::empty(),
+                            flags,
+                            modes,
+                            KeypadMode::Numeric
+                        ),
+                        encode_event_with_keypad_mode(
+                            key,
+                            ModifiersState::empty(),
+                            flags,
+                            modes,
+                            KeypadMode::Auto
+                        ),
+                        "Kitty physical={physical:?}, flags={flags}, state={state:?}",
+                    );
+                }
+            }
+            key.state = ElementState::Pressed;
+            key.repeat = false;
+        }
+    }
+}
+
+#[test]
+fn numeric_keypad_enter_keeps_return_modes_and_kitty_identity() {
+    // Numpad Enter uses Return rules in numeric mode, not Cocoa's native U+0003 text.
+    let logical = Key::Named(NamedKey::Enter);
+    let mut key = event(
+        &logical,
+        PhysicalKey::Code(KeyCode::NumpadEnter),
+        Some("\r"),
+        KeyLocation::Numpad,
+        ElementState::Pressed,
+        false,
+    );
+    key.text_with_all_modifiers = Some("\u{3}");
+    for (mods, newline, mok, expected) in [
+        (ModifiersState::empty(), false, 0, b"\r".as_slice()),
+        (ModifiersState::empty(), true, 0, b"\r\n".as_slice()),
+        (ModifiersState::ALT, true, 0, b"\x1b\r\n".as_slice()),
+        (ModifiersState::SHIFT, false, 2, b"\x1b[27;2;13~".as_slice()),
+        (ModifiersState::CONTROL, false, 1, b"\x1b[27;5;13~".as_slice()),
+    ] {
+        let modes = KeyboardModes::new(true, true, true, newline, mok);
+        assert_eq!(
+            encode_event_with_keypad_mode(key, mods, 0, modes, KeypadMode::Numeric),
+            Some(expected.to_vec())
+        );
+        assert!(modes.application_keypad(), "the parser snapshot is unchanged");
+    }
+    let modes = KeyboardModes::new(false, true, false, false, 0);
+    assert_eq!(
+        encode_event_with_keypad_mode(key, ModifiersState::empty(), 0, modes, KeypadMode::Auto),
+        Some(b"\x1bOM".to_vec())
+    );
+    for state in [ElementState::Pressed, ElementState::Released] {
+        key.state = state;
+        for flags in [KITTY_DISAMBIGUATE, KITTY_REPORT_ALL, KITTY_REPORT_EVENTS | KITTY_REPORT_ALL]
+        {
+            assert_eq!(
+                encode_event_with_keypad_mode(
+                    key,
+                    ModifiersState::SHIFT,
+                    flags,
+                    modes,
+                    KeypadMode::Numeric
+                ),
+                encode_event_with_keypad_mode(
+                    key,
+                    ModifiersState::SHIFT,
+                    flags,
+                    modes,
+                    KeypadMode::Auto
+                )
+            );
+        }
+    }
+    assert_eq!(
+        encode_event_with_keypad_mode(key, ModifiersState::empty(), 0, modes, KeypadMode::Numeric),
+        None
+    );
+}
+
+#[test]
+fn numeric_keypad_preference_preserves_other_modes_and_modifiers() {
+    // Keypad policy must not change layout text, cursor modes, or a recipient's modified-key protocol.
+    let logical = Key::Named(NamedKey::ArrowDown);
+    let key = event(
+        &logical,
+        PhysicalKey::Code(KeyCode::Numpad2),
+        None,
+        KeyLocation::Numpad,
+        ElementState::Pressed,
+        false,
+    );
+    let modes = KeyboardModes::new(true, true, true, true, 2);
+    assert_eq!(
+        encode_event_with_keypad_mode(key, ModifiersState::empty(), 0, modes, KeypadMode::Auto),
+        Some(b"\x1bOr".to_vec())
+    );
+    assert_eq!(
+        encode_event_with_keypad_mode(key, ModifiersState::empty(), 0, modes, KeypadMode::Numeric),
+        Some(b"\x1bOB".to_vec())
+    );
+    let add = Key::Character("+".into());
+    let mut key = event(
+        &add,
+        PhysicalKey::Code(KeyCode::NumpadAdd),
+        Some("+"),
+        KeyLocation::Numpad,
+        ElementState::Pressed,
+        false,
+    );
+    key.unmodified_character = Some('+');
+    for (mods, mok, expected) in [
+        (ModifiersState::ALT, 0, "\x1b+"),
+        (ModifiersState::SUPER, 0, "\x1b[43;9u"),
+        (ModifiersState::ALT, 2, "\x1b[27;3;43~"),
+    ] {
+        assert_eq!(
+            encode_event_with_keypad_mode(
+                key,
+                mods,
+                0,
+                KeyboardModes::new(false, true, false, false, mok),
+                KeypadMode::Numeric
+            ),
+            Some(expected.as_bytes().to_vec())
+        );
+    }
+}
+
+#[test]
+fn modify_other_keys_uses_layout_character_and_xterm_shift_rules() {
+    // MOK reports layout-selected characters; Shift-only symbols and control-producing keys differ.
+    for (base, shifted, physical, level_two) in [
+        ('1', '!', KeyCode::Digit1, "!"),
+        ('2', '@', KeyCode::Digit2, "@"),
+        ('3', '#', KeyCode::Digit3, "#"),
+        ('6', '^', KeyCode::Digit6, "^"),
+        ('=', '+', KeyCode::Equal, "+"),
+        ('/', '?', KeyCode::Slash, "?"),
+        ('[', '{', KeyCode::BracketLeft, "\x1b[27;2;123~"),
+        ('\\', '|', KeyCode::Backslash, "\x1b[27;2;124~"),
+        ('`', '~', KeyCode::Backquote, "\x1b[27;2;126~"),
+        ('a', 'A', KeyCode::KeyA, "\x1b[27;2;65~"),
+        (' ', ' ', KeyCode::Space, "\x1b[27;2;32~"),
+        ('8', '(', KeyCode::Digit8, "("),
+        ('é', '2', KeyCode::Digit2, "2"),
+        ('é', 'é', KeyCode::Digit2, "é"),
+        ('ä', 'Ä', KeyCode::Quote, "Ä"),
+    ] {
+        let text = shifted.to_string();
+        let logical = Key::Character(text.clone().into());
+        let mut key = event(
+            &logical,
+            PhysicalKey::Code(physical),
+            Some(&text),
+            KeyLocation::Standard,
+            ElementState::Pressed,
+            false,
+        );
+        key.unmodified_character = Some(base);
+        for level in 0..=2 {
+            let expected = if level == 2 { level_two } else { &text };
+            assert_eq!(
+                encode_event(
+                    key,
+                    ModifiersState::SHIFT,
+                    0,
+                    KeyboardModes::new(false, false, false, false, level)
+                ),
+                Some(expected.as_bytes().to_vec()),
+                "base={base:?}, shifted={shifted:?}, level={level}",
+            );
+        }
+    }
+}
+
+#[test]
+fn modify_other_keys_shifted_chords_keep_layout_codes_and_control_aliases() {
+    // Symbol identity is not reconstructible from an unshifted digit and Shift alone.
+    for (base, shifted, level_one) in [
+        ('3', '#', b"\x1b[27;6;35~".as_slice()),
+        ('=', '+', b"\x1b[27;6;43~".as_slice()),
+        ('/', '?', b"\x1b[27;6;63~".as_slice()),
+        ('2', '@', b"\0".as_slice()),
+        ('6', '^', b"\x1e".as_slice()),
+        ('[', '{', b"\x1b".as_slice()),
+        ('\\', '|', b"\x1c".as_slice()),
+        ('`', '~', b"\x1e".as_slice()),
+        ('a', 'A', b"\x01".as_slice()),
+    ] {
+        let text = shifted.to_string();
+        let logical = Key::Character(text.clone().into());
+        let mut key = event(
+            &logical,
+            PhysicalKey::Unidentified(winit::keyboard::NativeKeyCode::Unidentified),
+            Some(&text),
+            KeyLocation::Standard,
+            ElementState::Pressed,
+            false,
+        );
+        key.unmodified_character = Some(base);
+        key.text_with_all_modifiers = Some("\0");
+        let modifiers = ModifiersState::SHIFT | ModifiersState::CONTROL;
+        assert_eq!(
+            encode_event(key, modifiers, 0, KeyboardModes::new(false, false, false, false, 1)),
+            Some(level_one.to_vec()),
+            "Ctrl+Shift+{base}",
+        );
+        assert_eq!(
+            encode_event(key, modifiers, 0, KeyboardModes::new(false, false, false, false, 2)),
+            Some(format!("\x1b[27;6;{}~", u32::from(shifted)).into_bytes()),
+            "Ctrl+Shift+{base}",
+        );
+        key.text_with_all_modifiers = Some(&text);
+        for level in [1, 2] {
+            assert_eq!(
+                encode_event(
+                    key,
+                    ModifiersState::SHIFT | ModifiersState::ALT,
+                    0,
+                    KeyboardModes::new(false, false, false, false, level)
+                ),
+                Some(format!("\x1b[27;4;{}~", u32::from(shifted)).into_bytes()),
+                "Alt+Shift+{base}, level={level}",
+            );
+        }
+    }
+}
+
+#[test]
+fn modify_other_keys_does_not_split_composed_text_or_replay_releases() {
+    // A composed string is text, not one modified-key codepoint; Kitty keeps its own key identities.
+    for text in ["SS", "e\u{301}"] {
+        let logical = Key::Character(text.into());
+        let mut key = event(
+            &logical,
+            PhysicalKey::Code(KeyCode::KeyE),
+            Some(text),
+            KeyLocation::Standard,
+            ElementState::Pressed,
+            false,
+        );
+        key.unmodified_character = Some('e');
+        let modes = KeyboardModes::new(false, false, false, false, 2);
+        assert_eq!(
+            encode_event(key, ModifiersState::SHIFT, 0, modes),
+            Some(text.as_bytes().to_vec())
+        );
+        key.state = ElementState::Released;
+        assert_eq!(encode_event(key, ModifiersState::SHIFT, 0, modes), None);
+    }
+    let logical = Key::Character("#".into());
+    let key = event(
+        &logical,
+        PhysicalKey::Code(KeyCode::Digit3),
+        Some("#"),
+        KeyLocation::Standard,
+        ElementState::Pressed,
+        false,
+    );
+    let modes = KeyboardModes::new(false, false, false, false, 2);
+    assert_eq!(
+        encode_event(key, ModifiersState::SHIFT, KITTY_DISAMBIGUATE, modes),
+        Some(b"#".to_vec())
+    );
+    assert_eq!(
+        encode_event(key, ModifiersState::SHIFT, KITTY_REPORT_ALL, modes),
+        Some(b"\x1b[51;2u".to_vec())
+    );
+    let mut option = key;
+    option.unmodified_character = Some('q');
+    assert_eq!(encode_event(option, ModifiersState::ALT, 0, modes), Some(b"#".to_vec()));
+}
+
+#[test]
 fn enter_encodes_carriage_return() {
     assert_eq!(
         encode_logical(&Key::Named(NamedKey::Enter), ModifiersState::empty(), 0, false),

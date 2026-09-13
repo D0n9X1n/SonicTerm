@@ -69,7 +69,7 @@ pub(crate) struct WindowIdentity {
     pub pane_focus_flash_bucket: u8,
     pub hover_tab: u32,
     pub close_override: u8,
-    pub broadcast_receivers_hash: u64,
+    pub broadcast_participants_hash: u64,
     pub inline_media_hash: u64,
     pub hovered_url_cells: Option<HoveredUrlCells>,
     pub process_privileged: bool,

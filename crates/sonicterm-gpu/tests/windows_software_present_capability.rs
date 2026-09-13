@@ -111,7 +111,7 @@ fn run_probe(active: &ActiveEventLoop) -> Result<Capability, String> {
         viewport_top_abs: None,
         is_active: true,
         cursor_style: CursorStyle::BlockSteady,
-        is_broadcast_receiver: false,
+        is_broadcast_participant: false,
         scrollbar_alpha: 0.0,
         inline_images: Vec::new(),
     }];

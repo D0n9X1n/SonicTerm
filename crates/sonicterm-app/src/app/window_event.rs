@@ -528,7 +528,7 @@ impl App {
                     .and_then(|ts| ts.get(tab_idx))
                     .map(|st| st.active_pane)
                     .unwrap_or(0);
-                let broadcast_receivers = self.broadcast_receivers();
+                let broadcast_participants = self.broadcast_participants();
                 if let Some(t) = timing.as_mut() {
                     t.lap("layout");
                 }
@@ -950,7 +950,7 @@ impl App {
                                 viewport_top_abs: ws_viewport_tops.get(id).copied().flatten(),
                                 is_active: *id == active_id,
                                 cursor_style: sonicterm_render_model::CursorStyle::default(),
-                                is_broadcast_receiver: broadcast_receivers.contains(id),
+                                is_broadcast_participant: broadcast_participants.contains(id),
                                 scrollbar_alpha: scrollbar_alpha_map
                                     .get(id)
                                     .copied()

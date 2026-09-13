@@ -57,9 +57,8 @@ pub struct PaneRender<'a> {
     /// Cursor presentation style for this pane (block / bar / underline +
     /// blink). The renderer paints the cursor only on the active pane.
     pub cursor_style: CursorStyle,
-    /// True when this pane is receiving mirrored broadcast input from the
-    /// active/source pane and therefore needs prominent safety chrome.
-    pub is_broadcast_receiver: bool,
+    /// True for the fixed broadcast source and each eligible receiver that needs safety chrome.
+    pub is_broadcast_participant: bool,
     /// Per-pane scrollbar alpha. `1.0` = fully visible,
     /// `0.0` = hidden. The renderer multiplies the scrollbar tint
     /// alphas by this and skips the emit entirely below the floor.

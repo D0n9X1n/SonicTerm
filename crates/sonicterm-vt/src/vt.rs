@@ -1432,10 +1432,20 @@ impl Parser {
             + usize::from(matches!(self.raw_osc, Some(RawOsc::Iterm2 { .. })))
     }
 
-    /// Mutably borrow the [`Grid`] — used by the host on resize, scrollback
-    /// scroll, and selection clears.
+    /// Mutably borrow the grid for cell and history operations; use [`Self::resize`] for geometry.
     pub fn grid_mut(&mut self) -> &mut Grid {
         &mut self.performer.grid
+    }
+
+    /// Resize the grid and reset scrolling margins only when bounded cell dimensions change.
+    pub fn resize(&mut self, cols: u16, rows: u16) {
+        let before = (self.performer.grid.cols, self.performer.grid.rows);
+        self.performer.grid.resize(cols, rows);
+        if before != (self.performer.grid.cols, self.performer.grid.rows) {
+            // Absolute margins must not survive a change to the bounded screen dimensions.
+            self.performer.scroll_top = None;
+            self.performer.scroll_bottom = None;
+        }
     }
 
     /// Borrow the hyperlink registry (OSC 8 interned uris).
