@@ -70,9 +70,14 @@ focus unchanged; refusal in a live child window never redirects the split to
 the main window.
 
 Broadcast mode mirrors source-pane input to the other panes in the current tab
-or in all tabs. Receiver panes are marked. The source is excluded, so it does
-not receive the input twice. Use broadcast carefully because each receiver PTY
-gets the same bytes.
+or in all tabs. Every participant—the fixed source and each eligible receiver—has
+a thin red border on all four sides in main and torn-out windows. The top edge is
+2 physical pixels, like the other edges; no banner or warning text covers the
+terminal. A lone source is still marked while broadcast is armed. Disabling
+broadcast or closing its source clears the highlights. The source is excluded
+from mirrored delivery, so it does not receive input twice. Use broadcast carefully:
+input reaches every receiver, with key encoding following each pane's negotiated
+terminal modes.
 
 For the complete default map, action names, and customization syntax, see
 [Keybindings](Keybindings).
@@ -486,9 +491,12 @@ shell 不会重启。关闭分屏会关闭对应 PTY；关闭最后一个 pane �
 对已放大的 pane 分屏会退出放大状态、恢复分屏布局并聚焦新 pane；主窗口与拖出的窗口行为一致。
 分屏被拒绝时，放大状态和焦点保持不变；存活子窗口中的拒绝不会把分屏操作转移到主窗口。
 
-广播模式会把源 pane 的输入复制到当前标签页或所有标签页中的其它 pane，并标记
-接收 pane。源 pane 不在接收集合中，因此不会收到两份输入。请谨慎使用，因为每个
-接收 PTY 都会得到相同字节。
+广播模式会把源 pane 的输入复制到当前标签页或所有标签页中的其它 pane。所有参与 pane
+（固定的源 pane 与每个符合条件的接收 pane）在主窗口和拖出窗口中都有四边细红框。
+顶部边线与其它边线一样为 2 个物理像素；不使用遮挡终端的横幅或警告文本。
+即使只有源 pane，广播启用时也会标记；关闭广播或关闭源 pane 会清除高亮。
+源 pane 不参与镜像投递，因此不会收到两份输入。请谨慎使用：输入会发送到每个接收 pane，
+按键编码遵循各 pane 协商的终端模式。
 
 完整默认快捷键、action 名称和自定义格式见 [快捷键](Keybindings)。
 

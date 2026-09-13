@@ -97,7 +97,7 @@ pub fn resize_renderer_and_panes_if_present(
     }
     let (cols, rows) = r.cells();
     for (pane_id, pane) in panes {
-        pane.parser.lock().grid_mut().resize(cols, rows);
+        pane.parser.lock().resize(cols, rows);
         pane.resize_pty(*pane_id, cols, rows);
     }
     true
@@ -428,7 +428,7 @@ impl App {
         // Split-borrow the palette out so the renderer can mutate it even though
         // `child` borrows `self.windows` below. Disjoint fields — safe. Computed
         // AFTER the scrollbar pre-match (which needs an unborrowed `self`).
-        let broadcast_receivers = self.broadcast_receivers();
+        let broadcast_participants = self.broadcast_participants();
         let mut palette_for_render: Option<&mut CommandPalette> = if palette_here {
             Some(&mut self.command_palette)
         } else {
@@ -732,7 +732,7 @@ impl App {
                             viewport_top_abs: viewport_tops.get(id).copied().flatten(),
                             is_active: *id == active_id,
                             cursor_style: sonicterm_render_model::CursorStyle::default(),
-                            is_broadcast_receiver: broadcast_receivers.contains(id),
+                            is_broadcast_participant: broadcast_participants.contains(id),
                             scrollbar_alpha: scrollbar_alpha_map.get(id).copied().unwrap_or(0.0),
                             inline_images: inline_images_by_pane
                                 .get(id)

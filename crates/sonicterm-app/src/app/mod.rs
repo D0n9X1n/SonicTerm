@@ -1793,7 +1793,7 @@ pub fn seed_parser_theme_colors(parser: &mut sonicterm_vt::vt::Parser, theme: &T
 #[doc(hidden)]
 pub fn resize_all_panes(panes: &HashMap<u64, PaneState>, cols: u16, rows: u16) {
     for (pane_id, pane) in panes {
-        pane.parser.lock().grid_mut().resize(cols, rows);
+        pane.parser.lock().resize(cols, rows);
         pane.resize_pty(*pane_id, cols, rows);
     }
 }
@@ -1840,7 +1840,7 @@ pub fn resize_panes_to_rects(
             (content_w / cell_w).floor() as u64,
             (content_h / cell_h).floor() as u64,
         );
-        pane.parser.lock().grid_mut().resize(cols, rows);
+        pane.parser.lock().resize(cols, rows);
         pane.resize_pty(*id, cols, rows);
     }
 }
@@ -3822,6 +3822,7 @@ impl App {
                     modifiers,
                     kitty_flags,
                     sonicterm_vt::vt::KeyboardModes::from_bits(keyboard_modes),
+                    self.config.terminal.keypad_mode,
                 )
                 .filter(|bytes| !bytes.is_empty())
                 .map(|bytes| (*pane_id, bytes))
@@ -4600,6 +4601,31 @@ impl App {
         self.broadcast_receivers_for(scope, source_pane)
     }
 
+    /// Return render-only participants, including the live source; never use this set for PTY fan-out.
+    pub(crate) fn broadcast_participants(&self) -> std::collections::BTreeSet<u64> {
+        let BroadcastState::On { source_pane, .. } = self.broadcast else {
+            // When: broadcast is Off, no pane needs safety chrome.
+            return Default::default();
+        };
+        if self.pane_by_id(source_pane).is_none() {
+            // When: source_pane is gone, mirrored input is inert even if other tabs survive.
+            return Default::default();
+        }
+        let mut participants = self.broadcast_receivers();
+        participants.insert(source_pane);
+        participants
+    }
+
+    fn clear_closed_broadcast_source(&mut self) {
+        if let BroadcastState::On { source_pane, .. } = self.broadcast {
+            if self.pane_by_id(source_pane).is_none() {
+                // A closed source needs its safety chrome erased in every surviving window before sleeping.
+                self.broadcast = BroadcastState::Off;
+                self.request_redraw_all_terminal_windows();
+            }
+        }
+    }
+
     fn broadcast_receivers_for(
         &self,
         scope: BroadcastScope,
@@ -4676,15 +4702,15 @@ impl App {
         self.broadcast_from(pane_id, bytes, PtyInputSource::Keyboard);
     }
 
-    /// Test-only: child render pane ids with the broadcast receiver flag that
+    /// Test-only: child render pane ids with the broadcast participant flag that
     /// would be passed into `sonicterm_render_model::PaneRender`.
     #[doc(hidden)]
     pub fn __test_child_broadcast_render_flags(&self, id: WindowId) -> Option<Vec<(u64, bool)>> {
         let child = self.windows.get(&id)?;
         let tab_idx = child.tabs.active_index();
         let panes = child.tab_states.get(tab_idx)?.tree.leaves();
-        let receivers = self.broadcast_receivers();
-        Some(panes.into_iter().map(|pane| (pane, receivers.contains(&pane))).collect())
+        let participants = self.broadcast_participants();
+        Some(panes.into_iter().map(|pane| (pane, participants.contains(&pane))).collect())
     }
 
     /// Test-only: how many tabs the named child window currently owns.

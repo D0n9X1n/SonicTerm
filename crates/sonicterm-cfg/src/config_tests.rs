@@ -1,6 +1,23 @@
 use super::*;
 
 #[test]
+fn keypad_mode_defaults_auto_and_round_trips_supported_values() {
+    // Existing configs retain negotiated keypad behavior; numeric input requires an explicit choice.
+    assert_eq!(Config::default().terminal.keypad_mode, KeypadMode::Auto);
+    assert_eq!(toml::from_str::<Config>("").unwrap().terminal.keypad_mode, KeypadMode::Auto);
+    for (name, expected) in [("auto", KeypadMode::Auto), ("numeric", KeypadMode::Numeric)] {
+        let config: Config =
+            toml::from_str(&format!("[terminal]\nkeypad_mode = \"{name}\"\n")).unwrap();
+        assert_eq!(config.terminal.keypad_mode, expected);
+        assert!(config.to_toml().unwrap().contains(&format!("keypad_mode = \"{name}\"")));
+    }
+    assert!(toml::from_str::<Config>("[terminal]\nkeypad_mode = \"unknown\"\n").is_err());
+    let template = default_config_template();
+    assert!(template.contains("keypad_mode = \"auto\""));
+    assert!(template.contains("numeric"));
+}
+
+#[test]
 fn default_terminal_term_program_is_sonicterm() {
     let cfg = Config::default();
     assert_eq!(cfg.terminal.term_program, "SonicTerm");

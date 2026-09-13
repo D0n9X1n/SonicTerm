@@ -12,6 +12,160 @@ use sonicterm_cfg::keymap::Direction;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[test]
+fn broadcast_render_flags_include_fixed_source_and_exclude_unrelated_panes() {
+    // Visual membership includes the fixed source without changing delivery or following focus.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let main = app.__test_seed_tab("main");
+    let child = app.__test_seed_child_window(&["child"]);
+    assert!(app.__test_child_split_active_right(child));
+    let source = app.__test_child_active_pane(child).unwrap();
+    let sibling =
+        app.__test_child_pane_ids(child).unwrap().into_iter().find(|id| *id != source).unwrap();
+    let flags = |app: &App, window| app.__test_child_broadcast_render_flags(window).unwrap();
+    assert!(flags(&app, child).iter().all(|(_, marked)| !marked));
+    assert!(
+        app.run_action_for_window(&Action::ToggleBroadcast { scope: BroadcastScope::Tab }, child)
+    );
+    assert!(flags(&app, child).iter().all(|(_, marked)| *marked));
+    assert_eq!(flags(&app, app.main_window_id.unwrap()), vec![(main, false)]);
+    assert_eq!(app.broadcast_receivers(), std::collections::BTreeSet::from([sibling]));
+    app.windows.get_mut(&child).unwrap().tab_states[0].active_pane = sibling;
+    assert!(flags(&app, child).iter().all(|(_, marked)| *marked));
+    assert_eq!(app.__test_broadcast_source(), Some(source));
+    app.__test_enable_pty_write_log();
+    app.__test_write_to_pane_with_broadcast(source, b"ping".to_vec());
+    let writes = app.__test_pty_write_log();
+    assert_eq!(writes.len(), 2);
+    assert_eq!(writes.iter().filter(|(id, _)| *id == source).count(), 1);
+    assert_eq!(writes.iter().filter(|(id, _)| *id == sibling).count(), 1);
+    app.windows.get_mut(&child).unwrap().tab_states[0].active_pane = source;
+    assert!(
+        app.run_action_for_window(&Action::ToggleBroadcast { scope: BroadcastScope::Tab }, child)
+    );
+    assert!(flags(&app, child).iter().all(|(_, marked)| !marked));
+}
+
+#[test]
+fn broadcast_render_flags_cover_all_windows_and_clear_after_source_closes() {
+    // All-tabs chrome covers visible participants, but a dead source cannot advertise live fan-out.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let main = app.__test_seed_tab("main");
+    let child = app.__test_seed_child_window(&["child"]);
+    assert!(app
+        .run_action_for_window(&Action::ToggleBroadcast { scope: BroadcastScope::AllTabs }, child));
+    for window in [app.main_window_id.unwrap(), child] {
+        assert!(app
+            .__test_child_broadcast_render_flags(window)
+            .unwrap()
+            .iter()
+            .all(|(_, marked)| *marked));
+    }
+    app.clear_closed_broadcast_source();
+    assert!(app.__test_broadcast_source().is_some(), "a live source must remain armed");
+    assert!(app.close_child_window(child));
+    assert_eq!(
+        app.__test_child_broadcast_render_flags(app.main_window_id.unwrap()).unwrap(),
+        vec![(main, false)]
+    );
+    app.clear_closed_broadcast_source();
+    assert_eq!(app.__test_broadcast_source(), None);
+    assert!(app.broadcast_receivers().is_empty());
+}
+
+#[test]
+fn broadcast_render_flags_mark_single_source_without_receivers() {
+    // Armed single-pane tab broadcast still marks its source while the fan-out set stays empty.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let source = app.__test_seed_tab("main");
+    assert!(app.run_action(&Action::ToggleBroadcast { scope: BroadcastScope::Tab }));
+    assert!(app.broadcast_receivers().is_empty());
+    assert_eq!(
+        app.__test_child_broadcast_render_flags(app.main_window_id.unwrap()).unwrap(),
+        vec![(source, true)]
+    );
+}
+
+#[test]
+fn pane_resize_helpers_restore_fullscreen_scrolling_after_margin_reset() {
+    // Main and child layout helpers must reconcile parser margins before subsequent PTY output.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    for child in [false, true] {
+        for rows in [12, 36] {
+            let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+            app.__test_seed_tab("main");
+            let window_id = if child {
+                app.__test_seed_child_window(&["child"])
+            } else {
+                app.main_window_id.unwrap()
+            };
+            let pane_id = app.windows[&window_id].tab_states[0].active_pane;
+            let parser = app.pane_by_id(pane_id).unwrap().parser.clone();
+            parser.lock().advance(b"\x1b[r");
+            let viewport = sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, rows as f32 * 10.0);
+            if child {
+                assert!(app.__test_set_child_pane_viewport(window_id, viewport, 10.0, 10.0));
+                assert!(app.__test_invoke_activate_tab_in_child(window_id, 0));
+            } else {
+                assert!(app.__test_set_main_pane_viewport(viewport, 10.0, 10.0));
+                app.__test_resize_visible_panes();
+            }
+            let mut parser = parser.lock();
+            assert_eq!((parser.grid().cols, parser.grid().rows), (80, rows));
+            parser.advance(format!("\x1b[{rows};1H").as_bytes());
+            let before = parser.grid().scrollback_len();
+            parser.advance(b"first\r\nsecond\r\n");
+            assert_eq!(parser.grid().scrollback_len(), before + 2, "child={child}, rows={rows}");
+            assert_eq!(parser.grid().row(rows - 2)[0].ch, 's');
+        }
+    }
+}
+
+#[test]
+fn broadcast_panes_keep_scrollback_and_independent_viewports_after_resize() {
+    // Broadcast membership cannot couple the resized panes' history or scrolling positions.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let main_pane = app.__test_seed_tab("main");
+    let child = app.__test_seed_child_window(&["child"]);
+    let child_pane = app.__test_child_active_pane(child).unwrap();
+    assert!(app.run_action(&Action::ToggleBroadcast {
+        scope: sonicterm_cfg::keymap::BroadcastScope::AllTabs,
+    }));
+    assert!(app.terminal_key_targets(main_pane).contains(&child_pane));
+    for (window, pane) in [(app.main_window_id.unwrap(), main_pane), (child, child_pane)] {
+        let parser = app.pane_by_id(pane).unwrap().parser.clone();
+        parser.lock().advance(b"\x1b[r");
+        resize_all_panes(&app.windows[&window].panes, 80, 12);
+        parser.lock().advance(b"\x1b[12;1Hone\r\ntwo\r\nthree\r\n");
+        assert_eq!(parser.lock().grid().scrollback_len(), 3);
+    }
+    app.scroll_pane(main_pane, -2);
+    assert_eq!(app.pane_by_id(main_pane).unwrap().viewport_top_abs, Some(1));
+    assert_eq!(app.pane_by_id(child_pane).unwrap().viewport_top_abs, None);
+    app.__test_child_set_pane_view_top(child, child_pane, 0, 3);
+    assert_eq!(app.pane_by_id(child_pane).unwrap().viewport_top_abs, Some(0));
+    assert_eq!(app.pane_by_id(main_pane).unwrap().viewport_top_abs, Some(1));
+}
+
+#[test]
+fn all_panes_resize_restores_scrolling_without_homing_cursor() {
+    // Whole-window sizing has the same parser-state contract as per-pane rectangle sizing.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let pane_id = app.__test_seed_tab("main");
+    let parser = app.pane_by_id(pane_id).unwrap().parser.clone();
+    parser.lock().advance(b"\x1b[r\x1b[10;3H");
+    resize_all_panes(&app.main().unwrap().panes, 80, 12);
+    let mut parser = parser.lock();
+    assert_eq!(parser.grid().cursor, sonicterm_grid::grid::Pos { row: 9, col: 2 });
+    parser.advance(b"\x1b[12;1Hline\r\n");
+    assert_eq!(parser.grid().scrollback_len(), 1);
+}
+
+#[test]
 fn terminal_ime_anchor_adds_physical_pane_origin_once() {
     // The native setter receives raster coordinates, including a right/lower pane's origin exactly once.
     let mut throttle = sonicterm_ui::ime::ImeCursorThrottle::new();

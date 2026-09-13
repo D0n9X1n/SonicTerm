@@ -334,8 +334,11 @@ and the last successful size stays cached. The first request always reaches the
 native call, because the cache starts empty rather than seeded from the spawn
 dimensions.
 
-The grid is resized first and is never rolled back when the native call fails:
-the pane keeps the requested geometry and only the child's view of it lags.
+The host first calls `Parser::resize`: grid bounds apply, and an effective row or
+column change clears parser-owned scrolling margins without homing the cursor.
+Duplicate-size relayouts preserve partial margins. The grid is never rolled back
+when the native call fails: the pane keeps the requested geometry and only the
+child's view of it lags.
 `PaneState::resize_pty` reports the failure once per failing run — first failure
 logged with pane id, requested columns and rows, and error, then silence until a
 success clears the latch. The latch gates the log line only. Warning suppression
@@ -706,8 +709,9 @@ PTY 尺寸调整是可失败的，且只在成功时缓存。回调把原生调�
 成功的尺寸仍保留在缓存中。第一次请求一定会到达原生调用，因为缓存初始为空，不会用
 spawn 时的尺寸预填。
 
-网格先被调整，且在原生调用失败时绝不回滚：窗格保留请求的几何尺寸，只有子进程看到的
-尺寸会滞后。`PaneState::resize_pty` 在每一轮连续失败中只报告一次——第一次失败会记录
+宿主先调用 `Parser::resize`：应用网格尺寸上限，实际行数或列数变化时清除解析器自有的
+滚动边距，但不把光标移到起点。相同尺寸的布局刷新保留局部边距。原生调用失败时网格
+绝不回滚：窗格保留请求的几何尺寸，只有子进程看到的尺寸会滞后。`PaneState::resize_pty` 在每一轮连续失败中只报告一次——第一次失败会记录
 窗格 id、请求的列数与行数以及错误，随后保持静默，直到一次成功清除该闩锁。闩锁只控制
 日志行。告警抑制绝不会抑制一次尺寸调整尝试；无效尺寸和成功的重复请求由 IO 边界决定，
 与闩锁无关。

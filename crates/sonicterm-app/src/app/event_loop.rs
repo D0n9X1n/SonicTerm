@@ -222,6 +222,7 @@ impl App {
             el.exit();
             return;
         }
+        self.clear_closed_broadcast_source();
         self.expire_quit_confirmation();
         self.warm_window_pool_maintain(el);
         if self.runtime_smoke.as_ref().is_some_and(|smoke| smoke.should_maintain_warm_pool()) {

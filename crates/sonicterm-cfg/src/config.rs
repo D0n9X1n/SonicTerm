@@ -304,6 +304,8 @@ pub struct TerminalConfig {
     pub term_program: String,
     /// Scrollback buffer depth, in rows.
     pub scrollback: usize,
+    /// Legacy keypad preference; negotiated Kitty input is unaffected.
+    pub keypad_mode: KeypadMode,
     /// Whether native absolute and explicit-relative filesystem targets are clickable.
     pub clickable_local_targets: bool,
     /// Whether whole bare components may resolve against trusted pane CWD.
@@ -312,6 +314,17 @@ pub struct TerminalConfig {
     pub cursor_blink: bool,
     /// Cursor shape.
     pub cursor_shape: CursorShape,
+}
+
+/// User preference for legacy keypad input, independent of hardware NumLock.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum KeypadMode {
+    /// Preserve negotiated keypad behavior and OS-resolved digit text.
+    #[default]
+    Auto,
+    /// Use normal keypad text and Return rules regardless of DECKPAM.
+    Numeric,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -488,6 +501,7 @@ impl Default for TerminalConfig {
             shell: None,
             term_program: "SonicTerm".to_string(),
             scrollback: 1_000,
+            keypad_mode: KeypadMode::default(),
             clickable_local_targets: true,
             clickable_bare_names: true,
             cursor_blink: false,
@@ -1127,6 +1141,10 @@ term_program = "{term_program}"
 
 # Scrollback line limit per pane.
 scrollback = {scrollback}
+
+# auto preserves application-keypad mappings; numeric makes operators/Enter use
+# ordinary text/Return. Numeric digits and negotiated Kitty input are unchanged.
+keypad_mode = "auto"
 
 # Cmd/Ctrl-click safe local files and directories after asynchronous validation.
 clickable_local_targets = true

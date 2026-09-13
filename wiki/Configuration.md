@@ -84,6 +84,7 @@ including history is at most `1048576` cells.
 | `shell` | omitted | Shell for new panes. Windows tries `pwsh.exe` from `PATH`, registered PowerShell 7, the real Microsoft Store package, Windows PowerShell, then `cmd.exe`. Unix tries an executable `$SHELL`, the current user’s executable passwd shell, then `/bin/sh`. An explicit non-empty value wins. |
 | `term_program` | `"SonicTerm"` | `TERM_PROGRAM` for new child PTYs. `TERM_PROGRAM_VERSION` is SonicTerm’s version, except `term_program = "WezTerm"` advertises `20230712-072601`. |
 | `scrollback` | `1000` | Requested history rows per pane. `0` disables history. Grid and retained-byte budgets may lower the effective limit. |
+| `keypad_mode` | `"auto"` | `auto` preserves negotiated legacy keypad mappings and OS-resolved digit text. Opt-in `numeric` makes keypad operators and Enter use normal text/Return rules regardless of DECKPAM, and navigation follows its logical key. Kitty input is unchanged. See [Keybindings](Keybindings). |
 | `clickable_local_targets` | `true` | Allows validated local directories to open and files to be selected in their containing folder on every platform. Includes local file URIs and native-path OSC 8 links; web/mail links are independent. |
 | `clickable_bare_names` | `true` | Allows contextual names to resolve against the exact pane’s trusted local OSC 7 working directory. Separator-relative paths require that same trusted pane CWD. It only works when `clickable_local_targets` is also `true`. |
 | `cursor_blink` | `false` | Enables cursor blinking. |
@@ -159,7 +160,7 @@ names did not change. The following settings apply to existing windows:
 - font family, size, line height, weight, and LCD subpixel mode;
 - content padding, opacity, scrollbar, and panel padding;
 - cursor shape and blink;
-- scrollback and local-target policy;
+- scrollback, keypad mode, and local-target policy;
 - tab width, warm-window target, software degradation, accessibility, and
   notification settings.
 
@@ -298,6 +299,7 @@ Grid 尺寸始终有上限。每个轴最多是 `4096`，可见 grid 最多包�
 | `shell` | 省略 | 新 pane 使用的 shell。Windows 依次尝试 `PATH` 中的 `pwsh.exe`、已注册的 PowerShell 7、Microsoft Store 中的真实程序、Windows PowerShell、`cmd.exe`。Unix 依次尝试可执行的 `$SHELL`、当前用户 passwd 中的可执行 shell、`/bin/sh`。非空显式值优先。 |
 | `term_program` | `"SonicTerm"` | 新子 PTY 的 `TERM_PROGRAM`。`TERM_PROGRAM_VERSION` 通常是 SonicTerm 版本；`term_program = "WezTerm"` 时为 `20230712-072601`。 |
 | `scrollback` | `1000` | 每个 pane 请求保留的历史行数。`0` 关闭历史记录。Grid 和内存字节预算可能进一步降低实际值。 |
+| `keypad_mode` | `"auto"` | `auto` 保留协商的旧式小键盘映射及操作系统解析出的数字文本。显式选择 `numeric` 后，运算符和 Enter 不受 DECKPAM 影响，使用普通文本/Return 规则，导航遵循逻辑按键。Kitty 输入不变。参见[快捷键](Keybindings)。 |
 | `clickable_local_targets` | `true` | 所有平台都打开经过验证的本地目录，或在所在文件夹中选中文件。包括本地 file URI 和本机路径 OSC 8 链接；网页和邮件链接不受控制。 |
 | `clickable_bare_names` | `true` | 允许按准确 pane 的可信本机 OSC 7 工作目录解析上下文名称。带分隔符的相对路径也要求同一可信 pane CWD。只有 `clickable_local_targets` 同时为 `true` 时才生效。 |
 | `cursor_blink` | `false` | 让光标闪烁。 |
@@ -369,7 +371,7 @@ Scrollback 行数与内存预算会同时限制历史记录。包含丰富属性
 - 字体族、字号、行高、字重与 LCD 次像素模式；
 - 内容 padding、opacity、滚动条和 panel padding；
 - 光标形状与闪烁；
-- scrollback 与本地目标策略；
+- scrollback、小键盘模式与本地目标策略；
 - 标签页宽度、预热窗口目标、软件降级、无障碍与通知设置。
 
 有些设置只影响重载后新建的对象：
