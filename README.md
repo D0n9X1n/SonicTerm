@@ -56,11 +56,10 @@ then click to reveal it in its folder—not execute it or launch an editor.
 Relative references use the current pane's trusted shell working directory.
 See [local targets](wiki/Usage.md#open-urls-and-local-targets).
 
-![Static capture of an underlined source reference and its resolved filename preview, with the private directory prefix redacted](assets/screenshots/file-detection.png)
+![SonicTerm detecting an underlined file path and previewing its resolved absolute path](assets/screenshots/file-detection.png)
 
-*Static crop of a user-provided capture; the private directory prefix is redacted.
-The line range stays in the reference, not the filename. Click/reveal behavior
-was verified separately in the native app.*
+*User-provided capture showing a detected file path and its resolved absolute-path
+preview. Click/reveal behavior was verified separately in the native app.*
 
 ### READONLY mode for safe navigation
 
