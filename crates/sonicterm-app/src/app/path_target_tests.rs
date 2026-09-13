@@ -191,7 +191,13 @@ fn tool_and_prose_paths_resolve_real_files_in_each_window() {
     app.__test_seed_tab("main path boundaries");
     let main = app.main_window_id.unwrap();
     let child = app.__test_seed_child_window(&["path boundaries"]);
-    let cwd = local_file_uri(&root).unwrap();
+    // File URIs use a slash-prefixed drive path; the reveal URI encoder only accepts POSIX-shaped input.
+    let uri_path = if cfg!(windows) {
+        PathBuf::from(format!("/{}", root.to_str().unwrap().replace('\\', "/")))
+    } else {
+        root.clone()
+    };
+    let cwd = local_file_uri(&uri_path).unwrap();
     for window in [main, child] {
         let pane = *app.windows[&window].panes.keys().next().unwrap();
         app.windows[&window].panes[&pane].parser.lock().resize(120, 24);
