@@ -1826,17 +1826,11 @@ impl CellTargetSnapshot {
         match &self.target {
             ResolvedCellTarget::Rejected(_) => Some(self.display.clone()),
             ResolvedCellTarget::Path(key) => key.link_destination.clone().or_else(|| {
-                key.candidates
-                    .iter()
-                    .find(|candidate| match &candidate.target {
-                        DetectedTarget::PathCandidate(_) => true,
-                        DetectedTarget::SourceReference(reference) => {
-                            reference.explicit_path
-                                || !reference.path.chars().any(char::is_whitespace)
-                        }
-                        _ => false,
-                    })
-                    .map(|candidate| candidate.display().to_owned())
+                sonicterm_cfg::url_scan::explicit_path_feedback(
+                    key.candidates.iter().map(|candidate| &candidate.target),
+                    PathStyle::native(),
+                )
+                .map(str::to_owned)
             }),
             ResolvedCellTarget::Uri(_) => None,
         }

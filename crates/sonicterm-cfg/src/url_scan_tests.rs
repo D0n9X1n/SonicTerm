@@ -8,6 +8,157 @@
 use super::*;
 use crate::url_open::validate;
 
+/// Tool headings expose the complete inner path without assigning it to wrapper cells.
+#[test]
+fn tool_heading_candidates_expose_inner_path() {
+    for style in [PathStyle::Posix, PathStyle::Windows] {
+        for prefix in ["Update", "Read", "Write", "Inspect"] {
+            let path = "crates/sonicterm-app/src/app/mod_tests.rs";
+            let text = format!("  ⏺ {prefix}({path})");
+            let start = text.find(path).unwrap();
+            let end = start + path.len();
+            for (col, (byte, _)) in text.char_indices().enumerate() {
+                let candidates = target_candidates_at_char_col_for_style(&text, col, style, true);
+                let inner = candidates.iter().any(|candidate| {
+                    candidate.start == start
+                        && candidate.end == end
+                        && candidate.target == DetectedTarget::PathCandidate(path.into())
+                });
+                assert_eq!(
+                    inner,
+                    (start..end).contains(&byte),
+                    "{text}: col={col}, {candidates:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Prose paths remain separately enumerable while real multiword names keep their literal candidate.
+#[test]
+fn prose_paths_and_literal_and_names_are_distinct_candidates() {
+    let text = ".github/scripts/validate_release.py and focused tests/test_release_validation.py. Require stable";
+    for style in [PathStyle::Posix, PathStyle::Windows] {
+        for path in [".github/scripts/validate_release.py", "tests/test_release_validation.py"] {
+            let start = text.find(path).unwrap();
+            for col in start..start + path.len() {
+                let candidates = target_candidates_at_char_col_for_style(text, col, style, true);
+                assert!(
+                    candidates.iter().any(|candidate| {
+                        candidate.start == start
+                            && candidate.end == start + path.len()
+                            && candidate.target == DetectedTarget::PathCandidate(path.into())
+                    }),
+                    "{path}: col={col}, {candidates:?}"
+                );
+            }
+        }
+        for path in
+            ["fixtures/foo and bar.py", "fixtures/and", "fixtures/and/x", "fixtures/candy.txt"]
+        {
+            for col in 0..path.len() {
+                let candidates = target_candidates_at_char_col_for_style(path, col, style, true);
+                assert!(
+                    candidates.iter().any(|candidate| {
+                        candidate.start == 0
+                            && candidate.end == path.len()
+                            && candidate.target == DetectedTarget::PathCandidate(path.into())
+                    }),
+                    "{path}: col={col}"
+                );
+            }
+        }
+    }
+}
+
+/// Tool extraction preserves literal parentheses and spaces while refusing malformed call boundaries.
+#[test]
+fn tool_heading_boundaries_preserve_literal_safety() {
+    for style in [PathStyle::Posix, PathStyle::Windows] {
+        for path in [
+            "./fixtures/a(b).txt",
+            "./fixtures/foo and bar.py",
+            "./fixtures/and",
+            "./fixtures/file.rs:12–14",
+        ] {
+            let text = format!("Read({path})");
+            for col in 5..5 + path.chars().count() {
+                let candidates = target_candidates_at_char_col_for_style(&text, col, style, true);
+                assert!(
+                    candidates
+                        .iter()
+                        .any(|candidate| &text[candidate.start..candidate.end] == path),
+                    "{text} col={col}"
+                );
+                assert!(candidates.len() <= MAX_PATH_CANDIDATES_PER_CELL);
+            }
+        }
+        for text in [
+            "Read(./fixtures/a.txt",
+            "Read(./fixtures/a.txt))",
+            "Read(./fixtures/a.txt)tail",
+            "Read(./fixtures/a.txt)(extra)",
+        ] {
+            let candidates = target_candidates_at_char_col_for_style(text, 10, style, true);
+            assert!(
+                !candidates
+                    .iter()
+                    .any(|candidate| &text[candidate.start..candidate.end] == "./fixtures/a.txt"),
+                "{text}"
+            );
+        }
+        for path in ["./fixtures/a(b).txt", "./fixtures/foo and bar.py"] {
+            let candidates = target_candidates_at_char_col_for_style(path, 4, style, true);
+            assert!(candidates
+                .iter()
+                .any(|candidate| candidate.start == 0 && candidate.end == path.len()));
+        }
+    }
+}
+
+/// Unverified absolute paths stop at prose while an indivisible rooted spaced path remains intact.
+#[test]
+fn rooted_path_feedback_does_not_absorb_following_prose() {
+    for (text, pointed, expected) in [
+        ("/work/a.rs and focused tests/b.rs. Require stable", "a.rs", "/work/a.rs"),
+        ("/work/a.rs and focused tests/b.rs. Require stable", "b.rs", "tests/b.rs"),
+        ("/work/Test Folder/missing.rs", "missing", "/work/Test Folder/missing.rs"),
+        ("/work/foo and bar.py", "bar.py", "/work/foo and bar.py"),
+        ("/work/Test Folder/a.rs and tests/b.rs", "a.rs", "/work/Test Folder/a.rs"),
+        ("/work/Test Folder/a.rs and tests/b.rs", "b.rs", "tests/b.rs"),
+    ] {
+        let candidates = target_candidates_at_char_col_for_style(
+            text,
+            text.find(pointed).unwrap(),
+            PathStyle::Posix,
+            true,
+        );
+        assert_eq!(
+            explicit_path_feedback(
+                candidates.iter().map(|candidate| &candidate.target),
+                PathStyle::Posix
+            ),
+            Some(expected),
+            "{text}"
+        );
+    }
+}
+
+/// Missing extensionless multiword guesses do not claim a prose boundary without validation.
+#[test]
+fn extensionless_spaced_feedback_requires_validation() {
+    let text = "/tmp/My File and more";
+    let candidates = target_candidates_at_char_col_for_style(text, 10, PathStyle::Posix, true);
+    assert_eq!(
+        explicit_path_feedback(
+            candidates.iter().map(|candidate| &candidate.target),
+            PathStyle::Posix
+        ),
+        None
+    );
+    assert!(candidates.iter().any(|candidate| &text[candidate.start..candidate.end] == text));
+}
+
 /// Spaced scans preserve the literal filename candidate for filesystem disambiguation.
 #[test]
 fn spaced_candidates_retain_literal_filename() {

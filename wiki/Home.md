@@ -7,7 +7,7 @@ SonicTerm is a native, GPU-accelerated terminal for macOS, Windows, and Linux.
 
 ### User guide
 
-- [Usage](Usage) — install, open tabs, split panes, select text, and use rmux/tmux
+- [Usage](Usage) — install, open tabs, split panes, detect file references in terminal messages, select text, and use rmux/tmux
 - [Configuration](Configuration) — change defaults in `~/.sonicterm/sonicterm.toml`, reload, and save
 - [Keybindings](Keybindings) — find a shortcut or write a binding
 - [Themes](Themes) — choose or create a color palette
@@ -43,7 +43,7 @@ SonicTerm 是面向 macOS、Windows 和 Linux 的原生 GPU 加速终端。
 
 ### 用户手册
 
-- [用法](Usage) — 安装、新建标签页、分屏、选取文字和使用 rmux/tmux
+- [用法](Usage) — 安装、新建标签页、分屏、检测终端消息中的文件引用、选取文字和使用 rmux/tmux
 - [配置](Configuration) — 修改 `~/.sonicterm/sonicterm.toml`、重载与保存
 - [快捷键](Keybindings) — 查找快捷键或编写绑定
 - [主题](Themes) — 选择或创建配色

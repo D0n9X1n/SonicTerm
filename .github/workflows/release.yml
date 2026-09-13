@@ -501,6 +501,8 @@ jobs:
     # with a read-only token, so this is the only step that can publish them.
     permissions:
       contents: write
+      issues: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 5
@@ -531,6 +533,8 @@ jobs:
 
       - name: Generate release notes
         timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           bash scripts/release-notes.sh \
             "${{ github.ref_name }}" \

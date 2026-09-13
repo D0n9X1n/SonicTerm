@@ -387,10 +387,67 @@ unregistered release-like files, then generates:
 - deterministic `SHA256SUMS.txt`, including the manifest hash
 - `release-upload-paths.txt`, the exact list supplied to GitHub Release
 
-Release notes enumerate the manifest and commits since the preceding tag. The
-GitHub Release receives the five packages, `release-assets.json`, and
-`SHA256SUMS.txt`; fragment files and `release-upload-paths.txt` are internal
-workflow data.
+Release notes retain manifest-derived downloads, integrity metadata, verification,
+and non-merge commit history since the preceding reachable tag (not the highest
+version tag). Missing predecessor lookup fails by default; fetch the complete
+tag history rather than silently treating a lookup failure as a first release.
+Only explicit `RELEASE_FIRST=1` permits no-base notes and conflicts with any set
+`PREVIOUS_TAG`. Shallow repositories are rejected. In first-release mode the
+displayed history is limited to 200 commits; issue selection still considers the
+entire reachable history within its explicit bounds. The GitHub Release receives the five packages,
+`release-assets.json`, and `SHA256SUMS.txt`; fragment files and
+`release-upload-paths.txt` are internal workflow data.
+
+### Resolved-issue provenance
+
+`scripts/release-issues.py` supplies the **Resolved issues** section. It resolves
+head/base to commits, requires base ancestry, and includes every commit reachable
+from head but not base, including merge commits. Paginated REST commit-to-PR
+associations are discovery hints; a merged PR's GraphQL `closingIssuesReferences`
+and explicit commit closing keywords nominate issues. `Refs #123`, a milestone,
+and present-day closed state are not closure evidence. Issue-vs-PR identity is
+checked and issue entries are deduplicated, sorted, and Markdown-escaped; links
+are constructed only from validated owner/repository names and integer numbers.
+
+An issue is included only when a GraphQL `ClosedEvent.closer` identifies an
+in-range commit, or a merged PR whose `mergeCommit` is in range. This supports
+merge, squash, and rebase integration without requiring REST timeline `commit_id`
+to be non-null. Mutable PR links alone cannot establish shipped closure; prior
+ancestor closures are not presented as newly delivered, and closures after head
+are excluded. Empty commit-to-PR association lists are normal. A genuine empty
+result says **No linked issues resolved in this release range**.
+
+Canonical `This reverts commit <full SHA>` Git messages cancel the target's
+contribution; merge reverts also cancel introduced commits, and reverting a revert
+restores its contribution. A PR with a reverted associated constituent is omitted
+conservatively. Prose-only or partial/semantic reversals without canonical Git
+markers are not inferred. This is linked GitHub closure evidence, not a claim to
+find every fix or prove the runtime effect of arbitrary changes. Missing/deleted
+metadata, unknown/null closers, malformed schemas, inconsistent pagination, and
+ambiguous provenance fail generation instead of publishing a partial list.
+
+The collector caches exact API pages, requests 100 entries per page, and permits
+at most 20 pages per connection, 2,000 range commits, 1,000 API attempts, 4 MiB per
+child output, and 32 MiB aggregate API output. Each request has 15 seconds inside
+a 240-second total deadline; owned child trees are killed/reaped on timeout or
+output overflow. Only timeout, HTTP 429, explicit rate limits, and HTTP 5xx retry
+(up to three attempts, bounded backoff). Authentication and schema failures do
+not retry. Exceeding a cap fails, never silently truncates. The publish job alone
+adds `issues: read` and `pull-requests: read` alongside its existing
+`contents: write`, and note generation receives the short-lived job token as
+`GH_TOKEN`; packaging permissions and exact-tag provenance remain unchanged.
+
+For a read-only pre-tag preview, run from the checked-out repository with an
+existing authenticated `gh` session (CI uses its job token):
+
+```sh
+python3 scripts/release-issues.py --repo D0n9X1n/SonicTerm \
+  --head <exact-reviewed-merge-sha> --base <previous-tag-or-commit>
+```
+
+Omit `--base` only for the first release. This helper does not create or require a
+new tag. `bash scripts/test-release-notes.sh` runs offline temporary Git-history
+and fake-`gh` tests as well as the manifest/download integration checks.
 
 ## Manual release checks
 
@@ -770,9 +827,53 @@ platform/architecture/kind tuple，拒绝重复 tuple/名称和未登记的 rele
 - 确定性的 `SHA256SUMS.txt`，其中也包含 manifest hash
 - `release-upload-paths.txt`，即传给 GitHub Release 的精确列表
 
-Release note 会列出 manifest 内容和上一个 tag 之后的 commit。GitHub Release 最终收到五个
-package、`release-assets.json` 和 `SHA256SUMS.txt`；fragment 文件和
-`release-upload-paths.txt` 只是 workflow 内部数据。
+Release note 保留 manifest 驱动的下载列表、完整性 metadata、验证说明，以及前一个可达 tag
+之后的非 merge commit 历史（不是版本号最大的 tag）。默认情况下查找前序 tag 失败就会终止；
+应获取完整 tag 历史，而不是静默把查找失败视为首个 release。只有显式 `RELEASE_FIRST=1` 才允许
+无 base 的 notes，且与任何已设置的 `PREVIOUS_TAG` 冲突。Shallow 仓库会被拒绝。首个 release
+模式下展示最多 200 个 commit；issue 选择仍在明确上限内检查全部可达历史。GitHub Release 最终收到五个 package、
+`release-assets.json` 和 `SHA256SUMS.txt`；fragment 文件与 `release-upload-paths.txt`
+只是 workflow 内部数据。
+
+### 已解决 issue 的来源证据
+
+`scripts/release-issues.py` 生成 **Resolved issues** 部分。它先把 head/base 解析为 commit，
+要求 base 是 head 的祖先，再选取从 head 可达而从 base 不可达的所有 commit，包括 merge commit。
+分页的 REST commit-to-PR 关联只用于发现候选；已合并 PR 的 GraphQL `closingIssuesReferences`
+及 commit 中明确的关闭关键字提名 issue。`Refs #123`、milestone 和当前 closed 状态都不是关闭
+证据。脚本区分 issue 与 PR，对 issue 去重、排序、转义 Markdown；链接只使用已验证的
+owner/repository 和整数编号构造。
+
+仅当 GraphQL `ClosedEvent.closer` 指向范围内的 commit，或其 `mergeCommit` 在范围内的已合并
+PR 时，issue 才会入选。这支持 merge、squash 与 rebase，不要求 REST timeline 的 `commit_id`
+非空。可编辑的 PR 链接本身不能证明修复已交付；已在 base 祖先中关闭的 issue 不会当作新交付，
+head 之后的关闭也不会入选。空 commit-to-PR 关联列表是正常结果。确实没有匹配时明确显示
+**No linked issues resolved in this release range**。
+
+Git 规范消息 `This reverts commit <完整 SHA>` 会取消目标贡献；merge revert 也取消该 merge
+引入的 commit，revert-of-revert 则恢复原贡献。若 PR 关联的某个组成 commit 被 revert，会保守
+省略整个 PR。没有规范 Git 标记的纯文字、部分或语义性反向变更不会被推断。这是 GitHub 关闭关联
+证据，不声称发现全部修复，也不证明任意变更的运行时效果。缺失/删除的 metadata、未知/null closer、
+错误 schema、不一致分页和含糊来源会使生成失败，而不是发布不完整列表。
+
+Collector 缓存精确 API page，每页请求 100 项；每个 connection 最多 20 页，范围最多 2,000 个
+commit，最多 1,000 次 API 尝试，每个子进程输出最多 4 MiB，API 总输出最多 32 MiB。每次请求
+15 秒，总 deadline 240 秒；超时或输出超限会终止并回收其子进程树。仅 timeout、HTTP 429、明确
+rate limit 和 HTTP 5xx 会重试（最多三次尝试、有界退避）。认证和 schema 失败不重试。任何超限
+都失败，绝不静默截断。只有 publish job 在现有 `contents: write` 之外增加 `issues: read` 和
+`pull-requests: read`，生成步骤通过 `GH_TOKEN` 使用短生命周期 job token；打包权限和
+exact-tag 来源验证保持不变。
+
+打 tag 前，可在检出仓库内使用已认证的 `gh` 会话进行只读预览（CI 使用 job token）：
+
+```sh
+python3 scripts/release-issues.py --repo D0n9X1n/SonicTerm \
+  --head <exact-reviewed-merge-sha> --base <previous-tag-or-commit>
+```
+
+只有首个 release 才省略 `--base`。Helper 不创建也不要求新 tag。
+`bash scripts/test-release-notes.sh` 同时运行离线临时 Git 历史、fake-`gh` 测试和
+manifest/download 集成检查。
 
 ## 手工发布检查
 
