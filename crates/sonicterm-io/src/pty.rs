@@ -1267,7 +1267,7 @@ fn pty_writer(master: &dyn portable_pty::MasterPty) -> Result<Box<dyn Write + Se
 /// `portable-pty`'s writer, whose ConPTY destructor writes nothing.
 #[cfg(not(unix))]
 fn pty_writer(master: &dyn portable_pty::MasterPty) -> Result<Box<dyn Write + Send>> {
-    Ok(master.take_writer()?)
+    master.take_writer()
 }
 
 impl PtyHandle {
