@@ -147,8 +147,8 @@ correctness, not only speed.
   surgery clear affected boundaries. The bit travels into scrollback and enters
   row equality/hash identity, so an evicted predecessor remains detectable
   without increasing the row header.
-- Plain-text URI and local-target reconstruction joins at most eight visible
-  rows and 4 KiB only across those recorded boundaries. URI resolution precedes
+- Recorded-wrap URI and local-target reconstruction joins at most eight visible
+  rows and 4 KiB across those boundaries. URI resolution precedes
   local-target configuration gating and uses the complete candidate for preview,
   every highlight fragment, and a fresh activation-time lookup. No incomplete
   chain falls back to a row-local URI prefix. OSC 8 remains authoritative;
@@ -157,6 +157,15 @@ correctness, not only speed.
   screen epoch, scrollback-eviction generation, and exact-pane OSC 7 state.
   Hard newlines, incomplete chains, unsafe cells, and any identity change fail
   closed before activation-time native revalidation.
+- HTTP(S) extraction also recognizes explicit `()`/`[]` wrappers across at most
+  eight visible hard rows and 4 KiB. The first fragment must contain the complete
+  authority and a path slash; non-final fragments reach the margin and subsequent
+  rows share at most eight ASCII spaces of indentation. A matching closer and
+  exact whole-URI scanner match are required. This tri-state scan precedes logical
+  URI fallback: incomplete owned fragments are inert, unrelated text is untouched,
+  and complete destinations use the same preview, span, and fresh activation lookup.
+  Unsafe cells, internal whitespace/wrappers, multiple schemes, and mixed wrap kinds
+  cannot authorize a join. OSC 8 stays first; filesystem targets never use this path.
 - Changes to overlays or window chrome promote damage to the full surface.
   One hovered target carries up to eight ordered viewport fragments in the
   frame key. Active recoloring salts only each intersecting row cache key;
@@ -614,12 +623,18 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
   右边界自动换行会设置它；硬换行、整行擦除、行复用、不做 reflow 的 resize，以及无法证明
   连续性的区域调整会清除相关边界。该 bit 会随行进入 scrollback，并参与行相等性与 hash，
   因此前驱被淘汰后仍可检测，同时不会增大行 header。
-- 纯文本 URI 与本地目标只会跨这些已记录边界重建最多 8 个可见行和 4 KiB。URI 解析先于
+- 记录换行的 URI 与本地目标会跨这些已记录边界重建最多 8 个可见行和 4 KiB。URI 解析先于
   本地目标配置开关，预览、每个高亮片段和激活时的重新查找都使用完整候选；不完整的链不会
   回退到单行 URI 前缀。OSC 8 仍具有优先权，file URI 仍需文件系统授权。本地目标授权 key 绑定每个行
   fingerprint 与 wrap bit、有序绝对 span、鼠标绝对 cell、viewport、screen epoch、scrollback
   淘汰代次和准确 pane 的 OSC 7 状态。硬换行、不完整链、不安全 cell 或任一身份变化都会在
   激活时原生重新验证之前 fail closed。
+- HTTP(S) 提取也支持最多 8 个可见硬换行和 4 KiB 范围内显式 `()`/`[]` 包围的 URL。
+  首片段必须包含完整 authority 和路径斜杠；非末尾片段到达右边界，后续行使用一致且最多
+  8 个 ASCII 空格的缩进。必须有匹配闭括号，且现有扫描器精确匹配整个 URI。该三态扫描
+  先于逻辑 URI 回退：归属明确但不完整的片段不可操作，无关文字不受影响；完整目标沿用
+  相同预览、span 和激活时的重新查找。不安全 cell、内部空白或括号、多个协议及混合换行
+  类型不能授权连接。OSC 8 仍优先，文件系统目标绝不会使用该路径。
 - 界面浮层或窗口装饰变化会把损伤区域扩大到整个表面。一个 hover 目标最多携带 8 个有序
   viewport 片段进入帧键。活动变色只给相交行的缓存 key 加 salt；下划线几何为每个片段发射
   一个经过裁剪的 quad。每个窗格的有效滚动条透明度也属于窗口装饰：量化后的窗格身份进入帧键，

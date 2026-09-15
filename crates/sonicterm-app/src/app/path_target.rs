@@ -1194,6 +1194,198 @@ pub(super) fn bare_target_at_row_cell(row: &Row, col: u16, style: PathStyle) -> 
 }
 
 const MAX_LOGICAL_PATH_BYTES: usize = 4096;
+const MAX_HARDWRAP_INDENT: usize = 8;
+
+enum HardwrapUri {
+    NotApplicable,
+    Incomplete,
+    Complete(LogicalTargetCandidate),
+}
+
+fn hardwrap_uri_at_cell(grid: &Grid, view_top: u64, pointed: AbsoluteCell) -> HardwrapUri {
+    let view_end = view_top.saturating_add(u64::from(grid.rows));
+    let first = pointed.row.saturating_sub((MAX_WRAPPED_PATH_ROWS - 1) as u64).max(view_top);
+    for row_number in (first..=pointed.row).rev() {
+        let Some(row) = grid.row_at_abs(row_number) else {
+            // When: row_at_abs has no row_number, that evicted row cannot open a visible candidate.
+            continue;
+        };
+        if row.soft_wrapped_from_previous()
+            || grid.row_at_abs(row_number + 1).is_some_and(|next| next.soft_wrapped_from_previous())
+        {
+            // When: soft_wrapped_from_previous holds at either boundary, the logical scanner owns it.
+            continue;
+        }
+        let cells = row.iter().collect::<Vec<_>>();
+        let mut result = HardwrapUri::NotApplicable;
+        for (index, cell) in cells.iter().enumerate() {
+            let closer = match cell.ch {
+                '(' => ')',
+                '[' => ']',
+                _ => {
+                    // When: cell.ch opens no supported wrapper, this column cannot delimit a URI.
+                    continue;
+                }
+            };
+            let start = index + 1;
+            let scheme = cells[start..].iter().take(8).map(|cell| cell.ch).collect::<String>();
+            if !scheme.starts_with("https://") && !scheme.starts_with("http://") {
+                // When: scheme is neither https:// nor http://, this wrapper opens ordinary prose.
+                continue;
+            }
+            let found = hardwrap_uri_candidate(grid, view_end, pointed, row_number, start, closer);
+            // When: matches! excludes NotApplicable for found, retain this wrapper's claim on pointed.
+            if !matches!(found, HardwrapUri::NotApplicable) {
+                if !matches!(result, HardwrapUri::NotApplicable) {
+                    // When: matches! excludes NotApplicable for result, another wrapper already owns pointed.
+                    return HardwrapUri::Incomplete;
+                }
+                result = found;
+            }
+        }
+        if !matches!(result, HardwrapUri::NotApplicable) {
+            // When: matches! excludes NotApplicable for result, the nearest owning wrapper decides pointed.
+            return result;
+        }
+    }
+    HardwrapUri::NotApplicable
+}
+
+fn hardwrap_uri_candidate(
+    grid: &Grid,
+    view_end: u64,
+    pointed: AbsoluteCell,
+    first_row: u64,
+    first_col: usize,
+    closer: char,
+) -> HardwrapUri {
+    let mut spans = SmallVec::<[AbsoluteCellSpan; 2]>::new();
+    let mut joined = String::new();
+    let mut indent = None;
+    let mut authority_end = None;
+    let refusal = |spans: &[AbsoluteCellSpan]| {
+        // When: a span contains pointed, suppress that fragment's syntactically valid truncated prefix.
+        if spans.iter().any(|span| span.contains(pointed)) {
+            HardwrapUri::Incomplete
+        } else {
+            HardwrapUri::NotApplicable
+        }
+    };
+    for offset in 0..MAX_WRAPPED_PATH_ROWS {
+        let row_number = first_row + offset as u64;
+        // When: row_number reaches view_end, the chain leaves the viewport and cannot be proven complete.
+        if row_number >= view_end {
+            return refusal(&spans);
+        }
+        let Some(row) = grid.row_at_abs(row_number) else {
+            // When: row_at_abs has no row_number, the chain cannot be continued or proven.
+            return refusal(&spans);
+        };
+        if row.soft_wrapped_from_previous() {
+            // When: soft_wrapped_from_previous holds, the wrap-aware scanner owns this boundary.
+            return refusal(&spans);
+        }
+        let cells = row.iter().collect::<Vec<_>>();
+        let start = if offset == 0 {
+            first_col
+        } else {
+            // When: offset is past zero, start skips the continuation indent rather than first_col.
+            cells.iter().position(|cell| cell.ch != ' ').unwrap_or(cells.len())
+        };
+        let close = cells
+            .iter()
+            .enumerate()
+            .skip(start)
+            .find(|(_, cell)| cell.ch == closer)
+            .map(|(col, _)| col);
+        if offset == 0 && close.is_some() {
+            // When: close exists at offset zero, single-row detection stays authoritative.
+            return HardwrapUri::NotApplicable;
+        }
+        let end = close.unwrap_or(usize::from(grid.cols));
+        let Some(body) = cells.get(start..end).filter(|body| !body.is_empty()) else {
+            // When: cells hold no non-empty body between start and end, this row adds no fragment.
+            return refusal(&spans);
+        };
+        if body.iter().any(|cell| {
+            unsafe_path_cell(cell)
+                || cell.hyperlink().is_some()
+                || !cell.ch.is_ascii()
+                || cell.ch.is_whitespace()
+                || cell.ch.is_control()
+                || matches!(cell.ch, '(' | ')' | '[' | ']')
+        }) {
+            // When: any body cell is unsafe, hyperlinked, non-ascii, blank, control, or a wrapper,
+            // the row carries prose rather than a continuation of this candidate.
+            return refusal(&spans);
+        }
+        if offset > 0 {
+            // When: offset is past zero, a continuation row must open no scheme and respect the indent.
+            let prefix = body.iter().take(8).map(|cell| cell.ch).collect::<String>();
+            if prefix.starts_with("https://") || prefix.starts_with("http://") {
+                // When: prefix opens its own scheme, that independent URI keeps its destination.
+                return refusal(&spans);
+            }
+            if start > MAX_HARDWRAP_INDENT {
+                // When: start passes MAX_HARDWRAP_INDENT, the row is too deep to be one continued line.
+                return refusal(&spans);
+            }
+        }
+        if offset > 0 && *indent.get_or_insert(start) != start {
+            // When: start differs from the recorded indent, the preceding fragment does not own this row.
+            return refusal(&spans);
+        }
+        spans.push(AbsoluteCellSpan {
+            row: row_number,
+            start_col: start as u16,
+            end_col: end as u16,
+        });
+        if joined.len() + body.len() > MAX_LOGICAL_PATH_BYTES {
+            // When: joined plus body passes MAX_LOGICAL_PATH_BYTES, stop before admitting more text.
+            return refusal(&spans);
+        }
+        joined.extend(body.iter().map(|cell| cell.ch));
+        if offset == 0 {
+            // When: offset is zero, joined must prove a complete authority before the margin cut.
+            let scheme_len = if joined.starts_with("https://") { 8 } else { 7 };
+            authority_end = joined[scheme_len..]
+                .find(['/', '?', '#'])
+                .filter(|index| *index > 0 && joined.as_bytes()[scheme_len + index] == b'/')
+                .map(|index| scheme_len + index);
+            if authority_end.is_none() {
+                // When: authority_end is absent, no path slash followed the host, so invent no suffix.
+                return refusal(&spans);
+            }
+        }
+        if joined.matches("://").count() != 1 {
+            // When: joined holds other than one :// separator, two destinations were concatenated.
+            return refusal(&spans);
+        }
+        if close.is_some() {
+            // When: close exists, the wrapper terminates and joined must validate as one whole URI.
+            let matches = sonicterm_cfg::url_scan::find_urls(&joined);
+            let Some(found) = matches.first().filter(|found| {
+                matches.len() == 1
+                    && found.start == 0
+                    && found.end == joined.len()
+                    && found.url == joined
+                    && authority_end.is_some()
+            }) else {
+                // When: find_urls does not return exactly joined as one whole match, reject the prefix.
+                return refusal(&spans);
+            };
+            if !spans.iter().any(|span| span.contains(pointed)) {
+                // When: no span contains pointed, this proven chain does not own the pointer.
+                return HardwrapUri::NotApplicable;
+            }
+            return HardwrapUri::Complete(LogicalTargetCandidate {
+                target: DetectedTarget::Uri(found.url.clone()),
+                spans,
+            });
+        }
+    }
+    refusal(&spans)
+}
 
 fn logical_path_scan_at_cell(
     grid: &Grid,
@@ -2085,8 +2277,18 @@ impl App {
         let clickable_local_targets = self.config.terminal.clickable_local_targets;
         let clickable_bare_names = self.config.terminal.clickable_bare_names;
         let pointed = AbsoluteCell { row: absolute_row, col };
-        let logical =
-            logical_path_scan_at_cell(grid, view_top, pointed, style, clickable_bare_names)?;
+        let logical = match hardwrap_uri_at_cell(grid, view_top, pointed) {
+            HardwrapUri::Complete(candidate) => {
+                LogicalPathScan { candidates: vec![candidate], rows: SmallVec::new() }
+            }
+            HardwrapUri::Incomplete => {
+                // When: hardwrap_uri_at_cell is Incomplete, never fall back to its valid-looking prefix.
+                return None;
+            }
+            HardwrapUri::NotApplicable => {
+                logical_path_scan_at_cell(grid, view_top, pointed, style, clickable_bare_names)?
+            }
+        };
         if let Some(LogicalTargetCandidate { target: DetectedTarget::Uri(uri), spans }) =
             logical.candidates.first()
         {
