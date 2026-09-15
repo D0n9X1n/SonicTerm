@@ -9,10 +9,11 @@ use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 use smallvec::SmallVec;
+#[cfg(test)]
 use sonicterm_cfg::url_scan::{
-    bare_name_at_char_col_for_style, find_targets_for_style,
-    target_candidates_at_char_col_for_style, DetectedTarget, PathStyle, TargetMatch,
+    bare_name_at_char_col_for_style, find_targets_for_style, TargetMatch,
 };
+use sonicterm_cfg::url_scan::{target_candidates_at_char_col_for_style, DetectedTarget, PathStyle};
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::{Cell, CellFlags, Grid, Row};
 use sonicterm_vt::vt::Osc7Cwd;
@@ -21,6 +22,7 @@ use winit::window::WindowId;
 use super::App;
 
 /// A typed target extracted from one terminal row at one cell column.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RowTarget {
     pub(super) matched: TargetMatch,
@@ -1138,6 +1140,7 @@ fn open_native_path(_path: &Path, _expected_decision: PathOpenDecision) -> io::R
     Err(io::Error::new(io::ErrorKind::Unsupported, "path open is unsupported"))
 }
 
+#[cfg(test)]
 fn row_target_at_cell(
     row: &Row,
     col: u16,
@@ -1175,6 +1178,7 @@ fn row_target_at_cell(
     Some(RowTarget { matched, start_col, end_col })
 }
 
+#[cfg(test)]
 pub(super) fn target_at_row_cell(row: &Row, col: u16, style: PathStyle) -> Option<RowTarget> {
     row_target_at_cell(row, col, style, |text, col, style| {
         let clicked_byte = text.char_indices().nth(col)?.0;
@@ -1184,11 +1188,213 @@ pub(super) fn target_at_row_cell(row: &Row, col: u16, style: PathStyle) -> Optio
     })
 }
 
+#[cfg(test)]
 pub(super) fn bare_target_at_row_cell(row: &Row, col: u16, style: PathStyle) -> Option<RowTarget> {
     row_target_at_cell(row, col, style, bare_name_at_char_col_for_style)
 }
 
 const MAX_LOGICAL_PATH_BYTES: usize = 4096;
+const MAX_HARDWRAP_INDENT: usize = 8;
+
+enum HardwrapUri {
+    NotApplicable,
+    Incomplete,
+    Complete(LogicalTargetCandidate),
+}
+
+fn hardwrap_uri_at_cell(grid: &Grid, view_top: u64, pointed: AbsoluteCell) -> HardwrapUri {
+    let view_end = view_top.saturating_add(u64::from(grid.rows));
+    let first = pointed.row.saturating_sub((MAX_WRAPPED_PATH_ROWS - 1) as u64).max(view_top);
+    for row_number in (first..=pointed.row).rev() {
+        let Some(row) = grid.row_at_abs(row_number) else {
+            // When: row_at_abs has no row_number, that evicted row cannot open a visible candidate.
+            continue;
+        };
+        if row.soft_wrapped_from_previous()
+            || grid.row_at_abs(row_number + 1).is_some_and(|next| next.soft_wrapped_from_previous())
+        {
+            // When: soft_wrapped_from_previous holds at either boundary, the logical scanner owns it.
+            continue;
+        }
+        let cells = row.iter().collect::<Vec<_>>();
+        let mut result = HardwrapUri::NotApplicable;
+        for (index, cell) in cells.iter().enumerate() {
+            let closer = match cell.ch {
+                '(' => ')',
+                '[' => ']',
+                _ => {
+                    // When: cell.ch opens no supported wrapper, this column cannot delimit a URI.
+                    continue;
+                }
+            };
+            let start = index + 1;
+            let scheme = cells[start..].iter().take(8).map(|cell| cell.ch).collect::<String>();
+            if !scheme.starts_with("https://") && !scheme.starts_with("http://") {
+                // When: scheme is neither https:// nor http://, this wrapper opens ordinary prose.
+                continue;
+            }
+            let found = hardwrap_uri_candidate(grid, view_end, pointed, row_number, start, closer);
+            // When: matches! excludes NotApplicable for found, retain this wrapper's claim on pointed.
+            if !matches!(found, HardwrapUri::NotApplicable) {
+                if !matches!(result, HardwrapUri::NotApplicable) {
+                    // When: matches! excludes NotApplicable for result, another wrapper already owns pointed.
+                    return HardwrapUri::Incomplete;
+                }
+                result = found;
+            }
+        }
+        if !matches!(result, HardwrapUri::NotApplicable) {
+            // When: matches! excludes NotApplicable for result, the nearest owning wrapper decides pointed.
+            return result;
+        }
+    }
+    HardwrapUri::NotApplicable
+}
+
+fn hardwrap_uri_candidate(
+    grid: &Grid,
+    view_end: u64,
+    pointed: AbsoluteCell,
+    first_row: u64,
+    first_col: usize,
+    closer: char,
+) -> HardwrapUri {
+    let mut spans = SmallVec::<[AbsoluteCellSpan; 2]>::new();
+    let mut joined = String::new();
+    let mut indent = None;
+    let mut authority_end = None;
+    let refusal = |spans: &[AbsoluteCellSpan]| {
+        // When: a span contains pointed, suppress that fragment's syntactically valid truncated prefix.
+        if spans.iter().any(|span| span.contains(pointed)) {
+            HardwrapUri::Incomplete
+        } else {
+            HardwrapUri::NotApplicable
+        }
+    };
+    for offset in 0..MAX_WRAPPED_PATH_ROWS {
+        let row_number = first_row + offset as u64;
+        // When: row_number reaches view_end, the chain leaves the viewport and cannot be proven complete.
+        if row_number >= view_end {
+            return refusal(&spans);
+        }
+        let Some(row) = grid.row_at_abs(row_number) else {
+            // When: row_at_abs has no row_number, the chain cannot be continued or proven.
+            return refusal(&spans);
+        };
+        if row.soft_wrapped_from_previous() {
+            // When: soft_wrapped_from_previous holds, the wrap-aware scanner owns this boundary.
+            return refusal(&spans);
+        }
+        let cells = row.iter().collect::<Vec<_>>();
+        let start = if offset == 0 {
+            first_col
+        } else {
+            // When: offset is past zero, start skips the continuation indent rather than first_col.
+            cells.iter().position(|cell| cell.ch != ' ').unwrap_or(cells.len())
+        };
+        let close = cells
+            .iter()
+            .enumerate()
+            .skip(start)
+            .find(|(_, cell)| cell.ch == closer)
+            .map(|(col, _)| col);
+        if offset == 0 && close.is_some() {
+            // When: close exists at offset zero, single-row detection stays authoritative.
+            return HardwrapUri::NotApplicable;
+        }
+        let end = close.unwrap_or(usize::from(grid.cols));
+        let Some(body) = cells.get(start..end).filter(|body| !body.is_empty()) else {
+            // When: cells hold no non-empty body between start and end, this row adds no fragment.
+            return refusal(&spans);
+        };
+        if body.iter().any(|cell| {
+            unsafe_path_cell(cell)
+                || cell.hyperlink().is_some()
+                || !cell.ch.is_ascii()
+                || cell.ch.is_whitespace()
+                || cell.ch.is_control()
+                || matches!(cell.ch, '(' | ')' | '[' | ']')
+        }) {
+            // When: any body cell is unsafe, hyperlinked, non-ascii, blank, control, or a wrapper,
+            // the row carries prose rather than a continuation of this candidate.
+            return refusal(&spans);
+        }
+        if offset > 0 {
+            // When: offset is past zero, a continuation row must open no scheme and respect the indent.
+            let prefix = body.iter().take(8).map(|cell| cell.ch).collect::<String>();
+            if prefix.starts_with("https://") || prefix.starts_with("http://") {
+                // When: prefix opens its own scheme, that independent URI keeps its destination.
+                return refusal(&spans);
+            }
+            if start > MAX_HARDWRAP_INDENT {
+                // When: start passes MAX_HARDWRAP_INDENT, the row is too deep to be one continued line.
+                return refusal(&spans);
+            }
+        }
+        if offset > 0 && *indent.get_or_insert(start) != start {
+            // When: start differs from the recorded indent, the preceding fragment does not own this row.
+            return refusal(&spans);
+        }
+        spans.push(AbsoluteCellSpan {
+            row: row_number,
+            start_col: start as u16,
+            end_col: end as u16,
+        });
+        if joined.len() + body.len() > MAX_LOGICAL_PATH_BYTES {
+            // When: joined plus body passes MAX_LOGICAL_PATH_BYTES, stop before admitting more text.
+            return refusal(&spans);
+        }
+        joined.extend(body.iter().map(|cell| cell.ch));
+        if offset == 0 {
+            // When: offset is zero, joined must prove a complete authority before the margin cut.
+            let scheme_len = if joined.starts_with("https://") { 8 } else { 7 };
+            authority_end = joined[scheme_len..]
+                .find(['/', '?', '#'])
+                .filter(|index| *index > 0 && joined.as_bytes()[scheme_len + index] == b'/')
+                .map(|index| scheme_len + index);
+            if authority_end.is_none() {
+                // When: authority_end is absent, no path slash followed the host, so invent no suffix.
+                return refusal(&spans);
+            }
+        }
+        if joined.matches("://").count() != 1 {
+            // When: joined holds other than one :// separator, two destinations were concatenated.
+            return refusal(&spans);
+        }
+        if close.is_some() {
+            // When: close exists, the wrapper terminates and joined must validate as one whole URI.
+            if unsafe_path_cell(&cells[end])
+                || cells[end].hyperlink().is_some()
+                || cells[end + 1..].iter().take_while(|cell| !cell.ch.is_whitespace()).any(|cell| {
+                    unsafe_path_cell(cell) || !matches!(cell.ch, '.' | ',' | ';' | ':' | '!' | '?')
+                })
+            {
+                // When: cells after end continue the token, the apparent closer may be internal URI text.
+                return refusal(&spans);
+            }
+            let matches = sonicterm_cfg::url_scan::find_urls(&joined);
+            let Some(found) = matches.first().filter(|found| {
+                matches.len() == 1
+                    && found.start == 0
+                    && found.end == joined.len()
+                    && found.url == joined
+                    && authority_end.is_some()
+            }) else {
+                // When: find_urls does not return exactly joined as one whole match, reject the prefix.
+                return refusal(&spans);
+            };
+            if !spans.iter().any(|span| span.contains(pointed)) {
+                // When: no span contains pointed, this proven chain does not own the pointer.
+                return HardwrapUri::NotApplicable;
+            }
+            return HardwrapUri::Complete(LogicalTargetCandidate {
+                target: DetectedTarget::Uri(found.url.clone()),
+                spans,
+            });
+        }
+    }
+    refusal(&spans)
+}
 
 fn logical_path_scan_at_cell(
     grid: &Grid,
@@ -1513,6 +1719,7 @@ pub(super) fn macos_reveal_spec(path: &str) -> Option<CommandSpec> {
     })
 }
 
+#[cfg(test)]
 fn token_bounds(cells: &[&Cell], col: usize) -> (usize, usize) {
     let mut start = col;
     while start > 0 && !cell_delimiter(cells[start - 1]) {
@@ -1525,6 +1732,7 @@ fn token_bounds(cells: &[&Cell], col: usize) -> (usize, usize) {
     (start, end)
 }
 
+#[cfg(test)]
 fn cell_delimiter(cell: &Cell) -> bool {
     if cell.flags.contains(CellFlags::WIDE_CONT) {
         // When: `cell` is a wide continuation, keep it attached to its lead cell instead of treating its stored space as a delimiter.
@@ -2077,52 +2285,52 @@ impl App {
         let style = PathStyle::native();
         let clickable_local_targets = self.config.terminal.clickable_local_targets;
         let clickable_bare_names = self.config.terminal.clickable_bare_names;
-        let legacy_target = target_at_row_cell(row, col, style).or_else(|| {
-            (clickable_local_targets && clickable_bare_names)
-                .then(|| bare_target_at_row_cell(row, col, style))
-                .flatten()
-        });
-        if let Some(RowTarget {
-            matched: TargetMatch { target: DetectedTarget::Uri(uri), .. },
-            start_col,
-            end_col,
-        }) = legacy_target
+        let pointed = AbsoluteCell { row: absolute_row, col };
+        let logical = match hardwrap_uri_at_cell(grid, view_top, pointed) {
+            HardwrapUri::Complete(candidate) => {
+                LogicalPathScan { candidates: vec![candidate], rows: SmallVec::new() }
+            }
+            HardwrapUri::Incomplete => {
+                // When: hardwrap_uri_at_cell is Incomplete, never fall back to its valid-looking prefix.
+                return None;
+            }
+            HardwrapUri::NotApplicable => {
+                logical_path_scan_at_cell(grid, view_top, pointed, style, clickable_bare_names)?
+            }
+        };
+        if let Some(LogicalTargetCandidate { target: DetectedTarget::Uri(uri), spans }) =
+            logical.candidates.first()
         {
-            // When: `legacy_target` is an allow-listed URI, preserve its precedence over every filesystem candidate.
-            let local = match sonicterm_cfg::url_scan::local_link_target(&uri, style) {
+            // When: logical URI provenance wins, preserve its complete destination and every visible fragment.
+            let spans = spans
+                .iter()
+                .map(|span| {
+                    Some(sonicterm_render_model::inputs::HoveredUrlSpan {
+                        row: u16::try_from(span.row.checked_sub(view_top)?).ok()?,
+                        start_col: span.start_col,
+                        end_col: span.end_col,
+                    })
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let hover_cells =
+                sonicterm_render_model::inputs::HoveredUrlCells::new(pane_id, spans, false)?;
+            let local = match sonicterm_cfg::url_scan::local_link_target(uri, style) {
                 Ok(local) => local,
                 Err(reason) => {
-                    // When: local_link_target returns Err, preserve the rejection instead of falling back to URI dispatch.
-                    return rejected(&uri, reason);
+                    // When: local_link_target rejects the complete URI, no fragment may fall back to navigation.
+                    return rejected(uri, reason);
                 }
             };
             if let Some(local) = local {
-                // When: local is Some, require filesystem authorization rather than dispatch through the URI opener.
-                return local_snapshot(
-                    &uri,
-                    local,
-                    false,
-                    sonicterm_render_model::inputs::HoveredUrlCells::single(
-                        pane_id,
-                        viewport_row,
-                        start_col,
-                        end_col,
-                        false,
-                    ),
-                );
+                // When: local is Some, keep full-span file URI activation behind filesystem authorization.
+                return local_snapshot(uri, local, false, Some(hover_cells));
             }
             return Some(CellTargetSnapshot {
                 pane_id,
-                hover_cells: sonicterm_render_model::inputs::HoveredUrlCells::single(
-                    pane_id,
-                    viewport_row,
-                    start_col,
-                    end_col,
-                    false,
-                ),
+                hover_cells: Some(hover_cells),
                 display: uri.clone(),
                 explicit_hyperlink: false,
-                target: ResolvedCellTarget::Uri(uri),
+                target: ResolvedCellTarget::Uri(uri.clone()),
             });
         }
         if !clickable_local_targets {
@@ -2131,9 +2339,6 @@ impl App {
         }
 
         let cwd = parser.osc7_cwd().cloned();
-        let pointed = AbsoluteCell { row: absolute_row, col };
-        let logical =
-            logical_path_scan_at_cell(grid, view_top, pointed, style, clickable_bare_names)?;
         let mut candidates = logical
             .candidates
             .into_iter()

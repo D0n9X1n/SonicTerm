@@ -254,7 +254,23 @@ contiguous label across automatic wraps, including wide cells, but never crosses
 hard line breaks or gaps into another occurrence. At most eight visible fragments
 are painted, always retaining the pointed fragment of an overlong label.
 URLs inside prose parentheses or square brackets are detected without including
-the surrounding wrappers in the destination or underline.
+the surrounding wrappers in the destination or underline. Plain-text URLs also
+join across recorded automatic margin wraps: pointing at any fragment resolves
+the complete destination and highlights every fragment. Reconstruction requires
+the complete logical line to remain visible, within eight rows and 4 KiB;
+incomplete or oversized chains are inert rather than opening a truncated prefix.
+An application-hard-wrapped HTTP(S) URL can also join when `(` or `[` directly
+precedes its scheme and the matching closer is visible. Until the next whitespace
+or row edge, only ordinary sentence punctuation may follow that closer; adjacent
+URL text makes the boundary ambiguous and prevents reconstruction. Its complete authority
+and first path slash must appear before the first break; every non-final fragment
+must reach the right edge, and continuation rows must have the same indentation
+of at most eight ASCII spaces. The same eight-row/4 KiB limits apply. Only the
+indentation and line boundaries are removed; query text, percent escapes, and
+hyphens remain literal. Whitespace inside a fragment, nested wrappers, unsafe
+cells, mixed wrap kinds, and multiple schemes prevent reconstruction. Incomplete
+recognized fragments never fall back to a truncated URL. Unwrapped hard rows and
+local paths are not joined; applications can use OSC 8 for arbitrary label layouts.
 
 Modifier-hover shows a local destination only after its current filesystem probe
 validates it. Pending, missing, ambiguous, or rejected local targets have no preview,
@@ -655,6 +671,16 @@ Pointer protocol 与 OSC 52 边界见 [终端 IO 与 VT](Terminal-IO-and-VT)。
 操作强调色。OSC 8 覆盖范围沿连续标签跨越自动换行，包括宽字符，但不会跨硬换行或间隔
 连接另一次出现的链接。最多绘制八个可见片段；标签过长时仍保留指针所在片段。
 正文圆括号或方括号中的 URL 也会被检测到，外层括号不会进入目标地址或下划线范围。
+纯文本 URL 同样会跨已记录的终端右边界自动换行连接：指向任意片段都解析完整目标，并高亮
+所有片段。重建要求完整逻辑行仍可见，且不超过 8 行和 4 KiB；不完整或超限的链保持不可操作，
+不会打开截断的前缀。
+应用插入硬换行的 HTTP(S) URL 也可连接，但协议前必须紧邻 `(` 或 `[`，且匹配的闭括号仍可见。
+闭括号后直到下一个空白或行尾只能有普通句末标点；紧邻的 URL 文字会使边界有歧义并阻止重建。
+完整 authority 与第一个路径斜杠必须出现在首次换行前；所有非末尾片段必须到达右边界，
+续行必须使用一致且不超过 8 个 ASCII 空格的缩进。同样受 8 行和 4 KiB 限制。只移除缩进
+与行边界，查询文字、百分号转义和连字符均原样保留。片段内空白、嵌套括号、不安全 cell、
+混合换行类型及多个协议会阻止重建。已识别但不完整的片段不会回退到截断 URL。
+没有外层括号的硬换行及本地路径不会连接；任意标签布局可通过 OSC 8 保留完整目标。
 
 按住修饰键悬停时，本地目标只有通过当前文件系统探测验证后才显示预览。
 待验证、不存在、有歧义或被拒绝的本地目标不显示预览，避免把目录列表字段显示为未经验证的路径。
