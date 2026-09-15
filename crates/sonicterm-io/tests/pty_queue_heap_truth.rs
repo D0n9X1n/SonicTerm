@@ -31,6 +31,8 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use crossbeam_channel::{Receiver, RecvTimeoutError};
+
 use sonicterm_io::pty::{queued_output_bytes, PtyHandle, PTY_OUTPUT_QUEUE_CAPACITY};
 
 static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
@@ -78,9 +80,14 @@ fn held() -> usize {
 /// The reader's ring size. A pinned queue is always a whole multiple of this.
 const RING_CAP: usize = 64 * 1024;
 
+/// Absolute bound on reaching a quiesced producer. Generous against a loaded
+/// CI runner, but finite: exceeding it fails the measurement rather than
+/// weighing a population that is still changing.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(20);
+
 struct QueueTruth {
     slots: usize,
-    /// What `queued_output_bytes` claims while the queue is full.
+    /// What `queued_output_bytes` claims once the producer has quiesced.
     reported: usize,
     /// Sum of the queued view lengths — the payload actually waiting.
     payload: usize,
@@ -88,16 +95,33 @@ struct QueueTruth {
     pinned: usize,
 }
 
+/// Drain `rx` into `sink` until the sender side is gone, or fail at `deadline`.
+///
+/// Returns `true` only on `Disconnected`. A transient `Empty` is not an end:
+/// the PTY reader drops its sender only after observing EOF, and it cannot
+/// observe EOF while blocked sending into a full channel, so draining is what
+/// unblocks it. Stopping at the first empty moment therefore leaves the
+/// producer live and the population still moving.
+fn drain_until_disconnected<T>(rx: &Receiver<T>, sink: &mut Vec<T>, deadline: Instant) -> bool {
+    while Instant::now() < deadline {
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(item) => sink.push(item),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return true,
+        }
+    }
+    false
+}
+
 /// Fill one pane's output queue from a real child, then weigh what it holds.
 ///
-/// Nothing drains the channel while `script` runs, so the queue reaches
-/// capacity and the reader parks in `send`. The reported figure is sampled at
-/// that point — the state the governor would actually observe.
+/// Both figures come from ONE frozen population: sampling while the child runs
+/// would count the chunk the parked reader holds outside the queue, and admit
+/// more arrivals before the holder is filled.
 ///
 /// Each script writes without end rather than a fixed count: the PTY coalesces
 /// adjacent writes into one read, so a fixed count fills an unpredictable
-/// number of slots. Backpressure stops the child once the queue is full, and
-/// dropping the handle kills it.
+/// number of slots. Backpressure stops the child once the queue is full.
 fn measure_full_queue(script: &str) -> QueueTruth {
     let args = vec!["-c".to_string(), script.to_string()];
     let pty = PtyHandle::spawn_with_args("/bin/sh", &args, 80, 24).expect("spawn /bin/sh");
@@ -108,20 +132,29 @@ fn measure_full_queue(script: &str) -> QueueTruth {
     }
 
     let slots = pty.out_rx.len();
-    let reported = queued_output_bytes(&pty);
 
-    // Take the views out without dropping them. Allocated up front so the
-    // holder's own buffer is never inside a measurement window.
+    // Allocated before any measured sample, so its own growth is never inside
+    // a measurement window.
     let mut holder = Vec::with_capacity(PTY_OUTPUT_QUEUE_CAPACITY * 4);
-    while let Ok(chunk) = pty.out_rx.try_recv() {
-        holder.push(chunk);
-    }
+
+    pty.kill().expect("stop the producer before measuring");
+    let disconnected =
+        drain_until_disconnected(&pty.out_rx, &mut holder, Instant::now() + DRAIN_TIMEOUT);
+    // A timeout must fail rather than measure a population that is still moving.
+    assert!(
+        disconnected,
+        "producer did not quiesce within {DRAIN_TIMEOUT:?}; any measurement here would be \
+         meaningless"
+    );
+
+    // Both figures now describe the same frozen set of chunks: the reader has
+    // ended, nothing can enqueue, and the handle is still alive so the meter
+    // is readable.
+    let reported = queued_output_bytes(&pty);
     let payload: usize = holder.iter().map(|chunk| chunk.len()).sum();
 
-    // Retire the reader before weighing. While it lives it holds its own view
-    // into the newest ring, and that ring would be freed by dropping the
-    // handle rather than by dropping the queued views — which would land in
-    // the delta below and be miscounted as chunk-pinned.
+    // The reader has already ended, so this only releases the handle's own
+    // state; the ring the queued views pin is still held by `holder`.
     drop(pty);
     std::thread::sleep(Duration::from_millis(500));
 
@@ -285,4 +318,74 @@ fn a_refused_input_message_leaves_the_queued_figure_untouched() {
         before,
         "a refused message must not move the queued figure — it was never queued"
     );
+}
+
+/// An empty-but-connected channel must not read as the end of the stream.
+///
+/// This is the property the old `try_recv` drain lacked: it stopped at the
+/// first empty moment while the producer was still live, so the measurement
+/// that followed described a population that was still growing.
+#[test]
+fn a_transient_empty_channel_is_not_treated_as_disconnection() {
+    let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (tx, rx) = crossbeam_channel::unbounded::<u8>();
+
+    let mut drained = Vec::new();
+    let started = Instant::now();
+    let disconnected =
+        drain_until_disconnected(&rx, &mut drained, started + Duration::from_millis(300));
+
+    assert!(!disconnected, "an empty channel whose sender still lives must not report the end");
+    assert!(drained.is_empty(), "nothing was sent, so nothing may be collected");
+    drop(tx);
+}
+
+/// A drain that cannot reach disconnection must refuse at its deadline.
+///
+/// The bound has to be absolute: a sender that never goes away would otherwise
+/// hang the suite instead of failing it.
+#[test]
+fn a_drain_that_never_disconnects_refuses_at_its_deadline() {
+    let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (tx, rx) = crossbeam_channel::unbounded::<u8>();
+    tx.send(7).expect("seed one item");
+
+    let mut drained = Vec::new();
+    let budget = Duration::from_millis(300);
+    let started = Instant::now();
+    let disconnected = drain_until_disconnected(&rx, &mut drained, started + budget);
+    let elapsed = started.elapsed();
+
+    assert!(!disconnected, "the sender is still alive, so the drain must not claim the end");
+    assert_eq!(drained, vec![7], "items received before the deadline are still retained");
+    // Generous upper bound: proves it returned at the deadline rather than
+    // blocking indefinitely, without asserting scheduler precision.
+    assert!(elapsed < budget * 10, "drain overran its deadline: {elapsed:?}");
+    drop(tx);
+}
+
+/// Draining retains every value in FIFO order until all senders disconnect.
+#[test]
+fn a_bounded_drain_retains_every_value_until_disconnection() {
+    let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (tx, rx) = crossbeam_channel::unbounded::<u8>();
+    let gate = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+    let sender_gate = gate.clone();
+    let sender = std::thread::spawn(move || {
+        sender_gate.wait();
+        for value in 1..=5u8 {
+            tx.send(value).expect("receiver outlives the sender");
+        }
+        // Dropping `tx` here is the only thing that ends the drain.
+    });
+
+    gate.wait();
+    let mut drained = Vec::new();
+    let disconnected =
+        drain_until_disconnected(&rx, &mut drained, Instant::now() + Duration::from_secs(10));
+    sender.join().expect("sender thread completed");
+
+    assert!(disconnected, "the drain must end on disconnection, not on a timeout");
+    assert_eq!(drained, vec![1, 2, 3, 4, 5], "every value must be retained, in order");
 }
