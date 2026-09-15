@@ -78,6 +78,11 @@ fn held() -> usize {
 /// The reader's ring size. A pinned queue is always a whole multiple of this.
 const RING_CAP: usize = 64 * 1024;
 
+/// Absolute bound on reaching a quiesced producer. Generous against a loaded
+/// CI runner, but finite: exceeding it fails the measurement rather than
+/// weighing a population that is still changing.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(20);
+
 struct QueueTruth {
     slots: usize,
     /// What `queued_output_bytes` claims while the queue is full.
@@ -90,14 +95,16 @@ struct QueueTruth {
 
 /// Fill one pane's output queue from a real child, then weigh what it holds.
 ///
-/// Nothing drains the channel while `script` runs, so the queue reaches
-/// capacity and the reader parks in `send`. The reported figure is sampled at
-/// that point — the state the governor would actually observe.
+/// Both figures are taken from ONE frozen population. The producer is stopped
+/// and the channel drained to `Disconnected` before anything is sampled: while
+/// the child runs and the queue is full, the reader is parked in `send`
+/// holding a charged chunk that is not in the queue, and further chunks keep
+/// arriving, so a figure sampled there and a holder filled afterwards describe
+/// different sets of chunks and rings.
 ///
 /// Each script writes without end rather than a fixed count: the PTY coalesces
 /// adjacent writes into one read, so a fixed count fills an unpredictable
-/// number of slots. Backpressure stops the child once the queue is full, and
-/// dropping the handle kills it.
+/// number of slots. Backpressure stops the child once the queue is full.
 fn measure_full_queue(script: &str) -> QueueTruth {
     let args = vec!["-c".to_string(), script.to_string()];
     let pty = PtyHandle::spawn_with_args("/bin/sh", &args, 80, 24).expect("spawn /bin/sh");
@@ -108,20 +115,49 @@ fn measure_full_queue(script: &str) -> QueueTruth {
     }
 
     let slots = pty.out_rx.len();
-    let reported = queued_output_bytes(&pty);
 
-    // Take the views out without dropping them. Allocated up front so the
-    // holder's own buffer is never inside a measurement window.
+    // Allocated before any measured sample, so the holder's own buffer growth
+    // is never inside a measurement window.
     let mut holder = Vec::with_capacity(PTY_OUTPUT_QUEUE_CAPACITY * 4);
-    while let Ok(chunk) = pty.out_rx.try_recv() {
-        holder.push(chunk);
+
+    // Quiesce the producer BEFORE sampling. While the child runs and the queue
+    // is full, the reader is parked inside `send_pty_output` holding a charged
+    // chunk that is not in the queue, and more chunks keep arriving. Sampling
+    // the reported figure there and weighing a holder filled afterwards
+    // compares two different populations of chunks and rings.
+    pty.kill().expect("stop the producer before measuring");
+
+    // Drain to `Disconnected` under one absolute deadline: the reader drops
+    // its sender only after it observes EOF, and it cannot observe EOF while
+    // blocked sending into a full channel. Draining is what unblocks it.
+    let drain_deadline = Instant::now() + DRAIN_TIMEOUT;
+    let mut disconnected = false;
+    while Instant::now() < drain_deadline {
+        match pty.out_rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(chunk) => holder.push(chunk),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                disconnected = true;
+                break;
+            }
+        }
     }
+    // A timeout must fail rather than measure a partial population: the whole
+    // point of the drain is that nothing can arrive after the sample.
+    assert!(
+        disconnected,
+        "producer did not quiesce within {DRAIN_TIMEOUT:?}; the queue never reached a frozen \
+         population, so any measurement taken here would be meaningless"
+    );
+
+    // Both figures now describe the same frozen set of chunks: the reader has
+    // ended, nothing can enqueue, and the handle is still alive so the meter
+    // is readable.
+    let reported = queued_output_bytes(&pty);
     let payload: usize = holder.iter().map(|chunk| chunk.len()).sum();
 
-    // Retire the reader before weighing. While it lives it holds its own view
-    // into the newest ring, and that ring would be freed by dropping the
-    // handle rather than by dropping the queued views — which would land in
-    // the delta below and be miscounted as chunk-pinned.
+    // The reader has already ended, so this only releases the handle's own
+    // state; the ring the queued views pin is still held by `holder`.
     drop(pty);
     std::thread::sleep(Duration::from_millis(500));
 
