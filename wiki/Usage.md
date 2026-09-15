@@ -254,7 +254,14 @@ contiguous label across automatic wraps, including wide cells, but never crosses
 hard line breaks or gaps into another occurrence. At most eight visible fragments
 are painted, always retaining the pointed fragment of an overlong label.
 URLs inside prose parentheses or square brackets are detected without including
-the surrounding wrappers in the destination or underline.
+the surrounding wrappers in the destination or underline. Plain-text URLs also
+join across recorded automatic margin wraps: pointing at any fragment resolves
+the complete destination and highlights every fragment. Reconstruction requires
+the complete logical line to remain visible, within eight rows and 4 KiB;
+incomplete or oversized chains are inert rather than opening a truncated prefix.
+Explicit newlines and indentation inserted by an application are not joined.
+Applications that redraw wrapped text with hard breaks can preserve the complete
+destination using OSC 8 links.
 
 Modifier-hover shows a local destination only after its current filesystem probe
 validates it. Pending, missing, ambiguous, or rejected local targets have no preview,
@@ -655,6 +662,10 @@ Pointer protocol 与 OSC 52 边界见 [终端 IO 与 VT](Terminal-IO-and-VT)。
 操作强调色。OSC 8 覆盖范围沿连续标签跨越自动换行，包括宽字符，但不会跨硬换行或间隔
 连接另一次出现的链接。最多绘制八个可见片段；标签过长时仍保留指针所在片段。
 正文圆括号或方括号中的 URL 也会被检测到，外层括号不会进入目标地址或下划线范围。
+纯文本 URL 同样会跨已记录的终端右边界自动换行连接：指向任意片段都解析完整目标，并高亮
+所有片段。重建要求完整逻辑行仍可见，且不超过 8 行和 4 KiB；不完整或超限的链保持不可操作，
+不会打开截断的前缀。应用显式插入的换行和缩进不会被连接。使用硬换行重绘折行文本的应用
+可通过 OSC 8 链接保留完整目标。
 
 按住修饰键悬停时，本地目标只有通过当前文件系统探测验证后才显示预览。
 待验证、不存在、有歧义或被拒绝的本地目标不显示预览，避免把目录列表字段显示为未经验证的路径。

@@ -9,10 +9,11 @@ use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 use smallvec::SmallVec;
+#[cfg(test)]
 use sonicterm_cfg::url_scan::{
-    bare_name_at_char_col_for_style, find_targets_for_style,
-    target_candidates_at_char_col_for_style, DetectedTarget, PathStyle, TargetMatch,
+    bare_name_at_char_col_for_style, find_targets_for_style, TargetMatch,
 };
+use sonicterm_cfg::url_scan::{target_candidates_at_char_col_for_style, DetectedTarget, PathStyle};
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::{Cell, CellFlags, Grid, Row};
 use sonicterm_vt::vt::Osc7Cwd;
@@ -21,6 +22,7 @@ use winit::window::WindowId;
 use super::App;
 
 /// A typed target extracted from one terminal row at one cell column.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RowTarget {
     pub(super) matched: TargetMatch,
@@ -1138,6 +1140,7 @@ fn open_native_path(_path: &Path, _expected_decision: PathOpenDecision) -> io::R
     Err(io::Error::new(io::ErrorKind::Unsupported, "path open is unsupported"))
 }
 
+#[cfg(test)]
 fn row_target_at_cell(
     row: &Row,
     col: u16,
@@ -1175,6 +1178,7 @@ fn row_target_at_cell(
     Some(RowTarget { matched, start_col, end_col })
 }
 
+#[cfg(test)]
 pub(super) fn target_at_row_cell(row: &Row, col: u16, style: PathStyle) -> Option<RowTarget> {
     row_target_at_cell(row, col, style, |text, col, style| {
         let clicked_byte = text.char_indices().nth(col)?.0;
@@ -1184,6 +1188,7 @@ pub(super) fn target_at_row_cell(row: &Row, col: u16, style: PathStyle) -> Optio
     })
 }
 
+#[cfg(test)]
 pub(super) fn bare_target_at_row_cell(row: &Row, col: u16, style: PathStyle) -> Option<RowTarget> {
     row_target_at_cell(row, col, style, bare_name_at_char_col_for_style)
 }
@@ -1513,6 +1518,7 @@ pub(super) fn macos_reveal_spec(path: &str) -> Option<CommandSpec> {
     })
 }
 
+#[cfg(test)]
 fn token_bounds(cells: &[&Cell], col: usize) -> (usize, usize) {
     let mut start = col;
     while start > 0 && !cell_delimiter(cells[start - 1]) {
@@ -1525,6 +1531,7 @@ fn token_bounds(cells: &[&Cell], col: usize) -> (usize, usize) {
     (start, end)
 }
 
+#[cfg(test)]
 fn cell_delimiter(cell: &Cell) -> bool {
     if cell.flags.contains(CellFlags::WIDE_CONT) {
         // When: `cell` is a wide continuation, keep it attached to its lead cell instead of treating its stored space as a delimiter.
@@ -2077,52 +2084,42 @@ impl App {
         let style = PathStyle::native();
         let clickable_local_targets = self.config.terminal.clickable_local_targets;
         let clickable_bare_names = self.config.terminal.clickable_bare_names;
-        let legacy_target = target_at_row_cell(row, col, style).or_else(|| {
-            (clickable_local_targets && clickable_bare_names)
-                .then(|| bare_target_at_row_cell(row, col, style))
-                .flatten()
-        });
-        if let Some(RowTarget {
-            matched: TargetMatch { target: DetectedTarget::Uri(uri), .. },
-            start_col,
-            end_col,
-        }) = legacy_target
+        let pointed = AbsoluteCell { row: absolute_row, col };
+        let logical =
+            logical_path_scan_at_cell(grid, view_top, pointed, style, clickable_bare_names)?;
+        if let Some(LogicalTargetCandidate { target: DetectedTarget::Uri(uri), spans }) =
+            logical.candidates.first()
         {
-            // When: `legacy_target` is an allow-listed URI, preserve its precedence over every filesystem candidate.
-            let local = match sonicterm_cfg::url_scan::local_link_target(&uri, style) {
+            // When: logical URI provenance wins, preserve its complete destination and every visible fragment.
+            let spans = spans
+                .iter()
+                .map(|span| {
+                    Some(sonicterm_render_model::inputs::HoveredUrlSpan {
+                        row: u16::try_from(span.row.checked_sub(view_top)?).ok()?,
+                        start_col: span.start_col,
+                        end_col: span.end_col,
+                    })
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let hover_cells =
+                sonicterm_render_model::inputs::HoveredUrlCells::new(pane_id, spans, false)?;
+            let local = match sonicterm_cfg::url_scan::local_link_target(uri, style) {
                 Ok(local) => local,
                 Err(reason) => {
-                    // When: local_link_target returns Err, preserve the rejection instead of falling back to URI dispatch.
-                    return rejected(&uri, reason);
+                    // When: local_link_target rejects the complete URI, no fragment may fall back to navigation.
+                    return rejected(uri, reason);
                 }
             };
             if let Some(local) = local {
-                // When: local is Some, require filesystem authorization rather than dispatch through the URI opener.
-                return local_snapshot(
-                    &uri,
-                    local,
-                    false,
-                    sonicterm_render_model::inputs::HoveredUrlCells::single(
-                        pane_id,
-                        viewport_row,
-                        start_col,
-                        end_col,
-                        false,
-                    ),
-                );
+                // When: local is Some, keep full-span file URI activation behind filesystem authorization.
+                return local_snapshot(uri, local, false, Some(hover_cells));
             }
             return Some(CellTargetSnapshot {
                 pane_id,
-                hover_cells: sonicterm_render_model::inputs::HoveredUrlCells::single(
-                    pane_id,
-                    viewport_row,
-                    start_col,
-                    end_col,
-                    false,
-                ),
+                hover_cells: Some(hover_cells),
                 display: uri.clone(),
                 explicit_hyperlink: false,
-                target: ResolvedCellTarget::Uri(uri),
+                target: ResolvedCellTarget::Uri(uri.clone()),
             });
         }
         if !clickable_local_targets {
@@ -2131,9 +2128,6 @@ impl App {
         }
 
         let cwd = parser.osc7_cwd().cloned();
-        let pointed = AbsoluteCell { row: absolute_row, col };
-        let logical =
-            logical_path_scan_at_cell(grid, view_top, pointed, style, clickable_bare_names)?;
         let mut candidates = logical
             .candidates
             .into_iter()

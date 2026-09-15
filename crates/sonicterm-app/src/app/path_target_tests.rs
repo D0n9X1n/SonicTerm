@@ -746,12 +746,12 @@ fn parenthesized_url_hover_reaches_render_state() {
     }
 }
 
-/// Characterize full unwrapped URI detection versus a truncated first row and missed soft-wrap continuation.
+/// The same destination resolves whole at every width, wrapped or not, from any fragment.
 #[test]
-fn plain_url_width_baseline_exposes_row_local_truncation() {
+fn plain_url_width_contract_resolves_full_destination() {
     let uri = "https://github.com/D0n9X1n/SonicTerm/issues/1349";
-    let prefix = "https://github.com/D0n9";
-    for cols in [80, prefix.len() as u16] {
+    let prefix_cols = "https://github.com/D0n9".len() as u16;
+    for cols in [80, prefix_cols] {
         let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
         let window = app.__test_seed_child_window(&["URL width baseline"]);
         let pane = app.__test_child_pane_ids(window).unwrap()[0];
@@ -765,15 +765,16 @@ fn plain_url_width_baseline_exposes_row_local_truncation() {
             .unwrap()
             .soft_wrapped_from_previous();
         assert_eq!(wrapped, cols < uri.len() as u16);
-        let expected = if wrapped { prefix } else { uri };
+        let rows = uri.len().div_ceil(usize::from(cols));
         let target = app.cell_target_at(window, pane, 0, 2).expect("URI first row");
-        assert_eq!(target.display, expected);
-        assert!(matches!(&target.target, ResolvedCellTarget::Uri(found) if found == expected));
+        assert_eq!(target.display, uri);
+        assert!(matches!(&target.target, ResolvedCellTarget::Uri(found) if found == uri));
         let hover = target.hovered(true).expect("URI highlight");
-        assert_eq!(hover.cells.spans().len(), 1);
-        assert_eq!(hover.cells.spans()[0].end_col, expected.len() as u16);
+        assert_eq!(hover.cells.spans().len(), rows);
         if wrapped {
-            assert!(app.cell_target_at(window, pane, 1, 2).is_none());
+            let continuation =
+                app.cell_target_at(window, pane, 1, 2).expect("URI continuation row");
+            assert_eq!(continuation.display, uri);
         }
     }
 }
@@ -2351,4 +2352,165 @@ fn probe_mailbox_coalesces_to_the_latest_request() {
     wakes.recv().unwrap();
     assert_eq!(mailbox.take_latest(), Some(latest));
     assert_eq!(mailbox.take_latest(), None);
+}
+
+// Seed one child pane at `cols`x`rows` and feed `output` through the real parser.
+fn wrapped_url_pane(app: &mut App, cols: u16, rows: u16, output: &[u8]) -> (WindowId, u64) {
+    let window = app.__test_seed_child_window(&["wrapped url"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, rows);
+    assert!(app.__test_advance_child_pane_parser(window, pane, output));
+    (window, pane)
+}
+
+const ISSUE_URI: &str = "https://github.com/D0n9X1n/SonicTerm/issues/1349";
+
+/// Every fragment of a soft-wrapped URL resolves one whole destination with spans covering it exactly.
+#[test]
+fn wrapped_url_fragments_share_one_full_destination() {
+    for cols in [21u16, 31, 80] {
+        let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+        let (window, pane) = wrapped_url_pane(&mut app, cols, 10, ISSUE_URI.as_bytes());
+        let rows = (ISSUE_URI.len() as u16).div_ceil(cols);
+        for row in 0..rows {
+            let target = app.cell_target_at(window, pane, row, 0).expect("fragment target");
+            assert_eq!(target.display, ISSUE_URI, "cols {cols} row {row}");
+            assert!(matches!(&target.target, ResolvedCellTarget::Uri(u) if u == ISSUE_URI));
+            let cells = target.hovered(true).expect("highlight").cells;
+            assert_eq!(cells.spans().len(), usize::from(rows), "cols {cols} row {row}");
+            let covered: usize =
+                cells.spans().iter().map(|s| usize::from(s.end_col - s.start_col)).sum();
+            assert_eq!(covered, ISSUE_URI.len(), "cols {cols} row {row}");
+            assert!(cells.contains(row, 0));
+        }
+    }
+}
+
+/// A wrap inside the scheme still yields the whole URI while the chain stays within its row bound.
+#[test]
+fn wrapped_url_split_inside_scheme_resolves_whole_uri() {
+    let uri = "https://a.test/x";
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let (window, pane) = wrapped_url_pane(&mut app, 5, 8, uri.as_bytes());
+    for row in 0..(uri.len() as u16).div_ceil(5) {
+        let target = app.cell_target_at(window, pane, row, 0).expect("scheme-split fragment");
+        assert_eq!(target.display, uri, "row {row}");
+    }
+}
+
+/// Wrapped prose keeps query text and drops the trailing bracket and sentence punctuation.
+#[test]
+fn wrapped_url_excludes_surrounding_prose_punctuation() {
+    let uri = "https://github.com/D0n9X1n/SonicTerm/issues/1349?tab=all";
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let text = format!("See ({uri}) now.");
+    let (window, pane) = wrapped_url_pane(&mut app, 21, 10, text.as_bytes());
+    let target = app.cell_target_at(window, pane, 0, 6).expect("prose URI");
+    assert_eq!(target.display, uri);
+    assert!(matches!(&target.target, ResolvedCellTarget::Uri(u) if u == uri));
+}
+
+/// Network URLs stay clickable when both local-target settings are disabled.
+#[test]
+fn wrapped_network_url_ignores_local_target_settings() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.config.terminal.clickable_local_targets = false;
+    app.config.terminal.clickable_bare_names = false;
+    let (window, pane) = wrapped_url_pane(&mut app, 21, 10, ISSUE_URI.as_bytes());
+    for row in 0..3 {
+        let target = app.cell_target_at(window, pane, row, 0).expect("network URI");
+        assert!(matches!(&target.target, ResolvedCellTarget::Uri(u) if u == ISSUE_URI));
+    }
+}
+
+/// A hard line break with indentation is never concatenated into one destination.
+#[test]
+fn hard_break_with_indent_never_joins_fragments() {
+    let head = "https://github.com/D0n9X1n/So";
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let output = format!("{head}\r\n    nicTerm/issues/1349");
+    let (window, pane) = wrapped_url_pane(&mut app, 80, 10, output.as_bytes());
+    assert!(!app.windows[&window].panes[&pane]
+        .parser
+        .lock()
+        .grid()
+        .row_at_abs(1)
+        .unwrap()
+        .soft_wrapped_from_previous());
+    let first = app.cell_target_at(window, pane, 0, 2).expect("head URI");
+    assert_eq!(first.display, head);
+    let second = app.cell_target_at(window, pane, 1, 8);
+    assert!(!matches!(
+        second.as_ref().map(|t| &t.target),
+        Some(ResolvedCellTarget::Uri(u)) if u == ISSUE_URI
+    ));
+}
+
+/// An incomplete wrap chain stays inert instead of activating a visible prefix.
+#[test]
+fn incomplete_wrap_chains_stay_inert() {
+    // Head scrolled above the viewport: the visible rows cannot prove the whole destination.
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let (window, pane) = wrapped_url_pane(&mut app, 10, 3, ISSUE_URI.as_bytes());
+    {
+        let parser = app.windows[&window].panes[&pane].parser.lock();
+        let grid = parser.grid();
+        let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, None);
+        assert!(view_top > 0);
+        assert!(grid.row_at_abs(view_top).unwrap().soft_wrapped_from_previous());
+    }
+    assert!(app.cell_target_at(window, pane, 0, 2).is_none());
+    assert!(app.cell_target_at(window, pane, 1, 2).is_none());
+
+    // Chain longer than the eight-row bound.
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let (window, pane) = wrapped_url_pane(&mut app, 5, 12, ISSUE_URI.as_bytes());
+    assert!(app.cell_target_at(window, pane, 0, 2).is_none());
+    assert!(app.cell_target_at(window, pane, 2, 2).is_none());
+
+    // Flattened logical text beyond the 4 KiB scan bound.
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let long = format!("https://example.test/{}", "a".repeat(4096));
+    let (window, pane) = wrapped_url_pane(&mut app, 600, 10, long.as_bytes());
+    assert!(app.cell_target_at(window, pane, 1, 2).is_none());
+}
+
+/// A wrapped OSC 8 label keeps its declared destination rather than its visible text.
+#[test]
+fn wrapped_osc8_label_keeps_declared_destination() {
+    let uri = "https://example.com/declared";
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let output = format!("\x1b]8;;{uri}\x1b\\{}\x1b]8;;\x1b\\", "label-".repeat(6));
+    let (window, pane) = wrapped_url_pane(&mut app, 10, 8, output.as_bytes());
+    for row in 0..3 {
+        let target = app.cell_target_at(window, pane, row, 1).expect("OSC 8 fragment");
+        assert_eq!(target.display, uri, "row {row}");
+        assert!(target.explicit_hyperlink);
+    }
+}
+
+/// A wrapped local file URI routes to the filesystem probe and keeps every fragment span.
+#[test]
+fn wrapped_file_uri_routes_to_path_probe() {
+    let uri = if cfg!(windows) { "file:///C:/work/notes.txt" } else { "file:///tmp/notes.txt" };
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let (window, pane) = wrapped_url_pane(&mut app, 12, 8, uri.as_bytes());
+    let target = app.cell_target_at(window, pane, 1, 2).expect("file URI fragment");
+    let ResolvedCellTarget::Path(key) = target.target else { panic!("file URI needs a probe") };
+    assert_eq!(key.candidates[0].resolved_path.file_name().unwrap(), "notes.txt");
+    assert!(key.candidates[0].spans.len() >= 2);
+}
+
+/// Rewriting a continuation row yields a fresh value instead of the previously resolved destination.
+#[test]
+fn mutated_continuation_never_reuses_stale_destination() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let (window, pane) = wrapped_url_pane(&mut app, 21, 10, ISSUE_URI.as_bytes());
+    assert_eq!(app.cell_target_at(window, pane, 0, 2).unwrap().display, ISSUE_URI);
+    assert!(app.__test_advance_child_pane_parser(window, pane, b"\x1b[2;1H\x1b[2K"));
+    let refreshed = app.cell_target_at(window, pane, 0, 2);
+    assert!(!matches!(
+        refreshed.as_ref().map(|t| &t.target),
+        Some(ResolvedCellTarget::Uri(u)) if u == ISSUE_URI
+    ));
 }

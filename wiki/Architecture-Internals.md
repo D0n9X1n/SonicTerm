@@ -147,8 +147,12 @@ correctness, not only speed.
   surgery clear affected boundaries. The bit travels into scrollback and enters
   row equality/hash identity, so an evicted predecessor remains detectable
   without increasing the row header.
-- Local-target reconstruction joins at most eight visible rows and 4 KiB only
-  across those recorded boundaries. Its authorization key binds every row
+- Plain-text URI and local-target reconstruction joins at most eight visible
+  rows and 4 KiB only across those recorded boundaries. URI resolution precedes
+  local-target configuration gating and uses the complete candidate for preview,
+  every highlight fragment, and a fresh activation-time lookup. No incomplete
+  chain falls back to a row-local URI prefix. OSC 8 remains authoritative;
+  file URIs retain filesystem authorization. The local-target authorization key binds every row
   fingerprint and wrap bit, ordered absolute spans, pointed cell, viewport,
   screen epoch, scrollback-eviction generation, and exact-pane OSC 7 state.
   Hard newlines, incomplete chains, unsafe cells, and any identity change fail
@@ -610,7 +614,9 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
   右边界自动换行会设置它；硬换行、整行擦除、行复用、不做 reflow 的 resize，以及无法证明
   连续性的区域调整会清除相关边界。该 bit 会随行进入 scrollback，并参与行相等性与 hash，
   因此前驱被淘汰后仍可检测，同时不会增大行 header。
-- 本地目标只会跨这些已记录边界重建最多 8 个可见行和 4 KiB。授权 key 绑定每个行
+- 纯文本 URI 与本地目标只会跨这些已记录边界重建最多 8 个可见行和 4 KiB。URI 解析先于
+  本地目标配置开关，预览、每个高亮片段和激活时的重新查找都使用完整候选；不完整的链不会
+  回退到单行 URI 前缀。OSC 8 仍具有优先权，file URI 仍需文件系统授权。本地目标授权 key 绑定每个行
   fingerprint 与 wrap bit、有序绝对 span、鼠标绝对 cell、viewport、screen epoch、scrollback
   淘汰代次和准确 pane 的 OSC 7 状态。硬换行、不完整链、不安全 cell 或任一身份变化都会在
   激活时原生重新验证之前 fail closed。
