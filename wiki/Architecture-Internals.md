@@ -377,6 +377,45 @@ separate 500 ms bound.
 These deadlines keep `Drop` from blocking the UI indefinitely. They do not turn
 an incomplete native close into success.
 
+Teardown adds no synthetic input: destroying the writer contributes nothing to
+the child's input stream. Ordinary terminal input and parser-generated replies
+are unchanged, since replies are legitimate input the terminal produces. That is
+an invariant of writer *construction*, not of teardown ordering: a writer's
+destructor is part of the child's input stream, so `pty_writer` decides it once
+per platform rather than at the spawn site. Unix writes through an
+`F_DUPFD_CLOEXEC` duplicate of the master descriptor, whose close is silent. The
+duplicate shares the master's open file description, so file-status flags such
+as `O_NONBLOCK` remain shared, while `FD_CLOEXEC` is a per-descriptor flag set
+on the duplicate alone; its lifetime is independent, so it keeps delivering
+after the master is dropped. A Unix master exposing no descriptor is an
+`Unsupported` error; there is no fallback to `portable-pty`'s Unix writer, which
+writes a newline and `VEOF` when dropped whenever the line discipline reports
+one. Windows keeps that crate's writer, whose ConPTY destructor writes nothing.
+
+The verification boundary is the child side of a real PTY. `pty_tests.rs` opens
+a pair, puts the line discipline in raw mode with an explicit nonzero `VEOF`,
+and asserts that precondition through the *master* — the descriptor the upstream
+destructor reads — because a zero `VEOF` would suppress the synthetic write and
+make every later assertion vacuous. Each of the four ways the writer thread can
+end — cancellation, input-channel disconnect, a failed native write, a failed
+native flush — consumes its typed bytes first, requires the thread to have
+exited on its own before joining, and then requires the child-side stream to be
+empty. Proving exit matters because the shutdown path detaches on timeout, which
+would leave the writer undropped and an empty result meaningless. Write and
+flush failures are injected by a test-only wrapper that owns the real production
+writer, so the production destructor still runs; the child side is never closed,
+so an empty result means nothing was sent rather than nothing could be read.
+Separate tests assert the duplicate is close-on-exec and outlives its master,
+that an explicit Ctrl+D still ends a canonical shell whose readiness was proven
+by a marker it had to execute to emit, and that dropping a handle reaps both the
+shell leader and a background descendant of its session within a bounded drop.
+The no-fallback contract has its own test: a master double exposing no
+descriptor must make `pty_writer` return an `Unsupported` error, with the
+double's `take_writer` never called. A live PTY always exposes a descriptor, so
+nothing else reaches that branch, and a silent fallback would restore the defect
+with every other test still green. These are Unix-gated: they compile to nothing
+on Windows.
+
 ### Release verification boundary
 
 Root `Cargo.toml` `[workspace.package]` is the version source. The release
@@ -739,6 +778,32 @@ Windows 拆除先给 reader 500 ms，再给 writer 500 ms，然后关闭主端�
 500 ms 上限。
 
 这些期限保证 `Drop` 不会无限阻塞界面。原生关闭未完成时，代码不会谎报成功。
+
+拆除过程不会新增任何合成输入：销毁 writer 不会向子进程输入流写入任何内容。普通终端输入
+和解析器生成的应答不受影响，因为应答是终端自身产生的合法输入。这是 writer *构建*的
+不变量，而非拆除顺序的不变量：writer 的析构本身就是子进程输入流的一部分，因此由
+`pty_writer` 按平台一次性决定，而不是在 spawn 处决定。Unix 通过主端描述符的
+`F_DUPFD_CLOEXEC` 副本写入，关闭该副本是静默的。该副本与主端共享同一个打开文件描述，
+因此 `O_NONBLOCK` 等文件状态标志保持共享；而 `FD_CLOEXEC` 是每个描述符独立的标志，只
+设置在该副本上。副本的生命期是独立的：主端释放后它仍能继续投递。Unix 主端若不提供
+描述符，则返回 `Unsupported` 错误；不存在回退到 `portable-pty` Unix writer 的路径——
+只要线路规程报告了 `VEOF`，那个 writer 在析构时就会写入一个换行和该 `VEOF`。Windows
+仍使用该 crate 的 writer，其 ConPTY 析构不写入任何内容。
+
+验证边界是真实 PTY 的子进程一侧。`pty_tests.rs` 打开一对 PTY，将线路规程设为原始模式并
+显式设置非零 `VEOF`，并通过*主端*断言该前置条件——即上游析构实际读取的那个描述符——
+因为 `VEOF` 为零会抑制那次合成写入，使后续所有断言变得空洞。writer 线程结束的四种方式
+——取消、输入通道断开、原生写入失败、原生 flush 失败——都先消费掉已输入的字节，再要求
+该线程自行退出后才 join，最后要求子进程一侧的字节流为空。要求证明退出，是因为关闭路径
+在超时后会分离线程，那样 writer 可能尚未析构，结果为空也就毫无意义。写入与 flush 失败
+由一个持有**真实生产 writer** 的测试专用包装注入，因此生产析构仍会运行；子进程一侧从不
+关闭，所以结果为空表示"没有发送任何字节"，而不是"读不到字节"。另有测试断言该副本为
+close-on-exec 且比其主端存活更久；断言显式 Ctrl+D 仍能结束规范模式 shell，其就绪状态
+由一个只有真正执行才能产生的标记证明；并断言释放句柄会在有界时间内回收 shell leader
+及其会话中的后台后代。"不回退"这一契约另有专门测试：一个不提供描述符的 master 替身必须
+让 `pty_writer` 返回 `Unsupported` 错误，且该替身的 `take_writer` 从未被调用。真实 PTY
+总会提供描述符，因此没有其他测试会走到该分支；而一次静默回退会在其他测试全部通过的情况下
+让缺陷复原。这些测试仅在 Unix 上编译，在 Windows 上不生成任何代码。
 
 ### 发布验证边界
 
