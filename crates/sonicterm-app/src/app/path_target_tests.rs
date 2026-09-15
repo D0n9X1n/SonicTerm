@@ -746,6 +746,38 @@ fn parenthesized_url_hover_reaches_render_state() {
     }
 }
 
+/// Characterize full unwrapped URI detection versus a truncated first row and missed soft-wrap continuation.
+#[test]
+fn plain_url_width_baseline_exposes_row_local_truncation() {
+    let uri = "https://github.com/D0n9X1n/SonicTerm/issues/1349";
+    let prefix = "https://github.com/D0n9";
+    for cols in [80, prefix.len() as u16] {
+        let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+        let window = app.__test_seed_child_window(&["URL width baseline"]);
+        let pane = app.__test_child_pane_ids(window).unwrap()[0];
+        app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, 8);
+        assert!(app.__test_advance_child_pane_parser(window, pane, uri.as_bytes()));
+        let wrapped = app.windows[&window].panes[&pane]
+            .parser
+            .lock()
+            .grid()
+            .row_at_abs(1)
+            .unwrap()
+            .soft_wrapped_from_previous();
+        assert_eq!(wrapped, cols < uri.len() as u16);
+        let expected = if wrapped { prefix } else { uri };
+        let target = app.cell_target_at(window, pane, 0, 2).expect("URI first row");
+        assert_eq!(target.display, expected);
+        assert!(matches!(&target.target, ResolvedCellTarget::Uri(found) if found == expected));
+        let hover = target.hovered(true).expect("URI highlight");
+        assert_eq!(hover.cells.spans().len(), 1);
+        assert_eq!(hover.cells.spans()[0].end_col, expected.len() as u16);
+        if wrapped {
+            assert!(app.cell_target_at(window, pane, 1, 2).is_none());
+        }
+    }
+}
+
 /// Soft wraps join one label, but hard lines and same-row gaps separate equal hyperlink IDs.
 #[test]
 fn hyperlink_hover_preserves_occurrence_and_wide_cell_geometry() {
