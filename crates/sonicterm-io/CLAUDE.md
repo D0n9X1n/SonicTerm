@@ -25,6 +25,20 @@ building against a dependency's newer API while every other gate stays green.
 ## Guardrails
 - `PtyHandle::Drop` must clean up child PTYs/conhosts; orphan processes are
   release blockers.
+- The master-side input writer is built by `pty_writer`, never by calling
+  `MasterPty::take_writer` at the spawn site. A writer's destructor is part of
+  the child's input stream, so one seam decides it per platform. On Unix that
+  is a `std::fs::File` over an `F_DUPFD_CLOEXEC` duplicate of the master
+  descriptor, whose close is silent; `portable-pty`'s Unix writer instead
+  writes a newline and `VEOF` when dropped, which reaches the child as
+  synthetic input no source produced. Destroying the writer must add nothing
+  to the child's input stream; ordinary terminal input and parser-generated
+  replies are unaffected. The duplicate shares the master's open file
+  description, so
+  file-status flags such as `O_NONBLOCK` stay shared, while `FD_CLOEXEC` is
+  per-descriptor and set on the duplicate alone. A Unix master exposing no
+  descriptor is an error — never fall back to a writer that injects bytes.
+  Windows keeps `take_writer`.
 - Never hold parser/grid locks while writing to the PTY.
 - PTY/ConPTY resize can fail, and the callback returns `anyhow::Result<()>` so
   the caller sees it. A zero column or row count is refused as an `InvalidInput`

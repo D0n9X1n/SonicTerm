@@ -133,6 +133,25 @@ drains a cloned ConPTY reader while closing the master, with a 2 s close
 deadline. Timeout and cleanup failures are logged; teardown does not wait
 forever.
 
+The master-side input writer is built by one internal seam, so the bytes a child
+receives when a pane closes are decided in a single place. On Unix SonicTerm
+writes through a close-on-exec duplicate of the master descriptor, whose close
+is silent: destroying the writer adds no synthetic input. Ordinary terminal
+input and parser-generated replies are unchanged — the narrowing matters,
+because replies are legitimate input the terminal itself produces.
+`portable-pty`'s own Unix writer instead ends its life by writing a newline and
+`VEOF` whenever the line discipline reports one, so teardown delivered an
+unsolicited newline and Ctrl+D to the child. A Unix master that exposes no
+descriptor is an error rather than a fall back to that writer. Windows keeps
+`portable-pty`'s writer, whose ConPTY destructor writes nothing to the child.
+
+The duplicate shares the master's open file description, so file-status flags
+such as `O_NONBLOCK` remain shared and are not altered here. `FD_CLOEXEC` is a
+per-descriptor flag instead, set on the duplicate alone. The duplicate's
+lifetime is independent: it keeps delivering after the master is dropped, and
+closing it leaves any other duplicate usable. Explicit user input is untouched:
+a typed Ctrl+D still ends a canonical shell.
+
 ### VT parser and protocols
 
 `sonicterm-vt::Parser` wraps `vte::Parser` and a SonicTerm `Performer`. The
@@ -487,6 +506,20 @@ TERM_PROGRAM_VERSION=<与终端身份匹配的版本>
 退出和子进程回收的期限是 500 ms。Unix 会终止子进程会话，并在回收主进程前重新
 核对后代，避免向已复用的进程号或会话号发信号。Windows 在关闭 ConPTY 主端时并行
 排空一个克隆读取端，关闭期限为 2 s。超时和清理失败会写日志，析构不会无限等待。
+
+主端输入 writer 由同一个内部接缝构建，因此窗格关闭时子进程收到哪些字节只由一处决定。
+Unix 上 SonicTerm 通过主端描述符的 close-on-exec 副本写入，关闭该副本是静默的：销毁
+writer 不会新增任何合成输入。普通终端输入和解析器生成的应答不受影响——这一收窄很重要，
+因为应答是终端自身产生的合法输入。而 `portable-pty` 自带的 Unix writer 在析构时，只要
+线路规程报告了 `VEOF`，就会写入一个换行和该 `VEOF`，因此拆除过程会向子进程投递一次
+用户未请求的换行和 Ctrl+D。Unix 主端若不提供描述符，则返回错误，而不是回退到那个会注入
+字节的 writer。Windows 仍使用 `portable-pty` 的 writer，其 ConPTY 析构不会向子进程
+写入任何内容。
+
+该副本与主端共享同一个打开文件描述，因此 `O_NONBLOCK` 等文件状态标志保持共享，此处
+也不会修改它们；而 `FD_CLOEXEC` 是每个描述符独立的标志，只设置在该副本上。副本的生命期
+是独立的：主端释放后它仍能继续投递，关闭它也不影响其他副本继续可用。显式用户输入不受
+影响：用户输入的 Ctrl+D 仍然会结束一个规范模式 shell。
 
 ### VT 解析器与协议
 
