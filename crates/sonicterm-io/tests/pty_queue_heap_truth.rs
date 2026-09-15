@@ -364,13 +364,9 @@ fn a_drain_that_never_disconnects_refuses_at_its_deadline() {
     drop(tx);
 }
 
-/// Every value must survive a drain that spans quiet gaps, in order.
-///
-/// A barrier, not a sleep, provides readiness: the sender publishes only after
-/// both threads arrive, so the drain is already running and must cross the
-/// empty stretches before the sender finally drops.
+/// Draining retains every value in FIFO order until all senders disconnect.
 #[test]
-fn a_bounded_drain_retains_every_value_across_quiet_gaps() {
+fn a_bounded_drain_retains_every_value_until_disconnection() {
     let _serialised = MEASURE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let (tx, rx) = crossbeam_channel::unbounded::<u8>();
     let gate = std::sync::Arc::new(std::sync::Barrier::new(2));
