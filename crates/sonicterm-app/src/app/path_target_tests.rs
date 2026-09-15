@@ -2861,3 +2861,37 @@ fn hardwrap_bounds_and_offscreen_stay_inert() {
     assert!(view_top > 0, "opener must have scrolled above the viewport");
     assert!(app.cell_target_at(window, pane, 1, 5).is_none());
 }
+
+/// An internal closer followed by URL text cannot authorize a shorter reconstructed destination.
+#[test]
+fn hardwrap_closer_requires_a_prose_boundary() {
+    for (opener, closer) in [('(', ')'), ('[', ']')] {
+        let head = format!("x {opener}");
+        for suffix in ["cc", "/tail", "?query", "%2F", ".html", "界", "\u{301}"] {
+            let uri = "https://example.com/aaaaaaabb";
+            let mut lines = hardwrap_lines(30, &head, uri, &[2], closer);
+            assert_eq!(lines[1], format!("  bb{closer}"));
+            lines[1] = format!("  bb{closer}{suffix}{closer}");
+            let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+            let (window, pane) = hardwrap_pane(&mut app, 30, &lines);
+            for (row, col) in [(0, 5), (1, 2)] {
+                assert!(app.cell_target_at(window, pane, row, col).is_none(), "{suffix} at {row}");
+            }
+        }
+    }
+}
+
+/// Closing wrappers followed by prose punctuation retain the full URI from every fragment.
+#[test]
+fn hardwrap_closer_accepts_prose_punctuation() {
+    let uri = "https://example.com/aaaaaaabb";
+    for suffix in ["", " ", ".", ", next", "; next", ": next", "!", "?"] {
+        let mut lines = hardwrap_lines(30, "x (", uri, &[2], ')');
+        lines[1].push_str(suffix);
+        let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+        let (window, pane) = hardwrap_pane(&mut app, 30, &lines);
+        for (row, col) in [(0, 5), (1, 2)] {
+            assert_eq!(app.cell_target_at(window, pane, row, col).expect("URI").display, uri);
+        }
+    }
+}

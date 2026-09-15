@@ -1363,6 +1363,15 @@ fn hardwrap_uri_candidate(
         }
         if close.is_some() {
             // When: close exists, the wrapper terminates and joined must validate as one whole URI.
+            if unsafe_path_cell(&cells[end])
+                || cells[end].hyperlink().is_some()
+                || cells[end + 1..].iter().take_while(|cell| !cell.ch.is_whitespace()).any(|cell| {
+                    unsafe_path_cell(cell) || !matches!(cell.ch, '.' | ',' | ';' | ':' | '!' | '?')
+                })
+            {
+                // When: cells after end continue the token, the apparent closer may be internal URI text.
+                return refusal(&spans);
+            }
             let matches = sonicterm_cfg::url_scan::find_urls(&joined);
             let Some(found) = matches.first().filter(|found| {
                 matches.len() == 1
