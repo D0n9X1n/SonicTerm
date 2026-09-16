@@ -366,6 +366,11 @@ pub fn target_candidates_at_char_col_for_style(
         .char_indices()
         .find_map(|(offset, ch)| is_path_hard_delimiter(ch).then_some(clicked_byte + offset))
         .unwrap_or(text.len());
+    if let Some(quoted) = quoted_path_target(text, clicked_byte, segment_start, segment_end, style)
+    {
+        // When: quoted recognizes an explicit quoted segment, never fall back to partial inner paths.
+        return quoted.into_iter().collect();
+    }
     if let Some(shell_name) =
         shell_quoted_bare_name(text, segment_start, segment_end, style, include_bare_names)
     {
@@ -375,6 +380,12 @@ pub fn target_candidates_at_char_col_for_style(
     if quoted_spaced_segment(text, segment_start, segment_end) {
         // When: `quoted_spaced_segment` is true, reject every partial reconstruction around unsupported quote syntax.
         return Vec::new();
+    }
+    if let Some(grouped) =
+        grouped_source_target(text, clicked_byte, segment_start, segment_end, style)
+    {
+        // When: grouped recognizes citation syntax, one pointed location owns the complete validated group.
+        return grouped.into_iter().collect();
     }
     let tokens = soft_space_token_spans(text, segment_start, segment_end);
     let clicked_token =
@@ -982,6 +993,212 @@ fn is_path_hard_delimiter(ch: char) -> bool {
     (ch.is_whitespace() && ch != ' ')
         || ch.is_control()
         || matches!(ch, '"' | '\'' | '`' | '<' | '>')
+}
+
+fn quoted_path_target(
+    text: &str,
+    clicked: usize,
+    start: usize,
+    end: usize,
+    style: PathStyle,
+) -> Option<Option<TargetMatch>> {
+    let open = text[..start].chars().next_back()?;
+    if !matches!(open, '\'' | '"' | '`') {
+        // When: matches rejects the presentation quote opener, leave ordinary scanning unchanged.
+        return None;
+    }
+    let candidate = &text[start..end];
+    if candidate.starts_with(' ') || !has_path_prefix(candidate, style) {
+        // When: candidate is not immediate explicit path content, preserve the closing-quote and bare-name cases.
+        return None;
+    }
+    let quote_start = start - open.len_utf8();
+    let close_end = end + open.len_utf8();
+    if !text[end..].starts_with(open)
+        || candidate.len() > MAX_TARGET_BYTES
+        || candidate.ends_with(' ')
+        || candidate.contains(['$', '%'])
+        || candidate.chars().any(is_path_hard_delimiter)
+        || escaped_space_path(text, start, candidate, style)
+        || !structured_outer_boundary(text, quote_start, close_end)
+    {
+        // When: candidate or its open/close boundaries are ambiguous, reject without reconstructing a partial path.
+        return Some(None);
+    }
+    let target = detected_path_target(candidate, style, false)?;
+    Some((start <= clicked && clicked < end).then_some(TargetMatch { start, end, target }))
+}
+
+fn structured_outer_boundary(text: &str, start: usize, end: usize) -> bool {
+    let left = text[..start].chars().next_back();
+    let right = text[end..].chars().next();
+    let closer = match left {
+        Some('(') => Some(')'),
+        Some('[') => Some(']'),
+        Some('{') => Some('}'),
+        _ => None,
+    };
+    if let Some(closer) = closer {
+        // When: closer is required by a wrapper, enforce a whole standalone pair before accepting prose punctuation.
+        let before = &text[..start - 1];
+        if before.chars().next_back().is_some_and(|ch| !ch.is_whitespace()) || right != Some(closer)
+        {
+            // When: before is concatenated or right mismatches closer, never repair the enclosing syntax.
+            return false;
+        }
+        return text[end + 1..]
+            .trim_start_matches(is_prose_path_punctuation)
+            .chars()
+            .next()
+            .is_none_or(char::is_whitespace);
+    }
+    left.is_none_or(char::is_whitespace)
+        && text[end..]
+            .trim_start_matches(is_prose_path_punctuation)
+            .chars()
+            .next()
+            .is_none_or(char::is_whitespace)
+}
+
+fn grouped_source_target(
+    text: &str,
+    clicked: usize,
+    segment_start: usize,
+    segment_end: usize,
+    style: PathStyle,
+) -> Option<Option<TargetMatch>> {
+    let segment = &text[segment_start..segment_end];
+    let mut search_start = segment_start;
+    for (offset, ch) in segment.char_indices() {
+        if segment_start + offset < search_start
+            || ch != ','
+            || !segment[offset + 1..].trim_start_matches(' ').starts_with(':')
+        {
+            // When: ch and its following segment lack comma-colon syntax, they cannot introduce a shared-path location.
+            continue;
+        }
+        let comma = segment_start + offset;
+        let prefix = &text[search_start..comma];
+        let trimmed_start = search_start + prefix.len() - prefix.trim_start_matches(' ').len();
+        let wrapper_start = prefix
+            .char_indices()
+            .rev()
+            .find_map(|(index, ch)| {
+                (matches!(ch, '(' | '[' | '{')
+                    && prefix[..index].chars().next_back().is_none_or(char::is_whitespace))
+                .then_some(search_start + index)
+            })
+            .unwrap_or(trimmed_start);
+        let discarded = &text[trimmed_start..wrapper_start];
+        let ambiguous_prefix = discarded.contains(['/', '\\', '(', '[', '{']);
+        let first_start = if ambiguous_prefix { trimmed_start } else { wrapper_start };
+        let mut group_end = comma;
+        for word in text[comma + 1..segment_end].split_inclusive(' ') {
+            if word.trim().is_empty() || word.starts_with(':') {
+                group_end += word.len();
+            } else {
+                // When: word is not an abbreviated location or gap, stop before neighboring prose and paths.
+                break;
+            }
+        }
+        group_end = (group_end + 1).min(segment_end);
+        search_start = group_end;
+        if clicked < first_start || clicked >= group_end {
+            // When: clicked belongs outside first_start..group_end, keep independent neighboring targets searchable.
+            continue;
+        }
+        if text[first_start..comma].contains(' ') {
+            // When: first_start..comma contains spaces, reject the complete ambiguous anchor instead of shortening its filename.
+            return Some(None);
+        }
+        return Some(parse_source_group(text, clicked, first_start, comma, group_end, style));
+    }
+    None
+}
+
+fn parse_source_group(
+    text: &str,
+    clicked: usize,
+    first_start: usize,
+    comma: usize,
+    segment_end: usize,
+    style: PathStyle,
+) -> Option<TargetMatch> {
+    let opener = text[first_start..].chars().next()?;
+    let closer = match opener {
+        '(' => Some(')'),
+        '[' => Some(']'),
+        '{' => Some('}'),
+        _ => None,
+    };
+    let start = first_start + usize::from(closer.is_some());
+    if segment_end - start > MAX_TARGET_BYTES {
+        // When: segment_end exceeds start by the byte budget, reject before constructing inherited references.
+        return None;
+    }
+    let SourceSuffix::Source(first) = parse_source_reference(&text[start..comma], style, false)
+    else {
+        // When: first lacks a valid explicit source anchor, abbreviated locations cannot authorize a filename.
+        return None;
+    };
+    let mut references = vec![(start, comma, first.clone())];
+    let mut pos = comma;
+    loop {
+        if references.len() == MAX_SPACED_PATH_TOKENS {
+            // When: references fills the shared item budget, reject the whole group rather than a clickable prefix.
+            return None;
+        }
+        pos += 1;
+        while text.as_bytes().get(pos) == Some(&b' ') {
+            pos += 1;
+        }
+        let member_start = pos;
+        if text.as_bytes().get(pos) != Some(&b':') {
+            // When: pos does not begin a colon location, reject a malformed continuation rather than inheriting prose.
+            return None;
+        }
+        pos += 1;
+        let suffix_start = pos;
+        while pos < segment_end {
+            let ch = text[pos..].chars().next()?;
+            if !(ch.is_ascii_digit() || matches!(ch, ':' | '-' | '\u{2013}')) {
+                // When: ch ends numeric location syntax, leave its enclosing delimiter for boundary validation.
+                break;
+            }
+            pos += ch.len_utf8();
+        }
+        let suffix = &text[suffix_start..pos];
+        let combined = format!("{}:{suffix}", first.path);
+        let SourceSuffix::Source(reference) = parse_source_reference(&combined, style, false)
+        else {
+            // When: reference cannot validate combined path/location syntax, invalidate every member of the group.
+            return None;
+        };
+        references.push((member_start, pos, reference));
+        if text.as_bytes().get(pos) != Some(&b',') {
+            // When: pos is not another comma, validate the final group boundary before yielding any target.
+            break;
+        }
+    }
+    let end = pos;
+    if end - start > MAX_TARGET_BYTES || !structured_outer_boundary(text, start, end) {
+        // When: start..end lacks complete bounded outer syntax, reject instead of exposing a prefix.
+        return None;
+    }
+    if closer.is_some() && text[end..].chars().next() != closer {
+        // When: closer does not match the final character, never repair a malformed group wrapper.
+        return None;
+    }
+    if clicked >= end {
+        // When: clicked belongs to trailing punctuation, it cannot own the preceding reference.
+        return None;
+    }
+    let selected =
+        references.into_iter().find(|(left, right, _)| (*left..*right).contains(&clicked));
+    selected.map(|(_, _, mut reference)| {
+        reference.display = text[start..end].to_string();
+        TargetMatch { start, end, target: DetectedTarget::SourceReference(reference) }
+    })
 }
 
 fn shell_quoted_bare_name(

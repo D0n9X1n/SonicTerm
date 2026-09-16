@@ -920,7 +920,6 @@ fn shell_quoted_spaced_names_produce_one_unwrapped_candidate() {
         "'ff ff",
         "ff ff'",
         "\"ff ff\"",
-        "'/tmp/ff ff'",
         "'one two three four five six seven eight nine'",
     ] {
         let col = ambiguous.find(' ').unwrap();
@@ -940,6 +939,243 @@ fn shell_quoted_spaced_names_produce_one_unwrapped_candidate() {
         true,
     )
     .is_empty());
+}
+
+/// Balanced presentation quotes expose the whole native path, never quotes or surrounding command text.
+#[test]
+fn balanced_quoted_paths_cover_exact_inner_spans() {
+    for (style, path) in [
+        (PathStyle::Windows, r"C:\Users\dotan\OneDrive - Microsoft\Desktop\Promotion Analysis"),
+        (PathStyle::Windows, r"C:\work\file.txt"),
+        (PathStyle::Windows, r".\My Folder\file.txt"),
+        (PathStyle::Windows, r"~\My Folder\file.txt"),
+        (PathStyle::Windows, r"src\My Folder\café.rs"),
+        (PathStyle::Posix, "/tmp/My Folder/file.txt"),
+        (PathStyle::Posix, "./My Folder/file.txt"),
+        (PathStyle::Posix, "~/My Folder/file.txt"),
+        (PathStyle::Posix, "src/café.rs"),
+        (PathStyle::Posix, "/tmp/name(with)[braces]{and},punct!.txt"),
+    ] {
+        for quote in ['\'', '"', '`'] {
+            for (prefix, suffix) in [
+                ("", ""),
+                ("python -m http.server 8766 --bind 127.0.0.1 --directory ", "  stopped"),
+                ("é (", ")."),
+                ("see [", "],"),
+                ("see {", "};"),
+            ] {
+                let text = format!("{prefix}{quote}{path}{quote}{suffix}");
+                let start = prefix.len() + quote.len_utf8();
+                let end = start + path.len();
+                for (col, (byte, _)) in text.char_indices().enumerate() {
+                    let matches = target_candidates_at_char_col_for_style(&text, col, style, true);
+                    let exact = matches.iter().any(|m| {
+                        m.start == start
+                            && m.end == end
+                            && m.target == DetectedTarget::PathCandidate(path.into())
+                    });
+                    assert_eq!(exact, (start..end).contains(&byte), "{text:?} at {col}");
+                }
+            }
+        }
+    }
+}
+
+/// Quoted source suffixes retain location metadata without treating literal internal punctuation as prose.
+#[test]
+fn balanced_quoted_source_references_preserve_metadata() {
+    for style in [PathStyle::Posix, PathStyle::Windows] {
+        for quote in ['\'', '"', '`'] {
+            let text = format!("see {quote}src/My Folder/café.rs:12:4{quote}.");
+            let col = text.find("café").unwrap();
+            let found = target_candidates_at_char_col_for_style(&text, col, style, true);
+            assert!(found.iter().any(|m| matches!(&m.target,
+                DetectedTarget::SourceReference(r) if r.path == "src/My Folder/café.rs"
+                    && r.line == 12 && r.column == Some(4))));
+            let text = format!("{quote}/tmp/file.txt,{quote}");
+            if style == PathStyle::Posix {
+                assert_eq!(
+                    target_candidates_at_char_col_for_style(&text, 3, style, true)[0].target,
+                    DetectedTarget::PathCandidate("/tmp/file.txt,".into())
+                );
+            }
+        }
+    }
+}
+
+/// A grouped citation inherits only its explicit first path and validates every location before returning any member.
+#[test]
+fn grouped_source_references_select_pointed_location() {
+    for (style, path) in
+        [(PathStyle::Posix, "src/café.rs"), (PathStyle::Windows, r"C:\work\main.rs")]
+    {
+        for (left, right) in [("", ""), ("(", ")."), ("[", "],"), ("{", "};")] {
+            for separator in [", ", ","] {
+                let body = format!("{path}:924{separator}:934:2{separator}:375–380");
+                let prefix = if left.is_empty() { "" } else { "é " };
+                let text = format!("{prefix}{left}{body}{right}");
+                let start = text.find(path).unwrap();
+                for (needle, line, column, end_line) in [
+                    (path, 924, None, None),
+                    (":934", 934, Some(2), None),
+                    (":375", 375, None, Some(380)),
+                ] {
+                    let byte = text.find(needle).unwrap();
+                    let col = text[..byte].chars().count();
+                    let found = target_candidates_at_char_col_for_style(&text, col, style, true);
+                    assert!(
+                        found.iter().any(|m| m.start == start
+                            && m.end == start + body.len()
+                            && matches!(&m.target, DetectedTarget::SourceReference(r)
+                            if r.path == path && r.display == body && r.line == line
+                                && r.column == column && r.end_line == end_line)),
+                        "{text:?} at {needle}"
+                    );
+                }
+                for (col, (_, ch)) in text.char_indices().enumerate() {
+                    if ch == ',' || ch == ' ' {
+                        assert!(!target_candidates_at_char_col_for_style(&text, col, style, true)
+                            .iter().any(|m| matches!(&m.target, DetectedTarget::SourceReference(r) if r.path == path)));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Groups stay local to their own citation and do not hide later independent paths or citations.
+#[test]
+fn grouped_source_references_do_not_capture_neighbors() {
+    for text in [
+        "(src/a.rs:12, :14) /tmp/other.rs",
+        "(src/a.rs:12, :0) /tmp/other.rs",
+        "src/a.rs:12, :14 /tmp/other.rs",
+        "src/a.rs:12, :0 /tmp/other.rs",
+    ] {
+        let start = text.find("/tmp").unwrap();
+        assert!(
+            target_candidates_at_char_col_for_style(text, start, PathStyle::Posix, true)
+                .iter()
+                .any(|m| m.target == DetectedTarget::PathCandidate("/tmp/other.rs".into())),
+            "{text}"
+        );
+    }
+    let text = "(src/a.rs:12, :14) [src/b.rs:20, :24].";
+    let col = text.find(":24").unwrap();
+    assert!(target_candidates_at_char_col_for_style(text, col, PathStyle::Posix, true)
+        .iter().any(|m| matches!(&m.target, DetectedTarget::SourceReference(r) if r.path == "src/b.rs" && r.line == 24)));
+    let text = "(src/a.rs:12,   :14)";
+    assert!(target_candidates_at_char_col_for_style(text, 2, PathStyle::Posix, true)
+        .iter()
+        .any(|m| matches!(&m.target, DetectedTarget::SourceReference(r) if r.path == "src/a.rs")));
+}
+
+/// Ambiguous spaced anchors never expose a shorter filename, but independent following groups retain their own ownership.
+#[test]
+fn grouped_source_anchors_never_truncate_spaced_paths() {
+    for text in [
+        "My Folder/a.rs:1, :2",
+        "see src/a.rs:1, :2",
+        "(My Folder/a.rs:1, :2)",
+        "  My Folder/a.rs:1, :2",
+    ] {
+        for col in 0..text.chars().count() {
+            assert!(
+                target_candidates_at_char_col_for_style(text, col, PathStyle::Posix, true)
+                    .is_empty(),
+                "{text:?} at {col}"
+            );
+        }
+    }
+    for text in [
+        "src/a.rs:1, :2 src/b.rs:3, :4",
+        "(My Folder/a.rs:1, :2) [src/b.rs:3, :4]",
+        "  src/b.rs:3, :4",
+        "see (src/b.rs:3, :4)",
+    ] {
+        let col = text.find(":4").unwrap();
+        let found = target_candidates_at_char_col_for_style(text, col, PathStyle::Posix, true);
+        assert_eq!(found.len(), 1, "{text}");
+        assert!(
+            matches!(&found[0].target, DetectedTarget::SourceReference(r) if r.path == "src/b.rs" && r.line == 4),
+            "{text}"
+        );
+    }
+}
+
+/// Wrapper-looking characters inside spaced paths cannot replace a rooted anchor with a relative suffix.
+#[test]
+fn grouped_source_wrappers_do_not_discard_path_prefixes() {
+    for (style, text) in [
+        (PathStyle::Posix, "/tmp/My (Folder/a.rs:1, :2)"),
+        (PathStyle::Posix, "/tmp/My long folder [Folder/a.rs:1, :2]"),
+        (PathStyle::Windows, r"C:\My (Folder\a.rs:1, :2)"),
+        (PathStyle::Windows, r"C:\My long folder {Folder\a.rs:1, :2}"),
+    ] {
+        for (col, _) in text.char_indices().enumerate() {
+            assert!(
+                target_candidates_at_char_col_for_style(text, col, style, true).is_empty(),
+                "{text} at {col}"
+            );
+        }
+    }
+}
+
+/// Structured targets retain byte budgets, the eight-location limit, and explicit-path configuration independence.
+#[test]
+fn structured_path_limits_and_uri_precedence_hold() {
+    for style in [PathStyle::Posix, PathStyle::Windows] {
+        let path = format!("./{}", "x".repeat(MAX_TARGET_BYTES - 2));
+        for extra in ["", "x"] {
+            let text = format!("'{path}{extra}'");
+            let found = target_candidates_at_char_col_for_style(&text, 3, style, false);
+            assert_eq!(found.len(), usize::from(extra.is_empty()));
+        }
+        let text = "(src/a.rs:1, :2, :3, :4, :5, :6, :7, :8)";
+        let found =
+            target_candidates_at_char_col_for_style(text, text.find(":8").unwrap(), style, false);
+        assert_eq!(found.len(), 1);
+        assert!(matches!(&found[0].target, DetectedTarget::SourceReference(r) if r.line == 8));
+        let text = "'https://example.com/a' src/a.rs:1, :2";
+        let found = target_candidates_at_char_col_for_style(text, 4, style, true);
+        assert_eq!(found.len(), 1);
+        assert!(
+            matches!(&found[0].target, DetectedTarget::Uri(uri) if uri == "https://example.com/a")
+        );
+    }
+}
+
+/// Incomplete quotes, concatenation, invalid groups, expansion syntax and over-limit groups never expose partial targets.
+#[test]
+fn structured_paths_reject_ambiguous_or_malformed_input() {
+    for text in [
+        "'/tmp/My Folder",
+        "/tmp/My Folder'",
+        "'/tmp/My Folder\"",
+        "prefix'/tmp/My Folder'",
+        "'/tmp/My Folder'suffix",
+        "key='/tmp/My Folder'",
+        "' /tmp/My Folder '",
+        "\"/tmp/$HOME/file\"",
+        "`/tmp/$(command)/file`",
+        "\"/tmp/a\\ b\"",
+        "(src/file.rs:12, :0)",
+        "(src/file.rs:12, :13:0)",
+        "(src/file.rs:12, :14-13)",
+        "(src/file.rs:12, :4294967296)",
+        "(src/file.rs:12, :abc)",
+        "(src/file.rs:12, :13].",
+        "(src/file.rs:12, :13",
+        "(src/file.rs:12, :13)tail",
+        "(src/file.rs:12, :13,)",
+        "(src/file.rs:1, :2, :3, :4, :5, :6, :7, :8, :9)",
+    ] {
+        let col = text.find("tmp").or_else(|| text.find("src")).unwrap();
+        assert!(
+            target_candidates_at_char_col_for_style(text, col, PathStyle::Posix, true).is_empty(),
+            "{text:?}"
+        );
+    }
 }
 
 /// Spaced explicit and contextual paths produce bounded full-span candidates on every cell.
@@ -1212,13 +1448,7 @@ fn spaced_candidates_preserve_uri_and_hard_boundaries() {
             "candidate crossed the tab at {col}: {tabbed:?}"
         );
     }
-    for text in [
-        "\"/tmp/My Folder\"",
-        "'/tmp/My Folder'",
-        "\"/tmp/My Folder",
-        "/tmp/My Folder\"",
-        r"/tmp/My\ Folder",
-    ] {
+    for text in ["\"/tmp/My Folder", "/tmp/My Folder\"", r"/tmp/My\ Folder"] {
         for col in 0..text.chars().count() {
             assert!(
                 target_candidates_at_char_col_for_style(text, col, PathStyle::Posix, true)

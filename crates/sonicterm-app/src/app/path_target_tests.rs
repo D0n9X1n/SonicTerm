@@ -636,7 +636,9 @@ fn hyperlink_preview_covers_wrapped_and_repeated_occurrences() {
     let window = app.__test_seed_child_window(&["wrapped"]);
     let pane = app.__test_child_pane_ids(window).unwrap()[0];
     app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(12, 8);
-    let output = format!("\x1b]8;id=same;{uri}\x1b\\{uri}\x1b]8;;\x1b\\\r\n\x1b]8;id=same;{uri}\x1b\\Docs\x1b]8;;\x1b\\");
+    let output = format!(
+        "\x1b]8;id=same;{uri}\x1b\\{uri}\x1b]8;;\x1b\\\r\n\x1b]8;id=same;{uri}\x1b\\Docs\x1b]8;;\x1b\\"
+    );
     assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
     app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
         winit::keyboard::ModifiersState::SUPER
@@ -904,6 +906,135 @@ fn hyperlink_hover_bounds_long_labels_without_losing_pointer() {
         assert!(cells.contains(row, 2));
         assert!(cells.spans().len() <= 8);
     }
+}
+
+/// Quoted command paths survive automatic wraps while their quotes and surrounding words own no path.
+#[test]
+fn quoted_command_paths_preserve_app_spans_across_wraps() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["quoted command"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    let cols = 40;
+    app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(cols, 8);
+    let path = if cfg!(windows) {
+        r"C:\work\OneDrive - Team\Promotion Analysis"
+    } else {
+        "/work/OneDrive - Team/Promotion Analysis"
+    };
+    let prefix = "python -m http.server --directory '";
+    let text = format!("{prefix}{path}' stopped");
+    assert!(app.__test_advance_child_pane_parser(window, pane, text.as_bytes()));
+    for index in prefix.len()..prefix.len() + path.len() {
+        let snapshot = app
+            .cell_target_at(
+                window,
+                pane,
+                (index / cols as usize) as u16,
+                (index % cols as usize) as u16,
+            )
+            .unwrap();
+        let ResolvedCellTarget::Path(key) = snapshot.target else { panic!("path probe required") };
+        assert_eq!(key.candidates.len(), 1);
+        assert_eq!(key.candidates[0].resolved_path, PathBuf::from(path));
+        assert_eq!(key.candidates[0].display(), path);
+        assert!(key.rows.len() > 1);
+    }
+    for index in [prefix.len() - 1, prefix.len() + path.len()] {
+        assert!(app
+            .cell_target_at(
+                window,
+                pane,
+                (index / cols as usize) as u16,
+                (index % cols as usize) as u16
+            )
+            .is_none());
+    }
+}
+
+/// A grouped reference yields one probe, with all anchor cells in its authorization and selected location metadata.
+#[test]
+fn grouped_source_references_keep_one_probe_and_complete_identity() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["grouped source"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    let cwd = if cfg!(windows) { "file:///C:/workspace" } else { "file:///workspace" };
+    let text = "(src/main.rs:924, :934, :375).";
+    assert!(app.__test_advance_child_pane_parser(
+        window,
+        pane,
+        format!("\x1b]7;{cwd}\x1b\\{text}").as_bytes()
+    ));
+    for (needle, line) in [("src", 924), (":934", 934), (":375", 375)] {
+        let col = text.find(needle).unwrap() as u16;
+        let snapshot = app.cell_target_at(window, pane, 0, col).unwrap();
+        let ResolvedCellTarget::Path(key) = snapshot.target else {
+            panic!("source path probe required")
+        };
+        assert_eq!(key.candidates.len(), 1);
+        assert!(
+            matches!(&key.candidates[0].target, DetectedTarget::SourceReference(r) if r.line == line && r.path == "src/main.rs")
+        );
+        assert_eq!(key.candidates[0].spans[0].start_col, 1);
+        assert_eq!(key.candidates[0].display(), "src/main.rs:924, :934, :375");
+    }
+    for (col, ch) in text.chars().enumerate() {
+        if ch == ',' || ch == ' ' {
+            assert!(app.cell_target_at(window, pane, 0, col as u16).is_none());
+        }
+    }
+}
+
+/// Structured paths pass real filesystem classification and stale quote edits revoke cached authorization.
+#[test]
+fn structured_paths_reach_filesystem_probe_and_reject_stale_identity() {
+    let root = native_test_root().join(format!(
+        "sonicterm-quoted-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    let folder = root.join("My Folder");
+    std::fs::create_dir_all(&folder).unwrap();
+    let source = root.join("main.rs");
+    std::fs::write(&source, b"fn main() {}\n").unwrap();
+    for (text, needle, expected, decision) in [
+        (
+            format!("--directory '{}' stopped", folder.display()),
+            "My Folder",
+            folder.clone(),
+            PathOpenDecision::Openable(PathKind::Directory),
+        ),
+        (
+            format!("({}:12, :14).", source.display()),
+            ":14",
+            source.clone(),
+            PathOpenDecision::SourceReveal,
+        ),
+    ] {
+        let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+        let window = app.__test_seed_child_window(&["filesystem probe"]);
+        let pane = app.__test_child_pane_ids(window).unwrap()[0];
+        app.windows[&window].panes[&pane].parser.lock().grid_mut().resize(240, 4);
+        assert!(app.__test_advance_child_pane_parser(window, pane, text.as_bytes()));
+        let col = text.find(needle).unwrap() as u16;
+        let snapshot = app.cell_target_at(window, pane, 0, col).unwrap();
+        let ResolvedCellTarget::Path(key) = snapshot.target else { panic!("path probe") };
+        let selected = probe_candidates(&key.candidates, classify_local_target).unwrap();
+        assert_eq!(selected.candidate.resolved_path, expected);
+        assert_eq!(selected.decision, decision);
+        let request =
+            app.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
+        let result = PathProbeResult { request, selection: Some(selected), failure: None };
+        assert!(app.windows.get_mut(&window).unwrap().path_probe.accept(&result, Some(&key)));
+        assert!(app.windows[&window].path_probe.authorized(&key, true));
+        assert!(app.__test_advance_child_pane_parser(window, pane, b"\r!"));
+        let changed = app.cell_target_at(window, pane, 0, col);
+        assert!(changed.is_none_or(|snapshot| match snapshot.target {
+            ResolvedCellTarget::Path(next) =>
+                !app.windows[&window].path_probe.authorized(&next, true),
+            _ => true,
+        }));
+    }
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 /// Source locations resolve the filename against pane CWD, keeping the complete displayed reference.
@@ -1549,6 +1680,43 @@ fn punctuated_wrapped_paths_follow_only_automatic_rows() {
         if let Some(scan) = logical_path_scan_at_cell(&hard, 0, pointed, PathStyle::Posix, false) {
             assert!(scan.candidates.iter().all(|candidate| !matches!(&candidate.target,
                 DetectedTarget::SourceReference(reference) if reference.display == display)));
+        }
+    }
+}
+
+/// Quote delimiters and inherited citation anchors remain inside unsafe-cell authorization checks.
+#[test]
+fn structured_paths_reject_unsafe_delimiters_and_anchors() {
+    for (text, pointed, protected) in [
+        ("'/tmp/My Folder'", 3, vec![0, 14]),
+        ("\"/tmp/My Folder\"", 3, vec![0, 14]),
+        ("`/tmp/My Folder`", 3, vec![0, 14]),
+        ("(src/main.rs:12, :14)", 17, vec![0, 3, 18]),
+    ] {
+        for index in protected {
+            for hyperlink in [false, true] {
+                let mut grid = Grid::new(11, 4);
+                for ch in text.chars() {
+                    grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+                }
+                let cell = grid.row_mut((index / 11) as u16).iter_mut().nth(index % 11).unwrap();
+                if hyperlink {
+                    cell.set_hyperlink(Some(HyperlinkId(7)));
+                } else {
+                    cell.set_extras(Some("\u{301}".into()));
+                }
+                assert!(
+                    logical_path_scan_at_cell(
+                        &grid,
+                        0,
+                        AbsoluteCell { row: pointed / 11, col: (pointed % 11) as u16 },
+                        PathStyle::Posix,
+                        true
+                    )
+                    .is_none(),
+                    "{text} protected {index}"
+                );
+            }
         }
     }
 }

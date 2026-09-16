@@ -1476,7 +1476,10 @@ fn logical_path_scan_at_cell(
                     .unwrap_or(cells.len());
                 let mut source_start_index = start_index;
                 while source_start_index > 0
-                    && matches!(cells[source_start_index - 1].ch, '(' | '[' | '{')
+                    && matches!(
+                        cells[source_start_index - 1].ch,
+                        '(' | '[' | '{' | '\'' | '"' | '`'
+                    )
                 {
                     source_start_index -= 1;
                 }
@@ -1484,7 +1487,7 @@ fn logical_path_scan_at_cell(
                 while source_end_index < cells.len()
                     && matches!(
                         cells[source_end_index].ch,
-                        ',' | ';' | '.' | ':' | '!' | '?' | ')' | ']' | '}'
+                        ',' | ';' | '.' | ':' | '!' | '?' | ')' | ']' | '}' | '\'' | '"' | '`'
                     )
                 {
                     source_end_index += 1;
@@ -1562,7 +1565,8 @@ fn row_target_candidates_at_cell(
                 .position(|(start, _)| *start >= matched.end)
                 .unwrap_or(cells.len());
             let mut source_start_col = start_col;
-            while source_start_col > 0 && matches!(cells[source_start_col - 1].ch, '(' | '[' | '{')
+            while source_start_col > 0
+                && matches!(cells[source_start_col - 1].ch, '(' | '[' | '{' | '\'' | '"' | '`')
             {
                 source_start_col -= 1;
             }
@@ -1570,7 +1574,7 @@ fn row_target_candidates_at_cell(
             while source_end_col < cells.len()
                 && matches!(
                     cells[source_end_col].ch,
-                    ',' | ';' | '.' | ':' | '!' | '?' | ')' | ']' | '}'
+                    ',' | ';' | '.' | ':' | '!' | '?' | ')' | ']' | '}' | '\'' | '"' | '`'
                 )
             {
                 source_end_col += 1;

@@ -157,6 +157,10 @@ correctness, not only speed.
   screen epoch, scrollback-eviction generation, and exact-pane OSC 7 state.
   Hard newlines, incomplete chains, unsafe cells, and any identity change fail
   closed before activation-time native revalidation.
+- Balanced quoted paths retain delimiter cells in safety checks while excluding
+  them from the active span. Grouped source locations yield exactly one candidate
+  for the pointed member, with the entire anchor/group in the validated span;
+  comma/space separators do not initiate activation. No shell expansion occurs.
 - HTTP(S) extraction also recognizes explicit `()`/`[]` wrappers across at most
   eight visible hard rows and 4 KiB. The first fragment must contain the complete
   authority and a path slash; non-final fragments reach the margin and subsequent
@@ -634,6 +638,9 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
   fingerprint 与 wrap bit、有序绝对 span、鼠标绝对 cell、viewport、screen epoch、scrollback
   淘汰代次和准确 pane 的 OSC 7 状态。硬换行、不完整链、不安全 cell 或任一身份变化都会在
   激活时原生重新验证之前 fail closed。
+- 完整引号路径的分隔符 cell 仍参与安全检查，但不进入可操作范围。分组源文件位置只为
+  鼠标指向的成员返回一个候选，验证范围包含完整路径锚点和分组；逗号和空格分隔符不会
+  触发激活。代码不执行 shell 展开。
 - HTTP(S) 提取也支持最多 8 个可见硬换行和 4 KiB 范围内显式 `()`/`[]` 包围的 URL。
   首片段必须包含完整 authority 和路径斜杠；非末尾片段到达右边界，后续行使用一致且最多
   8 个 ASCII 空格的缩进。必须有匹配闭括号，且现有扫描器精确匹配整个 URI。该三态扫描
