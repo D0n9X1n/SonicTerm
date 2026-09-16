@@ -1,6 +1,49 @@
 use super::*;
 use std::path::Path;
 
+// The Windows color face must reach the atlas as artwork, unchanged by monochrome weight settings.
+#[cfg(windows)]
+#[test]
+fn native_color_face_preserves_artwork_across_weights() {
+    let make_stack = |scale| {
+        FontStack::try_new_full_with_weight_and_font_dirs(
+            "Segoe UI Emoji",
+            14.5,
+            72,
+            scale,
+            &[PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")],
+        )
+        .unwrap()
+    };
+    let mut identity = make_stack(1.0);
+    for ch in ['\u{1f600}', '\u{1f680}'] {
+        let key = GlyphKey::new(ch, false, false);
+        let baseline = identity.rasterize(key).expect("native emoji glyph");
+        assert!(baseline.is_color, "Windows emoji face must produce color artwork");
+        for scale in [0.5, 1.0, 2.0, 5.0] {
+            let candidate = make_stack(scale).rasterize(key).unwrap();
+            assert!(candidate.is_color);
+            assert_eq!(
+                (
+                    candidate.width,
+                    candidate.height,
+                    candidate.offset_x,
+                    candidate.offset_y,
+                    candidate.advance
+                ),
+                (
+                    baseline.width,
+                    baseline.height,
+                    baseline.offset_x,
+                    baseline.offset_y,
+                    baseline.advance
+                )
+            );
+            assert_eq!(candidate.coverage, baseline.coverage);
+        }
+    }
+}
+
 // Nonempty transparent rasters stay valid through production conversion and atlas insertion, not missing/tofu.
 #[test]
 fn blank_color_raster_survives_fontstack_and_atlas() {
@@ -28,7 +71,7 @@ fn blank_color_raster_survives_fontstack_and_atlas() {
         has_color: true,
         is_scaled: true,
     };
-    let tile = stack.rasterized_glyph_to_tile(glyph, key, true).expect("blank is valid");
+    let tile = stack.rasterized_glyph_to_tile(glyph).expect("blank is valid");
     assert_eq!((tile.width, tile.height), (3, 2));
     assert_eq!((tile.offset_x, tile.offset_y), (-3, -9));
     assert!(tile.is_color && !tile.is_empty());
@@ -42,30 +85,32 @@ fn blank_color_raster_survives_fontstack_and_atlas() {
     assert_eq!(atlas.get(key), Some(info));
 }
 
+// Identity and endpoint coverage remain exact while intermediate coverage follows the weight control.
 #[test]
-fn regular_weight_scale_preserves_identity_and_extremes() {
+fn weight_scale_preserves_identity_and_extremes() {
     let original = vec![0, 1, 64, 128, 254, 255];
     let mut coverage = original.clone();
-    apply_regular_weight_scale(&mut coverage, 1.0, false);
+    apply_weight_scale(&mut coverage, 1.0, false);
     assert_eq!(coverage, original);
 
     let mut stronger = original.clone();
-    apply_regular_weight_scale(&mut stronger, 1.1, false);
+    apply_weight_scale(&mut stronger, 1.1, false);
     assert_eq!(stronger[0], 0);
     assert_eq!(*stronger.last().unwrap(), 255);
     assert!(stronger[2] > original[2]);
     assert!(stronger[3] > original[3]);
 
     let mut lighter = original.clone();
-    apply_regular_weight_scale(&mut lighter, 0.9, false);
+    apply_weight_scale(&mut lighter, 0.9, false);
     assert!(lighter[2] < original[2]);
     assert!(lighter[3] < original[3]);
 }
 
+// RGB remapping rebuilds the alpha envelope without adding ink to empty pixels.
 #[test]
 fn subpixel_weight_scale_recomputes_alpha_from_rgb_coverage() {
     let mut coverage = vec![32, 64, 96, 96, 0, 0, 0, 0];
-    apply_regular_weight_scale(&mut coverage, 1.1, true);
+    apply_weight_scale(&mut coverage, 1.1, true);
     assert_eq!(coverage[3], coverage[0].max(coverage[1]).max(coverage[2]));
     assert_eq!(&coverage[4..], &[0, 0, 0, 0]);
 }
@@ -260,7 +305,7 @@ fn embolden_puts_ink_where_the_coverage_remap_cannot() {
 
     // The remap leaves every zero pixel at zero, at any scale in range.
     let mut remapped = coverage.clone();
-    apply_regular_weight_scale(&mut remapped, 5.0, false);
+    apply_weight_scale(&mut remapped, 5.0, false);
     assert_eq!(remapped, coverage, "gamma remap cannot create ink");
 
     // Dilation spreads into those same pixels, inside the tile it was given.
@@ -413,7 +458,7 @@ fn erosion_removes_ink_the_coverage_remap_cannot() {
 
     // The remap leaves every 255 exactly where it was, at any scale in range.
     let mut remapped = coverage.clone();
-    apply_regular_weight_scale(&mut remapped, 0.5, false);
+    apply_weight_scale(&mut remapped, 0.5, false);
     assert_eq!(remapped, coverage, "gamma remap cannot erode a solid core");
 
     // Erosion eats the rim of that core.
@@ -479,109 +524,88 @@ fn erosion_keeps_tile_geometry_and_subpixel_alpha_consistent() {
     }
 }
 
-/// `weight_scale` must reach the configured family's glyphs.
-///
-/// The setting exists to change that font's weight, so a build that gated it
-/// away entirely would be no fix at all — it would trade a wrong-glyph bug for
-/// a dead feature.
+// Pixel meaning alone excludes color artwork; every monochrome face shares this conversion stage.
 #[test]
-fn weight_scale_acts_on_the_configured_family() {
-    assert!(
-        weight_scale_applies(false, false, true),
-        "a regular glyph from the configured font is exactly what the setting names"
-    );
+fn weight_conversion_preserves_geometry_and_color_artwork() {
+    let make_stack = |scale| {
+        FontStack::try_new_with_font_dirs_for_test(
+            &[(DEFAULT_FONT_FAMILY, false)],
+            vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")],
+            14.5,
+            72,
+            scale,
+        )
+        .unwrap()
+    };
+    for color in [false, true] {
+        let make_glyph = || sonicterm_font::RasterizedGlyph {
+            data: [32, 64, 96, 96].repeat(20),
+            width: 4,
+            height: 5,
+            bearing_x: sonicterm_font::units::PixelLength::new(-2.0),
+            bearing_y: sonicterm_font::units::PixelLength::new(8.0),
+            has_color: color,
+            is_scaled: true,
+        };
+        let baseline = make_stack(1.0).rasterized_glyph_to_tile(make_glyph()).unwrap();
+        for scale in [0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0] {
+            let candidate = make_stack(scale).rasterized_glyph_to_tile(make_glyph()).unwrap();
+            assert_eq!(
+                (
+                    candidate.width,
+                    candidate.height,
+                    candidate.offset_x,
+                    candidate.offset_y,
+                    candidate.advance
+                ),
+                (
+                    baseline.width,
+                    baseline.height,
+                    baseline.offset_x,
+                    baseline.offset_y,
+                    baseline.advance
+                )
+            );
+            assert_eq!(candidate.is_color, color);
+            if color || scale == 1.0 {
+                assert_eq!(candidate.coverage, baseline.coverage);
+            } else {
+                assert_ne!(candidate.coverage, baseline.coverage);
+                assert!(candidate
+                    .coverage
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .all(|px| px[3] == px[0].max(px[1]).max(px[2])));
+            }
+        }
+    }
 }
 
-/// And must not reach glyphs from any other font.
-///
-/// This is the defect the gate closes. A fallback glyph is drawn at the weight
-/// its own designer chose, in a family the user never configured; scaling it
-/// applies the user's intent for one font to a different one. The visible
-/// result is a fallback glyph growing or thinning while its neighbour from the
-/// configured family stays put.
+// Designed bold counters stay open under the same outline-growth policy as regular text.
 #[test]
-fn weight_scale_leaves_fallback_fonts_alone() {
-    assert!(
-        !weight_scale_applies(false, false, false),
-        "a fallback font is one the user never configured, so the weight setting for \
-         their own family must not touch it"
-    );
-}
-
-/// Provenance is asked of the font, not inferred from the handle index.
-///
-/// Resolution pushes a handle only when a family actually matches, so a
-/// configured family that fails to load is absent entirely and the first
-/// fallback inherits index 0. A gate written `font_idx == 0` would then report
-/// "configured" for a font the user never named — reweighting it while
-/// claiming to protect it, in the one case where the distinction matters most.
-///
-/// This pins that the predicate takes the answer rather than deriving it: a
-/// fallback at index 0 must still be excluded.
-#[test]
-fn a_fallback_that_inherited_index_zero_is_still_excluded() {
-    // What `is_configured_family(0)` returns when the configured family
-    // failed to load and a fallback took the first slot.
-    let fallback_at_index_zero = false;
-    assert!(
-        !weight_scale_applies(false, false, fallback_at_index_zero),
-        "when the configured family fails to load, the fallback that inherits index 0 is \
-         still not the user's font, and an index-based gate would get this wrong"
-    );
-}
-
-/// The two exclusions that predate this gate must survive it.
-///
-/// Colour glyphs carry artwork rather than a weight, and an SGR-bold glyph has
-/// already had a bold face resolved for it — scaling on top would compound two
-/// weight changes. Both were correct before and are unrelated to the fallback
-/// question, so a fix that dropped either would be a regression smuggled in
-/// beside a fix.
-#[test]
-fn colour_and_bold_glyphs_stay_excluded_even_from_the_configured_family() {
-    assert!(
-        !weight_scale_applies(true, false, true),
-        "a colour glyph carries its own artwork; remapping coverage alters the picture"
-    );
-    assert!(
-        !weight_scale_applies(false, true, true),
-        "SGR bold already resolved a bold face; scaling it again compounds two changes"
-    );
-    assert!(!weight_scale_applies(true, true, true), "both exclusions together must still exclude");
-}
-
-/// The gate governs fixed-tile outline growth, not only the coverage remap.
-///
-/// This is the assertion a helper-level test misses. `rasterize` runs two
-/// mechanisms behind this single gate: the coverage remap and
-/// `embolden_coverage`, which max-filters the outline inside padded scratch
-/// space before cropping back to the original tile. The second adds real ink
-/// while width, height, origin, and advance remain fixed.
-///
-/// A fix that gated only the remap would leave a fallback glyph still being
-/// dilated. Pinning that the growth radius is non-zero at a raised weight makes
-/// this test fail against that half-fix rather than pass it.
-#[test]
-fn the_gate_governs_outline_growth_and_not_just_the_coverage_remap() {
-    // A weight the user reaches in four keypresses at 0.25 per step.
-    let scale = 2.0_f32;
-    let cell_h = 28.0_f64;
-
-    // Precondition: at this weight the growth is real, so gating it matters.
-    let radius = embolden_radius_px(scale, cell_h);
-    assert!(
-        radius > 0.0,
-        "test setup: weight {scale} must produce real outline growth, or this test cannot \
-         distinguish a fix that gates the growth from one that does not"
-    );
-
-    // Both mechanisms sit behind one predicate, so one answer decides both.
-    assert!(
-        weight_scale_applies(false, false, true),
-        "the configured family gets both the remap and the growth"
-    );
-    assert!(
-        !weight_scale_applies(false, false, false),
-        "a fallback glyph gets neither — including fixed-tile outline growth"
-    );
+fn bold_counters_survive_weight_two_at_current_raster_size() {
+    let mut stack = FontStack::try_new_with_font_dirs_for_test(
+        &[(DEFAULT_FONT_FAMILY, false)],
+        vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts")],
+        14.5,
+        72,
+        2.0,
+    )
+    .unwrap();
+    for ch in ['0', '8', 'B'] {
+        let tile = stack.rasterize(GlyphKey::new(ch, true, false)).unwrap();
+        let w = tile.width as usize;
+        let h = tile.height as usize;
+        let channels = if tile.is_subpixel { 4 } else { 1 };
+        let alpha = |x: usize, y: usize| tile.coverage[(y * w + x) * channels + channels - 1];
+        assert!(
+            (1..h - 1).any(|y| (1..w - 1).any(|x| {
+                alpha(x, y) < 96
+                    && (0..x).any(|left| alpha(left, y) > 192)
+                    && (x + 1..w).any(|right| alpha(right, y) > 192)
+            })),
+            "bold {ch} counter must remain open"
+        );
+    }
 }

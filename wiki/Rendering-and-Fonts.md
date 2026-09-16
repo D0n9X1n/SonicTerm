@@ -222,8 +222,11 @@ renderer has no flag-specific draw branch for those three.
 
 ### Rasterization
 
-Windows uses DirectWrite by default and falls back to FreeType when DirectWrite
-cannot rasterize a glyph. macOS and other Unix systems use FreeType. FreeType
+Windows uses DirectWrite natural-symmetric ClearType rasterization with grid
+fitting disabled, preserving outline alignment instead of independently snapping
+font hints. Color-capable faces use the existing FreeType color path rather than
+losing their artwork in a ClearType mask; other DirectWrite failures also fall
+back to FreeType. macOS and other Unix systems use FreeType. FreeType
 supports monochrome, grayscale, LCD subpixel, BGRA color strikes, and
 COLR/SVG handoff. HarfBuzz/COLR paint paths use Cairo-backed drawing for layered
 color glyphs and linear, radial, and sweep gradients. A gradient whose color
@@ -339,7 +342,11 @@ caches, and forces a full redraw.
 
 DirectWrite emits logical red, green, and blue ClearType coverage. SonicTerm
 preserves those native coverage bytes without a hidden contrast curve; the
-explicit `weight_scale` control is the only regular-text coverage adjustment.
+explicit `weight_scale` control is the only monochrome coverage adjustment.
+Face selection happens first; regular, bold, italic, bold-italic, and monochrome
+fallback glyphs then use the same adjustment. At fixed size and DPI, weight
+changes preserve cell pitch, baseline, bitmap dimensions, bearings, and advances.
+Different faces retain their natural ink shapes; color artwork is never reweighted.
 The maximum channel is stored in alpha. The engine changes the byte layout from
 RGBA to BGRA for the CPU atlas but does not perform a color-space conversion. With
 `[font].subpixel_aa = "off"`, both presenters use the stored alpha maximum as one
@@ -707,7 +714,9 @@ GPU 线段端点存放在与 HSV 颜色变换分离的几何参数中，因此�
 
 ### 光栅化
 
-Windows 默认使用 DirectWrite；DirectWrite 无法光栅化某字形时回退 FreeType。
+Windows 默认使用 DirectWrite 的 natural-symmetric ClearType 光栅化并禁用网格拟合，
+保留轮廓对齐，而不是逐字形按 hint 独立吸附。支持彩色的字体使用既有 FreeType 彩色路径，
+避免在 ClearType 掩码中丢失图像内容；其它 DirectWrite 失败也回退 FreeType。
 macOS 和其它 Unix 使用 FreeType。FreeType 支持单色、灰度、LCD 次像素、BGRA 彩色
 位图字形，以及 COLR/SVG 交接。HarfBuzz/COLR 绘制路径通过 Cairo 支持分层彩色字形和
 线性、径向、扫描渐变。颜色线没有可用色标时不绘制任何内容；扫描渐变的平铺有上限，
@@ -788,7 +797,10 @@ sRGB view 解码后等于预乘线性颜色的存储值。CPU 字节始终不会
 并强制完整重绘。
 
 DirectWrite 生成逻辑红、绿、蓝 ClearType 覆盖率。SonicTerm 会原样保留这些原生覆盖率字节，
-不再应用隐藏的对比度曲线；显式 `weight_scale` 是普通文字唯一的覆盖率调节。三个通道的最大值
+不再应用隐藏的对比度曲线；显式 `weight_scale` 是单色文字唯一的覆盖率调节。
+先选择字体，再对常规、粗体、斜体、粗斜体及单色回退字形使用同一调节。固定字号和 DPI 时，
+粗细变化不改变单元格间距、基线、位图尺寸、bearing 和推进量。各字体保留自然墨迹形状；
+彩色图像内容不参与粗细调节。三个通道的最大值
 写入 alpha。引擎只把字节布局从 RGBA 改为 CPU 图集使用的 BGRA，不执行色彩空间转换。使用
 `[font].subpixel_aa = "off"` 时，两种 presenter 都把保存的 alpha 最大值当作单一灰度覆盖率；
 `rgb` 把逻辑通道映射到对应显示通道，`bgr` 则交换红、蓝。GPU 路径从 unorm 覆盖率 view

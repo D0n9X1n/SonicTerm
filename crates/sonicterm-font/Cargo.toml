@@ -38,7 +38,8 @@ fontconfig.workspace = true
 
 [target."cfg(windows)".dependencies]
 dwrote = "0.11"
-winapi = { version = "0.3", features = ["winbase"] }
+winapi = { version = "0.3", features = ["dwrite", "dwrite_1", "dwrite_2", "winbase"] }
+wio = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "=0.26.1"

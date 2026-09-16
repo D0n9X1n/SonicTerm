@@ -40,7 +40,7 @@ top-level unknown keys but loses comments, formatting, and nested unknown keys.
 | `family` | `"Rec Mono St.Helens"` | Primary font family. Missing glyphs use the fallback chain. |
 | `size` | `13` | Font size in points. |
 | `line_height` | `1.3` | Line-height multiplier. |
-| `weight_scale` | `1.0` | Regular-text weight for the configured family. Valid values are `0.5..=5.0`; other values become `1.0`. Cell metrics, fallback glyphs, color emoji, and SGR bold do not change. |
+| `weight_scale` | `1.0` | Post-selection weight for all monochrome glyphs, including bold, italic, and fallback faces. Valid values are `0.5..=5.0`; other values become `1.0`. At a fixed size/DPI, cell metrics, bitmap dimensions, bearings, and advances do not change. Color artwork is unchanged. |
 | `subpixel_aa` | `"off"` | LCD coverage order: `off`, `rgb`, or `bgr`. See the eligibility rules below. |
 
 Font changes apply to terminal text and regular application text. Changes to
@@ -259,7 +259,7 @@ serializer 则只保留顶层未知 key，不保留注释、格式或嵌套未�
 | `family` | `"Rec Mono St.Helens"` | 主字体族。缺失的字符使用回退字体。 |
 | `size` | `13` | 字号，单位为 point。 |
 | `line_height` | `1.3` | 行高倍率。 |
-| `weight_scale` | `1.0` | 只调整所配置字体族的普通文字粗细。有效范围是 `0.5..=5.0`；其它值会变成 `1.0`。Cell metrics、回退字形、彩色 emoji 和 SGR bold 不变。 |
+| `weight_scale` | `1.0` | 选定字体后统一调整所有单色字形的粗细，包括粗体、斜体和回退字体。有效范围是 `0.5..=5.0`；其它值会变成 `1.0`。固定字号和 DPI 时，单元格度量、位图尺寸、bearing 与推进量不变。彩色图像内容不变。 |
 | `subpixel_aa` | `"off"` | LCD 覆盖率顺序：`off`、`rgb` 或 `bgr`。生效条件见下文。 |
 
 字体设置会同时用于终端文字和普通应用文字。修改 `family`、`size` 或
