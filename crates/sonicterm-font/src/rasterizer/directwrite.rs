@@ -5,7 +5,13 @@ use dwrote::{
     DWRITE_FONT_SIMULATIONS_NONE, DWRITE_MEASURING_MODE_NATURAL,
     DWRITE_RENDERING_MODE_CLEARTYPE_NATURAL_SYMMETRIC,
 };
-use winapi::um::dwrite::{DWRITE_GLYPH_OFFSET, DWRITE_GLYPH_RUN};
+use winapi::um::dwrite::{
+    DWriteCreateFactory, DWRITE_FACTORY_TYPE_SHARED, DWRITE_GLYPH_OFFSET, DWRITE_GLYPH_RUN,
+};
+use winapi::um::dwrite_1::DWRITE_TEXT_ANTIALIAS_MODE_CLEARTYPE;
+use winapi::um::dwrite_2::{IDWriteFactory2, DWRITE_GRID_FIT_MODE_DISABLED};
+use winapi::Interface;
+use wio::com::ComPtr;
 
 use crate::locator::FontDataSource;
 use crate::parser::ParsedFont;
@@ -16,6 +22,7 @@ use crate::rasterizer::{
 use crate::units::PixelLength;
 
 pub struct DirectWriteRasterizer {
+    factory: ComPtr<IDWriteFactory2>,
     face: FontFace,
     fallback: FreeTypeRasterizer,
     scale: f64,
@@ -35,8 +42,21 @@ impl DirectWriteRasterizer {
         let face = file
             .create_face(parsed.handle.index(), DWRITE_FONT_SIMULATIONS_NONE)
             .map_err(|hr| anyhow::anyhow!("DirectWrite CreateFontFace failed: 0x{hr:08x}"))?;
+        let mut factory = std::ptr::null_mut();
+        let hr =
+            // SAFETY: factory receives the owned COM interface selected by the IDWriteFactory2 IID.
+            unsafe {
+                DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, &IDWriteFactory2::uuidof(), &mut factory)
+            };
+        if hr < 0 {
+            // A failed factory cannot provide explicit grid-fit control.
+            anyhow::bail!("DirectWrite factory creation failed: 0x{hr:08x}");
+        }
+        let factory =
+            // SAFETY: successful DWriteCreateFactory returns one owned IDWriteFactory2 reference.
+            unsafe { ComPtr::from_raw(factory.cast::<IDWriteFactory2>()) };
         let fallback = FreeTypeRasterizer::from_locator(parsed, pixel_geometry)?;
-        Ok(Self { face, fallback, scale: parsed.scale.unwrap_or(1.0) })
+        Ok(Self { factory, face, fallback, scale: parsed.scale.unwrap_or(1.0) })
     }
 
     fn rasterize_directwrite_glyph(
@@ -64,32 +84,31 @@ impl DirectWriteRasterizer {
             bidiLevel: 0,
         };
 
-        let render_mode = self.face.get_recommended_rendering_mode_default_params(
-            em_size,
-            1.0,
-            DWRITE_MEASURING_MODE_NATURAL,
+        let mut analysis = std::ptr::null_mut();
+        // Grid fitting can contract equal-height outlines differently; preserve their design-space alignment.
+        let hr =
+            // SAFETY: factory, face, glyph arrays, and output pointer remain live through this synchronous call.
+            unsafe {
+                self.factory.CreateGlyphRunAnalysis(
+                    &glyph_run,
+                    std::ptr::null(),
+                    DWRITE_RENDERING_MODE_CLEARTYPE_NATURAL_SYMMETRIC,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                    DWRITE_GRID_FIT_MODE_DISABLED,
+                    DWRITE_TEXT_ANTIALIAS_MODE_CLEARTYPE,
+                    0.0,
+                    0.0,
+                    &mut analysis,
+                )
+            };
+        if hr < 0 {
+            // Analysis failure retains the caller's FreeType fallback path.
+            anyhow::bail!("CreateGlyphRunAnalysis failed: 0x{hr:08x}");
+        }
+        let analysis = GlyphRunAnalysis::take(
+            // SAFETY: successful CreateGlyphRunAnalysis transfers one owned interface reference.
+            unsafe { ComPtr::from_raw(analysis) },
         );
-        // Sentinel, outline, and aliased recommendations do not provide the
-        // ClearType coverage this texture path consumes; concrete modes do.
-        let render_mode = if render_mode == dwrote::DWRITE_RENDERING_MODE_ALIASED
-            || render_mode == dwrote::DWRITE_RENDERING_MODE_OUTLINE
-            || render_mode == dwrote::DWRITE_RENDERING_MODE_DEFAULT
-        {
-            DWRITE_RENDERING_MODE_CLEARTYPE_NATURAL_SYMMETRIC
-        } else {
-            render_mode
-        };
-
-        let analysis = GlyphRunAnalysis::create(
-            &glyph_run,
-            1.0,
-            None,
-            render_mode,
-            DWRITE_MEASURING_MODE_NATURAL,
-            0.0,
-            0.0,
-        )
-        .map_err(|hr| anyhow::anyhow!("CreateGlyphRunAnalysis failed: 0x{hr:08x}"))?;
         let bounds = analysis
             .get_alpha_texture_bounds(DWRITE_TEXTURE_CLEARTYPE_3x1)
             .map_err(|hr| anyhow::anyhow!("GetAlphaTextureBounds failed: 0x{hr:08x}"))?;
@@ -137,6 +156,10 @@ impl FontRasterizer for DirectWriteRasterizer {
         size: f64,
         dpi: u32,
     ) -> anyhow::Result<RasterizedGlyph> {
+        if self.fallback.has_color {
+            // When: has_color identifies artwork support, a ClearType mask would discard its palette and misclassify its pixels.
+            return self.fallback.rasterize_glyph(glyph_pos, size, dpi);
+        }
         self.rasterize_directwrite_glyph(glyph_pos, size, dpi)
             .or_else(|_| self.fallback.rasterize_glyph(glyph_pos, size, dpi))
     }

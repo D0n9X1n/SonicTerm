@@ -117,7 +117,7 @@ pub struct FontConfig {
     pub size: f32,
     /// Line height multiplier applied to the metric ascent+descent.
     pub line_height: f32,
-    /// Coverage multiplier for regular text. `1.0` preserves native weight.
+    /// Post-selection coverage multiplier for all monochrome text. `1.0` preserves native weight.
     pub weight_scale: f32,
     /// LCD subpixel coverage order. Effective only on eligible Windows targets.
     pub subpixel_aa: SubpixelAaMode,
@@ -461,7 +461,7 @@ impl Default for FontConfig {
 }
 
 impl FontConfig {
-    /// Return a safe regular-text weight scale. Invalid values preserve the
+    /// Return a safe monochrome-text weight scale. Invalid values preserve the
     /// native font coverage instead of reaching raster math.
     pub fn effective_weight_scale(&self) -> f32 {
         if self.weight_scale.is_finite() && (0.5..=5.0).contains(&self.weight_scale) {
@@ -1075,11 +1075,9 @@ family = "{font_family}"
 size = {font_size}
 # Line-height multiplier. 1.1 is close to WezTerm's default terminal spacing.
 line_height = {line_height}
-# Regular-text weight scale, range 0.5..=5.0. 1.0 preserves native weight.
-# Below 1.0 thins regular text; above 1.0 thickens it. Values far from 1.0 also
-# reshape the glyph outline (growing above, eroding below), which is what makes
-# the change visible on HiDPI screens where stem cores are already solid.
-# Cell metrics and SGR bold are unaffected. Invalid values fall back to 1.0.
+# Post-selection monochrome weight, range 0.5..=5.0; 1.0 preserves native coverage.
+# Below 1.0 thins; above 1.0 thickens, including bold, italic, and fallback faces.
+# Cell metrics, bitmap dimensions, bearings, and color artwork stay unchanged.
 weight_scale = {weight_scale}
 # LCD coverage order: "off" keeps grayscale AA; "rgb" and "bgr" select the
 # physical stripe order. Effective only on Windows with an opaque final target

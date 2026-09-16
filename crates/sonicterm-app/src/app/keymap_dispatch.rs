@@ -48,7 +48,7 @@ pub(super) fn terminal_input_passthrough_binding(key_str: &str, action: &Action)
         && matches!(action, Action::PasteFromClipboard)
 }
 
-/// One palette/keymap step of regular-text weight. Four steps span
+/// One palette/keymap step of monochrome-text weight. Four steps span
 /// 1.0 -> 2.0, so a useful weight is a few presses away while the full
 /// 0.5..=5.0 range stays reachable.
 const FONT_WEIGHT_STEP: f32 = 0.25;

@@ -1,5 +1,4 @@
-//! Weight scaling must act only on glyphs from the configured family and keep
-//! every geometry field fixed.
+//! Weight scaling follows face selection and preserves geometry for primary and fallback glyphs.
 //!
 //! These tests use only tracked font files through `ConfigDirsOnly`; no system
 //! font lookup is involved, and a fixture that fails to resolve is a hard test
@@ -89,8 +88,9 @@ fn resolved_handle(stack: &FontStack, ch: char) -> usize {
         .font_idx
 }
 
+// A missing primary cannot exempt the selected monochrome fallback from weight scaling.
 #[test]
-fn a_fallback_at_index_zero_is_not_reweighted() {
+fn a_fallback_at_index_zero_is_reweighted_without_geometry_changes() {
     let _serial = serialized_font_test();
     let families = [(MISSING_FAMILY, false), (FALLBACK, true)];
     let mut base_stack = stack(&families, 1.0);
@@ -99,11 +99,13 @@ fn a_fallback_at_index_zero_is_not_reweighted() {
 
     let base = facts(&mut base_stack, 'm');
     let heavy = facts(&mut heavy_stack, 'm');
-    assert_eq!(heavy, base, "a fallback at handle zero must not change geometry or ink");
+    assert_eq!(TileFacts { ink: base.ink, ..heavy }, base);
+    assert!(heavy.ink > base.ink, "selected fallback must receive the same weight adjustment");
 }
 
+// A nonzero fallback handle follows the same post-selection policy as the primary face.
 #[test]
-fn a_fallback_after_the_primary_is_not_reweighted() {
+fn a_fallback_after_the_primary_is_reweighted_without_geometry_changes() {
     let _serial = serialized_font_test();
     let families = [(PRIMARY, false), (FALLBACK, true)];
     let mut base_stack = stack(&families, 1.0);
@@ -113,9 +115,7 @@ fn a_fallback_after_the_primary_is_not_reweighted() {
         .expect("tracked Roboto fallback handle must resolve");
     assert!(fallback_index > 0, "Roboto fallback must follow the configured Rec Mono handle");
 
-    // Address Roboto's nonzero handle directly with a glyph id from Roboto.
-    // This kills a call-site mutant that asks provenance about handle 0
-    // regardless of which handle actually produced the glyph.
+    // Address Roboto directly so primary coverage cannot hide the selected fallback's behavior.
     let glyph_id = base_stack
         .glyph_id_for_family_for_test(FALLBACK, 'm')
         .expect("tracked Roboto fixture must contain m");
@@ -134,9 +134,10 @@ fn a_fallback_after_the_primary_is_not_reweighted() {
     assert_eq!(base.offset_x, heavy.offset_x);
     assert_eq!(base.offset_y, heavy.offset_y);
     assert_eq!(base.advance, heavy.advance);
-    assert_eq!(base.coverage, heavy.coverage, "nonzero fallback handle must not be reweighted");
+    assert_ne!(base.coverage, heavy.coverage, "selected fallback must be reweighted");
 }
 
+// The primary family receives real ink growth without changes to its native tile placement.
 #[test]
 fn the_configured_family_adds_ink_without_moving_any_geometry() {
     let _serial = serialized_font_test();
@@ -153,6 +154,7 @@ fn the_configured_family_adds_ink_without_moving_any_geometry() {
     assert!(heavy.ink > base.ink, "configured-family weight must add real ink");
 }
 
+// Both thinning and thickening preserve every tile geometry field at the supported endpoints.
 #[test]
 fn configured_family_geometry_is_fixed_across_the_weight_range() {
     let _serial = serialized_font_test();
@@ -178,6 +180,107 @@ fn configured_family_geometry_is_fixed_across_the_weight_range() {
     }
 }
 
+fn tile_ink(tile: &sonicterm_text::glyph_atlas::RasterTile) -> u64 {
+    if tile.is_subpixel || tile.is_color {
+        tile.coverage.chunks_exact(4).map(|px| u64::from(px[3])).sum()
+    } else {
+        tile.coverage.iter().map(|value| u64::from(*value)).sum()
+    }
+}
+
+// All selected styles retain geometry while one common policy adds or removes monochrome ink.
+#[test]
+fn every_style_scales_ink_without_resizing_or_repositioning_glyphs() {
+    let _serial = serialized_font_test();
+    for dpi in [72, 90, 108, 126, 144] {
+        let make_stack = |weight| {
+            FontStack::try_new_with_font_dirs_for_test(
+                &[(PRIMARY, false)],
+                tracked_font_dirs(),
+                14.5,
+                dpi,
+                weight,
+            )
+            .unwrap()
+        };
+        let mut identity_stack = make_stack(1.0);
+        let metrics = identity_stack.cell_metrics_raster_px().unwrap();
+        for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+            let shaped = identity_stack.shape_text_with_style("277 H0", bold, italic).unwrap();
+            for scale in [0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0] {
+                let mut candidate_stack = make_stack(scale);
+                assert_eq!(candidate_stack.cell_metrics_raster_px().unwrap(), metrics);
+                let candidate_shape =
+                    candidate_stack.shape_text_with_style("277 H0", bold, italic).unwrap();
+                assert_eq!(shaped.len(), candidate_shape.len());
+                for (base, candidate) in shaped.iter().zip(&candidate_shape) {
+                    assert_eq!(
+                        (base.x_advance, base.y_advance, base.x_offset, base.y_offset),
+                        (
+                            candidate.x_advance,
+                            candidate.y_advance,
+                            candidate.x_offset,
+                            candidate.y_offset
+                        )
+                    );
+                }
+                for ch in ['2', '7', 'H', '0', '\u{e0b0}'] {
+                    let key = GlyphKey::new(ch, bold, italic);
+                    let base = identity_stack.rasterize(key).expect("tracked base glyph");
+                    let candidate = candidate_stack.rasterize(key).expect("tracked weighted glyph");
+                    assert_eq!(
+                        (base.width, base.height, base.offset_x, base.offset_y, base.advance),
+                        (
+                            candidate.width,
+                            candidate.height,
+                            candidate.offset_x,
+                            candidate.offset_y,
+                            candidate.advance
+                        ),
+                        "{ch} bold={bold} italic={italic} scale={scale} dpi={dpi}"
+                    );
+                    let base_ink = tile_ink(&base);
+                    let candidate_ink = tile_ink(&candidate);
+                    if scale < 1.0 {
+                        assert!(
+                            candidate_ink < base_ink,
+                            "thin {ch} bold={bold} italic={italic} dpi={dpi}"
+                        );
+                    } else if scale > 1.0 {
+                        assert!(
+                            candidate_ink > base_ink,
+                            "heavy {ch} bold={bold} italic={italic} dpi={dpi}"
+                        );
+                    } else {
+                        assert_eq!(candidate.coverage, base.coverage);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Windows digit alignment is already correct at identity weight, independent of the adjustment stage.
+#[cfg(windows)]
+#[test]
+fn identity_weight_preserves_native_digit_alignment_for_all_styles() {
+    let _serial = serialized_font_test();
+    let mut stack = FontStack::try_new_with_font_dirs_for_test(
+        &[(PRIMARY, false)],
+        tracked_font_dirs(),
+        14.5,
+        72,
+        1.0,
+    )
+    .unwrap();
+    for (bold, italic) in [(true, false), (false, false), (false, true), (true, true)] {
+        let two = stack.rasterize(GlyphKey::new('2', bold, italic)).unwrap();
+        let seven = stack.rasterize(GlyphKey::new('7', bold, italic)).unwrap();
+        assert_eq!(two.offset_y, seven.offset_y, "bold={bold} italic={italic}");
+    }
+}
+
+// Weight is an ink control, never a terminal cell-size control.
 #[test]
 fn cell_metrics_are_fixed_across_the_weight_range() {
     let _serial = serialized_font_test();

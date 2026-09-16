@@ -1,9 +1,7 @@
 //! Renderer-facing adapter over SonicTerm's font discovery, shaping, and
 //! rasterization stack.
 //!
-//! The adapter owns the configured-family provenance check and converts native
-//! raster output into fixed-geometry atlas tiles. Weight scaling changes ink
-//! coverage only; fallback, color, and explicitly bold glyphs remain untouched.
+//! Selected faces become fixed-geometry atlas tiles; weight scales monochrome ink, never color artwork.
 
 use std::cell::Cell;
 use std::path::PathBuf;
@@ -66,7 +64,7 @@ pub struct CellMetricsPx {
 pub struct FontStack {
     fc: Rc<FontConfiguration>,
     font_size_pt: f64,
-    regular_weight_scale: f32,
+    weight_scale: f32,
     /// Memoized cell height in raster px, used to size outline growth.
     /// `0.0` means "not yet computed"; invalidated on scaling changes.
     cell_h_px: Cell<f64>,
@@ -93,25 +91,25 @@ impl FontStack {
     }
 
     /// Construct a [`FontStack`] with explicit primary family, point size, and
-    /// DPI using native regular-text coverage.
+    /// DPI using native monochrome coverage.
     pub fn try_new_full(primary_family: &str, font_size_pt: f64, dpi: usize) -> Result<Self> {
         Self::try_new_full_with_weight(primary_family, font_size_pt, dpi, 1.0)
     }
 
     /// Construct a [`FontStack`] with explicit primary family, point size, DPI,
-    /// and regular-text coverage scale. Pass `dpi = 72 * scale_factor` so
+    /// and monochrome coverage scale. Pass `dpi = 72 * scale_factor` so
     /// sonicterm-font's point-size conversion yields raster pixels.
     pub fn try_new_full_with_weight(
         primary_family: &str,
         font_size_pt: f64,
         dpi: usize,
-        regular_weight_scale: f32,
+        weight_scale: f32,
     ) -> Result<Self> {
         Self::try_new_full_with_weight_and_font_dirs(
             primary_family,
             font_size_pt,
             dpi,
-            regular_weight_scale,
+            weight_scale,
             &[],
         )
     }
@@ -125,7 +123,7 @@ impl FontStack {
         primary_family: &str,
         font_size_pt: f64,
         dpi: usize,
-        regular_weight_scale: f32,
+        weight_scale: f32,
         font_dirs: &[PathBuf],
     ) -> Result<Self> {
         install_default_config(primary_family, font_size_pt);
@@ -141,7 +139,7 @@ impl FontStack {
         Ok(Self {
             fc: Rc::new(fc),
             font_size_pt,
-            regular_weight_scale: sanitize_weight_scale(regular_weight_scale),
+            weight_scale: sanitize_weight_scale(weight_scale),
             cell_h_px: Cell::new(0.0),
         })
     }
@@ -157,7 +155,7 @@ impl FontStack {
         font_dirs: Vec<PathBuf>,
         font_size_pt: f64,
         dpi: usize,
-        regular_weight_scale: f32,
+        weight_scale: f32,
     ) -> Result<Self> {
         let mut cfg = config::Config::default_config();
         cfg.font.font = families
@@ -176,7 +174,7 @@ impl FontStack {
         Ok(Self {
             fc: Rc::new(fc),
             font_size_pt,
-            regular_weight_scale: sanitize_weight_scale(regular_weight_scale),
+            weight_scale: sanitize_weight_scale(weight_scale),
             cell_h_px: Cell::new(0.0),
         })
     }
@@ -191,7 +189,7 @@ impl FontStack {
         Self {
             fc: Rc::clone(&self.fc),
             font_size_pt,
-            regular_weight_scale: self.regular_weight_scale,
+            weight_scale: self.weight_scale,
             cell_h_px: Cell::new(0.0),
         }
     }
@@ -323,17 +321,12 @@ impl Rasterizer for FontStack {
         };
 
         let rg = font.rasterize_glyph(glyph_pos, font_idx).ok()?;
-        self.rasterized_glyph_to_tile(rg, key, font.is_configured_family(font_idx))
+        self.rasterized_glyph_to_tile(rg)
     }
 }
 
 impl FontStack {
-    fn rasterized_glyph_to_tile(
-        &self,
-        rg: sonicterm_font::RasterizedGlyph,
-        key: GlyphKey,
-        configured_family: bool,
-    ) -> Option<RasterTile> {
+    fn rasterized_glyph_to_tile(&self, rg: sonicterm_font::RasterizedGlyph) -> Option<RasterTile> {
         if rg.data.is_empty() || rg.width == 0 || rg.height == 0 {
             // When: empty raster data or dimensions cannot form a valid atlas tile.
             return None;
@@ -372,31 +365,26 @@ impl FontStack {
                 (mask, false, false)
             }
         };
-        let mut tile_w = rg.width;
-        let mut tile_h = rg.height;
-        let mut offset_x = rg.bearing_x.get() as i32;
-        let mut offset_y = -rg.bearing_y.get() as i32;
-        if weight_scale_applies(is_color, key.weight_bold, configured_family) {
-            apply_regular_weight_scale(&mut coverage, self.regular_weight_scale, is_subpixel);
+        let tile_w = rg.width;
+        let tile_h = rg.height;
+        let offset_x = rg.bearing_x.get() as i32;
+        let offset_y = -rg.bearing_y.get() as i32;
+        if !is_color {
+            // All monochrome styles and fallback faces share this fixed-geometry adjustment.
+            apply_weight_scale(&mut coverage, self.weight_scale, is_subpixel);
             // The coverage remap alone cannot thicken a stem whose core is
             // already fully opaque, which is the common case at HiDPI. Growing
             // the outline is what makes weight_scale visible there. The same
             // ceiling applies to thinning, so below 1.0 the outline shrinks.
             let cell_h = self.cell_h_px();
-            let radius = embolden_radius_px(self.regular_weight_scale, cell_h);
+            let radius = embolden_radius_px(self.weight_scale, cell_h);
             if let Some((grown, w, h, pad)) =
                 embolden_coverage(&coverage, tile_w, tile_h, radius, is_subpixel)
             {
+                debug_assert_eq!((w, h, pad), (tile_w, tile_h, 0));
                 coverage = grown;
-                tile_w = w;
-                tile_h = h;
-                // Fixed-tile emboldening reports pad zero. Keep the adjustment
-                // explicit so a future implementation that returns padding also
-                // keeps its top-left corner aligned with the pen.
-                offset_x -= pad as i32;
-                offset_y -= pad as i32;
             }
-            let thin = thin_radius_px(self.regular_weight_scale, cell_h);
+            let thin = thin_radius_px(self.weight_scale, cell_h);
             if let Some(eroded) = erode_coverage(&coverage, tile_w, tile_h, thin, is_subpixel) {
                 // Erosion only removes ink, so dimensions and offsets hold.
                 coverage = eroded;
@@ -454,7 +442,7 @@ const EMBOLDEN_RADIUS_PER_CELL_H: f64 = 0.02;
 /// margin would disable growth for those while still growing curved glyphs.
 const MAX_EMBOLDEN_RADIUS_PX: f64 = 1.0;
 
-/// Radius, in raster px, that regular text should grow at `scale`. Zero at or
+/// Radius, in raster px, that monochrome text should grow at `scale`. Zero at or
 /// below `1.0`, where [`thin_radius_px`] takes over instead.
 fn embolden_radius_px(scale: f32, cell_h: f64) -> f64 {
     if scale <= 1.0 || !cell_h.is_finite() || cell_h <= 0.0 {
@@ -471,7 +459,7 @@ fn embolden_radius_px(scale: f32, cell_h: f64) -> f64 {
 /// nudge and leaves stem cores opaque rather than washing the glyph out.
 const THIN_RADIUS_PER_CELL_H: f64 = 0.012;
 
-/// Radius, in raster px, that regular text should shrink at `scale`. Zero at
+/// Radius, in raster px, that monochrome text should shrink at `scale`. Zero at
 /// or above `1.0`. Like emboldening, this exists because the coverage remap
 /// cannot move a pixel that is already fully opaque — at HiDPI a stem core is
 /// solid, so gamma alone leaves the stem exactly as wide as it started.
@@ -744,38 +732,7 @@ fn scale_coverage(coverage: u8, scale: f32) -> u8 {
     (normalized.powf(exponent) * 255.0).round().clamp(0.0, 255.0) as u8
 }
 
-/// Whether `weight_scale` may act on this glyph.
-///
-/// The setting scales the native weight of *the configured font*, so it must
-/// reach that font's glyphs and no others. Three exclusions, each for its own
-/// reason:
-///
-/// * **colour glyphs** — emoji carry their own artwork; remapping coverage on
-///   them alters the picture rather than its weight.
-/// * **SGR bold** — the terminal already resolved a bold face for those, and
-///   scaling on top of it would compound two weight changes.
-/// * **fallback glyphs** — these come from a font the user did not configure,
-///   drawn at a weight its own designer chose. Reweighting them applies the
-///   user's intent for one family to a different one, and the mismatch shows
-///   whenever the two sit adjacent: a fallback glyph grows or thins while its
-///   neighbour from the configured family does not move with it.
-///
-/// `is_configured_family` is asked of the loaded font rather than inferred
-/// from the handle index. Resolution pushes a handle only when a family
-/// actually matches, so a configured family that fails to load is absent
-/// entirely and the first fallback inherits index 0 — an index test would then
-/// reweight a font the user never named, in the one case where the difference
-/// matters most.
-///
-/// Split out of `rasterize` so it can be tested. The gate governs both the
-/// coverage remap and the outline growth that follows it, and a test that
-/// reached only the helpers underneath would pass against a build whose gate
-/// was gone.
-fn weight_scale_applies(is_color: bool, weight_bold: bool, is_configured_family: bool) -> bool {
-    !is_color && !weight_bold && is_configured_family
-}
-
-fn apply_regular_weight_scale(coverage: &mut [u8], scale: f32, is_subpixel: bool) {
+fn apply_weight_scale(coverage: &mut [u8], scale: f32, is_subpixel: bool) {
     let scale = sanitize_weight_scale(scale);
     if (scale - 1.0).abs() < f32::EPSILON {
         // When: sanitized `scale` is identity, leave every coverage byte and subpixel alpha untouched.
