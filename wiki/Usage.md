@@ -326,9 +326,13 @@ shorter candidate without trailing comma, semicolon, period, colon, exclamation
 mark, or question mark win; the underline then excludes the prose punctuation.
 A blocked literal or equal-length ambiguity fails closed instead of falling
 back. A complete standalone single-quoted contextual name, such as `'My Folder'`
-from `ll`, is treated as `My Folder`. Other quoted or escaped names, `ls -F`
-suffixes (`*`, `@`, `=`, `|`), and raw paths containing wide, continuation,
-combining, or OSC 8-owned cells remain inert.
+from `ll`, is treated as `My Folder`. Explicit paths also accept one complete
+single-quote, double-quote, or backtick pair, including paths with spaces such as
+`'C:\work\My Folder'`. The quotes are excluded from the active span but included
+in cell safety checks. Quote contents are literal: no shell unescaping or variable
+expansion. Unmatched/mixed quotes, concatenated text, padded contents, `$`/`%`
+expansions, other quoted bare names, `ls -F` suffixes (`*`, `@`, `=`, `|`), and
+raw paths containing wide, continuation, combining, or OSC 8-owned cells remain inert.
 
 Terminal messages can contain actionable file references, including a balanced
 identifier-style tool heading such as `Update(src/main.rs)` or `Read(./notes.txt)`.
@@ -352,6 +356,17 @@ Line and column values must be positive; ranges accept `-` or `–` and must not
 run backwards. Relative source names still require the exact pane's trusted CWD.
 Windows, macOS, and Linux select the referenced file in its containing folder.
 Line metadata does not launch an editor or restrict the file's type or contents.
+Grouped citations such as `(src/main.rs:924, :934, :375).` share one explicit path
+and accept up to eight validated locations. Pointing at a location selects its
+metadata; pointing at the filename selects the first location. The complete group
+is underlined and validated together; separators and outer punctuation do not
+initiate navigation. Malformed members invalidate the whole group. Group anchors
+use unquoted paths without spaces; quoted individual references support spaces.
+A spaced anchor carrying grouped locations is entirely inert, including the
+anchor itself, rather than falling back to a shorter filename. Unwrapped groups
+start a segment or follow another complete group; after prose, use `()`/`[]`/`{}`
+to make the anchor boundary explicit. A wrapper after plain words is read as
+prose; it is not a continuation of a spaced relative filename.
 
 ### Local target behavior
 
@@ -725,7 +740,10 @@ SonicTerm 会选择包含鼠标 cell 的最长、无歧义且可操作候选。�
 标点结尾的路径，会先探测标点属于文件名的合法字面候选。只有该字面文件不存在时，才会尝试
 去掉末尾逗号、分号、句点、冒号、感叹号或问号的较短候选；此时下划线不包含正文标点。字面
 候选被阻止或同长度候选有歧义时会 fail closed，不会回退。`ll` 输出的完整独立单引号上下文
-名称，例如 `'My Folder'`，会按 `My Folder` 处理。其它带引号或转义的名称、`ls -F` 后缀
+名称，例如 `'My Folder'`，会按 `My Folder` 处理。显式路径也支持一对完整的单引号、双引号
+或反引号，包括 `'C:\work\My Folder'` 这样的带空格路径。引号不属于可操作范围，但仍参与
+cell 安全检查。引号内容按字面处理，不执行 shell 反转义或变量展开。不配对或混合引号、
+拼接文字、首尾填充空格、`$`/`%` 展开语法、其它带引号的裸名称、`ls -F` 后缀
 （`*`、`@`、`=`、`|`），以及含宽字符、续格、组合字符或已属于 OSC 8 的 cell 的原始路径
 都保持不可操作。
 
@@ -744,6 +762,13 @@ SonicTerm 会选择包含鼠标 cell 的最长、无歧义且可操作候选。�
 但只解析文件名。行号与列号必须为正数；范围接受 `-` 或 `–`，且终点不能早于起点。
 相对源文件名仍要求准确 pane 的可信 CWD。Windows、macOS 和 Linux 都在所在文件夹中
 选中引用的文件。行号不启动编辑器，也不限制文件类型或内容。
+`(src/main.rs:924, :934, :375).` 这样的分组引用共用一个显式路径，最多包含八个有效位置。
+指向某个位置时选择对应元数据，指向文件名时选择第一个位置。整个分组统一显示下划线并
+参与验证；分隔符和外围标点不触发导航。任何无效成员都会使整个分组失效。分组锚点使用
+不带引号和空格的路径；单独的带引号引用支持空格。带空格锚点的分组位置引用整体不可操作，
+包括锚点本身，不会回退到较短文件名。不加括号的分组必须位于片段开头或紧随另一个完整分组；
+正文之后请用 `()`/`[]`/`{}` 明确锚点边界。普通文字之后的括号会按正文分隔处理，
+不会作为带空格相对文件名的延续。
 
 ### 本地目标行为
 
