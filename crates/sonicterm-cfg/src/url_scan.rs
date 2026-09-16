@@ -533,12 +533,37 @@ fn focused_candidate_group(
     start: usize,
     source_end: usize,
 ) -> Option<FocusedCandidateGroup> {
-    let one_trim = text[start..source_end]
+    let source_start = start;
+    let prose_end =
+        start + text[start..source_end].trim_end_matches(is_prose_path_punctuation).len();
+    // Trailing prose can hide the closer from the initial wrapper pass.
+    let (inner_start, inner_end) = if prose_end < source_end {
+        trim_outer_path_wrapper(text, start, prose_end, style)
+    } else {
+        // When: `prose_end` reaches `source_end`, retain the initial wrapper decision.
+        (start, source_end)
+    };
+    // Replacing rejected outer tiers keeps the three-candidate group bound unchanged.
+    let (start, candidate_end) = if inner_start > start {
+        (inner_start, inner_end)
+    } else {
+        // When: `inner_start` did not advance past `start`, keep literal filename punctuation candidates.
+        (start, source_end)
+    };
+    if clicked_byte < start
+        || clicked_byte >= candidate_end
+        || escaped_space_path(text, start, &text[start..candidate_end], style)
+        || unsafe_wrapper_adjacent(text, start, candidate_end)
+    {
+        // When: the exposed `start..candidate_end` loses pointer ownership or safe boundaries, omit its entire group.
+        return None;
+    }
+    let one_trim = text[start..candidate_end]
         .char_indices()
         .next_back()
         .filter(|(_, ch)| is_prose_path_punctuation(*ch))
         .map(|(offset, _)| start + offset);
-    let mut full_trim = source_end;
+    let mut full_trim = candidate_end;
     while let Some((offset, ch)) = text[start..full_trim].char_indices().next_back() {
         if !is_prose_path_punctuation(ch) {
             // When: `ch` is not prose punctuation, stop before trimming legal filename content.
@@ -546,11 +571,11 @@ fn focused_candidate_group(
         }
         full_trim = start + offset;
     }
-    let mut ends = vec![source_end];
+    let mut ends = vec![candidate_end];
     if let Some(one_trim) = one_trim {
         ends.push(one_trim);
     }
-    if full_trim < source_end {
+    if full_trim < candidate_end {
         ends.push(full_trim);
     }
     ends.sort_unstable_by(|left, right| right.cmp(left));
@@ -572,7 +597,7 @@ fn focused_candidate_group(
     }
     Some(FocusedCandidateGroup {
         token_count,
-        source_start: start,
+        source_start,
         source_end,
         has_prose_fallback: candidates.iter().any(|candidate| candidate.end < source_end),
         candidates,

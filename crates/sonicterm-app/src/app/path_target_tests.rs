@@ -261,6 +261,84 @@ fn tool_and_prose_paths_resolve_real_files_in_each_window() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// Punctuated wrappers preserve source metadata and real-file reveal spans in main and child windows.
+#[test]
+fn punctuated_wrapped_paths_resolve_real_files_in_each_window() {
+    let _guard = super::super::media::MEDIA_COUNTER_LOCK.lock();
+    let root = native_test_root().join(format!(
+        "sonicterm-punctuated-path-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    let path = "src/café.rs";
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join(path), "harmless fixture").unwrap();
+    let uri_path = if cfg!(windows) {
+        PathBuf::from(format!("/{}", root.to_str().unwrap().replace('\\', "/")))
+    } else {
+        root.clone()
+    };
+    let cwd = local_file_uri(&uri_path).unwrap();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main punctuation");
+    let main = app.main_window_id.unwrap();
+    let child = app.__test_seed_child_window(&["child punctuation"]);
+    for window in [main, child] {
+        let pane = *app.windows[&window].panes.keys().next().unwrap();
+        app.windows[&window].panes[&pane].parser.lock().resize(120, 24);
+        for suffix in ["", ":97", ":97:4", ":97–100"] {
+            let display = format!("{path}{suffix}");
+            for (left, right) in [("(", ")"), ("[", "]"), ("{", "}"), ("Read(", ")")] {
+                let row = format!("é {left}{display}{right},.!? Next");
+                let output = format!("\x1b[2J\x1b[H\x1b]7;{cwd}\x1b\\{row}");
+                assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+                let start_col = 2 + left.len() as u16;
+                let end_col = start_col + display.chars().count() as u16;
+                for col in start_col..end_col {
+                    let snapshot =
+                        app.cell_target_at(window, pane, 0, col).expect("wrapped candidate");
+                    let ResolvedCellTarget::Path(key) = snapshot.target else {
+                        panic!("filesystem provenance")
+                    };
+                    let selection =
+                        probe_candidates(&key.candidates, classify_local_target).unwrap();
+                    assert_eq!(selection.candidate.resolved_path, root.join(path));
+                    assert_eq!(selection.candidate.display(), display);
+                    assert_eq!(
+                        selection.candidate.spans.as_slice(),
+                        &[AbsoluteCellSpan { row: 0, start_col, end_col }]
+                    );
+                    assert_eq!(
+                        local_target_action(selection.decision),
+                        Some(LocalTargetAction::Reveal)
+                    );
+                    let cells =
+                        selection.candidate.visible_cells(pane, key.view_top, true).unwrap();
+                    assert!(cells.contains(0, col));
+                    assert!(!cells.contains(0, start_col - 1));
+                    assert!(!cells.contains(0, end_col));
+                }
+                for col in [start_col - 1, end_col, end_col + 1] {
+                    if let Some(snapshot) = app.cell_target_at(window, pane, 0, col) {
+                        if let ResolvedCellTarget::Path(key) = snapshot.target {
+                            assert!(key
+                                .candidates
+                                .iter()
+                                .all(|candidate| candidate.resolved_path != root.join(path)));
+                        }
+                    }
+                }
+            }
+        }
+        let row = "(src/missing.rs:97).";
+        let output = format!("\x1b[2J\x1b[H{row}");
+        assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+        let snapshot = app.cell_target_at(window, pane, 0, 5).unwrap();
+        assert_eq!(snapshot.explicit_path_text().as_deref(), Some("src/missing.rs:97"));
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 /// Missing-path feedback follows the pointed filename, not adjacent prose or a neighboring file.
 #[test]
 fn prose_path_feedback_excludes_neighboring_words() {
@@ -1420,6 +1498,97 @@ fn logical_path_scan_keeps_wrapped_prose_punctuation_alternates() {
         candidate.target == DetectedTarget::PathCandidate("src/long/path.rs".into())
             && candidate.spans.last().is_some_and(|span| span.end_col == 7)
     }));
+}
+
+/// Automatic wrapping preserves the source span but hard line breaks never reconstruct it.
+#[test]
+fn punctuated_wrapped_paths_follow_only_automatic_rows() {
+    let text = "(src/long/path.rs:97).";
+    let display = "src/long/path.rs:97";
+    let width = 11;
+    let mut grid = Grid::new(width, 3);
+    for ch in text.chars() {
+        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    }
+    for index in 1..1 + display.len() {
+        let scan = logical_path_scan_at_cell(
+            &grid,
+            0,
+            AbsoluteCell {
+                row: (index / width as usize) as u64,
+                col: (index % width as usize) as u16,
+            },
+            PathStyle::Posix,
+            false,
+        )
+        .unwrap();
+        let candidate = scan.candidates.iter().find(|candidate| matches!(&candidate.target,
+            DetectedTarget::SourceReference(reference) if reference.display == display && reference.path == "src/long/path.rs")).expect("complete source across automatic rows");
+        assert_eq!(
+            candidate.spans.as_slice(),
+            &[
+                AbsoluteCellSpan { row: 0, start_col: 1, end_col: width },
+                AbsoluteCellSpan {
+                    row: 1,
+                    start_col: 0,
+                    end_col: (1 + display.len() - width as usize) as u16
+                },
+            ]
+        );
+    }
+    let mut hard = Grid::new(width, 3);
+    for ch in "(src/long/".chars() {
+        hard.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    }
+    hard.linefeed();
+    hard.carriage_return();
+    for ch in "path.rs:97).".chars() {
+        hard.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    }
+    for pointed in [AbsoluteCell { row: 0, col: 2 }, AbsoluteCell { row: 1, col: 2 }] {
+        if let Some(scan) = logical_path_scan_at_cell(&hard, 0, pointed, PathStyle::Posix, false) {
+            assert!(scan.candidates.iter().all(|candidate| !matches!(&candidate.target,
+                DetectedTarget::SourceReference(reference) if reference.display == display)));
+        }
+    }
+}
+
+/// Removed wrapper and punctuation cells still retain unsafe combining and hyperlink provenance.
+#[test]
+fn punctuated_wrapped_paths_reject_unsafe_removed_cells() {
+    let text = "(src/main.rs:97).";
+    for index in [0, text.len() - 2, text.len() - 1] {
+        let mut cells = text
+            .chars()
+            .map(|ch| Cell::plain(ch, Color::Default, Color::Default, CellFlags::empty()))
+            .collect::<Vec<_>>();
+        cells[index].set_extras(Some("\u{301}".into()));
+        assert!(row_target_candidates_at_cell(&Row::from_flat(cells), 3, PathStyle::Posix, true)
+            .is_empty());
+        let mut row = ascii_row(text);
+        row.iter_mut().nth(index).unwrap().set_hyperlink(Some(HyperlinkId(7)));
+        assert!(row_target_candidates_at_cell(&row, 3, PathStyle::Posix, true).is_empty());
+        for hyperlink in [false, true] {
+            let mut grid = Grid::new(11, 3);
+            for ch in text.chars() {
+                grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+            }
+            let cell = grid.row_mut((index / 11) as u16).iter_mut().nth(index % 11).unwrap();
+            if hyperlink {
+                cell.set_hyperlink(Some(HyperlinkId(7)));
+            } else {
+                cell.set_extras(Some("\u{301}".into()));
+            }
+            assert!(logical_path_scan_at_cell(
+                &grid,
+                0,
+                AbsoluteCell { row: 0, col: 3 },
+                PathStyle::Posix,
+                true
+            )
+            .is_none());
+        }
+    }
 }
 
 /// Hyperlink provenance inside a candidate prevents plain-text path reconstruction.

@@ -272,7 +272,10 @@ embedded zlib, libpng, and FreeType sources and exports their build paths.
 ### `sonicterm-harfbuzz`
 
 **Role:** generated HarfBuzz ABI. `build.rs` compiles the embedded HarfBuzz C++
-amalgamation against the FreeType build.
+amalgamation against the FreeType build. Native atomics, mutexes, and thread-safe
+static initialization stay enabled: independent font objects on different threads
+still share HarfBuzz callback tables. The font wrapper tests exercise concurrent
+creation and teardown without sharing mutable font objects.
 
 **First-party dependencies:** `sonicterm-freetype` under the dependency alias
 `freetype`.
@@ -654,7 +657,9 @@ Rust library 名为 `config`。
 ### `sonicterm-harfbuzz`
 
 **职责：** 生成的 HarfBuzz ABI。`build.rs` 针对 FreeType 构建结果编译内嵌的
-HarfBuzz C++ 合并源码。
+HarfBuzz C++ 合并源码。原生原子操作、互斥锁和线程安全的静态初始化保持启用：
+不同线程上的独立字体对象仍共享 HarfBuzz 回调表。字体封装测试在不共享可变字体对象的
+情况下并发创建和销毁字体。
 
 **第一方依赖：** 以依赖别名 `freetype` 使用 `sonicterm-freetype`。
 
