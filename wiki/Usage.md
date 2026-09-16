@@ -333,6 +333,10 @@ combining, or OSC 8-owned cells remain inert.
 Terminal messages can contain actionable file references, including a balanced
 identifier-style tool heading such as `Update(src/main.rs)` or `Read(./notes.txt)`.
 The detected inner path excludes the heading and its enclosing parentheses.
+Wrapped paths and source locations also accept following sentence punctuation,
+such as `(src/main.rs:97).`, `[src/main.rs:97:4],`, `{src/main.rs};`, or
+`Read(src/main.rs:97–100)!`. The wrapper and outer punctuation are excluded from
+the active span; punctuation inside the wrapper still follows literal-first probing.
 In prose such as `src/main.rs and focused tests/main.rs. Require stable`, point
 at either filename to resolve it independently. `and` is not a reserved word:
 existing filenames containing spaces or parentheses still use literal filesystem
@@ -727,6 +731,9 @@ SonicTerm 会选择包含鼠标 cell 的最长、无歧义且可操作候选。�
 
 终端消息中的文件引用可以直接操作，包括 `Update(src/main.rs)` 或 `Read(./notes.txt)`
 这类括号完整、名称为标识符的工具标题。内部路径不包含工具名称和外层圆括号。
+带括号的路径与源文件位置引用也允许后接句末标点，例如 `(src/main.rs:97).`、
+`[src/main.rs:97:4],`、`{src/main.rs};` 或 `Read(src/main.rs:97–100)!`。
+可操作范围不包含外层括号和标点；括号内部的标点仍遵循字面文件名优先的探测规则。
 在 `src/main.rs and focused tests/main.rs. Require stable` 这类正文中，分别指向两个
 文件名即可独立解析。`and` 不是保留词：真实文件名中的空格与圆括号仍通过字面文件系统
 候选消除歧义。缺失的上下文路径使用指向的文件名反馈，不使用未经验证的多词正文猜测。

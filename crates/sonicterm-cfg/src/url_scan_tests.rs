@@ -1047,6 +1047,143 @@ fn windows_spaced_candidates_reject_normalization_aliases() {
     }
 }
 
+/// Wrappers and prose endings compose without changing inner spans, location metadata, or pointer ownership.
+#[test]
+fn wrapped_paths_with_prose_endings_preserve_exact_targets() {
+    let mut failures = Vec::new();
+    for (style, path) in [
+        (PathStyle::Posix, "src/main.rs"),
+        (PathStyle::Posix, "./src/main.rs"),
+        (PathStyle::Posix, "/tmp/main.rs"),
+        (PathStyle::Posix, "~/src/main.rs"),
+        (PathStyle::Posix, "/tmp/My Folder/main.rs"),
+        (PathStyle::Posix, "src/café.rs"),
+        (PathStyle::Windows, r"C:\work\main.rs"),
+        (PathStyle::Windows, r"src\main.rs"),
+        (PathStyle::Windows, r".\src\main.rs"),
+    ] {
+        for (suffix, column, end_line) in [
+            ("", None, None),
+            (":97", None, None),
+            (":97:4", Some(4), None),
+            (":97-100", None, Some(100)),
+            (":97–100", None, Some(100)),
+        ] {
+            let display = format!("{path}{suffix}");
+            let expected = if suffix.is_empty() {
+                DetectedTarget::PathCandidate(path.into())
+            } else {
+                DetectedTarget::SourceReference(SourceReference {
+                    path: path.into(),
+                    display: display.clone(),
+                    line: 97,
+                    column,
+                    end_line,
+                    explicit_path: true,
+                })
+            };
+            for (left, right) in [("", ""), ("(", ")"), ("[", "]"), ("{", "}"), ("open(", ")")] {
+                for ending in ["", ".", ",", ";", ":", "!", "?", ",.!?"] {
+                    let prefix = format!("é {left}");
+                    let text = format!("{prefix}{display}{right}{ending}");
+                    let start = prefix.len();
+                    let end = start + display.len();
+                    let mut missing = 0;
+                    for (col, (byte, _)) in text.char_indices().enumerate() {
+                        let candidates =
+                            target_candidates_at_char_col_for_style(&text, col, style, true);
+                        let exact = candidates
+                            .iter()
+                            .any(|m| m.start == start && m.end == end && m.target == expected);
+                        if (start..end).contains(&byte) {
+                            missing += usize::from(!exact);
+                        } else {
+                            assert!(!exact, "exterior column {col} owns inner target: {text:?}");
+                        }
+                        assert!(candidates.len() <= MAX_PATH_CANDIDATES_PER_CELL);
+                    }
+                    if missing > 0 {
+                        failures.push(format!("{style:?} {text:?}: {missing} missing columns"));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} failing combinations; first: {:?}",
+        failures.len(),
+        failures.first()
+    );
+}
+
+/// Outer sentence endings must not erase an inner punctuation-bearing literal or filename parentheses.
+#[test]
+fn wrapped_paths_with_prose_endings_preserve_literal_precedence() {
+    for text in ["(/tmp/a(b).rs,.).", "open(/tmp/a(b).rs,.),.!?"] {
+        let col = text.find("a(b)").unwrap();
+        let candidates = target_candidates_at_char_col_for_style(text, col, PathStyle::Posix, true);
+        let paths = candidates
+            .iter()
+            .filter_map(|m| match &m.target {
+                DetectedTarget::PathCandidate(path) => Some(path.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(paths, ["/tmp/a(b).rs,.", "/tmp/a(b).rs,", "/tmp/a(b).rs"]);
+    }
+}
+
+/// Candidate pressure retains the complete three-tier inner group without increasing the per-cell budget.
+#[test]
+fn wrapped_paths_with_prose_endings_keep_bounded_atomic_groups() {
+    let text = "a0 a1 a2 a3 a4 a5 a6 (/tmp/My Long Spaced Path With Seven Parts.rs,.). z0 z1 z2 z3 z4 z5 z6";
+    let path = "/tmp/My Long Spaced Path With Seven Parts.rs";
+    let col = text.find("Parts").unwrap();
+    let candidates = target_candidates_at_char_col_for_style(text, col, PathStyle::Posix, true);
+    assert!(candidates.len() <= MAX_PATH_CANDIDATES_PER_CELL);
+    for suffix in [",.", ",", ""] {
+        let expected = format!("{path}{suffix}");
+        assert!(
+            candidates.iter().any(|m| m.target == DetectedTarget::PathCandidate(expected.clone())),
+            "missing {expected:?}"
+        );
+    }
+    let start = text.find("(/tmp").unwrap();
+    let source_end = text.find(").").unwrap() + 2;
+    let group =
+        focused_candidate_group(text, col, PathStyle::Posix, true, 8, start, source_end).unwrap();
+    assert_eq!(group.candidates.len(), 3);
+}
+
+/// Composing boundary alternatives never repairs malformed locations, quotes, or ambiguous outer syntax.
+#[test]
+fn wrapped_paths_with_prose_endings_reject_unsafe_boundaries() {
+    for text in [
+        "(src/main.rs:0).",
+        "(src/main.rs:97:0).",
+        "(src/main.rs:100-97).",
+        "(src/main.rs:99999999999).",
+        "(src/main.rs:97:abc).",
+        "(src/main.rs:97].",
+        "((src/main.rs:97)).",
+        "(src/main.rs:97).tail",
+        "open(src/main.rs:97)).",
+        "\"(src/main.rs:97).\"",
+        "(main.rs:97).",
+    ] {
+        let col = text.find("main").unwrap();
+        assert!(
+            target_candidates_at_char_col_for_style(text, col, PathStyle::Posix, true).is_empty(),
+            "{text:?}"
+        );
+    }
+    let text = "(https://example.com/main.rs:97).";
+    let candidates = target_candidates_at_char_col_for_style(text, 10, PathStyle::Posix, true);
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].target, DetectedTarget::Uri("https://example.com/main.rs:97".into()));
+}
+
 /// Existing wrapper trimming remains available through the focused candidate API.
 #[test]
 fn focused_candidates_preserve_matching_wrapper_support() {

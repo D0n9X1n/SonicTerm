@@ -1474,16 +1474,25 @@ fn logical_path_scan_at_cell(
                     .iter()
                     .position(|start| *start >= matched.end)
                     .unwrap_or(cells.len());
+                let mut source_start_index = start_index;
+                while source_start_index > 0
+                    && matches!(cells[source_start_index - 1].ch, '(' | '[' | '{')
+                {
+                    source_start_index -= 1;
+                }
                 let mut source_end_index = end_index;
                 while source_end_index < cells.len()
-                    && matches!(cells[source_end_index].ch, ',' | ';' | '.' | ':' | '!' | '?')
+                    && matches!(
+                        cells[source_end_index].ch,
+                        ',' | ';' | '.' | ':' | '!' | '?' | ')' | ']' | '}'
+                    )
                 {
                     source_end_index += 1;
                 }
                 if start_index >= end_index
                     || pointed_index < start_index
                     || pointed_index >= end_index
-                    || cells[start_index..source_end_index]
+                    || cells[source_start_index..source_end_index]
                         .iter()
                         .any(|cell| unsafe_path_cell(cell) || cell.hyperlink().is_some())
                 {
@@ -1552,9 +1561,17 @@ fn row_target_candidates_at_cell(
                 .iter()
                 .position(|(start, _)| *start >= matched.end)
                 .unwrap_or(cells.len());
+            let mut source_start_col = start_col;
+            while source_start_col > 0 && matches!(cells[source_start_col - 1].ch, '(' | '[' | '{')
+            {
+                source_start_col -= 1;
+            }
             let mut source_end_col = end_col;
             while source_end_col < cells.len()
-                && matches!(cells[source_end_col].ch, ',' | ';' | '.' | ':' | '!' | '?')
+                && matches!(
+                    cells[source_end_col].ch,
+                    ',' | ';' | '.' | ':' | '!' | '?' | ')' | ']' | '}'
+                )
             {
                 source_end_col += 1;
             }
@@ -1562,7 +1579,7 @@ fn row_target_candidates_at_cell(
                 || start_col > col
                 || end_col <= col
                 || source_end_col < end_col
-                || cells[start_col..source_end_col]
+                || cells[source_start_col..source_end_col]
                     .iter()
                     .any(|cell| unsafe_path_cell(cell) || cell.hyperlink().is_some())
             {
