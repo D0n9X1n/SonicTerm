@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent
 SPEC = importlib.util.spec_from_file_location("release_issues", ROOT / "release-issues.py")
@@ -287,6 +288,72 @@ class ProvenanceTests(unittest.TestCase):
         self.assertNotIn("\n## injected", notes)
         self.assertFalse((self.path / "PWNED").exists())
         self.assertEqual(len(self.log.read_text().splitlines()), 6)
+
+    def test_manual_closure_is_disclosed_separately_within_release_dates(self):
+        # A human close is date-bounded disclosure, never commit-linked resolution proof.
+        with patch.dict(os.environ, GIT_COMMITTER_DATE="2026-09-01T00:00:00Z"):
+            base = self.commit("release boundary")
+        with patch.dict(os.environ, GIT_COMMITTER_DATE="2026-09-10T00:00:00Z"):
+            head = self.commit("Fixes #1, closes #2, closes #3, closes #4")
+        self.association(head)
+        for n, date in [(1, "2026-09-05T00:00:00Z"), (2, "2026-08-31T00:00:00Z"),
+                        (3, "2026-09-11T00:00:00Z")]:
+            self.issue(n, [None], title="Manual [closure]")
+            item = self.fixture[f"issue:owner/repo:{n}:"]["body"]["data"]["repository"]["issueOrPullRequest"]
+            item.update(state="CLOSED", closedAt=date)
+            item["timelineItems"]["nodes"][0]["createdAt"] = date
+        self.issue(4, [commit_closer(head)])
+        notes = self.collect(head=head, base=base)
+        verified, disclosed = notes.split("## Manually closed issues (unverified release linkage)")
+        self.assertIn("[#4]", verified)
+        self.assertNotIn("[#1]", verified)
+        self.assertIn("[#1]", disclosed)
+        self.assertIn("2026-09-05T00:00:00Z", disclosed)
+        self.assertIn(r"Manual \[closure\]", disclosed)
+        self.assertNotIn("[#2]", notes)
+        self.assertNotIn("[#3]", notes)
+
+    def test_manual_closure_needs_valid_metadata_and_current_closed_event(self):
+        # Missing dates remain errors; reopened, prior-shipped, or non-current manual closures are not new disclosures.
+        head = self.commit("Fixes #1")
+        self.association(head)
+        date = self.git("show", "-s", "--format=%cI", head)
+        self.association(self.base)
+        for state, closed, event_date, expected in [
+            ("OPEN", None, date, False),
+            ("CLOSED", date, "2000-01-01T00:00:00Z", False),
+            ("CLOSED", date, date, True),
+        ]:
+            self.issue(1, [None])
+            item = self.fixture["issue:owner/repo:1:"]["body"]["data"]["repository"]["issueOrPullRequest"]
+            item.update(state=state, closedAt=closed)
+            item["timelineItems"]["nodes"][0]["createdAt"] = event_date
+            self.assertEqual("[#1]" in self.collect(base=""), expected)
+        self.issue(1, [commit_closer(self.base), None])
+        item = self.fixture["issue:owner/repo:1:"]["body"]["data"]["repository"]["issueOrPullRequest"]
+        item.update(state="CLOSED", closedAt=date)
+        item["timelineItems"]["nodes"][-1]["createdAt"] = date
+        self.assertNotIn("[#1]", self.collect())
+        for invalid in [None, "not-a-date", "2026-09-05T00:00:00"]:
+            item["closedAt"] = invalid
+            with self.assertRaises(release.Failure):
+                self.collect()
+
+    def test_manual_closure_timestamp_precision_and_ambiguity(self):
+        # GitHub can stamp closedAt one second before the event, but multiple matches are ambiguous.
+        with patch.dict(os.environ, GIT_COMMITTER_DATE="2026-09-10T00:00:00Z"):
+            head = self.commit("Fixes #1")
+        self.association(head)
+        self.association(self.base)
+        self.issue(1, [None])
+        item = self.fixture["issue:owner/repo:1:"]["body"]["data"]["repository"]["issueOrPullRequest"]
+        item.update(state="CLOSED", closedAt="2026-09-05T00:00:00Z")
+        events = item["timelineItems"]["nodes"]
+        events[0]["createdAt"] = "2026-09-05T00:00:01Z"
+        self.assertIn("[#1]", self.collect(base=""))
+        events.append(dict(events[0]))
+        with self.assertRaisesRegex(release.Failure, "ambiguous"):
+            self.collect(base="")
 
     def test_metadata_auth_schema_and_null_closer_fail(self):
         # Missing metadata and unknown provenance are errors, never empty successes.

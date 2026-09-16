@@ -423,8 +423,19 @@ restores its contribution. A PR with a reverted associated constituent is omitte
 conservatively. Prose-only or partial/semantic reversals without canonical Git
 markers are not inferred. This is linked GitHub closure evidence, not a claim to
 find every fix or prove the runtime effect of arbitrary changes. Missing/deleted
-metadata, unknown/null closers, malformed schemas, inconsistent pagination, and
-ambiguous provenance fail generation instead of publishing a partial list.
+metadata, unknown non-null closer types, malformed schemas, inconsistent pagination,
+and ambiguous provenance fail generation instead of publishing a partial list.
+
+A null closer never enters **Resolved issues**. Instead, nominated issues that are
+currently closed can appear under **Manually closed issues (unverified release
+linkage)** when their current closure event falls after the base commit date and
+no later than the head commit date (first releases have no lower date bound).
+The event and issue closure timestamps must agree within one second, accommodating
+GitHub's timestamp precision; missing/invalid dates or multiple matching events
+still fail. Previously shipped commit-linked closures remain excluded. This
+separate disclosure names the closure date and explicitly does not prove that
+the release resolved the issue; mutable PR links and dates never replace ancestry
+checks in the verified list.
 
 The collector caches exact API pages, requests 100 entries per page, and permits
 at most 20 pages per connection, 2,000 range commits, 1,000 API attempts, 4 MiB per
@@ -853,8 +864,15 @@ head 之后的关闭也不会入选。空 commit-to-PR 关联列表是正常结�
 Git 规范消息 `This reverts commit <完整 SHA>` 会取消目标贡献；merge revert 也取消该 merge
 引入的 commit，revert-of-revert 则恢复原贡献。若 PR 关联的某个组成 commit 被 revert，会保守
 省略整个 PR。没有规范 Git 标记的纯文字、部分或语义性反向变更不会被推断。这是 GitHub 关闭关联
-证据，不声称发现全部修复，也不证明任意变更的运行时效果。缺失/删除的 metadata、未知/null closer、
-错误 schema、不一致分页和含糊来源会使生成失败，而不是发布不完整列表。
+证据，不声称发现全部修复，也不证明任意变更的运行时效果。缺失/删除的 metadata、未知的非空 closer
+类型、错误 schema、不一致分页和含糊来源会使生成失败，而不是发布不完整列表。
+
+null closer 绝不会进入 **Resolved issues**。被范围内变更提名、当前仍关闭的 issue，若当前关闭事件
+晚于 base commit 日期且不晚于 head commit 日期（首次发布没有日期下限），可单独列入
+**Manually closed issues (unverified release linkage)**。事件与 issue 的关闭时间必须相差不超过一秒，
+以适应 GitHub 时间精度；缺失或无效日期、多个匹配事件仍会失败。此前已交付的 commit 关联关闭仍被
+排除。单独披露会注明关闭日期，并明确不证明该版本解决了 issue；可编辑 PR 链接与日期绝不替代
+已验证列表中的祖先关系检查。
 
 Collector 缓存精确 API page，每页请求 100 项；每个 connection 最多 20 页，范围最多 2,000 个
 commit，最多 1,000 次 API 尝试，每个子进程输出最多 4 MiB，API 总输出最多 32 MiB。每次请求
