@@ -1,5 +1,34 @@
 use super::*;
 
+/// Independent thread-local fonts must retain the shared OpenType callback table during concurrent teardown.
+#[test]
+fn concurrent_font_lifetimes_preserve_shared_callback_tables() {
+    let barrier = std::sync::Barrier::new(16);
+    std::thread::scope(|scope| {
+        for _ in 0..16 {
+            let barrier = &barrier;
+            scope.spawn(move || {
+                let handle = FontDataHandle {
+                    source: FontDataSource::BuiltIn {
+                        name: "concurrent-font",
+                        data: include_bytes!("../../../assets/fonts/RecMonoSt.Helens-Regular.ttf"),
+                    },
+                    index: 0,
+                    variation: 0,
+                    origin: crate::locator::FontOrigin::BuiltIn,
+                    coverage: None,
+                };
+                barrier.wait();
+                for _ in 0..2000 {
+                    let mut font = Font::from_locator(&handle).unwrap();
+                    font.set_ot_funcs();
+                    assert!(font.get_face().get_upem() > 0);
+                }
+            });
+        }
+    });
+}
+
 #[test]
 #[deny(unused_unsafe)]
 fn raw_pointer_ownership_constructors_remain_unsafe() {
