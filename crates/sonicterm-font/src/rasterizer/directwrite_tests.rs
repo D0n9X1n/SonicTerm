@@ -23,7 +23,7 @@ fn main_ink_rows(glyph: &RasterizedGlyph) -> (i32, i32) {
         .data
         .chunks_exact(glyph.width * 4)
         .enumerate()
-        .filter(|(_, row)| row.chunks_exact(4).any(|pixel| pixel[3] >= 128))
+        .filter(|(_, row)| row.as_chunks::<4>().0.iter().any(|pixel| pixel[3] >= 128))
         .map(|(row, _)| row as i32 - glyph.bearing_y.get() as i32)
         .collect();
     (*rows.first().expect("visible ink"), *rows.last().unwrap())

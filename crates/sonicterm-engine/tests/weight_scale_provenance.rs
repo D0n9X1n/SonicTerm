@@ -182,7 +182,7 @@ fn configured_family_geometry_is_fixed_across_the_weight_range() {
 
 fn tile_ink(tile: &sonicterm_text::glyph_atlas::RasterTile) -> u64 {
     if tile.is_subpixel || tile.is_color {
-        tile.coverage.chunks_exact(4).map(|px| u64::from(px[3])).sum()
+        tile.coverage.as_chunks::<4>().0.iter().map(|px| u64::from(px[3])).sum()
     } else {
         tile.coverage.iter().map(|value| u64::from(*value)).sum()
     }

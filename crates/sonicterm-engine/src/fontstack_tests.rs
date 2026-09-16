@@ -573,7 +573,9 @@ fn weight_conversion_preserves_geometry_and_color_artwork() {
                 assert_ne!(candidate.coverage, baseline.coverage);
                 assert!(candidate
                     .coverage
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .all(|px| px[3] == px[0].max(px[1]).max(px[2])));
             }
         }
