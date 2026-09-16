@@ -291,6 +291,11 @@ GPU atlas textures become 1 × 1 placeholders. Returning to wgpu presentation
 recreates matching textures, resets atlas state, invalidates UV-bearing caches,
 and forces a full redraw before sampling the new textures.
 
+Weight adjustment follows face selection for every monochrome style and fallback.
+At a fixed size/DPI it changes coverage only: cell pitch, baseline, bitmap bounds,
+bearings, and advances stay fixed. Color artwork is excluded. Windows disables
+DirectWrite grid fitting and routes color-capable faces through FreeType.
+
 DirectWrite subpixel tiles remain native linear BGRA coverage in both the CPU
 atlas and the GPU unorm coverage view; no hidden contrast curve precedes the
 explicit `weight_scale` control. They must never pass through the color-rectangle
@@ -726,6 +731,10 @@ CPU 字形图集固定为 2,048 × 2,048 个 BGRA8 像素，约 16 MiB。元数�
 Windows 降级呈现会保留完整 CPU 图集，同时把 GPU 图集纹理缩成 1 × 1 占位符。回到 wgpu
 呈现时，代码重新创建匹配纹理、重置图集状态、使所有携带 UV 的缓存失效，并在采样新纹理前
 强制完整重绘。
+
+所有单色样式及回退字形都先选定字体，再统一调节粗细。固定字号和 DPI 时只改变覆盖率：
+单元格间距、基线、位图边界、bearing 与推进量保持不变；彩色图像不参与调节。Windows 禁用
+DirectWrite 网格拟合，并把支持彩色的字体交给 FreeType。
 
 DirectWrite 次像素图块在 CPU 图集与 GPU unorm 覆盖率 view 中始终保留原生线性 BGRA
 覆盖率；显式 `weight_scale` 控制之前不再存在隐藏的对比度曲线。它们绝不能经过彩色矩形转换或

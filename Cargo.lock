@@ -5315,6 +5315,7 @@ dependencies = [
  "unicode-width",
  "walkdir",
  "winapi",
+ "wio",
 ]
 
 [[package]]

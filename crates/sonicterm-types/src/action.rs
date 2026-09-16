@@ -121,11 +121,11 @@ pub enum Action {
     DecreaseFontSize,
     /// Reset the font size to the configured default.
     ResetFontSize,
-    /// Make regular text heavier by one `weight_scale` step.
+    /// Make monochrome text heavier by one `weight_scale` step.
     IncreaseFontWeight,
-    /// Make regular text lighter by one `weight_scale` step.
+    /// Make monochrome text lighter by one `weight_scale` step.
     DecreaseFontWeight,
-    /// Reset regular-text weight to the configured `weight_scale`.
+    /// Reset monochrome-text weight to the configured `weight_scale`.
     ResetFontWeight,
     /// Persist the current font size and weight without persisting the session theme.
     SaveCurrentSettings,

@@ -28,7 +28,7 @@ use std::mem;
 use std::mem::MaybeUninit;
 
 pub struct FreeTypeRasterizer {
-    has_color: bool,
+    pub(super) has_color: bool,
     face: RefCell<ftwrap::Face>,
     _lib: ftwrap::Library,
     synthesize_bold: bool,

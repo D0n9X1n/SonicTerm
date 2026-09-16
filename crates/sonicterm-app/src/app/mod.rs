@@ -2663,7 +2663,7 @@ pub struct App {
     /// apply other settings from that edit, but the reset target stays where
     /// the session started. Only an explicit `ReloadConfig` moves it.
     pub(super) configured_font_size: f32,
-    /// Regular-text `weight_scale` the loaded config asked for. Follows the
+    /// Monochrome-text `weight_scale` the loaded config asked for. Follows the
     /// same rule as [`Self::configured_font_size`]: `ResetFontWeight` returns
     /// here, and only an explicit reload moves it.
     pub(super) configured_weight_scale: f32,

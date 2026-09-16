@@ -661,7 +661,7 @@ impl App {
         self.set_font_size(target);
     }
 
-    /// Step regular-text weight by `delta`, clamped to the accepted
+    /// Step monochrome-text weight by `delta`, clamped to the accepted
     /// `weight_scale` range. Weight does not affect cell metrics, so unlike a
     /// size change this never resizes a grid or PTY.
     pub(super) fn change_font_weight(&mut self, delta: f32) {
@@ -675,7 +675,7 @@ impl App {
         self.set_font_weight(next);
     }
 
-    /// Return regular-text weight to the configured `weight_scale`, discarding
+    /// Return monochrome-text weight to the configured `weight_scale`, discarding
     /// transient palette adjustments.
     pub(super) fn reset_font_weight(&mut self) {
         let target = self.configured_weight_scale;
@@ -784,7 +784,7 @@ impl App {
         TestCurrentSettingsPathGuard
     }
 
-    /// Persist the live font size and effective regular-text weight to `path`.
+    /// Persist the live font size and effective monochrome-text weight to `path`.
     ///
     /// Saving changes only the two reset baselines after the atomic config write
     /// succeeds. It deliberately does not reload config or reapply live renderers:
