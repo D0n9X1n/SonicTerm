@@ -394,6 +394,9 @@ workspace package. The tag workflow builds:
 Release notes also list deduplicated resolved issues proven by GitHub closure
 metadata and exact base-exclusive/head-inclusive ancestry, including merge
 commits. Milestones, current closed state, and mentions alone are not proof.
+Null-closer manual events are disclosed separately as unverified release linkage,
+only for current closures inside the base/head commit-date window; valid dates
+and unique matching closure metadata are mandatory. They never enter the verified list.
 Canonical Git revert markers cancel reverted contributions; unknown metadata,
 ambiguous provenance, and collector caps fail generation rather than imply an
 empty result. The publish job alone grants issue/PR read access alongside its

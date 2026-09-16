@@ -3,6 +3,7 @@
 
 import argparse
 from dataclasses import dataclass
+from datetime import datetime
 import html
 import json
 import os
@@ -52,6 +53,17 @@ def number(value):
 def oid(value):
     require(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value), "invalid commit oid")
     return value
+
+
+def timestamp(value):
+    """Require timezone-qualified closure dates without inferring missing provenance."""
+    require(isinstance(value, str), "missing manual closure provenance timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise Failure("invalid closure provenance timestamp") from error
+    require(parsed.tzinfo is not None, "closure provenance timestamp needs timezone")
+    return parsed
 
 
 def terminate(process):
@@ -216,9 +228,9 @@ class Api:
             query = '''query ReleaseIssue($owner:String!,$name:String!,$number:Int!,$cursor:String) {
               repository(owner:$owner,name:$name) { issueOrPullRequest(number:$number) {
                 __typename ... on PullRequest { number }
-                ... on Issue { number title repository { nameWithOwner }
+                ... on Issue { number title state closedAt repository { nameWithOwner }
                   timelineItems(first:100,after:$cursor,itemTypes:[CLOSED_EVENT]) {
-                    nodes { __typename ... on ClosedEvent { closer {
+                    nodes { __typename ... on ClosedEvent { createdAt closer {
                       __typename ... on PullRequest { number merged mergeCommit { oid } repository { nameWithOwner } }
                       ... on Commit { oid repository { nameWithOwner } }
                     } } } pageInfo { hasNextPage endCursor }
@@ -342,7 +354,9 @@ def collect(repo, head, base="", api=None, cwd=None):
             candidates.add((repository(issue["repository"]["nameWithOwner"]), number(issue["number"])))
     # GitHub repository identity is case insensitive, including direct references.
     candidates = {(name.lower(), n) for name, n in candidates}
-    selected = []
+    selected, manual = [], []
+    head_date = timestamp(git("show", "-s", "--format=%cI", head))
+    base_date = timestamp(git("show", "-s", "--format=%cI", base)) if base else None
     for issue_repo, n in sorted(candidates):
         if issue_repo == repo.lower():
             issue_repo = repo
@@ -350,10 +364,13 @@ def collect(repo, head, base="", api=None, cwd=None):
         if issue["__typename"] == "PullRequest":
             continue
         require(isinstance(issue["title"], str) and issue["title"].strip(), "invalid issue title")
-        closure_commits = []
+        closure_commits, manual_dates = [], []
         for event in events:
             require(isinstance(event, dict) and event.get("__typename") == "ClosedEvent", "invalid closure event schema")
             closer = event["closer"]
+            if closer is None:
+                manual_dates.append(timestamp(event.get("createdAt")))
+                continue
             require(isinstance(closer, dict), f"ambiguous closure provenance for {issue_repo}#{n}")
             closer_repo = repository(closer["repository"]["nameWithOwner"])
             if closer["__typename"] == "Commit":
@@ -371,12 +388,31 @@ def collect(repo, head, base="", api=None, cwd=None):
         # A prior shipped closure is not newly delivered merely because links changed.
         prior = any(sha not in included and base and git("merge-base", "--is-ancestor", sha, base,
                     allow_failure=True) is not None for sha in closure_commits)
+        manual_date = None
+        if manual_dates:
+            require(issue.get("state") in ("OPEN", "CLOSED"), "invalid manual closure state")
+            if issue["state"] == "CLOSED":
+                closed_at = timestamp(issue.get("closedAt"))
+                # GitHub's issue and event timestamps may differ by one second.
+                matching = [date for date in manual_dates if abs((date - closed_at).total_seconds()) <= 1]
+                require(len(matching) <= 1, "ambiguous current manual closure")
+                if matching and (base_date is None or base_date < matching[0]) and matching[0] <= head_date:
+                    manual_date = matching[0]
+        title = " ".join(issue["title"].split())
+        title = re.sub(r"([\\`*_{}\[\]()#+.!|~-])", r"\\\1", html.escape(title, quote=False))
+        label = f"#{n}" if issue_repo.lower() == repo.lower() else f"{issue_repo}#{n}"
+        entry = f"- [{label}](https://github.com/{issue_repo}/issues/{n}) — {title}"
         if not prior and any(sha in active for sha in closure_commits):
-            title = " ".join(issue["title"].split())
-            title = re.sub(r"([\\`*_{}\[\]()#+.!|~-])", r"\\\1", html.escape(title, quote=False))
-            label = f"#{n}" if issue_repo.lower() == repo.lower() else f"{issue_repo}#{n}"
-            selected.append(f"- [{label}](https://github.com/{issue_repo}/issues/{n}) — {title}")
-    return "## Resolved issues\n\n" + ("\n".join(selected) if selected else "No linked issues resolved in this release range.") + "\n"
+            selected.append(entry)
+        elif not prior and manual_date is not None:
+            manual.append(f"{entry} (closed {manual_date.isoformat().replace('+00:00', 'Z')})")
+    notes = "## Resolved issues\n\n" + ("\n".join(selected) if selected else "No linked issues resolved in this release range.") + "\n"
+    if manual:
+        notes += ("\n## Manually closed issues (unverified release linkage)\n\n"
+                  "These issues were nominated by changes in this range and manually closed during its commit-date window. "
+                  "GitHub records no closing commit or PR for those events; they are not verified as resolved by this release.\n\n"
+                  + "\n".join(manual) + "\n")
+    return notes
 
 
 def main():
