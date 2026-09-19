@@ -709,15 +709,12 @@ impl App {
             }
             Action::UpdateTabColor => self.start_update_tab_color(),
             Action::NewWindow => {
-                // NewWindow queues a fresh top-level terminal window.
-                // set the pending
-                // flag; `drain_pending_window_creates` consumes it with
-                // the live `ActiveEventLoop` and builds a fresh
-                // top-level terminal window. This also works when
-                // `self.windows` is empty, preserving the dock-alive
-                // post-close-last-window case on macOS when
-                // quit_on_last_window_close=false.
-                self.pending_new_window = true;
+                let source = match self.frontmost_kind() {
+                    FrontmostKind::Child(id) => Some(id),
+                    FrontmostKind::Main => self.main_window_id,
+                    FrontmostKind::None | FrontmostKind::Other => None,
+                };
+                self.pending_new_window = Some(self.window_request(source));
                 // Notify the reducer that a new window was requested. It bumps
                 // `live_window_count` and emits a `WindowOpen` Effect
                 // (currently trace-stubbed in `dispatch_effects`; the

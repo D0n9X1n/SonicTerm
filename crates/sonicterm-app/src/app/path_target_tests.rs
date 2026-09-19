@@ -15,6 +15,156 @@ fn native_test_root() -> PathBuf {
     }
 }
 
+/// A valid wide filename keeps both cells and never promotes the suffix to an independent target.
+#[test]
+fn mapped_wide_path_preserves_complete_identity() {
+    let mut grid = Grid::new(60, 3);
+    for ch in "./目录/file.rs".chars() {
+        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    }
+    for col in [0, 2, 3, 4, 5, 9] {
+        let scan = logical_path_scan_at_cell(
+            &grid,
+            0,
+            AbsoluteCell { row: 0, col },
+            PathStyle::Posix,
+            true,
+        )
+        .unwrap();
+        assert!(scan
+            .candidates
+            .iter()
+            .any(|c| c.target == DetectedTarget::PathCandidate("./目录/file.rs".into())));
+        assert!(!scan
+            .candidates
+            .iter()
+            .any(|c| c.target == DetectedTarget::PathCandidate("/file.rs".into())));
+    }
+}
+
+/// A list alternative requires the literal to be missing even when the literal candidate was filtered away.
+#[test]
+fn list_probe_requires_missing_literal_guard() {
+    let literal = PathBuf::from("/work/a.rs、b.rs");
+    let mut candidate = probe_candidate("a.rs", "/work/a.rs", 0);
+    candidate.missing_before.push(literal.clone());
+    for decision in [PathOpenDecision::Blocked, PathOpenDecision::Openable(PathKind::File)] {
+        assert!(probe_candidates(&[candidate.clone()], |path| {
+            if path == literal {
+                decision
+            } else {
+                PathOpenDecision::Openable(PathKind::File)
+            }
+        })
+        .is_err());
+    }
+    assert!(probe_candidates(&[candidate], |path| {
+        if path == literal {
+            PathOpenDecision::Missing
+        } else {
+            PathOpenDecision::Openable(PathKind::File)
+        }
+    })
+    .is_ok());
+}
+
+/// Filesystem evidence chooses a literal punctuation filename before list members and uses the exact pane directory.
+#[test]
+fn list_paths_resolve_literals_before_members() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let root = native_test_root().join(format!(
+        "sonicterm-list-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/a.rs"), "first").unwrap();
+    std::fs::write(root.join("b.rs"), "second").unwrap();
+    let literal = root.join("src/a.rs、b.rs");
+    std::fs::write(&literal, "literal").unwrap();
+    let uri_path = if cfg!(windows) {
+        PathBuf::from(format!("/{}", root.to_str().unwrap().replace('\\', "/")))
+    } else {
+        root.clone()
+    };
+    let cwd = local_file_uri(&uri_path).unwrap();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let pane = app.__test_seed_tab("list");
+    let window = app.main_window_id.unwrap();
+    app.windows[&window].panes[&pane].parser.lock().resize(60, 3);
+    assert!(app.__test_advance_child_pane_parser(
+        window,
+        pane,
+        format!("\x1b]7;{cwd}\x1b\\src/a.rs、b.rs").as_bytes()
+    ));
+    for (col, member) in [(3, root.join("src/a.rs")), (10, root.join("b.rs"))] {
+        let snapshot = app.cell_target_at(window, pane, 0, col).unwrap();
+        let ResolvedCellTarget::Path(key) = snapshot.target else { panic!("path") };
+        assert_eq!(
+            probe_candidates(&key.candidates, classify_local_target)
+                .unwrap()
+                .candidate
+                .resolved_path,
+            literal
+        );
+        std::fs::remove_file(&literal).unwrap();
+        assert_eq!(
+            probe_candidates(&key.candidates, classify_local_target)
+                .unwrap()
+                .candidate
+                .resolved_path,
+            member
+        );
+        std::fs::write(&literal, "literal").unwrap();
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Long report paths resolve from the reporting pane under a spaced parent; removing the file changes the real probe result.
+#[test]
+fn report_paths_use_exact_spaced_pane_directory() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let root = native_test_root().join(format!(
+        "sonicterm-report-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    let directory = root.join("OneDrive - Microsoft/Desktop/AgentRelated/pax");
+    std::fs::create_dir_all(directory.join("reports/investigate-online-issue")).unwrap();
+    let uri_path = if cfg!(windows) {
+        PathBuf::from(format!("/{}", directory.to_str().unwrap().replace('\\', "/")))
+    } else {
+        directory.clone()
+    };
+    let cwd = local_file_uri(&uri_path).unwrap();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let pane = app.__test_seed_tab("report");
+    let window = app.main_window_id.unwrap();
+    app.windows[&window].panes[&pane].parser.lock().resize(160, 4);
+    for (row, extension) in ["md", "html"].into_iter().enumerate() {
+        let relative = format!(
+            "reports/investigate-online-issue/20260918T180000Z-skills-classification-flight.{extension}"
+        );
+        let file = directory.join(&relative);
+        std::fs::write(&file, "inert report").unwrap();
+        assert!(app.__test_advance_child_pane_parser(
+            window,
+            pane,
+            format!("\x1b]7;{cwd}\x1b\\({relative})，正文\r\n").as_bytes()
+        ));
+        let snapshot = app.cell_target_at(window, pane, row as u16, 12).unwrap();
+        let ResolvedCellTarget::Path(key) = snapshot.target else { panic!("path") };
+        let selected = probe_candidates(&key.candidates, classify_local_target).unwrap();
+        assert_eq!(selected.candidate.resolved_path, file);
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(
+            probe_candidates(&key.candidates, classify_local_target).unwrap_err(),
+            "path-error-missing"
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 /// Failed-click recovery copies only the target and reports real clipboard success or failure.
 #[test]
 fn failed_click_copies_target_without_error_text() {
@@ -577,6 +727,154 @@ fn reveal_file_in_explorer_native_probe() {
     let decision = classify_local_target(&path);
     assert_eq!(decision, PathOpenDecision::Openable(PathKind::File));
     open_path(&path, decision).expect("native Explorer selection request");
+}
+
+/// A dedicated process runs real native input and path workers with scratch state; the driver verifies Explorer selection.
+#[cfg(target_os = "windows")]
+#[test]
+#[ignore = "requires an external native pointer driver and explicit scratch directory"]
+fn structural_paths_native_interaction() {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use winit::{
+        application::ApplicationHandler,
+        event::WindowEvent,
+        event_loop::{ActiveEventLoop, EventLoop},
+        platform::windows::EventLoopBuilderExtWindows,
+    };
+    struct NativeProbe {
+        app: App,
+        root: PathBuf,
+        started: std::time::Instant,
+    }
+    impl ApplicationHandler<super::super::UserEvent> for NativeProbe {
+        fn resumed(&mut self, el: &ActiveEventLoop) {
+            self.app.resumed(el);
+        }
+        fn new_events(&mut self, el: &ActiveEventLoop, cause: winit::event::StartCause) {
+            self.app.new_events(el, cause);
+        }
+        fn user_event(&mut self, el: &ActiveEventLoop, event: super::super::UserEvent) {
+            self.app.user_event(el, event);
+        }
+        fn window_event(&mut self, el: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+            self.app.window_event(el, id, event);
+        }
+        fn device_event(
+            &mut self,
+            el: &ActiveEventLoop,
+            id: winit::event::DeviceId,
+            event: winit::event::DeviceEvent,
+        ) {
+            self.app.device_event(el, id, event);
+        }
+        fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+            self.app.about_to_wait(el);
+            let native_windows = self.app.windows.iter().filter_map(|(id, state)| {
+                let window = state.window.as_ref()?;
+                let RawWindowHandle::Win32(handle) = window.window_handle().ok()?.as_raw() else { return None };
+                let active_pane = state.tab_states.get(state.tabs.active_index())?.active_pane;
+                let pane = state.panes.get(&active_pane)?;
+                let parser = pane.parser.try_lock()?;
+                let rows = parser.grid().rows_iter().map(|row| row.iter().map(|c| c.ch).collect::<String>()).collect::<Vec<_>>();
+                Some(serde_json::json!({"hwnd":handle.hwnd.get(),"main":Some(*id)==self.app.main_window_id,"width":window.inner_size().width,"height":window.inner_size().height,"scale":window.scale_factor(),"tabs":state.tabs.len(),"rows":rows,"hidden":state.hidden}))
+            }).collect::<Vec<_>>();
+            std::fs::write(
+                self.root.join("windows.json"),
+                serde_json::to_vec(&native_windows).unwrap(),
+            )
+            .unwrap();
+            if let Some(id) = self.app.main_window_id {
+                let window = &self.app.windows[&id];
+                let tab = &window.tab_states[window.tabs.active_index()];
+                if let (Some(native), Some(renderer), Some(pane)) =
+                    (&window.window, &window.renderer, window.panes.get(&tab.active_pane))
+                {
+                    if let Some(parser) = pane.parser.try_lock() {
+                        let RawWindowHandle::Win32(handle) =
+                            native.window_handle().unwrap().as_raw()
+                        else {
+                            panic!("Windows handle")
+                        };
+                        let rows = parser
+                            .grid()
+                            .rows_iter()
+                            .map(|row| row.iter().map(|c| c.ch).collect::<String>())
+                            .collect::<Vec<_>>();
+                        let (cw, ch) = renderer.cell_size();
+                        let pane_id = window.tab_states[window.tabs.active_index()].active_pane;
+                        let origin = renderer.pane_grid_origin(pane_id);
+                        let report = serde_json::json!({"hwnd": handle.hwnd.get(), "rows": rows, "cw": cw, "ch": ch,
+                            "top": origin.map(|p| p[1]), "tab_bar_top": renderer.tab_bar_y_offset(),
+                            "surface_height": renderer.height(), "padding_bottom": renderer.padding_bottom_px(),
+                            "view_top": GpuRenderer::resolved_view_top_abs_legacy(parser.grid(), pane.viewport_top_abs),
+                            "search_current": tab.search.as_ref().and_then(|s| s.current),
+                            "search_total": tab.search.as_ref().map(|s| s.matches.len()),
+                            "pointer_cell": renderer.pixel_to_pane_cell(window.cursor_pos.0 as f32, window.cursor_pos.1 as f32),
+                            "selection_rows": window.selection.as_ref().map(|s| {let (a,b)=s.normalized(); [a.0,b.0]}),
+                            "padding_left": self.app.config.window.padding_left,
+                            "preview": window.link_preview.as_ref().map(|p| &p.uri),
+                            "notification": window.notification.as_ref().map(|n| &n.message),
+                            "links": parser.grid().rows_iter().enumerate().flat_map(|(row, cells)| cells.iter().enumerate().filter_map(move |(col, cell)| cell.hyperlink().map(|id| (row,col,id)))).filter_map(|(row,col,id)| parser.hyperlinks().lookup(id).map(|link| serde_json::json!({"row":row,"col":col,"uri":link.uri}))).collect::<Vec<_>>()});
+                        std::fs::write(
+                            self.root.join("window.json"),
+                            serde_json::to_vec(&report).unwrap(),
+                        )
+                        .unwrap();
+                    }
+                }
+            }
+            if self.root.join("done").exists() {
+                el.exit();
+            }
+            assert!(
+                self.started.elapsed() < std::time::Duration::from_secs(180),
+                "native driver deadline"
+            );
+            el.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+                std::time::Instant::now() + std::time::Duration::from_millis(50),
+            ));
+        }
+    }
+    assert!(std::env::var_os("NO_COLOR").is_none(), "native color profile required");
+    let root = PathBuf::from(
+        std::env::var_os("SONICTERM_PATH_INTERACTION_DIR").expect("explicit scratch directory"),
+    );
+    std::fs::create_dir_all(root.join("config")).unwrap();
+    std::fs::create_dir_all(root.join("logs")).unwrap();
+    let mut config = Config::default();
+    config.terminal.shell = Some("cmd.exe".into());
+    if root.join("cold").exists() {
+        config.window.warm_window_pool = 0;
+    }
+    config.window.cols = 110;
+    config.window.rows = 28;
+    config.logging.level = sonicterm_logging::LogLevel::Debug;
+    let _log = sonicterm_logging::init_in(&config.logging, &root.join("logs")).unwrap();
+    tracing::warn!("native path interaction started");
+    let event_loop = EventLoop::<super::super::UserEvent>::with_user_event()
+        .with_any_thread(true)
+        .build()
+        .unwrap();
+    let mut app = App::new_with_proxy(
+        Theme::default(),
+        config,
+        Keymap::parse_resilient(
+            &format!(
+                "{}\n[[binding]]\nkeys = \"alt+shift+x\"\naction = \"move_tab_to_new_window\"\n",
+                include_str!("../../../../assets/keymaps/sonicterm-windows.toml")
+            ),
+            "native fixture",
+        )
+        .unwrap(),
+        Some(event_loop.create_proxy()),
+    );
+    app.runtime_config_path = Some(root.join("config/sonicterm.toml"));
+    let mut probe = NativeProbe { app, root, started: std::time::Instant::now() };
+    event_loop.run_app(&mut probe).unwrap();
+    assert!(
+        probe.root.join("done").exists(),
+        "driver must verify native outcomes before completion"
+    );
 }
 
 /// All platforms choose the same action, independent of which policy admitted the file.
@@ -1581,6 +1879,215 @@ fn logical_path_scan_rejects_incomplete_visible_or_evicted_chain() {
     .is_none());
 }
 
+/// Wide outer punctuation and wrappers never enter the path span, even beside Chinese prose or across soft rows.
+#[test]
+fn structural_boundary_cells_preserve_exact_ascii_path() {
+    let path = "reports/flight.html";
+    for (left, right) in [("(", ")"), ("【", "】"), ("“", "”"), ("'", "'")] {
+        for tail in ["，正文", ",next", "。", "，「引用」"] {
+            for width in [100, 17] {
+                let text = format!("前文 {left}{path}{right}{tail}");
+                let mut grid = Grid::new(width, 8);
+                for ch in text.chars() {
+                    grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+                }
+                let cells = grid
+                    .rows_iter()
+                    .enumerate()
+                    .flat_map(|(row, line)| {
+                        line.iter().enumerate().map(move |(col, cell)| {
+                            (AbsoluteCell { row: row as u64, col: col as u16 }, cell.ch)
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let begin = cells.iter().position(|(_, ch)| *ch == 'r').unwrap();
+                for index in begin..begin + path.len() {
+                    let pointed = cells[index].0;
+                    let scan =
+                        logical_path_scan_at_cell(&grid, 0, pointed, PathStyle::native(), true)
+                            .unwrap_or_else(|| panic!("{text} width {width} at {pointed:?}"));
+                    let candidate = scan
+                        .candidates
+                        .iter()
+                        .find(|c| c.target == DetectedTarget::PathCandidate(path.into()))
+                        .unwrap();
+                    assert!(candidate.spans.iter().any(|s| s.contains(pointed)));
+                    assert_eq!(
+                        candidate.spans.iter().copied().map(AbsoluteCellSpan::len).sum::<usize>(),
+                        path.len()
+                    );
+                    for outside in [cells[begin - 1].0, cells[begin + path.len()].0] {
+                        assert!(!candidate.spans.iter().any(|s| s.contains(outside)));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Real-file probes, hover, and click authorization agree across windows, and CWD changes revoke the decision.
+#[test]
+fn structural_boundaries_resolve_real_files_and_revoke_changed_cwd() {
+    let _guard = super::super::media::MEDIA_COUNTER_LOCK.lock();
+    let root = native_test_root().join(format!(
+        "sonicterm-structure-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    std::fs::create_dir_all(root.join("reports")).unwrap();
+    for name in ["flight.html", "flight.md", "flight.html,"] {
+        std::fs::write(root.join("reports").join(name), "inert fixture").unwrap();
+    }
+    let uri_path = if cfg!(windows) {
+        PathBuf::from(format!("/{}", root.to_str().unwrap().replace('\\', "/")))
+    } else {
+        root.clone()
+    };
+    let cwd = local_file_uri(&uri_path).unwrap();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main boundaries");
+    let main = app.main_window_id.unwrap();
+    let child = app.__test_seed_child_window(&["child boundaries"]);
+    for window in [main, child] {
+        let pane = *app.windows[&window].panes.keys().next().unwrap();
+        app.frontmost_window = Some(window);
+        app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+            winit::keyboard::ModifiersState::SUPER
+        } else {
+            winit::keyboard::ModifiersState::CONTROL
+        };
+        app.windows[&window].panes[&pane].parser.lock().resize(120, 8);
+        for (text, path, col) in [
+            ("前文 【reports/flight.html】，正文", "reports/flight.html", 8),
+            ("前文 (reports/flight.md)，正文", "reports/flight.md", 8),
+            ("(reports/flight.html,)，正文", "reports/flight.html,", 4),
+        ] {
+            let output = format!("\x1b[2J\x1b[H\x1b]7;{cwd}\x1b\\{text}");
+            assert!(app.__test_advance_child_pane_parser(window, pane, output.as_bytes()));
+            let snapshot = app.cell_target_at(window, pane, 0, col).unwrap();
+            let ResolvedCellTarget::Path(key) = snapshot.target.clone() else {
+                panic!("path target")
+            };
+            let selection = probe_candidates(&key.candidates, classify_local_target).unwrap();
+            assert_eq!(selection.candidate.resolved_path, root.join(path));
+            let request =
+                app.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
+            let result = PathProbeResult { request, selection: Some(selection), failure: None };
+            assert!(app.windows.get_mut(&window).unwrap().path_probe.accept(&result, Some(&key)));
+            app.apply_target_hover(window, Some(snapshot));
+            assert_eq!(
+                PathBuf::from(&app.windows[&window].link_preview.as_ref().unwrap().uri),
+                root.join(path)
+            );
+            assert!(app.windows[&window].path_probe.authorized(&key, true));
+            let change = format!("\x1b]7;{cwd}/other\x1b\\");
+            assert!(app.__test_advance_child_pane_parser(window, pane, change.as_bytes()));
+            let changed = app.cell_target_at(window, pane, 0, col).unwrap();
+            let ResolvedCellTarget::Path(changed_key) = changed.target else {
+                panic!("changed path")
+            };
+            assert!(!app.windows[&window].path_probe.authorized(&changed_key, true));
+            assert!(!app
+                .windows
+                .get_mut(&window)
+                .unwrap()
+                .path_probe
+                .accept(&result, Some(&changed_key)));
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Composite quote wrappers retain every source delimiter in authorization, including removed outer punctuation.
+#[test]
+fn structural_quoted_wrappers_reject_unsafe_outer_cells() {
+    let text = "(\"./safe.rs\").";
+    for index in [0, text.len() - 2, text.len() - 1] {
+        for hyperlink in [false, true] {
+            let mut grid = Grid::new(80, 4);
+            for ch in text.chars() {
+                grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+            }
+            let cell = grid.row_mut(0).iter_mut().nth(index).unwrap();
+            if hyperlink {
+                cell.set_hyperlink(Some(HyperlinkId(7)));
+            } else {
+                cell.set_extras(Some("\u{301}".into()));
+            }
+            let scan = logical_path_scan_at_cell(
+                &grid,
+                0,
+                AbsoluteCell { row: 0, col: 5 },
+                PathStyle::native(),
+                true,
+            );
+            assert!(scan.is_none(), "unsafe outer cell {index}, hyperlink={hyperlink}");
+        }
+    }
+}
+
+/// URI scanning cannot discard unsafe wrapper cells while preserving the inner destination.
+#[test]
+fn structural_uri_wrappers_reject_unsafe_source_cells() {
+    let text = "(https://example.com/a).";
+    for index in [0, text.len() - 2, text.len() - 1] {
+        for hyperlink in [false, true] {
+            let mut grid = Grid::new(80, 4);
+            for ch in text.chars() {
+                grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+            }
+            let cell = grid.row_mut(0).iter_mut().nth(index).unwrap();
+            if hyperlink {
+                cell.set_hyperlink(Some(HyperlinkId(7)));
+            } else {
+                cell.set_extras(Some("\u{301}".into()));
+            }
+            assert!(logical_path_scan_at_cell(
+                &grid,
+                0,
+                AbsoluteCell { row: 0, col: 6 },
+                PathStyle::native(),
+                true
+            )
+            .is_none());
+        }
+    }
+}
+
+/// Every cell establishing a wide boundary remains protected from combining, hyperlink, and broken-pair mutations.
+#[test]
+fn structural_boundary_cells_reject_unsafe_source_identity() {
+    let text = "【src/main.rs】，正文";
+    for protected in [0, 1, 13, 14, 15, 16] {
+        for mutation in [0, 1, 2] {
+            let mut grid = Grid::new(80, 4);
+            for ch in text.chars() {
+                grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+            }
+            let cell = grid.row_mut(0).iter_mut().nth(protected).unwrap();
+            match mutation {
+                0 => cell.set_hyperlink(Some(HyperlinkId(7))),
+                1 => cell.set_extras(Some("\u{301}".into())),
+                _ => cell.flags.toggle(CellFlags::WIDE_CONT),
+            }
+            let scan = logical_path_scan_at_cell(
+                &grid,
+                0,
+                AbsoluteCell { row: 0, col: 5 },
+                PathStyle::native(),
+                true,
+            );
+            assert!(
+                scan.is_none_or(|s| s
+                    .candidates
+                    .iter()
+                    .all(|c| c.target != DetectedTarget::PathCandidate("src/main.rs".into()))),
+                "protected {protected} mutation {mutation}"
+            );
+        }
+    }
+}
+
 /// Unsafe identity in any wrapped fragment rejects the complete candidate.
 #[test]
 fn logical_path_scan_rejects_cross_row_combining_and_osc8_cells() {
@@ -2167,6 +2674,7 @@ fn probe_candidate_at(display: &str, path: &str, start_col: u16, row: u64) -> Pa
         }],
         target: DetectedTarget::PathCandidate(display.into()),
         resolved_path: PathBuf::from(path),
+        missing_before: Vec::new(),
     }
 }
 
@@ -2440,6 +2948,7 @@ fn wrapped_probe_authorization_tracks_all_rows_and_fragments() {
         ],
         target: DetectedTarget::PathCandidate("src/long/path.rs".into()),
         resolved_path: PathBuf::from("/work/src/long/path.rs"),
+        missing_before: Vec::new(),
     };
     let mut key = probe_key("/work/src/long/path.rs", 20);
     key.pointed = AbsoluteCell { row: 20, col: 6 };
@@ -2614,11 +3123,13 @@ fn filesystem_selection_prefers_complete_spaced_entry() {
             spans: smallvec::smallvec![AbsoluteCellSpan { row: 0, start_col: 0, end_col: 20 }],
             target: DetectedTarget::BareName("OneDrive - Microsoft".into()),
             resolved_path: complete.clone(),
+            missing_before: Vec::new(),
         },
         PathProbeCandidate {
             spans: smallvec::smallvec![AbsoluteCellSpan { row: 0, start_col: 0, end_col: 8 }],
             target: DetectedTarget::BareName("OneDrive".into()),
             resolved_path: short,
+            missing_before: Vec::new(),
         },
     ];
 

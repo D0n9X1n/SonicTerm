@@ -676,7 +676,10 @@ impl App {
                     if let Some(search) =
                         child.tab_states.get_mut(tab_idx).and_then(|t| t.search.as_mut())
                     {
-                        search.maybe_refresh_for_revision(guards[active_pos].1.grid_mut());
+                        let grid = guards[active_pos].1.grid();
+                        let view_top =
+                            GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
+                        super::search_handle::prepare_search(search, active_id, grid, view_top);
                     }
                     let search = child.tab_states.get(tab_idx).and_then(|t| t.search.as_ref());
                     if let Some(t) = timing.as_mut() {
@@ -962,14 +965,19 @@ impl App {
                                 win.set_ime_cursor_area(pos, size);
                             } else {
                                 // When: neither `palette_here` nor `search` owns input, publish the active terminal pane's IME anchor.
-                                super::update_terminal_ime_cursor_area(
-                                    &mut child.ime_cursor_throttle,
-                                    (active_id, guards[active_pos].2),
-                                    (cur_row, cur_col),
-                                    (r.cell_w, r.cell_h),
-                                    (r.padding_left_px(), r.padding_top_px()),
-                                    |pos, size| win.set_ime_cursor_area(pos, size),
-                                );
+                                if let Some([x, y]) = r.pane_grid_origin(active_id) {
+                                    // Child IME follows the planned text origin rather than raw pane padding.
+                                    let pane = guards[active_pos].2;
+                                    let rect = sonicterm_ui::pane::Rect::new(x, y, pane.w, pane.h);
+                                    super::update_terminal_ime_cursor_area(
+                                        &mut child.ime_cursor_throttle,
+                                        (active_id, rect),
+                                        (cur_row, cur_col),
+                                        (r.cell_w, r.cell_h),
+                                        (0.0, 0.0),
+                                        |pos, size| win.set_ime_cursor_area(pos, size),
+                                    );
+                                }
                             }
                         }
                     }

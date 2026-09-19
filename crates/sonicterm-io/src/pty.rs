@@ -1700,7 +1700,7 @@ fn interactive_shell_args(shell_path: &str) -> Vec<String> {
             "-NoLogo".to_string(),
             "-NoExit".to_string(),
             "-Command".to_string(),
-            "[Console]::InputEncoding=[System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); $OutputEncoding=[System.Text.UTF8Encoding]::new($false); chcp 65001 > $null".to_string(),
+            format!("[Console]::InputEncoding=[System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); $OutputEncoding=[System.Text.UTF8Encoding]::new($false); chcp 65001 > $null; & {{\n{}\n}}", include_str!("../../../scripts/powershell-integration.ps1")),
         ],
         _ => Vec::new(),
     }

@@ -82,7 +82,16 @@ impl App {
             }
         };
         let grid_guard = parser_arc.lock();
-        search.input_str(text, grid_guard.grid());
+        let grid = grid_guard.grid();
+        let view_top = GpuRenderer::resolved_view_top_abs_legacy(
+            grid,
+            self.main()
+                .and_then(|ws| ws.panes.get(&pane_id))
+                .and_then(|pane| pane.viewport_top_abs),
+        );
+        prepare_search(&mut search, pane_id, grid, view_top);
+        search.input_str(text, grid);
+        anchor_unfocused_search(&mut search, view_top);
         drop(grid_guard);
         if let Some(ws) = self.main_mut() {
             if let Some(st) = ws.tab_states.get_mut(i) {
@@ -146,7 +155,17 @@ impl App {
             }
         };
         let grid_guard = parser_arc.lock();
-        search.input_str(text, grid_guard.grid());
+        let grid = grid_guard.grid();
+        let view_top = GpuRenderer::resolved_view_top_abs_legacy(
+            grid,
+            self.windows
+                .get(&win_id)
+                .and_then(|ws| ws.panes.get(&pane_id))
+                .and_then(|pane| pane.viewport_top_abs),
+        );
+        prepare_search(&mut search, pane_id, grid, view_top);
+        search.input_str(text, grid);
+        anchor_unfocused_search(&mut search, view_top);
         drop(grid_guard);
         if let Some(child) = self.windows.get_mut(&win_id) {
             if let Some(st) = child.tab_states.get_mut(i) {
@@ -209,11 +228,15 @@ impl App {
         };
         let grid_guard = parser_arc.lock();
         let grid = grid_guard.grid();
-        let anchor_row = (grid.scrollback_len() as u32).saturating_add(u32::from(grid.cursor.row));
-        let anchor_col = grid.cursor.col;
-
+        let view_top = GpuRenderer::resolved_view_top_abs_legacy(
+            grid,
+            self.main()
+                .and_then(|ws| ws.panes.get(&pane_id))
+                .and_then(|pane| pane.viewport_top_abs),
+        );
+        prepare_search(&mut search, pane_id, grid, view_top);
         let (handled, keep_search, requested_view_top) =
-            apply_search_key(&mut search, grid, event, mods, anchor_row, anchor_col);
+            apply_search_key(&mut search, grid, event, mods, view_top);
         drop(grid_guard);
         if let Some(view_top) = requested_view_top {
             if let Some(ws) = self.main_mut() {
@@ -290,10 +313,16 @@ impl App {
         };
         let grid_guard = parser_arc.lock();
         let grid = grid_guard.grid();
-        let anchor_row = (grid.scrollback_len() as u32).saturating_add(u32::from(grid.cursor.row));
-        let anchor_col = grid.cursor.col;
+        let view_top = GpuRenderer::resolved_view_top_abs_legacy(
+            grid,
+            self.windows
+                .get(&win_id)
+                .and_then(|ws| ws.panes.get(&pane_id))
+                .and_then(|pane| pane.viewport_top_abs),
+        );
+        prepare_search(&mut search, pane_id, grid, view_top);
         let (handled, keep_search, requested_view_top) =
-            apply_search_key(&mut search, grid, event, mods, anchor_row, anchor_col);
+            apply_search_key(&mut search, grid, event, mods, view_top);
         drop(grid_guard);
         if let Some(child) = self.windows.get_mut(&win_id) {
             if let Some(view_top) = requested_view_top {
@@ -311,6 +340,60 @@ impl App {
         }
         handled
     }
+}
+
+pub(super) fn prepare_search(
+    search: &mut sonicterm_ui::search::SearchState,
+    pane_id: u64,
+    grid: &Grid,
+    view_top: u64,
+) {
+    search.bind_pane(pane_id);
+    search.maybe_refresh_for_revision(grid);
+    anchor_unfocused_search(search, view_top);
+}
+
+fn anchor_unfocused_search(search: &mut sonicterm_ui::search::SearchState, view_top: u64) {
+    if search.current.is_none() {
+        // Query edits and identity changes refocus from the viewed rows without moving them.
+        search.anchor_to_viewport(view_top);
+    }
+}
+
+fn search_row_visible(row: u32, view_top: u64, rows: u16) -> bool {
+    (view_top..view_top.saturating_add(u64::from(rows))).contains(&u64::from(row))
+}
+
+fn navigate_search(
+    search: &mut sonicterm_ui::search::SearchState,
+    view_top: u64,
+    rows: u16,
+    backwards: bool,
+) {
+    anchor_unfocused_search(search, view_top);
+    if let Some(current) = search.current_match() {
+        // When: current exists, first check visibility to avoid skipping an unseen query result.
+        if !search_row_visible(current.row, view_top, rows) {
+            // When: current is offscreen, reveal it before advancing so the initial result cannot be skipped.
+            search.requested_scroll_row = Some(current.row);
+            return;
+        }
+    }
+    if backwards {
+        search.prev();
+    } else {
+        // When: backwards is false, follow document order and let next wrap at the end.
+        search.next();
+    }
+}
+
+fn take_search_scroll(
+    search: &mut sonicterm_ui::search::SearchState,
+    grid: &Grid,
+    view_top: u64,
+) -> Option<Option<u64>> {
+    let row = search.requested_scroll_row.take()?;
+    (!search_row_visible(row, view_top, grid.rows)).then(|| centered_search_view_top(grid, row))
 }
 
 fn centered_search_view_top(grid: &Grid, row: u32) -> Option<u64> {
@@ -336,8 +419,7 @@ fn apply_search_key(
     grid: &Grid,
     event: &KeyEvent,
     mods: ModifiersState,
-    anchor_row: u32,
-    anchor_col: u16,
+    view_top: u64,
 ) -> (bool, bool, Option<Option<u64>>) {
     let edit = super::text_edit::search_text_edit_for_event(event, mods);
     let (handled, keep_search) = if let Some(edit) = edit {
@@ -348,36 +430,15 @@ fn apply_search_key(
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => (true, false),
             Key::Named(NamedKey::Enter) => {
-                if search.current.is_none() {
-                    // An empty current match selects the nearest result to the anchor.
-                    search.select_nearest(anchor_row, anchor_col);
-                } else if mods.shift_key() {
-                    // When: current is Some and shift_key is true, move to the previous match.
-                    search.prev();
-                } else {
-                    // When: current is Some and shift_key is false, move to the next match.
-                    search.next();
-                }
+                navigate_search(search, view_top, grid.rows, mods.shift_key());
                 (true, true)
             }
             Key::Named(NamedKey::ArrowDown) => {
-                if search.current.is_none() {
-                    // An empty current match searches forward from the anchor.
-                    search.next_from(anchor_row, anchor_col);
-                } else {
-                    // When: current is Some, advance to the next match.
-                    search.next();
-                }
+                navigate_search(search, view_top, grid.rows, false);
                 (true, true)
             }
             Key::Named(NamedKey::ArrowUp) => {
-                if search.current.is_none() {
-                    // An empty current match searches backward from the anchor.
-                    search.prev_from(anchor_row, anchor_col);
-                } else {
-                    // When: current is Some, move to the previous match.
-                    search.prev();
-                }
+                navigate_search(search, view_top, grid.rows, true);
                 (true, true)
             }
             Key::Named(NamedKey::Backspace) => {
@@ -405,16 +466,7 @@ fn apply_search_key(
                             consumed = true;
                         }
                         "g" | "G" => {
-                            if search.current.is_none() {
-                                // Command-g without a current match selects the nearest result.
-                                search.select_nearest(anchor_row, anchor_col);
-                            } else if mods.shift_key() {
-                                // When: current is Some and shift_key is true, command-shift-g moves backward.
-                                search.prev();
-                            } else {
-                                // When: current is Some and shift_key is false, command-g moves forward.
-                                search.next();
-                            }
+                            navigate_search(search, view_top, grid.rows, mods.shift_key());
                             consumed = true;
                         }
                         _ => {
@@ -439,11 +491,16 @@ fn apply_search_key(
             }
         }
     };
+    anchor_unfocused_search(search, view_top);
     let requested_view_top = if handled && keep_search {
-        search.requested_scroll_row.map(|row| centered_search_view_top(grid, row))
+        take_search_scroll(search, grid, view_top)
     } else {
         // When: handled or keep_search is false, request no search-driven viewport change.
         None
     };
     (handled, keep_search, requested_view_top)
 }
+
+#[cfg(test)]
+#[path = "search_handle_tests.rs"]
+mod search_handle_tests;

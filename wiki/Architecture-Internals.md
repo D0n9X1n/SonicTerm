@@ -161,6 +161,12 @@ correctness, not only speed.
   them from the active span. Grouped source locations yield exactly one candidate
   for the pointed member, with the entire anchor/group in the validated span;
   comma/space separators do not initiate activation. No shell expansion occurs.
+  Scanner results carry separate display and source byte ranges. A scalar-to-cell
+  map assigns one wide character to its lead/continuation pair without duplicate
+  byte offsets. Valid wide filename and boundary scalars keep both cells under
+  combining/hyperlink/pair-integrity checks. List-member alternatives carry explicit
+  missing-literal dependencies through candidate caps, path resolution, authorization,
+  and native activation; a dropped or unresolvable literal cannot authorize a suffix.
 - HTTP(S) extraction also recognizes explicit `()`/`[]` wrappers across at most
   eight visible hard rows and 4 KiB. The first fragment must contain the complete
   authority and a path slash; non-final fragments reach the margin and subsequent
@@ -640,7 +646,11 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
   激活时原生重新验证之前 fail closed。
 - 完整引号路径的分隔符 cell 仍参与安全检查，但不进入可操作范围。分组源文件位置只为
   鼠标指向的成员返回一个候选，验证范围包含完整路径锚点和分组；逗号和空格分隔符不会
-  触发激活。代码不执行 shell 展开。
+  触发激活。代码不执行 shell 展开。扫描结果分别携带显示范围和完整来源的字节范围。
+  scalar 到 cell 的映射把一个宽字符关联到其 lead/continuation 两格，不生成重复字节偏移。
+  有效宽字符文件名和边界的两格都检查组合字符、超链接与配对完整性。列表成员候选携带明确的
+  完整字面缺失依赖，贯穿候选上限、路径解析、授权和原生激活；丢失或无法解析的完整候选不能
+  授权较短片段。
 - HTTP(S) 提取也支持最多 8 个可见硬换行和 4 KiB 范围内显式 `()`/`[]` 包围的 URL。
   首片段必须包含完整 authority 和路径斜杠；非末尾片段到达右边界，后续行使用一致且最多
   8 个 ASCII 空格的缩进。必须有匹配闭括号，且现有扫描器精确匹配整个 URI。该三态扫描

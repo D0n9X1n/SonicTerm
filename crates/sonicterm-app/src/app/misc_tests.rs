@@ -5,6 +5,16 @@ use sonicterm_gpu::{
 };
 use sonicterm_text::row_glyph_cache::row_hash_cells;
 
+/// New-window requests retain their initiating dimensions instead of choosing a fixed destination at drain time.
+#[test]
+fn new_window_constructor_uses_requested_dimensions() {
+    let source = include_str!("misc.rs");
+    let start = source.find("pub(super) fn create_new_terminal_window(").unwrap();
+    let constructor = &source[start..];
+    assert!(constructor.contains(".with_inner_size(request.inner_size)"));
+    assert!(!constructor.contains("LogicalSize::new(800.0, 500.0)"));
+}
+
 /// Prompt navigation must move cached colored rows without relying on later PTY output or dirty invalidation.
 #[test]
 fn prompt_navigation_reprojects_overlapping_colored_history_without_dirty_rows() {

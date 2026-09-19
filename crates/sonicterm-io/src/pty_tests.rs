@@ -176,6 +176,69 @@ fn windowsapps_filter_skips_user_alias_but_allows_store_package() {
     ));
 }
 
+/// Interactive PowerShell installs process-local file display links without changing clean test startup.
+#[cfg(target_os = "windows")]
+#[test]
+fn powershell_links_are_embedded_only_in_interactive_startup() {
+    let normal = shell_startup_args("pwsh.exe", ShellSpawnOpts::default());
+    let command = normal.last().unwrap();
+    assert!(command.contains("Format-SonicTermFileItem"));
+    assert!(command.contains("$uri.AbsoluteUri"));
+    assert!(!command.contains("Set-Alias"));
+    let clean = shell_startup_args(
+        "pwsh.exe",
+        ShellSpawnOpts { clean_e2e: true, ..ShellSpawnOpts::default() },
+    );
+    assert!(!clean.iter().any(|arg| arg.contains("Format-SonicTermFileItem")));
+}
+
+/// The normal PTY path runs linked-directory regression without profile edits and reaps its shell on a deadline.
+#[cfg(target_os = "windows")]
+#[test]
+fn powershell_link_view_executes_through_pty() {
+    let _live_pty_guard = lock_live_pty_test();
+    let shell = resolve_windows_default_shell_with(
+        || path_lookup("pwsh.exe"),
+        registered_pwsh,
+        windowsapps_store_pwsh,
+        || None,
+    );
+    assert_eq!(
+        shell_file_name(&shell),
+        "pwsh.exe",
+        "PowerShell 7 is required for linked directory verification"
+    );
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../scripts/test-powershell-integration.ps1");
+    let command = format!("& '{}'", script.to_string_lossy().replace('\'', "''"));
+    let pty = PtyHandle::spawn_with_args(
+        &shell,
+        &["-NoLogo".into(), "-NoProfile".into(), "-Command".into(), command],
+        120,
+        30,
+    )
+    .unwrap();
+    pty.send_input_nonblocking(b"\x1b[1;1R".to_vec()).unwrap();
+    let probe = pty.child_exit_probe();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut output = Vec::new();
+    while Instant::now() < deadline {
+        while let Ok(chunk) = pty.out_rx.try_recv() {
+            output.extend_from_slice(&chunk);
+        }
+        if probe.has_exited().unwrap() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(probe.has_exited().unwrap(), "PowerShell link checks timed out");
+    while let Ok(chunk) = pty.out_rx.try_recv() {
+        output.extend_from_slice(&chunk);
+    }
+    let output = String::from_utf8_lossy(&output);
+    assert!(output.contains("PowerShell file links: PASS"), "{output}");
+}
+
 #[cfg(target_os = "windows")]
 #[test]
 fn powershell_interactive_args_force_utf8_codepage() {

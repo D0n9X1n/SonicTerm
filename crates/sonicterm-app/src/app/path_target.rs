@@ -10,10 +10,10 @@ use std::sync::{Arc, Mutex};
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 use smallvec::SmallVec;
 #[cfg(test)]
+use sonicterm_cfg::url_scan::{bare_name_at_char_col_for_style, find_targets_for_style};
 use sonicterm_cfg::url_scan::{
-    bare_name_at_char_col_for_style, find_targets_for_style, TargetMatch,
+    target_candidates_at_char_col_for_style, DetectedTarget, PathStyle, TargetMatch,
 };
-use sonicterm_cfg::url_scan::{target_candidates_at_char_col_for_style, DetectedTarget, PathStyle};
 use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::{Cell, CellFlags, Grid, Row};
 use sonicterm_vt::vt::Osc7Cwd;
@@ -33,6 +33,7 @@ pub(super) struct RowTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LogicalTargetCandidate {
     target: DetectedTarget,
+    missing_before: Vec<DetectedTarget>,
     spans: SmallVec<[AbsoluteCellSpan; 2]>,
 }
 
@@ -136,6 +137,7 @@ pub struct PathProbeCandidate {
     pub(crate) spans: SmallVec<[AbsoluteCellSpan; 2]>,
     pub(crate) target: DetectedTarget,
     pub(crate) resolved_path: PathBuf,
+    pub(crate) missing_before: Vec<PathBuf>,
 }
 
 impl PathProbeCandidate {
@@ -777,6 +779,14 @@ fn probe_candidates(
         let mut blocked = false;
         while index < candidates.len() && candidates[index].span_len() == span_len {
             let candidate = &candidates[index];
+            if candidate
+                .missing_before
+                .iter()
+                .any(|literal| classify(literal) != PathOpenDecision::Missing)
+            {
+                // When: a literal is present or blocked, its shorter interpretation has no authority even if filtering removed its tier.
+                return Err("path-error-ambiguous");
+            }
             let decision = if matches!(candidate.target, DetectedTarget::SourceReference(_)) {
                 classify_source_reference(&candidate.resolved_path)
             } else {
@@ -817,6 +827,7 @@ struct PathOpenRequest {
     pane_id: u64,
     path: PathBuf,
     expected_decision: PathOpenDecision,
+    missing_before: Vec<PathBuf>,
 }
 
 /// App-owned handles for the bounded path probe and open workers.
@@ -864,8 +875,20 @@ impl PathWorkers {
             .name("sonicterm-path-open".into())
             .spawn(move || {
                 while let Ok(request) = open_rx.recv() {
-                    if let Err(error) = open_path(&request.path, request.expected_decision) {
-                        // When: open_path fails, return its reason to the requesting window instead of leaving only a log.
+                    let result =
+                        if request.missing_before.iter().all(|literal| {
+                            classify_local_target(literal) == PathOpenDecision::Missing
+                        }) {
+                            open_path(&request.path, request.expected_decision)
+                        } else {
+                            // When: a literal appeared after hover, do not reveal its shorter interpretation at activation time.
+                            Err(io::Error::new(
+                                io::ErrorKind::PermissionDenied,
+                                "literal path is no longer missing",
+                            ))
+                        };
+                    if let Err(error) = result {
+                        // When: result is an error, return its reason to the requesting window instead of leaving only a log.
                         tracing::warn!(path = ?request.path, %error, "path open failed");
                         let _ = proxy.send_event(super::UserEvent::PathOpenFailed {
                             window_id: request.window_id,
@@ -897,8 +920,15 @@ impl PathWorkers {
         pane_id: u64,
         path: PathBuf,
         expected_decision: PathOpenDecision,
+        missing_before: Vec<PathBuf>,
     ) -> io::Result<bool> {
-        match self.open.try_send(PathOpenRequest { window_id, pane_id, path, expected_decision }) {
+        match self.open.try_send(PathOpenRequest {
+            window_id,
+            pane_id,
+            path,
+            expected_decision,
+            missing_before,
+        }) {
             Ok(()) => Ok(true),
             Err(TrySendError::Full(_)) => Ok(false),
             Err(TrySendError::Disconnected(_)) => {
@@ -1389,11 +1419,108 @@ fn hardwrap_uri_candidate(
             }
             return HardwrapUri::Complete(LogicalTargetCandidate {
                 target: DetectedTarget::Uri(found.url.clone()),
+                missing_before: Vec::new(),
                 spans,
             });
         }
     }
     refusal(&spans)
+}
+
+struct PathScalar {
+    byte_start: usize,
+    byte_end: usize,
+    cell_start: usize,
+    cell_end: usize,
+    valid: bool,
+}
+
+struct PathCellText {
+    text: String,
+    scalars: Vec<PathScalar>,
+}
+
+impl PathCellText {
+    fn from_cells(cells: &[&Cell], positions: &[AbsoluteCell]) -> Option<Self> {
+        let mut text = String::new();
+        let mut scalars = Vec::new();
+        let mut index = 0;
+        while index < cells.len() {
+            let cell = cells[index];
+            let wide = cell.flags.contains(CellFlags::WIDE);
+            let continuation = cell.flags.contains(CellFlags::WIDE_CONT);
+            let paired = wide
+                && !continuation
+                && cells.get(index + 1).is_some_and(|next| {
+                    next.flags.contains(CellFlags::WIDE_CONT)
+                        && !next.flags.contains(CellFlags::WIDE)
+                        && positions[index].row == positions[index + 1].row
+                        && positions[index].col.checked_add(1) == Some(positions[index + 1].col)
+                });
+            let end = index + if paired { 2 } else { 1 };
+            let byte_start = text.len();
+            // When: continuation is orphaned, keep an invalid non-delimiter scalar so its neighbors cannot join across it.
+            let ch = if continuation { '\u{fdd0}' } else { cell.ch };
+            text.push(ch);
+            if text.len() > MAX_LOGICAL_PATH_BYTES {
+                // When: text exceeds the logical byte cap, refuse before any candidate enumeration.
+                return None;
+            }
+            scalars.push(PathScalar {
+                byte_start,
+                byte_end: text.len(),
+                cell_start: index,
+                cell_end: end,
+                valid: !continuation && (!wide || paired),
+            });
+            index = end;
+        }
+        Some(Self { text, scalars })
+    }
+
+    fn candidates(
+        &self,
+        cells: &[&Cell],
+        pointed: usize,
+        style: PathStyle,
+        include_bare_names: bool,
+    ) -> Vec<(TargetMatch, std::ops::Range<usize>)> {
+        let Some(col) =
+            self.scalars.iter().position(|s| (s.cell_start..s.cell_end).contains(&pointed))
+        else {
+            // When: no scalar contains pointed, it cannot own a scanner target.
+            return Vec::new();
+        };
+        target_candidates_at_char_col_for_style(&self.text, col, style, include_bare_names)
+            .into_iter()
+            .filter_map(|matched| {
+                let start = self.scalars.iter().position(|s| s.byte_start == matched.start)?;
+                let end = self.scalars.iter().position(|s| s.byte_end == matched.end)? + 1;
+                let source_start =
+                    self.scalars.iter().position(|s| s.byte_start == matched.source_start)?;
+                let source_end =
+                    self.scalars.iter().position(|s| s.byte_end == matched.source_end)? + 1;
+                if source_start > start || source_end < end || start >= end {
+                    // When: source_start/source_end fail to enclose start..end, no identity can authorize the match.
+                    return None;
+                }
+                for scalar in &self.scalars[source_start..source_end] {
+                    if !scalar.valid
+                        || cells[scalar.cell_start..scalar.cell_end].iter().any(|cell| {
+                            cell.hyperlink().is_some()
+                                || cell.extras().is_some_and(|s| !s.is_empty())
+                                || cell.ch.is_control()
+                        })
+                    {
+                        // When: scalar identity is unsafe, neither removed boundaries nor display text may be discarded to recover a target.
+                        return None;
+                    }
+                }
+                let range = self.scalars[start].cell_start..self.scalars[end - 1].cell_end;
+                range.contains(&pointed).then_some((matched, range))
+            })
+            .collect()
+    }
 }
 
 fn logical_path_scan_at_cell(
@@ -1438,98 +1565,54 @@ fn logical_path_scan_at_cell(
         row_count += 1;
     }
 
-    let mut text = String::new();
     let mut cells = Vec::new();
-    let mut byte_starts = Vec::new();
     let mut positions = Vec::new();
     let mut rows = SmallVec::<[PathRowIdentity; 2]>::new();
     for absolute_row in first_row..=last_row {
         let row = grid.row_at_abs(absolute_row)?;
         rows.push(PathRowIdentity { row: absolute_row, fingerprint: row_fingerprint(row) });
         for (column, cell) in row.iter().enumerate() {
-            byte_starts.push(text.len());
-            let ch = if cell.flags.contains(CellFlags::WIDE_CONT) {
-                '\u{fdd0}'
-            } else {
-                // When: `cell.flags` lacks `WIDE_CONT`, preserve the row's visible character.
-                cell.ch
-            };
-            text.push(ch);
-            if text.len() > MAX_LOGICAL_PATH_BYTES {
-                // When: flattened logical text exceeds the path-byte cap, stop before allocating or scanning more.
-                return None;
-            }
             cells.push(cell);
             positions.push(AbsoluteCell { row: absolute_row, col: u16::try_from(column).ok()? });
         }
     }
     let pointed_index = positions.iter().position(|position| *position == pointed)?;
-
-    let candidates =
-        target_candidates_at_char_col_for_style(&text, pointed_index, style, include_bare_names)
-            .into_iter()
-            .filter_map(|matched| {
-                let start_index = byte_starts.iter().position(|start| *start == matched.start)?;
-                let end_index = byte_starts
-                    .iter()
-                    .position(|start| *start >= matched.end)
-                    .unwrap_or(cells.len());
-                let mut source_start_index = start_index;
-                while source_start_index > 0
-                    && matches!(
-                        cells[source_start_index - 1].ch,
-                        '(' | '[' | '{' | '\'' | '"' | '`'
-                    )
-                {
-                    source_start_index -= 1;
-                }
-                let mut source_end_index = end_index;
-                while source_end_index < cells.len()
-                    && matches!(
-                        cells[source_end_index].ch,
-                        ',' | ';' | '.' | ':' | '!' | '?' | ')' | ']' | '}' | '\'' | '"' | '`'
-                    )
-                {
-                    source_end_index += 1;
-                }
-                if start_index >= end_index
-                    || pointed_index < start_index
-                    || pointed_index >= end_index
-                    || cells[source_start_index..source_end_index]
-                        .iter()
-                        .any(|cell| unsafe_path_cell(cell) || cell.hyperlink().is_some())
-                {
-                    // When: the candidate misses ownership or crosses unsafe cell identity, reject its complete logical span.
-                    return None;
-                }
-
-                let mut spans = SmallVec::<[AbsoluteCellSpan; 2]>::new();
-                for position in &positions[start_index..end_index] {
-                    match spans.last_mut() {
-                        Some(span) if span.row == position.row && span.end_col == position.col => {
-                            span.end_col = position.col.checked_add(1)?;
-                        }
-                        Some(span) if span.end_col == grid.cols && position.col == 0 => {
-                            spans.push(AbsoluteCellSpan {
-                                row: position.row,
-                                start_col: 0,
-                                end_col: 1,
-                            });
-                        }
-                        None => spans.push(AbsoluteCellSpan {
+    let mapped = PathCellText::from_cells(&cells, &positions)?;
+    let candidates = mapped
+        .candidates(&cells, pointed_index, style, include_bare_names)
+        .into_iter()
+        .filter_map(|(matched, range)| {
+            let mut spans = SmallVec::<[AbsoluteCellSpan; 2]>::new();
+            for position in &positions[range] {
+                match spans.last_mut() {
+                    Some(span) if span.row == position.row && span.end_col == position.col => {
+                        span.end_col = position.col.checked_add(1)?;
+                    }
+                    Some(span) if span.end_col == grid.cols && position.col == 0 => {
+                        spans.push(AbsoluteCellSpan {
                             row: position.row,
-                            start_col: position.col,
-                            end_col: position.col.checked_add(1)?,
-                        }),
-                        Some(_) => {
-                            // When: `spans.last_mut()` is `Some(_)` without adjacency, reject the discontinuous span map.
-                            return None;
-                        }
+                            start_col: 0,
+                            end_col: 1,
+                        });
+                    }
+                    None => spans.push(AbsoluteCellSpan {
+                        row: position.row,
+                        start_col: position.col,
+                        end_col: position.col.checked_add(1)?,
+                    }),
+                    Some(_) => {
+                        // When: `spans.last_mut()` is `Some(_)` without adjacency, reject the discontinuous span map.
+                        return None;
                     }
                 }
-                Some(LogicalTargetCandidate { target: matched.target, spans })
+            }
+            Some(LogicalTargetCandidate {
+                target: matched.target,
+                missing_before: matched.missing_before,
+                spans,
             })
-            .collect::<Vec<_>>();
+        })
+        .collect::<Vec<_>>();
     (!candidates.is_empty()).then_some(LogicalPathScan { candidates, rows })
 }
 
@@ -1546,54 +1629,20 @@ fn row_target_candidates_at_cell(
         // When: `col` lies beyond the materialized row, no scanner span can own it.
         return Vec::new();
     }
-    let mut text = String::with_capacity(cells.len());
-    let mut byte_ranges = Vec::with_capacity(cells.len());
-    for cell in &cells {
-        let start = text.len();
-        // When: `cell.flags` contains `WIDE_CONT`, retain its column with a non-path sentinel; otherwise retain `cell.ch`.
-        let ch = if cell.flags.contains(CellFlags::WIDE_CONT) { '\u{fdd0}' } else { cell.ch };
-        text.push(ch);
-        byte_ranges.push((start, text.len()));
-    }
-
-    target_candidates_at_char_col_for_style(&text, col, style, include_bare_names)
+    let positions =
+        (0..cells.len()).map(|col| AbsoluteCell { row: 0, col: col as u16 }).collect::<Vec<_>>();
+    let Some(mapped) = PathCellText::from_cells(&cells, &positions) else {
+        // When: PathCellText::from_cells exceeds the logical bound, the row cannot authorize an incomplete candidate.
+        return Vec::new();
+    };
+    mapped
+        .candidates(&cells, col, style, include_bare_names)
         .into_iter()
-        .filter_map(|matched| {
-            let start_col = byte_ranges.iter().position(|(start, _)| *start == matched.start)?;
-            let end_col = byte_ranges
-                .iter()
-                .position(|(start, _)| *start >= matched.end)
-                .unwrap_or(cells.len());
-            let mut source_start_col = start_col;
-            while source_start_col > 0
-                && matches!(cells[source_start_col - 1].ch, '(' | '[' | '{' | '\'' | '"' | '`')
-            {
-                source_start_col -= 1;
-            }
-            let mut source_end_col = end_col;
-            while source_end_col < cells.len()
-                && matches!(
-                    cells[source_end_col].ch,
-                    ',' | ';' | '.' | ':' | '!' | '?' | ')' | ']' | '}' | '\'' | '"' | '`'
-                )
-            {
-                source_end_col += 1;
-            }
-            if start_col >= end_col
-                || start_col > col
-                || end_col <= col
-                || source_end_col < end_col
-                || cells[source_start_col..source_end_col]
-                    .iter()
-                    .any(|cell| unsafe_path_cell(cell) || cell.hyperlink().is_some())
-            {
-                // When: the visible or literal source span misses ownership or crosses unsafe cells, reject the candidate.
-                return None;
-            }
+        .filter_map(|(matched, range)| {
             Some(RowTarget {
                 matched,
-                start_col: u16::try_from(start_col).ok()?,
-                end_col: u16::try_from(end_col).ok()?,
+                start_col: u16::try_from(range.start).ok()?,
+                end_col: u16::try_from(range.end).ok()?,
             })
         })
         .collect()
@@ -2250,7 +2299,12 @@ impl App {
                     pane_id,
                     pointed: AbsoluteCell { row: absolute_row, col },
                     view_top,
-                    candidates: vec![PathProbeCandidate { spans, target: local, resolved_path }],
+                    candidates: vec![PathProbeCandidate {
+                        spans,
+                        target: local,
+                        resolved_path,
+                        missing_before: Vec::new(),
+                    }],
                     rows,
                     cwd,
                     cwd_revision: parser.cwd_revision(),
@@ -2319,7 +2373,7 @@ impl App {
                 logical_path_scan_at_cell(grid, view_top, pointed, style, clickable_bare_names)?
             }
         };
-        if let Some(LogicalTargetCandidate { target: DetectedTarget::Uri(uri), spans }) =
+        if let Some(LogicalTargetCandidate { target: DetectedTarget::Uri(uri), spans, .. }) =
             logical.candidates.first()
         {
             // When: logical URI provenance wins, preserve its complete destination and every visible fragment.
@@ -2378,10 +2432,24 @@ impl App {
                     self.home_dir.as_deref(),
                     &self.local_hostname,
                 )?;
+                let missing_before = candidate
+                    .missing_before
+                    .iter()
+                    .map(|literal| {
+                        resolve_detected_path(
+                            literal,
+                            style,
+                            cwd.as_ref(),
+                            self.home_dir.as_deref(),
+                            &self.local_hostname,
+                        )
+                    })
+                    .collect::<Option<Vec<_>>>()?;
                 Some(PathProbeCandidate {
                     spans: candidate.spans,
                     target: candidate.target,
                     resolved_path,
+                    missing_before,
                 })
             })
             .collect::<Vec<_>>();
@@ -2651,6 +2719,7 @@ impl App {
                     pane_id,
                     selection.candidate.resolved_path,
                     selection.decision,
+                    selection.candidate.missing_before,
                 ) {
                     Ok(true) => true,
                     Ok(false) => {

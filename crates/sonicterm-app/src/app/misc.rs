@@ -450,6 +450,21 @@ impl App {
             // clipboard yielded anything, so there is nothing to paste.
             return;
         };
+        let consumed = match kind {
+            FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {
+                self.search_handle_ime_commit(&text)
+            }
+            FrontmostKind::Child(id) => self.search_handle_ime_commit_in_child(id, &text),
+        };
+        if consumed {
+            // When: search consumed the clipboard, the query must never reach the shell or broadcast peers.
+            if let Some(window) =
+                self.main_window().filter(|_| !matches!(kind, FrontmostKind::Child(_)))
+            {
+                window.request_redraw();
+            }
+            return;
+        }
         let Some(pane_id) = self.active_pane_id_for_kind(kind) else {
             // When: active_pane_id_for_kind finds no pane for this kind; there is
             // no PTY to paste into, so the clipboard text is dropped.
@@ -560,10 +575,27 @@ impl App {
             }
         }
     }
+    pub(super) fn window_request(&self, source: Option<WindowId>) -> super::WindowRequest {
+        let inherited = source
+            .and_then(|id| self.windows.get(&id))
+            .and_then(|state| state.window.as_ref())
+            .and_then(|window| {
+                super::inherited_window_size(
+                    window.inner_size(),
+                    window.scale_factor(),
+                    window.is_minimized().unwrap_or(false),
+                )
+            });
+        super::WindowRequest {
+            inner_size: inherited.unwrap_or_else(|| {
+                super::configured_window_size(&self.config, self.tab_bar_visible)
+            }),
+        }
+    }
+
     pub(super) fn drain_pending_window_creates(&mut self, el: &ActiveEventLoop) {
-        if self.pending_new_window {
-            self.pending_new_window = false;
-            self.create_new_terminal_window(el);
+        if let Some(request) = self.pending_new_window.take() {
+            self.create_new_terminal_window(el, request);
         }
         // In-process tear-out drain. The `Command::new`-based spawn
         // (`spawn_tearout_child` + `--tear-out-payload`) is still reached from
@@ -694,7 +726,11 @@ impl App {
     /// stays alive after the user closes the last window (dock icon +
     /// native menubar), so Cmd+N from that empty-windows state must
     /// still spawn a fresh terminal rather than do nothing.
-    pub(super) fn create_new_terminal_window(&mut self, el: &ActiveEventLoop) {
+    pub(super) fn create_new_terminal_window(
+        &mut self,
+        el: &ActiveEventLoop,
+        request: super::WindowRequest,
+    ) {
         use sonicterm_ui::tabs::Tab;
 
         let attrs = super::with_app_icon(super::with_backdrop_transparency(
@@ -703,7 +739,7 @@ impl App {
                     .with_title(super::NATIVE_WINDOW_TITLE)
                     .with_visible(false)
                     .with_decorations(true)
-                    .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0)),
+                    .with_inner_size(request.inner_size),
             ),
             self.config.appearance.backdrop,
             self.config.appearance.software_render_mode,

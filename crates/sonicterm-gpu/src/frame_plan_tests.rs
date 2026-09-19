@@ -35,6 +35,57 @@ fn link_preview_changes_repaint_full_surface() {
     }
 }
 
+/// Whole text rows stay against bottom padding as the pane grows, without changing its outer rectangle.
+#[test]
+fn bottom_alignment_moves_only_fractional_row_slack() {
+    for (height, expected_y) in [(91, 9.0), (111, 9.0), (100, 18.0), (84, 2.0)] {
+        let mut input = pane(7, 1);
+        input.rect.h = height;
+        input.rows = ((height - 4) / 20) as u16;
+        let plan = FramePlan::build(facts(false), [input], None);
+        let p = &plan.panes[0];
+        assert_eq!(p.layout.y, expected_y, "height={height}");
+        assert_eq!(p.layout.y + f32::from(p.row_count) * 20.0, height as f32 - 2.0);
+        assert_eq!(p.full_rect, PixelRect { x: 0, y: 0, w: 100, h: height });
+        assert_eq!(p.chrome, PaneRect::new(2.0, 2.0, 96.0, height as f32 - 4.0));
+        assert_eq!(p.background_rows, p.row_count);
+    }
+}
+
+/// Limited grids consume no whole-row slack, while overfull truncated panes retain their old origin.
+#[test]
+fn bottom_alignment_preserves_row_limit_and_overfull_cases() {
+    for (rows, origin, background_rows) in [(2, 9.0, 2), (4, 9.0, 4), (5, 2.0, 4)] {
+        let mut input = pane(7, 1);
+        input.rect.h = 91;
+        input.rows = rows;
+        let plan = FramePlan::build(facts(false), [input], None);
+        assert_eq!(plan.panes[0].layout.y, origin);
+        assert_eq!(plan.panes[0].background_rows, background_rows);
+        assert_eq!(plan.panes[0].chrome, PaneRect::new(2.0, 2.0, 96.0, 87.0));
+    }
+}
+
+/// Dirty damage uses the shifted row origin; resize repositions ink without leaving retained pixels behind.
+#[test]
+fn bottom_alignment_damage_and_resize_follow_grid_origin() {
+    let mut input = pane(7, 1);
+    input.rect.h = 91;
+    let first = FramePlan::build(facts(false), [input.clone()], None);
+    input.revision += 1;
+    input.dirty_rows = vec![3];
+    let dirty = FramePlan::build(facts(false), [input.clone()], Some(&first.key));
+    assert_eq!(dirty.damage, PixelRect { x: 0, y: 69, w: 100, h: 20 });
+    assert_eq!(dirty.panes[0].content_clip, PaneRect::new(2.0, 9.0, 96.0, 80.0));
+    input.rect.h = 100;
+    let resized = FramePlan::build(facts(false), [input.clone()], Some(&dirty.key));
+    assert_eq!(resized.damage, first.damage);
+    assert_eq!(resized.panes[0].layout.y, 18.0);
+    input.dirty_rows.clear();
+    let same = FramePlan::build(facts(false), [input], Some(&resized.key));
+    assert!(same.unchanged);
+}
+
 fn pane(id: u64, revision: u64) -> PaneMetadata {
     PaneMetadata {
         id,

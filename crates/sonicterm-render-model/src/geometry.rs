@@ -65,6 +65,47 @@ impl PixelRect {
     }
 }
 
+/// Padded pane bounds and the complete-row text region in physical pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PaneContentGeometry {
+    /// Unshifted padded region for pane chrome.
+    pub content: sonicterm_ui::pane::Rect,
+    /// Text region with only the fractional-row remainder moved above it.
+    pub grid: sonicterm_ui::pane::Rect,
+}
+
+/// Resolve bottom-aligned text without changing pane chrome or terminal row counts.
+pub fn pane_content_geometry(
+    pane: PixelRect,
+    padding: [f32; 4],
+    cell_height: f32,
+    rows: u16,
+) -> PaneContentGeometry {
+    let [left, right, top, bottom] = padding;
+    let content = sonicterm_ui::pane::Rect::new(
+        pane.x as f32 + left,
+        pane.y as f32 + top,
+        (pane.w as f32 - left - right).max(0.0),
+        (pane.h as f32 - top - bottom).max(0.0),
+    );
+    let fit = (content.h / cell_height).floor();
+    let shift = if cell_height.is_finite()
+        && cell_height > 0.0
+        && fit >= 1.0
+        && rows > 0
+        && f32::from(rows) <= fit
+    {
+        // Resource-limited grids must not consume whole empty rows as alignment slack.
+        (content.h - fit * cell_height).max(0.0).floor()
+    } else {
+        // When: rows exceed the truncated pane or no complete row fits, retain its existing origin.
+        0.0
+    };
+    let grid =
+        sonicterm_ui::pane::Rect::new(content.x, content.y + shift, content.w, content.h - shift);
+    PaneContentGeometry { content, grid }
+}
+
 /// Accumulated window-pixel damage for a frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DamageRect {

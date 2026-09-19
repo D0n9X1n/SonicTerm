@@ -70,6 +70,9 @@ pub struct SearchState {
     /// pane closed — the two counters are unrelated, and an accidental match
     /// skips the rescan and leaves the dead pane's matches on screen.
     needs_rescan: bool,
+    pane_id: Option<u64>,
+    screen_epoch: u64,
+    scrollback_evicted: u64,
 }
 
 impl SearchState {
@@ -77,6 +80,27 @@ impl SearchState {
     /// case-insensitive, and no pending scroll request.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Bind revisions to a pane identity before querying or refreshing its grid.
+    pub fn bind_pane(&mut self, pane_id: u64) {
+        if self.pane_id != Some(pane_id) {
+            // Equal revision numbers cannot preserve matches across pane identity changes.
+            self.pane_id = Some(pane_id);
+            self.invalidate_for_new_grid();
+        }
+    }
+
+    /// Select the first match in or after this viewport, or the last preceding match, without scrolling.
+    pub fn anchor_to_viewport(&mut self, view_top: u64) {
+        let index = self.matches.partition_point(|m| u64::from(m.row) < view_top);
+        self.current = if index < self.matches.len() {
+            Some(index)
+        } else {
+            // When: index reaches matches.len(), only earlier results exist, so focus the last one without wrapping.
+            self.matches.len().checked_sub(1)
+        };
+        self.requested_scroll_row = None;
     }
 
     /// Point this search at a different grid than the one it last scanned.
@@ -89,6 +113,8 @@ impl SearchState {
     /// pane's highlights are drawn over the survivor's text.
     pub fn invalidate_for_new_grid(&mut self) {
         self.needs_rescan = true;
+        self.current = None;
+        self.requested_scroll_row = None;
     }
 
     /// Index window `[start, end)` into [`Self::matches`] whose rows intersect
@@ -147,13 +173,12 @@ impl SearchState {
     /// Insert a committed string at the caret and rescan `grid`; the app feeds
     /// this from IME commit text.
     ///
-    /// Line breaks are stripped first because the field is single-line; text
-    /// that was only line breaks leaves the query and caret unchanged.
+    /// Controls are stripped from single-line input; text containing only
+    /// controls leaves the query and caret unchanged.
     pub fn input_str(&mut self, text: &str, grid: &Grid) {
-        let committed: String = text.chars().filter(|ch| !matches!(ch, '\r' | '\n')).collect();
+        let committed: String = text.chars().filter(|ch| !ch.is_control()).collect();
         if committed.is_empty() {
-            // When: committed held nothing but line breaks, so there is no
-            // text left to insert after filtering.
+            // When: committed is empty after control filtering, preserve the query and caret.
             return;
         }
         let cursor = self.cursor();
@@ -202,13 +227,25 @@ impl SearchState {
     /// nearest preceding match (or the first one when nothing precedes).
     /// Returns `true` if a rescan happened.
     pub fn maybe_refresh_for_revision(&mut self, grid: &Grid) -> bool {
-        if !self.needs_rescan && grid.revision() == self.last_revision {
-            // When: no rescan was forced and grid still reports the revision
-            // already scanned, so the existing matches still describe it.
+        let same_screen = self.screen_epoch == grid.screen_epoch();
+        if !self.needs_rescan
+            && same_screen
+            && grid.revision() == self.last_revision
+            && grid.scrollback_evicted() == self.scrollback_evicted
+        {
+            // When: revision, screen and eviction identity still match, cached matches remain valid without rescanning.
             return false;
         }
+        let removed = grid.scrollback_evicted().saturating_sub(self.scrollback_evicted);
+        let anchor =
+            self.current_match().filter(|_| same_screen && !self.needs_rescan).and_then(|mut m| {
+                let row = u64::from(m.row).checked_sub(removed)?;
+                m.row = u32::try_from(row).ok()?;
+                Some(m)
+            });
         self.needs_rescan = false;
-        let anchor = self.current_match();
+        self.screen_epoch = grid.screen_epoch();
+        self.scrollback_evicted = grid.scrollback_evicted();
         self.scrollback_len = grid.scrollback_len() as u32;
         self.visible_rows = grid.rows;
         self.last_revision = grid.revision();
@@ -248,7 +285,7 @@ impl SearchState {
             // before the rescan and nothing becomes focused now.
             None
         };
-        self.update_scroll_request();
+        self.requested_scroll_row = None;
         true
     }
 
@@ -259,6 +296,9 @@ impl SearchState {
     /// [`Self::maybe_refresh_for_revision`] it does not preserve the focused
     /// match: `current` and the pending scroll request are both reset.
     pub fn refresh(&mut self, grid: &Grid) {
+        self.needs_rescan = false;
+        self.screen_epoch = grid.screen_epoch();
+        self.scrollback_evicted = grid.scrollback_evicted();
         self.scrollback_len = grid.scrollback_len() as u32;
         self.visible_rows = grid.rows;
         self.last_revision = grid.revision();

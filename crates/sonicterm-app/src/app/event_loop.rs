@@ -764,25 +764,15 @@ impl App {
             hook();
         }
 
-        let (cols, rows) = sonicterm_grid::grid::bounded_grid_size(
-            u64::from(self.config.window.cols),
-            u64::from(self.config.window.rows),
-        );
-
         let attrs = super::with_app_icon(super::with_backdrop_transparency(
             with_integrated_titlebar(
                 Window::default_attributes()
                     .with_title(super::NATIVE_WINDOW_TITLE)
                     .with_visible(false)
                     .with_decorations(true)
-                    .with_inner_size(winit::dpi::LogicalSize::new(
-                        f32::from(cols) * 9.0
-                            + self.config.window.padding_left
-                            + self.config.window.padding_right,
-                        f32::from(rows) * (self.config.font.size * self.config.font.line_height)
-                            + self.config.window.padding_top
-                            + self.config.window.padding_bottom
-                            + sonicterm_ui::tabbar_view::TAB_BAR_HEIGHT,
+                    .with_inner_size(super::configured_window_size(
+                        &self.config,
+                        self.tab_bar_visible,
                     )),
             ),
             self.config.appearance.backdrop,

@@ -30,6 +30,35 @@ fn arrow_direction_selects_relative_to_cursor_when_unselected() {
     assert_eq!(up.current, Some(0));
 }
 
+/// Viewport anchoring retains global indices and never queues a scroll while typing.
+#[test]
+fn viewport_anchor_uses_document_order_without_scrolling() {
+    let mut search = state_with_matches();
+    for (top, expected) in [(0, 0), (10, 0), (11, 1), (30, 2), (31, 2)] {
+        search.anchor_to_viewport(top);
+        assert_eq!(search.current, Some(expected));
+        assert_eq!(search.requested_scroll_row, None);
+    }
+    search.matches.clear();
+    search.anchor_to_viewport(0);
+    assert_eq!(search.current, None);
+}
+
+/// Rebinding two equal-revision grids must discard the prior pane's match identity.
+#[test]
+fn pane_identity_invalidates_equal_revision_matches() {
+    let grid = Grid::new(20, 2);
+    let mut search = state_with_matches();
+    search.bind_pane(7);
+    search.refresh(&grid);
+    search.matches = state_with_matches().matches;
+    search.current = Some(1);
+    search.bind_pane(8);
+    assert_eq!(search.current, None);
+    assert!(search.maybe_refresh_for_revision(&grid));
+    assert!(search.matches.is_empty());
+}
+
 #[test]
 fn search_ignores_newline_input() {
     let grid = Grid::new(10, 2);
