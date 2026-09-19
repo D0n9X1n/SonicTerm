@@ -82,6 +82,21 @@ terminal modes.
 For the complete default map, action names, and customization syntax, see
 [Keybindings](Keybindings).
 
+### Search retained output
+
+Search scans the active pane's retained scrollback and current screen, not just
+its visible rows. After editing the query, the first match in the current viewport
+is selected; otherwise the next match below it, or the last preceding match, is
+selected. The counter uses the full match list: four earlier matches, the current
+one, and two later matches show `5/7`.
+
+Typing, IME commits, and pasting update the selection without scrolling. Enter or
+Down moves forward; Shift+Enter or Up moves backward, wrapping at either end.
+If the selected match is offscreen, the first navigation press reveals it without
+skipping it. Visible results do not recenter the viewport. Search paste stays in
+the query and never reaches the shell or broadcast peers; control characters are
+removed. History already evicted by retention limits and other panes are not searched.
+
 ### Window names and numbers
 
 Terminal windows receive process-local numbers starting at 1: `#1 SonicTerm`.
@@ -341,6 +356,17 @@ Wrapped paths and source locations also accept following sentence punctuation,
 such as `(src/main.rs:97).`, `[src/main.rs:97:4],`, `{src/main.rs};`, or
 `Read(src/main.rs:97–100)!`. The wrapper and outer punctuation are excluded from
 the active span; punctuation inside the wrapper still follows literal-first probing.
+Paired structures are recognized before surrounding prose: `(reports/flight.html)，内容`
+and `【reports/flight.html】，内容` keep the same inner target. Supported pairs include
+`()`/`[]`/`{}`, ASCII quotes/backticks, `（）`/`【】`/`《》`/`「」`/`『』`,
+`“”`/`‘’`/`«»`, and identifier-style calls. Outer separators use Unicode's
+Other Punctuation and Dash Punctuation categories, not a language-specific list.
+Path separators, mismatched closers, direct concatenation, and dot/colon suffix
+continuations such as `(src/main.rs).bak` remain ambiguous and inert. This does
+not interpret raw Markdown, strip invisible characters, or split unwrapped file lists.
+Wide outer delimiters and separators retain both cells in safety validation;
+wide characters inside the path remain unsupported. A missing or unsafe boundary
+never permits a shorter inner fragment.
 In prose such as `src/main.rs and focused tests/main.rs. Require stable`, point
 at either filename to resolve it independently. `and` is not a reserved word:
 existing filenames containing spaces or parentheses still use literal filesystem
@@ -367,6 +393,21 @@ anchor itself, rather than falling back to a shorter filename. Unwrapped groups
 start a segment or follow another complete group; after prose, use `()`/`[]`/`{}`
 to make the anchor boundary explicit. A wrapper after plain words is read as
 prose; it is not a continuation of a spaced relative filename.
+
+### Manual link checks
+
+From the repository root, run `./scripts/test-local-link-actions.ps1` inside
+SonicTerm on Windows. It prints numbered cases with expected previews and click
+results, and creates inert files in a unique temporary directory. It does not
+open targets, change configuration, or write the clipboard. Delete the printed
+fixture directory after testing.
+
+Use `-Group Web`, `Osc8`, `Paths`, `Wrappers`, `Source`, `Negative`, `Wrapping`,
+or `KnownGaps` to inspect one group at a time; the default is `All`. Known gaps
+are labeled separately, not represented as supported behavior. For wrapping
+checks, resize the window and keep the complete target visible. Report the group,
+case ID, preview, and observed click result. This manual matrix complements the
+scanner/app regression tests; it is not exhaustive proof over arbitrary text.
 
 ### Local target behavior
 
@@ -546,6 +587,17 @@ shell 不会重启。关闭分屏会关闭对应 PTY；关闭最后一个 pane �
 按键编码遵循各 pane 协商的终端模式。
 
 完整默认快捷键、action 名称和自定义格式见 [快捷键](Keybindings)。
+
+### 搜索保留的输出
+
+搜索覆盖活动窗格保留的回滚历史与当前屏幕，不只覆盖可见行。修改查询后优先选中当前视口中
+的第一个匹配；若没有，则选中视口下方的下一个匹配，或上方最后一个匹配。计数使用完整匹配
+列表：上方四个、当前一个、下方两个时显示 `5/7`。
+
+键入、输入法提交和粘贴只更新选中结果，不自动滚动。Enter 或下箭头向后查找，Shift+Enter
+或上箭头向前查找，首尾循环。选中结果在屏外时，第一次导航先显示它，不跳过它；结果已可见
+时不重新居中视口。搜索粘贴只进入查询，不发送给 shell 或广播窗格，并去除控制字符。
+已经因保留上限被淘汰的历史和其它窗格不在搜索范围内。
 
 ### 窗口名称与编号
 
@@ -752,6 +804,14 @@ cell 安全检查。引号内容按字面处理，不执行 shell 反转义或�
 带括号的路径与源文件位置引用也允许后接句末标点，例如 `(src/main.rs:97).`、
 `[src/main.rs:97:4],`、`{src/main.rs};` 或 `Read(src/main.rs:97–100)!`。
 可操作范围不包含外层括号和标点；括号内部的标点仍遵循字面文件名优先的探测规则。
+成对结构先于外围正文识别：`(reports/flight.html)，内容` 和
+`【reports/flight.html】，内容` 保留同一个内部目标。支持 `()`/`[]`/`{}`、ASCII
+引号/反引号、`（）`/`【】`/`《》`/`「」`/`『』`、`“”`/`‘’`/`«»` 及标识符式工具调用。
+外围分隔采用 Unicode 的 Other Punctuation 和 Dash Punctuation 类别，不维护逐语言的标点清单。
+路径分隔符、错配闭括号、直接拼接，以及 `(src/main.rs).bak` 这类点号/冒号后缀续接，
+仍因有歧义而不可操作。这不会解释原始 Markdown、删除不可见字符或拆分无包围符的文件列表。
+宽字符外围包围符和分隔标点的两格都参与安全验证；路径内部的宽字符仍不受支持。
+边界缺失或不安全时，不能回退到较短的内部片段。
 在 `src/main.rs and focused tests/main.rs. Require stable` 这类正文中，分别指向两个
 文件名即可独立解析。`and` 不是保留词：真实文件名中的空格与圆括号仍通过字面文件系统
 候选消除歧义。缺失的上下文路径使用指向的文件名反馈，不使用未经验证的多词正文猜测。
@@ -769,6 +829,17 @@ cell 安全检查。引号内容按字面处理，不执行 shell 反转义或�
 包括锚点本身，不会回退到较短文件名。不加括号的分组必须位于片段开头或紧随另一个完整分组；
 正文之后请用 `()`/`[]`/`{}` 明确锚点边界。普通文字之后的括号会按正文分隔处理，
 不会作为带空格相对文件名的延续。
+
+### 手工链接检查
+
+在 Windows 的 SonicTerm 中，从仓库根目录运行 `./scripts/test-local-link-actions.ps1`。
+它打印带编号、预期预览与点击结果的例子，并在独立临时目录创建无害文件；不会自动打开目标、
+修改配置或写入剪贴板。测试后删除输出中注明的夹具目录。
+
+用 `-Group Web`、`Osc8`、`Paths`、`Wrappers`、`Source`、`Negative`、`Wrapping`
+或 `KnownGaps` 可逐组检查，默认是 `All`。已知缺口单独标注，不冒充已支持的行为。
+检查换行时调整窗口宽度，并保持完整目标可见。反馈时提供分组、例子编号、预览和实际点击结果。
+这份手工矩阵补充 scanner/app 回归测试，不代表对任意文本的穷尽证明。
 
 ### 本地目标行为
 

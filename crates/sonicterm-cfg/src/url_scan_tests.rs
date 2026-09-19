@@ -906,6 +906,8 @@ fn shell_quoted_spaced_names_produce_one_unwrapped_candidate() {
             vec![TargetMatch {
                 start,
                 end: start + "ff ff".len(),
+                source_start: start - 1,
+                source_end: start + "ff ff".len() + 1,
                 target: DetectedTarget::BareName("ff ff".into()),
             }]
         );
@@ -1646,6 +1648,294 @@ fn uri_precedence_outranks_source_reference_parsing() {
             matches.iter().all(|matched| matches!(matched.target, DetectedTarget::Uri(_))),
             "non-URI provenance at column {col} in {text:?}: {matches:?}"
         );
+    }
+}
+
+/// Complete structures keep exact destinations under independent changes to outer prose and punctuation.
+#[test]
+fn structural_boundaries_preserve_destinations_and_pointer_ownership() {
+    let mut failures = Vec::new();
+    for style in [PathStyle::Windows, PathStyle::Posix] {
+        for path in ["reports/flight.html", "reports/flight.md", "./notes", "./My Folder/a(b).rs"] {
+            for suffix in ["", ":12", ":12:4", ":12–20"] {
+                let display = format!("{path}{suffix}");
+                for (left, right) in [
+                    ("(", ")"),
+                    ("[", "]"),
+                    ("{", "}"),
+                    ("Read(", ")"),
+                    ("'", "'"),
+                    ("\"", "\""),
+                    ("`", "`"),
+                    ("（", "）"),
+                    ("【", "】"),
+                    ("《", "》"),
+                    ("「", "」"),
+                    ("『", "』"),
+                    ("“", "”"),
+                    ("‘", "’"),
+                    ("«", "»"),
+                ] {
+                    for tail in [
+                        "",
+                        ", next",
+                        ",next",
+                        "，内容与",
+                        "。",
+                        "；后文",
+                        "：说明",
+                        "！",
+                        "？",
+                        "、",
+                        "…",
+                        "——",
+                        "،text",
+                        "，「引用」",
+                    ] {
+                        let prefix = format!("已检查 {left}");
+                        let text = format!("{prefix}{display}{right}{tail}");
+                        let start = prefix.len();
+                        let end = start + display.len();
+                        for (col, (byte, _)) in text.char_indices().enumerate() {
+                            let found =
+                                target_candidates_at_char_col_for_style(&text, col, style, true);
+                            let exact = found.iter().any(|m| {
+                                m.start == start
+                                    && m.end == end
+                                    && match &m.target {
+                                        DetectedTarget::PathCandidate(p) => {
+                                            suffix.is_empty() && p == path
+                                        }
+                                        DetectedTarget::SourceReference(r) => {
+                                            !suffix.is_empty()
+                                                && r.path == path
+                                                && r.display == display
+                                                && r.line == 12
+                                                && r.column == (suffix == ":12:4").then_some(4)
+                                                && r.end_line == (suffix == ":12–20").then_some(20)
+                                        }
+                                        _ => false,
+                                    }
+                            });
+                            assert!(found.len() <= MAX_PATH_CANDIDATES_PER_CELL);
+                            if exact != (start..end).contains(&byte) {
+                                if failures.len() < 8 {
+                                    failures
+                                        .push(format!("{style:?} {text:?} at {col}: {found:?}"));
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Grouped references use their matched closer rather than consuming neighboring prose or references.
+#[test]
+fn structural_boundaries_keep_grouped_locations_and_neighbors() {
+    for style in [PathStyle::Windows, PathStyle::Posix] {
+        for (left, right) in [("(", ")"), ("【", "】"), ("“", "”")] {
+            let group = "src/main.rs:12, :15:4, :20–25";
+            let text = format!("说明 {left}{group}{right}，内容与 (src/other.rs:7)。");
+            let start = text.find(group).unwrap();
+            for (needle, line, column, end_line) in [
+                ("src/main", 12, None, None),
+                (":15", 15, Some(4), None),
+                (":20", 20, None, Some(25)),
+            ] {
+                let col = text[..text.find(needle).unwrap()].chars().count();
+                let found = target_candidates_at_char_col_for_style(&text, col, style, true);
+                assert!(found.iter().any(|m| m.start == start && m.end == start + group.len()
+                    && matches!(&m.target, DetectedTarget::SourceReference(r) if r.path == "src/main.rs"
+                        && r.line == line && r.column == column && r.end_line == end_line)), "{text} {needle}: {found:?}");
+            }
+            let other = text.find("src/other").unwrap();
+            let found = target_candidates_at_char_col_for_style(
+                &text,
+                text[..other].chars().count(),
+                style,
+                true,
+            );
+            assert!(found.iter().any(|m| matches!(&m.target, DetectedTarget::SourceReference(r) if r.path == "src/other.rs" && r.line == 7)));
+            for (col, (byte, ch)) in text.char_indices().enumerate() {
+                if (start..start + group.len()).contains(&byte) && matches!(ch, ',' | ' ') {
+                    assert!(
+                        target_candidates_at_char_col_for_style(&text, col, style, true).is_empty(),
+                        "separator: {text} {col}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Invalid structures and filename continuations never recover an actionable inner prefix.
+#[test]
+fn structural_boundaries_reject_repairs_and_continuations() {
+    for style in [PathStyle::Windows, PathStyle::Posix] {
+        for text in [
+            "(src/main.rs).bak",
+            "(src/main.rs)/child",
+            "(src/main.rs)\\child",
+            "(src/main.rs)tail",
+            "Read(src/main.rs)(extra)",
+            "((src/main.rs))",
+            "（src/main.rs】",
+            "【src/main.rs)",
+            "“src/main.rs’",
+            "(src/main.rs",
+            "prefix'src/main.rs'",
+            "key='src/main.rs'",
+            "'src/main.rs'suffix",
+            "(src/main.rs:0)，",
+            "(src/main.rs:12:abc)，",
+            "(src/main.rs:12, :0)，",
+            "/tmp/My (src/main.rs:12, :15)，",
+            "C:\\My [src/main.rs:12, :15]，",
+        ] {
+            let col = text[..text.find("main.rs").unwrap()].chars().count();
+            let found = target_candidates_at_char_col_for_style(text, col, style, true);
+            assert!(
+                !found.iter().any(|m| match &m.target {
+                    DetectedTarget::PathCandidate(p) => p == "src/main.rs",
+                    DetectedTarget::SourceReference(r) => r.path == "src/main.rs",
+                    _ => false,
+                }),
+                "unsafe prefix: {text}: {found:?}"
+            );
+        }
+    }
+}
+
+/// Punctuation inside an explicit structure is literal filename data, not the outer separator.
+#[test]
+fn structural_boundaries_preserve_literal_punctuation() {
+    for style in [PathStyle::Windows, PathStyle::Posix] {
+        for path in
+            ["src/a，b.html", "src/a。", "src/a…b.html", "./a(b).html", "./My Folder/a.txt,"]
+        {
+            let text = format!("({path})，后文");
+            let found = target_candidates_at_char_col_for_style(&text, 3, style, true);
+            assert!(
+                found.iter().any(|m| m.target == DetectedTarget::PathCandidate(path.into())),
+                "{text}: {found:?}"
+            );
+        }
+    }
+}
+
+/// Source ranges include complete wide boundaries, not following prose; generated delimiter mutations cannot repair a path.
+#[test]
+fn structural_boundaries_carry_source_ranges_and_reject_mutations() {
+    for (left, right) in [("(", ")"), ("【", "】"), ("“", "”"), ("«", "»")] {
+        for path in ["src/main.rs", "./My Folder/file.md"] {
+            let text = format!("前文 {left}{path}{right}，正文");
+            let start = text.find(path).unwrap();
+            let source_start = "前文 ".len();
+            let source_end = text.find("正文").unwrap();
+            let found = target_candidates_at_char_col_for_style(
+                &text,
+                text[..start].chars().count(),
+                PathStyle::Windows,
+                true,
+            );
+            let exact = found
+                .iter()
+                .find(|m| m.target == DetectedTarget::PathCandidate(path.into()))
+                .unwrap();
+            assert_eq!(
+                (exact.start, exact.end, exact.source_start, exact.source_end),
+                (start, start + path.len(), source_start, source_end)
+            );
+            for bad in ["", "]", "'", "\u{1b}"] {
+                if bad == right {
+                    continue;
+                }
+                let text = format!("{left}{path}{bad}，正文");
+                let col = left.chars().count() + 2;
+                assert!(
+                    !target_candidates_at_char_col_for_style(&text, col, PathStyle::Windows, true)
+                        .iter()
+                        .any(|m| m.target == DetectedTarget::PathCandidate(path.into())),
+                    "{text:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Boundaries retain byte, nesting, token, and candidate budgets without accepting partial over-limit text.
+#[test]
+fn structural_boundaries_keep_limits_and_literal_priority() {
+    for style in [PathStyle::Windows, PathStyle::Posix] {
+        for extra in [0, 1] {
+            let path = format!("./{}", "x".repeat(MAX_TARGET_BYTES - 2 + extra));
+            let text = format!("【{path}】，后文");
+            let found = target_candidates_at_char_col_for_style(&text, 3, style, true);
+            assert_eq!(
+                found.iter().any(|m| m.target == DetectedTarget::PathCandidate(path.clone())),
+                extra == 0
+            );
+        }
+        let path = "./file.txt,";
+        let text = format!("({path})，后文");
+        let found = target_candidates_at_char_col_for_style(&text, 3, style, true);
+        assert_eq!(found[0].target, DetectedTarget::PathCandidate(path.into()));
+        assert!(found
+            .iter()
+            .any(|m| m.target == DetectedTarget::PathCandidate("./file.txt".into())));
+        for depth in [9, 100] {
+            let text = format!("{}src/file.rs{}", "(".repeat(depth), ")".repeat(depth));
+            let found = target_candidates_at_char_col_for_style(&text, depth + 2, style, true);
+            assert!(found.len() <= MAX_PATH_CANDIDATES_PER_CELL);
+            assert!(!found
+                .iter()
+                .any(|m| m.target == DetectedTarget::PathCandidate("src/file.rs".into())));
+        }
+    }
+}
+
+/// An earlier relative filename in prose does not acquire ownership of a later independently wrapped target.
+#[test]
+fn structural_boundaries_do_not_capture_prior_relative_prose_paths() {
+    for style in [PathStyle::Windows, PathStyle::Posix] {
+        for text in [
+            "see src/lib.rs and (src/main.rs)",
+            "src/lib.rs and 【src/main.rs】，后文",
+            "compare src/first.rs with 'src/main.rs'",
+            "9:30 (src/main.rs)",
+            "1: item (src/main.rs)",
+            "A: item (src/main.rs)",
+        ] {
+            let start = text.find("src/main.rs").unwrap();
+            for offset in 0.."src/main.rs".len() {
+                let col = text[..start + offset].chars().count();
+                let found = target_candidates_at_char_col_for_style(text, col, style, true);
+                assert!(
+                    found.iter().any(|m| m.start == start
+                        && m.end == start + "src/main.rs".len()
+                        && m.target == DetectedTarget::PathCandidate("src/main.rs".into())),
+                    "{text}: {found:?}"
+                );
+            }
+        }
+    }
+}
+
+/// URI precedence preserves the surrounding source range used by grid-level boundary identity checks.
+#[test]
+fn structural_uri_source_includes_wrappers_and_trimmed_punctuation() {
+    for text in ["(https://example.com/a).", "[file:///C:/work/a.txt],"] {
+        let url = find_urls(text).remove(0);
+        let found =
+            target_candidates_at_char_col_for_style(text, url.start + 5, PathStyle::Windows, true);
+        assert_eq!(found[0].source_start, 0);
+        assert_eq!(found[0].source_end, text.len());
+        assert_eq!(found[0].target, DetectedTarget::Uri(url.url));
     }
 }
 

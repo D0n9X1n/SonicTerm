@@ -166,6 +166,50 @@ fn all_panes_resize_restores_scrolling_without_homing_cursor() {
 }
 
 #[test]
+fn history_search_commit_starts_at_current_viewport_in_main_and_child() {
+    // Four earlier matches and two later matches must retain their global indices around the visible fifth match.
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    for child in [false, true] {
+        let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+        app.__test_seed_tab("main");
+        let window = if child {
+            app.__test_seed_child_window(&["child"])
+        } else {
+            app.main_window_id.unwrap()
+        };
+        let pane_id = app.windows[&window].tab_states[0].active_pane;
+        {
+            let pane = app.windows.get_mut(&window).unwrap().panes.get_mut(&pane_id).unwrap();
+            let mut parser = pane.parser.lock();
+            parser.resize(40, 3);
+            for row in 0..21 {
+                if row > 0 {
+                    parser.advance(b"\r\n");
+                }
+                let line = if row % 3 == 0 { "needle" } else { "other" };
+                parser.advance(line.as_bytes());
+            }
+            assert_eq!(parser.grid().scrollback_len(), 18);
+            pane.viewport_top_abs = Some(12);
+        }
+        if child {
+            assert!(app.open_search_in_child(window));
+            assert!(app.search_handle_ime_commit_in_child(window, "needle"));
+        } else {
+            app.open_search();
+            assert!(app.search_handle_ime_commit("needle"));
+        }
+        let state = &app.windows[&window];
+        let search = state.tab_states[0].search.as_ref().unwrap();
+        assert_eq!(search.matches.len(), 7);
+        assert_eq!(search.current, Some(4));
+        assert_eq!(sonicterm_ui::overlays::search_bar_label(search, ""), "/ needle · 5/7");
+        assert_eq!(state.panes[&pane_id].viewport_top_abs, Some(12));
+        assert_eq!(search.requested_scroll_row, None);
+    }
+}
+
+#[test]
 fn terminal_ime_anchor_adds_physical_pane_origin_once() {
     // The native setter receives raster coordinates, including a right/lower pane's origin exactly once.
     let mut throttle = sonicterm_ui::ime::ImeCursorThrottle::new();

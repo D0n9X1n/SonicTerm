@@ -51,6 +51,7 @@ vte = "0.15"
 portable-pty = "0.9"
 unicode-width = "0.2"
 unicode-segmentation = "1.13"
+unicode-general-category = "1.1"
 
 # Async / runtime
 tokio = { version = "1.52", features = ["full"] }

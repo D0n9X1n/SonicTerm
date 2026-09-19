@@ -450,6 +450,21 @@ impl App {
             // clipboard yielded anything, so there is nothing to paste.
             return;
         };
+        let consumed = match kind {
+            FrontmostKind::Main | FrontmostKind::None | FrontmostKind::Other => {
+                self.search_handle_ime_commit(&text)
+            }
+            FrontmostKind::Child(id) => self.search_handle_ime_commit_in_child(id, &text),
+        };
+        if consumed {
+            // When: search consumed the clipboard, the query must never reach the shell or broadcast peers.
+            if let Some(window) =
+                self.main_window().filter(|_| !matches!(kind, FrontmostKind::Child(_)))
+            {
+                window.request_redraw();
+            }
+            return;
+        }
         let Some(pane_id) = self.active_pane_id_for_kind(kind) else {
             // When: active_pane_id_for_kind finds no pane for this kind; there is
             // no PTY to paste into, so the clipboard text is dropped.

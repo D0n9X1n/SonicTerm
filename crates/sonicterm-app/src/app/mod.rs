@@ -5560,13 +5560,16 @@ impl App {
     /// Test seam: a window's cell width, cell height, and top inset.
     ///
     /// These are the metrics pane layout divides by, so a test can check
-    /// geometry against the same numbers production uses. `None` when the
-    /// window is unknown or has no renderer.
+    /// geometry against production's planned active-pane origin. Returns `None`
+    /// before layout or after its geometry is invalidated.
     #[doc(hidden)]
     pub fn __test_window_cell_geometry(&self, id: WindowId) -> Option<(f32, f32, f32)> {
-        let renderer = self.windows.get(&id)?.renderer.as_ref()?;
+        let window = self.windows.get(&id)?;
+        let renderer = window.renderer.as_ref()?;
+        let pane = window.tab_states.get(window.tabs.active_index())?.active_pane;
+        let [_, top] = renderer.pane_grid_origin(pane)?;
         let (cell_w, cell_h) = renderer.cell_size();
-        Some((cell_w, cell_h, renderer.top_inset()))
+        Some((cell_w, cell_h, top))
     }
 
     /// Test-only: feed bytes into a child pane's parser.

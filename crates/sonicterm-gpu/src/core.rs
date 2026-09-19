@@ -2549,6 +2549,7 @@ impl GpuRenderer {
         self.frame_view = frame_view;
         // Geometry change → force the next frame to actually render.
         self.last_frame_key = None;
+        self.last_pane_layout.clear();
         // Cell layout and absolute-row positioning both change with
         // the surface size; cached glyph instances would land at the
         // wrong NDC coordinates.
@@ -2634,6 +2635,7 @@ impl GpuRenderer {
         }
         self.titlebar_inset = clamped;
         self.last_frame_key = None;
+        self.last_pane_layout.clear();
     }
 
     /// Show or hide the tab bar. Returns `true` if the visibility actually
@@ -2647,6 +2649,7 @@ impl GpuRenderer {
         }
         self.tab_bar_visible = visible;
         self.last_frame_key = None;
+        self.last_pane_layout.clear();
         true
     }
 
@@ -3004,10 +3007,8 @@ impl GpuRenderer {
         self.padding_right * self.scale_factor
     }
     /// Top padding scaled to raster px. See [`Self::padding_left_px`].
-    /// Note: [`Self::top_inset`] already returns raster px (it bakes in
-    /// the titlebar inset + this value); callers that want the full
-    /// "y-origin of the grid" should use `top_inset()`, not this raw
-    /// padding alone.
+    /// `top_inset()` includes titlebar padding; `pane_grid_origin()` also
+    /// includes pane position and bottom-alignment slack after layout.
     pub fn padding_top_px(&self) -> f32 {
         self.padding_top * self.scale_factor
     }
@@ -3015,6 +3016,14 @@ impl GpuRenderer {
     pub fn padding_bottom_px(&self) -> f32 {
         self.padding_bottom * self.scale_factor
     }
+    /// Current planned text origin for a pane, absent before layout or after a geometry change.
+    pub fn pane_grid_origin(&self, pane_id: u64) -> Option<[f32; 2]> {
+        self.last_pane_layout
+            .iter()
+            .find(|pane| pane.id == pane_id)
+            .map(|pane| [pane.origin_x_logical, pane.origin_y_logical])
+    }
+
     /// Per-pane origins recorded by the most recent `render()` call, as
     /// `(pane_id, [origin_x_px, origin_y_px])`. Test-only hook for the
     /// Part B step 7 per-pane render integration test. Production code
@@ -3239,6 +3248,7 @@ impl GpuRenderer {
         self.padding_top = t;
         self.padding_bottom = b;
         self.last_frame_key = None;
+        self.last_pane_layout.clear();
     }
 
     /// Raster-pixel size of the render surface. Post-G1a (wezterm-takeover)
@@ -3788,6 +3798,7 @@ impl GpuRenderer {
         self.row_glyph_cache.invalidate_all();
         self.line_quad_cache.invalidate_all();
         self.last_frame_key = None;
+        self.last_pane_layout.clear();
         tracing::info!(
             "renderer.set_font: family={family} size={size} line_h={} cell={:.2}x{:.2}",
             self.line_height,
@@ -3892,6 +3903,7 @@ impl GpuRenderer {
         // bind group match the new atlas dimensions exactly.
         self.rebuild_glyph_upload_if_needed();
         self.last_frame_key = None;
+        self.last_pane_layout.clear();
         if let Some(w) = Some(&self.window) {
             w.request_redraw();
         }
@@ -4119,8 +4131,20 @@ impl GpuRenderer {
         if self.last_pane_layout.is_empty() {
             // When: `last_pane_layout.is_empty()` — no render has run yet, so
             // legacy single-grid arithmetic (padding + cell_w) is used.
-            let x = px - self.padding_left * sf;
-            let y = py - self.top_inset();
+            let (cols, rows) = self.cells();
+            let geometry = sonicterm_render_model::pane_content_geometry(
+                PixelRect { x: 0, y: 0, w: self.config.width, h: self.config.height },
+                [
+                    self.padding_left_px(),
+                    self.padding_right_px(),
+                    self.top_inset(),
+                    self.bottom_inset() + self.padding_bottom_px(),
+                ],
+                self.cell_h,
+                rows,
+            );
+            let x = px - geometry.grid.x;
+            let y = py - geometry.grid.y;
             if x < 0.0 || y < 0.0 {
                 // When: `x < 0.0 || y < 0.0` — left of or above the grid
                 // origin, which floors to a negative cell index.
@@ -4133,7 +4157,8 @@ impl GpuRenderer {
                 // floor below zero after the non-negative check above.
                 return None;
             }
-            return Some((0, row.min(u16::MAX as i32) as u16, col.min(u16::MAX as i32) as u16));
+            return (row < i32::from(rows) && col < i32::from(cols))
+                .then_some((0, row as u16, col as u16));
         }
         // Pane resolution: find the pane whose raster-px rect contains
         // (px, py). Split panes have different origins, so this MUST
@@ -5154,7 +5179,14 @@ impl GpuRenderer {
                 ];
                 let color = premultiply([flash_rgb[0], flash_rgb[1], flash_rgb[2], flash_alpha]);
                 quads.push(QuadInstance {
-                    rect: px_to_ndc(pv.origin_x, pv.origin_y, pv.rect_w, pv.rect_h, sw, sh),
+                    rect: px_to_ndc(
+                        pv.planned.chrome.x,
+                        pv.planned.chrome.y,
+                        pv.planned.chrome.w,
+                        pv.planned.chrome.h,
+                        sw,
+                        sh,
+                    ),
                     color,
                     ..Default::default()
                 });
@@ -5165,7 +5197,7 @@ impl GpuRenderer {
         // selection, cursor, and modal overlays. Auto opacity comes from the
         // app state machine; geometry remains shared with hit-testing.
         for pv in pane_views.iter().filter(|pane| pane.planned.full_clip.is_some()) {
-            let pane_rect = PaneRect { x: pv.origin_x, y: pv.origin_y, w: pv.rect_w, h: pv.rect_h };
+            let pane_rect = pv.planned.chrome;
             let viewport_rows = pv.planned.row_count;
             let total_rows = pv.planned.scrollback_len + u64::from(viewport_rows);
             let view_top = pv.planned.view_top_abs;

@@ -34,6 +34,20 @@ state. The renderer's metadata-only `FramePlan` fixes clips and viewport row
 slots before shaping; execution keeps the borrowed grids and parser guards,
 and CPU atlas/cache mutation remains stateful.
 
+### Complete-row alignment
+
+Each pane moves only the leftover fraction of a terminal row above its text grid,
+keeping complete rows against configured bottom padding. The offset uses whole
+physical pixels, so a subpixel remainder may stay below. Font size, line height,
+PTY dimensions, and configured padding are unchanged. A resource-limited smaller
+grid does not absorb whole unused rows; a grid already taller than its truncated
+pixel rectangle is not shifted farther down.
+
+Text backgrounds, glyphs, cursor, selection, links, inline media, and terminal IME
+share the planned grid origin. Pane chrome, focus flash, scrollbars, splitters,
+and the bottom tab bar retain their unshifted geometry. Margins do not address a
+terminal cell. Resize, DPI, font, and padding changes invalidate the old layout.
+
 ### Font discovery and matching
 
 `sonicterm-engine::FontStack` adapts `sonicterm-font` to the renderer. The
@@ -557,6 +571,17 @@ flowchart LR
 应用使用非阻塞 `try_lock` 获取所有可见窗格的解析器。只要有一个窗格正忙，就推迟
 整帧，而不是显示新旧状态混杂的窗格。渲染器仅含元数据的 `FramePlan` 在塑形前确定裁剪和
 视口行槽；执行仍保留借用网格和解析器保护对象，CPU 图集/缓存修改仍然有状态。
+
+### 完整行对齐
+
+每个窗格只把不足一行的剩余空间移到文字网格上方，让完整行贴近配置的底部 padding。
+偏移按整数物理像素应用，因此底部仍可能剩下不足一个像素。字号、行高、PTY 尺寸及配置的
+padding 不变。受资源限制而行数较少的网格不吸收整行的未使用区域；若网格已经高于截断后
+的像素矩形，则不再向下偏移。
+
+文字背景、字形、光标、选区、链接、内联媒体与终端输入法共用规划后的网格原点。窗格装饰、
+焦点闪烁、滚动条、分隔条和底部标签栏保持原几何。边距不对应终端单元格。窗口尺寸、DPI、
+字体或 padding 变化会使旧布局失效。
 
 ### 字体发现与匹配
 

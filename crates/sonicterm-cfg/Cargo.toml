@@ -22,6 +22,7 @@ toml_edit.workspace = true
 serde_plain.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+unicode-general-category.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [

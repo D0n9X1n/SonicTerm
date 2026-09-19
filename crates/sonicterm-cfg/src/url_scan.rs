@@ -74,6 +74,10 @@ pub struct TargetMatch {
     pub start: usize,
     /// Byte offset (exclusive) of the visible target span.
     pub end: usize,
+    /// Inclusive source byte offset, retaining delimiters that establish the target boundary.
+    pub source_start: usize,
+    /// Exclusive source byte offset, retaining removed punctuation but excluding neighboring prose.
+    pub source_end: usize,
     /// Detected value and its immutable provenance.
     pub target: DetectedTarget,
 }
@@ -230,6 +234,8 @@ pub fn find_targets_for_style(text: &str, style: PathStyle) -> Vec<TargetMatch> 
         .map(|url| TargetMatch {
             start: url.start,
             end: url.end,
+            source_start: url.start,
+            source_end: url.end,
             target: DetectedTarget::Uri(url.url.clone()),
         })
         .collect::<Vec<_>>();
@@ -275,6 +281,8 @@ pub fn find_targets_for_style(text: &str, style: PathStyle) -> Vec<TargetMatch> 
         matches.push(TargetMatch {
             start,
             end,
+            source_start: start,
+            source_end: end,
             target: DetectedTarget::PathCandidate(candidate.to_string()),
         });
     }
@@ -346,11 +354,23 @@ pub fn target_candidates_at_char_col_for_style(
     let urls = find_urls(text);
     if let Some(url) = urls.iter().find(|url| clicked_byte >= url.start && clicked_byte < url.end) {
         // When: a validated URI owns `clicked_byte`, return only that stronger provenance.
+        let source_start =
+            text[..url.start].trim_end_matches(['(', '[', '{', '\'', '"', '`']).len();
+        let source_end = text.len()
+            - text[url.end..]
+                .trim_start_matches([',', ';', '.', ':', '!', '?', ')', ']', '}', '\'', '"', '`'])
+                .len();
         return vec![TargetMatch {
             start: url.start,
             end: url.end,
+            source_start,
+            source_end,
             target: DetectedTarget::Uri(url.url.clone()),
         }];
+    }
+    if let Some(found) = structured_path_candidates(text, clicked_byte, style, include_bare_names) {
+        // When: a structure owns clicked_byte, its complete boundary prevents fallback to inner fragments.
+        return found;
     }
     if is_path_hard_delimiter(clicked) {
         // When: `clicked` is a control, quote, or non-space whitespace, do not bridge its hard boundary.
@@ -598,7 +618,7 @@ fn focused_candidate_group(
         .filter_map(|end| {
             let candidate = text.get(start..end)?;
             let target = detected_path_target(candidate, style, include_bare_names)?;
-            Some(TargetMatch { start, end, target })
+            Some(TargetMatch { start, end, source_start, source_end, target })
         })
         .collect::<Vec<_>>();
     candidates.dedup_by(|right, left| right.end == left.end && right.target == left.target);
@@ -949,7 +969,13 @@ pub fn bare_name_at_char_col_for_style(
         // When: wrappers or unsafe component syntax make `candidate` ambiguous, leave it as ordinary text.
         return None;
     }
-    Some(TargetMatch { start, end, target: DetectedTarget::BareName(candidate.to_string()) })
+    Some(TargetMatch {
+        start,
+        end,
+        source_start: start,
+        source_end: end,
+        target: DetectedTarget::BareName(candidate.to_string()),
+    })
 }
 
 fn validate_bare_name(candidate: &str, style: PathStyle) -> bool {
@@ -995,6 +1021,255 @@ fn is_path_hard_delimiter(ch: char) -> bool {
         || matches!(ch, '"' | '\'' | '`' | '<' | '>')
 }
 
+fn presentation_pair(ch: char) -> Option<char> {
+    match ch {
+        '(' => Some(')'),
+        '[' => Some(']'),
+        '{' => Some('}'),
+        '\'' | '"' | '`' => Some(ch),
+        '（' => Some('）'),
+        '【' => Some('】'),
+        '《' => Some('》'),
+        '「' => Some('」'),
+        '『' => Some('』'),
+        '“' => Some('”'),
+        '‘' => Some('’'),
+        '«' => Some('»'),
+        _ => None,
+    }
+}
+
+fn presentation_closer(ch: char) -> bool {
+    matches!(ch, ')' | ']' | '}' | '）' | '】' | '》' | '」' | '』' | '”' | '’' | '»')
+}
+
+fn outer_separator(ch: char) -> bool {
+    use unicode_general_category::{get_general_category, GeneralCategory};
+    !matches!(ch, '/' | '\\' | '\'' | '"' | '`')
+        && matches!(
+            get_general_category(ch),
+            GeneralCategory::OtherPunctuation | GeneralCategory::DashPunctuation
+        )
+}
+
+/// Whether a source-only scalar can be a structural delimiter or prose separator, never path content.
+#[must_use]
+pub fn is_path_boundary_character(ch: char) -> bool {
+    presentation_pair(ch).is_some() || presentation_closer(ch) || outer_separator(ch)
+}
+
+fn structure_tail_end(text: &str, end: usize) -> Option<usize> {
+    let mut cursor = end;
+    for (offset, ch) in text[end..].char_indices() {
+        if !outer_separator(ch) {
+            // When: ch ends the separator run, leave neighboring prose outside the validation span.
+            break;
+        }
+        cursor = end + offset + ch.len_utf8();
+    }
+    let next = text[cursor..].chars().next();
+    if cursor == end {
+        // When: cursor equals end, no separator proves independence from adjacent filename text.
+        return next.is_none_or(char::is_whitespace).then_some(end);
+    }
+    if text[end..cursor].ends_with(['.', ':']) && next.is_some_and(|ch| !ch.is_whitespace()) {
+        // When: text ends in a dot or colon before next, preserve filename/location continuations rather than truncating them.
+        return None;
+    }
+    if next.is_some_and(|ch| ch.is_control() || matches!(ch, '/' | '\\') || presentation_closer(ch))
+    {
+        // When: next continues path structure or a malformed wrapper, punctuation cannot authorize an inner prefix.
+        return None;
+    }
+    Some(cursor)
+}
+
+fn structure_close(text: &str, open: usize, opener: char, closer: char) -> Option<usize> {
+    let start = open + opener.len_utf8();
+    let quoted = matches!(opener, '\'' | '"' | '`' | '“' | '‘' | '«');
+    let mut stack = vec![closer];
+    for (offset, ch) in text[start..].char_indices() {
+        if offset > MAX_TARGET_BYTES || ch.is_control() {
+            // When: offset exceeds the byte budget or ch is controlled, incomplete source cannot authorize a path.
+            return None;
+        }
+        if Some(&ch) == stack.last() {
+            // When: ch closes stack's current pair, only the final pop establishes the outer boundary.
+            stack.pop();
+            if stack.is_empty() {
+                // When: stack is empty, offset names the proven outer closer rather than a filename's inner bracket.
+                return Some(start + offset);
+            }
+        } else if !quoted && !stack.last().is_some_and(|ch| matches!(ch, '\'' | '"' | '`')) {
+            // When: quoted is false and stack is outside quotes, paired filename brackets stay inside the outer structure.
+            if let Some(close) = presentation_pair(ch) {
+                // When: presentation_pair finds close, track it without selecting an inner filename fragment.
+                if stack.len() == MAX_SPACED_PATH_TOKENS {
+                    // When: stack reaches the nesting bound, reject rather than scan unbounded structure.
+                    return None;
+                }
+                stack.push(close);
+            } else if presentation_closer(ch) {
+                // When: presentation_closer finds a different closer, never repair mismatched source text.
+                return None;
+            }
+        } else if matches!(ch, '\'' | '"' | '`' | '“' | '”' | '‘' | '’') {
+            // When: matches! finds another quote in ch before closure, refuse shell-like concatenation or escaping.
+            return None;
+        }
+    }
+    None
+}
+
+fn structure_prefix_start(text: &str, floor: usize, open: usize, opener: char) -> Option<usize> {
+    let prefix = &text[floor..open];
+    let word_start = floor
+        + prefix
+            .rfind(char::is_whitespace)
+            .map_or(0, |i| i + prefix[i..].chars().next().unwrap().len_utf8());
+    let word = &text[word_start..open];
+    let call = opener == '('
+        && !word.is_empty()
+        && word
+            .bytes()
+            .enumerate()
+            .all(|(i, b)| b == b'_' || b.is_ascii_alphabetic() || i > 0 && b.is_ascii_digit());
+    if !word.is_empty() && !call {
+        // When: word is not an identifier call, retain its prefix rather than treating a suffix as independent.
+        return None;
+    }
+    let rooted_prefix = text[floor..word_start].split_whitespace().any(|word| {
+        word.starts_with(['/', '\\'])
+            || word.starts_with("~/")
+            || word.starts_with("~\\")
+            || word.starts_with("./")
+            || word.starts_with(".\\")
+            || word.starts_with("../")
+            || word.starts_with("..\\")
+            || matches!(word.as_bytes(), [drive, b':', b'/' | b'\\', ..] if drive.is_ascii_alphabetic())
+    });
+    if rooted_prefix {
+        // When: rooted_prefix proves an unconsumed explicit anchor, preserve its spaced name instead of exposing an inner suffix.
+        return None;
+    }
+    Some(if call { word_start } else { open })
+}
+
+fn structured_path_candidates(
+    text: &str,
+    clicked: usize,
+    style: PathStyle,
+    include_bare_names: bool,
+) -> Option<Vec<TargetMatch>> {
+    let mut floor = 0;
+    let mut skip_until = 0;
+    for (open, opener) in text.char_indices() {
+        if open < skip_until {
+            // When: open belongs to a previously consumed pair, do not promote nested presentation fragments.
+            continue;
+        }
+        if opener.is_control() || (opener.is_whitespace() && opener != ' ') {
+            // When: opener is a hard delimiter, prior path anchors cannot span it.
+            floor = open + opener.len_utf8();
+            continue;
+        }
+        let Some(closer) = presentation_pair(opener) else {
+            // When: opener has no presentation pair, ordinary text does not establish structure.
+            continue;
+        };
+        let start = open + opener.len_utf8();
+        let Some(close) = structure_close(text, open, opener, closer) else {
+            // When: an incomplete structure encloses explicit path text, prevent a suffix from becoming another target.
+            if clicked >= start
+                && !text[start..].starts_with(char::is_whitespace)
+                && structure_prefix_start(text, floor, open, opener).is_some()
+                && has_path_prefix(&text[start..], style)
+            {
+                // When: clicked lies inside an incomplete explicit path structure, never recover a partial destination.
+                return Some(Vec::new());
+            }
+            continue;
+        };
+        let end = close + closer.len_utf8();
+        skip_until = end;
+        let body = &text[start..close];
+        let owns = (open..end).contains(&clicked);
+        let source_start = structure_prefix_start(text, floor, open, opener);
+        let source_end = structure_tail_end(text, end);
+        if clicked >= end && source_end.is_some_and(|tail| clicked < tail) {
+            // When: clicked is in the separator run, it must not activate the enclosed filename.
+            return Some(Vec::new());
+        }
+        if !owns {
+            // When: owns is false, retain only completed independent structures as lookbehind boundaries.
+            if source_start.is_some() && source_end.is_some() {
+                // Both validated source bounds separate this completed anchor from the next target.
+                floor = end;
+            }
+            continue;
+        }
+        // When: body is an existing quote-in-wrapper form, its quote parser retains the full outer safety span.
+        if body.starts_with(['\'', '"', '`']) && body.ends_with(body.chars().next().unwrap()) {
+            return None;
+        }
+        if !has_path_prefix(body, style) {
+            // When: body lacks path syntax, distinguish literal brackets and supported quoted listing names.
+            if source_start.is_none()
+                || text[floor..open].contains(['/', '\\'])
+                || opener == '\'' && include_bare_names && !body.contains(['/', '\\'])
+            {
+                // When: source_start is absent or opener encloses a bare listing name, preserve the existing literal scanner.
+                return None;
+            }
+            return Some(Vec::new());
+        }
+        let (Some(source_start), Some(source_end)) = (source_start, source_end) else {
+            // When: source_start or source_end is unproven, no inner prefix may acquire filesystem authority.
+            return Some(Vec::new());
+        };
+        if clicked < start
+            || clicked >= close
+            || body.len() > MAX_TARGET_BYTES
+            || body.starts_with(' ')
+            || body.ends_with(' ')
+            || body.split(' ').filter(|word| !word.is_empty()).count() > MAX_SPACED_PATH_TOKENS
+            || find_urls(body).iter().any(|url| url.start < body.len())
+            || body.chars().any(char::is_control)
+            || (matches!(opener, '\'' | '"' | '`' | '“' | '‘' | '«')
+                && (body.contains(['$', '%']) || escaped_space_path(text, start, body, style)))
+        {
+            // When: clicked misses body or body violates bounds, provenance, or literal quote rules, reject the entire structure.
+            return Some(Vec::new());
+        }
+        let inner_clicked = clicked - start;
+        let grouped = body.char_indices().find_map(|(i, ch)| {
+            (ch == ',' && body[i + 1..].trim_start_matches(' ').starts_with(':')).then_some(i)
+        });
+        let mut found = if let Some(comma) = grouped {
+            // When: grouped supplies comma, validate every location under the same complete path anchor.
+            if body[..comma].contains(' ') {
+                // When: body before comma contains spaces, never reinterpret its final word as a shorter anchor.
+                return Some(Vec::new());
+            }
+            parse_source_group(body, inner_clicked, 0, comma, body.len(), style)
+                .into_iter()
+                .collect::<Vec<_>>()
+        } else {
+            // When: grouped is absent, preserve literal-first punctuation alternatives within the structure.
+            focused_candidate_group(body, inner_clicked, style, false, 1, 0, body.len())
+                .map_or_else(Vec::new, |group| group.candidates)
+        };
+        for matched in &mut found {
+            matched.start += start;
+            matched.end += start;
+            matched.source_start = source_start;
+            matched.source_end = source_end;
+        }
+        return Some(found);
+    }
+    None
+}
+
 fn quoted_path_target(
     text: &str,
     clicked: usize,
@@ -1026,7 +1301,18 @@ fn quoted_path_target(
         return Some(None);
     }
     let target = detected_path_target(candidate, style, false)?;
-    Some((start <= clicked && clicked < end).then_some(TargetMatch { start, end, target }))
+    let enclosed = text[..quote_start].ends_with(['(', '[', '{']);
+    let source_start = quote_start - usize::from(enclosed);
+    let wrapper_end = close_end + usize::from(enclosed);
+    let source_end = wrapper_end + text[wrapper_end..].len()
+        - text[wrapper_end..].trim_start_matches(is_prose_path_punctuation).len();
+    Some((start <= clicked && clicked < end).then_some(TargetMatch {
+        start,
+        end,
+        source_start,
+        source_end,
+        target,
+    }))
 }
 
 fn structured_outer_boundary(text: &str, start: usize, end: usize) -> bool {
@@ -1197,7 +1483,13 @@ fn parse_source_group(
         references.into_iter().find(|(left, right, _)| (*left..*right).contains(&clicked));
     selected.map(|(_, _, mut reference)| {
         reference.display = text[start..end].to_string();
-        TargetMatch { start, end, target: DetectedTarget::SourceReference(reference) }
+        TargetMatch {
+            start,
+            end,
+            source_start: first_start,
+            source_end: segment_end,
+            target: DetectedTarget::SourceReference(reference),
+        }
     })
 }
 
@@ -1238,6 +1530,8 @@ fn shell_quoted_bare_name(
     validate_bare_name(candidate, style).then(|| TargetMatch {
         start,
         end,
+        source_start: quote_start,
+        source_end: end + 1,
         target: DetectedTarget::BareName(candidate.to_string()),
     })
 }

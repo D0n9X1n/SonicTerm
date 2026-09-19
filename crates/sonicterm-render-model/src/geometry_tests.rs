@@ -13,6 +13,42 @@ fn is_device_aligned(edge: f32, scale: f32) -> bool {
     (d - d.round()).abs() < 1e-3
 }
 
+/// Fractional DPI and asymmetric padding leave at most subpixel bottom slack without changing chrome or pitch.
+#[test]
+fn aligned_geometry_keeps_complete_rows_and_padded_bottom() {
+    for scale in [1.0, 1.25, 1.5, 1.75, 2.0] {
+        for height in [91, 586, 1380] {
+            let pane = PixelRect { x: 37, y: 53, w: 960, h: height };
+            let padding = [12.0 * scale, 5.0 * scale, 4.0 * scale, 3.0 * scale];
+            let ch = 19.14 * scale;
+            let available = height as f32 - padding[2] - padding[3];
+            let rows = (available / ch).floor() as u16;
+            let geometry = pane_content_geometry(pane, padding, ch, rows);
+            let bottom = pane.y as f32 + height as f32 - padding[3];
+            let gap = bottom - (geometry.grid.y + f32::from(rows) * ch);
+            assert!((-0.001..1.001).contains(&gap), "{geometry:?} gap={gap}");
+            assert_eq!(geometry.content.y, pane.y as f32 + padding[2]);
+            assert_eq!(geometry.grid.x, geometry.content.x);
+            assert!(geometry.grid.h + 0.001 >= f32::from(rows) * ch);
+            assert!(geometry.grid.y - geometry.content.y < ch);
+        }
+    }
+}
+
+/// Exhausted padding and overfull grids do not invent positive space or shift partly visible rows farther down.
+#[test]
+fn aligned_geometry_preserves_exhausted_and_overfull_panes() {
+    let pane = PixelRect { x: 0, y: 0, w: 100, h: 31 };
+    for (padding, rows) in [([2.0; 4], 2), ([20.0; 4], 1)] {
+        let geometry = pane_content_geometry(pane, padding, 20.0, rows);
+        assert_eq!(geometry.grid, geometry.content);
+    }
+    let limited = pane_content_geometry(pane, [2.0; 4], 20.0, 1);
+    assert_eq!(limited.grid.y, 9.0);
+    let empty = pane_content_geometry(pane, [2.0; 4], 20.0, 0);
+    assert_eq!(empty.grid, empty.content);
+}
+
 #[test]
 fn right_and_bottom_are_edges_for_normal_rects() {
     let r = PixelRect { x: 10, y: 20, w: 30, h: 40 };
