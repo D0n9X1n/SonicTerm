@@ -11,6 +11,18 @@
 
 use super::*;
 
+/// Detached tabs carry source geometry into both fresh and warm destination preparation.
+#[test]
+fn tear_out_constructor_uses_captured_dimensions() {
+    let source = include_str!("tear_out.rs");
+    let start = source.find("fn prepare_tear_out_destination(").unwrap();
+    let end = start + source[start..].find("fn commit_torn_out_window(").unwrap();
+    let prepare = &source[start..end];
+    assert!(prepare.contains(".with_inner_size(request.inner_size)"));
+    assert!(prepare.contains("apply_window_request("));
+    assert!(!prepare.contains("LogicalSize::new(800.0, 500.0)"));
+}
+
 use sonicterm_cfg::{
     config::{Config, SubpixelAaMode},
     keymap::Keymap,
@@ -520,7 +532,7 @@ fn committed_handoff_accounts_only_after_the_sink_accepts() {
     let after = app.machine.state();
     assert_eq!(after.tab_count, before.0 - 1);
     assert_eq!(after.live_window_count, before.1 + 1);
-    assert!(!app.pending_new_window, "the committed route creates its own destination");
+    assert!(app.pending_new_window.is_none(), "the committed route creates its own destination");
 }
 
 /// Native event-loop wrappers delegate all orchestration to the route helpers

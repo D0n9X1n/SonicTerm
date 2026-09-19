@@ -150,6 +150,7 @@ pub(crate) struct PlannedPane {
     pub full_rect: PixelRect,
     pub full_clip: Option<PixelRect>,
     pub layout: PaneRect,
+    pub chrome: PaneRect,
     pub content_clip: PaneRect,
     pub view_top_abs: u64,
     pub scrollback_len: u64,
@@ -196,12 +197,23 @@ impl FramePlan {
         let mut panes = Vec::new();
         let mut dirt = DamageRect::empty();
         let mut damaged_rows = 0;
-        let [left, right, top, bottom] = facts.padding;
         for input in inputs {
-            let origin_x = input.rect.x as f32 + left;
-            let origin_y = input.rect.y as f32 + top;
-            let content_w = (input.rect.w as f32 - left - right).max(0.0);
-            let content_h = (input.rect.h as f32 - top - bottom).max(0.0);
+            let geometry = sonicterm_render_model::pane_content_geometry(
+                input.rect,
+                facts.padding,
+                facts.cell_h,
+                input.rows,
+            );
+            let origin_x = geometry.grid.x;
+            let origin_y = geometry.grid.y;
+            let content_w = geometry.grid.w;
+            let content_h = geometry.grid.h;
+            let chrome = PaneRect::new(
+                geometry.content.x,
+                geometry.content.y,
+                geometry.content.w.max(facts.cell_w),
+                geometry.content.h.max(facts.cell_h),
+            );
             let layout = PaneRect::new(
                 origin_x,
                 origin_y,
@@ -259,6 +271,7 @@ impl FramePlan {
                 full_rect: input.rect,
                 full_clip: input.rect.intersect(surface),
                 layout,
+                chrome,
                 content_clip,
                 view_top_abs,
                 scrollback_len: input.scrollback_len,

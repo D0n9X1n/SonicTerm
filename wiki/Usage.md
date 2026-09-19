@@ -82,6 +82,21 @@ terminal modes.
 For the complete default map, action names, and customization syntax, see
 [Keybindings](Keybindings).
 
+### Search retained output
+
+Search scans the active pane's retained scrollback and current screen, not just
+its visible rows. After editing the query, the first match in the current viewport
+is selected; otherwise the next match below it, or the last preceding match, is
+selected. The counter uses the full match list: four earlier matches, the current
+one, and two later matches show `5/7`.
+
+Typing, IME commits, and pasting update the selection without scrolling. Enter or
+Down moves forward; Shift+Enter or Up moves backward, wrapping at either end.
+If the selected match is offscreen, the first navigation press reveals it without
+skipping it. Visible results do not recenter the viewport. Search paste stays in
+the query and never reaches the shell or broadcast peers; control characters are
+removed. History already evicted by retention limits and other panes are not searched.
+
 ### Window names and numbers
 
 Terminal windows receive process-local numbers starting at 1: `#1 SonicTerm`.
@@ -332,7 +347,7 @@ single-quote, double-quote, or backtick pair, including paths with spaces such a
 in cell safety checks. Quote contents are literal: no shell unescaping or variable
 expansion. Unmatched/mixed quotes, concatenated text, padded contents, `$`/`%`
 expansions, other quoted bare names, `ls -F` suffixes (`*`, `@`, `=`, `|`), and
-raw paths containing wide, continuation, combining, or OSC 8-owned cells remain inert.
+raw paths containing broken wide-cell pairs, combining extras, control characters, or OSC 8-owned cells remain inert. Valid wide-character pairs retain their exact filename and cell span.
 
 Terminal messages can contain actionable file references, including a balanced
 identifier-style tool heading such as `Update(src/main.rs)` or `Read(./notes.txt)`.
@@ -341,6 +356,28 @@ Wrapped paths and source locations also accept following sentence punctuation,
 such as `(src/main.rs:97).`, `[src/main.rs:97:4],`, `{src/main.rs};`, or
 `Read(src/main.rs:97–100)!`. The wrapper and outer punctuation are excluded from
 the active span; punctuation inside the wrapper still follows literal-first probing.
+Paired structures are recognized before surrounding prose: `(reports/flight.html)，内容`
+and `【reports/flight.html】，内容` keep the same inner target. Supported pairs include
+`()`/`[]`/`{}`, ASCII quotes/backticks, `（）`/`【】`/`《》`/`「」`/`『』`,
+`“”`/`‘’`/`«»`, and identifier-style calls. Outer separators use Unicode's
+Other Punctuation and Dash Punctuation categories, not a language-specific list.
+Path separators, mismatched closers, direct concatenation, and dot/colon suffix
+continuations such as `(src/main.rs).bak` remain ambiguous and inert. This does
+not interpret raw Markdown or strip invisible characters. Valid wide characters
+retain both cells in safety validation, including filename content. A missing or
+unsafe boundary never permits a shorter inner fragment.
+
+Rooted log-field values such as `path=C:\work\file.exe` and
+`file="C:\My Folder\report.md"` exclude the key and matching quotes from their
+active span. Relative assignments and concatenated or incomplete quotes do not
+receive this rule. Existing `=` characters inside a filename remain literal.
+
+Unwrapped lists such as `src/a.rs、b.rs` retain the complete literal filename first.
+Only its confirmed absence permits the pointed file member; a blocked or ambiguous
+literal never authorizes a shorter member. The second name resolves only against
+this pane's CWD, never an inferred `src` directory. Hyphens are not list separators.
+The literal-absence requirement survives candidate limits and is checked again
+before native activation.
 In prose such as `src/main.rs and focused tests/main.rs. Require stable`, point
 at either filename to resolve it independently. `and` is not a reserved word:
 existing filenames containing spaces or parentheses still use literal filesystem
@@ -367,6 +404,36 @@ anchor itself, rather than falling back to a shorter filename. Unwrapped groups
 start a segment or follow another complete group; after prose, use `()`/`[]`/`{}`
 to make the anchor boundary explicit. A wrapper after plain words is read as
 prose; it is not a continuation of a spaced relative filename.
+
+### PowerShell directory links
+
+Interactive PowerShell 7.2 or newer started by SonicTerm adds full local file-URI
+links to the default directory display. A name split across display rows retains
+the same target on each fragment; padding and following entries are not linked.
+Mode, date, length, and name colors are preserved. `ls` remains `Get-ChildItem` and
+object pipelines remain unchanged. Explicit `Format-Table` keeps its native view.
+Plain-text/redirection output omits terminal decoration.
+
+The integration is process-local, embedded in SonicTerm, and writes no profile or
+format file. Custom file-name getters or nonstandard file views are left alone;
+legacy PowerShell and constrained-language hosts keep their original formatting.
+Existing output is not rewritten. Local-target validation still applies; clicking
+an executable reveals it rather than runs it.
+
+### Manual link checks
+
+From the repository root, run `./scripts/test-local-link-actions.ps1` inside
+SonicTerm on Windows. It prints numbered cases with expected previews and click
+results, and creates inert files in a unique temporary directory. It does not
+open targets, change configuration, or write the clipboard. Delete the printed
+fixture directory after testing.
+
+Use `-Group Web`, `Osc8`, `Paths`, `Wrappers`, `Source`, `Negative`, `Wrapping`,
+or `KnownGaps` to inspect one group at a time; the default is `All`. Known gaps
+are labeled separately, not represented as supported behavior. For wrapping
+checks, resize the window and keep the complete target visible. Report the group,
+case ID, preview, and observed click result. This manual matrix complements the
+scanner/app regression tests; it is not exhaustive proof over arbitrary text.
 
 ### Local target behavior
 
@@ -546,6 +613,17 @@ shell 不会重启。关闭分屏会关闭对应 PTY；关闭最后一个 pane �
 按键编码遵循各 pane 协商的终端模式。
 
 完整默认快捷键、action 名称和自定义格式见 [快捷键](Keybindings)。
+
+### 搜索保留的输出
+
+搜索覆盖活动窗格保留的回滚历史与当前屏幕，不只覆盖可见行。修改查询后优先选中当前视口中
+的第一个匹配；若没有，则选中视口下方的下一个匹配，或上方最后一个匹配。计数使用完整匹配
+列表：上方四个、当前一个、下方两个时显示 `5/7`。
+
+键入、输入法提交和粘贴只更新选中结果，不自动滚动。Enter 或下箭头向后查找，Shift+Enter
+或上箭头向前查找，首尾循环。选中结果在屏外时，第一次导航先显示它，不跳过它；结果已可见
+时不重新居中视口。搜索粘贴只进入查询，不发送给 shell 或广播窗格，并去除控制字符。
+已经因保留上限被淘汰的历史和其它窗格不在搜索范围内。
 
 ### 窗口名称与编号
 
@@ -744,14 +822,29 @@ SonicTerm 会选择包含鼠标 cell 的最长、无歧义且可操作候选。�
 或反引号，包括 `'C:\work\My Folder'` 这样的带空格路径。引号不属于可操作范围，但仍参与
 cell 安全检查。引号内容按字面处理，不执行 shell 反转义或变量展开。不配对或混合引号、
 拼接文字、首尾填充空格、`$`/`%` 展开语法、其它带引号的裸名称、`ls -F` 后缀
-（`*`、`@`、`=`、`|`），以及含宽字符、续格、组合字符或已属于 OSC 8 的 cell 的原始路径
-都保持不可操作。
+（`*`、`@`、`=`、`|`），以及含破损宽字符配对、组合附加字符、控制字符或已属于 OSC 8 的 cell
+的原始路径都保持不可操作。有效宽字符配对保留准确文件名和单元格范围。
 
 终端消息中的文件引用可以直接操作，包括 `Update(src/main.rs)` 或 `Read(./notes.txt)`
 这类括号完整、名称为标识符的工具标题。内部路径不包含工具名称和外层圆括号。
 带括号的路径与源文件位置引用也允许后接句末标点，例如 `(src/main.rs:97).`、
 `[src/main.rs:97:4],`、`{src/main.rs};` 或 `Read(src/main.rs:97–100)!`。
 可操作范围不包含外层括号和标点；括号内部的标点仍遵循字面文件名优先的探测规则。
+成对结构先于外围正文识别：`(reports/flight.html)，内容` 和
+`【reports/flight.html】，内容` 保留同一个内部目标。支持 `()`/`[]`/`{}`、ASCII
+引号/反引号、`（）`/`【】`/`《》`/`「」`/`『』`、`“”`/`‘’`/`«»` 及标识符式工具调用。
+外围分隔采用 Unicode 的 Other Punctuation 和 Dash Punctuation 类别，不维护逐语言的标点清单。
+路径分隔符、错配闭括号、直接拼接，以及 `(src/main.rs).bak` 这类点号/冒号后缀续接，
+仍因有歧义而不可操作。这不会解释原始 Markdown 或删除不可见字符。有效宽字符的两格都参与
+安全验证，包括文件名内容。边界缺失或不安全时，不能回退到较短的内部片段。
+
+`path=C:\work\file.exe` 和 `file="C:\My Folder\report.md"` 这类绝对路径字段的可操作范围
+不含字段名和配对引号。相对赋值、拼接或未闭合引号不适用该规则。文件名内部的 `=` 保持字面含义。
+
+`src/a.rs、b.rs` 这类无括号文件列表先保留完整字面文件名。只有确认它不存在，才允许指针所在
+文件成员；被阻止或有歧义的字面候选不授权较短成员。第二个名称只在该 pane 的 CWD 中解析，
+不会推测它属于 `src`。连字符不是列表分隔符。完整字面不存在的要求不会因候选上限被丢弃，
+并在原生操作前重新检查。
 在 `src/main.rs and focused tests/main.rs. Require stable` 这类正文中，分别指向两个
 文件名即可独立解析。`and` 不是保留词：真实文件名中的空格与圆括号仍通过字面文件系统
 候选消除歧义。缺失的上下文路径使用指向的文件名反馈，不使用未经验证的多词正文猜测。
@@ -769,6 +862,28 @@ cell 安全检查。引号内容按字面处理，不执行 shell 反转义或�
 包括锚点本身，不会回退到较短文件名。不加括号的分组必须位于片段开头或紧随另一个完整分组；
 正文之后请用 `()`/`[]`/`{}` 明确锚点边界。普通文字之后的括号会按正文分隔处理，
 不会作为带空格相对文件名的延续。
+
+### PowerShell 目录链接
+
+由 SonicTerm 启动的交互式 PowerShell 7.2 及以上版本，会给默认目录显示附上完整本地文件 URI。
+名称折到多行时，每段保留相同目标；缩进和后面的目录项不带该链接。保留模式、日期、长度及名称
+颜色。`ls` 仍是 `Get-ChildItem`，对象流水线不变；显式 `Format-Table` 使用原生视图。
+纯文本和重定向输出不带终端装饰。
+
+集成只在当前进程生效，嵌入 SonicTerm，不写 profile 或格式文件。自定义文件名 getter 或非标准
+文件视图不会被覆盖；旧版 PowerShell 与受限语言环境保留原格式。已有输出不会重写。
+本地目标仍需验证；点击可执行文件只在文件夹中选中，不执行它。
+
+### 手工链接检查
+
+在 Windows 的 SonicTerm 中，从仓库根目录运行 `./scripts/test-local-link-actions.ps1`。
+它打印带编号、预期预览与点击结果的例子，并在独立临时目录创建无害文件；不会自动打开目标、
+修改配置或写入剪贴板。测试后删除输出中注明的夹具目录。
+
+用 `-Group Web`、`Osc8`、`Paths`、`Wrappers`、`Source`、`Negative`、`Wrapping`
+或 `KnownGaps` 可逐组检查，默认是 `All`。已知缺口单独标注，不冒充已支持的行为。
+检查换行时调整窗口宽度，并保持完整目标可见。反馈时提供分组、例子编号、预览和实际点击结果。
+这份手工矩阵补充 scanner/app 回归测试，不代表对任意文本的穷尽证明。
 
 ### 本地目标行为
 

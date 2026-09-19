@@ -14,8 +14,14 @@ use std::{
     time::{Duration, Instant},
 };
 use windows::Win32::{
-    Foundation::HWND,
-    Graphics::Gdi::{GetDC, GetPixel, ReleaseDC, CLR_INVALID},
+    Foundation::{HWND, POINT, RECT},
+    Graphics::Gdi::{
+        ClientToScreen, GetClipBox, GetDC, GetPixel, PtVisible, ReleaseDC, CLR_INVALID,
+    },
+    UI::WindowsAndMessaging::{
+        GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId, IsHungAppWindow, IsIconic,
+        IsWindowVisible, WindowFromPoint,
+    },
 };
 use winit::{
     application::ApplicationHandler,
@@ -23,20 +29,58 @@ use winit::{
     event::WindowEvent,
     event_loop::{ActiveEventLoop, EventLoop},
     platform::windows::EventLoopBuilderExtWindows,
-    window::{Window, WindowId},
+    window::{Window, WindowId, WindowLevel},
 };
 
 struct Probe {
+    window: Option<Arc<Window>>,
+    next_scale: usize,
     outcome: Option<Result<(), String>>,
 }
 
 impl ApplicationHandler for Probe {
     fn resumed(&mut self, active: &ActiveEventLoop) {
-        self.outcome = Some(run_probe(active));
-        active.exit();
+        let result = active.create_window(
+            Window::default_attributes()
+                .with_title("SonicTerm font weight verification")
+                .with_position(PhysicalPosition::new(100, 100))
+                .with_inner_size(PhysicalSize::new(980, 410))
+                .with_window_level(WindowLevel::AlwaysOnTop)
+                .with_active(false)
+                .with_visible(true),
+        );
+        match result {
+            Ok(window) => {
+                window.request_redraw();
+                self.window = Some(Arc::new(window));
+            }
+            Err(error) => {
+                self.outcome = Some(Err(error.to_string()));
+                active.exit();
+            }
+        }
     }
 
-    fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+    fn window_event(&mut self, active: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+        if matches!(event, WindowEvent::RedrawRequested) && self.outcome.is_none() {
+            let window = self.window.as_ref().unwrap();
+            let scales = [1.0, 1.25, 1.5, 1.75, 2.0];
+            let baseline = sonicterm_gpu::core::live_renderer_count();
+            let mut result = run_scale_case(active, window, scales[self.next_scale]);
+            let observed = sonicterm_gpu::core::live_renderer_count();
+            if observed != baseline {
+                result = Err(format!("renderer retained between scale cases: expected={baseline} observed={observed}; native_result={result:?}"));
+            }
+            self.next_scale += 1;
+            if result.is_err() || self.next_scale == scales.len() {
+                self.outcome = Some(result);
+                active.exit();
+            } else {
+                // Return to native message dispatch between cases so Windows never replaces an unresponsive probe with a ghost.
+                window.request_redraw();
+            }
+        }
+    }
 }
 
 fn render(app: &mut App, active: &ActiveEventLoop, id: WindowId) {
@@ -44,7 +88,13 @@ fn render(app: &mut App, active: &ActiveEventLoop, id: WindowId) {
     ApplicationHandler::window_event(app, active, id, WindowEvent::RedrawRequested);
 }
 
-fn capture(app: &App, id: WindowId, window: &Window) -> Result<image::RgbaImage, String> {
+fn capture(
+    app: &App,
+    id: WindowId,
+    window: &Window,
+    scale: f32,
+    phase: &str,
+) -> Result<image::RgbaImage, String> {
     let size = window.inner_size();
     let mut pixels = image::RgbaImage::new(size.width, size.height);
     for (x, y, pixel) in pixels.enumerate_pixels_mut() {
@@ -82,8 +132,37 @@ fn capture(app: &App, id: WindowId, window: &Window) -> Result<image::RgbaImage,
             let p = pixels.get_pixel(x, y).0;
             let expected = u32::from(p[0]) | (u32::from(p[1]) << 8) | (u32::from(p[2]) << 16);
             if observed == CLR_INVALID || observed != expected {
+                let mut clip = RECT::default();
+                let (clip_kind, point_visible, visible, iconic) =
+                    // SAFETY: dc and hwnd remain live; clip is writable and x/y are scalar coordinates.
+                    unsafe {
+                    (
+                        GetClipBox(dc, &mut clip),
+                        PtVisible(dc, x as i32, y as i32).as_bool(),
+                        IsWindowVisible(hwnd).as_bool(),
+                        IsIconic(hwnd).as_bool(),
+                    )
+                };
+                let mut screen = POINT { x: x as i32, y: y as i32 };
+                let mut covering_pid = 0;
+                let (mapped, covering, foreground) =
+                    // SAFETY: hwnd is live, screen and covering_pid are writable; returned handles are only observed.
+                    unsafe {
+                    let mapped = ClientToScreen(hwnd, &mut screen).as_bool();
+                    let covering = WindowFromPoint(screen);
+                    GetWindowThreadProcessId(covering, Some(&mut covering_pid));
+                    (mapped, covering, GetForegroundWindow())
+                };
+                let mut class = [0u16; 128];
+                let (class_len, hung) =
+                    // SAFETY: covering is observed without ownership; class is a writable buffer and hwnd remains live.
+                    unsafe {
+                    (GetClassNameW(covering, &mut class), IsHungAppWindow(hwnd).as_bool())
+                };
+                let class = String::from_utf16_lossy(&class[..class_len.max(0) as usize]);
                 mismatch = Some(format!(
-                    "native pixel ({x},{y}) expected={expected:#x} observed={observed:#x}"
+                    "native pixel ({x},{y}) expected={expected:#x} observed={observed:#x}; hwnd={hwnd:?} scale={scale} phase={phase} size={size:?} clip_kind={clip_kind:?} clip={clip:?} point_visible={point_visible} visible={visible} iconic={iconic}; mapped={mapped} screen={screen:?} covering={covering:?} covering_pid={covering_pid} self_pid={} foreground={foreground:?} covering_class={class} hung={hung}",
+                    std::process::id()
                 ));
                 break;
             }
@@ -134,25 +213,11 @@ fn digit_top(image: &image::RgbaImage, geometry: (f32, f32, f32), row: u32, col:
         .expect("digit must contain visible native ink")
 }
 
-fn run_probe(active: &ActiveEventLoop) -> Result<(), String> {
-    for scale in [1.0, 1.25, 1.5, 1.75, 2.0] {
-        run_scale_case(active, scale)?;
-    }
-    Ok(())
-}
-
-fn run_scale_case(active: &ActiveEventLoop, scale: f32) -> Result<(), String> {
-    let window = Arc::new(
-        active
-            .create_window(
-                Window::default_attributes()
-                    .with_title("SonicTerm font weight verification")
-                    .with_position(PhysicalPosition::new(100, 100))
-                    .with_inner_size(PhysicalSize::new(980, 410))
-                    .with_visible(true),
-            )
-            .map_err(|e| e.to_string())?,
-    );
+fn run_scale_case(
+    active: &ActiveEventLoop,
+    window: &Arc<Window>,
+    scale: f32,
+) -> Result<(), String> {
     let fonts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
     let theme = Theme::default();
     let mut config = Config::default();
@@ -209,7 +274,7 @@ fn run_scale_case(active: &ActiveEventLoop, scale: f32) -> Result<(), String> {
     assert!(app.__test_attach_window_renderer(id, window.clone(), renderer));
     render(&mut app, active, id);
     let geometry = app.__test_window_cell_geometry(id).unwrap();
-    let baseline = capture(&app, id, &window)?;
+    let baseline = capture(&app, id, window, scale, "baseline")?;
     for row in 0..4 {
         assert_eq!(
             digit_top(&baseline, geometry, row, 0),
@@ -259,7 +324,7 @@ fn run_scale_case(active: &ActiveEventLoop, scale: f32) -> Result<(), String> {
         }
         render(&mut app, active, id);
         assert_eq!(app.__test_window_cell_geometry(id).unwrap(), geometry, "{label} layout drift");
-        let candidate = capture(&app, id, &window)?;
+        let candidate = capture(&app, id, window, scale, label)?;
         assert!(emoji_crop(&candidate) == emoji, "{label} changed color artwork");
         for row in 0..5 {
             let before = row_crop(&baseline, geometry, row);
@@ -279,8 +344,13 @@ fn run_scale_case(active: &ActiveEventLoop, scale: f32) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         }
         render(&mut app, active, id);
-        assert_eq!(capture(&app, id, &window)?, candidate, "{label} cache hit changed pixels");
+        assert_eq!(
+            capture(&app, id, window, scale, "cache-hit")?,
+            candidate,
+            "{label} cache hit changed pixels"
+        );
     }
+    drop(app);
     Ok(())
 }
 
@@ -289,7 +359,7 @@ fn run_scale_case(active: &ActiveEventLoop, scale: f32) -> Result<(), String> {
 fn windows_font_weight_preserves_layout_and_updates_every_style() {
     let event_loop =
         EventLoop::builder().with_any_thread(true).build().expect("Windows event loop");
-    let mut probe = Probe { outcome: None };
+    let mut probe = Probe { window: None, next_scale: 0, outcome: None };
     event_loop.run_app(&mut probe).expect("font verification event loop");
-    probe.outcome.expect("resumed must run").unwrap_or_else(|e| panic!("{e}"));
+    probe.outcome.expect("native scale checks must finish").unwrap_or_else(|e| panic!("{e}"));
 }

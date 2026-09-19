@@ -111,6 +111,10 @@ If `[terminal].shell` is absent:
 - Normal macOS launches zsh/tcsh/csh with `-l` and bash/fish with `--login`.
   Clean end-to-end mode instead suppresses profiles and banners.
 
+Normal Windows PowerShell startup also loads embedded, process-local directory
+links on supported PowerShell 7 hosts. It preserves custom formatting and explicit
+commands; clean end-to-end startup does not install it. See [Usage](Usage#powershell-directory-links).
+
 The child starts in an explicit valid working directory when supplied,
 otherwise in `HOME` when available. SonicTerm sets:
 
@@ -488,6 +492,10 @@ GUI 先调整网格，且在原生调用失败时不回滚：窗格保留用户�
 - Unix 依次使用可执行的 `$SHELL`、当前用户 passwd 记录中的可执行 shell、`/bin/sh`。
 - macOS 正常运行时，zsh/tcsh/csh 使用 `-l`，bash/fish 使用 `--login`。
   干净端到端测试模式则关闭配置文件和启动横幅。
+
+Windows PowerShell 正常启动时，还会在受支持的 PowerShell 7 主机中加载内嵌、仅当前进程
+生效的目录链接集成。它保留自定义格式和显式命令；干净端到端启动不会安装该集成。
+参见[使用说明](Usage#powershell-目录链接)。
 
 若提供了有效的显式工作目录，子进程从该目录启动；否则在可用时使用 `HOME`。
 SonicTerm 设置：
