@@ -319,6 +319,7 @@ fn local_target_switch_reload_revokes_all_window_authorization() {
             spans: smallvec::smallvec![AbsoluteCellSpan { row: 22, start_col: 4, end_col: 9 }],
             target: sonicterm_cfg::url_scan::DetectedTarget::BareName("entry".into()),
             resolved_path: PathBuf::from("/work/entry"),
+            missing_before: Vec::new(),
         };
         let key = PathProbeKey {
             window_id,
@@ -378,6 +379,7 @@ fn local_target_switch_reload_revokes_all_window_authorization() {
                     }],
                     target: sonicterm_cfg::url_scan::DetectedTarget::BareName("entry".into()),
                     resolved_path: PathBuf::from("/work/entry"),
+                    missing_before: Vec::new(),
                 }],
                 rows: smallvec::smallvec![PathRowIdentity { row: 22, fingerprint: 11 }],
                 cwd: Some(Osc7Cwd { authority: String::new(), path: "/work".into() }),

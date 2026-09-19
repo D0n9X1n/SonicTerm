@@ -67,7 +67,13 @@ For shaping and fallback details, see [Rendering and Fonts](Rendering-and-Fonts)
 | `decorations` | `true` | Enables native title-bar decorations for new windows. |
 | `warm_window_pool` | `1` | Number of hidden child windows kept for fast tab tear-out. `0` disables the pool. Hardware rendering caps it at `5`; software rendering caps any nonzero value at `1`. |
 
-`cols` and `rows` set only the initial size. Every native terminal window has a
+`cols` and `rows` set startup size and the fallback when no usable source window exists.
+New and torn-out windows inherit the initiating window's logical client size,
+including warm-pool adoption. Size is captured before deferred creation; later
+focus changes do not replace it. Maximized/fullscreen state is not inherited.
+A missing, minimized, or zero-size source uses the configured fallback. Destination
+DPI, native minimums, and accepted resize dimensions still apply; moving a tab into
+an existing window does not resize that window. Every native terminal window has a
 hard, non-configurable minimum inner size equal to 30 columns by 10 rows. The
 pixel floor is recomputed from the live font, DPI, padding, titlebar, and tab-bar
 geometry, including after live font/padding reloads and tab-bar visibility
@@ -285,7 +291,10 @@ presenter 正在使用或 GPU 支持 dual-source blending。其它所有组合�
 | `decorations` | `true` | 为新窗口启用原生标题栏装饰。 |
 | `warm_window_pool` | `1` | 为快速拖出标签页预留的隐藏子窗口数量。`0` 关闭预热池。硬件渲染最多保留 `5` 个；软件渲染会把任何非零值限制为 `1`。 |
 
-`cols` 与 `rows` 只设置初始大小。每个原生终端窗口都有不可配置的硬最小内区大小：
+`cols` 与 `rows` 设置启动尺寸，以及没有可用来源窗口时的默认尺寸。新建和拖出窗口继承发起窗口
+的逻辑客户区尺寸，预热窗口也相同。尺寸在延迟创建之前记录，后续焦点变化不会替换它；不继承
+最大化或全屏状态。来源缺失、最小化或尺寸为零时采用配置默认值。目标屏幕 DPI、原生最小尺寸
+和实际接受的 resize 仍生效；把标签页移入已有窗口不会改变该窗口尺寸。每个原生终端窗口都有不可配置的硬最小内区大小：
 30 列 × 10 行。像素下限会按当前字体、DPI、padding、标题栏和标签栏 geometry 重新计算，
 包括实时重载字体/padding 以及切换标签栏可见性之后。
 

@@ -95,6 +95,9 @@ if (Test-Group 'Paths') {
     Write-Case 'Absolute path containing spaces' $spaced 'Select selected & name.txt; preserve spaces and ampersand.'
     Write-Case 'Markdown file' $markdown 'Select flight.md, not its associated application.'
     Write-Case 'Executable is reveal-only' $exe 'Select inert.exe; never execute it.'
+    Write-Case 'Rooted log field' ('path=' + $exe + ' probe="--version" timeout_seconds=5') 'Select inert.exe only; never execute it or include path= in the active span.'
+    Write-Case 'Quoted log field' ('file="' + $spaced + '" next=ready') 'Select the complete spaced filename; field key and quotes remain outside the underline.'
+    Write-Case 'Unwrapped file list' ($plain + [char]0x3001 + 'flight.md') 'After confirming the full literal is missing, first member selects flight.html. The short second name uses the pane CWD, never the first parent folder.'
     Write-Case 'Existing directory' $folder.Replace('\', '/') 'Navigate into Test Folder.'
     Write-Case 'Percent-encoded file URI' $fileUri 'Decode %20 once and select selected & name.txt.'
     foreach ($name in @('hash#name.txt', 'percent%20.txt')) {
@@ -175,8 +178,6 @@ if (Test-Group 'Wrapping') {
 
 if (Test-Group 'KnownGaps') {
     Write-Output 'GROUP: KnownGaps'
-    Write-Case 'KNOWN #1365 - log field prefix' ('path=' + $exe) 'Known gap: key=value paths currently are not extracted. Plain exe path in Paths is the control.'
-    Write-Case 'KNOWN #1366 - unwrapped file list' ($plain + [char]0x3001 + 'flight.md') 'Known gap: list may be treated as one filename. Do not infer the second file directory.'
     Write-Case 'Unsupported raw Markdown link' ('[report](' + $plain + ')') 'Not a Markdown parser; no promise to detect this literal source form.'
     Write-Case 'Colored prose is not a link' ("{0}[36mordinary colored words{0}[0m" -f $esc) 'Color alone must not create a clickable target.'
     Write-Output 'The original missing-relative-file report still needs its actual pane directory/probe evidence; it is not declared fixed by these samples.'

@@ -33,6 +33,7 @@ pub(super) struct RowTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LogicalTargetCandidate {
     target: DetectedTarget,
+    missing_before: Vec<DetectedTarget>,
     spans: SmallVec<[AbsoluteCellSpan; 2]>,
 }
 
@@ -136,6 +137,7 @@ pub struct PathProbeCandidate {
     pub(crate) spans: SmallVec<[AbsoluteCellSpan; 2]>,
     pub(crate) target: DetectedTarget,
     pub(crate) resolved_path: PathBuf,
+    pub(crate) missing_before: Vec<PathBuf>,
 }
 
 impl PathProbeCandidate {
@@ -777,6 +779,14 @@ fn probe_candidates(
         let mut blocked = false;
         while index < candidates.len() && candidates[index].span_len() == span_len {
             let candidate = &candidates[index];
+            if candidate
+                .missing_before
+                .iter()
+                .any(|literal| classify(literal) != PathOpenDecision::Missing)
+            {
+                // When: a literal is present or blocked, its shorter interpretation has no authority even if filtering removed its tier.
+                return Err("path-error-ambiguous");
+            }
             let decision = if matches!(candidate.target, DetectedTarget::SourceReference(_)) {
                 classify_source_reference(&candidate.resolved_path)
             } else {
@@ -817,6 +827,7 @@ struct PathOpenRequest {
     pane_id: u64,
     path: PathBuf,
     expected_decision: PathOpenDecision,
+    missing_before: Vec<PathBuf>,
 }
 
 /// App-owned handles for the bounded path probe and open workers.
@@ -864,8 +875,20 @@ impl PathWorkers {
             .name("sonicterm-path-open".into())
             .spawn(move || {
                 while let Ok(request) = open_rx.recv() {
-                    if let Err(error) = open_path(&request.path, request.expected_decision) {
-                        // When: open_path fails, return its reason to the requesting window instead of leaving only a log.
+                    let result =
+                        if request.missing_before.iter().all(|literal| {
+                            classify_local_target(literal) == PathOpenDecision::Missing
+                        }) {
+                            open_path(&request.path, request.expected_decision)
+                        } else {
+                            // When: a literal appeared after hover, do not reveal its shorter interpretation at activation time.
+                            Err(io::Error::new(
+                                io::ErrorKind::PermissionDenied,
+                                "literal path is no longer missing",
+                            ))
+                        };
+                    if let Err(error) = result {
+                        // When: result is an error, return its reason to the requesting window instead of leaving only a log.
                         tracing::warn!(path = ?request.path, %error, "path open failed");
                         let _ = proxy.send_event(super::UserEvent::PathOpenFailed {
                             window_id: request.window_id,
@@ -897,8 +920,15 @@ impl PathWorkers {
         pane_id: u64,
         path: PathBuf,
         expected_decision: PathOpenDecision,
+        missing_before: Vec<PathBuf>,
     ) -> io::Result<bool> {
-        match self.open.try_send(PathOpenRequest { window_id, pane_id, path, expected_decision }) {
+        match self.open.try_send(PathOpenRequest {
+            window_id,
+            pane_id,
+            path,
+            expected_decision,
+            missing_before,
+        }) {
             Ok(()) => Ok(true),
             Err(TrySendError::Full(_)) => Ok(false),
             Err(TrySendError::Disconnected(_)) => {
@@ -1389,6 +1419,7 @@ fn hardwrap_uri_candidate(
             }
             return HardwrapUri::Complete(LogicalTargetCandidate {
                 target: DetectedTarget::Uri(found.url.clone()),
+                missing_before: Vec::new(),
                 spans,
             });
         }
@@ -1473,20 +1504,12 @@ impl PathCellText {
                     // When: source_start/source_end fail to enclose start..end, no identity can authorize the match.
                     return None;
                 }
-                for (index, scalar) in
-                    self.scalars.iter().enumerate().take(source_end).skip(source_start)
-                {
-                    let content = (start..end).contains(&index);
-                    let boundary = !content
-                        && sonicterm_cfg::url_scan::is_path_boundary_character(
-                            cells[scalar.cell_start].ch,
-                        );
+                for scalar in &self.scalars[source_start..source_end] {
                     if !scalar.valid
                         || cells[scalar.cell_start..scalar.cell_end].iter().any(|cell| {
                             cell.hyperlink().is_some()
                                 || cell.extras().is_some_and(|s| !s.is_empty())
-                                || !boundary
-                                    && cell.flags.intersects(CellFlags::WIDE | CellFlags::WIDE_CONT)
+                                || cell.ch.is_control()
                         })
                     {
                         // When: scalar identity is unsafe, neither removed boundaries nor display text may be discarded to recover a target.
@@ -1583,7 +1606,11 @@ fn logical_path_scan_at_cell(
                     }
                 }
             }
-            Some(LogicalTargetCandidate { target: matched.target, spans })
+            Some(LogicalTargetCandidate {
+                target: matched.target,
+                missing_before: matched.missing_before,
+                spans,
+            })
         })
         .collect::<Vec<_>>();
     (!candidates.is_empty()).then_some(LogicalPathScan { candidates, rows })
@@ -2272,7 +2299,12 @@ impl App {
                     pane_id,
                     pointed: AbsoluteCell { row: absolute_row, col },
                     view_top,
-                    candidates: vec![PathProbeCandidate { spans, target: local, resolved_path }],
+                    candidates: vec![PathProbeCandidate {
+                        spans,
+                        target: local,
+                        resolved_path,
+                        missing_before: Vec::new(),
+                    }],
                     rows,
                     cwd,
                     cwd_revision: parser.cwd_revision(),
@@ -2341,7 +2373,7 @@ impl App {
                 logical_path_scan_at_cell(grid, view_top, pointed, style, clickable_bare_names)?
             }
         };
-        if let Some(LogicalTargetCandidate { target: DetectedTarget::Uri(uri), spans }) =
+        if let Some(LogicalTargetCandidate { target: DetectedTarget::Uri(uri), spans, .. }) =
             logical.candidates.first()
         {
             // When: logical URI provenance wins, preserve its complete destination and every visible fragment.
@@ -2400,10 +2432,24 @@ impl App {
                     self.home_dir.as_deref(),
                     &self.local_hostname,
                 )?;
+                let missing_before = candidate
+                    .missing_before
+                    .iter()
+                    .map(|literal| {
+                        resolve_detected_path(
+                            literal,
+                            style,
+                            cwd.as_ref(),
+                            self.home_dir.as_deref(),
+                            &self.local_hostname,
+                        )
+                    })
+                    .collect::<Option<Vec<_>>>()?;
                 Some(PathProbeCandidate {
                     spans: candidate.spans,
                     target: candidate.target,
                     resolved_path,
+                    missing_before,
                 })
             })
             .collect::<Vec<_>>();
@@ -2673,6 +2719,7 @@ impl App {
                     pane_id,
                     selection.candidate.resolved_path,
                     selection.decision,
+                    selection.candidate.missing_before,
                 ) {
                     Ok(true) => true,
                     Ok(false) => {

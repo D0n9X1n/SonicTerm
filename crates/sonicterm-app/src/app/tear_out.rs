@@ -66,6 +66,7 @@ impl TearOutSource {
 /// Live tab ownership held between source detachment and destination commit.
 pub(super) struct DetachedTab {
     source: TearOutSource,
+    request: super::WindowRequest,
     original_index: usize,
     prior_active_tab_id: Option<sonicterm_ui::tabs::TabId>,
     tab: Tab,
@@ -80,7 +81,7 @@ impl DetachedTab {
         target: WindowId,
         index: usize,
     ) -> Result<(), super::TransferError> {
-        let Self { source, original_index, prior_active_tab_id, tab, state, panes } = self;
+        let Self { source, request, original_index, prior_active_tab_id, tab, state, panes } = self;
         let attached = if app.main_window_id == Some(target) {
             app.attach_tab_state(index, tab, state, panes)
         } else {
@@ -91,6 +92,7 @@ impl DetachedTab {
             // When: attached is Err(failure), restore exact source order/focus without resize or owner effects.
             app.rollback_detached_tab(Self {
                 source,
+                request,
                 original_index,
                 prior_active_tab_id,
                 tab: failure.tab,
@@ -501,17 +503,33 @@ impl App {
             }
             window.tabs.active().map(|tab| tab.id)
         };
+        let request = self.window_request(Some(source_window));
         let (tab, state, panes) = match source {
             TearOutSource::Main(_) => self.detach_tab_state(index),
             TearOutSource::Child(id) => self.detach_from_child(id, index),
         }?;
-        Some(DetachedTab { source, original_index: index, prior_active_tab_id, tab, state, panes })
+        Some(DetachedTab {
+            source,
+            request,
+            original_index: index,
+            prior_active_tab_id,
+            tab,
+            state,
+            panes,
+        })
     }
 
     /// Restore a detached transaction without applying transfer side effects.
     pub(super) fn rollback_detached_tab(&mut self, transaction: DetachedTab) {
-        let DetachedTab { source, original_index, prior_active_tab_id, tab, state, panes } =
-            transaction;
+        let DetachedTab {
+            source,
+            request: _,
+            original_index,
+            prior_active_tab_id,
+            tab,
+            state,
+            panes,
+        } = transaction;
         let window = self.windows.get_mut(&source.window_id()).expect(
             "a tear-out source cannot disappear during synchronous destination preparation",
         );
@@ -675,8 +693,9 @@ impl App {
         screen_pos: Option<(i32, i32)>,
         source: &'static str,
     ) -> Option<WindowId> {
+        let request = transaction.request;
         self.tear_out_with_destination(transaction, |app| {
-            app.prepare_tear_out_destination(el, screen_pos, source)
+            app.prepare_tear_out_destination(el, screen_pos, source, request)
         })
     }
 
@@ -686,6 +705,7 @@ impl App {
         el: &ActiveEventLoop,
         screen_pos: Option<(i32, i32)>,
         source: &'static str,
+        request: super::WindowRequest,
     ) -> Result<PreparedDestination, DestinationFailure> {
         let tear_start = Instant::now();
         let (window, renderer, create_window_ms, renderer_init_ms, resize_ms) =
@@ -711,6 +731,15 @@ impl App {
                             DestinationUnwind::warm(warm, DestinationDisposition::RetireWarm),
                         ));
                     }
+                    if !super::apply_window_request(&warm.window, &mut warm.renderer, request) {
+                        // When: inherited sizing exceeds renderer bounds, retire the mutated hidden window and restore its source.
+                        return Err(DestinationFailure::new(
+                            ChildRendererOrigin::WarmPool,
+                            TearOutStage::RendererConfigure,
+                            "renderer rejected inherited child size".to_owned(),
+                            DestinationUnwind::warm(warm, DestinationDisposition::RetireWarm),
+                        ));
+                    }
                     let resize_ms = resize_start.elapsed().as_secs_f32() * 1000.0;
                     (warm.window, warm.renderer, 0.0, 0.0, resize_ms)
                 }
@@ -722,7 +751,7 @@ impl App {
                             Window::default_attributes()
                                 .with_title(super::NATIVE_WINDOW_TITLE)
                                 .with_decorations(true)
-                                .with_inner_size(winit::dpi::LogicalSize::new(800.0, 500.0))
+                                .with_inner_size(request.inner_size)
                                 .with_visible(false),
                         ),
                         self.config.appearance.backdrop,

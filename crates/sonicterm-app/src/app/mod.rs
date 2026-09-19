@@ -272,6 +272,67 @@ pub const MIN_WINDOW_COLS: u16 = 30;
 /// Hard minimum terminal content height in cells for every native window.
 pub const MIN_WINDOW_ROWS: u16 = 10;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct WindowRequest {
+    pub(super) inner_size: winit::dpi::LogicalSize<f64>,
+}
+
+fn configured_window_size(config: &Config, tab_bar_visible: bool) -> winit::dpi::LogicalSize<f64> {
+    let (cols, rows) = sonicterm_grid::grid::bounded_grid_size(
+        u64::from(config.window.cols),
+        u64::from(config.window.rows),
+    );
+    let width = f32::from(cols) * 9.0 + config.window.padding_left + config.window.padding_right;
+    let height = f32::from(rows) * config.font.size * config.font.line_height
+        + config.window.padding_top
+        + config.window.padding_bottom
+        + if tab_bar_visible { sonicterm_ui::tabbar_view::TAB_BAR_HEIGHT } else { 0.0 };
+    winit::dpi::LogicalSize::new(f64::from(width), f64::from(height))
+}
+
+fn inherited_window_size(
+    physical: winit::dpi::PhysicalSize<u32>,
+    scale: f64,
+    minimized: bool,
+) -> Option<winit::dpi::LogicalSize<f64>> {
+    if minimized
+        || physical.width == 0
+        || physical.height == 0
+        || !scale.is_finite()
+        || scale <= 0.0
+    {
+        // When: native geometry is unavailable, retain the configured fallback rather than a minimized or invalid extent.
+        return None;
+    }
+    Some(physical.to_logical(scale))
+}
+
+fn apply_window_request(
+    window: &Window,
+    renderer: &mut GpuRenderer,
+    request: WindowRequest,
+) -> bool {
+    let (cell_w, cell_h) = renderer.cell_size();
+    let minimum = minimum_terminal_inner_size(
+        cell_w,
+        cell_h,
+        renderer.padding_left_px(),
+        renderer.padding_right_px(),
+        renderer.top_inset(),
+        renderer.bottom_inset(),
+        renderer.padding_bottom_px(),
+    );
+    window.set_min_inner_size(Some(minimum));
+    let desired = request.inner_size.to_physical::<u32>(window.scale_factor());
+    let desired = winit::dpi::PhysicalSize::new(
+        desired.width.max(minimum.width),
+        desired.height.max(minimum.height),
+    );
+    // An asynchronous request leaves the current extent authoritative until Resized supplies the accepted dimensions.
+    let actual = window.request_inner_size(desired).unwrap_or_else(|| window.inner_size());
+    renderer.try_resize(actual.width, actual.height)
+}
+
 /// Compute the physical inner-window floor that preserves a 30×10 terminal grid.
 #[must_use]
 pub fn minimum_terminal_inner_size(
@@ -2714,14 +2775,8 @@ pub struct App {
     // `self.main()?.dpi_scale` / `self.main()?.hovered_url`
     // (with safe-default fallbacks at call sites). The shadow-sync
     // path was deleted as the last of the per-window migration.
-    /// Action::NewWindow sets this
-    /// flag, then `drain_pending_window_creates` consumes it by calling
-    /// `create_new_terminal_window(el)`. Window creation requires an
-    /// `ActiveEventLoop` reference
-    /// that isn't reachable from the keymap dispatcher. Works from BOTH
-    /// the windows-non-empty case (Cmd+N from a focused window) AND the
-    /// windows-empty post-close-last-window dock-alive case on macOS.
-    pub(super) pending_new_window: bool,
+    /// Requested logical dimensions survive focus changes until native window creation can run.
+    pub(super) pending_new_window: Option<WindowRequest>,
     /// Deferred in-process tab tear-out request from either drag/drop or the
     /// Move Tab to New Window action. Drained only while an ActiveEventLoop is
     /// available so every path uses the same native-window constructor.
@@ -3234,7 +3289,7 @@ impl App {
             // writes for assertions. Production always passes `Some(proxy)`,
             // so the ledger stays disabled and adds no per-write cost.
             pty_write_log_enabled: event_loop_proxy.is_none(),
-            pending_new_window: false,
+            pending_new_window: None,
             pending_tear_out: None,
             pending_os_teardown: false,
             test_post_snapshot_hook: None,
@@ -3875,8 +3930,8 @@ impl App {
                 if self.run_action(&action) {
                     // When: `run_action` consumed the chord, so the caller gets
                     // the action and no encoded bytes reach the PTY.
-                    if simulate_drain && self.pending_new_window {
-                        self.pending_new_window = false;
+                    if simulate_drain {
+                        self.pending_new_window = None;
                     }
                     return (Some(action), None);
                 }
@@ -4228,7 +4283,7 @@ impl App {
                 // request observable without changing the dispatcher
                 // signature.
                 AppEffect::WindowOpen { role, initial_size } => {
-                    self.pending_new_window = true;
+                    self.pending_new_window = Some(self.window_request(None));
                     tracing::debug!(
                         target: "state_machine",
                         ?role,
@@ -6436,7 +6491,7 @@ impl App {
     /// is the testable seam.
     #[doc(hidden)]
     pub fn __test_pending_new_window(&self) -> bool {
-        self.pending_new_window
+        self.pending_new_window.is_some()
     }
 
     /// Test seam for deferred in-process tear-out requests.

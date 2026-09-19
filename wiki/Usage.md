@@ -347,7 +347,7 @@ single-quote, double-quote, or backtick pair, including paths with spaces such a
 in cell safety checks. Quote contents are literal: no shell unescaping or variable
 expansion. Unmatched/mixed quotes, concatenated text, padded contents, `$`/`%`
 expansions, other quoted bare names, `ls -F` suffixes (`*`, `@`, `=`, `|`), and
-raw paths containing wide, continuation, combining, or OSC 8-owned cells remain inert.
+raw paths containing broken wide-cell pairs, combining extras, control characters, or OSC 8-owned cells remain inert. Valid wide-character pairs retain their exact filename and cell span.
 
 Terminal messages can contain actionable file references, including a balanced
 identifier-style tool heading such as `Update(src/main.rs)` or `Read(./notes.txt)`.
@@ -363,10 +363,21 @@ and `【reports/flight.html】，内容` keep the same inner target. Supported p
 Other Punctuation and Dash Punctuation categories, not a language-specific list.
 Path separators, mismatched closers, direct concatenation, and dot/colon suffix
 continuations such as `(src/main.rs).bak` remain ambiguous and inert. This does
-not interpret raw Markdown, strip invisible characters, or split unwrapped file lists.
-Wide outer delimiters and separators retain both cells in safety validation;
-wide characters inside the path remain unsupported. A missing or unsafe boundary
-never permits a shorter inner fragment.
+not interpret raw Markdown or strip invisible characters. Valid wide characters
+retain both cells in safety validation, including filename content. A missing or
+unsafe boundary never permits a shorter inner fragment.
+
+Rooted log-field values such as `path=C:\work\file.exe` and
+`file="C:\My Folder\report.md"` exclude the key and matching quotes from their
+active span. Relative assignments and concatenated or incomplete quotes do not
+receive this rule. Existing `=` characters inside a filename remain literal.
+
+Unwrapped lists such as `src/a.rs、b.rs` retain the complete literal filename first.
+Only its confirmed absence permits the pointed file member; a blocked or ambiguous
+literal never authorizes a shorter member. The second name resolves only against
+this pane's CWD, never an inferred `src` directory. Hyphens are not list separators.
+The literal-absence requirement survives candidate limits and is checked again
+before native activation.
 In prose such as `src/main.rs and focused tests/main.rs. Require stable`, point
 at either filename to resolve it independently. `and` is not a reserved word:
 existing filenames containing spaces or parentheses still use literal filesystem
@@ -393,6 +404,21 @@ anchor itself, rather than falling back to a shorter filename. Unwrapped groups
 start a segment or follow another complete group; after prose, use `()`/`[]`/`{}`
 to make the anchor boundary explicit. A wrapper after plain words is read as
 prose; it is not a continuation of a spaced relative filename.
+
+### PowerShell directory links
+
+Interactive PowerShell 7.2 or newer started by SonicTerm adds full local file-URI
+links to the default directory display. A name split across display rows retains
+the same target on each fragment; padding and following entries are not linked.
+Mode, date, length, and name colors are preserved. `ls` remains `Get-ChildItem` and
+object pipelines remain unchanged. Explicit `Format-Table` keeps its native view.
+Plain-text/redirection output omits terminal decoration.
+
+The integration is process-local, embedded in SonicTerm, and writes no profile or
+format file. Custom file-name getters or nonstandard file views are left alone;
+legacy PowerShell and constrained-language hosts keep their original formatting.
+Existing output is not rewritten. Local-target validation still applies; clicking
+an executable reveals it rather than runs it.
 
 ### Manual link checks
 
@@ -796,8 +822,8 @@ SonicTerm 会选择包含鼠标 cell 的最长、无歧义且可操作候选。�
 或反引号，包括 `'C:\work\My Folder'` 这样的带空格路径。引号不属于可操作范围，但仍参与
 cell 安全检查。引号内容按字面处理，不执行 shell 反转义或变量展开。不配对或混合引号、
 拼接文字、首尾填充空格、`$`/`%` 展开语法、其它带引号的裸名称、`ls -F` 后缀
-（`*`、`@`、`=`、`|`），以及含宽字符、续格、组合字符或已属于 OSC 8 的 cell 的原始路径
-都保持不可操作。
+（`*`、`@`、`=`、`|`），以及含破损宽字符配对、组合附加字符、控制字符或已属于 OSC 8 的 cell
+的原始路径都保持不可操作。有效宽字符配对保留准确文件名和单元格范围。
 
 终端消息中的文件引用可以直接操作，包括 `Update(src/main.rs)` 或 `Read(./notes.txt)`
 这类括号完整、名称为标识符的工具标题。内部路径不包含工具名称和外层圆括号。
@@ -809,9 +835,16 @@ cell 安全检查。引号内容按字面处理，不执行 shell 反转义或�
 引号/反引号、`（）`/`【】`/`《》`/`「」`/`『』`、`“”`/`‘’`/`«»` 及标识符式工具调用。
 外围分隔采用 Unicode 的 Other Punctuation 和 Dash Punctuation 类别，不维护逐语言的标点清单。
 路径分隔符、错配闭括号、直接拼接，以及 `(src/main.rs).bak` 这类点号/冒号后缀续接，
-仍因有歧义而不可操作。这不会解释原始 Markdown、删除不可见字符或拆分无包围符的文件列表。
-宽字符外围包围符和分隔标点的两格都参与安全验证；路径内部的宽字符仍不受支持。
-边界缺失或不安全时，不能回退到较短的内部片段。
+仍因有歧义而不可操作。这不会解释原始 Markdown 或删除不可见字符。有效宽字符的两格都参与
+安全验证，包括文件名内容。边界缺失或不安全时，不能回退到较短的内部片段。
+
+`path=C:\work\file.exe` 和 `file="C:\My Folder\report.md"` 这类绝对路径字段的可操作范围
+不含字段名和配对引号。相对赋值、拼接或未闭合引号不适用该规则。文件名内部的 `=` 保持字面含义。
+
+`src/a.rs、b.rs` 这类无括号文件列表先保留完整字面文件名。只有确认它不存在，才允许指针所在
+文件成员；被阻止或有歧义的字面候选不授权较短成员。第二个名称只在该 pane 的 CWD 中解析，
+不会推测它属于 `src`。连字符不是列表分隔符。完整字面不存在的要求不会因候选上限被丢弃，
+并在原生操作前重新检查。
 在 `src/main.rs and focused tests/main.rs. Require stable` 这类正文中，分别指向两个
 文件名即可独立解析。`and` 不是保留词：真实文件名中的空格与圆括号仍通过字面文件系统
 候选消除歧义。缺失的上下文路径使用指向的文件名反馈，不使用未经验证的多词正文猜测。
@@ -829,6 +862,17 @@ cell 安全检查。引号内容按字面处理，不执行 shell 反转义或�
 包括锚点本身，不会回退到较短文件名。不加括号的分组必须位于片段开头或紧随另一个完整分组；
 正文之后请用 `()`/`[]`/`{}` 明确锚点边界。普通文字之后的括号会按正文分隔处理，
 不会作为带空格相对文件名的延续。
+
+### PowerShell 目录链接
+
+由 SonicTerm 启动的交互式 PowerShell 7.2 及以上版本，会给默认目录显示附上完整本地文件 URI。
+名称折到多行时，每段保留相同目标；缩进和后面的目录项不带该链接。保留模式、日期、长度及名称
+颜色。`ls` 仍是 `Get-ChildItem`，对象流水线不变；显式 `Format-Table` 使用原生视图。
+纯文本和重定向输出不带终端装饰。
+
+集成只在当前进程生效，嵌入 SonicTerm，不写 profile 或格式文件。自定义文件名 getter 或非标准
+文件视图不会被覆盖；旧版 PowerShell 与受限语言环境保留原格式。已有输出不会重写。
+本地目标仍需验证；点击可执行文件只在文件夹中选中，不执行它。
 
 ### 手工链接检查
 

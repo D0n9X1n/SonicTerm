@@ -11,6 +11,53 @@ use super::*;
 use sonicterm_cfg::keymap::Direction;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+/// Logical size snapshots survive source focus changes and preserve destination-DPI scaling without maximizing it.
+#[test]
+fn new_window_size_snapshot_validates_and_converts_source_geometry() {
+    let physical = winit::dpi::PhysicalSize::new(1400, 875);
+    let logical = inherited_window_size(physical, 1.75, false).unwrap();
+    assert_eq!(logical, winit::dpi::LogicalSize::new(800.0, 500.0));
+    assert_eq!(logical.to_physical::<u32>(1.25), winit::dpi::PhysicalSize::new(1000, 625));
+    assert!(inherited_window_size(physical, 1.75, true).is_none());
+    for scale in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(inherited_window_size(physical, scale, false).is_none());
+    }
+    assert!(inherited_window_size(winit::dpi::PhysicalSize::new(0, 875), 1.0, false).is_none());
+}
+
+/// A queued parentless request preserves its captured default even if configuration changes before draining it.
+#[test]
+fn new_window_request_keeps_captured_fallback() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.config.window.cols = 111;
+    let expected = configured_window_size(&app.config, app.tab_bar_visible);
+    assert!(app.run_action(&sonicterm_cfg::keymap::Action::NewWindow));
+    app.config.window.cols = 55;
+    assert_eq!(app.pending_new_window.unwrap().inner_size, expected);
+    assert_ne!(app.window_request(None).inner_size, expected);
+}
+
+/// Parentless requests use configured startup dimensions rather than the warm pool's internal size.
+#[test]
+fn new_window_size_fallback_tracks_configured_rows_and_columns() {
+    let mut config = Config::default();
+    config.window.cols = 100;
+    config.window.rows = 40;
+    config.font.size = 16.0;
+    config.font.line_height = 1.25;
+    config.window.padding_left = 8.0;
+    config.window.padding_right = 12.0;
+    config.window.padding_top = 4.0;
+    config.window.padding_bottom = 6.0;
+    let size = configured_window_size(&config, false);
+    assert_eq!(size, winit::dpi::LogicalSize::new(920.0, 810.0));
+    assert_eq!(
+        configured_window_size(&config, true).height,
+        size.height + f64::from(sonicterm_ui::tabbar_view::TAB_BAR_HEIGHT)
+    );
+}
+
 #[test]
 fn broadcast_render_flags_include_fixed_source_and_exclude_unrelated_panes() {
     // Visual membership includes the fixed source without changing delivery or following focus.

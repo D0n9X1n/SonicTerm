@@ -15,6 +15,156 @@ fn native_test_root() -> PathBuf {
     }
 }
 
+/// A valid wide filename keeps both cells and never promotes the suffix to an independent target.
+#[test]
+fn mapped_wide_path_preserves_complete_identity() {
+    let mut grid = Grid::new(60, 3);
+    for ch in "./目录/file.rs".chars() {
+        grid.put_char(ch, Color::Default, Color::Default, CellFlags::empty());
+    }
+    for col in [0, 2, 3, 4, 5, 9] {
+        let scan = logical_path_scan_at_cell(
+            &grid,
+            0,
+            AbsoluteCell { row: 0, col },
+            PathStyle::Posix,
+            true,
+        )
+        .unwrap();
+        assert!(scan
+            .candidates
+            .iter()
+            .any(|c| c.target == DetectedTarget::PathCandidate("./目录/file.rs".into())));
+        assert!(!scan
+            .candidates
+            .iter()
+            .any(|c| c.target == DetectedTarget::PathCandidate("/file.rs".into())));
+    }
+}
+
+/// A list alternative requires the literal to be missing even when the literal candidate was filtered away.
+#[test]
+fn list_probe_requires_missing_literal_guard() {
+    let literal = PathBuf::from("/work/a.rs、b.rs");
+    let mut candidate = probe_candidate("a.rs", "/work/a.rs", 0);
+    candidate.missing_before.push(literal.clone());
+    for decision in [PathOpenDecision::Blocked, PathOpenDecision::Openable(PathKind::File)] {
+        assert!(probe_candidates(&[candidate.clone()], |path| {
+            if path == literal {
+                decision
+            } else {
+                PathOpenDecision::Openable(PathKind::File)
+            }
+        })
+        .is_err());
+    }
+    assert!(probe_candidates(&[candidate], |path| {
+        if path == literal {
+            PathOpenDecision::Missing
+        } else {
+            PathOpenDecision::Openable(PathKind::File)
+        }
+    })
+    .is_ok());
+}
+
+/// Filesystem evidence chooses a literal punctuation filename before list members and uses the exact pane directory.
+#[test]
+fn list_paths_resolve_literals_before_members() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let root = native_test_root().join(format!(
+        "sonicterm-list-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/a.rs"), "first").unwrap();
+    std::fs::write(root.join("b.rs"), "second").unwrap();
+    let literal = root.join("src/a.rs、b.rs");
+    std::fs::write(&literal, "literal").unwrap();
+    let uri_path = if cfg!(windows) {
+        PathBuf::from(format!("/{}", root.to_str().unwrap().replace('\\', "/")))
+    } else {
+        root.clone()
+    };
+    let cwd = local_file_uri(&uri_path).unwrap();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let pane = app.__test_seed_tab("list");
+    let window = app.main_window_id.unwrap();
+    app.windows[&window].panes[&pane].parser.lock().resize(60, 3);
+    assert!(app.__test_advance_child_pane_parser(
+        window,
+        pane,
+        format!("\x1b]7;{cwd}\x1b\\src/a.rs、b.rs").as_bytes()
+    ));
+    for (col, member) in [(3, root.join("src/a.rs")), (10, root.join("b.rs"))] {
+        let snapshot = app.cell_target_at(window, pane, 0, col).unwrap();
+        let ResolvedCellTarget::Path(key) = snapshot.target else { panic!("path") };
+        assert_eq!(
+            probe_candidates(&key.candidates, classify_local_target)
+                .unwrap()
+                .candidate
+                .resolved_path,
+            literal
+        );
+        std::fs::remove_file(&literal).unwrap();
+        assert_eq!(
+            probe_candidates(&key.candidates, classify_local_target)
+                .unwrap()
+                .candidate
+                .resolved_path,
+            member
+        );
+        std::fs::write(&literal, "literal").unwrap();
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Long report paths resolve from the reporting pane under a spaced parent; removing the file changes the real probe result.
+#[test]
+fn report_paths_use_exact_spaced_pane_directory() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let root = native_test_root().join(format!(
+        "sonicterm-report-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    let directory = root.join("OneDrive - Microsoft/Desktop/AgentRelated/pax");
+    std::fs::create_dir_all(directory.join("reports/investigate-online-issue")).unwrap();
+    let uri_path = if cfg!(windows) {
+        PathBuf::from(format!("/{}", directory.to_str().unwrap().replace('\\', "/")))
+    } else {
+        directory.clone()
+    };
+    let cwd = local_file_uri(&uri_path).unwrap();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let pane = app.__test_seed_tab("report");
+    let window = app.main_window_id.unwrap();
+    app.windows[&window].panes[&pane].parser.lock().resize(160, 4);
+    for (row, extension) in ["md", "html"].into_iter().enumerate() {
+        let relative = format!(
+            "reports/investigate-online-issue/20260918T180000Z-skills-classification-flight.{extension}"
+        );
+        let file = directory.join(&relative);
+        std::fs::write(&file, "inert report").unwrap();
+        assert!(app.__test_advance_child_pane_parser(
+            window,
+            pane,
+            format!("\x1b]7;{cwd}\x1b\\({relative})，正文\r\n").as_bytes()
+        ));
+        let snapshot = app.cell_target_at(window, pane, row as u16, 12).unwrap();
+        let ResolvedCellTarget::Path(key) = snapshot.target else { panic!("path") };
+        let selected = probe_candidates(&key.candidates, classify_local_target).unwrap();
+        assert_eq!(selected.candidate.resolved_path, file);
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(
+            probe_candidates(&key.candidates, classify_local_target).unwrap_err(),
+            "path-error-missing"
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 /// Failed-click recovery copies only the target and reports real clipboard success or failure.
 #[test]
 fn failed_click_copies_target_without_error_text() {
@@ -619,6 +769,20 @@ fn structural_paths_native_interaction() {
         }
         fn about_to_wait(&mut self, el: &ActiveEventLoop) {
             self.app.about_to_wait(el);
+            let native_windows = self.app.windows.iter().filter_map(|(id, state)| {
+                let window = state.window.as_ref()?;
+                let RawWindowHandle::Win32(handle) = window.window_handle().ok()?.as_raw() else { return None };
+                let active_pane = state.tab_states.get(state.tabs.active_index())?.active_pane;
+                let pane = state.panes.get(&active_pane)?;
+                let parser = pane.parser.try_lock()?;
+                let rows = parser.grid().rows_iter().map(|row| row.iter().map(|c| c.ch).collect::<String>()).collect::<Vec<_>>();
+                Some(serde_json::json!({"hwnd":handle.hwnd.get(),"main":Some(*id)==self.app.main_window_id,"width":window.inner_size().width,"height":window.inner_size().height,"scale":window.scale_factor(),"tabs":state.tabs.len(),"rows":rows,"hidden":state.hidden}))
+            }).collect::<Vec<_>>();
+            std::fs::write(
+                self.root.join("windows.json"),
+                serde_json::to_vec(&native_windows).unwrap(),
+            )
+            .unwrap();
             if let Some(id) = self.app.main_window_id {
                 let window = &self.app.windows[&id];
                 let tab = &window.tab_states[window.tabs.active_index()];
@@ -649,7 +813,8 @@ fn structural_paths_native_interaction() {
                             "selection_rows": window.selection.as_ref().map(|s| {let (a,b)=s.normalized(); [a.0,b.0]}),
                             "padding_left": self.app.config.window.padding_left,
                             "preview": window.link_preview.as_ref().map(|p| &p.uri),
-                            "notification": window.notification.as_ref().map(|n| &n.message)});
+                            "notification": window.notification.as_ref().map(|n| &n.message),
+                            "links": parser.grid().rows_iter().enumerate().flat_map(|(row, cells)| cells.iter().enumerate().filter_map(move |(col, cell)| cell.hyperlink().map(|id| (row,col,id)))).filter_map(|(row,col,id)| parser.hyperlinks().lookup(id).map(|link| serde_json::json!({"row":row,"col":col,"uri":link.uri}))).collect::<Vec<_>>()});
                         std::fs::write(
                             self.root.join("window.json"),
                             serde_json::to_vec(&report).unwrap(),
@@ -678,6 +843,9 @@ fn structural_paths_native_interaction() {
     std::fs::create_dir_all(root.join("logs")).unwrap();
     let mut config = Config::default();
     config.terminal.shell = Some("cmd.exe".into());
+    if root.join("cold").exists() {
+        config.window.warm_window_pool = 0;
+    }
     config.window.cols = 110;
     config.window.rows = 28;
     config.logging.level = sonicterm_logging::LogLevel::Debug;
@@ -690,7 +858,14 @@ fn structural_paths_native_interaction() {
     let mut app = App::new_with_proxy(
         Theme::default(),
         config,
-        Keymap::default(),
+        Keymap::parse_resilient(
+            &format!(
+                "{}\n[[binding]]\nkeys = \"alt+shift+x\"\naction = \"move_tab_to_new_window\"\n",
+                include_str!("../../../../assets/keymaps/sonicterm-windows.toml")
+            ),
+            "native fixture",
+        )
+        .unwrap(),
         Some(event_loop.create_proxy()),
     );
     app.runtime_config_path = Some(root.join("config/sonicterm.toml"));
@@ -2499,6 +2674,7 @@ fn probe_candidate_at(display: &str, path: &str, start_col: u16, row: u64) -> Pa
         }],
         target: DetectedTarget::PathCandidate(display.into()),
         resolved_path: PathBuf::from(path),
+        missing_before: Vec::new(),
     }
 }
 
@@ -2772,6 +2948,7 @@ fn wrapped_probe_authorization_tracks_all_rows_and_fragments() {
         ],
         target: DetectedTarget::PathCandidate("src/long/path.rs".into()),
         resolved_path: PathBuf::from("/work/src/long/path.rs"),
+        missing_before: Vec::new(),
     };
     let mut key = probe_key("/work/src/long/path.rs", 20);
     key.pointed = AbsoluteCell { row: 20, col: 6 };
@@ -2946,11 +3123,13 @@ fn filesystem_selection_prefers_complete_spaced_entry() {
             spans: smallvec::smallvec![AbsoluteCellSpan { row: 0, start_col: 0, end_col: 20 }],
             target: DetectedTarget::BareName("OneDrive - Microsoft".into()),
             resolved_path: complete.clone(),
+            missing_before: Vec::new(),
         },
         PathProbeCandidate {
             spans: smallvec::smallvec![AbsoluteCellSpan { row: 0, start_col: 0, end_col: 8 }],
             target: DetectedTarget::BareName("OneDrive".into()),
             resolved_path: short,
+            missing_before: Vec::new(),
         },
     ];
 

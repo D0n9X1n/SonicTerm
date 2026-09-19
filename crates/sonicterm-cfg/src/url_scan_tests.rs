@@ -908,6 +908,7 @@ fn shell_quoted_spaced_names_produce_one_unwrapped_candidate() {
                 end: start + "ff ff".len(),
                 source_start: start - 1,
                 source_end: start + "ff ff".len() + 1,
+                missing_before: Vec::new(),
                 target: DetectedTarget::BareName("ff ff".into()),
             }]
         );
@@ -1156,7 +1157,6 @@ fn structured_paths_reject_ambiguous_or_malformed_input() {
         "'/tmp/My Folder\"",
         "prefix'/tmp/My Folder'",
         "'/tmp/My Folder'suffix",
-        "key='/tmp/My Folder'",
         "' /tmp/My Folder '",
         "\"/tmp/$HOME/file\"",
         "`/tmp/$(command)/file`",
@@ -1648,6 +1648,129 @@ fn uri_precedence_outranks_source_reference_parsing() {
             matches.iter().all(|matched| matches!(matched.target, DetectedTarget::Uri(_))),
             "non-URI provenance at column {col} in {text:?}: {matches:?}"
         );
+    }
+}
+
+/// A rooted log-field value owns its path without consuming the field key or neighboring assignments.
+#[test]
+fn log_field_rooted_values_keep_exact_pointer_ownership() {
+    let path = r"C:\Users\dotan\.copilot-cli\1.0.85\copilot.exe";
+    for text in [
+        format!(
+            r#"Copilot CLI version probe timed out path={path} probe="--version" timeout_seconds=5"#
+        ),
+        format!(r#"path="{path}" mode=ready"#),
+        format!("path={path}"),
+    ] {
+        let start = text.find(path).unwrap();
+        for offset in 0..path.len() {
+            let matches = target_candidates_at_char_col_for_style(
+                &text,
+                start + offset,
+                PathStyle::Windows,
+                true,
+            );
+            assert!(
+                matches.iter().any(|m| m.start == start
+                    && m.end == start + path.len()
+                    && m.target == DetectedTarget::PathCandidate(path.to_string())),
+                "{text}: {matches:?}"
+            );
+        }
+    }
+}
+
+/// Quoted fields permit spaces, but incomplete or concatenated values cannot authorize an inner path.
+#[test]
+fn log_field_quotes_reject_partial_values() {
+    let path = r"C:\My Folder\name=value.txt";
+    let text = format!("file=\"{path}\" next=done");
+    let start = text.find(path).unwrap();
+    let found = target_candidates_at_char_col_for_style(&text, start + 4, PathStyle::Windows, true);
+    assert!(found.iter().any(|m| m.start == start
+        && m.end == start + path.len()
+        && m.target == DetectedTarget::PathCandidate(path.into())));
+    for malformed in [format!("file=\"{path}"), format!("file=\"{path}\"tail")] {
+        let found = target_candidates_at_char_col_for_style(
+            &malformed,
+            start + 4,
+            PathStyle::Windows,
+            true,
+        );
+        assert!(!found.iter().any(|m| m.target == DetectedTarget::PathCandidate(path.into())));
+    }
+    let text = "key='/tmp/My Folder'";
+    let found = target_candidates_at_char_col_for_style(text, 8, PathStyle::Posix, true);
+    assert!(found.iter().any(|m| m.start == 5
+        && m.end == text.len() - 1
+        && m.target == DetectedTarget::PathCandidate("/tmp/My Folder".into())));
+    for text in ["key='src/file.rs'", "key='/tmp/file'tail", "prefix'/tmp/file'"] {
+        let col = text.find("file").unwrap();
+        assert!(
+            target_candidates_at_char_col_for_style(text, col, PathStyle::Posix, true).is_empty()
+        );
+    }
+    let literal = r"C:\work\name=value.txt";
+    assert!(target_candidates_at_char_col_for_style(literal, 15, PathStyle::Windows, true)
+        .iter()
+        .any(|m| m.target == DetectedTarget::PathCandidate(literal.into())));
+}
+
+/// Hyphens in filenames are not list separators, and a short second name keeps its own bare-name provenance.
+#[test]
+fn punctuation_list_does_not_invent_parent_directories() {
+    let text = "src/first.rs、second.rs";
+    let second = text.find("second").unwrap();
+    let col = text[..second].chars().count();
+    let found = target_candidates_at_char_col_for_style(text, col, PathStyle::Windows, true);
+    assert!(found
+        .iter()
+        .any(|m| m.start == second && m.target == DetectedTarget::BareName("second.rs".into())));
+    assert!(!found
+        .iter()
+        .any(|m| m.target == DetectedTarget::PathCandidate("src/second.rs".into())));
+    let literal = "src/first.rs-second.rs";
+    let found = target_candidates_at_char_col_for_style(literal, 6, PathStyle::Windows, true);
+    assert!(found.iter().any(|m| m.target == DetectedTarget::PathCandidate(literal.into())));
+    assert!(!found
+        .iter()
+        .any(|m| m.target == DetectedTarget::PathCandidate("src/first.rs".into())));
+}
+
+/// Independently enumerated spaced members carry the same literal guard even under candidate-budget pressure.
+#[test]
+fn list_guards_survive_spaced_candidates_and_caps() {
+    for prefix in ["", "one two three four five six seven "] {
+        let text = format!("{prefix}src/a.rs、 b.rs c d e f g h");
+        let start = text.find("b.rs").unwrap();
+        let col = text[..start].chars().count();
+        let found = target_candidates_at_char_col_for_style(&text, col, PathStyle::Windows, true);
+        let members = found
+            .iter()
+            .filter(|m| m.target == DetectedTarget::BareName("b.rs".into()))
+            .collect::<Vec<_>>();
+        assert!(!members.is_empty());
+        assert!(members.iter().all(|m| m.missing_before.iter().any(|literal|
+            matches!(literal, DetectedTarget::PathCandidate(value) if value.contains("src/a.rs、 b.rs")))));
+    }
+}
+
+/// List-member recognition must retain the complete literal candidate before any shorter filesystem alternative.
+#[test]
+fn punctuation_list_retains_literal_and_focused_member() {
+    for style in [PathStyle::Windows, PathStyle::Posix] {
+        for separator in ["、", ",", "，", ";"] {
+            let path = "crates/sonicterm-cfg/src/url_scan.rs";
+            let text = format!("{path}{separator}url_scan_tests.rs");
+            let found = target_candidates_at_char_col_for_style(&text, 3, style, true);
+            assert!(found.iter().any(|m| m.target == DetectedTarget::PathCandidate(text.clone())));
+            assert!(
+                found.iter().any(|m| m.start == 0
+                    && m.end == path.len()
+                    && m.target == DetectedTarget::PathCandidate(path.into())),
+                "{found:?}"
+            );
+        }
     }
 }
 
