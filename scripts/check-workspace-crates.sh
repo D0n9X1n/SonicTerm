@@ -8,6 +8,8 @@ cd "$repo_root"
 status=0
 python3 scripts/native-dependencies_tests.py || status=1
 python3 scripts/native-dependencies.py check || status=1
+python3 scripts/macos-bundle_tests.py || status=1
+python3 scripts/test-macos-package_tests.py || status=1
 
 echo "[workspace-gate] cargo test --workspace --lib --bins --tests --no-fail-fast"
 set +e

@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""Exercise a relocated macOS package without reading Homebrew runtime libraries."""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import json
+import os
+from pathlib import Path
+import plistlib
+import shutil
+import sys
+import uuid
+
+ROOT = Path(__file__).resolve().parent.parent
+SPEC = importlib.util.spec_from_file_location("smoke_runner", ROOT / "scripts/native-smoke-runner.py")
+RUNNER = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(RUNNER)
+FACES = {
+    "Regular": "RecMonoSt.Helens",
+    "Italic": "RecMonoSt.Helens-Italic",
+    "Bold": "RecMonoSt.Helens-Bold",
+    "BoldItalic": "RecMonoSt.Helens-BoldItalic",
+}
+DENY_BREW = '(version 1) (allow default) (deny file-read* (subpath "/opt/homebrew") (subpath "/usr/local"))'
+
+
+def run(command: list[str], state: Path, label: str, timeout: int = 60, env=None) -> bytes:
+    result = RUNNER.run_command(command, ROOT, timeout, env or clean_environment())
+    output = result.stdout + result.stderr
+    (state / (label + ".log")).write_bytes(output)
+    if result.returncode:
+        raise RuntimeError(f"{label} exited {result.returncode}: {output.decode(errors='replace')[-4000:]}")
+    return output
+
+
+def clean_environment() -> dict[str, str]:
+    return {key: value for key, value in os.environ.items()
+            if key != "NO_COLOR" and not key.startswith("DYLD_")}
+
+
+def size(path: Path) -> int:
+    return sum(p.stat().st_size for p in path.rglob("*") if p.is_file() and not p.is_symlink())
+
+
+def measure_font_savings(app: Path, state: Path) -> dict[str, int]:
+    measured = state / "measurement/SonicTerm.app"
+    shutil.copytree(app, measured, symlinks=True)
+    result = {}
+    for label in ("single", "duplicated"):
+        if label == "duplicated":
+            shutil.copytree(measured / "Contents/Resources/assets/fonts", measured / "Contents/Resources/Fonts")
+            plist = measured / "Contents/Info.plist"
+            info = plistlib.loads(plist.read_bytes())
+            info["ATSApplicationFontsPath"] = "Fonts"
+            plist.write_bytes(plistlib.dumps(info))
+            run(["/usr/bin/codesign", "--force", "--sign", "-", str(measured)], state, "measurement-sign")
+        image = state / (label + "-fonts.dmg")
+        run(["/usr/bin/hdiutil", "create", "-volname", "SonicTerm", "-srcfolder", str(measured),
+             "-ov", "-format", "UDZO", str(image)], state, label + "-measurement", 120)
+        result[label + "_dmg_bytes"] = image.stat().st_size
+    result["font_dmg_saved_bytes"] = result["duplicated_dmg_bytes"] - result["single_dmg_bytes"]
+    if result["font_dmg_saved_bytes"] <= 0:
+        raise RuntimeError("controlled font deduplication did not reduce the DMG")
+    shutil.rmtree(measured.parent)
+    return result
+
+
+def validate(app: Path, state: Path, dmg: Path | None, max_minimum: str) -> None:
+    executable = app / "Contents/MacOS/sonicterm-mac"
+    run([sys.executable, str(ROOT / "scripts/macos-bundle.py"), "verify", str(app), "--max-minimum-macos", max_minimum], state, "closure")
+    run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)], state, "signature")
+    info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+    if info.get("ATSApplicationFontsPath") != "assets/fonts":
+        raise RuntimeError("native registration does not use the canonical font directory")
+    fonts = app / "Contents/Resources/assets/fonts"
+    expected = {fonts / f"RecMonoSt.Helens-{face}.ttf" for face in FACES}
+    if set(app.rglob("*.ttf")) != expected:
+        raise RuntimeError("package must contain exactly one copy of each required font")
+    for font in expected:
+        if font.read_bytes() != (ROOT / "assets/fonts" / font.name).read_bytes():
+            raise RuntimeError(f"packaged font changed: {font.name}")
+    # A denied read must fail before trusting a sandboxed successful launch as isolation evidence.
+    protected = [str(path) for path in (Path("/opt/homebrew"), Path("/usr/local")) if path.is_dir()]
+    if not protected:
+        raise RuntimeError("Homebrew-denial control requires a present package-manager prefix")
+    for index, prefix in enumerate(protected):
+        control = RUNNER.run_command(["/bin/ls", prefix], ROOT, 10, clean_environment())
+        denied = RUNNER.run_command(["/usr/bin/sandbox-exec", "-p", DENY_BREW, "/bin/ls", prefix],
+                                    ROOT, 10, clean_environment())
+        (state / f"sandbox-canary-{index}.log").write_bytes(denied.stdout + denied.stderr)
+        if control.returncode != 0 or denied.returncode == 0:
+            raise RuntimeError(f"Homebrew-denial control did not distinguish access to {prefix}")
+    environment = RUNNER.smoke_environment(state / "runtime", clean_environment())
+    run(["/usr/bin/sandbox-exec", "-p", DENY_BREW, str(executable), "--runtime-smoke"],
+        state, "isolated-runtime", 45, environment)
+
+    # LaunchServices registration is tested in a copy; the shipping seal stays untouched.
+    probe = state / "FontRegistration.app"
+    shutil.copytree(app, probe, symlinks=True)
+    probe_bin = probe / "Contents/MacOS/package-probe"
+    run(["/usr/bin/xcrun", "clang", "-fobjc-arc", "-Wall", "-Wextra", "-Werror",
+         "-framework", "AppKit", "-framework", "CoreText",
+         str(ROOT / "scripts/macos-package-probe.m"), "-o", str(probe_bin)], state, "probe-build")
+    info["CFBundleExecutable"] = "package-probe"
+    info["CFBundleIdentifier"] = "org.sonicterm.packageprobe." + uuid.uuid4().hex
+    info["LSUIElement"] = True
+    info["ProbeExpectedFontsPath"] = "assets/fonts"
+    info["ProbeFonts"] = [{"File": f"RecMonoSt.Helens-{face}.ttf", "PostScriptName": name}
+                          for face, name in FACES.items()]
+    (probe / "Contents/Info.plist").write_bytes(plistlib.dumps(info))
+    run(["/usr/bin/codesign", "--force", "--sign", "-", str(probe)], state, "probe-sign")
+    cairo = probe / "Contents/Frameworks/libcairo.2.dylib"
+    run(["/usr/bin/sandbox-exec", "-p", DENY_BREW, str(probe_bin), "--cairo-only", str(cairo)],
+        state, "isolated-cairo", 20)
+    report = state / "native-fonts-cairo.log"
+    run(["/usr/bin/open", "-n", "-g", "-W", str(probe), "--args", str(report), str(cairo)],
+        state, "probe-launch", 25)
+    text = report.read_text()
+    if "RESULT fonts=4/4 cairo=PASS verdict=PASS" not in text:
+        raise RuntimeError("native registration or Cairo gradient failed: " + text)
+    result = {"app_bytes": size(app), "font_bytes": sum(p.stat().st_size for p in expected),
+              "font_files": 4, "framework_bytes": size(app / "Contents/Frameworks"),
+              "dmg_bytes": dmg.stat().st_size if dmg else None,
+              "architecture": run(["/usr/bin/lipo", "-archs", str(executable)], state, "architecture").decode().strip(),
+              "runtime_homebrew_denied": True, "cairo_homebrew_denied": True,
+              "minimum_macos": info["LSMinimumSystemVersion"],
+              "native_fonts": "4/4", "cairo_gradient": "PASS", "colr_glyph": "not exercised by probe"}
+    result.update(measure_font_savings(app, state))
+    (state / "package-evidence.json").write_text(json.dumps(result, indent=2) + "\n")
+    print(json.dumps(result))
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--app", type=Path)
+    source.add_argument("--dmg", type=Path)
+    parser.add_argument("--state-dir", type=Path, required=True)
+    parser.add_argument("--max-minimum-macos", default="14.0")
+    args = parser.parse_args()
+    state = args.state_dir.resolve()
+    state.mkdir(parents=True, exist_ok=False)
+    mount = state / "mounted"
+    try:
+        if args.dmg:
+            mount.mkdir()
+            run(["/usr/bin/hdiutil", "attach", "-readonly", "-nobrowse", "-mountpoint", str(mount),
+                 str(args.dmg.resolve())], state, "mount")
+            candidates = list(mount.glob("*.app"))
+            if len(candidates) != 1:
+                raise RuntimeError("DMG must contain exactly one application")
+            app = state / "installed/SonicTerm.app"
+            shutil.copytree(candidates[0], app, symlinks=True)
+        else:
+            app = args.app.resolve()
+        validate(app, state, args.dmg, args.max_minimum_macos)
+    finally:
+        if mount.is_mount():
+            run(["/usr/bin/hdiutil", "detach", str(mount)], state, "unmount")
+
+
+if __name__ == "__main__":
+    main()

@@ -34,6 +34,19 @@ fn info_plist_extraction_accepts_windows_line_endings() {
 }
 
 #[test]
+fn native_registration_and_runtime_share_one_font_directory() {
+    // Native font registration must resolve the same four faces as the runtime asset loader.
+    let xml = info_plist_xml();
+    let parseable =
+        xml.lines().filter(|line| !line.starts_with("<!DOCTYPE")).collect::<Vec<_>>().join("\n");
+    let document = Document::parse(&parseable).unwrap();
+    let plist = document.descendants().find(|node| node.has_tag_name("plist")).unwrap();
+    let root_dict = element_children(plist)[0];
+    assert_eq!(dict_value(root_dict, "ATSApplicationFontsPath").text(), Some("assets/fonts"));
+    assert!(!MACOS_DMG_SCRIPT.contains("Resources/Fonts"));
+}
+
+#[test]
 fn packaged_app_declares_one_alternate_shell_document_type() {
     let xml = info_plist_xml();
     let dtd = r#"<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">"#;

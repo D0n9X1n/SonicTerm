@@ -109,6 +109,46 @@ jobs:
             --log-file "$RUNNER_TEMP/sonicterm-macos-x86_64-smoke.log" \
             -- target/x86_64-apple-darwin/release/sonicterm-mac --runtime-smoke
 
+      # Packaging runs here, on the architecture it targets, so the bundle that
+      # ships is the one a host actually executed. Producing Intel bytes on an
+      # Apple Silicon packager would sign off on a load closure never run.
+      - name: Install packaging dependencies
+        timeout-minutes: 10
+        run: brew install create-dmg imagemagick
+
+      - name: Bake icons
+        timeout-minutes: 10
+        run: bash scripts/bake-icons.sh
+
+      - name: Verify x86_64 binary architecture
+        timeout-minutes: 5
+        run: |
+          file target/x86_64-apple-darwin/release/sonicterm-mac
+          test "$(lipo -archs target/x86_64-apple-darwin/release/sonicterm-mac)" = "x86_64"
+
+      - name: Build, validate, and register x86_64 dmg
+        timeout-minutes: 15
+        env:
+          # Declared floor for Intel, asserted as a ceiling. It is 15.0 because
+          # the Intel runner is macOS 15; raising it is a policy decision, so a
+          # bottle that pushes LC_BUILD_VERSION higher must fail rather than
+          # silently narrow the supported host set.
+          SONICTERM_MAX_MACOS_MINIMUM: "15.0"
+        run: |
+          bash scripts/make-macos-dmg.sh target/x86_64-apple-darwin/release/sonicterm-mac \
+            "${{ github.ref_name }}" mac-x86_64
+          python3 scripts/test-macos-package.py \
+            --dmg "dist/SonicTerm-${{ github.ref_name }}-mac-x86_64.dmg" \
+            --state-dir "$RUNNER_TEMP/sonicterm-release-package-x86_64" \
+            --max-minimum-macos "15.0"
+          python3 scripts/prepare-release-assets.py fragment \
+            --tag "${{ github.ref_name }}" \
+            --asset "dist/SonicTerm-${{ github.ref_name }}-mac-x86_64.dmg" \
+            --platform macos \
+            --arch x86_64 \
+            --kind dmg \
+            --output dist/macos-x86_64-dmg.asset.json
+
       - name: Upload macOS native smoke logs
         if: ${{ failure() }}
         timeout-minutes: 5
@@ -118,13 +158,17 @@ jobs:
           path: |
             ${{ runner.temp }}/sonicterm-macos-x86_64-smoke.log
             ${{ runner.temp }}/sonicterm-macos-x86_64-smoke/logs/**
+            ${{ runner.temp }}/sonicterm-release-package-x86_64/**
           if-no-files-found: ignore
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         timeout-minutes: 5
         with:
-          name: sonicterm-mac-x86_64
-          path: target/x86_64-apple-darwin/release/sonicterm-mac
+          name: macos-packaged-x86_64
+          path: |
+            dist/SonicTerm-${{ github.ref_name }}-mac-x86_64.dmg
+            dist/macos-x86_64-dmg.asset.json
+          if-no-files-found: error
 
   build-mac-aarch64:
     name: Build macOS aarch64 binary
@@ -161,6 +205,45 @@ jobs:
             --log-file "$RUNNER_TEMP/sonicterm-macos-aarch64-smoke.log" \
             -- target/aarch64-apple-darwin/release/sonicterm-mac --runtime-smoke
 
+      # Packaging runs here, on the architecture it targets, so the bundle that
+      # ships is the one a host actually executed. Producing Intel bytes on an
+      # Apple Silicon packager would sign off on a load closure never run.
+      - name: Install packaging dependencies
+        timeout-minutes: 10
+        run: brew install create-dmg imagemagick
+
+      - name: Bake icons
+        timeout-minutes: 10
+        run: bash scripts/bake-icons.sh
+
+      - name: Verify aarch64 binary architecture
+        timeout-minutes: 5
+        run: |
+          file target/aarch64-apple-darwin/release/sonicterm-mac
+          test "$(lipo -archs target/aarch64-apple-darwin/release/sonicterm-mac)" = "arm64"
+
+      - name: Build, validate, and register aarch64 dmg
+        timeout-minutes: 15
+        env:
+          # Declared floor for Apple Silicon, asserted as a ceiling: a bottle or
+          # SDK that raises LC_BUILD_VERSION fails here instead of quietly
+          # shipping a build that excludes macOS 14 hosts.
+          SONICTERM_MAX_MACOS_MINIMUM: "14.0"
+        run: |
+          bash scripts/make-macos-dmg.sh target/aarch64-apple-darwin/release/sonicterm-mac \
+            "${{ github.ref_name }}" mac-aarch64
+          python3 scripts/test-macos-package.py \
+            --dmg "dist/SonicTerm-${{ github.ref_name }}-mac-aarch64.dmg" \
+            --state-dir "$RUNNER_TEMP/sonicterm-release-package-aarch64" \
+            --max-minimum-macos "14.0"
+          python3 scripts/prepare-release-assets.py fragment \
+            --tag "${{ github.ref_name }}" \
+            --asset "dist/SonicTerm-${{ github.ref_name }}-mac-aarch64.dmg" \
+            --platform macos \
+            --arch aarch64 \
+            --kind dmg \
+            --output dist/macos-aarch64-dmg.asset.json
+
       - name: Upload macOS native smoke logs
         if: ${{ failure() }}
         timeout-minutes: 5
@@ -170,72 +253,58 @@ jobs:
           path: |
             ${{ runner.temp }}/sonicterm-macos-aarch64-smoke.log
             ${{ runner.temp }}/sonicterm-macos-aarch64-smoke/logs/**
+            ${{ runner.temp }}/sonicterm-release-package-aarch64/**
           if-no-files-found: ignore
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         timeout-minutes: 5
         with:
-          name: sonicterm-mac-aarch64
-          path: target/aarch64-apple-darwin/release/sonicterm-mac
+          name: macos-packaged-aarch64
+          path: |
+            dist/SonicTerm-${{ github.ref_name }}-mac-aarch64.dmg
+            dist/macos-aarch64-dmg.asset.json
+          if-no-files-found: error
 
   package-mac:
     name: Package macOS dmg
     runs-on: macos-14
-    timeout-minutes: 30
+    timeout-minutes: 20
     needs: [build-mac-x86_64, build-mac-aarch64]
-    env:
-      HOMEBREW_NO_AUTO_UPDATE: "1"
-      HOMEBREW_NO_INSTALL_CLEANUP: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 5
 
+      # Each .dmg was assembled, signed, and validated on the architecture it
+      # targets. This job only consolidates those bytes under the artifact name
+      # `publish` already consumes; repackaging here would rebuild the Intel
+      # bundle on an Apple Silicon host and discard the tested artifact.
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         timeout-minutes: 5
         with:
-          name: sonicterm-mac-x86_64
-          path: dist/x86_64
+          name: macos-packaged-aarch64
+          path: dist
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         timeout-minutes: 5
         with:
-          name: sonicterm-mac-aarch64
-          path: dist/aarch64
+          name: macos-packaged-x86_64
+          path: dist
 
-      - name: Verify macOS release binaries
+      # Presence and fragment metadata only. The sha256 each fragment records is
+      # re-derived from the bytes on disk by `consolidate` in `publish`, so a
+      # corrupted transfer fails there rather than passing silently here.
+      - name: Verify both architecture dmgs and fragment metadata
         timeout-minutes: 5
+        shell: bash
         run: |
-          chmod +x dist/x86_64/sonicterm-mac dist/aarch64/sonicterm-mac
-          file dist/x86_64/sonicterm-mac
-          file dist/aarch64/sonicterm-mac
-          test "$(lipo -archs dist/x86_64/sonicterm-mac)" = "x86_64"
-          test "$(lipo -archs dist/aarch64/sonicterm-mac)" = "arm64"
-
-      - name: Build icons
-        timeout-minutes: 10
-        run: |
-          brew install create-dmg imagemagick
-          bash scripts/bake-icons.sh
-
-      - name: Build and register dmg assets
-        timeout-minutes: 10
-        run: |
-          bash scripts/make-macos-dmg.sh dist/aarch64/sonicterm-mac "${{ github.ref_name }}" mac-aarch64
-          bash scripts/make-macos-dmg.sh dist/x86_64/sonicterm-mac "${{ github.ref_name }}" mac-x86_64
-          python3 scripts/prepare-release-assets.py fragment \
-            --tag "${{ github.ref_name }}" \
-            --asset "dist/SonicTerm-${{ github.ref_name }}-mac-aarch64.dmg" \
-            --platform macos \
-            --arch aarch64 \
-            --kind dmg \
-            --output dist/macos-aarch64-dmg.asset.json
-          python3 scripts/prepare-release-assets.py fragment \
-            --tag "${{ github.ref_name }}" \
-            --asset "dist/SonicTerm-${{ github.ref_name }}-mac-x86_64.dmg" \
-            --platform macos \
-            --arch x86_64 \
-            --kind dmg \
-            --output dist/macos-x86_64-dmg.asset.json
+          for arch in aarch64 x86_64; do
+            name="SonicTerm-${{ github.ref_name }}-mac-${arch}.dmg"
+            fragment="dist/macos-${arch}-dmg.asset.json"
+            test -f "dist/$name"
+            test -f "$fragment"
+            python3 -c "import json,sys; a=json.load(open(sys.argv[1]))['asset']; x={'platform':'macos','kind':'dmg','arch':sys.argv[2],'name':sys.argv[3],'path':sys.argv[3]}; bad=[k for k,v in x.items() if a.get(k)!=v]; sys.exit('fragment field mismatch in %s: %s' % (sys.argv[1],bad) if bad else 0)" "$fragment" "$arch" "$name"
+          done
+          ls -lh dist
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         timeout-minutes: 5

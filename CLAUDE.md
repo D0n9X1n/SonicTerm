@@ -118,7 +118,7 @@ scripts/rust-logic-coverage.sh
 
 **Run the list to the end before concluding anything.**
 `check-workspace-crates.sh` first runs the native-source verifier tests and offline
-`scripts/native-dependencies.py check`, then makes one
+`scripts/native-dependencies.py check`, plus the portable macOS bundle tests, then makes one
 `cargo test --workspace --lib --bins --tests --no-fail-fast` invocation; every
 phase runs even if an earlier phase fails. It
 includes integration-test binaries, avoids running library and binary tests a
@@ -199,6 +199,11 @@ cannot satisfy the required gate. The runner preserves `HOME`, removes inherited
 renamed, and reset titles for startup and warm-adopted windows; mismatches fail
 at the display boundary (exit `11`). Linux requires separate desktop evidence:
 winit's X11 title getter is unimplemented and its Wayland getter is only a cache.
+The macOS smoke shard runs on both Apple Silicon and Intel, packages on each
+native host, and validates the installed DMG's library closure, deployment floor,
+signatures, Homebrew-denied runtime/Cairo drawing, and exact bundled-font paths.
+It also measures a same-binary single/duplicate-font DMG pair. Release packaging
+stays on the matching architecture; the final macOS job collects verified DMGs.
 
 The Ubuntu 22.04 CI aggregate requires both the core-gate shard and the
 independent package/runtime shard. The package shard builds the shipping

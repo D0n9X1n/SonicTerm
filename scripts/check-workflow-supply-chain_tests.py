@@ -87,6 +87,25 @@ def findings_for(document: str, name: str = "ci.yml"):
         return checker.check(root)
 
 
+def job_block(workflow_name: str, job_name: str) -> str:
+    """Return one repository job's text, bounded by the next job key."""
+    text = (_HERE.parent / ".github" / "workflows" / workflow_name).read_text(
+        encoding="utf-8"
+    )
+    block = text.split(f"  {job_name}:\n", 1)[1]
+    return re.split(r"\n  (?=[a-z][a-z0-9_-]*:\n)", block, maxsplit=1)[0]
+
+
+def shell_commands(block: str) -> str:
+    """Join shell line-continuations so one invocation reads as one line.
+
+    `run:` blocks wrap long commands with a trailing backslash for legibility.
+    The contract under test is the command a runner executes, not where the
+    author happened to break the line, so reflowing must not turn a gate red.
+    """
+    return re.sub(r"[ \t]+", " ", re.sub(r"\\\n\s*", " ", block))
+
+
 def optional_feature_packages() -> dict[str, tuple[str, ...]]:
     """Return every workspace package that declares a non-default feature."""
     completed = subprocess.run(
@@ -684,6 +703,183 @@ class RepositoryTests(unittest.TestCase):
             self.assertIn("needs: [validate-release-tag]", block)
         self.assertIn("uses: actions/cache/restore@", text)
         self.assertNotIn("uses: actions/cache/save@", text)
+
+
+class MacPackageGateTests(unittest.TestCase):
+    """The macOS shipping artifact is the .dmg, so every gate must exercise that file."""
+
+    def test_ci_smoke_fans_out_over_both_mac_architectures_with_isolated_caches(self):
+        # One architecture's bundle cannot stand in for the other's: Intel and
+        # Apple Silicon resolve different Cairo and font binaries, and a shared
+        # cache key would let one leg restore the other's target directory.
+        job = job_block("ci.yml", "macos-smoke")
+        self.assertIn("name: macOS native runtime smoke (${{ matrix.arch }})", job)
+        self.assertIn("runs-on: ${{ matrix.runner }}", job)
+        self.assertIn("fail-fast: false", job)
+        self.assertIn("- runner: macos-14\n            arch: aarch64", job)
+        self.assertIn("- runner: macos-15-intel\n            arch: x86_64", job)
+        self.assertIn(
+            "shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-${{ matrix.runner }}", job
+        )
+        self.assertNotIn("shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-macos-14", job)
+        # Both legs upload from one job id, so an artifact name without the
+        # architecture collides and the second leg's evidence is discarded.
+        names = re.findall(r"(?m)^          name: (.+)$", job)
+        self.assertTrue(names, "no upload-artifact names found in macos-smoke")
+        for name in names:
+            with self.subTest(artifact=name):
+                self.assertIn("${{ matrix.arch }}", name)
+
+    def test_ci_smoke_validates_the_packaged_dmg_after_the_raw_binary_smoke(self):
+        # The raw smoke proves the build tree runs where Homebrew's Cairo is on
+        # the loader path; only the relocated, signed .dmg proves what ships.
+        job = job_block("ci.yml", "macos-smoke")
+        self.assertIn("brew install cairo pkg-config", job)
+        self.assertIn("-- target/release/sonicterm-mac --runtime-smoke", job)
+        self.assertIn(
+            "bash scripts/make-macos-dmg.sh target/release/sonicterm-mac ci "
+            "mac-${{ matrix.arch }}",
+            job,
+        )
+        self.assertIn(
+            '--dmg "dist/SonicTerm-ci-mac-${{ matrix.arch }}.dmg"', job
+        )
+        self.assertIn(
+            '--state-dir "$RUNNER_TEMP/sonicterm-macos-package-${{ matrix.arch }}"', job
+        )
+        self.assertLess(job.index("--runtime-smoke"), job.index("make-macos-dmg.sh"))
+        self.assertLess(job.index("make-macos-dmg.sh"), job.index("test-macos-package.py"))
+
+    def test_ci_package_validation_keeps_a_cold_run_bounded_budget(self):
+        # The validator builds and mounts a controlled DMG pair, each hdiutil
+        # pass bounded at 120s, so a 5-minute step truncates a cold CI run.
+        job = job_block("ci.yml", "macos-smoke")
+        step = job.split("- name: Validate packaged macOS dmg", 1)[1]
+        step = re.split(r"(?m)^      - ", step, maxsplit=1)[0]
+        self.assertIn("timeout-minutes: 8", step)
+
+    def test_release_builds_and_validates_each_dmg_on_its_own_architecture(self):
+        # Packaging Intel bytes on an Apple Silicon host cannot run the bundle
+        # it produced, so the load closure it signs off on is never executed.
+        contracts = (
+            ("build-mac-aarch64", "aarch64", "arm64", "aarch64-apple-darwin"),
+            ("build-mac-x86_64", "x86_64", "x86_64", "x86_64-apple-darwin"),
+        )
+        for job_name, arch, lipo_arch, target in contracts:
+            with self.subTest(job=job_name):
+                job = job_block("release.yml", job_name)
+                commands = shell_commands(job)
+                self.assertIn("brew install create-dmg imagemagick", commands)
+                self.assertIn("bash scripts/bake-icons.sh", commands)
+                binary = f"target/{target}/release/sonicterm-mac"
+                self.assertIn(f'test "$(lipo -archs {binary})" = "{lipo_arch}"', commands)
+                self.assertIn(
+                    f'bash scripts/make-macos-dmg.sh {binary} '
+                    f'"${{{{ github.ref_name }}}}" mac-{arch}',
+                    commands,
+                )
+                dmg = f"dist/SonicTerm-${{{{ github.ref_name }}}}-mac-{arch}.dmg"
+                self.assertIn(f'--dmg "{dmg}"', commands)
+                self.assertIn(f"--arch {arch}", commands)
+                self.assertIn(f"--output dist/macos-{arch}-dmg.asset.json", commands)
+                # Named outside `release-assets-*` on purpose: `publish` globs
+                # that prefix with merge-multiple, and a per-arch upload sharing
+                # it would land the same filenames twice in one directory.
+                self.assertIn(f"name: macos-packaged-{arch}", job)
+                self.assertNotIn(f"name: release-assets-macos-{arch}", job)
+                self.assertLess(job.index("--runtime-smoke"), job.index("make-macos-dmg.sh"))
+
+    def test_release_package_mac_consolidates_prebuilt_dmgs_without_repackaging(self):
+        # The aggregator keeps its job id so `publish` needs no change, but it
+        # must no longer package: re-running the packager here would rebuild the
+        # Intel bundle on an Apple Silicon host and discard the tested bytes.
+        job = job_block("release.yml", "package-mac")
+        self.assertIn("needs: [build-mac-x86_64, build-mac-aarch64]", job)
+        for arch in ("aarch64", "x86_64"):
+            with self.subTest(arch=arch):
+                self.assertIn(f"name: macos-packaged-{arch}", job)
+                self.assertIn(
+                    f"dist/SonicTerm-${{{{ github.ref_name }}}}-mac-{arch}.dmg", job
+                )
+                self.assertIn(f"dist/macos-{arch}-dmg.asset.json", job)
+        self.assertIn("name: release-assets-macos\n", job)
+        for removed in (
+            "brew install",
+            "make-macos-dmg.sh",
+            "bake-icons.sh",
+            "sonicterm-mac-x86_64",
+            "sonicterm-mac-aarch64",
+        ):
+            with self.subTest(removed=removed):
+                self.assertNotIn(removed, job)
+
+    def test_publish_glob_collects_one_upload_per_platform(self):
+        # `publish` downloads `release-assets-*` with merge-multiple into one
+        # directory. An intermediate upload matching that prefix would deliver
+        # the same filenames twice, so which bytes land becomes order-dependent.
+        text = (_HERE.parent / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        uploads = re.findall(r"(?m)^          name: (release-assets-\S*)$", text)
+        self.assertEqual(
+            sorted(uploads),
+            ["release-assets-linux", "release-assets-macos", "release-assets-windows"],
+        )
+        publish = job_block("release.yml", "publish")
+        self.assertIn("pattern: release-assets-*", publish)
+        self.assertIn("merge-multiple: true", publish)
+        for intermediate in ("macos-packaged-aarch64", "macos-packaged-x86_64"):
+            with self.subTest(artifact=intermediate):
+                self.assertFalse(intermediate.startswith("release-assets-"))
+                self.assertIn(f"name: {intermediate}", text)
+
+    def test_every_mac_package_gate_pins_an_explicit_deployment_ceiling(self):
+        # The floor is policy, not a reading. Asserting it as an explicit
+        # ceiling on both the packager env and the validator means a newer SDK
+        # or Homebrew bottle that raises LC_BUILD_VERSION fails the gate rather
+        # than silently shipping a build that excludes supported hosts.
+        # Apple Silicon ships a 14.0 floor, Intel 15.0, matching each runner.
+        self.assertIn(
+            'minimum: "14.0"', job_block("ci.yml", "macos-smoke")
+        )
+        self.assertIn(
+            'minimum: "15.0"', job_block("ci.yml", "macos-smoke")
+        )
+        smoke = job_block("ci.yml", "macos-smoke")
+        self.assertIn(
+            "SONICTERM_MAX_MACOS_MINIMUM: ${{ matrix.minimum }}", smoke
+        )
+        self.assertIn(
+            '--max-minimum-macos "${{ matrix.minimum }}"', shell_commands(smoke)
+        )
+
+        for job_name, ceiling in (
+            ("build-mac-aarch64", "14.0"),
+            ("build-mac-x86_64", "15.0"),
+        ):
+            with self.subTest(job=job_name):
+                job = job_block("release.yml", job_name)
+                self.assertIn(f'SONICTERM_MAX_MACOS_MINIMUM: "{ceiling}"', job)
+                self.assertIn(
+                    f'--max-minimum-macos "{ceiling}"', shell_commands(job)
+                )
+
+    def test_every_shipping_mac_gate_checks_the_package_not_only_the_binary(self):
+        # The regression this pins: a green `--runtime-smoke` on the build tree
+        # said nothing about the bundle users open, which is where the missing
+        # self-contained Cairo and font payload actually failed.
+        gates = (
+            ("ci.yml", "macos-smoke"),
+            ("release.yml", "build-mac-aarch64"),
+            ("release.yml", "build-mac-x86_64"),
+        )
+        for workflow_name, job_name in gates:
+            with self.subTest(workflow=workflow_name, job=job_name):
+                job = job_block(workflow_name, job_name)
+                self.assertIn("--runtime-smoke", job)
+                self.assertIn("python3 scripts/test-macos-package.py", job)
+                self.assertIn("--dmg ", job)
+                self.assertIn("--state-dir ", job)
 
 
 class CommandLineTests(unittest.TestCase):

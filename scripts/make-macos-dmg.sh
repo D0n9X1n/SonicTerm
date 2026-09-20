@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
 # Build a macOS .app bundle and wrap it in a .dmg.
-# Usage: scripts/make-macos-dmg.sh <path-to-binary> <version> [artifact-suffix]
+# Usage: scripts/make-macos-dmg.sh <binary> <version> [artifact-suffix] [--bundle-only]
 set -euo pipefail
 
 BIN="${1:?binary path required}"
 VERSION="${2:?version required}"
 ARTIFACT_SUFFIX="${3:-mac-local}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DIST="$ROOT/dist"
+DIST="${SONICTERM_PACKAGE_DIR:-$ROOT/dist}"
 APP="$DIST/SonicTerm.app"
+MODE="${4:-}"
+MAX_MINIMUM="${SONICTERM_MAX_MACOS_MINIMUM:-14.0}"
+if [ -n "$MODE" ] && [ "$MODE" != "--bundle-only" ]; then
+    printf 'unsupported packaging mode: %s\n' "$MODE" >&2
+    exit 2
+fi
 
 echo "==> Assembling $APP"
 rm -rf "$APP"
@@ -29,12 +35,6 @@ cp -R "$ROOT/assets/themes"  "$APP/Contents/Resources/assets/"
 cp -R "$ROOT/assets/keymaps" "$APP/Contents/Resources/assets/"
 cp -R "$ROOT/assets/icons"   "$APP/Contents/Resources/assets/"
 cp -R "$ROOT/assets/i18n"    "$APP/Contents/Resources/assets/"
-
-# Also expose bundled app fonts via the standard macOS app-font path.
-# SonicTerm loads assets/fonts itself, but ATSApplicationFontsPath lets
-# CoreText/AppKit resolve Rec Mono St.Helens from the app bundle too.
-mkdir -p "$APP/Contents/Resources/Fonts"
-cp "$ROOT/assets/fonts"/*.ttf "$APP/Contents/Resources/Fonts/"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -63,7 +63,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
         </dict>
     </array>
     <key>LSMinimumSystemVersion</key>   <string>14.0</string>
-    <key>ATSApplicationFontsPath</key>  <string>Fonts</string>
+    <key>ATSApplicationFontsPath</key>  <string>assets/fonts</string>
     <key>NSHighResolutionCapable</key>  <true/>
     <key>NSPrincipalClass</key>         <string>NSApplication</string>
 </dict>
@@ -72,8 +72,9 @@ PLIST
 
 for font in Regular Italic Bold BoldItalic; do
     test -f "$APP/Contents/Resources/assets/fonts/RecMonoSt.Helens-${font}.ttf"
-    test -f "$APP/Contents/Resources/Fonts/RecMonoSt.Helens-${font}.ttf"
 done
+
+python3 "$ROOT/scripts/macos-bundle.py" bundle "$APP" --max-minimum-macos "$MAX_MINIMUM"
 
 # Seal the fully-assembled bundle with an ad-hoc signature.
 #
@@ -86,8 +87,13 @@ done
 # "unidentified developer" prompt (right-click → Open, or strip quarantine).
 # See the Packaging wiki page for packaging and trust details.
 echo "==> Ad-hoc signing $APP (no Developer ID; not notarized)"
-codesign --force --deep --sign - "$APP"
-codesign --verify --strict --verbose=2 "$APP"
+codesign --force --sign - "$APP"
+codesign --verify --deep --strict --verbose=2 "$APP"
+python3 "$ROOT/scripts/macos-bundle.py" verify "$APP" --max-minimum-macos "$MAX_MINIMUM"
+
+if [ "$MODE" = "--bundle-only" ]; then
+    exit 0
+fi
 
 echo "==> Creating .dmg"
 DMG="$DIST/SonicTerm-${VERSION}-${ARTIFACT_SUFFIX}.dmg"
