@@ -220,9 +220,26 @@ jobs:
         run: scripts/rust-logic-coverage.sh
 
   macos-smoke:
-    name: macOS native runtime smoke
-    runs-on: macos-14
+    name: macOS native runtime smoke (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 55
+    strategy:
+      # Both legs must report: Intel and Apple Silicon resolve different Cairo
+      # and font binaries, so one architecture's result cannot stand in for the
+      # other's, and a cancelled sibling would hide which one regressed.
+      fail-fast: false
+      matrix:
+        include:
+          # `minimum` is the declared deployment floor for this architecture,
+          # asserted as a ceiling rather than read back from the build. A newer
+          # SDK or a Homebrew bottle raising LC_BUILD_VERSION must fail the gate
+          # and be decided deliberately, never raise the shipped floor silently.
+          - runner: macos-14
+            arch: aarch64
+            minimum: "14.0"
+          - runner: macos-15-intel
+            arch: x86_64
+            minimum: "15.0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         timeout-minutes: 5
@@ -237,7 +254,9 @@ jobs:
         timeout-minutes: 10
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-macos-14
+          # Keyed by runner: an x86_64 leg restoring the aarch64 target
+          # directory would rebuild anyway, and would poison the shared entry.
+          shared-key: ${{ env.CI_CACHE_NAMESPACE }}-unit-${{ matrix.runner }}
           add-job-id-key: false
           cache-workspace-crates: false
           save-if: false
@@ -255,19 +274,50 @@ jobs:
         run: |
           python3 scripts/native-smoke-runner.py \
             --timeout-seconds 45 \
-            --state-dir "$RUNNER_TEMP/sonicterm-macos-smoke" \
-            --log-file "$RUNNER_TEMP/sonicterm-macos-smoke.log" \
+            --state-dir "$RUNNER_TEMP/sonicterm-macos-smoke-${{ matrix.arch }}" \
+            --log-file "$RUNNER_TEMP/sonicterm-macos-smoke-${{ matrix.arch }}.log" \
             -- target/release/sonicterm-mac --runtime-smoke
+
+      # The step above proves the build tree runs where Homebrew's Cairo sits on
+      # the loader path. The two below prove the relocated, self-contained
+      # bundle does, which is the only artifact a user ever opens. create-dmg is
+      # deliberately not installed: the packager falls back to hdiutil, and the
+      # icon is a tracked asset, so no ImageMagick bake is needed here.
+      - name: Package macOS dmg for validation
+        timeout-minutes: 10
+        env:
+          SONICTERM_MAX_MACOS_MINIMUM: ${{ matrix.minimum }}
+        run: bash scripts/make-macos-dmg.sh target/release/sonicterm-mac ci mac-${{ matrix.arch }}
+
+      - name: Validate packaged macOS dmg
+        timeout-minutes: 8
+        run: |
+          python3 scripts/test-macos-package.py \
+            --dmg "dist/SonicTerm-ci-mac-${{ matrix.arch }}.dmg" \
+            --state-dir "$RUNNER_TEMP/sonicterm-macos-package-${{ matrix.arch }}" \
+            --max-minimum-macos "${{ matrix.minimum }}"
+
+      - name: Upload macOS package evidence
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          # Evidence and logs only. The validated .dmg is a CI-local build, not
+          # a release asset, and publishing it would invite use as one.
+          name: sonicterm-macos-package-evidence-${{ matrix.arch }}-${{ github.sha }}
+          path: ${{ runner.temp }}/sonicterm-macos-package-${{ matrix.arch }}/package-evidence.json
+          if-no-files-found: ignore
 
       - name: Upload macOS native smoke logs
         if: ${{ failure() }}
         timeout-minutes: 5
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: sonicterm-macos-smoke-logs-${{ github.sha }}
+          name: sonicterm-macos-smoke-logs-${{ matrix.arch }}-${{ github.sha }}
           path: |
-            ${{ runner.temp }}/sonicterm-macos-smoke.log
-            ${{ runner.temp }}/sonicterm-macos-smoke/logs/**
+            ${{ runner.temp }}/sonicterm-macos-smoke-${{ matrix.arch }}.log
+            ${{ runner.temp }}/sonicterm-macos-smoke-${{ matrix.arch }}/logs/**
+            ${{ runner.temp }}/sonicterm-macos-package-${{ matrix.arch }}/**
           if-no-files-found: ignore
 
   macos:

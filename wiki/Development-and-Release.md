@@ -147,8 +147,8 @@ features: St.Helens is a normal tracked asset and other fallback faces come from
 native discovery. On Windows, `AWS_LC_SYS_PREBUILT_NASM=1` selects aws-lc-sys's
 checked-in assembly objects, so the SSH feature gate does not depend on NASM or
 CMake being installed.
-`check-workspace-crates.sh` first runs the native-source verifier unit tests and
-its offline integrity check, then runs one fail-complete
+`check-workspace-crates.sh` first runs the native-source verifier unit tests,
+its offline integrity check, and portable macOS bundle tests, then runs one fail-complete
 `cargo test --workspace --lib --bins --tests --no-fail-fast` command for default
 features. Each phase runs even if an earlier phase fails. It covers every workspace library, binary, and integration-test target
 without repeating the unit and binary targets in a serial per-package loop.
@@ -246,8 +246,14 @@ workspace test gate, host probes, tooling tests, and real resource-baseline
 capture. Its feature shard runs Clippy, Rustdoc, and tests for all app and IO
 features on native macOS. Its independent coverage shard installs the pinned
 `cargo-llvm-cov` and runs the deterministic logic coverage gate. The restore-only
-`macos-smoke` shard builds the shipping release binary and requires its bounded
-native smoke.
+`macos-smoke` matrix builds shipping release binaries on macOS 14 Apple Silicon
+and macOS 15 Intel with distinct dependency-cache keys. Both lanes require the
+bounded raw-binary smoke, then build and mount a DMG on that same architecture.
+The installed bundle passes relative-library closure, signature, deployment-floor,
+Homebrew-denied runtime/Cairo drawing, and exact bundled-font registration checks;
+a controlled same-binary image pair records compressed font savings. The macOS
+aggregate requires both matrix lanes. Release jobs also package on their matching
+architecture; the final macOS artifact job collects already-validated DMGs.
 
 Windows first prepares static Cairo through vcpkg. It restores the binary cache,
 builds a cold miss, and saves that result immediately before the four dependent
@@ -402,9 +408,9 @@ reach package construction.
 flowchart TD
     tag["vX.Y.Z tag"]
     validate["verify exact release commit + successful main CI<br/>validate all package versions + release tooling"]
-    macx["build macOS x86_64 binary"]
-    maca["build macOS aarch64 binary"]
-    dmg["package and register two DMGs"]
+    macx["build, package and validate x86_64 DMG"]
+    maca["build, package and validate aarch64 DMG"]
+    dmg["collect and verify two DMGs"]
     msi["build, validate, and register x64 MSI"]
     linux["build, validate, smoke, and register deb + tar.gz"]
     manifest["consolidate fragments<br/>verify five required tuples and hashes"]
@@ -708,7 +714,8 @@ optional feature。它们覆盖应用与 IO 的 `ssh` 分支、`distro-defaults`
 实时 SSH 连接。字体栈没有可选 vendor feature：St.Helens 是普通的已跟踪资源，其它回退字体
 来自原生平台发现。Windows 上的 `AWS_LC_SYS_PREBUILT_NASM=1` 会选择 aws-lc-sys 已签入的汇编
 对象，因此 SSH feature gate 不依赖 runner 另行安装 NASM 或 CMake。
-`check-workspace-crates.sh` 先运行原生源码验证器的单元测试和离线完整性检查，再对默认
+`check-workspace-crates.sh` 先运行原生源码验证器的单元测试、离线完整性检查和可跨平台运行的
+macOS bundle 测试，再对默认
 feature 运行一次 fail-complete 的 `cargo test --workspace --lib --bins --tests --no-fail-fast`；
 即使前一阶段失败，后续阶段仍会执行。它覆盖全部
 workspace library、binary 和 integration-test target，且不会再用逐 package 串行循环重复执行
@@ -785,8 +792,13 @@ Watcher 运行期间，主 agent 只在基于当前默认分支的独立 worktre
 macOS core shard 运行源码策略检查、严格 Rustdoc、一次性 workspace 测试 gate、host probe、
 工具测试与真实 resource baseline 采集。feature shard 在原生 macOS 上对应用与 IO 的全部
 feature 运行 Clippy、Rustdoc 与测试。独立的 coverage shard 安装固定版本的
-`cargo-llvm-cov`，并运行确定性 logic coverage gate。只恢复缓存的 `macos-smoke` shard 会构建
-发布用 release 二进制，并要求其有界原生 smoke 成功。
+`cargo-llvm-cov`，并运行确定性 logic coverage gate。只恢复缓存的 `macos-smoke` 矩阵分别在
+macOS 14 Apple Silicon 和 macOS 15 Intel 上构建 release 二进制，使用不同依赖缓存键。
+两个 lane 都要求原始二进制的有界 smoke 成功，然后在相同架构主机生成并挂载 DMG。
+安装后的 bundle 验证相对动态库依赖、签名、部署下限、拒绝 Homebrew 读取时的应用/Cairo
+绘制，以及实际 bundle 字体注册；同一可执行文件的镜像对比记录压缩后字体节省量。
+macOS 汇总 gate 要求两个 lane 都成功。Release job 同样在对应架构打包，最终 macOS
+产物 job 只汇集已经验证的 DMG。
 
 Windows 先通过 vcpkg 准备静态 Cairo。它先恢复 binary cache，冷 miss 时完成构建，并在四个依赖
 shard 启动前立即保存结果。消费方为 Cairo 安装保留 12 分钟：托管镜像或 vcpkg 版本变化后，
@@ -907,9 +919,9 @@ release asset 工具，不会重新运行平台测试图。位于未审核分支
 flowchart TD
     tag["vX.Y.Z tag"]
     validate["验证精确 release commit 与成功 main CI<br/>核对全部 package 版本与 release 工具"]
-    macx["构建 macOS x86_64 binary"]
-    maca["构建 macOS aarch64 binary"]
-    dmg["打包并登记两个 DMG"]
+    macx["构建、打包并验证 x86_64 DMG"]
+    maca["构建、打包并验证 aarch64 DMG"]
+    dmg["汇集并验证两个 DMG"]
     msi["构建、验证并登记 x64 MSI"]
     linux["构建、验证、smoke 并登记 deb + tar.gz"]
     manifest["合并 fragment<br/>验证五个必需 tuple 与 hash"]

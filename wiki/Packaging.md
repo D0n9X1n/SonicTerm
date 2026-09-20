@@ -32,9 +32,15 @@ First-party packaging executables are direct children of `scripts/`.
 
 ### Requirements and command
 
-Build on the target macOS architecture. The current bundle declares macOS 14.0
-as its minimum. Install Cairo/pkg-config for the Rust build and `create-dmg` plus
-ImageMagick for packaging:
+Build and package on the target macOS architecture, on the same host whose
+Homebrew libraries linked the executable. The bundle's minimum macOS version is
+the maximum of 14.0 and the deployment targets of its executable and every
+bundled dylib. Official Apple Silicon packages support macOS 14+, and Intel
+packages support macOS 15+; CI enforces those explicit ceilings and refuses newer
+dependency floors. Check `LSMinimumSystemVersion` and
+`Resources/native-libraries.json` for the artifact's actual requirement. Official
+release packages are assembled on their architecture-specific CI runners. Install Cairo/pkg-config
+for the Rust build and `create-dmg` plus ImageMagick for packaging:
 
 ```bash
 brew install cairo pkg-config create-dmg imagemagick
@@ -72,16 +78,28 @@ The DMG contains `SonicTerm.app`:
 SonicTerm.app/Contents/
 ├── MacOS/sonicterm-mac
 ├── Info.plist
+├── Frameworks/*.dylib
 └── Resources/
     ├── assets/{fonts,themes,keymaps,icons,i18n}/
-    ├── Fonts/*.ttf
+    ├── licenses/
+    ├── native-libraries.json
     └── sonic.icns
 ```
 
 `Info.plist` records the supplied version, bundle id
-`com.d0n9x1n.sonicterm`, `ATSApplicationFontsPath=Fonts`, and alternate handlers
-for `public.shell-script` and `com.apple.terminal.shell-script`. The script
-verifies all four Rec Mono faces.
+`com.d0n9x1n.sonicterm`, `ATSApplicationFontsPath=assets/fonts`, and alternate handlers
+for `public.shell-script` and `com.apple.terminal.shell-script`. All four unchanged
+Rec Mono faces are stored once: the runtime and AppKit/CoreText share this path.
+
+`scripts/macos-bundle.py` recursively collects the executable's non-system dylib
+closure from installed Homebrew kegs, verifies architecture, rewrites loads to
+bundle-relative paths, and removes build-host rpaths. Required licenses, receipts,
+source/packaged hashes and resolved library versions accompany the bundle;
+missing attribution or unresolved dependencies stop packaging. System libraries
+remain supplied by macOS. Dylibs are individually signed before the final app
+seal, and the verifier checks the resulting closure and manifest. This does not
+change the source-pinned FreeType/HarfBuzz stack or require Homebrew on the user's
+Mac.
 
 After assembling all resources, the script applies and verifies an ad-hoc
 signature. It does not use an Apple Developer ID and does not notarize. A
@@ -93,6 +111,26 @@ CI and Release run each architecture's just-built `sonicterm-mac
 uses separate scratch config/log roots, preserves `HOME`, removes inherited
 `NO_COLOR`, and requires native window, renderer/device, live-grid PTY marker,
 later presentation, and the complete default warm-renderer lifecycle.
+
+Both Apple Silicon and Intel CI lanes also build a DMG on their native host and
+run `python3 scripts/test-macos-package.py --dmg <image> --state-dir <new-directory>`.
+The validator installs a read-only-mounted image into a scratch path, checks
+signatures and the dependency manifest, then exercises the app and Cairo drawing
+with Homebrew filesystem reads denied for those child processes. A native
+LaunchServices probe verifies all four font URLs point into the bundle, rather
+than accidentally finding installed copies. It checks basic Cairo gradient
+pixels; that probe is not an exhaustive COLR glyph test. A same-binary UDZO pair
+with single versus duplicated fonts reports actual compressed savings separately
+from logical file bytes and added Cairo-library bytes. No host libraries are
+moved or renamed. Logs and `package-evidence.json` retain the checks and sizes.
+
+`SONICTERM_PACKAGE_DIR` chooses an isolated output directory. The optional fourth
+argument `--bundle-only` assembles and verifies the app without creating a DMG.
+`SONICTERM_MAX_MACOS_MINIMUM` defaults to `14.0`; use `15.0` for the official Intel
+policy. A local developer may explicitly choose a higher ceiling for experiments
+with newer Homebrew bottles, but that artifact is not a supported release. Pass
+the same ceiling to the validator with `--max-minimum-macos`; it never rewrites
+Mach-O deployment targets to pretend compatibility.
 
 ## Windows package
 
@@ -290,8 +328,12 @@ Release tag 会增加 `v` 前缀。`scripts/prepare-release-assets.py check-vers
 
 ### 要求与命令
 
-请在目标 macOS 架构上构建。当前 bundle 声明最低 macOS 14.0。Rust 构建需要
-Cairo/pkg-config，打包需要 `create-dmg` 和 ImageMagick：
+请在目标 macOS 架构上构建和打包，并使用链接该程序时提供 Homebrew 库的同一主机。
+Bundle 的最低 macOS 版本取 14.0、可执行文件及全部内嵌 dylib 的部署目标中的最大值。
+正式 Apple Silicon 安装包支持 macOS 14+，Intel 安装包支持 macOS 15+；CI 强制检查
+这些显式上限，依赖要求更新系统时打包失败。请检查 `LSMinimumSystemVersion` 和
+`Resources/native-libraries.json` 获取产物的实际要求。正式发布包由对应架构的 CI runner 组装。Rust 构建需要 Cairo/pkg-config，打包需要
+`create-dmg` 和 ImageMagick：
 
 ```bash
 brew install cairo pkg-config create-dmg imagemagick
@@ -329,15 +371,25 @@ DMG 内包含 `SonicTerm.app`：
 SonicTerm.app/Contents/
 ├── MacOS/sonicterm-mac
 ├── Info.plist
+├── Frameworks/*.dylib
 └── Resources/
     ├── assets/{fonts,themes,keymaps,icons,i18n}/
-    ├── Fonts/*.ttf
+    ├── licenses/
+    ├── native-libraries.json
     └── sonic.icns
 ```
 
 `Info.plist` 写入传入的版本、bundle id `com.d0n9x1n.sonicterm`、
-`ATSApplicationFontsPath=Fonts`，并为 `public.shell-script` 和
-`com.apple.terminal.shell-script` 声明 alternate handler。脚本会检查四个 Rec Mono 字体。
+`ATSApplicationFontsPath=assets/fonts`，并为 `public.shell-script` 和
+`com.apple.terminal.shell-script` 声明 alternate handler。四个未经修改的 Rec Mono 字体
+仅保存一次，运行时和 AppKit/CoreText 共用同一路径。
+
+`scripts/macos-bundle.py` 从已安装的 Homebrew keg 递归收集可执行文件依赖的非系统 dylib，
+核对架构，将加载路径改为 bundle 内相对路径，并移除构建主机的 rpath。安装包附带必需的
+许可证、安装收据、源文件/打包文件摘要和实际库版本；来源信息缺失或依赖无法解析会使
+打包失败。系统库仍由 macOS 提供。各 dylib 先独立签名，再封装整个 app 的签名；验证器
+检查最终依赖集合和清单。这不改变源码固定的 FreeType/HarfBuzz 栈，也不要求用户安装
+Homebrew。
 
 所有资源组装完成后，脚本会施加并校验 ad-hoc 签名。它不使用 Apple Developer ID，也不
 做 notarize。下载的安装包可能显示标准的“无法验证开发者”提示；首次启动可使用 Finder
@@ -347,6 +399,21 @@ CI 与 Release 会在二进制进入 DMG 打包前，对每个架构刚构建的
 `sonicterm-mac --runtime-smoke` 运行必需原生 smoke。有界 wrapper 使用分开的临时
 config/log 根目录，保留 `HOME`，移除继承的 `NO_COLOR`，并要求原生窗口、渲染器/设备、
 实时 grid 中的 PTY marker、之后的呈现和完整默认预热渲染器生命周期。
+
+Apple Silicon 与 Intel CI lane 还会在各自原生主机生成 DMG，然后运行
+`python3 scripts/test-macos-package.py --dmg <image> --state-dir <new-directory>`。
+验证器将只读挂载镜像中的 app 复制到临时安装路径，检查签名和依赖清单，再针对子进程
+拒绝 Homebrew 文件读取，运行应用和 Cairo 绘制。原生 LaunchServices 探针核对四个字体
+URL 均指向 bundle，避免误用系统中已安装的同名字体。它验证基本 Cairo 渐变像素，不是
+完整的 COLR 字形测试。同一可执行文件分别使用单份/重复字体生成 UDZO 镜像，报告实际
+压缩后节省量，并与逻辑文件大小和新增 Cairo 库大小区分。不会移动或重命名主机库。
+日志及 `package-evidence.json` 保留检查和尺寸证据。
+
+`SONICTERM_PACKAGE_DIR` 可选择独立输出目录。第四个可选参数 `--bundle-only` 只组装和
+验证 app，不生成 DMG。`SONICTERM_MAX_MACOS_MINIMUM` 默认为 `14.0`，正式 Intel 策略
+使用 `15.0`。开发者可为使用较新 Homebrew bottle 的本地实验显式指定更高上限，但该产物
+不是受支持的正式发布包。验证器通过 `--max-minimum-macos` 接收相同上限，不会修改 Mach-O
+部署目标来伪装兼容性。
 
 ## Windows 安装包
 

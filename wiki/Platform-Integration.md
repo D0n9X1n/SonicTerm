@@ -102,9 +102,13 @@ tab-transfer path.
 
 ### App resources
 
-The bundle reads runtime assets from `Contents/Resources/assets`. The four
-`Rec Mono St.Helens` TTF files are also copied to `Contents/Resources/Fonts`, and
-`ATSApplicationFontsPath=Fonts` lets AppKit/CoreText resolve them.
+The bundle reads runtime assets from `Contents/Resources/assets`. Its four
+`Rec Mono St.Helens` faces are stored only in `assets/fonts`;
+`ATSApplicationFontsPath=assets/fonts` lets AppKit/CoreText resolve the same files.
+The package contains Cairo's non-system dylib closure in `Contents/Frameworks`
+with bundle-relative imports, plus licenses and provenance. Its minimum macOS
+version reflects the actual executable/library deployment targets, not merely
+the packaging host's architecture. See [Packaging](Packaging) for verification.
 
 ## Windows
 
@@ -333,9 +337,11 @@ macOS 的操作系统交接后端把序列化 `TabPayload` 写入 general NSPast
 
 ### App 资源
 
-Bundle 从 `Contents/Resources/assets` 读取运行时资源。四个
-`Rec Mono St.Helens` TTF 还会复制到 `Contents/Resources/Fonts`，并通过
-`ATSApplicationFontsPath=Fonts` 让 AppKit/CoreText 解析。
+Bundle 从 `Contents/Resources/assets` 读取运行时资源。四个 `Rec Mono St.Helens`
+字体仅保存在 `assets/fonts`，通过 `ATSApplicationFontsPath=assets/fonts` 让
+AppKit/CoreText 解析同一份文件。安装包在 `Contents/Frameworks` 中包含 Cairo 的非系统
+动态库依赖，使用 bundle 内相对加载路径，并附带许可证和来源清单。最低 macOS 版本反映
+可执行文件/库的实际部署目标，而不只是打包主机架构。验证方式见[打包](Packaging)。
 
 ## Windows
 

@@ -27,6 +27,10 @@ It aims to feel small, sharp, and quiet: no Electron shell, no heavyweight
 runtime, no required GUI preferences pane, and no global dotfile sprawl. User
 state lives under one directory: `~/.sonicterm`.
 
+macOS packages include their native libraries: Apple Silicon requires macOS 14+
+and Intel requires macOS 15+. See [Packaging](wiki/Packaging.md) for local-build
+compatibility and signing details.
+
 Need installation, configuration, keybindings, or theme authoring docs? Read the
 full bilingual docs in the repository-tracked [`wiki/`](wiki/) directory. The
 README is only the product overview: why SonicTerm exists, what it feels like,
