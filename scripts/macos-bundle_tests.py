@@ -161,7 +161,10 @@ class BundleTests(unittest.TestCase):
         # The loader's rpaths precede inherited executable rpaths, including transitive imports.
         pixman = self.library("pixman", "libpixman.1.dylib")
         cairo = self.library(loads=["@rpath/libpixman.1.dylib"], rpaths=[str(pixman.parent)])
-        self.link("@rpath/libcairo.2.dylib", rpaths=[str(cairo.parent), "/unused/host/path"])
+        # A host-native absolute path keeps this portable fixture valid on Windows drive roots too.
+        unused = self.root / "unused/host/path"
+        self.assertTrue(unused.is_absolute())
+        self.link("@rpath/libcairo.2.dylib", rpaths=[str(cairo.parent), str(unused)])
         bundle.bundle_app(self.app)
         bundle.verify_app(self.app)
         self.assertEqual(self.native.nodes[self.exe]["rpaths"], [])
