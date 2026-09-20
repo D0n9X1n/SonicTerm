@@ -5,6 +5,76 @@ use sonicterm_cfg::theme::Theme;
 use sonicterm_ui::command_palette::PaletteEntry;
 use winit::keyboard::{Key, NamedKey};
 
+/// About uses the originating window's green notification even if focus moves before activation.
+#[test]
+fn about_palette_shows_compiled_version_in_source_window_notification() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    let main = app.main_window_id.unwrap();
+    let child = app.__test_seed_child_window(&["child"]);
+    for (owner, other) in [(main, child), (child, main)] {
+        app.__test_set_frontmost_window(Some(owner));
+        app.run_action_for_window(&Action::OpenCommandPalette, owner);
+        app.__test_set_palette_query("About SonicTerm");
+        assert_eq!(app.command_palette.current(), Some(&PaletteEntry::About));
+        app.__test_set_frontmost_window(Some(other));
+        let before = std::time::Instant::now();
+        assert!(app.command_palette_handle_logical_key(&Key::Named(NamedKey::Enter)));
+        let after = std::time::Instant::now();
+        assert!(!app.command_palette.is_open());
+        assert_eq!(app.palette_attached_window, None);
+        assert_eq!(app.frontmost_window, Some(other));
+        let bubble = app.windows[&owner].notification.as_ref().expect("About notification");
+        assert_eq!(bubble.level, sonicterm_ui::overlays::NotificationLevel::Info);
+        assert_eq!(bubble.message, format!("SonicTerm {}", env!("CARGO_PKG_VERSION")));
+        let expires = bubble.expires_at.expect("standard notification expiry");
+        assert!(expires >= before + std::time::Duration::from_secs(5));
+        assert!(expires <= after + std::time::Duration::from_secs(5));
+        assert!(app.windows[&other].notification.is_none());
+        assert!(app.__test_drain_pty_writes().is_empty());
+        app.expire_notifications(expires);
+        assert!(app.windows[&owner].notification.is_none());
+    }
+}
+
+/// About remains available in READONLY and releases the palette without changing terminal mode or input.
+#[test]
+fn about_palette_notification_preserves_readonly_and_reopens_normally() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    app.__test_seed_tab("main");
+    let window_id = app.main_window_id.unwrap();
+    app.windows.get_mut(&window_id).unwrap().copy_mode =
+        Some(sonicterm_ui::copy_mode::CopyModeState::read_only_at((0, 0)));
+    app.run_action_for_window(&Action::OpenCommandPalette, window_id);
+    app.__test_set_palette_query("version");
+    app.refresh_command_palette_context();
+    let index = app
+        .command_palette
+        .visible()
+        .iter()
+        .position(|entry| **entry == PaletteEntry::About)
+        .unwrap();
+    assert!(app.command_palette.select_visible_index(index));
+    assert_eq!(app.command_palette.current(), Some(&PaletteEntry::About));
+    app.command_palette_handle_logical_key(&Key::Named(NamedKey::Enter));
+    assert!(!app.command_palette.is_open());
+    assert_eq!(
+        app.__test_main_notification_message(),
+        Some(format!("SonicTerm {}", env!("CARGO_PKG_VERSION")).as_str())
+    );
+    assert!(app.windows[&window_id].copy_mode.as_ref().unwrap().is_read_only());
+    assert!(app.__test_drain_pty_writes().is_empty());
+    app.run_action_for_window(&Action::OpenCommandPalette, window_id);
+    assert!(app.command_palette.is_open());
+    app.command_palette_handle_logical_key(&Key::Character("a".into()));
+    assert_eq!(app.command_palette.query(), "a");
+    app.command_palette_handle_logical_key(&Key::Named(NamedKey::Escape));
+    assert!(!app.command_palette.is_open());
+    assert!(app.__test_drain_pty_writes().is_empty());
+}
+
 #[test]
 fn reopening_tab_selector_in_another_window_selects_its_first_tab() {
     // A fresh selector must discard the previous window's selected TabId, in both directions.

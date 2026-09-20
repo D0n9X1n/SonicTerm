@@ -119,7 +119,10 @@ signatures and the dependency manifest, then exercises the app and Cairo drawing
 with Homebrew filesystem reads denied for those child processes. A native
 LaunchServices probe verifies all four font URLs point into the bundle, rather
 than accidentally finding installed copies. It checks basic Cairo gradient
-pixels; that probe is not an exhaustive COLR glyph test. A same-binary UDZO pair
+pixels; that probe is not an exhaustive COLR glyph test. Only the exact `open -W`
+exit-before-wait `kevent`/“No such process” error is accepted when the fresh report
+already ends with one complete passing verdict; other launch failures and timeouts
+still fail validation. A same-binary UDZO pair
 with single versus duplicated fonts reports actual compressed savings separately
 from logical file bytes and added Cairo-library bytes. No host libraries are
 moved or renamed. Logs and `package-evidence.json` retain the checks and sizes.
@@ -405,7 +408,9 @@ Apple Silicon 与 Intel CI lane 还会在各自原生主机生成 DMG，然后�
 验证器将只读挂载镜像中的 app 复制到临时安装路径，检查签名和依赖清单，再针对子进程
 拒绝 Homebrew 文件读取，运行应用和 Cairo 绘制。原生 LaunchServices 探针核对四个字体
 URL 均指向 bundle，避免误用系统中已安装的同名字体。它验证基本 Cairo 渐变像素，不是
-完整的 COLR 字形测试。同一可执行文件分别使用单份/重复字体生成 UDZO 镜像，报告实际
+完整的 COLR 字形测试。只有 `open -W` 在建立等待前进程已退出时产生的精确
+`kevent`/“No such process” 错误，且本次新报告已以唯一、完整的通过判定结束，才会被接受；
+其他启动失败和超时仍使验证失败。同一可执行文件分别使用单份/重复字体生成 UDZO 镜像，报告实际
 压缩后节省量，并与逻辑文件大小和新增 Cairo 库大小区分。不会移动或重命名主机库。
 日志及 `package-evidence.json` 保留检查和尺寸证据。
 

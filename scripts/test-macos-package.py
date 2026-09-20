@@ -67,6 +67,32 @@ def measure_font_savings(app: Path, state: Path) -> dict[str, int]:
     return result
 
 
+def run_font_probe(probe: Path, state: Path, cairo: Path) -> None:
+    report = state / "native-fonts-cairo.log"
+    if report.exists():
+        raise RuntimeError(f"native probe report already exists: {report}")
+    result = RUNNER.run_command(
+        ["/usr/bin/open", "-n", "-g", "-W", str(probe), "--args", str(report), str(cairo)],
+        ROOT, 25, clean_environment())
+    output = result.stdout + result.stderr
+    (state / "probe-launch.log").write_bytes(output)
+    wait_race = result.returncode == 1 and not result.stdout and result.stderr.strip() == (
+        b"Unable to block on applications (initial call to kevent() failed: No such process)")
+    if result.returncode and not wait_race:
+        raise RuntimeError(f"probe-launch exited {result.returncode}: {output.decode(errors='replace')[-4000:]}")
+    if not report.is_file():
+        raise RuntimeError(f"native probe report missing: {report}")
+    text = report.read_text()
+    lines = text.splitlines()
+    verdicts = [line for line in lines if line.startswith("RESULT ")]
+    passed = "RESULT fonts=4/4 cairo=PASS verdict=PASS"
+    if verdicts != [passed] or lines[-1] != passed or not text.endswith("\n"):
+        raise RuntimeError("native registration or Cairo gradient report has no unique final passing verdict: " + text)
+    if wait_race:
+        # open can lose its kevent target after the short-lived probe has flushed a complete verdict and exited.
+        print("probe-launch: completed report confirms success after open -W exit-before-wait race", file=sys.stderr)
+
+
 def validate(app: Path, state: Path, dmg: Path | None, max_minimum: str) -> None:
     executable = app / "Contents/MacOS/sonicterm-mac"
     run([sys.executable, str(ROOT / "scripts/macos-bundle.py"), "verify", str(app), "--max-minimum-macos", max_minimum], state, "closure")
@@ -114,12 +140,7 @@ def validate(app: Path, state: Path, dmg: Path | None, max_minimum: str) -> None
     cairo = probe / "Contents/Frameworks/libcairo.2.dylib"
     run(["/usr/bin/sandbox-exec", "-p", DENY_BREW, str(probe_bin), "--cairo-only", str(cairo)],
         state, "isolated-cairo", 20)
-    report = state / "native-fonts-cairo.log"
-    run(["/usr/bin/open", "-n", "-g", "-W", str(probe), "--args", str(report), str(cairo)],
-        state, "probe-launch", 25)
-    text = report.read_text()
-    if "RESULT fonts=4/4 cairo=PASS verdict=PASS" not in text:
-        raise RuntimeError("native registration or Cairo gradient failed: " + text)
+    run_font_probe(probe, state, cairo)
     result = {"app_bytes": size(app), "font_bytes": sum(p.stat().st_size for p in expected),
               "font_files": 4, "framework_bytes": size(app / "Contents/Frameworks"),
               "dmg_bytes": dmg.stat().st_size if dmg else None,

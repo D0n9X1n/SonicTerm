@@ -1165,7 +1165,7 @@ impl App {
     /// Mirrors [`Self::frontmost_kind`] but takes the id from the caller —
     /// used by [`Self::run_action_for_window`] to route a keyboard chord
     /// to the window that produced it.
-    fn kind_for(&self, id: WindowId) -> FrontmostKind {
+    pub(super) fn kind_for(&self, id: WindowId) -> FrontmostKind {
         if self.main_window_id == Some(id) && self.windows.contains_key(&id) {
             // When: main_window_id matches a live windows entry, native handle readiness cannot change its routing identity.
             return FrontmostKind::Main;
