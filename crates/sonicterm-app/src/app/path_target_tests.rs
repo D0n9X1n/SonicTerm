@@ -165,6 +165,122 @@ fn report_paths_use_exact_spaced_pane_directory() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[derive(Clone, Default)]
+struct PathDiagnosticLog(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for PathDiagnosticLog {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn capture_path_diagnostics(level: sonicterm_logging::LogLevel, action: impl FnOnce()) -> String {
+    let log = PathDiagnosticLog::default();
+    let writer = log.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_env_filter(sonicterm_logging::filter_for_level(level))
+        .with_writer(move || writer.clone())
+        .finish();
+    tracing::subscriber::with_default(subscriber, action);
+    let output = log.0.lock().unwrap().clone();
+    String::from_utf8(output).unwrap()
+}
+
+/// Failed explicit clicks log the current pane snapshot, never an old probe or another pane's directory.
+#[test]
+fn failed_path_diagnostics_preserve_clicked_pane_identity() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["first", "second"]);
+    let panes = app.__test_child_pane_ids(window).unwrap();
+    app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+        winit::keyboard::ModifiersState::SUPER
+    } else {
+        winit::keyboard::ModifiersState::CONTROL
+    };
+    for (index, pane) in panes.iter().copied().enumerate() {
+        let directory = if cfg!(windows) {
+            format!("/C:/diagnostic-{index}")
+        } else {
+            format!("/diagnostic-{index}")
+        };
+        let text = format!(
+            "\x1b]7;file://{directory}\x1b\\(reports/missing.md)，private-unrelated-output"
+        );
+        assert!(app.__test_advance_child_pane_parser(window, pane, text.as_bytes()));
+        let target = app.cell_target_at(window, pane, 0, 3).unwrap();
+        let ResolvedCellTarget::Path(key) = target.target else { panic!("path") };
+        let request =
+            app.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
+        let result =
+            PathProbeResult { request, selection: None, failure: Some("path-error-missing") };
+        assert!(app.windows.get_mut(&window).unwrap().path_probe.accept(&result, Some(&key)));
+        let log = capture_path_diagnostics(sonicterm_logging::LogLevel::Debug, || {
+            assert!(app.activate_target_at(window, pane, 0, 3));
+        });
+        assert!(log.contains("local path activation unverified"), "{log}");
+        assert!(log.contains(&format!("pane_id={pane}")), "{log}");
+        assert!(log.contains(&format!("window_id={window:?}")), "{log}");
+        assert!(log.contains("reason=\"path-error-missing\""), "{log}");
+        assert!(log.contains(&format!("cwd_revision={}", key.cwd_revision)), "{log}");
+        assert!(log.contains(&format!("diagnostic-{index}")), "{log}");
+        assert!(log.contains(&format!("{:?}", key.candidates[0].resolved_path)), "{log}");
+        assert!(!log.contains(&format!("diagnostic-{}", 1 - index)), "{log}");
+        assert!(!log.contains("private-unrelated-output"), "{log}");
+
+        let changed_directory = directory.replace("diagnostic", "changed");
+        assert!(app.__test_advance_child_pane_parser(
+            window,
+            pane,
+            format!("\x1b]7;file://{changed_directory}\x1b\\").as_bytes()
+        ));
+        let log = capture_path_diagnostics(sonicterm_logging::LogLevel::Debug, || {
+            assert!(app.activate_target_at(window, pane, 0, 3));
+        });
+        assert!(log.contains("reason=\"path-error-pending\""), "{log}");
+        assert!(log.contains(&format!("changed-{index}")), "{log}");
+        assert!(!log.contains("diagnostic-"), "{log}");
+        assert!(!log.contains("path-error-missing"), "{log}");
+    }
+}
+
+/// Default warning-level logging and unverified bare-name clicks never expose candidate paths.
+#[test]
+fn failed_path_diagnostics_remain_opt_in() {
+    let _serialised = crate::app::media::MEDIA_COUNTER_LOCK.lock();
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["diagnostics"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+        winit::keyboard::ModifiersState::SUPER
+    } else {
+        winit::keyboard::ModifiersState::CONTROL
+    };
+    let cwd = if cfg!(windows) { "file:///C:/diagnostic" } else { "file:///diagnostic" };
+    assert!(app.__test_advance_child_pane_parser(
+        window,
+        pane,
+        format!("\x1b]7;{cwd}\x1b\\reports/missing.md").as_bytes()
+    ));
+    let log = capture_path_diagnostics(sonicterm_logging::LogLevel::Warn, || {
+        assert!(app.activate_target_at(window, pane, 0, 3));
+    });
+    assert!(!log.contains("local path activation unverified"), "{log}");
+    assert!(!log.contains("diagnostic"), "{log}");
+    assert!(app.__test_advance_child_pane_parser(window, pane, b"\r\x1b[2Kmissing.md"));
+    let log = capture_path_diagnostics(sonicterm_logging::LogLevel::Debug, || {
+        assert!(!app.activate_target_at(window, pane, 0, 3));
+    });
+    assert!(!log.contains("local path activation unverified"), "{log}");
+}
+
 /// Failed-click recovery copies only the target and reports real clipboard success or failure.
 #[test]
 fn failed_click_copies_target_without_error_text() {

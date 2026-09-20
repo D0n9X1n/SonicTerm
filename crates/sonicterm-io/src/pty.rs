@@ -590,33 +590,55 @@ fn terminate_unix_session(session_id: u32) -> std::io::Result<()> {
     unsafe {
         libc::kill(-(session_id as libc::pid_t), libc::SIGKILL);
     }
-    for _ in 0..8 {
-        let members = unix_session_pids(session_id)?
-            .into_iter()
-            .filter(|pid| *pid != session_id && *pid != std::process::id())
-            .collect::<Vec<_>>();
-        if members.is_empty() {
-            // When: `members` is empty, every descendant is gone and session cleanup is complete.
-            return Ok(());
-        }
-        for pid in members {
+    terminate_session_members(
+        || {
+            Ok(unix_session_pids(session_id)?
+                .into_iter()
+                .filter(|pid| *pid != session_id && *pid != std::process::id())
+                .collect())
+        },
+        |pid| {
             // Recheck membership immediately before signalling.
             if
-            // SAFETY: `pid` was just enumerated as a live process; `getsid` only reads its session id.
+            // SAFETY: pid was just enumerated; getsid reads its session without changing process state.
             unsafe { libc::getsid(pid as libc::pid_t) } != session_id as libc::pid_t {
-                // When: `getsid` no longer matches, pid reuse makes signalling this process unsafe.
-                continue;
+                // When: getsid no longer matches session_id, pid reuse makes signalling this process unsafe.
+                return;
             }
-            // SAFETY: membership was rechecked immediately above; `kill` receives the member pid by value.
+            // SAFETY: membership was rechecked immediately above; kill receives the member pid by value.
             unsafe {
                 libc::kill(pid as libc::pid_t, libc::SIGKILL);
             }
+        },
+        || std::thread::sleep(Duration::from_millis(5)),
+    )
+}
+
+#[cfg(any(unix, test))]
+fn terminate_session_members(
+    mut members: impl FnMut() -> std::io::Result<Vec<u32>>,
+    mut signal: impl FnMut(u32),
+    mut pause: impl FnMut(),
+) -> std::io::Result<()> {
+    for _ in 0..8 {
+        let remaining = members()?;
+        if remaining.is_empty() {
+            // When: remaining is empty, every descendant is gone and session cleanup is complete.
+            return Ok(());
         }
-        std::thread::sleep(Duration::from_millis(5));
+        for pid in remaining {
+            signal(pid);
+        }
+        pause();
+    }
+    let remaining = members()?;
+    if remaining.is_empty() {
+        // When: remaining is empty after the last pause, the final signal completed within the existing attempt budget.
+        return Ok(());
     }
     Err(std::io::Error::new(
         std::io::ErrorKind::WouldBlock,
-        "PTY session still has live descendants after termination attempts",
+        format!("PTY session still has live descendants after termination attempts: {remaining:?}"),
     ))
 }
 

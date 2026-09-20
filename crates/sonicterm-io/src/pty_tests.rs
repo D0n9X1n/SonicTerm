@@ -818,6 +818,78 @@ fn a_clean_child_exit_becomes_observable_while_the_handle_lives() {
     drop(pty);
 }
 
+/// A descendant leaving during the last bounded pause must be observed before reporting failed termination.
+#[test]
+fn session_termination_observes_the_last_signal_before_failing() {
+    let pauses = std::cell::Cell::new(0);
+    let scans = std::cell::Cell::new(0);
+    let mut signals = Vec::new();
+    terminate_session_members(
+        || {
+            scans.set(scans.get() + 1);
+            Ok(if pauses.get() == 8 { vec![] } else { vec![42] })
+        },
+        |pid| signals.push(pid),
+        || pauses.set(pauses.get() + 1),
+    )
+    .expect("the last signal terminated the only member");
+    assert_eq!(signals, vec![42; 8]);
+    assert_eq!(pauses.get(), 8);
+    assert_eq!(scans.get(), 9);
+}
+
+/// A persistent descendant still fails after the existing budget and reports the final observed identity.
+#[test]
+fn session_termination_preserves_the_signal_budget_and_remaining_identity() {
+    let mut pauses = 0;
+    let mut signals = Vec::new();
+    let error = terminate_session_members(|| Ok(vec![42]), |pid| signals.push(pid), || pauses += 1)
+        .expect_err("a remaining member is not success");
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    assert!(error.to_string().contains("42"));
+    assert_eq!(signals, vec![42; 8]);
+    assert_eq!(pauses, 8);
+}
+
+/// Failure to read the final membership cannot authorize successful cleanup after the signal budget is exhausted.
+#[test]
+fn session_termination_propagates_final_confirmation_errors() {
+    let scans = std::cell::Cell::new(0);
+    let mut signals = Vec::new();
+    let mut pauses = 0;
+    let error = terminate_session_members(
+        || {
+            scans.set(scans.get() + 1);
+            if scans.get() == 9 {
+                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            } else {
+                Ok(vec![42])
+            }
+        },
+        |pid| signals.push(pid),
+        || pauses += 1,
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(scans.get(), 9);
+    assert_eq!(signals, vec![42; 8]);
+    assert_eq!(pauses, 8);
+}
+
+/// Empty sessions finish without signalling; unreadable membership never becomes a successful empty session.
+#[test]
+fn session_termination_preserves_empty_and_error_results() {
+    terminate_session_members(|| Ok(vec![]), |_| panic!("no member"), || panic!("no wait"))
+        .unwrap();
+    let error = terminate_session_members(
+        || Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+        |_| panic!("unknown member"),
+        || panic!("no wait"),
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+}
+
 #[test]
 fn linux_proc_stat_treats_zombie_and_dead_members_as_terminated() {
     // Protect session cleanup from waiting on non-runnable descendants that container PID 1 has not reaped.
