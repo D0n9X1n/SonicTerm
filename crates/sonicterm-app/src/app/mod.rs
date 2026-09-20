@@ -350,22 +350,29 @@ pub fn minimum_terminal_inner_size(
     winit::dpi::PhysicalSize::new(width.max(1.0) as u32, height.max(1.0) as u32)
 }
 
-/// Resolve one DPI transition to a bounded physical inner size.
-///
-/// The current physical size is projected through the old and new scales to
-/// preserve logical geometry. The live terminal minimum wins, while the
-/// destination monitor's available inner area caps the result so a low-to-high
-/// DPI move cannot create an unreachable native window.
+/// Select the scale that the platform uses to report its current physical inner size.
+#[must_use]
+fn dpi_transition_size_scale(stored_scale: f64, native_scale: f64) -> f64 {
+    if cfg!(target_os = "macos") {
+        // When: target_os is macos, AppKit already reports inner_size using its current backing scale.
+        native_scale
+    } else {
+        // When: target_os is not macos, native size retains the stored pre-transition scale contract.
+        stored_scale
+    }
+}
+
+/// Project an observed physical extent through its source scale, then apply terminal and monitor bounds.
 #[must_use]
 fn dpi_transition_inner_size(
     current: winit::dpi::PhysicalSize<u32>,
-    old_scale: f64,
+    source_scale: f64,
     new_scale: f64,
     minimum: winit::dpi::PhysicalSize<u32>,
     available_inner: winit::dpi::PhysicalSize<u32>,
 ) -> winit::dpi::PhysicalSize<u32> {
     let suggested =
-        current.to_logical::<f64>(old_scale.max(0.1)).to_physical::<u32>(new_scale.max(0.1));
+        current.to_logical::<f64>(source_scale.max(0.1)).to_physical::<u32>(new_scale.max(0.1));
     let upper_width = available_inner.width.max(minimum.width);
     let upper_height = available_inner.height.max(minimum.height);
     winit::dpi::PhysicalSize::new(
@@ -441,13 +448,18 @@ fn apply_window_dpi_transition(
     inner_size_writer: &mut InnerSizeWriter,
 ) -> Option<winit::dpi::PhysicalSize<u32>> {
     let old_scale = window.dpi_scale;
+    // A window without a renderer must retain the event scale for its later initialization.
     window.dpi_scale = dpi_scale;
     let native = window.window.as_ref()?.clone();
     let renderer = window.renderer.as_mut()?;
+    let native_scale = native.scale_factor();
     let old_inner = native.inner_size();
+    let size_scale = dpi_transition_size_scale(old_scale, native_scale);
+    let renderer_before = renderer.logical_size();
+    let cell_before = renderer.cell_size();
     renderer.set_scale_factor(dpi_scale as f32);
     let suggested =
-        old_inner.to_logical::<f64>(old_scale.max(0.1)).to_physical::<u32>(dpi_scale.max(0.1));
+        old_inner.to_logical::<f64>(size_scale.max(0.1)).to_physical::<u32>(dpi_scale.max(0.1));
 
     let (cell_w, cell_h) = renderer.cell_size();
     let minimum = minimum_terminal_inner_size(
@@ -468,7 +480,7 @@ fn apply_window_dpi_transition(
         return None;
     }
     let available = destination_available_inner_size(&native, old_scale, dpi_scale, minimum);
-    let target = dpi_transition_inner_size(old_inner, old_scale, dpi_scale, minimum, available);
+    let target = dpi_transition_inner_size(old_inner, size_scale, dpi_scale, minimum, available);
     if !renderer.try_resize(target.width, target.height) {
         // When: try_resize rejects target, leave the native writer untouched and await Resized.
         return None;
@@ -478,24 +490,35 @@ fn apply_window_dpi_transition(
         let _ = renderer.try_resize(old_inner.width, old_inner.height);
         tracing::warn!(
             ?error,
+            window_id = ?native.id(),
             old_scale,
             new_scale = dpi_scale,
+            native_scale,
+            size_scale,
             ?old_inner,
             ?target,
             "DPI transition size rejected"
         );
         return None;
     }
+    let renderer_after = renderer.logical_size();
     child_window::resize_visible_panes_in_child(window);
     window.ime_cursor_throttle.reset();
     tracing::info!(
+        window_id = ?native.id(),
         old_scale,
         new_scale = dpi_scale,
+        native_scale,
+        size_scale,
         ?old_inner,
         ?suggested,
         ?minimum,
         ?available,
         ?target,
+        ?renderer_before,
+        ?renderer_after,
+        ?cell_before,
+        cell_after = ?(cell_w, cell_h),
         "DPI transition synchronized"
     );
     window.request_redraw();

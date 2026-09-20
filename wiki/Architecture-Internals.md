@@ -213,10 +213,12 @@ correctness, not only speed.
   attenuate destination RGB independently in linear light, and use maximum
   channel weight for alpha. Images and color glyphs have higher branch priority.
 - A display-scale transition commits one physical inner size through winit's
-  event-scoped writer. That size preserves logical geometry where it fits, stays
-  above the 30×10 terminal minimum, and is capped by the destination monitor work
-  area; renderer surface, pane grids/PTYs, IME geometry, and redraw follow the
-  same target before Windows applies `WM_DPICHANGED`.
+  event-scoped writer. On macOS, the observed native size already uses AppKit's
+  current backing scale; convert from that scale, not the stored previous event
+  scale. Other platforms retain the stored-scale input contract. The target
+  preserves logical geometry and the 30×10 terminal minimum; Windows additionally
+  caps it to the destination monitor work area. Renderer surface, pane grids/PTYs,
+  IME geometry, and redraw follow the same target before the native size commit.
 
 The event-loop thread collects a complete frame without waiting on the VT
 worker. It uses `try_lock` for every active-tab parser and for required
@@ -690,9 +692,11 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
   presenter 或 wgpu 设备支持 `DUAL_SOURCE_BLENDING` 时才生效。实际 `off`/`rgb`/`bgr` 模式
   进入帧键。GPU 与 CPU presenter 都在应用覆盖率之前变换前景色，在线性光空间分别衰减目标
   RGB，并用最大通道权重计算 alpha。图像和彩色字形拥有更高分支优先级。
-- 显示缩放切换会通过 winit 的事件内 writer 一次提交一个物理 inner size。该尺寸在可容纳时
-  保持逻辑几何，不低于 30×10 终端下限，并受目标显示器 work area 限制；renderer surface、
-  pane grid/PTY、IME 几何与重绘都在 Windows 应用 `WM_DPICHANGED` 前跟随同一个目标。
+- 显示缩放切换会通过 winit 的事件内 writer 一次提交一个物理 inner size。macOS 观察到的
+  原生尺寸已使用 AppKit 当前 backing scale，因此从该比例转换，而不是从保存的上一次事件
+  比例转换。其他平台保留以保存比例解释输入尺寸的契约。目标保持逻辑几何与 30×10 终端下限；
+  Windows 还将其限制在目标显示器 work area 内。renderer surface、pane grid/PTY、IME 几何
+  与重绘都在原生尺寸提交前跟随同一个目标。
 
 事件循环线程获取完整帧时不会等待 VT 工作线程。它对活动标签页的每个解析器和所需内联图像
 存储使用 `try_lock`。任一锁不可用时，代码释放已经取得的所有保护对象，记录待重绘状态，

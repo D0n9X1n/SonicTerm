@@ -11,6 +11,109 @@ use super::*;
 use sonicterm_cfg::keymap::Direction;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+/// AppKit reports physical size at its current backing scale, even when the stored event scale is older.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_dpi_transition_preserves_current_native_size() {
+    let logical = winit::dpi::LogicalSize::new(800.0, 600.0);
+    for (stored, native, destination) in
+        [(1.0, 2.0, 2.0), (2.0, 1.0, 1.0), (1.0, 1.5, 1.5), (1.5, 2.0, 1.5), (2.0, 2.0, 2.0)]
+    {
+        let current = logical.to_physical::<u32>(native);
+        let target = dpi_transition_inner_size(
+            current,
+            dpi_transition_size_scale(stored, native),
+            destination,
+            winit::dpi::PhysicalSize::new(100, 100),
+            winit::dpi::PhysicalSize::new(u32::MAX, u32::MAX),
+        );
+        assert_eq!(
+            target,
+            logical.to_physical::<u32>(destination),
+            "stored={stored} native={native} destination={destination}"
+        );
+    }
+}
+
+/// Repeated AppKit scale changes preserve the same logical extent instead of compounding native width and height.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_dpi_transition_does_not_compound_round_trips() {
+    let mut logical = winit::dpi::LogicalSize::new(800.0, 600.0);
+    let initial = logical;
+    let mut stored = 1.0;
+    for native in [2.0, 1.0, 2.0, 1.0] {
+        let target = dpi_transition_inner_size(
+            logical.to_physical::<u32>(native),
+            dpi_transition_size_scale(stored, native),
+            native,
+            winit::dpi::PhysicalSize::new(100, 100),
+            winit::dpi::PhysicalSize::new(u32::MAX, u32::MAX),
+        );
+        logical = target.to_logical(native);
+        assert_eq!(logical, initial);
+        stored = native;
+    }
+}
+
+/// Physical-size source domains do not bypass terminal minimums or destination work-area caps.
+#[test]
+fn dpi_transition_preserves_bounds_in_both_size_domains() {
+    let minimum = winit::dpi::PhysicalSize::new(700, 500);
+    let available = winit::dpi::PhysicalSize::new(1800, 1000);
+    for source in [1.0, 2.0] {
+        let undersized = dpi_transition_inner_size(
+            winit::dpi::PhysicalSize::new(50, 40),
+            source,
+            2.0,
+            minimum,
+            available,
+        );
+        assert_eq!(undersized, minimum);
+        let oversized = dpi_transition_inner_size(
+            winit::dpi::PhysicalSize::new(3000, 2400),
+            source,
+            2.0,
+            minimum,
+            available,
+        );
+        assert_eq!(oversized, available);
+        let insufficient = dpi_transition_inner_size(
+            winit::dpi::PhysicalSize::new(50, 40),
+            source,
+            2.0,
+            minimum,
+            winit::dpi::PhysicalSize::new(600, 400),
+        );
+        assert_eq!(insufficient, minimum);
+    }
+}
+
+/// Non-AppKit platforms keep the stored-scale contract for their pre-transition native extents.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn dpi_transition_non_macos_retains_stored_scale() {
+    assert_eq!(dpi_transition_size_scale(1.0, 2.0), 1.0);
+    assert_eq!(dpi_transition_size_scale(2.0, 1.0), 2.0);
+}
+
+/// Native size must use the platform-selected scale in both the requested target and its diagnostic projection.
+#[test]
+fn dpi_transition_handler_uses_observed_size_domain() {
+    let source = include_str!("mod.rs");
+    let handler = source
+        .split("fn apply_window_dpi_transition(")
+        .nth(1)
+        .unwrap()
+        .split("pub fn apply_terminal_window_minimum(")
+        .next()
+        .unwrap();
+    assert!(handler.contains("dpi_transition_size_scale(old_scale, native_scale)"));
+    assert!(handler.contains("dpi_transition_inner_size(old_inner, size_scale, dpi_scale"));
+    assert!(handler.contains("old_inner.to_logical::<f64>(size_scale.max(0.1))"));
+    assert!(!handler.contains("old_inner.to_logical::<f64>(old_scale"));
+}
+
 /// Logical size snapshots survive source focus changes and preserve destination-DPI scaling without maximizing it.
 #[test]
 fn new_window_size_snapshot_validates_and_converts_source_geometry() {
