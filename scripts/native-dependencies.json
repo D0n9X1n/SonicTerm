@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "libraries": [
     {
       "name": "freetype",
@@ -13,16 +13,12 @@
         "root": "freetype-2.14.3"
       },
       "include": ["include/**", "src/**", "builds/**", "LICENSE.TXT", "README", "ChangeLog", "docs/FTL.TXT", "docs/GPLv2.TXT", "docs/LICENSE.TXT", "docs/CHANGES"],
-      "patches": [
+      "upstream_fixes": [
         {
-          "path": "scripts/native-patches/freetype-8fa928f1617aba65f45b00f0dcb109f077b7741e.patch",
-          "sha256": "7aed18afa6fdf5a934606d873145874e925270d2dc83e4bd640b02da8190d28c",
           "revision": "8fa928f1617aba65f45b00f0dcb109f077b7741e",
           "url": "https://gitlab.freedesktop.org/freetype/freetype/-/commit/8fa928f1617aba65f45b00f0dcb109f077b7741e"
         },
         {
-          "path": "scripts/native-patches/freetype-5a280ecde6f324de0d226261036e736e0cb49a71.patch",
-          "sha256": "fae1c96cd94b9ed5aafc7424f4b8894f2e235b4869a72b3cdbb684dedcea9d1a",
           "revision": "5a280ecde6f324de0d226261036e736e0cb49a71",
           "url": "https://gitlab.freedesktop.org/freetype/freetype/-/commit/5a280ecde6f324de0d226261036e736e0cb49a71"
         }
@@ -46,7 +42,7 @@
         "root": "harfbuzz-14.4.0"
       },
       "include": ["src/**", "COPYING", "AUTHORS", "NEWS", "README.md", "CONFIG.md", "SECURITY.md"],
-      "patches": [],
+      "upstream_fixes": [],
       "tree_sha256": "5c177bc1d1ba83d5f06d9ea1fe6bcdd69bdb853bac2490af34ac148de582c787",
       "version_check": {"path": "src/hb-version.h", "pattern": "HB_VERSION_STRING\\s+\"([^\"]+)\"", "value": "14.4.0"}
     },
@@ -62,7 +58,7 @@
         "root": "libpng-1.6.58"
       },
       "include": ["*.c", "*.h", "arm/**", "intel/**", "loongarch/**", "mips/**", "powerpc/**", "riscv/**", "scripts/pnglibconf.h.prebuilt", "LICENSE", "AUTHORS", "CHANGES", "README", "TRADEMARK"],
-      "patches": [],
+      "upstream_fixes": [],
       "tree_sha256": "75a542981ad0461cf449c448a20267256111f1fe61d2a4d537e4c865774303da",
       "version_check": {"path": "png.h", "pattern": "PNG_LIBPNG_VER_STRING\\s+\"([^\"]+)\"", "value": "1.6.58"}
     },
@@ -78,28 +74,20 @@
         "root": "zlib-1.3.2"
       },
       "include": ["*.c", "*.h", "LICENSE", "README", "ChangeLog", "FAQ"],
-      "patches": [
+      "upstream_fixes": [
         {
-          "path": "scripts/native-patches/zlib-09a1572aa624e5ddb6c075dc013880de70b1b9b9.patch",
-          "sha256": "938f646df871c1008a48c30a08dfd6b1c2c6448b0e7dcad196f50093381a2a5a",
           "revision": "09a1572aa624e5ddb6c075dc013880de70b1b9b9",
           "url": "https://github.com/madler/zlib/commit/09a1572aa624e5ddb6c075dc013880de70b1b9b9"
         },
         {
-          "path": "scripts/native-patches/zlib-e3dc0a85b7032e98380dec011bc8f2c2ee0d8fca.patch",
-          "sha256": "183bc8b9dd078a41a62de5c2d905d9b0196b45bc46f100d7e4147ec228207c74",
           "revision": "e3dc0a85b7032e98380dec011bc8f2c2ee0d8fca",
           "url": "https://github.com/madler/zlib/commit/e3dc0a85b7032e98380dec011bc8f2c2ee0d8fca"
         },
         {
-          "path": "scripts/native-patches/zlib-bbc2ccf3d0de267576b524b875c769a724a513b0.patch",
-          "sha256": "7d00ee29be5e636d30da2890961e83e35cee0b152333ecd97a46ae2e71eb5d47",
           "revision": "bbc2ccf3d0de267576b524b875c769a724a513b0",
           "url": "https://github.com/madler/zlib/commit/bbc2ccf3d0de267576b524b875c769a724a513b0"
         },
         {
-          "path": "scripts/native-patches/zlib-df84af25dc1942490e1d1c899a07619152a46148.patch",
-          "sha256": "110ff14375733173d8aa54574473424fbd7dfe4b81f1ca34a759c6fe14b15b14",
           "revision": "df84af25dc1942490e1d1c899a07619152a46148",
           "url": "https://github.com/madler/zlib/commit/df84af25dc1942490e1d1c899a07619152a46148"
         }

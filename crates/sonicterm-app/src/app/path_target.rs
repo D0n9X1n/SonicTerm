@@ -226,6 +226,8 @@ pub(crate) struct PathProbeState {
     current: Option<PathProbeKey>,
     selection: Option<PathProbeSelection>,
     failure: Option<&'static str>,
+    // Only the current epoch/key may complete, so one unvalidated result per window is sufficient.
+    pending_result: Option<PathProbeResult>,
     failed_click: Option<FailedTargetClick>,
 }
 
@@ -251,6 +253,7 @@ impl PathProbeState {
             self.current = None;
             self.selection = None;
             self.failure = None;
+            self.pending_result = None;
         }
         changed
     }
@@ -273,6 +276,7 @@ impl PathProbeState {
         self.current = Some(key.clone());
         self.selection = None;
         self.failure = None;
+        self.pending_result = None;
         Some(PathProbeRequest { epoch: self.epoch, key })
     }
 
@@ -295,6 +299,7 @@ impl PathProbeState {
             self.current = None;
             self.selection = None;
             self.failure = None;
+            self.pending_result = None;
             return false;
         }
         self.current = fresh.cloned();
@@ -2232,11 +2237,43 @@ impl App {
         viewport_row: u16,
         col: u16,
     ) -> Option<CellTargetSnapshot> {
-        let window = self.windows.get(&window_id)?;
-        let pane = window.panes.get(&pane_id)?;
-        let parser = pane.parser.try_lock()?;
+        self.cell_target_lookup(window_id, pane_id, viewport_row, col).ok().flatten()
+    }
+
+    fn cell_target_lookup(
+        &self,
+        window_id: WindowId,
+        pane_id: u64,
+        viewport_row: u16,
+        col: u16,
+    ) -> Result<Option<CellTargetSnapshot>, ()> {
+        let Some(pane) = self.windows.get(&window_id).and_then(|window| window.panes.get(&pane_id))
+        else {
+            // When: the owning pane is gone, this is genuine absence rather than transient parser contention.
+            return Ok(None);
+        };
+        let parser = pane.parser.try_lock().ok_or(())?;
+        Ok(self.cell_target_from_parser(
+            window_id,
+            pane_id,
+            viewport_row,
+            col,
+            &parser,
+            pane.viewport_top_abs,
+        ))
+    }
+
+    fn cell_target_from_parser(
+        &self,
+        window_id: WindowId,
+        pane_id: u64,
+        viewport_row: u16,
+        col: u16,
+        parser: &sonicterm_vt::vt::Parser,
+        viewport_top_abs: Option<u64>,
+    ) -> Option<CellTargetSnapshot> {
         let grid = parser.grid();
-        let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, pane.viewport_top_abs);
+        let view_top = GpuRenderer::resolved_view_top_abs_legacy(grid, viewport_top_abs);
         let absolute_row = view_top.checked_add(u64::from(viewport_row))?;
         let row = grid.row_at_abs(absolute_row)?;
         let cell = row.iter().nth(usize::from(col))?;
@@ -2484,7 +2521,7 @@ impl App {
         })
     }
 
-    fn pointer_target(&self, window_id: WindowId) -> Option<CellTargetSnapshot> {
+    fn pointer_target_cell(&self, window_id: WindowId) -> Option<(u64, u16, u16)> {
         let window = self.windows.get(&window_id)?;
         let (x, y) = (window.cursor_pos.0 as f32, window.cursor_pos.1 as f32);
         let (rendered_pane, row, col) = window.renderer.as_ref()?.pixel_to_pane_cell(x, y)?;
@@ -2499,11 +2536,58 @@ impl App {
             // When: `rendered_pane` is nonzero, retain the renderer-owned pane identity paired with `row` and `col`.
             rendered_pane
         };
-        self.cell_target_at(window_id, pane_id, row, col)
+        Some((pane_id, row, col))
     }
 
+    /// Refreshes pointer feedback without treating a busy parser as a missing target.
     pub(super) fn refresh_target_hover(&mut self, window_id: WindowId) {
-        let target = self.pointer_target(window_id);
+        let lookup = match self.pointer_target_cell(window_id) {
+            Some((pane_id, row, col)) => self.cell_target_lookup(window_id, pane_id, row, col),
+            None => Ok(None),
+        };
+        self.apply_target_lookup(window_id, lookup);
+    }
+
+    /// Resolves frame hover from the same held parser snapshots that will be presented.
+    pub(super) fn refresh_target_hover_from_parsers<'a>(
+        &mut self,
+        window_id: WindowId,
+        parsers: impl IntoIterator<Item = (u64, &'a sonicterm_vt::vt::Parser)>,
+    ) {
+        let target = self.pointer_target_cell(window_id).and_then(|(pane_id, row, col)| {
+            let (_, parser) = parsers.into_iter().find(|(id, _)| *id == pane_id)?;
+            let viewport = self.windows.get(&window_id)?.panes.get(&pane_id)?.viewport_top_abs;
+            self.cell_target_from_parser(window_id, pane_id, row, col, parser, viewport)
+        });
+        self.apply_target_hover(window_id, target);
+    }
+
+    fn apply_target_lookup(
+        &mut self,
+        window_id: WindowId,
+        lookup: Result<Option<CellTargetSnapshot>, ()>,
+    ) {
+        let Ok(target) = lookup else {
+            // When: parser contention prevents a fresh lookup, preserve the hint without extending modifier-only feedback.
+            if !self.open_modifier_held(window_id) {
+                if let Some(window) = self.windows.get_mut(&window_id) {
+                    let was_active =
+                        window.hovered_url.as_ref().is_some_and(|hover| hover.active());
+                    let had_preview = window.link_preview.take().is_some();
+                    if let Some(hover) = window.hovered_url.as_mut() {
+                        hover.cells.active = false;
+                    }
+                    if was_active || had_preview {
+                        window.hover_link = false;
+                        if let Some(native) = window.window.as_ref() {
+                            native.set_cursor(winit::window::CursorIcon::Default);
+                        }
+                        window.request_redraw();
+                    }
+                }
+            }
+            return;
+        };
         self.apply_target_hover(window_id, target);
     }
 
@@ -2536,6 +2620,10 @@ impl App {
                     hovered = target.hovered(modifier_held);
                 }
                 Some(target @ CellTargetSnapshot { target: ResolvedCellTarget::Path(key), .. }) => {
+                    // Accept before request can advance the epoch; pending results never authorize clicks without a fresh key.
+                    if let Some(result) = window.path_probe.pending_result.take() {
+                        window.path_probe.accept(&result, Some(key));
+                    }
                     probe_request = window.path_probe.request(key.clone());
                     if let Some(selection) =
                         window.path_probe.authorized_selection(key, modifier_held)
@@ -2615,19 +2703,21 @@ impl App {
         }
     }
 
+    /// Retains a current probe completion for validation against the next fresh hover snapshot.
     pub(super) fn handle_path_probe_finished(&mut self, result: PathProbeResult) {
         let window_id = result.request.key.window_id;
-        let fresh = self.pointer_target(window_id).and_then(|target| match target.target {
-            ResolvedCellTarget::Path(key) => Some(key),
-            ResolvedCellTarget::Uri(_) | ResolvedCellTarget::Rejected(_) => None,
-        });
-        let accepted = self
-            .windows
-            .get_mut(&window_id)
-            .is_some_and(|window| window.path_probe.accept(&result, fresh.as_ref()));
-        if accepted {
-            self.refresh_target_hover(window_id);
+        let Some(window) = self.windows.get_mut(&window_id) else {
+            // When: windows no longer contains window_id, discard the result with its original owner.
+            return;
+        };
+        if result.request.epoch != window.path_probe.epoch
+            || window.path_probe.current.as_ref() != Some(&result.request.key)
+        {
+            // When: result differs from the current epoch or key, it must not replace a newer pending completion.
+            return;
         }
+        window.path_probe.pending_result = Some(result);
+        window.request_redraw();
     }
 
     pub(super) fn open_modifier_held(&self, window_id: WindowId) -> bool {

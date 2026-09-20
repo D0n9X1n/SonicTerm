@@ -178,8 +178,17 @@ correctness, not only speed.
   cannot authorize a join. OSC 8 stays first; filesystem targets never use this path.
 - Changes to overlays or window chrome promote damage to the full surface.
   One hovered target carries up to eight ordered viewport fragments in the
-  frame key. Active recoloring salts only each intersecting row cache key;
-  underline geometry emits one clipped quad per fragment.
+  frame key. Hover-only changes on the accelerated path damage the old and new
+  pane rows, including glyph ink padding, rather than the whole window. Preview
+  and other chrome changes retain full-surface damage. Active recoloring salts
+  only each intersecting row cache key; underline geometry emits one clipped
+  quad per fragment. A busy event-time lookup preserves the existing hint but
+  drops modifier-only feedback when the modifier is released. Main and child
+  frames resolve hover from their held parser snapshots before presentation.
+  Each window retains at most one current-epoch filesystem-probe completion and
+  requests a frame to validate it against a fresh target, rather than discarding
+  it during parser contention. Clicks always require a fresh lookup, never
+  authorization from retained visuals or an unvalidated completion.
   Effective per-pane scrollbar opacity is window chrome: its quantized
   pane identity participates in the frame key, and a bucket change damages the full
   surface.
@@ -658,8 +667,14 @@ SonicTerm 会跨帧保留已经画好的像素。因此，损伤区域决定画�
   相同预览、span 和激活时的重新查找。不安全 cell、内部空白或括号、多个协议及混合换行
   类型不能授权连接。OSC 8 仍优先，文件系统目标绝不会使用该路径。
 - 界面浮层或窗口装饰变化会把损伤区域扩大到整个表面。一个 hover 目标最多携带 8 个有序
-  viewport 片段进入帧键。活动变色只给相交行的缓存 key 加 salt；下划线几何为每个片段发射
-  一个经过裁剪的 quad。每个窗格的有效滚动条透明度也属于窗口装饰：量化后的窗格身份进入帧键，
+  viewport 片段进入帧键。加速路径上仅 hover 变化时，只损伤旧、新目标所在窗格行及其字形
+  墨迹留白，不扩大到整个窗口；预览与其他窗口装饰变化仍使用完整表面损伤。活动变色只给
+  相交行的缓存 key 加 salt，下划线几何为每个片段发射一个经过裁剪的 quad。事件处理时解析器
+  繁忙则保留现有提示，但修饰键释放后立即移除仅由修饰键启用的反馈。主窗口与子窗口在呈现前
+  都从本帧已持锁的解析器快照重新解析 hover。每个窗口最多保留一个当前 epoch 的文件系统
+  probe 完成结果，并请求一帧用新目标验证它，而不是在解析器争用时丢弃。点击始终要求新的
+  查找，绝不以保留的视觉状态或尚未验证的完成结果授权。
+  每个窗格的有效滚动条透明度也属于窗口装饰：量化后的窗格身份进入帧键，
   桶值变化会损伤整个表面。
 - 已降级的 wgpu 帧只要有工作，就重画整个表面。Windows 降级呈现也会合成完整 CPU 表面。
   降级滚动条直接跳变并只设置一个空闲隐藏截止时间；加速滚动条请求有限的淡入淡出帧。

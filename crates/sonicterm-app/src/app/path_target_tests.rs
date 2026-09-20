@@ -1216,6 +1216,80 @@ fn hyperlink_hover_reaches_window_render_state() {
     assert!(!app.windows[&window].hover_link);
 }
 
+/// A busy parser is not proof that a hovered URL disappeared during a TUI output burst.
+#[test]
+fn busy_target_lookup_preserves_visuals_but_real_absence_clears_them() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["hover contention"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    assert!(app.__test_advance_child_pane_parser(window, pane, b"https://example.com/"));
+    let target = app.cell_target_at(window, pane, 0, 3);
+    app.apply_target_hover(window, target);
+    let before = app.windows[&window].hovered_url.clone();
+    assert!(before.is_some());
+    let parser = std::sync::Arc::clone(&app.windows[&window].panes[&pane].parser);
+    let guard = parser.lock();
+    let lookup = app.cell_target_lookup(window, pane, 0, 3);
+    assert!(lookup.is_err());
+    assert!(app.cell_target_at(window, pane, 0, 3).is_none());
+    app.apply_target_lookup(window, lookup);
+    assert_eq!(app.windows[&window].hovered_url, before);
+    drop(guard);
+    assert!(app.__test_advance_child_pane_parser(window, pane, b"\r\x1b[2Kplain"));
+    let target = app.cell_target_at(window, pane, 0, 3);
+    app.apply_target_hover(window, target);
+    assert!(app.windows[&window].hovered_url.is_none());
+}
+
+/// Releasing the open modifier during contention cannot leave a recolored, clickable-looking target.
+#[test]
+fn busy_target_lookup_drops_active_feedback_when_modifier_is_released() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["hover modifier"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    app.frontmost_window = Some(window);
+    app.windows.get_mut(&window).unwrap().modifiers = if cfg!(target_os = "macos") {
+        winit::keyboard::ModifiersState::SUPER
+    } else {
+        winit::keyboard::ModifiersState::CONTROL
+    };
+    assert!(app.__test_advance_child_pane_parser(window, pane, b"https://example.com/"));
+    let target = app.cell_target_at(window, pane, 0, 3);
+    app.apply_target_hover(window, target);
+    assert!(app.windows[&window].hovered_url.as_ref().unwrap().active());
+    assert!(app.windows[&window].link_preview.is_some());
+    let parser = std::sync::Arc::clone(&app.windows[&window].panes[&pane].parser);
+    let guard = parser.lock();
+    app.windows.get_mut(&window).unwrap().modifiers = winit::keyboard::ModifiersState::empty();
+    let lookup = app.cell_target_lookup(window, pane, 0, 3);
+    app.apply_target_lookup(window, lookup);
+    assert!(!app.windows[&window].hovered_url.as_ref().unwrap().active());
+    assert!(app.windows[&window].link_preview.is_none());
+    assert!(!app.windows[&window].hover_link);
+    assert!(!app.activate_target_at(window, pane, 0, 3));
+    drop(guard);
+}
+
+/// Frame collection revalidates retained visuals against the locked grid without recursively locking it.
+#[test]
+fn collected_parser_rejects_a_hover_after_content_changes() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["coherent hover"]);
+    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+    assert!(app.__test_advance_child_pane_parser(window, pane, b"https://example.com/"));
+    let target = app.cell_target_at(window, pane, 0, 3);
+    app.apply_target_hover(window, target);
+    let parser = std::sync::Arc::clone(&app.windows[&window].panes[&pane].parser);
+    let mut guard = parser.lock();
+    let lookup = app.cell_target_lookup(window, pane, 0, 3);
+    app.apply_target_lookup(window, lookup);
+    assert!(app.windows[&window].hovered_url.is_some());
+    guard.advance(b"\r\x1b[2Kplain");
+    let target = app.cell_target_from_parser(window, pane, 0, 3, &guard, None);
+    app.apply_target_hover(window, target);
+    assert!(app.windows[&window].hovered_url.is_none());
+}
+
 /// Parenthesized plain and OSC 8 URLs reach the same window hover renderer without underlining wrappers.
 #[test]
 fn parenthesized_url_hover_reaches_render_state() {
@@ -2825,6 +2899,111 @@ fn openable_result(request: PathProbeRequest) -> PathProbeResult {
         }),
         request,
     }
+}
+
+/// Both window roles retain completed probes until a fresh snapshot validates them, never authorizing clicks before that.
+#[test]
+fn completed_probe_waits_for_fresh_hover_without_reprobing() {
+    for main in [false, true] {
+        let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+        let window = app.__test_seed_child_window(&["pending probe"]);
+        if main {
+            app.main_window_id = Some(window);
+        }
+        let mut key = probe_key("/work/source.rs", 0);
+        key.window_id = window;
+        let request =
+            app.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
+        let epoch = request.epoch;
+        app.handle_path_probe_finished(openable_result(request));
+        assert!(!app.windows[&window].path_probe.authorized(&key, true));
+        app.apply_target_lookup(window, Err(()));
+        assert_eq!(app.windows[&window].path_probe.epoch, epoch);
+        app.apply_target_hover(
+            window,
+            Some(CellTargetSnapshot {
+                pane_id: key.pane_id,
+                hover_cells: None,
+                display: "./file".into(),
+                explicit_hyperlink: false,
+                target: ResolvedCellTarget::Path(key.clone()),
+            }),
+        );
+        assert!(app.windows[&window].path_probe.authorized(&key, true));
+        assert_eq!(app.windows[&window].path_probe.epoch, epoch);
+        assert!(app.windows.get_mut(&window).unwrap().path_probe.request(key).is_none());
+    }
+}
+
+/// The next snapshot must reject a completed result whose row changed and schedule a new probe.
+#[test]
+fn completed_probe_cannot_authorize_changed_content() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["changed probe"]);
+    let mut key = probe_key("/work/source.rs", 0);
+    key.window_id = window;
+    let request = app.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
+    let epoch = request.epoch;
+    app.handle_path_probe_finished(openable_result(request));
+    key.rows[0].fingerprint += 1;
+    app.apply_target_hover(
+        window,
+        Some(CellTargetSnapshot {
+            pane_id: key.pane_id,
+            hover_cells: None,
+            display: "./file".into(),
+            explicit_hyperlink: false,
+            target: ResolvedCellTarget::Path(key.clone()),
+        }),
+    );
+    let state = &app.windows[&window].path_probe;
+    assert!(!state.authorized(&key, true));
+    assert_ne!(state.epoch, epoch);
+    assert_eq!(state.current.as_ref(), Some(&key));
+}
+
+/// A delayed old completion cannot displace the current result or survive explicit invalidation.
+#[test]
+fn completed_probe_ignores_old_epochs_and_clears_on_leave() {
+    let mut app = App::new(Theme::default(), Config::default(), Keymap::default());
+    let window = app.__test_seed_child_window(&["probe epochs"]);
+    let mut key = probe_key("/work/source.rs", 0);
+    key.window_id = window;
+    let old = app.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
+    app.clear_target_hover(window);
+    let current = app.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
+    app.handle_path_probe_finished(openable_result(current));
+    app.handle_path_probe_finished(openable_result(old));
+    let target = CellTargetSnapshot {
+        pane_id: key.pane_id,
+        hover_cells: None,
+        display: "./file".into(),
+        explicit_hyperlink: false,
+        target: ResolvedCellTarget::Path(key.clone()),
+    };
+    app.apply_target_hover(window, Some(target.clone()));
+    assert!(app.windows[&window].path_probe.authorized(&key, true));
+    app.clear_target_hover(window);
+    let request = app.windows.get_mut(&window).unwrap().path_probe.request(key.clone()).unwrap();
+    app.handle_path_probe_finished(openable_result(request));
+    app.clear_target_hover(window);
+    app.apply_target_hover(window, Some(target));
+    assert!(!app.windows[&window].path_probe.authorized(&key, true));
+}
+
+/// A completed probe requests its own frame even after PTY output and pointer movement stop.
+#[test]
+fn completed_probe_schedules_its_validation_frame() {
+    let source = include_str!("path_target.rs");
+    let handler = source
+        .split("fn handle_path_probe_finished(")
+        .nth(1)
+        .unwrap()
+        .split("fn open_modifier_held(")
+        .next()
+        .unwrap();
+    assert!(handler.contains("request_redraw()"));
+    assert!(!handler.contains("pointer_target("));
 }
 
 /// Local previews wait for the exact probe and disappear on modifier release or invalidation.

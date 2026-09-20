@@ -431,8 +431,7 @@ impl App {
             }
 
             WindowEvent::RedrawRequested => {
-                // When: `RedrawRequested` arrives, revalidate pointer authorization so PTY, CWD, and viewport changes revoke stale targets.
-                self.refresh_target_hover(win_id);
+                // When: `RedrawRequested` arrives, collect one parser snapshot before resolving hover and presenting.
                 let process_privileged = self.process_privilege.is_privileged();
                 let was_dirty = self.input_dirty;
                 let pty_burst_snapshot = self.pty_burst_gen.load(Ordering::Acquire);
@@ -703,6 +702,10 @@ impl App {
                     return;
                 }
 
+                self.refresh_target_hover_from_parsers(
+                    win_id,
+                    guards.iter().map(|(id, parser, _)| (*id, &**parser)),
+                );
                 if let Some(window) = self.main_mut() {
                     window.coherent_frame_collected();
                 }

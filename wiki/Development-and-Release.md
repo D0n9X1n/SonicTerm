@@ -46,30 +46,35 @@ An exemption becomes stale as soon as the module gains its own sibling suite.
 
 `scripts/native-dependencies.json` is the machine-readable inventory for the
 four embedded native libraries. Each entry pins an upstream release commit,
-archive checksum, explicit source subset, ordered local patches with upstream
-commit identities and checksums, and the complete imported tree checksum.
-`scripts/native-patches/` holds unmodified upstream patch files, not shell
-programs. Required sources, headers, licenses, and changelogs are retained;
-unneeded upstream demos and CI trees are not build inputs. This is separate from
+archive checksum, explicit source subset, the upstream fixes carried on top of
+that release, and the complete imported tree checksum. An `upstream_fixes` record
+is provenance only: a full upstream revision and the URL to read it. The
+repository keeps no local patch files, because the vendored sources — not an
+archive plus a patch series — are the source of truth for what SonicTerm builds.
+Required sources, headers, licenses, and changelogs are retained; unneeded
+upstream demos and CI trees are not build inputs. This is separate from
 Cargo.lock and from platform-provided Cairo/Fontconfig.
 
-The verifier is Python-standard-library-only and never accesses the network:
+The verifier is Python-standard-library-only, offline, and check-only:
 
 ```sh
 python3 scripts/native-dependencies.py check
+python3 scripts/native-dependencies.py check --library freetype
 python3 scripts/native-dependencies_tests.py
-python3 scripts/native-dependencies.py stage freetype \
-  --archive /path/to/freetype-2.14.3.tar.xz --output /tmp/freetype-reviewed
 ```
 
-`stage` verifies the local archive and ordered patches, selects the recorded
-source subset, and writes a separate staging directory; it never replaces a
-repository tree or runs upstream build scripts. `check` rejects missing,
-modified, or additional vendor files, invalid patch hashes, and unpinned tree
-hashes. Source paths and raw bytes form the hash; executable modes and empty
-directories do not. `.gitattributes` disables newline conversion for vendor trees
-and patch files so Windows checks the same upstream bytes. A checksum detects
-drift; it does not establish publisher identity or prove absence of vulnerabilities.
+`check` rejects missing, modified, or additional vendor files, unpinned tree
+hashes, manifest entries that still declare the retired `patches` key, and
+`upstream_fixes` records that omit a revision or URL or name a local file.
+Source paths and raw bytes form the hash; executable modes and empty directories
+do not. `.gitattributes` disables newline conversion for vendor trees so Windows
+checks the same upstream bytes.
+
+A matching digest proves the working copy still holds the reviewed, committed
+bytes. It does not establish publisher identity and does not prove absence of
+vulnerabilities; that evidence comes from the recorded base release and from
+reading each recorded upstream fix at its source. There is no command that
+reconstructs a locally patched tree, and the tool does not pretend otherwise.
 
 For an update, use one reviewable library change at a time:
 
@@ -78,15 +83,17 @@ For an update, use one reviewable library change at a time:
    published checksum; record any verification limitation. A newer version is not
    automatically a fixed version. Avoid branch-head or unattended imports.
 2. Update that manifest entry with the immutable release identity and verified
-   archive hash. Record every required upstream patch separately; inspect its
-   prerequisites and keep its original bytes. Remove a patch only after proving
-   the selected release contains its fix. Keep unrelated native features enabled.
-3. Download the recorded archive separately, then stage it. A temporary null
-   `tree_sha256` permits computing a candidate hash during review; it must be
-   replaced by the independently checked result before `check` can pass. Compare
-   the staged tree against the archive plus patches and the current vendor tree,
-   then replace only that clean vendor directory. Review added/removed C/C++
-   files against `build.rs`; staging success is not a compilation result.
+   archive hash. Record every required upstream fix as a full revision and URL,
+   and inspect its prerequisites upstream. Drop a recorded fix only after proving
+   the selected release contains it. Keep unrelated native features enabled.
+3. Download the recorded archive separately and expand it outside the repository.
+   Import the recorded source subset by hand and apply each recorded upstream fix
+   from its upstream commit, comparing that commit against the release you are
+   importing rather than against a stored copy. Diff the result against the
+   current vendor tree, replace only that clean vendor directory, then record the
+   new `tree_sha256` from `check`'s reported digest after reviewing the diff.
+   Review added/removed C/C++ files against `build.rs`; an import is not a
+   compilation result.
 4. For FreeType/HarfBuzz, use `cargo install bindgen-cli --version 0.71.1 --locked`
    and run `bash scripts/regenerate-freetype.sh` or
    `bash scripts/regenerate-harfbuzz.sh`. `BINDGEN` can select a separately installed
@@ -100,13 +107,14 @@ For an update, use one reviewable library change at a time:
    raster output. Require exact-head platform CI; local macOS tests do not validate
    Windows code or Intel binaries. Update both wiki language halves in the same PR.
 
-The current FreeType patch pair fixes excess-coordinate handling after 2.14.3;
-the zlib patches cover invalid-distance decoding and the related gzip-write
-corrections after 1.3.2. The manifest records the full commits. These choices do
-not establish that every advisory is reachable through SonicTerm or that every
-remaining upstream defect is fixed. Recheck upstream releases/advisories when
-preparing each dependency update and before a release; updates remain reviewed
-changes rather than automatic merges.
+The vendored FreeType carries two upstream fixes for excess-coordinate handling
+after 2.14.3; the vendored zlib carries the invalid-distance decoding fix and the
+related gzip-write corrections after 1.3.2. Those fixes are already present in the
+imported sources, and the manifest records the full upstream commits for each one.
+These choices do not establish that every advisory is reachable through SonicTerm
+or that every remaining upstream defect is fixed. Recheck upstream
+releases/advisories when preparing each dependency update and before a release;
+updates remain reviewed changes rather than automatic merges.
 
 ## Local verification gate
 
@@ -633,36 +641,41 @@ crate 行为的 integration test。`sonicterm-ui` 与 `sonicterm-render-model` �
 ## 原生依赖维护
 
 `scripts/native-dependencies.json` 是四个内嵌原生库的机器可读清单。每个条目固定上游
-发布提交、归档校验和、明确的源码子集、按顺序应用的本地补丁及其上游提交和校验和，
-以及完整导入源码树的摘要。`scripts/native-patches/` 保存未经修改的上游补丁，不保存
-shell 程序。保留必需源码、头文件、许可证和变更日志；不需要的上游示例及 CI 目录不属于
-构建输入。这独立于 Cargo.lock 和由平台提供的 Cairo/Fontconfig。
+发布提交、归档校验和、明确的源码子集、在该发布之上携带的上游修复，以及完整导入源码树
+的摘要。`upstream_fixes` 记录只表示来源：完整的上游修订号和可供阅读的 URL。仓库不再
+保存本地补丁文件，因为 SonicTerm 构建的事实来源是已导入的第三方源码本身，而不是
+「归档加补丁序列」。保留必需源码、头文件、许可证和变更日志；不需要的上游示例及 CI
+目录不属于构建输入。这独立于 Cargo.lock 和由平台提供的 Cairo/Fontconfig。
 
-验证工具只使用 Python 标准库，不访问网络：
+验证工具只使用 Python 标准库，不访问网络，且只做检查：
 
 ```sh
 python3 scripts/native-dependencies.py check
+python3 scripts/native-dependencies.py check --library freetype
 python3 scripts/native-dependencies_tests.py
-python3 scripts/native-dependencies.py stage freetype \
-  --archive /path/to/freetype-2.14.3.tar.xz --output /tmp/freetype-reviewed
 ```
 
-`stage` 验证本地归档和按序补丁，选取清单规定的源码子集，写入独立暂存目录；它不会
-替换仓库源码树，也不会运行上游构建脚本。`check` 拒绝缺失、修改或额外的第三方文件、
-无效补丁摘要和未固定的源码树摘要。摘要包含路径和原始字节，不包含可执行位及空目录。
-`.gitattributes` 对第三方源码树和补丁关闭换行转换，使 Windows 检查相同的上游字节。
-校验和用于检测漂移，不等于发布者身份验证，也不证明不存在漏洞。
+`check` 拒绝缺失、修改或额外的第三方文件，拒绝未固定的源码树摘要，拒绝仍声明已废弃
+`patches` 键的清单条目，也拒绝缺少修订号或 URL、或指向本地文件的 `upstream_fixes`
+记录。摘要包含路径和原始字节，不包含可执行位及空目录。`.gitattributes` 对第三方源码树
+关闭换行转换，使 Windows 检查相同的上游字节。
+
+摘要一致只证明工作副本仍是经过审查并提交的那些字节；它不等于发布者身份验证，也不证明
+不存在漏洞，后者来自清单记录的基础发布版本，以及在上游逐条阅读所记录的修复。本工具没有
+任何命令可以重建带本地补丁的源码树，也不会假装具备该能力。
 
 每次以单个库为单位进行可审查的更新：
 
 1. 阅读官方发布和安全公告，包括新版本引入的回归。验证发布者/来源和可用签名或独立
    发布的校验和，记录验证限制。新版本不自动等于已修复版本，不使用浮动分支或无人审核导入。
-2. 用不可变发布身份和已验证的归档摘要更新清单条目。分别记录每个必需上游补丁，审查
-   前置条件并保留原始字节。仅在证明新版本包含修复后移除补丁，不禁用无关原生功能。
-3. 单独下载清单记录的归档，再执行暂存。审查期间允许临时将 `tree_sha256` 设为 null
-   以计算候选摘要；必须通过独立核对并填入结果后 `check` 才能成功。比较暂存目录、
-   归档加补丁的结果和当前第三方目录，再只替换干净的对应目录。核对新增/删除的 C/C++
-   文件和 `build.rs`；暂存成功不是编译成功。
+2. 用不可变发布身份和已验证的归档摘要更新清单条目。把每个必需上游修复记录为完整修订号
+   和 URL，并在上游审查其前置条件。仅在证明新版本已包含该修复后才移除记录，不禁用无关
+   原生功能。
+3. 单独下载清单记录的归档并在仓库之外解包。手工导入记录的源码子集，并依据上游提交本身
+   逐条应用所记录的上游修复——与所导入的发布版本比对，而不是与仓库内的副本比对。将结果
+   与当前第三方目录做差异比较，只替换干净的对应目录；审查该差异后，再把 `check` 输出的
+   摘要填入新的 `tree_sha256`。核对新增/删除的 C/C++ 文件和 `build.rs`；导入成功不是
+   编译成功。
 4. 更新 FreeType/HarfBuzz 时，用 `cargo install bindgen-cli --version 0.71.1 --locked`
    安装工具，再运行 `bash scripts/regenerate-freetype.sh` 或
    `bash scripts/regenerate-harfbuzz.sh`。`BINDGEN` 可指定单独安装的相同版本可执行文件。
@@ -673,10 +686,11 @@ python3 scripts/native-dependencies.py stage freetype \
    光栅输出。要求准确 head 的平台 CI；本地 macOS 测试不验证 Windows 代码或 Intel
    二进制。在同一 PR 更新 wiki 的两个语言部分。
 
-当前 FreeType 补丁对修复 2.14.3 之后的多余坐标处理；zlib 补丁修复 1.3.2 之后的无效
-距离解码及相关 gzip 写入问题。完整提交号在清单中。这些选择不证明每个公告都能从
-SonicTerm 触发，也不表示所有剩余上游缺陷均已修复。准备每次依赖更新和发布前都应重新
-检查上游版本/公告；更新始终经过审查，而不是自动合并。
+仓库内的 FreeType 带有 2.14.3 之后两项多余坐标处理修复；仓库内的 zlib 带有 1.3.2 之后
+的无效距离解码修复及相关 gzip 写入修复。这些修复已存在于导入的源码中，清单记录了每项
+修复的完整上游提交号。这些选择不证明每个公告都能从 SonicTerm 触发，也不表示所有剩余
+上游缺陷均已修复。准备每次依赖更新和发布前都应重新检查上游版本/公告；更新始终经过
+审查，而不是自动合并。
 
 ## 本地验证 gate
 

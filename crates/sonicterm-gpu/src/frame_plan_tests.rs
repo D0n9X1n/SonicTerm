@@ -35,6 +35,50 @@ fn link_preview_changes_repaint_full_surface() {
     }
 }
 
+/// Hover-only transitions repaint both old and new rows without invalidating unrelated window pixels.
+#[test]
+fn hover_only_damage_stays_within_its_pane_rows() {
+    let baseline = FramePlan::build(facts(false), [pane(7, 1)], None);
+    let mut shown = facts(false);
+    shown.window.hovered_url_cells = HoveredUrlCells::single(7, 1, 1, 5, false);
+    let first = FramePlan::build(shown.clone(), [pane(7, 1)], Some(&baseline.key));
+    assert_eq!(first.damage, PixelRect { x: 0, y: 22, w: 100, h: 20 });
+    shown.window.hovered_url_cells = HoveredUrlCells::single(7, 2, 1, 5, true);
+    let moved = FramePlan::build(shown, [pane(7, 1)], Some(&first.key));
+    assert_eq!(moved.damage, PixelRect { x: 0, y: 22, w: 100, h: 40 });
+    let cleared = FramePlan::build(facts(false), [pane(7, 1)], Some(&moved.key));
+    assert_eq!(cleared.damage, PixelRect { x: 0, y: 42, w: 100, h: 20 });
+}
+
+/// Hover row damage includes ink overhang but stays out of a neighboring pane; degradation still repaints fully.
+#[test]
+fn hover_damage_preserves_pane_ink_and_degraded_rules() {
+    for degraded in [false, true] {
+        let mut base_facts = facts(degraded);
+        base_facts.vertical_ink_pad = 3.0;
+        let mut neighbor = pane(9, 1);
+        neighbor.rect.x = 100;
+        neighbor.is_active = false;
+        let baseline = FramePlan::build(base_facts.clone(), [pane(7, 1), neighbor.clone()], None);
+        base_facts.window.hovered_url_cells = HoveredUrlCells::single(7, 1, 1, 5, false);
+        let shown = FramePlan::build(
+            base_facts.clone(),
+            [pane(7, 1), neighbor.clone()],
+            Some(&baseline.key),
+        );
+        assert_eq!(
+            shown.damage,
+            if degraded { baseline.damage } else { PixelRect { x: 0, y: 19, w: 100, h: 26 } }
+        );
+        let same =
+            FramePlan::build(base_facts.clone(), [pane(7, 1), neighbor.clone()], Some(&shown.key));
+        assert_eq!(same.mode, RenderMode::Noop);
+        base_facts.window.palette_hash = 1;
+        let overlay = FramePlan::build(base_facts, [pane(7, 1), neighbor], Some(&shown.key));
+        assert_eq!(overlay.damage, baseline.damage);
+    }
+}
+
 /// Whole text rows stay against bottom padding as the pane grows, without changing its outer rectangle.
 #[test]
 fn bottom_alignment_moves_only_fractional_row_slack() {
@@ -286,7 +330,6 @@ fn window_identity_mutations_require_full_repaint() {
         |w| w.close_override = 1,
         |w| w.broadcast_participants_hash = 1,
         |w| w.inline_media_hash = 1,
-        |w| w.hovered_url_cells = HoveredUrlCells::single(7, 0, 0, 1, true),
         |w| w.process_privileged = true,
         |w| w.subpixel_aa = SubpixelAaMode::Rgb,
         |w| w.background[3] = 0.5_f64.to_bits(),
