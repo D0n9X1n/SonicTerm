@@ -5,6 +5,9 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::unreadable_literal)]
 #![allow(clippy::upper_case_acronyms)]
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod lib_tests;
 
 pub type hb_bool_t = ::std::os::raw::c_int;
 pub type hb_codepoint_t = u32;
@@ -260,6 +263,10 @@ pub enum hb_script_t {
     HB_SCRIPT_SUNUWAR = 1400204917,
     HB_SCRIPT_TODHRI = 1416586354,
     HB_SCRIPT_TULU_TIGALARI = 1416983655,
+    HB_SCRIPT_BERIA_ERFE = 1113944678,
+    HB_SCRIPT_SIDETIC = 1399415924,
+    HB_SCRIPT_TAI_YO = 1415674223,
+    HB_SCRIPT_TOLONG_SIKI = 1416588403,
     HB_SCRIPT_INVALID = 0,
     _HB_SCRIPT_MAX_VALUE = 2147483647,
 }
@@ -809,6 +816,9 @@ unsafe extern "C" {
     pub fn hb_set_is_equal(set: *const hb_set_t, other: *const hb_set_t) -> hb_bool_t;
 }
 unsafe extern "C" {
+    pub fn hb_set_intersects(set: *const hb_set_t, other: *const hb_set_t) -> hb_bool_t;
+}
+unsafe extern "C" {
     pub fn hb_set_hash(set: *const hb_set_t) -> ::std::os::raw::c_uint;
 }
 unsafe extern "C" {
@@ -1311,6 +1321,49 @@ unsafe extern "C" {
         st: *mut hb_draw_state_t,
     );
 }
+#[repr(u32)]
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+pub enum hb_draw_line_cap_t {
+    HB_DRAW_LINE_CAP_BUTT = 0,
+    HB_DRAW_LINE_CAP_SQUARE = 1,
+}
+unsafe extern "C" {
+    pub fn hb_draw_line(
+        dfuncs: *mut hb_draw_funcs_t,
+        draw_data: *mut ::std::os::raw::c_void,
+        st: *mut hb_draw_state_t,
+        x0: f32,
+        y0: f32,
+        w0: f32,
+        x1: f32,
+        y1: f32,
+        w1: f32,
+        cap: hb_draw_line_cap_t,
+    );
+}
+unsafe extern "C" {
+    pub fn hb_draw_rectangle(
+        dfuncs: *mut hb_draw_funcs_t,
+        draw_data: *mut ::std::os::raw::c_void,
+        st: *mut hb_draw_state_t,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        stroke_width: f32,
+    );
+}
+unsafe extern "C" {
+    pub fn hb_draw_circle(
+        dfuncs: *mut hb_draw_funcs_t,
+        draw_data: *mut ::std::os::raw::c_void,
+        st: *mut hb_draw_state_t,
+        cx: f32,
+        cy: f32,
+        r: f32,
+        stroke_width: f32,
+    );
+}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct hb_paint_funcs_t {
@@ -1378,6 +1431,17 @@ pub type hb_paint_color_glyph_func_t = ::std::option::Option<
         user_data: *mut ::std::os::raw::c_void,
     ) -> hb_bool_t,
 >;
+pub type hb_paint_fill_glyph_func_t = ::std::option::Option<
+    unsafe extern "C" fn(
+        funcs: *mut hb_paint_funcs_t,
+        paint_data: *mut ::std::os::raw::c_void,
+        glyph: hb_codepoint_t,
+        font: *mut hb_font_t,
+        is_foreground: hb_bool_t,
+        color: hb_color_t,
+        user_data: *mut ::std::os::raw::c_void,
+    ),
+>;
 pub type hb_paint_push_clip_glyph_func_t = ::std::option::Option<
     unsafe extern "C" fn(
         funcs: *mut hb_paint_funcs_t,
@@ -1395,6 +1459,21 @@ pub type hb_paint_push_clip_rectangle_func_t = ::std::option::Option<
         ymin: f32,
         xmax: f32,
         ymax: f32,
+        user_data: *mut ::std::os::raw::c_void,
+    ),
+>;
+pub type hb_paint_push_clip_path_start_func_t = ::std::option::Option<
+    unsafe extern "C" fn(
+        funcs: *mut hb_paint_funcs_t,
+        paint_data: *mut ::std::os::raw::c_void,
+        draw_data: *mut *mut ::std::os::raw::c_void,
+        user_data: *mut ::std::os::raw::c_void,
+    ) -> *mut hb_draw_funcs_t,
+>;
+pub type hb_paint_push_clip_path_end_func_t = ::std::option::Option<
+    unsafe extern "C" fn(
+        funcs: *mut hb_paint_funcs_t,
+        paint_data: *mut ::std::os::raw::c_void,
         user_data: *mut ::std::os::raw::c_void,
     ),
 >;
@@ -1565,6 +1644,14 @@ pub type hb_paint_push_group_func_t = ::std::option::Option<
         user_data: *mut ::std::os::raw::c_void,
     ),
 >;
+pub type hb_paint_push_group_for_func_t = ::std::option::Option<
+    unsafe extern "C" fn(
+        funcs: *mut hb_paint_funcs_t,
+        paint_data: *mut ::std::os::raw::c_void,
+        mode: hb_paint_composite_mode_t,
+        user_data: *mut ::std::os::raw::c_void,
+    ),
+>;
 pub type hb_paint_pop_group_func_t = ::std::option::Option<
     unsafe extern "C" fn(
         funcs: *mut hb_paint_funcs_t,
@@ -1607,6 +1694,14 @@ unsafe extern "C" {
     );
 }
 unsafe extern "C" {
+    pub fn hb_paint_funcs_set_fill_glyph_func(
+        funcs: *mut hb_paint_funcs_t,
+        func: hb_paint_fill_glyph_func_t,
+        user_data: *mut ::std::os::raw::c_void,
+        destroy: hb_destroy_func_t,
+    );
+}
+unsafe extern "C" {
     pub fn hb_paint_funcs_set_push_clip_glyph_func(
         funcs: *mut hb_paint_funcs_t,
         func: hb_paint_push_clip_glyph_func_t,
@@ -1618,6 +1713,22 @@ unsafe extern "C" {
     pub fn hb_paint_funcs_set_push_clip_rectangle_func(
         funcs: *mut hb_paint_funcs_t,
         func: hb_paint_push_clip_rectangle_func_t,
+        user_data: *mut ::std::os::raw::c_void,
+        destroy: hb_destroy_func_t,
+    );
+}
+unsafe extern "C" {
+    pub fn hb_paint_funcs_set_push_clip_path_start_func(
+        funcs: *mut hb_paint_funcs_t,
+        func: hb_paint_push_clip_path_start_func_t,
+        user_data: *mut ::std::os::raw::c_void,
+        destroy: hb_destroy_func_t,
+    );
+}
+unsafe extern "C" {
+    pub fn hb_paint_funcs_set_push_clip_path_end_func(
+        funcs: *mut hb_paint_funcs_t,
+        func: hb_paint_push_clip_path_end_func_t,
         user_data: *mut ::std::os::raw::c_void,
         destroy: hb_destroy_func_t,
     );
@@ -1679,6 +1790,14 @@ unsafe extern "C" {
     );
 }
 unsafe extern "C" {
+    pub fn hb_paint_funcs_set_push_group_for_func(
+        funcs: *mut hb_paint_funcs_t,
+        func: hb_paint_push_group_for_func_t,
+        user_data: *mut ::std::os::raw::c_void,
+        destroy: hb_destroy_func_t,
+    );
+}
+unsafe extern "C" {
     pub fn hb_paint_funcs_set_pop_group_func(
         funcs: *mut hb_paint_funcs_t,
         func: hb_paint_pop_group_func_t,
@@ -1735,6 +1854,16 @@ unsafe extern "C" {
     ) -> hb_bool_t;
 }
 unsafe extern "C" {
+    pub fn hb_paint_fill_glyph(
+        funcs: *mut hb_paint_funcs_t,
+        paint_data: *mut ::std::os::raw::c_void,
+        glyph: hb_codepoint_t,
+        font: *mut hb_font_t,
+        is_foreground: hb_bool_t,
+        color: hb_color_t,
+    );
+}
+unsafe extern "C" {
     pub fn hb_paint_push_clip_glyph(
         funcs: *mut hb_paint_funcs_t,
         paint_data: *mut ::std::os::raw::c_void,
@@ -1750,6 +1879,19 @@ unsafe extern "C" {
         ymin: f32,
         xmax: f32,
         ymax: f32,
+    );
+}
+unsafe extern "C" {
+    pub fn hb_paint_push_clip_path_start(
+        funcs: *mut hb_paint_funcs_t,
+        paint_data: *mut ::std::os::raw::c_void,
+        draw_data: *mut *mut ::std::os::raw::c_void,
+    ) -> *mut hb_draw_funcs_t;
+}
+unsafe extern "C" {
+    pub fn hb_paint_push_clip_path_end(
+        funcs: *mut hb_paint_funcs_t,
+        paint_data: *mut ::std::os::raw::c_void,
     );
 }
 unsafe extern "C" {
@@ -1819,6 +1961,13 @@ unsafe extern "C" {
     );
 }
 unsafe extern "C" {
+    pub fn hb_paint_push_group_for(
+        funcs: *mut hb_paint_funcs_t,
+        paint_data: *mut ::std::os::raw::c_void,
+        mode: hb_paint_composite_mode_t,
+    );
+}
+unsafe extern "C" {
     pub fn hb_paint_pop_group(
         funcs: *mut hb_paint_funcs_t,
         paint_data: *mut ::std::os::raw::c_void,
@@ -1832,6 +1981,48 @@ unsafe extern "C" {
         color_index: ::std::os::raw::c_uint,
         color: *mut hb_color_t,
     ) -> hb_bool_t;
+}
+unsafe extern "C" {
+    pub fn hb_paint_reduce_linear_anchors(
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        xx0: *mut f32,
+        yy0: *mut f32,
+        xx1: *mut f32,
+        yy1: *mut f32,
+    );
+}
+unsafe extern "C" {
+    pub fn hb_paint_normalize_color_line(
+        stops: *mut hb_color_stop_t,
+        len: ::std::os::raw::c_uint,
+        min: *mut f32,
+        max: *mut f32,
+    );
+}
+pub type hb_paint_sweep_gradient_tile_func_t = ::std::option::Option<
+    unsafe extern "C" fn(
+        a0: f32,
+        c0: hb_color_t,
+        a1: f32,
+        c1: hb_color_t,
+        user_data: *mut ::std::os::raw::c_void,
+    ),
+>;
+unsafe extern "C" {
+    pub fn hb_paint_sweep_gradient_tiles(
+        stops: *mut hb_color_stop_t,
+        n_stops: ::std::os::raw::c_uint,
+        extend: hb_paint_extend_t,
+        start_angle: f32,
+        end_angle: f32,
+        emit_patch: hb_paint_sweep_gradient_tile_func_t,
+        user_data: *mut ::std::os::raw::c_void,
+    );
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -1964,6 +2155,22 @@ pub type hb_font_get_glyph_origin_func_t = ::std::option::Option<
 >;
 pub type hb_font_get_glyph_h_origin_func_t = hb_font_get_glyph_origin_func_t;
 pub type hb_font_get_glyph_v_origin_func_t = hb_font_get_glyph_origin_func_t;
+pub type hb_font_get_glyph_origins_func_t = ::std::option::Option<
+    unsafe extern "C" fn(
+        font: *mut hb_font_t,
+        font_data: *mut ::std::os::raw::c_void,
+        count: ::std::os::raw::c_uint,
+        first_glyph: *const hb_codepoint_t,
+        glyph_stride: ::std::os::raw::c_uint,
+        first_x: *mut hb_position_t,
+        x_stride: ::std::os::raw::c_uint,
+        first_y: *mut hb_position_t,
+        y_stride: ::std::os::raw::c_uint,
+        user_data: *mut ::std::os::raw::c_void,
+    ) -> hb_bool_t,
+>;
+pub type hb_font_get_glyph_h_origins_func_t = hb_font_get_glyph_origins_func_t;
+pub type hb_font_get_glyph_v_origins_func_t = hb_font_get_glyph_origins_func_t;
 pub type hb_font_get_glyph_kerning_func_t = ::std::option::Option<
     unsafe extern "C" fn(
         font: *mut hb_font_t,
@@ -2125,6 +2332,22 @@ unsafe extern "C" {
     );
 }
 unsafe extern "C" {
+    pub fn hb_font_funcs_set_glyph_h_origins_func(
+        ffuncs: *mut hb_font_funcs_t,
+        func: hb_font_get_glyph_h_origins_func_t,
+        user_data: *mut ::std::os::raw::c_void,
+        destroy: hb_destroy_func_t,
+    );
+}
+unsafe extern "C" {
+    pub fn hb_font_funcs_set_glyph_v_origins_func(
+        ffuncs: *mut hb_font_funcs_t,
+        func: hb_font_get_glyph_v_origins_func_t,
+        user_data: *mut ::std::os::raw::c_void,
+        destroy: hb_destroy_func_t,
+    );
+}
+unsafe extern "C" {
     pub fn hb_font_funcs_set_glyph_h_kerning_func(
         ffuncs: *mut hb_font_funcs_t,
         func: hb_font_get_glyph_h_kerning_func_t,
@@ -2263,6 +2486,30 @@ unsafe extern "C" {
         glyph: hb_codepoint_t,
         x: *mut hb_position_t,
         y: *mut hb_position_t,
+    ) -> hb_bool_t;
+}
+unsafe extern "C" {
+    pub fn hb_font_get_glyph_h_origins(
+        font: *mut hb_font_t,
+        count: ::std::os::raw::c_uint,
+        first_glyph: *const hb_codepoint_t,
+        glyph_stride: ::std::os::raw::c_uint,
+        first_x: *mut hb_position_t,
+        x_stride: ::std::os::raw::c_uint,
+        first_y: *mut hb_position_t,
+        y_stride: ::std::os::raw::c_uint,
+    ) -> hb_bool_t;
+}
+unsafe extern "C" {
+    pub fn hb_font_get_glyph_v_origins(
+        font: *mut hb_font_t,
+        count: ::std::os::raw::c_uint,
+        first_glyph: *const hb_codepoint_t,
+        glyph_stride: ::std::os::raw::c_uint,
+        first_x: *mut hb_position_t,
+        x_stride: ::std::os::raw::c_uint,
+        first_y: *mut hb_position_t,
+        y_stride: ::std::os::raw::c_uint,
     ) -> hb_bool_t;
 }
 unsafe extern "C" {
@@ -3095,6 +3342,9 @@ unsafe extern "C" {
         destroy: hb_destroy_func_t,
     );
 }
+unsafe extern "C" {
+    pub fn hb_buffer_changed(buffer: *mut hb_buffer_t);
+}
 pub type hb_font_get_glyph_func_t = ::std::option::Option<
     unsafe extern "C" fn(
         font: *mut hb_font_t,
@@ -3757,6 +4007,36 @@ unsafe extern "C" {
 }
 #[repr(u32)]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+pub enum hb_ot_bits_tag_t {
+    HB_OT_BITS_TAG_FS_TYPE = 1718842480,
+    HB_OT_BITS_TAG_FS_SELECTION = 1718842220,
+    HB_OT_BITS_TAG_MAC_STYLE = 1835234164,
+    HB_OT_BITS_TAG_IS_FIXED_PITCH = 1719169140,
+    HB_OT_BITS_TAG_UNICODE_RANGE_1 = 1970433585,
+    HB_OT_BITS_TAG_UNICODE_RANGE_2 = 1970433586,
+    HB_OT_BITS_TAG_UNICODE_RANGE_3 = 1970433587,
+    HB_OT_BITS_TAG_UNICODE_RANGE_4 = 1970433588,
+    HB_OT_BITS_TAG_CODE_PAGE_RANGE_1 = 1668313649,
+    HB_OT_BITS_TAG_CODE_PAGE_RANGE_2 = 1668313650,
+    _HB_OT_BITS_TAG_MAX_VALUE = 2147483647,
+}
+unsafe extern "C" {
+    pub fn hb_ot_fetch_bits(face: *mut hb_face_t, tag: hb_ot_bits_tag_t) -> u32;
+}
+#[repr(u32)]
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+pub enum hb_ot_number_tag_t {
+    HB_OT_NUMBER_TAG_FONT_X_MIN = 2020436334,
+    HB_OT_NUMBER_TAG_FONT_Y_MIN = 2037213550,
+    HB_OT_NUMBER_TAG_FONT_X_MAX = 2020434296,
+    HB_OT_NUMBER_TAG_FONT_Y_MAX = 2037211512,
+    _HB_OT_NUMBER_TAG_MAX_VALUE = 2147483647,
+}
+unsafe extern "C" {
+    pub fn hb_ot_fetch_number(face: *mut hb_face_t, tag: hb_ot_number_tag_t) -> i32;
+}
+#[repr(u32)]
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub enum hb_ot_name_id_predefined_t {
     HB_OT_NAME_ID_COPYRIGHT = 0,
     HB_OT_NAME_ID_FONT_FAMILY = 1,
@@ -3892,6 +4172,24 @@ unsafe extern "C" {
 }
 unsafe extern "C" {
     pub fn hb_ot_color_has_svg(face: *mut hb_face_t) -> hb_bool_t;
+}
+unsafe extern "C" {
+    pub fn hb_ot_color_get_svg_document_count(face: *mut hb_face_t) -> ::std::os::raw::c_uint;
+}
+unsafe extern "C" {
+    pub fn hb_ot_color_glyph_get_svg_document_index(
+        face: *mut hb_face_t,
+        glyph: hb_codepoint_t,
+        svg_document_index: *mut ::std::os::raw::c_uint,
+    ) -> hb_bool_t;
+}
+unsafe extern "C" {
+    pub fn hb_ot_color_get_svg_document_glyph_range(
+        face: *mut hb_face_t,
+        svg_document_index: ::std::os::raw::c_uint,
+        start_glyph_id: *mut hb_codepoint_t,
+        end_glyph_id: *mut hb_codepoint_t,
+    ) -> hb_bool_t;
 }
 unsafe extern "C" {
     pub fn hb_ot_color_glyph_reference_svg(
@@ -4238,6 +4536,14 @@ unsafe extern "C" {
         alternate_count: *mut ::std::os::raw::c_uint,
         alternate_glyphs: *mut hb_codepoint_t,
     ) -> ::std::os::raw::c_uint;
+}
+unsafe extern "C" {
+    pub fn hb_ot_layout_lookup_collect_glyph_alternates(
+        face: *mut hb_face_t,
+        lookup_index: ::std::os::raw::c_uint,
+        alternate_count: *mut hb_map_t,
+        alternate_glyphs: *mut hb_map_t,
+    ) -> hb_bool_t;
 }
 unsafe extern "C" {
     pub fn hb_ot_layout_lookup_would_substitute(
@@ -4659,6 +4965,9 @@ unsafe extern "C" {
     ) -> ::std::os::raw::c_uint;
 }
 unsafe extern "C" {
+    pub fn hb_ot_shape_get_buffer_format_serial() -> ::std::os::raw::c_uint;
+}
+unsafe extern "C" {
     pub fn hb_ot_var_has_data(face: *mut hb_face_t) -> hb_bool_t;
 }
 unsafe extern "C" {
@@ -4737,7 +5046,3 @@ unsafe extern "C" {
         normalized_coords: *mut ::std::os::raw::c_int,
     );
 }
-
-#[cfg(test)]
-#[path = "lib_tests.rs"]
-mod lib_tests;

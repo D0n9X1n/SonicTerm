@@ -1,8 +1,8 @@
 # Paths excluded from `rg`, and therefore from most editor and agent search.
 #
 # Four upstream C libraries are vendored under crates/ so the FFI wrappers can
-# build them: 2,021 tracked files, roughly three times the size of SonicTerm's
-# own source. An unfiltered search for anything generic — `buffer`, `size`,
+# build them. The pinned source subsets are listed in scripts/native-dependencies.json.
+# An unfiltered search for anything generic — `buffer`, `size`,
 # `error` — returns mostly FreeType and HarfBuzz, which buries the first-party
 # hit that was being looked for.
 #

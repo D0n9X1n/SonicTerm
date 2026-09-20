@@ -1,0 +1,25 @@
+From 09a1572aa624e5ddb6c075dc013880de70b1b9b9 Mon Sep 17 00:00:00 2001
+From: Mark Adler <git@madler.net>
+Date: Sat, 21 Feb 2026 23:03:37 -0800
+Subject: [PATCH] Fix inflateBack() bug that would fail to detect a too far
+ back.
+
+The bug would pass off an invalid deflate stream as good, and copy
+uninitialized memory contents to the output.
+---
+ infback.c | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/infback.c b/infback.c
+index e6443feb45..ac96ba1092 100644
+--- a/infback.c
++++ b/infback.c
+@@ -423,8 +423,6 @@ int ZEXPORT inflateBack(z_streamp strm, in_func in, void FAR *in_desc,
+             /* use inflate_fast() if we have enough input and output */
+             if (have >= 6 && left >= 258) {
+                 RESTORE();
+-                if (state->whave < state->wsize)
+-                    state->whave = state->wsize - left;
+                 inflate_fast(strm, state->wsize);
+                 LOAD();
+                 break;

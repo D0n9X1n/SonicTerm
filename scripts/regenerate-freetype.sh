@@ -4,7 +4,18 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT/crates/sonicterm-freetype"
 
-bindgen bindings.h -o src/types.rs \
+BINDGEN="${BINDGEN:-bindgen}"
+test "$("$BINDGEN" --version)" = "bindgen 0.71.1" || {
+  printf 'Install bindgen-cli 0.71.1 with --locked before regenerating bindings.\n' >&2
+  exit 1
+}
+
+scratch="$(mktemp -d)"
+trap 'rm -rf "$scratch"' EXIT
+rustc --edition=2021 "$ROOT/scripts/freetype-config.rs" -o "$scratch/freetype-config"
+"$scratch/freetype-config" freetype2/include/freetype/config/ftoption.h "$scratch/include"
+
+"$BINDGEN" bindings.h -o src/types.rs \
   --no-layout-tests \
   --no-doc-comments \
   --blocklist-type "FT_(Int16|UInt16|Int32|UInt32|Int16|Int64|UInt64)" \
@@ -12,9 +23,11 @@ bindgen bindings.h -o src/types.rs \
   --default-enum-style rust \
   --generate=types \
   --allowlist-type="FT_(Fixed|Pos|F\\d+Dot\\d+)" \
-  -- -Ifreetype2/include
+  -- -I"$scratch/include" -Ifreetype2/include
 
-bindgen bindings.h -o src/lib.rs \
+"$BINDGEN" bindings.h -o src/lib.rs \
+  --rust-target 1.82 \
+  --wrap-unsafe-ops \
   --no-layout-tests \
   --no-doc-comments \
   --blocklist-type "FT_(Int16|UInt16|Int32|UInt32|Int16|Int64|UInt64)" \
@@ -23,6 +36,10 @@ bindgen bindings.h -o src/lib.rs \
   --raw-line "#![allow(non_upper_case_globals)]" \
   --raw-line "#![allow(clippy::unreadable_literal)]" \
   --raw-line "#![allow(clippy::upper_case_acronyms)]" \
+  --raw-line "#![allow(clippy::missing_safety_doc)]" \
+  --raw-line "#![allow(clippy::non_canonical_clone_impl)]" \
+  --raw-line '#[cfg(test)] #[path = "../build_config.rs"] mod build_config;' \
+  --raw-line '#[cfg(test)] #[path = "lib_tests.rs"] mod lib_tests;' \
   --raw-line "mod types;" \
   --raw-line "mod fixed_point;" \
   --raw-line "pub use fixed_point::*;" \
@@ -37,7 +54,7 @@ bindgen bindings.h -o src/lib.rs \
   --allowlist-function="(SVG|FT)_.*" \
   --allowlist-type="(SVG|[FT]T)_.*" \
   --allowlist-var="(SVG|[FT]T)_.*" \
-  -- -Ifreetype2/include
+  -- -I"$scratch/include" -Ifreetype2/include
 
 perl -i -pe 's,^pub type FT_Fixed =,//$&,' src/lib.rs
 perl -i -pe 's,^pub type FT_F26Dot6 =,//$&,' src/lib.rs

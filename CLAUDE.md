@@ -37,8 +37,9 @@ When touching a crate, also read that crate's local `CLAUDE.md`.
 
 **Search is filtered by default, and the filter is silent.** A root `.ignore`
 excludes the four vendored upstream trees — FreeType, libpng, zlib, HarfBuzz —
-from `rg` and from most editors and agents that read it. That is 2,021 of the
-2,529 tracked files, so a default search covers 504.
+from `rg` and from most editors and agents that read it. The imported subsets
+and exact versions are pinned in `scripts/native-dependencies.json`; default
+searches deliberately omit those source trees.
 
 This matters for reading a result, not just for speed: **an empty result may
 mean the match is in a filtered tree, not that it does not exist.** When a
@@ -116,8 +117,10 @@ scripts/rust-logic-coverage.sh
 ```
 
 **Run the list to the end before concluding anything.**
-`check-workspace-crates.sh` makes one
-`cargo test --workspace --lib --bins --tests --no-fail-fast` invocation. It
+`check-workspace-crates.sh` first runs the native-source verifier tests and offline
+`scripts/native-dependencies.py check`, then makes one
+`cargo test --workspace --lib --bins --tests --no-fail-fast` invocation; every
+phase runs even if an earlier phase fails. It
 includes integration-test binaries, avoids running library and binary tests a
 second time, and lets Cargo report failures from every test target before the
 gate exits nonzero.
