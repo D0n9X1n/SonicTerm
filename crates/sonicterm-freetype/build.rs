@@ -1,5 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::{env, fs};
+
+mod build_config;
 
 fn new_build() -> cc::Build {
     let mut cfg = cc::Build::new();
@@ -10,10 +12,6 @@ fn new_build() -> cc::Build {
 }
 
 fn zlib() {
-    if !Path::new("zlib/.git").exists() {
-        git_submodule_update();
-    }
-
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
     let mut cfg = new_build();
@@ -47,10 +45,6 @@ fn zlib() {
 }
 
 fn libpng() {
-    if !Path::new("libpng/.git").exists() {
-        git_submodule_update();
-    }
-
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
     let mut cfg = new_build();
@@ -110,10 +104,6 @@ fn libpng() {
 }
 
 fn freetype() {
-    if !Path::new("freetype2/.git").exists() {
-        git_submodule_update();
-    }
-
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
     let mut cfg = new_build();
@@ -131,33 +121,14 @@ fn freetype() {
 
     let target = env::var("TARGET").unwrap();
 
-    fs::write(
-        build_dir.join("freetype2/include/freetype/config/ftoption.h"),
-        fs::read_to_string("freetype2/include/freetype/config/ftoption.h")
-            .unwrap()
-            .replace(
-                "/* #define FT_CONFIG_OPTION_ERROR_STRINGS */",
-                "#define FT_CONFIG_OPTION_ERROR_STRINGS",
-            )
-            .replace(
-                "/* #define FT_CONFIG_OPTION_SYSTEM_ZLIB */",
-                "#define FT_CONFIG_OPTION_SYSTEM_ZLIB",
-            )
-            .replace("/* #define FT_CONFIG_OPTION_USE_PNG */", "#define FT_CONFIG_OPTION_USE_PNG")
-            .replace(
-                "#define TT_CONFIG_OPTION_SUBPIXEL_HINTING  2",
-                "#define TT_CONFIG_OPTION_SUBPIXEL_HINTING  3",
-            )
-            .replace(
-                "/* #define PCF_CONFIG_OPTION_LONG_FAMILY_NAMES */",
-                "#define PCF_CONFIG_OPTION_LONG_FAMILY_NAMES",
-            )
-            .replace(
-                "/* #define FT_CONFIG_OPTION_SUBPIXEL_RENDERING */",
-                "#define FT_CONFIG_OPTION_SUBPIXEL_RENDERING",
-            ),
-    )
-    .unwrap();
+    let upstream_options =
+        fs::read_to_string("freetype2/include/freetype/config/ftoption.h").unwrap();
+    let options = build_config::configure_freetype(&upstream_options)
+        .unwrap_or_else(|error| panic!("invalid FreeType configuration: {}", error));
+    fs::write(build_dir.join("freetype2/include/freetype/config/ftoption.h"), options).unwrap();
+    let probe = build_dir.join("config_probe.c");
+    fs::write(&probe, build_config::configuration_probe()).unwrap();
+    cfg.file(probe);
 
     for f in [
         "autofit/autofit.c",
@@ -221,18 +192,17 @@ fn freetype() {
     // These cause DEP_FREETYPE_INCLUDE and DEP_FREETYPE_LIB to be
     // defined in the harfbuzz/build.rs
     println!(
-        "cargo:include={}/include/freetype2;{}/freetype2/include",
+        "cargo:include={}/freetype2/include;{}/freetype2/include",
         build_dir.display(),
         std::env::current_dir().unwrap().display()
     );
     println!("cargo:lib={}", build_dir.display());
 }
 
-fn git_submodule_update() {
-    let _ = std::process::Command::new("git").args(["submodule", "update", "--init"]).status();
-}
-
 fn main() {
+    for source in ["build.rs", "build_config.rs", "freetype2", "libpng", "zlib"] {
+        println!("cargo:rerun-if-changed={}", source);
+    }
     zlib();
     libpng();
     freetype();

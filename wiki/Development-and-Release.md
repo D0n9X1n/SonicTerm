@@ -42,6 +42,72 @@ declaration or a non-empty explicit exemption. A declared sibling file must
 exist and contain a `#[test]`; source-directory modules fail the flat inventory.
 An exemption becomes stale as soon as the module gains its own sibling suite.
 
+## Native dependency maintenance
+
+`scripts/native-dependencies.json` is the machine-readable inventory for the
+four embedded native libraries. Each entry pins an upstream release commit,
+archive checksum, explicit source subset, ordered local patches with upstream
+commit identities and checksums, and the complete imported tree checksum.
+`scripts/native-patches/` holds unmodified upstream patch files, not shell
+programs. Required sources, headers, licenses, and changelogs are retained;
+unneeded upstream demos and CI trees are not build inputs. This is separate from
+Cargo.lock and from platform-provided Cairo/Fontconfig.
+
+The verifier is Python-standard-library-only and never accesses the network:
+
+```sh
+python3 scripts/native-dependencies.py check
+python3 scripts/native-dependencies_tests.py
+python3 scripts/native-dependencies.py stage freetype \
+  --archive /path/to/freetype-2.14.3.tar.xz --output /tmp/freetype-reviewed
+```
+
+`stage` verifies the local archive and ordered patches, selects the recorded
+source subset, and writes a separate staging directory; it never replaces a
+repository tree or runs upstream build scripts. `check` rejects missing,
+modified, or additional vendor files, invalid patch hashes, and unpinned tree
+hashes. Source paths and raw bytes form the hash; executable modes and empty
+directories do not. `.gitattributes` disables newline conversion for vendor trees
+and patch files so Windows checks the same upstream bytes. A checksum detects
+drift; it does not establish publisher identity or prove absence of vulnerabilities.
+
+For an update, use one reviewable library change at a time:
+
+1. Review the official release and advisories, including regressions in the new
+   release. Verify the publisher/source and available signature or independently
+   published checksum; record any verification limitation. A newer version is not
+   automatically a fixed version. Avoid branch-head or unattended imports.
+2. Update that manifest entry with the immutable release identity and verified
+   archive hash. Record every required upstream patch separately; inspect its
+   prerequisites and keep its original bytes. Remove a patch only after proving
+   the selected release contains its fix. Keep unrelated native features enabled.
+3. Download the recorded archive separately, then stage it. A temporary null
+   `tree_sha256` permits computing a candidate hash during review; it must be
+   replaced by the independently checked result before `check` can pass. Compare
+   the staged tree against the archive plus patches and the current vendor tree,
+   then replace only that clean vendor directory. Review added/removed C/C++
+   files against `build.rs`; staging success is not a compilation result.
+4. For FreeType/HarfBuzz, use `cargo install bindgen-cli --version 0.71.1 --locked`
+   and run `bash scripts/regenerate-freetype.sh` or
+   `bash scripts/regenerate-harfbuzz.sh`. `BINDGEN` can select a separately installed
+   executable of that exact version. Both scripts compile the small
+   `scripts/freetype-config.rs` helper to reuse the build's configured header.
+   Review ABI and behavioral changes, not just
+   version strings; regeneration must preserve crate-owned modules and tests.
+5. Run the offline checks, native crate tests, full local gate, and native
+   rendering checks under normal colors with isolated config/log roots and HOME
+   preserved. Compare variable/color fonts, CJK, emoji, ligatures, fallback and
+   raster output. Require exact-head platform CI; local macOS tests do not validate
+   Windows code or Intel binaries. Update both wiki language halves in the same PR.
+
+The current FreeType patch pair fixes excess-coordinate handling after 2.14.3;
+the zlib patches cover invalid-distance decoding and the related gzip-write
+corrections after 1.3.2. The manifest records the full commits. These choices do
+not establish that every advisory is reachable through SonicTerm or that every
+remaining upstream defect is fixed. Recheck upstream releases/advisories when
+preparing each dependency update and before a release; updates remain reviewed
+changes rather than automatic merges.
+
 ## Local verification gate
 
 Run the repository gate to the end:
@@ -81,9 +147,10 @@ features: St.Helens is a normal tracked asset and other fallback faces come from
 native discovery. On Windows, `AWS_LC_SYS_PREBUILT_NASM=1` selects aws-lc-sys's
 checked-in assembly objects, so the SSH feature gate does not depend on NASM or
 CMake being installed.
-`check-workspace-crates.sh` runs one fail-complete
+`check-workspace-crates.sh` first runs the native-source verifier unit tests and
+its offline integrity check, then runs one fail-complete
 `cargo test --workspace --lib --bins --tests --no-fail-fast` command for default
-features. It covers every workspace library, binary, and integration-test target
+features. Each phase runs even if an earlier phase fails. It covers every workspace library, binary, and integration-test target
 without repeating the unit and binary targets in a serial per-package loop.
 
 The authored-comment checker enforces purpose Rustdoc on effectively public
@@ -557,6 +624,54 @@ crate 行为的 integration test。`sonicterm-ui` 与 `sonicterm-render-model` �
 已声明的 sibling 文件必须存在且包含 `#[test]`；源码目录模块会使这项扁平清单失败。模块一旦
 获得自己的 sibling suite，对应豁免就会立即变为过期并使测试失败。
 
+## 原生依赖维护
+
+`scripts/native-dependencies.json` 是四个内嵌原生库的机器可读清单。每个条目固定上游
+发布提交、归档校验和、明确的源码子集、按顺序应用的本地补丁及其上游提交和校验和，
+以及完整导入源码树的摘要。`scripts/native-patches/` 保存未经修改的上游补丁，不保存
+shell 程序。保留必需源码、头文件、许可证和变更日志；不需要的上游示例及 CI 目录不属于
+构建输入。这独立于 Cargo.lock 和由平台提供的 Cairo/Fontconfig。
+
+验证工具只使用 Python 标准库，不访问网络：
+
+```sh
+python3 scripts/native-dependencies.py check
+python3 scripts/native-dependencies_tests.py
+python3 scripts/native-dependencies.py stage freetype \
+  --archive /path/to/freetype-2.14.3.tar.xz --output /tmp/freetype-reviewed
+```
+
+`stage` 验证本地归档和按序补丁，选取清单规定的源码子集，写入独立暂存目录；它不会
+替换仓库源码树，也不会运行上游构建脚本。`check` 拒绝缺失、修改或额外的第三方文件、
+无效补丁摘要和未固定的源码树摘要。摘要包含路径和原始字节，不包含可执行位及空目录。
+`.gitattributes` 对第三方源码树和补丁关闭换行转换，使 Windows 检查相同的上游字节。
+校验和用于检测漂移，不等于发布者身份验证，也不证明不存在漏洞。
+
+每次以单个库为单位进行可审查的更新：
+
+1. 阅读官方发布和安全公告，包括新版本引入的回归。验证发布者/来源和可用签名或独立
+   发布的校验和，记录验证限制。新版本不自动等于已修复版本，不使用浮动分支或无人审核导入。
+2. 用不可变发布身份和已验证的归档摘要更新清单条目。分别记录每个必需上游补丁，审查
+   前置条件并保留原始字节。仅在证明新版本包含修复后移除补丁，不禁用无关原生功能。
+3. 单独下载清单记录的归档，再执行暂存。审查期间允许临时将 `tree_sha256` 设为 null
+   以计算候选摘要；必须通过独立核对并填入结果后 `check` 才能成功。比较暂存目录、
+   归档加补丁的结果和当前第三方目录，再只替换干净的对应目录。核对新增/删除的 C/C++
+   文件和 `build.rs`；暂存成功不是编译成功。
+4. 更新 FreeType/HarfBuzz 时，用 `cargo install bindgen-cli --version 0.71.1 --locked`
+   安装工具，再运行 `bash scripts/regenerate-freetype.sh` 或
+   `bash scripts/regenerate-harfbuzz.sh`。`BINDGEN` 可指定单独安装的相同版本可执行文件。
+   两个脚本编译小型 `scripts/freetype-config.rs` 辅助程序，复用构建时的配置头文件。
+   审查 ABI 与行为变化，不能只改版本号；重新生成必须保留 crate 自有模块和测试。
+5. 运行离线检查、原生 crate 测试、完整本地 gate，以及正常颜色配置下的原生渲染检查；
+   配置/日志使用独立临时目录并保留 HOME。比较可变/彩色字体、CJK、emoji、连字、回退及
+   光栅输出。要求准确 head 的平台 CI；本地 macOS 测试不验证 Windows 代码或 Intel
+   二进制。在同一 PR 更新 wiki 的两个语言部分。
+
+当前 FreeType 补丁对修复 2.14.3 之后的多余坐标处理；zlib 补丁修复 1.3.2 之后的无效
+距离解码及相关 gzip 写入问题。完整提交号在清单中。这些选择不证明每个公告都能从
+SonicTerm 触发，也不表示所有剩余上游缺陷均已修复。准备每次依赖更新和发布前都应重新
+检查上游版本/公告；更新始终经过审查，而不是自动合并。
+
 ## 本地验证 gate
 
 请把仓库 gate 完整运行到最后：
@@ -593,8 +708,9 @@ optional feature。它们覆盖应用与 IO 的 `ssh` 分支、`distro-defaults`
 实时 SSH 连接。字体栈没有可选 vendor feature：St.Helens 是普通的已跟踪资源，其它回退字体
 来自原生平台发现。Windows 上的 `AWS_LC_SYS_PREBUILT_NASM=1` 会选择 aws-lc-sys 已签入的汇编
 对象，因此 SSH feature gate 不依赖 runner 另行安装 NASM 或 CMake。
-`check-workspace-crates.sh` 对默认 feature 只运行
-一次 fail-complete 的 `cargo test --workspace --lib --bins --tests --no-fail-fast`。它覆盖全部
+`check-workspace-crates.sh` 先运行原生源码验证器的单元测试和离线完整性检查，再对默认
+feature 运行一次 fail-complete 的 `cargo test --workspace --lib --bins --tests --no-fail-fast`；
+即使前一阶段失败，后续阶段仍会执行。它覆盖全部
 workspace library、binary 和 integration-test target，且不会再用逐 package 串行循环重复执行
 unit 与 binary target。
 

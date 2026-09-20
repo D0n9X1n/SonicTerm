@@ -32,10 +32,14 @@ struct hb_varc_context_t
 {
   hb_font_t *font;
   hb_draw_session_t *draw_session;
-  hb_extents_t *extents;
+  hb_extents_t<> *extents;
   mutable hb_decycler_t decycler;
   mutable signed edges_left;
   mutable signed depth_left;
+  /* Work budget shared by all leaf glyphs loaded from glyf/CFF/CFF2,
+   * so their per-glyph work limits cannot multiply with our own
+   * composite-graph limits. */
+  mutable int64_t budget_left;
   hb_varc_scratch_t &scratch;
 };
 
@@ -65,9 +69,9 @@ struct VarComponent
   get_path_at (const hb_varc_context_t &c,
 	       hb_codepoint_t parent_gid,
 	       hb_array_t<const int> coords,
-	       hb_transform_t transform,
+	       hb_transform_t<> transform,
 	       hb_ubytes_t record,
-	       VarRegionList::cache_t *cache = nullptr) const;
+	       hb_scalar_cache_t *cache = nullptr) const;
 };
 
 struct VarCompositeGlyph
@@ -76,9 +80,9 @@ struct VarCompositeGlyph
   get_path_at (const hb_varc_context_t &c,
 	       hb_codepoint_t gid,
 	       hb_array_t<const int> coords,
-	       hb_transform_t transform,
+	       hb_transform_t<> transform,
 	       hb_ubytes_t record,
-	       VarRegionList::cache_t *cache)
+	       hb_scalar_cache_t *cache)
   {
     while (record)
     {
@@ -104,9 +108,9 @@ struct VARC
   get_path_at (const hb_varc_context_t &c,
 	       hb_codepoint_t gid,
 	       hb_array_t<const int> coords,
-	       hb_transform_t transform = HB_TRANSFORM_IDENTITY,
+	       hb_transform_t<> transform = HB_TRANSFORM_IDENTITY,
 	       hb_codepoint_t parent_gid = HB_CODEPOINT_INVALID,
-	       VarRegionList::cache_t *parent_cache = nullptr) const;
+	       hb_scalar_cache_t *parent_cache = nullptr) const;
 
   bool
   get_path (hb_font_t *font,
@@ -120,6 +124,7 @@ struct VARC
 			 hb_decycler_t {},
 			 HB_MAX_GRAPH_EDGE_COUNT,
 			 HB_MAX_NESTING_LEVEL,
+			 HB_VARC_MAX_WORK,
 			 scratch};
 
     return get_path_at (c, gid,
@@ -129,7 +134,7 @@ struct VARC
   bool
   get_extents (hb_font_t *font,
 	       hb_codepoint_t gid,
-	       hb_extents_t *extents,
+	       hb_extents_t<> *extents,
 	       hb_varc_scratch_t &scratch) const
   {
     hb_varc_context_t c {font,
@@ -138,6 +143,7 @@ struct VARC
 			 hb_decycler_t {},
 			 HB_MAX_GRAPH_EDGE_COUNT,
 			 HB_MAX_NESTING_LEVEL,
+			 HB_VARC_MAX_WORK,
 			 scratch};
 
     return get_path_at (c, gid,
@@ -194,9 +200,10 @@ struct VARC
 		 hb_codepoint_t gid,
 		 hb_glyph_extents_t *extents) const
     {
+#ifndef HB_NO_DRAW
       if (!table->has_data ()) return false;
 
-      hb_extents_t f_extents;
+      hb_extents_t<> f_extents;
 
       auto *scratch = acquire_scratch ();
       if (unlikely (!scratch)) return true;
@@ -207,6 +214,9 @@ struct VARC
 	*extents = f_extents.to_glyph_extents (font->x_scale < 0, font->y_scale < 0);
 
       return ret;
+#else
+      return false;
+#endif
     }
 
     private:

@@ -269,6 +269,34 @@ Ordinary text, composite clusters, wide glyphs, custom block glyphs, and
 multi-cell ligatures keep their natural raster geometry. The same producer-built
 rectangle is used by GPU and Windows software presentation.
 
+### Native source versions and configuration
+
+The source-pinned stack is FreeType 2.14.3, HarfBuzz 14.4.0, libpng 1.6.58,
+and zlib 1.3.2. FreeType carries two upstream excess-variable-coordinate fixes;
+zlib carries the upstream invalid-distance `inflateBack` correction and three
+related nonblocking gzip-writing fixes. The exact release commits, archive
+SHA-256 values, selected paths, ordered patches, and resulting source-tree hashes
+are in `scripts/native-dependencies.json`. The headers report the base releases,
+not additional patch revisions. Cairo remains an external platform dependency;
+this inventory does not pin Cairo or imply a self-contained macOS bundle.
+
+FreeType configuration is generated outside the vendored tree. It enables error
+strings, external zlib, PNG glyphs, long PCF family names, subpixel rendering,
+and the supported boolean subpixel-hinting option. Missing, repeated, or
+unexpectedly valued definitions fail the build; a C compilation probe also
+checks that preprocessing leaves each option enabled. The removed historical
+numeric hinting transformation is not restored. Cargo watches the native source
+and configuration inputs; builds neither fetch sources nor initialize submodules.
+
+The checked-in Rust bindings are regenerated with bindgen-cli 0.71.1. Both
+regeneration scripts use the native build's configuration generator and put its
+header before upstream includes, so bindgen and the compiled library see the same
+FreeType options. Regeneration preserves fixed-width integer overrides, fixed-point wrappers, explicit unsafe
+blocks, and sibling test declarations. Native version tests check the actually
+linked FreeType/HarfBuzz releases, including the unsigned FreeType span ABI.
+Update and verification commands are in
+[Development and Release](Development-and-Release#native-dependency-maintenance).
+
 ### Row and shape caches
 
 `RowGlyphCache` stores glyph instances, underlines, missing-glyph records, and
@@ -760,6 +788,26 @@ BGRA 彩色位图按非透明区域的半开边界裁剪，保留最后一行和
 占一个非宽单元格，且没有组合字符或变体选择符时进行定向适配。图块按统一比例缩放到
 单元格内保持纵横比的最大矩形，并沿两个轴居中。普通文字、复合字符簇、宽字形、自定义
 块字形和多单元格连字保持自然光栅几何。GPU 与 Windows 软件呈现共用上游生成的同一矩形。
+
+### 原生源码版本与配置
+
+源码固定版本为 FreeType 2.14.3、HarfBuzz 14.4.0、libpng 1.6.58 和 zlib 1.3.2。
+FreeType 带有两项上游可变字体多余坐标修复；zlib 带有上游 `inflateBack` 无效距离修复
+以及三项相关的非阻塞 gzip 写入修复。准确的发布提交、归档 SHA-256、导入路径、
+补丁顺序和最终源码树摘要记录在 `scripts/native-dependencies.json`。头文件报告基础
+发布版本，不包含额外补丁修订号。Cairo 仍由平台提供；此清单不固定 Cairo，也不表示
+macOS 应用包已自包含其运行依赖。
+
+FreeType 配置在第三方源码树之外生成，启用错误字符串、外部 zlib、PNG 字形、长 PCF
+族名、次像素光栅化和受支持的布尔次像素 hinting 选项。定义缺失、重复或出现意外值会
+使构建失败；C 编译探针还会检查预处理后这些选项仍然启用。不会恢复已淘汰的数值型
+hinting 转换。Cargo 监视原生源码和配置输入；构建既不下载源码，也不初始化子模块。
+
+仓库中的 Rust 绑定由 bindgen-cli 0.71.1 重新生成。两个生成脚本共用原生构建的配置生成器，
+并优先包含生成头文件，确保 bindgen 和编译出的库看到相同的 FreeType 选项；保留定宽整数覆盖、定点数包装、
+显式 unsafe 块和同级测试声明。原生版本测试检查实际链接的 FreeType/HarfBuzz 版本，
+并核对 FreeType 无符号 span ABI。更新和验证命令见
+[开发与发布](Development-and-Release#原生依赖维护)。
 
 ### 行缓存与塑形缓存
 
