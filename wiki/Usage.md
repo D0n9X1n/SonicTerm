@@ -47,6 +47,12 @@ The command palette is the quickest way to discover actions:
 - macOS: `Cmd+Shift+P`
 - Windows and Linux: `Alt+Shift+P`
 
+Search **About SonicTerm** or **version**, select the **About SonicTerm** result,
+and press Enter to close the palette and show `SonicTerm <version>` in the green notification in that
+window. The version comes from the running build. The notification replaces any
+current bubble and closes after five seconds or with its close button. The command
+works in READONLY mode and does not query releases online or send input to the shell.
+
 Common defaults are:
 
 | Action | macOS | Windows and Linux |
@@ -588,6 +594,11 @@ Linux package 面向 x86_64，并保证最多需要 glibc 2.35 ABI。`.deb` 会�
 
 - macOS：`Cmd+Shift+P`
 - Windows 和 Linux：`Alt+Shift+P`
+
+搜索 **关于 SonicTerm** 或 **版本**，选择 **关于 SonicTerm** 结果后按 Enter，
+会关闭面板并在该窗口已有的绿色通知中显示 `SonicTerm <version>`。版本号来自当前运行的构建。通知会替换当前气泡，并在五秒后
+自动关闭，也可点击其关闭按钮。READONLY 模式下也可使用；不会在线查询发布版本，
+也不会向 shell 发送输入。
 
 常用默认快捷键如下：
 

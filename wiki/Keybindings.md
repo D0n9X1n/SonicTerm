@@ -105,6 +105,14 @@ restrictions are reported. Copy requires a nonempty selection whose cells still
 match; a busy parser temporarily leaves Copy disabled rather than blocking the
 UI. Same-value repaints preserve valid selections.
 
+**About SonicTerm** is a palette-only entry with no default shortcut. Search
+`about`, `SonicTerm`, `version`, or their localized equivalents, then select the
+**About SonicTerm** result and press Enter. This closes the palette and shows
+`SonicTerm <version>`, including any prerelease suffix, in
+the originating window's existing green notification. It replaces any current
+bubble and closes after five seconds or with its close button. The command is
+available in READONLY mode and does not send input to the terminal.
+
 **Go to Tab** searches live tabs in the attached window by title or displayed
 position, including in READONLY. Selection follows tab identity across reorder
 and rename, and is revalidated before activation. A closed or no-longer-matching
@@ -443,6 +451,11 @@ Control 和 Alt 显示为 `Ctrl`、`Alt`。字面 `+` 按键会保留，例如 `
 上下文来自面板附着的窗口，而不是其他窗口的标签页数量。缺少标签页、窗格、选区、方向相邻窗格，
 以及 READONLY 限制都会显示原因。复制要求非空选区且所选单元格仍然匹配；解析器忙时暂时禁用复制，
 而不阻塞 UI。同值重绘保留有效选区。
+
+**关于 SonicTerm** 仅作为面板条目提供，没有默认快捷键。搜索 `about`、`SonicTerm`、
+`version` 或本地化关键词（例如“关于”“版本”），选择 **关于 SonicTerm** 结果后按 Enter。
+这会关闭面板，并在原窗口已有的绿色通知中显示 `SonicTerm <version>`，包括预发布后缀。通知会替换当前气泡，并在五秒后自动
+关闭，也可点击其关闭按钮。READONLY 模式下也可使用，不会向终端发送输入。
 
 **Go to Tab** 按标题或显示位置搜索附着窗口的实时标签页，READONLY 下也可用。选择跟随
 标签页身份跨越重排和重命名，激活前再次验证。目标关闭或不再匹配时清空选择；移动选择或修改

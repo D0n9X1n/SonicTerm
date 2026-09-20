@@ -113,7 +113,8 @@ back when the context belongs with the original session again.
   relative paths use that pane's trusted shell working directory. See
   [local targets](wiki/Usage.md#open-urls-and-local-targets).
 - **Command palette first** — commands are searchable and display shortcuts from
-  your current keymap config.
+  your current keymap config. **About SonicTerm** shows the running app's version
+  in a green notification.
 - **Config is just files** — `~/.sonicterm/sonicterm.toml`, plus editable
   `themes/` and `keymaps/` examples seeded on first launch.
 - **Bundled typography** — `Rec Mono St.Helens` ships with the app and is

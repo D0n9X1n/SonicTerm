@@ -1,11 +1,11 @@
 //! Command palette (Cmd+Shift+P). Pure-data state holder.
 //!
-//! The palette is a fuzzy-searchable list of runnable
-//! [`sonicterm_cfg::keymap::Action`] values. The app's keyboard-event handler
+//! The palette is a fuzzy-searchable list of keymap actions, live tab targets,
+//! and palette-only entries such as About. The app's keyboard-event handler
 //! routes printable characters, arrow keys, Enter and Esc
 //! into this state instead of forwarding them to the active pty when
 //! [`CommandPalette::is_open`] returns `true`. On Enter the dispatcher
-//! reads [`CommandPalette::current`] and runs that action.
+//! reads [`CommandPalette::current`] and handles that entry.
 //!
 //! Filtering is a VSCode-style fuzzy match using
 //! [`nucleo_matcher`]: each candidate label gets a score, results are
@@ -69,11 +69,13 @@ pub struct TabColorChoice {
     pub hex: Option<String>,
 }
 
-/// A palette command or a live tab target whose identity is independent of its display position.
+/// A palette entry whose executable identity is independent of its display position.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaletteEntry {
     /// An existing keymap action executed by App.
     Command(Action),
+    /// Show a product/version notification without introducing a keymap action.
+    About,
     /// A tab in the attached terminal window.
     Tab {
         /// Process-unique runtime identity, revalidated before activation.
@@ -90,6 +92,7 @@ impl PaletteEntry {
     pub fn same_identity(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Command(left), Self::Command(right)) => left == right,
+            (Self::About, Self::About) => true,
             (Self::Tab { id: left, .. }, Self::Tab { id: right, .. }) => left == right,
             _ => false,
         }
@@ -98,6 +101,7 @@ impl PaletteEntry {
     fn category(&self) -> CommandCategory {
         match self {
             Self::Command(action) => descriptor(action).category,
+            Self::About => CommandCategory::Settings,
             Self::Tab { .. } => CommandCategory::Tabs,
         }
     }
@@ -105,6 +109,8 @@ impl PaletteEntry {
     fn disabled_reason(&self, context: &CommandContext) -> Option<DisabledReason> {
         match self {
             Self::Command(action) => disabled_reason(action, context),
+            Self::About if !context.window_available => Some(DisabledReason::NoWindow),
+            Self::About => None,
             Self::Tab { .. } if !context.window_available => Some(DisabledReason::NoWindow),
             Self::Tab { .. } if context.tab_count == 0 => Some(DisabledReason::NoTab),
             Self::Tab { .. } => None,
@@ -117,6 +123,16 @@ impl PaletteEntry {
                 || (label(action), search_haystack(action)),
                 |i18n| (localized_label(action, i18n), localized_search_haystack(action, i18n)),
             ),
+            Self::About => {
+                let label = i18n
+                    .and_then(|i18n| i18n.try_t_args("palette-about-title", None))
+                    .unwrap_or_else(|| "About SonicTerm".to_string());
+                let aliases = i18n
+                    .and_then(|i18n| i18n.try_t_args("palette-about-search", None))
+                    .unwrap_or_default();
+                let search = format!("{label} About SonicTerm version build {aliases}");
+                (label, search)
+            }
             Self::Tab { title, position, .. } => {
                 let number = (position + 1).to_string();
                 let english = format!("Go to Tab {number}: {title}");
@@ -284,7 +300,7 @@ pub struct CommandPalette {
     tabs_only: bool,
     query: String,
     cursor: usize,
-    /// Canonical commands followed by the attached window's live tab targets.
+    /// Canonical/keymap commands, then About, followed by the attached window's live tab targets.
     all: Vec<PaletteEntry>,
     presentation: Vec<CommandPresentation>,
     text: PaletteText,
@@ -314,9 +330,10 @@ impl Default for CommandPalette {
 }
 
 impl CommandPalette {
-    /// Build a closed palette holding the canonical action list.
+    /// Build a closed palette holding canonical actions and the palette-only About entry.
     pub fn new() -> Self {
-        let all: Vec<_> = palette_actions().into_iter().map(PaletteEntry::Command).collect();
+        let mut all: Vec<_> = palette_actions().into_iter().map(PaletteEntry::Command).collect();
+        all.push(PaletteEntry::About);
         let presentation: Vec<_> = all.iter().map(|entry| entry.presentation(None, None)).collect();
         let text = PaletteText::new(None);
         let mut hash = std::collections::hash_map::DefaultHasher::new();
@@ -527,6 +544,7 @@ impl CommandPalette {
                 self.all.push(PaletteEntry::Command(action.clone()));
             }
         }
+        self.all.push(PaletteEntry::About);
         self.all.extend(targets);
         self.presentation = self
             .all
@@ -534,7 +552,7 @@ impl CommandPalette {
             .map(|entry| {
                 let hint = match entry {
                     PaletteEntry::Command(action) => keybinding_hint(keymap, action),
-                    PaletteEntry::Tab { .. } => None,
+                    PaletteEntry::About | PaletteEntry::Tab { .. } => None,
                 };
                 entry.presentation(Some(i18n), hint)
             })

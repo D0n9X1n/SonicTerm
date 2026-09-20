@@ -3,6 +3,89 @@ use crate::i18n::test_translator as translator;
 use sonicterm_cfg::keymap::{ActionWrapper, Binding, Keymap, Meta};
 use PaletteEntry::Command;
 
+/// About has its own identity, with English and localized aliases surviving every keymap refresh.
+#[test]
+fn about_command_is_searchable_after_keymap_refresh() {
+    let mut tabs = TabBar::new();
+    let id = tabs.push(crate::tabs::Tab::new("work"));
+    let keymap = Keymap {
+        meta: Meta { name: "about-refresh".into(), version: "1.0".into() },
+        bindings: vec![Binding {
+            keys: "ctrl+alt+y".into(),
+            action: ActionWrapper(Action::ApplyTheme("custom-theme".into())),
+        }],
+    };
+    for (locale, title, aliases) in [
+        ("en", "About SonicTerm", ["about", "version", "build"]),
+        ("zh-CN", "关于 SonicTerm", ["关于", "版本", "构建"]),
+        ("ja", "SonicTerm について", ["について", "バージョン", "ビルド"]),
+    ] {
+        let mut palette = CommandPalette::new();
+        assert_eq!(palette.all.last(), Some(&PaletteEntry::About));
+        palette.set_query("About SonicTerm");
+        assert_eq!(palette.highlighted(), Some(&PaletteEntry::About));
+        palette.set_context(CommandContext { window_available: true, ..Default::default() });
+        let i18n = translator(locale);
+        palette.set_tabs(&tabs, &i18n);
+        palette.open();
+        for _ in 0..3 {
+            palette.set_keymap(&keymap, &i18n);
+            let about = palette.all.iter().position(|entry| *entry == PaletteEntry::About).unwrap();
+            assert_eq!(about, palette_actions().len() + 1);
+            assert_eq!(
+                palette.all.iter().filter(|entry| **entry == PaletteEntry::About).count(),
+                1
+            );
+            assert!(
+                matches!(palette.all[about + 1], PaletteEntry::Tab { id: target, .. } if target == id)
+            );
+            assert_eq!(palette.all.len(), about + 2);
+            for query in [title, "About SonicTerm", "about", "SonicTerm", "version", "build"]
+                .into_iter()
+                .chain(aliases)
+            {
+                palette.set_query(query);
+                let index = palette
+                    .visible()
+                    .iter()
+                    .position(|entry| **entry == PaletteEntry::About)
+                    .unwrap_or_else(|| panic!("locale={locale} query={query}"));
+                assert_eq!(palette.label_for_visible_index(index), Some(title));
+                assert_eq!(palette.shortcut_hint_for_visible_index(index), None);
+                assert!(palette.select_visible_index(index));
+                assert_eq!(palette.current(), Some(&PaletteEntry::About));
+            }
+        }
+        palette.open_tabs();
+        assert_eq!(palette.len(), 1);
+        assert!(palette.visible().iter().all(|entry| matches!(entry, PaletteEntry::Tab { .. })));
+        palette.set_query("about");
+        assert!(palette.is_empty());
+    }
+}
+
+/// About requires only a window, remains available in terminal READONLY, and is not a keymap action.
+#[test]
+fn about_entry_identity_and_availability_are_ui_only() {
+    assert!(PaletteEntry::About.same_identity(&PaletteEntry::About));
+    assert!(!PaletteEntry::About.same_identity(&Command(Action::OpenCommandPalette)));
+    assert_eq!(PaletteEntry::About.category(), CommandCategory::Settings);
+    let mut palette = CommandPalette::new();
+    palette.open();
+    palette.set_query("About SonicTerm");
+    assert_eq!(palette.highlighted(), Some(&PaletteEntry::About));
+    assert_eq!(palette.current(), None);
+    assert_eq!(palette.disabled_reason_for_visible_index(0), Some(DisabledReason::NoWindow));
+    palette.set_context(CommandContext {
+        window_available: true,
+        read_only: true,
+        ..Default::default()
+    });
+    assert_eq!(palette.current(), Some(&PaletteEntry::About));
+    assert_eq!(palette.disabled_reason_for_visible_index(0), None);
+    assert_eq!(palette.detail_for_visible_index(0).as_deref(), Some("Settings"));
+}
+
 #[test]
 fn window_name_validation_preserves_unicode_and_rejects_malformed_names() {
     // Limits count trimmed scalars, while controls and Unicode line separators are rejected before trimming.
@@ -296,13 +379,11 @@ fn disabled_commands_preserve_identity_and_never_become_current() {
 /// Empty results are grouped stably without changing canonical fuzzy-score ties or command reachability.
 #[test]
 fn categories_group_empty_query_and_keep_search_order() {
-    let mut expected = palette_actions();
-    expected.sort_by_key(|action| crate::command_label::descriptor(action).category);
+    let mut expected: Vec<_> = palette_actions().into_iter().map(Command).collect();
+    expected.push(PaletteEntry::About);
+    expected.sort_by_key(PaletteEntry::category);
     let mut palette = CommandPalette::new();
-    assert_eq!(
-        palette.visible().into_iter().cloned().collect::<Vec<_>>(),
-        expected.into_iter().map(Command).collect::<Vec<_>>()
-    );
+    assert_eq!(palette.visible().into_iter().cloned().collect::<Vec<_>>(), expected);
     let pattern = Pattern::parse("create", CaseMatching::Ignore, Normalization::Smart);
     let mut matcher = Matcher::new(Config::DEFAULT);
     let mut scratch = Vec::new();

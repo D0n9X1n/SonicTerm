@@ -748,6 +748,22 @@ impl App {
                     let source_window = self.palette_attached_window.or(self.main_window_id);
                     let action = match action {
                         sonicterm_ui::command_palette::PaletteEntry::Command(action) => action,
+                        sonicterm_ui::command_palette::PaletteEntry::About => {
+                            // When: About is selected, notify the captured palette owner rather than the current focus.
+                            self.command_palette.close();
+                            self.palette_attached_window = None;
+                            if let Some(id) =
+                                source_window.filter(|id| self.windows.contains_key(id))
+                            {
+                                self.show_notification_for_kind(
+                                    self.kind_for(id),
+                                    sonicterm_ui::overlays::NotificationLevel::Info,
+                                    format!("SonicTerm {}", env!("CARGO_PKG_VERSION")),
+                                );
+                            }
+                            self.request_redraw_for_overlay(source_window);
+                            return true;
+                        }
                         sonicterm_ui::command_palette::PaletteEntry::Tab { id, .. } => {
                             // When: `Tab` supplies `id`, resolve it in the captured source before closing the palette.
                             let target = source_window.and_then(|window_id| {
