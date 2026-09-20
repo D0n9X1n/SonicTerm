@@ -132,7 +132,9 @@ capability-compatible WezTerm version.
 Dropping `PtyHandle` cancels native IO, terminates the child, closes the PTY,
 and attempts bounded reaping. Reader and writer shutdown and child reaping use
 a 500 ms deadline. Unix kills the child session and rechecks descendants before
-reaping the leader, so a reused process or session id is not signalled. Windows
+reaping the leader, so a reused process or session id is not signalled. After the
+last bounded signal/wait attempt, a fresh membership check confirms completion;
+a remaining-member error includes the observed process IDs. Windows
 drains a cloned ConPTY reader while closing the master, with a 2 s close
 deadline. Timeout and cleanup failures are logged; teardown does not wait
 forever.
@@ -512,7 +514,8 @@ TERM_PROGRAM_VERSION=<与终端身份匹配的版本>
 
 释放 `PtyHandle` 时会取消原生 IO、终止子进程、关闭 PTY，并限时回收进程。读写线程
 退出和子进程回收的期限是 500 ms。Unix 会终止子进程会话，并在回收主进程前重新
-核对后代，避免向已复用的进程号或会话号发信号。Windows 在关闭 ConPTY 主端时并行
+核对后代，避免向已复用的进程号或会话号发信号。最后一次有界发信号/等待之后，重新检查
+会话成员以确认完成；仍有成员时，错误会包含观测到的进程 ID。Windows 在关闭 ConPTY 主端时并行
 排空一个克隆读取端，关闭期限为 2 s。超时和清理失败会写日志，析构不会无限等待。
 
 主端输入 writer 由同一个内部接缝构建，因此窗格关闭时子进程收到哪些字节只由一处决定。

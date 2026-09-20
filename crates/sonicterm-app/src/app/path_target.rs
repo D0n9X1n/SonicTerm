@@ -2692,6 +2692,20 @@ impl App {
                         .get(&window_id)
                         .and_then(|window| window.path_probe.failure_for(&key))
                         .unwrap_or("path-error-pending");
+                    tracing::debug!(
+                        window_id = ?key.window_id,
+                        pane_id = key.pane_id,
+                        pointed = ?key.pointed,
+                        view_top = key.view_top,
+                        screen_epoch = key.screen_epoch,
+                        scrollback_evicted = key.scrollback_evicted,
+                        cwd_revision = key.cwd_revision,
+                        cwd = ?key.cwd,
+                        clicked_path = ?path,
+                        candidates = ?key.candidates,
+                        reason,
+                        "local path activation unverified"
+                    );
                     self.report_or_copy_path_failure(window_id, pane_id, reason, &path);
                     return true;
                 };
