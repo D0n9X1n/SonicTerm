@@ -5,6 +5,7 @@ import importlib.util
 import os
 from pathlib import Path
 import plistlib
+import subprocess
 import tempfile
 import sys
 import unittest
@@ -16,6 +17,63 @@ SPEC.loader.exec_module(tool)
 
 
 class PackageTests(unittest.TestCase):
+    def test_font_probe_accepts_completed_report_when_open_wait_loses_process(self):
+        # A fast successful app can exit before open registers its kevent process wait.
+        diagnostic = b"Unable to block on applications (initial call to kevent() failed: No such process)\n"
+        for code, error in [(0, b""), (1, diagnostic)]:
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as directory:
+                state = Path(directory)
+                report = state / "native-fonts-cairo.log"
+                def launch(command, cwd, timeout, environment):
+                    self.assertEqual(command[:5], ["/usr/bin/open", "-n", "-g", "-W", str(state / "Probe.app")])
+                    self.assertEqual(timeout, 25)
+                    self.assertNotIn("NO_COLOR", environment)
+                    report.write_text("START pid=123\nRESULT fonts=4/4 cairo=PASS verdict=PASS\n")
+                    return subprocess.CompletedProcess(command, code, b"", error)
+                with patch.object(tool.RUNNER, "run_command", side_effect=launch):
+                    tool.run_font_probe(state / "Probe.app", state, state / "libcairo.dylib")
+                self.assertEqual((state / "probe-launch.log").read_bytes(), error)
+
+    def test_font_probe_rejects_other_launch_errors_even_with_pass_report(self):
+        # Only the exact exit-before-wait diagnostic can be resolved by the completed report.
+        diagnostic = b"Unable to block on applications (initial call to kevent() failed: No such process)\n"
+        for code, output, error in [(1, b"", b"launch failed"), (124, b"", diagnostic),
+                                    (91, b"", diagnostic), (1, b"unexpected", diagnostic),
+                                    (1, b"", diagnostic + b"another error\n")]:
+            with self.subTest(code=code, output=output, error=error), tempfile.TemporaryDirectory() as directory:
+                state = Path(directory)
+                def launch(command, *_args):
+                    (state / "native-fonts-cairo.log").write_text("RESULT fonts=4/4 cairo=PASS verdict=PASS\n")
+                    return subprocess.CompletedProcess(command, code, output, error)
+                with patch.object(tool.RUNNER, "run_command", side_effect=launch):
+                    with self.assertRaises(RuntimeError):
+                        tool.run_font_probe(state / "Probe.app", state, state / "libcairo.dylib")
+
+    def test_font_probe_requires_one_complete_fresh_passing_verdict(self):
+        # Missing, partial, conflicting, and stale reports must never turn a launch into success.
+        passed = "RESULT fonts=4/4 cairo=PASS verdict=PASS\n"
+        diagnostic = b"Unable to block on applications (initial call to kevent() failed: No such process)\n"
+        for text in [None, "START pid=123\n", "RESULT fonts=3/4 cairo=PASS verdict=FAIL\n",
+                     passed + passed, passed + "RESULT fonts=0/4 cairo=FAIL verdict=FAIL\n",
+                     passed + "unfinished\n"]:
+            for code in [0, 1]:
+                with self.subTest(text=text, code=code), tempfile.TemporaryDirectory() as directory:
+                    state = Path(directory)
+                    def launch(command, *_args):
+                        if text is not None:
+                            (state / "native-fonts-cairo.log").write_text(text)
+                        return subprocess.CompletedProcess(command, code, b"", diagnostic if code else b"")
+                    with patch.object(tool.RUNNER, "run_command", side_effect=launch):
+                        with self.assertRaisesRegex(RuntimeError, "report|verdict"):
+                            tool.run_font_probe(state / "Probe.app", state, state / "libcairo.dylib")
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            (state / "native-fonts-cairo.log").write_text(passed)
+            with patch.object(tool.RUNNER, "run_command") as launch:
+                with self.assertRaisesRegex(RuntimeError, "already exists"):
+                    tool.run_font_probe(state / "Probe.app", state, state / "libcairo.dylib")
+                launch.assert_not_called()
+
     def test_shared_runner_executes_and_preserves_isolated_environment(self):
         # Exercise the imported process runner rather than letting package mocks hide API drift.
         with tempfile.TemporaryDirectory() as directory:
