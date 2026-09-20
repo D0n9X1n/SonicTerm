@@ -67,6 +67,36 @@ the configured filters. Very hot font-shaper dumps are `trace`; no configured
 level admits them. Use a targeted `RUST_LOG` directive only when investigating
 that path.
 
+## Local-path click diagnostics
+
+Enable `[logging] level = "debug"` before reproducing an explicit local-path
+click failure, or use `RUST_LOG=sonicterm_app::app::path_target=debug` for one run.
+The `local path activation unverified` event records a click whose detected
+explicit path has no current authorized filesystem selection. It uses the
+immutable click snapshot, without re-reading the filesystem or the parser.
+
+| Field | Meaning |
+| --- | --- |
+| `window_id`, `pane_id`, `pointed`, `view_top` | Clicked window/pane, absolute cell, and viewport origin |
+| `screen_epoch`, `scrollback_evicted` | Screen and retained-history identity |
+| `cwd`, `cwd_revision` | That pane's OSC 7 authority/path and revision, not the process CWD |
+| `clicked_path` | Explicit path text associated with the click |
+| `candidates` | Bounded candidate set with typed provenance, resolved paths, cell spans, and literal-missing prerequisites |
+| `reason` | Current probe failure key, or `path-error-pending` when no matching failure is available |
+
+A pending result is not evidence that the file is missing. The event contains
+paths, which can be sensitive, but no whole terminal rows or environment dump;
+review it before sharing. Paths use escaped debug formatting, and one event may
+be large even though candidate enumeration is bounded. Default `warn` logging
+does not emit it. Hover and unverified bare-name clicks do not emit it either.
+
+An absent event proves nothing about success or failure: logging may be disabled,
+no target may have been detected, or a rejected target/native-open failure may
+have followed another branch. Native-open failures retain their separate
+`path open failed` warning. To investigate a relative-path failure, compare the
+same file's relative path, absolute path, and local file URI in the same pane;
+retain the matching click identity and do not infer its CWD from another shell.
+
 ## PTY input rejection diagnostics
 
 The default `warn` level reports input that was refused, including terminal
@@ -461,6 +491,31 @@ max_breadcrumb_bytes = 1048576    # 1 MiB
 配置过滤器始终把 `wgpu`、`naga`、`sonicterm-vt` 和 `sonicterm-grid` 保持在 warning
 级别。字体塑形热路径的海量输出位于 `trace`，任何配置级别都不会启用；只有专门排查该
 路径时才使用精确的 `RUST_LOG` 指令。
+
+## 本地路径点击诊断
+
+复现显式本地路径点击失败前，设置 `[logging] level = "debug"`，或对单次运行使用
+`RUST_LOG=sonicterm_app::app::path_target=debug`。当已检测的显式路径没有当前有效的
+文件系统授权目标时，`local path activation unverified` 事件会记录该次点击。
+它使用不可变的点击快照，不重新读取文件系统或 parser。
+
+| 字段 | 含义 |
+| --- | --- |
+| `window_id`、`pane_id`、`pointed`、`view_top` | 被点击的窗口/窗格、绝对单元格与视口起点 |
+| `screen_epoch`、`scrollback_evicted` | 屏幕与保留历史的身份 |
+| `cwd`、`cwd_revision` | 该窗格的 OSC 7 authority/path 与版本，不是进程 CWD |
+| `clicked_path` | 与点击关联的显式路径文本 |
+| `candidates` | 有界候选集合，含类型来源、解析后的路径、单元格范围及完整字面缺失前提 |
+| `reason` | 当前探测失败键；没有匹配失败结果时为 `path-error-pending` |
+
+pending 不是文件不存在的证据。事件包含可能敏感的路径，但不含整行终端内容或环境转储；
+分享前应检查。路径以转义后的 debug 格式输出；即使候选枚举有上限，单条事件仍可能较大。
+默认 `warn` 级别不输出它，悬停和未经验证的裸文件名点击也不输出。
+
+没有该事件不能证明成功或失败：可能没有开启日志、没有检测到目标，或被拒绝的目标/原生打开
+失败走了其它分支。原生打开失败保留独立的 `path open failed` 告警。调查相对路径失败时，
+在同一窗格比较同一个文件的相对路径、绝对路径与本地文件 URI；保留对应点击身份，
+不要用另一个 shell 的 CWD 推断该窗格目录。
 
 ## PTY 输入拒绝诊断
 
