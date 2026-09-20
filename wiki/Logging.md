@@ -191,6 +191,15 @@ presenter state changes. Its `requested`, `effective`, `windows_host`,
 `opaque_target`, `software_presenter`, and `dual_source_supported` fields explain
 every LCD-to-grayscale fallback without relying on a screenshot.
 
+At `info`, `DPI transition synchronized` records `window_id`, `old_scale`,
+`new_scale`, `native_scale`, and `size_scale` alongside `old_inner`, `suggested`,
+`minimum`, `available`, and `target`. `renderer_before`/`renderer_after` are
+physical surface pixels; `cell_before`/`cell_after` are raster-pixel cell extents.
+On macOS, `size_scale` follows the native backing scale because `old_inner` is
+already reported in that domain. The other platforms use the stored old scale.
+These paired inputs/outputs distinguish double scaling from a surface or cell
+mismatch without recording terminal content.
+
 ## Memory diagnostics
 
 ### Aggregate snapshot at `info`
@@ -586,6 +595,13 @@ VDI 环境中，请查找 `software-render degrade engaged`，并对照[配置](
 模式、opacity、主题或 presenter 状态变化时写入 `renderer LCD subpixel policy`。其中的
 `requested`、`effective`、`windows_host`、`opaque_target`、`software_presenter` 和
 `dual_source_supported` 字段能解释每次 LCD 到灰度的回退，不必依赖截图推断。
+
+在 `info` 级别，`DPI transition synchronized` 会记录 `window_id`、`old_scale`、
+`new_scale`、`native_scale`、`size_scale`，以及 `old_inner`、`suggested`、`minimum`、
+`available`、`target`。`renderer_before`/`renderer_after` 是物理表面像素尺寸，
+`cell_before`/`cell_after` 是光栅像素单位的单元格尺寸。macOS 的 `size_scale` 使用原生
+backing scale，因为 `old_inner` 已按该比例报告；其他平台使用保存的旧比例。这些成对的
+输入/输出可区分重复缩放与表面或单元格尺寸不一致，不会记录终端内容。
 
 ## 内存诊断
 
