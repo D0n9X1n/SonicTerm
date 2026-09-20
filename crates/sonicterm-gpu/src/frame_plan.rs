@@ -80,6 +80,12 @@ pub(crate) struct WindowIdentity {
     pub overlay_active: bool,
 }
 
+impl WindowIdentity {
+    fn same_chrome(&self, other: &Self) -> bool {
+        Self { hovered_url_cells: other.hovered_url_cells, ..self.clone() } == *other
+    }
+}
+
 /// Structural pane identity preserves order, revision, requested viewport, and resolved projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PaneIdentity {
@@ -305,7 +311,7 @@ impl FramePlan {
         let first_frame = previous.is_none();
         let unchanged = previous.is_some_and(|previous| previous == &key);
         let chrome_changed = previous.is_none_or(|previous| {
-            previous.window != key.window
+            !previous.window.same_chrome(&key.window)
                 || previous.metrics != key.metrics
                 || previous.padding != key.padding
                 || previous.degraded != key.degraded
@@ -319,6 +325,36 @@ impl FramePlan {
         });
         if chrome_changed {
             dirt.add_clipped(surface, surface);
+        } else if let Some(previous) = previous {
+            // When: previous exists with unchanged chrome, hover transitions replace only old and new glyph-row ink.
+            if previous.window.hovered_url_cells != key.window.hovered_url_cells {
+                for hovered in [previous.window.hovered_url_cells, key.window.hovered_url_cells]
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(pane) = panes.iter().find(|pane| pane.id == hovered.pane_id) {
+                        let rows = hovered
+                            .spans()
+                            .iter()
+                            .filter(|span| span.row < pane.row_count)
+                            .map(|span| usize::from(span.row));
+                        if let Some(rect) = dirty_rows_damage_rect_with_ink_pad(
+                            rows,
+                            pane.full_rect,
+                            pane.layout.x,
+                            pane.layout.y,
+                            pane.cols,
+                            facts.cell_w,
+                            facts.cell_h,
+                            facts.vertical_ink_pad,
+                            surface.w,
+                            surface.h,
+                        ) {
+                            dirt.add_clipped(rect, surface);
+                        }
+                    }
+                }
+            }
         }
         let mode = if unchanged {
             RenderMode::Noop

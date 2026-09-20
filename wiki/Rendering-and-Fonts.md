@@ -272,12 +272,14 @@ rectangle is used by GPU and Windows software presentation.
 ### Native source versions and configuration
 
 The source-pinned stack is FreeType 2.14.3, HarfBuzz 14.4.0, libpng 1.6.58,
-and zlib 1.3.2. FreeType carries two upstream excess-variable-coordinate fixes;
-zlib carries the upstream invalid-distance `inflateBack` correction and three
-related nonblocking gzip-writing fixes. The exact release commits, archive
-SHA-256 values, selected paths, ordered patches, and resulting source-tree hashes
-are in `scripts/native-dependencies.json`. The headers report the base releases,
-not additional patch revisions. Cairo remains an external platform dependency;
+and zlib 1.3.2. The vendored FreeType carries two upstream excess-variable-coordinate
+fixes; the vendored zlib carries the upstream invalid-distance `inflateBack`
+correction and three related nonblocking gzip-writing fixes. Those fixes are
+already present in the imported sources rather than applied at build time. The
+exact release commits, archive SHA-256 values, selected paths, the upstream
+revision and URL of each carried fix, and the resulting source-tree hashes are in
+`scripts/native-dependencies.json`. The headers report the base releases, not the
+additional fix revisions. Cairo remains an external platform dependency;
 this inventory does not pin Cairo or imply a self-contained macOS bundle.
 
 FreeType configuration is generated outside the vendored tree. It enables error
@@ -792,11 +794,12 @@ BGRA 彩色位图按非透明区域的半开边界裁剪，保留最后一行和
 ### 原生源码版本与配置
 
 源码固定版本为 FreeType 2.14.3、HarfBuzz 14.4.0、libpng 1.6.58 和 zlib 1.3.2。
-FreeType 带有两项上游可变字体多余坐标修复；zlib 带有上游 `inflateBack` 无效距离修复
-以及三项相关的非阻塞 gzip 写入修复。准确的发布提交、归档 SHA-256、导入路径、
-补丁顺序和最终源码树摘要记录在 `scripts/native-dependencies.json`。头文件报告基础
-发布版本，不包含额外补丁修订号。Cairo 仍由平台提供；此清单不固定 Cairo，也不表示
-macOS 应用包已自包含其运行依赖。
+仓库内的 FreeType 带有两项上游可变字体多余坐标修复；仓库内的 zlib 带有上游
+`inflateBack` 无效距离修复以及三项相关的非阻塞 gzip 写入修复。这些修复已存在于导入的
+源码中，而不是在构建时应用。准确的发布提交、归档 SHA-256、导入路径、每项已携带修复的
+上游修订号与 URL，以及最终源码树摘要记录在 `scripts/native-dependencies.json`。头文件
+报告基础发布版本，不包含额外修复修订号。Cairo 仍由平台提供；此清单不固定 Cairo，也不
+表示 macOS 应用包已自包含其运行依赖。
 
 FreeType 配置在第三方源码树之外生成，启用错误字符串、外部 zlib、PNG 字形、长 PCF
 族名、次像素光栅化和受支持的布尔次像素 hinting 选项。定义缺失、重复或出现意外值会

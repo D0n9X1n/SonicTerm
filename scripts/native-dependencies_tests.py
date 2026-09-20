@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Regression tests for the offline native-dependency maintenance tool."""
+"""Regression tests for the offline native-dependency verifier."""
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import hashlib
 import importlib.util
@@ -10,14 +11,12 @@ import io
 import json
 import os
 from pathlib import Path
-import shutil
-import stat
-import tarfile
 import tempfile
 import unittest
 from unittest import mock
 
 _HERE = Path(__file__).resolve().parent
+_REPO_ROOT = _HERE.parent
 _SPEC = importlib.util.spec_from_file_location(
     "native_dependencies", _HERE / "native-dependencies.py"
 )
@@ -31,7 +30,15 @@ _SPEC.loader.exec_module(tool)
 PINNED_TWO_FILE_TREE = "6196283baec24038d2c66d7b8bd519e86c8bd9e18dce96e7c49f6bbcf4317d4d"
 PINNED_EMPTY_TREE = "dc1b85cc111ad965f947938798d33b98ffcc90b724dacac0b2153368eb15df93"
 
-HAVE_GIT = shutil.which("git") is not None
+# The four vendored trees as imported and reviewed. Pinning them here, independently of
+# the manifest, is what turns "the manifest still parses" into "no vendored byte moved":
+# a refactor that rewrote a digest would have to rewrite this list to stay green.
+PINNED_VENDOR_TREES = {
+    "freetype": "283cb02ba9baaa5e6b8a99e7bfa8673bd2d45dae9c9f4debdfd685c9abd97bb6",
+    "harfbuzz": "5c177bc1d1ba83d5f06d9ea1fe6bcdd69bdb853bac2490af34ac148de582c787",
+    "libpng": "75a542981ad0461cf449c448a20267256111f1fe61d2a4d537e4c865774303da",
+    "zlib": "d021ec147dcd37fb5b33f8413d7409942d4a7607558e03b6bc0c191a6b5156f8",
+}
 
 
 def create_test_symlink(target, link: Path, *, directory: bool = False) -> None:
@@ -68,44 +75,6 @@ def write_file(path: Path, data: bytes | str) -> Path:
     return path
 
 
-def sha256_file(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def build_tar(path: Path, entries) -> Path:
-    """Build a tar from declarative members so hostile shapes stay expressible."""
-    with tarfile.open(path, "w") as archive:
-        for entry in entries:
-            kind = entry.get("kind", "file")
-            info = tarfile.TarInfo(entry["name"])
-            info.mode = entry.get("mode", 0o644)
-            if kind == "file":
-                payload = entry["data"]
-                if isinstance(payload, str):
-                    payload = payload.encode("utf-8")
-                info.size = len(payload)
-                archive.addfile(info, io.BytesIO(payload))
-            elif kind == "dir":
-                info.type = tarfile.DIRTYPE
-                info.mode = entry.get("mode", 0o755)
-                archive.addfile(info)
-            elif kind == "symlink":
-                info.type = tarfile.SYMTYPE
-                info.linkname = entry["target"]
-                archive.addfile(info)
-            elif kind == "hardlink":
-                info.type = tarfile.LNKTYPE
-                info.linkname = entry["target"]
-                archive.addfile(info)
-            elif kind == "device":
-                info.type = tarfile.CHRTYPE
-                info.devmajor, info.devminor = 1, 3
-                archive.addfile(info)
-            else:  # pragma: no cover - guards fixture typos
-                raise AssertionError("unknown fixture member kind {}".format(kind))
-    return path
-
-
 class Fixture:
     """A throwaway repository root holding one manifest-described library tree."""
 
@@ -132,11 +101,11 @@ class Fixture:
             "revision": None,
             "tag": None,
             "include": ["a.txt", "sub/**"],
-            "patches": [],
+            "upstream_fixes": [],
             "tree_sha256": PINNED_TWO_FILE_TREE,
         }
         library.update(overrides)
-        return {"schema_version": 1, "libraries": [library]}
+        return {"schema_version": tool.SCHEMA_VERSION, "libraries": [library]}
 
     def write_manifest(self, document: dict) -> None:
         write_file(self.manifest_path, json.dumps(document, indent=2))
@@ -240,7 +209,7 @@ class CheckTests(unittest.TestCase):
             self.assertEqual(fixture.run("check"), 1)
 
     def test_null_tree_hash_is_rejected_by_check(self):
-        # Protect the manifest from staying in its unpinned bootstrap state.
+        # Protect the manifest from shipping without the reviewed tree digest recorded.
         with tempfile.TemporaryDirectory() as directory:
             fixture = Fixture(Path(directory))
             fixture.populate_tree()
@@ -254,24 +223,14 @@ class CheckTests(unittest.TestCase):
             fixture.write_manifest(fixture.manifest())
             self.assertEqual(fixture.run("check"), 1)
 
-    def test_patch_hash_is_verified_from_the_repository_root(self):
-        # Protect applied patches from being edited after review without failing verification.
+    def test_single_library_selection_checks_only_that_library(self):
+        # Protect `--library`, which stays part of the supported command surface.
         with tempfile.TemporaryDirectory() as directory:
             fixture = Fixture(Path(directory))
             fixture.populate_tree()
-            patch = write_file(fixture.root / "scripts" / "patches" / "p.patch", "diff\n")
-            entry = {
-                "path": "scripts/patches/p.patch",
-                "sha256": sha256_file(patch),
-                "revision": None,
-                "url": None,
-            }
-            fixture.write_manifest(fixture.manifest(patches=[entry]))
-            self.assertEqual(fixture.run("check"), 0)
-            write_file(patch, "diff tampered\n")
-            self.assertEqual(fixture.run("check"), 1)
-            patch.unlink()
-            self.assertEqual(fixture.run("check"), 1)
+            fixture.write_manifest(fixture.manifest())
+            self.assertEqual(fixture.run("check", "--library", "demo"), 0)
+            self.assertEqual(fixture.run("check", "--library", "absent"), 1)
 
     def test_optional_version_check_reads_one_capture_group(self):
         # Protect the pinned version from drifting out of the header the build compiles.
@@ -327,324 +286,160 @@ class CheckTests(unittest.TestCase):
             )
             self.assertEqual(fixture.run("check"), 1)
 
-    def test_unknown_schema_version_and_unknown_library_fail(self):
-        # Protect the tool from misreading a future manifest or accepting a typo'd library name.
+    def test_unknown_schema_version_is_rejected(self):
+        # Protect the tool from misreading a manifest shape it cannot claim to understand,
+        # including the retired schema 1 whose `patches` entries named local files.
         with tempfile.TemporaryDirectory() as directory:
             fixture = Fixture(Path(directory))
             fixture.populate_tree()
-            fixture.write_manifest(fixture.manifest())
-            self.assertEqual(fixture.run("check", "--library", "absent"), 1)
-            fixture.write_manifest({"schema_version": 2, "libraries": []})
+            for version in (1, tool.SCHEMA_VERSION + 1, "2", None):
+                with self.subTest(schema_version=version):
+                    document = fixture.manifest()
+                    document["schema_version"] = version
+                    fixture.write_manifest(document)
+                    self.assertEqual(fixture.run("check"), 1)
+
+
+class UpstreamFixMetadataTests(unittest.TestCase):
+    """`upstream_fixes` records provenance only: a revision and where to read it."""
+
+    def test_valid_records_are_accepted_without_any_local_file(self):
+        # The central contract: recorded fixes need no file on disk to verify.
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Fixture(Path(directory))
+            fixture.populate_tree()
+            fixture.write_manifest(fixture.manifest(upstream_fixes=[
+                {
+                    "revision": "8fa928f1617aba65f45b00f0dcb109f077b7741e",
+                    "url": "https://example.invalid/commit/8fa928f",
+                },
+            ]))
+            self.assertEqual(fixture.run("check"), 0)
+
+    def test_incomplete_records_are_rejected(self):
+        # A fix without both a revision and a URL is not provenance anyone can follow.
+        broken = {
+            "no revision": {"url": "https://example.invalid/c/1"},
+            "no url": {"revision": "a" * 40},
+            "empty revision": {"revision": "", "url": "https://example.invalid/c/1"},
+            "empty url": {"revision": "a" * 40, "url": ""},
+            "not an object": "https://example.invalid/c/1",
+        }
+        for label, entry in broken.items():
+            with self.subTest(record=label):
+                with tempfile.TemporaryDirectory() as directory:
+                    fixture = Fixture(Path(directory))
+                    fixture.populate_tree()
+                    fixture.write_manifest(fixture.manifest(upstream_fixes=[entry]))
+                    self.assertEqual(fixture.run("check"), 1)
+
+    def test_local_patch_fields_are_rejected_inside_a_record(self):
+        # Refuse the old shape outright: a path or file hash here would re-create the
+        # duplication this manifest exists to avoid, and nothing would apply it.
+        for field, value in (("path", "scripts/native-patches/x.patch"), ("sha256", "0" * 64)):
+            with self.subTest(field=field):
+                with tempfile.TemporaryDirectory() as directory:
+                    fixture = Fixture(Path(directory))
+                    fixture.populate_tree()
+                    entry = {
+                        "revision": "a" * 40,
+                        "url": "https://example.invalid/c/1",
+                        field: value,
+                    }
+                    fixture.write_manifest(fixture.manifest(upstream_fixes=[entry]))
+                    self.assertEqual(fixture.run("check"), 1)
+
+    def test_legacy_patches_key_is_rejected(self):
+        # A library still carrying `patches` would be silently unverified, since nothing
+        # reads that key any more; failing loudly is the only honest response.
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Fixture(Path(directory))
+            fixture.populate_tree()
+            document = fixture.manifest()
+            document["libraries"][0]["patches"] = [
+                {"path": "scripts/native-patches/x.patch", "sha256": "0" * 64}
+            ]
+            fixture.write_manifest(document)
+            self.assertEqual(fixture.run("check"), 1)
+
+    def test_missing_upstream_fixes_key_is_rejected(self):
+        # Absent is not the same as empty: an omitted list hides whether fixes were considered.
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Fixture(Path(directory))
+            fixture.populate_tree()
+            document = fixture.manifest()
+            del document["libraries"][0]["upstream_fixes"]
+            fixture.write_manifest(document)
             self.assertEqual(fixture.run("check"), 1)
 
 
-class StageArchiveSafetyTests(unittest.TestCase):
-    def stage_with(self, fixture: Fixture, entries, output: Path, **overrides) -> int:
-        archive = build_tar(fixture.root / "demo.tar", entries)
-        archive_meta = {
-            "url": "https://example.invalid/demo-1.0.tar",
-            "sha256": overrides.pop("archive_sha256", sha256_file(archive)),
-            "root": overrides.pop("archive_root", "demo-1.0"),
-        }
-        fixture.write_manifest(
-            fixture.manifest(archive=archive_meta, tree_sha256=None, **overrides)
-        )
-        return fixture.run(
-            "stage", "demo", "--archive", str(archive), "--output", str(output)
-        )
+class NoPatchFileDependencyTests(unittest.TestCase):
+    """The tool must not depend on, advertise, or imply local patch reconstruction."""
 
-    def test_wrong_archive_hash_stages_nothing(self):
-        # Protect the staging root from a substituted or truncated download.
-        with tempfile.TemporaryDirectory() as directory:
-            fixture = Fixture(Path(directory))
-            output = fixture.root / "stage"
-            code = self.stage_with(
-                fixture,
-                [{"name": "demo-1.0/a.txt", "data": "alpha\n"}],
-                output,
-                archive_sha256="1" * 64,
-            )
-            self.assertEqual(code, 1)
-            self.assertFalse(output.exists())
+    def test_patch_and_staging_entry_points_are_gone(self):
+        # These are the exact names that made a patch file a build-adjacent input.
+        for name in ("apply_patches", "verify_patches", "stage_library",
+                     "extract_selected", "glob_to_regex", "file_sha256",
+                     "_assert_patch_stays_inside", "_scan_archive"):
+            with self.subTest(symbol=name):
+                self.assertFalse(hasattr(tool, name))
 
-    def test_unsafe_member_paths_are_refused_anywhere_in_the_archive(self):
-        # Protect the host filesystem from escape and from a conflicting duplicate member.
-        hostile = {
-            "absolute": [{"name": "/etc/passwd", "data": "x"}],
-            "traversal": [{"name": "demo-1.0/../../escape.txt", "data": "x"}],
-            # Rejected although the duplicate sits outside the include list.
-            "duplicate": [
-                {"name": "demo-1.0/docs/d.txt", "data": "one"},
-                {"name": "demo-1.0/docs/d.txt", "data": "two"},
-            ],
-        }
-        for label, entries in hostile.items():
-            with self.subTest(member=label):
-                with tempfile.TemporaryDirectory() as directory:
-                    fixture = Fixture(Path(directory))
-                    output = fixture.root / "stage"
-                    self.assertEqual(self.stage_with(fixture, entries, output), 1)
-                    self.assertFalse(output.exists())
-                    self.assertFalse((fixture.root / "escape.txt").exists())
+    def test_archive_and_process_machinery_is_not_imported(self):
+        # Without staging there is nothing to untar and nothing to execute; keeping the
+        # imports would leave that capability one call away from returning.
+        for name in ("tarfile", "subprocess", "shutil", "tempfile"):
+            with self.subTest(module=name):
+                self.assertFalse(hasattr(tool, name))
 
-    def test_selected_links_and_devices_are_refused(self):
-        # Protect the staged tree from members the tree digest cannot describe.
-        hostile = {
-            "symlink": [{"name": "demo-1.0/sub/link", "kind": "symlink", "target": "/etc/passwd"}],
-            "hardlink": [{"name": "demo-1.0/sub/hard", "kind": "hardlink", "target": "demo-1.0/a.txt"}],
-            "device": [{"name": "demo-1.0/sub/null", "kind": "device"}],
-        }
-        for label, extra in hostile.items():
-            with self.subTest(member=label):
-                with tempfile.TemporaryDirectory() as directory:
-                    fixture = Fixture(Path(directory))
-                    output = fixture.root / "stage"
-                    entries = [
-                        {"name": "demo-1.0/a.txt", "data": "alpha\n"},
-                        {"name": "demo-1.0/sub/b.txt", "data": "beta\n"},
-                    ] + extra
-                    self.assertEqual(self.stage_with(fixture, entries, output), 1)
-                    self.assertFalse(output.exists())
+    def test_stage_is_neither_advertised_nor_accepted(self):
+        # A removed command that still parses would promise a reconstruction it cannot do.
+        help_text = io.StringIO()
+        with contextlib.redirect_stdout(help_text):
+            with self.assertRaises(SystemExit):
+                tool._parse_args(["--help"])
+        self.assertNotIn("stage", help_text.getvalue())
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                tool._parse_args(["stage", "freetype"])
 
-    def test_excluded_benign_symlink_does_not_fail_a_valid_release(self):
-        # Protect real upstream releases, which ship root instruction symlinks we never select.
-        with tempfile.TemporaryDirectory() as directory:
-            fixture = Fixture(Path(directory))
-            output = fixture.root / "stage"
-            entries = [
-                {"name": "demo-1.0/a.txt", "data": "alpha\n"},
-                {"name": "demo-1.0/sub/b.txt", "data": "beta\n"},
-                {"name": "demo-1.0/AGENTS.md", "data": "upstream instructions\n"},
-                {"name": "demo-1.0/CLAUDE.md", "kind": "symlink", "target": "AGENTS.md"},
-            ]
-            self.assertEqual(self.stage_with(fixture, entries, output), 0)
-            self.assertFalse((output / "CLAUDE.md").exists())
-            self.assertFalse((output / "AGENTS.md").exists())
-            self.assertEqual(tool.tree_sha256(output), PINNED_TWO_FILE_TREE)
-
-    def test_entry_count_and_byte_bounds_are_enforced(self):
-        # Protect the host from an archive bomb before any member reaches the disk.
-        entries = [
-            {"name": "demo-1.0/f{}.txt".format(index), "data": "x" * 16}
-            for index in range(6)
-        ]
-        for attribute, value in (("MAX_ARCHIVE_ENTRIES", 3), ("MAX_ARCHIVE_BYTES", 32)):
-            with self.subTest(bound=attribute):
-                original = getattr(tool, attribute)
-                setattr(tool, attribute, value)
-                try:
-                    with tempfile.TemporaryDirectory() as directory:
-                        fixture = Fixture(Path(directory))
-                        output = fixture.root / "stage"
-                        self.assertEqual(self.stage_with(fixture, entries, output), 1)
-                        self.assertFalse(output.exists())
-                finally:
-                    setattr(tool, attribute, original)
-
-    def test_existing_non_empty_output_is_preserved(self):
-        # Protect an existing checkout or vendor tree from being overwritten or deleted.
-        with tempfile.TemporaryDirectory() as directory:
-            fixture = Fixture(Path(directory))
-            output = fixture.root / "stage"
-            keep = write_file(output / "keep.txt", "precious")
-            code = self.stage_with(
-                fixture, [{"name": "demo-1.0/a.txt", "data": "alpha\n"}], output
-            )
-            self.assertEqual(code, 1)
-            self.assertEqual(keep.read_text(encoding="utf-8"), "precious")
-            self.assertFalse((output / "a.txt").exists())
-
-    def test_output_symlink_cannot_redirect_publication(self):
-        # A caller's output path must not silently write into a different directory through a link.
-        with tempfile.TemporaryDirectory() as directory:
-            fixture = Fixture(Path(directory))
-            elsewhere = fixture.root / "elsewhere"
-            elsewhere.mkdir()
-            output = fixture.root / "stage"
-            create_test_symlink(elsewhere, output, directory=True)
-            self.assertEqual(self.stage_with(
-                fixture, [{"name": "demo-1.0/a.txt", "data": "alpha\n"}], output
-            ), 1)
-            self.assertEqual(list(elsewhere.iterdir()), [])
-
-    def test_staging_checks_the_declared_version(self):
-        # An unpinned candidate still must match the version the maintainer intended to import.
-        with tempfile.TemporaryDirectory() as directory:
-            fixture = Fixture(Path(directory))
-            output = fixture.root / "stage"
-            check = {"path": "a.txt", "pattern": r"VERSION (\d+)", "value": "2"}
-            self.assertEqual(self.stage_with(
-                fixture, [{"name": "demo-1.0/a.txt", "data": "VERSION 1\n"}],
-                output, version_check=check
-            ), 1)
-            self.assertFalse(output.exists())
-
-    def test_missing_archive_root_fails(self):
-        # Protect against a renamed upstream top-level directory staging an empty tree.
-        with tempfile.TemporaryDirectory() as directory:
-            fixture = Fixture(Path(directory))
-            output = fixture.root / "stage"
-            code = self.stage_with(
-                fixture, [{"name": "other-2.0/a.txt", "data": "alpha\n"}], output
-            )
-            self.assertEqual(code, 1)
-            self.assertFalse(output.exists())
-
-    def test_include_filters_and_root_is_stripped(self):
-        # Protect the bootstrap workflow: stage the selected subset under a stripped root.
-        with tempfile.TemporaryDirectory() as directory:
-            fixture = Fixture(Path(directory))
-            output = fixture.root / "stage"
-            entries = [
-                {"name": "demo-1.0", "kind": "dir"},
-                {"name": "demo-1.0/a.txt", "data": "alpha\n"},
-                {"name": "demo-1.0/sub", "kind": "dir"},
-                {"name": "demo-1.0/sub/nested", "kind": "dir"},
-                {"name": "demo-1.0/sub/b.txt", "data": "beta\n"},
-                {"name": "demo-1.0/docs/manual.txt", "data": "excluded"},
-            ]
-            self.assertEqual(self.stage_with(fixture, entries, output), 0)
-            self.assertTrue((output / "a.txt").exists())
-            self.assertTrue((output / "sub" / "b.txt").exists())
-            self.assertFalse((output / "docs").exists())
-            self.assertEqual(tool.tree_sha256(output), PINNED_TWO_FILE_TREE)
-
-    def test_staged_files_are_not_executable(self):
-        # Protect maintainers from an upstream build script arriving pre-armed for execution.
-        with tempfile.TemporaryDirectory() as directory:
-            fixture = Fixture(Path(directory))
-            output = fixture.root / "stage"
-            entries = [
-                {"name": "demo-1.0/a.txt", "data": "alpha\n"},
-                {"name": "demo-1.0/configure", "data": "#!/bin/sh\n", "mode": 0o777},
-            ]
-            self.assertEqual(self.stage_with(fixture, entries, output, include=["**"]), 0)
-            self.assertFalse((output / "configure").stat().st_mode & stat.S_IXUSR)
-
-    def test_upstream_scripts_are_never_executed(self):
-        # Protect the host from an archive whose own build scripts would run during staging.
-        with tempfile.TemporaryDirectory() as directory:
-            fixture = Fixture(Path(directory))
-            output = fixture.root / "stage"
-            marker = fixture.root / "executed.marker"
-            script = "#!/bin/sh\ntouch {}\n".format(marker)
-            entries = [
-                {"name": "demo-1.0/a.txt", "data": "alpha\n"},
-                {"name": "demo-1.0/configure", "data": script, "mode": 0o777},
-                {"name": "demo-1.0/autogen.sh", "data": script, "mode": 0o777},
-                {"name": "demo-1.0/Makefile", "data": "all:\n\ttouch {}\n".format(marker)},
-            ]
-            self.assertEqual(self.stage_with(fixture, entries, output, include=["**"]), 0)
-            self.assertFalse(marker.exists())
+    def test_patch_directory_is_absent_from_the_repository(self):
+        # The duplication this change removes must not creep back in beside the manifest.
+        self.assertFalse((_REPO_ROOT / "scripts" / "native-patches").exists())
 
 
-@unittest.skipUnless(HAVE_GIT, "git is required to apply patches")
-class StagePatchTests(unittest.TestCase):
-    def stage(self, fixture: Fixture, output: Path, patches, tree_hash=None) -> int:
-        archive = build_tar(
-            fixture.root / "demo.tar",
-            [
-                {"name": "demo-1.0/a.txt", "data": "alpha\n"},
-                {"name": "demo-1.0/sub/b.txt", "data": "beta\n"},
-            ],
-        )
-        fixture.write_manifest(
-            fixture.manifest(
-                archive={
-                    "url": "https://example.invalid/demo-1.0.tar",
-                    "sha256": sha256_file(archive),
-                    "root": "demo-1.0",
-                },
-                patches=patches,
-                tree_sha256=tree_hash,
-            )
-        )
-        return fixture.run(
-            "stage", "demo", "--archive", str(archive), "--output", str(output)
-        )
+class ShippedManifestTests(unittest.TestCase):
+    """Guard the real manifest: four libraries, unchanged digests, provenance only."""
 
-    def patch_entry(self, fixture: Fixture, name: str, body: str) -> dict:
-        path = write_file(fixture.root / "scripts" / "patches" / name, body)
-        return {
-            "path": "scripts/patches/{}".format(name),
-            "sha256": sha256_file(path),
-            "revision": None,
-            "url": None,
-        }
+    def setUp(self):
+        self.manifest_path = _HERE / "native-dependencies.json"
+        self.document = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        self.libraries = tool.load_manifest(self.manifest_path)
 
-    def test_patch_applies_and_the_final_tree_hash_is_verified(self):
-        # Protect the staged result from differing from the reviewed, pinned tree.
-        body = "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-alpha\n+patched\n"
-        with tempfile.TemporaryDirectory() as directory:
-            fixture = Fixture(Path(directory))
-            output = fixture.root / "stage"
-            entry = self.patch_entry(fixture, "one.patch", body)
-            self.assertEqual(self.stage(fixture, output, [entry]), 0)
-            self.assertEqual((output / "a.txt").read_text(encoding="utf-8"), "patched\n")
-            staged = tool.tree_sha256(output)
+    def test_four_vendored_trees_keep_their_reviewed_digests(self):
+        # The refactor's hard requirement: not one vendored byte, and not one pin, moved.
+        recorded = {library["name"]: library["tree_sha256"] for library in self.libraries}
+        self.assertEqual(recorded, PINNED_VENDOR_TREES)
 
-            matching = fixture.root / "stage-pinned"
-            self.assertEqual(self.stage(fixture, matching, [entry], tree_hash=staged), 0)
+    def test_every_library_records_followable_upstream_fixes(self):
+        # Each retained fix must still name a full revision and a place to read it.
+        for library in self.libraries:
+            for fix in library["upstream_fixes"]:
+                with self.subTest(library=library["name"], revision=fix["revision"]):
+                    self.assertEqual(set(fix), {"revision", "url"})
+                    self.assertRegex(fix["revision"], r"\A[0-9a-f]{40}\Z")
+                    self.assertTrue(fix["url"].startswith("https://"))
 
-            mismatched = fixture.root / "stage-mismatched"
-            self.assertEqual(self.stage(fixture, mismatched, [entry], tree_hash="2" * 64), 1)
-            self.assertFalse(mismatched.exists())
+    def test_base_release_provenance_is_retained(self):
+        # Dropping the patch files must not drop the archive identity they were cut against.
+        for library in self.libraries:
+            with self.subTest(library=library["name"]):
+                self.assertRegex(library["revision"], r"\A[0-9a-f]{40}\Z")
+                self.assertRegex(library["archive"]["sha256"], r"\A[0-9a-f]{64}\Z")
+                self.assertTrue(library["archive"]["url"].startswith("https://"))
 
-    def test_tampered_patch_is_refused_before_application(self):
-        # Protect applied changes from an edit made after the patch was reviewed.
-        body = "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-alpha\n+patched\n"
-        with tempfile.TemporaryDirectory() as directory:
-            fixture = Fixture(Path(directory))
-            output = fixture.root / "stage"
-            entry = self.patch_entry(fixture, "one.patch", body)
-            entry["sha256"] = "3" * 64
-            self.assertEqual(self.stage(fixture, output, [entry]), 1)
-            self.assertFalse(output.exists())
-
-    def test_patch_that_does_not_apply_leaves_no_stage_behind(self):
-        # Protect the host from a half-patched tree when a patch rebase is overdue.
-        body = "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-nomatch\n+patched\n"
-        with tempfile.TemporaryDirectory() as directory:
-            fixture = Fixture(Path(directory))
-            output = fixture.root / "nested" / "stage"
-            keep = write_file(fixture.root / "nested" / "keep.txt", "precious")
-            entry = self.patch_entry(fixture, "bad.patch", body)
-            self.assertEqual(self.stage(fixture, output, [entry]), 1)
-            self.assertFalse(output.exists())
-            self.assertEqual(keep.read_text(encoding="utf-8"), "precious")
-
-    def test_patch_paths_may_not_escape_the_stage_root(self):
-        # Protect files outside the staging directory from a traversal in a patch header.
-        bodies = {
-            "traversal": "--- a/../escape.txt\n+++ b/../escape.txt\n@@ -0,0 +1 @@\n+x\n",
-            "absolute": "--- a/tmp/escape.txt\n+++ /tmp/escape.txt\n@@ -0,0 +1 @@\n+x\n",
-        }
-        for label, body in bodies.items():
-            with self.subTest(patch=label):
-                with tempfile.TemporaryDirectory() as directory:
-                    fixture = Fixture(Path(directory))
-                    output = fixture.root / "stage"
-                    entry = self.patch_entry(fixture, "escape.patch", body)
-                    self.assertEqual(self.stage(fixture, output, [entry]), 1)
-                    self.assertFalse(output.exists())
-                    self.assertFalse((fixture.root / "escape.txt").exists())
-
-    def test_patches_apply_in_manifest_order(self):
-        # Protect a dependent patch series from being reordered into a failure.
-        first = "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-alpha\n+second\n"
-        second = "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-second\n+third\n"
-        with tempfile.TemporaryDirectory() as directory:
-            fixture = Fixture(Path(directory))
-            output = fixture.root / "stage"
-            entries = [
-                self.patch_entry(fixture, "1.patch", first),
-                self.patch_entry(fixture, "2.patch", second),
-            ]
-            self.assertEqual(self.stage(fixture, output, entries), 0)
-            self.assertEqual((output / "a.txt").read_text(encoding="utf-8"), "third\n")
-
-            reversed_output = fixture.root / "stage-reversed"
-            self.assertEqual(self.stage(fixture, reversed_output, list(reversed(entries))), 1)
+    def test_no_local_patch_path_survives_in_the_manifest(self):
+        # A stale path would advertise a file the repository no longer ships.
+        self.assertNotIn("native-patches", self.manifest_path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

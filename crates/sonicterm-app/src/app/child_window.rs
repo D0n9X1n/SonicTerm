@@ -21,7 +21,6 @@ use sonicterm_gpu::core::GpuRenderer;
 use sonicterm_grid::grid::Grid;
 use sonicterm_io::pty::PtyHandle;
 use sonicterm_ui::{
-    command_palette::CommandPalette,
     overlays::{
         command_palette_query_caret_prefix, search_bar_label, search_query_caret_prefix,
         PaletteLayout, SearchBarLayout, PALETTE_ROW_PAD_X, SEARCH_BAR_ICON_GAP,
@@ -420,22 +419,7 @@ impl App {
                 // falls through to the main match below.
             }
         }
-        if matches!(event, WindowEvent::RedrawRequested) {
-            // Re-read before the long-lived palette/window borrows below so
-            // PTY, CWD, and viewport changes revoke stale path authorization.
-            self.refresh_target_hover(win_id);
-        }
-        // Split-borrow the palette out so the renderer can mutate it even though
-        // `child` borrows `self.windows` below. Disjoint fields — safe. Computed
-        // AFTER the scrollbar pre-match (which needs an unborrowed `self`).
         let broadcast_participants = self.broadcast_participants();
-        let mut palette_for_render: Option<&mut CommandPalette> = if palette_here {
-            Some(&mut self.command_palette)
-        } else {
-            // When: `palette_here` is false, so the palette belongs to another
-            // window and this child must not draw it.
-            None
-        };
         let pty_event_proxy = self.event_loop_proxy.clone();
         let Some(child) = self.windows.get_mut(&win_id) else {
             // When: `windows` no longer holds `win_id`, so the child was reaped
@@ -490,10 +474,8 @@ impl App {
                     // When: `should_defer_streaming_redraw` says this frame lands
                     // inside the vsync window, so it waits for the next boundary.
 
-                    // End the `child` / palette borrows on this path so the
-                    // `&mut self` defer helper is callable.
+                    // End the child borrow before updating the window's redraw schedule.
                     let _ = child;
-                    let _ = palette_for_render;
                     self.defer_child_redraw(win_id, was_dirty);
                     return;
                 }
@@ -592,7 +574,6 @@ impl App {
                     // preserved so a deferred input-driven redraw still bypasses
                     // the coalescing gate.
                     let _ = child;
-                    let _ = palette_for_render;
                     self.defer_window_lock_contention(win_id, was_dirty, Instant::now());
                     return;
                 }
@@ -627,6 +608,16 @@ impl App {
                     self.defer_window_lock_contention(win_id, was_dirty, Instant::now());
                     return;
                 }
+                let _ = child;
+                self.refresh_target_hover_from_parsers(
+                    win_id,
+                    guards.iter().map(|(id, parser, _)| (*id, &**parser)),
+                );
+                let mut palette_for_render = palette_here.then_some(&mut self.command_palette);
+                let Some(child) = self.windows.get_mut(&win_id) else {
+                    // When: windows no longer contains win_id, discard its collected frame instead of presenting retained hover.
+                    return;
+                };
                 child.coherent_frame_collected();
                 let viewport_tops: std::collections::HashMap<u64, Option<u64>> =
                     child.panes.iter().map(|(id, pane)| (*id, pane.viewport_top_abs)).collect();

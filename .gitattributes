@@ -10,4 +10,3 @@ crates/sonicterm-freetype/freetype2/** linguist-vendored -text
 crates/sonicterm-freetype/libpng/**    linguist-vendored -text
 crates/sonicterm-freetype/zlib/**      linguist-vendored -text
 crates/sonicterm-harfbuzz/harfbuzz/**  linguist-vendored -text
-scripts/native-patches/** -text

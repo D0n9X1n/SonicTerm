@@ -265,7 +265,9 @@ blink an unchanged target; changing the pointed row, target, CWD, viewport, or
 openability identity revokes authorization and requires a fresh probe.
 
 Plain hover underlines both detected URLs and OSC 8 labels with the theme's yellow
-hint; the open modifier switches to the action accent. OSC 8 coverage follows the
+hint; the open modifier switches to the action accent. Plain hover leaves glyph
+foreground colors unchanged. A temporarily busy parser does not remove an
+unchanged hint; clicks still require fresh target validation. OSC 8 coverage follows the
 contiguous label across automatic wraps, including wide cells, but never crosses
 hard line breaks or gaps into another occurrence. At most eight visible fragments
 are painted, always retaining the pointed fragment of an overlong label.
@@ -767,7 +769,8 @@ Pointer protocol 与 OSC 52 边界见 [终端 IO 与 VT](Terminal-IO-and-VT)。
 授权会被撤销并重新 probe。
 
 普通悬停会以主题黄色提示为检测到的 URL 和 OSC 8 标签添加下划线；按住打开修饰键后改用
-操作强调色。OSC 8 覆盖范围沿连续标签跨越自动换行，包括宽字符，但不会跨硬换行或间隔
+操作强调色。普通悬停不改变字形前景色；解析器暂时繁忙时不会移除未变化的提示，但点击
+仍须通过新的目标验证。OSC 8 覆盖范围沿连续标签跨越自动换行，包括宽字符，但不会跨硬换行或间隔
 连接另一次出现的链接。最多绘制八个可见片段；标签过长时仍保留指针所在片段。
 正文圆括号或方括号中的 URL 也会被检测到，外层括号不会进入目标地址或下划线范围。
 纯文本 URL 同样会跨已记录的终端右边界自动换行连接：指向任意片段都解析完整目标，并高亮
