@@ -2605,8 +2605,10 @@ impl App {
                             }
                         }
                     }
-                    if self.main().map(|ws| ws.selection.is_some()).unwrap_or(false) {
-                        // A selection becomes stale after terminal input and is cleared.
+                    if self.main().map(|ws| ws.selection.is_some()).unwrap_or(false)
+                        && !matches!(event.logical_key, Key::Named(key) if super::key_encoding::is_modifier_key(key))
+                    {
+                        // Standalone modifiers preserve selection for copy chords even when their protocol records reach the PTY.
                         self.selection_set(None);
                         if let Some(panes) = self.main_panes() {
                             mark_all_panes_dirty(panes);

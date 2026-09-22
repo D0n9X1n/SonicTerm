@@ -378,6 +378,14 @@ same-value repaints do not. The epoch rejects a primary-to-alternate-to-primary
 ABA transition even when the restored cells match. The check runs before
 rendering and immediately before copy.
 
+Pressing a modifier by itself (Ctrl, Shift, Alt/AltGr, Win/Super, Hyper, or Meta)
+does not clear the local selection, even when Win32 or Kitty sends that key as
+a protocol record. Other accepted terminal key presses still clear it. A
+character produced with AltGr is text input, not a modifier-only press. Main
+and child windows apply the same rule; copy shortcuts retain their existing
+clipboard-success policy. Lock keys such as CapsLock, NumLock, ScrollLock, and
+FnLock are not part of this modifier-only exception.
+
 For an explicit alternate-screen copy, a successful clipboard write clears the
 selection. Clipboard failure preserves it so the user can retry. If content has
 become stale, SonicTerm clears the selection without copying and leaves the
@@ -740,6 +748,12 @@ SGR 使用从 1 开始的 `CSI < Cb ; Cx ; Cy M`，释放使用小写 `m`。旧�
 屏幕 epoch 或窗格变化、淘汰已选行，或修改与选区相交的行都会清除选区；无关行变化
 与同值重绘不会。即使恢复后的 cell 相同，epoch 也会拒绝“主屏幕→备用屏幕→主屏幕”
 的 ABA 切换。渲染前和复制前都会执行检查。
+
+单独按下修饰键（Ctrl、Shift、Alt/AltGr、Win/Super、Hyper 或 Meta）不会清除本地选区，
+即使 Win32 或 Kitty 把该键发送为协议记录也一样。其它成功进入终端输入队列的按键仍会
+清除选区。通过 AltGr 输入的字符属于文本输入，不是单独修饰键。主窗口和子窗口规则
+一致；复制快捷键保留既有的剪贴板成功写入策略。CapsLock、NumLock、ScrollLock、
+FnLock 等锁定键不属于这一单独修饰键例外。
 
 显式复制备用屏幕选区时，剪贴板写入成功后清除选区；写入失败则保留，便于重试。
 若所选内容已经过期，SonicTerm 会清除选区但不复制，剪贴板保持不变。rmux/tmux 的

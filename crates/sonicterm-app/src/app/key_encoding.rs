@@ -1096,7 +1096,8 @@ fn kitty_functional_number(key: NamedKey, location: KeyLocation) -> Option<u32> 
     }
 }
 
-fn is_modifier_key(key: NamedKey) -> bool {
+/// Identify standalone modifier keys without classifying lock keys or modifier-produced text as modifiers.
+pub(super) fn is_modifier_key(key: NamedKey) -> bool {
     matches!(
         key,
         NamedKey::Shift

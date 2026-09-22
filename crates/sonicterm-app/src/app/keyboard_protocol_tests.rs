@@ -44,6 +44,50 @@ fn native_selection_requires_windows_request_and_zero_kitty_flags() {
 }
 
 #[test]
+fn native_request_preempts_modify_other_keys_in_either_order() {
+    // Outer Win32 negotiation is independent of modifyOtherKeys; only Kitty flags preempt native records.
+    for bytes in [&b"\x1b[?9001h\x1b[>4;2m"[..], &b"\x1b[>4;2m\x1b[?9001h"[..]] {
+        let mut parser = Parser::new(Grid::new(80, 24));
+        parser.advance(bytes);
+        let state = KeyboardSnapshot::from_bits(parser.keyboard_input_snapshot());
+        assert_eq!(state.modes().modify_other_keys(), 2);
+        assert_eq!(state.protocol(true), KeyboardProtocol::Win32);
+        let enter = Win32KeyEvent {
+            virtual_key: 13,
+            scan_code: 28,
+            unicode: &[13],
+            control_key_state: 16,
+            ..native()
+        };
+        assert_eq!(
+            encode(state, Some(enter), false, None, false).unwrap().bytes,
+            b"\x1b[13;28;13;1;16;1_"
+        );
+        parser.advance(b"\x1b[>10u");
+        assert_eq!(
+            KeyboardSnapshot::from_bits(parser.keyboard_input_snapshot()).protocol(true),
+            KeyboardProtocol::Other
+        );
+        parser.advance(b"\x1b[<u");
+        assert_eq!(
+            KeyboardSnapshot::from_bits(parser.keyboard_input_snapshot()).protocol(true),
+            KeyboardProtocol::Win32
+        );
+        parser.advance(b"\x1b[?9001l");
+        let state = KeyboardSnapshot::from_bits(parser.keyboard_input_snapshot());
+        assert_eq!(state.protocol(true), KeyboardProtocol::Other);
+        let bytes = super::super::key_encoding::encode_logical_with_modes(
+            &winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter),
+            winit::keyboard::ModifiersState::SHIFT,
+            state.kitty_flags(),
+            state.modes(),
+        )
+        .unwrap();
+        assert_eq!(bytes, b"\x1b[27;2;13~");
+    }
+}
+
+#[test]
 fn missing_native_metadata_refuses_without_legacy_fallback() {
     // A real event without its native record cannot reconstruct Win32 state from logical text.
     assert!(encode(snapshot(true, 0, 3), None, false, None, false).is_none());

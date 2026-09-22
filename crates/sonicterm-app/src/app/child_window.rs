@@ -1934,7 +1934,10 @@ impl App {
                             }
                         }
                     }
-                    if child.selection.is_some() {
+                    if child.selection.is_some()
+                        && !matches!(event.logical_key, Key::Named(key) if super::key_encoding::is_modifier_key(key))
+                    {
+                        // Standalone modifiers leave copy-chord selection intact without suppressing native key ownership.
                         child.selection = None;
                         mark_all_panes_dirty(&child.panes);
                         child.request_redraw();

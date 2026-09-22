@@ -1,6 +1,33 @@
 use super::*;
 
 #[test]
+fn standalone_modifier_classification_excludes_locks_and_input_keys() {
+    // Selection preservation covers standalone modifiers, not lock toggles or ordinary input.
+    for key in [
+        NamedKey::Shift,
+        NamedKey::Control,
+        NamedKey::Alt,
+        NamedKey::Super,
+        NamedKey::Hyper,
+        NamedKey::Meta,
+        NamedKey::AltGraph,
+    ] {
+        assert!(is_modifier_key(key), "{key:?} must preserve selection");
+    }
+    for key in [
+        NamedKey::CapsLock,
+        NamedKey::NumLock,
+        NamedKey::ScrollLock,
+        NamedKey::FnLock,
+        NamedKey::Enter,
+        NamedKey::Tab,
+        NamedKey::ArrowLeft,
+    ] {
+        assert!(!is_modifier_key(key), "{key:?} is not a standalone modifier");
+    }
+}
+
+#[test]
 fn win32_shift_return_preserves_native_fields() {
     // Shift+Return retains native identity rather than collapsing into legacy CR.
     let key = Win32KeyEvent {
