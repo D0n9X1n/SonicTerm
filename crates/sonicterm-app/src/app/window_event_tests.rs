@@ -2,7 +2,8 @@ use super::{
     begin_pointer_gesture, cancel_pointer_gesture, is_quit_chord, native_scrollbar_owns_pointer,
     no_button_motion_report, pointer_report_bytes, route_pressed_pointer_motion,
     take_focus_loss_pointer_release, take_pointer_release, terminal_repeat_targets,
-    wheel_report_bytes, PointerCell, PointerGestureOwner, PointerMotionRoute, PointerReportKind,
+    wheel_report_bytes, wheel_route, PointerCell, PointerGestureOwner, PointerMotionRoute,
+    PointerReportKind, WheelRoute,
 };
 use crate::app::{child_window::child_no_button_motion_report, hovered_url::HoveredUrl, App};
 use sonicterm_cfg::{
@@ -16,6 +17,192 @@ use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 
 fn pointer_cell(pane_id: u64, row: u16, col: u16) -> PointerCell {
     PointerCell { pane_id, row, col }
+}
+
+#[test]
+fn wheel_route_tracking_takes_precedence_on_both_screens() {
+    // Every tracking mode owns wheel input on primary and alternate screens; screen alone selects only the fallback.
+    for tracking in [MouseTracking::Button, MouseTracking::ButtonMotion, MouseTracking::AnyMotion] {
+        for is_alt in [false, true] {
+            assert_eq!(
+                wheel_route(tracking, is_alt),
+                WheelRoute::MouseReport,
+                "{tracking:?}, alt={is_alt}"
+            );
+        }
+    }
+    assert_eq!(wheel_route(MouseTracking::Off, false), WheelRoute::LocalScrollback);
+    assert_eq!(wheel_route(MouseTracking::Off, true), WheelRoute::CursorKeys);
+}
+
+#[test]
+fn wheel_route_sgr_encoding_alone_does_not_enable_tracking() {
+    // DEC1006 selects mouse encoding only, so it must not suppress either screen's untracked fallback.
+    use sonicterm_grid::grid::Grid;
+    use sonicterm_vt::vt::Parser;
+    for is_alt in [false, true] {
+        let mut parser = Parser::new(Grid::new(80, 24));
+        if is_alt {
+            parser.advance(b"\x1b[?1049h");
+        }
+        parser.advance(b"\x1b[?1006h");
+        let (tracking, sgr) = super::parser_mouse_profile(&parser);
+        assert!(sgr);
+        assert_eq!(tracking, MouseTracking::Off);
+        assert_eq!(
+            wheel_route(tracking, parser.grid().is_alt()),
+            if is_alt { WheelRoute::CursorKeys } else { WheelRoute::LocalScrollback }
+        );
+    }
+}
+
+#[test]
+fn wheel_route_parser_tracking_resets_restore_screen_fallback() {
+    // Real DEC mode transitions own wheel routing independently of SGR and restore the correct fallback on reset.
+    use sonicterm_grid::grid::Grid;
+    use sonicterm_vt::vt::Parser;
+    for (mode, expected) in [
+        (1000, MouseTracking::Button),
+        (1002, MouseTracking::ButtonMotion),
+        (1003, MouseTracking::AnyMotion),
+    ] {
+        for is_alt in [false, true] {
+            for sgr_enabled in [false, true] {
+                let mut parser = Parser::new(Grid::new(80, 24));
+                if is_alt {
+                    parser.advance(b"\x1b[?1049h");
+                }
+                if sgr_enabled {
+                    parser.advance(b"\x1b[?1006h");
+                }
+                parser.advance(format!("\x1b[?{mode}h").as_bytes());
+                let (tracking, sgr) = super::parser_mouse_profile(&parser);
+                assert_eq!(tracking, expected);
+                assert_eq!(sgr, sgr_enabled);
+                assert_eq!(wheel_route(tracking, parser.grid().is_alt()), WheelRoute::MouseReport);
+                parser.advance(format!("\x1b[?{mode}l").as_bytes());
+                let (tracking, sgr) = super::parser_mouse_profile(&parser);
+                assert_eq!(tracking, MouseTracking::Off);
+                assert_eq!(sgr, sgr_enabled);
+                assert_eq!(
+                    wheel_route(tracking, parser.grid().is_alt()),
+                    if is_alt { WheelRoute::CursorKeys } else { WheelRoute::LocalScrollback }
+                );
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn wheel_route_main_and_child_handlers_admit_tracking_without_scrolling() {
+    // Real event handlers must enqueue primary-screen wheel reports without moving either window's scrollback viewport.
+    use std::time::{Duration, Instant};
+    use winit::{
+        application::ApplicationHandler,
+        event::{DeviceId, MouseScrollDelta, TouchPhase, WindowEvent},
+        event_loop::{ActiveEventLoop, EventLoop},
+        platform::windows::EventLoopBuilderExtWindows,
+        window::WindowId,
+    };
+    struct Probe {
+        failures: Vec<String>,
+        ran: bool,
+    }
+    impl ApplicationHandler for Probe {
+        fn resumed(&mut self, el: &ActiveEventLoop) {
+            for child in [false, true] {
+                let mut app = App::new(Default::default(), Default::default(), Default::default());
+                let main_pane = app.__test_seed_tab("wheel-main");
+                let (window, pane_id) = if child {
+                    let window = app.__test_seed_child_window(&["wheel-child"]);
+                    let pane = app.__test_child_pane_ids(window).unwrap()[0];
+                    app.__test_set_child_pane_viewport(
+                        window,
+                        sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 240.0),
+                        10.0,
+                        10.0,
+                    );
+                    (window, pane)
+                } else {
+                    app.__test_set_main_pane_viewport(
+                        sonicterm_ui::pane::Rect::new(0.0, 0.0, 800.0, 240.0),
+                        10.0,
+                        10.0,
+                    );
+                    (app.main_window_id.unwrap(), main_pane)
+                };
+                let pty = sonicterm_io::pty::PtyHandle::spawn_with_args(
+                    "cmd.exe",
+                    &["/D".into(), "/Q".into()],
+                    80,
+                    24,
+                )
+                .unwrap();
+                let input = pty.input_sender();
+                let window_state = app.windows.get_mut(&window).unwrap();
+                window_state.cursor_pos = (40.0, 40.0);
+                let pane = window_state.panes.get_mut(&pane_id).unwrap();
+                pane.pty = Some(pty);
+                pane.parser.lock().advance("history\r\n".repeat(60).as_bytes());
+                pane.viewport_top_abs = Some(10);
+                pane.parser.lock().advance(b"\x1b[?1003h\x1b[?1006h");
+                ApplicationHandler::window_event(
+                    &mut app,
+                    el,
+                    window,
+                    WindowEvent::MouseWheel {
+                        device_id: DeviceId::dummy(),
+                        delta: MouseScrollDelta::LineDelta(0.0, 1.0),
+                        phase: TouchPhase::Moved,
+                    },
+                );
+                let deadline = Instant::now() + Duration::from_secs(1);
+                while input.diagnostics().completed_messages == 0 && Instant::now() < deadline {
+                    std::thread::yield_now();
+                }
+                let completed = input.diagnostics().completed_messages;
+                let viewport = app.windows[&window].panes[&pane_id].viewport_top_abs;
+                if completed != 1 || viewport != Some(10) {
+                    self.failures.push(format!(
+                        "child={child}: accepted/completed={completed}, viewport={viewport:?}"
+                    ));
+                }
+                app.windows
+                    .get_mut(&window)
+                    .unwrap()
+                    .panes
+                    .get_mut(&pane_id)
+                    .unwrap()
+                    .parser
+                    .lock()
+                    .advance(b"\x1b[?1003l");
+                ApplicationHandler::window_event(
+                    &mut app,
+                    el,
+                    window,
+                    WindowEvent::MouseWheel {
+                        device_id: DeviceId::dummy(),
+                        delta: MouseScrollDelta::LineDelta(0.0, 1.0),
+                        phase: TouchPhase::Moved,
+                    },
+                );
+                let fallback = app.windows[&window].panes[&pane_id].viewport_top_abs;
+                if fallback != viewport.map(|top| top.saturating_sub(3)) {
+                    self.failures
+                        .push(format!("child={child}: reset fallback viewport={fallback:?}"));
+                }
+            }
+            self.ran = true;
+            el.exit();
+        }
+        fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+    }
+    let event_loop = EventLoop::builder().with_any_thread(true).build().unwrap();
+    let mut probe = Probe { failures: Vec::new(), ran: false };
+    event_loop.run_app(&mut probe).unwrap();
+    assert!(probe.ran);
+    assert!(probe.failures.is_empty(), "{}", probe.failures.join("; "));
 }
 
 #[test]
@@ -504,12 +691,15 @@ fn main_and_child_focus_loss_share_release_helper() {
 #[test]
 fn terminal_repeat_owner_is_resolved_before_local_input_owners() {
     let key = PhysicalKey::Code(KeyCode::KeyA);
-    let panes = std::collections::BTreeSet::from([7, 11]);
+    let panes = std::collections::BTreeMap::from([
+        (7, crate::app::HeldKey::Legacy),
+        (11, crate::app::HeldKey::Legacy),
+    ]);
     let mut pressed = std::collections::HashMap::from([(key, panes.clone())]);
 
-    assert_eq!(terminal_repeat_targets(&pressed, key, true), Some(panes));
+    assert_eq!(terminal_repeat_targets(&pressed, key, true), Some(panes.clone()));
     assert_eq!(terminal_repeat_targets(&pressed, key, false), None);
-    assert_eq!(pressed.remove(&key), Some(std::collections::BTreeSet::from([7, 11])));
+    assert_eq!(pressed.remove(&key), Some(panes));
 
     let main_source = include_str!("window_event.rs");
     let child_source = include_str!("child_window.rs");
@@ -518,7 +708,7 @@ fn terminal_repeat_owner_is_resolved_before_local_input_owners() {
         (child_source, "if palette_here {"),
     ] {
         let keyboard = source
-            .find("WindowEvent::KeyboardInput { event, .. } =>")
+            .find("WindowEvent::KeyboardInput { event, is_synthetic, .. } =>")
             .expect("keyboard routing branch");
         let keyboard_route = &source[keyboard..];
         let repeat =

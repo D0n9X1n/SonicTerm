@@ -30,14 +30,13 @@ _SPEC.loader.exec_module(tool)
 PINNED_TWO_FILE_TREE = "6196283baec24038d2c66d7b8bd519e86c8bd9e18dce96e7c49f6bbcf4317d4d"
 PINNED_EMPTY_TREE = "dc1b85cc111ad965f947938798d33b98ffcc90b724dacac0b2153368eb15df93"
 
-# The four vendored trees as imported and reviewed. Pinning them here, independently of
-# the manifest, is what turns "the manifest still parses" into "no vendored byte moved":
-# a refactor that rewrote a digest would have to rewrite this list to stay green.
+# Pin reviewed source trees independently so manifest-only digest changes cannot hide drift.
 PINNED_VENDOR_TREES = {
     "freetype": "283cb02ba9baaa5e6b8a99e7bfa8673bd2d45dae9c9f4debdfd685c9abd97bb6",
     "harfbuzz": "5c177bc1d1ba83d5f06d9ea1fe6bcdd69bdb853bac2490af34ac148de582c787",
     "libpng": "75a542981ad0461cf449c448a20267256111f1fe61d2a4d537e4c865774303da",
     "zlib": "d021ec147dcd37fb5b33f8413d7409942d4a7607558e03b6bc0c191a6b5156f8",
+    "winit": "e8630c3c708c5453cca35d8be4a8fd61968c2af84d08010db911f755fb2020f7",
 }
 
 
@@ -408,15 +407,15 @@ class NoPatchFileDependencyTests(unittest.TestCase):
 
 
 class ShippedManifestTests(unittest.TestCase):
-    """Guard the real manifest: four libraries, unchanged digests, provenance only."""
+    """Guard the real manifest's reviewed digests and upstream provenance."""
 
     def setUp(self):
         self.manifest_path = _HERE / "native-dependencies.json"
         self.document = json.loads(self.manifest_path.read_text(encoding="utf-8"))
         self.libraries = tool.load_manifest(self.manifest_path)
 
-    def test_four_vendored_trees_keep_their_reviewed_digests(self):
-        # The refactor's hard requirement: not one vendored byte, and not one pin, moved.
+    def test_vendored_trees_keep_their_reviewed_digests(self):
+        # Each manifest pin must match the independently recorded reviewed source tree.
         recorded = {library["name"]: library["tree_sha256"] for library in self.libraries}
         self.assertEqual(recorded, PINNED_VENDOR_TREES)
 

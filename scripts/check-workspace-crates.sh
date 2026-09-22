@@ -11,6 +11,16 @@ python3 scripts/native-dependencies.py check || status=1
 python3 scripts/macos-bundle_tests.py || status=1
 python3 scripts/test-macos-package_tests.py || status=1
 
+# The preserved dependency is excluded from workspace formatting; its authored tests are not.
+rustfmt --check --config-path "$repo_root/rustfmt.toml" \
+    third_party/winit/src/platform_impl/windows/keyboard_tests.rs || status=1
+
+if [[ "${OS:-}" == "Windows_NT" ]]; then
+    echo "[workspace-gate] patched winit native keyboard tests"
+    cargo test --locked --manifest-path third_party/winit/Cargo.toml \
+        --target-dir "$repo_root/target" --lib --no-fail-fast keyboard_tests || status=1
+fi
+
 echo "[workspace-gate] cargo test --workspace --lib --bins --tests --no-fail-fast"
 set +e
 cargo test --workspace --lib --bins --tests --no-fail-fast

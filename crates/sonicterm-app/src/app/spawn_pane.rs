@@ -7,7 +7,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -160,8 +160,7 @@ pub(super) struct PaneVtHandles {
     redraw_target: Arc<Mutex<Option<WindowId>>>,
     command_events: Arc<Mutex<Vec<super::PaneCommandEvent>>>,
     cursor_visible: Arc<AtomicBool>,
-    kitty_flags: Arc<AtomicU8>,
-    keyboard_modes: Arc<AtomicU8>,
+    keyboard_input: Arc<AtomicU64>,
     inline_images: Arc<Mutex<Vec<InlineImage>>>,
     inline_media_charge: super::media::SharedInlineMediaCharge,
 }
@@ -174,8 +173,7 @@ impl PaneVtHandles {
             redraw_target: pane.redraw_target.clone(),
             command_events: pane.command_events.clone(),
             cursor_visible: pane.cursor_visible.clone(),
-            kitty_flags: pane.kitty_flags.clone(),
-            keyboard_modes: pane.keyboard_modes.clone(),
+            keyboard_input: pane.keyboard_input.clone(),
             inline_images: pane.inline_images.clone(),
             inline_media_charge: pane.inline_media_charge.clone(),
         }
@@ -351,7 +349,7 @@ pub(super) fn process_pane_vt_batch<Bytes: AsRef<[u8]>>(
 }
 
 // Lock order: inline_images -> inline_media_charge; parser releases before either, and command_events locks after both.
-// Ordering: cursor_visible, kitty_flags, and keyboard_modes use Ordering::Relaxed; each publishes only its independent parser value.
+// Ordering: cursor_visible and keyboard_input use Relaxed; the keyboard word is self-contained, not a barrier for later parser changes.
 fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
     handles: &PaneVtHandles,
     bytes: Bytes,
@@ -373,8 +371,7 @@ fn process_pane_vt_batch_with<Bytes, Decode, Emit, Now, Send>(
         let (consumed, events, replies) = {
             let mut parser = handles.parser.lock();
             let result = parser.advance_with_replies(remaining);
-            handles.kitty_flags.store(parser.kitty_keyboard_flags(), Ordering::Relaxed);
-            handles.keyboard_modes.store(parser.keyboard_modes().bits(), Ordering::Relaxed);
+            handles.keyboard_input.store(parser.keyboard_input_snapshot(), Ordering::Relaxed);
             result
         };
         remaining = &remaining[consumed..];

@@ -64,9 +64,12 @@ for required in \
   share/icons/hicolor/256x256/apps/com.d0n9x1n.SonicTerm.png \
   LICENSE \
   LICENSE-Rec-Mono-OFL-1.1 \
+  LICENSE-winit-Apache-2.0 \
   README.md; do
   [[ -f "$stage/$required" ]] || fail "staged payload is missing $required"
 done
+cmp -s "$root/third_party/winit/LICENSE" "$stage/LICENSE-winit-Apache-2.0" || \
+  fail "staged winit license differs from the pinned source license"
 
 [[ "$(stat -c '%a' "$stage/sonicterm" 2>/dev/null || stat -f '%Lp' "$stage/sonicterm")" == "755" ]] || \
   fail "staged binary mode is not 755"
@@ -79,6 +82,7 @@ for required_text in \
   'dpkg-shlibdeps' \
   'debian/control' \
   'libxkbcommon-x11-0' \
+  '"$deb_root/usr/share/doc/sonicterm/LICENSE-winit-Apache-2.0"' \
   'SOURCE_DATE_EPOCH' \
   '--sort=name' \
   '--numeric-owner' \
@@ -124,6 +128,11 @@ portable_root="$(find "$portable" -mindepth 1 -maxdepth 1 -type d -print -quit)"
 [[ -d "$portable_root/assets" ]] || fail "tarball adjacent assets are missing"
 [[ -x "$deb_root/usr/bin/sonicterm" ]] || fail "Debian binary is missing"
 [[ -d "$deb_root/usr/share/sonicterm/assets" ]] || fail "Debian assets are missing"
+for license in "$portable_root/LICENSE-winit-Apache-2.0" \
+  "$deb_root/usr/share/doc/sonicterm/LICENSE-winit-Apache-2.0"; do
+  cmp -s "$root/third_party/winit/LICENSE" "$license" || \
+    fail "package winit license is missing or differs from the pinned source license: $license"
+done
 
 architecture="$(dpkg-deb -f "$deb" Architecture)"
 [[ "$architecture" == "amd64" ]] || fail "Debian architecture is $architecture, expected amd64"

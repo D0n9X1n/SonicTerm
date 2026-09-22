@@ -94,6 +94,22 @@
       ],
       "tree_sha256": "d021ec147dcd37fb5b33f8413d7409942d4a7607558e03b6bc0c191a6b5156f8",
       "version_check": {"path": "zlib.h", "pattern": "ZLIB_VERSION\\s+\"([^\"]+)\"", "value": "1.3.2"}
+    },
+    {
+      "name": "winit",
+      "path": "third_party/winit",
+      "version": "0.30.13",
+      "tag": "v0.30.13",
+      "revision": "e9809ef54b18499bb4f2cac945719ecc2a61061b",
+      "archive": {
+        "url": "https://static.crates.io/crates/winit/winit-0.30.13.crate",
+        "sha256": "a6755fa58a9f8350bd1e472d4c3fcc25f824ec358933bba33306d0b63df5978d",
+        "root": "winit-0.30.13"
+      },
+      "include": ["**"],
+      "upstream_fixes": [],
+      "tree_sha256": "e8630c3c708c5453cca35d8be4a8fd61968c2af84d08010db911f755fb2020f7",
+      "version_check": {"path": "Cargo.toml", "pattern": "(?m)^version = \"([^\"]+)\"$", "value": "0.30.13"}
     }
   ]
 }

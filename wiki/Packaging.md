@@ -28,6 +28,9 @@ Release tags add the `v` prefix. `scripts/prepare-release-assets.py
 check-version` rejects a tag that does not match every workspace package.
 First-party packaging executables are direct children of `scripts/`.
 
+Every package includes the pinned, statically linked winit dependency's
+`third_party/winit/LICENSE` as `LICENSE-winit-Apache-2.0`.
+
 ## macOS package
 
 ### Requirements and command
@@ -101,10 +104,11 @@ seal, and the verifier checks the resulting closure and manifest. This does not
 change the source-pinned FreeType/HarfBuzz stack or require Homebrew on the user's
 Mac.
 
-After assembling all resources, the script applies and verifies an ad-hoc
-signature. It does not use an Apple Developer ID and does not notarize. A
-downloaded package can therefore show the standard unidentified-developer
-warning; Finder's **Open** context-menu action allows the first launch.
+After native dependency collection, the script adds `LICENSE-winit-Apache-2.0`
+to `Contents/Resources/licenses`. After assembling all resources, it applies and
+verifies an ad-hoc signature. It does not use an Apple Developer ID and does not
+notarize. A downloaded package can therefore show the standard
+unidentified-developer warning; Finder's **Open** context-menu action allows the first launch.
 
 CI and Release run each architecture's just-built `sonicterm-mac
 --runtime-smoke` before its binary can enter DMG packaging. The bounded wrapper
@@ -197,6 +201,7 @@ MSI installs this core layout under `Program Files\SonicTerm`:
 ```text
 SonicTerm/
 ├── sonicterm-windows.exe
+├── LICENSE-winit-Apache-2.0
 └── assets/
     ├── themes/*.toml
     ├── keymaps/*.toml
@@ -258,6 +263,7 @@ SonicTerm-<tag>-linux-x86_64/
 ├── share/icons/hicolor/256x256/apps/com.d0n9x1n.SonicTerm.png
 ├── LICENSE
 ├── LICENSE-Rec-Mono-OFL-1.1
+├── LICENSE-winit-Apache-2.0
 └── README.md
 ```
 
@@ -269,7 +275,7 @@ The Debian package is `SonicTerm-<tag>-linux-x86_64.deb` and installs:
 /usr/share/applications/com.d0n9x1n.SonicTerm.desktop
 /usr/share/metainfo/com.d0n9x1n.SonicTerm.metainfo.xml
 /usr/share/icons/hicolor/256x256/apps/com.d0n9x1n.SonicTerm.png
-/usr/share/doc/sonicterm/{copyright,LICENSE-Rec-Mono-OFL-1.1,README.md}
+/usr/share/doc/sonicterm/{copyright,LICENSE-Rec-Mono-OFL-1.1,LICENSE-winit-Apache-2.0,README.md}
 ```
 
 The builder checks x86_64 ELF identity and rejects GLIBC requirements newer
@@ -326,6 +332,9 @@ print(versions.pop())
 
 Release tag 会增加 `v` 前缀。`scripts/prepare-release-assets.py check-version` 会拒绝
 不能匹配每个 workspace package 的 tag。第一方打包可执行脚本都直接位于 `scripts/`。
+
+每种安装包都将固定源码并静态链接的 winit 依赖的 `third_party/winit/LICENSE`
+以 `LICENSE-winit-Apache-2.0` 文件名附带。
 
 ## macOS 安装包
 
@@ -394,8 +403,10 @@ SonicTerm.app/Contents/
 检查最终依赖集合和清单。这不改变源码固定的 FreeType/HarfBuzz 栈，也不要求用户安装
 Homebrew。
 
-所有资源组装完成后，脚本会施加并校验 ad-hoc 签名。它不使用 Apple Developer ID，也不
-做 notarize。下载的安装包可能显示标准的“无法验证开发者”提示；首次启动可使用 Finder
+原生依赖收集完成后，脚本将 `LICENSE-winit-Apache-2.0` 加入
+`Contents/Resources/licenses`。所有资源组装完成后，再施加并校验 ad-hoc 签名。
+它不使用 Apple Developer ID，也不做 notarize。下载的安装包可能显示标准的
+“无法验证开发者”提示；首次启动可使用 Finder
 右键菜单中的**打开**。
 
 CI 与 Release 会在二进制进入 DMG 打包前，对每个架构刚构建的
@@ -477,6 +488,7 @@ marker、呈现和预热渲染器生命周期契约。
 ```text
 SonicTerm/
 ├── sonicterm-windows.exe
+├── LICENSE-winit-Apache-2.0
 └── assets/
     ├── themes/*.toml
     ├── keymaps/*.toml
@@ -535,6 +547,7 @@ SonicTerm-<tag>-linux-x86_64/
 ├── share/icons/hicolor/256x256/apps/com.d0n9x1n.SonicTerm.png
 ├── LICENSE
 ├── LICENSE-Rec-Mono-OFL-1.1
+├── LICENSE-winit-Apache-2.0
 └── README.md
 ```
 
@@ -546,7 +559,7 @@ Debian package 为 `SonicTerm-<tag>-linux-x86_64.deb`，安装到：
 /usr/share/applications/com.d0n9x1n.SonicTerm.desktop
 /usr/share/metainfo/com.d0n9x1n.SonicTerm.metainfo.xml
 /usr/share/icons/hicolor/256x256/apps/com.d0n9x1n.SonicTerm.png
-/usr/share/doc/sonicterm/{copyright,LICENSE-Rec-Mono-OFL-1.1,README.md}
+/usr/share/doc/sonicterm/{copyright,LICENSE-Rec-Mono-OFL-1.1,LICENSE-winit-Apache-2.0,README.md}
 ```
 
 Builder 会检查 x86_64 ELF，并拒绝高于 2.35 的 GLIBC requirement。`dpkg-shlibdeps`

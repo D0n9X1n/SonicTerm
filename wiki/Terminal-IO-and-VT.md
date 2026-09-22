@@ -284,6 +284,44 @@ Other keys and modifiers follow these rules:
   newline mode, and navigation uses its logical key. Stored terminal modes and
   Kitty encoding are unchanged; this preference does not measure hardware NumLock.
 
+### Windows native keyboard input
+
+Windows ConPTY can request native key records with `CSI ? 9001 h` and disable
+that request with `CSI ? 9001 l`. The request is pane-wide, not part of either
+screen's Kitty stack. Nonzero active Kitty flags take precedence; an explicit
+Kitty flag value of zero permits Win32 input. Without the request, existing
+keyboard encoding is unchanged. RIS clears the request.
+
+The encoder emits `ESC[Vk;Sc;Uc;Kd;Cs;Rc_` with every parameter present in decimal.
+`Sc` is the native scan-code byte; the enhanced-key flag belongs in `Cs`.
+Each raw UTF-16 unit produces one record with the same native repeat count;
+there is no conversion to a single Unicode scalar. Keys without character data
+produce one record with `Uc=0`. Releases also use `Uc=0`: a Windows key-up
+message contains no accompanying character, and SonicTerm does not reuse the
+previous press's text. This is not a claim of nonzero key-up character parity
+with other terminals.
+
+The pinned Windows winit extension keeps native key metadata with the event
+through character aggregation and deferred delivery. Synthetic focus events
+carry no native metadata. Unavailable native metadata refuses native-key input
+with a diagnostic instead of guessing a layout or silently sending legacy bytes.
+IME commits and clipboard paste retain their separate text paths; mouse and
+focus reports are not encoded as Win32 keyboard records.
+
+Accepted native presses retain their pane targets and protocol epoch. A change
+in effective Win32 eligibility, including screen-local Kitty changes, or RIS
+cancels older native holds. A held key must be released and pressed again after
+such a transition; SonicTerm does not emit old-protocol cleanup into a newly
+selected protocol. An application disabling the protocol mid-hold owns its
+remaining key-state cleanup. While Win32 remains active, focus loss emits one
+synthetic release for each accepted native hold, grouped into one queue admission
+per pane, then retires those holds. Cleanup clears held modifier bits and retains
+the accepted press's last-known lock and enhanced-key bits; it does not sample
+new key state. Synthetic focus-in presses do not create new terminal ownership.
+The protocol epoch saturates at its 48-bit maximum and then refuses native input
+rather than reusing an old generation. Local shortcuts, READONLY, and per-target
+broadcast protocol selection still apply.
+
 ### Mouse tracking and selection
 
 `MouseTracking` has one current value; modes do not form a stack:
@@ -308,7 +346,12 @@ use SGR reports when `?1006` is active and the current legacy report otherwise.
 SGR uses one-based `CSI < Cb ; Cx ; Cy M` and lowercase `m` for release. Legacy
 uses `CSI M` plus three biased bytes and clamps the protocol coordinates to 223.
 Wheel reports use button codes 64 for up and 65 for down and have no release
-report.
+report. Any active tracking mode receives wheel reports on both the primary and
+alternate screens; primary-screen tracking therefore prevents the same wheel
+event from moving SonicTerm's local scrollback. With tracking off, wheel input
+scrolls local history on the primary screen and sends cursor keys on the
+alternate screen. SGR encoding alone does not change that fallback. Main and
+child windows use the same routing rule.
 
 A press chooses and latches one gesture owner:
 
@@ -627,6 +670,32 @@ OSC 8 驻留 URI 仍限 8 KiB、客户端 id 限 1 KiB。
   覆盖旧式 DECKPAM：使用包含修饰键和 newline mode 的普通文本/Return 规则，导航采用
   逻辑按键。已保存的终端模式和 Kitty 编码不变；该偏好并不测量硬件 NumLock。
 
+### Windows 原生键盘输入
+
+Windows ConPTY 可用 `CSI ? 9001 h` 请求原生按键记录，用 `CSI ? 9001 l` 关闭请求。
+该请求属于整个窗格，不属于主屏或备用屏的 Kitty 栈。当前非零 Kitty flags 优先；显式
+Kitty flag 值为零时允许 Win32 输入。未请求时，原有键盘编码不变。RIS 会清除请求。
+
+编码器发送 `ESC[Vk;Sc;Uc;Kd;Cs;Rc_`，所有参数均以十进制显式给出。`Sc` 是原生扫描码
+字节，扩展键标志保存在 `Cs`。每个原始 UTF-16 单元产生一条记录，并保留相同的原生
+重复次数，不合并为单个 Unicode 标量。没有字符数据的按键产生一条 `Uc=0` 记录。
+释放也使用 `Uc=0`：Windows 按键释放消息不带对应字符，SonicTerm 不复用上次按下的
+文本。这不表示与其它终端的非零释放字符行为完全一致。
+
+固定版本的 Windows winit 扩展让原生元数据随同一个按键事件经过字符聚合和延迟交付。
+焦点合成事件没有原生元数据。无法取得原生元数据时，会拒绝该次原生按键输入并记录诊断，
+不会猜测键盘布局或悄悄发送旧式字节。输入法提交和剪贴板粘贴保留独立文本路径；鼠标和
+焦点报告不编码成 Win32 键盘记录。
+
+成功接纳的原生按下保留目标窗格及协议代次。有效 Win32 状态变化（包括屏幕独立 Kitty
+状态变化）或 RIS 会取消较早的原生按键所有权。跨越这类切换时，按住的键必须先释放再
+重新按下；SonicTerm 不向新协议发送旧协议的清理记录。应用在按键仍按住时关闭协议，需
+自行处理其剩余按键状态。Win32 仍启用时，失去焦点会为每个已接纳的原生按下发送一次
+合成释放，按窗格合并为一次入队，然后清除所有权。清理记录清除按住的修饰键位，保留
+被接纳按下时最后已知的锁定键及扩展键位，不重新采样按键状态。重新获得焦点时的合成按下
+不会建立新的终端所有权。协议代次达到 48 位最大值后保持饱和并拒绝原生输入，不复用旧
+代次。本地快捷键、READONLY 和按广播目标独立选择协议的规则仍然适用。
+
 ### 鼠标跟踪与选区
 
 `MouseTracking` 只有一个当前值；各模式不会形成栈：
@@ -648,7 +717,10 @@ TUI 指在终端内运行的全屏文本界面程序。
 应用拥有的点击、释放、滚轮和符合条件的移动使用 SGR 报告，否则使用当前旧式报告。
 SGR 使用从 1 开始的 `CSI < Cb ; Cx ; Cy M`，释放使用小写 `m`。旧式格式使用
 `CSI M` 加三个偏移字节，并把协议坐标限制在 223。滚轮向上、向下分别使用按键码
-64、65，不发送释放报告。
+64、65，不发送释放报告。无论主屏幕还是备用屏幕，只要启用任意跟踪模式，滚轮都会
+发送给应用；因此主屏幕跟踪启用时，同一次滚轮事件不会再移动 SonicTerm 的本地回滚
+视图。跟踪关闭时，主屏幕滚轮滚动本地历史，备用屏幕滚轮发送方向键。仅启用 SGR
+编码不会改变这一后备行为。主窗口和子窗口采用相同的路由规则。
 
 按下时只选择并锁定一个手势所有者：
 

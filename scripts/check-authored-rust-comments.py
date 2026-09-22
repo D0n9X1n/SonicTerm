@@ -25,6 +25,10 @@ EXCLUDED_PREFIXES = (
     "crates/sonicterm-freetype/libpng/",
     "crates/sonicterm-freetype/zlib/",
     "crates/sonicterm-harfbuzz/harfbuzz/",
+    "third_party/winit/",
+)
+AUTHORED_VENDOR_FILES = frozenset(
+    {"third_party/winit/src/platform_impl/windows/keyboard_tests.rs"}
 )
 EXCLUDED_FILES = frozenset(
     {
@@ -561,6 +565,8 @@ def _attributes(tokens: Sequence[Token], pairs: dict[int, int]) -> list[Span]:
 
 
 def _is_excluded(path: str) -> bool:
+    if path in AUTHORED_VENDOR_FILES:
+        return False
     return path in EXCLUDED_FILES or path.startswith(EXCLUDED_PREFIXES)
 
 
@@ -906,6 +912,7 @@ def _module_target(parent: Module, name: str, path_attr: str | None, tracked: se
         base = parent_path.parent
     else:
         base = parent_path.parent / parent_path.stem
+    name = name.removeprefix("r#")
     candidates = [(base / f"{name}.rs").as_posix(), (base / name / "mod.rs").as_posix()]
     return next((candidate for candidate in candidates if candidate in tracked), None)
 
