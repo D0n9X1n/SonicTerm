@@ -527,7 +527,7 @@ jobs:
           save-if: false
 
       - name: Verify optional feature surfaces
-        timeout-minutes: 25
+        timeout-minutes: 35
         shell: bash
         run: |
           cargo clippy -p sonicterm-app -p sonicterm-io --all-features --all-targets -- -D warnings
